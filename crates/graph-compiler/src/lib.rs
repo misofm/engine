@@ -7220,24 +7220,51 @@ mod tests {
         })
     }
 
-    /// Issue #169: the bank-window slot hold costs no arena.
+    /// Issue #169: the bank-window slot hold costs no arena on the plan every host renders -- and
+    /// what it does cost on a builtins-less plan, since issue #925.
     ///
     /// Colouring may not recycle a physical slot inside a bank's reordering window, so slots freed
-    /// there are held until it closes. That could have cost buffers; on the sixty-four-track
-    /// console fixture -- eight full eight-lane EQ banks and eight compressor banks, the floor
-    /// pass's own workload -- it costs none, because holding a slot changes *which* slot an op
-    /// gets rather than how many exist.
+    /// there are held until it closes. On the sixty-four-track console fixture -- eight full
+    /// eight-lane EQ banks and eight compressor banks, the floor pass's own workload -- whether
+    /// that costs buffers depends on what sits between the inputs and the first bank.
     ///
-    /// Two assertions, and the first is the durable one: the banked plan's arena equals the arena
-    /// of the same session compiled against a registry that refuses every bank, so banking is
-    /// arena-neutral whatever lane width this host has. The literal pins the fixture's shape, so a
-    /// colouring regression surfaces as a number rather than as a benchmark drifting.
+    /// **With builtins** (`compile_with_builtins`, the configuration every host compiles through)
+    /// the #925 scope amendment asks for the durable form of the claim: the banked plan's arena
+    /// equal to the arena of the same session compiled against a registry that refuses every
+    /// effect bank. **It does not hold, and did not hold before #925**: 256 banked against 193 per
+    /// node, on this branch and on the base commit alike (the three stages are listed there, so
+    /// #925 does not change that plan). This arm is red on purpose, pending a ruling; see the
+    /// issue's evidence record. Derivation: with builtins `PostInputBuiltins` is itself a builtin
+    /// bank member, the cohort chain `builtins -> EQ -> compressor -> fader -> matrix` merges into
+    /// one span per cohort and the eight spans overlap into one, and the `Input` slots the
+    /// post-input ops free fall inside it and are held: 64 inputs + 64 dedicated post-input + 64
+    /// dedicated EQ + 64 compressor outputs = 256, the fader, matrix and route in place and the
+    /// session output reusing a released slot. Per node the effect ops break the chain, so each
+    /// post-input bank's window is one level wide and releases its eight input slots as it closes:
+    /// 64 input slots + 8 new post-input + 56 new EQ + 64 compressor outputs + the output = 193.
+    ///
+    /// **Without builtins** (`GraphCompiler::compile`) the post-input stage is an alias since
+    /// #925, and the arena-neutrality this test used to show there -- 193 banked and 193 per node
+    /// -- was an artifact of the identity copy #925 removed. The EQ banks now read the `Input`
+    /// buffers directly. Each EQ bank and its compressor bank are a chainable cohort pair
+    /// (`program::chainable_bank_groups`), and the eight pairs' windows overlap into one span from
+    /// the first EQ op to the last compressor op. Every `Input` slot the EQ ops free falls inside
+    /// that span and is held until it closes, so the banked plan needs 64 inputs + 64 dedicated EQ
+    /// outputs + 64 compressor outputs = **192**, the session output reusing a released input
+    /// slot. The hold is required, not conservative: a merged chain renders a cohort's compressor
+    /// at its EQ's position, before the later EQ banks have read their inputs, so a compressor
+    /// output coloured onto a freed input slot would overwrite an input still to be read. Per
+    /// node there is no window: each EQ output takes the slot its predecessor's input has just
+    /// freed, so the inputs' 64 slots become the EQ outputs' and the plan needs 64 dedicated EQ
+    /// outputs + 64 compressor outputs + the session output = **129**. Neither arm grew: both
+    /// were 193 before #925.
     ///
     /// The rejected alternative in `program::lower` (dedicating every bank member) scored 257
-    /// here: one extra buffer and one extra stereo block copy per block for each of the 64
-    /// dynamic members whose consumer could no longer consume it in place.
+    /// on the builtins-less plan before #925: one extra buffer and one extra stereo block copy per
+    /// block for each of the 64 dynamic members whose consumer could no longer consume it in
+    /// place.
     #[test]
-    fn banking_a_dynamic_rack_costs_no_arena_buffers() {
+    fn banking_costs_no_arena_buffers_with_builtins_and_holds_inputs_without() {
         let model = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_FIXTURE).expect("console fixture");
         let session = compile_session(
             &model,
@@ -7266,7 +7293,7 @@ mod tests {
             maximum_scratch_bytes: 1 << 20,
             maximum_automation_spans_per_block: 32,
         };
-        let arena = |plan_id: u64, registry: &NativeEffectRegistry| {
+        let builtins_less = |plan_id: u64, registry: &NativeEffectRegistry| {
             GraphCompiler::compile(GraphCompileRequest {
                 dispatch: host_dispatch(),
                 plan_id,
@@ -7280,13 +7307,61 @@ mod tests {
             .expect("lowers")
             .buffers
         };
-        let banked = arena(1_690, &registry);
-        let per_node = arena(1_691, &per_node_registry);
+        let with_builtins = |plan_id: u64, registry: &NativeEffectRegistry| {
+            let builtins = prepare_session_builtins(
+                &session,
+                &[],
+                BuiltinCompileCaps {
+                    maximum_total_state_bytes: u64::MAX,
+                    maximum_total_retained_payload_bytes: u64::MAX,
+                    maximum_total_meter_items: u64::MAX,
+                    maximum_total_meter_bytes: u64::MAX,
+                    maximum_single_allocation_bytes: u64::MAX,
+                    maximum_meter_streams: u64::MAX,
+                    maximum_period_frames: u32::MAX,
+                    maximum_peak_hold_frames: u32::MAX,
+                    maximum_smoothing_samples: u32::MAX,
+                },
+            )
+            .expect("prepared console builtins");
+            GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+                dispatch: host_dispatch(),
+                plan_id,
+                effects: prepare_native_session_effects(&session, registry, effect_caps)
+                    .expect("prepared console effects"),
+                builtins,
+                caps: integration_caps(),
+            })
+            .unwrap_or_else(|failure| panic!("console graph: {:?}", failure.diagnostics))
+            .graph()
+            .program()
+            .expect("lowers")
+            .buffers
+        };
+
+        // The builtins-less pin (#925): the hold now costs the freed input slots, and no plan grew.
+        let banked = builtins_less(1_690, &registry);
+        let per_node = builtins_less(1_691, &per_node_registry);
+        assert_eq!(
+            banked, 192,
+            "64 held inputs + 64 EQ + 64 compressor outputs"
+        );
+        assert_eq!(
+            per_node, 129,
+            "64 EQ + 64 compressor outputs + the session output"
+        );
+        assert!(
+            banked <= 193 && per_node <= 193,
+            "both arms were 193 before #925; eliding the identity stages must not grow either"
+        );
+
+        // The durable #169 claim, on the plan every host renders.
+        let banked = with_builtins(1_692, &registry);
+        let per_node = with_builtins(1_693, &per_node_registry);
         assert_eq!(
             banked, per_node,
-            "banking regrouped the lanes; it must not enlarge the arena"
+            "with builtins, banking regrouped the lanes; it must not enlarge the arena"
         );
-        assert_eq!(banked, 193);
     }
 
     /// The measured session: the 64-track console fixture the benchmark renders.
@@ -11924,6 +11999,47 @@ mod tests {
         .unwrap_or_else(|_| panic!("graph"));
         assert_eq!(artifact.external_binding_nodes().count(), 2);
         assert_eq!(artifact.report().output_tail, TailSamples::Infinite);
+        // Issue #925: with builtins the three stages are compiler-owned bindings, listed in
+        // `required_bindings`, and each keeps its op -- a builtin bank member or a scalar owner
+        // has to run. The same session compiled without builtins lists none of them and lowers
+        // `Input -> Route -> Output` (`accepted_session_compiles_binds_and_renders_direct_route`).
+        let track = |stage| track_node("vocal", stage);
+        let program = artifact.graph().program().expect("lowers");
+        let op_nodes: Vec<&GraphNodeId> = program
+            .ops
+            .iter()
+            .map(|op| &artifact.graph().spec.nodes[op.node as usize].id)
+            .collect();
+        let route = GraphNodeId::Route {
+            route_id: gid("to-main"),
+        };
+        let output = GraphNodeId::Output {
+            output_id: gid("main-out"),
+        };
+        let with_builtins = [
+            track(TrackStage::Input),
+            track(TrackStage::PostInputBuiltins),
+            track(TrackStage::PostFader),
+            track(TrackStage::PostMatrix),
+            route.clone(),
+            output.clone(),
+        ];
+        assert_eq!(op_nodes, with_builtins.iter().collect::<Vec<_>>());
+        for stage in [
+            TrackStage::PostInputBuiltins,
+            TrackStage::PostFader,
+            TrackStage::PostMatrix,
+        ] {
+            assert!(artifact.graph().required_bindings.contains(&track(stage)));
+        }
+        let builtins_less = compile_fixture(78);
+        let program = builtins_less.graph.program().expect("lowers");
+        let op_nodes: Vec<&GraphNodeId> = program
+            .ops
+            .iter()
+            .map(|op| &builtins_less.graph.spec.nodes[op.node as usize].id)
+            .collect();
+        assert_eq!(op_nodes, vec![&track(TrackStage::Input), &route, &output]);
         let tail = artifact
             .graph()
             .spec
@@ -13118,7 +13234,22 @@ mod tests {
         let colored_buffer_count = assigned.values().copied().max().expect("buffers") + 1;
         assert_eq!(colored_buffer_count, 2);
         assert!(colored_buffer_count < artifact.report.estimate.logical_nodes);
-        assert_eq!(artifact.graph.required_bindings.len(), 5);
+        // Issue #925: a builtins-less compile binds the input and the output and nothing else.
+        // Without builtins nothing owns `PostInputBuiltins`, `PostFader` or `PostMatrix`, so they
+        // are left out of the bindable set and lower as aliases of the input's buffer. Only
+        // `compile_with_builtins` lists them; see
+        // `builtins_replace_only_the_three_internal_track_bindings`.
+        assert_eq!(artifact.graph.required_bindings.len(), 2);
+        for stage in [
+            TrackStage::PostInputBuiltins,
+            TrackStage::PostFader,
+            TrackStage::PostMatrix,
+        ] {
+            assert!(
+                !artifact.graph.required_bindings.contains(&track(stage)),
+                "{stage:?} must not be bindable on a builtins-less compile"
+            );
+        }
         let envelope = artifact.graph.envelope;
         let nodes = artifact
             .graph
