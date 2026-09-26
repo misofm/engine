@@ -209,3 +209,121 @@ Implementer: attempt 1, branch `codex/936-skip-inert-source-inputs`. The impleme
    gains two fields. No workspace code builds it with a literal (the workspace clippy passes). No
    public trait changed. The new test-only functions are `#[doc(hidden)]` and exist only with
    `test-support`.
+
+## Sol attempt 1 verdict: FAIL
+
+Reviewer: Sol, attempt 1, on `cde3345e` (implementation `3172be42`, base `64b155d0`). Nothing was
+pushed, and no timed benchmark was run. Every mutation and scratch probe below was applied in
+place and reverted with `git checkout`. The tree is left exactly at `cde3345e` plus this section.
+
+The render change is correct and class A. The attempt fails for one reason: it turns a required CI
+test red, and that test is outside the brief's authorized paths.
+
+### Findings, most severe first
+
+1. **Blocking: a required resource-report test is red.**
+   `crates/capi/tests/resource_lifecycle.rs:2689`
+   (`external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps`) fails on HEAD. The
+   live report gives `graph_metadata_bytes` 56,403 against the pinned 54,763, and
+   `graph_session_plus_plan_bytes` and `graph_incremental_plan_bytes` 237,168 against 235,528.
+   - **Cause:** the difference, +1,640, is exactly that fixture's 82 emitted ops x 20 B, the new
+     `active_unit_table_bytes` + `source_input_table_bytes` charge (`crates/graph/src/lib.rs:501-502`).
+   - **Attribution:** with `crates/graph/src/{lib,runtime}.rs` put back to `64b155d0`, the same
+     test passes 4 of 4.
+   - **Scope of the failure:** I ran the required `qualification` job `test-debug-a` command
+     (`.github/workflows/qualification.yml:476`, with `--no-fail-fast`) on HEAD. This is its only
+     failure; the other 107 test binaries pass.
+   - **Gate 5 is not met:** it says "the existing resource-report tests pass". The attempt-1
+     evidence did not run `-p capi` and does not mention this test.
+   - **Needed for attempt 2:** re-pin the three single-plan graph literals
+     (`resource_lifecycle.rs:555-572`) and the double-live `oracle.graph` (`:2644`, +3,280). Add the
+     two tables as independent primitive rows in `graph_owners` (`:1766`), following that file's
+     own convention (#470, #779, #816). That file is outside the brief's authorized paths, so the
+     coordinator must amend the scope first.
+2. **Batch-boundary item, not charged to this attempt.** The browser pin
+   `hosts/host-web/tests/browser-v1/expected.json:70-72` will move: `graphSessionPlusPlanBytes`,
+   `graphIncrementalPlanBytes` and `graphMetadataBytes`. It is gated by
+   `scripts/check-browser-expected-resources.py` (`qualification.yml:216`). The shift is emitted
+   ops x 12 B, because on wasm32 the entries are `u32` (4 B) and `(usize, u32)` (8 B). The brief
+   defers browser re-pins to the batch boundary, and these rows must be on that list.
+3. **Low: deviation 5 is inaccurate, but my ruling is not to regenerate here.**
+   `fixtures/graph/v1/direct-route.resources.json` was stale before #936. On HEAD the generator
+   (`graph_fixture --emit`) gives `graph_metadata_bytes` 6,048 (base 5,868) against the checked-in
+   5,336, and `session_plus_plan_bytes` 16,292 against 27,868. `direct-route.report.json`'s
+   `graph_sha256` differs too, and `graph_fixture --check` fails with `manifest mismatch`, as #685
+   recorded on its own base.
+   - **Nothing consumes the file.** `check-graph-determinism.sh` compares only the fingerprint, and
+     `docs/audits/test-usefulness-2026-09-04/03-compilers-hosts-tools.md:156` records that `--check`
+     runs nowhere.
+   - **Ruling:** regenerating one row of an already-stale corpus is not in scope and would hide
+     that corpus's real state. File a stateless tooling successor that either regenerates
+     `fixtures/graph/v1` and wires `graph_fixture --check` into CI, or deletes the checker.
+     Deviation 5 should say "already stale; moves by a further 180 B".
+4. **Low: a gap in the policy script (tooling successor).** Mutation 936-7 shows
+   `scripts/check-realtime-policy.sh` does not match the turbofish form `.collect::<`. The
+   counting-allocator tests catch it. This needs its own issue.
+5. **Accepted deviation (gate 5 wording).** Gate 5 pins growth by the charged bound (emitted ops x
+   20 B), not by the bound tables' actual lengths. That is the only possible form: the estimate is
+   admitted at compile time, and the lengths are decided at bind. The bound is a true upper bound
+   for every plan:
+   - **Dispatched-unit table:** `active_units.len()` <= units <= ops <= spec nodes, which equals
+     `emitted_op_count`. `has_valid_structural_layout` (`lib.rs:1158-1180`) requires the
+     dependency levels to partition the spec nodes exactly.
+   - **Copied-claim table:** `source_input_buffers.len()` <= claims <= spec nodes. Claims must be
+     strictly ascending (`lib.rs:1903`), and each one is resolved by `node_index`.
+
+   Neither bound depends on how many units are active, so a plan where every unit is dispatched
+   is covered too.
+
+### What holds (re-run or checked by me)
+
+- **Class A.**
+  - *What the predicate skips:* `unit_inert` (`runtime.rs:2713`) names only a plain
+    `RuntimeUnit::Op` of kind `SourceInput`. For that kind, `execute_op` returns before any
+    staging, reduction or split-pair code, and `execute`'s resident lookup only matters for a
+    `Bank`.
+  - *No hidden observers:* `observed` is set only in `new_with_observation_activation`, from
+    `has_observers()`, the same `op.observers` slice. Activation entries are emitted from the same
+    `observer_nodes(node, taps)` rows that `build_op` folds, alias taps included. So an inert unit
+    has no cursor entry.
+  - *No later rebinding:* `GraphExecutor::new` is the only constructor, and `units`,
+    `identity`, `output_unit` and `op.observers` are never reassigned after bind. A plan swap
+    builds a new executor, so the table is rebuilt from the rows render reads.
+  - *Walks that ignore the table:* `complete_pending`, invalidation and the census still walk
+    every unit.
+  - *Selective observation, tested:* a scratch test (not committed) bound the ring plan with every
+    observer controlled, over `Plain`, `ObservedInput`, `ObservedAlias`, `TrackDelayed` and
+    `SendTap`, at frames 1 and 16. It activated every handle, removed K's meter at block 4 and
+    re-added it at block 7, over 12 blocks. The digests of every host word and meter frame are
+    identical with the table loop and with a dispatch-every-unit loop, and K's meter published 9
+    frames both ways.
+  - *The base-commit oracle:* with the loop dispatching every unit and only the per-block count
+    check relaxed, gates 1-3 match `INERT_PRE_CHANGE`.
+- **Order.** The table is `0..units.len()` filtered, so it is ascending. The Output op and every
+  `Bank` are never inert. A resident predecessor `units[index - 1]` that is a `Bank` is therefore
+  dispatched immediately before its successor.
+- **Tests.** The rt9 source pin keeps every expected statement, count and control, and adds two
+  more. The three required mutations are RED as recorded:
+  - 936-1: graph 5 of 113 red; bits-only, gate 2's digest is red (it reads the Plain digest).
+  - 936-2: 3 of 113 red; bits-only, gate 3's digest is red.
+  - 936-3: `BASE_DIGEST`, `the_folded_master_is_the_reductions_own_bits` and the driver-fed
+    equality are red.
+
+  The mutants 936-1a and 936-1b stay green (113 of 113), and they are truly equivalent: for a
+  plain op, `observed` is always `!op.observers.is_empty()`, because that is how it is set.
+- **Gates re-run on HEAD, all passing:**
+  - `cargo test -p graph` with and without `test-support` (rt10, rt1 and rt9 alloc included);
+    `-p console-workload`, `-p graph-compiler`, `-p host-core`, `-p audit`, `-p bench`.
+  - `check-realtime-policy.sh` (54 regions), `check-graph-policy.sh`, and
+    `check-graph-determinism.sh` (100/100).
+  - `cargo fmt --all --check`, workspace `clippy -D warnings`, and `RUSTDOCFLAGS='-D warnings'
+    cargo doc`.
+
+  No `unsafe` was added to `crates/graph`.
+- **Scope.** The branch changes only authorized paths.
+
+### For attempt 2
+
+The coordinator authorizes `crates/capi/tests/resource_lifecycle.rs`. The implementer re-pins it
+as described in finding 1, corrects deviation 5, and re-runs the `test-debug-a` command in full.
+No production change is needed.
