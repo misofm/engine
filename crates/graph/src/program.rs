@@ -520,11 +520,19 @@ struct Lifetime {
 /// * **On its own it makes matters worse** -- 528 divergences, up from 285. A dedicated member
 ///   cannot fold into its producer in place, so it allocates, and the slot it allocates may be
 ///   one a hoisted op still needs.
-/// * **It is redundant once windows hold**, and it is not free: on
-///   `fixtures/session/v1/console-sixty-four-track.json` it costs 64 arena buffers (193 -> 257)
-///   and 64 stereo block copies per render block, one per dynamic member whose consumer can no
-///   longer consume it in place. The window hold costs nothing there --
-///   `banking_a_dynamic_rack_costs_no_arena_buffers` pins the 193.
+/// * **It is redundant once windows hold**, and it is not free: on the builtins-less compile of
+///   `fixtures/session/v1/console-sixty-four-track.json`, measured before issue #925, it cost 64
+///   arena buffers (193 -> 257) and 64 stereo block copies per render block, one per dynamic
+///   member whose consumer can no longer consume it in place.
+///
+/// The window hold itself is not free either, and this doc used to say it was. The "costs
+/// nothing" measurement (193 banked, 193 per node) was taken on that builtins-less plan, where an
+/// identity post-input op level retired every input slot outside any window; #925 elides that
+/// level, and with builtins it never existed as a copy. A merged cohort span holds the input
+/// slots its first slot's ops free, and
+/// `the_merged_span_hold_costs_the_input_slots_with_and_without_builtins` pins what that costs
+/// today: 192 banked against 129 per node without builtins, 256 against 193 with them (the plan
+/// every host renders). Narrowing the hold is issue #931.
 ///
 /// The invariant the doc on `is_dedicated` used to claim for bank members -- "no op may consume
 /// a member's buffer in place" -- is not needed and is not held. A member's consumer sits at a

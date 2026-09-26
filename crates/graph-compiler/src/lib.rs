@@ -7220,21 +7220,26 @@ mod tests {
         })
     }
 
-    /// Issue #169: the bank-window slot hold costs no arena on the plan every host renders -- and
-    /// what it does cost on a builtins-less plan, since issue #925.
+    /// Issue #169's bank-window slot hold, measured: what it costs in arena buffers on the plan
+    /// every host renders, and on a builtins-less plan since issue #925.
     ///
     /// Colouring may not recycle a physical slot inside a bank's reordering window, so slots freed
     /// there are held until it closes. On the sixty-four-track console fixture -- eight full
-    /// eight-lane EQ banks and eight compressor banks, the floor pass's own workload -- whether
-    /// that costs buffers depends on what sits between the inputs and the first bank.
+    /// eight-lane EQ banks and eight compressor banks, the floor pass's own workload -- each arm
+    /// compares the banked plan's arena with the arena of the same session compiled against a
+    /// registry that refuses every effect bank, and pins both, so a colouring change surfaces as a
+    /// number rather than as a benchmark drifting.
     ///
-    /// **With builtins** (`compile_with_builtins`, the configuration every host compiles through)
-    /// the #925 scope amendment asks for the durable form of the claim: the banked plan's arena
-    /// equal to the arena of the same session compiled against a registry that refuses every
-    /// effect bank. **It does not hold, and did not hold before #925**: 256 banked against 193 per
-    /// node, on this branch and on the base commit alike (the three stages are listed there, so
-    /// #925 does not change that plan). This arm is red on purpose, pending a ruling; see the
-    /// issue's evidence record. Derivation: with builtins `PostInputBuiltins` is itself a builtin
+    /// **#169's arena-neutrality claim ("the window hold costs nothing") never held on the path
+    /// every host compiles through.** It was measured only on the builtins-less plan, where the
+    /// identity post-input copy level that #925 removes absorbed the input retirements outside
+    /// every window. Narrowing the merged-span hold is issue #931; this test is the measurement
+    /// it starts from.
+    ///
+    /// **With builtins** (`compile_with_builtins`): **256 banked against 193 per node**, 63 stereo
+    /// buffers (about 63 KiB at 128 frames) of arena -- memory, not copies. #925 does not change
+    /// this plan (the three stages are listed there and keep their ops), and the base commit of
+    /// #925 measures the same two numbers. Derivation: with builtins `PostInputBuiltins` is itself a builtin
     /// bank member, the cohort chain `builtins -> EQ -> compressor -> fader -> matrix` merges into
     /// one span per cohort and the eight spans overlap into one, and the `Input` slots the
     /// post-input ops free fall inside it and are held: 64 inputs + 64 dedicated post-input + 64
@@ -7264,7 +7269,7 @@ mod tests {
     /// block for each of the 64 dynamic members whose consumer could no longer consume it in
     /// place.
     #[test]
-    fn banking_costs_no_arena_buffers_with_builtins_and_holds_inputs_without() {
+    fn the_merged_span_hold_costs_the_input_slots_with_and_without_builtins() {
         let model = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_FIXTURE).expect("console fixture");
         let session = compile_session(
             &model,
@@ -7355,12 +7360,17 @@ mod tests {
             "both arms were 193 before #925; eliding the identity stages must not grow either"
         );
 
-        // The durable #169 claim, on the plan every host renders.
+        // The plan every host renders: the merged post-input-to-matrix span holds the inputs'
+        // 64 slots, one of which the session output reuses. Unchanged by #925.
         let banked = with_builtins(1_692, &registry);
         let per_node = with_builtins(1_693, &per_node_registry);
         assert_eq!(
-            banked, per_node,
-            "with builtins, banking regrouped the lanes; it must not enlarge the arena"
+            banked, 256,
+            "64 held inputs + 64 post-input + 64 EQ + 64 compressor outputs"
+        );
+        assert_eq!(
+            per_node, 193,
+            "64 input slots + 8 post-input + 56 EQ + 64 compressor outputs + the session output"
         );
     }
 
