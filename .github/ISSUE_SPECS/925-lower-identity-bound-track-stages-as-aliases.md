@@ -166,3 +166,210 @@ be in place over the Input's buffer).
 - The floor ruling's sentence "pays sixty-four individually dispatched route ops and an unfolded
   reduction" (`docs/rulings/effect-floor-accounting.md:527-529`) is still true after this issue;
   only draft B changes it.
+
+## Attempt 1 evidence
+
+Terra, branch `codex/925-alias-identity-bound-stages` from `3c93469d`. Local commits, none
+pushed: `ba3b3a25` (the change), `6b36b0ff` and `f70c8302` (graph-compiler tests, under the scope
+amendment below), `0973b805` (gates 1 to 3 and the corrections), `b1d9a5eb` (mutation rows), and
+the commit that adds this record.
+
+### Design
+
+- **Where `required_bindings` is trimmed.** `compile_with_builtin_tails`
+  (`crates/graph-compiler/src/compile.rs`, the `required_bindings` filter after the `spec` is
+  assembled): `Input` and the `Output` are always listed. `PostInputBuiltins | PostFader |
+  PostMatrix` are listed iff `prepared_builtins.is_some()`, which is true on the
+  `compile_with_builtins` path and false on `compile`. Nothing else in the compiler changes. The
+  compiler's own estimate and `buffer_assignments` never read `required_bindings`, and neither
+  does the canonical text or SHA.
+- **The predicate.** `program::lower(spec, schedule, levels, delays, banks, bindable)`, and
+  likewise `lower_with` and the test-only `lower_with_per_bank_windows`. `bindable` is interned
+  once into `listed: Vec<bool>` by `node_index`, so there is no per-node linear `contains`, and
+  unknown ids are ignored. The elision predicate is
+  `(is_alias_candidate(id) || (is_builtin_stage(id) && !listed[index])) && main_in.len() == 1 &&
+  side_in.is_none() && edge_delay.is_none()`. The new `const fn is_builtin_stage` names the three
+  stages. Nothing else in `lower` changes: elision, `reads_of` resolution through the alias
+  chain, taps and colouring are the existing machinery.
+- **The seam.** `PreparedGraphPlan::lower_from_current_fields` passes `&self.required_bindings`.
+  So `program()`, `attach_builtin_banks`'s re-derivation and bind-time `lowered()` read the same
+  field. #99 F2 (derive once, gate on every compile) holds.
+- **What a with-builtins plan still does.** Exactly what it did. `compile_with_builtins` lists all
+  three stages of every track, so `listed` is true for every builtin stage and the predicate
+  reduces to `is_alias_candidate`, the pre-#925 lowering. Builtin bank members are listed by
+  construction (`attach_builtin_banks` refuses a member that is not in `required_bindings`), so
+  a bank member is never elided. Measured, not only argued: every standing console workload was
+  rendered for 64 blocks on `3c93469d` (separate target directory) and on this branch. For all 15
+  with-builtins rows, digest, `[chains, slots]`, transposes, unit count and symmetry census are
+  identical. The plumbing row keeps its digest and changes only in units and census, as below.
+- **Hand-built plans.** A plan that lists a builtin stage keeps its op. The E9 test binds
+  `Scale(0.375)` to a listed `PostFader` and is unchanged in its assertions. `lowered()`'s
+  elided-binding refusal still means what it says: a listed stage is never elided, and an
+  unlisted one is never bound.
+- **Consequence.** A builtins-less plan has no bindable builtin stage, so a host cannot supply its
+  own fader or matrix processor there. No host does: every host compiles through
+  `compile_with_builtins`.
+- **#885's clarification** ("a `PostMatrix` node is never elided") now holds for plans that list
+  their `PostMatrix` stages, which is every with-builtins plan. A builtins-less plan's
+  `PostMatrix` is elided, but such a plan has no builtin banks, so the alias branch of
+  `served_by_the_resident_lane` stays unreachable in practice, as #885 recorded.
+- **Render path.** `runtime.rs` is untouched and no render-path code changed. The plan simply has
+  fewer ops. `crates/graph` adds no `unsafe` and does not name `wide` (`check-graph-policy.sh`).
+
+### Unit census of `sixty_four_track_plumbing_only`
+
+| | before (`3c93469d`) | after |
+|---|---|---|
+| units | 321: 64 bound, 128 identity-copy, 64 identity-alias, 64 route, 1 output | 129: 64 bound, 64 route, 1 output |
+| `symmetry_counters` | `[257, 321]` | `[65, 129]` |
+| `[chains, slots]` / transposes | `[0, 0]` / 0 | `[0, 0]` / 0 |
+| digest, 64 blocks | `57535244ba953d82f6c9c19428dc83a8ac412018c66acc167818e1917283f800` | same |
+
+The chain per track is now `Input (bound) -> Route (in place over the input's buffer) -> Output`.
+
+### Scope amendment (Sol)
+
+Two tests in the `mod tests` region of `crates/graph-compiler/src/lib.rs`, outside the authorized
+paths, pinned the old builtins-less shape. Sol authorized that region for three tests:
+
+1. `accepted_session_compiles_binds_and_renders_direct_route` now expects
+   `required_bindings.len() == 2` and the three stages absent.
+2. `banking_a_dynamic_rack_costs_no_arena_buffers` is renamed
+   `the_merged_span_hold_costs_the_input_slots_with_and_without_builtins`. It pinned banked arena
+   == per-node arena == 193 on the builtins-less compile of `console-sixty-four-track.json`.
+   **Finding: #169's arena-neutrality claim ("the window hold costs nothing") never held on the
+   path every host compiles through.** It was measured only on the builtins-less plan, where the
+   identity post-input copy level that #925 removes retired every `Input` slot outside any bank
+   window. The test now pins both arms (ruling: option (i)):
+   - **Builtins-less: 192 banked, 129 per node, both at most the old 193.** The EQ banks read the
+     inputs directly, each EQ bank and its compressor bank form a chainable cohort pair, and the
+     eight pairs' spans overlap into one. The input slots the EQ ops free are held inside it:
+     64 inputs + 64 EQ + 64 compressor outputs. The hold is required, because a merged chain runs
+     a cohort's compressor before the later EQ banks read their inputs. Per node there is no
+     window: 64 dedicated EQ + 64 compressor outputs + the output.
+   - **With builtins: 256 banked, 193 per node, identical at `3c93469d`.** This is 63 stereo
+     buffers, about 63 KiB at 128 frames: memory, not copies, and unchanged by #925. The merged
+     `builtins -> EQ -> compressor -> fader -> matrix` span holds the inputs: 64 inputs + 64
+     post-input + 64 EQ + 64 compressor outputs. Per node, the post-input banks' one-level windows
+     release them: 64 + 8 + 56 + 64 + 1.
+   - Narrowing the merged-span hold is **#931**. The stale `program::lower` passage ("pins the
+     193", "(193 -> 257)") now cites these pins and says the 257 was measured before #925.
+3. `builtins_replace_only_the_three_internal_track_bindings` pins the with-builtins op list
+   `[Input, PostInputBuiltins, PostFader, PostMatrix, Route, Output]` and, for the same session
+   without builtins, `[Input, Route, Output]`.
+
+### Tests
+
+- Gate 1, `graph` `tests::identity_bound_builtin_stages_alias_without_moving_a_bit`:
+  - Three tracks `Input -> seven stages -> Route -> Output`, 16 blocks of 16 frames.
+  - Hostile input: signed zeros, subnormals, magnitudes `2^-24 .. 2^25`, fresh every block.
+  - Hostile route gains and 2x2s, with track 1's `lr` exactly `-0.0`.
+  - Unlisted arm against the same plan with the three stages listed and bound to
+    `GraphNodeBinding::identity`.
+  - Asserted bit-identical: the host planes, and every window (first sample and both planes) of a
+    `PlaneRecorder` observer on each of track 1's three stages.
+  - Unlisted program: `2 x tracks + 1 = 7` ops, 18 taps, 4 buffers, every route in place, and the
+    output the only dedicated op. Listed program: `5 x tracks + 1 = 16` ops.
+- Gate 2:
+  - `graph` `program::tests::unlisted_builtin_stages_lower_as_aliases`:
+    - Nothing listed: `[Input, Route, Output]`, 6 taps, route in place, 2 buffers, output the only
+      dedicated op.
+    - Each stage listed alone keeps exactly that op. Listing `PostInputBuiltins` brings back its
+      dedicated buffer and the route's copy (3 buffers).
+    - A PDC edge keeps an unlisted stage's op.
+  - The standing instance: `tests::aliased_identity_stages_do_not_change_audio` (E9, `Scale` on a
+    listed `PostFader`). Its fixture now lists `PostInputBuiltins` and `PostMatrix`, bound to the
+    identity, and every assertion is unchanged.
+  - With builtins: graph-compiler `builtins_replace_only_the_three_internal_track_bindings`
+    (6 ops).
+- `graph` `program::tests::lowering_preserves_dataflow_and_bounds_the_arena_on_random_graphs`
+  gains an arm:
+  - Each of the 300 seeded graphs is lowered again with a separately seeded subset of builtin
+    stages listed, so the original corpus is unchanged.
+  - The symbolic interpreter treats an unlisted builtin stage as transparent.
+  - Asserted: same dataflow, every listed stage keeps its op, no other node moves, and every node
+    is an op or an alias.
+  - Every pre-existing `lower` call in `program/tests.rs` passes `builtins_bound(&spec)`: all
+    builtin stages listed, which is the pre-#925 lowering.
+- Gate 3: `console-workload` `the_plumbing_row_is_input_route_output_and_renders_the_base_bits`.
+  - It pins the base digest over 64 blocks, 129 units (none banked, one lane each), census
+    `[65, 129]`, `[0, 0]` and 0 transposes.
+  - Unchanged and green: `the_plumbing_row_binds_no_strip_at_all`,
+    `every_standing_workload_folds_one_route_per_track`, and
+    `the_mono_row_pairs_unit_rows_are_pinned` (census `[65, 129]`).
+
+### Gates
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | PASS |
+| `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | PASS, no warnings |
+| `cargo test -p graph` | 106 passed (lib 103) |
+| `cargo test -p graph --features test-support` | 113 passed (lib 103, rt9 8) |
+| `cargo test -p graph-compiler` | 92 passed (lib 73) |
+| `cargo test -p console-workload` | 30 passed, 2 ignored (the profile harness) |
+| `cargo test -p builtins-compiler --features test-support` | 79 passed |
+| `cargo test -p host-core --all-features` | 225 passed, 2 ignored |
+| `cargo test -p bench` | 62 passed |
+| `bash scripts/check-graph-determinism.sh` | PASS (100/100) |
+| `bash scripts/check-graph-policy.sh` | PASS |
+| `bash scripts/check-realtime-policy.sh` | PASS (53 marked regions in 15 files) |
+
+Also green earlier on this branch: `-p audit`, `-p source`.
+
+### Mutations
+
+`crates/graph/tests/MUTATIONS.md`, section "Issue #925". Each row was applied alone to
+`0973b805` and run over `graph --lib`, `graph-compiler --lib` and `console-workload --test
+chain_shape`:
+
+| # | mutation | result |
+|---|---|---|
+| 925-1 | elide the three stages unconditionally | RED: gate 2's listed case, and every with-builtins bind (graph 31, graph-compiler 23, chain_shape 22 of 23) |
+| 925-2 | keep the dedicated `PostInputBuiltins` out of the predicate while the other two alias | RED: gate 1 op count (10 against 7), gate 2, gate 3, two graph-compiler pins |
+| 925-3 | alias only `PostMatrix` | RED: gate 1 op count (13 against 7), gate 2, gate 3, two graph-compiler pins |
+| 925-4 | `lower_from_current_fields` passes an empty bindable set | RED: graph 21, graph-compiler 23, chain_shape 22 |
+| 925-5 | the builtins-less compile keeps listing the stages | RED: three graph-compiler tests and gate 3. graph stays green (no compiler there). |
+
+### Profile (descriptive only; no claim)
+
+`phase_profile` of `tools/console-workload/tests/plumbing_profile.rs`, `--release`,
+`taskset -c 31`, 4,000 blocks per repeat, three repeats (ranges). Other implementers were building
+in parallel: loadavg 2.5 before and 4.7 to 5.4 after. `kernel_replicas` was not rerun: it times
+standalone replicas that #925 does not touch.
+
+| phase (cycles/block) | before (`3c93469d`, 3.697 GHz) | after (`b1d9a5eb`, 3.702 GHz) |
+|---|---:|---:|
+| probes off, p50 | 11,061-11,071 ns (40,896-40,933 cycles) | 4,880-4,889 ns (18,067-18,100 cycles) |
+| units | 64 bound, 128 identity-copy, 64 identity-alias, 64 route, 1 output | 64 bound, 64 route, 1 output |
+| enter | 103 | 103-106 |
+| source set + loop entry | 155-165 | 137-141 |
+| bound units (64) | 9,648-9,726 | 7,333-7,351 |
+| identity-copy units (128) | 17,757-17,788 | -- |
+| identity-alias units (64) | 3,780-3,830 | -- |
+| route units (64) | 8,570-8,626 | 8,014-8,038 |
+| output unit (1) | 3,556-3,564 | 3,426-3,436 |
+
+The paired console benchmark runs once at the batch boundary, and this table is not its number.
+
+### Deviations and notes
+
+- **Anchor drift.** `crates/graph/src/lib.rs` sat about 153 lines lower on `3c93469d` than the
+  spec cites: `lower_from_current_fields` `:1348` (spec `:1195`), `lowered` `:1365`
+  (`:1212-1222`), `PreparedGraphPlanParts` `:1715` (`:1562`), `GraphNodeBinding::identity`
+  `:1964` (`:1814`). Every other anchor matched.
+- The spec states the predicate as `bindable.contains(id)`. The implementation interns the set
+  once. It is the same predicate, and the lowering is not quadratic in the track count.
+- The floor ruling (`docs/rulings/effect-floor-accounting.md`, "Plumbing inventory") and the
+  workload comment (`tools/console-workload/src/lib.rs`, the builtins-less compile path) keep
+  their sentence and add a dated correction: false until #925, true after it.
+  `program::is_alias_candidate`'s doc is rewritten. The floor ruling's "sixty-four individually
+  dispatched route ops and an unfolded reduction" is still true and was not touched.
+- **Build incident.** To measure `3c93469d`, a base worktree was once built into this branch's
+  `target/`. Cargo keys workspace crates by workspace-relative path, so the base `graph` rlib
+  replaced this branch's, and one graph-compiler run linked it. That run was discarded after
+  `cargo clean -p graph -p graph-compiler`, and every number above comes from a clean build. The
+  later base comparison used a separate target directory, since removed.
+- The partial-listing arm of the random-graph test does not assert the arena bound
+  `buffers <= ops`. That bound was written for the fully listed program, and fewer ops with PDC
+  staging are not covered by its argument. The arm asserts dataflow and the op/alias structure.
