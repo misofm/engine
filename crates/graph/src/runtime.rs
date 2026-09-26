@@ -15086,19 +15086,20 @@ mod tests {
     }
 
     impl RingShape {
+        /// Gate 1's shape, then gate 2's three, then the rest: the order gate 2 visits them in.
         const ALL: [Self; 12] = [
             Self::Plain,
-            Self::FoldDeclined,
-            Self::TrackDelayed,
-            Self::ObservedInput,
-            Self::ObservedAlias,
             Self::SendTap,
             Self::DelayedEdge,
             Self::SubmixReader,
             Self::BoundStage,
-            Self::RouteEdgeDelayed,
+            Self::TrackDelayed,
+            Self::ObservedInput,
+            Self::ObservedAlias,
             Self::LateInput,
             Self::DeadClaim,
+            Self::RouteEdgeDelayed,
+            Self::FoldDeclined,
         ];
 
         /// The Output fold's input count, or zero when it declines.
