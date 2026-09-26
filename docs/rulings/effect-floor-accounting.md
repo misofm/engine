@@ -531,8 +531,11 @@ thing this row has done so far.
 `gain_pan_only` binds eight bank chains, so issue #218's route fold fires on every one of its
 sixty-four lanes: its route and its share of the master reduction are an epilogue on a tile the
 chain has already transposed, and they cost almost nothing. `plumbing_only` binds **no chain at
-all**, so there is no epilogue to fold into: it pays sixty-four individually dispatched route ops
-and an unfolded reduction over sixty-four separate planar buffers. The two rows execute the same
+all**, so there is no epilogue to fold into. Until issue #926 it paid sixty-four individually
+dispatched route ops and an unfolded reduction over sixty-four separate planar buffers; since #926
+the route ops are retired into the Output op's reduction, which applies each track's 2x2 in
+registers as it loads that track's buffer, a pair of tracks at a time, so the row pays one
+reduction over sixty-four separate planar buffers and no route op. The two rows execute the same
 *arithmetic* plumbing and completely different *plans* for it.
 
 Subtracting the second from the first therefore removes the fold's saving as well as the plumbing's
