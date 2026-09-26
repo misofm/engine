@@ -5946,6 +5946,352 @@ mod tests {
         );
     }
 
+    /// SplitMix64, frozen here so the #925 corpus does not depend on host RNG state.
+    fn splitmix(state: &mut u64) -> u64 {
+        *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = *state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+
+    /// A hostile finite sample: `+0.0` and `-0.0`, signed subnormals, and signed normals whose
+    /// magnitude spans `2^-24 .. 2^25`, each with a random mantissa.
+    fn hostile_sample(state: &mut u64) -> f32 {
+        let bits = splitmix(state);
+        let sign = ((bits >> 63) as u32) << 31;
+        let mantissa = (bits as u32) & 0x007f_ffff;
+        match (bits >> 32) % 8 {
+            0 => f32::from_bits(sign),
+            1 => f32::from_bits(sign | mantissa.max(1)),
+            _ => {
+                // Biased exponents 103..=151 are the unbiased -24..=24.
+                let exponent = 103 + ((bits >> 40) % 49) as u32;
+                f32::from_bits(sign | (exponent << 23) | mantissa)
+            }
+        }
+    }
+
+    /// A bound track input that writes a fresh hostile block every call, left and right drawn
+    /// independently.
+    struct HostileSource(u64);
+    impl GraphRuntimeProcessor for HostileSource {
+        fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+            for (left, right) in block.left.iter_mut().zip(block.right.iter_mut()) {
+                *left = hostile_sample(&mut self.0);
+                *right = hostile_sample(&mut self.0);
+            }
+            Ok(())
+        }
+    }
+
+    /// Every observation one observer saw: first sample, then the left and right words.
+    struct PlaneRecorder(Arc<std::sync::Mutex<Vec<u64>>>);
+    impl GraphRuntimeObserver for PlaneRecorder {
+        fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
+            let mut sink = self.0.lock().expect("plane sink");
+            sink.push(block.first_sample);
+            sink.extend(block.left.iter().map(|sample| u64::from(sample.to_bits())));
+            sink.extend(block.right.iter().map(|sample| u64::from(sample.to_bits())));
+            Ok(())
+        }
+    }
+
+    /// Issue #925, gate 1: a builtins-less plan's three builtin stages, unlisted and therefore
+    /// lowered as aliases, render the same words as the same plan with them listed and bound to
+    /// the identity -- the shape every builtins-less plan had before #925 -- on the host planes
+    /// and in every observer window.
+    ///
+    /// Three tracks, each `Input -> seven stages -> Route -> Output`, the shape
+    /// `GraphCompiler::compile` builds for a session with no effects. The input is hostile: signed
+    /// zeros, subnormals and magnitudes over `2^-24 .. 2^25`, fresh every block. Every route
+    /// carries a hostile 2x2 and gain, and one coefficient is exactly `-0.0`, so a copy that
+    /// flipped a sign or flushed a subnormal would show. Class A is the claim: an identity copy
+    /// moves no bit and an in-place identity computes nothing, so removing them must leave every
+    /// word where it was.
+    ///
+    /// An observer on each of track 1's three builtin stages records every window it sees. With the
+    /// stages listed they fire after their own ops; unlisted they are taps on the input's buffer,
+    /// firing right after the input op. The words must be the same words either way.
+    ///
+    /// Red mutations (`tests/MUTATIONS.md`, #925): keep the post-input stage out of the alias
+    /// predicate, or alias only `PostMatrix`, and the op count below fails.
+    #[test]
+    fn identity_bound_builtin_stages_alias_without_moving_a_bit() {
+        const FRAMES: usize = 16;
+        const BLOCKS: u64 = 16;
+        const TRACKS: usize = 3;
+        const OBSERVED: usize = 1;
+        let stages = [
+            TrackStage::Input,
+            TrackStage::PostInputBuiltins,
+            TrackStage::PostSimd1,
+            TrackStage::PostDynamic,
+            TrackStage::PostSimd2PreFader,
+            TrackStage::PostFader,
+            TrackStage::PostMatrix,
+        ];
+        let builtin_stages = [
+            TrackStage::PostInputBuiltins,
+            TrackStage::PostFader,
+            TrackStage::PostMatrix,
+        ];
+        let stage_node = |track: usize, stage: TrackStage| GraphNodeId::TrackStage {
+            track_id: StableGraphId::parse(&format!("t{track}")).expect("track ID"),
+            stage,
+        };
+        let route_node = |track: usize| GraphNodeId::Route {
+            route_id: StableGraphId::parse(&format!("r{track}")).expect("route ID"),
+        };
+        let output = GraphNodeId::Output {
+            output_id: StableGraphId::parse("main").expect("output ID"),
+        };
+        let envelope = RenderEnvelope {
+            sample_rate: engine::SampleRateHz(48_000),
+            quantum: QuantumFrames(FRAMES as u32),
+            input_channels: None,
+            output_channels: core::num::NonZeroUsize::new(2).expect("two"),
+        };
+        let edge = |id: GraphEdgeId, source: &GraphNodeId, destination: &GraphNodeId| GraphEdge {
+            id,
+            source: GraphPortId {
+                node: source.clone(),
+                kind: GraphPortKind::MainOutput,
+                effect_port: None,
+            },
+            destination: GraphPortId {
+                node: destination.clone(),
+                kind: GraphPortKind::MainInput,
+                effect_port: None,
+            },
+            path: "$.main".to_owned(),
+        };
+        // Hostile route constants, drawn once so both arms fold the same words: a gain in
+        // `[2^-2, 2^2)` and a 2x2 of signed normals, with track 1's `lr` exactly `-0.0`.
+        let mut constants = 0x925_u64;
+        let mut hostile_constant = || {
+            let bits = splitmix(&mut constants);
+            let sign = ((bits >> 63) as u32) << 31;
+            let exponent = 125 + ((bits >> 40) % 4) as u32;
+            f32::from_bits(sign | (exponent << 23) | ((bits as u32) & 0x007f_ffff))
+        };
+        let transforms: Vec<RouteTransform> = (0..TRACKS)
+            .map(|track| RouteTransform {
+                gain: hostile_constant().abs(),
+                ll: hostile_constant(),
+                lr: if track == 1 { -0.0 } else { hostile_constant() },
+                rl: hostile_constant(),
+                rr: hostile_constant(),
+            })
+            .collect();
+        assert_eq!(transforms[1].lr.to_bits(), (-0.0_f32).to_bits());
+
+        let build = |listed: bool, sinks: &[Arc<std::sync::Mutex<Vec<u64>>>]| {
+            let mut nodes = vec![output.clone()];
+            let mut edges = Vec::new();
+            let mut routes = Vec::new();
+            let mut required = Vec::new();
+            let mut bindings = Vec::new();
+            for (track, transform) in transforms.iter().enumerate() {
+                let chain: Vec<GraphNodeId> = stages
+                    .iter()
+                    .map(|stage| stage_node(track, *stage))
+                    .collect();
+                for pair in chain.windows(2) {
+                    edges.push(edge(
+                        GraphEdgeId::TrackMain {
+                            target: pair[1].clone(),
+                        },
+                        &pair[0],
+                        &pair[1],
+                    ));
+                }
+                let route = route_node(track);
+                let route_id = StableGraphId::parse(&format!("r{track}")).expect("route ID");
+                edges.push(edge(
+                    GraphEdgeId::RouteSource {
+                        route_id: route_id.clone(),
+                    },
+                    &chain[6],
+                    &route,
+                ));
+                edges.push(edge(
+                    GraphEdgeId::RouteDestination { route_id },
+                    &route,
+                    &output,
+                ));
+                routes.push(PreparedRoute {
+                    node: route.clone(),
+                    transform: *transform,
+                });
+                nodes.extend(chain);
+                nodes.push(route);
+                required.push(stage_node(track, TrackStage::Input));
+                bindings.push(GraphNodeBinding::new(
+                    stage_node(track, TrackStage::Input),
+                    Box::new(HostileSource(0x925_0000 + track as u64)),
+                ));
+                if listed {
+                    for stage in builtin_stages {
+                        required.push(stage_node(track, stage));
+                        bindings.push(GraphNodeBinding::identity(stage_node(track, stage)));
+                    }
+                }
+            }
+            required.push(output.clone());
+            bindings.push(GraphNodeBinding::identity(output.clone()));
+            edges.sort_by(|left, right| left.id.cmp(&right.id));
+            let levels = levels_for(&nodes, &edges);
+            let schedule: Vec<GraphNodeId> = levels
+                .iter()
+                .flat_map(|level| level.nodes.iter().cloned())
+                .collect();
+            let observers = builtin_stages
+                .iter()
+                .zip(sinks)
+                .enumerate()
+                .map(|(handle, (stage, sink))| {
+                    GraphNodeObserverBinding::new(
+                        stage_node(OBSERVED, *stage),
+                        handle as u64 + 1,
+                        Box::new(PlaneRecorder(Arc::clone(sink))),
+                    )
+                })
+                .collect();
+            let plan = PreparedGraphPlan::new(PreparedGraphPlanParts {
+                plan_id: 925 + u64::from(listed),
+                spec: GraphSpec {
+                    nodes: sorted_nodes(
+                        nodes
+                            .iter()
+                            .cloned()
+                            .map(|id| GraphNode {
+                                id,
+                                latency: LatencySamples(0),
+                                tail: TailSamples::Finite(0),
+                            })
+                            .collect(),
+                    ),
+                    ports: Vec::new(),
+                    edges,
+                },
+                sequential_schedule: schedule,
+                dependency_levels: levels,
+                route_timings: Vec::new(),
+                inserted_delays: Vec::new(),
+                buffer_assignments: Vec::new(),
+                estimate: empty_estimate(),
+                envelope,
+                required_bindings: required,
+                routes,
+                track_delays: Vec::new(),
+                effects: Vec::new(),
+                effect_controls: Vec::new(),
+                effect_observations: Vec::new(),
+                banks: Vec::new(),
+                builtin_banks: Vec::new(),
+                observers,
+            });
+            (
+                plan,
+                GraphRuntimeBindings {
+                    envelope,
+                    nodes: bindings,
+                    observers: Vec::new(),
+                },
+            )
+        };
+        let sinks = |_: ()| -> Vec<Arc<std::sync::Mutex<Vec<u64>>>> {
+            (0..builtin_stages.len())
+                .map(|_| Arc::new(std::sync::Mutex::new(Vec::new())))
+                .collect()
+        };
+
+        let unlisted_sinks = sinks(());
+        let (unlisted, unlisted_bindings) = build(false, &unlisted_sinks);
+        let program = unlisted.program().expect("lowered");
+        // `Input` and `Route` per track and the output: the three stages are aliases.
+        assert_eq!(program.ops.len(), 2 * TRACKS + 1);
+        let op_nodes: Vec<&GraphNodeId> = program
+            .ops
+            .iter()
+            .map(|op| &unlisted.spec.nodes[op.node as usize].id)
+            .collect();
+        assert!(op_nodes.iter().all(|id| matches!(
+            id,
+            GraphNodeId::TrackStage {
+                stage: TrackStage::Input,
+                ..
+            } | GraphNodeId::Route { .. }
+                | GraphNodeId::Output { .. }
+        )));
+        // The only dedicated storage by kind is the session output's (`program::is_dedicated`:
+        // the post-input stage, SIMD-rack effects and the output), and every route runs in place
+        // over its input's buffer: one slot per track and the output's.
+        let dedicated = op_nodes
+            .iter()
+            .filter(|id| {
+                matches!(
+                    id,
+                    GraphNodeId::TrackStage {
+                        stage: TrackStage::PostInputBuiltins,
+                        ..
+                    } | GraphNodeId::Effect(_)
+                        | GraphNodeId::Output { .. }
+                )
+            })
+            .count();
+        assert_eq!(dedicated, 1, "only the output is dedicated storage");
+        for op in program.ops.iter() {
+            if matches!(
+                unlisted.spec.nodes[op.node as usize].id,
+                GraphNodeId::Route { .. }
+            ) {
+                assert!(op.in_place, "a route reads its input's buffer in place");
+            }
+        }
+        assert_eq!(program.buffers as usize, TRACKS + 1);
+        assert_eq!(program.taps.len(), 6 * TRACKS);
+
+        let listed_sinks = sinks(());
+        let (listed, listed_bindings) = build(true, &listed_sinks);
+        assert_eq!(
+            listed.program().expect("lowered").ops.len(),
+            5 * TRACKS + 1,
+            "the old shape: Input, the three stages and the route per track, and the output"
+        );
+
+        let mut unlisted_plan = unlisted
+            .bind(unlisted_bindings)
+            .unwrap_or_else(|failure| panic!("unlisted bind: {}", failure.code));
+        let mut listed_plan = listed
+            .bind(listed_bindings)
+            .unwrap_or_else(|failure| panic!("listed bind: {}", failure.code));
+        let unlisted_bits = render_blocks(&mut unlisted_plan, FRAMES, BLOCKS);
+        let listed_bits = render_blocks(&mut listed_plan, FRAMES, BLOCKS);
+        assert!(unlisted_bits.iter().any(|bits| *bits != 0));
+        assert_eq!(
+            unlisted_bits, listed_bits,
+            "eliding identity stages must not move one bit of the host planes"
+        );
+        for (stage, (unlisted, listed)) in builtin_stages
+            .iter()
+            .zip(unlisted_sinks.iter().zip(&listed_sinks))
+        {
+            let unlisted = unlisted.lock().expect("sink").clone();
+            let listed = listed.lock().expect("sink").clone();
+            assert_eq!(
+                unlisted.len(),
+                BLOCKS as usize * (1 + 2 * FRAMES),
+                "{stage:?}: one window per block"
+            );
+            assert_eq!(
+                unlisted, listed,
+                "{stage:?}: an observer window moved a bit"
+            );
+        }
+    }
+
     /// The #98 F2 corpus: fifty seeded random DAGs -- stage chains, rack effects with sidechains,
     /// submixes, sends from arbitrary taps, non-trivial 2x2 routes and PDC on a quarter of the
     /// edges -- each bind and render eight blocks of non-silent PCM through the sequential

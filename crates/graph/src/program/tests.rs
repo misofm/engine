@@ -209,6 +209,124 @@ fn chain_of_seven_stages_lowers_to_six_ops_three_taps_and_two_buffers() {
     assert_eq!(program.output, program.ops[5].output);
 }
 
+/// Issue #925: the same chain as a builtins-less compile now lists it -- only the input and the
+/// output bindable -- is `Input -> Route -> Output`: three ops, six aliases, and the route in place
+/// over the input's own buffer.
+///
+/// Every builtin stage the plan does not list is an identity nothing will bind, so it lowers as
+/// an alias exactly like the three rack boundaries: no op, no buffer, no unit. The post-input
+/// stage is dedicated storage by kind (`is_dedicated`), but dedication is a property of an *op's*
+/// output; an elided stage owns no storage, so the only dedicated buffer left is the session
+/// output's.
+///
+/// The one-stage-listed cases are the other half of the predicate: a listed stage keeps its op
+/// (a processor bound to it must run) and the other two are still elided around it. Listing the
+/// post-input stage brings its dedicated buffer back, and with it the route's copy.
+///
+/// Red mutations (`crates/graph/tests/MUTATIONS.md`, #925): elide the three stages whatever the
+/// bindable set says, and every listed case here fails; keep the post-input stage out of the
+/// predicate, or alias only `PostMatrix`, and the unlisted op count fails.
+#[test]
+fn unlisted_builtin_stages_lower_as_aliases() {
+    let (nodes, edges) = plain_track("t", &["r"]);
+    let (spec, schedule, levels) = build(nodes, edges);
+    let input = stage_node("t", TrackStage::Input);
+    let route = GraphNodeId::Route { route_id: gid("r") };
+    let output = GraphNodeId::Output {
+        output_id: gid("out"),
+    };
+    let unlisted = [input.clone(), output.clone()];
+    let program = lower(&spec, &schedule, &levels, &[], &[], &unlisted).expect("lowers");
+    let op_nodes: Vec<&GraphNodeId> = program
+        .ops
+        .iter()
+        .map(|op| &spec.nodes[op.node as usize].id)
+        .collect();
+    assert_eq!(op_nodes, vec![&input, &route, &output]);
+    assert_eq!(program.taps.len(), 6, "every track stage but the input");
+    let in_place: Vec<bool> = program.ops.iter().map(|op| op.in_place).collect();
+    assert_eq!(in_place, vec![false, true, false]);
+    // The route runs in place over the input's buffer, and every alias observes it right after
+    // the input op wrote it.
+    assert_eq!(program.ops[1].output, program.ops[0].output);
+    for tap in &program.taps {
+        assert_eq!(tap.buffer, program.ops[0].output);
+        assert_eq!(tap.after_op, 0);
+        assert!(program.node_op[tap.node as usize].is_none());
+    }
+    // The input's slot and the dedicated output's: nothing else is storage.
+    assert_eq!(program.buffers, 2);
+    let dedicated: Vec<&GraphNodeId> = program
+        .ops
+        .iter()
+        .map(|op| &spec.nodes[op.node as usize].id)
+        .filter(|id| is_dedicated(id))
+        .collect();
+    assert_eq!(dedicated, vec![&output]);
+
+    // One stage listed: that op, and only that op, comes back.
+    for (stage, in_place, buffers) in [
+        (
+            TrackStage::PostInputBuiltins,
+            vec![false, false, false, false],
+            3,
+        ),
+        (TrackStage::PostFader, vec![false, true, true, false], 2),
+        (TrackStage::PostMatrix, vec![false, true, true, false], 2),
+    ] {
+        let listed = stage_node("t", stage);
+        let program = lower(
+            &spec,
+            &schedule,
+            &levels,
+            &[],
+            &[],
+            &[input.clone(), listed.clone(), output.clone()],
+        )
+        .expect("lowers");
+        let op_nodes: Vec<&GraphNodeId> = program
+            .ops
+            .iter()
+            .map(|op| &spec.nodes[op.node as usize].id)
+            .collect();
+        assert_eq!(
+            op_nodes,
+            vec![&input, &listed, &route, &output],
+            "{stage:?} listed"
+        );
+        assert_eq!(program.taps.len(), 5, "{stage:?} listed");
+        assert_eq!(
+            program.ops.iter().map(|op| op.in_place).collect::<Vec<_>>(),
+            in_place,
+            "{stage:?} listed"
+        );
+        assert_eq!(program.buffers, buffers, "{stage:?} listed");
+    }
+
+    // A listed stage behind a PDC edge keeps its op for both reasons; an unlisted one keeps it
+    // only for the delay -- the alias condition is unchanged, the bindable set only widens which
+    // stages it applies to.
+    let delayed = InsertedDelay {
+        node: stage_node("t", TrackStage::PostFader),
+        edge_id: GraphEdgeId::TrackMain {
+            target: stage_node("t", TrackStage::PostFader),
+        },
+        samples: LatencySamples(8),
+    };
+    let program = lower(
+        &spec,
+        &schedule,
+        &levels,
+        std::slice::from_ref(&delayed),
+        &[],
+        &unlisted,
+    )
+    .expect("lowers");
+    let fader = node_index(&spec, &stage_node("t", TrackStage::PostFader)).expect("fader");
+    assert!(program.node_op[fader as usize].is_some());
+    assert_eq!(program.ops.len(), 4);
+}
+
 /// Two routes off one tap: the shared buffer has two readers, so neither route may consume it
 /// in place, and the output op keeps a genuine two-input reduction.
 #[test]

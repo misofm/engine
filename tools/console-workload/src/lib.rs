@@ -871,6 +871,12 @@ impl SessionRuntime {
             // produces here is the session's own dataflow with nothing attached to the track
             // stages, so each `TrackStage` lowers to an elided alias and the route and the master
             // reduction are all that stand between a track's source and the output.
+            //
+            // Correction, 2026-09-26 (issue #925): that was false until #925. The compile listed
+            // the three builtin stages as required bindings, `source_binding` acknowledged them
+            // with the identity, and each lowered to an identity op (two copies and a dispatch
+            // per track). Since #925 `required_bindings` here is the inputs and the output only,
+            // the stages are aliases, and the sentence above holds.
             let compiled = GraphCompiler::compile(GraphCompileRequest {
                 dispatch,
                 plan_id: PLAN_ID,
