@@ -873,6 +873,42 @@ fn the_plumbing_row_binds_no_strip_at_all() {
     );
 }
 
+/// The plumbing row is `Input -> Route -> Output` per track, and renders the bits it rendered
+/// when every track also ran three identity stages (issue #925).
+///
+/// `GraphCompiler::compile` lists no builtin stage as bindable, so a builtins-less plan's
+/// `PostInputBuiltins`, `PostFader` and `PostMatrix` lower as aliases of the input's buffer
+/// instead of two identity copies and a dispatch that computed nothing. The row's units fall from
+/// 321 (`64 bound, 128 identity-copy, 64 identity-alias, 64 route, 1 output`) to 129 (`64 bound,
+/// 64 route, 1 output`), and the census from `[257, 321]` to `[65, 129]`: the 192 identity units
+/// it loses were all eligible, vacuously. With #926 merged the 64 route units are retired into
+/// the Output op's reduction too, so the row is `64 bound, 1 output`: 65 units, census
+/// `[1, 65]` (the bound host processors decline the symmetry witness; only the Output op is
+/// eligible). Class A: the digest over 64 blocks is pinned at the value the base commit of #925
+/// (`3c93469d`) renders, before any of this existed.
+#[test]
+fn the_plumbing_row_is_input_route_output_and_renders_the_base_bits() {
+    const BASE_DIGEST: &str = "57535244ba953d82f6c9c19428dc83a8ac412018c66acc167818e1917283f800";
+    let (digest, shape, transposes) = render(
+        Workload::SixtyFourTrackPlumbingOnly,
+        PlanConfig::BASELINE,
+        BLOCKS,
+    );
+    assert_eq!(digest, BASE_DIGEST, "eliding identity stages moved a bit");
+    assert_eq!(shape, [0, 0], "the plumbing row binds no bank");
+    assert_eq!(transposes, 0);
+    let runtime = SessionRuntime::build(Workload::SixtyFourTrackPlumbingOnly, PlanConfig::BASELINE);
+    let rows = runtime.unit_eligibility();
+    assert_eq!(
+        rows.len(),
+        65,
+        "64 bound inputs and the output: no identity-stage unit is left (#925) and every route \
+         is retired into the Output reduction (#926)"
+    );
+    assert!(rows.iter().all(|row| !row.banked && row.lanes() == 1));
+    assert_eq!(runtime.symmetry_counters(), [1, 65]);
+}
+
 /// The folded master carries the reduction's own bits, and the declined arm is the oracle that says
 /// so.
 ///
@@ -960,6 +996,74 @@ fn the_folded_master_is_the_reductions_own_bits() {
             folded,
             "{}: a metered, folded master is not the reduction's bits",
             workload.kind()
+        );
+    }
+}
+
+/// Issue #926: the plumbing row's routes fuse into the Output op's reduction, and the fused
+/// reduction renders the route ops' and the reduction's own bits; no other row takes the fold.
+///
+/// The plumbing row binds no bank, so issue #218's chain fold has no epilogue to fold into, and
+/// each track's route op was a dispatched `mix2x2_block` store pass over its in-place buffer, which
+/// the Output's reduction then loaded back. Issue #926 retires those sixty-four route ops and
+/// applies each route's 2x2 inside the reduction, a pair of tracks at a time, as it loads the
+/// buffers (the eligibility is issue #920's, which never landed).
+///
+/// The oracle is the same row bound with that fold declined
+/// (`graph::test_only_set_output_route_fold_declined`, read once at bind). Its route ops run and
+/// its Output reduces their outputs, which is the plan this row rendered before the issue, so the
+/// two arms differ in exactly the thing under test.
+///
+/// A count first, because the fold renders the same bits by construction and a digest cannot see
+/// whether it fired: the plan has one unit fewer per route, sixty-four, read off the per-unit
+/// census. Then the bank shape, which the fold must not move (`the_plumbing_row_binds_no_strip_at_all`
+/// pins `[0, 0]`), and the chain-fold count, which stays zero
+/// (`every_standing_workload_folds_one_route_per_track`). Then the digests over `BLOCKS` blocks.
+///
+/// Last, the fold's reach: every other standing workload binds a bank, so the fold declines on
+/// its no-bank clause and must read zero there. The engine's plan trait carries no Output-fold
+/// count, so zero is read the same way sixty-four is, off the unit census: declining the fold
+/// must leave every other row's census exactly as it is.
+#[test]
+fn the_plumbing_rows_output_fold_is_the_route_ops_own_bits() {
+    let digest = |runtime: &mut SessionRuntime| {
+        let mut sink = Sha256Sink::new();
+        for block in 0..BLOCKS {
+            runtime.render(block).expect("console render");
+            runtime.hash_output(&mut sink);
+        }
+        sink.finish_hex()
+    };
+    let workload = Workload::SixtyFourTrackPlumbingOnly;
+    let mut folded_runtime = SessionRuntime::build(workload, PlanConfig::BASELINE);
+    graph::test_only_set_output_route_fold_declined(true);
+    let mut declined_runtime = SessionRuntime::build(workload, PlanConfig::BASELINE);
+    graph::test_only_set_output_route_fold_declined(false);
+    assert_eq!(
+        declined_runtime.unit_eligibility().len() - folded_runtime.unit_eligibility().len(),
+        usize::try_from(workload.tracks()).expect("track count"),
+        "the plumbing row must retire one route op per track into the Output's reduction"
+    );
+    for runtime in [&folded_runtime, &declined_runtime] {
+        assert_eq!(runtime.bank_shape(), [0, 0], "the fold binds no bank");
+        assert_eq!(runtime.bank_route_folds(), 0, "and is not the chain fold");
+    }
+    let folded = digest(&mut folded_runtime);
+    let declined = digest(&mut declined_runtime);
+    assert_eq!(
+        folded, declined,
+        "the fused Output reduction is not the route ops' and the reduction's bits"
+    );
+    for other in WORKLOADS.into_iter().filter(|other| *other != workload) {
+        let as_bound = SessionRuntime::build(other, PlanConfig::BASELINE).unit_eligibility();
+        graph::test_only_set_output_route_fold_declined(true);
+        let declined = SessionRuntime::build(other, PlanConfig::BASELINE).unit_eligibility();
+        graph::test_only_set_output_route_fold_declined(false);
+        assert_eq!(
+            as_bound,
+            declined,
+            "{} must not take the Output route fold: it binds a bank",
+            other.kind()
         );
     }
 }

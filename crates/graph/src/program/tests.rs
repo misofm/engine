@@ -33,6 +33,19 @@ fn main_edge(id: GraphEdgeId, source: GraphNodeId, destination: GraphNodeId) -> 
         path: "$".to_owned(),
     }
 }
+/// Every builtin stage of `spec`, as `GraphCompiler::compile_with_builtins` lists them in
+/// `required_bindings`: the bindable set under which each keeps its op.
+///
+/// The fixtures below were written when a builtin stage kept its op unconditionally, and this is
+/// the set that keeps them describing that plan. An unlisted builtin stage lowers as an alias
+/// since issue #925; `unlisted_builtin_stages_lower_as_aliases` is that plan.
+fn builtins_bound(spec: &GraphSpec) -> Vec<GraphNodeId> {
+    spec.nodes
+        .iter()
+        .map(|node| node.id.clone())
+        .filter(is_builtin_stage)
+        .collect()
+}
 /// A spec plus the level-major schedule the graph compiler would emit for it.
 ///
 /// The compiler sorts nodes and edges by id and emits levels in ascending node-id order, so
@@ -150,7 +163,8 @@ fn chain_of_seven_stages_lowers_to_six_ops_three_taps_and_two_buffers() {
     let (spec, schedule, levels) = build(nodes, edges);
     assert_eq!(spec.nodes.len(), 9);
     assert_eq!(spec.edges.len(), 8);
-    let program = lower(&spec, &schedule, &levels, &[], &[]).expect("lowers");
+    let program =
+        lower(&spec, &schedule, &levels, &[], &[], &builtins_bound(&spec)).expect("lowers");
 
     assert_eq!(program.ops.len(), 6);
     assert_eq!(program.taps.len(), 3);
@@ -195,13 +209,132 @@ fn chain_of_seven_stages_lowers_to_six_ops_three_taps_and_two_buffers() {
     assert_eq!(program.output, program.ops[5].output);
 }
 
+/// Issue #925: the same chain as a builtins-less compile now lists it -- only the input and the
+/// output bindable -- is `Input -> Route -> Output`: three ops, six aliases, and the route in place
+/// over the input's own buffer.
+///
+/// Every builtin stage the plan does not list is an identity nothing will bind, so it lowers as
+/// an alias exactly like the three rack boundaries: no op, no buffer, no unit. The post-input
+/// stage is dedicated storage by kind (`is_dedicated`), but dedication is a property of an *op's*
+/// output; an elided stage owns no storage, so the only dedicated buffer left is the session
+/// output's.
+///
+/// The one-stage-listed cases are the other half of the predicate: a listed stage keeps its op
+/// (a processor bound to it must run) and the other two are still elided around it. Listing the
+/// post-input stage brings its dedicated buffer back, and with it the route's copy.
+///
+/// Red mutations (`crates/graph/tests/MUTATIONS.md`, #925): elide the three stages whatever the
+/// bindable set says, and every listed case here fails; keep the post-input stage out of the
+/// predicate, or alias only `PostMatrix`, and the unlisted op count fails.
+#[test]
+fn unlisted_builtin_stages_lower_as_aliases() {
+    let (nodes, edges) = plain_track("t", &["r"]);
+    let (spec, schedule, levels) = build(nodes, edges);
+    let input = stage_node("t", TrackStage::Input);
+    let route = GraphNodeId::Route { route_id: gid("r") };
+    let output = GraphNodeId::Output {
+        output_id: gid("out"),
+    };
+    let unlisted = [input.clone(), output.clone()];
+    let program = lower(&spec, &schedule, &levels, &[], &[], &unlisted).expect("lowers");
+    let op_nodes: Vec<&GraphNodeId> = program
+        .ops
+        .iter()
+        .map(|op| &spec.nodes[op.node as usize].id)
+        .collect();
+    assert_eq!(op_nodes, vec![&input, &route, &output]);
+    assert_eq!(program.taps.len(), 6, "every track stage but the input");
+    let in_place: Vec<bool> = program.ops.iter().map(|op| op.in_place).collect();
+    assert_eq!(in_place, vec![false, true, false]);
+    // The route runs in place over the input's buffer, and every alias observes it right after
+    // the input op wrote it.
+    assert_eq!(program.ops[1].output, program.ops[0].output);
+    for tap in &program.taps {
+        assert_eq!(tap.buffer, program.ops[0].output);
+        assert_eq!(tap.after_op, 0);
+        assert!(program.node_op[tap.node as usize].is_none());
+    }
+    // The input's slot and the dedicated output's: nothing else is storage.
+    assert_eq!(program.buffers, 2);
+    let dedicated: Vec<&GraphNodeId> = program
+        .ops
+        .iter()
+        .map(|op| &spec.nodes[op.node as usize].id)
+        .filter(|id| is_dedicated(id))
+        .collect();
+    assert_eq!(dedicated, vec![&output]);
+
+    // One stage listed: that op, and only that op, comes back.
+    for (stage, in_place, buffers) in [
+        (
+            TrackStage::PostInputBuiltins,
+            vec![false, false, false, false],
+            3,
+        ),
+        (TrackStage::PostFader, vec![false, true, true, false], 2),
+        (TrackStage::PostMatrix, vec![false, true, true, false], 2),
+    ] {
+        let listed = stage_node("t", stage);
+        let program = lower(
+            &spec,
+            &schedule,
+            &levels,
+            &[],
+            &[],
+            &[input.clone(), listed.clone(), output.clone()],
+        )
+        .expect("lowers");
+        let op_nodes: Vec<&GraphNodeId> = program
+            .ops
+            .iter()
+            .map(|op| &spec.nodes[op.node as usize].id)
+            .collect();
+        assert_eq!(
+            op_nodes,
+            vec![&input, &listed, &route, &output],
+            "{stage:?} listed"
+        );
+        assert_eq!(program.taps.len(), 5, "{stage:?} listed");
+        assert_eq!(
+            program.ops.iter().map(|op| op.in_place).collect::<Vec<_>>(),
+            in_place,
+            "{stage:?} listed"
+        );
+        assert_eq!(program.buffers, buffers, "{stage:?} listed");
+    }
+
+    // A listed stage behind a PDC edge keeps its op for both reasons; an unlisted one keeps it
+    // only for the delay -- the alias condition is unchanged, the bindable set only widens which
+    // stages it applies to.
+    let delayed = InsertedDelay {
+        node: stage_node("t", TrackStage::PostFader),
+        edge_id: GraphEdgeId::TrackMain {
+            target: stage_node("t", TrackStage::PostFader),
+        },
+        samples: LatencySamples(8),
+    };
+    let program = lower(
+        &spec,
+        &schedule,
+        &levels,
+        std::slice::from_ref(&delayed),
+        &[],
+        &unlisted,
+    )
+    .expect("lowers");
+    let fader = node_index(&spec, &stage_node("t", TrackStage::PostFader)).expect("fader");
+    assert!(program.node_op[fader as usize].is_some());
+    assert_eq!(program.ops.len(), 4);
+}
+
 /// Two routes off one tap: the shared buffer has two readers, so neither route may consume it
 /// in place, and the output op keeps a genuine two-input reduction.
 #[test]
 fn fan_out_blocks_in_place_and_fan_in_keeps_its_reduction() {
     let (nodes, edges) = plain_track("t", &["ra", "rb"]);
     let (spec, schedule, levels) = build(nodes, edges);
-    let program = lower(&spec, &schedule, &levels, &[], &[]).expect("lowers");
+    let program =
+        lower(&spec, &schedule, &levels, &[], &[], &builtins_bound(&spec)).expect("lowers");
 
     assert_eq!(program.taps.len(), 3);
     assert_eq!(program.reduction_count(), 1);
@@ -242,7 +375,8 @@ fn sixty_four_plain_tracks_keep_one_ordered_non_aliasing_master_reduction() {
         output_id: gid("out"),
     }));
     let (spec, schedule, levels) = build(nodes, edges);
-    let program = lower(&spec, &schedule, &levels, &[], &[]).expect("plumbing lowers");
+    let program = lower(&spec, &schedule, &levels, &[], &[], &builtins_bound(&spec))
+        .expect("plumbing lowers");
     let master = program.ops.last().expect("master output");
     let inputs = program.inputs_of(master);
     assert_eq!(inputs.len(), 64);
@@ -284,6 +418,7 @@ fn delayed_edge_gets_staging_buffer_and_blocks_in_place() {
         &levels,
         std::slice::from_ref(&delayed),
         &[],
+        &builtins_bound(&spec),
     )
     .expect("lowers");
 
@@ -325,6 +460,7 @@ fn a_delayed_stage_boundary_is_not_elided() {
         &levels,
         std::slice::from_ref(&delayed),
         &[],
+        &builtins_bound(&spec),
     )
     .expect("lowers");
     assert_eq!(program.taps.len(), 2);
@@ -373,7 +509,8 @@ fn taps_are_not_readers_so_an_alias_chain_still_folds_into_its_producer() {
         stage_node(track, TrackStage::PostDynamic),
     ));
     let (spec, schedule, levels) = build(nodes, edges);
-    let program = lower(&spec, &schedule, &levels, &[], &[]).expect("lowers");
+    let program =
+        lower(&spec, &schedule, &levels, &[], &[], &builtins_bound(&spec)).expect("lowers");
 
     let effect_index = node_index(&spec, &effect).expect("effect node");
     let effect_op = program.node_op[effect_index as usize].expect("effect keeps its op");
@@ -415,6 +552,13 @@ enum Expr {
     Sum(Vec<Expr>),
 }
 
+/// Whether a node transforms nothing, whether or not lowering gave it an op: a rack boundary
+/// always, and a builtin stage the plan does not list (issue #925), because nothing binds it and
+/// the executor's identity kind is all it could ever be.
+fn transparent(id: &GraphNodeId, bindable: &[GraphNodeId]) -> bool {
+    is_alias_candidate(id) || (is_builtin_stage(id) && !bindable.contains(id))
+}
+
 /// Evaluate the *semantic* graph the naive way: every node consumes the ordered, individually
 /// delayed outputs of its incoming main edges. An identity stage boundary is transparent,
 /// because that is exactly what the executor's `RuntimeNodeKind::Identity` does with a
@@ -423,6 +567,7 @@ fn evaluate_spec(
     spec: &GraphSpec,
     schedule: &[GraphNodeId],
     delays: &[InsertedDelay],
+    bindable: &[GraphNodeId],
 ) -> Vec<Expr> {
     let mut value = vec![Expr::Silence; spec.nodes.len()];
     for id in schedule {
@@ -452,7 +597,7 @@ fn evaluate_spec(
         // elides it: elision removes the schedule item, never a transformation. Modelling it
         // as transparent on both sides is what makes the delayed case (which keeps its op)
         // comparable to the undelayed case (which becomes an alias).
-        value[index] = if is_alias_candidate(id) {
+        value[index] = if transparent(id, bindable) {
             combined
         } else {
             Expr::Node(u32::try_from(index).expect("index"), Box::new(combined))
@@ -470,9 +615,10 @@ fn assert_program_matches_spec(
     spec: &GraphSpec,
     schedule: &[GraphNodeId],
     delays: &[InsertedDelay],
+    bindable: &[GraphNodeId],
     program: &ExecutionProgram,
 ) {
-    let expected = evaluate_spec(spec, schedule, delays);
+    let expected = evaluate_spec(spec, schedule, delays, bindable);
     let mut arena = vec![Expr::Silence; program.buffers as usize];
     let mut taps_by_op: std::collections::BTreeMap<OpIndex, Vec<&Tap>> =
         std::collections::BTreeMap::new();
@@ -506,7 +652,7 @@ fn assert_program_matches_spec(
         // Same rule as the reference side: an identity stage boundary that kept its op
         // (because its input is delayed) still transforms nothing.
         let id = &spec.nodes[op.node as usize].id;
-        arena[op.output.0 as usize] = if is_alias_candidate(id) {
+        arena[op.output.0 as usize] = if transparent(id, bindable) {
             combined
         } else {
             Expr::Node(op.node, Box::new(combined))
@@ -622,10 +768,17 @@ fn lowering_preserves_dataflow_and_bounds_the_arena_on_random_graphs() {
                 samples: LatencySamples(xorshift(&mut state) % 128 + 1),
             });
         }
-        let program = lower(&spec, &schedule, &levels, &delays, &[])
-            .unwrap_or_else(|error| panic!("graph {graph}: {error:?}"));
+        let program = lower(
+            &spec,
+            &schedule,
+            &levels,
+            &delays,
+            &[],
+            &builtins_bound(&spec),
+        )
+        .unwrap_or_else(|error| panic!("graph {graph}: {error:?}"));
 
-        assert_program_matches_spec(&spec, &schedule, &delays, &program);
+        assert_program_matches_spec(&spec, &schedule, &delays, &builtins_bound(&spec), &program);
 
         // Structure: every node is either an op or an alias, never both and never neither.
         assert_eq!(
@@ -689,6 +842,38 @@ fn lowering_preserves_dataflow_and_bounds_the_arena_on_random_graphs() {
             (program.buffers as usize) < spec.edges.len() + spec.nodes.len(),
             "graph {graph}: arena is no smaller than the per-edge model it replaces"
         );
+
+        // Issue #925: the same graph with a seeded subset of its builtin stages listed as
+        // bindable. An unlisted one is the identity, so the reference treats it as transparent,
+        // and the program must compute the same values with it elided (or, behind a PDC edge,
+        // kept as an identity op). The subset has its own seed so the corpus above is unchanged.
+        let mut pick = u64::from(graph).wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+        let listed: Vec<GraphNodeId> = builtins_bound(&spec)
+            .into_iter()
+            .filter(|_| xorshift(&mut pick).is_multiple_of(2))
+            .collect();
+        let partial = lower(&spec, &schedule, &levels, &delays, &[], &listed)
+            .unwrap_or_else(|error| panic!("graph {graph}, partial listing: {error:?}"));
+        assert_program_matches_spec(&spec, &schedule, &delays, &listed, &partial);
+        for (index, candidate) in spec.nodes.iter().enumerate() {
+            if !is_builtin_stage(&candidate.id) {
+                assert_eq!(
+                    partial.node_op[index].is_some(),
+                    program.node_op[index].is_some(),
+                    "graph {graph}: the listing moved a node that is not a builtin stage"
+                );
+            } else if listed.contains(&candidate.id) {
+                assert!(
+                    partial.node_op[index].is_some(),
+                    "graph {graph}: a listed builtin stage lost its op"
+                );
+            }
+        }
+        assert_eq!(
+            partial.ops.len() + partial.taps.len(),
+            spec.nodes.len(),
+            "graph {graph}, partial listing: nodes are neither op nor alias"
+        );
     }
 }
 
@@ -698,19 +883,33 @@ fn malformed_inputs_are_rejected_rather_than_lowered() {
     let (nodes, edges) = plain_track("t", &["r"]);
     let (spec, schedule, levels) = build(nodes, edges);
     assert_eq!(
-        lower(&spec, &schedule[..schedule.len() - 1], &levels, &[], &[]),
+        lower(
+            &spec,
+            &schedule[..schedule.len() - 1],
+            &levels,
+            &[],
+            &[],
+            &builtins_bound(&spec)
+        ),
         Err(ProgramError::ScheduleMismatch)
     );
     let mut swapped = schedule.clone();
     swapped.swap(0, 1);
     assert_eq!(
-        lower(&spec, &swapped, &levels, &[], &[]),
+        lower(&spec, &swapped, &levels, &[], &[], &builtins_bound(&spec)),
         Err(ProgramError::ScheduleMismatch)
     );
     let mut unsorted = spec.clone();
     unsorted.nodes.swap(0, 1);
     assert_eq!(
-        lower(&unsorted, &schedule, &levels, &[], &[]),
+        lower(
+            &unsorted,
+            &schedule,
+            &levels,
+            &[],
+            &[],
+            &builtins_bound(&unsorted)
+        ),
         Err(ProgramError::SpecUnsorted)
     );
 }
@@ -1142,7 +1341,9 @@ fn divergence_in_runtime_order(
     program: &ExecutionProgram,
     lanes: &std::collections::BTreeMap<u32, (usize, usize)>,
 ) -> Option<String> {
-    let expected = evaluate_spec(spec, schedule, delays);
+    // Every builtin stage listed, as every caller lowers: `transform` below and this agree that
+    // only the rack boundaries are transparent.
+    let expected = evaluate_spec(spec, schedule, delays, &builtins_bound(spec));
     let mut arena = vec![Expr::Silence; program.buffers as usize];
     // One op's reduction: stage every delayed input into its scratch, then combine.
     let gather = |arena: &mut Vec<Expr>, op: &Op| {
@@ -1360,8 +1561,16 @@ fn a_bank_window_never_recycles_a_physical_slot() {
 
     // Not vacuous: told nothing about the bank, colouring recycles the slot and the render
     // diverges. This is the pre-#169 behaviour, and the fixture exists to reach it.
-    let unaware = lower(&spec, &schedule, &levels, &delays, &[]).expect("lowers");
-    assert_program_matches_spec(&spec, &schedule, &delays, &unaware);
+    let unaware = lower(
+        &spec,
+        &schedule,
+        &levels,
+        &delays,
+        &[],
+        &builtins_bound(&spec),
+    )
+    .expect("lowers");
+    assert_program_matches_spec(&spec, &schedule, &delays, &builtins_bound(&spec), &unaware);
     let member = node_index(&spec, &dynamic_effect("t02")).expect("member");
     let outsider = node_index(&spec, &dynamic_effect("t01")).expect("outsider");
     let outsider_op = &unaware.ops[unaware.node_op[outsider as usize].expect("op") as usize];
@@ -1379,8 +1588,16 @@ fn a_bank_window_never_recycles_a_physical_slot() {
     );
 
     // Told about the bank, the slot is held until the window closes.
-    let program = lower(&spec, &schedule, &levels, &delays, &banks).expect("lowers");
-    assert_program_matches_spec(&spec, &schedule, &delays, &program);
+    let program = lower(
+        &spec,
+        &schedule,
+        &levels,
+        &delays,
+        &banks,
+        &builtins_bound(&spec),
+    )
+    .expect("lowers");
+    assert_program_matches_spec(&spec, &schedule, &delays, &builtins_bound(&spec), &program);
     assert_no_slot_is_recycled_inside_a_bank_window(&program, &spec, &banks, "minimal");
     assert_eq!(
         divergence_in_runtime_order(&spec, &schedule, &delays, &program, &lanes),
@@ -1421,8 +1638,16 @@ fn no_slot_is_recycled_inside_a_merged_bank_window() {
         vec![dynamic_effect("t00"), dynamic_effect("t02")],
         vec![dynamic_effect("t01"), dynamic_effect("t03")],
     ];
-    let program = lower(&spec, &schedule, &levels, &[], &banks).expect("lowers");
-    assert_program_matches_spec(&spec, &schedule, &[], &program);
+    let program = lower(
+        &spec,
+        &schedule,
+        &levels,
+        &[],
+        &banks,
+        &builtins_bound(&spec),
+    )
+    .expect("lowers");
+    assert_program_matches_spec(&spec, &schedule, &[], &builtins_bound(&spec), &program);
 
     // The two windows really do interleave, so `bank_windows` really does merge them.
     let window = |members: &[GraphNodeId]| {
@@ -1559,9 +1784,17 @@ fn bank_window_hoisting_preserves_dataflow_on_random_graphs() {
         }
         banked_graphs += 1;
 
-        let program = lower(&spec, &schedule, &levels, &delays, &banks).expect("lowers");
+        let program = lower(
+            &spec,
+            &schedule,
+            &levels,
+            &delays,
+            &banks,
+            &builtins_bound(&spec),
+        )
+        .expect("lowers");
         let lanes = member_lanes(&spec, &banks);
-        assert_program_matches_spec(&spec, &schedule, &delays, &program);
+        assert_program_matches_spec(&spec, &schedule, &delays, &builtins_bound(&spec), &program);
         assert_no_slot_is_recycled_inside_a_bank_window(&program, &spec, &banks, "random");
         assert_eq!(
             divergence_in_runtime_order(&spec, &schedule, &delays, &program, &lanes),
@@ -1569,7 +1802,15 @@ fn bank_window_hoisting_preserves_dataflow_on_random_graphs() {
             "graph {graph}"
         );
 
-        let unaware = lower(&spec, &schedule, &levels, &delays, &[]).expect("lowers");
+        let unaware = lower(
+            &spec,
+            &schedule,
+            &levels,
+            &delays,
+            &[],
+            &builtins_bound(&spec),
+        )
+        .expect("lowers");
         if divergence_in_runtime_order(&spec, &schedule, &delays, &unaware, &lanes).is_some() {
             unaware_divergences += 1;
         }
@@ -1731,9 +1972,17 @@ fn cohort_chain_merging_preserves_dataflow_on_random_graphs() {
         }
         chained_graphs += 1;
 
-        let program = lower(&spec, &schedule, &levels, &delays, &banks).expect("lowers");
+        let program = lower(
+            &spec,
+            &schedule,
+            &levels,
+            &delays,
+            &banks,
+            &builtins_bound(&spec),
+        )
+        .expect("lowers");
         let lanes = member_lanes(&spec, &banks);
-        assert_program_matches_spec(&spec, &schedule, &delays, &program);
+        assert_program_matches_spec(&spec, &schedule, &delays, &builtins_bound(&spec), &program);
         assert_eq!(
             divergence_in_runtime_order(&spec, &schedule, &delays, &program, &lanes),
             None,
@@ -1767,8 +2016,15 @@ fn cohort_chain_merging_preserves_dataflow_on_random_graphs() {
             })
             .filter(|members: &Vec<_>| members.len() > 1)
             .collect();
-        let route_program =
-            lower(&spec, &schedule, &levels, &delays, &matrix_banks).expect("route lowering");
+        let route_program = lower(
+            &spec,
+            &schedule,
+            &levels,
+            &delays,
+            &matrix_banks,
+            &builtins_bound(&spec),
+        )
+        .expect("route lowering");
         let route_lanes = member_lanes(&spec, &matrix_banks);
         let route_runs = runs_in_runtime_order(&route_program, &route_lanes);
         let routes = route_constants(&spec);
@@ -1791,13 +2047,28 @@ fn cohort_chain_merging_preserves_dataflow_on_random_graphs() {
         );
 
         // The narrow-window arm: every bank's own span, and no union across banks.
-        let narrow = lower_with_per_bank_windows(&spec, &schedule, &levels, &delays, &banks)
-            .expect("lowers");
+        let narrow = lower_with_per_bank_windows(
+            &spec,
+            &schedule,
+            &levels,
+            &delays,
+            &banks,
+            &builtins_bound(&spec),
+        )
+        .expect("lowers");
         if divergence_in_runtime_order(&spec, &schedule, &delays, &narrow, &lanes).is_some() {
             narrow_divergences += 1;
         }
 
-        let unaware = lower(&spec, &schedule, &levels, &delays, &[]).expect("lowers");
+        let unaware = lower(
+            &spec,
+            &schedule,
+            &levels,
+            &delays,
+            &[],
+            &builtins_bound(&spec),
+        )
+        .expect("lowers");
         if divergence_in_runtime_order(&spec, &schedule, &delays, &unaware, &lanes).is_some() {
             unaware_divergences += 1;
         }

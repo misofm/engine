@@ -662,7 +662,7 @@ if [[ -n "$counted" ]]; then
     }
 fi
 failure_reason=record_count
-[[ "$(wc -l <"$raw")" == 46 ]] || exit 1
+[[ "$(wc -l <"$raw")" == 48 ]] || exit 1
 failure_reason=validation_failed
 jq -s -e -L scripts -f scripts/console-benchmark-validator.jq "$raw" >/dev/null || exit 1
 failure_reason=accepted_promotion_failed
