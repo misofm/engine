@@ -42,7 +42,7 @@ pub use runtime::{
 #[doc(hidden)]
 pub use observation_activation::test_only_observation_transition_entries;
 
-/// Phase-level timing of [`GraphExecutor::render`] for the plumbing-floor diagnosis
+/// Phase-level timing of `GraphExecutor::render` for the plumbing-floor diagnosis
 /// (`.github/ISSUE_SPECS/DRAFTS/PLAN.md`). Test builds only: nothing here exists in a production
 /// build, and a `test-support` build that never calls [`test_only_phase_profile::enable`] pays one
 /// thread-local read per block and nothing per unit.
