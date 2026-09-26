@@ -294,3 +294,30 @@ Four statements of "the driver-fed row renders the bound-feed row's bits":
    (b) `scripts/check-realtime-policy.sh`'s floors (12 files, 41 regions) could be raised to 16 and
    54; they are `>=` floors and pass as they are. (c) `docs/rulings/effect-floor-accounting.md`
    does not yet name the ring row; its floor basis reuses the `plumbing` inventory string.
+
+## Sol attempt 1 verdict: PASS
+
+Adversarial review (Fable 5.1, high effort) against `ed1ce679` and `6081b122` on base
+`3c93469d`. No blocking findings. Verified: `frozen_track_source` is the body of the old
+`source_binding` arm moved verbatim, and a temporary release test showed every one of the sixteen
+standing rows' 1000-block digests equal to the sealed `copy-removal` record byte for byte, with the
+new row equal to the plumbing row's sealed digest; the driver copies and lends the same claim
+words, its `begin_block` is a frame check, and the impl sits inside a realtime-policy region; the
+`source_feed` field is required and pinned per kind on both session shapes, the aggregate expects
+48 records with the two plumbing digests pinned equal, and the shifted index cases in the
+validator suite target the records they name; nothing re-validates sealed `artifacts/` with the
+live validators; deviation 1 is justified (the wasm console guest and runner address `WORKLOADS`
+by index and its validator expects sixteen kinds; both stay green) and deviation 2 is exact
+(`into_bound_with_source_set` is validation plus builtin bindings plus `bind_with_source_set`).
+Four mutations re-applied and reverted, each red on the named tests. The bench-policy failure on
+`tools/console-workload/tests/plumbing_profile.rs:41` predates this issue (it is the cycle's
+diagnosis instrument on the base commit).
+
+Two batch-boundary items recorded for the coordinator, outside this issue's paths: the runner pins
+the record count at 46 (`scripts/run-console-benchmark.sh:648`,
+`scripts/operator/preflight-console-benchmark.sh:153`) and must move to 48 with the arm
+registration, or every capture fails on `record_count` before the validator; and the instrument's
+local `fn percentile` must be replaced by `bench_support::stats` (not renamed, which would dodge
+the rule) before `check-bench-policy.sh` passes. Nits, no change: the floor ruling does not yet
+name the ring row; the driver reports 64 KiB as overhead that nothing checks against a ceiling.
+Not re-verified: the runner end to end, the workspace-wide clippy.
