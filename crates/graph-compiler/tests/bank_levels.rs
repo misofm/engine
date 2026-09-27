@@ -47,15 +47,15 @@ use std::collections::{BTreeMap, BTreeSet};
 const INTENDED: &str =
     include_str!("../../../fixtures/session/v1/console-sixty-four-track-intended.json");
 
-/// The same desk with every track mono-mapped and every strip symmetric, so the armed mono
-/// collapse has cohorts to fire on. The intended fixture's strips are asymmetric by design, and
-/// a structural witness that declines everywhere would make an armed leg compare nothing.
+/// The same desk with every track mono-mapped and every strip symmetric. The armed mono collapse
+/// fires on it, so the armed leg can see a collapse that moves a bit. On a mono-mapped desk with
+/// the intended fixture's asymmetric strips, the arming must instead decline every chain that does
+/// not gather the track input (#970); the probe keeps both desks for that reason.
 const MONO: &str = include_str!("../../../fixtures/session/v1/console-sixty-four-track-mono.json");
 
-/// The #970 verification probe's reduced reproducer, kept byte for byte where the issue records
-/// it: eight mono-mapped tracks, `t0` running `simd1: [eq, comp]` beside seven running `[comp]`.
-const REDUCED_MONO: &str =
-    include_str!("../../../docs/handoffs/bug-966-2026-09-27/reduced-nobus-from-970-verify.json");
+/// The #970 verification probe's reduced reproducer, kept byte for byte: eight mono-mapped tracks,
+/// `t0` running `simd1: [eq, comp]` beside seven running `[comp]`.
+const REDUCED_MONO: &str = include_str!("data/reduced-nobus-from-970-verify.json");
 
 /// Every width a host compiles for: the scalar oracle, the browser and mobile width, and native.
 pub const WIDTHS: [Backend; 3] = [Backend::Scalar, Backend::Simd4, Backend::Simd8];
@@ -555,8 +555,9 @@ pub enum Shape {
 
 /// One randomized, realistic console session: 1 to 40 tracks or a 64-track desk; a common strip
 /// per rack with dropped and inserted slots, or free per-track racks; mono tracks, and all-mono
-/// desks with symmetric strips; per-side input delays; bypassed effects; compressor and gate
-/// sidechains from earlier tracks at every tap; and sends from every tap into up to two submixes.
+/// desks with asymmetric or symmetric strips; per-side input delays; bypassed effects; compressor
+/// and gate sidechains from earlier tracks at every tap; and sends from every tap into up to two
+/// submixes.
 pub fn generate(seed: u64) -> (SessionModel, Shape) {
     let mut rng = Rng::new(seed);
     let tracks = match rng.below(20) {
@@ -572,11 +573,15 @@ pub fn generate(seed: u64) -> (SessionModel, Shape) {
         }
     };
     let mono = [0, 0, 300, 1000][rng.below(4) as usize];
-    // An all-mono desk takes the symmetric mono strip, so the armed collapse can fire on it; the
-    // mixed and stereo desks keep the intended fixture's asymmetric one. Parsing draws nothing
-    // from `rng`, so the fixture choice moves no other draw.
+    // An all-mono desk on an odd seed takes the symmetric mono strip, and every other desk the
+    // intended fixture's asymmetric one. The armed leg needs both. On the symmetric strip the
+    // collapse fires, so a wrong collapse is visible. On the asymmetric strip only chains that
+    // gather the track input may arm (#970), and a later chain the arming wrongly admitted would
+    // copy a left plane over a right one that an asymmetric stage upstream made differ. The
+    // parity draws nothing from `rng`, so the choice moves no other draw.
+    let symmetric = mono == 1000 && seed % 2 == 1;
     let base =
-        parse_session_json(if mono == 1000 { MONO } else { INTENDED }).expect("console fixture");
+        parse_session_json(if symmetric { MONO } else { INTENDED }).expect("console fixture");
     let templates = Templates::of(&base);
     let strip = base.tracks[0].clone();
     let mut model = base;
@@ -1068,8 +1073,9 @@ fn probe_seed(seed: u64, blocks: u64, render_all: bool) -> SeedReport {
 /// misaligned slot at either SIMD width -- the only plans the fix changes -- is also rendered at
 /// all three, unarmed, and at both SIMD widths armed as a host arms it, and compared bit for bit
 /// with the scalar render. The audible count is asserted, because a comparison of two silent
-/// renders proves nothing, and so is the count of seeds whose armed collapse fired, because an
-/// armed leg that never collapses compares nothing either.
+/// renders proves nothing. The armed collapse must also fire on some rendered seed. The generator
+/// keeps symmetric all-mono desks, where it fires and a wrong collapse would move a bit, and
+/// asymmetric ones, where it must decline every chain that does not gather the track input (#970).
 ///
 /// The probe must also *reach* the defect, or it proves nothing: the count of seeds with a
 /// misaligned planned slot is asserted to be nonzero at both SIMD widths. That count is a property
