@@ -518,3 +518,30 @@ made private. Same host and settings as attempt 1; `target/` deleted afterwards.
 6. **Gates:** `cargo fmt --all --check`; `cargo clippy --locked --workspace --all-targets
    --all-features -- -D warnings` (exit 0); `cargo test --locked -p graph` (108/1/1/1) and
    `--features test-support` (108/1/1/8), all green.
+
+## Sol follow-up check
+
+On `9c6c97b0`, which changes tests only. I ran it in this worktree and in a detached scratch
+worktree, both now deleted along with their `target/`. Verdict: the follow-up is sound, and the
+PASS stands.
+
+1. **The dead-claim test now catches its own hazard.** Each mutation below was applied alone.
+   - The gather ignores `source_lanes` (957-5): the test goes RED at the bits (`1 frames, block 0
+     (Full): the master is the copy arm's`). #918's gate 1 goes red too.
+   - My own leak, limited to the dead claim: an unmarked lane is served the table's claim only when
+     that claim is 6 and the table names seven claims. The dead-claim test goes RED at the bits,
+     and it is the only test that does.
+   - Both failures come after the new "a later bank gathers the dead slot, unmarked" check has
+     passed.
+2. **The fake changes weaken nothing else.** The cap (`min(frames - 1)`) and the one-frame noise
+   word change `PlayedSource` only below ten frames.
+   - Its only users are #918's gate 1 (13 and 16 frames), the ported #936 gates and the dead-claim
+     test. rt10 has its own fake.
+   - #918's `SOURCE_SHAPES` pins are untouched by the diff and green.
+   - I spliced the head's fixture into `64b155d0`. There #918's gate 1 passes, and my own recorder
+     reproduces every new pin: `0x59ac_7ce2_0913_f0e1`, `0x57be_32ec_07e5_88cd` (both observed
+     shapes), `0x5669_2e20_31f4_30b1`, and `0x6813_ae30_0a55_754d` for both dead-claim arms, in
+     place and copy alike.
+3. **The graph tests pass.** `cargo test -p graph` gives 108/1/1/1, and with `--features
+   test-support` 108/1/1/8, all green. `fmt --check` and `clippy -p graph --all-targets
+   --all-features -D warnings` exit 0.
