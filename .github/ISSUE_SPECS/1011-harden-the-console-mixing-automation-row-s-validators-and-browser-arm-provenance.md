@@ -184,3 +184,99 @@ was held 23:00:29-23:00:39, with load average 15.5 at the start and 18.1 at the 
 * The sweep scripts are scratch and not committed. Their outcome is above.
 * The browser records carry no percentile of the warmup launch.
 * Round two's slowdown is host load (18-19). Its digests agree with round one's.
+
+## Sol attempt 1 verdict: PASS
+
+Verifier: Sol, 2026-09-27, on `e767bbf4` merged onto the current batch head `9693f577` (clean). That
+head now carries #1004, #1012, #995, #1002 and #1009. Host EPYC 7313P, rustc 1.97.1, Node v22.23.2,
+`CARGO_INCREMENTAL=0`, a scratch target.
+
+**What reproduces on the merged tree.**
+
+* `cargo fmt --check` and `cargo clippy --locked --workspace --all-targets -- -D warnings` are clean.
+* `cargo test -p console-workload -p bench` passes.
+* `test-console-benchmark.sh` passes.
+* The eight policy scripts pass, including the artifact-leak check, and so does `cargo check` of the
+  wasm guest.
+* The aggregate validator accepts `after-1003` and `after-1004`. The web validator accepts
+  `after-1011`.
+* `bench console --preflight` prints the seven `after-1003` preflight digests, now with every
+  cohort collapsed on every arm (#1004).
+* `prepare` built `a383a188…` (the batch's module, with #1004) and recorded the merge commit.
+
+**Gate 1: every rule I deleted turns the suite red.** Each rule was deleted alone, on a copy of
+`scripts/`, and compile-checked first:
+
+* my three #1003 rules, with the aggregate's two preflight fields taken separately;
+* thirteen other mixing-record rules;
+* ten web-validator rules, among them both cross-round rules, `prepared == candidate`, the pin
+  honesty rule, rounds `{1,2}` and both feed phases.
+
+All 29 are red, each by the mutation named for it. The six rules the evidence calls implied stay
+green when deleted, and each is implied:
+
+* **`.record` pin.** `mixing_automation_record_valid` is reached only through the dispatcher's
+  `.record` branch.
+* **The two object guards.** Without them, `keys_unsorted` returns indices for an array and errors
+  on a scalar, so the record is still refused.
+* **The aggregate's count of two.** Fifty records minus the 48 whose counts are pinned for the
+  other seven record types leaves two.
+* **The aggregate's kind for the row.** The per-record rule pins it.
+* **`quiet`'s cross-round counters.** Per record, `quiet[0] = quiet[1] × 1064`, and `quiet[1]`
+  equals `restated[1]`, which agrees across rounds.
+
+The multi-field mutations are single-claim: they keep the dependent counts consistent, so that only
+the target rule refuses them. The sweep confirms it.
+
+**Gate 2.** My limiter-at-base − 0.5 mutation now fails only
+`restated_pushes_exactly_the_held_bases`. The comment is narrowed as asked.
+
+**Gate 3.**
+
+* **Rounds agree on digests and provenance only, never on timings.** Round 2's 1.5× slowdown under
+  load is therefore accepted, correctly.
+* **`run`'s refusals** each exited 1 before anything was launched or created:
+  * a provenance commit other than HEAD;
+  * a changed module;
+  * a changed `controls.json`;
+  * a missing `provenance.json`;
+  * a provenance record without the module digest;
+  * a modified tracked file.
+* **An existing record** is still refused at the start.
+* **Disclosure.** I launched one full `run` outside `timing.lock` by mistake: about 10 s on CPU 31,
+  at load 7.4. Its timings are discarded. Its two rounds reproduce `after-1011`'s digests on the
+  merged module, and the validator accepted them. The protocol therefore works end to end with
+  #1004 in.
+
+**Gate 4.** No rendered bit moved (above). `source_block`'s constants are literal-identical.
+
+### Findings
+
+1. **LOW-MEDIUM: a post-run validator refusal destroys the evidence.**
+   * **What happens.** The rounds are written only to a `mktemp -d` that the EXIT trap removes.
+     When `web-mixing-automation-validator.jq` refuses them, the runner prints one generic line and
+     exits 1. It deletes both measured records and writes no disposition.
+   * **Why it matters.** AGENTS.md asks that the raw output be preserved and the failure recorded.
+     The console runner keeps `raw.jsonl` and a disposition.
+   * **Failure scenario.** The two V8 rounds disagree on a digest, which is the one failure the new
+     agreement rule exists to catch. The one authorised run is consumed, and nothing says which
+     digest differed.
+   * **History.** #1003's single `jq` check behaved the same way, but #1011 made the post-run check
+     the protocol's main gate.
+   * **Fix.** Keep the rounds as `web-mixing-automation.raw.jsonl` (or keep `$raw` and print its
+     path) on refusal.
+2. **LOW: `set -o noclobber` is now dead code.**
+   * **What changed.** The record is written with `cp`, which `noclobber` does not govern. #1003
+     wrote it with a redirect, which refused an existing file at write time.
+   * **Why the impact is small.** The stderr log is created before the rounds and checked at the
+     start, so it still refuses a concurrent run in all but a millisecond window.
+   * **Fix.** Write `cat -- "$raw/rounds.jsonl" >"$record"` under `noclobber`.
+3. **LOW: provenance guards against accidents, not against tampering.**
+   * **Re-forged provenance.** A `provenance.json` re-forged to match a garbage module passes, and
+     `node` is launched on it.
+   * **No post-run check.** `run` does not re-check HEAD and the clean tree after its three
+     launches, although each launch re-reads the tracked harness, fixture and ABI layout.
+     `prepare` does re-check.
+   * **Fix.** Repeat `require_clean_tree` and the HEAD comparison after the rounds.
+
+None of these weakens what the row or its gates measure. All three are runner follow-ups.
