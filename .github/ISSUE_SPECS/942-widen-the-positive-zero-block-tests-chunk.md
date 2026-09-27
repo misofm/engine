@@ -261,3 +261,193 @@ Lengths ran over 0..=2,100. The patterns were `-0.0`, the smallest subnormal, a 
 `1.0`. Each was placed at the first word, the last word, every 32-word boundary (the last word of the
 head, the first word of each wide chunk and the last word of each wide chunk), and two seeded
 random positions. Every block agreed.
+
+## Attempt 3 evidence
+
+**Verdict (implementer): every corrected gate passes, with one deviation for the verifier.** The
+predicate carries `#[inline(always)]` where it had `#[inline]`. Without it, the head+128 shape
+fails the live-block bound in the shipped wasm artifact; the reason is set out below.
+
+### Change
+
+`crates/effect-runtime/src/bank.rs` only:
+
+- `block_is_positive_zero` folds the first `min(32, len)` words and returns `false` on any set bit.
+  It then folds the rest in `chunks(128)` with the same early exit. The fold is today's
+  `bits |= value.to_bits()`, moved unchanged into a private `#[inline] fn or_bits`. There is no
+  `unsafe`, no intrinsic and no `chunks_exact`.
+- **Deviation:** the predicate's attribute changes from `#[inline]` to `#[inline(always)]`.
+- The doc comment updates its chunk-size sentence and adds three lines explaining the attribute.
+- A `#[cfg(test)] mod tests` adds gate 1's property test.
+
+### Why `#[inline(always)]` (found under gate 5)
+
+With plain `#[inline]`, the release wasm AudioWorklet artifact (the build script's own cargo line)
+stops inlining the two-loop predicate. It emits three outlined copies of
+`effect_runtime::bank::block_is_positive_zero`. The limiter's copy is called from 7 sites, the
+compressor's from 4 and the parametric EQ's from 4. Today's one-loop form is inlined at every site;
+the base artifact has no such symbol. The attempt-2 harness had put both arms behind
+`#[inline(never)]`, so it could not see this. Measuring each form as it ships (Node 22, per call):
+
+| live 512-word block, wasm | today inlined | head+128 inlined | head+128 outlined |
+|---|---:|---:|---:|
+| ns per call | 4.04 | 4.04 | 5.93 |
+
+The shipped plain-`#[inline]` form is therefore +1.89 ns on a live block, against a 1 ns bound.
+`#[inline(always)]` removes all three outlined copies; the rebuilt artifact contains no
+`block_is_positive_zero` symbol. The live cost then equals today's.
+
+### Gate 3 timing (descriptive)
+
+The throwaway harness sat in a scratch directory and was deleted afterwards. It used the release
+profile (fat LTO, `codegen-units = 1`, `panic = "abort"`). Native was built with
+`+avx2,+fma` and wasm with `+simd128`. It ran pinned with `taskset` on an AMD EPYC 7313P
+(Zen 3, TSC at 3.0 GHz). x86 values are the minimum of 40 x 2,000 calls; wasm values are the
+minimum of 30 x 20,000 calls in Node v22.23.2. Arms rotated within each round.
+
+The arms were:
+
+- `today`: a verbatim `chunks(32)` replica.
+- `chunks(128)`: attempt 1's shape.
+- `head+128`: the real crate function through a path dependency.
+- *outlined*: the arm sits behind an `#[inline(never)]` wrapper.
+- *inlined*: the arm is folded into the timing loop, which is how the shipped code calls it.
+
+**Production form (inlined), the gate:**
+
+| input | x86 today | x86 head+128 | wasm today | wasm head+128 |
+|---|---:|---:|---:|---:|
+| 128 silent | 24.2 tsc (8.09 ns) | 16.1 tsc (5.39 ns) | 15.08 ns | 10.78 ns |
+| 512 silent | 91.9 tsc (30.71 ns) | 42.7 tsc (14.28 ns) | 57.25 ns | 35.05 ns |
+| 1,024 silent | 195.9 tsc (65.45 ns) | 78.2 tsc (26.14 ns) | 118.3 ns | 68.1 ns |
+| live (512 or 1,024) | 7.3 tsc (2.44 ns) | 7.2-7.3 tsc (2.44 ns) | 4.04 ns | 4.04 ns |
+
+**Outlined, all three shapes (the attempt 1 and 2 method):**
+
+| input | x86 today | x86 `chunks(128)` | x86 head+128 | wasm today | wasm `chunks(128)` | wasm head+128 |
+|---|---:|---:|---:|---:|---:|---:|
+| 128 silent | 26.6-29.0 | 14.5 | 19.3-20.9 | 16.43 | 11.32 | 12.66 |
+| 512 silent | 96.8-99.2 | 45.9-46.7 | 49.1-50.8 | 58.6 | 37.98 | 37.45-37.48 |
+| 1,024 silent | 200.9-204.8 | 87.9 | 90.3-92.7 | 119.4-119.9 | 73.7-73.8 | 71.2-71.5 |
+| live | 10.5-12.1 | 14.5 | 9.7-10.5 | 5.39 | 11.05 | 5.93 |
+
+In the outlined table, x86 values are in tsc and wasm values in ns.
+
+**Corrected gate 3, production form:**
+
+| bound | result |
+|---|---|
+| wasm 512 silent at least 25 % faster | pass: 38.8 % |
+| wasm 1,024 silent at least 25 % faster | pass: 42.4 % |
+| x86 1,024 silent at least 25 % faster | pass: 60.1 % |
+| live at most 1 ns slower | pass: x86 +0.0 ns, wasm +0.00 ns |
+| 128 silent no slower | pass: x86 33 % faster, wasm 28.5 % faster |
+
+The outlined-both method also passes every bound: wasm 512 at 36.1 %, 1,024 at 40.2 % and live at
++0.54 ns; x86 1,024 at 54.7 %.
+
+The attempt-2 finding stands: at 128 words the head+128 shape is 22.9 % faster on wasm in the
+outlined method and 28.5 % inlined.
+
+### Gate 3 disassembly
+
+- **x86-64, harness `pz_crate`, final source.** The head is 2 x `vpor ymm` per 16-word step
+  followed by one reduction. The wide loop is 4 x `vpor ymm` per 32-word step, with one
+  `vextracti128`/`vpshufd`/`vmovd` reduction per 128-word chunk and none inside the step:
+  ```
+  vpor ymm0,ymm0,YMMWORD PTR [rax+r10*4]
+  vpor ymm1,ymm1,YMMWORD PTR [rax+r10*4+0x20]
+  vpor ymm2,ymm2,YMMWORD PTR [rax+r10*4+0x40]
+  vpor ymm3,ymm3,YMMWORD PTR [rax+r10*4+0x60]
+  add  r10,0x20
+  ...
+  vextracti128 xmm1,ymm0,0x1        ; once per chunk
+  ```
+  Scalar `or r32, DWORD` appears twice, once in each remainder loop.
+- **wasm32 simd128 (`wasm-objdump -d`, wabt 1.0.34).**
+  - In the harness, each loop is `v128.load 2 0` + `v128.or` per 4 words, followed by one
+    `i8x16.shuffle`/`v128.or`/`i32x4.extract_lane` reduction. `i32.or` appears twice, once in each
+    remainder loop, with no chain.
+  - In the shipped artifact (`inline(always)`), the compressor bank's `render` carries the inlined
+    wide loop (`i32.const 128` bound, `v128.load 2 0`, `v128.or`).
+  - The `min(len, 128)` chunk-bound sequences rise from 13 in the base artifact to 46.
+  - `v128.or` rises from 636 to 735 and `i32.or` from 2,031 to 2,064, the added remainder loops.
+  - The longest run of consecutive `i32.or` is 39 in both base and change, and that run is not
+    the predicate.
+
+### Gate 1
+
+`bank::tests::the_widened_chunk_agrees_with_the_naive_reference` runs 221,581 blocks.
+
+- **Lengths:** every length 0..=2,100.
+- **Blocks:** the all-zero block at each length, plus one nonzero word from five patterns: `-0.0`,
+  the smallest subnormal, a quiet NaN, an all-ones NaN and `1.0`.
+- **Positions:** the first word, the last word, the last word of the head, the first and last
+  word of every 128-word chunk (the last chunk is the remainder), and one xorshift-seeded word per
+  length.
+
+The test compares every block against `io.iter().all(|v| v.to_bits() == 0)`. It passed.
+
+Each red mutation was checked with `cargo test -p effect-runtime --lib`:
+
+| mutation | first failure |
+|---|---|
+| sign bit masked out of the fold | len 1, word 0, `-0.0` |
+| `chunks_exact(128)` in the wide loop | len 33, word 32 |
+| return after the head | len 33, word 32 |
+| head's early exit dropped | len 1, word 0 |
+
+The throwaway harness separately agreed on 578,841 blocks across all three shapes.
+
+### Gate 2
+
+`cargo test --locked -p effect-runtime -p parametric-eq -p compressor -p true-peak-limiter`: 312
+passed, 0 failed, 5 ignored, across 54 suites. The passing tests include:
+
+- `a_negative_zero_input_block_is_not_treated_as_silence` in parametric-eq, compressor and the
+  limiter.
+- `a_settled_silent_bank_renders_exactly_the_never_fast_path` (parametric-eq) and
+  `a_settled_silent_bank_renders_exactly_the_bank_that_never_fast_paths` (compressor).
+- The limiter's silent-rest tests: `a_settled_silent_limiter_renders_exactly_the_never_fast_path`
+  and `a_limiter_still_releasing_through_the_silence_is_never_frozen`.
+- `a_detector_still_releasing_through_the_silence_is_never_frozen`.
+
+### Gate 4: digests
+
+A throwaway test, deleted and not committed, rendered all 16 `WORKLOADS` plus
+`DRIVER_FED_WORKLOADS` (`sixty_four_track_plumbing_ring`). Each ran 64 blocks through
+`SessionRuntime::render` + `hash_output`. The base commit and the final change were compared in
+both the dev and the release profile. All 17 digests are identical in every comparison, and the
+release digests equal the dev digests. `sixty_four_track_plumbing_only` equals the digest pinned
+in `chain_shape.rs`, `57535244...f800`.
+
+These digests are a non-regression check, not a discriminator. The "return after the head"
+mutation also left all 17 unchanged, because no workload has a block that is silent for its first
+32 words and then live. Gate 1 is the discriminating test.
+
+### Gate 5
+
+The build script's cargo line was used:
+`RUSTFLAGS="-C target-feature=+simd128 -C strip=debuginfo <remap>" cargo build --locked --release --target wasm32-unknown-unknown -p host-web`.
+It built into a scratch target directory with no repin, and `wasm-objdump -d` was piped into
+`scripts/check-web-audioworklet-callgraph.py` with the four invocations from
+`check-web-audioworklet.sh`. Every check passes on the final artifact. The base artifact,
+plain `#[inline]` and `inline(always)` all give identical numbers:
+
+| check | result |
+|---|---|
+| `--callgraph miso_engine_web_v1_render` | closure 8, traps 5 |
+| `--kernel-shape` | f32x4 arithmetic 11,719, 15 kernels, every roster entry ok |
+| `meter_poll` | closure 9, traps 2 |
+| `command_submit --allocation-only` | closure 39 |
+
+The artifact hash is not the pin, and neither is the base's (`0b6b0632...`): the branch carries
+other issues, and the pin is repinned at the batch boundary.
+
+### Gate 6
+
+`cargo fmt --all --check`, `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
+(178 crates checked) and `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps` are
+all clean. The four suites are as in gate 2. `cargo test --locked -p console-workload` gives 37
+passed, 0 failed and 2 ignored. `scripts/check-realtime-policy.sh` reports ok (55 marked regions
+in 16 files). All ran with `CARGO_INCREMENTAL=0`. The timed console runner was not run.
