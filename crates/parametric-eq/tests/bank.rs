@@ -1683,3 +1683,300 @@ fn admitted_blocks_render_the_base_bits_without_selects() {
         }
     }
 }
+
+/// Tracks in the skewed-pass scenario: one eight-lane bank, or two four-lane banks.
+const SKEW_TRACKS: usize = 8;
+/// Blocks in the skewed-pass scenario.
+const SKEW_BLOCKS: usize = 32;
+
+/// The configurations of [`two_and_four_live_sections_render_the_base_bits`], named by their live
+/// physical sections; every one of them runs its stationary cascade in depth-two passes only.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SkewShape {
+    /// Two live general bands: one pair.
+    TwoGeneral,
+    /// The two dedicated cuts, each live on some lanes and dry on the others: one pair of cuts.
+    TwoCutsDry,
+    /// Four live general bands: two pairs.
+    FourGeneral,
+    /// The HPF and the LPF on some lanes, and two general bands: two pairs, dry lanes in both.
+    FourWithDryCuts,
+    /// All six sections live, the cuts on some lanes only: three masked pairs on every block.
+    SixWithDryCuts,
+    /// All six sections live on every lane: three masked pairs on every block.
+    SixEverywhere,
+}
+
+const SKEW_SHAPES: [SkewShape; 6] = [
+    SkewShape::TwoGeneral,
+    SkewShape::TwoCutsDry,
+    SkewShape::FourGeneral,
+    SkewShape::FourWithDryCuts,
+    SkewShape::SixWithDryCuts,
+    SkewShape::SixEverywhere,
+];
+
+/// One track's prepare-time values for `shape`: every section is set at prepare time.
+fn skew_configuration(
+    shape: SkewShape,
+    track: usize,
+) -> Vec<effect_contract::InitialParameterValue> {
+    use ParameterChannel::{Left, Right};
+    let mut values = values();
+    let kinds = [
+        EqBandKind::LowShelf,
+        EqBandKind::Bell,
+        EqBandKind::Notch,
+        EqBandKind::HighShelf,
+    ];
+    let bands: &[usize] = match shape {
+        SkewShape::TwoGeneral => &[0, 2],
+        SkewShape::TwoCutsDry => &[],
+        SkewShape::FourWithDryCuts => &[1, 2],
+        SkewShape::FourGeneral | SkewShape::SixWithDryCuts | SkewShape::SixEverywhere => {
+            &[0, 1, 2, 3]
+        }
+    };
+    for channel in [Left, Right] {
+        for &band in bands {
+            odd_band(&mut values, band, kinds[band], channel, track);
+        }
+    }
+    // Which channels carry each cut: everywhere, or a per-track pattern that leaves every
+    // four-lane group with both dry and live lanes on both channels.
+    let (hpf, lpf): (&[ParameterChannel], &[ParameterChannel]) = match shape {
+        SkewShape::TwoGeneral | SkewShape::FourGeneral => (&[], &[]),
+        SkewShape::SixEverywhere => (&[Left, Right], &[Left, Right]),
+        SkewShape::TwoCutsDry | SkewShape::FourWithDryCuts | SkewShape::SixWithDryCuts => {
+            match track % 4 {
+                0 => (&[Left], &[Right]),
+                1 => (&[Right], &[Left, Right]),
+                2 => (&[Left, Right], &[]),
+                _ => (&[], &[Left]),
+            }
+        }
+    };
+    for &channel in hpf {
+        odd_cut(&mut values, HPF_PARAMETERS, channel, track);
+    }
+    for &channel in lpf {
+        odd_cut(&mut values, LPF_PARAMETERS, channel, track);
+    }
+    values
+}
+
+/// Frames in block `block`: blocks `8k + 1` run 1, 2, 3 and 37 frames (the skewed pass's
+/// fallback, its shortest pipelines, and a ragged block), every fifth block 37, the rest 128.
+fn skew_frames(block: usize) -> usize {
+    if block % 8 == 1 {
+        [1, 2, 3, 37][block / 8]
+    } else if block % 5 == 4 {
+        37
+    } else {
+        128
+    }
+}
+
+/// One hostile input word for the skewed-pass scenario, [`select_word`]'s families under its own
+/// seed: `+0.0`, subnormals of either sign and normals in `2^-24..2^26`, with one `-0.0` on track
+/// `2k`, plane `k mod 2`, at block `8k + 3`, and one non-finite word on tracks 0 and 4 of plane
+/// `k mod 2` at block `8k + 6`.
+fn skew_word(block: usize, frame: usize, track: usize, channel: usize) -> f32 {
+    let frames = skew_frames(block);
+    let k = block / 8;
+    if block % 8 == 3 && frame == (block * 7) % frames && track == 2 * k && channel == k % 2 {
+        return -0.0;
+    }
+    if block % 8 == 6
+        && frame == (block * 13) % frames
+        && track.is_multiple_of(4)
+        && channel == k % 2
+    {
+        return [f32::INFINITY, f32::NAN, f32::NEG_INFINITY, f32::INFINITY][k];
+    }
+    let mut state = ((block as u64) << 40)
+        ^ ((frame as u64) << 20)
+        ^ ((track as u64) << 4)
+        ^ channel as u64
+        ^ 0x0978_0978_0978_0978;
+    let word = support::splitmix64(&mut state);
+    let sign = ((word >> 63) as u32) << 31;
+    match word & 15 {
+        0 => 0.0,
+        1 => f32::from_bits(sign | (((word >> 8) as u32 & 0x007f_ffff) | 1)),
+        _ => {
+            let exponent = ((word >> 8) % 50) as u32 + 127 - 24;
+            let mantissa = (word >> 16) as u32 & 0x007f_ffff;
+            f32::from_bits(sign | (exponent << 23) | mantissa)
+        }
+    }
+}
+
+/// The scalar leg of the skewed-pass scenario.
+fn skew_scalar_digest() -> String {
+    let factory = ParametricEqFactory;
+    let mut hasher = Sha256::new();
+    for shape in SKEW_SHAPES {
+        let mut effects: Vec<_> = (0..SKEW_TRACKS)
+            .map(|track| {
+                factory
+                    .prepare(request(&skew_configuration(shape, track), false))
+                    .expect("scalar prepare")
+            })
+            .collect();
+        let mut position = 0_u64;
+        for block in 0..SKEW_BLOCKS {
+            let frames = skew_frames(block);
+            for (track, effect) in effects.iter_mut().enumerate() {
+                let mut left: Vec<f32> = (0..frames)
+                    .map(|frame| skew_word(block, frame, track, 0))
+                    .collect();
+                let mut right: Vec<f32> = (0..frames)
+                    .map(|frame| skew_word(block, frame, track, 1))
+                    .collect();
+                let report = effect.process(
+                    EffectProcessBlock::new(&mut left, &mut right, None, position, &[], 128)
+                        .expect("scalar block"),
+                );
+                fold_words(&mut hasher, left.into_iter().chain(right));
+                fold_report(&mut hasher, &report);
+                fold_payload(&mut hasher, &snapshot(effect.as_ref()));
+            }
+            position += frames as u64;
+        }
+    }
+    hex(&hasher.finalize())
+}
+
+/// The bank legs of the skewed-pass scenario, folded per track in track order so the digest does
+/// not depend on the bank width. `mono` renders the collapsed body over the left plane.
+fn skew_bank_digest(width: BankWidth, backend: Backend, mono: bool) -> String {
+    let lanes = width.lanes() as usize;
+    assert_eq!(SKEW_TRACKS % lanes, 0, "the scenario fills whole banks");
+    let factory = ParametricEqFactory;
+    let mut hasher = Sha256::new();
+    for shape in SKEW_SHAPES {
+        let configurations: Vec<_> = (0..SKEW_TRACKS)
+            .map(|track| skew_configuration(shape, track))
+            .collect();
+        let mut banks: Vec<_> = configurations
+            .chunks(lanes)
+            .map(|group| {
+                let requests: Vec<_> = group
+                    .iter()
+                    .map(|initial| request(initial, false))
+                    .collect();
+                factory
+                    .bind_homogeneous_bank(PrepareEffectBankRequest {
+                        backend,
+                        width,
+                        requests: &requests,
+                    })
+                    .expect("valid bank request")
+                    .expect("the native width must bind")
+            })
+            .collect();
+        let offsets = vec![0_u32; lanes + 1];
+        let mut position = 0_u64;
+        for block in 0..SKEW_BLOCKS {
+            let frames = skew_frames(block);
+            for (group, bank) in banks.iter_mut().enumerate() {
+                let plane = |channel: usize| -> Vec<f32> {
+                    (0..frames * lanes)
+                        .map(|cell| {
+                            skew_word(block, cell / lanes, group * lanes + cell % lanes, channel)
+                        })
+                        .collect()
+                };
+                let mut left = plane(0);
+                let mut right = if mono {
+                    vec![f32::from_bits(0x7F7F_FFFF); frames * lanes]
+                } else {
+                    plane(1)
+                };
+                let process = EffectBankProcessBlock::new(
+                    &mut left,
+                    &mut right,
+                    None,
+                    frames as u32,
+                    width,
+                    position,
+                    &[],
+                    &offsets,
+                    128,
+                )
+                .expect("bank block");
+                let report = if mono {
+                    bank.process_bank_mono(process)
+                } else {
+                    bank.process_bank(process)
+                };
+                for lane in 0..lanes {
+                    let column = |plane: &[f32]| -> Vec<f32> {
+                        (0..frames)
+                            .map(|frame| plane[frame * lanes + lane])
+                            .collect()
+                    };
+                    if mono {
+                        fold_words(&mut hasher, column(&left).into_iter());
+                    } else {
+                        fold_words(&mut hasher, column(&left).into_iter().chain(column(&right)));
+                    }
+                    fold_report(&mut hasher, &report.reports[lane]);
+                    fold_payload(&mut hasher, &snapshot_bank(bank.as_ref(), lane as u32));
+                }
+            }
+            position += frames as u64;
+        }
+    }
+    hex(&hasher.finalize())
+}
+
+/// The digests [`two_and_four_live_sections_render_the_base_bits`] pins, recorded on the
+/// unmodified base of issue #978 (every depth-two pass in the interleaved schedule).
+const SKEW_DIGESTS: [(&str, &str); 3] = [
+    (
+        "scalar",
+        "9fdeb65d468cd6c5b5aed91c853d0dcb3fb4781dc723ecba223cf67926214dda",
+    ),
+    (
+        "bank",
+        "aad039b4e61453d750e40869a0c8b7aa59df2a6299eecfc6430faab0beebcc6a",
+    ),
+    (
+        "bank-mono",
+        "602d2f39e13d8431c2db10bb94caebeeb3f64d767261ec6c773c648079106ea4",
+    ),
+];
+
+/// Issue #978 gate 2: two, four and six live sections -- only depth-two passes, select-free on
+/// admitted blocks and masked on refused and all-live ones, with and without dry lanes -- render
+/// the bits they rendered before the passes were software-pipelined.
+///
+/// Through the public API only. The blocks run 1, 2, 3, 37 and 128 frames, so the skewed pass's
+/// fallback (one frame), its shortest pipelines and its steady state are all reached, dual and
+/// collapsed mono. The input is hostile (`+0.0`, subnormals, magnitudes `2^-24..2^26`) with `-0.0`
+/// and non-finite words on some blocks. Every output word, every report and every lane's state
+/// payload after every block is folded into one SHA-256 per leg, raw bits.
+#[test]
+fn two_and_four_live_sections_render_the_base_bits() {
+    let mut legs = vec![("scalar", skew_scalar_digest())];
+    if let Some((width, backend)) = native_bank() {
+        legs.push(("bank", skew_bank_digest(width, backend, false)));
+        legs.push(("bank-mono", skew_bank_digest(width, backend, true)));
+    }
+    for (leg, digest) in &legs {
+        println!("skewed-pass digest {leg} {digest}");
+    }
+    for (leg, digest) in &legs {
+        let pinned = SKEW_DIGESTS
+            .iter()
+            .find(|(name, _)| name == leg)
+            .map(|(_, pin)| *pin)
+            .expect("every leg is pinned");
+        assert_eq!(
+            digest, pinned,
+            "#978 gate 2: the {leg} leg moved a bit, a report or a state word"
+        );
+    }
+}

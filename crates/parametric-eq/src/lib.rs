@@ -59,7 +59,8 @@ use effect_runtime::state_payload as payload;
 use engine::{SampleRateHz, is_launch_sample_rate};
 use lane::kernels::{
     SvfCoef, SvfCoefStep, SvfState, svf_block, svf_block_ramped, svf_block_ramped_with_dry_mask,
-    svf_cascade_interleaved, svf_cascade_interleaved_with_dry_masks,
+    svf_cascade_interleaved, svf_cascade_interleaved_with_dry_masks, svf_cascade_skewed,
+    svf_cascade_skewed_with_dry_masks,
 };
 use lane::{Backend, Lane, Simd4, Simd8};
 
@@ -1653,8 +1654,8 @@ fn cascade_sections_mono<L: Lane, const W: usize>(
     (list, length)
 }
 
-/// [`interleave`] over one stream. Same kernel, same list, same tail rule, same select-free pairs
-/// on an admitted plan (issue #977), one channel of it.
+/// [`interleave`] over one stream. Same kernels (the skewed pair, issue #978), same list, same
+/// tail rule, same select-free pairs on an admitted plan (issue #977), one channel of it.
 ///
 /// This is a second instantiation of [`svf_cascade_interleaved`] -- at `CHANNELS = 1` where the
 /// dual path uses `2` -- and [`cascade_sections`] warns that a second arithmetic-carrying EQ kernel
@@ -1663,7 +1664,8 @@ fn cascade_sections_mono<L: Lane, const W: usize>(
 /// cascades inline into `process_bank_inner`. The compressor and the limiter did grow a second
 /// symbol each, and the roster names them. If a later change splits this one out, the fix is a
 /// roster row, not a looser pattern. The depth-one tail (issue #976) is two more instantiations,
-/// `<L, 1, 1>` with and without the dry select, inlined the same way.
+/// `<L, 1, 1>` with and without the dry select, and the pairs run [`svf_cascade_skewed`] and its
+/// dry-mask twin (issue #978), all inlined the same way.
 #[inline(always)]
 fn interleave_mono<L: Lane, const W: usize, const DEPTH: usize>(
     channel: &mut Channel<L, W>,
@@ -1686,13 +1688,13 @@ fn interleave_mono<L: Lane, const W: usize, const DEPTH: usize>(
         let mut state: [[SvfState<L>; DEPTH]; 1] =
             [core::array::from_fn(|k| channel.sections[at[k]].state)];
         if admitted {
-            svf_cascade_interleaved::<L, 1, DEPTH>([&mut *io], frames, &coefficients, &mut state);
+            svf_cascade_skewed::<L, 1, DEPTH>([&mut *io], frames, &coefficients, &mut state);
         } else {
             #[cfg(any(test, feature = "test-support"))]
             count_masked_pair_pass();
             let dry_masks: [[L::Mask; DEPTH]; 1] =
                 [core::array::from_fn(|k| channel.dry_mask(at[k]))];
-            svf_cascade_interleaved_with_dry_masks::<L, 1, DEPTH>(
+            svf_cascade_skewed_with_dry_masks::<L, 1, DEPTH>(
                 [&mut *io],
                 frames,
                 &coefficients,
@@ -1924,13 +1926,20 @@ fn cascade_sections<L: Lane, const W: usize>(
 /// The list runs as `length / DEPTH` whole passes and then, when the length is odd, one depth-one
 /// pass over its last entry, which is the last live section in cascade order.
 ///
+/// Each whole pass runs [`svf_cascade_skewed`] (or its dry-mask twin), the interleaved kernel
+/// scheduled as a software pipeline: in iteration `i` section `k` runs frame `i - k`, so the two
+/// sections of an iteration no longer wait on each other within the frame (issue #978). Every
+/// `(stream, section)` chain runs the same operations on the same inputs in the same order as in
+/// [`svf_cascade_interleaved`], so this is a schedule change and moves no bit. The depth-one tail
+/// has nothing to pipeline and keeps [`svf_cascade_interleaved`].
+///
 /// # Select-free pairs on an admitted plan (issue #977)
 ///
 /// A list shorter than [`EQ_SECTION_COUNT`] is exactly an *admitted* plan: [`cascade_sections`]
 /// returns the full six both when it refuses and when every section is live, and a shorter list
 /// only after all three of its legs passed. On an admitted plan every dry select is a no-op -- see
 /// "Why an admitted plan runs select-free" on [`cascade_sections`] -- so every depth-two pass runs
-/// [`svf_cascade_interleaved`] and builds no [`Channel::dry_mask`]. A six-entry list keeps the
+/// [`svf_cascade_skewed`] and builds no [`Channel::dry_mask`]. A six-entry list keeps the
 /// masked kernel: a refused block may carry `-0.0` or a non-finite word, and an all-live block was
 /// never scanned for either, and there the select is not a no-op.
 ///
@@ -1973,7 +1982,7 @@ fn interleave<L: Lane, const W: usize, const DEPTH: usize>(
             core::array::from_fn(|k| channels.1.sections[at[k]].state),
         ];
         if admitted {
-            svf_cascade_interleaved::<L, 2, DEPTH>(
+            svf_cascade_skewed::<L, 2, DEPTH>(
                 [&mut *left, &mut *right],
                 frames,
                 &coefficients,
@@ -1986,7 +1995,7 @@ fn interleave<L: Lane, const W: usize, const DEPTH: usize>(
                 core::array::from_fn(|k| channels.0.dry_mask(at[k])),
                 core::array::from_fn(|k| channels.1.dry_mask(at[k])),
             ];
-            svf_cascade_interleaved_with_dry_masks::<L, 2, DEPTH>(
+            svf_cascade_skewed_with_dry_masks::<L, 2, DEPTH>(
                 [&mut *left, &mut *right],
                 frames,
                 &coefficients,
@@ -2313,6 +2322,16 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
     /// survive, because a non-finite block is a fault report, not an automation event. The two
     /// channels are judged independently: they carry independent state and independent counters,
     /// which is what dual-mono means here.
+    ///
+    /// `#[inline(always)]`, and [`render_mono`](Self::render_mono) with it: the stationary cascade
+    /// is the EQ's arithmetic, and the shipped wasm artifact is gated on it living in the one
+    /// `process_bank` (or `process_bank_mono`) symbol per width (`KERNEL_ROSTER` rule 1). The
+    /// inliner decided that on its own until issue #978's skewed pairs -- a prologue, a steady
+    /// state, an epilogue and a short-block fallback per pass kind -- made `render` large enough
+    /// that it outlined it in the `simd128` build, which left `process_bank` carrying no
+    /// arithmetic. Each width calls it from one place (the bank body, or the scalar `process`), so
+    /// pinning the shape here duplicates nothing.
+    #[inline(always)]
     fn render(
         &mut self,
         left: &mut [f32],
@@ -2392,6 +2411,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
     /// two channels' `remaining` arrays and identity flags agree. `failures[1]` is copied from
     /// `failures[0]`, because the right plane the seam is about to write is this left plane and a
     /// dual run would have rejected it on the same words.
+    #[inline(always)]
     fn render_mono(&mut self, left: &mut [f32], frames: usize) -> [[bool; MAX_LANES]; 2] {
         let mut failures = [[false; MAX_LANES]; 2];
         let words = frames * W;
@@ -3072,6 +3092,12 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
     /// shipped before the collapse existed and the collapsed one is its own function. "Adding a
     /// path must not move the path already there" is the same rule `ConsoleEffectBankStage` exists
     /// for, applied inside a kernel.
+    ///
+    /// `#[inline(always)]` for the reason on [`render`](Self::render): each instantiation has one
+    /// caller, `process_bank` or `process_bank_mono`, and the roster finds the EQ's arithmetic in
+    /// those two symbols. Issue #978's larger render body made the inliner outline the dual
+    /// instantiation in the `simd128` build; the pin keeps the shape the roster was measured on.
+    #[inline(always)]
     fn process_bank_inner<const MONO: bool>(
         &mut self,
         block: EffectBankProcessBlock<'_>,

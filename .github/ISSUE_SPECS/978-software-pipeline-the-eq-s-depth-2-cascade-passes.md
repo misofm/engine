@@ -133,3 +133,134 @@ As EQ-1. Only `crates/lane` may name `wide`; the new kernels use the `Lane` trai
 - **`Simd4` natively gains little select-free (-3 %)**; that is not a reason to specialise by width.
 - **The multiband crossover** calls `svf_step` directly and is not part of this change.
 
+
+## Attempt 1 evidence
+
+Implementer: attempt 1, 2026-09-27, branch `codex/977-eq-elision-and-passes`, on #977 (`92deafd9`).
+The verification comment (pure scheduling, bit-identical; add the two-band wasm run and the mono
+skew to the evidence) is applied. Host: AMD EPYC 7313P (Zen 3), `rustc 1.97.1`, `x86-64-v3`, every
+build `CARGO_INCREMENTAL=0`.
+
+### The change
+
+- `crates/lane/src/kernels.rs`: `svf_cascade_skewed` and `svf_cascade_skewed_with_dry_masks`, one
+  body (`svf_cascade_skewed_impl`, the `SvfOutput` policy of the interleaved kernels). Prologue
+  (iterations `0..D-1`, section `k <= i`), branch-free steady state (iterations `D-1..frames`,
+  sections `D-1` down to `0`, each reading the previous iteration's carry before it is overwritten),
+  epilogue (iterations `frames..frames+D-1`, section `k >= i + 1 - frames`). Section 0 loads frame
+  `i`, section `D - 1` stores frame `i - (D - 1)`; `frames < D` calls `svf_cascade_interleaved_impl`
+  with the same policy. `Lane` trait only, no `unsafe`, no allocation, `#[inline(always)]`.
+  `svf_cascade_interleaved[_with_dry_masks]` are untouched.
+- `crates/parametric-eq/src/lib.rs`: `interleave` and `interleave_mono` run every depth-2 pass
+  through the skewed kernels (select-free when admitted, masked otherwise, per #977); the depth-1
+  tail is unchanged.
+- **Outside the brief's paths (deviation 1):** `#[inline(always)]` on
+  `PreparedParametricEq::render`, `render_mono` and `process_bank_inner`. Without them the
+  `simd128` build outlined the dual `render` (then `process_bank_inner::<false>`), leaving
+  `process_bank` with no arithmetic: `KERNEL_ROSTER` rule 1 failed ("parametric-eq f32x4 dual: 0
+  arithmetic-carrying kernels match"). Each has one caller per width, so the pins duplicate nothing;
+  the start-ramp precedent (`#[inline(never)]`, pinned "rather than left to a heuristic") is the
+  same reasoning.
+
+### Gate 1: `g2_skewed_cascade_equals_the_interleaved_cascade` (`crates/lane/tests/g2_kernel_identity.rs`)
+
+`f32`, `Simd4`, `Simd8` x `S` in {1, 2} x `D` in {1, 2, 3} x masked and select-free x frames
+{1, 2, 3, 128, 1024} x the four G2 signals and a hostile family (`+0.0`, `-0.0`, subnormals of either
+sign, normals across `2^-30..2^30`, a `0x7fc01234` NaN payload at block 30 and `-inf` at block 35 on
+single lanes), 40 carried blocks each; per-(stream, section) dry masks from a fixed pattern. After
+every block every output word and every integrator word equals the interleaved kernel's ("both
+NaN, or equal bits"), and 8 guard words either side of every block are untouched, under
+`CanonicalFpEnv::enter()`. Green in dev and release (`cargo test -p lane`: 69 passed, 2 ignored).
+
+### Gate 2: `two_and_four_live_sections_render_the_base_bits` (`crates/parametric-eq/tests/bank.rs`)
+
+Six shapes, 8 tracks, 32 hostile blocks, frames 128 with 37-frame blocks and blocks of 1, 2, 3 and
+37 frames at `8k + 1` (the fallback, the shortest pipelines): two general bands; the two cuts, each
+live on some lanes and dry on others; four general bands; both cuts on some lanes plus two bands;
+all six with the cuts on some lanes; all six everywhere (masked on every block). `-0.0` and
+non-finite blocks as in #977's scenario. Scalar, bank and bank-mono legs. Pinned on the unmodified
+base (`92deafd9`), identical in dev and release: scalar
+`9fdeb65d468cd6c5b5aed91c853d0dcb3fb4781dc723ecba223cf67926214dda`, bank
+`aad039b4e61453d750e40869a0c8b7aa59df2a6299eecfc6430faab0beebcc6a`, bank-mono
+`602d2f39e13d8431c2db10bb94caebeeb3f64d767261ec6c773c648079106ea4`; the change reproduces all
+three. `cargo test -p parametric-eq`: 107 passed, 3 ignored, dev and release, with and without
+`test-support` (#976's and #977's pins included).
+
+### Gate 3: rows
+
+`chain_shape` (release): 23 passed. Scratch digest harness as in #980's record: 90 native lines
+(15 rows x three backends, one and two EQ bands) identical to the base; 30 wasm guest digests
+identical to the base and to the native ones. The two-band rows run depth-2 passes (dual and
+collapsed), so they exercise the skewed kernels natively and in the browser build.
+
+### Gate 4: mutations
+
+Recorded in `crates/lane/tests/MUTATIONS.md` ("Issue #978"), release: M1 (ascending sections), M2
+(store to frame `i`; the epilogue store runs off the block), M2b (the same clamped, so it shows on
+the bit comparison) and M3 (no epilogue), each red on gate 1 at its first case (scalar, `S = 1`,
+`D = 2`, two frames).
+
+### Gate 5: browser artifact, V8, and timing
+
+Artifact (build script's cargo line, not repinned) `ba9438b8…`: `--callgraph
+miso_engine_web_v1_render` closure=8 traps=5 (one owner); `--kernel-shape` ok, kernels=14, rule 3
+ok; `parametric-eq f32x4 dual` one kernel, vector 384 -> 672, scalar 0; `collapsed` 192 -> 336,
+scalar 0; every other roster row unchanged; `meter_poll` and `command_submit --allocation-only` ok.
+The growth is the prologue, the epilogue and the short-block fallback of the two skewed
+instantiations per body.
+
+V8 (`--no-liftoff --print-wasm-code`, two-band `eq_only`): the admitted dual depth-2 loop goes from
+161 instructions (`vmovups` 41, 62 memory operands) to 185 (`vmovups` 54, 78 memory operands): V8
+does spill more in the skewed loop. The masked loop goes from 208 to 216 (`vinsertps` 12 -> 6). The
+mono admitted loop goes from 72 to 78 instructions (`vmovups` 9 -> 10).
+
+**Kernel replicas** (one binary each, both kernels, fixture-shaped bell coefficients, 128 frames,
+the per-call input refresh measured alone and subtracted, best of 7 x 20,000 calls, two rounds that
+agree within 1 %, `taskset -c 31` under the lock, 3.7 GHz): cycles per bank-block, depth 2:
+
+| target | dual select-free | dual masked | mono select-free | mono masked |
+|---|---:|---:|---:|---:|
+| native `Simd8` | 5,527 -> 4,981 (-9.9 %) | 8,212 -> 5,557 (-32.3 %) | 3,266 -> 3,244 (-0.7 %) | 3,673 -> 3,302 (-10.1 %) |
+| native `Simd4` | 5,233 -> 4,861 (-7.1 %) | 6,271 -> 5,186 (-17.3 %) | 3,266 -> 3,242 (-0.7 %) | 3,454 -> 3,304 (-4.3 %) |
+| V8 `simd128` | 5,801 -> 4,960 (-14.5 %) | 7,378 -> 5,669 (-23.2 %) | 3,193 -> 3,226 (+1.0 %) | 3,433 -> 3,230 (-5.9 %) |
+
+**The mono skew:** select-free, it is neutral (-0.7 % native, +1.0 % in V8); masked (refused blocks,
+six live sections) it gains 4-10 %. The contract's skewed mono body is kept.
+
+**Clean-build console rows** (the two-band variant is a scratch-only knob that enables general band
+2 on every EQ; the mono rows are the mono fixture with every rack but the EQ emptied, also
+scratch-only; neither is committed). Clean scratch builds of #977 and of this change, each verified
+by its artifact before timing (EQ `process_bank` arithmetic 384 and 672); two holds, the arms in
+both orders, load average 5-6. Isolates, median of the per-round p50s, us:
+
+| row | native #977 | native #978 | wasm #977 | wasm #978 |
+|---|---:|---:|---:|---:|
+| `eq_only` (one band, no depth-2 pass) | 9.40 / 9.33 | 9.33 / 9.31 | 19.48 / 20.23 | 20.28 / 19.29 |
+| two-band `eq_only` (one dual depth-2 pass) | 14.74 / 14.65 | 13.39 / 13.65 | 33.55 / 33.66 | 30.70 / 29.98 |
+| EQ-only mono, one band | 7.17 / 7.19 | 7.11 / 7.46 | 15.66 / 15.33 | 15.69 / 15.61 |
+| EQ-only mono, two bands (one mono depth-2 pass) | 8.78 / 8.69 | 8.60 / 8.75 | 19.59 / 19.20 | 19.46 / 20.01 |
+
+An earlier pair of holds on the full console mono row agrees (two-band `eq_only`: native 14.07 ->
+12.82 and 14.12 -> 12.91, wasm 33.39 -> 31.31 and 33.45 -> 30.68). So the dual two-band row gains
+about 1.0-1.35 us natively and 2.9-3.7 us in V8 per 64-track block, and the mono two-band row does
+not move beyond noise either way, as the replicas predict (the mono select-free skew is neutral).
+The one-band rows do not move. A third pair of holds is discarded: its "#977" arm had been built
+from a `git archive` of the commit into the shared scratch target, whose files carried the
+commit's older mtimes, so cargo (workspace-relative metadata hashes) reused the #978 rlibs; the
+arm's artifact showed 672 EQ ops, not 384. Every arm quoted here was checked that way. No projected
+saving is claimed.
+
+### Gate 6: toolchain
+
+fmt, clippy (`-D warnings`), doc (`-D warnings`), `-p lane` dev and release (69), `-p
+effect-runtime` (86), `-p console-workload` (39), `-p builtins-compiler --features test-support`
+(79), `-p wasm-gates` (9), `-p bench floor` (9), `check-lane-policy.sh` (ok), realtime policy (57
+regions), EQ render contract, console benchmark validators: green.
+
+### Deviations and notes for the verifier
+
+1. The three `#[inline(always)]` pins above, outside `interleave`/`interleave_mono`; required by
+   gate 5 (rule 1).
+2. V8 spills more in the skewed loop (+13 `vmovups`), and the replica still shows -14.5 %.
+3. The mono skew is neutral where the admitted plan runs it (select-free) and gains 4-10 % on
+   refused or all-live blocks (masked); the skewed mono body is kept as the contract says.
