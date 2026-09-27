@@ -370,3 +370,88 @@ tail and its accumulators. #998 then edits `cascade_sections` and the state-writ
 `process_bank` body, whose V8 allocation both issues must keep green. Start #998 after #999's
 attempt 2 passes and lands, and re-run the spill gate and the one-band artifact timing on the
 combined code.
+
+## Attempt 2 evidence
+
+Implementer: Terra, attempt 2, 2026-09-27, branch `codex/999-eq-fold-boundary-scan`. The batch head
+`07e0f45f` (with #1000's V8 spill gate and #1009's amendment: header-crossing carries only, module
+from `build-web-audioworklet.sh --module-only`) is merged in first (`1b435b61`, clean); the change is
+`f285057b`. Host AMD EPYC 7313P, `rustc 1.97.1`, Node 22.23.2 (V8 12.4), `CARGO_INCREMENTAL=0`,
+every arm a `git archive` in its own target directory.
+
+### The change (answers Sol's HIGH finding 1)
+
+`StoreBound` (`crates/lane/src/kernels.rs`) keeps one `bool` per stream and folds, per stored vector,
+`failed |= mask_any(NOT (|y| < limit))`; the verdict is `NOT failed`. Attempt 1 folded
+`ok = ok AND (|y| < limit)` into a vector mask per stream, and V8 routed those two masks through
+`[rbp-0x100]`/`[rbp-0x120]` on every iteration of the one-band dual tail. This is Sol's variant: the
+same predicate on the same words, and a disjunction of per-vector failures is the scan's per-block
+answer, so it is exact by construction. Nothing else in the code changed: the tail rule, which
+blocks fold, the unfolded pair (Sol's LOW 3: deviation 1 stands) and `render`'s use are as in
+attempt 1. Docs on `StoreBound`, the kernel's frozen order and `interleave` say why the fold is a
+`bool`.
+
+### V8 spill gate (the blocking finding)
+
+`bash scripts/run-wasm-gates.sh` on the committed tree: **exit 0**. The spill gate reads the module
+`47df13ff…` and reports `ok` for the dual depth-1 tail (109 instructions, no carried stack slot),
+the mono depth-2 pair (79) and the mono depth-1 tail (53); the dual pair is reported, not held
+(181, 10 carried slots, as at the batch head). The same gate on the three timed arms: batch head
+ok (tail 83); attempt 1 merged FAIL (the two accumulators, as Sol recorded); attempt 2 ok. In the
+listing each stream's fold is `vandps` (abs), `vcmpps (lt)`, `vpcmpeqd`/`vpxor` (not), `vptest`,
+`setnz`, `or` into `r8`/`r9`: the two verdicts live in general-purpose registers, and no vector
+register is taken from the recurrence. The timed artifact `9fb4275c…` differs from the committed
+tree's `47df13ff…` in 14 bytes of the data section only (panic line numbers moved by the doc edits);
+the code sections are identical.
+
+### Gates
+
+| gate | result |
+|---|---|
+| differential (Sol's #977/#979 harness, rebuilt against `07e0f45f` and attempt 2, scratch four-lane hook) | native release 0 of 140,000; native dev 0 of 10,500; wasm `simd128` release 0 of 28,000; wasm dev 0 of 3,360 |
+| `WORKLOADS` digests | 90 native lines (15 rows x 3 backends, one and two bands) identical to the batch head; 30 wasm guest digests identical to the batch head's and to the native ones |
+| mutations (scratch copy, release) | M1-M5 and M3m red on the same gates and first messages as attempt 1 (`MUTATIONS.md`, both crates, re-run notes added) |
+| `cargo test -p parametric-eq`, dev and release, with and without `test-support` | 111 passed, 3 ignored |
+| `-p lane` dev and release; `-p console-workload` dev and release | 70 / 2 ignored; 56 / 2 ignored |
+| fmt, clippy `--workspace --all-targets --all-features -D warnings`, doc `-D warnings` | pass |
+| realtime, lane, EQ render contract, unfused seal, workspace, env vocabulary policies | ok |
+| `check-web-audioworklet-callgraph.py` | render closure=8 traps=5 (one owner), `meter_poll`, `command_submit --allocation-only` identical to the batch head; `--kernel-shape --kernel-min 11` ok, kernels=15 (rule 3), roster identical to the batch head, EQ dual 672 / collapsed 336, scalar 0 |
+
+### Timing (descriptive, under the lock)
+
+Arms: batch head `07e0f45f` (bh), attempt 1 merged `1b435b61` (a1, reference) and attempt 2 (a2).
+Four holds (`flock -w 7200 …/timing.lock`, `taskset -c 31`), each started only when the one-minute
+load average was below 12, orders rotated; one-minute load during the holds 3.4-8.3. Per hold: the
+native harness (three rounds per arm) and two invocations of `web.mjs` (forward and reverse).
+Filter fixed beforehand, as in attempt 1: a web invocation is dropped when any row's median exceeds
+that row's best round by more than 2 %, a native round pair when either arm's `builtins` p50 exceeds
+its hold median by more than 3 %. Kept: 16 of 16 web invocations, 11 of 12 native round pairs.
+Paired deltas (arm minus batch head, us per 64-track block), mean (median), and how often the arm
+was lower:
+
+| row | batch head | a2 | a2 - bh | a1 - bh |
+|---|---:|---:|---|---|
+| web one-band isolate | 20.25 | **19.80** | **-0.44 (-0.48), 12/16** | -0.67 (-0.63), 15/16 |
+| web one-band row | 69.93 | 69.47 | -0.46 (-0.38), 14/16 | -0.53 (-0.54), 14/16 |
+| web two-band isolate | 30.48 | 30.54 | +0.05 (+0.13), 6/16 | +0.13 (+0.09), 8/16 |
+| web two-band row | 80.17 | 80.21 | +0.04 (+0.08), 7/16 | +0.28 (+0.36), 4/16 |
+| web builtins | 49.69 | 49.67 | -0.02 (+0.04), 7/16 | +0.14 (+0.12), 6/16 |
+| native `Simd8` `eq_only` isolate | 8.97 | **8.62** | **-0.35 (-0.44), 9/11** | -0.30 (-0.28), 8/11 |
+| native `Simd4` (per-node `f32`) `eq_only` isolate | 73.72 | **71.61** | **-2.11 (-2.30), 11/11** | -2.26 (-2.40), 11/11 |
+| native `Simd8` two-band isolate | 13.28 | 13.20 | -0.07 (-0.21), 7/11 | +0.15 (+0.23), 3/11 |
+| native `Simd4` two-band isolate | 94.97 | 95.30 | +0.33 (+0.17), 2/11 | +0.29 (+0.03), 4/11 |
+
+The `bool` fold keeps most of attempt 1's one-band gain in the shipped artifact: -0.44 us against
+the batch head (attempt 1 -0.67; a2 against a1 +0.23 us, the `vptest`/`setnz`/`or` per stored
+vector). The two-band web row and the builtins row are flat. The native per-node two-band isolate
+reads +0.33 us (+0.35 %, 2 of 11 lower); its pass is a pair, whose source is unchanged, and it is
+not one of the brief's timing rows. It is recorded, not claimed as noise.
+
+### Notes for the verifier
+
+1. Sol's INFO 2 (timing inconclusive at load 18-31) is answered by these holds, taken at one-minute
+   load 3.4-8.3 with no invocation dropped.
+2. No committed file outside `crates/lane`, `crates/parametric-eq` and this spec changed; the merge
+   brings the batch head's own files.
+3. Scratch (never committed) in `scratchpad/impl-999b/`: arms, holds, the differential and mutation
+   copies; target directories deleted.
