@@ -133,6 +133,13 @@ pub struct Report {
     /// single-instruction `max`/`min` lowerings, which no native gate can reach (see
     /// `wasm_gate_corpus::minmax_lowering_mismatches`).
     pub minmax_lowering_mismatches: u32,
+    /// Lanes on which this leg's `f64` lanes (`lane::LaneF64`, `lane::Widen`) disagreed with the
+    /// scalar `f64` oracle, summed over every width. Anything but zero fails the leg.
+    ///
+    /// Not a digest and not pinned, for the reason `minmax_lowering_mismatches` is not: it is the
+    /// wasm execution of issue #949's exactness differential (see
+    /// `wasm_gate_corpus::f64_lane_mismatches`).
+    pub f64_lane_mismatches: u32,
 }
 
 impl Report {
@@ -154,13 +161,14 @@ impl Report {
             })
             .collect();
         format!(
-            "{{\"schema_version\":1,\"kind\":\"wasm_gates\",\"leg\":\"{}\",\"runtime\":\"wasmtime {}\",\"backend\":{},\"cases\":{},\"comparisons\":{},\"minmax_lowering_mismatches\":{},\"mismatches\":[{}]}}",
+            "{{\"schema_version\":1,\"kind\":\"wasm_gates\",\"leg\":\"{}\",\"runtime\":\"wasmtime {}\",\"backend\":{},\"cases\":{},\"comparisons\":{},\"minmax_lowering_mismatches\":{},\"f64_lane_mismatches\":{},\"mismatches\":[{}]}}",
             self.leg,
             WASMTIME_VERSION,
             self.backend,
             self.cases,
             self.comparisons,
             self.minmax_lowering_mismatches,
+            self.f64_lane_mismatches,
             mismatches.join(",")
         )
     }
@@ -224,6 +232,7 @@ pub fn native_report() -> Report {
         minmax_lowering_mismatches: (0..corpus::WIDTHS)
             .map(corpus::minmax_lowering_mismatches)
             .sum(),
+        f64_lane_mismatches: (0..corpus::WIDTHS).map(corpus::f64_lane_mismatches).sum(),
     }
 }
 
@@ -235,6 +244,8 @@ struct Guest {
     digest_word: TypedFunc<(u32, u32, u32), u32>,
     /// `miso_gate_minmax_lowering_mismatches(width) -> u32`.
     minmax_lowering_mismatches: TypedFunc<u32, u32>,
+    /// `miso_gate_f64_lane_mismatches(width) -> u32`.
+    f64_lane_mismatches: TypedFunc<u32, u32>,
     /// What `miso_gate_backend()` reported.
     backend: u32,
     /// What `miso_gate_case_count()` reported.
@@ -264,6 +275,8 @@ impl Guest {
             instance.get_typed_func(&mut store, "miso_gate_digest_word")?;
         let minmax_lowering_mismatches: TypedFunc<u32, u32> =
             instance.get_typed_func(&mut store, "miso_gate_minmax_lowering_mismatches")?;
+        let f64_lane_mismatches: TypedFunc<u32, u32> =
+            instance.get_typed_func(&mut store, "miso_gate_f64_lane_mismatches")?;
 
         let backend = backend.call(&mut store, ())?;
         let cases = case_count.call(&mut store, ())? as usize;
@@ -281,6 +294,7 @@ impl Guest {
             store,
             digest_word,
             minmax_lowering_mismatches,
+            f64_lane_mismatches,
             backend,
             cases,
         })
@@ -292,6 +306,17 @@ impl Guest {
         for width in 0..corpus::WIDTHS {
             total += self
                 .minmax_lowering_mismatches
+                .call(&mut self.store, width as u32)?;
+        }
+        Ok(total)
+    }
+
+    /// Runs the `f64` lane exactness differential inside the guest, at every width.
+    fn f64_lane_mismatches(&mut self) -> wasmtime::Result<u32> {
+        let mut total = 0;
+        for width in 0..corpus::WIDTHS {
+            total += self
+                .f64_lane_mismatches
                 .call(&mut self.store, width as u32)?;
         }
         Ok(total)
@@ -348,6 +373,7 @@ pub fn wasm_report(path: &Path, expected: ExpectedBackend) -> wasmtime::Result<R
     }
 
     let minmax_lowering_mismatches = guest.minmax_lowering_mismatches()?;
+    let f64_lane_mismatches = guest.f64_lane_mismatches()?;
 
     Ok(Report {
         leg: "wasm",
@@ -356,6 +382,7 @@ pub fn wasm_report(path: &Path, expected: ExpectedBackend) -> wasmtime::Result<R
         comparisons,
         mismatches,
         minmax_lowering_mismatches,
+        f64_lane_mismatches,
     })
 }
 

@@ -146,3 +146,33 @@ matched their pins under the mutation, on every leg.** The swapped lowering diff
 ties and unordered pairs, and rule 2 of the corpus is that no NaN reaches a digest, so the frozen
 corpus cannot see this defect. That is the whole reason the count exists beside the digests rather
 than as another case in them.
+
+## `f64` lanes (issue #949): the exactness count and the lowering pin
+
+`crates/lane/src/f64_lane.rs` adds `LaneF64`/`Widen`. The guest gained
+`miso_gate_f64_lane_mismatches(width)`, which runs `wasm_gate_corpus::f64_lane_mismatches` (widen
+over every 65,537th `f32` pattern and a directed pool; `add`/`mul` over every ordered pair of a
+directed binary64 pool and 4,096 random pairs; 64 energy chains of 256 steps) and returns the lanes
+that disagree with scalar `f64`. Every leg requires zero and carries the count in its evidence line
+as `f64_lane_mismatches`. It also gained `miso_gate_f64_lane_probe`, whose simd128 body
+`check_f64_lane_lowering` in `scripts/run-wasm-gates.sh` censuses.
+
+**Red mutations, applied and reverted on the delivery host** (the full table, with the native gates,
+is rows F-1 to F-4 in `crates/lane/tests/MUTATIONS.md`). `Widen for f32x8` with its halves swapped
+(F-1):
+
+```
+{"schema_version":1,"kind":"wasm_gates","leg":"native",…,"minmax_lowering_mismatches":0,"f64_lane_mismatches":81676,"mismatches":[]}
+native f64 lanes: 81676 lanes disagree with the scalar f64 oracle; the widen, add or mul in crates/lane/src/f64_lane.rs is not exact IEEE binary64 on this target
+{"schema_version":1,"kind":"wasm_gates","leg":"wasm",…,"backend":0,…,"f64_lane_mismatches":81676,"mismatches":[]}
+{"schema_version":1,"kind":"wasm_gates","leg":"wasm",…,"backend":1,…,"f64_lane_mismatches":81676,"mismatches":[]}
+```
+
+Subnormal widen inputs flushed to `+0.0` (F-2) give `518` on every leg, and a vector `add` of
+`(self + b) + 0.0` (F-3) gives `2`, which is the `-0.0 + -0.0` pair at the two vector widths. All
+358 digest comparisons stay green under each of them. The probe widening through a `black_box`ed
+scalar loop (F-4) leaves every count at zero and fails the lowering pin instead:
+
+```
+wasm gates: the f64 lane probe is not vectorised on the simd128 leg: f64x2.promote_low_f32x4=0 f64x2.mul=2 f64x2.add=2 f64.promote_f32=4 f64.mul=0 f64.add=0
+```
