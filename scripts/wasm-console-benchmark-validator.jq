@@ -1,7 +1,8 @@
 # Aggregate validator for the issue #163 phase 2 step 1 wasm console arm.
 #
-# Thirty-two records: the sixteen console workloads in each of the two measured rounds. Each record
-# carries three legs of the *same* subject -- native at Simd8, native at Simd4, and
+# Thirty records: the fifteen console workloads in each of the two measured rounds (#956 retired the
+# builtins-less `sixty_four_track_plumbing_only`, index 11, two records fewer than the thirty-two
+# before it). Each record carries three legs of the *same* subject -- native at Simd8, native at Simd4, and
 # `wasm32-unknown-unknown` with `+simd128` under the pinned wasmtime -- interleaved observation by
 # observation so their ratio is a paired statistic rather than a quotient of two summaries.
 #
@@ -64,11 +65,8 @@ def workload_pins:
       [64, false, "eq+compressor", "simd1:eq,dynamic:compressor", "tone", "fixtures/session/v1/console-sixty-four-track.json"],
     "sixty_four_track_eq_comp_simd1":
       [64, true, "eq+compressor", "simd1:eq+compressor", "tone", "fixtures/session/v1/console-sixty-four-track-intended.json"],
-    # The overhead pair. `plumbing` is a layout word of its own -- no rack effect *and* no builtin
-    # binding -- and it is the difference between these two rows that the pair measures, so a row
-    # that called itself `builtins` would be naming the thing it is defined by not having.
-    "sixty_four_track_plumbing_only":
-      [64, true, "plumbing", "plumbing", "tone", "fixtures/session/v1/console-sixty-four-track-intended.json"],
+    # The identity sections with the fixture's real fader and pan. Its builtins-less partner, the
+    # plumbing row, was retired by #956: no host compiles a plan without builtins.
     "sixty_four_track_gain_pan_only":
       [64, true, "gain+pan", "builtins", "tone", "fixtures/session/v1/console-sixty-four-track-intended.json"],
     # The mono rows. Both arms of the row-pair render the mono fixture exactly as it is checked in;
@@ -204,12 +202,12 @@ def record_valid:
        else ["native_simd4","native_simd8"] end));
 
 . as $records |
-(type == "array") and length == 32 and
+(type == "array") and length == 30 and
 all(.[]; record_valid) and
 ([.[] | .round] | unique | sort) == [1,2] and
-# Sixteen workloads, each measured exactly once per round, and no workload measured twice.
-([.[] | [.workload_kind,(.round|tostring)] | join(":")] | unique | length) == 32 and
-([.[] | .workload_kind] | unique | length) == 16 and
+# Fifteen workloads, each measured exactly once per round, and no workload measured twice.
+([.[] | [.workload_kind,(.round|tostring)] | join(":")] | unique | length) == 30 and
+([.[] | .workload_kind] | unique | length) == 15 and
 ([.[] | .workload_kind] | unique | sort) == (workload_pins | keys | sort) and
 # One guest module produced every row. Two modules in one record set would mean two different
 # machine codes were timed and reported as one measurement.
@@ -224,4 +222,4 @@ all(.[]; record_valid) and
 all(.[]; .digest_identity == "all_legs_identical") and
 # The same workload in the two rounds must render the same output on every leg. A round that
 # rendered something else did not re-measure the row it claims to have re-measured.
-([.[] | [.workload_kind, (.legs[0].output_sha256)] | join(":")] | unique | length) == 16
+([.[] | [.workload_kind, (.legs[0].output_sha256)] | join(":")] | unique | length) == 15

@@ -9,10 +9,13 @@ standing records as `cycles_per_lane_sample` and `percent_of_floor` columns.
 
 **Status.** Adopted for all four kernels of the standing strip, and extended twice since: by the
 appendix, which split the two rack-free rows' floors once a prepared-identity section stopped being
-executed, and by the strip round's job 4, which added the *plumbing* inventory below them — the
-route and the master reduction, which is what a lane-sample costs when no builtin is prepared at
-all, and which is the floor of the whole table. Two of the directive's own premises did not survive
-the derivation and are ruled against below, with the evidence:
+executed, and by the strip round's job 4, which added a *plumbing* inventory below them — the
+route and the master reduction alone, costed on a row that prepared no builtin. Issue #956 retired
+that row on 2026-09-27, because no host compiles a plan without builtins: the route and the
+reduction are now the *routing component* of the identity and builtins inventories, and the
+identity inventory is the floor of the whole table (see "Routing component"). Two of the
+directive's own premises did not survive the derivation and are ruled against below, with the
+evidence:
 
 * the standing figure *"compressor ~13.2 derived cycles/lane-sample"* does not divide by lane
   width. The compressor's inventory is 94 operations per lane-sample and 94 ÷ 13.2 is 7.1, which is
@@ -496,92 +499,61 @@ contradiction between two rows rather than as an unexplained microsecond.
 
 ---
 
-## Plumbing inventory, and the overhead floor
+## Routing component
 
-`sixty_four_track_dispatch_only` has been read as "the overhead" since it was added, and it is not.
-An identity strip still executes 22 lane-ops of arithmetic the frozen spec requires of every block.
-The row *below* it — `sixty_four_track_plumbing_only`, added by the strip round's job 4 — is the one
-that prepares nothing: `prepare_session_builtins` is never called for it, so the graph is built
-through `GraphCompiler::compile`, every `TrackStage` lowers to an elided alias, and no bank chain is
-bound at all (`[chains, slots] == [0, 0]`, and therefore no planar/AoSoA round-trip and no route
-fold — the chain-shape gate pins all three). *Correction, 2026-09-26 (issue #925):* the "elided
-alias" clause was false until #925. The builtins-less compile listed `PostInputBuiltins`,
-`PostFader` and `PostMatrix` as required bindings, the harness bound them to the identity, and each
-lowered to an identity op: two block copies and one do-nothing dispatch per track, 192 of the
-row's 321 units. Since #925 the builtins-less compile leaves them unbound and they lower as aliases,
-so the row's chain is `Input -> Route -> Output` (129 units) and the sentence holds. Per
-lane-sample:
+Every row that renders sixty-four tracks into one master pays two lines of arithmetic whatever else
+it prepares:
 
 | stage | lane-ops |
 |---|---:|
 | route `mix2x2`: `mul` + unfused `fma` per channel | 3 |
 | output node's 64-input reduction, amortised per track | 1 |
-| **total** | **4** |
+| **routing component** | **4** |
 
-Both lines are already lines of the builtins inventory and of the identity inventory, so the two
-*inventories* subtract exactly:
+Both lines are lines of the builtins inventory (69) and of the identity inventory (22), and they stay
+there. **No row is costed at them alone.** The floor of the table is the identity inventory, 22
+lane-ops, shared by `sixty_four_track_dispatch_only`, `sixty_four_track_gain_pan_only` and
+`sixty_four_track_gain_pan_ring`; `floor.rs` asserts that no row is costed below it, and that the
+three share it exactly.
 
-    sixty_four_track_gain_pan_only − sixty_four_track_plumbing_only  =  22 − 4  =  18
+**The native pure-path target is `sixty_four_track_gain_pan_ring`.** It is `gain_pan_only`'s
+session — racks empty, input sections the prepared identity, the fixture's own fader and pan —
+fed the way a host feeds a session: its track inputs are claimed by a prepared source set, bound
+through `into_bound_with_source_set`, and each cohort's `PostInputBuiltins` bank gathers its claims
+in place (issue #918), so no input unit is dispatched (issue #936). `gain_pan_only` is its
+bound-feed twin: the same bits and the same inventory, but every track input is a host processor
+dispatched once per block to copy a frozen block into the arena, a feed no host uses. The two rows
+name no control and nobody names them — a feed change is not an arithmetic change — and the
+aggregate validator refuses a run in which they render different bits.
 
-and those 18 are precisely the sanitise (7), the collapsed run of identity sections (1), the output
-boundary scan (4), the fader (2) and the pan matrix (4).
+**What was retired, and why.** The strip round's job 4 added `sixty_four_track_plumbing_only`: the
+same session compiled through `GraphCompiler::compile`, so no builtin was bound, every
+`TrackStage` lowered to an elided alias, and the plan was `Input -> Route -> Output` with no bank.
+It was costed at the routing component alone (4 lane-ops, 0.135 cycles/lane-sample) as "the
+overhead floor", and issue #928 added its driver-fed twin, `sixty_four_track_plumbing_ring`. On
+2026-09-27 the owner ruled that a builtins-less compile is never needed in production, and issue
+#956 retired both rows: no host compiles such a plan, so its number described no shipped path. The
+driver-fed row was re-based onto the gain/pan session as `sixty_four_track_gain_pan_ring`. The
+sealed records under `artifacts/` keep every plumbing number taken before the retirement —
+`artifacts/strip4/` measured the row at 6.7 % of its four-lane-op floor, the unfolded route ops and
+reduction that job 3's fold removed from every banked row — and they are history, not a standing
+row.
 
-### Why these two rows are **not** a control pair
+**The control that does subtract cleanly** stays available and undeclared:
+`sixty_four_track_builtins_only − sixty_four_track_gain_pan_only` is 69 − 22 = 47 lane-ops, the
+two 24-op SVF sections less the single `add(+0.0)` the elided run composes to, over two rows that
+realise the same bank slots and the same round-trips. Declaring it would move an existing row's
+`floor_control_row`, which is a ruling of its own.
 
-The obvious next step is to make `plumbing_only` the control row of `gain_pan_only` and publish that
-18 as an isolate. It was tried, and the floor table itself refused it — which is the most useful
-thing this row has done so far.
-
-`gain_pan_only` binds eight bank chains, so issue #218's route fold fires on every one of its
-sixty-four lanes: its route and its share of the master reduction are an epilogue on a tile the
-chain has already transposed, and they cost almost nothing. `plumbing_only` binds **no chain at
-all**, so there is no epilogue to fold into. Until issue #926 it paid sixty-four individually
-dispatched route ops and an unfolded reduction over sixty-four separate planar buffers; since #926
-the route ops are retired into the Output op's reduction, which applies each track's 2x2 in
-registers as it loads that track's buffer, a pair of tracks at a time, so the row pays one
-reduction over sixty-four separate planar buffers and no route op. The two rows execute the same
-*arithmetic* plumbing and completely different *plans* for it.
-
-Subtracting the second from the first therefore removes the fold's saving as well as the plumbing's
-four lane-ops, and the result lands **below** the 18-lane-op floor it is supposed to be measured
-against: on `artifacts/strip4/` the difference is 0.327 cycles/lane-sample against a floor of 0.608,
-an `isolated_percent_of_floor` of 186 % — the table stating that the quantity is not the one its name
-claims. The subtraction is retired rather than tolerated: `floor_control_row`
-is `none` on both rows, `floor.rs` and the jq restatement agree, and
-`the_overhead_inventories_differ_by_the_scaffolding_and_neither_row_claims_an_isolate` is what stops
-a later edit from quietly reinstating it.
-
-What survives is more interesting than the isolate would have been. `plumbing_only`'s own
-`percent_of_floor` is the *unfolded* plumbing measured against the four lane-ops plumbing requires,
-and `artifacts/strip4/` measures it at **6.7 %** — the worst standing in this table by a factor of
-nearly five. The next two are the identity rows at 31.9 % and 32.4 %, and the idle row, which
-boundary 5 singles out as the strongest statement in the stream that a row's cost is dispatch rather
-than arithmetic, is 35.4 % on that same host. Six microseconds a block of 64 dispatched route ops
-and an unfolded 64-buffer reduction, against four lane-ops of required arithmetic: that gap is a
-direct measurement of what job 3's fold removed from every banked row.
-The pair that *would* subtract cleanly is one where both sides bank and both sides fold:
-`sixty_four_track_builtins_only` against `gain_pan_only` differ by 69 − 22 = 47 lane-ops, which is
-the two 24-op SVF sections less the single `add(+0.0)` the elided run composes to, over two rows
-that realise the same twenty-four bank slots and the same eight round-trips. That control is not
-declared here — it would move an existing row's `floor_control_row`, which is not this job's to do —
-and it is written down so the next person reaching for an overhead isolate reaches for that one
-rather than for the plumbing row. The plumbing row's job is to be the floor, not the control.
-
-**The post-fold recheck, and why the number did not move.** Job 3 folded the route application and
-the master accumulation into the cohort chain's own epilogue, which is where the route and the
-reduction now live on every banked row. The inventory above is stated on the *post*-fold tree and is
-unchanged from the pre-fold one, for the same reason job 2's banking moved no row of the builtins
-table: `ArenaMembers::fold_plane` runs the same `mix2x2_block` over the same bind-folded 2×2 on a
-slice of the same length, and then the same `sum_into_block` — with the first contributor storing
-instead of accumulating, which is what keeps sixty-four contributors at sixty-three adds rather than
-sixty-four. The route is deliberately *not* merged into the matrix slot above it (two 2×2s
-multiplied out is a different rounding), so no operation was eliminated and none was added. What the
-fold removed is 64 whole passes over buffers the chain had just scattered, 63 reduction passes and
-64 dead fan-in-zero fills — dispatch, buffers and stores, none of which this table counts.
-
-The plumbing row is the *floor of the whole table*, and `floor.rs` asserts that: no row in this
-stream may be costed below it, because a row that renders sixty-four tracks into one master pays a
-route matrix and its share of the reduction whatever else it does or does not prepare.
+**The post-fold recheck, and why the routing lines did not move.** Job 3 folded the route
+application and the master accumulation into the cohort chain's own epilogue, which is where the
+route and the reduction live on every banked row. `ArenaMembers::fold_plane` runs the same
+`mix2x2_block` over the same bind-folded 2×2 on a slice of the same length, and then the same
+`sum_into_block` — with the first contributor storing instead of accumulating, which is what keeps
+sixty-four contributors at sixty-three adds rather than sixty-four. The route is deliberately *not*
+merged into the matrix slot above it (two 2×2s multiplied out is a different rounding), so no
+operation was eliminated and none was added. What the fold removed is dispatch, buffers and stores,
+none of which this table counts.
 
 ### The mono rows
 
@@ -618,9 +590,9 @@ independently by `scripts/console-benchmark-record-lib.jq`, and carried in every
 
 | kernel | lane-ops | derived floor, cycles/lane-sample |
 |---|---:|---:|
-| route and master reduction (the plumbing floor) | 4 | 0.135 |
+| routing component: route and master reduction (a line of the two builtins inventories; no row's floor) | 4 | 0.135 |
 | builtins chain and routing | 69 | 2.331 |
-| builtins chain, identity sections (`dispatch_only`, `gain_pan_only`) | 22 | 0.743 |
+| builtins chain, identity sections (`dispatch_only`, `gain_pan_only`, `gain_pan_ring`; the floor of the table) | 22 | 0.743 |
 | parametric EQ, two kept sections | 53 | 1.791 |
 | compressor | 81.5 | 2.753 |
 | true-peak limiter, uniform cohort | 129.5 | 4.375 |

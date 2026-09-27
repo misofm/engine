@@ -2,7 +2,7 @@
 # Mutation coverage for the issue #163 phase 2 step 1 wasm console arm's validator.
 #
 # Hermetic: no wasmtime, no guest module, no timing, no measurement. It builds one frozen
-# thirty-two-record set with `jq -cn`, asserts the validator accepts it, then destroys one claim at
+# thirty-record set with `jq -cn`, asserts the validator accepts it, then destroys one claim at
 # a time and asserts the validator rejects each. Every case carries a prose label naming the claim
 # it breaks, because a mutation suite whose cases are unlabelled is a list of jq expressions rather
 # than a statement of what the validator is for.
@@ -58,7 +58,6 @@ records=$(jq -cn '
       ["sixty_four_track_idle", 64, true, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "silence", "fixtures/session/v1/console-sixty-four-track-intended.json"],
       ["sixty_four_track_console_legacy", 64, false, "eq+compressor", "simd1:eq,dynamic:compressor", "tone", "fixtures/session/v1/console-sixty-four-track.json"],
       ["sixty_four_track_eq_comp_simd1", 64, true, "eq+compressor", "simd1:eq+compressor", "tone", "fixtures/session/v1/console-sixty-four-track-intended.json"],
-      ["sixty_four_track_plumbing_only", 64, true, "plumbing", "plumbing", "tone", "fixtures/session/v1/console-sixty-four-track-intended.json"],
       ["sixty_four_track_gain_pan_only", 64, true, "gain+pan", "builtins", "tone", "fixtures/session/v1/console-sixty-four-track-intended.json"],
       ["sixty_four_track_console_mono", 64, false, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "tone", "fixtures/session/v1/console-sixty-four-track-mono.json"],
       ["sixty_four_track_console_mono_dual", 64, false, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "tone", "fixtures/session/v1/console-sixty-four-track-mono.json"],
@@ -102,10 +101,10 @@ records=$(jq -cn '
 set_all() { printf '%s' "$records" | jq -c "[.[] | $1] | .[]"; }
 mutate() { expect_reject "$(printf '%s' "$records" | jq -c "$1 | .[]")" "$2"; }
 
-expect_accept "$(printf '%s' "$records" | jq -c '.[]')" 'the frozen thirty-two-record set'
+expect_accept "$(printf '%s' "$records" | jq -c '.[]')" 'the frozen thirty-record set'
 
 # Shape of the set.
-mutate 'del(.[0])' 'thirty-one records'
+mutate 'del(.[0])' 'twenty-nine records'
 mutate '. as $r | ($r + [$r[0]])' 'a duplicated workload row'
 mutate '.[0].round = 2' 'a workload measured twice in one round and never in the other'
 mutate '[.[] | .round = 1]' 'a set with only one measured round'
@@ -127,7 +126,7 @@ mutate '.[0].digest_identity = "divergent"' \
     'a summary claiming divergence over legs whose digests agree'
 mutate '.[0].digest_identity = "probably_fine"' \
     'a digest identity outside the two words the field may carry'
-mutate '.[16].legs[0].output_sha256 = ("e" * 64)' \
+mutate '.[15].legs[0].output_sha256 = ("e" * 64)' \
     'a second round that rendered something other than what the first round rendered'
 
 # Claim 3: the published ratios are the legs own.
@@ -162,18 +161,18 @@ mutate '.[2].strip_layout = "simd1:eq,dynamic:compressor"' \
     'the standing console row claiming the retired layout'
 mutate '.[2].strip_content = "eq+compressor"' \
     'the standing console row claiming it carries no limiter'
-# The rows this arm gained with the strip round's job 4. The overhead pair separates on
-# `strip_layout` alone -- `plumbing` against `builtins` -- which is the same trap #175's row-pair
-# set, seen from the other end: two rows whose whole difference is what is *not* prepared.
-mutate '.[11].strip_layout = "builtins"' \
-    'the overhead floor row claiming the builtins layout it is the floor of'
-mutate '.[12].strip_content = "identity"' \
+# The rows this arm gained with the strip round's job 4, re-indexed by #956: the builtins-less
+# plumbing row at index 11 was retired, so the gain-and-pan row is 11, the mono rows 12 and 13 and
+# the mixed-cohort row 14. A set still carrying the retired row is refused: its kind has no pin.
+mutate '.[11].strip_content = "identity"' \
     'the gain-and-pan row claiming the identity fader and pan'
-mutate '.[13].fixture_id = "fixtures/session/v1/console-sixty-four-track-intended.json"' \
+mutate '[.[] | if .workload_kind == "sixty_four_track_gain_pan_only" then .workload_kind = "sixty_four_track_plumbing_only" | .strip_content = "plumbing" | .strip_layout = "plumbing" else . end]' \
+    'the retired builtins-less plumbing row in place of the gain-and-pan row'
+mutate '.[12].fixture_id = "fixtures/session/v1/console-sixty-four-track-intended.json"' \
     'a mono row rendered from the standing stereo fixture'
-mutate '.[13].synthetic_fixture = true' \
+mutate '.[12].synthetic_fixture = true' \
     'a mono row reported as derived in code'
-mutate '.[15].synthetic_fixture = false' \
+mutate '.[14].synthetic_fixture = false' \
     'the mixed-cohort row reported as a checked-in fixture'
 mutate '.[2].fixture_id = "fixtures/session/v1/console-sixty-four-track-mono.json"' \
     'the standing console row rendered from the mono fixture'
@@ -207,7 +206,7 @@ expect_reject "$(set_all 'del(.guest_call_overhead_p50_ns)')" \
     'a record that dropped the host-to-guest crossing cost it does not subtract'
 
 # ------------------------------------------------------------------------------------------
-# The issue #183 paired arm: the same twenty-two rows with a fourth leg, the eight-lane wasm
+# The issue #183 paired arm: the same thirty records with a fourth leg, the eight-lane wasm
 # guest, and the width ratio the switch decision is read off. The set is derived from the frozen
 # one above rather than written out again, so the two shapes cannot drift apart in this file.
 # ------------------------------------------------------------------------------------------
@@ -234,10 +233,10 @@ paired_set_all() { printf '%s' "$paired" | jq -c "[.[] | $1] | .[]"; }
 paired_mutate() { expect_reject "$(printf '%s' "$paired" | jq -c "$1 | .[]")" "$2"; }
 
 expect_accept "$(printf '%s' "$paired" | jq -c '.[]')" \
-    'the frozen thirty-two-record paired W4/W8 set'
+    'the frozen thirty-record paired W4/W8 set'
 
 # The pairing itself: a record set is paired in every row or in none.
-paired_mutate '.[0:16] = ([.[0:16][] | del(.guest_simd8_module_sha256)
+paired_mutate '.[0:15] = ([.[0:15][] | del(.guest_simd8_module_sha256)
                           | .legs = .legs[0:3] | .ratios = .ratios[0:2]])' \
     'half a set carrying the eight-lane leg and half not'
 paired_mutate '[.[] | del(.guest_simd8_module_sha256)]' \

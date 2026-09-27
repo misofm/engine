@@ -61,14 +61,11 @@ def builtins_lane_ops: 69;
 # elided, not executed, so the identity row's arithmetic is the 69 with both 24-op SVF sections
 # replaced by the single `add(+0.0)` a run of identity sections composes to:
 # 7 sanitise + 1 identity add + 4 boundary + 2 fader + 4 pan + 3 route + 1 reduction.
+# It is the floor of the whole table (#956). Its last two lines, the route's `mix2x2` (3) and the
+# output node's reduction amortised per track (1), are the routing component every row pays to
+# reach the master; no row is costed at them alone, because the builtins-less plumbing row that was
+# measured a plan no host compiles and was retired.
 def builtins_identity_lane_ops: 22;
-# The overhead floor: what a lane-sample pays with *no builtins prepared at all*. The route's
-# `mix2x2` is one `mul` and one deliberately unfused `fma` per channel (3), and the output node's
-# 64-input reduction amortises to 1 per track. Both are already lines of the two builtins
-# inventories above, which is what makes `gain_pan_only - plumbing_only` an exact 18 rather than an
-# estimate. Job 3's route fold moved neither: folding relocates the same `mix2x2_block` and the
-# same 63 adds into the cohort chain's epilogue, in the order `route_fold` proves at bind.
-def plumbing_lane_ops: 3 + 1;
 def eq_lane_ops: 53;
 # Current-lowering recount (#368): max/min are one lane-op on x86 and wasm; the shared stereo
 # link contributes a fractional half-op per channel sample. exp2_int_in_range is two operations
@@ -117,27 +114,17 @@ def floor_pins:
       [$bi, 1, "none", floor_document + "builtins, identity"],
     # The other row that composes the identity inventory. One basis string for both identity rows
     # is deliberate -- a real fader and pan cost what an identity fader and pan cost, because
-    # neither kernel has an identity arm, and that claim is what the shared inventory states.
-    #
-    # It names **no control**, and the plumbing row below is deliberately not one. The inventories
-    # subtract (22 - 4 = 18, the scaffolding) but the rows do not: this row binds eight bank chains
-    # so job 3's route fold fires, the plumbing row binds none so it pays 64 dispatched route ops
-    # and an unfolded reduction, and the difference between them is the fold's saving as well as
-    # the plumbing's arithmetic. The ruling records the measured evidence.
+    # neither kernel has an identity arm, and that claim is what the shared inventory states. It
+    # names no control.
     "sixty_four_track_gain_pan_only":
       [$bi, 1, "none", floor_document + "builtins, identity"],
-    # The floor of the whole table. Nothing in this stream can be costed below it: a row that
-    # renders sixty-four tracks into one master pays a route matrix and its share of the master
-    # reduction whatever else it does or does not prepare. Its own `percent_of_floor` is the
-    # interesting number -- unfolded plumbing against four lane-ops -- and it is nobody's control.
-    "sixty_four_track_plumbing_only":
-      [plumbing_lane_ops, 1, "none", floor_document + "plumbing"],
-    # Its driver-fed twin (#928): the same session with its track inputs claimed by a prepared
-    # source set. Moving a frozen block into the graph is a copy, not a lane-op, whichever feed does
-    # it, so the inventory is the plumbing row's -- equal to the floor, not below it -- and like the
-    # plumbing row it names no control.
-    "sixty_four_track_plumbing_ring":
-      [plumbing_lane_ops, 1, "none", floor_document + "plumbing"],
+    # Its driver-fed twin (#928, re-based onto the gain/pan session by #956) and the native
+    # pure-path target: the same session with its track inputs claimed by a prepared source set.
+    # Moving a frozen block into the graph is a copy, not a lane-op, whichever feed does it, so the
+    # inventory is the gain/pan row's -- the floor of the table, not below it -- and like its twin
+    # it names no control.
+    "sixty_four_track_gain_pan_ring":
+      [$bi, 1, "none", floor_document + "builtins, identity"],
     # The three mono rows carry the whole intended strip, so they carry its inventory. Their
     # fixture differs from the standing one in per-channel values only -- one source channel
     # instead of two, and the left channel's designed words on both sides -- and a floor is an
@@ -192,10 +179,10 @@ def floor_shape:
    end);
 
 
-# The eighteen session workloads, sorted: `WORKLOADS`'s sixteen (append-only, in emission order),
-# the driver-fed plumbing row the bench emits after them (#928, `DRIVER_FED_WORKLOADS`) and the
-# metered console row it emits last (#881, `METERED_WORKLOADS`).
-def session_kinds: ["nine_track_baseline","nine_track_ragged_strip","one_twenty_eight_track_stretch","sixty_four_track_builtins_only","sixty_four_track_compressor_only","sixty_four_track_console","sixty_four_track_console_half_mono","sixty_four_track_console_legacy","sixty_four_track_console_metered","sixty_four_track_console_mono","sixty_four_track_console_mono_dual","sixty_four_track_dispatch_only","sixty_four_track_eq_comp_simd1","sixty_four_track_eq_only","sixty_four_track_gain_pan_only","sixty_four_track_idle","sixty_four_track_plumbing_only","sixty_four_track_plumbing_ring"];
+# The seventeen session workloads, sorted: `WORKLOADS`'s fifteen (append-only, in emission order),
+# the driver-fed gain/pan row the bench emits after them (#928 and #956, `DRIVER_FED_WORKLOADS`)
+# and the metered console row it emits last (#881, `METERED_WORKLOADS`).
+def session_kinds: ["nine_track_baseline","nine_track_ragged_strip","one_twenty_eight_track_stretch","sixty_four_track_builtins_only","sixty_four_track_compressor_only","sixty_four_track_console","sixty_four_track_console_half_mono","sixty_four_track_console_legacy","sixty_four_track_console_metered","sixty_four_track_console_mono","sixty_four_track_console_mono_dual","sixty_four_track_dispatch_only","sixty_four_track_eq_comp_simd1","sixty_four_track_eq_only","sixty_four_track_gain_pan_only","sixty_four_track_gain_pan_ring","sixty_four_track_idle"];
 
 # #928: how a session row's track inputs reach the graph. `bound` is a `FrozenGraphSource`
 # processor per track input, dispatched once per track per block; `played_planes` is a prepared
@@ -205,7 +192,7 @@ def session_kinds: ["nine_track_baseline","nine_track_ragged_strip","one_twenty_
 # or the reverse, would attribute the feed's cost to the wrong row. The field is required on every
 # session record, so a record from before it existed is refused; the driver-fed row's digest
 # partner is pinned by the aggregate.
-def driver_fed_kinds: ["sixty_four_track_plumbing_ring"];
+def driver_fed_kinds: ["sixty_four_track_gain_pan_ring"];
 def session_source_feed:
   .workload_kind as $kind |
   .source_feed == (if any(driver_fed_kinds[]; . == $kind) then "played_planes" else "bound" end);
@@ -329,19 +316,12 @@ def session_kind_shape:
     .tracks == 64 and .synthetic_fixture == true and
     .strip_content == "gain+pan" and .strip_layout == "builtins" and .input_signal == "tone" and
     .fixture_id == console_fixture
-  # The overhead floor row. `plumbing` is a third layout word, not an empty `builtins` one: the
-  # difference between this row and the `builtins` rows -- that no builtin binding exists at all --
-  # is exactly what the row measures, so a record that called it `builtins` would be naming the
-  # thing it is defined by not having.
-  elif .workload_kind == "sixty_four_track_plumbing_only" then
+  # Its driver-fed twin (#928, re-based by #956) states the same six facts: one session, fed two
+  # ways. What separates the two records is `source_feed`, pinned by `session_source_feed`, and
+  # nothing else.
+  elif .workload_kind == "sixty_four_track_gain_pan_ring" then
     .tracks == 64 and .synthetic_fixture == true and
-    .strip_content == "plumbing" and .strip_layout == "plumbing" and .input_signal == "tone" and
-    .fixture_id == console_fixture
-  # Its driver-fed twin (#928) states the same six facts: one session, fed two ways. What separates
-  # the two records is `source_feed`, pinned by `session_source_feed`, and nothing else.
-  elif .workload_kind == "sixty_four_track_plumbing_ring" then
-    .tracks == 64 and .synthetic_fixture == true and
-    .strip_content == "plumbing" and .strip_layout == "plumbing" and .input_signal == "tone" and
+    .strip_content == "gain+pan" and .strip_layout == "builtins" and .input_signal == "tone" and
     .fixture_id == console_fixture
   # The mono row-pair, as session rows. Both render the mono fixture exactly as it is checked in,
   # so both are `synthetic_fixture == false`: they are two rows of one session, which is the

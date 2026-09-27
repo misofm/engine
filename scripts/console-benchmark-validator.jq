@@ -1,15 +1,16 @@
-# Aggregate validator: eighteen session workloads (sixteen bound-feed rows, the driver-fed
-# plumbing row, #928, and the metered console row, #881), two hoist workloads, one meters arm, one
-# observation arm, one placement row-pair, one automation-active row and one mono row-pair, each
-# in rounds one and two -- fifty records.
+# Aggregate validator: seventeen session workloads (fifteen bound-feed rows, the driver-fed
+# gain/pan row, #928 and #956, and the metered console row, #881), two hoist workloads, one meters
+# arm, one observation arm, one placement row-pair, one automation-active row and one mono
+# row-pair, each in rounds one and two -- forty-eight records. #956 retired the builtins-less
+# plumbing row and re-based the driver-fed row, two records fewer than the fifty before it.
 include "console-benchmark-record-lib";
 . as $records |
-(type == "array") and length == 50 and
+(type == "array") and length == 48 and
 all(.[]; console_benchmark_record_valid_lib) and
 ([.[] | select(.record == "console_session") | .workload_kind] | unique | sort) == session_kinds and
 ([.[] | select(.record == "console_hoist") | .workload_kind] | unique | sort)
   == ["nine_track_ragged_strip","sixty_four_track_console"] and
-([.[] | select(.record == "console_session")] | length) == 36 and
+([.[] | select(.record == "console_session")] | length) == 34 and
 ([.[] | select(.record == "console_hoist")] | length) == 4 and
 ([.[] | select(.record == "console_meters")] | length) == 2 and
 ([.[] | select(.record == "console_observation")] | length) == 2 and
@@ -21,18 +22,18 @@ all(.[]; console_benchmark_record_valid_lib) and
 ([.[] | select(.record == "console_automation") | .workload_kind] | unique)
   == ["sixty_four_track_compressor_automation"] and
 ([.[] | .round] | unique | sort) == [1,2] and
-([.[] | [.record,.workload_kind,.round] | join(":")] | unique | length) == 50 and
+([.[] | [.record,.workload_kind,.round] | join(":")] | unique | length) == 48 and
 (group_by([.record,.workload_kind]) | all(map(.round) | sort == [1,2])) and
 # Round one and round two are two measurements of one frozen workload, so the rendered output must
 # be identical across them. A drifting digest means the rounds are not measuring the same thing.
 (group_by([.record,.workload_kind]) | all(map(.output_sha256 // .restated_output_sha256 // .meters_off_output_sha256 // .absent_output_sha256 // .split_chains_output_sha256 // .collapse_eligible_output_sha256) | unique | length == 1)) and
-# #928: the driver-fed plumbing row is the bound-feed plumbing row fed through a prepared source
-# set. The two feeds deliver the same frozen words, so the two rows render the same bits in both
-# rounds; a difference is a harness defect, never a finding, and the run is refused rather than
-# published with two numbers for two different computations.
+# #928, re-based by #956: the driver-fed gain/pan row is the bound-feed gain/pan row fed through a
+# prepared source set. The two feeds deliver the same frozen words, so the two rows render the same
+# bits in both rounds; a difference is a harness defect, never a finding, and the run is refused
+# rather than published with two numbers for two different computations.
 ([.[] | select(.record == "console_session" and
-               (.workload_kind == "sixty_four_track_plumbing_only" or
-                .workload_kind == "sixty_four_track_plumbing_ring"))
+               (.workload_kind == "sixty_four_track_gain_pan_only" or
+                .workload_kind == "sixty_four_track_gain_pan_ring"))
       | .output_sha256] | length == 4 and (unique | length) == 1) and
 # #881: the metered console row is the standing console session prepared as the default web boot
 # prepares it -- a meter on every track and between-render-calls delivery, which fuses each

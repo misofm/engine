@@ -160,11 +160,12 @@ use lane::Backend;
 const OBSERVATIONS: usize = 1_000;
 const ISSUE: u32 = 149;
 
-/// The bound-feed plumbing row and its driver-fed twin (issue #928): one session, one frozen tone,
-/// two feeds. Their digests must agree, and the run asserts it before it emits either record.
-const PLUMBING_FEED_PAIR: [Workload; 2] = [
-    Workload::SixtyFourTrackPlumbingOnly,
-    Workload::SixtyFourTrackPlumbingRing,
+/// The bound-feed gain/pan row and its driver-fed twin (issue #928, re-based onto the gain/pan
+/// session by #956): one session, one frozen tone, two feeds. Their digests must agree, and the run
+/// asserts it before it emits either record. The driver-fed row is the native pure-path target.
+const GAIN_PAN_FEED_PAIR: [Workload; 2] = [
+    Workload::SixtyFourTrackGainPanOnly,
+    Workload::SixtyFourTrackGainPanRing,
 ];
 
 /// The standing console row and its metered twin (issue #881): one session, prepared once through
@@ -212,12 +213,12 @@ pub(crate) fn main() {
             .expect("both rows of the pair are measured")
     };
     // The class-A statement of the driver-fed row, asserted in-run like the facility arms' before
-    // a number is published: the two feeds deliver the same frozen words, so the two plumbing
+    // a number is published: the two feeds deliver the same frozen words, so the two gain/pan
     // rows render the same bits. A difference is a harness defect, never a finding.
-    let [bound, driver_fed] = PLUMBING_FEED_PAIR.map(digest_of);
+    let [bound, driver_fed] = GAIN_PAN_FEED_PAIR.map(digest_of);
     assert_eq!(
         driver_fed, bound,
-        "the driver-fed plumbing row rendered different output from the bound-feed row"
+        "the driver-fed gain/pan row rendered different output from the bound-feed row"
     );
     // And the metered row's (issue #881): a meter observes, so the metered console renders the
     // standing console's bits.
@@ -2084,12 +2085,12 @@ mod tests {
         }
     }
 
-    /// Issue #928: the driver-fed plumbing row, run short through the real subject, renders the
-    /// bound-feed row's bits with no forbidden operation, prints its record with its feed, and the
-    /// record validator pins that feed.
+    /// Issue #928, re-based onto the gain/pan session by #956: the driver-fed gain/pan row, run
+    /// short through the real subject, renders the bound-feed row's bits with no forbidden
+    /// operation, prints its record with its feed, and the record validator pins that feed.
     ///
     /// The same `SessionMeasurement` the runner's run takes, over eight timed blocks instead of a
-    /// thousand (`cargo test -p bench the_driver_fed_plumbing_row -- --nocapture` prints the
+    /// thousand (`cargo test -p bench the_driver_fed_gain_pan_row -- --nocapture` prints the
     /// record). Its timings are not to be read, and its `observations` field says eight, which the
     /// validator refuses as a frozen measurement -- so the validator is asked about the two
     /// records with that one field set to the frozen count, and then with the feed removed or
@@ -2102,14 +2103,14 @@ mod tests {
     /// library -- the removed-feed cases are accepted; unpin the per-kind feed -- the swapped-feed
     /// cases are accepted.
     #[test]
-    fn the_driver_fed_plumbing_row_prints_its_feed_and_the_validator_pins_it() {
-        let measured = PLUMBING_FEED_PAIR
+    fn the_driver_fed_gain_pan_row_prints_its_feed_and_the_validator_pins_it() {
+        let measured = GAIN_PAN_FEED_PAIR
             .map(|workload| SessionMeasurement::run_for(workload, SHORT_RUN_OBSERVATIONS));
         assert_eq!(
             measured[1].output_sha256, measured[0].output_sha256,
             "the driver-fed row must render the bound-feed row's bits"
         );
-        for (workload, measurement) in PLUMBING_FEED_PAIR.iter().zip(&measured) {
+        for (workload, measurement) in GAIN_PAN_FEED_PAIR.iter().zip(&measured) {
             assert_eq!(measurement.render_errors, 0, "{}", workload.kind());
             assert_eq!(
                 measurement.audit.total(),
@@ -2120,7 +2121,7 @@ mod tests {
         }
         let [bound, ring] = [0, 1].map(|index| {
             measured[index].record(
-                PLUMBING_FEED_PAIR[index],
+                GAIN_PAN_FEED_PAIR[index],
                 1,
                 Backend::current(),
                 Metadata::gather(),
@@ -2145,7 +2146,7 @@ mod tests {
             );
         }
         assert!(
-            ring.contains("\"workload_kind\":\"sixty_four_track_plumbing_ring\","),
+            ring.contains("\"workload_kind\":\"sixty_four_track_gain_pan_ring\","),
             "the driver-fed row names itself"
         );
 

@@ -2,7 +2,7 @@
 //!
 //! # What this measures
 //!
-//! The sixteen console workloads -- the real 64-track fixture and its decomposition rows, through a
+//! The fifteen console workloads -- the real 64-track fixture and its decomposition rows, through a
 //! real `PreparedRenderPlan` -- rendered on three legs whose only difference is *what executes the
 //! code*:
 //!
