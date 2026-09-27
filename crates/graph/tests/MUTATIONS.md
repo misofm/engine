@@ -435,3 +435,32 @@ checked before writing, the suites were run with `--no-fail-fast`, and the file 
 | 936-6a | the copied-claim table is charged nothing (`source_input_entry_bytes.checked_mul(0)`) | `graph/src/lib.rs` `checked_for_with_response_bindings` | `cargo test -p graph --lib`; console-workload lib | RED: the metadata test, graph gate 5 (`declined true: the charge (516, 0) covers the tables (4, 1024)`), console gate 5. |
 | 936-6b | neither table is added to `total_bytes` | `graph/src/lib.rs` `checked_for_with_response_bindings` | `cargo test -p graph --lib`; console-workload lib | RED: the metadata test; console gate 5 `the charge grows by exactly the two tables` (15840 against 26100). |
 | 936-7 | the loop collects the table into a `Vec` every block (`active_units.iter().copied().collect::<Vec<u32>>().into_iter()`) | `graph/src/lib.rs` `GraphExecutor::render` | rt10, rt1 and rt9 alloc tests (`--features test-support`); `scripts/check-realtime-policy.sh` | RED: rt10 2 of 2 (`1000 in-place blocks allocate and free nothing`), rt1 1 of 1, rt9 3 of 8 failed and then the binary aborted (SIGABRT). **GREEN on `check-realtime-policy.sh`**: its forbidden-body pattern matches `\.collect\(`, not the turbofish `.collect::<`. The counting-allocator tests are what catch it. This gap in the script is disclosed here, not fixed: the script is outside this brief's paths. |
+
+## Issue #945 — read fold tiles without a stack copy
+
+Each row was applied alone to `b8df5b52` as an exact-text replacement of
+`core::array::from_fn(|row| rows[row])` in `tile_rows` (match count one, checked before writing),
+the suites were run with `--no-fail-fast`, and the file was restored before the next row. Host:
+`x86_64` (`.cargo/config.toml` pin `-C target-feature=+avx2,+fma`). The graph and chain_shape runs
+are the debug profile in this worktree. "Digests" is the `digests` harness of
+`docs/handoffs/gain-pan-2026-09-26/gain-pan-diagnosis-harnesses.patch` (every standing console
+workload's 64-block output digest), built `--release` in a scratch copy with the patch applied and
+the same edit made; it was never committed. The witnesses the amended brief names are graph
+`runtime::tests::a_resident_fold_is_the_staged_scatter_and_cohort_fold_bit_for_bit` ("the resident
+witness") and chain_shape `the_folded_master_is_the_reductions_own_bits`.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 945-1 | the tile's rows from the wrong offset, `rows[(row + 1) % W]` (the brief's "`rows[i + 1]` wrapped"), at both widths | `graph/src/runtime.rs` `tile_rows` | `cargo test -p graph --lib`; chain_shape; digests | RED. graph 4 of 113: the resident witness (`Four, 4 frames, 1 cohort(s), store true: left master`), `a_banked_source_gathers_the_played_block_bit_for_bit_with_the_copy`, `a_folded_metered_plan_is_the_unfolded_plans_master_and_meters_bit_for_bit`, `a_redirect_after_a_retired_route_lands_on_its_own_chain`. chain_shape 1 of 24: `the_folded_master_is_the_reductions_own_bits` (`nine_track_baseline: the folded master is not the reduction's bits`). Digests: 13 of 16 rows move (`nine_track_baseline` `e7c6ef01` -> `f39cdeaa`, `sixty_four_track_gain_pan_only` `01e465a7` -> `26fcd980`, and the ragged strip, console, stretch, eq, compressor, builtins, dispatch, console_legacy, eq_comp_simd1, console_mono and console_mono_dual rows). The three that stay are the rows that take no resident fold: `sixty_four_track_idle`, `sixty_four_track_plumbing_only` (`BASE_DIGEST`, which has no bank) and `sixty_four_track_console_half_mono`. |
+| 945-1b | the same offset at `W = 4` only: `rows[if W == 4 { (row + 1) % W } else { row }]` | `graph/src/runtime.rs` `tile_rows` | `cargo test -p graph --lib`; chain_shape; digests | RED on graph 4 of 113, the same four as 945-1, the resident witness at `Four, 4 frames, 1 cohort(s), store true: left master`. **GREEN on chain_shape (24 of 24) and on all 16 digests**: a native x86-64-v3 bank is eight lanes wide, so no console workload reaches the `W = 4` instantiation on this host. `W = 4` is what the browser build ships, and the resident witness, which runs `BankWidth::Four` explicitly, is the gate that sees it. |
+| 945-1c | the same offset at `W = 8` only | `graph/src/runtime.rs` `tile_rows` | `cargo test -p graph --lib`; chain_shape; digests | RED. graph 3 of 113: the resident witness at `Eight, 8 frames, 1 cohort(s), store true: left master`, `a_banked_source_gathers_the_played_block_bit_for_bit_with_the_copy`, `a_folded_metered_plan_is_the_unfolded_plans_master_and_meters_bit_for_bit` (`a_redirect_after_a_retired_route_lands_on_its_own_chain` stays green, so it folds a four-lane bank). chain_shape as 945-1. Digests: the same 13 rows move to the same values as 945-1. |
+
+Disclosed equivalent mutants:
+
+* **Restoring the copy** (the pre-#945 zeroed tile and per-row `copy_from_slice`) moves no bit:
+  that is the class-A claim itself. It is a codegen property, witnessed by the release `objdump`
+  of `fold_resident` in the #945 spec's evidence (4 `memcpy` calls against 0), not by a test.
+* **Dropping the `[..W * W]` slice** (the brief's prototype, `block.as_chunks::<W>()`) moves no bit
+  either, because the caller hands exactly `W * W` words. The length of `rows` is then not a
+  constant, so the release `W = 8` tile loop keeps a chain of five row-bounds compares, where the
+  slice leaves one (`cmp $0x40`) per tile. Also a codegen property, not a test.

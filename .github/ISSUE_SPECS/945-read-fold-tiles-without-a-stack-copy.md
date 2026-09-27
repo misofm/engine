@@ -98,3 +98,191 @@ None.
 - Commit on `codex/<issue>-<slug>` from synchronized `main`. Do not run the timed runner; do not quote
   a projected saving.
 - The AudioWorklet artifact pin and browser qualification are repinned once at the batch boundary.
+
+## Attempt 1 evidence
+
+Implementer: attempt 1, 2026-09-26/27. Code commit `b8df5b52` on `codex/945-fold-tiles-without-copy`
+(on top of #936's branch tip `a7d8fc0d`, which is the "base" everywhere below). Host AMD EPYC 7313P
+(Zen 3), rustc 1.97.1, `.cargo/config.toml` pin `+avx2,+fma`, `CARGO_INCREMENTAL=0`, one scratch
+target directory. The digest harness, the base/after release binaries and the wasm builds were made
+in a detached scratch worktree of the base with `gain-pan-diagnosis-harnesses.patch` applied, and
+`runtime.rs` copied in for the "after" builds; the worktree and the patch were removed afterwards
+and nothing from them is committed. No timed runner and no timing were run; no saving is quoted.
+
+### Design
+
+Only `tile_rows` changed (authorized path; its one call site is untouched):
+
+```rust
+let (rows, _) = block[..W * W].as_chunks::<W>();
+core::array::from_fn(|row| rows[row])
+```
+
+Row `i` is words `i * W .. (i + 1) * W`, exactly the rows the zeroed tile plus `copy_from_slice`
+formed from a `W * W`-word block, taken by value, so no bit can move. The transpose, `fold_words`,
+the ragged tail, the premises and the association order are unchanged. No `unsafe`, no `wide`, no
+intrinsics.
+
+**Deviation (form, not scope).** The brief's prototype is `block.as_chunks::<W>()` without the
+`[..W * W]` slice. That form was built and checked first: 0 `memcpy`, all 16 digests identical. But
+the length of `rows` is then a runtime value (the `ChunksExact::zip` constructor stays out of line,
+so LLVM cannot see that every chunk is `W * W` words), and the release `W = 8` tile loop kept a
+chain of five row-bounds compares per tile (`test %rsi; cmp $0x1; cmp $0x2; cmp $0x3; cmpq $0x20`).
+Slicing to exactly `W * W` words makes `rows.len() == W` a constant: the loop keeps one
+`cmp $0x40,%rax; jb` per tile, a panic path that states the caller's premise. A shorter block would
+now panic where the old code zero-padded; the caller hands exactly `W * W` words
+(`chunks_exact(W * W)`), so neither is reachable.
+
+### Gate 1 -- digests: PASS (unchanged)
+
+The `digests` harness (release), every standing workload's 64-block output digest:
+
+| workload | base `a7d8fc0d` | after `b8df5b52` |
+|---|---|---|
+| nine_track_baseline | `e7c6ef01770ab7da...` | same |
+| nine_track_ragged_strip | `17613a3ab693d3f0...` | same |
+| sixty_four_track_console | `fe5bed9becdbc101...` | same |
+| one_twenty_eight_track_stretch | `cba2c94f81544caa...` | same |
+| sixty_four_track_eq_only | `9b2c56a1da62ebda...` | same |
+| sixty_four_track_compressor_only | `95c9375429fbca34...` | same |
+| sixty_four_track_builtins_only | `b63eccd09c19eb7a...` | same |
+| sixty_four_track_dispatch_only | `15688888612d161e...` | same |
+| sixty_four_track_idle | `de2f256064a0af79...` | same |
+| sixty_four_track_console_legacy | `f68febb7a10e242b...` | same |
+| sixty_four_track_eq_comp_simd1 | `f68febb7a10e242b...` | same |
+| sixty_four_track_plumbing_only | `57535244ba953d82...` | same |
+| sixty_four_track_gain_pan_only | `01e465a797036fb4...` | same |
+| sixty_four_track_console_mono | `fc96d91f6a397e91...` | same |
+| sixty_four_track_console_mono_dual | `fc96d91f6a397e91...` | same |
+| sixty_four_track_console_half_mono | `4a656cdf63882999...` | same |
+
+All 16 full 64-hex digests are byte-identical (`diff` of the two outputs is empty). The gain/pan,
+dispatch, builtins, console and plumbing values equal the pins in `GAIN-PAN-VERIFY.md` section 3.
+In the tree: `cargo test --locked -p console-workload` passes (lib 5, automation 4, chain_shape 24,
+placement 3), including `the_plumbing_row_is_input_route_output_and_renders_the_base_bits`
+(`BASE_DIGEST`) and `the_folded_master_is_the_reductions_own_bits`.
+
+### Gate 2 -- standing fold tests: PASS
+
+`cargo test --locked -p graph`: lib 113 of 113, rt10 2, rt1 1, rt9 1. `cargo test --locked -p graph
+--features test-support`: lib 113 of 113, rt10 2, rt1 1, rt9 8. Among them the resident witness
+`a_resident_fold_is_the_staged_scatter_and_cohort_fold_bit_for_bit` (W4 and W8, 1 and 2 cohorts,
+4/8, 13, 16 and 128 frames), `a_resident_fold_declines_before_writing_on_a_broken_premise`, and the
+probes near the old `:9327`, `:9806` and `:9990`. No test was edited.
+
+### Gate 3 -- no copy call: PASS
+
+`cargo build --locked --release -p bench`, then `objdump -d -C` over the `nm -S` extent of
+`<graph::runtime::ArenaMembers as rack::BankMembers>::fold_resident` (both widths are inlined into
+it):
+
+| `fold_resident` in `bench` | base | after |
+|---|---:|---:|
+| size (bytes) | 7,285 | 6,111 |
+| `call` to `memcpy`/`memset`/`memmove` | 4 | 0 |
+| `vzeroupper` | 18 | 9 |
+| instructions addressing `%rsp` | 454 | 311 |
+
+Base, the head of the `W = 8` tile loop: zero both stack tiles (16 `vmovups %ymm0` stores), then one
+runtime-length `memcpy` per plane, each behind a `vzeroupper` and a spill/reload of the live rows:
+
+```text
+327c37: vmovups %ymm0,0x210(%rsp)   ... 8 stores, 0x210..0x130   ; zero tile (left)
+327cab: lea    0x130(%rsp),%rdi ; mov 0x30(%rsp),%rsi ; mov 0x4c8(%rsp),%rdx
+327cc0: vzeroupper
+327cc3: call   *0x20394f(%rip)        # memcpy
+327cd6: vmovups 0x130(%rsp),%ymm2   ... 8 reloads
+327d22: vmovups %ymm0,0x210(%rsp)   ... 8 stores                 ; zero tile (right)
+327d8b: vmovups %ymm4,0x3a0(%rsp)   ... 8 spills
+327dd3: vzeroupper
+327dd6: call   *0x20383c(%rip)        # memcpy
+327ddc: vmovups 0x5e0(%rsp),%ymm2   ... 8 + 8 reloads
+327ee0: vunpcklps %ymm1,%ymm2,%ymm0                               ; transpose
+```
+
+The `W = 4` loop had the same shape (`0x3276da`, `0x32777d`: two more `memcpy`, 64-byte tiles).
+
+After, the `W = 8` tile loop reads its rows straight from the resident block into the transpose:
+
+```text
+327a0a: cmp    $0x40,%rax ; jb <panic>                             ; the one `[..W * W]` check
+327a1f: cmp 0x18(%rsp),%r11 ; jae ... ; cmp 0x8(%rsp),%rsi ; ja ... ; master_left[base..base + W]
+327a38: vmovups -0xe0(%r10),%ymm0
+327a41: vmovups -0xc0(%r10),%ymm1
+   ...  (six more rows, -0xa0 .. 0x0)
+327a6b: vmovups (%r10),%ymm7
+327a70: vunpcklps %ymm1,%ymm0,%ymm8                               ; transpose
+```
+
+The `W = 4` loop is the same (`vmovups -0x30(%r9)..(%r9),%xmm0..3`, then `vunpcklps`). The only
+remaining calls in the function are `master_planes`, the `ChunksExact::zip` constructor (both
+pre-existing, outside the loop) and cold panic entries.
+
+### Gate 4 -- wasm (amendment 2): PASS
+
+Built with the build script's own line, from the scratch worktree:
+`CARGO_TARGET_DIR=<scratch> RUSTFLAGS="-C target-feature=+simd128 -C strip=debuginfo
+--remap-path-prefix=$CARGO_HOME=/cargo --remap-path-prefix=<repo>=/repo" cargo build --locked
+--release --target wasm32-unknown-unknown -p host-web`, then `wasm-objdump -d host_web.wasm` piped
+into both callgraph checks. Artifacts: base `319719052a107f78...`, after `0b5d6055240e264a...`.
+The base already differs from the committed pin `8934cdd9...` (issue #936's change is in it); the
+pin was not touched, per the batch-boundary repin.
+
+- `--callgraph miso_engine_web_v1_render`: base and after both `closure=8 traps=5`, the same trap
+  owner (`PreparedRenderPlan::render_inner`) and entry (`slice_index_fail`). PASS, unchanged.
+- `--kernel-shape --kernel-pattern '4wide6f32x[48]' --kernel-min 11`: base and after both
+  `f32x4_arith=11683 kernels=15`; the full outputs, every roster row included, are identical.
+  PASS, unchanged.
+- Rule 3 is vacuous here, as the amendment says: `fold_resident`'s v0 name carries no
+  `4wide6f32x[48]`, because the generic tile body is inlined into the non-generic trait method.
+- `fold_resident` (func 1952), base -> after: `memory.copy` 2 -> 0, `memory.fill` 0 -> 0,
+  `v128.store` 14 -> 6, `v128.load` 18 -> 146 (the rows now load directly), ops 4,547 -> 3,289,
+  `f32x4.{mul,add,sub,div}` 160 -> 160, scalar `f32` arithmetic 192 -> 192 (the ragged tail).
+  Direct calls 20 -> 24: four more cold `slice_index_fail` sites, the `[..W * W]` check per plane
+  and width; `fold_resident` is not in the render export's direct-call closure, which is unchanged.
+
+### Gate 5 -- allocation and policy: PASS
+
+- `bash scripts/check-realtime-policy.sh`: `realtime policy: ok (54 marked regions in 16 files)`.
+  `tile_rows` is inside a marked region; indexing is permitted there, and it has no `.expect(` or
+  `.unwrap(`.
+- `bash scripts/check-graph-policy.sh`: `graph policy: PASS`.
+- `bash scripts/check-graph-determinism.sh`: `graph fresh-process determinism: PASS (100/100)`. The
+  script hard-codes `target/debug`, so it was run through a temporary `target` symlink to the
+  scratch target directory, removed afterwards.
+- `bash scripts/check-workspace-policy.sh`: `workspace policy: ok`.
+- The counting-allocator tests rt1, rt9 and rt10 pass with `test-support` (gate 2).
+
+### Gate 6 -- red mutation: PASS
+
+Recorded in `crates/graph/tests/MUTATIONS.md`, "Issue #945":
+
+- 945-1, `rows[(row + 1) % W]`: graph 4 of 113 red (the resident witness at
+  `Four, 4 frames, 1 cohort(s), store true: left master`), chain_shape
+  `the_folded_master_is_the_reductions_own_bits` red, and 13 of 16 release digests move
+  (gain/pan `01e465a7` -> `26fcd980`). Only idle, plumbing (`BASE_DIGEST`, no bank) and
+  console_half_mono keep their bits: they take no resident fold.
+- 945-1b, `W = 4` only: the same 4 graph tests red; chain_shape and all 16 digests green, because a
+  native x86-64-v3 bank is eight lanes wide. The resident witness, which runs `BankWidth::Four`
+  itself, is `W = 4`'s gate (the width the browser ships).
+- 945-1c, `W = 8` only: graph 3 red (the witness at `Eight, 8 frames, ...`), chain_shape red, the
+  same 13 digests move.
+
+### Gate 7 -- fmt, clippy, doc, tests: PASS
+
+- `cargo fmt --all --check`: clean.
+- `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`: clean (178 crates
+  checked).
+- `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`: clean.
+- `cargo test --locked -p graph` (with and without `test-support`), `-p console-workload`: as gates
+  1 and 2. `cargo test --locked -p capi`: 32 + 4 passed.
+
+### Deviations and notes for the verifier
+
+1. The `[..W * W]` slice beyond the prototype (see Design). It is bit-neutral (checked: the
+   prototype form and this form both reproduce all 16 digests) and removes the per-row bounds
+   chain; its only cost is one cold panic site per plane and width.
+2. Gate 1's `W = 4` coverage on this host comes only from graph tests: no console workload banks at
+   four lanes natively (945-1b).
+3. The base wasm artifact does not reproduce the committed pin because #936 is under it; the
+   callgraph checks were run on the piped disassembly instead, per amendment 2.
