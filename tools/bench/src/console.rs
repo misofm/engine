@@ -134,6 +134,28 @@
 //! ramp delta is `automated - restated`: the same queue drain, the same span count, and a
 //! smoothing window open in one arm and not the other. `quiet == restated` is the class-A
 //! statement, asserted in-run.
+//!
+//! # The mixing-automation row (`console_mixing_automation`, issue #1003)
+//!
+//! `console_automation` rides one compressor threshold on one track of the compressor-only row.
+//! A mixing session rides EQ gains, compressor thresholds and limiter ceilings across the console,
+//! and on the mono console -- the product's common case -- that traffic is where three costs no
+//! other row sees live: the EQ's whole-bank ramping path, the mono collapse a one-channel record
+//! retires for the life of the plan, and the fact that tracks spread across banks each take a
+//! bank down.
+//!
+//! This row is the mono fixture as written, with the live-console control channel, riding eight
+//! controls on eight tracks, one per eight-lane bank (`console_workload::mixing_automation` is the
+//! table). Each control is pushed in the shape a real host pushes it: the EQ as one owner edit on
+//! `Both`, which designs one `Both` target, and the compressor and the limiter as a Left then a
+//! Right record. Its three arms alternate per observation, and their deltas are named for what
+//! they measure: `restated - quiet` is the collapse the restating records retire, and `automated -
+//! restated` is the ramping. Every base is the held value, so `quiet == restated` is the collapse's
+//! own class-A statement, asserted in-run. An untimed preflight asserts, before any number is
+//! taken, that every automated effect moves bits on its own, and that the EQ's restatement keeps
+//! every cohort collapsed (`bench console --preflight` runs it alone). The row states each arm's
+//! `bank_collapse_counters`, because a collapse renders the bits a dual bank renders and nothing
+//! else can say whether it held.
 
 use crate::floor::{self, CoreClock};
 use bench_support::alloc as bench_alloc;
@@ -143,6 +165,9 @@ use bench_support::metadata::Metadata;
 use bench_support::stats::{Percentiles, format_f64, microseconds};
 use bench_support::timing;
 use builtins::{MeterMetricSet, MeterSnapshot, MeterTap};
+use console_workload::mixing_automation::{
+    self, Lowering, MixingArm, Preflight, PushTally, ResolvedControl,
+};
 use console_workload::{
     ObservationArm, PlanConfig, QUANTUM, SAMPLE_RATE_HZ, SessionRuntime, WINDOW_BLOCKS, Workload,
     native_session_rows,
@@ -184,11 +209,17 @@ pub(crate) fn main() {
     // allocator registered by a dependency that is never named may not be linked at all, and a
     // silently absent audit reports success for every gate below it.
     bench_alloc::assert_installed();
-    assert_eq!(
-        std::env::args_os().count(),
-        1,
-        "benchmark accepts no arguments"
-    );
+    let arguments: Vec<_> = std::env::args_os().skip(1).collect();
+    match arguments.as_slice() {
+        [] => {}
+        // Issue #1003: the mixing-automation row's untimed preflight, alone. It takes no round
+        // marker because it produces no record.
+        [flag] if flag == "--preflight" => {
+            mixing_preflight(Backend::current());
+            return;
+        }
+        _ => panic!("benchmark accepts no arguments but --preflight"),
+    }
     let round = round_from_runner();
     // Feature detection ends here, before every timed observation.
     let backend = Backend::current();
@@ -257,6 +288,42 @@ pub(crate) fn main() {
     println!("{}", automation.record(round, backend, metadata));
     let mono = MonoMeasurement::run();
     println!("{}", mono.record(round, backend, metadata));
+    let mixing = MixingAutomationMeasurement::run(backend);
+    println!("{}", mixing.record(round, backend, metadata));
+}
+
+/// `bench console --preflight`: the mixing-automation row's premises, untimed, with what they
+/// resolved. Panics on the first premise that fails, so a nonzero exit is the refusal.
+fn mixing_preflight(backend: Backend) {
+    let preflight = mixing_automation::preflight(backend);
+    for control in &preflight.controls {
+        println!(
+            "control {} {} {} channel {} base {} values {:?} lowering {}",
+            control.control.track_id,
+            control.slot_id,
+            control.control.parameter,
+            control.channel,
+            control.base,
+            control.values,
+            control.control.effect.lowering().name()
+        );
+    }
+    for (index, (arm, effects)) in mixing_automation::PREFLIGHT_ARMS.iter().enumerate() {
+        println!(
+            "arm {} digest {} bank_collapse_counters {:?} pushes {}/{}",
+            mixing_automation::preflight_arm_name(*arm, *effects),
+            preflight.digests[index],
+            preflight.collapse[index],
+            preflight.tallies[index].accepted,
+            preflight.tallies[index].attempted
+        );
+    }
+    preflight.assert_premises();
+    println!(
+        "console_mixing_automation preflight: PASS ({} controls resolved, backend {})",
+        preflight.controls.len(),
+        backend_name(backend)
+    );
 }
 
 fn round_from_runner() -> u32 {
@@ -1946,6 +2013,287 @@ const AUTOMATION_STATISTICAL_METHOD: &str = "three arms alternated per observati
 percentiles over per-block nanoseconds; ramp delta is automated minus restated and control delta \
 is restated minus quiet, per observation; descriptive only; no threshold";
 
+// ---------------------------------------------------------------------------------------------
+// The mixing-automation measurement (issue #1003): the mono console riding eight controls.
+// ---------------------------------------------------------------------------------------------
+
+/// The record kind of the mixing-automation row.
+const MIXING_WORKLOAD_KIND: &str = "sixty_four_track_console_mono_mixing_automation";
+
+/// Pinned verbatim in the validator, for the reason every method sentence in this stream is.
+const MIXING_STATISTICAL_METHOD: &str = "three arms alternated per observation; nearest-rank \
+percentiles over per-block nanoseconds; ramp delta is automated minus restated and collapse delta \
+is restated minus quiet, per observation; descriptive only; no threshold";
+
+/// The mixing-automation row: the mono console, eight tracks each riding one control, pushed in
+/// the shapes a real host pushes them.
+///
+/// Structurally a sibling of [`AutomationMeasurement`]: three arms that carry the same control
+/// channel, alternated observation by observation, with the push outside the clock and the render
+/// call alone inside it. What it adds is the collapse. On the mono console a restating record can
+/// retire a cohort's collapse for the life of the plan, so `restated` is not only the ramping
+/// arm's control but a measurement of its own, and each arm states its `bank_collapse_counters`
+/// read once after the run.
+struct MixingAutomationMeasurement {
+    /// Timed observations. [`OBSERVATIONS`] in every run the runner launches; the record states
+    /// this rather than the constant, so a shortened run cannot pass for the frozen one.
+    observations: usize,
+    ns_per_block: [Vec<u64>; 3],
+    digests: [String; 3],
+    /// Pushes after the settling write, per arm.
+    tallies: [PushTally; 3],
+    /// `bank_collapse_counters` per arm, read once after the run.
+    collapse: [[u64; 2]; 3],
+    /// The eight controls as the `quiet` arm resolved them.
+    controls: Vec<ResolvedControl>,
+    /// The untimed preflight the run asserted before it took a number.
+    preflight: Preflight,
+    audit: audit::AuditSnapshot,
+    render_errors: u64,
+}
+
+impl MixingAutomationMeasurement {
+    fn run(backend: Backend) -> Self {
+        Self::run_for(backend, OBSERVATIONS)
+    }
+
+    /// [`MixingAutomationMeasurement::run`] over `observations` timed rounds. Only the unit test
+    /// below passes anything but [`OBSERVATIONS`], and the record says so.
+    fn run_for(backend: Backend, observations: usize) -> Self {
+        // The premises first, untimed and before any arm the clock sees is built: every automated
+        // effect moves bits on its own, restating is bit-exact, and the EQ's restatement keeps the
+        // collapse. A row whose premises fail reports nothing.
+        let preflight = mixing_automation::preflight(backend);
+        preflight.assert_premises();
+
+        let mut arms: Vec<MixingArm> = mixing_automation::ARMS
+            .iter()
+            .map(|arm| MixingArm::prepare(*arm, None, backend))
+            .collect();
+        let mut hashes: Vec<Sha256Sink> = arms.iter().map(|_| Sha256Sink::new()).collect();
+        let mut samples: Vec<Vec<u64>> = arms
+            .iter()
+            .map(|_| Vec::with_capacity(observations))
+            .collect();
+        let mut render_errors = 0_u64;
+        audit::warm_up();
+        audit::reset();
+        for _ in 0..observations {
+            for (index, arm) in arms.iter_mut().enumerate() {
+                // Control-plane work, outside the clock, exactly where a host does it: the EQ's
+                // owner designs its target here, and the queue drain, the staging and the window
+                // the traffic opens are what the timed region pays for.
+                arm.drive();
+                let (elapsed_ns, result) = timing::timed(|| arm.render());
+                if result.is_err() {
+                    render_errors += 1;
+                }
+                samples[index].push(elapsed_ns);
+            }
+            for (index, arm) in arms.iter().enumerate() {
+                arm.runtime.hash_output(&mut hashes[index]);
+            }
+        }
+        let snapshot = audit::snapshot();
+        let digests: Vec<String> = hashes.into_iter().map(Sha256Sink::finish_hex).collect();
+
+        // The class-A statement, asserted in-run: every base is the held value, so restating it
+        // is a no-op, and a collapse that a restating record retires renders the bits it rendered
+        // collapsed.
+        assert_eq!(
+            digests[0], digests[1],
+            "console_mixing_automation: restating the held values changed rendered output"
+        );
+        // The honesty half: an automated arm that renders the restated arm's bits opened no
+        // window.
+        assert_ne!(
+            digests[1], digests[2],
+            "console_mixing_automation: the automated arm rendered the restated arm's output"
+        );
+        let tallies = [arms[0].tally, arms[1].tally, arms[2].tally];
+        assert_eq!(tallies[0].attempted, 0, "the quiet arm pushed a record");
+        let per_block = arms[0].automation.pushes_per_block(None);
+        for index in [1, 2] {
+            assert_eq!(
+                (tallies[index].attempted, tallies[index].accepted),
+                (
+                    per_block * observations as u64,
+                    per_block * observations as u64
+                ),
+                "console_mixing_automation {}: a push was refused",
+                mixing_automation::ARMS[index].name()
+            );
+        }
+        let collapse = [
+            arms[0].runtime.bank_collapse_counters(),
+            arms[1].runtime.bank_collapse_counters(),
+            arms[2].runtime.bank_collapse_counters(),
+        ];
+        Self {
+            observations,
+            ns_per_block: [samples[0].clone(), samples[1].clone(), samples[2].clone()],
+            digests: [digests[0].clone(), digests[1].clone(), digests[2].clone()],
+            tallies,
+            collapse,
+            controls: arms[0].automation.controls().to_vec(),
+            preflight,
+            audit: snapshot,
+            render_errors,
+        }
+    }
+
+    /// The record-side JSON of the resolved controls, in track order.
+    fn controls_json(&self) -> String {
+        let rows: Vec<String> = self
+            .controls
+            .iter()
+            .map(|control| {
+                format!(
+                    concat!(
+                        "{{\"track_id\":\"{track}\",\"slot_id\":\"{slot}\",",
+                        "\"effect\":\"{effect}\",\"parameter\":\"{parameter}\",",
+                        "\"parameter_index\":{index},\"lowering\":\"{lowering}\",",
+                        "\"base\":{base},\"step\":{step},",
+                        "\"even_value\":{even},\"odd_value\":{odd}}}"
+                    ),
+                    track = json_escape(control.control.track_id),
+                    slot = json_escape(&control.slot_id),
+                    effect = control.control.effect.contract_id(),
+                    parameter = control.control.parameter,
+                    index = control.control.parameter_index,
+                    lowering = control.control.effect.lowering().name(),
+                    base = control.base,
+                    step = control.control.step,
+                    even = control.values[0],
+                    odd = control.values[1],
+                )
+            })
+            .collect();
+        format!("[{}]", rows.join(","))
+    }
+
+    /// One `{"arm": value}` object over the preflight arms, in their order.
+    fn preflight_json(&self, value: impl Fn(usize) -> String) -> String {
+        let fields: Vec<String> = mixing_automation::PREFLIGHT_ARMS
+            .iter()
+            .enumerate()
+            .map(|(index, (arm, effects))| {
+                format!(
+                    "\"{}\":{}",
+                    mixing_automation::preflight_arm_name(*arm, *effects),
+                    value(index)
+                )
+            })
+            .collect();
+        format!("{{{}}}", fields.join(","))
+    }
+
+    fn record(&self, round: u32, backend: Backend, metadata: &Metadata) -> String {
+        let quiet = Percentiles::from_samples(&self.ns_per_block[0]);
+        let restated = Percentiles::from_samples(&self.ns_per_block[1]);
+        let automated = Percentiles::from_samples(&self.ns_per_block[2]);
+        let workload = mixing_automation::WORKLOAD;
+        let owner_edits = self
+            .controls
+            .iter()
+            .filter(|control| control.control.effect.lowering() == Lowering::OwnerBoth)
+            .count();
+        let parameter_records = 2 * self
+            .controls
+            .iter()
+            .filter(|control| control.control.effect.lowering() == Lowering::LeftThenRight)
+            .count();
+        let counters = |[collapsed, cohorts]: [u64; 2]| format!("[{collapsed},{cohorts}]");
+        format!(
+            concat!(
+                "{{\"schema_version\":1,\"issue\":{issue},\"record\":\"console_mixing_automation\",",
+                "\"workload_kind\":\"{kind}\",\"tracks\":{tracks},",
+                "\"synthetic_fixture\":{synthetic},\"strip_content\":\"{strip}\",",
+                "\"strip_layout\":\"{layout}\",\"input_signal\":\"{signal}\",",
+                "\"fixture_id\":\"{fixture}\",\"round\":{round},\"backend\":\"{backend}\",",
+                "\"sample_rate_hz\":{rate},\"quantum_frames\":{quantum},",
+                "\"observations\":{obs},\"preroll_blocks\":{preroll},",
+                "\"pairing\":\"alternating_per_observation\",",
+                "\"arms\":[\"{arm0}\",\"{arm1}\",\"{arm2}\"],",
+                "\"automated_controls\":{controls},",
+                "\"owner_edits_per_block\":{owner_edits},",
+                "\"parameter_records_per_block\":{parameter_records},",
+                "\"smoothing_samples\":{smoothing},",
+                "\"restated_pushes_accepted\":{restated_pushes},",
+                "\"automated_pushes_accepted\":{automated_pushes},",
+                "\"units\":\"ns_per_block\",\"percentile_method\":\"nearest_rank\",",
+                "\"quiet_p50_ns\":{q50},\"quiet_p95_ns\":{q95},\"quiet_p99_ns\":{q99},",
+                "\"restated_p50_ns\":{r50},\"restated_p95_ns\":{r95},\"restated_p99_ns\":{r99},",
+                "\"automated_p50_ns\":{a50},\"automated_p95_ns\":{a95},\"automated_p99_ns\":{a99},",
+                "\"paired_ramp_delta_median_ns\":{ramp},",
+                "\"paired_collapse_delta_median_ns\":{collapse_delta},",
+                "\"quiet_bank_collapse_counters\":{quiet_collapse},",
+                "\"restated_bank_collapse_counters\":{restated_collapse},",
+                "\"automated_bank_collapse_counters\":{automated_collapse},",
+                "\"quiet_output_sha256\":\"{qd}\",\"restated_output_sha256\":\"{rd}\",",
+                "\"automated_output_sha256\":\"{ad}\",",
+                "\"bit_identity\":\"quiet == restated, asserted in-run\",",
+                "\"preflight_blocks\":{preflight_blocks},",
+                "\"preflight_output_sha256\":{preflight_digests},",
+                "\"preflight_bank_collapse_counters\":{preflight_collapse},",
+                "\"render_errors\":{errors},\"render_total_forbidden_operations\":{forbidden},",
+                "{metadata}",
+                "\"descriptive_only\":true,",
+                "\"statistical_method\":\"{method}\"}}"
+            ),
+            issue = ISSUE,
+            kind = MIXING_WORKLOAD_KIND,
+            tracks = workload.tracks(),
+            synthetic = workload.synthetic(),
+            strip = workload.strip_content(),
+            layout = workload.strip_layout(),
+            signal = workload.input_signal(),
+            fixture = json_escape(workload.fixture_id()),
+            round = round,
+            backend = backend_name(backend),
+            rate = SAMPLE_RATE_HZ,
+            quantum = QUANTUM,
+            obs = self.observations,
+            preroll = mixing_automation::PREROLL_BLOCKS,
+            arm0 = mixing_automation::ARMS[0].name(),
+            arm1 = mixing_automation::ARMS[1].name(),
+            arm2 = mixing_automation::ARMS[2].name(),
+            controls = self.controls_json(),
+            owner_edits = owner_edits,
+            parameter_records = parameter_records,
+            smoothing = mixing_automation::SMOOTHING_SAMPLES,
+            restated_pushes = self.tallies[1].accepted,
+            automated_pushes = self.tallies[2].accepted,
+            q50 = quiet.p50,
+            q95 = quiet.p95,
+            q99 = quiet.p99,
+            r50 = restated.p50,
+            r95 = restated.p95,
+            r99 = restated.p99,
+            a50 = automated.p50,
+            a95 = automated.p95,
+            a99 = automated.p99,
+            ramp = paired_median(&self.ns_per_block[2], &self.ns_per_block[1]),
+            collapse_delta = paired_median(&self.ns_per_block[1], &self.ns_per_block[0]),
+            quiet_collapse = counters(self.collapse[0]),
+            restated_collapse = counters(self.collapse[1]),
+            automated_collapse = counters(self.collapse[2]),
+            qd = self.digests[0],
+            rd = self.digests[1],
+            ad = self.digests[2],
+            preflight_blocks = self.preflight.blocks,
+            preflight_digests =
+                self.preflight_json(|index| format!("\"{}\"", self.preflight.digests[index])),
+            preflight_collapse =
+                self.preflight_json(|index| counters(self.preflight.collapse[index])),
+            errors = self.render_errors,
+            forbidden = self.audit.total(),
+            metadata = metadata.record_fields(),
+            method = MIXING_STATISTICAL_METHOD,
+        )
+    }
+}
+
 /// The median of the per-observation differences `left[i] - right[i]`.
 ///
 /// Pairs taken microseconds apart, then summarised -- never a difference of two summaries taken
@@ -2082,6 +2430,95 @@ mod tests {
                 "the record validator returned no verdict ({status:?}): {}",
                 String::from_utf8_lossy(&verdict.stderr)
             ),
+        }
+    }
+
+    /// Issue #1003: the mixing-automation row, run short through the real subject, prints its
+    /// controls, its host lowerings, its preflight and its collapse counters, and the record
+    /// validator pins them.
+    ///
+    /// The same `MixingAutomationMeasurement` the runner's run takes -- the preflight asserted,
+    /// then the three arms alternated -- over eight timed blocks instead of a thousand (`cargo
+    /// test -p bench the_mixing_automation_row -- --nocapture` prints the record). Its timings are
+    /// not to be read. Its `observations`, its push counts and its quiet arm's collapse counter say
+    /// it was shortened, so the validator is asked about it with those set to what the frozen run
+    /// produces, and then with each claim the row makes taken away.
+    ///
+    /// Red mutations (run): push the EQ as `LeftThenRight` -- the preflight's collapse premise
+    /// fails; ride the limiter at 0.25 dB -- its bit-movement premise fails; restate a value that
+    /// is not held -- the in-run digest equality fails.
+    #[test]
+    fn the_mixing_automation_row_prints_its_controls_and_the_validator_pins_them() {
+        let measured =
+            MixingAutomationMeasurement::run_for(Backend::current(), SHORT_RUN_OBSERVATIONS);
+        assert_eq!(measured.render_errors, 0);
+        assert_eq!(
+            measured.audit.total(),
+            0,
+            "a forbidden operation on the render path"
+        );
+        let record = measured.record(1, Backend::current(), Metadata::gather());
+        println!("{record}");
+        for key in [
+            "quiet_bank_collapse_counters",
+            "restated_bank_collapse_counters",
+            "automated_bank_collapse_counters",
+            "preflight_bank_collapse_counters",
+            "preflight_output_sha256",
+            "automated_controls",
+        ] {
+            assert_eq!(
+                record.matches(&format!("\"{key}\":")).count(),
+                1,
+                "{key} appears exactly once"
+            );
+        }
+        let frozen = concat!(
+            ".observations = 1000 | .restated_pushes_accepted = 13000 | ",
+            ".automated_pushes_accepted = 13000 | ",
+            ".quiet_bank_collapse_counters[0] = .quiet_bank_collapse_counters[1] * 1064"
+        );
+        assert!(
+            !record_validator_accepts(&record, "."),
+            "a shortened run must not pass for the frozen one"
+        );
+        assert!(
+            record_validator_accepts(&record, frozen),
+            "the mixing-automation record at the frozen counts"
+        );
+        for (edit, why) in [
+            (
+                "del(.quiet_bank_collapse_counters)",
+                "a record missing its collapse counters",
+            ),
+            (
+                "del(.preflight_bank_collapse_counters)",
+                "a record missing its preflight collapse counters",
+            ),
+            (
+                ".automated_controls[0].lowering = \"left_then_right\"",
+                "an EQ pushed as two one-channel edits",
+            ),
+            (
+                concat!(
+                    ".preflight_output_sha256.automated_limiter_only = ",
+                    ".preflight_output_sha256.restated"
+                ),
+                "a limiter ride that moved no bit",
+            ),
+            (
+                ".preflight_bank_collapse_counters.restated_eq_only = [0, 8]",
+                "an EQ restatement that retired the collapse",
+            ),
+            (
+                ".automated_output_sha256 = .restated_output_sha256",
+                "an automated arm that rendered the restated bits",
+            ),
+        ] {
+            assert!(
+                !record_validator_accepts(&record, &format!("{frozen} | {edit}")),
+                "{why}"
+            );
         }
     }
 
