@@ -529,10 +529,10 @@ struct Lifetime {
 /// nothing" measurement (193 banked, 193 per node) was taken on that builtins-less plan, where an
 /// identity post-input op level retired every input slot outside any window; #925 elides that
 /// level, and with builtins it never existed as a copy. A merged cohort span holds the input
-/// slots its first slot's ops free, and
-/// `the_merged_span_hold_costs_the_input_slots_with_and_without_builtins` pins what that costs
-/// today: 192 banked against 129 per node without builtins, 256 against 193 with them (the plan
-/// every host renders). Narrowing the hold is issue #931.
+/// slots its first slot's ops free, and `the_merged_span_hold_costs_the_input_slots` pins what
+/// that costs on the plan every host renders: 256 banked against 193 per node (it also pinned
+/// 192 against 129 on the builtins-less compile until #964 removed that arm). Narrowing the hold
+/// is issue #931.
 ///
 /// The invariant the doc on `is_dedicated` used to claim for bank members -- "no op may consume
 /// a member's buffer in place" -- is not needed and is not held. A member's consumer sits at a

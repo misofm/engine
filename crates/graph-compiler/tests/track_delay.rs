@@ -14,11 +14,14 @@
 //! Eval P2-1 (shift exactness) and the mono-collapse interaction are rendered facts and live in
 //! `host-core`'s `track_delay.rs`.
 
+use builtins_compiler::{BuiltinCompileCaps, prepare_session_builtins};
 use effect_compiler::{
     EffectCompileCaps, launch_native_effect_registry, prepare_native_session_effects,
 };
 use graph::{GraphCompileCaps, PreparedGraphPlan};
-use graph_compiler::{Backend, GraphCompileRequest, GraphCompiler};
+use graph_compiler::{
+    Backend, GraphBuiltinsCompileRequest, GraphCompiler, PreparedGraphBuiltinsArtifact,
+};
 use session::{CompileCaps, CompiledSession, SessionModel, compile_session, parse_session_json};
 
 /// Nine tracks, a real parametric EQ on each, routes into the session output, and a non-zero
@@ -124,15 +127,40 @@ fn session_with_delay(left: u32, right: u32) -> CompiledSession {
 }
 
 struct Compiled {
-    plan: PreparedGraphPlan,
+    artifact: PreparedGraphBuiltinsArtifact,
     sha256: String,
     output_latency: u64,
     delay_bytes: u64,
     largest_allocation_bytes: u64,
 }
 
+impl Compiled {
+    fn plan(&self) -> &PreparedGraphPlan {
+        self.artifact.graph()
+    }
+}
+
+/// The production compile: the session's own builtins, prepared with no meters and no live
+/// controls, attached through `compile_with_builtins` at the width this build renders at (#964).
+/// The canonical digest is dispatch-independent, so the pin below holds on every host.
 fn compile(session: CompiledSession, caps: GraphCompileCaps) -> Result<Compiled, String> {
     let registry = launch_native_effect_registry().expect("launch registry");
+    let builtins = prepare_session_builtins(
+        &session,
+        &[],
+        BuiltinCompileCaps {
+            maximum_total_state_bytes: u64::MAX,
+            maximum_total_retained_payload_bytes: u64::MAX,
+            maximum_total_meter_items: u64::MAX,
+            maximum_total_meter_bytes: u64::MAX,
+            maximum_single_allocation_bytes: u64::MAX,
+            maximum_meter_streams: u64::MAX,
+            maximum_period_frames: u32::MAX,
+            maximum_peak_hold_frames: u32::MAX,
+            maximum_smoothing_samples: u32::MAX,
+        },
+    )
+    .expect("the fixture's builtins prepare");
     let effects = prepare_native_session_effects(
         &session,
         &registry,
@@ -143,10 +171,11 @@ fn compile(session: CompiledSession, caps: GraphCompileCaps) -> Result<Compiled,
         },
     )
     .expect("the fixture's native effects prepare");
-    let artifact = GraphCompiler::compile(GraphCompileRequest {
-        dispatch: Backend::Scalar,
+    let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        dispatch: Backend::current(),
         plan_id: 1,
         effects,
+        builtins,
         caps,
     })
     .map_err(|failure| {
@@ -158,14 +187,16 @@ fn compile(session: CompiledSession, caps: GraphCompileCaps) -> Result<Compiled,
             .collect::<Vec<_>>()
             .join(",")
     })?;
-    let sha256 = GraphCompiler::sha256(&artifact.graph, &artifact.report);
-    let estimate = artifact.graph.estimate.clone();
+    let sha256 = GraphCompiler::sha256(artifact.graph(), artifact.report());
+    // The whole-plan estimate, with the builtin banks attached: the one the caps are checked
+    // against, and the one a host publishes.
+    let estimate = artifact.graph_resource_estimate().clone();
     Ok(Compiled {
-        output_latency: artifact.report.output_latency.0,
+        output_latency: artifact.report().output_latency.0,
         sha256,
         delay_bytes: estimate.delay_bytes,
         largest_allocation_bytes: estimate.largest_allocation_bytes,
-        plan: artifact.graph,
+        artifact,
     })
 }
 
@@ -189,7 +220,7 @@ fn compiled(left: u32, right: u32) -> Compiled {
 fn a_zero_delay_session_lowers_no_delay_node() {
     let zero = compiled(0, 0);
     assert!(
-        zero.plan.track_delays().is_empty(),
+        zero.plan().track_delays().is_empty(),
         "a session declaring no delay must carry no delay entry"
     );
     assert_eq!(zero.delay_bytes, 0, "no ring, no bytes");
@@ -208,6 +239,13 @@ fn a_zero_delay_session_lowers_no_delay_node() {
 /// Every other canonical byte is retained in that independently derived expected text. The
 /// numbered #807 spec records the matching computed/compiled hashes and exact estimate row.
 ///
+/// Issue #964 compiles through `compile_with_builtins`, as every host does. The fixture's input
+/// sections declare a 20 Hz high-pass and a 20 kHz low-pass on every lane, so each of the nine
+/// `post-input-builtins` nodes carries an `infinite` tail rather than `finite:0`. Applying only
+/// that change to the #807 canonical text -- the nine `node` rows and the nine `tail` rows of those
+/// nodes, eighteen tokens, and no other byte -- gives the hash below; the builtins-less compile
+/// hashed the unchanged text to `eb3ca776...cb18e0ea10`. The #964 spec records the diff.
+///
 /// The structural off-delay gate above still proves that no zero-length delay node or ring was
 /// introduced. Emitting a zero-length entry contributes no `delay_bytes` and leaves this digest
 /// unchanged; `a_zero_delay_session_lowers_no_delay_node` catches that program mutation.
@@ -221,9 +259,10 @@ fn the_zero_delay_plan_digest_is_the_current_semantic_plan() {
 }
 
 /// Historical #241 schema arithmetic remains in `docs/derivations/241-schema-repins.md`;
-/// the numbered #805 and #807 specs preserve their subsequent state-size derivations.
+/// the numbered #805 and #807 specs preserve their subsequent state-size derivations, and the
+/// #964 spec the builtin-tail re-pin.
 const ZERO_DELAY_CANONICAL_SHA256: &str =
-    "eb3ca77606e93cf9aa13f475415ecbf6e70ee1cdd074a0cca9e46cbb18e0ea10";
+    "957e97ca86f8af87ff8c0ea6adc35ec26b903046c73541613f6abb8ce7640e42";
 
 /// ...and a delayed one is a genuinely different plan, so the digest above is not inert.
 #[test]
@@ -260,17 +299,19 @@ fn a_track_delay_moves_no_pdc_row() {
         "the latent fixture must declare latency"
     );
     assert!(
-        !zero.plan.inserted_delays.is_empty(),
+        !zero.plan().inserted_delays.is_empty(),
         "the latent fixture must make PDC insert at least one compensation delay"
     );
     for (left, right) in [(1_u32, 1_u32), (128, 128), (4_800, 4_800), (48_000, 0)] {
         let delayed = latent(left, right);
         assert_eq!(
-            delayed.plan.inserted_delays, zero.plan.inserted_delays,
+            delayed.plan().inserted_delays,
+            zero.plan().inserted_delays,
             "PDC inserted no delay for {left}/{right}"
         );
         assert_eq!(
-            delayed.plan.route_timings, zero.plan.route_timings,
+            delayed.plan().route_timings,
+            zero.plan().route_timings,
             "PDC retimed no route for {left}/{right}"
         );
         assert_eq!(
@@ -278,14 +319,14 @@ fn a_track_delay_moves_no_pdc_row() {
             "the plan's declared output latency moved for {left}/{right}"
         );
         let latencies: Vec<_> = delayed
-            .plan
+            .plan()
             .spec
             .nodes
             .iter()
             .map(|node| (node.id.clone(), node.latency))
             .collect();
         let baseline: Vec<_> = zero
-            .plan
+            .plan()
             .spec
             .nodes
             .iter()
@@ -337,7 +378,7 @@ fn the_estimate_charges_each_lane_its_own_ring() {
 fn the_pdc_counts_are_untouched() {
     let zero = compiled(0, 0);
     let delayed = compiled(48_000, 48_000);
-    let (a, b) = (&zero.plan.estimate, &delayed.plan.estimate);
+    let (a, b) = (&zero.plan().estimate, &delayed.plan().estimate);
     assert_eq!(a.total_delay_samples, b.total_delay_samples);
     assert_eq!(a.materialized_nodes, b.materialized_nodes);
     assert_eq!(a.edges, b.edges);
@@ -368,7 +409,7 @@ fn a_ring_is_a_named_allocation() {
 fn an_oversized_delay_is_rejected_by_the_caps() {
     let mut caps = graph_caps();
     // Room for the plan's audio and metadata, but not for two 48,000-sample rings on top.
-    caps.maximum_plan_bytes = compiled(0, 0).plan.estimate.incremental_plan_bytes + 1_024;
+    caps.maximum_plan_bytes = compiled(0, 0).plan().estimate.incremental_plan_bytes + 1_024;
     assert!(
         compile(session_with_delay(0, 0), caps).is_ok(),
         "the cap must admit the undelayed session, or the rejection below proves nothing"
