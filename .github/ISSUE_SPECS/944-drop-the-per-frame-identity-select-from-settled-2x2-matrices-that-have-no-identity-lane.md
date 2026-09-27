@@ -861,3 +861,50 @@ sixty_four_track_console_half_mono  4a656cdf63882999b720b7dd765c1b4f7bbcb95e2ab3
    The `floor.rs:122` clause "a settled identity matrix still evaluates both arms" is still true
    of a real identity matrix. They belong with S-G, or with the batch-boundary doc pass.
 4. `check-web-audioworklet.sh` itself was not run (amendment 4).
+
+## Sol attempt 1 verdict: PASS
+
+Verifier: Sol (Claude Opus 5.5), 2026-09-27. Reviewed `git diff 21a0dfcf..04ed64c7`. Every gate was
+re-run in a private detached checkout and a private target directory (`CARGO_INCREMENTAL=0`), both
+removed afterwards. No timed benchmark was run, and nothing was pushed.
+
+### Gates re-run
+
+| # | result |
+| --- | --- |
+| 1 | `fader_matrix` green in dev and release, and CI's `--release -p lane -p math -p wasm-gates --features math/lane` line is green. With the NaN clause removed, release goes red at `width=4 frames=1 family=3: R[3] new=7fc00000 old=7fc01234` and dev stays green, so amendment 1 reproduces. Independent check (a scratch test, not committed): 40,000 random blocks per width, covering signed zeros, subnormals, infinities, quiet and signalling NaN payloads, `f32::MAX`, and random coefficients including `-0.0` and subnormals. That is 9.3 M words per profile at `f32`, `Simd4` and `Simd8`, dev and release: every non-NaN word is bit-identical, and every NaN stays a NaN. |
+| 2 | Green in dev and release. |
+| 3 | `0e1c5af8e3aa66b6...` printed by `c41b1c97` (the base, with no select-free arm) and by `04ed64c7`, in dev and in release. The scenario includes the `(l, r) = (-0.0, +0.0)` frame (`hostile_pair`, `frame % 16 == 0`) on every lane. Under M1 in release, the identity and padding lanes move the digest to `b76c1305...`, so the break is caught by the bits. |
+| 4 | `chain_shape` 25/25 on the base and after. All 16 `WORKLOADS` 64-block digests match (harness patch in the scratch checkout only): base dev = base release = after dev = after release = the table above. |
+| 5 | x86 (`objdump` of the release `bench` binary): `BuiltinMatrixBank::process` has 4 `vtestps` guards, one per width and site. Each branches to a select-free loop with 2 plain `vmovups` stores and no `vblendvps` or `vmaskmovps` (all 4 loops read). The select form keeps its 4 `vmaskmovps` and 12 `vblendvps`. The workspace `vmaskmovps` census is identical per function. Wasm: artifacts `0b5d6055...` (base) and `025b6b20...` (after), matching the evidence above. The render, meter-poll and command-submit callgraph outputs are byte-identical. There are 15 kernels with an identical roster, `f32x4_arith` goes from 11,683 to 11,725, and `v128.bitselect` in `BuiltinMatrixBank::process` stays at 24. |
+| 6 | M1 to M4 are red exactly as recorded in both `MUTATIONS.md` files, with the same digests and messages. Extra mutation M5 tested the guard evaluated before `sync_settled`, with a stale mask used for the tail. Gate 2 goes red (`identity tail`, 1 against 0; in dev, the kernel's `debug_assert!`), and so does gate 3 (release digest `53f676b6...`). |
+| 8/9 | All green: `fmt --check`; clippy `--workspace --all-targets --all-features -D warnings`; `cargo doc -D warnings`; `lane` 52 (dev and release); `builtins` 113 (without the feature, with it, and in release); `builtins-compiler --features test-support` 79; `allocation_tracker` 9; `console-workload` 37; `host-core` 174; CI's `--release -p audit -p bench -p console-workload` 150; `check-builtins-fixtures.sh`; the realtime (54 regions), builtins, lane and workspace policy scripts. |
+
+### Review answers
+
+- **Guard.** `settled_block` (`crates/builtins/src/lib.rs:2989`) tests `L::mask_any(self.coef.identity)` once per call. It is the only entry to the select-free kernel, and both settled sites use it (`:3009`, and the tail at `:3038`, after `sync_settled`). Two facts make it safe:
+  - `coef.identity` is written only by `sync_settled`, from `mask_from_flags` over `flags[..L::WIDTH]`. That covers the padding lanes, which hold `IDENTITY` with a zero window, so their flags are set.
+  - Masks are canonical compare results, and `mask_any` and `select` agree on them.
+
+  So class A does not depend on the mask being fresh: an all-false mask makes the select return its second arm. No settled caller can reach the select-free arm with an identity lane set.
+- **`#[inline(always)]` on `settled_block`.** I rebuilt without it. `BuiltinMatrixBank::process` on x86 is identical apart from addresses. `MatrixStage<f32>::process` and the wasm module differ only in block layout, with the same op counts, function roster, kernel census and callgraphs. No effect on any gate. Accepted as a disclosed deviation.
+- **The M2 gate-4 incident is explained, and it is not a defect.** M2 makes `settled_block` always call `matrix2x2_block`, which is the base kernel. The base commit passes gate 4, and my 20 reruns under M2 (10 dev, 10 release) are all green. The render is deterministic and single-threaded. The mechanism is the shared target directory:
+  - Cargo's artifact hashes for workspace members do not depend on the checkout path. My scratch checkout's `chain_shape-747c2c0fa6e991fe` has the same name as the implementer's.
+  - So a target directory shared with an agent building another checkout, or a mutation, of this workspace can swap that agent's rlibs in.
+  - Once the directory is `rm -rf`'d, cargo's build lock is gone as well.
+- **`cargo test -p builtins-compiler` without `test-support` was already broken on `main`.** At `14f2917b` the lib test does not compile: 21 E0425 errors (`first_fader_state`, `graph::test_only_selected_split_fader`, ...). CI never runs it that way. It runs only `--features builtins-compiler/test-support` (`qualification.yml:476-484`) and a lib-only `cargo check` (`:451`). Not caused by this branch.
+- **Scope.** Every path is authorized. The `floor.rs` and `console-workload/src/lib.rs` hunks are comment-only and fall in amendment 5's ranges. `pan_matrix(1, 1)` gives `ll = lr = cos(pi/2) = 6.1e-17` and `rl = rr = 1`, so the corrected docs are right. No `unsafe` was added, and nothing outside `crates/lane` names `wide`.
+
+### Findings (severity-ranked)
+
+1. **Low, follow-up (docs only, outside the authorized ranges, correctly left alone).** Four passages are now wrong or stale:
+   - `tools/console-workload/src/lib.rs:230-233` says `dispatch_only` pays "a settled identity pan matrix's per-lane select". That is wrong twice: its pan is hard right, not the identity, and since #944 its banks run the select-free arm.
+   - `tools/bench/src/floor.rs:121-123` says "this row asks both for their identity". That is wrong for the pan. The identity-matrix clause is still true of a real identity matrix, but it no longer describes this row.
+   - `tools/bench/src/floor.rs:578-580` claims "a settled identity matrix [costs] what a real one costs". That is now false on x86: a bank with an identity lane keeps the masked store and costs more than a non-identity bank. What the test asserts is still correct.
+   - `docs/rulings/effect-floor-accounting.md:482-489` repeats "hard identity" and "`matrix2x2_block` had acquired a data-dependent path". It is out of scope by the brief's non-goal and belongs with S-G's recount.
+
+   Fold these into the batch-boundary doc pass or S-G. None of them is a gate.
+2. **Info.** A broken `builtins-compiler` test build without `test-support` was already on `main`. A stateless follow-up could gate those test helpers so that the plain `cargo test -p builtins-compiler` compiles. It is not needed for CI.
+3. **Nit.** One doc line in `crates/builtins/tests/matrix.rs` (the gate-3 doc, "both dev and release, before the select-free arm existed. Only a full ...") runs past 100 columns. rustfmt does not wrap comments, so it is cosmetic.
+
+The browser artifact pin is not repinned here (amendment 4); it is repinned once at the batch boundary.
