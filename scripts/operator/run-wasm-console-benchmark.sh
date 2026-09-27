@@ -98,7 +98,10 @@
 # the fixture's real fader and pan) and three mono rows on a new checked-in fixture. Every existing
 # row's `output_sha256` is unchanged from `strip3`, which is the arm this one is read against; the
 # five new rows have no earlier number to be read against, and that is the point of capturing them.
-# This capture is the post-strip-round baseline the sprint scoreboard quotes.
+# This capture is the post-strip-round baseline the sprint scoreboard quotes. Issue #956 later
+# retired `sixty_four_track_plumbing_only` from this arm (it was `WORKLOADS[11]`): no host compiles
+# a plan without builtins. The arm now measures fifteen rows, thirty records, and every row after
+# index 10 moved down one index.
 #
 # `--mono3` and `--mono3-baseline` are the wasm halves of the M3 / #210-phase-3 pair; the native
 # runner's header carries the two trees, the four readings and the class-A obligation. On this leg
@@ -480,7 +483,7 @@ failure_reason=round_2_failed
 run_round 2 >>"$raw" 2>>"$stderr_log" || exit 1
 measured_rounds_completed=2
 failure_reason=record_count
-[[ "$(wc -l <"$raw")" == 32 ]] || exit 1
+[[ "$(wc -l <"$raw")" == 30 ]] || exit 1
 failure_reason=validation_failed
 jq -s -e -f scripts/wasm-console-benchmark-validator.jq "$raw" >/dev/null || exit 1
 failure_reason=accepted_promotion_failed
