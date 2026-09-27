@@ -2170,13 +2170,16 @@ impl ArenaMembers<'_> {
 }
 
 /// One `W * W` block of AoSoA words as its `W` frame rows, the input of a tile transpose.
+///
+/// Every row is a fixed-size `[f32; W]` taken by value from `as_chunks` over exactly `W * W`
+/// words, so every length here is a compile-time constant: the rows reach the transpose as `W`
+/// loads, with no runtime-length copy into a zeroed stack tile and no per-row bounds check
+/// (issue #945). The caller hands exactly `W * W` words, so the one slice below is the whole
+/// block, `as_chunks`' remainder is empty, and row `i` is words `i * W .. (i + 1) * W`.
 #[inline(always)]
 fn tile_rows<const W: usize>(block: &[f32]) -> [[f32; W]; W] {
-    let mut rows = [[0.0_f32; W]; W];
-    for (row, chunk) in rows.iter_mut().zip(block.chunks_exact(W)) {
-        row.copy_from_slice(chunk);
-    }
-    rows
+    let (rows, _) = block[..W * W].as_chunks::<W>();
+    core::array::from_fn(|row| rows[row])
 }
 
 /// One group of master words -- the `W` frames of a tile at a `W`-wide `L`, or one tail frame at
