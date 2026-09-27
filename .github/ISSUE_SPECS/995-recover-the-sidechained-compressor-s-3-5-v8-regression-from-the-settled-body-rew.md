@@ -227,3 +227,135 @@ sidechain: performance-only).
   more, but widens a relaxation the owner has not yet acknowledged; M5 shows the gates see it.
 * Scratch harness sources, session documents and raw logs:
   `scratchpad/impl-995/{harness,sessions,logs}`.
+
+## Sol attempt 1 verdict: PASS
+
+This is an adversarial verification of `b5407795`/`308b7046` from 2026-09-27. I judged it as
+merged onto the current batch head, `codex/batch-plumbing-floor-2` at `220c5db5`. The merge is
+clean (tree `df896788`), and it differs from the batch head only in the compressor kernel,
+`MUTATIONS.md` and this spec.
+
+The oracle is the batch head's own kernel, built separately from its own sources, so it already
+carries #994's knee design. For the spec's timing gate I also built `197db1c9` separately.
+
+**1. Bit-identity.** I extended the #981 verification's independent differential, which is
+scratch only and not committed. In 70 % of seeds, 75 % of blocks are `Sidechain` or `Silent`.
+Sidechain planes change mid-block in several ways:
+
+* they go to +0 or -0 from some frame on;
+* they go to NaN, sNaN, ±inf, ±MAX or `BLOCK_LIMIT` from some frame on;
+* they spike at one frame;
+* one lane goes dead;
+* under a main plane quietened by 60 dB.
+
+It also covers ramps crossing into the settled frames, dual, collapsed and transitioning banks,
+and every link mode. Each block's output words, state words (every coefficient and ramp field,
+and the recursive words), boundary masks and post-boundary words are compared **strictly by bits,
+with no relaxation**. All of the following had 0 failures:
+
+* **Native release**, 3,000 seeds x 160 blocks at `f32`, `Simd4` and `Simd8` (480,000 blocks per
+  width). Per width that includes 138,000-140,000 settled sidechained or silent dual blocks,
+  46,000 of them starting mid-block, 90,000 spanning several chunks and 49,000 silent, plus
+  166,000-169,000 collapsed blocks and 10,300-10,700 collapse transitions.
+* **Native dev**, 128 seeds.
+* **The public factory**: 1,500 seeds x 128 blocks, scalar with the sidechain present (69,900
+  blocks) and absent (17,500), and banks.
+* **V8**: TurboFan `simd128` (600 seeds at `f32`, `Simd4` and `Simd8`, 22,000-23,000 settled
+  sidechained blocks per width), default tiering, and scalar wasm.
+
+`scenario_995` (`25b39c7a...`) reproduces on the batch-head kernel, in dev and release. The head's
+whole test module also passes against that kernel.
+
+**2. What the sidechain means is unchanged.** The compressor has no sidechain gain or filter of
+its own; `Sidechain` is a route source. Link modes are covered by the differential. I also
+checked sessions end to end, comparing base and merged builds:
+
+* a compressor-only session with sidechains routed pairwise from the neighbour's `input` tap,
+  under DualMono, Maximum and Average;
+* the full console (EQ, compressor, and the look-ahead true-peak limiter) with odd tracks keyed
+  from the even neighbour's `post_simd2_pre_fader` tap (after the limiter's latency, so PDC
+  applies), `post_fader`, `input` and `post_simd1`.
+
+All 16 session digests and all 30 standing console digests are identical natively at `Simd8` and
+`Simd4` dispatch. All 9 session digests are identical through the shipped `host_web.wasm` under
+V8. The keying is live: each keyed digest differs from its unkeyed session.
+
+**3. `#[cold]` is harmless, but it is not load-bearing.**
+
+* **The body is not pessimised.** I built a variant with only `#[inline(never)]`. Its
+  `settled_sidechain::<f32>` is instruction-identical to the candidate's once RIP offsets are
+  normalised: without a profile, LLVM's `cold` only weights the one call site per block.
+* **Callers barely change.** `process_block::<f32>` has the same 2,511 instructions and differs
+  only in stack-slot numbering and nop padding.
+* **V8 is flat** across base, cand and the no-cold variant on the main-detector and bank shapes.
+* **The speed-up holds** everywhere it was measured: native `Simd8` dispatch, native `Simd4`
+  dispatch (unbanked `f32`), and V8.
+* **Not measured:** aarch64 (no toolchain or host here), and native cold against no-cold timing,
+  which host load of 21-30 made unusable.
+
+**4. Timings.** These were taken under the lock, pinned to cpu 31, at load 10-16. Isolate means
+the row minus the builtins-only control.
+
+| shape | base (batch head) | #995 | change |
+|---|---:|---:|---:|
+| V8 shipped artifact, 64 routed sidechains, isolate (two runs) | 358.3 / 358.8 | 138.4 / 137.6 | -61 % |
+| V8 shipped artifact, full console keyed after the limiter (row) | 433.4 / 432.3 | 322.6 / 322.1 | -26 % |
+| native `Simd8` dispatch, 64 routed sidechains, isolate | 316.7 / 316.2 | 110.4 / 110.7 | -65 % |
+| native `Simd4` dispatch, 64 routed sidechains, isolate | 316.8 / 317.1 | 111.7 / 111.5 | -65 % |
+| native full console keyed after the limiter (row) | 297.8 / 294.5 | 191.5 / 194.3 | -35 % |
+| unbanked sidechain / silent / sidechain+ramp, native | 309.2 / 305.5 / 435.6 | 105.0 / 90.9 / 335.8 | -66 / -70 / -23 % |
+| the same shapes under V8 | 385.8 / 314.0 / 598.1 | 124.8 / 91.8 / 445.5 | -68 / -71 / -26 % |
+
+**The spec's gate against `197db1c9` is met.** The unbanked sidechain went from 309.0 to 105.0 us
+natively and from 372.4 to 124.8 us under V8.
+
+The unsidechained rows stay flat under V8: the main-detector session row, over six interleaved
+pairs, and the vbench banks. Natively the vbench banks are flat or within ±0.3 %, and the
+full-console session is flat (100.4 and 100.1 base, 99.6 and 108.1 merged, the second a single
+noisy run at load 15.6).
+
+**The two native residuals are layout, and they do not matter.**
+
+* *Bank, one lane ramping:* +0.57 % (5 of 6 alternations) and +0.31 % (3 of 4).
+* *Bank, all lanes ramping:* -0.37 % (candidate faster 6 of 6) and -0.22 %.
+
+Both run the same, untouched ramp-prefix source, and they move in opposite directions. The prefix
+loop differs only in register and stack-slot assignment. The unbanked main-ramp +0.25 % does not
+reproduce either: I measured -0.15 %, faster 6 of 6. None of these reaches any budget.
+
+**5. The gates discriminate.** On the merged tree every gate is green:
+
+* fmt, clippy `-D warnings` (all features), rustdoc `-D warnings`;
+* `-p compressor`: 99 passed in dev and in release;
+* effect-runtime 90, console-workload 39, builtins-compiler 79, graph-compiler 118;
+* lane, math and wasm-gates in release: 114;
+* `run-wasm-gates.sh`;
+* the lane, realtime, unfused, env-vocabulary and workspace policy scripts;
+* the AudioWorklet stages: rule 3, the roster (the compressor dual row is still one function and
+  drops from 516 to 427 vector instructions), `meter_poll`, `command_submit` and the boot budget.
+
+The artifact grows from 3,389,816 to 3,399,701 bytes (+9,885).
+
+In my harness these mutations are red at every width, and all but M5 are also red through the
+factory:
+
+* M1, M2, M3, M4b, M5 and M6;
+* M9, the sidechain read one frame early (a PDC-style misalignment);
+* M10, the sidechain's left and right swapped;
+* M11, sidechained blocks sent to `settled_main`.
+
+M4 (equivalent) and M7 (performance-only) stay green, which confirms their classification. The
+in-tree suite also goes red on M9 and M10, with 7 tests each.
+
+**Findings (severity-ranked).** None blocking.
+
+1. *Low.* The doc on `settled_sidechain` (`crates/compressor/src/kernel.rs:660-667`) says
+   "`#[cold]` is what keeps them: `#[inline(never)]` alone did not". My build does not reproduce
+   that. Without `#[cold]` the main-detector code differs only in stack slots and padding. The
+   doc should call it a layout-level hint rather than a guarantee. Line 666 is also 135 columns
+   wide.
+2. *Info.* `settled_sidechain::<f32x4>` (in the shipped artifact) and `<f32x8>` (native) are
+   unreachable, because banks never carry a sidechain. They add about 6 KB natively.
+3. *Info.* The sidechained body is still about 38 % slower than the main-detector body (105 against
+   76 us natively), because it keeps the general output law. That is by design, pending the
+   owner's ruling on #982's relaxation.
