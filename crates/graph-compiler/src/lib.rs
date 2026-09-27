@@ -33,46 +33,27 @@ use rack_compiler::{BankGroup, BankPlan, CohortCandidate, CohortLevel, plan_bank
 use session::{ChannelMatrix, RouteDestination, RouteSource, SendTap, SidechainDeclaration};
 use sha2::{Digest, Sha256};
 
-pub struct GraphCompileRequest {
+pub struct GraphCompiler;
+/// Compile a graph with internally prepared issue-007 processors and observers.
+///
+/// This is the one compile entry. The builtins are a required input: every host renders a track's
+/// input section, fader and pan matrix, so a plan without them describes no shipped path, and the
+/// builtins-less entry that once built one was deleted (issue #959).
+pub struct GraphBuiltinsCompileRequest {
     pub plan_id: u64,
     pub effects: EffectPreparedSession,
+    pub builtins: PreparedBuiltinsSession,
     pub caps: GraphCompileCaps,
     /// The kernel dispatch the SIMD-rack and builtin banks are planned for.
     ///
     /// Compile is a pure function of its inputs (#99 F6). The host CPU is read exactly once, by
     /// the caller that owns the render target -- `capi` and the web host do it at
     /// plan-build time -- never inside the compiler. Before this, the host backend was selected
-    /// *inside* compile, so the same `GraphCompileRequest` produced
-    /// different banks, a different scratch allocation and a different capped resource estimate
-    /// on different machines, and the scalar fallback could not be exercised without feature
-    /// injection. The semantic graph -- schedule, levels, PDC, reductions, canonical bytes -- is
-    /// deliberately independent of this value; only the bank overlay and the bank half of the
-    /// estimate depend on it.
-    pub dispatch: Backend,
-}
-pub struct GraphCompiler;
-pub struct PreparedGraphArtifact {
-    pub graph: PreparedGraphPlan,
-    pub report: GraphCompileReport,
-    /// Every track's cohort pool class, as this compile derived it (mono-collapse M1).
-    ///
-    /// Published because it is the object `compile_with_builtins` must hand to the *second*
-    /// planner: `bind_rack_banks` ran inside the compile and read this, and
-    /// `PreparedBuiltinsSession::into_graph_artifact_with_banks` reads the same value rather than
-    /// re-deriving one. See [`builtins_compiler::SessionPoolClasses`].
-    pub pool_classes: SessionPoolClasses,
-}
-pub struct GraphCompileFailure {
-    pub effects: EffectPreparedSession,
-    pub diagnostics: GraphDiagnosticSet,
-}
-/// Compile a graph with internally prepared issue-007 processors and observers.
-pub struct GraphBuiltinsCompileRequest {
-    pub plan_id: u64,
-    pub effects: EffectPreparedSession,
-    pub builtins: PreparedBuiltinsSession,
-    pub caps: GraphCompileCaps,
-    /// See [`GraphCompileRequest::dispatch`] (#99 F6).
+    /// *inside* compile, so the same request produced different banks, a different scratch
+    /// allocation and a different capped resource estimate on different machines, and the scalar
+    /// fallback could not be exercised without feature injection. The semantic graph --
+    /// schedule, levels, PDC, reductions, canonical bytes -- is deliberately independent of this
+    /// value; only the bank overlay and the bank half of the estimate depend on it.
     pub dispatch: Backend,
 }
 /// The one-way, sealed builtin attachment result.
@@ -151,7 +132,7 @@ pub struct GraphCompileReport {
 
 /// The human- and fixture-facing view of a compiled graph, produced on demand.
 ///
-/// Never built by `compile` (#99 F5). `canonical_bytes` is the deterministic text the semantic
+/// Never built by [`GraphCompiler::compile_with_builtins`] (#99 F5). `canonical_bytes` is the deterministic text the semantic
 /// SHA-256 is taken over; `dot` is a Graphviz rendering that carries no schedule or buffer
 /// content. Producing this is `O(nodes + edges)` allocations and, at scale, tens of megabytes --
 /// which is why it is a method rather than a field.

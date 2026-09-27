@@ -6244,10 +6244,10 @@ mod tests {
     /// the identity -- the shape every builtins-less plan had before #925 -- on the host planes
     /// and in every observer window.
     ///
-    /// Three tracks, each `Input -> seven stages -> Route -> Output`, the shape
-    /// `GraphCompiler::compile` builds for a session with no effects. The input is hostile: signed
-    /// zeros, subnormals and magnitudes over `2^-24 .. 2^25`, fresh every block. Every route
-    /// carries a hostile 2x2 and gain, and the hostile *input* carries signed zeros and
+    /// Three tracks, each `Input -> seven stages -> Route -> Output`, the shape the builtins-less
+    /// compile entry (deleted by issue #959) built for a session with no effects. The input is
+    /// hostile: signed zeros, subnormals and magnitudes over `2^-24 .. 2^25`, fresh every block.
+    /// Every route carries a hostile 2x2 and gain, and the hostile *input* carries signed zeros and
     /// subnormals, which is what would expose a copy that flipped a sign or flushed a subnormal:
     /// an identity op's only work is the byte copy in `reduce_plane`'s single-input arm, so the
     /// alias holds the same words, `-0.0` included. Class A is the claim: an identity copy

@@ -199,13 +199,16 @@ const fn is_alias_candidate(node: &GraphNodeId) -> bool {
 /// Unlike the rack boundaries these are bindable: `GraphCompiler::compile_with_builtins` lists
 /// them in `required_bindings`, and the builtins artifact fills each with a bank member or a
 /// scalar fader/matrix owner, which has to run as an op. A plan that does **not** list one has
-/// nothing to run there (issue #925): `GraphCompiler::compile` prepares no builtins and so leaves
-/// all three out, and a host could only ever have acknowledged them with
+/// nothing to run there (issue #925): the builtins-less compile entry prepared no builtins and so
+/// left all three out, and a host could only ever have acknowledged them with
 /// `GraphNodeBinding::identity`, which renders as an identity op -- a copy out of the dedicated
 /// post-input stage, a second copy into the fader, and an in-place matrix that only dispatches.
 /// So [`lower`] elides an unlisted builtin stage under the same one-input, no-sidechain, no-delay
 /// condition as [`is_alias_candidate`], and the question "does this stage keep its op" is
 /// answered by the bindable set the plan carries, never by a guess from the node id.
+///
+/// Issue #959 deleted that compile entry, so every compiled plan lists all three stages and only
+/// a hand-built plan can still leave one out, until issue #958 reverts this elision.
 const fn is_builtin_stage(node: &GraphNodeId) -> bool {
     matches!(
         node,
