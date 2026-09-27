@@ -836,3 +836,152 @@ to `1975fc44` plus this commit's final G2 (deviation 2). Recorded in
 - The pass runs for a unit whenever one final-slot observer accepts, including blocks whose windows
   then take the sample loop (a window boundary inside the block, S4). It never runs in a plan bound
   with an activation (control 2).
+
+## Sol attempt 1 verdict: FAIL
+
+Reviewer: Sol, attempt 1, 2026-09-27, on `69410f38` (code `1975fc44`, base `925f47d6`). Nothing was
+pushed and no timed benchmark was run beyond one throwaway in-process A/B. Every mutation and
+throwaway test was applied in place and reverted; the tree is `69410f38` plus this section.
+
+The render change is correct and class A: I could not make it publish a wrong word or move a PCM
+bit. The attempt fails because an explicit invariant (I6 "no retained byte", interface item 4
+"placed in the existing padding") does not hold on wasm32, the target this slice exists for, while
+the code and the evidence say it does; and no committed gate can see the bank width that target
+runs.
+
+### Findings, most severe first
+
+1. **Blocking (I6, interface 4): `UnitIdentity` grows from 20 to 24 bytes on wasm32.**
+   `crates/graph/src/runtime.rs:2405` adds a fifth one-byte field. On 64-bit targets the struct
+   stays 32 bytes (29 used). On `wasm32-unknown-unknown` the boxed slice is 8 bytes, so the four
+   existing flag bytes already fill the only slack (`8 + 4 + 4 + 4 = 20`) and the fifth rounds the
+   struct to 24. Measured on the real type: a probe `const _: [(); 20] = [(); size_of::<UnitIdentity>()]`
+   fails `cargo check --target wasm32-unknown-unknown -p graph` with "expected an array with a size
+   of 20, found one with a size of 24", and `[(); 24]` compiles. That is 4 retained bytes per
+   runtime unit in the browser build. The doc at `runtime.rs:2404` ("Fits the existing identity
+   padding") and this spec's evidence ("no retained byte (`rt9_...` green)") are false there, and
+   the pin `rt9_identity_metadata_has_no_retained_or_peak_layout_delta` (`runtime.rs:8478`) is a
+   native-only `#[test]` that cannot see it. The brief's F5 premise was wrong for 32-bit targets;
+   the implementation had to pack the flag or escalate, not rely on the native pin.
+   Fix, implementer's choice: carry the flag in an existing byte (for example, `sample_peak` implies
+   `observed`, so one byte can hold none, observed, or observed with peak), and make the layout pin
+   a `const` assertion in non-test code so every target build, wasm32 included, checks it. The
+   alternative is an owner ruling that accepts 4 bytes per unit on 32-bit targets, with the doc, the
+   evidence and the pin corrected to say so.
+
+2. **Required (I2 at the product width): no committed gate sees the `BankWidth::Four` dispatch.**
+   `bank_sample_peak`'s `BankWidth::Four => planes::<lane::Simd4>(left, right)` (`runtime.rs:3834`)
+   is the only arm the browser and NEON execute. G3 and G4 compile at `host_dispatch()`
+   (`crates/graph-compiler/src/lib.rs:9873`), which is `Simd8` on this host and on every CI runner
+   (`qualification.yml` is all `ubuntu-24.04` x86-64). Mutation S-7, `Four => planes::<lane::Simd8>`,
+   stays GREEN on `-p graph --features test-support` (125), `-p graph-compiler` (G3 and G4
+   included), `-p builtins-compiler --features test-support` (79) and `-p console-workload` (39).
+   G1 and corpus case 55 test the kernel, not the dispatch. My differential at `Backend::Simd4` goes
+   red at once ("same PCM as Simd8 but different meter words"). Required: run G3 (at least one
+   period through both selected deliveries) at `Backend::Simd4` as well, which compiles and renders
+   natively, and record S-7 red in `crates/graph/tests/MUTATIONS.md`.
+
+3. **Info.**
+   - The pass runs on blocks where every accepting meter then takes the sample loop (period shorter
+     than, or not dividing, the block). This is S4's territory and is disclosed above. No action.
+   - Placing the corpus case at global index 55 is sound. Nothing pins a global index:
+     `g5_native_corpus.rs` derives every family base from the counts,
+     `LANE_DIGESTS: [[u8; 32]; LANE_CASE_COUNT]` ties the pin count at compile time, the timing arm
+     resolves cases by name, and the only hard-coded numbers (`tools/wasm-gates/MUTATIONS.md:27-30`)
+     are historical rows that also carry names. This follows #463's precedent.
+   - host-core `--all-features` here is 224 passed and 2 ignored; the evidence says 225. Nothing
+     fails.
+   - Out of scope and pre-existing: under my hostile input the intended fixture's PCM differs
+     between `Simd8`, `Simd4` and `Scalar` dispatch in 3 of 4 seeds, while the mixed and mono
+     sessions are bit-identical across all three. The pass and declined arms agree within every
+     width, so #943 is not the cause. It deserves its own look against "banking never moves a bit".
+
+### Re-verified (green unless noted)
+
+- **Meter words, own differential** (throwaway `crates/graph-compiler/tests/sol943_diff.rs`,
+  deleted).
+  - Sessions: a 21-track stereo session (EQ on every third track, partial banks, pan and mixing
+    matrices, a mute per channel, filters on and off), the first 12 mono-fixture tracks with the
+    collapse armed, and the 64-track intended fixture.
+  - Matrix: `Simd8`, `Simd4` and `Scalar` dispatch; concurrent delivery, between-render-calls
+    delivery with and without controls, and controlled delivery with the activation toggled every
+    five blocks; 4 seeds of 96 blocks. Every run was paired against
+    `test_only_set_bank_sample_peak_declined(true)`.
+  - Meters: at `PostMatrix`, `SAMPLE_PEAK` mixed with ALL, `+COUNTS`, `+HELD_PEAK` and
+    `ENERGY_RMS`. Also `SAMPLE_PEAK` at `PostFader` (a split chain, so the pass runs on the earlier
+    chain), `Input` and `PostInputBuiltins`. Periods 1, 7, 64, 100, 127, 128, 129, 300, 512, 1,536
+    and 2,048, with hold and decay on and off, and discontinuities of 77 to 5,000 samples.
+  - Input: NaN payloads, ±inf, ±0, subnormals, ±`MIN_POSITIVE`, ±1, ±`MAX`, 9e29 and 1.5e30, plus
+    invalid-only and silent stretches.
+  - Caller probes on final lanes: accepting probes (which alone trigger the pass), probes that
+    decline the resident view (the planar path and #885's `write_resident_lane` on folded lanes),
+    and plain probes. Each probe checks every `Some` peak against its own sanitized-peak oracle over
+    the resident words.
+  - Result: 4,533,495 snapshots equal on every field by bits. PCM, shape, transposes, folds,
+    redirects and collapse counters are equal. All 104,832 handed peaks equal the oracle. No
+    declined, `Scalar` or activation-bound arm ran a pass. The mono collapse fired (`[288, 3]`) and
+    stayed bit-identical, and on the stereo and mono sessions the three dispatches published
+    identical meter words.
+  - What reached the meters: −0 (10.0 M words), subnormals (370 k) and `MIN_POSITIVE`. NaN and
+    ±inf never reach a post-matrix lane (the D7 input rule), so G1 and G2 alone cover them.
+- **Opt-in and order.**
+  - The flag is derived beside `observed` from observer slices that nothing mutates after bind, and
+    from `MeterAccumulator::metrics`, which has no setter, so it cannot go stale. A controlled binding
+    needs an activation (`graph.plan.observation_activation_required`), so it never reaches
+    `observe_unit`.
+  - The pass runs after a successful execute and before the member loop, and only reads. The `?`
+    short-circuit and `write_resident_lane` are unchanged.
+  - G3's two controls pass. S-2 (`accepts_sample_peak` on `contains`) and G-1 go red on the ALL
+    control.
+- **Layout and API.** Finding 1 aside, the new field and the trait default compile across the
+  workspace, and every implementor, `SpectrumCaptureObserver` included, keeps `false`. host-web
+  (206) and capi (36) are green, and the graph policy passes.
+- **Wasm.**
+  - The build script's cargo line reproduces the implementer's `host_web.wasm` (sha256
+    `890705fa...9e54a9b2`, 3,308,878 bytes). The four callgraph checks, `--kernel-min 11` (15
+    kernels) and `--self-test` pass.
+  - The census matches: `bank_sample_peak` is `func[2252]`, with one caller and no calls.
+    `f32x4.abs` 6, `v128.and` 6, `i32x4.sub` 6, `i32x4.lt_u` 6, `v128.bitselect` 10, `f32x4.lt` 4,
+    `f32x4.pmax` 2, `loop` 4; no scalar `f32` op and no `f32x4.ge`.
+  - Each loop's only `br_if` is its back edge. The range test
+    `(bits & 0x7fffffff) - 0x00800000 <u 0x7f000000` is exactly `normal_or_zero` on the magnitude.
+  - `scripts/run-wasm-gates.sh`: native, wasm scalar and wasm `simd128` legs each ran 142 cases and
+    358 comparisons, with no mismatches.
+- **Tests and mutations.**
+  - The source scan's multi-line `MEMBER_CALL` pin is at least as strong as the one-line pin it
+    replaced. It matches only in `observe_unit`'s production body, indentation included, and its
+    `false` and `.ok()` control is kept. The new control rows are real.
+  - All nine recorded rows reproduce. L-1 and L-2 are red on G1 (3 of 4), G2 and corpus case 55;
+    L-green stays green. B-1 (period 300), B-2 (the ALL arm) and B-3 (period 512) are red on G2.
+    G-1 is red only on G3's ALL control. G-2 is red on G3 and the scan, and G-3 on G3.
+  - Extra rows, red unless noted:
+
+    | # | mutation | red on |
+    |---|---|---|
+    | S-1 | the bank pass seeded with `MIN_POSITIVE` | G3, the differential |
+    | S-2 | `accepts_sample_peak` on `metrics().contains(SAMPLE_PEAK)` | G3's ALL control |
+    | S-3 | `<` for `<=` in the window test (output-equivalent) | G2's merge counter only |
+    | S-4 | the flag derived from the non-final members | G3, G4 |
+    | S-5 | channels swapped in the merge | G2 |
+    | S-6 | `eligible` dropped from the gate (output-equivalent) | the source scan only |
+    | S-7 | the `Four` arm dispatched at `Simd8` | GREEN on every committed gate (finding 2) |
+- **Effect.** A throwaway in-process A/B on `sixty_four_track_console_metered`: two runtimes
+  alternated per block with the order swapped, 512 warm-up and 6,000 timed blocks, release build,
+  meters drained outside the clock, load 1.8-2.4.
+  - Paired median saving: 16.0 and 15.3 us (p10/p90 11.1/21.1 and 10.2/20.8).
+  - p50: 133.7 against 149.7 us, and 133.9 against 149.3 us.
+  - The PCM digests and all 34,688 snapshots were equal; 52,096 passes ran with the pass on and 0
+    declined.
+  - Descriptive only; this is not the row's result.
+- **Suites and policy.**
+  - `cargo fmt --all --check`, workspace clippy `-D warnings` (all targets, all features) and
+    `RUSTDOCFLAGS='-D warnings' cargo doc`: pass.
+  - Suites: lane 56, builtins 114 and 114, rack 54, graph 118 and 125, graph-compiler 94,
+    builtins-compiler 79, host-core 224, host-web 206, console-workload 39, capi 36.
+  - All eight policy scripts pass (realtime 56 regions in 16 files; determinism 100/100).
+  - The diff stays inside the authorized paths, including amendment 2's corpus.
+
+### Attempt 2 scope
+
+Findings 1 and 2 only, inside `crates/graph/src/runtime.rs`, the `crates/graph-compiler/src/lib.rs`
+tests, `crates/graph/tests/MUTATIONS.md` and this spec.
