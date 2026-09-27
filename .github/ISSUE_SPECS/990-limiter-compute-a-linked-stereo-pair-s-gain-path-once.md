@@ -310,3 +310,140 @@ not committed.
   | W8 | about 245 KB | about 274 KB |
   | W4 | about 146 KB | about 164 KB |
   | scalar | 56 KB | 64 KB |
+
+## Sol attempt 1 verdict: PASS
+
+Reviewer: Sol, 2026-09-27, on `cd924ed9` against `bbcf8ce1`. Implementation untouched; the tree
+was restored byte-for-byte after every mutation row. Harnesses were scratch and are not committed.
+
+### What was checked, independently of the in-tree oracle
+
+* **Separate-build differential.** One public-API harness (factory `prepare` and
+  `bind_homogeneous_bank`), built against an export of `bbcf8ce1` and against this branch. After
+  every block it folds every output word, every per-track `ProcessReport`, every track's full
+  state payload, the resident reduction reading, the per-lane symmetry witness and every restore
+  verdict. Scenarios draw: all four launch rates; quanta and ragged frame counts from 1 to 256;
+  `Maximum` and `DualMono`; bypass; uniform and ragged cohorts; partial banks (trailing lanes
+  silent or fed garbage); left/right asymmetry in ceiling, release, lookahead, or lookahead by one
+  ulp (same window). Signals are quiet, +3 dBFS, one-sided, +20 dBFS, tone, per-lane mixed, `+0`,
+  `-0`, subnormal, exact and one-below threshold, spikes, log-uniform, and NaN/inf/1e30. Events are
+  one- and two-channel retargets, staggered left-then-right retargets, same-value retargets,
+  rejected `Both`, out-of-order and lookahead spans, both resets, and restores. The restores
+  cover current, stale, cross-track, swapped, mixed-section, one-section-perturbed (ring,
+  reduction, prefix, phase, history, ramp), symmetric-perturbed and hostile-ramp payloads, and a
+  wrong version. Mono-collapse runs follow the contract, with `desymmetrize` skipped in some.
+  * Release: 8,000 scenarios × 128 blocks at each of scalar, W4 and W8 (3.07 M blocks, 834k with
+    every lane designed-symmetric under `Maximum`), plus 3,000 × 96. **All digests identical.**
+  * Dev profile (debug assertions): 1,200 × 96 blocks per width. Identical, and no assertion fired.
+  * wasm32 `+simd128` under Node 22: 6,000 scenarios (scalar and W4). Identical.
+* **Guarantees, measured directly** on both builds, with identical output:
+  * impulse latency is exactly `N + 6` at every rate and width, at unity gain;
+  * the stationary 8x-sinc true peak is at most -0.20 dB against the ceiling (worst ratio 0.978).
+* **Admission.** Every writer of the gain words re-derives or keeps the record:
+  * construction and reset: `lane_shapes_agree` (`src/lib.rs:2539`);
+  * §4.4: `src/lib.rs:2646`;
+  * render: the decision is the record (`src/lib.rs:2601-2604`), taken after `apply_automation`;
+  * collapse clears it (`src/lib.rs:2685`); `desymmetrize` sets it (`src/lib.rs:2745`);
+  * restore compares in full (`src/lib.rs:3197`), and a rejected restore writes nothing;
+  * the silent path keeps it, soundly (equal box sums at rest imply equal windows).
+
+  Nothing is stale. The admission is exact, if conservative (see L2).
+* **Gate 3's pins are base words.** `tests/linked.rs` passes unmodified on `bbcf8ce1` in dev and
+  release.
+
+### Gates (all reproduced)
+
+* fmt, clippy `-D warnings` (workspace, all targets, all features) and doc `-D warnings`: clean.
+* `true-peak-limiter`: 50/50 in dev, 50/50 in release.
+* `effect-runtime` 86; `console-workload` 39; `builtins-compiler --features test-support` 79.
+* `wasm-gates`: 9/9 in dev and 9/9 in release.
+* Lane and realtime policies: ok (57 regions).
+* AudioWorklet:
+  * base and branch built with the script's flags; the branch is `15abcca5…` and base is
+    `820e96dd…` (the committed pin `8934cdd9…` is already stale on base);
+  * "true-peak-limiter f32x4 dual" matches exactly one function (vector 880 to 910, scalar 0);
+  * the rule-3 kernel count stays at 14;
+  * the render, meter-poll and command-submit closures are unchanged;
+  * `check-web-audioworklet.sh` passes on an assembled directory.
+* Session digests: all 17 native 64-block digests match base, as do all 15 V8 wasm-guest digests
+  (tone). The V8 console and `eq_comp_simd1` 200-block digests on the +20 dBFS source also match.
+* **Mutations:** all 17 rows go red exactly as `tests/MUTATIONS.md` records.
+  * My differential independently catches every correctness row (M1-M12, M17).
+  * The liveness rows M13-M16 are, correctly, invisible to a class-A differential.
+  * An extra output-visible mutation, X1 (the right linked output left ungained), turns 7 limiter
+    tests and 11 `console-workload` tests red.
+
+### Performance (descriptive; separate binaries, ABBA, `taskset -c 31`, under the lock)
+
+* **Kernel rig** (64 tracks, fixture parameters), in cycles per lane-sample:
+  * hot W8: 9.95-10.50 to 8.70-9.15 (-12%);
+  * hot W4: 18.24-18.42 to 15.38-15.91 (-14% to -16%);
+  * quiet W8/W4: -14%/-15%; linked ramping W8/W4: -12% to -17%/-20%.
+* **Unlinked shapes** over 4 interleaved passes:
+  * `DualMono` +0.2%/+0.2%;
+  * asymmetric -1.1%/-0.1%;
+  * asymmetric ramping -0.2%/-2.8%;
+  * ragged (per-lane body, untouched) +0.7% W8 and +1.3% W4 (see I1).
+
+  One early W8 `DualMono` pass read +3% to +6% and did not reproduce in four later passes.
+* **Console, +20 dBFS source:**
+  * W8 27.41-27.80 to 26.24-26.60 (-3% to -5.5%);
+  * W4 115.0-115.4 to 112.4-112.7 (-2.3%);
+  * tone: W8 -1.0 to -1.4 and W4 -2.4 cycles per lane-sample;
+  * `eq_comp_simd1` is flat, so the limiter isolate falls about 11% (W8).
+* **V8, one process, 6 rounds each:**
+  * console +20 dBFS: 59.77 to 55.89 (-6.5%, faster in 6/6 rounds);
+  * tone: -6.3% (6/6);
+  * `eq_comp_simd1`: ±0.2%.
+
+  This meets or beats the claims.
+* **How much the hot console limits** (point 3, now measured, not argued): with observation
+  armed (it needs `control: true`, because `arm_observation` pushes through the control producers
+  at `tools/console-workload/src/lib.rs:1185`; this is why the attempt's arm published nothing),
+  the limiters with reduction at steady state are:
+
+  | source | limiters with reduction | ≥ 1 dB | median | deepest |
+  |---|---:|---:|---:|---:|
+  | +20 dBFS | 64/64 | 31 | ~0.95 dB | 21.3 dB |
+  | fixture tone | 6/64 | – | – | 0.41 dB |
+  | +3 dBFS | 63/64 | 14 | – | – |
+
+### Findings (severity-ranked; none blocks)
+
+1. **M1 (Medium; coverage, follow-up issue).** Session-level tests reach the linked body, but
+   they cannot see the right channel's mirrored state.
+   * *What reaches it:* `console-workload` renders compiled sessions whose W8 limiter banks link
+     on every block. `chain_shape::the_select_free_matrix_arm_renders_the_base_bits`
+     (`tools/console-workload/tests/chain_shape.rs:872`) pins `sixty_four_track_console`'s
+     pre-#990 64-block digest, and X1 turns it and 10 others red.
+   * *What it cannot see:* M1 stays green there, and M8 is caught only by the collapsed-tap
+     observation test. It stays green even on a +20 dBFS source with a hard left-only retarget
+     that unlinks a cohort. Three reasons:
+     * `SourceSignal::Injected` freezes one 128-frame block (`tools/console-workload/src/lib.rs:1756`). That period is
+       shorter than the 241-sample window, so the window minimum is constant and the post-unlink
+       difference falls below one ulp through the release step.
+     * The fixture tone barely limits.
+     * No session API exposes effect state payloads.
+   * *Meanwhile:* D90 and G5 run only the dual kernel, because `limiter_block`
+     (`crates/true-peak-limiter/src/lib.rs:1899`) is called from `corpus.rs:246` with no record.
+   * *Needed test:* a `console-workload` (or `host-core`) test that renders the standing console
+     from an **aperiodic, multi-block** source that limits every track (for example a
+     per-observation +20 dBFS noise table; this needs a tooling change to `SourceSignal`). It
+     arms observation, pushes a Left and Right ceiling retarget and later a Left-only one through
+     `push_parameter`, and pins the output and readings, recorded on `bbcf8ce1`, at Simd8, Simd4
+     and in the wasm guest. The test must turn M1, M2, M6 and M7 red. My output-only aperiodic
+     bank differential shows it can: 23-124 of 400 scenarios per width.
+   * Separately, route `corpus::run_case` through `limiter_block_linkable` with a record, so D90
+     and G5 link. That needs `corpus.rs` authorised.
+2. **L2 (Low; liveness).** Rendering never re-establishes the record. After any one-channel
+   retarget, the pair stays dual until reset, restore or `desymmetrize`. That holds even once both
+   channels settle at silent rest, where `is_at_silent_rest` on both, plus equal phases and shapes,
+   would re-prove agreement cheaply. This is as briefed; it is worth a follow-up, since hosts
+   rarely reset.
+3. **I1 (Info).** The ragged per-lane body, which #990 does not change, measured +0.7% at W8 and
+   +1.3% at W4, with a consistent sign. That is within codegen variance, but it should be
+   watched in the weekly pass.
+4. **I2 (Info).**
+   * Contract 4's "one whole-block branch" is a per-segment test of a block-invariant flag
+     (`src/lib.rs:2275`). That is acceptable as measured.
+   * The AudioWorklet pin was stale before #990, and needs a repin at the batch boundary.
