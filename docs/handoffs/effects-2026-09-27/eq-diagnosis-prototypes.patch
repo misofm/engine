@@ -1,0 +1,3214 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 36c4c272..c9608415 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -343,6 +343,7 @@ dependencies = [
+  "graph",
+  "graph-compiler",
+  "lane",
++ "parametric-eq",
+  "session",
+ ]
+ 
+@@ -2427,6 +2428,7 @@ dependencies = [
+  "bench-support",
+  "console-workload",
+  "lane",
++ "parametric-eq",
+ ]
+ 
+ [[package]]
+diff --git a/crates/parametric-eq/Cargo.toml b/crates/parametric-eq/Cargo.toml
+index ef1527d9..819fdce3 100644
+--- a/crates/parametric-eq/Cargo.toml
++++ b/crates/parametric-eq/Cargo.toml
+@@ -31,6 +31,7 @@ sha2.workspace = true
+ [features]
+ default = []
+ test-support = []
++diag = []
+ 
+ [lints]
+ workspace = true
+diff --git a/crates/parametric-eq/src/lib.rs b/crates/parametric-eq/src/lib.rs
+index bb160ecf..5964b77d 100644
+--- a/crates/parametric-eq/src/lib.rs
++++ b/crates/parametric-eq/src/lib.rs
+@@ -66,6 +66,137 @@ use lane::{Backend, Lane, Simd4, Simd8};
+ mod control;
+ mod response;
+ 
++/// EQ diagnosis toggles (diagnosis prototype only; never committed).
++#[cfg(feature = "diag")]
++pub mod diag {
++    use core::sync::atomic::{AtomicU32, Ordering};
++    /// The flag word, read once per bank call.
++    pub static FLAGS: AtomicU32 = AtomicU32::new(0);
++    #[inline(always)]
++    pub(crate) fn flags() -> u32 {
++        FLAGS.load(Ordering::Relaxed)
++    }
++}
++#[cfg(not(feature = "diag"))]
++mod diag {
++    #[inline(always)]
++    pub(crate) fn flags() -> u32 {
++        0
++    }
++}
++/// Attribution: return from `process_bank_inner` before `render`.
++pub const DIAG_SKIP_BANK: u32 = 1 << 0;
++/// Attribution: skip the interleaved kernel call(s), keep the pass set-up.
++pub const DIAG_SKIP_KERNEL: u32 = 1 << 1;
++/// Attribution (bit-exact on the fixture): skip `block_admits_elision`.
++pub const DIAG_SKIP_GATE: u32 = 1 << 2;
++/// Attribution (bit-exact on finite output): skip the 4.4 boundary scan.
++pub const DIAG_SKIP_CHECK: u32 = 1 << 3;
++/// Attribution (bit-exact): skip the positive-zero input test.
++pub const DIAG_SKIP_ZEROTEST: u32 = 1 << 4;
++/// Prototype: no identity padding; a lone section runs at depth 1.
++pub const DIAG_NO_PAD: u32 = 1 << 8;
++/// Prototype: a pass whose dry masks are all clear runs the unmasked kernel.
++pub const DIAG_UNMASKED: u32 = 1 << 9;
++/// Prototype: pad with a general identity band rather than a dedicated cut.
++pub const DIAG_PAD_GENERAL: u32 = 1 << 10;
++/// Bind-time: let a native `Simd8` build bind four-lane EQ banks (read at bind only).
++pub const DIAG_ALLOW_SIMD4: u32 = 1 << 16;
++/// Attribution: every dry mask is the empty mask (no per-lane bit derivation).
++pub const DIAG_ZERO_MASKS: u32 = 1 << 5;
++/// Prototype: depth-2 passes run the software-pipelined (skewed) cascade.
++pub const DIAG_SKEW: u32 = 1 << 11;
++/// Attribution (bit-exact while no restored state is signed-zero): skip legs (b) and (c).
++pub const DIAG_SKIP_STATE_LEGS: u32 = 1 << 6;
++/// Prototype: the elision gate's min/max form (same predicate).
++pub const DIAG_GATE_MINMAX: u32 = 1 << 7;
++
++/// The min/max form of `block_admits_elision`: the same predicate, fewer vector operations.
++#[inline]
++#[must_use]
++fn block_admits_elision_minmax(io: &[f32]) -> bool {
++    let mut nearest = u32::MAX;
++    let mut largest = 0_u32;
++    for value in io {
++        let bits = value.to_bits();
++        nearest = nearest.min(bits ^ NEGATIVE_ZERO_BITS);
++        largest = largest.max(bits & MAGNITUDE_MASK);
++    }
++    nearest != 0 && largest <= ELISION_MAGNITUDE_CEILING
++}
++
++/// Prototype kernel: section `k` of every stream runs frame `i - k` in iteration `i`. Each
++/// chain sees the same inputs in the same order through the same `svf_step` and output mix.
++#[inline(always)]
++fn diag_skewed<L: Lane, const S: usize, const D: usize, const MASKED: bool>(
++    io: [&mut [f32]; S],
++    frames: usize,
++    c: &[[SvfCoef<L>; D]; S],
++    s: &mut [[SvfState<L>; D]; S],
++    masks: &[[L::Mask; D]; S],
++) {
++    let w = L::WIDTH;
++    let span = frames * w;
++    let mut io = io.map(|block| &mut block[..span]);
++    let mut state = *s;
++    let nc1: [[L; D]; S] = core::array::from_fn(|t| core::array::from_fn(|k| c[t][k].c1.neg()));
++    let mut carry: [[L; D]; S] = [[L::zero(); D]; S];
++    macro_rules! step {
++        ($i:expr, $t:expr, $k:expr) => {{
++            let (i, t, k) = ($i, $t, $k);
++            let f = i - k;
++            let x = if k == 0 {
++                L::load(&io[t][f * w..f * w + w])
++            } else {
++                carry[t][k - 1]
++            };
++            let coefficients = &c[t][k];
++            let (v1, v2) = lane::kernels::svf_step(
++                x,
++                nc1[t][k],
++                coefficients.a2,
++                coefficients.a3,
++                &mut state[t][k],
++            );
++            let wet = coefficients
++                .m2
++                .fma(v2, coefficients.m1.fma(v1, coefficients.m0.mul(x)));
++            let y = if MASKED { L::select(masks[t][k], x, wet) } else { wet };
++            if k == D - 1 {
++                y.store(&mut io[t][f * w..f * w + w]);
++            } else {
++                carry[t][k] = y;
++            }
++        }};
++    }
++    if frames < D {
++        svf_cascade_interleaved_with_dry_masks::<L, S, D>(io, frames, c, s, masks);
++        return;
++    }
++    for i in 0..D - 1 {
++        for t in 0..S {
++            for k in (0..=i).rev() {
++                step!(i, t, k);
++            }
++        }
++    }
++    for i in D - 1..frames {
++        for t in 0..S {
++            for k in (0..D).rev() {
++                step!(i, t, k);
++            }
++        }
++    }
++    for i in frames..frames + D - 1 {
++        for t in 0..S {
++            for k in (i + 1 - frames..D).rev() {
++                step!(i, t, k);
++            }
++        }
++    }
++    *s = state;
++}
++
+ pub use response::{
+     EqResponseConfiguration, EqResponseError, EqResponseMode, EqResponseOutput, EqResponseRequest,
+     EqResponseSummary, query_response_into, query_snapshot_magnitudes_into,
+@@ -1457,6 +1588,7 @@ fn process_channels<L: Lane, const W: usize>(
+     right: &mut [f32],
+     frames: usize,
+     stationary: bool,
++    flags: u32,
+ ) {
+     if !stationary {
+         channels.0.process_block(left, frames);
+@@ -1465,10 +1597,10 @@ fn process_channels<L: Lane, const W: usize>(
+     }
+     debug_assert!(channels.0.identity_flags_agree());
+     debug_assert!(channels.1.identity_flags_agree());
+-    let sections = cascade_sections::<L, W>(channels.0, channels.1, left, right, frames);
++    let sections = cascade_sections::<L, W>(channels.0, channels.1, left, right, frames, flags);
+     // Six physical sections use the effective stationary depth of two on every backend. This
+     // keeps the final LPF in a complete pass while retaining one fixed interleaved kernel shape.
+-    interleave::<L, W, EFFECTIVE_CASCADE_DEPTH>(channels, left, right, frames, sections);
++    interleave::<L, W, EFFECTIVE_CASCADE_DEPTH>(channels, left, right, frames, sections, flags);
+ }
+ 
+ /// [`process_channels`] over one plane: the collapsed track's live channel.
+@@ -1686,10 +1818,15 @@ fn cascade_sections<L: Lane, const W: usize>(
+     left: &[f32],
+     right: &[f32],
+     frames: usize,
++    flags: u32,
+ ) -> ([usize; EQ_SECTION_COUNT], usize) {
+     let all = (core::array::from_fn(|section| section), EQ_SECTION_COUNT);
+     let dead = |section: usize| left_channel.identity[section] && right_channel.identity[section];
+-    let depth = EFFECTIVE_CASCADE_DEPTH;
++    let depth = if flags & DIAG_NO_PAD != 0 {
++        1
++    } else {
++        EFFECTIVE_CASCADE_DEPTH
++    };
+     let live = (0..EQ_SECTION_COUNT)
+         .filter(|section| !dead(*section))
+         .count();
+@@ -1705,10 +1842,21 @@ fn cascade_sections<L: Lane, const W: usize>(
+     // (a) Neither input plane carries `-0.0`, an infinity, a NaN, or a magnitude above the §4.4
+     // bound. See the proof above; this is the leg that stops a `-0.0` entering the cascade.
+     let words = frames * W;
+-    if !block_admits_elision(&left[..words]) || !block_admits_elision(&right[..words]) {
+-        return all;
++    if flags & DIAG_SKIP_GATE == 0 {
++        let admitted = if flags & DIAG_GATE_MINMAX != 0 {
++            block_admits_elision_minmax(&left[..words])
++                && block_admits_elision_minmax(&right[..words])
++        } else {
++            block_admits_elision(&left[..words]) && block_admits_elision(&right[..words])
++        };
++        if !admitted {
++            return all;
++        }
+     }
+     for section in 0..EQ_SECTION_COUNT {
++        if flags & DIAG_SKIP_STATE_LEGS != 0 {
++            break;
++        }
+         let admissible = if dead(section) {
+             // (b) An elided section must already be at the `+0.0` state the proof's induction
+             // starts from -- otherwise its state would move in the full cascade and not here.
+@@ -1731,7 +1879,8 @@ fn cascade_sections<L: Lane, const W: usize>(
+     let mut length = 0;
+     for section in 0..EQ_SECTION_COUNT {
+         let keep = if dead(section) {
+-            let take = padding > 0;
++            let general = section != HPF_SECTION && section != LPF_SECTION;
++            let take = padding > 0 && (flags & DIAG_PAD_GENERAL == 0 || general);
+             padding -= usize::from(take);
+             take
+         } else {
+@@ -1742,7 +1891,9 @@ fn cascade_sections<L: Lane, const W: usize>(
+             length += 1;
+         }
+     }
+-    debug_assert_eq!(length, kept);
++    if length != kept {
++        return all;
++    }
+     (list, length)
+ }
+ 
+@@ -1759,10 +1910,10 @@ fn interleave<L: Lane, const W: usize, const DEPTH: usize>(
+     right: &mut [f32],
+     frames: usize,
+     sections: ([usize; EQ_SECTION_COUNT], usize),
++    flags: u32,
+ ) {
+     debug_assert_eq!(EQ_SECTION_COUNT % DEPTH, 0);
+     let (list, length) = sections;
+-    debug_assert_eq!(length % DEPTH, 0);
+     for pass in 0..length / DEPTH {
+         let base = pass * DEPTH;
+         let at: [usize; DEPTH] = core::array::from_fn(|k| list[base + k]);
+@@ -1774,17 +1925,53 @@ fn interleave<L: Lane, const W: usize, const DEPTH: usize>(
+             core::array::from_fn(|k| channels.0.sections[at[k]].state),
+             core::array::from_fn(|k| channels.1.sections[at[k]].state),
+         ];
+-        let dry_masks: [[L::Mask; DEPTH]; 2] = [
+-            core::array::from_fn(|k| channels.0.dry_mask(at[k])),
+-            core::array::from_fn(|k| channels.1.dry_mask(at[k])),
+-        ];
+-        svf_cascade_interleaved_with_dry_masks::<L, 2, DEPTH>(
+-            [&mut *left, &mut *right],
+-            frames,
+-            &coefficients,
+-            &mut state,
+-            &dry_masks,
+-        );
++        let dry_masks: [[L::Mask; DEPTH]; 2] = if flags & DIAG_ZERO_MASKS != 0 {
++            [[L::zero().lt(L::zero()); DEPTH]; 2]
++        } else {
++            [
++                core::array::from_fn(|k| channels.0.dry_mask(at[k])),
++                core::array::from_fn(|k| channels.1.dry_mask(at[k])),
++            ]
++        };
++        let any_dry = dry_masks
++            .iter()
++            .any(|masks| masks.iter().any(|mask| L::mask_any(*mask)));
++        if flags & DIAG_SKIP_KERNEL != 0 {
++            core::hint::black_box((&coefficients, &mut state, &dry_masks));
++        } else if flags & DIAG_SKEW != 0 {
++            if flags & DIAG_UNMASKED != 0 && !any_dry {
++                diag_skewed::<L, 2, DEPTH, false>(
++                    [&mut *left, &mut *right],
++                    frames,
++                    &coefficients,
++                    &mut state,
++                    &dry_masks,
++                );
++            } else {
++                diag_skewed::<L, 2, DEPTH, true>(
++                    [&mut *left, &mut *right],
++                    frames,
++                    &coefficients,
++                    &mut state,
++                    &dry_masks,
++                );
++            }
++        } else if flags & DIAG_UNMASKED != 0 && !any_dry {
++            lane::kernels::svf_cascade_interleaved::<L, 2, DEPTH>(
++                [&mut *left, &mut *right],
++                frames,
++                &coefficients,
++                &mut state,
++            );
++        } else {
++            svf_cascade_interleaved_with_dry_masks::<L, 2, DEPTH>(
++                [&mut *left, &mut *right],
++                frames,
++                &coefficients,
++                &mut state,
++                &dry_masks,
++            );
++        }
+         let [left_state, right_state] = state;
+         for (k, word) in left_state.into_iter().enumerate() {
+             channels.0.sections[at[k]].state = word;
+@@ -1793,6 +1980,39 @@ fn interleave<L: Lane, const W: usize, const DEPTH: usize>(
+             channels.1.sections[at[k]].state = word;
+         }
+     }
++    if length % DEPTH == 1 {
++        let at = list[length - 1];
++        let coefficients: [[SvfCoef<L>; 1]; 2] =
++            [[channels.0.sections[at].coef], [channels.1.sections[at].coef]];
++        let mut state: [[SvfState<L>; 1]; 2] =
++            [[channels.0.sections[at].state], [channels.1.sections[at].state]];
++        let dry_masks: [[L::Mask; 1]; 2] = if flags & DIAG_ZERO_MASKS != 0 {
++            [[L::zero().lt(L::zero())]; 2]
++        } else {
++            [[channels.0.dry_mask(at)], [channels.1.dry_mask(at)]]
++        };
++        let any_dry = L::mask_any(dry_masks[0][0]) || L::mask_any(dry_masks[1][0]);
++        if flags & DIAG_SKIP_KERNEL != 0 {
++            core::hint::black_box((&coefficients, &mut state, &dry_masks));
++        } else if flags & DIAG_UNMASKED != 0 && !any_dry {
++            lane::kernels::svf_cascade_interleaved::<L, 2, 1>(
++                [&mut *left, &mut *right],
++                frames,
++                &coefficients,
++                &mut state,
++            );
++        } else {
++            svf_cascade_interleaved_with_dry_masks::<L, 2, 1>(
++                [&mut *left, &mut *right],
++                frames,
++                &coefficients,
++                &mut state,
++                &dry_masks,
++            );
++        }
++        channels.0.sections[at].state = state[0][0];
++        channels.1.sections[at].state = state[1][0];
++    }
+ }
+ 
+ /// Reads increment `index` of a step set in the pinned order.
+@@ -2084,8 +2304,10 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
+         // #163 phase 3 reuses this leg. "Stationary" -- no lane of either channel has a ramp in
+         // flight -- is exactly the condition under which every section runs `svf_block` with fixed
+         // coefficients over the whole block, which is the shape the interleaved cascade replaces.
++        let flags = diag::flags();
+         let stationary = self.left.no_ramp_in_flight() && self.right.no_ramp_in_flight();
+         let quiet = stationary
++            && flags & DIAG_SKIP_ZEROTEST == 0
+             && block_is_positive_zero(&left[..words])
+             && block_is_positive_zero(&right[..words]);
+         if quiet && self.silent_fixed_point {
+@@ -2107,13 +2329,14 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
+             right,
+             frames,
+             stationary,
++            flags,
+         );
+         for (index, (channel, block)) in
+             [(&mut self.left, &mut *left), (&mut self.right, &mut *right)]
+                 .into_iter()
+                 .enumerate()
+         {
+-            if check_block::<L>(block) {
++            if flags & DIAG_SKIP_CHECK != 0 || check_block::<L>(block) {
+                 continue;
+             }
+             let mask = nonfinite_lane_mask::<L>(block);
+@@ -2397,7 +2620,9 @@ impl NativeEffectFactory for ParametricEqFactory {
+         // divergence (`NativeEffectFactory::bind_homogeneous_bank` states the frozen rule).
+         request.validate_shape()?;
+         let lanes = request.width.lanes() as usize;
+-        if lanes != Backend::current().width() {
++        if lanes != Backend::current().width()
++            && !(lanes == 4 && diag::flags() & DIAG_ALLOW_SIMD4 != 0)
++        {
+             return Ok(None);
+         }
+         let first = request
+@@ -2847,7 +3072,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
+             // rendering its already prepared state, so no render-thread designer is reachable.
+             report.reports[track].invalid_spans = (end - start) as u64;
+         }
+-        if self.metadata.bypass {
++        if self.metadata.bypass || diag::flags() & DIAG_SKIP_BANK != 0 {
+             return report;
+         }
+         let frames = block.frames as usize;
+diff --git a/tools/console-workload/Cargo.toml b/tools/console-workload/Cargo.toml
+index 1b327e59..5f2833ca 100644
+--- a/tools/console-workload/Cargo.toml
++++ b/tools/console-workload/Cargo.toml
+@@ -32,6 +32,7 @@ session.workspace = true
+ # tests build, so the bench and the wasm guest that link it as a normal dependency are unaffected.
+ [dev-dependencies]
+ graph = { workspace = true, features = ["test-support"] }
++parametric-eq = { workspace = true, features = ["diag"] }
+ 
+ [lints]
+ workspace = true
+diff --git a/tools/console-workload/tests/eq_diag.rs b/tools/console-workload/tests/eq_diag.rs
+new file mode 100644
+index 00000000..a715f6ff
+--- /dev/null
++++ b/tools/console-workload/tests/eq_diag.rs
+@@ -0,0 +1,1258 @@
++//! Parametric-EQ diagnosis harness (`docs/handoffs/effects-2026-09-27/EQ-DIAGNOSIS.md`).
++//!
++//! Diagnosis prototype only. Ignored by default; prints measurements and asserts nothing about
++//! time. Build first, then run the binary pinned under the shared timing lock:
++//!
++//! ```text
++//! CARGO_INCREMENTAL=0 cargo test --release -p console-workload --test eq_diag --no-run
++//! flock -w 7200 LOCK taskset -c 31 target/release/deps/eq_diag-<hash> --ignored --nocapture \
++//!     --test-threads 1 <facts|rows|ab|digests|kernels>
++//! ```
++//!
++//! Cycles are derived: nanoseconds from `Instant` times a core clock calibrated in process from a
++//! dependent scalar `f32` add chain at three cycles per add (Zen 3), the plumbing-diagnosis method.
++
++use std::hint::black_box;
++use std::sync::atomic::Ordering;
++use std::time::Instant;
++
++use console_workload::{PlanConfig, QUANTUM, SessionRuntime, WORKLOADS, Workload};
++use engine::SampleRateHz;
++use graph::test_only_phase_profile as profile;
++use lane::kernels::{
++    SvfCoef, SvfState, svf_cascade_interleaved, svf_cascade_interleaved_with_dry_masks,
++};
++use lane::{Backend, Lane, Simd4, Simd8};
++use parametric_eq::{
++    DIAG_ALLOW_SIMD4, DIAG_SKEW, DIAG_ZERO_MASKS, DIAG_NO_PAD, DIAG_PAD_GENERAL, DIAG_SKIP_BANK, DIAG_SKIP_CHECK, DIAG_SKIP_GATE,
++    DIAG_SKIP_KERNEL, DIAG_SKIP_ZEROTEST, DIAG_UNMASKED, EqBandKind, design_svf,
++};
++
++const TRACKS: usize = 64;
++const FADD_LATENCY_CYCLES: f64 = 3.0;
++
++fn lane_samples() -> f64 {
++    (TRACKS * QUANTUM * 2) as f64
++}
++
++fn core_hz() -> f64 {
++    const ADDS: u64 = 300_000_000;
++    let mut best = f64::MAX;
++    for _ in 0..3 {
++        let mut x = black_box(0.0_f32);
++        let d = black_box(1.0e-3_f32);
++        let start = Instant::now();
++        for _ in 0..ADDS {
++            x += d;
++        }
++        let elapsed = start.elapsed().as_secs_f64();
++        black_box(x);
++        best = best.min(elapsed);
++    }
++    FADD_LATENCY_CYCLES * ADDS as f64 / best
++}
++
++fn loadavg() -> String {
++    std::fs::read_to_string("/proc/loadavg")
++        .unwrap_or_default()
++        .trim()
++        .to_string()
++}
++
++fn set_flags(flags: u32) {
++    parametric_eq::diag::FLAGS.store(flags, Ordering::Relaxed);
++}
++
++fn flag_name(flags: u32) -> String {
++    if flags == 0 {
++        return "base".into();
++    }
++    let names = [
++        (DIAG_SKIP_BANK, "skip_bank"),
++        (DIAG_SKIP_KERNEL, "skip_kernel"),
++        (DIAG_SKIP_GATE, "skip_gate"),
++        (DIAG_SKIP_CHECK, "skip_check"),
++        (DIAG_SKIP_ZEROTEST, "skip_zerotest"),
++        (DIAG_NO_PAD, "no_pad"),
++        (DIAG_UNMASKED, "unmasked"),
++        (DIAG_PAD_GENERAL, "pad_general"),
++        (DIAG_ZERO_MASKS, "zero_masks"),
++        (DIAG_SKEW, "skew"),
++        (1 << 6, "skip_state_legs"),
++        (1 << 7, "gate_minmax"),
++    ];
++    names
++        .iter()
++        .filter(|(bit, _)| flags & bit != 0)
++        .map(|(_, name)| *name)
++        .collect::<Vec<_>>()
++        .join("+")
++}
++
++fn env_flags(default: &[u32]) -> Vec<u32> {
++    match std::env::var("EQ_DIAG_FLAGS") {
++        Ok(text) => text
++            .split(',')
++            .map(|word| word.trim().parse().expect("flag word"))
++            .collect(),
++        Err(_) => default.to_vec(),
++    }
++}
++
++fn env_backends() -> Vec<Backend> {
++    let text = std::env::var("EQ_DIAG_BACKENDS").unwrap_or_else(|_| "8,4".into());
++    text.split(',')
++        .map(|word| match word.trim() {
++            "8" => Backend::Simd8,
++            "4" => Backend::Simd4,
++            "1" => Backend::Scalar,
++            other => panic!("backend {other}"),
++        })
++        .collect()
++}
++
++/// Builds one arm. `Simd4` binds four-lane EQ banks (`DIAG_ALLOW_SIMD4` held during the build)
++/// unless `EQ_DIAG_SIMD4_SCALAR_EQ` is set, which keeps the shipped native behaviour (the EQ then
++/// renders per node at W = 1).
++fn build(workload: Workload, backend: Backend) -> SessionRuntime {
++    let allow = backend == Backend::Simd4 && std::env::var("EQ_DIAG_SIMD4_SCALAR_EQ").is_err();
++    let previous = parametric_eq::diag::FLAGS.load(Ordering::Relaxed);
++    if allow {
++        set_flags(previous | DIAG_ALLOW_SIMD4);
++    }
++    let runtime = SessionRuntime::build_with_dispatch(workload, PlanConfig::BASELINE, backend);
++    set_flags(previous);
++    runtime
++}
++
++fn backend_name(backend: Backend) -> &'static str {
++    match backend {
++        Backend::Simd8 => "Simd8",
++        Backend::Simd4 => "Simd4",
++        Backend::Scalar => "Scalar",
++    }
++}
++
++/// `(min, p50)` nanoseconds per block over `blocks` back-to-back renders.
++fn measure(runtime: &mut SessionRuntime, observation: &mut u64, blocks: usize) -> (u64, u64) {
++    let mut samples = Vec::with_capacity(blocks);
++    for _ in 0..blocks {
++        let start = Instant::now();
++        runtime.render(*observation).expect("block");
++        samples.push(u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX));
++        *observation += 1;
++    }
++    samples.sort_unstable();
++    (samples[0], samples[samples.len() / 2])
++}
++
++fn median(values: &mut [f64]) -> f64 {
++    values.sort_by(f64::total_cmp);
++    values[values.len() / 2]
++}
++
++#[test]
++#[ignore = "diagnosis harness"]
++fn facts() {
++    set_flags(0);
++    for backend in env_backends() {
++        for workload in [
++            Workload::SixtyFourTrackEqOnly,
++            Workload::SixtyFourTrackBuiltinsOnly,
++        ] {
++            let mut runtime =
++                build(workload, backend);
++            let before = runtime.bank_transposes();
++            for block in 0..8 {
++                runtime.render(block).expect("render");
++            }
++            let after = runtime.bank_transposes();
++            println!(
++                "{:<6} {:<32} bank_shape={:?} transposes/block={} scatter_redirects={} \
++                 route_folds={} units={} collapse={:?}",
++                backend_name(backend),
++                workload.kind(),
++                runtime.bank_shape(),
++                (after - before) / 8,
++                runtime.bank_scatter_redirects(),
++                runtime.bank_route_folds(),
++                runtime.unit_eligibility().len(),
++                runtime.bank_collapse_counters(),
++            );
++            if std::env::var("EQ_DIAG_UNITS").is_ok() {
++                for unit in runtime.unit_eligibility() {
++                    if unit.banked || unit.stages > 1 {
++                        println!(
++                            "   unit {} banked={} stages={} lanes={:?}",
++                            unit.unit, unit.banked, unit.stages, unit.lane_tracks
++                        );
++                    }
++                }
++            }
++        }
++    }
++}
++
++/// Phase profile and probes-off p50 of the two rows, interleaved.
++#[test]
++#[ignore = "diagnosis harness"]
++fn rows() {
++    set_flags(0);
++    let hz = core_hz();
++    println!("core clock {:.3} GHz, loadavg {}", hz / 1e9, loadavg());
++    for backend in env_backends() {
++        let mut eq = build(Workload::SixtyFourTrackEqOnly, backend);
++        let mut builtins = build(Workload::SixtyFourTrackBuiltinsOnly, backend);
++        let (mut oe, mut ob) = (0_u64, 0_u64);
++        profile::enable(false);
++        measure(&mut eq, &mut oe, 512);
++        measure(&mut builtins, &mut ob, 512);
++        let mut eq_p50 = Vec::new();
++        let mut builtins_p50 = Vec::new();
++        for round in 0..4 {
++            let (emin, ep50) = measure(&mut eq, &mut oe, 3000);
++            let (bmin, bp50) = measure(&mut builtins, &mut ob, 3000);
++            println!(
++                "{} round {round}: eq min {emin} p50 {ep50} ns | builtins min {bmin} p50 {bp50} \
++                 ns | delta {} ns = {:.3} cyc/lane-sample",
++                backend_name(backend),
++                ep50 as i64 - bp50 as i64,
++                (ep50 as f64 - bp50 as f64) * hz / 1e9 / lane_samples()
++            );
++            eq_p50.push(ep50 as f64);
++            builtins_p50.push(bp50 as f64);
++        }
++        let e = median(&mut eq_p50);
++        let b = median(&mut builtins_p50);
++        println!(
++            "{} median: eq {e:.0} ns ({:.3} cyc/ls), builtins {b:.0} ns ({:.3} cyc/ls), \
++             isolate {:.0} ns = {:.3} cyc/lane-sample; loadavg {}",
++            backend_name(backend),
++            e * hz / 1e9 / lane_samples(),
++            b * hz / 1e9 / lane_samples(),
++            e - b,
++            (e - b) * hz / 1e9 / lane_samples(),
++            loadavg()
++        );
++        for (name, runtime, observation) in [
++            ("eq", &mut eq, &mut oe),
++            ("builtins", &mut builtins, &mut ob),
++        ] {
++            profile::enable(true);
++            profile::reset();
++            for _ in 0..3000 {
++                runtime.render(*observation).expect("block");
++                *observation += 1;
++            }
++            profile::enable(false);
++            let (nanos, blocks, _) = profile::snapshot();
++            let names = [
++                "enter", "source", "bound", "route", "output", "id-copy", "id-alias", "other",
++                "bank", "exit",
++            ];
++            let parts: Vec<String> = names
++                .iter()
++                .enumerate()
++                .filter(|(index, _)| nanos[*index] > 0)
++                .map(|(index, name)| {
++                    format!(
++                        "{name} {:.0}",
++                        nanos[index] as f64 / blocks as f64 * hz / 1e9
++                    )
++                })
++                .collect();
++            println!(
++                "{} {name} phase cycles/block: {}",
++                backend_name(backend),
++                parts.join(", ")
++            );
++        }
++    }
++}
++
++fn env_workload() -> Workload {
++    match std::env::var("EQ_DIAG_WORKLOAD").as_deref() {
++        Ok("idle") => Workload::SixtyFourTrackIdle,
++        Ok("console") => Workload::SixtyFourTrackConsole,
++        Ok("mono") => Workload::SixtyFourTrackConsoleMono,
++        _ => Workload::SixtyFourTrackEqOnly,
++    }
++}
++
++/// In-process A/B of the EQ toggles on one runtime per backend, interleaved rounds.
++#[test]
++#[ignore = "diagnosis harness"]
++fn ab() {
++    let flags_list = env_flags(&[
++        0,
++        DIAG_SKIP_BANK,
++        DIAG_SKIP_KERNEL,
++        DIAG_SKIP_GATE,
++        DIAG_SKIP_CHECK,
++        DIAG_SKIP_ZEROTEST,
++        DIAG_NO_PAD,
++        DIAG_NO_PAD | DIAG_UNMASKED,
++        DIAG_PAD_GENERAL | DIAG_UNMASKED,
++    ]);
++    let rounds: usize = std::env::var("EQ_DIAG_ROUNDS")
++        .ok()
++        .and_then(|text| text.parse().ok())
++        .unwrap_or(4);
++    let blocks: usize = std::env::var("EQ_DIAG_BLOCKS")
++        .ok()
++        .and_then(|text| text.parse().ok())
++        .unwrap_or(1500);
++    let hz = core_hz();
++    println!(
++        "core clock {:.3} GHz, loadavg {}, rounds {rounds}, blocks {blocks}",
++        hz / 1e9,
++        loadavg()
++    );
++    for backend in env_backends() {
++        set_flags(0);
++        let mut eq = build(env_workload(), backend);
++        let mut builtins = build(Workload::SixtyFourTrackBuiltinsOnly, backend);
++        let (mut oe, mut ob) = (0_u64, 0_u64);
++        measure(&mut eq, &mut oe, 512);
++        measure(&mut builtins, &mut ob, 512);
++        println!("workload {}", env_workload().kind());
++        let mut table: Vec<Vec<f64>> = vec![Vec::new(); flags_list.len()];
++        let mut control = Vec::new();
++        for round in 0..rounds {
++            set_flags(0);
++            control.push(measure(&mut builtins, &mut ob, blocks).1 as f64);
++            for step in 0..flags_list.len() {
++                let index = (step + round) % flags_list.len();
++                set_flags(flags_list[index]);
++                measure(&mut eq, &mut oe, 64);
++                table[index].push(measure(&mut eq, &mut oe, blocks).1 as f64);
++            }
++        }
++        set_flags(0);
++        let b = median(&mut control);
++        let base = median(&mut table[0].clone());
++        println!(
++            "== {} builtins_only control p50 {b:.0} ns; loadavg {}",
++            backend_name(backend),
++            loadavg()
++        );
++        for (index, flags) in flags_list.iter().enumerate() {
++            let samples = table[index].clone();
++            let m = median(&mut table[index]);
++            println!(
++                "{:<6} {:<28} p50 {m:>8.0} ns  vs base {:>+7.0} ns ({:>+8.0} cyc/block, {:>+6.3} \
++                 cyc/ls)  isolate {:>6.3} cyc/ls  rounds {:?}",
++                backend_name(backend),
++                flag_name(*flags),
++                m - base,
++                (m - base) * hz / 1e9,
++                (m - base) * hz / 1e9 / lane_samples(),
++                (m - b) * hz / 1e9 / lane_samples(),
++                samples
++            );
++        }
++    }
++}
++
++/// 64-block digests of every standing workload under each flag set, against flag 0.
++#[test]
++#[ignore = "diagnosis harness"]
++fn digests() {
++    let flags_list = env_flags(&[
++        DIAG_SKIP_GATE,
++        DIAG_SKIP_CHECK,
++        DIAG_SKIP_ZEROTEST,
++        DIAG_NO_PAD,
++        DIAG_NO_PAD | DIAG_UNMASKED,
++        DIAG_PAD_GENERAL | DIAG_UNMASKED,
++    ]);
++    let digest = |workload: Workload, backend: Backend, flags: u32| {
++        set_flags(flags);
++        let mut runtime = build(workload, backend);
++        let mut sink = bench_support::digest::Sha256Sink::new();
++        for block in 0..64 {
++            runtime.render(block).expect("render");
++            runtime.hash_output(&mut sink);
++        }
++        set_flags(0);
++        sink.finish_hex()
++    };
++    let mut mismatches = 0;
++    for backend in [Backend::Scalar, Backend::Simd4, Backend::Simd8] {
++        for workload in WORKLOADS {
++            let base = digest(workload, backend, 0);
++            let mut line = format!(
++                "{:<6} {:<44} {}",
++                backend_name(backend),
++                workload.kind(),
++                &base[..16]
++            );
++            for flags in &flags_list {
++                let other = digest(workload, backend, *flags);
++                if other == base {
++                    line.push_str(" =");
++                } else {
++                    mismatches += 1;
++                    line.push_str(&format!(" DIFF[{}]", flag_name(*flags)));
++                }
++            }
++            println!("{line}");
++        }
++    }
++    println!("mismatches: {mismatches}");
++}
++
++// ---------------------------------------------------------------------------------------------
++// Kernel replicas: the lane kernels the EQ calls, on fixture-shaped coefficients.
++
++fn bell_words(track: usize, channel: usize) -> [f32; 6] {
++    let (frequency, gain) = if channel == 0 {
++        (90.0 + 45.0 * track as f32, -7.5 + track as f32)
++    } else {
++        (110.0 + 55.0 * track as f32, 6.5 - track as f32)
++    };
++    let q = 0.5 + 0.15 * track as f32;
++    design_svf(
++        EqBandKind::Bell,
++        frequency,
++        gain.clamp(-24.0, 24.0),
++        q,
++        1.0,
++        SampleRateHz(48_000),
++    )
++    .expect("bell")
++    .to_array()
++}
++
++fn coef_from<L: Lane>(words: impl Fn(usize) -> [f32; 6]) -> SvfCoef<L> {
++    let lane = |index: usize| {
++        let values: Vec<f32> = (0..L::WIDTH).map(|lane| words(lane)[index]).collect();
++        L::load(&values)
++    };
++    SvfCoef {
++        c1: lane(0),
++        a2: lane(1),
++        a3: lane(2),
++        m0: lane(3),
++        m1: lane(4),
++        m2: lane(5),
++    }
++}
++
++fn identity<L: Lane>() -> SvfCoef<L> {
++    coef_from::<L>(|_| [0.0, 0.0, 0.0, 1.0, 0.0, 0.0])
++}
++
++fn bell<L: Lane>(channel: usize, salt: usize) -> SvfCoef<L> {
++    coef_from::<L>(|lane| bell_words(lane + salt, channel))
++}
++
++fn signal(len: usize, salt: usize) -> Vec<f32> {
++    (0..len)
++        .map(|index| (((index * 7 + salt * 13) % 97) as f32 - 48.0) / 96.0)
++        .collect()
++}
++
++fn block_admits_elision(io: &[f32]) -> bool {
++    let mut rejected = 0_u32;
++    for value in io {
++        let bits = value.to_bits();
++        rejected |= u32::from(bits == 0x8000_0000);
++        rejected |= u32::from((bits & 0x7fff_ffff) > 1.0e30_f32.to_bits());
++    }
++    rejected == 0
++}
++
++fn check_block<L: Lane>(io: &[f32]) -> bool {
++    let limit = L::splat(1.0e30);
++    let mut ok = L::zero().eq(L::zero());
++    for frame in io.chunks_exact(L::WIDTH) {
++        let x = L::load(frame);
++        ok = L::mask_and(ok, x.abs().lt(limit));
++    }
++    !L::mask_any(L::mask_not(ok))
++}
++
++const CALLS: usize = 20_000;
++
++/// Minimum over three rounds of cycles per call, after a warmup. Every call refreshes both planes
++/// from the source first (so the signal never drifts into subnormals); the refresh is measured
++/// alone as `refresh` and subtracted by the reader.
++fn time_case(hz: f64, mut body: impl FnMut()) -> f64 {
++    for _ in 0..2_000 {
++        body();
++    }
++    let mut best = f64::MAX;
++    for _ in 0..3 {
++        let start = Instant::now();
++        for _ in 0..CALLS {
++            body();
++        }
++        best = best.min(start.elapsed().as_secs_f64() / CALLS as f64);
++    }
++    best * hz
++}
++
++macro_rules! cascade_case {
++    ($L:ty, $hz:expr, $name:expr, $refresh:expr, $sections:expr, $depth:literal, $streams:literal,
++     $masked:expr, $coef:expr, $masks:expr, $source:expr, $blocks:expr) => {{
++        let passes: usize = $sections / $depth;
++        let coef_fn = $coef;
++        let mask_fn = $masks;
++        let coef: Vec<[[SvfCoef<$L>; $depth]; $streams]> = (0..passes)
++            .map(|pass| {
++                core::array::from_fn(|stream| core::array::from_fn(|k| coef_fn(stream, pass * $depth + k)))
++            })
++            .collect();
++        let masks: Vec<[[<$L as Lane>::Mask; $depth]; $streams]> = (0..passes)
++            .map(|pass| {
++                core::array::from_fn(|stream| core::array::from_fn(|k| mask_fn(stream, pass * $depth + k)))
++            })
++            .collect();
++        let mut state: Vec<[[SvfState<$L>; $depth]; $streams]> =
++            vec![[[SvfState::<$L>::default(); $depth]; $streams]; passes];
++        let cycles = time_case($hz, || {
++            for (block, source) in $blocks.iter_mut().zip($source.iter()) {
++                block.copy_from_slice(source);
++            }
++            for pass in 0..passes {
++                let mut each = $blocks.iter_mut();
++                let io: [&mut [f32]; $streams] =
++                    core::array::from_fn(|_| each.next().expect("stream").as_mut_slice());
++                if $masked {
++                    svf_cascade_interleaved_with_dry_masks::<$L, $streams, $depth>(
++                        black_box(io),
++                        QUANTUM,
++                        &coef[pass],
++                        &mut state[pass],
++                        &masks[pass],
++                    );
++                } else {
++                    svf_cascade_interleaved::<$L, $streams, $depth>(
++                        black_box(io),
++                        QUANTUM,
++                        &coef[pass],
++                        &mut state[pass],
++                    );
++                }
++            }
++        });
++        let net = cycles - $refresh;
++        let lane_samples = (QUANTUM * <$L as Lane>::WIDTH * $streams) as f64;
++        println!(
++            "{:<6} {:<44} {:>8.0} cyc/call  net {:>8.0}  {:.3} cyc/lane-sample  {:.3} \
++             cyc/(lane-sample x section)",
++            core::any::type_name::<$L>().rsplit("::").next().unwrap_or(""),
++            $name,
++            cycles,
++            net,
++            net / lane_samples,
++            net / lane_samples / $sections as f64
++        );
++        black_box(&state);
++        net
++    }};
++}
++
++fn kernel_sweep<L: Lane>(hz: f64) {
++    let span = QUANTUM * L::WIDTH;
++    let source: Vec<Vec<f32>> = (0..2).map(|salt| signal(span, salt)).collect();
++    let mut blocks: Vec<Vec<f32>> = source.clone();
++    let one_source: Vec<Vec<f32>> = vec![source[0].clone()];
++    let mut one_block: Vec<Vec<f32>> = one_source.clone();
++    let all_ones = L::zero().eq(L::zero());
++    let none = L::zero().lt(L::zero());
++
++    let refresh = time_case(hz, || {
++        for (block, source) in blocks.iter_mut().zip(source.iter()) {
++            block.copy_from_slice(source);
++        }
++        black_box(&mut blocks);
++    });
++    let refresh_one = time_case(hz, || {
++        for (block, source) in one_block.iter_mut().zip(one_source.iter()) {
++            block.copy_from_slice(source);
++        }
++        black_box(&mut one_block);
++    });
++    let tag = core::any::type_name::<L>().rsplit("::").next().unwrap_or("");
++    println!(
++        "{tag:<6} refresh (two {span}-word plane copies)            {refresh:>8.0} cyc/call; \
++         one plane {refresh_one:.0}"
++    );
++
++    // The fixture's pass today: [HPF identity with an all-set dry mask, live bell], masked.
++    cascade_case!(L, hz, "fixture pass: D2 masked [HPF id dry, bell]", refresh, 2, 2, 2, true,
++        |stream: usize, k: usize| if k == 0 { identity::<L>() } else { bell::<L>(stream, 0) },
++        |_stream: usize, k: usize| if k == 0 { all_ones } else { none },
++        source, blocks);
++    cascade_case!(L, hz, "D2 unmasked [general id pad, bell]", refresh, 2, 2, 2, false,
++        |stream: usize, k: usize| if k == 0 { identity::<L>() } else { bell::<L>(stream, 0) },
++        |_stream: usize, _k: usize| none, source, blocks);
++    cascade_case!(L, hz, "D1 masked [bell] (mask clear)", refresh, 1, 1, 2, true,
++        |stream: usize, _k: usize| bell::<L>(stream, 0),
++        |_stream: usize, _k: usize| none, source, blocks);
++    cascade_case!(L, hz, "D1 unmasked [bell]", refresh, 1, 1, 2, false,
++        |stream: usize, _k: usize| bell::<L>(stream, 0),
++        |_stream: usize, _k: usize| none, source, blocks);
++    // Depth sweeps with every section live and distinct.
++    for sections in [2_usize, 4, 6] {
++        let live = |stream: usize, k: usize| bell::<L>(stream, 3 * k + 1);
++        let clear = |_stream: usize, _k: usize| none;
++        let name = |depth: usize| format!("{sections} live, S2 D{depth} unmasked");
++        cascade_case!(L, hz, name(1), refresh, sections, 1, 2, false, live, clear, source, blocks);
++        cascade_case!(L, hz, name(2), refresh, sections, 2, 2, false, live, clear, source, blocks);
++        if sections == 6 {
++            cascade_case!(L, hz, name(3), refresh, sections, 3, 2, false, live, clear, source, blocks);
++            cascade_case!(L, hz, name(6), refresh, sections, 6, 2, false, live, clear, source, blocks);
++        }
++        if sections == 4 {
++            cascade_case!(L, hz, name(4), refresh, sections, 4, 2, false, live, clear, source, blocks);
++        }
++        if sections == 2 {
++            cascade_case!(L, hz, format!("{sections} live, S2 D2 masked (clear)"), refresh, sections, 2, 2, true, live, clear, source, blocks);
++        }
++    }
++    // Mono (collapsed bank): one stream.
++    for sections in [2_usize, 4, 6] {
++        let live = |stream: usize, k: usize| bell::<L>(stream, 3 * k + 1);
++        let clear = |_stream: usize, _k: usize| none;
++        let name = |depth: usize| format!("{sections} live, S1 D{depth} unmasked");
++        cascade_case!(L, hz, name(1), refresh_one, sections, 1, 1, false, live, clear, one_source, one_block);
++        cascade_case!(L, hz, name(2), refresh_one, sections, 2, 1, false, live, clear, one_source, one_block);
++        if sections == 4 {
++            cascade_case!(L, hz, name(4), refresh_one, sections, 4, 1, false, live, clear, one_source, one_block);
++        }
++        if sections == 6 {
++            cascade_case!(L, hz, name(3), refresh_one, sections, 3, 1, false, live, clear, one_source, one_block);
++            cascade_case!(L, hz, name(6), refresh_one, sections, 6, 1, false, live, clear, one_source, one_block);
++        }
++    }
++    // Per-block scans over two planes.
++    let gate = time_case(hz, || {
++        for block in &source {
++            black_box(block_admits_elision(black_box(block)));
++        }
++    });
++    let check = time_case(hz, || {
++        for block in &source {
++            black_box(check_block::<L>(black_box(block)));
++        }
++    });
++    let lane_samples = (2 * span) as f64;
++    println!(
++        "{tag:<6} elision gate, two planes: {gate:.0} cyc/call = {:.3} cyc/lane-sample",
++        gate / lane_samples
++    );
++    println!(
++        "{tag:<6} 4.4 boundary scan, two planes: {check:.0} cyc/call = {:.3} cyc/lane-sample",
++        check / lane_samples
++    );
++    println!(
++        "{tag:<6} two-plane copy: {refresh:.0} cyc/call = {:.3} cyc/lane-sample",
++        refresh / lane_samples
++    );
++}
++
++#[test]
++#[ignore = "diagnosis harness"]
++fn kernels() {
++    let hz = core_hz();
++    println!("core clock {:.3} GHz, loadavg {}", hz / 1e9, loadavg());
++    kernel_sweep::<Simd8>(hz);
++    kernel_sweep::<Simd4>(hz);
++    println!("loadavg {}", loadavg());
++}
++
++// ---------------------------------------------------------------------------------------------
++// Prototype: the software-pipelined ("skewed") cascade. Section `k` of every stream runs frame
++// `i - k` in iteration `i`, so the sections inside one iteration are independent and the
++// per-iteration dependency chain is one section long. Each chain still sees exactly the inputs
++// it sees today, in the same order, through the same `svf_step` and output mix: a schedule
++// change, bit-identical by construction (checked below against the shipped kernel).
++
++#[inline(always)]
++fn section<L: Lane>(x: L, nc1: L, c: &SvfCoef<L>, s: &mut SvfState<L>) -> L {
++    let (v1, v2) = lane::kernels::svf_step(x, nc1, c.a2, c.a3, s);
++    c.m2.fma(v2, c.m1.fma(v1, c.m0.mul(x)))
++}
++
++#[inline(always)]
++fn skewed<L: Lane, const S: usize, const D: usize, const MASKED: bool>(
++    io: [&mut [f32]; S],
++    frames: usize,
++    c: &[[SvfCoef<L>; D]; S],
++    s: &mut [[SvfState<L>; D]; S],
++    masks: &[[L::Mask; D]; S],
++) {
++    let w = L::WIDTH;
++    let span = frames * w;
++    let mut io = io.map(|block| &mut block[..span]);
++    let mut state = *s;
++    let nc1: [[L; D]; S] = core::array::from_fn(|t| core::array::from_fn(|k| c[t][k].c1.neg()));
++    let mut carry: [[L; D]; S] = [[L::zero(); D]; S];
++    let total = frames + D - 1;
++    for i in 0..total {
++        for t in 0..S {
++            for k in (0..D).rev() {
++                if i < k || i - k >= frames {
++                    continue;
++                }
++                let f = i - k;
++                let x = if k == 0 {
++                    L::load(&io[t][f * w..f * w + w])
++                } else {
++                    carry[t][k - 1]
++                };
++                let wet = section(x, nc1[t][k], &c[t][k], &mut state[t][k]);
++                let y = if MASKED {
++                    L::select(masks[t][k], x, wet)
++                } else {
++                    wet
++                };
++                if k == D - 1 {
++                    y.store(&mut io[t][f * w..f * w + w]);
++                } else {
++                    carry[t][k] = y;
++                }
++            }
++        }
++    }
++    *s = state;
++}
++
++/// Steady-state-peeled form of [`skewed`]: prologue, a branch-free body, epilogue.
++#[inline(always)]
++fn skewed_peeled<L: Lane, const S: usize, const D: usize, const MASKED: bool>(
++    io: [&mut [f32]; S],
++    frames: usize,
++    c: &[[SvfCoef<L>; D]; S],
++    s: &mut [[SvfState<L>; D]; S],
++    masks: &[[L::Mask; D]; S],
++) {
++    let w = L::WIDTH;
++    let span = frames * w;
++    let mut io = io.map(|block| &mut block[..span]);
++    let mut state = *s;
++    let nc1: [[L; D]; S] = core::array::from_fn(|t| core::array::from_fn(|k| c[t][k].c1.neg()));
++    let mut carry: [[L; D]; S] = [[L::zero(); D]; S];
++    macro_rules! step {
++        ($i:expr, $t:expr, $k:expr) => {{
++            let (i, t, k) = ($i, $t, $k);
++            let f = i - k;
++            let x = if k == 0 {
++                L::load(&io[t][f * w..f * w + w])
++            } else {
++                carry[t][k - 1]
++            };
++            let wet = section(x, nc1[t][k], &c[t][k], &mut state[t][k]);
++            let y = if MASKED {
++                L::select(masks[t][k], x, wet)
++            } else {
++                wet
++            };
++            if k == D - 1 {
++                y.store(&mut io[t][f * w..f * w + w]);
++            } else {
++                carry[t][k] = y;
++            }
++        }};
++    }
++    debug_assert!(frames >= D);
++    for i in 0..D - 1 {
++        for t in 0..S {
++            for k in (0..=i).rev() {
++                step!(i, t, k);
++            }
++        }
++    }
++    for i in D - 1..frames {
++        for t in 0..S {
++            for k in (0..D).rev() {
++                step!(i, t, k);
++            }
++        }
++    }
++    for i in frames..frames + D - 1 {
++        for t in 0..S {
++            for k in (i + 1 - frames..D).rev() {
++                step!(i, t, k);
++            }
++        }
++    }
++    *s = state;
++}
++
++fn words_equal(a: &[f32], b: &[f32]) -> bool {
++    a.iter()
++        .zip(b)
++        .all(|(x, y)| x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan()))
++}
++
++fn hostile(len: usize, salt: usize) -> Vec<f32> {
++    (0..len)
++        .map(|index| match (index + salt) % 11 {
++            0 => -0.0,
++            1 => 1.0e-39,
++            2 => -3.0e-42,
++            3 => 0.0,
++            _ => (((index * 7 + salt * 13) % 97) as f32 - 48.0) / 96.0,
++        })
++        .collect()
++}
++
++fn state_bits<L: Lane, const S: usize, const D: usize>(s: &[[SvfState<L>; D]; S]) -> Vec<u32> {
++    let mut out = Vec::new();
++    for stream in s {
++        for section in stream {
++            let mut words = vec![0_u32; L::WIDTH];
++            section.ic1.store_bits(&mut words);
++            out.extend_from_slice(&words);
++            section.ic2.store_bits(&mut words);
++            out.extend_from_slice(&words);
++        }
++    }
++    out
++}
++
++fn skew_identity<L: Lane, const S: usize, const D: usize, const MASKED: bool>() -> bool {
++    let span = QUANTUM * L::WIDTH;
++    let all_ones = L::zero().eq(L::zero());
++    let none = L::zero().lt(L::zero());
++    let coef: [[SvfCoef<L>; D]; S] = core::array::from_fn(|t| {
++        core::array::from_fn(|k| {
++            if k == 0 && MASKED {
++                identity::<L>()
++            } else {
++                bell::<L>(t, 3 * k + 1)
++            }
++        })
++    });
++    let masks: [[L::Mask; D]; S] = core::array::from_fn(|_| {
++        core::array::from_fn(|k| if k == 0 && MASKED { all_ones } else { none })
++    });
++    let mut s_ref = [[SvfState::<L>::default(); D]; S];
++    let mut s_new = s_ref;
++    let mut s_peel = s_ref;
++    let mut ok = true;
++    for block in 0..40 {
++        let mut a: Vec<Vec<f32>> = (0..S).map(|t| hostile(span, block * 3 + t)).collect();
++        let mut b = a.clone();
++        let mut p = a.clone();
++        {
++            let mut each = a.iter_mut();
++            let io: [&mut [f32]; S] = core::array::from_fn(|_| each.next().unwrap().as_mut_slice());
++            if MASKED {
++                svf_cascade_interleaved_with_dry_masks::<L, S, D>(io, QUANTUM, &coef, &mut s_ref, &masks);
++            } else {
++                svf_cascade_interleaved::<L, S, D>(io, QUANTUM, &coef, &mut s_ref);
++            }
++        }
++        {
++            let mut each = b.iter_mut();
++            let io: [&mut [f32]; S] = core::array::from_fn(|_| each.next().unwrap().as_mut_slice());
++            skewed::<L, S, D, MASKED>(io, QUANTUM, &coef, &mut s_new, &masks);
++        }
++        {
++            let mut each = p.iter_mut();
++            let io: [&mut [f32]; S] = core::array::from_fn(|_| each.next().unwrap().as_mut_slice());
++            skewed_peeled::<L, S, D, MASKED>(io, QUANTUM, &coef, &mut s_peel, &masks);
++        }
++        for t in 0..S {
++            ok &= words_equal(&a[t], &b[t]) && words_equal(&a[t], &p[t]);
++        }
++    }
++    ok &= state_bits(&s_ref) == state_bits(&s_new) && state_bits(&s_ref) == state_bits(&s_peel);
++    let tag = core::any::type_name::<L>().rsplit("::").next().unwrap_or("");
++    println!(
++        "{tag:<6} skew identity S{S} D{D} masked={MASKED}: {}",
++        if ok { "bit-identical" } else { "MISMATCH" }
++    );
++    ok
++}
++
++fn skew_time<L: Lane, const S: usize, const D: usize, const MASKED: bool, const PEELED: bool>(
++    hz: f64,
++    name: &str,
++    sections: usize,
++) {
++    let span = QUANTUM * L::WIDTH;
++    let all_ones = L::zero().eq(L::zero());
++    let none = L::zero().lt(L::zero());
++    let source: Vec<Vec<f32>> = (0..S).map(|salt| signal(span, salt)).collect();
++    let mut blocks = source.clone();
++    let refresh = time_case(hz, || {
++        for (block, source) in blocks.iter_mut().zip(source.iter()) {
++            block.copy_from_slice(source);
++        }
++        black_box(&mut blocks);
++    });
++    let passes = sections / D;
++    let coef: Vec<[[SvfCoef<L>; D]; S]> = (0..passes)
++        .map(|pass| {
++            core::array::from_fn(|t| {
++                core::array::from_fn(|k| {
++                    if MASKED && pass == 0 && k == 0 {
++                        identity::<L>()
++                    } else {
++                        bell::<L>(t, 3 * (pass * D + k) + 1)
++                    }
++                })
++            })
++        })
++        .collect();
++    let masks: [[L::Mask; D]; S] = core::array::from_fn(|_| {
++        core::array::from_fn(|k| if MASKED && k == 0 { all_ones } else { none })
++    });
++    let mut state = vec![[[SvfState::<L>::default(); D]; S]; passes];
++    let cycles = time_case(hz, || {
++        for (block, source) in blocks.iter_mut().zip(source.iter()) {
++            block.copy_from_slice(source);
++        }
++        for pass in 0..passes {
++            let mut each = blocks.iter_mut();
++            let io: [&mut [f32]; S] = core::array::from_fn(|_| each.next().unwrap().as_mut_slice());
++            if PEELED {
++                skewed_peeled::<L, S, D, MASKED>(black_box(io), QUANTUM, &coef[pass], &mut state[pass], &masks);
++            } else {
++                skewed::<L, S, D, MASKED>(black_box(io), QUANTUM, &coef[pass], &mut state[pass], &masks);
++            }
++        }
++    });
++    let net = cycles - refresh;
++    let lane_samples = (QUANTUM * L::WIDTH * S) as f64;
++    let tag = core::any::type_name::<L>().rsplit("::").next().unwrap_or("");
++    println!(
++        "{tag:<6} {name:<44} {cycles:>8.0} cyc/call  net {net:>8.0}  {:.3} cyc/lane-sample  {:.3} \
++         cyc/(ls x section)  {:.1} cyc/frame/pass",
++        net / lane_samples,
++        net / lane_samples / sections as f64,
++        net / (QUANTUM * passes) as f64
++    );
++    black_box(&state);
++}
++
++fn skew_sweep<L: Lane>(hz: f64) {
++    let mut ok = true;
++    ok &= skew_identity::<L, 2, 2, false>();
++    ok &= skew_identity::<L, 2, 2, true>();
++    ok &= skew_identity::<L, 2, 3, false>();
++    ok &= skew_identity::<L, 1, 2, false>();
++    ok &= skew_identity::<L, 1, 3, false>();
++    assert!(ok);
++    skew_time::<L, 2, 2, true, false>(hz, "skewed fixture pass: D2 masked [HPF id, bell]", 2);
++    skew_time::<L, 2, 2, true, true>(hz, "skewed-peeled fixture pass: D2 masked", 2);
++    skew_time::<L, 2, 2, false, false>(hz, "skewed 2 live D2 unmasked", 2);
++    skew_time::<L, 2, 2, false, true>(hz, "skewed-peeled 2 live D2 unmasked", 2);
++    skew_time::<L, 2, 2, false, true>(hz, "skewed-peeled 4 live D2 unmasked", 4);
++    skew_time::<L, 2, 2, false, true>(hz, "skewed-peeled 6 live D2 unmasked", 6);
++    skew_time::<L, 2, 3, false, true>(hz, "skewed-peeled 6 live D3 unmasked", 6);
++    skew_time::<L, 2, 6, false, true>(hz, "skewed-peeled 6 live D6 unmasked", 6);
++    skew_time::<L, 2, 4, false, true>(hz, "skewed-peeled 4 live D4 unmasked", 4);
++    skew_time::<L, 1, 2, false, true>(hz, "skewed-peeled mono 2 live D2 unmasked", 2);
++    skew_time::<L, 1, 3, false, true>(hz, "skewed-peeled mono 6 live D3 unmasked", 6);
++}
++
++#[test]
++#[ignore = "diagnosis harness"]
++fn skew() {
++    let hz = core_hz();
++    println!("core clock {:.3} GHz, loadavg {}", hz / 1e9, loadavg());
++    skew_sweep::<Simd8>(hz);
++    skew_sweep::<Simd4>(hz);
++    println!("loadavg {}", loadavg());
++}
++
++// ---------------------------------------------------------------------------------------------
++// Prototype: the skewed cascade with its `S * D` independent chains interleaved op by op
++// ("vertical"), so the instruction stream itself carries the independence instead of relying on
++// the out-of-order window to find it. Every operation is the `Lane` method `svf_step` and the
++// output mix use, with the same receiver and the same argument, so each chain's arithmetic is
++// the shipped arithmetic.
++
++#[inline(always)]
++fn vertical_step<L: Lane, const N: usize>(
++    x: &[L; N],
++    nc1: &[L; N],
++    c: &[&SvfCoef<L>; N],
++    ic1: &mut [L; N],
++    ic2: &mut [L; N],
++) -> [L; N] {
++    let v3: [L; N] = core::array::from_fn(|n| x[n].sub(ic2[n]));
++    let a2v3: [L; N] = core::array::from_fn(|n| c[n].a2.mul(v3[n]));
++    let d1: [L; N] = core::array::from_fn(|n| nc1[n].mul(ic1[n]).add(a2v3[n]));
++    let v1: [L; N] = core::array::from_fn(|n| ic1[n].add(d1[n]));
++    let a2ic1: [L; N] = core::array::from_fn(|n| c[n].a2.mul(ic1[n]));
++    let d2: [L; N] = core::array::from_fn(|n| c[n].a3.mul(v3[n]).add(a2ic1[n]));
++    let v2: [L; N] = core::array::from_fn(|n| ic2[n].add(d2[n]));
++    let n1: [L; N] = core::array::from_fn(|n| lane::flush(ic1[n].add(d1[n].add(d1[n]))));
++    let n2: [L; N] = core::array::from_fn(|n| lane::flush(ic2[n].add(d2[n].add(d2[n]))));
++    *ic1 = n1;
++    *ic2 = n2;
++    let m0x: [L; N] = core::array::from_fn(|n| c[n].m0.mul(x[n]));
++    let inner: [L; N] = core::array::from_fn(|n| c[n].m1.mul(v1[n]).add(m0x[n]));
++    core::array::from_fn(|n| c[n].m2.mul(v2[n]).add(inner[n]))
++}
++
++/// The skewed, peeled cascade with the chains of one iteration stepped together. Chain `n` is
++/// `(stream, section) = (n / D, n % D)`. Only whole iterations use the vertical step; the short
++/// prologue and epilogue reuse `skewed_peeled`'s per-chain order.
++#[inline(always)]
++fn skewed_vertical<L: Lane, const S: usize, const D: usize, const N: usize, const MASKED: bool>(
++    io: [&mut [f32]; S],
++    frames: usize,
++    c: &[[SvfCoef<L>; D]; S],
++    s: &mut [[SvfState<L>; D]; S],
++    masks: &[[L::Mask; D]; S],
++) {
++    debug_assert_eq!(N, S * D);
++    let w = L::WIDTH;
++    let span = frames * w;
++    let mut io = io.map(|block| &mut block[..span]);
++    let nc1s: [[L; D]; S] = core::array::from_fn(|t| core::array::from_fn(|k| c[t][k].c1.neg()));
++    let nc1: [L; N] = core::array::from_fn(|n| nc1s[n / D][n % D]);
++    let coef: [&SvfCoef<L>; N] = core::array::from_fn(|n| &c[n / D][n % D]);
++    let mask: [L::Mask; N] = core::array::from_fn(|n| masks[n / D][n % D]);
++    let mut ic1: [L; N] = core::array::from_fn(|n| s[n / D][n % D].ic1);
++    let mut ic2: [L; N] = core::array::from_fn(|n| s[n / D][n % D].ic2);
++    let mut carry: [L; N] = [L::zero(); N];
++    // One chain step, used by the prologue and epilogue.
++    macro_rules! single {
++        ($i:expr, $t:expr, $k:expr) => {{
++            let (i, t, k) = ($i, $t, $k);
++            let n = t * D + k;
++            let f = i - k;
++            let x = if k == 0 {
++                L::load(&io[t][f * w..f * w + w])
++            } else {
++                carry[n - 1]
++            };
++            let mut state = SvfState { ic1: ic1[n], ic2: ic2[n] };
++            let wet = section(x, nc1[n], coef[n], &mut state);
++            ic1[n] = state.ic1;
++            ic2[n] = state.ic2;
++            let y = if MASKED { L::select(mask[n], x, wet) } else { wet };
++            if k == D - 1 {
++                y.store(&mut io[t][f * w..f * w + w]);
++            } else {
++                carry[n] = y;
++            }
++        }};
++    }
++    for i in 0..D - 1 {
++        for t in 0..S {
++            for k in (0..=i).rev() {
++                single!(i, t, k);
++            }
++        }
++    }
++    for i in D - 1..frames {
++        let x: [L; N] = core::array::from_fn(|n| {
++            let (t, k) = (n / D, n % D);
++            if k == 0 {
++                L::load(&io[t][i * w..i * w + w])
++            } else {
++                carry[n - 1]
++            }
++        });
++        let wet = vertical_step::<L, N>(&x, &nc1, &coef, &mut ic1, &mut ic2);
++        let y: [L; N] = core::array::from_fn(|n| {
++            if MASKED { L::select(mask[n], x[n], wet[n]) } else { wet[n] }
++        });
++        for n in 0..N {
++            let (t, k) = (n / D, n % D);
++            if k == D - 1 {
++                let f = i - k;
++                y[n].store(&mut io[t][f * w..f * w + w]);
++            } else {
++                carry[n] = y[n];
++            }
++        }
++    }
++    for i in frames..frames + D - 1 {
++        for t in 0..S {
++            for k in (i + 1 - frames..D).rev() {
++                single!(i, t, k);
++            }
++        }
++    }
++    for n in 0..N {
++        s[n / D][n % D] = SvfState { ic1: ic1[n], ic2: ic2[n] };
++    }
++}
++
++/// Unskewed vertical form (today's frame order, the S streams stepped together per section).
++#[inline(always)]
++fn plain_vertical<L: Lane, const S: usize, const D: usize, const MASKED: bool>(
++    io: [&mut [f32]; S],
++    frames: usize,
++    c: &[[SvfCoef<L>; D]; S],
++    s: &mut [[SvfState<L>; D]; S],
++    masks: &[[L::Mask; D]; S],
++) {
++    let w = L::WIDTH;
++    let span = frames * w;
++    let mut io = io.map(|block| &mut block[..span]);
++    let nc1: [[L; S]; D] = core::array::from_fn(|k| core::array::from_fn(|t| c[t][k].c1.neg()));
++    let mut ic1: [[L; S]; D] = core::array::from_fn(|k| core::array::from_fn(|t| s[t][k].ic1));
++    let mut ic2: [[L; S]; D] = core::array::from_fn(|k| core::array::from_fn(|t| s[t][k].ic2));
++    let coef: [[&SvfCoef<L>; S]; D] = core::array::from_fn(|k| core::array::from_fn(|t| &c[t][k]));
++    for frame in 0..frames {
++        let mut x: [L; S] = core::array::from_fn(|t| L::load(&io[t][frame * w..frame * w + w]));
++        for k in 0..D {
++            let wet = vertical_step::<L, S>(&x, &nc1[k], &coef[k], &mut ic1[k], &mut ic2[k]);
++            x = core::array::from_fn(|t| {
++                if MASKED { L::select(masks[t][k], x[t], wet[t]) } else { wet[t] }
++            });
++        }
++        for t in 0..S {
++            x[t].store(&mut io[t][frame * w..frame * w + w]);
++        }
++    }
++    for t in 0..S {
++        for k in 0..D {
++            s[t][k] = SvfState { ic1: ic1[k][t], ic2: ic2[k][t] };
++        }
++    }
++}
++
++fn vertical_identity<L: Lane, const S: usize, const D: usize, const N: usize, const MASKED: bool>(
++) -> bool {
++    let span = QUANTUM * L::WIDTH;
++    let all_ones = L::zero().eq(L::zero());
++    let none = L::zero().lt(L::zero());
++    let coef: [[SvfCoef<L>; D]; S] = core::array::from_fn(|t| {
++        core::array::from_fn(|k| {
++            if k == 0 && MASKED { identity::<L>() } else { bell::<L>(t, 3 * k + 1) }
++        })
++    });
++    let masks: [[L::Mask; D]; S] = core::array::from_fn(|_| {
++        core::array::from_fn(|k| if k == 0 && MASKED { all_ones } else { none })
++    });
++    let mut s_ref = [[SvfState::<L>::default(); D]; S];
++    let mut s_new = s_ref;
++    let mut s_plain = s_ref;
++    let mut ok = true;
++    for block in 0..40 {
++        let mut a: Vec<Vec<f32>> = (0..S).map(|t| hostile(span, block * 3 + t)).collect();
++        let mut b = a.clone();
++        let mut p = a.clone();
++        {
++            let mut each = a.iter_mut();
++            let io: [&mut [f32]; S] = core::array::from_fn(|_| each.next().unwrap().as_mut_slice());
++            svf_cascade_interleaved_with_dry_masks::<L, S, D>(io, QUANTUM, &coef, &mut s_ref, &masks);
++        }
++        {
++            let mut each = b.iter_mut();
++            let io: [&mut [f32]; S] = core::array::from_fn(|_| each.next().unwrap().as_mut_slice());
++            skewed_vertical::<L, S, D, N, MASKED>(io, QUANTUM, &coef, &mut s_new, &masks);
++        }
++        {
++            let mut each = p.iter_mut();
++            let io: [&mut [f32]; S] = core::array::from_fn(|_| each.next().unwrap().as_mut_slice());
++            plain_vertical::<L, S, D, MASKED>(io, QUANTUM, &coef, &mut s_plain, &masks);
++        }
++        for t in 0..S {
++            ok &= words_equal(&a[t], &b[t]) && words_equal(&a[t], &p[t]);
++        }
++    }
++    ok &= state_bits(&s_ref) == state_bits(&s_new) && state_bits(&s_ref) == state_bits(&s_plain);
++    let tag = core::any::type_name::<L>().rsplit("::").next().unwrap_or("");
++    println!(
++        "{tag:<6} vertical identity S{S} D{D} masked={MASKED}: {}",
++        if ok { "bit-identical" } else { "MISMATCH" }
++    );
++    ok
++}
++
++fn vertical_time<L: Lane, const S: usize, const D: usize, const N: usize, const MASKED: bool, const SKEW: bool>(
++    hz: f64,
++    name: &str,
++    sections: usize,
++) {
++    let span = QUANTUM * L::WIDTH;
++    let all_ones = L::zero().eq(L::zero());
++    let none = L::zero().lt(L::zero());
++    let source: Vec<Vec<f32>> = (0..S).map(|salt| signal(span, salt)).collect();
++    let mut blocks = source.clone();
++    let refresh = time_case(hz, || {
++        for (block, source) in blocks.iter_mut().zip(source.iter()) {
++            block.copy_from_slice(source);
++        }
++        black_box(&mut blocks);
++    });
++    let passes = sections / D;
++    let coef: Vec<[[SvfCoef<L>; D]; S]> = (0..passes)
++        .map(|pass| {
++            core::array::from_fn(|t| {
++                core::array::from_fn(|k| {
++                    if MASKED && pass == 0 && k == 0 {
++                        identity::<L>()
++                    } else {
++                        bell::<L>(t, 3 * (pass * D + k) + 1)
++                    }
++                })
++            })
++        })
++        .collect();
++    let masks: [[L::Mask; D]; S] = core::array::from_fn(|_| {
++        core::array::from_fn(|k| if MASKED && k == 0 { all_ones } else { none })
++    });
++    let mut state = vec![[[SvfState::<L>::default(); D]; S]; passes];
++    let cycles = time_case(hz, || {
++        for (block, source) in blocks.iter_mut().zip(source.iter()) {
++            block.copy_from_slice(source);
++        }
++        for pass in 0..passes {
++            let mut each = blocks.iter_mut();
++            let io: [&mut [f32]; S] = core::array::from_fn(|_| each.next().unwrap().as_mut_slice());
++            if SKEW {
++                skewed_vertical::<L, S, D, N, MASKED>(black_box(io), QUANTUM, &coef[pass], &mut state[pass], &masks);
++            } else {
++                plain_vertical::<L, S, D, MASKED>(black_box(io), QUANTUM, &coef[pass], &mut state[pass], &masks);
++            }
++        }
++    });
++    let net = cycles - refresh;
++    let lane_samples = (QUANTUM * L::WIDTH * S) as f64;
++    let tag = core::any::type_name::<L>().rsplit("::").next().unwrap_or("");
++    println!(
++        "{tag:<6} {name:<44} {cycles:>8.0} cyc/call  net {net:>8.0}  {:.3} cyc/lane-sample  {:.3} \
++         cyc/(ls x section)  {:.1} cyc/frame/pass",
++        net / lane_samples,
++        net / lane_samples / sections as f64,
++        net / (QUANTUM * passes) as f64
++    );
++    black_box(&state);
++}
++
++fn vertical_sweep<L: Lane>(hz: f64) {
++    let mut ok = true;
++    ok &= vertical_identity::<L, 2, 2, 4, false>();
++    ok &= vertical_identity::<L, 2, 2, 4, true>();
++    ok &= vertical_identity::<L, 2, 1, 2, false>();
++    ok &= vertical_identity::<L, 2, 3, 6, false>();
++    ok &= vertical_identity::<L, 1, 2, 2, false>();
++    ok &= vertical_identity::<L, 1, 4, 4, false>();
++    assert!(ok);
++    vertical_time::<L, 2, 2, 4, true, true>(hz, "skew+vertical fixture pass D2 masked", 2);
++    vertical_time::<L, 2, 2, 4, false, true>(hz, "skew+vertical 2 live D2 unmasked", 2);
++    vertical_time::<L, 2, 2, 4, false, false>(hz, "plain vertical 2 live D2 unmasked", 2);
++    vertical_time::<L, 2, 2, 4, true, false>(hz, "plain vertical fixture pass D2 masked", 2);
++    vertical_time::<L, 2, 1, 2, false, false>(hz, "plain vertical 1 live D1 unmasked", 1);
++    vertical_time::<L, 2, 3, 6, false, true>(hz, "skew+vertical 6 live D3 unmasked", 6);
++    vertical_time::<L, 2, 2, 4, false, true>(hz, "skew+vertical 6 live D2 unmasked", 6);
++    vertical_time::<L, 1, 2, 2, false, true>(hz, "skew+vertical mono 2 live D2", 2);
++    vertical_time::<L, 1, 4, 4, false, true>(hz, "skew+vertical mono 4 live D4", 4);
++    vertical_time::<L, 1, 1, 1, false, false>(hz, "plain vertical mono 1 live D1", 1);
++}
++
++#[test]
++#[ignore = "diagnosis harness"]
++fn vertical() {
++    let hz = core_hz();
++    println!("core clock {:.3} GHz, loadavg {}", hz / 1e9, loadavg());
++    vertical_sweep::<Simd8>(hz);
++    vertical_sweep::<Simd4>(hz);
++    println!("loadavg {}", loadavg());
++}
+diff --git a/tools/console-workload/tests/eq_rows.rs b/tools/console-workload/tests/eq_rows.rs
+new file mode 100644
+index 00000000..f3ff9ad6
+--- /dev/null
++++ b/tools/console-workload/tests/eq_rows.rs
+@@ -0,0 +1,285 @@
++//! EQ diagnosis: clean-build row timing (no toggles). Diagnosis prototype only; never committed.
++//! Prints `p50` of `sixty_four_track_eq_only` and `sixty_four_track_builtins_only`, interleaved.
++
++use std::hint::black_box;
++use std::time::Instant;
++
++use console_workload::{PlanConfig, QUANTUM, SessionRuntime, Workload};
++use lane::Backend;
++
++fn core_hz() -> f64 {
++    const ADDS: u64 = 300_000_000;
++    let mut best = f64::MAX;
++    for _ in 0..3 {
++        let mut x = black_box(0.0_f32);
++        let d = black_box(1.0e-3_f32);
++        let start = Instant::now();
++        for _ in 0..ADDS {
++            x += d;
++        }
++        best = best.min(start.elapsed().as_secs_f64());
++        black_box(x);
++    }
++    3.0 * ADDS as f64 / best
++}
++
++fn measure(runtime: &mut SessionRuntime, observation: &mut u64, blocks: usize) -> f64 {
++    let mut samples = Vec::with_capacity(blocks);
++    for _ in 0..blocks {
++        let start = Instant::now();
++        runtime.render(*observation).expect("block");
++        samples.push(start.elapsed().as_nanos() as f64);
++        *observation += 1;
++    }
++    samples.sort_by(f64::total_cmp);
++    samples[blocks / 2]
++}
++
++#[test]
++#[ignore = "diagnosis harness"]
++fn clean_rows() {
++    let hz = core_hz();
++    let mut eq =
++        SessionRuntime::build_with_dispatch(Workload::SixtyFourTrackEqOnly, PlanConfig::BASELINE, Backend::Simd8);
++    let mut builtins = SessionRuntime::build_with_dispatch(
++        Workload::SixtyFourTrackBuiltinsOnly,
++        PlanConfig::BASELINE,
++        Backend::Simd8,
++    );
++    let (mut oe, mut ob) = (0, 0);
++    measure(&mut eq, &mut oe, 1000);
++    measure(&mut builtins, &mut ob, 1000);
++    let mut e = Vec::new();
++    let mut b = Vec::new();
++    for _ in 0..6 {
++        e.push(measure(&mut eq, &mut oe, 1500));
++        b.push(measure(&mut builtins, &mut ob, 1500));
++    }
++    e.sort_by(f64::total_cmp);
++    b.sort_by(f64::total_cmp);
++    let (em, bm) = (e[3], b[3]);
++    println!(
++        "CLEAN eq_only p50 {em:.0} ns, builtins_only p50 {bm:.0} ns, isolate {:.0} ns = {:.3} cyc/ls \
++         at {:.3} GHz; loadavg {}",
++        em - bm,
++        (em - bm) * hz / 1e9 / (64 * QUANTUM * 2) as f64,
++        hz / 1e9,
++        std::fs::read_to_string("/proc/loadavg").unwrap_or_default().trim()
++    );
++}
++
++const NEGATIVE_ZERO_BITS: u32 = 0x8000_0000;
++const MAGNITUDE_MASK: u32 = 0x7fff_ffff;
++const CEILING: u32 = 0x7149_f2ca; // 1.0e30_f32.to_bits()
++
++#[inline(never)]
++fn gate_today(io: &[f32]) -> bool {
++    let mut rejected = 0_u32;
++    for value in io {
++        let bits = value.to_bits();
++        rejected |= u32::from(bits == NEGATIVE_ZERO_BITS);
++        rejected |= u32::from((bits & MAGNITUDE_MASK) > CEILING);
++    }
++    rejected == 0
++}
++
++#[inline(never)]
++fn gate_minmax(io: &[f32]) -> bool {
++    let mut nearest = u32::MAX;
++    let mut largest = 0_u32;
++    for value in io {
++        let bits = value.to_bits();
++        nearest = nearest.min(bits ^ NEGATIVE_ZERO_BITS);
++        largest = largest.max(bits & MAGNITUDE_MASK);
++    }
++    nearest != 0 && largest <= CEILING
++}
++
++#[test]
++#[ignore = "diagnosis harness"]
++fn gate_forms() {
++    assert_eq!(CEILING, 1.0e30_f32.to_bits());
++    // Equivalence on hostile words, then timing on two 1024-word planes.
++    let words: Vec<u32> = [0_u32, 0x8000_0000, 1, 0x8000_0001, CEILING, CEILING + 1, 0x7f80_0000,
++        0xff80_0000, 0x7fc0_0000, 0xffc0_1234, 0x3f80_0000, 0xbf80_0000, CEILING | 0x8000_0000,
++        (CEILING + 1) | 0x8000_0000, u32::MAX, 0x7fff_ffff].to_vec();
++    let mut cases = 0;
++    for a in &words {
++        for b in &words {
++            let block: Vec<f32> = (0..1024).map(|i| f32::from_bits(if i == 17 { *a } else if i == 900 { *b } else { 0x3e80_0000 })).collect();
++            assert_eq!(gate_today(&block), gate_minmax(&block), "{a:08x} {b:08x}");
++            cases += 1;
++        }
++    }
++    let hz = core_hz();
++    let planes: Vec<Vec<f32>> = (0..2).map(|salt| (0..1024).map(|i| (((i * 7 + salt * 13) % 97) as f32 - 48.0) / 96.0).collect()).collect();
++    for (name, gate) in [("today", gate_today as fn(&[f32]) -> bool), ("minmax", gate_minmax as fn(&[f32]) -> bool)] {
++        let mut best = f64::MAX;
++        for _ in 0..3 {
++            let start = Instant::now();
++            let mut ok = 0;
++            for _ in 0..20_000 {
++                for plane in &planes {
++                    ok += u32::from(gate(black_box(plane)));
++                }
++            }
++            black_box(ok);
++            best = best.min(start.elapsed().as_secs_f64() / 20_000.0);
++        }
++        println!("GATE {name:<7} {:.0} cycles per two planes = {:.3} cyc/lane-sample ({cases} equivalence cases)", best * hz, best * hz / 2048.0);
++    }
++}
++
++// ---------------------------------------------------------------------------------------------
++// Prototype: the 4.4 boundary scan folded into the last section's store (depth 1, S streams).
++
++use lane::kernels::{SvfCoef, SvfState, svf_cascade_interleaved, svf_step};
++use lane::{Lane, Simd4, Simd8};
++
++#[inline(always)]
++fn fused_d1<L: Lane, const S: usize>(
++    io: [&mut [f32]; S],
++    frames: usize,
++    c: &[[SvfCoef<L>; 1]; S],
++    s: &mut [[SvfState<L>; 1]; S],
++) -> [bool; S] {
++    let w = L::WIDTH;
++    let span = frames * w;
++    let io = io.map(|block| &mut block[..span]);
++    let mut state = *s;
++    let nc1: [L; S] = core::array::from_fn(|t| c[t][0].c1.neg());
++    let limit = L::splat(1.0e30);
++    let mut ok: [L::Mask; S] = [L::zero().eq(L::zero()); S];
++    for frame in 0..frames {
++        for t in 0..S {
++            let slot = &mut io[t][frame * w..frame * w + w];
++            let x = L::load(slot);
++            let cf = &c[t][0];
++            let (v1, v2) = svf_step(x, nc1[t], cf.a2, cf.a3, &mut state[t][0]);
++            let y = cf.m2.fma(v2, cf.m1.fma(v1, cf.m0.mul(x)));
++            ok[t] = L::mask_and(ok[t], y.abs().lt(limit));
++            y.store(slot);
++        }
++    }
++    *s = state;
++    core::array::from_fn(|t| !L::mask_any(L::mask_not(ok[t])))
++}
++
++fn check<L: Lane>(io: &[f32]) -> bool {
++    let limit = L::splat(1.0e30);
++    let mut ok = L::zero().eq(L::zero());
++    for frame in io.chunks_exact(L::WIDTH) {
++        ok = L::mask_and(ok, L::load(frame).abs().lt(limit));
++    }
++    !L::mask_any(L::mask_not(ok))
++}
++
++fn bell_coef<L: Lane>(t: usize) -> SvfCoef<L> {
++    let words = |lane: usize| -> [f32; 6] {
++        parametric_eq::design_svf(
++            parametric_eq::EqBandKind::Bell,
++            90.0 + 45.0 * lane as f32 + 20.0 * t as f32,
++            -7.5 + lane as f32,
++            0.5 + 0.15 * lane as f32,
++            1.0,
++            engine::SampleRateHz(48_000),
++        )
++        .expect("bell")
++        .to_array()
++    };
++    let lane = |index: usize| {
++        let values: Vec<f32> = (0..L::WIDTH).map(|l| words(l)[index]).collect();
++        L::load(&values)
++    };
++    SvfCoef { c1: lane(0), a2: lane(1), a3: lane(2), m0: lane(3), m1: lane(4), m2: lane(5) }
++}
++
++fn fused_sweep<L: Lane>(hz: f64) {
++    let span = QUANTUM * L::WIDTH;
++    let source: Vec<Vec<f32>> = (0..2)
++        .map(|salt| (0..span).map(|i| (((i * 7 + salt * 13) % 97) as f32 - 48.0) / 96.0).collect())
++        .collect();
++    let mut blocks = source.clone();
++    let c: [[SvfCoef<L>; 1]; 2] = [[bell_coef::<L>(0)], [bell_coef::<L>(1)]];
++    let mut s1 = [[SvfState::<L>::default(); 1]; 2];
++    let mut s2 = s1;
++    // Equivalence: outputs, states and verdicts, including a planted infinity.
++    for block in 0..20 {
++        let mut a = source.clone();
++        let mut b = source.clone();
++        if block == 7 {
++            a[1][33] = f32::INFINITY;
++            b[1][33] = f32::INFINITY;
++        }
++        {
++            let (x, y) = a.split_at_mut(1);
++            svf_cascade_interleaved::<L, 2, 1>([&mut x[0], &mut y[0]], QUANTUM, &c, &mut s1);
++        }
++        let verdict_a = [check::<L>(&a[0]), check::<L>(&a[1])];
++        let verdict_b = {
++            let (x, y) = b.split_at_mut(1);
++            fused_d1::<L, 2>([&mut x[0], &mut y[0]], QUANTUM, &c, &mut s2)
++        };
++        assert_eq!(verdict_a, verdict_b, "block {block}");
++        for t in 0..2 {
++            assert!(a[t].iter().zip(&b[t]).all(|(p, q)| p.to_bits() == q.to_bits() || (p.is_nan() && q.is_nan())));
++        }
++        if block == 7 {
++            s1 = [[SvfState::<L>::default(); 1]; 2];
++            s2 = s1;
++        }
++    }
++    let time = |f: &mut dyn FnMut()| -> f64 {
++        for _ in 0..2000 {
++            f();
++        }
++        let mut best = f64::MAX;
++        for _ in 0..3 {
++            let start = Instant::now();
++            for _ in 0..20_000 {
++                f();
++            }
++            best = best.min(start.elapsed().as_secs_f64() / 20_000.0);
++        }
++        best * hz
++    };
++    let refresh = time(&mut || {
++        for (b, s) in blocks.iter_mut().zip(&source) {
++            b.copy_from_slice(s);
++        }
++        black_box(&mut blocks);
++    });
++    let separate = time(&mut || {
++        for (b, s) in blocks.iter_mut().zip(&source) {
++            b.copy_from_slice(s);
++        }
++        let (x, y) = blocks.split_at_mut(1);
++        svf_cascade_interleaved::<L, 2, 1>(black_box([&mut x[0], &mut y[0]]), QUANTUM, &c, &mut s1);
++        black_box([check::<L>(&blocks[0]), check::<L>(&blocks[1])]);
++    });
++    let fused = time(&mut || {
++        for (b, s) in blocks.iter_mut().zip(&source) {
++            b.copy_from_slice(s);
++        }
++        let (x, y) = blocks.split_at_mut(1);
++        black_box(fused_d1::<L, 2>(black_box([&mut x[0], &mut y[0]]), QUANTUM, &c, &mut s2));
++    });
++    let ls = (2 * span) as f64;
++    println!(
++        "FUSED {:<6} D1 + separate scan {:.0} cyc ({:.3} cyc/ls), fused {:.0} cyc ({:.3} cyc/ls) net of refresh {:.0}",
++        core::any::type_name::<L>().rsplit("::").next().unwrap_or(""),
++        separate - refresh,
++        (separate - refresh) / ls,
++        fused - refresh,
++        (fused - refresh) / ls,
++        refresh
++    );
++}
++
++#[test]
++#[ignore = "diagnosis harness"]
++fn fused_check() {
++    let hz = core_hz();
++    fused_sweep::<Simd8>(hz);
++    fused_sweep::<Simd4>(hz);
++}
+diff --git a/tools/wasm-console-guest/Cargo.toml b/tools/wasm-console-guest/Cargo.toml
+index 917d33b6..7f625e37 100644
+--- a/tools/wasm-console-guest/Cargo.toml
++++ b/tools/wasm-console-guest/Cargo.toml
+@@ -18,6 +18,7 @@ crate-type = ["cdylib"]
+ bench-support.workspace = true
+ console-workload.workspace = true
+ lane.workspace = true
++parametric-eq = { workspace = true, features = ["diag"] }
+ 
+ [lints]
+ workspace = true
+diff --git a/tools/wasm-console-guest/src/lib.rs b/tools/wasm-console-guest/src/lib.rs
+index 5559d386..880caaeb 100644
+--- a/tools/wasm-console-guest/src/lib.rs
++++ b/tools/wasm-console-guest/src/lib.rs
+@@ -269,3 +269,10 @@ pub extern "C" fn miso_console_render_errors() -> u32 {
+         .unwrap_or_else(std::sync::PoisonError::into_inner);
+     guard.as_ref().map_or(0, |arm| arm.render_errors)
+ }
++
++/// EQ diagnosis toggles (diagnosis prototype only; never committed). Returns `1`.
++#[unsafe(no_mangle)]
++pub extern "C" fn miso_console_set_eq_diag(flags: u32) -> u32 {
++    parametric_eq::diag::FLAGS.store(flags, std::sync::atomic::Ordering::Relaxed);
++    1
++}
+diff --git a/docs/handoffs/effects-2026-09-27/eq-diag-tools/kbench/Cargo.toml b/docs/handoffs/effects-2026-09-27/eq-diag-tools/kbench/Cargo.toml
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/eq-diag-tools/kbench/Cargo.toml
+@@ -0,0 +1,21 @@
++[package]
++name = "kbench"
++version = "0.0.0"
++edition = "2024"
++publish = false
++
++[lib]
++crate-type = ["cdylib", "rlib"]
++
++[dependencies]
++lane = { path = "../../../../../crates/lane" }
++parametric-eq = { path = "../../../../../crates/parametric-eq" }
++engine = { path = "../../../../../crates/engine" }
++
++[profile.release]
++lto = "fat"
++codegen-units = 1
++panic = "abort"
++debug = 1
++
++[workspace]
+diff --git a/docs/handoffs/effects-2026-09-27/eq-diag-tools/kbench/src/lib.rs b/docs/handoffs/effects-2026-09-27/eq-diag-tools/kbench/src/lib.rs
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/eq-diag-tools/kbench/src/lib.rs
+@@ -0,0 +1,306 @@
++//! Kernel replicas for the EQ diagnosis, compiled to wasm32 + simd128 (and natively for checks).
++//! Each export runs `calls` iterations of (refresh both planes, run the case) and returns a word
++//! of the result so nothing is dead. The host times the call.
++#![allow(unsafe_code)]
++
++use engine::SampleRateHz;
++use lane::kernels::{
++    SvfCoef, SvfState, svf_cascade_interleaved, svf_cascade_interleaved_with_dry_masks, svf_step,
++};
++use lane::{Lane, Simd4};
++use parametric_eq::{EqBandKind, design_svf};
++use std::hint::black_box;
++use std::sync::Mutex;
++
++type L = Simd4;
++const W: usize = 4;
++const FRAMES: usize = 128;
++const SPAN: usize = FRAMES * W;
++
++fn bell_words(track: usize, channel: usize) -> [f32; 6] {
++    let (frequency, gain) = if channel == 0 {
++        (90.0 + 45.0 * track as f32, -7.5 + track as f32)
++    } else {
++        (110.0 + 55.0 * track as f32, 6.5 - track as f32)
++    };
++    let q = 0.5 + 0.15 * track as f32;
++    design_svf(
++        EqBandKind::Bell,
++        frequency,
++        gain.clamp(-24.0, 24.0),
++        q,
++        1.0,
++        SampleRateHz(48_000),
++    )
++    .expect("bell")
++    .to_array()
++}
++
++fn coef_from(words: impl Fn(usize) -> [f32; 6]) -> SvfCoef<L> {
++    let lane = |index: usize| {
++        let values: Vec<f32> = (0..W).map(|lane| words(lane)[index]).collect();
++        L::load(&values)
++    };
++    SvfCoef { c1: lane(0), a2: lane(1), a3: lane(2), m0: lane(3), m1: lane(4), m2: lane(5) }
++}
++
++fn identity() -> SvfCoef<L> {
++    coef_from(|_| [0.0, 0.0, 0.0, 1.0, 0.0, 0.0])
++}
++
++fn bell(channel: usize, salt: usize) -> SvfCoef<L> {
++    coef_from(|lane| bell_words(lane + salt, channel))
++}
++
++fn signal(salt: usize) -> Vec<f32> {
++    (0..SPAN)
++        .map(|index| (((index * 7 + salt * 13) % 97) as f32 - 48.0) / 96.0)
++        .collect()
++}
++
++#[inline(always)]
++fn section(x: L, nc1: L, c: &SvfCoef<L>, s: &mut SvfState<L>) -> L {
++    let (v1, v2) = svf_step(x, nc1, c.a2, c.a3, s);
++    c.m2.fma(v2, c.m1.fma(v1, c.m0.mul(x)))
++}
++
++#[inline(always)]
++fn skewed<const S: usize, const D: usize, const MASKED: bool>(
++    io: [&mut [f32]; S],
++    frames: usize,
++    c: &[[SvfCoef<L>; D]; S],
++    s: &mut [[SvfState<L>; D]; S],
++    masks: &[[<L as Lane>::Mask; D]; S],
++) {
++    let w = W;
++    let span = frames * w;
++    let mut io = io.map(|block| &mut block[..span]);
++    let mut state = *s;
++    let nc1: [[L; D]; S] = core::array::from_fn(|t| core::array::from_fn(|k| c[t][k].c1.neg()));
++    let mut carry: [[L; D]; S] = [[L::zero(); D]; S];
++    macro_rules! step {
++        ($i:expr, $t:expr, $k:expr) => {{
++            let (i, t, k) = ($i, $t, $k);
++            let f = i - k;
++            let x = if k == 0 { L::load(&io[t][f * w..f * w + w]) } else { carry[t][k - 1] };
++            let wet = section(x, nc1[t][k], &c[t][k], &mut state[t][k]);
++            let y = if MASKED { L::select(masks[t][k], x, wet) } else { wet };
++            if k == D - 1 { y.store(&mut io[t][f * w..f * w + w]); } else { carry[t][k] = y; }
++        }};
++    }
++    for i in 0..D - 1 {
++        for t in 0..S {
++            for k in (0..=i).rev() {
++                step!(i, t, k);
++            }
++        }
++    }
++    for i in D - 1..frames {
++        for t in 0..S {
++            for k in (0..D).rev() {
++                step!(i, t, k);
++            }
++        }
++    }
++    for i in frames..frames + D - 1 {
++        for t in 0..S {
++            for k in (i + 1 - frames..D).rev() {
++                step!(i, t, k);
++            }
++        }
++    }
++    *s = state;
++}
++
++fn block_admits_elision(io: &[f32]) -> bool {
++    let mut rejected = 0_u32;
++    for value in io {
++        let bits = value.to_bits();
++        rejected |= u32::from(bits == 0x8000_0000);
++        rejected |= u32::from((bits & 0x7fff_ffff) > 1.0e30_f32.to_bits());
++    }
++    rejected == 0
++}
++
++fn block_admits_elision_minmax(io: &[f32]) -> bool {
++    let mut nearest = u32::MAX;
++    let mut largest = 0_u32;
++    for value in io {
++        let bits = value.to_bits();
++        nearest = nearest.min(bits ^ 0x8000_0000);
++        largest = largest.max(bits & 0x7fff_ffff);
++    }
++    nearest != 0 && largest <= 1.0e30_f32.to_bits()
++}
++
++#[inline(always)]
++fn fused_d1(io: [&mut [f32]; 2], c: &[[SvfCoef<L>; 1]; 2], s: &mut [[SvfState<L>; 1]; 2]) -> [bool; 2] {
++    let w = W;
++    let io = io.map(|block| &mut block[..SPAN]);
++    let mut state = *s;
++    let nc1: [L; 2] = core::array::from_fn(|t| c[t][0].c1.neg());
++    let limit = L::splat(1.0e30);
++    let mut ok: [<L as Lane>::Mask; 2] = [L::zero().eq(L::zero()); 2];
++    for frame in 0..FRAMES {
++        for t in 0..2 {
++            let slot = &mut io[t][frame * w..frame * w + w];
++            let x = L::load(slot);
++            let y = section(x, nc1[t], &c[t][0], &mut state[t][0]);
++            ok[t] = L::mask_and(ok[t], y.abs().lt(limit));
++            y.store(slot);
++        }
++    }
++    *s = state;
++    core::array::from_fn(|t| !L::mask_any(L::mask_not(ok[t])))
++}
++
++fn check_block(io: &[f32]) -> bool {
++    let limit = L::splat(1.0e30);
++    let mut ok = L::zero().eq(L::zero());
++    for frame in io.chunks_exact(W) {
++        let x = L::load(frame);
++        ok = L::mask_and(ok, x.abs().lt(limit));
++    }
++    !L::mask_any(L::mask_not(ok))
++}
++
++struct Data {
++    source: [Vec<f32>; 2],
++    blocks: [Vec<f32>; 2],
++}
++
++static DATA: Mutex<Option<Data>> = Mutex::new(None);
++
++fn with_data<R>(f: impl FnOnce(&mut Data) -> R) -> R {
++    let mut guard = DATA.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
++    if guard.is_none() {
++        let source = [signal(0), signal(1)];
++        *guard = Some(Data { blocks: source.clone(), source });
++    }
++    f(guard.as_mut().expect("data"))
++}
++
++fn refresh(data: &mut Data) {
++    for (block, source) in data.blocks.iter_mut().zip(data.source.iter()) {
++        block.copy_from_slice(source);
++    }
++}
++
++/// `passes` passes of an `S`-stream, depth-`D` cascade with section coefficients from `coef`.
++fn cascade<const S: usize, const D: usize, const MASKED: bool, const SKEW: bool>(
++    calls: u32,
++    passes: usize,
++    coef: impl Fn(usize, usize, usize) -> SvfCoef<L>,
++    dry_first: bool,
++) -> u32 {
++    let all_ones = L::zero().eq(L::zero());
++    let none = L::zero().lt(L::zero());
++    let c: Vec<[[SvfCoef<L>; D]; S]> = (0..passes)
++        .map(|pass| core::array::from_fn(|t| core::array::from_fn(|k| coef(pass, t, k))))
++        .collect();
++    let masks: [[<L as Lane>::Mask; D]; S] = core::array::from_fn(|_| {
++        core::array::from_fn(|k| if dry_first && k == 0 { all_ones } else { none })
++    });
++    let mut state = vec![[[SvfState::<L>::default(); D]; S]; passes];
++    with_data(|data| {
++        for _ in 0..calls {
++            refresh(data);
++            for pass in 0..passes {
++                let (a, b) = data.blocks.split_at_mut(1);
++                let pair: [&mut [f32]; 2] = [a[0].as_mut_slice(), b[0].as_mut_slice()];
++                let mut each = pair.into_iter();
++                let io: [&mut [f32]; S] = core::array::from_fn(|_| each.next().expect("plane"));
++                let io = black_box(io);
++                if SKEW {
++                    skewed::<S, D, MASKED>(io, FRAMES, &c[pass], &mut state[pass], &masks);
++                } else if MASKED {
++                    svf_cascade_interleaved_with_dry_masks::<L, S, D>(io, FRAMES, &c[pass], &mut state[pass], &masks);
++                } else {
++                    svf_cascade_interleaved::<L, S, D>(io, FRAMES, &c[pass], &mut state[pass]);
++                }
++            }
++        }
++        data.blocks[0][7].to_bits()
++    })
++}
++
++#[unsafe(no_mangle)]
++pub extern "C" fn kb_run(case: u32, calls: u32) -> u32 {
++    let live = |pass: usize, t: usize, k: usize, depth: usize| bell(t, 3 * (pass * depth + k) + 1);
++    match case {
++        0 => with_data(|data| {
++            for _ in 0..calls {
++                refresh(data);
++                black_box(&mut data.blocks);
++            }
++            data.blocks[0][7].to_bits()
++        }),
++        1 => cascade::<2, 2, true, false>(calls, 1, |_, t, k| if k == 0 { identity() } else { bell(t, 0) }, true),
++        2 => cascade::<2, 2, false, false>(calls, 1, |_, t, k| if k == 0 { identity() } else { bell(t, 0) }, false),
++        3 => cascade::<2, 1, false, false>(calls, 1, |_, t, _| bell(t, 0), false),
++        4 => cascade::<2, 1, true, false>(calls, 1, |_, t, _| bell(t, 0), false),
++        5 => cascade::<2, 2, true, true>(calls, 1, |_, t, k| if k == 0 { identity() } else { bell(t, 0) }, true),
++        6 => cascade::<2, 2, false, true>(calls, 1, |p, t, k| live(p, t, k, 2), false),
++        7 => cascade::<2, 2, false, false>(calls, 1, |p, t, k| live(p, t, k, 2), false),
++        8 => cascade::<2, 2, false, false>(calls, 3, |p, t, k| live(p, t, k, 2), false),
++        9 => cascade::<2, 3, false, false>(calls, 2, |p, t, k| live(p, t, k, 3), false),
++        10 => cascade::<2, 1, false, false>(calls, 6, |p, t, k| live(p, t, k, 1), false),
++        11 => cascade::<2, 4, false, false>(calls, 1, |p, t, k| live(p, t, k, 4), false),
++        12 => cascade::<2, 2, false, false>(calls, 2, |p, t, k| live(p, t, k, 2), false),
++        13 => cascade::<2, 3, false, true>(calls, 2, |p, t, k| live(p, t, k, 3), false),
++        14 => with_data(|data| {
++            let mut ok = 0;
++            for _ in 0..calls {
++                for block in &data.source {
++                    ok += u32::from(block_admits_elision(black_box(block)));
++                }
++            }
++            ok
++        }),
++        15 => with_data(|data| {
++            let mut ok = 0;
++            for _ in 0..calls {
++                for block in &data.source {
++                    ok += u32::from(check_block(black_box(block)));
++                }
++            }
++            ok
++        }),
++        16 => cascade::<1, 1, false, false>(calls, 1, |_, t, _| bell(t, 0), false),
++        17 => cascade::<1, 2, false, false>(calls, 1, |p, t, k| live(p, t, k, 2), false),
++        18 => cascade::<1, 3, false, false>(calls, 2, |p, t, k| live(p, t, k, 3), false),
++        19 => cascade::<1, 2, false, false>(calls, 3, |p, t, k| live(p, t, k, 2), false),
++        20 => cascade::<2, 2, false, true>(calls, 3, |p, t, k| live(p, t, k, 2), false),
++        21 => cascade::<2, 3, false, true>(calls, 2, |p, t, k| live(p, t, k, 3), false),
++        22 => with_data(|data| {
++            let mut ok = 0;
++            for _ in 0..calls {
++                for block in &data.source {
++                    ok += u32::from(block_admits_elision_minmax(black_box(block)));
++                }
++            }
++            ok
++        }),
++        23 | 24 => {
++            let c: [[SvfCoef<L>; 1]; 2] = [[bell(0, 0)], [bell(1, 0)]];
++            let mut st = [[SvfState::<L>::default(); 1]; 2];
++            with_data(|data| {
++                let mut ok = 0;
++                for _ in 0..calls {
++                    refresh(data);
++                    let (a, b) = data.blocks.split_at_mut(1);
++                    let io = black_box([a[0].as_mut_slice(), b[0].as_mut_slice()]);
++                    if case == 23 {
++                        svf_cascade_interleaved::<L, 2, 1>(io, FRAMES, &c, &mut st);
++                        ok += u32::from(check_block(&data.blocks[0])) + u32::from(check_block(&data.blocks[1]));
++                    } else {
++                        let v = fused_d1(io, &c, &mut st);
++                        ok += u32::from(v[0]) + u32::from(v[1]);
++                    }
++                }
++                ok
++            })
++        }
++        _ => 0,
++    }
++}
+diff --git a/docs/handoffs/effects-2026-09-27/eq-diag-tools/kbench.mjs b/docs/handoffs/effects-2026-09-27/eq-diag-tools/kbench.mjs
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/eq-diag-tools/kbench.mjs
+@@ -0,0 +1,57 @@
++// node kbench.mjs kbench.wasm : wasm simd128 (V8) kernel replicas, cycles per call at HZ.
++import { readFileSync } from 'node:fs';
++const HZ = Number(process.env.HZ ?? 3.7e9);
++const bytes = readFileSync(process.argv[2]);
++const { instance } = await WebAssembly.instantiate(bytes, {});
++const run = instance.exports.kb_run;
++const CALLS = 20000;
++const W = 4, FRAMES = 128;
++const cases = [
++  [0, 'refresh (two 512-word planes)', 0, 0],
++  [1, 'fixture pass: S2 D2 masked [HPF id dry, bell]', 2, 2],
++  [2, 'S2 D2 unmasked [general id pad, bell]', 2, 2],
++  [3, 'S2 D1 unmasked [bell]', 2, 1],
++  [4, 'S2 D1 masked [bell] (mask clear)', 2, 1],
++  [5, 'skewed S2 D2 masked fixture pass', 2, 2],
++  [6, 'skewed S2 D2 unmasked, 2 live', 2, 2],
++  [7, 'S2 D2 unmasked, 2 live', 2, 2],
++  [12, 'S2 D2 x2 unmasked, 4 live', 2, 4],
++  [11, 'S2 D4 x1 unmasked, 4 live', 2, 4],
++  [8, 'S2 D2 x3 unmasked, 6 live', 2, 6],
++  [9, 'S2 D3 x2 unmasked, 6 live', 2, 6],
++  [10, 'S2 D1 x6 unmasked, 6 live', 2, 6],
++  [20, 'skewed S2 D2 x3 unmasked, 6 live', 2, 6],
++  [13, 'skewed S2 D3 x2 unmasked, 6 live', 2, 6],
++  [16, 'S1 D1 unmasked [bell] (mono)', 1, 1],
++  [17, 'S1 D2 unmasked, 2 live (mono)', 1, 2],
++  [19, 'S1 D2 x3 unmasked, 6 live (mono)', 1, 6],
++  [18, 'S1 D3 x2 unmasked, 6 live (mono)', 1, 6],
++  [14, 'elision gate, two planes', 2, 0],
++  [15, '4.4 boundary scan, two planes', 2, 0],
++  [22, 'elision gate min/max form, two planes', 2, 0],
++  [23, 'S2 D1 unmasked + separate 4.4 scan', 2, 1],
++  [24, 'S2 D1 unmasked with the 4.4 scan fused', 2, 1],
++];
++function time(id) {
++  for (let i = 0; i < 3; i++) run(id, 2000);
++  let best = Infinity;
++  for (let r = 0; r < 3; r++) {
++    const t0 = process.hrtime.bigint();
++    run(id, CALLS);
++    best = Math.min(best, Number(process.hrtime.bigint() - t0) / CALLS);
++  }
++  return best * HZ / 1e9;
++}
++const loadavg = () => readFileSync('/proc/loadavg', 'utf8').trim();
++console.log(`node ${process.version} v8 ${process.versions.v8} loadavg ${loadavg()}`);
++const refresh = time(0);
++for (const [id, name, streams, sections] of cases) {
++  const cycles = time(id);
++  const isScan = id === 14 || id === 15 || id === 22;
++  const net = id === 0 || isScan ? cycles : cycles - (streams === 1 ? refresh : refresh);
++  const ls = FRAMES * W * (streams || 2);
++  let line = `wasm ${name.padEnd(48)} ${cycles.toFixed(0).padStart(7)} cyc/call  net ${net.toFixed(0).padStart(7)}  ${(net / ls).toFixed(3)} cyc/ls`;
++  if (sections) line += `  ${(net / ls / sections).toFixed(3)} cyc/(ls x section)  ${(net / FRAMES / sections * streams / 2).toFixed(1)} cyc per frame per 2 section-chains`;
++  console.log(line);
++}
++console.log(`loadavg ${loadavg()}`);
+diff --git a/docs/handoffs/effects-2026-09-27/eq-diag-tools/wasm_ab.mjs b/docs/handoffs/effects-2026-09-27/eq-diag-tools/wasm_ab.mjs
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/eq-diag-tools/wasm_ab.mjs
+@@ -0,0 +1,147 @@
++// EQ diagnosis: wasm simd128 guest under Node (V8), in-process A/B of the EQ diag toggles.
++// node wasm_ab.mjs GUEST.wasm
++import { readFileSync } from 'node:fs';
++
++const bytes = readFileSync(process.argv[2]);
++const module = new WebAssembly.Module(bytes);
++const HZ = Number(process.env.HZ ?? 3.7e9);
++const TRACKS = 64;
++const QUANTUM = 128;
++const LANE_SAMPLES = TRACKS * QUANTUM * 2;
++const EQ_ONLY = 4;
++const BUILTINS_ONLY = 6;
++const IDLE = 8;
++const ROUNDS = Number(process.env.ROUNDS ?? 6);
++const BLOCKS = Number(process.env.BLOCKS ?? 1000);
++const flagsList = (process.env.FLAGS ?? '0,1,2,32,4,8,768,2048,3584,772,812')
++  .split(',').map(Number);
++const workload = Number(process.env.WORKLOAD ?? EQ_ONLY);
++
++const f32 = new Float32Array(1);
++const u32 = new Uint32Array(f32.buffer);
++function bits(x) { f32[0] = x; return u32[0]; }
++
++function instance(index) {
++  const inst = new WebAssembly.Instance(module, {});
++  const e = inst.exports;
++  if (e.miso_console_backend() !== 1) throw new Error('guest is not simd128');
++  e.miso_console_reset_source();
++  for (let track = 0; track < TRACKS; track++) {
++    const left = [], right = [];
++    for (let frame = 0; frame < QUANTUM; frame++) {
++      const phase = Math.fround(Math.fround(frame * Math.fround(0.017)) + Math.fround(track * Math.fround(0.31)));
++      const value = Math.fround(Math.fround(Math.sin(phase)) * Math.fround(0.6));
++      left.push(value);
++      right.push(Math.fround(Math.fround(-value) * Math.fround(0.75)));
++    }
++    for (const v of left) e.miso_console_push_source_word(bits(v));
++    for (const v of right) e.miso_console_push_source_word(bits(v));
++  }
++  if (e.miso_console_prepare(index) !== 1) throw new Error('prepare ' + index);
++  return { e, observation: 0 };
++}
++
++function measure(arm, blocks) {
++  const samples = new Float64Array(blocks);
++  for (let i = 0; i < blocks; i++) {
++    const t0 = process.hrtime.bigint();
++    const ok = arm.e.miso_console_render(arm.observation);
++    const t1 = process.hrtime.bigint();
++    if (ok !== 1) throw new Error('render');
++    arm.observation++;
++    samples[i] = Number(t1 - t0);
++  }
++  samples.sort();
++  return samples[blocks >> 1];
++}
++
++function median(values) {
++  const v = [...values].sort((a, b) => a - b);
++  return v[v.length >> 1];
++}
++
++function digest(index, flags) {
++  const inst = new WebAssembly.Instance(module, {});
++  const e = inst.exports;
++  e.miso_console_reset_source();
++  for (let track = 0; track < TRACKS * (index === 3 ? 2 : 1); track++) {
++    for (let k = 0; k < 2 * QUANTUM; k++) {
++      e.miso_console_push_source_word(bits(Math.fround(Math.sin(track * 0.31 + k * 0.017) * 0.5)));
++    }
++  }
++  return { e };
++}
++
++const loadavg = () => readFileSync('/proc/loadavg', 'utf8').trim();
++console.log(`node ${process.version}, v8 ${process.versions.v8}, loadavg ${loadavg()}, HZ ${HZ}`);
++if (process.env.TIMING !== '0') {
++const eq = instance(workload);
++const control = instance(BUILTINS_ONLY);
++eq.e.miso_console_set_eq_diag(0);
++measure(eq, 3000);
++measure(control, 3000);
++for (const flags of flagsList) {
++  eq.e.miso_console_set_eq_diag(flags);
++  measure(eq, 300);
++}
++eq.e.miso_console_set_eq_diag(0);
++const table = flagsList.map(() => []);
++const controls = [];
++for (let round = 0; round < ROUNDS; round++) {
++  controls.push(measure(control, BLOCKS));
++  for (let step = 0; step < flagsList.length; step++) {
++    const index = (step + round) % flagsList.length;
++    eq.e.miso_console_set_eq_diag(flagsList[index]);
++    measure(eq, 64);
++    table[index].push(measure(eq, BLOCKS));
++  }
++}
++eq.e.miso_console_set_eq_diag(0);
++const b = median(controls);
++const base = median(table[0]);
++console.log(`workload ${workload}; builtins_only control p50 ${b.toFixed(0)} ns; loadavg ${loadavg()}`);
++for (let i = 0; i < flagsList.length; i++) {
++  const m = median(table[i]);
++  const d = m - base;
++  console.log(
++    `wasm flags ${String(flagsList[i]).padStart(5)}  p50 ${m.toFixed(0).padStart(7)} ns  vs base ${d >= 0 ? '+' : ''}${d.toFixed(0).padStart(6)} ns ` +
++    `(${(d * HZ / 1e9 / LANE_SAMPLES).toFixed(3)} cyc/ls)  isolate ${((m - b) * HZ / 1e9 / LANE_SAMPLES).toFixed(3)} cyc/ls  ` +
++    `rounds [${table[i].map((x) => x.toFixed(0)).join(', ')}]`);
++}
++}
++
++// Digests: 64 blocks of every workload under each flag set against flags 0, same staged input.
++if (process.env.DIGESTS) {
++  const digestFlags = process.env.DIGESTS.split(',').map(Number);
++  let mismatches = 0;
++  const count = new WebAssembly.Instance(module, {}).exports.miso_console_workload_count();
++  for (let index = 0; index < count; index++) {
++    const words = [];
++    for (const flags of [0, ...digestFlags]) {
++      const inst = new WebAssembly.Instance(module, {});
++      const e = inst.exports;
++      e.miso_console_reset_source();
++      const tracks = index === 3 ? 128 : (index <= 1 ? 9 : 64);
++      for (let track = 0; track < tracks; track++) {
++        for (let k = 0; k < 2 * QUANTUM; k++) {
++          const v = Math.fround(Math.sin(track * 0.31 + (k % QUANTUM) * 0.017) * (k < QUANTUM ? 0.6 : -0.45));
++          e.miso_console_push_source_word(bits(v));
++        }
++      }
++      if (e.miso_console_prepare(index) !== 1) { words.push('prepare-failed'); continue; }
++      e.miso_console_set_eq_diag(flags);
++      for (let block = 0; block < 64; block++) {
++        e.miso_console_render(block);
++        e.miso_console_hash_output();
++      }
++      e.miso_console_finish_digest();
++      let hex = '';
++      for (let w = 0; w < 8; w++) hex += (e.miso_console_digest_word(w) >>> 0).toString(16).padStart(8, '0');
++      words.push(hex);
++    }
++    const same = words.slice(1).map((w) => (w === words[0] ? '=' : 'DIFF'));
++    mismatches += same.filter((x) => x !== '=').length;
++    console.log(`digest workload ${String(index).padStart(2)} ${words[0].slice(0, 16)} ${same.join(' ')}`);
++  }
++  console.log(`wasm digest mismatches: ${mismatches}`);
++}
+diff --git a/docs/handoffs/effects-2026-09-27/eq-diag-tools/wasm_variants.mjs b/docs/handoffs/effects-2026-09-27/eq-diag-tools/wasm_variants.mjs
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/eq-diag-tools/wasm_variants.mjs
+@@ -0,0 +1,80 @@
++// node wasm_variants.mjs base.wasm skew.wasm ... : eq_only and builtins_only per build, one
++// process, interleaved rounds; plus a 64-block digest per build and workload.
++import { readFileSync } from 'node:fs';
++
++const HZ = Number(process.env.HZ ?? 3.7e9);
++const TRACKS = 64, QUANTUM = 128, LANE_SAMPLES = TRACKS * QUANTUM * 2;
++const ROUNDS = Number(process.env.ROUNDS ?? 6);
++const BLOCKS = Number(process.env.BLOCKS ?? 1000);
++const WORKLOADS = (process.env.WORKLOADS ?? '4,6').split(',').map(Number);
++const f32 = new Float32Array(1), u32 = new Uint32Array(f32.buffer);
++const bits = (x) => { f32[0] = x; return u32[0]; };
++const tracksOf = (index) => (index === 3 ? 128 : index <= 1 ? 9 : 64);
++
++function arm(module, index) {
++  const e = new WebAssembly.Instance(module, {}).exports;
++  e.miso_console_reset_source();
++  for (let track = 0; track < tracksOf(index); track++) {
++    for (let k = 0; k < 2 * QUANTUM; k++) {
++      const v = Math.fround(Math.sin(track * 0.31 + (k % QUANTUM) * 0.017) * (k < QUANTUM ? 0.6 : -0.45));
++      e.miso_console_push_source_word(bits(v));
++    }
++  }
++  if (e.miso_console_prepare(index) !== 1) throw new Error('prepare');
++  return { e, observation: 0 };
++}
++
++function measure(a, blocks) {
++  const samples = new Float64Array(blocks);
++  for (let i = 0; i < blocks; i++) {
++    const t0 = process.hrtime.bigint();
++    if (a.e.miso_console_render(a.observation) !== 1) throw new Error('render');
++    samples[i] = Number(process.hrtime.bigint() - t0);
++    a.observation++;
++  }
++  samples.sort();
++  return samples[blocks >> 1];
++}
++const median = (v) => [...v].sort((x, y) => x - y)[v.length >> 1];
++const loadavg = () => readFileSync('/proc/loadavg', 'utf8').trim();
++
++const names = process.argv.slice(2);
++const modules = names.map((path) => new WebAssembly.Module(readFileSync(path)));
++console.log(`node ${process.version} v8 ${process.versions.v8} loadavg ${loadavg()}`);
++
++if (process.env.DIGESTS) {
++  const count = new WebAssembly.Instance(modules[0], {}).exports.miso_console_workload_count();
++  for (let index = 0; index < count; index++) {
++    const hexes = modules.map((m) => {
++      const a = arm(m, index);
++      for (let block = 0; block < 64; block++) {
++        a.e.miso_console_render(block);
++        a.e.miso_console_hash_output();
++      }
++      a.e.miso_console_finish_digest();
++      let hex = '';
++      for (let w = 0; w < 8; w++) hex += (a.e.miso_console_digest_word(w) >>> 0).toString(16).padStart(8, '0');
++      return hex;
++    });
++    console.log(`digest ${String(index).padStart(2)} ${hexes[0].slice(0, 16)} ${hexes.slice(1).map((h) => (h === hexes[0] ? '=' : 'DIFF')).join(' ')}`);
++  }
++}
++
++const arms = modules.map((m) => WORKLOADS.map((index) => arm(m, index)));
++for (const row of arms) for (const a of row) measure(a, 3000);
++const table = arms.map((row) => row.map(() => []));
++for (let round = 0; round < ROUNDS; round++) {
++  for (let s = 0; s < arms.length; s++) {
++    const i = (s + round) % arms.length;
++    for (let w = 0; w < WORKLOADS.length; w++) {
++      measure(arms[i][w], 64);
++      table[i][w].push(measure(arms[i][w], BLOCKS));
++    }
++  }
++}
++for (let i = 0; i < arms.length; i++) {
++  const p = table[i].map(median);
++  const iso = p.length > 1 ? `  isolate(w0-w1) ${(p[0] - p[1]).toFixed(0)} ns = ${((p[0] - p[1]) * HZ / 1e9 / LANE_SAMPLES).toFixed(3)} cyc/ls` : '';
++  console.log(`${names[i].padEnd(20)} ` + WORKLOADS.map((w, k) => `w${w} p50 ${p[k].toFixed(0)} ns [${table[i][k].map((x) => x.toFixed(0)).join(',')}]`).join('  ') + iso);
++}
++console.log(`loadavg ${loadavg()}`);
+diff --git a/docs/handoffs/effects-2026-09-27/eq-diag-tools/print_code.mjs b/docs/handoffs/effects-2026-09-27/eq-diag-tools/print_code.mjs
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/eq-diag-tools/print_code.mjs
+@@ -0,0 +1,14 @@
++// node --no-liftoff --print-wasm-code print_code.mjs GUEST.wasm : render a few eq_only blocks.
++import { readFileSync } from 'node:fs';
++const module = new WebAssembly.Module(readFileSync(process.argv[2]));
++const e = new WebAssembly.Instance(module, {}).exports;
++const f32 = new Float32Array(1), u32 = new Uint32Array(f32.buffer);
++e.miso_console_reset_source();
++for (let track = 0; track < 64; track++) {
++  for (let k = 0; k < 256; k++) {
++    f32[0] = Math.fround(Math.sin(track * 0.31 + (k % 128) * 0.017) * 0.5);
++    e.miso_console_push_source_word(u32[0]);
++  }
++}
++e.miso_console_prepare(4);
++for (let block = 0; block < 4; block++) e.miso_console_render(block);
+diff --git a/docs/handoffs/effects-2026-09-27/eq-diag-tools/probe.rs b/docs/handoffs/effects-2026-09-27/eq-diag-tools/probe.rs
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/eq-diag-tools/probe.rs
+@@ -0,0 +1,123 @@
++// Zen 3 op-mix throughput probe (diagnosis only; not in the tree).
++// rustc -O -C target-feature=+avx2,+fma probe.rs -o probe ; taskset -c 31 ./probe
++#![allow(unsafe_code)]
++use std::arch::x86_64::*;
++use std::hint::black_box;
++use std::time::Instant;
++
++const CHAINS: usize = 12;
++const REPEAT: usize = 8;
++
++macro_rules! variant {
++    ($name:expr, $ops:expr, $iters:expr, $hz:expr, |$x:ident, $c1:ident, $c2:ident, $eps:ident, $absm:ident| $body:expr) => {{
++        #[target_feature(enable = "avx2,fma")]
++        unsafe fn run(iters: u64) -> f32 {
++            let $c1 = _mm256_set1_ps(1.000_000_1);
++            let $c2 = _mm256_set1_ps(0.999_999_9);
++            let $eps = _mm256_set1_ps(1.0e-20);
++            let $absm = _mm256_castsi256_ps(_mm256_set1_epi32(0x7fff_ffff));
++            let mut a: [__m256; CHAINS] = core::array::from_fn(|i| _mm256_set1_ps(1.0 + i as f32 * 0.01));
++            for _ in 0..iters {
++                for _ in 0..REPEAT {
++                    for slot in a.iter_mut() {
++                        let $x = *slot;
++                        *slot = $body;
++                    }
++                }
++
++            }
++            let mut total = _mm256_setzero_ps();
++            for slot in a {
++                total = _mm256_add_ps(total, slot);
++            }
++            let mut out = [0.0_f32; 8];
++            _mm256_storeu_ps(out.as_mut_ptr(), total);
++            out.iter().sum()
++        }
++        let iters: u64 = $iters;
++        let mut best = f64::MAX;
++        for _ in 0..3 {
++            let start = Instant::now();
++            black_box(unsafe { run(iters) });
++            best = best.min(start.elapsed().as_secs_f64());
++        }
++        let cycles = best * $hz;
++        let ops = iters as f64 * (REPEAT * CHAINS) as f64 * $ops as f64;
++        println!("{:<44} {:.3} ops/cycle", $name, ops / cycles);
++    }};
++}
++
++fn core_hz() -> f64 {
++    const ADDS: u64 = 300_000_000;
++    let mut best = f64::MAX;
++    for _ in 0..3 {
++        let mut x = black_box(0.0_f32);
++        let d = black_box(1.0e-3_f32);
++        let start = Instant::now();
++        for _ in 0..ADDS {
++            x += d;
++        }
++        best = best.min(start.elapsed().as_secs_f64());
++        black_box(x);
++    }
++    3.0 * ADDS as f64 / best
++}
++
++fn main() {
++    let hz = core_hz();
++    println!("core clock {:.3} GHz", hz / 1e9);
++    let n = 2_000_000;
++    variant!("vaddps", 1, n, hz, |x, c1, c2, eps, absm| _mm256_add_ps(x, c1));
++    variant!("vmulps", 1, n, hz, |x, c1, c2, eps, absm| _mm256_mul_ps(x, c2));
++    variant!("vmulps+vaddps", 2, n, hz, |x, c1, c2, eps, absm| _mm256_add_ps(_mm256_mul_ps(x, c2), c1));
++    variant!("vandps (x & absmask) + vaddps", 2, n, hz, |x, c1, c2, eps, absm| _mm256_add_ps(_mm256_and_ps(x, absm), c1));
++    variant!("vcmpps+vblendvps", 2, n, hz, |x, c1, c2, eps, absm| {
++        let m = _mm256_cmp_ps::<_CMP_GT_OQ>(x, c1);
++        _mm256_blendv_ps(x, c2, m)
++    });
++    variant!("flush: vandps, vcmpps, vandnps", 3, n, hz, |x, c1, c2, eps, absm| {
++        let m = _mm256_cmp_ps::<_CMP_LT_OQ>(_mm256_and_ps(x, absm), eps);
++        _mm256_andnot_ps(m, _mm256_add_ps(x, c1))
++    });
++    variant!("vaddps + flush (4 ops)", 4, n, hz, |x, c1, c2, eps, absm| {
++        let y = _mm256_add_ps(x, c1);
++        let m = _mm256_cmp_ps::<_CMP_LT_OQ>(_mm256_and_ps(y, absm), eps);
++        _mm256_andnot_ps(m, y)
++    });
++    variant!("vmulps + vaddps + flush (5 ops)", 5, n, hz, |x, c1, c2, eps, absm| {
++        let y = _mm256_add_ps(_mm256_mul_ps(x, c2), c1);
++        let m = _mm256_cmp_ps::<_CMP_LT_OQ>(_mm256_and_ps(y, absm), eps);
++        _mm256_andnot_ps(m, y)
++    });
++    variant!("vcmpps alone (x < c1 as float bits)", 1, n, hz, |x, c1, c2, eps, absm| _mm256_cmp_ps::<_CMP_LT_OQ>(x, c1));
++    variant!("vandps alone (x & c)", 1, n, hz, |x, c1, c2, eps, absm| _mm256_and_ps(x, c2));
++    variant!("vandnps alone", 1, n, hz, |x, c1, c2, eps, absm| _mm256_andnot_ps(c2, x));
++    variant!("vblendvps alone", 1, n, hz, |x, c1, c2, eps, absm| _mm256_blendv_ps(x, c2, c1));
++    // EQ section mix, 11 add : 7 mul : 4 logic : 2 cmp (24 ops), shallow dependency.
++    variant!("EQ mix 11a:7m:4l:2c (independent)", 24, n / 4, hz, |x, c1, c2, eps, absm| {
++        let a0 = _mm256_add_ps(x, c1);
++        let m0 = _mm256_mul_ps(x, c2);
++        let a1 = _mm256_add_ps(m0, c1);
++        let m1 = _mm256_mul_ps(a0, c2);
++        let a2 = _mm256_add_ps(a1, m1);
++        let m2 = _mm256_mul_ps(a1, c2);
++        let a3 = _mm256_add_ps(a2, c1);
++        let m3 = _mm256_mul_ps(a2, c2);
++        let a4 = _mm256_add_ps(m2, m3);
++        let l0 = _mm256_and_ps(a3, absm);
++        let k0 = _mm256_cmp_ps::<_CMP_LT_OQ>(l0, eps);
++        let n0 = _mm256_andnot_ps(k0, a3);
++        let l1 = _mm256_and_ps(a4, absm);
++        let k1 = _mm256_cmp_ps::<_CMP_LT_OQ>(l1, eps);
++        let n1 = _mm256_andnot_ps(k1, a4);
++        let a5 = _mm256_add_ps(n0, n1);
++        let m4 = _mm256_mul_ps(n0, c2);
++        let a6 = _mm256_add_ps(a5, m4);
++        let m5 = _mm256_mul_ps(n1, c2);
++        let a7 = _mm256_add_ps(a6, m5);
++        let m6 = _mm256_mul_ps(a7, c2);
++        let a8 = _mm256_add_ps(m6, a0);
++        let a9 = _mm256_add_ps(a8, c1);
++        _mm256_add_ps(a9, a3)
++    });
++}
+diff --git a/docs/handoffs/effects-2026-09-27/eq-diag-tools/loops.py b/docs/handoffs/effects-2026-09-27/eq-diag-tools/loops.py
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/eq-diag-tools/loops.py
+@@ -0,0 +1,53 @@
++"""Find loops (backward branches) in an objdump -d listing of one function and summarise them.
++
++usage: python3 loops.py LISTING [--min N] [--dump START]
++"""
++import re
++import sys
++from collections import Counter
++
++path = sys.argv[1]
++minimum = 20
++dump = None
++if '--min' in sys.argv:
++    minimum = int(sys.argv[sys.argv.index('--min') + 1])
++if '--dump' in sys.argv:
++    dump = int(sys.argv[sys.argv.index('--dump') + 1], 16)
++
++insns = []
++line_re = re.compile(r'^\s*([0-9a-f]+):\s+(\S.*)$')
++for line in open(path):
++    m = line_re.match(line)
++    if not m:
++        continue
++    addr = int(m.group(1), 16)
++    text = m.group(2).strip()
++    insns.append((addr, text))
++
++index_of = {a: i for i, (a, _) in enumerate(insns)}
++loops = []
++for i, (addr, text) in enumerate(insns):
++    parts = text.split()
++    if not parts or not parts[0].startswith('j'):
++        continue
++    target = re.search(r'\b([0-9a-f]+) <', text)
++    if not target:
++        continue
++    t = int(target.group(1), 16)
++    if t <= addr and t in index_of:
++        start = index_of[t]
++        body = insns[start:i + 1]
++        loops.append((t, addr, body))
++
++for t, end, body in loops:
++    if len(body) < minimum:
++        continue
++    ops = Counter(b[1].split()[0] for b in body)
++    loads = sum(1 for _, x in body if '(' in x and not x.split()[0].startswith(('lea', 'j', 'nop')))
++    print(f"loop {t:x}-{end:x}: {len(body)} insns")
++    print("   ", ", ".join(f"{k} {v}" for k, v in sorted(ops.items(), key=lambda kv: -kv[1])))
++    mem_ops = [x for _, x in body if '(' in x and not x.split()[0].startswith(('lea', 'nop'))]
++    print(f"    memory-operand instructions: {len(mem_ops)}")
++    if dump is not None and t == dump:
++        for a, x in body:
++            print(f"      {a:x}: {x}")
+diff --git a/docs/handoffs/effects-2026-09-27/eq-diag-tools/wasm_loops.py b/docs/handoffs/effects-2026-09-27/eq-diag-tools/wasm_loops.py
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/eq-diag-tools/wasm_loops.py
+@@ -0,0 +1,53 @@
++"""Summarise innermost wasm loops of one function in `wasm-objdump -d` output.
++
++usage: python3 wasm_loops.py DIS FUNCTION_SUBSTRING [--min N]
++"""
++import re
++import sys
++from collections import Counter
++
++path, needle = sys.argv[1], sys.argv[2]
++minimum = int(sys.argv[sys.argv.index('--min') + 1]) if '--min' in sys.argv else 30
++HEADER = re.compile(r"^([0-9a-f]+) func\[(\d+)\] <(.+)>:")
++INSN = re.compile(r"^\s*[0-9a-f]+: [0-9a-f ]+\|\s*(.*)$")
++
++functions = {}
++current = None
++for line in open(path):
++    h = HEADER.match(line)
++    if h:
++        current = h.group(3)
++        functions[current] = []
++        continue
++    if current is None:
++        continue
++    m = INSN.match(line)
++    if m:
++        functions[current].append(m.group(1).strip())
++
++matches = [name for name in functions if needle in name]
++for name in matches:
++    ops = functions[name]
++    print(f"== {name[:160]} ({len(ops)} instructions)")
++    stack = []
++    loops = []
++    for index, op in enumerate(ops):
++        word = op.split()[0] if op else ''
++        if word in ('block', 'loop', 'if'):
++            stack.append((word, index, []))
++        elif word == 'end' and stack:
++            kind, start, children = stack.pop()
++            if kind == 'loop':
++                loops.append((start, index, len(children) == 0))
++            if stack:
++                stack[-1][2].append(kind)
++    for start, end, innermost in loops:
++        body = ops[start:end + 1]
++        if len(body) < minimum:
++            continue
++        counts = Counter(op.split()[0] for op in body if op)
++        vec = sum(v for k, v in counts.items() if k.startswith(('f32x4', 'v128', 'i32x4')))
++        arith = sum(v for k, v in counts.items() if re.match(r"f32x4\.(mul|add|sub|div)$", k))
++        top = ', '.join(f"{k} {v}" for k, v in counts.most_common(14))
++        print(f"  loop @{start}-{end} innermost={innermost}: {len(body)} ops, vector {vec}, f32x4 arith {arith}")
++        print(f"    {top}")
+diff --git a/docs/handoffs/effects-2026-09-27/eq-diag-tools/v8_loops.py b/docs/handoffs/effects-2026-09-27/eq-diag-tools/v8_loops.py
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/eq-diag-tools/v8_loops.py
+@@ -0,0 +1,42 @@
++"""Loops (backward branches) in one V8 --print-wasm-code function listing.
++
++usage: python3 v8_loops.py LISTING START_LINE END_LINE [--min N] [--dump OFFSET]
++"""
++import re
++import sys
++from collections import Counter
++
++path, first, last = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
++minimum = int(sys.argv[sys.argv.index('--min') + 1]) if '--min' in sys.argv else 30
++dump = sys.argv[sys.argv.index('--dump') + 1] if '--dump' in sys.argv else None
++LINE = re.compile(r"^0x([0-9a-f]+)\s+([0-9a-f]+)\s+[0-9a-f]+\s+(.*)$")
++insns = []
++with open(path) as handle:
++    for number, line in enumerate(handle, 1):
++        if number < first:
++            continue
++        if number > last:
++            break
++        m = LINE.match(line.rstrip())
++        if m:
++            insns.append((int(m.group(1), 16), m.group(2), m.group(3).strip()))
++index_of = {a: i for i, (a, _, _) in enumerate(insns)}
++for i, (address, offset, text) in enumerate(insns):
++    if not text.startswith('j'):
++        continue
++    target = re.search(r"0x([0-9a-f]+)", text)
++    if not target:
++        continue
++    t = int(target.group(1), 16)
++    if t <= address and t in index_of:
++        body = insns[index_of[t]:i + 1]
++        if len(body) < minimum:
++            continue
++        ops = Counter(b[2].split()[0] if not b[2].startswith('REX.W') else b[2].split()[1] for b in body)
++        vec = sum(v for k, v in ops.items() if k.startswith('v') or k.endswith('ps') or k.startswith('movdq') or k.startswith('movap') or k.startswith('movup'))
++        mem = sum(1 for b in body if '[' in b[2])
++        print(f"loop +0x{insns[index_of[t]][1]}..+0x{offset}: {len(body)} insns, vector-ish {vec}, memory operands {mem}")
++        print("   ", ", ".join(f"{k} {v}" for k, v in ops.most_common(18)))
++        if dump and insns[index_of[t]][1] == dump:
++            for b in body:
++                print("      ", b[1], b[2])
+diff --git a/docs/handoffs/effects-2026-09-27/eq-diag-tools/variant.py b/docs/handoffs/effects-2026-09-27/eq-diag-tools/variant.py
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/eq-diag-tools/variant.py
+@@ -0,0 +1,165 @@
++"""Apply one minimal EQ variant to a base tree: `skew`, `nopad`, or `both`.
++
++usage: python3 variant.py ROOT VARIANT
++"""
++import sys
++
++root, variant = sys.argv[1], sys.argv[2]
++p = root + '/crates/parametric-eq/src/lib.rs'
++s = open(p).read()
++
++
++def rep(old, new, count=1):
++    global s
++    n = s.count(old)
++    assert n == count, (old[:100], n)
++    s = s.replace(old, new)
++
++
++SKEWED = '''
++/// Variant kernel: section `k` of every stream runs frame `i - k` in iteration `i`.
++#[inline(always)]
++fn skewed_cascade<L: Lane, const S: usize, const D: usize>(
++    io: [&mut [f32]; S],
++    frames: usize,
++    c: &[[SvfCoef<L>; D]; S],
++    s: &mut [[SvfState<L>; D]; S],
++    masks: &[[L::Mask; D]; S],
++) {
++    if frames < D {
++        svf_cascade_interleaved_with_dry_masks::<L, S, D>(io, frames, c, s, masks);
++        return;
++    }
++    let w = L::WIDTH;
++    let span = frames * w;
++    let mut io = io.map(|block| &mut block[..span]);
++    let mut state = *s;
++    let nc1: [[L; D]; S] = core::array::from_fn(|t| core::array::from_fn(|k| c[t][k].c1.neg()));
++    let mut carry: [[L; D]; S] = [[L::zero(); D]; S];
++    macro_rules! step {
++        ($i:expr, $t:expr, $k:expr) => {{
++            let (i, t, k) = ($i, $t, $k);
++            let f = i - k;
++            let x = if k == 0 {
++                L::load(&io[t][f * w..f * w + w])
++            } else {
++                carry[t][k - 1]
++            };
++            let coefficients = &c[t][k];
++            let (v1, v2) = lane::kernels::svf_step(
++                x,
++                nc1[t][k],
++                coefficients.a2,
++                coefficients.a3,
++                &mut state[t][k],
++            );
++            let wet = coefficients
++                .m2
++                .fma(v2, coefficients.m1.fma(v1, coefficients.m0.mul(x)));
++            let y = L::select(masks[t][k], x, wet);
++            if k == D - 1 {
++                y.store(&mut io[t][f * w..f * w + w]);
++            } else {
++                carry[t][k] = y;
++            }
++        }};
++    }
++    for i in 0..D - 1 {
++        for t in 0..S {
++            for k in (0..=i).rev() {
++                step!(i, t, k);
++            }
++        }
++    }
++    for i in D - 1..frames {
++        for t in 0..S {
++            for k in (0..D).rev() {
++                step!(i, t, k);
++            }
++        }
++    }
++    for i in frames..frames + D - 1 {
++        for t in 0..S {
++            for k in (i + 1 - frames..D).rev() {
++                step!(i, t, k);
++            }
++        }
++    }
++    *s = state;
++}
++'''
++
++if variant in ('skew', 'both'):
++    rep("""/// Reads increment `index` of a step set in the pinned order.
++fn step_word<""", SKEWED + """
++/// Reads increment `index` of a step set in the pinned order.
++fn step_word<""")
++    rep("""        svf_cascade_interleaved_with_dry_masks::<L, 2, DEPTH>(
++            [&mut *left, &mut *right],
++            frames,
++            &coefficients,
++            &mut state,
++            &dry_masks,
++        );""", """        skewed_cascade::<L, 2, DEPTH>(
++            [&mut *left, &mut *right],
++            frames,
++            &coefficients,
++            &mut state,
++            &dry_masks,
++        );""")
++
++if variant in ('nopad', 'both'):
++    # dual cascade_sections: no padding
++    rep("""    let dead = |section: usize| left_channel.identity[section] && right_channel.identity[section];
++    let depth = EFFECTIVE_CASCADE_DEPTH;""", """    let dead = |section: usize| left_channel.identity[section] && right_channel.identity[section];
++    let depth = 1;""")
++    rep("""    let (list, length) = sections;
++    debug_assert_eq!(length % DEPTH, 0);
++    for pass in 0..length / DEPTH {
++        let base = pass * DEPTH;
++        let at: [usize; DEPTH] = core::array::from_fn(|k| list[base + k]);
++        let coefficients: [[SvfCoef<L>; DEPTH]; 2] = [""", """    let (list, length) = sections;
++    for pass in 0..length / DEPTH {
++        let base = pass * DEPTH;
++        let at: [usize; DEPTH] = core::array::from_fn(|k| list[base + k]);
++        let coefficients: [[SvfCoef<L>; DEPTH]; 2] = [""")
++    rep("""        for (k, word) in right_state.into_iter().enumerate() {
++            channels.1.sections[at[k]].state = word;
++        }
++    }
++}
++""", """        for (k, word) in right_state.into_iter().enumerate() {
++            channels.1.sections[at[k]].state = word;
++        }
++    }
++    if length % DEPTH == 1 {
++        let at = list[length - 1];
++        let coefficients: [[SvfCoef<L>; 1]; 2] =
++            [[channels.0.sections[at].coef], [channels.1.sections[at].coef]];
++        let mut state: [[SvfState<L>; 1]; 2] =
++            [[channels.0.sections[at].state], [channels.1.sections[at].state]];
++        let dry_masks: [[L::Mask; 1]; 2] = [[channels.0.dry_mask(at)], [channels.1.dry_mask(at)]];
++        if L::mask_any(dry_masks[0][0]) || L::mask_any(dry_masks[1][0]) {
++            svf_cascade_interleaved_with_dry_masks::<L, 2, 1>(
++                [&mut *left, &mut *right],
++                frames,
++                &coefficients,
++                &mut state,
++                &dry_masks,
++            );
++        } else {
++            lane::kernels::svf_cascade_interleaved::<L, 2, 1>(
++                [&mut *left, &mut *right],
++                frames,
++                &coefficients,
++                &mut state,
++            );
++        }
++        channels.0.sections[at].state = state[0][0];
++        channels.1.sections[at].state = state[1][0];
++    }
++}
++""")
++
++open(p, 'w').write(s)
++print("ok", variant)
+diff --git a/docs/handoffs/effects-2026-09-27/eq-diag-tools/build_variants.sh b/docs/handoffs/effects-2026-09-27/eq-diag-tools/build_variants.sh
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/eq-diag-tools/build_variants.sh
+@@ -0,0 +1,21 @@
++#!/usr/bin/env bash
++# Build the wasm console guest at base and at each minimal EQ variant. Restores lib.rs after.
++set -euo pipefail
++ROOT=/home/bl/misofm/engine/.claude/worktrees/agent-abc20584e3e1eb631
++S=/tmp/claude-1002/-home-bl-misofm-engine/43895396-e183-427f-b08f-a0b72f15ae5f/scratchpad/eq-diag
++LIB=$ROOT/crates/parametric-eq/src/lib.rs
++export CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=$S/target-wasm RUSTFLAGS="-C target-feature=+simd128"
++cd "$ROOT"
++build() {
++  cargo build --release --target wasm32-unknown-unknown -p wasm-console-guest 2>&1 | tail -1
++  cp "$CARGO_TARGET_DIR/wasm32-unknown-unknown/release/wasm_console_guest.wasm" "$S/guest_$1.wasm"
++}
++cp "$S/eq_lib_base.rs" "$LIB"
++build base
++for variant in ${VARIANTS:-skew nopad both}; do
++  cp "$S/eq_lib_base.rs" "$LIB"
++  python3 "$S/variant.py" "$ROOT" "$variant"
++  build "$variant"
++done
++cp "$S/eq_lib_base.rs" "$LIB"
++ls -la "$S"/guest_*.wasm
+diff --git a/docs/handoffs/effects-2026-09-27/eq-diag-tools/build_native_variants.sh b/docs/handoffs/effects-2026-09-27/eq-diag-tools/build_native_variants.sh
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/eq-diag-tools/build_native_variants.sh
+@@ -0,0 +1,24 @@
++#!/usr/bin/env bash
++# Build the clean-rows harness at base and at each minimal EQ variant. Restores lib.rs after.
++set -euo pipefail
++ROOT=/home/bl/misofm/engine/.claude/worktrees/agent-abc20584e3e1eb631
++S=/tmp/claude-1002/-home-bl-misofm-engine/43895396-e183-427f-b08f-a0b72f15ae5f/scratchpad/eq-diag
++LIB=$ROOT/crates/parametric-eq/src/lib.rs
++export CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=$S/target
++cd "$ROOT"
++# eq_diag.rs needs the diag feature; park it while the clean harness builds.
++mv "$ROOT/tools/console-workload/tests/eq_diag.rs" "$S/eq_diag.rs.parked"
++trap 'mv "$S/eq_diag.rs.parked" "$ROOT/tools/console-workload/tests/eq_diag.rs"; cp "$S/eq_lib_base.rs" "$LIB"' EXIT
++build() {
++  local out
++  out=$(cargo test --release -p console-workload --test eq_rows --no-run 2>&1 | grep -o '/[^ ]*eq_rows-[0-9a-f]*' | tail -1)
++  cp "$out" "$S/eq_rows_$1"
++  echo "built $1"
++}
++cp "$S/eq_lib_base.rs" "$LIB"
++build base
++for variant in ${VARIANTS:-skew nopad}; do
++  cp "$S/eq_lib_base.rs" "$LIB"
++  python3 "$S/variant.py" "$ROOT" "$variant"
++  build "$variant"
++done
+diff --git a/docs/handoffs/effects-2026-09-27/eq-diag-tools/run_native_variants.sh b/docs/handoffs/effects-2026-09-27/eq-diag-tools/run_native_variants.sh
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/eq-diag-tools/run_native_variants.sh
+@@ -0,0 +1,9 @@
++#!/usr/bin/env bash
++# Alternate the clean native variant binaries, three rounds, pinned (caller holds the lock).
++S=/tmp/claude-1002/-home-bl-misofm-engine/43895396-e183-427f-b08f-a0b72f15ae5f/scratchpad/eq-diag
++for round in 1 2 3; do
++  for variant in ${VARIANTS:-base skew nopad}; do
++    printf '%s round %s: ' "$variant" "$round"
++    taskset -c 31 "$S/eq_rows_$variant" --ignored --nocapture --test-threads 1 clean_rows 2>&1 | grep CLEAN
++  done
++done
+diff --git a/docs/handoffs/effects-2026-09-27/eq-diag-tools/roster.sh b/docs/handoffs/effects-2026-09-27/eq-diag-tools/roster.sh
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/eq-diag-tools/roster.sh
+@@ -0,0 +1,9 @@
++#!/usr/bin/env bash
++# Run the AudioWorklet kernel-shape gate over each guest variant's disassembly.
++S=/tmp/claude-1002/-home-bl-misofm-engine/43895396-e183-427f-b08f-a0b72f15ae5f/scratchpad/eq-diag
++CHECK=/home/bl/misofm/engine/.claude/worktrees/agent-abc20584e3e1eb631/scripts/check-web-audioworklet-callgraph.py
++for variant in "$@"; do
++  echo "== $variant"
++  wasm-objdump -d "$S/guest_$variant.wasm" > "$S/guest_$variant.dis" 2>/dev/null
++  python3 "$CHECK" --kernel-shape --kernel-pattern '4wide6f32x[48]' --kernel-min 1 < "$S/guest_$variant.dis" 2>&1 | grep -i "parametric\|fail\|error\|kernel" | head -8
++done
