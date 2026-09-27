@@ -791,8 +791,8 @@ impl GraphCompiler {
         // stages -- `PostInputBuiltins`, `PostFader`, `PostMatrix` -- each a compiler-owned
         // binding the builtins artifact fills with a bank member or a scalar owner and keeps as
         // an op. The builtins-less entry left the three builtin stages out of this set, which
-        // `program::lower` read to elide them as aliases (issue #925); it was deleted by issue
-        // #959, so every compiled plan lists all three.
+        // `program::lower` read to elide them as aliases (issue #925). Issue #959 deleted that
+        // entry and issue #958 reverted the elision, so `program::lower` no longer reads this set.
         let required_bindings = schedule
             .iter()
             .filter(|node| {

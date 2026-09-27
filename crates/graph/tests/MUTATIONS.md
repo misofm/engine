@@ -346,6 +346,13 @@ result column gives that second run's failure. For 926-12, the second run also d
 
 ## Issue #925 — identity-bound builtin stages of a builtins-less plan lower as aliases
 
+**Retired (issue #958).** The alias arm -- `is_builtin_stage`, `program::lower`'s `bindable`
+parameter and the `listed` clause of the elision predicate -- was reverted once issue #959 had
+deleted the builtins-less compile entry, the only producer of a plan that left a builtin stage out
+of `required_bindings`. Gate 1 and gate 2's graph half were deleted with it, and gate 2's
+graph-compiler half pins only the with-builtins shape since issue #964. The code these rows mutate
+no longer exists. The rows stay as the record of what the gates proved while it did.
+
 Each row was applied alone to `0973b805`, the three suites below were run with `--no-fail-fast`,
 and the file was restored with `git checkout`. Suites: `cargo test -p graph --lib` (103 tests),
 `cargo test -p graph-compiler --lib` (73), `cargo test -p console-workload --test chain_shape` (23).
