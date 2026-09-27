@@ -1,15 +1,15 @@
-# Aggregate validator: seventeen session workloads (sixteen bound-feed rows and the driver-fed
-# plumbing row, #928), two hoist workloads, one meters arm, one observation arm, one placement
-# row-pair, one automation-active row and one mono row-pair, each in rounds one and two --
-# forty-eight records.
+# Aggregate validator: eighteen session workloads (sixteen bound-feed rows, the driver-fed
+# plumbing row, #928, and the metered console row, #881), two hoist workloads, one meters arm, one
+# observation arm, one placement row-pair, one automation-active row and one mono row-pair, each
+# in rounds one and two -- fifty records.
 include "console-benchmark-record-lib";
 . as $records |
-(type == "array") and length == 48 and
+(type == "array") and length == 50 and
 all(.[]; console_benchmark_record_valid_lib) and
 ([.[] | select(.record == "console_session") | .workload_kind] | unique | sort) == session_kinds and
 ([.[] | select(.record == "console_hoist") | .workload_kind] | unique | sort)
   == ["nine_track_ragged_strip","sixty_four_track_console"] and
-([.[] | select(.record == "console_session")] | length) == 34 and
+([.[] | select(.record == "console_session")] | length) == 36 and
 ([.[] | select(.record == "console_hoist")] | length) == 4 and
 ([.[] | select(.record == "console_meters")] | length) == 2 and
 ([.[] | select(.record == "console_observation")] | length) == 2 and
@@ -21,7 +21,7 @@ all(.[]; console_benchmark_record_valid_lib) and
 ([.[] | select(.record == "console_automation") | .workload_kind] | unique)
   == ["sixty_four_track_compressor_automation"] and
 ([.[] | .round] | unique | sort) == [1,2] and
-([.[] | [.record,.workload_kind,.round] | join(":")] | unique | length) == 48 and
+([.[] | [.record,.workload_kind,.round] | join(":")] | unique | length) == 50 and
 (group_by([.record,.workload_kind]) | all(map(.round) | sort == [1,2])) and
 # Round one and round two are two measurements of one frozen workload, so the rendered output must
 # be identical across them. A drifting digest means the rounds are not measuring the same thing.
@@ -33,6 +33,22 @@ all(.[]; console_benchmark_record_valid_lib) and
 ([.[] | select(.record == "console_session" and
                (.workload_kind == "sixty_four_track_plumbing_only" or
                 .workload_kind == "sixty_four_track_plumbing_ring"))
+      | .output_sha256] | length == 4 and (unique | length) == 1) and
+# #881: the metered console row is the standing console session prepared as the default web boot
+# prepares it -- a meter on every track and between-render-calls delivery, which fuses each
+# cohort's fader and matrix into one stage. A meter observes and the fused stage renders the split
+# pair's bits, so the two rows render the same bits in both rounds, and a difference is refused
+# rather than published as the price of metering.
+#
+# Its #914 counters are deliberately *not* compared with any other record's. No record in the run
+# is its baseline: the `console_meters` arms and the standing row are `Concurrent` plans, a
+# different delivery and a different chain shape, so agreement with them today would be a
+# coincidence and disagreement tomorrow would refuse a truthful record. The fold count is pinned per
+# record instead (every route of the console folds, on every plan that states one), and the
+# redirect count is the metered plan's own, pinned in `console-workload`'s pair test.
+([.[] | select(.record == "console_session" and
+               (.workload_kind == "sixty_four_track_console" or
+                .workload_kind == "sixty_four_track_console_metered"))
       | .output_sha256] | length == 4 and (unique | length) == 1) and
 ([.[] | .backend] | unique | length) == 1 and
 # Ragged versus full, and every decomposition subtraction, are the whole point of the fixture set,

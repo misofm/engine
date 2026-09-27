@@ -912,8 +912,13 @@ fn the_plumbing_row_is_input_route_output_and_renders_the_base_bits() {
 /// Issue #944: the settled pan matrix takes a select-free arm when no lane of its bank is the
 /// identity, and every row that renders a banked matrix renders the bits it rendered before.
 ///
-/// Every banked row prepares builtins through `Concurrent` delivery, so its fader and matrix are
-/// never paired and each bank's matrix renders through `MatrixStage::process`. No standing row has
+/// Every banked row in `WORKLOADS` prepares builtins through `Concurrent` delivery, so its fader
+/// and matrix are never paired and each bank's matrix renders through `MatrixStage::process`. The
+/// one banked session row outside `WORKLOADS`, the metered console row (#881), is prepared with
+/// between-render-calls delivery, as the default web boot is, and pairs them: each cohort's fader
+/// and matrix run as one fused stage (`fader_matrix_block`), so these pins say nothing about its
+/// matrix. Its bits are pinned equal to `sixty_four_track_console`'s in `console-workload`'s own
+/// pair test. No standing row has
 /// an identity lane in a full bank -- the pan law's `cos(pi / 2)` is `6.1e-17`, not `0.0`, and
 /// `dispatch_only`'s pan is hard right on both inputs -- so all of these rows take the new arm on
 /// every bank. Class A: `select(no lane, a, b)` is `b`, bit for bit. The four pins are the 64-block

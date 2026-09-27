@@ -2,12 +2,13 @@
 # Console validator mutation suite. Hermetic: no workload, no timing, no binary.
 #
 # A validator that has never been shown to reject anything is decoration. Every rule below is
-# mutated in turn and asserted red, so the aggregate's guarantees -- forty-eight records, both
-# rounds, one host, one admissibility state, the decomposition rows' pinned strip contents, every
-# session row's pinned source feed, the class-A statements that neither the stationary smoother
-# nor a meter nor an armed observation tap nor a restated parameter nor the mono collapse nor the
-# driver-fed source feed changes a rendered bit, and the meters pair's equal fold and redirect
-# counters -- are properties the suite can actually lose.
+# mutated in turn and asserted red, so the aggregate's guarantees -- fifty records, both rounds,
+# one host, one admissibility state, the decomposition rows' pinned strip contents, every session
+# row's pinned source feed, the class-A statements that neither the stationary smoother nor a
+# meter nor an armed observation tap nor a restated parameter nor the mono collapse nor the
+# driver-fed source feed nor the metered row's web meters and fused fader and matrix changes a
+# rendered bit, the meters pair's equal fold and redirect counters, and the metered row's pinned
+# meter group -- are properties the suite can actually lose.
 set -euo pipefail
 [[ "$#" -le 1 ]] || { printf 'usage: %s\n' "$0" >&2; exit 2; }
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -291,10 +292,25 @@ expect_accept "$session_floor_dispatch" 'the identity row carrying the identity 
 expect_accept "$session_ring" 'the driver-fed plumbing row'
 expect_accept "$session_floor_ring" 'the driver-fed plumbing row carrying the plumbing inventory'
 
+# #881: the metered console row. The standing console row's six facts, plus the meter group that
+# row alone carries: the default web boot's meter set (one sample-peak meter at the post-matrix tap
+# per track, a twelve-block window), every snapshot it published over the thousand timed blocks
+# (64 x floor(1000 / 12)), none dropped, and the plan's #914 counters. No inventory exists for a
+# metered strip, so its floor group states none and names no control.
+session_metered=$(printf '%s' "$session" | jq -c '.workload_kind = "sixty_four_track_console_metered"
+      | . + {meter_streams: 64, meter_tap: "post_matrix", meter_metrics: "sample_peak",
+             meter_window_blocks: 12, meter_snapshots: 5312, meter_dropped_snapshots: 0,
+             bank_route_folds: 64, bank_scatter_redirects: 0}')
+session_floor_metered=$(printf '%s' "$session_metered" | jq -c -L "$scripts_dir" --arg s "$core_clock_source" \
+    "$add_floor"' with_floor(5480000000; $s)')
+
+expect_accept "$session_metered" 'the metered console row'
+expect_accept "$session_floor_metered" 'the metered console row carrying an underived floor'
+
 # ---------------------------------------------------------------------------------------------
 # Per-key structural mutations: every key is load-bearing in both directions.
 # ---------------------------------------------------------------------------------------------
-for base in "$session" "$session_floor" "$session_ring" "$hoist" "$meters" \
+for base in "$session" "$session_floor" "$session_ring" "$session_metered" "$hoist" "$meters" \
     "$observation" "$placement" "$automation" "$mono"; do
     kind=$(printf '%s' "$base" | jq -r '.record')
     while read -r field; do
@@ -321,6 +337,15 @@ while read -r field; do
 done < <(printf '%s' "$session_floor_not_derived" | jq -r 'keys[]')
 expect_reject "$(printf '%s' "$session_floor_not_derived" | jq -c '.unexpected_key = 1')" \
     'the uninventoried row with an extra key'
+# The metered row's floor group is underived too, so it takes the same half-sweep.
+while read -r field; do
+    expect_reject "$(printf '%s' "$session_floor_metered" | jq -c "del(.\"$field\")")" \
+        "the floor-accounted metered row without $field"
+    if [[ "$(printf '%s' "$session_floor_metered" | jq -c ".\"$field\"")" != null ]]; then
+        expect_reject "$(printf '%s' "$session_floor_metered" | jq -c ".\"$field\" = null")" \
+            "the floor-accounted metered row with $field nulled"
+    fi
+done < <(printf '%s' "$session_floor_metered" | jq -r 'keys[]')
 
 # ---------------------------------------------------------------------------------------------
 # Semantic mutations: each names the property it destroys.
@@ -512,6 +537,67 @@ expect_reject "$(printf '%s' "$session_floor_ring" | jq -c \
 expect_reject "$(printf '%s' "$session_floor_plumbing" | jq -c \
     '.floor_control_row = "sixty_four_track_plumbing_ring" | .isolated_cycles_per_lane_sample = 0.1 | .isolated_percent_of_floor = 1.0')" \
     'the bound plumbing row isolated against the driver-fed row'
+
+# #881: the metered console row. The meter group is carried by that row alone and is pinned field
+# by field: a row that metered another tap, another metric set or another window would publish a
+# cost the browser does not pay, and a row that consumed fewer snapshots than its windows closed,
+# or dropped one, did not exercise the observer path it claims to time.
+metered_mutation() { expect_reject "$(printf '%s' "$session_metered" | jq -c "$1")" "$2"; }
+metered_group='. + {meter_streams: 64, meter_tap: "post_matrix", meter_metrics: "sample_peak",
+  meter_window_blocks: 12, meter_snapshots: 5312, meter_dropped_snapshots: 0,
+  bank_route_folds: 64, bank_scatter_redirects: 0}'
+session_mutation "$metered_group" 'the standing console row carrying the meter group'
+session_mutation '.workload_kind = "sixty_four_track_console_metered"' \
+    'a metered row without its meter group'
+expect_reject "$(printf '%s' "$session_floor" | jq -c "$metered_group")" \
+    'a floor-accounted standing row carrying the meter group'
+metered_mutation '.workload_kind = "sixty_four_track_console"' 'the meter group on the standing row'
+metered_mutation '.workload_kind = "sixty_four_track_plumbing_only" | .strip_content = "plumbing" | .strip_layout = "plumbing" | .synthetic_fixture = true' \
+    'the meter group on another row'
+metered_mutation '.meter_streams = 32' 'a metered row that metered half its tracks'
+metered_mutation '.meter_tap = "post_fader"' 'a metered row at a tap the browser does not meter'
+metered_mutation '.meter_metrics = "all"' 'a metered row computing every statistic'
+# The window mutation carries the snapshot count its window implies, so the window pin alone
+# refuses it; the count rule refuses the inconsistent pairs below.
+metered_mutation '.meter_window_blocks = 4 | .meter_snapshots = 16000' 'a metered row at the facility arm window'
+metered_mutation '.meter_window_blocks = 0' 'a meter window of no blocks'
+metered_mutation '.meter_metrics = "other"' 'a metered row whose snapshots disagreed about their metric set'
+metered_mutation '.meter_tap = "other"' 'a metered row whose streams observe more than one tap'
+metered_mutation '.meter_snapshots = 0' 'a metered row that consumed no snapshot'
+metered_mutation '.meter_snapshots = 5311' 'a metered row that lost a snapshot'
+metered_mutation '.meter_snapshots = 5313' 'a metered row that consumed a snapshot no window closed'
+metered_mutation '.meter_snapshots = 16000' 'a metered row counting four-block windows'
+metered_mutation '.meter_dropped_snapshots = 1' 'a metered row whose stream dropped a snapshot'
+metered_mutation '.meter_dropped_snapshots = -1' 'a negative drop count'
+metered_mutation '.bank_route_folds = 0' 'a metered plan whose route fold declined'
+metered_mutation '.bank_route_folds = 65' 'a metered plan folding more routes than it has tracks'
+metered_mutation '.bank_scatter_redirects = -1' 'a negative redirect count'
+metered_mutation '.bank_scatter_redirects = 0.5' 'a fractional redirect count'
+metered_mutation '.bank_scatter_redirects = "0"' 'a redirect count carried as a string'
+metered_mutation '.synthetic_fixture = true' 'a metered row reported as a derived session'
+metered_mutation '.strip_content = "eq+compressor+limiter+meter"' 'a metered row counting its meters as strip content'
+metered_mutation '.strip_layout = "builtins"' 'a metered row claiming the builtins layout'
+metered_mutation '.input_signal = "silence"' 'a metered row claiming silence'
+metered_mutation '.fixture_id = "fixtures/session/v1/console-sixty-four-track-mono.json"' \
+    'a metered row rendered from the mono fixture'
+metered_mutation '.source_feed = "played_planes"' 'a metered row claiming the driver-fed feed'
+metered_mutation '.tracks = 9' 'a metered row that is not eight full banks'
+metered_mutation '.observations = 100' 'a shortened metered run'
+# The redirect count is the metered plan's own, whatever it is: any non-negative integer.
+expect_accept "$(printf '%s' "$session_metered" | jq -c '.bank_scatter_redirects = 8')" \
+    'a metered row redirecting lanes'
+# Its floor group states none: no ruling has inventoried a metered strip, and the standing strip's
+# inventory would publish the meters' cost as a gap in the strip's.
+expect_reject "$(printf '%s' "$session_floor_metered" | jq -c \
+    '.floor_cycles_per_lane_sample = (333 / (8 * 3.7))
+     | .percent_of_floor = (100 * (333 / (8 * 3.7)) / .cycles_per_lane_sample)')" \
+    'a metered row costed at the unmetered strip inventory'
+expect_reject "$(printf '%s' "$session_floor_metered" | jq -c \
+    '.floor_basis = "docs/rulings/effect-floor-accounting.md: builtins+eq+compressor+limiter"')" \
+    'a metered row citing the unmetered strip inventory'
+expect_reject "$(printf '%s' "$session_floor_metered" | jq -c \
+    '.floor_control_row = "sixty_four_track_console" | .isolated_cycles_per_lane_sample = 0.1 | .isolated_percent_of_floor = 1.0')" \
+    'a metered row isolating its meters against the standing row'
 
 # The mono session rows. Both arms render the mono fixture as written, so both are checked-in
 # rather than derived; the half-mono row is the one that is derived, and it is derived from the
@@ -867,7 +953,15 @@ records=$(jq -cn --argjson session "$session" --argjson hoist "$hoist" \
     # #928: emitted after the sixteen, and rendering the bits of the bound plumbing row.
     {kind: "sixty_four_track_plumbing_ring", tracks: 64, synthetic: true, strip: "plumbing",
      layout: "plumbing", signal: "tone", fixture: console_fixture, digest: "0",
-     feed: "played_planes"}
+     feed: "played_planes"},
+    # #881: emitted last, rendering the bits of the standing console row, and carrying the meter
+    # group and the counters of its own plan.
+    {kind: "sixty_four_track_console_metered", tracks: 64, synthetic: false,
+     strip: "eq+compressor+limiter", layout: intended_layout, signal: "tone",
+     fixture: console_fixture, digest: "3",
+     extra: {meter_streams: 64, meter_tap: "post_matrix", meter_metrics: "sample_peak",
+             meter_window_blocks: 12, meter_snapshots: 5312, meter_dropped_snapshots: 0,
+             bank_route_folds: 64, bank_scatter_redirects: 0}}
   ];
   def hoists: [
     {kind: "nine_track_ragged_strip", tracks: 9, digest: "a"},
@@ -880,7 +974,8 @@ records=$(jq -cn --argjson session "$session" --argjson hoist "$hoist" \
         | .strip_content = $s.strip | .strip_layout = $s.layout | .input_signal = $s.signal
         | .source_feed = ($s.feed // "bound")
         | .fixture_id = $s.fixture | .round = $round
-        | .output_sha256 = ($a[0:63] + $s.digest)),
+        | .output_sha256 = ($a[0:63] + $s.digest)
+        | . + ($s.extra // {})),
       (hoists[] | . as $h | $hoist
         | .workload_kind = $h.kind | .tracks = $h.tracks | .round = $round
         | .quiet_output_sha256 = ($a[0:63] + $h.digest)
@@ -893,30 +988,30 @@ records=$(jq -cn --argjson session "$session" --argjson hoist "$hoist" \
       ($mono | .round = $round)
   ) ]')
 
-expect_aggregate_accept "$(printf '%s' "$records" | jq -c '.[]')" 'the forty-eight-record set'
+expect_aggregate_accept "$(printf '%s' "$records" | jq -c '.[]')" 'the fifty-record set'
 
-# Index map of the frozen emission order: 0-16 are round one's seventeen session rows (16 is the
-# driver-fed plumbing row), 17-18 its two hoist rows, 19 its meters row, 20 its observation row,
-# 21 its placement row-pair, 22 its automation-active row and 23 its mono row-pair; 24-47 repeat
-# for round two.
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c 'del(.[0]) | .[]')" 'forty-seven records'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c '. as $r | ($r + [$r[22]]) | .[]')" 'forty-nine records'
+# Index map of the frozen emission order: 0-17 are round one's eighteen session rows (16 is the
+# driver-fed plumbing row and 17 the metered console row), 18-19 its two hoist rows, 20 its meters
+# row, 21 its observation row, 22 its placement row-pair, 23 its automation-active row and 24 its
+# mono row-pair; 25-49 repeat for round two.
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c 'del(.[0]) | .[]')" 'forty-nine records'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '. as $r | ($r + [$r[23]]) | .[]')" 'fifty-one records'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '. as $r | ($r + [$r[0]]) | .[]')" 'a duplicated record'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[24].round = 1 | .[]')" 'a workload measured twice in one round'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[25].round = 1 | .[]')" 'a workload measured twice in one round'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[0].cpu_model = "Another CPU" | .[]')" 'records from two hosts'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[0].candidate_commit = "ffffffffffffffffffffffffffffffffffffffff" | .[]')" 'records from two commits'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[0].backend = "Scalar" | .[]')" 'records from two backends'
 # Round one and round two must render the same bytes: they are two measurements of one workload.
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[24].output_sha256 = $c | .[]')" 'a workload whose rounds rendered different output'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[25].output_sha256 = $c | .[]')" 'a workload whose rounds rendered different output'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record == "console_session")] | .[]')" 'a set with no hoist rows'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record != "console_meters")] | .[]')" 'a set with no meters arm'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record != "console_observation")] | .[]')" 'a set with no observation arm'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[43].meters_off_output_sha256 = $c | .[43].meters_on_output_sha256 = $c | .[]')" 'a meters arm whose rounds rendered different output'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[44].absent_output_sha256 = $c | .[44].unarmed_output_sha256 = $c | .[44].armed_output_sha256 = $c | .[]')" 'an observation arm whose rounds rendered different output'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[45].split_chains_output_sha256 = $c | .[45].merged_chain_output_sha256 = $c | .[]')" 'a placement pair whose rounds rendered different output'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[45].meters_off_output_sha256 = $c | .[45].meters_on_output_sha256 = $c | .[]')" 'a meters arm whose rounds rendered different output'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[46].absent_output_sha256 = $c | .[46].unarmed_output_sha256 = $c | .[46].armed_output_sha256 = $c | .[]')" 'an observation arm whose rounds rendered different output'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[47].split_chains_output_sha256 = $c | .[47].merged_chain_output_sha256 = $c | .[]')" 'a placement pair whose rounds rendered different output'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record != "console_placement")] | .[]')" 'a set with no placement row-pair'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record != "console_automation")] | .[]')" 'a set with no automation-active row'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[46].quiet_output_sha256 = $c | .[46].restated_output_sha256 = $c | .[]')" 'an automation row whose rounds rendered different output'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[48].quiet_output_sha256 = $c | .[48].restated_output_sha256 = $c | .[]')" 'an automation row whose rounds rendered different output'
 # #144 item 13: two admissibility states in one accepted run is the comparison the control field
 # exists to prevent, and a run that never stated one at all is not an accepted run.
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[0].measurement_control = "uncontrolled" | .[0].cpu_affinity = "uncontrolled" | .[0].background_load_note = "uncontrolled; MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1; waived affinity_unavailable" | .[]')" 'a run mixing controlled and uncontrolled records'
@@ -928,7 +1023,7 @@ expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.worklo
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_eq_comp_simd1")] | .[]')" 'a set missing the chain-shape row'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_compressor_automation")] | .[]')" 'a set missing the automation-active row'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record != "console_mono")] | .[]')" 'a set with no mono row-pair'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[47].collapse_eligible_output_sha256 = $c | .[47].collapse_forced_off_output_sha256 = $c | .[]')" 'a mono pair whose rounds rendered different output'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[49].collapse_eligible_output_sha256 = $c | .[49].collapse_forced_off_output_sha256 = $c | .[]')" 'a mono pair whose rounds rendered different output'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_plumbing_only")] | .[]')" 'a set missing the overhead floor row'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_gain_pan_only")] | .[]')" 'a set missing the gain-and-pan row'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_console_mono")] | .[]')" 'a set missing the mono session row'
@@ -940,6 +1035,16 @@ expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.worklo
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '(.[] | select(.workload_kind == "sixty_four_track_plumbing_ring")).output_sha256 = $c | .[]')" 'a driver-fed row that rendered other bits than the bound row'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '(.[] | select(.workload_kind == "sixty_four_track_plumbing_only")).output_sha256 = $c | .[]')" 'a bound plumbing row that rendered other bits than the driver-fed row'
 expect_aggregate_accept "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '(.[] | select(.workload_kind == "sixty_four_track_plumbing_only" or .workload_kind == "sixty_four_track_plumbing_ring")).output_sha256 = $c | .[]')" 'the plumbing pair moving together'
+# #881: the metered console row is a row of the set and its digest is the standing console row's.
+# Both rounds are moved together so the rounds rule is satisfied and only the pair pin can refuse
+# it. Its counters are compared with no other record: every other plan in the run is a
+# `Concurrent` one, so a redirect count that differs from theirs is a truthful record.
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_console_metered")] | .[]')" 'a set missing the metered console row'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '(.[] | select(.workload_kind == "sixty_four_track_console_metered")).output_sha256 = $c | .[]')" 'a metered row that rendered other bits than the standing row'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '(.[] | select(.record == "console_session" and .workload_kind == "sixty_four_track_console")).output_sha256 = $c | .[]')" 'a standing row that rendered other bits than the metered row'
+expect_aggregate_accept "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '(.[] | select(.record == "console_session" and (.workload_kind == "sixty_four_track_console" or .workload_kind == "sixty_four_track_console_metered"))).output_sha256 = $c | .[]')" 'the console pair moving together'
+expect_aggregate_accept "$(printf '%s' "$records" | jq -c '(.[] | select(.workload_kind == "sixty_four_track_console_metered")).bank_scatter_redirects = 8 | .[]')" 'a metered row redirecting lanes the Concurrent meters arm does not'
+expect_aggregate_accept "$(printf '%s' "$records" | jq -c '(.[] | select(.record == "console_meters")) |= (.meters_off_bank_scatter_redirects = 8 | .meters_on_bank_scatter_redirects = 8) | .[]')" 'a Concurrent meters arm redirecting lanes the metered row does not'
 
 # ---------------------------------------------------------------------------------------------
 # #184 at the aggregate: the isolate is a subtraction between two rows, so only a whole run has
@@ -956,7 +1061,7 @@ floor_records=$(printf '%s' "$records" | jq -c -L "$scripts_dir" --arg s "$core_
     "sixty_four_track_console_legacy": 3.30, "sixty_four_track_console": 4.40,
     "one_twenty_eight_track_stretch": 8.60,
     "sixty_four_track_plumbing_only": 0.42, "sixty_four_track_gain_pan_only": 1.01,
-    "sixty_four_track_plumbing_ring": 0.40,
+    "sixty_four_track_plumbing_ring": 0.40, "sixty_four_track_console_metered": 4.80,
     "sixty_four_track_console_mono": 4.38, "sixty_four_track_console_mono_dual": 4.38,
     "sixty_four_track_console_half_mono": 4.39
   }[.workload_kind];
@@ -980,7 +1085,7 @@ floor_records=$(printf '%s' "$records" | jq -c -L "$scripts_dir" --arg s "$core_
                  / .isolated_cycles_per_lane_sample)
         else . end ]')
 
-expect_aggregate_accept "$(printf '%s' "$floor_records" | jq -c '.[]')" 'the forty-eight-record set with floor accounting'
+expect_aggregate_accept "$(printf '%s' "$floor_records" | jq -c '.[]')" 'the fifty-record set with floor accounting'
 expect_aggregate_reject "$(printf '%s' "$floor_records" | jq -c '(.[] | select(.workload_kind == "sixty_four_track_compressor_only")).isolated_cycles_per_lane_sample = 3.0 | .[]')" 'an isolate that is not the subtraction it names'
 expect_aggregate_reject "$(printf '%s' "$floor_records" | jq -c '(.[] | select(.workload_kind == "sixty_four_track_compressor_only")).isolated_percent_of_floor = 88.0 | .[]')" 'an isolate percentage that does not follow from the two rows floors'
 # The control row moving is the same defect seen from the other side: the subtraction stops being

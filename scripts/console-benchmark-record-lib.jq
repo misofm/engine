@@ -19,6 +19,11 @@ def metadata_names: ["background_load_note","candidate_commit","cpu_affinity","c
 
 def session_keys: ["backend","background_load_note","candidate_commit","cpu_affinity","cpu_model","descriptive_only","fixture_id","governor_or_power_mode","input_signal","issue","llvm_version","max_ns_per_block","max_us_per_block","measurement_control","min_ns_per_block","min_us_per_block","missing_metadata","observations","os","output_sha256","p50_ns_per_block","p50_us_per_block","p50_us_per_block_per_track","p95_ns_per_block","p95_us_per_block","p99_ns_per_block","p99_us_per_block","percentile_method","profile","quantum_frames","record","render_errors","render_total_forbidden_operations","round","rust_version","sample_rate_hz","schema_version","source_feed","statistical_method","strip_content","strip_layout","synthetic_fixture","target_features","target_triple","tracks","units","workload_kind"];
 
+# #881: the metered console row's meter group, carried by that row alone. Every other session
+# row validates on `session_keys` exactly as before, so a standing row that grew the group, or the
+# metered row without it, matches neither shape.
+def metered_session_keys: ["bank_route_folds","bank_scatter_redirects","meter_dropped_snapshots","meter_metrics","meter_snapshots","meter_streams","meter_tap","meter_window_blocks"];
+
 def hoist_keys: ["arms","backend","background_load_note","bank_boundary","bit_identity","candidate_commit","cpu_affinity","cpu_model","descriptive_only","governor_or_power_mode","issue","llvm_version","measurement_control","missing_metadata","moving_output_sha256","moving_p50_ns","moving_p95_ns","moving_p99_ns","observations","os","paired_delta_median_ns","pairing","percentile_method","profile","quiet_output_sha256","quiet_p50_ns","quiet_p99_ns","record","restated_output_sha256","restated_p50_ns","restated_p95_ns","restated_p99_ns","round","rust_version","schema_version","statistical_method","target_features","target_triple","tracks","units","workload_kind"];
 
 def meters_keys: ["arms","backend","background_load_note","bit_identity","candidate_commit","cpu_affinity","cpu_model","descriptive_only","governor_or_power_mode","issue","llvm_version","measurement_control","meter_frames_drained","meter_streams","meter_tap","meter_window_blocks","meters_off_bank_route_folds","meters_off_bank_scatter_redirects","meters_off_output_sha256","meters_off_p50_ns","meters_off_p95_ns","meters_off_p99_ns","meters_on_bank_route_folds","meters_on_bank_scatter_redirects","meters_on_output_sha256","meters_on_p50_ns","meters_on_p95_ns","meters_on_p99_ns","missing_metadata","observations","os","paired_delta_median_ns","pairing","percentile_method","profile","record","render_errors","render_total_forbidden_operations","round","rust_version","schema_version","statistical_method","target_features","target_triple","tracks","units","workload_kind"];
@@ -142,7 +147,12 @@ def floor_pins:
     "sixty_four_track_console_mono_dual":
       [$becl, 1, "none", floor_document + "builtins+eq+compressor+limiter"],
     "sixty_four_track_console_half_mono":
-      [$becl, 1, "none", floor_document + "builtins+eq+compressor+limiter"]
+      [$becl, 1, "none", floor_document + "builtins+eq+compressor+limiter"],
+    # The metered console row (#881). Its strip is the standing console's, but its meters are
+    # arithmetic no ruling has inventoried, so it states no floor rather than the unmetered strip's,
+    # and names no control rather than isolating the meters against a floor nobody derived.
+    "sixty_four_track_console_metered":
+      [null, 1, "none", "not_derived"]
   };
 
 # Absolute agreement to the precision the subject prints (three decimals), with a little slack for
@@ -182,9 +192,10 @@ def floor_shape:
    end);
 
 
-# The seventeen session workloads, sorted: `WORKLOADS`'s sixteen (append-only, in emission order)
-# and the driver-fed plumbing row the bench emits after them (#928, `DRIVER_FED_WORKLOADS`).
-def session_kinds: ["nine_track_baseline","nine_track_ragged_strip","one_twenty_eight_track_stretch","sixty_four_track_builtins_only","sixty_four_track_compressor_only","sixty_four_track_console","sixty_four_track_console_half_mono","sixty_four_track_console_legacy","sixty_four_track_console_mono","sixty_four_track_console_mono_dual","sixty_four_track_dispatch_only","sixty_four_track_eq_comp_simd1","sixty_four_track_eq_only","sixty_four_track_gain_pan_only","sixty_four_track_idle","sixty_four_track_plumbing_only","sixty_four_track_plumbing_ring"];
+# The eighteen session workloads, sorted: `WORKLOADS`'s sixteen (append-only, in emission order),
+# the driver-fed plumbing row the bench emits after them (#928, `DRIVER_FED_WORKLOADS`) and the
+# metered console row it emits last (#881, `METERED_WORKLOADS`).
+def session_kinds: ["nine_track_baseline","nine_track_ragged_strip","one_twenty_eight_track_stretch","sixty_four_track_builtins_only","sixty_four_track_compressor_only","sixty_four_track_console","sixty_four_track_console_half_mono","sixty_four_track_console_legacy","sixty_four_track_console_metered","sixty_four_track_console_mono","sixty_four_track_console_mono_dual","sixty_four_track_dispatch_only","sixty_four_track_eq_comp_simd1","sixty_four_track_eq_only","sixty_four_track_gain_pan_only","sixty_four_track_idle","sixty_four_track_plumbing_only","sixty_four_track_plumbing_ring"];
 
 # #928: how a session row's track inputs reach the graph. `bound` is a `FrozenGraphSource`
 # processor per track input, dispatched once per track per block; `played_planes` is a prepared
@@ -198,6 +209,31 @@ def driver_fed_kinds: ["sixty_four_track_plumbing_ring"];
 def session_source_feed:
   .workload_kind as $kind |
   .source_feed == (if any(driver_fed_kinds[]; . == $kind) then "played_planes" else "bound" end);
+
+# #881: the rows prepared with the default web boot's meter set -- one `SAMPLE_PEAK` meter at
+# `PostMatrix` per track, a twelve-block window, bound as permanent observers -- and the key sets a
+# session record of each kind must carry exactly.
+def metered_kinds: ["sixty_four_track_console_metered"];
+def session_metered: .workload_kind as $kind | any(metered_kinds[]; . == $kind);
+def session_row_keys: if session_metered then (session_keys + metered_session_keys) | sort else session_keys end;
+def session_row_floor_keys: (session_row_keys + floor_keys) | sort;
+
+# The metered row's meter group. The meter set is pinned field by field, because a row that metered
+# another tap, another metric set or another window would publish a cost the browser does not pay
+# under the name of the one it does. The count is exact: every stream is drained after every
+# block, so each of the `observations` timed blocks that closes a window yields one snapshot per
+# stream, and a stream that dropped one or published off its cadence changes the count. The fold
+# and redirect counters are the #914 pair, which the digest cannot see: every route of the console
+# folds whether or not a post-matrix meter reads it (#885). The redirect count is the metered plan's
+# own; no record in the run shares its delivery, so none is its baseline (see the aggregate).
+def metered_session_shape:
+  .meter_streams == .tracks and .meter_tap == "post_matrix" and
+  .meter_metrics == "sample_peak" and .meter_window_blocks == 12 and
+  (.meter_snapshots | positive_integer) and
+  .meter_snapshots == .meter_streams * ((.observations / .meter_window_blocks) | floor) and
+  .meter_dropped_snapshots == 0 and
+  ([.bank_route_folds,.bank_scatter_redirects] | all(nonnegative_integer)) and
+  .bank_route_folds == .tracks;
 
 # The standing qualification fixture (#175): the intended production layout, EQ and compressor as
 # one two-slot chain on `simd1` and a true-peak limiter on `simd2`.
@@ -232,6 +268,16 @@ def session_kind_shape:
     .strip_layout == "simd1:eq+compressor,simd2:limiter" and .input_signal == "tone" and
     .fixture_id == console_fixture
   elif .workload_kind == "sixty_four_track_console" then
+    .tracks == 64 and .synthetic_fixture == false and
+    .strip_content == "eq+compressor+limiter" and
+    .strip_layout == "simd1:eq+compressor,simd2:limiter" and .input_signal == "tone" and
+    .fixture_id == console_fixture
+  # The metered console row (#881) is that session as written, prepared as the default web boot
+  # prepares it: meters, and the between-render-calls delivery that fuses each cohort's fader and
+  # matrix into one stage. Neither is strip content -- a meter observes, and the fused stage computes
+  # the split pair's arithmetic -- so it states the standing row's six facts, and its meter group
+  # says what else it prepared.
+  elif .workload_kind == "sixty_four_track_console_metered" then
     .tracks == 64 and .synthetic_fixture == false and
     .strip_content == "eq+compressor+limiter" and
     .strip_layout == "simd1:eq+compressor,simd2:limiter" and .input_signal == "tone" and
@@ -394,7 +440,7 @@ def common_shape:
   honest_metadata and admissibility;
 
 def session_record_valid:
-  ((keys | sort) == session_keys or (keys | sort) == session_floor_keys) and
+  ((keys | sort) == session_row_keys or (keys | sort) == session_row_floor_keys) and
   .record == "console_session" and common_shape and
   # The method is pinned verbatim. A record that changed how it was measured but kept the old
   # sentence would be the most expensive kind of quiet drift, so the sentence is part of the shape.
@@ -407,7 +453,8 @@ def session_record_valid:
   ([.min_us_per_block,.p50_us_per_block,.p95_us_per_block,.p99_us_per_block,.max_us_per_block,.p50_us_per_block_per_track] | all(type == "number" and . > 0)) and
   (.output_sha256 | sha256) and
   .render_errors == 0 and .render_total_forbidden_operations == 0 and
-  (if (keys | sort) == session_floor_keys then floor_shape else true end);
+  (if session_metered then metered_session_shape else true end) and
+  (if (keys | sort) == session_row_floor_keys then floor_shape else true end);
 
 def hoist_record_valid:
   (keys | sort) == hoist_keys and
