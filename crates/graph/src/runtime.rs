@@ -2389,24 +2389,84 @@ pub(crate) struct UnitIdentity {
     pub(crate) banked: bool,
     /// Proven from final adjacent emitted units at bind; fits the existing identity padding.
     resident_input: bool,
-    /// Whether any op of this unit holds an observer binding (issue #900). Derived from the final
-    /// units by [`Runtime::new_with_observation_activation`], the one constructor every runtime
-    /// passes through, so a caller's value is a placeholder; nothing changes an op's observer
-    /// slice after that. Fits the existing identity padding.
-    observed: bool,
+    /// Whether any op of this unit holds an observer binding (issue #900), and whether this bank
+    /// unit runs its sample-peak pass (issue #943). Derived from the final units by
+    /// [`Runtime::new_with_observation_activation`], the one constructor every runtime passes
+    /// through, so a caller's value is a placeholder; nothing changes an op's observer slice after
+    /// that. One byte for both facts, so it fits the existing identity padding on every target,
+    /// which the `const` assertion after [`UnitIdentityWithoutFlags`] checks at compile time.
+    observation: UnitObservation,
     /// Issue #918: bit `l` is set when first-slot lane `l` of this bank unit gathers a source
     /// claim bound in place, whose planes [`ArenaMembers::plane`] then reads from the played block.
     /// Set by [`source_plane_table`] at bind; zero for a plain unit. A bank has at most eight lanes,
     /// and the byte fits the existing identity padding.
     source_lanes: u8,
-    /// Issue #943: this bank unit runs its sample-peak pass, because a final-slot observer accepts
-    /// the peak. Derived from the final units by [`Runtime::new_with_observation_activation`] like
-    /// `observed`, so a caller's value is a placeholder. Fits the existing identity padding.
-    sample_peak: bool,
     pub(crate) stages: u32,
     pub(crate) upstream_of_seam_stages: u32,
     pub(crate) lane_tracks: Box<[Box<str>]>,
 }
+
+/// What `Runtime::observe_unit` dispatches for one unit, fixed at bind: nothing, its observers,
+/// or its observers after the bank's sample-peak pass (issues #900 and #943).
+///
+/// One byte for two facts, because the second implies the first -- a final-slot observer that
+/// accepts the peak is an observer -- and because a second `bool` beside `observed` did not fit
+/// `UnitIdentity`'s padding on 32-bit targets: there the row's four flag bytes already fill the
+/// only slack, and a fifth grew the row from 20 to 24 bytes on wasm32.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum UnitObservation {
+    /// No op of the unit holds an observer: `observe_unit` returns at once.
+    #[default]
+    Unobserved,
+    /// Some op holds an observer, and no final-slot observer accepts a sample peak.
+    Observed,
+    /// A bank some final-slot member of which holds an observer that accepts the sample peak.
+    ObservedWithPeak,
+}
+
+impl UnitObservation {
+    /// The row for a unit that holds observers (`observed`) and whose final slot accepts the peak
+    /// (`sample_peak`); the peak alone, which no real unit has, is still unobserved.
+    const fn of(observed: bool, sample_peak: bool) -> Self {
+        match (observed, sample_peak) {
+            (false, _) => Self::Unobserved,
+            (true, false) => Self::Observed,
+            (true, true) => Self::ObservedWithPeak,
+        }
+    }
+
+    /// Whether `observe_unit` dispatches this unit's observers at all.
+    const fn observed(self) -> bool {
+        !matches!(self, Self::Unobserved)
+    }
+
+    /// Whether this unit runs the banked sample-peak pass before its observers.
+    const fn sample_peak(self) -> bool {
+        matches!(self, Self::ObservedWithPeak)
+    }
+}
+
+/// `UnitIdentity` before the per-unit flags of issues #885, #900, #918 and #943: the row's shape
+/// with none of them, which is what the flags must not grow.
+#[allow(dead_code)]
+struct UnitIdentityWithoutFlags {
+    banked: bool,
+    stages: u32,
+    upstream_of_seam_stages: u32,
+    lane_tracks: Box<[Box<str>]>,
+}
+
+// I6 on every target (issue #943): the identity row's one-byte flags live in the padding the row
+// already had, so they retain no byte. A compile-time assertion rather than a test, so every build
+// checks it -- a 32-bit one above all, the wasm32 browser module, where the row's sixteen non-flag
+// bytes (a boxed slice is eight there) leave room for exactly four flag bytes, against eight on a
+// 64-bit target.
+const _: () = assert!(
+    core::mem::size_of::<UnitIdentity>() == core::mem::size_of::<UnitIdentityWithoutFlags>()
+        && core::mem::align_of::<UnitIdentity>()
+            == core::mem::align_of::<UnitIdentityWithoutFlags>(),
+    "a UnitIdentity flag no longer fits the row's padding"
+);
 
 /// The compact bind-time relation from a declared response owner to its runtime unit and lane.
 ///
@@ -2767,8 +2827,7 @@ impl Runtime {
             "a folded route table belongs to the Output op's identity reduction"
         );
         for (row, unit) in identity.iter_mut().zip(&units) {
-            row.observed = unit.has_observers();
-            row.sample_peak = unit.accepts_sample_peak();
+            row.observation = UnitObservation::of(unit.has_observers(), unit.accepts_sample_peak());
         }
         #[cfg(any(test, feature = "test-support"))]
         if !split_pairs.is_empty() {
@@ -2873,7 +2932,7 @@ impl Runtime {
             && self
                 .identity
                 .get(index)
-                .is_some_and(|identity| !identity.observed)
+                .is_some_and(|identity| !identity.observation.observed())
             && matches!(
                 self.units.get(index),
                 Some(RuntimeUnit::Op(op))
@@ -3214,13 +3273,14 @@ impl Runtime {
         // Issue #900: a unit bound without any observer has nothing to dispatch and the walk
         // below has no other production effect, so one bind-time flag answers it. `execute` has
         // already indexed this unit's identity row in this block.
-        let observed = self.identity[index].observed;
+        let observation = self.identity[index].observation;
+        let observed = observation.observed();
         #[cfg(test)]
         let observed = observed || TEST_ONLY_OBSERVER_SKIP_DISABLED.with(std::cell::Cell::get);
         if !observed {
             return Ok(());
         }
-        let sample_peak = self.identity[index].sample_peak;
+        let sample_peak = observation.sample_peak();
         #[cfg(any(test, feature = "test-support"))]
         let sample_peak =
             sample_peak && !TEST_ONLY_BANK_SAMPLE_PEAK_DECLINED.with(std::cell::Cell::get);
@@ -5912,9 +5972,8 @@ pub(crate) fn build_sequential(
                 banked: !membership.is_empty(),
                 resident_input: false,
                 // Derived from the finished unit by the runtime constructor.
-                observed: false,
+                observation: UnitObservation::Unobserved,
                 source_lanes: 0,
-                sample_peak: false,
                 stages: u32::try_from(stages).unwrap_or(u32::MAX),
                 upstream_of_seam_stages: u32::try_from(
                     (0..stages)
@@ -7839,9 +7898,8 @@ mod tests {
             vec![UnitIdentity {
                 banked: false,
                 resident_input: false,
-                observed: false,
+                observation: UnitObservation::Unobserved,
                 source_lanes: 0,
-                sample_peak: false,
                 stages: 1,
                 upstream_of_seam_stages: 1,
                 lane_tracks: Box::new([Box::from("track")]),
@@ -7931,9 +7989,8 @@ mod tests {
             vec![UnitIdentity {
                 banked: false,
                 resident_input: false,
-                observed: false,
+                observation: UnitObservation::Unobserved,
                 source_lanes: 0,
-                sample_peak: false,
                 stages: 1,
                 upstream_of_seam_stages: 1,
                 lane_tracks: Box::new([Box::from("track")]),
@@ -8139,7 +8196,8 @@ mod tests {
                     "u32::try_from(lease.frames()).ok()",
                     "members.len().checked_sub(population)",
                     "let chain: &BankChain = chain;",
-                    "let sample_peak = self.identity[index].sample_peak;",
+                    "let observation = self.identity[index].observation;",
+                    "let sample_peak = observation.sample_peak();",
                     "let peaks = if sample_peak && eligible {",
                     ".and_then(|frames| chain.final_output_block(frames))",
                     ".and_then(|(left, right)| bank_sample_peak(chain.width(), left, right))",
@@ -8377,9 +8435,8 @@ mod tests {
         let identity = |population| UnitIdentity {
             banked: true,
             resident_input: false,
-            observed: false,
+            observation: UnitObservation::Unobserved,
             source_lanes: 0,
-            sample_peak: false,
             stages: 1,
             upstream_of_seam_stages: 1,
             lane_tracks: (0..population)
@@ -8476,19 +8533,15 @@ mod tests {
 
     #[test]
     fn rt9_identity_metadata_has_no_retained_or_peak_layout_delta() {
-        struct Before {
-            _banked: bool,
-            _stages: u32,
-            _upstream: u32,
-            _tracks: Box<[Box<str>]>,
-        }
+        // The every-target form of this pin is the `const` assertion after
+        // `UnitIdentityWithoutFlags`, which a wasm32 build checks too; this is its native echo.
         assert_eq!(
             core::mem::size_of::<UnitIdentity>(),
-            core::mem::size_of::<Before>()
+            core::mem::size_of::<UnitIdentityWithoutFlags>()
         );
         assert_eq!(
             core::mem::align_of::<UnitIdentity>(),
-            core::mem::align_of::<Before>()
+            core::mem::align_of::<UnitIdentityWithoutFlags>()
         );
         // build_sequential retains the same vector capacity and boxes it once; no separate
         // resident table, per-block allocation, or transient acquisition buffer is introduced.
@@ -8548,9 +8601,8 @@ mod tests {
         let row = |observed| UnitIdentity {
             banked: false,
             resident_input: false,
-            observed,
+            observation: UnitObservation::of(observed, false),
             source_lanes: 0,
-            sample_peak: false,
             stages: 1,
             upstream_of_seam_stages: 0,
             lane_tracks: Box::new([]),
@@ -8575,7 +8627,7 @@ mod tests {
             runtime
                 .identity
                 .iter()
-                .map(|row| row.observed)
+                .map(|row| row.observation.observed())
                 .collect::<Vec<_>>(),
             [false, true, true, false]
         );
@@ -8821,9 +8873,8 @@ mod tests {
             vec![UnitIdentity {
                 banked: false,
                 resident_input: false,
-                observed: false,
+                observation: UnitObservation::Unobserved,
                 source_lanes: 0,
-                sample_peak: false,
                 stages: 1,
                 upstream_of_seam_stages: 0,
                 lane_tracks: Box::new([]),
@@ -16260,7 +16311,7 @@ mod tests {
                         &runtime.units[unit],
                         RuntimeUnit::Op(op) if matches!(op.kind, NodeKind::SourceInput)
                             && op.observers.is_empty()
-                    ) && !runtime.identity[unit].observed
+                    ) && !runtime.identity[unit].observation.observed()
                         && runtime.output_unit != Some(unit),
                     "{case}: skipped unit {unit} is a plain unobserved source input"
                 );

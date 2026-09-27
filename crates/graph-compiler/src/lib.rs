@@ -5191,6 +5191,7 @@ mod tests {
             9_450,
             &post_matrix_meter_requests(&intended, MeterMetricSet::SAMPLE_PEAK, 12 * 128),
             true,
+            host_dispatch(),
             &registry,
         );
         let envelope = artifact.envelope();
@@ -8999,106 +9000,122 @@ mod tests {
     #[test]
     fn post_matrix_peak_meters_merge_one_bank_pass_per_cohort_and_publish_the_scalar_frames() {
         const BLOCKS: u64 = 24;
-        let Some(width) = BankWidth::for_backend(host_dispatch()) else {
+        let host = host_dispatch();
+        let Some(host_width) = BankWidth::for_backend(host) else {
             return;
         };
-        let cohorts = 64 / width.lanes() as u64;
+        // The host's bank width, and the four-lane one the browser and NEON run whatever the
+        // host's is (attempt 2): `bank_sample_peak` dispatches on the chain's width, and an
+        // eight-lane host would otherwise never reach its `Four` arm.
+        let dispatches = if host_width == BankWidth::Four {
+            vec![host]
+        } else {
+            vec![host, Backend::Simd4]
+        };
         let intended = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
             .expect("intended fixture");
         let registry = launch_native_effect_registry().expect("launch registry");
         let mut plan_id = 9_430;
         let mut declined_web_frames = None;
-        for between_render_calls in [false, true] {
-            for period in [512_u32, 300] {
-                let meters =
-                    post_matrix_meter_requests(&intended, MeterMetricSet::SAMPLE_PEAK, period);
-                let mut arms = Vec::new();
-                for declined in [false, true] {
-                    plan_id += 1;
-                    let artifact = compile_console_model_with_selected_meters(
-                        &intended,
-                        plan_id,
-                        &meters,
-                        between_render_calls,
-                        &registry,
+        for dispatch in dispatches {
+            let width = BankWidth::for_backend(dispatch).expect("a banked dispatch");
+            let cohorts = 64 / width.lanes() as u64;
+            for between_render_calls in [false, true] {
+                for period in [512_u32, 300] {
+                    let meters =
+                        post_matrix_meter_requests(&intended, MeterMetricSet::SAMPLE_PEAK, period);
+                    let mut arms = Vec::new();
+                    for declined in [false, true] {
+                        plan_id += 1;
+                        let artifact = compile_console_model_with_selected_meters(
+                            &intended,
+                            plan_id,
+                            &meters,
+                            between_render_calls,
+                            dispatch,
+                            &registry,
+                        );
+                        graph::test_only_set_bank_sample_peak_declined(declined);
+                        builtins::test_only_reset_block_peak_merges();
+                        let rendered = render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
+                        let passes = graph::test_only_bank_sample_peak_passes();
+                        let merges = builtins::test_only_block_peak_merges();
+                        graph::test_only_set_bank_sample_peak_declined(false);
+                        arms.push((rendered, passes, merges));
+                    }
+                    let context = format!(
+                        "{dispatch:?} between_render_calls {between_render_calls} period {period}"
                     );
-                    graph::test_only_set_bank_sample_peak_declined(declined);
-                    builtins::test_only_reset_block_peak_merges();
-                    let rendered = render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
-                    let passes = graph::test_only_bank_sample_peak_passes();
-                    let merges = builtins::test_only_block_peak_merges();
-                    graph::test_only_set_bank_sample_peak_declined(false);
-                    arms.push((rendered, passes, merges));
-                }
-                let context =
-                    format!("between_render_calls {between_render_calls} period {period}");
-                let (
-                    (banked, banked_passes, banked_merges),
-                    (scalar, scalar_passes, scalar_merges),
-                ) = (&arms[0], &arms[1]);
-                eprintln!(
-                    "G3 {context}: [chains, slots] [{}, {}], transposes {}, folds {}, redirects {}, \
+                    let (
+                        (banked, banked_passes, banked_merges),
+                        (scalar, scalar_passes, scalar_merges),
+                    ) = (&arms[0], &arms[1]);
+                    eprintln!(
+                        "G3 {context}: [chains, slots] [{}, {}], transposes {}, folds {}, redirects {}, \
                      frames {}, passes {banked_passes}/{scalar_passes}, merges \
                      {banked_merges}/{scalar_merges}",
-                    banked.2,
-                    banked.3,
-                    banked.1,
-                    banked.6,
-                    banked.5,
-                    banked.4.len()
-                );
-                assert_pcm_bits_equal(&banked.0, &scalar.0, &context);
-                assert_eq!(
-                    (banked.1, banked.2, banked.3, banked.5, banked.6),
-                    (scalar.1, scalar.2, scalar.3, scalar.5, scalar.6),
-                    "{context}: transposes, chains, slots, redirects and folds"
-                );
-                assert_eq!(banked.6, 64, "{context}: every route stays folded");
-                assert_eq!(banked.4.len(), scalar.4.len(), "{context}: frame count");
-                assert_eq!(
-                    banked.4.len() as u64,
-                    64 * (BLOCKS * 128 / u64::from(period)),
-                    "{context}: every meter publishes every whole window"
-                );
-                for (banked_frame, scalar_frame) in banked.4.iter().zip(scalar.4.iter()) {
+                        banked.2,
+                        banked.3,
+                        banked.1,
+                        banked.6,
+                        banked.5,
+                        banked.4.len()
+                    );
+                    assert_pcm_bits_equal(&banked.0, &scalar.0, &context);
                     assert_eq!(
-                        meter_frame_bits(banked_frame),
-                        meter_frame_bits(scalar_frame),
-                        "{context}: meter {} window {}",
-                        scalar_frame.handle.0,
-                        scalar_frame.window_sequence
+                        (banked.1, banked.2, banked.3, banked.5, banked.6),
+                        (scalar.1, scalar.2, scalar.3, scalar.5, scalar.6),
+                        "{context}: transposes, chains, slots, redirects and folds"
                     );
-                }
-                assert!(
-                    banked.4.iter().any(|frame| frame.left.sample_peak != 0.0),
-                    "{context}: the metered windows carry signal"
-                );
-                assert!(
-                    banked.4.iter().any(|frame| {
-                        frame.left.sample_peak.to_bits() != frame.right.sample_peak.to_bits()
-                    }),
-                    "{context}: some window's left and right peaks differ"
-                );
-                assert_eq!(
-                    *banked_passes,
-                    BLOCKS * cohorts,
-                    "{context}: one pass per cohort"
-                );
-                assert_eq!(*scalar_passes, 0, "{context}: the declined arm runs none");
-                assert_eq!(
-                    *scalar_merges, 0,
-                    "{context}: the declined arm merges nothing"
-                );
-                if period == 512 {
-                    assert_eq!(*banked_merges, 64 * BLOCKS, "{context}: every block merges");
-                } else {
+                    assert_eq!(banked.6, 64, "{context}: every route stays folded");
+                    assert_eq!(banked.4.len(), scalar.4.len(), "{context}: frame count");
+                    assert_eq!(
+                        banked.4.len() as u64,
+                        64 * (BLOCKS * 128 / u64::from(period)),
+                        "{context}: every meter publishes every whole window"
+                    );
+                    for (banked_frame, scalar_frame) in banked.4.iter().zip(scalar.4.iter()) {
+                        assert_eq!(
+                            meter_frame_bits(banked_frame),
+                            meter_frame_bits(scalar_frame),
+                            "{context}: meter {} window {}",
+                            scalar_frame.handle.0,
+                            scalar_frame.window_sequence
+                        );
+                    }
                     assert!(
-                        *banked_merges > 0 && *banked_merges < 64 * BLOCKS,
-                        "{context}: a window-crossing block takes the sample loop ({banked_merges})"
+                        banked.4.iter().any(|frame| frame.left.sample_peak != 0.0),
+                        "{context}: the metered windows carry signal"
                     );
-                }
-                if between_render_calls && period == 512 {
-                    declined_web_frames = Some(arms.swap_remove(1).0);
+                    assert!(
+                        banked.4.iter().any(|frame| {
+                            frame.left.sample_peak.to_bits() != frame.right.sample_peak.to_bits()
+                        }),
+                        "{context}: some window's left and right peaks differ"
+                    );
+                    // Per cohort one final chain carries the meters: at `Simd4` that is sixteen
+                    // four-lane passes a block, which is also what says the `Four` arm ran.
+                    assert_eq!(
+                        *banked_passes,
+                        BLOCKS * cohorts,
+                        "{context}: one pass per cohort"
+                    );
+                    assert_eq!(*scalar_passes, 0, "{context}: the declined arm runs none");
+                    assert_eq!(
+                        *scalar_merges, 0,
+                        "{context}: the declined arm merges nothing"
+                    );
+                    if period == 512 {
+                        assert_eq!(*banked_merges, 64 * BLOCKS, "{context}: every block merges");
+                    } else {
+                        assert!(
+                            *banked_merges > 0 && *banked_merges < 64 * BLOCKS,
+                            "{context}: a window-crossing block takes the sample loop ({banked_merges})"
+                        );
+                    }
+                    if dispatch == host && between_render_calls && period == 512 {
+                        declined_web_frames = Some(arms.swap_remove(1).0);
+                    }
                 }
             }
         }
@@ -9144,6 +9161,7 @@ mod tests {
             9_441,
             &post_matrix_meter_requests(&intended, MeterMetricSet::SAMPLE_PEAK, 512),
             true,
+            host_dispatch(),
             &registry,
         );
         let envelope = artifact.envelope();
@@ -9822,12 +9840,14 @@ mod tests {
 
     /// [`compile_console_model_with_builtins`] for metric-selected meters (issue #943), through the
     /// two selected entry points a host prepares them with: the concurrent console, or
-    /// `between_render_calls`, which is what host-core calls for the browser.
+    /// `between_render_calls`, which is what host-core calls for the browser. `dispatch` is the
+    /// bank backend, so a test can bind the browser's four-lane banks on an eight-lane host.
     fn compile_console_model_with_selected_meters(
         model: &session::SessionModel,
         plan_id: u64,
         meters: &[SelectedMeterRequest],
         between_render_calls: bool,
+        dispatch: Backend,
         registry: &NativeEffectRegistry,
     ) -> PreparedGraphBuiltinsArtifact {
         let session = compile_session(
@@ -9870,7 +9890,7 @@ mod tests {
         }
         .expect("prepared selected console builtins");
         GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
-            dispatch: host_dispatch(),
+            dispatch,
             plan_id,
             effects: prepare_native_session_effects(
                 &session,
