@@ -343,6 +343,7 @@ dependencies = [
  "graph",
  "graph-compiler",
  "lane",
+ "rack",
  "session",
 ]
 

@@ -34,7 +34,7 @@
 //! | [`SOURCE`](ChannelSymmetryWitness::SOURCE) | preparation: the track's two channels read one source channel, or a one-channel source | a recompile with a different source mapping |
 //! | [`DESIGNED`](ChannelSymmetryWitness::DESIGNED) | preparation: every designed per-lane word the stage's kernel reads compares bit-equal between the channels | a recompile with asymmetric parameters |
 //! | [`RESTORED`](ChannelSymmetryWitness::RESTORED) | restore: the left and right payload sections compared byte-equal | a restore whose sections differ |
-//! | [`LIVE`](ChannelSymmetryWitness::LIVE) | preparation | an admitted record that writes one channel's upstream word |
+//! | [`LIVE`](ChannelSymmetryWitness::LIVE) | preparation | an admitted record that writes one channel's upstream word, unless it is a one-channel `Parameter` whose drain also staged its bit-equal other-channel twin (the pairing rule below) |
 //! | [`UNBYPASSED`](ChannelSymmetryWitness::UNBYPASSED) | preparation | a live bypass on an upstream stage; **restored** when it is lifted |
 //!
 //! # The hook rule is structural, not a list of kinds
@@ -48,6 +48,31 @@
 //! Enumerating kinds would have made every future kind a silent hole; this makes it a compile
 //! error. The builtins trim/polarity drain (#210 phase 3) is the first type the rule caught that
 //! did not exist when it was written.
+//!
+//! # The pairing rule: a both-channel write that arrives as two records (issue #1004)
+//!
+//! A `PerLane` parameter has no `Both` spelling at the effect -- every launch effect refuses a
+//! `Both` span for one -- so a host's "both channels" command arrives as a `Left` record and a
+//! `Right` record. Folded one by one, each is [`SymmetryEvent::Desymmetrize`], and since `LIVE` has
+//! no restoring arm, the first knob touch on a mono stem would retire its bank's collapse for the
+//! rest of the plan although the two writes leave the channels exactly where a `Both` would.
+//!
+//! So `EffectControlLane::stage` defers a one-channel `Parameter` record to the end of its drain
+//! and folds it only if the drain's staged spans do not **pair**: every `Left` span must be
+//! immediately followed by a `Right` span of the same parameter, kind and samples with values
+//! equal by bits, and every `Right` span immediately preceded by one. The staging is last-wins per
+//! `(parameter, channel)`, so a paired window is the channels' final values, and the effects apply
+//! a twin by the same validation and the same code from the same value. It is decided from the
+//! records alone, at the drain, because the chain decides the block's mode right after it.
+//!
+//! What it does **not** cover, deliberately:
+//!
+//! * a one-channel `PreparedTarget`. Targets are a FIFO with no last-wins staging, so equal last
+//!   targets per channel do not mean equal state: `[Left A, Both C, Right A]` leaves `C` and `A`.
+//!   They fold as before. A symmetric both-channel target edit is already one `Both` target;
+//! * a pair split across two drains: each drain sees a lone write and clears `LIVE`, as before;
+//! * re-earning `LIVE` after a genuinely asymmetric write. The rule never sets the term; it only
+//!   declines to clear it.
 //!
 //! # The seams: one closed, one still open
 //!
@@ -136,6 +161,10 @@ impl ChannelSymmetryWitness {
     /// channels.
     pub const DESIGNED: u8 = 1 << 1;
     /// No admitted record has written an upstream per-lane word for one channel only.
+    ///
+    /// A one-channel parameter write whose drain also staged its bit-equal twin on the other
+    /// channel is one both-channel write, and does not clear this term (see the pairing rule in
+    /// the module documentation).
     pub const LIVE: u8 = 1 << 2;
     /// No upstream stage of this track is live-bypassed.
     pub const UNBYPASSED: u8 = 1 << 3;
