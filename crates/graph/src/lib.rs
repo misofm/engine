@@ -1858,6 +1858,44 @@ pub(crate) trait GraphSourcePlanes {
     /// [`GraphPreparedSourceSetDriver::played_planes`] after the set's own claim and length
     /// checks.
     fn played_planes(&self, claim_index: usize) -> Option<(&[f32], &[f32])>;
+
+    // REALTIME_POLICY_BEGIN
+    /// One group of the Output op's inputs at once (issue #937): for each `claims[i]` that is not
+    /// `NO_SOURCE_CLAIM`, `planes[i]` becomes [`Self::played_planes`]'s planes for that claim, or
+    /// `silence` on `None` (underrun, end of region). A slot whose claim is `NO_SOURCE_CLAIM`, an
+    /// input read from the arena, keeps what the caller put there. Entries past the shorter of
+    /// the two slices are not visited.
+    ///
+    /// Provided, and deliberately not overridden: in this body `self.played_planes` is a static
+    /// call into the implementor's own method, so the set's claim-index and quantum checks run for
+    /// every claim exactly as they do one input at a time, and the reader makes one dynamic call
+    /// per group instead of one per input. The driver is still asked once per claim, through its
+    /// unchanged public trait. Realtime: no allocation, lock or syscall.
+    fn played_planes_group<'s>(
+        &'s self,
+        claims: &[u32],
+        silence: (&'s [f32], &'s [f32]),
+        planes: &mut [(&'s [f32], &'s [f32])],
+    ) {
+        for (slot, &claim) in planes.iter_mut().zip(claims) {
+            if claim == runtime::NO_SOURCE_CLAIM {
+                continue;
+            }
+            *slot = match self.played_planes(claim as usize) {
+                Some(played) => {
+                    #[cfg(any(test, feature = "test-support"))]
+                    runtime::test_only_count_source_plane(1);
+                    played
+                }
+                None => {
+                    #[cfg(any(test, feature = "test-support"))]
+                    runtime::test_only_count_source_plane(2);
+                    silence
+                }
+            };
+        }
+    }
+    // REALTIME_POLICY_END
 }
 
 /// A graph-owned, coordinator-only source-set capability.
