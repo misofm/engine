@@ -185,3 +185,103 @@ render closure (8 members, 5 traps) are unchanged.
   oracle B, so the class statement holds as written.
 - The wasm A/B compares two modules instead of one toggle binary; the concurrent control row
   measures the resulting bias and is reported beside each result.
+
+## Sol attempt 1 verdict: PASS
+
+Verifier: Sol (Claude Opus 5.5), 2026-09-27, on `e0c32c3d` (diff `e0f25bb6..e0c32c3d`). Host AMD EPYC
+7313P (Zen 3), rustc 1.97.1, node 22 (V8), `CARGO_INCREMENTAL=0`, the worktree's own `target/`
+(deleted afterwards). Another agent was building on the host. `scripts/run-console-benchmark.sh`
+was not run. Scratch harnesses were kept out of the tree and are not committed.
+
+Every gate the brief and amendments A1-A7 require was re-run and holds. The dispatch is correct by
+construction: `MatrixStage::fused_settled_block` (`crates/builtins/src/lib.rs:3016`) reads
+`self.coef.identity` and hands the same `&self.coef` to whichever kernel it picks, so it cannot
+disagree with the select form's own per-lane select. There is no cached copy. All four call sites
+(`:3159`, `:3872`, `:3883`, `:4216`) pass through it after their settled checks.
+`fader_matrix_block_without_identity` (`crates/lane/src/kernels/builtins.rs:404`) is the select
+form's second arm, verbatim.
+
+### Findings, by severity
+
+1. **Low: the chain half of the added scalar scenario test cannot see an M1-class fault.**
+   `scalar_fused_fader_matrix_renders_the_base_bits` (`crates/builtins/tests/matrix.rs:643-656`, chain
+   call `:705`) drives `BuiltinChain::process_dual_mono`. That function runs the input stage first
+   (`crates/builtins/src/lib.rs:3153`), and with elided sections the input stage computes
+   `v + 0.0` (`identity_chain_block`, `crates/lane/src/kernels/builtins.rs:1291`), which turns every
+   `-0.0` into `+0.0`. With no `-0.0` reaching the identity track, `1*l + 0*r == l` for every finite
+   input, so the select and select-free arms give the same bits on that half.
+   Scratch mutation X2 made the chain site always take the select-free arm. In release the test
+   stayed green (`c5131019...`); only the witness (`chain pan` 0 vs 2) and, in dev, the kernel's
+   `debug_assert!` caught it. M1 still goes red, but only through the
+   `FaderMuteRampBuiltins::process_fader_matrix` half. So the test docstring and this spec's
+   deviation bullet (line 179, "which no existing test pins by bits against M1") claim too much for
+   the chain site.
+   Not blocking: A5 does not require this test, A2 marks the chain site tools-only, and the
+   witness still guards that site's dispatch. Correct the two sentences, or give the chain track a
+   non-elided input section, when the batch next touches this file.
+2. **Info: the two-module wasm A/B.** The concurrent control row shows whole-module layout bias,
+   but only on code the fused path does not run. It cannot show layout effects on the fused loops
+   themselves, so the method is weaker than a toggle inside one module, though acceptable as a
+   descriptive number reported beside its control. Re-measured with a toggle inside one
+   `wasm-console-guest` module (a scratch `AtomicBool` in the dispatch, between-render-calls
+   switch, `SourceSignal::Local`, `taskset -c 14`, Backend `Simd4`, 8 interleaved rounds x 400
+   blocks, median paired p50 difference; one invocation, no retry):
+
+   | row | select-free on vs off |
+   | --- | --- |
+   | gain_pan_only, between render calls | **-1,092 ns** (all 8 rounds -1,062..-1,172) |
+   | gain_pan_only, concurrent control | +11 ns |
+   | builtins_only, between render calls | -1,071 ns |
+   | builtins_only, concurrent control | +30 ns |
+
+   All four delivery x toggle digests were identical for each row. The saving points the same
+   way as the reported one and is close to A1's -1.13 us. The implementer's -816 ns slightly
+   underestimates it.
+3. **Info: NaN payloads outside the parameter domain.** In my random-bit fuzz, NaN coefficients
+   and gains, which validation rejects, also produce release NaN-payload differences against
+   oracle B at `f32`, because the multiplies commute too. The class statement still held in both
+   profiles: 0 non-NaN differences and 0 NaN-vs-non-NaN. In domain (finite gains and coefficients),
+   0 payload differences.
+
+### Gates re-run
+
+- **Exactness (A4).** `select_free_fused_…` gate 1 reproduced in dev (`[[0,0],[0,0],[0,0]]`) and
+  release (`[[30,0],[456,0],[894,0]]`). I added a scratch copy of the gate that explains each
+  difference: all 1,380 release differences are on the right plane, both products `rl*l` and `rr*r`
+  are NaN with different payloads, and the new word is `rl*l`'s payload (source order) while
+  oracle A's is `rr*r`'s. So the difference is the final add's operand order and nothing else.
+  Release `bench` disassembly agrees: the select form computes `yr` as `vaddps %xmm6,%xmm9` (rr*r
+  first) and the select-free form as `vaddps %xmm7,%xmm6` (rl*l first).
+  A scratch fuzz (60,000 cases per width, random bits plus special values, `-0.0`/0/1 gains,
+  mixed mutes, identity-valued unflagged lanes, guard words) passed at `f32`, `Simd4` and `Simd8`
+  in dev and release.
+- **Dispatch.** A scratch random differential ran fused dispatch against always-split stages
+  with instant and smoothed retargets to and from `IDENTITY`, fader and mute ramps, members
+  `1..=W` at both widths, and the scalar `process_fader_matrix`. 28,800 banked and 16,000 scalar
+  blocks, bit-identical in dev and release, and no `debug_assert!` fired in dev. The same
+  differential goes red under M1, M3 and X1.
+- **A5 scenario pins.** On `e0f25bb6`'s sources both digests reproduce in dev and release
+  (`46cc0096...` 368 fused; `c5131019...` 44 fused), and they are identical at `e0c32c3d`.
+- **Mutations.** Every recorded outcome reproduced in dev and release: M1 (debug_assert in dev;
+  release witness `3 vs 0`, `0f5a0f59...`, `28e62077...`; composite and metered green), M2
+  (witness only), M3 (gate 1, `c3e895f6...`, `4c06dd6d...`, composite, metered), and M5
+  (witness only). Extra mutations: X1, dropping the right mute from the new kernel, is red on
+  gate 1 and both scenarios. X2 is finding 1.
+- **Codegen.** Release `bench` `FaderMatrixBankProcessor::process` has 4 `vblendvps`, all in the
+  two select loops, 0 `vmaskmovps`, and 2 `vtestps` guards. The `xmm` and `ymm` select-free loops
+  have no blend. For wasm, both artifacts were built with the build script's cargo line: base
+  `890705fa...` and after `225812fe...`, both matching the implementer's hashes. The render
+  closure is 8 with 5 traps, `meter_poll` 9/2 and `command_submit` 39/77 in both. `--kernel-shape`
+  finds 15 kernels in both, `f32x4_arith` goes 11,719 -> 11,751, and the roster lines are
+  identical. `try_process_settled_with_matrix` has 4 loops: the select-free `Simd4` and `Simd8`
+  loops have 0 `v128.bitselect`, and the select loops keep 2 and 4.
+- **Row gates (A6).** `composite_live_sequence_…` and the metered row are green in dev and
+  release.
+- **Workspace.** `cargo fmt --all --check`; `cargo clippy --locked --workspace --all-targets
+  --all-features -- -D warnings`; `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace
+  --no-deps`; `cargo test --locked` of `lane` (dev 65 and `--release` 65), `builtins` (dev,
+  `--release`, `--features test-support`; 117 excluding my scratch tests), `builtins-compiler --features test-support` (lib
+  58), `console-workload` (dev and `--release`, 39), and `capi` (32 + 4). The lane, builtins and
+  realtime policy scripts pass (`56 marked regions in 16 files`), as does
+  `check-builtins-fixtures.sh` (50 files). Scope is `crates/lane` and `crates/builtins` plus
+  this spec. No `unsafe` was added, no manifest changed, and only `crates/lane` names `wide`.
