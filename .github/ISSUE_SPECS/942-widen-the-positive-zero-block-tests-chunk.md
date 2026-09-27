@@ -542,3 +542,15 @@ The claim reproduces, and it holds natively as well as in wasm:
    covers the whole truth-value claim that every caller relies on, and the limiter's rest tests
    end to end. That is sufficient for a class A predicate change. The digests are
    non-regression only.
+
+## Coordinator follow-up after Sol attempt 3 PASS (2026-09-27)
+
+Closes Sol's low findings 1 and 2 before merge. The doc comment now attributes the scalar wasm fold to
+the `chunks_exact(64)` shape specifically (Sol measured `chunks_exact(128)` vectorising). A second
+test, `two_set_words_in_one_chunk_are_never_silent`, sets two words in one chunk (equal patterns, and
+`0xffff_ffff` with `0x0000_0001`) inside the head, across its end, and inside and across a wide chunk.
+Red mutations, each applied alone to `or_bits`: `bits ^= value.to_bits()` and
+`bits = bits.wrapping_add(value.to_bits())` both turn it red; the unmutated crate passes
+(`cargo test -p effect-runtime --lib`: 2 passed). Finding 3 (a block that turns live within words
+32-95 costs up to 4.85 ns more on wasm) is accepted: it affects the first live block after silence,
+once per transition.

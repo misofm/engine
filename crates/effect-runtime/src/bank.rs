@@ -126,8 +126,8 @@ pub fn check_block<L: Lane>(io: &[f32]) -> bool {
 /// returns there, so a rendering console pays 32 words rather than a whole extra pass over
 /// `frames * lanes`. Past that head the fold widens to 128-word chunks, because on a silent block
 /// the horizontal reduction and branch each chunk ends with were most of the cost (#942). The
-/// wide loop stays `chunks` rather than `chunks_exact`, which wasm32 `simd128` emits as a scalar
-/// `i32.or` chain. The reduction is a plain `|` fold, which vectorises.
+/// wide loop stays `chunks`: the `chunks_exact(64)` shape first proposed in #942 compiled to a
+/// scalar `i32.or` chain on wasm32 `simd128`. The reduction is a plain `|` fold, which vectorises.
 ///
 /// `inline(always)` keeps the predicate inlined at every call site, as the one-loop form was. With
 /// two loops, plain `#[inline]` let LLVM outline it at the effects' call sites in the wasm
@@ -458,5 +458,35 @@ mod tests {
             }
         }
         assert!(blocks >= 10_000, "only {blocks} blocks");
+    }
+
+    /// Two set words in one chunk, which the single-word test above cannot see: equal patterns
+    /// cancel under `^`, and `0xffff_ffff + 1` wraps to zero under `wrapping_add`, so a fold that
+    /// is not a plain `|` would call these blocks silent. Pairs sit inside the head, straddle the
+    /// head's end, and sit inside and across a wide chunk.
+    #[test]
+    fn two_set_words_in_one_chunk_are_never_silent() {
+        const LEN: usize = 32 + 128 + 40;
+        const PAIRS: [(u32, u32); 4] = [
+            (0x8000_0000, 0x8000_0000),
+            (0x3f80_0000, 0x3f80_0000),
+            (0xffff_ffff, 0x0000_0001),
+            (0x0000_0001, 0xffff_ffff),
+        ];
+        const PLACES: [(usize, usize); 5] = [(0, 1), (30, 31), (31, 32), (32, 33), (100, 159)];
+        let mut buf = [0.0_f32; LEN];
+        for (first, second) in PAIRS {
+            for (at, then) in PLACES {
+                buf[at] = f32::from_bits(first);
+                buf[then] = f32::from_bits(second);
+                assert!(!reference(&buf), "reference, words {at} and {then}");
+                assert!(
+                    !block_is_positive_zero(&buf),
+                    "words {at} and {then}, bits {first:#010x} and {second:#010x}"
+                );
+                buf[at] = 0.0;
+                buf[then] = 0.0;
+            }
+        }
     }
 }
