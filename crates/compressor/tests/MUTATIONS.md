@@ -263,6 +263,45 @@ same witness-keyed "both NaN" rule as the dual half, and the grid runs a third p
 | 985-M1 | the Average case takes the `abs` arm in the collapsed body | Applied and run: **GREEN** everywhere, including `mono_collapse::a_halved_subnormal_does_not_come_back` and gate 1's subnormal-only input, and it is equivalent. On one plane `0.5|m| + 0.5|m|` differs from `|m|` only where `0.5|m|` is inexact, which needs `|m| < 2 * f32::MIN_POSITIVE`; the linked value's only consumer is `curve_target`'s `max(detected, 1e-8)` floor, which maps both to `1e-8`, and NaN and `inf` agree. It was red in the retired design because a detector ring stored the linked value (M2-C1). The body keeps `link_frame` for Average and Maximum anyway, as the brief freezes, so the collapsed arithmetic stays the dual body's word for word |
 | 985-M5 | Maximum also takes the `abs` arm | Applied and run: **GREEN**, as the verification predicted: `max(|m|, |m|)` is `|m|` on every backend. Recorded, never listed as red |
 
+## Issue #995 — the sidechained settled body
+
+A connected sidechain, present (`Detector::Sidechain`) or absent (`Detector::Silent`), now renders
+its settled frames through `settled_sidechain`, the two-pass body with the sidechain as pass 1's
+source, instead of the one-pass `frames_loop::<L, false>`. The gates are #981-#985's: the grid
+and the three randomized differentials already ran `Silent` and `Sidechain` blocks against
+`settled_body_tests::reference` (the one-pass body, verbatim), and they now also assert that
+sidechained settled bodies started mid-block. Nothing is relaxed for them: a sidechained block
+never takes the all-wet arm, so its words, NaN payloads included, compare by bits.
+`scenario_995_sidechain_render_is_pinned` (both sources, `f32`, `Simd4` and `Simd8`, every link
+mode, both tables, chunk-straddling blocks and ramps ending at frame 40) was pinned on the
+unmodified batch head `fc43c97d`, dev and release: `25b39c7a...`.
+
+Driver as for #981-#985: one mutation at a time on a scratch copy of the tree,
+`CARGO_INCREMENTAL=0 cargo test --locked -p compressor --no-fail-fast` (dev), every red test
+recorded. "Gate 1" is the grid on every table
+(`the_settled_body_is_the_base_body_on_the_corpus_table`,
+`the_all_wet_arm_is_the_base_body_on_all_wet_tables`,
+`the_collapsed_settled_body_is_the_base_body_on_the_three_parameter_sets`) and the three
+differentials.
+
+| # | mutation | red |
+|---|---|---|
+| 995-M1 | the sidechain's first pass reads the main planes (`Detector::Sidechain(..) => Detector::Main` in `settled_sidechain`) | gate 1, `scenario_995_*`, `contract::links_are_exact_and_connected_sidechain_is_distinct_from_main_detection`, `nonfinite::a_nan_in_the_sidechain_alone_is_clamped_to_the_level_floor` (9 red) |
+| 995-M2 | the sidechain offset never advances, so every chunk detects on the settled slice's first chunk (`offset += 0`) | gate 1, `scenario_995_*`, `partition::linked_sidechain_partitions_are_invariant` (8 red) |
+| 995-M3 | the sidechain planes are not sliced to the ramp prefix's end (`[..settled.len()]`) | gate 1 (its settled bodies starting at frames 1, 18 and 40), `scenario_995_*` (7 red) |
+| 995-M4b | an absent sidechain detects the main planes (`Detector::Silent => Some(chunk)`) | gate 1, `scenario_995_*` (7 red) |
+| 995-M5 | a sidechained block takes the all-wet arm when #982's predicate holds | `the_all_wet_arm_is_the_base_body_on_all_wet_tables`, `randomized_differential_simd4`/`_simd8`, `scenario_995_*` (4 red). The difference is a quieted signalling NaN in a block the boundary check then rejects, which is why the gates hold sidechained blocks to bits before `finish_channel` |
+| 995-M6 | the DualMono `abs` arm for every link mode | gate 1, `scenario_995_*` (7 red) |
+
+| # | mutation | why it survives |
+|---|---|---|
+| 995-M4 | an absent sidechain's one target is never computed, so pass 2 reads the zero-filled scratch | Applied and run: **GREEN** everywhere, and equivalent for every legal parameter set. A silent detector floors to `1e-8`, whose level (about -160 dB) is at least 80 dB under any legal threshold (`>= -80`) and so past any legal half knee (`<= 12`): `gain_delta_db` takes its `under` arm, `+0.0`, and both clamps keep it, which is the zero fill's word. The body computes the target anyway, so it is `link_frame`'s and `curve_target`'s value by construction rather than by a range argument over the parameter domains |
+| 995-M7 | the DualMono arm is never taken for a sidechain (`if false`) | Applied and run: **GREEN**, necessarily: under DualMono `link_frame`'s result is `abs` of the word it read (984-M3's argument). Performance-only |
+
+The independent head-against-candidate differential of the attempt evidence (spec #995) is red on
+M1, M2 and M5 at `f32`, `Simd4` and `Simd8`; on M1 and M2 also through the public factory; on M5
+only at the kernel word, as the boundary check predicts.
+
 ## Issue #994 — a knee whose `1 / (2 W)` overflows, through the compressor's entry points
 
 The fix is in `effect-runtime` (`dynamics::knee_coefficients`); this crate's source is unchanged
