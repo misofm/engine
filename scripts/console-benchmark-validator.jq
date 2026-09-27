@@ -1,11 +1,12 @@
 # Aggregate validator: seventeen session workloads (fifteen bound-feed rows, the driver-fed
 # gain/pan row, #928 and #956, and the metered console row, #881), two hoist workloads, one meters
-# arm, one observation arm, one placement row-pair, one automation-active row and one mono
-# row-pair, each in rounds one and two -- forty-eight records. #956 retired the builtins-less
-# plumbing row and re-based the driver-fed row, two records fewer than the fifty before it.
+# arm, one observation arm, one placement row-pair, one automation-active row, one mono row-pair
+# and one mixing-automation row (#1003), each in rounds one and two -- fifty records. #956 retired
+# the builtins-less plumbing row and re-based the driver-fed row, two records fewer than the fifty
+# before it; #1003's row, emitted last, brought the count back to fifty.
 include "console-benchmark-record-lib";
 . as $records |
-(type == "array") and length == 48 and
+(type == "array") and length == 50 and
 all(.[]; console_benchmark_record_valid_lib) and
 ([.[] | select(.record == "console_session") | .workload_kind] | unique | sort) == session_kinds and
 ([.[] | select(.record == "console_hoist") | .workload_kind] | unique | sort)
@@ -21,12 +22,21 @@ all(.[]; console_benchmark_record_valid_lib) and
   == ["sixty_four_track_mono_pair"] and
 ([.[] | select(.record == "console_automation") | .workload_kind] | unique)
   == ["sixty_four_track_compressor_automation"] and
+([.[] | select(.record == "console_mixing_automation")] | length) == 2 and
+([.[] | select(.record == "console_mixing_automation") | .workload_kind] | unique)
+  == ["sixty_four_track_console_mono_mixing_automation"] and
 ([.[] | .round] | unique | sort) == [1,2] and
-([.[] | [.record,.workload_kind,.round] | join(":")] | unique | length) == 48 and
+([.[] | [.record,.workload_kind,.round] | join(":")] | unique | length) == 50 and
 (group_by([.record,.workload_kind]) | all(map(.round) | sort == [1,2])) and
 # Round one and round two are two measurements of one frozen workload, so the rendered output must
 # be identical across them. A drifting digest means the rounds are not measuring the same thing.
 (group_by([.record,.workload_kind]) | all(map(.output_sha256 // .restated_output_sha256 // .meters_off_output_sha256 // .absent_output_sha256 // .split_chains_output_sha256 // .collapse_eligible_output_sha256) | unique | length == 1)) and
+# #1003: the mixing-automation row's moving arm and its preflight are frozen workloads too, so both
+# rounds render them identically, and the collapse counters are functions of the traffic alone.
+([.[] | select(.record == "console_mixing_automation")
+      | [.automated_output_sha256, .preflight_output_sha256, .quiet_bank_collapse_counters,
+         .restated_bank_collapse_counters, .automated_bank_collapse_counters,
+         .preflight_bank_collapse_counters]] | unique | length == 1) and
 # #928, re-based by #956: the driver-fed gain/pan row is the bound-feed gain/pan row fed through a
 # prepared source set. The two feeds deliver the same frozen words, so the two rows render the same
 # bits in both rounds; a difference is a harness defect, never a finding, and the run is refused

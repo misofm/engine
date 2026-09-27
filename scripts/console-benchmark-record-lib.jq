@@ -1,13 +1,15 @@
 # Shared definitions for the console qualification benchmark records.
 #
-# Seven record shapes share one stream. `console_session` is a workload rendered through a real
+# Eight record shapes share one stream. `console_session` is a workload rendered through a real
 # prepared plan; `console_hoist` is the paired-alternation comparison of the stationary-smoother
 # arms; `console_meters` and `console_observation` are the #163 item 0d paired arms of the console
 # observation facilities; `console_placement` is the #175 chain-shape row-pair; and
 # `console_automation` is the automation-active row -- one Point span per block on one track,
 # which is the only place in this stream a compressor's ramping body is executed at all; and
 # `console_mono` is the mono-collapse row-pair, whose two arms are one session in this tree and
-# whose digest equality is the gate the collapse will be constrained by when it lands.
+# whose digest equality is the gate the collapse will be constrained by when it lands; and
+# `console_mixing_automation` (#1003) is the mono console riding eight controls on eight tracks in
+# the shapes a real host pushes them.
 # `console_benchmark_record_valid_lib` dispatches on `.record`, so a record that claims one shape
 # and carries another's keys fails rather than being validated against the wrong table.
 def sha256: type == "string" and test("^[0-9a-f]{64}$");
@@ -37,6 +39,8 @@ def mono_keys: ["arm_difference","arms","backend","background_load_note","bit_id
 def observation_keys: ["absent_output_sha256","absent_p50_ns","absent_p95_ns","absent_p99_ns","armed_output_sha256","armed_p50_ns","armed_p95_ns","armed_p99_ns","armed_windows_published","arms","backend","background_load_note","bit_identity","candidate_commit","cpu_affinity","cpu_model","descriptive_only","governor_or_power_mode","issue","llvm_version","measurement_control","missing_metadata","observation_lanes","observation_taps","observation_window_blocks","observations","os","paired_arm_delta_median_ns","paired_capacity_delta_median_ns","pairing","percentile_method","profile","record","render_errors","render_total_forbidden_operations","round","rust_version","schema_version","statistical_method","target_features","target_triple","tracks","unarmed_output_sha256","unarmed_p50_ns","unarmed_p95_ns","unarmed_p99_ns","unarmed_windows_published","units","workload_kind"];
 
 def automation_keys: ["arms","automated_channel","automated_effect","automated_effect_id","automated_output_sha256","automated_p50_ns","automated_p95_ns","automated_p99_ns","automated_parameter","automated_parameter_index","automated_pushes_accepted","automated_track_id","automation_spans_per_block","backend","background_load_note","bit_identity","candidate_commit","cpu_affinity","cpu_model","descriptive_only","fixture_id","governor_or_power_mode","input_signal","issue","llvm_version","measurement_control","missing_metadata","observations","os","paired_control_delta_median_ns","paired_ramp_delta_median_ns","paired_ramp_delta_median_ns_per_track","pairing","percentile_method","profile","quantum_frames","quiet_output_sha256","quiet_p50_ns","quiet_p95_ns","quiet_p99_ns","record","render_errors","render_total_forbidden_operations","restated_output_sha256","restated_p50_ns","restated_p95_ns","restated_p99_ns","restated_pushes_accepted","round","rust_version","sample_rate_hz","schema_version","smoothing_samples","statistical_method","strip_content","strip_layout","synthetic_fixture","target_features","target_triple","tracks","units","workload_kind"];
+
+def mixing_automation_keys: ["arms","automated_bank_collapse_counters","automated_controls","automated_output_sha256","automated_p50_ns","automated_p95_ns","automated_p99_ns","automated_pushes_accepted","backend","background_load_note","bit_identity","candidate_commit","cpu_affinity","cpu_model","descriptive_only","fixture_id","governor_or_power_mode","input_signal","issue","llvm_version","measurement_control","missing_metadata","observations","os","owner_edits_per_block","paired_collapse_delta_median_ns","paired_ramp_delta_median_ns","pairing","parameter_records_per_block","percentile_method","preflight_bank_collapse_counters","preflight_blocks","preflight_output_sha256","preroll_blocks","profile","quantum_frames","quiet_bank_collapse_counters","quiet_output_sha256","quiet_p50_ns","quiet_p95_ns","quiet_p99_ns","record","render_errors","render_total_forbidden_operations","restated_bank_collapse_counters","restated_output_sha256","restated_p50_ns","restated_p95_ns","restated_p99_ns","restated_pushes_accepted","round","rust_version","sample_rate_hz","schema_version","smoothing_samples","statistical_method","strip_content","strip_layout","synthetic_fixture","target_features","target_triple","tracks","units","workload_kind"];
 
 # ---------------------------------------------------------------------------------------------
 # Issue #184: floor accounting. Additive, and additive means additive.
@@ -405,6 +409,8 @@ def placement_statistical_method:
   "two arms alternated per observation; nearest-rank percentiles over per-block nanoseconds; paired delta is merged_chain minus split_chains per observation; descriptive only; no threshold";
 def automation_statistical_method:
   "three arms alternated per observation; nearest-rank percentiles over per-block nanoseconds; ramp delta is automated minus restated and control delta is restated minus quiet, per observation; descriptive only; no threshold";
+def mixing_automation_statistical_method:
+  "three arms alternated per observation; nearest-rank percentiles over per-block nanoseconds; ramp delta is automated minus restated and collapse delta is restated minus quiet, per observation; descriptive only; no threshold";
 def mono_statistical_method:
   "two arms alternated per observation; nearest-rank percentiles over per-block nanoseconds; paired delta is collapse_forced_off minus collapse_eligible per observation; descriptive only; no threshold";
 def observation_statistical_method:
@@ -676,6 +682,97 @@ def mono_record_valid:
   .arm_difference == "collapse_eligible takes the mono collapse on every cohort; collapse_forced_off renders the same fixture dual" and
   .render_errors == 0 and .render_total_forbidden_operations == 0;
 
+# The mixing-automation row (#1003): the mono console riding eight controls on eight tracks.
+#
+# The row's controls are its workload, so they are pinned control by control: which track, which
+# slot, which parameter, the step, and the lowering each one is pushed in. The lowering is the
+# claim VERIFY-AUTOMATION F2 turned on -- the EQ goes as one owner edit on `Both`, which keeps a
+# mono cohort's collapse, and the compressor and the limiter as a Left and a Right record -- so a
+# record that pushed the EQ as two one-channel edits measured a loss the product does not have and
+# is refused. The bases are not pinned here: they are the fixture's held values, and the digest
+# equality below is what proves the row restated exactly those. Each ride must move: its two values
+# straddle the base.
+def mixing_automation_controls:
+  [["ch00","eq","miso.parametric-eq","band-1-gain",3,"owner_both",0.25],
+   ["ch08","comp","miso.compressor","threshold",0,"left_then_right",0.5],
+   ["ch16","limiter","miso.true-peak-limiter","ceiling",0,"left_then_right",8],
+   ["ch24","eq","miso.parametric-eq","band-1-gain",3,"owner_both",0.25],
+   ["ch32","comp","miso.compressor","threshold",0,"left_then_right",0.5],
+   ["ch40","limiter","miso.true-peak-limiter","ceiling",0,"left_then_right",8],
+   ["ch48","eq","miso.parametric-eq","band-1-gain",3,"owner_both",0.25],
+   ["ch56","comp","miso.compressor","threshold",0,"left_then_right",0.5]];
+def mixing_automation_preflight_arms:
+  ["quiet","restated","automated","automated_eq_only","automated_compressor_only","automated_limiter_only","restated_eq_only"];
+def collapse_counters: type == "array" and length == 2 and all(nonnegative_integer) and .[1] > 0;
+
+# Three claims beyond the controls, each one a statement the digests or the timings cannot make.
+#
+# The digests: `quiet == restated` is the collapse's own class-A statement -- a restating record
+# may retire a cohort's collapse, and the dual bank renders the collapsed bank's bits -- and
+# `restated != automated` is the honesty half. The preflight repeats both and adds that each effect
+# moves bits on its own (VERIFY-AUTOMATION A3, F6): a whole-mix inequality could be carried by the
+# EQ alone while the limiter's ramps moved nothing.
+#
+# The collapse counters: the quiet arm collapses every cohort on every block it rendered, or the
+# row is not measuring a collapse at all; no arm collapses more than quiet; and the EQ-only
+# restated preflight arm collapses exactly what quiet does (A6), which is what pins the harness to
+# the SDK's `Both` shape. The restated and automated arms' counters are stated, not pinned: they
+# are what the automation fixes move.
+#
+# The pushes: every block of both pushing arms, every record accepted.
+def mixing_automation_record_valid:
+  (keys | sort) == mixing_automation_keys and
+  .record == "console_mixing_automation" and common_shape and
+  .statistical_method == mixing_automation_statistical_method and
+  .workload_kind == "sixty_four_track_console_mono_mixing_automation" and
+  # The mono session row's six pinned facts, verbatim from `session_kind_shape`.
+  .tracks == 64 and .synthetic_fixture == false and
+  .strip_content == "eq+compressor+limiter" and
+  .strip_layout == "simd1:eq+compressor,simd2:limiter" and .input_signal == "tone" and
+  .fixture_id == mono_console_fixture and
+  .sample_rate_hz == 48000 and .quantum_frames == 128 and
+  .pairing == "alternating_per_observation" and
+  .arms == ["quiet","restated","automated"] and
+  .preroll_blocks == 64 and
+  (.automated_controls | type == "array" and
+    map([.track_id,.slot_id,.effect,.parameter,.parameter_index,.lowering,.step])
+      == mixing_automation_controls and
+    all(.[]; ([.base,.even_value,.odd_value] | all(type == "number")) and
+             .even_value > .base and .base > .odd_value)) and
+  .owner_edits_per_block == ([.automated_controls[] | select(.lowering == "owner_both")] | length) and
+  .parameter_records_per_block
+    == 2 * ([.automated_controls[] | select(.lowering == "left_then_right")] | length) and
+  .smoothing_samples == 64 and
+  .restated_pushes_accepted == .observations * (.owner_edits_per_block + .parameter_records_per_block) and
+  .automated_pushes_accepted == .restated_pushes_accepted and
+  .units == "ns_per_block" and
+  ([.quiet_p50_ns,.quiet_p95_ns,.quiet_p99_ns,.restated_p50_ns,.restated_p95_ns,.restated_p99_ns,.automated_p50_ns,.automated_p95_ns,.automated_p99_ns] | all(positive_integer)) and
+  ordered_percentiles([.quiet_p50_ns,.quiet_p95_ns,.quiet_p99_ns]) and
+  ordered_percentiles([.restated_p50_ns,.restated_p95_ns,.restated_p99_ns]) and
+  ordered_percentiles([.automated_p50_ns,.automated_p95_ns,.automated_p99_ns]) and
+  ([.paired_ramp_delta_median_ns,.paired_collapse_delta_median_ns] | all(type == "number" and floor == .)) and
+  ([.quiet_bank_collapse_counters,.restated_bank_collapse_counters,.automated_bank_collapse_counters] | all(collapse_counters)) and
+  ([.quiet_bank_collapse_counters,.restated_bank_collapse_counters,.automated_bank_collapse_counters] | map(.[1]) | unique | length == 1) and
+  .quiet_bank_collapse_counters[0] == .quiet_bank_collapse_counters[1] * (.preroll_blocks + .observations) and
+  .restated_bank_collapse_counters[0] <= .quiet_bank_collapse_counters[0] and
+  .automated_bank_collapse_counters[0] <= .quiet_bank_collapse_counters[0] and
+  ([.quiet_output_sha256,.restated_output_sha256,.automated_output_sha256] | all(sha256)) and
+  .quiet_output_sha256 == .restated_output_sha256 and
+  .restated_output_sha256 != .automated_output_sha256 and
+  .bit_identity == "quiet == restated, asserted in-run" and
+  .preflight_blocks == .preroll_blocks + 64 and
+  (.preflight_output_sha256 | type == "object" and (keys_unsorted == mixing_automation_preflight_arms) and
+    all(.[]; sha256) and
+    .quiet == .restated and .restated_eq_only == .restated and
+    .automated != .restated and .automated_eq_only != .restated and
+    .automated_compressor_only != .restated and .automated_limiter_only != .restated) and
+  (.preflight_bank_collapse_counters | type == "object" and
+    (keys_unsorted == mixing_automation_preflight_arms) and all(.[]; collapse_counters)) and
+  .preflight_bank_collapse_counters.quiet[0]
+    == .preflight_bank_collapse_counters.quiet[1] * .preflight_blocks and
+  .preflight_bank_collapse_counters.restated_eq_only == .preflight_bank_collapse_counters.quiet and
+  .render_errors == 0 and .render_total_forbidden_operations == 0;
+
 def console_benchmark_record_valid_lib:
   type == "object" and (.record | type == "string") and
   (if .record == "console_session" then session_record_valid
@@ -685,4 +782,5 @@ def console_benchmark_record_valid_lib:
    elif .record == "console_placement" then placement_record_valid
    elif .record == "console_automation" then automation_record_valid
    elif .record == "console_mono" then mono_record_valid
+   elif .record == "console_mixing_automation" then mixing_automation_record_valid
    else false end);
