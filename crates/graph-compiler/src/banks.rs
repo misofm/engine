@@ -342,6 +342,14 @@ pub(crate) fn bind_rack_banks_indexed(
             }
         }
     }
+    // Issue #1002: a bank reused from the trial plan carries the index its group had there, and
+    // acceptance renumbers it. The report's slot index is gated by a test; the bank's cohort index
+    // has no public reader, so it is tied to the same index here.
+    debug_assert!(bound.iter().enumerate().all(|(index, group)| {
+        group.iter().all(|(bank, slot)| {
+            slot.group == index && usize::try_from(bank.cohort.group).ok() == Some(index)
+        })
+    }));
     let (banks, bound_slots) = bound.into_iter().flatten().unzip();
     Ok((
         banks,
