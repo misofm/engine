@@ -631,3 +631,75 @@ Run on the attempt-2 tree with `CARGO_INCREMENTAL=0` and the worktree's own `tar
 After the runs, the scratch console probe, the applied harness, the `Cargo.toml` and `Cargo.lock`
 edits, and the scratch worktree were all removed. Nothing from them is committed except the patch
 file.
+
+## Sol attempt 2 verdict: PASS
+
+Reviewed `cd316992..6c9b5f6c` (`008d0ef3`, `6c9b5f6c`). The host and settings are the same as for
+attempt 1. The mutation and base builds ran in a separate scratch worktree, and nothing from them
+is committed. Nothing was timed.
+
+- **`banks.rs` is unchanged.** `584dbc16..HEAD` still touches only the 28-line binder hunk and the
+  `CohortLevel` doc.
+- **Finding 1 is resolved.**
+  - All-mono desks take the symmetric fixture on odd seeds and the intended strip on even seeds.
+  - No random draw moved: the probe's misaligned counts are `[0, 29, 15]` again.
+  - M970 (`runtime.rs:2375` without `gathers_track_input()`) is **red**:
+    - on the committed `0..64`, 5 armed lines over seeds 12, 48, 50 and 54;
+    - with every seed of `20000..20300` rendered, 22 armed lines over 16 seeds, including 20194;
+    - in the wasm harness, `moved_armed=24`.
+  - The collapse still fires (6 seeds), and the corrected prose is accurate.
+- **Finding 2 is resolved.** I followed `README.md` literally from the implementation worktree:
+  `git worktree add --detach ../engine-966-pins HEAD`, then `git apply`, then its two commands.
+  - The patch applied cleanly.
+  - The guest reports 4 lanes, and all 8 pins pass: 45, 45, 45, 45, 6, 1, 43 and 18 banks, with 1
+    misaligned slot each and 2 for the realignment guard.
+  - The probe over `0..1000` is clean.
+  - The same harness goes red under M1 (all 8 pins; 324 of 1,000 seeds refused) and under M970.
+    The worktree was then removed.
+- **Finding 3 is resolved.** The JSON was renamed at 100% similarity to
+  `crates/graph-compiler/tests/data/`, and `bank_levels.rs:58` reads `data/...`.
+  - No `include_str!` or code references the old path; only historical spec prose still names it.
+  - The harness README points to the new location.
+- **Mutations** on this test file match `MUTATIONS.md`:
+  - M1: 9 of 9, 28 lines over 22 seeds (15 at `Simd4`);
+  - M2: 2;
+  - M7: 1;
+  - M3: 3 (11 lines over 10 seeds);
+  - M8: 1;
+  - M9: 2 (11 lines over 6 seeds);
+  - M10b, the implementer's M10: 9;
+  - my own M10: 4;
+  - M970: 1.
+- **Nothing from attempt 1 regressed.** The fresh range is `74000..75000`, run with this
+  generator: 263 all-mono desks, 141 of them asymmetric. Every width was rendered for 16 blocks,
+  unarmed and armed.
+  - **1,643 of 1,643** lines that bind on the base are byte-identical.
+  - The base refuses 357 lines over 260 seeds. All of them now bind and render the `Scalar` bits,
+    with none silent.
+- **Gates** (the attempt 1 list):
+  - fmt, clippy `-D warnings` and doc `-D warnings` pass;
+  - test suites:
+
+    | Suite | Passed | Ignored |
+    |---|---|---|
+    | `graph` | 110 | |
+    | `graph --features test-support` | 117 | |
+    | `graph-compiler` | 110 | |
+    | `rack-compiler` | 13 | |
+    | `builtins-compiler --features test-support` | 79 | |
+    | `host-core --all-features` | 234 | 2 |
+    | `capi` | 36 | |
+    | `console-workload` | 39 | 2 |
+    | `wasm-gates` | 9 | |
+
+  - `bank_levels` also passes with `test-debug-a`'s features;
+  - scripts and checks: graph, rack and realtime policy pass, `graph_fixture --check` passes, and
+    determinism is 100/100.
+
+### Remaining (Info, not blocking)
+
+- `wasm_pins_966.rs`'s `PINS` table copies the `simd4` values that `bank_levels.rs` asserts. If a
+  pin changes, update both.
+- The harness is a patch, so it can stop applying as `Cargo.toml` moves. No CI job runs the
+  `Simd4` pins; that is the owner-flagged wasm-leg follow-up.
+- Attempt-1 findings 4 and 5 (`banks.rs:263` and `:67-70`) are left as they are, by scope.
