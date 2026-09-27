@@ -1127,3 +1127,63 @@ The in-process A/B and the census are attempt 1's: the artifact is the same byte
 | S-1R | the right half dropped | M2 `MovedRightSeed` |
 | D-1 | the `2^24` decline deleted | the decline test (`Four`) |
 | G-5 | observers keep running after a failure | the rewritten failure boundary (`[1..8]` against `[1, 2]`) |
+
+## Sol attempt 2 verdict: PASS
+
+Verifier: Sol, 2026-09-27, on `e0c1b4ad` (attempt 2: `958c7066`, `f8562bdc`, `e0c1b4ad`), same host
+and toolchain, `CARGO_INCREMENTAL=0`, the worktree's own `target/` (rebuilt, then deleted). Nothing
+pushed; no implementation file left edited (mutations and my throwaway differential were applied,
+run and restored).
+
+**Scope.** Test code and records only. The `crates/graph/src/runtime.rs` hunk lies inside `mod tests`
+(from line 8836; the module opens at 8067), and the `crates/graph-compiler/src/lib.rs` changes are
+all inside its `mod tests`. No `tools/`, `hosts/` or `scripts/` change. The AudioWorklet build (the
+build script's cargo line), rebuilt here: sha256 `b005b58b...5efeaac2`, byte-identical to attempt 1,
+so attempt 1's census, pins and A/B stand.
+
+**Every attempt 1 finding is closed, and each new test catches the fault it targets.** I applied
+each mutation alone, as an exact-text replacement, and restored it:
+
+| # | mutation | result |
+|---|---|---|
+| S-2 | `commit_banked`'s window check deleted | RED on the mixed bank in dev (the underflow at `crates/builtins/src/lib.rs:4881`) **and in release**, where overflow checks are off: frame count 176 against 1,064 |
+| S-1L | left half of the seed check dropped | RED on M2 `MovedLeftSeed` (energy `180.35156250000003` against `180.3515625`) |
+| S-1R | right half dropped | RED on M2 `MovedRightSeed` |
+| N-1 (mine) | meters without `ENERGY_RMS` never commit | RED on the mixed bank: commits 384 against 504. The non-energy commit path is now witnessed |
+| D-1 | the `2^24` decline deleted | RED on the new graph unit test |
+| D-2 (mine) | decline at `>= 2^24` instead of `>` | GREEN, as expected: refusing exactly `2^24` frames is conservative and exact, so no gate can or should see it |
+| G-5 | the member loop keeps observing after a failure | RED on the rewritten failure boundary: handles `[1..8]` against `[1, 2]` |
+
+**The mixed bank is robust, not merely red when the fixture changes.** Its assertion
+`passes == BLOCKS x cohorts` holds only if every bank holds a seeding lane (`ALL`/512 or
+`ENERGY_RMS`/1536) in every block. At `Simd8` that places every lane beside a seeder; at `Simd4`,
+with 16 seeders and 16 banks, exactly one sits in each. So under **any** grouping that keeps the gate
+green, every crossing lane is handed `meter: Some` every block. The commit and merge counts then
+depend only on each meter's own window, not on the grouping, and S-2 stays exercised. A grouping
+that leaves a bank without a seeder fails loudly on the pass count and never passes vacuously. The
+implementer's note is conservative: most regroupings would not change the counts at all.
+
+**The failure boundary** now derives the set of meters that observed the failing block from a probe
+plan's observation order and checks it against the discontinuity set and the commit count, at both
+widths. If the probe's order ever differed from the real plan's, the gate would go red, not vacuous,
+and `observed_before_failure.len() < 64` keeps it from being trivially satisfied.
+
+**No regression.** fmt, clippy `-D warnings` and `RUSTDOCFLAGS='-D warnings' cargo doc` pass. The
+suites pass: lane; builtins, with and without `test-support`; builtins-compiler `test-support`;
+graph, with and without `test-support`; graph-compiler; host-core `--all-features`; host-web;
+console-workload; capi; wasm-gates and wasm-gate-corpus. All eight policy scripts pass (realtime 58
+regions in 16 files; determinism 100/100). M3 reproduces exactly (Simd8 passes 192/112, Simd4
+384/224, commits 1,536/896). The mixed bank gives 1,064 frames, passes 192 (Simd8) and 384 (Simd4),
+#943 passes 0 on and 192 declined, merges 192/192, and commits 504/0 with 120 non-energy. The failure
+boundary gives `[64 x 5, 2, 64 x 10]` at both widths.
+
+**My randomized differential**, re-run on the attempt 2 tree: 150 scenarios against the declined arm
+(same generator as attempt 1: both widths, partial banks, mono, mixed periods and metric sets,
+hostile input, discontinuities, bogus seeders). PCM and **1,066,862 meter frames equal by bits**,
+20,266 passes and 40,717 commits; sanitized words reached a meter in 104 scenarios and clipped words
+in 120.
+
+**Carried as info, not blocking.** Attempt 1's 5(a) to 5(d) stand. 5(c): a bank whose accepting meters
+all lack `ENERGY_RMS` queries seeds but never runs the pass; this is performance only. 5(d): the
+64-byte `Some(meters.peaks())` copy per bank per block is a production nit for a later pass under
+the owner's copy rule.
