@@ -7500,7 +7500,7 @@ mod tests {
     ///
     /// **#169's arena-neutrality claim ("the window hold costs nothing") never held on the path
     /// every host compiles through.** It was measured only on the builtins-less plan, where the
-    /// identity post-input copy level that #925 removes absorbed the input retirements outside
+    /// identity post-input copy level that #925 removed absorbed the input retirements outside
     /// every window. Narrowing the merged-span hold is issue #931; this test is the measurement
     /// it starts from.
     ///

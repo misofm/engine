@@ -186,7 +186,8 @@ pub fn node_index(spec: &GraphSpec, id: &GraphNodeId) -> Option<NodeIndex> {
 ///
 /// Issue #925 also elided a builtin stage the plan left out of `required_bindings`, which only the
 /// builtins-less compile entry did. Issue #959 deleted that entry and issue #958 reverted the
-/// elision, so whether a node keeps its op is again decided by its kind alone.
+/// elision, so whether a node is an alias candidate is again decided by its kind alone; whether a
+/// candidate is elided still depends on its input edges (one main input, no sidechain, no delay).
 const fn is_alias_candidate(node: &GraphNodeId) -> bool {
     matches!(
         node,

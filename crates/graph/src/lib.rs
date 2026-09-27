@@ -1395,7 +1395,8 @@ impl PreparedGraphPlan {
     ///
     /// `required_bindings` is not one of them. Issue #925 made it one, to elide a builtin stage
     /// the plan did not list, and issue #958 reverted that with the builtins-less compile it
-    /// served (#959): which nodes keep an op is decided by node kind alone.
+    /// served (#959): which nodes are alias candidates is decided by node kind alone (elision also
+    /// needs the candidate's input edges to allow it).
     fn lower_from_current_fields(&self) -> Option<program::ExecutionProgram> {
         program::lower(
             &self.spec,
