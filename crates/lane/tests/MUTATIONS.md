@@ -421,3 +421,26 @@ guest legs built with `run-wasm-gates.sh`'s commands); the pin by running that s
 K-1, K-5 and K-6 are also red on gate M2 (`crates/builtins/tests/MUTATIONS.md`), and K-1 on gate M3
 (`crates/graph/tests/MUTATIONS.md`). All 358 corpus digest comparisons stay green under every row:
 the frozen digests do not run the new kernel.
+
+## Issue #978 — the skewed (software-pipelined) cascade
+
+`src/kernels.rs` adds `svf_cascade_skewed` and `svf_cascade_skewed_with_dry_masks` (one body,
+`svf_cascade_skewed_impl`). Gate 1 is `g2_skewed_cascade_equals_the_interleaved_cascade`
+(`tests/g2_kernel_identity.rs`): `f32`, `Simd4` and `Simd8`, one and two streams, depths 1 to 3,
+masked and select-free, frames 1, 2, 3, 128 and 1,024, the G2 signals plus a hostile family, 40
+carried blocks, outputs and integrators against `svf_cascade_interleaved[_with_dry_masks]` ("both
+NaN, or equal bits"), guard words, under `CanonicalFpEnv`. Driver: one mutation at a time as an
+exact-text replacement (match count one) in `src/kernels.rs`, then
+`cargo test --release -p lane --test g2_kernel_identity --no-fail-fast`, restored byte for byte.
+Host AMD EPYC 7313P, rustc 1.97.1, `x86-64-v3`.
+
+| # | mutation | gate 1 | result |
+|---|---|---|---|
+| 978-M1 | the steady state visits the sections `0..D` ascending, so section 0 overwrites the carry section 1 was about to read | `Scalar S=1 D=2 masked=false frames=2 noise: block 0, stream 0, word 8: 0xbd32fd2c != interleaved 0x3d2f6ceb` | RED |
+| 978-M2 | section `D - 1` stores to frame `i` instead of `i - (D - 1)` | the epilogue's store runs off the block (`range end index 3 out of range for slice of length 2`, `S=1 D=2 frames=2`) | RED |
+| 978-M2b | the same, clamped to the block's last frame so nothing panics | `Scalar S=1 D=2 masked=false frames=2 noise: block 0, stream 0, word 8: 0x3f7a5c00 != interleaved 0x3d2f6ceb` | RED |
+| 978-M3 | the epilogue deleted | `Scalar S=1 D=2 masked=false frames=2 noise: block 0, stream 0, word 9: 0xbf187800 != interleaved 0xbd57c751` (the last frame is never written) | RED |
+
+Each is red at its first case, the scalar two-section cascade over two frames, which is the
+shortest shape with a prologue, a steady state and an epilogue; the clamped M2b is added so the
+corruption is shown on the bit comparison as well as on the bounds check.

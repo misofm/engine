@@ -840,3 +840,243 @@ fn bits<L: Lane>(value: L) -> Vec<u32> {
     value.store(&mut words);
     words.iter().map(|sample| sample.to_bits()).collect()
 }
+
+/// Blocks of carried state in the skewed-cascade gate.
+const SKEW_BLOCKS: usize = 40;
+/// Frame counts of the skewed-cascade gate: shorter than every depth, as short as the pipeline,
+/// one quantum, and a long block.
+const SKEW_FRAMES: [usize; 5] = [1, 2, 3, 128, 1024];
+/// Guard words on either side of every block the skewed-cascade gate hands a kernel.
+const SKEW_GUARD: usize = 8;
+/// A NaN pattern no kernel writes, so an overrun cannot land on it by accident.
+const SKEW_GUARD_WORD: u32 = 0x7fa5_a5a5;
+
+/// Issue #978 gate 1: the skewed cascade is the interleaved cascade, rescheduled.
+///
+/// For every width, one and two streams, depths one to three, with and without dry masks, and
+/// frame counts from 1 (every depth falls back) through 1,024: 40 consecutive blocks with the
+/// state carried across them, over the G2 signals and a hostile family (both signed zeros,
+/// subnormals of either sign, normals across the range, a NaN payload and an infinity on single
+/// lanes late in the run). After every block the output words and every integrator word equal
+/// [`svf_cascade_interleaved`]'s (or its dry-mask twin's), compared as "both NaN, or equal bits",
+/// and the guard words either side of every block are untouched. Under the canonical FP
+/// environment.
+///
+/// Red mutations (`tests/MUTATIONS.md`, issue #978): visit the steady state's sections in
+/// ascending order; store the last section's output to frame `i` instead of `i - (D - 1)`; drop
+/// the epilogue.
+#[test]
+fn g2_skewed_cascade_equals_the_interleaved_cascade() {
+    let _canonical = CanonicalFpEnv::enter();
+    check_skew_width::<f32>("Scalar");
+    check_skew_width::<Simd4>("Simd4");
+    check_skew_width::<Simd8>("Simd8");
+}
+
+fn check_skew_width<L: Lane>(width: &str) {
+    check_skew::<L, 1, 1>(width);
+    check_skew::<L, 1, 2>(width);
+    check_skew::<L, 1, 3>(width);
+    check_skew::<L, 2, 1>(width);
+    check_skew::<L, 2, 2>(width);
+    check_skew::<L, 2, 3>(width);
+}
+
+/// One input word of the hostile family for `(block, frame, lane, stream)`.
+fn skew_hostile(block: usize, frame: usize, lane: usize, stream: usize) -> f32 {
+    if block == 30 && frame == 0 && lane == 0 && stream == 0 {
+        return f32::from_bits(0x7fc0_1234);
+    }
+    if block == 35 && frame == 1 && lane == 1 {
+        return f32::NEG_INFINITY;
+    }
+    let mut random = support::Xorshift64Star::new(
+        0x0978_0000
+            ^ ((block as u64) << 32)
+            ^ ((frame as u64) << 12)
+            ^ ((lane as u64) << 4)
+            ^ stream as u64,
+    );
+    let word = random.next_u32();
+    match word % 8 {
+        0 => 0.0,
+        1 => -0.0,
+        2 => f32::from_bits((word & 0x8000_0000) | ((word >> 3) & 0x007f_ffff) | 1),
+        _ => {
+            let exponent = 127 - 30 + (word >> 3) % 60;
+            f32::from_bits((word & 0x8000_0000) | (exponent << 23) | ((word >> 9) & 0x007f_ffff))
+        }
+    }
+}
+
+fn check_skew<L: Lane, const S: usize, const D: usize>(width: &str) {
+    use lane::kernels::{
+        SvfCoef, svf_cascade_interleaved, svf_cascade_interleaved_with_dry_masks,
+        svf_cascade_skewed, svf_cascade_skewed_with_dry_masks,
+    };
+
+    let coefficients: [[SvfCoef<L>; D]; S] = core::array::from_fn(|stream| {
+        core::array::from_fn(|section| cascade_coefficients(stream * 4 + section))
+    });
+    let masks: [[L::Mask; D]; S] = core::array::from_fn(|stream| {
+        core::array::from_fn(|section| {
+            let decisions: Vec<f32> = (0..L::WIDTH)
+                .map(|lane| f32::from(u8::from((stream * 3 + section * 5 + lane) % 3 == 0)))
+                .collect();
+            L::load(&decisions).eq(L::splat(1.0))
+        })
+    });
+    for masked in [false, true] {
+        for frames in SKEW_FRAMES {
+            for family in 0..=ALL_SIGNALS.len() {
+                let label = format!(
+                    "G2 skew {width} S={S} D={D} masked={masked} frames={frames} {}",
+                    ALL_SIGNALS
+                        .get(family)
+                        .map_or("hostile", |signal| signal.name())
+                );
+                // Per stream and lane, one run of `SKEW_BLOCKS * frames` samples.
+                let runs: Vec<Vec<Vec<f32>>> = (0..S)
+                    .map(|stream| {
+                        (0..L::WIDTH)
+                            .map(|lane| {
+                                let mut run = vec![0.0_f32; SKEW_BLOCKS * frames];
+                                match ALL_SIGNALS.get(family) {
+                                    Some(signal) => signal.fill(
+                                        &mut run,
+                                        0x5E3D_0000 + (stream * MAX_WIDTH + lane) as u64,
+                                    ),
+                                    None => {
+                                        for (index, sample) in run.iter_mut().enumerate() {
+                                            *sample = skew_hostile(
+                                                index / frames,
+                                                index % frames,
+                                                lane,
+                                                stream,
+                                            );
+                                        }
+                                    }
+                                }
+                                run
+                            })
+                            .collect()
+                    })
+                    .collect();
+                let seed = ALL_SIGNALS
+                    .get(family)
+                    .map_or(0.0, |signal| signal.state_seed());
+                let initial: [[SvfState<L>; D]; S] = core::array::from_fn(|stream| {
+                    core::array::from_fn(|section| {
+                        let mut state = cascade_state::<L>(stream * 4 + section);
+                        if seed != 0.0 {
+                            state.ic1 = L::splat(seed);
+                        }
+                        state
+                    })
+                });
+                let mut oracle_state = initial;
+                let mut skew_state = initial;
+                for block in 0..SKEW_BLOCKS {
+                    let span = frames * L::WIDTH;
+                    let fresh: [Vec<f32>; S] = core::array::from_fn(|stream| {
+                        let mut buffer =
+                            vec![f32::from_bits(SKEW_GUARD_WORD); span + 2 * SKEW_GUARD];
+                        for frame in 0..frames {
+                            for lane in 0..L::WIDTH {
+                                buffer[SKEW_GUARD + frame * L::WIDTH + lane] =
+                                    runs[stream][lane][block * frames + frame];
+                            }
+                        }
+                        buffer
+                    });
+                    let mut oracle = fresh.clone();
+                    let mut skewed = fresh;
+                    {
+                        let io = oracle
+                            .each_mut()
+                            .map(|b| &mut b[SKEW_GUARD..SKEW_GUARD + span]);
+                        if masked {
+                            svf_cascade_interleaved_with_dry_masks::<L, S, D>(
+                                io,
+                                frames,
+                                &coefficients,
+                                &mut oracle_state,
+                                &masks,
+                            );
+                        } else {
+                            svf_cascade_interleaved::<L, S, D>(
+                                io,
+                                frames,
+                                &coefficients,
+                                &mut oracle_state,
+                            );
+                        }
+                    }
+                    {
+                        let io = skewed
+                            .each_mut()
+                            .map(|b| &mut b[SKEW_GUARD..SKEW_GUARD + span]);
+                        if masked {
+                            svf_cascade_skewed_with_dry_masks::<L, S, D>(
+                                io,
+                                frames,
+                                &coefficients,
+                                &mut skew_state,
+                                &masks,
+                            );
+                        } else {
+                            svf_cascade_skewed::<L, S, D>(
+                                io,
+                                frames,
+                                &coefficients,
+                                &mut skew_state,
+                            );
+                        }
+                    }
+                    for stream in 0..S {
+                        for (index, (want, got)) in
+                            oracle[stream].iter().zip(&skewed[stream]).enumerate()
+                        {
+                            assert!(
+                                same_or_both_nan(*want, *got),
+                                "{label}: block {block}, stream {stream}, word {index}: \
+                                 {:#010x} != interleaved {:#010x}",
+                                got.to_bits(),
+                                want.to_bits()
+                            );
+                            if index < SKEW_GUARD || index >= SKEW_GUARD + span {
+                                assert_eq!(
+                                    got.to_bits(),
+                                    SKEW_GUARD_WORD,
+                                    "{label}: block {block}, stream {stream}: guard word {index}"
+                                );
+                            }
+                        }
+                        for section in 0..D {
+                            let (want, got) =
+                                (oracle_state[stream][section], skew_state[stream][section]);
+                            for (name, a, b) in [
+                                ("ic1", bits::<L>(want.ic1), bits::<L>(got.ic1)),
+                                ("ic2", bits::<L>(want.ic2), bits::<L>(got.ic2)),
+                            ] {
+                                for (lane, (a, b)) in a.iter().zip(&b).enumerate() {
+                                    assert!(
+                                        same_or_both_nan(f32::from_bits(*a), f32::from_bits(*b)),
+                                        "{label}: block {block}, stream {stream}, section \
+                                         {section}, lane {lane}: {name} {b:#010x} != {a:#010x}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// "Both NaN, or equal bits": the compiler may commute an addition in one instantiation and not
+/// the other, and on x86 two NaN operands keep the first one's payload (#944).
+fn same_or_both_nan(a: f32, b: f32) -> bool {
+    a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan())
+}

@@ -226,3 +226,31 @@ On the minima: native -0.5 us and wasm -1.6 us on the standing isolate (the brie
    integer comparisons per lane-sample"; the ruling is outside this issue's paths. It is corrected
    with #977, which is authorized to edit that section.
 3. The descriptive A/B ran under a load average of 15-16; its wasm medians straddle two modes.
+
+## Sol attempt 1 verdict: PASS
+
+Verifier: Sol, 2026-09-27, on `750fff95` and the stacked tip `04e439db`. Host EPYC 7313P, rustc
+1.97.1, every build `CARGO_INCREMENTAL=0` in a fresh target directory. Scratch copies were built from
+`git archive` into their own targets and checked against their artifacts: the AudioWorklet artifact
+of `1d8c4851` hashes to `820e96dd…` and this commit's to `e4fc2382…`, as recorded above.
+
+- **Predicate.** `nearest == 0` iff some word is `0x8000_0000` (`x ^ c == 0` iff `x == c`);
+  `largest <= 0x7149f2ca` iff every magnitude is within `BLOCK_LIMIT`, and every NaN and infinity
+  sits at or above `0x7f80_0000`; an empty block is admitted by both forms; start values stated.
+  I ran the ignored exhaustive test (`--lib every_word -- --ignored`): green in release (2 s) and
+  dev (35 s). Gate 1 is green in dev and release, and the three protected refusal tests are
+  untouched by the diff and green.
+- **Differential.** The randomized differential described under #977's verdict found 0 differing
+  runs against `1d8c4851` at this commit (35,000 runs) and at the tip. A harness mutation that drops
+  the `-0.0` witness (`largest <= CEILING` alone) moves 723 of 21,000 runs, so the witness carries
+  load and is exercised. M2 re-run in a scratch copy: red on gate 1 (`lib.rs:4837`).
+- **Artifact.** The EQ `process_bank` bodies carry `i32x4.min_u` 9 and `max_u` 12 and no
+  `i32x4.eq`/`gt_u` (base: 13 and 3). The callgraph, roster and allocation checks are identical to
+  base.
+- **Timing (descriptive).** Shipped artifact, 64 tracks, through its render export: the standing
+  one-band EQ isolate goes from 20.55 to 19.91 us, and two bands from 43.18 to 42.38 us.
+
+Findings:
+
+1. NIT `crates/parametric-eq/src/lib.rs:4859`: the ignored test's doc says "about a minute in
+   release, several in a dev build". It took 2 s and 35 s here.

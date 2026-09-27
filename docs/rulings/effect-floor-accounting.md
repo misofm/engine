@@ -209,36 +209,40 @@ still has one active general band, with the other five physical sections at the 
 stationary EQ path pins a local effective cascade depth of 2 in both its dual and mono forms; this
 is an EQ dispatch choice and does not change `Lane::SVF_CASCADE_DEPTH` for other kernels. Since
 #976 an admitted plan keeps exactly its live sections: it runs them in depth-2 passes, and an odd
-last section runs alone in a depth-1 pass, which carries no dry select when neither channel has a
-dry lane there. Per lane-sample:
+last section runs alone in a depth-1 pass. Since #977 every depth-2 pass of an admitted plan runs
+without the dry select, dry lanes included: under admission every select is a no-op (the proof is
+on `cascade_sections`), so no mask is built and none is applied. The depth-1 tail keeps #976's
+rule, select-free unless a lane of either channel is dry there; that is a code-generation choice
+for the shipped browser build (see `interleave`), not an arithmetic one. Only a refused or all-live
+plan runs masked pairs. Per lane-sample:
 
 | item | lane-ops |
 |---|---:|
 | `svf_step`: `sub` 1, two unfused `fma` with their multiplies 6, two `add` 2, two state lines with `flush` 10 | 19 |
 | output mix `m2.fma(v2, m1.fma(v1, m0.mul(x)))` | 5 |
-| **one section, select-free** (a depth-1 tail with no dry lane) | **24** |
-| `Lane::select(dry, x, wet)` output selection (every depth-2 pass; a depth-1 tail with a dry lane) | 1 |
+| **one section, select-free** (every pair of an admitted plan; a depth-1 tail with no dry lane) | **24** |
+| `Lane::select(dry, x, wet)` output selection (every pair of a refused or all-live plan; a depth-1 tail with a dry lane) | 1 |
 | **one section, masked** | **25** |
 | the standing fixture: its one live section, as a select-free depth-1 tail | 24 |
 | 4.4 boundary scan | 3 |
 | **total, standing fixture** | **27** |
 
-The block-data elision gate (`block_admits_elision`) adds five integer comparisons per lane-sample
-and is not counted as arithmetic: it is a guard on the optimisation, contends for the integer
+The block-data elision gate (`block_admits_elision`) adds four integer operations per lane-sample
+(since #980 an `xor`, an unsigned `min`, an `and` and an unsigned `max` per input word) and is not
+counted as arithmetic: it is a guard on the optimisation, contends for the integer
 pipes rather than the FP ones, and would disappear with the optimisation.
 
 **The section count here is workload-dependent in a way the builtins' is not**, and the floor is
 stated per kept section. For an **admitted stationary elision plan**, the `active` nonidentity
 physical sections are exactly the kept ones (#976: no identity section is kept as padding), run as
-`floor(active / 2)` masked depth-2 passes and, when `active` is odd, one depth-1 tail:
+`floor(active / 2)` select-free depth-2 passes (#977) and, when `active` is odd, one depth-1 tail:
 
-`floor_lane_ops(active) = 25 * 2 * floor(active / 2) + 24 * (active mod 2) + 3`, for `active` in
-`0..=5`, where the tail's 24 becomes 25 when either channel has a dry lane in that section (a
-dedicated cut that is off on some lanes).
+`floor_lane_ops(active) = 24 * active + 3`, for `active` in `0..=5`, plus 1 when the tail has a
+dry lane in either channel (a dedicated cut that is the last live section and off on some lanes).
 
 A **refused** block (a `-0.0`, a non-finite word or a word above the bound in either input plane, a
-non-`+0.0` state in a dead section, a `-0.0` state in a live one), and every block with all six
-sections live, runs all six in three masked depth-2 passes: **153**.
+non-`+0.0` state in a dead section, a `-0.0` or non-finite state in a live one), and every block
+with all six sections live, runs all six in three masked depth-2 passes: **153**.
 
 This is a source operation count for the stationary cascade, not a timing measurement. Mask
 construction from coefficient words and remaining counters is a bounded block/segment control cost
@@ -250,16 +254,16 @@ inventory must follow that implementation.
 |---:|---:|---|---:|
 | 0 | 0 | none | 3 |
 | 1 | 1 | one depth-1 tail | 27 (28 with a dry lane) |
-| 2 | 2 | one pair | 53 |
-| 3 | 3 | one pair, one tail | 77 (78) |
-| 4 | 4 | two pairs | 103 |
-| 5 | 5 | two pairs, one tail | 127 (128) |
-| 6, or refused | 6 | three pairs | 153 |
+| 2 | 2 | one pair | 51 |
+| 3 | 3 | one pair, one tail | 75 (76) |
+| 4 | 4 | two pairs | 99 |
+| 5 | 5 | two pairs, one tail | 123 (124) |
+| 6, or refused | 6 | three masked pairs | 153 |
 
 `active` counts physical sections whose current coefficient words are nonidentity for any required
 bank lane/channel; it is not a user-enabled-control count. Mono counts the selected channel. At
-the standing fixture's one active general band, `kept = 1`, the tail is select-free (a general band
-is never dry), and the floor is 27. A full six-section pass is 153. `tools/bench/src/floor.rs` and
+the standing fixture's one active general band, `kept = 1`, the tail is select-free, and the floor
+is 27. A full six-section pass is 153. `tools/bench/src/floor.rs` and
 `scripts/console-benchmark-record-lib.jq` are pinned at 27 for the standing workload; these values
 move with the source inventory and do not claim a new timing result.
 
