@@ -256,7 +256,9 @@ divergence everywhere**.
 - No rendered seed was silent, except one in the wasm render-everything sweep (`20000..21000`); that
   mode does not assert audibility.
 - The "every seed rendered" rows cover the plans that bind today (`PROBE_966_RENDER_ALL=1`),
-  including the verifier's pre-#970 divergence range `20000..20300`.
+  including the verifier's pre-#970 divergence range `20000..20300`. **Corrected in attempt 2:**
+  with attempt 1's generator this range could not see a #970 revert (Sol, finding 1). Attempt 2's
+  generator does: 22 armed lines over 16 seeds, including 20194.
 - Committed probe runtime: 15-16 s wall and about 95 s CPU in debug on this 32-core host. It uses
   up to 8 worker threads; on a 4-core CI runner I estimate 25-30 s (not measured). The whole
   `bank_levels` binary finishes in the same time.
@@ -317,8 +319,11 @@ test) and the temporary `Cargo.toml`/`Cargo.lock` edit were removed before these
 
 1. **Generator.** An all-mono desk (`mono == 1000`) now draws its strip from
    `console-sixty-four-track-mono.json`, which is symmetric.
-   - With the intended fixture's asymmetric strip, the armed collapse fired on 0 of 29 rendered
-     seeds, so an armed leg compared nothing.
+   - ~~With the intended fixture's asymmetric strip, the armed collapse fired on 0 of 29 rendered
+     seeds, so an armed leg compared nothing.~~ **Wrong; corrected in attempt 2.** The collapse did
+     not fire there because the arming correctly declined every chain that does not gather the
+     track input (#970). That decline is exactly what the armed leg must check, and only that strip
+     can see it fail. Attempt 2 keeps both strips.
    - Parsing draws nothing from the RNG, so every other draw is unchanged. A symmetric strip can
      still pool its tracks differently, and the prototype's counts moved: misaligned seeds are 30
      and 16 (were 29 and 15), and M1 refuses 29 lines over 23 seeds (was 28 over 22).
@@ -512,3 +517,117 @@ reproduced from the repository. Both are cheap to correct, and `banks.rs` does n
   - finding 2: the wasm harness patch, or the named successor.
 - Re-pin the probe's misaligned counts, and re-run M1-M10 and M970.
 - Findings 3-5 are optional.
+
+## Attempt 2 evidence
+
+Implementer: attempt 2, on the same branch, at `008d0ef3` (test and evidence changes) on top of
+Sol's attempt-1 verdict `cd316992`. Same host and settings as attempt 1. **`banks.rs` is
+unchanged** from `2c6562d3`, and so is every other production file. Nothing was timed.
+
+### Finding 1: the armed leg sees #970 again
+
+- **Generator.** An all-mono desk takes the symmetric mono fixture on an odd seed, and keeps the
+  intended fixture's asymmetric strip on an even one; every other desk is unchanged.
+  - Parity draws nothing from the RNG, so every other field matches the prototype generator.
+  - On the symmetric strip the armed collapse fires, so a wrong collapse moves a bit (M9).
+  - On the asymmetric strip the arming must decline every chain that does not gather the track
+    input. That is the only shape that sees a revert of #970's check (M970).
+  - The "collapse fired" assertion stays.
+- **Corrected prose.**
+  - Attempt 1's deviation 1 and its `20000..20300` bullet are corrected in place, above.
+  - The doc comments on `MONO` and on the probe say the same.
+- **M970**: `Runtime::arm_mono_collapse` without `identity.banking.gathers_track_input()`.
+  - Committed probe (`0..64`): **RED**, 5 armed lines over seeds 12, 48, 50 and 54. The other 8
+    tests stay green.
+  - Manual sweep `20000..20300`, every seed rendered: **RED**, 22 armed lines over 16 seeds,
+    including 20194.
+  - Wasm `Simd4`, `0..1000`: **RED**, 24 armed renders moved.
+  - Unmutated, all three are green.
+
+### Finding 2: the `Simd4` pins are reproducible from the repository
+
+I chose the patch. A real `tools/wasm-gates` case would need a new guest crate and workspace member,
+which is new infrastructure: `wasm-gate-guest` runs a kernel corpus, not sessions.
+
+- `docs/handoffs/bug-966-2026-09-27/wasm-pins-harness.patch` holds:
+  - the guest `tools/wasm-pins-966-guest`, which `#[path]`-includes the committed `bank_levels.rs`;
+  - the host test `tools/wasm-gates/tests/wasm_pins_966.rs`;
+  - the workspace-member line.
+- `docs/handoffs/bug-966-2026-09-27/README.md` gives the apply, build and run commands.
+- The host test **asserts** the 8 `Simd4` pins: effect banks, misaligned slots, no refusal, no
+  cross-level bank, and `Scalar` bits unarmed and armed over 16 blocks. It no longer only prints
+  them.
+- **Checked from the commit.** In a fresh detached worktree at `008d0ef3`, the patch applied
+  cleanly and the README's two commands passed. The guest reports 4 lanes, all 8 pins hold, and the
+  probe over `0..64` is clean. The worktree was then removed.
+
+| reproducer | `Simd4` banks, fix | `Simd4` banks, base (M1) | misaligned `Simd4` |
+|---|---|---|---|
+| console less `ch00`'s EQ | 45 | 46, refused | 1 |
+| console less `ch60`'s EQ | 45 | 46, refused | 1 |
+| console less `ch63`'s EQ | 45 | 46, refused | 1 |
+| mono console less `ch00`'s EQ (collapse fired: 256 blocks, 16 cohorts) | 45 | 46, refused | 1 |
+| seed-412 shape | 6 | 7, refused | 1 |
+| reduced #970 console | 1 | 2, refused | 1 |
+| console less nine EQs | 43 | 44, refused | 1 |
+| realignment guard | 18 | 20, refused | 2 |
+
+Under M1 the harness fails on all 8 pins, and its probe (`0..1000`) refuses 324 seeds.
+
+### Finding 3: the reduced reproducer is test data
+
+`git mv` moved it to `crates/graph-compiler/tests/data/reduced-nobus-from-970-verify.json`. The
+bytes are unchanged, `bank_levels.rs` reads it with `include_str!("data/...")`, and the handoff
+README points to it. Findings 4 and 5 are in `banks.rs`, which this attempt must not change, so
+they are left as they are.
+
+### Probe, re-pinned
+
+| run | seeds | misaligned `[Scalar, Simd4, Simd8]` | rendered | moved, unarmed / armed | collapse fired | bind refused |
+|---|---|---|---|---|---|---|
+| native, committed | `0..64` | `[0, 29, 15]` | 29 | 0 / 0 | 6 seeds | 0 |
+| native, manual | `0..1000` | `[0, 335, 196]` | 336 | 0 / 0 | 34 | 0 |
+| native, every seed rendered | `20000..20300` | `[0, 116, 64]` | 300 | 0 / 0 | 33 | 0 |
+| wasm `Simd4` | `0..1000` | 335 at `Simd4` | 335 | 0 / 0 | 34 | 0 |
+
+The committed probe's counts, 29 and 15, match the prototype generator's again.
+
+### Mutations (`crates/graph-compiler/tests/MUTATIONS.md`, re-run on this test file)
+
+| # | mutation | result |
+|---|---|---|
+| M1 | delete the check | RED 9 of 9; the probe refuses 28 lines over 22 seeds (15 `Simd4`, 13 `Simd8`) |
+| M2 | over-strict (`rank == slot`) | RED 2 of 9, the two over-reach guards (19 ≠ 20, 8 ≠ 9) |
+| M3 | first versus last member only | RED 3 of 9: middle-lane gate 1, seed-412 shape, probe (11 lines over 10 seeds) |
+| M7 | `continue` becomes `break` | RED 1 of 9, the realignment guard (8 ≠ 9) |
+| M8 | skip lane 1 | RED 1 of 9, the probe (seeds 31, 58) |
+| M9 | the test source feeds a mono-mapped track two different sides | RED 2 of 9, armed legs only: the mono desk, and the probe (11 lines over 6 seeds) |
+| M10 | compare only lanes that ran every earlier slot | RED 9 of 9. This is my formulation: Sol reported 4 of 9 for M10, and Sol's code is not recorded |
+| M970 | revert #970's arming check | RED 1 of 9: the probe (seeds 12, 48, 50, 54) |
+
+### Gates
+
+Run on the attempt-2 tree with `CARGO_INCREMENTAL=0` and the worktree's own `target/`:
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | PASS |
+| `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | PASS |
+| `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps` | PASS |
+| `cargo test --locked -p graph` | 110 passed |
+| `cargo test --locked -p graph --features test-support` | 117 passed |
+| `cargo test --locked -p graph-compiler` | 110 passed (`bank_levels` 9) |
+| `cargo test --locked -p rack-compiler` | 13 passed |
+| `cargo test --locked -p builtins-compiler --features test-support` | 79 passed |
+| `cargo test --locked -p host-core --all-features` | 234 passed, 2 ignored (pre-existing) |
+| `cargo test --locked -p capi` | 36 passed |
+| `cargo test --locked -p console-workload` | 39 passed, 2 ignored (pre-existing) |
+| `cargo test --locked -p wasm-gates` | 9 passed |
+| graph, rack and realtime policy scripts | PASS; PASS; ok (57 regions) |
+| `scripts/check-graph-determinism.sh` | PASS (100/100) |
+| `graph_fixture --check` | PASS |
+| console class A (the harness's `zz_probe_966.rs`, release) | 99/99 rows identical, SHA-256 `754f4ed8…` as on the base |
+
+After the runs, the scratch console probe, the applied harness, the `Cargo.toml` and `Cargo.lock`
+edits, and the scratch worktree were all removed. Nothing from them is committed except the patch
+file.
