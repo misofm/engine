@@ -8,9 +8,11 @@
 //!
 //! `cargo run --locked --release -p console-workload --example mixing_automation_controls`
 
-use console_workload::SessionRuntime;
 use console_workload::mixing_automation::{
     self, CONTROLS, MixingAutomation, PREFLIGHT_BLOCKS, PREROLL_BLOCKS, SMOOTHING_SAMPLES,
+};
+use console_workload::{
+    QUANTUM, SessionRuntime, TONE_AMPLITUDE, TONE_RADIANS_PER_FRAME, TONE_TRACK_PHASE_RADIANS,
 };
 
 fn main() {
@@ -48,8 +50,22 @@ fn main() {
             )
         })
         .collect();
+    // The native row's input (`console_workload::source_block`): per track, one frozen block of
+    // the tone, phase-offset by track and repeated every block. The browser arm streams the same
+    // tone continuously instead and states both in its record (issue #1011).
+    let native_input_feed = format!(
+        concat!(
+            "{{\"waveform\":\"sine\",\"radians_per_frame\":{radians},\"amplitude\":{amplitude},",
+            "\"track_phase_radians\":{phase},\"delivery\":\"frozen_block_per_track\",",
+            "\"block_frames\":{block},\"continuous_across_blocks\":false}}"
+        ),
+        radians = TONE_RADIANS_PER_FRAME,
+        amplitude = TONE_AMPLITUDE,
+        phase = TONE_TRACK_PHASE_RADIANS,
+        block = QUANTUM,
+    );
     println!(
-        "{{\"workload_kind\":\"{kind}\",\"fixture_id\":\"{fixture}\",\"preroll_blocks\":{preroll},\"preflight_blocks\":{preflight},\"smoothing_samples\":{smoothing},\"controls\":[{controls}]}}",
+        "{{\"workload_kind\":\"{kind}\",\"fixture_id\":\"{fixture}\",\"preroll_blocks\":{preroll},\"preflight_blocks\":{preflight},\"smoothing_samples\":{smoothing},\"native_input_feed\":{native_input_feed},\"controls\":[{controls}]}}",
         kind = mixing_automation::WORKLOAD.kind(),
         fixture = mixing_automation::WORKLOAD.fixture_id(),
         preroll = PREROLL_BLOCKS,

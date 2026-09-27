@@ -9,7 +9,9 @@
 # driver-fed source feed nor the metered row's web meters and fused fader and matrix changes a
 # rendered bit, the meters pair's equal fold and redirect counters, the metered row's pinned
 # meter group, and the mixing-automation row's pinned controls, host lowerings, collapse counters
-# and per-effect bit movement -- are properties the suite can actually lose.
+# and per-effect bit movement -- are properties the suite can actually lose. The same holds for the
+# mixing-automation row's browser arm (`web-mixing-automation-validator.jq`, #1011): its input
+# feed, its provenance, and its two measured rounds' agreement.
 set -euo pipefail
 [[ "$#" -le 1 ]] || { printf 'usage: %s\n' "$0" >&2; exit 2; }
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -1015,6 +1017,37 @@ mixing_mutation '.preflight_blocks = 64' 'a preflight that compared no block aft
 mixing_mutation '.quiet_p99_ns = 1' 'mixing percentiles out of order'
 mixing_mutation '.render_errors = 1' 'a mixing row that produced render errors'
 mixing_mutation '.render_total_forbidden_operations = 1' 'a mixing row that allocated on the render path'
+# #1011: one mutation per rule that no mutation above isolates. Each changes the field its rule
+# guards and keeps every other rule satisfied, so each one is refused by that rule alone and the
+# rule cannot be deleted with the suite staying green. The mutations above that touch these
+# fields are refused first by a neighbouring rule: a preflight quiet arm that lost a cohort-block
+# by A6's equality, a preflight of 64 blocks by the quiet-counter rule.
+mixing_mutation '.preflight_blocks = 64 | .preflight_bank_collapse_counters.quiet = [512, 8] | .preflight_bank_collapse_counters.restated_eq_only = [512, 8]' \
+    'a preflight that compared no block after its pre-roll, its counters made consistent'
+mixing_mutation '.preflight_bank_collapse_counters.quiet = [1016, 8] | .preflight_bank_collapse_counters.restated_eq_only = [1016, 8]' \
+    'a preflight quiet arm that lost a cohort-block, the EQ-only arm losing it too'
+mixing_mutation '.preroll_blocks = 32 | .quiet_bank_collapse_counters = [8256, 8] | .preflight_blocks = 96 | .preflight_bank_collapse_counters.quiet = [768, 8] | .preflight_bank_collapse_counters.restated_eq_only = [768, 8]' \
+    'a shorter pre-roll than the row freezes, every count made consistent'
+mixing_mutation '.owner_edits_per_block = 4 | .restated_pushes_accepted = 14000 | .automated_pushes_accepted = 14000' \
+    'an owner edit per block the controls do not make, the push counts made consistent'
+mixing_mutation '.parameter_records_per_block = 11 | .restated_pushes_accepted = 14000 | .automated_pushes_accepted = 14000' \
+    'a parameter record per block the controls do not make, the push counts made consistent'
+mixing_mutation '.automated_controls |= (to_entries | map({key: (.key | tostring), value}) | from_entries)' \
+    'the controls as an object in control order'
+mixing_mutation '.automated_controls[0] |= (.even_value = "b" | .base = "a")' \
+    'a base and a ride value that are not numbers, in jq'"'"'s order'
+mixing_mutation '.quiet_p50_ns = 0' 'a zero-cost quiet arm'
+mixing_mutation '.restated_p99_ns = 1' 'restated percentiles out of order'
+mixing_mutation '.automated_p99_ns = 1' 'automated percentiles out of order'
+mixing_mutation '.restated_bank_collapse_counters = [3192, 8, 0]' 'a collapse counter that is not a pair'
+mixing_mutation '.automated_bank_collapse_counters = [9000, 8]' 'an automated arm collapsing more than quiet'
+mixing_mutation '.preflight_output_sha256.extra = "'"$digest_a"'"' 'a preflight arm the row does not run'
+mixing_mutation '.preflight_output_sha256.automated_eq_only = "not-a-digest"' 'a preflight digest that is not a digest'
+mixing_mutation '.preflight_output_sha256.automated = .preflight_output_sha256.restated' \
+    'a preflight automated arm that rendered the restated bits'
+mixing_mutation '.preflight_bank_collapse_counters.extra = [1024, 8]' 'preflight counters for an arm the row does not run'
+mixing_mutation '.preflight_bank_collapse_counters.automated_eq_only = [1024, 8, 0]' \
+    'a preflight collapse counter that is not a pair'
 # The future the row exists to measure: with the collapse kept through restating records, the
 # restated arm collapses what quiet does and the collapse delta is noise. Still a valid record.
 expect_accept "$(printf '%s' "$mixing" | jq -c '.restated_bank_collapse_counters = [8512, 8] | .automated_bank_collapse_counters = [8512, 8] | .paired_collapse_delta_median_ns = -40 | .restated_p50_ns = 69700')" \
@@ -1147,8 +1180,13 @@ expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record != "console_mixing_automation")] | .[]')" 'a set with no mixing-automation row'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[49].quiet_output_sha256 = $c | .[49].restated_output_sha256 = $c | .[]')" 'a mixing row whose rounds rendered different output'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[49].automated_output_sha256 = $c | .[]')" 'a mixing row whose rounds rode different traffic'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[49].preflight_output_sha256.automated_limiter_only = $c | .[]')" 'a mixing preflight whose rounds disagree'
+# #1011: a fresh digest. `$digest_c` is the base record's preflight `restated` digest, so that
+# edit is refused by the per-record A3 rule before the rounds are compared.
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg a "$digest_a" '.[49].preflight_output_sha256.automated_limiter_only = ($a[0:63] + "4") | .[]')" 'a mixing preflight whose rounds disagree'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[49].preflight_bank_collapse_counters.automated_compressor_only = [512, 8] | .[]')" 'a mixing preflight whose rounds collapsed differently'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[49].restated_bank_collapse_counters = [2128, 8] | .[]')" 'a mixing row whose rounds collapsed differently'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[49].automated_bank_collapse_counters = [2128, 8] | .[]')" 'a mixing automated arm whose rounds collapsed differently'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[49].quiet_bank_collapse_counters = [17024, 16] | .[49].restated_bank_collapse_counters = [6384, 16] | .[49].automated_bank_collapse_counters = [6384, 16] | .[]')" 'a mixing row whose rounds formed different cohorts'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[48].collapse_eligible_output_sha256 = $c | .[48].collapse_forced_off_output_sha256 = $c | .[]')" 'a mono pair whose rounds rendered different output'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '(.[] | select(.workload_kind == "sixty_four_track_gain_pan_ring")) |= (.workload_kind = "sixty_four_track_plumbing_ring" | .strip_content = "plumbing" | .strip_layout = "plumbing") | .[]')" 'a set carrying the retired plumbing ring row in place of the gain-and-pan ring row'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_gain_pan_only")] | .[]')" 'a set missing the gain-and-pan row'
@@ -1225,6 +1263,162 @@ expect_aggregate_reject "$(printf '%s' "$floor_records" | jq -c -L "$scripts_dir
 # second clock so that every per-record rule still passes and only the aggregate rule bites.
 expect_aggregate_reject "$(printf '%s' "$floor_records" | jq -c -L "$scripts_dir" --arg s "$core_clock_source" "$add_floor"'[.[] | if .workload_kind == "sixty_four_track_idle" then with_floor(4100000000; $s) else . end] | .[]')" 'a run measured under two core clocks'
 expect_aggregate_reject "$(printf '%s' "$floor_records" | jq -c '[.[] | if .record == "console_session" then .core_clock_source = (.core_clock_source + .workload_kind) else . end] | .[]')" 'a run whose rows disagree about where their clock came from'
+
+# ---------------------------------------------------------------------------------------------
+# #1011: the browser arm of the mixing-automation row (`scripts/web-mixing-automation-validator.jq`).
+# Two measured rounds of one prepared module, slurped. The base pair states what the runner writes:
+# the row's controls in the host's lowerings, the arm's streamed input beside the native row's
+# frozen blocks, the provenance, and digests that agree across the rounds.
+# ---------------------------------------------------------------------------------------------
+web_valid() { printf '%s\n' "$1" | jq -s -e -L "$scripts_dir" -f "$scripts_dir/web-mixing-automation-validator.jq" >/dev/null 2>&1; }
+expect_web_accept() {
+    if ! web_valid "$1"; then printf 'expected web accept: %s\n' "$2" >&2; failures=$((failures + 1)); fi
+}
+expect_web_reject() {
+    if web_valid "$1"; then printf 'expected web reject: %s\n' "$2" >&2; failures=$((failures + 1)); fi
+}
+commit_a=$(printf '1%.0s' {1..40})
+commit_b=$(printf '2%.0s' {1..40})
+web_round=$(jq -cn --arg a "$digest_a" --arg b "$digest_b" --arg c "$digest_c" --arg commit "$commit_a" \
+    "$mixing_controls"' as $controls | {
+  schema_version: 1, issue: 1003, record: "web_mixing_automation", round: 1,
+  workload_kind: "sixty_four_track_console_mono_mixing_automation",
+  fixture_id: "fixtures/session/v1/console-sixty-four-track-mono.json", source_frames: "48000000",
+  tracks: 64, input_signal: "tone",
+  input_feed: {waveform: "sine", radians_per_frame: 0.017, amplitude: 0.6, track_phase_radians: 0,
+    delivery: "streamed_source", block_frames: 128, continuous_across_blocks: true},
+  native_input_feed: {waveform: "sine", radians_per_frame: 0.017, amplitude: 0.6,
+    track_phase_radians: 0.31, delivery: "frozen_block_per_track", block_frames: 128,
+    continuous_across_blocks: false},
+  sample_rate_hz: 48000, quantum_frames: 128,
+  module_sha256: $b, module_matches_pin: false, pinned_sha256: $c,
+  node_version: "v22.23.2", v8_version: "12.4.254.21-node.56", node_flags: ["--no-liftoff"],
+  console_command_queue_records: 64, source_ring_frames: 5120,
+  observations: 1000, preroll_blocks: 64, pairing: "alternating_per_observation",
+  arms: ["quiet","restated","automated"],
+  controls: [$controls[] | . + {parameter_id: (if .effect == "miso.parametric-eq" then 4 else 1 end)}],
+  command_records_per_block: 8, records_admitted: {quiet: 0, restated: 8000, automated: 8000},
+  units: "ns_per_block", percentile_method: "nearest_rank",
+  quiet_p50_ns: 154304, quiet_p95_ns: 225630, quiet_p99_ns: 233174,
+  restated_p50_ns: 189220, restated_p95_ns: 277649, restated_p99_ns: 285344,
+  automated_p50_ns: 216622, automated_p95_ns: 318577, automated_p99_ns: 325940,
+  paired_ramp_delta_median_ns: 27603, paired_collapse_delta_median_ns: 34897,
+  quiet_output_sha256: $a, restated_output_sha256: $a, automated_output_sha256: $b,
+  preflight_output_sha256: {quiet: $c, restated: $c, automated: $b, automated_eq_only: ($a[0:63] + "1"),
+    automated_compressor_only: ($a[0:63] + "2"), automated_limiter_only: ($a[0:63] + "3"),
+    restated_eq_only: $c},
+  bit_identity: "quiet == restated, asserted in-run", bank_collapse_counters_exported: false,
+  loadavg_start: "9.52 7.22 7.64 8/1930 3836898", loadavg_end: "9.48 7.25 7.65 6/1921 3837039",
+  descriptive_only: true,
+  statistical_method: "three arms alternated per observation; one warmup launch and two measured launches; descriptive only; no threshold",
+  candidate_commit: $commit, prepared_commit: $commit,
+  measurement_control: "uncontrolled; MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1; waived loadavg_above_ceiling; loadavg 9.52 7.22 7.64 21/1947 3836866; affinity cpu 31",
+  cpu_affinity: "31"
+}')
+web_pair=$(printf '%s' "$web_round" | jq -c '., (.round = 2 | .quiet_p50_ns = 150000 | .paired_ramp_delta_median_ns = 27011)')
+# One edit applied to both rounds, so the rounds still agree and only a per-record rule can refuse it.
+web_mutation() { expect_web_reject "$(printf '%s\n' "$web_pair" | jq -c -s "map($1) | .[]")" "$2"; }
+# One edit applied to round two only, which only the cross-round rule can refuse.
+web_round_mutation() { expect_web_reject "$(printf '%s\n' "$web_pair" | jq -c -s ".[1] |= ($1) | .[]")" "$2"; }
+
+expect_web_accept "$web_pair" 'the two measured browser rounds'
+while read -r field; do
+    web_mutation "del(.\"$field\")" "a browser round without $field"
+    web_mutation ".\"$field\" = null" "a browser round with $field nulled"
+done < <(printf '%s' "$web_round" | jq -r 'keys[]')
+web_mutation '.unexpected_key = 1' 'a browser round with an extra key'
+web_mutation '.round = 0' 'the warmup launch published as a measured round'
+web_mutation '.quantum_frames = 256 | .input_feed.block_frames = 256 | .native_input_feed.block_frames = 256' \
+    'a browser round in another quantum, its feeds made consistent'
+web_mutation '.observations = 500 | .records_admitted.restated = 4000 | .records_admitted.automated = 4000' \
+    'a shortened browser round, its admitted records made consistent'
+web_mutation '.command_records_per_block = 13 | .records_admitted.restated = 13000 | .records_admitted.automated = 13000' \
+    'the native push count on the web wire, its admitted records made consistent'
+web_mutation '.source_ring_frames = 0' 'a browser round with no source ring'
+web_mutation '.input_feed.waveform = "square"' 'a streamed input that is not a sine'
+web_mutation '.native_input_feed.waveform = "square"' 'a native input that is not a sine'
+web_mutation '.native_input_feed.block_frames = 256' 'a native feed in another quantum'
+web_mutation '.quiet_p99_ns = 1' 'browser quiet percentiles out of order'
+web_mutation '.restated_p99_ns = 1' 'browser restated percentiles out of order'
+web_mutation '.quiet_output_sha256 = "x" | .restated_output_sha256 = "x"' 'browser digests that are not digests'
+web_mutation '.preflight_output_sha256.automated_eq_only = "not-a-digest"' 'a browser preflight digest that is not a digest'
+web_mutation '.candidate_commit = "HEAD" | .prepared_commit = "HEAD"' 'a run and a prepare naming no commit'
+web_mutation '.record = "console_mixing_automation"' 'a browser round claiming the native shape'
+web_mutation '.fixture_id = "fixtures/session/v1/console-sixty-four-track-intended.json"' \
+    'a browser round on the stereo console'
+# The input: the claim #1011 added, and what separates the two feeds.
+web_mutation '.input_feed.continuous_across_blocks = false' 'a streamed tone claiming frozen blocks'
+web_mutation '.input_feed.delivery = "frozen_block_per_track"' 'the browser arm claiming the native feed'
+web_mutation '.input_feed.track_phase_radians = 0.31' 'a browser tone phase-offset by track'
+web_mutation '.native_input_feed.continuous_across_blocks = true' 'the native feed claiming a continuous tone'
+web_mutation '.native_input_feed.track_phase_radians = 0' 'the native feed claiming tracks in phase'
+web_mutation '.native_input_feed.delivery = "streamed_source"' 'the native feed claiming a streamed source'
+web_mutation '.input_feed.radians_per_frame = 0.02' 'a browser tone at another rate than the native'"'"'s'
+web_mutation '.input_feed.amplitude = 0.3' 'a browser tone at another level than the native'"'"'s'
+web_mutation '.input_feed.block_frames = 256' 'a browser feed in another quantum'
+web_mutation '.input_feed.extra = 1' 'a feed with a fact the validator does not know'
+web_mutation '.input_signal = "silence"' 'a browser round claiming silence'
+# The module and the protocol.
+web_mutation '.module_matches_pin = true' 'a module claiming the pin it does not match'
+web_mutation '.node_flags = []' 'a browser round with Liftoff enabled'
+web_mutation '.console_command_queue_records = 8' 'a queue the SDK does not boot'
+web_mutation '.source_ring_frames = 100' 'a source ring that is not whole quanta'
+web_mutation '.prepared_commit = "'"$commit_b"'"' 'a module prepared at another commit than the run'"'"'s'
+web_mutation '.candidate_commit = "HEAD"' 'a commit that is not a commit id'
+web_mutation '.measurement_control = "uncontrolled"' 'an uncontrolled round that does not name its waiver'
+web_mutation '.cpu_affinity = "any"' 'a round pinned to no CPU'
+web_mutation '.bank_collapse_counters_exported = true' 'a browser round claiming collapse counters it cannot read'
+# The row, as the native pin states it.
+web_mutation '.controls[0].lowering = "left_then_right"' 'an EQ pushed as two one-channel edits'
+web_mutation '.controls[2].step = 0.25' 'a limiter step that never engages'
+web_mutation '.controls[5].even_value = -1.75' 'a ride whose even value is the base'
+web_mutation '.controls[6].odd_value = -4.25' 'a ride that does not straddle its base'
+web_mutation '.controls[1].parameter_id = 0' 'a control with no wire parameter id'
+web_mutation '.command_records_per_block = 13' 'the native push count on the web wire'
+web_mutation '.records_admitted.restated = 7999' 'a restated record the host did not admit'
+web_mutation '.records_admitted.quiet = 8' 'a quiet arm that submitted'
+web_mutation '.quiet_p50_ns = 0' 'a zero-cost browser arm'
+web_mutation '.automated_p99_ns = 1' 'browser percentiles out of order'
+web_mutation '.paired_ramp_delta_median_ns = 0.5' 'a fractional paired delta'
+web_mutation '.restated_output_sha256 = "'"$digest_c"'"' 'restating the held values moved a bit in V8'
+web_mutation '.automated_output_sha256 = .restated_output_sha256' 'an automated arm that rendered the restated bits'
+web_mutation '.bit_identity = "asserted"' 'a browser bit-identity sentence that drifted'
+web_mutation '.preflight_output_sha256.automated_limiter_only = .preflight_output_sha256.restated' \
+    'a browser limiter ride that moved no bit'
+web_mutation '.preflight_output_sha256.automated_eq_only = .preflight_output_sha256.restated' \
+    'a browser EQ ride that moved no bit'
+web_mutation '.preflight_output_sha256.automated_compressor_only = .preflight_output_sha256.restated' \
+    'a browser compressor ride that moved no bit'
+web_mutation '.preflight_output_sha256.automated = .preflight_output_sha256.restated' \
+    'a browser preflight automated arm that rendered the restated bits'
+web_mutation '.preflight_output_sha256.restated_eq_only = "'"$digest_a"'"' 'a browser EQ restatement that moved a bit'
+web_mutation '.preflight_output_sha256.quiet = "'"$digest_a"'"' 'a browser preflight restatement that moved a bit'
+web_mutation '.preflight_output_sha256.extra = "'"$digest_a"'"' 'a browser preflight arm the row does not run'
+# The protocol across the rounds: two of them, measured, of one module at one commit, rendering the
+# same bits. Each edit below leaves both records valid on their own.
+expect_web_reject "$(printf '%s\n' "$web_pair" | jq -c -s '.[0] | .')" 'one measured browser round'
+expect_web_reject "$(printf '%s\n' "$web_pair" | jq -c -s '.[0].round = 0 | .[]')" 'a warmup record beside a measured round'
+expect_web_reject "$(printf '%s\n' "$web_pair" | jq -c -s '.[1].round = 1 | .[]')" 'two browser records of round one'
+expect_web_reject "$(printf '%s\n' "$web_pair" | jq -c -s '. + [.[1]] | .[]')" 'three browser rounds'
+web_round_mutation '.quiet_output_sha256 = "'"$digest_c"'" | .restated_output_sha256 = "'"$digest_c"'"' \
+    'browser rounds that rendered different bits'
+web_round_mutation '.automated_output_sha256 = "'"$digest_c"'"' 'browser rounds that rode different traffic'
+web_round_mutation '.preflight_output_sha256.automated_limiter_only = "'"${digest_a:0:63}4"'"' \
+    'browser rounds whose preflights disagree'
+web_round_mutation '.module_sha256 = "'"$digest_a"'"' 'browser rounds of two modules'
+web_round_mutation '.candidate_commit = "'"$commit_b"'" | .prepared_commit = "'"$commit_b"'"' \
+    'browser rounds at two commits'
+web_round_mutation '.controls[0].base = -7.25 | .controls[0].even_value = -7.0' 'browser rounds with two control tables'
+web_round_mutation '.input_feed.amplitude = 0.5 | .native_input_feed.amplitude = 0.5' 'browser rounds on two tones'
+web_round_mutation '.native_input_feed.track_phase_radians = 0.5' 'browser rounds stating two native feeds'
+web_round_mutation '.node_version = "v24.0.0"' 'browser rounds under two Node versions'
+web_round_mutation '.v8_version = "13.0"' 'browser rounds under two V8 versions'
+web_round_mutation '.node_flags = ["--no-liftoff","--jitless"]' 'browser rounds under two flag sets'
+web_round_mutation '.source_frames = "96000000"' 'browser rounds on two documents'
+web_round_mutation '.source_ring_frames = 6144' 'browser rounds with two source rings'
+web_round_mutation '.measurement_control = "controlled; loadavg 0.01; ceiling 0.50; affinity cpu 31"' \
+    'browser rounds under two admissibility states'
+web_round_mutation '.cpu_affinity = "30"' 'browser rounds on two CPUs'
 
 if [[ "$failures" != 0 ]]; then
     printf 'console benchmark validator suite: %s FAILED case(s)\n' "$failures" >&2
