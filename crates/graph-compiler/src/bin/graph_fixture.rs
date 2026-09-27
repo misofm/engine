@@ -1,6 +1,13 @@
 #![allow(clippy::disallowed_methods)]
 // D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! Generates, verifies, or fingerprints the checked-in issue-006 graph fixtures.
+//!
+//! The fixture plan is compiled the way every host compiles one: through
+//! [`GraphCompiler::compile_with_builtins`] at the build's own [`Backend::current`], so the
+//! checked-in canonical text, Graphviz rendering and resource report describe a plan with its
+//! builtin banks attached (#963). The checked-in corpus is regenerated with
+//! `cargo run -p graph-compiler --bin graph_fixture -- --write` and verified byte for byte by
+//! this binary's `checked_in_fixtures_are_the_generated_bytes` test (#947) and by `--check`.
 
 use core::fmt::Write as _;
 use graph_compiler::Backend;
@@ -10,9 +17,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use builtins_compiler::{BuiltinCompileCaps, prepare_session_builtins};
 use effect_compiler::EffectPreparedSession;
 use graph::{GraphCompileCaps, PreparedGraphPlan, reduce_left_to_right};
-use graph_compiler::{GraphCompileRequest, GraphCompiler, GraphEvidence, PreparedGraphArtifact};
+use graph_compiler::{
+    GraphBuiltinsCompileRequest, GraphCompiler, GraphEvidence, PreparedGraphBuiltinsArtifact,
+};
 use session::{CompileCaps, compile_session, parse_session_json};
 use sha2::{Digest, Sha256};
 
@@ -31,8 +41,8 @@ fn run(arguments: Vec<String>) -> Result<(), String> {
     match arguments.as_slice() {
         [] => {
             let artifact = compile_fixture();
-            let evidence = GraphCompiler::evidence(&artifact.graph, &artifact.report);
-            println!("{}", fingerprint(&artifact.graph, &evidence));
+            let evidence = GraphCompiler::evidence(artifact.graph(), artifact.report());
+            println!("{}", fingerprint(artifact.graph(), &evidence));
             Ok(())
         }
         [mode] if mode == "--check" => verify(&root, &generated()),
@@ -67,7 +77,7 @@ fn default_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/graph")
 }
 
-fn compile_fixture() -> PreparedGraphArtifact {
+fn compile_fixture() -> PreparedGraphBuiltinsArtifact {
     let mut model = parse_session_json(SESSION).unwrap_or_else(|diagnostics| {
         panic!("session parse diagnostics: {diagnostics:?}");
     });
@@ -85,13 +95,32 @@ fn compile_fixture() -> PreparedGraphArtifact {
         },
     )
     .unwrap_or_else(|diagnostics| panic!("session compile diagnostics: {diagnostics:?}"));
-    GraphCompiler::compile(GraphCompileRequest {
-        dispatch: Backend::Scalar,
+    let builtins = prepare_session_builtins(
+        &session,
+        &[],
+        BuiltinCompileCaps {
+            maximum_total_state_bytes: u64::MAX,
+            maximum_total_retained_payload_bytes: u64::MAX,
+            maximum_total_meter_items: u64::MAX,
+            maximum_total_meter_bytes: u64::MAX,
+            maximum_single_allocation_bytes: u64::MAX,
+            maximum_meter_streams: u64::MAX,
+            maximum_period_frames: u32::MAX,
+            maximum_peak_hold_frames: u32::MAX,
+            maximum_smoothing_samples: u32::MAX,
+        },
+    )
+    .unwrap_or_else(|diagnostics| panic!("builtin diagnostics: {diagnostics:?}"));
+    GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        // The width this build renders at, as every host compiles (#963). Native x86-64 is pinned
+        // to x86-64-v3 at compile time, so this is `Simd8` wherever the fixtures are checked.
+        dispatch: Backend::current(),
         plan_id: 0,
         effects: EffectPreparedSession {
             session,
             entries: Vec::new(),
         },
+        builtins,
         caps: GraphCompileCaps {
             maximum_nodes: 10_000,
             maximum_edges: 10_000,
@@ -111,8 +140,8 @@ fn compile_fixture() -> PreparedGraphArtifact {
 
 fn generated() -> Vec<(String, Vec<u8>)> {
     let artifact = compile_fixture();
-    let graph = &artifact.graph;
-    let report = &artifact.report;
+    let graph = artifact.graph();
+    let report = artifact.report();
     // #99 F5: evidence is produced here, off the compile path, exactly once.
     let evidence = GraphCompiler::evidence(graph, report);
     let fingerprint = format!("{}\n", fingerprint(graph, &evidence)).into_bytes();
@@ -122,6 +151,10 @@ fn generated() -> Vec<(String, Vec<u8>)> {
         .map(|assignment| assignment.buffer_index)
         .max()
         .map_or(0, |maximum| maximum + 1);
+    // The plan's own estimate, after the builtin banks attached: what a host that compiles this
+    // session is charged. The report's `estimate` is the pre-bank semantic estimate the canonical
+    // text records, and it omits every builtin-bank byte.
+    let estimate = artifact.graph_resource_estimate();
     let resource_report = format!(
         concat!(
             "{{\"schema\":1,\"fixture\":\"direct-route\",\"logical_nodes\":{},",
@@ -129,22 +162,27 @@ fn generated() -> Vec<(String, Vec<u8>)> {
             "\"dependency_levels\":{},\"colored_output_buffers\":{},",
             "\"audio_buffer_samples\":{},\"delay_bytes\":{},",
             "\"graph_metadata_bytes\":{},\"declared_effect_bytes\":{},",
+            "\"builtin_bank_count\":{},\"builtin_bank_bytes\":{},",
+            "\"builtin_bank_scratch_bytes\":{},",
             "\"largest_allocation_bytes\":{},\"incremental_plan_bytes\":{},",
             "\"session_plus_plan_bytes\":{}}}\n"
         ),
-        report.estimate.logical_nodes,
-        report.estimate.materialized_nodes,
-        report.estimate.edges,
-        report.estimate.schedule_items,
-        report.estimate.dependency_levels,
+        estimate.logical_nodes,
+        estimate.materialized_nodes,
+        estimate.edges,
+        estimate.schedule_items,
+        estimate.dependency_levels,
         colored_buffers,
-        report.estimate.audio_buffer_samples,
-        report.estimate.delay_bytes,
-        report.estimate.graph_metadata_bytes,
-        report.estimate.declared_effect_bytes,
-        report.estimate.largest_allocation_bytes,
-        report.estimate.incremental_plan_bytes,
-        report.estimate.session_plus_plan_bytes,
+        estimate.audio_buffer_samples,
+        estimate.delay_bytes,
+        estimate.graph_metadata_bytes,
+        estimate.declared_effect_bytes,
+        estimate.builtin_bank_count,
+        estimate.builtin_bank_bytes,
+        estimate.builtin_bank_scratch_bytes,
+        estimate.largest_allocation_bytes,
+        estimate.incremental_plan_bytes,
+        estimate.session_plus_plan_bytes,
     )
     .into_bytes();
     let mut files = vec![
@@ -311,18 +349,20 @@ fn write_and_verify(root: &Path) -> Result<(), String> {
 }
 
 fn verify(root: &Path, expected: &[(String, Vec<u8>)]) -> Result<(), String> {
-    let expected_manifest = manifest(expected);
-    let actual_manifest = fs::read(root.join("MANIFEST.tsv"))
-        .map_err(|error| format!("read graph fixture manifest: {error}"))?;
-    if actual_manifest != expected_manifest.as_bytes() {
-        return Err("graph fixture manifest mismatch".to_owned());
-    }
+    // Each file before the manifest, so a stale corpus is reported by the first file that moved
+    // rather than by the manifest that summarises it.
     for (path, generated) in expected {
         let actual = fs::read(root.join(path))
             .map_err(|error| format!("read graph fixture {path}: {error}"))?;
         if actual != *generated {
             return Err(format!("graph fixture content mismatch: {path}"));
         }
+    }
+    let expected_manifest = manifest(expected);
+    let actual_manifest = fs::read(root.join("MANIFEST.tsv"))
+        .map_err(|error| format!("read graph fixture manifest: {error}"))?;
+    if actual_manifest != expected_manifest.as_bytes() {
+        return Err("graph fixture manifest mismatch".to_owned());
     }
     let mut actual_paths = fs::read_dir(root.join("v1"))
         .map_err(|error| format!("read graph fixture directory: {error}"))?
@@ -360,6 +400,39 @@ mod tests {
 
     fn temporary_root() -> PathBuf {
         env::temp_dir().join(format!("graph-fixture-test-{}", std::process::id()))
+    }
+
+    /// #947: the checked-in corpus under `fixtures/graph` is exactly what this binary generates,
+    /// byte for byte, every file and the manifest.
+    ///
+    /// Each file is regenerated in process from the same compile `--write` uses, so a change to
+    /// what the graph estimate charges, to the canonical text or to the Graphviz rendering turns
+    /// this red until the corpus is regenerated. Regenerate with
+    /// `cargo run -p graph-compiler --bin graph_fixture -- --write` and commit the diff.
+    #[test]
+    fn checked_in_fixtures_are_the_generated_bytes() {
+        let files = generated();
+        let root = default_root();
+        for (path, bytes) in &files {
+            let checked_in = fs::read(root.join(path))
+                .unwrap_or_else(|error| panic!("read checked-in graph fixture {path}: {error}"));
+            assert!(
+                checked_in == *bytes,
+                concat!(
+                    "checked-in graph fixture {} is stale; regenerate with ",
+                    "`cargo run -p graph-compiler --bin graph_fixture -- --write`.\n",
+                    "checked in: {}\ngenerated:  {}"
+                ),
+                path,
+                String::from_utf8_lossy(&checked_in),
+                String::from_utf8_lossy(bytes),
+            );
+        }
+        verify(&root, &files).unwrap_or_else(|error| {
+            panic!(
+                "{error}; regenerate with `cargo run -p graph-compiler --bin graph_fixture -- --write`"
+            )
+        });
     }
 
     #[test]

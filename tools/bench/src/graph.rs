@@ -1,4 +1,7 @@
 //! Fixed-work, exactly-two-round descriptive benchmark driver for issue 006.
+//!
+//! Every workload compiles through [`GraphCompiler::compile_with_builtins`] at the build's own
+//! [`Backend::current`], the compile every host runs (#963).
 #![allow(missing_docs)]
 
 use bench_support::digest::sha256_hex;
@@ -11,11 +14,12 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
+use builtins_compiler::{BuiltinCompileCaps, PreparedBuiltinsSession, prepare_session_builtins};
 use conformance::DualAccumulatorDelayFactory;
 use effect_compiler::{EffectCompileCaps, EffectPreparedSession, prepare_native_session_effects};
 use effect_contract::{NativeEffectFactory, NativeEffectRegistry};
 use graph::{GraphCompileCaps, GraphResourceEstimate};
-use graph_compiler::{GraphCompileRequest, GraphCompiler};
+use graph_compiler::{GraphBuiltinsCompileRequest, GraphCompiler, PreparedGraphBuiltinsArtifact};
 use session::{
     ChannelMatrix, CompileCaps, CompiledSession, EffectIdentity, EffectParam, ParameterChannel,
     ParameterUnit, Route, RouteDestination, RouteSource, SendTap, SessionModel, Sidechain,
@@ -282,25 +286,18 @@ fn run_once(fixture: &Fixture) -> Sample {
     let prepare_started = Instant::now();
     let effects = prepared_effects(fixture);
     let effect_prepare_ns = prepare_started.elapsed().as_nanos();
+    // Builtin preparation is compile input, as effect preparation is. It is inside `total_ns` and
+    // outside both phase timers, so `graph_compile_ns` stays the compile call alone.
+    let builtins = prepared_builtins(fixture);
     let compile_started = Instant::now();
-    let artifact = GraphCompiler::compile(GraphCompileRequest {
-        // The host's dispatch, deliberately: bank planning and `bind_homogeneous_bank` are part
-        // of compile, so a scalar dispatch would quietly remove them from the timed workload and
-        // make the number incomparable with every earlier run (#99 F6).
-        dispatch: Backend::current(),
-        plan_id: 6,
-        effects,
-        caps: unlimited_graph_caps(),
-    })
-    .unwrap_or_else(|failure| panic!("benchmark graph: {:?}", failure.diagnostics));
+    let artifact = compile(effects, builtins);
     let graph_compile_ns = compile_started.elapsed().as_nanos();
     // #99 F5: the evidence payload is produced here, strictly AFTER `graph_compile_ns` has been
-    // taken. Before this it was built inside `GraphCompiler::compile`, so every compile -- and
-    // therefore this number -- carried a multi-megabyte canonical dump, its SHA-256 and a
-    // Graphviz string that no production caller ever read. The record still reports its sizes and
-    // hash, because the benchmark's jq validators pin them; they are just no longer timed.
-    let report = artifact.report;
-    let evidence = GraphCompiler::evidence(&artifact.graph, &report);
+    // taken. Before this it was built inside the compile, so every compile -- and therefore this
+    // number -- carried a multi-megabyte canonical dump, its SHA-256 and a Graphviz string that no
+    // production caller ever read. The record still reports its sizes and hash, because the
+    // benchmark's jq validators pin them; they are just no longer timed.
+    let evidence = GraphCompiler::evidence(artifact.graph(), artifact.report());
     black_box((&evidence.canonical_bytes, &evidence.dot));
     Sample {
         total_ns: total.elapsed().as_nanos(),
@@ -309,8 +306,48 @@ fn run_once(fixture: &Fixture) -> Sample {
         graph_sha256: evidence.sha256,
         canonical_debug_bytes: evidence.canonical_bytes.len(),
         dot_bytes: evidence.dot.len(),
-        estimate: report.estimate,
+        // The plan's own estimate, after the builtin banks attached: what the host is charged.
+        estimate: artifact.graph_resource_estimate().clone(),
     }
+}
+
+/// The benchmark's one compile: the production entry at the host's dispatch.
+///
+/// The host's dispatch, deliberately: bank planning, `bind_homogeneous_bank` and the builtin
+/// bank attachment are part of compile, so a scalar dispatch would quietly remove them from the
+/// timed workload (#99 F6).
+fn compile(
+    effects: EffectPreparedSession,
+    builtins: PreparedBuiltinsSession,
+) -> PreparedGraphBuiltinsArtifact {
+    GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        dispatch: Backend::current(),
+        plan_id: 6,
+        effects,
+        builtins,
+        caps: unlimited_graph_caps(),
+    })
+    .unwrap_or_else(|failure| panic!("benchmark graph: {:?}", failure.diagnostics))
+}
+
+/// Every track's builtins, as a host prepares them for a session with no meters.
+fn prepared_builtins(fixture: &Fixture) -> PreparedBuiltinsSession {
+    prepare_session_builtins(
+        &fixture.session,
+        &[],
+        BuiltinCompileCaps {
+            maximum_total_state_bytes: u64::MAX,
+            maximum_total_retained_payload_bytes: u64::MAX,
+            maximum_total_meter_items: u64::MAX,
+            maximum_total_meter_bytes: u64::MAX,
+            maximum_single_allocation_bytes: u64::MAX,
+            maximum_meter_streams: u64::MAX,
+            maximum_period_frames: u32::MAX,
+            maximum_peak_hold_frames: u32::MAX,
+            maximum_smoothing_samples: u32::MAX,
+        },
+    )
+    .unwrap_or_else(|diagnostics| panic!("benchmark builtins: {diagnostics:?}"))
 }
 
 fn prepared_effects(fixture: &Fixture) -> EffectPreparedSession {
@@ -629,19 +666,38 @@ mod tests {
         assert_eq!(fixture.submixes, 32);
         assert_eq!(fixture.effects, 64);
         assert_eq!(fixture.sidechains, 32);
-        let artifact = GraphCompiler::compile(GraphCompileRequest {
-            // See above: the timed workload keeps the host's banks.
-            dispatch: Backend::current(),
-            plan_id: 6,
-            effects: prepared_effects(&fixture),
-            caps: unlimited_graph_caps(),
-        })
-        .unwrap_or_else(|failure| panic!("benchmark fixture: {:?}", failure.diagnostics));
-        assert_eq!(artifact.report.estimate.routes, 1_024);
-        assert_eq!(artifact.report.estimate.effects, 64);
-        let evidence = GraphCompiler::evidence(&artifact.graph, &artifact.report);
+        let artifact = compile(prepared_effects(&fixture), prepared_builtins(&fixture));
+        let estimate = artifact.graph_resource_estimate();
+        assert_eq!(estimate.routes, 1_024);
+        assert_eq!(estimate.effects, 64);
+        // The production compile: every track's post-input, fader and matrix stages are builtin
+        // bank members at the host's SIMD width.
+        assert!(Backend::current().width() > 1);
+        assert_eq!(artifact.graph().builtin_bank_members().count(), 3 * 256);
+        assert!(estimate.builtin_bank_count > 0);
+        let evidence = GraphCompiler::evidence(artifact.graph(), artifact.report());
         assert!(!evidence.canonical_bytes.is_empty());
         assert!(!evidence.dot.is_empty());
+    }
+
+    /// The `graph_validate_65537_tracks` row's own fixture and compile, once and untimed.
+    ///
+    /// #962 made this compile linear in the track count; before it the with-builtins compile of
+    /// this fixture took about 160 s in release. Ignored because it is the benchmark's scale row,
+    /// not a claim the per-PR suite needs: `graph-compiler`'s
+    /// `compiles_and_binds_65_537_tracks_with_builtins` already gates the same session shape. Run
+    /// with `cargo test --release -p bench scale_benchmark_fixture -- --ignored`.
+    #[test]
+    #[ignore = "the benchmark's 65,537-track scale row; graph-compiler's scale test gates it"]
+    fn scale_benchmark_fixture_prepares_and_compiles() {
+        let fixture = scale_fixture();
+        assert_eq!(fixture.tracks, 65_537);
+        assert_eq!(fixture.routes, 1);
+        assert_eq!(fixture.effects, 0);
+        let artifact = compile(prepared_effects(&fixture), prepared_builtins(&fixture));
+        assert_eq!(artifact.graph().sequential_schedule.len(), 458_761);
+        assert_eq!(artifact.graph().builtin_bank_members().count(), 3 * 65_537);
+        assert_eq!(artifact.graph_resource_estimate().routes, 1);
     }
 
     #[cfg(unix)]

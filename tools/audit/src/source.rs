@@ -1,4 +1,11 @@
 //! Deterministic Issue-010 source-ring realtime and duration-independent resource audit.
+//!
+//! The native worker's ring feeds a plan compiled the way every host compiles one (#963): a
+//! one-track session through [`GraphCompiler::compile_with_builtins`] at the build's own
+//! [`Backend::current`], its track input claimed by the source set and its builtin strip attached
+//! as banks. The strip is configured as the exact identity (no filters, 0 dB, the identity matrix
+//! and a unity route), so the source's PCM reaches the output bit for bit and the audit's
+//! per-block PCM assertions keep their meaning.
 
 use bench_support::alloc as bench_alloc;
 use std::{
@@ -6,17 +13,21 @@ use std::{
     num::NonZeroUsize,
 };
 
-use effect_contract::{LatencySamples, TailSamples};
+use builtins_compiler::{BuiltinCompileCaps, prepare_session_builtins};
+use effect_compiler::EffectPreparedSession;
 use engine::realtime::audit;
 use engine::{
     QuantumFrames, SampleRateHz,
-    realtime::{PlanarBufferMut, RenderEnvelope, RenderIo, RenderTime},
+    realtime::{PlanarBufferMut, RenderIo, RenderTime},
 };
 use graph::{
-    DependencyLevel, GraphEdge, GraphEdgeId, GraphNode, GraphNodeBinding, GraphNodeId, GraphPortId,
-    GraphPortKind, GraphResourceEstimate, GraphRuntimeBindings, GraphRuntimeProcessor, GraphSpec,
-    PreparedGraphPlan, PreparedGraphPlanParts, StableGraphId, TrackStage,
+    GraphCompileCaps, GraphNodeBinding, GraphNodeId, GraphRuntimeBindings, GraphRuntimeProcessor,
+    TrackStage,
 };
+use graph_compiler::{
+    Backend, GraphBuiltinsCompileRequest, GraphCompiler, PreparedGraphBuiltinsArtifact,
+};
+use session::{ChannelBuiltins, CompileCaps, MatrixOrPan, compile_session, parse_session_json};
 use source::{
     NativeResolvedAsset, NativeSourcePrepareCaps, NativeSourcePrepareRequest, NativeSourceResolver,
     NativeSourceResolverError, NativeWaveParseCaps, NativeWaveRegion, SourceCommand, SourceFrame,
@@ -71,19 +82,27 @@ pub(crate) fn main() {
         .wait_for_event()
         .expect("native worker prefill event");
     let (mut controller, source) = prepared.into_graph_source();
-    let envelope = RenderEnvelope {
-        sample_rate: SampleRateHz(48_000),
-        quantum: QuantumFrames(QUANTUM),
-        input_channels: None,
-        output_channels: NonZeroUsize::new(2).expect("stereo output"),
+    let artifact = prepared_graph_artifact();
+    let envelope = artifact.envelope();
+    assert_eq!(envelope.sample_rate, SampleRateHz(48_000));
+    assert_eq!(envelope.quantum, QuantumFrames(QUANTUM));
+    let (input, output): (Vec<_>, Vec<_>) =
+        artifact
+            .external_binding_nodes()
+            .cloned()
+            .partition(|node| {
+                matches!(
+                    node,
+                    GraphNodeId::TrackStage {
+                        stage: TrackStage::Input,
+                        ..
+                    }
+                )
+            });
+    let ([input], [output]) = (input.as_slice(), output.as_slice()) else {
+        panic!("one track input and the session output are external: {input:?} {output:?}");
     };
-    let input = GraphNodeId::TrackStage {
-        track_id: StableGraphId::parse("audit.source").expect("stable input id"),
-        stage: TrackStage::Input,
-    };
-    let output = GraphNodeId::Output {
-        output_id: StableGraphId::parse("audit.main").expect("stable output id"),
-    };
+    assert!(matches!(output, GraphNodeId::Output { .. }));
     let source_set = prepare_graph_source_set(
         envelope,
         vec![source],
@@ -95,20 +114,15 @@ pub(crate) fn main() {
         }],
     )
     .expect("seal graph source set");
-    let mut plan = match prepared_graph_plan(envelope, input, output).bind_with_source_set(
+    let mut plan = match artifact.into_bound_with_source_set(
         GraphRuntimeBindings {
             envelope,
-            nodes: vec![GraphNodeBinding::new(
-                GraphNodeId::Output {
-                    output_id: StableGraphId::parse("audit.main").expect("stable output id"),
-                },
-                Box::new(Noop),
-            )],
+            nodes: vec![GraphNodeBinding::new(output.clone(), Box::new(Noop))],
             observers: Vec::new(),
         },
         source_set,
     ) {
-        Ok(plan) => plan,
+        Ok(bound) => bound.plan,
         Err(failure) => panic!("bind graph source set: {}", failure.code),
     };
     let mut output_pcm = [f32::from_bits(0xffff_ffff); (QUANTUM as usize) * 2];
@@ -366,94 +380,101 @@ impl Seek for SyntheticWave {
     }
 }
 
-fn prepared_graph_plan(
-    envelope: RenderEnvelope,
-    input: GraphNodeId,
-    output: GraphNodeId,
-) -> PreparedGraphPlan {
-    PreparedGraphPlan::new(PreparedGraphPlanParts {
+/// The one-track session the worker feeds, compiled with its builtins at the host's width.
+///
+/// The canonical session's track, stripped of its effects and automation, with a mono source
+/// read into both lanes and every builtin stage set to its exact identity: no polarity flip, 0 dB
+/// trim and fader, both filters off (a `0.0` cutoff is the identity section), no delay, the
+/// identity 2x2 matrix (a pan is a position, not a gain) and the canonical unity route. The bank
+/// arithmetic then multiplies by one and adds zero, so the output is the source's PCM bit for
+/// bit.
+fn prepared_graph_artifact() -> PreparedGraphBuiltinsArtifact {
+    let mut model = parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
+        .expect("canonical session");
+    model.quantum_frames = QUANTUM;
+    model.sources[0].channels = 1;
+    let track = &mut model.tracks[0];
+    track.left_source_channel = 0;
+    track.right_source_channel = 0;
+    track.dynamic.effects.clear();
+    let identity = ChannelBuiltins {
+        polarity_invert: false,
+        trim_db: 0.0,
+        hpf_hz: 0.0,
+        lpf_hz: 0.0,
+        delay_samples: 0,
+    };
+    track.builtins.left = identity.clone();
+    track.builtins.right = identity;
+    track.fader.left_db = 0.0;
+    track.fader.right_db = 0.0;
+    track.fader.left_mute = false;
+    track.fader.right_mute = false;
+    track.matrix_or_pan = MatrixOrPan::Matrix {
+        ll: 1.0,
+        lr: 0.0,
+        rl: 0.0,
+        rr: 1.0,
+        smoothing_samples: 0,
+    };
+    model.automation.clear();
+    let session = compile_session(
+        &model,
+        CompileCaps {
+            max_compiled_model_bytes: u64::MAX,
+            max_requested_runtime_bytes: u64::MAX,
+            max_single_allocation_bytes: u64::MAX,
+            max_queue_items: u64::MAX,
+            max_source_ring_frames: u64::MAX,
+            max_source_ring_bytes: u64::MAX,
+        },
+    )
+    .expect("compiled source audit session");
+    let builtins = prepare_session_builtins(
+        &session,
+        &[],
+        BuiltinCompileCaps {
+            maximum_total_state_bytes: u64::MAX,
+            maximum_total_retained_payload_bytes: u64::MAX,
+            maximum_total_meter_items: u64::MAX,
+            maximum_total_meter_bytes: u64::MAX,
+            maximum_single_allocation_bytes: u64::MAX,
+            maximum_meter_streams: u64::MAX,
+            maximum_period_frames: u32::MAX,
+            maximum_peak_hold_frames: u32::MAX,
+            maximum_smoothing_samples: u32::MAX,
+        },
+    )
+    .expect("sealed source audit builtins");
+    let dispatch = Backend::current();
+    let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        dispatch,
         plan_id: 41,
-        spec: GraphSpec {
-            nodes: vec![
-                GraphNode {
-                    id: input.clone(),
-                    latency: LatencySamples(0),
-                    tail: TailSamples::Finite(0),
-                },
-                GraphNode {
-                    id: output.clone(),
-                    latency: LatencySamples(0),
-                    tail: TailSamples::Finite(0),
-                },
-            ],
-            ports: Vec::new(),
-            edges: vec![GraphEdge {
-                id: GraphEdgeId::RouteSource {
-                    route_id: StableGraphId::parse("audit.route").expect("stable route id"),
-                },
-                source: GraphPortId {
-                    node: input.clone(),
-                    kind: GraphPortKind::MainOutput,
-                    effect_port: None,
-                },
-                destination: GraphPortId {
-                    node: output.clone(),
-                    kind: GraphPortKind::MainInput,
-                    effect_port: None,
-                },
-                path: "$.audit.route".to_owned(),
-            }],
+        effects: EffectPreparedSession {
+            session,
+            entries: Vec::new(),
         },
-        sequential_schedule: vec![input.clone(), output.clone()],
-        dependency_levels: vec![
-            DependencyLevel {
-                level: 0,
-                nodes: vec![input.clone()],
-            },
-            DependencyLevel {
-                level: 1,
-                nodes: vec![output.clone()],
-            },
-        ],
-        route_timings: Vec::new(),
-        inserted_delays: Vec::new(),
-        buffer_assignments: Vec::new(),
-        estimate: GraphResourceEstimate {
-            logical_nodes: 0,
-            materialized_nodes: 0,
-            edges: 0,
-            schedule_items: 0,
-            dependency_levels: 0,
-            reductions: 0,
-            routes: 0,
-            effects: 0,
-            audio_buffer_samples: 0,
-            total_delay_samples: 0,
-            delay_bytes: 0,
-            graph_metadata_bytes: 0,
-            declared_effect_bytes: 0,
-            effect_bank_count: 0,
-            effect_bank_scratch_bytes: 0,
-            effect_bank_runtime_buffer_bytes: 0,
-            effect_bank_metadata_bytes: 0,
-            builtin_bank_bytes: 0,
-            builtin_bank_scratch_bytes: 0,
-            builtin_bank_count: 0,
-            largest_allocation_bytes: 0,
-            incremental_plan_bytes: 0,
-            session_plus_plan_bytes: 0,
+        builtins,
+        caps: GraphCompileCaps {
+            maximum_nodes: 10_000,
+            maximum_edges: 10_000,
+            maximum_schedule_items: 10_000,
+            maximum_dependency_levels: 10_000,
+            maximum_audio_buffer_samples: 10_000_000,
+            maximum_delay_samples_per_edge: 1_000_000,
+            maximum_total_delay_samples: 10_000_000,
+            maximum_graph_bytes: 10_000_000,
+            maximum_plan_bytes: 100_000_000,
+            maximum_single_allocation_bytes: 10_000_000,
+            maximum_finite_tail_samples: 10_000_000,
         },
-        envelope,
-        required_bindings: vec![input, output],
-        routes: Vec::new(),
-        track_delays: Vec::new(),
-        effects: Vec::new(),
-        effect_controls: Vec::new(),
-        banks: Vec::new(),
-        builtin_banks: Vec::new(),
-        observers: Vec::new(),
-        effect_observations: Vec::new(),
     })
+    .unwrap_or_else(|failure| panic!("source audit graph compile: {:?}", failure.diagnostics));
+    // The strip renders in banks at a SIMD width, as on every host; at scalar width no bank
+    // attaches.
+    let banks = if dispatch.width() > 1 { 3 } else { 0 };
+    assert_eq!(artifact.prepared_builtin_bank_count(), banks);
+    artifact
 }
 
 #[cfg(test)]

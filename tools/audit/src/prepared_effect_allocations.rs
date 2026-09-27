@@ -1,11 +1,17 @@
 //! Compile-only allocation records for issue #650.
+//!
+//! Each corpus is compiled the way every host compiles a session: through
+//! [`GraphCompiler::compile_with_builtins`] at the build's own [`Backend::current`] (#963). The
+//! measured region is the compile call alone; effect and builtin preparation are its inputs and
+//! happen before the counters are marked.
 
 use bench_support::alloc as bench_alloc;
+use builtins_compiler::{BuiltinCompileCaps, PreparedBuiltinsSession, prepare_session_builtins};
 use conformance::DualAccumulatorDelayFactory;
 use effect_compiler::{EffectCompileCaps, EffectPreparedSession, prepare_native_session_effects};
 use effect_contract::NativeEffectRegistry;
 use graph::{GraphCompileCaps, GraphDiagnosticSet};
-use graph_compiler::{Backend, GraphCompileRequest, GraphCompiler};
+use graph_compiler::{Backend, GraphBuiltinsCompileRequest, GraphCompiler};
 use session::{
     CompileCaps, EffectIdentity, EffectQuality as SessionEffectQuality, LinkMode, StableId,
     compile_session, parse_session_json,
@@ -114,6 +120,20 @@ fn effect_caps() -> EffectCompileCaps {
     }
 }
 
+fn builtin_caps() -> BuiltinCompileCaps {
+    BuiltinCompileCaps {
+        maximum_total_state_bytes: u64::MAX,
+        maximum_total_retained_payload_bytes: u64::MAX,
+        maximum_total_meter_items: u64::MAX,
+        maximum_total_meter_bytes: u64::MAX,
+        maximum_single_allocation_bytes: u64::MAX,
+        maximum_meter_streams: u64::MAX,
+        maximum_period_frames: u32::MAX,
+        maximum_peak_hold_frames: u32::MAX,
+        maximum_smoothing_samples: u32::MAX,
+    }
+}
+
 fn fixture_session(corpus: Corpus) -> session::CompiledSession {
     let mut model = parse_session_json(SESSION).expect("issue-650 session fixture");
     let mut template = model.tracks[0].clone();
@@ -185,6 +205,25 @@ fn prepared(corpus: Corpus) -> EffectPreparedSession {
     effects
 }
 
+/// The builtins a host prepares for the corpus's session: no meters, every track's strip.
+fn prepared_builtins(effects: &EffectPreparedSession) -> PreparedBuiltinsSession {
+    prepare_session_builtins(&effects.session, &[], builtin_caps())
+        .expect("issue-650 builtins prepare")
+}
+
+/// The compile request for `corpus`, at the width this build renders at.
+fn request(corpus: Corpus, plan_id: u64, caps: GraphCompileCaps) -> GraphBuiltinsCompileRequest {
+    let effects = prepared(corpus);
+    let builtins = prepared_builtins(&effects);
+    GraphBuiltinsCompileRequest {
+        plan_id,
+        effects,
+        builtins,
+        caps,
+        dispatch: Backend::current(),
+    }
+}
+
 fn diagnostic_hash(diagnostics: &GraphDiagnosticSet) -> String {
     let mut text = String::new();
     for diagnostic in diagnostics.diagnostics() {
@@ -209,25 +248,13 @@ fn diagnostic_hash(diagnostics: &GraphDiagnosticSet) -> String {
 fn diagnostic_identity(corpus: Corpus) -> String {
     let mut caps = graph_caps();
     caps.maximum_nodes = 0;
-    let invalid = match GraphCompiler::compile(GraphCompileRequest {
-        plan_id: 2,
-        effects: prepared(corpus),
-        caps,
-        dispatch: dispatch(corpus),
-    }) {
+    let invalid = match GraphCompiler::compile_with_builtins(request(corpus, 2, caps)) {
         Ok(_) => panic!("issue-650 invalid twin unexpectedly compiled"),
         Err(value) => value,
     };
     let diagnostic = diagnostic_hash(&invalid.diagnostics);
     drop(invalid);
     diagnostic
-}
-
-const fn dispatch(corpus: Corpus) -> Backend {
-    match corpus {
-        Corpus::Banks64 => Backend::current(),
-        Corpus::Zero64 | Corpus::CrossedSmall => Backend::Scalar,
-    }
 }
 
 struct Measurement {
@@ -247,20 +274,14 @@ fn positive_allocator_control() {
 }
 
 fn measure(corpus: Corpus) -> Measurement {
-    let effects = prepared(corpus);
-    let request = GraphCompileRequest {
-        plan_id: 7,
-        effects,
-        caps: graph_caps(),
-        dispatch: dispatch(corpus),
-    };
+    let request = request(corpus, 7, graph_caps());
     let mark = bench_alloc::current_thread_counters();
-    let artifact = match GraphCompiler::compile(request) {
+    let artifact = match GraphCompiler::compile_with_builtins(request) {
         Ok(value) => value,
         Err(_) => panic!("issue-650 measured graph"),
     };
     let delta = bench_alloc::current_thread_delta_since(mark);
-    let graph = GraphCompiler::sha256(&artifact.graph, &artifact.report);
+    let graph = GraphCompiler::sha256(artifact.graph(), artifact.report());
     drop(artifact);
     Measurement {
         counters: Counters {
@@ -503,16 +524,21 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["slot0", "slot1"]
         );
-        let artifact = match GraphCompiler::compile(GraphCompileRequest {
+        let builtins = prepared_builtins(&effects);
+        let artifact = match GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
             plan_id: 99,
             effects,
+            builtins,
             caps: graph_caps(),
             dispatch: Backend::current(),
         }) {
             Ok(value) => value,
             Err(_) => panic!("banks64 graph"),
         };
-        let report = &artifact.report.rack_cohorts;
+        // The with-builtins compile attached every track's three bankable strip stages at the
+        // host width: 64 tracks x 3 stages in banks of 8.
+        assert_eq!(artifact.prepared_builtin_bank_count(), 64 * 3 / 8);
+        let report = &artifact.report().rack_cohorts;
         let mut normal_chains: Vec<_> = (0..63)
             .map(|track| graph_compiler::RackChainId {
                 track_id: format!("track-{track}"),
