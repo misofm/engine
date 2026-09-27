@@ -368,3 +368,30 @@ NaN result is compared only as "is a NaN", so the operand order is free.
 Under F-1, F-2 and F-3 every one of the 358 corpus digest comparisons still matched its pin on all
 three legs. Nothing in production calls the new surface, so the frozen corpus cannot see a defect in
 it; the count exists beside the digests for the same reason `minmax_lowering_mismatches` does.
+
+## Issue #954 — the select-free fused fader/matrix kernel
+
+`fader_matrix_block_without_identity` is `fader_matrix_block`'s second arm with no `L::select` in
+the body. Gate 1, `select_free_fused_fader_matrix_matches_both_oracles_when_no_lane_is_identity`
+(`tests/fader_matrix.rs`), holds it equal to two oracles with no identity lane: oracle A is
+`fader_matrix_block` with an all-false mask, oracle B is `gain_mute_block` on each plane followed by
+`matrix2x2_block_without_identity`. It covers five input families (the four hostile ones and an
+overflow family that a gain of up to `15.85` drives to infinity), three gain sets (mixed; unity and
+zero; large), three mute sets (none, mixed, all), frame counts `[1, 3, 8, 9, 128]`, guard words
+included, at `f32`, `Simd4` and `Simd8`, in dev and in release, with a negative control over a mixed
+identity mask. NaN words compare as "both NaN" (amendment 4). Release reports
+`[[30, 0], [456, 0], [894, 0]]` NaN-payload differences `[oracle A, oracle B]` at
+`[f32, Simd4, Simd8]` and no other difference; dev reports none.
+
+Each row was applied alone as an exact-text replacement (match count one) to `ab9bdbd9`, run in dev
+and release, and restored with `git checkout`. Command form:
+`cargo test --locked -p lane --test fader_matrix select_free_fused` (and with `--release`).
+Host AMD EPYC 7313P, rustc 1.97.1, pin `+avx2,+fma`.
+
+| # | mutation | gate | observed |
+| --- | --- | --- | --- |
+| M3 | swap `matrix.lr` and `matrix.rl` in `fader_matrix_block_without_identity` | gate 1, dev and release | FAILED, `width=1 frames=1 family=0 gains=0 mutes=0: oracle A L[1] new=c0250000 old=c0688000` |
+
+The same mutation is red in `builtins` (the scenario gates), `builtins-compiler`
+(`composite_live_sequence_…`) and `console-workload` (the metered row); those rows, and M1, M2 and
+M5, are in `crates/builtins/tests/MUTATIONS.md`.

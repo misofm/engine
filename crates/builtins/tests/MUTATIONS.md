@@ -260,3 +260,40 @@ peak was then always a normal value, which hides an admitted subnormal. G2 now g
 only words the meter sanitizes to `+0.0` (NaN, both infinities, both zeros, extreme subnormals),
 asserts their published peaks are `+0.0`, and the row is red. The lane rows are also in
 `crates/lane/tests/MUTATIONS.md`.
+
+## Issue #954 — the fused fader/matrix's select-free arm
+
+`MatrixStage::fused_settled_block` takes `fader_matrix_block_without_identity` when
+`L::mask_any(coef.identity)` is false over all `L::WIDTH` lanes, padding included, and
+`fader_matrix_block` otherwise. All four call sites of the fused kernel go through it, each after
+its own settled check: `BuiltinFaderBank::try_process_settled_with_matrix` at `Simd4` and `Simd8`,
+`FaderMuteRampBuiltins::process_fader_matrix` and `BuiltinChain::process_dual_mono`. The gates:
+
+- gate 1 (lane), in `crates/lane/tests/MUTATIONS.md`;
+- the dispatch witness, `tests::fused_fader_matrix_takes_the_select_free_arm_only_without_an_identity_lane`
+  (`src/tests.rs`): the `#[cfg(test)]` counter `FUSED_SELECT_FREE_BLOCKS` counts the arm per fused
+  call at W8, W4 and both scalar sites, over identity members, partial banks, instant retargets to
+  and from the identity, and ramps that decline the fused call;
+- the scenario gates (amendment 5), `fused_fader_matrix_shapes_render_the_base_bits` (banked,
+  `46cc0096...`) and `scalar_fused_fader_matrix_renders_the_base_bits` (`c5131019...`) in
+  `tests/matrix.rs`, pinned on the unmodified base `e0f25bb6` in dev and release;
+- the row gates (amendment 6): `builtins-compiler`'s
+  `composite_live_sequence_matches_original_owners_and_discriminates_both_branches` and
+  `console-workload`'s `the_metered_console_row_renders_the_console_bits_and_publishes_every_window`.
+
+Each mutation was applied alone as an exact-text replacement (match count one) to `ab9bdbd9`, run
+through all five gates in dev and in release, and restored with `git checkout`.
+
+| # | mutation | red | green (expected) |
+| --- | --- | --- | --- |
+| M1 | `fused_settled_block` always takes the select-free arm (`if false {`) | Dev: the kernel's `debug_assert!` (`lane/src/kernels/builtins.rs:416`) fires in the witness, both scenario gates and `composite_live_sequence_…`. Release, by the counter and by bits: the witness `width=8: identity member` `left: 3 right: 0`; the banked scenario digest `0f5a0f59...` against `46cc0096...`; the scalar scenario digest `28e62077...` against `c5131019...` | gate 1; the metered row in dev and release (every bank is full with no identity lane, so the arm is already the right one there); `composite_live_sequence_…` in release (it compares no identity-lane word on which the two arms disagree) |
+| M2 | `fused_settled_block` never takes it (`if true {`) | the witness, dev and release: `width=8: full non-identity` `left: 0 right: 3` | gate 1, both scenario gates and both row gates -- the performance-only regression the counter exists to see |
+| M3 | swap `matrix.lr` and `matrix.rl` in `fader_matrix_block_without_identity` | gate 1 (dev and release); the banked scenario digest `c3e895f6...` and the scalar `4c06dd6d...` (dev and release); `composite_live_sequence_…` `post-matrix left PCM words` (dev and release); the metered row digest `d3bc88bd...` against `fe5bed9b...` (dev and release) | the witness |
+| M5 | `FaderMuteRampBuiltins::process_fader_matrix` calls `fader_matrix_block::<f32>` directly, bypassing the dispatch | the witness, dev and release: `per-track pan` `left: 0 right: 2` | gate 1, both scenario gates and both row gates (class A) |
+
+### Row count
+
+Four rows, all red; none argued equivalent. There is no M4: the fused path has no ramp tail (a
+ramping block declines the fused call and runs the split stages, whose tail is #944's
+`settled_block`), so there is no tail site to mutate. M2 and M5 render the base bits by
+construction, so only the witness sees them.
