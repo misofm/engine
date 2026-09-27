@@ -34,10 +34,9 @@ pub use runtime::{
     test_only_resident_input_counts, test_only_resident_input_reset,
     test_only_selected_split_fader, test_only_set_bank_meter_declined,
     test_only_set_bank_sample_peak_declined, test_only_set_completion_disabled,
-    test_only_set_output_route_fold_declined, test_only_set_route_fold_declined,
-    test_only_set_scatter_redirect_declined, test_only_set_source_in_place_declined,
-    test_only_source_plane_counts, test_only_source_plane_reset,
-    test_only_split_pair_table_witness,
+    test_only_set_route_fold_declined, test_only_set_scatter_redirect_declined,
+    test_only_set_source_in_place_declined, test_only_source_plane_counts,
+    test_only_source_plane_reset, test_only_split_pair_table_witness,
 };
 
 #[cfg(any(test, feature = "test-support"))]
@@ -1853,51 +1852,12 @@ pub trait GraphPreparedSourceSetDriver: Send {
     }
 }
 
-/// The source set as a bank's gather (issue #918) and the Output op's fused reduction (issue #927)
-/// see it during the unit loop: a shared view of the planes `begin_block` played, handed to
-/// [`runtime::Runtime::execute`] after the copy loop.
+/// The source set as a bank's gather sees it during the unit loop (issue #918): a shared view of
+/// the planes `begin_block` played, handed to [`runtime::Runtime::execute`] after the copy loop.
 pub(crate) trait GraphSourcePlanes {
     /// [`GraphPreparedSourceSetDriver::played_planes`] after the set's own claim and length
     /// checks.
     fn played_planes(&self, claim_index: usize) -> Option<(&[f32], &[f32])>;
-
-    // REALTIME_POLICY_BEGIN
-    /// One group of the Output op's inputs at once (issue #937): for each `claims[i]` that is not
-    /// `NO_SOURCE_CLAIM`, `planes[i]` becomes [`Self::played_planes`]'s planes for that claim, or
-    /// `silence` on `None` (underrun, end of region). A slot whose claim is `NO_SOURCE_CLAIM`, an
-    /// input read from the arena, keeps what the caller put there. Entries past the shorter of
-    /// the two slices are not visited.
-    ///
-    /// Provided, and deliberately not overridden: in this body `self.played_planes` is a static
-    /// call into the implementor's own method, so the set's claim-index and quantum checks run for
-    /// every claim exactly as they do one input at a time, and the reader makes one dynamic call
-    /// per group instead of one per input. The driver is still asked once per claim, through its
-    /// unchanged public trait. Realtime: no allocation, lock or syscall.
-    fn played_planes_group<'s>(
-        &'s self,
-        claims: &[u32],
-        silence: (&'s [f32], &'s [f32]),
-        planes: &mut [(&'s [f32], &'s [f32])],
-    ) {
-        for (slot, &claim) in planes.iter_mut().zip(claims) {
-            if claim == runtime::NO_SOURCE_CLAIM {
-                continue;
-            }
-            *slot = match self.played_planes(claim as usize) {
-                Some(played) => {
-                    #[cfg(any(test, feature = "test-support"))]
-                    runtime::test_only_count_source_plane(1);
-                    played
-                }
-                None => {
-                    #[cfg(any(test, feature = "test-support"))]
-                    runtime::test_only_count_source_plane(2);
-                    silence
-                }
-            };
-        }
-    }
-    // REALTIME_POLICY_END
 }
 
 /// A graph-owned, coordinator-only source-set capability.
@@ -2570,9 +2530,9 @@ impl GraphExecutor {
             plan.track_delays,
             frames,
         );
-        // Issue #918: the claims a bank's gather, or the Output op's fused reduction (issue #927),
-        // may read in place, in claim order. Only a driver that lends its played planes offers
-        // any, and `build_sequential` decides which of them are bound in place.
+        // Issue #918: the claims a bank's gather may read in place, in claim order. Only a driver
+        // that lends its played planes offers any, and `build_sequential` decides which of them
+        // are bound in place.
         // `test_only_set_source_in_place_declined` offers none, which binds the path every claim
         // took before issue #918.
         let lent_claims: Vec<GraphNodeId> = source_set
@@ -2620,14 +2580,6 @@ impl GraphExecutor {
             source_input_buffers,
             active_units,
         }
-    }
-
-    /// Routes this bind retired into the session Output op's fused reduction (issue #926). A
-    /// count, like `bank_route_folds`: the fold renders the same bits, so only a count can say
-    /// whether it fired.
-    #[cfg(test)]
-    fn output_route_folds(&self) -> u64 {
-        self.runtime.output_route_folds()
     }
 }
 
@@ -2717,8 +2669,8 @@ impl PreparedPlanExecutor for GraphExecutor {
                 host.silence();
                 return Err(error);
             }
-            // A claim bound in place is not in this list: its bank's gather (issue #918) or the
-            // Output op's fused reduction (issue #927) reads the played block's planes.
+            // A claim bound in place is not in this list: its bank's gather reads the played
+            // block's planes (issue #918), or nothing reads it.
             for &(claim, buffer) in source_input_buffers.iter() {
                 #[cfg(any(test, feature = "test-support"))]
                 runtime::test_only_count_source_copy();
