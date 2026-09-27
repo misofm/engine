@@ -117,3 +117,65 @@ As slice 1.
 * **The mono body has its own link call.** `frames_loop_mono` evaluates `link_frame(main, main)`.
   Slice 5 owns that call; do not touch it here.
 
+
+## Attempt 1 evidence
+
+Implementer attempt 1, 2026-09-27. Per the verification ("implemented together with #983; closes
+with it"), this slice lands in #983's commit on branch `codex/981-compressor-settled-body`.
+
+### The change
+
+`crates/compressor/src/kernel.rs` only. `settled_detect::<L, DUAL_MONO>(main_left, main_right,
+invariants)` returns `(main_left.abs(), main_right.abs())` when `DUAL_MONO`, and
+`link_frame(Detector::Main, 0, main_left, main_right, invariants)` otherwise. It is called only in
+pass 1 of #983's two-pass body, never in a loop that also carries the recurrence.
+`settled_main` sets `dual_mono = matches!(link, LinkMode::DualMono)` once per block from the
+prepared `metadata.link_mode`, never from data. Four settled instantiations per width.
+
+**Why it is exact.** Under DualMono `Invariants::new` makes `linked` the all-zero mask, and
+`select` is bitwise on every backend, so `link_frame` returns `magnitude = source.abs()` with
+`source = main` for `Detector::Main`. The arm computes the same sign-bit operation on the same
+word: equal bits for every input, NaN included. No relaxation.
+
+### Gates
+
+* **Gate 1**: the grid and the randomized differentials cover `DualMono`, `Maximum` and `Average`
+  with the hostile input, at `f32`, `Simd4` and `Simd8`, dev and release, by bits (with #982's
+  "both NaN" rule on its arm only).
+* **Gate 2**: the digests of slices 1-3 unchanged (`57cfd7ce...`, `cd2d5b11...`, `47ffff05...`);
+  slice 1's scenario includes DualMono and Maximum, slice 3's all three modes.
+* **Gate 3**: `cross_target` (all four cases), `identity::average_link_is_two_products_and_an_add`,
+  `partition::linked_sidechain_partitions_are_invariant`, `lane_identity`, `mono_collapse` green.
+* **Gate 4**: all 30 console digests identical to B0.
+* **Gate 6**: browser checks PASS, as #983's evidence records; the artifact with four settled
+  instantiations per width is 3,360,990 bytes (+15,375 over B0), and the compressor dual roster
+  row still matches exactly one function (vector 516, scalar 0). Toolchain, other crates, wasm and
+  policy gates: #983's table.
+
+### Mutations (gate 5)
+
+`MUTATIONS.md`, section "#983 and #984": M1 (arm for every link mode) 11 red, including
+`cross_target` and `identity::average_link_is_two_products_and_an_add`; M2 (`(|left|, |left|)`)
+15 red; M3 (arm never taken) applied and GREEN everywhere, recorded as performance-only.
+
+### Codegen (gate 7, recorded)
+
+x86 `Simd8` release, pass 1 of the DualMono-wet instantiation: one `vandps` (abs, a load-op) per
+channel feeding the level floor's `vmaxps` directly, with no `vblendvps` before it:
+
+```
+vmovaps 0x100(%rsp),%ymm8
+vandps  0x0(%r13,%rsi,1),%ymm8,%ymm1     # |left|
+vmaxps  %ymm9,%ymm1,%ymm1                # level floor
+...
+vandps  (%r15,%rsi,1),%ymm8,%ymm8        # |right|
+vmaxps  %ymm9,%ymm8,%ymm8                # level floor
+```
+
+Opcode counts, DualMono against linked pass 1 (same `WET` arm): `vblendvps` 2 against 5 (the
+remaining two are the knee's), `vmulps` 20 against 22, `vaddps` 16 against 17, `vmaxps` 8 against
+9; 100 against 108 instructions per frame. Under V8: 122 against 134.
+
+### A/B
+
+Measured once as the set #981-#985 against a separately built B0; see #985's evidence.

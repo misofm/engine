@@ -178,3 +178,87 @@ bank both ways rather than by arguing that the bypass is per plane inside the ke
 
 `lookahead_ms` and `delay` are on the copy list and are **not** individually red: no rendered block
 writes them. See `copy_state_from`'s doc for why they are copied anyway.
+
+## Issues #981-#985 — the settled-body rewrite
+
+`kernel::settled_body_tests` (in `src/kernel.rs`) is the gate for this series. It keeps the kernel
+as it stood before #981 -- `process_block`, `process_block_mono` and their one-pass `frames_loop`
+bodies, verbatim -- as `settled_body_tests::reference`, and compares the production kernel with it
+block by block: every output word, the recursive words, every coefficient word and every ramp
+field, then the `finish_channel` masks and the same words again after the boundary check. Its
+three kinds of gate are the deterministic grid (`the_settled_body_is_the_base_body_*`), the seeded
+randomized differential (`randomized_differential_{f32,simd4,simd8}`, dual and collapsed), and the
+`scenario_*` digests, each pinned on the unmodified base `197db1c9` before its slice landed.
+
+Driver: one mutation at a time, `CARGO_INCREMENTAL=0 cargo test --locked -p compressor
+--no-fail-fast` (dev), every red test recorded, tree restored before the next row. Host: `x86_64`
+(AMD EPYC 7313P, Zen 3), workspace `.cargo/config.toml` pin `-C target-feature=+avx2,+fma`.
+"Gate 1" below means the grid and all three randomized differentials.
+
+### #981 — the chunked settled body, recursive words in locals
+
+| # | mutation | red |
+|---|---|---|
+| 981-M1 | the recursive words are never written back to their channels | gate 1, `scenario_981_heterogeneous_hostile_render_is_pinned`, `cross_target`, and 22 more tests across `conformance`, `identity`, `lane_identity`, `mono_collapse`, `nonfinite`, `observation`, `oracle`, `partition` and `ramps` (27 red) |
+| 981-M2 | `start` is ignored: the settled slice begins at frame 0 | gate 1, `scenario_981_*`, `cross_target`, `lane_identity::bank_matches_scalar_per_lane_bits`, `partition::block_partitions_are_invariant`, `partition::bank_block_partitions_are_invariant`, and three `ramps` tests (12 red) |
+| 981-M3 | every detector takes `settled_main`, so `Silent` and `Sidechain` blocks read the main input | gate 1 (its `Silent` and `Sidechain` cases under a quiet main), `contract::links_are_exact_and_connected_sidechain_is_distinct_from_main_detection`, `nonfinite::a_nan_in_the_sidechain_alone_is_clamped_to_the_level_floor` (6 red). Neither `causality` nor `partition::linked_sidechain_partitions_are_invariant` went red, which is why the grid carries the sidechain cases |
+| 981-M4 | the right channel's `one_frame` updates the left recursive word (`&mut gain_left`), the verification's replacement for "right before left" | gate 1, `scenario_981_*`, `cross_target`, `lane_identity`, four `mono_collapse` tests, two `nonfinite`, `observation`, `oracle` and two `ramps` tests (17 red) |
+
+The brief's original M4, "right is processed before left", is not recorded as a gate: the
+verification applied it and it is equivalent (the two channels' recurrences share nothing), which
+is the same independence #983's pass 2 relies on.
+
+### #982 — the all-wet arm, `input * gain`
+
+Gate 1 compares NaN words as "both NaN" only in a block whose witness `SETTLED_WET_BLOCKS` says the
+arm ran, and then requires `finish_channel` to have rejected that channel; everything else, and
+everything after the boundary check, compares by bits. Gate 1 also asserts the witness moved
+exactly when the block was an all-wet, unbypassed, settled `Main` block, so the grid and the
+differentials see dispatch as well as bits.
+
+| # | mutation | red |
+|---|---|---|
+| 982-M1 | the arm ignores `bypass` | `identity::bypass_preserves_exact_dry_bits_at_sample_zero`, gate 1 (`the_all_wet_arm_is_the_base_body_on_all_wet_tables`, the three differentials), gate 3, `conformance`, `contract::every_launch_rate_processes_scalar_and_supported_bank_at_zero_latency`, `mono_collapse::a_statically_bypassed_bank_collapses_to_the_dual_bits` (9 red) |
+| 982-M2 | the arm is taken when any lane is wet (`mask_any`) | gate 1 on the mixed corpus banks (`the_settled_body_is_the_base_body_on_the_corpus_table`, `randomized_differential_simd4`/`_simd8`), gate 3, `scenario_981_*`, `cross_target`, `lane_identity::every_width_produces_the_same_words` (7 red) |
+| 982-M3 | the arm drops `+ makeup` | gate 1, `scenario_982_all_wet_render_is_pinned`, `cross_target` (its `f32` lane 7 has mix 1 and makeup 6), `lane_identity::every_width_produces_the_same_words` (7 red). `oracle` stays green, as the verification found |
+| 982-M4 | the arm is never taken | gate 3 (`the_all_wet_arm_is_taken_exactly_when_every_lane_is_wet`) and gate 1's dispatch assertion (5 red). No bit-exactness test can see it: it is a performance-only regression |
+| 982-M5 | only the left channel's mask is tested | gate 3's "only the right channel has a non-wet lane" case, and gate 1 (5 red) |
+
+### #983 and #984 — the two-pass settled body and its DualMono detector arm
+
+Gate 1's grid gained the 97-frame count, so its settled bodies start at frames 0, 1, 18 and 40 of
+blocks of 1, 7, 31, 32, 33, 97 and 128 frames: chunks that are short, exact, and misaligned to the
+block. `scenario_983_chunk_straddling_render_is_pinned` adds blocks of 31, 32, 33, 64, 97 and 128
+frames with ramps ending at frame 40.
+
+| # | mutation | red |
+|---|---|---|
+| 983-M1 | pass 2 reads `targets[k + 1]` (`targets.iter().cycle().skip(1)`) | gate 1, all three scenarios, `cross_target`, `partition` (both), `lane_identity`, four `mono_collapse`, `conformance`, `contract` and two `ramps` tests (20 red) |
+| 983-M2 | the last, short chunk is skipped (`chunks_exact_mut` on the outer loop) | gate 1, all three scenarios, `cross_target`, `partition::block_partitions_are_invariant`, `partition::bank_block_partitions_are_invariant`, `conformance`, `contract` (13 red) |
+| 983-M3 | pass 1 runs only for the first chunk; later chunks reuse its targets | gate 1, all three scenarios, `cross_target`, `partition` (both), `lane_identity`, `conformance` and three `ramps` tests (16 red) |
+| 983-M4 | `gl` and `gr` swapped in pass 2 | gate 1, all three scenarios, `cross_target`, `lane_identity`, two `nonfinite`, `conformance` and two `ramps` tests (15 red) |
+| 984-M1 | the `abs` arm is taken for every link mode | gate 1, all three scenarios, `cross_target` (`maximum_link`, `average_link`), `identity::average_link_is_two_products_and_an_add`, `contract::links_are_exact_and_connected_sidechain_is_distinct_from_main_detection` (11 red) |
+| 984-M2 | the arm returns `(|left|, |left|)` | gate 1, all three scenarios, `cross_target`, `lane_identity`, `nonfinite`, `conformance`, `contract` and two `ramps` tests (15 red) |
+
+### Equivalent and performance-only mutations (applied, GREEN, recorded)
+
+| # | mutation | why it survives |
+|---|---|---|
+| 984-M3 | the `abs` arm is never taken (`dual_mono = false`) | Applied and run: **GREEN** in every test, and necessarily so: the arm's bits are `link_frame`'s under DualMono (the `linked` mask is all zero and `select` is bitwise). It is a performance-only regression, caught by the recorded codegen evidence (#984 gate 7: DualMono pass 1 loads `abs` straight into the level floor with no link `vblendvps`), not by a test, as #944's M2 was |
+
+### #985 — the collapsed body's settled rewrite
+
+From #985 on, gate 1's collapsed half (`Mono::block` in the grid and the differentials) applies the
+same witness-keyed "both NaN" rule as the dual half, and the grid runs a third parameter set,
+`COMPRESSING_TRACKS`.
+
+| # | mutation | red |
+|---|---|---|
+| 985-M2 | the short last chunk is skipped (`chunks_exact_mut` on the outer loop), the verification's replacement for "the body reads the right plane", which cannot be written | gate 1 (its 31-, 33- and 97-frame blocks: the grid on every table and the three differentials), `scenario_985_collapsed_render_is_pinned` (7 red) |
+| 985-M3 | the recursive word's write-back is dropped | gate 1, `scenario_985_*`, and four `mono_collapse` tests including `the_collapsed_body_renders_the_dual_bodys_left_plane` (11 red) |
+| 985-M4 | the collapsed wet arm ignores `bypass` | `mono_collapse::a_statically_bypassed_bank_collapses_to_the_dual_bits`, gate 1 (7 red) |
+
+| # | mutation | why it survives |
+|---|---|---|
+| 985-M1 | the Average case takes the `abs` arm in the collapsed body | Applied and run: **GREEN** everywhere, including `mono_collapse::a_halved_subnormal_does_not_come_back` and gate 1's subnormal-only input, and it is equivalent. On one plane `0.5|m| + 0.5|m|` differs from `|m|` only where `0.5|m|` is inexact, which needs `|m| < 2 * f32::MIN_POSITIVE`; the linked value's only consumer is `curve_target`'s `max(detected, 1e-8)` floor, which maps both to `1e-8`, and NaN and `inf` agree. It was red in the retired design because a detector ring stored the linked value (M2-C1). The body keeps `link_frame` for Average and Maximum anyway, as the brief freezes, so the collapsed arithmetic stays the dual body's word for word |
+| 985-M5 | Maximum also takes the `abs` arm | Applied and run: **GREEN**, as the verification predicted: `max(|m|, |m|)` is `|m|` on every backend. Recorded, never listed as red |
