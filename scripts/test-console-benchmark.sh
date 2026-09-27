@@ -11,7 +11,8 @@
 # meter group, and the mixing-automation row's pinned controls, host lowerings, collapse counters
 # and per-effect bit movement -- are properties the suite can actually lose. The same holds for the
 # mixing-automation row's browser arm (`web-mixing-automation-validator.jq`, #1011): its input
-# feed, its provenance, and its two measured rounds' agreement.
+# feed, its provenance, and its two measured rounds' agreement -- and for its runner: a refused run
+# keeps its rounds, no artifact is overwritten, and the provenance is checked after the rounds.
 set -euo pipefail
 [[ "$#" -le 1 ]] || { printf 'usage: %s\n' "$0" >&2; exit 2; }
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -1420,8 +1421,131 @@ web_round_mutation '.measurement_control = "controlled; loadavg 0.01; ceiling 0.
     'browser rounds under two admissibility states'
 web_round_mutation '.cpu_affinity = "30"' 'browser rounds on two CPUs'
 
+# ---------------------------------------------------------------------------------------------
+# The browser arm's runner (`run-web-mixing-automation-benchmark.sh run`, #1011 follow-up): what it
+# keeps, what it refuses to overwrite, and what it checks again after the rounds. Nothing is timed.
+# Each case runs the real runner in a throwaway git repository whose harness is a stub: it prints
+# the base round above for each launch, after doing to the run the one thing the case is about.
+# ---------------------------------------------------------------------------------------------
+runner_tmp=$(mktemp -d)
+trap 'rm -rf -- "$runner_tmp"' EXIT
+web_template=$(printf '%s' "$web_round" | jq -c 'del(.candidate_commit, .prepared_commit, .measurement_control, .cpu_affinity)')
+runner_git() { git -C "$1" -c user.name=runner-test -c user.email=runner-test@invalid "${@:2}" >/dev/null 2>&1; }
+# A repository carrying the runner and its validators, committed, and a prepared work directory
+# whose provenance names that commit.
+runner_fixture() {
+    local case_dir="$runner_tmp/$1" repo work
+    repo="$case_dir/repo"
+    work="$case_dir/work"
+    mkdir -p "$repo/scripts" "$work"
+    cp -- "$scripts_dir/run-web-mixing-automation-benchmark.sh" "$scripts_dir/check-bench-preconditions.sh" \
+        "$scripts_dir/web-mixing-automation-lib.jq" "$scripts_dir/web-mixing-automation-validator.jq" \
+        "$scripts_dir/console-benchmark-record-lib.jq" "$repo/scripts/"
+    printf '%s\n' "$web_template" >"$repo/round.json"
+    printf 'tracked\n' >"$repo/tracked.txt"
+    cat >"$repo/scripts/web-mixing-automation-benchmark.mjs" <<'STUB'
+// Stub harness: prints the template round, after the one disturbance its case names.
+import { appendFileSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+const repo = new URL("../", import.meta.url).pathname;
+const [, , mode, module, controls, round] = process.argv;
+const plan = JSON.parse(readFileSync(`${repo}case.json`, "utf8"));
+appendFileSync(`${repo}launches`, `${round}\n`);
+const record = JSON.parse(readFileSync(`${repo}round.json`, "utf8"));
+record.round = round === "warmup" ? 0 : Number(round);
+if (round === "2") {
+  const git = (...args) => execFileSync("git", ["-C", repo, "-c", "user.name=stub", "-c", "user.email=stub@invalid", ...args]);
+  if (plan.disturb === "disagree") record.automated_output_sha256 = "c".repeat(64);
+  if (plan.disturb === "race") {
+    mkdirSync(`${repo}artifacts/steps/${plan.step}`, { recursive: true });
+    writeFileSync(`${repo}artifacts/steps/${plan.step}/web-mixing-automation.jsonl`, "concurrent\n");
+  }
+  if (plan.disturb === "head") git("commit", "--allow-empty", "-q", "-m", "moved");
+  if (plan.disturb === "tracked") appendFileSync(`${repo}tracked.txt`, "edited\n");
+  if (plan.disturb === "module") appendFileSync(module, "x");
+  if (plan.disturb === "provenance") {
+    const provenance = `${module.slice(0, module.lastIndexOf("/"))}/provenance.json`;
+    writeFileSync(provenance, readFileSync(provenance, "utf8").replace(/"module_sha256": "[0-9a-f]{64}"/, `"module_sha256": "${"0".repeat(64)}"`));
+  }
+}
+if (mode !== "run") process.exit(2);
+process.stdout.write(`${JSON.stringify(record)}\n`);
+STUB
+    runner_git "$repo" init -q
+    runner_git "$repo" add -A
+    runner_git "$repo" commit -q -m fixture
+    printf 'module bytes\n' >"$work/host_web.wasm"
+    printf '{"controls":[]}\n' >"$work/controls.json"
+    jq -n --arg commit "$(git -C "$repo" rev-parse HEAD)" \
+        --arg module "$(sha256sum "$work/host_web.wasm" | awk '{print $1}')" \
+        --arg controls "$(sha256sum "$work/controls.json" | awk '{print $1}')" \
+        '{commit: $commit, module_sha256: $module, controls_sha256: $controls}' >"$work/provenance.json"
+    jq -n --arg disturb "$2" --arg step "$1" '{disturb: $disturb, step: $step}' >"$repo/case.json"
+    printf '%s' "$case_dir"
+}
+# Runs the fixture's runner; its combined output goes to `$case_dir/output`, its status is returned.
+runner_run() {
+    local case_dir=$1
+    MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1 bash "$case_dir/repo/scripts/run-web-mixing-automation-benchmark.sh" \
+        run "$case_dir/work" --step "$(basename "$case_dir")" >"$case_dir/output" 2>&1
+}
+runner_expect() {
+    if ! eval "$2"; then printf 'expected runner behaviour: %s\n' "$1" >&2; failures=$((failures + 1)); fi
+}
+lines() { if [[ -f "$1" ]]; then wc -l <"$1"; else printf 0; fi; }
+
+# The control: undisturbed, the runner writes the two measured records and nothing else.
+case_dir=$(runner_fixture valid none)
+artifacts="$case_dir/repo/artifacts/steps/valid"
+runner_run "$case_dir" && status=0 || status=$?
+runner_expect 'an undisturbed run succeeds' '[[ $status == 0 ]]'
+runner_expect 'an undisturbed run launches warmup, 1 and 2' '[[ "$(tr "\n" " " <"$case_dir/repo/launches")" == "warmup 1 2 " ]]'
+runner_expect 'an undisturbed run writes two records' '[[ $(lines "$artifacts/web-mixing-automation.jsonl") == 2 ]]'
+runner_expect 'an undisturbed run keeps no refused records' '[[ ! -e "$artifacts/web-mixing-automation.refused.jsonl" ]]'
+
+# Finding 1: a refusal after the rounds keeps what was measured, and says why.
+case_dir=$(runner_fixture disagree disagree)
+artifacts="$case_dir/repo/artifacts/steps/disagree"
+runner_run "$case_dir" && status=0 || status=$?
+runner_expect 'rounds that disagree are refused' '[[ $status != 0 ]]'
+runner_expect 'refused rounds publish no record' '[[ ! -e "$artifacts/web-mixing-automation.jsonl" ]]'
+runner_expect 'refused rounds are kept' '[[ $(lines "$artifacts/web-mixing-automation.refused.jsonl") == 2 ]]'
+runner_expect 'a refusal names the disagreeing field' 'grep -q "the rounds disagree on automated_output_sha256" "$case_dir/output"'
+runner_expect 'a refusal is logged' 'grep -q "the rounds disagree on automated_output_sha256" "$artifacts/web-mixing-automation.stderr.log"'
+
+# Finding 2: no artifact is overwritten. An existing one is refused before anything is launched,
+# and one that appears while the rounds run is refused at the write and left as it was.
+for existing in web-mixing-automation.jsonl web-mixing-automation.refused.jsonl web-mixing-automation.stderr.log; do
+    case_dir=$(runner_fixture "existing-${existing//./-}" none)
+    artifacts="$case_dir/repo/artifacts/steps/existing-${existing//./-}"
+    mkdir -p "$artifacts"
+    printf 'earlier\n' >"$artifacts/$existing"
+    runner_run "$case_dir" && status=0 || status=$?
+    runner_expect "an existing $existing is refused" '[[ $status != 0 ]]'
+    runner_expect "an existing $existing is refused before any launch" '[[ ! -e "$case_dir/repo/launches" ]]'
+    runner_expect "an existing $existing is left as it was" '[[ "$(cat "$artifacts/$existing")" == earlier ]]'
+done
+case_dir=$(runner_fixture race race)
+artifacts="$case_dir/repo/artifacts/steps/race"
+runner_run "$case_dir" && status=0 || status=$?
+runner_expect 'a record that appears during the rounds is refused' '[[ $status != 0 ]]'
+runner_expect 'a record that appears during the rounds is not overwritten' '[[ "$(cat "$artifacts/web-mixing-automation.jsonl")" == concurrent ]]'
+runner_expect 'the rounds of a raced run are kept' '[[ $(lines "$artifacts/web-mixing-automation.refused.jsonl") == 2 ]]'
+
+# Finding 3: the provenance is checked again after the rounds, before the record is written.
+for disturb in head tracked module provenance; do
+    case_dir=$(runner_fixture "moved-$disturb" "$disturb")
+    artifacts="$case_dir/repo/artifacts/steps/moved-$disturb"
+    runner_run "$case_dir" && status=0 || status=$?
+    runner_expect "a run whose $disturb changed during the rounds is refused" '[[ $status != 0 ]]'
+    runner_expect "a run whose $disturb changed during the rounds publishes no record" '[[ ! -e "$artifacts/web-mixing-automation.jsonl" ]]'
+    runner_expect "a run whose $disturb changed during the rounds keeps them" '[[ $(lines "$artifacts/web-mixing-automation.refused.jsonl") == 2 ]]'
+done
+rm -rf -- "$runner_tmp"
+trap - EXIT
+
 if [[ "$failures" != 0 ]]; then
     printf 'console benchmark validator suite: %s FAILED case(s)\n' "$failures" >&2
     exit 1
 fi
-printf 'console benchmark validators: PASS (real runner/workload/timing invocations: 0/0/0)\n'
+printf 'console benchmark validators: PASS (real runner/workload/timing invocations: 0/0/0; browser runner on a stub harness, untimed)\n'
