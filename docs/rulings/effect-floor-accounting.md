@@ -241,8 +241,10 @@ physical sections are exactly the kept ones (#976: no identity section is kept a
 dry lane in either channel (a dedicated cut that is the last live section and off on some lanes).
 
 A **refused** block (a `-0.0`, a non-finite word or a word above the bound in either input plane, a
-non-`+0.0` state in a dead section, a `-0.0` or non-finite state in a live one), and every block
-with all six sections live, runs all six in three masked depth-2 passes: **153**.
+non-inert state in a dead section, a `-0.0` or non-finite state in a live one), and every block
+with all six sections live, runs all six in three masked depth-2 passes: **153**. Since #979 a
+dead section's state is inert when every word is `+0.0` or has a magnitude between the flush floor
+and the elision bound; `-0.0` and smaller or larger magnitudes refuse.
 
 This is a source operation count for the stationary cascade, not a timing measurement. Mask
 construction from coefficient words and remaining counters is a bounded block/segment control cost
