@@ -441,3 +441,103 @@ console benchmark remains the batch boundary's.
    `kept = 6`): exact, covered by gate 1's dead-first/middle/last shapes and the 64-mask sweep.
 7. **Not done here:** the artifact repin (batch boundary), the paired console benchmark
    (`scripts/run-console-benchmark.sh` was not run), and the masked tail's `vmaskmovps` (EQ-2).
+
+## Sol attempt 1 verdict: PASS
+
+Reviewer: Sol, 2026-09-27, `git diff 15414bb6..e2f3e46e`. Same host (EPYC 7313P, `rustc 1.97.1`,
+`x86-64-v3`), `CARGO_INCREMENTAL=0`; the base was a `git archive 15414bb6` scratch copy, and every
+scratch harness stayed outside the tree.
+
+### What was checked, independently of the attempt's evidence
+
+1. **Class A, own randomized differential.** A scratch crate linked the base crate (version-bumped
+   copy of `15414bb6`) and the branch's crate into one binary and drove both through the public API
+   in lockstep, comparing every output word, every `ProcessReport`/`BankProcessReport` field and
+   every track's full state payload after every block, bit for bit (NaN-only differences counted
+   separately: none occurred). Scenarios cycle all 64 live-section masks (zero to six live, dead
+   first, middle and last), with random per-lane/per-channel liveness (dry-lane tails), random
+   designs at domain edges, all four launch rates, bypass, ragged 1..128-frame blocks, and hostile
+   input: `+0.0` and `-0.0` blocks, subnormals of either sign, magnitudes up to `2^126`, injected
+   `-0.0`, `+-inf`, quiet and signalling NaN payloads of either sign, `1e30` and the next float above
+   it, `f32::MAX`. Between blocks: prepared-target retunes and HPF/LPF toggles (ramps), snapshots
+   restored into the same or another lane with hostile finite integrators (`-0.0`, subnormals,
+   `+-3e38`), both reset kinds, raw spans, and mono/dual switches with `desymmetrize_channels`.
+   Legs: scalar (`W = 1`), native bank dual and collapsed mono.
+   - native `Simd8`, release (fat LTO): 60,000 scenarios, 5,071,159 blocks, 0 differences;
+   - native, dev: 9,000 scenarios, 760,381 blocks, 0;
+   - wasm32 `+simd128` (`Simd4` banks) under Node 22, release: 60,000 scenarios, 5,065,290 blocks, 0;
+     dev: 4,500 scenarios, 380,910 blocks, 0; `--cfg miso_wasm_simd8` (`Simd8` in wasm): 15,000
+     scenarios, 1,266,340 blocks, 0;
+   - coverage build (`test-support` on the new arm only): 48,188 select-free tails in 1,920 wasm
+     scenarios and 4,810 in 192 native ones, so the new arms are reached.
+   - Discrimination: pointed at a copy with the dual tail moved before the pairs, or with the tail's
+     right state written from the left, the same harness reported differences within the first
+     seeds.
+2. **Gate 1.** On the base `lib.rs`, the committed `tests/bank.rs` prints `81015a5c…`, `247bc0b6…`,
+   `e9041804…`, and `e5fb8ac8`'s version prints `e57233ea…`, `d6c46894…`, `3821224f…`, each in dev
+   and release: both pin sets are base values. The branch reproduces both sets (dev, release, with
+   and without `test-support`), and the tail counts match the table above. The re-pin cause is real:
+   `block % 8 == 3` makes `block % 2 == 1`, so the first version's `-0.0` was always on the right
+   plane.
+3. **The five pins.** The branch's implementation with the base `elision` module swapped back in
+   fails exactly `the_two_channels_are_judged_together`, `the_shipped_shape_actually_elides`,
+   `a_section_live_on_one_lane_is_not_elided`, `a_negative_zero_input_refuses_elision` and
+   `a_non_finite_or_oversized_input_refuses_elision` (27 passed, 5 failed, dev and release). Each new
+   value is `kept = live` on an admissible input and state: `popcount(left | right)`; 1, 2, 0, 3;
+   1 and `ran == 1`; 1 for the `+0.0` arm; 1 for `1e29`.
+4. **Wasm.** `host-web` built with the build script's cargo line reproduces the recorded digests
+   exactly (base `a3ab44f4…`, after `dc01d9e5…`). Kernel shape: kernels 14 before and after, EQ dual
+   240 -> 312, collapsed 120 -> 156, every other roster row unchanged; render callgraph closure 8,
+   traps 5, one trap owner, identical; `meter_poll` and `command_submit --allocation-only` identical.
+   The `wasm-console-guest` (`+simd128`, release) fed `console_workload::source_block` words (the
+   wasm-console host's staging) renders all 15 rows identically at both commits, and each equals the
+   native digest. Native: all 45 row digests (15 rows x three backends) identical before and after
+   and equal to the table above.
+5. **Floor.** 27 is an executed count, not a copy. Every one of the 64 tracks of the three standing
+   fixtures enables only band 1 as a bell, so a bank has one live section, a general band, never dry:
+   an admitted block runs one select-free depth-1 tail. The release `bench` binary's loop at
+   `0x41909f-0x4191bf` is 56 instructions with 48 vector arithmetic per two streams (`vaddps` 20,
+   `vmulps` 14, `vandps`/`vcmplt_oqps`/`vandnps` 4 each, `vsubps` 2), which is 24 per stream: 19 for
+   `svf_step` and 5 for the mix. Add the 3-op boundary scan and the result is 27. The pair is 2 x 25 + 3 = 53, the old value, so the
+   formula `25 * 2 * floor(active / 2) + 24 * (active mod 2) + 3` (tail 25 with a dry lane; 153
+   refused or all live) matches the code. `floor.rs`, the jq file and the ruling agree: EQ 27, strip
+   307, 0.912 and 10.372 cycles. `cargo test -p bench` (64 passed) and
+   `scripts/test-console-benchmark.sh` pass. Verdict on the unruled change: **correct.** The ruling
+   ties the EQ floor to the executed kept-section inventory ("this inventory must follow that
+   implementation"). The padding section was never required arithmetic. So this is an inventory
+   correction, not a class-B policy call.
+6. **A/B.** Built outside the lock, each run one hold of `flock … taskset -c 31`, arms alternated
+   three times; same shape as recorded (host load 7): base isolate 14.87 / 15.13 / 14.78 us, after
+   9.11 / 8.87 / 9.24 us.
+7. **Toolchain.** fmt; clippy `--workspace --all-targets --all-features -D warnings`; doc
+   `-D warnings`; `parametric-eq` 102 passed / 2 ignored in dev and release, with and without
+   `test-support`; `effect-runtime` 86; `console-workload` 39 and `chain_shape` release 23;
+   `builtins-compiler --features test-support` 79; `bench` 64; `wasm-gates` 9; lane policy,
+   realtime policy (57 regions), EQ render contract, console benchmark validators: all green. M2 and
+   M3 re-applied to the branch reproduce the recorded red (`757d054f…`/`5d2fa266…`; the counter). No
+   shipped host or benchmark binary enables `parametric-eq/test-support`.
+
+### Findings, most severe first (none blocks)
+
+1. **LOW, stale comment:** `crates/parametric-eq/src/lib.rs:1504-1505` still says the depth "keeps
+   the final LPF in a complete pass while retaining one fixed interleaved kernel shape". Neither is
+   true now: an odd tail can be the LPF alone at depth one, and the schedule has depth-1
+   instantiations. It is disclosed (deviation 1) and outside the authorized functions. Fix it with
+   EQ-2.
+2. **LOW, stale literal outside scope:** `scripts/test-console-benchmark.sh:580-581` still costs the
+   metered-row mutation at `333` "the unmetered strip inventory", which is now 307. The case still
+   rejects for the right reason, because a metered row may state no floor, so no gate is weakened. Only the
+   label and literal are stale. File a follow-up.
+3. **LOW, evidence defect, superseded:** the gate-3 wasm table (this file, lines 295 and 301) gives
+   `sixty_four_track_console` and `sixty_four_track_idle` the same guest digest `43574fed…`, while
+   their native digests differ (`fe5bed9b…`, `de2f2560…`). The digest-only Node driver staged the
+   wrong input for one of those rows (VERIFY-EQ's inherited twin), so that pair did not show what it
+   claims. Item 4 above replaces it.
+4. **INFO, scope:** the ruling edits outside "EQ inventory" (the #368/#805 authority line, the
+   derived-floor rows, the mono paragraph, the standing-table and Boundary 3 notes) exceed the
+   brief's literal path list. They are disclosed (deviation 2), and they are necessary so the ruling
+   does not contradict `floor.rs`. Accepted.
+5. **INFO, evidence wording:** line 341's "the growth is exactly two inlined depth-1
+   instantiations" holds for the two roster kernels (+72, +36). The module total's other +16 is
+   `PreparedParametricEq<f32, 1>::process` (24 -> 40 `f32x4` ops, autovectorised scalar tail). It is
+   not a roster kernel and not a gate.
