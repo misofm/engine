@@ -540,3 +540,10 @@ The console benchmark was not run.
    3 × 2^32 sweeps: 7.6 s on 4 threads here, and about twice that on a 2-core runner. The `f32` arm
    (3.8 s) exceeds the brief's "cover". It is acceptable, and it is the first thing to trim if that
    job's budget tightens.
+
+## Coordinator follow-up after Sol attempt 1 PASS (2026-09-27)
+
+Sol's low finding 1 is closed before merge: the `LaneF64` doc now names DAZ (a subnormal input read
+as zero) beside FTZ. Low finding 2 (`tools/wasm-gates/tests/g6_full_corpus_ftz.rs` does not assert
+the new `f64_lane_mismatches` count) is outside this issue's authorized paths and is carried by
+#950, whose gates already cover the wasm-gates corpus.

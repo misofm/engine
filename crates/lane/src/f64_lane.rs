@@ -62,7 +62,8 @@ use crate::Lane;
 ///   And `wide`'s `mul_add` is never forwarded. `e.add(w.mul(w))` is two roundings on every
 ///   backend.
 /// * The floating-point environment matters, exactly as `wide_impl.rs`, "The one precondition",
-///   records for `f32`: under x86 `MXCSR.FTZ` a subnormal result would flush to zero. Every native
+///   records for `f32`: under x86 `MXCSR.FTZ` a subnormal result would flush to zero, and under
+///   `MXCSR.DAZ` a subnormal input would be read as zero. Every native
 ///   render entry installs the canonical environment, with FTZ and DAZ clear, through
 ///   [`crate::fpenv::CanonicalFpEnv`] (issue #146); AArch64 clears `FPCR` the same way, and wasm
 ///   has no flush mode.
