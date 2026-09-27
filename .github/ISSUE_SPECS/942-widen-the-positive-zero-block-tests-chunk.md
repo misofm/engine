@@ -186,3 +186,78 @@ block is still 0.54 ns slower than today's 5.39 ns, so it would also fail a stri
 input" gate. Any shape that reads more than one 32-word chunk, or adds a split, before a live
 block's first exit pays for it on wasm. A rescope has to either accept a bounded live-block cost
 explicitly or leave the predicate as it is.
+
+## Attempt 2 evidence
+
+**Verdict: STOP on the bounded gate 3. The predicate change is not committed; `bank.rs` is back to
+`HEAD`.** The rescoped shape meets the live-block bound on both targets and the 1,024-word bound on
+both, but a 128-word silent block is only 22.9 % faster than today on wasm (the bound is 25 %), and
+on x86 the result swings between 21.4 % and 33.4 % with code layout between builds. Gates 1, 2, 4, 5
+and 6 were not run in the repository, because the coordinator's instruction was to stop before
+committing the code if the bounded gate failed.
+
+### Change measured
+
+`block_is_positive_zero`: `let (head, rest) = io.split_at(io.len().min(32));` then return `false` if
+`or_bits(head) != 0`, then `for chunk in rest.chunks(128)` with the same early exit. `or_bits` is a
+private `#[inline]` helper holding today's fold unchanged (`bits |= value.to_bits()`). The doc
+comment's chunk-size sentence was the only prose change. No `unsafe`, no intrinsics, no
+`chunks_exact`.
+
+### Harness
+
+The same throwaway harness as attempt 1, in a scratch directory and deleted afterwards. It uses the
+same profile and flags and is pinned to one core. There are four arms: `today` (a verbatim
+`chunks(32)` replica), `chunks(128)` (the attempt-1 replica), `head+128` (the real crate function
+through a path dependency) and `floor` (the same call and loop around a function that only tests
+`is_empty`). Arms rotate within each round. The x86 values are the minimum of 40 x 2,000 calls. The
+wasm values are the minimum of 30 x 20,000 calls in Node v22.23.2. There were five runs across two
+builds.
+
+### Timing (per call)
+
+| input | today | `chunks(128)` | head+128 | harness floor |
+|---|---:|---:|---:|---:|
+| x86 128 silent | 26.6-29.0 tsc | 13.7-14.5 | 19.3-20.9 | 4.8 |
+| x86 1,024 silent | 201-205 tsc | 81.4-87.9 | 90.3-92.7 | 4.8 |
+| x86 live 1,024 | 10.5-12.1 tsc | 13.7-14.5 | 9.7-10.5 | 4.8 |
+| wasm 128 silent | 16.43 ns | 11.32 ns | **12.66 ns** | 3.14 ns |
+| wasm 1,024 silent | 119.4-120.0 ns | 73.7-73.8 ns | 71.3-71.5 ns | 3.14 ns |
+| wasm live 1,024 | 5.39 ns | 11.05 ns | 5.93 ns | 3.14 ns |
+
+x86 TSC runs at 3.0 GHz, so 1 ns is 3 tsc. The two x86 builds were paired as follows: build A had
+today at 26.6 and head+128 at 20.9 (21.4 % faster); build B had today at 29.0 and head+128 at 19.3
+(33.4 % faster). The wasm numbers did not move between runs or builds.
+
+Bounded gate 3, per call:
+
+| bound | x86 | wasm |
+|---|---|---|
+| live at most today + 1 ns | pass (0.3 ns faster) | pass (+0.54 ns) |
+| 1,024 silent at least 25 % faster | pass (54-55 %) | pass (40 %) |
+| 128 silent at least 25 % faster | **layout-dependent (21.4-33.4 %)** | **FAIL (22.9 %)** |
+
+The 128-word miss comes from the shape itself. A 128-word block under head+128 still pays two
+reductions (the head and one 96-word chunk), against today's four. Only `chunks(128)` alone pays
+one, and it fails the live bound. Moving the head's size does not change the count of two. With the
+harness floor subtracted (a descriptive figure only, not the gate as written), the wasm 128-word
+saving is 28.4 % (13.29 to 9.52 ns). Whether that is what the bound means is a coordinator ruling.
+
+### Disassembly (requirements met)
+
+- x86 (`objdump -d -M intel`). The head loop is 2 x `vpor ymm` per 16-word step, then one
+  reduction. The wide loop is 4 x `vpor ymm` per 32-word step with no reduction inside it, and one
+  `vextracti128`/`vpshufd`/`vmovd` reduction per 128-word chunk. Scalar `or r32, DWORD` appears only
+  in the two remainder loops.
+- wasm (`wasm-objdump -d`, wabt 1.0.34). Each of the two loops is `v128.load` + `v128.or` per
+  4 words, followed by one `i8x16.shuffle`/`v128.or`/`i32x4.extract_lane` reduction.
+  `i32.const 32` bounds the head and `i32.const 128` bounds the chunks. `i32.or` appears exactly
+  twice, once in each remainder loop, with no chain.
+
+### Gate 1 shape (harness only)
+
+The harness compared all three shapes with `io.iter().all(|v| v.to_bits() == 0)` on 578,841 blocks.
+Lengths ran over 0..=2,100. The patterns were `-0.0`, the smallest subnormal, a quiet NaN and
+`1.0`. Each was placed at the first word, the last word, every 32-word boundary (the last word of the
+head, the first word of each wide chunk and the last word of each wide chunk), and two seeded
+random positions. Every block agreed.
