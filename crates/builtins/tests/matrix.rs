@@ -652,7 +652,9 @@ fn fused_fader_matrix_shapes_render_the_base_bits() {
 /// folded into one SHA-256, pinned at the unmodified base (`e0f25bb6`) in dev and release.
 ///
 /// Red mutation (issue #954 M1, `MUTATIONS.md`): the fused dispatch always select-free moves the
-/// digest through the identity track's `-0.0`.
+/// digest through the identity track's `-0.0` at the `process_fader_matrix` site. At the
+/// `BuiltinChain` site the chain's input stage has already turned `-0.0` into `+0.0`, so this test
+/// cannot see M1 there; that site is tools-only, and the dispatch witness (M5) guards it.
 #[test]
 fn scalar_fused_fader_matrix_renders_the_base_bits() {
     const BASE_DIGEST: &str = "c51310190d189b0432ae56f97e331ee79a9e2c1dd222b5cccc086b4abbcaaafe";

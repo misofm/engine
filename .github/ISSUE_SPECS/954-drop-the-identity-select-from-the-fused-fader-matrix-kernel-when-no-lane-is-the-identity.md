@@ -176,7 +176,9 @@ render closure (8 members, 5 traps) are unchanged.
 ### Deviations
 
 - The amendment-5 scenario is two pinned tests: the banked one A5 names, and a second over the two
-  scalar call sites, which no existing test pins by bits against M1.
+  scalar call sites, pinned by bits. (Corrected after Sol's verdict: the second test catches M1 at
+  `process_fader_matrix` only; at the tools-only `BuiltinChain` site the input stage turns `-0.0`
+  into `+0.0` first, and only the dispatch witness guards that site.)
 - M5 (one call site bypassing the dispatch) was added to the briefed mutations; only the witness
   sees it, as intended.
 - Gate 1's release NaN-payload counts are larger than the verification's (54 at `f32`) because its
