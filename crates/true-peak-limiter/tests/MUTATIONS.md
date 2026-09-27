@@ -387,7 +387,11 @@ gates are this crate's.
 
 ## Issue #996 — the linked pair at session level
 
-The gate is `crates/host-core/tests/limiter_linked_session.rs`
+Superseded as a gate by the next section: #997 moved the test to
+`crates/host-core/src/limiter_linked_session.rs`, extended its scenario and re-pinned it. The rows
+below are #996's record, on #996's scenario.
+
+The gate was `crates/host-core/tests/limiter_linked_session.rs`
 (`the_hot_console_renders_the_pre_990_words_through_link_and_unlink`): the standing 64-track
 console, one noise stream per track, compressors bypassed, fourteen live limiter retargets that
 keep, break and re-equal pairs, 96 blocks. Its digest was pinned on the pre-#990 kernel (this tree
@@ -437,3 +441,81 @@ retried:
   raised their reduction after block 32. They were releasing from the onset transient. With per-track streams
   and the compressors still in circuit, M1 went red, but on only one or two lanes in two of the
   six banks.
+
+  The #996 verification (finding 4) did not reproduce the last sentence: on the committed schedule
+  with the compressors in circuit, it measured M1 moving 26 tracks at +6 to +18 dBFS and 27 tracks
+  at +16 to +22 dBFS, in all six unlinking banks. Read the sentence as a note from an earlier shape
+  of the scenario, not as a reason never to test the standing strip with its compressors.
+
+## Issue #997 — the linked pair at session level, at every width
+
+The gate is `crates/host-core/src/limiter_linked_session.rs`, three unit tests,
+`the_hot_console_renders_the_pre_990_words_at_simd8`, `_at_simd4` and `_at_scalar`. They are unit
+tests so that they can prepare through `prepare_host_runtime_with_console_backend`, the
+`#[cfg(test)]` backend seam in `crates/host-core/src/prepare.rs`. The scenario is #996's with:
+
+* four linked ramps: both channels of every lane of a bank still linked, `ch16`-`ch23` at blocks
+  12 and 60 (ceiling) and `ch48`-`ch55` at blocks 26 (release) and 44 (ceiling);
+* two more unlinks, `ch23` (block 66: lane 7 at W8, lane 3 at W4) and `ch48` (block 85: lane 0
+  at both), each re-equalled later (blocks 90 and 92);
+* #996's `ch37` rows moved to `ch38`, so that the eight retargets that unlink the eight W8 banks
+  land on eight different lanes. At W4 the nine unlinking retargets cover all four lanes.
+
+The test reads every track's bank and lane from the prepared plan and asserts that each lane of
+its width carries an unlinking retarget. Its pin, `6d87267b…`, was recorded on the pre-#990 limiter
+crate (`crates/true-peak-limiter` checked out from `bbcf8ce1` in a scratch tree): `Simd8`,
+`Simd4` and `Scalar` rendered it there in dev and in release, and the head renders it too.
+
+Driver: one mutation at a time, applied to `src/lib.rs`, then
+`cargo test -p host-core --lib limiter_linked_session` (dev profile), then the file restored with
+`git checkout` and checked byte-identical to `HEAD` by SHA-256. Every row is red at every width.
+Every row was also run at eight noise seeds (the pinned `0x0996`, and `0x0997` to `0x099D`)
+through a temporary seed hook, each seed compared with its own unmutated digest. Unmutated, every
+seed passes every check and renders one digest at all three widths, on the base and on the head.
+**Every row is red at eight of eight seeds at every width.**
+
+The cells name the check that fired at the pinned seed. "Equal" is a pair that no one-sided
+retarget reaches parting; "parts nothing" is a one-sided retarget leaving its pair's readings
+equal; "floor" is the limiting floor; "pin" is every check holding and the digest moving.
+
+| # | mutation | `Simd8` | `Simd4` | `Scalar` |
+|---|---|---|---|---|
+| 997-M1 | #990 M1: the mirrored backward pass skips its store into the right ring | equal: `ch00` | equal: `ch00` | pin |
+| 997-K1 | #996 K1: the decision in `process_block` drops `designed_gain_agree` | parts nothing: `ch03`, block 17 | the same | the same |
+| 997-K2 | #996 K2 (#990 M12): the decision is not written back to `gain_linked` | pin | pin | pin |
+| 997-M2 | #990 M2: the box term is not stored into the right box ring | equal: `ch00` | equal: `ch00` | pin |
+| 997-M6 | #990 M6: the required gain is not stored into the right ring at the cursor | equal: `ch00` | equal: `ch00` | pin |
+| 997-M7 | #990 M7: the right box sum is not set from the left at block end | floor: `ch00`, block 28 | floor: `ch00`, block 28 | floor: `ch03`, block 30 |
+| 997-M9 | #990 M9: the right ramps are not set from the left at block end | equal: `ch16` | equal: `ch16` | equal: `ch16` |
+| 997-E0 | `designed_gain_agree` skips lane 0 | parts nothing: `ch48` (lane 0), block 85 | parts nothing: `ch12` (lane 0), block 53 | parts nothing: `ch03`, block 17 |
+| 997-EL | `designed_gain_agree` skips the last lane | parts nothing: `ch23` (lane 7), block 66 | parts nothing: `ch03` (lane 3), block 17 | as E0 |
+| 997-S0 | the mirrored suffix store keeps lane 0's old word | equal: `ch00` | equal: `ch00` | pin (it is M1 at one lane) |
+| 997-SL | the mirrored suffix store keeps the last lane's old word | equal: `ch07` | equal: `ch07` | pin (it is M1 at one lane) |
+
+Digests at the pinned seed, `Simd8` / `Simd4` / `Scalar`: M1 `c8ee529a` / `518c3f81` /
+`d338db89`; K1 `bb2587a0` at all three; K2 `b9582d91` at all three; M2 `84f575ae` / `67574f79` /
+`dd8a7cb6`; M6 `c0a5d943` / `5215c2a8` / `f3f57c56`; M7 `9ddbbba7` / `7501b7eb` / `649439cd`; M9
+`3eefa838` at all three; E0 `e78624a8` / `4fa81c14` / `bb2587a0`; EL `5b25f453` / `a3fcba4c` /
+`bb2587a0`; S0 `6bd80b02` / `490efc8e` / `d338db89`; SL `fc58c8a2` / `b1844d1e` / `d338db89`. A
+row whose defect is per pair (K1, K2, M9) moves the same words at every width. A mirroring row
+moves a bank's untouched lanes once the bank unlinks, so its words depend on which tracks share a
+bank.
+
+M9, E0, EL, S0 and SL are the rows #997 was for:
+
+* **M9** was green at five of eight seeds on #996's one linked-ramp trial. The two first ramps now
+  reach 16 pairs. With a temporary reading dump, under M9 the ceiling ramp parts three to five of
+  `ch16`-`ch22` and the release ramp six or seven of `ch49`-`ch55`, at each of the eight seeds,
+  identically at every width (`ch23` and `ch48` are left out of the count because they part by
+  design later).
+* **E0 and EL** are the #996 verification's X4 and X3, which were green at W8 because no
+  retarget unlinked a W8 bank from lane 0 or lane 7. At W8, only `ch48` and `ch23` catch them.
+* **S0 and SL** confine #990 M1 to one edge lane. The reading dump shows each moves exactly that
+  lane: in six of the eight W8 unlinking banks and seven of the nine W4 ones, each from its bank's
+  unlink block. At `Scalar` a bank is one lane, so both are M1.
+
+The same dump puts M1 at 52 tracks at W8 (five to seven lanes of each of the eight unlinking
+banks), 31 at W4 (two to four lanes of each of nine) and 9 at `Scalar` (exactly the nine
+retargeted pairs), each from its unlink block. That is why M1 fires on the channels-equal check at
+W8 and W4, where a bank-mate parts, and only on the pin at `Scalar`, where the only pair that
+unlinks is the retargeted one.

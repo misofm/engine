@@ -102,3 +102,38 @@ Authorized paths:
 ## Dependencies
 
 After `automation-2`, which edits the same `process_section`.
+
+## Amendments (Sol verification, 2026-09-27)
+
+Evidence: `docs/handoffs/effects-2026-09-27/VERIFY-AUTOMATION.md` and
+`verify-automation-raw-timings.txt`.
+
+The slice stands.
+
+* **Reproduced on top of E1**, V8 EQ Δ: 8 of 64 goes +11.4 → **+9.85 µs**, and all 64 goes +38.4 →
+  **+24.0 µs**. Natively at `Simd8`, all 64 goes +30.6 → +18.8 µs.
+* **Differential:** the bank differential passed at 300 × 96 per width for E2 alone and for
+  E1 + E2.
+* **Wasm:** the roster is unchanged, and the artifact is 2,762 bytes smaller than E1 alone.
+
+### A1. Unit test (gate 1)
+
+* Add a **`Both`** target, which writes both channels. That is the SDK's shape for a symmetric
+  both-channel edit.
+* Add the last lane, `W - 1`, of `Simd4` and of `Simd8`.
+* `lane_mask` must not be able to panic. Use `ONE_HOT.get(lane)` with a `debug_assert!` and a
+  declining fallback, never `ONE_HOT[lane]` as the prototype does.
+
+### A2. Differential
+
+* Run `automation-2`'s amended differential for E2 alone and for E1 + E2: `Both` targets, resets
+  mid-ramp and boundary targets.
+* The bank output is read after the §4.4 check, so compare it strictly by bits.
+
+### A3. Gate 6, made self-contained, with a mono row
+
+* Use the recipe of `automation-2` amendment A5, with subjects `eq_gain,mono_eq` and arms
+  `settled,eight_of_64,all_64`.
+* **No regression.** The `settled` isolate must not be more than 2 % slower on either subject.
+* **Descriptive.** Record `all_64`.
+* **Identity.** `DIGEST=150` must print "all identical".

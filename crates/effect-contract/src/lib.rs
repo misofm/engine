@@ -1510,7 +1510,7 @@ pub trait NativeEffectFactory: Send + Sync {
     ///
     /// | outcome | meaning | `graph-compiler` | `effect-compiler` restore |
     /// |---|---|---|---|
-    /// | `Err(code)` | **the request violates this contract** | fails the whole graph compile with `code` | `effect.state.unavailable` |
+    /// | `Err(code)` | **the request violates this contract** | fails the whole graph compile with `code`, except while binding #971's speculative re-plan, where it keeps the unmoved plan (#1001) | `effect.state.unavailable` |
     /// | `Ok(None)` | the request is well formed, but this artifact cannot bank it | skips the cohort; the tracks run as scalar instances | `effect.state.unavailable` |
     /// | `Ok(Some(bank))` | bound | uses the bank | uses the bank |
     ///

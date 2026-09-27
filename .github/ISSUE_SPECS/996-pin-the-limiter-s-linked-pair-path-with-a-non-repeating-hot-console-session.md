@@ -234,3 +234,10 @@ row. Scratch trees, harnesses and target directories were deleted.
   or a wasm32 runner for host-core tests. The #990 verification checked kernel identity under
   Node.
 * File finding 1's successor, with findings 2-4 folded in.
+
+### Erratum (Sol, 2026-09-27)
+
+The pin rows above were built in a target directory shared across `git archive` trees, so the base
+and merged rows may have reused the head's artifacts. They were re-run in fresh target directories
+with a compile witness. #996's head and its whole-crate `bbcf8ce1` base both render `b22ef17c…` in
+dev and in release, so the verdict stands. See the #997 spec, "Erratum to the #996 verdict".

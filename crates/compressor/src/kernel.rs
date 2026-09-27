@@ -516,9 +516,9 @@ pub(crate) fn process_block<L: Lane>(
                 channel_left,
                 channel_right,
             ),
-            // A connected sidechain, present or absent, keeps the one-pass body: its detector is
-            // another buffer, so the settled rewrite below does not apply (issue #981).
-            Detector::Silent | Detector::Sidechain(..) => frames_loop::<L, false>(
+            // A connected sidechain, present or absent, takes the same two-pass body with its own
+            // detector source (issue #995).
+            Detector::Silent | Detector::Sidechain(..) => settled_sidechain::<L>(
                 left,
                 right,
                 detector,
@@ -526,7 +526,6 @@ pub(crate) fn process_block<L: Lane>(
                 frames,
                 link,
                 bypass,
-                sample_rate,
                 channel_left,
                 channel_right,
             ),
@@ -536,9 +535,10 @@ pub(crate) fn process_block<L: Lane>(
 
 /// The settled body of a `Detector::Main` block: frames `start..end`, after every ramp finished.
 ///
-/// The frame law is `frames_loop::<L, false>`'s, on the same values: each frame's target, its
-/// recurrence step and its output are computed by the same operations from the same inputs, and
-/// the recurrence visits the frames in the same order. What changes is the loop around it:
+/// The frame law is the one-pass `frames_loop::<L, false>`'s, on the same values: each frame's
+/// target, its recurrence step and its output are computed by the same operations from the same
+/// inputs, and the recurrence visits the frames in the same order. What changes is the loop around
+/// it:
 ///
 /// * the detector is matched once per block, by the caller, instead of once per frame (#981);
 /// * the frames are visited as chunks of the settled slice, so no frame indexes a plane and there
@@ -589,17 +589,122 @@ fn settled_main<L: Lane>(
     }
     match (dual_mono, wet) {
         (true, true) => {
-            settled_frames::<L, true, true>(left, right, coefs, &mut gains, &invariants);
+            settled_frames::<L, true, true>(
+                left,
+                right,
+                Detector::Main,
+                coefs,
+                &mut gains,
+                &invariants,
+            );
         }
         (true, false) => {
-            settled_frames::<L, true, false>(left, right, coefs, &mut gains, &invariants);
+            settled_frames::<L, true, false>(
+                left,
+                right,
+                Detector::Main,
+                coefs,
+                &mut gains,
+                &invariants,
+            );
         }
         (false, true) => {
-            settled_frames::<L, false, true>(left, right, coefs, &mut gains, &invariants);
+            settled_frames::<L, false, true>(
+                left,
+                right,
+                Detector::Main,
+                coefs,
+                &mut gains,
+                &invariants,
+            );
         }
         (false, false) => {
-            settled_frames::<L, false, false>(left, right, coefs, &mut gains, &invariants);
+            settled_frames::<L, false, false>(
+                left,
+                right,
+                Detector::Main,
+                coefs,
+                &mut gains,
+                &invariants,
+            );
         }
+    }
+    channel_left.gain_reduction_db = gains.0;
+    channel_right.gain_reduction_db = gains.1;
+}
+
+/// The settled body of a block whose detector is a connected sidechain, present
+/// (`Detector::Sidechain`) or absent (`Detector::Silent`): frames `start..end`, after every ramp
+/// finished (issue #995).
+///
+/// It is `settled_main` with the detector read from the sidechain, and the one-pass
+/// `frames_loop::<L, false>` it replaces is the oracle, bit for bit. A frame's target depends only
+/// on that frame's detector words and on coefficients constant over the settled slice, so the
+/// two-pass order is exact here for the reason it is for the main detector (see
+/// `settled_frames`); and nothing a pass reads is written by the other, because the sidechain
+/// planes are borrowed shared and the main planes exclusively. The sidechain planes are sliced to
+/// the settled frames, which they cover: the contract sizes them to the block
+/// (`EffectProcessBlock::new`). An absent sidechain detects `+0.0` on every frame, so its one
+/// target is computed once (`settled_frames`).
+///
+/// Two of `settled_main`'s block-level choices carry over and one does not:
+///
+/// * the DualMono detector arm (#984): under DualMono `link_frame` returns `abs` of whichever
+///   source it read, so `abs` of the sidechain word is its result bit for bit;
+/// * the linked detector: `link_frame(Detector::Main, ..)` on the sidechain's words is
+///   `link_frame(Detector::Sidechain, ..)` on the same words, since the detector only chooses which
+///   words are read;
+/// * **not** the all-wet arm (#982). Its one relaxation, a signalling NaN quieted by `x * 1.0` in a
+///   block the boundary check then rejects, is confined to the main detector, where it was
+///   reviewed; a sidechained block renders the general law, which is `frames_loop`'s word for word,
+///   NaN payloads included.
+///
+/// Outlined and `#[cold]`, unlike `settled_main`, and for a measured reason: inlined beside the
+/// four main-detector bodies it reshuffled their register allocation (natively, an extra spill in
+/// the unbanked instance's vectorised first pass, +0.4 % on 64 unbanked main-detector instances;
+/// under V8, an extra reload in a linked bank's first pass), while out of line it leaves them as
+/// they were. `#[cold]` is what keeps them: `#[inline(never)]` alone did not. It weights the call site, not this body, whose loops are
+/// optimised as usual; one call per sidechained block costs nothing measurable. No bank reaches
+/// it -- a connected sidechain never banks -- so the roster's `process_block::<Simd4>` still
+/// carries every banked body, and this function's `Simd4` instantiation is dead code the roster
+/// does not need to name.
+#[allow(clippy::too_many_arguments)]
+#[cold]
+#[inline(never)]
+fn settled_sidechain<L: Lane>(
+    left: &mut [f32],
+    right: &mut [f32],
+    detector: Detector<'_>,
+    start: usize,
+    end: usize,
+    link: LinkMode,
+    bypass: bool,
+    channel_left: &mut Channel<L>,
+    channel_right: &mut Channel<L>,
+) {
+    let width = L::WIDTH;
+    let invariants = Invariants::<L>::new(link, bypass);
+    let coef_left = Coef::load(&channel_left.words);
+    let coef_right = Coef::load(&channel_right.words);
+    let settled = start * width..end * width;
+    let source = match detector {
+        Detector::Sidechain(sidechain_left, sidechain_right) => Detector::Sidechain(
+            &sidechain_left[settled.clone()],
+            &sidechain_right[settled.clone()],
+        ),
+        other => other,
+    };
+    let left = &mut left[settled.clone()];
+    let right = &mut right[settled];
+    let coefs = (&coef_left, &coef_right);
+    let mut gains = (
+        channel_left.gain_reduction_db,
+        channel_right.gain_reduction_db,
+    );
+    if matches!(link, LinkMode::DualMono) {
+        settled_frames::<L, true, false>(left, right, source, coefs, &mut gains, &invariants);
+    } else {
+        settled_frames::<L, false, false>(left, right, source, coefs, &mut gains, &invariants);
     }
     channel_left.gain_reduction_db = gains.0;
     channel_right.gain_reduction_db = gains.1;
@@ -624,10 +729,18 @@ fn settled_main<L: Lane>(
 /// per call. It holds `curve_target` values, which the one-pass body kept in registers or spill
 /// slots; it is not a block copy of audio. No in-place form exists: pass 2 needs both a frame's
 /// input and its target, and writing the targets into the plane would destroy the input.
+///
+/// `source` is where pass 1 reads its detector words (issue #995): the chunk's own planes for
+/// `Detector::Main`, the same frames of the sidechain planes (already sliced to the settled
+/// frames) for `Detector::Sidechain`. `Detector::Silent` detects the same `+0.0` on every frame, so
+/// every target is the one word `link_frame` and `curve_target` make of it: it is computed once,
+/// before the chunks, and pass 1 is skipped. `settled_main` passes the literal `Detector::Main`, so
+/// in its four instantiations the match below folds away and the body is #983's.
 #[inline(always)]
 fn settled_frames<L: Lane, const DUAL_MONO: bool, const WET: bool>(
     left: &mut [f32],
     right: &mut [f32],
+    source: Detector<'_>,
     coefs: (&Coef<L>, &Coef<L>),
     gains: &mut (L, L),
     invariants: &Invariants<L>,
@@ -636,25 +749,46 @@ fn settled_frames<L: Lane, const DUAL_MONO: bool, const WET: bool>(
     let (coef_left, coef_right) = coefs;
     let (mut gain_left, mut gain_right) = *gains;
     let mut targets = [(L::zero(), L::zero()); SETTLED_CHUNK];
+    if let Detector::Silent = source {
+        let (detected_left, detected_right) =
+            link_frame(source, 0, invariants.zero, invariants.zero, invariants);
+        targets = [(
+            curve_target(detected_left, coef_left, invariants),
+            curve_target(detected_right, coef_right, invariants),
+        ); SETTLED_CHUNK];
+    }
+    let mut offset = 0;
     for (chunk_left, chunk_right) in left
         .chunks_mut(SETTLED_CHUNK * width)
         .zip(right.chunks_mut(SETTLED_CHUNK * width))
     {
+        let words = chunk_left.len();
+        let detector_planes = match source {
+            Detector::Main => Some((&*chunk_left, &*chunk_right)),
+            Detector::Sidechain(sidechain_left, sidechain_right) => Some((
+                &sidechain_left[offset..offset + words],
+                &sidechain_right[offset..offset + words],
+            )),
+            Detector::Silent => None,
+        };
+        offset += words;
         // Pass 1: every frame's target. No frame depends on another here.
-        for ((frame_left, frame_right), target) in chunk_left
-            .chunks_exact(width)
-            .zip(chunk_right.chunks_exact(width))
-            .zip(targets.iter_mut())
-        {
-            let (detected_left, detected_right) = settled_detect::<L, DUAL_MONO>(
-                L::load(frame_left),
-                L::load(frame_right),
-                invariants,
-            );
-            *target = (
-                curve_target(detected_left, coef_left, invariants),
-                curve_target(detected_right, coef_right, invariants),
-            );
+        if let Some((planes_left, planes_right)) = detector_planes {
+            for ((frame_left, frame_right), target) in planes_left
+                .chunks_exact(width)
+                .zip(planes_right.chunks_exact(width))
+                .zip(targets.iter_mut())
+            {
+                let (detected_left, detected_right) = settled_detect::<L, DUAL_MONO>(
+                    L::load(frame_left),
+                    L::load(frame_right),
+                    invariants,
+                );
+                *target = (
+                    curve_target(detected_left, coef_left, invariants),
+                    curve_target(detected_right, coef_right, invariants),
+                );
+            }
         }
         // Pass 2: the recurrence, then the output of the same frame. The two channels'
         // recurrences share nothing, so stepping both before either output is exact.
@@ -676,6 +810,14 @@ fn settled_frames<L: Lane, const DUAL_MONO: bool, const WET: bool>(
     *gains = (gain_left, gain_right);
 }
 
+/// The one-frame-at-a-time body: frames `start..end`, reading the detector through `link_frame`.
+///
+/// Production runs it only as the ramp prefix (`RAMPING`), where every frame advances the ramps
+/// and reloads the coefficients. Since #995 every settled slice, whatever its detector, runs the
+/// two-pass body instead, so nothing instantiates `RAMPING = false` here any more; the one-pass
+/// settled form those bodies must equal lives on as the oracle in `settled_body_tests::reference`.
+/// The prefix is left exactly as it was, parameter included, rather than rewritten around a
+/// constant.
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn frames_loop<L: Lane, const RAMPING: bool>(
@@ -1103,7 +1245,8 @@ mod coefficient_ramp_tests {
 
 #[cfg(test)]
 mod settled_body_tests {
-    //! The settled body against the base kernel (issues #981-#985).
+    //! The settled body against the base kernel (issues #981-#985, and #995 for the sidechained
+    //! body).
     //!
     //! [`reference`] is `process_block` and `process_block_mono` exactly as they stood before
     //! #981, one-pass `frames_loop` bodies included. It lives here, in the test code, so that every
@@ -1659,6 +1802,10 @@ mod settled_body_tests {
         all_wet_settled: usize,
         rejected: usize,
         sidechain: usize,
+        /// Settled bodies of a `Silent` or `Sidechain` block (#995), and those that started
+        /// mid-block.
+        settled_sidechain: usize,
+        settled_sidechain_mid_block: usize,
         /// Words the all-wet arm rendered as a NaN of another payload, every one of them in a
         /// block the boundary check rejected.
         nan_payload: usize,
@@ -1672,6 +1819,8 @@ mod settled_body_tests {
             self.all_wet_settled += other.all_wet_settled;
             self.rejected += other.rejected;
             self.sidechain += other.sidechain;
+            self.settled_sidechain += other.settled_sidechain;
+            self.settled_sidechain_mid_block += other.settled_sidechain_mid_block;
             self.nan_payload += other.nan_payload;
         }
     }
@@ -1849,6 +1998,10 @@ mod settled_body_tests {
                 all_wet_settled: usize::from(all_wet_settled),
                 rejected: usize::from(oracle_masks != (0, 0)),
                 sidechain: usize::from(source != Source::Main),
+                settled_sidechain: usize::from(settled && source != Source::Main),
+                settled_sidechain_mid_block: usize::from(
+                    settled && ramping > 0 && source != Source::Main,
+                ),
                 nan_payload: relaxed_left + relaxed_right,
             }
         }
@@ -1956,6 +2109,8 @@ mod settled_body_tests {
                 all_wet_settled: usize::from(all_wet_settled),
                 rejected: usize::from(oracle_mask != 0),
                 sidechain: usize::from(source != Source::Main),
+                settled_sidechain: 0,
+                settled_sidechain_mid_block: 0,
                 nan_payload: relaxed,
             }
         }
@@ -2088,6 +2243,10 @@ mod settled_body_tests {
         assert!(
             coverage.settled_mid_block > 0,
             "the grid must start settled bodies mid-block"
+        );
+        assert!(
+            coverage.settled_sidechain_mid_block > 0,
+            "the grid must start sidechained settled bodies mid-block (#995)"
         );
         assert!(
             coverage.rejected > 0,
@@ -2373,6 +2532,10 @@ mod settled_body_tests {
             coverage.sidechain > 0,
             "the sidechain detectors must be exercised"
         );
+        assert!(
+            coverage.settled_sidechain_mid_block > 0,
+            "sidechained settled bodies must start mid-block (#995)"
+        );
     }
 
     #[test]
@@ -2412,12 +2575,14 @@ mod settled_body_tests {
     /// Renders a fixed dual scenario through `process_block` and folds, per block, the kernel's
     /// output words and recursive words, then the boundary masks, the finished words and the
     /// recursive words again. Returns how many blocks started their settled body mid-block.
+    #[allow(clippy::too_many_arguments)]
     fn scenario_dual<L: Lane>(
         hasher: &mut Sha256,
         table: &[[f32; PARAMETER_COUNT]; 8],
         link: LinkMode,
         schedule: &[ScenarioBlock],
         canonical: bool,
+        source: Source,
     ) -> usize {
         let width = L::WIDTH;
         let mut mid_block = 0;
@@ -2429,6 +2594,9 @@ mod settled_body_tests {
                 Channel::<L>::new(&right, SAMPLE_RATE),
             );
             let mut rng = Rng::new(0x5ce0 + group as u64);
+            // The sidechain planes draw from their own generator, so a `Main` scenario renders
+            // exactly the blocks it rendered before the source parameter existed.
+            let mut sidechain_rng = Rng::new(0x51de + group as u64);
             for (block, &(frames, retarget)) in schedule.iter().enumerate() {
                 if let Some((parameter, lane, value)) = retarget {
                     channels
@@ -2444,10 +2612,30 @@ mod settled_body_tests {
                 let mut right = vec![0.0_f32; frames * width];
                 fill(&mut rng, block % PROFILES, width, &mut left);
                 fill(&mut rng, (block + 3) % PROFILES, width, &mut right);
+                let mut sidechain = Sidechain {
+                    left: Vec::new(),
+                    right: Vec::new(),
+                };
+                if source == Source::Sidechain {
+                    sidechain.left = vec![0.0_f32; frames * width];
+                    sidechain.right = vec![0.0_f32; frames * width];
+                    let profile = (block + 5) % PROFILES;
+                    fill(&mut sidechain_rng, profile, width, &mut sidechain.left);
+                    fill(
+                        &mut sidechain_rng,
+                        (profile + 2) % PROFILES,
+                        width,
+                        &mut sidechain.right,
+                    );
+                    // A quiet main under a louder sidechain, as in the grid.
+                    for word in left.iter_mut().chain(&mut right) {
+                        *word *= 1.0e-3;
+                    }
+                }
                 process_block::<L>(
                     &mut left,
                     &mut right,
-                    Detector::Main,
+                    sidechain.detector(source),
                     frames,
                     link,
                     false,
@@ -2500,10 +2688,22 @@ mod settled_body_tests {
         let mut hasher = Sha256::new();
         let mut mid_block = 0;
         for link in [LinkMode::DualMono, LinkMode::Maximum] {
-            mid_block +=
-                scenario_dual::<Simd4>(&mut hasher, &CORPUS_TRACKS, link, &schedule, false);
-            mid_block +=
-                scenario_dual::<Simd8>(&mut hasher, &CORPUS_TRACKS, link, &schedule, false);
+            mid_block += scenario_dual::<Simd4>(
+                &mut hasher,
+                &CORPUS_TRACKS,
+                link,
+                &schedule,
+                false,
+                Source::Main,
+            );
+            mid_block += scenario_dual::<Simd8>(
+                &mut hasher,
+                &CORPUS_TRACKS,
+                link,
+                &schedule,
+                false,
+                Source::Main,
+            );
         }
         assert!(
             mid_block > 0,
@@ -2546,8 +2746,22 @@ mod settled_body_tests {
         .collect();
         let mut hasher = Sha256::new();
         for link in [LinkMode::DualMono, LinkMode::Average] {
-            scenario_dual::<Simd4>(&mut hasher, &FIXTURE_TRACKS, link, &schedule, true);
-            scenario_dual::<Simd8>(&mut hasher, &FIXTURE_TRACKS, link, &schedule, true);
+            scenario_dual::<Simd4>(
+                &mut hasher,
+                &FIXTURE_TRACKS,
+                link,
+                &schedule,
+                true,
+                Source::Main,
+            );
+            scenario_dual::<Simd8>(
+                &mut hasher,
+                &FIXTURE_TRACKS,
+                link,
+                &schedule,
+                true,
+                Source::Main,
+            );
         }
         let digest = hex(hasher);
         println!("scenario 982 digest {digest}");
@@ -2577,8 +2791,22 @@ mod settled_body_tests {
         let mut mid_block = 0;
         for link in LINKS {
             for (table, canonical) in [(&CORPUS_TRACKS, false), (&FIXTURE_TRACKS, true)] {
-                mid_block += scenario_dual::<Simd4>(&mut hasher, table, link, &schedule, canonical);
-                mid_block += scenario_dual::<Simd8>(&mut hasher, table, link, &schedule, canonical);
+                mid_block += scenario_dual::<Simd4>(
+                    &mut hasher,
+                    table,
+                    link,
+                    &schedule,
+                    canonical,
+                    Source::Main,
+                );
+                mid_block += scenario_dual::<Simd8>(
+                    &mut hasher,
+                    table,
+                    link,
+                    &schedule,
+                    canonical,
+                    Source::Main,
+                );
             }
         }
         // Six ramps end at frame 40, per group, table and link mode.
@@ -2591,6 +2819,41 @@ mod settled_body_tests {
         println!("scenario 983 digest {digest}");
         assert_eq!(digest, SCENARIO_983);
     }
+    /// #995 gate 2: a connected sidechain, present (`Sidechain`) and absent (`Silent`), through
+    /// the chunk-straddling schedule, both tables, every link mode, at `f32` -- the only width a
+    /// sidechained compressor renders at, since it never banks -- and at `Simd4` and `Simd8`.
+    /// Every word folds by bits: a sidechained block never takes the all-wet arm. Pinned on the
+    /// unmodified batch head (`fc43c97d`), in dev and release.
+    const SCENARIO_995: &str = "25b39c7a6331a1571d2b5bc023e8a7e2d54ffefb9393e6b860b1b95a27e4c482";
+
+    #[test]
+    fn scenario_995_sidechain_render_is_pinned() {
+        let schedule = straddling_schedule(0, [-30.0, -18.0, -42.0, -24.0, -12.0, -36.0]);
+        let mut hasher = Sha256::new();
+        let mut mid_block = 0;
+        for source in [Source::Sidechain, Source::Silent] {
+            for link in LINKS {
+                for table in [&CORPUS_TRACKS, &FIXTURE_TRACKS] {
+                    mid_block +=
+                        scenario_dual::<f32>(&mut hasher, table, link, &schedule, false, source);
+                    mid_block +=
+                        scenario_dual::<Simd4>(&mut hasher, table, link, &schedule, false, source);
+                    mid_block +=
+                        scenario_dual::<Simd8>(&mut hasher, table, link, &schedule, false, source);
+                }
+            }
+        }
+        // Six ramps end at frame 40, per group (8 + 2 + 1), table, link mode and source.
+        assert_eq!(
+            mid_block,
+            6 * 11 * 2 * 3 * 2,
+            "every retarget must leave a mid-chunk start"
+        );
+        let digest = hex(hasher);
+        println!("scenario 995 digest {digest}");
+        assert_eq!(digest, SCENARIO_995);
+    }
+
     /// The collapsed twin of [`scenario_dual`]: `process_block_mono` over the left defaults.
     fn scenario_mono<L: Lane>(
         hasher: &mut Sha256,

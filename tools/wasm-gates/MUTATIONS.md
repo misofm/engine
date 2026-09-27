@@ -208,3 +208,64 @@ the new probe while the #949 probe stays green:
 wasm gates: miso_gate_f64_lane_probe census (simd128): f64x2.promote_low_f32x4=2 f64x2.mul=2 f64x2.add=2 f64.promote_f32=0 ...
 wasm gates: miso_gate_meter_block_probe is not vectorised on the simd128 leg: f64x2.promote_low_f32x4=0 f64x2.mul=2 f64x2.add=2 f64.promote_f32=4 f64.mul=0 f64.add=0 f32.{add,gt,abs}=0 f32x4.abs=1 f32x4.add=2
 ```
+
+## The EQ's stationary cascade loops under V8 (issues #1000, #1009)
+
+`scripts/check-web-audioworklet-v8-spill.py` reads the shipped AudioWorklet module. It gets it from
+one build. CI runs it in `artifact-gates` on the downloaded artifact after that job's pin check.
+Locally `scripts/run-wasm-gates.sh` runs it last, on `build-web-audioworklet.sh --module-only`'s
+output: the delivery build's cargo line, without the pin check, since a batch repins only at its
+boundary. `wasm-guests` passes `--without-v8-spill`, and `check-ci-path-routing.py` refuses that
+flag unless `artifact-gates` runs the gate after its pin check.
+
+The pinned Node (`v22.23.2`, V8 `12.4.254.21-node.56`, Linux x64, an x86-64-v3 host) compiles the
+parametric EQ's `f32x4` `process_bank` and `process_bank_mono` with TurboFan (`--no-liftoff
+--no-wasm-lazy-compilation`). The gate fails when an innermost loop of the stationary, select-free
+cascade carries a value from one iteration to the next through a stack slot. There are two rules:
+
+- **Live across the back edge.** The slot is read from the header before it is written.
+- **On a recurrence.** A value loaded from the slot reaches a store to it along a path that crosses
+  the header. A path inside one iteration is slot reuse, which V8 does freely, and is allowed
+  (#1009).
+
+It holds the dual depth-one tail and the mono pair and tail, and reports the dual pair without
+holding it. The functions are found by symbol. The loops are found by what they compute: SVF steps
+per iteration, streams, select-free, and for a tail, reachable from a pair loop. They are never
+found by offset. A held row that matches no loop, or more than one, fails closed.
+
+**Re-pinning Node.** Build the red arms below and the current head, run the gate on the new V8, and
+record what each gives. Keep the rule whatever they show: if a red arm turns green on the new V8,
+say so, rather than changing a row to match. The first run on a CI runner is its own observation,
+so every verdict line names the CPU model.
+
+**What it proves.** That the reference V8 runs none of the held loops' values through memory from
+one iteration to the next: the mechanism that made #977 attempt 1's standing one-band browser EQ
+about 20 % slower while every other gate stayed green. **What it does not.** It times nothing and
+says nothing else about speed. Node's V8 is not a given browser's, and eager TurboFan is not a
+page's tier-up, so green is not "the browser EQ is as fast as before"; red is "this build brings
+back the #977 mechanism".
+
+**Red mutations, applied and reverted on the delivery host.** The one-token edit #977's attempt-2
+verifier recorded, in `interleave`'s depth-one tail, `if !admitted && (L::mask_any(…) ||
+L::mask_any(…))`, and #977 attempt 1 itself (`codex/977-eq-elision-and-passes-attempt1`), each
+red on the dual tail row, ten runs in ten with the same output; with the tail edit applied in the
+tree, `run-wasm-gates.sh` exits 1 there. The tail edit:
+
+```
+FAIL dual depth-1 tail, select-free: V8 carries [rbp-0xc0] from one iteration to the next (84 instructions in 4 blocks, 2 SVF steps, 2 streams, select-free, vmulps=14 vaddps=18 vsubps=4). Listing, carried slots marked:
+  …
+  *   817e  vmovups xmm0,[rbp-0xc0]
+  …
+  *   8238  vmovups [rbp-0xc0],xmm10
+      82e9  addl rdi,0xff
+      82ec  jnz <+0x8140>
+```
+
+**The dual pair is reported, not held.** It carries ten values across its back edge (eight
+integrators, two skew carries) beside 24 loop-invariant coefficients in sixteen vector registers,
+and at #977-#979 TurboFan routes ten stack slots through its recurrences. Among them are `ic2`
+(`v3 = x - ic2`) and `ic1` of one chain, stored by the back edge's gap moves and reloaded in the
+body. #977's scans reported the loop clean because it is entered in the middle: read in a straight
+line from the back edge's target, the rotated body stores each slot before it loads it. Whether
+this costs time is not measured, and in a loop that starved the count moves with any allocation
+change, so a count would be a byte pin by another name.
