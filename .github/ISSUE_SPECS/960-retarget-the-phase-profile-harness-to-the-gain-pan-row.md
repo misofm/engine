@@ -267,3 +267,96 @@ The console benchmark was not run.
   minutes, whichever came first; the load threshold triggered it.
 - **Not the console benchmark.** The numbers are descriptive, from one host, one run, and gate
   nothing.
+
+## Sol attempt 1 verdict: PASS
+
+Verifier: Claude Opus 5.5 (Sol role), 2026-09-27, on `abe3fc7e` (implementation `362b3683`) over
+the base `403afba9`. Nothing in the implementation was edited. A scratch digest test was used at the
+base checkout and then deleted.
+
+### Independent evidence
+
+- **Production is untouched.** Release `bench` built at the base and at the head in one target
+  directory. `.text` (`8b4cc865…`, 3,860,734 bytes) and `.rodata` (`68b9faf4…`) are byte-identical.
+  `nm -S` name, size and type show 0 differing lines, and there are no probe symbols or strings.
+  `.data.rel.ro` differs in 102 `u32` words, and every one is a panic line number (14 distinct
+  deltas, from 21 to 224).
+  - **AudioWorklet artifact.** Built with `build-web-audioworklet.sh`'s exact flags. The wasm code
+    section (2,831,884 bytes) and every other section are byte-identical, except the data section,
+    which differs only by the same line-number deltas. The artifact sha moves, but the base already
+    differs from the committed pin, so the batch-boundary repin already owed covers it.
+  - **Feature resolution.** `cargo tree -e features,normal -i rack` shows no `rack/test-support`
+    for `bench`, `capi`, `host-web` (wasm32) or `wasm-console-guest` (wasm32). `Cargo.lock` is
+    unchanged.
+- **Bits.** A base-checkout scratch test rendered all 17 `native_session_rows()` 64-block digests.
+  All 17 equal the head's `digests` output and the spec's table. `digests` also asserts that the
+  probes-on digest equals the probes-off digest for every row, and it passed.
+- **Profile re-run.** One run under the timing lock (`taskset -c 31`, 2026-09-27T12:22:29Z). The
+  host was loaded (1-minute load 4.4), and the test binary's sha256 prefix is `3991ab71`, the
+  implementer's. Probes-off p50 was 9047 ns (2.04 c/ls) against the implementer's 8847 ns. In
+  situ, a probe cost 30.1 ns; repeat 1 was an outlier at 50.5 ns, and the per-row median absorbed
+  it. Net shares, mine against the implementer's:
+
+  | part | mine | implementer |
+  |---|---|---|
+  | input section (slot 0) | 28.9 % | 29.0 % |
+  | gather | 23.0 % | 22.9 % |
+  | fold | 20.5 % | 20.9 % |
+  | pan matrix (slot 2) | 12.5 % | 12.3 % |
+  | fader (slot 1) | 8.7 % | 9.0 % |
+  | outside chain | 3.7 % | 3.4 % |
+  | prologue | 1.9 % | 1.7 % |
+  | scatter | 0.4 % | 0.4 % |
+
+  Every share agrees within 0.4 points.
+- **Gates**, all run with `CARGO_INCREMENTAL=0`:
+  - `cargo fmt --all --check`: pass.
+  - Clippy `--workspace --all-targets --all-features -D warnings`: pass. So is `-p rack
+    --all-targets` with and without `test-support`. The graph integration test
+    `rt9_resident_bank_input_alloc.rs` has dead-code errors when linted without features, but that
+    file is unchanged and CI lints only `--all-features`, so this predates the change.
+  - Doc `-D warnings`: pass for the workspace, and for `-p graph`/`-p rack` with and without the
+    feature.
+  - `cargo test -p graph -p rack`: graph 107, 1, 1, 1 and rack 40, 10, 4. With `test-support`:
+    graph 107, 1, 1, 8 and rack 41, 10, 4.
+  - `-p console-workload`: 8, 4, 23, 1 (+2 ignored), 3.
+  - Policy checks: realtime (57 regions in 16 files), graph, rack, workspace and audit-leak all
+    pass, and so do the realtime, graph, rack and workspace self-tests.
+
+### Findings (severity-ranked; none blocking)
+
+1. **Low. The slot labels are correct for this row by construction, but nothing asserts it.**
+   Doc: `tools/console-workload/tests/gain_pan_profile.rs:28-30`; shape reads at `:230` and `:448`.
+   - **Why the mapping holds now.** `cohort_runs` (`crates/graph/src/runtime.rs:7200`) chains units
+     in dataflow order. Input, fader and matrix are the only builtin bank kinds. The row's
+     `Concurrent` delivery keeps fader and matrix as two stages, so `bank_shape` is `[8, 24]`, three
+     slots per chain. Positions are chain indices, so a slot that is skipped cannot shift the labels.
+   - **How it breaks.** Under `BetweenRenderCalls`, which the web boot uses and which the rulings'
+     "fused twin" would use, `make_fader_matrix` fuses fader and matrix into one `BuiltinStage`
+     (`crates/builtins-compiler/src/lib.rs:1008`). That gives two slots, and the harness would then
+     print "slot 1 (BuiltinStage)", which the doc calls "the fader". The standing test only bounds
+     `slot_entries <= BLOCKS * slots` (`:496`).
+   - **Fix.** Assert `slots == 3 * chains` before reading the table by name.
+2. **Info. "Unprobed" means the `test-support` build with the probes off, not the production
+   build.** Spec `:183`; harness `:248`. That build still performs about 8 disabled thread-local
+   checks per chain run. They are cheap, but they are not measured against production, so the
+   2.00 c/ls figure belongs to the harness build.
+3. **Info. The rack comment says no production build enables the feature (`crates/rack/Cargo.toml:14`).
+   That holds for every shipped artifact, but not for every build.**
+   - `tools/audit` depends on `graph/test-support` as a normal dependency. So a
+     `cargo build --workspace`, or CI `audit-native`'s `-p audit -p bench -p capi
+     -p session-validator`, unifies it and now also compiles the rack probes, disabled, into those
+     CI binaries.
+   - This exposure already existed through graph's own probes. Disabled probes do no allocation and
+     make no syscall, so the realtime traces are unaffected.
+4. **Nit. A doc comment disagrees with the code.** `gain_pan_profile.rs:102` says `render` drains
+   the meters "outside any clock", but `timed_loop` (`:202`) calls it inside its clock. The ring row
+   has no meters, so the effect is negligible.
+5. **Nit. The spec's range of line-number deltas is slightly off.** Spec `:99` says the deltas run
+   from 21 to 226; I measured 21 to 224. It does not matter.
+
+**Scope.** The two manifest lines, the rack `[features] test-support = []` and graph's forward to
+`rack/test-support`, are necessary and minimal. `rack` had no feature to gate on, `cfg(test)` does
+not cross crates, and a rustflag would override the pinned ISA flags. Both dependency lists are
+unchanged. All other edits are within the authorized paths. Amendment 3 is met: the base contains
+#957.
