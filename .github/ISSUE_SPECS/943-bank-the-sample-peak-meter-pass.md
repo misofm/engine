@@ -985,3 +985,88 @@ runs.
 
 Findings 1 and 2 only, inside `crates/graph/src/runtime.rs`, the `crates/graph-compiler/src/lib.rs`
 tests, `crates/graph/tests/MUTATIONS.md` and this spec.
+
+## Attempt 2 evidence
+
+Implementer: attempt 2, 2026-09-27, on `79601b8f` (Sol's attempt 1 verdict). Scope: Sol's findings 1
+and 2 only, in `crates/graph/src/runtime.rs`, the `crates/graph-compiler/src/lib.rs` tests,
+`crates/graph/tests/MUTATIONS.md` and this spec. Same host and toolchain as attempt 1,
+`CARGO_INCREMENTAL=0`, the worktree's own `target/` (rebuilt, then deleted). No timed benchmark.
+
+### Finding 1 (I6): the flag now shares `observed`'s byte, and the pin is compile-time
+
+- `UnitIdentity`'s `observed: bool` and attempt 1's `sample_peak: bool` are one field,
+  `observation: UnitObservation`, a one-byte enum `{ Unobserved, Observed, ObservedWithPeak }`.
+  The peak implies an observer, so the three states are the whole domain. The constructor writes
+  `UnitObservation::of(unit.has_observers(), unit.accepts_sample_peak())`; `observe_unit` reads the
+  row once and asks `.observed()` and `.sample_peak()`; `unit_inert` asks `.observed()`. No
+  behaviour changes: every read returns what the two `bool`s returned.
+- The layout pin is now a `const _: () = assert!(...)` in production code: `size_of` and
+  `align_of` of `UnitIdentity` equal those of `UnitIdentityWithoutFlags` (the row with none of the
+  #885/#900/#918/#943 flags, formerly the `rt9` test's local `Before`). Every build evaluates it,
+  wasm32 included. `rt9_identity_metadata_has_no_retained_or_peak_layout_delta` remains as its
+  native echo, now against the shared shape.
+- Size probes on the real type, `const _: [(); N] = [(); size_of::<UnitIdentity>()]`, applied and
+  reverted:
+
+  | probe | `cargo check -p graph` (x86-64) | `cargo check --target wasm32-unknown-unknown -p graph` |
+  |---|---|---|
+  | N = 32 on 64-bit, 20 on 32-bit | PASS | PASS |
+  | N = 24 on both (negative control) | FAIL, "found one with a size of 32" | FAIL, "found one with a size of 20" |
+
+  So the row is 32 bytes natively and back to **20 bytes on wasm32** (attempt 1: 24).
+- The const assertion is live on wasm32 and silent natively for exactly the attempt 1 defect: with
+  attempt 1's layout restored (a separate fifth `bool`), or with `#[repr(u16)]` on the enum,
+  `cargo check -p graph` passes natively and `cargo check --target wasm32-unknown-unknown -p graph`
+  fails with `evaluation panicked: a UnitIdentity flag no longer fits the row's padding`.
+
+### Finding 2: G3 runs at `Backend::Simd4` too
+
+`compile_console_model_with_selected_meters` takes the dispatch. G3 now loops over the host's
+dispatch and `Backend::Simd4` (only the host's when it is already four-lane), each through both
+selected deliveries and both periods, pass on against declined. The mixed and ALL controls and G4
+stay at the host width.
+
+| dispatch, delivery, period | `[chains, slots]` | transposes | folds | redirects | frames | passes | merges |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Simd8, both deliveries, 512 | [8, 48] | 192 | 64 | 0 | 384 | 192 / 0 | 1,536 / 0 |
+| Simd8, both deliveries, 300 | [8, 48] | 192 | 64 | 0 | 640 | 192 / 0 | 896 / 0 |
+| Simd4, both deliveries, 512 | [32, 64] | 768 | 64 | 60 | 384 | 384 / 0 | 1,536 / 0 |
+| Simd4, both deliveries, 300 | [32, 64] | 768 | 64 | 60 | 640 | 384 / 0 | 896 / 0 |
+
+At `Simd4` the PCM and every frame are bit-identical between the arms, the shape tuple is equal,
+and 384 passes (24 blocks x 16 four-lane cohorts) ran. The `Simd4` plan's shape on this host
+(`[32, 64]`, 60 redirects) differs from the `Simd8` plan's; that is the plan the pre-existing
+compiler binds at that dispatch, and the pass moves none of it (the arms are equal). I first pinned
+`[cohorts, 6 * cohorts]` and dropped it for that reason; the pass count is what pins four-lane
+cohorts. Sol's S-7 (`Four => planes::<lane::Simd8>`) is now RED on G3:
+`Simd4 between_render_calls false period 512: meter 6 window 0`.
+
+### Gates (attempt 2 tree)
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | PASS |
+| `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | PASS |
+| `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps` | PASS |
+| `cargo check --locked --target wasm32-unknown-unknown -p graph` | PASS (the const layout pin holds) |
+| G1, G2 | PASS (unchanged code; lane 56, builtins 114 and 114 with `test-support`) |
+| G3 | PASS, 8 configurations above plus both controls (14.5 s debug) |
+| G4 | PASS: audit total 0, passes 8,000, merges 64,000 |
+| suites | PASS: lane 56; builtins 114 / 114; rack 54; builtins-compiler `test-support` 79; graph 118 / 125 with `test-support`; graph-compiler 94; host-core `--all-features` 225 (summing every `test result` line, doctests included; Sol's 224 excludes one); host-web 206; console-workload 39; capi 36; wasm-gate-corpus + wasm-gates 9 |
+| policy | PASS, all eight scripts (realtime 56 regions in 16 files; determinism 100/100) |
+| `scripts/run-wasm-gates.sh` | PASS: native, wasm scalar and wasm `simd128` legs, each 142 cases, 358 comparisons, 0 mismatches, `minmax_lowering_mismatches` 0 |
+| AudioWorklet artifact (build script's cargo line) | 3,308,848 bytes (30 fewer than attempt 1), sha256 `0fe086b4...1014283b`, not repinned |
+| callgraph checks on it | PASS: render, `--kernel-shape --kernel-pattern '4wide6f32x[48]' --kernel-min 11`, meter_poll, command_submit, `--self-test` |
+| census of `bank_sample_peak` (`func[2252]`) | unchanged: `f32x4.abs` 6, `v128.and` 6, `i32x4.sub` 6, `i32x4.lt_u` 6, `v128.bitselect` 10, `f32x4.lt` 4, `f32x4.pmax` 2, `loop` 4, no scalar `f32` op |
+
+### Mutations (recorded in `crates/graph/tests/MUTATIONS.md`)
+
+| # | mutation | result |
+|---|---|---|
+| S-7 | `BankWidth::Four => planes::<lane::Simd8>` | RED on G3's `Simd4` arm (GREEN on every committed gate in attempt 1) |
+| G-1 | `UnitObservation::of(unit.has_observers(), true)` | RED on G3's ALL control (`192` against `0`), as in attempt 1 |
+| O-1 | the `(true, true)` arm returns `Observed` | RED: G3 `one pass per cohort` (`0` against `192`); G4 (`0` against `8000`) |
+| O-2 | `observed()` becomes `matches!(self, Self::Observed)` | RED: G3 `every meter publishes every whole window` (`0` against `384`) |
+| L-A | attempt 1's separate `bool` restored | native check GREEN, wasm32 check RED on the const assertion |
+| L-B | `#[repr(u16)]` on `UnitObservation` | native check GREEN, wasm32 check RED on the const assertion |

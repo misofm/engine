@@ -514,6 +514,24 @@ one), run in dev, and restored.
 
 | # | mutation | G3 | source scan |
 | --- | --- | --- | --- |
-| G-1 | `row.sample_peak = unit.accepts_sample_peak();` becomes `row.sample_peak = true;` | RED at the ALL control: `ALL meters must not make a bank run the pass` (`192` against `0`). PCM and every frame stay equal: the counter is the only witness | GREEN (the flag's derivation is not pinned there) |
+| G-1 | `row.sample_peak = unit.accepts_sample_peak();` becomes `row.sample_peak = true;` (attempt 2's form: `UnitObservation::of(unit.has_observers(), true)`, same result) | RED at the ALL control: `ALL meters must not make a bank run the pass` (`192` against `0`). PCM and every frame stay equal: the counter is the only witness | GREEN (the flag's derivation is not pinned there) |
 | G-2 | the final lane's hand-off reads lane `lane ^ 1` of both planes | RED: `between_render_calls false period 512: meter 1 window 0` (left and right peaks are lane 1's) | RED: `valid(source)` |
 | G-3 | the right plane's pass reads the left plane (`meter_sample_peak_block::<L>(left, ..)` into `peaks[1]`) | RED: `meter 1 window 0`, right `sample_peak` bits `543241058` against `994846919` (needs the L-differs-from-R window) | GREEN (`bank_sample_peak`'s body is not pinned there) |
+
+### Attempt 2: the packed identity byte and the four-lane dispatch
+
+Attempt 1's `sample_peak: bool` was a fifth one-byte field in `UnitIdentity`, which fits the
+padding on a 64-bit target but grew the row from 20 to 24 bytes on wasm32 (Sol, attempt 1). The
+flag now shares `observed`'s byte as `UnitObservation { Unobserved, Observed, ObservedWithPeak }`,
+and the layout pin is a `const` assertion in production code (`size_of` and `align_of` of
+`UnitIdentity` equal those of `UnitIdentityWithoutFlags`), so every target build checks it. G3 now
+also runs at `Backend::Simd4`, the browser's and NEON's bank width. Rows applied alone to the
+attempt 2 tree and restored:
+
+| # | mutation | result |
+| --- | --- | --- |
+| S-7 | `BankWidth::Four => planes::<lane::Simd8>(left, right)` (Sol's row) | RED on G3's `Simd4` arm: `Simd4 between_render_calls false period 512: meter 6 window 0` (left peak bits `992536920` against `994476435`). GREEN on G4 (host width) and the source scan, as before; it was GREEN on every committed gate in attempt 1 |
+| O-1 | `UnitObservation::of`'s `(true, true)` arm returns `Observed` (the peak bit lost in the packing) | RED: G3 `Simd8 ... period 512: one pass per cohort` (`0` against `192`); G4 (`0` against `8000`) |
+| O-2 | `UnitObservation::observed` becomes `matches!(self, Self::Observed)` (a peak unit's observers skipped) | RED: G3 `every meter publishes every whole window` (`0` against `384`). GREEN on `-p graph --features test-support`: no graph test binds a peak-accepting observer, so G3 is the witness |
+| L-A | the attempt 1 layout restored: a separate `sample_peak_flag: bool` after `source_lanes` | `cargo check -p graph` GREEN natively (32 bytes either way); `cargo check --target wasm32-unknown-unknown -p graph` RED: `evaluation panicked: a UnitIdentity flag no longer fits the row's padding` |
+| L-B | `#[repr(u16)]` on `UnitObservation` | the same: native check GREEN, wasm32 check RED with the same message |
