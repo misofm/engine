@@ -8833,6 +8833,43 @@ mod tests {
         }
     }
 
+    /// Issue #950 amendment 5: the full meter pass declines a block of more than `2^24` frames,
+    /// where its `f32` counts would stop being exact integers, at both bank widths.
+    ///
+    /// The planes are zero-filled `vec!`s, which the allocator maps lazily, and the pass refuses
+    /// on the slice length before it reads a word, so the `2^24 + 1`-frame block costs address
+    /// space and no physical memory. A three-frame block of the same width is accepted and
+    /// computed, so the refusal is the frame count's and nothing else's.
+    #[test]
+    fn the_full_meter_pass_declines_a_block_whose_counts_would_not_be_exact() {
+        assert_eq!(
+            BANK_METER_MAX_FRAMES,
+            1 << 24,
+            "the largest exact f32 count"
+        );
+        let seeds = [[0.5_f64; 8]; 2];
+        for width in [BankWidth::Four, BankWidth::Eight] {
+            let lanes = width.lanes() as usize;
+            let over = vec![0.0_f32; (BANK_METER_MAX_FRAMES + 1) * lanes];
+            assert!(
+                bank_meter_pass(width, &over, &over, &seeds).is_none(),
+                "{width:?}: 2^24 + 1 frames decline the pass"
+            );
+            drop(over);
+            let short = vec![1.0_f32; 3 * lanes];
+            let results = bank_meter_pass(width, &short, &short, &seeds)
+                .unwrap_or_else(|| panic!("{width:?}: three frames run the pass"));
+            for lane in 0..lanes {
+                let lane = results.lane(lane, &seeds).expect("an active lane");
+                assert_eq!(lane.sample_peak, [1.0, 1.0]);
+                assert_eq!(lane.clipped, [3, 3]);
+                assert_eq!(lane.sanitized, [0, 0]);
+                assert_eq!(lane.energy_seed, [0.5, 0.5]);
+                assert_eq!(lane.energy, [3.5, 3.5]);
+            }
+        }
+    }
+
     #[test]
     fn rt9_identity_metadata_has_no_retained_or_peak_layout_delta() {
         // The every-target form of this pin is the `const` assertion after

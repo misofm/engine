@@ -9718,15 +9718,173 @@ mod tests {
         }
     }
 
+    /// Issue #950 attempt 2 (Sol finding 1): a bank whose lanes disagree -- different periods,
+    /// different metric sets, with and without `ENERGY_RMS`, a ballistic held peak -- publishes
+    /// the declined arm's frames, every field by bits, at the host's bank width and the four-lane
+    /// one, through both deliveries.
+    ///
+    /// One lane's seed makes the pass run, and every other lane's meter is then handed
+    /// `meter: Some` and must commit or refuse on its own terms: a block that crosses its window is
+    /// refused by `commit_banked`'s window check, and a meter without an energy commits with no
+    /// seed to check. The tracks cycle through eight meters:
+    ///
+    /// | track % 8 | metrics | period | what it does with the pass |
+    /// |---|---|---:|---|
+    /// | 0 | `ALL` | 512 | seeds every block, commits every block |
+    /// | 1 | `COUNTS` | 300 | commits the blocks its window holds, refuses the others, no seed |
+    /// | 2 | `SAMPLE_PEAK \| HELD_PEAK` | 129 | as 1, with the held merge |
+    /// | 3 | `ENERGY_RMS \| COUNTS` | 100 | every block crosses its window: never seeds, refuses |
+    /// | 4 | `SAMPLE_PEAK` | 384 | merges the pass's peak through issue #943's call |
+    /// | 5 | `ALL`, hold 5 | 512 | never accepts: the sample loop |
+    /// | 6 | `ENERGY_RMS` | 1536 | seeds every block, commits every block |
+    /// | 7 | `COUNTS \| HELD_PEAK` | 64 | every block crosses its window: refuses, no seed |
+    ///
+    /// On this fixture a bank is consecutive tracks, so every bank holds a lane that seeds every
+    /// block (0 or 6), the pass runs once per cohort per block, and the commits are exactly those of
+    /// tracks 0, 1, 2 and 6 in every block their windows hold: the non-energy meters 1 and 2 commit
+    /// beside the energy lanes. A different grouping would change the pass and commit counts and
+    /// turn this test red, not vacuous. Deleting the window check (mutation S-2) commits a
+    /// crossing block for tracks 1, 3 and 7 and is red here.
+    #[test]
+    fn a_bank_of_mixed_periods_and_metric_sets_publishes_the_declined_arms_frames() {
+        use MeterMetricSet as M;
+        const BLOCKS: u64 = 24;
+        let host = host_dispatch();
+        let Some(host_width) = BankWidth::for_backend(host) else {
+            return;
+        };
+        let dispatches = if host_width == BankWidth::Four {
+            vec![host]
+        } else {
+            vec![host, Backend::Simd4]
+        };
+        let set = |metrics: &[M]| {
+            M::from_bits_retain(metrics.iter().fold(0, |bits, metric| bits | metric.bits()))
+        };
+        let pattern: [(M, u32, u32); 8] = [
+            (M::ALL, 512, 0),
+            (M::COUNTS, 300, 0),
+            (set(&[M::SAMPLE_PEAK, M::HELD_PEAK]), 129, 0),
+            (set(&[M::ENERGY_RMS, M::COUNTS]), 100, 0),
+            (M::SAMPLE_PEAK, 384, 0),
+            (M::ALL, 512, 5),
+            (M::ENERGY_RMS, 1536, 0),
+            (set(&[M::COUNTS, M::HELD_PEAK]), 64, 0),
+        ];
+        let intended = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
+            .expect("intended fixture");
+        let registry = launch_native_effect_registry().expect("launch registry");
+        let meters: Vec<SelectedMeterRequest> = post_matrix_meter_requests(&intended, M::ALL, 512)
+            .into_iter()
+            .enumerate()
+            .map(|(index, mut meter)| {
+                let (metrics, period, hold) = pattern[index % 8];
+                meter.metrics = metrics;
+                meter.request.config.period_frames = NonZeroU32::new(period).expect("period");
+                meter.request.config.peak_hold_frames = hold;
+                meter
+            })
+            .collect();
+        let inside = |period: u32| blocks_inside_a_window(u64::from(period), BLOCKS, 128);
+        // Per eight tracks: the committing meters 0, 1, 2 and 6, and the merging meter 4.
+        let commits_per_eight = inside(512) + inside(300) + inside(129) + inside(1536);
+        let non_energy_commits_per_eight = inside(300) + inside(129);
+        assert!(non_energy_commits_per_eight > 0 && inside(300) < BLOCKS && inside(129) < BLOCKS);
+        let windows: u64 = pattern
+            .iter()
+            .map(|&(_, period, _)| BLOCKS * 128 / u64::from(period))
+            .sum();
+        let mut plan_id = 9_560;
+        for dispatch in dispatches {
+            let width = BankWidth::for_backend(dispatch).expect("a banked dispatch");
+            let cohorts = 64 / width.lanes() as u64;
+            for between_render_calls in [false, true] {
+                let arms: Vec<FullMeterArm> = [false, true]
+                    .into_iter()
+                    .map(|declined| {
+                        plan_id += 1;
+                        let artifact = compile_console_model_with_selected_meters(
+                            &intended,
+                            plan_id,
+                            &meters,
+                            between_render_calls,
+                            dispatch,
+                            &registry,
+                        );
+                        render_full_meter_arm(artifact, BLOCKS, declined, Vec::new())
+                    })
+                    .collect();
+                let context =
+                    format!("mixed bank, {dispatch:?} between_render_calls {between_render_calls}");
+                let (on, off) = (&arms[0], &arms[1]);
+                eprintln!(
+                    "{context}: frames {}, passes {}/{}, #943 passes {}/{}, merges {}/{}, \
+                     commits {}/{} (non-energy {})",
+                    on.rendered.4.len(),
+                    on.passes,
+                    off.passes,
+                    on.peak_passes,
+                    off.peak_passes,
+                    on.merges,
+                    off.merges,
+                    on.commits,
+                    off.commits,
+                    8 * non_energy_commits_per_eight
+                );
+                assert_full_meter_arms_equal(on, off, &context);
+                assert_eq!(
+                    on.rendered.4.len() as u64,
+                    8 * windows,
+                    "{context}: every meter publishes every whole window of its own period"
+                );
+                assert_eq!(
+                    on.passes,
+                    BLOCKS * cohorts,
+                    "{context}: every bank has a seeding lane in every block"
+                );
+                assert_eq!(off.passes, 0, "{context}: the declined arm runs none");
+                assert_eq!(
+                    on.peak_passes, 0,
+                    "{context}: the full pass serves the peak meters"
+                );
+                assert!(
+                    off.peak_passes > 0,
+                    "{context}: declined, #943's pass serves them"
+                );
+                assert_eq!(
+                    (on.merges, off.merges),
+                    (8 * inside(384), 8 * inside(384)),
+                    "{context}: the SAMPLE_PEAK meters merge every block their windows hold"
+                );
+                assert_eq!(
+                    on.commits,
+                    8 * commits_per_eight,
+                    "{context}: tracks 0, 1, 2 and 6 commit every block their windows hold, \
+                     the non-energy tracks 1 and 2 included"
+                );
+                assert_eq!(
+                    off.commits, 0,
+                    "{context}: the declined arm commits nothing"
+                );
+            }
+        }
+    }
+
     /// Issue #950 amendment 3, the failure boundary: an observer that fails mid-bank stops every
     /// later observer of the block, and the full pass, which only read the later meters' seeds,
     /// leaves them exactly as the declined arm does.
     ///
     /// A permanent observer bound after `ch01`'s `ALL` meter fails on block 5. In both arms that
-    /// block's render fails, `ch00` and `ch01` have observed it, and `ch02` and every later meter
-    /// have not: their next block is a discontinuity. Every frame of every meter equals the
-    /// declined arm's by bits, and the PCM of every successful block too. Had the pass committed
-    /// anything on a meter's behalf before its observer ran, `ch02` would have observed block 5.
+    /// block's render fails. Which meters had observed it by then is read from the schedule, not
+    /// assumed: a probe plan of the same artifact, with an order-recording observer on every
+    /// track's post-matrix node, gives the order the tracks are observed in, and the meters
+    /// observed before the failure are exactly the tracks up to and including `ch01` in that
+    /// order. Those meters, and only those, commit block 5 and see no discontinuity; every other
+    /// meter never observed block 5, so its next block is a discontinuity. Every frame of every
+    /// meter equals the declined arm's by bits, and the PCM of every successful block too, at the
+    /// host's bank width and the four-lane one. Had the pass committed anything on a meter's behalf
+    /// before its observer ran, or had the observers after the failing one run, a meter after
+    /// `ch01` would have observed block 5.
     #[test]
     fn an_observer_failing_mid_bank_leaves_every_later_meter_as_the_declined_arm_does() {
         const BLOCKS: u64 = 16;
@@ -9747,136 +9905,214 @@ mod tests {
                 }
             }
         }
-        let host = host_dispatch();
-        if BankWidth::for_backend(host).is_none() {
-            return;
+        /// Records when its node was first observed, on a sequence shared by every recorder.
+        struct Order {
+            sequence: Arc<AtomicU64>,
+            first: Arc<AtomicU64>,
         }
+        impl GraphRuntimeObserver for Order {
+            fn observe(
+                &mut self,
+                _block: GraphObservationBlock<'_>,
+            ) -> Result<(), engine::realtime::RenderError> {
+                if self.first.load(Ordering::Relaxed) == u64::MAX {
+                    let at = self.sequence.fetch_add(1, Ordering::Relaxed);
+                    self.first.store(at, Ordering::Relaxed);
+                }
+                Ok(())
+            }
+        }
+        let host = host_dispatch();
+        let Some(host_width) = BankWidth::for_backend(host) else {
+            return;
+        };
+        let dispatches = if host_width == BankWidth::Four {
+            vec![host]
+        } else {
+            vec![host, Backend::Simd4]
+        };
         let intended = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
             .expect("intended fixture");
         let registry = launch_native_effect_registry().expect("launch registry");
         let meters = post_matrix_meter_requests(&intended, MeterMetricSet::ALL, 512);
-        let mut arms = Vec::new();
-        for (declined, plan_id) in [(false, 9_540), (true, 9_541)] {
+        let post_matrix = |index: usize| GraphNodeId::TrackStage {
+            track_id: StableGraphId::parse(intended.tracks[index].id.as_str())
+                .expect("track node id"),
+            stage: TrackStage::PostMatrix,
+        };
+        let failing_track = intended
+            .tracks
+            .iter()
+            .position(|track| track.id.as_str() == "ch01")
+            .expect("ch01");
+        let mut plan_id = 9_540;
+        for dispatch in dispatches {
+            // The order the tracks' post-matrix nodes are observed in, from a probe plan.
+            plan_id += 1;
             let artifact = compile_console_model_with_selected_meters(
-                &intended, plan_id, &meters, true, host, &registry,
+                &intended, plan_id, &meters, true, dispatch, &registry,
             );
-            let envelope = artifact.envelope();
-            let frames = envelope.quantum.0 as usize;
-            let nodes = artifact
-                .external_binding_nodes()
-                .map(|node| GraphNodeBinding::new(node.clone(), console_track_input_binding(node)))
+            let sequence = Arc::new(AtomicU64::new(0));
+            let firsts: Vec<Arc<AtomicU64>> = (0..intended.tracks.len())
+                .map(|_| Arc::new(AtomicU64::new(u64::MAX)))
                 .collect();
-            let bound = artifact
-                .into_bound(GraphRuntimeBindings {
-                    envelope,
-                    nodes,
-                    observers: vec![GraphNodeObserverBinding::new(
-                        GraphNodeId::TrackStage {
-                            track_id: StableGraphId::parse("ch01").expect("track node id"),
-                            stage: TrackStage::PostMatrix,
-                        },
-                        0x0950_F000,
-                        Box::new(FailOnce {
-                            block: FAILING_BLOCK,
-                            frames: frames as u64,
-                        }),
-                    )],
-                })
-                .unwrap_or_else(|failure| panic!("bind: {}", failure.code));
-            let mut plan = bound.plan;
-            let mut meter_consumers = bound.meter_consumers;
-            graph::test_only_set_bank_meter_declined(declined);
-            builtins::test_only_reset_banked_meter_commits();
-            let mut pcm = Vec::new();
-            let mut meter_frames: Vec<MeterSnapshot> = Vec::new();
-            let mut commits = Vec::new();
-            for block in 0..BLOCKS {
-                let mut output = vec![0.0_f32; frames * 2];
-                let rendered = plan.render(
-                    RenderIo {
-                        input: None,
-                        output: PlanarBufferMut::try_new(&mut output, 2, frames, frames)
-                            .expect("output"),
-                    },
-                    RenderTime {
-                        absolute_sample: block * frames as u64,
-                    },
-                );
-                assert_eq!(
-                    rendered.is_err(),
-                    block == FAILING_BLOCK,
-                    "block {block}: only the failing observer's block fails"
-                );
-                if rendered.is_ok() {
-                    pcm.push(output);
-                }
-                commits.push(builtins::test_only_banked_meter_commits());
-                for stream in &mut meter_consumers {
-                    while let Ok(snapshot) = stream.consumer.try_pop() {
-                        meter_frames.push(snapshot);
-                    }
-                }
-            }
-            let passes = graph::test_only_bank_meter_passes();
-            graph::test_only_set_bank_meter_declined(false);
-            arms.push((pcm, meter_frames, commits, passes));
-        }
-        let (on, off) = (&arms[0], &arms[1]);
-        assert_pcm_bits_equal(&on.0, &off.0, "failure boundary");
-        assert_eq!(on.1.len(), off.1.len(), "failure boundary: frame count");
-        for (on_frame, off_frame) in on.1.iter().zip(off.1.iter()) {
-            assert_eq!(
-                meter_frame_bits(on_frame),
-                meter_frame_bits(off_frame),
-                "failure boundary: meter {} window {}",
-                off_frame.handle.0,
-                off_frame.window_sequence
-            );
-        }
-        assert!(on.3 > 0, "the pass ran");
-        assert_eq!(off.3, 0);
-        assert!(off.2.iter().all(|&commits| commits == 0));
-        // The failing block committed fewer than every meter, and the blocks around it all 64.
-        let per_block: Vec<u64> =
-            on.2.iter()
-                .scan(0, |previous, &total| {
-                    let delta = total - *previous;
-                    *previous = total;
-                    Some(delta)
-                })
-                .collect();
-        eprintln!("failure boundary: commits per block {per_block:?}");
-        // Bank 0, `ch00` to `ch03` or `ch07`, is the first observed unit at either width, so
-        // exactly `ch00`'s and `ch01`'s meters commit the failing block.
-        assert_eq!(
-            per_block[FAILING_BLOCK as usize], 2,
-            "ch00 and ch01 commit the failing block and no later meter does"
-        );
-        assert!(
-            per_block
+            let recorders = firsts
                 .iter()
                 .enumerate()
-                .all(|(block, &commits)| block == FAILING_BLOCK as usize || commits == 64),
-            "every other block commits every meter"
-        );
-        // `ch02`'s meter (handle 3) missed block 5, so its next window starts at a
-        // discontinuity; `ch01`'s (handle 2) observed it and did not.
-        let discontinuities = |handle: u64| {
-            on.1.iter()
-                .filter(|frame| frame.handle.0.get() == handle)
-                .map(|frame| frame.cumulative_discontinuities)
-                .max()
-        };
-        assert_eq!(
-            discontinuities(2),
-            Some(0),
-            "ch01 observed the failing block"
-        );
-        assert_eq!(
-            discontinuities(3),
-            Some(1),
-            "ch02 never observed the failing block"
-        );
+                .map(|(index, first)| {
+                    GraphNodeObserverBinding::new(
+                        post_matrix(index),
+                        0x0950_E000 + index as u64,
+                        Box::new(Order {
+                            sequence: Arc::clone(&sequence),
+                            first: Arc::clone(first),
+                        }),
+                    )
+                })
+                .collect();
+            render_console_builtins_blocks(artifact, 1, recorders);
+            let mut order: Vec<usize> = (0..firsts.len()).collect();
+            order.sort_by_key(|&index| firsts[index].load(Ordering::Relaxed));
+            assert!(
+                firsts
+                    .iter()
+                    .all(|first| first.load(Ordering::Relaxed) != u64::MAX),
+                "{dispatch:?}: every track's node was observed"
+            );
+            let reached = order
+                .iter()
+                .position(|&index| index == failing_track)
+                .expect("ch01 is observed");
+            let mut observed_before_failure: Vec<u64> = order[..=reached]
+                .iter()
+                .map(|&index| index as u64 + 1)
+                .collect();
+            observed_before_failure.sort_unstable();
+            assert!(
+                observed_before_failure.len() < 64,
+                "{dispatch:?}: some meter is observed after ch01, so the failure stops something"
+            );
+
+            let mut arms = Vec::new();
+            for declined in [false, true] {
+                plan_id += 1;
+                let artifact = compile_console_model_with_selected_meters(
+                    &intended, plan_id, &meters, true, dispatch, &registry,
+                );
+                let envelope = artifact.envelope();
+                let frames = envelope.quantum.0 as usize;
+                let nodes = artifact
+                    .external_binding_nodes()
+                    .map(|node| {
+                        GraphNodeBinding::new(node.clone(), console_track_input_binding(node))
+                    })
+                    .collect();
+                let bound = artifact
+                    .into_bound(GraphRuntimeBindings {
+                        envelope,
+                        nodes,
+                        observers: vec![GraphNodeObserverBinding::new(
+                            post_matrix(failing_track),
+                            0x0950_F000,
+                            Box::new(FailOnce {
+                                block: FAILING_BLOCK,
+                                frames: frames as u64,
+                            }),
+                        )],
+                    })
+                    .unwrap_or_else(|failure| panic!("bind: {}", failure.code));
+                let mut plan = bound.plan;
+                let mut meter_consumers = bound.meter_consumers;
+                graph::test_only_set_bank_meter_declined(declined);
+                builtins::test_only_reset_banked_meter_commits();
+                let mut pcm = Vec::new();
+                let mut meter_frames: Vec<MeterSnapshot> = Vec::new();
+                let mut commits = Vec::new();
+                for block in 0..BLOCKS {
+                    let mut output = vec![0.0_f32; frames * 2];
+                    let rendered = plan.render(
+                        RenderIo {
+                            input: None,
+                            output: PlanarBufferMut::try_new(&mut output, 2, frames, frames)
+                                .expect("output"),
+                        },
+                        RenderTime {
+                            absolute_sample: block * frames as u64,
+                        },
+                    );
+                    assert_eq!(
+                        rendered.is_err(),
+                        block == FAILING_BLOCK,
+                        "{dispatch:?} block {block}: only the failing observer's block fails"
+                    );
+                    if rendered.is_ok() {
+                        pcm.push(output);
+                    }
+                    commits.push(builtins::test_only_banked_meter_commits());
+                    for stream in &mut meter_consumers {
+                        while let Ok(snapshot) = stream.consumer.try_pop() {
+                            meter_frames.push(snapshot);
+                        }
+                    }
+                }
+                let passes = graph::test_only_bank_meter_passes();
+                graph::test_only_set_bank_meter_declined(false);
+                arms.push((pcm, meter_frames, commits, passes));
+            }
+            let context = format!("{dispatch:?} failure boundary");
+            let (on, off) = (&arms[0], &arms[1]);
+            assert_pcm_bits_equal(&on.0, &off.0, &context);
+            assert_eq!(on.1.len(), off.1.len(), "{context}: frame count");
+            for (on_frame, off_frame) in on.1.iter().zip(off.1.iter()) {
+                assert_eq!(
+                    meter_frame_bits(on_frame),
+                    meter_frame_bits(off_frame),
+                    "{context}: meter {} window {}",
+                    off_frame.handle.0,
+                    off_frame.window_sequence
+                );
+            }
+            assert!(on.3 > 0, "{context}: the pass ran");
+            assert_eq!(off.3, 0);
+            assert!(off.2.iter().all(|&commits| commits == 0));
+            let per_block: Vec<u64> =
+                on.2.iter()
+                    .scan(0, |previous, &total| {
+                        let delta = total - *previous;
+                        *previous = total;
+                        Some(delta)
+                    })
+                    .collect();
+            eprintln!(
+                "{context}: {} meters observed before the failure, commits per block {per_block:?}",
+                observed_before_failure.len()
+            );
+            // The meters that observed block 5 are the ones whose windows never broke.
+            let mut unbroken: Vec<u64> = (1..=64_u64)
+                .filter(|&handle| {
+                    on.1.iter()
+                        .filter(|frame| frame.handle.0.get() == handle)
+                        .all(|frame| frame.cumulative_discontinuities == 0)
+                })
+                .collect();
+            unbroken.sort_unstable();
+            assert_eq!(
+                unbroken, observed_before_failure,
+                "{context}: exactly the meters observed before the failing observer saw block 5"
+            );
+            assert_eq!(
+                per_block[FAILING_BLOCK as usize],
+                observed_before_failure.len() as u64,
+                "{context}: exactly those meters commit the failing block, and no later meter does"
+            );
+            assert!(
+                per_block
+                    .iter()
+                    .enumerate()
+                    .all(|(block, &commits)| block == FAILING_BLOCK as usize || commits == 64),
+                "{context}: every other block commits every meter"
+            );
+        }
     }
 
     /// Route ids ordered against the cohorts decline the fold: the association proof, at session

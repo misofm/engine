@@ -996,6 +996,11 @@ enum BankedMode {
     /// The safety net: every seed is moved by one ulp before the pass runs from it and is handed
     /// on, so no energy-keeping meter may commit.
     MovedSeed,
+    /// The safety net for one channel: only the left seed is moved, so only the left half of the
+    /// seed check can refuse the commit.
+    MovedLeftSeed,
+    /// The same for the right channel alone.
+    MovedRightSeed,
 }
 
 /// One M2 configuration. `metrics` is one lane's meters, in binding order; every lane has the same.
@@ -1175,12 +1180,16 @@ fn banked_differential<L: Widen>(
                             .iter()
                             .find_map(|meter| meter.accumulator.banked_seed(time, frames))
                         {
-                            let moved = |x: f64| match run.mode {
-                                BankedMode::MovedSeed => f64::from_bits(x.to_bits() + 1),
+                            let moved = |x: f64, channel: usize| match (run.mode, channel) {
+                                (BankedMode::MovedSeed, _)
+                                | (BankedMode::MovedLeftSeed, 0)
+                                | (BankedMode::MovedRightSeed, 1) => {
+                                    f64::from_bits(x.to_bits() + 1)
+                                }
                                 _ => x,
                             };
-                            seeds[0][lane] = moved(l);
-                            seeds[1][lane] = moved(r);
+                            seeds[0][lane] = moved(l, 0);
+                            seeds[1][lane] = moved(r, 1);
                             seeded = true;
                         }
                     }
@@ -1388,8 +1397,8 @@ fn banked_sweep(period: u32) -> (usize, u64) {
 ///
 /// Built with `--features test-support`, it also pins the commit counter: every block of a plain
 /// 64-block stream at period 512 and 1536, none at 64, some at 300; none on a held peak with a hold
-/// or a decay; none with the block withheld; none with the seed moved by one ulp; a block after a
-/// skipped gap commits.
+/// or a decay; none with the block withheld; none with both seeds, the left alone or the right
+/// alone moved by one ulp; and a block after a skipped gap commits.
 #[test]
 fn a_banked_block_commit_publishes_the_scalar_meters_snapshots() {
     use MeterMetricSet as M;
@@ -1456,11 +1465,27 @@ fn a_banked_block_commit_publishes_the_scalar_meters_snapshots() {
             assert_eq!(commits, 0, "hold {hold} decay {decay}");
         }
     }
-    for mode in [BankedMode::Withheld, BankedMode::MovedSeed] {
+    // The safety net moves both seeds, then each one alone, so each channel's half of the seed
+    // check is the only thing refusing a commit in one of the rows.
+    for mode in [
+        BankedMode::Withheld,
+        BankedMode::MovedSeed,
+        BankedMode::MovedLeftSeed,
+        BankedMode::MovedRightSeed,
+    ] {
         let outcome = banked_differential::<Simd8>(&all(512, 0, 0.0, mode), &plain, 7);
         assert_eq!(outcome.compared, 8 * 64 * 128 / 512, "{mode:?}");
         if let Some(commits) = outcome.commits {
             assert_eq!(commits[commits.len() - 1], 0, "{mode:?} commits nothing");
+        }
+        let outcome = banked_differential::<Simd4>(&all(512, 0, 0.0, mode), &plain, 7);
+        assert_eq!(outcome.compared, 4 * 64 * 128 / 512, "{mode:?} at Simd4");
+        if let Some(commits) = outcome.commits {
+            assert_eq!(
+                commits[commits.len() - 1],
+                0,
+                "{mode:?} commits nothing at Simd4"
+            );
         }
     }
 
