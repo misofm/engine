@@ -137,7 +137,7 @@ All run with `CARGO_INCREMENTAL=0`, the worktree's own `target/`, and `set -o pi
 | graph | `cargo test --locked -p graph` | pass: lib 109, rt10 1, rt1 1, rt9 1 |
 | builtins-compiler | `cargo test --locked -p builtins-compiler --features test-support` | pass: 58, 9, 3, 6, 1, 2 |
 | host-core | `cargo test --locked -p host-core --all-features` | pass (every binary, lib 86) |
-| capi | `cargo test --locked -p capi` | pass (`resource_lifecycle` 32, doc 4) |
+| capi | `cargo test --locked -p capi` | pass: lib 32, `resource_lifecycle` 4, doc 0 |
 | console-workload | `cargo test --locked -p console-workload` (dev) | pass: 8, 4, 23, 3 |
 | tools, CI release mode | `cargo test --locked --release -p audit -p bench -p console-workload` | pass: audit 49, bench 64 (1 ignored), console-workload 8/4/23/3 |
 | other tools | `cargo test --locked -p native-pcm-runner -p parameter-metadata` | pass: 19, 1; 18, 5 |
