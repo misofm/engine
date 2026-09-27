@@ -344,3 +344,171 @@ test) and the temporary `Cargo.toml`/`Cargo.lock` edit were removed before these
    still asserts that every seed binds.
 8. **Not done** (optional amendment 4): the facility-armed reproducer (meters, controls,
    observation). The verification covered it with scratch tooling.
+
+## Sol attempt 1 verdict: FAIL
+
+Reviewed `584dbc16..7e3d75e8` (`2c6562d3`, `7e3d75e8`). Host: `x86_64`, `x86-64-v3`, rustc 1.97.1,
+`CARGO_INCREMENTAL=0`, debug unless stated. Nothing was timed. The base and mutation builds ran in
+a separate scratch worktree; nothing from them is committed.
+
+**The code fix is correct, minimal and in the right place. Attempt 1 fails on test coverage and
+evidence accuracy only.** The generator change removed the one probe shape that could see #970's
+defect on a rescued plan, and the evidence says the opposite. The `Simd4` pins also cannot be
+reproduced from the repository. Both are cheap to correct, and `banks.rs` does not need to change.
+
+### Findings, by severity
+
+1. **Medium: the armed leg is now blind to #970, and deviation 1 and the `20000..20300` row
+   misdescribe it.** The fixture choice is at `crates/graph-compiler/tests/bank_levels.rs:579`.
+   - The mutation used here is M970, the functional revert of `954790d1`. It sets
+     `let armed = !tracks.is_empty()` at `crates/graph/src/runtime.rs:2375`, so chains that do not
+     gather the track input are armed again.
+   - Under M970, **all 9 `bank_levels` tests pass**. The committed probe also stays green on
+     `20000..20300` with every seed rendered: 300 rendered, collapse fired on 79, 0 moved.
+   - The same probe fails under M970 when all-mono desks keep the intended strip (the prototype's
+     choice):
+     - on `0..64`, 9 lines over 7 seeds (12, 19, 31, 48, 50, 54 and 59);
+     - on `20000..20300`, 32 lines over 24 seeds, including the verification's seed 20194.
+   - The reason is that a symmetric all-mono strip leaves nothing asymmetric upstream of a later
+     chain. Wrongly arming that chain is then bit-exact, so the armed leg cannot fail.
+   - The old armed leg did not "compare nothing" (spec deviation 1). The collapse never fired
+     there because the arming correctly declined, and that decline is exactly what #970 made
+     correct.
+   - Amendment 1 exists to cover rescued mono-mapped sessions under the host's arming. The
+     evidence row that runs `20000..20300` "including the verifier's pre-#970 divergence range"
+     suggests coverage the committed generator no longer has.
+   - **Required:**
+     - Keep both all-mono shapes. For example, pick `MONO` or `INTENDED` for a `mono == 1000`
+       desk by seed parity or by one draw inside that branch, so the armed leg must both fire and
+       decline.
+     - Keep the "collapse fired" assertion.
+     - Record M970 as red in `MUTATIONS.md`.
+     - Correct deviation 1 and that evidence row.
+   - Without the change, the M970 counts are unchanged, and the prototype-strip probe is green
+     unmutated apart from the "collapse fired" assertion.
+2. **Medium: the `Simd4` pins cannot be reproduced from the repository.**
+   - Where the pins are asserted and reported:
+     - `native_bank_count` (`bank_levels.rs:855`) pins 45, 45, 45, 45, 6, 1, 43 and 18 at `Simd4`;
+     - the spec reports them at lines 229-237.
+   - Why nothing checks them now:
+     - They came from an uncommitted guest, host test and workspace-member edit.
+     - No CI job builds `bank_levels` for `wasm32` or `aarch64`, so the `Simd4` arm never runs.
+     - `docs/handoffs/bug-966-2026-09-27/evidence-harness.patch` holds only the study's guest,
+       which covers three shapes and not the five new ones.
+   - I reproduced all 8 pins with that scratch guest (below), so the numbers are right.
+   - **Required**, once the coordinator authorizes the path: commit the guest crate, the host test,
+     the member line and the two commands as `docs/handoffs/bug-966-2026-09-27/wasm-pins-harness.patch`.
+     Otherwise, file the brief's "wasm leg for the probe" successor and cite it next to the pins.
+   - Reasoning from the code: the pins should also hold on `aarch64`. There `Backend::current()`
+     is `Simd4`, and each factory banks only at `Backend::current().width()`. That is unverified
+     on hardware.
+3. **Low: the test compiles against a handoff directory.** `bank_levels.rs:57-58` `include_str!`s
+   `docs/handoffs/.../reduced-nobus-from-970-verify.json`.
+   - It is the only Rust source in the workspace that does. Every other cross-crate
+     `include_str!` reads `fixtures/`.
+   - Pruning or renaming the handoff breaks the `graph-compiler` test build.
+   - Move it, when authorized, to a test data directory (for example
+     `crates/graph-compiler/tests/data/`) or into `fixtures/`.
+   - Not blocking on its own.
+4. **Info: an unreachable case unbinds silently.** `banks.rs:263` unbinds silently when
+   `first_level` is `None`.
+   - That case is unreachable: every member comes from a candidate chain whose slot levels
+     `banks.rs:151-190` already resolved, returning `graph.internal.invariant` if one is missing.
+   - The line is identical to the prototype. If a future touch reaches it, make it the invariant
+     error.
+5. **Info: doc wording overstates.** `banks.rs:67-70` says the bucket "aligns every lane's slot 0
+   and nothing after it". Lanes with identical programs align at every slot, so "guarantees
+   alignment only at slot 0" would be exact.
+6. **Info: the CI cost is acceptable.**
+   - The whole `bank_levels` binary uses about 114 s of CPU.
+   - Wall time is 18 s on this host, and 37 s pinned to 4 cores (`taskset -c 0-3`) with the host
+     loaded.
+   - `test-debug-a` runs on public 4-vCPU runners with a 15-minute limit.
+   - It also passes with that job's features (`graph/test-support`, `engine/realtime-audit`,
+     `builtins-compiler/test-support`).
+
+### Confirmed
+
+- **The fix.**
+  - The `banks.rs` hunk is byte-identical to the prototype (blob `8f1dc9cc`).
+  - The check runs before `bind_homogeneous_bank`, whose only call site is this one.
+  - The `rack-compiler` change is doc-only, and the diff stays within the authorized paths.
+  - The branch merges cleanly with `codex/batch-plumbing-floor-2` at `1d8c4851`.
+- **Byte identity, native, fresh seeds `70000..72000`.**
+  - The probe used a different input signal from the committed test's.
+  - Every width was rendered for 16 blocks, unarmed and armed as the host arms it.
+  - It compared, base (`584dbc16`) against the fix:
+    - the SHA and levels;
+    - effect banks, builtin banks and bound slots;
+    - the estimate and the unit census;
+    - shape, transposes, folds and redirects;
+    - the unarmed and armed PCM and the collapse counters.
+  - **5,227 of 5,227 lines that bind on the base are identical.**
+- **Refused lines are rescued, native.**
+  - The base refuses 773 lines (363 `Simd4`, 410 `Simd8`) over 551 seeds, all with
+    `graph.scheduler.layout`.
+  - All 773 bind with the fix, and they render the `Scalar` bits, unarmed and armed.
+  - Levels are unchanged, and the collapse fired on 140 of these lines.
+- **`prepare_host_session`.**
+  - Base: the `ch00`, `ch60` and `ch63` consoles less one EQ, and the mono desk less `ch00`'s EQ,
+    are refused with `graph.scheduler.layout`.
+  - Fix: all four prepare.
+- **Wasm `Simd4` guest.** It runs under the pinned wasmtime 47.0.3, and the guest reports 4 lanes.
+  - **Reproducers:**
+    - the base refuses all 8, with planned banks 46, 46, 46, 7, 2, 44, 20 and 46;
+    - the fix binds them with 45, 45, 45, 6, 1, 43, 18 and 45 banks;
+    - over 16 blocks, 0 renders moved, unarmed or armed;
+    - on the mono desk the collapse fired: 256 collapsed blocks, 16 cohorts.
+  - **Fresh seeds `70000..71000`:**
+    - the base refuses 344 seeds; the fix binds all 1,000;
+    - 351 misaligned seeds were rendered for 16 blocks, with 0 moved unarmed or armed;
+    - the collapse fired on 69 seeds, and 2 renders were silent.
+  - **Seeds `72000..72300`, every seed rendered:** 300 of 300 bind, 0 moved, 0 silent, and the
+    collapse fired on 80.
+- **Class A.**
+  - Console probe (the harness's `zz_probe_966.rs`, debug): 99 of 99 rows are identical. The
+    SHA-256 is `754f4ed8…681976c` for both base and fix.
+  - `graph_fixture --check` passes, and so does the determinism script (100/100).
+- **Mutations.** Every recorded mutation reproduces exactly:
+  - M1: 9 of 9 red, 29 lines over 23 seeds (16 at `Simd4`, 13 at `Simd8`);
+  - M2: 2 of 9 (19 ≠ 20, 8 ≠ 9);
+  - M7: 1 of 9 (8 ≠ 9);
+  - M3: 3 of 9;
+  - M8: 1 of 9, only the probe (seeds 31 and 58);
+  - M9: 2 of 9, armed legs only.
+  - My own extra, M10 (compare only lanes that ran every earlier slot), is red on 4 of 9.
+- **Generator counts (30 and 16, were 29 and 15).**
+  - Every RNG-driven field matches the prototype-strip generator on `0..64`: track count, source
+    mapping, delays, and effect ids, bypass and sidechains.
+  - Only seeds 19, 31, 35 and 62 differ, all of them all-mono desks with asymmetric-delay tracks.
+  - On those desks the symmetric strip splits pool classes, which moves grouping. That matches the
+    evidence's explanation.
+  - The input change (deviation 2) is host-realistic and correct.
+- **Gates**, on the worktree with `-j 12`:
+  - fmt passes;
+  - clippy `--workspace --all-targets --all-features -D warnings` passes;
+  - doc `-D warnings` passes;
+  - test suites:
+
+    | Suite | Passed | Ignored |
+    |---|---|---|
+    | `graph` | 110 | |
+    | `graph --features test-support` | 117 | |
+    | `graph-compiler` | 110 | |
+    | `rack-compiler` | 13 | |
+    | `builtins-compiler --features test-support` | 79 | |
+    | `host-core --all-features` | 234 | 2 |
+    | `capi` | 36 | |
+    | `console-workload` | 39 | 2 |
+    | `wasm-gates` | 9 | |
+
+  - scripts and checks: graph, rack and realtime policy pass, and `graph_fixture --check` passes.
+
+### Attempt 2 scope
+
+- Test and evidence only, with no `banks.rs` change:
+  - finding 1: the generator keeps both all-mono shapes, M970 is recorded, and the prose is
+    corrected;
+  - finding 2: the wasm harness patch, or the named successor.
+- Re-pin the probe's misaligned counts, and re-run M1-M10 and M970.
+- Findings 3-5 are optional.
