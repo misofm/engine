@@ -8782,6 +8782,55 @@ mod tests {
         assert_pcm_bits_equal(&render.pcm, &scalar_render.pcm, "disjoint stereo programs");
     }
 
+    /// Issues #971 and #1002: a move that binds exactly as many banks as it loses is not kept.
+    ///
+    /// `lanes / 2` mono tracks carry `simd1: [eq, comp]`; `W` stereo tracks carry `[eq]` and
+    /// then `1.5 W` carry `[comp]`. The trial binds 2 banks: the stereo EQ cohort and the first
+    /// stereo compressor cohort. Moved, the mono tracks' longer program leads one stereo cohort
+    /// over all of them, in id order: the mono tracks and half the EQ tracks bind an EQ bank, the
+    /// next group mixes EQ and compressor lanes and binds nothing, and the last full group binds
+    /// a compressor bank. That is 2 banks gained against the 2 the trial bound in groups the move
+    /// changed, so the move is not kept. The lost banks sit in trial groups after the first
+    /// vanished one (the mono partial group, which binds nothing), so this is the gate on
+    /// #1002's count of the trial's vanished groups, and on the strict comparison.
+    #[test]
+    fn a_move_that_binds_as_many_banks_as_it_loses_is_not_kept() {
+        let Some(width) = BankWidth::for_backend(host_dispatch()) else {
+            return;
+        };
+        let lanes = width.lanes() as usize;
+        let registry = launch_native_effect_registry().expect("launch registry");
+        let (eq_only, comp_only, mono_count) = (lanes, lanes + lanes / 2, lanes / 2);
+        let stereo = eq_only + comp_only;
+        let mut model = mono_fixture_with_tracks(stereo + mono_count);
+        for (index, track) in model.tracks.iter_mut().enumerate() {
+            track.simd2.effects.clear();
+            if index < stereo {
+                track.right_source_channel = 1;
+                // EQ is slot 0 and the compressor slot 1 of the fixture's simd1 chain.
+                if index < eq_only {
+                    track.simd1.effects.truncate(1);
+                } else {
+                    track.simd1.effects.remove(0);
+                }
+            }
+        }
+        let mono: BTreeSet<String> = (stereo..stereo + mono_count)
+            .map(|index| format!("ch{index:02}"))
+            .collect();
+        let artifact = compile_console_model_with_builtins(&model, 2_095, &[], &registry);
+        assert_eq!(
+            pooled_tracks(&artifact)[0],
+            mono,
+            "the mono tracks stay mono"
+        );
+        assert_eq!(
+            artifact.graph().prepared_bank_count(),
+            2,
+            "the trial's stereo EQ bank and stereo compressor bank"
+        );
+    }
+
     /// Issue #971: the rule, not the bank-gain check, decides which tracks move.
     ///
     /// In every other #971 gate session, either the rule moves nothing or every looser rule moves
@@ -9266,14 +9315,15 @@ mod tests {
 
     /// Issue #1001: a re-plan that fails part way leaves nothing of itself behind.
     ///
-    /// `ch00..ch{2W-2}` are stereo and `ch{2W-1}` is mono, each carrying only `dynamic: [comp]`;
-    /// the mono track's compressor carries a marker threshold, and the bank bind errors only on a
-    /// group holding the marker. The trial binds the stereo cohort `ch00..ch{W-1}`. Moving the
-    /// mono track re-plans the stereo pool as two full groups, and the re-plan binds the first
-    /// (a second bank over `ch00..ch{W-1}`) before the second, which holds the marker, errors.
-    /// The compile keeps the trial: its one bank, its pools (the mono track still mono), and no
-    /// bank of the failed re-plan alive once the compile returns. Dropping the artifact then
-    /// drops the last bank.
+    /// `2W` tracks carry only `dynamic: [comp]`. `ch{W-1}` is mono and the rest stereo. The last
+    /// track's compressor carries a marker threshold, and the bank bind errors only on a group
+    /// holding the marker. The trial binds the stereo cohort `ch00..=ch{W}` without `ch{W-1}`,
+    /// and the marked track sits in its partial remainder, which is never bound. Moving the mono
+    /// track re-plans the stereo pool as two full groups, and both differ from every trial group,
+    /// so the re-plan binds both (issue #1002 binds only changed groups). It binds the first,
+    /// `ch00..ch{W-1}`, before the second, which holds the marker, errors. The compile keeps the
+    /// trial: its one bank, its pools (the mono track still mono), and no bank of the failed
+    /// re-plan alive once the compile returns. Dropping the artifact then drops the last bank.
     ///
     /// At the host width only: the real compressor binds a bank only at the width the build
     /// executes, and declines any other.
@@ -9285,9 +9335,9 @@ mod tests {
             return;
         };
         let lanes = width.lanes() as usize;
-        let mono_index = 2 * lanes - 1;
+        let mono_index = lanes - 1;
         let mut model = dynamic_compressor_session(2 * lanes, mono_index);
-        let threshold = model.tracks[mono_index].dynamic.effects[0]
+        let threshold = model.tracks[2 * lanes - 1].dynamic.effects[0]
             .params
             .iter_mut()
             .find(|param| param.parameter_id == 1)
@@ -9326,7 +9376,8 @@ mod tests {
         assert_eq!(
             members,
             vec![
-                (0..lanes)
+                (0..=lanes)
+                    .filter(|index| *index != mono_index)
                     .map(|index| format!("ch{index:02}"))
                     .collect::<Vec<_>>()
             ],
