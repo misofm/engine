@@ -690,6 +690,78 @@ fn ramps_are_stationary(ramps: &[LinearRamp]) -> bool {
         .all(|ramp| ramp.remaining == 0 && ramp.current.to_bits() == ramp.target.to_bits())
 }
 
+/// `true` when two ramps hold the same four words, by bit pattern.
+///
+/// All four, because [`RampLanes::advance`] reads all four: two ramps that agree on `current` and
+/// disagree on `step` produce the same value on this sample and different ones on the next.
+fn ramp_words_agree(left: &LinearRamp, right: &LinearRamp) -> bool {
+    left.current.to_bits() == right.current.to_bits()
+        && left.target.to_bits() == right.target.to_bits()
+        && left.step.to_bits() == right.step.to_bits()
+        && left.remaining == right.remaining
+}
+
+/// Issue #990 contract 1: `true` when, on every lane, the two channels carry the same designed
+/// words the gain path reads.
+///
+/// Those are the window shape (`LaneShape`: the van Herk window, the ring distance to its newest
+/// sample and the box term leaving the running sum) and all four words of each of the two ramps
+/// (the `limit` and `release` coefficients). Nothing else designed reaches steps 1-6 of
+/// [`channel_frame_uniform`]: `lookahead_ms` is what `LaneShape` was derived from and is never read
+/// by a rendered block, and the link and bypass booleans are one per bank.
+///
+/// Bit compares throughout, never tolerances: the licence this grants is "the two gain paths run
+/// the same operations on the same operands", which a tolerance cannot state. About ninety word
+/// compares at `W = 8`, once per block, on the control side of the frame loop.
+fn designed_gain_agree(left: &ChannelState, right: &ChannelState) -> bool {
+    left.lane.iter().zip(right.lane.iter()).all(|(a, b)| a == b)
+        && left
+            .limit
+            .iter()
+            .zip(right.limit.iter())
+            .all(|(a, b)| ramp_words_agree(a, b))
+        && left
+            .release
+            .iter()
+            .zip(right.release.iter())
+            .all(|(a, b)| ramp_words_agree(a, b))
+}
+
+/// `true` when every lane's window shape agrees across the two channels.
+///
+/// After [`ChannelState::clear_runtime`] this is exactly "the two channels' gain words agree":
+/// `clear_runtime` writes `1.0` over both gain rings and the prefix, `+0.0` over the reduction word,
+/// `0` over the phase, and `Wb` over the box sum. The last is the only word that depends on the
+/// lane, and it depends on nothing but the lane's window, so the words agree if and only if every
+/// lane's `LaneShape` does. That is what lets a reset re-establish the linked-agreement record in
+/// `W` compares instead of a full comparison.
+fn lane_shapes_agree(left: &ChannelState, right: &ChannelState) -> bool {
+    left.lane.iter().zip(right.lane.iter()).all(|(a, b)| a == b)
+}
+
+/// `true` when the two channels' gain words are bit-equal on every lane.
+///
+/// The gain words are the running state of steps 1-6 of [`channel_frame_uniform`]: both gain rings
+/// (every slot, not only the live window -- a slot outside it is still serialised), the van Herk
+/// `prefix` and `phase`, the running box sum and the recursive reduction word. The detector history
+/// and the main delay ring are per channel by design and are not in the list.
+///
+/// A full comparison, so it runs on the control path only: after a restore, where the payload's two
+/// sections are arbitrary.
+fn gain_state_agrees(left: &ChannelState, right: &ChannelState) -> bool {
+    let words_agree = |a: &[f32], b: &[f32]| {
+        a.iter()
+            .zip(b.iter())
+            .all(|(a, b)| a.to_bits() == b.to_bits())
+    };
+    words_agree(&left.required_ring, &right.required_ring)
+        && words_agree(&left.box_ring, &right.box_ring)
+        && words_agree(&left.prefix, &right.prefix)
+        && words_agree(&left.box_sum, &right.box_sum)
+        && words_agree(&left.reduction, &right.reduction)
+        && left.phase == right.phase
+}
+
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StationaryDispatch {
@@ -790,6 +862,16 @@ fn observe_dispatch<const DISPATCH: u8>(route: DispatchRoute) {
 #[cfg(test)]
 fn dispatch_observation() -> DispatchObservation {
     DISPATCH_OBSERVATION.with(Cell::get)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Issue #990 gate 2: uniform blocks that rendered a linked pair's gain path once, on this
+    /// thread. Instrumentation, not render state.
+    static LINKED_ENGAGEMENTS: Cell<u32> = const { Cell::new(0) };
+    /// Issue #990 gate 1: route [`limiter_block_linkable`] to the unmodified reference kernel the
+    /// test module keeps, for the oracle arm of the identity harness.
+    static REFERENCE_KERNEL: Cell<bool> = const { Cell::new(false) };
 }
 
 /// A linear ramp of one coefficient, held as lanes for the block loop.
@@ -1221,6 +1303,62 @@ fn sliding_minimum_uniform<L: Lane>(
         for _ in 0..window {
             suffix = suffix.min(ring_lane::<L>(required_ring, slot));
             store_ring_lane::<L>(required_ring, slot, suffix);
+            if slot == 0 {
+                slot = ring;
+            }
+            slot -= 1;
+        }
+        *phase = 0;
+    } else {
+        *phase = (position + 1) as u32;
+    }
+    minimum
+}
+
+/// Issue #990 contract 2: [`sliding_minimum_uniform`] with every write of its backward pass also
+/// made to `mirror`, at the same slot.
+///
+/// The body is [`sliding_minimum_uniform`]'s, line for line and operand for operand; the only
+/// addition is the second `store_ring_lane`. Every read comes from `required_ring`. It is a
+/// separate function, not a parameter of the first, so the dual body keeps the code it had.
+///
+/// The mirror is the right channel of a linked pair whose required-gain rings are bit-equal on
+/// entry (the linked-agreement invariant). The dual body would have run this same pass on the
+/// right ring and written the same words to the same slots, so writing them here leaves the right
+/// ring exactly as a dual block would: the saving is the recomputation, never the store.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn sliding_minimum_uniform_mirrored<L: Lane>(
+    required_ring: &mut [f32],
+    mirror: &mut [f32],
+    window: usize,
+    ring: usize,
+    end: usize,
+    start: usize,
+    prefix: &mut L,
+    phase: &mut u32,
+) -> L {
+    let newest = ring_lane::<L>(required_ring, end);
+    let position = *phase as usize;
+    let running = if position == 0 {
+        newest
+    } else {
+        (*prefix).min(newest)
+    };
+    *prefix = running;
+    let complete = position + 1 == window;
+    let minimum = if complete {
+        running
+    } else {
+        ring_lane::<L>(required_ring, start).min(running)
+    };
+    if complete {
+        let mut suffix = ring_lane::<L>(required_ring, end);
+        let mut slot = end;
+        for _ in 0..window {
+            suffix = suffix.min(ring_lane::<L>(required_ring, slot));
+            store_ring_lane::<L>(required_ring, slot, suffix);
+            store_ring_lane::<L>(mirror, slot, suffix);
             if slot == 0 {
                 slot = ring;
             }
@@ -1665,6 +1803,83 @@ fn channel_frame_uniform<L: Lane>(
     L::select(bypass, delayed, delayed.mul(gain)).store(io_frame);
 }
 
+/// Issue #990 contract 3: one frame of a linked pair, steps 1-6 once and step 7 on each channel.
+///
+/// # When this is the frame the dual body renders
+///
+/// Under `LinkMode::Maximum` both channels feed the same linked peak `max(p_R, p_L)` to their gain
+/// computers. When, lane by lane, the two channels also carry the same designed words
+/// ([`designed_gain_agree`]) and the same gain words (the `gain_linked` record on
+/// [`LimiterCore`]), the right channel's steps 1-6 of [`channel_frame_uniform`] are the left's:
+/// the same operations, in the same order, on the same operands. So they produce the same words,
+/// including a `-0.0`, a subnormal and a NaN payload, and computing them once is class A.
+///
+/// Steps 1-6 run here on the left channel's hot words in [`channel_frame_uniform`]'s order. Every
+/// ring write they make is made to the right channel as well, at the same slot: the required gain
+/// at the cursor, each suffix minimum of the backward pass ([`sliding_minimum_uniform_mirrored`])
+/// and the quantised box term. The right channel therefore ends every frame holding exactly the
+/// ring words a dual frame would have left in it. Its four register words (`prefix`, `phase`, the
+/// box sum and the reduction word) are set from the left's once, when the block ends.
+///
+/// Step 7 is per channel and runs twice, left then right, each on its own delay ring and its own
+/// input, with the one gain `g = 1 - d`.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn linked_frame_uniform<L: Lane>(
+    left_frame: &mut [f32],
+    right_frame: &mut [f32],
+    x_left: L,
+    x_right: L,
+    peak: L,
+    limit: L,
+    release: L,
+    hot: &mut HotChannel<L>,
+    left: &mut UniformHot<'_, L>,
+    right: &mut UniformHot<'_, L>,
+    ring: usize,
+    slots: FrameSlots,
+    bypass: <L as Lane>::Mask,
+) {
+    let one = L::splat(1.0);
+
+    let required = L::select(peak.gt(limit), limit.div(peak), one);
+    store_ring_lane::<L>(left.required_ring, slots.ring_cursor, required);
+    store_ring_lane::<L>(right.required_ring, slots.ring_cursor, required);
+
+    let minimum = sliding_minimum_uniform_mirrored::<L>(
+        left.required_ring,
+        right.required_ring,
+        left.offsets.window,
+        ring,
+        slots.end,
+        slots.start,
+        &mut left.prefix,
+        &mut left.phase,
+    );
+    let quantised = minimum
+        .mul(L::splat(BOX_GRID))
+        .floor()
+        .mul(L::splat(1.0 / BOX_GRID));
+
+    let expired = ring_lane::<L>(left.box_ring, slots.expiring);
+    hot.box_sum = hot.box_sum.add(quantised).sub(expired);
+    store_ring_lane::<L>(left.box_ring, slots.ring_cursor, quantised);
+    store_ring_lane::<L>(right.box_ring, slots.ring_cursor, quantised);
+    let smoothed = hot.box_sum.div(hot.window);
+
+    let target = one.sub(smoothed);
+    let released = release.fma(target.sub(hot.reduction), hot.reduction);
+    hot.reduction = flush(target.max(released));
+
+    let gain = one.sub(hot.reduction);
+    let delayed = ring_lane::<L>(left.main_ring, slots.main_cursor);
+    store_ring_lane::<L>(left.main_ring, slots.main_cursor, x_left);
+    L::select(bypass, delayed, delayed.mul(gain)).store(left_frame);
+    let delayed = ring_lane::<L>(right.main_ring, slots.main_cursor);
+    store_ring_lane::<L>(right.main_ring, slots.main_cursor, x_right);
+    L::select(bypass, delayed, delayed.mul(gain)).store(right_frame);
+}
+
 /// The one block kernel: `frames` frames of `L::WIDTH` tracks, both channels, one pass.
 ///
 /// Decision D10. The frame loop lives here and nothing per-sample crosses a call boundary: the
@@ -1675,6 +1890,10 @@ fn channel_frame_uniform<L: Lane>(
 ///
 /// Panics in debug builds if either block is not `frames * L::WIDTH` long, or if the arena was not
 /// allocated for `L::WIDTH` lanes. Block shapes are validated once at preparation (#90 F8).
+///
+/// This entry never links a pair (issue #990): it carries no linked-agreement record, so it renders
+/// both channels' gain paths, which is always correct. It is the corpus's entry; the shipped path
+/// is [`limiter_block_linkable`], which [`LimiterCore::process_block`] calls with the record.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn limiter_block<L: Lane>(
@@ -1687,6 +1906,38 @@ fn limiter_block<L: Lane>(
     right: &mut ChannelState,
     cursors: &mut Cursors,
 ) {
+    limiter_block_linkable::<L>(
+        left_io, right_io, frames, coef, shape, left, right, cursors, false,
+    );
+}
+
+/// [`limiter_block`] with the linked-pair decision of issue #990.
+///
+/// `linked` is the caller's statement that the pair is linked (`LinkMode::Maximum`), that its
+/// designed words agree on every lane ([`designed_gain_agree`]) and that its gain words agree (the
+/// `gain_linked` record). A uniform cohort then renders its gain path once
+/// ([`linked_frame_uniform`]); a cohort that is not uniform renders the per-lane body, which needs
+/// no such branch: it computes both channels' gain words from equal operands and leaves them equal.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn limiter_block_linkable<L: Lane>(
+    left_io: &mut [f32],
+    right_io: &mut [f32],
+    frames: usize,
+    coef: &LimiterCoef<L>,
+    shape: &Shape,
+    left: &mut ChannelState,
+    right: &mut ChannelState,
+    cursors: &mut Cursors,
+    linked: bool,
+) {
+    // Issue #990 gate 1: the oracle arm of the identity harness renders the unmodified kernel,
+    // which the test module keeps as a verbatim copy. Test builds only.
+    #[cfg(test)]
+    if REFERENCE_KERNEL.with(Cell::get) {
+        tests::reference_block::<L>(left_io, right_io, frames, coef, shape, left, right, cursors);
+        return;
+    }
     let stationary = dual_stationary(left, right);
     // Issue #182 S1: one whole-bank branch, taken here and nowhere else. Both channels must be
     // uniform, because both run the same body; a bank with a mixed left channel and a uniform
@@ -1695,11 +1946,11 @@ fn limiter_block<L: Lane>(
     if lanes_uniform(left) && lanes_uniform(right) {
         if stationary {
             limiter_block_uniform::<DISPATCH_STATIONARY, L>(
-                left_io, right_io, frames, coef, shape, left, right, cursors, true,
+                left_io, right_io, frames, coef, shape, left, right, cursors, true, linked,
             );
         } else {
             limiter_block_uniform::<DISPATCH_RAMPING, L>(
-                left_io, right_io, frames, coef, shape, left, right, cursors, false,
+                left_io, right_io, frames, coef, shape, left, right, cursors, false, linked,
             );
         }
     } else {
@@ -1731,7 +1982,7 @@ fn limiter_block_runtime_oracle<L: Lane>(
     let stationary = dual_stationary(left, right);
     if lanes_uniform(left) && lanes_uniform(right) {
         limiter_block_uniform::<DISPATCH_RUNTIME, L>(
-            left_io, right_io, frames, coef, shape, left, right, cursors, stationary,
+            left_io, right_io, frames, coef, shape, left, right, cursors, stationary, false,
         );
     } else {
         limiter_block_per_lane::<DISPATCH_RUNTIME, L>(
@@ -1920,6 +2171,23 @@ fn limiter_block_per_lane<const DISPATCH: u8, L: Lane>(
 /// and this form computes `((c + o) mod R) + step`; the two agree exactly while
 /// `((c + o) mod R) + step < R`, which is the condition the segment length is the minimum of. The
 /// state words the frame loop keeps in registers are argued in [`sliding_minimum_uniform`].
+///
+/// # The linked pair (issue #990 contract 4)
+///
+/// `linked` is a whole-block decision, taken once by the caller and never per frame or per lane.
+/// When it holds, every segment runs [`linked_frame_uniform`] instead of the two
+/// [`channel_frame_uniform`] calls, and only the left ramps are advanced per frame. The segment walk,
+/// the detector passes and the write-back are the dual body's.
+///
+/// When the block ends, the right channel's four register words -- `prefix`, `phase`, the box sum
+/// and the reduction word -- are set from the left's, and so are its two ramps. Each is the word the
+/// dual body would have computed for the right channel, because it would have computed it from
+/// equal operands: the ramps entered the block bit-equal ([`designed_gain_agree`]) and advance by a
+/// function of their own four words, so copying them at block end in the ramping dispatch is the
+/// same as advancing them frame by frame. The right channel's ring words were mirrored frame by
+/// frame. So the right channel leaves the block in exactly the state a dual block leaves it in:
+/// `snapshot_track`, the resident reduction tap, the silent-rest test and the mono collapse's
+/// disengage copy all read the same words.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn limiter_block_uniform<const DISPATCH: u8, L: Lane>(
@@ -1932,6 +2200,7 @@ fn limiter_block_uniform<const DISPATCH: u8, L: Lane>(
     right: &mut ChannelState,
     cursors: &mut Cursors,
     stationary: bool,
+    linked: bool,
 ) {
     let width = L::WIDTH;
     debug_assert!(width <= MAXIMUM_WIDTH);
@@ -1944,6 +2213,10 @@ fn limiter_block_uniform<const DISPATCH: u8, L: Lane>(
     let mut hot_right = HotChannel::<L>::load(right);
     #[cfg(test)]
     observe_dispatch::<DISPATCH>(DispatchRoute::DualUniform);
+    #[cfg(test)]
+    if linked {
+        LINKED_ENGAGEMENTS.with(|count| count.set(count.get().saturating_add(1)));
+    }
     let all = L::zero().eq(L::zero());
     let none = L::mask_not(all);
     let link = if coef.link_max { all } else { none };
@@ -1998,6 +2271,50 @@ fn limiter_block_uniform<const DISPATCH: u8, L: Lane>(
                 let right_segment = &mut right_io[base..base + words];
                 let left_peaks = &peaks_left[frame * width..(frame + run) * width];
                 let right_peaks = &peaks_right[frame * width..(frame + run) * width];
+
+                if linked {
+                    for (step, (((left_frame, right_frame), left_peak), right_peak)) in left_segment
+                        .chunks_exact_mut(width)
+                        .zip(right_segment.chunks_exact_mut(width))
+                        .zip(left_peaks.chunks_exact(width))
+                        .zip(right_peaks.chunks_exact(width))
+                        .enumerate()
+                    {
+                        let (limit, release) = ramp_values::<DISPATCH, L>(
+                            stationary,
+                            &mut hot_left.limit,
+                            &mut hot_left.release,
+                        );
+
+                        // The dual body's `select(link, linked, peak)` with `link` all-true, which
+                        // is `linked` bit for bit: a linked pair is `LinkMode::Maximum` by the
+                        // caller's decision.
+                        let peak = L::load(right_peak).max(L::load(left_peak));
+
+                        let x_left = L::load(left_frame);
+                        let x_right = L::load(right_frame);
+
+                        linked_frame_uniform::<L>(
+                            left_frame,
+                            right_frame,
+                            x_left,
+                            x_right,
+                            peak,
+                            limit,
+                            release,
+                            &mut hot_left,
+                            &mut uniform_left,
+                            &mut uniform_right,
+                            ring,
+                            walk.left.advanced(step),
+                            bypass,
+                        );
+                    }
+                    frame += run;
+                    ring_cursor = wrapped(ring_cursor + run, ring);
+                    main_cursor = wrapped(main_cursor + run, main);
+                    continue;
+                }
 
                 for (step, (((left_frame, right_frame), left_peak), right_peak)) in left_segment
                     .chunks_exact_mut(width)
@@ -2058,12 +2375,22 @@ fn limiter_block_uniform<const DISPATCH: u8, L: Lane>(
             }
         }
 
-        (
-            uniform_left.prefix,
-            uniform_left.phase,
-            uniform_right.prefix,
-            uniform_right.phase,
-        )
+        if linked {
+            // Issue #990: the right channel's van Herk words are the left's.
+            (
+                uniform_left.prefix,
+                uniform_left.phase,
+                uniform_left.prefix,
+                uniform_left.phase,
+            )
+        } else {
+            (
+                uniform_left.prefix,
+                uniform_left.phase,
+                uniform_right.prefix,
+                uniform_right.phase,
+            )
+        }
     };
 
     // R1(a)'s write-back. One store of each van Herk word per block, holding what the last frame
@@ -2074,6 +2401,14 @@ fn limiter_block_uniform<const DISPATCH: u8, L: Lane>(
     right_prefix.store(&mut right.prefix);
     right.phase.fill(right_phase);
 
+    if linked {
+        // Issue #990: the right channel's recursive words and ramps are the left's, as argued in
+        // the doc comment above. Its detector history is its own and is stored as computed.
+        hot_right.box_sum = hot_left.box_sum;
+        hot_right.reduction = hot_left.reduction;
+        hot_right.limit = hot_left.limit;
+        hot_right.release = hot_left.release;
+    }
     hot_left.store(left);
     hot_right.store(right);
     cursors.main = main_cursor as u32;
@@ -2113,6 +2448,29 @@ struct LimiterCore<L: Lane> {
     /// The bypass flag in force when the claim above was earned. Bypass selects a different arm of
     /// the output `select`, so a claim earned on one side of it says nothing about the other.
     silent_bypass: bool,
+    /// Issue #990: the linked-agreement record.
+    ///
+    /// **Invariant:** when this is `true`, then on every lane the two channels' gain words are
+    /// bit-equal -- both gain rings, `prefix`, `phase`, `box_sum` and `reduction`
+    /// ([`gain_state_agrees`]). It licenses [`limiter_block_uniform`] to compute a linked pair's gain
+    /// path once, together with the per-block legs that the prepared link is `Maximum`, that both
+    /// channels are uniform and that the designed words agree ([`designed_gain_agree`]).
+    ///
+    /// * **Established** at construction and by [`reset`](Self::reset) (including the §4.4 reset
+    ///   of a non-finite block) iff every lane's window shape agrees ([`lane_shapes_agree`], which
+    ///   is exact after `clear_runtime`); by [`desymmetrize`](Self::desymmetrize), which copies the
+    ///   left channel over the right; and by [`restore_track`](Self::restore_track), from a full
+    ///   comparison of every lane's gain words.
+    /// * **Kept** by a dual block that renders under `Maximum` with the designed words agreeing:
+    ///   linked, it mirrors every write; dual (the per-lane body), it computes both channels' words
+    ///   from equal operands. The silent fast path keeps it too: it advances each channel's phase
+    ///   by a function of that phase and the lane's window, and at silent rest the box sum *is* the
+    ///   window, so equal box sums mean equal windows.
+    /// * **Cleared** by a dual block under `DualMono` or with a designed word apart on any lane, by
+    ///   every collapsed block (only the left channel advances), and by a restore whose comparison
+    ///   fails. Once cleared it stays cleared until one of the three establishing events: a pair
+    ///   whose designed words come back together has no proof its gain words did.
+    gain_linked: bool,
     /// Blocks the fast path actually took, for the engagement-rate gate. Test-only, like
     /// [`nonfinite_report`](Self::nonfinite_report): instrumentation is not render state.
     #[cfg(test)]
@@ -2132,17 +2490,21 @@ impl<L: Lane> LimiterCore<L> {
         }
         let shape = Shape::new(metadata.sample_rate)?;
         let rate = metadata.sample_rate;
+        let left = ChannelState::new(width, &shape, &left_defaults, rate);
+        let right = ChannelState::new(width, &shape, &right_defaults, rate);
+        let gain_linked = lane_shapes_agree(&left, &right);
         Some(Self {
             coefficients: LimiterCoef::new(
                 matches!(metadata.link_mode, LinkMode::Maximum),
                 metadata.bypass,
             ),
-            left: ChannelState::new(width, &shape, &left_defaults, rate),
-            right: ChannelState::new(width, &shape, &right_defaults, rate),
+            left,
+            right,
             cursors: Cursors::default(),
             report: NonFiniteReport::new(),
             silent_fixed_point: false,
             silent_bypass: metadata.bypass,
+            gain_linked,
             #[cfg(test)]
             silent_engagements: 0,
             metadata,
@@ -2173,6 +2535,8 @@ impl<L: Lane> LimiterCore<L> {
             }
         }
         self.cursors = Cursors::default();
+        // #990: both channels now hold `clear_runtime`'s words.
+        self.gain_linked = lane_shapes_agree(&self.left, &self.right);
     }
 
     /// Runs one block and applies the master plan §4.4 boundary check (decision D7).
@@ -2231,7 +2595,14 @@ impl<L: Lane> LimiterCore<L> {
             }
             return;
         }
-        limiter_block::<L>(
+        // Issue #990: the whole-block linked-pair decision, and the record it leaves. A block that
+        // renders under `Maximum` with every designed word agreeing leaves agreeing gain words
+        // behind whichever body runs it, so the record after the block is exactly the decision.
+        let linked = self.coefficients.link_max
+            && self.gain_linked
+            && designed_gain_agree(&self.left, &self.right);
+        self.gain_linked = linked;
+        limiter_block_linkable::<L>(
             left_io,
             right_io,
             frames,
@@ -2240,6 +2611,7 @@ impl<L: Lane> LimiterCore<L> {
             &mut self.left,
             &mut self.right,
             &mut self.cursors,
+            linked,
         );
         // Earn or lose the claim from what this block actually did. `is_at_silent_rest` is
         // `clear_runtime`'s own word list read back, which is the state the crate documents a
@@ -2265,10 +2637,13 @@ impl<L: Lane> LimiterCore<L> {
         let left_defaults = &self.left_defaults;
         let right_defaults = &self.right_defaults;
         let cursors = &mut self.cursors;
+        let gain_linked = &mut self.gain_linked;
         finish_block::<L>(left_io, right_io, &mut self.report, || {
             left.reset_to_defaults(&shape, left_defaults, rate);
             right.reset_to_defaults(&shape, right_defaults, rate);
             *cursors = Cursors::default();
+            // #990: the §4.4 reset re-establishes the record exactly as `reset` does.
+            *gain_linked = lane_shapes_agree(left, right);
         });
     }
 
@@ -2279,6 +2654,10 @@ impl<L: Lane> LimiterCore<L> {
         right_io: &mut [f32],
         frames: usize,
     ) {
+        // The oracle never links, and keeps the record honest for a core it drives.
+        self.gain_linked = self.coefficients.link_max
+            && self.gain_linked
+            && designed_gain_agree(&self.left, &self.right);
         limiter_block_runtime_oracle::<L>(
             left_io,
             right_io,
@@ -2301,6 +2680,9 @@ impl<L: Lane> LimiterCore<L> {
     /// `mask(left) | mask(right)` with `right` equal to `left`, so it is the same mask; the reset
     /// it triggers still restores **both** channels and the cursors, exactly as the dual one does.
     fn process_block_mono(&mut self, left_io: &mut [f32], frames: usize) {
+        // #990: only the left channel advances from here, the silent path included, so the right
+        // channel's gain words go stale until `desymmetrize` copies the left over them.
+        self.gain_linked = false;
         let words = frames * L::WIDTH;
         let quiet = self.silent_bypass == self.metadata.bypass
             && ramps_are_stationary(&self.left.limit)
@@ -2343,6 +2725,7 @@ impl<L: Lane> LimiterCore<L> {
 
     #[cfg(test)]
     fn process_block_mono_runtime_oracle(&mut self, left_io: &mut [f32], frames: usize) {
+        self.gain_linked = false;
         limiter_block_mono_runtime_oracle::<L>(
             left_io,
             frames,
@@ -2358,6 +2741,8 @@ impl<L: Lane> LimiterCore<L> {
     /// See [`ChannelState::copy_state_from`] for the word-by-word list and why it is exhaustive.
     fn desymmetrize(&mut self) {
         self.right.copy_state_from(&self.left);
+        // #990: every word of the right channel is now the left's, the gain words included.
+        self.gain_linked = true;
     }
 
     /// The boundary-check record, for the gates. Wiring it into `ProcessReport` belongs to #95.
@@ -2806,6 +3191,10 @@ impl<L: Lane> LimiterCore<L> {
         let right = read_lane(input.right, &self.shape, rate)?;
         commit_lane(&mut self.left, track, &left, self.cursors, &self.shape);
         commit_lane(&mut self.right, track, &right, self.cursors, &self.shape);
+        // #990: a payload's two sections are arbitrary, so the record is re-derived from the words
+        // themselves, every lane of the bank, on this control-path call. A rejected restore returns
+        // above without writing anything and leaves the record as true as it was.
+        self.gain_linked = gain_state_agrees(&self.left, &self.right);
         Ok(())
     }
 }
@@ -2956,16 +3345,10 @@ impl<L: Lane> LimiterCore<L> {
         if lane >= self.left.width || lane >= self.right.width {
             return false;
         }
-        let ramps_agree = |left: &LinearRamp, right: &LinearRamp| {
-            left.current.to_bits() == right.current.to_bits()
-                && left.target.to_bits() == right.target.to_bits()
-                && left.step.to_bits() == right.step.to_bits()
-                && left.remaining == right.remaining
-        };
         self.left.lane[lane] == self.right.lane[lane]
             && self.left.lookahead_ms[lane].to_bits() == self.right.lookahead_ms[lane].to_bits()
-            && ramps_agree(&self.left.limit[lane], &self.right.limit[lane])
-            && ramps_agree(&self.left.release[lane], &self.right.release[lane])
+            && ramp_words_agree(&self.left.limit[lane], &self.right.limit[lane])
+            && ramp_words_agree(&self.left.release[lane], &self.right.release[lane])
     }
 }
 
@@ -6092,5 +6475,1236 @@ mod tests {
             limit_coefficient(-3.0).to_bits()
         );
         assert_eq!(read_u32(&payload.1, words::MAIN_CURSOR), 0);
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Issue #990: the linked gain computer.
+    //
+    // Gate 1 is an identity harness. Every block runs through the shipped kernel and through
+    // `reference_block`, a verbatim copy of the kernel as it stood before #990, kept here in test
+    // code; everything a host or a snapshot can observe is compared after every block, and the
+    // linked-agreement invariant is read straight off the shipped core. Gate 2 is the engagement
+    // witness: `LINKED_ENGAGEMENTS` counts the uniform blocks that actually took the linked body.
+    // ---------------------------------------------------------------------------------------
+
+    /// The kernel's block entry before issue #990 (`limiter_block`), verbatim.
+    ///
+    /// The oracle arm of gate 1, reached through `REFERENCE_KERNEL`. It lives in test code so that
+    /// the oracle is the kernel that shipped before the change rather than a switch inside the code
+    /// under test: [`reference_block_uniform`] is the pre-#990 `limiter_block_uniform` token for
+    /// token, and a ragged cohort goes to the per-lane body, which #990 does not touch.
+    /// `#[inline(never)]` keeps the copy's frame out of `process_block`'s in the dev profile.
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn reference_block<L: Lane>(
+        left_io: &mut [f32],
+        right_io: &mut [f32],
+        frames: usize,
+        coef: &LimiterCoef<L>,
+        shape: &Shape,
+        left: &mut ChannelState,
+        right: &mut ChannelState,
+        cursors: &mut Cursors,
+    ) {
+        let stationary = dual_stationary(left, right);
+        if lanes_uniform(left) && lanes_uniform(right) {
+            if stationary {
+                reference_block_uniform::<DISPATCH_STATIONARY, L>(
+                    left_io, right_io, frames, coef, shape, left, right, cursors, true,
+                );
+            } else {
+                reference_block_uniform::<DISPATCH_RAMPING, L>(
+                    left_io, right_io, frames, coef, shape, left, right, cursors, false,
+                );
+            }
+        } else if stationary {
+            limiter_block_per_lane::<DISPATCH_STATIONARY, L>(
+                left_io, right_io, frames, coef, shape, left, right, cursors, true,
+            );
+        } else {
+            limiter_block_per_lane::<DISPATCH_RAMPING, L>(
+                left_io, right_io, frames, coef, shape, left, right, cursors, false,
+            );
+        }
+    }
+
+    /// `limiter_block_uniform` before issue #990, verbatim but for its name and its inlining.
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn reference_block_uniform<const DISPATCH: u8, L: Lane>(
+        left_io: &mut [f32],
+        right_io: &mut [f32],
+        frames: usize,
+        coef: &LimiterCoef<L>,
+        shape: &Shape,
+        left: &mut ChannelState,
+        right: &mut ChannelState,
+        cursors: &mut Cursors,
+        stationary: bool,
+    ) {
+        let width = L::WIDTH;
+        debug_assert!(width <= MAXIMUM_WIDTH);
+        debug_assert_eq!(left.width, width);
+        debug_assert_eq!(right.width, width);
+        debug_assert_eq!(left_io.len(), frames * width);
+        debug_assert_eq!(right_io.len(), frames * width);
+
+        let mut hot_left = HotChannel::<L>::load(left);
+        let mut hot_right = HotChannel::<L>::load(right);
+        #[cfg(test)]
+        observe_dispatch::<DISPATCH>(DispatchRoute::DualUniform);
+        let all = L::zero().eq(L::zero());
+        let none = L::mask_not(all);
+        let link = if coef.link_max { all } else { none };
+        let bypass = if coef.bypass { all } else { none };
+        let ring = shape.ring;
+        let main = shape.main;
+        let mut main_cursor = cursors.main as usize;
+        let mut ring_cursor = cursors.ring as usize;
+        let mut peaks_left = [0.0_f32; DETECTOR_CHUNK * MAXIMUM_WIDTH];
+        let mut peaks_right = [0.0_f32; DETECTOR_CHUNK * MAXIMUM_WIDTH];
+
+        // The ring views borrow the two channels for the whole walk, so the two van Herk words come
+        // back out of the scope and are written to the arena below, once.
+        let (left_prefix, left_phase, right_prefix, right_phase) = {
+            let mut uniform_left = UniformHot::<L>::new(left, shape);
+            let mut uniform_right = UniformHot::<L>::new(right, shape);
+
+            // The chunking of the detector is `limiter_block_per_lane`'s, for its reason: only one
+            // channel's twelve history words are live at a time.
+            for chunk in (0..frames).step_by(DETECTOR_CHUNK) {
+                let span = core::cmp::min(DETECTOR_CHUNK, frames - chunk);
+                let active_base = chunk * width;
+                let active_words = span * width;
+                detector_chunk::<L>(
+                    &mut hot_left.history,
+                    &left_io[active_base..active_base + active_words],
+                    &coef.fir,
+                    &mut peaks_left[..active_words],
+                );
+                detector_chunk::<L>(
+                    &mut hot_right.history,
+                    &right_io[active_base..active_base + active_words],
+                    &coef.fir,
+                    &mut peaks_right[..active_words],
+                );
+
+                let mut frame = 0;
+                while frame < span {
+                    let walk = segment(
+                        shape,
+                        ring_cursor,
+                        main_cursor,
+                        span - frame,
+                        uniform_left.offsets,
+                        uniform_right.offsets,
+                    );
+                    let run = walk.run;
+
+                    let base = (chunk + frame) * width;
+                    let words = run * width;
+                    let left_segment = &mut left_io[base..base + words];
+                    let right_segment = &mut right_io[base..base + words];
+                    let left_peaks = &peaks_left[frame * width..(frame + run) * width];
+                    let right_peaks = &peaks_right[frame * width..(frame + run) * width];
+
+                    for (step, (((left_frame, right_frame), left_peak), right_peak)) in left_segment
+                        .chunks_exact_mut(width)
+                        .zip(right_segment.chunks_exact_mut(width))
+                        .zip(left_peaks.chunks_exact(width))
+                        .zip(right_peaks.chunks_exact(width))
+                        .enumerate()
+                    {
+                        let (limit_left, release_left) = ramp_values::<DISPATCH, L>(
+                            stationary,
+                            &mut hot_left.limit,
+                            &mut hot_left.release,
+                        );
+                        let (limit_right, release_right) = ramp_values::<DISPATCH, L>(
+                            stationary,
+                            &mut hot_right.limit,
+                            &mut hot_right.release,
+                        );
+
+                        let peak_left = L::load(left_peak);
+                        let peak_right = L::load(right_peak);
+                        let linked = peak_right.max(peak_left);
+                        let peak_left = L::select(link, linked, peak_left);
+                        let peak_right = L::select(link, linked, peak_right);
+
+                        let x_left = L::load(left_frame);
+                        let x_right = L::load(right_frame);
+
+                        channel_frame_uniform::<L>(
+                            left_frame,
+                            x_left,
+                            peak_left,
+                            limit_left,
+                            release_left,
+                            &mut hot_left,
+                            &mut uniform_left,
+                            ring,
+                            walk.left.advanced(step),
+                            bypass,
+                        );
+                        channel_frame_uniform::<L>(
+                            right_frame,
+                            x_right,
+                            peak_right,
+                            limit_right,
+                            release_right,
+                            &mut hot_right,
+                            &mut uniform_right,
+                            ring,
+                            walk.right.advanced(step),
+                            bypass,
+                        );
+                    }
+
+                    frame += run;
+                    ring_cursor = wrapped(ring_cursor + run, ring);
+                    main_cursor = wrapped(main_cursor + run, main);
+                }
+            }
+
+            (
+                uniform_left.prefix,
+                uniform_left.phase,
+                uniform_right.prefix,
+                uniform_right.phase,
+            )
+        };
+
+        // R1(a)'s write-back. One store of each van Herk word per block, holding what the last frame
+        // of the block computed; `phase` is filled across the cohort because every lane of it shares
+        // the one position `lanes_uniform` established.
+        left_prefix.store(&mut left.prefix);
+        left.phase.fill(left_phase);
+        right_prefix.store(&mut right.prefix);
+        right.phase.fill(right_phase);
+
+        hot_left.store(left);
+        hot_right.store(right);
+        cursors.main = main_cursor as u32;
+        cursors.ring = ring_cursor as u32;
+    }
+
+    /// SplitMix64 draws for the #990 scenarios, so a scenario is a seed and never a file.
+    struct Draw(u64);
+
+    impl Draw {
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut mixed = self.0;
+            mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            mixed ^ (mixed >> 31)
+        }
+
+        fn below(&mut self, bound: usize) -> usize {
+            (self.next_u64() % bound as u64) as usize
+        }
+
+        fn chance(&mut self, numerator: usize, denominator: usize) -> bool {
+            self.below(denominator) < numerator
+        }
+
+        fn pick<T: Copy>(&mut self, items: &[T]) -> T {
+            items[self.below(items.len())]
+        }
+
+        /// Uniform in `[-1, 1)`, on the 2^-23 grid.
+        fn unit(&mut self) -> f32 {
+            ((self.next_u64() >> 40) as f32 * (1.0 / 16_777_216.0)) * 2.0 - 1.0
+        }
+    }
+
+    /// The gate-1 block lengths: around the detector chunk (32), the cohort width and one frame.
+    const LINKED_BLOCK_LENGTHS: [usize; 11] = [1, 5, 11, 12, 13, 31, 32, 33, 64, 127, 128];
+
+    /// +3 dBFS peak: every lane of every fixture ceiling limits on this.
+    const HOT: f32 = 1.412_537_5;
+
+    /// What one block of the #990 harness carries on its two planes.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum LinkedSignal {
+        /// Noise at 0.2 peak: below every ceiling the harness prepares.
+        Quiet,
+        /// Noise at +3 dBFS on both channels.
+        Hot,
+        /// One channel hot, the other at -34 dBFS; which one is drawn per block.
+        Asymmetric,
+        /// Exact `+0.0`.
+        Silence,
+        /// Exact `-0.0`.
+        NegativeZero,
+        /// Random subnormals of either sign.
+        Subnormal,
+        /// Each lane's own limit, and the largest `f32` below it, with random signs.
+        Threshold,
+        /// Silence but for one loud sample in one lane of one channel.
+        Spike,
+        /// Magnitudes log-uniform over `2^-24 ..= 1`.
+        LogUniform,
+        /// Hot noise with one NaN, infinity or `1e30` in it.
+        NonFinite,
+    }
+
+    const LINKED_SIGNALS: [LinkedSignal; 10] = [
+        LinkedSignal::Quiet,
+        LinkedSignal::Hot,
+        LinkedSignal::Asymmetric,
+        LinkedSignal::Silence,
+        LinkedSignal::NegativeZero,
+        LinkedSignal::Subnormal,
+        LinkedSignal::Threshold,
+        LinkedSignal::Spike,
+        LinkedSignal::LogUniform,
+        LinkedSignal::NonFinite,
+    ];
+
+    /// Both planes of one block of `frames` frames, lane-interleaved at `L::WIDTH`.
+    fn linked_planes<L: Lane>(
+        signal: LinkedSignal,
+        draw: &mut Draw,
+        frames: usize,
+        core: &LimiterCore<L>,
+    ) -> (Vec<f32>, Vec<f32>) {
+        let width = L::WIDTH;
+        let words = frames * width;
+        let loud_left = draw.chance(1, 2);
+        let mut planes = [vec![0.0_f32; words], vec![0.0_f32; words]];
+        for (channel, plane) in planes.iter_mut().enumerate() {
+            for (word, sample) in plane.iter_mut().enumerate() {
+                let lane = word % width;
+                *sample = match signal {
+                    LinkedSignal::Quiet => draw.unit() * 0.2,
+                    LinkedSignal::Hot | LinkedSignal::NonFinite => draw.unit() * HOT,
+                    LinkedSignal::Asymmetric => {
+                        if (channel == 0) == loud_left {
+                            draw.unit() * HOT
+                        } else {
+                            draw.unit() * 0.02
+                        }
+                    }
+                    LinkedSignal::Silence => 0.0,
+                    LinkedSignal::NegativeZero => -0.0,
+                    LinkedSignal::Subnormal => {
+                        let bits = draw.next_u64() as u32;
+                        f32::from_bits(bits & 0x807F_FFFF)
+                    }
+                    LinkedSignal::Threshold => {
+                        let limit = [&core.left, &core.right][channel].limit[lane].current;
+                        let below = f32::from_bits(limit.to_bits().wrapping_sub(1));
+                        let magnitude = if draw.chance(1, 2) { limit } else { below };
+                        if draw.chance(1, 2) {
+                            magnitude
+                        } else {
+                            -magnitude
+                        }
+                    }
+                    LinkedSignal::Spike => 0.0,
+                    LinkedSignal::LogUniform => {
+                        let exponent = draw.unit().abs() * -24.0;
+                        let magnitude = f32::from_bits(((127.0 + exponent) * 8_388_608.0) as u32);
+                        if draw.chance(1, 2) {
+                            magnitude
+                        } else {
+                            -magnitude
+                        }
+                    }
+                };
+            }
+        }
+        match signal {
+            LinkedSignal::Spike => {
+                let channel = draw.below(2);
+                let word = draw.below(words);
+                planes[channel][word] = if draw.chance(1, 2) { 3.0 } else { -3.0 };
+            }
+            LinkedSignal::NonFinite => {
+                let channel = draw.below(2);
+                let word = draw.below(words);
+                planes[channel][word] =
+                    draw.pick(&[f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 1.0e30]);
+            }
+            _ => {}
+        }
+        let [left, right] = planes;
+        (left, right)
+    }
+
+    /// One track's six initial values with a separate left and right `[ceiling, release,
+    /// lookahead]`.
+    fn linked_values(
+        left: [f32; PARAMETER_COUNT],
+        right: [f32; PARAMETER_COUNT],
+    ) -> [InitialParameterValue; PARAMETER_COUNT * 2] {
+        let mut values = values_with(left[0], left[1], left[2]);
+        values[1].value = right[0];
+        values[3].value = right[1];
+        values[5].value = right[2];
+        values
+    }
+
+    /// The console fixture's limiter shape, `channel: "both"`, one track per lane.
+    fn fixture_tracks(width: usize) -> Vec<[InitialParameterValue; PARAMETER_COUNT * 2]> {
+        (0..width)
+            .map(|track| {
+                let values = [
+                    -0.5 - 0.031_25 * track as f32,
+                    60.0 + 1.25 * track as f32,
+                    5.0,
+                ];
+                linked_values(values, values)
+            })
+            .collect()
+    }
+
+    fn linked_core<L: Lane>(
+        tracks: &[[InitialParameterValue; PARAMETER_COUNT * 2]],
+        link: LinkMode,
+        bypass: bool,
+        rate: u32,
+    ) -> LimiterCore<L> {
+        assert_eq!(tracks.len(), L::WIDTH);
+        let mut preparation = request_at_rate(&tracks[0], rate);
+        preparation.link_mode = link;
+        preparation.bypass = bypass;
+        let metadata = expected_prepared_metadata(&TRUE_PEAK_LIMITER_DESCRIPTOR, preparation)
+            .expect("metadata");
+        let mut left_defaults = Vec::with_capacity(L::WIDTH);
+        let mut right_defaults = Vec::with_capacity(L::WIDTH);
+        for values in tracks {
+            let (left, right) = initial_defaults(values).expect("defaults");
+            left_defaults.push(left);
+            right_defaults.push(right);
+        }
+        LimiterCore::<L>::new(
+            metadata,
+            left_defaults.into_boxed_slice(),
+            right_defaults.into_boxed_slice(),
+        )
+        .expect("core")
+    }
+
+    /// `process_bank_inner`'s dual arm (and `PreparedTruePeakLimiter::process`), over a bare core.
+    fn drive_dual<L: Lane>(
+        core: &mut LimiterCore<L>,
+        left: &mut [f32],
+        right: &mut [f32],
+        spans: &[Vec<PreparedAutomationSpan>],
+        first_sample: u64,
+    ) -> Vec<ProcessReport> {
+        if spans.iter().any(|lane| !lane.is_empty()) {
+            core.silent_fixed_point = false;
+        }
+        let mut reports = vec![ProcessReport::default(); L::WIDTH];
+        for (lane, lane_spans) in spans.iter().enumerate() {
+            apply_automation(
+                lane_spans,
+                &core.metadata,
+                first_sample,
+                &mut core.left,
+                &mut core.right,
+                lane,
+                &mut reports[lane],
+            );
+        }
+        let frames = left.len() / L::WIDTH;
+        core.process_block(left, right, frames);
+        reports
+    }
+
+    fn core_snapshot<L: Lane>(core: &LimiterCore<L>, track: usize) -> LanePayload {
+        let sizes = core.metadata.state_sizes;
+        let mut common = vec![0; sizes.common_bytes as usize];
+        let mut left = vec![0; sizes.left_bytes as usize];
+        let mut right = vec![0; sizes.right_bytes as usize];
+        core.snapshot_track(
+            track,
+            &mut StatePayloadOutput::new(&mut common, &mut left, &mut right, sizes).expect("sizes"),
+        )
+        .expect("snapshot");
+        (common, left, right)
+    }
+
+    fn core_restore<L: Lane>(
+        core: &mut LimiterCore<L>,
+        track: usize,
+        payload: &LanePayload,
+    ) -> Result<(), StatePayloadError> {
+        let sizes = core.metadata.state_sizes;
+        core.restore_track(
+            track,
+            STATE_LAYOUT_VERSION,
+            &StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes).expect("sizes"),
+        )
+    }
+
+    /// Bit identity, with a NaN compared as "both NaN" (the §4.4 check zeroes a non-finite block
+    /// before a host sees it, so this is the harness being general rather than a case it expects).
+    fn assert_same_words(shipped: &[f32], oracle: &[f32], what: &str) {
+        assert_eq!(shipped.len(), oracle.len(), "{what}: length");
+        for (index, (a, b)) in shipped.iter().zip(oracle.iter()).enumerate() {
+            assert!(
+                a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan()),
+                "{what}: word {index}: shipped {:#010x}, reference {:#010x}",
+                a.to_bits(),
+                b.to_bits()
+            );
+        }
+    }
+
+    /// The two arms of gate 1: the shipped kernel and the reference kernel, one core each, fed the
+    /// same blocks, the same automation and the same control calls.
+    struct LinkedPair<L: Lane> {
+        shipped: LimiterCore<L>,
+        oracle: LimiterCore<L>,
+        first_sample: u64,
+        /// Uniform dual blocks the shipped core rendered linked.
+        engaged: u32,
+        /// Dual blocks the shipped core rendered.
+        rendered: u32,
+        label: String,
+    }
+
+    impl<L: Lane> LinkedPair<L> {
+        fn new(
+            tracks: &[[InitialParameterValue; PARAMETER_COUNT * 2]],
+            link: LinkMode,
+            bypass: bool,
+            rate: u32,
+            label: String,
+        ) -> Self {
+            let pair = Self {
+                shipped: linked_core::<L>(tracks, link, bypass, rate),
+                oracle: linked_core::<L>(tracks, link, bypass, rate),
+                first_sample: 0,
+                engaged: 0,
+                rendered: 0,
+                label,
+            };
+            pair.compare("prepared");
+            pair
+        }
+
+        /// Renders one dual block through both arms and compares everything. Returns whether the
+        /// shipped core took the linked body.
+        fn dual(
+            &mut self,
+            left: &[f32],
+            right: &[f32],
+            spans: &[Vec<PreparedAutomationSpan>],
+            at: &str,
+        ) -> bool {
+            let (mut shipped_left, mut shipped_right) = (left.to_vec(), right.to_vec());
+            let (mut oracle_left, mut oracle_right) = (left.to_vec(), right.to_vec());
+            let before = LINKED_ENGAGEMENTS.with(Cell::get);
+            let shipped_reports = drive_dual(
+                &mut self.shipped,
+                &mut shipped_left,
+                &mut shipped_right,
+                spans,
+                self.first_sample,
+            );
+            let after = LINKED_ENGAGEMENTS.with(Cell::get);
+            REFERENCE_KERNEL.with(|reference| reference.set(true));
+            let oracle_reports = drive_dual(
+                &mut self.oracle,
+                &mut oracle_left,
+                &mut oracle_right,
+                spans,
+                self.first_sample,
+            );
+            REFERENCE_KERNEL.with(|reference| reference.set(false));
+            assert_eq!(
+                LINKED_ENGAGEMENTS.with(Cell::get),
+                after,
+                "{} {at}: the reference kernel linked a pair",
+                self.label
+            );
+            let label = format!("{} {at}", self.label);
+            assert_same_words(
+                &shipped_left,
+                &oracle_left,
+                &format!("{label}: left output"),
+            );
+            assert_same_words(
+                &shipped_right,
+                &oracle_right,
+                &format!("{label}: right output"),
+            );
+            assert_eq!(shipped_reports, oracle_reports, "{label}: process reports");
+            self.first_sample += (left.len() / L::WIDTH) as u64;
+            let engaged = after != before;
+            self.engaged += u32::from(engaged);
+            self.rendered += 1;
+            self.compare(at);
+            engaged
+        }
+
+        /// Renders one collapsed block (the left plane) through both arms, which share the mono
+        /// body: #990 does not touch it.
+        fn mono(&mut self, left: &[f32], at: &str) {
+            let frames = left.len() / L::WIDTH;
+            let mut shipped_left = left.to_vec();
+            let mut oracle_left = left.to_vec();
+            let before = LINKED_ENGAGEMENTS.with(Cell::get);
+            self.shipped.process_block_mono(&mut shipped_left, frames);
+            self.oracle.process_block_mono(&mut oracle_left, frames);
+            assert_eq!(
+                LINKED_ENGAGEMENTS.with(Cell::get),
+                before,
+                "{} {at}: a collapsed block linked",
+                self.label
+            );
+            assert!(
+                !self.shipped.gain_linked,
+                "{} {at}: collapsed but linked",
+                self.label
+            );
+            assert_same_words(
+                &shipped_left,
+                &oracle_left,
+                &format!("{} {at}: collapsed output", self.label),
+            );
+            self.first_sample += frames as u64;
+            self.compare(at);
+        }
+
+        fn desymmetrize(&mut self) {
+            self.shipped.desymmetrize();
+            self.oracle.desymmetrize();
+            self.compare("desymmetrized");
+        }
+
+        fn reset(&mut self, kind: ResetKind) {
+            self.shipped.reset(kind);
+            self.oracle.reset(kind);
+            self.compare("reset");
+        }
+
+        fn restore(&mut self, track: usize, payload: &LanePayload) -> bool {
+            let shipped = core_restore(&mut self.shipped, track, payload);
+            let oracle = core_restore(&mut self.oracle, track, payload);
+            assert_eq!(shipped, oracle, "{}: restore verdicts", self.label);
+            self.compare("restored");
+            shipped.is_ok()
+        }
+
+        /// Everything observable, and the #990 invariant itself.
+        fn compare(&self, at: &str) {
+            let label = format!("{} {at}", self.label);
+            let (shipped, oracle) = (&self.shipped, &self.oracle);
+            // Cursors, every arena word of both channels (the reduction word the resident tap
+            // reads included), every phase and all four words of every ramp.
+            assert_eq!(
+                state_bits(shipped),
+                state_bits(oracle),
+                "{label}: complete state"
+            );
+            for (a, b) in [
+                (&shipped.left, &oracle.left),
+                (&shipped.right, &oracle.right),
+            ] {
+                assert_eq!(a.lane, b.lane, "{label}: window shapes");
+                assert_eq!(
+                    a.lookahead_ms
+                        .iter()
+                        .map(|v| v.to_bits())
+                        .collect::<Vec<_>>(),
+                    b.lookahead_ms
+                        .iter()
+                        .map(|v| v.to_bits())
+                        .collect::<Vec<_>>(),
+                    "{label}: lookahead"
+                );
+            }
+            for track in 0..L::WIDTH {
+                assert_eq!(
+                    core_snapshot(shipped, track),
+                    core_snapshot(oracle, track),
+                    "{label}: track {track} payload"
+                );
+            }
+            assert_eq!(
+                shipped.silent_fixed_point, oracle.silent_fixed_point,
+                "{label}: silent claim"
+            );
+            assert_eq!(
+                shipped.nonfinite_report(),
+                oracle.nonfinite_report(),
+                "{label}: non-finite report"
+            );
+            if shipped.gain_linked {
+                assert!(
+                    gain_state_agrees(&shipped.left, &shipped.right),
+                    "{label}: the linked-agreement record is set over disagreeing gain words"
+                );
+            }
+        }
+    }
+
+    fn no_spans(width: usize) -> Vec<Vec<PreparedAutomationSpan>> {
+        vec![Vec::new(); width]
+    }
+
+    fn point_span(
+        first_sample: u64,
+        parameter: u32,
+        channel: ParameterChannel,
+        value: f32,
+    ) -> PreparedAutomationSpan {
+        PreparedAutomationSpan {
+            kind: AutomationSpanKind::Point,
+            channel,
+            parameter_index: parameter,
+            start_sample: first_sample,
+            end_sample: first_sample,
+            start_value: value,
+            end_value: value,
+        }
+    }
+
+    /// Gate 1's matrix at one width: both links, bypass on and off, every block length, and the
+    /// quiet, limiting and asymmetric signals, on the fixture-shaped bank.
+    ///
+    /// Each run first renders 512 frames of its signal in 128-frame blocks, so the delay line
+    /// (`B = 486` at 48 kHz) is full of rendered samples and every output word below is a gained
+    /// input word rather than the line's initial zeros, then 48 frames at the length under test.
+    fn linked_identity_matrix<L: Lane>(label: &str) {
+        let tracks = fixture_tracks(L::WIDTH);
+        for link in [LinkMode::Maximum, LinkMode::DualMono] {
+            for bypass in [false, true] {
+                for (length_index, &length) in LINKED_BLOCK_LENGTHS.iter().enumerate() {
+                    for signal in [
+                        LinkedSignal::Quiet,
+                        LinkedSignal::Hot,
+                        LinkedSignal::Asymmetric,
+                    ] {
+                        let run =
+                            format!("{label} {link:?} bypass {bypass} length {length} {signal:?}");
+                        let mut draw = Draw(0x0990_0001 ^ ((length_index as u64) << 8));
+                        let mut pair =
+                            LinkedPair::<L>::new(&tracks, link, bypass, 48_000, run.clone());
+                        let spans = no_spans(L::WIDTH);
+                        let mut blocks = 0;
+                        for block in 0..4 {
+                            let (left, right) =
+                                linked_planes(signal, &mut draw, 128, &pair.shipped);
+                            pair.dual(&left, &right, &spans, &format!("pre-roll {block}"));
+                            blocks += 1;
+                        }
+                        for block in 0..48_usize.div_ceil(length) {
+                            let (left, right) =
+                                linked_planes(signal, &mut draw, length, &pair.shipped);
+                            pair.dual(&left, &right, &spans, &format!("block {block}"));
+                            blocks += 1;
+                        }
+                        // Gate 2 on the same runs: the fixture-shaped bank links every block under
+                        // `Maximum`, and nothing links under `DualMono`.
+                        let expected = if link == LinkMode::Maximum { blocks } else { 0 };
+                        assert_eq!(pair.engaged, expected, "{run}: engagements");
+                    }
+                }
+            }
+        }
+    }
+
+    /// **Gate 1: the linked body renders exactly what the unmodified kernel renders.**
+    ///
+    /// Issue #990. Every output word, every track's payload, the complete state (the resident
+    /// reduction tap's word included), the silent claim and the non-finite report, after every
+    /// block, against the pre-#990 kernel kept in this module. Red mutations: skip the mirrored
+    /// backward pass (M1), skip the mirrored box store (M2), engage under `DualMono` (M3).
+    #[test]
+    fn the_linked_body_renders_exactly_the_unmodified_kernel() {
+        linked_identity_matrix::<f32>("scalar");
+        linked_identity_matrix::<Simd4>("W4");
+        linked_identity_matrix::<Simd8>("W8");
+    }
+
+    /// One randomized scenario: a random bank, then random blocks, signals, automation and control
+    /// calls, every one of them through both arms.
+    fn linked_scenario<L: Lane>(seed: u64, label: &str) -> (u32, u32) {
+        let mut draw = Draw(seed);
+        let rate = if draw.chance(3, 4) {
+            48_000
+        } else {
+            draw.pick(&[44_100, 88_200, 96_000])
+        };
+        let link = if draw.chance(3, 4) {
+            LinkMode::Maximum
+        } else {
+            LinkMode::DualMono
+        };
+        let bypass = draw.chance(1, 5);
+        let ragged = draw.chance(1, 7);
+        let asymmetric = draw.chance(1, 5);
+        let common_lookahead = draw.pick(&[0.0, 1.0, 2.0, 5.0, 10.0]);
+        let tracks: Vec<_> = (0..L::WIDTH)
+            .map(|_| {
+                let left = [
+                    draw.pick(&[-0.5, -1.0, -3.0, -6.0, -12.0, -24.0]),
+                    draw.pick(&[10.0, 60.0, 100.0, 500.0, 2000.0]),
+                    if ragged {
+                        draw.pick(&[0.0, 1.0, 2.0, 5.0, 10.0])
+                    } else {
+                        common_lookahead
+                    },
+                ];
+                let mut right = left;
+                if asymmetric && draw.chance(1, 2) {
+                    let parameter = draw.below(PARAMETER_COUNT);
+                    right[parameter] = match parameter {
+                        0 => draw.pick(&[-0.5, -2.0, -9.0]),
+                        1 => draw.pick(&[20.0, 300.0]),
+                        _ => draw.pick(&[0.5, 3.0, 7.0]),
+                    };
+                }
+                linked_values(left, right)
+            })
+            .collect();
+        let run = format!(
+            "{label} seed {seed:#x} {rate} Hz {link:?} bypass {bypass} ragged {ragged} \
+             asymmetric {asymmetric}"
+        );
+        let mut pair = LinkedPair::<L>::new(&tracks, link, bypass, rate, run);
+        let mut stash: Vec<LanePayload> = Vec::new();
+        let blocks = 24 + draw.below(16);
+        for block in 0..blocks {
+            let at = format!("block {block}");
+            match draw.below(100) {
+                0..=2 => pair.reset(if draw.chance(1, 2) {
+                    ResetKind::FullToDefaults
+                } else {
+                    ResetKind::DiscontinuityKeepParameters
+                }),
+                3..=6 if !stash.is_empty() => {
+                    let mut payload = stash[draw.below(stash.len())].clone();
+                    if draw.chance(1, 4) {
+                        // Another stashed track's right section: two sections that disagree.
+                        payload.2 = stash[draw.below(stash.len())].2.clone();
+                    }
+                    if draw.chance(1, 5) {
+                        // An in-flight limit ramp that `read_lane` accepts and that no retarget
+                        // produces: it walks the limit to zero, below it, or to infinity.
+                        let current = read_f32(&payload.1, words::LIMIT_RAMP);
+                        let step = draw.pick(&[-current, -2.0 * current, f32::MAX, -0.5 * current]);
+                        let remaining = 2 + draw.below(63) as u32;
+                        let sections = if draw.chance(1, 2) { 2 } else { 1 };
+                        for section in [&mut payload.1, &mut payload.2].into_iter().take(sections) {
+                            write_f32(section, words::LIMIT_RAMP, current);
+                            write_f32(section, words::LIMIT_RAMP + 1, current);
+                            write_f32(section, words::LIMIT_RAMP + 2, step);
+                            write_u32(section, words::LIMIT_RAMP + 3, remaining);
+                        }
+                    }
+                    pair.restore(draw.below(L::WIDTH), &payload);
+                }
+                7..=9 => {
+                    for step in 0..1 + draw.below(3) {
+                        let frames = draw.pick(&LINKED_BLOCK_LENGTHS);
+                        let signal = draw.pick(&[LinkedSignal::Hot, LinkedSignal::Quiet]);
+                        let (left, _) = linked_planes(signal, &mut draw, frames, &pair.shipped);
+                        pair.mono(&left, &format!("{at} collapsed {step}"));
+                    }
+                    // The contract desymmetrizes before any dual block. One run in four does not,
+                    // which is how the defensive clear on collapse is reached from here.
+                    if draw.chance(3, 4) {
+                        pair.desymmetrize();
+                    }
+                }
+                _ => {}
+            }
+            let mut spans = no_spans(L::WIDTH);
+            if draw.chance(1, 6) {
+                let lane = draw.below(L::WIDTH);
+                let parameter = draw.below(RAMP_COUNT) as u32;
+                let value = if parameter == 0 {
+                    draw.pick(&[-0.5, -1.0, -3.0, -6.0])
+                } else {
+                    draw.pick(&[10.0, 60.0, 100.0, 500.0])
+                };
+                let first = pair.first_sample;
+                spans[lane] = match draw.below(4) {
+                    0 => vec![point_span(first, parameter, ParameterChannel::Left, value)],
+                    1 => vec![point_span(first, parameter, ParameterChannel::Right, value)],
+                    2 => vec![
+                        point_span(first, parameter, ParameterChannel::Left, value),
+                        point_span(first, parameter, ParameterChannel::Right, value),
+                    ],
+                    _ => vec![point_span(first, parameter, ParameterChannel::Both, value)],
+                };
+            }
+            let frames = draw.pick(&LINKED_BLOCK_LENGTHS);
+            let signal = if draw.chance(1, 2) {
+                draw.pick(&[LinkedSignal::Hot, LinkedSignal::Asymmetric])
+            } else {
+                draw.pick(&LINKED_SIGNALS)
+            };
+            let (left, right) = linked_planes(signal, &mut draw, frames, &pair.shipped);
+            pair.dual(&left, &right, &spans, &at);
+            if draw.chance(1, 3) {
+                stash.push(core_snapshot(&pair.shipped, draw.below(L::WIDTH)));
+            }
+        }
+        (pair.engaged, pair.rendered)
+    }
+
+    /// **Gate 1, randomized: the linked body is the unmodified kernel under hostile events.**
+    ///
+    /// Issue #990. Random banks (every launch rate, both links, bypass, ragged and asymmetric
+    /// cohorts), random block lengths and signals (including `-0.0`, subnormals, the exact
+    /// threshold and non-finite words), one- and two-channel retargets, same-value retargets,
+    /// rejected `Both` spans, both resets, restores of current, cross-track and hostile-ramp
+    /// payloads, and collapse runs with and without `desymmetrize`. Every block is compared as in
+    /// the matrix. The linked body must actually have run.
+    #[test]
+    fn randomized_scenarios_render_exactly_the_unmodified_kernel() {
+        let scenarios = if cfg!(debug_assertions) { 24 } else { 1000 };
+        for (label, run) in [
+            (
+                "scalar",
+                linked_scenario::<f32> as fn(u64, &str) -> (u32, u32),
+            ),
+            ("W4", linked_scenario::<Simd4>),
+            ("W8", linked_scenario::<Simd8>),
+        ] {
+            let mut engaged = 0;
+            let mut rendered = 0;
+            for scenario in 0..scenarios {
+                let (linked, blocks) = run(0x0990_5EED_0000 + scenario as u64, label);
+                engaged += linked;
+                rendered += blocks;
+            }
+            println!("{label}: {scenarios} scenarios, {engaged} of {rendered} dual blocks linked");
+            assert!(
+                engaged > rendered / 8,
+                "{label}: the linked body ran on {engaged} of {rendered} blocks"
+            );
+        }
+    }
+
+    /// Mutation M4's gate: a collapsed block unlinks the pair even when no `desymmetrize` follows.
+    ///
+    /// The contract desymmetrizes before any dual block (`effect-contract`), and `desymmetrize`
+    /// re-establishes the record, so clearing it on a collapsed block is defensive: under the
+    /// contract the clear is unobservable. This test leaves the contract on purpose to reach it.
+    /// The right channel keeps its pre-collapse words, so a pair still marked linked would render
+    /// its right channel from the left's gain path; the reference kernel renders it from its own.
+    /// Red mutation: drop the clear in `process_block_mono` (M4).
+    #[test]
+    fn a_collapsed_block_unlinks_the_pair_without_desymmetrize() {
+        fn run<L: Lane>(label: &str) {
+            let mut pair = LinkedPair::<L>::new(
+                &fixture_tracks(L::WIDTH),
+                LinkMode::Maximum,
+                false,
+                48_000,
+                label.to_owned(),
+            );
+            let mut draw = Draw(0x0990_0004);
+            let spans = no_spans(L::WIDTH);
+            for block in 0..4 {
+                let (left, right) = linked_planes(LinkedSignal::Hot, &mut draw, 128, &pair.shipped);
+                assert!(pair.dual(&left, &right, &spans, &format!("dual {block}")));
+            }
+            for block in 0..3 {
+                let (left, _) = linked_planes(LinkedSignal::Hot, &mut draw, 128, &pair.shipped);
+                pair.mono(&left, &format!("collapsed {block}"));
+            }
+            for block in 0..4 {
+                let (left, right) = linked_planes(LinkedSignal::Hot, &mut draw, 128, &pair.shipped);
+                assert!(
+                    !pair.dual(&left, &right, &spans, &format!("after {block}")),
+                    "{label}: linked after a collapse with no desymmetrize"
+                );
+            }
+        }
+        run::<f32>("scalar");
+        run::<Simd4>("W4");
+        run::<Simd8>("W8");
+    }
+
+    /// Renders `blocks` hot dual blocks of 128 frames with no automation and returns the engaged
+    /// count.
+    fn hot_blocks<L: Lane>(
+        pair: &mut LinkedPair<L>,
+        draw: &mut Draw,
+        blocks: usize,
+        at: &str,
+    ) -> u32 {
+        let spans = no_spans(L::WIDTH);
+        let mut engaged = 0;
+        for block in 0..blocks {
+            let (left, right) = linked_planes(LinkedSignal::Hot, draw, 128, &pair.shipped);
+            engaged += u32::from(pair.dual(&left, &right, &spans, &format!("{at} {block}")));
+        }
+        engaged
+    }
+
+    /// Gate 2 at one width. Every run is also a gate-1 identity run.
+    fn linked_engagement_witness<L: Lane>(label: &str) {
+        let fixture = fixture_tracks(L::WIDTH);
+        let fresh =
+            |link: LinkMode, tracks: &[[InitialParameterValue; PARAMETER_COUNT * 2]], tag: &str| {
+                LinkedPair::<L>::new(tracks, link, false, 48_000, format!("{label} {tag}"))
+            };
+        let mut draw = Draw(0x0990_0002);
+
+        // Engages on the fixture-shaped bank, every block.
+        let mut pair = fresh(LinkMode::Maximum, &fixture, "fixture");
+        assert_eq!(
+            hot_blocks(&mut pair, &mut draw, 6, "fixture"),
+            6,
+            "{label}: fixture"
+        );
+
+        // Never under `DualMono`.
+        let mut pair = fresh(LinkMode::DualMono, &fixture, "dual mono");
+        assert_eq!(
+            hot_blocks(&mut pair, &mut draw, 6, "dual mono"),
+            0,
+            "{label}: DualMono"
+        );
+
+        // Never with one lane's left ceiling apart; desymmetrize copies the left ceiling over the
+        // right and the pair links.
+        let mut ceiling_apart = fixture.clone();
+        let last = L::WIDTH - 1;
+        ceiling_apart[last][0].value = -2.0;
+        let mut pair = fresh(LinkMode::Maximum, &ceiling_apart, "ceiling apart");
+        assert_eq!(
+            hot_blocks(&mut pair, &mut draw, 4, "apart"),
+            0,
+            "{label}: ceiling apart"
+        );
+        pair.desymmetrize();
+        assert_eq!(
+            hot_blocks(&mut pair, &mut draw, 3, "copied"),
+            3,
+            "{label}: desymmetrized"
+        );
+
+        // A one-channel retarget: not on the block it lands, not while it ramps, and not after
+        // the other channel is retargeted to the same value and both ramps have settled with
+        // bit-equal designed words. A reset re-engages.
+        let mut pair = fresh(LinkMode::Maximum, &fixture, "one channel");
+        assert_eq!(hot_blocks(&mut pair, &mut draw, 3, "before"), 3);
+        let mut spans = no_spans(L::WIDTH);
+        spans[last] = vec![point_span(
+            pair.first_sample,
+            1,
+            ParameterChannel::Left,
+            250.0,
+        )];
+        let (left, right) = linked_planes(LinkedSignal::Hot, &mut draw, 128, &pair.shipped);
+        assert!(
+            !pair.dual(&left, &right, &spans, "lands"),
+            "{label}: on the landing block"
+        );
+        assert_eq!(
+            hot_blocks(&mut pair, &mut draw, 3, "ramping"),
+            0,
+            "{label}: while apart"
+        );
+        spans[last] = vec![point_span(
+            pair.first_sample,
+            1,
+            ParameterChannel::Right,
+            250.0,
+        )];
+        let (left, right) = linked_planes(LinkedSignal::Hot, &mut draw, 128, &pair.shipped);
+        assert!(
+            !pair.dual(&left, &right, &spans, "matched"),
+            "{label}: on the matching block"
+        );
+        assert_eq!(
+            hot_blocks(&mut pair, &mut draw, 4, "re-equal"),
+            0,
+            "{label}: re-equal"
+        );
+        assert!(
+            designed_gain_agree(&pair.shipped.left, &pair.shipped.right),
+            "{label}: the re-equal case must have equal designed words"
+        );
+        pair.reset(ResetKind::DiscontinuityKeepParameters);
+        assert_eq!(
+            hot_blocks(&mut pair, &mut draw, 3, "reset"),
+            3,
+            "{label}: after reset"
+        );
+
+        // A two-channel retarget (a left span and a right span, equal values, one block) stays
+        // linked through the ramping dispatch.
+        let mut pair = fresh(LinkMode::Maximum, &fixture, "both channels");
+        assert_eq!(hot_blocks(&mut pair, &mut draw, 2, "before"), 2);
+        let mut spans = no_spans(L::WIDTH);
+        for (lane, lane_spans) in spans.iter_mut().enumerate() {
+            let value = -3.0 - lane as f32;
+            *lane_spans = vec![
+                point_span(pair.first_sample, 0, ParameterChannel::Left, value),
+                point_span(pair.first_sample, 0, ParameterChannel::Right, value),
+            ];
+        }
+        let (left, right) = linked_planes(LinkedSignal::Hot, &mut draw, 32, &pair.shipped);
+        assert!(
+            pair.dual(&left, &right, &spans, "retarget"),
+            "{label}: two-channel retarget"
+        );
+        assert!(!dual_stationary(&pair.shipped.left, &pair.shipped.right));
+        assert_eq!(
+            hot_blocks(&mut pair, &mut draw, 3, "ramping"),
+            3,
+            "{label}: ramping"
+        );
+
+        // Restores of the whole bank, so every lane lands on one van Herk phase and the cohort
+        // stays uniform: payloads whose left and right sections disagree in their gain words
+        // (and agree in their designed words) unlink the pair; payloads whose sections agree
+        // link it again. A one-track restore would desynchronise the phase and send the cohort
+        // to the per-lane body, which would say nothing about the comparison.
+        let mut donor = linked_core::<L>(&fixture, LinkMode::DualMono, false, 48_000);
+        for _ in 0..3 {
+            let (mut left, _) = linked_planes(LinkedSignal::Hot, &mut draw, 128, &donor);
+            let mut right = vec![0.0; left.len()];
+            drive_dual(&mut donor, &mut left, &mut right, &no_spans(L::WIDTH), 0);
+        }
+        let apart: Vec<_> = (0..L::WIDTH)
+            .map(|track| core_snapshot(&donor, track))
+            .collect();
+        assert!(
+            apart.iter().all(|payload| payload.1 != payload.2),
+            "the donor's sections must differ"
+        );
+        let mut pair = fresh(LinkMode::Maximum, &fixture, "restore");
+        assert_eq!(hot_blocks(&mut pair, &mut draw, 2, "before"), 2);
+        let together: Vec<_> = (0..L::WIDTH)
+            .map(|track| core_snapshot(&pair.shipped, track))
+            .collect();
+        for (track, payload) in apart.iter().enumerate() {
+            assert!(pair.restore(track, payload));
+        }
+        assert!(designed_gain_agree(&pair.shipped.left, &pair.shipped.right));
+        assert!(lanes_uniform(&pair.shipped.left) && lanes_uniform(&pair.shipped.right));
+        assert_eq!(
+            hot_blocks(&mut pair, &mut draw, 3, "apart"),
+            0,
+            "{label}: restored apart"
+        );
+        for (track, payload) in together.iter().enumerate() {
+            assert!(pair.restore(track, payload));
+        }
+        assert_eq!(
+            hot_blocks(&mut pair, &mut draw, 3, "together"),
+            3,
+            "{label}: restored"
+        );
+
+        // A collapsed block never links; the record stays clear until `desymmetrize`.
+        let mut pair = fresh(LinkMode::Maximum, &fixture, "collapse");
+        assert_eq!(hot_blocks(&mut pair, &mut draw, 2, "before"), 2);
+        let (left, _) = linked_planes(LinkedSignal::Hot, &mut draw, 128, &pair.shipped);
+        pair.mono(&left, "collapsed");
+        pair.desymmetrize();
+        assert_eq!(
+            hot_blocks(&mut pair, &mut draw, 3, "after"),
+            3,
+            "{label}: desymmetrized"
+        );
+
+        // The silent fast path keeps the record: a fresh pair earns the silence claim, skips blocks
+        // on it, and links on the first loud block after.
+        let mut pair = fresh(LinkMode::Maximum, &fixture, "silence");
+        let silent = vec![0.0_f32; 128 * L::WIDTH];
+        for block in 0..4 {
+            pair.dual(
+                &silent,
+                &silent,
+                &no_spans(L::WIDTH),
+                &format!("silent {block}"),
+            );
+        }
+        assert!(
+            pair.shipped.silent_engagements() > 0,
+            "{label}: the fast path never ran"
+        );
+        assert_eq!(
+            hot_blocks(&mut pair, &mut draw, 2, "after"),
+            2,
+            "{label}: after silence"
+        );
+
+        // The §4.4 reset of a non-finite block re-establishes the record, as `reset` does: a pair
+        // unlinked by a one-channel retarget links again once the reset has put both channels
+        // back on their (symmetric) defaults.
+        let mut pair = fresh(LinkMode::Maximum, &fixture, "non-finite");
+        assert_eq!(hot_blocks(&mut pair, &mut draw, 1, "before"), 1);
+        let mut spans = no_spans(L::WIDTH);
+        spans[0] = vec![point_span(
+            pair.first_sample,
+            1,
+            ParameterChannel::Left,
+            250.0,
+        )];
+        let (mut left, right) = linked_planes(LinkedSignal::Hot, &mut draw, 128, &pair.shipped);
+        left[0] = f32::NAN;
+        assert!(!pair.dual(&left, &right, &spans, "poisoned"));
+        let mut blocks = 0;
+        while pair.shipped.nonfinite_report().nonfinite_blocks == 0 {
+            assert!(
+                blocks < 8,
+                "{label}: the NaN never reached the boundary check"
+            );
+            hot_blocks(&mut pair, &mut draw, 1, "draining");
+            blocks += 1;
+        }
+        assert_eq!(
+            hot_blocks(&mut pair, &mut draw, 3, "after"),
+            3,
+            "{label}: after §4.4"
+        );
+
+        // ceiling retarget at 30, unlinked from the left-only release retarget at 60, linked
+        // again from the reset at 90.
+        let mut pair = fresh(LinkMode::Maximum, &fixture, "gate 3");
+        for block in 0..128 {
+            if block == 90 {
+                pair.reset(ResetKind::FullToDefaults);
+            }
+            let mut spans = no_spans(L::WIDTH);
+            let first = pair.first_sample;
+            if block == 30 {
+                for lane_spans in &mut spans {
+                    *lane_spans = vec![
+                        point_span(first, 0, ParameterChannel::Left, -3.0),
+                        point_span(first, 0, ParameterChannel::Right, -3.0),
+                    ];
+                }
+            }
+            if block == 60 {
+                spans[0] = vec![point_span(first, 1, ParameterChannel::Left, 250.0)];
+            }
+            let (left, right) = linked_planes(LinkedSignal::Hot, &mut draw, 128, &pair.shipped);
+            let engaged = pair.dual(&left, &right, &spans, &format!("block {block}"));
+            assert_eq!(
+                engaged,
+                !(60..90).contains(&block),
+                "{label}: gate 3 block {block}"
+            );
+        }
+    }
+
+    /// **Gate 2: the linked body engages exactly where the linked-agreement record allows.**
+    ///
+    /// Issue #990. Red mutation: compare only `current` of the ramps in `designed_gain_agree`
+    /// (M5) -- the one-channel retarget's landing block then links.
+    #[test]
+    fn the_linked_body_engages_exactly_where_the_record_allows() {
+        linked_engagement_witness::<f32>("scalar");
+        linked_engagement_witness::<Simd4>("W4");
+        linked_engagement_witness::<Simd8>("W8");
     }
 }

@@ -329,3 +329,58 @@ them -- and a collapsed block advances only the left channel's, so a divergence 
 constructible and this corpus does not construct one. An earlier draft of this row claimed they were
 re-derived at the next van Herk block boundary; that is not true of either word and the claim is
 withdrawn rather than repaired. The gap is recorded, not explained.
+
+## Issue #990 — the linked gain computer
+
+Driver: one mutation at a time, `cargo test --no-fail-fast -p true-peak-limiter` (dev profile),
+tree restored between rows. Every row turned red. "Gate 1" is
+`tests::the_linked_body_renders_exactly_the_unmodified_kernel` (the matrix against the pre-#990
+kernel kept in the test module), "randomized" is
+`tests::randomized_scenarios_render_exactly_the_unmodified_kernel`, "gate 2" is
+`tests::the_linked_body_engages_exactly_where_the_record_allows` (the engagement witness, whose runs
+are also identity runs), "M4 gate" is `tests::a_collapsed_block_unlinks_the_pair_without_desymmetrize`
+and "gate 3" is `linked::the_linked_scenario_renders_the_pinned_base_words` (pinned on the unmodified
+kernel before the change).
+
+| # | mutation | file | tests that turned red |
+|---|---|---|---|
+| 990-M1 | the mirrored backward pass skips its store into the right ring | `src/lib.rs` `sliding_minimum_uniform_mirrored` | gate 1, randomized, gate 2, M4 gate, gate 3, `lane_identity_holds_across_widths`, `mono_collapse::a_desymmetrized_bank_is_a_never_collapsed_bank` |
+| 990-M2 | the box term is not stored into the right box ring | `src/lib.rs` `linked_frame_uniform` | as M1, and `conformance::passes_effect_contract_conformance` |
+| 990-M3 | the link leg dropped from the decision, so a `DualMono` pair links | `src/lib.rs` `LimiterCore::process_block` | gate 1, randomized, gate 2, `conformance`, `a_mixed_lookahead_cohort_falls_back_bit_identically`, `a_restore_that_desyncs_the_phase_falls_back`, `lane_identity_holds_across_widths` |
+| 990-M4 | `process_block_mono` keeps `gain_linked` | `src/lib.rs` `LimiterCore::process_block_mono` | M4 gate, randomized (one collapse run in four skips `desymmetrize`), gate 2 |
+| 990-M5 | `designed_gain_agree` compares only `current` of each ramp | `src/lib.rs` `designed_gain_agree` | gate 2 (the one-channel retarget's landing block links), randomized, gate 3 |
+| 990-M6 | the required gain is not stored into the right ring at the cursor | `src/lib.rs` `linked_frame_uniform` | as M1 |
+| 990-M7 | the right box sum is not set from the left at block end | `src/lib.rs` `limiter_block_uniform` | as M2 |
+| 990-M8 | the right reduction word is not set from the left at block end | `src/lib.rs` `limiter_block_uniform` | as M1 |
+| 990-M9 | the right ramps are not set from the left at block end (the ramping dispatch strands them) | `src/lib.rs` `limiter_block_uniform` | randomized, gate 2, gate 3 |
+| 990-M10 | the right channel's `prefix` and `phase` are written back from its own stale registers | `src/lib.rs` `limiter_block_uniform` | as M1 |
+| 990-M11 | `restore_track` leaves the record as it was instead of comparing | `src/lib.rs` `LimiterCore::restore_track` | randomized, gate 2 |
+| 990-M12 | a dual block no longer clears the record when its designed words disagree | `src/lib.rs` `LimiterCore::process_block` | gate 1, randomized, gate 2 |
+| 990-M13 | `reset` does not re-establish the record | `src/lib.rs` `LimiterCore::reset` | randomized, gate 2 |
+| 990-M14 | `desymmetrize` does not re-establish the record | `src/lib.rs` `LimiterCore::desymmetrize` | gate 2 |
+| 990-M15 | the §4.4 reset of a non-finite block does not re-establish the record | `src/lib.rs` `LimiterCore::process_block` | randomized, gate 2 |
+| 990-M16 | the silent fast path clears the record | `src/lib.rs` `LimiterCore::process_block` | gate 2 |
+| 990-M17 | `restore_track` re-establishes from the window shapes instead of the gain words | `src/lib.rs` `LimiterCore::restore_track` | randomized, gate 2 |
+
+M1-M5 are the brief's; M6-M17 were added so that every write the linked body mirrors, every word the
+block end copies and every establishing, keeping and clearing site of the record has a red row. M13,
+M14, M15 and M16 are liveness rows (the pair stops linking where it may); the rest are correctness
+rows (the pair links where its words disagree, or leaves the right channel in a state no dual block
+would have left).
+
+### M4 is equivalent under the contract, and is gated off it
+
+The effect contract requires `desymmetrize_channels` before any dual block that follows a collapsed
+one, and `desymmetrize` re-establishes the record by copying the left channel over the right. Under
+the contract, keeping the record across a collapsed block is therefore unobservable: the next dual
+block always finds it re-established over genuinely equal words. The clear in `process_block_mono`
+is defensive. M4 is red only on a sequence the contract forbids -- collapsed blocks and then a dual
+block with no `desymmetrize` -- which the M4 gate constructs at the core level, and which the
+randomized harness reaches by skipping `desymmetrize` after one collapse run in four.
+
+The brief's original claim that the `console-workload` `chain_shape` transition tests turn red for
+M4 was withdrawn by the verification amendment and is not made here. The verification
+(`docs/handoffs/effects-2026-09-27/VERIFY-LIMITER.md`, section 2) found `chain_shape` and the
+console digests green under both M1 and M4: the console fixture barely limits, and every console
+transition desymmetrizes. These rows were not re-run against `console-workload`; the discriminating
+gates are this crate's.
