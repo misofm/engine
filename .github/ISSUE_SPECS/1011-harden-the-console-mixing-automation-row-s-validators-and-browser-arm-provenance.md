@@ -280,3 +280,43 @@ the target rule refuses them. The sweep confirms it.
    * **Fix.** Repeat `require_clean_tree` and the HEAD comparison after the rounds.
 
 None of these weakens what the row or its gates measure. All three are runner follow-ups.
+
+## Follow-up: runner record keeping
+
+Sol's three runner findings, fixed on `codex/1011-runner-keeps-records` from `b4e44e98`. Terra.
+
+1. **A refused run keeps its rounds and says why.**
+   * The records are now kept as `web-mixing-automation.refused.jsonl` whenever the run is refused
+     after a measured round: a validator refusal, a failed launch, or a post-run check.
+   * The runner prints the reason, logs it, and exits 1.
+   * The claims moved to `scripts/web-mixing-automation-lib.jq`. Each is named, and
+     `web_mixing_refusal_reasons` lists every failed claim, every missing or unexpected key, a
+     wrong round set, and each field the rounds disagree on. `web-mixing-automation-validator.jq`
+     is now the one-line verdict.
+2. **Nothing is overwritten.**
+   * The record, the refused file and the log are all checked before any launch.
+   * Every write now goes through a redirect under `noclobber`, and the `cp` is gone. A record
+     that appears during the rounds is refused at the write, left as it was, and the rounds are
+     kept.
+3. **Provenance is re-checked after the rounds.** After the last launch the runner checks HEAD, the
+   tracked files, the module, `controls.json` and `provenance.json` again. It compares them with
+   what it read before the rounds, and a change refuses the run and keeps the rounds.
+   * Limit: `run` checks the files against `provenance.json`, never the provenance against a
+     build, so forging all three consistently before `run` still passes. The record states the
+     module digest, and `prepare` is reproducible, so a rebuild is the check for that.
+
+**Tests.** `test-console-benchmark.sh` runs the real runner, untimed, in throwaway git repositories
+whose harness is a stub. The stub prints the base browser round, after the one disturbance the case
+names. The cases are:
+* an undisturbed control;
+* rounds that disagree;
+* each of the three artifacts already present;
+* a record that appears during round 2;
+* HEAD, a tracked file, the module or the provenance changing during round 2.
+
+With `b4e44e98`'s runner swapped in, 20 cases fail, covering all three findings. The control still
+passes, so the fixture is not what fails. With this runner, all pass.
+
+**Checks.** `test-console-benchmark.sh` passes. The env-vocabulary, workspace, bench, realtime,
+effect-runtime, lane and session policy scripts pass, and so do the bench-preconditions self-test
+and the artifact-leak check. No Rust changed. `after-1011`'s rounds still pass the verdict.

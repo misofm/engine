@@ -21,11 +21,15 @@
 #   run WORKDIR --step N   The one timed invocation. It refuses a module or a control table that
 #                          was not prepared at HEAD, or that changed after `prepare` recorded it.
 #                          Then it launches the harness three times, as the console runner does: one
-#                          warmup, whose record is discarded, and two measured rounds (#1011). The
-#                          two records must pass `scripts/web-mixing-automation-validator.jq`,
-#                          which requires them to agree on every digest, before either is written
-#                          to `artifacts/steps/N/web-mixing-automation.jsonl`; it refuses to
-#                          overwrite that file. Requires unmodified tracked files, pins every launch
+#                          warmup, whose record is discarded, and two measured rounds (#1011). After
+#                          the rounds it checks HEAD, the tracked files, the module, the table and
+#                          `provenance.json` again. The two records must pass
+#                          `scripts/web-mixing-automation-validator.jq`, which requires them to agree
+#                          on every digest, before they are written to
+#                          `artifacts/steps/N/web-mixing-automation.jsonl`. A refusal after the
+#                          rounds keeps them as `web-mixing-automation.refused.jsonl` and prints why;
+#                          no artifact is ever overwritten, and all three names are checked before
+#                          anything is launched. Requires unmodified tracked files, pins every launch
 #                          to the highest online CPU, and refuses a loaded host unless
 #                          `MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1`, in which case the records say
 #                          `uncontrolled`, as the console runner's do.
@@ -98,8 +102,11 @@ case "$command" in
         [[ "$4" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]] || { printf 'invalid --step name: %s\n' "$4" >&2; exit 2; }
         artifact_dir="$root/artifacts/steps/$4"
         record="$artifact_dir/web-mixing-automation.jsonl"
+        refused="$artifact_dir/web-mixing-automation.refused.jsonl"
         stderr_log="$artifact_dir/web-mixing-automation.stderr.log"
-        for path in "$record" "$stderr_log"; do
+        # Every artifact of a run is created and never replaced, and this is checked before anything
+        # is launched. `noclobber` below makes each write refuse a file that appeared since.
+        for path in "$record" "$refused" "$stderr_log"; do
             [[ ! -e "$path" && ! -L "$path" ]] ||
                 { printf 'refusing to overwrite web artifact: %s\n' "$path" >&2; exit 1; }
         done
@@ -109,15 +116,18 @@ case "$command" in
             { printf 'run prepare first\n' >&2; exit 1; }
         # The module and the control table belong to the commit the rounds run at, and are the
         # bytes `prepare` recorded. Either mismatch would publish one commit's module under another
-        # commit's name.
+        # commit's name. What is read here is held for the check after the rounds.
         commit=$(git rev-parse --verify HEAD)
         prepared_commit=$(jq -r '.commit' "$provenance")
+        module_sha256=$(jq -r '.module_sha256' "$provenance")
+        controls_sha256=$(jq -r '.controls_sha256' "$provenance")
+        provenance_sha256=$(digest "$provenance")
         [[ "$prepared_commit" == "$commit" ]] ||
             { printf 'the module was prepared at %s, not at HEAD %s; run prepare again\n' \
                 "$prepared_commit" "$commit" >&2; exit 1; }
-        [[ "$(digest "$workdir/host_web.wasm")" == "$(jq -r '.module_sha256' "$provenance")" ]] ||
+        [[ "$(digest "$workdir/host_web.wasm")" == "$module_sha256" ]] ||
             { printf 'host_web.wasm changed after prepare recorded it\n' >&2; exit 1; }
-        [[ "$(digest "$workdir/controls.json")" == "$(jq -r '.controls_sha256' "$provenance")" ]] ||
+        [[ "$(digest "$workdir/controls.json")" == "$controls_sha256" ]] ||
             { printf 'controls.json changed after prepare recorded it\n' >&2; exit 1; }
         source "$root/scripts/check-bench-preconditions.sh"
         cpu=$(bench_highest_cpu "$(< /sys/devices/system/cpu/online)")
@@ -133,27 +143,60 @@ case "$command" in
         fi
         umask 077
         mkdir -p "$artifact_dir"
+        set -o noclobber
+        : >"$stderr_log"
         raw=$(mktemp -d)
         trap 'rm -rf -- "$raw"' EXIT
-        : >"$stderr_log"
+        # A refused run keeps what it measured (AGENTS.md: preserve the raw output and record the
+        # failure). The measured records taken so far go to `web-mixing-automation.refused.jsonl`,
+        # which no validator accepts by name, and the reason goes to the terminal and the log.
+        refuse_run() {
+            local kept=''
+            if [[ -s "$raw/rounds.jsonl" ]]; then
+                if cat -- "$raw/rounds.jsonl" >"$refused"; then
+                    kept="; the measured records are kept at $refused"
+                else
+                    kept="; the measured records could not be kept at $refused"
+                fi
+            fi
+            printf 'the browser run is refused: %s%s\n' "$1" "$kept" | tee -a "$stderr_log" >&2
+            exit 1
+        }
         # One process per round, as the console runner launches its binary: the warmup's record is
         # discarded, and its in-run assertions still have to pass.
         for round in warmup 1 2; do
             taskset -c "$cpu" node --no-liftoff "$harness" run "$workdir/host_web.wasm" \
-                "$workdir/controls.json" "$round" >"$raw/$round.json" 2>>"$stderr_log"
-        done
-        for round in 1 2; do
+                "$workdir/controls.json" "$round" >"$raw/$round.json" 2>>"$stderr_log" ||
+                refuse_run "the $round launch failed; its assertion is in $stderr_log"
+            [[ "$round" == warmup ]] && continue
             jq -c --arg commit "$commit" --arg prepared "$prepared_commit" \
                 --arg control "$control" --arg cpu "$cpu" \
                 '. + {candidate_commit: $commit, prepared_commit: $prepared,
                       measurement_control: $control, cpu_affinity: $cpu}' \
-                "$raw/$round.json" >>"$raw/rounds.jsonl"
+                "$raw/$round.json" >>"$raw/rounds.jsonl" ||
+                refuse_run "the $round launch printed no record"
         done
-        jq -s -e -L "$root/scripts" -f "$root/scripts/web-mixing-automation-validator.jq" \
-            "$raw/rounds.jsonl" >/dev/null ||
-            { printf 'the browser rounds failed their validator\n' >&2; exit 1; }
-        set -o noclobber
-        cp -- "$raw/rounds.jsonl" "$record"
+        # Every launch re-read the tracked harness, fixture and ABI layout and the prepared module
+        # and table, so the provenance the records carry is checked again after the last of them.
+        [[ -z "$(git status --porcelain=v1 --untracked-files=no)" ]] ||
+            refuse_run 'a tracked file changed while the rounds ran'
+        [[ "$(git rev-parse --verify HEAD)" == "$commit" ]] ||
+            refuse_run "HEAD moved from $commit while the rounds ran"
+        [[ "$(digest "$workdir/host_web.wasm")" == "$module_sha256" ]] ||
+            refuse_run 'host_web.wasm changed while the rounds ran'
+        [[ "$(digest "$workdir/controls.json")" == "$controls_sha256" ]] ||
+            refuse_run 'controls.json changed while the rounds ran'
+        [[ "$(digest "$provenance")" == "$provenance_sha256" ]] ||
+            refuse_run 'provenance.json changed while the rounds ran'
+        if ! jq -s -e -L "$root/scripts" -f "$root/scripts/web-mixing-automation-validator.jq" \
+            "$raw/rounds.jsonl" >/dev/null; then
+            reasons=$(jq -s -r -L "$root/scripts" \
+                'include "web-mixing-automation-lib"; web_mixing_refusal_reasons' \
+                "$raw/rounds.jsonl" | paste -sd ';' -) || reasons='no reason could be computed'
+            refuse_run "the validator refused the rounds: ${reasons:-no reason given}"
+        fi
+        cat -- "$raw/rounds.jsonl" >"$record" ||
+            refuse_run "$record appeared while the rounds ran; it is left as it was"
         printf '%s\n' "$record"
         ;;
     *) usage ;;
