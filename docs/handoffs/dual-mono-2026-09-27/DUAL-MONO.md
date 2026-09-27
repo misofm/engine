@@ -491,9 +491,9 @@ In order; each is a separate, closable issue (drafts in [`issues/`](issues/)):
 ```
 git apply docs/handoffs/dual-mono-2026-09-27/dual-mono-prototypes.patch
 # probes: green with the patch (S1 arm change included);
-# MISO_RESEARCH_ARM_ANY_CHAIN=1 restores the shipped arming and turns the two asymmetric probes red
+# MISO_ENGINE_RESEARCH_ARM_ANY_CHAIN=1 restores the shipped arming and turns the two asymmetric probes red
 cargo test --locked -p host-core --test dualmono_probe -- --test-threads 1
-MISO_RESEARCH_ARM_ANY_CHAIN=1 cargo test --locked -p host-core --test dualmono_probe -- --test-threads 1
+MISO_ENGINE_RESEARCH_ARM_ANY_CHAIN=1 cargo test --locked -p host-core --test dualmono_probe -- --test-threads 1
 # 8-lane bench
 cargo build --release --locked -p console-workload --example dualmono_research
 # 4-lane bench (research cfg; RUSTFLAGS replaces the config's target flags, so restate them)
@@ -506,6 +506,6 @@ flock -w 7200 <timing.lock> taskset -c 31 target/release/examples/dualmono_resea
 
 The first-listen session predates the BLAKE3 stem identity; the driver relabels its `sha256:`
 identities as `blake3:` (they are only labels here). The patch's prototypes: the probe test, the
-research build and example, `MISO_RESEARCH_SKIP_SEAM_COPY` (rack, timing bound only),
-`MISO_RESEARCH_MONO_REMAINDER` (S2, global rather than per strip program), the S1 arm change
-(`MISO_RESEARCH_ARM_ANY_CHAIN` restores the shipped behaviour) and the `miso_native_simd4` cfg.
+research build and example, `MISO_ENGINE_RESEARCH_SKIP_SEAM_COPY` (rack, timing bound only),
+`MISO_ENGINE_RESEARCH_MONO_REMAINDER` (S2, global rather than per strip program), the S1 arm change
+(`MISO_ENGINE_RESEARCH_ARM_ANY_CHAIN` restores the shipped behaviour) and the `miso_native_simd4` cfg.

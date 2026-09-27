@@ -262,3 +262,19 @@ same witness-keyed "both NaN" rule as the dual half, and the grid runs a third p
 |---|---|---|
 | 985-M1 | the Average case takes the `abs` arm in the collapsed body | Applied and run: **GREEN** everywhere, including `mono_collapse::a_halved_subnormal_does_not_come_back` and gate 1's subnormal-only input, and it is equivalent. On one plane `0.5|m| + 0.5|m|` differs from `|m|` only where `0.5|m|` is inexact, which needs `|m| < 2 * f32::MIN_POSITIVE`; the linked value's only consumer is `curve_target`'s `max(detected, 1e-8)` floor, which maps both to `1e-8`, and NaN and `inf` agree. It was red in the retired design because a detector ring stored the linked value (M2-C1). The body keeps `link_frame` for Average and Maximum anyway, as the brief freezes, so the collapsed arithmetic stays the dual body's word for word |
 | 985-M5 | Maximum also takes the `abs` arm | Applied and run: **GREEN**, as the verification predicted: `max(|m|, |m|)` is `|m|` on every backend. Recorded, never listed as red |
+
+## Issue #994 — a knee whose `1 / (2 W)` overflows, through the compressor's entry points
+
+The fix is in `effect-runtime` (`dynamics::knee_coefficients`); this crate's source is unchanged
+and its reduction clamp in `kernel.rs` is untouched. The mutations were applied to the shared
+design temporarily, as for row 20, to prove this crate's gates catch it. Debug profile,
+`CARGO_INCREMENTAL=0 cargo test --locked -p compressor --test knee_overflow --no-fail-fast`; the
+file was restored byte for byte from a saved copy.
+
+| # | mutation | test | result |
+|---|---|---|---|
+| 994-C1 | `knee_coefficients` without its `is_finite` test (the pre-#994 design) | `knee_overflow` | RED, 4 of 5: the prepare, automation, restore and bank tests. First failure `prepare: W 3e-45 (0x00000002) R 4 frame 0: 0.11473124 vs f64 reference 1` — the NaN target clamped to -100 dB and a 0.1 ms attack duck the very first full-scale sample by 18.8 dB. The automation test is red although both of its endpoints (0 and `1e-38`) are outside the overflow band: the `Linear 64` ramp passes through it |
+| 994-C2 | the rule as a constant bound one ulp too low: `knee_db >= f32::from_bits(0x0010_0000)` | `knee_overflow` | RED, 2 of 5: the prepare and bank tests, the two whose widths include `2^-129` itself |
+
+`the_narrowest_soft_knees_do_not_duck_a_sample_at_the_threshold` stays green under both: it is a
+preservation gate for widths the rule must not move, not a red gate.

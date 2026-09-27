@@ -43,7 +43,7 @@ index f6253816..591aca69 100644
          }
 +        // RESEARCH PROTOTYPE (dual-mono 2026-09-27, reverted): remainder-aware pooling, read at
 +        // compile time (control plane) so the driver can build both arms in one process.
-+        if std::env::var_os("MISO_RESEARCH_MONO_REMAINDER").is_some()
++        if std::env::var_os("MISO_ENGINE_RESEARCH_MONO_REMAINDER").is_some()
 +            && let Some(width) = BankWidth::for_backend(dispatch)
 +        {
 +            pool_classes.research_demote_mono_remainder(width.lanes() as usize);
@@ -75,8 +75,8 @@ index 89e659ea..8256b7cf 100644
 -            let armed = !tracks.is_empty()
 +            // RESEARCH PROTOTYPE (dual-mono 2026-09-27, reverted): the structural witness speaks
 +            // for the track *input*, so only a chain that gathers the track input may be armed on
-+            // it. `MISO_RESEARCH_ARM_ANY_CHAIN` restores the shipped behaviour for comparison.
-+            let input_only = std::env::var_os("MISO_RESEARCH_ARM_ANY_CHAIN").is_none();
++            // it. `MISO_ENGINE_RESEARCH_ARM_ANY_CHAIN` restores the shipped behaviour for comparison.
++            let input_only = std::env::var_os("MISO_ENGINE_RESEARCH_ARM_ANY_CHAIN").is_none();
 +            let armed = (!input_only || identity.reads_track_input)
 +                && !tracks.is_empty()
                  && tracks
@@ -460,7 +460,7 @@ index 9960a550..a2ce0ac0 100644
      /// block count alone cannot say it.
      transitions: [u64; 3],
 +    /// RESEARCH PROTOTYPE (dual-mono 2026-09-27, reverted): read once at bind from
-+    /// `MISO_RESEARCH_SKIP_SEAM_COPY`; a timing-only upper bound on the seam copy.
++    /// `MISO_ENGINE_RESEARCH_SKIP_SEAM_COPY`; a timing-only upper bound on the seam copy.
 +    research_skip_seam_copy: bool,
  }
  
@@ -469,7 +469,7 @@ index 9960a550..a2ce0ac0 100644
              collapse_source: false,
              collapses: 0,
              transitions: [0; 3],
-+            research_skip_seam_copy: std::env::var_os("MISO_RESEARCH_SKIP_SEAM_COPY").is_some(),
++            research_skip_seam_copy: std::env::var_os("MISO_ENGINE_RESEARCH_SKIP_SEAM_COPY").is_some(),
          })
      }
  
@@ -603,9 +603,9 @@ index 00000000..ceeeb74a
 +    // SAFETY: single-threaded research driver; the variable is read once per chain at bind.
 +    unsafe {
 +        if on {
-+            std::env::set_var("MISO_RESEARCH_SKIP_SEAM_COPY", "1");
++            std::env::set_var("MISO_ENGINE_RESEARCH_SKIP_SEAM_COPY", "1");
 +        } else {
-+            std::env::remove_var("MISO_RESEARCH_SKIP_SEAM_COPY");
++            std::env::remove_var("MISO_ENGINE_RESEARCH_SKIP_SEAM_COPY");
 +        }
 +    }
 +}
@@ -625,9 +625,9 @@ index 00000000..ceeeb74a
 +    // SAFETY: single-threaded research driver; read once per compile, off render.
 +    unsafe {
 +        if on {
-+            std::env::set_var("MISO_RESEARCH_MONO_REMAINDER", "1");
++            std::env::set_var("MISO_ENGINE_RESEARCH_MONO_REMAINDER", "1");
 +        } else {
-+            std::env::remove_var("MISO_RESEARCH_MONO_REMAINDER");
++            std::env::remove_var("MISO_ENGINE_RESEARCH_MONO_REMAINDER");
 +        }
 +    }
 +}
@@ -721,7 +721,7 @@ index 00000000..ceeeb74a
 +        SessionRuntime::research_build(&folded, backend, true, &stereo_feed),
 +    ));
 +    if std::env::var_os("DUALMONO_UNARMED").is_some() {
-+        set("MISO_RESEARCH_NO_ARM", true);
++        set("MISO_ENGINE_RESEARCH_NO_ARM", true);
 +        arms.push(arm(
 +            "folded_remainder_unarmed",
 +            SessionRuntime::research_build(&folded, backend, false, &stereo_feed),
@@ -731,7 +731,7 @@ index 00000000..ceeeb74a
 +            "folded_unarmed",
 +            SessionRuntime::research_build(&folded, backend, false, &stereo_feed),
 +        ));
-+        set("MISO_RESEARCH_NO_ARM", false);
++        set("MISO_ENGINE_RESEARCH_NO_ARM", false);
 +        // Keep only the arms this diagnosis compares.
 +        arms.retain(|arm| {
 +            matches!(
@@ -853,7 +853,7 @@ index 76876388..0eab0eb9 100644
 +            .filter(|(_, witness)| witness.eligible())
 +            .map(|(track, _)| track.as_ref())
 +            .collect();
-+        if std::env::var_os("MISO_RESEARCH_NO_ARM").is_none() {
++        if std::env::var_os("MISO_ENGINE_RESEARCH_NO_ARM").is_none() {
 +            plan.arm_mono_collapse(&|track: &str| eligible.contains(track));
 +        }
 +        plan.force_mono_collapse_off(forced_off);
