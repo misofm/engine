@@ -172,3 +172,175 @@ fixtures and console workloads, is out of scope. Stop and report instead.
 - **A wasm run in CI for 4-lane effect banks** is flagged to the owner (x86 `Simd4` tests barely form
   4-lane effect banks, which hid the browser case).
 
+
+## Attempt 1 evidence
+
+Implementer: attempt 1, on `codex/966-unbank-cross-level-slots` (the brief's
+`codex/966-unbind-misaligned-bank-slots` was created under this name), cut from `584dbc16`, which
+carries #970. Host: `x86_64`, `x86-64-v3` (`Backend::current()` = `Simd8`), rustc 1.97.1,
+`CARGO_INCREMENTAL=0`, debug unless stated. Nothing was timed.
+
+### The fix
+
+`bind_rack_banks_indexed` (`crates/graph-compiler/src/banks.rs`): after a slot's members are
+collected, the slot is left unbound (`continue`) unless every member has the same dependency level,
+read from the `level_by_node` map the function already builds. It is the prototype's check,
+unchanged: 13 lines of code, plus a comment and one doc paragraph on the "Level bucketing" comment.
+`CohortLevel`'s doc (`crates/rack-compiler/src/lib.rs`) now says the level partition aligns only
+each candidate's first slot. No graph, planner, schedule, fixture or digest change; nothing on the
+render path changes, so render stays allocation-, lock- and syscall-free, and there is no new
+`unsafe`.
+
+### Committed tests (`crates/graph-compiler/tests/bank_levels.rs`)
+
+Every reproducer compiles, binds and renders 16 blocks at `Scalar`, `Simd4` and `Simd8` with the
+mono collapse unarmed, and at `Simd4` and `Simd8` armed exactly as `prepare_host_session` arms it
+(`session_structural_symmetry` -> `arm_mono_collapse`). Every render must equal the `Scalar`
+render bit for bit, the `Scalar` render must be audible, and no bound effect bank may span levels.
+The misaligned planned slots are asserted at both SIMD widths, and the bank count at
+`Backend::current()`.
+
+| test | shape | misaligned `[Simd4, Simd8]` | ragged lanes `[Simd4, Simd8]` | banks `Simd8` (x86) | banks `Simd4` (wasm guest) |
+|---|---|---|---|---|---|
+| `the_sixty_four_track_console_less_one_eq_binds_at_every_width` | gate 1, `ch00` | 1, 1 | 0, 0 | 21 | 45 |
+| `the_console_less_a_middle_lanes_eq_binds_at_every_width` | gate 1, `ch60` (amendment 3) | 1, 1 | 0, 4 | 21 | 45 |
+| `the_console_less_a_last_lanes_eq_binds_at_every_width` | gate 1, `ch63` (amendment 3) | 1, 1 | 3, 7 | 21 | 45 |
+| `the_mono_console_less_one_eq_binds_and_collapses_at_every_width` | gate 1 on the mono desk; asserts the armed collapse fires | 1, 1 | | 21 | 45 |
+| `a_cohort_lane_behind_an_extra_dynamic_eq_binds_at_every_width` | seed-412 shape | 1, 1 | | 2 | 6 |
+| `the_reduced_mono_console_from_the_970_probe_binds_at_every_width` | `reduced-nobus-from-970-verify.json` | 1, 1 | | 0 | 1 |
+| `lanes_that_skip_the_same_slot_still_bank_it` | over-reach guard, nine EQs | 1, 1 | | 20 | 43 |
+| `a_slot_after_a_misaligned_one_realigns_and_still_banks` | realignment guard (amendment 2) | 2, 1 | | 9 | 18 |
+| `randomized_consoles_compile_bind_and_render_the_scalar_bits` | probe, seeds `0..64` | | | | |
+
+The `Simd4` pins were read in the wasm guest (below), never off an x86 run.
+
+### Reproducers before and after
+
+- **Native, before** (base binder; also mutation M1 below): all eight reproducer and guard tests
+  refuse at `Simd8` with `graph.scheduler.layout`.
+- **Native, after:** 9 of 9 pass.
+- **Wasm `Simd4`, before:** all eight shapes are refused, each with one cross-level bank (two for the
+  realignment guard). Planned banks: 46, 46, 46, 46, 7, 2, 44 and 20.
+- **Wasm `Simd4`, after:** all eight bind, with banks 45, 45, 45, 45, 6, 1, 43 and 18. Unarmed and
+  armed renders equal the `Scalar` render bit for bit over 16 blocks (4,096 samples each), none
+  silent. On the mono desk the armed collapse fired (256 collapsed blocks, 16 collapsible
+  cohorts).
+
+The wasm leg is a scratch `wasm32-unknown-unknown` + `simd128` guest that includes the committed
+`bank_levels.rs` by `#[path]`, driven by a scratch host test in `tools/wasm-gates/tests/` under the
+pinned wasmtime 47.0.3 (relaxed SIMD rejected). The guest reports `Backend::current()` = `Simd4`.
+It needs a workspace member, so `Cargo.toml` and `Cargo.lock` were edited for the run and
+restored; none of it is committed. Commands: `CARGO_TARGET_DIR=target/zz966 RUSTFLAGS='-C
+target-feature=+simd128' cargo build --release --target wasm32-unknown-unknown -p zz-966-guest`,
+then `ZZ966_GUEST=<the .wasm> ZZ966_REPROS=1 ZZ966_BLOCKS=16 ZZ966_START=0 ZZ966_COUNT=1000 cargo
+test --release -p wasm-gates --test zz_966_host -- --nocapture` (`ZZ966_RENDER_ALL=1` renders every
+seed). The native manual sweeps are the committed probe with `PROBE_966_START`, `PROBE_966_COUNT`
+and `PROBE_966_RENDER_ALL`.
+
+### Probe: unarmed and armed (amendment 1)
+
+The collapse is armed exactly as the host arms it. #970 is on the base, and **both legs show zero
+divergence everywhere**.
+
+| run | seeds | refused before | refused after | rendered | moved, unarmed / armed | armed collapse fired |
+|---|---|---|---|---|---|---|
+| native, committed | `0..64` | 29 lines, 23 seeds (16 `Simd4`, 13 `Simd8`) | 0 | 30 | 0 / 0 | 12 seeds |
+| native, manual | `0..1000` | | 0 | 338 | 0 / 0 | 86 |
+| native, every seed rendered | `20000..20300` | | 0 | 300 | 0 / 0 | 79 |
+| wasm `Simd4` | `0..64` | 28 seeds | 0 | 30 | 0 / 0 | 12 |
+| wasm `Simd4` | `0..1000` | 323 seeds | 0 | 336 | 0 / 0 | 85 |
+| wasm `Simd4`, every seed rendered | `20000..21000` | | 0 | 1,000 | 0 / 0 | 244 |
+
+- Seeds with a misaligned planned slot: `[0, 30, 16]` at `[Scalar, Simd4, Simd8]` over `0..64`, and
+  `[0, 336, 191]` over `0..1000`.
+- No rendered seed was silent, except one in the wasm render-everything sweep (`20000..21000`); that
+  mode does not assert audibility.
+- The "every seed rendered" rows cover the plans that bind today (`PROBE_966_RENDER_ALL=1`),
+  including the verifier's pre-#970 divergence range `20000..20300`.
+- Committed probe runtime: 15-16 s wall and about 95 s CPU in debug on this 32-core host. It uses
+  up to 8 worker threads; on a 4-core CI runner I estimate 25-30 s (not measured). The whole
+  `bank_levels` binary finishes in the same time.
+
+### Class A: every plan that binds today is unchanged
+
+- **Console rows:** `console-workload` probe (the harness's `zz_probe_966.rs` only, release). This
+  covers every console row at `Scalar`, `Simd4` and `Simd8`, baseline and meters/control/
+  observation: digest, bank shape, transposes, folds, redirects, symmetry, collapse counters, unit
+  census and meters drained. **99 of 99 rows are identical**; the output file's SHA-256 is
+  `754f4ed8…681976c` before and after.
+- **By construction:** the only output that changes is a bank whose members span levels, and bind
+  refuses every plan that contains one.
+- `graph_fixture --check`: **PASS**.
+- `scripts/check-graph-determinism.sh`: **PASS (100/100)**.
+
+### Mutations (`crates/graph-compiler/tests/MUTATIONS.md`, section "Issue #966")
+
+| # | mutation | result |
+|---|---|---|
+| M1 | delete the check | RED 9 of 9, `graph.scheduler.layout`. The probe refuses 29 lines over 23 seeds |
+| M2 | over-strict (`rank == slot`) | RED 2 of 9, the two over-reach guards only (19 ≠ 20, 8 ≠ 9) |
+| M7 | `continue` becomes `break` | RED 1 of 9: the realignment guard (8 ≠ 9) |
+| M3 | first versus last member only | RED 3 of 9: the middle-lane gate 1, the seed-412 shape and the probe |
+| M8 | skip lane 1 | RED 1 of 9: the probe (seeds 31, 58) |
+| M9 | the test source feeds a mono-mapped track two different sides | RED 2 of 9, armed legs only: the mono desk and the probe |
+
+### Gates
+
+All run on the tree committed as `2c6562d3`, with `CARGO_INCREMENTAL=0`, the worktree's own
+`target/`, and `set -o pipefail` wherever output was piped.
+
+| gate | command | result |
+|---|---|---|
+| fmt | `cargo fmt --all --check` | PASS |
+| clippy | `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | PASS, no warnings |
+| docs | `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps` | PASS |
+| graph | `cargo test --locked -p graph` | 110 passed, 0 failed |
+| graph, test support | `cargo test --locked -p graph --features test-support` | 117 passed, 0 failed |
+| graph-compiler | `cargo test --locked -p graph-compiler` | 110 passed, 0 failed (`bank_levels` 9 in 14.9 s; `scale` 59.5 s) |
+| rack-compiler | `cargo test --locked -p rack-compiler` | 13 passed, 0 failed |
+| builtins-compiler | `cargo test --locked -p builtins-compiler --features test-support` | 79 passed, 0 failed |
+| host-core | `cargo test --locked -p host-core --all-features` | 234 passed, 0 failed, 2 ignored (pre-existing release-budget tests) |
+| capi | `cargo test --locked -p capi` | 36 passed, 0 failed |
+| console-workload | `cargo test --locked -p console-workload` | 39 passed, 0 failed, 2 ignored (pre-existing measurement harnesses) |
+| wasm-gates | `cargo test --locked -p wasm-gates` | 9 passed, 0 failed |
+| graph policy | `bash scripts/check-graph-policy.sh` | `graph policy: PASS` |
+| rack policy | `bash scripts/check-rack-policy.sh` | `rack policy: PASS` |
+| realtime policy | `bash scripts/check-realtime-policy.sh` | `realtime policy: ok (57 marked regions in 16 files)` |
+| graph determinism | `bash scripts/check-graph-determinism.sh` | `PASS (100/100)` |
+| fixtures | `cargo run -p graph-compiler --bin graph_fixture -- --check` | PASS |
+| console class A | the harness's `zz_probe_966.rs` in `console-workload`, release, before and after | 99/99 rows identical |
+
+No timed benchmark was run. The scratch harness (`zz_probe_966.rs`, the wasm guest and its host
+test) and the temporary `Cargo.toml`/`Cargo.lock` edit were removed before these gates ran.
+
+### Deviations from the brief
+
+1. **Generator.** An all-mono desk (`mono == 1000`) now draws its strip from
+   `console-sixty-four-track-mono.json`, which is symmetric.
+   - With the intended fixture's asymmetric strip, the armed collapse fired on 0 of 29 rendered
+     seeds, so an armed leg compared nothing.
+   - Parsing draws nothing from the RNG, so every other draw is unchanged. A symmetric strip can
+     still pool its tracks differently, and the prototype's counts moved: misaligned seeds are 30
+     and 16 (were 29 and 15), and M1 refuses 29 lines over 23 seeds (was 28 over 22).
+2. **Input.** The test's input reads each side from the session's mapped source channel, so a
+   mono-mapped track is symmetric at its input as a host's source ring keeps it. The prototype
+   gave each side its own signal, which would make the armed collapse diverge in a way no host
+   can produce (M9 shows exactly that).
+3. **Probe cost.**
+   - Seeds are spread over up to 8 threads. Serial with the armed leg, the probe took 83 s.
+   - Armed renders are skipped on desks with no mono-mapped track, because arming is then a no-op.
+   - The probe also asserts that the armed collapse fired on at least one rendered seed.
+4. **Blocks.** Reproducers render 16 blocks, not 8 (amendment 5).
+5. **Extra tests.**
+   - From the amendments and comments: `ch60` and `ch63`, the realignment guard and the reduced
+     `#970` reproducer.
+   - My own addition: the mono-desk reproducer, the one reproducer where the armed collapse fires on
+     a rescued plan.
+   - `early_lanes` pins where the ragged lane sits.
+6. **Reduced reproducer location.** It is `include_str!`-ed from
+   `docs/handoffs/bug-966-2026-09-27/`, where the issue records it, rather than copied into
+   `fixtures/` (out of scope).
+7. **Scope wording.** The claim is scoped to the effect-bank layout refusal (amendment 5). The probe
+   still asserts that every seed binds.
+8. **Not done** (optional amendment 4): the facility-armed reproducer (meters, controls,
+   observation). The verification covered it with scratch tooling.
