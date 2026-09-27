@@ -1,9 +1,11 @@
-//! The compile entry points and their orchestration.
+//! The compile entry point and its orchestration.
 //!
-//! `compile_with_builtin_tails` is the whole pipeline: validate the prepared effects against the
-//! session model, materialise nodes and edges, detect cycles, order and level the graph, resolve
-//! PDC, colour output buffers, plan and bind the SIMD-rack banks, and check the resource estimate
-//! against the caps -- transactionally, handing every caller-owned input back on any failure.
+//! [`GraphCompiler::compile_with_builtins`] is the one entry: it validates the prepared builtins
+//! against the session, runs `compile_graph`, and attaches the builtin banks. `compile_graph` is
+//! the graph pipeline: validate the prepared effects against the session model, materialise nodes
+//! and edges, detect cycles, order and level the graph, resolve PDC, colour output buffers, plan
+//! and bind the SIMD-rack banks, and check the resource estimate against the caps --
+//! transactionally, handing every caller-owned input back on any failure.
 //!
 //! Evidence -- the canonical text, its SHA-256 and the Graphviz rendering -- is **not** produced
 //! here (#99 F5); see [`GraphCompiler::evidence`].
@@ -16,7 +18,7 @@ use crate::canonical::{
 use crate::estimate::{effect_control_resource, estimate_fits_platform, resource_estimate};
 use crate::ids::{
     PreparedEffectIndex, add_main_edge, add_node, add_route_destination_edge,
-    add_route_source_edge, diag, effect_path, failure, gid, into_effects, port, ports_for,
+    add_route_source_edge, diag, effect_path, gid, into_effects, port, ports_for,
     prepared_effect_node, route_destination_node, route_source_node, route_transform,
     sidechain_matches, stages, track_node,
 };
@@ -64,6 +66,14 @@ impl GraphCompiler {
         reductions_of(graph)
     }
 
+    /// Compile an effect-prepared session and its prepared builtins into one bindable plan.
+    ///
+    /// The builtins are required: every host renders a track's input section, fader and pan
+    /// matrix, and the builtins-less entry that compiled a plan without them was deleted (issue
+    /// #959). On any failure the prepared effects and builtins are handed back with the sorted
+    /// diagnostics.
+    // The transactional API returns the complete prepared-effect and builtin inputs by value on
+    // failure. Boxing them would change that ownership contract solely to optimize a cold path.
     #[allow(clippy::result_large_err)]
     pub fn compile_with_builtins(
         request: GraphBuiltinsCompileRequest,
@@ -89,28 +99,7 @@ impl GraphCompiler {
                 ),
             });
         }
-        let builtin_tails: BTreeMap<_, _> = builtins
-            .tails()
-            .map(|(track_id, tail)| {
-                (
-                    track_id.to_owned(),
-                    match tail {
-                        BuiltinTail::FiniteZero => TailSamples::Finite(0),
-                        BuiltinTail::Infinite => TailSamples::Infinite,
-                    },
-                )
-            })
-            .collect();
-        let compiled = match Self::compile_with_builtin_tails(
-            GraphCompileRequest {
-                plan_id,
-                effects,
-                caps,
-                dispatch,
-            },
-            &builtin_tails,
-            Some(&builtins),
-        ) {
+        let compiled = match Self::compile_graph(plan_id, effects, caps, dispatch, &builtins) {
             Ok(value) => value,
             Err(failure) => {
                 return Err(GraphBuiltinsCompileFailure {
@@ -133,26 +122,33 @@ impl GraphCompiler {
             &compiled.pool_classes,
         ))
     }
-    // The frozen transactional API returns the complete prepared-effect input by value on
-    // failure. Boxing it would change that ownership contract solely to optimize a cold path.
+
+    /// The graph pipeline, run against builtins `compile_with_builtins` has already validated
+    /// for this session. The builtin banks are attached by the caller; this charges their
+    /// reservation, lists their three stages for binding, and takes each track's input-section
+    /// tail from them.
     #[allow(clippy::result_large_err)]
-    pub fn compile(
-        request: GraphCompileRequest,
-    ) -> Result<PreparedGraphArtifact, GraphCompileFailure> {
-        Self::compile_with_builtin_tails(request, &BTreeMap::new(), None)
-    }
-    #[allow(clippy::result_large_err)]
-    fn compile_with_builtin_tails(
-        request: GraphCompileRequest,
-        builtin_tails: &BTreeMap<String, TailSamples>,
-        prepared_builtins: Option<&PreparedBuiltinsSession>,
-    ) -> Result<PreparedGraphArtifact, GraphCompileFailure> {
-        let GraphCompileRequest {
-            plan_id,
-            effects,
-            caps,
-            dispatch,
-        } = request;
+    fn compile_graph(
+        plan_id: u64,
+        effects: EffectPreparedSession,
+        caps: GraphCompileCaps,
+        dispatch: Backend,
+        builtins: &PreparedBuiltinsSession,
+    ) -> Result<CompiledGraph, GraphFailure> {
+        // `validate_for_session` has checked the tail set against the session's tracks, so every
+        // track has exactly one entry here.
+        let builtin_tails: BTreeMap<&str, TailSamples> = builtins
+            .tails()
+            .map(|(track_id, tail)| {
+                (
+                    track_id,
+                    match tail {
+                        BuiltinTail::FiniteZero => TailSamples::Finite(0),
+                        BuiltinTail::Infinite => TailSamples::Infinite,
+                    },
+                )
+            })
+            .collect();
         let mut diagnostics = Vec::new();
         if !caps.all_nonzero() {
             diagnostics.push(diag("graph.resource.limit", "$.graph_compile_caps"));
@@ -217,10 +213,9 @@ impl GraphCompiler {
             for stage in stages() {
                 let id = track_node(track.id.as_str(), stage);
                 let tail = if stage == TrackStage::PostInputBuiltins {
-                    builtin_tails
+                    *builtin_tails
                         .get(track.id.as_str())
-                        .copied()
-                        .unwrap_or(TailSamples::Finite(0))
+                        .expect("validated builtins carry one tail per track")
                 } else {
                     TailSamples::Finite(0)
                 };
@@ -433,10 +428,8 @@ impl GraphCompiler {
         // chain merge would decline silently.
         //
         // The contributors are the prepare-time terms of every upstream-of-seam stage this compile
-        // actually prepared: `SOURCE` from the compiled session, `DESIGNED` from each prepared
-        // native effect and -- when this is the `compile_with_builtins` path -- from each track's
-        // prepared input section. `GraphCompiler::compile` has no input sections in its plan at
-        // all, so having one fewer contributor there is the honest answer rather than a gap.
+        // prepared: `SOURCE` from the compiled session, and `DESIGNED` from each prepared native
+        // effect and from each track's prepared input section.
         let mut pool_classes = SessionPoolClasses::from_session(session);
         for entry in &effects.entries {
             let mut witness = ChannelSymmetryWitness::SYMMETRIC;
@@ -446,10 +439,8 @@ impl GraphCompiler {
             );
             pool_classes.conjoin(&entry.track_id, witness);
         }
-        if let Some(builtins) = prepared_builtins {
-            for (track, witness) in builtins.input_channel_symmetry() {
-                pool_classes.conjoin(track, witness);
-            }
+        for (track, witness) in builtins.input_channel_symmetry() {
+            pool_classes.conjoin(track, witness);
         }
         let (banks, rack_cohorts) = match bind_rack_banks_indexed(
             &effects,
@@ -651,46 +642,42 @@ impl GraphCompiler {
                 )],
             ));
         }
-        if let Some(builtins) = prepared_builtins {
-            let Some(resource) =
-                builtins.graph_scalar_owner_resource(dispatch, &levels, &pool_classes)
-            else {
-                return Err(failure(
-                    effects,
-                    vec![diag(
-                        "graph.resource.arithmetic_overflow",
-                        "$.graph.scalar_owners",
-                    )],
-                ));
-            };
-            if estimate.checked_add_scalar_owners(resource).is_none() {
-                return Err(failure(
-                    effects,
-                    vec![diag(
-                        "graph.resource.arithmetic_overflow",
-                        "$.graph.scalar_owners",
-                    )],
-                ));
-            }
+        let Some(scalar_owner_resource) =
+            builtins.graph_scalar_owner_resource(dispatch, &levels, &pool_classes)
+        else {
+            return Err(failure(
+                effects,
+                vec![diag(
+                    "graph.resource.arithmetic_overflow",
+                    "$.graph.scalar_owners",
+                )],
+            ));
+        };
+        if estimate
+            .checked_add_scalar_owners(scalar_owner_resource)
+            .is_none()
+        {
+            return Err(failure(
+                effects,
+                vec![diag(
+                    "graph.resource.arithmetic_overflow",
+                    "$.graph.scalar_owners",
+                )],
+            ));
         }
         // The runtime chain retains one slot and one cloned mask per prepared membership.  Fold
         // its conservative coexistence reservation into the published estimate before caps; the
         // builtin payload itself is attached later and must not carry this term a second time.
-        let builtin_bank_resource = if let Some(builtins) = prepared_builtins {
-            let Some(resource) =
-                builtins.graph_builtin_bank_resource(rack_cohorts.dispatch, &levels, &pool_classes)
-            else {
-                return Err(failure(
-                    effects,
-                    vec![diag(
-                        "graph.resource.arithmetic_overflow",
-                        "$.graph.builtin_banks",
-                    )],
-                ));
-            };
-            resource
-        } else {
-            graph::GraphBuiltinBankResourceEstimate::default()
+        let Some(builtin_bank_resource) =
+            builtins.graph_builtin_bank_resource(rack_cohorts.dispatch, &levels, &pool_classes)
+        else {
+            return Err(failure(
+                effects,
+                vec![diag(
+                    "graph.resource.arithmetic_overflow",
+                    "$.graph.builtin_banks",
+                )],
+            ));
         };
         let mut capped_estimate = estimate.clone();
         if capped_estimate
@@ -800,40 +787,28 @@ impl GraphCompiler {
             nodes,
             edges,
         };
-        // The nodes the host must bind. `Input` and the session output always. The three builtin
-        // stages -- `PostInputBuiltins`, `PostFader`, `PostMatrix` -- only when builtins are being
-        // prepared (`compile_with_builtins`), where each is a compiler-owned binding the builtins
-        // artifact fills with a bank member or a scalar owner and keeps as an op.
-        //
-        // Issue #925: without builtins nothing owns them. Every host acknowledged them with
-        // `GraphNodeBinding::identity`, and each lowered to an identity op -- a copy out of the
-        // dedicated post-input stage, a second copy into the fader, and an in-place matrix that
-        // only dispatched. Leaving them out of the bindable set is what `program::lower` reads to
-        // elide them as aliases, exactly like the three rack boundaries: no op, no buffer, no
-        // unit, and the route reads the input's own buffer. An identity moves no bit, so the
-        // rendered words are the same words. The cost is that a builtins-less plan has no bindable
-        // builtin stage: a host cannot supply its own fader or matrix processor there.
-        let builtin_stages_bindable = prepared_builtins.is_some();
-        let required_bindings =
-            schedule
-                .iter()
-                .filter(|node| match node {
+        // The nodes the host must bind: `Input`, the session output, and the three builtin
+        // stages -- `PostInputBuiltins`, `PostFader`, `PostMatrix` -- each a compiler-owned
+        // binding the builtins artifact fills with a bank member or a scalar owner and keeps as
+        // an op. The builtins-less entry left the three builtin stages out of this set, which
+        // `program::lower` read to elide them as aliases (issue #925); it was deleted by issue
+        // #959, so every compiled plan lists all three.
+        let required_bindings = schedule
+            .iter()
+            .filter(|node| {
+                matches!(
+                    node,
                     GraphNodeId::TrackStage {
-                        stage: TrackStage::Input,
-                        ..
-                    }
-                    | GraphNodeId::Output { .. } => true,
-                    GraphNodeId::TrackStage {
-                        stage:
-                            TrackStage::PostInputBuiltins
+                        stage: TrackStage::Input
+                            | TrackStage::PostInputBuiltins
                             | TrackStage::PostFader
                             | TrackStage::PostMatrix,
                         ..
-                    } => builtin_stages_bindable,
-                    _ => false,
-                })
-                .cloned()
-                .collect();
+                    } | GraphNodeId::Output { .. }
+                )
+            })
+            .cloned()
+            .collect();
         let graph = PreparedGraphPlan::new(PreparedGraphPlanParts {
             plan_id,
             spec,
@@ -859,7 +834,7 @@ impl GraphCompiler {
             observers: Vec::new(),
             effect_observations,
         });
-        Ok(PreparedGraphArtifact {
+        Ok(CompiledGraph {
             pool_classes,
             graph,
             report: GraphCompileReport {
@@ -870,5 +845,31 @@ impl GraphCompiler {
                 rack_cohorts,
             },
         })
+    }
+}
+
+/// The graph half of a compile: the plan before the builtin banks are attached, its report, and
+/// the pool classes the second bank planner must read.
+struct CompiledGraph {
+    graph: PreparedGraphPlan,
+    report: GraphCompileReport,
+    /// Every track's cohort pool class, as this compile derived it (mono-collapse M1).
+    ///
+    /// `bind_rack_banks` read it inside the compile, and
+    /// `PreparedBuiltinsSession::into_graph_artifact_with_banks` reads the same value rather than
+    /// re-deriving one. See [`builtins_compiler::SessionPoolClasses`].
+    pool_classes: SessionPoolClasses,
+}
+
+/// A rejected graph half: the prepared effects handed back, and why.
+struct GraphFailure {
+    effects: EffectPreparedSession,
+    diagnostics: GraphDiagnosticSet,
+}
+
+fn failure(effects: EffectPreparedSession, diagnostics: Vec<GraphDiagnostic>) -> GraphFailure {
+    GraphFailure {
+        effects,
+        diagnostics: GraphDiagnosticSet::sorted(diagnostics),
     }
 }

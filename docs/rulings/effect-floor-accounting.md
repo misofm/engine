@@ -533,7 +533,8 @@ It was costed at the routing component alone (4 lane-ops, 0.135 cycles/lane-samp
 overhead floor", and issue #928 added its driver-fed twin, `sixty_four_track_plumbing_ring`. On
 2026-09-27 the owner ruled that a builtins-less compile is never needed in production, and issue
 #956 retired both rows: no host compiles such a plan, so its number described no shipped path. The
-driver-fed row was re-based onto the gain/pan session as `sixty_four_track_gain_pan_ring`. The
+driver-fed row was re-based onto the gain/pan session as `sixty_four_track_gain_pan_ring`, and
+issue #959 then deleted `GraphCompiler::compile` itself, so no compile can produce that plan. The
 sealed records under `artifacts/` keep every plumbing number taken before the retirement —
 `artifacts/strip4/` measured the row at 6.7 % of its four-lane-op floor, the unfolded route ops and
 reduction that job 3's fold removed from every banked row — and they are history, not a standing

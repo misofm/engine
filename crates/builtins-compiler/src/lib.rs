@@ -3985,10 +3985,10 @@ pub fn session_structural_symmetry(
 ///
 /// * `SOURCE` from [`track_mono_source`], through [`session_structural_symmetry`]. This is
 ///   the term the M0 phase built and the only one the compiled session can answer alone.
-/// * `DESIGNED` from each prepared upstream-of-seam stage the compile actually prepared: the
-///   track's input builtins ([`InputBuiltins::channel_symmetry`]) and each of its prepared native
-///   effects. A compile that prepared no builtins (`GraphCompiler::compile`) simply has one fewer
-///   contributor -- honest, because there is no input stage in that plan to be asymmetric.
+/// * `DESIGNED` from each prepared upstream-of-seam stage the compile prepared: the track's
+///   input builtins ([`InputBuiltins::channel_symmetry`]) and each of its prepared native effects.
+///   Every compile prepares the input builtins, so that term is always present; the builtins-less
+///   compile entry, which had no input stage to contribute it, was deleted by issue #959.
 ///
 /// Absent terms are never assumed: an unknown track answers [`CohortPoolClass::Stereo`], which
 /// is the class that cannot over-claim.

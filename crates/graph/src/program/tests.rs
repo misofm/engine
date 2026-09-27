@@ -209,7 +209,7 @@ fn chain_of_seven_stages_lowers_to_six_ops_three_taps_and_two_buffers() {
     assert_eq!(program.output, program.ops[5].output);
 }
 
-/// Issue #925: the same chain as a builtins-less compile now lists it -- only the input and the
+/// Issue #925: the same chain as the builtins-less compile listed it -- only the input and the
 /// output bindable -- is `Input -> Route -> Output`: three ops, six aliases, and the route in place
 /// over the input's own buffer.
 ///
