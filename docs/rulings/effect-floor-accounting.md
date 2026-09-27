@@ -213,8 +213,9 @@ last section runs alone in a depth-1 pass. Since #977 every depth-2 pass of an a
 without the dry select, dry lanes included: under admission every select is a no-op (the proof is
 on `cascade_sections`), so no mask is built and none is applied. The depth-1 tail keeps #976's
 rule, select-free unless a lane of either channel is dry there; that is a code-generation choice
-for the shipped browser build (see `interleave`), not an arithmetic one. Since #1000
-`scripts/run-wasm-gates.sh` holds it: the pinned Node's TurboFan must carry no value of the
+for the shipped browser build (see `interleave`), not an arithmetic one. Since #1000 the V8 spill
+gate holds it, on the shipped artifact in CI (`artifact-gates`, #1009) and in
+`scripts/run-wasm-gates.sh` locally: the pinned Node's TurboFan must carry no value of the
 select-free dual tail, or of the mono pair and tail, from one iteration to the next through a stack
 slot. The dual pair already does, and is only reported. That is a register-allocation check, not
 a timing (`tools/wasm-gates/MUTATIONS.md` says what it proves). Only a refused or all-live plan
