@@ -505,3 +505,153 @@ fn the_rule_not_the_bank_gain_check_picks_the_moved_tracks() {
 3. **Correct the two false statements.** `banks.rs:358` says consent is "the same for every plan";
    `crates/builtins-compiler/src/lib.rs:4003` says the move is kept only when the plan "binds more
    effect banks". Correct both, or make them true with item 2.
+
+## Attempt 2 evidence
+
+Implementer attempt 2, 2026-09-27. The branch first merged the batch head `077fb31e` (merge
+`ef7e5510`), so every gate below ran against it. The implementation is commit `8ff8ce65`. Host
+x86_64 (`x86-64-v3`), `CARGO_INCREMENTAL=0`. The four-lane legs use the research `--cfg
+miso_native_simd4` lane hunk in their own target directories, applied for measurement only and
+reverted. The scratch harnesses are not committed and live under `<scratchpad>/971/a2/`.
+
+### Finding 2 (medium): the guard now counts banks the factories bind
+
+* `bind_rack_banks_indexed` binds the trial plan through `bind_planned_banks`, which is the old
+  bind loop, moved unchanged. If some mono track strands, it re-plans, binds the re-plan the
+  same way, and keeps the move only when `replan_banks.len() > banks.len()`. Both counts are
+  banks a factory actually returned, so a full group the factory declines counts for nothing.
+  That covers the delay's `Ok(None)` and a width the artefact was not built for. The rejected
+  plan's banks are dropped on the control plane. `bindable_slot_count` is gone.
+* The two false statements are corrected. The comment above the guard in `banks.rs`, formerly
+  "binds more effect slots", now says the check compares bound banks and why a planned slot
+  proves nothing. The `SessionPoolClasses` doc in `builtins-compiler/src/lib.rs` now says both
+  plans are bound and the move is kept only when the factories bound more banks. It also says
+  the delay never banks and that the decision is one for the whole move set.
+* Error semantics: binding the re-plan is a real `bind_homogeneous_bank` call, so a factory
+  error on it fails the compile, exactly as it would if that plan were the one kept. Launch
+  factories return errors only for malformed requests, which preparation already refuses.
+* The gates are Sol's two phantom sessions, both width-generic, in
+  `crates/graph-compiler/src/lib.rs`:
+  * `a_move_that_binds_no_bank_is_not_kept` asserts that `ch{W}` stays mono and that there are
+    0 effect banks;
+  * `a_move_that_binds_fewer_banks_is_not_kept` asserts that both mono tracks stay mono and that
+    there are 2 effect banks.
+
+  Both also compare the rendered PCM with the bank-free registry, which now includes `miso.delay`
+  so the oracle can prepare these sessions. The delay never banks, so this changes no other test.
+
+### Finding 1 (high): a gate for the rule with the guard in place
+
+`the_rule_not_the_bank_gain_check_picks_the_moved_tracks` is Sol's test, with its assertions
+unchanged. Only its formatting differs: `!local.is_multiple_of(2)` for clippy, and the doc was
+edited. The doc of `a_mono_track_that_fills_a_cohort_is_not_pooled_as_stereo` now says it gates
+the rule only without the check, and names this test and the guard gate.
+
+### Mutations
+
+Each mutation was applied to `banks.rs` (the driver is `<scratchpad>/971/mut2/`) and reverted.
+At 8 lanes the whole `cargo test --locked -p graph-compiler --lib` suite ran (86 tests). At 4
+lanes the scratch-cfg build ran the seven #971 tests plus `the_two_planners_agree_on_every_track_class`
+and `class_pooling_forfeits_the_route_fold_only_on_an_interleaved_session`. The red sets are
+identical at both widths.
+
+| mutation (the guard is kept unless named) | red, at 8 and 4 lanes |
+|---|---|
+| `today`: no move | `the_rule_not_…` (mono pool includes the stranded `ch09`), dogfood gate, odd-track |
+| `brief`: the per-program rule | **`the_rule_not_…`**: mono pool = P only (every T mono track moved; the whole set accepted) |
+| `global`: the prototype | **`the_rule_not_…`**: the set is cancelled, so `ch09` stays mono |
+| `any`: move if any group is partial mono | **`the_rule_not_…`**: cancelled, `ch09` stays mono |
+| `vacuous`: also move tracks in no effect group | **`the_rule_not_…`**: "V stays in the mono pool", with V's post-input bank holding `ch09`..`ch15` |
+| `slotguard`: attempt 1's planned-slot count | **`a_move_that_binds_no_bank_is_not_kept`** (`ch08` moved), **`a_move_that_binds_fewer_banks_is_not_kept`** (both mono tracks moved) |
+| `noguard` | both phantom gates, `the_mono_remainder_stays_when_moving_it_binds_no_more_banks` |
+| `rackonly`: the builtin planner's map is not updated | dogfood gate (`bank_shape` [18,63] vs [12,63]), odd-track (chain shape) |
+| `brief`, `global`, `any`, `vacuous`, each with `noguard` | 5 tests each: the discriminating test plus the no-guard reds, and the 16-track gate under `brief` and `any`, or the dogfood builtins-only arm under `global` and `vacuous` |
+
+The failure messages quoted come from the 8-lane run, with P's stranded track at `ch09`; at 4
+lanes the names shift with `W`.
+
+### Gates
+
+| command | result |
+|---|---|
+| `cargo fmt --all --check` | pass |
+| `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | pass |
+| `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps` | pass |
+| `cargo test --locked -p graph-compiler` | 116 passed (lib 86) |
+| `cargo test --locked -p rack-compiler` | 13 passed |
+| `cargo test --locked -p graph` / `--features test-support` | 110 / 117 passed |
+| `cargo test --locked -p builtins-compiler --features test-support` | 79 passed |
+| `cargo test --locked -p host-core --all-features` | 234 passed |
+| `cargo test --locked -p console-workload` (includes `chain_shape`) | 39 passed |
+| `cargo test --locked -p capi` | 36 passed |
+| `bash scripts/check-graph-policy.sh .` / `bash scripts/check-graph-determinism.sh` | PASS / PASS (100/100) |
+| `bash scripts/check-env-vocabulary.sh .` | ok |
+| `cargo check -p graph-compiler --target wasm32-unknown-unknown` (`+simd128`) | pass |
+| 4 lanes (scratch cfg): the seven #971 tests plus the two class tests | 9 passed |
+
+### Class A, digests
+
+* **Standing rows.** All 17 `native_session_rows()`, 64 blocks each, at `Simd8` and at `Simd4`,
+  base `077fb31e` against head `8ff8ce65`: `bank_shape`, `bank_transposes`, the collapse
+  counters, the route folds, the scatter redirects and the output SHA-256 are identical row for
+  row at both widths.
+* **Sol's randomized probe** (`971v/probe971_final.rs`, run unchanged as a scratch integration
+  test, 400 seeds plus 22 named shapes, rendered at `Scalar`, `Simd4` and `Simd8`, armed and
+  unarmed), base `077fb31e` against head, on the 8-lane and 4-lane builds: **4,220 rows**.
+  * **0 digest differences.**
+  * **0 rows that differ from the scalar oracle.** The only row the probe reports is seed 46,
+    which is silent at every width and so compares nothing, as Sol found.
+  * **0 rows with fewer effect banks at head.** Attempt 1 had 1 such row at 8 lanes and 2 at 4.
+  * Every row with a #971 move gains at least one bank: 20 + 48 moved rows at 8 lanes, 12 + 46 at
+    4 lanes, none without a gain.
+  * The four phantom sessions (`phantom-{4,8}`, `phantom-loss-{4,8}`) now match base in pools and
+    bank counts at every dispatch.
+  * Folds: the contiguous mono-first strip goes from 0 to 81; nothing else changes.
+
+### A/B, dogfood first-listen session (short re-run)
+
+Attempt 1's `ab971` harness was rebuilt on the merged tree, with its compile-time switch disabling
+the move for `folded_today`. The method is the same: one invocation per width under `flock -w
+7200 <scratchpad>/timing.lock` with `taskset -c 31`, one warmup and two rounds of 3000
+observations, built outside the lock. Host load was 7.3 and uncontrolled. Figures are p50 per
+block, in µs.
+
+| strip | width | as_is | folded_today | folded + #971 | #971 vs today |
+|---|---|---:|---:|---:|---:|
+| mixing strip | 8 | 127.9 / 127.9 | 152.3 / 152.4 (+19.1%) | **123.9 / 124.0 (-3.1%)** | -18.6% |
+| mixing strip | 4 | 222.6 / 222.6 | 219.7 / 219.7 (-1.3%) | **210.2 / 210.2 (-5.6%)** | -4.3% |
+| builtins only | 8 | 30.7 / 30.9 | 33.8 / 34.0 | 32.8 / 33.1 (same plan) | noise |
+| builtins only | 4 | 48.5 / 48.4 | 48.5 / 48.4 | 48.7 / 48.6 (same plan) | noise |
+
+The digests are `58a7dc2477b23056` for the strip and `a3bb6a6a84917779` for builtins only, in
+every arm at both widths. The shapes and collapse counters equal attempt 1's: `[12,63]` with 2
+armed chains at 8 lanes, and `[22,123]` with 4 at 4 lanes. The route folds are 81 as is, 0
+today and 0 with #971.
+
+The #971 plan on this session is attempt 1's. The smaller relative gain than attempt 1's
+(-4.3% and -7.1%) comes with the merged batch, where every arm is cheaper: as is was 135.9 µs at
+8 lanes and 238.5 µs at 4, and is now 127.9 and 222.6. The merge brought the EQ elision (#980)
+and the linked limiter pair (#990). I did not isolate which accounts for the difference.
+
+### Compile-time cost
+
+The session is Sol's #962-scale case: 65,537 tracks, each with `simd1: [comp]`. The figures are
+`compile_with_builtins` time in a debug build, one repetition each, under the timing lock, with
+host load 5 to 7.
+
+| case | base | head |
+|---|---:|---:|
+| one stranded track, move refused | 48.9 s | 50.5 s (+3.2%) |
+| one track in 9 stereo, move kept (8191 → 8192 banks) | 48.7 s | 50.6 s (+3.9%) |
+
+Binding the re-plan costs about 2 s more than attempt 1's planned-slot count did (Sol measured
+about 1.5% for attempt 1). The cost is paid only when some mono track strands, and only on the
+control plane.
+
+### Follow-up (low finding 3, not implemented)
+
+The guard keeps or refuses the whole move set at once. A harmful move bundled with a profitable
+one is kept whenever the profitable one gains more banks than the harmful one loses, and when it
+gains less, both are cancelled. Evaluating moves per independent component, meaning tracks whose
+groups share no pool, would recover the profitable part. That is an optimisation, and it belongs
+in its own issue.
