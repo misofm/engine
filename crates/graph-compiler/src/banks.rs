@@ -261,8 +261,14 @@ pub(crate) fn bind_rack_banks_indexed(
         }
         let replan = plan_bank_groups(&levels_in, width)
             .map_err(|_| diag("graph.effect.bank_members", "$.effects"))?;
-        let (replan_banks, replan_slots) = bind(&replan)?;
-        if replan_banks.len() > banks.len() {
+        // Issue #1001: the re-plan is speculative, and the trial above is already bound and
+        // valid, so a factory error while binding the re-plan keeps the unmoved plan and its banks
+        // rather than failing the compile (#95: a cohort a factory cannot bank never costs the
+        // user the compile). The re-plan's banks bound before the error are dropped with it, and
+        // `classes` is still the unmoved map: only the clone was changed.
+        if let Ok((replan_banks, replan_slots)) = bind(&replan)
+            && replan_banks.len() > banks.len()
+        {
             *classes = demoted;
             plan = replan;
             banks = replan_banks;
