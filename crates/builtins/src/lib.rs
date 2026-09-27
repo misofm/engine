@@ -4497,9 +4497,30 @@ std::thread_local! {
 }
 
 #[cfg(any(test, feature = "test-support"))]
+std::thread_local! {
+    static METER_BLOCK_PEAK_MERGES: Cell<u64> = const { Cell::new(0) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub fn test_only_reset_peak_samples() {
     METER_PEAK_SAMPLES.with(|samples| samples.set(0));
+}
+
+/// Reset the count of block peaks merged by [`MeterAccumulator::observe_input_with_block_peak`]'s
+/// fast path (issue #943).
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn test_only_reset_block_peak_merges() {
+    METER_BLOCK_PEAK_MERGES.with(|merges| merges.set(0));
+}
+
+/// Block peaks merged by the fast path since the last reset: one per meter per block that took it.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_block_peak_merges() -> u64 {
+    METER_BLOCK_PEAK_MERGES.with(Cell::get)
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -4596,6 +4617,31 @@ impl MeterAccumulator {
         input: MeterInput<'_>,
         first_sample: u64,
     ) -> Result<(), MeterObservationError> {
+        self.observe_input_with_block_peak(input, first_sample, None)
+    }
+
+    /// [`Self::observe_input`], with this block's `[left, right]` sample peak already computed by
+    /// the bank that produced it (issue #943).
+    ///
+    /// `block_peak` must be the maximum of `+0.0` and every **sanitized** magnitude of this
+    /// block's two channels -- `lane::kernels::builtins::meter_sample_peak_block` seeded with
+    /// `+0.0` -- and nothing else. It is used only when the whole block lies inside the current
+    /// window and the meter selects exactly [`MeterMetricSet::SAMPLE_PEAK`]; then it is merged into
+    /// the window's peak with the same select form the sample loop uses, which on the sanitized
+    /// domain is an exact reassociation of that loop, and the samples are not read. Any other
+    /// block -- one that crosses a window boundary, an empty one, or any other metric selection --
+    /// ignores `block_peak` and takes the sample loop, so every published word is the one
+    /// [`Self::observe_input`] would publish.
+    ///
+    /// # Errors
+    /// [`MeterObservationError::SampleTimeOverflow`] before any state mutation if the
+    /// block would run past `u64::MAX`.
+    pub fn observe_input_with_block_peak(
+        &mut self,
+        input: MeterInput<'_>,
+        first_sample: u64,
+        block_peak: Option<[f32; 2]>,
+    ) -> Result<(), MeterObservationError> {
         let len = match u64::try_from(input.frames)
             .ok()
             .and_then(|len| first_sample.checked_add(len))
@@ -4613,6 +4659,32 @@ impl MeterAccumulator {
             self.start = Some(first_sample);
         }
         let period = self.config.period_frames.get();
+        // Issue #943: the block's peak arrives precomputed and the whole block lies inside this
+        // window, so the window's peak is one select-form merge per channel and the frame count.
+        // Nothing else a `SAMPLE_PEAK` window keeps reads a sample.
+        if let Some([left, right]) = block_peak
+            && self.metrics == MeterMetricSet::SAMPLE_PEAK
+            && len > 0
+            && len <= (period - self.frames) as usize
+        {
+            #[cfg(any(test, feature = "test-support"))]
+            METER_BLOCK_PEAK_MERGES.with(|merges| merges.set(merges.get().saturating_add(1)));
+            self.left.peak = if left > self.left.peak {
+                left
+            } else {
+                self.left.peak
+            };
+            self.right.peak = if right > self.right.peak {
+                right
+            } else {
+                self.right.peak
+            };
+            self.frames = self.frames.saturating_add(len as u32);
+            if self.frames == period {
+                self.emit();
+            }
+            return Ok(());
+        }
         let window = MeterWindow {
             hold_frames: self.config.peak_hold_frames,
             decay: self.decay,
@@ -4734,6 +4806,12 @@ impl MeterAccumulator {
         self.frames = 0;
         self.left = meter_lane();
         self.right = meter_lane();
+    }
+
+    /// The metric selection this meter was prepared with.
+    #[must_use]
+    pub const fn metrics(&self) -> MeterMetricSet {
+        self.metrics
     }
 
     #[must_use]

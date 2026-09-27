@@ -1519,6 +1519,41 @@ pub const fn plan_is_channel_symmetric(plan: &InputChainPlan) -> bool {
     plan.elided[0][0] == plan.elided[1][0] && plan.elided[0][1] == plan.elided[1][1]
 }
 
+/// The sample-peak meter's partial over one resident AoSoA block (issue #943).
+///
+/// Returns, per lane, the maximum of `peak` and every **sanitized magnitude** in the block's
+/// `frames` frames. A meter that seeds `peak` with `L::zero()` gets the block's partial peak and
+/// merges it into its window with the same D8 select form; that merge is an exact reassociation of
+/// the scalar meter's sample-serial `if a > p { a } else { p }` (`builtins::MeterAccumulator`),
+/// because every operand lies in `{+0.0} ∪ [f32::MIN_POSITIVE, f32::MAX]`, where the select form
+/// is commutative and associative, has one bit pattern per value and has `+0.0` as its identity.
+///
+/// The validity test is the meter's own `normal_or_zero` -- a finite, non-subnormal sample is
+/// kept and anything else becomes `+0.0` -- and deliberately **not** [`NONFINITE_LIMIT`], the D7
+/// input rule, which admits subnormals and rejects `[1e30, inf)`. Tested on the magnitude, it is
+/// the two ordered compares below: NaN fails both, so it becomes `+0.0` before the `max` and D8's
+/// asymmetric NaN rule is never exercised.
+///
+/// Frozen operation order, per frame:
+/// 1. `a = |load(frame)|`
+/// 2. `c = select(a >= MIN_POSITIVE & a < INFINITY, a, +0.0)`
+/// 3. `peak = max(c, peak)`, the D8 `select(c > peak, c, peak)`
+///
+/// Branch free per frame: one load, two compares, one mask `and`, one select and one `max`.
+#[inline(always)]
+pub fn meter_sample_peak_block<L: Lane>(words: &[f32], frames: usize, peak: L) -> L {
+    debug_assert!(words.len() >= frames * L::WIDTH);
+    let low = L::splat(f32::MIN_POSITIVE);
+    let high = L::splat(f32::INFINITY);
+    let mut peak = peak;
+    for frame in words[..frames * L::WIDTH].chunks_exact(L::WIDTH) {
+        let a = L::load(frame).abs();
+        let c = L::select(L::mask_and(a.ge(low), a.lt(high)), a, L::zero());
+        peak = L::max(c, peak);
+    }
+    peak
+}
+
 #[cfg(test)]
 std::thread_local! {
     static MIXED_PLAN_SELECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };

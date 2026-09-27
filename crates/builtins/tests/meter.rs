@@ -677,3 +677,267 @@ fn resident_meter_shape_and_time_errors_precede_mutation_and_empty_input_matches
     }
     assert_snapshot_bits(a.consumer.try_pop().unwrap(), b.consumer.try_pop().unwrap());
 }
+
+// Issue #943, gate G2: the block-peak merge publishes the scalar meter's snapshots.
+
+/// One event of a G2 stream, applied to every lane's meter in both arms.
+#[derive(Clone, Copy)]
+enum PeakEvent {
+    /// A block of this many frames at the running sample time.
+    Block(usize),
+    /// Skip this many samples, so the next block is a discontinuity.
+    Skip(u64),
+    /// `restart_observation` with this generation.
+    Restart(u64),
+}
+
+/// Xorshift64\*, so both arms and every host see the same words.
+struct PeakRng(u64);
+
+impl PeakRng {
+    fn next_u64(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.0 = x;
+        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+
+    fn below(&mut self, n: usize) -> usize {
+        (self.next_u64() % n as u64) as usize
+    }
+}
+
+/// NaN, both infinities, both zeros, the extreme subnormals of both signs, `±MIN_POSITIVE`,
+/// `±1.0`, `±f32::MAX` and `±2^k` for `k` in `-34..=5`.
+fn peak_hostile_pool() -> Vec<f32> {
+    let mut pool = vec![
+        f32::NAN,
+        f32::from_bits(0xFFC0_0714),
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        0.0,
+        -0.0,
+        f32::from_bits(0x0000_0001),
+        f32::from_bits(0x8000_0001),
+        f32::from_bits(0x007F_FFFF),
+        f32::from_bits(0x807F_FFFF),
+        f32::MIN_POSITIVE,
+        -f32::MIN_POSITIVE,
+        1.0,
+        -1.0,
+        f32::MAX,
+        -f32::MAX,
+    ];
+    for k in -34_i32..=5 {
+        let power = f32::from_bits(((127 + k) as u32) << 23);
+        pool.push(power);
+        pool.push(-power);
+    }
+    pool
+}
+
+/// Fills one strided 8-lane plane: hostile words from the pool, or a triangle tone whose
+/// amplitude differs per lane.
+fn peak_fill(rng: &mut PeakRng, pool: &[f32], plane: &mut [f32], hostile: bool, phase: usize) {
+    for (index, word) in plane.iter_mut().enumerate() {
+        *word = if hostile {
+            pool[rng.below(pool.len())]
+        } else {
+            let lane = index % 8;
+            let step = ((index / 8 + phase) * (3 + lane)) % 256;
+            let triangle = (step as f32 / 64.0 - 2.0).abs() - 1.0;
+            (0.25 + 0.0625 * lane as f32) * triangle
+        };
+    }
+}
+
+fn peak_meters(metrics: MeterMetricSet, period: u32) -> Vec<PreparedMeter> {
+    (0..8_u64)
+        .map(|lane| {
+            MeterAccumulator::prepare_selected(
+                MeterHandle(NonZeroU64::new(lane + 1).expect("constant")),
+                MeterConfig {
+                    period_frames: NonZeroU32::new(period).expect("period"),
+                    peak_hold_frames: 0,
+                    peak_decay_db_per_second: 0.0,
+                    queue_capacity: NonZeroUsize::new(256).expect("constant"),
+                    reset_generation: 943,
+                },
+                48_000,
+                metrics,
+            )
+            .expect("meter")
+        })
+        .collect()
+}
+
+/// Runs one stream through two arms of eight meters -- arm A through `observe_input`, arm B
+/// through `observe_input_with_block_peak` with the lane kernel's seeded-zero block peaks -- and
+/// asserts every published snapshot is the same on every field. Returns the snapshots compared.
+fn peak_differential(
+    metrics: MeterMetricSet,
+    period: u32,
+    events: &[PeakEvent],
+    hostile: bool,
+    seed: u64,
+) -> usize {
+    use lane::kernels::builtins::meter_sample_peak_block;
+    use lane::{Lane, Simd8};
+    let pool = peak_hostile_pool();
+    let mut rng = PeakRng(seed);
+    let mut scalar = peak_meters(metrics, period);
+    let mut banked = peak_meters(metrics, period);
+    let mut time = 1_000_u64;
+    let mut compared = 0;
+    for (index, event) in events.iter().enumerate() {
+        match *event {
+            PeakEvent::Block(frames) => {
+                let mut left = vec![0.0_f32; frames * 8];
+                let mut right = vec![0.0_f32; frames * 8];
+                peak_fill(&mut rng, &pool, &mut left, hostile, index * 5);
+                peak_fill(&mut rng, &pool, &mut right, hostile, index * 11 + 3);
+                let mut peaks = [[0.0_f32; 8]; 2];
+                meter_sample_peak_block::<Simd8>(&left, frames, Simd8::zero()).store(&mut peaks[0]);
+                meter_sample_peak_block::<Simd8>(&right, frames, Simd8::zero())
+                    .store(&mut peaks[1]);
+                for lane in 0..8 {
+                    let input = MeterInput::strided(&left, &right, frames, 8, lane).expect("view");
+                    let a = scalar[lane].accumulator.observe_input(input, time);
+                    let b = banked[lane].accumulator.observe_input_with_block_peak(
+                        input,
+                        time,
+                        Some([peaks[0][lane], peaks[1][lane]]),
+                    );
+                    assert_eq!(a, b);
+                }
+                time += frames as u64;
+            }
+            PeakEvent::Skip(samples) => time += samples,
+            PeakEvent::Restart(generation) => {
+                for lane in 0..8 {
+                    scalar[lane].accumulator.restart_observation(generation);
+                    banked[lane].accumulator.restart_observation(generation);
+                }
+            }
+        }
+        for lane in 0..8 {
+            loop {
+                match (
+                    scalar[lane].consumer.try_pop(),
+                    banked[lane].consumer.try_pop(),
+                ) {
+                    (Ok(a), Ok(b)) => {
+                        assert_snapshot_bits(b, a);
+                        compared += 1;
+                    }
+                    (Err(_), Err(_)) => break,
+                    _ => panic!(
+                        "metrics {} period {period} event {index} lane {lane}: publication \
+                         count differs",
+                        metrics.bits()
+                    ),
+                }
+            }
+        }
+    }
+    compared
+}
+
+/// The streams G2 runs: 64 plain 128-frame blocks, then the same with a skipped block, a
+/// mid-window restart, a zero-frame block, and all three together.
+fn peak_streams() -> Vec<(&'static str, Vec<PeakEvent>)> {
+    let plain: Vec<PeakEvent> = (0..64).map(|_| PeakEvent::Block(128)).collect();
+    let with = |at: usize, event: PeakEvent| {
+        let mut stream = plain.clone();
+        stream.insert(at, event);
+        stream
+    };
+    let mut all = plain.clone();
+    all.insert(50, PeakEvent::Block(0));
+    all.insert(33, PeakEvent::Restart(7));
+    all.insert(20, PeakEvent::Skip(77));
+    vec![
+        ("plain", plain.clone()),
+        ("skip", with(20, PeakEvent::Skip(77))),
+        ("restart", with(33, PeakEvent::Restart(7))),
+        ("zero-frame", with(40, PeakEvent::Block(0))),
+        ("all", all),
+    ]
+}
+
+#[cfg(feature = "test-support")]
+fn peak_merges() -> Option<u64> {
+    Some(builtins::test_only_block_peak_merges())
+}
+
+#[cfg(not(feature = "test-support"))]
+fn peak_merges() -> Option<u64> {
+    None
+}
+
+#[cfg(feature = "test-support")]
+fn reset_peak_merges() {
+    builtins::test_only_reset_block_peak_merges();
+}
+
+#[cfg(not(feature = "test-support"))]
+fn reset_peak_merges() {}
+
+/// Gate G2. Every snapshot of the merge arm equals the scalar arm's, `sample_peak` by bits, at
+/// periods 512, 300, 128 and 64 on hostile and tone input, through discontinuities, a restart and
+/// a zero-frame block. A selection other than exactly `SAMPLE_PEAK` declines the merge.
+///
+/// Built with `--features test-support`, it also pins the merge count: every block at period 512,
+/// none at 64 (each 128-frame block crosses a window boundary), some at 300.
+#[test]
+fn a_block_peak_merge_publishes_the_scalar_meters_snapshots() {
+    let peak = MeterMetricSet::SAMPLE_PEAK;
+    let peak_and_counts =
+        MeterMetricSet::from_bits_retain(peak.bits() | MeterMetricSet::COUNTS.bits());
+    let mut seed = 0x0943_5A3B_1E00_0001_u64;
+    let mut total = 0;
+    for period in [512_u32, 300, 128, 64] {
+        for hostile in [true, false] {
+            for (name, stream) in peak_streams() {
+                seed = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
+                reset_peak_merges();
+                let compared = peak_differential(peak, period, &stream, hostile, seed);
+                let merges = peak_merges();
+                total += compared;
+                assert!(
+                    compared > 0,
+                    "period {period} {name}: windows were published"
+                );
+                if name == "plain" {
+                    eprintln!(
+                        "G2 period {period} hostile {hostile}: {compared} snapshots, merges {merges:?}"
+                    );
+                    let expected_windows = 64 * 128 / period as usize * 8;
+                    assert_eq!(compared, expected_windows, "period {period}");
+                    if let Some(merges) = merges {
+                        match period {
+                            512 | 128 => assert_eq!(merges, 8 * 64, "period {period}"),
+                            64 => assert_eq!(merges, 0, "period {period}"),
+                            _ => assert!(
+                                merges > 0 && merges < 8 * 64,
+                                "period {period}: {merges} merges"
+                            ),
+                        }
+                    }
+                }
+                for metrics in [MeterMetricSet::ALL, peak_and_counts] {
+                    reset_peak_merges();
+                    let declined = peak_differential(metrics, period, &stream, hostile, seed);
+                    assert!(declined > 0);
+                    total += declined;
+                    if let Some(merges) = peak_merges() {
+                        assert_eq!(merges, 0, "metrics {} never merge", metrics.bits());
+                    }
+                }
+            }
+        }
+    }
+    eprintln!("G2: {total} snapshots bit-identical across both arms");
+}

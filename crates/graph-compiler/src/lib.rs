@@ -328,13 +328,16 @@ mod tests {
     /// `chains`, and the assertions below are written that way -- slots against this constant,
     /// chains against the cohort count.
     const STRIP_SLOTS_PER_COHORT: u64 = BANKABLE_TRACK_STAGES + 3;
-    use builtins::{BuiltinLaneSelector, MeterConfig, MeterHandle, MeterSnapshot, MeterTap};
+    use builtins::{
+        BuiltinLaneSelector, MeterConfig, MeterHandle, MeterMetricSet, MeterSnapshot, MeterTap,
+    };
     use builtins_compiler::{
         BuiltinCompileCaps, MeterRequest, PreparedBuiltinsCorruption,
-        PreparedBuiltinsCorruptionCase, TrackControlRequest, TrackFaderRecord,
-        prepare_session_builtins, prepare_session_builtins_between_render_calls,
-        prepare_session_builtins_with_console, test_only_fader_matrix_witness,
-        test_only_reset_fader_matrix_witness,
+        PreparedBuiltinsCorruptionCase, SelectedMeterRequest, TrackControlRequest,
+        TrackFaderRecord, prepare_selected_session_builtins_between_render_calls,
+        prepare_selected_session_builtins_with_console, prepare_session_builtins,
+        prepare_session_builtins_between_render_calls, prepare_session_builtins_with_console,
+        test_only_fader_matrix_witness, test_only_reset_fader_matrix_witness,
     };
     use conformance::DualAccumulatorDelayFactory;
     use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
@@ -354,8 +357,9 @@ mod tests {
         audit, bounded_spsc,
     };
     use graph::{
-        GraphBindingBlock, GraphNodeBinding, GraphNodeObserverBinding, GraphObservationBlock,
-        GraphRuntimeBindings, GraphRuntimeObserver, GraphRuntimeProcessor,
+        GraphBindingBlock, GraphNodeBinding, GraphNodeObserverBinding,
+        GraphObservationActivationConfig, GraphObservationBlock, GraphRuntimeBindings,
+        GraphRuntimeObserver, GraphRuntimeProcessor,
     };
     use parametric_eq::{PARAMETRIC_EQ_DESCRIPTOR, ParametricEqFactory};
     use session::{
@@ -5168,6 +5172,78 @@ mod tests {
         }
     }
 
+    /// Issue #943 gate G4: the banked sample-peak pass is realtime-clean. The browser's shape --
+    /// a `SAMPLE_PEAK` meter on every post-matrix boundary, prepared between render calls, at the
+    /// web period of 12 blocks -- renders 1,000 blocks under the allocation audit with zero events,
+    /// one pass per cohort per block and one merge per meter per block.
+    #[test]
+    fn the_banked_sample_peak_pass_renders_without_an_audited_event() {
+        const BLOCKS: u64 = 1_000;
+        let Some(width) = BankWidth::for_backend(host_dispatch()) else {
+            return;
+        };
+        let cohorts = 64 / width.lanes() as u64;
+        let intended = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
+            .expect("intended fixture");
+        let registry = launch_native_effect_registry().expect("launch registry");
+        let artifact = compile_console_model_with_selected_meters(
+            &intended,
+            9_450,
+            &post_matrix_meter_requests(&intended, MeterMetricSet::SAMPLE_PEAK, 12 * 128),
+            true,
+            &registry,
+        );
+        let envelope = artifact.envelope();
+        let frames = envelope.quantum.0 as usize;
+        assert_eq!(frames, 128, "the web period is twelve 128-frame blocks");
+        let nodes = artifact
+            .external_binding_nodes()
+            .map(|node| GraphNodeBinding::new(node.clone(), console_track_input_binding(node)))
+            .collect();
+        let bound = artifact
+            .into_bound(GraphRuntimeBindings {
+                envelope,
+                nodes,
+                observers: Vec::new(),
+            })
+            .unwrap_or_else(|failure| panic!("bind: {}", failure.code));
+        let mut plan = bound.plan;
+        let mut meter_consumers = bound.meter_consumers;
+        let mut pcm = vec![0.0_f32; frames * 2];
+        let mut windows = 0_u64;
+        graph::test_only_set_bank_sample_peak_declined(false);
+        builtins::test_only_reset_block_peak_merges();
+        audit::warm_up();
+        audit::reset();
+        for block in 0..BLOCKS {
+            plan.render(
+                RenderIo {
+                    input: None,
+                    output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames).expect("output"),
+                },
+                RenderTime {
+                    absolute_sample: block * frames as u64,
+                },
+            )
+            .expect("render");
+            for stream in &mut meter_consumers {
+                while stream.consumer.try_pop().is_ok() {
+                    windows += 1;
+                }
+            }
+        }
+        assert!(!audit::is_render_scope_active());
+        let snapshot = audit::snapshot();
+        assert_eq!(snapshot.total(), 0, "{snapshot:?}");
+        assert_eq!(graph::test_only_bank_sample_peak_passes(), BLOCKS * cohorts);
+        assert_eq!(builtins::test_only_block_peak_merges(), BLOCKS * 64);
+        assert_eq!(
+            windows,
+            64 * (BLOCKS / 12),
+            "every whole window was published"
+        );
+    }
+
     /// Where a [`BitRecorder`] writes: one `(left bits, right bits)` pair per rendered frame.
     type BitSink = Arc<std::sync::Mutex<Vec<(u32, u32)>>>;
 
@@ -8904,6 +8980,226 @@ mod tests {
         );
     }
 
+    /// Issue #943 gate G3: a `SAMPLE_PEAK` meter on every track's post-matrix boundary makes each
+    /// cohort run one lane pass per block, every meter merges its lane's block peak instead of
+    /// reading its samples, and nothing observable moves.
+    ///
+    /// Both deliveries a host prepares selected meters with -- the concurrent console and
+    /// `between_render_calls`, the browser's -- at a period the 128-frame block divides (512, so
+    /// every block merges) and one it does not (300, so a block that crosses a window takes the
+    /// sample loop). Each runs twice: with the pass, and with the pass declined, which is the scalar
+    /// meter the pass must reproduce. The PCM, every meter frame by bits, and the plan's shape --
+    /// chains, slots, transposes, route folds and scatter redirects -- are the declined arm's.
+    ///
+    /// The pass count is the only witness that the pass ran at all: the declined arm renders the
+    /// same bits by construction. Two controls hold it at zero: ALL-metric meters, which cannot use
+    /// a peak partial and must not opt in (I5), and a plan bound with an observation activation,
+    /// whose observers -- permanent ones included -- are dispatched by the controlled path the pass
+    /// does not bank (amendment 3).
+    #[test]
+    fn post_matrix_peak_meters_merge_one_bank_pass_per_cohort_and_publish_the_scalar_frames() {
+        const BLOCKS: u64 = 24;
+        let Some(width) = BankWidth::for_backend(host_dispatch()) else {
+            return;
+        };
+        let cohorts = 64 / width.lanes() as u64;
+        let intended = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
+            .expect("intended fixture");
+        let registry = launch_native_effect_registry().expect("launch registry");
+        let mut plan_id = 9_430;
+        let mut declined_web_frames = None;
+        for between_render_calls in [false, true] {
+            for period in [512_u32, 300] {
+                let meters =
+                    post_matrix_meter_requests(&intended, MeterMetricSet::SAMPLE_PEAK, period);
+                let mut arms = Vec::new();
+                for declined in [false, true] {
+                    plan_id += 1;
+                    let artifact = compile_console_model_with_selected_meters(
+                        &intended,
+                        plan_id,
+                        &meters,
+                        between_render_calls,
+                        &registry,
+                    );
+                    graph::test_only_set_bank_sample_peak_declined(declined);
+                    builtins::test_only_reset_block_peak_merges();
+                    let rendered = render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
+                    let passes = graph::test_only_bank_sample_peak_passes();
+                    let merges = builtins::test_only_block_peak_merges();
+                    graph::test_only_set_bank_sample_peak_declined(false);
+                    arms.push((rendered, passes, merges));
+                }
+                let context =
+                    format!("between_render_calls {between_render_calls} period {period}");
+                let (
+                    (banked, banked_passes, banked_merges),
+                    (scalar, scalar_passes, scalar_merges),
+                ) = (&arms[0], &arms[1]);
+                eprintln!(
+                    "G3 {context}: [chains, slots] [{}, {}], transposes {}, folds {}, redirects {}, \
+                     frames {}, passes {banked_passes}/{scalar_passes}, merges \
+                     {banked_merges}/{scalar_merges}",
+                    banked.2,
+                    banked.3,
+                    banked.1,
+                    banked.6,
+                    banked.5,
+                    banked.4.len()
+                );
+                assert_pcm_bits_equal(&banked.0, &scalar.0, &context);
+                assert_eq!(
+                    (banked.1, banked.2, banked.3, banked.5, banked.6),
+                    (scalar.1, scalar.2, scalar.3, scalar.5, scalar.6),
+                    "{context}: transposes, chains, slots, redirects and folds"
+                );
+                assert_eq!(banked.6, 64, "{context}: every route stays folded");
+                assert_eq!(banked.4.len(), scalar.4.len(), "{context}: frame count");
+                assert_eq!(
+                    banked.4.len() as u64,
+                    64 * (BLOCKS * 128 / u64::from(period)),
+                    "{context}: every meter publishes every whole window"
+                );
+                for (banked_frame, scalar_frame) in banked.4.iter().zip(scalar.4.iter()) {
+                    assert_eq!(
+                        meter_frame_bits(banked_frame),
+                        meter_frame_bits(scalar_frame),
+                        "{context}: meter {} window {}",
+                        scalar_frame.handle.0,
+                        scalar_frame.window_sequence
+                    );
+                }
+                assert!(
+                    banked.4.iter().any(|frame| frame.left.sample_peak != 0.0),
+                    "{context}: the metered windows carry signal"
+                );
+                assert!(
+                    banked.4.iter().any(|frame| {
+                        frame.left.sample_peak.to_bits() != frame.right.sample_peak.to_bits()
+                    }),
+                    "{context}: some window's left and right peaks differ"
+                );
+                assert_eq!(
+                    *banked_passes,
+                    BLOCKS * cohorts,
+                    "{context}: one pass per cohort"
+                );
+                assert_eq!(*scalar_passes, 0, "{context}: the declined arm runs none");
+                assert_eq!(
+                    *scalar_merges, 0,
+                    "{context}: the declined arm merges nothing"
+                );
+                if period == 512 {
+                    assert_eq!(*banked_merges, 64 * BLOCKS, "{context}: every block merges");
+                } else {
+                    assert!(
+                        *banked_merges > 0 && *banked_merges < 64 * BLOCKS,
+                        "{context}: a window-crossing block takes the sample loop ({banked_merges})"
+                    );
+                }
+                if between_render_calls && period == 512 {
+                    declined_web_frames = Some(arms.swap_remove(1).0);
+                }
+            }
+        }
+
+        // Control 1: ALL-metric meters never opt in, so no bank runs the pass.
+        let all_meters: Vec<MeterRequest> =
+            post_matrix_meter_requests(&intended, MeterMetricSet::ALL, 512)
+                .into_iter()
+                .map(|selected| selected.request)
+                .collect();
+        let artifact =
+            compile_console_model_with_builtins(&intended, 9_440, &all_meters, &registry);
+        graph::test_only_set_bank_sample_peak_declined(false);
+        builtins::test_only_reset_block_peak_merges();
+        let (_, _, _, _, all_frames, _, all_folds) =
+            render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
+        assert_eq!(
+            graph::test_only_bank_sample_peak_passes(),
+            0,
+            "ALL meters must not make a bank run the pass"
+        );
+        assert_eq!(builtins::test_only_block_peak_merges(), 0);
+        assert_eq!(all_folds, 64);
+        assert!(all_frames.iter().any(|frame| frame.left.energy != 0.0));
+
+        // Control 2: the same web-shape plan bound with an observation activation and one active
+        // controlled observer. Every observer, the permanent meters included, now runs on the
+        // controlled path: no pass, no merge, and the declined arm's PCM and frames.
+        struct Count(Arc<AtomicU64>);
+        impl GraphRuntimeObserver for Count {
+            fn observe(
+                &mut self,
+                _block: GraphObservationBlock<'_>,
+            ) -> Result<(), engine::realtime::RenderError> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+        }
+        let calls = Arc::new(AtomicU64::new(0));
+        let controlled_handle = 0x0943_0000_u64;
+        let artifact = compile_console_model_with_selected_meters(
+            &intended,
+            9_441,
+            &post_matrix_meter_requests(&intended, MeterMetricSet::SAMPLE_PEAK, 512),
+            true,
+            &registry,
+        );
+        let envelope = artifact.envelope();
+        let frames = envelope.quantum.0 as usize;
+        let nodes = artifact
+            .external_binding_nodes()
+            .map(|node| GraphNodeBinding::new(node.clone(), console_track_input_binding(node)))
+            .collect();
+        let (bound, mut controller) = artifact
+            .into_bound_with_observation_activation(
+                GraphRuntimeBindings {
+                    envelope,
+                    nodes,
+                    observers: vec![GraphNodeObserverBinding::controlled(
+                        GraphNodeId::TrackStage {
+                            track_id: StableGraphId::parse("ch00").expect("track node id"),
+                            stage: TrackStage::PostMatrix,
+                        },
+                        controlled_handle,
+                        Box::new(Count(Arc::clone(&calls))),
+                    )],
+                },
+                GraphObservationActivationConfig {
+                    maximum_active_observers: 1,
+                    maximum_retained_bytes: u64::MAX,
+                },
+            )
+            .unwrap_or_else(|failure| panic!("activation bind: {}", failure.code));
+        controller
+            .replace(&[controlled_handle])
+            .unwrap_or_else(|error| panic!("controlled activation: {error:?}"));
+        graph::test_only_set_bank_sample_peak_declined(false);
+        builtins::test_only_reset_block_peak_merges();
+        let mixed = render_bound_console_blocks(bound, frames, BLOCKS);
+        assert_eq!(
+            graph::test_only_bank_sample_peak_passes(),
+            0,
+            "a plan bound with an activation runs no pass"
+        );
+        assert_eq!(builtins::test_only_block_peak_merges(), 0);
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            BLOCKS,
+            "the controlled row is active"
+        );
+        let declined = declined_web_frames.expect("the web-shape declined arm ran");
+        assert_pcm_bits_equal(&mixed.0, &declined.0, "mixed permanent and controlled plan");
+        assert_eq!(mixed.4.len(), declined.4.len());
+        for (mixed_frame, declined_frame) in mixed.4.iter().zip(declined.4.iter()) {
+            assert_eq!(
+                meter_frame_bits(mixed_frame),
+                meter_frame_bits(declined_frame)
+            );
+        }
+    }
+
     /// Route ids ordered against the cohorts decline the fold: the association proof, at session
     /// level.
     ///
@@ -9524,6 +9820,134 @@ mod tests {
         .unwrap_or_else(|_| panic!("production console graph"))
     }
 
+    /// [`compile_console_model_with_builtins`] for metric-selected meters (issue #943), through the
+    /// two selected entry points a host prepares them with: the concurrent console, or
+    /// `between_render_calls`, which is what host-core calls for the browser.
+    fn compile_console_model_with_selected_meters(
+        model: &session::SessionModel,
+        plan_id: u64,
+        meters: &[SelectedMeterRequest],
+        between_render_calls: bool,
+        registry: &NativeEffectRegistry,
+    ) -> PreparedGraphBuiltinsArtifact {
+        let session = compile_session(
+            model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("compiled console model");
+        let controls: Vec<TrackControlRequest> = model
+            .tracks
+            .iter()
+            .map(|track| TrackControlRequest {
+                track_id: track.id.as_str().to_owned(),
+                queue_capacity: NonZeroUsize::new(16).expect("constant"),
+            })
+            .collect();
+        let caps = BuiltinCompileCaps {
+            maximum_total_state_bytes: u64::MAX,
+            maximum_total_retained_payload_bytes: u64::MAX,
+            maximum_total_meter_items: u64::MAX,
+            maximum_total_meter_bytes: u64::MAX,
+            maximum_single_allocation_bytes: u64::MAX,
+            maximum_meter_streams: u64::MAX,
+            maximum_period_frames: u32::MAX,
+            maximum_peak_hold_frames: u32::MAX,
+            maximum_smoothing_samples: u32::MAX,
+        };
+        let builtins = if between_render_calls {
+            prepare_selected_session_builtins_between_render_calls(
+                &session, meters, &controls, caps,
+            )
+        } else {
+            prepare_selected_session_builtins_with_console(&session, meters, &controls, caps)
+        }
+        .expect("prepared selected console builtins");
+        GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            dispatch: host_dispatch(),
+            plan_id,
+            effects: prepare_native_session_effects(
+                &session,
+                registry,
+                EffectCompileCaps {
+                    maximum_total_state_bytes: 1 << 22,
+                    maximum_scratch_bytes: 1 << 20,
+                    maximum_automation_spans_per_block: 32,
+                },
+            )
+            .expect("prepared console effects"),
+            builtins,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|_| panic!("production selected-meter console graph"))
+    }
+
+    /// One `PostMatrix` meter per track of `model`, selecting `metrics`, with no ballistics:
+    /// the shape the browser binds, at `period` frames.
+    fn post_matrix_meter_requests(
+        model: &session::SessionModel,
+        metrics: MeterMetricSet,
+        period: u32,
+    ) -> Vec<SelectedMeterRequest> {
+        model
+            .tracks
+            .iter()
+            .enumerate()
+            .map(|(index, track)| SelectedMeterRequest {
+                request: MeterRequest {
+                    handle: MeterHandle(NonZeroU64::new(index as u64 + 1).expect("handle")),
+                    track_id: track.id.as_str().to_owned(),
+                    tap: MeterTap::PostMatrix,
+                    config: MeterConfig {
+                        period_frames: NonZeroU32::new(period).expect("period"),
+                        peak_hold_frames: 0,
+                        peak_decay_db_per_second: 0.0,
+                        queue_capacity: NonZeroUsize::new(64).expect("constant"),
+                        reset_generation: 0,
+                    },
+                },
+                metrics,
+            })
+            .collect()
+    }
+
+    /// Every field of one meter frame as bits, so a float compares by its bits rather than `==`.
+    fn meter_frame_bits(frame: &MeterSnapshot) -> Vec<u64> {
+        let lane = |lane: &builtins::MeterLaneSnapshot| {
+            [
+                u64::from(lane.sample_peak.to_bits()),
+                lane.rms.to_bits(),
+                lane.energy.to_bits(),
+                u64::from(lane.held_peak.to_bits()),
+                lane.clipped_samples,
+                lane.sanitized_samples,
+            ]
+        };
+        let mut bits = vec![
+            frame.handle.0.get(),
+            u64::from(frame.present_metrics.bits()),
+            frame.reset_generation,
+            frame.observation_generation,
+            frame.window_sequence,
+            frame.start_sample,
+            frame.end_sample,
+            u64::from(frame.frames),
+            frame.cumulative_clipped_samples,
+            frame.cumulative_sanitized_samples,
+            frame.cumulative_discontinuities,
+            frame.cumulative_dropped_snapshots,
+        ];
+        bits.extend(lane(&frame.left));
+        bits.extend(lane(&frame.right));
+        bits
+    }
+
     /// Compile a live-control console model through the production scalar path. This fixture is
     /// intentionally separate from the broad host-dispatch helper above: the split-pair seam is
     /// eligible only for between-render-call controls, and scalar dispatch must disable every
@@ -9633,6 +10057,15 @@ mod tests {
                 observers,
             })
             .unwrap_or_else(|failure| panic!("production console bind: {}", failure.code));
+        render_bound_console_blocks(bound, frames, blocks)
+    }
+
+    /// [`render_console_builtins_blocks`] for a plan the caller bound.
+    fn render_bound_console_blocks(
+        bound: PreparedGraphBuiltinsBound,
+        frames: usize,
+        blocks: u64,
+    ) -> (Vec<Vec<f32>>, u64, u64, u64, Vec<MeterSnapshot>, u64, u64) {
         let mut plan = bound.plan;
         let mut meter_consumers = bound.meter_consumers;
         let mut meter_frames: Vec<MeterSnapshot> = Vec::new();
