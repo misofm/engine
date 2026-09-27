@@ -310,3 +310,376 @@ Gates:
 * The prototype's clean build grew by 53,316 bytes. That includes C1, which `mode & 3` routes onto
   `Silent` and `Sidechain` blocks. The implementation must carry neither C1 nor that routing.
 * Record the size under `check-web-boot-budget.mjs`.
+
+## Attempt 1 evidence
+
+Implementer attempt 1 (Terra), 2026-09-27, branch `codex/1006-compressor-ramping-prefix` (the #995
+branch with the batch head merged in; the batch head `ce2f1534`, with #995 and its verdict, is
+merged as `b0d8569f`). Code commit `3a293404`; `ef585bf5` is the separate doc-only correction of
+#995's `#[cold]` comment (Sol's #995 finding). The bit-identity oracle is the batch head's kernel
+(`081fdc6c` and `ce2f1534` carry the same compressor, host and effect runtime), on every input.
+Host: AMD EPYC 7313P (Zen 3), rustc 1.97.1, Node 22.23.2 (V8 12.4, `--no-liftoff`). Every timed
+run held `timing.lock`, was pinned with `taskset -c 31`, and names its load; the longest hold was
+1m30s. `scripts/run-console-benchmark.sh` was not run.
+
+### The change (class A)
+
+`crates/compressor/src/kernel.rs`; the scenario in `crates/compressor/tests/`; `MUTATIONS.md`.
+
+* **Contracts 1 and 2.** `RampVec` (`gather`, `scatter`, `advance_where`: `next_value` as selects,
+  with the `remaining == 0` hold) and `ChannelRamps` (`gather` of every ramp, rate ramp and word
+  once per block; `advance_curve`; `advance_output`, the rate ramps gated by their parameter
+  ramp's was-moving mask; `curve`; `coef`; `wet`). `design_curve` is `GainComputerCoef::new` per
+  lane with `knee_coefficients`' branch as `W > 0 && 1/(2W) < +inf`. The redesign keeps
+  `design_lane`'s `changed` rule: it writes the four curve words only on lanes where a curve
+  parameter moved.
+* **Contracts 3 and 4.** `ramping_main` (dual) and `ramping_main_mono` (collapsed) replace
+  `frames_loop::<L, true>` and `frames_loop_mono::<L, true>` for `Detector::Main`: the settled
+  body's `SETTLED_CHUNK` two passes, pass 1 advancing threshold, ratio and knee and computing the
+  targets, pass 2 advancing attack, release, makeup and mix and running the recurrence and the
+  output. The DualMono arm is #984's; the wet arm (#982) is taken only when the block is
+  unbypassed, no mix ramp is open on either channel and every lane's mix is `1`. Four
+  `(DUAL_MONO, WET)` instantiations each, `#[inline(always)]` into the roster functions.
+* **Contract 5.** `curve_target` takes `&GainComputerCoef` (every caller passes `&coef.curve`);
+  `Coef::new` builds the masks for `Coef::load` and for the prefix, so there is one mask rule.
+* **Contract 6.** `Silent` and `Sidechain` keep `frames_loop::<L, true>` (and the collapsed body's
+  non-`Main` detectors `frames_loop_mono::<L, true>`) unchanged; there is no C1 and no C1 routing.
+  `advance_ramps` is `#[inline(never)]`, where it already was in both the wasm and the native
+  builds, so that it cannot land in the collapsed roster function.
+* **One measured deviation: the scalar instance's prefix is out of line** (`ramping_main_scalar`,
+  taken when `L::WIDTH == 1`). With the prefix inlined, `process_block::<f32>` grew too large to
+  inline into the scalar instance's `process`, and natively its settled loops came out with more
+  instructions and stack traffic: interleaved A/B, 64 unbanked settled instances (native `Simd4`
+  dispatch), six alternations at load 20-24: base 126.54-127.30 us, inlined 127.77-128.18
+  in five alternations and 139.54 in one disturbed one (+1.0 %), out of line 126.30-126.83
+  (flat). Out of line, every settled
+  loop of the scalar instance is the batch head's in instruction and stack-access counts but one
+  (one instruction longer). Banks keep the prefix inline, so the roster carries it.
+
+### Timing (us per 64-track block; isolate = row minus builtins-only in the same round)
+
+**V8, the shipped `host_web.wasm` render export**, through the live console's command queue
+(`channel = 2` Points each block), the diagnosis harness `web_auto.mjs` (paths fixed, subjects
+`console_comp` and `mono_attack` added), `ROUNDS=6 BLOCKS=500`, arms interleaved. Δ is the
+isolate's change from `settled` in the same module.
+
+| session, control | arm | base | #1006 |
+|---|---|---:|---:|
+| stereo console, threshold (load 10.9-11.1) | settled isolate | 193.15 | 192.30 |
+| | one lane, a Point per block: Δ | +5.45 | **+1.78** |
+| | 8 of 64: Δ | +43.40 | **+13.54** |
+| | all 64: Δ | +142.79 | **+26.61** |
+| mono console, threshold, P1 in both builds, banks collapsed (load 9.8-10.2) | untouched / settled isolate | 98.32 / 98.64 | 97.46 / 97.79 |
+| | one lane: Δ | +4.03 | **+1.27** |
+| | 8 of 64: Δ | +32.96 | **+7.63** |
+| | all 64: Δ | +96.11 | **+18.39** |
+| mono console, attack, P1, collapsed | settled isolate | 98.00 | 97.23 |
+| | one lane / 8 of 64 / all 64: Δ | +4.53 / +30.84 / +78.95 | **+1.33 / +7.74 / +19.79** |
+| mono console as shipped (no P1: the settle writes send every bank dual) | settled isolate | 194.96 | 196.90 |
+| | one lane / 8 of 64 / all 64: Δ | +6.42 / +43.74 / +143.71 | **-0.90 / +9.82 / +24.95** |
+| compressor only, threshold | settled isolate | 61.46 | 61.42 |
+| | one lane / 8 of 64 / all 64: Δ | +6.03 / +44.40 / +145.35 | **+2.09 / +13.04 / +27.53** |
+| compressor only, attack | settled isolate | 61.79 | 60.83 |
+| | one lane / 8 of 64 / all 64: Δ | +5.82 / +39.15 / +109.13 | **+2.64 / +13.68 / +29.34** |
+
+P1 (#1004) has not landed. The collapsed rows use the verification's spans-only P1 prototype,
+compiled on, in **both** scratch builds; nothing of it is committed. Without P1 the product's mono
+console runs dual banks once any compressor knob is touched, which is the "as shipped" row.
+
+**No regression on the other compressor shapes under V8.** Settled isolates above are within
+-1.3 to +1.0 %. The #995 sessions through the same artifact (9 x 1,000 blocks, two reps, load
+5.1-6.5), rows base / #1006: 64 sidechained unbanked 188.75, 189.24 / 187.61, 190.41; 64 settled
+banked 109.08, 110.35 / 109.36, 110.68; collapsed mono 63.61, 64.12 / 63.49, 63.63; 3 unbanked
+main-detector 11.05, 11.11 / 11.12, 11.23; 3 sidechained 11.42, 11.34 / 11.36, 11.41. The V8
+listings of the settled loops are unchanged (below).
+
+**Native**, the diagnosis's console harness (`automation_diag`, production control queue; six
+interleaved rounds of 600 blocks; two reps; load 4.7-5.4). Isolates, rep 1 / rep 2:
+
+| shape | arm | base | #1006 |
+|---|---|---:|---:|
+| `Simd8`, compressor only, threshold | settled | 24.14 / 24.98 | 24.51 / 23.89 |
+| | one lane / 8 of 64 / all 64 | 29.82 / 65.05 / 103.57 | **26.31 / 34.08 / 36.10** |
+| `Simd8`, stereo console, threshold | settled | 81.34 / 81.80 | 81.58 / 82.01 |
+| | one lane / 8 of 64 / all 64 | 86.79 / 121.31 / 160.44 | **83.32 / 90.24 / 92.95** |
+| `Simd8`, mono console, P1, collapsed | settled | 43.55 / 43.66 | 43.85 / 43.56 |
+| | one lane / 8 of 64 / all 64 | 47.04 / 69.79 / 90.09 | **44.33 / 50.32 / 53.25** |
+| `Simd4` banks (the diagnosis's four-lane bind), threshold | settled | 46.71 / 47.41 | 47.45 / 47.33 |
+| | one lane / 8 of 64 / all 64 | 50.87 / 77.07 / 140.98 | **48.29 / 55.53 / 64.92** |
+| `Simd4` dispatch as shipped (every compressor an unbanked `f32` instance) | settled | 84.22 / 84.81 | 84.90 / 85.56 |
+| | one lane / 8 of 64 / all 64 | 88.12 / 114.29 / 323.55 | **86.36 / 94.02 / 159.48** |
+
+The native settled rows, and the other shapes, re-measured at lower load: the settled consoles,
+five alternations at load 3.0-3.7 (rows): stereo 106.01 / 106.46 median, mono as shipped
+107.70 / 107.72, mono untouched (collapsed) 69.00 / 69.48; the #995 sessions (two reps, load
+3.7-4.9), `Simd8` rows base / #1006: 64 sidechained 137.46, 137.75 / 136.76, 137.09; 64 settled
+banked 48.00, 49.13 / 48.84, 48.84; collapsed mono 30.47, 30.76 / 30.50, 30.48; 3 unbanked
+7.58, 7.66 / 7.61, 7.62; and at `Simd4` dispatch 64 unbanked main-detector 124.58, 124.57 /
+124.52, 124.65 and 64 sidechained 154.42, 156.16 / 154.40, 153.96. The largest settled
+difference anywhere is the collapsed untouched console's +0.7 % in one harness, flat in the
+other.
+
+### Codegen
+
+* **V8 listings** (`--print-wasm-code`, natural loops, one iteration laid out). The dual kernel
+  `process_block::<f32x4>`: all eight settled loops have the head's instruction and frame-access
+  counts or one less; the one-pass prefix (476 instructions, 121 frame accesses per frame, plus
+  two out-of-line `advance_ramps` calls) is replaced by eight two-pass loops, pass 1 366-378
+  instructions and 33-34 frame accesses, pass 2 444-481 and 61-62, no calls. The collapsed kernel:
+  all eight settled loops identical; the prefix is replaced by pass 1 203-217 / 25-35 and pass 2
+  256-281 / 62-63. `process_block::<f32>`'s twelve settled loops are identical. **Carried stack
+  slots: the new pass 2 loops carry the output ramps' state through the frame** (dual 7-9 slots,
+  collapsed 16-17), because every ramp field of attack, release, makeup and mix is loop-carried
+  and does not fit the 16 registers. Recorded, not chased: the brief's "let them spill", and the
+  measured Δ already falls 4-6x. The retained sidechain prefix loops are unchanged.
+* **Native `Simd8`** (`objdump`): the dual and collapsed settled loops have the head's
+  instruction and stack-access counts; `process_block::<f32x8>` is now out of line from
+  `Instance::render` (it grew), measured flat.
+* **Wasm roster** (`check-web-audioworklet-callgraph.py`): "compressor f32x4 dual" vector 427 ->
+  949, scalar 0; "collapsed" 262 -> 524, **scalar 0** (the prototype's scalar 9 is gone); 15
+  kernels. Artifact 3,400,324 -> 3,456,671 bytes (+56,347); `check-web-boot-budget.mjs` passes.
+
+### Exactness
+
+* **In-tree**, dev and release: the grid and the three randomized differentials now assert, per
+  block, that the dual prefix and the collapsed prefix ran exactly on a `Main` block with an open
+  window, and that the prefix took the wet arm exactly when predicted from the pre-block state
+  (unbypassed, no mix ramp open, every lane's mix `1`); #982's relaxation is granted only where a
+  witness shows an arm ran, and only in a rejected channel. Additions per A2: retargets on one
+  channel or on both with one value; payload restores through `validate_channel` and
+  `commit_channel` at `remaining = 0` with `current != target` (or mid-window); knees at the
+  smallest subnormal and either side of `MIN_SOFT_KNEE_DB`. Release coverage per width: 11,500
+  dual and 10,200-10,500 collapsed prefixes, 2,750-4,850 on the wet arm.
+* **Scenarios pinned before the change** on the unmodified batch head, dev and release, unchanged
+  after: `scenario_1006_ramping_prefix_is_pinned` (`162979dd...`; kernel, `f32`, `Simd4`, `Simd8`,
+  DualMono and Maximum, dual and collapsed, a threshold ride on one lane and a left-only write,
+  an all-lanes attack ride, a makeup and mix ride on the all-wet table, two discontinuity resets
+  mid-window, a restore at `remaining = 0`, windows crossing block boundaries, hostile input;
+  kernel words, recursive words, masks, finished words and every lane's payload words) and
+  `tests/ramping_prefix_scenario.rs` (`61ecffd0...`; the same schedule through the bank contract at
+  this build's width, dual and `process_bank_mono`, with reports and every track's payload; 0
+  invalid spans, some rejected blocks). The bank API binds only this build's width natively, so
+  the four-lane bank is covered by the kernel scenario. They were pinned on `081fdc6c`, not
+  `49f696c7`: the main detector's kernel is the same on both (#994 was already in; #995 changed
+  only the sidechain arms).
+* **Independent**, scratch only: the #995 harness with the batch head's kernel as `Base`, built
+  from its own sources beside #1006's, now with the payload restores and a prediction of the
+  prefix's wet arm. Every output word, every coefficient word, all ramp fields and the recursive
+  words, then masks and words after `finish_channel`; NaN payloads relaxed only where the prefix
+  (or the settled body) is predicted to take the wet arm, in rejected channels. **0 failures**:
+  native release 3,000 seeds x 160 blocks at `f32`, `Simd4` and `Simd8` (about 88,000 dual and
+  40,000 collapsed prefixes per width, 56,000 of them still open at the block's end, 10,300-10,700
+  collapse transitions, 13,400 restores); native dev 96 seeds; the public-factory differential
+  1,200 seeds; V8 TurboFan 1,500 seeds at `f32` and `Simd4` plus 600 factory seeds; V8 default
+  tiering 64. Strict mode (no relaxation) fails, so the relaxation is real and the harness sees
+  it; the mutants M1 (`Simd4`, `Simd8`), M3, M5 and M6 fail it.
+* **Digests.** All 30 standing console rows and 16 session rows, identical base / #1006. The
+  native automated arms (threshold and attack, compressor only, stereo and mono consoles, seven
+  arms each, at `Simd8`, the four-lane bind and `Simd4` dispatch, with and without P1): 83 rows
+  identical. V8 `DIGEST=150` on the shipped artifact, compressor-only, stereo and mono consoles,
+  with and without P1: all identical, and every automated arm moves bits except the one-track
+  attack arms (F6). The committed #1003 browser preflight (`web-mixing-automation-benchmark.mjs
+  preflight`): all seven arm digests identical, `automated_compressor_only` included.
+
+### Gates
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | PASS |
+| `cargo clippy --locked --workspace --all-targets -- -D warnings`, and with `--all-features` | PASS |
+| `cargo test --locked -p compressor`, dev and `--release` | 101 passed, 0 failed, each |
+| `cargo test --locked -p console-workload` / `-p effect-runtime` | 44 / 90 passed |
+| `bash scripts/run-wasm-gates.sh` | PASS: native, wasm scalar and `simd128` legs, 0 mismatches; the #1000 V8 spill gate ok |
+| `bash scripts/check-env-vocabulary.sh` | PASS (134 names) |
+| `check-realtime-policy.sh`, `check-lane-policy.sh`, `check-unfused-seal.sh` | PASS |
+| `check-web-audioworklet-callgraph.py`: render rule 3, roster, `meter_poll`, `command_submit` | PASS (roster above; render closure 8, traps 5, unchanged) |
+| `check-web-boot-budget.mjs` | PASS |
+| allocation (`conformance`'s `process.allocation`) | PASS (in the crate run) |
+
+### Mutations
+
+`crates/compressor/tests/MUTATIONS.md`, section "Issue #1006". Red: M1 (the `remaining == 0` hold
+dropped) 4, M3 (output ramps advanced in pass 1) 16, M5 (wet arm with a mix ramp open) 9, M6 (words
+scattered from before the prefix) 16, M7 (the collapsed prefix skips the redesign) 11, M8 (the
+collapsed prefix's wet arm with a mix ramp open) 6, M9 (the `abs` arm for every link mode) 11, M10
+(threshold never advanced) 17, M11 (#986: the right channel's ramping set from the left) 7, M12
+(#986: makeup and mix words not written) 12. Green, recorded with reasons: M2 (rate ramps gated by
+their own `remaining`: equivalent, a rate ramp's `remaining` is always `0` or its parameter
+ramp's) and M4 (redesign on every lane: equivalent by C2b's invariant, which this slice does not
+rely on).
+
+### For the verifier
+
+* **The spec's M2 and M4 cannot go red** (above). M4 green is C2b's invariant showing through; C2b
+  itself stays out.
+* **The scalar-prefix outlining** is the one structural choice the brief did not name; its A/B is
+  above. Without it the native unbanked settled path is +1.0 %.
+* **Pass 2 spills under V8** (7-9 carried slots dual, 16-17 collapsed). The next saving is there
+  (for example, specialising pass 2 by which output ramps are open), not attempted: the brief
+  says measure before specialising, and the remaining Δ is 1-2 us per moving bank.
+* `tests/bench_ramp.rs` is untouched. It is MQ-2's frozen, script-driven harness with a recorded
+  identity, so adding #986's arms would change a frozen measurement; the arms were measured here
+  with the diagnosis harness instead.
+* Scratch harness sources, session documents and raw logs: `scratchpad/impl-1006/{tools,logs}`.
+
+## Sol attempt 1 verdict: PASS
+
+Adversarial verification of `3a293404`, `ef585bf5` and `e407e462`, 2026-09-27. The branch was
+judged as merged onto the **current** batch head, `9693f577`, which carries #1004 (P1, `f8556aaf`)
+and #1012. The merge is clean (tree `98dff59d`). The base is the batch head built separately
+from its own sources.
+
+**Bit-identity.** A fresh independent differential was used (scratch only, not committed). It runs
+the batch-head kernel against #1006's, block by block, and compares by bits:
+
+* every output word, every coefficient word, every field of every parameter and rate ramp, and
+  the recursive words;
+* then the `finish_channel` masks and every word after the boundary.
+
+The #982 relaxation is admitted only where the harness itself predicts the wet arm. For the
+prefix, the prediction is taken from the pre-block state (unbypassed, `Main`, no mix ramp open
+and every lane's mix exactly 1). For the settled body it is taken after the prefix. In both
+cases the base word must be the input sNaN and the channel must then be rejected.
+
+Coverage:
+
+* **Automation styles:** knob drags (a Point every block), all-lanes rides, random multi-parameter
+  retargets, one channel or both with one value.
+* **Blocks:** 1 to 399 frames, so windows start, end and cross block boundaries. A lane often
+  stops mid-prefix while others continue (15,000 blocks per width at `Simd4`/`Simd8`).
+* **Payload restores:** through `validate_channel`/`commit_channel`, 10,500 of them at
+  `remaining = 0` with `current != target`.
+* **Resets:** discontinuity and full resets mid-window.
+* **Domain edges:** knees at +0, the smallest subnormal and either side of `MIN_SOFT_KNEE_DB`;
+  every other parameter at both domain ends.
+* **Detectors and bodies:** `Silent` and `Sidechain`; dual, collapsed and transitioning.
+
+**0 failures** in each of these runs:
+
+* native release, 3,000 seeds x 160 blocks at `f32`, `Simd4` and `Simd8`: 480,000 blocks per
+  width, with 142,000-147,000 dual and 110,000-112,000 collapsed prefixes, 31,000-39,500 of them on
+  the wet arm;
+* native dev, 160 seeds;
+* the public factory (spans every block, payload restores, `process_bank_mono`,
+  `desymmetrize_channels`), 1,500 seeds;
+* V8 TurboFan `simd128`, 800 seeds at `f32`, `Simd4` and `Simd8`, plus 400 factory seeds;
+* V8 default tiering;
+* scalar wasm.
+
+**"NaN and extreme targets"** at the kernel level (NaN, sNaN, ±inf, ±MAX, -0.0 and out-of-domain
+values, in 10 % of seeds) match the base in every non-NaN word. Where two NaNs meet, for example
+a NaN parameter and an sNaN input, the propagated payload can differ. That is operand
+commutation, which LLVM is free to choose. It was 345 words in 480,000 blocks, all NaN in both
+builds. The contract refuses every such target (`parameter_value_valid` on spans, initial values
+and restores), so it is unreachable. The factory differential, which cannot inject such targets,
+has none.
+
+`scenario_1006` (`162979dd...`) and `tests/ramping_prefix_scenario.rs` (`61ecffd0...`) reproduce on
+the batch-head kernel. All 30 native console digests are identical base and merged. The shipped
+artifact's preflight digests are identical base and merged for all 7 arms of
+`console_mixing_automation` and of two compressor-only tables (8 of 64, all 64 on the mono
+console).
+
+**The equivalence proofs (flag b) hold.**
+
+* **M2 (rate ramps gated by their own `remaining`).** Every write site keeps
+  `rate.remaining ∈ {0, parameter.remaining}`:
+  * `set_parameter_target` gives 64 or a hoisted 0, and its cancel branch re-arms the parameter
+    ramp to the rate ramp's 64;
+  * `restore_rate_ramps` uses the parameter's `remaining` or hoists to 0;
+  * resets and `copy_state_from` keep both together;
+  * both advance together.
+
+  Where the rate ramp is at 0, its `current` already equals the word, so both gates write the
+  same bits.
+* **M4 (redesign every lane).** This is C2b's invariant, `words[0..4] == design(current)`, which
+  every write site maintains.
+* `design_curve` is `GainComputerCoef::new` operation for operation:
+  * `1.0 / R - 1.0`;
+  * `0.5 * W`;
+  * `1.0 / (2.0 * W)`;
+  * `is_finite` as `< +inf`, which is the same for `W > 0`.
+
+Both mutations are green in my harness, kernel and factory. The production code relies on
+neither invariant.
+
+**Mutations are live.** In my harness the spec's M1, M3, M5, M6, M7, M8, M9 and M10 are red at
+every width, plus six of mine:
+
+* S1: the snap one frame early;
+* S2: `design_curve` without #994's overflow guard;
+* S3: the rate word taken from the milliseconds ramp;
+* S4: `step` not scattered (red in the kernel's state comparison; green through the factory,
+  because a payload does not carry `step`);
+* S5: the wet arm tested on the left channel only;
+* S6: the right channel reading the left's ramps.
+
+M1 goes red only through a raw kernel `-0.0` target, which the contract normalises. S1, S2, S5,
+S6, M8 and S4 are also red in-tree, with 16, 4, 5, 14, 6 and 6 tests.
+
+**Timings** (flag a). Taken under the lock, pinned to cpu 31, at load 8-10. The committed
+`web-mixing-automation-benchmark.mjs` was run on the shipped `host_web.wasm`, the real #1004 in
+both builds, two alternating reps each. Values are the paired ramp Δ (automated minus restated,
+µs per block):
+
+| row | base | #1006 |
+|---|---:|---:|
+| `console_mixing_automation` (8 controls, 3 of them compressor thresholds) | 23.2 / 23.1 | **13.6 / 13.4** |
+| mono console, compressor threshold, 8 of 64 (collapsed) | 32.9 / 32.3 | **6.7 / 6.7** |
+| mono console, compressor threshold, all 64 (collapsed) | 91.9 / 91.1 | **13.5 / 12.7** |
+
+The quiet (settled) rows are flat, +0.3 % on the median of six. The collapse Δ is unchanged.
+
+Bank API A/B over 64 tracks, native then V8 (V8 varies ±15 % between runs on the ramp shapes):
+
+| shape | native base | native #1006 | V8 base | V8 #1006 |
+|---|---:|---:|---:|---:|
+| threshold, 8 of 64 | 64.0 | 33.5 | 150 | 84-115 |
+| threshold, all 64 | 103.0 | 34.7 | 205-210 | 86-100 |
+| attack, all 64 | 79.7 | 36.7 | — | — |
+| collapsed threshold, 8 of 64 | 41.2 | 19.8 | 101 | 48-55 |
+| collapsed threshold, all 64 | 60.7 | 21.3 | 129 | 49-56 |
+| unbanked threshold rides | 316.8 | 148.1 | 437 | 318 |
+| settled, dual | — | ±0.2 % | — | flat |
+| settled, collapsed | — | ±0.2 % | — | flat |
+| sidechain | — | ±0.2 % | — | flat |
+
+All digests are identical.
+
+**The spills (flag c) have no consistent cost.** I built a scratch probe that bypasses
+`advance_output` when no output ramp is open. It is bit-exact in the differential, and it runs
+pass 2 as the settled pass 2 on threshold rides. Natively it is identical to #1006. Under V8 it is
+7-21 % faster on the dual banks but 7-8 % slower on the collapsed ones. So the carried slots are
+not a measurable, one-directional cost, and V8's variance dominates.
+
+The compressor does not belong under #1000's gate as written. That gate's loop finder is the EQ's
+op-shape, and its rule is zero carried slots, which the compressor's settled pass 2 already breaks
+by one value. A compressor spill gate would need a pinned per-loop ceiling on the settled bodies.
+That is a follow-up, not this slice.
+
+**Gates on the merged tree.** All green:
+
+* fmt, clippy `-D warnings` (all features), rustdoc `-D warnings`;
+* `-p compressor`: 101 passed in dev and in release;
+* effect-runtime 90, effect-contract 64, console-workload 57, builtins-compiler 79,
+  graph-compiler 119;
+* lane, math and wasm-gates in release: 114;
+* `run-wasm-gates.sh`, with the V8 spill gate ok;
+* the lane, realtime, unfused, env-vocabulary and workspace policy scripts;
+* the AudioWorklet stages: rule 3, the roster (dual 427 → 949 and collapsed 262 → 524, each one
+  function with scalar 0), `meter_poll`, `command_submit` and the boot budget.
+
+The artifact grows from 3,425,844 to 3,482,814 bytes (+56,970).
+
+**Findings (severity-ranked).** None blocking.
+
+1. *Low.* Native unbanked settled instances are +0.5 % (76.0 → 76.4 µs, slower in 4 of 4
+   alternations; the out-of-line `ramping_main_scalar` did not remove it all). Also, under V8 an
+   unbanked connected-sidechain compressor with a ramp every block is +1.0 % and +1.4 % in two runs
+   (444 → 449 µs). Its prefix source is untouched (`kernel.rs:549`). Both are under the 2 % gate;
+   record them, don't chase them (weekly rule).
+2. *Info.* With non-finite kernel-level targets, which the contract refuses, NaN-versus-NaN
+   payloads can differ from the base by operand commutation. The class-A statement holds for
+   every reachable input.
+3. *Info.* A compressor V8 spill gate would need a pinned ceiling, not #1000's zero-carry rule.
+   Recommend it as a follow-up if the settled bodies are to be protected the way the EQ's are.
