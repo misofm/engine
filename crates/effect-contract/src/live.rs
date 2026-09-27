@@ -258,6 +258,13 @@ impl EffectControlLane {
     /// the effect's automation capacity; the count exists so a violated invariant is observable
     /// rather than silent.
     ///
+    /// `staging` must be exactly the effect's `automation_capacity` spans long. A caller that
+    /// allocates it checks that once, at preparation, with
+    /// [`EffectProcessBlock::check_automation_window`](crate::EffectProcessBlock::check_automation_window)
+    /// or
+    /// [`EffectBankProcessBlock::check_automation_window`](crate::EffectBankProcessBlock::check_automation_window);
+    /// the pairing rule below depends on it.
+    ///
     /// # The witness, and the one record kind it is folded late for (issue #1004)
     ///
     /// Every drained record is folded into this lane's channel-symmetry witness through
@@ -359,6 +366,14 @@ impl EffectControlLane {
                         // A prepared-target owner must never silently fall back to render-time
                         // semantic design. Its checked admission path supplies a companion target
                         // for every EQ edit; a missing one is an invariant failure.
+                        //
+                        // A one-channel record refused here was deferred above and is never
+                        // staged, so when nothing else in the drain is staged the empty window
+                        // pairs and `LIVE` survives it; before #1004 it cleared `LIVE`. That is
+                        // not the pairing rule firing, and it is sound: the record reaches neither
+                        // channel, and `target_error` fails this block's render
+                        // (`RenderError::InvalidEnvelope` in both racks) before any sample moves
+                        // (issue #1004 finding 4).
                         target_error = true;
                         continue;
                     }
@@ -403,14 +418,14 @@ impl EffectControlLane {
             staging[position] = span;
             staged += 1;
         }
-        // Callers size `staging` to the effect's `automation_capacity` (`rack`'s console bank stage
-        // and `graph`'s console effect both do), so this is `staged <= automation_capacity`: every
-        // staged span sits below the effect's `span_index < automation_capacity` cut-off, and that
-        // cut-off cannot separate a twin that `spans_pair` counted as paired.
-        debug_assert!(
-            staged <= staging.len(),
-            "the staging window is the capacity"
-        );
+        // `staged <= staging.len()` by construction, and the window is exactly the effect's
+        // `automation_capacity`: every caller that allocates one refuses any other size at
+        // preparation (`EffectProcessBlock::check_automation_window`,
+        // `EffectBankProcessBlock::check_automation_window`; issue #1012). So every staged span
+        // sits below the effect's `span_index < automation_capacity` cut-off, and that cut-off
+        // cannot separate a twin that `spans_pair` counts as paired. (The assertion that stood here
+        // restated the loop bound and could not fire; the bound it meant is enforced where both
+        // numbers are known.)
         if let Some(record) = deferred
             && !spans_pair(&staging[..staged])
         {
