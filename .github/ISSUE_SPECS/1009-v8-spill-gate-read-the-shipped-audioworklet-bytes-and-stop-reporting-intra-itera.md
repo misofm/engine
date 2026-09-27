@@ -181,3 +181,90 @@ Findings 4 and 5, with a shim `node` reporting v22.22.0 first on PATH:
    check reads its first line. The mock's `MOCK_UNPINNED` is not a `MISO_ENGINE_` name.
 3. **Not run here.** CI itself, and `check-web-audioworklet.sh` on a full artifact directory: the
    batch pin is stale until the batch boundary, so the delivery build refuses.
+
+## Sol attempt 1 verdict: PASS
+
+Verifier: Sol, 2026-09-27, on `613a8610` (change `6f4c0379`). Host EPYC 7313P, rustc 1.97.1, Node
+v22.23.2, `CARGO_INCREMENTAL=0`, every module built from `git archive` into its own target. No
+crate changed between #1000's merge (`3c920f73`) and this head.
+
+**The #1000 findings are closed.**
+
+1. **One home for the cargo line.**
+   - **Byte identity.** From the same tree, `build-web-audioworklet.sh --module-only` wrote
+     `9ac37ae7…`. So did the full delivery build, run in a scratch copy whose pin I set to that
+     digest; its `miso-engine-v1-audio-worklet.simd128.wasm` is byte-identical (`cmp`). The same
+     digest comes from #1000's copied cargo line on the merged batch head.
+   - **CI.** `artifact-gates` runs the self-test and then the gate on the downloaded file. Both come
+     after its pin check, behind `setup-node` 22.23.2. `wasm-guests` passes `--without-v8-spill` and
+     no longer builds the module or installs Node.
+   - **Tests.** `test-sdk-artifact-builder-output-contract.sh` and the two new routing mutations
+     are green.
+2. **Intra-iteration reuse no longer fails.** Synthetic listings through `check_function`:
+   - my #1000 reuse listing, verbatim, is green;
+   - an invariant reload is green;
+   - a back-edge carry (#977's shape) is red;
+   - a register-carried recurrence round-tripped through a slot mid-iteration is red;
+   - a carry through two slots is red;
+   - reuse whose second value is read in the next iteration is red.
+3. **The tail is unique without unrolling.** Under `--no-wasm-loop-unrolling`, and under
+   `--no-turbo-loop-rotation`, every held row matches one loop. Head is green; attempt 1 and the
+   one-token edit are red.
+4. **The Node pin no longer blocks G5.** With a shim reporting v22.22.0,
+   `run-wasm-gates.sh --without-v8-spill` exits 0. Without the flag it exits 2 after G5's legs and
+   before the module build.
+5. **The CPU model is named.** Every verdict line prints it.
+
+**Real carries are still caught.** I compared #1000's rule with this one on all 60 SVF loops of both
+functions, in head, attempt 1 and the one-token module. Every loop's live-across and recurrence sets
+are identical, and the loops found are the same, so the jump-table fix moved none. In particular:
+
+- #977's tail is still caught by both rules (`[rbp-0xa0]`, and `[rbp-0xc0]` under the edit);
+- the masked mono tail's back-edge reload is still caught, by the recurrence rule alone;
+- head's dual pair still has its 10 recurrence slots, 2 of them live across.
+
+**Reproduced.** Ten runs per arm gave one distinct output each: head `9ac37ae7…` exits 0, attempt 1
+`0db9b2f5…` and the one-token edit `36015854…` exit 1. `run-wasm-gates.sh` exits 0 cold in 297 s,
+with the gate taking 1.5 s. These are also green:
+
+- `check-ci-path-routing.py` and `test-ci-path-routing.py`;
+- `check-workspace-policy.sh` and `test-workspace-policy.sh`;
+- `check-env-vocabulary.sh`;
+- `test-sdk-artifact-builder-output-contract.sh`;
+- `check-artifact-evidence-leak.sh` and `test-artifact-evidence-leak.sh`;
+- `test-npm-publish-modes.py`;
+- the gate's self-test (19 cases).
+
+**CI.** No job was added or removed, so the verdict table still expects `artifact-gates` and
+`wasm-guests` to succeed on `full`. Both jobs run on `full` only, as before.
+`build-web-audioworklet.sh`, the gate and `run-wasm-gates.sh` all route `full`. On the `sdk` route
+nothing that shapes the module can change.
+
+- **What `wasm-guests` lost.** Only the V8 leg (toolchain check, self-test, gate), and all of it now
+  runs in `artifact-gates`.
+- **Loud failures.** A stale pin fails `artifact`, which skips `artifact-gates` and fails the
+  verdict. A missing or floating Node exits 2.
+
+**Stale pin.** Nothing here waits on the repin. Locally, `--module-only` ignores the pin. In CI the
+gate reads only an artifact that passed its pin check, and the batch's single push needs a fresh pin
+anyway. The one duty at the boundary is to run `run-wasm-gates.sh` on the repinned tree before
+pushing.
+
+Findings (none blocking):
+
+1. **LOW: the routing guard catches deletion and reordering, not disabling.**
+   `check-ci-path-routing.py` checks the gate line by substring. I tried four mutations of the
+   artifact-gates step, and all four passed the guard:
+   - the line commented out inside `run:`;
+   - `|| true` appended;
+   - `if: false` on the step;
+   - `node-version` floated to `22`. This one is still loud in CI: 22.23.3 exits 2.
+
+   This matches the file's other presence guards. Tighten it only if disabling the step becomes a
+   real risk.
+2. **INFO: the held dual tail is anchored on the reported dual pair's shape.** #1010's candidate
+   stores section 0's frame to the block, which makes that pair four streams. The dual tail row
+   would then fail closed with "0 innermost loops … reachable from the depth-2 pair" until #1010
+   updates the pair row. It fails closed, not vacuously, but #1010's brief should expect it.
+3. **INFO: every local `run-wasm-gates.sh` pays a cold fat-LTO build.** `--module-only` builds in a
+   fresh `mktemp` target. CI no longer does this build.
