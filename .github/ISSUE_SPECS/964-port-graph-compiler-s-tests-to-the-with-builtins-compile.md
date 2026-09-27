@@ -217,3 +217,129 @@ The timed benchmark was not run.
   reads like unit gains; with builtins it renders an impulse of `1 / -1` as silence. Every test
   that relied on it now says what it wants explicitly (`identity_builtins`). Whether the fixture
   itself should change is for the owner (it would move `fixtures/graph/v1` and host bytes).
+
+## Sol attempt 1 verdict: FAIL
+
+Reviewed `git diff 53807191..HEAD` (`bb3d0e69`, `fdb411fa`, `741b5a5b`) side by side, test by test.
+Host x86-64-v3 (eight-lane banks), `CARGO_INCREMENTAL=0`, the worktree's own `target/`. Every
+mutation and probe below was applied, run and reverted; nothing of it is committed.
+
+One blocking finding: five ported tests got weaker. The rest of the port is faithful.
+
+### Findings, by severity
+
+1. **Medium, blocking (the brief's "never weaken a test").** The five launch-effect
+   transactional-cap tests read their one-byte-below plan cap from the report's estimate, which is
+   taken before the builtin banks attach. The compile caps the whole-plan figure
+   (`capped_estimate`, `compile.rs:695-786`), which `graph_resource_estimate()` publishes.
+   - Affected: `crates/graph-compiler/src/lib.rs:11691` (limiter), `:12059` (multiband), `:12416`
+     (soft clip), `:12776` (transient shaper) and `:13057` (delay). Each is
+     `let minimum_plan_bytes = artifact.report().estimate.incremental_plan_bytes;`.
+   - Builtins-less, the report's estimate was the capped figure, so the cap sat exactly one byte
+     below it. Now it sits 64,043 bytes below: the builtin payload, measured on all five fixtures.
+   - Evidence: mutation M-b drops the bank-slot reservation from `capped_estimate` only
+     (`compile.rs:749-751`, `slot_resource` -> `Default::default()`). The base versions of the
+     limiter, multiband, soft-clip and transient-shaper tests go RED ("one-byte-below ... graph cap
+     must reject before publication"). The ported versions stay GREEN.
+   - The fix is to read `artifact.graph_resource_estimate().incremental_plan_bytes` on those five
+     lines. That was verified: all five pass unmutated and all five go RED under M-b, the delay
+     test included.
+   - This is the correction 964-6 already made in `effect_control_resource_…`. Port-table rows
+     27-31 claim these assertions are unchanged. The suite still catches M-b, through tests 4 and 5,
+     so there is no net hole, but each of these tests is weaker than it was.
+2. **Low.** `Backend::Scalar` is not essential to `tests/track_delay.rs`.
+   - It has no lane oracle, and its digest is dispatch-independent: at `Backend::current()` it is
+     the same `957e97ca…`, with the same zero-delay `delay_bytes` and largest allocation.
+   - All 8 tests pass unchanged with `dispatch: Backend::current()` at `track_delay.rs:174`
+     (verified).
+   - Under the owner's real-paths rule it should move. That is one line plus the comment at
+     `:189-191`. The brief did not require it, so either take it in attempt 2 or hand it to #959
+     explicitly.
+3. **Info.** The `graph_fixture` bin's unit test (`src/bin/graph_fixture.rs:366`, through `:88`)
+   still reaches the builtins-less entry. #963's brief owns it, so the gate holds for the 47 scoped
+   tests but not literally for "no test in `crates/graph-compiler`". Say so in the evidence.
+4. **Info.** `runtime_bank_slot_reservation_…` now takes its no-bank priors from with-builtins
+   compiles at `Backend::Scalar` (`lib.rs:3269-3284`, `:3308-3322`).
+   - They equal the old builtins-less priors by derivation, not by coincidence:
+     - With no live controls, the builtin scalar-owner term and the effect-control term are both
+       zero (`graph_scalar_owner_resource` counts only strips with `control.is_some()`).
+     - The semantic estimate and the runtime metadata do not depend on builtins.
+     - `Scalar` forms no bank and reserves no slot.
+   - If #959 closes the Scalar back door, this test needs another no-bank prior.
+   - The historical #925 rows in `crates/graph/tests/MUTATIONS.md:361-364` still name the deleted
+     merged-span arm; #958 retires them.
+
+### Checked and sound
+
+- **Identity builtins are identity.**
+  - An independent probe compiled 12 configurations both builtins-less and with
+    `identity_builtins` at `Backend::current()`: direct route, nine-track EQ, compressor,
+    dynamic-rack compressor, gate, limiter, multiband, soft clip, transient shaper, delay,
+    identity cross-index and twelve-track.
+  - Every one has the same SHA, output tail and output latency, and renders PCM bit-identical over
+    24 blocks. The matrix kernel's identity select passes the lanes through untouched.
+  - So these tests cannot hide a fault that the builtins-less versions exposed.
+  - The queued-EQ fixture keeps its own filter-free hard-left/hard-right pan, and its lanes stay
+    separate.
+  - The console tests keep the production strip and still see a crossed lane: mutation MX (the
+    per-node compressor crosses its lanes) turns both `dynamic_rack_compressors_…` and
+    `console_sixty_four_track_…` RED.
+- **The re-pins are derived.**
+  - `track_delay` digest: the builtins-less and with-builtins canonical texts differ in exactly 18
+    lines, the nine `node` rows and nine `tail` rows of `post-input-builtins`
+    (`finite:0` -> `infinite`). Editing only those rows of the old text hashes to `957e97ca…`, and
+    the old text hashes to `eb3ca776…`.
+  - Chain and slot counts: the derivations hold. S7 turns `add_a_track` RED at 1 chain against 2,
+    which confirms the stated reason (the `PostSimd1` observers decline the EQ -> fader merge).
+- **The four deleted arms tested only the builtins-less path:**
+  - #925's two-node bind shape;
+  - #925's alias op list;
+  - the 192/129 builtins-less arena;
+  - the base compile as a pre-attachment figure, which equals the report's
+    `audio_buffer_samples` by derivation (no effects, and a slot adds no samples).
+- **The rename lost nothing.** Test counts are 80/8/2 before and after, and only one name changed.
+  S2c turns the renamed test RED at 193 against 256.
+- **No test in the scope calls the builtins-less compile.**
+  `rg -P 'GraphCompiler::compile(?!_with_builtins)|GraphCompileRequest|PreparedGraphArtifact\b'`
+  finds nothing in the `lib.rs` test module or in `tests/`.
+- **The `program.rs` edit is doc-only and correct:** 4 comment lines, no code.
+- **Scale**, reproduced: 55.00 s and 1.34 GB peak RSS alone in debug. The binary takes 60.2 s in
+  debug and 17.1 s in release.
+
+### Sol mutations (all RED as expected, all reverted)
+
+| # | group | mutation | result |
+|---|---|---|---|
+| S1b | B | `compile.rs` lists `PostSimd2PreFader` as bindable with builtins | `accepted_session_…` RED at the exact `required_bindings` |
+| S2 | P | the cap check reads the pre-attachment `audio_buffer_samples` | `post_bank_graph_cap_…` RED, "post-bank cap must reject" |
+| S2b | P | `PostSimd2PreFader` is no longer an alias candidate | `builtins_replace_only_…` RED at the exact op list |
+| S2c | P | the bank-window hold is disabled | `the_merged_span_hold_costs_the_input_slots` RED, 193 vs 256 |
+| S3 | G | PDC compensation one sample short | all three `mixed_causal_…` RED |
+| S4 | G/B | the identity-matrix arm swaps L and R | `accepted_session_…` (-1.0), `issue122_…`, EQ bypass pins and delay bits RED; bank-vs-per-node tests GREEN, as expected |
+| MX | G | the per-node compressor crosses its lanes | `dynamic_rack_compressors_…` and `console_sixty_four_track_…` RED |
+| S5 | track_delay | the left ring is charged 2 B/sample | `the_estimate_charges_each_lane_its_own_ring` RED, 2 vs 4 |
+| S6 | scale | the builtin bank planner refuses more than 65,536 tracks | `compiles_65_537_…` RED; the old Scalar builtins-less gate never reached the planner |
+| S7 | G | an observed alias no longer declines a merge | `add_a_track_…` RED, 1 vs 2 chains |
+| M-b | G | the slot reservation is dropped from `capped_estimate` only | finding 1: ported launch cap tests GREEN, base versions RED |
+
+### Gates (all pass)
+
+- `cargo fmt --all --check`
+- `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
+- `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`
+- `cargo test -p graph-compiler`:
+  - dev: 80/1/3/2/8/6;
+  - release with `panic="unwind"`: the same counts;
+  - CI's `graph/test-support,builtins-compiler/test-support` feature set: the same counts.
+- `-p graph` (109/1/1/1), `-p builtins-compiler --features test-support`,
+  `-p host-core --all-features`, and `-p console-workload` in dev and release, so the console
+  digests are unchanged.
+- `check-graph-policy.sh` PASS, `test-graph-policy.sh` ok, `check-graph-determinism.sh` PASS
+  (100/100).
+
+### For attempt 2
+
+- Fix finding 1 on the five lines and re-run M-b.
+- Take finding 2, or hand it to #959 explicitly.
+- Record finding 3 in the evidence.
+- No other change is needed.
