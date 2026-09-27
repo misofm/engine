@@ -844,7 +844,8 @@ fn odd_frames(block: usize) -> usize {
 ///
 /// Every word is one of: `+0.0` (one in sixteen), a subnormal of either sign (one in sixteen), or a
 /// normal of either sign with magnitude in `2^-24..2^26`. On top of that, block `8k + 3` carries one
-/// `-0.0` and block `8k + 6` carries one non-finite word on tracks 0 and 4 of one plane, so every
+/// `-0.0` (tracks 1, 4, 7, 2, alternating planes, so the collapsed mono leg sees half of them) and
+/// block `8k + 6` carries one non-finite word on tracks 0 and 4 of one plane, so every
 /// four-lane group and every eight-lane group sees the same fault: a fault zeroes and resets a
 /// whole bank plane, and placing it this way keeps the bank digest independent of the bank width.
 /// Either word refuses elision for the bank (or scalar track) that carries it, which then renders
@@ -852,8 +853,8 @@ fn odd_frames(block: usize) -> usize {
 fn odd_word(block: usize, frame: usize, track: usize, channel: usize) -> f32 {
     if block % 8 == 3
         && frame == (block * 7) % odd_frames(block)
-        && track == block % ODD_TRACKS
-        && channel == block % 2
+        && track == (block / 8 * 3 + 1) % ODD_TRACKS
+        && channel == (block / 8) % 2
     {
         return -0.0;
     }
@@ -906,11 +907,33 @@ fn fold_payload(hasher: &mut Sha256, payload: &Payload) {
     hasher.update(payload.2);
 }
 
+/// Resets this thread's count of select-free depth-one tail passes (issue #976 M3); a no-op
+/// without `test-support`, where the counter does not exist.
+fn reset_select_free_tails() {
+    #[cfg(feature = "test-support")]
+    parametric_eq::test_only_reset_select_free_tail_passes();
+}
+
+/// This thread's count of select-free depth-one tail passes, or `None` without `test-support`.
+fn select_free_tails() -> Option<usize> {
+    #[cfg(feature = "test-support")]
+    let count = Some(parametric_eq::test_only_select_free_tail_passes());
+    #[cfg(not(feature = "test-support"))]
+    let count = None;
+    count
+}
+
+/// One leg's digest, and per shape (in [`ODD_SHAPES`] order) how many stationary depth-one tail
+/// passes ran without the dry select.
+type OddLeg = (String, Vec<Option<usize>>);
+
 /// The scalar leg: one prepared effect per track, every block, every word.
-fn odd_scalar_digest() -> String {
+fn odd_scalar_digest() -> OddLeg {
     let factory = ParametricEqFactory;
     let mut hasher = Sha256::new();
+    let mut tails = Vec::new();
     for shape in ODD_SHAPES {
+        reset_select_free_tails();
         let configurations: Vec<_> = (0..ODD_TRACKS)
             .map(|track| odd_configuration(shape, track))
             .collect();
@@ -947,19 +970,22 @@ fn odd_scalar_digest() -> String {
             }
             position += frames as u64;
         }
+        tails.push(select_free_tails());
     }
-    hex(&hasher.finalize())
+    (hex(&hasher.finalize()), tails)
 }
 
 /// The bank legs: `ODD_TRACKS / lanes` native banks, folded per track in track order so the
 /// digest does not depend on the bank width. `mono` renders the collapsed body instead of the dual
 /// one, over the left plane alone.
-fn odd_bank_digest(width: BankWidth, backend: Backend, mono: bool) -> String {
+fn odd_bank_digest(width: BankWidth, backend: Backend, mono: bool) -> OddLeg {
     let lanes = width.lanes() as usize;
     assert_eq!(ODD_TRACKS % lanes, 0, "the scenario fills whole banks");
     let factory = ParametricEqFactory;
     let mut hasher = Sha256::new();
+    let mut tails = Vec::new();
     for shape in ODD_SHAPES {
+        reset_select_free_tails();
         let configurations: Vec<_> = (0..ODD_TRACKS)
             .map(|track| odd_configuration(shape, track))
             .collect();
@@ -1046,8 +1072,9 @@ fn odd_bank_digest(width: BankWidth, backend: Backend, mono: bool) -> String {
             }
             position += frames as u64;
         }
+        tails.push(select_free_tails());
     }
-    hex(&hasher.finalize())
+    (hex(&hasher.finalize()), tails)
 }
 
 fn hex(digest: &[u8]) -> String {
@@ -1059,15 +1086,15 @@ fn hex(digest: &[u8]) -> String {
 const ODD_LIVE_DIGESTS: [(&str, &str); 3] = [
     (
         "scalar",
-        "e57233ea3780aa3d7c03ca9a4e7ad0750706268f9bd1a4709b305aa15ef2b063",
+        "81015a5c841e7fb53b6d7f4968c1706b46902db7055cdc687fa2d7c5366cb852",
     ),
     (
         "bank",
-        "d6c46894c319657b44f3bf71a96d94cb1331d23682cbb3abadd6ba6a055c0d28",
+        "247bc0b6fd53e45fe85f15dd481dc65eb6110bc3ca8cd6a056e40a6d9c131d7c",
     ),
     (
         "bank-mono",
-        "3821224fe6a29437b0b13c76751c216514f6e03ee3e78e678a54448ea6b4156d",
+        "e904180499a49c1a203eef5da5f6a257b7e9a74c34a1e1ba22fdb7ebcb1e108a",
     ),
 ];
 
@@ -1083,6 +1110,10 @@ const ODD_LIVE_DIGESTS: [(&str, &str); 3] = [
 /// elision where they land, so that bank or track renders all six sections. Every output word, every report and every lane's state
 /// payload after every block is folded into one SHA-256 per leg; state words are hashed as raw
 /// bits (no NaN reaches an output word: a non-finite block is zeroed).
+///
+/// Under `--features test-support` it also asserts M3's performance half: the HPF-everywhere shape
+/// runs its one live section, the odd tail, without the dry select on every admitted stationary
+/// block, which no rendered bit can show.
 #[test]
 fn odd_live_counts_render_the_base_bits() {
     let mut legs = vec![("scalar", odd_scalar_digest())];
@@ -1090,10 +1121,23 @@ fn odd_live_counts_render_the_base_bits() {
         legs.push(("bank", odd_bank_digest(width, backend, false)));
         legs.push(("bank-mono", odd_bank_digest(width, backend, true)));
     }
-    for (leg, digest) in &legs {
+    for (leg, (digest, tails)) in &legs {
         println!("odd-live digest {leg} {digest}");
+        println!("odd-live select-free tails {leg} {tails:?} (shapes {ODD_SHAPES:?})");
     }
-    for (leg, digest) in &legs {
+    let hpf_everywhere = ODD_SHAPES
+        .iter()
+        .position(|shape| matches!(shape, OddShape::HpfEverywhere))
+        .expect("the HPF-everywhere shape is in the scenario");
+    for (leg, (_, tails)) in &legs {
+        if let Some(count) = tails[hpf_everywhere] {
+            assert!(
+                count > 0,
+                "#976 M3: the {leg} leg's HPF-everywhere tail must run select-free"
+            );
+        }
+    }
+    for (leg, (digest, _)) in &legs {
         let pinned = ODD_LIVE_DIGESTS
             .iter()
             .find(|(name, _)| name == leg)

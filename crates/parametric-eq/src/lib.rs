@@ -59,7 +59,7 @@ use effect_runtime::state_payload as payload;
 use engine::{SampleRateHz, is_launch_sample_rate};
 use lane::kernels::{
     SvfCoef, SvfCoefStep, SvfState, svf_block, svf_block_ramped, svf_block_ramped_with_dry_mask,
-    svf_cascade_interleaved_with_dry_masks,
+    svf_cascade_interleaved, svf_cascade_interleaved_with_dry_masks,
 };
 use lane::{Backend, Lane, Simd4, Simd8};
 
@@ -122,6 +122,8 @@ const MAX_LANES: usize = 8;
 #[cfg(any(test, feature = "test-support"))]
 std::thread_local! {
     static DESIGN_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Stationary depth-one tail passes that ran without a dry select (issue #976).
+    static SELECT_FREE_TAIL_PASSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -145,6 +147,39 @@ pub fn test_only_reset_design_calls() {
 #[must_use]
 pub fn test_only_design_call_count() -> usize {
     design_call_count()
+}
+
+/// Counts one select-free depth-one tail pass of the stationary cascade.
+///
+/// Test builds only: the one gate that sees a performance-only regression (issue #976 M3) needs to
+/// know which kernel arm the odd last section took, and no rendered bit says so.
+#[cfg(any(test, feature = "test-support"))]
+fn count_select_free_tail_pass() {
+    SELECT_FREE_TAIL_PASSES.with(|passes| passes.set(passes.get().saturating_add(1)));
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn reset_select_free_tail_passes() {
+    SELECT_FREE_TAIL_PASSES.with(|passes| passes.set(0));
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn select_free_tail_pass_count() -> usize {
+    SELECT_FREE_TAIL_PASSES.with(std::cell::Cell::get)
+}
+
+/// Resets this thread's count of select-free depth-one tail passes (issue #976).
+#[cfg(feature = "test-support")]
+pub fn test_only_reset_select_free_tail_passes() {
+    reset_select_free_tail_passes();
+}
+
+/// This thread's count of stationary depth-one tail passes that ran without a dry select: the odd
+/// last live section of an admitted block whose dry masks were empty on both channels.
+#[cfg(feature = "test-support")]
+#[must_use]
+pub fn test_only_select_free_tail_passes() -> usize {
+    select_free_tail_pass_count()
 }
 
 /// Frozen V1 section filter families.
@@ -1513,12 +1548,10 @@ fn cascade_sections_mono<L: Lane, const W: usize>(
 ) -> ([usize; EQ_SECTION_COUNT], usize) {
     let all = (core::array::from_fn(|section| section), EQ_SECTION_COUNT);
     let dead = |section: usize| channel.identity[section];
-    let depth = EFFECTIVE_CASCADE_DEPTH;
     let live = (0..EQ_SECTION_COUNT)
         .filter(|section| !dead(*section))
         .count();
-    let kept = live.div_ceil(depth) * depth;
-    if kept >= EQ_SECTION_COUNT {
+    if live >= EQ_SECTION_COUNT {
         return all;
     }
     let words = frames * W;
@@ -1535,27 +1568,19 @@ fn cascade_sections_mono<L: Lane, const W: usize>(
             return all;
         }
     }
-    let mut padding = kept - live;
     let mut list = [0_usize; EQ_SECTION_COUNT];
     let mut length = 0;
     for section in 0..EQ_SECTION_COUNT {
-        let keep = if dead(section) {
-            let take = padding > 0;
-            padding -= usize::from(take);
-            take
-        } else {
-            true
-        };
-        if keep {
+        if !dead(section) {
             list[length] = section;
             length += 1;
         }
     }
-    debug_assert_eq!(length, kept);
+    debug_assert_eq!(length, live);
     (list, length)
 }
 
-/// [`interleave`] over one stream. Same kernel, same list, one channel of it.
+/// [`interleave`] over one stream. Same kernel, same list, same tail rule, one channel of it.
 ///
 /// This is a second instantiation of [`svf_cascade_interleaved`] -- at `CHANNELS = 1` where the
 /// dual path uses `2` -- and [`cascade_sections`] warns that a second arithmetic-carrying EQ kernel
@@ -1563,7 +1588,8 @@ fn cascade_sections_mono<L: Lane, const W: usize>(
 /// rather than assumed: at mono-collapse M2 the artifact carries one EQ symbol, because both
 /// cascades inline into `process_bank_inner`. The compressor and the limiter did grow a second
 /// symbol each, and the roster names them. If a later change splits this one out, the fix is a
-/// roster row, not a looser pattern.
+/// roster row, not a looser pattern. The depth-one tail (issue #976) is two more instantiations,
+/// `<L, 1, 1>` with and without the dry select, inlined the same way.
 #[inline(always)]
 fn interleave_mono<L: Lane, const W: usize, const DEPTH: usize>(
     channel: &mut Channel<L, W>,
@@ -1573,7 +1599,10 @@ fn interleave_mono<L: Lane, const W: usize, const DEPTH: usize>(
 ) {
     debug_assert_eq!(EQ_SECTION_COUNT % DEPTH, 0);
     let (list, length) = sections;
-    debug_assert_eq!(length % DEPTH, 0);
+    debug_assert!(
+        length % DEPTH <= 1,
+        "the tail rule is one section at depth one"
+    );
     for pass in 0..length / DEPTH {
         let base = pass * DEPTH;
         let at: [usize; DEPTH] = core::array::from_fn(|k| list[base + k]);
@@ -1594,6 +1623,26 @@ fn interleave_mono<L: Lane, const W: usize, const DEPTH: usize>(
             channel.sections[at[k]].state = word;
         }
     }
+    if length % DEPTH == 1 {
+        let at = list[length - 1];
+        let coefficients: [[SvfCoef<L>; 1]; 1] = [[channel.sections[at].coef]];
+        let mut state: [[SvfState<L>; 1]; 1] = [[channel.sections[at].state]];
+        let dry_masks: [[L::Mask; 1]; 1] = [[channel.dry_mask(at)]];
+        if L::mask_any(dry_masks[0][0]) {
+            svf_cascade_interleaved_with_dry_masks::<L, 1, 1>(
+                [&mut *io],
+                frames,
+                &coefficients,
+                &mut state,
+                &dry_masks,
+            );
+        } else {
+            #[cfg(any(test, feature = "test-support"))]
+            count_select_free_tail_pass();
+            svf_cascade_interleaved::<L, 1, 1>([&mut *io], frames, &coefficients, &mut state);
+        }
+        channel.sections[at].state = state[0][0];
+    }
 }
 
 /// The cascade positions this stationary block will actually run, in cascade order.
@@ -1608,8 +1657,9 @@ fn interleave_mono<L: Lane, const W: usize, const DEPTH: usize>(
 /// parameter, so a disabled band is not "nearly" a pass-through, it is `c1 = a2 = a3 = m1 = m2 =
 /// +0.0, m0 = 1.0`. A console that ships six sections and uses two spends most of the cascade
 /// there.
-/// The bank runs both channels through [`svf_cascade_interleaved`] at a fixed effective depth of
-/// two, so dropping sections buys whole passes.
+/// The list is exactly the live sections, in cascade order. [`interleave`] runs both channels
+/// through [`svf_cascade_interleaved`] two sections per pass and an odd last section alone at depth
+/// one, so every dropped section is one section's arithmetic that no longer runs.
 ///
 /// The flag is per section **across both channels** because that is the granularity the kernel
 /// has: one pass carries section `k` of the left channel and section `k` of the right, and a
@@ -1636,6 +1686,13 @@ fn interleave_mono<L: Lane, const W: usize, const DEPTH: usize>(
 /// one exception: it rewrites `-0.0` to `+0.0`. Eliding it is therefore bit-exact **iff no `-0.0`
 /// ever reaches it**, and the state it keeps is `+0.0` either way — which is what gate (b) below
 /// asserts it already holds.
+///
+/// The argument is per dead section and never counted how many were dropped, so it covers dropping
+/// every one of them. Until issue #976 the list was padded back up to a whole number of depth-two
+/// passes with dead sections, which the proof licensed to drop anyway; the padding only kept one
+/// kernel instantiation. Pairing is not arithmetic: each `(stream, section)` chain runs the same
+/// operations in the same order whichever pass carries it, and a value handed between passes goes
+/// through an exact `f32` store and load.
 ///
 /// That leaves: can a `-0.0` reach an elided section? Its input is either the block input or a
 /// live section's output, so both have to be closed.
@@ -1689,17 +1746,15 @@ fn cascade_sections<L: Lane, const W: usize>(
 ) -> ([usize; EQ_SECTION_COUNT], usize) {
     let all = (core::array::from_fn(|section| section), EQ_SECTION_COUNT);
     let dead = |section: usize| left_channel.identity[section] && right_channel.identity[section];
-    let depth = EFFECTIVE_CASCADE_DEPTH;
     let live = (0..EQ_SECTION_COUNT)
         .filter(|section| !dead(*section))
         .count();
-    // The kernel runs whole passes of `DEPTH` sections, so the list has to divide by the depth.
-    // Rounding the live count up and paying for the difference in identity sections keeps the
-    // *one* instantiation of `svf_cascade_interleaved` this backend already ships: a shorter final
-    // pass would need a second `DEPTH`, and a second arithmetic-carrying EQ kernel in the wasm
-    // artifact reads to `KERNEL_ROSTER` as a kernel that moved.
-    let kept = live.div_ceil(depth) * depth;
-    if kept >= EQ_SECTION_COUNT {
+    // The list is the live sections and nothing else: `interleave` runs an odd last one at depth
+    // one rather than padding it with a dead section. The depth-one passes are further
+    // instantiations of the interleaved kernel, `#[inline(always)]` into the one arithmetic-carrying
+    // `process_bank` symbol per width that `KERNEL_ROSTER` counts, so they add no EQ symbol to the
+    // wasm artifact. A cascade with nothing to drop never pays the scan below.
+    if live >= EQ_SECTION_COUNT {
         return all;
     }
     // (a) Neither input plane carries `-0.0`, an infinity, a NaN, or a magnitude above the §4.4
@@ -1726,32 +1781,29 @@ fn cascade_sections<L: Lane, const W: usize>(
             return all;
         }
     }
-    let mut padding = kept - live;
     let mut list = [0_usize; EQ_SECTION_COUNT];
     let mut length = 0;
     for section in 0..EQ_SECTION_COUNT {
-        let keep = if dead(section) {
-            let take = padding > 0;
-            padding -= usize::from(take);
-            take
-        } else {
-            true
-        };
-        if keep {
+        if !dead(section) {
             list[length] = section;
             length += 1;
         }
     }
-    debug_assert_eq!(length, kept);
+    debug_assert_eq!(length, live);
     (list, length)
 }
 
 /// One stationary block, both channels, `DEPTH` cascade sections fused per pass.
 ///
-/// `sections` is the list [`cascade_sections`] chose and its length, which is a whole number of
-/// passes by construction. Positions are read out of it rather than counted from a base, so an
-/// elided cascade runs the same kernel over a shorter list — the operation order per surviving
-/// chain is untouched, which is what keeps this a schedule change.
+/// `sections` is the list [`cascade_sections`] chose and its length. Positions are read out of it
+/// rather than counted from a base, so an elided cascade runs the same kernel over a shorter list —
+/// the operation order per surviving chain is untouched, which is what keeps this a schedule
+/// change.
+///
+/// The list runs as `length / DEPTH` whole passes and then, when the length is odd, one depth-one
+/// pass over its last entry, which is the last live section in cascade order. That tail pass
+/// selects dry lanes only when a lane of either channel is dry there: a general band never is, and
+/// a dedicated cut is dry only on a lane where it is off.
 #[inline(always)]
 fn interleave<L: Lane, const W: usize, const DEPTH: usize>(
     channels: (&mut Channel<L, W>, &mut Channel<L, W>),
@@ -1762,7 +1814,10 @@ fn interleave<L: Lane, const W: usize, const DEPTH: usize>(
 ) {
     debug_assert_eq!(EQ_SECTION_COUNT % DEPTH, 0);
     let (list, length) = sections;
-    debug_assert_eq!(length % DEPTH, 0);
+    debug_assert!(
+        length % DEPTH <= 1,
+        "the tail rule is one section at depth one"
+    );
     for pass in 0..length / DEPTH {
         let base = pass * DEPTH;
         let at: [usize; DEPTH] = core::array::from_fn(|k| list[base + k]);
@@ -1792,6 +1847,39 @@ fn interleave<L: Lane, const W: usize, const DEPTH: usize>(
         for (k, word) in right_state.into_iter().enumerate() {
             channels.1.sections[at[k]].state = word;
         }
+    }
+    if length % DEPTH == 1 {
+        let at = list[length - 1];
+        let coefficients: [[SvfCoef<L>; 1]; 2] = [
+            [channels.0.sections[at].coef],
+            [channels.1.sections[at].coef],
+        ];
+        let mut state: [[SvfState<L>; 1]; 2] = [
+            [channels.0.sections[at].state],
+            [channels.1.sections[at].state],
+        ];
+        let dry_masks: [[L::Mask; 1]; 2] = [[channels.0.dry_mask(at)], [channels.1.dry_mask(at)]];
+        if L::mask_any(dry_masks[0][0]) || L::mask_any(dry_masks[1][0]) {
+            svf_cascade_interleaved_with_dry_masks::<L, 2, 1>(
+                [&mut *left, &mut *right],
+                frames,
+                &coefficients,
+                &mut state,
+                &dry_masks,
+            );
+        } else {
+            #[cfg(any(test, feature = "test-support"))]
+            count_select_free_tail_pass();
+            svf_cascade_interleaved::<L, 2, 1>(
+                [&mut *left, &mut *right],
+                frames,
+                &coefficients,
+                &mut state,
+            );
+        }
+        let [[left_state], [right_state]] = state;
+        channels.0.sections[at].state = left_state;
+        channels.1.sections[at].state = right_state;
     }
 }
 
@@ -3821,8 +3909,9 @@ mod interleave_identity {
 #[cfg(test)]
 mod elision {
     use super::{
-        BandTarget, Channel, EFFECTIVE_CASCADE_DEPTH, EQ_SECTION_COUNT, EqSvfWords, MAX_LANES,
-        RAMP_SAMPLES, cascade_sections, corpus, process_channels,
+        BandTarget, Channel, EQ_SECTION_COUNT, EqSvfWords, MAX_LANES, RAMP_SAMPLES,
+        cascade_sections, cascade_sections_mono, corpus, process_channels, process_channels_mono,
+        reset_select_free_tail_passes, select_free_tail_pass_count,
     };
     use lane::{Lane, Simd4, Simd8};
 
@@ -3963,18 +4052,127 @@ mod elision {
         ran
     }
 
-    /// Every live/dead subset, both channels, all three widths, cold and seeded.
+    /// [`compare`] for the collapsed body: one channel through [`process_channels_mono`], against
+    /// the same channel's per-section path.
+    fn compare_mono<L: Lane, const W: usize>(
+        width: &str,
+        case: usize,
+        live: u8,
+        seed_state: bool,
+    ) -> usize {
+        let mut arms = Vec::new();
+        let mut ran = EQ_SECTION_COUNT;
+        for stationary in [true, false] {
+            let mut channel = channel::<L, W>(0, live);
+            if seed_state {
+                for section in 0..EQ_SECTION_COUNT {
+                    if live & (1 << section) != 0 {
+                        channel.sections[section].state.ic1 = L::splat(1.0e-40);
+                        channel.sections[section].state.ic2 = L::splat(-1.0e-41);
+                    }
+                }
+            }
+            let mut io = block::<W>(case, 0);
+            if stationary {
+                ran = cascade_sections_mono::<L, W>(&channel, &io, FRAMES).1;
+            }
+            process_channels_mono(&mut channel, &mut io, FRAMES, stationary);
+            let mut words = [0_u32; EQ_SECTION_COUNT * 2 * MAX_LANES];
+            channel.state_bits(&mut words);
+            arms.push((io, words));
+        }
+        let (elided, full) = (&arms[0], &arms[1]);
+        let label = format!("{width} mono, case {case}, live {live:06b}, seeded={seed_state}");
+        assert_eq!(
+            bits(&elided.0),
+            bits(&full.0),
+            "elided mono output differs from the full cascade at {label}"
+        );
+        assert_eq!(
+            elided.1, full.1,
+            "elided mono integrators differ from the full cascade at {label}"
+        );
+        assert!(
+            elided.0.iter().all(|s| s.is_finite()),
+            "an elided mono case must stay finite at {label}"
+        );
+        ran
+    }
+
+    /// Every live/dead subset, both channels, all three widths, cold and seeded; dual and
+    /// collapsed mono.
+    ///
+    /// Issue #976: the elided list is exactly the live sections -- no identity section is kept as
+    /// padding -- so an odd live count runs its last section in a depth-one pass. Both corpus
+    /// cases are admissible (no `-0.0`, nothing above the ceiling), so every mask elides down to
+    /// its live count.
     #[test]
     fn an_elided_cascade_is_the_full_cascade_bit_for_bit() {
         for case in [0_usize, 2] {
             for seeded in [false, true] {
                 for live in MASKS {
-                    compare::<f32, 1>("Scalar", case, live, live, seeded);
-                    compare::<Simd4, 4>("Simd4", case, live, live, seeded);
-                    compare::<Simd8, 8>("Simd8", case, live, live, seeded);
+                    let count = live.count_ones() as usize;
+                    let ran = [
+                        compare::<f32, 1>("Scalar", case, live, live, seeded),
+                        compare::<Simd4, 4>("Simd4", case, live, live, seeded),
+                        compare::<Simd8, 8>("Simd8", case, live, live, seeded),
+                    ];
+                    assert_eq!(
+                        ran, [count; 3],
+                        "the dual cascade keeps exactly the live sections ({live:06b})"
+                    );
+                    let ran = [
+                        compare_mono::<f32, 1>("Scalar", case, live, seeded),
+                        compare_mono::<Simd4, 4>("Simd4", case, live, seeded),
+                        compare_mono::<Simd8, 8>("Simd8", case, live, seeded),
+                    ];
+                    assert_eq!(
+                        ran, [count; 3],
+                        "the mono cascade keeps exactly the live sections ({live:06b})"
+                    );
                 }
             }
         }
+    }
+
+    /// An odd last live section with no dry lane runs the depth-one pass without the dry select.
+    ///
+    /// Issue #976 M3: rendered bits cannot see which arm the tail took -- a select whose mask is
+    /// empty returns the wet word -- so this counter is the only gate on the performance half of
+    /// the tail rule. A general band is never dry, so one live band is an odd tail with empty masks.
+    #[test]
+    fn an_odd_tail_without_dry_lanes_skips_the_select() {
+        fn run<L: Lane, const W: usize>(width: &str) {
+            // One live general band (physical section 2), and three: sections 1, 2 and 4.
+            for (live, pairs) in [(0b00_0100_u8, 0_usize), (0b01_0110, 1)] {
+                reset_select_free_tail_passes();
+                let mut left_channel = channel::<L, W>(0, live);
+                let mut right_channel = channel::<L, W>(3, live);
+                let mut left = block::<W>(0, 0);
+                let mut right = block::<W>(0, 3);
+                process_channels(
+                    (&mut left_channel, &mut right_channel),
+                    &mut left,
+                    &mut right,
+                    FRAMES,
+                    true,
+                );
+                assert_eq!(
+                    select_free_tail_pass_count(),
+                    1,
+                    "{width} dual {live:06b}: {pairs} pair(s), then one select-free tail pass"
+                );
+                process_channels_mono(&mut left_channel, &mut left, FRAMES, true);
+                assert_eq!(
+                    select_free_tail_pass_count(),
+                    2,
+                    "{width} mono {live:06b}: {pairs} pair(s), then one select-free tail pass"
+                );
+            }
+        }
+        run::<f32, 1>("Scalar");
+        run::<Simd4, 4>("Simd4");
+        run::<Simd8, 8>("Simd8");
     }
 
     /// The two channels are allowed to disagree about which sections are live, and a section is
@@ -3985,11 +4183,8 @@ mod elision {
             for right_live in MASKS {
                 let ran = compare::<Simd4, 4>("Simd4", 0, left_live, right_live, false);
                 let live = (left_live | right_live).count_ones() as usize;
-                let depth = EFFECTIVE_CASCADE_DEPTH;
-                let expected = live.div_ceil(depth) * depth;
                 assert_eq!(
-                    ran,
-                    expected.min(EQ_SECTION_COUNT),
+                    ran, live,
                     "a section is elidable only when it is identity on both channels \
                      ({left_live:04b}/{right_live:04b})"
                 );
@@ -4003,7 +4198,7 @@ mod elision {
     /// sixty-four-track session), and it is the row the standing measurement moves.
     #[test]
     fn the_shipped_shape_actually_elides() {
-        for (live, expected) in [(0b0001_u8, 2_usize), (0b0011, 2), (0b0000, 0)] {
+        for (live, expected) in [(0b0001_u8, 1_usize), (0b0011, 2), (0b0000, 0)] {
             let left_channel = channel::<Simd8, 8>(0, live);
             let right_channel = channel::<Simd8, 8>(3, live);
             let left = block::<8>(0, 0);
@@ -4015,8 +4210,8 @@ mod elision {
                  {EQ_SECTION_COUNT} sections"
             );
         }
-        // Three live sections round up to four at depth two: the list has to divide by the depth,
-        // and paying one identity section keeps a single kernel instantiation.
+        // Three live sections run three: one depth-two pass and a depth-one tail, with no identity
+        // section kept as padding (issue #976).
         let left_channel = channel::<Simd8, 8>(0, 0b0111);
         let right_channel = channel::<Simd8, 8>(3, 0b0111);
         assert_eq!(
@@ -4026,8 +4221,8 @@ mod elision {
                 &block::<8>(0, 0),
                 &block::<8>(0, 3)
             ),
-            4,
-            "three live sections round up to four at depth two"
+            3,
+            "three live sections run three, not four"
         );
     }
 
@@ -4050,12 +4245,12 @@ mod elision {
         let right = block::<8>(0, 3);
         assert_eq!(
             kept(&left_channel, &right_channel, &left, &right),
-            2,
-            "one live lane keeps its whole section, and the depth rounds one live section to two"
+            1,
+            "one live lane keeps its whole section, and only that section"
         );
         // And it renders the same bits as the full cascade.
         let ran = compare::<Simd8, 8>("Simd8", 0, 0b0100, 0b0000, false);
-        assert_eq!(ran, 2, "the mixed-lane case must still engage");
+        assert_eq!(ran, 1, "the mixed-lane case must still engage");
     }
 
     /// A `-0.0` anywhere in either input plane refuses the elision.
@@ -4090,7 +4285,7 @@ mod elision {
                 }
                 assert_eq!(
                     kept(&left_channel, &right_channel, &left, &right),
-                    2,
+                    1,
                     "a +0.0 at word {position} of plane {plane} is an ordinary sample"
                 );
             }
@@ -4127,7 +4322,7 @@ mod elision {
         left[17] = 1.0e29;
         assert_eq!(
             kept(&left_channel, &right_channel, &left, &right),
-            2,
+            1,
             "a large but admissible sample does not refuse elision"
         );
     }
