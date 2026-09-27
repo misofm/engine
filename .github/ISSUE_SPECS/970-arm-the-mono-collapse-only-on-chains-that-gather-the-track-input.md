@@ -183,3 +183,84 @@ lanes and at 4 lanes (scratch example over `SessionRuntime::new`, not committed)
 * **Expected performance cost, not measured here** (timed benchmark not run, per the brief): the
   verification measured +42% at 8 lanes and +48% at 4 on 64 mono tracks with half lacking effects,
   and +25% / +24% with one track in eight lacking the limiter. Recovery is #987; not attempted here.
+
+## Sol attempt 1 verdict: PASS
+
+Adversarial review of `28964870..31c78b5a` (fix `954790d1`), 2026-09-27. x86_64 (`x86-64-v3`),
+debug, `CARGO_INCREMENTAL=0`; no timed run. Four lanes = the prototype's `miso_native_simd4`
+`Backend::current()` hunk in a scratch copy of the branch (own target dirs, never in this tree):
+`Backend::current()` is the only width selector, and the four-lane kernels it selects already build
+and run natively under the graph tests; no wasm test runner is installed.
+
+### What was checked
+
+* **Reproducers.** `collapse_arming` on base: 2 passed / 7 failed at 8 lanes and at 4, with the
+  recorded first differences (R from 0, 240, 512) and counters ([32,4], [64,4] at 4 lanes; count
+  gate 2 vs 1 and 4 vs 2). On the fix: 9/9 at both widths.
+* **Randomized probe** (scratch `verify970_probe.rs`): mono-heavy sessions of 1-20 tracks (some
+  stereo, mono on channel 0 or 1), random strips over EQ, compressor (dual/max/avg link), delay,
+  limiter, soft-clip, gate, transient shaper in all three racks, bypass, symmetric/asymmetric
+  trim, polarity, HPF/LPF and input delay, random pan/fader, sends at all seven taps, routed
+  sidechains, random meter tap, observation taps, live writes on the input, fader, matrix and
+  effect queues (left/right/both), and optionally left/right automation of trim and EQ gain.
+  Armed against `force_mono_collapse_off(true)`, output bits compared. **Fix: 0 differences in
+  2,245 rendered sessions at 8 lanes and 1,954 at 4** (60-75% collapsing, about 20% (8) / 50% (4)
+  holding an all-mono later chain left unarmed). **Base, same generator: 19 of 748 differ at 8
+  lanes, 56 of 441 at 4**, so the probe discriminates. Other paths (plan swaps, rebinds,
+  observation activation): `UnitIdentity` is built only in `build_sequential` and the only
+  production arm is `host-core/src/prepare.rs:1646`, which every prepare entry reaches.
+* **Standing rows.** All 17 `native_session_rows()`, 32 blocks, base against fix: shape,
+  collapse counters, transitions, route folds, scatter redirects, both censuses, unit and bank
+  counts, a digest of the whole `unit_eligibility()` rows and the output SHA-256 are identical at
+  8 and 4 lanes (`_mono` [256,8]/[512,16], `half_mono` [128,4]/[256,8]).
+* **Layout.** One read site of the old bool (`graph/src/lib.rs:2876`), behaviour-identical
+  (`banked()` is `!Plain`, and `of` yields `Plain` exactly when membership is empty). No `Runtime`
+  field. `cargo check -p graph` and `-p host-web --target wasm32-unknown-unknown` pass; capi
+  `resource_lifecycle` 4/4 and the console-workload lib resource test pass.
+* **Mutations.** M1-M4 reproduced exactly (M1: 7 red; M2: 6 red + 9 `chain_shape`; M3: 3 red +
+  2 `chain_shape`; M4: wasm32 const assertion, native still builds).
+* **Gates.** fmt; clippy `--workspace --all-targets --all-features -D warnings`; doc `-D warnings`;
+  `-p graph` 110, `--features test-support` 117, `-p rack` 54, `-p graph-compiler` 101,
+  `-p builtins-compiler --features test-support` 79, `-p host-core --all-features` 234 (+2
+  ignored), `-p capi` 36, `-p console-workload` 39 (+2 ignored); graph, realtime and rack policy
+  scripts pass (the first two are mode 644 in the tree and need `bash`).
+
+### Findings (none blocking)
+
+1. **Low, docs outside the authorized paths: follow-up.** `crates/rack/src/lib.rs:2748-2749`
+   defines `BankChain::arm_mono_collapse`'s `structural` as "every active lane of this chain
+   renders a track whose two channels read one source channel", the per-track premise #970
+   refutes; `:1828` and `crates/host-core/src/lib.rs:211-213` say the same. The M3 comment at
+   `crates/rack/src/lib.rs:2521-2527` is true again and needs no change. Follow-up (doc-only):
+   restate `structural` as "this chain gathers its tracks' input (every active lane's first slot
+   is its track's `PostInputBuiltins` stage) and each of those tracks reads one source channel;
+   a chain fed by an earlier unit must be passed `false` (#970)", and add "on a chain that gathers
+   the track input" at the other two sites.
+2. **Low, plan surface: follow-up.** `crates/engine/src/realtime/plan.rs:185-228` tells a
+   caller to join `lane_eligible` with `SOURCE` through `lane_tracks`. That now over-reports every
+   later chain of a split strip, and neither `console-workload`'s `bank_symmetry_counters`
+   (`tools/console-workload/src/lib.rs:1518`) nor this issue's own count gate (proxy
+   `banked && upstream_of_seam_stages > 0`) can see the armed set. Follow-up: add
+   `pub gathers_track_input: bool` to `PlanUnitEligibility`, filled at
+   `crates/graph/src/lib.rs:2876` from `identity.banking.gathers_track_input()`; limit the doc's
+   join to rows where it holds; have `collapse_arming.rs` assert that the second chain of each
+   cohort reports `false`.
+3. **Low, one important mutation survives.** Changing `UnitBanking::of`'s
+   `(false, _) => Plain` (`crates/graph/src/runtime.rs:2016`) to map a plain op whose node is
+   `PostInputBuiltins` onto `BankGatheringTrackInput` passes `collapse_arming`, `chain_shape` and
+   `-p graph`. No audio changes (`arm_mono_collapse` skips non-bank units), but
+   `PlanUnitEligibility::banked` would be wrong for an unbanked input stage. A row assertion on a
+   one-track session, or a unit test of `of`, kills it. Also surviving, and equivalent: dropping
+   `lanes > 0` (redundant with the empty-lanes guard) and `any` for `all` (a graph bank slot has
+   one stage and one lane set, `runtime.rs:4031`), as recorded.
+4. **Nit.** The `954790d1` message says "seven reproducers" and lists six. M1's "all seven
+   reproducers and the count gate red" is 7 red in total: 6 reproducers and the count gate.
+5. **Info, pre-existing, unrelated.** Some valid sessions are refused at prepare with
+   `graph.scheduler.layout` on the base as well as the fix (2 of 1,500 at 8 lanes, about 1.5% at
+   4), against `runtime.rs:368-369`'s "the graph compiler never emits either". Reduced reproducer:
+   8 mono tracks all routed to `main-out`, each with a `simd1` compressor (link `average`), mixed
+   EQ/soft-clip programs and per-track asymmetries (7 tracks or no effects pass). It fails safe,
+   not wrong audio, and deserves its own issue. The scratch `reduced-nobus.json` holds it.
+6. **Info.** Four-lane coverage exists only by the scratch hunk; CI runs these tests at 8 lanes.
+   The tests are written width-free, which is the right mitigation. Cost is unmeasured by design;
+   recovery is #987.
