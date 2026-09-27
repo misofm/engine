@@ -624,46 +624,56 @@ impl<'a> OutputSources<'a> {
         claims: &[],
     };
 
-    /// Input `position`'s two planes: its claim's played planes, or the silence buffer on `None`,
-    /// if that input is read in place; otherwise arena buffer `buffer`, as before the issue. One
-    /// table read and one predictable branch per input per block; nothing is copied.
+    /// One group of inputs' planes, into `planes` slot for slot (issue #937): input
+    /// `first + i` is arena buffer `buffers[i]`, as before issue #927, unless it is read in place,
+    /// when it is its claim's played planes, or the silence buffer on `None`. The in-place inputs
+    /// of the group are resolved by one [`crate::GraphSourcePlanes::played_planes_group`] call,
+    /// which asks the source set once per claim with the set's own checks; nothing is copied.
+    ///
+    /// A claim table that does not cover the group reads every input from the arena, as
+    /// [`Self::NONE`] does. [`route_reduce`] has already refused a claim table that is neither
+    /// empty nor one entry per input.
     #[inline]
-    fn input<'b>(
+    fn resolve_group<'b>(
         self,
         lease: &'b ArenaLease,
-        position: usize,
-        buffer: u32,
-    ) -> (&'b [f32], &'b [f32])
-    where
+        first: usize,
+        buffers: &[u32],
+        planes: &mut [(&'b [f32], &'b [f32])],
+    ) where
         'a: 'b,
     {
-        let claim = self
+        let lent = self
             .claims
-            .get(position)
-            .copied()
-            .unwrap_or(NO_SOURCE_CLAIM);
-        if claim != NO_SOURCE_CLAIM
-            && let Some(planes) = self.planes
-        {
-            return match planes.played_planes(claim as usize) {
-                Some(played) => {
-                    #[cfg(any(test, feature = "test-support"))]
-                    test_only_count_source_plane(1);
-                    played
-                }
-                None => {
-                    #[cfg(any(test, feature = "test-support"))]
-                    test_only_count_source_plane(2);
-                    lease.read_stereo(ARENA_SILENCE_BUFFER)
-                }
-            };
+            .get(first..first + buffers.len())
+            .zip(self.planes);
+        let Some((claims, set)) = lent else {
+            for (slot, &buffer) in planes.iter_mut().zip(buffers) {
+                *slot = lease.read_stereo(buffer);
+            }
+            return;
+        };
+        for ((slot, &buffer), &claim) in planes.iter_mut().zip(buffers).zip(claims) {
+            if claim == NO_SOURCE_CLAIM {
+                *slot = lease.read_stereo(buffer);
+            }
         }
-        lease.read_stereo(buffer)
+        set.played_planes_group(claims, lease.read_stereo(ARENA_SILENCE_BUFFER), planes);
     }
 }
 
+/// How many inputs [`route_reduce`] resolves and reduces at a time (issue #937).
+///
+/// A batch size, not a track cap: any fan-in is walked in as many groups as it takes. It is even,
+/// so a pair never straddles two groups and only the last group can end in a lone input. One
+/// group's table is eight slice pairs on the stack, rebuilt per group. A single table for every
+/// input was measured slower on the 64-track plumbing row, and it would need a compiled maximum
+/// (`docs/handoffs/plumbing-floor-2026-09-26/DIAGNOSIS-2.md`, change 2).
+const OUTPUT_GROUP: usize = 8;
+
 /// The session Output op's reduction with each contributor's route fused in, one **pair** of
-/// inputs at a time (issue #926; the fold's eligibility is issue #920's, [`output_route_fold`]).
+/// inputs at a time (issue #926; the fold's eligibility is issue #920's, [`output_route_fold`]),
+/// the inputs resolved [`OUTPUT_GROUP`] at a time (issue #937).
 ///
 /// Input `i` is the buffer a plain route ran in place over, and `routes[i]` is that route's
 /// folded 2x2. The route op itself is retired at bind, so the buffer holds the route's *input*.
@@ -679,37 +689,48 @@ impl<'a> OutputSources<'a> {
 /// * **The sum** is [`reduce_many`]'s one left-to-right chain, `((m0 + m1) + m2) + ...` in edge
 ///   order. The first pair stores `m0 + m1`, with the first contributor taken as the value, so a
 ///   `-0.0` survives (the fan-in is at least two, so the first pair is always whole); every later
-///   pair, the odd fan-in's lone last input included, reloads the running sum from the host plane
-///   and adds its `m_i` left to right. Where the chain is stored and reloaded does not matter: a store and a
-///   load move no bit, which is the argument [`reduce_many`] already makes for its group
-///   boundaries. So groups of two here and groups of [`REDUCE_GROUP`] there are the same chain.
+///   pair computes `(load + m_2k) + m_(2k+1)`, and the odd fan-in's lone last input
+///   `load + m`, reloading the running sum from the host plane. Where the chain is stored and
+///   reloaded does not matter: a store and a load move no bit, which is the argument
+///   [`reduce_many`] already makes for its group boundaries. So groups of two here and groups of
+///   [`REDUCE_GROUP`] there are the same chain.
+///
+/// **Groups** (issue #937). Each group's planes are resolved once into a stack table by
+/// [`OutputSources::resolve_group`], one call into the source set per group for the inputs read
+/// in place, and [`route_group`] checks every plane's length once for the group before it runs
+/// the group's pairs. A group boundary is a pair boundary, so grouping adds no store or reload
+/// that the pairs did not already make, and moves no bit.
 ///
 /// **Why pairs.** Each pair hoists its eight coefficients as splats before its chunk loop, and
 /// that loop keeps eight coefficients, two running sums, two loads and two temporaries live,
 /// fourteen of sixteen AVX2 registers. A group of four or eight spills its coefficients, and a
 /// per-chunk broadcast costs a load-port operation per coefficient per chunk; the pair was the
 /// fastest of every group size and coefficient policy measured (`docs/handoffs/plumbing-floor-
-/// 2026-09-26/PLAN.md`, table C). An odd fan-in's last input is the same body at `G = 1`.
+/// 2026-09-26/PLAN.md`, table C). An odd fan-in's last input is the same body for one input.
 ///
-/// **Why the tail is outlined.** The frames that do not fill a vector run the same body at
+/// **Why the tail is outlined.** The frames that do not fill a vector run the same chain at
 /// `L = f32`, as every D9 kernel finishes its tail, but in [`route_tail`]: a separate, non-generic,
-/// never-inlined function. Inlined here, LLVM unrolls the up-to-three `f32` tail frames of the
-/// wasm build's four-lane instantiation into three scalar operations per vector one, and the
-/// AudioWorklet artifact gate (`scripts/check-web-audioworklet-callgraph.py`, rule 3) rejects any
-/// function instantiated at the four-lane type whose scalar arithmetic is not strictly below its
-/// vector arithmetic. Issue #920's kernel failed it exactly that way (560 vector against 1,680
-/// scalar). This function is itself never inlined, so its four-lane instantiation stays one named
-/// symbol that the gate inspects on every build; the call is once per block.
+/// never-inlined function. Inlined into the vector kernel, LLVM unrolls the up-to-three `f32`
+/// tail frames of the wasm build's four-lane instantiation into three scalar operations per
+/// vector one, and the AudioWorklet artifact gate (`scripts/check-web-audioworklet-callgraph.py`,
+/// rule 3) rejects any function instantiated at the four-lane type whose scalar arithmetic is
+/// not strictly below its vector arithmetic. Issue #920's kernel failed it exactly that way (560
+/// vector against 1,680 scalar). [`route_group`], which holds every vector operation, is itself
+/// never inlined, so its four-lane instantiation stays one named symbol that the gate inspects on
+/// every build. The tail is one call per pair per block, and only when the quantum is not a
+/// multiple of the lane width.
 ///
 /// Both planes are formed in one pass per pair, because both mixes read both input planes: each
 /// input word is loaded once where the two-pass form would load it twice. Each output plane's
-/// arithmetic does not depend on the other's, so the pass order changes no bit. Within a pair,
-/// the vector frames run before the tail frames, and frames are independent, so each frame still
-/// sees the pairs in edge order.
+/// arithmetic does not depend on the other's, so the pass order changes no bit. Within a group,
+/// every pair's vector frames run before any pair's tail frames, each in edge order, and frames
+/// are independent, so each frame still sees the pairs in edge order.
 ///
 /// `false`, before the first write, for a table that does not match the inputs, a fan-in below
 /// two, or host planes that are not `lease.frames()` words (which `HostMaster::new` already
-/// rules out). The caller turns `false` into an error.
+/// rules out); and `false`, before that group's first write, for a group with a plane that is not
+/// `lease.frames()` words (which the arena and the source set rule out). The caller turns `false`
+/// into an error.
 #[inline(never)]
 fn route_reduce<L: Lane>(
     lease: &ArenaLease,
@@ -728,105 +749,187 @@ fn route_reduce<L: Lane>(
     {
         return false;
     }
-    let vectored = frames - frames % L::WIDTH;
-    for (index, (pair, table)) in inputs.chunks(2).zip(routes.chunks(2)).enumerate() {
-        let initial_store = index == 0;
-        let first = 2 * index;
-        let reduced = match (pair, table) {
-            (&[first_input, second_input], &[first_route, second_route]) => route_pair::<L, 2>(
-                lease,
-                sources,
-                first,
-                [first_input, second_input],
-                &[first_route, second_route],
-                left,
-                right,
-                vectored,
-                initial_store,
-            ),
-            (&[only], &[only_route]) => route_pair::<L, 1>(
-                lease,
-                sources,
-                first,
-                [only],
-                &[only_route],
-                left,
-                right,
-                vectored,
-                initial_store,
-            ),
-            _ => false,
+    for (index, (buffers, table)) in inputs
+        .chunks(OUTPUT_GROUP)
+        .zip(routes.chunks(OUTPUT_GROUP))
+        .enumerate()
+    {
+        let mut resolved: [(&[f32], &[f32]); OUTPUT_GROUP] = [(&[], &[]); OUTPUT_GROUP];
+        let Some(planes) = resolved.get_mut(..buffers.len()) else {
+            return false;
         };
-        if !reduced {
+        sources.resolve_group(lease, index * OUTPUT_GROUP, buffers, planes);
+        if !route_group::<L>(planes, table, left, right, index == 0) {
             return false;
         }
     }
     true
 }
 
-/// One pair of routed inputs (`G = 2`), or an odd fan-in's last input (`G = 1`), into both host
-/// planes: the vector frames at `L` here, then the tail frames, if any, in [`route_tail`].
+/// One group of [`route_reduce`]'s resolved inputs into both host planes (issue #937): every
+/// pair's vector frames at `L`, in edge order, then the odd last input's (the lone input is only
+/// ever the block's last); then, if the lane width leaves a tail, every pair's and the lone
+/// input's tail frames in [`route_tail`], in the same order. `store` is set for the block's first
+/// group, whose first pair stores `m0 + m1` instead of adding to the host planes.
 ///
-/// `first` is the pair's first input position, and each input's planes are what
-/// [`OutputSources::input`] serves for it: the arena buffer `ids` names, or its claim's played
-/// block (issue #927). Both are formed once per input per block, before any word is read, and
-/// every word the loops below read comes from them. Every input plane is `lease.frames()` words:
-/// [`ArenaLease::read`]'s, and a played plane is held to the quantum by the source set
-/// ([`crate::GraphSourcePlanes`]), which is the lease's frames. [`route_reduce`] has checked the
-/// host planes against it, so the shape check below never fails; it is what lets the slicing below
-/// compile without a bounds check.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the pair's reads, its table and the host planes stay explicit parameters"
-)]
-#[inline(always)]
-fn route_pair<L: Lane, const G: usize>(
-    lease: &ArenaLease,
-    sources: OutputSources<'_>,
-    first: usize,
-    ids: [u32; G],
-    table: &[[f32; 4]; G],
+/// Every input plane must be `left.len()` words: [`ArenaLease::read`]'s, or a played plane the
+/// source set held to the quantum ([`crate::GraphSourcePlanes`]), which is the lease's frames.
+/// This is checked here, once for the group, before any write, and so are the table and the host
+/// planes: any other shape is `false` before the group's first write. After it, each pair is a
+/// plain zip of `chunks_exact(L::WIDTH)` iterators over the two host planes and its four input
+/// planes, with no per-chunk exhaustion test or bounds check.
+///
+/// Generic and never inlined on purpose: see [`route_reduce`], "Why the tail is outlined".
+#[inline(never)]
+fn route_group<L: Lane>(
+    planes: &[(&[f32], &[f32])],
+    routes: &[[f32; 4]],
     left: &mut [f32],
     right: &mut [f32],
-    vectored: usize,
-    initial_store: bool,
+    store: bool,
 ) -> bool {
-    let planes: [(&[f32], &[f32]); G] =
-        core::array::from_fn(|member| sources.input(lease, first + member, ids[member]));
-    let lefts = planes.map(|(left, _)| left);
-    let rights = planes.map(|(_, right)| right);
     let frames = left.len();
-    if vectored > frames
+    if planes.len() != routes.len()
+        || planes.is_empty()
+        || (store && planes.len() < 2)
         || right.len() != frames
-        || lefts
-            .iter()
-            .chain(rights.iter())
-            .any(|plane| plane.len() != frames)
+        || planes.iter().any(|(input_left, input_right)| {
+            input_left.len() != frames || input_right.len() != frames
+        })
     {
         return false;
     }
-    let (left_vectors, left_tail) = left.split_at_mut(vectored);
-    let (right_vectors, right_tail) = right.split_at_mut(vectored);
-    route_run::<L, G>(
-        left_vectors,
-        right_vectors,
-        lefts.map(|plane| &plane[..vectored]),
-        rights.map(|plane| &plane[..vectored]),
-        table,
-        initial_store,
-    ) && (left_tail.is_empty()
-        || route_tail(
+    let vectored = frames - frames % L::WIDTH;
+    let (Some((left_vectors, left_tail)), Some((right_vectors, right_tail))) = (
+        left.split_at_mut_checked(vectored),
+        right.split_at_mut_checked(vectored),
+    ) else {
+        return false;
+    };
+    let (pairs, lone) = planes.as_chunks::<2>();
+    let (pair_routes, lone_route) = routes.as_chunks::<2>();
+    for (index, (pair, table)) in pairs.iter().zip(pair_routes).enumerate() {
+        route_pair_vectors::<L>(
+            left_vectors,
+            right_vectors,
+            pair,
+            table,
+            store && index == 0,
+        );
+    }
+    if let (&[input], &[route]) = (lone, lone_route) {
+        route_lone_vectors::<L>(left_vectors, right_vectors, input, &route);
+    }
+    if left_tail.is_empty() {
+        return true;
+    }
+    // A plane of the group's length ends in exactly the host planes' tail: the remainder of its
+    // `L::WIDTH` chunks is its last `frames % L::WIDTH` words, taken without a bounds check.
+    fn tail<L: Lane>(plane: &[f32]) -> &[f32] {
+        plane.chunks_exact(L::WIDTH).remainder()
+    }
+    for (index, (&[(first_left, first_right), (second_left, second_right)], table)) in
+        pairs.iter().zip(pair_routes).enumerate()
+    {
+        if !route_tail(
             left_tail,
             right_tail,
-            &lefts.map(|plane| &plane[vectored..]),
-            &rights.map(|plane| &plane[vectored..]),
+            &[tail::<L>(first_left), tail::<L>(second_left)],
+            &[tail::<L>(first_right), tail::<L>(second_right)],
             table,
-            initial_store,
-        ))
+            store && index == 0,
+        ) {
+            return false;
+        }
+    }
+    if let (&[(only_left, only_right)], &[route]) = (lone, lone_route) {
+        return route_tail(
+            left_tail,
+            right_tail,
+            &[tail::<L>(only_left)],
+            &[tail::<L>(only_right)],
+            &[route],
+            false,
+        );
+    }
+    true
+}
+
+/// One pair's vector frames: per chunk, `mix(in0) + mix(in1)` stored when `store` (the block's
+/// first pair), else `(load + mix(in0)) + mix(in1)`. The two forms are two loops, so neither
+/// branches per chunk. The pair's eight coefficients are splatted once, before either loop.
+///
+/// `left` and `right` are the host planes' vector frames, a whole number of chunks; each input
+/// plane may run on past them into the tail, which its `chunks_exact` stops short of.
+#[inline(always)]
+fn route_pair_vectors<L: Lane>(
+    left: &mut [f32],
+    right: &mut [f32],
+    [(first_left, first_right), (second_left, second_right)]: &[(&[f32], &[f32]); 2],
+    [first_route, second_route]: &[[f32; 4]; 2],
+    store: bool,
+) {
+    let first = first_route.map(L::splat);
+    let second = second_route.map(L::splat);
+    let outputs = left
+        .chunks_exact_mut(L::WIDTH)
+        .zip(right.chunks_exact_mut(L::WIDTH));
+    let inputs = first_left
+        .chunks_exact(L::WIDTH)
+        .zip(first_right.chunks_exact(L::WIDTH))
+        .zip(
+            second_left
+                .chunks_exact(L::WIDTH)
+                .zip(second_right.chunks_exact(L::WIDTH)),
+        );
+    let frames = outputs.zip(inputs);
+    if store {
+        for ((out_left, out_right), ((l0, r0), (l1, r1))) in frames {
+            let (mixed_left, mixed_right) = mix_chunk(&first, l0, r0);
+            let (next_left, next_right) = mix_chunk(&second, l1, r1);
+            mixed_left.add(next_left).store(out_left);
+            mixed_right.add(next_right).store(out_right);
+        }
+    } else {
+        for ((out_left, out_right), ((l0, r0), (l1, r1))) in frames {
+            let (mixed_left, mixed_right) = mix_chunk(&first, l0, r0);
+            let (next_left, next_right) = mix_chunk(&second, l1, r1);
+            L::load(out_left)
+                .add(mixed_left)
+                .add(next_left)
+                .store(out_left);
+            L::load(out_right)
+                .add(mixed_right)
+                .add(next_right)
+                .store(out_right);
+        }
+    }
+}
+
+/// An odd fan-in's lone last input over the vector frames: per chunk, `load + mix(in)`. It is
+/// never the block's first input, so it never stores.
+#[inline(always)]
+fn route_lone_vectors<L: Lane>(
+    left: &mut [f32],
+    right: &mut [f32],
+    (input_left, input_right): (&[f32], &[f32]),
+    route: &[f32; 4],
+) {
+    let coefficients = route.map(L::splat);
+    let frames = left
+        .chunks_exact_mut(L::WIDTH)
+        .zip(input_left.chunks_exact(L::WIDTH))
+        .zip(right.chunks_exact_mut(L::WIDTH))
+        .zip(input_right.chunks_exact(L::WIDTH));
+    for (((out_left, l), out_right), r) in frames {
+        let (mixed_left, mixed_right) = mix_chunk(&coefficients, l, r);
+        L::load(out_left).add(mixed_left).store(out_left);
+        L::load(out_right).add(mixed_right).store(out_right);
+    }
 }
 
 /// The tail frames of one pair (or lone input) at `f32`: [`route_run::<f32, G>`](route_run), the
-/// same body the vector frames run, in a function of its own.
+/// same chain [`route_group`] runs over the vector frames, in a function of its own.
 ///
 /// Non-generic and never inlined on purpose, and not for speed (it runs only when the quantum is
 /// not a multiple of the lane width): see [`route_reduce`], "Why the tail is outlined". Its `f32`
@@ -874,14 +977,17 @@ fn route_tail(
     }
 }
 
-/// One width's share of one pair: every slice has one common length, a multiple of `L::WIDTH`.
+/// The tail's body: one pair (`G = 2`) or a lone input (`G = 1`) over frames that every slice
+/// has in common, a multiple of `L::WIDTH`. [`route_tail`] runs it at `f32`; the vector frames
+/// run the same chain in [`route_pair_vectors`] and [`route_lone_vectors`] (issue #937), which
+/// drop the per-chunk exhaustion test below because [`route_group`] checks every length first.
 ///
 /// The pair's coefficients are splatted once, before the loop: eight for a pair, four for a lone
 /// input. The pair's four input planes and the two host planes are then walked together by
 /// `chunks_exact(L::WIDTH)` in one loop. Per chunk: the first pair's value is `mix(in0)`, a later
 /// pair's is `load(out) + mix(in0)`; then `+ mix(in1)`; then the store. As in
 /// [`accumulate_run`], the store and accumulate forms are two loops, so neither branches per
-/// chunk.
+/// chunk. An input that runs out is `false`.
 #[inline(always)]
 fn route_run<L: Lane, const G: usize>(
     left: &mut [f32],
@@ -5070,7 +5176,7 @@ pub fn test_only_source_plane_counts() -> [u64; 3] {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-fn test_only_count_source_plane(slot: usize) {
+pub(crate) fn test_only_count_source_plane(slot: usize) {
     SOURCE_PLANE_COUNTS.with(|counts| {
         let mut value = counts.get();
         value[slot] += 1;
@@ -14191,7 +14297,7 @@ mod tests {
         let bits = |words: &[f32]| words.iter().map(|word| word.to_bits()).collect::<Vec<_>>();
         let mut state = 0x0920_u64 ^ L::WIDTH as u64;
         for frames in [1, 3, 7, 8, 13, 16, 33, 64] {
-            for fan_in in (2..=19_usize).chain([64]) {
+            for fan_in in (2..=19_usize).chain([64, 257]) {
                 for negative_zero in [false, true] {
                     // Buffer 0 is the silence buffer and buffer 1 the op's own (unused) output;
                     // then the routes' inputs, then the buffers the route ops mix in place.
@@ -14299,15 +14405,20 @@ mod tests {
     /// Hostile words (signed zeros, subnormals, magnitudes over `2^-24 .. 2^25`) and a hostile 2x2
     /// per route; `frames` with and without ragged tails at both widths, so the outlined
     /// `route_tail` runs for every pair shape; fan-in two to nineteen (one to nine pairs, and every
-    /// odd fan-in's lone last input) and sixty-four (thirty-two pairs, the plumbing row's); and a
-    /// signed-zero case whose master must stay `-0.0`. The oracle reduces in groups of eight and
-    /// the candidate in pairs, so every fan-in above two also checks that moving the store/reload
-    /// boundary moves no bit. The width is free because `Lane::fma` is two roundings on every
-    /// backend, and the oracle's route ops run at `FrameLane` whatever the candidate's width.
+    /// odd fan-in's lone last input, which covers one, two and three groups of
+    /// [`OUTPUT_GROUP`] and every partial last group), sixty-four (thirty-two pairs, the plumbing
+    /// row's) and 257 (issue #937: thirty-two whole groups and a lone input in a group of its
+    /// own, odd and above every power of two the group size divides, so the group is a batch
+    /// size and no track cap); and a signed-zero case whose master must stay `-0.0`. The oracle
+    /// reduces in groups of eight and the candidate in pairs, so every fan-in above two also
+    /// checks that moving the store/reload boundary moves no bit. The width is free because
+    /// `Lane::fma` is two roundings on every backend, and the oracle's route ops run at
+    /// `FrameLane` whatever the candidate's width.
     ///
     /// Red mutations (`crates/graph/tests/MUTATIONS.md`, issue #926): reverse the accumulation,
     /// seed the first pair from `+0.0`, mix the running sum instead of the input, swap the
-    /// coefficient roles, store in every pair, skip an odd fan-in's lone last input.
+    /// coefficient roles, store in every pair, skip an odd fan-in's lone last input. Issue #937:
+    /// reassociate a later pair, and reduce only the first seven inputs of a group of eight.
     #[test]
     fn a_route_reduction_is_the_route_ops_and_the_reduction_bit_for_bit() {
         assert_route_reduce_is_the_route_ops_and_the_reduction::<f32>();
@@ -16352,5 +16463,106 @@ mod tests {
         assert_route_reduce_reads_lent_inputs_as_the_copy::<f32>();
         assert_route_reduce_reads_lent_inputs_as_the_copy::<lane::Simd4>();
         assert_route_reduce_reads_lent_inputs_as_the_copy::<lane::Simd8>();
+    }
+
+    /// Issue #937: a source set's group call is its per-claim call, claim for claim.
+    ///
+    /// A claim's slot gets exactly the planes the set's own `played_planes` lends for it, or the
+    /// silence planes where that is `None`: an underrun, a short plane the set refuses, and an
+    /// index past the set's claims. A `NO_SOURCE_CLAIM` slot keeps the arena planes the caller put
+    /// there. The counters see one played or one silent read per claim, which is what the
+    /// per-input reads counted before the issue. Slices are compared by address and length, so a
+    /// slot cannot pass by holding equal words from somewhere else.
+    #[test]
+    fn a_source_sets_group_call_is_its_per_claim_call() {
+        const FRAMES: usize = 5;
+        /// Claim 1 underruns and claim 2's right plane is one word short; every other index lends
+        /// a quantum, including 3, which is not one of the set's claims.
+        struct Lender(Vec<f32>);
+        impl crate::GraphPreparedSourceSetDriver for Lender {
+            fn claim_count(&self) -> usize {
+                3
+            }
+            fn begin_block(&mut self, _: u64, _: u32) -> Result<(), RenderError> {
+                Ok(())
+            }
+            fn copy_track_input(
+                &mut self,
+                _: usize,
+                _: &mut [f32],
+                _: &mut [f32],
+            ) -> Result<(), RenderError> {
+                Ok(())
+            }
+            fn provides_played_planes(&self) -> bool {
+                true
+            }
+            fn played_planes(&self, claim: usize) -> Option<(&[f32], &[f32])> {
+                let right = match claim {
+                    1 => return None,
+                    2 => FRAMES - 1,
+                    _ => FRAMES,
+                };
+                Some((&self.0[..FRAMES], &self.0[FRAMES..FRAMES + right]))
+            }
+        }
+        let envelope = engine::realtime::RenderEnvelope {
+            sample_rate: engine::SampleRateHz(48_000),
+            quantum: engine::QuantumFrames(FRAMES as u32),
+            input_channels: None,
+            output_channels: NonZeroUsize::new(2).expect("stereo"),
+        };
+        let claim = |track: &str| crate::GraphSourceInputClaim {
+            node: GraphNodeId::TrackStage {
+                track_id: crate::StableGraphId::parse(track).expect("track id"),
+                stage: TrackStage::Input,
+            },
+        };
+        let words: Vec<f32> = (0..2 * FRAMES).map(|word| word as f32).collect();
+        let set = crate::GraphPreparedSourceSet::new(
+            envelope,
+            vec![claim("a"), claim("b"), claim("c")],
+            crate::GraphSourceSetResourceReport {
+                pcm_payload_already_charged_bytes: 0,
+                overhead_bytes: 0,
+                total_engine_owned_bytes: 0,
+                largest_allocation_bytes: 0,
+            },
+            Box::new(Lender(words.clone())),
+        );
+        let (silent, resident) = ([0.0_f32; FRAMES], [0.5_f32; FRAMES]);
+        let silence = (&silent[..], &silent[..]);
+        let arena = (&resident[..], &resident[..]);
+        let claims = [0, NO_SOURCE_CLAIM, 1, 2, 3, 0, NO_SOURCE_CLAIM];
+        let mut planes = [arena; 7];
+        test_only_source_plane_reset();
+        crate::GraphSourcePlanes::played_planes_group(&set, &claims, silence, &mut planes);
+        assert_eq!(
+            test_only_source_plane_counts(),
+            [0, 2, 3],
+            "[copies, played reads, silent reads]: claims 0 and 0 played; 1, 2 and 3 silent"
+        );
+        let same = |slot: (&[f32], &[f32]), expected: (&[f32], &[f32])| {
+            core::ptr::eq(slot.0, expected.0) && core::ptr::eq(slot.1, expected.1)
+        };
+        for (position, (&claim, &slot)) in claims.iter().zip(&planes).enumerate() {
+            let expected = if claim == NO_SOURCE_CLAIM {
+                arena
+            } else {
+                crate::GraphSourcePlanes::played_planes(&set, claim as usize).unwrap_or(silence)
+            };
+            assert!(
+                same(slot, expected),
+                "slot {position}, claim {claim}: the per-claim call's planes"
+            );
+        }
+        assert_eq!(
+            planes[0],
+            (&words[..FRAMES], &words[FRAMES..]),
+            "a lent claim's words"
+        );
+        for position in [2, 3, 4] {
+            assert!(same(planes[position], silence), "slot {position}: silence");
+        }
     }
 }

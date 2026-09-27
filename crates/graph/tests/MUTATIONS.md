@@ -464,3 +464,37 @@ Disclosed equivalent mutants:
   either, because the caller hands exactly `W * W` words. The length of `rows` is then not a
   constant, so the release `W = 8` tile loop keeps a chain of five row-bounds compares, where the
   slice leaves one (`cmp $0x40`) per tile. Also a codegen property, not a test.
+
+## Issue #937 — Output inputs resolved in groups of eight, and the tighter pair kernel
+
+Each row was applied alone to `40c62101` as an exact-text replacement (match count one, checked
+before writing), the suites were run with `--no-fail-fast`, and the file was restored with
+`git checkout` before the next row. Host: `x86_64` (`.cargo/config.toml` pin
+`-C target-feature=+avx2,+fma`), debug profile. The tests these rows name:
+
+- "Gate 1" is `runtime::tests::a_route_reduction_is_the_route_ops_and_the_reduction_bit_for_bit`
+  (#926's kernel oracle, whose sweep this issue extends to fan-in 257). It visits `f32`, then
+  `Simd4`, then `Simd8`, each over frames {1, 3, 7, 8, 13, 16, 33, 64} and fan-in 2..=19, 64, 257,
+  so its first failure names the narrowest width and the smallest case a row reaches.
+- "The lent test" is `runtime::tests::a_route_reduction_reads_each_lent_input_as_the_copys_words`,
+  and "the group test" is this issue's `runtime::tests::a_source_sets_group_call_is_its_per_claim_call`.
+- "#927's gates 1 and 2" are `a_plain_strip_source_is_read_in_place_by_the_fused_output_with_the_copy_bits`
+  and `a_claim_with_another_reader_keeps_the_copy_and_the_copy_bits`; "#936's gates" are
+  `an_unobserved_source_input_is_not_dispatched_and_moves_no_bit`,
+  `an_observed_source_input_stays_dispatched_and_meters_the_base_values` and
+  `a_delayed_claim_stays_dispatched_and_renders_the_base_bits`.
+- "The console counter gate" is console-workload `tests::the_driver_fed_plumbing_row_renders_the_bound_rows_bits`
+  (`[0, claims * BLOCKS, 0]`); "the console digests" are chain_shape
+  `the_plumbing_row_is_input_route_output_and_renders_the_base_bits` (`BASE_DIGEST`) and
+  `the_plumbing_rows_output_fold_is_the_route_ops_own_bits`.
+- "Rule 3" is `scripts/check-web-audioworklet-callgraph.py --kernel-shape --kernel-pattern
+  '4wide6f32x[48]' --kernel-min 11` over `wasm-objdump -d` of the simd128 AudioWorklet module,
+  built with `scripts/build-web-audioworklet.sh`'s own cargo line and flags.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 937-1 | reassociate a later pair as `load + (m_2k + m_(2k+1))` (both planes of `route_pair_vectors`' accumulate loop) | `graph/src/runtime.rs` `route_pair_vectors` | `cargo test -p graph --lib --features test-support`; `cargo test -p console-workload` | RED. graph 7 of 114: gate 1 `width 1, 1 frames, fan-in 7, -0.0 false: right` (`1118879272` against `1118879273`; fan-ins 4 to 6 are the first with a later pair, and their one-frame sums happen to round alike), #926's `an_output_route_fold_is_the_route_ops_and_the_reduction_bit_for_bit` (`Plain, fan-in 64, 13 frames, block 0: the host planes`), #927's gates 1 and 2 (`the declined arm is the pre-change executor`) and #936's three gates (`every host word and meter frame is the pre-change executor's`). Console: both console digests (`9b7337c3...` against `BASE_DIGEST` `57535244...`). GREEN: the lent test and the console counter gate, which compare the kernel with itself. |
+| 937-2 | drop the played-read counter call (`Some(played) => played,` in the provided body) | `graph/src/lib.rs` `GraphSourcePlanes::played_planes_group` | `cargo test -p graph --features test-support`; console-workload `--lib`; host-core `--test source_in_place` | RED. graph 4 of 114: the group test (`[0, 0, 3]` against `[0, 2, 3]`), the lent test (`width 1, 1 frames, fan-in 2`, `[0, 0, 0]` against `[0, 1, 0]`), #927's gate 1 (`Plain, 1 frames, block 0: in place`, `[0, 0, 0]` against `[0, 64, 0]`) and gate 2 (`SendTap`, `[1, 0, 0]` against `[1, 63, 0]`). Console counter gate RED (`[0, 0, 0]` against `[0, 4096, 0]`). **GREEN on host-core `source_in_place`**: it pins #918's bank gathers, which count at `ArenaMembers::plane`, the other counter site, and which this issue does not touch; it is listed in gate 2 as a must-stay-green test, not as this row's witness. rt10, rt1 and rt9 green (no bit moves). |
+| 937-2b | drop the silent-read counter call (`None => silence,`) | `graph/src/lib.rs` `GraphSourcePlanes::played_planes_group` | `cargo test -p graph --features test-support`; console-workload `--lib` | RED. graph 4 of 114: the lent test (`width 1, 1 frames, fan-in 9`, the first fan-in with a silent input: `[0, 5, 0]` against `[0, 5, 1]`), the group test (`[0, 2, 0]` against `[0, 2, 3]`), #927's gates 1 and 2 at the block-3 underrun (`[0, 63, 0]` against `[0, 63, 1]`). GREEN on the console counter gate: the ring row never underruns. |
+| 937-3 | resolve a group of eight but reduce only its first seven (`&planes[..7]`, `&table[..7]` when the group is full) | `graph/src/runtime.rs` `route_reduce` | `cargo test -p graph --features test-support`; `cargo test -p console-workload` | RED. graph 7 of 114: gate 1 at `width 1, 1 frames, fan-in 8, -0.0 false: left` (`1254604654` against `1254604426`), the first fan-in with a full group; #926's fold gate, #927's gates 1 and 2 and #936's three gates as in 937-1. Console: both console digests (`133d291a...`). GREEN: the lent test and the console counter gate (kernel against itself; every lent claim is still resolved and counted). |
+| 937-4 | inline the tail into the vector kernel (`route_tail` marked `#[inline(always)]`), #920's failure shape | `graph/src/runtime.rs` `route_tail` | rule 3 | RED: `FAIL kernel ...route_group...4wide6f32x4...: vector=38 scalar=122`. The committed tree reads `vector=38 scalar=0`, so rule 3 does inspect `route_group<f32x4>`. |
