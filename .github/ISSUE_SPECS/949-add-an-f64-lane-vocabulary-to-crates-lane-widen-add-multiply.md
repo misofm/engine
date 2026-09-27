@@ -286,3 +286,264 @@ issue.
 - **Lane policy.** The policy's marker rule flags `.max(`, `.min(`, `.mul_add(`, `.sqrt(` and
   `f64::sqrt(` in `crates/lane/src`, but not `f64::from(`. If you write any flagged call, it needs a
   `LANE-OP-OK` marker, and none should be needed.
+
+## Attempt 1 evidence
+
+Implementer: attempt 1, 2026-09-27. Branch `codex/949-f64-lane-vocabulary`, base `edc9273a` (the
+#943 branch tip plus this brief). Code commit `6d8867e9`; the follow-up commit carries this record.
+Host AMD EPYC 7313P (Zen 3), rustc 1.97.1, `.cargo/config.toml` pin `+avx2,+fma`, wasmtime 47.0.3,
+wabt `wasm-objdump` 1.0.34, node 22.23.2, `CARGO_INCREMENTAL=0`, the worktree's own `target/`. The
+console benchmark was not run, and no speed-up is quoted: this slice has no caller.
+
+### Design
+
+- **Traits** (`crates/lane/src/f64_lane.rs`, re-exported as `lane::{LaneF64, Widen}`): exactly the
+  brief's two signatures. `LaneF64: Copy + Send + Sync + 'static` with `WIDTH`, `load`, `store`,
+  `add` and `mul`; `Widen: Lane` with `type F64: LaneF64` and `widen`. No other operation.
+- **Implementations**, every method `#[inline(always)]`:
+  - `LaneF64 for f64` (`WIDTH = 1`, `src[0]`, `dst[0]`, `self + b`, `self * b`): the oracle.
+  - `LaneF64 for wide::f64x4` and `wide::f64x8` from one macro, `impl_lane_f64_for_wide!`, in
+    `wide_impl.rs`'s style: `load` copies into `[f64; W]` and calls `new`, `store` uses `to_array`,
+    and `add`/`mul` forward `+`/`*`. None of `wide`'s fused spellings is called.
+  - `Widen for f32` (`f64::from`), `for wide::f32x4` and `for wide::f32x8`, the vector ones exactly
+    `<F64>::new(self.to_array().map(f64::from))`. No `core::arch`.
+  - Three `const _: () = assert!(...)` lines pin `F64::WIDTH == Self::WIDTH` at compile time. They
+    are not trait surface.
+- **Docs.** The numeric contract sits on the traits: widen is exact off NaN and a NaN gives some
+  NaN; add and mul are IEEE binary64 round-to-nearest-even with the NaN payload unspecified; there
+  is no fusion, for `Lane::fma`'s two reasons; the environment dependence is `wide_impl.rs`'s
+  "The one precondition", met by `fpenv`. The module docs cover what is and is not forwarded, the
+  SLP-at-fat-LTO lowering and its pin, and the rlib-assembly trap. `lib.rs` gains a `# f64 lanes`
+  paragraph naming the 2026-09-26 owner ruling and #949, and saying the `f32` `Lane` contract is
+  unchanged.
+- **Tests** (`crates/lane/tests/f64_lane.rs`). Gates 1 to 3 are as briefed, using the brief's
+  integer-construction widen oracle and square oracle. Every vector result is stored through
+  `black_box`, and the output array is `black_box`ed again before it is compared.
+  - A known-value test checks the widen oracle against hand-derived bits before the oracle is
+    trusted.
+  - A tie test proves on scalar `f64` that the pool's rounding members produce exact ties:
+    `1 + 2^-53`, `(1 + 2^-52) + 2^-53`, `2^53 + 1` and `1.5 * (1 + 2^-52)`.
+- **wasm differential** (`tools/wasm-gate-corpus`). `pub fn f64_lane_mismatches(width) -> u32` is
+  modeled on `minmax_lowering_mismatches`: a count with no pin and no case index, so no digest index
+  moves. It runs sets (a), (b) and (c) at `f32`, `Simd4` and `Simd8` through `<L as Widen>::F64`,
+  and the tools crates never name `wide`.
+- **Guest** (`tools/wasm-gate-guest`): `miso_gate_f64_lane_mismatches(width)` and
+  `#[inline(never)] miso_gate_f64_lane_probe(seed)`, exactly the brief's probe shape.
+- **Host** (`tools/wasm-gates`): a `Guest` field, the loader's `get_typed_func` and a summing method;
+  a `Report` field, and the JSON key `f64_lane_mismatches` after `minmax_lowering_mismatches`. The
+  native leg is `(0..corpus::WIDTHS).map(corpus::f64_lane_mismatches).sum()`. In `main.rs` both legs
+  fail on a nonzero count, with `report_f64_lane` naming `crates/lane/src/f64_lane.rs`.
+- **Lowering pin** (`scripts/run-wasm-gates.sh`, `check_f64_lane_lowering`). It is modeled on
+  `check_detector_residency` and runs on the simd128 guest only. It takes the census inside the
+  `func[N] <miso_gate_f64_lane_probe>:` body of `wasm-objdump -d`, and it fails:
+  - if the probe is not found exactly once;
+  - if any of `f64x2.promote_low_f32x4`, `f64x2.mul` or `f64x2.add` is missing;
+  - if any of `f64.promote_f32`, `f64.mul` or `f64.add` is present.
+
+  It prints the census on stdout, not in the JSONL, so every evidence line keeps one schema.
+
+### Deviations and additions (none weakens a gate)
+
+1. **Pools are supersets.**
+   - The widen pool adds a third NaN, the signalling `0x7F80_0001`, and `-(1 ± ulp)`.
+   - The binary64 pool adds two NaN payloads and `2^53`, which with `1.0` makes a third additive
+     tie.
+   - The tie-rounding "pair" is carried by `2^-53` and `1.5` against `1.0` and `1 + 2^-52`.
+2. **Gate 2's random pairs are two families.** Half are arbitrary bit patterns, every class
+   including NaN. The other half have exponents within 60 binades of each other, so the addition
+   actually rounds instead of returning the larger operand. The wasm set (b) keeps the brief's
+   4,096 arbitrary pairs.
+3. **Extra widths and inputs.**
+   - The release run of gate 1 also sweeps `Widen for f32` over all 2^32 patterns; the brief asked
+     only to cover it.
+   - Gate 3 also runs at `f32` and adds both zeros and the negative powers.
+   - Every list is read at every lane rotation, so each directed value sits in every lane.
+4. **Set (c) compares at every step**, not only at the end of each chain, so a one-ulp divergence
+   that a later large term would absorb is still counted. The seeds are random positive values in
+   `[2^-64, 2^65)`. The inputs are random finite `f32` of every magnitude: the exponent field is
+   redrawn from `0..=254`, so subnormals are included.
+5. **`check_f64_lane_lowering` also fails if the probe is missing.** Without that clause, a missing
+   export would census as zero of everything and fail only on the "vector op absent" clause, with a
+   misleading message.
+
+### Gates
+
+| # | gate | command | result |
+|---|---|---|---|
+| 1 | widen identity | `cargo test --locked --release -p lane --test f64_lane -- --nocapture` | PASS. All 2^32 patterns, 0 mismatches at every width: `f32` 3.78 s, `Simd4` 2.09 s, `Simd8` 1.78 s on 4 threads (a folded sweep measured 5 ms). Dev: sparse sweep plus pool at every rotation, 0 mismatches. Width assertions hold at both widths and for `f32`. |
+| 2 | `add`/`mul` identity | same binary; the dev run too | PASS. Every ordered pair of the 20-value pool at every rotation, plus 1,000,000 random pairs in release and 20,000 in dev, at `f64x4` and `f64x8` (the pool also at `f64`): 0 mismatches. The tie test passes. |
+| 3 | square exactness witness | same binary | PASS. Pool plus 100,000 seeded finite values at `f32`, `Simd4` and `Simd8`: 0 mismatches against `(M*M) * 2^(2E)`. |
+| 4 | wasm differential | `bash scripts/run-wasm-gates.sh` | PASS. `f64_lane_mismatches: 0` on the native, scalar-wasm (backend 0) and simd128-wasm (backend 1) legs, in `target/ci/wasm-gates/wasm-gates.jsonl` after `minmax_lowering_mismatches`. All 358 digest comparisons match their pins on every leg. Under V8 the export takes 0.4 to 1.8 ms per width on both guests, well under a second. |
+| 5 | wasm lowering pin | same script | PASS. `f64x2.promote_low_f32x4=2 f64x2.mul=2 f64x2.add=2 f64.promote_f32=0 f64.mul=0 f64.add=0`, the prototype's census exactly. The native census is below. |
+| 6 | suites and policy | see below | PASS |
+
+Gate 6, run on the committed tree:
+
+- `cargo fmt --all --check`: clean.
+- `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`: clean. The first
+  pass flagged a `f64::powi` (disallowed by D6) in a test assertion, a manual `is_multiple_of` and
+  an assign-op; all three were fixed.
+- `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`: clean.
+  `lane/trait.LaneF64.html` and `trait.Widen.html` render.
+- `cargo test --locked -p lane`, dev and `--release`: every binary passes, `f64_lane` 8 of 8.
+- `cargo test --locked -p wasm-gates`: 7 plus 2 passed, in 1 min 27 s.
+- `scripts/check-lane-policy.sh`, `scripts/test-lane-policy.sh`, `scripts/check-realtime-policy.sh`
+  (56 marked regions in 16 files), `scripts/check-workspace-policy.sh` and
+  `scripts/check-unfused-seal.sh`: all ok. `--self-test` gives 62 passed, 0 failed.
+
+### Contraction evidence (no fusion)
+
+- **Native guest, linked fat-LTO module.**
+  - Command: `cargo rustc --release -p wasm-gate-guest --lib -- --emit=llvm-ir,link`. The emitted
+    module is the merged one, with 513 definitions.
+  - It has 0 floating-point instructions carrying `contract`, `fast` or `reassoc`
+    (`grep -E '= (fadd|fmul|fsub|fdiv|frem|fneg|call)( [a-z]+)* (contract|fast|reassoc)\b'`), 0
+    `llvm.fmuladd` and 0 `llvm.fma.*`.
+  - A bare `grep contract` finds 5 hits. All of them are the `effect-contract` file names, not
+    flags.
+  - The probe's IR is `fpext <4 x float> %10 to <4 x double>`, `fmul <4 x double> %11, %11` and
+    `fadd <4 x double> %energy, %12`.
+- **wasm simd128 guest** (same command, `--target wasm32-unknown-unknown`,
+  `RUSTFLAGS=-Ctarget-feature=+simd128`). It has 0 flagged instructions, 0 `fmuladd` and 0
+  `llvm.fma`. The probe's IR is two `fpext <2 x float> to <2 x double>`, two `fmul <2 x double>`
+  and two `fadd <2 x double>`.
+- **`lane` release test binary** (`cargo rustc --release -p lane --test f64_lane -- --emit=llvm-ir,link`).
+  - IR: 0 flagged instructions, 0 `fmuladd` and 0 `llvm.fma`, with 9 vector `fpext`, 11
+    `fmul <4 x double>` and 8 `fadd <4 x double>`.
+  - Linked binary: 0 `vfmadd` anywhere (`objdump -d | grep -c vfmadd`).
+  - The exhaustive sweeps: the `Simd8` closure holds 2 `vcvtps2pd`, `Simd4` holds 1, and `f32`
+    holds 1 `vcvtss2sd`, which is the scalar arm the sweep is meant to exercise.
+- **Native probe census.**
+  - Build: `cargo build --release -p wasm-gate-guest` natively, which gives
+    `target/release/libwasm_gate_guest.so`, a linked cdylib at fat LTO.
+  - The loop body of `miso_gate_f64_lane_probe` is `vcvtps2pd 0x8(%rsp,%rax,4),%ymm1`,
+    `vmulpd %ymm1,%ymm1,%ymm1` and `vaddpd %ymm1,%ymm0,%ymm0`: 1 of each on `ymm`.
+  - It has 0 `vcvtss2sd`, and 1 `vextractf128` in the final fold.
+  - It has 0 `vfmadd`, and so does the whole 5.7 MB `.so`.
+- **Cross-target value.** `miso_gate_f64_lane_probe(1)` is `967085629` natively (called through
+  `ctypes`) and in both wasm guests under V8.
+
+### wasm opcode findings
+
+- The simd128 probe body is 2 `f64x2.promote_low_f32x4`, 2 `f64x2.mul` and 2 `f64x2.add`, with no
+  scalar `f64.*` at all.
+  - The rest of the body is the xorshift fill (`i32.*`, `memory.fill`), 1 `v128.load` and 1
+    `v128.const` (the 0.5 seed), 1 `i8x16.shuffle`, and 8 `i32x4.extract_lane` for the fold.
+  - Two of each `f64x2` op is the expected shape: `Simd4`'s companion is two `f64x2` halves.
+- Under F-3, `(self + b) + 0.0`, the probe census is unchanged. LLVM folds the `+ 0.0` in the probe,
+  because `e + w*w` can never be `-0.0` there. That fold is why gate 4, and not gate 5, is F-3's
+  discriminator.
+
+### Red mutations
+
+Each mutation was applied alone, run, and reverted with a `cmp`-clean restore. The full rows are in
+`crates/lane/tests/MUTATIONS.md` ("Issue #949"), and the wasm-leg lines are in
+`tools/wasm-gates/MUTATIONS.md`.
+
+| # | mutation | observed |
+|---|---|---|
+| F-1 | `Widen for f32x8` puts lanes 4..8 first | RED. Gate 1 at `Simd8` (522,496) and gate 3 at `Simd8` (100,096). Gate 4: 81,676 on native, scalar wasm and simd128 wasm. |
+| F-2 | vector `widen` maps subnormal inputs to `+0.0` | RED. Gate 1 at `Simd4` (1,047) and gate 3 (369). Gate 4: 518 on every leg, which is exactly the widen set's subnormal rows: 255 sparse patterns plus 4 pool entries, at the two vector widths. |
+| F-3 | vector `add` becomes `(self + b) + 0.0` | RED. Gate 2 pool (4, the `-0.0 + -0.0` pair at four rotations). Gate 4: 2 on every leg. |
+| F-4 | the probe widens through a `black_box`ed scalar loop | RED. Gate 5: `f64x2.promote_low_f32x4=0 … f64.promote_f32=4`. Gate 4 stays 0, as it should. |
+| F-green | vector `add` becomes `b + self` | GREEN in gates 1 to 3 (dev and release) and gate 4 (0 on every leg), as expected. |
+
+Under F-1 to F-3, all 358 digest comparisons stayed green on every leg. Nothing in production calls
+the new surface, which is why the count exists beside the digests.
+
+### Class A
+
+- **What changed.** Outside `crates/lane/src/f64_lane.rs`, the diff touches `crates/lane/src/lib.rs`
+  only by a module line, a re-export and a doc paragraph. The rest is the new test, tooling, the
+  script and records.
+- **Who uses it.** `LaneF64`/`Widen` are referenced only by `crates/lane` and
+  `tools/wasm-gate-{corpus,guest}`/`tools/wasm-gates`, per `grep -rln` over `crates hosts tools`.
+  No kernel, pin, digest or production crate changed.
+- **Digests.** The G5 corpus's 358 comparisons match their pins on all three legs. Console workload
+  digests cannot move, because no render path changed. The console benchmark was not run.
+
+### Not measured
+
+- AArch64: this host has no aarch64 target installed.
+- `wasm_gates::native_report()` now also computes the count. `g6_full_corpus_ftz.rs` calls it under
+  FTZ+DAZ and asserts only the digests, so the count, which DAZ is expected to make nonzero, is
+  ignored there, as the verification record predicted. The test passes.
+
+## Sol attempt 1 verdict: PASS
+
+Reviewer: Sol, 2026-09-27, adversarial review of `git diff edc9273a..a7f7705f` on
+`codex/949-f64-lane-vocabulary`. Host AMD EPYC 7313P, rustc 1.97.1, pin `+avx2,+fma`, wasmtime
+47.0.3, wabt 1.0.34, node 22.23.2, `CARGO_INCREMENTAL=0`, a fresh worktree `target/`, which was
+deleted afterwards. Every gate was re-run from scratch. Each mutation was applied alone as an
+exact-text replacement and restored with `git checkout`, and `git status` was clean after each one.
+The console benchmark was not run.
+
+### Gates re-run
+
+| # | result |
+|---|---|
+| 1 | PASS. Release sweeps all 2^32 patterns: `f32` 3.84 s, `Simd4` 2.07 s, `Simd8` 1.66 s on 4 threads, 0 mismatches. The dev sparse sweep and pool are 0. |
+| 2, 3 | PASS, dev and release: 8 of 8 tests. |
+| 4 | PASS. `f64_lane_mismatches: 0` on native, scalar wasm and simd128 wasm. All 358 digest comparisons match on every leg. Under V8 the export takes 0.3 to 1.6 ms per width on both guests. |
+| 5 | PASS. `f64x2.promote_low_f32x4=2 f64x2.mul=2 f64x2.add=2`, scalar `f64.*` 0. The native `libwasm_gate_guest.so` probe has 1 each of `vcvtps2pd`, `vmulpd`, `vaddpd` and `vextractf128`, 0 `vcvtss2sd`, and 0 `vfmadd` in the whole `.so`. `probe(1) = 967085629` natively (ctypes) and on both guests. |
+| 6 | PASS: fmt; clippy `-D warnings` over the workspace; `cargo doc` `-D warnings`; `cargo test -p wasm-gates` (7 + 2); lane policy and its mutation test; the unfused seal, whose `--self-test` gives 62/0; workspace policy; realtime policy (56 regions). |
+
+### Adversarial checks
+
+- **The tests are not vacuous.**
+  - In the release `f64_lane` binary, the `Simd4` sweep closure holds 1 `vcvtps2pd` and the `Simd8`
+    closure holds 2. Gate 2's closures hold `vaddpd`/`vmulpd` on `ymm`. So the tests call the real
+    `lane::{LaneF64, Widen}` implementations, and they lower the same way the release caller does.
+  - F-2 in **release** gives 16,777,214 mismatches at `Simd4` in the exhaustive sweep, which is
+    every nonzero subnormal. The 2^32 gate therefore executes and discriminates.
+- **No contraction.** I wrote an out-of-tree caller shaped like #950's step 6:
+  `w = L::load(frame).abs().widen(); e = e.add(w.mul(w))`, plus a general `acc + widen(x) * widen(y)`,
+  at `f32`, `Simd4` and `Simd8`, as a linked fat-LTO cdylib.
+  - Native IR has 0 `contract`/`fast`/`reassoc` (or other FMF) flags, 0 `llvm.fmuladd` and 0
+    `llvm.fma`. The linked `.so` has 0 `vfmadd`. `Simd8` gives 2 `vcvtps2pd`, 2 `vmulpd` and
+    2 `vaddpd`.
+  - The simd128 IR is also 0/0/0, with only `f64x2` ops for `Simd4`/`Simd8` and no scalar `f64`.
+  - A build with `+simd128,+relaxed-simd` emits no `relaxed_madd` either.
+- **The lowering pin catches a real library scalarisation.** These two mutations go beyond the
+  recorded rows:
+  - X-1: vector `mul` computed per lane through `black_box`.
+  - X-2: `Widen for f32x4` converts through a `black_box`ed lane.
+
+  Both leave gates 1 to 4 green and turn gate 5 red, with `f64.promote_f32=4`. F-3 staying green
+  on gate 5 is expected: it changes values, not the lowering, and LLVM folds the `+ 0.0` there.
+- **Mutations reproduce exactly as recorded.**
+  - F-1: 522,496 and 100,096 in gates 1 and 3, and 81,676 on all three gate-4 legs.
+  - F-2: 1,047 and 369, and 518 on every leg.
+  - F-3: 4, and 2 on every leg.
+  - F-4: gate 5 red with the recorded census, and gate 4 at 0.
+  - F-green: green in dev, in release, on all three legs and on the pin.
+- **API and scope.** `LaneF64` and `Widen: Lane` are separate traits, so `Observed<L>` is untouched.
+  The tools name only `<L as Widen>::F64` and `lane::Simd4`, never `wide`. No `core::arch`, no
+  `mul_add(` and no relaxed SIMD. Every changed path is authorized, and no production crate, kernel,
+  pin or digest changed.
+
+### Findings (severity-ranked; none blocks)
+
+1. **Low (doc).** `crates/lane/src/f64_lane.rs:64-65`. `LaneF64`'s environment bullet names only
+   `MXCSR.FTZ` ("a subnormal result would flush"). It cites `wide_impl.rs`'s "The one precondition",
+   which is about **DAZ**, and DAZ would also zero subnormal *operands* of `add`/`mul`. The next
+   sentence ("FTZ and DAZ clear") makes the precondition complete, so only the hazard wording is
+   partial. Fix it when the file is next touched.
+2. **Low (coverage; outside this slice's paths).** `tools/wasm-gates/tests/g6_full_corpus_ftz.rs:93-140`
+   computes `f64_lane_mismatches` in its hostile-FTZ+DAZ unguarded and guarded arms but asserts
+   neither. Asserting `guarded.f64_lane_mismatches == 0` would make `Widen`'s documented DAZ
+   precondition executable. This is a one-line follow-up.
+3. **Info (known).** Gate 5 pins the guest probe only. A caller-specific scalarisation, such as
+   #950's `meter_block` or any native build, stays invisible. This is F64-VERIFY §1's robustness
+   gap and the brief's named non-goal. #950 should census its own kernel.
+4. **Info (CI cost).** `qualification.yml:526` runs `cargo test --release -p lane`, which now does
+   3 × 2^32 sweeps: 7.6 s on 4 threads here, and about twice that on a 2-core runner. The `f32` arm
+   (3.8 s) exceeds the brief's "cover". It is acceptable, and it is the first thing to trim if that
+   job's budget tightens.
+
+## Coordinator follow-up after Sol attempt 1 PASS (2026-09-27)
+
+Sol's low finding 1 is closed before merge: the `LaneF64` doc now names DAZ (a subnormal input read
+as zero) beside FTZ. Low finding 2 (`tools/wasm-gates/tests/g6_full_corpus_ftz.rs` does not assert
+the new `f64_lane_mismatches` count) is outside this issue's authorized paths and is carried by
+#950, whose gates already cover the wasm-gates corpus.

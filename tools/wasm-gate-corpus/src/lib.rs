@@ -44,12 +44,12 @@ use compressor::corpus as compressor_corpus;
 use delay::corpus as delay_corpus;
 use effect_runtime::corpus as runtime_corpus;
 use gate_expander::corpus as gate_expander_corpus;
-use lane::Lane;
 use lane::kernels::{
     OnePoleCoef, OnePoleState, RampSegment, SvfCoef, SvfCoefStep, SvfState, gain_block,
     gain_mix_block, mix2x2_block, one_pole_block, ramp_block, sum_into_block, sum2_block,
     svf_block, svf_block_ramped,
 };
+use lane::{Lane, LaneF64, Widen};
 use math::corpus as math_corpus;
 use math::{exp2_lane, log2_lane};
 use multiband_compressor::corpus as multiband_corpus;
@@ -631,6 +631,254 @@ fn minmax_lowering_mismatches_at<L: Lane>() -> u32 {
             }
         }
         index += L::WIDTH;
+    }
+    mismatches
+}
+
+/// The directed `f32` inputs of [`f64_lane_mismatches`]' widen set (issue #949): both zeros, the
+/// smallest and largest subnormal and `MIN_POSITIVE` of both signs, `±1.0` and its neighbours,
+/// `±MAX`, both infinities, and three NaN payloads (quiet, negative quiet with a payload, and
+/// signalling).
+const F64_LANE_WIDEN_POOL: [u32; 21] = [
+    0x0000_0000,
+    0x8000_0000,
+    0x0000_0001,
+    0x8000_0001,
+    0x007F_FFFF,
+    0x807F_FFFF,
+    0x0080_0000,
+    0x8080_0000,
+    0x3F80_0000,
+    0xBF80_0000,
+    0x3F80_0001,
+    0x3F7F_FFFF,
+    0xBF80_0001,
+    0xBF7F_FFFF,
+    0x7F7F_FFFF,
+    0xFF7F_FFFF,
+    0x7F80_0000,
+    0xFF80_0000,
+    0x7FC0_0000,
+    0xFFC0_0001,
+    0x7F80_0001,
+];
+
+/// The directed binary64 operands of [`f64_lane_mismatches`]' `add`/`mul` set: both zeros, the
+/// smallest and largest subnormal and `MIN_POSITIVE` of both signs, `±1.0`, `1 + 2^-52`, `±MAX`,
+/// both infinities, two NaN payloads, and the tie-rounding members `2^-53`, `1.5` and `2^53`:
+/// `1 + 2^-53`, `(1 + 2^-52) + 2^-53`, `2^53 + 1` and `1.5 * (1 + 2^-52)` are exact ties, so a
+/// lowering that rounded a tie other than to even would disagree.
+const F64_LANE_BINOP_POOL: [u64; 20] = [
+    0x0000_0000_0000_0000,
+    0x8000_0000_0000_0000,
+    0x0000_0000_0000_0001,
+    0x8000_0000_0000_0001,
+    0x000F_FFFF_FFFF_FFFF,
+    0x800F_FFFF_FFFF_FFFF,
+    0x0010_0000_0000_0000,
+    0x8010_0000_0000_0000,
+    0x3FF0_0000_0000_0000,
+    0xBFF0_0000_0000_0000,
+    0x3FF0_0000_0000_0001,
+    0x7FEF_FFFF_FFFF_FFFF,
+    0xFFEF_FFFF_FFFF_FFFF,
+    0x7FF0_0000_0000_0000,
+    0xFFF0_0000_0000_0000,
+    0x7FF8_0000_0000_0000,
+    0xFFF8_0000_0000_0001,
+    0x3CA0_0000_0000_0000,
+    0x3FF8_0000_0000_0000,
+    0x4340_0000_0000_0000,
+];
+
+/// Chains and steps of [`f64_lane_mismatches`]' energy-shape set.
+const F64_LANE_CHAINS: usize = 64;
+
+/// Steps per chain of the energy-shape set.
+const F64_LANE_STEPS: usize = 256;
+
+/// Lanes on which this target's `f64` lanes (`lane::LaneF64`, `lane::Widen`) disagree with the
+/// scalar `f64` oracle at `width`. Zero is the only admissible answer.
+///
+/// Modeled on [`minmax_lowering_mismatches`], and for the same reason: `crates/lane`'s `f64`
+/// vocabulary (issue #949) is exact IEEE binary64 by contract, its lowering is a codegen outcome
+/// (`f64x2.promote_low_f32x4`, `f64x2.mul` and `f64x2.add` under `simd128`, a per-lane array
+/// without it), and no native gate executes either wasm lowering. A count, with no pin and no
+/// case index: the pools are full of NaNs, which rule 2 of this corpus keeps out of a digest. Three
+/// sets are counted:
+///
+/// * **widen**: every 65,537th `f32` bit pattern plus a directed pool. A non-NaN input must match
+///   an independent integer construction of its binary64 bits; a NaN input must give a NaN.
+/// * **`add` and `mul`**: every ordered pair of a directed binary64 pool plus 4,096 seeded random
+///   pairs, against scalar `+` and `*`. A non-NaN result must match bit for bit; a NaN result must
+///   be a NaN.
+/// * **the energy shape**: 64 chains of 256 steps of `e = e.add(w.mul(w))` with `w = widen(x)`,
+///   on random finite `f32` of any magnitude from random positive seeds, compared at every step
+///   against the scalar `e + f64::from(x) * f64::from(x)`.
+///
+/// Every vector result passes through `core::hint::black_box` before it is compared: `widen` is
+/// the same `fpext` as `f64::from`, and without the barrier LLVM may prove a native comparison
+/// true and delete it.
+///
+/// # Panics
+///
+/// Panics if `width >= WIDTHS`.
+#[must_use]
+pub fn f64_lane_mismatches(width: usize) -> u32 {
+    assert!(width < WIDTHS, "width index out of range");
+    match width {
+        0 => f64_lane_mismatches_at::<f32>(),
+        1 => f64_lane_mismatches_at::<lane::Simd4>(),
+        _ => f64_lane_mismatches_at::<lane::Simd8>(),
+    }
+}
+
+/// [`f64_lane_mismatches`] at one width.
+fn f64_lane_mismatches_at<L: Widen>() -> u32 {
+    f64_lane_widen_mismatches::<L>()
+        + f64_lane_binop_mismatches::<L::F64>()
+        + f64_lane_energy_mismatches::<L>()
+}
+
+/// The binary64 bits of `x`, built from its fields with integer arithmetic; `None` for a NaN.
+///
+/// This is `crates/lane/tests/f64_lane.rs`' gate 1 oracle, deliberately independent of
+/// `f64::from`: the subnormal row normalises the significand, so `m * 2^-149` with `k` leading
+/// zeros in the 23-bit field has biased exponent `896 - k`.
+fn f64_lane_widen_oracle(x: f32) -> Option<u64> {
+    let bits = x.to_bits();
+    let sign = u64::from(bits >> 31) << 63;
+    let exponent = u64::from((bits >> 23) & 0xFF);
+    let mantissa = bits & 0x7F_FFFF;
+    match (exponent, mantissa) {
+        (0, 0) => Some(sign),
+        (0, _) => {
+            let k = mantissa.leading_zeros() - 9;
+            let fraction = u64::from((mantissa << (k + 1)) & 0x7F_FFFF) << 29;
+            Some(sign | (896 - u64::from(k)) << 52 | fraction)
+        }
+        (255, 0) => Some(sign | 0x7FF << 52),
+        (255, _) => None,
+        _ => Some(sign | (exponent + 896) << 52 | u64::from(mantissa) << 29),
+    }
+}
+
+/// The widen set: every 65,537th pattern (`k * 0x1_0001` for every `k`) and the directed pool,
+/// read consecutively `L::WIDTH` at a time.
+fn f64_lane_widen_mismatches<L: Widen>() -> u32 {
+    let mut patterns: Vec<u32> = (0..=0xFFFF_u32).map(|k| k * 0x1_0001).collect();
+    patterns.extend_from_slice(&F64_LANE_WIDEN_POOL);
+    while !patterns.len().is_multiple_of(LANES) {
+        patterns.push(0);
+    }
+
+    let mut mismatches = 0;
+    let mut src = [0.0_f32; LANES];
+    let mut out = [0.0_f64; LANES];
+    for group in patterns.chunks_exact(L::WIDTH) {
+        for (value, &pattern) in src.iter_mut().zip(group) {
+            *value = f32::from_bits(pattern);
+        }
+        core::hint::black_box(L::load(&src).widen()).store(&mut out);
+        let out = core::hint::black_box(out);
+        for lane in 0..L::WIDTH {
+            let agrees = match f64_lane_widen_oracle(src[lane]) {
+                Some(bits) => out[lane].to_bits() == bits,
+                None => out[lane].is_nan(),
+            };
+            mismatches += u32::from(!agrees);
+        }
+    }
+    mismatches
+}
+
+/// The `add`/`mul` set: every ordered pair of the directed pool, then 4,096 seeded random pairs of
+/// arbitrary bit patterns.
+fn f64_lane_binop_mismatches<F: LaneF64>() -> u32 {
+    let mut left = Vec::new();
+    let mut right = Vec::new();
+    for a in F64_LANE_BINOP_POOL {
+        for b in F64_LANE_BINOP_POOL {
+            left.push(f64::from_bits(a));
+            right.push(f64::from_bits(b));
+        }
+    }
+    let mut random = Xorshift64Star::new(0x0949_F64B_1A0B_0001);
+    for _ in 0..4096 {
+        left.push(f64::from_bits(random.next_u64()));
+        right.push(f64::from_bits(random.next_u64()));
+    }
+    while left.len() % LANES != 0 {
+        left.push(0.0);
+        right.push(0.0);
+    }
+
+    let mut mismatches = 0;
+    let mut out = [0.0_f64; LANES];
+    let mut index = 0;
+    while index < left.len() {
+        let a = F::load(&left[index..]);
+        let b = F::load(&right[index..]);
+        for (is_add, value) in [(true, a.add(b)), (false, a.mul(b))] {
+            core::hint::black_box(value).store(&mut out);
+            let out = core::hint::black_box(out);
+            for lane in 0..F::WIDTH {
+                let (x, y) = (left[index + lane], right[index + lane]);
+                let oracle = if is_add { x + y } else { x * y };
+                let agrees = if oracle.is_nan() {
+                    out[lane].is_nan()
+                } else {
+                    out[lane].to_bits() == oracle.to_bits()
+                };
+                mismatches += u32::from(!agrees);
+            }
+        }
+        index += F::WIDTH;
+    }
+    mismatches
+}
+
+/// The energy-shape set: [`F64_LANE_CHAINS`] independent chains of [`F64_LANE_STEPS`] steps, one
+/// chain per lane, compared with the scalar chain at every step.
+fn f64_lane_energy_mismatches<L: Widen>() -> u32 {
+    let mut random = Xorshift64Star::new(0x0949_E4E2_6700_0001);
+    // Random positive seeds between 2^-64 and 2^64, and random finite `f32` of any magnitude,
+    // subnormals included: the exponent field is redrawn from 0..=254, never 255.
+    let seeds: Vec<f64> = (0..F64_LANE_CHAINS)
+        .map(|_| {
+            let exponent = 1023 - 64 + random.next_u64() % 129;
+            f64::from_bits((exponent << 52) | (random.next_u64() & 0x000F_FFFF_FFFF_FFFF))
+        })
+        .collect();
+    let inputs: Vec<f32> = (0..F64_LANE_CHAINS * F64_LANE_STEPS)
+        .map(|_| {
+            let bits = random.next_u32();
+            let exponent = ((bits >> 23) & 0xFF) % 255;
+            f32::from_bits((bits & 0x807F_FFFF) | (exponent << 23))
+        })
+        .collect();
+
+    let mut mismatches = 0;
+    let mut src = [0.0_f32; LANES];
+    let mut out = [0.0_f64; LANES];
+    for first in (0..F64_LANE_CHAINS).step_by(L::WIDTH) {
+        let mut oracle = [0.0_f64; LANES];
+        oracle[..L::WIDTH].copy_from_slice(&seeds[first..first + L::WIDTH]);
+        let mut energy = <L::F64 as LaneF64>::load(&oracle);
+        for step in 0..F64_LANE_STEPS {
+            for (lane, value) in src.iter_mut().enumerate().take(L::WIDTH) {
+                *value = inputs[(first + lane) * F64_LANE_STEPS + step];
+            }
+            let w = L::load(&src).widen();
+            energy = core::hint::black_box(energy.add(w.mul(w)));
+            energy.store(&mut out);
+            let out = core::hint::black_box(out);
+            for lane in 0..L::WIDTH {
+                let x = f64::from(src[lane]);
+                oracle[lane] += x * x;
+                mismatches += u32::from(out[lane].to_bits() != oracle[lane].to_bits());
+            }
+        }
     }
     mismatches
 }

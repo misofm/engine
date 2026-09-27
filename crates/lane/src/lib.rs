@@ -37,6 +37,16 @@
 //! on the two targets where that instruction is D8 exactly; the difference between borrowing a
 //! semantics and borrowing an instruction is argued case by case in `wide_impl.rs`.
 //!
+//! # `f64` lanes
+//!
+//! The owner ruling of 2026-09-26 -- "We shouldn't leave scalar arithmetic where vector arithmetic
+//! is possible" -- gave this crate `f64` lanes (issue #949). They are two separate traits beside
+//! [`Lane`]: [`LaneF64`], `W` lanes of IEEE binary64 with `load`, `store`, `add` and `mul` and
+//! nothing else, and [`Widen`], which converts each backend's `f32` lanes to its `f64` companion
+//! (`f64`, [`wide::f64x4`] and [`wide::f64x8`]). Their contract is pinned the same way: exact
+//! binary64, never fused, with scalar `f64` as the oracle at every width. The `f32` [`Lane`]
+//! contract is unchanged by them.
+//!
 //! # Realtime rules
 //!
 //! Every operation and every kernel body is `#[inline(always)]`, allocation-free, branch-free per
@@ -72,6 +82,7 @@ compile_error!(
 
 mod backend;
 mod bits;
+mod f64_lane;
 pub mod fpenv;
 pub mod kernels;
 mod scalar;
@@ -81,6 +92,7 @@ pub mod softfma;
 mod wide_impl;
 
 pub use backend::{Backend, HostAttestation, attest_host};
+pub use f64_lane::{LaneF64, Widen};
 pub use fpenv::{CanonicalFpEnv, FpEnvironmentRejection, attest_fp_environment};
 
 /// The four-lane production width: NEON on AArch64, `v128` on wasm with `simd128`.

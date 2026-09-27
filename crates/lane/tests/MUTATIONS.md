@@ -342,3 +342,29 @@ L-green is the expected-green row: on the sanitized domain `{+0.0} ∪ [MIN_POSI
 select form is commutative by bits, so the operand order is free.
 `g1_select_max_is_order_free_only_on_the_sanitized_domain` witnesses that argument directly, and
 also that it fails off the domain (`max(+0, -0)` and `max(1, NaN)` depend on the order).
+
+## Issue #949 — the `f64` lane vocabulary
+
+`src/f64_lane.rs` adds `LaneF64` and `Widen`. Gates 1 to 3 are `tests/f64_lane.rs`; gate 4 is the
+`f64_lane_mismatches` count that `tools/wasm-gates` reads on its native, scalar-wasm and
+simd128-wasm legs; gate 5 is `check_f64_lane_lowering` in `scripts/run-wasm-gates.sh`. Each row was
+applied alone as an exact-text replacement (match count one per site) on top of the attempt-1 tree,
+run, and restored by copying the saved original back (`cmp` clean). Gates 1 to 3 were run in dev
+(`cargo test --locked -p lane --test f64_lane`); gate 4 on all three legs with the same build
+commands as `scripts/run-wasm-gates.sh`; gate 5 by running that script. Host AMD EPYC 7313P,
+rustc 1.97.1, pin `+avx2,+fma`, wasmtime 47.0.3.
+
+| # | mutation | gates 1-3 (`f64_lane`, dev) | gate 4 (`f64_lane_mismatches`) | gate 5 |
+| --- | --- | --- | --- | --- |
+| F-1 | `Widen for f32x8` puts lanes 4..8 first: `[a[4], a[5], a[6], a[7], a[0], a[1], a[2], a[3]].map(f64::from)` | RED: gate 1 `widen at Simd8 over the directed pool and sparse sweep` (`522496` against `0`); gate 3 `square witness at Simd8` (`100096`) | RED: `81676` on native, scalar wasm and simd128 wasm | green (the probe is `Simd4`) |
+| F-2 | both vector `widen`s map a subnormal input to `+0.0`: `map(\|x\| if x.is_subnormal() { 0.0 } else { f64::from(x) })` | RED: gate 1 `widen at Simd4 …` (`1047`); gate 3 `square witness at Simd4` (`369`) | RED: `518` on every leg, which is exactly the subnormal rows of the widen set (255 sparse patterns plus 4 pool entries, at the two vector widths) | green |
+| F-3 | vector `add` becomes `(self + b) + <$simd>::splat(0.0)` | RED: gate 2 `add/mul at Simd4 over the pool` (`4`: the `-0.0 + -0.0` pair at four rotations); the random pairs stay green | RED: `2` on every leg (`-0.0 + -0.0` at `Simd4` and `Simd8`) | green |
+| F-4 | the guest probe widens through a `black_box`ed scalar loop (`*value = black_box(f64::from(x))`, then `LaneF64::load`) | not applicable | green, `0` on every leg (the values are the same) | RED: `the f64 lane probe is not vectorised on the simd128 leg: f64x2.promote_low_f32x4=0 f64x2.mul=2 f64x2.add=2 f64.promote_f32=4 f64.mul=0 f64.add=0` |
+| F-green | vector `add` becomes `b + self` | GREEN, 8 of 8, dev and release | GREEN, `0` on every leg | green |
+
+F-green is the recorded expected-green row: IEEE addition is commutative bit for bit off NaN, and a
+NaN result is compared only as "is a NaN", so the operand order is free.
+
+Under F-1, F-2 and F-3 every one of the 358 corpus digest comparisons still matched its pin on all
+three legs. Nothing in production calls the new surface, so the frozen corpus cannot see a defect in
+it; the count exists beside the digests for the same reason `minmax_lowering_mismatches` does.

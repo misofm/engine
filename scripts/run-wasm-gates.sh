@@ -82,8 +82,57 @@ check_detector_residency() {
     }
 }
 
+# Issue #949 gate 5: the `f64` lane vocabulary must lower to `f64x2` vector opcodes under simd128.
+#
+# `lane::Widen` is written portably -- `wide` has no f32-to-f64 conversion and `core::arch` is
+# confined to two files -- so the packed `f64x2.promote_low_f32x4` is a codegen outcome of the
+# release profile's fat LTO, not a spelling. Correctness never depends on it (a scalarised widen is
+# the same conversion per lane, with the same bits, and the f64_lane_mismatches count above holds
+# both guest legs to that), but the reason the vocabulary exists is to stop doing this arithmetic
+# one lane at a time. So the census is taken over the body of the exported probe
+# `miso_gate_f64_lane_probe` (`e = e.add(w.mul(w))` at Simd4, tools/wasm-gate-guest): it must
+# contain `f64x2.promote_low_f32x4`, `f64x2.mul` and `f64x2.add`, and none of the scalar
+# `f64.promote_f32`, `f64.mul` or `f64.add`. The simd128 leg only: without simd128, `wide`'s
+# `f64x2` is an array and scalar code is the correct lowering.
+check_f64_lane_lowering() {
+    local module="$1" census seen promote vector_mul vector_add scalar_promote scalar_mul scalar_add
+    census="$(wasm-objdump -d "$module" | awk '
+        /^[0-9a-f]+ func\[[0-9]+\] </ {
+            inside = /<miso_gate_f64_lane_probe>:/
+            if (inside) seen++
+            next
+        }
+        inside && /f64x2\.promote_low_f32x4/ { promote++ }
+        inside && /f64x2\.mul/ { vector_mul++ }
+        inside && /f64x2\.add/ { vector_add++ }
+        inside && /f64\.promote_f32/ { scalar_promote++ }
+        inside && /f64\.mul/ { scalar_mul++ }
+        inside && /f64\.add/ { scalar_add++ }
+        END {
+            printf "%d %d %d %d %d %d %d\n", seen, promote, vector_mul, vector_add,
+                scalar_promote, scalar_mul, scalar_add
+        }
+    ')"
+    read -r seen promote vector_mul vector_add scalar_promote scalar_mul scalar_add <<<"$census"
+    local summary="f64x2.promote_low_f32x4=$promote f64x2.mul=$vector_mul f64x2.add=$vector_add"
+    summary="$summary f64.promote_f32=$scalar_promote f64.mul=$scalar_mul f64.add=$scalar_add"
+    [[ "$seen" == 1 ]] || {
+        printf 'wasm gates: miso_gate_f64_lane_probe not found exactly once in %s (found %s)\n' \
+            "$module" "$seen" >&2
+        return 1
+    }
+    if ((promote == 0 || vector_mul == 0 || vector_add == 0 ||
+        scalar_promote != 0 || scalar_mul != 0 || scalar_add != 0)); then
+        printf 'wasm gates: the f64 lane probe is not vectorised on the simd128 leg: %s\n' \
+            "$summary" >&2
+        printf 'wasm gates: see crates/lane/src/f64_lane.rs, "Lowering"\n' >&2
+        return 1
+    fi
+    printf 'wasm gates: f64 lane probe census (simd128): %s\n' "$summary"
+}
+
 command -v wasm-objdump >/dev/null 2>&1 || {
-    printf 'wasm gates: wasm-objdump is required for the detector-residency pin\n' >&2
+    printf 'wasm gates: wasm-objdump is required for the detector-residency and f64 lane pins\n' >&2
     exit 1
 }
 
@@ -94,5 +143,6 @@ for leg in scalar simd128; do
     check_detector_residency "target/ci/wasm-gates-$leg/$TARGET/release/$GUEST" "$leg"
 done
 printf 'wasm gates: detector history resident in locals on both guest legs\n'
+check_f64_lane_lowering "target/ci/wasm-gates-simd128/$TARGET/release/$GUEST"
 
 printf 'wasm gates: ok (native + wasm scalar + wasm simd128), evidence in %s\n' "$evidence"

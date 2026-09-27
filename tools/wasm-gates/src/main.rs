@@ -125,13 +125,17 @@ fn main() -> ExitCode {
 fn run_native() -> ExitCode {
     let report = native_report();
     println!("{}", report.json());
-    if report.mismatches.is_empty() && report.minmax_lowering_mismatches == 0 {
+    if report.mismatches.is_empty()
+        && report.minmax_lowering_mismatches == 0
+        && report.f64_lane_mismatches == 0
+    {
         ExitCode::SUCCESS
     } else {
         for mismatch in &report.mismatches {
             eprintln!("native mismatch: {mismatch}");
         }
         report_minmax_lowering("native", report.minmax_lowering_mismatches);
+        report_f64_lane("native", report.f64_lane_mismatches);
         ExitCode::FAILURE
     }
 }
@@ -147,18 +151,33 @@ fn report_minmax_lowering(leg: &str, mismatches: u32) {
     }
 }
 
+/// Names an `f64` lane divergence (issue #949), which is a lane-crate defect rather than a pin
+/// drift.
+fn report_f64_lane(leg: &str, mismatches: u32) {
+    if mismatches != 0 {
+        eprintln!(
+            "{leg} f64 lanes: {mismatches} lanes disagree with the scalar f64 oracle; the widen, \
+             add or mul in crates/lane/src/f64_lane.rs is not exact IEEE binary64 on this target"
+        );
+    }
+}
+
 /// The wasm leg: the same corpus executed under wasmtime against the same pins.
 fn run_wasm(path: PathBuf, expected: ExpectedBackend) -> ExitCode {
     match wasm_report(&path, expected) {
         Ok(report) => {
             println!("{}", report.json());
-            if report.mismatches.is_empty() && report.minmax_lowering_mismatches == 0 {
+            if report.mismatches.is_empty()
+                && report.minmax_lowering_mismatches == 0
+                && report.f64_lane_mismatches == 0
+            {
                 ExitCode::SUCCESS
             } else {
                 for mismatch in &report.mismatches {
                     eprintln!("wasm mismatch: {mismatch}");
                 }
                 report_minmax_lowering("wasm", report.minmax_lowering_mismatches);
+                report_f64_lane("wasm", report.f64_lane_mismatches);
                 ExitCode::FAILURE
             }
         }
