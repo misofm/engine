@@ -1,6 +1,6 @@
 # Retarget the phase-profile harness to the gain/pan row
 
-Scoping study: `docs/handoffs/builtins-less-removal-2026-09-27/SCOPE.md` (option (a), owner-directed removal, 2026-09-27).
+Scoping study: `docs/handoffs/builtins-less-removal-2026-09-27/SCOPE.md` (owner-directed removal, 2026-09-27; option (b) per the owner's second ruling below).
 
 ## Amendments (adversarial verification, 2026-09-27; override conflicting text)
 
