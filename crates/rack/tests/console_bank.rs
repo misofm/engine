@@ -444,6 +444,104 @@ fn stage_construction_rejects_a_lane_count_or_quantum_mismatch() {
     );
 }
 
+/// A bank whose reported `automation_capacity` falls by one on every `metadata()` read.
+///
+/// The stage sizes its staging window from one read and checks it against the next, so this
+/// bank hands the stage exactly the failure issue #1012 closes: a window one span larger than the
+/// capacity the effect enforces. Everything else is `MockGainBank`.
+struct ShrinkingCapacityBank {
+    inner: MockGainBank,
+    reads: core::cell::Cell<u32>,
+}
+
+impl PreparedNativeEffectBank for ShrinkingCapacityBank {
+    fn metadata(&self) -> PreparedBankMetadata {
+        let reads = self.reads.get();
+        self.reads.set(reads + 1);
+        let mut metadata = self.inner.metadata();
+        metadata.program_key.automation_capacity = CAPACITY + 8 - reads;
+        metadata
+    }
+    fn reset(&mut self, kind: ResetKind) {
+        self.inner.reset(kind);
+    }
+    fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
+        self.inner.process_bank(block)
+    }
+    fn snapshot_track_state_payload(
+        &self,
+        track_index: u32,
+        output: StatePayloadOutput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        self.inner.snapshot_track_state_payload(track_index, output)
+    }
+    fn restore_track_state_payload(
+        &mut self,
+        track_index: u32,
+        state_layout_version: u32,
+        input: StatePayloadInput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        self.inner
+            .restore_track_state_payload(track_index, state_layout_version, input)
+    }
+}
+
+/// Issue #1012: a staging window one span larger than the effect's automation capacity is refused
+/// at bind, with a typed error, never discovered on the render thread.
+///
+/// The #1004 pairing rule keeps the mono collapse for a `Left` span staged with its bit-equal
+/// `Right` twin, on the premise that the effect applies both or neither. With a window of
+/// capacity + 1 a drain could stage the last twin across the effect's `span_index <
+/// automation_capacity` cut-off, and the right channel's write would be lost behind a collapse
+/// that still held. The window is refused instead, and a stable bank binds.
+///
+/// Red mutation (issue #1012): delete the `check_automation_window` call from
+/// `ConsoleEffectBankStage::new` -> this binds a capacity + 1 window and fails.
+#[test]
+fn a_staging_window_larger_than_the_capacity_is_refused_at_bind() {
+    let shrinking = ShrinkingCapacityBank {
+        inner: MockGainBank::new(0),
+        reads: core::cell::Cell::new(0),
+    };
+    let lanes = || {
+        (0..LANES)
+            .map(|_| {
+                let (_producer, consumer) = bounded_spsc::<EffectControlRecord>(
+                    depth(CAPACITY as usize),
+                    QueueGeneration(0),
+                )
+                .expect("queue");
+                Some(EffectControlLane::new(consumer, false))
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        ConsoleEffectBankStage::new(
+            Box::new(shrinking),
+            BankWidth::Four,
+            8,
+            lanes(),
+            vec![None, None, None, None],
+            0,
+        )
+        .err(),
+        Some(rack::RackError::AutomationWindow),
+        "a window sized one span past the enforced capacity is refused at bind"
+    );
+    assert!(
+        ConsoleEffectBankStage::new(
+            Box::new(MockGainBank::new(0)),
+            BankWidth::Four,
+            8,
+            lanes(),
+            vec![None, None, None, None],
+            0,
+        )
+        .is_ok(),
+        "a window of exactly the capacity binds"
+    );
+}
+
 /// Issue #143 E5, at the bank slot: the observation surface a stage exposes off the render thread.
 ///
 /// `ConsoleEffectBankStage` is where the structural walk bottoms out — `BankChain` sums it and the

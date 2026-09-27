@@ -190,6 +190,9 @@ pub enum RackError {
     Overflow,
     Shape,
     WidthMismatch,
+    /// A console slot's live-control staging window is not exactly the bank's
+    /// `automation_capacity` spans (`EffectBankProcessBlock::check_automation_window`, issue #1012).
+    AutomationWindow,
 }
 
 /// Where in a track's chain a bank cohort sits.
@@ -974,7 +977,10 @@ impl ConsoleEffectBankStage {
     /// # Errors
     ///
     /// [`RackError::WidthMismatch`] if the processor is not this width or the lane count disagrees,
-    /// and [`RackError::ZeroQuantum`] for a zero quantum.
+    /// [`RackError::ZeroQuantum`] for a zero quantum, and [`RackError::AutomationWindow`] if the
+    /// staging window is not exactly the bank's automation capacity -- the precondition of the
+    /// live drain's pairing rule, refused here, at bind, rather than discovered on the render
+    /// thread.
     pub fn new(
         processor: Box<dyn PreparedNativeEffectBank>,
         width: BankWidth,
@@ -1017,6 +1023,12 @@ impl ConsoleEffectBankStage {
         let designed = (0..lane_count)
             .map(|lane| processor.lane_channel_symmetry(lane))
             .collect();
+        let staging: Box<[PreparedAutomationSpan]> = vec![IDLE_SPAN; capacity].into_boxed_slice();
+        // One window serves every lane, and each lane's staged prefix meets the effect's per-lane
+        // `span_index < automation_capacity` cut-off; a window of any other size would let a
+        // staged twin pair straddle it (issue #1012).
+        EffectBankProcessBlock::check_automation_window(&staging, &processor.metadata())
+            .map_err(|_| RackError::AutomationWindow)?;
         Ok(Self {
             processor,
             designed,
@@ -1024,7 +1036,7 @@ impl ConsoleEffectBankStage {
             quantum,
             offsets: vec![0_u32; lane_count + 1].into_boxed_slice(),
             lanes: lanes.into_boxed_slice(),
-            staging: vec![IDLE_SPAN; capacity].into_boxed_slice(),
+            staging,
             packed: vec![IDLE_SPAN; total].into_boxed_slice(),
             shunt,
             observations: observed.then(|| observations.into_boxed_slice()),

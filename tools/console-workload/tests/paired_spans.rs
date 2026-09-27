@@ -40,7 +40,7 @@ use effect_contract::{
     ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, PortRole,
     PrepareEffectBankRequest, PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan,
     PreparedBankMetadata, PreparedEffectTarget, PreparedNativeEffect, PreparedNativeEffectBank,
-    PreparedPorts, PreparedSidechainPort, ResetKind, ResponseAnalysisError,
+    PreparedPorts, PreparedSidechainPort, ProcessBlockError, ResetKind, ResponseAnalysisError,
     ResponseSnapshotRequest, ResponseSnapshotSummary, SeamSide, StatePayloadError,
     StatePayloadInput, StatePayloadOutput, StatePayloadSizes, default_initial_values,
 };
@@ -1916,6 +1916,101 @@ fn every_launch_effect_applies_a_twin_pair_with_channel_symmetric_validity() {
             .iter()
             .any(|line| line.contains(LIMITER) && line.contains("collapse-capable")),
         "{covered:?}"
+    );
+}
+
+/// Issue #1012: the staging-window bound the pairing rule rests on, refused at preparation for
+/// every launch effect, scalar and banked.
+///
+/// A window of exactly `automation_capacity` spans is accepted; one span more (which could stage a
+/// twin across the effect's cut-off) or one span fewer (which would drop admitted records) is
+/// refused with the typed `ProcessBlockError::AutomationWindow`.
+///
+/// Red mutation (issue #1012): make the contract's `check_window` return `Ok(())`
+/// unconditionally -> both refusals below fail, for every effect.
+#[test]
+fn every_launch_effect_refuses_a_staging_window_that_is_not_its_capacity() {
+    let width = BankWidth::for_backend(Backend::current()).expect("a SIMD backend");
+    let registry = registry();
+    let window = |spans: usize| {
+        vec![
+            PreparedAutomationSpan {
+                kind: AutomationSpanKind::Point,
+                channel: ParameterChannel::Both,
+                parameter_index: 0,
+                start_sample: 0,
+                end_sample: 0,
+                start_value: 0.0,
+                end_value: 0.0,
+            };
+            spans
+        ]
+    };
+    let mut checked = Vec::new();
+    for descriptor in registry.descriptors() {
+        let factory = registry.get(descriptor.id).expect("registered");
+        let values: Vec<InitialParameterValue> = if descriptor.id.as_str() == EQ {
+            initial_values(Fx::Eq)
+        } else {
+            default_initial_values(descriptor).collect()
+        };
+        let mode = [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average]
+            .into_iter()
+            .find(|mode| descriptor.supported_link_modes.contains(*mode))
+            .expect("a link mode");
+        let Some(request) = prepare_request(descriptor, &values, mode) else {
+            continue;
+        };
+        let scalar = factory.prepare(request).expect("scalar prepare").metadata();
+        let capacity = scalar.automation_capacity as usize;
+        assert!(
+            capacity > 0,
+            "{}: a live effect has capacity",
+            descriptor.id.as_str()
+        );
+        assert_eq!(
+            EffectProcessBlock::check_automation_window(&window(capacity), &scalar),
+            Ok(())
+        );
+        for wrong in [capacity + 1, capacity - 1] {
+            assert_eq!(
+                EffectProcessBlock::check_automation_window(&window(wrong), &scalar),
+                Err(ProcessBlockError::AutomationWindow),
+                "{}: a scalar window of {wrong} spans against capacity {capacity}",
+                descriptor.id.as_str()
+            );
+        }
+        let requests = vec![request; width.lanes() as usize];
+        let banked = match factory.bind_homogeneous_bank(PrepareEffectBankRequest {
+            backend: Backend::current(),
+            width,
+            requests: &requests,
+        }) {
+            Ok(Some(bank)) => {
+                let metadata = bank.metadata();
+                let capacity = metadata.program_key.automation_capacity as usize;
+                assert_eq!(
+                    EffectBankProcessBlock::check_automation_window(&window(capacity), &metadata),
+                    Ok(())
+                );
+                for wrong in [capacity + 1, capacity - 1] {
+                    assert_eq!(
+                        EffectBankProcessBlock::check_automation_window(&window(wrong), &metadata),
+                        Err(ProcessBlockError::AutomationWindow),
+                        "{}: a bank window of {wrong} spans against capacity {capacity}",
+                        descriptor.id.as_str()
+                    );
+                }
+                true
+            }
+            _ => false,
+        };
+        checked.push((descriptor.id.as_str().to_owned(), banked));
+    }
+    assert_eq!(checked.len(), registry.len(), "{checked:?}");
+    assert!(
+        checked.iter().filter(|(_, banked)| *banked).count() >= 3,
+        "{checked:?}"
     );
 }
 

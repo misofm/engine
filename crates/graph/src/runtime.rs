@@ -881,21 +881,27 @@ impl ConsoleEffect {
     ) -> Self {
         let capacity = effect.metadata.automation_capacity as usize;
         let latency = usize::try_from(effect.metadata.latency.0).unwrap_or(usize::MAX);
+        let spans: Box<[PreparedAutomationSpan]> = vec![
+            PreparedAutomationSpan {
+                kind: effect_contract::AutomationSpanKind::Point,
+                channel: effect_contract::ParameterChannel::Both,
+                parameter_index: 0,
+                start_sample: 0,
+                end_sample: 0,
+                start_value: 0.0,
+                end_value: 0.0,
+            };
+            capacity
+        ]
+        .into_boxed_slice();
+        // The live drain's pairing rule needs the window to be exactly the effect's automation
+        // capacity (issue #1012). Checked here, at bind, off the render thread; this node builder
+        // is infallible, so a violation is a bind-time panic, as `stage_for`'s validated width is.
+        effect_contract::EffectProcessBlock::check_automation_window(&spans, &effect.metadata)
+            .expect("a console effect's staging window is its automation capacity");
         Self {
             observation,
-            spans: vec![
-                PreparedAutomationSpan {
-                    kind: effect_contract::AutomationSpanKind::Point,
-                    channel: effect_contract::ParameterChannel::Both,
-                    parameter_index: 0,
-                    start_sample: 0,
-                    end_sample: 0,
-                    start_value: 0.0,
-                    end_value: 0.0,
-                };
-                capacity
-            ]
-            .into_boxed_slice(),
+            spans,
             shunt: BypassShunt::new(frames, latency),
             effect,
             control,
@@ -4576,7 +4582,7 @@ impl RuntimeParts {
                         observations,
                         latency,
                     )
-                    .expect("validated width");
+                    .expect("validated width and a staging window of the automation capacity");
                     return (bank.scratch, bank.active_mask, Box::new(stage));
                 }
                 let stage =

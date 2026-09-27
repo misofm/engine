@@ -1101,6 +1101,22 @@ pub enum ProcessBlockError {
     ZeroFrames,
     Shape,
     Automation,
+    /// A live-console staging window whose span count is not the effect's
+    /// `automation_capacity`; refused at preparation by
+    /// [`EffectProcessBlock::check_automation_window`] and
+    /// [`EffectBankProcessBlock::check_automation_window`].
+    AutomationWindow,
+}
+
+/// The one statement of the staging-window bound, shared by both block types.
+///
+/// See [`EffectProcessBlock::check_automation_window`] for why the bound is equality.
+const fn check_window(window: usize, automation_capacity: u32) -> Result<(), ProcessBlockError> {
+    if window as u64 == automation_capacity as u64 {
+        Ok(())
+    } else {
+        Err(ProcessBlockError::AutomationWindow)
+    }
 }
 pub struct EffectProcessBlock<'a> {
     pub left: &'a mut [f32],
@@ -1138,6 +1154,37 @@ impl<'a> EffectProcessBlock<'a> {
     }
     pub fn frames(&self) -> usize {
         self.left.len()
+    }
+
+    /// Refuse, at preparation, a live-console staging window that is not exactly this instance's
+    /// `automation_capacity` spans (issue #1004 finding 1, issue #1012).
+    ///
+    /// Every caller that owns the window it hands [`EffectControlLane::stage`] for a prepared
+    /// instance -- `graph`'s per-node console effect today -- calls this once, off the render
+    /// thread, where it allocates the window. The blocks this type builds afterwards carry only the
+    /// staged prefix of that window, per block, on the render thread, and never see the window or
+    /// the capacity, so this is where the bound can be checked at all.
+    ///
+    /// # Why the bound is a precondition of the pairing rule
+    ///
+    /// `EffectControlLane::stage` keeps the `LIVE` witness term when a one-channel `Left` span and
+    /// its bit-equal `Right` twin are staged together, on the premise that the effect applies both
+    /// halves or neither. Every launch effect refuses a span at `span_index >= automation_capacity`
+    /// one span at a time, so a window larger than the capacity could stage a twin across that
+    /// cut-off: the effect would apply `Left p v` and refuse `Right p v`, the witness would still
+    /// hold, and the mono collapse would render the left channel's state for the right one. A
+    /// window equal to the capacity cannot stage a span the effect refuses on capacity. A smaller
+    /// one would be sound for the pair but is refused too: it drops records the queue admitted.
+    ///
+    /// # Errors
+    ///
+    /// [`ProcessBlockError::AutomationWindow`] when `window.len()` differs from
+    /// `metadata.automation_capacity`.
+    pub const fn check_automation_window(
+        window: &[PreparedAutomationSpan],
+        metadata: &PreparedEffectMetadata,
+    ) -> Result<(), ProcessBlockError> {
+        check_window(window.len(), metadata.automation_capacity)
     }
 }
 pub struct EffectBankProcessBlock<'a> {
@@ -1188,6 +1235,27 @@ impl<'a> EffectBankProcessBlock<'a> {
             automation,
             automation_offsets: offsets,
         })
+    }
+
+    /// Refuse, at preparation, a live-console staging window that is not exactly this bank's
+    /// `automation_capacity` spans (issue #1012).
+    ///
+    /// The bank sibling of [`EffectProcessBlock::check_automation_window`], with the same reason:
+    /// `rack`'s console bank stage drains every lane through one window before packing the lane's
+    /// partition, and each lane's partition meets the effect's per-lane `span_index <
+    /// automation_capacity` cut-off, so the window must be exactly that capacity for a staged twin
+    /// pair never to straddle it. Called once, off the render thread, where the window is
+    /// allocated.
+    ///
+    /// # Errors
+    ///
+    /// [`ProcessBlockError::AutomationWindow`] when `window.len()` differs from the bank's
+    /// `program_key.automation_capacity`.
+    pub const fn check_automation_window(
+        window: &[PreparedAutomationSpan],
+        metadata: &PreparedBankMetadata,
+    ) -> Result<(), ProcessBlockError> {
+        check_window(window.len(), metadata.program_key.automation_capacity)
     }
 }
 pub fn valid_runtime_span(
