@@ -162,13 +162,3 @@ fixtures and console workloads, is out of scope. Stop and report instead.
 - No product behaviour changes for any plan that binds today. A moved console digest or unit census
   is a hard stop.
 - Commit on `codex/966-unbind-misaligned-bank-slots`. Do not run timed benchmarks.
-
-## Rulings (coordinator, 2026-09-27)
-
-- **The cost is accepted.** Only sessions that fail to bind today lose banks (about 79% of the banks
-  the compiler formed survive), and failing to load is worse than running some slots per node.
-- **Aligning dependency levels** to recover those banks changes graph identity; it is a separate
-  performance follow-up, not part of this fix.
-- **A wasm run in CI for 4-lane effect banks** is flagged to the owner (x86 `Simd4` tests barely form
-  4-lane effect banks, which hid the browser case).
-
