@@ -1959,7 +1959,9 @@ fn route_word<L: Lane>([ll, lr, rl, rr]: [L; 4], left: L, right: L) -> (L, L) {
 /// computed once, here, from the node ids the lowering already resolved -- and the counters are
 /// pulled from the chain on demand.
 pub(crate) struct UnitIdentity {
-    pub(crate) banked: bool,
+    /// A plain op, a bank, or a bank that gathers its tracks' input (issue #970). One byte for
+    /// what was a `bool`, so the third state costs the row nothing on any target.
+    pub(crate) banking: UnitBanking,
     /// Proven from final adjacent emitted units at bind; fits the existing identity padding.
     resident_input: bool,
     /// Whether any op of this unit holds an observer binding (issue #900), and whether this bank
@@ -1977,6 +1979,56 @@ pub(crate) struct UnitIdentity {
     pub(crate) stages: u32,
     pub(crate) upstream_of_seam_stages: u32,
     pub(crate) lane_tracks: Box<[Box<str>]>,
+}
+
+/// Whether a unit is a bank chain and, for a bank, whether it gathers its tracks' input, fixed at
+/// bind (issue #970).
+///
+/// The mono collapse's structural term, `SOURCE`, says the track **input** carries two identical
+/// planes. That is a statement about the planes a chain gathers only when the chain gathers the
+/// track input: when every lane's first slot is its track's `PostInputBuiltins` stage, which reads
+/// the `Input` stage (the source, then the structurally symmetric input delay) and nothing else. A
+/// later chain of the same track -- after a split at a stage meter, a send tap, a per-node op, or a
+/// builtin/effect cohort misalignment -- gathers planes an earlier unit produced, and whatever made
+/// them differ is in neither its own witness nor the join. [`Runtime::arm_mono_collapse`] arms only
+/// [`Self::BankGatheringTrackInput`], so a later chain renders dual.
+///
+/// One byte for three states, rather than a second flag beside a `bool`, because the identity row's
+/// padding has no fifth flag byte on wasm32 (see the `const` assertion after
+/// [`UnitIdentityWithoutFlags`]), and because only a bank can gather anything.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum UnitBanking {
+    /// A single dispatched op.
+    #[default]
+    Plain,
+    /// A bank chain some lane of which does not begin at its track's `PostInputBuiltins` stage.
+    Bank,
+    /// A bank chain every lane of which begins at its track's `PostInputBuiltins` stage: its
+    /// gathered planes are its tracks' input, so the structural witness speaks for them.
+    BankGatheringTrackInput,
+}
+
+impl UnitBanking {
+    /// The row for a unit that is a bank (`banked`) and, if so, whether every lane's first slot is
+    /// its track's `PostInputBuiltins` stage (`gathers_track_input`). A plain op gathers nothing.
+    const fn of(banked: bool, gathers_track_input: bool) -> Self {
+        match (banked, gathers_track_input) {
+            (false, _) => Self::Plain,
+            (true, false) => Self::Bank,
+            (true, true) => Self::BankGatheringTrackInput,
+        }
+    }
+
+    /// Whether this unit is a homogeneous bank chain.
+    pub(crate) const fn banked(self) -> bool {
+        !matches!(self, Self::Plain)
+    }
+
+    /// Whether this unit is a bank whose gathered planes are its tracks' input: the only unit the
+    /// structural `SOURCE` witness may arm.
+    pub(crate) const fn gathers_track_input(self) -> bool {
+        matches!(self, Self::BankGatheringTrackInput)
+    }
 }
 
 /// What `Runtime::observe_unit` dispatches for one unit, fixed at bind: nothing, its observers,
@@ -2043,6 +2095,9 @@ impl UnitObservation {
 
 /// `UnitIdentity` before the per-unit flags of issues #885, #900, #918, #943 and #950: the row's shape
 /// with none of them, which is what the flags must not grow.
+///
+/// `banked` stays the `bool` it was: issue #970 re-encoded it as the one-byte [`UnitBanking`], and
+/// keeping the original type here is what makes the assertion below refuse a wider re-encoding.
 #[allow(dead_code)]
 struct UnitIdentityWithoutFlags {
     banked: bool,
@@ -2301,13 +2356,24 @@ impl Runtime {
     ///
     /// A unit whose lane list is empty arms nothing: a chain that names no track is one this join
     /// cannot speak for.
+    ///
+    /// Nor does a chain that does not gather its tracks' input (issue #970). `SOURCE` says the
+    /// track **input** carries identical planes, which speaks for a chain only when every lane's
+    /// first slot is its track's `PostInputBuiltins` stage ([`UnitBanking::gathers_track_input`]).
+    /// A later chain of a split strip reads planes an earlier unit of the same track produced; a
+    /// stage there that made them differ is in neither that chain's witness nor this join, so
+    /// arming it would copy a left plane over a right one that differs. It stays unarmed and
+    /// renders dual. That is also what keeps the rack's agreement invariant sound, which leaves
+    /// `SOURCE` out on the ground that it cannot change within a plan: true of the track input,
+    /// and not of a plane an upstream live write can move.
     pub(crate) fn arm_mono_collapse(&mut self, eligible: &dyn Fn(&str) -> bool) {
         for (unit, identity) in self.units.iter_mut().zip(self.identity.iter()) {
             let RuntimeUnit::Bank { chain, .. } = unit else {
                 continue;
             };
             let tracks = &identity.lane_tracks;
-            let armed = !tracks.is_empty()
+            let armed = identity.banking.gathers_track_input()
+                && !tracks.is_empty()
                 && tracks
                     .iter()
                     .all(|track| !track.is_empty() && eligible(track));
@@ -5678,8 +5744,20 @@ pub(crate) fn build_sequential(
             let stages = membership.len().max(1);
             let lanes = ops.len() / stages;
             let node_of = |index: usize| &spec.nodes[program.ops[index].node as usize].id;
+            // Issue #970: the chain gathers its tracks' input when every lane's first slot is that
+            // lane's own track's input-builtins stage. `ops[lane]` is slot 0's lane `lane`.
+            let gathers_track_input = lanes > 0
+                && (0..lanes).all(|lane| {
+                    matches!(
+                        node_of(ops[lane]),
+                        GraphNodeId::TrackStage {
+                            stage: crate::TrackStage::PostInputBuiltins,
+                            ..
+                        }
+                    )
+                });
             identity.push(UnitIdentity {
-                banked: !membership.is_empty(),
+                banking: UnitBanking::of(!membership.is_empty(), gathers_track_input),
                 resident_input: false,
                 // Derived from the finished unit by the runtime constructor.
                 observation: UnitObservation::Unobserved,
@@ -7436,7 +7514,7 @@ mod tests {
             })],
             Vec::new(),
             vec![UnitIdentity {
-                banked: false,
+                banking: UnitBanking::Plain,
                 resident_input: false,
                 observation: UnitObservation::Unobserved,
                 source_lanes: 0,
@@ -7527,7 +7605,7 @@ mod tests {
             })],
             Vec::new(),
             vec![UnitIdentity {
-                banked: false,
+                banking: UnitBanking::Plain,
                 resident_input: false,
                 observation: UnitObservation::Unobserved,
                 source_lanes: 0,
@@ -8015,7 +8093,7 @@ mod tests {
             }
         };
         let identity = |population| UnitIdentity {
-            banked: true,
+            banking: UnitBanking::Bank,
             resident_input: false,
             observation: UnitObservation::Unobserved,
             source_lanes: 0,
@@ -8218,7 +8296,7 @@ mod tests {
             master: FoldTarget::Arena(0),
         };
         let row = |observed| UnitIdentity {
-            banked: false,
+            banking: UnitBanking::Plain,
             resident_input: false,
             observation: UnitObservation::of(observed, false, false),
             source_lanes: 0,
@@ -8470,7 +8548,7 @@ mod tests {
                 completions: Arc::clone(&completions),
             })],
             vec![UnitIdentity {
-                banked: false,
+                banking: UnitBanking::Plain,
                 resident_input: false,
                 observation: UnitObservation::Unobserved,
                 source_lanes: 0,
