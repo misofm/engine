@@ -305,3 +305,36 @@ Findings:
 3. **NIT `crates/parametric-eq/src/lib.rs:4232`.** The comment "a non-`+0.0` state in a dead section
    is a refusal leg" is stale.
 4. **Stacked on #977, which fails attempt 1.** Re-run gates 1-3 after #977 is revised.
+
+## Attempt 2 re-verification (rebased onto #977 attempt 2)
+
+2026-09-27. This commit was cherry-picked onto the revised #977 and #978 (`04e439db` -> `f2952432`).
+Two conflicts, both mechanical, were resolved: the `elision` test module's import list (#977 renamed
+its counter to `masked_pair_pass_count`) and the end of `MUTATIONS.md`. Two changes answer Sol's
+findings:
+
+- **LOW 1:** `lane_is_inert` is one branch-free reduction. It folds the lanes with non-short-circuiting
+  `&`/`|`, and the range test is a single unsigned compare,
+  `(word & MAGNITUDE_MASK).wrapping_sub(FLOOR) <= CEILING - FLOOR`. A scratch program
+  (`scratchpad/work-977-evidence/inert_eq.rs`) checks it against the range form on all `2^32`
+  words: they agree, and 2,786,728,839 words are inert, which is `1 + 2 * (CEILING - FLOOR + 1)`.
+- **NIT 3:** the stale "non-`+0.0` state in a dead section" comment in the `elision` module now reads
+  "non-inert".
+
+Sol's LOW 2, the ruling's refusal list, is outside this issue's paths and is left for the batch
+boundary, as the verdict says.
+
+| gate | result |
+|---|---|
+| 1 `a_cut_switched_off_keeps_the_bank_eliding` | its base pins (`a34ce034…`, `2e0845c6…`, `26a755c1…`), and the overflow leg faults once per leg; dev and release, ±`test-support` |
+| 2 engagement | 9 of 9 later blocks elide at every width and section, dev and release (first stationary block after the ramp too) |
+| 3 refusals | green (every refused and admitted word, bits and integrators) |
+| 4 suite and rows | `-p parametric-eq` 109 passed, 3 ignored, dev and release, ±`test-support`; `chain_shape` 23; 90 native lines and 30 wasm guest digests identical to base |
+| 5 mutations | M1-M4 red on the new body with the same messages and digests (patterns rewritten for it; `MUTATIONS.md` notes the re-run) |
+| 6 toolchain | as in #977's attempt-2 record, all green |
+| 7 shipped artifact `1d46945a…` | callgraph and roster lines identical to #978's; the dual select-free depth-one tail is 83 instructions with no carried stack slot; one-band isolate 20.51 us against base 20.69 (range 20.15-21.43 over 6 runs), two bands 80.39 against 92.94 us, builtins within 0.3 %: PASS |
+
+**Combined, the stack's tip against the batch base** (console harness and guest, two holds, EQ
+isolates, us): native `Simd8` one band 9.82 / 9.56 -> 9.09 / 9.17, two bands 15.40 / 15.49 ->
+13.11 / 13.32. V8 guest one band 20.94 / 21.17 -> 20.01 / 20.25, two bands 43.74 / 43.95 -> 30.29 /
+30.84. The shipped artifact is in the gate 7 row above.

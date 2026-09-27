@@ -328,3 +328,28 @@ Findings:
    This is not a product shape: x86 binds eight-lane EQ banks.
 3. **Stacked on #977, which fails attempt 1.** After #977 is revised, re-run gate 2, the row digests
    and the shipped-artifact check.
+
+## Attempt 2 re-verification (rebased onto #977 attempt 2)
+
+2026-09-27. #977 failed Sol's attempt 1 on the shipped artifact's one-band performance and was
+revised: its depth-one tail is #976's code again. This commit was cherry-picked onto it
+(`100469fa` -> `9e7a342e`). Two doc-comment hunks conflicted (`interleave_mono`'s summary line and
+the head of `interleave`'s "Select-free pairs" section); both were resolved by keeping both
+statements, and the section names `svf_cascade_skewed` as the pairs' kernel. No code line of this issue
+changed. Every gate was re-run on the rebased commit:
+
+| gate | result |
+|---|---|
+| 1 lane `g2_skewed_cascade_equals_the_interleaved_cascade` | green, dev and release (`-p lane`: 69 passed, 2 ignored) |
+| 2 `two_and_four_live_sections_render_the_base_bits` | reproduces its three base pins (`9fdeb65d…`, `aad039b4…`, `602d2f39…`); `-p parametric-eq` 107 passed, 3 ignored, dev and release, ±`test-support` |
+| 3 rows | `chain_shape` 23; 90 native lines and 30 wasm guest digests identical to base |
+| 4 mutations | M1, M2, M2b and M3 red with the same first messages as recorded in `crates/lane/tests/MUTATIONS.md` |
+| 5 artifact `0770f6fe…` | render closure=8 traps=5; kernels=14; EQ dual 672, collapsed 336, scalar 0; other checks identical to base |
+| 6 toolchain | as in #977's attempt-2 record, all green |
+| 7 shipped-artifact V8 and timing (#977's new gate) | V8: the dual select-free depth-one tail is 83 instructions with no carried stack slot; the skewed pairs (181 and 219) have none. Timing: one-band isolate 20.49 us against base 20.69 (range 19.81-21.28 over 6 runs), two bands 79.98 us against base 92.94 (isolate 30.02 against 43.14), builtins within 0.3 %: PASS |
+
+Sol's finding 1 (the three `#[inline(always)]` pins lie outside the brief's paths) stands as
+recorded: they are required by `KERNEL_ROSTER` rule 1. Against attempt 1's numbers, the one-band
+row no longer carries #977's regression (Sol measured 24.1 -> 23.7-24.0 us through this commit's
+parent; now 20.07 -> 20.49, within noise of base). The two-band gain over #977 is unchanged:
+33.50 -> 30.02 us.

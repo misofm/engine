@@ -354,3 +354,124 @@ Findings:
 3. **INFO.** The project's wasm console arm benchmarks the guest, which did not reproduce the shipped
    artifact's register allocation here. A tooling issue should time or inspect `host_web.wasm`
    itself.
+
+## Attempt 2 evidence
+
+Implementer: attempt 2, 2026-09-27, branch `codex/977-eq-elision-and-passes`. The branch was rebuilt
+on #980 (`750fff95`, unchanged): this issue is `52460097` (attempt 1's commit amended with the fix),
+#978 and #979 are rebased on it as `9e7a342e` and `f2952432`, and Sol's verdict commit is cherry-picked
+unchanged as `4073b13f`. Attempt 1's history is kept on `codex/977-eq-elision-and-passes-attempt1`
+(`f1bf752c`), so `git diff 92deafd9 52460097` is exactly the fix. Host: AMD EPYC 7313P (Zen 3),
+`rustc 1.97.1`, Node 22.23.2 (V8 12.4), every build `CARGO_INCREMENTAL=0`.
+
+### Diagnosis
+
+The verdict's finding reproduces. I built the shipped artifact (the build script's cargo line) at
+the base (`820e96dd…`) and at attempt 1 (`7b975112…`), compiled `PreparedParametricEq<f32x4, 4>::process_bank`
+with `node --no-liftoff --no-wasm-lazy-compilation --print-wasm-code-function-index`, and looked in
+each innermost SVF loop for a stack slot that is loaded before it is stored in the body (a value
+carried across iterations through memory). The select-free dual depth-1 tail, the standing
+fixture's whole cascade, is 83 instructions with no carried slot at base and 84 with one (the right
+channel's `ic2`) at attempt 1.
+
+Neither the tail's arithmetic nor its wasm loop explains it: variants whose wasm tail loop is
+identical to base's, instruction for instruction, still spilled. The allocation depends on the
+shape of the tail code around the loop:
+
+| variant (all with #977's select-free pairs) | tail rule | dual select-free tail loop |
+|---|---|---|
+| base (`1d8c4851`) | #976: masked if a lane of either channel is dry | 83 insns, no carried slot |
+| attempt 1 | select-free on every admitted block, masked arm laid out first | 84, one carried slot |
+| V1 | one arm only, select-free (an odd list is always admitted) | 79, one carried slot |
+| E3 | #976's code with `!admitted &&` in front of the dry test | 84, one carried slot |
+| **E2 = attempt 2** | **#976's code, unchanged** | **83, no carried slot** |
+
+At base and in E2 it is the *masked* tail loop (dry lanes) that carries a slot. That is unchanged
+from base and costs no standing shape.
+
+### The change (against attempt 1)
+
+- `interleave` and `interleave_mono`: the depth-one tail is #976's code again, token for token (the
+  masks are built; the masked kernel runs when a lane of either channel is dry there, the
+  select-free kernel otherwise). The pairs keep attempt 1's rule: an admitted plan's depth-two
+  passes run `svf_cascade_interleaved`, and build no mask. So a dedicated cut that is the last live
+  section with dry lanes keeps its masked depth-one pass on an admitted block, as at base. It is
+  exact under either rule. The two-band gain comes from the pairs. The docs ("The tail keeps
+  #976's rule" on `interleave`) record why.
+- The test-support counter now counts masked **depth-two** passes only (`MASKED_PAIR_PASSES`,
+  `test_only_masked_pair_passes`). The tail keeps #976's select-free tail counter.
+- The in-crate test is now `an_admitted_plan_runs_every_pair_select_free`. It also pins the tail's
+  #976 rule per configuration: the LPF-with-dry-lanes tail runs 0 select-free tails, and the
+  general-band tail runs 1.
+- Ruling, "EQ inventory": pairs select-free on admitted blocks. The admitted floor is
+  `24 * active + 3`, plus 1 when the tail has a dry lane (27/28, 51, 75/76, 99, 123/124; refused or
+  all-live 153).
+- Unchanged from attempt 1: leg (c)'s finiteness term (amendment 1), gate 1, the proof.
+
+### Gates (re-run)
+
+| gate | result |
+|---|---|
+| 1 `admitted_blocks_render_the_base_bits_without_selects` | the base pins (`9316456b…`, `d4a1dc9d…`, `f442a0d3…`), dev and release, with and without `test-support`; the poisoned lane poisons as intended |
+| 2 masked-pair counter | `(admitted, refused)` per switching shape: scalar (0, 36) and (0, 36); bank (0, 24) and (0, 24); bank-mono (0, 12) and (0, 12) |
+| 3 suite and rows | `cargo test -p parametric-eq` 106 passed, 3 ignored, dev and release, ±`test-support`. `chain_shape` 23. Rows (scratch harness): 90 native lines and 30 wasm guest digests, one and two bands, identical to base, native equal to wasm |
+| 4 mutations (`MUTATIONS.md`, "Issue #977", rewritten for attempt 2) | M1, M1m, M2, M2m, M4 red as in attempt 1. M3/M3m are now "the tail made select-free on admitted blocks" (attempt 1's rule): red on the in-crate tail-rule assertion (`Simd4 hpf 00000000 lpf 01100110`: 1 select-free tail, want 0) |
+| 5 browser artifact `a6dc00bb…` | render closure=8 traps=5, one owner; kernels=14; EQ dual 312 -> 384, collapsed 156 -> 192, scalar 0; `meter_poll` and `command_submit` identical to base |
+| 6 toolchain | fmt, clippy, doc `-D warnings`; `-p lane` 68; `effect-runtime` 86; `console-workload` 39; `builtins-compiler` 79; `wasm-gates` 9; `bench floor` 9; lane, realtime (57 regions) and EQ-contract policies; `test-console-benchmark.sh` |
+| **7 (new) shipped-artifact V8 and timing** | see below: PASS |
+
+### Gate 7: the shipped artifact, V8 code and render-export timing (new)
+
+**V8 check.** Each artifact is built with the build script's cargo line. `process_bank` and
+`process_bank_mono` are compiled with TurboFan (as above). Every innermost SVF loop is scanned for
+a stack slot that is read before it is written in the body. The dual select-free tail is 83
+instructions with no carried slot, at this commit, at #978 (`9e7a342e`) and at #979 (`f2952432`).
+The dual pairs have none either: select-free 159/181 instructions, masked 209/219. The mono
+select-free tail (42) and mono pairs have none. The only carried slots are in the masked depth-one
+tails, dual 92/88 and mono 43, and base has the same.
+
+**Timing.** Through the artifact's own render export, with Sol's driver
+(`scratchpad/verify-977/timing/web.mjs`: 64 tracks; the console fixture with only the EQ, one band
+(`eq1`), two bands (`eq2`), or no racks (`builtins`); a stereo sine via `source_submit`). Each
+hold runs `flock -w 7200 …/timing.lock` and `taskset -c 31`, with every build done first and
+outside the lock. Arms are timed in the given order, then reversed. There were three holds in
+different arm orders, 6 runs per arm, at load average 3.4-8.8. Each run's value is the median
+over ten rounds of the per-round p50 of 1,000 blocks. The table gives the mean over the runs, us
+per block:
+
+| arm | one band | one-band isolate (range) | two bands | two-band isolate | builtins | gate |
+|---|---:|---:|---:|---:|---:|---|
+| base `1d8c4851` | 70.50 | 20.69 (20.21-21.06) | 92.94 | 43.14 | 49.80 | |
+| **#977 attempt 2** `52460097` | **69.83** | **20.07** (19.66-20.37) | **83.27** | **33.50** | 49.77 | PASS |
+| #978 rebased `9e7a342e` | 70.44 | 20.49 (19.81-21.28) | 79.98 | 30.02 | 49.96 | PASS |
+| #979 rebased `f2952432` | 70.44 | 20.51 (20.15-21.43) | 80.39 | 30.47 | 49.93 | PASS |
+| attempt 1 `92deafd9` (reference, 2 runs) | 74.07 | 24.20 | 83.91 | 34.03 | 49.87 | FAIL |
+
+The gate needs three things of each arm against base: a mean one-band isolate no greater than
+base's, a mean two-band row no greater, and a builtins row within 1 %. The isolate is the row minus
+the same artifact's builtins row, Sol's metric. This commit's one band is 0.6 us faster than base
+(the #980 gate); it was 3.5 us slower at attempt 1. Two bands keep attempt 1's gain in full:
+isolate 43.1 -> 33.5 us (attempt 1: 34.0).
+
+**Console harness and guest** (the evidence harness of attempt 1, not a gate). Base against the
+stacked tip (`f2952432`), two holds in both orders, EQ isolates in us, native `Simd8` then V8 guest:
+
+- one band: 9.82 / 9.56 -> 9.09 / 9.17, and 20.94 / 21.17 -> 20.01 / 20.25;
+- two bands: 15.40 / 15.49 -> 13.11 / 13.32, and 43.74 / 43.95 -> 30.29 / 30.84;
+- EQ-only mono, one band (absolute row, first hold): 24.00 -> 24.00 native, 50.95 -> 51.11 guest.
+
+### Deviations and notes for the verifier
+
+1. **Contract 1 is narrowed for the tail.** The depth-one tail keeps #976's rule instead of running
+   select-free on every admitted block. This is the "restrict the select-free arm to shapes where
+   it measures faster" option of the attempt-2 brief. A tail with dry lanes on an admitted block
+   runs the masked depth-one pass it ran at base.
+2. **The V8 behaviour is empirical.** No variant of the one-band tail loop's own code decides the
+   allocation; the surrounding tail code does. Gate 7's V8 check is how a later change would see a
+   regression. The one-band tail loop is now the same code, in the same place, as at base.
+3. **The counter was renamed** to masked depth-two passes, so gate 2 means the same thing under
+   the narrowed tail rule.
+4. **Gate 7 tooling is scratch, not committed.** It is kept in `scratchpad/work-977-evidence/`:
+   `build_web.sh`, `v8web.sh`, `carried.py`, `webhold.sh` and `webgate.py`. Sol's finding 3 already
+   asks for a tooling issue that times or inspects `host_web.wasm` itself.
+5. Sol's LOW finding 2 (a direct `-0.0` witness for M1) is not added; it was optional.
