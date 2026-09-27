@@ -784,9 +784,18 @@ mod tests {
         })
     }
 
+    /// The nine-track EQ fixture, plus a tenth track, with a compressor in every `simd1` slot and a
+    /// routed sidechain on `eq8`.
+    ///
+    /// #964: the builtins compile in as identities (`identity_builtins`). The base fixture's
+    /// `pan: {left: 1, right: 1}` sums both lanes into the right output, where a bank that crossed
+    /// a track's lanes would render the same bits as one that did not; the identity matrix keeps
+    /// each lane visible at the output, as the builtins-less plan did, and the effect under test
+    /// stays the only stage with a tail or a finite support.
     fn accepted_compressor_graph_fixture() -> session::SessionModel {
         let mut model =
             parse_session_json(PARAMETRIC_EQ_NINE_TRACK_FIXTURE).expect("accepted base fixture");
+        identity_builtins(&mut model);
         let mut tail = model.tracks[7].clone();
         tail.id = StableId::parse("eq9").expect("stable tail id");
         model.tracks.push(tail);
@@ -846,7 +855,7 @@ mod tests {
         model: &session::SessionModel,
         effect_id: &str,
         plan_id: u64,
-    ) -> (PreparedGraphArtifact, PreparedGraphArtifact) {
+    ) -> (PreparedGraphBuiltinsArtifact, PreparedGraphBuiltinsArtifact) {
         let session = compile_session(
             model,
             CompileCaps {
@@ -877,14 +886,14 @@ mod tests {
         let per_node_effects =
             prepare_native_session_effects(&session, &scalar_registry, effect_caps)
                 .expect("prepared per-node effects");
-        let bank = GraphCompiler::compile(GraphCompileRequest {
+        let bank = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id,
             effects: bank_effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("bank graph: {:?}", failure.diagnostics));
-        let per_node = GraphCompiler::compile(GraphCompileRequest {
+        let per_node = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: plan_id + 1,
             effects: per_node_effects,
@@ -895,7 +904,10 @@ mod tests {
     }
 
     /// Compile one accepted model against the real launch registry.
-    fn compile_bank_only(model: &session::SessionModel, plan_id: u64) -> PreparedGraphArtifact {
+    fn compile_bank_only(
+        model: &session::SessionModel,
+        plan_id: u64,
+    ) -> PreparedGraphBuiltinsArtifact {
         let session = compile_session(
             model,
             CompileCaps {
@@ -919,7 +931,7 @@ mod tests {
             },
         )
         .expect("prepared effects");
-        GraphCompiler::compile(GraphCompileRequest {
+        compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id,
             effects,
@@ -930,22 +942,9 @@ mod tests {
 
     /// Bind a compiled artifact over the shared impulse input bindings and render `blocks` blocks,
     /// returning the PCM of each block.
-    fn render_blocks(artifact: PreparedGraphArtifact, blocks: u64) -> Vec<Vec<f32>> {
-        let graph = artifact.graph;
-        let envelope = graph.envelope;
-        let frames = envelope.quantum.0 as usize;
-        let nodes = graph
-            .required_bindings
-            .iter()
-            .map(|node| GraphNodeBinding::new(node.clone(), parametric_eq_input_binding(node)))
-            .collect();
-        let mut plan = graph
-            .bind(GraphRuntimeBindings {
-                envelope,
-                nodes,
-                observers: Vec::new(),
-            })
-            .unwrap_or_else(|failure| panic!("bind: {}", failure.code));
+    fn render_blocks(artifact: PreparedGraphBuiltinsArtifact, blocks: u64) -> Vec<Vec<f32>> {
+        let frames = artifact.envelope().quantum.0 as usize;
+        let mut plan = bind_session_builtins(artifact, parametric_eq_input_binding, Vec::new());
         (0..blocks)
             .map(|block| {
                 let mut pcm = vec![0.0_f32; frames * 2];
@@ -985,7 +984,7 @@ mod tests {
     }
 
     fn render_cross_index_blocks(
-        artifact: PreparedGraphArtifact,
+        artifact: PreparedGraphBuiltinsArtifact,
         mut producers: Vec<effect_compiler::EffectControlProducer>,
         blocks: u64,
         command_target: bool,
@@ -1034,21 +1033,8 @@ mod tests {
                     .expect("decoy control queue has room");
             }
         }
-        let graph = artifact.graph;
-        let envelope = graph.envelope;
-        let frames = envelope.quantum.0 as usize;
-        let nodes = graph
-            .required_bindings
-            .iter()
-            .map(|node| GraphNodeBinding::new(node.clone(), cross_index_input_binding(node)))
-            .collect();
-        let mut plan = graph
-            .bind(GraphRuntimeBindings {
-                envelope,
-                nodes,
-                observers: Vec::new(),
-            })
-            .unwrap_or_else(|failure| panic!("cross-index bind: {}", failure.code));
+        let frames = artifact.envelope().quantum.0 as usize;
+        let mut plan = bind_session_builtins(artifact, cross_index_input_binding, Vec::new());
         (0..blocks)
             .map(|block| {
                 let mut pcm = vec![0.0_f32; frames * 2];
@@ -1879,10 +1865,124 @@ mod tests {
         }
     }
 
-    fn compile_fixture(plan_id: u64) -> PreparedGraphArtifact {
+    /// Builtin caps no test here is about: every builtin budget is unbounded, so a ported test
+    /// still fails only on the graph caps it names.
+    fn unbounded_builtin_caps() -> BuiltinCompileCaps {
+        BuiltinCompileCaps {
+            maximum_total_state_bytes: u64::MAX,
+            maximum_total_retained_payload_bytes: u64::MAX,
+            maximum_total_meter_items: u64::MAX,
+            maximum_total_meter_bytes: u64::MAX,
+            maximum_single_allocation_bytes: u64::MAX,
+            maximum_meter_streams: u64::MAX,
+            maximum_period_frames: u32::MAX,
+            maximum_peak_hold_frames: u32::MAX,
+            maximum_smoothing_samples: u32::MAX,
+        }
+    }
+
+    /// The inputs of one production compile, less the builtins it prepares from the session.
+    struct SessionBuiltinsCompile {
+        plan_id: u64,
+        effects: EffectPreparedSession,
+        caps: GraphCompileCaps,
+        dispatch: Backend,
+    }
+
+    /// Compile `request` the way every host does: the session's own builtins -- no meters, no
+    /// live controls -- prepared and attached through `compile_with_builtins` (#964).
+    ///
+    /// Every test that once compiled without builtins compiles through here, so a plan under test
+    /// carries the input section, fader and pan matrix a host renders, and at a SIMD dispatch their
+    /// banks.
+    #[allow(clippy::result_large_err)]
+    fn compile_with_session_builtins(
+        request: SessionBuiltinsCompile,
+    ) -> Result<PreparedGraphBuiltinsArtifact, GraphBuiltinsCompileFailure> {
+        let SessionBuiltinsCompile {
+            plan_id,
+            effects,
+            caps,
+            dispatch,
+        } = request;
+        let builtins = prepare_session_builtins(&effects.session, &[], unbounded_builtin_caps())
+            .expect("the session's builtins prepare");
+        GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            plan_id,
+            effects,
+            builtins,
+            caps,
+            dispatch,
+        })
+    }
+
+    /// Bind `artifact`'s external nodes -- every track input and the session output -- with
+    /// `input`, plus `observers`, and return the bound plan.
+    fn bind_session_builtins(
+        artifact: PreparedGraphBuiltinsArtifact,
+        input: impl Fn(&GraphNodeId) -> Box<dyn GraphRuntimeProcessor>,
+        observers: Vec<GraphNodeObserverBinding>,
+    ) -> PreparedRenderPlan {
+        let envelope = artifact.envelope();
+        let nodes = artifact
+            .external_binding_nodes()
+            .map(|node| GraphNodeBinding::new(node.clone(), input(node)))
+            .collect();
+        artifact
+            .into_bound(GraphRuntimeBindings {
+                envelope,
+                nodes,
+                observers,
+            })
+            .unwrap_or_else(|failure| panic!("bind: {}", failure.code))
+            .plan
+    }
+
+    /// Make every track's builtin chain an exact identity, so a plan compiled through
+    /// `compile_with_builtins` renders the bits and carries the tails of its graph alone (#964).
+    ///
+    /// * **Input section.** No polarity inversion, 0 dB trim, and both filters off: a zero cutoff
+    ///   disables a filter (#808), and with both off the section's tail is `FiniteZero` rather
+    ///   than `Infinite` (`InputSection::tail`).
+    /// * **Fader.** 0 dB and unmuted on both lanes.
+    /// * **Matrix.** The explicit 2x2 identity. The canonical fixture's `pan: {left: 1, right: 1}`
+    ///   is *not* one: pan values are constant-power positions, so both lanes are panned hard
+    ///   right and an impulse of `1.0 / -1.0` cancels to silence.
+    ///
+    /// Each stage then multiplies by exactly `1.0` or adds exactly `0.0`, so a test whose subject
+    /// is the graph layer keeps its exact pins (a canonical SHA, a `Finite(0)` output tail, an
+    /// impulse rendered as `1.0`) with the production builtins attached, instead of re-pinning
+    /// them to what a 20 Hz high-pass and a pan law do to an impulse. Track delay is left alone:
+    /// it is a graph-compiler feature with its own tests.
+    fn identity_builtins(model: &mut session::SessionModel) {
+        for track in &mut model.tracks {
+            for lane in [&mut track.builtins.left, &mut track.builtins.right] {
+                lane.polarity_invert = false;
+                lane.trim_db = 0.0;
+                lane.hpf_hz = 0.0;
+                lane.lpf_hz = 0.0;
+            }
+            track.fader = session::DualMonoFader {
+                left_db: 0.0,
+                right_db: 0.0,
+                left_mute: false,
+                right_mute: false,
+            };
+            track.matrix_or_pan = session::MatrixOrPan::Matrix {
+                ll: 1.0,
+                lr: 0.0,
+                rl: 0.0,
+                rr: 1.0,
+                smoothing_samples: 16,
+            };
+        }
+    }
+
+    fn compile_fixture(plan_id: u64) -> PreparedGraphBuiltinsArtifact {
         let mut model = parse_session_json(SESSION_FIXTURE).expect("session fixture");
         model.tracks[0].dynamic.effects.clear();
         model.automation.clear();
+        identity_builtins(&mut model);
         let compiled = compile_session(
             &model,
             CompileCaps {
@@ -1895,7 +1995,7 @@ mod tests {
             },
         )
         .expect("compiled session");
-        GraphCompiler::compile(GraphCompileRequest {
+        compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id,
             effects: EffectPreparedSession {
@@ -1907,10 +2007,11 @@ mod tests {
         .unwrap_or_else(|failure| panic!("graph diagnostics: {:?}", failure.diagnostics))
     }
 
-    fn compile_reverse_route_submix_fixture(plan_id: u64) -> PreparedGraphArtifact {
+    fn compile_reverse_route_submix_fixture(plan_id: u64) -> PreparedGraphBuiltinsArtifact {
         let mut model = parse_session_json(SESSION_FIXTURE).expect("session fixture");
         model.tracks[0].dynamic.effects.clear();
         model.automation.clear();
+        identity_builtins(&mut model);
         model.submixes = vec![
             Submix {
                 id: StableId::parse("a-submix").expect("submix id"),
@@ -1953,7 +2054,7 @@ mod tests {
             },
         )
         .expect("compiled reverse-route submix session");
-        GraphCompiler::compile(GraphCompileRequest {
+        compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id,
             effects: EffectPreparedSession {
@@ -2064,12 +2165,12 @@ mod tests {
         Ok(())
     }
 
-    fn render_reverse_route_submix(artifact: PreparedGraphArtifact) -> (Vec<u32>, u64, bool) {
-        let envelope = artifact.graph.envelope;
+    fn render_reverse_route_submix(
+        artifact: PreparedGraphBuiltinsArtifact,
+    ) -> (Vec<u32>, u64, bool) {
+        let envelope = artifact.envelope();
         let nodes = artifact
-            .graph
-            .required_bindings
-            .iter()
+            .external_binding_nodes()
             .cloned()
             .map(|node| {
                 let processor: Box<dyn GraphRuntimeProcessor> = if matches!(
@@ -2114,9 +2215,9 @@ mod tests {
             ],
         };
         let mut plan = artifact
-            .graph
-            .bind(bindings)
-            .unwrap_or_else(|failure| panic!("reverse-route bind: {}", failure.code));
+            .into_bound(bindings)
+            .unwrap_or_else(|failure| panic!("reverse-route bind: {}", failure.code))
+            .plan;
         let frames = envelope.quantum.0 as usize;
         let mut pcm = vec![0.0_f32; frames * 2];
         plan.render(
@@ -2140,9 +2241,9 @@ mod tests {
         let baseline = compile_reverse_route_submix_fixture(122_000);
         let existing_fixture = compile_fixture(122_001);
         dependency_level_contract(
-            &existing_fixture.graph,
-            &existing_fixture.graph.sequential_schedule,
-            &existing_fixture.graph.dependency_levels,
+            existing_fixture.graph(),
+            &existing_fixture.graph().sequential_schedule,
+            &existing_fixture.graph().dependency_levels,
         )
         .expect("existing deterministic fixture level contract");
 
@@ -2165,17 +2266,17 @@ mod tests {
         // #241 re-pin: this graph identity commits the canonical session source shape; its
         // schedule, dependency levels, and rendered PCM remain independently fixed below.
         reverse_fixture_identity_contract(
-            &baseline.graph,
-            &baseline.report,
-            &baseline.graph.sequential_schedule,
-            &baseline.graph.dependency_levels,
-            &GraphCompiler::evidence(&baseline.graph, &baseline.report).canonical_bytes,
+            baseline.graph(),
+            baseline.report(),
+            &baseline.graph().sequential_schedule,
+            &baseline.graph().dependency_levels,
+            &GraphCompiler::evidence(baseline.graph(), baseline.report()).canonical_bytes,
             &expected_schedule,
             "14d73acde3dfc2a57a7a3c797151d675440b7c987aed85b2911ca94e5fac07c3",
         )
         .expect("sorted production identity");
         let level_transcript: Vec<_> = baseline
-            .graph
+            .graph()
             .dependency_levels
             .iter()
             .map(|level| {
@@ -2218,8 +2319,8 @@ mod tests {
         // A level-major schedule with two members of level 9 swapped: the pre-#99 pop-order
         // output. It must fail the contract, and it must hash differently.
         let baseline_canonical =
-            GraphCompiler::evidence(&baseline.graph, &baseline.report).canonical_bytes;
-        let mut legacy_schedule = baseline.graph.sequential_schedule.clone();
+            GraphCompiler::evidence(baseline.graph(), baseline.report()).canonical_bytes;
+        let mut legacy_schedule = baseline.graph().sequential_schedule.clone();
         legacy_schedule.swap(11, 12);
         legacy_schedule.swap(10, 11);
         assert_eq!(
@@ -2243,60 +2344,60 @@ mod tests {
         );
         assert_eq!(
             dependency_level_contract(
-                &baseline.graph,
+                baseline.graph(),
                 &legacy_schedule,
-                &baseline.graph.dependency_levels
+                &baseline.graph().dependency_levels
             ),
             Err("schedule level order")
         );
         let legacy_canonical = canonical_with_levels(
-            &baseline.graph,
-            &baseline.report,
+            baseline.graph(),
+            baseline.report(),
             &legacy_schedule,
-            &baseline.graph.dependency_levels,
+            &baseline.graph().dependency_levels,
         );
         assert_ne!(legacy_canonical, baseline_canonical);
         assert_eq!(
-            GraphCompiler::sha256(&baseline.graph, &baseline.report),
+            GraphCompiler::sha256(baseline.graph(), baseline.report()),
             "14d73acde3dfc2a57a7a3c797151d675440b7c987aed85b2911ca94e5fac07c3"
         );
-        let mut reversed = baseline.graph.dependency_levels.clone();
+        let mut reversed = baseline.graph().dependency_levels.clone();
         reversed[9].nodes.reverse();
         assert_eq!(
             dependency_level_contract(
-                &baseline.graph,
-                &baseline.graph.sequential_schedule,
+                baseline.graph(),
+                &baseline.graph().sequential_schedule,
                 &reversed
             ),
             Err("member order")
         );
-        let mut omitted = baseline.graph.dependency_levels.clone();
+        let mut omitted = baseline.graph().dependency_levels.clone();
         omitted[9].nodes.pop();
         assert_eq!(
             dependency_level_contract(
-                &baseline.graph,
-                &baseline.graph.sequential_schedule,
+                baseline.graph(),
+                &baseline.graph().sequential_schedule,
                 &omitted
             ),
             Err("level membership")
         );
-        let mut duplicate = baseline.graph.dependency_levels.clone();
+        let mut duplicate = baseline.graph().dependency_levels.clone();
         let duplicate_node = duplicate[9].nodes[0].clone();
         duplicate[10].nodes.insert(0, duplicate_node);
         assert_eq!(
             dependency_level_contract(
-                &baseline.graph,
-                &baseline.graph.sequential_schedule,
+                baseline.graph(),
+                &baseline.graph().sequential_schedule,
                 &duplicate
             ),
             Err("duplicate level member")
         );
         assert_eq!(
             reverse_fixture_identity_contract(
-                &baseline.graph,
-                &baseline.report,
+                baseline.graph(),
+                baseline.report(),
                 &legacy_schedule,
-                &baseline.graph.dependency_levels,
+                &baseline.graph().dependency_levels,
                 &baseline_canonical,
                 &expected_schedule,
                 "14d73acde3dfc2a57a7a3c797151d675440b7c987aed85b2911ca94e5fac07c3",
@@ -2307,10 +2408,10 @@ mod tests {
         canonical_corruption[0] ^= 1;
         assert_eq!(
             reverse_fixture_identity_contract(
-                &baseline.graph,
-                &baseline.report,
-                &baseline.graph.sequential_schedule,
-                &baseline.graph.dependency_levels,
+                baseline.graph(),
+                baseline.report(),
+                &baseline.graph().sequential_schedule,
+                &baseline.graph().dependency_levels,
                 &canonical_corruption,
                 &expected_schedule,
                 "14d73acde3dfc2a57a7a3c797151d675440b7c987aed85b2911ca94e5fac07c3",
@@ -2320,43 +2421,46 @@ mod tests {
 
         let repeated = compile_reverse_route_submix_fixture(122_003);
         assert_eq!(
-            repeated.graph.sequential_schedule,
-            baseline.graph.sequential_schedule
+            repeated.graph().sequential_schedule,
+            baseline.graph().sequential_schedule
         );
         assert_eq!(
-            GraphCompiler::evidence(&repeated.graph, &repeated.report).canonical_bytes,
-            GraphCompiler::evidence(&baseline.graph, &baseline.report).canonical_bytes
+            GraphCompiler::evidence(repeated.graph(), repeated.report()).canonical_bytes,
+            GraphCompiler::evidence(baseline.graph(), baseline.report()).canonical_bytes
         );
         assert_eq!(
-            GraphCompiler::sha256(&repeated.graph, &repeated.report),
-            GraphCompiler::sha256(&baseline.graph, &baseline.report)
+            GraphCompiler::sha256(repeated.graph(), repeated.report()),
+            GraphCompiler::sha256(baseline.graph(), baseline.report())
         );
         assert_eq!(
-            repeated.graph.buffer_assignments,
-            baseline.graph.buffer_assignments
+            repeated.graph().buffer_assignments,
+            baseline.graph().buffer_assignments
         );
-        assert_eq!(repeated.report.output_latency, LatencySamples(0));
-        assert!(repeated.graph.inserted_delays.is_empty());
+        assert_eq!(repeated.report().output_latency, LatencySamples(0));
+        assert!(repeated.graph().inserted_delays.is_empty());
 
         let single_artifact = compile_reverse_route_submix_fixture(122_004);
         let wave_artifact = compile_reverse_route_submix_fixture(122_005);
         for artifact in [&single_artifact, &wave_artifact] {
             assert_eq!(
-                artifact.report.output_latency,
-                baseline.report.output_latency
+                artifact.report().output_latency,
+                baseline.report().output_latency
             );
             assert_eq!(
-                artifact.graph.inserted_delays,
-                baseline.graph.inserted_delays
-            );
-            assert_eq!(artifact.graph.route_timings, baseline.graph.route_timings);
-            assert_eq!(
-                GraphCompiler::evidence(&artifact.graph, &artifact.report).canonical_bytes,
-                GraphCompiler::evidence(&baseline.graph, &baseline.report).canonical_bytes
+                artifact.graph().inserted_delays,
+                baseline.graph().inserted_delays
             );
             assert_eq!(
-                GraphCompiler::sha256(&artifact.graph, &artifact.report),
-                GraphCompiler::sha256(&baseline.graph, &baseline.report)
+                artifact.graph().route_timings,
+                baseline.graph().route_timings
+            );
+            assert_eq!(
+                GraphCompiler::evidence(artifact.graph(), artifact.report()).canonical_bytes,
+                GraphCompiler::evidence(baseline.graph(), baseline.report()).canonical_bytes
+            );
+            assert_eq!(
+                GraphCompiler::sha256(artifact.graph(), artifact.report()),
+                GraphCompiler::sha256(baseline.graph(), baseline.report())
             );
         }
         let single = render_reverse_route_submix(single_artifact);
@@ -2374,19 +2478,19 @@ mod tests {
     fn direct_graph_report_exposes_zero_output_latency_and_tail_without_identity_change() {
         let first = compile_fixture(700);
         let second = compile_fixture(701);
-        assert_eq!(first.report.output_latency, LatencySamples(0));
-        assert_eq!(first.report.output_tail, TailSamples::Finite(0));
+        assert_eq!(first.report().output_latency, LatencySamples(0));
+        assert_eq!(first.report().output_tail, TailSamples::Finite(0));
         assert_eq!(
-            GraphCompiler::evidence(&first.graph, &first.report).canonical_bytes,
-            GraphCompiler::evidence(&second.graph, &second.report).canonical_bytes
+            GraphCompiler::evidence(first.graph(), first.report()).canonical_bytes,
+            GraphCompiler::evidence(second.graph(), second.report()).canonical_bytes
         );
         assert_eq!(
-            GraphCompiler::sha256(&first.graph, &first.report),
-            GraphCompiler::sha256(&second.graph, &second.report)
+            GraphCompiler::sha256(first.graph(), first.report()),
+            GraphCompiler::sha256(second.graph(), second.report())
         );
         assert_eq!(
-            GraphCompiler::evidence(&first.graph, &first.report).dot,
-            GraphCompiler::evidence(&second.graph, &second.report).dot
+            GraphCompiler::evidence(first.graph(), first.report()).dot,
+            GraphCompiler::evidence(second.graph(), second.report()).dot
         );
     }
 
@@ -2408,7 +2512,7 @@ mod tests {
             "the scalar dispatch must not offer a bank width"
         );
         let (_, _, banked_effects) = twelve_track_bank_fixture();
-        let banked = GraphCompiler::compile(GraphCompileRequest {
+        let banked = compile_with_session_builtins(SessionBuiltinsCompile {
             plan_id: 771,
             effects: banked_effects,
             caps: integration_caps(),
@@ -2416,7 +2520,7 @@ mod tests {
         })
         .unwrap_or_else(|failure| panic!("graph diagnostics: {:?}", failure.diagnostics));
         let (_, _, scalar_effects) = twelve_track_bank_fixture();
-        let plain = GraphCompiler::compile(GraphCompileRequest {
+        let plain = compile_with_session_builtins(SessionBuiltinsCompile {
             plan_id: 771,
             effects: scalar_effects,
             caps: integration_caps(),
@@ -2424,10 +2528,19 @@ mod tests {
         })
         .unwrap_or_else(|failure| panic!("graph diagnostics: {:?}", failure.diagnostics));
 
-        assert_eq!(plain.graph.prepared_bank_count(), 0);
+        assert_eq!(plain.graph().prepared_bank_count(), 0);
         let expected_banked =
             BankWidth::for_backend(host_dispatch()).map_or(0, |width| 12 / width.lanes() as usize);
-        assert_eq!(banked.graph.prepared_bank_count(), expected_banked);
+        assert_eq!(banked.graph().prepared_bank_count(), expected_banked);
+        // #964: the builtins are banks too, and the scalar dispatch forms none of them either,
+        // while the host dispatch banks each of the three builtin stages once per cohort.
+        assert_eq!(plain.prepared_builtin_bank_count(), 0);
+        assert_eq!(
+            banked.prepared_builtin_bank_count(),
+            BankWidth::for_backend(host_dispatch()).map_or(0, |width| {
+                BANKABLE_TRACK_STAGES as usize * 12_usize.div_ceil(width.lanes() as usize)
+            })
+        );
         // Non-vacuity: on a host that cannot bank at all, both compiles bind zero banks and the
         // comparison proves nothing. Recorded rather than skipped, so a scalar CI host is visible
         // as a gap in the evidence instead of a silent pass. The delivery host is x86-64-v3
@@ -2439,39 +2552,45 @@ mod tests {
         );
 
         assert_eq!(
-            plain.graph.sequential_schedule,
-            banked.graph.sequential_schedule
+            plain.graph().sequential_schedule,
+            banked.graph().sequential_schedule
         );
         assert_eq!(
-            plain.graph.dependency_levels,
-            banked.graph.dependency_levels
+            plain.graph().dependency_levels,
+            banked.graph().dependency_levels
         );
-        assert_eq!(plain.graph.route_timings, banked.graph.route_timings);
-        assert_eq!(plain.graph.inserted_delays, banked.graph.inserted_delays);
+        assert_eq!(plain.graph().route_timings, banked.graph().route_timings);
         assert_eq!(
-            GraphCompiler::reductions(&plain.graph),
-            GraphCompiler::reductions(&banked.graph)
-        );
-        assert_eq!(plain.graph.routes(), banked.graph.routes());
-        assert_eq!(
-            plain.graph.buffer_assignments,
-            banked.graph.buffer_assignments
-        );
-        assert_eq!(plain.report.output_latency, banked.report.output_latency);
-        assert_eq!(plain.report.output_tail, banked.report.output_tail);
-        assert_eq!(
-            GraphCompiler::evidence(&plain.graph, &plain.report).canonical_bytes,
-            GraphCompiler::evidence(&banked.graph, &banked.report).canonical_bytes
+            plain.graph().inserted_delays,
+            banked.graph().inserted_delays
         );
         assert_eq!(
-            GraphCompiler::sha256(&plain.graph, &plain.report),
-            GraphCompiler::sha256(&banked.graph, &banked.report)
+            GraphCompiler::reductions(plain.graph()),
+            GraphCompiler::reductions(banked.graph())
+        );
+        assert_eq!(plain.graph().routes(), banked.graph().routes());
+        assert_eq!(
+            plain.graph().buffer_assignments,
+            banked.graph().buffer_assignments
         );
         assert_eq!(
-            GraphCompiler::evidence(&plain.graph, &plain.report).dot,
-            GraphCompiler::evidence(&banked.graph, &banked.report).dot
+            plain.report().output_latency,
+            banked.report().output_latency
         );
-        assert_eq!(plain.report.rack_cohorts.dispatch, scalar);
+        assert_eq!(plain.report().output_tail, banked.report().output_tail);
+        assert_eq!(
+            GraphCompiler::evidence(plain.graph(), plain.report()).canonical_bytes,
+            GraphCompiler::evidence(banked.graph(), banked.report()).canonical_bytes
+        );
+        assert_eq!(
+            GraphCompiler::sha256(plain.graph(), plain.report()),
+            GraphCompiler::sha256(banked.graph(), banked.report())
+        );
+        assert_eq!(
+            GraphCompiler::evidence(plain.graph(), plain.report()).dot,
+            GraphCompiler::evidence(banked.graph(), banked.report()).dot
+        );
+        assert_eq!(plain.report().rack_cohorts.dispatch, scalar);
     }
 
     #[test]
@@ -2798,9 +2917,9 @@ mod tests {
                        controlled: usize,
                        target_staging: bool,
                        caps: GraphCompileCaps|
-         -> (PreparedGraphArtifact, OwnerExpectation) {
+         -> (PreparedGraphBuiltinsArtifact, OwnerExpectation) {
             let (effects, expected) = build(registry, dispatch, controlled, target_staging);
-            let artifact = GraphCompiler::compile(GraphCompileRequest {
+            let artifact = compile_with_session_builtins(SessionBuiltinsCompile {
                 dispatch,
                 plan_id: 8_080,
                 effects,
@@ -2809,7 +2928,7 @@ mod tests {
             .unwrap_or_else(|failure| panic!("resource graph: {:?}", failure.diagnostics));
             if expected.banked && controlled != 0 {
                 let members: usize = artifact
-                    .report
+                    .report()
                     .rack_cohorts
                     .bound_slots_in(RackLocation::Simd1)
                     .map(|slot| slot.members.len())
@@ -2859,44 +2978,57 @@ mod tests {
                 BankWidth::for_backend(dispatch).is_some(),
                 "{label} bank mode"
             );
-            let plain_resource = &plain.report.estimate;
-            let live_resource = &live.report.estimate;
             assert_eq!(
-                GraphCompiler::evidence(&plain.graph, &plain.report).canonical_bytes,
-                GraphCompiler::evidence(&live.graph, &live.report).canonical_bytes,
+                GraphCompiler::evidence(plain.graph(), plain.report()).canonical_bytes,
+                GraphCompiler::evidence(live.graph(), live.report()).canonical_bytes,
                 "{label}: controls do not alter semantic canonical bytes"
             );
-            assert_eq!(
-                live_resource.graph_metadata_bytes - plain_resource.graph_metadata_bytes,
-                expected.total,
-                "{label}: graph owner delta"
-            );
-            assert_eq!(
-                live_resource.incremental_plan_bytes - plain_resource.incremental_plan_bytes,
-                expected.total,
-                "{label}: plan owner delta"
-            );
-            assert_eq!(
-                live_resource.session_plus_plan_bytes - plain_resource.session_plus_plan_bytes,
-                expected.total,
-                "{label}: session owner delta"
-            );
-            assert_eq!(
-                live_resource.largest_allocation_bytes,
-                plain_resource
-                    .largest_allocation_bytes
-                    .max(expected.largest),
-                "{label}: largest owner is a maximum, never a sum"
-            );
-            if controlled == 0 {
-                assert_eq!(expected.total, 0, "no controls retain no owner bytes");
-            } else if label == "bank-one-target" {
-                assert!(
-                    expected.largest > plain_resource.largest_allocation_bytes,
-                    "the high-cap control owner must exercise largest-allocation accounting"
+            // Both published estimates carry exactly the control owners: the report's, and the
+            // whole-plan estimate with the builtin banks attached -- the one the caps below are
+            // checked against (#964). The builtin terms are the same in `plain` and `live`, so
+            // every delta is the owners' alone.
+            for (estimate, plain_resource, live_resource) in [
+                ("report", &plain.report().estimate, &live.report().estimate),
+                (
+                    "whole-plan",
+                    plain.graph_resource_estimate(),
+                    live.graph_resource_estimate(),
+                ),
+            ] {
+                assert_eq!(
+                    live_resource.graph_metadata_bytes - plain_resource.graph_metadata_bytes,
+                    expected.total,
+                    "{label}: {estimate} graph owner delta"
                 );
+                assert_eq!(
+                    live_resource.incremental_plan_bytes - plain_resource.incremental_plan_bytes,
+                    expected.total,
+                    "{label}: {estimate} plan owner delta"
+                );
+                assert_eq!(
+                    live_resource.session_plus_plan_bytes - plain_resource.session_plus_plan_bytes,
+                    expected.total,
+                    "{label}: {estimate} session owner delta"
+                );
+                assert_eq!(
+                    live_resource.largest_allocation_bytes,
+                    plain_resource
+                        .largest_allocation_bytes
+                        .max(expected.largest),
+                    "{label}: {estimate} largest owner is a maximum, never a sum"
+                );
+                if controlled == 0 {
+                    assert_eq!(expected.total, 0, "no controls retain no owner bytes");
+                } else if label == "bank-one-target" {
+                    assert!(
+                        expected.largest > plain_resource.largest_allocation_bytes,
+                        "the high-cap control owner must exercise {estimate} largest-allocation \
+                         accounting"
+                    );
+                }
             }
 
+            let live_resource = live.graph_resource_estimate();
             for (field, value) in [
                 ("graph", live_resource.graph_metadata_bytes),
                 ("plan", live_resource.incremental_plan_bytes),
@@ -2912,9 +3044,8 @@ mod tests {
                 assert!(
                     prepare(registry, dispatch, controlled, target_staging, exact)
                         .0
-                        .report
-                        .estimate
-                        == *live_resource,
+                        .graph_resource_estimate()
+                        == live_resource,
                     "{label}: exact {field} cap accepts"
                 );
                 let mut below = exact;
@@ -2925,7 +3056,7 @@ mod tests {
                     _ => unreachable!(),
                 }
                 let (effects, _) = build(registry, dispatch, controlled, target_staging);
-                let failure = match GraphCompiler::compile(GraphCompileRequest {
+                let failure = match compile_with_session_builtins(SessionBuiltinsCompile {
                     dispatch,
                     plan_id: 8_080,
                     effects,
@@ -3047,7 +3178,7 @@ mod tests {
             Some(effect_contract::BankWidth::Eight),
         )
         .expect("literal fold resource");
-        let mut below_largest = compile_fixture(5_110).report.estimate;
+        let mut below_largest = compile_fixture(5_110).report().estimate.clone();
         below_largest.graph_metadata_bytes = 11;
         below_largest.incremental_plan_bytes = 22;
         below_largest.session_plus_plan_bytes = 33;
@@ -3067,7 +3198,7 @@ mod tests {
             "all four fields fold independently"
         );
 
-        let mut above_largest = compile_fixture(5_111).report.estimate;
+        let mut above_largest = compile_fixture(5_111).report().estimate.clone();
         above_largest.largest_allocation_bytes = resource.largest_allocation_bytes + 1;
         let expected_largest = above_largest.largest_allocation_bytes;
         above_largest
@@ -3075,7 +3206,7 @@ mod tests {
             .expect("larger prior allocation remains");
         assert_eq!(above_largest.largest_allocation_bytes, expected_largest);
 
-        let mut zero = compile_fixture(5_110).report.estimate;
+        let mut zero = compile_fixture(5_110).report().estimate.clone();
         let before_zero = zero.clone();
         zero.checked_add_bank_slot_owners(Default::default())
             .expect("zero fold");
@@ -3135,27 +3266,26 @@ mod tests {
             },
         )
         .expect("compiled session");
-        let graph = GraphCompiler::compile(GraphCompileRequest {
-            dispatch: host_dispatch(),
-            plan_id: 5_111,
+        let builtin_caps = unbounded_builtin_caps();
+        // The prior owners, observed where no bank of either kind forms: the same session and its
+        // builtins compiled at `Backend::Scalar`. Until #964 this was a builtins-less compile at
+        // the host dispatch, which bound no bank either. With the builtins-less compile gone, a
+        // scalar dispatch is the one production compile that has no slot owner to charge, so the
+        // host compile below must publish exactly its estimate plus the literal reservation.
+        let semantic_baseline = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            dispatch: Backend::Scalar,
+            plan_id: 5_115,
             effects: EffectPreparedSession {
                 session: session.clone(),
                 entries: Vec::new(),
             },
+            builtins: prepare_session_builtins(&session, &[], builtin_caps)
+                .expect("semantic baseline builtins"),
             caps: integration_caps(),
         })
-        .unwrap_or_else(|failure| panic!("plain graph: {:?}", failure.diagnostics));
-        let builtin_caps = BuiltinCompileCaps {
-            maximum_total_state_bytes: u64::MAX,
-            maximum_total_retained_payload_bytes: u64::MAX,
-            maximum_total_meter_items: u64::MAX,
-            maximum_total_meter_bytes: u64::MAX,
-            maximum_single_allocation_bytes: u64::MAX,
-            maximum_meter_streams: u64::MAX,
-            maximum_period_frames: u32::MAX,
-            maximum_peak_hold_frames: u32::MAX,
-            maximum_smoothing_samples: u32::MAX,
-        };
+        .unwrap_or_else(|failure| panic!("semantic baseline: {:?}", failure.diagnostics));
+        assert_eq!(semantic_baseline.prepared_builtin_bank_count(), 0);
+        assert_eq!(semantic_baseline.graph().prepared_bank_count(), 0);
         let prepared =
             prepare_session_builtins(&session, &[], builtin_caps).expect("prepared builtins");
         let classes = SessionPoolClasses::from_session(&session);
@@ -3165,7 +3295,11 @@ mod tests {
         assert_eq!(empty_builtin_resource.bank_count, 0);
         assert_eq!(empty_builtin_resource.maximum_mask_bytes, 0);
         let builtin_resource = prepared
-            .graph_builtin_bank_resource(host_dispatch(), &graph.graph.dependency_levels, &classes)
+            .graph_builtin_bank_resource(
+                host_dispatch(),
+                &semantic_baseline.graph().dependency_levels,
+                &classes,
+            )
             .expect("builtin resource");
         assert!(
             builtin_resource.bank_count > 0,
@@ -3188,7 +3322,7 @@ mod tests {
             .max(u64::from(width.lanes()) * core::mem::size_of::<bool>() as u64);
         assert_eq!(slots.total_bytes, slot_total);
         assert_eq!(slots.largest_allocation_bytes, slot_largest);
-        let mut expected = graph.report.estimate.clone();
+        let mut expected = semantic_baseline.report().estimate.clone();
         expected.graph_metadata_bytes += slot_total;
         expected.incremental_plan_bytes += slot_total;
         expected.session_plus_plan_bytes += slot_total;
@@ -3209,39 +3343,59 @@ mod tests {
             expected,
             "published estimate carries slots"
         );
-        let semantic_baseline = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
-            dispatch: Backend::Scalar,
-            plan_id: 5_115,
-            effects: EffectPreparedSession {
-                session: session.clone(),
-                entries: Vec::new(),
-            },
-            builtins: prepare_session_builtins(&session, &[], builtin_caps)
-                .expect("semantic baseline builtins"),
-            caps: integration_caps(),
-        })
-        .unwrap_or_else(|failure| panic!("semantic baseline: {:?}", failure.diagnostics));
         assert_eq!(
             GraphCompiler::evidence(semantic_baseline.graph(), semantic_baseline.report())
                 .canonical_bytes,
             GraphCompiler::evidence(artifact.graph(), artifact.report()).canonical_bytes,
             "bank overlay leaves canonical semantics unchanged"
         );
-        // A separate real compiler fixture combines prepared native effects and builtins. The
-        // effect-only compile supplies the independently observed prior owners; direct arithmetic
-        // below derives the combined slot delta and attached builtin payload.
-        let (_, effect_only_inputs) = rack_chain_fixture(8, 1, |_| 1);
-        let mixed_session = effect_only_inputs.session.clone();
-        let effect_only = compile_chain_fixture(effect_only_inputs);
-        let effect_count = effect_only.report.estimate.effect_bank_count;
-        assert!(effect_count > 0, "mixed fixture prepares effect banks");
+        // A separate real compiler fixture combines prepared native effects and builtins. Its
+        // prior owners are observed the same way -- the fixture at `Backend::Scalar`, where neither
+        // its effects nor its builtins bank -- and the effect banks the host dispatch binds are
+        // charged by their own resource term; direct arithmetic below derives the combined slot
+        // reservation and the attached builtin payload. Until #964 an effect-only, builtins-less
+        // compile at the host dispatch supplied the prior owners and the effect-bank term together.
+        let scalar_mixed = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            dispatch: Backend::Scalar,
+            plan_id: 5_117,
+            effects: {
+                let (_, effects) = rack_chain_fixture(8, 1, |_| 1);
+                effects
+            },
+            builtins: {
+                let (_, effects) = rack_chain_fixture(8, 1, |_| 1);
+                prepare_session_builtins(&effects.session, &[], builtin_caps)
+                    .expect("scalar mixed builtins")
+            },
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("scalar mixed graph: {:?}", failure.diagnostics));
+        assert_eq!(scalar_mixed.prepared_builtin_bank_count(), 0);
+        assert_eq!(scalar_mixed.report().estimate.effect_bank_count, 0);
+        let (_, effect_inputs) = rack_chain_fixture(8, 1, |_| 1);
+        let mixed_session = effect_inputs.session.clone();
         let mixed_classes = SessionPoolClasses::from_session(&mixed_session);
+        let (effect_index, effect_ids) = indexed_effect_ids(&effect_inputs);
+        let (effect_banks, _) = bind_rack_banks_indexed(
+            &effect_inputs,
+            &effect_index,
+            &effect_ids,
+            &scalar_mixed.graph().dependency_levels,
+            host_dispatch(),
+            &mixed_classes,
+        )
+        .expect("the fixture's effect banks bind");
+        let effect_resource =
+            crate::banks::effect_bank_resource(&effect_banks, mixed_session.quantum().0)
+                .expect("effect bank resource");
+        let effect_count = effect_resource.bank_count;
+        assert!(effect_count > 0, "mixed fixture prepares effect banks");
         let mixed_builtins =
             prepare_session_builtins(&mixed_session, &[], builtin_caps).expect("mixed builtins");
         let mixed_builtin_resource = mixed_builtins
             .graph_builtin_bank_resource(
                 host_dispatch(),
-                &effect_only.graph.dependency_levels,
+                &scalar_mixed.graph().dependency_levels,
                 &mixed_classes,
             )
             .expect("mixed builtin resource");
@@ -3252,7 +3406,9 @@ mod tests {
         let combined_count = effect_count
             .checked_add(mixed_builtin_resource.bank_count)
             .expect("combined count");
-        let effect_slot_bytes = literal_bank_slot_reservation_bytes(effect_count, lanes);
+        // One reservation over the combined count. Its total is linear in the count, so what tells
+        // it from one reservation per kind is the largest allocation: one array of
+        // `combined_count` entries, not two shorter ones.
         let combined_slot_bytes = literal_bank_slot_reservation_bytes(combined_count, lanes);
         let stage = core::mem::size_of::<Box<dyn rack::BankStage>>() as u64;
         let slot = core::mem::size_of::<rack::BankSlot>() as u64;
@@ -3260,11 +3416,12 @@ mod tests {
         let combined_largest = (combined_count * stage)
             .max(combined_count * slot)
             .max(mask);
-        let mut expected_report = effect_only.report.estimate.clone();
-        let slot_delta = combined_slot_bytes - effect_slot_bytes;
-        expected_report.graph_metadata_bytes += slot_delta;
-        expected_report.incremental_plan_bytes += slot_delta;
-        expected_report.session_plus_plan_bytes += slot_delta;
+        let mut expected_report = scalar_mixed.report().estimate.clone();
+        crate::banks::checked_add_effect_banks(&mut expected_report, effect_resource)
+            .expect("effect bank fold");
+        expected_report.graph_metadata_bytes += combined_slot_bytes;
+        expected_report.incremental_plan_bytes += combined_slot_bytes;
+        expected_report.session_plus_plan_bytes += combined_slot_bytes;
         expected_report.largest_allocation_bytes = expected_report
             .largest_allocation_bytes
             .max(combined_largest);
@@ -3293,9 +3450,9 @@ mod tests {
                 mixed.report().estimate.effect_bank_runtime_buffer_bytes,
             ),
             (
-                effect_only.report.estimate.effect_bank_metadata_bytes,
-                effect_only.report.estimate.effect_bank_scratch_bytes,
-                effect_only.report.estimate.effect_bank_runtime_buffer_bytes,
+                effect_resource.metadata_bytes,
+                effect_resource.scratch_bytes,
+                effect_resource.runtime_buffer_bytes,
             )
         );
         let mut expected_attached = expected_report.clone();
@@ -3313,21 +3470,6 @@ mod tests {
             .largest_allocation_bytes
             .max(mixed_builtin_resource.largest_allocation_bytes);
         assert_eq!(mixed.graph_resource_estimate(), &expected_attached);
-        let scalar_mixed = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
-            dispatch: Backend::Scalar,
-            plan_id: 5_117,
-            effects: {
-                let (_, effects) = rack_chain_fixture(8, 1, |_| 1);
-                effects
-            },
-            builtins: {
-                let (_, effects) = rack_chain_fixture(8, 1, |_| 1);
-                prepare_session_builtins(&effects.session, &[], builtin_caps)
-                    .expect("scalar mixed builtins")
-            },
-            caps: integration_caps(),
-        })
-        .unwrap_or_else(|failure| panic!("scalar mixed graph: {:?}", failure.diagnostics));
         assert_eq!(
             GraphCompiler::evidence(mixed.graph(), mixed.report()).canonical_bytes,
             GraphCompiler::evidence(scalar_mixed.graph(), scalar_mixed.report()).canonical_bytes,
@@ -3491,6 +3633,20 @@ mod tests {
     /// prepared-entry permutation can only be resolved by the production `(track, rack, effect)`
     /// handoff. The fixture's expected metadata below is a separate ownership table.
     fn cross_index_effect_fixture() -> EffectPreparedSession {
+        cross_index_effect_session(|_| {})
+    }
+
+    /// [`cross_index_effect_fixture`] with identity builtins (#964): the fixture's input filters
+    /// would give both plans an `Infinite` output tail, and its pan would sum both lanes into the
+    /// right output, so the tail and PCM comparisons that prove ownership survives a reorder could
+    /// no longer see a crossed tail or a crossed lane.
+    fn identity_cross_index_effect_fixture() -> EffectPreparedSession {
+        cross_index_effect_session(identity_builtins)
+    }
+
+    fn cross_index_effect_session(
+        builtins: fn(&mut session::SessionModel),
+    ) -> EffectPreparedSession {
         let mut model = parse_session_json(SESSION_FIXTURE).expect("fixture");
         let base_track = model.tracks[0].clone();
         let base_route = model.routes[0].clone();
@@ -3540,6 +3696,7 @@ mod tests {
                 route
             })
             .collect();
+        builtins(&mut model);
         let session = compile_session(
             &model,
             CompileCaps {
@@ -3744,8 +3901,8 @@ mod tests {
         }
     }
 
-    fn compile_chain_fixture(effects: EffectPreparedSession) -> PreparedGraphArtifact {
-        GraphCompiler::compile(GraphCompileRequest {
+    fn compile_chain_fixture(effects: EffectPreparedSession) -> PreparedGraphBuiltinsArtifact {
+        compile_with_session_builtins(SessionBuiltinsCompile {
             plan_id: 4242,
             effects,
             caps: integration_caps(),
@@ -3766,7 +3923,7 @@ mod tests {
             panic!("delivery host must offer a bank width");
         };
         let lanes = width.lanes() as usize;
-        let cases: Vec<(&str, PreparedGraphArtifact)> = vec![
+        let cases: Vec<(&str, PreparedGraphBuiltinsArtifact)> = vec![
             ("direct route", compile_fixture(9_100)),
             (
                 "reverse submixes",
@@ -3774,7 +3931,7 @@ mod tests {
             ),
             ("twelve-track banks", {
                 let (_, _, effects) = twelve_track_bank_fixture();
-                GraphCompiler::compile(GraphCompileRequest {
+                compile_with_session_builtins(SessionBuiltinsCompile {
                     plan_id: 9_102,
                     effects,
                     caps: integration_caps(),
@@ -3789,7 +3946,7 @@ mod tests {
         ];
         let mut measured = Vec::new();
         for (label, artifact) in cases {
-            let graph = &artifact.graph;
+            let graph = &artifact.graph();
             let program = graph
                 .program()
                 .unwrap_or_else(|| panic!("{label}: compiled plan must lower"));
@@ -3893,7 +4050,7 @@ mod tests {
         let lanes = width.lanes() as usize;
         let (_registry, effects) = rack_chain_fixture(lanes, 2, |_| 2);
         let artifact = compile_chain_fixture(effects);
-        let report = &artifact.report.rack_cohorts;
+        let report = &artifact.report().rack_cohorts;
 
         let groups: Vec<_> = report.groups_in(RackLocation::Simd1).collect();
         assert_eq!(groups.len(), 1, "one cohort for one shared rack program");
@@ -3921,7 +4078,7 @@ mod tests {
                 slot.slot
             );
         }
-        assert_eq!(artifact.graph.prepared_bank_count(), 2);
+        assert_eq!(artifact.graph().prepared_bank_count(), 2);
         assert!(report.scalar_in(RackLocation::Simd1).is_empty());
     }
 
@@ -3955,22 +4112,22 @@ mod tests {
         let candidate = compile_chain_fixture(shuffled);
 
         assert_eq!(
-            candidate.report.rack_cohorts.plan,
-            baseline.report.rack_cohorts.plan
+            candidate.report().rack_cohorts.plan,
+            baseline.report().rack_cohorts.plan
         );
         assert_eq!(
-            candidate.report.rack_cohorts.bound_slots,
-            baseline.report.rack_cohorts.bound_slots
+            candidate.report().rack_cohorts.bound_slots,
+            baseline.report().rack_cohorts.bound_slots
         );
         assert_eq!(
-            GraphCompiler::sha256(&candidate.graph, &candidate.report),
-            GraphCompiler::sha256(&baseline.graph, &baseline.report)
+            GraphCompiler::sha256(candidate.graph(), candidate.report()),
+            GraphCompiler::sha256(baseline.graph(), baseline.report())
         );
         // This is the causal wrong-result control: the expected ownership table is written from
         // the session declarations, then attached to each prepared entry before the candidate
         // permutation. A zip-by-entry implementation swaps these four metadata rows and the
         // live control lane below, while the indexed production handoff preserves both.
-        let mut declared = cross_index_effect_fixture();
+        let mut declared = identity_cross_index_effect_fixture();
         for entry in &mut declared.entries {
             entry.metadata.latency = LatencySamples(cross_index_metadata_latency(
                 &entry.track_id,
@@ -3980,7 +4137,7 @@ mod tests {
             entry.metadata.tail = TailSamples::Finite(entry.metadata.latency.0 + 1);
         }
         let mut candidate = declared;
-        let mut baseline = cross_index_effect_fixture();
+        let mut baseline = identity_cross_index_effect_fixture();
         for entry in &mut baseline.entries {
             entry.metadata.latency = LatencySamples(cross_index_metadata_latency(
                 &entry.track_id,
@@ -3996,7 +4153,7 @@ mod tests {
             attach_effect_console(&mut candidate, NonZeroUsize::new(8).expect("control queue"))
                 .expect("candidate controls attach");
         candidate.entries.reverse();
-        let baseline = GraphCompiler::compile(GraphCompileRequest {
+        let baseline = compile_with_session_builtins(SessionBuiltinsCompile {
             plan_id: 6_330,
             effects: baseline,
             caps: integration_caps(),
@@ -4005,7 +4162,7 @@ mod tests {
         .unwrap_or_else(|failure| {
             panic!("baseline cross-index compile: {:?}", failure.diagnostics)
         });
-        let candidate = GraphCompiler::compile(GraphCompileRequest {
+        let candidate = compile_with_session_builtins(SessionBuiltinsCompile {
             plan_id: 6_331,
             effects: candidate,
             caps: integration_caps(),
@@ -4015,15 +4172,17 @@ mod tests {
             panic!("reordered cross-index compile: {:?}", failure.diagnostics)
         });
         assert_eq!(
-            baseline.report.output_latency, candidate.report.output_latency,
+            baseline.report().output_latency,
+            candidate.report().output_latency,
             "metadata ownership must survive prepared-entry reordering"
         );
         assert_eq!(
-            baseline.report.output_tail, candidate.report.output_tail,
+            baseline.report().output_tail,
+            candidate.report().output_tail,
             "tail ownership must survive prepared-entry reordering"
         );
-        let baseline_evidence = GraphCompiler::evidence(&baseline.graph, &baseline.report);
-        let candidate_evidence = GraphCompiler::evidence(&candidate.graph, &candidate.report);
+        let baseline_evidence = GraphCompiler::evidence(baseline.graph(), baseline.report());
+        let candidate_evidence = GraphCompiler::evidence(candidate.graph(), candidate.report());
         assert_eq!(
             baseline_evidence.canonical_bytes,
             candidate_evidence.canonical_bytes
@@ -4060,7 +4219,7 @@ mod tests {
         // A deliberate processor crossing must change the rendered result. This is the
         // wrong-association control missing from the earlier attempt: entries retain their owner
         // keys, but their processor payloads are crossed between track/rack/slot identities.
-        let mut crossed_processor = cross_index_effect_fixture();
+        let mut crossed_processor = identity_cross_index_effect_fixture();
         for entry in &mut crossed_processor.entries {
             entry.metadata.latency = LatencySamples(cross_index_metadata_latency(
                 &entry.track_id,
@@ -4095,7 +4254,7 @@ mod tests {
         assert!(first < second, "crossed processor fixture order");
         let (before, after) = crossed_processor.entries.split_at_mut(second);
         std::mem::swap(&mut before[first].processor, &mut after[0].processor);
-        let crossed_processor = GraphCompiler::compile(GraphCompileRequest {
+        let crossed_processor = compile_with_session_builtins(SessionBuiltinsCompile {
             plan_id: 6_333,
             effects: crossed_processor,
             caps: integration_caps(),
@@ -4118,7 +4277,7 @@ mod tests {
         // Swapping only the retained control consumers proves the intended target independently:
         // the same producer command is sent to cross1/dynamic/slot1, and a crossed consumer must
         // therefore alter the output rather than merely proving that some control was drained.
-        let mut crossed_control = cross_index_effect_fixture();
+        let mut crossed_control = identity_cross_index_effect_fixture();
         for entry in &mut crossed_control.entries {
             entry.metadata.latency = LatencySamples(cross_index_metadata_latency(
                 &entry.track_id,
@@ -4166,7 +4325,7 @@ mod tests {
             let (before, after) = crossed_control.entries.split_at_mut(target_entry);
             std::mem::swap(&mut before[decoy_entry].control, &mut after[0].control);
         }
-        let crossed_control = GraphCompiler::compile(GraphCompileRequest {
+        let crossed_control = compile_with_session_builtins(SessionBuiltinsCompile {
             plan_id: 6_334,
             effects: crossed_control,
             caps: integration_caps(),
@@ -4216,7 +4375,7 @@ mod tests {
         let sidechain = compile_bank_only(&accepted_compressor_graph_fixture(), 6_332);
         assert!(
             sidechain
-                .report
+                .report()
                 .rack_cohorts
                 .scalar_in(RackLocation::Simd1)
                 .iter()
@@ -4224,7 +4383,7 @@ mod tests {
         );
         assert!(
             sidechain
-                .report
+                .report()
                 .rack_cohorts
                 .bound_slots_in(RackLocation::Simd1)
                 .all(|slot| slot
@@ -4238,7 +4397,7 @@ mod tests {
             effect_id: gid("compressor"),
         });
         let sidechain_edge = sidechain
-            .graph
+            .graph()
             .spec
             .edges
             .iter()
@@ -4278,7 +4437,7 @@ mod tests {
             let (_registry, homogeneous) = rack_chain_fixture(lanes, 2, |_| 2);
             let homogeneous = compile_chain_fixture(homogeneous);
             let bound: Vec<_> = homogeneous
-                .report
+                .report()
                 .rack_cohorts
                 .bound_slots_in(RackLocation::Simd1)
                 .collect();
@@ -4293,7 +4452,7 @@ mod tests {
             let heterogeneous = compile_chain_fixture(heterogeneous);
             assert_eq!(
                 heterogeneous
-                    .report
+                    .report()
                     .rack_cohorts
                     .bound_slots_in(RackLocation::Simd1)
                     .count(),
@@ -4301,14 +4460,14 @@ mod tests {
             );
             assert_eq!(
                 heterogeneous
-                    .report
+                    .report()
                     .rack_cohorts
                     .scalar_in(RackLocation::Simd1)
                     .len(),
                 lanes / 2
             );
             let heterogeneous_bound: Vec<_> = heterogeneous
-                .report
+                .report()
                 .rack_cohorts
                 .bound_slots_in(RackLocation::Simd1)
                 .collect();
@@ -4324,7 +4483,7 @@ mod tests {
                     })
             );
             let scalar_members: Vec<_> = heterogeneous
-                .report
+                .report()
                 .rack_cohorts
                 .scalar_in(RackLocation::Simd1)
                 .into_iter()
@@ -4355,7 +4514,7 @@ mod tests {
         // Half the tracks run both slots, half run only the first.
         let (_registry, effects) = rack_chain_fixture(lanes, 2, |index| 1 + index % 2);
         let artifact = compile_chain_fixture(effects);
-        let report = &artifact.report.rack_cohorts;
+        let report = &artifact.report().rack_cohorts;
 
         let groups: Vec<_> = report.groups_in(RackLocation::Simd1).collect();
         assert_eq!(
@@ -4428,6 +4587,9 @@ mod tests {
                 route
             })
             .collect();
+        // #964: identity builtins, so the bank-and-scalar comparison below sees each lane of each
+        // track at the output rather than their pan-law sum in the right channel.
+        identity_builtins(&mut model);
         let session = compile_session(
             &model,
             CompileCaps {
@@ -4460,7 +4622,7 @@ mod tests {
     #[test]
     fn mixed_twelve_track_plan_binds_renders_full_banks_and_scalar_tails_without_graph_changes() {
         let (session, registry, effects) = twelve_track_bank_fixture();
-        let artifact = GraphCompiler::compile(GraphCompileRequest {
+        let artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 998,
             effects,
@@ -4469,29 +4631,27 @@ mod tests {
         .unwrap_or_else(|_| panic!("graph"));
         let expected = BankWidth::for_backend(Backend::current())
             .map_or(0, |width| 12 / width.lanes() as usize);
-        assert_eq!(artifact.graph.prepared_bank_count(), expected);
-        let canonical = GraphCompiler::evidence(&artifact.graph, &artifact.report)
+        assert_eq!(artifact.graph().prepared_bank_count(), expected);
+        let canonical = GraphCompiler::evidence(artifact.graph(), artifact.report())
             .canonical_bytes
             .clone();
         assert_eq!(
             canonical,
-            GraphCompiler::evidence(&artifact.graph, &artifact.report).canonical_bytes
+            GraphCompiler::evidence(artifact.graph(), artifact.report()).canonical_bytes
         );
-        let bank_delays = artifact.graph.inserted_delays.clone();
-        let bank_output_latency = artifact.report.output_latency;
-        let bank_output_tail = artifact.report.output_tail;
+        let bank_delays = artifact.graph().inserted_delays.clone();
+        let bank_output_latency = artifact.report().output_latency;
+        let bank_output_tail = artifact.report().output_tail;
         let bank_tails: Vec<_> = artifact
-            .graph
+            .graph()
             .spec
             .nodes
             .iter()
             .map(|node| (node.id.clone(), node.tail))
             .collect();
-        let envelope = artifact.graph.envelope;
+        let envelope = artifact.envelope();
         let nodes = artifact
-            .graph
-            .required_bindings
-            .iter()
+            .external_binding_nodes()
             .cloned()
             .map(|node| {
                 let processor = asymmetric_input_binding(&node);
@@ -4503,10 +4663,9 @@ mod tests {
         let observed_stage = track_node("bank0", TrackStage::PostSimd1);
         // `bind` consumes the plan, and #99 F5 moved the dependency levels onto it, so keep the
         // copy this test needs afterwards.
-        let dependency_levels = artifact.graph.dependency_levels.clone();
+        let dependency_levels = artifact.graph().dependency_levels.clone();
         let mut plan = artifact
-            .graph
-            .bind(GraphRuntimeBindings {
+            .into_bound(GraphRuntimeBindings {
                 envelope,
                 nodes,
                 // Reverse input order proves executor sorting by stable handle. The stage is only
@@ -4532,7 +4691,8 @@ mod tests {
                     ),
                 ],
             })
-            .unwrap_or_else(|failure| panic!("bind: {}", failure.code));
+            .unwrap_or_else(|failure| panic!("bind: {}", failure.code))
+            .plan;
         let frames = envelope.quantum.0 as usize;
         let mut pcm = vec![0.0_f32; frames * 2];
         plan.render(
@@ -4562,7 +4722,7 @@ mod tests {
             },
         )
         .expect("scalar effects");
-        let scalar_artifact = GraphCompiler::compile(GraphCompileRequest {
+        let scalar_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 999,
             effects: scalar_effects,
@@ -4570,16 +4730,16 @@ mod tests {
         })
         .unwrap_or_else(|failure| panic!("scalar graph: {:?}", failure.diagnostics));
         assert_eq!(
-            GraphCompiler::evidence(&scalar_artifact.graph, &scalar_artifact.report)
+            GraphCompiler::evidence(scalar_artifact.graph(), scalar_artifact.report())
                 .canonical_bytes,
             canonical
         );
-        assert_eq!(scalar_artifact.graph.inserted_delays, bank_delays);
-        assert_eq!(scalar_artifact.report.output_latency, bank_output_latency);
-        assert_eq!(scalar_artifact.report.output_tail, bank_output_tail);
+        assert_eq!(scalar_artifact.graph().inserted_delays, bank_delays);
+        assert_eq!(scalar_artifact.report().output_latency, bank_output_latency);
+        assert_eq!(scalar_artifact.report().output_tail, bank_output_tail);
         assert_eq!(
             scalar_artifact
-                .graph
+                .graph()
                 .spec
                 .nodes
                 .iter()
@@ -4587,25 +4747,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             bank_tails
         );
-        let scalar_envelope = scalar_artifact.graph.envelope;
-        let scalar_nodes = scalar_artifact
-            .graph
-            .required_bindings
-            .iter()
-            .cloned()
-            .map(|node| {
-                let processor = asymmetric_input_binding(&node);
-                GraphNodeBinding::new(node, processor)
-            })
-            .collect();
-        let mut scalar_plan = scalar_artifact
-            .graph
-            .bind(GraphRuntimeBindings {
-                envelope: scalar_envelope,
-                nodes: scalar_nodes,
-                observers: Vec::new(),
-            })
-            .unwrap_or_else(|failure| panic!("scalar bind: {}", failure.code));
+        let mut scalar_plan =
+            bind_session_builtins(scalar_artifact, asymmetric_input_binding, Vec::new());
         let mut scalar_pcm = vec![0.0_f32; frames * 2];
         scalar_plan
             .render(
@@ -5378,31 +5521,17 @@ mod tests {
                 },
             )
             .expect("prepared cohort-boundary effects");
-            let artifact = GraphCompiler::compile(GraphCompileRequest {
+            let artifact = compile_with_session_builtins(SessionBuiltinsCompile {
                 dispatch: host_dispatch(),
                 plan_id: 1_096,
                 effects,
                 caps: integration_caps(),
             })
             .unwrap_or_else(|failure| panic!("cohort-boundary graph: {:?}", failure.diagnostics));
-            let bank_count =
-                artifact.graph.prepared_bank_count() + artifact.graph.prepared_builtin_bank_count();
-            let PreparedGraphArtifact {
-                graph,
-                report: _,
-                pool_classes: _,
-            } = artifact;
-            let envelope = graph.envelope;
-            let frames = envelope.quantum.0 as usize;
-            let nodes = graph
-                .required_bindings
-                .iter()
-                .cloned()
-                .map(|node| {
-                    let processor = parametric_eq_input_binding(&node);
-                    GraphNodeBinding::new(node, processor)
-                })
-                .collect();
+            let effect_banks = artifact.graph().prepared_bank_count();
+            let builtin_banks = artifact.prepared_builtin_bank_count();
+            let bank_count = effect_banks + builtin_banks;
+            let frames = artifact.envelope().quantum.0 as usize;
             let sinks: Vec<_> = (0..8)
                 .map(|_| Arc::new(std::sync::Mutex::new(Vec::new())))
                 .collect();
@@ -5417,13 +5546,7 @@ mod tests {
                     )
                 })
                 .collect();
-            let mut plan = graph
-                .bind(GraphRuntimeBindings {
-                    envelope,
-                    nodes,
-                    observers,
-                })
-                .unwrap_or_else(|failure| panic!("cohort-boundary bind: {}", failure.code));
+            let mut plan = bind_session_builtins(artifact, parametric_eq_input_binding, observers);
             let mut pcm = vec![0.0_f32; frames * 2];
             for block in 0..BLOCKS {
                 plan.render(
@@ -5460,14 +5583,40 @@ mod tests {
                 chains <= slots,
                 "a chain carries at least one slot, so chains can never exceed slots"
             );
-            // This fixture is a one-slot cohort, so here the two coincide -- and saying so is the
-            // point: the gate now records *which* reading it checked instead of relying on them
-            // being indistinguishable. `intended_placement_merges_two_chains_into_one_bit_\
-            // identically` is the counterpart where they differ.
+            // The shape, stated exactly, so the law above is known to be a statement about chains.
+            //
+            // #964 re-pin. Compiled without builtins this fixture was a one-slot cohort, and the
+            // gate pinned `chains == slots`. With the production builtins every cohort also binds
+            // its three builtin stages -- post-input, fader, matrix -- and the input stage fuses
+            // into the EQ's chain, so the two readings now differ here too:
+            //
+            // * Slots: the EQ binds only in a *full* cohort (the ninth track's padded group is
+            //   planned but left unbound), and each builtin stage binds in every cohort, padded
+            //   or not.
+            // * Chains: two per cohort, `[post-input, EQ]` (or `[post-input]` where the EQ stays
+            //   scalar) and `[fader, matrix]`. The `PostSimd1` observers below read the EQ's output,
+            //   which declines the EQ -> fader merge
+            //   (`a_leased_stage_meter_declines_the_merge_and_still_meters`).
+            //
+            // A runtime that regressed to one chain per slot would now fail the transpose law, which
+            // `chains == slots` could not show.
+            let lanes = BankWidth::for_backend(host_dispatch())
+                .expect("the cohort-boundary fixture needs a bank width")
+                .lanes() as usize;
+            let tracks = model.tracks.len();
+            let cohorts = tracks.div_ceil(lanes);
+            let full_cohorts = tracks / lanes;
             assert_eq!(
-                chains, slots,
-                "the cohort-boundary fixture binds one slot per chain"
+                (effect_banks, builtin_banks),
+                (full_cohorts, BANKABLE_TRACK_STAGES as usize * cohorts),
+                "{tracks} tracks: one EQ bank per full cohort, three builtin banks per cohort"
             );
+            assert_eq!(
+                chains,
+                2 * cohorts as u64,
+                "{tracks} tracks: [post-input, EQ] and [fader, matrix] per cohort"
+            );
+            assert!(chains < slots, "the builtins fuse into multi-slot chains");
             assert!(bank_count > 0, "the eight-lane cohort must actually bank");
             observed.push(
                 sinks
@@ -5495,9 +5644,13 @@ mod tests {
 
     #[test]
     fn launch_parametric_eq_fixture_retains_banks_and_matches_scalar_across_blocks() {
-        let model = parse_session_json(PARAMETRIC_EQ_NINE_TRACK_FIXTURE)
+        let mut model = parse_session_json(PARAMETRIC_EQ_NINE_TRACK_FIXTURE)
             .expect("accepted parametric-EQ fixture");
         assert_eq!(model.tracks.len(), 9);
+        // #964: the builtins are compiled in, as identities. The EQ must be the only state that can
+        // make the second block differ from the first, and the only stage between the dry impulse
+        // and the bypass pins below.
+        identity_builtins(&mut model);
         let first_effect = &model.tracks[0].simd1.effects[0];
         assert!(first_effect.params.iter().any(|parameter| {
             parameter.parameter_id == 3
@@ -5539,14 +5692,14 @@ mod tests {
         let scalar_effects =
             prepare_native_session_effects(&session, &scalar_registry, effect_caps)
                 .expect("prepared scalar effects");
-        let bank_artifact = GraphCompiler::compile(GraphCompileRequest {
+        let bank_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_042,
             effects: bank_effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("bank graph: {:?}", failure.diagnostics));
-        let scalar_artifact = GraphCompiler::compile(GraphCompileRequest {
+        let scalar_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_043,
             effects: scalar_effects,
@@ -5554,15 +5707,15 @@ mod tests {
         })
         .unwrap_or_else(|failure| panic!("scalar graph: {:?}", failure.diagnostics));
 
-        let width = BankWidth::for_backend(bank_artifact.report.rack_cohorts.dispatch);
+        let width = BankWidth::for_backend(bank_artifact.report().rack_cohorts.dispatch);
         let (expected_banks, expected_scalar_tails) = width.map_or((0, 9), |width| {
             let lanes = width.lanes() as usize;
             (9 / lanes, 9 % lanes)
         });
-        assert_eq!(bank_artifact.graph.prepared_bank_count(), expected_banks);
+        assert_eq!(bank_artifact.graph().prepared_bank_count(), expected_banks);
         assert_eq!(
             bank_artifact
-                .report
+                .report()
                 .rack_cohorts
                 .bound_groups_in(RackLocation::Simd1)
                 .count(),
@@ -5570,26 +5723,26 @@ mod tests {
         );
         assert_eq!(
             bank_artifact
-                .report
+                .report()
                 .rack_cohorts
                 .scalar_in(RackLocation::Simd1)
                 .len(),
             expected_scalar_tails
         );
-        assert_eq!(scalar_artifact.graph.prepared_bank_count(), 0);
+        assert_eq!(scalar_artifact.graph().prepared_bank_count(), 0);
         // #96: the report is the *bound* plan. Cohort planning is still independent of the
         // factory's legal scalar fallback -- the planned groups are identical -- but a group the
         // factory declined is now reported as unbound, so its members show up in the scalar set
         // instead of being invisible there.
         assert_eq!(
-            scalar_artifact.report.rack_cohorts.plan.groups,
-            bank_artifact.report.rack_cohorts.plan.groups,
+            scalar_artifact.report().rack_cohorts.plan.groups,
+            bank_artifact.report().rack_cohorts.plan.groups,
             "cohort planning is independent of the factory's legal scalar fallback"
         );
-        assert!(scalar_artifact.report.rack_cohorts.bound_slots.is_empty());
+        assert!(scalar_artifact.report().rack_cohorts.bound_slots.is_empty());
         assert_eq!(
             scalar_artifact
-                .report
+                .report()
                 .rack_cohorts
                 .scalar_in(RackLocation::Simd1)
                 .len(),
@@ -5597,87 +5750,52 @@ mod tests {
             "a declined bind puts every member on the per-node scalar path"
         );
         assert_eq!(
-            bank_artifact.graph.sequential_schedule,
-            scalar_artifact.graph.sequential_schedule
+            bank_artifact.graph().sequential_schedule,
+            scalar_artifact.graph().sequential_schedule
         );
         assert_eq!(
-            bank_artifact.graph.route_timings,
-            scalar_artifact.graph.route_timings
+            bank_artifact.graph().route_timings,
+            scalar_artifact.graph().route_timings
         );
         assert_eq!(
-            bank_artifact.graph.inserted_delays,
-            scalar_artifact.graph.inserted_delays
+            bank_artifact.graph().inserted_delays,
+            scalar_artifact.graph().inserted_delays
         );
-        let expected_schedule = bank_artifact.graph.sequential_schedule.clone();
-        let expected_route_timings = bank_artifact.graph.route_timings.clone();
+        let expected_schedule = bank_artifact.graph().sequential_schedule.clone();
+        let expected_route_timings = bank_artifact.graph().route_timings.clone();
 
-        let PreparedGraphArtifact {
-            pool_classes: _,
-            graph: bank_graph,
-            report: _,
-        } = bank_artifact;
-        let envelope = bank_graph.envelope;
+        let envelope = bank_artifact.envelope();
         let frames = envelope.quantum.0 as usize;
-        let bank_nodes = bank_graph
-            .required_bindings
-            .iter()
-            .cloned()
-            .map(|node| {
-                let processor = parametric_eq_input_binding(&node);
-                GraphNodeBinding::new(node, processor)
-            })
-            .collect();
         let observer_order = Arc::new(AtomicU64::new(0));
         let observed_post_bank_audio = Arc::new(AtomicBool::new(false));
-        let mut bank_plan = bank_graph
-            .bind(GraphRuntimeBindings {
-                envelope,
-                nodes: bank_nodes,
-                // Deliberately reverse insertion order: binding handles, not insertion order,
-                // decide the stable observer schedule after the SIMD rack boundary.
-                observers: vec![
-                    GraphNodeObserverBinding::new(
-                        track_node("eq0", TrackStage::PostSimd1),
-                        2,
-                        Box::new(RepeatedOrderedPostBankObserver {
-                            expected_order: 1,
-                            order: Arc::clone(&observer_order),
-                            observed_post_bank_audio: Arc::clone(&observed_post_bank_audio),
-                        }),
-                    ),
-                    GraphNodeObserverBinding::new(
-                        track_node("eq0", TrackStage::PostSimd1),
-                        1,
-                        Box::new(RepeatedOrderedPostBankObserver {
-                            expected_order: 0,
-                            order: Arc::clone(&observer_order),
-                            observed_post_bank_audio: Arc::clone(&observed_post_bank_audio),
-                        }),
-                    ),
-                ],
-            })
-            .unwrap_or_else(|failure| panic!("bank graph bind: {}", failure.code));
-        let PreparedGraphArtifact {
-            pool_classes: _,
-            graph: scalar_graph,
-            report: _,
-        } = scalar_artifact;
-        let scalar_nodes = scalar_graph
-            .required_bindings
-            .iter()
-            .cloned()
-            .map(|node| {
-                let processor = parametric_eq_input_binding(&node);
-                GraphNodeBinding::new(node, processor)
-            })
-            .collect();
-        let mut scalar_plan = scalar_graph
-            .bind(GraphRuntimeBindings {
-                envelope,
-                nodes: scalar_nodes,
-                observers: Vec::new(),
-            })
-            .unwrap_or_else(|failure| panic!("scalar graph bind: {}", failure.code));
+        let mut bank_plan = bind_session_builtins(
+            bank_artifact,
+            parametric_eq_input_binding,
+            // Deliberately reverse insertion order: binding handles, not insertion order,
+            // decide the stable observer schedule after the SIMD rack boundary.
+            vec![
+                GraphNodeObserverBinding::new(
+                    track_node("eq0", TrackStage::PostSimd1),
+                    2,
+                    Box::new(RepeatedOrderedPostBankObserver {
+                        expected_order: 1,
+                        order: Arc::clone(&observer_order),
+                        observed_post_bank_audio: Arc::clone(&observed_post_bank_audio),
+                    }),
+                ),
+                GraphNodeObserverBinding::new(
+                    track_node("eq0", TrackStage::PostSimd1),
+                    1,
+                    Box::new(RepeatedOrderedPostBankObserver {
+                        expected_order: 0,
+                        order: Arc::clone(&observer_order),
+                        observed_post_bank_audio: Arc::clone(&observed_post_bank_audio),
+                    }),
+                ),
+            ],
+        );
+        let mut scalar_plan =
+            bind_session_builtins(scalar_artifact, parametric_eq_input_binding, Vec::new());
         let mut bank_blocks = Vec::new();
         for block in 0..2_u64 {
             let mut bank_pcm = vec![0.0_f32; frames * 2];
@@ -5744,7 +5862,7 @@ mod tests {
         let bypass_effects =
             prepare_native_session_effects(&bypass_session, &registry, effect_caps)
                 .expect("prepared bypass effects");
-        let bypass_artifact = GraphCompiler::compile(GraphCompileRequest {
+        let bypass_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_044,
             effects: bypass_effects,
@@ -5752,30 +5870,17 @@ mod tests {
         })
         .unwrap_or_else(|failure| panic!("bypass graph: {:?}", failure.diagnostics));
         assert_eq!(
-            bypass_artifact.graph.sequential_schedule, expected_schedule,
+            bypass_artifact.graph().sequential_schedule,
+            expected_schedule,
             "bypass does not change graph scheduling"
         );
         assert_eq!(
-            bypass_artifact.graph.route_timings, expected_route_timings,
+            bypass_artifact.graph().route_timings,
+            expected_route_timings,
             "bypass does not change PDC timings"
         );
-        let bypass_graph = bypass_artifact.graph;
-        let bypass_nodes = bypass_graph
-            .required_bindings
-            .iter()
-            .cloned()
-            .map(|node| {
-                let processor = parametric_eq_input_binding(&node);
-                GraphNodeBinding::new(node, processor)
-            })
-            .collect();
-        let mut bypass_plan = bypass_graph
-            .bind(GraphRuntimeBindings {
-                envelope,
-                nodes: bypass_nodes,
-                observers: Vec::new(),
-            })
-            .unwrap_or_else(|failure| panic!("bypass graph bind: {}", failure.code));
+        let mut bypass_plan =
+            bind_session_builtins(bypass_artifact, parametric_eq_input_binding, Vec::new());
         let mut bypass_pcm = vec![0.0_f32; frames * 2];
         bypass_plan
             .render(
@@ -5804,7 +5909,7 @@ mod tests {
     }
 
     struct QueuedEqArtifact {
-        artifact: PreparedGraphArtifact,
+        artifact: PreparedGraphBuiltinsArtifact,
         producers: Vec<RawEqProducer>,
         initial_values: Vec<InitialParameterValue>,
     }
@@ -5915,7 +6020,7 @@ mod tests {
                 producer,
             });
         }
-        let artifact = GraphCompiler::compile(GraphCompileRequest {
+        let artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch,
             plan_id,
             effects,
@@ -5930,22 +6035,11 @@ mod tests {
     }
 
     fn bind_queued_eq(queued: QueuedEqArtifact) -> BoundQueuedEq {
-        let graph = queued.artifact.graph;
-        let envelope = graph.envelope;
-        let nodes = graph
-            .required_bindings
-            .iter()
-            .map(|node| {
-                GraphNodeBinding::new(node.clone(), equal_parametric_eq_input_binding(node))
-            })
-            .collect();
-        let plan = graph
-            .bind(GraphRuntimeBindings {
-                envelope,
-                nodes,
-                observers: Vec::new(),
-            })
-            .unwrap_or_else(|failure| panic!("queued-EQ bind: {}", failure.code));
+        let plan = bind_session_builtins(
+            queued.artifact,
+            equal_parametric_eq_input_binding,
+            Vec::new(),
+        );
         BoundQueuedEq {
             plan,
             producers: queued.producers,
@@ -6116,18 +6210,21 @@ mod tests {
         let candidate = compile_queued_eq(&model, &registry, 8_071, host_dispatch());
         let oracle = compile_queued_eq(&model, &registry, 8_072, host_dispatch());
         let scalar = compile_queued_eq(&model, &scalar_registry, 8_073, Backend::Scalar);
-        let width = BankWidth::for_backend(candidate.artifact.report.rack_cohorts.dispatch);
+        let width = BankWidth::for_backend(candidate.artifact.report().rack_cohorts.dispatch);
         let expected_banks = width.map_or(0, |width| 8 / width.lanes() as usize);
         assert_eq!(
-            candidate.artifact.graph.prepared_bank_count(),
+            candidate.artifact.graph().prepared_bank_count(),
             expected_banks
         );
-        assert_eq!(oracle.artifact.graph.prepared_bank_count(), expected_banks);
-        assert_eq!(scalar.artifact.graph.prepared_bank_count(), 0);
+        assert_eq!(
+            oracle.artifact.graph().prepared_bank_count(),
+            expected_banks
+        );
+        assert_eq!(scalar.artifact.graph().prepared_bank_count(), 0);
         assert_eq!(
             candidate
                 .artifact
-                .report
+                .report()
                 .rack_cohorts
                 .scalar_in(RackLocation::Simd1)
                 .len(),
@@ -6253,9 +6350,9 @@ mod tests {
         let registry = launch_native_effect_registry().expect("launch registry");
         let candidate = compile_queued_eq(&model, &registry, 8_074, host_dispatch());
         let oracle = compile_queued_eq(&model, &registry, 8_075, host_dispatch());
-        let width = BankWidth::for_backend(candidate.artifact.report.rack_cohorts.dispatch);
+        let width = BankWidth::for_backend(candidate.artifact.report().rack_cohorts.dispatch);
         assert_eq!(
-            candidate.artifact.graph.prepared_bank_count(),
+            candidate.artifact.graph().prepared_bank_count(),
             width.map_or(0, |width| 8 / width.lanes() as usize)
         );
         let mut candidate = bind_queued_eq(candidate);
@@ -6409,29 +6506,29 @@ mod tests {
         let scalar_effects =
             prepare_native_session_effects(&session, &scalar_registry, effect_caps)
                 .expect("prepared scalar compressor effects");
-        let artifact = GraphCompiler::compile(GraphCompileRequest {
+        let artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_013,
             effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("compressor graph: {:?}", failure.diagnostics));
-        let scalar_artifact = GraphCompiler::compile(GraphCompileRequest {
+        let scalar_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_014,
             effects: scalar_effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("scalar compressor graph: {:?}", failure.diagnostics));
-        let width = BankWidth::for_backend(artifact.report.rack_cohorts.dispatch);
+        let width = BankWidth::for_backend(artifact.report().rack_cohorts.dispatch);
         if let Some(width) = width {
             let lanes = width.lanes() as usize;
             let expected_banks = 9 / lanes;
             let expected_scalar_tails = 1 + 9 % lanes;
-            assert_eq!(artifact.graph.prepared_bank_count(), expected_banks);
+            assert_eq!(artifact.graph().prepared_bank_count(), expected_banks);
             assert_eq!(
                 artifact
-                    .report
+                    .report()
                     .rack_cohorts
                     .bound_groups_in(RackLocation::Simd1)
                     .count(),
@@ -6439,7 +6536,7 @@ mod tests {
             );
             assert_eq!(
                 artifact
-                    .report
+                    .report()
                     .rack_cohorts
                     .scalar_in(RackLocation::Simd1)
                     .len(),
@@ -6447,7 +6544,7 @@ mod tests {
             );
             assert!(
                 artifact
-                    .report
+                    .report()
                     .rack_cohorts
                     .scalar_in(RackLocation::Simd1)
                     .iter()
@@ -6455,17 +6552,17 @@ mod tests {
             );
             assert!(
                 artifact
-                    .report
+                    .report()
                     .rack_cohorts
                     .scalar_in(RackLocation::Simd1)
                     .iter()
                     .any(|id| id.track_id.as_str() == "eq9")
             );
         } else {
-            assert_eq!(artifact.graph.prepared_bank_count(), 0);
+            assert_eq!(artifact.graph().prepared_bank_count(), 0);
             assert_eq!(
                 artifact
-                    .report
+                    .report()
                     .rack_cohorts
                     .scalar_in(RackLocation::Simd1)
                     .len(),
@@ -6473,55 +6570,25 @@ mod tests {
             );
         }
         assert_eq!(
-            artifact.graph.sequential_schedule,
-            scalar_artifact.graph.sequential_schedule
+            artifact.graph().sequential_schedule,
+            scalar_artifact.graph().sequential_schedule
         );
         assert_eq!(
-            artifact.graph.route_timings,
-            scalar_artifact.graph.route_timings
+            artifact.graph().route_timings,
+            scalar_artifact.graph().route_timings
         );
         assert_eq!(
-            artifact.graph.inserted_delays,
-            scalar_artifact.graph.inserted_delays
+            artifact.graph().inserted_delays,
+            scalar_artifact.graph().inserted_delays
         );
-        let expected_schedule = artifact.graph.sequential_schedule.clone();
-        let expected_route_timings = artifact.graph.route_timings.clone();
+        let expected_schedule = artifact.graph().sequential_schedule.clone();
+        let expected_route_timings = artifact.graph().route_timings.clone();
 
-        let PreparedGraphArtifact {
-            pool_classes: _,
-            graph: bank_graph,
-            report: _,
-        } = artifact;
-        let PreparedGraphArtifact {
-            pool_classes: _,
-            graph: scalar_graph,
-            report: _,
-        } = scalar_artifact;
-        let envelope = bank_graph.envelope;
-        let bank_nodes = bank_graph
-            .required_bindings
-            .iter()
-            .map(|node| GraphNodeBinding::new(node.clone(), parametric_eq_input_binding(node)))
-            .collect();
-        let scalar_nodes = scalar_graph
-            .required_bindings
-            .iter()
-            .map(|node| GraphNodeBinding::new(node.clone(), parametric_eq_input_binding(node)))
-            .collect();
-        let mut bank_plan = bank_graph
-            .bind(GraphRuntimeBindings {
-                envelope,
-                nodes: bank_nodes,
-                observers: Vec::new(),
-            })
-            .unwrap_or_else(|failure| panic!("compressor bank bind: {}", failure.code));
-        let mut scalar_plan = scalar_graph
-            .bind(GraphRuntimeBindings {
-                envelope,
-                nodes: scalar_nodes,
-                observers: Vec::new(),
-            })
-            .unwrap_or_else(|failure| panic!("compressor scalar bind: {}", failure.code));
+        let envelope = artifact.envelope();
+        let mut bank_plan =
+            bind_session_builtins(artifact, parametric_eq_input_binding, Vec::new());
+        let mut scalar_plan =
+            bind_session_builtins(scalar_artifact, parametric_eq_input_binding, Vec::new());
         let frames = envelope.quantum.0 as usize;
         let mut rendered_nonzero = false;
         let mut first_block_nonzero = false;
@@ -6602,15 +6669,21 @@ mod tests {
                 .iter()
                 .all(|entry| entry.metadata.latency == LatencySamples(0))
         );
-        let bypass_artifact = GraphCompiler::compile(GraphCompileRequest {
+        let bypass_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_015,
             effects: bypass_effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("bypass compressor graph: {:?}", failure.diagnostics));
-        assert_eq!(bypass_artifact.graph.sequential_schedule, expected_schedule);
-        assert_eq!(bypass_artifact.graph.route_timings, expected_route_timings);
+        assert_eq!(
+            bypass_artifact.graph().sequential_schedule,
+            expected_schedule
+        );
+        assert_eq!(
+            bypass_artifact.graph().route_timings,
+            expected_route_timings
+        );
     }
 
     #[test]
@@ -6669,7 +6742,7 @@ mod tests {
                 .filter(|entry| entry.effect_id == "true-peak-limiter")
                 .all(|entry| entry.metadata.latency == LatencySamples(486))
         );
-        let artifact = GraphCompiler::compile(GraphCompileRequest {
+        let artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_017,
             effects,
@@ -6678,15 +6751,15 @@ mod tests {
         .unwrap_or_else(|failure| {
             panic!("mixed compressor/limiter graph: {:?}", failure.diagnostics)
         });
-        assert_eq!(artifact.report.output_latency, LatencySamples(486));
+        assert_eq!(artifact.report().output_latency, LatencySamples(486));
         assert!(
             artifact
-                .graph
+                .graph()
                 .inserted_delays
                 .iter()
                 .any(|delay| { delay.samples == LatencySamples(486) })
         );
-        for route in &artifact.graph.route_timings {
+        for route in &artifact.graph().route_timings {
             let route_id = route.route_id.as_str();
             if route_id == "eq9-main" {
                 assert_eq!(route.source_arrival, LatencySamples(486));
@@ -6717,20 +6790,22 @@ mod tests {
         .expect("mixed bypass fixture");
         let bypass_effects = prepare_native_session_effects(&bypass_session, &registry, caps)
             .expect("prepared mixed bypass effects");
-        let bypass_artifact = GraphCompiler::compile(GraphCompileRequest {
+        let bypass_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_018,
             effects: bypass_effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("mixed bypass graph: {:?}", failure.diagnostics));
-        assert_eq!(bypass_artifact.report.output_latency, LatencySamples(486));
+        assert_eq!(bypass_artifact.report().output_latency, LatencySamples(486));
         assert_eq!(
-            bypass_artifact.graph.route_timings, artifact.graph.route_timings,
+            bypass_artifact.graph().route_timings,
+            artifact.graph().route_timings,
             "bypassing the delayed limiter preserves PDC route timing"
         );
         assert_eq!(
-            bypass_artifact.graph.inserted_delays, artifact.graph.inserted_delays,
+            bypass_artifact.graph().inserted_delays,
+            artifact.graph().inserted_delays,
             "bypassing the delayed limiter preserves its compensation"
         );
     }
@@ -6790,7 +6865,7 @@ mod tests {
                 .filter(|entry| entry.effect_id == "true-peak-limiter")
                 .all(|entry| entry.metadata.latency == LatencySamples(486))
         );
-        let artifact = GraphCompiler::compile(GraphCompileRequest {
+        let artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_019,
             effects,
@@ -6799,15 +6874,15 @@ mod tests {
         .unwrap_or_else(|failure| {
             panic!("mixed multiband/limiter graph: {:?}", failure.diagnostics)
         });
-        assert_eq!(artifact.report.output_latency, LatencySamples(486));
+        assert_eq!(artifact.report().output_latency, LatencySamples(486));
         assert!(
             artifact
-                .graph
+                .graph()
                 .inserted_delays
                 .iter()
                 .any(|delay| delay.samples == LatencySamples(486))
         );
-        for route in &artifact.graph.route_timings {
+        for route in &artifact.graph().route_timings {
             let route_id = route.route_id.as_str();
             if route_id == "eq9-main" {
                 assert_eq!(route.source_arrival, LatencySamples(486));
@@ -6836,20 +6911,22 @@ mod tests {
         .expect("mixed bypass fixture");
         let bypass_effects = prepare_native_session_effects(&bypass_session, &registry, caps)
             .expect("prepared mixed multiband bypass effects");
-        let bypass_artifact = GraphCompiler::compile(GraphCompileRequest {
+        let bypass_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_020,
             effects: bypass_effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("mixed bypass graph: {:?}", failure.diagnostics));
-        assert_eq!(bypass_artifact.report.output_latency, LatencySamples(486));
+        assert_eq!(bypass_artifact.report().output_latency, LatencySamples(486));
         assert_eq!(
-            bypass_artifact.graph.route_timings, artifact.graph.route_timings,
+            bypass_artifact.graph().route_timings,
+            artifact.graph().route_timings,
             "bypassing the delayed limiter preserves PDC route timing"
         );
         assert_eq!(
-            bypass_artifact.graph.inserted_delays, artifact.graph.inserted_delays,
+            bypass_artifact.graph().inserted_delays,
+            artifact.graph().inserted_delays,
             "bypassing the delayed limiter preserves its compensation"
         );
     }
@@ -6910,22 +6987,22 @@ mod tests {
                 .filter(|entry| entry.effect_id == "true-peak-limiter")
                 .all(|entry| entry.metadata.latency == LatencySamples(486))
         );
-        let artifact = GraphCompiler::compile(GraphCompileRequest {
+        let artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_017,
             effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("mixed gate/limiter graph: {:?}", failure.diagnostics));
-        assert_eq!(artifact.report.output_latency, LatencySamples(486));
+        assert_eq!(artifact.report().output_latency, LatencySamples(486));
         assert!(
             artifact
-                .graph
+                .graph()
                 .inserted_delays
                 .iter()
                 .any(|delay| { delay.samples == LatencySamples(486) })
         );
-        for route in &artifact.graph.route_timings {
+        for route in &artifact.graph().route_timings {
             let route_id = route.route_id.as_str();
             if route_id == "eq9-main" {
                 assert_eq!(route.source_arrival, LatencySamples(486));
@@ -6956,20 +7033,22 @@ mod tests {
         .expect("mixed bypass fixture");
         let bypass_effects = prepare_native_session_effects(&bypass_session, &registry, caps)
             .expect("prepared mixed gate bypass effects");
-        let bypass_artifact = GraphCompiler::compile(GraphCompileRequest {
+        let bypass_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_018,
             effects: bypass_effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("mixed bypass graph: {:?}", failure.diagnostics));
-        assert_eq!(bypass_artifact.report.output_latency, LatencySamples(486));
+        assert_eq!(bypass_artifact.report().output_latency, LatencySamples(486));
         assert_eq!(
-            bypass_artifact.graph.route_timings, artifact.graph.route_timings,
+            bypass_artifact.graph().route_timings,
+            artifact.graph().route_timings,
             "bypassing the delayed limiter preserves PDC route timing"
         );
         assert_eq!(
-            bypass_artifact.graph.inserted_delays, artifact.graph.inserted_delays,
+            bypass_artifact.graph().inserted_delays,
+            artifact.graph().inserted_delays,
             "bypassing the delayed limiter preserves its compensation"
         );
     }
@@ -7000,11 +7079,11 @@ mod tests {
 
         // Structure: the dynamic rack is now a bank location, and it fills exactly as SIMD-1 does.
         // Nine tracks are bankable (`eq8` carries a routed sidechain); the tenth is the tail.
-        let width = BankWidth::for_backend(bank.report.rack_cohorts.dispatch);
+        let width = BankWidth::for_backend(bank.report().rack_cohorts.dispatch);
         if let Some(width) = width {
             let lanes = width.lanes() as usize;
-            let cohorts = &bank.report.rack_cohorts;
-            assert_eq!(bank.graph.prepared_bank_count(), 9 / lanes);
+            let cohorts = &bank.report().rack_cohorts;
+            assert_eq!(bank.graph().prepared_bank_count(), 9 / lanes);
             assert_eq!(
                 cohorts.bound_groups_in(RackLocation::Dynamic).count(),
                 9 / lanes,
@@ -7023,22 +7102,26 @@ mod tests {
             );
             assert!(scalar.iter().all(|id| id.rack == RackId::Dynamic));
         } else {
-            assert_eq!(bank.graph.prepared_bank_count(), 0);
+            assert_eq!(bank.graph().prepared_bank_count(), 0);
         }
-        assert_eq!(per_node.graph.prepared_bank_count(), 0);
-        assert!(per_node.report.rack_cohorts.bound_slots.is_empty());
+        assert_eq!(per_node.graph().prepared_bank_count(), 0);
+        assert!(per_node.report().rack_cohorts.bound_slots.is_empty());
         assert_eq!(
-            per_node.report.rack_cohorts.plan.groups, bank.report.rack_cohorts.plan.groups,
+            per_node.report().rack_cohorts.plan.groups,
+            bank.report().rack_cohorts.plan.groups,
             "cohort planning is independent of the factory's legal scalar fallback"
         );
 
         // Banking is an execution-layer decision: it must not move the graph.
         assert_eq!(
-            bank.graph.sequential_schedule,
-            per_node.graph.sequential_schedule
+            bank.graph().sequential_schedule,
+            per_node.graph().sequential_schedule
         );
-        assert_eq!(bank.graph.route_timings, per_node.graph.route_timings);
-        assert_eq!(bank.graph.inserted_delays, per_node.graph.inserted_delays);
+        assert_eq!(bank.graph().route_timings, per_node.graph().route_timings);
+        assert_eq!(
+            bank.graph().inserted_delays,
+            per_node.graph().inserted_delays
+        );
 
         let banked = render_blocks(bank, 16);
         let scalar = render_blocks(per_node, 16);
@@ -7072,37 +7155,38 @@ mod tests {
         let (dynamic, _) = compile_bank_and_per_node(&dynamic_model, "miso.compressor", 1_630);
 
         assert_eq!(
-            simd1.graph.prepared_bank_count(),
-            dynamic.graph.prepared_bank_count(),
+            simd1.graph().prepared_bank_count(),
+            dynamic.graph().prepared_bank_count(),
             "the same session banks the same width wherever it is placed"
         );
         assert_eq!(
             simd1
-                .report
+                .report()
                 .rack_cohorts
                 .bound_slots_in(RackLocation::Simd1)
                 .count(),
             dynamic
-                .report
+                .report()
                 .rack_cohorts
                 .bound_slots_in(RackLocation::Dynamic)
                 .count(),
         );
         assert_eq!(
             simd1
-                .report
+                .report()
                 .rack_cohorts
                 .scalar_in(RackLocation::Simd1)
                 .len(),
             dynamic
-                .report
+                .report()
                 .rack_cohorts
                 .scalar_in(RackLocation::Dynamic)
                 .len(),
             "the same tracks fall back, for the same reasons"
         );
         assert_eq!(
-            simd1.report.output_latency, dynamic.report.output_latency,
+            simd1.report().output_latency,
+            dynamic.report().output_latency,
             "PDC is a property of the chain, not of the rack the stage sits in"
         );
 
@@ -7113,20 +7197,20 @@ mod tests {
         // scratch and metadata under either placement, so a snapshot taken under one restores
         // under the other.
         assert_eq!(
-            simd1.report.estimate.effect_bank_scratch_bytes,
-            dynamic.report.estimate.effect_bank_scratch_bytes,
+            simd1.report().estimate.effect_bank_scratch_bytes,
+            dynamic.report().estimate.effect_bank_scratch_bytes,
         );
         assert_eq!(
-            simd1.report.estimate.effect_bank_runtime_buffer_bytes,
-            dynamic.report.estimate.effect_bank_runtime_buffer_bytes,
+            simd1.report().estimate.effect_bank_runtime_buffer_bytes,
+            dynamic.report().estimate.effect_bank_runtime_buffer_bytes,
         );
         assert_eq!(
-            simd1.report.estimate.effect_bank_metadata_bytes,
-            dynamic.report.estimate.effect_bank_metadata_bytes,
+            simd1.report().estimate.effect_bank_metadata_bytes,
+            dynamic.report().estimate.effect_bank_metadata_bytes,
         );
         assert_eq!(
-            simd1.report.estimate.declared_effect_bytes,
-            dynamic.report.estimate.declared_effect_bytes,
+            simd1.report().estimate.declared_effect_bytes,
+            dynamic.report().estimate.declared_effect_bytes,
             "identical declared state layout under either placement"
         );
 
@@ -7154,16 +7238,16 @@ mod tests {
             effect_id: StableId::parse("miso.gate-expander").expect("gate/expander id"),
         };
         let bank = compile_bank_only(&model, 1_640);
-        let cohorts = &bank.report.rack_cohorts;
+        let cohorts = &bank.report().rack_cohorts;
 
         let Some(width) = BankWidth::for_backend(cohorts.dispatch) else {
-            assert_eq!(bank.graph.prepared_bank_count(), 0);
+            assert_eq!(bank.graph().prepared_bank_count(), 0);
             return;
         };
         let lanes = width.lanes() as usize;
         // Eight homogeneous compressors remain; the gate/expander and the sidechained compressor
         // are each alone in their cohort and bind nothing.
-        assert_eq!(bank.graph.prepared_bank_count(), 8 / lanes);
+        assert_eq!(bank.graph().prepared_bank_count(), 8 / lanes);
         let scalar = cohorts.scalar_in(RackLocation::Dynamic);
         assert_eq!(scalar.len(), 2, "exactly the two odd tracks fall back");
         assert!(scalar.iter().any(|id| id.track_id.as_str() == "eq7"));
@@ -7181,14 +7265,14 @@ mod tests {
     }
 
     /// The level of one node in the compiled graph.
-    fn level_of(artifact: &PreparedGraphArtifact, track: &str, effect: &str) -> u64 {
+    fn level_of(artifact: &PreparedGraphBuiltinsArtifact, track: &str, effect: &str) -> u64 {
         let wanted = GraphNodeId::Effect(EffectNodeId {
             track_id: StableGraphId::parse(track).expect("track id"),
             rack: RackId::Dynamic,
             effect_id: StableGraphId::parse(effect).expect("effect id"),
         });
         artifact
-            .graph
+            .graph()
             .dependency_levels
             .iter()
             .find(|level| level.nodes.contains(&wanted))
@@ -7252,7 +7336,7 @@ mod tests {
 
         // (c) The lifted chain renders per node, and the report says so for both its slots.
         let scalar = artifact
-            .report
+            .report()
             .rack_cohorts
             .scalar_in(RackLocation::Dynamic);
         for effect in ["compressor", "compressor-sc"] {
@@ -7266,13 +7350,13 @@ mod tests {
 
         // (d) The lifted chain is isolated: every other track still banks, and no bound bank ever
         // contains one of its slots.
-        if BankWidth::for_backend(artifact.report.rack_cohorts.dispatch).is_some() {
+        if BankWidth::for_backend(artifact.report().rack_cohorts.dispatch).is_some() {
             assert!(
-                artifact.graph.prepared_bank_count() > 0,
+                artifact.graph().prepared_bank_count() > 0,
                 "one awkward chain must not disband the rest of the rack"
             );
             for bound in artifact
-                .report
+                .report()
                 .rack_cohorts
                 .bound_slots_in(RackLocation::Dynamic)
             {
@@ -7369,13 +7453,12 @@ mod tests {
             right: -0.015625 * (index % 5 + 1) as f32,
         })
     }
-
     /// Issue #169's bank-window slot hold, measured: what it costs in arena buffers on the plan
-    /// every host renders, and on a builtins-less plan since issue #925.
+    /// every host renders.
     ///
     /// Colouring may not recycle a physical slot inside a bank's reordering window, so slots freed
     /// there are held until it closes. On the sixty-four-track console fixture -- eight full
-    /// eight-lane EQ banks and eight compressor banks, the floor pass's own workload -- each arm
+    /// eight-lane EQ banks and eight compressor banks, the floor pass's own workload -- the test
     /// compares the banked plan's arena with the arena of the same session compiled against a
     /// registry that refuses every effect bank, and pins both, so a colouring change surfaces as a
     /// number rather than as a benchmark drifting.
@@ -7386,40 +7469,28 @@ mod tests {
     /// every window. Narrowing the merged-span hold is issue #931; this test is the measurement
     /// it starts from.
     ///
-    /// **With builtins** (`compile_with_builtins`): **256 banked against 193 per node**, 63 stereo
-    /// buffers (about 63 KiB at 128 frames) of arena -- memory, not copies. #925 does not change
-    /// this plan (the three stages are listed there and keep their ops), and the base commit of
-    /// #925 measures the same two numbers. Derivation: with builtins `PostInputBuiltins` is itself a builtin
-    /// bank member, the cohort chain `builtins -> EQ -> compressor -> fader -> matrix` merges into
-    /// one span per cohort and the eight spans overlap into one, and the `Input` slots the
-    /// post-input ops free fall inside it and are held: 64 inputs + 64 dedicated post-input + 64
-    /// dedicated EQ + 64 compressor outputs = 256, the fader, matrix and route in place and the
-    /// session output reusing a released slot. Per node the effect ops break the chain, so each
-    /// post-input bank's window is one level wide and releases its eight input slots as it closes:
-    /// 64 input slots + 8 new post-input + 56 new EQ + 64 compressor outputs + the output = 193.
+    /// **256 banked against 193 per node**, 63 stereo buffers (about 63 KiB at 128 frames) of
+    /// arena -- memory, not copies. #925 does not change this plan (the three stages are listed
+    /// there and keep their ops), and the base commit of #925 measures the same two numbers.
+    /// Derivation: `PostInputBuiltins` is itself a builtin bank member, the cohort chain
+    /// `builtins -> EQ -> compressor -> fader -> matrix` merges into one span per cohort and the
+    /// eight spans overlap into one, and the `Input` slots the post-input ops free fall inside it
+    /// and are held: 64 inputs + 64 dedicated post-input + 64 dedicated EQ + 64 compressor outputs
+    /// = 256, the fader, matrix and route in place and the session output reusing a released slot.
+    /// Per node the effect ops break the chain, so each post-input bank's window is one level wide
+    /// and releases its eight input slots as it closes: 64 input slots + 8 new post-input + 56 new
+    /// EQ + 64 compressor outputs + the output = 193.
     ///
-    /// **Without builtins** (`GraphCompiler::compile`) the post-input stage is an alias since
-    /// #925, and the arena-neutrality this test used to show there -- 193 banked and 193 per node
-    /// -- was an artifact of the identity copy #925 removed. The EQ banks now read the `Input`
-    /// buffers directly. Each EQ bank and its compressor bank are a chainable cohort pair
-    /// (`program::chainable_bank_groups`), and the eight pairs' windows overlap into one span from
-    /// the first EQ op to the last compressor op. Every `Input` slot the EQ ops free falls inside
-    /// that span and is held until it closes, so the banked plan needs 64 inputs + 64 dedicated EQ
-    /// outputs + 64 compressor outputs = **192**, the session output reusing a released input
-    /// slot. The hold is required, not conservative: a merged chain renders a cohort's compressor
-    /// at its EQ's position, before the later EQ banks have read their inputs, so a compressor
-    /// output coloured onto a freed input slot would overwrite an input still to be read. Per
-    /// node there is no window: each EQ output takes the slot its predecessor's input has just
-    /// freed, so the inputs' 64 slots become the EQ outputs' and the plan needs 64 dedicated EQ
-    /// outputs + 64 compressor outputs + the session output = **129**. Neither arm grew: both
-    /// were 193 before #925.
+    /// Until #964 this test also pinned the builtins-less compile (192 banked against 129 per node
+    /// since #925, where the post-input stage was an alias and the EQ banks read the `Input`
+    /// buffers directly). That compile is gone, and its arm with it.
     ///
     /// The rejected alternative in `program::lower` (dedicating every bank member) scored 257
     /// on the builtins-less plan before #925: one extra buffer and one extra stereo block copy per
     /// block for each of the 64 dynamic members whose consumer could no longer consume it in
     /// place.
     #[test]
-    fn the_merged_span_hold_costs_the_input_slots_with_and_without_builtins() {
+    fn the_merged_span_hold_costs_the_input_slots() {
         let model = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_FIXTURE).expect("console fixture");
         let session = compile_session(
             &model,
@@ -7447,20 +7518,6 @@ mod tests {
             maximum_total_state_bytes: 1 << 20,
             maximum_scratch_bytes: 1 << 20,
             maximum_automation_spans_per_block: 32,
-        };
-        let builtins_less = |plan_id: u64, registry: &NativeEffectRegistry| {
-            GraphCompiler::compile(GraphCompileRequest {
-                dispatch: host_dispatch(),
-                plan_id,
-                effects: prepare_native_session_effects(&session, registry, effect_caps)
-                    .expect("prepared console effects"),
-                caps: integration_caps(),
-            })
-            .unwrap_or_else(|failure| panic!("console graph: {:?}", failure.diagnostics))
-            .graph
-            .program()
-            .expect("lowers")
-            .buffers
         };
         let with_builtins = |plan_id: u64, registry: &NativeEffectRegistry| {
             let builtins = prepare_session_builtins(
@@ -7493,22 +7550,6 @@ mod tests {
             .expect("lowers")
             .buffers
         };
-
-        // The builtins-less pin (#925): the hold now costs the freed input slots, and no plan grew.
-        let banked = builtins_less(1_690, &registry);
-        let per_node = builtins_less(1_691, &per_node_registry);
-        assert_eq!(
-            banked, 192,
-            "64 held inputs + 64 EQ + 64 compressor outputs"
-        );
-        assert_eq!(
-            per_node, 129,
-            "64 EQ + 64 compressor outputs + the session output"
-        );
-        assert!(
-            banked <= 193 && per_node <= 193,
-            "both arms were 193 before #925; eliding the identity stages must not grow either"
-        );
 
         // The plan every host renders: the merged post-input-to-matrix span holds the inputs'
         // 64 slots, one of which the session output reuses. Unchanged by #925.
@@ -7583,7 +7624,7 @@ mod tests {
             maximum_scratch_bytes: 1 << 20,
             maximum_automation_spans_per_block: 32,
         };
-        let bank = GraphCompiler::compile(GraphCompileRequest {
+        let bank = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_650,
             effects: prepare_native_session_effects(&session, &registry, effect_caps)
@@ -7591,7 +7632,7 @@ mod tests {
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("console graph: {:?}", failure.diagnostics));
-        let per_node = GraphCompiler::compile(GraphCompileRequest {
+        let per_node = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_651,
             effects: prepare_native_session_effects(&session, &per_node_registry, effect_caps)
@@ -7600,14 +7641,14 @@ mod tests {
         })
         .unwrap_or_else(|failure| panic!("per-node console graph: {:?}", failure.diagnostics));
 
-        let width = BankWidth::for_backend(bank.report.rack_cohorts.dispatch);
+        let width = BankWidth::for_backend(bank.report().rack_cohorts.dispatch);
         let Some(width) = width else {
-            assert_eq!(bank.graph.prepared_bank_count(), 0);
+            assert_eq!(bank.graph().prepared_bank_count(), 0);
             return;
         };
         let lanes = width.lanes() as usize;
         assert_eq!(64 % lanes, 0, "the fixture is a whole number of cohorts");
-        let cohorts = &bank.report.rack_cohorts;
+        let cohorts = &bank.report().rack_cohorts;
         assert_eq!(
             cohorts.bound_slots_in(RackLocation::Simd1).count(),
             64 / lanes,
@@ -7623,29 +7664,47 @@ mod tests {
             cohorts.scalar_in(RackLocation::Dynamic).is_empty(),
             "no compressor is left on the per-node path"
         );
-        assert_eq!(bank.graph.prepared_bank_count(), 2 * (64 / lanes));
-        assert_eq!(per_node.graph.prepared_bank_count(), 0);
+        assert_eq!(bank.graph().prepared_bank_count(), 2 * (64 / lanes));
+        assert_eq!(per_node.graph().prepared_bank_count(), 0);
         assert_eq!(
-            bank.graph.sequential_schedule, per_node.graph.sequential_schedule,
+            bank.graph().sequential_schedule,
+            per_node.graph().sequential_schedule,
             "banking is an execution decision and must not move the graph"
         );
-        assert_eq!(bank.report.output_latency, per_node.report.output_latency);
+        assert_eq!(
+            bank.report().output_latency,
+            per_node.report().output_latency
+        );
 
-        let bank_count = bank.graph.prepared_bank_count();
-        let builtin_bank_count = bank.graph.prepared_builtin_bank_count();
+        let bank_count = bank.graph().prepared_bank_count();
+        let builtin_bank_count = bank.graph().prepared_builtin_bank_count();
         let bound_slots = (bank_count + builtin_bank_count) as u64;
-        // G5 derivation, issue #202 rec 2. This fixture binds `64 / lanes` EQ slots on `simd1` and
-        // `64 / lanes` compressor slots in `dynamic`, and nothing else -- no builtin banks are
-        // attached on this path. Lane `i` of the compressor bank reads lane `i` of the EQ bank
-        // through the elided `PostSimd1` boundary, undelayed, unmixed, with no second reader and
-        // no observer, so every cohort fuses into one chain:
+        // G5 derivation, issue #202 rec 2. Each cohort binds five slots, in cascade order: the
+        // post-input builtins, `64 / lanes` EQ slots on `simd1`, `64 / lanes` compressor slots in
+        // `dynamic`, the fader and the matrix. Lane `i` of the compressor bank reads lane `i` of
+        // the EQ bank through the elided `PostSimd1` boundary, undelayed, unmixed, with no second
+        // reader and no observer, and each builtin slot is the sole reader of the slot before it,
+        // so every cohort fuses into one chain:
         //
-        //     chains = bound slots - one merge per cohort = 2 * (64 / lanes) - 64 / lanes
+        //     chains = bound slots - four merges per cohort = 5 * (64 / lanes) - 4 * (64 / lanes)
         //
-        // Before rec 2 the merge was never proposed, because the cohort planner pools per
-        // `RackLocation` and these two slots sit in different racks.
+        // #964 re-pin: compiled without builtins this fixture bound the EQ and compressor slots
+        // alone, one merge per cohort, `2 * (64 / lanes) - 64 / lanes` chains. The claim is the
+        // same -- the cross-rack pair fuses -- and the builtin slots on either side of it now
+        // fuse into the same chain. Before rec 2 the merge was never proposed, because the cohort
+        // planner pools per `RackLocation` and these two slots sit in different racks.
         let cohorts = 64 / lanes;
-        let expected_chains = bound_slots - cohorts as u64;
+        assert_eq!(
+            builtin_bank_count,
+            BANKABLE_TRACK_STAGES as usize * cohorts,
+            "post-input, fader and matrix bank once per cohort"
+        );
+        assert_eq!(
+            per_node.graph().prepared_builtin_bank_count(),
+            builtin_bank_count,
+            "refusing the effect banks leaves the builtin banks alone"
+        );
+        let expected_chains = bound_slots - 4 * cohorts as u64;
         let banked = render_console_blocks(bank, BLOCKS);
         let scalar = render_console_blocks(per_node, BLOCKS);
         assert_pcm_bits_equal(&banked.0, &scalar.0, "64-track console: banked vs per node");
@@ -7671,7 +7730,19 @@ mod tests {
             banked.2 < banked.3,
             "a cross-rack cohort must realise fewer chains than slots"
         );
-        assert_eq!(scalar.1, 0, "the per-node arm transposes nothing");
+        // #964 re-pin: without builtins the per-node arm bound no bank and transposed nothing. With
+        // them it binds only its builtin slots, and the per-node EQ and compressor between them
+        // split each cohort's strip into two chains, `[post-input]` and `[fader, matrix]`.
+        assert_eq!(
+            (scalar.3, scalar.2),
+            (builtin_bank_count as u64, 2 * cohorts as u64),
+            "the per-node arm binds only its builtin slots, as two chains per cohort"
+        );
+        assert_eq!(
+            scalar.1,
+            BLOCKS * scalar.2,
+            "the per-node arm transposes only its builtin chains"
+        );
         // Descriptive, printed under `--nocapture`: what phase 1b actually buys on the measured
         // session, and what the composed benchmark should expect to see.
         println!(
@@ -7731,22 +7802,25 @@ mod tests {
         }
         let split = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_FIXTURE).expect("retired fixture");
 
-        let compile = compile_console_model;
+        let registry = launch_native_effect_registry().expect("launch registry");
+        let compile = |model: &session::SessionModel, plan_id: u64| {
+            compile_console_model_with_builtins(model, plan_id, &[], &registry)
+        };
 
         let split_artifact = compile(&split, 1_750);
         let merged_artifact = compile(&merged, 1_751);
         let intended_artifact = compile(&intended, 1_752);
 
-        let Some(width) = BankWidth::for_backend(split_artifact.report.rack_cohorts.dispatch)
+        let Some(width) = BankWidth::for_backend(split_artifact.report().rack_cohorts.dispatch)
         else {
-            assert_eq!(split_artifact.graph.prepared_bank_count(), 0);
+            assert_eq!(split_artifact.graph().prepared_bank_count(), 0);
             return;
         };
         let lanes = width.lanes() as usize;
         let cohorts_per_rack = 64 / lanes;
 
         // (2) Structure. The retired layout: one cohort in `simd1`, one in `dynamic`.
-        let split_cohorts = &split_artifact.report.rack_cohorts;
+        let split_cohorts = &split_artifact.report().rack_cohorts;
         assert_eq!(
             split_cohorts.bound_slots_in(RackLocation::Simd1).count(),
             cohorts_per_rack
@@ -7756,12 +7830,12 @@ mod tests {
             cohorts_per_rack
         );
         assert_eq!(
-            split_artifact.graph.prepared_bank_count(),
+            split_artifact.graph().prepared_bank_count(),
             2 * cohorts_per_rack
         );
 
         // The merged layout: both slots bound inside one `simd1` cohort, nothing in `dynamic`.
-        let merged_cohorts = &merged_artifact.report.rack_cohorts;
+        let merged_cohorts = &merged_artifact.report().rack_cohorts;
         assert_eq!(
             merged_cohorts.bound_slots_in(RackLocation::Simd1).count(),
             2 * cohorts_per_rack,
@@ -7781,20 +7855,20 @@ mod tests {
         // and since #202 rec 2 so does the retired layout's cross-rack pair, so the chain counts
         // asserted further down are equal as well. Same slots, same chains, different racks.
         assert_eq!(
-            merged_artifact.graph.prepared_bank_count(),
-            split_artifact.graph.prepared_bank_count(),
+            merged_artifact.graph().prepared_bank_count(),
+            split_artifact.graph().prepared_bank_count(),
             "merging the racks regroups which cohort the slots belong to, not how many slots bind"
         );
         assert_eq!(
-            intended_artifact.graph.prepared_bank_count(),
+            intended_artifact.graph().prepared_bank_count(),
             3 * cohorts_per_rack,
             "the intended strip binds three slots per cohort: EQ, compressor and limiter"
         );
 
         // (1) Bits, and (3) G5. The slot counts are read before the artifacts are consumed, so
         // the G5 accounting below is derived from what this plan actually bound.
-        let bound_slots_per_block = |artifact: &PreparedGraphArtifact| {
-            artifact.graph.prepared_bank_count() + artifact.graph.prepared_builtin_bank_count()
+        let bound_slots_per_block = |artifact: &PreparedGraphBuiltinsArtifact| {
+            artifact.graph().prepared_bank_count() + artifact.graph().prepared_builtin_bank_count()
         };
         let split_slots = bound_slots_per_block(&split_artifact);
         let merged_slots = bound_slots_per_block(&merged_artifact);
@@ -7855,19 +7929,25 @@ mod tests {
         );
         assert_eq!(split_render.1, BLOCKS * chains(&split_render));
         assert_eq!(merged_render.1, BLOCKS * chains(&merged_render));
-        // Two bound slots per cohort on both sides, fused into one chain on both sides.
-        // Derivation: 64 tracks / `lanes` = `cohorts_per_rack` cohorts; each binds an EQ slot and
-        // a compressor slot (2 * cohorts_per_rack slots); the compressor's op is the sole reader
-        // of the EQ's output, undelayed, unmixed and unobserved, so each cohort fuses to one
+        // Five bound slots per cohort on both sides, fused into one chain on both sides.
+        // Derivation: 64 tracks / `lanes` = `cohorts_per_rack` cohorts; each binds an EQ slot, a
+        // compressor slot and the three builtin slots around them -- post-input before, fader and
+        // matrix after (5 * cohorts_per_rack slots); each slot's op is the sole reader of the
+        // previous slot's output, undelayed, unmixed and unobserved, so each cohort fuses to one
         // chain.
+        //
+        // #964 re-pin: compiled without builtins each cohort bound the EQ and compressor slots
+        // alone, `2 * cohorts_per_rack`. The builtin slots join the same chain, so the chain
+        // counts below are unchanged.
         assert_eq!(
             split_render.3,
-            2 * cohorts_per_rack as u64,
-            "the retired layout binds one EQ slot and one compressor slot per cohort"
+            (2 + BANKABLE_TRACK_STAGES) * cohorts_per_rack as u64,
+            "the retired layout binds one EQ slot, one compressor slot and three builtin slots \
+             per cohort"
         );
         assert_eq!(
             merged_render.3,
-            2 * cohorts_per_rack as u64,
+            (2 + BANKABLE_TRACK_STAGES) * cohorts_per_rack as u64,
             "so does the merged layout; the racks differ, the slot count does not"
         );
         assert_eq!(
@@ -10642,46 +10722,12 @@ mod tests {
         (pcm, builtin_banks, effect_banks)
     }
 
-    /// Compile one console session model into a prepared graph artifact.
-    fn compile_console_model(model: &session::SessionModel, plan_id: u64) -> PreparedGraphArtifact {
-        let session = compile_session(
-            model,
-            CompileCaps {
-                max_compiled_model_bytes: u64::MAX,
-                max_requested_runtime_bytes: u64::MAX,
-                max_single_allocation_bytes: u64::MAX,
-                max_queue_items: u64::MAX,
-                max_source_ring_frames: u64::MAX,
-                max_source_ring_bytes: u64::MAX,
-            },
-        )
-        .expect("compiled console model");
-        let registry = launch_native_effect_registry().expect("launch registry");
-        GraphCompiler::compile(GraphCompileRequest {
-            dispatch: host_dispatch(),
-            plan_id,
-            effects: prepare_native_session_effects(
-                &session,
-                &registry,
-                EffectCompileCaps {
-                    maximum_total_state_bytes: 1 << 22,
-                    maximum_scratch_bytes: 1 << 20,
-                    maximum_automation_spans_per_block: 32,
-                },
-            )
-            .expect("prepared console effects"),
-            caps: integration_caps(),
-        })
-        .unwrap_or_else(|failure| panic!("console graph: {:?}", failure.diagnostics))
-    }
-
     /// Compile one console session model into a prepared graph artifact **with** its builtin
     /// banks, the way the production pipeline assembles a plan.
     ///
-    /// [`compile_console_model`] attaches none, so the plans it builds carry effect banks only and
-    /// the `builtins -> simd1` boundary does not exist in them at all. Issue #202 rec 2 fuses
-    /// across exactly that boundary, so every test that measures it has to compile the production
-    /// pair rather than the effect-only one.
+    /// Issue #202 rec 2 fuses across the `builtins -> simd1` boundary, which only a plan with its
+    /// builtins attached has. Since #964 every console test compiles here: the effect-only
+    /// `compile_console_model` beside it, which attached none, went with the builtins-less compile.
     fn compile_console_model_with_builtins(
         model: &session::SessionModel,
         plan_id: u64,
@@ -11155,24 +11201,11 @@ mod tests {
 
     /// Render the console fixture, returning each block's PCM and the plan's transpose counter.
     fn render_console_blocks(
-        artifact: PreparedGraphArtifact,
+        artifact: PreparedGraphBuiltinsArtifact,
         blocks: u64,
     ) -> (Vec<Vec<f32>>, u64, u64, u64) {
-        let graph = artifact.graph;
-        let envelope = graph.envelope;
-        let frames = envelope.quantum.0 as usize;
-        let nodes = graph
-            .required_bindings
-            .iter()
-            .map(|node| GraphNodeBinding::new(node.clone(), console_track_input_binding(node)))
-            .collect();
-        let mut plan = graph
-            .bind(GraphRuntimeBindings {
-                envelope,
-                nodes,
-                observers: Vec::new(),
-            })
-            .unwrap_or_else(|failure| panic!("console bind: {}", failure.code));
+        let frames = artifact.envelope().quantum.0 as usize;
+        let mut plan = bind_session_builtins(artifact, console_track_input_binding, Vec::new());
         let pcm = (0..blocks)
             .map(|block| {
                 let mut pcm = vec![0.0_f32; frames * 2];
@@ -11237,29 +11270,29 @@ mod tests {
         let scalar_effects =
             prepare_native_session_effects(&session, &scalar_registry, effect_caps)
                 .expect("prepared scalar gate/expander effects");
-        let artifact = GraphCompiler::compile(GraphCompileRequest {
+        let artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_014,
             effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("gate/expander graph: {:?}", failure.diagnostics));
-        let scalar_artifact = GraphCompiler::compile(GraphCompileRequest {
+        let scalar_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_015,
             effects: scalar_effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("scalar gate/expander graph: {:?}", failure.diagnostics));
-        let width = BankWidth::for_backend(artifact.report.rack_cohorts.dispatch);
+        let width = BankWidth::for_backend(artifact.report().rack_cohorts.dispatch);
         if let Some(width) = width {
             let lanes = width.lanes() as usize;
             let expected_banks = 9 / lanes;
             let expected_scalar_tails = 1 + 9 % lanes;
-            assert_eq!(artifact.graph.prepared_bank_count(), expected_banks);
+            assert_eq!(artifact.graph().prepared_bank_count(), expected_banks);
             assert_eq!(
                 artifact
-                    .report
+                    .report()
                     .rack_cohorts
                     .bound_groups_in(RackLocation::Simd1)
                     .count(),
@@ -11267,14 +11300,14 @@ mod tests {
             );
             assert!(
                 artifact
-                    .report
+                    .report()
                     .rack_cohorts
                     .bound_groups_in(RackLocation::Simd1)
                     .all(|bank| bank.active_count() == lanes)
             );
             assert_eq!(
                 artifact
-                    .report
+                    .report()
                     .rack_cohorts
                     .scalar_in(RackLocation::Simd1)
                     .len(),
@@ -11282,7 +11315,7 @@ mod tests {
             );
             assert!(
                 artifact
-                    .report
+                    .report()
                     .rack_cohorts
                     .scalar_in(RackLocation::Simd1)
                     .iter()
@@ -11290,17 +11323,17 @@ mod tests {
             );
             assert!(
                 artifact
-                    .report
+                    .report()
                     .rack_cohorts
                     .scalar_in(RackLocation::Simd1)
                     .iter()
                     .any(|id| id.track_id.as_str() == "eq9")
             );
         } else {
-            assert_eq!(artifact.graph.prepared_bank_count(), 0);
+            assert_eq!(artifact.graph().prepared_bank_count(), 0);
             assert_eq!(
                 artifact
-                    .report
+                    .report()
                     .rack_cohorts
                     .scalar_in(RackLocation::Simd1)
                     .len(),
@@ -11308,54 +11341,24 @@ mod tests {
             );
         }
         assert_eq!(
-            artifact.graph.sequential_schedule,
-            scalar_artifact.graph.sequential_schedule
+            artifact.graph().sequential_schedule,
+            scalar_artifact.graph().sequential_schedule
         );
         assert_eq!(
-            artifact.graph.route_timings,
-            scalar_artifact.graph.route_timings
+            artifact.graph().route_timings,
+            scalar_artifact.graph().route_timings
         );
         assert_eq!(
-            artifact.graph.inserted_delays,
-            scalar_artifact.graph.inserted_delays
+            artifact.graph().inserted_delays,
+            scalar_artifact.graph().inserted_delays
         );
-        let expected_schedule = artifact.graph.sequential_schedule.clone();
-        let expected_route_timings = artifact.graph.route_timings.clone();
-        let PreparedGraphArtifact {
-            pool_classes: _,
-            graph: bank_graph,
-            report: _,
-        } = artifact;
-        let PreparedGraphArtifact {
-            pool_classes: _,
-            graph: scalar_graph,
-            report: _,
-        } = scalar_artifact;
-        let envelope = bank_graph.envelope;
-        let bank_nodes = bank_graph
-            .required_bindings
-            .iter()
-            .map(|node| GraphNodeBinding::new(node.clone(), parametric_eq_input_binding(node)))
-            .collect();
-        let scalar_nodes = scalar_graph
-            .required_bindings
-            .iter()
-            .map(|node| GraphNodeBinding::new(node.clone(), parametric_eq_input_binding(node)))
-            .collect();
-        let mut bank_plan = bank_graph
-            .bind(GraphRuntimeBindings {
-                envelope,
-                nodes: bank_nodes,
-                observers: Vec::new(),
-            })
-            .unwrap_or_else(|failure| panic!("gate/expander bank bind: {}", failure.code));
-        let mut scalar_plan = scalar_graph
-            .bind(GraphRuntimeBindings {
-                envelope,
-                nodes: scalar_nodes,
-                observers: Vec::new(),
-            })
-            .unwrap_or_else(|failure| panic!("gate/expander scalar bind: {}", failure.code));
+        let expected_schedule = artifact.graph().sequential_schedule.clone();
+        let expected_route_timings = artifact.graph().route_timings.clone();
+        let envelope = artifact.envelope();
+        let mut bank_plan =
+            bind_session_builtins(artifact, parametric_eq_input_binding, Vec::new());
+        let mut scalar_plan =
+            bind_session_builtins(scalar_artifact, parametric_eq_input_binding, Vec::new());
         let frames = envelope.quantum.0 as usize;
         let mut rendered_nonzero = false;
         let mut first_block_nonzero = false;
@@ -11433,15 +11436,21 @@ mod tests {
                 .iter()
                 .all(|entry| entry.metadata.latency == LatencySamples(0))
         );
-        let bypass_artifact = GraphCompiler::compile(GraphCompileRequest {
+        let bypass_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_016,
             effects: bypass_effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("bypass gate/expander graph: {:?}", failure.diagnostics));
-        assert_eq!(bypass_artifact.graph.sequential_schedule, expected_schedule);
-        assert_eq!(bypass_artifact.graph.route_timings, expected_route_timings);
+        assert_eq!(
+            bypass_artifact.graph().sequential_schedule,
+            expected_schedule
+        );
+        assert_eq!(
+            bypass_artifact.graph().route_timings,
+            expected_route_timings
+        );
     }
 
     #[test]
@@ -11486,14 +11495,14 @@ mod tests {
         let scalar_effects =
             prepare_native_session_effects(&session, &scalar_registry, effect_caps)
                 .expect("prepared scalar limiter effects");
-        let artifact = GraphCompiler::compile(GraphCompileRequest {
+        let artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_050,
             effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("true-peak limiter graph: {:?}", failure.diagnostics));
-        let scalar_artifact = GraphCompiler::compile(GraphCompileRequest {
+        let scalar_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_051,
             effects: scalar_effects,
@@ -11501,15 +11510,15 @@ mod tests {
         })
         .unwrap_or_else(|failure| panic!("scalar limiter graph: {:?}", failure.diagnostics));
 
-        let width = BankWidth::for_backend(artifact.report.rack_cohorts.dispatch);
+        let width = BankWidth::for_backend(artifact.report().rack_cohorts.dispatch);
         let (expected_banks, expected_scalar_tails) = width.map_or((0, 10), |width| {
             let lanes = width.lanes() as usize;
             (10 / lanes, 10 % lanes)
         });
-        assert_eq!(artifact.graph.prepared_bank_count(), expected_banks);
+        assert_eq!(artifact.graph().prepared_bank_count(), expected_banks);
         assert_eq!(
             artifact
-                .report
+                .report()
                 .rack_cohorts
                 .bound_groups_in(RackLocation::Simd1)
                 .count(),
@@ -11517,14 +11526,14 @@ mod tests {
         );
         assert_eq!(
             artifact
-                .report
+                .report()
                 .rack_cohorts
                 .scalar_in(RackLocation::Simd1)
                 .len(),
             expected_scalar_tails
         );
         let actual_members: Vec<Vec<String>> = artifact
-            .report
+            .report()
             .rack_cohorts
             .bound_groups_in(RackLocation::Simd1)
             .map(|bank| {
@@ -11550,7 +11559,7 @@ mod tests {
             "full banks retain stable membership"
         );
         let actual_tails: Vec<_> = artifact
-            .report
+            .report()
             .rack_cohorts
             .scalar_in(RackLocation::Simd1)
             .iter()
@@ -11561,7 +11570,7 @@ mod tests {
                 .map(|index| format!("eq{index}"))
                 .collect();
         assert_eq!(actual_tails, expected_tails, "scalar tail order is stable");
-        assert_eq!(scalar_artifact.graph.prepared_bank_count(), 0);
+        assert_eq!(scalar_artifact.graph().prepared_bank_count(), 0);
         let lanes = width.map_or(0_u64, |width| u64::from(width.lanes()));
         let bank_count = u64::try_from(expected_banks).expect("bank count");
         let expected_bank_slot_bytes = literal_bank_slot_reservation_bytes(bank_count, lanes);
@@ -11573,7 +11582,7 @@ mod tests {
                 .expect("bank metadata size")
                 + lanes)
             + artifact
-                .report
+                .report()
                 .rack_cohorts
                 .bound_groups_in(RackLocation::Simd1)
                 .flat_map(|bank| bank.members.iter().flatten())
@@ -11584,136 +11593,109 @@ mod tests {
                         + u64::try_from("true-peak-limiter".len()).expect("effect ID bytes")
                 })
                 .sum::<u64>();
-        assert_eq!(artifact.report.estimate.effect_bank_count, bank_count);
+        assert_eq!(artifact.report().estimate.effect_bank_count, bank_count);
         assert_eq!(
-            artifact.report.estimate.effect_bank_scratch_bytes,
+            artifact.report().estimate.effect_bank_scratch_bytes,
             expected_bank_scratch_bytes
         );
         assert_eq!(
-            artifact.report.estimate.effect_bank_runtime_buffer_bytes,
+            artifact.report().estimate.effect_bank_runtime_buffer_bytes,
             expected_bank_runtime_buffer_bytes
         );
         assert_eq!(
-            artifact.report.estimate.effect_bank_metadata_bytes,
+            artifact.report().estimate.effect_bank_metadata_bytes,
             expected_bank_metadata_bytes
         );
-        assert_eq!(scalar_artifact.report.estimate.effect_bank_count, 0);
-        assert_eq!(scalar_artifact.report.estimate.effect_bank_scratch_bytes, 0);
+        assert_eq!(scalar_artifact.report().estimate.effect_bank_count, 0);
+        assert_eq!(
+            scalar_artifact.report().estimate.effect_bank_scratch_bytes,
+            0
+        );
         assert_eq!(
             scalar_artifact
-                .report
+                .report()
                 .estimate
                 .effect_bank_runtime_buffer_bytes,
             0
         );
         assert_eq!(
-            scalar_artifact.report.estimate.effect_bank_metadata_bytes,
+            scalar_artifact.report().estimate.effect_bank_metadata_bytes,
             0
         );
         assert_eq!(
-            artifact.report.estimate.audio_buffer_samples,
-            scalar_artifact.report.estimate.audio_buffer_samples
+            artifact.report().estimate.audio_buffer_samples,
+            scalar_artifact.report().estimate.audio_buffer_samples
                 + (expected_bank_scratch_bytes + expected_bank_runtime_buffer_bytes) / 4
         );
         assert_eq!(
-            artifact.report.estimate.graph_metadata_bytes,
-            scalar_artifact.report.estimate.graph_metadata_bytes
+            artifact.report().estimate.graph_metadata_bytes,
+            scalar_artifact.report().estimate.graph_metadata_bytes
                 + expected_bank_metadata_bytes
                 + expected_bank_slot_bytes
         );
         assert_eq!(
-            artifact.report.estimate.incremental_plan_bytes,
-            scalar_artifact.report.estimate.incremental_plan_bytes
+            artifact.report().estimate.incremental_plan_bytes,
+            scalar_artifact.report().estimate.incremental_plan_bytes
                 + expected_bank_scratch_bytes
                 + expected_bank_runtime_buffer_bytes
                 + expected_bank_metadata_bytes
                 + expected_bank_slot_bytes
         );
         assert_eq!(
-            artifact.report.estimate.session_plus_plan_bytes,
-            scalar_artifact.report.estimate.session_plus_plan_bytes
+            artifact.report().estimate.session_plus_plan_bytes,
+            scalar_artifact.report().estimate.session_plus_plan_bytes
                 + expected_bank_scratch_bytes
                 + expected_bank_runtime_buffer_bytes
                 + expected_bank_metadata_bytes
                 + expected_bank_slot_bytes
         );
         assert_eq!(
-            artifact.graph.sequential_schedule,
-            scalar_artifact.graph.sequential_schedule
+            artifact.graph().sequential_schedule,
+            scalar_artifact.graph().sequential_schedule
         );
         assert_eq!(
-            artifact.graph.route_timings,
-            scalar_artifact.graph.route_timings
+            artifact.graph().route_timings,
+            scalar_artifact.graph().route_timings
         );
         assert_eq!(
-            artifact.graph.inserted_delays,
-            scalar_artifact.graph.inserted_delays
+            artifact.graph().inserted_delays,
+            scalar_artifact.graph().inserted_delays
         );
         assert_eq!(
-            GraphCompiler::evidence(&artifact.graph, &artifact.report).canonical_bytes,
-            GraphCompiler::evidence(&scalar_artifact.graph, &scalar_artifact.report)
+            GraphCompiler::evidence(artifact.graph(), artifact.report()).canonical_bytes,
+            GraphCompiler::evidence(scalar_artifact.graph(), scalar_artifact.report())
                 .canonical_bytes
         );
-        assert_eq!(artifact.report.output_latency, LatencySamples(486));
+        assert_eq!(artifact.report().output_latency, LatencySamples(486));
         assert_eq!(
-            artifact.report.output_latency,
-            scalar_artifact.report.output_latency
+            artifact.report().output_latency,
+            scalar_artifact.report().output_latency
         );
         assert_eq!(
-            artifact.report.output_tail,
-            scalar_artifact.report.output_tail
+            artifact.report().output_tail,
+            scalar_artifact.report().output_tail
         );
-        assert!(artifact.graph.route_timings.iter().all(|route| {
+        assert!(artifact.graph().route_timings.iter().all(|route| {
             route.source_arrival == LatencySamples(486)
                 && route.compensation_delay == LatencySamples(0)
                 && route.destination_arrival == LatencySamples(486)
         }));
-        let expected_schedule = artifact.graph.sequential_schedule.clone();
-        let expected_route_timings = artifact.graph.route_timings.clone();
-        let expected_delays = artifact.graph.inserted_delays.clone();
-        let expected_canonical_bytes = GraphCompiler::evidence(&artifact.graph, &artifact.report)
+        let expected_schedule = artifact.graph().sequential_schedule.clone();
+        let expected_route_timings = artifact.graph().route_timings.clone();
+        let expected_delays = artifact.graph().inserted_delays.clone();
+        let expected_canonical_bytes = GraphCompiler::evidence(artifact.graph(), artifact.report())
             .canonical_bytes
             .clone();
-        let expected_output_latency = artifact.report.output_latency;
-        let expected_output_tail = artifact.report.output_tail;
-        let minimum_plan_bytes = artifact.report.estimate.incremental_plan_bytes;
+        let expected_output_latency = artifact.report().output_latency;
+        let expected_output_tail = artifact.report().output_tail;
+        let minimum_plan_bytes = artifact.report().estimate.incremental_plan_bytes;
 
-        let PreparedGraphArtifact {
-            pool_classes: _,
-            graph: bank_graph,
-            report: _,
-        } = artifact;
-        let PreparedGraphArtifact {
-            pool_classes: _,
-            graph: scalar_graph,
-            report: _,
-        } = scalar_artifact;
-        let envelope = bank_graph.envelope;
+        let envelope = artifact.envelope();
         let frames = envelope.quantum.0 as usize;
-        let bank_nodes = bank_graph
-            .required_bindings
-            .iter()
-            .map(|node| GraphNodeBinding::new(node.clone(), true_peak_limiter_input_binding(node)))
-            .collect();
-        let scalar_nodes = scalar_graph
-            .required_bindings
-            .iter()
-            .map(|node| GraphNodeBinding::new(node.clone(), true_peak_limiter_input_binding(node)))
-            .collect();
-        let mut bank_plan = bank_graph
-            .bind(GraphRuntimeBindings {
-                envelope,
-                nodes: bank_nodes,
-                observers: Vec::new(),
-            })
-            .unwrap_or_else(|failure| panic!("limiter bank bind: {}", failure.code));
-        let mut scalar_plan = scalar_graph
-            .bind(GraphRuntimeBindings {
-                envelope,
-                nodes: scalar_nodes,
-                observers: Vec::new(),
-            })
-            .unwrap_or_else(|failure| panic!("limiter scalar bind: {}", failure.code));
+        let mut bank_plan =
+            bind_session_builtins(artifact, true_peak_limiter_input_binding, Vec::new());
+        let mut scalar_plan =
+            bind_session_builtins(scalar_artifact, true_peak_limiter_input_binding, Vec::new());
         let mut reached_fixed_latency = false;
         for block in 0..16_u64 {
             let mut bank_pcm = vec![0.0_f32; frames * 2];
@@ -11796,28 +11778,37 @@ mod tests {
                 .iter()
                 .all(|entry| entry.metadata.latency == LatencySamples(486))
         );
-        let bypass_artifact = GraphCompiler::compile(GraphCompileRequest {
+        let bypass_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_052,
             effects: bypass_effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("bypass limiter graph: {:?}", failure.diagnostics));
-        assert_eq!(bypass_artifact.graph.prepared_bank_count(), expected_banks);
-        assert_eq!(bypass_artifact.graph.sequential_schedule, expected_schedule);
-        assert_eq!(bypass_artifact.graph.route_timings, expected_route_timings);
-        assert_eq!(bypass_artifact.graph.inserted_delays, expected_delays);
         assert_eq!(
-            bypass_artifact.report.output_latency,
+            bypass_artifact.graph().prepared_bank_count(),
+            expected_banks
+        );
+        assert_eq!(
+            bypass_artifact.graph().sequential_schedule,
+            expected_schedule
+        );
+        assert_eq!(
+            bypass_artifact.graph().route_timings,
+            expected_route_timings
+        );
+        assert_eq!(bypass_artifact.graph().inserted_delays, expected_delays);
+        assert_eq!(
+            bypass_artifact.report().output_latency,
             expected_output_latency
         );
-        assert_eq!(bypass_artifact.report.output_tail, expected_output_tail);
+        assert_eq!(bypass_artifact.report().output_tail, expected_output_tail);
         assert_eq!(
-            GraphCompiler::evidence(&bypass_artifact.graph, &bypass_artifact.report)
+            GraphCompiler::evidence(bypass_artifact.graph(), bypass_artifact.report())
                 .canonical_bytes,
             expected_canonical_bytes
         );
-        assert!(bypass_artifact.graph.route_timings.iter().all(|route| {
+        assert!(bypass_artifact.graph().route_timings.iter().all(|route| {
             route.source_arrival == LatencySamples(486)
                 && route.compensation_delay == LatencySamples(0)
                 && route.destination_arrival == LatencySamples(486)
@@ -11829,7 +11820,7 @@ mod tests {
         constrained_caps.maximum_plan_bytes = minimum_plan_bytes
             .checked_sub(1)
             .expect("nonzero full graph plan estimate");
-        let cap_failure = match GraphCompiler::compile(GraphCompileRequest {
+        let cap_failure = match compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_053,
             effects: cap_effects,
@@ -11906,14 +11897,14 @@ mod tests {
         let scalar_effects =
             prepare_native_session_effects(&session, &scalar_registry, effect_caps)
                 .expect("prepared scalar multiband effects");
-        let artifact = GraphCompiler::compile(GraphCompileRequest {
+        let artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_080,
             effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("multiband graph: {:?}", failure.diagnostics));
-        let scalar_artifact = GraphCompiler::compile(GraphCompileRequest {
+        let scalar_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_081,
             effects: scalar_effects,
@@ -11921,15 +11912,15 @@ mod tests {
         })
         .unwrap_or_else(|failure| panic!("scalar multiband graph: {:?}", failure.diagnostics));
 
-        let width = BankWidth::for_backend(artifact.report.rack_cohorts.dispatch);
+        let width = BankWidth::for_backend(artifact.report().rack_cohorts.dispatch);
         let (expected_banks, expected_scalar_tails) = width.map_or((0, 10), |width| {
             let lanes = width.lanes() as usize;
             (10 / lanes, 10 % lanes)
         });
-        assert_eq!(artifact.graph.prepared_bank_count(), expected_banks);
+        assert_eq!(artifact.graph().prepared_bank_count(), expected_banks);
         assert_eq!(
             artifact
-                .report
+                .report()
                 .rack_cohorts
                 .bound_groups_in(RackLocation::Simd1)
                 .count(),
@@ -11937,14 +11928,14 @@ mod tests {
         );
         assert_eq!(
             artifact
-                .report
+                .report()
                 .rack_cohorts
                 .scalar_in(RackLocation::Simd1)
                 .len(),
             expected_scalar_tails
         );
         let actual_members: Vec<Vec<String>> = artifact
-            .report
+            .report()
             .rack_cohorts
             .bound_groups_in(RackLocation::Simd1)
             .map(|bank| {
@@ -11972,7 +11963,7 @@ mod tests {
         let expected_tail_start = expected_banks * width.map_or(1, |width| width.lanes() as usize);
         assert_eq!(
             artifact
-                .report
+                .report()
                 .rack_cohorts
                 .scalar_in(RackLocation::Simd1)
                 .iter()
@@ -11983,7 +11974,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             "stable scalar-tail membership"
         );
-        assert_eq!(scalar_artifact.graph.prepared_bank_count(), 0);
+        assert_eq!(scalar_artifact.graph().prepared_bank_count(), 0);
 
         let lanes = width.map_or(0_u64, |width| u64::from(width.lanes()));
         let bank_count = u64::try_from(expected_banks).expect("bank count");
@@ -11996,7 +11987,7 @@ mod tests {
                 .expect("bank metadata size")
                 + lanes)
             + artifact
-                .report
+                .report()
                 .rack_cohorts
                 .bound_groups_in(RackLocation::Simd1)
                 .flat_map(|bank| bank.members.iter().flatten())
@@ -12007,106 +11998,75 @@ mod tests {
                         + u64::try_from("multiband-compressor".len()).expect("effect ID bytes")
                 })
                 .sum::<u64>();
-        assert_eq!(artifact.report.estimate.effect_bank_count, bank_count);
+        assert_eq!(artifact.report().estimate.effect_bank_count, bank_count);
         assert_eq!(
-            artifact.report.estimate.effect_bank_scratch_bytes,
+            artifact.report().estimate.effect_bank_scratch_bytes,
             expected_bank_scratch_bytes
         );
         assert_eq!(
-            artifact.report.estimate.effect_bank_runtime_buffer_bytes,
+            artifact.report().estimate.effect_bank_runtime_buffer_bytes,
             expected_bank_runtime_buffer_bytes
         );
         assert_eq!(
-            artifact.report.estimate.effect_bank_metadata_bytes,
+            artifact.report().estimate.effect_bank_metadata_bytes,
             expected_bank_metadata_bytes
         );
-        assert_eq!(scalar_artifact.report.estimate.effect_bank_count, 0);
+        assert_eq!(scalar_artifact.report().estimate.effect_bank_count, 0);
         assert_eq!(
-            artifact.report.estimate.incremental_plan_bytes,
-            scalar_artifact.report.estimate.incremental_plan_bytes
+            artifact.report().estimate.incremental_plan_bytes,
+            scalar_artifact.report().estimate.incremental_plan_bytes
                 + expected_bank_scratch_bytes
                 + expected_bank_runtime_buffer_bytes
                 + expected_bank_metadata_bytes
                 + expected_bank_slot_bytes
         );
         assert_eq!(
-            artifact.report.estimate.session_plus_plan_bytes,
-            scalar_artifact.report.estimate.session_plus_plan_bytes
+            artifact.report().estimate.session_plus_plan_bytes,
+            scalar_artifact.report().estimate.session_plus_plan_bytes
                 + expected_bank_scratch_bytes
                 + expected_bank_runtime_buffer_bytes
                 + expected_bank_metadata_bytes
                 + expected_bank_slot_bytes
         );
         assert_eq!(
-            artifact.graph.sequential_schedule,
-            scalar_artifact.graph.sequential_schedule
+            artifact.graph().sequential_schedule,
+            scalar_artifact.graph().sequential_schedule
         );
         assert_eq!(
-            artifact.graph.route_timings,
-            scalar_artifact.graph.route_timings
+            artifact.graph().route_timings,
+            scalar_artifact.graph().route_timings
         );
         assert_eq!(
-            artifact.graph.inserted_delays,
-            scalar_artifact.graph.inserted_delays
+            artifact.graph().inserted_delays,
+            scalar_artifact.graph().inserted_delays
         );
         assert_eq!(
-            GraphCompiler::evidence(&artifact.graph, &artifact.report).canonical_bytes,
-            GraphCompiler::evidence(&scalar_artifact.graph, &scalar_artifact.report)
+            GraphCompiler::evidence(artifact.graph(), artifact.report()).canonical_bytes,
+            GraphCompiler::evidence(scalar_artifact.graph(), scalar_artifact.report())
                 .canonical_bytes
         );
-        assert!(artifact.graph.route_timings.iter().all(|route| {
+        assert!(artifact.graph().route_timings.iter().all(|route| {
             route.source_arrival == LatencySamples(0)
                 && route.compensation_delay == LatencySamples(0)
                 && route.destination_arrival == LatencySamples(0)
         }));
-        let expected_schedule = artifact.graph.sequential_schedule.clone();
-        let expected_route_timings = artifact.graph.route_timings.clone();
-        let expected_delays = artifact.graph.inserted_delays.clone();
-        let expected_canonical_bytes = GraphCompiler::evidence(&artifact.graph, &artifact.report)
+        let expected_schedule = artifact.graph().sequential_schedule.clone();
+        let expected_route_timings = artifact.graph().route_timings.clone();
+        let expected_delays = artifact.graph().inserted_delays.clone();
+        let expected_canonical_bytes = GraphCompiler::evidence(artifact.graph(), artifact.report())
             .canonical_bytes
             .clone();
-        let minimum_plan_bytes = artifact.report.estimate.incremental_plan_bytes;
+        let minimum_plan_bytes = artifact.report().estimate.incremental_plan_bytes;
 
-        let PreparedGraphArtifact {
-            pool_classes: _,
-            graph: bank_graph,
-            ..
-        } = artifact;
-        let PreparedGraphArtifact {
-            pool_classes: _,
-            graph: scalar_graph,
-            ..
-        } = scalar_artifact;
-        let envelope = bank_graph.envelope;
+        let envelope = artifact.envelope();
         let frames = envelope.quantum.0 as usize;
-        let bank_nodes = bank_graph
-            .required_bindings
-            .iter()
-            .map(|node| {
-                GraphNodeBinding::new(node.clone(), multiband_compressor_input_binding(node))
-            })
-            .collect();
-        let scalar_nodes = scalar_graph
-            .required_bindings
-            .iter()
-            .map(|node| {
-                GraphNodeBinding::new(node.clone(), multiband_compressor_input_binding(node))
-            })
-            .collect();
-        let mut bank_plan = bank_graph
-            .bind(GraphRuntimeBindings {
-                envelope,
-                nodes: bank_nodes,
-                observers: Vec::new(),
-            })
-            .unwrap_or_else(|failure| panic!("multiband bank bind: {}", failure.code));
-        let mut scalar_plan = scalar_graph
-            .bind(GraphRuntimeBindings {
-                envelope,
-                nodes: scalar_nodes,
-                observers: Vec::new(),
-            })
-            .unwrap_or_else(|failure| panic!("multiband scalar bind: {}", failure.code));
+        let mut bank_plan =
+            bind_session_builtins(artifact, multiband_compressor_input_binding, Vec::new());
+        let mut scalar_plan = bind_session_builtins(
+            scalar_artifact,
+            multiband_compressor_input_binding,
+            Vec::new(),
+        );
         let mut reached_current_sample = false;
         let mut reached_release_probe = false;
         for block in 0..20_u64 {
@@ -12183,23 +12143,32 @@ mod tests {
         let bypass_effects =
             prepare_native_session_effects(&bypass_session, &registry, effect_caps)
                 .expect("prepared bypass multiband effects");
-        let bypass_artifact = GraphCompiler::compile(GraphCompileRequest {
+        let bypass_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_082,
             effects: bypass_effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("bypass multiband graph: {:?}", failure.diagnostics));
-        assert_eq!(bypass_artifact.graph.prepared_bank_count(), expected_banks);
-        assert_eq!(bypass_artifact.graph.sequential_schedule, expected_schedule);
-        assert_eq!(bypass_artifact.graph.route_timings, expected_route_timings);
-        assert_eq!(bypass_artifact.graph.inserted_delays, expected_delays);
         assert_eq!(
-            GraphCompiler::evidence(&bypass_artifact.graph, &bypass_artifact.report)
+            bypass_artifact.graph().prepared_bank_count(),
+            expected_banks
+        );
+        assert_eq!(
+            bypass_artifact.graph().sequential_schedule,
+            expected_schedule
+        );
+        assert_eq!(
+            bypass_artifact.graph().route_timings,
+            expected_route_timings
+        );
+        assert_eq!(bypass_artifact.graph().inserted_delays, expected_delays);
+        assert_eq!(
+            GraphCompiler::evidence(bypass_artifact.graph(), bypass_artifact.report())
                 .canonical_bytes,
             expected_canonical_bytes
         );
-        assert!(bypass_artifact.graph.route_timings.iter().all(|route| {
+        assert!(bypass_artifact.graph().route_timings.iter().all(|route| {
             route.source_arrival == LatencySamples(0)
                 && route.compensation_delay == LatencySamples(0)
                 && route.destination_arrival == LatencySamples(0)
@@ -12211,7 +12180,7 @@ mod tests {
         constrained_caps.maximum_plan_bytes = minimum_plan_bytes
             .checked_sub(1)
             .expect("nonzero full graph plan estimate");
-        let cap_failure = match GraphCompiler::compile(GraphCompileRequest {
+        let cap_failure = match compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_083,
             effects: cap_effects,
@@ -12288,14 +12257,14 @@ mod tests {
         let scalar_effects =
             prepare_native_session_effects(&session, &scalar_registry, effect_caps)
                 .expect("prepared scalar soft-clip effects");
-        let artifact = GraphCompiler::compile(GraphCompileRequest {
+        let artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_100,
             effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("soft-clip graph: {:?}", failure.diagnostics));
-        let scalar_artifact = GraphCompiler::compile(GraphCompileRequest {
+        let scalar_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_101,
             effects: scalar_effects,
@@ -12303,15 +12272,15 @@ mod tests {
         })
         .unwrap_or_else(|failure| panic!("scalar soft-clip graph: {:?}", failure.diagnostics));
 
-        let width = BankWidth::for_backend(artifact.report.rack_cohorts.dispatch);
+        let width = BankWidth::for_backend(artifact.report().rack_cohorts.dispatch);
         let (expected_banks, expected_scalar_tails) = width.map_or((0, 10), |width| {
             let lanes = width.lanes() as usize;
             (10 / lanes, 10 % lanes)
         });
-        assert_eq!(artifact.graph.prepared_bank_count(), expected_banks);
+        assert_eq!(artifact.graph().prepared_bank_count(), expected_banks);
         assert_eq!(
             artifact
-                .report
+                .report()
                 .rack_cohorts
                 .bound_groups_in(RackLocation::Simd1)
                 .count(),
@@ -12319,14 +12288,14 @@ mod tests {
         );
         assert_eq!(
             artifact
-                .report
+                .report()
                 .rack_cohorts
                 .scalar_in(RackLocation::Simd1)
                 .len(),
             expected_scalar_tails
         );
         let actual_members = artifact
-            .report
+            .report()
             .rack_cohorts
             .bound_groups_in(RackLocation::Simd1)
             .map(|bank| {
@@ -12351,7 +12320,7 @@ mod tests {
         let tail_start = expected_banks * width.map_or(1, |width| width.lanes() as usize);
         assert_eq!(
             artifact
-                .report
+                .report()
                 .rack_cohorts
                 .scalar_in(RackLocation::Simd1)
                 .iter()
@@ -12362,7 +12331,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             "stable scalar-tail order"
         );
-        assert_eq!(scalar_artifact.graph.prepared_bank_count(), 0);
+        assert_eq!(scalar_artifact.graph().prepared_bank_count(), 0);
 
         let lanes = width.map_or(0_u64, |width| u64::from(width.lanes()));
         let bank_count = u64::try_from(expected_banks).expect("bank count");
@@ -12375,7 +12344,7 @@ mod tests {
                 .expect("bank metadata size")
                 + lanes)
             + artifact
-                .report
+                .report()
                 .rack_cohorts
                 .bound_groups_in(RackLocation::Simd1)
                 .flat_map(|bank| bank.members.iter().flatten())
@@ -12386,102 +12355,71 @@ mod tests {
                         + u64::try_from("soft-clip".len()).expect("effect ID bytes")
                 })
                 .sum::<u64>();
-        assert_eq!(artifact.report.estimate.effect_bank_count, bank_count);
+        assert_eq!(artifact.report().estimate.effect_bank_count, bank_count);
         assert_eq!(
-            artifact.report.estimate.effect_bank_scratch_bytes,
+            artifact.report().estimate.effect_bank_scratch_bytes,
             expected_bank_scratch_bytes
         );
         assert_eq!(
-            artifact.report.estimate.effect_bank_runtime_buffer_bytes,
+            artifact.report().estimate.effect_bank_runtime_buffer_bytes,
             expected_bank_runtime_buffer_bytes
         );
         assert_eq!(
-            artifact.report.estimate.effect_bank_metadata_bytes,
+            artifact.report().estimate.effect_bank_metadata_bytes,
             expected_bank_metadata_bytes
         );
-        assert_eq!(scalar_artifact.report.estimate.effect_bank_count, 0);
+        assert_eq!(scalar_artifact.report().estimate.effect_bank_count, 0);
         assert_eq!(
-            artifact.report.estimate.incremental_plan_bytes,
-            scalar_artifact.report.estimate.incremental_plan_bytes
+            artifact.report().estimate.incremental_plan_bytes,
+            scalar_artifact.report().estimate.incremental_plan_bytes
                 + expected_bank_scratch_bytes
                 + expected_bank_runtime_buffer_bytes
                 + expected_bank_metadata_bytes
                 + expected_bank_slot_bytes
         );
         assert_eq!(
-            artifact.report.estimate.session_plus_plan_bytes,
-            scalar_artifact.report.estimate.session_plus_plan_bytes
+            artifact.report().estimate.session_plus_plan_bytes,
+            scalar_artifact.report().estimate.session_plus_plan_bytes
                 + expected_bank_scratch_bytes
                 + expected_bank_runtime_buffer_bytes
                 + expected_bank_metadata_bytes
                 + expected_bank_slot_bytes
         );
         assert_eq!(
-            artifact.graph.sequential_schedule,
-            scalar_artifact.graph.sequential_schedule
+            artifact.graph().sequential_schedule,
+            scalar_artifact.graph().sequential_schedule
         );
         assert_eq!(
-            artifact.graph.route_timings,
-            scalar_artifact.graph.route_timings
+            artifact.graph().route_timings,
+            scalar_artifact.graph().route_timings
         );
         assert_eq!(
-            artifact.graph.inserted_delays,
-            scalar_artifact.graph.inserted_delays
+            artifact.graph().inserted_delays,
+            scalar_artifact.graph().inserted_delays
         );
         assert_eq!(
-            GraphCompiler::evidence(&artifact.graph, &artifact.report).canonical_bytes,
-            GraphCompiler::evidence(&scalar_artifact.graph, &scalar_artifact.report)
+            GraphCompiler::evidence(artifact.graph(), artifact.report()).canonical_bytes,
+            GraphCompiler::evidence(scalar_artifact.graph(), scalar_artifact.report())
                 .canonical_bytes
         );
-        assert!(artifact.graph.route_timings.iter().all(|route| {
+        assert!(artifact.graph().route_timings.iter().all(|route| {
             route.source_arrival == LatencySamples(31)
                 && route.compensation_delay == LatencySamples(0)
                 && route.destination_arrival == LatencySamples(31)
         }));
-        let expected_schedule = artifact.graph.sequential_schedule.clone();
-        let expected_route_timings = artifact.graph.route_timings.clone();
-        let expected_delays = artifact.graph.inserted_delays.clone();
-        let expected_canonical_bytes = GraphCompiler::evidence(&artifact.graph, &artifact.report)
+        let expected_schedule = artifact.graph().sequential_schedule.clone();
+        let expected_route_timings = artifact.graph().route_timings.clone();
+        let expected_delays = artifact.graph().inserted_delays.clone();
+        let expected_canonical_bytes = GraphCompiler::evidence(artifact.graph(), artifact.report())
             .canonical_bytes
             .clone();
-        let minimum_plan_bytes = artifact.report.estimate.incremental_plan_bytes;
+        let minimum_plan_bytes = artifact.report().estimate.incremental_plan_bytes;
 
-        let PreparedGraphArtifact {
-            pool_classes: _,
-            graph: bank_graph,
-            ..
-        } = artifact;
-        let PreparedGraphArtifact {
-            pool_classes: _,
-            graph: scalar_graph,
-            ..
-        } = scalar_artifact;
-        let envelope = bank_graph.envelope;
+        let envelope = artifact.envelope();
         let frames = envelope.quantum.0 as usize;
-        let bank_nodes = bank_graph
-            .required_bindings
-            .iter()
-            .map(|node| GraphNodeBinding::new(node.clone(), soft_clip_input_binding(node)))
-            .collect();
-        let scalar_nodes = scalar_graph
-            .required_bindings
-            .iter()
-            .map(|node| GraphNodeBinding::new(node.clone(), soft_clip_input_binding(node)))
-            .collect();
-        let mut bank_plan = bank_graph
-            .bind(GraphRuntimeBindings {
-                envelope,
-                nodes: bank_nodes,
-                observers: Vec::new(),
-            })
-            .unwrap_or_else(|failure| panic!("soft-clip bank bind: {}", failure.code));
-        let mut scalar_plan = scalar_graph
-            .bind(GraphRuntimeBindings {
-                envelope,
-                nodes: scalar_nodes,
-                observers: Vec::new(),
-            })
-            .unwrap_or_else(|failure| panic!("soft-clip scalar bind: {}", failure.code));
+        let mut bank_plan = bind_session_builtins(artifact, soft_clip_input_binding, Vec::new());
+        let mut scalar_plan =
+            bind_session_builtins(scalar_artifact, soft_clip_input_binding, Vec::new());
         for block in 0..2_u64 {
             let mut bank_pcm = vec![0.0_f32; frames * 2];
             let mut scalar_pcm = vec![0.0_f32; frames * 2];
@@ -12569,23 +12507,32 @@ mod tests {
             entry.metadata.latency == LatencySamples(31)
                 && entry.metadata.tail == TailSamples::Finite(29)
         }));
-        let bypass_artifact = GraphCompiler::compile(GraphCompileRequest {
+        let bypass_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_102,
             effects: bypass_effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("bypass soft-clip graph: {:?}", failure.diagnostics));
-        assert_eq!(bypass_artifact.graph.prepared_bank_count(), expected_banks);
-        assert_eq!(bypass_artifact.graph.sequential_schedule, expected_schedule);
-        assert_eq!(bypass_artifact.graph.route_timings, expected_route_timings);
-        assert_eq!(bypass_artifact.graph.inserted_delays, expected_delays);
         assert_eq!(
-            GraphCompiler::evidence(&bypass_artifact.graph, &bypass_artifact.report)
+            bypass_artifact.graph().prepared_bank_count(),
+            expected_banks
+        );
+        assert_eq!(
+            bypass_artifact.graph().sequential_schedule,
+            expected_schedule
+        );
+        assert_eq!(
+            bypass_artifact.graph().route_timings,
+            expected_route_timings
+        );
+        assert_eq!(bypass_artifact.graph().inserted_delays, expected_delays);
+        assert_eq!(
+            GraphCompiler::evidence(bypass_artifact.graph(), bypass_artifact.report())
                 .canonical_bytes,
             expected_canonical_bytes
         );
-        assert!(bypass_artifact.graph.route_timings.iter().all(|route| {
+        assert!(bypass_artifact.graph().route_timings.iter().all(|route| {
             route.source_arrival == LatencySamples(31)
                 && route.compensation_delay == LatencySamples(0)
                 && route.destination_arrival == LatencySamples(31)
@@ -12597,7 +12544,7 @@ mod tests {
         constrained_caps.maximum_plan_bytes = minimum_plan_bytes
             .checked_sub(1)
             .expect("nonzero full graph plan estimate");
-        let cap_failure = match GraphCompiler::compile(GraphCompileRequest {
+        let cap_failure = match compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_103,
             effects: cap_effects,
@@ -12672,14 +12619,14 @@ mod tests {
         let scalar_effects =
             prepare_native_session_effects(&session, &scalar_registry, effect_caps)
                 .expect("prepared scalar transient-shaper effects");
-        let artifact = GraphCompiler::compile(GraphCompileRequest {
+        let artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_120,
             effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("transient-shaper graph: {:?}", failure.diagnostics));
-        let scalar_artifact = GraphCompiler::compile(GraphCompileRequest {
+        let scalar_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_121,
             effects: scalar_effects,
@@ -12689,15 +12636,15 @@ mod tests {
             panic!("scalar transient-shaper graph: {:?}", failure.diagnostics)
         });
 
-        let width = BankWidth::for_backend(artifact.report.rack_cohorts.dispatch);
+        let width = BankWidth::for_backend(artifact.report().rack_cohorts.dispatch);
         let (expected_banks, expected_scalar_tails) = width.map_or((0, 10), |width| {
             let lanes = width.lanes() as usize;
             (10 / lanes, 10 % lanes)
         });
-        assert_eq!(artifact.graph.prepared_bank_count(), expected_banks);
+        assert_eq!(artifact.graph().prepared_bank_count(), expected_banks);
         assert_eq!(
             artifact
-                .report
+                .report()
                 .rack_cohorts
                 .bound_groups_in(RackLocation::Simd1)
                 .count(),
@@ -12705,14 +12652,14 @@ mod tests {
         );
         assert_eq!(
             artifact
-                .report
+                .report()
                 .rack_cohorts
                 .scalar_in(RackLocation::Simd1)
                 .len(),
             expected_scalar_tails
         );
         let actual_members = artifact
-            .report
+            .report()
             .rack_cohorts
             .bound_groups_in(RackLocation::Simd1)
             .map(|bank| {
@@ -12737,7 +12684,7 @@ mod tests {
         let tail_start = expected_banks * width.map_or(1, |width| width.lanes() as usize);
         assert_eq!(
             artifact
-                .report
+                .report()
                 .rack_cohorts
                 .scalar_in(RackLocation::Simd1)
                 .iter()
@@ -12748,7 +12695,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             "stable scalar-tail order"
         );
-        assert_eq!(scalar_artifact.graph.prepared_bank_count(), 0);
+        assert_eq!(scalar_artifact.graph().prepared_bank_count(), 0);
 
         let lanes = width.map_or(0_u64, |width| u64::from(width.lanes()));
         let bank_count = u64::try_from(expected_banks).expect("bank count");
@@ -12761,7 +12708,7 @@ mod tests {
                 .expect("bank metadata size")
                 + lanes)
             + artifact
-                .report
+                .report()
                 .rack_cohorts
                 .bound_groups_in(RackLocation::Simd1)
                 .flat_map(|bank| bank.members.iter().flatten())
@@ -12772,98 +12719,68 @@ mod tests {
                         + u64::try_from("transient-shaper".len()).expect("effect ID bytes")
                 })
                 .sum::<u64>();
-        assert_eq!(artifact.report.estimate.effect_bank_count, bank_count);
+        assert_eq!(artifact.report().estimate.effect_bank_count, bank_count);
         assert_eq!(
-            artifact.report.estimate.effect_bank_scratch_bytes,
+            artifact.report().estimate.effect_bank_scratch_bytes,
             expected_bank_scratch_bytes
         );
         assert_eq!(
-            artifact.report.estimate.effect_bank_runtime_buffer_bytes,
+            artifact.report().estimate.effect_bank_runtime_buffer_bytes,
             expected_bank_runtime_buffer_bytes
         );
         assert_eq!(
-            artifact.report.estimate.effect_bank_metadata_bytes,
+            artifact.report().estimate.effect_bank_metadata_bytes,
             expected_bank_metadata_bytes
         );
-        assert_eq!(scalar_artifact.report.estimate.effect_bank_count, 0);
+        assert_eq!(scalar_artifact.report().estimate.effect_bank_count, 0);
         let bank_overhead = expected_bank_scratch_bytes
             + expected_bank_runtime_buffer_bytes
             + expected_bank_metadata_bytes
             + expected_bank_slot_bytes;
         assert_eq!(
-            artifact.report.estimate.incremental_plan_bytes,
-            scalar_artifact.report.estimate.incremental_plan_bytes + bank_overhead
+            artifact.report().estimate.incremental_plan_bytes,
+            scalar_artifact.report().estimate.incremental_plan_bytes + bank_overhead
         );
         assert_eq!(
-            artifact.report.estimate.session_plus_plan_bytes,
-            scalar_artifact.report.estimate.session_plus_plan_bytes + bank_overhead
+            artifact.report().estimate.session_plus_plan_bytes,
+            scalar_artifact.report().estimate.session_plus_plan_bytes + bank_overhead
         );
         assert_eq!(
-            artifact.graph.sequential_schedule,
-            scalar_artifact.graph.sequential_schedule
+            artifact.graph().sequential_schedule,
+            scalar_artifact.graph().sequential_schedule
         );
         assert_eq!(
-            artifact.graph.route_timings,
-            scalar_artifact.graph.route_timings
+            artifact.graph().route_timings,
+            scalar_artifact.graph().route_timings
         );
         assert_eq!(
-            artifact.graph.inserted_delays,
-            scalar_artifact.graph.inserted_delays
+            artifact.graph().inserted_delays,
+            scalar_artifact.graph().inserted_delays
         );
         assert_eq!(
-            GraphCompiler::evidence(&artifact.graph, &artifact.report).canonical_bytes,
-            GraphCompiler::evidence(&scalar_artifact.graph, &scalar_artifact.report)
+            GraphCompiler::evidence(artifact.graph(), artifact.report()).canonical_bytes,
+            GraphCompiler::evidence(scalar_artifact.graph(), scalar_artifact.report())
                 .canonical_bytes
         );
-        assert!(artifact.graph.route_timings.iter().all(|route| {
+        assert!(artifact.graph().route_timings.iter().all(|route| {
             route.source_arrival == LatencySamples(0)
                 && route.compensation_delay == LatencySamples(0)
                 && route.destination_arrival == LatencySamples(0)
         }));
-        let expected_schedule = artifact.graph.sequential_schedule.clone();
-        let expected_route_timings = artifact.graph.route_timings.clone();
-        let expected_delays = artifact.graph.inserted_delays.clone();
-        let expected_canonical_bytes = GraphCompiler::evidence(&artifact.graph, &artifact.report)
+        let expected_schedule = artifact.graph().sequential_schedule.clone();
+        let expected_route_timings = artifact.graph().route_timings.clone();
+        let expected_delays = artifact.graph().inserted_delays.clone();
+        let expected_canonical_bytes = GraphCompiler::evidence(artifact.graph(), artifact.report())
             .canonical_bytes
             .clone();
-        let minimum_plan_bytes = artifact.report.estimate.incremental_plan_bytes;
+        let minimum_plan_bytes = artifact.report().estimate.incremental_plan_bytes;
 
-        let PreparedGraphArtifact {
-            pool_classes: _,
-            graph: bank_graph,
-            ..
-        } = artifact;
-        let PreparedGraphArtifact {
-            pool_classes: _,
-            graph: scalar_graph,
-            ..
-        } = scalar_artifact;
-        let envelope = bank_graph.envelope;
+        let envelope = artifact.envelope();
         let frames = envelope.quantum.0 as usize;
-        let bank_nodes = bank_graph
-            .required_bindings
-            .iter()
-            .map(|node| GraphNodeBinding::new(node.clone(), transient_shaper_input_binding(node)))
-            .collect();
-        let scalar_nodes = scalar_graph
-            .required_bindings
-            .iter()
-            .map(|node| GraphNodeBinding::new(node.clone(), transient_shaper_input_binding(node)))
-            .collect();
-        let mut bank_plan = bank_graph
-            .bind(GraphRuntimeBindings {
-                envelope,
-                nodes: bank_nodes,
-                observers: Vec::new(),
-            })
-            .unwrap_or_else(|failure| panic!("transient bank bind: {}", failure.code));
-        let mut scalar_plan = scalar_graph
-            .bind(GraphRuntimeBindings {
-                envelope,
-                nodes: scalar_nodes,
-                observers: Vec::new(),
-            })
-            .unwrap_or_else(|failure| panic!("transient scalar bind: {}", failure.code));
+        let mut bank_plan =
+            bind_session_builtins(artifact, transient_shaper_input_binding, Vec::new());
+        let mut scalar_plan =
+            bind_session_builtins(scalar_artifact, transient_shaper_input_binding, Vec::new());
         for block in 0..2_u64 {
             let mut bank_pcm = vec![0.0_f32; frames * 2];
             let mut scalar_pcm = vec![0.0_f32; frames * 2];
@@ -12924,7 +12841,7 @@ mod tests {
         let bypass_effects =
             prepare_native_session_effects(&bypass_session, &registry, effect_caps)
                 .expect("prepared bypass transient-shaper effects");
-        let bypass_artifact = GraphCompiler::compile(GraphCompileRequest {
+        let bypass_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_122,
             effects: bypass_effects,
@@ -12933,16 +12850,25 @@ mod tests {
         .unwrap_or_else(|failure| {
             panic!("bypass transient-shaper graph: {:?}", failure.diagnostics)
         });
-        assert_eq!(bypass_artifact.graph.prepared_bank_count(), expected_banks);
-        assert_eq!(bypass_artifact.graph.sequential_schedule, expected_schedule);
-        assert_eq!(bypass_artifact.graph.route_timings, expected_route_timings);
-        assert_eq!(bypass_artifact.graph.inserted_delays, expected_delays);
         assert_eq!(
-            GraphCompiler::evidence(&bypass_artifact.graph, &bypass_artifact.report)
+            bypass_artifact.graph().prepared_bank_count(),
+            expected_banks
+        );
+        assert_eq!(
+            bypass_artifact.graph().sequential_schedule,
+            expected_schedule
+        );
+        assert_eq!(
+            bypass_artifact.graph().route_timings,
+            expected_route_timings
+        );
+        assert_eq!(bypass_artifact.graph().inserted_delays, expected_delays);
+        assert_eq!(
+            GraphCompiler::evidence(bypass_artifact.graph(), bypass_artifact.report())
                 .canonical_bytes,
             expected_canonical_bytes
         );
-        assert!(bypass_artifact.graph.route_timings.iter().all(|route| {
+        assert!(bypass_artifact.graph().route_timings.iter().all(|route| {
             route.source_arrival == LatencySamples(0)
                 && route.compensation_delay == LatencySamples(0)
                 && route.destination_arrival == LatencySamples(0)
@@ -12954,7 +12880,7 @@ mod tests {
         constrained_caps.maximum_plan_bytes = minimum_plan_bytes
             .checked_sub(1)
             .expect("nonzero full graph plan estimate");
-        let cap_failure = match GraphCompiler::compile(GraphCompileRequest {
+        let cap_failure = match compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_123,
             effects: cap_effects,
@@ -13027,19 +12953,19 @@ mod tests {
                 && matches!(entry.metadata.ports.sidechain, PreparedSidechainPort::None)
         }));
 
-        let artifact = GraphCompiler::compile(GraphCompileRequest {
+        let artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_130,
             effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("delay graph: {:?}", failure.diagnostics));
-        assert_eq!(artifact.graph.prepared_bank_count(), 0);
+        assert_eq!(artifact.graph().prepared_bank_count(), 0);
         // Every delay lives in the dynamic rack, so neither SIMD rack has a candidate at all: the
         // planner sees an empty pool and produces no groups and no scalar members.
         for rack in [RackLocation::Simd1, RackLocation::Simd2] {
-            assert_eq!(artifact.report.rack_cohorts.groups_in(rack).count(), 0);
-            assert!(artifact.report.rack_cohorts.scalar_in(rack).is_empty());
+            assert_eq!(artifact.report().rack_cohorts.groups_in(rack).count(), 0);
+            assert!(artifact.report().rack_cohorts.scalar_in(rack).is_empty());
         }
         // The dynamic rack *is* a bank location now, so this fixture is the gate on the thing that
         // actually disqualifies a bank: the kernel contract, not the rack. Ten identical
@@ -13050,7 +12976,7 @@ mod tests {
         // `scalar_in(Dynamic)` below both move.
         assert!(
             artifact
-                .report
+                .report()
                 .rack_cohorts
                 .groups_in(RackLocation::Dynamic)
                 .count()
@@ -13059,7 +12985,7 @@ mod tests {
         );
         assert_eq!(
             artifact
-                .report
+                .report()
                 .rack_cohorts
                 .bound_slots_in(RackLocation::Dynamic)
                 .count(),
@@ -13068,23 +12994,26 @@ mod tests {
         );
         assert_eq!(
             artifact
-                .report
+                .report()
                 .rack_cohorts
                 .scalar_in(RackLocation::Dynamic)
                 .len(),
             10,
             "every delay stays on the per-node path"
         );
-        assert_eq!(artifact.report.estimate.effect_bank_count, 0);
-        assert_eq!(artifact.report.estimate.effect_bank_scratch_bytes, 0);
-        assert_eq!(artifact.report.estimate.effect_bank_runtime_buffer_bytes, 0);
-        assert_eq!(artifact.report.estimate.effect_bank_metadata_bytes, 0);
-        assert_eq!(artifact.report.estimate.effects, 10);
-        assert_eq!(artifact.report.estimate.declared_effect_bytes, 7_682_040);
-        assert_eq!(artifact.report.output_latency, LatencySamples(0));
-        assert_eq!(artifact.report.output_tail, TailSamples::Infinite);
+        assert_eq!(artifact.report().estimate.effect_bank_count, 0);
+        assert_eq!(artifact.report().estimate.effect_bank_scratch_bytes, 0);
+        assert_eq!(
+            artifact.report().estimate.effect_bank_runtime_buffer_bytes,
+            0
+        );
+        assert_eq!(artifact.report().estimate.effect_bank_metadata_bytes, 0);
+        assert_eq!(artifact.report().estimate.effects, 10);
+        assert_eq!(artifact.report().estimate.declared_effect_bytes, 7_682_040);
+        assert_eq!(artifact.report().output_latency, LatencySamples(0));
+        assert_eq!(artifact.report().output_tail, TailSamples::Infinite);
         let effect_nodes = artifact
-            .graph
+            .graph()
             .spec
             .nodes
             .iter()
@@ -13096,14 +13025,14 @@ mod tests {
                 && node.tail == TailSamples::Infinite
                 && matches!(&node.id, GraphNodeId::Effect(id) if id.rack == RackId::Dynamic)
         }));
-        assert!(artifact.graph.route_timings.iter().all(|route| {
+        assert!(artifact.graph().route_timings.iter().all(|route| {
             route.source_arrival == LatencySamples(0)
                 && route.compensation_delay == LatencySamples(0)
                 && route.destination_arrival == LatencySamples(0)
         }));
-        assert!(artifact.graph.inserted_delays.is_empty());
+        assert!(artifact.graph().inserted_delays.is_empty());
         let dynamic_order = artifact
-            .graph
+            .graph()
             .sequential_schedule
             .iter()
             .filter_map(|node| match node {
@@ -13119,29 +13048,16 @@ mod tests {
                 .map(|index| format!("eq{index}"))
                 .collect::<Vec<_>>()
         );
-        let expected_schedule = artifact.graph.sequential_schedule.clone();
-        let expected_route_timings = artifact.graph.route_timings.clone();
-        let expected_delays = artifact.graph.inserted_delays.clone();
-        let expected_canonical = GraphCompiler::evidence(&artifact.graph, &artifact.report)
+        let expected_schedule = artifact.graph().sequential_schedule.clone();
+        let expected_route_timings = artifact.graph().route_timings.clone();
+        let expected_delays = artifact.graph().inserted_delays.clone();
+        let expected_canonical = GraphCompiler::evidence(artifact.graph(), artifact.report())
             .canonical_bytes
             .clone();
-        let minimum_plan_bytes = artifact.report.estimate.incremental_plan_bytes;
+        let minimum_plan_bytes = artifact.report().estimate.incremental_plan_bytes;
 
-        let PreparedGraphArtifact { graph, .. } = artifact;
-        let envelope = graph.envelope;
-        let frames = envelope.quantum.0 as usize;
-        let nodes = graph
-            .required_bindings
-            .iter()
-            .map(|node| GraphNodeBinding::new(node.clone(), delay_input_binding(node)))
-            .collect();
-        let mut plan = graph
-            .bind(GraphRuntimeBindings {
-                envelope,
-                nodes,
-                observers: Vec::new(),
-            })
-            .unwrap_or_else(|failure| panic!("delay bind: {}", failure.code));
+        let frames = artifact.envelope().quantum.0 as usize;
+        let mut plan = bind_session_builtins(artifact, delay_input_binding, Vec::new());
         assert_eq!(
             direct
                 .entries
@@ -13275,19 +13191,19 @@ mod tests {
         let bypass_effects =
             prepare_native_session_effects(&bypass_session, &registry, effect_caps)
                 .expect("prepared bypass delays");
-        let bypass = GraphCompiler::compile(GraphCompileRequest {
+        let bypass = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_131,
             effects: bypass_effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("bypass delay graph: {:?}", failure.diagnostics));
-        assert_eq!(bypass.graph.prepared_bank_count(), 0);
-        assert_eq!(bypass.graph.sequential_schedule, expected_schedule);
-        assert_eq!(bypass.graph.route_timings, expected_route_timings);
-        assert_eq!(bypass.graph.inserted_delays, expected_delays);
+        assert_eq!(bypass.graph().prepared_bank_count(), 0);
+        assert_eq!(bypass.graph().sequential_schedule, expected_schedule);
+        assert_eq!(bypass.graph().route_timings, expected_route_timings);
+        assert_eq!(bypass.graph().inserted_delays, expected_delays);
         assert_eq!(
-            GraphCompiler::evidence(&bypass.graph, &bypass.report).canonical_bytes,
+            GraphCompiler::evidence(bypass.graph(), bypass.report()).canonical_bytes,
             expected_canonical
         );
 
@@ -13297,7 +13213,7 @@ mod tests {
         constrained.maximum_plan_bytes = minimum_plan_bytes
             .checked_sub(1)
             .expect("nonzero delay plan estimate");
-        let failure = match GraphCompiler::compile(GraphCompileRequest {
+        let failure = match compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_132,
             effects: cap_effects,
@@ -13361,8 +13277,11 @@ mod tests {
         assert_eq!(artifact.report().output_tail, TailSamples::Infinite);
         // Issue #925: with builtins the three stages are compiler-owned bindings, listed in
         // `required_bindings`, and each keeps its op -- a builtin bank member or a scalar owner
-        // has to run. The same session compiled without builtins lists none of them and lowers
-        // `Input -> Route -> Output` (`accepted_session_compiles_binds_and_renders_direct_route`).
+        // has to run. Every other stage boundary lowers as an alias, so the ops are exactly these.
+        //
+        // #964 deleted this test's builtins-less arm, which pinned that the same session compiled
+        // without builtins listed none of the three and lowered `Input -> Route -> Output`. That
+        // compile is gone, and the elision it pinned goes with it (#958).
         let track = |stage| track_node("vocal", stage);
         let program = artifact.graph().program().expect("lowers");
         let op_nodes: Vec<&GraphNodeId> = program
@@ -13392,14 +13311,6 @@ mod tests {
         ] {
             assert!(artifact.graph().required_bindings.contains(&track(stage)));
         }
-        let builtins_less = compile_fixture(78);
-        let program = builtins_less.graph.program().expect("lowers");
-        let op_nodes: Vec<&GraphNodeId> = program
-            .ops
-            .iter()
-            .map(|op| &builtins_less.graph.spec.nodes[op.node as usize].id)
-            .collect();
-        assert_eq!(op_nodes, vec![&track(TrackStage::Input), &route, &output]);
         let tail = artifact
             .graph()
             .spec
@@ -13673,16 +13584,6 @@ mod tests {
             },
         )
         .expect("compiled cap session");
-        let base = GraphCompiler::compile(GraphCompileRequest {
-            dispatch: host_dispatch(),
-            plan_id: 79,
-            effects: EffectPreparedSession {
-                session: session.clone(),
-                entries: Vec::new(),
-            },
-            caps: integration_caps(),
-        })
-        .unwrap_or_else(|failure| panic!("base graph: {:?}", failure.diagnostics));
         let baseline_builtins = prepare_session_builtins(
             &session,
             &[],
@@ -13710,13 +13611,15 @@ mod tests {
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("baseline bank graph: {:?}", failure.diagnostics));
+        // The graph's own samples, before the builtin banks attach their scratch: the report's
+        // estimate. #964: a builtins-less compile of the same session supplied this figure, and
+        // published exactly the same one; that compile is gone.
+        let pre_attachment_samples = baseline.report().estimate.audio_buffer_samples;
         let final_samples = baseline.graph_resource_estimate().audio_buffer_samples;
-        assert!(final_samples > base.report.estimate.audio_buffer_samples);
+        assert!(final_samples > pre_attachment_samples);
         let mut constrained = integration_caps();
         constrained.maximum_audio_buffer_samples = final_samples - 1;
-        assert!(
-            base.report.estimate.audio_buffer_samples <= constrained.maximum_audio_buffer_samples
-        );
+        assert!(pre_attachment_samples <= constrained.maximum_audio_buffer_samples);
         let builtins = prepare_session_builtins(
             &session,
             &[],
@@ -14484,7 +14387,7 @@ mod tests {
     #[test]
     fn level_major_compiler_coloring_matches_independent_live_intervals() {
         let artifact = compile_reverse_route_submix_fixture(123_200);
-        let report = &artifact.graph;
+        let report = &artifact.graph();
         let flattened: Vec<_> = report
             .dependency_levels
             .iter()
@@ -14566,14 +14469,14 @@ mod tests {
     #[test]
     fn accepted_session_compiles_binds_and_renders_direct_route() {
         let artifact = compile_fixture(123);
-        assert_eq!(artifact.report.estimate.routes, 1);
-        assert_eq!(artifact.report.estimate.effects, 0);
-        assert_eq!(artifact.report.estimate.reductions, 0);
-        assert!(artifact.report.estimate.audio_buffer_samples > 0);
-        assert!(artifact.report.estimate.graph_metadata_bytes > 0);
-        assert!(artifact.report.estimate.incremental_plan_bytes > 0);
+        assert_eq!(artifact.report().estimate.routes, 1);
+        assert_eq!(artifact.report().estimate.effects, 0);
+        assert_eq!(artifact.report().estimate.reductions, 0);
+        assert!(artifact.report().estimate.audio_buffer_samples > 0);
+        assert!(artifact.report().estimate.graph_metadata_bytes > 0);
+        assert!(artifact.report().estimate.incremental_plan_bytes > 0);
         let assigned: BTreeMap<_, _> = artifact
-            .graph
+            .graph()
             .buffer_assignments
             .iter()
             .map(|assignment| (assignment.port.node.clone(), assignment.buffer_index))
@@ -14593,28 +14496,33 @@ mod tests {
         );
         let colored_buffer_count = assigned.values().copied().max().expect("buffers") + 1;
         assert_eq!(colored_buffer_count, 2);
-        assert!(colored_buffer_count < artifact.report.estimate.logical_nodes);
-        // Issue #925: a builtins-less compile binds the input and the output and nothing else.
-        // Without builtins nothing owns `PostInputBuiltins`, `PostFader` or `PostMatrix`, so they
-        // are left out of the bindable set and lower as aliases of the input's buffer. Only
-        // `compile_with_builtins` lists them; see
-        // `builtins_replace_only_the_three_internal_track_bindings`.
-        assert_eq!(artifact.graph.required_bindings.len(), 2);
-        for stage in [
-            TrackStage::PostInputBuiltins,
-            TrackStage::PostFader,
-            TrackStage::PostMatrix,
-        ] {
-            assert!(
-                !artifact.graph.required_bindings.contains(&track(stage)),
-                "{stage:?} must not be bindable on a builtins-less compile"
-            );
-        }
-        let envelope = artifact.graph.envelope;
+        assert!(colored_buffer_count < artifact.report().estimate.logical_nodes);
+        // The host binds the input and the output and nothing else. The three builtin stages are
+        // bindings too, but the compiler owns them and fills them from the prepared builtins
+        // (`builtins_replace_only_the_three_internal_track_bindings`).
+        //
+        // #964: this pinned #925's builtins-less shape -- `required_bindings` of length two, the
+        // builtin stages unbindable and lowered as aliases -- which went with that compile.
+        let output = GraphNodeId::Output {
+            output_id: gid("main-out"),
+        };
+        assert_eq!(
+            artifact.graph().required_bindings,
+            [
+                track(TrackStage::Input),
+                track(TrackStage::PostInputBuiltins),
+                track(TrackStage::PostFader),
+                track(TrackStage::PostMatrix),
+                output.clone(),
+            ]
+        );
+        assert_eq!(
+            artifact.external_binding_nodes().collect::<Vec<_>>(),
+            [&track(TrackStage::Input), &output]
+        );
+        let envelope = artifact.envelope();
         let nodes = artifact
-            .graph
-            .required_bindings
-            .iter()
+            .external_binding_nodes()
             .cloned()
             .map(|node| {
                 let processor: Box<dyn GraphRuntimeProcessor> = if matches!(
@@ -14631,12 +14539,12 @@ mod tests {
                 GraphNodeBinding::new(node, processor)
             })
             .collect();
-        let mut plan = match artifact.graph.bind(GraphRuntimeBindings {
+        let mut plan = match artifact.into_bound(GraphRuntimeBindings {
             envelope,
             nodes,
             observers: Vec::new(),
         }) {
-            Ok(plan) => plan,
+            Ok(bound) => bound.plan,
             Err(failure) => panic!("bind: {}", failure.code),
         };
         let frames = envelope.quantum.0 as usize;
@@ -14660,7 +14568,7 @@ mod tests {
     fn canonical_artifacts_are_complete_and_repeatable_100_times() {
         let baseline = compile_fixture(0);
         // #99 F5: the evidence is produced here, by an explicit call, not carried by the report.
-        let baseline_evidence = GraphCompiler::evidence(&baseline.graph, &baseline.report);
+        let baseline_evidence = GraphCompiler::evidence(baseline.graph(), baseline.report());
         let canonical = core::str::from_utf8(&baseline_evidence.canonical_bytes).expect("UTF-8");
         for section in [
             "envelope\t",
@@ -14690,26 +14598,29 @@ mod tests {
         // The streaming hash and the materialised one agree: `GraphCompiler::sha256` never builds
         // the text, so this is the gate that keeps the two writers in step.
         assert_eq!(
-            GraphCompiler::sha256(&baseline.graph, &baseline.report),
+            GraphCompiler::sha256(baseline.graph(), baseline.report()),
             baseline_evidence.sha256
         );
         for plan_id in 1..=100 {
             let candidate = compile_fixture(plan_id);
-            let evidence = GraphCompiler::evidence(&candidate.graph, &candidate.report);
+            let evidence = GraphCompiler::evidence(candidate.graph(), candidate.report());
             assert_eq!(evidence.canonical_bytes, baseline_evidence.canonical_bytes);
             assert_eq!(evidence.sha256, baseline_evidence.sha256);
             assert_eq!(
-                candidate.graph.sequential_schedule,
-                baseline.graph.sequential_schedule
+                candidate.graph().sequential_schedule,
+                baseline.graph().sequential_schedule
             );
             assert_eq!(
-                candidate.graph.dependency_levels,
-                baseline.graph.dependency_levels
+                candidate.graph().dependency_levels,
+                baseline.graph().dependency_levels
             );
-            assert_eq!(candidate.graph.route_timings, baseline.graph.route_timings);
             assert_eq!(
-                candidate.graph.buffer_assignments,
-                baseline.graph.buffer_assignments
+                candidate.graph().route_timings,
+                baseline.graph().route_timings
+            );
+            assert_eq!(
+                candidate.graph().buffer_assignments,
+                baseline.graph().buffer_assignments
             );
             assert_eq!(evidence.dot, baseline_evidence.dot);
         }
@@ -14721,6 +14632,10 @@ mod tests {
         let mut model = parse_session_json(SESSION_FIXTURE).expect("session fixture");
         model.tracks[0].dynamic.effects.clear();
         model.automation.clear();
+        // #964: the same identity builtins as `compile_fixture`, so the route gain is the only
+        // difference between the two plans. The fixture's own input filters would change the
+        // post-input tail, and with it the hash, on their own.
+        identity_builtins(&mut model);
         model.routes[0].gain_db = -6.0;
         let session = compile_session(
             &model,
@@ -14734,7 +14649,7 @@ mod tests {
             },
         )
         .expect("session");
-        let changed = GraphCompiler::compile(GraphCompileRequest {
+        let changed = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1,
             effects: EffectPreparedSession {
@@ -14745,12 +14660,12 @@ mod tests {
         })
         .unwrap_or_else(|failure| panic!("graph diagnostics: {:?}", failure.diagnostics));
         assert_ne!(
-            GraphCompiler::sha256(&changed.graph, &changed.report),
-            GraphCompiler::sha256(&baseline.graph, &baseline.report)
+            GraphCompiler::sha256(changed.graph(), changed.report()),
+            GraphCompiler::sha256(baseline.graph(), baseline.report())
         );
         assert_ne!(
-            GraphCompiler::evidence(&changed.graph, &changed.report).canonical_bytes,
-            GraphCompiler::evidence(&baseline.graph, &baseline.report).canonical_bytes
+            GraphCompiler::evidence(changed.graph(), changed.report()).canonical_bytes,
+            GraphCompiler::evidence(baseline.graph(), baseline.report()).canonical_bytes
         );
     }
 
@@ -14778,7 +14693,7 @@ mod tests {
             },
         )
         .expect("session");
-        let compiled = GraphCompiler::compile(GraphCompileRequest {
+        let compiled = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1,
             effects: EffectPreparedSession {
@@ -14789,7 +14704,7 @@ mod tests {
         })
         .unwrap_or_else(|failure| panic!("graph diagnostics: {:?}", failure.diagnostics));
         let gains: Vec<u32> = compiled
-            .graph
+            .graph()
             .routes()
             .iter()
             .map(|route| route.transform.gain.to_bits())
