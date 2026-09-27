@@ -567,3 +567,176 @@ the browser's shape (V8 is).
 - `effect-contract/tests/MUTATIONS.md` does not carry these rows; they are recorded here only.
 - The bank differential drives effects directly with hostile audio (the product's input stage
   would sanitize NaN/inf first) and still matched by bits, so no NaN relaxation is used anywhere.
+
+## Sol attempt 1 verdict: PASS
+
+Sol, 2026-09-27. I judged `56c81e91` merged onto the current batch head `b03edde4`, which adds
+#1000's V8 spill gate and #1001's re-plan change after the branch's base `1010d50c`. The merge is
+clean and was made in scratch only. Every gate below ran on the merged tree. The base for timings
+and digests is `b03edde4`, built separately from a `git archive`. Host AMD EPYC 7313P,
+`CARGO_INCREMENTAL=0`, Node 22.23.2. Nothing was pushed, and all scratch and target directories
+were deleted.
+
+The answer to the standing question is **no**. An ack cannot precede a drop, and an
+acknowledged edit is neither rendered wrong nor lost:
+
+* The diff does not touch admission (`host-web`, `host-core` and `effect-compiler`), the queue,
+  staging, the target FIFO or `dropped`.
+* The deferral holds only a `Copy` of the record, and only for the witness. The record itself is
+  staged in the same loop iteration, exactly as before.
+* No path leaves `stage` between the loop and the fold, so a held fold cannot be skipped at a
+  drain end. Nothing is carried across calls, so a plan swap or a teardown has nothing held to lose.
+* Deferring the fold cannot reorder anything. `Desymmetrize` only clears `LIVE`, and `Bypass` only
+  writes `UNBYPASSED`, so the witness events commute. Reset and restore are not queue records, and
+  the rack reads the witness only after `stage` returns.
+
+Soundness then rests on symmetric application. I read the compressor's and the limiter's
+`apply_automation`, the per-lane slicing of the offsets, and both staging constructors (`rack`
+`ConsoleEffectBankStage::new` and `graph` `ConsoleEffect::new`). Both constructors size the window
+to `automation_capacity`.
+
+### Reproduced
+
+* **My own drain-model fuzz** (scratch, not committed).
+  * An independent re-implementation of the pre-#1004 drain, plus a final-value pairing model.
+    With the base rule, the reference matches the base tree exactly over 449k drains.
+  * On the merge: 3M runs and 13.5M drains in release, 1.73M of them kept by the rule.
+  * The inputs vary widely:
+    * queue depth 1-24;
+    * windows smaller than, equal to and larger than the queue, so drops are reachable;
+    * 1-6 parameters and 1-8 drains per run;
+    * values `1`, `2`, `±0` and two NaN payloads;
+    * pairs in either order, last-wins shapes and the F1 shape;
+    * `Bypass`, `Observe`, and targets on both owner kinds.
+  * Every output matched the reference exactly: spans, the target FIFO, `dropped`, `unbound`,
+    `target_error`, bypass, and the whole witness byte.
+  * Whenever `LIVE` held, a channel-state model with compressor and limiter validity held both
+    channels bit-equal.
+* **My own rendered fuzz.** It runs on the implementer's rig over real banks: the production
+  `ConsoleEffectBankStage` in a `BankChain`, collapsed against forced dual. Every block compares
+  output, reports and state.
+  * 3,000 scenarios in release and 750 in dev.
+  * Effect sets: compressor, limiter, EQ + compressor + limiter, and compressor + limiter.
+  * Widths: W8, plus W4 for the limiter.
+  * Link modes: the compressor at DualMono, Maximum and Average; the limiter at Maximum and
+    DualMono.
+  * Writes: random pairs, last-wins, `Both` beside a pair, lone halves, near-pairs, split pairs,
+    resets, capture and restore, and hostile audio.
+  * Every block matched. Collapse on each block equalled the model: 1,464 scenarios kept the
+    collapse throughout and 1,536 retired it.
+* **My own fuzz through the product path.** It runs the shipped `host_web.wasm`, base against
+  change, and compares output bits after every block.
+  * 2,300 seeds and 238k commands.
+  * The streams include the F1 order on the EQ, as one submission and as three, bypass toggles,
+    and submissions that set several parameters.
+  * 0 mismatches and 0 refusals.
+* **Mutations.** The rendered fuzz and the web fuzz both go red, with wrong audio or a collapse
+  while the reference's channels disagree, on:
+  * M1 (the value is ignored);
+  * M6 (a `Right` span is accepted with no `Left`).
+* **Gate 3b through `host_web.wasm`.** All 12 P1BREAK digests equal base's. They also equal the
+  implementer's and the verifier's digests (`39d2dc01`, `4a47ef63`, `59aefc46`, …). `DIGEST=150`
+  over 5 subjects × 7 arms prints "all identical".
+* **Tests.** In dev, 572 passed, 0 failed and 7 ignored. In release, 573 passed (my fuzz
+  included), 0 failed and 7 ignored. The runs covered `effect-contract`, `host-core`,
+  `effect-compiler`, `host-web` and `console-workload`. The pinned `9242f149…` still holds on the
+  merge.
+* **The standing digests.** All 17 64-block console digests (`gain_pan_profile digests`) are
+  identical on base and change.
+* **Static checks.** `cargo clippy --workspace --all-targets -- -D warnings` is clean, and
+  `cargo fmt --check` is clean.
+* **`check-web-audioworklet.sh`.** It passes on the delivery-recipe artifact of each build, and
+  the two reports are identical:
+  * render closure 8, 5 traps, one trap owner (`render_inner`);
+  * 14 kernels, `f32x4_arith=13149`;
+  * `meter_poll` and `command_submit` unchanged.
+* **Artifacts.** Base is `9ac37ae7…` at 3,389,816 bytes; the change is `12479f0b…` at 3,390,223
+  bytes (+407).
+* **`run-wasm-gates.sh`** passes: 142 cases, 358 comparisons, 0 mismatches, and #1000's V8 spill
+  gate ok.
+* **Policy scripts.** All of these pass: realtime (57 regions), workspace, effect-contract, rack,
+  env-vocabulary, host-core, effect-runtime, graph, lane, session, protocol-control, builtins,
+  bench, unfused-seal, wasm-realtime-atomics and realtime-audit-leak.
+* **Realtime.** The change allocates nothing: the one new value, `Option<EffectControlRecord>`, is
+  `Copy` and lives on the stack. It takes no lock. `spans_pair` makes one zip pass over at most
+  `automation_capacity` spans, inside the marked region.
+
+### Timings
+
+Every run used one invocation, the shared lock and cpu 31, but the host was heavily loaded: load
+average 26-32 against the implementer's 7-9. cpu 31's SMT sibling was busy, so absolute
+microseconds are about 1.4× the implementer's.
+
+**Native `Simd8`.** Base and change were run ABBA, one process per build per round, 6 rounds of
+800 blocks. The Δ is the median of the paired deltas.
+
+| mono console | base | change | Δ | collapsed blocks, base → change |
+|---|---:|---:|---:|---|
+| quiet | 97.5 | 97.2 | −0.2 % | 6912 → 6912 |
+| compressor written once | 148.9 | 97.4 | −34.4 % | 0 → 6912 |
+| limiter written once | 149.2 | 97.5 | −36.1 % | 0 → 6912 |
+| 8 of 64 | 203.4 | 127.6 | −37.7 % | 0 → 6912 |
+| all 64 | 318.4 | 191.3 | −40.1 % | 0 → 6912 |
+
+On the stereo console, settled, 8 of 64 and all 64 moved by +0.5 %, +0.1 % and +0.1 %.
+
+**V8.** `ROUNDS=6 BLOCKS=500`. The rounds were bimodal under the sibling load, so I give each
+build's minimum next to the paired median.
+
+| row | minimum, base → change | paired median Δ |
+|---|---|---:|
+| mono quiet | 150.2 → 150.7 | +1.5 % |
+| mono, compressor written once | 250.3 → 151.2 | −38.2 % |
+| mono, all three written once | 250.2 → 150.3 | −40.3 % |
+| mono, EQ written once | 150.0 → 149.6 | −0.5 % |
+| mono 8 of 64 | 290.7 → 176.8 | −37.2 % |
+| mono all 64 | 474.3 → 286.0 | −39.1 % |
+| stereo 8 of 64 | 289.4 → 288.0 | −1.6 % |
+| stereo all 64 | — | +0.1 % |
+
+The minima reproduce the implementer's V8 figures within about 2 %. The stereo 2 % bound is met.
+
+### Findings, by severity
+
+1. **Low: the A3 debug assertion is vacuous.**
+   * `debug_assert!(staged <= staging.len())` can never fire, because `staged` is incremented
+     only while it is below `staging.len()`.
+   * So the precondition the pair rests on, `staging.len() <= automation_capacity`, is enforced
+     nowhere. Neither `EffectBankProcessBlock::new` nor `EffectProcessBlock::new` checks a lane's
+     span count against capacity.
+   * Today it holds, because both constructors size the window to the capacity.
+   * **Failure scenario.** A future caller sizes its window to capacity + 1. A drain stages
+     capacity + 1 spans, and the last twin straddles the cut-off: the effect applies `Left p v` at
+     index `capacity − 1` and refuses `Right p v` at index `capacity`. `LIVE` is kept, the
+     collapse renders the left channel's state for the right channel, and the right-channel write
+     is lost when the collapse disengages.
+   * **Fix.** Assert `window == automation_capacity` where both are known, in the two
+     constructors.
+2. **Low: stale prose in `host-core/tests/symmetry_witness.rs`.**
+   `two_per_lane_writes_that_agree_still_decline_the_lane` says:
+   * that a `Left` then a `Right` write to the same value "is how the ABI addresses a `PerLane`
+     parameter";
+   * that the witness "cannot see two writes cancel".
+
+   Both statements are now false for `Parameter` spans. The test still passes only because it
+   drives EQ targets.
+   * **Failure scenario.** A maintainer reads the test as the contract and "restores" the decline
+     for twin spans.
+   * **Fix.** Correct it in a follow-up, since the file is outside this slice's paths.
+3. **Info: the `rack` dev-dependency is acceptable.**
+   * `rack` is already in `console-workload`'s normal dependency closure through `graph`, and
+     `graph/test-support` already enables `rack/test-support` in test builds.
+   * With resolver 3, the dev-dependency therefore adds no crate, version or feature to any build.
+     `Cargo.lock` gains one dependency-list line.
+   * The bench and the wasm guest are unaffected.
+   * Ratify it by adding the two paths to the authorized list.
+4. **Info: an undocumented change on an invariant-failure path.** A lone one-channel `Parameter`
+   record that reaches a target owner now keeps `LIVE`, because the window is empty and so pairs.
+   Base cleared `LIVE` there.
+   * This is sound: the record is refused and never applied, and `stage` returns `target_error`,
+     so the block's render fails.
+   * No fix is needed. It is noted so that nobody reads it as the pairing rule firing.
+5. **Info: pending bookkeeping.**
+   * The artifact pin (`8934cdd9…`) is already stale at the batch head. The repin belongs at the
+     batch boundary.
+   * The mutation rows live only in this spec.
