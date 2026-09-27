@@ -71,7 +71,10 @@ preflight's `records_required`. All are authorized by the brief or by the amendm
   `builtins_compiler::prepare_selected_session_builtins_between_render_calls(&session, &requests, &[], caps)`.
   That entry is the one `host_core::prepare_host_runtime_with_selected_meters_between_render_calls`
   reaches, and it binds the meters as **permanent** observers (`MeterBindingPolicy::Permanent`).
-  No control channel is attached, so the meters are the only thing this row adds. The row refuses
+  No control channel is attached. *(Corrected in attempt 2: the meters are not the only thing
+  this row adds. The entry's between-render-calls delivery fuses each cohort's fader and matrix
+  into one stage, giving 40 chain stages where the standing row has 48. See "Attempt 2
+  evidence".)* The row refuses
   any `PlanConfig` other than `BASELINE`. Every other row keeps `prepare_session_builtins`.
 - **Timing.** The session timing loop allows the drain to sit outside the clock, and it does.
   `timing::timed` wraps `runtime.render` alone. After each timed block, and after `hash_output`,
@@ -316,3 +319,86 @@ gate 3 comparison.
    - **No drift.** Existing rows' prepare path, record shape, floor pins and digests are
      unchanged. `WORKLOADS`, and so the wasm arm, is untouched. The scope is within the amended
      paths, and no engine, host or effect file changes.
+
+## Attempt 2 evidence
+
+Implementer: attempt 2, 2026-09-27. Code commit `423a43f8`, on top of Sol's verdict `a26f6224`.
+This attempt answers Sol's findings 1 and 2 with documentation and a pin. The design is
+unchanged: the row keeps the default web boot's between-render-calls delivery and permanent
+`observe_unit` path. No engine, host or effect file is touched.
+
+### Finding 1: the pair differs by the meters plus the fader/matrix fusion
+
+Under between-render-calls delivery, each cohort's fader and matrix banks fuse into one stage
+(`FaderMatrixBankProcessor`, which renders through `fader_matrix_block`). The standing
+`Concurrent` row keeps them as two stages, and its matrix renders through `MatrixStage::process`.
+Each site now says so:
+
+- `tools/console-workload/src/lib.rs`:
+  - the `SixtyFourTrackConsoleMetered` doc now has a paragraph headed "The meters are not the only
+    difference from the standing row". It covers the delivery, the fusion, the stage counts, and
+    how to read the ratio: meters plus fused-versus-split fader/matrix;
+  - the `METERED_WORKLOADS` doc;
+  - the `build_full` comment, which no longer says the delivery "has nothing to deliver", and the
+    facility-arm assertion comment;
+  - the pair test's doc and assertions, where "no bank moves" is replaced by the true statement.
+- `tools/bench/src/console.rs`: the module doc's metered-row section and the `METERED_PAIR` doc.
+  They say the timings differ by the meters and the fusion together.
+- `tools/console-workload/tests/chain_shape.rs` (#944): the sentence "Every banked row prepares
+  builtins through `Concurrent` delivery" now reads "Every banked row in `WORKLOADS`". It adds that
+  the metered row pairs fader and matrix, so the #944 pins say nothing about its matrix.
+- `scripts/console-benchmark-record-lib.jq`: the metered branch of `session_kind_shape`.
+- This spec's attempt 1 Design bullet, corrected in place and marked.
+
+**Pin.** `the_metered_console_row_renders_the_console_bits_and_publishes_every_window` resets and
+reads `graph::test_only_bank_chain_construction_facts` around each bind. It asserts
+`[standing memberships, standing stages, metered memberships, metered stages] == [48, 48, 48, 40]`
+and `bank_shape == [8, 48]` on both. The digest pin is unchanged: the fused stage renders the
+split pair's bits.
+
+**Red mutation.** Preparing the metered row through `prepare_selected_session_builtins_with_console`
+(`Concurrent`) gives `left: [48, 48, 48, 48]`, and the test fails. The file was restored and
+checked with `cmp`.
+
+### Finding 2: no cross-delivery counter comparison
+
+**Aggregate validator.** The block comparing the metered row's `bank_route_folds` and
+`bank_scatter_redirects` with the `console_meters` `meters_off` arm is removed. The stated reason:
+no record in the run shares the metered row's delivery, so none is its baseline. Agreement with a
+`Concurrent` plan today is a coincidence, and disagreement tomorrow would refuse a truthful
+record. Two checks carry the counters instead:
+
+- folds stay pinned per record to the track count (`metered_session_shape` for this row,
+  `meters_record_valid` for the arm);
+- each plan's own redirect count is pinned in the pair test (`[0, 0]`, as two pins, not a
+  comparison).
+
+The console-pair digest pin is kept.
+
+**Tests.**
+
+- The bench test now reads the redirect expectation from a fresh bind of the metered row, not from
+  the standing row.
+- The suite's two cross-plan redirect rejections are now acceptances ("a metered row redirecting
+  lanes the Concurrent meters arm does not", and the reverse).
+- The comments in the record library and the suite are restated.
+
+### Gates, re-run at `423a43f8`, all PASS
+
+- `cargo fmt --all --check`.
+- `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`, with the edited
+  crates re-checked.
+- `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`.
+- `cargo test --locked -p bench -p console-workload`: bench 65; console-workload lib 7,
+  automation 4, chain_shape 25, placement 3; 2 ignored.
+- `bash scripts/test-console-benchmark.sh`: PASS, with runner, workload and timing invocations
+  0/0/0.
+- `bash scripts/check-console-benchmark-fixture.sh`: ok.
+- `scripts/check-bench-policy.sh` and `scripts/test-bench-policy.sh`: ok.
+- `scripts/check-realtime-policy.sh`: ok.
+- `bash scripts/operator/preflight-console-benchmark.sh --step preflight-881-a2`: PASS at
+  `423a43f8`, with `records_required: 50`, `workload_launches: 0`, binary `8effd58a...`, and no
+  artifact directory left.
+
+No timed run was made; the coordinator records gate 3. Finding 3 (product parity of the observer
+path) needed no change.
