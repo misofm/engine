@@ -1,0 +1,1440 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 36c4c272..2dd4d83b 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -343,6 +343,7 @@ dependencies = [
+  "graph",
+  "graph-compiler",
+  "lane",
++ "rack",
+  "session",
+ ]
+ 
+diff --git a/crates/builtins-compiler/src/lib.rs b/crates/builtins-compiler/src/lib.rs
+index 84a6f1eb..175c5752 100644
+--- a/crates/builtins-compiler/src/lib.rs
++++ b/crates/builtins-compiler/src/lib.rs
+@@ -506,6 +506,10 @@ impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
+             .copy_response_snapshot_lane(lane, sample_rate_hz, request)
+     }
+ 
++    fn silent_rest(&self) -> bool {
++        self.bank.silent_rest()
++    }
++
+     fn qualification_counters(&self) -> [u64; 2] {
+         [self.process_calls, self.frames_processed]
+     }
+@@ -638,6 +642,10 @@ impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
+         Ok(())
+     }
+ 
++    fn silent_rest(&self) -> bool {
++        self.controls.iter().all(Option::is_none) && self.bank.silent_rest()
++    }
++
+     fn qualification_counters(&self) -> [u64; 2] {
+         [self.process_calls, self.frames_processed]
+     }
+@@ -697,6 +705,10 @@ impl GraphPreparedBuiltinBankProcessor for MatrixBankProcessor {
+         Ok(())
+     }
+ 
++    fn silent_rest(&self) -> bool {
++        self.controls.iter().all(Option::is_none) && self.bank.silent_rest()
++    }
++
+     fn qualification_counters(&self) -> [u64; 2] {
+         [self.process_calls, self.frames_processed]
+     }
+@@ -1112,6 +1124,13 @@ impl GraphPreparedBuiltinBankProcessor for FaderMatrixBankProcessor {
+         let _ = first_sample;
+         Ok(())
+     }
++    fn silent_rest(&self) -> bool {
++        self.fader.controls.iter().all(Option::is_none)
++            && self.matrix.controls.iter().all(Option::is_none)
++            && self.fader.bank.silent_rest()
++            && self.matrix.bank.silent_rest()
++    }
++
+     fn qualification_counters(&self) -> [u64; 2] {
+         [
+             self.fader
+diff --git a/crates/builtins/src/lib.rs b/crates/builtins/src/lib.rs
+index c08da82a..e3657e9d 100644
+--- a/crates/builtins/src/lib.rs
++++ b/crates/builtins/src/lib.rs
+@@ -1058,6 +1058,25 @@ pub(crate) struct InputStage<L: Lane> {
+ }
+ 
+ impl<L: Lane> InputStage<L> {
++    /// PROTOTYPE (silence research): every integrator word of every lane is `+0.0` and no trim or
++    /// filter ramp is in flight, so an all-`+0.0` block leaves the state unchanged.
++    fn silent_rest(&self) -> bool {
++        if self.ramping || self.filter_ramping {
++            return false;
++        }
++        let mut bits = 0_u32;
++        let mut words = [0_u32; MAX_BANK_LANES];
++        for channel in &self.state.section {
++            for section in channel {
++                section.ic1.store_bits(&mut words[..L::WIDTH]);
++                bits |= words[..L::WIDTH].iter().fold(0, |a, b| a | b);
++                section.ic2.store_bits(&mut words[..L::WIDTH]);
++                bits |= words[..L::WIDTH].iter().fold(0, |a, b| a | b);
++            }
++        }
++        bits == 0
++    }
++
+     /// Builds the stage from one prepared track per populated lane.
+     ///
+     /// `tracks.len()` must be in `1..=L::WIDTH`; the remaining lanes become padding lanes.
+@@ -3526,6 +3545,15 @@ impl BuiltinInputBank {
+         }
+     }
+ 
++    /// PROTOTYPE (silence research): see `InputStage::silent_rest`.
++    #[must_use]
++    pub fn silent_rest(&self) -> bool {
++        match &self.stage {
++            InputStageKernel::Simd4(stage) => stage.silent_rest(),
++            InputStageKernel::Simd8(stage) => stage.silent_rest(),
++        }
++    }
++
+     /// Whether this bank may run [`BuiltinInputBank::process_mono`] at all.
+     ///
+     /// Fixed by preparation: the elision plan is decided once, from the coefficient words and a
+@@ -3895,6 +3923,13 @@ impl BuiltinFaderBank {
+         true
+     }
+ 
++    /// PROTOTYPE (silence research): no fader or mute ramp in flight, so the gain words are
++    /// constant and an all-`+0.0` block maps to itself (gain >= +0.0, mute clears bits).
++    #[must_use]
++    pub fn silent_rest(&self) -> bool {
++        !self.remaining_nonzero()
++    }
++
+     fn remaining_nonzero(&self) -> bool {
+         match &self.stage {
+             FaderStageKernel::Simd4(stage) => stage.remaining.iter().flatten().any(|v| *v != 0),
+@@ -4035,6 +4070,13 @@ impl BuiltinMatrixBank {
+         BuiltinProcessReport::default()
+     }
+ 
++    /// PROTOTYPE (silence research): settled, so the block's map is a fixed 2x2. Whether it
++    /// maps `+0.0` to `+0.0` is verified by the chain when it seals.
++    #[must_use]
++    pub fn silent_rest(&self) -> bool {
++        !self.remaining_nonzero()
++    }
++
+     fn remaining_nonzero(&self) -> bool {
+         match &self.stage {
+             MatrixStageKernel::Simd4(stage) => stage.remaining.iter().any(|v| *v != 0),
+diff --git a/crates/compressor/src/lib.rs b/crates/compressor/src/lib.rs
+index ddcd9140..6bf104cc 100644
+--- a/crates/compressor/src/lib.rs
++++ b/crates/compressor/src/lib.rs
+@@ -977,6 +977,14 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
+         self.metadata.clone()
+     }
+ 
++    fn silent_rest(&self) -> bool {
++        let instance = &self.instance;
++        instance.silent_fixed_point
++            && instance.left.max_remaining() == 0
++            && instance.right.max_remaining() == 0
++            && instance.silent_bypass == instance.metadata.bypass
++    }
++
+     fn lane_channel_symmetry(&self, lane: usize) -> bool {
+         self.instance.designed_channel_symmetry(lane)
+     }
+diff --git a/crates/effect-contract/src/lib.rs b/crates/effect-contract/src/lib.rs
+index a7251020..13d83785 100644
+--- a/crates/effect-contract/src/lib.rs
++++ b/crates/effect-contract/src/lib.rs
+@@ -1749,6 +1749,17 @@ pub trait PreparedNativeEffectBank: Send {
+     fn reset(&mut self, kind: ResetKind);
+     fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport;
+ 
++    /// PROTOTYPE (silence research, not for commit): given an all-`+0.0` input block and no
++    /// automation, `process_bank` would leave the block `+0.0` and its state unchanged apart from
++    /// what [`Self::advance_silent_rest`] does. Default: declined.
++    fn silent_rest(&self) -> bool {
++        false
++    }
++    /// PROTOTYPE: the state a skipped silent block still advances (cursors, phases).
++    fn advance_silent_rest(&mut self, frames: u32) {
++        let _ = frames;
++    }
++
+     /// Applies one already-prepared target to one bank lane at a block boundary.
+     ///
+     /// Preparation and numerical design happen on the control or worker plane through the
+diff --git a/crates/graph/src/lib.rs b/crates/graph/src/lib.rs
+index 081911e0..3e58064b 100644
+--- a/crates/graph/src/lib.rs
++++ b/crates/graph/src/lib.rs
+@@ -1064,6 +1064,11 @@ pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
+         [0, 0]
+     }
+ 
++    /// PROTOTYPE (silence research): see `rack::BankStage::silent_rest`.
++    fn silent_rest(&self) -> bool {
++        false
++    }
++
+     /// Drain this bank's live-console queues, before any lane of the block is dispatched.
+     ///
+     /// Forwarded from `rack::BankStage::begin_block`, and it carries that method's
+diff --git a/crates/graph/src/runtime.rs b/crates/graph/src/runtime.rs
+index 89e659ea..11e4a074 100644
+--- a/crates/graph/src/runtime.rs
++++ b/crates/graph/src/runtime.rs
+@@ -1792,6 +1792,62 @@ impl BankMembers for ArenaMembers<'_> {
+     /// Every premise is checked before the first write. A failed one declines having written
+     /// nothing, and the chain then takes the staged path -- whose `fold_cohort` applies its own
+     /// checks exactly as it always has.
++    /// PROTOTYPE (silence research): the scatter and fold epilogue of a chain whose resident
++    /// block is all `+0.0`, written as constants.
++    ///
++    /// A folded lane contributes `route_word` of `(+0.0, +0.0)` to each master plane: a signed
++    /// zero, `-0.0` exactly when both of that plane's row coefficients carry the sign bit. The
++    /// fold's exact effect on the master is then: from a storing lane on, a constant (the left-to-
++    /// right sum of the zeros, computed with the same `f32` adds); on a master it accumulates into,
++    /// `master + (+0.0)` when any contribution is `+0.0` and nothing when all are `-0.0` (the
++    /// signed-zero skip rule of #940, Research findings (2)). An unfolded lane's output buffer is
++    /// filled with `+0.0`, which is what its scatter would write.
++    fn skip_silent(&mut self, lanes: usize, frames: usize, fold: &[bool]) -> bool {
++        let folded = |lane: usize| fold.get(lane).copied().unwrap_or(false);
++        if (0..lanes).any(folded) && (self.fold.len() < lanes || !self.master_writable()) {
++            return false;
++        }
++        for lane in 0..lanes {
++            if !folded(lane) {
++                let (left, right) = self.lease.write_stereo(self.outputs[lane]);
++                left[..frames].fill(0.0);
++                right[..frames].fill(0.0);
++            }
++        }
++        let mut constant: [Option<f32>; 2] = [None, None];
++        let mut fixup = [false; 2];
++        for lane in (0..lanes).filter(|&lane| folded(lane)) {
++            let FoldLane {
++                coefficients: [ll, lr, rl, rr],
++                store,
++            } = self.fold[lane];
++            let zeros = [lr * 0.0 + ll * 0.0, rr * 0.0 + rl * 0.0];
++            for plane in 0..2 {
++                if store {
++                    constant[plane] = Some(zeros[plane]);
++                    fixup[plane] = false;
++                } else if let Some(value) = constant[plane] {
++                    constant[plane] = Some(value + zeros[plane]);
++                } else if zeros[plane].to_bits() == 0 {
++                    fixup[plane] = true;
++                }
++            }
++        }
++        if (0..lanes).any(folded) {
++            let (master_left, master_right) = self.master_planes();
++            for (plane, master) in [master_left, master_right].into_iter().enumerate() {
++                if let Some(value) = constant[plane] {
++                    master[..frames].fill(value);
++                } else if fixup[plane] {
++                    for word in &mut master[..frames] {
++                        *word += 0.0;
++                    }
++                }
++            }
++        }
++        true
++    }
++
+     fn fold_resident(&mut self, cohort: ResidentFoldCohort<'_>) -> bool {
+         match cohort.width() {
+             BankWidth::Four => self.fold_resident_tiles::<4, lane::Simd4>(cohort, transpose_tile_4),
+@@ -2659,6 +2715,7 @@ impl Runtime {
+                 master,
+             } => {
+                 let lanes = *lanes;
++                let members_started = rack::test_only_chain_probe::enabled().then(std::time::Instant::now);
+                 // Only the first slot reduces graph inputs; the chain computes the rest -- and a
+                 // member whose whole reduction *is* the dedication copy does not even do that:
+                 // the gather reads its producer's buffer directly. See `bank_gather_source`.
+@@ -2683,6 +2740,9 @@ impl Runtime {
+                 for lane in 0..lanes {
+                     bank_outputs[lane] = members[last + lane].output;
+                 }
++                if let Some(started) = members_started {
++                    rack::test_only_chain_probe::add(rack::test_only_chain_probe::MEMBERS, started.elapsed().as_nanos() as u64);
++                }
+                 let frames = lease.frames();
+                 let master = match *master {
+                     FoldTarget::Arena(buffer) => MasterPlanes::Arena(buffer),
+@@ -3880,6 +3940,9 @@ use crate::{
+ /// Adapter that lets a compiler-owned builtin bank act as a chain slot.
+ struct BuiltinStage(Box<dyn GraphPreparedBuiltinBankProcessor>);
+ impl BankStage for BuiltinStage {
++    fn silent_rest(&self) -> bool {
++        self.0.silent_rest()
++    }
+     // REALTIME_POLICY_BEGIN
+     fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
+         self.0
+diff --git a/crates/parametric-eq/src/lib.rs b/crates/parametric-eq/src/lib.rs
+index bb160ecf..75c277ac 100644
+--- a/crates/parametric-eq/src/lib.rs
++++ b/crates/parametric-eq/src/lib.rs
+@@ -2682,6 +2682,13 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
+         self.bank.clone()
+     }
+ 
++    fn silent_rest(&self) -> bool {
++        self.metadata.bypass
++            || (self.silent_fixed_point
++                && self.left.no_ramp_in_flight()
++                && self.right.no_ramp_in_flight())
++    }
++
+     fn copy_response_snapshot_lane(
+         &self,
+         lane: usize,
+diff --git a/crates/parametric-eq/tests/silence_snapshot_cost.rs b/crates/parametric-eq/tests/silence_snapshot_cost.rs
+new file mode 100644
+index 00000000..9349e592
+--- /dev/null
++++ b/crates/parametric-eq/tests/silence_snapshot_cost.rs
+@@ -0,0 +1,100 @@
++#![allow(clippy::disallowed_methods)]
++//! THROWAWAY silence-research timing (not for commit): the cost of the generic slot latch's state
++//! comparison on a W8 EQ bank -- eight `snapshot_track_state_payload` calls into preallocated
++//! buffers plus a byte compare -- against one `process_bank` on silence and on tone.
++
++mod support;
++
++use std::hint::black_box;
++use std::time::Instant;
++
++use effect_contract::{
++    BankWidth, EffectBankProcessBlock, NativeEffectFactory, PrepareEffectBankRequest,
++    StatePayloadOutput, StatePayloadSizes,
++};
++use lane::Backend;
++use parametric_eq::ParametricEqFactory;
++use support::{COMMON_BYTES, LANE_BYTES, request, values};
++
++#[test]
++#[ignore = "throwaway silence-research timing"]
++fn eq_bank_snapshot_cost() {
++    let backend = Backend::current();
++    let width = BankWidth::for_backend(backend).expect("native width");
++    let lanes = width.lanes() as usize;
++    let prepared: Vec<_> = (0..lanes).map(|_| values()).collect();
++    let requests: Vec<_> = prepared.iter().map(|v| request(v, false)).collect();
++    let mut bank = ParametricEqFactory
++        .bind_homogeneous_bank(PrepareEffectBankRequest {
++            backend,
++            width,
++            requests: &requests,
++        })
++        .unwrap()
++        .unwrap();
++    let sizes = StatePayloadSizes {
++        common_bytes: COMMON_BYTES as u32,
++        left_bytes: LANE_BYTES as u32,
++        right_bytes: LANE_BYTES as u32,
++    };
++    let per_track = COMMON_BYTES + 2 * LANE_BYTES;
++    let mut before = vec![0u8; per_track * lanes];
++    let mut after = vec![0u8; per_track * lanes];
++    let offsets = vec![0_u32; lanes + 1];
++    let mut left = vec![0.0f32; 128 * lanes];
++    let mut right = vec![0.0f32; 128 * lanes];
++    let snap = |bank: &dyn effect_contract::PreparedNativeEffectBank, out: &mut [u8]| {
++        for (track, chunk) in out.chunks_exact_mut(per_track).enumerate() {
++            let (common, rest) = chunk.split_at_mut(COMMON_BYTES);
++            let (l, r) = rest.split_at_mut(LANE_BYTES);
++            bank.snapshot_track_state_payload(
++                track as u32,
++                StatePayloadOutput::new(common, l, r, sizes).unwrap(),
++            )
++            .unwrap();
++        }
++    };
++    let mut best = [f64::MAX; 3];
++    for _ in 0..30 {
++        let t = Instant::now();
++        for _ in 0..200 {
++            snap(&*bank, &mut before);
++            snap(&*bank, &mut after);
++            black_box(before == after);
++        }
++        best[0] = best[0].min(t.elapsed().as_nanos() as f64 / 200.0);
++        let t = Instant::now();
++        for i in 0..200 {
++            left.fill(0.0);
++            right.fill(0.0);
++            bank.process_bank(
++                EffectBankProcessBlock::new(
++                    &mut left, &mut right, None, 128, width, i * 128, &[], &offsets, 128,
++                )
++                .unwrap(),
++            );
++        }
++        best[1] = best[1].min(t.elapsed().as_nanos() as f64 / 200.0);
++        let t = Instant::now();
++        for i in 0..200 {
++            for (k, (l, r)) in left.iter_mut().zip(right.iter_mut()).enumerate() {
++                *l = ((k as f32) * 0.01).sin() * 0.3;
++                *r = -*l;
++            }
++            bank.process_bank(
++                EffectBankProcessBlock::new(
++                    &mut left, &mut right, None, 128, width, i * 128, &[], &offsets, 128,
++                )
++                .unwrap(),
++            );
++        }
++        best[2] = best[2].min(t.elapsed().as_nanos() as f64 / 200.0);
++    }
++    println!(
++        "EQ W{lanes}: payload {} B/bank; two snapshots + compare {:.0} ns; process_bank silent-settled {:.0} ns; process_bank tone (+ fill) {:.0} ns",
++        per_track * lanes,
++        best[0],
++        best[1],
++        best[2]
++    );
++}
+diff --git a/crates/rack/src/lib.rs b/crates/rack/src/lib.rs
+index 9960a550..7e6bf768 100644
+--- a/crates/rack/src/lib.rs
++++ b/crates/rack/src/lib.rs
+@@ -16,6 +16,94 @@ use effect_contract::{
+ };
+ use engine::realtime::RenderError;
+ 
++
++/// THROWAWAY silence-research prototype knobs (not for commit).
++#[doc(hidden)]
++pub mod test_only_silence {
++    use core::cell::Cell;
++    thread_local! {
++        static DECLINED: Cell<bool> = const { Cell::new(false) };
++        static SKIPS: Cell<u64> = const { Cell::new(0) };
++        static SEALS: Cell<u64> = const { Cell::new(0) };
++        static TIMING_ONLY: Cell<u8> = const { Cell::new(0) };
++    }
++    /// Timing decomposition only (moves state bits): bit 0 skips `advance_silent`, bit 1 assumes
++    /// every input silent without scanning.
++    pub fn set_timing_only(bits: u8) { TIMING_ONLY.with(|v| v.set(bits)); }
++    pub fn timing_only() -> u8 { TIMING_ONLY.with(Cell::get) }
++    pub fn set_declined(declined: bool) { DECLINED.with(|v| v.set(declined)); }
++    pub fn declined() -> bool { DECLINED.with(Cell::get) }
++    pub fn counts() -> (u64, u64) { (SKIPS.with(Cell::get), SEALS.with(Cell::get)) }
++    pub fn reset() { SKIPS.with(|v| v.set(0)); SEALS.with(|v| v.set(0)); }
++    pub(crate) fn skip() { SKIPS.with(|v| v.set(v.get() + 1)); }
++    pub(crate) fn seal() { SEALS.with(|v| v.set(v.get() + 1)); }
++}
++
++/// `true` when every word of `words` is exactly `+0.0` (#942's shape).
++#[inline(always)]
++pub fn words_are_positive_zero(words: &[f32]) -> bool {
++    #[inline]
++    fn or_bits(words: &[f32]) -> u32 {
++        let mut bits = 0_u32;
++        for value in words {
++            bits |= value.to_bits();
++        }
++        bits
++    }
++    let (head, rest) = words.split_at(words.len().min(32));
++    if or_bits(head) != 0 {
++        return false;
++    }
++    for chunk in rest.chunks(128) {
++        if or_bits(chunk) != 0 {
++            return false;
++        }
++    }
++    true
++}
++
++/// THROWAWAY silence-research probe (not for commit): sub-phase timing inside a bank chain.
++#[doc(hidden)]
++pub mod test_only_chain_probe {
++    use core::cell::Cell;
++    use std::time::Instant;
++    pub const DRAIN: usize = 0;
++    pub const DECIDE: usize = 1;
++    pub const GATHER: usize = 2;
++    pub const SLOT0: usize = 3;
++    pub const SCATTER: usize = 11;
++    pub const AUX: usize = 12;
++    pub const MEMBERS: usize = 13;
++    pub const COUNT: usize = 14;
++    thread_local! {
++        static ENABLED: Cell<bool> = const { Cell::new(false) };
++        static NANOS: Cell<[u64; COUNT]> = const { Cell::new([0; COUNT]) };
++        static CALLS: Cell<u64> = const { Cell::new(0) };
++    }
++    pub fn enable(on: bool) { ENABLED.with(|v| v.set(on)); }
++    pub fn enabled() -> bool { ENABLED.with(Cell::get) }
++    pub fn reset() { NANOS.with(|v| v.set([0; COUNT])); CALLS.with(|v| v.set(0)); }
++    pub fn snapshot() -> ([u64; COUNT], u64) { (NANOS.with(Cell::get), CALLS.with(Cell::get)) }
++    pub fn add(phase: usize, nanos: u64) { NANOS.with(|v| { let mut a = v.get(); a[phase] += nanos; v.set(a); }); }
++    pub struct Probe { last: Instant, nanos: [u64; COUNT] }
++    impl Probe {
++        #[inline]
++        pub fn start() -> Option<Self> {
++            ENABLED.with(Cell::get).then(|| Self { last: Instant::now(), nanos: [0; COUNT] })
++        }
++        #[inline]
++        pub fn lap(&mut self, phase: usize) {
++            let now = Instant::now();
++            self.nanos[phase] += now.duration_since(self.last).as_nanos() as u64;
++            self.last = now;
++        }
++        pub fn finish(self) {
++            NANOS.with(|v| { let mut a = v.get(); for (x, y) in a.iter_mut().zip(self.nanos) { *x += y; } v.set(a); });
++            CALLS.with(|v| v.set(v.get() + 1));
++        }
++    }
++}
++
+ #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+ pub enum RackError {
+     ZeroQuantum,
+@@ -550,6 +638,18 @@ pub trait BankStage: Send {
+     fn channels_agree(&self) -> bool {
+         false
+     }
++
++    /// PROTOTYPE (silence research): read after `begin_block`. `true` promises that, given an
++    /// all-`+0.0` input block, this stage would write the same output as its last block and leave
++    /// its state unchanged apart from what [`advance_silent`](Self::advance_silent) does.
++    fn silent_rest(&self) -> bool {
++        false
++    }
++
++    /// PROTOTYPE: what a skipped silent block must still do to this stage's state.
++    fn advance_silent(&mut self, frames: u32) {
++        let _ = frames;
++    }
+ }
+ 
+ /// Adapter from the effect contract's prepared homogeneous bank to a chain stage.
+@@ -653,6 +753,14 @@ impl BankStage for EffectBankStage {
+         self.processor.channels_agree()
+     }
+ 
++    fn silent_rest(&self) -> bool {
++        self.processor.silent_rest()
++    }
++
++    fn advance_silent(&mut self, frames: u32) {
++        self.processor.advance_silent_rest(frames);
++    }
++
+     // REALTIME_POLICY_BEGIN
+     fn process_mono(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
+         let block = EffectBankProcessBlock::new(
+@@ -1488,6 +1596,20 @@ pub trait BankMembers {
+     fn plane(&self, lane: usize) -> (&[f32], &[f32]);
+     fn plane_mut(&mut self, lane: usize) -> (&mut [f32], &mut [f32]);
+ 
++    /// PROTOTYPE (silence research): lane `lane`'s input block is exactly `+0.0` in both planes.
++    /// The default scans the gather source; a provider with a producer's silence bit overrides.
++    fn input_silent(&self, lane: usize, frames: usize) -> bool {
++        let (left, right) = self.plane(lane);
++        words_are_positive_zero(&left[..frames]) && words_are_positive_zero(&right[..frames])
++    }
++
++    /// PROTOTYPE: write what the chain's scatter and fold epilogue would write for a block whose
++    /// every lane is `+0.0` at the scatter, or return `false` having written nothing.
++    fn skip_silent(&mut self, lanes: usize, frames: usize, fold: &[bool]) -> bool {
++        let _ = (lanes, frames, fold);
++        false
++    }
++
+     /// Borrow every destination of a complete bank at once, or decline to use direct scatter.
+     /// Implementors must validate IDs, pairwise disjointness, and capacities before creating any
+     /// references. The default preserves the staged path for providers without that capability.
+@@ -1773,6 +1895,9 @@ pub struct BankChain {
+     /// [`collapse_transitions`](Self::collapse_transitions) for what each one counts and why a
+     /// block count alone cannot say it.
+     transitions: [u64; 3],
++    /// PROTOTYPE (silence research): the last block ran with every lane's input `+0.0` and every
++    /// slot at silent rest, and left `+0.0` in the whole resident block.
++    silent_sealed: bool,
+ }
+ 
+ /// Owned chain masks validated before graph bindings transfer their processors. The constructor
+@@ -1876,6 +2001,7 @@ impl BankChain {
+             collapse_source: false,
+             collapses: 0,
+             transitions: [0; 3],
++            silent_sealed: false,
+         })
+     }
+ 
+@@ -2263,6 +2389,7 @@ impl BankChain {
+         predecessor: Option<&BankChain>,
+     ) -> Result<(), RenderError> {
+         debug_assert!(frames >= 1 && frames <= self.scratch.quantum);
++        let mut probe = test_only_chain_probe::Probe::start();
+         let len = frames as usize * self.lanes;
+         // Validate stored shape before any successor drain or destination write. Graph owns
+         // adjacency, current-block freshness, and the lane-wise dataflow/observation proof.
+@@ -2287,6 +2414,39 @@ impl BankChain {
+                 slot.stage.begin_block(first_sample)?;
+             }
+         }
++        if let Some(p) = probe.as_mut() { p.lap(test_only_chain_probe::DRAIN); }
++        // PROTOTYPE (silence research): the whole-bank silent latch.
++        let mut seal_candidate = false;
++        if predecessor.is_none() && self.aux.is_empty() && !test_only_silence::declined() {
++            let rest = self
++                .slots
++                .iter()
++                .all(|slot| !slot.has_active_lanes() || slot.stage.silent_rest());
++            let assume = test_only_silence::timing_only() & 2 != 0;
++            let qualify = rest
++                && (assume
++                    || (0..self.lanes).all(|lane| {
++                        !self.active[lane] || members.input_silent(lane, frames as usize)
++                    }));
++            if qualify {
++                if self.silent_sealed && members.skip_silent(self.lanes, frames as usize, &self.fold)
++                {
++                    if test_only_silence::timing_only() & 1 == 0 {
++                        for slot in &mut self.slots {
++                            if slot.has_active_lanes() {
++                                slot.stage.advance_silent(frames);
++                            }
++                        }
++                    }
++                    test_only_silence::skip();
++                    if let Some(mut p) = probe { p.lap(test_only_chain_probe::SCATTER); p.finish(); }
++                    return Ok(());
++                }
++                seal_candidate = true;
++            } else {
++                self.silent_sealed = false;
++            }
++        }
+         // Publish after every drain. The armed decision combines each stage's lane bank once,
+         // then reuses it if declining eligibility requires agreement maintenance below. Stages
+         // outside rack may still forward nested processor queries; only this boundary is bulk.
+@@ -2361,6 +2521,7 @@ impl BankChain {
+         if collapse {
+             self.collapses = self.collapses.saturating_add(1);
+         }
++        if let Some(p) = probe.as_mut() { p.lap(test_only_chain_probe::DECIDE); }
+         if let Some(source) = predecessor {
+             self.acquire_resident_input(source, frames, collapse);
+         } else if collapse {
+@@ -2369,12 +2530,13 @@ impl BankChain {
+             self.gather(members, frames);
+         }
+         self.transposes = self.transposes.saturating_add(1);
++        if let Some(p) = probe.as_mut() { p.lap(test_only_chain_probe::GATHER); }
+         let prefix = if collapse {
+             self.collapse_prefix
+         } else {
+             self.slots.len()
+         };
+-        for slot in &mut self.slots[..prefix] {
++        for (slot_index, slot) in self.slots[..prefix].iter_mut().enumerate() {
+             if slot.has_active_lanes() {
+                 let block = BankBlock {
+                     left: &mut self.scratch.left[..len],
+@@ -2389,6 +2551,7 @@ impl BankChain {
+                     slot.stage.process(block)?;
+                 }
+             }
++            if let Some(p) = probe.as_mut() { p.lap(test_only_chain_probe::SLOT0 + slot_index.min(7)); }
+         }
+         if collapse {
+             // The seam. One extra copy of the resident block per collapsed chain per block, and it
+@@ -2411,12 +2574,21 @@ impl BankChain {
+                 }
+             }
+         }
++        if seal_candidate {
++            self.silent_sealed = words_are_positive_zero(&self.scratch.left[..len])
++                && words_are_positive_zero(&self.scratch.right[..len]);
++            if self.silent_sealed {
++                test_only_silence::seal();
++            }
++        }
+         self.scatter(members, frames);
++        if let Some(p) = probe.as_mut() { p.lap(test_only_chain_probe::SCATTER); }
+         // The epilogue. Empty on every chain the engine builds today, so this is one branch and
+         // no auxiliary state; see `BankMembers::aux_plane_mut` for what arming it is for.
+         if !self.aux.is_empty() {
+             self.accumulate_aux(members, frames);
+         }
++        if let Some(mut p) = probe { p.lap(test_only_chain_probe::AUX); p.finish(); }
+         Ok(())
+     }
+     // REALTIME_POLICY_END
+diff --git a/crates/true-peak-limiter/src/lib.rs b/crates/true-peak-limiter/src/lib.rs
+index e8873b0f..ac705e85 100644
+--- a/crates/true-peak-limiter/src/lib.rs
++++ b/crates/true-peak-limiter/src/lib.rs
+@@ -3037,6 +3037,24 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedTruePeakLimiterBank<L> {
+         self.metadata.clone()
+     }
+ 
++    fn silent_rest(&self) -> bool {
++        let core = &self.core;
++        core.silent_fixed_point
++            && core.silent_bypass == core.metadata.bypass
++            && ramps_are_stationary(&core.left.limit)
++            && ramps_are_stationary(&core.left.release)
++            && ramps_are_stationary(&core.right.limit)
++            && ramps_are_stationary(&core.right.release)
++    }
++
++    fn advance_silent_rest(&mut self, frames: u32) {
++        let frames = frames as usize;
++        let core = &mut self.core;
++        core.left.advance_rest_phase(frames);
++        core.right.advance_rest_phase(frames);
++        core.cursors.advance(frames, &core.shape);
++    }
++
+     fn lane_channel_symmetry(&self, lane: usize) -> bool {
+         self.core.designed_channel_symmetry(lane)
+     }
+diff --git a/tools/console-workload/Cargo.toml b/tools/console-workload/Cargo.toml
+index 1b327e59..36438cf4 100644
+--- a/tools/console-workload/Cargo.toml
++++ b/tools/console-workload/Cargo.toml
+@@ -32,6 +32,7 @@ session.workspace = true
+ # tests build, so the bench and the wasm guest that link it as a normal dependency are unaffected.
+ [dev-dependencies]
+ graph = { workspace = true, features = ["test-support"] }
++rack.workspace = true
+ 
+ [lints]
+ workspace = true
+diff --git a/tools/console-workload/src/lib.rs b/tools/console-workload/src/lib.rs
+index 76876388..0eae8558 100644
+--- a/tools/console-workload/src/lib.rs
++++ b/tools/console-workload/src/lib.rs
+@@ -1744,6 +1744,51 @@ impl SourceSignal {
+     }
+ }
+ 
++/// THROWAWAY silence-research prototype (not for commit): a per-track activity pattern for the
++/// bound feed. While set, every track input plays its frozen block on a live block and `+0.0` on
++/// a silent one, block `b` of the pattern at observation `b mod blocks`.
++#[doc(hidden)]
++pub mod proto_pattern {
++    use std::sync::{Arc, Mutex};
++    pub struct Pattern {
++        pub blocks: usize,
++        /// `live[stem * blocks + block]`, 1 = live.
++        pub live: Vec<u8>,
++        /// Track index -> stem index.
++        pub order: Vec<usize>,
++    }
++    pub static PATTERN: Mutex<Option<Arc<Pattern>>> = Mutex::new(None);
++    pub fn set(pattern: Option<Arc<Pattern>>) {
++        *PATTERN.lock().unwrap() = pattern;
++    }
++    pub fn get() -> Option<Arc<Pattern>> {
++        PATTERN.lock().unwrap().clone()
++    }
++}
++
++struct PatternGraphSource {
++    frozen: Box<FrozenGraphSource>,
++    stem: usize,
++    pattern: std::sync::Arc<proto_pattern::Pattern>,
++}
++
++impl GraphRuntimeProcessor for PatternGraphSource {
++    fn process(
++        &mut self,
++        block: GraphBindingBlock<'_>,
++    ) -> Result<(), engine::realtime::RenderError> {
++        let index = (block.first_sample / QUANTUM as u64) as usize % self.pattern.blocks;
++        if self.pattern.live[self.stem * self.pattern.blocks + index] != 0 {
++            block.left.copy_from_slice(&self.frozen.left);
++            block.right.copy_from_slice(&self.frozen.right);
++        } else {
++            block.left.fill(0.0);
++            block.right.fill(0.0);
++        }
++        Ok(())
++    }
++}
++
+ /// Every track input is a frozen block per observation; nothing is decoded on the render path.
+ ///
+ /// Aligned to 64 bytes (issue #935) so both planes start a cache line wherever the struct is
+@@ -1891,10 +1936,24 @@ fn source_binding(
+         stage: TrackStage::Input,
+     } = node
+     {
+-        GraphNodeBinding::new(
+-            node.clone(),
+-            bound_track_source(track_id.as_str(), silent, source, mappings),
+-        )
++        let frozen = bound_track_source(track_id.as_str(), silent, source, mappings);
++        if let Some(pattern) = proto_pattern::get() {
++            let track: usize = track_id
++                .as_str()
++                .trim_start_matches(|c: char| !c.is_ascii_digit())
++                .parse()
++                .unwrap_or(0);
++            let stem = pattern.order[track];
++            return GraphNodeBinding::new(
++                node.clone(),
++                Box::new(PatternGraphSource {
++                    frozen,
++                    stem,
++                    pattern,
++                }),
++            );
++        }
++        GraphNodeBinding::new(node.clone(), frozen)
+     } else {
+         GraphNodeBinding::identity(node.clone())
+     }
+diff --git a/tools/console-workload/tests/silence_profile.rs b/tools/console-workload/tests/silence_profile.rs
+new file mode 100644
+index 00000000..0bfd5de6
+--- /dev/null
++++ b/tools/console-workload/tests/silence_profile.rs
+@@ -0,0 +1,206 @@
++//! THROWAWAY silence-research harness (docs/handoffs/silence-2026-09-27). Not for commit as is.
++//!
++//! Run: CARGO_INCREMENTAL=0 taskset -c <cpu> cargo test --release -p console-workload
++//!      --test silence_profile -- --ignored --nocapture --test-threads 1
++#![allow(clippy::disallowed_methods)]
++
++use std::hint::black_box;
++use std::time::Instant;
++
++use console_workload::{PlanConfig, SessionRuntime, Workload};
++use graph::test_only_phase_profile as gp;
++use lane::Backend;
++use rack::test_only_chain_probe as cp;
++
++fn calibrate_ghz() -> f64 {
++    // Dependent scalar f32 add chain without black_box inside the loop body: the loop-carried
++    // `x + d` is one vaddss (3 cycles on Zen 3) per step.
++    let mut best = f64::MAX;
++    for _ in 0..20 {
++        let n = 4_000_000u64;
++        let mut x = black_box(1.0f32);
++        let d = black_box(1.0e-30f32);
++        let t = Instant::now();
++        for _ in 0..n {
++            x += d;
++        }
++        let ns = t.elapsed().as_nanos() as f64;
++        black_box(x);
++        best = best.min(ns / n as f64);
++    }
++    3.0 / best
++}
++
++fn p50(v: &mut [u64]) -> u64 {
++    v.sort_unstable();
++    v[v.len() / 2]
++}
++
++fn time_blocks(rt: &mut SessionRuntime, start: u64, blocks: u64) -> (u64, u64, u64) {
++    let mut v = Vec::with_capacity(blocks as usize);
++    for b in 0..blocks {
++        let t = Instant::now();
++        rt.render(start + b).unwrap();
++        v.push(t.elapsed().as_nanos() as u64);
++    }
++    let min = *v.iter().min().unwrap();
++    let p = p50(&mut v);
++    let p95 = v[v.len() * 95 / 100];
++    (min, p, p95)
++}
++
++const PHASES: [&str; gp::COUNT] = [
++    "enter",
++    "source",
++    "bound",
++    "route",
++    "output",
++    "identity_copy",
++    "identity_alias",
++    "other_op",
++    "bank",
++    "exit",
++];
++const SUB: [&str; cp::COUNT] = [
++    "drain",
++    "decide",
++    "gather",
++    "slot0",
++    "slot1",
++    "slot2",
++    "slot3",
++    "slot4",
++    "slot5",
++    "slot6",
++    "slot7",
++    "scatter+fold",
++    "aux",
++    "members",
++];
++
++fn profile(workload: Workload, backend: Backend, warmup: u64, blocks: u64) {
++    let mut rt = SessionRuntime::build_with_dispatch(workload, PlanConfig::BASELINE, backend);
++    for b in 0..warmup {
++        rt.render(b).unwrap();
++    }
++    let mut t = warmup;
++    println!(
++        "\n=== {} at {:?}: shape {:?} ===",
++        workload.kind(),
++        backend,
++        rt.bank_shape()
++    );
++    for r in 0..3 {
++        let (min, p, p95) = time_blocks(&mut rt, t, blocks);
++        t += blocks;
++        println!("probes off, repeat {r}: min {min} ns  p50 {p} ns  p95 {p95} ns");
++    }
++    gp::reset();
++    gp::enable(true);
++    let (_, p_g, _) = time_blocks(&mut rt, t, blocks);
++    t += blocks;
++    gp::enable(false);
++    let (nanos, nblocks, probes) = gp::snapshot();
++    println!("graph phases (probes on, p50 {p_g} ns, {probes} probes over {nblocks} blocks):");
++    for (i, n) in nanos.iter().enumerate() {
++        if *n > 0 {
++            println!(
++                "  {:>15}: {:>9.1} ns/block",
++                PHASES[i],
++                *n as f64 / nblocks as f64
++            );
++        }
++    }
++    let runs = gp::runs();
++    let runs: Vec<_> = runs
++        .iter()
++        .filter(|(k, n)| *k < gp::COUNT && *n > 0)
++        .map(|(k, n)| format!("{}x{}", n, PHASES[*k]))
++        .collect();
++    println!("  unit runs: {}", runs.join(", "));
++    cp::reset();
++    cp::enable(true);
++    let (_, p_c, _) = time_blocks(&mut rt, t, blocks);
++    cp::enable(false);
++    let (nanos, calls) = cp::snapshot();
++    println!(
++        "chain sub-phases (chain probes on, p50 {p_c} ns, {calls} chain runs = {:.1}/block):",
++        calls as f64 / blocks as f64
++    );
++    let mut total = 0.0;
++    for (i, n) in nanos.iter().enumerate() {
++        let per = *n as f64 / blocks as f64;
++        total += if i == cp::MEMBERS { 0.0 } else { per };
++        if *n > 0 {
++            println!(
++                "  {:>13}: {:>9.1} ns/block  {:>8.1} ns/chain",
++                SUB[i],
++                per,
++                *n as f64 / calls as f64
++            );
++        }
++    }
++    println!("  chain total (excl members): {total:.1} ns/block");
++}
++
++fn or_bits(words: &[f32]) -> u32 {
++    let mut bits = 0_u32;
++    for value in words {
++        bits |= value.to_bits();
++    }
++    bits
++}
++#[inline(always)]
++fn block_is_positive_zero(io: &[f32]) -> bool {
++    let (head, rest) = io.split_at(io.len().min(32));
++    if or_bits(head) != 0 {
++        return false;
++    }
++    for chunk in rest.chunks(128) {
++        if or_bits(chunk) != 0 {
++            return false;
++        }
++    }
++    true
++}
++
++#[test]
++#[ignore = "throwaway silence-research profile"]
++fn silence_profile() {
++    let ghz = calibrate_ghz();
++    println!("calibrated clock (3-cycle dependent vaddss chain): {ghz:.3} GHz");
++    for words in [256usize, 512, 1024] {
++        let block = vec![0.0f32; words];
++        let mut best = f64::MAX;
++        for _ in 0..40 {
++            let t = Instant::now();
++            let mut acc = 0u32;
++            for _ in 0..2000 {
++                acc += u32::from(block_is_positive_zero(black_box(&block)));
++            }
++            black_box(acc);
++            best = best.min(t.elapsed().as_nanos() as f64 / 2000.0);
++        }
++        println!("block_is_positive_zero({words} words, silent): {best:.1} ns");
++    }
++    let only = std::env::var("SILENCE_ONLY").ok();
++    let run = |name: &str| only.as_deref().is_none_or(|o| o == name);
++    if run("idle8") {
++        profile(Workload::SixtyFourTrackIdle, Backend::Simd8, 512, 4000);
++    }
++    if run("idle4") {
++        profile(Workload::SixtyFourTrackIdle, Backend::Simd4, 512, 4000);
++    }
++    if run("console8") {
++        profile(Workload::SixtyFourTrackConsole, Backend::Simd8, 64, 4000);
++    }
++    if run("console4") {
++        profile(Workload::SixtyFourTrackConsole, Backend::Simd4, 64, 4000);
++    }
++    if run("builtins8") {
++        profile(Workload::SixtyFourTrackBuiltinsOnly, Backend::Simd8, 512, 2000);
++    }
++    if run("ring8") {
++        profile(Workload::SixtyFourTrackGainPanRing, Backend::Simd8, 64, 2000);
++    }
++}
+diff --git a/tools/console-workload/tests/silence_proto.rs b/tools/console-workload/tests/silence_proto.rs
+new file mode 100644
+index 00000000..e357b466
+--- /dev/null
++++ b/tools/console-workload/tests/silence_proto.rs
+@@ -0,0 +1,410 @@
++//! THROWAWAY silence-research prototype harness (docs/handoffs/silence-2026-09-27). Not for
++//! commit as is. Two tests:
++//!
++//! * `silence_proto_bits` -- the whole-bank latch renders the declined arm's bits on every block,
++//!   over idle, static-sparse, synthetic-transition and dogfood patterns;
++//! * `silence_proto_timing` -- A/B timings (run under the shared timing lock).
++#![allow(clippy::disallowed_methods)]
++
++use std::sync::Arc;
++use std::time::Instant;
++
++use bench_support::digest::Sha256Sink;
++use console_workload::proto_pattern::{self, Pattern};
++use console_workload::{PlanConfig, SessionRuntime, Workload};
++use lane::Backend;
++use rack::test_only_silence as knob;
++
++const SCRATCH: &str = "/tmp/claude-1002/-home-bl-misofm-engine/43895396-e183-427f-b08f-a0b72f15ae5f/scratchpad/stemsilence";
++const DOGFOOD_BLOCKS: usize = 48_895;
++
++fn dogfood(order_file: Option<&str>) -> Pattern {
++    let live = std::fs::read(format!("{SCRATCH}/pattern64.bin")).expect("pattern64.bin");
++    assert_eq!(live.len(), 64 * DOGFOOD_BLOCKS);
++    let order = match order_file {
++        None => (0..64).collect(),
++        Some(name) => std::fs::read_to_string(format!("{SCRATCH}/{name}"))
++            .expect("order file")
++            .trim()
++            .split(',')
++            .map(|t| t.parse().unwrap())
++            .collect(),
++    };
++    Pattern {
++        blocks: DOGFOOD_BLOCKS,
++        live,
++        order,
++    }
++}
++
++/// Every track silent.
++fn all_silent(blocks: usize) -> Pattern {
++    Pattern {
++        blocks,
++        live: vec![0; 64 * blocks],
++        order: (0..64).collect(),
++    }
++}
++
++/// Tracks 0..16 live, 16..64 silent: banks 2..8 silent at width 8.
++fn static_sparse(blocks: usize) -> Pattern {
++    let mut live = vec![0; 64 * blocks];
++    for track in 0..16 {
++        live[track * blocks..(track + 1) * blocks].fill(1);
++    }
++    Pattern {
++        blocks,
++        live,
++        order: (0..64).collect(),
++    }
++}
++
++/// Deterministic on/off runs of different lengths per track, including long silences so every
++/// bank settles, latches and is released by a downbeat on which many tracks enter together.
++fn transitions(blocks: usize) -> Pattern {
++    let mut live = vec![0u8; 64 * blocks];
++    let mut state = 0x9e37_79b9_u32;
++    for track in 0..64 {
++        let mut b = 0;
++        let mut on = track % 3 == 0;
++        while b < blocks {
++            state ^= state << 13;
++            state ^= state >> 17;
++            state ^= state << 5;
++            let run = if on {
++                1 + (state % 40) as usize
++            } else {
++                1 + (state % 900) as usize
++            };
++            if on {
++                for k in b..(b + run).min(blocks) {
++                    live[track * blocks + k] = 1;
++                }
++            }
++            b += run;
++            on = !on;
++        }
++        // A common downbeat every 1,500 blocks.
++        for k in (1500..blocks).step_by(1500) {
++            for j in k..(k + 8).min(blocks) {
++                live[track * blocks + j] = 1;
++            }
++        }
++    }
++    Pattern {
++        blocks,
++        live,
++        order: (0..64).collect(),
++    }
++}
++
++fn build(workload: Workload, backend: Backend, pattern: Pattern) -> SessionRuntime {
++    proto_pattern::set(Some(Arc::new(pattern)));
++    let runtime = SessionRuntime::build_with_dispatch(workload, PlanConfig::BASELINE, backend);
++    proto_pattern::set(None);
++    runtime
++}
++
++fn digest(runtime: &SessionRuntime) -> String {
++    let mut sink = Sha256Sink::new();
++    runtime.hash_output(&mut sink);
++    sink.finish_hex()
++}
++
++fn compare(label: &str, workload: Workload, backend: Backend, pattern: impl Fn() -> Pattern, blocks: u64) {
++    let mut declined = build(workload, backend, pattern());
++    let mut latched = build(workload, backend, pattern());
++    knob::reset();
++    let mut mismatches = 0u64;
++    for block in 0..blocks {
++        knob::set_declined(true);
++        declined.render(block).unwrap();
++        knob::set_declined(false);
++        latched.render(block).unwrap();
++        if digest(&declined) != digest(&latched) {
++            mismatches += 1;
++            if mismatches <= 3 {
++                println!("  {label}: MISMATCH at block {block}");
++            }
++        }
++    }
++    let (skips, seals) = knob::counts();
++    println!(
++        "{label:>40} {:?}: {blocks} blocks, mismatches {mismatches}, chain skips {skips}, seals {seals}",
++        backend
++    );
++    assert_eq!(mismatches, 0, "{label}: the latch moved a bit");
++}
++
++#[test]
++#[ignore = "throwaway silence-research prototype"]
++fn silence_proto_bits() {
++    for workload in [
++        Workload::SixtyFourTrackConsole,
++        Workload::SixtyFourTrackBuiltinsOnly,
++        Workload::SixtyFourTrackEqOnly,
++        Workload::SixtyFourTrackCompressorOnly,
++        Workload::SixtyFourTrackGainPanOnly,
++    ] {
++        let kind = workload.kind();
++        compare(&format!("{kind} all-silent"), workload, Backend::Simd8, || all_silent(4096), 1024);
++        compare(&format!("{kind} static-sparse"), workload, Backend::Simd8, || static_sparse(4096), 1024);
++        compare(&format!("{kind} transitions"), workload, Backend::Simd8, || transitions(6000), 6000);
++        compare(&format!("{kind} dogfood[0..8000]"), workload, Backend::Simd8, || dogfood(None), 8000);
++    }
++    compare(
++        "idle row (its own silent sources)",
++        Workload::SixtyFourTrackIdle,
++        Backend::Simd8,
++        || all_silent(4096),
++        1024,
++    );
++    compare(
++        "builtins_only transitions (Simd4)",
++        Workload::SixtyFourTrackBuiltinsOnly,
++        Backend::Simd4,
++        || transitions(6000),
++        6000,
++    );
++}
++
++fn p(v: &mut [u64], q: f64) -> u64 {
++    v.sort_unstable();
++    v[((v.len() - 1) as f64 * q) as usize]
++}
++
++/// Interleaved A/B: `repeats` x (declined pass, latched pass) of `blocks` blocks from `start`.
++fn ab(label: &str, workload: Workload, backend: Backend, pattern: impl Fn() -> Pattern, warmup: u64, blocks: u64, repeats: usize) {
++    let mut declined = build(workload, backend, pattern());
++    let mut latched = build(workload, backend, pattern());
++    knob::set_declined(true);
++    for b in 0..warmup {
++        declined.render(b).unwrap();
++    }
++    knob::set_declined(false);
++    for b in 0..warmup {
++        latched.render(b).unwrap();
++    }
++    let mut rows = Vec::new();
++    for _ in 0..repeats {
++        for (arm, runtime) in [(true, &mut declined), (false, &mut latched)] {
++            knob::set_declined(arm);
++            knob::reset();
++            let mut v = Vec::with_capacity(blocks as usize);
++            for b in 0..blocks {
++                let t = Instant::now();
++                runtime.render(warmup + b).unwrap();
++                v.push(t.elapsed().as_nanos() as u64);
++            }
++            let mean = v.iter().sum::<u64>() as f64 / v.len() as f64;
++            let (skips, _) = knob::counts();
++            rows.push((arm, mean, p(&mut v, 0.5), p(&mut v, 0.95), p(&mut v, 1.0), skips));
++        }
++    }
++    knob::set_declined(false);
++    for (arm, mean, p50, p95, max, skips) in rows {
++        println!(
++            "{label:>44} {backend:?} {:>8}: mean {:>9.0} ns  p50 {p50:>8} ns  p95 {p95:>8} ns  max {max:>8} ns  skips/block {:.2}",
++            if arm { "declined" } else { "latched" },
++            mean,
++            skips as f64 / blocks as f64
++        );
++    }
++}
++
++#[test]
++#[ignore = "throwaway silence-research prototype"]
++fn silence_proto_timing() {
++    let only = std::env::var("SILENCE_ONLY").ok();
++    let run = |name: &str| only.as_deref().is_none_or(|o| o.split(',').any(|x| x == name));
++    if run("idle") {
++        ab("idle row", Workload::SixtyFourTrackIdle, Backend::Simd8, || all_silent(4096), 512, 4000, 3);
++    }
++    if run("idle-builtins") {
++        ab("builtins_only all-silent", Workload::SixtyFourTrackBuiltinsOnly, Backend::Simd8, || all_silent(4096), 512, 4000, 3);
++        ab("builtins_only all-silent", Workload::SixtyFourTrackBuiltinsOnly, Backend::Simd4, || all_silent(4096), 512, 4000, 3);
++    }
++    if run("dense") {
++        ab("console dense (tone)", Workload::SixtyFourTrackConsole, Backend::Simd8, || static_sparse_all_live(), 64, 4000, 3);
++    }
++    if run("static") {
++        ab("console static sparse 48/64", Workload::SixtyFourTrackConsole, Backend::Simd8, || static_sparse(4096), 2048, 4000, 3);
++    }
++    if run("dogfood") {
++        let full = DOGFOOD_BLOCKS as u64;
++        ab("console dogfood file order", Workload::SixtyFourTrackConsole, Backend::Simd8, || dogfood(None), 0, full, 1);
++        ab("console dogfood grouped (W8 @1 s)", Workload::SixtyFourTrackConsole, Backend::Simd8, || dogfood(Some("order64_w8_a345.txt")), 0, full, 1);
++        ab("builtins_only dogfood file order", Workload::SixtyFourTrackBuiltinsOnly, Backend::Simd8, || dogfood(None), 0, full, 1);
++        ab("builtins_only dogfood grouped (W8 @1 s)", Workload::SixtyFourTrackBuiltinsOnly, Backend::Simd8, || dogfood(Some("order64_w8_a345.txt")), 0, full, 1);
++    }
++    if run("dogfood4") {
++        let full = DOGFOOD_BLOCKS as u64;
++        ab("builtins_only dogfood file order", Workload::SixtyFourTrackBuiltinsOnly, Backend::Simd4, || dogfood(None), 0, full, 1);
++        ab("builtins_only dogfood grouped (W4 @1 s)", Workload::SixtyFourTrackBuiltinsOnly, Backend::Simd4, || dogfood(Some("order64_w4_a345.txt")), 0, full, 1);
++    }
++}
++
++/// Chunk-interleaved A/B over a long pattern: both arms advance through the same blocks, 500 at a
++/// time, alternating which arm goes first, so host drift lands on both arms equally.
++fn ab_interleaved(label: &str, workload: Workload, backend: Backend, pattern: impl Fn() -> Pattern, blocks: u64) {
++    let mut runtimes = [build(workload, backend, pattern()), build(workload, backend, pattern())];
++    let mut times: [Vec<u64>; 2] = [Vec::with_capacity(blocks as usize), Vec::with_capacity(blocks as usize)];
++    let mut skips = [0u64; 2];
++    let chunk = 500u64;
++    let mut start = 0u64;
++    let mut flip = false;
++    while start < blocks {
++        let end = (start + chunk).min(blocks);
++        let order = if flip { [1usize, 0] } else { [0usize, 1] };
++        for arm in order {
++            knob::set_declined(arm == 0);
++            knob::reset();
++            for b in start..end {
++                let t = Instant::now();
++                runtimes[arm].render(b).unwrap();
++                times[arm].push(t.elapsed().as_nanos() as u64);
++            }
++            skips[arm] += knob::counts().0;
++        }
++        flip = !flip;
++        start = end;
++    }
++    knob::set_declined(false);
++    for arm in 0..2 {
++        let v = &mut times[arm];
++        let mean = v.iter().sum::<u64>() as f64 / v.len() as f64;
++        println!(
++            "{label:>44} {backend:?} {:>8}: mean {:>9.0} ns  p50 {:>8} ns  p95 {:>8} ns  p99 {:>8} ns  max {:>8} ns  skips/block {:.2}",
++            if arm == 0 { "declined" } else { "latched" },
++            mean,
++            p(v, 0.5),
++            p(v, 0.95),
++            p(v, 0.99),
++            p(v, 1.0),
++            skips[arm] as f64 / blocks as f64
++        );
++    }
++}
++
++#[test]
++#[ignore = "throwaway silence-research prototype"]
++fn silence_proto_interleaved() {
++    let only = std::env::var("SILENCE_ONLY").ok();
++    let run = |name: &str| only.as_deref().is_none_or(|o| o.split(',').any(|x| x == name));
++    let full = DOGFOOD_BLOCKS as u64;
++    if run("console") {
++        ab_interleaved("console dogfood file order", Workload::SixtyFourTrackConsole, Backend::Simd8, || dogfood(None), full);
++        ab_interleaved("console dogfood grouped (W8 @1 s)", Workload::SixtyFourTrackConsole, Backend::Simd8, || dogfood(Some("order64_w8_a345.txt")), full);
++    }
++    if run("builtins") {
++        ab_interleaved("builtins_only dogfood file order", Workload::SixtyFourTrackBuiltinsOnly, Backend::Simd8, || dogfood(None), full);
++        ab_interleaved("builtins_only dogfood grouped (W8 @1 s)", Workload::SixtyFourTrackBuiltinsOnly, Backend::Simd8, || dogfood(Some("order64_w8_a345.txt")), full);
++    }
++    if run("builtins4") {
++        ab_interleaved("builtins_only dogfood file order", Workload::SixtyFourTrackBuiltinsOnly, Backend::Simd4, || dogfood(None), full);
++        ab_interleaved("builtins_only dogfood grouped (W4 @1 s)", Workload::SixtyFourTrackBuiltinsOnly, Backend::Simd4, || dogfood(Some("order64_w4_a345.txt")), full);
++    }
++    if run("dense") {
++        ab_interleaved("console dense (tone)", Workload::SixtyFourTrackConsole, Backend::Simd8, static_sparse_all_live, 8000);
++    }
++}
++
++/// All tracks silent for `quiet` blocks, then all live for `loud` blocks, repeated.
++fn downbeats(quiet: usize, loud: usize, cycles: usize) -> Pattern {
++    let blocks = (quiet + loud) * cycles;
++    let mut live = vec![0u8; 64 * blocks];
++    for track in 0..64 {
++        for cycle in 0..cycles {
++            let start = cycle * (quiet + loud) + quiet;
++            live[track * blocks + start..track * blocks + start + loud].fill(1);
++        }
++    }
++    Pattern {
++        blocks,
++        live,
++        order: (0..64).collect(),
++    }
++}
++
++/// The silence-to-dense transition: the first loud block after a long silence, both arms, the
++/// arms alternating which renders a cycle first.
++#[test]
++#[ignore = "throwaway silence-research prototype"]
++fn silence_proto_downbeat() {
++    let (quiet, loud, cycles) = (4000usize, 64usize, 6usize);
++    for workload in [Workload::SixtyFourTrackConsole, Workload::SixtyFourTrackBuiltinsOnly] {
++        let mut runtimes = [
++            build(workload, Backend::Simd8, downbeats(quiet, loud, cycles)),
++            build(workload, Backend::Simd8, downbeats(quiet, loud, cycles)),
++        ];
++        let mut first: [Vec<u64>; 2] = [Vec::new(), Vec::new()];
++        let mut steady: [Vec<u64>; 2] = [Vec::new(), Vec::new()];
++        let mut last_quiet: [Vec<u64>; 2] = [Vec::new(), Vec::new()];
++        for cycle in 0..cycles {
++            let base = (cycle * (quiet + loud)) as u64;
++            let order = if cycle % 2 == 0 { [0usize, 1] } else { [1, 0] };
++            for arm in order {
++                knob::set_declined(arm == 0);
++                for b in 0..(quiet + loud) as u64 {
++                    let t = Instant::now();
++                    runtimes[arm].render(base + b).unwrap();
++                    let ns = t.elapsed().as_nanos() as u64;
++                    let pos = b as usize;
++                    if pos == quiet {
++                        first[arm].push(ns);
++                    } else if pos > quiet + 8 {
++                        steady[arm].push(ns);
++                    } else if pos + 1 == quiet {
++                        last_quiet[arm].push(ns);
++                    }
++                }
++            }
++        }
++        knob::set_declined(false);
++        for arm in 0..2 {
++            let label = if arm == 0 { "declined" } else { "latched" };
++            let lq = p(&mut last_quiet[arm], 0.5);
++            let f50 = p(&mut first[arm], 0.5);
++            let fmax = p(&mut first[arm], 1.0);
++            let st = p(&mut steady[arm], 0.5);
++            println!(
++                "{:>34} {label:>8}: last quiet block median {lq:>7} ns; first loud block median {f50:>7} max {fmax:>7} ns; steady loud p50 {st:>7} ns",
++                workload.kind(),
++            );
++        }
++    }
++}
++
++/// Decompose the latched idle row: full latch, without the limiter advance, without the input
++/// scans, without both (timing only; the last three move cursor bits, never output bits).
++#[test]
++#[ignore = "throwaway silence-research prototype"]
++fn silence_proto_idle_parts() {
++    let mut runtime = build(Workload::SixtyFourTrackIdle, Backend::Simd8, all_silent(4096));
++    for b in 0..512 {
++        runtime.render(b).unwrap();
++    }
++    let mut next = 512u64;
++    for _ in 0..3 {
++        for bits in [0u8, 1, 2, 3] {
++            knob::set_timing_only(bits);
++            let mut v = Vec::with_capacity(4000);
++            for _ in 0..4000 {
++                let t = Instant::now();
++                runtime.render(next).unwrap();
++                next += 1;
++                v.push(t.elapsed().as_nanos() as u64);
++            }
++            println!("idle latched, timing-only bits {bits}: p50 {} ns", p(&mut v, 0.5));
++        }
++    }
++    knob::set_timing_only(0);
++}
++
++fn static_sparse_all_live() -> Pattern {
++    Pattern {
++        blocks: 4096,
++        live: vec![1; 64 * 4096],
++        order: (0..64).collect(),
++    }
++}

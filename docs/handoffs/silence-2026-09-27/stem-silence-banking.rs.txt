@@ -1,0 +1,334 @@
+//! Silence pattern of the dogfood stems, and activity-aware banking headroom.
+//!
+//! Per stem and per 128-frame block: live, digital silence (every PCM byte of both channels zero,
+//! i.e. an all-`+0.0` block after integer conversion), or absent (past the stem's last frame).
+//! Session length = the longest stem. Banks are groups of W tracks; a bank-block is "silent" when
+//! every member is silent (digital or absent) at that block and has been for the last `A` blocks
+//! (the settle allowance; A = 1 means only the current block).
+use std::fs;
+use std::io::Read;
+
+const Q: usize = 128;
+
+struct Stem {
+    name: String,
+    // 0 = live, 1 = digital silence, 2 = absent
+    status: Vec<u8>,
+}
+
+fn read_stem(path: &std::path::Path, name: &str) -> (Vec<u8>, usize) {
+    let mut f = fs::File::open(path).unwrap();
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).unwrap();
+    assert_eq!(&buf[0..4], b"RIFF");
+    assert_eq!(&buf[8..12], b"WAVE");
+    let mut pos = 12;
+    let mut channels = 0usize;
+    let mut bits = 0usize;
+    let mut data = None;
+    while pos + 8 <= buf.len() {
+        let id = &buf[pos..pos + 4];
+        let size = u32::from_le_bytes(buf[pos + 4..pos + 8].try_into().unwrap()) as usize;
+        let body = pos + 8;
+        if id == b"fmt " {
+            channels = u16::from_le_bytes(buf[body + 2..body + 4].try_into().unwrap()) as usize;
+            bits = u16::from_le_bytes(buf[body + 14..body + 16].try_into().unwrap()) as usize;
+        } else if id == b"data" {
+            let end = (body + size).min(buf.len());
+            data = Some((body, end));
+            break;
+        }
+        pos = body + size + (size & 1);
+    }
+    let (start, end) = data.expect("data chunk");
+    let frame_bytes = channels * bits / 8;
+    assert!(channels == 2 && frame_bytes > 0, "{name}: channels {channels} bits {bits}");
+    let frames = (end - start) / frame_bytes;
+    let blocks = frames.div_ceil(Q);
+    let mut status = Vec::with_capacity(blocks);
+    for b in 0..blocks {
+        let f0 = b * Q;
+        let f1 = ((b + 1) * Q).min(frames);
+        let bytes = &buf[start + f0 * frame_bytes..start + f1 * frame_bytes];
+        let silent = bytes.iter().all(|&x| x == 0);
+        status.push(u8::from(silent));
+    }
+    (status, frames)
+}
+
+/// Bitset per stem of "silent" (digital or absent) over the session's blocks.
+type Bits = Vec<u64>;
+
+fn silent_bits(stem: &Stem, blocks: usize) -> Bits {
+    let mut bits = vec![0u64; blocks.div_ceil(64)];
+    for b in 0..blocks {
+        let s = stem.status.get(b).copied().unwrap_or(2);
+        if s != 0 {
+            bits[b / 64] |= 1 << (b % 64);
+        }
+    }
+    bits
+}
+
+/// Blocks at which the AND of `members` has been set for the last `allowance` blocks.
+fn qualified(members: &[usize], bits: &[Bits], blocks: usize, allowance: usize) -> usize {
+    let words = bits[0].len();
+    let mut and = vec![u64::MAX; words];
+    for &m in members {
+        for (a, b) in and.iter_mut().zip(&bits[m]) {
+            *a &= *b;
+        }
+    }
+    if allowance <= 1 {
+        let mut count = 0;
+        for (i, w) in and.iter().enumerate() {
+            let mut w = *w;
+            if (i + 1) * 64 > blocks {
+                let valid = blocks - i * 64;
+                if valid < 64 {
+                    w &= (1u64 << valid) - 1;
+                }
+            }
+            count += w.count_ones() as usize;
+        }
+        return count;
+    }
+    let mut run = 0usize;
+    let mut count = 0;
+    for (i, &word) in and.iter().enumerate() {
+        let base = i * 64;
+        if base + 64 <= blocks && word == u64::MAX {
+            let before = run;
+            run += 64;
+            count += run.saturating_sub(allowance.max(before + 1) - 1).min(64);
+            continue;
+        }
+        if base + 64 <= blocks && word == 0 {
+            run = 0;
+            continue;
+        }
+        for b in base..(base + 64).min(blocks) {
+            if word >> (b - base) & 1 == 1 {
+                run += 1;
+                if run >= allowance {
+                    count += 1;
+                }
+            } else {
+                run = 0;
+            }
+        }
+    }
+    count
+}
+
+fn score(groups: &[Vec<usize>], bits: &[Bits], blocks: usize, allowance: usize) -> usize {
+    groups
+        .iter()
+        .map(|g| qualified(g, bits, blocks, allowance))
+        .sum()
+}
+
+/// Greedy seed then pairwise-swap hill climbing, maximizing silent bank-blocks at `allowance`.
+///
+/// Seed: repeatedly open a bank with the unassigned track that is silent most often, then add the
+/// unassigned track that keeps the running intersection largest (ties: lowest index), until the
+/// bank holds W tracks. Climb: try every swap of two tracks in different banks; take the best
+/// strictly improving swap; repeat until none improves.
+fn optimise(n: usize, w: usize, bits: &[Bits], blocks: usize, allowance: usize) -> Vec<Vec<usize>> {
+    let mut unassigned: Vec<usize> = (0..n).collect();
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    while !unassigned.is_empty() {
+        let seed = *unassigned
+            .iter()
+            .max_by_key(|&&t| (qualified(&[t], bits, blocks, allowance), usize::MAX - t))
+            .unwrap();
+        unassigned.retain(|&t| t != seed);
+        let mut group = vec![seed];
+        while group.len() < w && !unassigned.is_empty() {
+            let best = *unassigned
+                .iter()
+                .max_by_key(|&&t| {
+                    let mut g = group.clone();
+                    g.push(t);
+                    (qualified(&g, bits, blocks, allowance), usize::MAX - t)
+                })
+                .unwrap();
+            unassigned.retain(|&t| t != best);
+            group.push(best);
+        }
+        groups.push(group);
+    }
+    let mut current: Vec<usize> = groups
+        .iter()
+        .map(|g| qualified(g, bits, blocks, allowance))
+        .collect();
+    loop {
+        let mut best: Option<(isize, usize, usize, usize, usize)> = None;
+        for a in 0..groups.len() {
+            for b in a + 1..groups.len() {
+                for i in 0..groups[a].len() {
+                    for j in 0..groups[b].len() {
+                        let mut ga = groups[a].clone();
+                        let mut gb = groups[b].clone();
+                        std::mem::swap(&mut ga[i], &mut gb[j]);
+                        let sa = qualified(&ga, bits, blocks, allowance);
+                        let sb = qualified(&gb, bits, blocks, allowance);
+                        let delta = (sa + sb) as isize - (current[a] + current[b]) as isize;
+                        if delta > 0 && best.is_none_or(|x| delta > x.0) {
+                            best = Some((delta, a, b, i, j));
+                        }
+                    }
+                }
+            }
+        }
+        match best {
+            Some((_, a, b, i, j)) => {
+                let t = groups[a][i];
+                groups[a][i] = groups[b][j];
+                groups[b][j] = t;
+                current[a] = qualified(&groups[a], bits, blocks, allowance);
+                current[b] = qualified(&groups[b], bits, blocks, allowance);
+            }
+            None => break,
+        }
+    }
+    groups
+}
+
+fn main() {
+    let dir = std::path::Path::new("/home/bl/misofm/agents/stems");
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| {
+            let e = e.ok()?;
+            let n = e.file_name().into_string().ok()?;
+            n.ends_with(".wav").then_some(n)
+        })
+        .collect();
+    names.sort(); // byte order of file names
+    let mut stems = Vec::new();
+    let mut session_blocks = 0;
+    for name in &names {
+        let (status, frames) = read_stem(&dir.join(name), name);
+        session_blocks = session_blocks.max(status.len());
+        eprintln!("{name}: {frames} frames, {} blocks", status.len());
+        stems.push(Stem {
+            name: name.clone(),
+            status,
+        });
+    }
+    let n = stems.len();
+    let blocks = session_blocks;
+    let (mut live, mut digital, mut absent) = (0usize, 0usize, 0usize);
+    for s in &stems {
+        for b in 0..blocks {
+            match s.status.get(b).copied().unwrap_or(2) {
+                0 => live += 1,
+                1 => digital += 1,
+                _ => absent += 1,
+            }
+        }
+    }
+    let total = (n * blocks) as f64;
+    println!("stems {n}, session blocks {blocks} ({:.1} s at 44.1 kHz)", blocks as f64 * Q as f64 / 44100.0);
+    println!(
+        "track-blocks: live {:.1} %, digital silence {:.1} %, absent {:.1} %",
+        100.0 * live as f64 / total,
+        100.0 * digital as f64 / total,
+        100.0 * absent as f64 / total
+    );
+    // Per-block silent-track count distribution.
+    let mut per_block: Vec<usize> = (0..blocks)
+        .map(|b| stems.iter().filter(|s| s.status.get(b).copied().unwrap_or(2) != 0).count())
+        .collect();
+    let mean = per_block.iter().sum::<usize>() as f64 / blocks as f64;
+    per_block.sort_unstable();
+    println!(
+        "silent tracks per block: mean {mean:.1}, p10 {}, p50 {}, p90 {}, min {}, max {}",
+        per_block[blocks / 10],
+        per_block[blocks / 2],
+        per_block[blocks * 9 / 10],
+        per_block[0],
+        per_block[blocks - 1]
+    );
+    let bits: Vec<Bits> = stems.iter().map(|s| silent_bits(s, blocks)).collect();
+    if let Ok(path) = std::env::var("ORDER81") {
+        let order: Vec<usize> = fs::read_to_string(path).unwrap().trim().split(',').map(|t| t.parse().unwrap()).collect();
+        for w in [4usize, 8] {
+            let groups: Vec<Vec<usize>> = order.chunks(w).map(<[usize]>::to_vec).collect();
+            let cells: Vec<String> = [1usize, 138, 345, 1585]
+                .iter()
+                .map(|&a| format!("{:.1}", 100.0 * score(&groups, &bits, blocks, a) as f64 / (groups.len() * blocks) as f64))
+                .collect();
+            println!("given order, W{w}: silent bank-blocks % at allowance [1 blk, 0.4 s, 1 s, 4.6 s] = {cells:?}");
+        }
+        return;
+    }
+    if std::env::var("EXPORT64").is_ok() {
+        // The first 64 stems in file order: activity per block (1 = live), stem-major, and the
+        // track orders (stem index per track) for file order and the optimised groupings at W8/W4.
+        let n64 = 64usize;
+        let mut out = Vec::with_capacity(n64 * blocks);
+        for s in stems.iter().take(n64) {
+            for b in 0..blocks {
+                out.push(u8::from(s.status.get(b).copied().unwrap_or(2) == 0));
+            }
+        }
+        fs::write("pattern64.bin", &out).unwrap();
+        let sub: Vec<Bits> = bits.iter().take(n64).cloned().collect();
+        for (w, a) in [(8usize, 1usize), (8, 345), (4, 1), (4, 345)] {
+            let g = optimise(n64, w, &sub, blocks, a);
+            let order: Vec<String> = g.iter().flatten().map(|t| t.to_string()).collect();
+            fs::write(format!("order64_w{w}_a{a}.txt"), order.join(",")).unwrap();
+            let fo: Vec<Vec<usize>> = (0..n64).collect::<Vec<_>>().chunks(w).map(<[usize]>::to_vec).collect();
+            let pct = |gr: &[Vec<usize>], al: usize| 100.0 * score(gr, &sub, blocks, al) as f64 / (gr.len() * blocks) as f64;
+            println!("first 64 stems, W{w}, optimised at allowance {a}: file order {:.1}/{:.1}/{:.1} %, optimised {:.1}/{:.1}/{:.1} % (allowance 1 blk / 1 s / 4.6 s)",
+                pct(&fo, 1), pct(&fo, 345), pct(&fo, 1585), pct(&g, 1), pct(&g, 345), pct(&g, 1585));
+        }
+        let (mut live, mut total) = (0usize, 0usize);
+        for s in stems.iter().take(n64) { for b in 0..blocks { total += 1; if s.status.get(b).copied().unwrap_or(2) == 0 { live += 1; } } }
+        println!("first 64 stems: live {:.1} % of track-blocks; names {}..{}", 100.0 * live as f64 / total as f64, stems[0].name, stems[63].name);
+        return;
+    }
+    // Settle allowances in blocks at 44.1 kHz: 1 block, 0.4 s (HPF 25 Hz to the D7 flush), 1 s, 4.6 s.
+    let allowances = [1usize, 138, 345, 1585];
+    for w in [4usize, 8] {
+        let file_order: Vec<Vec<usize>> = (0..n).collect::<Vec<_>>().chunks(w).map(<[usize]>::to_vec).collect();
+        let banks = file_order.len();
+        println!("\n== width {w}: {banks} banks ({} full) ==", n / w);
+        let opt1 = optimise(n, w, &bits, blocks, 1);
+        let opt345 = optimise(n, w, &bits, blocks, 345);
+        for (label, groups) in [("file order", &file_order), ("optimised @1 block", &opt1), ("optimised @1 s", &opt345)] {
+            let cells: Vec<String> = allowances
+                .iter()
+                .map(|&a| {
+                    let s = score(groups, &bits, blocks, a);
+                    format!("{:.1}", 100.0 * s as f64 / (banks * blocks) as f64)
+                })
+                .collect();
+            // Mean silent banks per block at allowance 1 and 1 s.
+            println!("{label:>20}: silent bank-blocks % at allowance [1 blk, 0.4 s, 1 s, 4.6 s] = {cells:?}");
+        }
+        for (label, groups) in [("optimised @1 block", &opt1), ("optimised @1 s", &opt345)] {
+            println!("  {label} grouping:");
+            for g in groups.iter() {
+                let names: Vec<&str> = g.iter().map(|&t| stems[t].name.trim_end_matches(".wav")).collect();
+                println!("    {}", names.join(", "));
+            }
+        }
+        // Silent-lane fraction inside partially silent banks (waste), file order, allowance 1.
+        let mut waste = 0usize;
+        for g in &file_order {
+            for b in 0..blocks {
+                let silent = g.iter().filter(|&&t| bits[t][b / 64] >> (b % 64) & 1 == 1).count();
+                if silent != g.len() {
+                    waste += silent;
+                }
+            }
+        }
+        println!(
+            "  file order: silent track-blocks stranded in non-silent banks: {:.1} % of all track-blocks",
+            100.0 * waste as f64 / total
+        );
+    }
+}
