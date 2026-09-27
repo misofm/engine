@@ -26,12 +26,13 @@ pub use runtime::{
 #[doc(hidden)]
 pub use runtime::{
     TestOnlyFailedBufferCapture, TestOnlySelectedSplitFader, TestOnlySplitPairTableWitness,
-    test_only_arm_failed_buffer_capture, test_only_bank_sample_peak_passes,
-    test_only_completion_disabled, test_only_failed_buffer_capture, test_only_meter_input_counts,
-    test_only_meter_input_reset, test_only_observation_dispatch_counts,
-    test_only_observation_dispatch_reset, test_only_reset_selected_split_fader,
-    test_only_reset_split_pair_table_witness, test_only_resident_input_counts,
-    test_only_resident_input_reset, test_only_selected_split_fader,
+    test_only_arm_failed_buffer_capture, test_only_bank_meter_passes,
+    test_only_bank_sample_peak_passes, test_only_completion_disabled,
+    test_only_failed_buffer_capture, test_only_meter_input_counts, test_only_meter_input_reset,
+    test_only_observation_dispatch_counts, test_only_observation_dispatch_reset,
+    test_only_reset_selected_split_fader, test_only_reset_split_pair_table_witness,
+    test_only_resident_input_counts, test_only_resident_input_reset,
+    test_only_selected_split_fader, test_only_set_bank_meter_declined,
     test_only_set_bank_sample_peak_declined, test_only_set_completion_disabled,
     test_only_set_output_route_fold_declined, test_only_set_route_fold_declined,
     test_only_set_scatter_redirect_declined, test_only_set_source_in_place_declined,
@@ -2185,9 +2186,43 @@ pub struct GraphResidentObservationBlock<'a> {
     ///
     /// `Some` only when this unit's bank pass ran this block, which it does only for a unit bound
     /// with at least one final-slot observer whose [`GraphRuntimeObserver::accepts_sample_peak`]
-    /// is true. It is then offered to every observer of the lane, so an observer that did not ask
-    /// for it must ignore it.
+    /// is true, or whose full meter pass ran this block ([`Self::meter`], issue #950), which carries
+    /// the same peak. It is then offered to every observer of the lane, so an observer that did not
+    /// ask for it must ignore it.
     pub sample_peak: Option<[f32; 2]>,
+    /// This lane's full meter pass over this block, computed once for the whole bank (issue #950).
+    ///
+    /// `Some` only for a final-slot member of a unit whose full pass ran this block, which it does
+    /// only for a unit bound with at least one final-slot observer whose
+    /// [`GraphRuntimeObserver::accepts_banked_meter`] is true, and only when some final lane's
+    /// observer answered [`GraphRuntimeObserver::banked_meter_seed`]. It is offered to every
+    /// observer of the lane; an observer uses it only if it accepted the pass, and only if
+    /// [`GraphBankedMeterLane::energy_seed`] is its own state.
+    pub meter: Option<GraphBankedMeterLane>,
+}
+
+/// One lane's full meter pass over one final resident block (issue #950): the sanitized sample
+/// peak, the clipped and sanitized counts and the energy sum, per channel as `[left, right]`, left
+/// read from the left plane and right from the right plane.
+///
+/// "Sanitized" is the meter's `normal_or_zero`: a finite, non-subnormal sample is kept and anything
+/// else becomes `+0.0` before it is measured. The pass is `lane::kernels::builtins::meter_block` at
+/// the bank's width.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GraphBankedMeterLane {
+    /// The maximum of `+0.0` and every sanitized magnitude of the block.
+    pub sample_peak: [f32; 2],
+    /// How many sanitized magnitudes of the block are `>= 1.0`.
+    pub clipped: [u32; 2],
+    /// How many of the block's words the sanitization replaced: NaN, `±inf` and nonzero
+    /// subnormals.
+    pub sanitized: [u32; 2],
+    /// The energy the pass started from: the first [`GraphRuntimeObserver::banked_meter_seed`]
+    /// answer in binding order among this lane's observers, or `+0.0` when none answered.
+    pub energy_seed: [f64; 2],
+    /// `energy_seed` plus the square of every sanitized sample, widened to `f64` and added one
+    /// sample at a time in frame order: the sum the answering observer's own loop would reach.
+    pub energy: [f64; 2],
 }
 /// A bounded observer invoked after its node has completed.
 pub trait GraphRuntimeObserver: Send {
@@ -2226,6 +2261,28 @@ pub trait GraphRuntimeObserver: Send {
     /// declines, so an observer that would not use the peak never pays for it.
     fn accepts_sample_peak(&self) -> bool {
         false
+    }
+
+    /// Whether this observer consumes [`GraphResidentObservationBlock::meter`] (issue #950).
+    ///
+    /// Read once, when the runtime is bound, and never on the render path: a bank runs its full
+    /// meter pass only if some observer of its final slot answers `true` here. The default
+    /// declines, so an observer that would not use the pass never pays for it.
+    fn accepts_banked_meter(&self) -> bool {
+        false
+    }
+
+    /// The `[left, right]` energy this observer's own loop would start a `frames`-frame block at
+    /// `first_sample` from, or `None` to decline the full meter pass for this block (issue #950).
+    ///
+    /// Called at render, after the unit executed and before any observer of the unit runs, on the
+    /// observers of each final-slot member in binding order until one answers. It must be pure --
+    /// a read of this observer's own state that changes nothing -- bounded, and allocation-free:
+    /// an observer that fails later in the same block must leave every other observer as it was.
+    /// The answer seeds the pass; it does not commit anything. An observer that accepts the result
+    /// must check [`GraphBankedMeterLane::energy_seed`] against its own state before using it.
+    fn banked_meter_seed(&self, _first_sample: u64, _frames: u32) -> Option<[f64; 2]> {
+        None
     }
 
     /// Invalidate a pending capture after a failed graph render.
