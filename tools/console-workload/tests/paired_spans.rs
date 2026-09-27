@@ -1026,6 +1026,25 @@ fn scenarios(fxs: &[Fx], lanes: usize) -> Vec<Scenario> {
             }
             out.push(scenario);
 
+            // A lone `Left` on one parameter and a lone `Right` on the next, carrying one value:
+            // the two spans are adjacent in the sorted window (`(p, Left) < (p + 1, Right)`) and
+            // are not a pair.
+            let mut scenario = Scenario::new(
+                format!("{label}: a Left on one parameter and a Right on the next, slot {slot}"),
+                12,
+                Expect::RetiredAt(WRITE),
+            )
+            .asymmetric();
+            scenario.at(
+                WRITE,
+                record(slot, 2, parameter, ParameterChannel::Left, value),
+            );
+            scenario.at(
+                WRITE,
+                record(slot, 2, parameter + 1, ParameterChannel::Right, value),
+            );
+            out.push(scenario);
+
             // A `Both` span on a `PerLane` parameter is refused on both channels by every launch
             // effect, so it needs no twin and moves nothing; the pair beside it is kept.
             let mut scenario = Scenario::new(
