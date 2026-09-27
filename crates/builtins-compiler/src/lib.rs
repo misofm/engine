@@ -4679,6 +4679,20 @@ impl GraphRuntimeObserver for MeterObserver {
         self.0.metrics() == builtins::MeterMetricSet::SAMPLE_PEAK
     }
 
+    /// Issue #950: a meter that can commit a banked block -- no held peak with a hold or a decay
+    /// -- asks the bank for its full meter pass, unless it selects exactly `SAMPLE_PEAK`, which
+    /// issue #943's cheaper peak pass already serves.
+    fn accepts_banked_meter(&self) -> bool {
+        self.0.banked_eligible() && self.0.metrics() != builtins::MeterMetricSet::SAMPLE_PEAK
+    }
+
+    /// Issue #950: the energy this meter's own loop would start the block from, read without
+    /// changing anything.
+    fn banked_meter_seed(&self, first_sample: u64, frames: u32) -> Option<[f64; 2]> {
+        self.0
+            .banked_seed(first_sample, usize::try_from(frames).ok()?)
+    }
+
     fn activation_changed(&mut self, active: bool, generation: u64, _first_sample: u64) {
         if active {
             self.0.restart_observation(generation);
@@ -4698,6 +4712,18 @@ impl GraphRuntimeObserver for MeterObserver {
         &mut self,
         block: graph::GraphResidentObservationBlock<'_>,
     ) -> Option<Result<(), RenderError>> {
+        // Issue #950: the full pass is this meter's only if it accepted it. A `SAMPLE_PEAK` meter
+        // on a unit whose full pass ran merges that pass's peak through issue #943's call.
+        let banked = block
+            .meter
+            .filter(|_| self.accepts_banked_meter())
+            .map(|meter| builtins::MeterBankedBlock {
+                sample_peak: meter.sample_peak,
+                clipped: meter.clipped.map(u64::from),
+                sanitized: meter.sanitized.map(u64::from),
+                energy_seed: meter.energy_seed,
+                energy: meter.energy,
+            });
         Some(
             builtins::MeterInput::strided(
                 block.lane.left(),
@@ -4706,9 +4732,16 @@ impl GraphRuntimeObserver for MeterObserver {
                 block.lane.width().lanes() as usize,
                 block.lane.lane(),
             )
-            .and_then(|input| {
-                self.0
-                    .observe_input_with_block_peak(input, block.first_sample, block.sample_peak)
+            .and_then(|input| match banked {
+                Some(banked) => {
+                    self.0
+                        .observe_input_banked(input, block.first_sample, Some(banked))
+                }
+                None => self.0.observe_input_with_block_peak(
+                    input,
+                    block.first_sample,
+                    block.sample_peak,
+                ),
             })
             .map_err(|error| match error {
                 builtins::MeterObservationError::SampleTimeOverflow => RenderError::TimeOverflow,

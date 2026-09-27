@@ -395,3 +395,29 @@ Host AMD EPYC 7313P, rustc 1.97.1, pin `+avx2,+fma`.
 The same mutation is red in `builtins` (the scenario gates), `builtins-compiler`
 (`composite_live_sequence_…`) and `console-workload` (the metered row); those rows, and M1, M2 and
 M5, are in `crates/builtins/tests/MUTATIONS.md`.
+
+## Issue #950 — the full meter block pass
+
+`src/kernels/builtins.rs` adds `meter_block` and `MeterBlock`. Gate M1 is `tests/meter_block.rs`
+(`Simd8`, `Simd4` and `f32` against the `f32` kernel over the de-interleaved lane and an
+independent scalar `ALL` oracle, 64 carried blocks at frames 1, 2, 3, 127, 128 and 129, hostile and
+tone input, random positive seeds; the bit sweep of the count boundaries; and the witness that a
+zero-seeded partial plus the seed is a different sum). The wasm count is
+`wasm_gate_corpus::meter_block_mismatches`, run by `tools/wasm-gates` on its native, scalar-wasm and
+simd128-wasm legs, and the lowering pin is `check_f64_lane_lowering`'s census of
+`miso_gate_meter_block_probe` in `scripts/run-wasm-gates.sh`. Each row was applied alone as an
+exact-text replacement (match count one) to `326607ce`, run, and restored with `git checkout`.
+M1 in dev; the count through `cargo run --release -p wasm-gates -- --native` (and, for K-6, both
+guest legs built with `run-wasm-gates.sh`'s commands); the pin by running that script. Host AMD EPYC
+7313P, rustc 1.97.1, pin `+avx2,+fma`, wasmtime 47.0.3.
+
+| # | mutation | M1 (`meter_block`, dev) | `meter_block_mismatches` | lowering pin |
+| --- | --- | --- | --- | --- |
+| K-1 | the energy starts from `+0.0` and the seed is added once after the loop (`seed.add(partial)`), the class-B form | RED, 2 of 3: `width 8 Hostile frames 2 block 2 lane 7: energy against the meter's serial loop` (`...022` against `...021`, one ulp); the reassociation witness (the two forms now agree) | RED, `686` on the native leg | not run |
+| K-5 | the sanitized count adds `1.0 & !(a >= MIN_POSITIVE & a < INFINITY)`, which also counts both zeros | RED, 2 of 3: `width 8 Hostile frames 1 block 4 lane 5: sanitized against the meter's serial loop` (`1` against `0`); the bit sweep | RED, `1315` native | not run |
+| K-6 | clipped counts `c > 1.0` | RED, 2 of 3: `width 8 Hostile frames 1 block 3 lane 3: clipped against the meter's serial loop` (`0` against `1`); the bit sweep | RED, `662` on native, wasm scalar and wasm simd128 | not run |
+| M-W | the kernel widens through a `black_box`ed scalar `f64::from` per lane, then `LaneF64::load` | not run (same values) | GREEN, `0` on every leg | RED: `miso_gate_meter_block_probe is not vectorised on the simd128 leg: f64x2.promote_low_f32x4=0 ... f64.promote_f32=4`; the #949 `miso_gate_f64_lane_probe` census stays green, so the new probe is the only pin on the production kernel's lowering |
+
+K-1, K-5 and K-6 are also red on gate M2 (`crates/builtins/tests/MUTATIONS.md`), and K-1 on gate M3
+(`crates/graph/tests/MUTATIONS.md`). All 358 corpus digest comparisons stay green under every row:
+the frozen digests do not run the new kernel.

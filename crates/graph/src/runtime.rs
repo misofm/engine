@@ -61,6 +61,9 @@ thread_local! {
         const { std::cell::Cell::new(false) };
     static TEST_ONLY_BANK_SAMPLE_PEAK_PASSES: std::cell::Cell<u64> =
         const { std::cell::Cell::new(0) };
+    static TEST_ONLY_BANK_METER_DECLINED: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+    static TEST_ONLY_BANK_METER_PASSES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// Decline (`true`) or restore (`false`) the banked sample-peak pass of issue #943, and reset its
@@ -80,6 +83,26 @@ pub fn test_only_set_bank_sample_peak_declined(declined: bool) {
 #[must_use]
 pub fn test_only_bank_sample_peak_passes() -> u64 {
     TEST_ONLY_BANK_SAMPLE_PEAK_PASSES.with(std::cell::Cell::get)
+}
+
+/// Decline (`true`) or restore (`false`) the banked full meter pass of issue #950, and reset its
+/// pass count. A declined pass seeds nothing and hands every observer `meter: None`, so a meter
+/// takes its scalar sample loop, or issue #943's peak merge where that pass still runs under its
+/// own switch: the oracle arm the full pass is compared against.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn test_only_set_bank_meter_declined(declined: bool) {
+    TEST_ONLY_BANK_METER_DECLINED.with(|value| value.set(declined));
+    TEST_ONLY_BANK_METER_PASSES.with(|value| value.set(0));
+}
+
+/// Banked full meter passes run since the last [`test_only_set_bank_meter_declined`]: one per bank
+/// unit per block that ran it.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_bank_meter_passes() -> u64 {
+    TEST_ONLY_BANK_METER_PASSES.with(std::cell::Cell::get)
 }
 
 /// Reset the test-only counts of prepared observer and bank-member object accesses.
@@ -1281,6 +1304,22 @@ impl RuntimeUnit {
     /// final-slot member of which holds an observer that accepts the peak. Bind-time only; a
     /// malformed bank whose member count is below its lane count accepts nothing.
     fn accepts_sample_peak(&self) -> bool {
+        self.final_slot_accepts(|observer| observer.accepts_sample_peak())
+    }
+
+    /// Whether `observe_unit` runs this unit's banked full meter pass (issue #950): a bank some
+    /// final-slot member of which holds an observer that accepts it. Bind-time only, on the same
+    /// terms as [`Self::accepts_sample_peak`].
+    fn accepts_banked_meter(&self) -> bool {
+        self.final_slot_accepts(|observer| observer.accepts_banked_meter())
+    }
+
+    /// Whether some observer of some final-slot member of this bank satisfies `accepts`; `false`
+    /// for an op and for a malformed bank whose member count is below its lane count.
+    fn final_slot_accepts(
+        &self,
+        accepts: impl Fn(&dyn crate::GraphRuntimeObserver) -> bool,
+    ) -> bool {
         match self {
             Self::Op(_) => false,
             Self::Bank { members, lanes, .. } => members
@@ -1292,7 +1331,7 @@ impl RuntimeUnit {
                         member
                             .observers
                             .iter()
-                            .any(|observer| observer.observer.accepts_sample_peak())
+                            .any(|observer| accepts(observer.observer.as_ref()))
                     })
                 }),
         }
@@ -1924,7 +1963,7 @@ pub(crate) struct UnitIdentity {
     /// Proven from final adjacent emitted units at bind; fits the existing identity padding.
     resident_input: bool,
     /// Whether any op of this unit holds an observer binding (issue #900), and whether this bank
-    /// unit runs its sample-peak pass (issue #943). Derived from the final units by
+    /// unit runs its sample-peak pass (issue #943) or its full meter pass (issue #950). Derived from the final units by
     /// [`Runtime::new_with_observation_activation`], the one constructor every runtime passes
     /// through, so a caller's value is a placeholder; nothing changes an op's observer slice after
     /// that. One byte for both facts, so it fits the existing identity padding on every target,
@@ -1941,31 +1980,41 @@ pub(crate) struct UnitIdentity {
 }
 
 /// What `Runtime::observe_unit` dispatches for one unit, fixed at bind: nothing, its observers,
-/// or its observers after the bank's sample-peak pass (issues #900 and #943).
+/// or its observers after one of the bank's meter passes (issues #900, #943 and #950).
 ///
-/// One byte for two facts, because the second implies the first -- a final-slot observer that
-/// accepts the peak is an observer -- and because a second `bool` beside `observed` did not fit
-/// `UnitIdentity`'s padding on 32-bit targets: there the row's four flag bytes already fill the
-/// only slack, and a fifth grew the row from 20 to 24 bytes on wasm32.
+/// One byte for three facts, because the second and third each imply the first -- a final-slot
+/// observer that accepts a pass is an observer -- and because a second `bool` beside `observed`
+/// did not fit `UnitIdentity`'s padding on 32-bit targets: there the row's four flag bytes already
+/// fill the only slack, and a fifth grew the row from 20 to 24 bytes on wasm32.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum UnitObservation {
     /// No op of the unit holds an observer: `observe_unit` returns at once.
     #[default]
     Unobserved,
-    /// Some op holds an observer, and no final-slot observer accepts a sample peak.
+    /// Some op holds an observer, and no final-slot observer accepts a bank pass.
     Observed,
-    /// A bank some final-slot member of which holds an observer that accepts the sample peak.
+    /// A bank some final-slot member of which holds an observer that accepts the sample peak, and
+    /// none of whose final-slot observers accepts the full meter pass.
     ObservedWithPeak,
+    /// A bank some final-slot member of which holds an observer that accepts the full meter pass,
+    /// and none of whose final-slot observers accepts the sample peak.
+    ObservedWithMeter,
+    /// A bank whose final slot has an observer that accepts the full meter pass and one that
+    /// accepts the sample peak: the full pass runs when it can, and the sample-peak pass otherwise.
+    ObservedWithPeakAndMeter,
 }
 
 impl UnitObservation {
     /// The row for a unit that holds observers (`observed`) and whose final slot accepts the peak
-    /// (`sample_peak`); the peak alone, which no real unit has, is still unobserved.
-    const fn of(observed: bool, sample_peak: bool) -> Self {
-        match (observed, sample_peak) {
-            (false, _) => Self::Unobserved,
-            (true, false) => Self::Observed,
-            (true, true) => Self::ObservedWithPeak,
+    /// (`sample_peak`) and the full meter pass (`banked_meter`); a pass alone, which no real unit
+    /// has, is still unobserved.
+    const fn of(observed: bool, sample_peak: bool, banked_meter: bool) -> Self {
+        match (observed, sample_peak, banked_meter) {
+            (false, _, _) => Self::Unobserved,
+            (true, false, false) => Self::Observed,
+            (true, true, false) => Self::ObservedWithPeak,
+            (true, false, true) => Self::ObservedWithMeter,
+            (true, true, true) => Self::ObservedWithPeakAndMeter,
         }
     }
 
@@ -1974,13 +2023,25 @@ impl UnitObservation {
         !matches!(self, Self::Unobserved)
     }
 
-    /// Whether this unit runs the banked sample-peak pass before its observers.
+    /// Whether this unit runs the banked sample-peak pass before its observers, when its full
+    /// meter pass does not run.
     const fn sample_peak(self) -> bool {
-        matches!(self, Self::ObservedWithPeak)
+        matches!(
+            self,
+            Self::ObservedWithPeak | Self::ObservedWithPeakAndMeter
+        )
+    }
+
+    /// Whether this unit runs the banked full meter pass before its observers.
+    const fn banked_meter(self) -> bool {
+        matches!(
+            self,
+            Self::ObservedWithMeter | Self::ObservedWithPeakAndMeter
+        )
     }
 }
 
-/// `UnitIdentity` before the per-unit flags of issues #885, #900, #918 and #943: the row's shape
+/// `UnitIdentity` before the per-unit flags of issues #885, #900, #918, #943 and #950: the row's shape
 /// with none of them, which is what the flags must not grow.
 #[allow(dead_code)]
 struct UnitIdentityWithoutFlags {
@@ -2320,7 +2381,11 @@ impl Runtime {
             "the session Output op is a plain unit of its own"
         );
         for (row, unit) in identity.iter_mut().zip(&units) {
-            row.observation = UnitObservation::of(unit.has_observers(), unit.accepts_sample_peak());
+            row.observation = UnitObservation::of(
+                unit.has_observers(),
+                unit.accepts_sample_peak(),
+                unit.accepts_banked_meter(),
+            );
         }
         #[cfg(any(test, feature = "test-support"))]
         if !split_pairs.is_empty() {
@@ -2755,13 +2820,19 @@ impl Runtime {
         #[cfg(any(test, feature = "test-support"))]
         let sample_peak =
             sample_peak && !TEST_ONLY_BANK_SAMPLE_PEAK_DECLINED.with(std::cell::Cell::get);
+        let banked_meter = observation.banked_meter();
+        #[cfg(any(test, feature = "test-support"))]
+        let banked_meter =
+            banked_meter && !TEST_ONLY_BANK_METER_DECLINED.with(std::cell::Cell::get);
         let output = self.output_unit == Some(index);
         let Self { lease, units, .. } = self;
         match &mut units[index] {
             RuntimeUnit::Op(op) if output => {
                 observe_output(op, host.planes(), first_sample, validity)
             }
-            RuntimeUnit::Op(op) => observe(op, lease, first_sample, None, false, validity, None),
+            RuntimeUnit::Op(op) => {
+                observe(op, lease, first_sample, None, false, validity, None, None)
+            }
             RuntimeUnit::Bank {
                 members,
                 lanes,
@@ -2791,21 +2862,48 @@ impl Runtime {
                 let frames = u32::try_from(lease.frames()).ok();
                 let final_start = members.len().checked_sub(population);
                 let chain: &BankChain = chain;
-                // Issue #943: one lane pass per plane over the same resident words every final
-                // lane's view below borrows, before the first observer runs. It only reads them,
-                // and it covers the scratch lanes of a partial bank too; only an active lane's
-                // result is ever handed on, because only an active lane has a final member.
-                let peaks = if sample_peak && eligible {
-                    frames
-                        .and_then(|frames| chain.final_output_block(frames))
-                        .and_then(|(left, right)| bank_sample_peak(chain.width(), left, right))
+                // Issue #950: the full meter pass, before the first observer runs. First each
+                // final lane's energy seed, read from its observers in binding order without
+                // changing any of them; then, only if some lane answered, one lane pass per plane
+                // from those seeds over the same resident words every final lane's view below
+                // borrows. It only reads them, and it covers the scratch lanes of a partial bank
+                // too, from `+0.0`; only an active lane's result is ever handed on, because only
+                // an active lane has a final member. Each observer then commits its own lane, in
+                // binding order, and only if the seed is still its own.
+                // The seeds are written once, where the hand-off below reads them, and never copied.
+                let mut seeds: Option<[[f64; 8]; 2]> = None;
+                let meters = if banked_meter && eligible {
+                    frames.zip(final_start).and_then(|(frames, final_start)| {
+                        let seeds = seeds.insert([[0.0; 8]; 2]);
+                        if !bank_meter_seeds(members, final_start, first_sample, frames, seeds) {
+                            return None;
+                        }
+                        let (left, right) = chain.final_output_block(frames)?;
+                        bank_meter_pass(chain.width(), left, right, seeds)
+                    })
                 } else {
                     None
                 };
                 #[cfg(any(test, feature = "test-support"))]
-                if peaks.is_some() {
-                    TEST_ONLY_BANK_SAMPLE_PEAK_PASSES.with(|value| value.set(value.get() + 1));
+                if meters.is_some() {
+                    TEST_ONLY_BANK_METER_PASSES.with(|value| value.set(value.get() + 1));
                 }
+                // Issue #943: one lane pass per plane over the same words, when the full pass did
+                // not run; when it did, its peak is the same peak and this pass is not run.
+                let peaks = if let Some(meters) = &meters {
+                    Some(meters.peaks())
+                } else if sample_peak && eligible {
+                    let peaks = frames
+                        .and_then(|frames| chain.final_output_block(frames))
+                        .and_then(|(left, right)| bank_sample_peak(chain.width(), left, right));
+                    #[cfg(any(test, feature = "test-support"))]
+                    if peaks.is_some() {
+                        TEST_ONLY_BANK_SAMPLE_PEAK_PASSES.with(|value| value.set(value.get() + 1));
+                    }
+                    peaks
+                } else {
+                    None
+                };
                 for (index, member) in members.iter_mut().enumerate() {
                     #[cfg(any(test, feature = "test-support"))]
                     test_only_observation_dispatch_member_access();
@@ -2823,6 +2921,9 @@ impl Runtime {
                         .and_then(|(lane, [left, right])| {
                             Some([*left.get(lane)?, *right.get(lane)?])
                         });
+                    let meter = final_lane
+                        .zip(meters.as_ref().zip(seeds.as_ref()))
+                        .and_then(|(lane, (meters, seeds))| meters.lane(lane, seeds));
                     observe(
                         member,
                         lease,
@@ -2831,6 +2932,7 @@ impl Runtime {
                         folded,
                         validity,
                         peak,
+                        meter,
                     )?;
                 }
                 Ok(())
@@ -3346,6 +3448,154 @@ fn bank_sample_peak(width: BankWidth, left: &[f32], right: &[f32]) -> Option<[[f
 // REALTIME_POLICY_END
 
 // REALTIME_POLICY_BEGIN
+/// The most frames the full meter pass takes in one block (issue #950): its counts are `f32` lanes,
+/// exact integers only up to `2^24`. A longer block declines the pass and its meters read their
+/// samples.
+const BANK_METER_MAX_FRAMES: usize = 1 << 24;
+
+/// One plane of the full meter pass (issue #950), for every lane of the bank: the partials of
+/// `lane::kernels::builtins::MeterBlock`, stored.
+#[derive(Clone, Copy)]
+struct BankMeterPlane {
+    peak: [f32; 8],
+    clipped: [f32; 8],
+    sanitized: [f32; 8],
+    energy: [f64; 8],
+}
+
+/// The full meter pass over one final resident block (issue #950): both planes' results,
+/// `[left, right]`, for every lane of the bank. The seeds it started from stay where
+/// [`bank_meter_seeds`] wrote them.
+struct BankMeterResults {
+    planes: [BankMeterPlane; 2],
+}
+
+impl BankMeterResults {
+    /// Every lane's `[left, right]` peak, in the shape issue #943's pass returns.
+    fn peaks(&self) -> [[f32; 8]; 2] {
+        let [left, right] = &self.planes;
+        [left.peak, right.peak]
+    }
+
+    /// Lane `lane`'s results, started from `seeds`, with its counts as integers: an `f32` count
+    /// below `2^24` converts exactly. `None` past the eighth lane.
+    fn lane(&self, lane: usize, seeds: &[[f64; 8]; 2]) -> Option<crate::GraphBankedMeterLane> {
+        let [left, right] = &self.planes;
+        let [left_seed, right_seed] = seeds;
+        Some(crate::GraphBankedMeterLane {
+            sample_peak: [*left.peak.get(lane)?, *right.peak.get(lane)?],
+            clipped: [
+                *left.clipped.get(lane)? as u32,
+                *right.clipped.get(lane)? as u32,
+            ],
+            sanitized: [
+                *left.sanitized.get(lane)? as u32,
+                *right.sanitized.get(lane)? as u32,
+            ],
+            energy_seed: [*left_seed.get(lane)?, *right_seed.get(lane)?],
+            energy: [*left.energy.get(lane)?, *right.energy.get(lane)?],
+        })
+    }
+}
+
+/// Writes each final lane's `[left, right]` energy seed for the full meter pass into `seeds`
+/// (issue #950): the first [`crate::GraphRuntimeObserver::banked_meter_seed`] answer among that
+/// lane's final member's observers, in binding order. A lane nobody answers keeps the `+0.0` the
+/// caller filled. Returns whether any lane answered, so a block no meter can commit does not pay
+/// for the pass.
+///
+/// Only reads the observers: the query is `&self`, so an observer that fails later in this block
+/// has changed nothing, and neither has any other.
+fn bank_meter_seeds(
+    members: &[RuntimeOp],
+    final_start: usize,
+    first_sample: u64,
+    frames: u32,
+    seeds: &mut [[f64; 8]; 2],
+) -> bool {
+    let mut answered = false;
+    let [left, right] = seeds;
+    let Some(finals) = members.get(final_start..) else {
+        return false;
+    };
+    for ((member, left), right) in finals.iter().zip(left.iter_mut()).zip(right.iter_mut()) {
+        if let Some([l, r]) = member
+            .observers
+            .iter()
+            .find_map(|binding| binding.observer.banked_meter_seed(first_sample, frames))
+        {
+            *left = l;
+            *right = r;
+            answered = true;
+        }
+    }
+    answered
+}
+
+/// The banked full meter pass of issue #950: every lane's `[left, right]` sample peak, clipped and
+/// sanitized counts, and energy over one final resident block, one
+/// [`meter_block`](lane::kernels::builtins::meter_block) call per plane at the chain's own width,
+/// each seeded with that plane's `seeds`.
+///
+/// Out of line on purpose, like [`bank_sample_peak`]: it is the one function that holds the pass,
+/// so its instructions can be read off a built artifact, and the width dispatch happens once per
+/// bank. `None` when the planes are not the same whole number of frames of that width, which
+/// `BankChain::final_output_block` never returns, or when there are more than
+/// [`BANK_METER_MAX_FRAMES`]. The words handed to the kernel are borrowed with `get`, at exactly
+/// `frames` frames, so the kernel's own slice cannot fail and the function keeps no panic path.
+#[inline(never)]
+fn bank_meter_pass(
+    width: BankWidth,
+    left: &[f32],
+    right: &[f32],
+    seeds: &[[f64; 8]; 2],
+) -> Option<BankMeterResults> {
+    use lane::kernels::builtins::meter_block;
+    use lane::{LaneF64, Widen};
+    fn plane<L: Widen>(words: &[f32], frames: usize, seeds: &[f64; 8]) -> Option<BankMeterPlane> {
+        let words = words.get(..frames * L::WIDTH)?;
+        let block = meter_block::<L>(words, frames, <L::F64 as LaneF64>::load(&seeds[..L::WIDTH]));
+        let mut plane = BankMeterPlane {
+            peak: [0.0; 8],
+            clipped: [0.0; 8],
+            sanitized: [0.0; 8],
+            energy: [0.0; 8],
+        };
+        block.peak.store(&mut plane.peak[..L::WIDTH]);
+        block.clipped.store(&mut plane.clipped[..L::WIDTH]);
+        block.sanitized.store(&mut plane.sanitized[..L::WIDTH]);
+        block.energy.store(&mut plane.energy[..L::WIDTH]);
+        Some(plane)
+    }
+    fn planes<L: Widen>(
+        left: &[f32],
+        right: &[f32],
+        seeds: &[[f64; 8]; 2],
+    ) -> Option<BankMeterResults> {
+        let frames = left.len() / L::WIDTH;
+        if left.len() != right.len()
+            || !left.len().is_multiple_of(L::WIDTH)
+            || frames > BANK_METER_MAX_FRAMES
+        {
+            return None;
+        }
+        let [left_seeds, right_seeds] = seeds;
+        Some(BankMeterResults {
+            planes: [
+                plane::<L>(left, frames, left_seeds)?,
+                plane::<L>(right, frames, right_seeds)?,
+            ],
+        })
+    }
+    match width {
+        BankWidth::Four => planes::<lane::Simd4>(left, right, seeds),
+        BankWidth::Eight => planes::<lane::Simd8>(left, right, seeds),
+    }
+}
+
+// REALTIME_POLICY_END
+
+// REALTIME_POLICY_BEGIN
 /// Run one op's observers in binding order, offering each the resident view first.
 ///
 /// `folded` says the chain folded this member's route (issue #885), so its scatter never wrote
@@ -3353,6 +3603,13 @@ fn bank_sample_peak(width: BankWidth, left: &[f32], right: &[f32]) -> Option<[[f
 /// there before any planar block is formed. `resident` is the only source of those words. The
 /// planar block is re-sliced per declining observer rather than cached, because the lease has to
 /// stay writable until that first acquisition.
+///
+/// `sample_peak` and `meter` are this member's lane of the bank's meter passes (issues #943 and
+/// #950), `None` for every member but a final one whose unit ran a pass this block.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "issue #950 adds the banked meter lane beside issue #943's banked peak"
+)]
 fn observe(
     op: &mut RuntimeOp,
     lease: &mut ArenaLease,
@@ -3361,6 +3618,7 @@ fn observe(
     folded: bool,
     validity: GraphObservationValidity,
     sample_peak: Option<[f32; 2]>,
+    meter: Option<crate::GraphBankedMeterLane>,
 ) -> Result<(), RenderError> {
     #[cfg(test)]
     TEST_ONLY_OBSERVE_CALLS.with(|calls| calls.set(calls.get() + 1));
@@ -3387,6 +3645,7 @@ fn observe(
                         first_sample,
                         validity,
                         sample_peak,
+                        meter,
                     })
             {
                 #[cfg(any(test, feature = "test-support"))]
@@ -3461,9 +3720,10 @@ fn observe_one(
                     lane,
                     first_sample,
                     validity,
-                    // Issue #943 banks the permanent path only; a controlled row's meter reads
-                    // its samples.
+                    // Issues #943 and #950 bank the permanent path only; a controlled row's meter
+                    // reads its samples.
                     sample_peak: None,
+                    meter: None,
                 })
         {
             #[cfg(any(test, feature = "test-support"))]
@@ -4805,7 +5065,7 @@ pub fn test_only_source_plane_counts() -> [u64; 3] {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn test_only_count_source_plane(slot: usize) {
+fn test_only_count_source_plane(slot: usize) {
     SOURCE_PLANE_COUNTS.with(|counts| {
         let mut value = counts.get();
         value[slot] += 1;
@@ -7395,6 +7655,7 @@ mod tests {
                 false,
                 GraphObservationValidity::CLEAR,
                 None,
+                None,
             );
             let take = accepts
                 .iter()
@@ -7423,7 +7684,8 @@ mod tests {
 
     #[test]
     fn resident_meter_entry_has_one_final_output_dispatch_and_admission_control() {
-        /// The member dispatch as rustfmt lays it out since issue #943 added the block peak.
+        /// The member dispatch as rustfmt lays it out since issue #943 added the block peak and
+        /// issue #950 the banked meter lane.
         const MEMBER_CALL: &str = concat!(
             "                    observe(\n",
             "                        member,\n",
@@ -7433,6 +7695,7 @@ mod tests {
             "                        folded,\n",
             "                        validity,\n",
             "                        peak,\n",
+            "                        meter,\n",
             "                    )?;\n",
         );
         fn valid(source: &str) -> bool {
@@ -7458,14 +7721,21 @@ mod tests {
                 && dispatcher.contains("if folded {")
                 && dispatcher.contains("write_resident_lane(lease, op.output, words)?;")
                 && dispatcher.contains("sample_peak,\n")
+                && dispatcher.contains("                        meter,\n")
                 && production.matches(".final_output_lane(").count() == 1
-                // Issue #943: one whole-block borrow, and one out-of-line pass over it.
-                && production.matches(".final_output_block(").count() == 1
+                // Issues #943 and #950: one whole-block borrow in each of the two exclusive pass
+                // arms, and one out-of-line pass over each.
+                && production.matches(".final_output_block(").count() == 2
                 && production.matches("bank_sample_peak(").count() == 2
+                && production.matches("bank_meter_pass(").count() == 2
+                && production.matches("bank_meter_seeds(").count() == 2
                 && observation.contains(MEMBER_CALL)
                 && [
                     "let Self { lease, units, .. } = self;",
-                    "RuntimeUnit::Op(op) => observe(op, lease, first_sample, None, false, validity, None)",
+                    concat!(
+                        "RuntimeUnit::Op(op) => {\n",
+                        "                observe(op, lease, first_sample, None, false, validity, None, None)",
+                    ),
                     "let eligible = population > 0",
                     "population <= width",
                     "!members.is_empty()",
@@ -7478,7 +7748,16 @@ mod tests {
                     "let chain: &BankChain = chain;",
                     "let observation = self.identity[index].observation;",
                     "let sample_peak = observation.sample_peak();",
-                    "let peaks = if sample_peak && eligible {",
+                    "let banked_meter = observation.banked_meter();",
+                    "let meters = if banked_meter && eligible {",
+                    "frames.zip(final_start).and_then(|(frames, final_start)| {",
+                    "let seeds = seeds.insert([[0.0; 8]; 2]);",
+                    "if !bank_meter_seeds(members, final_start, first_sample, frames, seeds) {",
+                    "let (left, right) = chain.final_output_block(frames)?;",
+                    "bank_meter_pass(chain.width(), left, right, seeds)",
+                    "let peaks = if let Some(meters) = &meters {",
+                    "Some(meters.peaks())",
+                    "} else if sample_peak && eligible {",
                     ".and_then(|frames| chain.final_output_block(frames))",
                     ".and_then(|(left, right)| bank_sample_peak(chain.width(), left, right))",
                     "let resident = if eligible",
@@ -7487,6 +7766,8 @@ mod tests {
                     "chain.fold_lanes().get(lane) == Some(&true)",
                     ".zip(peaks.as_ref())",
                     "Some([*left.get(lane)?, *right.get(lane)?])",
+                    ".zip(meters.as_ref().zip(seeds.as_ref()))",
+                    ".and_then(|(lane, (meters, seeds))| meters.lane(lane, seeds))",
                 ]
                 .iter()
                 .all(|term| observation.contains(term))
@@ -7523,9 +7804,30 @@ mod tests {
             ),
             // Issue #943: the pass forced on, run without the bind-time opt-in and without the
             // shape the resident views are admitted under.
+            ("} else if sample_peak && eligible {", "} else if true {"),
+            // Issue #950: the full pass forced on the same way; the sample-peak pass run beside
+            // it; the meter lane withheld from the member or read off its neighbour; the seeds
+            // not read; the pass handed a plane twice.
             (
-                "let peaks = if sample_peak && eligible {",
-                "let peaks = if true {",
+                "let meters = if banked_meter && eligible {",
+                "let meters = if true {",
+            ),
+            (
+                "let peaks = if let Some(meters) = &meters {",
+                "let peaks = if let Some(meters) = &None::<BankMeterResults> {",
+            ),
+            (MEMBER_CALL, &member_call("meter,\n", "None,\n")),
+            (
+                ".and_then(|(lane, (meters, seeds))| meters.lane(lane, seeds))",
+                ".and_then(|(lane, (meters, seeds))| meters.lane(lane ^ 1, seeds))",
+            ),
+            (
+                "if !bank_meter_seeds(members, final_start, first_sample, frames, seeds) {",
+                "if false {",
+            ),
+            (
+                "bank_meter_pass(chain.width(), left, right, seeds)",
+                "bank_meter_pass(chain.width(), left, left, seeds)",
             ),
             // The block peak withheld from the member, or the lane's peak read off its neighbour.
             (MEMBER_CALL, &member_call("peak,\n", "None,\n")),
@@ -7811,6 +8113,43 @@ mod tests {
         }
     }
 
+    /// Issue #950 amendment 5: the full meter pass declines a block of more than `2^24` frames,
+    /// where its `f32` counts would stop being exact integers, at both bank widths.
+    ///
+    /// The planes are zero-filled `vec!`s, which the allocator maps lazily, and the pass refuses
+    /// on the slice length before it reads a word, so the `2^24 + 1`-frame block costs address
+    /// space and no physical memory. A three-frame block of the same width is accepted and
+    /// computed, so the refusal is the frame count's and nothing else's.
+    #[test]
+    fn the_full_meter_pass_declines_a_block_whose_counts_would_not_be_exact() {
+        assert_eq!(
+            BANK_METER_MAX_FRAMES,
+            1 << 24,
+            "the largest exact f32 count"
+        );
+        let seeds = [[0.5_f64; 8]; 2];
+        for width in [BankWidth::Four, BankWidth::Eight] {
+            let lanes = width.lanes() as usize;
+            let over = vec![0.0_f32; (BANK_METER_MAX_FRAMES + 1) * lanes];
+            assert!(
+                bank_meter_pass(width, &over, &over, &seeds).is_none(),
+                "{width:?}: 2^24 + 1 frames decline the pass"
+            );
+            drop(over);
+            let short = vec![1.0_f32; 3 * lanes];
+            let results = bank_meter_pass(width, &short, &short, &seeds)
+                .unwrap_or_else(|| panic!("{width:?}: three frames run the pass"));
+            for lane in 0..lanes {
+                let lane = results.lane(lane, &seeds).expect("an active lane");
+                assert_eq!(lane.sample_peak, [1.0, 1.0]);
+                assert_eq!(lane.clipped, [3, 3]);
+                assert_eq!(lane.sanitized, [0, 0]);
+                assert_eq!(lane.energy_seed, [0.5, 0.5]);
+                assert_eq!(lane.energy, [3.5, 3.5]);
+            }
+        }
+    }
+
     #[test]
     fn rt9_identity_metadata_has_no_retained_or_peak_layout_delta() {
         // The every-target form of this pin is the `const` assertion after
@@ -7881,7 +8220,7 @@ mod tests {
         let row = |observed| UnitIdentity {
             banked: false,
             resident_input: false,
-            observation: UnitObservation::of(observed, false),
+            observation: UnitObservation::of(observed, false, false),
             source_lanes: 0,
             stages: 1,
             upstream_of_seam_stages: 0,
@@ -12997,7 +13336,9 @@ mod tests {
     enum PlayedBlock {
         /// A whole quantum.
         Full,
-        /// This many played frames, then `+0.0` to the quantum: a short end-of-region block.
+        /// This many played frames, then `+0.0` to the quantum: a short end-of-region block. The
+        /// count is capped one frame below the quantum, so the block is short at every quantum;
+        /// at the quanta issue #918's gate 1 renders (13 and 16) the cap changes nothing.
         Short(usize),
         /// Nothing was played: the whole quantum is the underrun.
         Underrun,
@@ -13053,7 +13394,7 @@ mod tests {
             let block = (first_sample / u64::from(frames)) as usize;
             let played = match PLAYED_SCRIPT[block % PLAYED_SCRIPT.len()] {
                 PlayedBlock::Full => Some(self.frames),
-                PlayedBlock::Short(played) => Some(played),
+                PlayedBlock::Short(played) => Some(played.min(self.frames - 1)),
                 PlayedBlock::Underrun => None,
             };
             self.played = played.is_some();
@@ -13064,8 +13405,12 @@ mod tests {
                     for word in &mut plane[..played] {
                         *word = lcg(&mut state);
                     }
-                    // A negative zero survives only a bit-exact path.
-                    plane[0] = -0.0;
+                    // A negative zero survives only a bit-exact path. A block of one played frame
+                    // keeps its noise word, so a one-frame quantum still carries audio; at every
+                    // quantum issue #918's gate 1 renders, at least nine frames play.
+                    if played > 1 {
+                        plane[0] = -0.0;
+                    }
                     plane[played..].fill(0.0);
                 }
             }
@@ -13801,9 +14146,10 @@ mod tests {
     // Issue #936 on issue #918's banked source fixture (ported by issue #957).
     // -----------------------------------------------------------------------------------------
 
-    /// The quanta every ported issue #936 shape renders at: each longer than [`PLAYED_SCRIPT`]'s
-    /// nine-frame short block, three of them with a ragged four-lane tail.
-    const INERT_FRAMES: [u32; 4] = [10, 13, 16, 128];
+    /// The quanta every ported issue #936 shape renders at, #936's own: one frame (a tail and no
+    /// vector, and a `(3, 5)` delay line longer than the quantum), seven (a ragged four-lane
+    /// tail), and two whole multiples. [`PLAYED_SCRIPT`]'s short block is capped below each.
+    const INERT_FRAMES: [u32; 4] = [1, 7, 16, 128];
 
     /// The blocks each ported gate renders: [`PLAYED_SCRIPT`] twice over.
     const INERT_BLOCKS: u64 = 16;
@@ -13824,7 +14170,9 @@ mod tests {
         /// A meter on `K`'s `PostSimd1`, a rack boundary between `K`'s input and its bank stage.
         /// The boundary is an elided alias of the input's buffer, so its meter binds to the input
         /// op (clause (c) through the alias). It meters with the observed input's handle, so the
-        /// two observed shapes digest alike.
+        /// two observed shapes digest alike. The order is test-only: no with-builtins compile puts
+        /// `PostSimd1` before the builtin bank. It is the graph layer's shape of an elided alias
+        /// directly on a claimed input, and a rack boundary is an alias whatever the plan lists.
         ObservedAlias,
         /// `K`'s input is delayed in place (`NodeKind::TrackDelay`, clause (a)).
         TrackDelayed,
@@ -13859,10 +14207,10 @@ mod tests {
     /// loop dispatched every unit. The two observed shapes meter the same words under one handle,
     /// so their digests agree.
     const INERT_PRE_CHANGE: [(InertShape, u64); 4] = [
-        (InertShape::Plain, 0x3adf_c3ee_a1b4_75ab),
-        (InertShape::ObservedInput, 0x51c6_c3cf_4cdc_5509),
-        (InertShape::ObservedAlias, 0x51c6_c3cf_4cdc_5509),
-        (InertShape::TrackDelayed, 0xd1eb_c3d4_2404_cb33),
+        (InertShape::Plain, 0x59ac_7ce2_0913_f0e1),
+        (InertShape::ObservedInput, 0x57be_32ec_07e5_88cd),
+        (InertShape::ObservedAlias, 0x57be_32ec_07e5_88cd),
+        (InertShape::TrackDelayed, 0x5669_2e20_31f4_30b1),
     ];
 
     /// One more `u64` into a running FNV-1a hash, byte by byte.
@@ -14016,6 +14364,15 @@ mod tests {
                     meters_per_block * INERT_BLOCKS as usize,
                     "{case}: every meter published every block"
                 );
+                let stride = frames as usize + 3;
+                assert!(
+                    run.run.masters.iter().any(|master| master
+                        .iter()
+                        .enumerate()
+                        .any(|(index, word)| index % stride < frames as usize
+                            && *word & 0x7fff_ffff != 0)),
+                    "{case}: the master carries audio"
+                );
                 combined = inert_fnv(combined, run.run.digest());
                 run
             })
@@ -14034,7 +14391,7 @@ mod tests {
 
     /// Issue #936 gate 1, ported by issue #957 onto issue #918's banked fixture: six tracks
     /// `Input -> PostInputBuiltins (a four-lane and a two-lane bank) -> Route -> Output`, every
-    /// claim gathered in place by its bank ([`InertShape::Plain`]), frames `{10, 13, 16, 128}`,
+    /// claim gathered in place by its bank ([`InertShape::Plain`]), frames `{1, 7, 16, 128}`,
     /// sixteen blocks of [`PLAYED_SCRIPT`] with every claim's slot poisoned before each.
     ///
     /// The six input units are plain unobserved source inputs, which bind leaves out of the
@@ -14062,7 +14419,7 @@ mod tests {
     /// and its bank stage, which is an elided alias whose observer binds to the input op. Either
     /// way `K`'s input op holds an observer and its unit is `observed`, so the table is every unit
     /// but the other five inputs, dispatched every block. The observer also keeps `K`'s claim on
-    /// the copy, so `K`'s lane gathers the arena. Over sixteen blocks at frames `{10, 13, 16, 128}`,
+    /// the copy, so `K`'s lane gathers the arena. Over sixteen blocks at frames `{1, 7, 16, 128}`,
     /// the `K` meter publishes every block, and every meter window and host word is the base
     /// tree's ([`INERT_PRE_CHANGE`]).
     ///
@@ -14092,7 +14449,7 @@ mod tests {
     /// [`InertShape::TrackDelayed`] delays track `K`'s input by `(3, 5)` samples, so `K`'s claim
     /// keeps the copy, its delay line runs over the copied words and `K`'s lane gathers the arena.
     /// The table is every unit but the other five inputs; over sixteen blocks at frames
-    /// `{10, 13, 16, 128}` every host word and meter window is the base tree's
+    /// `{1, 7, 16, 128}` every host word and meter window is the base tree's
     /// ([`INERT_PRE_CHANGE`]).
     ///
     /// Red mutations: `crates/graph/tests/MUTATIONS.md`, issues #936 and #957.
@@ -14176,21 +14533,21 @@ mod tests {
     /// [`INERT_FRAMES`], recorded by this fixture compiled against `64b155d0`, as
     /// [`INERT_PRE_CHANGE`] is.
     const DEAD_CLAIM_PRE_CHANGE: [(bool, u64); 2] = [
-        (false, 0xe889_005e_2b7c_170c),
-        (true, 0xe889_005e_2b7c_170c),
+        (false, 0x6813_ae30_0a55_754d),
+        (true, 0x6813_ae30_0a55_754d),
     ];
 
     /// Issue #927's dead claim, ported by issue #957 onto issue #918's banked fixture: the only
     /// test of clause (b)'s zero-reader arm, which binds a claim nothing reads in place, and whose
-    /// slot the colouring then hands to a later value.
+    /// slot the colouring then hands to a later value that a bank gathers.
     ///
     /// [`SourceShape::dead`] adds `track99`'s claimed `Input`, which nothing reads, last among the
-    /// six inputs of the `W4 x 6` plan. It is checked to build its hazard on the lowered program:
-    /// the dead input's slot is freed at once, and a later op writes it and a later op reads it
-    /// (the first bank member's dedicated output and its route). With the redirects bound, the
-    /// bank's scatter then leaves that slot for its route's buffer; with them declined, the bank
-    /// scatters into it and the route reads it from the arena. Both arms, at frames
-    /// `{10, 13, 16, 128}` ([`render_source_shape`], every claim's slot poisoned before each block):
+    /// six inputs of a `W4 x 6` plan with two bank stages, `PostInputBuiltins` then `PostMatrix`.
+    /// The dead input's slot is freed at once and handed to a later value, and the table names it
+    /// for the dead claim, so only the lane marking keeps a gather of that slot on the arena. The
+    /// test checks, on the bound runtime, that the hazard is built: a bank after the dead input
+    /// gathers the slot on a lane its unit does not mark. Both redirect arms, at frames
+    /// `{1, 7, 16, 128}` ([`render_source_shape`], every claim's slot poisoned before each block):
     ///
     /// * **The mode table.** In place: all seven claims, the dead one by the zero-reader arm.
     ///   Declined: none.
@@ -14213,26 +14570,48 @@ mod tests {
                 let shape = SourceShape {
                     dead: true,
                     redirect_declined,
+                    stages: &[TrackStage::PostInputBuiltins, TrackStage::PostMatrix],
                     ..SourceShape::banked(BankWidth::Four, 6, frames)
                 };
                 let case = format!("{shape:?}");
-                let (plan, _, _) = source_fixture_parts(shape, &Published::default());
-                let program = plan.lowered().expect("lowered");
-                let dead = GraphNodeId::TrackStage {
-                    track_id: crate::StableGraphId::parse("track99").expect("stable id"),
-                    stage: TrackStage::Input,
-                };
-                let index = crate::program::node_index(&plan.spec, &dead).expect("dead input");
-                let dead_op = program.node_op[index as usize].expect("dead input op") as usize;
-                let slot = program.node_buffer[index as usize];
-                let later = &program.ops[dead_op + 1..];
-                assert!(
-                    later.iter().any(|op| op.output == slot)
-                        && later.iter().any(|op| program
-                            .inputs_of(op)
+                let (plan, bindings, source_set) =
+                    source_fixture_parts(shape, &Published::default());
+                let slot = source_slots(&plan, shape)[shape.tracks];
+                test_only_set_scatter_redirect_declined(redirect_declined);
+                let (executor, _, _) = bind_executor(plan, bindings, false, Some(source_set));
+                test_only_set_scatter_redirect_declined(false);
+                let runtime = &executor.runtime;
+                let dead_unit = runtime
+                    .units
+                    .iter()
+                    .position(|unit| {
+                        matches!(unit, RuntimeUnit::Op(op)
+                            if op.output == slot && matches!(op.kind, NodeKind::SourceInput))
+                    })
+                    .expect("the dead input's unit");
+                let unmarked_gathers = runtime
+                    .units
+                    .iter()
+                    .enumerate()
+                    .skip(dead_unit + 1)
+                    .filter_map(|(unit, bank)| match bank {
+                        RuntimeUnit::Bank { members, lanes, .. } => Some((unit, members, *lanes)),
+                        RuntimeUnit::Op(_) => None,
+                    })
+                    .flat_map(|(unit, members, lanes)| {
+                        members[..lanes]
                             .iter()
-                            .any(|input| input.buffer == slot)),
-                    "{case}: the dead claim's slot is recoloured to a value a later op reads"
+                            .enumerate()
+                            .map(move |(lane, member)| (unit, lane, member))
+                    })
+                    .filter(|(unit, lane, member)| {
+                        bank_gather_source(member).unwrap_or(member.output) == slot
+                            && runtime.identity[*unit].source_lanes & (1 << lane) == 0
+                    })
+                    .count();
+                assert!(
+                    unmarked_gathers > 0,
+                    "{case}: a later bank gathers the dead claim's recoloured slot, unmarked"
                 );
                 let in_place = render_source_shape(shape, false);
                 let copy = render_source_shape(shape, true);
@@ -14256,6 +14635,14 @@ mod tests {
                         PLAYED_SCRIPT[block]
                     );
                 }
+                assert!(
+                    in_place
+                        .masters
+                        .iter()
+                        .flatten()
+                        .any(|word| *word & 0x7fff_ffff != 0),
+                    "{case}: the master carries audio"
+                );
                 assert_eq!(
                     in_place.meters, copy.meters,
                     "{case}: every meter window is the copy arm's"

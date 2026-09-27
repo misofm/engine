@@ -883,6 +883,151 @@ fn f64_lane_energy_mismatches<L: Widen>() -> u32 {
     mismatches
 }
 
+/// The hostile words of [`meter_block_mismatches`]: NaN payloads, both infinities, both zeros, the
+/// extreme subnormals of both signs, `±MIN_POSITIVE`, the clip boundary `±1.0` and its neighbours,
+/// `±1e30`, `1e38` and `±MAX`. Mixed at random with small normal values.
+const METER_BLOCK_HOSTILE_POOL: [u32; 23] = [
+    0x7FC0_0000,
+    0xFFC0_0714,
+    0x7F80_0001,
+    0x7F80_0000,
+    0xFF80_0000,
+    0x0000_0000,
+    0x8000_0000,
+    0x0000_0001,
+    0x8000_0001,
+    0x007F_FFFF,
+    0x807F_FFFF,
+    0x0080_0000,
+    0x8080_0000,
+    0x3F80_0000,
+    0xBF80_0000,
+    0x3F80_0001,
+    0x3F7F_FFFF,
+    0xBF80_0001,
+    0x7149_F2CA,
+    0xF149_F2CA,
+    0x7E96_7699,
+    0x7F7F_FFFF,
+    0xFF7F_FFFF,
+];
+
+/// Blocks per stream of [`meter_block_mismatches`], each seeded with the previous block's energy.
+const METER_BLOCK_BLOCKS: usize = 16;
+
+/// Frames per block of [`meter_block_mismatches`]' streams, one stream each.
+const METER_BLOCK_FRAMES: [usize; 5] = [1, 3, 64, 128, 129];
+
+/// Lane fields on which this target's full meter block pass (`lane::kernels::builtins::meter_block`,
+/// issue #950) disagrees with the builtin meter's own `ALL` loop at `width`. Zero is the only
+/// admissible answer.
+///
+/// Modeled on [`f64_lane_mismatches`]: the pass is exact by contract -- its peak and counts are
+/// order-free and exact, and its energy is each lane's sample-serial sum in `f64` from the seed it
+/// was given -- its lowering is a codegen outcome (`f64x2.promote_low_f32x4`, `f64x2.mul` and
+/// `f64x2.add` under `simd128`, a per-lane array without it), and no native gate executes either
+/// wasm lowering. A count, with no pin: the inputs are full of NaNs.
+///
+/// Per width, hostile and tone input, one stream per frame count (1, 3, 64, 128 and 129) of 16
+/// blocks, each block's energy carried into the next as its seed from
+/// random positive seeds. Per lane and block, the peak, the two counts and the energy are compared
+/// with an independent scalar loop written here -- sanitize with `is_finite() &&
+/// !is_subnormal()`, take the magnitude, `if a > p`, `e += f64(s) * f64(s)` -- by bits (the
+/// counts as integers), and each field that differs counts one.
+///
+/// Every vector result passes through `core::hint::black_box` before it is compared.
+///
+/// # Panics
+///
+/// Panics if `width >= WIDTHS`.
+#[must_use]
+pub fn meter_block_mismatches(width: usize) -> u32 {
+    assert!(width < WIDTHS, "width index out of range");
+    match width {
+        0 => meter_block_mismatches_at::<f32>(),
+        1 => meter_block_mismatches_at::<lane::Simd4>(),
+        _ => meter_block_mismatches_at::<lane::Simd8>(),
+    }
+}
+
+/// [`meter_block_mismatches`] at one width.
+fn meter_block_mismatches_at<L: Widen>() -> u32 {
+    use lane::kernels::builtins::meter_block;
+    let mut random = Xorshift64Star::new(0x0950_3E7E_B10C_0001);
+    let mut mismatches = 0;
+    let mut words = Vec::new();
+    let mut peak = [0.0_f32; LANES];
+    let mut clipped = [0.0_f32; LANES];
+    let mut sanitized = [0.0_f32; LANES];
+    let mut energy = [0.0_f64; LANES];
+    for hostile in [true, false] {
+        for frames in METER_BLOCK_FRAMES {
+            // Random positive seeds between 2^-64 and 2^64: a running energy of any size.
+            let mut carried = [0.0_f64; LANES];
+            for seed in &mut carried {
+                let exponent = 1023 - 64 + random.next_u64() % 129;
+                *seed =
+                    f64::from_bits((exponent << 52) | (random.next_u64() & 0x000F_FFFF_FFFF_FFFF));
+            }
+            let mut oracle_energy = carried;
+            for block in 0..METER_BLOCK_BLOCKS {
+                words.clear();
+                for index in 0..frames * L::WIDTH {
+                    let lane = index % L::WIDTH;
+                    let word = if hostile && !random.next_u32().is_multiple_of(3) {
+                        f32::from_bits(
+                            METER_BLOCK_HOSTILE_POOL
+                                [random.next_u32() as usize % METER_BLOCK_HOSTILE_POOL.len()],
+                        )
+                    } else {
+                        // A triangle tone whose amplitude cycles through 0.375 to 1.5 by lane and
+                        // block, so some lanes clip.
+                        let step = ((index / L::WIDTH + block * 131) * (3 + lane)) % 256;
+                        let triangle = (step as f32 / 64.0 - 2.0).abs() - 1.0;
+                        0.375 * (1 + (lane + block) % 4) as f32 * triangle
+                    };
+                    words.push(word);
+                }
+                let result = core::hint::black_box(meter_block::<L>(
+                    &words,
+                    frames,
+                    <L::F64 as LaneF64>::load(&carried),
+                ));
+                result.peak.store(&mut peak);
+                result.clipped.store(&mut clipped);
+                result.sanitized.store(&mut sanitized);
+                result.energy.store(&mut energy);
+                let (peak, clipped, sanitized, energy) =
+                    core::hint::black_box((peak, clipped, sanitized, energy));
+                for lane in 0..L::WIDTH {
+                    let mut oracle_peak = 0.0_f32;
+                    let mut oracle_clipped = 0_u32;
+                    let mut oracle_sanitized = 0_u32;
+                    for frame in 0..frames {
+                        let x = words[frame * L::WIDTH + lane];
+                        let valid = x.is_finite() && !x.is_subnormal();
+                        let s = if valid { x } else { 0.0 };
+                        let a = s.abs();
+                        if a > oracle_peak {
+                            oracle_peak = a;
+                        }
+                        oracle_energy[lane] += f64::from(s) * f64::from(s);
+                        oracle_sanitized += u32::from(!valid);
+                        oracle_clipped += u32::from(a >= 1.0);
+                    }
+                    mismatches += u32::from(peak[lane].to_bits() != oracle_peak.to_bits());
+                    mismatches += u32::from(clipped[lane] != oracle_clipped as f32);
+                    mismatches += u32::from(sanitized[lane] != oracle_sanitized as f32);
+                    mismatches +=
+                        u32::from(energy[lane].to_bits() != oracle_energy[lane].to_bits());
+                    carried[lane] = energy[lane];
+                }
+            }
+        }
+    }
+    mismatches
+}
+
 /// Name of a width index, as the widths appear in [`digest_case`].
 ///
 /// # Panics

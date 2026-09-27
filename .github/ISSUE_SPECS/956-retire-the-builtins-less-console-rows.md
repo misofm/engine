@@ -244,3 +244,120 @@ go red: the facts test, gate 1 (the planes), gate 2 (dispatches) and gate 3 (the
      and #957 owns it.
    - The plumbing-floor arm prose and the `--plumbing-floor*` registrations in
      `scripts/run-console-benchmark.sh` are kept, because only the count there was authorised.
+
+## Sol attempt 1 verdict: PASS
+
+Reviewer: Sol (Claude Opus 5.5), 2026-09-27, on `d86dd62d` (`git diff 2b1e67df..HEAD`). Same
+host, `CARGO_INCREMENTAL=0`, the worktree's own `target/` (deleted afterwards). The timed runner was
+not run. The implementation was not edited. Temporary probes and mutations were reverted, and the
+tree was clean before this commit.
+
+### Gates, re-run independently
+
+1. **Digest, source planes and dispatch, at both widths.** A scratch probe (not committed) built
+   every `native_session_rows()` row with `build_with_dispatch` at `Simd8` and `Simd4`. For each it
+   rendered 64 blocks and recorded:
+   - the digest and the whole `unit_eligibility()` census, hashed;
+   - the symmetry and bank counters, shape, transposes, folds and redirects;
+   - the source-plane counts, the units dispatched per block and the executor table bytes.
+
+   Results for `gain_pan_ring`:
+   - `Simd8`: digest `01e465a7…2dfdb4`, equal to `gain_pan_only`'s. Planes `[0, 4096, 0]`. It
+     dispatches 9 of 73 units on every block, and `gain_pan_only` dispatches all 73.
+   - `Simd4`: the same digest and the same planes. It dispatches 17 of 81 units (`81 − 64`), and
+     `gain_pan_only` dispatches all 81.
+2. **Every other row unchanged.** The same probe ran on an exported `2b1e67df` tree, with its own
+   target directory. A first attempt that shared this worktree's `target/` silently reused the
+   head's build: `git archive` mtimes predate the artifacts. It was discarded.
+   - All 32 other lines (16 rows × 2 widths, the metered row included) are byte-identical: digest,
+     census hash, counters, planes, dispatches and table bytes.
+   - `rg 'GraphCompiler::compile\(|GraphCompileRequest|bind_with_source_set' tools/console-workload`
+     is empty.
+   - `tools/bench/src/graph.rs:286` and `:632` still call `GraphCompiler::compile`. That is the
+     #006 compile benchmark, outside this brief's paths and owned by #963. It is not a #956 defect.
+3. **Record counts.** Native: 48 records and 34 session records, 17 session kinds. Wasm: 30 records
+   and 15 kinds. Each is the base count minus 2 (kinds minus 1).
+   - Both out-of-scope edits were needed, and both are correct: 15 × 2 = 30.
+     - Without the edit at `scripts/operator/run-wasm-console-benchmark.sh:486`, the wasm runner
+       refuses every capture at `record_count`.
+     - Without the edit at `scripts/operator/preflight-wasm-console-benchmark.sh:256`, the preflight
+       states a count the arm cannot emit.
+   - Nothing else pins a count. I searched:
+     - both runners, both preflights, the three validators, both mutation suites and
+       `check-bench-preconditions.sh`;
+     - `tools/{bench,wasm-console,wasm-console-guest}`;
+     - `qualification.yml:346-354`, which only invokes the suites;
+     - `nightly.yml:249`, a wasm32 `cargo check` that I ran green.
+   - The wasm host and guest derive the count from `WORKLOADS.len()`.
+   - Every index mutation in `test-console-benchmark.sh` (`.[22]`, `.[24]`, `.[43]`–`.[47]`) and in
+     `test-wasm-console-benchmark.sh` (`.[11]`, `.[12]`, `.[14]`, `.[15]`, `.[0:15]`) was checked
+     against a dump of the frozen record set. Each hits the record kind its label names.
+4. **The bank-slot term is derived.** Past `semantic_estimate`, `compile.rs` adds these terms to
+   the published estimate:
+   - the effect-control and builtin scalar-owner terms, both zero for this row: there is no effect,
+     and at a vector width `graph_scalar_owner_resource` counts only unbanked strips;
+   - the runtime metadata;
+   - the effect-bank term, zero;
+   - `checked_for_mask(builtin bank count, lanes × size_of::<bool>())`.
+
+   The builtin bank payload is charged only to `capped_estimate`. The test recomputes the slot term
+   from the artifact's retained banks, which are independent of the planned groups the compiler
+   reserves from. It pins no number. A temporary edit ran the test at `Simd4` (48 banks, 4-byte
+   mask), and it passed.
+5. **Tests are re-homed, not lost, and still discriminate.**
+   - A mutation had `played_planes` lend claim `i + 1`. Gate 1 failed (digest `673f18ed…` against
+     the pin), and so did the driver test.
+   - Declining in-place reads (`test_only_set_source_in_place_declined`) moves the ring's planes to
+     `[4096, 0, 0]` at both widths, so gate 1's planes pin separates in place from copy.
+   - The identity-pair half of `chain_shape.rs:834` is kept, and `:2398` is kept: that test is
+     independent of any row. `:2538` moved to the gain/pan pair.
+   - Two law tests now also cover the ring row, and neither weakened:
+     - the fold census, where the ring folds 64 routes;
+     - the folded-master oracle, including its metered candidate.
+6. **Floor accounting.** The parity test passes, and so does
+   `every_derived_row_names_its_ruling`.
+   - The ruling agrees with `floor.rs` and the jq pins:
+     - routing is 4 lane-ops = 0.135, a line of the 69-op and the 22-op inventories and no row's
+       floor;
+     - the floor of the table is the identity inventory, 22 = 0.743, shared by `dispatch_only`,
+       `gain_pan_only` and `gain_pan_ring`;
+     - the ring row is the native pure-path target;
+     - the retirement and its reason are recorded;
+     - the undeclared 47-op control, whose bank shapes I confirmed at `[8, 24]`.
+   - No unknown kind passes: `session_kind_shape` ends `else false`.
+7. **Build and scripts.** Every check below passed or reported ok.
+   - `cargo fmt --all --check`.
+   - Workspace clippy with `-D warnings`.
+   - `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`.
+   - `cargo test --locked -p console-workload -p bench`, in debug and in release. Bench 64, lib 8,
+     automation 4, chain_shape 23 and placement 3.
+   - `test-console-benchmark.sh` and `test-wasm-console-benchmark.sh`.
+   - `preflight-console-benchmark.sh --step preflight-956-sol`: `records_required` 48, workload
+     launches 0, and no `artifacts/steps/` directory left behind.
+   - `check-bench-policy.sh`, `check-realtime-policy.sh` (56 regions in 16 files) and
+     `check-workspace-policy.sh`.
+   - The nightly wasm32 `cargo check` of `wasm-console-guest` and `console-workload`.
+
+### Findings, by severity
+
+None blocks the pass.
+
+1. **Low, left to successors.** `crates/graph/tests/MUTATIONS.md:309`, `:350`, `:416-419`,
+   `:431-432` and `:486-489` still name deleted or renamed console tests. That is acceptable: the
+   file is outside this brief's paths, #957 (items 101 and 128) owns the #926, #927, #936 and #937
+   records, and #958 owns the #925 record. #957's handoff should carry the rename map:
+   - `the_driver_fed_plumbing_row_dispatches_only_its_output_unit` is now
+     `the_driver_fed_gain_pan_row_dispatches_every_unit_but_its_inputs`;
+   - `the_driver_fed_plumbing_row_renders_the_bound_rows_bits` is now
+     `the_driver_fed_gain_pan_row_renders_the_bound_rows_bits`;
+   - both `chain_shape` plumbing tests are deleted.
+2. **Low, a doc nit.** `tools/console-workload/src/lib.rs:473` (`METERED_WORKLOADS`) still says
+   "the census and shape tests under `tests/` iterate `WORKLOADS` only". Two of them now chain
+   `DRIVER_FED_WORKLOADS`. They still never iterate the metered row, so the sentence's point
+   holds, but not its letter.
+3. **Informational.** Deleting `chain_shape.rs:1084`, as the brief directs, also drops its console
+   check that no with-builtins row takes the Output route fold. Nothing on the console side replaces
+   it until #957 deletes the fold. The structural argument and `VERIFY.md` §1 cover the interval,
+   and every other row's census is unchanged above.
+4. **Informational, a brief defect.** The authorised-path list omitted the two wasm count pins in
+   finding 3 of the gates above, and the implementer's deviation record is accurate.
