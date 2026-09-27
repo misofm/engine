@@ -4547,11 +4547,18 @@ fn scalar_pair_is_in_place(program: &ExecutionProgram, fader: usize, matrix: usi
 /// no arena buffer, and the Output op, being dedicated, never shares a live buffer with the
 /// fader. A matching slot only means the colouring gave the Output that slot after the pair
 /// retired it: see [`chains_into`]'s session-output bullet.
+///
+/// `crossing_sources` and `naming` are [`crossing_sources`] and [`ops_naming_buffers`] of this
+/// program, built once by the caller: this is asked once per scalar fader, and scanning every edge
+/// and every op between the pair for each one made bind quadratic in the track count (issue #962).
+#[allow(clippy::too_many_arguments)]
 fn scalar_split_interval_is_clear(
     program: &ExecutionProgram,
     spec: &GraphSpec,
     parts: &RuntimeParts,
     taps: &BTreeMap<u32, Vec<GraphNodeId>>,
+    crossing_sources: &std::collections::BTreeSet<&GraphNodeId>,
+    naming: &BTreeMap<crate::program::BufferRef, Vec<usize>>,
     fader: usize,
     matrix: usize,
 ) -> bool {
@@ -4568,31 +4575,54 @@ fn scalar_split_interval_is_clear(
     {
         return false;
     }
-    if spec.edges.iter().any(|edge| {
-        edge.source.node == *fader_node
-            && matches!(
+    if crossing_sources.contains(fader_node) {
+        return false;
+    }
+    // No op strictly between the pair may name the buffer: as its output, a main input, a
+    // sidechain, or a delayed input's staging slot. `naming` lists the ops that do, in op order,
+    // so the first one after the fader decides it.
+    let naming = naming.get(&buffer).map_or(&[][..], Vec::as_slice);
+    naming
+        .get(naming.partition_point(|op| *op <= fader))
+        .is_none_or(|op| *op >= matrix)
+}
+
+/// The nodes a route or a sidechain reads out of, from anywhere in the graph: a node in this set
+/// has a reader the lowered program's scalar pairing cannot see.
+fn crossing_sources(spec: &GraphSpec) -> std::collections::BTreeSet<&GraphNodeId> {
+    spec.edges
+        .iter()
+        .filter(|edge| {
+            matches!(
                 edge.id,
                 GraphEdgeId::RouteSource { .. } | GraphEdgeId::EffectSidechain { .. }
             )
-    }) {
-        return false;
+        })
+        .map(|edge| &edge.source.node)
+        .collect()
+}
+
+/// Every op that names each physical buffer, in op order: [`op_names_buffer`], inverted once.
+fn ops_naming_buffers(
+    program: &ExecutionProgram,
+) -> BTreeMap<crate::program::BufferRef, Vec<usize>> {
+    let mut naming: BTreeMap<crate::program::BufferRef, Vec<usize>> = BTreeMap::new();
+    let mut name = |buffer: crate::program::BufferRef, index: usize| {
+        let ops = naming.entry(buffer).or_default();
+        if ops.last() != Some(&index) {
+            ops.push(index);
+        }
+    };
+    for (index, op) in program.ops.iter().enumerate() {
+        name(op.output, index);
+        for input in program.inputs_of(op).iter().chain(op.sidechain.as_ref()) {
+            name(input.buffer, index);
+            if let Some(delay) = input.delay {
+                name(delay.staging, index);
+            }
+        }
     }
-    program.ops[fader + 1..matrix].iter().all(|op| {
-        if op.output == buffer {
-            return false;
-        }
-        if program.inputs_of(op).iter().any(|input| {
-            input.buffer == buffer || input.delay.is_some_and(|delay| delay.staging == buffer)
-        }) {
-            return false;
-        }
-        if op.sidechain.is_some_and(|side| {
-            side.buffer == buffer || side.delay.is_some_and(|delay| delay.staging == buffer)
-        }) {
-            return false;
-        }
-        true
-    })
+    naming
 }
 
 /// Groups the program's ops into units: a bank's members become one unit at the first member's
@@ -4603,36 +4633,33 @@ pub(crate) fn units_of(
     program: &ExecutionProgram,
     membership_of: &BankMembership,
 ) -> Vec<PlannedUnit> {
-    let mut units: Vec<PlannedUnit> = Vec::with_capacity(program.ops.len());
-    let mut emitted: BTreeMap<usize, usize> = BTreeMap::new();
-    let mut op_of_node: BTreeMap<u32, usize> = BTreeMap::new();
+    let key_of = |membership: &Membership| match membership {
+        Membership::Effect(bank) => (false, *bank),
+        Membership::Builtin(bank) => (true, *bank),
+    };
+    // Every bank's `(member position, op)` pairs, gathered in one pass over the ops (issue #962).
+    // A bank's unit used to rescan every op of the program to find its own members, which made
+    // bind quadratic in the track count. The pairs are the ones that scan collected, in the same
+    // op order, and they are sorted the same way below.
+    let mut members_of: BTreeMap<(bool, usize), Vec<(usize, usize)>> = BTreeMap::new();
     for (index, op) in program.ops.iter().enumerate() {
-        op_of_node.insert(op.node, index);
+        if let Some((membership, position)) = membership_of.get(&op.node) {
+            members_of
+                .entry(key_of(membership))
+                .or_default()
+                .push((*position, index));
+        }
     }
+    let mut units: Vec<PlannedUnit> = Vec::with_capacity(program.ops.len());
     for (index, op) in program.ops.iter().enumerate() {
         match membership_of.get(&op.node) {
             None => units.push((None, vec![index])),
             Some((membership, _)) => {
-                let key = match membership {
-                    Membership::Effect(bank) => *bank,
-                    Membership::Builtin(bank) => bank + program.ops.len(),
-                };
-                if emitted.contains_key(&key) {
+                // A bank's unit is emitted at its first member's op; taking its members out of
+                // the map is what marks it emitted.
+                let Some(mut members) = members_of.remove(&key_of(membership)) else {
                     continue;
-                }
-                emitted.insert(key, units.len());
-                let mut members: Vec<(usize, usize)> = program
-                    .ops
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(other, candidate)| {
-                        membership_of.get(&candidate.node).and_then(
-                            |(other_membership, position)| {
-                                (*other_membership == *membership).then_some((*position, other))
-                            },
-                        )
-                    })
-                    .collect();
+                };
                 members.sort_unstable();
                 units.push((
                     Some(*membership),
@@ -4835,12 +4862,7 @@ pub(crate) fn preflight_sequential(
     bindings: &crate::GraphRuntimeBindings,
     sources: Option<&crate::GraphPreparedSourceSet>,
 ) -> Result<SequentialPlan, &'static str> {
-    let metadata = BorrowedPlanningMetadata {
-        plan,
-        bindings,
-        sources,
-        membership: bank_membership(&plan.spec, &plan.banks, &plan.builtin_banks),
-    };
+    let metadata = BorrowedPlanningMetadata::new(plan, bindings, sources);
     let grouped = units_of(program, metadata.membership());
     let runs = cohort_runs(program, &plan.spec, &metadata, &grouped);
     let run_units: Vec<(Vec<Membership>, Vec<usize>)> = runs
@@ -5169,6 +5191,8 @@ pub(crate) fn build_sequential(
     // matrix binding becomes an identity at its original slot, while the composite runs from the
     // fader slot and the existing reduction/observer boundaries remain in place.
     let (readers, first_producer) = op_dataflow(program);
+    let crossing_sources = crossing_sources(spec);
+    let naming = ops_naming_buffers(program);
     for pair in run_units.windows(2) {
         let (first_membership, first_ops) = &pair[0];
         let (second_membership, second_ops) = &pair[1];
@@ -5204,14 +5228,7 @@ pub(crate) fn build_sequential(
         else {
             continue;
         };
-        let crossing_reader = spec.edges.iter().any(|edge| {
-            edge.source.node == *first_node
-                && matches!(
-                    edge.id,
-                    GraphEdgeId::RouteSource { .. } | GraphEdgeId::EffectSidechain { .. }
-                )
-        });
-        if crossing_reader
+        if crossing_sources.contains(first_node)
             || first_track != second_track
             || !chains_into(
                 program,
@@ -5219,6 +5236,7 @@ pub(crate) fn build_sequential(
                 &parts,
                 &readers,
                 &first_producer,
+                &taps,
                 &[first],
                 &[second],
             )
@@ -5249,6 +5267,18 @@ pub(crate) fn build_sequential(
         }
     }
 
+    // `chains_into(&[fader], &[matrix])` below admits `matrix` only as `fader`'s sole reader, so the
+    // run holding that reader is the one candidate a scan over every later run could ever admit.
+    // Looking it up instead of scanning keeps the split pass linear in the track count, where the
+    // scan made bind quadratic (issue #962). Every condition, and the order they are tested in, is
+    // unchanged.
+    let mut plain_run_of_op: Vec<Option<usize>> = vec![None; program.ops.len()];
+    for (run, (membership, ops)) in run_units.iter().enumerate() {
+        if let ([op], true) = (ops.as_slice(), membership.is_empty()) {
+            plain_run_of_op[*op] = Some(run);
+        }
+    }
+
     // Keep the nonadjacent pair at both original schedule positions. A settled fader defers only
     // its private in-place arithmetic; the owner completes it at the matrix slot or before an
     // intervening execution/observer error escapes the render call. The first slice admits one
@@ -5259,7 +5289,15 @@ pub(crate) fn build_sequential(
             continue;
         }
         let fader = fader_ops[0];
-        for (matrix_membership, matrix_ops) in run_units.iter().skip(fader_run + 2) {
+        // Only the run holding `fader`'s sole reader can be admitted (see `plain_run_of_op`).
+        let candidate = match readers[fader].as_slice() {
+            [reader] => plain_run_of_op[*reader].filter(|run| *run >= fader_run + 2),
+            _ => None,
+        };
+        for (matrix_membership, matrix_ops) in candidate
+            .map(|run| &run_units[run..=run])
+            .unwrap_or_default()
+        {
             if !matrix_membership.is_empty() || matrix_ops.len() != 1 {
                 continue;
             }
@@ -5277,10 +5315,20 @@ pub(crate) fn build_sequential(
                     &parts,
                     &readers,
                     &first_producer,
+                    &taps,
                     &[fader],
                     &[matrix],
                 )
-                || !scalar_split_interval_is_clear(program, spec, &parts, &taps, fader, matrix)
+                || !scalar_split_interval_is_clear(
+                    program,
+                    spec,
+                    &parts,
+                    &taps,
+                    &crossing_sources,
+                    &naming,
+                    fader,
+                    matrix,
+                )
             {
                 continue;
             }
@@ -6192,11 +6240,56 @@ impl PlanningMetadata for RuntimeParts {
     }
 }
 
+/// The planning questions a plan and its bindings answer before any owner has moved.
+///
+/// Every answer is interned once, at construction, from the same lists the questions used to scan
+/// (issue #962): the route fold and the merge search ask them once per lane, and a linear scan of
+/// a per-track list per question made bind quadratic in the track count.
 struct BorrowedPlanningMetadata<'a> {
-    plan: &'a crate::PreparedGraphPlan,
-    bindings: &'a crate::GraphRuntimeBindings,
-    sources: Option<&'a crate::GraphPreparedSourceSet>,
     membership: BankMembership,
+    /// The source set's claim nodes.
+    sources: std::collections::BTreeSet<&'a GraphNodeId>,
+    /// Nodes bound with a processor (an identity acknowledgement is not one).
+    bound: std::collections::BTreeSet<&'a GraphNodeId>,
+    effects: std::collections::BTreeSet<&'a crate::EffectNodeId>,
+    /// The plan's own observers and the bindings', together.
+    observers: std::collections::BTreeSet<&'a GraphNodeId>,
+    /// Each route node's transform. When a node is listed twice the later entry wins (`insert`
+    /// replaces), which is what a reverse search of `plan.routes` returned.
+    routes: BTreeMap<&'a GraphNodeId, &'a RouteTransform>,
+}
+
+impl<'a> BorrowedPlanningMetadata<'a> {
+    fn new(
+        plan: &'a crate::PreparedGraphPlan,
+        bindings: &'a crate::GraphRuntimeBindings,
+        sources: Option<&'a crate::GraphPreparedSourceSet>,
+    ) -> Self {
+        let mut routes = BTreeMap::new();
+        for route in &plan.routes {
+            routes.insert(&route.node, &route.transform);
+        }
+        Self {
+            membership: bank_membership(&plan.spec, &plan.banks, &plan.builtin_banks),
+            sources: sources
+                .map(|set| set.claims().iter().map(|claim| &claim.node).collect())
+                .unwrap_or_default(),
+            bound: bindings
+                .nodes
+                .iter()
+                .filter(|binding| binding.processor.is_some())
+                .map(|binding| &binding.node)
+                .collect(),
+            effects: plan.effects.iter().map(|effect| &effect.id).collect(),
+            observers: plan
+                .observers
+                .iter()
+                .chain(bindings.observers.iter())
+                .map(|observer| &observer.node)
+                .collect(),
+            routes,
+        }
+    }
 }
 
 impl PlanningMetadata for BorrowedPlanningMetadata<'_> {
@@ -6204,35 +6297,19 @@ impl PlanningMetadata for BorrowedPlanningMetadata<'_> {
         &self.membership
     }
     fn has_source(&self, node: &GraphNodeId) -> bool {
-        self.sources
-            .is_some_and(|set| set.claims().iter().any(|claim| &claim.node == node))
+        self.sources.contains(node)
     }
     fn has_binding(&self, node: &GraphNodeId) -> bool {
-        self.bindings
-            .nodes
-            .iter()
-            .any(|binding| &binding.node == node && binding.processor.is_some())
+        self.bound.contains(node)
     }
     fn has_effect(&self, node: &GraphNodeId) -> bool {
-        self.plan
-            .effects
-            .iter()
-            .any(|effect| matches!(node, GraphNodeId::Effect(id) if *id == effect.id))
+        matches!(node, GraphNodeId::Effect(id) if self.effects.contains(id))
     }
     fn has_observer(&self, node: &GraphNodeId) -> bool {
-        self.plan
-            .observers
-            .iter()
-            .chain(self.bindings.observers.iter())
-            .any(|observer| &observer.node == node)
+        self.observers.contains(node)
     }
     fn route(&self, node: &GraphNodeId) -> Option<&RouteTransform> {
-        self.plan
-            .routes
-            .iter()
-            .rev()
-            .find(|route| &route.node == node)
-            .map(|route| &route.transform)
+        self.routes.get(node).copied()
     }
 }
 
@@ -6265,6 +6342,7 @@ fn observed(
     program: &ExecutionProgram,
     spec: &GraphSpec,
     parts: &impl PlanningMetadata,
+    taps: &BTreeMap<u32, Vec<GraphNodeId>>,
     index: usize,
     served: fn(&GraphNodeId) -> bool,
 ) -> bool {
@@ -6272,12 +6350,16 @@ fn observed(
     if parts.has_observer(node) && !served(node) {
         return true;
     }
-    program
-        .taps
-        .iter()
-        .filter(|tap| tap.after_op as usize == index)
-        .map(|tap| &spec.nodes[tap.node as usize].id)
-        .any(|node| parts.has_observer(node) && !served(node))
+    // `taps` is [`taps_by_op`] of this program, built once by the caller (issue #962): this is
+    // asked twice per folded lane, and scanning every tap for each made bind quadratic.
+    u32::try_from(index)
+        .ok()
+        .and_then(|op| taps.get(&op))
+        .is_some_and(|aliases| {
+            aliases
+                .iter()
+                .any(|node| parts.has_observer(node) && !served(node))
+        })
 }
 
 /// The one observation boundary a folded lane still serves (issue #885): post-matrix.
@@ -6354,6 +6436,7 @@ fn foldable_lane(
     parts: &impl PlanningMetadata,
     readers: &[Vec<usize>],
     first_producer: &[Option<usize>],
+    taps: &BTreeMap<u32, Vec<GraphNodeId>>,
     producer: usize,
 ) -> Option<(usize, [f32; 4])> {
     if readers[producer].len() != 1 {
@@ -6375,8 +6458,14 @@ fn foldable_lane(
     // A post-matrix observer on the last slot reads the chain's resident final lane instead of
     // the member buffer the fold stops writing (issue #885). The route has no such stand-in: its
     // output is mixed straight into the master and never exists on its own.
-    if observed(program, spec, parts, producer, served_by_the_resident_lane)
-        || observed(program, spec, parts, route, served_by_nothing)
+    if observed(
+        program,
+        spec,
+        parts,
+        taps,
+        producer,
+        served_by_the_resident_lane,
+    ) || observed(program, spec, parts, taps, route, served_by_nothing)
     {
         return None;
     }
@@ -6472,6 +6561,7 @@ fn route_fold(
     run_units: &[(Vec<Membership>, Vec<usize>)],
 ) -> Option<RouteFold> {
     let (readers, first_producer) = op_dataflow(program);
+    let taps = taps_by_op(program, spec);
     // (run unit, one (route op, folded 2x2) per rendered lane), in render order.
     let mut candidates: Vec<FoldCandidate> = Vec::new();
     for (run, (membership, ops)) in run_units.iter().enumerate() {
@@ -6488,6 +6578,7 @@ fn route_fold(
                 parts,
                 &readers,
                 &first_producer,
+                &taps,
                 ops[last + lane],
             ) {
                 Some(lane_fold) => folded.push(lane_fold),
@@ -6765,12 +6856,17 @@ fn op_dataflow(program: &ExecutionProgram) -> (Vec<Vec<usize>>, Vec<Option<usize
 /// Effect observation (`ObservationLane`) is *not* such an observer and must not be confused
 /// with one: it reads the effect's own resident state through `observe_resident`, never a planar
 /// stage buffer, so an armed console lane neither declines the merge nor is disturbed by one.
+///
+/// `taps` is [`taps_by_op`] of this program, built once by the caller: scanning every tap of the
+/// program for each lane asked made the merge search quadratic in the track count (issue #962).
+#[allow(clippy::too_many_arguments)]
 fn chains_into(
     program: &ExecutionProgram,
     spec: &GraphSpec,
     parts: &impl PlanningMetadata,
     readers: &[Vec<usize>],
     first_producer: &[Option<usize>],
+    taps: &BTreeMap<u32, Vec<GraphNodeId>>,
     earlier: &[usize],
     later: &[usize],
 ) -> bool {
@@ -6794,11 +6890,10 @@ fn chains_into(
         if parts.has_observer(node) {
             return false;
         }
-        if program
-            .taps
-            .iter()
-            .filter(|tap| tap.after_op as usize == *before)
-            .any(|tap| parts.has_observer(&spec.nodes[tap.node as usize].id))
+        if u32::try_from(*before)
+            .ok()
+            .and_then(|op| taps.get(&op))
+            .is_some_and(|aliases| aliases.iter().any(|alias| parts.has_observer(alias)))
         {
             return false;
         }
@@ -6849,6 +6944,7 @@ fn cohort_runs(
     units: &[PlannedUnit],
 ) -> Vec<Vec<usize>> {
     let (readers, first_producer) = op_dataflow(program);
+    let taps = taps_by_op(program, spec);
     let mut unit_of_op: Vec<Option<usize>> = vec![None; program.ops.len()];
     for (index, (membership, ops)) in units.iter().enumerate() {
         if membership.is_none() {
@@ -6882,6 +6978,7 @@ fn cohort_runs(
             parts,
             &readers,
             &first_producer,
+            &taps,
             ops,
             &units[later].1,
         ) {

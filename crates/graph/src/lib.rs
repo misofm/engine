@@ -1202,6 +1202,18 @@ impl PreparedGraphPlan {
             return false;
         }
 
+        // The source of every edge into each node, main and sidechain alike, gathered once (issue
+        // #962). The check below asks, per bank, whether any edge *into* a member starts at or
+        // after the bank's first member. Only the members' own incoming edges can answer that, and
+        // scanning every edge of the spec for every bank instead made bind quadratic in the track
+        // count.
+        let mut sources_into: BTreeMap<&GraphNodeId, Vec<&GraphNodeId>> = BTreeMap::new();
+        for edge in &self.spec.edges {
+            sources_into
+                .entry(&edge.destination.node)
+                .or_default()
+                .push(&edge.source.node);
+        }
         let effect_banks = self.banks.iter().map(|bank| {
             bank.members
                 .iter()
@@ -1232,11 +1244,14 @@ impl PreparedGraphPlan {
             else {
                 return false;
             };
-            if self.spec.edges.iter().any(|edge| {
-                members.contains(&edge.destination.node)
-                    && positions
-                        .get(&edge.source.node)
-                        .is_none_or(|source| *source >= first_member)
+            if members.iter().any(|member| {
+                sources_into.get(member).is_some_and(|sources| {
+                    sources.iter().any(|source| {
+                        positions
+                            .get(*source)
+                            .is_none_or(|source| *source >= first_member)
+                    })
+                })
             }) {
                 return false;
             }
@@ -1292,6 +1307,13 @@ impl PreparedGraphPlan {
         resource: GraphBuiltinBankResourceEstimate,
     ) -> Result<Self, GraphBuiltinBankAttachError> {
         let mut seen = BTreeSet::new();
+        // Membership in `required_bindings`, interned once per call (issue #962). The field is in
+        // schedule order and about four entries per track, and every bank member is looked up in
+        // it, so a linear `contains` per member made every host's compile quadratic in the track
+        // count. This is a sorted copy of the borrows, used for nothing but membership: the field
+        // itself, and every order derived from it, is untouched.
+        let mut required: Vec<&GraphNodeId> = self.required_bindings.iter().collect();
+        required.sort_unstable();
         let level_by_node: BTreeMap<_, _> = self
             .dependency_levels
             .iter()
@@ -1337,7 +1359,7 @@ impl PreparedGraphPlan {
             };
             if bank.members.iter().any(|member| {
                 level_by_node.get(member).copied() != Some(level)
-                    || !self.required_bindings.contains(member)
+                    || required.binary_search(&member).is_err()
             }) {
                 return Err(GraphBuiltinBankAttachError::IncompatibleMembers);
             }
