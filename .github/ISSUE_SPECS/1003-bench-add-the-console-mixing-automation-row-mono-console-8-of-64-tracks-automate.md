@@ -419,3 +419,116 @@ The browser arm ran once under the lock, 21:30:14-21:30:17, pinned to CPU 31, wi
   false`). A run after the batch repins would prove the recipe equals delivery.
 * **Under V8, A6 cannot be observed through the shipped ABI.**
 * **Both arms ran with the host uncontrolled.**
+
+## Sol attempt 1 verdict: PASS
+
+Verifier: Sol, 2026-09-27, on `9f33fa63` merged onto the current batch head `b03edde4` (which adds
+#1000 and #1001; the merge is clean). Host EPYC 7313P, rustc 1.97.1, Node v22.23.2,
+`CARGO_INCREMENTAL=0`, a scratch target. The one timed probe held `timing.lock` with `taskset -c 31`
+(load average 15.9).
+
+**What reproduces on the merged tree.**
+
+* `cargo fmt --check` and `cargo clippy --locked --workspace --all-targets -- -D warnings` are clean.
+* `cargo test -p console-workload -p bench` passes, including the five new tests and the bench
+  row test.
+* `test-console-benchmark.sh` passes. The aggregate validator accepts `after-1003`.
+* The env-vocabulary, workspace, bench, realtime, lane, session and effect-runtime policy scripts
+  pass, as do the artifact-leak check and `cargo check` of `wasm-console-guest` and
+  `console-workload` for `wasm32`.
+* `bench console --preflight` passes and prints exactly the seven preflight digests of the
+  `after-1003` records.
+* The 48 standing records of `after-1003` carry the digests of `after-971`.
+* `run-web-mixing-automation-benchmark.sh prepare` and `preflight` rebuild `host_web.wasm` from the
+  merged tree and reproduce the browser record's seven preflight digests exactly. The module is
+  `9ac37ae7…`, the bytes the #1000 verdict built at the batch head, because this branch changes no
+  wasm input. It is still not the pin (`8934cdd9…`). So the browser arm is reproducible from the repo
+  alone. Its record says `descriptive_only`, and nothing in CI reads it.
+
+**A1: the traffic is the SDK's lowering.** Traced end to end.
+
+* **EQ.** `prepared-control.js` groups every `effectParam` record with `rack <= 2` by address and
+  sends each EQ group through `eq_target_prepare` with the wire channel. `channel = 2` becomes
+  `ParameterChannel::Both`, and `EqTargetPreparer::apply_edit`'s `(PerLane, Both)` arm marks both
+  rows dirty. The native `edit_owner(3, Both, v)` does the same through the owner's `edit_inner`.
+  Both then call the one factory `prepare_targets`, whose `fill_targets` emits one `Both` target
+  when both lanes are touched and the sections are bit-equal.
+* **Compressor and limiter.** These addresses get `Unsupported` from the config copy, so they ride
+  the same submission unprepared. `into_effect_records`'s `(PerLane, 2)` arm lowers each to a
+  `Left` then a `Right` `Parameter` record, which is exactly what `push` sends natively.
+* **The V8 harness** passes `createPreparedControl` the same callbacks as `boundary.ts`.
+* **A restated EQ target opens no window.** `start_ramp` settles through `stationary_at`.
+
+**A3 holds per effect, and ch16 hides no path, but the stated reason is wrong (F1).** Timed under
+the lock, paired medians over 1,000 alternated observations:
+
+| comparison | paired median |
+|---|---:|
+| ch16-only limiter ride − limiter restated | +0.53 µs |
+| ch40-only limiter ride − limiter restated | −0.06 µs |
+| whole row at the 8 dB limiter step − the same row at 0.25 dB | +0.43 µs |
+
+* ch16's ride takes the same ramp at the same cost as ch40's.
+* The 8 dB step adds no measurable engaged-limiting cost to `paired_ramp_delta`.
+
+**Vacuity.** Four mutations on the merged tree:
+
+| mutation | result |
+|---|---|
+| EQ lowered Left then Right | red at A6 |
+| limiter step 0.25 dB | red: "limiter alone moved no rendered bit" |
+| `quiet` also settles | red: "quiet … did not collapse every cohort" |
+| limiter restated at base − 0.5 dB | **green** everywhere (F3) |
+
+### Findings
+
+1. **MEDIUM (fix the prose before the batch boundary; no new attempt): ch16's non-engagement is
+   misexplained.** `LIMITER_STEP_DB`'s doc and the evidence above say that ch16 "never engages
+   natively anywhere in the ceiling's [−24, 0] dB domain, even at −24 dB", and that its compressor
+   "holds the track below −24 dBFS". Both statements are false. Measured natively, with 64-block
+   pre-roll and 128 compared blocks:
+   * a ceiling held from block 64 moves bits at −20 dB and below, and not at −18 dB, so ch16's peak
+     sits between −20 and −18 dBFS;
+   * a per-block ride of −16/−24 or −20/−24 moves bits, and so does 0/−24 changed every two blocks;
+   * only the spec's `base ± step` ride cannot engage it. Its upper value is at least −1 dB (0 dB
+     for any step of 1 dB or more), so the ceiling climbs back every other block.
+
+   **Failure scenario.** The owner rules on the offered option, "move the bank-2 limiter to a track
+   that engages", which changes the track table and the validator pin. The real choice is between
+   the ride shape and the track. Or a later diagnosis cites ch16 as a limiter that cannot engage.
+   **Fix.** Correct the doc comment and add an erratum here. No step or table change is needed: the
+   premise is per effect, and the cost is equal.
+2. **LOW-MEDIUM: the mutation suite does not isolate three new validator rules.** Each was deleted
+   alone, and `test-console-benchmark.sh` still passed:
+   * the aggregate's cross-round agreement on `preflight_output_sha256` and
+     `preflight_bank_collapse_counters`. Its named mutation sets `automated_limiter_only` to the
+     preflight `restated` digest, so the per-record A3 rule refuses it first;
+   * `preflight_bank_collapse_counters.quiet[0] == quiet[1] × preflight_blocks`, whose mutation the
+     A6 equality refuses first;
+   * `preflight_blocks == preroll_blocks + 64`, whose mutation the quiet-counter rule refuses first.
+
+   **Failure scenario.** A later edit drops one of these rules and the suite stays green, against
+   the suite's own header. **Fix.** Add mutations that change only the guarded field. For example,
+   give `.[49]`'s `automated_limiter_only` a fresh digest; or change `preflight_blocks` together
+   with both quiet-shaped counters.
+3. **LOW: `quiet == restated` does not check the limiter's bases.** Neither limiter engages near its
+   held value, so restating it 0.5 dB off leaves every gate green. The validator comment ("the digest
+   equality … proves the row restated exactly those") overclaims for the limiter. There is no timing
+   effect: a restated ceiling is stationary after the settle. The literal bases in
+   `the_eight_controls_resolve_by_id_to_their_held_values` pin `resolve`, not `value(Restated)`.
+   **Fix.** Narrow the comment, or assert `value(Restated, _) == base` in a unit test.
+4. **LOW: the browser arm's protocol and provenance.**
+   * It takes one measured round, with no labelled warmup (the preflight warms it), where AGENTS.md
+     asks for one warmup and two rounds. So there is no cross-round digest agreement.
+   * `prepare` records no commit, so `run` can pair a module and `controls.json` built at commit A
+     with `candidate_commit` B.
+   * Its input is one continuous 130 Hz sine shared by every track. The native row feeds per-track
+     phase-offset frozen blocks. The record does not say so, although the limiter's engagement
+     differs between the two arms partly for that reason.
+5. **INFO.** No native host attaches an effect console (VERIFY-AUTOMATION §3). The native arm
+   therefore prices the web host's traffic at `Simd8`, as the spec requires.
+
+The row measures what it claims, in the host's shapes. Its central premises discriminate: the
+lowering, the held bases for the EQ and the compressor, per-effect movement, A6's collapse
+counters, and the push counts. The findings above are prose, test-isolation and provenance
+follow-ups.
