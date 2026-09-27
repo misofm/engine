@@ -655,3 +655,122 @@ one is kept whenever the profitable one gains more banks than the harmful one lo
 gains less, both are cancelled. Evaluating moves per independent component, meaning tracks whose
 groups share no pool, would recover the profitable part. That is an optimisation, and it belongs
 in its own issue.
+
+
+## Sol attempt 2 verdict: PASS
+
+Sol, 2026-09-27. I judged `d1506656` merged onto the batch head `f12d1466` (#996), as a
+detached scratch merge `1f4c1986` that is not kept. Host x86-64-v3, `CARGO_INCREMENTAL=0`.
+Four-lane legs use the research `--cfg miso_native_simd4` lane hunk in `target/simd4`, applied for
+measurement only. Timings ran under the timing lock, built outside it. The worktree was left clean.
+
+Attempt 1's three required items are done and hold under reproduction. The guard now compares
+banks the factories actually bind; my discriminating test is in unchanged
+(`crates/graph-compiler/src/lib.rs:8806`); both delay gates are in (`:8920`, `:8968`); and both
+statements are corrected. The remaining findings are low and go to follow-ups. None changes a
+bit, loses a bank, or can fail a compile with any shipped factory.
+
+### Reproduced
+
+* **Gates on the merged tree.** All pass:
+  * `fmt --check`, clippy `-D warnings` (workspace, all targets and features), doc
+    `-D warnings`;
+  * tests: `graph-compiler` 116, `rack-compiler` 13, `graph` 110 / 117 with test-support,
+    `builtins-compiler` 79, `host-core` 234 (including #996's `limiter_linked_session`,
+    `symmetry_witness` and `collapse_arming`), `console-workload` 39 (including `chain_shape`),
+    `capi` 36, `delay` 16;
+  * the graph policy and determinism scripts (100/100), the realtime, workspace and
+    env-vocabulary scripts.
+* **Mutation table.** My own driver, on the whole lib suite at 8 lanes and on the ten #971 and
+  class tests at 4 lanes; red sets are identical at both widths.
+
+  | mutation | red tests |
+  |---|---|
+  | no move | discriminating test, dogfood gate, odd-track gate |
+  | brief's rule, guard kept | discriminating test |
+  | global rule, guard kept | discriminating test |
+  | "any" rule, guard kept | discriminating test |
+  | vacuous rule, guard kept | discriminating test |
+  | attempt 1's planned-slot guard | both delay gates |
+  | no guard | both delay gates and the guard gate |
+  | rack-only (builtin map not updated) | dogfood gate and odd-track gate, on `bank_shape` |
+  | brief's rule, no guard | 5 tests |
+  | "any" rule, no guard | 5 tests |
+
+  This matches the attempt-2 evidence.
+* **Class A.** My randomized probe (400 seeds plus 22 named shapes, rendered at Scalar, Simd4 and
+  Simd8, armed and unarmed), with the merged tree compared against the same tree carrying
+  `f12d1466`'s four #971 files:
+
+  | build | rows | digest differences | rows off the scalar oracle | rows with fewer banks | rows moved without a bank gain |
+  |---|---:|---:|---:|---:|---:|
+  | 8 lanes | 2,110 | 0 | 0 | 0 | 0 of 68 moved |
+  | 4 lanes | 2,110 | 0 | 0 | 0 | 0 of 58 moved |
+
+  Seed 46 is silent at every width, on base as well. The phantom sessions now match base
+  exactly. On the four-lane build, Simd8 dispatch moves nothing, because the factories decline
+  eight lanes and the guard now sees that.
+* **A/B**, with host load 12 to 13; p50 per block, as-is / today / #971:
+  * 8 lanes: 129.2 / 154.5 (+19.5%) / **125.7 µs (−2.7%)**;
+  * 4 lanes: 225.8 / 223.1 / **212.5 µs (−5.9%)**; round 2 gave −6.0%.
+  * Digests are `58a7dc2477b23056` and `a3bb6a6a84917779` in every arm.
+  * Shapes are `[12,63]` and `[22,123]`, and the builtins-only arm is the same plan in both.
+
+  This is consistent with the evidence's −3.1% and −5.6%.
+
+### The two questions
+
+1. **A factory error on the re-plan fails the compile** (`crates/graph-compiler/src/banks.rs:264`,
+   `bind(&replan)?`). This is **Low** severity, and the fix is a recommended follow-up, not
+   blocking.
+   * **The failure mode is real.** A test-only compressor factory whose bank bind always errors
+     demonstrates it: `ch00` mono, and `ch01..` stereo carrying only `dynamic: [comp]`.
+     With the move disabled the session compiles, because the unmoved plan has no full group
+     and never calls bind. At head it is refused with the factory's code, at 8 and 4 lanes.
+   * **No shipped factory can trigger it.** I read the bank path of all eight launch factories.
+     Every error there is one of three kinds:
+     * A request-shape check (`validate_shape`, backend/width, `len != lanes`), which a full
+       group at the plan's width always passes.
+     * A per-member validator that per-node `prepare` already ran on the same replayed request
+       (`EffectBankPreparation`): `expected_prepared_metadata`, `initial_defaults`, the EQ's
+       `physical_targets`/`words`, the transient shaper's `coefficient_row`, the limiter's
+       `Shape::new`, the multiband's `design_lr4`/`Side::new`, the gate's `seed_lane`, the
+       delay's `validate_inputs`.
+     * A binder invariant (`graph.effect.bank_metadata`, scratch and index overflow) that
+       depends on the width, the quantum or the factory contract, not on which tracks move.
+   * **Ruling.** The re-plan is speculative, and the trial plan is already bound and valid. A
+     `bind(&replan)` error should keep the unmoved plan and its banks, not fail the compile.
+     That matches #95's stance that a cohort a factory cannot bank must not cost the user the
+     whole compile. The gate for it is the erroring-factory session above: it must compile
+     and keep `ch00` mono.
+2. **Compile time and memory at #962's scale.** The rise is linear and conditional. A cheaper
+   exact count exists; it goes to a follow-up.
+   * **Timing.** Debug `compile_with_builtins`, 65,537 tracks all mono with one strand, under
+     the lock:
+
+     | effect per track | case | base | head | change |
+     |---|---|---:|---:|---:|
+     | `simd1: [comp]` | refused | 48.8 / 48.4 s | 50.1 / 50.4 s | +3.4% |
+     | `simd1: [comp]` | one track in 9 stereo, kept | 48.7 s | 50.8 s | +4.3% |
+     | `simd2: [limiter]` | refused | 48.5 s | 53.4 s | +10.2% |
+
+     With the limiter, peak RSS also rises from 3.21 GB to **3.99 GB (+24%)**, because both
+     plans' banks are alive at once.
+   * **#962's gates never take this path.** Their session has no effects, so nothing strands,
+     and growth stays linear.
+   * **The cheaper exact count.** Planning is independent per `(level, rack, class)` pool. A
+     bind depends only on its group (program slot, member requests, active slots, levels) and
+     on width and dispatch. So a re-plan group equal to a trial group binds identically. Bind
+     only the re-plan's groups that are absent from the trial, move the trial's banks across
+     for the rest (renumbering `cohort.group`), and compare
+     `trial − vanished + new`. This is exact, and it brings the overhead back to about attempt
+     1's (the planner re-run and the map clone) without doubling bank memory.
+
+### Follow-ups to file (stateless, each small)
+
+* On a re-plan bind error, keep the unmoved plan. The gate is the erroring-factory session
+  above.
+* Reuse the trial's banks for unchanged groups. Gates: the bank count and the digest are
+  unchanged on the whole probe; at scale, the limiter case's peak RSS stays within a few
+  percent of base.
+* The implementer's per-component move decision (attempt 1's low finding 3), unchanged.
