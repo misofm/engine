@@ -14062,7 +14062,7 @@ mod tests {
             assert_eq!(
                 executor.active_units.len(),
                 9,
-                "declined {declined}: a copied claim's input unit is inert too"
+                "declined {declined}: every input unit is inert, copied or read in place"
             );
             assert!(
                 active <= charge.active_unit_table_bytes
