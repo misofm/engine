@@ -64,6 +64,11 @@ pub(crate) fn banks_are_permitted(identity: &session::EffectIdentity) -> bool {
 /// is a path and a sidechain source never raises a chain member's level. A bank may not cross a
 /// dependency level (#96 F12), so chains are bucketed by the level of their *first* slot and the
 /// arithmetic is asserted rather than assumed.
+///
+/// That `k` is the lane's own chain position, not the leader's slot index (issue #966). A lane
+/// whose program skips an earlier leader slot runs a later one at a lower rank, so the bucket
+/// aligns every lane's slot 0 and nothing after it. A slot binds only when its members also share
+/// a level; the misaligned ones render per node.
 pub(crate) fn bind_rack_banks_indexed(
     effects: &EffectPreparedSession,
     prepared: &PreparedEffectIndex<'_>,
@@ -238,6 +243,29 @@ pub(crate) fn bind_rack_banks_indexed(
                     return Err(diag("graph.internal.invariant", "$.effects"));
                 };
                 members.push(node.clone());
+            }
+            // Issue #966: every member must sit at one dependency level, or bind refuses the
+            // plan (`graph.scheduler.layout`). An identity slot is a planner fiction with no
+            // graph node, so a lane's member for leader slot `slot` sits at `group.level + rank`,
+            // not at `group.level + slot`: a lane that skips an earlier slot another lane runs
+            // reaches this one a level early. Such a bank would run as one unit at its first
+            // member's position, before the late lanes' producers had written their blocks. The
+            // slot is left unbound instead and its members render per node, exactly as a slot
+            // some lane skips does. Equal ranks and equal levels are the same condition (the path
+            // arithmetic above asserts `slot_level == level + offset` for every bankable chain),
+            // and this reads the levels because they are what bind checks.
+            let member_level = |node: &EffectNodeId| {
+                level_by_node
+                    .get(&GraphNodeId::Effect(node.clone()))
+                    .copied()
+            };
+            let first_level = member_level(&members[0]);
+            if first_level.is_none()
+                || members
+                    .iter()
+                    .any(|member| member_level(member) != first_level)
+            {
+                continue;
             }
             let entries: Vec<&EffectPreparedEntry> = members
                 .iter()

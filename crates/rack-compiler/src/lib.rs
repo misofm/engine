@@ -109,6 +109,11 @@ pub struct CohortCandidate<Id, K = EffectProgramKey> {
 
 /// Candidates already partitioned by dependency level by the caller: a bank never crosses a level,
 /// because its members must all be ready in the same wave (#96 F12).
+///
+/// The partition aligns each candidate's *first* slot. A member whose program is a subsequence of
+/// its leader's runs identity slots with no graph node behind them, so a slot after one it skips
+/// sits at a lower level than the same slot on a lane that runs the whole program. The binder must
+/// therefore bind a slot only when every lane reaches it at the same level (issue #966).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CohortLevel<Id, K = EffectProgramKey> {
     pub level: u64,
