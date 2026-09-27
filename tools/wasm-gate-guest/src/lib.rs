@@ -146,6 +146,59 @@ pub extern "C" fn miso_gate_f64_lane_probe(seed: u32) -> u32 {
     })
 }
 
+/// Lane fields on which this module's full meter block pass (`lane::kernels::builtins::meter_block`)
+/// disagrees with the builtin meter's scalar loop at `width` (issue #950). Zero is the only
+/// admissible answer, and the host fails the leg on anything else.
+///
+/// Like [`miso_gate_f64_lane_mismatches`], this is the only wasm execution of that differential:
+/// `crates/lane/tests/meter_block.rs` runs it natively.
+///
+/// Traps on an out-of-range argument, which the host reports as a failure rather than a mismatch.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_gate_meter_block_mismatches(width: u32) -> u32 {
+    corpus::meter_block_mismatches(width as usize)
+}
+
+/// The lowering probe of issue #950: the real `lane::kernels::builtins::meter_block` at `Simd4`,
+/// the kernel the graph's banked full meter pass runs on the browser's four-lane banks.
+///
+/// `scripts/run-wasm-gates.sh` (`check_f64_lane_lowering`) disassembles this function's body in
+/// the `simd128` guest and fails unless it contains `f64x2.promote_low_f32x4`, `f64x2.mul` and
+/// `f64x2.add` and none of the scalar `f64.promote_f32`, `f64.mul`, `f64.add`, `f32.add`, `f32.gt`
+/// or `f32.abs`. `#[inline(never)]` and the export keep it one named function to census. The
+/// inputs are an xorshift of `seed` taken as raw bits, so NaNs, infinities and subnormals reach
+/// the kernel's sanitization too; the result is a fold of every output's bits, so nothing the probe
+/// computes is dead.
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "C" fn miso_gate_meter_block_probe(seed: u32) -> u32 {
+    use lane::kernels::builtins::meter_block;
+    use lane::{Lane, LaneF64, Simd4, Widen};
+
+    let mut words = [0.0_f32; 4 * 64];
+    let mut state = seed | 1;
+    for value in &mut words {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        *value = f32::from_bits(state);
+    }
+    let block = meter_block::<Simd4>(&words, 64, <Simd4 as Widen>::F64::load(&[0.5; 4]));
+    let mut counts = [0.0_f32; 12];
+    block.peak.store(&mut counts[..4]);
+    block.clipped.store(&mut counts[4..8]);
+    block.sanitized.store(&mut counts[8..]);
+    let mut energy = [0.0_f64; 4];
+    block.energy.store(&mut energy);
+    let fold = counts
+        .iter()
+        .fold(0_u32, |fold, value| fold.rotate_left(5) ^ value.to_bits());
+    energy.iter().fold(fold, |fold, value| {
+        let bits = value.to_bits();
+        fold ^ (bits as u32) ^ ((bits >> 32) as u32)
+    })
+}
+
 /// Word `word` (0..8) of the little-endian SHA-256 digest of `case` at `width`.
 ///
 /// Traps on an out-of-range argument, which the host reports as a failure rather than a mismatch.

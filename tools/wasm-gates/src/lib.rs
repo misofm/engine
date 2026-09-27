@@ -140,6 +140,13 @@ pub struct Report {
     /// wasm execution of issue #949's exactness differential (see
     /// `wasm_gate_corpus::f64_lane_mismatches`).
     pub f64_lane_mismatches: u32,
+    /// Lane fields on which this leg's full meter block pass (`lane::kernels::builtins::meter_block`)
+    /// disagreed with the builtin meter's scalar loop, summed over every width. Anything but zero
+    /// fails the leg.
+    ///
+    /// Not a digest and not pinned, for the same reason: it is the wasm execution of issue #950's
+    /// kernel differential (see `wasm_gate_corpus::meter_block_mismatches`).
+    pub meter_block_mismatches: u32,
 }
 
 impl Report {
@@ -161,7 +168,7 @@ impl Report {
             })
             .collect();
         format!(
-            "{{\"schema_version\":1,\"kind\":\"wasm_gates\",\"leg\":\"{}\",\"runtime\":\"wasmtime {}\",\"backend\":{},\"cases\":{},\"comparisons\":{},\"minmax_lowering_mismatches\":{},\"f64_lane_mismatches\":{},\"mismatches\":[{}]}}",
+            "{{\"schema_version\":1,\"kind\":\"wasm_gates\",\"leg\":\"{}\",\"runtime\":\"wasmtime {}\",\"backend\":{},\"cases\":{},\"comparisons\":{},\"minmax_lowering_mismatches\":{},\"f64_lane_mismatches\":{},\"meter_block_mismatches\":{},\"mismatches\":[{}]}}",
             self.leg,
             WASMTIME_VERSION,
             self.backend,
@@ -169,6 +176,7 @@ impl Report {
             self.comparisons,
             self.minmax_lowering_mismatches,
             self.f64_lane_mismatches,
+            self.meter_block_mismatches,
             mismatches.join(",")
         )
     }
@@ -233,6 +241,9 @@ pub fn native_report() -> Report {
             .map(corpus::minmax_lowering_mismatches)
             .sum(),
         f64_lane_mismatches: (0..corpus::WIDTHS).map(corpus::f64_lane_mismatches).sum(),
+        meter_block_mismatches: (0..corpus::WIDTHS)
+            .map(corpus::meter_block_mismatches)
+            .sum(),
     }
 }
 
@@ -246,6 +257,8 @@ struct Guest {
     minmax_lowering_mismatches: TypedFunc<u32, u32>,
     /// `miso_gate_f64_lane_mismatches(width) -> u32`.
     f64_lane_mismatches: TypedFunc<u32, u32>,
+    /// `miso_gate_meter_block_mismatches(width) -> u32`.
+    meter_block_mismatches: TypedFunc<u32, u32>,
     /// What `miso_gate_backend()` reported.
     backend: u32,
     /// What `miso_gate_case_count()` reported.
@@ -277,6 +290,8 @@ impl Guest {
             instance.get_typed_func(&mut store, "miso_gate_minmax_lowering_mismatches")?;
         let f64_lane_mismatches: TypedFunc<u32, u32> =
             instance.get_typed_func(&mut store, "miso_gate_f64_lane_mismatches")?;
+        let meter_block_mismatches: TypedFunc<u32, u32> =
+            instance.get_typed_func(&mut store, "miso_gate_meter_block_mismatches")?;
 
         let backend = backend.call(&mut store, ())?;
         let cases = case_count.call(&mut store, ())? as usize;
@@ -295,6 +310,7 @@ impl Guest {
             digest_word,
             minmax_lowering_mismatches,
             f64_lane_mismatches,
+            meter_block_mismatches,
             backend,
             cases,
         })
@@ -317,6 +333,17 @@ impl Guest {
         for width in 0..corpus::WIDTHS {
             total += self
                 .f64_lane_mismatches
+                .call(&mut self.store, width as u32)?;
+        }
+        Ok(total)
+    }
+
+    /// Runs the full meter block pass differential inside the guest, at every width.
+    fn meter_block_mismatches(&mut self) -> wasmtime::Result<u32> {
+        let mut total = 0;
+        for width in 0..corpus::WIDTHS {
+            total += self
+                .meter_block_mismatches
                 .call(&mut self.store, width as u32)?;
         }
         Ok(total)
@@ -374,6 +401,7 @@ pub fn wasm_report(path: &Path, expected: ExpectedBackend) -> wasmtime::Result<R
 
     let minmax_lowering_mismatches = guest.minmax_lowering_mismatches()?;
     let f64_lane_mismatches = guest.f64_lane_mismatches()?;
+    let meter_block_mismatches = guest.meter_block_mismatches()?;
 
     Ok(Report {
         leg: "wasm",
@@ -383,6 +411,7 @@ pub fn wasm_report(path: &Path, expected: ExpectedBackend) -> wasmtime::Result<R
         mismatches,
         minmax_lowering_mismatches,
         f64_lane_mismatches,
+        meter_block_mismatches,
     })
 }
 
