@@ -233,3 +233,21 @@ and without `test-support` gate 1 is green for them. They are caught by the two 
 schedule rather than the audio -- `kept == live` and the select-free tail counter -- which is why
 both exist. M2 is caught only by a shape with a pair ahead of the tail: one live section has no
 pairs, so the three- and five-section shapes carry that row.
+
+## Issue #980 — the elision gate in its min/max form
+
+Driver: one mutation at a time applied to `block_admits_elision` in `src/lib.rs`, then
+`cargo test --release -p parametric-eq --lib elision -- --include-ignored`, tree restored byte for
+byte between rows. Gate 1 is `the_min_max_gate_equals_the_rejection_oracle` (every ordered pair of
+the sixteen edge patterns, planted at two positions, block lengths 0, 1, 7, 8, 9 and 1,024, against
+the `#[cfg(test)]` rejection-accumulator oracle `block_admits_elision_oracle`);
+`every_word_gets_the_rejection_oracles_verdict` is the ignored exhaustive run over all `2^32` words.
+
+| # | mutation | gate that goes red | result |
+|---|---|---|---|
+| 980-M1 | `nearest.min(bits)` (the `^ NEGATIVE_ZERO_BITS` dropped) | gate 1 first at length 1, word `0x00000000`: `+0.0` refused (`false`, oracle `true`); the exhaustive run (word `0x00000000`); also `a_negative_zero_input_refuses_elision`, `the_negative_zero_refusal_is_load_bearing`, `an_elided_cascade_is_the_full_cascade_bit_for_bit` | RED |
+| 980-M2 | `largest < ELISION_MAGNITUDE_CEILING` | gate 1 first at length 1, word `0x7149f2ca` (the ceiling itself, `1e30`): refused, oracle admits; the exhaustive run (`0xf149f2ca`) | RED |
+| 980-M3 | `largest.max(bits)` (the `& MAGNITUDE_MASK` dropped) | gate 1 first at length 1, word `0x80000001` (a negative subnormal): refused, oracle admits; the exhaustive run; and eight other `elision` tests, because every negative sample now refuses | RED |
+
+M2 is invisible to every test that predates the gate: the ceiling is `BLOCK_LIMIT` itself, and no
+earlier fixture places a word of exactly `1e30`. Only the edge set (and the exhaustive run) does.

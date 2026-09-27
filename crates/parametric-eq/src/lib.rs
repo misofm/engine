@@ -1019,10 +1019,27 @@ fn section_state_has_no_negative_zero<L: Lane>(section: &Section<L>) -> bool {
 
 /// `true` when no word of `io` is `-0.0` and every word is finite and inside [`BLOCK_LIMIT`].
 ///
-/// One branchless integer scan of the block, in the same shape as
-/// [`effect_runtime::bank::check_block`]: two compares and two `or`s per word, folded
-/// into one accumulator that is inspected once at the end, so the loop vectorises and nothing
-/// leaves the integer domain until the block is finished.
+/// One branchless integer scan of the block that carries two witnesses and decides once, at the
+/// end (issue #980). Per word it does one `xor`, one unsigned `min`, one `and` and one unsigned
+/// `max` -- four integer vector operations per vector of words, which LLVM emits as
+/// `vpminud`/`vpmaxud` on x86 and `i32x4.min_u`/`i32x4.max_u` in `simd128` -- and nothing leaves
+/// the integer domain until the block is finished. There is no float compare anywhere: a float
+/// compare would call `-0.0` equal to `+0.0` and order a NaN away.
+///
+/// * `nearest` starts at `u32::MAX` and keeps the minimum of `bits ^ NEGATIVE_ZERO_BITS`. For any
+///   `x` and `c`, `x ^ c == 0` exactly when `x == c`, so a word contributes `0` exactly when it is
+///   the `-0.0` bit pattern, and every other word contributes something non-zero. The minimum is
+///   therefore `0` exactly when some word is `-0.0`. (`+0.0` contributes `0x8000_0000`, so it is
+///   an ordinary sample here, as it must be.)
+/// * `largest` starts at `0` and keeps the maximum of `bits & MAGNITUDE_MASK`, the magnitude bits.
+///   They are monotone in magnitude, and every infinity and every NaN has magnitude bits at or
+///   above `0x7f80_0000`, above [`ELISION_MAGNITUDE_CEILING`] (see that constant). So
+///   `largest <= ELISION_MAGNITUDE_CEILING` is exactly "every word is finite and
+///   `|x| <= BLOCK_LIMIT`".
+///
+/// The block is admitted iff `nearest != 0 && largest <= ELISION_MAGNITUDE_CEILING`: the same
+/// predicate, word for word, as the rejection accumulator it replaced (two compares and two `or`s
+/// per word, seven vector operations per vector), and an empty block is admitted by both.
 ///
 /// It is deliberately **not** chunked and short-circuiting the way
 /// [`block_is_positive_zero`] is. That predicate's common answer is "no" on the first chunk; this
@@ -1030,6 +1047,20 @@ fn section_state_has_no_negative_zero<L: Lane>(section: &Section<L>) -> bool {
 #[inline]
 #[must_use]
 fn block_admits_elision(io: &[f32]) -> bool {
+    let mut nearest = u32::MAX;
+    let mut largest = 0_u32;
+    for value in io {
+        let bits = value.to_bits();
+        nearest = nearest.min(bits ^ NEGATIVE_ZERO_BITS);
+        largest = largest.max(bits & MAGNITUDE_MASK);
+    }
+    nearest != 0 && largest <= ELISION_MAGNITUDE_CEILING
+}
+
+/// The elision gate in the rejection-accumulator form it had before issue #980: the oracle the
+/// min/max form is proven equal to.
+#[cfg(test)]
+fn block_admits_elision_oracle(io: &[f32]) -> bool {
     let mut rejected = 0_u32;
     for value in io {
         let bits = value.to_bits();
@@ -3910,8 +3941,9 @@ mod interleave_identity {
 #[cfg(test)]
 mod elision {
     use super::{
-        BandTarget, Channel, EQ_SECTION_COUNT, EqSvfWords, MAX_LANES, RAMP_SAMPLES,
-        cascade_sections, cascade_sections_mono, corpus, process_channels, process_channels_mono,
+        BandTarget, Channel, ELISION_MAGNITUDE_CEILING, EQ_SECTION_COUNT, EqSvfWords, MAX_LANES,
+        RAMP_SAMPLES, block_admits_elision, block_admits_elision_oracle, cascade_sections,
+        cascade_sections_mono, corpus, process_channels, process_channels_mono,
         reset_select_free_tail_passes, select_free_tail_pass_count,
     };
     use lane::{Lane, Simd4, Simd8};
@@ -4377,6 +4409,145 @@ mod elision {
                 "a live section holding -0.0 in integrator {word} must refuse elision"
             );
         }
+    }
+
+    /// The word patterns of issue #980 gate 1: both zeros, the smallest subnormals, the ceiling and
+    /// the word above it at either sign, both infinities, a quiet and a payload NaN, `+-1.0`, the
+    /// largest magnitude pattern and the all-ones word.
+    const GATE_EDGES: [u32; 16] = [
+        0,
+        0x8000_0000,
+        1,
+        0x8000_0001,
+        ELISION_MAGNITUDE_CEILING,
+        ELISION_MAGNITUDE_CEILING + 1,
+        0x7f80_0000,
+        0xff80_0000,
+        0x7fc0_0000,
+        0xffc0_1234,
+        0x3f80_0000,
+        0xbf80_0000,
+        ELISION_MAGNITUDE_CEILING | 0x8000_0000,
+        (ELISION_MAGNITUDE_CEILING + 1) | 0x8000_0000,
+        0x7fff_ffff,
+        0xffff_ffff,
+    ];
+
+    /// An ordinary admissible word of either sign for position `index`: finite, non-zero, well
+    /// inside the ceiling, never `-0.0`.
+    fn ordinary_word(index: usize) -> f32 {
+        let magnitude = 0.001 + (index % 97) as f32 * 0.37;
+        if index % 3 == 1 {
+            -magnitude
+        } else {
+            magnitude
+        }
+    }
+
+    /// Issue #980 gate 1: the min/max gate gives the rejection accumulator's verdict on every
+    /// ordered pair of edge patterns, planted at two positions of a block of ordinary words, at
+    /// every block length that exercises an empty block, a lone word, the scalar remainder and the
+    /// vector body of both widths.
+    #[test]
+    fn the_min_max_gate_equals_the_rejection_oracle() {
+        let mut verdicts = [0_usize; 2];
+        for length in [0_usize, 1, 7, 8, 9, 1024] {
+            let placements: &[(usize, usize)] = if length == 0 {
+                &[(0, 0)]
+            } else {
+                &[(length / 3, length - 1), (0, length / 2)]
+            };
+            for &first in &GATE_EDGES {
+                for &second in &GATE_EDGES {
+                    for &(at_first, at_second) in placements {
+                        let mut block: Vec<f32> = (0..length).map(ordinary_word).collect();
+                        if length > 0 {
+                            block[at_first] = f32::from_bits(first);
+                            block[at_second] = f32::from_bits(second);
+                        }
+                        let oracle = block_admits_elision_oracle(&block);
+                        assert_eq!(
+                            block_admits_elision(&block),
+                            oracle,
+                            "length {length}: {first:#010x} at {at_first}, {second:#010x} at \
+                             {at_second}"
+                        );
+                        verdicts[usize::from(oracle)] += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            verdicts[0] > 0 && verdicts[1] > 0,
+            "the edge set must reach both verdicts: {verdicts:?}"
+        );
+    }
+
+    /// Issue #980: the min/max gate and the rejection accumulator agree on every one of the
+    /// `2^32` words, alone and in every run of 64 consecutive words.
+    ///
+    /// Both predicates are a conjunction of the same per-word test, so the lone-word verdict is the
+    /// whole claim; the 64-word runs put every word through the vectorised loop body as well.
+    /// Ignored by default (about a minute in release, several in a dev build): run it with
+    /// `cargo test -p parametric-eq --release --lib every_word -- --ignored`.
+    #[test]
+    #[ignore = "exhaustive over 2^32 words; run explicitly"]
+    fn every_word_gets_the_rejection_oracles_verdict() {
+        use std::hint::black_box;
+        const RUN: u64 = 64;
+        let threads = std::thread::available_parallelism()
+            .map_or(1, core::num::NonZeroUsize::get)
+            .clamp(1, 8) as u64;
+        let per_thread = (1_u64 << 32) / threads / RUN * RUN;
+        let admitted: u64 = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..threads)
+                .map(|thread| {
+                    scope.spawn(move || {
+                        let start = thread * per_thread;
+                        let end = if thread + 1 == threads {
+                            1_u64 << 32
+                        } else {
+                            start + per_thread
+                        };
+                        let mut admitted = 0_u64;
+                        let mut run = [0.0_f32; RUN as usize];
+                        let mut first = start;
+                        while first < end {
+                            for (offset, word) in run.iter_mut().enumerate() {
+                                let bits = first + offset as u64;
+                                *word = f32::from_bits(bits as u32);
+                                // `black_box` keeps the optimiser from proving the two
+                                // bodies equal on a known word and deleting the comparison:
+                                // both run, on a word they cannot see through.
+                                let lone = [*word];
+                                let verdict = block_admits_elision(black_box(&lone));
+                                assert_eq!(
+                                    verdict,
+                                    block_admits_elision_oracle(black_box(&lone)),
+                                    "word {bits:#010x}"
+                                );
+                                admitted += u64::from(verdict);
+                            }
+                            assert_eq!(
+                                block_admits_elision(black_box(&run)),
+                                block_admits_elision_oracle(black_box(&run)),
+                                "the run of {RUN} words from {first:#010x}"
+                            );
+                            first += RUN;
+                        }
+                        admitted
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().expect("worker"))
+                .sum()
+        });
+        // Every magnitude pattern from `0` to the ceiling is admitted at either sign, except the
+        // one `-0.0` pattern.
+        let expected = 2 * (u64::from(ELISION_MAGNITUDE_CEILING) + 1) - 1;
+        assert_eq!(admitted, expected, "admitted words");
     }
 
     /// The `-0.0` refusal is load-bearing: forced past it, the bits really do move.
