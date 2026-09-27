@@ -1501,8 +1501,9 @@ fn process_channels<L: Lane, const W: usize>(
     debug_assert!(channels.0.identity_flags_agree());
     debug_assert!(channels.1.identity_flags_agree());
     let sections = cascade_sections::<L, W>(channels.0, channels.1, left, right, frames);
-    // Six physical sections use the effective stationary depth of two on every backend. This
-    // keeps the final LPF in a complete pass while retaining one fixed interleaved kernel shape.
+    // The kept (live) sections run in passes of the effective stationary depth of two on every
+    // backend, and an odd count ends in one depth-one pass: #976 removed the identity padding
+    // section that used to make the count even.
     interleave::<L, W, EFFECTIVE_CASCADE_DEPTH>(channels, left, right, frames, sections);
 }
 
