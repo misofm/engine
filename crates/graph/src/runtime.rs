@@ -3399,11 +3399,16 @@ impl Runtime {
                 // too, from `+0.0`; only an active lane's result is ever handed on, because only
                 // an active lane has a final member. Each observer then commits its own lane, in
                 // binding order, and only if the seed is still its own.
+                // The seeds are written once, where the hand-off below reads them, and never copied.
+                let mut seeds: Option<[[f64; 8]; 2]> = None;
                 let meters = if banked_meter && eligible {
                     frames.zip(final_start).and_then(|(frames, final_start)| {
-                        let seeds = bank_meter_seeds(members, final_start, first_sample, frames)?;
+                        let seeds = seeds.insert([[0.0; 8]; 2]);
+                        if !bank_meter_seeds(members, final_start, first_sample, frames, seeds) {
+                            return None;
+                        }
                         let (left, right) = chain.final_output_block(frames)?;
-                        bank_meter_pass(chain.width(), left, right, &seeds)
+                        bank_meter_pass(chain.width(), left, right, seeds)
                     })
                 } else {
                     None
@@ -3446,8 +3451,8 @@ impl Runtime {
                             Some([*left.get(lane)?, *right.get(lane)?])
                         });
                     let meter = final_lane
-                        .zip(meters.as_ref())
-                        .and_then(|(lane, meters)| meters.lane(lane));
+                        .zip(meters.as_ref().zip(seeds.as_ref()))
+                        .and_then(|(lane, (meters, seeds))| meters.lane(lane, seeds));
                     observe(
                         member,
                         lease,
@@ -4011,10 +4016,10 @@ struct BankMeterPlane {
     energy: [f64; 8],
 }
 
-/// The full meter pass over one final resident block (issue #950): the seeds it started from and
-/// both planes' results, `[left, right]`, for every lane of the bank.
+/// The full meter pass over one final resident block (issue #950): both planes' results,
+/// `[left, right]`, for every lane of the bank. The seeds it started from stay where
+/// [`bank_meter_seeds`] wrote them.
 struct BankMeterResults {
-    seeds: [[f64; 8]; 2],
     planes: [BankMeterPlane; 2],
 }
 
@@ -4025,11 +4030,11 @@ impl BankMeterResults {
         [left.peak, right.peak]
     }
 
-    /// Lane `lane`'s results, with its counts as integers: an `f32` count below `2^24` converts
-    /// exactly. `None` past the eighth lane.
-    fn lane(&self, lane: usize) -> Option<crate::GraphBankedMeterLane> {
+    /// Lane `lane`'s results, started from `seeds`, with its counts as integers: an `f32` count
+    /// below `2^24` converts exactly. `None` past the eighth lane.
+    fn lane(&self, lane: usize, seeds: &[[f64; 8]; 2]) -> Option<crate::GraphBankedMeterLane> {
         let [left, right] = &self.planes;
-        let [left_seed, right_seed] = &self.seeds;
+        let [left_seed, right_seed] = seeds;
         Some(crate::GraphBankedMeterLane {
             sample_peak: [*left.peak.get(lane)?, *right.peak.get(lane)?],
             clipped: [
@@ -4046,28 +4051,27 @@ impl BankMeterResults {
     }
 }
 
-/// Each final lane's `[left, right]` energy seed for the full meter pass (issue #950): the first
-/// [`crate::GraphRuntimeObserver::banked_meter_seed`] answer among that lane's final member's observers,
-/// in binding order, or `+0.0` when none answers. `None` when no lane answered, so a block no meter
-/// can commit does not pay for the pass.
+/// Writes each final lane's `[left, right]` energy seed for the full meter pass into `seeds`
+/// (issue #950): the first [`crate::GraphRuntimeObserver::banked_meter_seed`] answer among that
+/// lane's final member's observers, in binding order. A lane nobody answers keeps the `+0.0` the
+/// caller filled. Returns whether any lane answered, so a block no meter can commit does not pay
+/// for the pass.
 ///
-/// Only reads: the query is `&self`, so an observer that fails later in this block has changed
-/// nothing, and neither has any other.
+/// Only reads the observers: the query is `&self`, so an observer that fails later in this block
+/// has changed nothing, and neither has any other.
 fn bank_meter_seeds(
     members: &[RuntimeOp],
     final_start: usize,
     first_sample: u64,
     frames: u32,
-) -> Option<[[f64; 8]; 2]> {
-    let mut seeds = [[0.0_f64; 8]; 2];
+    seeds: &mut [[f64; 8]; 2],
+) -> bool {
     let mut answered = false;
-    let [left, right] = &mut seeds;
-    for ((member, left), right) in members
-        .get(final_start..)?
-        .iter()
-        .zip(left.iter_mut())
-        .zip(right.iter_mut())
-    {
+    let [left, right] = seeds;
+    let Some(finals) = members.get(final_start..) else {
+        return false;
+    };
+    for ((member, left), right) in finals.iter().zip(left.iter_mut()).zip(right.iter_mut()) {
         if let Some([l, r]) = member
             .observers
             .iter()
@@ -4078,7 +4082,7 @@ fn bank_meter_seeds(
             answered = true;
         }
     }
-    answered.then_some(seeds)
+    answered
 }
 
 /// The banked full meter pass of issue #950: every lane's `[left, right]` sample peak, clipped and
@@ -4130,7 +4134,6 @@ fn bank_meter_pass(
         }
         let [left_seeds, right_seeds] = seeds;
         Some(BankMeterResults {
-            seeds: *seeds,
             planes: [
                 plane::<L>(left, frames, left_seeds)?,
                 plane::<L>(right, frames, right_seeds)?,
@@ -8468,9 +8471,10 @@ mod tests {
                     "let banked_meter = observation.banked_meter();",
                     "let meters = if banked_meter && eligible {",
                     "frames.zip(final_start).and_then(|(frames, final_start)| {",
-                    "let seeds = bank_meter_seeds(members, final_start, first_sample, frames)?;",
+                    "let seeds = seeds.insert([[0.0; 8]; 2]);",
+                    "if !bank_meter_seeds(members, final_start, first_sample, frames, seeds) {",
                     "let (left, right) = chain.final_output_block(frames)?;",
-                    "bank_meter_pass(chain.width(), left, right, &seeds)",
+                    "bank_meter_pass(chain.width(), left, right, seeds)",
                     "let peaks = if let Some(meters) = &meters {",
                     "Some(meters.peaks())",
                     "} else if sample_peak && eligible {",
@@ -8482,8 +8486,8 @@ mod tests {
                     "chain.fold_lanes().get(lane) == Some(&true)",
                     ".zip(peaks.as_ref())",
                     "Some([*left.get(lane)?, *right.get(lane)?])",
-                    ".zip(meters.as_ref())",
-                    ".and_then(|(lane, meters)| meters.lane(lane))",
+                    ".zip(meters.as_ref().zip(seeds.as_ref()))",
+                    ".and_then(|(lane, (meters, seeds))| meters.lane(lane, seeds))",
                 ]
                 .iter()
                 .all(|term| observation.contains(term))
@@ -8534,16 +8538,16 @@ mod tests {
             ),
             (MEMBER_CALL, &member_call("meter,\n", "None,\n")),
             (
-                ".and_then(|(lane, meters)| meters.lane(lane))",
-                ".and_then(|(lane, meters)| meters.lane(lane ^ 1))",
+                ".and_then(|(lane, (meters, seeds))| meters.lane(lane, seeds))",
+                ".and_then(|(lane, (meters, seeds))| meters.lane(lane ^ 1, seeds))",
             ),
             (
-                "let seeds = bank_meter_seeds(members, final_start, first_sample, frames)?;",
-                "let seeds = [[0.0; 8]; 2];",
+                "if !bank_meter_seeds(members, final_start, first_sample, frames, seeds) {",
+                "if false {",
             ),
             (
-                "bank_meter_pass(chain.width(), left, right, &seeds)",
-                "bank_meter_pass(chain.width(), left, left, &seeds)",
+                "bank_meter_pass(chain.width(), left, right, seeds)",
+                "bank_meter_pass(chain.width(), left, left, seeds)",
             ),
             // The block peak withheld from the member, or the lane's peak read off its neighbour.
             (MEMBER_CALL, &member_call("peak,\n", "None,\n")),
