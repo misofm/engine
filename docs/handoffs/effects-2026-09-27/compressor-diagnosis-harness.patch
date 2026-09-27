@@ -1,0 +1,2973 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 36c4c272..5e21f08b 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -317,6 +317,17 @@ dependencies = [
+  "sha2 0.11.0",
+ ]
+ 
++[[package]]
++name = "compressor-diag-guest"
++version = "0.1.0"
++dependencies = [
++ "compressor",
++ "effect-contract",
++ "effect-runtime",
++ "lane",
++ "math",
++]
++
+ [[package]]
+ name = "conformance"
+ version = "0.1.0"
+@@ -337,6 +348,7 @@ dependencies = [
+  "bench-support",
+  "builtins",
+  "builtins-compiler",
++ "compressor",
+  "effect-compiler",
+  "effect-contract",
+  "engine",
+@@ -2425,6 +2437,7 @@ name = "wasm-console-guest"
+ version = "0.1.0"
+ dependencies = [
+  "bench-support",
++ "compressor",
+  "console-workload",
+  "lane",
+ ]
+diff --git a/Cargo.toml b/Cargo.toml
+index 4271e1f0..6b88d5e3 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -45,6 +45,7 @@ members = [
+     "tools/parameter-metadata",
+     "tools/session-validator",
+     "tools/wasm-gates",
++    "tools/compressor-diag-guest",
+ ]
+ resolver = "3"
+ 
+diff --git a/crates/compressor/examples/diag_kernel.rs b/crates/compressor/examples/diag_kernel.rs
+new file mode 100644
+index 00000000..26332913
+--- /dev/null
++++ b/crates/compressor/examples/diag_kernel.rs
+@@ -0,0 +1,336 @@
++//! Compressor kernel diagnosis harness (docs/handoffs/effects-2026-09-27/COMPRESSOR-DIAGNOSIS.md).
++//!
++//! DIAGNOSIS ONLY. An example rather than a test so that it is built with the shipped release
++//! profile (fat LTO, one codegen unit, `panic = "abort"`), exactly like `lane_sample_timing`.
++//!
++//! ```text
++//! CARGO_INCREMENTAL=0 cargo build --release -p compressor --example diag_kernel
++//! taskset -c 31 <target>/release/examples/diag_kernel verify   # replicas vs the real kernel
++//! taskset -c 31 <target>/release/examples/diag_kernel time     # timing table
++//! ```
++//!
++//! Every replica below is the kernel's frame law transcribed from `crates/compressor/src/kernel.rs`
++//! with one structural change each. `verify` checks each against the real kernel (reached through
++//! the `compressor::diag` hook) word for word on fixture, compressing and hostile inputs, output
++//! and recursive state, before anything is timed.
++#![allow(clippy::disallowed_methods, clippy::too_many_arguments, missing_docs)]
++
++use std::hint::black_box;
++use std::time::Instant;
++
++use effect_contract::LinkMode;
++use lane::{Lane, Simd4, Simd8};
++
++#[path = "diag_support/replicas.rs"]
++mod replicas;
++use compressor::diag::DiagBank;
++use replicas::*;
++
++const FADD_LATENCY_CYCLES: f64 = 3.0;
++
++/// Kernel prototype modes timed as `real_kernel_m*` rows (see `compressor::diag::MODE`).
++const MODES: [u8; 10] = [1, 3, 5, 7, 9, 11, 13, 15, 31, 47];
++
++fn core_hz() -> f64 {
++    const ADDS: u64 = 300_000_000;
++    let mut best = f64::MAX;
++    for _ in 0..3 {
++        let mut x = black_box(0.0_f32);
++        let d = black_box(1.0e-3_f32);
++        let start = Instant::now();
++        for _ in 0..ADDS {
++            x += d;
++        }
++        let elapsed = start.elapsed().as_secs_f64();
++        black_box(x);
++        best = best.min(elapsed);
++    }
++    FADD_LATENCY_CYCLES * ADDS as f64 / best
++}
++
++fn loadavg() -> String {
++    std::fs::read_to_string("/proc/loadavg")
++        .unwrap_or_default()
++        .split_whitespace()
++        .take(3)
++        .collect::<Vec<_>>()
++        .join(" ")
++}
++// time
++// ---------------------------------------------------------------------------------------------
++
++const BLOCKS_PER_ROUND: usize = 4096;
++const ROUNDS: usize = 3;
++
++fn per_block_p50(mut samples: Vec<u64>) -> u64 {
++    samples.sort_unstable();
++    samples[samples.len() / 2]
++}
++
++/// Times one closure per block, the input copied in outside the clock.
++fn time_blocks(
++    source: &(Vec<f32>, Vec<f32>),
++    left: &mut [f32],
++    right: &mut [f32],
++    mut body: impl FnMut(&mut [f32], &mut [f32]),
++) -> u64 {
++    let mut samples = Vec::with_capacity(BLOCKS_PER_ROUND);
++    for _ in 0..BLOCKS_PER_ROUND {
++        left.copy_from_slice(&source.0);
++        right.copy_from_slice(&source.1);
++        let start = Instant::now();
++        body(left, right);
++        samples.push(u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX));
++    }
++    per_block_p50(samples)
++}
++
++fn time_width<L: Lane>(label: &str, hz: f64, params: [f32; 7], filter: &str) {
++    let source = noise_planes(L::WIDTH, 1, 0x5EED_0003, 0.5).remove(0);
++    let mut left = vec![0.0_f32; FRAMES * L::WIDTH];
++    let mut right = vec![0.0_f32; FRAMES * L::WIDTH];
++    let channel_frames = (FRAMES * 2) as f64;
++    let lane_samples = channel_frames * L::WIDTH as f64;
++    let mut rows: Vec<(String, Vec<u64>)> = Vec::new();
++    let mut names: Vec<String> = vec![
++        "real_render".into(),
++        "real_kernel".into(),
++        "real_finish".into(),
++        "empty".into(),
++    ];
++    for mode in MODES {
++        names.push(format!("real_kernel_m{mode}"));
++    }
++    names.push("real_render_m15".into());
++    names.push("real_kernel_mono".into());
++    for mode in [1u8, 5, 9, 13, 15] {
++        names.push(format!("real_mono_m{mode}"));
++    }
++    names.push("real_bank".into());
++    names.push("real_bank_m15".into());
++    for parameter in [0u32, 1, 3, 5] {
++        names.push(format!("real_bank_ramp_p{parameter}"));
++    }
++    names.push("real_bank_ramp1lane_p0".into());
++    names.push("real_render_silent".into());
++    names.extend(VARIANTS.iter().map(|name| (*name).to_string()));
++    names.retain(|name| filter.is_empty() || name.contains(filter) || name.starts_with("real") || name == "empty");
++    for name in &names {
++        rows.push((name.clone(), Vec::new()));
++    }
++    let mut real_render = DiagBank::<L>::new(metadata(LinkMode::DualMono), params);
++    let mut real_kernel = DiagBank::<L>::new(metadata(LinkMode::DualMono), params);
++    let mut real_finish = DiagBank::<L>::new(metadata(LinkMode::DualMono), params);
++    let words = real_kernel.words();
++    let mut bank = if lane::Backend::current().width() == L::WIDTH {
++        BankArm::new(params)
++    } else {
++        None
++    };
++    let mut states: Vec<[L; 2]> = vec![[L::zero(); 2]; names.len()];
++    // Warm every arm once.
++    for _ in 0..64 {
++        real_render.render(&mut left, &mut right, FRAMES);
++        real_kernel.kernel(&mut left, &mut right, FRAMES);
++    }
++    for _ in 0..ROUNDS {
++        for (index, name) in names.iter().enumerate() {
++            let p50 = match name.as_str() {
++                "real_render" => time_blocks(&source, &mut left, &mut right, |l, r| {
++                    real_render.render(l, r, FRAMES)
++                }),
++                "real_render_silent" => {
++                    let zero = (vec![0.0_f32; source.0.len()], vec![0.0_f32; source.1.len()]);
++                    let mut silent = DiagBank::<L>::new(metadata(LinkMode::DualMono), params);
++                    for _ in 0..4096 {
++                        left.copy_from_slice(&zero.0);
++                        right.copy_from_slice(&zero.1);
++                        silent.render(&mut left, &mut right, FRAMES);
++                    }
++                    time_blocks(&zero, &mut left, &mut right, |l, r| silent.render(l, r, FRAMES))
++                }
++                "real_bank_ramp1lane_p0" => match bank.as_mut() {
++                    Some(bank) => time_blocks(&source, &mut left, &mut right, |l, r| {
++                        bank.process_ramp_lanes(l, r, 0, 1)
++                    }),
++                    None => 0,
++                },
++                ramp if ramp.starts_with("real_bank_ramp_p") => match bank.as_mut() {
++                    Some(bank) => {
++                        let parameter: u32 = ramp["real_bank_ramp_p".len()..].parse().expect("p");
++                        time_blocks(&source, &mut left, &mut right, |l, r| {
++                            bank.process_ramp(l, r, parameter)
++                        })
++                    }
++                    None => 0,
++                },
++                "real_bank" | "real_bank_m15" => match bank.as_mut() {
++                    Some(bank) => {
++                        compressor::diag::set_mode(if name == "real_bank" { 0 } else { 15 });
++                        let p50 = time_blocks(&source, &mut left, &mut right, |l, r| bank.process(l, r));
++                        compressor::diag::set_mode(0);
++                        p50
++                    }
++                    None => 0,
++                },
++                moded if moded.starts_with("real_mono_m") => {
++                    let mode: u8 = moded["real_mono_m".len()..].parse().expect("mode");
++                    compressor::diag::set_mode(mode);
++                    let p50 = time_blocks(&source, &mut left, &mut right, |l, _r| {
++                        real_kernel.kernel_mono(l, FRAMES)
++                    });
++                    compressor::diag::set_mode(0);
++                    p50
++                }
++                "real_kernel_mono" => time_blocks(&source, &mut left, &mut right, |l, _r| {
++                    real_kernel.kernel_mono(l, FRAMES)
++                }),
++                "real_render_m15" => {
++                    compressor::diag::set_mode(15);
++                    let p50 = time_blocks(&source, &mut left, &mut right, |l, r| {
++                        real_render.render(l, r, FRAMES)
++                    });
++                    compressor::diag::set_mode(0);
++                    p50
++                }
++                moded if moded.starts_with("real_kernel_m") => {
++                    let mode: u8 = moded["real_kernel_m".len()..].parse().expect("mode");
++                    compressor::diag::set_mode(mode);
++                    let p50 = time_blocks(&source, &mut left, &mut right, |l, r| {
++                        real_kernel.kernel(l, r, FRAMES)
++                    });
++                    compressor::diag::set_mode(0);
++                    p50
++                }
++                "real_kernel" => time_blocks(&source, &mut left, &mut right, |l, r| {
++                    real_kernel.kernel(l, r, FRAMES)
++                }),
++                "real_finish" => time_blocks(&source, &mut left, &mut right, |l, r| {
++                    black_box(real_finish.finish(l, r));
++                }),
++                "empty" => time_blocks(&source, &mut left, &mut right, |l, r| {
++                    black_box((l, r));
++                }),
++                variant => {
++                    let state = &mut states[index];
++                    time_blocks(&source, &mut left, &mut right, |l, r| {
++                        dispatch::<L>(variant, l, r, &words, state, LinkMode::DualMono)
++                    })
++                }
++            };
++            rows[index].1.push(p50);
++        }
++    }
++    let empty = {
++        let row = rows.iter().find(|(name, _)| name == "empty").expect("empty row");
++        per_block_p50(row.1.clone()) as f64
++    };
++    println!(
++        "== {label}: p50 ns per block (rounds), then median minus the empty-clock row, as cycles per channel-frame and per lane-sample; clock {:.3} GHz; loadavg {}",
++        hz / 1e9,
++        loadavg()
++    );
++    for (name, samples) in &rows {
++        let median = per_block_p50(samples.clone()) as f64;
++        let net = if name == "empty" { median } else { median - empty };
++        let cycles = net * hz / 1e9;
++        println!(
++            "  {name:<20} {samples:?}  net {net:>8.0} ns  {:>7.2} c/channel-frame  {:>6.3} c/lane-sample",
++            cycles / channel_frames,
++            cycles / lane_samples
++        );
++    }
++}
++
++fn verify_mono<L: Lane>(label: &str) -> bool {
++    let mut ok = true;
++    for params in [FIXTURE, COMPRESSING, PARALLEL] {
++        for link_mode in [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average] {
++            for inputs in [
++                noise_planes(L::WIDTH, 48, 0xC0_4455, 1.0),
++                hostile_planes(L::WIDTH, 48, 0xBAD_F00D),
++            ] {
++                for mode in [1u8, 3, 5, 7, 9, 11, 13, 15] {
++                    let mut base = DiagBank::<L>::new(metadata(link_mode), params);
++                    let mut proto = DiagBank::<L>::new(metadata(link_mode), params);
++                    let mut bad = 0;
++                    for (source, _) in &inputs {
++                        let mut a = source.clone();
++                        let mut b = source.clone();
++                        compressor::diag::set_mode(0);
++                        base.kernel_mono(&mut a, FRAMES);
++                        compressor::diag::set_mode(mode);
++                        proto.kernel_mono(&mut b, FRAMES);
++                        compressor::diag::set_mode(0);
++                        for (x, y) in a.iter().zip(&b) {
++                            if x.to_bits() != y.to_bits() && !(x.is_nan() && y.is_nan()) {
++                                bad += 1;
++                            }
++                        }
++                        if base.state_bits() != proto.state_bits() {
++                            bad += 1;
++                        }
++                        let mut dummy_a = vec![0.0; a.len()];
++                        let mut dummy_b = vec![0.0; b.len()];
++                        base.finish(&mut a, &mut dummy_a);
++                        proto.finish(&mut b, &mut dummy_b);
++                    }
++                    if bad != 0 {
++                        ok = false;
++                        println!("{label} mono mode {mode} {link_mode:?}: {bad} mismatches");
++                    }
++                }
++            }
++        }
++    }
++    ok
++}
++
++fn main() {
++    let mut args = std::env::args().skip(1);
++    let mode = args.next().unwrap_or_default();
++    let filter = args.next().unwrap_or_default();
++    match mode.as_str() {
++        "verify" => {
++            let mode: u8 = filter.parse().unwrap_or(0);
++            compressor::diag::set_mode(mode);
++            println!("verify with kernel prototype mode {mode}");
++            let a = verify_width::<Simd8>("Simd8");
++            let b = verify_width::<Simd4>("Simd4");
++            let c = verify_width::<f32>("Scalar");
++            println!("verify: {}", if a && b && c { "ALL OK" } else { "FAILED" });
++            if !(a && b && c) {
++                std::process::exit(1);
++            }
++        }
++        "verify_mono" => {
++            let a = verify_mono::<Simd8>("Simd8");
++            let b = verify_mono::<Simd4>("Simd4");
++            let c = verify_mono::<f32>("Scalar");
++            println!("verify_mono: {}", if a && b && c { "ALL OK" } else { "FAILED" });
++        }
++        "time" => {
++            let hz = core_hz();
++            time_width::<Simd8>("Simd8 fixture", hz, FIXTURE, &filter);
++            time_width::<Simd4>("Simd4 fixture", hz, FIXTURE, &filter);
++            println!("clock after {:.3} GHz, loadavg {}", core_hz() / 1e9, loadavg());
++        }
++        "time8" => {
++            let hz = core_hz();
++            time_width::<Simd8>("Simd8 fixture", hz, FIXTURE, &filter);
++        }
++        "time4" => {
++            let hz = core_hz();
++            time_width::<Simd4>("Simd4 fixture", hz, FIXTURE, &filter);
++        }
++        "time_parallel" => {
++            let hz = core_hz();
++            time_width::<Simd8>("Simd8 parallel", hz, PARALLEL, &filter);
++            time_width::<Simd4>("Simd4 parallel", hz, PARALLEL, &filter);
++        }
++        _ => {
++            eprintln!("usage: diag_kernel <verify|time|time8|time4|time_parallel> [filter]");
++            std::process::exit(2);
++        }
++    }
++}
+diff --git a/crates/compressor/examples/diag_probe.rs b/crates/compressor/examples/diag_probe.rs
+new file mode 100644
+index 00000000..fdec304c
+--- /dev/null
++++ b/crates/compressor/examples/diag_probe.rs
+@@ -0,0 +1,132 @@
++//! DIAGNOSIS ONLY: Zen 3 pipe-sharing probe for the compressor's op mix
++//! (docs/handoffs/effects-2026-09-27/COMPRESSOR-DIAGNOSIS.md). Twelve independent 256-bit
++//! accumulators, one inline-asm instruction per accumulator per step, so every dependency chain is
++//! longer than any latency and nothing can be folded.
++#![allow(unsafe_code, missing_docs, unreachable_pub, clippy::all)]
++
++#[cfg(target_arch = "x86_64")]
++mod probe {
++    use std::arch::asm;
++    use std::arch::x86_64::{__m256, _mm256_set1_ps};
++    use std::hint::black_box;
++    use std::time::Instant;
++
++    macro_rules! stream {
++        ($name:ident, [$($ins:literal),+]) => {
++            #[inline(never)]
++            pub fn $name(iterations: u64) -> f64 {
++                // SAFETY: AVX2 is pinned at compile time for this workspace; the asm touches only
++                // the named registers.
++                unsafe {
++                    let mut a: [__m256; 12] = [_mm256_set1_ps(black_box(1.0)); 12];
++                    let k: __m256 = _mm256_set1_ps(black_box(1.0000001));
++                    let m: __m256 = _mm256_set1_ps(black_box(-0.0));
++                    let start = Instant::now();
++                    for _ in 0..iterations {
++                        $(
++                            asm!(concat!($ins, " /* {k} {m} */"), a = inout(ymm_reg) a[0], k = in(ymm_reg) k, m = in(ymm_reg) m, options(nomem, nostack, pure));
++                            asm!(concat!($ins, " /* {k} {m} */"), a = inout(ymm_reg) a[1], k = in(ymm_reg) k, m = in(ymm_reg) m, options(nomem, nostack, pure));
++                            asm!(concat!($ins, " /* {k} {m} */"), a = inout(ymm_reg) a[2], k = in(ymm_reg) k, m = in(ymm_reg) m, options(nomem, nostack, pure));
++                            asm!(concat!($ins, " /* {k} {m} */"), a = inout(ymm_reg) a[3], k = in(ymm_reg) k, m = in(ymm_reg) m, options(nomem, nostack, pure));
++                            asm!(concat!($ins, " /* {k} {m} */"), a = inout(ymm_reg) a[4], k = in(ymm_reg) k, m = in(ymm_reg) m, options(nomem, nostack, pure));
++                            asm!(concat!($ins, " /* {k} {m} */"), a = inout(ymm_reg) a[5], k = in(ymm_reg) k, m = in(ymm_reg) m, options(nomem, nostack, pure));
++                            asm!(concat!($ins, " /* {k} {m} */"), a = inout(ymm_reg) a[6], k = in(ymm_reg) k, m = in(ymm_reg) m, options(nomem, nostack, pure));
++                            asm!(concat!($ins, " /* {k} {m} */"), a = inout(ymm_reg) a[7], k = in(ymm_reg) k, m = in(ymm_reg) m, options(nomem, nostack, pure));
++                            asm!(concat!($ins, " /* {k} {m} */"), a = inout(ymm_reg) a[8], k = in(ymm_reg) k, m = in(ymm_reg) m, options(nomem, nostack, pure));
++                            asm!(concat!($ins, " /* {k} {m} */"), a = inout(ymm_reg) a[9], k = in(ymm_reg) k, m = in(ymm_reg) m, options(nomem, nostack, pure));
++                            asm!(concat!($ins, " /* {k} {m} */"), a = inout(ymm_reg) a[10], k = in(ymm_reg) k, m = in(ymm_reg) m, options(nomem, nostack, pure));
++                            asm!(concat!($ins, " /* {k} {m} */"), a = inout(ymm_reg) a[11], k = in(ymm_reg) k, m = in(ymm_reg) m, options(nomem, nostack, pure));
++                        )+
++                    }
++                    let elapsed = start.elapsed().as_secs_f64();
++                    black_box(a);
++                    let ops = [$($ins),+].len() as f64 * 12.0 * iterations as f64;
++                    ops / elapsed
++                }
++            }
++        };
++    }
++
++    stream!(mul, ["vmulps {a}, {a}, {k}"]);
++    stream!(add, ["vaddps {a}, {a}, {k}"]);
++    stream!(max, ["vmaxps {a}, {a}, {k}"]);
++    stream!(cmp, ["vcmpltps {a}, {a}, {k}"]);
++    stream!(blend, ["vblendvps {m}, {k}, {a}, {a}"]);
++    stream!(and, ["vandps {a}, {a}, {k}"]);
++    stream!(round, ["vroundps {a}, {a}, 9"]);
++    stream!(shift, ["vpslld {a}, {a}, 1"]);
++    stream!(mul_add, ["vmulps {a}, {a}, {k}", "vaddps {a}, {a}, {k}"]);
++    stream!(mul_max, ["vmulps {a}, {a}, {k}", "vmaxps {a}, {a}, {k}"]);
++    stream!(add_max, ["vaddps {a}, {a}, {k}", "vmaxps {a}, {a}, {k}"]);
++    stream!(mul_cmp, ["vmulps {a}, {a}, {k}", "vcmpltps {a}, {a}, {k}"]);
++    stream!(add_cmp, ["vaddps {a}, {a}, {k}", "vcmpltps {a}, {a}, {k}"]);
++    stream!(mul_blend, ["vmulps {a}, {a}, {k}", "vblendvps {m}, {k}, {a}, {a}"]);
++    stream!(add_blend, ["vaddps {a}, {a}, {k}", "vblendvps {m}, {k}, {a}, {a}"]);
++    stream!(mul_and, ["vmulps {a}, {a}, {k}", "vandps {a}, {a}, {k}"]);
++    stream!(add_and, ["vaddps {a}, {a}, {k}", "vandps {a}, {a}, {k}"]);
++    stream!(mul_add_and, ["vmulps {a}, {a}, {k}", "vaddps {a}, {a}, {k}", "vandps {a}, {a}, {k}"]);
++    stream!(mul_add_max, ["vmulps {a}, {a}, {k}", "vaddps {a}, {a}, {k}", "vmaxps {a}, {a}, {k}"]);
++    stream!(mul_round, ["vmulps {a}, {a}, {k}", "vroundps {a}, {a}, 9"]);
++    stream!(add_round, ["vaddps {a}, {a}, {k}", "vroundps {a}, {a}, 9"]);
++    stream!(mul_shift, ["vmulps {a}, {a}, {k}", "vpslld {a}, {a}, 1"]);
++    stream!(add_shift, ["vaddps {a}, {a}, {k}", "vpslld {a}, {a}, 1"]);
++
++    pub fn run(hz: f64) {
++        let rows: [(&str, fn(u64) -> f64); 23] = [
++            ("vmulps", mul),
++            ("vaddps", add),
++            ("vmaxps", max),
++            ("vcmpltps", cmp),
++            ("vblendvps", blend),
++            ("vandps", and),
++            ("vroundps", round),
++            ("vpslld", shift),
++            ("mul+add", mul_add),
++            ("mul+max", mul_max),
++            ("add+max", add_max),
++            ("mul+cmp", mul_cmp),
++            ("add+cmp", add_cmp),
++            ("mul+blend", mul_blend),
++            ("add+blend", add_blend),
++            ("mul+and", mul_and),
++            ("add+and", add_and),
++            ("mul+add+and", mul_add_and),
++            ("mul+add+max", mul_add_max),
++            ("mul+round", mul_round),
++            ("add+round", add_round),
++            ("mul+shift", mul_shift),
++            ("add+shift", add_shift),
++        ];
++        for (name, f) in rows {
++            let mut best = 0.0_f64;
++            for _ in 0..3 {
++                best = best.max(f(20_000_000));
++            }
++            println!("  {name:<12} {:.3} ops/cycle", best / hz);
++        }
++    }
++}
++
++fn core_hz() -> f64 {
++    const ADDS: u64 = 300_000_000;
++    let mut best = f64::MAX;
++    for _ in 0..3 {
++        let mut x = std::hint::black_box(0.0_f32);
++        let d = std::hint::black_box(1.0e-3_f32);
++        let start = std::time::Instant::now();
++        for _ in 0..ADDS {
++            x += d;
++        }
++        let elapsed = start.elapsed().as_secs_f64();
++        std::hint::black_box(x);
++        best = best.min(elapsed);
++    }
++    3.0 * ADDS as f64 / best
++}
++
++fn main() {
++    let hz = core_hz();
++    println!("core clock {:.3} GHz", hz / 1e9);
++    #[cfg(target_arch = "x86_64")]
++    probe::run(hz);
++}
+diff --git a/crates/compressor/examples/diag_support/replicas.rs b/crates/compressor/examples/diag_support/replicas.rs
+new file mode 100644
+index 00000000..cae23bfd
+--- /dev/null
++++ b/crates/compressor/examples/diag_support/replicas.rs
+@@ -0,0 +1,1309 @@
++//! Shared replica code of the compressor diagnosis harnesses (native example and wasm guest).
++//! DIAGNOSIS ONLY: docs/handoffs/effects-2026-09-27/COMPRESSOR-DIAGNOSIS.md.
++#![allow(dead_code, unreachable_pub, clippy::all)]
++
++use compressor::COMPRESSOR_DESCRIPTOR;
++use compressor::COMPRESSOR_PARAMETERS;
++use compressor::diag::DiagBank;
++use effect_contract::{
++    EffectQuality, InitialParameterValue, LinkMode, ParameterChannel, PortId,
++    PrepareEffectLimits, PrepareEffectRequest, PreparedEffectMetadata, PreparedPorts,
++    PreparedSidechainPort, expected_prepared_metadata,
++};
++use effect_runtime::dynamics::{GainComputerCoef, gain_delta_db};
++use effect_runtime::envelope::rms_follow;
++use lane::kernels::gain_mix_step;
++use lane::{Lane, flush};
++use math::fast_db::{fast_gain_from_db, fast_level_db};
++pub const SAMPLE_RATE: u32 = 48_000;
++pub const FRAMES: usize = 128;
++pub const FADD_LATENCY_CYCLES: f64 = 3.0;
++
++/// The standing console fixture's compressor (threshold, ratio, knee, attack, release, makeup,
++/// mix).
++pub const FIXTURE: [f32; 7] = [-6.0, 1.5, 3.0, 2.0, 40.0, 0.0, 1.0];
++/// A setting that compresses hard on the harness input.
++pub const COMPRESSING: [f32; 7] = [-30.0, 6.0, 6.0, 1.0, 60.0, 0.0, 1.0];
++/// Parallel compression with makeup: every identity mask false, the general arm.
++pub const PARALLEL: [f32; 7] = [-30.0, 6.0, 6.0, 1.0, 60.0, 4.0, 0.6];
++
++/// SplitMix64, as `conformance::SplitMix64`, inlined so the wasm guest shares it.
++#[derive(Clone, Copy)]
++pub struct SplitMix64 {
++    state: u64,
++}
++
++impl SplitMix64 {
++    pub const fn new(seed: u64) -> Self {
++        Self { state: seed }
++    }
++    pub fn next_u64(&mut self) -> u64 {
++        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
++        let mut z = self.state;
++        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
++        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
++        z ^ (z >> 31)
++    }
++    pub fn next_bipolar_f32(&mut self) -> f32 {
++        (((self.next_u64() >> 40) as f32) * (1.0 / 16_777_216.0)) * 2.0 - 1.0
++    }
++}
++pub fn metadata(link: LinkMode) -> PreparedEffectMetadata {
++    let values: [InitialParameterValue; 14] = core::array::from_fn(|index| InitialParameterValue {
++        parameter_index: (index / 2) as u32,
++        channel: if index % 2 == 0 {
++            ParameterChannel::Left
++        } else {
++            ParameterChannel::Right
++        },
++        value: COMPRESSOR_PARAMETERS[index / 2].default_value,
++    });
++    let request = PrepareEffectRequest {
++        sample_rate: SAMPLE_RATE,
++        quantum: FRAMES as u32,
++        quality: EffectQuality::Normal,
++        bypass: false,
++        link_mode: link,
++        ports: PreparedPorts {
++            sidechain: PreparedSidechainPort::Unconnected {
++                id: PortId::new("sidechain-in").expect("static port id"),
++                required: false,
++            },
++        },
++        initial_values: &values,
++        limits: PrepareEffectLimits {
++            maximum_total_state_bytes: 1 << 20,
++            maximum_scratch_bytes: 1 << 20,
++            maximum_automation_spans_per_block: 16,
++        },
++    };
++    expected_prepared_metadata(&COMPRESSOR_DESCRIPTOR, request).expect("metadata")
++}
++
++/// The public bank contract at this build's own width: `bind_homogeneous_bank` and
++/// `process_bank`, every lane carrying `params`, no automation.
++pub struct BankArm {
++    bank: Box<dyn effect_contract::PreparedNativeEffectBank>,
++    offsets: Vec<u32>,
++    width: effect_contract::BankWidth,
++    first_sample: u64,
++}
++
++impl BankArm {
++    pub fn new(params: [f32; 7]) -> Option<Self> {
++        use effect_contract::NativeEffectFactory;
++        let backend = lane::Backend::current();
++        let width = effect_contract::BankWidth::for_backend(backend)?;
++        let lanes = width.lanes() as usize;
++        let values: [InitialParameterValue; 14] = core::array::from_fn(|index| InitialParameterValue {
++            parameter_index: (index / 2) as u32,
++            channel: if index % 2 == 0 {
++                ParameterChannel::Left
++            } else {
++                ParameterChannel::Right
++            },
++            value: params[index / 2],
++        });
++        let request = PrepareEffectRequest {
++            sample_rate: SAMPLE_RATE,
++            quantum: FRAMES as u32,
++            quality: EffectQuality::Normal,
++            bypass: false,
++            link_mode: LinkMode::DualMono,
++            ports: PreparedPorts {
++                sidechain: PreparedSidechainPort::Unconnected {
++                    id: PortId::new("sidechain-in").expect("static port id"),
++                    required: false,
++                },
++            },
++            initial_values: &values,
++            limits: PrepareEffectLimits {
++                maximum_total_state_bytes: 1 << 20,
++                maximum_scratch_bytes: 1 << 20,
++                maximum_automation_spans_per_block: 16,
++            },
++        };
++        let requests = vec![request; lanes];
++        let bank = compressor::CompressorFactory
++            .bind_homogeneous_bank(effect_contract::PrepareEffectBankRequest {
++                backend,
++                width,
++                requests: &requests,
++            })
++            .ok()??;
++        Some(Self {
++            bank,
++            offsets: vec![0; lanes + 1],
++            width,
++            first_sample: 0,
++        })
++    }
++
++    /// One block in which every lane and channel receives a Point on `parameter`, alternating
++    /// between two in-domain values, so a 64-sample ramp is in flight at the start of every block.
++    pub fn process_ramp(&mut self, left: &mut [f32], right: &mut [f32], parameter: u32) {
++        self.process_ramp_lanes(left, right, parameter, self.width.lanes() as usize);
++    }
++
++    /// As `process_ramp`, on the first `ramping` lanes only.
++    pub fn process_ramp_lanes(
++        &mut self,
++        left: &mut [f32],
++        right: &mut [f32],
++        parameter: u32,
++        ramping: usize,
++    ) {
++        let lanes = self.width.lanes() as usize;
++        let odd = (self.first_sample / FRAMES as u64) % 2 == 1;
++        let value = match parameter {
++            0 => if odd { -20.0 } else { -24.0 },
++            1 => if odd { 3.0 } else { 4.0 },
++            3 => if odd { 5.0 } else { 8.0 },
++            _ => if odd { 1.0 } else { 2.0 },
++        };
++        let mut spans = Vec::with_capacity(lanes * 2);
++        let mut offsets = Vec::with_capacity(lanes + 1);
++        offsets.push(0_u32);
++        for lane in 0..lanes {
++            for channel in [ParameterChannel::Left, ParameterChannel::Right] {
++                if lane >= ramping {
++                    continue;
++                }
++                spans.push(effect_contract::PreparedAutomationSpan {
++                    kind: effect_contract::AutomationSpanKind::Point,
++                    channel,
++                    parameter_index: parameter,
++                    start_sample: self.first_sample,
++                    end_sample: self.first_sample,
++                    start_value: value,
++                    end_value: value,
++                });
++            }
++            offsets.push(spans.len() as u32);
++        }
++        let block = effect_contract::EffectBankProcessBlock::new(
++            left,
++            right,
++            None,
++            FRAMES as u32,
++            self.width,
++            self.first_sample,
++            &spans,
++            &offsets,
++            FRAMES as u32,
++        )
++        .expect("bank block");
++        let report = self.bank.process_bank(block);
++        assert!(report.reports.iter().all(|r| r.invalid_spans == 0), "span rejected");
++        self.first_sample += FRAMES as u64;
++    }
++
++    pub fn process(&mut self, left: &mut [f32], right: &mut [f32]) {
++        let block = effect_contract::EffectBankProcessBlock::new(
++            left,
++            right,
++            None,
++            FRAMES as u32,
++            self.width,
++            self.first_sample,
++            &[],
++            &self.offsets,
++            FRAMES as u32,
++        )
++        .expect("bank block");
++        let _ = self.bank.process_bank(block);
++        self.first_sample += FRAMES as u64;
++    }
++}
++
++// ---------------------------------------------------------------------------------------------
++// The replica: kernel.rs's frame law, verbatim, with structural switches.
++// ---------------------------------------------------------------------------------------------
++
++pub const COEF_THRESHOLD: usize = 0;
++pub const COEF_INV_RATIO_MINUS_ONE: usize = 1;
++pub const COEF_HALF_KNEE: usize = 2;
++pub const COEF_INV_TWO_KNEE: usize = 3;
++pub const COEF_ATTACK: usize = 4;
++pub const COEF_RELEASE: usize = 5;
++pub const COEF_MAKEUP: usize = 6;
++pub const COEF_MIX: usize = 7;
++
++pub type Words = [[f32; 8]; 8];
++
++#[derive(Clone, Copy)]
++pub struct Coef<L: Lane> {
++    curve: GainComputerCoef<L>,
++    attack: L,
++    release: L,
++    makeup: L,
++    mix: L,
++    wet_identity: L::Mask,
++    dry_mix_zero: L::Mask,
++    makeup_zero: L::Mask,
++}
++
++impl<L: Lane> Coef<L> {
++    #[inline(always)]
++    fn load(words: &Words) -> Self {
++        let makeup = L::load(&words[COEF_MAKEUP]);
++        let mix = L::load(&words[COEF_MIX]);
++        Self {
++            curve: GainComputerCoef {
++                threshold_db: L::load(&words[COEF_THRESHOLD]),
++                inv_ratio_minus_one: L::load(&words[COEF_INV_RATIO_MINUS_ONE]),
++                half_knee_db: L::load(&words[COEF_HALF_KNEE]),
++                inv_two_knee: L::load(&words[COEF_INV_TWO_KNEE]),
++            },
++            attack: L::load(&words[COEF_ATTACK]),
++            release: L::load(&words[COEF_RELEASE]),
++            makeup,
++            mix,
++            wet_identity: mix.eq(L::splat(1.0)),
++            dry_mix_zero: mix.eq(L::zero()),
++            makeup_zero: makeup.eq(L::zero()),
++        }
++    }
++}
++
++#[derive(Clone, Copy)]
++pub struct Inv<L: Lane> {
++    k: K<L>,
++    zero: L,
++    half: L,
++    level_floor: L,
++    level_min: L,
++    level_max: L,
++    reduction_min: L,
++    linked: L::Mask,
++    averaged: L::Mask,
++    bypassed: L::Mask,
++}
++
++impl<L: Lane> Inv<L> {
++    #[inline(always)]
++    fn new(link: LinkMode) -> Self {
++        Self::new_k(link, false)
++    }
++
++    #[inline(always)]
++    fn new_k(link: LinkMode, opaque: bool) -> Self {
++        let zero = L::zero();
++        let all = zero.eq(zero);
++        let none = L::mask_not(all);
++        Self {
++            k: K::new(opaque),
++            zero,
++            half: L::splat(0.5),
++            level_floor: L::splat(1.0e-8),
++            level_min: L::splat(-160.0),
++            level_max: L::splat(24.0),
++            reduction_min: L::splat(-100.0),
++            linked: if matches!(link, LinkMode::DualMono) { none } else { all },
++            averaged: if matches!(link, LinkMode::Average) { all } else { none },
++            bypassed: none,
++        }
++    }
++}
++
++/// Structural switches of one replica.
++#[derive(Clone, Copy)]
++pub struct Shape {
++    /// `link_frame`'s select form (false) or the DualMono arm alone, `abs` per channel (true).
++    dual_mono: bool,
++    /// `gain_mix`'s masked form (false) or the all-wet arm alone, `x * g` (true).
++    wet_only: bool,
++    /// The recursive word kept in a local across the loop (true) or in the channel (false).
++    local_state: bool,
++    /// `chunks_exact` iteration (true) or `slot` indexing with its bounds checks (false).
++    chunks: bool,
++    /// Whole left block then whole right block (true) or both channels per frame (false).
++    split: bool,
++    /// Cumulative truncation of the frame law, for the stage breakdown: 0 copy, 1 link, 2 level,
++    /// 3 curve, 4 ballistic, 5 gain conversion, 6 full.
++    stage: u8,
++    /// Constants hoisted into values built once per block (see `K`).
++    consts: bool,
++    /// Interleaving: 0 none, 1 `Pair` over the channels, 2 two frames at once, 3 two passes.
++    interleave: u8,
++    /// Provably inactive clamps removed: the reduction clamp and `fast_exp2`'s argument clamp are
++    /// not removable without touching the sealed tier, so only the reduction clamp here.
++    no_reduction_clamp: bool,
++}
++
++
++/// The fast-dB tier's and the kernel's constants as values rather than immediates, built once per
++/// block. With `opaque`, each scalar passes through `black_box`, so neither backend can fold it
++/// back into a per-use immediate: x86 keeps it in a register or a stack slot, wasm in a local.
++#[derive(Clone, Copy)]
++pub struct K<L: Lane> {
++    min_positive: L,
++    one: L,
++    log2_q: [L; 6],
++    db_per_log2: L,
++    log2_per_db: L,
++    exp_lo: L,
++    exp_hi: L,
++    exp2_p: [L; 5],
++    level_floor: L,
++    level_min: L,
++    level_max: L,
++    reduction_min: L,
++}
++
++const K_DB_PER_LOG2: f32 = (20.0_f64 * core::f64::consts::LOG10_2) as f32;
++const K_LOG2_PER_DB: f32 = (core::f64::consts::LOG2_10 / 20.0) as f32;
++const K_EXP2_P: [f32; 5] = [0.693_151_3, 0.240_164_44, 0.055_799_913, 0.009_017_031, 0.001_867_13];
++const K_LOG2_Q: [f32; 6] = [
++    1.442_553_2,
++    -0.718_281_9,
++    0.458_270_82,
++    -0.279_538_15,
++    0.123_451_486,
++    -0.026_457_45,
++];
++
++impl<L: Lane> K<L> {
++    #[inline(always)]
++    fn new(opaque: bool) -> Self {
++        let s = |x: f32| {
++            if opaque {
++                L::splat(core::hint::black_box(x))
++            } else {
++                L::splat(x)
++            }
++        };
++        Self {
++            min_positive: s(f32::MIN_POSITIVE),
++            one: s(1.0),
++            log2_q: core::array::from_fn(|i| s(K_LOG2_Q[i])),
++            db_per_log2: s(K_DB_PER_LOG2),
++            log2_per_db: s(K_LOG2_PER_DB),
++            exp_lo: s(-126.0),
++            exp_hi: s(127.0),
++            exp2_p: core::array::from_fn(|i| s(K_EXP2_P[i])),
++            level_floor: s(1.0e-8),
++            level_min: s(-160.0),
++            level_max: s(24.0),
++            reduction_min: s(-100.0),
++        }
++    }
++}
++
++fn pair_k<L: Lane>(a: &K<L>) -> K<Pair<L>> {
++    let p = |x: L| Pair(x, x);
++    K {
++        min_positive: p(a.min_positive),
++        one: p(a.one),
++        log2_q: core::array::from_fn(|i| p(a.log2_q[i])),
++        db_per_log2: p(a.db_per_log2),
++        log2_per_db: p(a.log2_per_db),
++        exp_lo: p(a.exp_lo),
++        exp_hi: p(a.exp_hi),
++        exp2_p: core::array::from_fn(|i| p(a.exp2_p[i])),
++        level_floor: p(a.level_floor),
++        level_min: p(a.level_min),
++        level_max: p(a.level_max),
++        reduction_min: p(a.reduction_min),
++    }
++}
++
++/// `math::fast_db::fast_level_db`, verbatim operation order, constants from `k`.
++#[inline(always)]
++fn fast_level_db_k<L: Lane>(x: L, k: &K<L>) -> L {
++    let x = x.max(k.min_positive);
++    let (m, e) = x.frexp();
++    let t = m.sub(k.one);
++    let mut q = k.log2_q[5];
++    let mut index = 4;
++    loop {
++        q = q.mul(t).add(k.log2_q[index]);
++        if index == 0 {
++            break;
++        }
++        index -= 1;
++    }
++    e.add(t.mul(q)).mul(k.db_per_log2)
++}
++
++/// `math::fast_db::fast_gain_from_db`, verbatim operation order, constants from `k`.
++#[inline(always)]
++fn fast_gain_from_db_k<L: Lane>(db: L, k: &K<L>) -> L {
++    let x = db.mul(k.log2_per_db);
++    let x = x.max(k.exp_lo).min(k.exp_hi);
++    let xi = x.floor();
++    let f = x.sub(xi);
++    let mut p = k.exp2_p[4];
++    let mut index = 3;
++    loop {
++        p = p.mul(f).add(k.exp2_p[index]);
++        if index == 0 {
++            break;
++        }
++        index -= 1;
++    }
++    let p = k.one.add(f.mul(p));
++    p.mul(L::exp2_int_in_range(xi))
++}
++
++#[inline(always)]
++pub fn link<L: Lane>(ml: L, mr: L, inv: &Inv<L>, dual_mono: bool) -> (L, L) {
++    if dual_mono {
++        return (ml.abs(), mr.abs());
++    }
++    let magnitude_left = ml.abs();
++    let magnitude_right = mr.abs();
++    let maximum = magnitude_left.max(magnitude_right);
++    let average = magnitude_left
++        .mul(inv.half)
++        .add(magnitude_right.mul(inv.half));
++    let combined = L::select(inv.averaged, average, maximum);
++    (
++        L::select(inv.linked, combined, magnitude_left),
++        L::select(inv.linked, combined, magnitude_right),
++    )
++}
++
++/// One channel-frame after the link, truncated at `stage`.
++#[inline(always)]
++pub fn channel_frame<L: Lane>(
++    input: L,
++    detected: L,
++    coef: &Coef<L>,
++    g: &mut L,
++    inv: &Inv<L>,
++    shape: Shape,
++) -> L {
++    if shape.stage == 0 {
++        return input;
++    }
++    if shape.stage == 1 {
++        return detected;
++    }
++    let floored = detected.max(inv.level_floor);
++    let level = fast_level_db(floored).max(inv.level_min).min(inv.level_max);
++    if shape.stage == 2 {
++        return level;
++    }
++    let delta = gain_delta_db(level, &coef.curve);
++    let target = if shape.no_reduction_clamp {
++        delta
++    } else {
++        delta.max(inv.reduction_min).min(inv.zero)
++    };
++    if shape.stage == 3 {
++        return target;
++    }
++    let coefficient = L::select(target.lt(*g), coef.attack, coef.release);
++    let smoothed = flush(rms_follow(target, *g, coefficient));
++    *g = smoothed;
++    if shape.stage == 4 {
++        return smoothed;
++    }
++    let gain = fast_gain_from_db(smoothed.add(coef.makeup));
++    if shape.stage == 5 {
++        return gain;
++    }
++    let wet = input.mul(gain);
++    if shape.wet_only {
++        return wet;
++    }
++    let mixed = gain_mix_step(input, gain, coef.mix);
++    let dry_identity = L::mask_or(
++        inv.bypassed,
++        L::mask_or(
++            coef.dry_mix_zero,
++            L::mask_and(smoothed.eq(inv.zero), coef.makeup_zero),
++        ),
++    );
++    let output = L::select(coef.wet_identity, wet, mixed);
++    L::select(dry_identity, input, output)
++}
++
++
++// ---------------------------------------------------------------------------------------------
++// Pair<L>: two independent L values advanced op by op, so the emitted program order interleaves
++// two dependency chains. Every operation is L's own operation applied to each half, so the value
++// of each half is exactly what L computes.
++// ---------------------------------------------------------------------------------------------
++
++#[derive(Clone, Copy)]
++pub struct Pair<L: Lane>(L, L);
++
++impl<L: Lane> Lane for Pair<L> {
++    const WIDTH: usize = 2 * L::WIDTH;
++    const SVF_CASCADE_DEPTH: usize = 1;
++    type Mask = (L::Mask, L::Mask);
++    #[inline(always)]
++    fn splat(x: f32) -> Self {
++        Pair(L::splat(x), L::splat(x))
++    }
++    #[inline(always)]
++    fn zero() -> Self {
++        Pair(L::zero(), L::zero())
++    }
++    #[inline(always)]
++    fn load(src: &[f32]) -> Self {
++        Pair(L::load(src), L::load(&src[L::WIDTH..]))
++    }
++    #[inline(always)]
++    fn store(self, dst: &mut [f32]) {
++        self.0.store(dst);
++        self.1.store(&mut dst[L::WIDTH..]);
++    }
++    #[inline(always)]
++    fn add(self, b: Self) -> Self {
++        Pair(self.0.add(b.0), self.1.add(b.1))
++    }
++    #[inline(always)]
++    fn sub(self, b: Self) -> Self {
++        Pair(self.0.sub(b.0), self.1.sub(b.1))
++    }
++    #[inline(always)]
++    fn mul(self, b: Self) -> Self {
++        Pair(self.0.mul(b.0), self.1.mul(b.1))
++    }
++    #[inline(always)]
++    fn div(self, b: Self) -> Self {
++        Pair(self.0.div(b.0), self.1.div(b.1))
++    }
++    #[inline(always)]
++    fn sqrt(self) -> Self {
++        Pair(self.0.sqrt(), self.1.sqrt())
++    }
++    #[inline(always)]
++    fn fma(self, b: Self, c: Self) -> Self {
++        Pair(self.0.fma(b.0, c.0), self.1.fma(b.1, c.1))
++    }
++    #[inline(always)]
++    fn neg(self) -> Self {
++        Pair(self.0.neg(), self.1.neg())
++    }
++    #[inline(always)]
++    fn abs(self) -> Self {
++        Pair(self.0.abs(), self.1.abs())
++    }
++    #[inline(always)]
++    fn floor(self) -> Self {
++        Pair(self.0.floor(), self.1.floor())
++    }
++    #[inline(always)]
++    fn lt(self, b: Self) -> Self::Mask {
++        (self.0.lt(b.0), self.1.lt(b.1))
++    }
++    #[inline(always)]
++    fn le(self, b: Self) -> Self::Mask {
++        (self.0.le(b.0), self.1.le(b.1))
++    }
++    #[inline(always)]
++    fn gt(self, b: Self) -> Self::Mask {
++        (self.0.gt(b.0), self.1.gt(b.1))
++    }
++    #[inline(always)]
++    fn ge(self, b: Self) -> Self::Mask {
++        (self.0.ge(b.0), self.1.ge(b.1))
++    }
++    #[inline(always)]
++    fn eq(self, b: Self) -> Self::Mask {
++        (self.0.eq(b.0), self.1.eq(b.1))
++    }
++    #[inline(always)]
++    fn mask_and(a: Self::Mask, b: Self::Mask) -> Self::Mask {
++        (L::mask_and(a.0, b.0), L::mask_and(a.1, b.1))
++    }
++    #[inline(always)]
++    fn mask_or(a: Self::Mask, b: Self::Mask) -> Self::Mask {
++        (L::mask_or(a.0, b.0), L::mask_or(a.1, b.1))
++    }
++    #[inline(always)]
++    fn mask_not(a: Self::Mask) -> Self::Mask {
++        (L::mask_not(a.0), L::mask_not(a.1))
++    }
++    #[inline(always)]
++    fn mask_any(m: Self::Mask) -> bool {
++        L::mask_any(m.0) || L::mask_any(m.1)
++    }
++    #[inline(always)]
++    fn select(m: Self::Mask, a: Self, b: Self) -> Self {
++        Pair(L::select(m.0, a.0, b.0), L::select(m.1, a.1, b.1))
++    }
++    #[inline(always)]
++    fn andnot(self, m: Self::Mask) -> Self {
++        Pair(self.0.andnot(m.0), self.1.andnot(m.1))
++    }
++    #[inline(always)]
++    fn max(self, b: Self) -> Self {
++        Pair(self.0.max(b.0), self.1.max(b.1))
++    }
++    #[inline(always)]
++    fn min(self, b: Self) -> Self {
++        Pair(self.0.min(b.0), self.1.min(b.1))
++    }
++    #[inline(always)]
++    fn exp2_int(n: Self) -> Self {
++        Pair(L::exp2_int(n.0), L::exp2_int(n.1))
++    }
++    #[inline(always)]
++    fn exp2_int_in_range(n: Self) -> Self {
++        Pair(L::exp2_int_in_range(n.0), L::exp2_int_in_range(n.1))
++    }
++    #[inline(always)]
++    fn frexp(self) -> (Self, Self) {
++        let (m0, e0) = self.0.frexp();
++        let (m1, e1) = self.1.frexp();
++        (Pair(m0, m1), Pair(e0, e1))
++    }
++    #[inline(always)]
++    fn store_bits(self, dst: &mut [u32]) {
++        self.0.store_bits(dst);
++        self.1.store_bits(&mut dst[L::WIDTH..]);
++    }
++}
++
++pub fn pair_coef<L: Lane>(a: &Coef<L>, b: &Coef<L>) -> Coef<Pair<L>> {
++    Coef {
++        curve: GainComputerCoef {
++            threshold_db: Pair(a.curve.threshold_db, b.curve.threshold_db),
++            inv_ratio_minus_one: Pair(a.curve.inv_ratio_minus_one, b.curve.inv_ratio_minus_one),
++            half_knee_db: Pair(a.curve.half_knee_db, b.curve.half_knee_db),
++            inv_two_knee: Pair(a.curve.inv_two_knee, b.curve.inv_two_knee),
++        },
++        attack: Pair(a.attack, b.attack),
++        release: Pair(a.release, b.release),
++        makeup: Pair(a.makeup, b.makeup),
++        mix: Pair(a.mix, b.mix),
++        wet_identity: (a.wet_identity, b.wet_identity),
++        dry_mix_zero: (a.dry_mix_zero, b.dry_mix_zero),
++        makeup_zero: (a.makeup_zero, b.makeup_zero),
++    }
++}
++
++pub fn pair_inv<L: Lane>(a: &Inv<L>) -> Inv<Pair<L>> {
++    Inv {
++        k: pair_k(&a.k),
++        zero: Pair(a.zero, a.zero),
++        half: Pair(a.half, a.half),
++        level_floor: Pair(a.level_floor, a.level_floor),
++        level_min: Pair(a.level_min, a.level_min),
++        level_max: Pair(a.level_max, a.level_max),
++        reduction_min: Pair(a.reduction_min, a.reduction_min),
++        linked: (a.linked, a.linked),
++        averaged: (a.averaged, a.averaged),
++        bypassed: (a.bypassed, a.bypassed),
++    }
++}
++
++/// The frame law split at the recurrence: the target (no state), the ballistic (the state), the
++/// output (no state). `channel_frame` is exactly `output(ballistic(target))`.
++#[inline(always)]
++pub fn target_of<L: Lane>(detected: L, coef: &Coef<L>, inv: &Inv<L>, shape: Shape) -> L {
++    if shape.consts {
++        let k = &inv.k;
++        let floored = detected.max(k.level_floor);
++        let level = fast_level_db_k(floored, k).max(k.level_min).min(k.level_max);
++        let delta = gain_delta_db(level, &coef.curve);
++        return if shape.no_reduction_clamp {
++            delta
++        } else {
++            delta.max(k.reduction_min).min(inv.zero)
++        };
++    }
++    let floored = detected.max(inv.level_floor);
++    let level = fast_level_db(floored).max(inv.level_min).min(inv.level_max);
++    let delta = gain_delta_db(level, &coef.curve);
++    if shape.no_reduction_clamp {
++        delta
++    } else {
++        delta.max(inv.reduction_min).min(inv.zero)
++    }
++}
++
++#[inline(always)]
++pub fn ballistic_of<L: Lane>(target: L, g: &mut L, coef: &Coef<L>) -> L {
++    let coefficient = L::select(target.lt(*g), coef.attack, coef.release);
++    let smoothed = flush(rms_follow(target, *g, coefficient));
++    *g = smoothed;
++    smoothed
++}
++
++#[inline(always)]
++pub fn output_of<L: Lane>(input: L, smoothed: L, coef: &Coef<L>, inv: &Inv<L>, shape: Shape) -> L {
++    let gain = if shape.consts {
++        fast_gain_from_db_k(smoothed.add(coef.makeup), &inv.k)
++    } else {
++        fast_gain_from_db(smoothed.add(coef.makeup))
++    };
++    let wet = input.mul(gain);
++    if shape.wet_only {
++        return wet;
++    }
++    let mixed = gain_mix_step(input, gain, coef.mix);
++    let dry_identity = L::mask_or(
++        inv.bypassed,
++        L::mask_or(
++            coef.dry_mix_zero,
++            L::mask_and(smoothed.eq(inv.zero), coef.makeup_zero),
++        ),
++    );
++    let output = L::select(coef.wet_identity, wet, mixed);
++    L::select(dry_identity, input, output)
++}
++
++/// Interleaved replicas. `mode`: 0 = both channels as one `Pair` per frame; 1 = two frames of
++/// both channels (`Pair<Pair>`) for the target and the output, the recurrence frame by frame;
++/// 2 = two passes, every frame's target first (stack scratch), then recurrence and output.
++#[inline(always)]
++pub fn replica_pair<L: Lane>(
++    left: &mut [f32],
++    right: &mut [f32],
++    words: &(Words, Words),
++    state: &mut [L; 2],
++    link_mode: LinkMode,
++    shape: Shape,
++    mode: u8,
++) {
++    let inv = Inv::<L>::new_k(link_mode, shape.consts);
++    let pinv = pair_inv(&inv);
++    let cl = Coef::<L>::load(&words.0);
++    let cr = Coef::<L>::load(&words.1);
++    let pc = pair_coef(&cl, &cr);
++    let width = L::WIDTH;
++    let mut g = Pair(state[0], state[1]);
++    let detect = |ml: L, mr: L| -> Pair<L> {
++        let (dl, dr) = link(ml, mr, &inv, shape.dual_mono);
++        Pair(dl, dr)
++    };
++    match mode {
++        0 => {
++            for (l, r) in left
++                .chunks_exact_mut(width)
++                .zip(right.chunks_exact_mut(width))
++            {
++                let x = Pair(L::load(l), L::load(r));
++                let d = detect(x.0, x.1);
++                let t = target_of(d, &pc, &pinv, shape);
++                let s = ballistic_of(t, &mut g, &pc);
++                let y = output_of(x, s, &pc, &pinv, shape);
++                y.0.store(l);
++                y.1.store(r);
++            }
++        }
++        1 => {
++            let qc = pair_coef(&pc, &pc);
++            let qinv = pair_inv(&pinv);
++            for (l, r) in left
++                .chunks_exact_mut(2 * width)
++                .zip(right.chunks_exact_mut(2 * width))
++            {
++                let (l0, l1) = l.split_at_mut(width);
++                let (r0, r1) = r.split_at_mut(width);
++                let xa = Pair(L::load(l0), L::load(r0));
++                let xb = Pair(L::load(l1), L::load(r1));
++                let d = Pair(detect(xa.0, xa.1), detect(xb.0, xb.1));
++                let t = target_of(d, &qc, &qinv, shape);
++                let sa = ballistic_of(t.0, &mut g, &pc);
++                let sb = ballistic_of(t.1, &mut g, &pc);
++                let y = output_of(Pair(xa, xb), Pair(sa, sb), &qc, &qinv, shape);
++                y.0.0.store(l0);
++                y.0.1.store(r0);
++                y.1.0.store(l1);
++                y.1.1.store(r1);
++            }
++        }
++        3 => {
++            // Four frames of both channels per iteration.
++            let qc = pair_coef(&pc, &pc);
++            let qinv = pair_inv(&pinv);
++            let oc = pair_coef(&qc, &qc);
++            let oinv = pair_inv(&qinv);
++            for (l, r) in left
++                .chunks_exact_mut(4 * width)
++                .zip(right.chunks_exact_mut(4 * width))
++            {
++                let x: [Pair<L>; 4] = core::array::from_fn(|k| {
++                    Pair(
++                        L::load(&l[k * width..]),
++                        L::load(&r[k * width..]),
++                    )
++                });
++                let d = Pair(
++                    Pair(detect(x[0].0, x[0].1), detect(x[1].0, x[1].1)),
++                    Pair(detect(x[2].0, x[2].1), detect(x[3].0, x[3].1)),
++                );
++                let t = target_of(d, &oc, &oinv, shape);
++                let s0 = ballistic_of(t.0.0, &mut g, &pc);
++                let s1 = ballistic_of(t.0.1, &mut g, &pc);
++                let s2 = ballistic_of(t.1.0, &mut g, &pc);
++                let s3 = ballistic_of(t.1.1, &mut g, &pc);
++                let y = output_of(
++                    Pair(Pair(x[0], x[1]), Pair(x[2], x[3])),
++                    Pair(Pair(s0, s1), Pair(s2, s3)),
++                    &oc,
++                    &oinv,
++                    shape,
++                );
++                let ys = [y.0.0, y.0.1, y.1.0, y.1.1];
++                for (k, value) in ys.iter().enumerate() {
++                    value.0.store(&mut l[k * width..]);
++                    value.1.store(&mut r[k * width..]);
++                }
++            }
++        }
++        4 | 5 => {
++            // Pass 1: every frame's target, two frames of both channels per iteration.
++            let qc = pair_coef(&pc, &pc);
++            let qinv = pair_inv(&pinv);
++            let mut targets = [Pair(L::zero(), L::zero()); FRAMES];
++            for ((l, r), t) in left
++                .chunks_exact(2 * width)
++                .zip(right.chunks_exact(2 * width))
++                .zip(targets.chunks_exact_mut(2))
++            {
++                let d = Pair(
++                    detect(L::load(l), L::load(r)),
++                    detect(L::load(&l[width..]), L::load(&r[width..])),
++                );
++                let v = target_of(d, &qc, &qinv, shape);
++                t[0] = v.0;
++                t[1] = v.1;
++            }
++            if mode == 4 {
++                // Pass 2: the recurrence alone, in place over the targets.
++                for t in targets.iter_mut() {
++                    *t = ballistic_of(*t, &mut g, &pc);
++                }
++                // Pass 3: the output, two frames per iteration.
++                for ((l, r), s) in left
++                    .chunks_exact_mut(2 * width)
++                    .zip(right.chunks_exact_mut(2 * width))
++                    .zip(targets.chunks_exact(2))
++                {
++                    let (l0, l1) = l.split_at_mut(width);
++                    let (r0, r1) = r.split_at_mut(width);
++                    let x = Pair(Pair(L::load(l0), L::load(r0)), Pair(L::load(l1), L::load(r1)));
++                    let y = output_of(x, Pair(s[0], s[1]), &qc, &qinv, shape);
++                    y.0.0.store(l0);
++                    y.0.1.store(r0);
++                    y.1.0.store(l1);
++                    y.1.1.store(r1);
++                }
++            } else {
++                // Pass 2: recurrence and output, two frames per iteration.
++                for ((l, r), t) in left
++                    .chunks_exact_mut(2 * width)
++                    .zip(right.chunks_exact_mut(2 * width))
++                    .zip(targets.chunks_exact(2))
++                {
++                    let (l0, l1) = l.split_at_mut(width);
++                    let (r0, r1) = r.split_at_mut(width);
++                    let x = Pair(Pair(L::load(l0), L::load(r0)), Pair(L::load(l1), L::load(r1)));
++                    let sa = ballistic_of(t[0], &mut g, &pc);
++                    let sb = ballistic_of(t[1], &mut g, &pc);
++                    let y = output_of(x, Pair(sa, sb), &qc, &qinv, shape);
++                    y.0.0.store(l0);
++                    y.0.1.store(r0);
++                    y.1.0.store(l1);
++                    y.1.1.store(r1);
++                }
++            }
++        }
++        _ => {
++            let mut targets = [Pair(L::zero(), L::zero()); FRAMES];
++            for ((l, r), t) in left
++                .chunks_exact(width)
++                .zip(right.chunks_exact(width))
++                .zip(targets.iter_mut())
++            {
++                *t = target_of(detect(L::load(l), L::load(r)), &pc, &pinv, shape);
++            }
++            for ((l, r), t) in left
++                .chunks_exact_mut(width)
++                .zip(right.chunks_exact_mut(width))
++                .zip(targets.iter())
++            {
++                let x = Pair(L::load(l), L::load(r));
++                let s = ballistic_of(*t, &mut g, &pc);
++                let y = output_of(x, s, &pc, &pinv, shape);
++                y.0.store(l);
++                y.1.store(r);
++            }
++        }
++    }
++    state[0] = g.0;
++    state[1] = g.1;
++}
++
++/// The replica block body. `#[inline(always)]` so every call site below is its own function.
++#[inline(always)]
++pub fn replica<L: Lane>(
++    left: &mut [f32],
++    right: &mut [f32],
++    words: &(Words, Words),
++    state: &mut [L; 2],
++    link_mode: LinkMode,
++    shape: Shape,
++) {
++    if shape.interleave != 0 {
++        replica_pair::<L>(left, right, words, state, link_mode, shape, shape.interleave - 1);
++        return;
++    }
++    if shape.consts {
++        // Chunked, local state, the split frame law with hoisted constants.
++        let inv = Inv::<L>::new_k(link_mode, true);
++        let cl = Coef::<L>::load(&words.0);
++        let cr = Coef::<L>::load(&words.1);
++        let (mut gl, mut gr) = (state[0], state[1]);
++        for (l, r) in left
++            .chunks_exact_mut(L::WIDTH)
++            .zip(right.chunks_exact_mut(L::WIDTH))
++        {
++            let ml = L::load(l);
++            let mr = L::load(r);
++            let (dl, dr) = link(ml, mr, &inv, shape.dual_mono);
++            let tl = target_of(dl, &cl, &inv, shape);
++            let sl = ballistic_of(tl, &mut gl, &cl);
++            output_of(ml, sl, &cl, &inv, shape).store(l);
++            let tr = target_of(dr, &cr, &inv, shape);
++            let sr = ballistic_of(tr, &mut gr, &cr);
++            output_of(mr, sr, &cr, &inv, shape).store(r);
++        }
++        state[0] = gl;
++        state[1] = gr;
++        return;
++    }
++    let inv = Inv::<L>::new(link_mode);
++    let cl = Coef::<L>::load(&words.0);
++    let cr = Coef::<L>::load(&words.1);
++    let width = L::WIDTH;
++    let frames = left.len() / width;
++    if shape.split {
++        // DualMono only: the channels share nothing.
++        for (plane, coef, index) in [(&mut *left, &cl, 0), (&mut *right, &cr, 1)] {
++            let mut g = state[index];
++            for chunk in plane.chunks_exact_mut(width) {
++                let x = L::load(chunk);
++                let detected = link(x, x, &inv, true).0;
++                channel_frame(x, detected, coef, &mut g, &inv, shape).store(chunk);
++            }
++            state[index] = g;
++        }
++        return;
++    }
++    if shape.chunks {
++        let (mut gl, mut gr) = (state[0], state[1]);
++        for (l, r) in left
++            .chunks_exact_mut(width)
++            .zip(right.chunks_exact_mut(width))
++        {
++            let ml = L::load(l);
++            let mr = L::load(r);
++            let (dl, dr) = link(ml, mr, &inv, shape.dual_mono);
++            if shape.local_state {
++                channel_frame(ml, dl, &cl, &mut gl, &inv, shape).store(l);
++                channel_frame(mr, dr, &cr, &mut gr, &inv, shape).store(r);
++            } else {
++                channel_frame(ml, dl, &cl, &mut state[0], &inv, shape).store(l);
++                channel_frame(mr, dr, &cr, &mut state[1], &inv, shape).store(r);
++            }
++        }
++        if shape.local_state {
++            state[0] = gl;
++            state[1] = gr;
++        }
++        return;
++    }
++    let (mut gl, mut gr) = (state[0], state[1]);
++    for frame in 0..frames {
++        let slot = frame * width;
++        let ml = L::load(&left[slot..]);
++        let mr = L::load(&right[slot..]);
++        let (dl, dr) = link(ml, mr, &inv, shape.dual_mono);
++        if shape.local_state {
++            channel_frame(ml, dl, &cl, &mut gl, &inv, shape).store(&mut left[slot..]);
++            channel_frame(mr, dr, &cr, &mut gr, &inv, shape).store(&mut right[slot..]);
++        } else {
++            channel_frame(ml, dl, &cl, &mut state[0], &inv, shape).store(&mut left[slot..]);
++            channel_frame(mr, dr, &cr, &mut state[1], &inv, shape).store(&mut right[slot..]);
++        }
++    }
++    if shape.local_state {
++        state[0] = gl;
++        state[1] = gr;
++    }
++}
++
++pub const BASE: Shape = Shape {
++    dual_mono: false,
++    wet_only: false,
++    local_state: false,
++    chunks: false,
++    split: false,
++    stage: 6,
++    interleave: 0,
++    consts: false,
++    no_reduction_clamp: false,
++};
++
++/// The named replica variants. Each gets its own non-inlined function per width via the macro.
++macro_rules! variants {
++    ($($name:ident = $shape:expr;)*) => {
++        $(
++            #[inline(never)]
++            pub fn $name<L: Lane>(
++                left: &mut [f32],
++                right: &mut [f32],
++                words: &(Words, Words),
++                state: &mut [L; 2],
++                link_mode: LinkMode,
++            ) {
++                replica::<L>(left, right, words, state, link_mode, $shape);
++            }
++        )*
++        pub const VARIANTS: &[&str] = &[$(stringify!($name)),*];
++        pub fn dispatch<L: Lane>(
++            name: &str,
++            left: &mut [f32],
++            right: &mut [f32],
++            words: &(Words, Words),
++            state: &mut [L; 2],
++            link_mode: LinkMode,
++        ) {
++            match name {
++                $(stringify!($name) => $name::<L>(left, right, words, state, link_mode),)*
++                _ => panic!("unknown variant {name}"),
++            }
++        }
++    };
++}
++
++variants! {
++    r_base = BASE;
++    r_stage0_copy = Shape { stage: 0, ..BASE };
++    r_stage1_link = Shape { stage: 1, ..BASE };
++    r_stage2_level = Shape { stage: 2, ..BASE };
++    r_stage3_curve = Shape { stage: 3, ..BASE };
++    r_stage4_ballistic = Shape { stage: 4, ..BASE };
++    r_stage5_gain = Shape { stage: 5, ..BASE };
++    r_local = Shape { local_state: true, ..BASE };
++    r_chunks = Shape { chunks: true, ..BASE };
++    r_chunks_local = Shape { chunks: true, local_state: true, ..BASE };
++    r_dm = Shape { dual_mono: true, ..BASE };
++    r_wet = Shape { wet_only: true, ..BASE };
++    r_dm_wet = Shape { dual_mono: true, wet_only: true, ..BASE };
++    r_lean = Shape { dual_mono: true, wet_only: true, chunks: true, local_state: true, ..BASE };
++    r_lean_noclamp = Shape { dual_mono: true, wet_only: true, chunks: true, local_state: true, no_reduction_clamp: true, ..BASE };
++    r_split = Shape { split: true, ..BASE };
++    r_split_wet = Shape { split: true, wet_only: true, ..BASE };
++    r_cl_dm = Shape { chunks: true, local_state: true, dual_mono: true, ..BASE };
++    r_cl_wet = Shape { chunks: true, local_state: true, wet_only: true, ..BASE };
++    r_lean_stage0 = Shape { dual_mono: true, wet_only: true, chunks: true, local_state: true, stage: 0, ..BASE };
++    r_lean_stage1 = Shape { dual_mono: true, wet_only: true, chunks: true, local_state: true, stage: 1, ..BASE };
++    r_lean_stage2 = Shape { dual_mono: true, wet_only: true, chunks: true, local_state: true, stage: 2, ..BASE };
++    r_lean_stage3 = Shape { dual_mono: true, wet_only: true, chunks: true, local_state: true, stage: 3, ..BASE };
++    r_lean_stage4 = Shape { dual_mono: true, wet_only: true, chunks: true, local_state: true, stage: 4, ..BASE };
++    r_lean_stage5 = Shape { dual_mono: true, wet_only: true, chunks: true, local_state: true, stage: 5, ..BASE };
++    r_pair = Shape { interleave: 1, ..BASE };
++    r_pair_dm = Shape { interleave: 1, dual_mono: true, ..BASE };
++    r_pair_lean = Shape { interleave: 1, dual_mono: true, wet_only: true, ..BASE };
++    r_quad = Shape { interleave: 2, ..BASE };
++    r_quad_lean = Shape { interleave: 2, dual_mono: true, wet_only: true, ..BASE };
++    r_twopass = Shape { interleave: 3, ..BASE };
++    r_twopass_lean = Shape { interleave: 3, dual_mono: true, wet_only: true, ..BASE };
++    r_quad_dm = Shape { interleave: 2, dual_mono: true, ..BASE };
++    r_quad_wet = Shape { interleave: 2, wet_only: true, ..BASE };
++    r_oct = Shape { interleave: 4, ..BASE };
++    r_oct_lean = Shape { interleave: 4, dual_mono: true, wet_only: true, ..BASE };
++    r_3pass = Shape { interleave: 5, ..BASE };
++    r_3pass_lean = Shape { interleave: 5, dual_mono: true, wet_only: true, ..BASE };
++    r_2passq = Shape { interleave: 6, ..BASE };
++    r_2passq_lean = Shape { interleave: 6, dual_mono: true, wet_only: true, ..BASE };
++    r_quad_lean_noclamp = Shape { interleave: 2, dual_mono: true, wet_only: true, no_reduction_clamp: true, ..BASE };
++    r_k = Shape { consts: true, ..BASE };
++    r_k_wet = Shape { consts: true, wet_only: true, ..BASE };
++    r_k_lean = Shape { consts: true, wet_only: true, dual_mono: true, ..BASE };
++    r_k_pair = Shape { consts: true, interleave: 1, ..BASE };
++    r_k_quad = Shape { consts: true, interleave: 2, ..BASE };
++    r_k_quad_wet = Shape { consts: true, interleave: 2, wet_only: true, ..BASE };
++    r_k_quad_lean = Shape { consts: true, interleave: 2, dual_mono: true, wet_only: true, ..BASE };
++    r_k_oct = Shape { consts: true, interleave: 4, ..BASE };
++    r_k_oct_wet = Shape { consts: true, interleave: 4, wet_only: true, ..BASE };
++    r_k_oct_lean = Shape { consts: true, interleave: 4, dual_mono: true, wet_only: true, ..BASE };
++    r_oct_wet = Shape { interleave: 4, wet_only: true, ..BASE };
++    r_oct_dm = Shape { interleave: 4, dual_mono: true, ..BASE };
++}
++
++/// Variants that must be word-identical to the real kernel on the given parameter set.
++pub fn equivalent(name: &str, params: &[f32; 7]) -> bool {
++    if name.contains("stage") {
++        return false;
++    }
++    let all_wet = params[6] == 1.0;
++    if (name.contains("wet") || name.contains("lean")) && !all_wet {
++        return false;
++    }
++    true
++}
++
++// ---------------------------------------------------------------------------------------------
++// Inputs
++// ---------------------------------------------------------------------------------------------
++
++pub fn noise_planes(lanes: usize, blocks: usize, seed: u64, amplitude: f32) -> Vec<(Vec<f32>, Vec<f32>)> {
++    let mut generator = SplitMix64::new(seed);
++    (0..blocks)
++        .map(|_| {
++            let mut left = vec![0.0_f32; FRAMES * lanes];
++            let mut right = vec![0.0_f32; FRAMES * lanes];
++            for value in left.iter_mut().chain(right.iter_mut()) {
++                *value = generator.next_bipolar_f32() * amplitude;
++            }
++            (left, right)
++        })
++        .collect()
++}
++
++/// Hostile words: signed zeros, subnormals, huge finite, infinities, NaN payloads, and ordinary
++/// audio, placed per lane so every lane sees every class over the run.
++pub fn hostile_planes(lanes: usize, blocks: usize, seed: u64) -> Vec<(Vec<f32>, Vec<f32>)> {
++    let mut generator = SplitMix64::new(seed);
++    let specials = [
++        -0.0_f32,
++        0.0,
++        f32::from_bits(1),
++        -f32::from_bits(0x0000_1234),
++        f32::MIN_POSITIVE,
++        1.0e-30,
++        1.0e29,
++        -3.0e30,
++        f32::INFINITY,
++        f32::NEG_INFINITY,
++        f32::from_bits(0x7fc0_1234),
++        f32::from_bits(0xffa0_0001),
++        1.0,
++        -1.0,
++    ];
++    (0..blocks)
++        .map(|block| {
++            let mut left = vec![0.0_f32; FRAMES * lanes];
++            let mut right = vec![0.0_f32; FRAMES * lanes];
++            for (index, value) in left.iter_mut().chain(right.iter_mut()).enumerate() {
++                let r = generator.next_u64();
++                // Specials sparsely, on a quarter of the blocks, so most blocks survive the
++                // boundary check and the recursive words keep evolving.
++                *value = if block % 4 == 3 && r % 29 == 0 {
++                    specials[(r as usize / 29 + index) % specials.len()]
++                } else if r % 7 == 0 {
++                    if r % 2 == 0 { -0.0 } else { 0.0 }
++                } else {
++                    generator.next_bipolar_f32() * if block % 3 == 0 { 1.5 } else { 0.2 }
++                };
++            }
++            (left, right)
++        })
++        .collect()
++}
++
++// ---------------------------------------------------------------------------------------------
++// verify
++// ---------------------------------------------------------------------------------------------
++
++pub fn compare_words(a: &[f32], b: &[f32]) -> (usize, usize) {
++    // (mismatching non-NaN words, NaN words that are NaN in both but differ in payload)
++    let mut hard = 0;
++    let mut nan_payload = 0;
++    for (x, y) in a.iter().zip(b) {
++        if x.to_bits() == y.to_bits() {
++            continue;
++        }
++        if x.is_nan() && y.is_nan() {
++            nan_payload += 1;
++        } else {
++            hard += 1;
++        }
++    }
++    (hard, nan_payload)
++}
++
++pub fn verify_width<L: Lane>(label: &str) -> bool {
++    let mut ok = true;
++    let links = [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average];
++    for (params_name, params) in [
++        ("fixture", FIXTURE),
++        ("compressing", COMPRESSING),
++        ("parallel", PARALLEL),
++    ] {
++        for link_mode in links {
++            for (input_name, inputs) in [
++                ("noise", noise_planes(L::WIDTH, 48, 0xC0_4455, 1.0)),
++                ("hostile", hostile_planes(L::WIDTH, 48, 0xBAD_F00D)),
++            ] {
++                for name in VARIANTS {
++                    if !equivalent(name, &params) {
++                        continue;
++                    }
++                    // DualMono-only structures are compared on DualMono only.
++                    if (name.contains("dm") || name.contains("lean") || name.contains("split"))
++                        && !matches!(link_mode, LinkMode::DualMono)
++                    {
++                        continue;
++                    }
++                    let mut real = DiagBank::<L>::new(metadata(link_mode), params);
++                    let words = real.words();
++                    let mut state = [L::zero(); 2];
++                    let mut hard = 0;
++                    let mut nan_payload = 0;
++                    let mut state_mismatch = 0;
++                    for (source_left, source_right) in &inputs {
++                        let (mut a_left, mut a_right) = (source_left.clone(), source_right.clone());
++                        let (mut b_left, mut b_right) = (source_left.clone(), source_right.clone());
++                        real.kernel(&mut a_left, &mut a_right, FRAMES);
++                        dispatch::<L>(name, &mut b_left, &mut b_right, &words, &mut state, link_mode);
++                        let (h1, n1) = compare_words(&a_left, &b_left);
++                        let (h2, n2) = compare_words(&a_right, &b_right);
++                        hard += h1 + h2;
++                        nan_payload += n1 + n2;
++                        let (real_left, real_right) = real.state_bits();
++                        let mut replica_left = [0_u32; 8];
++                        let mut replica_right = [0_u32; 8];
++                        state[0].store_bits(&mut replica_left[..L::WIDTH]);
++                        state[1].store_bits(&mut replica_right[..L::WIDTH]);
++                        if real_left != replica_left || real_right != replica_right {
++                            state_mismatch += 1;
++                        }
++                        // Mirror the boundary policy on both sides so state stays comparable.
++                        let flag_real = real.finish(&mut a_left, &mut a_right);
++                        let flag_replica = {
++                            let mut flag = 0;
++                            for (plane, index) in [(&mut b_left, 0), (&mut b_right, 1)] {
++                                let bad = plane.iter().any(|x| !(x.abs() < 1.0e30));
++                                if bad {
++                                    plane.fill(0.0);
++                                    state[index] = L::zero();
++                                    flag |= 1;
++                                }
++                            }
++                            flag
++                        };
++                        let _ = (flag_real, flag_replica);
++                        let (h3, n3) = compare_words(&a_left, &b_left);
++                        let (h4, n4) = compare_words(&a_right, &b_right);
++                        if h3 + h4 != 0 {
++                            hard += h3 + h4;
++                        }
++                        let _ = n3 + n4;
++                    }
++                    let verdict = if hard == 0 && state_mismatch == 0 { "ok" } else { "MISMATCH" };
++                    if verdict != "ok" {
++                        ok = false;
++                    }
++                    println!(
++                        "{label} {params_name:<11} {link_mode:?} {input_name:<7} {name:<16} {verdict} (non-NaN mismatches {hard}, NaN-payload-only {nan_payload}, state mismatches {state_mismatch})"
++                    );
++                }
++            }
++        }
++    }
++    ok
++}
++
++// ---------------------------------------------------------------------------------------------
+\ No newline at end of file
+diff --git a/crates/compressor/src/lib.rs b/crates/compressor/src/lib.rs
+index ddcd9140..114716a5 100644
+--- a/crates/compressor/src/lib.rs
++++ b/crates/compressor/src/lib.rs
+@@ -1151,6 +1151,97 @@ fn offsets_are_ordered(offsets: &[u32], spans: usize) -> bool {
+     true
+ }
+ 
++/// DIAGNOSIS ONLY (docs/handoffs/effects-2026-09-27): exposes the kernel at any lane width.
++#[doc(hidden)]
++pub mod diag {
++    use super::{Instance, Lane, MAX_WIDTH, PARAMETER_COUNT, kernel};
++    use effect_contract::{LinkMode, PreparedEffectMetadata};
++
++    /// Which settled-body prototype the kernel runs, read once per block. 0 is today's body.
++    /// Bit 0: loop hygiene (chunks, local state, detector hoisted); bit 1: DualMono link arm;
++    /// bit 2: all-wet output arm; bit 3: two-pass (targets first, 32-frame chunks).
++    pub static MODE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
++
++    /// Sets [`MODE`].
++    pub fn set_mode(mode: u8) {
++        MODE.store(mode, core::sync::atomic::Ordering::Relaxed);
++    }
++
++    /// One prepared instance at width `L`, driven without the bank contract.
++    pub struct DiagBank<L: Lane> {
++        instance: Instance<L>,
++    }
++
++    impl<L: Lane> DiagBank<L> {
++        /// Builds an instance whose every lane and channel carries `values`.
++        pub fn new(metadata: PreparedEffectMetadata, values: [f32; PARAMETER_COUNT]) -> Self {
++            let defaults = [values; MAX_WIDTH];
++            Self {
++                instance: Instance::new(metadata, &defaults, &defaults),
++            }
++        }
++
++        /// The whole `Instance::render` path: admission, kernel, boundary scan.
++        pub fn render(&mut self, left: &mut [f32], right: &mut [f32], frames: usize) {
++            self.instance
++                .render(left, right, kernel::Detector::Main, frames, |_, _, _| {});
++        }
++
++        /// The kernel alone.
++        pub fn kernel(&mut self, left: &mut [f32], right: &mut [f32], frames: usize) {
++            let metadata = self.instance.metadata;
++            kernel::process_block::<L>(
++                left,
++                right,
++                kernel::Detector::Main,
++                frames,
++                metadata.link_mode,
++                metadata.bypass,
++                metadata.sample_rate,
++                (&mut self.instance.left, &mut self.instance.right),
++            );
++        }
++
++        /// The collapsed (mono) kernel alone.
++        pub fn kernel_mono(&mut self, left: &mut [f32], frames: usize) {
++            let metadata = self.instance.metadata;
++            kernel::process_block_mono::<L>(
++                left,
++                kernel::Detector::Main,
++                frames,
++                metadata.link_mode,
++                metadata.bypass,
++                metadata.sample_rate,
++                &mut self.instance.left,
++            );
++        }
++
++        /// The two boundary scans alone.
++        pub fn finish(&mut self, left: &mut [f32], right: &mut [f32]) -> u32 {
++            kernel::finish_channel::<L>(left, &mut self.instance.left)
++                | kernel::finish_channel::<L>(right, &mut self.instance.right)
++        }
++
++        /// Overrides the link mode (diagnosis of the link specialisation).
++        pub fn set_link(&mut self, link: LinkMode) {
++            self.instance.metadata.link_mode = link;
++        }
++
++        /// The designed coefficient words, left then right.
++        pub fn words(&self) -> ([[f32; MAX_WIDTH]; 8], [[f32; MAX_WIDTH]; 8]) {
++            (self.instance.left.words, self.instance.right.words)
++        }
++
++        /// The recursive words, left then right.
++        pub fn state_bits(&self) -> ([u32; MAX_WIDTH], [u32; MAX_WIDTH]) {
++            (
++                self.instance.left.recursive_bits(),
++                self.instance.right.recursive_bits(),
++            )
++        }
++    }
++}
++
+ #[cfg(test)]
+ mod width_state_tests {
+     use super::{Channel, Detector, Lane, Simd4, Simd8, kernel, state};
+diff --git a/tools/compressor-diag-guest/Cargo.toml b/tools/compressor-diag-guest/Cargo.toml
+new file mode 100644
+index 00000000..ecde77fe
+--- /dev/null
++++ b/tools/compressor-diag-guest/Cargo.toml
+@@ -0,0 +1,23 @@
++[package]
++name = "compressor-diag-guest"
++version.workspace = true
++license.workspace = true
++edition.workspace = true
++rust-version.workspace = true
++publish.workspace = true
++
++# DIAGNOSIS ONLY (docs/handoffs/effects-2026-09-27/COMPRESSOR-DIAGNOSIS.md): the compressor
++# kernel and its replicas as a wasm module that Node's V8 instantiates.
++[lib]
++name = "compressor_diag_guest"
++crate-type = ["cdylib"]
++
++[dependencies]
++compressor.workspace = true
++effect-contract.workspace = true
++effect-runtime.workspace = true
++lane.workspace = true
++math = { workspace = true, features = ["lane"] }
++
++[lints]
++workspace = true
+diff --git a/tools/compressor-diag-guest/host/README.md b/tools/compressor-diag-guest/host/README.md
+new file mode 100644
+index 00000000..84be4bda
+--- /dev/null
++++ b/tools/compressor-diag-guest/host/README.md
+@@ -0,0 +1,33 @@
++# Compressor diagnosis harness (DIAGNOSIS ONLY, never merged)
++
++Recorded in `docs/handoffs/effects-2026-09-27/compressor-diagnosis-harness.patch`; applies to
++`6ca203f8` (`codex/batch-plumbing-floor-2`). The prototypes patch applies on top of it.
++
++Build outside the timing lock, run pinned inside it:
++
++```text
++T=<scratch>/target; W=<scratch>/target-wasm
++CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=$T cargo build --release -p compressor --example diag_kernel
++CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=$T cargo build --release -p compressor --example diag_probe
++CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=$T cargo test --release -p console-workload --test compressor_diag --no-run
++CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=$W RUSTFLAGS="-C target-feature=+simd128" \
++  cargo build --release --target wasm32-unknown-unknown -p compressor-diag-guest -p wasm-console-guest
++
++$T/release/examples/diag_kernel verify [mode]     # replicas vs the real kernel, hostile inputs
++$T/release/examples/diag_kernel verify_mono       # mono prototypes vs mono base
++taskset -c 31 $T/release/examples/diag_kernel time [filter]
++taskset -c 31 $T/release/examples/diag_probe      # Zen 3 pipe-sharing probe
++DIAG_DISPATCH=8 DIAG_MODES=0,1,5,9,13,15 taskset -c 31 $T/release/deps/compressor_diag-* \
++  --ignored --nocapture --test-threads 1 rows      # DIAG_ROW=mono|console for other rows
++DIAG_MODE=15 $T/release/deps/compressor_diag-* --ignored --nocapture --test-threads 1 digests
++DIAG_SOURCE_OUT=source.bin $T/release/deps/compressor_diag-* --ignored --test-threads 1 dump_sources
++taskset -c 31 node --no-liftoff node_host.mjs $W/wasm32-unknown-unknown/release/compressor_diag_guest.wasm time
++taskset -c 31 node --no-liftoff node_console.mjs $W/wasm32-unknown-unknown/release/wasm_console_guest.wasm \
++  source.bin 0,1,5,9,13,15 5 6
++node --no-liftoff --print-wasm-code -e '...' | python3 v8_loops.py - <function index>
++```
++
++Kernel prototype modes (`compressor::diag::MODE`, read once per block): 0 today's body; bit 0
++loop hygiene (always on when nonzero); bit 1 DualMono link arm; bit 2 all-wet output arm; bit 3
++two-pass (targets first, 32-frame chunks). 15 is all four. 31 / 47 are the two-pass body's pass 1
++alone / pass 2 alone (diagnosis only).
+diff --git a/tools/compressor-diag-guest/host/classify.py b/tools/compressor-diag-guest/host/classify.py
+new file mode 100644
+index 00000000..6b07dc47
+--- /dev/null
++++ b/tools/compressor-diag-guest/host/classify.py
+@@ -0,0 +1,42 @@
++import sys, re
++
++# usage: classify.py file start_hex end_hex [a-b ...]  (address ranges on the executed path)
++f, start, end = sys.argv[1], int(sys.argv[2], 16), int(sys.argv[3], 16)
++extra = [(int(a, 16), int(b, 16)) for a, b in (x.split('-') for x in sys.argv[4:])]
++ranges = [(start, end)] + extra
++cats = {}
++lines = []
++for line in open(f):
++    m = re.match(r'\s*([0-9a-f]+):\s+(\S+)\s*(.*)', line)
++    if not m:
++        continue
++    addr = int(m.group(1), 16)
++    op = m.group(2)
++    args = m.group(3)
++    if not any(a <= addr <= b for a, b in ranges):
++        continue
++    if op.startswith('data16') or op.startswith('nop') or op.startswith('cs'):
++        continue
++    memarg = '(' in args
++    if op in ('vbroadcastss', 'vbroadcastsd', 'vpbroadcastd'):
++        c = 'broadcast'
++    elif op in ('vmovups', 'vmovaps', 'vmovss', 'vinsertps', 'vmovdqu', 'vmovdqa',
++                'vextractf128', 'vinsertf128', 'vperm2f128', 'movups', 'movaps', 'movss'):
++        c = 'vec-mem-move' if memarg else 'vec-reg-move'
++    elif op.startswith('v'):
++        c = 'vec-alu'
++        if memarg:
++            cats['  (vec-alu with mem operand)'] = cats.get('  (vec-alu with mem operand)', 0) + 1
++    else:
++        c = 'scalar'
++    cats[c] = cats.get(c, 0) + 1
++    lines.append((c, op))
++tot = sum(v for k, v in cats.items() if not k.startswith(' '))
++for k in sorted(cats):
++    print(f"{k:32s}{cats[k]:5d}")
++print(f"{'total':32s}{tot:5d}")
++ops = {}
++for c, op in lines:
++    if c == 'vec-alu':
++        ops[op] = ops.get(op, 0) + 1
++print(sorted(ops.items(), key=lambda x: -x[1]))
+diff --git a/tools/compressor-diag-guest/host/node_console.mjs b/tools/compressor-diag-guest/host/node_console.mjs
+new file mode 100644
+index 00000000..3c1c585f
+--- /dev/null
++++ b/tools/compressor-diag-guest/host/node_console.mjs
+@@ -0,0 +1,76 @@
++// DIAGNOSIS ONLY: the wasm console guest's compressor_only and builtins_only rows under Node's V8,
++// with the compressor kernel prototype mode switched on the same instance between rounds.
++// usage: node [--no-liftoff] node_console.mjs <wasm_console_guest.wasm> <source.bin> [modes] [row] [control]
++import { readFileSync } from 'node:fs';
++import { loadavg } from 'node:os';
++
++const [, , path, sourcePath, modesArg = '0', rowArg = '5', controlArg = '6'] = process.argv;
++const modes = modesArg.split(',').map(Number);
++const row = Number(rowArg);
++const control = Number(controlArg);
++const source = new Uint32Array(readFileSync(sourcePath).buffer.slice(0));
++const module = new WebAssembly.Module(readFileSync(path));
++const TRACKS = 64;
++const SOURCE_BLOCK_VALUES = 256;
++const LANE_SAMPLES = TRACKS * 128 * 2;
++const WARMUP = 512;
++const ROUND_BLOCKS = 2000;
++const ROUNDS = 5;
++
++function instance(index, mode) {
++  const x = new WebAssembly.Instance(module, {}).exports;
++  if (x.miso_console_backend() !== 1) throw new Error('not Simd4');
++  x.miso_console_diag_mode(mode);
++  x.miso_console_reset_source();
++  for (let i = 0; i < TRACKS * SOURCE_BLOCK_VALUES; i++) x.miso_console_push_source_word(source[i]);
++  if (x.miso_console_prepare(index) !== 1) throw new Error(`prepare ${index}`);
++  return x;
++}
++
++function digest(index, mode, blocks = 64) {
++  const x = instance(index, mode);
++  for (let b = 0; b < blocks; b++) {
++    if (x.miso_console_render(b) !== 1) throw new Error('render');
++    x.miso_console_hash_output();
++  }
++  x.miso_console_finish_digest();
++  let hex = '';
++  for (let w = 0; w < 8; w++) hex += (x.miso_console_digest_word(w) >>> 0).toString(16).padStart(8, '0');
++  return hex;
++}
++
++const median = (v) => [...v].sort((a, b) => a - b)[Math.floor(v.length / 2)];
++function round(arm) {
++  const samples = new Array(ROUND_BLOCKS);
++  for (let i = 0; i < ROUND_BLOCKS; i++) {
++    const start = process.hrtime.bigint();
++    arm.x.miso_console_render(arm.observation++);
++    samples[i] = Number(process.hrtime.bigint() - start);
++  }
++  return median(samples);
++}
++
++const comp = { x: instance(row, 0), observation: 0 };
++const ctrl = { x: instance(control, 0), observation: 0 };
++for (const arm of [comp, ctrl]) {
++  for (let i = 0; i < WARMUP; i++) arm.x.miso_console_render(arm.observation++);
++}
++const p50 = new Map(modes.map((m) => [m, []]));
++const ctrlP50 = [];
++for (let r = 0; r < ROUNDS; r++) {
++  for (const m of modes) {
++    comp.x.miso_console_diag_mode(m);
++    round(comp); // one untimed round after a switch
++    p50.get(m).push(round(comp));
++  }
++  ctrlP50.push(round(ctrl));
++}
++const hz = Number(process.env.CORE_HZ || '3.70e9');
++const c = median(ctrlP50);
++console.log(`== wasm console row ${row} vs control ${control} under Node ${process.version} (${process.execArgv.join(' ') || 'default tiering'}), loadavg ${loadavg().map((v) => v.toFixed(2)).join(' ')}`);
++console.log(`  control p50 per round [${ctrlP50.join(', ')}] ns; median ${c}; digest64 ${digest(control, 0)}`);
++for (const m of modes) {
++  const v = median(p50.get(m));
++  const d = v - c;
++  console.log(`  mode ${String(m).padStart(2)}: p50 per round [${p50.get(m).join(', ')}] ns; median ${v} ns; isolate ${d} ns = ${((d * hz) / 1e9 / LANE_SAMPLES).toFixed(3)} c/ls; digest64 ${digest(row, m)}`);
++}
+diff --git a/tools/compressor-diag-guest/host/node_host.mjs b/tools/compressor-diag-guest/host/node_host.mjs
+new file mode 100644
+index 00000000..b1f89504
+--- /dev/null
++++ b/tools/compressor-diag-guest/host/node_host.mjs
+@@ -0,0 +1,87 @@
++// DIAGNOSIS ONLY: time the compressor diag guest under Node's V8.
++// usage: node [--no-liftoff] node_host.mjs <guest.wasm> <verify|time> [filter] [params]
++import { readFileSync } from 'node:fs';
++import { loadavg } from 'node:os';
++
++const [, , path, mode = 'time', filter = '', paramsArg = '0'] = process.argv;
++const bytes = readFileSync(path);
++const module = new WebAssembly.Module(bytes);
++const imports = WebAssembly.Module.imports(module);
++if (imports.length !== 0) {
++  console.error('unexpected imports', imports);
++}
++const instance = new WebAssembly.Instance(module, {});
++const x = instance.exports;
++if (x.diag_backend() !== 1) {
++  throw new Error(`backend ${x.diag_backend()} is not Simd4`);
++}
++const names = [];
++for (let i = 0; i < x.diag_variant_count(); i++) {
++  let name = '';
++  const len = x.diag_variant_name_len(i);
++  for (let j = 0; j < len; j++) name += String.fromCharCode(x.diag_variant_name_byte(i, j));
++  names.push(name);
++}
++
++if (mode === 'verify') {
++  x.diag_set_mode(Number(filter || '0'));
++  const ok = x.diag_verify();
++  console.log(`wasm verify: ${ok === 1 ? 'ALL OK' : 'FAILED'}`);
++  process.exit(ok === 1 ? 0 : 1);
++}
++
++const FRAMES = 128;
++const LANES = 4;
++const BLOCKS_PER_CALL = 64;
++const CALLS = 48;
++const ROUNDS = 3;
++const params = Number(paramsArg);
++
++const MODES = (process.env.MODES || '1,3,5,7,9,11,13,15').split(',').map(Number);
++const arms = [
++  ['empty', 0, 0],
++  ['real_render', 1, 0],
++  ['real_kernel', 2, 0],
++  ...MODES.map((m) => [`real_kernel_m${m}`, 2, m]),
++  ['real_render_m15', 1, 15],
++  ['real_bank', 1000, 0],
++  ['real_bank_m15', 1000, 15],
++  ['real_bank_ramp_p0', 1002, 0],
++  ['real_bank_ramp1lane_p0', 1003, 0],
++  ...[0, 1, 5, 9, 13, 15].map((m) => [`real_mono_m${m}`, 1001, m]),
++  ...names.map((name, i) => [name, 3 + i, 0]),
++].filter(([name]) => !filter || name === 'empty' || name.startsWith('real') || name.includes(filter));
++
++function median(values) {
++  const sorted = [...values].sort((a, b) => a - b);
++  return sorted[Math.floor(sorted.length / 2)];
++}
++
++const results = new Map(arms.map(([name]) => [name, []]));
++for (let round = 0; round < ROUNDS; round++) {
++  for (const [name, which, mode] of arms) {
++    x.diag_set_mode(mode);
++    if (x.diag_prepare(which, params) !== 1) throw new Error(`prepare ${name}`);
++    for (let w = 0; w < 8; w++) x.diag_run(BLOCKS_PER_CALL);
++    const samples = [];
++    for (let c = 0; c < CALLS; c++) {
++      const start = process.hrtime.bigint();
++      x.diag_run(BLOCKS_PER_CALL);
++      const end = process.hrtime.bigint();
++      samples.push(Number(end - start) / BLOCKS_PER_CALL);
++    }
++    results.get(name).push(median(samples));
++  }
++}
++const hz = Number(process.env.CORE_HZ || '3.70e9');
++const empty = median(results.get('empty'));
++console.log(`== wasm simd128 under Node ${process.version} (${process.execArgv.join(' ') || 'default tiering'}), params ${params}; ns per block per round, net of the copy-only arm; clock ${hz / 1e9} GHz (native calibration); loadavg ${loadavg().map((v) => v.toFixed(2)).join(' ')}`);
++for (const [name] of arms) {
++  const rounds = results.get(name);
++  const m = median(rounds);
++  const net = name === 'empty' ? m : m - empty;
++  const cycles = (net * hz) / 1e9;
++  console.log(
++    `  ${name.padEnd(20)} [${rounds.map((v) => v.toFixed(0)).join(', ')}]  net ${net.toFixed(0).padStart(6)} ns  ${(cycles / (FRAMES * 2)).toFixed(2).padStart(7)} c/channel-frame  ${(cycles / (FRAMES * 2 * LANES)).toFixed(3).padStart(7)} c/lane-sample`,
++  );
++}
+diff --git a/tools/compressor-diag-guest/host/v8_loops.py b/tools/compressor-diag-guest/host/v8_loops.py
+new file mode 100644
+index 00000000..276152a0
+--- /dev/null
++++ b/tools/compressor-diag-guest/host/v8_loops.py
+@@ -0,0 +1,64 @@
++import re, sys
++from collections import Counter
++
++# usage: v8_loops.py listing.txt index [index ...]
++path = sys.argv[1]
++wanted = [int(x) for x in sys.argv[2:]]
++text = open(path).read().split('\n')
++funcs = {}
++cur = None
++name = None
++for line in text:
++    if line.startswith('name: '):
++        name = line[6:]
++    elif line.startswith('index: '):
++        cur = int(line[7:])
++        funcs[cur] = (name, [])
++    elif cur is not None:
++        m = re.match(r'^0x[0-9a-f]+\s+([0-9a-f]+)\s+[0-9a-f]+\s+(.*)$', line)
++        if m:
++            off = int(m.group(1), 16)
++            ins = m.group(2).strip()
++            funcs[cur][1].append((off, ins))
++
++
++def cat(ins):
++    op = ins.replace('REX.W ', '').split()[0]
++    if op.startswith('v'):
++        op = op[1:]
++    mem = '[' in ins
++    if op in ('movaps', 'movups', 'movdqu', 'movdqa', 'movss', 'movd', 'movq') and ('xmm' in ins):
++        return 'xmm move/load/store' + (' (mem)' if mem else ' (reg)')
++    if 'xmm' in ins:
++        return 'xmm alu' + (' +mem' if mem else '')
++    if op.startswith('j'):
++        return 'branch'
++    return 'scalar' + (' mem' if mem else '')
++
++
++for index in wanted:
++    if index not in funcs:
++        print('missing', index)
++        continue
++    name, code = funcs[index]
++    offs = [o for o, _ in code]
++    loops = []
++    for i, (o, ins) in enumerate(code):
++        m = re.match(r'^(j\w+)\s+0x[0-9a-f]+\s+<\+0x([0-9a-f]+)>', ins)
++        if m:
++            target = int(m.group(2), 16)
++            if target < o:
++                loops.append((target, o))
++    # innermost = smallest range containing no other loop; take the largest of those
++    inner = [l for l in loops if not any(l2 != l and l[0] <= l2[0] and l2[1] <= l[1] for l2 in loops)]
++    for best in sorted(inner):
++        body = [(o, ins) for o, ins in code if best[0] <= o <= best[1]]
++        if len(body) < 20:
++            continue
++        c = Counter(cat(ins) for _, ins in body)
++        ops = Counter(ins.replace('REX.W ', '').split()[0] for _, ins in body if 'xmm' in ins)
++        short = re.sub(r'_R.*replicas\d+', '', name)[:40]
++        print(f'[{index}] {short}: loop {best[0]:#x}-{best[1]:#x}, {len(body)} instructions')
++        for k in sorted(c):
++            print(f'    {k:28s}{c[k]:5d}')
++        print('    top xmm ops:', ops.most_common(16))
+diff --git a/tools/compressor-diag-guest/host/v8_slots.py b/tools/compressor-diag-guest/host/v8_slots.py
+new file mode 100644
+index 00000000..f7bbf0f4
+--- /dev/null
++++ b/tools/compressor-diag-guest/host/v8_slots.py
+@@ -0,0 +1,48 @@
++import re, sys
++from collections import defaultdict
++
++# usage: v8_slots.py listing.txt index : for the innermost loop, list stack slots written and read.
++path, index = sys.argv[1], int(sys.argv[2])
++text = open(path).read().split('\n')
++code = []
++cur = None
++for line in text:
++    if line.startswith('index: '):
++        cur = int(line[7:])
++    elif cur == index:
++        m = re.match(r'^0x[0-9a-f]+\s+([0-9a-f]+)\s+[0-9a-f]+\s+(.*)$', line)
++        if m:
++            code.append((int(m.group(1), 16), m.group(2).strip()))
++loops = []
++for o, ins in code:
++    m = re.match(r'^(j\w+)\s+0x[0-9a-f]+\s+<\+0x([0-9a-f]+)>', ins)
++    if m and int(m.group(2), 16) < o:
++        loops.append((int(m.group(2), 16), o))
++inner = [l for l in loops if not any(l2 != l and l[0] <= l2[0] and l2[1] <= l[1] for l2 in loops)]
++best = max(inner, key=lambda l: l[1] - l[0])
++body = [(o, ins) for o, ins in code if best[0] <= o <= best[1]]
++writes = defaultdict(list)
++reads = defaultdict(list)
++for pos, (o, ins) in enumerate(body):
++    ins2 = ins.replace('REX.W ', '')
++    m = re.match(r'^(\w+)\s+(.*)$', ins2)
++    if not m:
++        continue
++    op, args = m.group(1), m.group(2)
++    slots = re.findall(r'\[rbp[+-]0x[0-9a-f]+\]|\[rsp[+-]0x[0-9a-f]+\]|\[rsp\]', args)
++    if not slots:
++        continue
++    first = args.split(',')[0]
++    for s in slots:
++        if op.startswith('vmov') and s in first:
++            writes[s].append(pos)
++        else:
++            reads[s].append(pos)
++print(f'loop {best[0]:#x}-{best[1]:#x}: {len(body)} instructions')
++carried = []
++for s in sorted(set(writes) | set(reads)):
++    w, r = writes.get(s, []), reads.get(s, [])
++    kind = 'rw' if w and r else ('w' if w else 'r')
++    # loop-carried: read before the first write in program order
++    lc = bool(w and r and min(r) < min(w))
++    print(f'  {s:14s} {kind:3s} writes@{w} reads@{r}{"  LOOP-CARRIED" if lc else ""}')
+diff --git a/tools/compressor-diag-guest/host/wasm_loops.py b/tools/compressor-diag-guest/host/wasm_loops.py
+new file mode 100644
+index 00000000..fe4423a3
+--- /dev/null
++++ b/tools/compressor-diag-guest/host/wasm_loops.py
+@@ -0,0 +1,71 @@
++import re, sys
++from collections import Counter
++
++# usage: wasm_loops.py guest.dis func_index [func_index ...]
++path = sys.argv[1]
++wanted = set(int(x) for x in sys.argv[2:])
++funcs = {}
++current = None
++for line in open(path):
++    m = re.match(r'^[0-9a-f]+ func\[(\d+)\] <(.*)>:', line)
++    if m:
++        current = int(m.group(1))
++        funcs[current] = (m.group(2), [])
++        continue
++    if current is None:
++        continue
++    if '|' in line:
++        op = line.split('|', 1)[1].strip()
++        if op:
++            funcs[current][1].append(op)
++
++
++def classify(op):
++    name = op.split()[0]
++    if name.startswith('f32x4.') or name.startswith('i32x4.') or name.startswith('v128.') or name.startswith('i8x16') or name.startswith('i16x8') or name.startswith('i64x2') or name.startswith('f64x2'):
++        if name in ('v128.load', 'v128.store') or name.startswith('v128.load') or name.startswith('v128.store'):
++            return 'v128 load/store'
++        if name == 'v128.const':
++            return 'v128.const'
++        if 'splat' in name:
++            return 'splat'
++        return 'simd arithmetic'
++    if name.startswith('local.') or name.startswith('global.'):
++        return 'local/global'
++    if 'load' in name or 'store' in name:
++        return 'scalar load/store'
++    if name in ('br', 'br_if', 'br_table', 'loop', 'block', 'end', 'if', 'else', 'return', 'unreachable', 'call', 'select'):
++        return 'control'
++    return 'scalar alu'
++
++
++for index in sorted(wanted):
++    name, ops = funcs[index]
++    # find innermost loops
++    stack = []
++    loops = []
++    for i, op in enumerate(ops):
++        head = op.split()[0]
++        if head in ('block', 'loop', 'if'):
++            stack.append((head, i, []))
++        elif head == 'end':
++            if not stack:
++                continue
++            kind, start, children = stack.pop()
++            if kind == 'loop':
++                loops.append((start, i, any(c for c in children)))
++                if stack:
++                    stack[-1][2].append(True)
++            else:
++                if stack and any(children):
++                    stack[-1][2].append(True)
++    innermost = [(s, e) for s, e, nested in loops if not nested]
++    s, e = max(innermost, key=lambda r: r[1] - r[0])
++    body = ops[s:e + 1]
++    c = Counter(classify(op) for op in body)
++    simd = Counter(op.split()[0] for op in body if classify(op) == 'simd arithmetic')
++    short = re.sub(r'_R.*replicas\d+', '', name)[:60]
++    print(f'func[{index}] {short}: loop of {len(body)} ops')
++    for k in sorted(c):
++        print(f'    {k:20s}{c[k]:5d}')
++    print('    top simd:', simd.most_common(14))
+diff --git a/tools/compressor-diag-guest/host/x86_loops.py b/tools/compressor-diag-guest/host/x86_loops.py
+new file mode 100644
+index 00000000..27715263
+--- /dev/null
++++ b/tools/compressor-diag-guest/host/x86_loops.py
+@@ -0,0 +1,40 @@
++import re, subprocess, sys
++from collections import Counter
++
++# usage: x86_loops.py binary start_hex size_hex : classify every innermost loop of one function.
++binary, start, size = sys.argv[1], int(sys.argv[2], 16), int(sys.argv[3], 16)
++out = subprocess.run(['objdump', '-d', '--no-show-raw-insn', '-C', f'--start-address={start}',
++                      f'--stop-address={start + size}', binary], capture_output=True, text=True).stdout
++code = []
++for line in out.split('\n'):
++    m = re.match(r'\s*([0-9a-f]+):\s+(\S+)\s*(.*)', line)
++    if m:
++        code.append((int(m.group(1), 16), m.group(2), m.group(3)))
++loops = []
++for addr, op, args in code:
++    if op.startswith('j'):
++        m = re.match(r'([0-9a-f]+)\s', args)
++        if m and int(m.group(1), 16) < addr:
++            loops.append((int(m.group(1), 16), addr))
++inner = [l for l in loops if not any(l2 != l and l[0] <= l2[0] and l2[1] <= l[1] for l2 in loops)]
++
++
++def cat(op, args):
++    mem = '(' in args
++    if op in ('vbroadcastss', 'vbroadcastsd', 'vpbroadcastd'):
++        return 'broadcast'
++    if op in ('vmovups', 'vmovaps', 'vmovss', 'vmovdqu', 'vmovdqa'):
++        return 'vec move (mem)' if mem else 'vec move (reg)'
++    if op.startswith('v'):
++        return 'vec alu' + (' +mem' if mem else '')
++    return 'scalar'
++
++
++for lo, hi in sorted(inner):
++    body = [(op, args) for addr, op, args in code if lo <= addr <= hi and not op.startswith(('nop', 'data16', 'cs'))]
++    if len(body) < 20:
++        continue
++    c = Counter(cat(op, args) for op, args in body)
++    print(f'loop {lo:#x}-{hi:#x}: {len(body)} instructions')
++    for k in sorted(c):
++        print(f'    {k:20s}{c[k]:5d}')
+diff --git a/tools/compressor-diag-guest/src/lib.rs b/tools/compressor-diag-guest/src/lib.rs
+new file mode 100644
+index 00000000..b49df53d
+--- /dev/null
++++ b/tools/compressor-diag-guest/src/lib.rs
+@@ -0,0 +1,156 @@
++//! DIAGNOSIS ONLY (docs/handoffs/effects-2026-09-27/COMPRESSOR-DIAGNOSIS.md).
++//!
++//! The compressor kernel at the wasm build's own width (`Simd4` under `+simd128`) and the
++//! replicas of `crates/compressor/examples/diag_support/replicas.rs`, as `u32`-in/`u32`-out
++//! exports. The host holds the clock around `run`, which renders `blocks` blocks of one arm.
++#![allow(unsafe_code, missing_docs, clippy::all)]
++
++#[path = "../../../crates/compressor/examples/diag_support/replicas.rs"]
++mod replicas;
++
++use compressor::diag::DiagBank;
++use effect_contract::LinkMode;
++use lane::{Backend, Lane};
++use replicas::*;
++use std::sync::Mutex;
++
++type W = lane::Simd4;
++
++struct Arm {
++    real: DiagBank<W>,
++    words: (Words, Words),
++    state: [W; 2],
++    source: (Vec<f32>, Vec<f32>),
++    left: Vec<f32>,
++    right: Vec<f32>,
++    bank: Option<BankArm>,
++    /// `usize::MAX - 3` public bank contract, `usize::MAX - 2` empty, `usize::MAX - 1` real render, `usize::MAX` real kernel, else a
++    /// replica index.
++    which: usize,
++}
++
++static ARM: Mutex<Option<Arm>> = Mutex::new(None);
++
++#[unsafe(no_mangle)]
++pub extern "C" fn diag_backend() -> u32 {
++    match Backend::current() {
++        Backend::Scalar => 0,
++        Backend::Simd4 => 1,
++        Backend::Simd8 => 2,
++    }
++}
++
++#[unsafe(no_mangle)]
++pub extern "C" fn diag_variant_count() -> u32 {
++    VARIANTS.len() as u32
++}
++
++#[unsafe(no_mangle)]
++pub extern "C" fn diag_variant_name_len(index: u32) -> u32 {
++    VARIANTS.get(index as usize).map_or(0, |name| name.len() as u32)
++}
++
++#[unsafe(no_mangle)]
++pub extern "C" fn diag_variant_name_byte(index: u32, at: u32) -> u32 {
++    VARIANTS
++        .get(index as usize)
++        .and_then(|name| name.as_bytes().get(at as usize))
++        .map_or(0, |byte| u32::from(*byte))
++}
++
++/// `which`: 0 empty, 1 real render, 2 real kernel, 3 + i replica i. `params`: 0 fixture,
++/// 1 compressing, 2 parallel.
++#[unsafe(no_mangle)]
++pub extern "C" fn diag_prepare(which: u32, params: u32) -> u32 {
++    let values = match params {
++        0 => FIXTURE,
++        1 => COMPRESSING,
++        _ => PARALLEL,
++    };
++    let real = DiagBank::<W>::new(metadata(LinkMode::DualMono), values);
++    let words = real.words();
++    let source = noise_planes(W::WIDTH, 1, 0x5EED_0003, 0.5).remove(0);
++    let which = match which {
++        1000 => usize::MAX - 3,
++        1001 => usize::MAX - 4,
++        1002 => usize::MAX - 5,
++        1003 => usize::MAX - 6,
++        0 => usize::MAX - 2,
++        1 => usize::MAX - 1,
++        2 => usize::MAX,
++        n => (n - 3) as usize,
++    };
++    if which < usize::MAX - 6 && which >= VARIANTS.len() {
++        return 0;
++    }
++    *ARM.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arm {
++        real,
++        words,
++        state: [W::zero(); 2],
++        bank: BankArm::new(values),
++        left: source.0.clone(),
++        right: source.1.clone(),
++        source,
++        which,
++    });
++    1
++}
++
++/// Renders `blocks` blocks of the prepared arm, each from a fresh copy of the source.
++#[unsafe(no_mangle)]
++pub extern "C" fn diag_run(blocks: u32) -> u32 {
++    let mut guard = ARM.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
++    let Some(arm) = guard.as_mut() else {
++        return 0;
++    };
++    for _ in 0..blocks {
++        arm.left.copy_from_slice(&arm.source.0);
++        arm.right.copy_from_slice(&arm.source.1);
++        match arm.which {
++            w if w == usize::MAX - 4 => arm.real.kernel_mono(&mut arm.left, FRAMES),
++            w if w == usize::MAX - 5 => {
++                if let Some(bank) = arm.bank.as_mut() {
++                    bank.process_ramp(&mut arm.left, &mut arm.right, 0);
++                }
++            }
++            w if w == usize::MAX - 6 => {
++                if let Some(bank) = arm.bank.as_mut() {
++                    bank.process_ramp_lanes(&mut arm.left, &mut arm.right, 0, 1);
++                }
++            }
++            w if w == usize::MAX - 3 => {
++                if let Some(bank) = arm.bank.as_mut() {
++                    bank.process(&mut arm.left, &mut arm.right);
++                }
++            }
++            w if w == usize::MAX - 2 => {}
++            w if w == usize::MAX - 1 => arm.real.render(&mut arm.left, &mut arm.right, FRAMES),
++            w if w == usize::MAX => arm.real.kernel(&mut arm.left, &mut arm.right, FRAMES),
++            index => dispatch::<W>(
++                VARIANTS[index],
++                &mut arm.left,
++                &mut arm.right,
++                &arm.words,
++                &mut arm.state,
++                LinkMode::DualMono,
++            ),
++        }
++    }
++    arm.left[0].to_bits() ^ arm.right[FRAMES].to_bits()
++}
++
++/// Runs the replica verification at this build's width and the scalar oracle. `1` if every
++/// equivalent replica matched the real kernel word for word.
++#[unsafe(no_mangle)]
++pub extern "C" fn diag_verify() -> u32 {
++    let a = verify_width::<W>("wasm");
++    let b = verify_width::<f32>("wasm-scalar");
++    u32::from(a && b)
++}
++
++/// Selects the kernel prototype mode (`compressor::diag::MODE`).
++#[unsafe(no_mangle)]
++pub extern "C" fn diag_set_mode(mode: u32) -> u32 {
++    compressor::diag::set_mode(mode as u8);
++    1
++}
+diff --git a/tools/console-workload/Cargo.toml b/tools/console-workload/Cargo.toml
+index 1b327e59..df72a39e 100644
+--- a/tools/console-workload/Cargo.toml
++++ b/tools/console-workload/Cargo.toml
+@@ -31,6 +31,8 @@ session.workspace = true
+ # its unfolded oracle (issue #885). Dev-dependency features are resolved only when this crate's own
+ # tests build, so the bench and the wasm guest that link it as a normal dependency are unaffected.
+ [dev-dependencies]
++# DIAGNOSIS ONLY (compressor prototype mode switch).
++compressor.workspace = true
+ graph = { workspace = true, features = ["test-support"] }
+ 
+ [lints]
+diff --git a/tools/console-workload/tests/compressor_diag.rs b/tools/console-workload/tests/compressor_diag.rs
+new file mode 100644
+index 00000000..3d639c84
+--- /dev/null
++++ b/tools/console-workload/tests/compressor_diag.rs
+@@ -0,0 +1,278 @@
++//! Compressor diagnosis harness (docs/handoffs/effects-2026-09-27/COMPRESSOR-DIAGNOSIS.md).
++//!
++//! Ignored by default: it prints measurements and asserts nothing about time. Build outside the
++//! timing lock, run the binary pinned:
++//!
++//! ```text
++//! CARGO_INCREMENTAL=0 cargo test --release -p console-workload --test compressor_diag --no-run
++//! taskset -c 31 <target>/release/deps/compressor_diag-<hash> --ignored --nocapture \
++//!     --test-threads 1 <rows|digests>
++//! ```
++//!
++//! * `rows` renders `sixty_four_track_compressor_only` and `sixty_four_track_builtins_only`,
++//!   interleaved in rounds, at `Simd8` and at `Simd4` dispatch, and reports p50/min nanoseconds and
++//!   derived cycles per block, the isolate (compressor minus builtins) and the graph phase split.
++//! * `digests` prints the 64-block output digest of every standing console workload at both
++//!   dispatch widths, so a class-A prototype can be checked against the base bits.
++//!
++//! Cycles are derived, not counted: the core clock is calibrated from a dependent chain of scalar
++//! `f32` adds at three cycles each (Zen 3), timed by the same monotonic clock.
++
++use std::hint::black_box;
++use std::time::Instant;
++
++use console_workload::{PlanConfig, QUANTUM, SessionRuntime, WORKLOADS, Workload};
++use graph::test_only_phase_profile as profile;
++use lane::Backend;
++
++const WARMUP_BLOCKS: u64 = 512;
++const ROUND_BLOCKS: usize = 2000;
++const ROUNDS: usize = 5;
++const TRACKS: usize = 64;
++const FADD_LATENCY_CYCLES: f64 = 3.0;
++
++fn core_hz() -> f64 {
++    const ADDS: u64 = 300_000_000;
++    let mut best = f64::MAX;
++    for _ in 0..3 {
++        let mut x = black_box(0.0_f32);
++        let d = black_box(1.0e-3_f32);
++        let start = Instant::now();
++        for _ in 0..ADDS {
++            x += d;
++        }
++        let elapsed = start.elapsed().as_secs_f64();
++        black_box(x);
++        best = best.min(elapsed);
++    }
++    FADD_LATENCY_CYCLES * ADDS as f64 / best
++}
++
++fn loadavg() -> String {
++    std::fs::read_to_string("/proc/loadavg")
++        .unwrap_or_default()
++        .split_whitespace()
++        .take(3)
++        .collect::<Vec<_>>()
++        .join(" ")
++}
++
++struct Arm {
++    name: &'static str,
++    runtime: SessionRuntime,
++    observation: u64,
++    p50: Vec<u64>,
++    min: Vec<u64>,
++}
++
++impl Arm {
++    fn new(name: &'static str, workload: Workload, dispatch: Backend) -> Self {
++        let mut runtime = SessionRuntime::build_with_dispatch(workload, PlanConfig::BASELINE, dispatch);
++        println!(
++            "  {name}: bank_shape [chains, slots] = {:?}, units = {}",
++            runtime.bank_shape(),
++            runtime.unit_eligibility().len(),
++        );
++        let mut observation = 0;
++        for _ in 0..WARMUP_BLOCKS {
++            runtime.render(observation).expect("warmup");
++            observation += 1;
++        }
++        let transposes = runtime.bank_transposes();
++        println!(
++            "  {name}: bank transposes per block = {}",
++            transposes as f64 / WARMUP_BLOCKS as f64
++        );
++        Self {
++            name,
++            runtime,
++            observation,
++            p50: Vec::new(),
++            min: Vec::new(),
++        }
++    }
++
++    fn round(&mut self) {
++        let mut samples = Vec::with_capacity(ROUND_BLOCKS);
++        for _ in 0..ROUND_BLOCKS {
++            let start = Instant::now();
++            let result = self.runtime.render(self.observation);
++            let elapsed = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
++            result.expect("block");
++            self.observation += 1;
++            samples.push(elapsed);
++        }
++        samples.sort_unstable();
++        self.p50.push(samples[samples.len() / 2]);
++        self.min.push(samples[0]);
++    }
++
++    fn profile(&mut self, hz: f64) {
++        profile::enable(true);
++        profile::reset();
++        for _ in 0..ROUND_BLOCKS {
++            self.runtime.render(self.observation).expect("block");
++            self.observation += 1;
++        }
++        profile::enable(false);
++        let (nanos, blocks, probes) = profile::snapshot();
++        let names = [
++            "enter", "source", "bound", "route", "output", "id-copy", "id-alias", "other", "bank",
++            "exit",
++        ];
++        let mut line = format!(
++            "  {} phases ({:.1} probes/block):",
++            self.name,
++            probes as f64 / blocks as f64
++        );
++        for (index, name) in names.iter().enumerate() {
++            let ns = nanos[index] as f64 / blocks as f64;
++            if ns > 0.0 {
++                line.push_str(&format!(" {name} {:.0}c", ns * hz / 1e9));
++            }
++        }
++        println!("{line}");
++    }
++}
++
++fn median(values: &[u64]) -> f64 {
++    let mut sorted = values.to_vec();
++    sorted.sort_unstable();
++    sorted[sorted.len() / 2] as f64
++}
++
++fn rows_at(dispatch: Backend, hz: f64) {
++    println!("== dispatch {dispatch:?}, loadavg {}", loadavg());
++    let modes: Vec<u8> = std::env::var("DIAG_MODES")
++        .unwrap_or_else(|_| "0".into())
++        .split(',')
++        .map(|m| m.parse().expect("mode"))
++        .collect();
++    let mut arms = [
++        match std::env::var("DIAG_ROW").as_deref() {
++            Ok("mono") => Arm::new("console_mono", Workload::SixtyFourTrackConsoleMono, dispatch),
++            Ok("console") => Arm::new("console", Workload::SixtyFourTrackConsole, dispatch),
++            _ => Arm::new(
++                "compressor_only",
++                Workload::SixtyFourTrackCompressorOnly,
++                dispatch,
++            ),
++        },
++        Arm::new("builtins_only", Workload::SixtyFourTrackBuiltinsOnly, dispatch),
++    ];
++    let mut by_mode: Vec<Vec<u64>> = vec![Vec::new(); modes.len()];
++    for _ in 0..ROUNDS {
++        for (index, mode) in modes.iter().enumerate() {
++            compressor::diag::set_mode(*mode);
++            arms[0].round();
++            arms[0].p50.pop();
++            arms[0].min.pop();
++            arms[0].round();
++            by_mode[index].push(*arms[0].p50.last().expect("p50"));
++        }
++        compressor::diag::set_mode(0);
++        arms[1].round();
++    }
++    let lane_samples_m = (TRACKS * QUANTUM * 2) as f64;
++    for (index, mode) in modes.iter().enumerate() {
++        let deltas: Vec<i64> = by_mode[index]
++            .iter()
++            .zip(&arms[1].p50)
++            .map(|(a, b)| *a as i64 - *b as i64)
++            .collect();
++        let mut sorted = deltas.clone();
++        sorted.sort_unstable();
++        let delta = sorted[sorted.len() / 2] as f64;
++        println!(
++            "  mode {mode:>2}: compressor_only p50 per round {:?} ns; isolate median {delta:.0} ns = {:.3} c/ls",
++            by_mode[index],
++            delta * hz / 1e9 / lane_samples_m
++        );
++    }
++    let lane_samples = (TRACKS * QUANTUM * 2) as f64;
++    for arm in &arms {
++        println!(
++            "  {:<16} p50 per round {:?} ns; min per round {:?} ns; median p50 {:.0} ns = {:.0} cycles = {:.3} c/ls",
++            arm.name,
++            arm.p50,
++            arm.min,
++            median(&arm.p50),
++            median(&arm.p50) * hz / 1e9,
++            median(&arm.p50) * hz / 1e9 / lane_samples
++        );
++    }
++    let deltas: Vec<i64> = arms[0]
++        .p50
++        .iter()
++        .zip(&arms[1].p50)
++        .map(|(a, b)| *a as i64 - *b as i64)
++        .collect();
++    let mut sorted = deltas.clone();
++    sorted.sort_unstable();
++    let delta = sorted[sorted.len() / 2] as f64;
++    println!(
++        "  isolate per round {deltas:?} ns; median {delta:.0} ns = {:.0} cycles/block = {:.3} cycles/lane-sample",
++        delta * hz / 1e9,
++        delta * hz / 1e9 / lane_samples
++    );
++    for arm in &mut arms {
++        arm.profile(hz);
++    }
++    println!("  loadavg after {}", loadavg());
++}
++
++#[test]
++#[ignore = "measurement harness; run pinned with --ignored --nocapture"]
++fn rows() {
++    let hz = core_hz();
++    println!("core clock {:.3} GHz, loadavg {}", hz / 1e9, loadavg());
++    let only = std::env::var("DIAG_DISPATCH").unwrap_or_default();
++    if only.is_empty() || only == "8" {
++        rows_at(Backend::Simd8, hz);
++    }
++    if only.is_empty() || only == "4" {
++        rows_at(Backend::Simd4, hz);
++    }
++    println!("core clock after {:.3} GHz", core_hz() / 1e9);
++}
++
++#[test]
++#[ignore = "writes the native source table for the wasm console host (DIAG_SOURCE_OUT)"]
++fn dump_sources() {
++    let path = std::env::var("DIAG_SOURCE_OUT").expect("DIAG_SOURCE_OUT");
++    let mut bytes = Vec::new();
++    for track in 0..128 {
++        for value in console_workload::source_block(track, false) {
++            bytes.extend_from_slice(&value.to_bits().to_le_bytes());
++        }
++    }
++    std::fs::write(path, bytes).expect("write");
++    for (index, workload) in WORKLOADS.iter().enumerate() {
++        println!("{index} {} tracks={}", workload.kind(), workload.tracks());
++    }
++}
++
++#[test]
++#[ignore = "digest harness; run with --ignored --nocapture"]
++fn digests() {
++    let mode: u8 = std::env::var("DIAG_MODE").map_or(0, |m| m.parse().expect("mode"));
++    compressor::diag::set_mode(mode);
++    println!("kernel prototype mode {mode}");
++    for dispatch in [Backend::Simd8, Backend::Simd4] {
++        for workload in WORKLOADS {
++            let mut runtime =
++                SessionRuntime::build_with_dispatch(workload, PlanConfig::BASELINE, dispatch);
++            let mut digest = bench_support::digest::Sha256Sink::new();
++            for block in 0..64 {
++                runtime.render(block).expect("render");
++                runtime.hash_output(&mut digest);
++            }
++            println!(
++                "{:?} {:<44} {}",
++                dispatch,
++                workload.kind(),
++                digest.finish_hex()
++            );
++        }
++    }
++}
+diff --git a/tools/wasm-console-guest/Cargo.toml b/tools/wasm-console-guest/Cargo.toml
+index 917d33b6..c7bb8c31 100644
+--- a/tools/wasm-console-guest/Cargo.toml
++++ b/tools/wasm-console-guest/Cargo.toml
+@@ -16,6 +16,8 @@ crate-type = ["cdylib"]
+ 
+ [dependencies]
+ bench-support.workspace = true
++# DIAGNOSIS ONLY (compressor prototype mode switch).
++compressor.workspace = true
+ console-workload.workspace = true
+ lane.workspace = true
+ 
+diff --git a/tools/wasm-console-guest/src/lib.rs b/tools/wasm-console-guest/src/lib.rs
+index 5559d386..50839c23 100644
+--- a/tools/wasm-console-guest/src/lib.rs
++++ b/tools/wasm-console-guest/src/lib.rs
+@@ -269,3 +269,10 @@ pub extern "C" fn miso_console_render_errors() -> u32 {
+         .unwrap_or_else(std::sync::PoisonError::into_inner);
+     guard.as_ref().map_or(0, |arm| arm.render_errors)
+ }
++
++/// DIAGNOSIS ONLY: selects the compressor kernel prototype mode (`compressor::diag::MODE`).
++#[unsafe(no_mangle)]
++pub extern "C" fn miso_console_diag_mode(mode: u32) -> u32 {
++    compressor::diag::set_mode(mode as u8);
++    1
++}

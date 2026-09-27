@@ -1,0 +1,396 @@
+diff --git a/crates/compressor/src/kernel.rs b/crates/compressor/src/kernel.rs
+index 2f018b19..bb396219 100644
+--- a/crates/compressor/src/kernel.rs
++++ b/crates/compressor/src/kernel.rs
+@@ -432,19 +432,264 @@ pub(crate) fn process_block<L: Lane>(
+         );
+     }
+     if ramping < frames {
+-        frames_loop::<L, false>(
+-            left,
+-            right,
+-            detector,
+-            ramping,
+-            frames,
+-            link,
+-            bypass,
+-            sample_rate,
+-            channel_left,
+-            channel_right,
+-        );
++        let mode = crate::diag::MODE.load(core::sync::atomic::Ordering::Relaxed);
++        if mode == 0 || !matches!(detector, Detector::Main) {
++            frames_loop::<L, false>(
++                left,
++                right,
++                detector,
++                ramping,
++                frames,
++                link,
++                bypass,
++                sample_rate,
++                channel_left,
++                channel_right,
++            );
++        } else {
++            settled_main::<L>(
++                mode,
++                left,
++                right,
++                ramping,
++                frames,
++                link,
++                bypass,
++                channel_left,
++                channel_right,
++            );
++        }
++    }
++}
++
++// ---------------------------------------------------------------------------------------------
++// DIAGNOSIS PROTOTYPES (docs/handoffs/effects-2026-09-27/COMPRESSOR-DIAGNOSIS.md). Selected by
++// `crate::diag::MODE`; mode 0 is today's `frames_loop`.
++// ---------------------------------------------------------------------------------------------
++
++#[inline(always)]
++fn all_lanes<L: Lane>(mask: L::Mask) -> bool {
++    !L::mask_any(L::mask_not(mask))
++}
++
++#[allow(clippy::too_many_arguments)]
++#[inline(always)]
++fn settled_main<L: Lane>(
++    mode: u8,
++    left: &mut [f32],
++    right: &mut [f32],
++    start: usize,
++    end: usize,
++    link: LinkMode,
++    bypass: bool,
++    channel_left: &mut Channel<L>,
++    channel_right: &mut Channel<L>,
++) {
++    let width = L::WIDTH;
++    let invariants = Invariants::<L>::new(link, bypass);
++    let coef_left = Coef::load(&channel_left.words);
++    let coef_right = Coef::load(&channel_right.words);
++    let dual_mono = mode & 2 != 0 && matches!(link, LinkMode::DualMono);
++    let wet = mode & 4 != 0
++        && !bypass
++        && all_lanes::<L>(coef_left.wet_identity)
++        && all_lanes::<L>(coef_right.wet_identity);
++    let two_pass = mode & 8 != 0;
++    let chunk = if mode & 16 != 0 {
++        64
++    } else if mode & 32 != 0 {
++        16
++    } else if mode & 64 != 0 {
++        128
++    } else {
++        32
++    };
++    let left = &mut left[start * width..end * width];
++    let right = &mut right[start * width..end * width];
++    let mut g = (
++        channel_left.gain_reduction_db,
++        channel_right.gain_reduction_db,
++    );
++    let coef = (&coef_left, &coef_right);
++    match (two_pass, dual_mono, wet) {
++        (false, false, false) => one_pass::<L, false, false>(left, right, coef, &mut g, &invariants),
++        (false, true, false) => one_pass::<L, true, false>(left, right, coef, &mut g, &invariants),
++        (false, false, true) => one_pass::<L, false, true>(left, right, coef, &mut g, &invariants),
++        (false, true, true) => one_pass::<L, true, true>(left, right, coef, &mut g, &invariants),
++        (true, false, false) => two_pass_body::<L, false, false, 32>(left, right, coef, &mut g, &invariants),
++        (true, true, false) => two_pass_body::<L, true, false, 32>(left, right, coef, &mut g, &invariants),
++        (true, false, true) => two_pass_body::<L, false, true, 32>(left, right, coef, &mut g, &invariants),
++        (true, true, true) => match chunk {
++            // DIAGNOSIS: 64 here means "pass 1 only", 16 "pass 2 only" (both at 32 frames).
++            64 => two_pass_part::<L, 1>(left, right, coef, &mut g, &invariants),
++            16 => two_pass_part::<L, 2>(left, right, coef, &mut g, &invariants),
++            128 => two_pass_body::<L, true, true, 128>(left, right, coef, &mut g, &invariants),
++            _ => two_pass_body::<L, true, true, 32>(left, right, coef, &mut g, &invariants),
++        },
++    }
++    channel_left.gain_reduction_db = g.0;
++    channel_right.gain_reduction_db = g.1;
++}
++
++/// The link of `link_frame` for `Detector::Main`; the DualMono arm is its `abs` alone.
++#[inline(always)]
++fn detect<L: Lane, const DM: bool>(ml: L, mr: L, invariants: &Invariants<L>) -> (L, L) {
++    if DM {
++        (ml.abs(), mr.abs())
++    } else {
++        link_frame(Detector::Main, 0, ml, mr, invariants)
++    }
++}
++
++/// `gain_mix`, or for an all-wet, unbypassed bank its `mix == 1` arm alone: `input * gain`.
++#[inline(always)]
++#[expect(
++    clippy::disallowed_methods,
++    reason = "FAST-DB-CROSSING X2: applied gain from a smoothed reduction, never a pinned coefficient"
++)]
++fn output<L: Lane, const WET: bool>(
++    input: L,
++    smoothed: L,
++    coef: &Coef<L>,
++    invariants: &Invariants<L>,
++) -> L {
++    if WET {
++        input.mul(fast_gain_from_db(smoothed.add(coef.makeup)))
++    } else {
++        gain_mix(input, smoothed, coef, invariants)
++    }
++}
++
++#[inline(never)]
++fn one_pass<L: Lane, const DM: bool, const WET: bool>(
++    left: &mut [f32],
++    right: &mut [f32],
++    coef: (&Coef<L>, &Coef<L>),
++    g: &mut (L, L),
++    invariants: &Invariants<L>,
++) {
++    let (mut gl, mut gr) = *g;
++    for (l, r) in left
++        .chunks_exact_mut(L::WIDTH)
++        .zip(right.chunks_exact_mut(L::WIDTH))
++    {
++        let ml = L::load(l);
++        let mr = L::load(r);
++        let (dl, dr) = detect::<L, DM>(ml, mr, invariants);
++        let tl = curve_target(dl, coef.0, invariants);
++        let sl = ballistic(tl, &mut gl, coef.0);
++        output::<L, WET>(ml, sl, coef.0, invariants).store(l);
++        let tr = curve_target(dr, coef.1, invariants);
++        let sr = ballistic(tr, &mut gr, coef.1);
++        output::<L, WET>(mr, sr, coef.1, invariants).store(r);
++    }
++    *g = (gl, gr);
++}
++
++
++#[inline(never)]
++fn two_pass_body<L: Lane, const DM: bool, const WET: bool, const CHUNK: usize>(
++    left: &mut [f32],
++    right: &mut [f32],
++    coef: (&Coef<L>, &Coef<L>),
++    g: &mut (L, L),
++    invariants: &Invariants<L>,
++) {
++    let width = L::WIDTH;
++    let (mut gl, mut gr) = *g;
++    let mut targets = [(L::zero(), L::zero()); CHUNK];
++    for (lc, rc) in left
++        .chunks_mut(CHUNK * width)
++        .zip(right.chunks_mut(CHUNK * width))
++    {
++        // Pass 1: every frame's target. No frame depends on another here.
++        for ((l, r), t) in lc
++            .chunks_exact(width)
++            .zip(rc.chunks_exact(width))
++            .zip(targets.iter_mut())
++        {
++            let (dl, dr) = detect::<L, DM>(L::load(l), L::load(r), invariants);
++            *t = (
++                curve_target(dl, coef.0, invariants),
++                curve_target(dr, coef.1, invariants),
++            );
++        }
++        // Pass 2: the recurrence, then the output of the same frame.
++        for ((l, r), t) in lc
++            .chunks_exact_mut(width)
++            .zip(rc.chunks_exact_mut(width))
++            .zip(targets.iter())
++        {
++            let ml = L::load(l);
++            let mr = L::load(r);
++            let sl = ballistic(t.0, &mut gl, coef.0);
++            let sr = ballistic(t.1, &mut gr, coef.1);
++            output::<L, WET>(ml, sl, coef.0, invariants).store(l);
++            output::<L, WET>(mr, sr, coef.1, invariants).store(r);
++        }
+     }
++    *g = (gl, gr);
++}
++
++/// DIAGNOSIS: one pass of `two_pass_body::<L, true, true, 32>` alone. `PART == 1` runs pass 1
++/// and writes the left target to the output so it stays live; `PART == 2` runs pass 2 on targets
++/// that are the input magnitudes (data-independent timing).
++#[inline(never)]
++fn two_pass_part<L: Lane, const PART: u8>(
++    left: &mut [f32],
++    right: &mut [f32],
++    coef: (&Coef<L>, &Coef<L>),
++    g: &mut (L, L),
++    invariants: &Invariants<L>,
++) {
++    const CH: usize = 32;
++    let width = L::WIDTH;
++    let (mut gl, mut gr) = *g;
++    let mut targets = [(L::zero(), L::zero()); CH];
++    for (lc, rc) in left.chunks_mut(CH * width).zip(right.chunks_mut(CH * width)) {
++        if PART == 1 {
++            for ((l, r), t) in lc
++                .chunks_exact(width)
++                .zip(rc.chunks_exact(width))
++                .zip(targets.iter_mut())
++            {
++                let (dl, dr) = detect::<L, true>(L::load(l), L::load(r), invariants);
++                *t = (
++                    curve_target(dl, coef.0, invariants),
++                    curve_target(dr, coef.1, invariants),
++                );
++            }
++            for ((l, r), t) in lc
++                .chunks_exact_mut(width)
++                .zip(rc.chunks_exact_mut(width))
++                .zip(targets.iter())
++            {
++                t.0.store(l);
++                t.1.store(r);
++            }
++        } else {
++            for ((l, r), t) in lc
++                .chunks_exact(width)
++                .zip(rc.chunks_exact(width))
++                .zip(targets.iter_mut())
++            {
++                *t = (L::load(l).abs().neg(), L::load(r).abs().neg());
++            }
++            for ((l, r), t) in lc
++                .chunks_exact_mut(width)
++                .zip(rc.chunks_exact_mut(width))
++                .zip(targets.iter())
++            {
++                let ml = L::load(l);
++                let mr = L::load(r);
++                let sl = ballistic(t.0, &mut gl, coef.0);
++                let sr = ballistic(t.1, &mut gr, coef.1);
++                output::<L, true>(ml, sl, coef.0, invariants).store(l);
++                output::<L, true>(mr, sr, coef.1, invariants).store(r);
++            }
++        }
++    }
++    *g = (gl, gr);
+ }
+ 
+ #[allow(clippy::too_many_arguments)]
+@@ -524,17 +769,104 @@ pub(crate) fn process_block_mono<L: Lane>(
+         );
+     }
+     if ramping < frames {
+-        frames_loop_mono::<L, false>(
+-            left,
+-            detector,
+-            ramping,
+-            frames,
+-            link,
+-            bypass,
+-            sample_rate,
+-            channel_left,
+-        );
++        let mode = crate::diag::MODE.load(core::sync::atomic::Ordering::Relaxed);
++        if mode == 0 || !matches!(detector, Detector::Main) {
++            frames_loop_mono::<L, false>(
++                left,
++                detector,
++                ramping,
++                frames,
++                link,
++                bypass,
++                sample_rate,
++                channel_left,
++            );
++        } else {
++            settled_main_mono::<L>(mode, left, ramping, frames, link, bypass, channel_left);
++        }
++    }
++}
++
++/// DIAGNOSIS PROTOTYPE: the collapsed body's settled arm, as `settled_main` for one plane.
++#[inline(always)]
++fn settled_main_mono<L: Lane>(
++    mode: u8,
++    left: &mut [f32],
++    start: usize,
++    end: usize,
++    link: LinkMode,
++    bypass: bool,
++    channel_left: &mut Channel<L>,
++) {
++    let width = L::WIDTH;
++    let invariants = Invariants::<L>::new(link, bypass);
++    let coef = Coef::load(&channel_left.words);
++    let dual_mono = mode & 2 != 0 && matches!(link, LinkMode::DualMono);
++    let wet = mode & 4 != 0 && !bypass && all_lanes::<L>(coef.wet_identity);
++    let two_pass = mode & 8 != 0;
++    let left = &mut left[start * width..end * width];
++    let mut g = channel_left.gain_reduction_db;
++    match (two_pass, dual_mono, wet) {
++        (false, false, false) => mono_one::<L, false, false>(left, &coef, &mut g, &invariants),
++        (false, true, false) => mono_one::<L, true, false>(left, &coef, &mut g, &invariants),
++        (false, false, true) => mono_one::<L, false, true>(left, &coef, &mut g, &invariants),
++        (false, true, true) => mono_one::<L, true, true>(left, &coef, &mut g, &invariants),
++        (true, false, false) => mono_two::<L, false, false>(left, &coef, &mut g, &invariants),
++        (true, true, false) => mono_two::<L, true, false>(left, &coef, &mut g, &invariants),
++        (true, false, true) => mono_two::<L, false, true>(left, &coef, &mut g, &invariants),
++        (true, true, true) => mono_two::<L, true, true>(left, &coef, &mut g, &invariants),
++    }
++    channel_left.gain_reduction_db = g;
++}
++
++#[inline(always)]
++fn detect_mono<L: Lane, const DM: bool>(main: L, invariants: &Invariants<L>) -> L {
++    if DM {
++        main.abs()
++    } else {
++        link_frame(Detector::Main, 0, main, main, invariants).0
++    }
++}
++
++#[inline(never)]
++fn mono_one<L: Lane, const DM: bool, const WET: bool>(
++    left: &mut [f32],
++    coef: &Coef<L>,
++    g: &mut L,
++    invariants: &Invariants<L>,
++) {
++    let mut gl = *g;
++    for l in left.chunks_exact_mut(L::WIDTH) {
++        let main = L::load(l);
++        let target = curve_target(detect_mono::<L, DM>(main, invariants), coef, invariants);
++        let smoothed = ballistic(target, &mut gl, coef);
++        output::<L, WET>(main, smoothed, coef, invariants).store(l);
++    }
++    *g = gl;
++}
++
++#[inline(never)]
++fn mono_two<L: Lane, const DM: bool, const WET: bool>(
++    left: &mut [f32],
++    coef: &Coef<L>,
++    g: &mut L,
++    invariants: &Invariants<L>,
++) {
++    const CH: usize = 32;
++    let width = L::WIDTH;
++    let mut gl = *g;
++    let mut targets = [L::zero(); CH];
++    for chunk in left.chunks_mut(CH * width) {
++        for (l, t) in chunk.chunks_exact(width).zip(targets.iter_mut()) {
++            *t = curve_target(detect_mono::<L, DM>(L::load(l), invariants), coef, invariants);
++        }
++        for (l, t) in chunk.chunks_exact_mut(width).zip(targets.iter()) {
++            let main = L::load(l);
++            let smoothed = ballistic(*t, &mut gl, coef);
++            output::<L, WET>(main, smoothed, coef, invariants).store(l);
++        }
+     }
++    *g = gl;
+ }
+ 
+ #[allow(clippy::too_many_arguments)]
