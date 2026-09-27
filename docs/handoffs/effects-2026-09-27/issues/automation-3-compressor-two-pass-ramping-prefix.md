@@ -198,3 +198,111 @@ every block, and a mutation that breaks one maintenance site.
 
 None. It is independent of the EQ items. Land it after P1 (`automation-1`) if the mono-console
 gate is to show the collapsed body's gain.
+
+## Amendments (Sol verification, 2026-09-27)
+
+Evidence: `docs/handoffs/effects-2026-09-27/VERIFY-AUTOMATION.md` (F4, F6, F7, F8 and section 4)
+and `verify-automation-raw-timings.txt`.
+
+### What reproduces
+
+On the **dual** body:
+
+* **V8 threshold Δ** (one lane / 8 of 64 / all 64): +6.05 / +44.6 / +142.8 µs → **+2.81 / +14.4 /
+  +29.9 µs**. Attack, all 64: +106.9 → +31.0 µs.
+* **Native `Simd8`:** +5.11 / +39.3 / +81.5 µs → +1.00 / +10.3 / +12.2 µs.
+* **Differential:** `diag_ramping_prefix_randomized` passed in release, 320 seeds × 128 blocks ×
+  {`f32`, `Simd4`, `Simd8`}, for C2, C1 and C2 + C2b.
+* **Wasm:** the dual kernel's vector count goes 516 → 1,084, and the collapsed kernel's scalar count
+  0 → 9, as the draft says.
+
+### A1. The collapsed body is the primary deliverable, and it must be measured
+
+The prototype rewrote the dual prefix only. A collapsed bank, which is what a mono stem is once
+`automation-1` lands, still runs `frames_loop_mono::<L, true>`.
+
+V8, mono console, threshold rides, with P1 in both builds so that the banks stay collapsed:
+
+| arm | P1 | P1 + C2 |
+|---|---:|---:|
+| 8 of 64 | +33.7 µs | +32.0 µs |
+| all 64 | +97.1 µs | +95.3 µs |
+
+Both are noise. The C2 gain the draft tables quote therefore applies to stereo, or uncollapsed,
+banks only.
+
+* Contract 4 (`ramping_main_mono`) is the half that serves the owner's common case. It is
+  unprototyped, so its cost and saving are unknown. Quote none until it is measured.
+* The engagement witness (gate 2) counts **dual and collapsed** prefix engagements separately.
+  Both must be non-zero on `Main` with an open ramp.
+* The existing `randomized` differential already runs a `Mono` arm (`process_block_mono`). It must
+  be shown to reach the new collapsed prefix, through its own counter.
+* **Dependency.** Land after `automation-1`. Until then, any compressor write retires the mono
+  console's collapse, and the V8 mono gate below cannot see the collapsed body.
+
+### A2. Differential additions (gate 1)
+
+* Retargets that hit **both channels with the same value in the same block**, which is the web
+  host's `channel = 2` traffic, as well as one-channel ones.
+* The restored `remaining = 0, current != target` state, reached through
+  `restore_state_payload` rather than by poking fields.
+* **Boundary values:**
+  * knee at `+0.0`, at the smallest subnormal and just below `MIN_SOFT_KNEE_DB` (which takes
+    `design_curve`'s `inv < +inf` select), and at 24 dB;
+  * ratio, threshold, attack and release at both domain ends (attack and release drive the `f64`
+    rate coefficient);
+  * makeup at both ends;
+  * mix at 0 and at 1.
+* **The NaN relaxation (F8).**
+  * The prototype's `wet_arm_relaxed` grants the payload relaxation to every ramping, `Main`,
+    unbypassed block.
+  * Grant it only when a `#[cfg(test)]` counter shows that the prefix, or the settled body, took
+    the wet arm in that block, and only where `finish_channel` rejects the block.
+  * Words after `finish_channel`, and every state word, compare strictly by bits.
+
+### A3. Gate 5 additions
+
+* The collapsed prefix skips the curve redesign on a moved lane.
+* The collapsed prefix takes the wet arm while a mix ramp is open.
+* If C2b is ruled in: `discontinuity_reset` designs with `changed = 0`. It goes red only under
+  C2b, because the reference kernel re-derives all four curve words on the next advance.
+
+### A4. C2b's invariant (section 4 of the verification)
+
+The invariant is `words[0..4] == GainComputerCoef::new(ramps[0..3].current)`. It holds on every
+write site on today's tree:
+
+* `seed_from_defaults`, `full_reset`, `discontinuity_reset`, `redesign` on restore, and
+  `advance_ramps` each rewrite all four words through `design_lane`;
+* `copy_state_from` copies words and ramps together;
+* `set_target` writes `current` only when it is already bit-equal.
+
+Each curve word depends on one parameter. It is exact, but by maintenance, not by construction.
+Measured natively: 8 of 64 goes +10.3 → +8.2 µs, and all 64 goes +12.2 → +10.9 µs. Take it only
+on the owner's ruling, with the debug assertion after every block and A3's mutation.
+
+### A5. Gate 7, made self-contained, with mono rows
+
+1. Extract `automation-diag-tools/` from the diagnosis patch.
+2. Fix `web_auto.mjs`'s three hard-coded paths.
+3. Add `mono_comp = {...comp_threshold, doc: "mono", effectIndex: 1}`, or apply
+   `verify-automation-harness.patch`.
+4. Run `gen_docs.py`.
+5. Build base and change with the flags of `scripts/build-web-audioworklet.sh`, with P1 in both.
+6. Under the lock, pinned, run `ROUNDS=6 BLOCKS=500`:
+   * `comp_threshold,comp_attack` on arms `settled,one_point,eight_of_64,all_64`;
+   * `mono_comp` on arms `settled,eight_of_64,all_64`.
+
+Gates:
+
+* **No regression.** The `settled` isolate must not be more than 2 % slower, dual or mono.
+* **Descriptive.** Record the mono saving. It is the product number this slice exists for.
+* **Identity.** `DIGEST=150` must print "all identical". The one-track `comp_attack` arms equal
+  `settled` on this fixture (F6), so the identity evidence must use an arm that moves bits.
+
+### A6. Wasm
+
+* "compressor f32x4 collapsed" must return to scalar 0.
+* The prototype's clean build grew by 53,316 bytes. That includes C1, which `mode & 3` routes onto
+  `Silent` and `Sidechain` blocks. The implementation must carry neither C1 nor that routing.
+* Record the size under `check-web-boot-budget.mjs`.

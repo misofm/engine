@@ -169,3 +169,173 @@ Steps:
 ## Dependencies
 
 None. It is independent of the kernel changes, and it multiplies their value on mono stems.
+
+## Amendments (Sol verification, 2026-09-27)
+
+Evidence: `docs/handoffs/effects-2026-09-27/VERIFY-AUTOMATION.md` (F1, F2, F5, F9, section 3)
+and `verify-automation-raw-timings.txt`. **These amendments supersede the body wherever they
+conflict.**
+
+### A1. Scope: pair spans only; the target half is removed
+
+The prototype's target rule is unsound. It compares the last `(slot, Left)` target with the last
+`(slot, Right)` target and ignores any `Both` target between them.
+
+* **Failure.** A drain FIFO `[L A, Both C, R A]` leaves left = `C` and right = `A`. P1 keeps
+  `LIVE`, and the collapse renders the left plane on both channels.
+* **Reachability.** It is reachable through the SDK: three submissions between two render quanta,
+  left-only, then both-channel, then right-only.
+* **Reproduced** through the shipped `host_web.wasm`: base output digest `39d2dc01…`, P1
+  `22e07bf0…`.
+* **Consequence.** On disengage, the chain copies the left state over the right, so the
+  acknowledged right-only edit is lost.
+
+The target half is also unnecessary. The SDK sends a symmetric both-channel EQ edit as **one
+`Both` target**, because `prepare_targets` → `fill_targets` coalesces bit-equal sections, and the
+witness already preserves that target.
+
+Contracts 1-3 become:
+
+1. In `EffectControlLane::stage`, only a `Parameter` record whose channel writes one channel sets
+   `deferred` instead of calling `admit`. **Every `PreparedTarget` calls `admit` exactly as today**,
+   so a one-channel target still clears `LIVE`. `Bypass` and `Observe` are unchanged.
+2. `fn spans_pair(spans: &[PreparedAutomationSpan]) -> bool` is private, O(n) and iterator-only.
+   * Staging leaves the window strictly increasing in `(parameter_index, channel)`, with
+     `Left (1) < Right (2) < Both (3)` (`effect-contract/src/lib.rs:157`). So a one-channel pair
+     is two **adjacent** spans.
+   * A `Left` span must be immediately followed by a `Right` span with the same `parameter_index`
+     and the same `start_value` bits.
+   * A `Right` span must be immediately preceded by that `Left` span.
+   * `Both` spans are skipped.
+   * Use `windows(2)` or a zip, and no panicking index.
+   * The prototype's any-over-all search is O(n²) and must not be copied.
+3. At the end of `stage`: `if deferred && !spans_pair(&staging[..staged])`, clear `LIVE`.
+
+Delete these parts of the body:
+
+* the "Targets" bullets under "The pairing rule";
+* the targets paragraph under "Why a pair leaves the channels equal";
+* gate 1's "EQ targets for a lane whose L and R prepared `(enabled, kind)` differ" (it has nothing
+  left to test).
+
+`writes_pair` is not written.
+
+### A2. Corrected product outcome (replaces the mechanism bullets and the table)
+
+* Only records that reach the drain as one-channel `Parameter` records retire the collapse. On the
+  web path those are **the compressor's and the limiter's** (and any other launch effect's
+  `PerLane` parameters), through `into_effect_records`'s `(PerLane, 2)` arm.
+* The EQ does not retire it. V8, mono console, each control written once on all 64 tracks and then
+  left settled (shipped `host_web.wasm`, cpu 31, lock):
+
+  | written | base µs | P1 spans only µs |
+  |---|---:|---:|
+  | nothing | 148.8 | 148.1 |
+  | EQ gain only | **148.7** | 148.3 |
+  | compressor threshold only | 248.0 | 148.2 |
+  | limiter ceiling only | 247.8 | 148.6 |
+  | all three | 247.7 (245.4 in a second run) | 148.2 |
+  | 8 of 64 automated (mixed) | 290.5 (287.4) | 173.4 |
+
+  Stereo console, 8 of 64 automated: 284.7 µs at base, 283.1 µs with P1 spans only.
+* The native `SessionRuntime::push_parameter` harness sends an EQ edit as two owner transactions,
+  so it produces one-channel targets. That is a harness shape, not the product's.
+* The C ABI, the native host and the mobile host attach no effect console, so the web host is the
+  only affected product path.
+
+### A3. The obligation a span pair rests on, stated per effect
+
+A twin pair leaves the channels equal only if every effect that can sit in a collapse-eligible
+cohort applies `pending[0][p]` and `pending[1][p]` with channel-symmetric validity. That covers the
+compressor, the true-peak limiter, and every other launch effect with live `PerLane` parameters:
+the gate-expander, the de-esser, and so on.
+
+* Enumerate them in the evidence.
+* For each, add a unit test. It feeds one bank lane with bit-equal channels a twin pair, a pair
+  whose values straddle a domain edge, and a pair with one value refused. It then asserts
+  bit-equal left and right state afterwards.
+* The capacity cut-off (`span_index < automation_capacity`) cannot split a twin, because the
+  staging window is the capacity. Assert `staged <= automation_capacity` in debug.
+
+### A4. Gates added or changed
+
+* **Gate 1, additional scenarios (dev and release, W4 and W8):**
+  * the F1 FIFO on one EQ lane: it must **retire** the cohort and match the forced-dual reference;
+  * spans `[L v1, L v2, R v2]` on one parameter: last-wins leaves a pair, so the cohort is **kept**
+    and matches;
+  * spans `[L v1, R v2, L v2]`: kept, and matches;
+  * a pair on one parameter plus a lone `Left` on another: retired;
+  * EQ edits made both ways, as one `ParameterChannel::Both` owner edit
+    (`SessionRuntime::push_parameter(ch, p, Both, v)` → one `Both` target, the SDK's shape) and as
+    per-channel owner edits.
+
+  Output words compare by bits, and the bank output is after the §4.4 check. A "both NaN" match is
+  allowed only on a plane read before that check, and only where the forced-dual reference rejects
+  the block.
+* **Gate 2.** Add: an EQ-only both-channel ride keeps every cohort collapsed **on the base as well**
+  (no P1 needed).
+* **Gate 3.** Pin the scenario on the current tip, which is code-identical to `49f696c7`. Use the
+  product shapes: EQ as `Both` owner edits, compressor and limiter as Left then Right records.
+* **New gate 3b, through the shipped artifact.** Build base and change with the delivery recipe
+  (below).
+  * Run the P1-break check: on one mono track, three submissions through `prepared-control.js`
+    before one render, in each of these orders:
+    * `split`: `ch0 g1`, then `ch2 g2`, then `ch1 g1`;
+    * `pair`: `ch0 g1`, then `ch1 g1`;
+    * `both`: `ch2 g1`;
+    * `left`: `ch0 g1`.
+  * Do this for the EQ (gain 4.5 / 1.5 dB), the compressor (threshold −20 / −12 dB) and the
+    limiter (ceiling −20 / −17 dB; the values must engage, and −12 dB does not on this fixture).
+  * Every 40-block output digest must equal base's.
+  * The harness is the `P1BREAK` mode (`P1FX`, `P1ORDER`) that
+    `verify-automation-harness.patch` adds to `web_auto.mjs`. Apply it on top of the diagnosis
+    patch.
+* **Gate 5 mutations.**
+  * Keep: "ignore the value", "lone write paired", and "split across drains kept".
+  * Drop the two target mutations.
+  * Add, each recorded red:
+    * "defer one-channel `PreparedTarget`s too, with the prototype's last-per-channel rule" (red
+      on the F1 FIFO, in gate 1 and gate 3b);
+    * "pair adjacent spans without comparing `parameter_index`";
+    * "accept a `Right` span with no preceding `Left`".
+* **Gate 7, the V8 recipe.**
+  1. Extract `docs/handoffs/effects-2026-09-27/automation-diag-tools/` from the diagnosis patch
+     into scratch.
+  2. In `web_auto.mjs`, edit the three hard-coded paths: the `prepared-control.js` import, the ABI
+     layout JSON and `ROOT`. They name a deleted worktree and scratch root.
+  3. Add the subjects:
+     * `mono_eq = {...eq_gain, doc: "mono", effectIndex: 0}`;
+     * `mono_comp = {...comp_threshold, doc: "mono", effectIndex: 1}`;
+     * `mono_lim = {...lim_ceiling, doc: "mono", effectIndex: 0}`.
+  4. Run `gen_docs.py`.
+  5. Build each artifact with `scripts/build-web-audioworklet.sh`'s flags into
+     `…/t-web-NAME/wasm32-unknown-unknown/release/host_web.wasm`. The harness names modules by
+     that path.
+  6. Under the lock, run `taskset -c 31 node --no-liftoff web_auto.mjs` with `ROUNDS=6
+     BLOCKS=500`. Subjects `mono_mix,mono_comp,mono_lim,mono_eq` on arms
+     `untouched,settled,eight_of_64`, and `console_mix` on `settled,eight_of_64`.
+
+  The stereo rows must not be more than 2 % slower. The mono `settled` rows should sit within 2 %
+  of `untouched`; that is descriptive, and a miss means the rule is not engaging. Then run
+  `DIGEST=150` over the same subjects: it must print "all identical".
+
+### A5. If the owner rules for the host-`Both` form instead
+
+The rule is exact, but it carries two preconditions this draft does not meet (VERIFY-AUTOMATION
+F5).
+
+* **Capacity.** The web host derives automation capacity as `max(segments, queue records, 1)`,
+  and the queue depth equals the records. Expanding one `Both` record into two spans can therefore
+  overflow the staging window after an OK ack. Example: records = 2, and one submission with
+  threshold and ratio `channel = 2` gives four spans in a two-span window. Capacity must be derived
+  as at least 2 × the queue depth, and preparation must assert it.
+* **Policy.** The drain must know each parameter's channel policy, because a `Shared` `Both` stays
+  one span.
+
+Re-brief rather than extend this slice.
+
+### A6. Split pairs
+
+The web host submits and renders on the AudioWorklet thread, so both halves of one submission are
+always in one drain. A threaded host that splits them loses the pair, which clears `LIVE` as today.
+That is correct and conservative.
