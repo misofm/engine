@@ -2873,7 +2873,7 @@ impl PreparedPlanExecutor for GraphExecutor {
             .enumerate()
             .map(|(unit, (runtime_unit, identity))| PlanUnitEligibility {
                 unit: u32::try_from(unit).unwrap_or(u32::MAX),
-                banked: identity.banked,
+                banked: identity.banking.banked(),
                 stages: identity.stages,
                 upstream_of_seam_stages: identity.upstream_of_seam_stages,
                 lane_tracks: identity.lane_tracks.clone(),
