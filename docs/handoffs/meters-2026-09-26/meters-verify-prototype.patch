@@ -1,0 +1,1328 @@
+diff --git a/crates/builtins-compiler/src/lib.rs b/crates/builtins-compiler/src/lib.rs
+index c7742437..219e1a11 100644
+--- a/crates/builtins-compiler/src/lib.rs
++++ b/crates/builtins-compiler/src/lib.rs
+@@ -4672,6 +4672,10 @@ fn make_scalar_split_pair(
+ }
+ struct MeterObserver(MeterAccumulator);
+ impl GraphRuntimeObserver for MeterObserver {
++    fn accepts_sample_peak(&self) -> bool {
++        self.0.metrics() == builtins::MeterMetricSet::SAMPLE_PEAK
++    }
++
+     fn activation_changed(&mut self, active: bool, generation: u64, _first_sample: u64) {
+         if active {
+             self.0.restart_observation(generation);
+@@ -4699,7 +4703,10 @@ impl GraphRuntimeObserver for MeterObserver {
+                 block.lane.width().lanes() as usize,
+                 block.lane.lane(),
+             )
+-            .and_then(|input| self.0.observe_input(input, block.first_sample))
++            .and_then(|input| {
++                self.0
++                    .observe_input_with_block_peak(input, block.first_sample, block.sample_peak)
++            })
+             .map_err(|error| match error {
+                 builtins::MeterObservationError::SampleTimeOverflow => RenderError::TimeOverflow,
+                 builtins::MeterObservationError::LaneLength => RenderError::InvalidEnvelope,
+diff --git a/crates/builtins/src/lib.rs b/crates/builtins/src/lib.rs
+index ca87e6d3..bf622550 100644
+--- a/crates/builtins/src/lib.rs
++++ b/crates/builtins/src/lib.rs
+@@ -4476,6 +4476,16 @@ std::thread_local! {
+     static METER_PEAK_SAMPLES: Cell<u64> = const { Cell::new(0) };
+ }
+ 
++#[cfg(any(test, feature = "test-support"))]
++std::thread_local! {
++    static METER_FAST_MERGES: Cell<u64> = const { Cell::new(0) };
++}
++#[cfg(any(test, feature = "test-support"))]
++#[doc(hidden)]
++pub fn verify_fast_merges_take() -> u64 {
++    METER_FAST_MERGES.with(|m| m.replace(0))
++}
++
+ #[cfg(any(test, feature = "test-support"))]
+ #[doc(hidden)]
+ pub fn test_only_reset_peak_samples() {
+@@ -4575,6 +4585,16 @@ impl MeterAccumulator {
+         &mut self,
+         input: MeterInput<'_>,
+         first_sample: u64,
++    ) -> Result<(), MeterObservationError> {
++        self.observe_input_with_block_peak(input, first_sample, None)
++    }
++
++    /// VERIFY PROTOTYPE of #943 interface item 6.
++    pub fn observe_input_with_block_peak(
++        &mut self,
++        input: MeterInput<'_>,
++        first_sample: u64,
++        block_peak: Option<[f32; 2]>,
+     ) -> Result<(), MeterObservationError> {
+         let len = match u64::try_from(input.frames)
+             .ok()
+@@ -4593,6 +4613,21 @@ impl MeterAccumulator {
+             self.start = Some(first_sample);
+         }
+         let period = self.config.period_frames.get();
++        if let Some(p) = block_peak
++            && self.metrics == MeterMetricSet::SAMPLE_PEAK
++            && len > 0
++            && len <= (period - self.frames) as usize
++        {
++            #[cfg(any(test, feature = "test-support"))]
++            METER_FAST_MERGES.with(|m| m.set(m.get() + 1));
++            self.left.peak = if p[0] > self.left.peak { p[0] } else { self.left.peak };
++            self.right.peak = if p[1] > self.right.peak { p[1] } else { self.right.peak };
++            self.frames = self.frames.saturating_add(len as u32);
++            if self.frames == period {
++                self.emit();
++            }
++            return Ok(());
++        }
+         let window = MeterWindow {
+             hold_frames: self.config.peak_hold_frames,
+             decay: self.decay,
+@@ -4716,6 +4751,11 @@ impl MeterAccumulator {
+         self.right = meter_lane();
+     }
+ 
++    #[must_use]
++    pub const fn metrics(&self) -> MeterMetricSet {
++        self.metrics
++    }
++
+     #[must_use]
+     pub const fn observation_generation(&self) -> u64 {
+         self.observation_generation
+diff --git a/crates/builtins/tests/zz_verify943.rs b/crates/builtins/tests/zz_verify943.rs
+new file mode 100644
+index 00000000..7f49f23b
+--- /dev/null
++++ b/crates/builtins/tests/zz_verify943.rs
+@@ -0,0 +1,558 @@
++//! Throwaway verification harness for issue #943 (not for commit).
++#![allow(clippy::all, clippy::pedantic, missing_docs)]
++
++use builtins::{
++    BuiltinResetKind, MeterAccumulator, MeterConfig, MeterHandle, MeterInput, MeterMetricSet,
++    MeterSnapshot, PreparedMeter,
++};
++use lane::{Lane, Simd4, Simd8};
++use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
++
++// ---- the brief's kernel, verbatim order ----
++#[inline(always)]
++fn meter_sample_peak_block<L: Lane>(words: &[f32], frames: usize, peak: L) -> L {
++    debug_assert!(words.len() >= frames * L::WIDTH);
++    let mut peak = peak;
++    for f in 0..frames {
++        let a = L::load(&words[f * L::WIDTH..]).abs();
++        let c = L::select(
++            L::mask_and(
++                a.ge(L::splat(f32::MIN_POSITIVE)),
++                a.lt(L::splat(f32::INFINITY)),
++            ),
++            a,
++            L::zero(),
++        );
++        peak = L::max(c, peak);
++    }
++    peak
++}
++
++#[inline(always)]
++fn sanitize<L: Lane>(x: L) -> L {
++    let a = x.abs();
++    L::select(
++        L::mask_and(
++            a.ge(L::splat(f32::MIN_POSITIVE)),
++            a.lt(L::splat(f32::INFINITY)),
++        ),
++        a,
++        L::zero(),
++    )
++}
++
++/// The scalar meter, as written in `observe_selected_segment`: sanitize, then abs.
++fn meter_oracle(x: f32) -> f32 {
++    let s = if x.is_finite() && !x.is_subnormal() { x } else { 0.0 };
++    s.abs()
++}
++
++fn to_vec<L: Lane>(v: L) -> Vec<f32> {
++    let mut out = vec![0.0f32; L::WIDTH];
++    v.store(&mut out);
++    out
++}
++
++fn exhaustive<L: Lane>() -> (u64, u64) {
++    let w = L::WIDTH as u64;
++    let mut buf = vec![0.0f32; L::WIDTH];
++    let mut out = vec![0.0f32; L::WIDTH];
++    let mut mismatches = 0u64;
++    let mut checked = 0u64;
++    let mut base: u64 = 0;
++    while base <= u32::MAX as u64 {
++        for i in 0..L::WIDTH {
++            buf[i] = f32::from_bits((base + i as u64) as u32);
++        }
++        let c = sanitize(L::load(&buf));
++        c.store(&mut out);
++        for i in 0..L::WIDTH {
++            let want = meter_oracle(buf[i]);
++            if out[i].to_bits() != want.to_bits() {
++                mismatches += 1;
++                if mismatches < 5 {
++                    eprintln!(
++                        "mismatch w={} x={:#010x} got={:#010x} want={:#010x}",
++                        L::WIDTH,
++                        buf[i].to_bits(),
++                        out[i].to_bits(),
++                        want.to_bits()
++                    );
++                }
++            }
++            checked += 1;
++        }
++        base += w;
++    }
++    (checked, mismatches)
++}
++
++#[test]
++#[ignore]
++fn exhaustive_sanitization_equals_normal_or_zero_on_every_bit_pattern() {
++    let h8 = std::thread::spawn(exhaustive::<Simd8>);
++    let h4 = std::thread::spawn(exhaustive::<Simd4>);
++    let h1 = std::thread::spawn(exhaustive::<f32>);
++    for (name, h) in [("Simd8", h8), ("Simd4", h4), ("f32", h1)] {
++        let (checked, mismatches) = h.join().unwrap();
++        eprintln!("{name}: checked {checked} patterns, mismatches {mismatches}");
++        assert_eq!(checked, 1u64 << 32);
++        assert_eq!(mismatches, 0);
++    }
++}
++
++// ---- hostile value pool ----
++struct Rng(u64);
++impl Rng {
++    fn next(&mut self) -> u64 {
++        self.0 ^= self.0 << 13;
++        self.0 ^= self.0 >> 7;
++        self.0 ^= self.0 << 17;
++        self.0
++    }
++    fn below(&mut self, n: usize) -> usize {
++        (self.next() % n as u64) as usize
++    }
++}
++
++fn pool() -> Vec<f32> {
++    let mut v = vec![
++        f32::NAN,
++        -f32::NAN,
++        f32::from_bits(0x7FC0_0001),
++        f32::from_bits(0xFF80_0001),
++        f32::from_bits(0x7F80_0001),
++        f32::INFINITY,
++        f32::NEG_INFINITY,
++        0.0,
++        -0.0,
++        f32::from_bits(1),
++        f32::from_bits(0x8000_0001),
++        f32::from_bits(0x007F_FFFF),
++        f32::from_bits(0x807F_FFFF),
++        f32::MIN_POSITIVE,
++        -f32::MIN_POSITIVE,
++        1.0,
++        -1.0,
++        f32::from_bits(0x3F7F_FFFF),
++        f32::from_bits(0x3F80_0001),
++        f32::MAX,
++        -f32::MAX,
++        1.0e30,
++        -1.0e30,
++        1.0e38,
++    ];
++    for k in -34..=5 {
++        v.push((2.0f32).powi(k));
++        v.push(-(2.0f32).powi(k));
++    }
++    v
++}
++
++fn fill(rng: &mut Rng, pool: &[f32], words: &mut [f32], hostile: bool, phase: f32) {
++    let n = words.len();
++    for (i, w) in words.iter_mut().enumerate() {
++        if hostile && rng.below(3) != 0 {
++            *w = pool[rng.below(pool.len())];
++        } else if hostile {
++            // random bit pattern
++            *w = f32::from_bits(rng.next() as u32);
++        } else {
++            let lane = (i % 8) as f32;
++            *w = (0.3 + 0.05 * lane) * ((i as f32 + phase) * (0.01 + 0.002 * lane)).sin();
++        }
++    }
++    let _ = n;
++}
++
++fn serial_peak(words: &[f32], frames: usize, stride: usize, lane: usize, mut p: f32) -> f32 {
++    for f in 0..frames {
++        let x = words[f * stride + lane];
++        let s = if x.is_finite() && !x.is_subnormal() { x } else { 0.0 };
++        let a = s.abs();
++        p = if a > p { a } else { p };
++    }
++    p
++}
++
++fn deinterleave(words: &[f32], frames: usize, stride: usize, lane: usize) -> Vec<f32> {
++    (0..frames).map(|f| words[f * stride + lane]).collect()
++}
++
++fn kernel_identity<L: Lane>(seed: u64) -> u64 {
++    let pool = pool();
++    let mut rng = Rng(seed);
++    let w = L::WIDTH;
++    let mut compared = 0;
++    for &frames in &[1usize, 2, 3, 127, 128, 129] {
++        for hostile in [true, false] {
++            let mut carried = L::zero();
++            let mut carried_serial = vec![0.0f32; w];
++            let mut carried_scalar = vec![0.0f32; w];
++            let mut window_merge = vec![0.0f32; w];
++            for block in 0..64 {
++                let mut words = vec![0.0f32; frames * w];
++                fill(&mut rng, &pool, &mut words, hostile, block as f32 * 7.0);
++                carried = meter_sample_peak_block::<L>(&words, frames, carried);
++                let partial = to_vec(meter_sample_peak_block::<L>(&words, frames, L::zero()));
++                let got = to_vec(carried);
++                for lane in 0..w {
++                    carried_serial[lane] =
++                        serial_peak(&words, frames, w, lane, carried_serial[lane]);
++                    let de = deinterleave(&words, frames, w, lane);
++                    carried_scalar[lane] =
++                        meter_sample_peak_block::<f32>(&de, frames, carried_scalar[lane]);
++                    // F4 reassociation: seeded +0 partial merged with the select form.
++                    let q = partial[lane];
++                    window_merge[lane] =
++                        if q > window_merge[lane] { q } else { window_merge[lane] };
++                    assert_eq!(got[lane].to_bits(), carried_serial[lane].to_bits());
++                    assert_eq!(got[lane].to_bits(), carried_scalar[lane].to_bits());
++                    assert_eq!(window_merge[lane].to_bits(), carried_serial[lane].to_bits());
++                    compared += 1;
++                }
++            }
++        }
++    }
++    // A lane fed only invalid values ends at +0.0.
++    let invalid = [f32::NAN, f32::INFINITY, -0.0, f32::from_bits(1), f32::from_bits(0x807F_FFFF)];
++    let mut words = vec![0.0f32; 128 * w];
++    for (i, x) in words.iter_mut().enumerate() {
++        *x = invalid[i % invalid.len()];
++    }
++    let r = to_vec(meter_sample_peak_block::<L>(&words, 128, L::zero()));
++    for lane in 0..w {
++        assert_eq!(r[lane].to_bits(), 0);
++    }
++    compared
++}
++
++#[test]
++fn g1_kernel_identity_and_reassociation() {
++    let a = kernel_identity::<Simd8>(0x9E37_79B9_7F4A_7C15);
++    let b = kernel_identity::<Simd4>(0x1234_5678_9ABC_DEF1);
++    let c = kernel_identity::<f32>(0xDEAD_BEEF_CAFE_F00D);
++    eprintln!("kernel identity: compared {a} (Simd8) {b} (Simd4) {c} (f32) lane-blocks");
++}
++
++/// Domain argument, witnessed: select-max is associative/commutative on {+0} U [MIN_POSITIVE, MAX]
++/// but NOT once -0.0 or NaN enter; the sanitizer is what makes the reassociation exact.
++#[test]
++fn select_max_associativity_domain() {
++    let m = |a: f32, b: f32| if a > b { a } else { b };
++    let mut d: Vec<f32> = pool()
++        .into_iter()
++        .map(meter_oracle)
++        .collect();
++    d.push(0.0);
++    d.sort_by(|a, b| a.partial_cmp(b).unwrap());
++    d.dedup_by(|a, b| a.to_bits() == b.to_bits());
++    for &a in &d {
++        for &b in &d {
++            assert_eq!(m(a, b).to_bits(), m(b, a).to_bits());
++            for &c in &d {
++                assert_eq!(m(m(a, b), c).to_bits(), m(a, m(b, c)).to_bits());
++            }
++        }
++    }
++    // Outside the domain: -0.0 breaks commutativity (bits), NaN breaks associativity.
++    assert_ne!(m(0.0, -0.0).to_bits(), m(-0.0, 0.0).to_bits());
++    // NaN: m(m(NaN,2),1) = m(2,1) = 2 but m(NaN, m(2,1)) = m(NaN,2) = 2; m(1, NaN) = NaN vs m(NaN, 1) = 1.
++    assert_ne!(m(1.0, f32::NAN).to_bits(), m(f32::NAN, 1.0).to_bits());
++    eprintln!("domain size {} associative+commutative", d.len());
++}
++
++// ---- accumulator differential ----
++fn meter(metrics: MeterMetricSet, period: u32, hold: u32, decay: f32, h: u64) -> PreparedMeter {
++    MeterAccumulator::prepare_selected(
++        MeterHandle(NonZeroU64::new(h).unwrap()),
++        MeterConfig {
++            period_frames: NonZeroU32::new(period).unwrap(),
++            peak_hold_frames: hold,
++            peak_decay_db_per_second: decay,
++            queue_capacity: NonZeroUsize::new(4096).unwrap(),
++            reset_generation: 0,
++        },
++        48_000,
++        metrics,
++    )
++    .unwrap_or_else(|e| panic!("{e:?}"))
++}
++
++fn snap_bits(s: &MeterSnapshot) -> Vec<u64> {
++    let lane = |l: &builtins::MeterLaneSnapshot| {
++        vec![
++            u64::from(l.sample_peak.to_bits()),
++            l.rms.to_bits(),
++            l.energy.to_bits(),
++            u64::from(l.held_peak.to_bits()),
++            l.clipped_samples,
++            l.sanitized_samples,
++        ]
++    };
++    let mut v = vec![
++        s.handle.0.get(),
++        u64::from(s.present_metrics.bits()),
++        s.reset_generation,
++        s.observation_generation,
++        s.window_sequence,
++        s.start_sample,
++        s.end_sample,
++        u64::from(s.frames),
++        s.cumulative_clipped_samples,
++        s.cumulative_sanitized_samples,
++        s.cumulative_discontinuities,
++        s.cumulative_dropped_snapshots,
++    ];
++    v.extend(lane(&s.left));
++    v.extend(lane(&s.right));
++    v
++}
++
++#[derive(Clone, Copy, Debug)]
++enum Event {
++    Block(usize),
++    Skip(u64),
++    Restart(u64),
++    Reset(bool),
++}
++
++fn run_differential(
++    metrics: MeterMetricSet,
++    period: u32,
++    hold: u32,
++    decay: f32,
++    events: &[Event],
++    hostile: bool,
++    seed: u64,
++) -> (u64, u64) {
++    const W: usize = 8;
++    let pool = pool();
++    let mut rng = Rng(seed);
++    let mut a: Vec<PreparedMeter> = (0..W)
++        .map(|l| meter(metrics, period, hold, decay, l as u64 + 1))
++        .collect();
++    let mut b: Vec<PreparedMeter> = (0..W)
++        .map(|l| meter(metrics, period, hold, decay, l as u64 + 1))
++        .collect();
++    let mut sample = 0u64;
++    let mut snapshots = 0u64;
++    let _ = builtins::verify_fast_merges_take();
++    for (i, ev) in events.iter().enumerate() {
++        match *ev {
++            Event::Block(frames) => {
++                let mut left = vec![0.0f32; frames * W];
++                let mut right = vec![0.0f32; frames * W];
++                fill(&mut rng, &pool, &mut left, hostile, i as f32 * 3.0);
++                fill(&mut rng, &pool, &mut right, hostile, i as f32 * 5.0 + 1.0);
++                let pl = to_vec(meter_sample_peak_block::<Simd8>(&left, frames, Simd8::zero()));
++                let pr = to_vec(meter_sample_peak_block::<Simd8>(&right, frames, Simd8::zero()));
++                for lane in 0..W {
++                    let input = MeterInput::strided(&left, &right, frames, W, lane).unwrap();
++                    a[lane].accumulator.observe_input(input, sample).unwrap();
++                    let input = MeterInput::strided(&left, &right, frames, W, lane).unwrap();
++                    b[lane]
++                        .accumulator
++                        .observe_input_with_block_peak(input, sample, Some([pl[lane], pr[lane]]))
++                        .unwrap();
++                }
++                sample += frames as u64;
++            }
++            Event::Skip(n) => sample += n,
++            Event::Restart(g) => {
++                for lane in 0..W {
++                    a[lane].accumulator.restart_observation(g);
++                    b[lane].accumulator.restart_observation(g);
++                }
++            }
++            Event::Reset(full) => {
++                let k = if full {
++                    BuiltinResetKind::FullToPrepared
++                } else {
++                    BuiltinResetKind::DiscontinuityKeepTargets
++                };
++                for lane in 0..W {
++                    a[lane].accumulator.reset(k);
++                    b[lane].accumulator.reset(k);
++                }
++            }
++        }
++        for lane in 0..W {
++            loop {
++                let x = a[lane].consumer.try_pop().ok();
++                let y = b[lane].consumer.try_pop().ok();
++                match (x, y) {
++                    (None, None) => break,
++                    (Some(x), Some(y)) => {
++                        assert_eq!(
++                            snap_bits(&x),
++                            snap_bits(&y),
++                            "metrics={:?} period={period} event={i} lane={lane}",
++                            metrics.bits()
++                        );
++                        snapshots += 1;
++                    }
++                    (x, y) => panic!(
++                        "snapshot count differs: {:?} vs {:?} (metrics={} period={period} event={i})",
++                        x.map(|s| s.window_sequence),
++                        y.map(|s| s.window_sequence),
++                        metrics.bits()
++                    ),
++                }
++            }
++        }
++    }
++    (snapshots, builtins::verify_fast_merges_take())
++}
++
++#[test]
++fn g2_accumulator_fast_path_is_bit_identical() {
++    let peak = MeterMetricSet::SAMPLE_PEAK;
++    let sets = [
++        peak,
++        MeterMetricSet::ALL,
++        MeterMetricSet::from_bits_retain(peak.bits() | MeterMetricSet::COUNTS.bits()),
++        MeterMetricSet::from_bits_retain(peak.bits() | MeterMetricSet::ENERGY_RMS.bits()),
++        MeterMetricSet::from_bits_retain(peak.bits() | MeterMetricSet::HELD_PEAK.bits()),
++        MeterMetricSet::HELD_PEAK,
++        MeterMetricSet::COUNTS,
++    ];
++    let mut rng = Rng(0x5151_7272_9393_A4A4);
++    let mut total_snaps = 0;
++    let mut total_merges = 0;
++    for &period in &[1u32, 64, 127, 128, 129, 300, 512, 1536, 4096] {
++        for &metrics in &sets {
++            for (hold, decay) in [(0u32, 0.0f32), (7, 0.0), (0, 12.0), (100, 60.0)] {
++                for hostile in [true, false] {
++                    // fixed 128-block stream
++                    let fixed: Vec<Event> = (0..64).map(|_| Event::Block(128)).collect();
++                    let (s, m) =
++                        run_differential(metrics, period, hold, decay, &fixed, hostile, rng.next());
++                    total_snaps += s;
++                    total_merges += m;
++                    if metrics != peak {
++                        assert_eq!(m, 0, "non-SAMPLE_PEAK set must never merge");
++                    }
++                    // random stream with discontinuities, restarts, resets, zero-frame blocks
++                    let mut evs = Vec::new();
++                    for _ in 0..200 {
++                        let r = rng.below(20);
++                        evs.push(match r {
++                            0 => Event::Skip(1 + rng.below(700) as u64),
++                            1 => Event::Restart(rng.next() % 1000),
++                            2 => Event::Reset(rng.below(2) == 0),
++                            3 => Event::Block(0),
++                            _ => Event::Block(
++                                [1usize, 2, 3, 63, 64, 127, 128, 128, 128, 129, 256, 300, 511][
++                                    rng.below(13)
++                                ],
++                            ),
++                        });
++                    }
++                    let (s, m) =
++                        run_differential(metrics, period, hold, decay, &evs, hostile, rng.next());
++                    total_snaps += s;
++                    total_merges += m;
++                    if metrics != peak {
++                        assert_eq!(m, 0);
++                    }
++                }
++            }
++        }
++    }
++    eprintln!("G2 differential: {total_snaps} snapshots bit-identical, {total_merges} fast merges");
++    assert!(total_merges > 0);
++}
++
++#[test]
++fn g2_merge_counter_expectations() {
++    let fixed: Vec<Event> = (0..64).map(|_| Event::Block(128)).collect();
++    for (period, expect) in [(512u32, Some(8 * 64u64)), (64, Some(0)), (300, None), (1536, Some(512))] {
++        let (_, m) =
++            run_differential(MeterMetricSet::SAMPLE_PEAK, period, 0, 0.0, &fixed, false, 7);
++        eprintln!("period {period}: {m} merges of {} lane-blocks", 8 * 64);
++        match expect {
++            Some(e) => assert_eq!(m, e),
++            None => assert!(m > 0 && m < 512),
++        }
++    }
++}
++
++// ---- microbenchmark (direction only) ----
++#[test]
++#[ignore]
++fn bench_per_bank() {
++    use std::hint::black_box;
++    use std::time::Instant;
++    fn run<L: Lane>(period: u32, metrics: MeterMetricSet, rounds: usize) -> (f64, f64) {
++        let w = L::WIDTH;
++        let frames = 128;
++        let mut left = vec![0.0f32; frames * w];
++        let mut right = vec![0.0f32; frames * w];
++        for (i, x) in left.iter_mut().enumerate() {
++            *x = 0.5 * ((i as f32) * 0.013).sin();
++        }
++        for (i, x) in right.iter_mut().enumerate() {
++            *x = 0.4 * ((i as f32) * 0.017).cos();
++        }
++        let mut a: Vec<PreparedMeter> = (0..w)
++            .map(|l| meter(metrics, period, 0, 0.0, l as u64 + 1))
++            .collect();
++        let mut b: Vec<PreparedMeter> = (0..w)
++            .map(|l| meter(metrics, period, 0, 0.0, l as u64 + 1))
++            .collect();
++        let mut ta = Vec::with_capacity(rounds);
++        let mut tb = Vec::with_capacity(rounds);
++        let mut sample = 0u64;
++        const INNER: usize = 64;
++        for _ in 0..rounds {
++            let t = Instant::now();
++            for k in 0..INNER {
++                for lane in 0..w {
++                    let input =
++                        MeterInput::strided(black_box(&left), black_box(&right), frames, w, lane)
++                            .unwrap();
++                    a[lane].accumulator.observe_input(input, sample + (k * frames) as u64).unwrap();
++                }
++            }
++            ta.push(t.elapsed().as_nanos() as f64 / INNER as f64);
++            let t = Instant::now();
++            for k in 0..INNER {
++                let pl = meter_sample_peak_block::<L>(black_box(&left), frames, L::zero());
++                let pr = meter_sample_peak_block::<L>(black_box(&right), frames, L::zero());
++                let mut peaks = [[0.0f32; 8]; 2];
++                pl.store(&mut peaks[0]);
++                pr.store(&mut peaks[1]);
++                for lane in 0..w {
++                    let input =
++                        MeterInput::strided(black_box(&left), black_box(&right), frames, w, lane)
++                            .unwrap();
++                    b[lane]
++                        .accumulator
++                        .observe_input_with_block_peak(
++                            input,
++                            sample + (k * frames) as u64,
++                            Some([peaks[0][lane], peaks[1][lane]]),
++                        )
++                        .unwrap();
++                }
++            }
++            tb.push(t.elapsed().as_nanos() as f64 / INNER as f64);
++            sample += (INNER * frames) as u64;
++            for m in a.iter_mut().chain(b.iter_mut()) {
++                while m.consumer.try_pop().is_ok() {}
++            }
++        }
++        ta.sort_by(|x, y| x.partial_cmp(y).unwrap());
++        tb.sort_by(|x, y| x.partial_cmp(y).unwrap());
++        (ta[ta.len() / 2], tb[tb.len() / 2])
++    }
++    for (name, (a, b)) in [
++        ("Simd8 SAMPLE_PEAK period 1536", run::<Simd8>(1536, MeterMetricSet::SAMPLE_PEAK, 3000)),
++        ("Simd8 SAMPLE_PEAK period 512", run::<Simd8>(512, MeterMetricSet::SAMPLE_PEAK, 3000)),
++        ("Simd4 SAMPLE_PEAK period 1536", run::<Simd4>(1536, MeterMetricSet::SAMPLE_PEAK, 3000)),
++        ("Simd8 ALL period 512 (pass wasted)", run::<Simd8>(512, MeterMetricSet::ALL, 3000)),
++    ] {
++        eprintln!("{name}: scalar {a:.0} ns/bank/block, pass+merge {b:.0} ns/bank/block, ratio {:.2}x", a / b);
++    }
++}
+diff --git a/crates/graph-compiler/src/lib.rs b/crates/graph-compiler/src/lib.rs
+index 2329e240..6f964d1d 100644
+--- a/crates/graph-compiler/src/lib.rs
++++ b/crates/graph-compiler/src/lib.rs
+@@ -9471,6 +9471,335 @@ mod tests {
+     /// the `builtins -> simd1` boundary does not exist in them at all. Issue #202 rec 2 fuses
+     /// across exactly that boundary, so every test that measures it has to compile the production
+     /// pair rather than the effect-only one.
++    /// VERIFY PROTOTYPE (#943) G3/G4-like end-to-end check.
++    fn zz_compile_selected_console(
++        model: &session::SessionModel,
++        plan_id: u64,
++        period: u32,
++        metrics: builtins::MeterMetricSet,
++        between: bool,
++        registry: &NativeEffectRegistry,
++    ) -> PreparedGraphBuiltinsArtifact {
++        let session = compile_session(
++            model,
++            CompileCaps {
++                max_compiled_model_bytes: u64::MAX,
++                max_requested_runtime_bytes: u64::MAX,
++                max_single_allocation_bytes: u64::MAX,
++                max_queue_items: u64::MAX,
++                max_source_ring_frames: u64::MAX,
++                max_source_ring_bytes: u64::MAX,
++            },
++        )
++        .expect("compiled console model");
++        let requests: Vec<builtins_compiler::SelectedMeterRequest> = model
++            .tracks
++            .iter()
++            .enumerate()
++            .map(|(index, track)| builtins_compiler::SelectedMeterRequest {
++                request: MeterRequest {
++                    handle: MeterHandle(NonZeroU64::new(index as u64 + 1).expect("handle")),
++                    track_id: track.id.as_str().to_owned(),
++                    tap: MeterTap::PostMatrix,
++                    config: MeterConfig {
++                        period_frames: NonZeroU32::new(period).expect("period"),
++                        peak_hold_frames: 0,
++                        peak_decay_db_per_second: 0.0,
++                        queue_capacity: NonZeroUsize::new(64).expect("constant"),
++                        reset_generation: 0,
++                    },
++                },
++                metrics,
++            })
++            .collect();
++        let controls: Vec<TrackControlRequest> = model
++            .tracks
++            .iter()
++            .map(|track| TrackControlRequest {
++                track_id: track.id.as_str().to_owned(),
++                queue_capacity: NonZeroUsize::new(16).expect("constant"),
++            })
++            .collect();
++        let caps = BuiltinCompileCaps {
++            maximum_total_state_bytes: u64::MAX,
++            maximum_total_retained_payload_bytes: u64::MAX,
++            maximum_total_meter_items: u64::MAX,
++            maximum_total_meter_bytes: u64::MAX,
++            maximum_single_allocation_bytes: u64::MAX,
++            maximum_meter_streams: u64::MAX,
++            maximum_period_frames: u32::MAX,
++            maximum_peak_hold_frames: u32::MAX,
++            maximum_smoothing_samples: u32::MAX,
++        };
++        let builtins = if between {
++            builtins_compiler::prepare_selected_session_builtins_between_render_calls(
++                &session, &requests, &controls, caps,
++            )
++        } else {
++            builtins_compiler::prepare_selected_session_builtins_with_console(
++                &session, &requests, &controls, caps,
++            )
++        }
++        .expect("prepared selected console builtins");
++        GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
++            dispatch: host_dispatch(),
++            plan_id,
++            effects: prepare_native_session_effects(
++                &session,
++                registry,
++                EffectCompileCaps {
++                    maximum_total_state_bytes: 1 << 22,
++                    maximum_scratch_bytes: 1 << 20,
++                    maximum_automation_spans_per_block: 32,
++                },
++            )
++            .expect("prepared console effects"),
++            builtins,
++            caps: integration_caps(),
++        })
++        .unwrap_or_else(|_| panic!("production console graph"))
++    }
++
++    fn zz_frame_bits(frame: &MeterSnapshot) -> Vec<u64> {
++        let lane = |l: &builtins::MeterLaneSnapshot| {
++            [
++                u64::from(l.sample_peak.to_bits()),
++                l.rms.to_bits(),
++                l.energy.to_bits(),
++                u64::from(l.held_peak.to_bits()),
++                l.clipped_samples,
++                l.sanitized_samples,
++            ]
++        };
++        let mut v = vec![
++            frame.handle.0.get(),
++            u64::from(frame.present_metrics.bits()),
++            frame.window_sequence,
++            frame.start_sample,
++            frame.end_sample,
++            u64::from(frame.frames),
++            frame.cumulative_clipped_samples,
++            frame.cumulative_sanitized_samples,
++            frame.cumulative_discontinuities,
++            frame.cumulative_dropped_snapshots,
++        ];
++        v.extend(lane(&frame.left));
++        v.extend(lane(&frame.right));
++        v
++    }
++
++    #[test]
++    fn zz_verify943_banked_sample_peak_end_to_end() {
++        const BLOCKS: u64 = 24;
++        let Some(width) = BankWidth::for_backend(host_dispatch()) else {
++            return;
++        };
++        let cohorts = 64 / width.lanes() as u64;
++        let intended = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
++            .expect("intended fixture");
++        let registry = launch_native_effect_registry().expect("launch registry");
++        let mut plan_id = 9_430;
++        for between in [false, true] {
++            for (period, metrics) in [
++                (512, builtins::MeterMetricSet::SAMPLE_PEAK),
++                (300, builtins::MeterMetricSet::SAMPLE_PEAK),
++                (1536, builtins::MeterMetricSet::SAMPLE_PEAK),
++                (512, builtins::MeterMetricSet::ALL),
++            ] {
++                let mut arms = Vec::new();
++                for declined in [false, true] {
++                    plan_id += 1;
++                    let artifact = zz_compile_selected_console(
++                        &intended, plan_id, period, metrics, between, &registry,
++                    );
++                    graph::test_only_set_bank_sample_peak_declined(declined);
++                    let _ = builtins::verify_fast_merges_take();
++                    let out = render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
++                    let passes = graph::test_only_bank_sample_peak_passes();
++                    let merges = builtins::verify_fast_merges_take();
++                    graph::test_only_set_bank_sample_peak_declined(false);
++                    arms.push((out, passes, merges));
++                }
++                let ((on, on_passes, on_merges), (off, off_passes, off_merges)) =
++                    (&arms[0], &arms[1]);
++                eprintln!(
++                    "between={between} period={period} metrics={} passes on/off={on_passes}/{off_passes} \
++                     merges on/off={on_merges}/{off_merges} shape={:?} folds={} redirects={} transposes={} frames={}",
++                    metrics.bits(),
++                    [on.2, on.3],
++                    on.6,
++                    on.5,
++                    on.1,
++                    on.4.len()
++                );
++                assert_pcm_bits_equal(&on.0, &off.0, "banked sample peak changes no PCM");
++                assert_eq!((on.1, on.2, on.3, on.5, on.6), (off.1, off.2, off.3, off.5, off.6));
++                assert_eq!(on.4.len(), off.4.len());
++                for (a, b) in on.4.iter().zip(off.4.iter()) {
++                    assert_eq!(zz_frame_bits(a), zz_frame_bits(b));
++                }
++                assert!(on.4.iter().any(|f| f.left.sample_peak != 0.0));
++                assert!(
++                    on.4
++                        .iter()
++                        .any(|f| f.left.sample_peak.to_bits() != f.right.sample_peak.to_bits())
++                );
++                assert_eq!(*off_passes, 0);
++                if metrics == builtins::MeterMetricSet::SAMPLE_PEAK {
++                    assert_eq!(*on_passes, BLOCKS * cohorts);
++                    assert!(*on_merges > 0);
++                } else {
++                    assert_eq!(*on_passes, 0, "ALL meters never opt in");
++                }
++            }
++        }
++    }
++
++    #[test]
++    #[ignore]
++    fn zz_verify943_in_situ_paired() {
++        use std::time::Instant;
++        const ROUNDS: usize = 6_000;
++        const WARM: usize = 256;
++        let intended = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
++            .expect("intended fixture");
++        let registry = launch_native_effect_registry().expect("launch registry");
++        let bind = |plan_id: u64, metered: bool| {
++            let artifact = if metered {
++                zz_compile_selected_console(
++                    &intended,
++                    plan_id,
++                    1536,
++                    builtins::MeterMetricSet::SAMPLE_PEAK,
++                    true,
++                    &registry,
++                )
++            } else {
++                zz_compile_selected_console(
++                    &intended,
++                    plan_id,
++                    1536,
++                    builtins::MeterMetricSet::SAMPLE_PEAK,
++                    true,
++                    &registry,
++                )
++            };
++            let envelope = artifact.envelope();
++            let nodes = artifact
++                .external_binding_nodes()
++                .map(|node| GraphNodeBinding::new(node.clone(), console_track_input_binding(node)))
++                .collect();
++            artifact
++                .into_bound(GraphRuntimeBindings {
++                    envelope,
++                    nodes,
++                    observers: Vec::new(),
++                })
++                .unwrap_or_else(|failure| panic!("bind: {}", failure.code))
++        };
++        // arm 0: pass on; arm 1: pass declined (scalar meters), both SAMPLE_PEAK PostMatrix x64.
++        let mut arms = [bind(9_601, true), bind(9_602, true)];
++        let frames = 128usize;
++        let mut pcm = vec![0.0_f32; frames * 2];
++        let mut times: [Vec<f64>; 2] = [Vec::new(), Vec::new()];
++        let mut digests = [0u64; 2];
++        for round in 0..(WARM + ROUNDS) {
++            for (arm, bound) in arms.iter_mut().enumerate() {
++                graph::test_only_set_bank_sample_peak_declined(arm == 1);
++                let t = Instant::now();
++                bound
++                    .plan
++                    .render(
++                        RenderIo {
++                            input: None,
++                            output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames)
++                                .expect("output"),
++                        },
++                        RenderTime {
++                            absolute_sample: (round * frames) as u64,
++                        },
++                    )
++                    .expect("render");
++                let dt = t.elapsed().as_nanos() as f64;
++                for sample in &pcm {
++                    digests[arm] = digests[arm].rotate_left(5) ^ u64::from(sample.to_bits());
++                }
++                for stream in &mut bound.meter_consumers {
++                    while stream.consumer.try_pop().is_ok() {}
++                }
++                if round >= WARM {
++                    times[arm].push(dt);
++                }
++            }
++        }
++        graph::test_only_set_bank_sample_peak_declined(false);
++        assert_eq!(digests[0], digests[1]);
++        let mut deltas: Vec<f64> = times[1].iter().zip(&times[0]).map(|(b, a)| b - a).collect();
++        deltas.sort_by(|a, b| a.partial_cmp(b).unwrap());
++        for t in &mut times {
++            t.sort_by(|a, b| a.partial_cmp(b).unwrap());
++        }
++        eprintln!(
++            "in-situ web shape SAMPLE_PEAK PostMatrix x64: p50 pass-on {:.1} us, pass-declined {:.1} us, paired median saving {:.1} us",
++            times[0][ROUNDS / 2] / 1e3,
++            times[1][ROUNDS / 2] / 1e3,
++            deltas[ROUNDS / 2] / 1e3
++        );
++    }
++
++    #[test]
++    fn zz_verify943_realtime_audit() {
++        const BLOCKS: u64 = 1_000;
++        let Some(width) = BankWidth::for_backend(host_dispatch()) else {
++            return;
++        };
++        let cohorts = 64 / width.lanes() as u64;
++        let intended = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
++            .expect("intended fixture");
++        let registry = launch_native_effect_registry().expect("launch registry");
++        let artifact = zz_compile_selected_console(
++            &intended,
++            9_499,
++            1536,
++            builtins::MeterMetricSet::SAMPLE_PEAK,
++            true,
++            &registry,
++        );
++        let envelope = artifact.envelope();
++        let frames = envelope.quantum.0 as usize;
++        let nodes = artifact
++            .external_binding_nodes()
++            .map(|node| GraphNodeBinding::new(node.clone(), console_track_input_binding(node)))
++            .collect();
++        let bound = artifact
++            .into_bound(GraphRuntimeBindings {
++                envelope,
++                nodes,
++                observers: Vec::new(),
++            })
++            .unwrap_or_else(|failure| panic!("bind: {}", failure.code));
++        let mut plan = bound.plan;
++        let mut pcm = vec![0.0_f32; frames * 2];
++        graph::test_only_set_bank_sample_peak_declined(false);
++        audit::warm_up();
++        audit::reset();
++        for block in 0..BLOCKS {
++            plan.render(
++                RenderIo {
++                    input: None,
++                    output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames).expect("output"),
++                },
++                RenderTime {
++                    absolute_sample: block * frames as u64,
++                },
++            )
++            .expect("render");
++        }
++        let snapshot = audit::snapshot();
++        assert_eq!(snapshot.total(), 0, "{snapshot:?}");
++        assert_eq!(graph::test_only_bank_sample_peak_passes(), BLOCKS * cohorts);
++    }
++
+     fn compile_console_model_with_builtins(
+         model: &session::SessionModel,
+         plan_id: u64,
+diff --git a/crates/graph/src/lib.rs b/crates/graph/src/lib.rs
+index 336bae88..d378a362 100644
+--- a/crates/graph/src/lib.rs
++++ b/crates/graph/src/lib.rs
+@@ -26,7 +26,8 @@ pub use runtime::{
+ #[doc(hidden)]
+ pub use runtime::{
+     TestOnlyFailedBufferCapture, TestOnlySelectedSplitFader, TestOnlySplitPairTableWitness,
+-    test_only_arm_failed_buffer_capture, test_only_completion_disabled,
++    test_only_arm_failed_buffer_capture, test_only_bank_sample_peak_passes,
++    test_only_completion_disabled, test_only_set_bank_sample_peak_declined,
+     test_only_failed_buffer_capture, test_only_meter_input_counts, test_only_meter_input_reset,
+     test_only_observation_dispatch_counts, test_only_observation_dispatch_reset,
+     test_only_reset_selected_split_fader, test_only_reset_split_pair_table_witness,
+@@ -2116,6 +2117,9 @@ pub struct GraphResidentObservationBlock<'a> {
+     pub first_sample: u64,
+     /// Source facts for the graph block containing this resident lane.
+     pub validity: GraphObservationValidity,
++    /// VERIFY PROTOTYPE (#943): `[left, right]` block peak of this lane, `Some` only when the
++    /// unit's pass ran this block.
++    pub sample_peak: Option<[f32; 2]>,
+ }
+ /// A bounded observer invoked after its node has completed.
+ pub trait GraphRuntimeObserver: Send {
+@@ -2147,6 +2151,11 @@ pub trait GraphRuntimeObserver: Send {
+         None
+     }
+ 
++    /// VERIFY PROTOTYPE (#943): bind-time opt-in to the banked sample-peak pass.
++    fn accepts_sample_peak(&self) -> bool {
++        false
++    }
++
+     /// Invalidate a pending capture after a failed graph render.
+     ///
+     /// The default keeps existing meter and observer implementations unchanged.
+diff --git a/crates/graph/src/runtime.rs b/crates/graph/src/runtime.rs
+index 60b9edb7..d18f0869 100644
+--- a/crates/graph/src/runtime.rs
++++ b/crates/graph/src/runtime.rs
+@@ -57,6 +57,24 @@ thread_local! {
+     static TEST_ONLY_METER_INPUT_COUNTS: std::cell::Cell<[u64; 3]> = const { std::cell::Cell::new([0; 3]) };
+     static TEST_ONLY_OBSERVATION_DISPATCH_COUNTS: std::cell::Cell<[u64; 2]> =
+         const { std::cell::Cell::new([0; 2]) };
++    static TEST_ONLY_BANK_SAMPLE_PEAK_DECLINED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
++    static TEST_ONLY_BANK_SAMPLE_PEAK_PASSES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
++}
++
++/// VERIFY PROTOTYPE (#943).
++#[cfg(any(test, feature = "test-support"))]
++#[doc(hidden)]
++pub fn test_only_set_bank_sample_peak_declined(declined: bool) {
++    TEST_ONLY_BANK_SAMPLE_PEAK_DECLINED.with(|value| value.set(declined));
++    TEST_ONLY_BANK_SAMPLE_PEAK_PASSES.with(|value| value.set(0));
++}
++
++/// VERIFY PROTOTYPE (#943).
++#[cfg(any(test, feature = "test-support"))]
++#[doc(hidden)]
++#[must_use]
++pub fn test_only_bank_sample_peak_passes() -> u64 {
++    TEST_ONLY_BANK_SAMPLE_PEAK_PASSES.with(std::cell::Cell::get)
+ }
+ 
+ /// Reset the test-only counts of prepared observer and bank-member object accesses.
+@@ -1614,6 +1632,25 @@ impl RuntimeUnit {
+         }
+     }
+ 
++    /// VERIFY PROTOTYPE (#943): bind-time only.
++    fn accepts_sample_peak(&self) -> bool {
++        match self {
++            Self::Op(_) => false,
++            Self::Bank { members, lanes, .. } => members
++                .len()
++                .checked_sub(*lanes)
++                .and_then(|start| members.get(start..))
++                .is_some_and(|finals| {
++                    finals.iter().any(|member| {
++                        member
++                            .observers
++                            .iter()
++                            .any(|observer| observer.observer.accepts_sample_peak())
++                    })
++                }),
++        }
++    }
++
+     pub(crate) fn qualification_counters(&self) -> [u64; 2] {
+         match self {
+             Self::Op(_) => [0, 0],
+@@ -2246,6 +2283,8 @@ pub(crate) struct UnitIdentity {
+     /// Set by [`source_plane_table`] at bind; zero for a plain unit. A bank has at most eight lanes,
+     /// and the byte fits the existing identity padding.
+     source_lanes: u8,
++    /// VERIFY PROTOTYPE (#943): some final-slot member holds an observer that accepts the pass.
++    sample_peak: bool,
+     pub(crate) stages: u32,
+     pub(crate) upstream_of_seam_stages: u32,
+     pub(crate) lane_tracks: Box<[Box<str>]>,
+@@ -2611,6 +2650,7 @@ impl Runtime {
+         );
+         for (row, unit) in identity.iter_mut().zip(&units) {
+             row.observed = unit.has_observers();
++            row.sample_peak = unit.accepts_sample_peak();
+         }
+         #[cfg(any(test, feature = "test-support"))]
+         if !split_pairs.is_empty() {
+@@ -3036,13 +3076,14 @@ impl Runtime {
+         if !observed {
+             return Ok(());
+         }
++        let sample_peak = self.identity[index].sample_peak;
+         let output = self.output_unit == Some(index);
+         let Self { lease, units, .. } = self;
+         match &mut units[index] {
+             RuntimeUnit::Op(op) if output => {
+                 observe_output(op, host.planes(), first_sample, validity)
+             }
+-            RuntimeUnit::Op(op) => observe(op, lease, first_sample, None, false, validity),
++            RuntimeUnit::Op(op) => observe(op, lease, first_sample, None, false, validity, None),
+             RuntimeUnit::Bank {
+                 members,
+                 lanes,
+@@ -3072,6 +3113,22 @@ impl Runtime {
+                 let frames = u32::try_from(lease.frames()).ok();
+                 let final_start = members.len().checked_sub(population);
+                 let chain: &BankChain = chain;
++                #[cfg(any(test, feature = "test-support"))]
++                let sample_peak = sample_peak
++                    && !TEST_ONLY_BANK_SAMPLE_PEAK_DECLINED.with(std::cell::Cell::get);
++                let mut peaks = [[0.0_f32; 8]; 2];
++                let peaked = sample_peak
++                    && eligible
++                    && frames
++                        .and_then(|frames| chain.final_output_block(frames).map(|b| (frames, b)))
++                        .is_some_and(|(frames, (left, right))| {
++                            bank_sample_peak(chain.width(), left, right, frames as usize, &mut peaks);
++                            true
++                        });
++                #[cfg(any(test, feature = "test-support"))]
++                if peaked {
++                    TEST_ONLY_BANK_SAMPLE_PEAK_PASSES.with(|value| value.set(value.get() + 1));
++                }
+                 for (index, member) in members.iter_mut().enumerate() {
+                     #[cfg(any(test, feature = "test-support"))]
+                     test_only_observation_dispatch_member_access();
+@@ -3084,7 +3141,10 @@ impl Runtime {
+                     // The member buffer a folded lane's scatter skipped (issue #885).
+                     let folded =
+                         final_lane.is_some_and(|lane| chain.fold_lanes().get(lane) == Some(&true));
+-                    observe(member, lease, first_sample, resident, folded, validity)?;
++                    let peak = final_lane
++                        .filter(|_| peaked)
++                        .map(|lane| [peaks[0][lane], peaks[1][lane]]);
++                    observe(member, lease, first_sample, resident, folded, validity, peak)?;
+                 }
+                 Ok(())
+             }
+@@ -3591,6 +3651,35 @@ fn output_and_sidechain_planes<'b>(
+ 
+ // REALTIME_POLICY_END
+ 
++// REALTIME_POLICY_BEGIN
++/// VERIFY PROTOTYPE (#943): one lane pass per plane over the chain's final resident block.
++#[inline(never)]
++fn bank_sample_peak(
++    width: effect_contract::BankWidth,
++    left: &[f32],
++    right: &[f32],
++    frames: usize,
++    peaks: &mut [[f32; 8]; 2],
++) {
++    use lane::Lane;
++    use lane::kernels::builtins::meter_sample_peak_block;
++    match width {
++        effect_contract::BankWidth::Four => {
++            meter_sample_peak_block::<lane::Simd4>(left, frames, lane::Simd4::zero())
++                .store(&mut peaks[0]);
++            meter_sample_peak_block::<lane::Simd4>(right, frames, lane::Simd4::zero())
++                .store(&mut peaks[1]);
++        }
++        effect_contract::BankWidth::Eight => {
++            meter_sample_peak_block::<lane::Simd8>(left, frames, lane::Simd8::zero())
++                .store(&mut peaks[0]);
++            meter_sample_peak_block::<lane::Simd8>(right, frames, lane::Simd8::zero())
++                .store(&mut peaks[1]);
++        }
++    }
++}
++// REALTIME_POLICY_END
++
+ // REALTIME_POLICY_BEGIN
+ /// Run one op's observers in binding order, offering each the resident view first.
+ ///
+@@ -3606,6 +3695,7 @@ fn observe(
+     resident: Option<rack::ResidentOutputLane<'_>>,
+     folded: bool,
+     validity: GraphObservationValidity,
++    sample_peak: Option<[f32; 2]>,
+ ) -> Result<(), RenderError> {
+     #[cfg(test)]
+     TEST_ONLY_OBSERVE_CALLS.with(|calls| calls.set(calls.get() + 1));
+@@ -3631,6 +3721,7 @@ fn observe(
+                         lane,
+                         first_sample,
+                         validity,
++                        sample_peak,
+                     })
+             {
+                 #[cfg(any(test, feature = "test-support"))]
+@@ -3705,6 +3796,7 @@ fn observe_one(
+                     lane,
+                     first_sample,
+                     validity,
++                    sample_peak: None,
+                 })
+         {
+             #[cfg(any(test, feature = "test-support"))]
+@@ -5662,6 +5754,7 @@ pub(crate) fn build_sequential(
+                 // Derived from the finished unit by the runtime constructor.
+                 observed: false,
+                 source_lanes: 0,
++                sample_peak: false,
+                 stages: u32::try_from(stages).unwrap_or(u32::MAX),
+                 upstream_of_seam_stages: u32::try_from(
+                     (0..stages)
+@@ -7588,6 +7681,7 @@ mod tests {
+                 resident_input: false,
+                 observed: false,
+                 source_lanes: 0,
++                sample_peak: false,
+                 stages: 1,
+                 upstream_of_seam_stages: 1,
+                 lane_tracks: Box::new([Box::from("track")]),
+@@ -7679,6 +7773,7 @@ mod tests {
+                 resident_input: false,
+                 observed: false,
+                 source_lanes: 0,
++                sample_peak: false,
+                 stages: 1,
+                 upstream_of_seam_stages: 1,
+                 lane_tracks: Box::new([Box::from("track")]),
+@@ -7802,6 +7897,7 @@ mod tests {
+                 Some(view),
+                 false,
+                 GraphObservationValidity::CLEAR,
++                None,
+             );
+             let take = accepts
+                 .iter()
+@@ -8061,6 +8157,7 @@ mod tests {
+             resident_input: false,
+             observed: false,
+             source_lanes: 0,
++            sample_peak: false,
+             stages: 1,
+             upstream_of_seam_stages: 1,
+             lane_tracks: (0..population)
+@@ -8231,6 +8328,7 @@ mod tests {
+             resident_input: false,
+             observed,
+             source_lanes: 0,
++            sample_peak: false,
+             stages: 1,
+             upstream_of_seam_stages: 0,
+             lane_tracks: Box::new([]),
+@@ -8503,6 +8601,7 @@ mod tests {
+                 resident_input: false,
+                 observed: false,
+                 source_lanes: 0,
++                sample_peak: false,
+                 stages: 1,
+                 upstream_of_seam_stages: 0,
+                 lane_tracks: Box::new([]),
+diff --git a/crates/lane/src/kernels/builtins.rs b/crates/lane/src/kernels/builtins.rs
+index c23f3e84..9ffbddf4 100644
+--- a/crates/lane/src/kernels/builtins.rs
++++ b/crates/lane/src/kernels/builtins.rs
+@@ -1555,3 +1555,18 @@ mod mixed_elision_tests {
+         assert_eq!(IDENTITY_RAMP_DISPATCHES.with(std::cell::Cell::get), 1);
+     }
+ }
++
++/// VERIFY PROTOTYPE (#943 interface item 1), policy-clean form.
++#[inline(always)]
++pub fn meter_sample_peak_block<L: Lane>(words: &[f32], frames: usize, peak: L) -> L {
++    debug_assert!(words.len() >= frames * L::WIDTH);
++    let lo = L::splat(f32::MIN_POSITIVE);
++    let hi = L::splat(f32::INFINITY);
++    let mut peak = peak;
++    for frame in words[..frames * L::WIDTH].chunks_exact(L::WIDTH) {
++        let a = L::load(frame).abs();
++        let c = L::select(L::mask_and(a.ge(lo), a.lt(hi)), a, L::zero());
++        peak = L::max(c, peak);
++    }
++    peak
++}
+diff --git a/crates/rack/src/lib.rs b/crates/rack/src/lib.rs
+index 945b3e4b..c2b2d93f 100644
+--- a/crates/rack/src/lib.rs
++++ b/crates/rack/src/lib.rs
+@@ -2175,6 +2175,22 @@ impl BankChain {
+         })
+     }
+ 
++    /// VERIFY PROTOTYPE (#943): the whole final resident block, same shape checks as
++    /// [`Self::final_output_lane`] minus the per-lane activity test.
++    #[must_use]
++    pub fn final_output_block(&self, frames: u32) -> Option<(&[f32], &[f32])> {
++        let lanes = self.scratch.width.lanes() as usize;
++        if frames == 0
++            || frames > self.scratch.quantum
++            || self.lanes != lanes
++            || self.active.len() != lanes
++        {
++            return None;
++        }
++        let words = usize::try_from(frames).ok()?.checked_mul(lanes)?;
++        Some((self.scratch.left.get(..words)?, self.scratch.right.get(..words)?))
++    }
++
+     /// Gather every active lane, run every non-identity slot over the resident block, scatter every
+     /// active lane back. No allocation, no shape `Result`, one transpose round-trip.
+     pub fn run<M: BankMembers + ?Sized>(
