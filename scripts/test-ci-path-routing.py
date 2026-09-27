@@ -654,6 +654,22 @@ def main() -> int:
         "        run: bash scripts/check-workspace-policy.sh\n",
         "        run: true\n",
     )
+    # Issue #1009: wasm-guests leaves the V8 spill leg to artifact-gates, so artifact-gates must run
+    # it on the downloaded artifact, after the pin check.
+    workflow_mutation_fails(
+        "qualification.yml",
+        "          python3 -B scripts/check-web-audioworklet-v8-spill.py "
+        "target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm\n",
+        "",
+    )
+    workflow_mutation_fails(
+        "qualification.yml",
+        "          shared-key: artifact-gates\n",
+        "          shared-key: artifact-gates\n"
+        "      - name: V8 spill gate before the pin check\n"
+        "        run: python3 -B scripts/check-web-audioworklet-v8-spill.py "
+        "target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm\n",
+    )
 
     # Baseline: the unmutated workspace() -- qualification.yml plus the router/checker/test
     # scripts, with none of the four retired workflows present -- must pass the checker outright.

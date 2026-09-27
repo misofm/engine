@@ -209,19 +209,34 @@ wasm gates: miso_gate_f64_lane_probe census (simd128): f64x2.promote_low_f32x4=2
 wasm gates: miso_gate_meter_block_probe is not vectorised on the simd128 leg: f64x2.promote_low_f32x4=0 f64x2.mul=2 f64x2.add=2 f64.promote_f32=4 f64.mul=0 f64.add=0 f32.{add,gt,abs}=0 f32x4.abs=1 f32x4.add=2
 ```
 
-## The EQ's stationary cascade loops under V8 (issue #1000)
+## The EQ's stationary cascade loops under V8 (issues #1000, #1009)
 
-`scripts/check-web-audioworklet-v8-spill.py`, run last by `scripts/run-wasm-gates.sh` on the
-AudioWorklet module that script builds with `build-web-audioworklet.sh`'s cargo line. The pinned
-Node (`v22.23.2`, V8 `12.4.254.21-node.56`, Linux x64, an x86-64-v3 host) compiles the parametric
-EQ's `f32x4` `process_bank` and `process_bank_mono` with TurboFan (`--no-liftoff
+`scripts/check-web-audioworklet-v8-spill.py` reads the shipped AudioWorklet module. It gets it from
+one build. CI runs it in `artifact-gates` on the downloaded artifact after that job's pin check.
+Locally `scripts/run-wasm-gates.sh` runs it last, on `build-web-audioworklet.sh --module-only`'s
+output: the delivery build's cargo line, without the pin check, since a batch repins only at its
+boundary. `wasm-guests` passes `--without-v8-spill`, and `check-ci-path-routing.py` refuses that
+flag unless `artifact-gates` runs the gate after its pin check.
+
+The pinned Node (`v22.23.2`, V8 `12.4.254.21-node.56`, Linux x64, an x86-64-v3 host) compiles the
+parametric EQ's `f32x4` `process_bank` and `process_bank_mono` with TurboFan (`--no-liftoff
 --no-wasm-lazy-compilation`). The gate fails when an innermost loop of the stationary, select-free
-cascade carries a value from one iteration to the next through a stack slot: a slot live across the
-back edge (read from the header before it is written), or a slot on a recurrence (a value loaded
-from it reaches a store to it around the loop). It holds the dual depth-one tail and the mono pair
-and tail. It reports the dual pair and does not hold it. The functions are found by symbol and the
-loops by what they compute (SVF steps per iteration, streams, select-free), never by offset. A held
-row that finds no loop fails closed.
+cascade carries a value from one iteration to the next through a stack slot. There are two rules:
+
+- **Live across the back edge.** The slot is read from the header before it is written.
+- **On a recurrence.** A value loaded from the slot reaches a store to it along a path that crosses
+  the header. A path inside one iteration is slot reuse, which V8 does freely, and is allowed
+  (#1009).
+
+It holds the dual depth-one tail and the mono pair and tail, and reports the dual pair without
+holding it. The functions are found by symbol. The loops are found by what they compute: SVF steps
+per iteration, streams, select-free, and for a tail, reachable from a pair loop. They are never
+found by offset. A held row that matches no loop, or more than one, fails closed.
+
+**Re-pinning Node.** Build the red arms below and the current head, run the gate on the new V8, and
+record what each gives. Keep the rule whatever they show: if a red arm turns green on the new V8,
+say so, rather than changing a row to match. The first run on a CI runner is its own observation,
+so every verdict line names the CPU model.
 
 **What it proves.** That the reference V8 runs none of the held loops' values through memory from
 one iteration to the next: the mechanism that made #977 attempt 1's standing one-band browser EQ

@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """V8 register-allocation gate over the EQ's stationary cascade loops in the shipped browser module.
 
-Issue #1000. The input is the shipped AudioWorklet module, `host_web.wasm` built with
-`scripts/build-web-audioworklet.sh`'s cargo line. The pinned Node's V8 compiles the parametric EQ's
-two `f32x4` bank bodies with TurboFan; the gate finds the stationary cascade's innermost loops in
-that machine code and fails when one carries a value from one iteration to the next through a stack
-slot. It times nothing. `scripts/run-wasm-gates.sh` builds the module and runs it.
+Issues #1000 and #1009. The input is the shipped AudioWorklet module. The pinned Node's V8
+compiles the parametric EQ's two `f32x4` bank bodies with TurboFan; the gate finds the stationary
+cascade's innermost loops in that machine code and fails when one carries a value from one iteration
+to the next through a stack slot. It times nothing.
+
+It reads the bytes that ship, from one build. CI runs it in `artifact-gates` on the downloaded
+artifact after that job has verified it against its pin. Locally `scripts/run-wasm-gates.sh` runs
+it on `scripts/build-web-audioworklet.sh --module-only`'s output: the delivery build's own cargo
+line, without the pin check, since a batch repins only at its boundary.
 
 Why it exists
 -------------
@@ -26,12 +30,15 @@ such a slot, and either one fails the loop:
 
 * **Live across the back edge**: the slot is read on a path from the loop's header before it is
   written (the #977 attempt-1 tail: reloaded at the top, stored mid-iteration).
-* **On a recurrence**: a value loaded from the slot reaches, through registers and slots and around
-  the back edge, a store to the same slot. This is the same mechanism wherever V8 lays out the
-  store and the reload, including a reload on the back-edge path itself, which leaves nothing live
-  across the header in memory (the masked mono tail does exactly that).
+* **On a recurrence**: a value loaded from the slot reaches a store to the same slot along a path,
+  through registers and slots, that crosses the loop's header. This is the same mechanism wherever
+  V8 lays out the store and the reload, including a reload on the back-edge path itself, which
+  leaves nothing live across the header in memory (the masked mono tail does exactly that).
 
-A loop-invariant spill that is only ever reloaded is neither, and is allowed.
+A loop-invariant spill that is only ever reloaded is neither, and is allowed. So is slot reuse
+inside one iteration: V8 packs spill ranges that do not overlap into one slot, and a value that is
+fresh every iteration may be spilled, reloaded and turned into another value spilled to the same
+slot. No path from the load to the store crosses the header, so nothing is carried (issue #1009).
 
 It proves nothing about speed beyond that one mechanism, and it measures no time. It is a proxy
 for the browser twice over: Node's V8 is not a given Chrome's, and eager TurboFan without Liftoff's
@@ -54,17 +61,23 @@ where it sits in the listing:
 * **Select-free**: no `vpor`/`vorps`/blend. The dry-mask kernels' bitselect needs one; the flush
   does not.
 
+* **After the pairs** (the tails only): `interleave` runs the depth-2 passes and then the depth-1
+  tail, so the tail is reachable from a pair loop. The ramp path's per-section `svf_block` loop
+  computes exactly a mono tail's arithmetic (one section, one stream); today only V8's unrolling of
+  it by three gives it another shape. It is not reachable from the stationary passes, so this
+  tells the two apart with or without unrolling (issue #1009).
+
 | function | loop | streams | steps | |
 |---|---|---:|---:|---|
-| dual | depth-1 tail (`svf_cascade_interleaved`, no dry lane) | 2 | 2 | held |
+| dual | depth-1 tail (`svf_cascade_interleaved`, no dry lane), after the pair | 2 | 2 | held |
 | mono | depth-2 pair (`svf_cascade_skewed`, admitted plan) | 1 | 2 | held |
-| mono | depth-1 tail | 1 | 1 | held |
+| mono | depth-1 tail, after the pair | 1 | 1 | held |
 | dual | depth-2 pair | 2 | 4 | reported |
 
-Every select-free innermost loop of a held row's function and shape is held to the rule, and a held
-row that matches no loop fails closed, printing the loops that were found. The masked kernels (a
-refused or all-live plan's pairs, a tail with a dry lane) are out of scope: the masked depth-one
-tails carried a slot before #977.
+A held row must match exactly one select-free innermost loop of its function. A row that matches
+none, or more than one, fails closed and prints the loops that were found: nothing is checked, so
+nothing passes. The masked kernels (a refused or all-live plan's pairs, a tail with a dry lane) are
+out of scope: the masked depth-one tails carried a slot before #977.
 
 **Why the dual pair is reported, not held.** It carries ten values across its back edge (eight
 integrators and two skew carries) beside 24 loop-invariant coefficients, in sixteen vector
@@ -85,7 +98,13 @@ Checked before anything else: the exact Node and V8 versions, the platform and a
 the host CPU features V8 12.4 selects instructions by (all within x86-64-v3). The V8 flags are
 `V8_FLAGS`, and the child runs without `NODE_OPTIONS`. The listing must come from TurboFan with a
 non-empty protected-instruction table (trap-handler bounds checks, as a browser uses on x64).
-Nothing in the listing is pinned: no offset, register or instruction count.
+Nothing in the listing is pinned: no offset, register or instruction count. Every verdict line
+names the CPU model, since a CI runner's codegen is observed only there.
+
+Re-pinning Node (`PINNED_NODE`, `PINNED_V8`) is a change to the reference V8, not a chore: build
+the #1000 red arms (#977 attempt 1, and the one-token tail edit) and the current head, run the gate
+on the new V8, and record what each gives. Keep the rule whatever they show; if a red arm turns
+green, say so, rather than loosening a row to match.
 
 Usage
 -----
@@ -132,13 +151,15 @@ class Row:
     streams: int
     steps: int
     held: bool = True
+    after: str | None = None  # the label of a row whose loops this loop must be reachable from
 
 
+PAIR = "depth-2 pair, select-free"
 LOOPS = (
-    Row("dual", "depth-1 tail, select-free", streams=2, steps=2),
-    Row("dual", "depth-2 pair, select-free", streams=2, steps=4, held=False),
-    Row("mono", "depth-2 pair, select-free", streams=1, steps=2),
-    Row("mono", "depth-1 tail, select-free", streams=1, steps=1),
+    Row("dual", "depth-1 tail, select-free", streams=2, steps=2, after=PAIR),
+    Row("dual", PAIR, streams=2, steps=4, held=False),
+    Row("mono", PAIR, streams=1, steps=2),
+    Row("mono", "depth-1 tail, select-free", streams=1, steps=1, after=PAIR),
 )
 STEP_SHAPE = {"vmulps": 7, "vaddps": 9, "vsubps": 2}
 SELECT_OPS = frozenset({"vpor", "vorps", "vpblendvb", "vblendvps", "vpternlogd", "vpternlogq"})
@@ -181,6 +202,8 @@ class Block:
 class Loop:
     instructions: list[Instruction]
     blocks: int
+    reaches: frozenset[int]  # every block reachable from the loop's blocks
+    members: frozenset[int]
     ops: Counter
     steps: int | None
     streams: int
@@ -255,23 +278,32 @@ def check_listing_header(listing: str, symbol: str, index: int) -> None:
 def build_blocks(instructions: list[Instruction], tables: dict[int, int]) -> dict[int, Block]:
     offsets = [instruction.offset for instruction in instructions]
     known = set(offsets)
-    table_starts = sorted(tables)
 
-    def table_targets(i: int) -> list[int]:
-        # `leaq r10,[rip+d]` then `jmp [r10+reg*8]`: the table starts d bytes past the lea and runs
-        # to the next table.
+    # `leaq r10,[rip+d]` then `jmp [r10+reg*8]`: the jump's table starts d bytes past the lea. It
+    # runs over consecutive eight-byte entries up to the next jump's table.
+    table_begins: dict[int, int] = {}
+    for i, instruction in enumerate(instructions):
+        if instruction.op != "jmp" or not instruction.operands[0].startswith("[r10+"):
+            continue
         for back in range(i - 1, max(i - 8, -1), -1):
             address = TABLE_ADDRESS.match(instructions[back].text)
             if address is not None:
-                begin = instructions[back + 1].offset + int(address[1], 16)
-                end = next((start for start in table_starts if start > begin), None)
-                targets = [
-                    tables[o] for o in table_starts if o >= begin and (end is None or o < end)
-                ]
-                if targets:
-                    return targets
+                table_begins[i] = instructions[back + 1].offset + int(address[1], 16)
                 break
-        raise GateError(f"indirect jump at {instructions[i].offset:#x} without a jump table")
+        else:
+            raise GateError(f"indirect jump at {instruction.offset:#x} without a table address")
+    begins = sorted(set(table_begins.values()))
+
+    def table_targets(i: int) -> list[int]:
+        begin = table_begins[i]
+        end = next((other for other in begins if other > begin), None)
+        targets, entry = [], begin
+        while entry in tables and (end is None or entry < end):
+            targets.append(tables[entry])
+            entry += 8
+        if not targets:
+            raise GateError(f"indirect jump at {instructions[i].offset:#x} has an empty table")
+        return targets
 
     branches: dict[int, list[int]] = {}
     leaders = {offsets[0]}
@@ -462,10 +494,16 @@ def data_flow(instruction: Instruction) -> tuple[list[str], list[str]]:
 
 
 def recurrent_slots(blocks: dict[int, Block], header: int, body: set[int]) -> set[str]:
-    """Slots on a loop-carried dependence cycle: a value loaded from the slot reaches, through
-    registers and slots and around the back edge, a store to the same slot. This is the #977
-    mechanism wherever V8 lays out the store and the reload, including a reload on the back-edge
-    path itself, which leaves nothing live across the header in memory."""
+    """Slots on a loop-carried dependence cycle: a value loaded from the slot reaches a store to
+    the same slot along a path, through registers and slots, that crosses the loop's header. This
+    is the #977 mechanism wherever V8 lays out the store and the reload, including a reload on the
+    back-edge path itself, which leaves nothing live across the header in memory.
+
+    A path that stays inside one iteration is slot reuse, not a carry: V8 packs spill ranges that
+    do not overlap into one slot, so a value that is fresh every iteration can be spilled,
+    reloaded and turned into another value spilled to the same slot. The taint therefore carries
+    a bit, set when it flows along the back edge into the header, and only a crossed value
+    stored to its own slot counts."""
     stored = {
         slot
         for node in body
@@ -474,26 +512,35 @@ def recurrent_slots(blocks: dict[int, Block], header: int, body: set[int]) -> se
     }
     found = set()
     for slot in stored:
-        tainted: dict[int, set[str]] = {node: set() for node in body}
+        # location -> whether some path to it from a load of `slot` crossed the header.
+        tainted: dict[int, dict[str, bool]] = {node: {} for node in body}
         changed = True
         while changed:
             changed = False
             for node in body:
-                state = set(tainted[node])
+                state = dict(tainted[node])
                 for instruction in blocks[node].instructions:
                     written, read = data_flow(instruction)
-                    hot = slot in read or bool(state.intersection(read))
-                    if hot and slot in written:
+                    sources = [state[location] for location in read if location in state]
+                    if slot in read and slot not in state:
+                        sources.append(False)  # a fresh load of the slot starts a path
+                    crossed = any(sources)
+                    if sources and crossed and slot in written:
                         found.add(slot)
                     for location in written:
-                        if hot:
-                            state.add(location)
+                        if sources:
+                            state[location] = crossed
                         else:
-                            state.discard(location)
+                            state.pop(location, None)
                 for child in blocks[node].successors:
-                    if child in body and not state <= tainted[child]:
-                        tainted[child] |= state
-                        changed = True
+                    if child not in body:
+                        continue
+                    target = tainted[child]
+                    for location, bit in state.items():
+                        bit = bit or child == header  # along the back edge
+                        if target.get(location) is None or (bit and not target[location]):
+                            target[location] = bit
+                            changed = True
     return found
 
 
@@ -525,7 +572,16 @@ def analyse(listing: str) -> list[Loop]:
         )
         select_free = not any(ops[op] for op in SELECT_OPS)
         carried = sorted(live_across(blocks, header, body) | recurrent_slots(blocks, header, body))
-        result.append(Loop(code, len(body), ops, steps, streams, select_free, carried))
+        reaches, pending = set(body), list(body)
+        while pending:
+            for child in blocks[pending.pop()].successors:
+                if child not in reaches:
+                    reaches.add(child)
+                    pending.append(child)
+        result.append(
+            Loop(code, len(body), frozenset(reaches), frozenset(body), ops, steps, streams,
+                 select_free, carried)
+        )
     return result
 
 
@@ -538,6 +594,24 @@ def describe(loop: Loop) -> str:
     )
 
 
+def shaped(loops: list[Loop], row: Row, rows: tuple[Row, ...]) -> list[Loop]:
+    """The select-free loops of a row's shape, restricted by its `after` row."""
+    matched = [
+        loop
+        for loop in loops
+        if loop.select_free and loop.steps == row.steps and loop.streams == row.streams
+    ]
+    if row.after is not None:
+        (before,) = [r for r in rows if r.function == row.function and r.label == row.after]
+        sources = shaped(loops, before, rows)
+        matched = [
+            loop
+            for loop in matched
+            if any(loop is not source and loop.members <= source.reaches for source in sources)
+        ]
+    return matched
+
+
 def check_function(name: str, listing: str, rows: tuple[Row, ...] = LOOPS) -> int:
     """Hold one function's loops to its rows. Returns the number of failures."""
     loops = analyse(listing)
@@ -546,11 +620,7 @@ def check_function(name: str, listing: str, rows: tuple[Row, ...] = LOOPS) -> in
         if row.function != name:
             continue
         label = f"{name} {row.label}"
-        matched = [
-            loop
-            for loop in loops
-            if loop.select_free and loop.steps == row.steps and loop.streams == row.streams
-        ]
+        matched = shaped(loops, row, rows)
         if not row.held:
             for loop in matched or [None]:
                 state = (
@@ -560,31 +630,34 @@ def check_function(name: str, listing: str, rows: tuple[Row, ...] = LOOPS) -> in
                 )
                 print(f"info {label} (reported, not held): {state}")
             continue
-        if not matched:
+        if len(matched) != 1:
             failures += 1
+            where = f", reachable from the {row.after} loop," if row.after else ""
             print(
-                f"FAIL {label}: no innermost loop with {row.streams} streams and {row.steps} SVF "
-                "steps, so nothing was checked (fail closed). Innermost loops with SVF arithmetic:",
+                f"FAIL {label}: {len(matched)} innermost loops with {row.streams} streams and "
+                f"{row.steps} SVF steps{where} where exactly one was expected, so nothing was "
+                "checked (fail closed). Innermost loops with SVF arithmetic:",
                 file=sys.stderr,
             )
             for loop in loops:
                 if loop.ops["vmulps"]:
-                    print(f"  {describe(loop)}", file=sys.stderr)
+                    mark = "*" if any(loop is other for other in matched) else " "
+                    print(f"  {mark} {describe(loop)}", file=sys.stderr)
             continue
-        for loop in matched:
-            if not loop.carried:
-                print(f"ok   {label}: {describe(loop)}; no carried stack slot")
-                continue
-            failures += 1
-            print(
-                f"FAIL {label}: V8 carries {', '.join(loop.carried)} from one iteration to the "
-                f"next ({describe(loop)}). Listing, carried slots marked:",
-                file=sys.stderr,
-            )
-            for instruction in loop.instructions:
-                touched = set().union(*slot_accesses(instruction)) & set(loop.carried)
-                mark = "*" if touched else " "
-                print(f"  {mark} {instruction.offset:6x}  {instruction.text}", file=sys.stderr)
+        (loop,) = matched
+        if not loop.carried:
+            print(f"ok   {label}: {describe(loop)}; no carried stack slot")
+            continue
+        failures += 1
+        print(
+            f"FAIL {label}: V8 carries {', '.join(loop.carried)} from one iteration to the "
+            f"next ({describe(loop)}). Listing, carried slots marked:",
+            file=sys.stderr,
+        )
+        for instruction in loop.instructions:
+            touched = set().union(*slot_accesses(instruction)) & set(loop.carried)
+            mark = "*" if touched else " "
+            print(f"  {mark} {instruction.offset:6x}  {instruction.text}", file=sys.stderr)
     return failures
 
 
@@ -598,7 +671,8 @@ def child_environment() -> dict[str, str]:
     return {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
 
 
-def check_toolchain(node: str) -> None:
+def check_toolchain(node: str) -> str:
+    """Refuse any Node, V8, platform or host CPU but the pinned ones; return the CPU model."""
     script = "[process.version, process.versions.v8, process.platform, process.arch].join(' ')"
     probe = subprocess.run(
         [node, "-p", script],
@@ -613,12 +687,19 @@ def check_toolchain(node: str) -> None:
         )
     try:
         with open("/proc/cpuinfo", encoding="ascii", errors="replace") as cpuinfo:
-            flags = next(line for line in cpuinfo if line.startswith("flags")).split(":", 1)[1]
-    except (OSError, StopIteration):
+            fields = dict(
+                (key.strip(), value.strip())
+                for key, _, value in (line.partition(":") for line in cpuinfo)
+                if key.strip() in ("flags", "model name")
+            )
+        flags = fields["flags"]
+    except (OSError, KeyError):
         raise GateError("cannot read the host CPU flags from /proc/cpuinfo") from None
     missing = [flag for flag in REQUIRED_CPU_FLAGS if flag not in flags.split()]
     if missing:
         raise GateError(f"the host CPU lacks {', '.join(missing)}; V8 would select other code")
+    # Printed on every verdict: the runner's codegen is observed only there (issue #1009).
+    return fields.get("model name", "unknown model")
 
 
 def leb128(data: bytes, position: int) -> tuple[int, int]:
@@ -676,16 +757,14 @@ def v8_listing(node: str, artifact: str, index: int) -> str:
     return run.stdout
 
 
-def pinned_node() -> str:
+def pinned_node() -> tuple[str, str]:
     node = shutil.which("node")
     if node is None:
         raise GateError(f"node is not on PATH; the gate needs Node {PINNED_NODE}")
-    check_toolchain(node)
-    return node
+    return node, check_toolchain(node)
 
 
-def run_gate(artifact: str) -> int:
-    node = pinned_node()
+def run_gate(artifact: str, node: str) -> int:
     with open(artifact, "rb") as module:
         names = function_names(module.read())
     failures = 0
@@ -708,18 +787,28 @@ def run_gate(artifact: str) -> int:
 # -------------------------------------------------------------------------------------------------
 
 
+def assemble(code: list[str]) -> str:
+    """A V8-format listing of `code`. A line `NAME:` labels the next instruction, and `<+NAME>`
+    in a jump targets it."""
+    labels, rows = {}, []
+    for text in code:
+        if text.endswith(":"):
+            labels[text[:-1]] = 4 * len(rows)
+        else:
+            rows.append(text)
+    out = ["--- WebAssembly code ---", "Instructions (size = 0)"]
+    for i, text in enumerate(rows):
+        text = re.sub(r"<\+([A-Z]\w*)>", lambda m: f"0xdead  <+{labels[m[1]]:#x}>", text)
+        out.append(f"0x{4 * i:012x}  {4 * i:4x}  90909090             {text}")
+    return "\n".join(out) + "\n\n"
+
+
 def synthetic(body: list[str], outline: list[str] = ()) -> str:
-    """A V8-format listing: an entry, a loop closing over `body`, a return, then `outline`
-    (out-of-line code). `<+BODY>` jumps to the loop's first instruction, `<+OUTLINE>` to the
-    outline's."""
-    code = ["movl rax,0x40", *body, "subl rax,0x1", "jnz <+BODY>", "retl", *outline]
-    labels = {"<+BODY>": 4, "<+OUTLINE>": 4 * (len(code) - len(outline))}
-    rows = ["--- WebAssembly code ---", "Instructions (size = 0)"]
-    for i, text in enumerate(code):
-        for label, target in labels.items():
-            text = text.replace(label, f"0xdead  <+{target:#x}>")
-        rows.append(f"0x{4 * i:012x}  {4 * i:4x}  90909090             {text}")
-    return "\n".join(rows) + "\n\n"
+    """An entry, a loop closing over `body`, a return, then `outline` (out-of-line code)."""
+    return assemble(
+        ["movl rax,0x40", "BODY:", *body, "subl rax,0x1", "jnz <+BODY>", "retl", "OUTLINE:",
+         *outline]
+    )
 
 
 def svf_step(stream: str) -> list[str]:
@@ -758,6 +847,14 @@ def self_test() -> int:
         ("back-edge reload", synthetic(["vandps xmm11,xmm10,xmm0", "vminps xmm13,xmm11,xmm0",
                                         "vmovups [rbp-0xa0],xmm13", *tail,
                                         "vmovups xmm0,[rbp-0xa0]"]), (2, 2, ["[rbp-0xa0]"], True)),
+        # Slot reuse within an iteration (the #1000 verdict's finding 2): A is fresh each
+        # iteration, is spilled and reloaded, and B = f(A) is spilled to the same slot. No path
+        # from a load of the slot to a store to it crosses the header.
+        ("slot reuse", synthetic(["vmovdqu xmm3,[rbx+rdx*1]", "vandps xmm3,xmm3,xmm2",
+                                  "vmovups [rbp-0x40],xmm3", *tail, "vmovups xmm4,[rbp-0x40]",
+                                  "vandps xmm5,xmm4,xmm2", "vmovups [rbp-0x40],xmm5",
+                                  "vmovups xmm6,[rbp-0x40]", "vandps xmm7,xmm6,xmm2"]),
+         (2, 2, [], True)),
         # The same slot, but the value stored is a fresh zero: no recurrence.
         ("zero idiom", synthetic(["vpxor xmm13,xmm13,xmm13", "vmovups [rbp-0xa0],xmm13", *tail,
                                   "vmovups xmm13,[rbp-0xa0]"]), (2, 2, [], True)),
@@ -783,7 +880,8 @@ def self_test() -> int:
         if got != [expected]:
             failures += 1
             print(f"self-test FAIL {label}: got {got}, want [{expected}]", file=sys.stderr)
-    # Verdicts: carried fails, a reported row never fails, no loop fails closed, clean passes.
+    # Verdicts: carried fails, a reported row never fails, no loop fails closed, clean passes,
+    # then the two `after` layouts below.
     verdicts = []
     with open(os.devnull, "w") as sink:
         stdout, stderr = sys.stdout, sys.stderr
@@ -793,11 +891,23 @@ def self_test() -> int:
                                   (tail, True)):
                 rows = (Row("t", "tail", streams=2, steps=2, held=held),)
                 verdicts.append(check_function("t", synthetic(listing), rows))
+            # `after`: of two loops of the tail's shape, the one the pair reaches is the tail; a
+            # ramp-path loop of the same shape carrying a slot is not held. When the pair reaches
+            # both, the row is ambiguous and fails closed.
+            ramp = ["vmovups xmm0,[rbp-0x30]", *svf_step("rdx"), "vmovups [rbp-0x30],xmm1"]
+            layout = ["movl rax,0x40", "cmpl rdi,0x0", "jz <+RAMP>", "PAIR:", *tail,
+                      "subl rax,0x1", "jnz <+PAIR>", "TAIL:", *svf_step("rsi"), "subl rcx,0x1",
+                      "jnz <+TAIL>", "retl", "RAMP:", *ramp, "subl rdx,0x1", "jnz <+RAMP>", "retl"]
+            rows = (Row("t", "pair", streams=2, steps=2, held=False),
+                    Row("t", "tail", streams=1, steps=1, after="pair"))
+            verdicts.append(check_function("t", assemble(layout), rows))
+            layout[layout.index("jnz <+TAIL>") + 1] = "jmp <+RAMP>"
+            verdicts.append(check_function("t", assemble(layout), rows))
         finally:
             sys.stdout, sys.stderr = stdout, stderr
-    if verdicts != [1, 0, 1, 0]:
+    if verdicts != [1, 0, 1, 0, 0, 1]:
         failures += 1
-        print(f"self-test FAIL verdicts: {verdicts}, want [1, 0, 1, 0]", file=sys.stderr)
+        print(f"self-test FAIL verdicts: {verdicts}, want [1, 0, 1, 0, 0, 1]", file=sys.stderr)
     if failures:
         return 1
     print(f"V8 spill gate self-test: {len(cases) + len(verdicts)} cases ok")
@@ -818,18 +928,19 @@ def main() -> int:
     if args.check_toolchain == (args.artifact is not None):
         parser.error("give an artifact or --check-toolchain")
     try:
+        node, cpu = pinned_node()
+        where = f"Node {PINNED_NODE}, V8 {PINNED_V8}, {' '.join(V8_FLAGS)}, CPU {cpu}"
         if args.check_toolchain:
-            pinned_node()
-            print(f"V8 spill gate: toolchain ok (Node {PINNED_NODE}, V8 {PINNED_V8})")
+            print(f"V8 spill gate: toolchain ok ({where})")
             return 0
-        failures = run_gate(args.artifact)
+        failures = run_gate(args.artifact, node)
     except GateError as error:
         print(f"V8 spill gate: {error}", file=sys.stderr)
         return 2
     if failures:
-        print(f"V8 spill gate: {failures} failure(s)", file=sys.stderr)
+        print(f"V8 spill gate: {failures} failure(s) ({where})", file=sys.stderr)
         return 1
-    print(f"V8 spill gate: ok (Node {PINNED_NODE}, V8 {PINNED_V8}, {' '.join(V8_FLAGS)})")
+    print(f"V8 spill gate: ok ({where})")
     return 0
 
 

@@ -9,8 +9,11 @@
 #   wasm+simd128 -- and with it (backend simd4), which is the only place the v128 software FMA of
 #                   master plan §3.5 is actually executed.
 #
-# After the legs, `check_v8_spill` (issue #1000) holds the shipped AudioWorklet module's EQ cascade
-# loops to V8's register allocation under the pinned Node; it needs that Node on PATH.
+# After the legs, `check_v8_spill` (issues #1000, #1009) holds the shipped AudioWorklet module's EQ
+# cascade loops to V8's register allocation under the pinned Node; it needs that Node on PATH, and
+# only it does. `--without-v8-spill` leaves it out. CI passes that flag in `wasm-guests`, because
+# `artifact-gates` runs the same gate on the downloaded, pin-verified artifact: the bytes that ship,
+# with no second fat-LTO build.
 #
 # Every leg compares against pins generated from the scalar `Lane` oracle. A mismatch is never
 # fixed by re-pinning: it means a target stopped agreeing with the oracle, which is the whole
@@ -24,14 +27,15 @@ readonly GUEST="wasm_gate_guest.wasm"
 
 cd "$repository_root"
 
+v8_spill=1
+if [[ ${1-} == --without-v8-spill ]]; then
+    v8_spill=0
+    shift
+fi
 output_dir="${1:-target/ci/wasm-gates}"
 mkdir -p "$output_dir"
 evidence="$output_dir/wasm-gates.jsonl"
 : >"$evidence"
-
-# The V8 spill gate's pinned Node, V8 and host (issue #1000), checked before anything is built.
-python3 -B scripts/check-web-audioworklet-v8-spill.py --check-toolchain
-python3 -B scripts/check-web-audioworklet-v8-spill.py --self-test
 
 # The host runner and the native leg. `--locked` everywhere: the pinned wasmtime is part of the
 # gate, and a resolver that quietly moved it would change which modules validate.
@@ -167,26 +171,23 @@ check_f64_lane_lowering() {
     done
 }
 
-# Issue #1000: V8's register allocation of the parametric EQ's stationary cascade loops in the
-# shipped AudioWorklet module. `check-web-audioworklet-v8-spill.py` has the rule and what it does
-# and does not prove; it times nothing. The module is built with `build-web-audioworklet.sh`'s cargo
-# line, its strip and path-remap flags included, so these are the bytes that ship at this commit.
-# That script's digest pin is its own gate and is not repeated here: a batch repins it once, at its
-# boundary, and the loops are a property of the source whether or not the pin has caught up.
+# Issues #1000 and #1009: V8's register allocation of the parametric EQ's stationary cascade loops
+# in the shipped AudioWorklet module. `check-web-audioworklet-v8-spill.py` has the rule and what it
+# does and does not prove; it times nothing. The module comes from `build-web-audioworklet.sh
+# --module-only`, so the cargo line has one home and these are the bytes that ship at this commit.
+# That mode does not hold the module to the digest pin: a batch repins once, at its boundary, and
+# the loops are a property of the source whether or not the pin has caught up. The pins are checked
+# first, so a Node other than the pinned one fails before the build.
 check_v8_spill() {
-    local web_target="target/ci/wasm-gates-web" physical_root rustflags started finished module
-    physical_root="$(pwd -P)"
-    rustflags="-C target-feature=+simd128 -C strip=debuginfo"
-    rustflags+=" --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
-    rustflags+=" --remap-path-prefix=$physical_root=/repo"
-    (
-        cd "$physical_root"
-        CARGO_TARGET_DIR="$web_target" RUSTFLAGS="$rustflags" \
-            cargo build --locked --release --target "$TARGET" -p host-web
-    )
-    module="$web_target/$TARGET/release/host_web.wasm"
+    local module_dir="target/ci/wasm-gates-web" started finished
+    python3 -B scripts/check-web-audioworklet-v8-spill.py --check-toolchain
+    python3 -B scripts/check-web-audioworklet-v8-spill.py --self-test
+    rm -rf -- "$module_dir"
+    mkdir -p "$module_dir"
+    bash scripts/build-web-audioworklet.sh --module-only "$module_dir"
     started="$EPOCHREALTIME"
-    python3 -B scripts/check-web-audioworklet-v8-spill.py "$module"
+    python3 -B scripts/check-web-audioworklet-v8-spill.py \
+        "$module_dir/miso-engine-v1-audio-worklet.simd128.wasm"
     finished="$EPOCHREALTIME"
     awk -v a="$started" -v b="$finished" \
         'BEGIN { printf "wasm gates: V8 spill gate ran in %.1f s (build excluded)\n", b - a }'
@@ -205,7 +206,12 @@ for leg in scalar simd128; do
 done
 printf 'wasm gates: detector history resident in locals on both guest legs\n'
 check_f64_lane_lowering "target/ci/wasm-gates-simd128/$TARGET/release/$GUEST"
-check_v8_spill
+legs="native + wasm scalar + wasm simd128"
+if ((v8_spill)); then
+    check_v8_spill
+    legs+=" + V8 EQ loops"
+else
+    legs+="; V8 EQ loops left out (--without-v8-spill)"
+fi
 
-printf 'wasm gates: ok (native + wasm scalar + wasm simd128 + V8 EQ loops), evidence in %s\n' \
-    "$evidence"
+printf 'wasm gates: ok (%s), evidence in %s\n' "$legs" "$evidence"
