@@ -187,3 +187,166 @@ scripts/check-workspace-policy.sh` ok, and `bash scripts/test-workspace-policy.s
 6. **The register semantics are approximate.** The recurrence rule models x86 register semantics for
    the shapes these loops use: VEX three-operand, moves, two-operand arithmetic, compares and the
    zero idiom. An unknown shape reads all its operands, which can only add a path.
+
+## Sol attempt 1 verdict: PASS
+
+Verifier: Sol, 2026-09-27, on `1364cf2d` and on its merge with the current batch head `4cf2a104`
+(which now carries #971, #997 and #1001; `git merge-tree` is clean). Host EPYC 7313P, rustc 1.97.1,
+Node v22.23.2. Every module was built from `git archive` into its own target with the shipped cargo
+line and `CARGO_INCREMENTAL=0`.
+
+**Gate 1 reproduces.** I got the recorded bytes for head (`eee596e8…`), attempt 1 (`0db9b2f5…`)
+and the one-token tail edit (`59fda8ba…`):
+
+- head and the merged batch head (`9ac37ae7…`) are green;
+- attempt 1 is red on the dual tail with `[rbp-0xa0]`;
+- the one-token edit is red with `[rbp-0xc0]`.
+
+`build-web-audioworklet.sh` in repin mode prints `eee596e8…`, so today the gate's copied cargo line
+builds the bytes that ship. `run-wasm-gates.sh` passed end to end (cold, 250 s; the gate took 1.5 s).
+
+**Gate 2 reproduces.** Ten runs per arm (head, merged, attempt 1, one-token) gave one distinct output
+and one exit code per arm. The local `node` binary is byte-identical to nodejs.org's
+`node-v22.23.2-linux-x64` (`3517c2df…`), which is what `setup-node` installs.
+
+**It cannot pass vacuously on the paths I tried.**
+
+- **Symbol renamed.** Patching `12process_bank` to `12process_bonk` in the name section fails with
+  "0 functions match", exit 1.
+- **Tiering.** Dropping `--no-liftoff` exits 2 (the listing says Liftoff). Dropping
+  `--no-wasm-lazy-compilation`, or passing no flags, exits 2 (nothing printed). `--no-enable-avx`
+  fails all three held rows closed.
+- **Other V8 flags.** Under `--no-wasm-loop-unrolling`, `--no-turbo-loop-rotation` or
+  `--turbo-instruction-scheduling`, the gate still finds every row, and the loops stay clean.
+- **Tier-up.** I ran the eq1 and eq2 fixtures through the render export with default flags (Liftoff,
+  then dynamic tier-up). V8 12.4 then prints a TurboFan `process_bank` identical to the eager
+  listing, all 8,574 lines. So for this V8, eager compilation is exact, not a proxy; only Chrome's V8
+  version remains a gap.
+- **My own mutations.** Swapping the tail's `||` operands changes the bytes (`eb723b82…`) and stays
+  green. The one-token edit applied to the *mono* tail stays green, so V8 did not respill it. Hoisting
+  `nc1` per step builds identical bytes.
+
+**CI: the runner will run the gate, and it should pass.** `wasm-guests` is expected `success` on the
+full route. Changes to `crates/parametric-eq`, `crates/lane` and the gate script all route `full`.
+The script runs under `set -euo pipefail`, with no skip path.
+
+- **Node.** `setup-node` fetches 22.23.2, which is present in `actions/node-versions`. 22.23.3 is the
+  latest release there now, and the other jobs float on `22`.
+- **CPU.** V8 12.4 probes exactly the twelve features the script checks, plus `is_atom`. Its
+  flag list has no AVX-512 or VNNI entries.
+  - Disabling BMI1, BMI2, LZCNT, POPCNT, SAHF or FMA3 one at a time leaves both functions' code
+    identical. So do `--mcpu=atom` and `--intel-jcc-erratum-mitigation`.
+  - Disabling AVX2 changes 127 lines, but the held loops stay clean.
+  - Disabling SSE3 through SSE4.2 turns AVX off and fails closed.
+  - So on any x86-64-v3 host the verdict is the reference one. The same job's native leg already
+    needs AVX2 and FMA (the workspace's pinned flags, and `lane`'s host attestation), so the CPU
+    check adds no new way for a hosted runner to fail.
+  - If a runner ever lacks a feature, exit 2 blocks merges. For a required gate that is the right
+    failure, since the alternative is a skip.
+- **Time budget.** The job gains one fat-LTO build of about 2 min on the `artifact` job's evidence.
+  It runs about 5 min today, against a 15-minute limit.
+
+**The deviation is justified.** At both heads the dual pair routes ten slots through its
+recurrences. `[rbp-0xc0]` (`ic2`, `v3 = x - ic2`) and `[rbp-0x2a0]` (`ic1`) of stream 1, section 0
+are stored at the end of the iteration and by the back edge's gap moves, and reloaded in the next
+iteration. The loop is 181 instructions, and 27 of them (13 loads, 14 stores) are that traffic. A
+further 25 reload invariants. It carries ten values and 24 invariants, against the 15 XMM registers
+V8 can allocate (`xmm15` is its scratch).
+
+Every variant I could build cheaply is slower. Two holds under `timing.lock` with `taskset -c 31`,
+arms rotated in both orders, load average 5.8-7.9. The table gives the two-band isolate through the
+render export, us per 64-track block, mean of 6 runs:
+
+| arm | pair loop | slots on recurrences | hold 1 | hold 2 |
+|---|---|---:|---:|---:|
+| head (skewed, S=2, D=2) | 181 insns | 10 | 30.48 | 30.61 |
+| split: two S=1 skewed passes (bit-identical) | 83 + 80 | 0 | 35.31 | 35.37 |
+| non-skewed S=2, D=2, #977's shape (bit-identical) | 159 | 7 | | 33.69 |
+| coefficients re-read from memory per step (bit-identical) | 192 | 11 | 32.13 | |
+| one coefficient set for all four chains (timing only, not exact) | 178 | 13 | | 31.38 |
+
+- **Checks.** The one-band isolate is 20.0-21.2 us in every arm. The exact variants hash
+  identically to head over 397 blocks of eq1, eq2 and builtins. A variant that skips the right
+  channel changes eq2 only, so eq2 does run the admitted dual pair.
+- **What it shows.** Even with 6 invariants, V8 spills the loop's recurrences first. The only
+  spill-free form loses 16 %. Holding the pair today would force a slower EQ.
+
+**Ceremony.** The gate discriminates a claim: no held loop routes a value through a stack slot from
+one iteration to the next. It pins no offset, register or count. The dual pair's count is printed
+and not held. The version pin is needed because register allocation belongs to one V8.
+
+Findings:
+
+1. **MEDIUM (follow-up): the gate reads a copy of the shipped bytes, not the bytes, and the copy can
+   drift silently.** `check_v8_spill` repeats `build-web-audioworklet.sh`'s RUSTFLAGS and cargo line.
+   - **How it fails.** Suppose that script changes its build, for example a new `-C` flag, a
+     `--features` on `host-web`, or a different `MISO_ENGINE_WEB_STRIP` default. The gate keeps
+     compiling the old module. It can stay green while the shipped tail respills, or go red on bytes
+     that never ship. Nothing notices.
+   - **CI cost.** It also contradicts `qualification.yml`'s "Built exactly once here; every consumer
+     downloads it and re-hashes", and pays for a second fat-LTO build.
+   - **The single source of truth.**
+     - Give `build-web-audioworklet.sh` a module-only mode that writes the unpinned `.wasm`, and have
+       `run-wasm-gates.sh` call it, so the cargo line has one home.
+     - In CI, run the gate in `artifact-gates` on the downloaded, pin-verified
+       `miso-engine-v1-audio-worklet.simd128.wasm`. That job would need `setup-node` 22.23.2. It
+       has the exact shipped bytes and needs no rebuild; its 10-minute limit has room for the 1.5 s.
+2. **LOW: the recurrence rule reports intra-iteration slot reuse as a carried value.**
+   - **Why it matters.** V8 merges non-overlapping spill ranges into one slot. A value A that is
+     fresh each iteration can be spilled, reloaded, and used to compute B, which is spilled to the
+     same slot. Nothing crosses the back edge.
+   - **Proof.** A synthetic listing of that shape, with an otherwise clean two-step, two-stream tail,
+     fails `check_function` with "V8 carries [rbp-0x40] from one iteration to the next".
+   - **Impact.** A future benign spill would block merges with a false diagnosis.
+   - **Fix.** Flag only a load-to-store path that crosses the header. That still catches #977's
+     shape, the masked tail's back-edge reload, and head's mid-iteration spills of the `d` terms.
+3. **LOW: the shape key relies on V8 unrolling the per-section `svf_block` loop by three.**
+   - **The collision.** Under `--no-wasm-loop-unrolling`, `process_bank_mono` has two select-free
+     loops with one stream and one step: the 35-instruction per-section loop and the 42-instruction
+     tail. Both would be held.
+   - **Consequences.** Today that is only over-holding, so a false red. A vacuous green needs two
+     changes together: the real tail reshapes, and another loop takes its shape.
+   - **Fix.** Disambiguate by the depth-1 tail's instruction mix, or report a row that matches more
+     than one loop.
+4. **LOW: `run-wasm-gates.sh` checks the Node pin before the native leg.** Without exactly Node
+   22.23.2, G5's cross-target legs cannot run locally at all. Checking the pin in `check_v8_spill`
+   would keep that coupling to the V8 gate. MUTATIONS.md should also say how to re-pin Node: re-run
+   the red arms on the new V8, and keep the rule whatever they show.
+5. **INFO.** Nothing has shown the mono rows going red on a real module. My mono one-token edit
+   stayed clean, so the mono rows rest on the shared analysis and the self-test. The first CI run is
+   still the only observation of the runner's codegen, so the `ok` line should print the CPU model.
+
+### Draft follow-up issue: the dual depth-2 pair routes its integrators through V8 stack slots
+
+**Problem.** In the shipped `host_web.wasm`, V8 12.4's TurboFan compiles the admitted, select-free
+dual depth-2 pair loop of `PreparedParametricEq<f32x4, _>::process_bank` (`svf_cascade_skewed`
+with S=2, D=2) to 181 instructions. Ten stack slots lie on its recurrences, among them `ic1` and
+`ic2` of stream 1, section 0, which go through memory from one iteration to the next. 27
+instructions are that traffic.
+
+- **Why V8 spills.** The loop carries 8 integrators and 2 skew carries beside 24 invariants, against
+  15 allocatable XMM registers. V8 spills the loop phis rather than the invariants.
+- **What does not help.** Splitting it into spill-free single-stream passes costs 16 % on the
+  two-band isolate (30.5 to 35.3 us per 64 tracks). Re-reading the coefficients, sharing them, or
+  dropping the skew does not remove the spills either.
+- **What is at stake.** Store-to-load forwarding on the recurrence and the extra dispatch. An upper
+  bound from the instruction count is about 15 % of the pair loop, at most about 3 us of the 30.5 us
+  isolate. Nothing measured has realised any of it.
+
+**Candidate.** Take the two skew carries out of registers by routing section 0's output through the
+block in place: section 0 writes frame `i`, and section 1 reads it back one iteration later. An
+`f32` store and load is the identity, and a carry is not a recurrence, so memory costs it no
+recurrence latency. Then check whether V8 keeps the eight integrators in registers.
+
+**Gates.**
+
+1. The render is bit-identical: the G2 kernel identity, the parametric-eq suite, and the 90 native
+   and 30 wasm console digests.
+2. #1000's gate, with finding 2 fixed, reports no slot on an integrator recurrence in the dual pair.
+   The pair is then moved from reported to held in the same change.
+3. The two-band isolate through the render export (`web.mjs`) improves by at least 1.0 us. This is
+   the mean of 6 runs per arm in both orders under `timing.lock` and `taskset -c 31`. The one-band
+   isolate and the builtins row must stay within noise.
+4. Stop after one prototype if gate 2 or gate 3 fails. Record the listing and the numbers, and name
+   the reason for the gap: V8 x64's 15 XMM registers at S=2, D=2 is class B. Do not chase it further.
+   This is weekly-optimisation work, not launch-critical.
