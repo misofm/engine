@@ -63,3 +63,10 @@ Measured cost of the comparison on the 81 dogfood stems (native, naive per-frame
 early exit): 3.0 ns per frame for a full compare, 0.56 s for all 81 files
 (`docs/handoffs/dual-mono-2026-09-27/DUAL-MONO.md` §4.5).
 
+
+## Deferred (owner ruling, 2026-09-27)
+
+The owner ruled that only mono source files get the dual-mono treatment and that the engine does no
+content detection; preparing files, and any detection or conversion tooling, is future work in the
+owner's own tools. Do not start this issue until the owner schedules that tooling. See
+`docs/handoffs/dual-mono-2026-09-27/DUAL-MONO.md`, "Owner ruling".

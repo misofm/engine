@@ -509,3 +509,17 @@ identities as `blake3:` (they are only labels here). The patch's prototypes: the
 research build and example, `MISO_ENGINE_RESEARCH_SKIP_SEAM_COPY` (rack, timing bound only),
 `MISO_ENGINE_RESEARCH_MONO_REMAINDER` (S2, global rather than per strip program), the S1 arm change
 (`MISO_ENGINE_RESEARCH_ARM_ANY_CHAIN` restores the shipped behaviour) and the `miso_native_simd4` cfg.
+
+## Owner ruling (2026-09-27): mono source files only
+
+"Mono source file gets the dual mono treatment, stereo doesn't." A track collapses only when it
+reads a mono source. A stereo file is processed as stereo, even when its two channels are
+bit-identical, one-sided or near-mono. The engine does no content detection, at load, at startup
+or at render. The reason is the incentive: a mono file also saves half the storage, so users are
+encouraged to prepare files correctly, and detection or conversion belongs in the owner's own
+tools later.
+
+This settles draft 08 (one-sided and near-mono stems: no folding) and makes §3.1's detect-and-fold
+design future tooling work rather than an engine feature. #972 (dual-mono report in the stem
+hasher) is deferred with it. The collapse work for declared mono sources stands: #971 (merged),
+#973, #974, #975 and #987.
