@@ -208,3 +208,49 @@ the new probe while the #949 probe stays green:
 wasm gates: miso_gate_f64_lane_probe census (simd128): f64x2.promote_low_f32x4=2 f64x2.mul=2 f64x2.add=2 f64.promote_f32=0 ...
 wasm gates: miso_gate_meter_block_probe is not vectorised on the simd128 leg: f64x2.promote_low_f32x4=0 f64x2.mul=2 f64x2.add=2 f64.promote_f32=4 f64.mul=0 f64.add=0 f32.{add,gt,abs}=0 f32x4.abs=1 f32x4.add=2
 ```
+
+## The EQ's stationary cascade loops under V8 (issue #1000)
+
+`scripts/check-web-audioworklet-v8-spill.py`, run last by `scripts/run-wasm-gates.sh` on the
+AudioWorklet module that script builds with `build-web-audioworklet.sh`'s cargo line. The pinned
+Node (`v22.23.2`, V8 `12.4.254.21-node.56`, Linux x64, an x86-64-v3 host) compiles the parametric
+EQ's `f32x4` `process_bank` and `process_bank_mono` with TurboFan (`--no-liftoff
+--no-wasm-lazy-compilation`). The gate fails when an innermost loop of the stationary, select-free
+cascade carries a value from one iteration to the next through a stack slot: a slot live across the
+back edge (read from the header before it is written), or a slot on a recurrence (a value loaded
+from it reaches a store to it around the loop). It holds the dual depth-one tail and the mono pair
+and tail. It reports the dual pair and does not hold it. The functions are found by symbol and the
+loops by what they compute (SVF steps per iteration, streams, select-free), never by offset. A held
+row that finds no loop fails closed.
+
+**What it proves.** That the reference V8 runs none of the held loops' values through memory from
+one iteration to the next: the mechanism that made #977 attempt 1's standing one-band browser EQ
+about 20 % slower while every other gate stayed green. **What it does not.** It times nothing and
+says nothing else about speed. Node's V8 is not a given browser's, and eager TurboFan is not a
+page's tier-up, so green is not "the browser EQ is as fast as before"; red is "this build brings
+back the #977 mechanism".
+
+**Red mutations, applied and reverted on the delivery host.** The one-token edit #977's attempt-2
+verifier recorded, in `interleave`'s depth-one tail, `if !admitted && (L::mask_any(…) ||
+L::mask_any(…))`, and #977 attempt 1 itself (`codex/977-eq-elision-and-passes-attempt1`), each
+red on the dual tail row, ten runs in ten with the same output; with the tail edit applied in the
+tree, `run-wasm-gates.sh` exits 1 there. The tail edit:
+
+```
+FAIL dual depth-1 tail, select-free: V8 carries [rbp-0xc0] from one iteration to the next (84 instructions in 4 blocks, 2 SVF steps, 2 streams, select-free, vmulps=14 vaddps=18 vsubps=4). Listing, carried slots marked:
+  …
+  *   817e  vmovups xmm0,[rbp-0xc0]
+  …
+  *   8238  vmovups [rbp-0xc0],xmm10
+      82e9  addl rdi,0xff
+      82ec  jnz <+0x8140>
+```
+
+**The dual pair is reported, not held.** It carries ten values across its back edge (eight
+integrators, two skew carries) beside 24 loop-invariant coefficients in sixteen vector registers,
+and at #977-#979 TurboFan routes ten stack slots through its recurrences. Among them are `ic2`
+(`v3 = x - ic2`) and `ic1` of one chain, stored by the back edge's gap moves and reloaded in the
+body. #977's scans reported the loop clean because it is entered in the middle: read in a straight
+line from the back edge's target, the rotated body stores each slot before it loads it. Whether
+this costs time is not measured, and in a loop that starved the count moves with any allocation
+change, so a count would be a byte pin by another name.
