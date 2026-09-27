@@ -10,8 +10,9 @@
 //!
 //! The fix is in the one design every entry point reaches, so each test drives a different entry:
 //! preparation (a session's initial value), automation (a control message whose `Linear 64` ramp
-//! crosses the overflow band between two admissible endpoints — which is why a raised parameter
-//! minimum could not have closed this), a state-payload restore, and a homogeneous bank.
+//! crosses the overflow band between two endpoints that a parameter minimum at the derived bound
+//! would admit — which is why rejecting widths below the bound could not have closed this), a
+//! state-payload restore, and a homogeneous bank.
 //!
 //! Every test compares against the knee-0 hard knee rendered through the same path, bit for bit,
 //! and against the independent `f64` reference compressor at the same pathological knee.
@@ -175,8 +176,9 @@ fn knee_point(channel: ParameterChannel, value: f32) -> PreparedAutomationSpan {
 /// The `Linear 64` ramp steps by `1e-38 / 64`, so its first nine values on the way up and its last
 /// nine on the way down lie inside `(0, 2^-129]`, and the compressor redesigns the curve from every
 /// one of them. Before #994 those samples took a NaN target and were ducked. This is why the fix
-/// is in the design rather than in parameter validation: no minimum on the parameter can stop a
-/// ramp between two valid values from passing through the band.
+/// is in the design rather than in parameter validation: a parameter minimum at the derived bound,
+/// `2^-129 + 2^-149`, admits both endpoints, and so cannot stop this ramp from passing through the
+/// band.
 ///
 /// Red mutation (MUTATIONS.md row 994-C1): drop the `is_finite` test in `knee_coefficients`.
 #[test]

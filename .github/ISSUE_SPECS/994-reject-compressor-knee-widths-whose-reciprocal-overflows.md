@@ -28,11 +28,16 @@ finite**. Every other width returns `(0.5 * W, 1.0 / (2.0 * W))`, the pre-#994 e
 
 Why not (b), a raised parameter minimum with a typed diagnostic:
 
-* It cannot close the defect. The compressor redesigns the curve from every sample of a
-  `Linear 64` knee ramp (`kernel.rs` `advance_ramps` -> `design_lane` -> `GainComputerCoef::new`).
-  A ramp from 0 to `1e-38`, two values any minimum would admit, steps by `1e-38 / 64`, so its first
-  nine values (and the last nine of the ramp back) lie in the overflow band. The test
+* At the bound this issue derives, it cannot close the defect. The compressor redesigns the curve
+  from every sample of a `Linear 64` knee ramp (`kernel.rs` `advance_ramps` -> `design_lane` ->
+  `GainComputerCoef::new`). A ramp from 0 to `1e-38` has two endpoints that a minimum of
+  `2^-129 + 2^-149` admits. Its step is `111504 * 2^-149`, so its first nine values (and the last
+  nine of the ramp back, k = 55..63) lie in the overflow band. The test
   `an_automated_knee_ramp_through_the_overflow_band_does_not_duck` is red on the pre-#994 design.
+* A much coarser minimum would keep ramps out of the band, since a ramp from 0 to `a` never comes
+  closer to 0 than about `a / 64`. That needs `a > 64 * 2^-129`, for example the 0.1 dB lattice
+  step. But it is a product-domain change, not the derived bound, and its safety would rest on the
+  ramp's geometry rather than on the design.
 * The minimum cannot simply be raised: 0 is the documented hard knee and must stay admissible, so
   (b) would need a split domain `{0} U [bound, 24]`, a new domain kind in the contract, the
   session, the control plane and automation.
