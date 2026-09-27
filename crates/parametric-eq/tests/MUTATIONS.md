@@ -207,3 +207,29 @@ worth stating: both are read only to choose a *schedule* — the interleaved cas
 per-section one, and the elided cascade over the full one — and this crate's own gates prove all
 three schedules render the same bits. A stale copy of either leaves the two channels taking
 different schedules to the same words, which is the invariant the whole-state rule protects.
+
+## Issue #976 — no identity padding in the stationary cascade
+
+Driver: one mutation at a time applied to `src/lib.rs`, then
+`cargo test --release -p parametric-eq --features test-support --lib --test bank --no-fail-fast`,
+tree restored between rows. Host: AMD EPYC 7313P (Zen 3), `rustc 1.97.1`, `x86-64-v3`, release
+profile (fat LTO). Gate 1 is `odd_live_counts_render_the_base_bits` (`tests/bank.rs`); its counter
+assertion needs `--features test-support`, because a `cfg(test)` counter in `lib.rs` is not compiled
+for an integration test. The in-crate rows are in `src/lib.rs`'s `elision` module.
+
+| # | mutation | gate that goes red | result |
+|---|---|---|---|
+| 976-M1 | `cascade_sections` (dual only) rounds the live count up again: `kept = live.div_ceil(2) * 2` with the old padding loop | `an_elided_cascade_is_the_full_cascade_bit_for_bit` (dual `kept == live`, first at live `000001`: `[2, 2, 2]` against `[1, 1, 1]`), `the_two_channels_are_judged_together`, `the_shipped_shape_actually_elides`, `a_section_live_on_one_lane_is_not_elided`, `a_negative_zero_input_refuses_elision`, `a_non_finite_or_oversized_input_refuses_elision`, `an_odd_tail_without_dry_lanes_skips_the_select`; gate 1's counter (scalar leg) | RED |
+| 976-M1m | the same in `cascade_sections_mono` only | `an_elided_cascade_is_the_full_cascade_bit_for_bit` (mono `kept == live`), `an_odd_tail_without_dry_lanes_skips_the_select` (mono count 1, want 2); gate 1's counter (bank-mono leg) | RED |
+| 976-M2 | `interleave` runs the depth-one tail before the pairs | gate 1 digests: scalar `757d054f…`, bank `5d2fa266…` against the pinned base; `an_elided_cascade_is_the_full_cascade_bit_for_bit`, `the_two_channels_are_judged_together` (bits) | RED |
+| 976-M2m | the same in `interleave_mono` | gate 1 bank-mono digest `7760302e…` against the pinned base; `an_elided_cascade_is_the_full_cascade_bit_for_bit` (mono bits) | RED |
+| 976-M3 | `interleave` always takes the masked depth-one arm (`if true \|\| …`) | gate 1's counter (scalar leg first: HPF-everywhere ran 0 select-free tails); `an_odd_tail_without_dry_lanes_skips_the_select` | RED |
+| 976-M3m | the same in `interleave_mono` | gate 1's counter (bank-mono leg); `an_odd_tail_without_dry_lanes_skips_the_select` (mono) | RED |
+
+M1 and M3 move no rendered bit, and that is expected rather than a gap: the padding section is an
+exact identity (the elision proof covers dropping it), and a select whose mask is empty returns the
+wet word. Gate 1's three digests therefore stay at their pins under both (measured in release),
+and without `test-support` gate 1 is green for them. They are caught by the two counts that describe the
+schedule rather than the audio -- `kept == live` and the select-free tail counter -- which is why
+both exist. M2 is caught only by a shape with a pair ahead of the tail: one live section has no
+pairs, so the three- and five-section shapes carry that row.

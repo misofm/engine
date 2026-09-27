@@ -16,6 +16,7 @@ use effect_contract::{
 };
 use lane::Backend;
 use parametric_eq::{EqBandKind, ParametricEqFactory, design_svf};
+use sha2::{Digest, Sha256};
 use support::{
     COMMON_BYTES, LANE_BYTES, Payload, apply_prepared_targets, apply_prepared_targets_lane,
     request, set_initial, snapshot, values,
@@ -633,4 +634,518 @@ fn descriptive_bank_throughput() {
          ns_per_frame_per_track_round2={:.4}",
         second / lanes as f64
     );
+}
+
+/// Tracks in the odd-live-count scenario: one eight-lane bank, or two four-lane banks.
+const ODD_TRACKS: usize = 8;
+/// Blocks in the odd-live-count scenario.
+const ODD_BLOCKS: usize = 32;
+
+/// The configurations of [`odd_live_counts_render_the_base_bits`], named by what the stationary
+/// cascade keeps of the six physical sections (HPF, bands 1..4, LPF) on an admitted block.
+#[derive(Clone, Copy, Debug)]
+enum OddShape {
+    /// One live section: the HPF on every lane of both channels, through prepared targets.
+    HpfEverywhere,
+    /// One live section: the HPF on some lanes of one channel only, so the section runs with dry
+    /// lanes; the other channel's odd tracks join twelve blocks in.
+    HpfSomeLanes,
+    /// One live section: a general bell, prepared through `set_initial` (the console fixture).
+    BellOnly,
+    /// Three live sections: the HPF and a bell at prepare time, then an LPF on some lanes of each
+    /// channel through prepared targets, so the last section runs with dry lanes.
+    ThreeWithDryLpf,
+    /// Three live general bands.
+    ThreeGeneral,
+    /// Five live sections, the dead one first (the HPF).
+    FiveDeadFirst,
+    /// Five live sections, the dead one in the middle (band 3).
+    FiveDeadMiddle,
+    /// Five live sections, the dead one last (the LPF).
+    FiveDeadLast,
+}
+
+const ODD_SHAPES: [OddShape; 8] = [
+    OddShape::HpfEverywhere,
+    OddShape::HpfSomeLanes,
+    OddShape::BellOnly,
+    OddShape::ThreeWithDryLpf,
+    OddShape::ThreeGeneral,
+    OddShape::FiveDeadFirst,
+    OddShape::FiveDeadMiddle,
+    OddShape::FiveDeadLast,
+];
+
+/// Parameter index of the HPF's enable word; frequency and Q follow it, and the LPF's three follow
+/// those (`physical_targets`' order).
+const HPF_PARAMETERS: usize = 24;
+const LPF_PARAMETERS: usize = 27;
+
+/// Enables general band `band` on `channel` with a per-track design.
+fn odd_band(
+    values: &mut [effect_contract::InitialParameterValue],
+    band: usize,
+    kind: EqBandKind,
+    channel: ParameterChannel,
+    track: usize,
+) {
+    let right = matches!(channel, ParameterChannel::Right);
+    let base = band * 6;
+    let frequency = [150.0, 900.0, 3_100.0, 9_000.0][band] * (1.0 + track as f32 * 0.07);
+    set_initial(values, base, channel, 1.0);
+    set_initial(values, base + 1, channel, kind as u32 as f32);
+    set_initial(
+        values,
+        base + 2,
+        channel,
+        if right { frequency * 1.13 } else { frequency },
+    );
+    set_initial(
+        values,
+        base + 3,
+        channel,
+        -12.0 + (track * 3 + band * 5) as f32 % 25.0,
+    );
+    set_initial(
+        values,
+        base + 4,
+        channel,
+        0.4 + (track + band) as f32 * 0.21,
+    );
+    set_initial(values, base + 5, channel, 0.5 + band as f32 * 0.15);
+}
+
+/// Enables the dedicated cut whose enable word is `first` on `channel` with a per-track design,
+/// and returns the three parameter indices it wrote.
+fn odd_cut(
+    values: &mut [effect_contract::InitialParameterValue],
+    first: usize,
+    channel: ParameterChannel,
+    track: usize,
+) -> [usize; 3] {
+    let right = matches!(channel, ParameterChannel::Right);
+    let frequency = if first == HPF_PARAMETERS {
+        40.0 + track as f32 * 17.0
+    } else {
+        6_500.0 + track as f32 * 900.0
+    };
+    set_initial(values, first, channel, 1.0);
+    set_initial(
+        values,
+        first + 1,
+        channel,
+        if right { frequency * 1.21 } else { frequency },
+    );
+    set_initial(values, first + 2, channel, 0.55 + track as f32 * 0.09);
+    [first, first + 1, first + 2]
+}
+
+/// One track's prepare-time values, and the prepared cut targets it receives before `block`:
+/// `(block, final values, changed mask)`.
+type OddEvent = (
+    usize,
+    Vec<effect_contract::InitialParameterValue>,
+    Vec<bool>,
+);
+
+fn odd_configuration(
+    shape: OddShape,
+    track: usize,
+) -> (Vec<effect_contract::InitialParameterValue>, Vec<OddEvent>) {
+    use ParameterChannel::{Left, Right};
+    let mut initial = values();
+    let mut events = Vec::new();
+    // A prepared cut on the given channels, applied before `block`.
+    let mut cut_event = |initial: &[effect_contract::InitialParameterValue],
+                         block: usize,
+                         first: usize,
+                         channels: &[ParameterChannel]| {
+        if channels.is_empty() {
+            return;
+        }
+        let mut target = initial.to_vec();
+        let mut changed = vec![false; target.len()];
+        for &channel in channels {
+            let lane = usize::from(matches!(channel, Right));
+            for parameter in odd_cut(&mut target, first, channel, track) {
+                changed[parameter * 2 + lane] = true;
+            }
+        }
+        events.push((block, target, changed));
+    };
+    match shape {
+        OddShape::HpfEverywhere => {
+            cut_event(&initial, 0, HPF_PARAMETERS, &[Left, Right]);
+        }
+        OddShape::HpfSomeLanes => {
+            if track.is_multiple_of(2) {
+                cut_event(&initial, 0, HPF_PARAMETERS, &[Left]);
+            } else {
+                cut_event(&initial, 12, HPF_PARAMETERS, &[Right]);
+            }
+        }
+        OddShape::BellOnly => {
+            for channel in [Left, Right] {
+                odd_band(&mut initial, 0, EqBandKind::Bell, channel, track);
+            }
+        }
+        OddShape::ThreeWithDryLpf => {
+            for channel in [Left, Right] {
+                odd_cut(&mut initial, HPF_PARAMETERS, channel, track);
+                odd_band(&mut initial, 1, EqBandKind::Bell, channel, track);
+            }
+            let mut channels = Vec::new();
+            if !track.is_multiple_of(3) {
+                channels.push(Left);
+            }
+            if track.is_multiple_of(2) {
+                channels.push(Right);
+            }
+            cut_event(&initial, 0, LPF_PARAMETERS, &channels);
+        }
+        OddShape::ThreeGeneral => {
+            for channel in [Left, Right] {
+                odd_band(&mut initial, 0, EqBandKind::LowShelf, channel, track);
+                odd_band(&mut initial, 1, EqBandKind::Bell, channel, track);
+                odd_band(&mut initial, 3, EqBandKind::HighShelf, channel, track);
+            }
+        }
+        OddShape::FiveDeadFirst | OddShape::FiveDeadMiddle | OddShape::FiveDeadLast => {
+            let kinds = [
+                EqBandKind::LowShelf,
+                EqBandKind::Bell,
+                EqBandKind::Notch,
+                EqBandKind::HighShelf,
+            ];
+            for channel in [Left, Right] {
+                if !matches!(shape, OddShape::FiveDeadFirst) {
+                    odd_cut(&mut initial, HPF_PARAMETERS, channel, track);
+                }
+                for (band, kind) in kinds.into_iter().enumerate() {
+                    if !(matches!(shape, OddShape::FiveDeadMiddle) && band == 2) {
+                        odd_band(&mut initial, band, kind, channel, track);
+                    }
+                }
+                if !matches!(shape, OddShape::FiveDeadLast) {
+                    odd_cut(&mut initial, LPF_PARAMETERS, channel, track);
+                }
+            }
+        }
+    }
+    (initial, events)
+}
+
+/// Frames in block `block`: mostly one quantum, and a short ragged block every fifth.
+fn odd_frames(block: usize) -> usize {
+    if block % 5 == 4 { 37 } else { 128 }
+}
+
+/// One hostile input word for `(block, frame, track, channel)`.
+///
+/// Every word is one of: `+0.0` (one in sixteen), a subnormal of either sign (one in sixteen), or a
+/// normal of either sign with magnitude in `2^-24..2^26`. On top of that, block `8k + 3` carries one
+/// `-0.0` (tracks 1, 4, 7, 2, alternating planes, so the collapsed mono leg sees half of them) and
+/// block `8k + 6` carries one non-finite word on tracks 0 and 4 of one plane, so every
+/// four-lane group and every eight-lane group sees the same fault: a fault zeroes and resets a
+/// whole bank plane, and placing it this way keeps the bank digest independent of the bank width.
+/// Either word refuses elision for the bank (or scalar track) that carries it, which then renders
+/// all six sections.
+fn odd_word(block: usize, frame: usize, track: usize, channel: usize) -> f32 {
+    if block % 8 == 3
+        && frame == (block * 7) % odd_frames(block)
+        && track == (block / 8 * 3 + 1) % ODD_TRACKS
+        && channel == (block / 8) % 2
+    {
+        return -0.0;
+    }
+    if block % 8 == 6
+        && frame == (block * 13) % odd_frames(block)
+        && track.is_multiple_of(4)
+        && channel == (block / 8) % 2
+    {
+        return [f32::INFINITY, f32::NEG_INFINITY, f32::NAN, f32::INFINITY][block / 8];
+    }
+    let mut state = ((block as u64) << 40)
+        ^ ((frame as u64) << 20)
+        ^ ((track as u64) << 4)
+        ^ channel as u64
+        ^ 0x0976_0976_0976_0976;
+    let word = support::splitmix64(&mut state);
+    let sign = ((word >> 63) as u32) << 31;
+    match word & 15 {
+        0 => 0.0,
+        1 => f32::from_bits(sign | (((word >> 8) as u32 & 0x007f_ffff) | 1)),
+        _ => {
+            let exponent = ((word >> 8) % 50) as u32 + 127 - 24;
+            let mantissa = (word >> 16) as u32 & 0x007f_ffff;
+            f32::from_bits(sign | (exponent << 23) | mantissa)
+        }
+    }
+}
+
+fn fold_report(hasher: &mut Sha256, report: &effect_contract::ProcessReport) {
+    for count in [
+        report.sanitized_main_samples,
+        report.sanitized_sidechain_samples,
+        report.invalid_spans,
+        report.nonfinite_left_blocks,
+        report.nonfinite_right_blocks,
+    ] {
+        hasher.update(count.to_le_bytes());
+    }
+}
+
+fn fold_words(hasher: &mut Sha256, words: impl Iterator<Item = f32>) {
+    for word in words {
+        hasher.update(word.to_bits().to_le_bytes());
+    }
+}
+
+fn fold_payload(hasher: &mut Sha256, payload: &Payload) {
+    hasher.update(payload.0);
+    hasher.update(payload.1);
+    hasher.update(payload.2);
+}
+
+/// Resets this thread's count of select-free depth-one tail passes (issue #976 M3); a no-op
+/// without `test-support`, where the counter does not exist.
+fn reset_select_free_tails() {
+    #[cfg(feature = "test-support")]
+    parametric_eq::test_only_reset_select_free_tail_passes();
+}
+
+/// This thread's count of select-free depth-one tail passes, or `None` without `test-support`.
+fn select_free_tails() -> Option<usize> {
+    #[cfg(feature = "test-support")]
+    let count = Some(parametric_eq::test_only_select_free_tail_passes());
+    #[cfg(not(feature = "test-support"))]
+    let count = None;
+    count
+}
+
+/// One leg's digest, and per shape (in [`ODD_SHAPES`] order) how many stationary depth-one tail
+/// passes ran without the dry select.
+type OddLeg = (String, Vec<Option<usize>>);
+
+/// The scalar leg: one prepared effect per track, every block, every word.
+fn odd_scalar_digest() -> OddLeg {
+    let factory = ParametricEqFactory;
+    let mut hasher = Sha256::new();
+    let mut tails = Vec::new();
+    for shape in ODD_SHAPES {
+        reset_select_free_tails();
+        let configurations: Vec<_> = (0..ODD_TRACKS)
+            .map(|track| odd_configuration(shape, track))
+            .collect();
+        let mut effects: Vec<_> = configurations
+            .iter()
+            .map(|(initial, _)| {
+                factory
+                    .prepare(request(initial, false))
+                    .expect("scalar prepare")
+            })
+            .collect();
+        let mut position = 0_u64;
+        for block in 0..ODD_BLOCKS {
+            let frames = odd_frames(block);
+            for (track, effect) in effects.iter_mut().enumerate() {
+                for (at, target, changed) in &configurations[track].1 {
+                    if *at == block {
+                        apply_prepared_targets(effect.as_mut(), target, changed);
+                    }
+                }
+                let mut left: Vec<f32> = (0..frames)
+                    .map(|frame| odd_word(block, frame, track, 0))
+                    .collect();
+                let mut right: Vec<f32> = (0..frames)
+                    .map(|frame| odd_word(block, frame, track, 1))
+                    .collect();
+                let report = effect.process(
+                    EffectProcessBlock::new(&mut left, &mut right, None, position, &[], 128)
+                        .expect("scalar block"),
+                );
+                fold_words(&mut hasher, left.into_iter().chain(right));
+                fold_report(&mut hasher, &report);
+                fold_payload(&mut hasher, &snapshot(effect.as_ref()));
+            }
+            position += frames as u64;
+        }
+        tails.push(select_free_tails());
+    }
+    (hex(&hasher.finalize()), tails)
+}
+
+/// The bank legs: `ODD_TRACKS / lanes` native banks, folded per track in track order so the
+/// digest does not depend on the bank width. `mono` renders the collapsed body instead of the dual
+/// one, over the left plane alone.
+fn odd_bank_digest(width: BankWidth, backend: Backend, mono: bool) -> OddLeg {
+    let lanes = width.lanes() as usize;
+    assert_eq!(ODD_TRACKS % lanes, 0, "the scenario fills whole banks");
+    let factory = ParametricEqFactory;
+    let mut hasher = Sha256::new();
+    let mut tails = Vec::new();
+    for shape in ODD_SHAPES {
+        reset_select_free_tails();
+        let configurations: Vec<_> = (0..ODD_TRACKS)
+            .map(|track| odd_configuration(shape, track))
+            .collect();
+        let mut banks: Vec<_> = configurations
+            .chunks(lanes)
+            .map(|group| {
+                let requests: Vec<_> = group
+                    .iter()
+                    .map(|(initial, _)| request(initial, false))
+                    .collect();
+                factory
+                    .bind_homogeneous_bank(PrepareEffectBankRequest {
+                        backend,
+                        width,
+                        requests: &requests,
+                    })
+                    .expect("valid bank request")
+                    .expect("the native width must bind")
+            })
+            .collect();
+        let offsets = vec![0_u32; lanes + 1];
+        let mut position = 0_u64;
+        for block in 0..ODD_BLOCKS {
+            let frames = odd_frames(block);
+            for (group, bank) in banks.iter_mut().enumerate() {
+                assert!(!mono || bank.supports_mono_collapse());
+                for lane in 0..lanes {
+                    for (at, target, changed) in &configurations[group * lanes + lane].1 {
+                        if *at == block {
+                            apply_prepared_targets_lane(
+                                bank.as_mut(),
+                                lane,
+                                48_000,
+                                target,
+                                changed,
+                            );
+                        }
+                    }
+                }
+                let plane = |channel: usize| -> Vec<f32> {
+                    (0..frames * lanes)
+                        .map(|cell| {
+                            odd_word(block, cell / lanes, group * lanes + cell % lanes, channel)
+                        })
+                        .collect()
+                };
+                let mut left = plane(0);
+                let mut right = if mono {
+                    vec![f32::from_bits(0x7F7F_FFFF); frames * lanes]
+                } else {
+                    plane(1)
+                };
+                let process = EffectBankProcessBlock::new(
+                    &mut left,
+                    &mut right,
+                    None,
+                    frames as u32,
+                    width,
+                    position,
+                    &[],
+                    &offsets,
+                    128,
+                )
+                .expect("bank block");
+                let report = if mono {
+                    bank.process_bank_mono(process)
+                } else {
+                    bank.process_bank(process)
+                };
+                for lane in 0..lanes {
+                    let column = |plane: &[f32]| -> Vec<f32> {
+                        (0..frames)
+                            .map(|frame| plane[frame * lanes + lane])
+                            .collect()
+                    };
+                    if mono {
+                        fold_words(&mut hasher, column(&left).into_iter());
+                    } else {
+                        fold_words(&mut hasher, column(&left).into_iter().chain(column(&right)));
+                    }
+                    fold_report(&mut hasher, &report.reports[lane]);
+                    fold_payload(&mut hasher, &snapshot_bank(bank.as_ref(), lane as u32));
+                }
+            }
+            position += frames as u64;
+        }
+        tails.push(select_free_tails());
+    }
+    (hex(&hasher.finalize()), tails)
+}
+
+fn hex(digest: &[u8]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// The digests [`odd_live_counts_render_the_base_bits`] pins, recorded on the unmodified base of
+/// issue #976 (before the stationary cascade stopped padding odd live-section counts).
+const ODD_LIVE_DIGESTS: [(&str, &str); 3] = [
+    (
+        "scalar",
+        "81015a5c841e7fb53b6d7f4968c1706b46902db7055cdc687fa2d7c5366cb852",
+    ),
+    (
+        "bank",
+        "247bc0b6fd53e45fe85f15dd481dc65eb6110bc3ca8cd6a056e40a6d9c131d7c",
+    ),
+    (
+        "bank-mono",
+        "e904180499a49c1a203eef5da5f6a257b7e9a74c34a1e1ba22fdb7ebcb1e108a",
+    ),
+];
+
+/// Issue #976 gate 1: odd live-section counts (1, 3 and 5) render the bits they rendered when the
+/// stationary cascade still rounded the live count up to whole depth-2 passes with an identity
+/// padding section.
+///
+/// The scenario covers, through the public API only: the HPF live on every lane (prepared targets),
+/// the HPF live on some lanes only (the last kept section runs with dry lanes), general bands at
+/// prepare time, an LPF on some lanes as the last of three, and five live sections with the dead
+/// one first, in the middle and last. The input is hostile (subnormals, `+0.0`, magnitudes
+/// `2^-24..2^26`, ragged blocks), and some blocks carry a `-0.0` or a non-finite word, which refuse
+/// elision where they land, so that bank or track renders all six sections. Every output word, every report and every lane's state
+/// payload after every block is folded into one SHA-256 per leg; state words are hashed as raw
+/// bits (no NaN reaches an output word: a non-finite block is zeroed).
+///
+/// Under `--features test-support` it also asserts M3's performance half: the HPF-everywhere shape
+/// runs its one live section, the odd tail, without the dry select on every admitted stationary
+/// block, which no rendered bit can show.
+#[test]
+fn odd_live_counts_render_the_base_bits() {
+    let mut legs = vec![("scalar", odd_scalar_digest())];
+    if let Some((width, backend)) = native_bank() {
+        legs.push(("bank", odd_bank_digest(width, backend, false)));
+        legs.push(("bank-mono", odd_bank_digest(width, backend, true)));
+    }
+    for (leg, (digest, tails)) in &legs {
+        println!("odd-live digest {leg} {digest}");
+        println!("odd-live select-free tails {leg} {tails:?} (shapes {ODD_SHAPES:?})");
+    }
+    let hpf_everywhere = ODD_SHAPES
+        .iter()
+        .position(|shape| matches!(shape, OddShape::HpfEverywhere))
+        .expect("the HPF-everywhere shape is in the scenario");
+    for (leg, (_, tails)) in &legs {
+        if let Some(count) = tails[hpf_everywhere] {
+            assert!(
+                count > 0,
+                "#976 M3: the {leg} leg's HPF-everywhere tail must run select-free"
+            );
+        }
+    }
+    for (leg, (digest, _)) in &legs {
+        let pinned = ODD_LIVE_DIGESTS
+            .iter()
+            .find(|(name, _)| name == leg)
+            .map(|(_, pin)| *pin)
+            .expect("every leg is pinned");
+        assert_eq!(
+            digest, pinned,
+            "#976 gate 1: the {leg} leg moved a bit, a report or a state word"
+        );
+    }
 }

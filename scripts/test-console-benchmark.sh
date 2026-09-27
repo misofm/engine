@@ -577,8 +577,8 @@ expect_accept "$(printf '%s' "$session_metered" | jq -c '.bank_scatter_redirects
 # Its floor group states none: no ruling has inventoried a metered strip, and the standing strip's
 # inventory would publish the meters' cost as a gap in the strip's.
 expect_reject "$(printf '%s' "$session_floor_metered" | jq -c \
-    '.floor_cycles_per_lane_sample = (333 / (8 * 3.7))
-     | .percent_of_floor = (100 * (333 / (8 * 3.7)) / .cycles_per_lane_sample)')" \
+    '.floor_cycles_per_lane_sample = (307 / (8 * 3.7))
+     | .percent_of_floor = (100 * (307 / (8 * 3.7)) / .cycles_per_lane_sample)')" \
     'a metered row costed at the unmetered strip inventory'
 expect_reject "$(printf '%s' "$session_floor_metered" | jq -c \
     '.floor_basis = "docs/rulings/effect-floor-accounting.md: builtins+eq+compressor+limiter"')" \
