@@ -261,3 +261,247 @@ change reads. It must also cite the renamed test.
   build.
 * The cost falls on the control plane only: one extra `plan_bank_groups` run and two slot counts,
   and only when some mono track is stranded.
+
+
+## Sol attempt 1 verdict: FAIL
+
+Sol, 2026-09-27, on `9b1a3ce2` (base `8eebf17b`), x86-64-v3 host, `CARGO_INCREMENTAL=0`. The
+four-lane runs use the research `--cfg miso_native_simd4` lane hunk in `target/simd4`, applied for
+measurement only and then reverted. The worktree was left clean. The scratch probe, the tests and
+the mutation driver are in the session scratchpad (`971v/`) and are not committed.
+
+The implementation is class A and does what the evidence says: rendered bits are unchanged, the
+A/B reproduces, and every named gate passes. It fails on two claims that no gate checks. With the
+bank-gain guard in place, the rule this issue exists to ship is untested. And the guard itself can
+keep a move that binds no more banks, or fewer, which its own documentation says it never does.
+Both fixes are bounded; see "Required for attempt 2".
+
+### Findings, by severity
+
+1. **High (gate gap). No gate pins the rule while the guard is present.**
+   `crates/graph-compiler/src/banks.rs:233-251` (`stranded_mono_tracks`, then the guard at 246).
+   Reproduced at 8 and 4 lanes: the brief's per-program rule, the global prototype, the "any
+   group" rule and the vacuous rule, each with the guard kept, pass all four #971 gates and
+   `the_two_planners_agree_on_every_track_class`. The reason is that in every gate session where a
+   wrong rule moves a different set of tracks from the right rule, the right rule moves nothing.
+   A cancelled move therefore looks exactly like the correct outcome.
+   `a_mono_track_that_fills_a_cohort_is_not_pooled_as_stereo` (`lib.rs:8689`) is red only under
+   the brief's rule *without* the guard. Its own doc says so (`lib.rs:8685`). The fix is the test
+   below, which turns red under all four wrong rules with the guard kept.
+2. **Medium (the guard is unsound on banks). It counts planned slots, not banks a factory will
+   bind.** `bindable_slot_count` (`banks.rs:358-359`) says that consent "is the same for every
+   plan of one session". That holds for each slot key, but the count adds up slots across keys.
+   `miso.delay` always returns `Ok(None)` (`crates/delay/src/lib.rs:609`). At a non-native width,
+   EQ and soft-clip decline too. Measured, class A in every case:
+   * `dynamic: [delay]` only, `ch00..=ch{W}` mono and the rest stereo: `ch{W}` moves to the stereo
+     pool, and the effect bank count is 0 before and after. The move gains nothing and loses
+     `ch{W}`'s collapse.
+   * The implementer's guard shape plus one mono track with `dynamic: [delay]` and `simd2: [delay]`
+     beside `W-1` stereo tracks with the same chains: the effect bank count drops from **2 to 1**
+     at `Simd8`. On the native four-lane build it drops from 2 to 1, and from 4 to 3 on the
+     `W=8` layout. The guard accepted it because the planned slots rose from 2 to 3.
+   * In the randomized probe at native four lanes, seed 380 (template strips with a dynamic delay)
+     moves `ch07` and `ch09` for 3 → 3 banks.
+
+   The type's documentation repeats the false invariant ("binds more effect banks than the trial",
+   `crates/builtins-compiler/src/lib.rs:4003`).
+3. **Low (follow-up, not required).** The guard accepts or refuses the whole move set at once. A
+   harmful move bundled with a profitable one is kept whenever the profitable one gains more
+   banks than the harmful one loses. When it gains less, both are cancelled. Evaluating moves per
+   independent component is an optimisation, so it belongs in its own issue.
+
+### The questions asked
+
+* **Is the guard sound?** Renders: yes. Every accepted and cancelled plan rendered the bits of
+  base and of the `Backend::Scalar` oracle, armed and unarmed (see "Class A" below).
+  Deterministic: yes. It is a pure function of the trial plan with BTreeMap order,
+  `check-graph-determinism.sh` gave 100/100, and a fresh-process rerun of the named probe was
+  byte-identical, pools included. Never binds fewer banks: **no**, see finding 2.
+* **Is it the right design, or a crutch?** The rule needs an acceptance check. The planner's
+  greedy leader choice is not monotone: a longer program that joins a pool re-leads its cohort,
+  so `the_mono_remainder_stays_when_moving_it_binds_no_more_banks` loses a bank without the
+  check. "Propose with the rule, keep only a measured gain" is therefore sound in shape. It is
+  only a crutch in the sense of finding 1, where it hides which rule proposes, and its measure is
+  wrong (finding 2).
+* **Compile-time cost.** The re-plan is one extra `plan_bank_groups` call, one clone of the class
+  map, and two slot counts, and it runs only when some mono track strands. #962's scale session
+  has no effects, so it never takes this path. Measured on the same 65,537 tracks, all mono, each
+  with a `simd1: [comp]` (debug, `compile_with_builtins` only, two runs each):
+  * one stranded track, where the guard refuses: 49.2 / 47.7 s against base 48.5 / 47.6 s;
+  * one track in 9 stereo, so 7 move and one bank is gained (8192 against 8191): 49.8 / 48.2 s
+    against 49.2 / 47.5 s.
+
+  That is at most about 1.5%, inside run-to-run noise. Peak RSS is 2.1 GB.
+
+### Class A (randomized probe, base against head)
+
+A scratch integration test drove a generator derived from #966's `bank_levels.rs` probe. It
+builds 1 to 40, 64, 65 or 81 tracks, with a mono share of 10 to 90% on either the symmetric mono
+strip or the asymmetric intended one. It uses template or free strips with dropped and inserted
+slots, sidechains from every tap, sends from every tap into submixes, input delays, and bypass.
+The generator ran over 400 seeds. It also ran 22 named shapes:
+* the dogfood layout, as a strip, builtins only, contiguous and all stereo;
+* the 16-track and guard sessions at `W` = 4 and 8;
+* the discriminating and phantom sessions;
+* the odd-track session;
+* #966's shapes with mixed mono: the mono console less EQs (3 and 9 of them), the ragged
+  soft-clip session and the realigning strips;
+* #970's reduced console, as is and mixed.
+
+Each model was compiled at `Scalar`, `Simd4` and `Simd8`, then rendered unarmed and armed for 16
+to 24 blocks, on base and on head.
+
+| build | rows | digest differences base→head | rows ≠ scalar oracle | models with a #971 move | effect banks fewer |
+|---|---:|---:|---:|---:|---:|
+| native 8 lanes | 2,110 | 0 | 0 | 44 | 1 (phantom-loss) |
+| native 4 lanes | 2,110 | 0 | 0 | 44 | 2 (phantom-loss) |
+
+One seed, 46, renders silence at every width, so it compares nothing. The 17 standing rows are
+identical, base against after, at both widths: I reran the implementer's four row binaries, and
+their output matched the recorded files.
+
+### A/B reproduced
+
+These ran under the timing lock, uncontended, with `taskset -c 31` and host load 4 to 5. The
+driver was the implementer's `ab971` harness: one warmup and two measured rounds of 3000
+observations. Figures are p50 per-block render times in microseconds.
+
+| strip | width | as is | folded today | folded + #971 |
+|---|---|---:|---:|---:|
+| EQ + compressor + limiter | 8 | 136.0 / 136.2 | 164.2 / 164.5 (+20.8%) | **130.1 / 130.3 (−4.3%)** |
+| EQ + compressor + limiter | 4 | 240.1 / 240.2 | 235.6 / 235.8 (−1.8%) | **223.0 / 223.3 (−7.1%)** |
+| builtins only | 8 | 30.8 / 30.8 | 32.9 / 32.9 | 32.9 / 32.9 (same plan) |
+| builtins only | 4 | 48.8 / 48.7 | 48.0 / 47.9 | 47.8 / 47.7 (same plan) |
+
+Every arm printed the same digests: `58a7dc2477b23056` for the strip and `a3bb6a6a84917779` for
+builtins only, at both widths. The shapes, collapse and fold counts match the evidence.
+
+### Route folds and ruling 07
+
+The dogfood layout folds 0 before and after the change, as the evidence says. The contiguous
+mono-first layout goes from 0 to 81 at both widths. With builtins only it folds 81 both before
+and after, because nothing moves. This agrees with ruling 07: pooling is what forfeits the fold
+on interleaved ids, and #971 is the prerequisite for option 3 (mono ids sorted first at
+authoring). The phantom-loss session also regains its folds (0 → 25), because nothing stays
+partial.
+
+### Gates and scope
+
+These all pass at head:
+* `cargo fmt --all --check`, and clippy on the workspace with `--all-targets --all-features -D
+  warnings`;
+* `RUSTDOCFLAGS='-D warnings' cargo doc`;
+* `-p graph-compiler` (113), `-p rack-compiler`, and `-p graph` with and without `test-support`;
+* `-p builtins-compiler --features test-support`;
+* `-p host-core --all-features`, which includes `symmetry_witness` and `collapse_arming`;
+* `-p console-workload`, which includes `chain_shape` (23);
+* `-p capi`;
+* both graph scripts, and `cargo check` on `wasm32-unknown-unknown` with `+simd128`.
+
+On the four-lane build, the four #971 tests and the discriminating test pass. Three unrelated
+lib tests fail on that build at base as well: `launch_soft_clip_fixture_*`,
+`misaligned_lane_sets_decline_the_merge` and `frozen_issue_037_*`. They are artefacts of the
+scratch cfg, not of this change.
+
+The other scope checks:
+* `bank_shape` is asserted, and it catches the rack-only mutation ([18,63] against [12,63]).
+* The 16-track gate is red under the brief's rule without the guard. It is green under the
+  prototype, which leaves that session alone by construction.
+* The note for #969 is present.
+* The diff stays inside the authorized paths, and the only changes to `lib.rs` are in its test
+  module.
+
+### Required for attempt 2
+
+1. **Add this test** (`crates/graph-compiler/src/lib.rs` tests, width-generic; it uses the
+   implementer's `mono_fixture_with_tracks`, `pooled_tracks` and `render_armed_console_blocks`).
+   Validated in scratch: green at head at both widths. It is red at both widths under five
+   mutations:
+   * `today` (no move);
+   * the brief's rule with the guard: T's mono tracks move and the whole move is accepted;
+   * the global rule with the guard: the move is cancelled and `ch{W+1}` stays mono;
+   * the "any" rule with the guard: the move is cancelled;
+   * the vacuous rule with the guard: V moves.
+
+   The implementer's guard test still covers the rule without the guard.
+
+```rust
+/// Issue #971: the rule, not the bank-gain check, decides which tracks move. A session that
+/// hands the check one move it must accept beside the moves a looser rule adds: accepted
+/// wholesale they move tracks the rule keeps, refused wholesale they cancel the move it makes.
+/// V (`ch00`): mono, no effect. P (`ch01..=ch{2W}`): `W + 1` mono then `W - 1` stereo, only
+/// `dynamic: [comp]`; the last mono one strands and completes the stereo cohort. T (next `2W`):
+/// the over-demotion session (even mono, odd stereo, the limiter on the stereo tracks and the
+/// lower half's mono ones); the rule moves none of it.
+#[test]
+fn the_rule_not_the_bank_gain_check_picks_the_moved_tracks() {
+    const BLOCKS: u64 = 12;
+    let Some(width) = BankWidth::for_backend(host_dispatch()) else { return; };
+    let lanes = width.lanes() as usize;
+    let registry = launch_native_effect_registry().expect("launch registry");
+    let (p, t) = (2 * lanes, 2 * lanes);
+    let mut model = mono_fixture_with_tracks(1 + p + t);
+    let comp = model.tracks[1].simd1.effects[1].clone();
+    for (index, track) in model.tracks.iter_mut().enumerate() {
+        if index == 0 {
+            track.simd1.effects.clear();
+            track.dynamic.effects.clear();
+            track.simd2.effects.clear();
+        } else if index <= p {
+            if index > lanes + 1 { track.right_source_channel = 1; }
+            track.simd1.effects.clear();
+            track.simd2.effects.clear();
+            track.dynamic.effects = vec![comp.clone()];
+        } else {
+            let local = index - 1 - p;
+            if !local.is_multiple_of(2) { track.right_source_channel = 1; }
+            else if local >= lanes { track.simd2.effects.clear(); }
+        }
+    }
+    let name = |index: usize| format!("ch{index:02}");
+    let mono: BTreeSet<String> = model.tracks.iter()
+        .filter(|track| track.left_source_channel == track.right_source_channel)
+        .map(|track| track.id.as_str().to_owned()).collect();
+    let stranded = name(lanes + 1);
+    let artifact = compile_console_model_with_builtins(&model, 2_086, &[], &registry);
+    let pooled = pooled_tracks(&artifact);
+    assert_eq!(pooled[0], (1..=lanes).chain((1 + p..1 + p + t).step_by(2)).map(name)
+        .collect::<BTreeSet<_>>());
+    assert_eq!(pooled[1], (lanes + 1..=p).chain((2 + p..1 + p + t).step_by(2)).map(name)
+        .collect::<BTreeSet<_>>(),
+        "exactly P's stranded track ({stranded}) joined the stereo pool");
+    assert_eq!(artifact.graph().prepared_bank_count(), 7);
+    // V is in no effect group, so it stays mono: its full post-input bank holds only mono tracks.
+    let v_banks: Vec<Vec<String>> = artifact.prepared_builtin_banks()
+        .filter(|bank| bank.stage == TrackStage::PostInputBuiltins)
+        .map(|bank| bank.members.iter().map(|node| match node {
+            GraphNodeId::TrackStage { track_id, .. } => track_id.as_str().to_owned(),
+            other => panic!("a builtin bank named {other:?}"),
+        }).collect::<Vec<_>>())
+        .filter(|members| members.contains(&name(0))).collect();
+    assert_eq!(v_banks.len(), 1);
+    assert_eq!(v_banks[0].len(), lanes);
+    assert!(v_banks[0].iter().all(|track| mono.contains(track) && *track != stranded));
+    let render = render_armed_console_blocks(artifact, BLOCKS, &mono, &mono);
+    assert!(render.collapse[0] > 0);
+    let scalar = compile_console_model_with_builtins(&model, 2_087, &[], &scalar_console_registry());
+    let scalar_render = render_armed_console_blocks(scalar, BLOCKS, &mono, &mono);
+    assert_pcm_bits_equal(&render.pcm, &scalar_render.pcm, "discriminating session");
+}
+```
+
+2. **Make the guard count banks the factories will bind.** For launch factories, whether a bank
+   binds depends on the factory, the width and the program key. The planner already guarantees
+   that key is equal across a group. So one approach is to learn each slot key's consent from
+   one `bind_homogeneous_bank` call, cached per key, and count only the consenting slots. Then
+   add two gates (width-generic, and red at head today). Both start from
+   `mono_fixture_with_tracks`, with `simd1` and `simd2` cleared unless stated:
+   * `W + 1` mono and `W - 1` stereo tracks, each with only `dynamic: [delay]`. Assert that
+     `ch{W}` stays in the mono pool, and 0 effect banks.
+   * The guard session's `2W` stereo tracks (`simd1: [eq]` or `[comp]`); one mono track with
+     `simd1: [eq, comp]`; one mono track with `dynamic: [delay]` and `simd2: [delay]`; and `W - 1`
+     stereo tracks with the same two delay chains. Assert 2 effect banks (the no-move plan's
+     count) and that both mono tracks stay mono.
+3. **Correct the two false statements.** `banks.rs:358` says consent is "the same for every plan";
+   `crates/builtins-compiler/src/lib.rs:4003` says the move is kept only when the plan "binds more
+   effect banks". Correct both, or make them true with item 2.
