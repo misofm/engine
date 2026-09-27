@@ -170,3 +170,56 @@ Steps:
   the whole kernel, never on the new loop in isolation.
 * **Prefer `split_at_mut` and `chunks_exact(_mut)` zips.** A zip of `ChunksExact` iterators uses one
   index and no per-element check. Re-slicing inside the loop brings the checks back.
+
+## Amendments (Sol verification, 2026-09-27)
+
+Evidence: `docs/handoffs/effects-2026-09-27/VERIFY-LIMITER-2.md` (F4, F8) and
+`verify-limiter-2-raw-timings.txt`. **These amendments supersede the body wherever they conflict.**
+
+### A1. Merged into limiter-2-2
+
+Limiter-2-2 alone fails its gate on the linked rows (its amendment A1). This slice is what makes the
+linked pair faster.
+
+* This draft's stream facts, contracts, mutations and codegen record move into limiter-2-2, as
+  amended.
+* The two-attempt limit applies to the merged slice.
+* Scope is the stationary dispatch only, per limiter-2-2 A2. The linked streams run only under
+  `DISPATCH_STATIONARY`.
+
+### A2. The no-copy form is safe Rust, and it is built
+
+`linked_steady_streams` in `verify-limiter-2-prototype.patch` implements contracts 1-3 as written:
+
+* `split_at_mut` at `max(e, c)` for the required ring and at `max(x, c)` for the box ring;
+* eight zipped `chunks_exact(_mut)` iterators;
+* a prologue, the skewed body, and an epilogue.
+
+It has no `unsafe`, no copy, and no lane-crate change. The "lane-crate array view" non-goal is moot.
+
+* **Release codegen** (`Simd8` and `Simd4`, stationary): **23 instructions**, one backward branch, no
+  panic edge. The checked steady loop it replaces is 64 instructions with 9 branches.
+* **Identity.** The #990 differential at W8, W4 and W1 and the V8 digests read unchanged. So does
+  the crate's suite (50 tests) in dev and in release.
+* **Measured, against the pristine binary, with limiter-2-1 and 2-2 (stationary only):**
+  * native linked -9 to -10 % (`Simd8`) and -8 % (`Simd4`);
+  * V8 `lim - bi` -10.2 %, `limdm - bi` -3.2 %, `console - nolim` -9.8 %.
+
+  Against slice 1 alone, V8 reads -9.5 %, -2.4 % and -9.5 %.
+
+  The body's `X_UNCHECKED` prize was -5 to -9 % native and -8 % V8 on this batch. The safe form
+  meets it on linked blocks.
+* Replace "This change is ranked on its prize, not on a measured implementation" with these
+  measurements.
+
+### A3. M3 panics rather than rendering wrong words
+
+"Drop the `steady <= R - Wb` leg" makes the `E` or `X` view run past its split point, so safe Rust
+panics at the slice. Record M3 as "red (panic)", at `Wb = 476`. In the prototype's form, M1 cannot
+compile when `e > c`, because both views would borrow the same half. Record which of the two it does.
+
+### A4. Facts 1-2 need `Wb ≥ steady + 1`, which holds
+
+Fact 2's "`c + Wb ≥ c + 32 > c + steady`" is what lets the cursor block `[c, c + steady]` sit below
+`e`. It needs `steady + 1 ≤ Wb`. That holds because `steady ≤ 31` and `Wb ≥ 32`. The doc comment
+should state it.

@@ -168,3 +168,78 @@ Steps:
 * **Keep the reference kernel honest.** `tests::reference_block` (`:6534`) reaches `detector_chunk`,
   so it changes too. That is why E1b and gate 4, not the randomized oracle, are this slice's
   discriminating gates.
+
+## Amendments (Sol verification, 2026-09-27)
+
+Evidence: `docs/handoffs/effects-2026-09-27/VERIFY-LIMITER-2.md` (F1, F9, F10) and
+`verify-limiter-2-raw-timings.txt`. **These amendments supersede the body wherever they conflict.**
+The slice stands as drafted; the amendments tighten its evidence and its gate.
+
+### A1. Gate 7 builds the change arm from the slice's own commit, with nothing else in the tree
+
+The diagnosis timed every prototype in a tree that also carried its whole scaffold (`LIMDIAG2`
+switches, 20 prototypes as dead code). That scaffold alone moves this kernel. The same seed edit,
+built inside a scaffolded tree, measured +5 % (`Simd8` `HotLinked`) and +24 % (`Simd8`
+`RampLinked`) against the clean base; built clean from the pristine tree it measured -4 % and -3 %.
+
+* The change arm is the slice's commit. The base arm is its parent. Neither carries a diagnostic
+  switch, a prototype or any other dead code.
+* Record both binaries' SHA-256 in the evidence.
+
+### A2. Expected values, restated from clean builds
+
+Minimum over 4 passes of 4 rounds, separate binaries, under the lock at load 10-12, cycles per
+lane-sample, against the pristine binary:
+
+| row | `Simd8` | `Simd4` |
+|---|---:|---:|
+| `HotDualMono` | 9.89 → 9.65 (-2 %) | 18.21 → 17.63 (-3 %) |
+| `HotLinked` | 8.65 → 8.30 (-4 %) | 15.38 → 14.79 (-4 %) |
+| `QuietLinked` | 8.63 → 8.18 (-5 %) | 15.37 → 14.86 (-3 %) |
+| `RampLinked` | 8.98 → 8.71 (-3 %); another run +0.4 % | 16.04 → 15.59 (-3 %) |
+
+Under V8 (mean of three Node processes, load 8-12) the isolates moved -0.8 % (`lim - bi`), -0.2 %
+(`limdm - bi`) and -1.2 % (`console - nolim`). **The slice is neutral in the browser** and is
+justified by the native rows and the every-block applicability, not by a browser saving. The
+diagnosis's `Simd4` -5 % does not reproduce clean; -3 % does. Its ramping -3 % reproduced in three
+clean runs of four (see A3). Two later quiet V8 runs agree: -0.3 to -1.9 %.
+
+### A3. Gate 7's statistic and tolerance, exactly
+
+* **Native statistic.** For each row, the minimum over every round of at least three passes; each
+  pass runs each arm as its own process, forward then reverse. Print the load average with each
+  pass. A run whose load average exceeds 15 is not evidence and is repeated whole, once, before any
+  row is judged.
+* **Native criterion.** `HotLinked`, `HotDualMono` and `QuietLinked` must each be below base.
+  `RampLinked` must be at most base + 2 %.
+  * The seed's `RampLinked` effect measured -3, -3, -2 and +0.4 % (`Simd8`) in four clean runs.
+  * The pristine binary's own `RampLinked` minimum varied by 1.8 % between runs on this host.
+  * So the draft's strict "≤ base" on that row is a coin flip, not a gate. The stationary rows moved
+    -2 to -5 % in every run, and the strict criterion stays on them.
+* **V8.** The mean over three separate Node processes of each process's median isolate (the
+  diagnosis's `web.mjs time`), each isolate ≤ base + 2 %.
+
+### A4. E1b also covers a NaN made inside a chain
+
+Add to E1b's inputs:
+
+* `+inf` and `-inf` taps;
+* a history whose products reach `+inf` and `-inf` within one phase, so the chain creates a NaN
+  mid-sum rather than receiving one.
+
+Compare as the body says: non-NaN peaks by bits, NaN peaks as "both NaN".
+
+**Verified:** E1, the frozen-order bit test, passes unchanged against the seedless
+`annex2_phases`. Its noise never produces a signed-zero first product. Keep E1 on
+`annex2_phases_seeded` as contract 2 says, so that it remains a statement of the frozen order. E1b's
+signed-zero rows are the only rows that see the sign difference. The whole crate suite (50 tests)
+passes in release with the seedless form.
+
+### A5. Corrections
+
+* `tests::reference_block` is at `:6499`; `:6534` is `reference_block_uniform`. Both reach
+  `detector_chunk`, so the randomized oracle still cannot see this change.
+* Gate 4's digest may be recorded on the slice's parent (`220c5db5` today). The limiter crate is
+  identical there and on `49f696c7`. Record `git rev-parse HEAD:crates/true-peak-limiter` beside the
+  digest.
+* The roster count (910 → 878) and the loop count (133 → 129 at `Simd8`) reproduce exactly.
