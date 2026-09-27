@@ -14,9 +14,9 @@ use lane::{Lane, flush};
 use math::fast_db::{fast_gain_from_db, fast_level_db};
 
 use crate::design::{
-    ALL_PARAMETERS, COEF_ATTACK, COEF_HALF_KNEE, COEF_INV_RATIO_MINUS_ONE, COEF_INV_TWO_KNEE,
-    COEF_MAKEUP, COEF_MIX, COEF_RELEASE, COEF_THRESHOLD, CoefWords, MAX_WIDTH, PARAMETER_COUNT,
-    RAMP_COUNT, SMOOTHING_SAMPLES, design_lane, rate_coefficient,
+    ALL_PARAMETERS, COEF_ATTACK, COEF_COUNT, COEF_HALF_KNEE, COEF_INV_RATIO_MINUS_ONE,
+    COEF_INV_TWO_KNEE, COEF_MAKEUP, COEF_MIX, COEF_RELEASE, COEF_THRESHOLD, CoefWords, MAX_WIDTH,
+    PARAMETER_COUNT, RAMP_COUNT, SMOOTHING_SAMPLES, design_lane, rate_coefficient,
 };
 
 const LEVEL_FLOOR: f32 = 1.0e-8;
@@ -32,6 +32,18 @@ const SETTLED_CHUNK: usize = 32;
 thread_local! {
     /// Settled blocks that took the all-wet arm (issue #982), counted once per block.
     static SETTLED_WET_BLOCKS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+    /// Dual blocks whose ramping prefix ran the two-pass body (issue #1006), once per block.
+    static RAMPING_DUAL_BLOCKS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+    /// Collapsed blocks whose ramping prefix ran the two-pass body (issue #1006), once per block.
+    static RAMPING_MONO_BLOCKS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+    /// Ramping prefixes, dual or collapsed, that took the all-wet arm (issue #1006).
+    static RAMPING_WET_BLOCKS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+/// Adds one to a `#[cfg(test)]` witness counter.
+#[cfg(test)]
+fn witness(counter: &'static std::thread::LocalKey<core::cell::Cell<usize>>) {
+    counter.with(|blocks| blocks.set(blocks.get() + 1));
 }
 
 /// Detector source selected by the prepared port configuration and current block buffers.
@@ -214,6 +226,12 @@ impl<L: Lane> Channel<L> {
     }
 
     /// Advances each in-flight parameter ramp and its dependent coefficient ramp.
+    ///
+    /// Since #1006 only the one-pass prefix of a connected sidechain calls this; the main
+    /// detector's prefix advances whole lane vectors (`ChannelRamps`). `#[inline(never)]` keeps it
+    /// where it was, out of line: inlined into the collapsed kernel it would put scalar control
+    /// arithmetic into a function the wasm roster requires to carry none.
+    #[inline(never)]
     fn advance_ramps(&mut self, sample_rate: u32) {
         for lane in 0..L::WIDTH {
             let mut changed = 0_u8;
@@ -262,17 +280,27 @@ struct Coef<L: Lane> {
 impl<L: Lane> Coef<L> {
     #[inline(always)]
     fn load(words: &CoefWords) -> Self {
-        let makeup = L::load(&words[COEF_MAKEUP]);
-        let mix = L::load(&words[COEF_MIX]);
-        Self {
-            curve: GainComputerCoef {
+        Self::new(
+            GainComputerCoef {
                 threshold_db: L::load(&words[COEF_THRESHOLD]),
                 inv_ratio_minus_one: L::load(&words[COEF_INV_RATIO_MINUS_ONE]),
                 half_knee_db: L::load(&words[COEF_HALF_KNEE]),
                 inv_two_knee: L::load(&words[COEF_INV_TWO_KNEE]),
             },
-            attack: L::load(&words[COEF_ATTACK]),
-            release: L::load(&words[COEF_RELEASE]),
+            L::load(&words[COEF_ATTACK]),
+            L::load(&words[COEF_RELEASE]),
+            L::load(&words[COEF_MAKEUP]),
+            L::load(&words[COEF_MIX]),
+        )
+    }
+
+    /// The coefficient set of the given words, with its three identity masks.
+    #[inline(always)]
+    fn new(curve: GainComputerCoef<L>, attack: L, release: L, makeup: L, mix: L) -> Self {
+        Self {
+            curve,
+            attack,
+            release,
             makeup,
             mix,
             wet_identity: mix.eq(L::splat(1.0)),
@@ -355,12 +383,16 @@ fn link_frame<L: Lane>(
     clippy::disallowed_methods,
     reason = "FAST-DB-CROSSING X1: dynamics detector reading, never a pinned coefficient"
 )]
-fn curve_target<L: Lane>(detected: L, coef: &Coef<L>, invariants: &Invariants<L>) -> L {
+fn curve_target<L: Lane>(
+    detected: L,
+    curve: &GainComputerCoef<L>,
+    invariants: &Invariants<L>,
+) -> L {
     let floored = detected.max(invariants.level_floor);
     let level = fast_level_db(floored)
         .max(invariants.level_min)
         .min(invariants.level_max);
-    gain_delta_db(level, &coef.curve)
+    gain_delta_db(level, curve)
         .max(invariants.reduction_min)
         .min(invariants.zero)
 }
@@ -465,7 +497,7 @@ fn one_frame<L: Lane>(
     gain_reduction_db: &mut L,
     invariants: &Invariants<L>,
 ) -> L {
-    let target = curve_target(detected, coef, invariants);
+    let target = curve_target(detected, &coef.curve, invariants);
     let smoothed = ballistic(target, gain_reduction_db, coef);
     gain_mix(input, smoothed, coef, invariants)
 }
@@ -491,18 +523,42 @@ pub(crate) fn process_block<L: Lane>(
         .max(channel_right.max_remaining()) as usize;
     let ramping = remaining.min(frames);
     if ramping > 0 {
-        frames_loop::<L, true>(
-            left,
-            right,
-            detector,
-            0,
-            ramping,
-            link,
-            bypass,
-            sample_rate,
-            channel_left,
-            channel_right,
-        );
+        if let Detector::Main = detector {
+            if L::WIDTH == 1 {
+                ramping_main_scalar::<L>(
+                    left,
+                    right,
+                    ramping,
+                    link,
+                    bypass,
+                    channel_left,
+                    channel_right,
+                );
+            } else {
+                ramping_main::<L>(
+                    left,
+                    right,
+                    ramping,
+                    link,
+                    bypass,
+                    channel_left,
+                    channel_right,
+                );
+            }
+        } else {
+            frames_loop::<L, true>(
+                left,
+                right,
+                detector,
+                0,
+                ramping,
+                link,
+                bypass,
+                sample_rate,
+                channel_left,
+                channel_right,
+            );
+        }
     }
     if ramping < frames {
         match detector {
@@ -753,8 +809,8 @@ fn settled_frames<L: Lane, const DUAL_MONO: bool, const WET: bool>(
         let (detected_left, detected_right) =
             link_frame(source, 0, invariants.zero, invariants.zero, invariants);
         targets = [(
-            curve_target(detected_left, coef_left, invariants),
-            curve_target(detected_right, coef_right, invariants),
+            curve_target(detected_left, &coef_left.curve, invariants),
+            curve_target(detected_right, &coef_right.curve, invariants),
         ); SETTLED_CHUNK];
     }
     let mut offset = 0;
@@ -785,8 +841,8 @@ fn settled_frames<L: Lane, const DUAL_MONO: bool, const WET: bool>(
                     invariants,
                 );
                 *target = (
-                    curve_target(detected_left, coef_left, invariants),
-                    curve_target(detected_right, coef_right, invariants),
+                    curve_target(detected_left, &coef_left.curve, invariants),
+                    curve_target(detected_right, &coef_right.curve, invariants),
                 );
             }
         }
@@ -812,12 +868,13 @@ fn settled_frames<L: Lane, const DUAL_MONO: bool, const WET: bool>(
 
 /// The one-frame-at-a-time body: frames `start..end`, reading the detector through `link_frame`.
 ///
-/// Production runs it only as the ramp prefix (`RAMPING`), where every frame advances the ramps
-/// and reloads the coefficients. Since #995 every settled slice, whatever its detector, runs the
-/// two-pass body instead, so nothing instantiates `RAMPING = false` here any more; the one-pass
-/// settled form those bodies must equal lives on as the oracle in `settled_body_tests::reference`.
-/// The prefix is left exactly as it was, parameter included, rather than rewritten around a
-/// constant.
+/// Production runs it only as the ramp prefix (`RAMPING`) of a connected sidechain, present or
+/// absent, where every frame advances the ramps and reloads the coefficients. Since #995 every
+/// settled slice, whatever its detector, runs the two-pass body, and since #1006 so does the
+/// main detector's prefix (`ramping_main`), so nothing instantiates `RAMPING = false` here any
+/// more; the one-pass forms those bodies must equal live on as the oracle in
+/// `settled_body_tests::reference`. The sidechain's prefix is left exactly as it was, parameter
+/// included, rather than rewritten around a constant.
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn frames_loop<L: Lane, const RAMPING: bool>(
@@ -867,6 +924,460 @@ fn frames_loop<L: Lane, const RAMPING: bool>(
     }
 }
 
+/// Parameter bits of the static curve: threshold, ratio and knee.
+const CURVE_BITS: u8 = 0b0000_0111;
+/// The mix parameter's bit.
+const MIX_BIT: u8 = 1 << 6;
+/// The parameter each rate ramp follows, and the coefficient word it writes: attack, release.
+const RATE_PARAMETER: [usize; 2] = [3, 4];
+const RATE_WORD: [usize; 2] = [COEF_ATTACK, COEF_RELEASE];
+
+/// One parameter's (or one rate coefficient's) `LinearRamp` on every lane, as lane vectors.
+///
+/// `remaining` is carried as `f32`. It is an integer no greater than [`SMOOTHING_SAMPLES`] (a
+/// restored payload is validated to that bound), so the conversion both ways is exact and the
+/// compares below are integer compares.
+#[derive(Clone, Copy)]
+struct RampVec<L: Lane> {
+    current: L,
+    target: L,
+    step: L,
+    remaining: L,
+}
+
+impl<L: Lane> RampVec<L> {
+    #[inline(always)]
+    fn gather(ramps: &[LinearRamp; MAX_WIDTH]) -> Self {
+        let mut current = [0.0_f32; MAX_WIDTH];
+        let mut target = [0.0_f32; MAX_WIDTH];
+        let mut step = [0.0_f32; MAX_WIDTH];
+        let mut remaining = [0.0_f32; MAX_WIDTH];
+        for (lane, ramp) in ramps.iter().enumerate().take(L::WIDTH) {
+            current[lane] = ramp.current;
+            target[lane] = ramp.target;
+            step[lane] = ramp.step;
+            remaining[lane] = ramp.remaining as f32;
+        }
+        Self {
+            current: L::load(&current),
+            target: L::load(&target),
+            step: L::load(&step),
+            remaining: L::load(&remaining),
+        }
+    }
+
+    /// Writes back what an advance can change: `current`, `step` and `remaining`.
+    #[inline(always)]
+    fn scatter(self, ramps: &mut [LinearRamp; MAX_WIDTH]) {
+        let mut current = [0.0_f32; MAX_WIDTH];
+        let mut step = [0.0_f32; MAX_WIDTH];
+        let mut remaining = [0.0_f32; MAX_WIDTH];
+        self.current.store(&mut current);
+        self.step.store(&mut step);
+        self.remaining.store(&mut remaining);
+        for (lane, ramp) in ramps.iter_mut().enumerate().take(L::WIDTH) {
+            ramp.current = current[lane];
+            ramp.step = step[lane];
+            ramp.remaining = remaining[lane] as u32;
+        }
+    }
+
+    /// `LinearRamp::next_value` on the lanes of `gate`, as selects: `remaining == 0` leaves every
+    /// word as it is (at rest, or a restored ramp whose `current` is not its `target`),
+    /// `remaining == 1` assigns the target and clears the step, and otherwise the step is added
+    /// once and `remaining` counts down. Lanes outside `gate` are untouched. Returns the lanes
+    /// that were in flight, which are the lanes `next_value` would have advanced.
+    #[inline(always)]
+    fn advance_where(&mut self, gate: L::Mask) -> L::Mask {
+        let zero = L::zero();
+        let one = L::splat(1.0);
+        let moving = L::mask_and(gate, self.remaining.gt(zero));
+        let last = L::mask_and(moving, self.remaining.eq(one));
+        let next = L::select(last, self.target, self.current.add(self.step));
+        self.current = L::select(moving, next, self.current);
+        self.step = L::select(last, zero, self.step);
+        self.remaining = L::select(moving, self.remaining.sub(one), self.remaining);
+        moving
+    }
+}
+
+/// One channel's ramps and coefficient words as lane vectors, for one ramping prefix.
+///
+/// `Channel::advance_ramps` per frame, lane-wide: gathered once per block, advanced once per
+/// frame in the pass that reads them, and scattered once. A parameter without a ramp in flight on
+/// any lane at the start of the prefix cannot start one inside it (retargets land between blocks),
+/// so `active` decides once which parameters advance at all.
+struct ChannelRamps<L: Lane> {
+    /// Parameters with a ramp in flight on some lane at the start of the prefix.
+    active: u8,
+    ramps: [RampVec<L>; RAMP_COUNT],
+    /// The attack and release coefficient ramps.
+    rates: [RampVec<L>; 2],
+    words: [L; COEF_COUNT],
+}
+
+impl<L: Lane> ChannelRamps<L> {
+    #[inline(always)]
+    fn gather(channel: &Channel<L>) -> Self {
+        let mut active = 0_u8;
+        for (parameter, ramps) in channel.ramps.iter().enumerate() {
+            if ramps.iter().take(L::WIDTH).any(LinearRamp::is_ramping) {
+                active |= 1 << parameter;
+            }
+        }
+        Self {
+            active,
+            ramps: core::array::from_fn(|parameter| RampVec::gather(&channel.ramps[parameter])),
+            rates: core::array::from_fn(|slot| RampVec::gather(&channel.rate_ramps[slot])),
+            words: core::array::from_fn(|word| L::load(&channel.words[word])),
+        }
+    }
+
+    #[inline(always)]
+    fn scatter(&self, channel: &mut Channel<L>) {
+        for (parameter, ramp) in self.ramps.iter().enumerate() {
+            if self.active & (1 << parameter) != 0 {
+                ramp.scatter(&mut channel.ramps[parameter]);
+            }
+        }
+        for (slot, ramp) in self.rates.iter().enumerate() {
+            if self.active & (1 << RATE_PARAMETER[slot]) != 0 {
+                ramp.scatter(&mut channel.rate_ramps[slot]);
+            }
+        }
+        for (word, value) in self.words.iter().enumerate() {
+            value.store(&mut channel.words[word]);
+        }
+    }
+
+    /// One frame of `advance_ramps` for threshold, ratio and knee: advance them, then write the
+    /// redesigned curve into the lanes where any of the three moved, which is `design_lane`'s
+    /// `changed` rule.
+    #[inline(always)]
+    fn advance_curve(&mut self) {
+        if self.active & CURVE_BITS == 0 {
+            return;
+        }
+        let all = L::zero().eq(L::zero());
+        let mut moved = L::mask_not(all);
+        for parameter in 0..3 {
+            if self.active & (1 << parameter) != 0 {
+                moved = L::mask_or(moved, self.ramps[parameter].advance_where(all));
+            }
+        }
+        let curve = design_curve::<L>(
+            self.ramps[0].current,
+            self.ramps[1].current,
+            self.ramps[2].current,
+        );
+        for (word, value) in [
+            (COEF_THRESHOLD, curve.threshold_db),
+            (COEF_INV_RATIO_MINUS_ONE, curve.inv_ratio_minus_one),
+            (COEF_HALF_KNEE, curve.half_knee_db),
+            (COEF_INV_TWO_KNEE, curve.inv_two_knee),
+        ] {
+            self.words[word] = L::select(moved, value, self.words[word]);
+        }
+    }
+
+    /// One frame of `advance_ramps` for attack, release, makeup and mix. A rate ramp advances on
+    /// the lanes whose parameter ramp was in flight, as `advance_ramps` gates it, whatever its own
+    /// `remaining` says.
+    #[inline(always)]
+    fn advance_output(&mut self) {
+        let all = L::zero().eq(L::zero());
+        for slot in 0..2 {
+            let parameter = RATE_PARAMETER[slot];
+            if self.active & (1 << parameter) != 0 {
+                let moved = self.ramps[parameter].advance_where(all);
+                self.rates[slot].advance_where(moved);
+                let word = RATE_WORD[slot];
+                self.words[word] = L::select(moved, self.rates[slot].current, self.words[word]);
+            }
+        }
+        for (parameter, word) in [(5, COEF_MAKEUP), (6, COEF_MIX)] {
+            if self.active & (1 << parameter) != 0 {
+                let moved = self.ramps[parameter].advance_where(all);
+                self.words[word] =
+                    L::select(moved, self.ramps[parameter].current, self.words[word]);
+            }
+        }
+    }
+
+    /// The static curve's words, which is all pass 1 reads.
+    #[inline(always)]
+    fn curve(&self) -> GainComputerCoef<L> {
+        GainComputerCoef {
+            threshold_db: self.words[COEF_THRESHOLD],
+            inv_ratio_minus_one: self.words[COEF_INV_RATIO_MINUS_ONE],
+            half_knee_db: self.words[COEF_HALF_KNEE],
+            inv_two_knee: self.words[COEF_INV_TWO_KNEE],
+        }
+    }
+
+    /// `Coef::load` of the current words.
+    #[inline(always)]
+    fn coef(&self) -> Coef<L> {
+        Coef::new(
+            self.curve(),
+            self.words[COEF_ATTACK],
+            self.words[COEF_RELEASE],
+            self.words[COEF_MAKEUP],
+            self.words[COEF_MIX],
+        )
+    }
+
+    /// `true` when no mix ramp is open and every lane's mix is exactly `1`.
+    #[inline(always)]
+    fn wet(&self) -> bool {
+        self.active & MIX_BIT == 0 && every_lane::<L>(self.words[COEF_MIX].eq(L::splat(1.0)))
+    }
+}
+
+/// `GainComputerCoef::new` on every lane: `1/R - 1` as `1 / R - 1`, and `knee_coefficients` with
+/// its branch as a select, `(W / 2, 1 / (2 W))` where `W > 0` and the reciprocal is below
+/// `+inf`, else `(+0, +0)`. The same `f32` operations on the same operands, lane by lane.
+#[inline(always)]
+fn design_curve<L: Lane>(threshold: L, ratio: L, knee: L) -> GainComputerCoef<L> {
+    let zero = L::zero();
+    let one = L::splat(1.0);
+    let inv_two_knee = one.div(L::splat(2.0).mul(knee));
+    let soft = L::mask_and(knee.gt(zero), inv_two_knee.lt(L::splat(f32::INFINITY)));
+    GainComputerCoef {
+        threshold_db: threshold,
+        inv_ratio_minus_one: one.div(ratio).sub(one),
+        half_knee_db: L::select(soft, L::splat(0.5).mul(knee), zero),
+        inv_two_knee: L::select(soft, inv_two_knee, zero),
+    }
+}
+
+/// The ramping prefix of a `Detector::Main` block, frames `0..end`: the settled body's two passes
+/// with the ramps advanced lane-wide (issue #1006).
+///
+/// `frames_loop::<L, true>` is the oracle. Per frame it advances every ramp (`advance_ramps`),
+/// reloads the words and runs the one-pass law. Here each ramp advances exactly once per frame,
+/// in the pass that reads it:
+///
+/// * a frame's target depends on its input and on the curve words, which depend only on the
+///   threshold, ratio and knee ramps, so pass 1 advances those three and computes the chunk's
+///   targets;
+/// * pass 2 advances attack, release, makeup and mix, then runs the recurrence and the output,
+///   frame by frame.
+///
+/// The word each frame reads is therefore the one-pass loop's, and the order across independent
+/// frames is #983's. The DualMono detector arm is #984's. The all-wet arm (#982) is taken when the
+/// block is unbypassed, no mix ramp is open on either channel and every lane's mix is `1`: then
+/// mix is `1` on every frame, and the arm's argument holds frame by frame whatever makeup does.
+///
+/// `#[inline(always)]`, so that `process_block::<Simd4>` carries the bank's prefix and the wasm
+/// roster checks it, as it did the one-pass prefix; a scalar instance calls it through
+/// `ramping_main_scalar`.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn ramping_main<L: Lane>(
+    left: &mut [f32],
+    right: &mut [f32],
+    end: usize,
+    link: LinkMode,
+    bypass: bool,
+    channel_left: &mut Channel<L>,
+    channel_right: &mut Channel<L>,
+) {
+    let width = L::WIDTH;
+    let invariants = Invariants::<L>::new(link, bypass);
+    let mut ramps_left = ChannelRamps::gather(channel_left);
+    let mut ramps_right = ChannelRamps::gather(channel_right);
+    let dual_mono = matches!(link, LinkMode::DualMono);
+    let wet = !bypass && ramps_left.wet() && ramps_right.wet();
+    let left = &mut left[..end * width];
+    let right = &mut right[..end * width];
+    let mut gains = (
+        channel_left.gain_reduction_db,
+        channel_right.gain_reduction_db,
+    );
+    #[cfg(test)]
+    {
+        witness(&RAMPING_DUAL_BLOCKS);
+        if wet {
+            witness(&RAMPING_WET_BLOCKS);
+        }
+    }
+    let ramps = (&mut ramps_left, &mut ramps_right);
+    match (dual_mono, wet) {
+        (true, true) => {
+            ramping_frames::<L, true, true>(left, right, ramps, &mut gains, &invariants);
+        }
+        (true, false) => {
+            ramping_frames::<L, true, false>(left, right, ramps, &mut gains, &invariants);
+        }
+        (false, true) => {
+            ramping_frames::<L, false, true>(left, right, ramps, &mut gains, &invariants);
+        }
+        (false, false) => {
+            ramping_frames::<L, false, false>(left, right, ramps, &mut gains, &invariants);
+        }
+    }
+    channel_left.gain_reduction_db = gains.0;
+    channel_right.gain_reduction_db = gains.1;
+    ramps_left.scatter(channel_left);
+    ramps_right.scatter(channel_right);
+}
+
+/// `ramping_main` out of line, for a scalar instance (`L::WIDTH == 1`) only.
+///
+/// Measured, not assumed: inlined into `process_block::<f32>`, the prefix made that function too
+/// large to inline into the scalar instance's `process`, and the unbanked settled loops came out
+/// with more instructions and stack traffic (natively, +1.0 % on 64 settled unbanked instances,
+/// slower in five of six alternations). Out of line, those loops are the batch head's again. A
+/// bank keeps the prefix inline, so the wasm roster's `process_block::<Simd4>` carries it; one
+/// call per ramping block is all this costs a scalar instance.
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn ramping_main_scalar<L: Lane>(
+    left: &mut [f32],
+    right: &mut [f32],
+    end: usize,
+    link: LinkMode,
+    bypass: bool,
+    channel_left: &mut Channel<L>,
+    channel_right: &mut Channel<L>,
+) {
+    ramping_main::<L>(left, right, end, link, bypass, channel_left, channel_right);
+}
+
+/// The ramping prefix's two passes over chunks of [`SETTLED_CHUNK`] frames, both channels. The
+/// chunking, the scratch and the in-place argument are `settled_frames`'.
+#[inline(always)]
+fn ramping_frames<L: Lane, const DUAL_MONO: bool, const WET: bool>(
+    left: &mut [f32],
+    right: &mut [f32],
+    ramps: (&mut ChannelRamps<L>, &mut ChannelRamps<L>),
+    gains: &mut (L, L),
+    invariants: &Invariants<L>,
+) {
+    let width = L::WIDTH;
+    let (ramps_left, ramps_right) = ramps;
+    let (mut gain_left, mut gain_right) = *gains;
+    let mut targets = [(L::zero(), L::zero()); SETTLED_CHUNK];
+    for (chunk_left, chunk_right) in left
+        .chunks_mut(SETTLED_CHUNK * width)
+        .zip(right.chunks_mut(SETTLED_CHUNK * width))
+    {
+        // Pass 1: the curve ramps, then every frame's target.
+        for ((frame_left, frame_right), target) in chunk_left
+            .chunks_exact(width)
+            .zip(chunk_right.chunks_exact(width))
+            .zip(targets.iter_mut())
+        {
+            ramps_left.advance_curve();
+            ramps_right.advance_curve();
+            let (detected_left, detected_right) = settled_detect::<L, DUAL_MONO>(
+                L::load(frame_left),
+                L::load(frame_right),
+                invariants,
+            );
+            *target = (
+                curve_target(detected_left, &ramps_left.curve(), invariants),
+                curve_target(detected_right, &ramps_right.curve(), invariants),
+            );
+        }
+        // Pass 2: the output ramps, then the recurrence and the output of the same frame.
+        for ((frame_left, frame_right), target) in chunk_left
+            .chunks_exact_mut(width)
+            .zip(chunk_right.chunks_exact_mut(width))
+            .zip(targets.iter())
+        {
+            ramps_left.advance_output();
+            ramps_right.advance_output();
+            let coef_left = ramps_left.coef();
+            let coef_right = ramps_right.coef();
+            let main_left = L::load(frame_left);
+            let main_right = L::load(frame_right);
+            let smoothed_left = ballistic(target.0, &mut gain_left, &coef_left);
+            let smoothed_right = ballistic(target.1, &mut gain_right, &coef_right);
+            settled_output::<L, WET>(main_left, smoothed_left, &coef_left, invariants)
+                .store(frame_left);
+            settled_output::<L, WET>(main_right, smoothed_right, &coef_right, invariants)
+                .store(frame_right);
+        }
+    }
+    *gains = (gain_left, gain_right);
+}
+
+/// `ramping_main` on the collapsed plane (issue #1006): the one channel's ramps, the detector
+/// `link_frame(main, main).0` (under DualMono its `abs` arm), and `frames_loop_mono::<L, true>`
+/// as the oracle. Mono stems run this prefix whenever one of their compressor's knobs moves.
+#[inline(always)]
+fn ramping_main_mono<L: Lane>(
+    left: &mut [f32],
+    end: usize,
+    link: LinkMode,
+    bypass: bool,
+    channel_left: &mut Channel<L>,
+) {
+    let width = L::WIDTH;
+    let invariants = Invariants::<L>::new(link, bypass);
+    let mut ramps = ChannelRamps::gather(channel_left);
+    let dual_mono = matches!(link, LinkMode::DualMono);
+    let wet = !bypass && ramps.wet();
+    let left = &mut left[..end * width];
+    let mut gain = channel_left.gain_reduction_db;
+    #[cfg(test)]
+    {
+        witness(&RAMPING_MONO_BLOCKS);
+        if wet {
+            witness(&RAMPING_WET_BLOCKS);
+        }
+    }
+    match (dual_mono, wet) {
+        (true, true) => {
+            ramping_frames_mono::<L, true, true>(left, &mut ramps, &mut gain, &invariants);
+        }
+        (true, false) => {
+            ramping_frames_mono::<L, true, false>(left, &mut ramps, &mut gain, &invariants);
+        }
+        (false, true) => {
+            ramping_frames_mono::<L, false, true>(left, &mut ramps, &mut gain, &invariants);
+        }
+        (false, false) => {
+            ramping_frames_mono::<L, false, false>(left, &mut ramps, &mut gain, &invariants);
+        }
+    }
+    channel_left.gain_reduction_db = gain;
+    ramps.scatter(channel_left);
+}
+
+/// `ramping_frames` on the one plane.
+#[inline(always)]
+fn ramping_frames_mono<L: Lane, const DUAL_MONO: bool, const WET: bool>(
+    left: &mut [f32],
+    ramps: &mut ChannelRamps<L>,
+    gain: &mut L,
+    invariants: &Invariants<L>,
+) {
+    let width = L::WIDTH;
+    let mut gain_left = *gain;
+    let mut targets = [L::zero(); SETTLED_CHUNK];
+    for chunk in left.chunks_mut(SETTLED_CHUNK * width) {
+        // Pass 1: the curve ramps, then every frame's target.
+        for (frame, target) in chunk.chunks_exact(width).zip(targets.iter_mut()) {
+            ramps.advance_curve();
+            let main = L::load(frame);
+            let (detected, _) = settled_detect::<L, DUAL_MONO>(main, main, invariants);
+            *target = curve_target(detected, &ramps.curve(), invariants);
+        }
+        // Pass 2: the output ramps, then the recurrence and the output.
+        for (frame, target) in chunk.chunks_exact_mut(width).zip(targets.iter()) {
+            ramps.advance_output();
+            let coef = ramps.coef();
+            let main = L::load(frame);
+            let smoothed = ballistic(*target, &mut gain_left, &coef);
+            settled_output::<L, WET>(main, smoothed, &coef, invariants).store(frame);
+        }
+    }
+    *gain = gain_left;
+}
+
 /// Renders the collapsed one-plane bank path. The detector is evaluated from the left plane twice
 /// to retain the exact linked Average arithmetic used by the dual path.
 #[allow(clippy::too_many_arguments)]
@@ -883,16 +1394,20 @@ pub(crate) fn process_block_mono<L: Lane>(
     let remaining = channel_left.max_remaining() as usize;
     let ramping = remaining.min(frames);
     if ramping > 0 {
-        frames_loop_mono::<L, true>(
-            left,
-            detector,
-            0,
-            ramping,
-            link,
-            bypass,
-            sample_rate,
-            channel_left,
-        );
+        if let Detector::Main = detector {
+            ramping_main_mono::<L>(left, ramping, link, bypass, channel_left);
+        } else {
+            frames_loop_mono::<L, true>(
+                left,
+                detector,
+                0,
+                ramping,
+                link,
+                bypass,
+                sample_rate,
+                channel_left,
+            );
+        }
     }
     if ramping < frames {
         match detector {
@@ -978,7 +1493,7 @@ fn settled_frames_mono<L: Lane, const DUAL_MONO: bool, const WET: bool>(
         for (frame, target) in chunk.chunks_exact(width).zip(targets.iter_mut()) {
             let main = L::load(frame);
             let (detected, _) = settled_detect::<L, DUAL_MONO>(main, main, invariants);
-            *target = curve_target(detected, coef, invariants);
+            *target = curve_target(detected, &coef.curve, invariants);
         }
         // Pass 2: the recurrence, then the output of the same frame.
         for (frame, target) in chunk.chunks_exact_mut(width).zip(targets.iter()) {
@@ -1270,9 +1785,11 @@ mod settled_body_tests {
     //! every ramp field, then the `finish_channel` masks, and the same words again after it.
 
     use super::{
-        Channel, Detector, SETTLED_WET_BLOCKS, finish_channel, process_block, process_block_mono,
+        Channel, Detector, RAMPING_DUAL_BLOCKS, RAMPING_MONO_BLOCKS, RAMPING_WET_BLOCKS,
+        SETTLED_WET_BLOCKS, finish_channel, process_block, process_block_mono,
     };
     use crate::design::{MAX_WIDTH, PARAMETER_COUNT};
+    use crate::state::{STATE_HEADER_WORDS, commit_channel, validate_channel, write_channel};
     use core::cell::Cell;
     use effect_contract::LinkMode;
     use lane::{Lane, Simd4, Simd8};
@@ -1642,6 +2159,11 @@ mod settled_body_tests {
                         6.0,
                         3.0,
                         1.0e-3,
+                        // #1006: the smallest subnormal, and either side of `MIN_SOFT_KNEE_DB`,
+                        // whose reciprocal decides `design_curve`'s `inv < +inf` select.
+                        f32::from_bits(1),
+                        f32::from_bits(0x0010_0000),
+                        f32::from_bits(0x0010_0001),
                     ])
                 } else {
                     rng.unit() * 24.0
@@ -1770,6 +2292,16 @@ mod settled_body_tests {
         SETTLED_WET_BLOCKS.with(Cell::get)
     }
 
+    /// The ramping prefix's witnesses (#1006): dual prefixes, collapsed prefixes, and prefixes of
+    /// either kind that took the all-wet arm, on this thread.
+    fn prefix_blocks() -> [usize; 3] {
+        [
+            RAMPING_DUAL_BLOCKS.with(Cell::get),
+            RAMPING_MONO_BLOCKS.with(Cell::get),
+            RAMPING_WET_BLOCKS.with(Cell::get),
+        ]
+    }
+
     /// Which detector a block runs with. A sidechain block carries its own planes.
     #[derive(Clone, Copy, Debug, PartialEq)]
     enum Source {
@@ -1802,6 +2334,11 @@ mod settled_body_tests {
         all_wet_settled: usize,
         rejected: usize,
         sidechain: usize,
+        /// Ramping prefixes that ran the two-pass body (#1006), dual and collapsed, and those that
+        /// took the all-wet arm.
+        prefix: usize,
+        prefix_mono: usize,
+        prefix_wet: usize,
         /// Settled bodies of a `Silent` or `Sidechain` block (#995), and those that started
         /// mid-block.
         settled_sidechain: usize,
@@ -1819,6 +2356,9 @@ mod settled_body_tests {
             self.all_wet_settled += other.all_wet_settled;
             self.rejected += other.rejected;
             self.sidechain += other.sidechain;
+            self.prefix += other.prefix;
+            self.prefix_mono += other.prefix_mono;
+            self.prefix_wet += other.prefix_wet;
             self.settled_sidechain += other.settled_sidechain;
             self.settled_sidechain_mid_block += other.settled_sidechain_mid_block;
             self.nan_payload += other.nan_payload;
@@ -1827,6 +2367,51 @@ mod settled_body_tests {
 
     fn all_wet<L: Lane>(channel: &Channel<L>) -> bool {
         (0..L::WIDTH).all(|lane| channel.words[crate::design::COEF_MIX][lane] == 1.0)
+    }
+
+    /// The ramping prefix's all-wet predicate (#1006), on the state before the block: every lane
+    /// wet and no mix ramp open.
+    fn wet_prefix<L: Lane>(channel: &Channel<L>) -> bool {
+        all_wet(channel)
+            && channel.ramps[6]
+                .iter()
+                .take(L::WIDTH)
+                .all(|ramp| !ramp.is_ramping())
+    }
+
+    /// Asserts which ramping prefix ran, from the witnesses' movement over one block.
+    fn assert_prefix(
+        context: &dyn Fn() -> String,
+        moved: [usize; 3],
+        expected: [bool; 3],
+    ) -> [usize; 3] {
+        assert_eq!(
+            moved,
+            expected.map(usize::from),
+            "{}: the two-pass prefix runs exactly on a `Main` block with an open ramp \
+             [dual, collapsed, all-wet]",
+            context()
+        );
+        moved
+    }
+
+    /// Restores one lane of `channel` through the payload codec (`validate_channel`, then
+    /// `commit_channel`), with the ramp of `parameter` replaced by `(current, target, remaining)`.
+    fn restore_ramp<L: Lane>(
+        channel: &mut Channel<L>,
+        lane: usize,
+        parameter: usize,
+        (current, target, remaining): (f32, f32, u32),
+        sample_rate: u32,
+    ) {
+        let mut bytes = [0_u8; STATE_HEADER_WORDS * 4];
+        write_channel(&mut bytes, channel, lane);
+        let word = (1 + parameter * 3) * 4;
+        bytes[word..word + 4].copy_from_slice(&current.to_le_bytes());
+        bytes[word + 4..word + 8].copy_from_slice(&target.to_le_bytes());
+        bytes[word + 8..word + 12].copy_from_slice(&remaining.to_le_bytes());
+        validate_channel(&bytes).expect("a legal payload");
+        commit_channel(&bytes, channel, lane, sample_rate);
     }
 
     /// Two identically prepared channel pairs: the oracle's and the candidate's.
@@ -1856,6 +2441,15 @@ mod settled_body_tests {
             for pair in [&mut self.oracle, &mut self.candidate] {
                 let channel = if right { &mut pair.1 } else { &mut pair.0 };
                 channel.set_parameter_target(parameter, lane, value, rate);
+            }
+        }
+
+        /// Restores one lane of one channel, both sides, with one ramp rewritten.
+        fn restore(&mut self, right: bool, lane: usize, parameter: usize, ramp: (f32, f32, u32)) {
+            let rate = self.sample_rate;
+            for pair in [&mut self.oracle, &mut self.candidate] {
+                let channel = if right { &mut pair.1 } else { &mut pair.0 };
+                restore_ramp(channel, lane, parameter, ramp, rate);
             }
         }
 
@@ -1891,6 +2485,11 @@ mod settled_body_tests {
             let ramping = (self.oracle.0.max_remaining())
                 .max(self.oracle.1.max_remaining())
                 .min(frames as u32) as usize;
+            let prefix_expected = ramping > 0 && source == Source::Main;
+            let prefix_wet_expected = prefix_expected
+                && !bypass
+                && wet_prefix(&self.oracle.0)
+                && wet_prefix(&self.oracle.1);
             let (mut oracle_left, mut oracle_right) = (input.0.to_vec(), input.1.to_vec());
             let (mut candidate_left, mut candidate_right) = (input.0.to_vec(), input.1.to_vec());
             let detector = sidechain.detector(source);
@@ -1905,6 +2504,7 @@ mod settled_body_tests {
                 (&mut self.oracle.0, &mut self.oracle.1),
             );
             let wet_before = wet_arm_blocks();
+            let prefix_before = prefix_blocks();
             process_block::<L>(
                 &mut candidate_left,
                 &mut candidate_right,
@@ -1916,6 +2516,7 @@ mod settled_body_tests {
                 (&mut self.candidate.0, &mut self.candidate.1),
             );
             let wet_arm = wet_arm_blocks() - wet_before;
+            let prefix_after = prefix_blocks();
             let settled = ramping < frames;
             let all_wet_settled = settled
                 && source == Source::Main
@@ -1929,17 +2530,24 @@ mod settled_body_tests {
                 "{}: the all-wet arm runs exactly once on an all-wet, unbypassed settled block",
                 context()
             );
+            let prefix = assert_prefix(
+                &context,
+                core::array::from_fn(|kind| prefix_after[kind] - prefix_before[kind]),
+                [prefix_expected, false, prefix_wet_expected],
+            );
+            // #982's relaxation, granted only where a witness says the arm ran in this block.
+            let relaxed = wet_arm == 1 || prefix[2] == 1;
             let relaxed_left = assert_words_relaxed(
                 &format!("{} left kernel", context()),
                 &oracle_left,
                 &candidate_left,
-                wet_arm == 1,
+                relaxed,
             );
             let relaxed_right = assert_words_relaxed(
                 &format!("{} right kernel", context()),
                 &oracle_right,
                 &candidate_right,
-                wet_arm == 1,
+                relaxed,
             );
             assert_state(
                 &format!("{} left", context()),
@@ -1998,6 +2606,9 @@ mod settled_body_tests {
                 all_wet_settled: usize::from(all_wet_settled),
                 rejected: usize::from(oracle_masks != (0, 0)),
                 sidechain: usize::from(source != Source::Main),
+                prefix: prefix[0],
+                prefix_mono: 0,
+                prefix_wet: prefix[2],
                 settled_sidechain: usize::from(settled && source != Source::Main),
                 settled_sidechain_mid_block: usize::from(
                     settled && ramping > 0 && source != Source::Main,
@@ -2037,6 +2648,12 @@ mod settled_body_tests {
             self.candidate.discontinuity_reset(rate);
         }
 
+        fn restore(&mut self, lane: usize, parameter: usize, ramp: (f32, f32, u32)) {
+            let rate = self.sample_rate;
+            restore_ramp(&mut self.oracle, lane, parameter, ramp, rate);
+            restore_ramp(&mut self.candidate, lane, parameter, ramp, rate);
+        }
+
         fn block(
             &mut self,
             context: &dyn Fn() -> String,
@@ -2048,6 +2665,8 @@ mod settled_body_tests {
         ) -> Coverage {
             let frames = input.len() / L::WIDTH;
             let ramping = self.oracle.max_remaining().min(frames as u32) as usize;
+            let prefix_expected = ramping > 0 && source == Source::Main;
+            let prefix_wet_expected = prefix_expected && !bypass && wet_prefix(&self.oracle);
             let mut oracle = input.to_vec();
             let mut candidate = input.to_vec();
             let detector = sidechain.detector(source);
@@ -2061,6 +2680,7 @@ mod settled_body_tests {
                 &mut self.oracle,
             );
             let wet_before = wet_arm_blocks();
+            let prefix_before = prefix_blocks();
             process_block_mono::<L>(
                 &mut candidate,
                 detector,
@@ -2071,6 +2691,7 @@ mod settled_body_tests {
                 &mut self.candidate,
             );
             let wet_arm = wet_arm_blocks() - wet_before;
+            let prefix_after = prefix_blocks();
             let settled = ramping < frames;
             let all_wet_settled =
                 settled && source == Source::Main && !bypass && all_wet(&self.oracle);
@@ -2081,11 +2702,16 @@ mod settled_body_tests {
                 "{}: the collapsed all-wet arm runs exactly once on an all-wet, unbypassed settled block",
                 context()
             );
+            let prefix = assert_prefix(
+                &context,
+                core::array::from_fn(|kind| prefix_after[kind] - prefix_before[kind]),
+                [false, prefix_expected, prefix_wet_expected],
+            );
             let relaxed = assert_words_relaxed(
                 &format!("{} kernel", context()),
                 &oracle,
                 &candidate,
-                wet_arm == 1,
+                wet_arm == 1 || prefix[2] == 1,
             );
             assert_state(&context(), &self.oracle, &self.candidate);
             let oracle_mask = finish_channel::<L>(&mut oracle, &mut self.oracle);
@@ -2109,6 +2735,9 @@ mod settled_body_tests {
                 all_wet_settled: usize::from(all_wet_settled),
                 rejected: usize::from(oracle_mask != 0),
                 sidechain: usize::from(source != Source::Main),
+                prefix: 0,
+                prefix_mono: prefix[1],
+                prefix_wet: prefix[2],
                 settled_sidechain: 0,
                 settled_sidechain_mid_block: 0,
                 nan_payload: relaxed,
@@ -2247,6 +2876,10 @@ mod settled_body_tests {
         assert!(
             coverage.settled_sidechain_mid_block > 0,
             "the grid must start sidechained settled bodies mid-block (#995)"
+        );
+        assert!(
+            coverage.prefix > 0 && coverage.prefix_mono > 0,
+            "the grid must run the two-pass prefix, dual and collapsed (#1006)"
         );
         assert!(
             coverage.rejected > 0,
@@ -2438,12 +3071,41 @@ mod settled_body_tests {
                     } else {
                         self::parameter(&mut rng, parameter)
                     };
-                    let right = rng.chance(0.5);
-                    dual.retarget(right, parameter, lane, value);
-                    if !right {
-                        mono.retarget(parameter, lane, value);
+                    // One channel, or both with the same value in the same block: the web host's
+                    // `channel = 2` traffic (#1006).
+                    match rng.below(3) {
+                        0 => dual.retarget(true, parameter, lane, value),
+                        1 => {
+                            dual.retarget(false, parameter, lane, value);
+                            mono.retarget(parameter, lane, value);
+                        }
+                        _ => {
+                            dual.retarget(false, parameter, lane, value);
+                            dual.retarget(true, parameter, lane, value);
+                            mono.retarget(parameter, lane, value);
+                        }
                     }
                 }
+            }
+            if rng.chance(0.03) {
+                // A payload restore that leaves a ramp at `remaining = 0` with `current !=
+                // target` (or, one time in four, mid-window), through the restore path (#1006).
+                let lane = rng.below(width);
+                let parameter = rng.below(PARAMETER_COUNT);
+                let current = self::parameter(&mut rng, parameter);
+                let target = self::parameter(&mut rng, parameter);
+                let remaining = if rng.chance(0.75) {
+                    0
+                } else {
+                    1 + rng.below(64) as u32
+                };
+                dual.restore(
+                    rng.chance(0.5),
+                    lane,
+                    parameter,
+                    (current, target, remaining),
+                );
+                mono.restore(lane, parameter, (current, target, remaining));
             }
             if rng.chance(0.02) {
                 dual.reset(false);
@@ -2535,6 +3197,10 @@ mod settled_body_tests {
         assert!(
             coverage.settled_sidechain_mid_block > 0,
             "sidechained settled bodies must start mid-block (#995)"
+        );
+        assert!(
+            coverage.prefix > 0 && coverage.prefix_mono > 0 && coverage.prefix_wet > 0,
+            "the two-pass prefix must run dual, collapsed and on the all-wet arm (#1006)"
         );
     }
 
@@ -2921,5 +3587,223 @@ mod settled_body_tests {
         let digest = hex(hasher);
         println!("scenario 985 digest {digest}");
         assert_eq!(digest, SCENARIO_985);
+    }
+
+    /// One block of the #1006 ramping scenario: its frame count and the events before it.
+    #[derive(Clone, Copy, Default)]
+    struct RideEvents {
+        frames: usize,
+        /// Threshold to `-30` or `-20` dB on lane 1, both channels.
+        threshold: Option<f32>,
+        /// Threshold on lane 1, left channel only.
+        threshold_left: Option<f32>,
+        /// Attack on every lane, both channels.
+        attack: Option<f32>,
+        /// Makeup on every lane, both channels.
+        makeup: Option<f32>,
+        /// Mix on lane 0, both channels.
+        mix: Option<f32>,
+        /// A discontinuity reset before the block (after its events).
+        reset: bool,
+        /// A payload restore of lane 0 with its threshold ramp at `remaining = 0`,
+        /// `current != target`.
+        restore: bool,
+    }
+
+    /// The #1006 schedule: 128 blocks of mixed lengths, so that windows open in one block and
+    /// close in the next, with a threshold ride on one lane, an attack ride on every lane, a
+    /// makeup and mix ride, two discontinuity resets and one restore.
+    fn ride_schedule(wet: bool) -> Vec<RideEvents> {
+        const FRAMES: [usize; 12] = [128, 37, 64, 1, 100, 31, 33, 128, 50, 97, 7, 63];
+        (0..128)
+            .map(|block| {
+                let mut events = RideEvents {
+                    frames: FRAMES[block % FRAMES.len()],
+                    ..RideEvents::default()
+                };
+                if block.is_multiple_of(2) {
+                    events.threshold = Some(if block.is_multiple_of(4) {
+                        -30.0
+                    } else {
+                        -20.0
+                    });
+                }
+                if block % 11 == 3 {
+                    events.threshold_left = Some(-12.5);
+                }
+                if block % 5 == 1 {
+                    events.attack = Some(if block % 10 == 1 { 3.0 } else { 12.0 });
+                }
+                if wet && block % 4 == 1 {
+                    events.makeup = Some(if block % 8 == 1 { 3.0 } else { 0.0 });
+                }
+                if wet && block % 7 == 2 {
+                    events.mix = Some(if block % 14 == 2 { 0.8 } else { 1.0 });
+                }
+                events.reset = block == 51 || block == 90;
+                events.restore = block == 70;
+                events
+            })
+            .collect()
+    }
+
+    /// Applies one block's events to a channel, as `apply_automation` and the resets do.
+    fn apply_ride<L: Lane>(channel: &mut Channel<L>, events: &RideEvents, right: bool) {
+        let width = L::WIDTH;
+        let lane = 1 % width;
+        if let Some(value) = events.threshold {
+            channel.set_parameter_target(0, lane, value, SAMPLE_RATE);
+        }
+        if let (Some(value), false) = (events.threshold_left, right) {
+            channel.set_parameter_target(0, lane, value, SAMPLE_RATE);
+        }
+        for lane in 0..width {
+            if let Some(value) = events.attack {
+                channel.set_parameter_target(3, lane, value, SAMPLE_RATE);
+            }
+            if let Some(value) = events.makeup {
+                channel.set_parameter_target(5, lane, value, SAMPLE_RATE);
+            }
+        }
+        if let Some(value) = events.mix {
+            channel.set_parameter_target(6, 0, value, SAMPLE_RATE);
+        }
+        if events.restore {
+            let mut bytes = [0_u8; STATE_HEADER_WORDS * 4];
+            write_channel(&mut bytes, channel, 0);
+            bytes[4..8].copy_from_slice(&(-25.0_f32).to_le_bytes());
+            bytes[8..12].copy_from_slice(&(-15.0_f32).to_le_bytes());
+            bytes[12..16].copy_from_slice(&0_u32.to_le_bytes());
+            validate_channel(&bytes).expect("a legal payload");
+            commit_channel(&bytes, channel, 0, SAMPLE_RATE);
+        }
+        if events.reset {
+            channel.discontinuity_reset(SAMPLE_RATE);
+        }
+    }
+
+    /// Folds every lane's version-1 payload words of one channel.
+    fn fold_payload<L: Lane>(hasher: &mut Sha256, channel: &Channel<L>) {
+        for lane in 0..L::WIDTH {
+            let mut bytes = [0_u8; STATE_HEADER_WORDS * 4];
+            write_channel(&mut bytes, channel, lane);
+            hasher.update(bytes);
+        }
+    }
+
+    /// What the #1006 scenario reached, for its coverage assertions.
+    #[derive(Default)]
+    struct RideCoverage {
+        /// Blocks that began with a window open.
+        ramping: usize,
+        /// Blocks whose windows closed inside the block, so a settled body followed the prefix.
+        closed_mid_block: usize,
+        /// Blocks that ended with a window still open.
+        open_at_end: usize,
+        /// Discontinuity resets applied while a window was open.
+        resets_mid_ramp: usize,
+    }
+
+    /// Renders the #1006 scenario for one width, table and link mode, dual and collapsed, and
+    /// folds every kernel word, recursive word, mask, finished word and payload word.
+    fn ride_width<L: Lane>(
+        hasher: &mut Sha256,
+        table: &[[f32; PARAMETER_COUNT]; 8],
+        wet: bool,
+        link: LinkMode,
+        coverage: &mut RideCoverage,
+    ) {
+        let width = L::WIDTH;
+        let schedule = ride_schedule(wet);
+        for group in 0..8 / width {
+            let left_defaults = table_defaults(table, group * width, 0);
+            let right_defaults = table_defaults(table, group * width, 3);
+            let mut dual = (
+                Channel::<L>::new(&left_defaults, SAMPLE_RATE),
+                Channel::<L>::new(&right_defaults, SAMPLE_RATE),
+            );
+            let mut mono = Channel::<L>::new(&left_defaults, SAMPLE_RATE);
+            let mut rng = Rng::new(0x1006 + group as u64);
+            for (block, events) in schedule.iter().enumerate() {
+                let open = dual.0.max_remaining().max(dual.1.max_remaining()) > 0;
+                if events.reset && open {
+                    coverage.resets_mid_ramp += 1;
+                }
+                apply_ride(&mut dual.0, events, false);
+                apply_ride(&mut dual.1, events, true);
+                apply_ride(&mut mono, events, false);
+                let frames = events.frames;
+                let remaining = dual.0.max_remaining().max(dual.1.max_remaining()) as usize;
+                coverage.ramping += usize::from(remaining > 0);
+                coverage.closed_mid_block += usize::from(remaining > 0 && remaining < frames);
+                coverage.open_at_end += usize::from(remaining > frames);
+                let mut left = vec![0.0_f32; frames * width];
+                let mut right = vec![0.0_f32; frames * width];
+                fill(&mut rng, block % PROFILES, width, &mut left);
+                fill(&mut rng, (block + 3) % PROFILES, width, &mut right);
+                let mut plane = left.clone();
+                process_block::<L>(
+                    &mut left,
+                    &mut right,
+                    Detector::Main,
+                    frames,
+                    link,
+                    false,
+                    SAMPLE_RATE,
+                    (&mut dual.0, &mut dual.1),
+                );
+                process_block_mono::<L>(
+                    &mut plane,
+                    Detector::Main,
+                    frames,
+                    link,
+                    false,
+                    SAMPLE_RATE,
+                    &mut mono,
+                );
+                for (words, channel) in [(&mut left, &mut dual.0), (&mut right, &mut dual.1)]
+                    .into_iter()
+                    .chain([(&mut plane, &mut mono)])
+                {
+                    fold(hasher, words, wet);
+                    fold_state(hasher, channel);
+                    let mask = finish_channel::<L>(words, channel);
+                    hasher.update(mask.to_le_bytes());
+                    fold(hasher, words, false);
+                    fold_state(hasher, channel);
+                    fold_payload(hasher, channel);
+                }
+            }
+        }
+    }
+
+    /// #1006 gate 3: the ramping prefix under a threshold ride on one lane, an attack ride on
+    /// every lane, a makeup and mix ride on an all-wet table, discontinuity resets mid-ramp, a
+    /// restored `remaining = 0, current != target` ramp and hostile input, at `f32`, `Simd4` and
+    /// `Simd8`, DualMono and Maximum, dual and collapsed. Kernel words fold canonically on the
+    /// all-wet table only (#982's arm), and by bits after the boundary check. Pinned on the
+    /// unmodified batch head (`081fdc6c`), in dev and release.
+    const SCENARIO_1006: &str = "162979ddfe036f96f2327b7538c95033647d93989eb0430a7bc8fb57bf87e757";
+
+    #[test]
+    fn scenario_1006_ramping_prefix_is_pinned() {
+        let mut hasher = Sha256::new();
+        let mut coverage = RideCoverage::default();
+        for link in [LinkMode::DualMono, LinkMode::Maximum] {
+            for (table, wet) in [(&CORPUS_TRACKS, false), (&FIXTURE_TRACKS, true)] {
+                ride_width::<f32>(&mut hasher, table, wet, link, &mut coverage);
+                ride_width::<Simd4>(&mut hasher, table, wet, link, &mut coverage);
+                ride_width::<Simd8>(&mut hasher, table, wet, link, &mut coverage);
+            }
+        }
+        assert!(coverage.ramping > 0 && coverage.closed_mid_block > 0);
+        assert!(
+            coverage.open_at_end > 0,
+            "some windows must cross a block boundary"
+        );
+        assert!(coverage.resets_mid_ramp > 0, "a reset must land mid-ramp");
+        let digest = hex(hasher);
+        println!("scenario 1006 digest {digest}");
+        assert_eq!(digest, SCENARIO_1006);
     }
 }
