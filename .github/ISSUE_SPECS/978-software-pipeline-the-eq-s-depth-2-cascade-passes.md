@@ -264,3 +264,67 @@ regions), EQ render contract, console benchmark validators: green.
 2. V8 spills more in the skewed loop (+13 `vmovups`), and the replica still shows -14.5 %.
 3. The mono skew is neutral where the admitted plan runs it (select-free) and gains 4-10 % on
    refused or all-live blocks (masked); the skewed mono body is kept as the contract says.
+
+## Sol attempt 1 verdict: PASS
+
+Verifier: Sol, 2026-09-27, on `100469fa` and the stacked tip `04e439db`. Host, toolchain and
+artifact checks are as in #977's verdict. The tip's AudioWorklet artifact, `0db9b2f5…`, equals a
+build of the pristine worktree.
+
+**The change is purely a schedule.**
+
+- **Indexing.** In the prologue section `k` runs only for `k <= i`; in the epilogue only for
+  `k >= i + 1 - frames`. Section `D - 1` writes frame `i - (D - 1)` before section 0 reads frame `i`
+  in the same iteration.
+- **Short blocks.** `frames < D` falls back to the interleaved body.
+- **Oracle untouched.** The `kernels.rs` diff is additive only, so
+  `svf_cascade_interleaved[_with_dry_masks]` still stand as the oracle.
+- **Tests.** Gate 1 is green in dev and release. M1 and M3 re-run red (`g2_kernel_identity.rs:1040`).
+- **Differential.** #977's verdict describes it. Against `1d8c4851`: 0 differing runs at this commit
+  (35,000) and at the tip. A harness mutation that visits the steady-state sections in ascending
+  order moves all 21,000 runs.
+- **Rows.** 90 native and 30 wasm digests are identical, and `chain_shape` is green.
+
+**The inline pins (outside the brief's paths) are accepted.** Three variants each fail `KERNEL_ROSTER`
+rule 1 with "parametric-eq f32x4 dual: 0 arithmetic-carrying kernels":
+
+- removing all three pins;
+- keeping only `process_bank_inner`'s pin, which outlines `render`;
+- keeping only `render`'s and `render_mono`'s pins, which outlines `process_bank_inner::<false>`.
+
+Each pinned function has one caller per width, and the artifact grows by 9.5 KB. `render_mono`'s pin
+is not needed today, since the collapsed row stays a single kernel without it; it is harmless.
+
+**Roster.** Dual 312 to 672 and collapsed 156 to 336, scalar 0, 14 kernels. The callgraph,
+`meter_poll` and `command_submit` checks are identical to base.
+
+**Performance: the A/B reproduces.** Clean builds, each verified by its artifact or binary. Console
+workload (native binary and wasm guest), 64-track EQ isolate against `1d8c4851`:
+
+| row | native | wasm (V8) |
+|---|---|---|
+| two-band | 14.89 to 13.66 us, and 14.90 to 13.43 us | 44.72 to 32.84 us |
+| mono two-band | | 23.20 to 19.30 us |
+| standing `eq_only` | | flat, 21.62 to 20.94 us |
+
+**Isolated to this commit (#977 to #978):**
+
+- **Shipped artifact** (`host_web.wasm` through its render export, 64 tracks): the standing one band
+  is flat (24.1 to 23.7-24.0 us); two bands gain 34.0 to 30.7-30.9 us (-10 %).
+- **V8 per shape** (four-lane bank, `--no-liftoff`): every depth-2 shape improves. Dual passes gain
+  10-20 %; mono gains 1.5-14 %. The mono select-free pair gains 2.4 %, not the +1 % of the replica.
+  The one-band shapes are flat.
+- **Native `Simd8`**: dual depth-2 shapes gain 4-10 %, mono is neutral (-0.5 to +0.5 %).
+
+No shipped shape gets slower. On the browser's four-lane banks the net is positive for every session
+with two or more live sections and neutral for one.
+
+Findings:
+
+1. **LOW (process) `crates/parametric-eq/src/lib.rs:2373, 2453, 3139`.** The three pins are outside
+   the authorized paths. They are needed for gate 5, as shown above. Record the path amendment on
+   the issue.
+2. **INFO.** Native `Simd4` one-band dual is 17-33 % slower at this commit in my harness, and noisy.
+   This is not a product shape: x86 binds eight-lane EQ banks.
+3. **Stacked on #977, which fails attempt 1.** After #977 is revised, re-run gate 2, the row digests
+   and the shipped-artifact check.

@@ -257,3 +257,100 @@ projected about 0.6 and 4.0).
    operations per lane-sample (#980's form) instead of "five integer comparisons".
 5. The in-crate tests `an_admitted_plan_runs_every_pass_select_free` and
    `a_non_finite_state_in_a_live_section_refuses_elision` are additions beyond the brief's gates.
+
+## Sol attempt 1 verdict: FAIL
+
+Verifier: Sol, 2026-09-27, on `92deafd9` and the stacked tip `04e439db`. Host EPYC 7313P, rustc
+1.97.1, every build `CARGO_INCREMENTAL=0` in a fresh target directory. The scratch builds match
+the recorded artifacts: `7b975112…` for this commit and `820e96dd…` for the batch base.
+
+**The amended rule is exact (class A).** On an admitted plan, a dry lane is a dedicated cut
+holding the exact identity words with no ramp in flight:
+
+- **HPF.** Its input is the block input: finite, at most `1e30`, and never `-0.0`. Leg (c) now keeps
+  its state finite and free of `-0.0`, so `v3` is finite, `d1` and `d2` are zeros, and the wet word
+  is the input bit for bit.
+- **LPF.** Its input carries no `-0.0`, by the elision induction. The wet word differs from the input
+  only when `x - ic2` overflows, which needs `|x| >= 2^103`. The LPF is the last section, so that `x`
+  is the block output, and both kernels fail §4.4 on the same lane. `nonfinite_lane_mask` treats NaN,
+  infinity and anything at or above `1e30` alike, so the report, the zeroing and the reset agree.
+- **State.** The state update never reads the mask.
+
+**Differential (mine, public surface).** One seed fixes a scenario:
+
+- a sample rate and eight tracks with random band and cut masks (dead sections first, in the
+  middle and last);
+- prepared targets that toggle cuts per lane, per channel and bank-wide, and retune bands with
+  ramps, over blocks of 1 to 128 frames;
+- restores of extreme integrators into live, dead and dry sections: `+-0.0`, `+-MAX`, the ceiling
+  and its successor, `FLUSH_EPS` and its predecessor, subnormals and `+-1e32`;
+- the two VERIFY-EQ scenarios: the restored `-MAX` dry HPF with a `1.1e31` spike, and `ic2 = -MAX`
+  in a disabled band behind a +24 dB bell and ahead of a 10 Hz LPF;
+- resets;
+- input that is hostile, near the ceiling, a big sine, silence, or planted `-0.0`, non-finite or
+  oversized words.
+
+Seven legs run each scenario: scalar; `Simd8` and `Simd4` banks, each dual, mono and mixed with
+`desymmetrize`. The four-lane native bank goes through a scratch-only binding hook, and the wasm
+build runs `Simd4` natively in V8. Every output word, report field, target and restore result, and
+every lane's payload after every block is hashed as raw bits.
+
+Against `1d8c4851`:
+
+| build | seeds | legs | differing runs |
+|---|---:|---:|---:|
+| native release, the tip | 20,000 | 7 | 0 of 140,000 |
+| native dev | 1,500 | 7 | 0 |
+| wasm `simd128` release | 4,000 | 7 | 0 |
+| wasm `simd128` dev | 480 | 7 | 0 |
+| native release, at each of #980, #977 and #978 | 5,000 | 7 | 0 of 35,000 each |
+
+Coverage over the 20,000 native seeds, counting bank and track blocks:
+
+- 3.97M admitted blocks with dry cut lanes in a live section;
+- 6.9M admitted blocks with a depth-2 pass;
+- 1.33M admitted blocks with a non-zero dead-section state;
+- 44k refusals on a non-finite live-section state, the amended leg.
+
+The harness is validated by mutation: dropping the amended finiteness term moves 640 runs, and
+`admitted = true` moves 1,097. M1 re-run in a scratch copy is red on gate 1 (`tests/bank.rs:1660`).
+Gates re-run in the worktree: suite 109 passed and 3 ignored in dev and release, with and without
+`test-support`; fmt, clippy and doc `-D warnings`; lane, effect-runtime, console-workload,
+`chain_shape`, builtins-compiler, wasm-gates, `bench floor`, the lane, realtime and EQ-contract
+policy scripts, and `test-console-benchmark.sh`. All green. The 90 native and 30 wasm console
+digests are identical to base.
+
+Findings:
+
+1. **HIGH (performance, blocking): the standing browser EQ is slower in the shipped artifact.**
+   - **What changed in the code.** Since this commit, V8 TurboFan spills the right channel's `ic2`
+     in the select-free depth-1 dual tail loop of `PreparedParametricEq<f32x4, 4>::process_bank` in
+     `host_web.wasm`. The source is `interleave`'s tail, `crates/parametric-eq/src/lib.rs:2046-2088`.
+     The integrator is stored to a frame slot mid-iteration and reloaded at the top of the next, so
+     the recurrence runs through store-to-load forwarding. Seen with
+     `node --no-liftoff --no-wasm-lazy-compilation --print-wasm-code-function-index`: 84
+     instructions and 14 frame operands, against 83 and 12 with no loop-carried round trip at
+     `750fff95` and at base.
+   - **What it costs.** I timed the artifact itself through its render export: 64 tracks, the
+     console fixture with only the EQ, a stereo sine fed by `source_submit`, three holds under
+     `timing.lock` with `taskset -c 31`. The standing one-band EQ isolate goes from 19.91 us at #980
+     to 24.11 us (+21 %); over the batch base it goes from 20.55-20.88 to 23.73-23.96 us (+15 %).
+     Two bands improve over the same step: 42.4 to 34.0 us. Mono is unaffected.
+   - **Why the evidence missed it.** The brief expects the standing rows not to move beyond noise,
+     and the evidence above reports exactly that. It was measured on `wasm-console-guest`, whose
+     codegen of this loop does not spill (83/12). Its `eq_only` isolate is flat, 21.6 to 20.9 us,
+     which I reproduced. My harness binary spills the same way the artifact does and loses 18-24 %
+     on the one-band dual shape, attributed to this commit by building each commit.
+   - **Remedy for attempt 2.** Keep the shipped standing tail as it was: no loop-carried frame round
+     trip in the select-free dual tail loop, and a one-band isolate within noise of `750fff95` on
+     `host_web.wasm`. Add that check, the artifact's V8 code and its render-export timing, to the
+     evidence. The console guest is not a proxy for this loop. The scratch driver used is
+     `scratchpad/verify-977/timing/web.mjs`.
+2. **LOW `crates/parametric-eq/tests/bank.rs` (gate 1).** M1 is red only through the poisoned dry
+   lane. A direct `-0.0` witness does exist: an identity section holding negative non-zero
+   integrators passes `-0.0` through, because `(+0*v2) + ((+0*v1) + -0)` stays `-0.0` when
+   `v1, v2 < 0`. With negative states restored into the dead bands, a dry HPF lane's `-0.0` reaches
+   the output of a refused block, and M1 renders `+0.0` there. Adding this is optional.
+3. **INFO.** The project's wasm console arm benchmarks the guest, which did not reproduce the shipped
+   artifact's register allocation here. A tooling issue should time or inspect `host_web.wasm`
+   itself.

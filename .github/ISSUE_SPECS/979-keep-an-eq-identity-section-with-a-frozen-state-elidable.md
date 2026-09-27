@@ -254,3 +254,54 @@ the batch boundary's.
 2. Gate 3 restores through `Channel::restore_track` (in-crate), as the brief says; the public
    restore path is gate 1's overflow scenario.
 3. The combined A/B's scratch rows (two bands, EQ-only mono) are not committed.
+
+## Sol attempt 1 verdict: PASS
+
+Verifier: Sol, 2026-09-27, on `04e439db`. Host, toolchain and artifact checks are as in #977's
+verdict. This commit's AudioWorklet artifact is `0db9b2f5…`, as recorded.
+
+**The capped rule is exact (class A).** Take an identity section whose integrators are `+0.0` or
+have magnitude bits in `[FLUSH_EPS, 1e30]`, and any finite `v0`, whichever section feeds it:
+
+- **`v3` stays finite.** `|v0 - ic2| <= f32::MAX + 1e30 < f32::MAX + 2^103`, so it cannot round to
+  an infinity.
+- **The state does not move.** Both products in `d1` and `d2` are zeros, so `v1 = ic1` and
+  `v2 = ic2`. `flush` keeps every `|x| >= FLUSH_EPS` (`crates/lane/src/lib.rs:133`), so both
+  integrators come back unchanged.
+- **The output is the input.** The section returns `v0`, except for `-0.0`, which legs (a) and (c)
+  exclude.
+- **Non-finite input.** A non-finite `v0` makes both arms non-finite on the same lane, so the §4.4
+  mask, the zeroing and the reset agree.
+
+**The differential agrees.** As #977's verdict describes: 0 differing runs, with 1.33M admitted
+blocks carrying a non-zero frozen or restored dead-section state. Two harness mutations go red: no
+cap moves 934 runs (the restored `-MAX` behind +24 dB), and no floor moves 6,813.
+
+**The questions asked:**
+
+- **Gate 3 refuses `f32::MAX`.** Yes: `+-MAX` and the ceiling's successor, at either sign, refuse. M4
+  re-run in a scratch copy is red on gate 3 (`lib.rs:4633`) and on gate 1 (`tests/bank.rs:2342`).
+- **The cliff is fixed.** Gate 2 prints 9 of 9 at every width and section here. Under M1, the shipped
+  `+0.0` rule, it prints 0 of 9 (re-run).
+- **The renamed test is stronger.** Every old refusal case (`+-1e-30`, `-0.0`) still refuses, now in
+  either integrator and on one lane, which tests the any-lane reduction. The floor's and ceiling's
+  neighbours and `+-MAX` are added. `1.0` moves to the admitted list, as the rule requires. Every
+  case now also asserts the per-section path's bits and integrators.
+- **Rows and the protected test.** The 90 native and 30 wasm digests are identical.
+  `a_tiny_restored_disabled_cut_state_refuses_elision_but_preserves_old_bands` is unchanged and
+  green.
+
+Findings:
+
+1. **LOW (performance) `crates/parametric-eq/src/lib.rs:1057`.** `lane_is_inert` is a short-circuiting
+   per-word `all()`, where the helper it replaced was a branch-free OR reduction. Natively it costs
+   about 35-40 ns per eight-track bank block on every stationary block. Measured #978 to this
+   commit, four alternations, `Simd8`: one-band dual 1,120 to 1,157 ns, two-band 1,611 to 1,647 ns.
+   That is about +0.3 us per 64 tracks; the console `eq_only` isolate moved +0.46 us in two holds.
+   V8 moves about +1 %. A branch-free reduction would remove the cost. Not blocking.
+2. **LOW `docs/rulings/effect-floor-accounting.md:242`.** The refusal list still says "a non-`+0.0`
+   state in a dead section". Since this issue it is a non-inert state. The file is outside the
+   brief's paths; fix it at the batch boundary.
+3. **NIT `crates/parametric-eq/src/lib.rs:4232`.** The comment "a non-`+0.0` state in a dead section
+   is a refusal leg" is stale.
+4. **Stacked on #977, which fails attempt 1.** Re-run gates 1-3 after #977 is revised.
