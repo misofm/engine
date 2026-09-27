@@ -24,6 +24,10 @@ const LEVEL_MIN_DB: f32 = -160.0;
 const LEVEL_MAX_DB: f32 = 24.0;
 const GAIN_REDUCTION_MIN_DB: f32 = -100.0;
 
+/// Frames per chunk of the settled body's two passes (issue #983). 16, 64 and 128 measured the
+/// same to within 3 %; 32 keeps the stack scratch smallest.
+const SETTLED_CHUNK: usize = 32;
+
 #[cfg(test)]
 thread_local! {
     /// Settled blocks that took the all-wet arm (issue #982), counted once per block.
@@ -432,6 +436,27 @@ fn every_lane<L: Lane>(mask: L::Mask) -> bool {
     !L::mask_any(L::mask_not(mask))
 }
 
+/// The settled body's detector for `Detector::Main`: `link_frame`, or on a DualMono instance its
+/// magnitudes alone (issue #984).
+///
+/// Under DualMono, `Invariants::new` makes `linked` the all-zero mask and `select` is bitwise, so
+/// `link_frame` returns `magnitude`, which is `abs` of the same main word: the arm's bits are
+/// `link_frame`'s for every input, NaN included. The link mode is the prepared, whole-instance
+/// `metadata.link_mode`, never data. The arm lives only in the two-pass body's first pass: in a
+/// loop that also carries the recurrence it made V8 spill the recurrence and run slower.
+#[inline(always)]
+fn settled_detect<L: Lane, const DUAL_MONO: bool>(
+    main_left: L,
+    main_right: L,
+    invariants: &Invariants<L>,
+) -> (L, L) {
+    if DUAL_MONO {
+        (main_left.abs(), main_right.abs())
+    } else {
+        link_frame(Detector::Main, 0, main_left, main_right, invariants)
+    }
+}
+
 #[inline(always)]
 fn one_frame<L: Lane>(
     input: L,
@@ -511,18 +536,22 @@ pub(crate) fn process_block<L: Lane>(
 
 /// The settled body of a `Detector::Main` block: frames `start..end`, after every ramp finished.
 ///
-/// The frame law and its order over frames and channels are `frames_loop::<L, false>`'s, on the
-/// same values (issue #981). What changes is the loop around it:
+/// The frame law is `frames_loop::<L, false>`'s, on the same values: each frame's target, its
+/// recurrence step and its output are computed by the same operations from the same inputs, and
+/// the recurrence visits the frames in the same order. What changes is the loop around it:
 ///
-/// * the detector is matched once per block, by the caller, instead of once per frame;
-/// * the frames are visited as `chunks_exact_mut` of the settled slice, so no frame indexes a
-///   plane and there is no per-frame bounds check;
+/// * the detector is matched once per block, by the caller, instead of once per frame (#981);
+/// * the frames are visited as chunks of the settled slice, so no frame indexes a plane and there
+///   is no per-frame bounds check (#981);
 /// * both recursive words live in locals for the whole slice and are written back to their
-///   channels once, after the loop;
-/// * the output law is chosen once per block (issue #982): when neither channel has a lane that
-///   needs anything but the wet arm, and the block is unbypassed, `settled_output`'s `input * gain`
+///   channels once, after the loop (#981);
+/// * the output law is chosen once per block (#982): when neither channel has a lane that needs
+///   anything but the wet arm, and the block is unbypassed, `settled_output`'s `input * gain`
 ///   replaces `gain_mix`. The masks come from the `Coef` loaded here, after the ramp prefix, so an
-///   automated `mix` is seen on the block its ramp finishes in.
+///   automated `mix` is seen on the block its ramp finishes in;
+/// * each chunk of [`SETTLED_CHUNK`] frames runs in two passes (#983): every frame's target
+///   first, then the recurrence and the output frame by frame (see `settled_frames`);
+/// * a DualMono instance's first pass detects with `abs` alone (#984, `settled_detect`).
 ///
 /// `#[inline(always)]` is load-bearing: `process_block::<Simd4>` is the one arithmetic-carrying
 /// function the wasm callgraph roster names for this kernel, and an outlined body would leave the
@@ -543,6 +572,7 @@ fn settled_main<L: Lane>(
     let invariants = Invariants::<L>::new(link, bypass);
     let coef_left = Coef::load(&channel_left.words);
     let coef_right = Coef::load(&channel_right.words);
+    let dual_mono = matches!(link, LinkMode::DualMono);
     let wet = !bypass
         && every_lane::<L>(coef_left.wet_identity)
         && every_lane::<L>(coef_right.wet_identity);
@@ -553,20 +583,49 @@ fn settled_main<L: Lane>(
         channel_left.gain_reduction_db,
         channel_right.gain_reduction_db,
     );
+    #[cfg(test)]
     if wet {
-        #[cfg(test)]
         SETTLED_WET_BLOCKS.with(|blocks| blocks.set(blocks.get() + 1));
-        settled_frames::<L, true>(left, right, coefs, &mut gains, &invariants);
-    } else {
-        settled_frames::<L, false>(left, right, coefs, &mut gains, &invariants);
+    }
+    match (dual_mono, wet) {
+        (true, true) => {
+            settled_frames::<L, true, true>(left, right, coefs, &mut gains, &invariants);
+        }
+        (true, false) => {
+            settled_frames::<L, true, false>(left, right, coefs, &mut gains, &invariants);
+        }
+        (false, true) => {
+            settled_frames::<L, false, true>(left, right, coefs, &mut gains, &invariants);
+        }
+        (false, false) => {
+            settled_frames::<L, false, false>(left, right, coefs, &mut gains, &invariants);
+        }
     }
     channel_left.gain_reduction_db = gains.0;
     channel_right.gain_reduction_db = gains.1;
 }
 
-/// The settled frames of both channels, with the output law `settled_output::<L, WET>`.
+/// The settled frames of both channels, in chunks of [`SETTLED_CHUNK`] frames of the settled
+/// slice (issue #983). The slice starts wherever the ramp prefix ended, so a chunk need not be
+/// aligned to the block, and the last chunk may be short; nothing here depends on either.
+///
+/// The frame law is one dependent chain per channel -- detector, level, curve, recurrence, gain,
+/// output -- and only the recurrence and what follows it depend on the previous frame. A frame's
+/// target is a function of that frame's input and of coefficients that are constant over the
+/// settled slice: the compressor is feed-forward, and no recursive word feeds the curve. So pass 1
+/// computes every target of the chunk, both channels, with no frame depending on another, and pass
+/// 2 runs the recurrence and the output frame by frame, in today's order. The same operations run
+/// on the same values; only their order across independent frames changes, which lets the core
+/// keep many target chains in flight where the one-pass body kept about two. Pass 1 reads a
+/// chunk's inputs before pass 2 overwrites any of them, and pass 2 reloads each input before it
+/// stores that frame's output, so the in-place planes are safe.
+///
+/// `targets` is stack scratch: `2 * SETTLED_CHUNK` lane words, 2 KiB at `Simd8`, zero-filled once
+/// per call. It holds `curve_target` values, which the one-pass body kept in registers or spill
+/// slots; it is not a block copy of audio. No in-place form exists: pass 2 needs both a frame's
+/// input and its target, and writing the targets into the plane would destroy the input.
 #[inline(always)]
-fn settled_frames<L: Lane, const WET: bool>(
+fn settled_frames<L: Lane, const DUAL_MONO: bool, const WET: bool>(
     left: &mut [f32],
     right: &mut [f32],
     coefs: (&Coef<L>, &Coef<L>),
@@ -576,21 +635,43 @@ fn settled_frames<L: Lane, const WET: bool>(
     let width = L::WIDTH;
     let (coef_left, coef_right) = coefs;
     let (mut gain_left, mut gain_right) = *gains;
-    for (frame_left, frame_right) in left
-        .chunks_exact_mut(width)
-        .zip(right.chunks_exact_mut(width))
+    let mut targets = [(L::zero(), L::zero()); SETTLED_CHUNK];
+    for (chunk_left, chunk_right) in left
+        .chunks_mut(SETTLED_CHUNK * width)
+        .zip(right.chunks_mut(SETTLED_CHUNK * width))
     {
-        let main_left = L::load(frame_left);
-        let main_right = L::load(frame_right);
-        let (detected_left, detected_right) =
-            link_frame(Detector::Main, 0, main_left, main_right, invariants);
-        let target_left = curve_target(detected_left, coef_left, invariants);
-        let smoothed_left = ballistic(target_left, &mut gain_left, coef_left);
-        settled_output::<L, WET>(main_left, smoothed_left, coef_left, invariants).store(frame_left);
-        let target_right = curve_target(detected_right, coef_right, invariants);
-        let smoothed_right = ballistic(target_right, &mut gain_right, coef_right);
-        settled_output::<L, WET>(main_right, smoothed_right, coef_right, invariants)
-            .store(frame_right);
+        // Pass 1: every frame's target. No frame depends on another here.
+        for ((frame_left, frame_right), target) in chunk_left
+            .chunks_exact(width)
+            .zip(chunk_right.chunks_exact(width))
+            .zip(targets.iter_mut())
+        {
+            let (detected_left, detected_right) = settled_detect::<L, DUAL_MONO>(
+                L::load(frame_left),
+                L::load(frame_right),
+                invariants,
+            );
+            *target = (
+                curve_target(detected_left, coef_left, invariants),
+                curve_target(detected_right, coef_right, invariants),
+            );
+        }
+        // Pass 2: the recurrence, then the output of the same frame. The two channels'
+        // recurrences share nothing, so stepping both before either output is exact.
+        for ((frame_left, frame_right), target) in chunk_left
+            .chunks_exact_mut(width)
+            .zip(chunk_right.chunks_exact_mut(width))
+            .zip(targets.iter())
+        {
+            let main_left = L::load(frame_left);
+            let main_right = L::load(frame_right);
+            let smoothed_left = ballistic(target.0, &mut gain_left, coef_left);
+            let smoothed_right = ballistic(target.1, &mut gain_right, coef_right);
+            settled_output::<L, WET>(main_left, smoothed_left, coef_left, invariants)
+                .store(frame_left);
+            settled_output::<L, WET>(main_right, smoothed_right, coef_right, invariants)
+                .store(frame_right);
+        }
     }
     *gains = (gain_left, gain_right);
 }
@@ -1814,7 +1895,7 @@ mod settled_body_tests {
         schedule
     }
 
-    const GRID_COUNTS: [usize; 6] = [1, 7, 31, 32, 33, 128];
+    const GRID_COUNTS: [usize; 7] = [1, 7, 31, 32, 33, 97, 128];
 
     /// #981 gate 1 at width `L`, over one parameter table.
     fn grid<L: Lane>(label: &str, table: &[[f32; PARAMETER_COUNT]; 8], wet: bool) -> Coverage {
@@ -2354,5 +2435,43 @@ mod settled_body_tests {
         let digest = hex(hasher);
         println!("scenario 982 digest {digest}");
         assert_eq!(digest, SCENARIO_982);
+    }
+    /// Blocks that straddle 32-frame chunks, and 24-frame fully ramping blocks whose ramps then end
+    /// at frame 40 of the next block, so its settled body starts mid-chunk.
+    fn straddling_schedule(parameter: usize, values: [f32; 6]) -> Vec<ScenarioBlock> {
+        let mut schedule = Vec::new();
+        for (round, &frames) in [31_usize, 32, 33, 64, 97, 128].iter().enumerate() {
+            schedule.push((frames, None));
+            schedule.push((24, Some((parameter, round, values[round]))));
+            schedule.push((frames.max(41), None));
+        }
+        schedule.extend([(128, None), (97, None), (33, None)]);
+        schedule
+    }
+
+    /// #983 gate 2: the chunk-straddling scenario, both tables, every link mode, `Simd4` and
+    /// `Simd8`. Pinned on the unmodified base (`197db1c9`) and on #982, in dev and release.
+    const SCENARIO_983: &str = "47ffff05a0f1b605a42acd320948d09b7137d92e2f3b7925381b6c6dc0aed424";
+
+    #[test]
+    fn scenario_983_chunk_straddling_render_is_pinned() {
+        let schedule = straddling_schedule(0, [-27.0, -33.0, -21.0, -45.0, -9.0, -36.0]);
+        let mut hasher = Sha256::new();
+        let mut mid_block = 0;
+        for link in LINKS {
+            for (table, canonical) in [(&CORPUS_TRACKS, false), (&FIXTURE_TRACKS, true)] {
+                mid_block += scenario_dual::<Simd4>(&mut hasher, table, link, &schedule, canonical);
+                mid_block += scenario_dual::<Simd8>(&mut hasher, table, link, &schedule, canonical);
+            }
+        }
+        // Six ramps end at frame 40, per group, table and link mode.
+        assert_eq!(
+            mid_block,
+            6 * 3 * 3 * 2,
+            "every retarget must leave a mid-chunk start"
+        );
+        let digest = hex(hasher);
+        println!("scenario 983 digest {digest}");
+        assert_eq!(digest, SCENARIO_983);
     }
 }

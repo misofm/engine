@@ -223,3 +223,25 @@ differentials see dispatch as well as bits.
 | 982-M3 | the arm drops `+ makeup` | gate 1, `scenario_982_all_wet_render_is_pinned`, `cross_target` (its `f32` lane 7 has mix 1 and makeup 6), `lane_identity::every_width_produces_the_same_words` (7 red). `oracle` stays green, as the verification found |
 | 982-M4 | the arm is never taken | gate 3 (`the_all_wet_arm_is_taken_exactly_when_every_lane_is_wet`) and gate 1's dispatch assertion (5 red). No bit-exactness test can see it: it is a performance-only regression |
 | 982-M5 | only the left channel's mask is tested | gate 3's "only the right channel has a non-wet lane" case, and gate 1 (5 red) |
+
+### #983 and #984 — the two-pass settled body and its DualMono detector arm
+
+Gate 1's grid gained the 97-frame count, so its settled bodies start at frames 0, 1, 18 and 40 of
+blocks of 1, 7, 31, 32, 33, 97 and 128 frames: chunks that are short, exact, and misaligned to the
+block. `scenario_983_chunk_straddling_render_is_pinned` adds blocks of 31, 32, 33, 64, 97 and 128
+frames with ramps ending at frame 40.
+
+| # | mutation | red |
+|---|---|---|
+| 983-M1 | pass 2 reads `targets[k + 1]` (`targets.iter().cycle().skip(1)`) | gate 1, all three scenarios, `cross_target`, `partition` (both), `lane_identity`, four `mono_collapse`, `conformance`, `contract` and two `ramps` tests (20 red) |
+| 983-M2 | the last, short chunk is skipped (`chunks_exact_mut` on the outer loop) | gate 1, all three scenarios, `cross_target`, `partition::block_partitions_are_invariant`, `partition::bank_block_partitions_are_invariant`, `conformance`, `contract` (13 red) |
+| 983-M3 | pass 1 runs only for the first chunk; later chunks reuse its targets | gate 1, all three scenarios, `cross_target`, `partition` (both), `lane_identity`, `conformance` and three `ramps` tests (16 red) |
+| 983-M4 | `gl` and `gr` swapped in pass 2 | gate 1, all three scenarios, `cross_target`, `lane_identity`, two `nonfinite`, `conformance` and two `ramps` tests (15 red) |
+| 984-M1 | the `abs` arm is taken for every link mode | gate 1, all three scenarios, `cross_target` (`maximum_link`, `average_link`), `identity::average_link_is_two_products_and_an_add`, `contract::links_are_exact_and_connected_sidechain_is_distinct_from_main_detection` (11 red) |
+| 984-M2 | the arm returns `(|left|, |left|)` | gate 1, all three scenarios, `cross_target`, `lane_identity`, `nonfinite`, `conformance`, `contract` and two `ramps` tests (15 red) |
+
+### Equivalent and performance-only mutations (applied, GREEN, recorded)
+
+| # | mutation | why it survives |
+|---|---|---|
+| 984-M3 | the `abs` arm is never taken (`dual_mono = false`) | Applied and run: **GREEN** in every test, and necessarily so: the arm's bits are `link_frame`'s under DualMono (the `linked` mask is all zero and `select` is bitwise). It is a performance-only regression, caught by the recorded codegen evidence (#984 gate 7: DualMono pass 1 loads `abs` straight into the level floor with no link `vblendvps`), not by a test, as #944's M2 was |
