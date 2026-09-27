@@ -341,3 +341,8 @@ M1-M3 are the brief's three rows; M3m, M4 and M5 are added. M2 moves no public-A
 scenario stores a word exactly at `1e30` on a folded block (the nothing-live shape's `1e30` words are
 scanned, not folded), so gate 1's scale sections are its gate. The lane gate is green under M3-M5,
 which are EQ-side rows.
+
+Re-run on attempt 2 (the verdict folded into a per-stream `bool`, merged onto the batch head
+`07e0f45f`), each alone in a scratch copy, release: M1-M5 and M3m red on the same gates and first
+messages as above (M1: lane gate, gate 1, gate 2 non-vacuity; M2: lane gate and gate 1; M3/M3m:
+gate 1 and all five pinned scenarios; M4: gate 1 and gate 2; M5: gate 1 and gate 2 non-vacuity).

@@ -1103,7 +1103,8 @@ const BOUNDED_EDGES: [f32; 10] = [
 ];
 
 /// `effect_runtime::bank::check_block`'s fold, written out with the `Lane` operations it uses:
-/// `ok = ok AND (|x| < limit)` per frame, then `NOT mask_any(NOT ok)`.
+/// `ok = ok AND (|x| < limit)` per frame, then `NOT mask_any(NOT ok)`. The bounded kernels reduce each
+/// stored vector at once instead (issue #999, attempt 2); the verdicts must still agree.
 fn bounded_scan<L: Lane>(io: &[f32], limit: f32) -> bool {
     let limit = L::splat(limit);
     let mut ok = L::zero().eq(L::zero());

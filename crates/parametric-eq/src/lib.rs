@@ -2037,8 +2037,11 @@ fn cascade_sections<L: Lane, const W: usize>(
 /// all-live list, and an even list, whose last pass is a pair. The pair keeps its kernel because
 /// a bounded pair measured worse, not better: in the shipped `simd128` artifact V8 carried four
 /// values of the bounded two-stream pair through stack slots across iterations, and natively the
-/// per-node (`f32`) two-band row was about 5 % slower (#999, attempt 1). The bounded tail keeps
-/// its integrators in registers in V8 (no carried stack slot).
+/// per-node (`f32`) two-band row was about 5 % slower (#999, attempt 1). The bounded tail's fold
+/// reduces each stored vector to a per-channel `bool` at once (attempt 2): folded into a vector mask
+/// instead, the two accumulators went through stack slots across the loop's back edge in V8, which
+/// the spill gate (issue #1000) refuses; as `bool`s they stay in general-purpose registers, and the
+/// tail's integrators stay in vector registers (no carried stack slot).
 ///
 /// [`svf_cascade_interleaved`]: lane::kernels::svf_cascade_interleaved
 #[inline(always)]

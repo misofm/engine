@@ -449,7 +449,9 @@ corruption is shown on the bit comparison as well as on the bounds check.
 
 `src/kernels.rs` adds `svf_cascade_interleaved_bounded` and
 `svf_cascade_interleaved_with_dry_masks_bounded`: the interleaved body with a `StoreBound` observer
-that folds `ok = ok AND (|y| < limit)` per stream as each word is stored. Gate 1 is
+that folds the verdict per stream as each word is stored (attempt 1: `ok = ok AND (|y| < limit)` into
+a vector mask; attempt 2: `failed |= mask_any(NOT (|y| < limit))` into a `bool`, so V8 keeps it in a
+general-purpose register). Gate 1 is
 `g2_bounded_cascade_is_the_cascade_and_judges_what_it_stores` (`tests/g2_kernel_identity.rs`):
 `f32`, `Simd4` and `Simd8`, one and two streams, depths 1 and 2, masked and select-free, the G2
 coefficients and the identity words, limits `1e30`, `1.0` and infinity, frames 1, 2, 3 and 128, 24
@@ -463,5 +465,9 @@ EPYC 7313P, rustc 1.97.1, `x86-64-v3`. The same rows are also red on the EQ's ga
 
 | # | mutation | gate 1 | result |
 |---|---|---|---|
-| 999-M1 | the fold ignores the second stream (`observe` updates `within[0]` only) | `Scalar S=2 D=1 identity=false masked=false limit=1e30 frames=1: block 2, stream 1: the folded verdict is not the scan of the stored words` (`true` against `false`) | RED |
+| 999-M1 | the fold ignores the second stream (`observe` updates stream 0 only; attempt 1 `within[0]`, attempt 2 `failed[0]`) | `Scalar S=2 D=1 identity=false masked=false limit=1e30 frames=1: block 2, stream 1: the folded verdict is not the scan of the stored words` (`true` against `false`) | RED |
 | 999-M2 | the fold compares with `<=` (`y.abs().le(limit)`) | `Scalar S=1 D=1 identity=false masked=true limit=1e30 frames=1: block 0, stream 0: the folded verdict is not the scan of the stored words` (a dry lane stored `1e30` exactly) | RED |
+
+Re-run on attempt 2 (the `bool` fold), each alone in a scratch copy, release: 999-M1 and 999-M2 red on
+gate 1 at the same first case and message as above, and on the EQ gates as recorded in
+`crates/parametric-eq/tests/MUTATIONS.md`.

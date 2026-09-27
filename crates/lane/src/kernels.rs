@@ -308,17 +308,19 @@ pub fn svf_cascade_skewed_with_dry_masks<L: Lane, const S: usize, const D: usize
 /// A caller that applies a block-limit rule to the kernel's output -- the effects' master plan
 /// §4.4 check, `effect_runtime::bank::check_block` -- would otherwise re-read both planes after
 /// the cascade has written them. The cascade already holds every output word in a register when
-/// it stores it, and its frame loop is latency-bound (see [`svf_cascade_interleaved`]), so three
-/// more independent operations per stored vector ride in the recurrence's shadow where the
-/// separate scan costs a load, the same three operations and a loop of its own.
+/// it stores it, and its frame loop is latency-bound (see [`svf_cascade_interleaved`]), so the
+/// fold's few independent operations per stored vector (an `abs`, a compare, a mask reduction and
+/// an `or`) ride in the recurrence's shadow, where the separate scan costs a load, the same
+/// predicate and a loop of its own.
 ///
 /// # Frozen operation order
 ///
-/// Per stream, before the first frame: `ok = true` on every lane. Per stored vector `y`, after
-/// the kernel computes it and before it is stored: `ok = ok AND (|y| < limit)`. Once, after the
-/// last frame: `verdict = NOT mask_any(NOT ok)`. That is `check_block`'s fold over the same words
-/// in the same frame order; a conjunction of per-word predicates does not depend on the order
-/// anyway, so the verdict is the scan's on every block, NaN payloads and signed zeros included.
+/// Per stream, before the first frame: `failed = false`. Per stored vector `y`, after the kernel
+/// computes it and before it is stored: `failed = failed OR mask_any(NOT (|y| < limit))`. Once,
+/// after the last frame: `verdict = NOT failed`. `check_block` folds the same per-word predicate
+/// into a vector mask and reduces once; a disjunction of per-word failures does not depend on
+/// where the reduction happens or in what order, so the verdict is the scan's on every block, NaN
+/// payloads and signed zeros included.
 ///
 /// # Contract
 ///
@@ -481,8 +483,8 @@ impl<L: Lane> SvfOutput<L> for MaskedBlockOutput<L> {
 /// What a cascade kernel does with each output word besides storing it (issue #999).
 ///
 /// A zero-cost static choice, like [`SvfOutput`]: [`Unobserved`] does nothing, so the entry points
-/// that return no verdict keep their arithmetic and their loop, and [`StoreBound`] adds the three
-/// operations of its fold.
+/// that return no verdict keep their arithmetic and their loop, and [`StoreBound`] adds only its
+/// fold.
 trait StoreObserver<L: Lane> {
     fn observe(&mut self, stream: usize, y: L);
 }
@@ -494,10 +496,21 @@ impl<L: Lane> StoreObserver<L> for Unobserved {
     fn observe(&mut self, _stream: usize, _y: L) {}
 }
 
-/// The block-limit fold of [`svf_cascade_interleaved_bounded`]: one accumulator per stream.
+/// The block-limit fold of [`svf_cascade_interleaved_bounded`]: one `bool` per stream.
+///
+/// # Why a `bool`, not a vector mask (issue #999, attempt 2)
+///
+/// The first form kept one vector mask per stream and folded `ok = ok AND (|y| < limit)` into it.
+/// In the shipped `simd128` artifact V8 carried both masks through stack slots across the one-band
+/// dual tail's back edge (stored at the loop top, reloaded before the `and`), a loop-carried value
+/// through memory that the V8 spill gate (issue #1000) rightly refuses. Reducing each stored
+/// vector's verdict to a scalar at once -- `failed |= mask_any(NOT (|y| < limit))` -- leaves the
+/// carried value in a general-purpose register, of which the kernel has plenty, and takes no vector
+/// register from the recurrence. It is the same predicate on the same words, and a disjunction of
+/// per-vector verdicts is the scan's per-block one.
 struct StoreBound<L: Lane, const S: usize> {
     limit: L,
-    within: [L::Mask; S],
+    failed: [bool; S],
 }
 
 impl<L: Lane, const S: usize> StoreBound<L, S> {
@@ -505,20 +518,21 @@ impl<L: Lane, const S: usize> StoreBound<L, S> {
     fn new(limit: f32) -> Self {
         Self {
             limit: L::splat(limit),
-            within: [L::zero().eq(L::zero()); S],
+            failed: [false; S],
         }
     }
 
     #[inline(always)]
     fn verdict(&self) -> [bool; S] {
-        core::array::from_fn(|stream| !L::mask_any(L::mask_not(self.within[stream])))
+        core::array::from_fn(|stream| !self.failed[stream])
     }
 }
 
 impl<L: Lane, const S: usize> StoreObserver<L> for StoreBound<L, S> {
     #[inline(always)]
     fn observe(&mut self, stream: usize, y: L) {
-        self.within[stream] = L::mask_and(self.within[stream], y.abs().lt(self.limit));
+        // Non-short-circuiting `|`: the reduction runs on every stored vector, branch-free.
+        self.failed[stream] |= L::mask_any(L::mask_not(y.abs().lt(self.limit)));
     }
 }
 
