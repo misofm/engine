@@ -120,3 +120,137 @@ As EQ-1.
   Keep that assertion's meaning: move the exact-zero helper into the test module rather than
   pointing the test at the widened predicate.
 
+
+## Attempt 1 evidence
+
+Implementer: attempt 1, 2026-09-27, branch `codex/977-eq-elision-and-passes`, on #978 (`100469fa`;
+#976, #980 and #977 below it). The verification amendment on the GitHub issue is applied: the
+**capped rule** (magnitude bits in `[FLUSH_EPS.to_bits(), ELISION_MAGNITUDE_CEILING]`), gate 3
+refuses the largest finite word, mutation M4 (accept above the cap) and the restored
+`ic2 = -f32::MAX` scenario are added, and `a_non_zero_state_in_a_dead_section_refuses_elision` is
+listed as changed. Host: AMD EPYC 7313P (Zen 3), `rustc 1.97.1`, `x86-64-v3`, every build
+`CARGO_INCREMENTAL=0`.
+
+### The change
+
+- `section_state_is_positive_zero` is replaced by `section_state_is_inert<L>(section)`, through
+  `lane_is_inert`: every lane of `ic1` and `ic2` read with `store_bits` is `0`, or has magnitude bits
+  in `[INERT_MAGNITUDE_FLOOR, ELISION_MAGNITUDE_CEILING]` (`INERT_MAGNITUDE_FLOOR =
+  lane::FLUSH_EPS.to_bits()`, `0x1e3ce508`; the ceiling is `BLOCK_LIMIT`'s, `0x7149f2ca`). `-0.0`
+  (magnitude 0), every magnitude below `FLUSH_EPS`, every magnitude above `1e30`, and every infinity
+  and NaN refuse.
+- `cascade_sections` and `cascade_sections_mono` call it for dead sections (leg (b)); legs (a) and
+  (c) are unchanged.
+- `cascade_sections`' proof now starts from an inert state: `v3 = v0 - ic2` stays finite for every
+  finite `v0` because `|ic2| <= 1e30 < 2^103`; `d1`, `d2` are zeros; `v1`, `v2` finite; `flush` keeps
+  `ic1`, `ic2` exactly; `y = v0` except `-0.0`. A closing paragraph says why each bound is
+  load-bearing (the floor and `-0.0`: the executed section flushes them; the cap: VERIFY-EQ finding
+  1's `ic2 = -f32::MAX` behind a +24 dB bell).
+- `lane_is_positive_zero` is no longer imported by the library; the exact-`+0.0` helper moved into
+  the `interleave_identity` test module, where its one caller keeps its meaning.
+
+### Gate 1: `a_cut_switched_off_keeps_the_bank_eliding` (`tests/bank.rs`)
+
+Eight tracks. Two shapes: the HPF alone, and the HPF beside a live bell; the HPF switched on on
+every lane of both channels by prepared target at block 0, four blocks, a target with `enabled = 0`,
+twelve more blocks of hostile input (`+0.0`, subnormals of either sign, normals `2^-24..2^26`;
+blocks 7 and 12 carry one `-0.0`). Then VERIFY-EQ finding 1's scenario: a +24 dB bell at 12 kHz, band 2
+disabled with `ic2 = -f32::MAX` restored (scalar: track 0; bank: lane 0 of every bank), a 10 Hz LPF,
+eight blocks of a `9e29` sine at 12 kHz. Scalar, bank and bank-mono legs; every output word, report
+and state payload after every block. Pinned on the unmodified base (`100469fa`), identical in dev
+and release: scalar `a34ce0342d321d08dae9a99fa1adc175a2511041035a27cd5b744cff89b1b5f4`, bank
+`2e0845c6619db72d76cfd1d96b6ab89414a923fed6dabbb65dab4ccadcad1214`, bank-mono
+`26a755c16fc0efd143ff5ac79115aa835149a0336a6cc94c01cea91947e30cd2`; the overflow leg faults its
+first block once per leg (asserted). After the change: the same three digests and the same fault,
+dev and release, with and without `test-support`. The rule as briefed (M4) moves all three and
+renders that block as audio.
+
+### Gate 2: engagement, `elision::a_band_switched_off_keeps_the_bank_eliding`
+
+The diagnosis patch's `diag_disable_cliff`, ported: beside one live general band, a general band
+(section 3) and, separately, the HPF (section 0) switched on at step 2 and off at step 5 through
+`start_ramp` on every lane of both channels, sixteen 512-frame blocks, at `f32`, `Simd4` and
+`Simd8`. It asserts the switched-off section is the identity again and holds a frozen non-zero
+state, that every stationary block after the ramp elides, and that every block's words and the
+final integrators equal the per-section path's. Blocks eliding after the disable (steps 7-15):
+
+| rule | Scalar s3 | Scalar HPF | Simd4 s3 | Simd4 HPF | Simd8 s3 | Simd8 HPF |
+|---|---:|---:|---:|---:|---:|---:|
+| shipped (`+0.0` only), dev and release | 0 of 9 | 0 of 9 | 0 of 9 | 0 of 9 | 0 of 9 | 0 of 9 |
+| capped inert rule, dev and release | 9 of 9 | 9 of 9 | 9 of 9 | 9 of 9 | 9 of 9 | 9 of 9 |
+
+(and the first stationary block after the ramp, step 6, elides as well). The shipped-rule row was
+taken on the base with the test's count printed instead of asserted.
+
+### Gate 3: refusals, `elision::a_non_inert_state_in_a_dead_section_refuses_elision`
+
+Formerly `a_non_zero_state_in_a_dead_section_refuses_elision` (which refused `1.0` as well; it is
+the test the verification listed as changing). Words restored through `Channel::restore_track`
+into lane 5 of dead section 3, in either integrator. Refused (`kept == 6`): `-0.0`, `+-1e-30`, the
+word under the floor, the word over the ceiling at either sign, and `+-f32::MAX` (the largest finite
+word refuses, per the amendment). Admitted (`kept == 1`): `+-1.0`, `+-FLUSH_EPS`, `+-1e30`. Every
+case also renders the per-section path's words and integrators, checked before the refusal
+assertion. `a_tiny_restored_disabled_cut_state_refuses_elision_but_preserves_old_bands` is
+unchanged and green.
+
+### Gate 4: suite and rows
+
+`cargo test -p parametric-eq`: 109 passed, 3 ignored, dev and release, with and without
+`test-support` (every earlier pin of #976, #977 and #978 included). `chain_shape` (release): 23
+passed. Scratch digests (as in #980's record): 90 native lines and 30 wasm guest digests identical
+to the base, each row's native and wasm digests equal. The standing fixtures never switch a section
+mid-run.
+
+### Gate 5: mutations
+
+Recorded in `crates/parametric-eq/tests/MUTATIONS.md` ("Issue #979"), release,
+`--features test-support --lib --test bank`: M1 (exact `+0.0`: gate 2, 0 of 9), M2 (below
+`FLUSH_EPS`: gate 3, `1e-30` integrators differ), M3 (`-0.0`: gate 3, integrators differ), M4 (above
+the cap: gate 3 admits `1.0000001e30`; gate 1 scalar `c060ba98…`, bank `b0063058…`, bank-mono
+`7698bb8b…`, no fault reported) -- all red.
+
+### Gate 6: toolchain
+
+fmt, clippy (`--workspace --all-targets --all-features -D warnings`), doc (`-D warnings`), `-p lane`
+dev and release (69), `-p effect-runtime` (86), `-p console-workload` (39), `-p builtins-compiler
+--features test-support` (79), `-p wasm-gates` (9), `-p bench floor` (9), lane policy, realtime
+policy (57 regions), EQ render contract, console benchmark validators: green. AudioWorklet artifact
+(build script's cargo line, not repinned) `0db9b2f5…`: all four callgraph checks give the lines #978
+gave (render closure=8 traps=5; kernels=14; EQ dual 672 / collapsed 336, scalar 0).
+
+### Descriptive A/B (not a gate)
+
+No standing or scratch row switches a cut mid-run, so this change is not expected to move one; the
+cliff it removes is shown by gate 2 (the brief's replica: about 14,600 cycles per affected bank-block
+natively). One hold of #978 against this change (load 8-9) moved the isolates by 0.1-0.5 us either
+way, which is noise.
+
+**Combined A/B of #980, #977, #978 and #979** (`1d8c4851` against this commit's tree): clean scratch
+builds, each verified by its artifact (base: no `i32x4.min_u` in the EQ `process_bank`, 312 EQ
+ops; final: 672 and the inert-floor constants); two holds of `flock … timing.lock`, `taskset -c 31`,
+arms in both orders, load average 5-6; the native harness alternated three times (six rounds of
+1,500 blocks per row at `Simd8`), then both guests in one Node process (ten interleaved rounds of
+1,000 blocks). Isolates (row minus `builtins_only`, or minus the mono rack-free row), median of the
+per-round p50s, us, hold 1 / hold 2:
+
+| row | native base | native final | wasm base | wasm final |
+|---|---:|---:|---:|---:|
+| `eq_only` (standing, one band) | 9.34 / 9.55 | 9.41 / 9.58 | 20.34 / 20.92 | 20.80 / 20.42 |
+| two-band `eq_only` (scratch) | 15.44 / 15.01 | 14.15 / 13.74 | 43.65 / 43.73 | 30.94 / 31.29 |
+| EQ-only mono, one band (scratch) | 7.55 / 7.51 | 7.48 / 7.52 | 15.84 / 15.98 | 16.23 / 16.26 |
+| EQ-only mono, two bands (scratch) | 9.02 / 9.10 | 8.83 / 8.84 | 23.34 / 24.05 | 19.76 / 19.65 |
+
+The standing one-band rows do not move beyond noise (their pass was already select-free and depth
+1 after #976; #980's gate saving is below this noise). A session with two live bands per track gains
+about 1.3 us natively and 12.5 us (29 %) in V8 per 64-track block; its EQ-only mono form about 0.2
+us natively and 3.6-4.4 us in V8. No projected saving is claimed; the paired console benchmark is
+the batch boundary's.
+
+### Deviations and notes for the verifier
+
+1. `a_non_zero_state_in_a_dead_section_refuses_elision` is renamed
+   `a_non_inert_state_in_a_dead_section_refuses_elision` and rewritten to the capped rule (gate 3);
+   its old `1.0` case is now admitted and asserted bit-exact.
+2. Gate 3 restores through `Channel::restore_track` (in-crate), as the brief says; the public
+   restore path is gate 1's overflow scenario.
+3. The combined A/B's scratch rows (two bands, EQ-only mono) are not committed.

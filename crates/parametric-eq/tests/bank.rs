@@ -1980,3 +1980,374 @@ fn two_and_four_live_sections_render_the_base_bits() {
         );
     }
 }
+
+/// Tracks in the switched-off-cut scenario: one eight-lane bank, or two four-lane banks.
+const CLIFF_TRACKS: usize = 8;
+/// Blocks rendered with the cut on (the first starts its ramp), then with it off.
+const CLIFF_ON_BLOCKS: usize = 4;
+const CLIFF_OFF_BLOCKS: usize = 12;
+
+/// The configurations of [`a_cut_switched_off_keeps_the_bank_eliding`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum CliffShape {
+    /// Only the HPF, switched on and off on every lane of both channels: once it is off, every
+    /// section is dead and an admitted block runs none of them.
+    HpfOnly,
+    /// A live bell throughout, and the HPF switched on and off everywhere: once it is off, the
+    /// admitted plan is the bell alone.
+    BellAndHpf,
+}
+
+const CLIFF_SHAPES: [CliffShape; 2] = [CliffShape::HpfOnly, CliffShape::BellAndHpf];
+
+/// One track's prepare-time values and its two prepared-target events: the HPF on at block 0,
+/// off (`enabled = 0`) at block [`CLIFF_ON_BLOCKS`], both channels.
+fn cliff_configuration(
+    shape: CliffShape,
+    track: usize,
+) -> (Vec<effect_contract::InitialParameterValue>, Vec<OddEvent>) {
+    use ParameterChannel::{Left, Right};
+    let mut initial = values();
+    if shape == CliffShape::BellAndHpf {
+        for channel in [Left, Right] {
+            odd_band(&mut initial, 1, EqBandKind::Bell, channel, track);
+        }
+    }
+    let mut on = initial.clone();
+    let mut changed = vec![false; on.len()];
+    for channel in [Left, Right] {
+        odd_cut(&mut on, HPF_PARAMETERS, channel, track);
+        mark_cut(&mut changed, HPF_PARAMETERS, channel);
+    }
+    let mut off = on.clone();
+    let mut changed_off = vec![false; off.len()];
+    for channel in [Left, Right] {
+        set_initial(&mut off, HPF_PARAMETERS, channel, 0.0);
+        mark_cut(&mut changed_off, HPF_PARAMETERS, channel);
+    }
+    (
+        initial,
+        vec![(0, on, changed), (CLIFF_ON_BLOCKS, off, changed_off)],
+    )
+}
+
+/// One hostile input word: `+0.0` (one in sixteen), a subnormal of either sign (one in sixteen), or
+/// a normal with magnitude in `2^-24..2^26`, under its own seed; blocks 7 and 12 carry one `-0.0`
+/// (tracks 3 and 6, planes 1 and 0), which refuses the elision for that bank or track.
+fn cliff_word(block: usize, frame: usize, track: usize, channel: usize) -> f32 {
+    if (block == 7 && frame == 41 && track == 3 && channel == 1)
+        || (block == 12 && frame == 99 && track == 6 && channel == 0)
+    {
+        return -0.0;
+    }
+    let mut state = ((block as u64) << 40)
+        ^ ((frame as u64) << 20)
+        ^ ((track as u64) << 4)
+        ^ channel as u64
+        ^ 0x0979_0979_0979_0979;
+    let word = support::splitmix64(&mut state);
+    let sign = ((word >> 63) as u32) << 31;
+    match word & 15 {
+        0 => 0.0,
+        1 => f32::from_bits(sign | (((word >> 8) as u32 & 0x007f_ffff) | 1)),
+        _ => {
+            let exponent = ((word >> 8) % 50) as u32 + 127 - 24;
+            let mantissa = (word >> 16) as u32 & 0x007f_ffff;
+            f32::from_bits(sign | (exponent << 23) | mantissa)
+        }
+    }
+}
+
+/// VERIFY-EQ finding 1's configuration: a +24 dB bell at 12 kHz (band 1), band 2 disabled, and a
+/// 10 Hz LPF, on both channels.
+fn overflow_configuration() -> Vec<effect_contract::InitialParameterValue> {
+    let mut values = values();
+    for channel in [ParameterChannel::Left, ParameterChannel::Right] {
+        set_initial(&mut values, 0, channel, 1.0);
+        set_initial(&mut values, 1, channel, EqBandKind::Bell as u32 as f32);
+        set_initial(&mut values, 2, channel, 12_000.0);
+        set_initial(&mut values, 3, channel, 24.0);
+        set_initial(&mut values, 4, channel, core::f32::consts::FRAC_1_SQRT_2);
+        set_initial(&mut values, LPF_PARAMETERS, channel, 1.0);
+        set_initial(&mut values, LPF_PARAMETERS + 1, channel, 10.0);
+    }
+    values
+}
+
+/// A `9e29` sine at 12 kHz (a quarter of 48 kHz), with no `-0.0`: every block is admitted, and the
+/// bell turns it into about `1.4e31` ahead of the disabled band.
+fn overflow_word(frame: usize) -> f32 {
+    let value = 9.0e29 * (core::f32::consts::FRAC_PI_2 * (frame % 4) as f32).sin();
+    if value.to_bits() == 0x8000_0000 {
+        0.0
+    } else {
+        value
+    }
+}
+
+/// The scalar leg of the switched-off-cut scenario, then of the restored-overflow scenario; and how
+/// many left-plane faults the overflow scenario reported.
+fn cliff_scalar_digest() -> (String, u64) {
+    let factory = ParametricEqFactory;
+    let mut hasher = Sha256::new();
+    for shape in CLIFF_SHAPES {
+        let configurations: Vec<_> = (0..CLIFF_TRACKS)
+            .map(|track| cliff_configuration(shape, track))
+            .collect();
+        let mut effects: Vec<_> = configurations
+            .iter()
+            .map(|(initial, _)| {
+                factory
+                    .prepare(request(initial, false))
+                    .expect("scalar prepare")
+            })
+            .collect();
+        for block in 0..CLIFF_ON_BLOCKS + CLIFF_OFF_BLOCKS {
+            for (track, effect) in effects.iter_mut().enumerate() {
+                for (at, target, changed) in &configurations[track].1 {
+                    if *at == block {
+                        apply_prepared_targets(effect.as_mut(), target, changed);
+                    }
+                }
+                let mut left: Vec<f32> = (0..128)
+                    .map(|frame| cliff_word(block, frame, track, 0))
+                    .collect();
+                let mut right: Vec<f32> = (0..128)
+                    .map(|frame| cliff_word(block, frame, track, 1))
+                    .collect();
+                let report = effect.process(
+                    EffectProcessBlock::new(
+                        &mut left,
+                        &mut right,
+                        None,
+                        (block * 128) as u64,
+                        &[],
+                        128,
+                    )
+                    .expect("scalar block"),
+                );
+                fold_words(&mut hasher, left.into_iter().chain(right));
+                fold_report(&mut hasher, &report);
+                fold_payload(&mut hasher, &snapshot(effect.as_ref()));
+            }
+        }
+    }
+    let values = overflow_configuration();
+    let mut effect = factory
+        .prepare(request(&values, false))
+        .expect("scalar prepare");
+    let mut payload = snapshot(effect.as_ref());
+    plant_left_ic2(&mut payload, 2, -f32::MAX);
+    effect
+        .restore_state_payload(
+            PARAMETRIC_EQ_DESCRIPTOR.state_layout_version,
+            StatePayloadInput::new(
+                &payload.0,
+                &payload.1,
+                &payload.2,
+                effect.metadata().state_sizes,
+            )
+            .expect("state input"),
+        )
+        .expect("a finite integrator restores");
+    let mut faults = 0;
+    for block in 0..8 {
+        let mut left: Vec<f32> = (0..128).map(overflow_word).collect();
+        let mut right = left.clone();
+        let report = effect.process(
+            EffectProcessBlock::new(&mut left, &mut right, None, (block * 128) as u64, &[], 128)
+                .expect("scalar block"),
+        );
+        faults += report.nonfinite_left_blocks;
+        fold_words(&mut hasher, left.into_iter().chain(right));
+        fold_report(&mut hasher, &report);
+        fold_payload(&mut hasher, &snapshot(effect.as_ref()));
+    }
+    (hex(&hasher.finalize()), faults)
+}
+
+/// The bank legs of both scenarios, folded per track in track order so the digest does not depend
+/// on the bank width, and the left-plane faults the overflow scenario reported on lane 0. `mono`
+/// renders the collapsed body over the left plane.
+fn cliff_bank_digest(width: BankWidth, backend: Backend, mono: bool) -> (String, u64) {
+    let lanes = width.lanes() as usize;
+    assert_eq!(CLIFF_TRACKS % lanes, 0, "the scenario fills whole banks");
+    let factory = ParametricEqFactory;
+    let mut hasher = Sha256::new();
+    let bind = |configurations: &[Vec<effect_contract::InitialParameterValue>]| {
+        configurations
+            .chunks(lanes)
+            .map(|group| {
+                let requests: Vec<_> = group
+                    .iter()
+                    .map(|initial| request(initial, false))
+                    .collect();
+                factory
+                    .bind_homogeneous_bank(PrepareEffectBankRequest {
+                        backend,
+                        width,
+                        requests: &requests,
+                    })
+                    .expect("valid bank request")
+                    .expect("the native width must bind")
+            })
+            .collect::<Vec<_>>()
+    };
+    let offsets = vec![0_u32; lanes + 1];
+    let render = |bank: &mut Box<dyn PreparedNativeEffectBank>,
+                  hasher: &mut Sha256,
+                  block: usize,
+                  word: &dyn Fn(usize, usize, usize) -> f32|
+     -> u64 {
+        let plane = |channel: usize| -> Vec<f32> {
+            (0..128 * lanes)
+                .map(|cell| word(cell / lanes, cell % lanes, channel))
+                .collect()
+        };
+        let mut left = plane(0);
+        let mut right = if mono {
+            vec![f32::from_bits(0x7F7F_FFFF); 128 * lanes]
+        } else {
+            plane(1)
+        };
+        let process = EffectBankProcessBlock::new(
+            &mut left,
+            &mut right,
+            None,
+            128,
+            width,
+            (block * 128) as u64,
+            &[],
+            &offsets,
+            128,
+        )
+        .expect("bank block");
+        let report = if mono {
+            bank.process_bank_mono(process)
+        } else {
+            bank.process_bank(process)
+        };
+        for lane in 0..lanes {
+            let column = |plane: &[f32]| -> Vec<f32> {
+                (0..128).map(|frame| plane[frame * lanes + lane]).collect()
+            };
+            if mono {
+                fold_words(hasher, column(&left).into_iter());
+            } else {
+                fold_words(hasher, column(&left).into_iter().chain(column(&right)));
+            }
+            fold_report(hasher, &report.reports[lane]);
+            fold_payload(hasher, &snapshot_bank(bank.as_ref(), lane as u32));
+        }
+        report.reports[0].nonfinite_left_blocks
+    };
+    for shape in CLIFF_SHAPES {
+        let configurations: Vec<_> = (0..CLIFF_TRACKS)
+            .map(|track| cliff_configuration(shape, track))
+            .collect();
+        let initials: Vec<_> = configurations
+            .iter()
+            .map(|(initial, _)| initial.clone())
+            .collect();
+        let mut banks = bind(&initials);
+        for block in 0..CLIFF_ON_BLOCKS + CLIFF_OFF_BLOCKS {
+            for (group, bank) in banks.iter_mut().enumerate() {
+                for lane in 0..lanes {
+                    for (at, target, changed) in &configurations[group * lanes + lane].1 {
+                        if *at == block {
+                            apply_prepared_targets_lane(
+                                bank.as_mut(),
+                                lane,
+                                48_000,
+                                target,
+                                changed,
+                            );
+                        }
+                    }
+                }
+                let word = |frame: usize, lane: usize, channel: usize| {
+                    cliff_word(block, frame, group * lanes + lane, channel)
+                };
+                render(bank, &mut hasher, block, &word);
+            }
+        }
+    }
+    let mut faults = 0;
+    let values = overflow_configuration();
+    let mut banks = bind(&vec![values; CLIFF_TRACKS]);
+    for bank in &mut banks {
+        let mut payload = snapshot_bank(bank.as_ref(), 0);
+        plant_left_ic2(&mut payload, 2, -f32::MAX);
+        let sizes = bank.metadata().program_key.state_sizes;
+        bank.restore_track_state_payload(
+            0,
+            PARAMETRIC_EQ_DESCRIPTOR.state_layout_version,
+            StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes).expect("state input"),
+        )
+        .expect("a finite integrator restores");
+    }
+    for block in 0..8 {
+        for bank in &mut banks {
+            let word = |frame: usize, _: usize, _: usize| overflow_word(frame);
+            faults += render(bank, &mut hasher, block, &word);
+        }
+    }
+    (hex(&hasher.finalize()), faults)
+}
+
+/// The digests [`a_cut_switched_off_keeps_the_bank_eliding`] pins, recorded on the unmodified base
+/// of issue #979 (an elided section's state had to be exactly `+0.0`).
+const CLIFF_DIGESTS: [(&str, &str); 3] = [
+    (
+        "scalar",
+        "a34ce0342d321d08dae9a99fa1adc175a2511041035a27cd5b744cff89b1b5f4",
+    ),
+    (
+        "bank",
+        "2e0845c6619db72d76cfd1d96b6ab89414a923fed6dabbb65dab4ccadcad1214",
+    ),
+    (
+        "bank-mono",
+        "26a755c16fc0efd143ff5ac79115aa835149a0336a6cc94c01cea91947e30cd2",
+    ),
+];
+
+/// Issue #979 gate 1: a dedicated cut switched on and then off again through prepared targets
+/// leaves its section at the identity with a frozen, non-zero state, and the wider elision leg (b)
+/// that now lets such a bank elide renders the bits the shipped rule rendered.
+///
+/// Through the public API only: the HPF on every lane of both channels at block 0, four blocks,
+/// then a target with `enabled = 0`, twelve more blocks of hostile input (subnormals, `+0.0`,
+/// magnitudes `2^-24..2^26`; blocks 7 and 12 carry a `-0.0`), alone and beside a live bell. Then
+/// VERIFY-EQ finding 1: a +24 dB bell ahead of a disabled band restored with `ic2 = -f32::MAX` and a
+/// 10 Hz LPF behind it, on a `9e29` sine. The executed band overflows `v3`, the block is zeroed,
+/// reset and reported; the capped rule keeps refusing that band, so this leg stays on its pin. Every
+/// output word, every report and every lane's state payload after every block, one SHA-256 per leg.
+#[test]
+fn a_cut_switched_off_keeps_the_bank_eliding() {
+    let mut legs = vec![("scalar", cliff_scalar_digest())];
+    if let Some((width, backend)) = native_bank() {
+        legs.push(("bank", cliff_bank_digest(width, backend, false)));
+        legs.push(("bank-mono", cliff_bank_digest(width, backend, true)));
+    }
+    for (leg, (digest, faults)) in &legs {
+        println!("switched-off-cut digest {leg} {digest} (overflow faults {faults})");
+    }
+    for (leg, (digest, _)) in &legs {
+        let pinned = CLIFF_DIGESTS
+            .iter()
+            .find(|(name, _)| name == leg)
+            .map(|(_, pin)| *pin)
+            .expect("every leg is pinned");
+        assert_eq!(
+            digest, pinned,
+            "#979 gate 1: the {leg} leg moved a bit, a report or a state word"
+        );
+    }
+    for (leg, (_, faults)) in &legs {
+        assert!(
+            *faults > 0,
+            "non-vacuity: the {leg} leg's executed band must overflow and fault its first block"
+        );
+    }
+}

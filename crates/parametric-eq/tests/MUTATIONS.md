@@ -285,3 +285,29 @@ of a refused block; in gate 1 that `-0.0` is rewritten to `+0.0` downstream by t
 bands a refused block executes, so M1 shows instead through the poisoned dry lane (and, in mono,
 through the older all-high-pass signed-zero oracle, whose general bands are all live). In mono the
 poisoned HPF is a dead section, refused by leg (b), so M4 moves only the dual legs.
+
+## Issue #979 — an identity section with a frozen, inert state stays elidable
+
+Driver: one mutation at a time applied to `lane_is_inert` in `src/lib.rs`, then
+`cargo test --release -p parametric-eq --features test-support --lib --test bank --no-fail-fast`,
+tree restored byte for byte between rows. Gate 1 is `a_cut_switched_off_keeps_the_bank_eliding`
+(`tests/bank.rs`; pinned on the unmodified base: scalar `a34ce034…`, bank `2e0845c6…`, bank-mono
+`26a755c1…`, and the restored-overflow leg faults its first block once per leg). Gate 2 is
+`elision::a_band_switched_off_keeps_the_bank_eliding`, gate 3
+`elision::a_non_inert_state_in_a_dead_section_refuses_elision` (formerly
+`a_non_zero_state_in_a_dead_section_refuses_elision`). Re-run after the rebase onto #977's attempt 2,
+on the branch-free body (`offset = magnitude.wrapping_sub(FLOOR)`, `inert &= (word == 0) | (offset
+<= CEILING - FLOOR)`), which agrees with the range form on all `2^32` words: the same rows go red
+with the same messages and digests.
+
+| # | mutation | gate that goes red | result |
+|---|---|---|---|
+| 979-M1 | back to the exact `+0.0` test (`*word == 0` only) | gate 2: `Scalar section 3: 0 of 9 later blocks elide` (the shipped rule's cliff); gate 3: `1.0` refused | RED |
+| 979-M2 | accept magnitudes below `FLUSH_EPS` (the floor set to `1`) | gate 3: `1e-30` elided, integrators differ (the executed section flushes it to `+0.0`); also `a_tiny_restored_disabled_cut_state_refuses_elision_but_preserves_old_bands` and `the_interleaved_cascade_renders_the_per_section_path_bit_for_bit` (seeded subnormal states) | RED |
+| 979-M3 | accept `-0.0` (`word & MAGNITUDE_MASK == 0` for the zero term) | gate 3: `-0.0` elided, integrators differ (the executed section flushes it to `+0.0`) | RED |
+| 979-M4 | accept above the cap (`[FLOOR, 0x7f80_0000)`, the rule as briefed before the amendment) | gate 3: the word above the ceiling (`1.0000001e30`) admitted; gate 1: scalar `c060ba98…`, bank `b0063058…`, bank-mono `7698bb8b…`, and the restored-overflow leg reports no fault (the band restored with `ic2 = -f32::MAX` is elided and the block renders audio) | RED |
+
+Gate 2 is green under M2, M3 and M4 (a switched-off band's frozen state is always inert), and gate 1
+under M1-M3 (the fixtures never restore a sub-`FLUSH_EPS` or `-0.0` word); each row is caught by the
+gate built for it. On the unmodified base gate 2 reports 0 of 9 at every width and section, in dev
+and release; after the change, 9 of 9.

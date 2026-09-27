@@ -48,9 +48,7 @@ use effect_contract::{
     StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
     expected_prepared_metadata,
 };
-use effect_runtime::bank::{
-    BLOCK_LIMIT, block_is_positive_zero, check_block, lane_is_positive_zero, nonfinite_lane_mask,
-};
+use effect_runtime::bank::{BLOCK_LIMIT, block_is_positive_zero, check_block, nonfinite_lane_mask};
 use effect_runtime::params::{
     ParameterSpec, normalize_zero, parameter_value_valid as domain_valid,
 };
@@ -1048,9 +1046,35 @@ fn lane_is_finite_without_negative_zero<L: Lane>(value: L) -> bool {
         .all(|word| *word != NEGATIVE_ZERO_BITS && (*word & MAGNITUDE_MASK) < NON_FINITE_MAGNITUDE)
 }
 
-/// `true` when both integrator words of `section` are exactly `+0.0` on every lane.
-fn section_state_is_positive_zero<L: Lane>(section: &Section<L>) -> bool {
-    lane_is_positive_zero::<L>(section.state.ic1) && lane_is_positive_zero::<L>(section.state.ic2)
+/// Magnitude bits of [`lane::FLUSH_EPS`], the smallest magnitude `flush` keeps.
+const INERT_MAGNITUDE_FLOOR: u32 = lane::FLUSH_EPS.to_bits();
+
+/// `true` when every lane of `value` is *inert*: exactly `+0.0`, or finite with magnitude bits in
+/// `[INERT_MAGNITUDE_FLOOR, ELISION_MAGNITUDE_CEILING]` (issue #979).
+///
+/// Bits, not float compares: `-0.0` (magnitude bits `0`) and every magnitude below `FLUSH_EPS`
+/// fall under the floor, and every infinity and NaN above the ceiling, so all three refuse. The
+/// lanes are folded with non-short-circuiting `&`/`|` into one branch-free reduction, like the
+/// `+0.0` test it replaced, because it runs for every dead section on every stationary block.
+fn lane_is_inert<L: Lane>(value: L) -> bool {
+    debug_assert!(L::WIDTH <= MAX_LANES);
+    let mut words = [0_u32; MAX_LANES];
+    value.store_bits(&mut words[..L::WIDTH]);
+    let mut inert = true;
+    for word in &words[..L::WIDTH] {
+        // `FLOOR <= m <= CEILING` as one unsigned compare: below the floor the subtraction wraps
+        // above `CEILING - FLOOR`.
+        let offset = (*word & MAGNITUDE_MASK).wrapping_sub(INERT_MAGNITUDE_FLOOR);
+        inert &= (*word == 0) | (offset <= ELISION_MAGNITUDE_CEILING - INERT_MAGNITUDE_FLOOR);
+    }
+    inert
+}
+
+/// `true` when both integrator words of `section` are inert on every lane: an identity section
+/// holding them leaves them exactly where they are and passes its input through (issue #979; the
+/// argument is on [`cascade_sections`]).
+fn section_state_is_inert<L: Lane>(section: &Section<L>) -> bool {
+    lane_is_inert::<L>(section.state.ic1) && lane_is_inert::<L>(section.state.ic2)
 }
 
 /// `true` when every integrator word of `section` is finite and none is `-0.0`, on every lane.
@@ -1634,7 +1658,7 @@ fn cascade_sections_mono<L: Lane, const W: usize>(
     }
     for section in 0..EQ_SECTION_COUNT {
         let admissible = if dead(section) {
-            section_state_is_positive_zero(&channel.sections[section])
+            section_state_is_inert(&channel.sections[section])
         } else {
             section_state_is_finite_without_negative_zero(&channel.sections[section])
         };
@@ -1754,23 +1778,41 @@ fn interleave_mono<L: Lane, const W: usize, const DEPTH: usize>(
 ///
 /// The claim is exact bit identity of the rendered audio **and** of every section's integrator
 /// words, elided sections included — not approximate agreement. Take an identity section whose
-/// two integrator words are exactly `+0.0`, and one input word `v0`.
+/// integrator words are each *inert* -- exactly `+0.0`, or finite with a magnitude in
+/// `[FLUSH_EPS, BLOCK_LIMIT]` (issue #979) -- and one finite input word `v0`.
 ///
-/// * `v3 = v0 - ic2 = v0 - (+0.0) = v0`, bit for bit, including `v0 = -0.0` (IEEE-754 gives
-///   `(-0) - (+0) = -0` under round-to-nearest).
-/// * `d1 = nc1 * ic1 + a2 * v3`. `nc1 = -c1 = -0.0`, so `nc1 * ic1 = -0.0`; `a2 * v3 = +0.0 * v0`,
-///   which is `+0.0` for `v0 >= +0.0` and `-0.0` for `v0 < 0` or `v0 = -0.0`. Either way `d1` is a
-///   zero, and `v1 = ic1 + d1 = (+0.0) + (±0.0) = +0.0`.
-/// * `d2 = a3 * v3 + a2 * ic1 = (±0.0) + (+0.0) = +0.0`, and `v2 = ic2 + d2 = +0.0`.
-/// * `ic1' = flush(ic1 + (d1 + d1)) = flush(+0.0) = +0.0` and likewise `ic2' = +0.0`. **The state
-///   stays exactly `+0.0`, by induction over the block.** (`flush` maps every zero to `+0.0`.)
-/// * `y = m2 * v2 + (m1 * v1 + m0 * v0) = (+0.0) + ((+0.0) + v0)`. `m0 = 1.0`, so `m0 * v0 = v0`
-///   exactly; `(+0.0) + v0` is `v0` for every `v0` **except** `v0 = -0.0`, where it is `+0.0`.
+/// * `v3 = v0 - ic2`. For `ic2 = +0.0` that is `v0` bit for bit, including `v0 = -0.0` (IEEE-754
+///   gives `(-0) - (+0) = -0` under round-to-nearest). Otherwise `|ic2| <= 1e30`, below `2^103`,
+///   half an ulp of `f32::MAX`, so the exact difference is under `f32::MAX + 2^103` in magnitude
+///   and rounds to a finite `v3` for every finite `v0`, whatever section feeds it.
+/// * `d1 = nc1 * ic1 + a2 * v3`. `nc1 = -c1 = -0.0` and `a2 = +0.0`, and `ic1` and `v3` are
+///   finite, so both products are zeros of some sign and `d1` is a zero. `v1 = ic1 + d1` is `ic1`
+///   for a non-zero `ic1`, and `+0.0` for `ic1 = +0.0` (`(+0.0) + (±0.0) = +0.0`).
+/// * `d2 = a3 * v3 + a2 * ic1` is a zero the same way, and `v2 = ic2 + d2` is `ic2` or `+0.0`.
+/// * `ic1' = flush(ic1 + (d1 + d1)) = flush(ic1) = ic1`: a zero addend leaves a non-zero `ic1`
+///   exactly, `flush` keeps every magnitude of at least `FLUSH_EPS`, and it maps a zero to `+0.0`.
+///   Likewise `ic2' = ic2`. **The state does not move, by induction over the block.** That is what
+///   happens to every identity section, whatever it held when it became the identity -- a
+///   dedicated cut switched on and off again through prepared targets freezes a non-zero state
+///   exactly this way (#807) -- provided the state was inert to begin with.
+/// * `y = m2 * v2 + (m1 * v1 + m0 * v0) = (+0.0 * v2) + ((+0.0 * v1) + v0)`. `v1` and `v2` are
+///   finite, so both products are zeros; `m0 = 1.0`, so `m0 * v0 = v0` exactly; and a zero plus
+///   `v0` is `v0` for every `v0` **except** `v0 = -0.0`, where `(±0.0) + (-0.0)` can be `+0.0`.
 ///
-/// So an identity section at `+0.0` state is the exact identity on a finite input, with exactly
+/// So an identity section at an inert state is the exact identity on a finite input, with exactly
 /// one exception: it rewrites `-0.0` to `+0.0`. Eliding it is therefore bit-exact **iff no `-0.0`
-/// ever reaches it**, and the state it keeps is `+0.0` either way — which is what gate (b) below
+/// ever reaches it**, and the state it keeps is unchanged either way — which is what gate (b) below
 /// asserts it already holds.
+///
+/// Each bound of "inert" is load-bearing. A magnitude below `FLUSH_EPS` (a restored subnormal, say)
+/// is flushed to `+0.0` by the executed section and kept by the elided one, and a `-0.0` is flushed
+/// to `+0.0` the same way. A magnitude above [`BLOCK_LIMIT`] can overflow `v3`: a disabled band
+/// restored with `ic2 = -f32::MAX` behind a live +24 dB bell that turns an admitted `9e29` into
+/// `1.4e31` computes `v3 = inf`, then `d1 = 0.0 * inf = NaN`, and the executed section writes `NaN`
+/// where the elided one passes `v0` on (VERIFY-EQ, finding 1). `flush` keeps every state the kernel
+/// writes at `+0.0` or at least `FLUSH_EPS` in magnitude, so the floor refuses only restored
+/// payloads (admitted on finiteness alone); the cap refuses those too, and the rare huge state a
+/// section can be left with when it is switched off after a spike.
 ///
 /// The argument is per dead section and never counted how many were dropped, so it covers dropping
 /// every one of them. Until issue #976 the list was padded back up to a whole number of depth-two
@@ -1884,10 +1926,12 @@ fn cascade_sections<L: Lane, const W: usize>(
     }
     for section in 0..EQ_SECTION_COUNT {
         let admissible = if dead(section) {
-            // (b) An elided section must already be at the `+0.0` state the proof's induction
-            // starts from -- otherwise its state would move in the full cascade and not here.
-            section_state_is_positive_zero(&left_channel.sections[section])
-                && section_state_is_positive_zero(&right_channel.sections[section])
+            // (b) An elided section's state must be inert (issue #979): `+0.0`, or finite with a
+            // magnitude between `FLUSH_EPS` and the ceiling -- the states the proof's induction
+            // starts from. Any other state would move in the full cascade and not here, and a
+            // magnitude above the ceiling could overflow the executed section's `v3`.
+            section_state_is_inert(&left_channel.sections[section])
+                && section_state_is_inert(&right_channel.sections[section])
         } else {
             // (c) A live section must carry no `-0.0` and no non-finite integrator word. Nothing
             // the kernel writes is ever `-0.0`, but a restored state payload is admitted on
@@ -3192,10 +3236,19 @@ mod interleave_identity {
         BAND_SECTION_OFFSET, BandTarget, Channel, EFFECTIVE_CASCADE_DEPTH, EQ_BAND_COUNT,
         EQ_SECTION_COUNT, EqBandKind, HPF_SECTION, LPF_SECTION, MAX_LANES, PreparedParametricEq,
         RAMP_SAMPLES, STATE_SIZES, SampleRateHz, Section, cascade_sections, cascade_sections_mono,
-        corpus, process_channels, process_channels_mono, section_state_is_positive_zero,
+        corpus, process_channels, process_channels_mono,
     };
     use lane::kernels::svf_block;
     use lane::{Lane, Simd4, Simd8};
+
+    /// `true` when both integrator words of `section` are exactly `+0.0` on every lane.
+    ///
+    /// Before issue #979 this was elision leg (b). The leg now accepts any inert state, so the
+    /// exact "this section holds no state" question lives here, with the one test that asks it.
+    fn section_state_is_positive_zero<L: Lane>(section: &Section<L>) -> bool {
+        effect_runtime::bank::lane_is_positive_zero::<L>(section.state.ic1)
+            && effect_runtime::bank::lane_is_positive_zero::<L>(section.state.ic2)
+    }
 
     /// Frames per case: the corpus length, several blocks' worth of settling.
     const FRAMES: usize = corpus::FRAMES;
@@ -4093,10 +4146,11 @@ mod interleave_identity {
 mod elision {
     use super::{
         BandTarget, Channel, ELISION_MAGNITUDE_CEILING, EQ_SECTION_COUNT, EqBandKind, EqSvfWords,
-        HPF_SECTION, LPF_SECTION, MAX_LANES, RAMP_SAMPLES, block_admits_elision,
-        block_admits_elision_oracle, cascade_sections, cascade_sections_mono, corpus,
-        masked_pair_pass_count, process_channels, process_channels_mono, reset_masked_pair_passes,
-        reset_select_free_tail_passes, select_free_tail_pass_count,
+        HPF_SECTION, INERT_MAGNITUDE_FLOOR, LPF_SECTION, MAX_LANES, RAMP_SAMPLES, STATE_LANE_WORDS,
+        STATE_WORDS_PER_BAND, block_admits_elision, block_admits_elision_oracle, cascade_sections,
+        cascade_sections_mono, corpus, masked_pair_pass_count, process_channels,
+        process_channels_mono, reset_masked_pair_passes, reset_select_free_tail_passes,
+        select_free_tail_pass_count,
     };
     use lane::{Lane, Simd4, Simd8};
 
@@ -4181,7 +4235,7 @@ mod elision {
             let mut right_channel = channel::<L, W>(3, right_live);
             if seed_state {
                 for section in 0..EQ_SECTION_COUNT {
-                    // Only *live* sections are seeded: a non-`+0.0` state in a dead section is a
+                    // Only *live* sections are seeded: a non-inert state in a dead section is a
                     // refusal leg with its own test, and seeding it here would silently disable
                     // the very engagement this function is asserting.
                     if left_live & (1 << section) != 0 {
@@ -4512,24 +4566,192 @@ mod elision {
         );
     }
 
-    /// A restored, non-`+0.0` state in a section that *would* be elided refuses the elision.
+    /// Issue #979 gate 3: a restored state in a section that *would* be elided refuses the
+    /// elision unless it is inert, and either way the stationary path renders the per-section
+    /// path's bits and integrators.
     ///
-    /// The full cascade would move that state; eliding the section would not, and the state words
-    /// are part of the bit-identity claim.
+    /// The words go in through [`Channel::restore_track`], on one lane of dead section 3, in either
+    /// integrator. Refused: `-0.0`, magnitudes below `FLUSH_EPS` (`1e-30`, the word under the floor),
+    /// magnitudes above the ceiling (the word over it, `f32::MAX`). Admitted: `+-1.0`,
+    /// `+-FLUSH_EPS` and `+-1e30`, the two ends of the inert band. Before issue #979 this test was
+    /// `a_non_zero_state_in_a_dead_section_refuses_elision` and refused `1.0` too.
     #[test]
-    fn a_non_zero_state_in_a_dead_section_refuses_elision() {
-        for word in [1.0e-30_f32, -1.0e-30, 1.0, -0.0] {
-            let mut left_channel = channel::<Simd8, 8>(0, 0b0001);
-            let right_channel = channel::<Simd8, 8>(3, 0b0001);
-            left_channel.sections[3].state.ic2 = Simd8::splat(word);
-            let left = block::<8>(0, 0);
-            let right = block::<8>(0, 3);
-            assert_eq!(
-                kept(&left_channel, &right_channel, &left, &right),
-                EQ_SECTION_COUNT,
-                "a dead section holding {word} must refuse elision"
-            );
+    fn a_non_inert_state_in_a_dead_section_refuses_elision() {
+        let floor = f32::from_bits(INERT_MAGNITUDE_FLOOR);
+        let ceiling = f32::from_bits(ELISION_MAGNITUDE_CEILING);
+        let refused = [
+            -0.0_f32,
+            1.0e-30,
+            -1.0e-30,
+            f32::from_bits(INERT_MAGNITUDE_FLOOR - 1),
+            f32::from_bits(ELISION_MAGNITUDE_CEILING + 1),
+            -f32::from_bits(ELISION_MAGNITUDE_CEILING + 1),
+            f32::MAX,
+            -f32::MAX,
+        ];
+        let admitted = [1.0_f32, -1.0, floor, -floor, ceiling, -ceiling];
+        for (word, admit) in refused
+            .into_iter()
+            .map(|word| (word, false))
+            .chain(admitted.into_iter().map(|word| (word, true)))
+        {
+            for integrator in [0_usize, 1] {
+                let label = format!("dead section 3 holding {word:e} in integrator {integrator}");
+                let mut arms = Vec::new();
+                let mut ran = EQ_SECTION_COUNT;
+                for stationary in [true, false] {
+                    let mut left_channel = channel::<Simd8, 8>(0, 0b0000_0010);
+                    let mut right_channel = channel::<Simd8, 8>(3, 0b0000_0010);
+                    let mut words = [0_u32; STATE_LANE_WORDS];
+                    left_channel.snapshot_track(5, &mut words);
+                    words[3 * STATE_WORDS_PER_BAND + integrator] = word.to_bits();
+                    let configuration = left_channel.targets[5];
+                    left_channel
+                        .restore_track(5, &words, &configuration, corpus::CORPUS_RATE)
+                        .expect("a finite integrator restores");
+                    let mut left = block::<8>(0, 0);
+                    let mut right = block::<8>(0, 3);
+                    if stationary {
+                        ran = kept(&left_channel, &right_channel, &left, &right);
+                    }
+                    process_channels(
+                        (&mut left_channel, &mut right_channel),
+                        &mut left,
+                        &mut right,
+                        FRAMES,
+                        stationary,
+                    );
+                    arms.push((
+                        bits(&left),
+                        bits(&right),
+                        integrators(&left_channel, &right_channel),
+                    ));
+                }
+                // The bits first: under a mutation that admits a word the executed section would
+                // move, the integrators are what differ.
+                assert!(
+                    arms[0] == arms[1],
+                    "{label}: the stationary path must render the per-section path's bits and integrators"
+                );
+                if admit {
+                    assert_eq!(ran, 1, "{label}: an inert state is admitted");
+                } else {
+                    assert_eq!(ran, EQ_SECTION_COUNT, "{label}: must refuse elision");
+                }
+            }
         }
+    }
+
+    /// Issue #979 gate 2: a band switched on and off again on every lane of both channels leaves
+    /// its section at the identity with a frozen, non-zero state, and the bank keeps eliding.
+    ///
+    /// The transition goes through [`Channel::start_ramp`], the automation route: on at step 2,
+    /// off at step 5, sixteen blocks, beside one live general band. Before issue #979 leg (b)
+    /// refused every block after the disable (0 of the 9 counted below elided, VERIFY-EQ); the
+    /// inert rule elides every stationary block from the first one after the ramp. Every block
+    /// renders the per-section path's bits and integrators. Once for a general band (section 3)
+    /// and once for the HPF (section 0), at every width.
+    #[test]
+    fn a_band_switched_off_keeps_the_bank_eliding() {
+        fn run<L: Lane, const W: usize>(width: &str) {
+            const BLOCKS: usize = 16;
+            const ON: usize = 2;
+            const OFF: usize = 5;
+            for section in [3_usize, HPF_SECTION] {
+                let words = |lane: usize, offset: usize| {
+                    let track = (lane + offset) % corpus::LANES;
+                    let target = if section == HPF_SECTION {
+                        BandTarget {
+                            enabled: true,
+                            kind: EqBandKind::HighPass,
+                            frequency: 40.0 + track as f32 * 23.0,
+                            gain: 0.0,
+                            q: 0.5 + track as f32 * 0.1,
+                            slope: 1.0,
+                        }
+                    } else {
+                        let mut band = corpus::sections(track)[section];
+                        band.enabled = true;
+                        band
+                    };
+                    target.words(corpus::CORPUS_RATE).expect("legal design")
+                };
+                let mut arms = Vec::new();
+                let mut eliding_after = 0_usize;
+                let mut first_after_elided = false;
+                for elide in [true, false] {
+                    let mut left_channel = channel::<L, W>(0, 0b0000_0010);
+                    let mut right_channel = channel::<L, W>(3, 0b0000_0010);
+                    let mut rendered: Vec<u32> = Vec::new();
+                    for step in 0..BLOCKS {
+                        for lane in 0..W {
+                            if step == ON {
+                                left_channel.start_ramp(section, lane, words(lane, 0));
+                                right_channel.start_ramp(section, lane, words(lane, 3));
+                            }
+                            if step == OFF {
+                                left_channel.start_ramp(section, lane, EqSvfWords::IDENTITY);
+                                right_channel.start_ramp(section, lane, EqSvfWords::IDENTITY);
+                            }
+                        }
+                        let mut left = block::<W>(0, step % corpus::LANES);
+                        let mut right = block::<W>(0, (step + 3) % corpus::LANES);
+                        let stationary =
+                            left_channel.no_ramp_in_flight() && right_channel.no_ramp_in_flight();
+                        if elide && step > OFF {
+                            assert!(stationary, "{width} section {section}: the ramp has ended");
+                            let elided = kept(&left_channel, &right_channel, &left, &right)
+                                < EQ_SECTION_COUNT;
+                            first_after_elided |= elided && step == OFF + 1;
+                            eliding_after += usize::from(elided && step > OFF + 1);
+                        }
+                        process_channels(
+                            (&mut left_channel, &mut right_channel),
+                            &mut left,
+                            &mut right,
+                            FRAMES,
+                            stationary && elide,
+                        );
+                        rendered.extend(bits(&left));
+                        rendered.extend(bits(&right));
+                    }
+                    if elide {
+                        assert!(
+                            (0..EQ_SECTION_COUNT).all(|index| index == 1
+                                || (left_channel.identity[index] && right_channel.identity[index])),
+                            "{width} section {section}: switched off, it is the identity again"
+                        );
+                        let frozen = left_channel.sections[section].state;
+                        assert!(
+                            !(effect_runtime::bank::lane_is_positive_zero::<L>(frozen.ic1)
+                                && effect_runtime::bank::lane_is_positive_zero::<L>(frozen.ic2)),
+                            "{width} section {section}: non-vacuity, the section holds a frozen \
+                             non-zero state"
+                        );
+                    }
+                    rendered.extend(integrators(&left_channel, &right_channel));
+                    arms.push(rendered);
+                }
+                println!(
+                    "#979 cliff {width} section {section}: {eliding_after} of {} later blocks elide \
+                     (first stationary block after the ramp: {first_after_elided})",
+                    BLOCKS - OFF - 2
+                );
+                assert_eq!(
+                    (eliding_after, first_after_elided),
+                    (BLOCKS - OFF - 2, true),
+                    "{width} section {section}: every stationary block after the switch-off elides"
+                );
+                assert!(
+                    arms[0] == arms[1],
+                    "{width} section {section}: the eliding arm must render the per-section path's \
+                     bits and integrators"
+                );
+            }
+        }
+        run::<f32, 1>("Scalar");
+        run::<Simd4, 4>("Simd4");
+        run::<Simd8, 8>("Simd8");
     }
 
     /// A `-0.0` integrator in a *live* section refuses the elision.
