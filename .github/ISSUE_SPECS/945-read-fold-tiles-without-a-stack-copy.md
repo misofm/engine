@@ -286,3 +286,81 @@ Recorded in `crates/graph/tests/MUTATIONS.md`, "Issue #945":
    four lanes natively (945-1b).
 3. The base wasm artifact does not reproduce the committed pin because #936 is under it; the
    callgraph checks were run on the piped disassembly instead, per amendment 2.
+
+## Sol attempt 1 verdict: PASS
+
+Reviewer: Sol, 2026-09-27, `git diff a7d8fc0d..60eaae13`. Every gate was re-run independently: the
+worktree for fmt, clippy, doc, tests and policy scripts; a `git archive` copy of `60eaae13` with
+`gain-pan-diagnosis-harnesses.patch` applied for digests, mutations, release `bench`, wasm and
+determinism, with `runtime.rs` swapped between `a7d8fc0d` and `60eaae13`. One scratch target
+directory, `CARGO_INCREMENTAL=0`, no timed runner, no timing. Nothing from the scratch copy is
+committed, and the worktree was left clean with no `target` entry.
+
+### Gates, reproduced
+
+| gate | result |
+|---|---|
+| 1 digests | All 16 `digests` rows byte-identical base against after, and equal to the evidence table (gain/pan `01e465a7...`, plumbing `57535244...`). `chain_shape` 24 of 24, including `BASE_DIGEST` and `the_folded_master_is_the_reductions_own_bits`. |
+| 2 fold tests | `cargo test -p graph`: lib 113, rt10 2, rt1 1, rt9 1. With `test-support`: lib 113, rt10 2, rt1 1, rt9 8. No test edited. |
+| 3 x86 | `fold_resident` in release `bench`: 7,285 -> 6,111 bytes, `memcpy` calls 4 -> 0, `vzeroupper` 18 -> 9, `%rsp` instructions 454 -> 311. The `W = 8` loop loads rows with `vmovups -0xe0(%r10)..(%r10)` straight into `vunpcklps`. The `W = 4` loop does the same with `xmm`. |
+| 4 wasm (amendment 2) | Artifacts reproduce the implementer's exactly: base `319719052a107f78...`, after `0b5d6055240e264a...`. The render callgraph, kernel shape, meter_poll and command_submit outputs are identical base against after (`closure=8 traps=5`, same owner and entry; `f32x4_arith=11683 kernels=15`). In func 1952 `fold_resident`, `memory.copy` goes 2 -> 0, `v128.store` 14 -> 6, and direct calls 20 -> 24. |
+| 5 policy | `check-realtime-policy.sh` ok (54 regions in 16 files), `check-graph-policy.sh` PASS, `check-workspace-policy.sh` ok, `check-graph-determinism.sh` PASS 100/100. The determinism script ran through a symlink in the scratch copy, which was removed afterwards. |
+| 6 mutations | 945-1: graph 4 of 113 red, chain_shape red, 13 of 16 digests move (gain/pan -> `26fcd980`). 945-1b: graph 4 red, chain_shape 24 green, 0 digests move. 945-1c: graph 3 red, chain_shape red, the same 13 digests. All exactly as recorded. |
+| 7 hygiene | fmt clean. clippy `--workspace --all-targets --all-features -D warnings` clean. `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` clean. `-p console-workload` 5/4/24/3, `-p capi` 32 + 4. |
+| scope | Only `runtime.rs` (`tile_rows` alone, `:2173-2183`), `MUTATIONS.md` and this spec changed. There is no `unsafe`, `wide` or intrinsic in the diff. The brief and amendments are untouched; the evidence is append-only. |
+
+### Exactness and the `[..W * W]` deviation
+
+- The caller hands exactly `W * W` words. The premise `resident_left.len() == frames * W` is at
+  `runtime.rs:2125`, and `tiled = frames - frames % W` at `:2138` makes `tiled * W` a multiple of
+  `W * W` no larger than the length, so `chunks_exact(W * W)` at `:2140-2141` yields only full
+  blocks. `block[..W * W]` is therefore the whole block and never out of bounds. `as_chunks::<W>`
+  yields exactly `W` rows, and `from_fn(|row| rows[row])` is row `i` = words `iW .. (i + 1)W` by
+  value, the same words the zeroed tile plus `copy_from_slice` formed. A typed copy of `[f32; W]`
+  moves bits unchanged (x86 `vmovups`, wasm `v128.load`/`load32_lane`). The panic cannot fire on
+  the render thread.
+- Adversarial extra (not recorded in MUTATIONS.md): zeroing only the last row at `W = 4` makes 5
+  graph tests red, including
+  `a_resident_fold_stores_its_first_contributor_so_a_negative_zero_master_keeps_its_sign`. So the
+  `W = 4` witnesses see a single-row defect, not only a rotation.
+- I built the brief's prototype form (no slice) to judge the deviation. On x86 it keeps the
+  five-compare chain per `W = 8` tile, as the evidence claims (`test %rsi; cmp $0x1; cmp $0x2;
+  cmp $0x3; cmpq $0x20`), with 6,251 bytes and 11 `vzeroupper`. In wasm it adds the same four panic
+  sites as `panic_bounds_check` (calls 20 -> 24). The deviation is therefore neutral to better on
+  every axis.
+
+### Findings (severity-ranked; none blocking)
+
+1. **Low: `W = 4` has no executing end-to-end witness.** Amendment 1 says chain_shape goes red
+   under a `W = 4`-only variant. It does not on an x86-64-v3 host: native banks are eight wide
+   (`BankWidth::for_backend(Simd8)`). The implementer disclosed this correctly (945-1b), and I
+   reproduced it. `W = 4`, the width the browser ships, is guarded only by native graph unit tests
+   that run `BankWidth::Four`: `runtime.rs:9875`, `:11496`, `:11915` and `:14111`, all red under
+   945-1b. No wasm gate executes the fold:
+   - the callgraph and kernel checks are static;
+   - `fold_resident` does not match rule 3's pattern;
+   - the browser-v1 parity fixture has one track, so it never forms a full folded bank;
+   - qualification has no aarch64 leg.
+   Because the change is target-independent Rust, the native `W = 4` tests are a sound witness
+   for #945. A wasm or aarch64 executed console digest would be a separate, stateless follow-up.
+2. **Info: four cold wasm panic sites are acceptable.** func 1952 goes from 10 to 14
+   `slice_index_fail` calls and from 14 to 18 `unreachable`; native x86 panic calls go from 14 to
+   15. They are unreachable by construction (above) and the same class as the function's existing
+   14 checked-index sites. The realtime policy permits indexing in marked regions (`:1790-2228`).
+   `fold_resident`'s only direct caller is `rack::BankChain::scatter`, which is reached by
+   `call_indirect`, so the function is outside the render export's direct-call closure. The pinned
+   census is unchanged and never covered this function. No safe form of the brief's design avoids
+   the sites, short of a silent fallback tile.
+3. **Info: evidence wording.** "`v128.load` 18 -> 146" counts the whole `v128.load*` family. The
+   128 added loads are `load32_zero` and `load32_lane` in the `W = 8` instantiation, which the
+   browser never runs. They replace 128 `f32.load`s from the old stack tile (238 -> 110). The
+   shipped `W = 4` path's plain `v128.load` count stays 18 and now reads the resident block. The
+   "ops" figures are line counts; instruction counts are 4,514 -> 3,257. The conclusions are
+   unaffected.
+4. **Info, out of scope.** In wasm, func 2020, the `W = 8` `constants` `from_fn` at
+   `runtime.rs:2135`, keeps one `memory.copy` before and after. It runs once per cohort, outside
+   the tile loop, only at `W = 8` (unreached in the browser), and has no x86 counterpart. It is
+   listed only for the copy-rule inventory.
+
+The AudioWorklet artifact pin (`8934cdd9...`) is intentionally not repinned. Per the brief it is
+repinned once at the batch boundary, together with #936's change beneath this branch.
