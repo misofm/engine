@@ -228,6 +228,11 @@ fn phase_profile() {
 
     let mut runtime = SessionRuntime::build(ROW, PlanConfig::BASELINE);
     let [chains, slots] = runtime.bank_shape();
+    assert_eq!(
+        slots,
+        3 * chains,
+        "the slot labels assume three builtin stages per chain: input section, fader, pan matrix"
+    );
     println!(
         "bank_shape [chains, slots] = [{chains}, {slots}], units = {}, route folds = {}",
         runtime.unit_eligibility().len(),
@@ -447,6 +452,11 @@ fn probes_split_the_bank_units_and_move_no_bit() {
     let mut runtime = SessionRuntime::build(ROW, PlanConfig::BASELINE);
     let [chains, slots] = runtime.bank_shape();
     assert!(chains > 0, "the row binds bank chains");
+    assert_eq!(
+        slots,
+        3 * chains,
+        "the slot labels assume three builtin stages per chain: input section, fader, pan matrix"
+    );
     assert_eq!(
         runtime.bank_route_folds(),
         u64::from(ROW.tracks()),
