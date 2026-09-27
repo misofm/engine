@@ -372,3 +372,99 @@ All in `crates/graph`. Graph lib tests go from 114 to 108; rt10 from 2 to 1.
 8. **Disk.** `CARGO_PROFILE_DEV_DEBUG=0` for every debug build, to fit the host's free space; it
    changes debug info only. The worktree's `target/` and the scratch worktree at `64b155d0` are
    deleted.
+
+## Sol attempt 1 verdict: PASS
+
+Reviewer: Sol, attempt 1, on `0109d841` (code `bf3bacab`, mutation record `10b53a56`, base
+`d86dd62d`). Nothing was pushed and no timed benchmark was run. The gates ran in this worktree
+(`CARGO_INCREMENTAL=0`, `CARGO_PROFILE_DEV_DEBUG=0`). Mutations, probes and every before/after
+build ran in a detached scratch worktree, never on this branch. Both `target/` directories and the
+scratch worktree were deleted afterwards.
+
+The slice deletes exactly what the brief names, stays inside the authorized paths (five files, no
+`unsafe`), and is class A for every shipped plan. Every gate reproduces. Finding 1 is a real
+weakness in the `DeadClaim` port, and its recorded justification is wrong. Neither is a gate
+failure, and the suite still covers the hazard elsewhere, so it does not block closure. Fold it in
+before the batch push, or file it as a follow-up.
+
+### Gates, re-run independently
+
+| gate | result |
+|---|---|
+| 1 digests and census | I reviewed the implementer's console probe and ran it at `Simd8` and `Simd4`, on `d86dd62d` and on `0109d841`: 34 lines each, `diff`-identical. It covers the 64-block SHA-256, units, banked units, symmetry, bank shape, transposes, folds, redirects, per-block dispatch and plane counters. |
+| 2 host-core | `--all-features`: 225 tests, 0 failed. The two forced-`Scalar` tests' pins are relative (reference against endpoint on one backend), so a green run alone cannot see a fold/route-ops divergence. I measured absolutely instead: a probe hashed every block both tests render, per backend, and on the base logged each Output fold admission. On the base the fold fires (fan-in 9 once, fan-in 3 twice); on the head there is none. Every `Scalar` hash is identical before and after, and equals the `Simd8` arm's hash. #926 proved the equivalence against its seam-declined oracle and the per-width kernel test (926-1 to 926-5 red), and #937 re-proved it. |
+| 3 #936 ported | Green. I re-ran the recorder on a detached `64b155d0`, after first checking that the patched fixture region is byte-identical to the head's (803 lines). It printed `0x3adf_c3ee_a1b4_75ab` / `0x51c6_c3cf_4cdc_5509` (both observed shapes) / `0xd1eb_c3d4_2404_cb33`, and `0xe889_005e_2b7c_170c` for both dead-claim arms. These equal the pins, so "moves no bit" is not circular. |
+| 4 #918 rt10 | Green in both graph runs (1,000 blocks, zero allocations). |
+| 5 nothing left | The grep finds only `MUTATIONS.md` history. `docs/`, `scripts/`, `tools/` and `hosts/` hold no live description of the fold; `run-console-benchmark.sh:126-137` is arm-registration history. `cargo doc -p graph --document-private-items` shows the same six pre-existing unresolved links before and after, none new. |
+| 6 AudioWorklet | Built with the delivery script's cargo line. Base `1bc33051…f674` (3,310,208 B), head `190fb681…42e3` (3,292,914 B); both equal the implementer's, since the remap makes the build reproducible. Kernel census 15 → 14, and the only kernel gone is `route_group<f32x4>` (vector 38). `f32x4` arithmetic 11,751 → 11,713. The roster lines and the render-closure line (`closure=8 traps=5`, same trap owner and entry) are text-identical. The `route_reduce`, `route_tail` and `played_planes_group` symbols are gone. `check-web-audioworklet.sh` over the assembled seven-file set: exit 0. |
+| 7 resources | `size_of`: `GraphExecutor` 616 → 584, `Runtime` 488 → 456, split mirror 472 → 440, observation mirror 232 → 200, so the charged deltas (16 and 256) are unchanged. `capi` lib 32 and `resource_lifecycle` 4: green. `check-browser-expected-resources.py` exits 1 with the identical message on base and head. The full oracle and native dump (24 + 24 rows) is byte-identical before and after, and equals the implementer's. The +108 is 9 ops × 12 B, #936's wasm32 executor tables: the batch-boundary re-pin #936's verdict listed. No row moves here. |
+| 8 mutations | My own edits, each applied alone to the head. S1 (bind tables every unit, `\|\| unit < usize::MAX` in `lib.rs`): RED on gates 1, 2, 3 and 5 (`unit 0 is tabled iff it is not inert`, and the tables). S2 (an observed `SourceInput` is inert): RED on gate 2; bits-only RED at the `Plain` digest; bits-only with `ObservedAlias` alone, RED too. S3 (`TrackDelay` inert): RED on gate 3; bits-only RED. S4 (clause (b) refuses a zero-reader claim): RED on the dead-claim test's mode table. |
+| 9 build and lint | `fmt`; `clippy --workspace --all-targets --all-features -D warnings` (0 diagnostics); `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps`; graph 108/1/1/1, and 108/1/1/8 with `test-support`; graph-compiler 94; console-workload 38; capi 36; source 73. Determinism PASS 100/100; graph policy PASS; realtime ok (55 regions in 16 files); lane ok. `graph_fixture --manifest`: base equals head (seven files), and both equal the implementer's. |
+
+**Safety.** Every deleted path runs only when `output_route_fold` admits a fold:
+
+- the kernels, through `execute_op`'s third arm;
+- (b') and (e), through `output_producers`;
+- `played_planes_group`, through `resolve_group`.
+
+The fold's first clause is an empty `membership()`, and that set includes builtin banks
+(`bank_membership`). At `Simd4` and `Simd8`, `into_graph_artifact_with_banks` banks every strip
+node of every track. Short banks are padded, so a one-track session still has three one-member
+banks. Split pairs are `Scalar`-only. Zero tracks fails the fan-in ≥ 2 clause. So no vector plan
+reached the deleted code, and the census and the host-core probe confirm it empirically.
+
+**Frames.** The panic is a real limit of the test fixture, not a bug. `PlayedSource::begin_block`
+writes `plane[..played]` with `PLAYED_SCRIPT`'s `Short(9)` (`runtime.rs:12916`, `:12967`), so a
+quantum under nine frames indexes out of bounds in the test fake. A production driver never plays
+more than the quantum.
+
+**ObservedAlias.** I probed the bound plan at all four quanta:
+
+- `K`'s `PostSimd1` has no op (`node_op` is `None`) and shares `K`'s input buffer.
+- `K`'s input op holds one observer, and its unit is observed and tabled.
+- `K`'s claim keeps the copy (`[true × 5, false]`).
+
+This is #936's mechanism: an elided alias whose observer folds into the input op. Because a rack
+boundary is always an alias, this gate survives #958, which #936's `PostFader` shape would not.
+
+### Findings, most severe first
+
+1. **Medium, non-blocking: the `DeadClaim` port cannot see its own hazard, and its stated reason is
+   false.**
+   - **What the test lacks.** #927's shape existed to prove that a recoloured dead slot is never
+     read "by the buffer-keyed table". The ported test (`runtime.rs:14081-14200`) has no gather of
+     that slot. With redirects bound, which is the production arm, nothing in the bound runtime
+     touches the slot after the dead input op. So no table-read mutation can turn it red.
+   - **Why the recorded reason is wrong.** The spec (`:243-244`) says the fixture "cannot express
+     without a new stage kind" a bank gather of the dead slot. It can:
+     `SourceShape { dead: true, stages: &[PostInputBuiltins, PostMatrix], ..banked(Four, 6, f) }`
+     binds all seven claims in place. In both redirect arms, bank unit 9, lane 0 (unmarked),
+     gathers the recoloured slot 7. The in-place and copy bits are equal at every quantum.
+   - **Evidence.** Under a lane-marking leak (`SourceGather::claim`, `runtime.rs:1520`, ignoring
+     `lanes`, i.e. 918-5), the committed test stays GREEN and that variant goes RED at the bits. The
+     same holds with a leak limited to the dead claim's index.
+   - **Coverage.** The suite still catches 918-5 through #918's gate 1 (`scalar: Some(PostFader)`),
+     so no hazard is uncovered. The loss is that the test named for this hazard does not discriminate it.
+   - **Fix (test-only, small).**
+     - Use the two-bank stages in the dead-claim test.
+     - Re-record `DEAD_CLAIM_PRE_CHANGE` on `64b155d0`.
+     - Make the lowered-program check require a later bank gather of the slot.
+     - Add a bits-level row, "the gather ignores `source_lanes`", beside 957-4.
+     - Correct the spec's limitation text and `MUTATIONS.md:592`.
+2. **Low: #936's sub-ten-frame quanta are gone.** Frames `{1, 7}` became `{10, 13, 16, 128}`.
+   - **Why it does not matter to the gates.** The skip is decided at bind and does not depend on
+     frames, so the gates' power over #936 is intact.
+   - **What is lost.** `TrackDelayed`'s `(3, 5)` line longer than the quantum, and one-frame
+     gathers.
+   - **How to restore it.** Clamping the fake's short block (for example `Short(9)` capped below
+     the quantum) would bring them back without moving #918's pins at 13 and 16 frames. Optional.
+3. **Info: the ObservedAlias topology is test-only.** `Input → PostSimd1 → PostInputBuiltins` is an
+   order no with-builtins compile emits, since `PostSimd1` follows the builtin bank. It is valid for
+   a graph-layer gate. The `InertShape::ObservedAlias` doc (`runtime.rs:13731`) could say so.
+4. **Info: a visibility nit.** `test_only_count_source_plane` (`runtime.rs:4781`) is now used only
+   inside `runtime.rs`, but stays `pub(crate)`. #937 widened it for `played_planes_group`, and it
+   can be private again. rt10's `ALLOCATOR_MODE_GUARD` now guards one test; that is harmless.
+5. **Pre-existing, not charged to this issue.** The browser `expected.json` (+108 B, #936) and the
+   AudioWorklet pin were already stale before this branch. Because of the pin, the delivery script
+   refuses before it copies anything, so gate 6's check can only run on a hand-assembled set until
+   the batch boundary re-pins.
