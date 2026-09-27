@@ -303,3 +303,115 @@ other site. It is a stay-green test, not that row's witness.
    stay inside the authorized paths.
 3. Row 937-4 was added beyond the brief's three mutations, to show that rule 3 does inspect
    `route_group<f32x4>`.
+
+## Sol attempt 1 verdict: PASS
+
+Reviewer: Sol, attempt 1, on `dc7d9155` (code `40c62101`, base `04ed64c7`). Nothing was pushed,
+and no timed benchmark was run. Every mutation, digest and wasm build ran on `git archive` copies
+in a scratch target directory, which has since been deleted. The worktree was never edited, apart
+from this section.
+
+The change is class A, keeps the source-plane contract and its counters, has no track cap, and
+passes every gate. The findings below are informational. None of them blocks the issue.
+
+### Findings, most severe first
+
+1. **Informational: host-core `source_in_place` does not witness the Output counters, before or
+   after this change.** Its three fixtures bind every claim to a bank gather. Its pin
+   `[0, claims * 9, claims * 3]` therefore counts gathers only (`ArenaMembers::plane`,
+   `runtime.rs:2005-2011`), and 937-2 leaves it green, as disclosed. The claim in
+   `DIAGNOSIS-2-VERIFY.md:99` that it "would break" does not hold for a drop at the Output site.
+   The move is still witnessed. Under 937-2 I reproduced four red graph tests (the group test, the
+   lent test, and #927's gates 1 and 2) and the console counter gate (`[0, 0, 0]` against
+   `[0, 4096, 0]`).
+2. **Informational: the group size's evenness is not a correctness condition.** Two equivalent
+   mutants stay green: `OUTPUT_GROUP = 7` (graph 114 of 114 and console-workload green) and
+   `OUTPUT_GROUP = 3` (graph 114 of 114). With either, a would-be pair is split across two groups
+   and a lone input sits mid-block. The chain is still exact, because a group boundary is only a
+   store and a reload. Two statements hold only while the group is even: "the lone input is only
+   ever the block's last" in the `route_group` doc (`runtime.rs:770-775`), and "never the block's
+   first input" (`route_lone_vectors`, `:910`). A group of 1 would fail loudly at `:794`, not
+   silently. These rows can be listed as disclosed equivalents at the batch boundary; nothing is
+   required.
+3. **Informational: wasm trap placement moved, but no trap kind is new.** `route_reduce<f32x4>`
+   now inlines `resolve_group`, so it carries 9 `panic_bounds_check` sites. They are the arena's
+   release read-ID guard (`engine/src/realtime/disjoint.rs:176`), which in the base sat inside the
+   out-of-line `OutputSources::input`. The render callgraph is unchanged on both artifacts:
+   `closure=8 traps=5`, with the same owner and the same entry.
+4. **Informational: a fixed cost per group, for the weekly pass only.** `resolve_group`
+   (`runtime.rs:655-661`) makes one silence read (two guarded reads) and one `dyn` call per group,
+   even when the group has no lent claim. That is at most `ceil(fan-in / 8)` per block.
+
+### What I re-ran and checked
+
+- **Class A (question 1).**
+  - *Chain:* by reading the code and the release x86 disassembly of `route_group<f32x8>`. The
+    store loop is `m0 + m1`, the accumulate loop `(load + m0) + m1`, and the lone loop
+    `load + m`. Each `mix` is `vmulps` and `vmulps` then `vaddps`, with no `vfmadd`. `mix_chunk`
+    is untouched. The only calls are the two to `route_tail`, and there is no panic path.
+  - *Store flag:* `initial_store` is `index == 0` for the group and `store && index == 0` for
+    the pair (`:762`, `:817`, `:840`). It is set exactly once per block.
+  - *Pair shape:* no pair can straddle a group of 8. Finding 2 shows that one split across a
+    group of 7 or 3 still gives the same bits.
+  - *Oracle:* green at `f32`, `Simd4` and `Simd8`. It covers fan-in 2..=19, 64 and 257, frames
+    {1, 3, 7, 13, 33}, which are ragged at both widths, and signed zeros. The lent test is green
+    too; its fan-ins 9 and 64 put lent, silent and arena inputs across group offsets.
+- **Source-plane contract (question 2).**
+  - *Provided body:* `played_planes_group` (`lib.rs:1874`) skips `NO_SOURCE_CLAIM`, which
+    matches the old arena read. It calls the implementor's own `played_planes` for every other
+    claim.
+  - *Wasm:* the production `GraphPreparedSourceSet` instance shows, per claim, `== -1` then skip,
+    `claim >= claims.len()` then silence, then the driver `call_indirect`, then `Some` and both
+    plane lengths `== quantum`, before any slot is written.
+  - *Public trait:* `GraphPreparedSourceSetDriver` is byte-identical.
+  - *Counter hook:* `test_only_count_source_plane` is `pub(crate)` and under
+    `cfg(any(test, feature = "test-support"))`. The production wasm has no `test_only` symbol.
+- **Mutations (all reproduced).**
+  - *The implementer's rows:*
+    - 937-1: 7 of 114 red, first `width 1, 1 frames, fan-in 7` (`1118879272` against
+      `1118879273`), and console `9b7337c3...` against `57535244...`.
+    - 937-2: as in finding 1.
+    - 937-2b: 4 of 114 red.
+    - 937-3: 7 of 114 red, first `fan-in 8` (`1254604654` against `1254604426`), plus both
+      console digests.
+    - 937-4 (rule 3): `route_group ... vector=38 scalar=122`.
+  - *My own rows, all red:*
+    - Drop the group's claim offset: 6 red, including the lent test at fan-in 9.
+    - Store in every group: 8 red, including the oracle at fan-in 9.
+    - Lone tail stores: 3 red (`width 4, 1 frames, fan-in 3`).
+    - Lone vectors before the pairs: 3 red.
+    - Every pair's tail stores: 7 red.
+    - No `NO_SOURCE_CLAIM` skip: 5 red, including the group test.
+    - Set range check removed: 2 red.
+    - Quantum filter weakened to `||`: 2 red (the group test and 918's).
+- **Digests (gate 3).** I built base and head, each forced to rebuild, and checked the head binary
+  carries `route_group::<f32x8>`. All 17 console workloads render the same 64-block digests at
+  three dispatch widths: current (`Simd8`), `Simd4` and `Scalar`, 51 of 51. They equal the table
+  above and the #945 values.
+- **Wasm rule 3 (gate 4).**
+  - *Build:* I rebuilt with the build script's cargo line. Artifacts: base `025b6b20...` and
+    head `0b6b0632...`, both equal to the implementer's.
+  - *Rule 3:* exit 0, `kernels=15`, and the roster lines are identical to the base.
+  - *`route_group<f32x4>`:* 38 vector and 0 scalar. The base `route_reduce<f32x4>` was 44 and
+    0; the 6 fewer are the lone input's never-run store form. `route_tail` has 0 vector ops (132
+    scalar, 24 `f32.store`).
+  - *Out-of-line `Zip::new`:* it is called once, before the lone-input loop, and its two
+    chunk-size checks are hoisted with it. The loop body is loads, 4 `mul`s, 4 `add`s and 2
+    stores, with no call or check. So its cost is one call per block, only when the fan-in is odd,
+    and nothing per chunk.
+- **Allocation and policy (gate 5).**
+  - `rt10` passes, 2 of 2, with and without `test-support`.
+  - `check-realtime-policy.sh`: 55 regions. The base has 54.
+  - `check-graph-policy.sh`, `check-graph-determinism.sh` (100 of 100) and
+    `check-workspace-policy.sh` pass.
+- **Suites (gate 7).**
+  - `cargo fmt --check` and workspace clippy `--all-targets --all-features -D warnings` are clean.
+    So is graph clippy on a fresh scratch build.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passes.
+  - `cargo test -p graph`, with and without `test-support`: 114, rt10 2, rt1 1, rt9 1 or 8.
+  - `-p console-workload`: 5 + 4 + 25 + 3.
+  - `-p host-core`: every binary, including `source_in_place` 1.
+  - `-p capi`: 32 + 4.
+- **Scope.** Only the four authorized paths changed. Making `test_only_count_source_plane`
+  `pub(crate)`, and the doc-only edits to `route_tail`, are what the lib.rs counter placement
+  needs; I accept them.
