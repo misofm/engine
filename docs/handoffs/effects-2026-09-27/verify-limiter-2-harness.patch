@@ -1,0 +1,2195 @@
+diff --git a/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/README.txt b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/README.txt
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/README.txt
+@@ -0,0 +1,21 @@
++Sol verification of the limiter dense-path diagnosis, round 2 (VERIFY-LIMITER-2.md). Evidence only.
++
++Every scripted path assumes the scratch directory D named at the top of each script, holding:
++  wt-base/      a worktree of the verified tip (220c5db5) with limiter-diag-2-harness/ copied in
++                from limiter-diagnosis-2-prototypes.patch (only the harness, not its lib.rs edits);
++  lib.rs.orig   the pristine crates/true-peak-limiter/src/lib.rs of that tree.
++
++Clean single-change builds (the point of this verification): clean.sh writes lib.rs from
++lib.rs.orig through variants.py then variants2.py, builds, and restores the pristine file.
++  ./clean.sh native NAME SPEC   -> bin/NAME, the round-2 kernel rig (limiter-diag-2-harness)
++  ./clean.sh web NAME SPEC      -> web/NAME.wasm, host_web built with the delivery cargo line
++SPEC parts ("+"-joined): seed (limiter-2-1), skewr, skew, pair, splat (class A detector shapes),
++tree, tree2 (class B), vh (limiter-2-2), bcf (limiter-2-3 no-copy), statonly (stationary dispatch
++only), p2s (pass-2 delay streams), unchk (unchecked rings, diagnostic), nogain, nodet
++(truncations), none.
++
++Identity: ./diff.sh W START COUNT BLOCKS bin... (the #990 differential's combined digest);
++node web.mjs digest web/*.wasm (BLOCKS=300).
++Timing (under the lock): abba.sh kbench ROUNDS BLOCKS PASSES bin... ; webtime.sh PROCS arm... ;
++detrep.sh N ROUNDS (the isolated detector benchmark, detbench/). quiet.sh gates a run on load.
++Summaries: python3 summ.py RAW BASE (the diagnosis's summ.py); python3 websumm.py RAW BASE web|wmin.
+diff --git a/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/variants.py b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/variants.py
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/variants.py
+@@ -0,0 +1,421 @@
++"""Clean single-change variants of the limiter, written from the pristine lib.rs.
++
++usage: variants.py ORIG OUT VARIANT[+VARIANT...]
++variants: seed, skewr, skew, pair (class A detector shapes), tree2, tree (class B), none
++"""
++import sys
++
++orig, out, spec = sys.argv[1], sys.argv[2], sys.argv[3]
++parts = set(spec.split('+')) - {'none'}
++s = open(orig).read()
++seed = 'seed' in parts
++
++
++def rep(old, new, count=1):
++    global s
++    assert s.count(old) == count, (old[:80], s.count(old))
++    s = s.replace(old, new)
++
++
++SEED_HEAD_OLD = '''    let mut phase0 = L::zero();
++    let mut phase1 = L::zero();
++    let mut phase2 = L::zero();
++    let mut phase3 = L::zero();
++    macro_rules! tap {
++        ($index:literal, $sample:expr) => {{
++            let row = &fir[$index];
++            let sample = $sample;
++            phase0 = phase0.add(row[0].mul(sample));
++            phase1 = phase1.add(row[1].mul(sample));
++            phase2 = phase2.add(row[2].mul(sample));
++            phase3 = phase3.add(row[3].mul(sample));
++        }};
++    }
++    tap!(0, history.t0);
++'''
++SEED_HEAD_NEW = '''    let row = &fir[0];
++    let sample = history.t0;
++    let mut phase0 = row[0].mul(sample);
++    let mut phase1 = row[1].mul(sample);
++    let mut phase2 = row[2].mul(sample);
++    let mut phase3 = row[3].mul(sample);
++    macro_rules! tap {
++        ($index:literal, $sample:expr) => {{
++            let row = &fir[$index];
++            let sample = $sample;
++            phase0 = phase0.add(row[0].mul(sample));
++            phase1 = phase1.add(row[1].mul(sample));
++            phase2 = phase2.add(row[2].mul(sample));
++            phase3 = phase3.add(row[3].mul(sample));
++        }};
++    }
++'''
++if seed:
++    rep(SEED_HEAD_OLD, SEED_HEAD_NEW)
++
++A2 = 'fn annex2_phases<L: Lane>(history: &History<L>, fir: &[[L; 4]; HISTORY_WORDS]) -> [L; 4] {\n'
++if 'tree2' in parts:
++    rep(A2, A2 + '''    {
++        // CLASS B: two six-tap chains per phase (taps 0-5 and 6-11), merged by one add.
++        let h = history;
++        let t = [h.t0, h.t1, h.t2, h.t3, h.t4, h.t5, h.t6, h.t7, h.t8, h.t9, h.t10, h.t11];
++        let (mut l0, mut l1, mut l2, mut l3) =
++            (fir[0][0].mul(t[0]), fir[0][1].mul(t[0]), fir[0][2].mul(t[0]), fir[0][3].mul(t[0]));
++        let (mut u0, mut u1, mut u2, mut u3) =
++            (fir[6][0].mul(t[6]), fir[6][1].mul(t[6]), fir[6][2].mul(t[6]), fir[6][3].mul(t[6]));
++        macro_rules! step2 {
++            ($k:literal) => {{
++                let (a, b) = (t[$k], t[$k + 6]);
++                l0 = l0.add(fir[$k][0].mul(a));
++                l1 = l1.add(fir[$k][1].mul(a));
++                l2 = l2.add(fir[$k][2].mul(a));
++                l3 = l3.add(fir[$k][3].mul(a));
++                u0 = u0.add(fir[$k + 6][0].mul(b));
++                u1 = u1.add(fir[$k + 6][1].mul(b));
++                u2 = u2.add(fir[$k + 6][2].mul(b));
++                u3 = u3.add(fir[$k + 6][3].mul(b));
++            }};
++        }
++        step2!(1);
++        step2!(2);
++        step2!(3);
++        step2!(4);
++        step2!(5);
++        #[allow(clippy::needless_return)]
++        return [l0.add(u0), l1.add(u1), l2.add(u2), l3.add(u3)];
++    }
++    #[allow(unreachable_code)]
++''')
++if 'tree' in parts:
++    rep(A2, A2 + '''    {
++        // CLASS B: round 1's depth-4 pairwise tree per phase.
++        let h = history;
++        let taps = [h.t0, h.t1, h.t2, h.t3, h.t4, h.t5, h.t6, h.t7, h.t8, h.t9, h.t10, h.t11];
++        let phase = |p: usize| {
++            let m = |k: usize| fir[k][p].mul(taps[k]);
++            let s01 = m(0).add(m(1));
++            let s23 = m(2).add(m(3));
++            let s45 = m(4).add(m(5));
++            let s67 = m(6).add(m(7));
++            let s89 = m(8).add(m(9));
++            let s1011 = m(10).add(m(11));
++            s01.add(s23).add(s45.add(s67)).add(s89.add(s1011))
++        };
++        #[allow(clippy::needless_return)]
++        return [phase(0), phase(1), phase(2), phase(3)];
++    }
++    #[allow(unreachable_code)]
++''')
++
++DC_BODY = '''    let width = L::WIDTH;
++    debug_assert_eq!(io.len(), peaks.len());
++    debug_assert_eq!(io.len() % width, 0);
++    let mut history = *taps;
++    for (input, output) in io.chunks_exact(width).zip(peaks.chunks_exact_mut(width)) {
++        let x = L::load(input);
++        detector_peak(&mut history, x, fir).store(output);
++    }
++    *taps = history;
++}
++'''
++
++if seed:
++    FIRST_INIT = '''    let (mut a0, mut a1, mut a2, mut a3) =
++        (row[0].mul(t[0]), row[1].mul(t[0]), row[2].mul(t[0]), row[3].mul(t[0]));
++'''
++    PAIR_INIT = '''            a0 = row[0].mul(ta[0]);
++            b0 = row[0].mul(tb[0]);
++            a1 = row[1].mul(ta[0]);
++            b1 = row[1].mul(tb[0]);
++            a2 = row[2].mul(ta[0]);
++            b2 = row[2].mul(tb[0]);
++            a3 = row[3].mul(ta[0]);
++            b3 = row[3].mul(tb[0]);
++'''
++else:
++    FIRST_INIT = '''    let zero = L::zero();
++    let (mut a0, mut a1, mut a2, mut a3) = (
++        zero.add(row[0].mul(t[0])),
++        zero.add(row[1].mul(t[0])),
++        zero.add(row[2].mul(t[0])),
++        zero.add(row[3].mul(t[0])),
++    );
++'''
++    PAIR_INIT = '''            let z = L::zero();
++            a0 = z.add(row[0].mul(ta[0]));
++            b0 = z.add(row[0].mul(tb[0]));
++            a1 = z.add(row[1].mul(ta[0]));
++            b1 = z.add(row[1].mul(tb[0]));
++            a2 = z.add(row[2].mul(ta[0]));
++            b2 = z.add(row[2].mul(tb[0]));
++            a3 = z.add(row[3].mul(ta[0]));
++            b3 = z.add(row[3].mul(tb[0]));
++'''
++
++HALVES = '''
++/// The first half of one frame's four Annex-2 accumulators, taps 0-5 (`t[k]` is tap `k`), in the
++/// frozen order.
++#[inline(always)]
++fn skew_first<L: Lane>(t: [L; 6], fir: &[[L; 4]; HISTORY_WORDS]) -> [L; 4] {
++    let row = &fir[0];
++''' + FIRST_INIT + '''    macro_rules! step {
++        ($k:literal) => {{
++            let row = &fir[$k];
++            let s = t[$k];
++            a0 = a0.add(row[0].mul(s));
++            a1 = a1.add(row[1].mul(s));
++            a2 = a2.add(row[2].mul(s));
++            a3 = a3.add(row[3].mul(s));
++        }};
++    }
++    step!(1);
++    step!(2);
++    step!(3);
++    step!(4);
++    step!(5);
++    [a0, a1, a2, a3]
++}
++
++/// The second half, taps 6-11 (`t[j]` is tap `6 + j`) continuing `acc`, then the peak folded in
++/// [`detector_peak`]'s order.
++#[inline(always)]
++fn skew_second<L: Lane>(acc: [L; 4], t: [L; 6], fir: &[[L; 4]; HISTORY_WORDS]) -> L {
++    let [mut a0, mut a1, mut a2, mut a3] = acc;
++    macro_rules! step {
++        ($k:literal) => {{
++            let row = &fir[$k];
++            let s = t[$k - 6];
++            a0 = a0.add(row[0].mul(s));
++            a1 = a1.add(row[1].mul(s));
++            a2 = a2.add(row[2].mul(s));
++            a3 = a3.add(row[3].mul(s));
++        }};
++    }
++    step!(6);
++    step!(7);
++    step!(8);
++    step!(9);
++    step!(10);
++    step!(11);
++    let mut peak = t[0].abs();
++    for phase in [a0, a1, a2, a3] {
++        peak = peak.max(phase.abs());
++    }
++    peak
++}
++'''
++
++if 'skewr' in parts:
++    rep(DC_BODY, '''    let width = L::WIDTH;
++    debug_assert_eq!(io.len(), peaks.len());
++    debug_assert_eq!(io.len() % width, 0);
++    // Software-pipelined by half a frame: iteration `f` finishes frame `f` (taps 6-11) and starts
++    // frame `f + 1` (taps 0-5). Every accumulator takes the same products in the same order.
++    let span = io.len() / width;
++    let mut h = *taps;
++    h.shift(L::load(&io[..width]));
++    let mut acc = skew_first([h.t0, h.t1, h.t2, h.t3, h.t4, h.t5], fir);
++    for (input, out) in io[width..].chunks_exact(width).zip(peaks.chunks_exact_mut(width)) {
++        let dropped = h.t11;
++        h.shift(L::load(input));
++        let peak = skew_second(acc, [h.t7, h.t8, h.t9, h.t10, h.t11, dropped], fir);
++        acc = skew_first([h.t0, h.t1, h.t2, h.t3, h.t4, h.t5], fir);
++        peak.store(out);
++    }
++    let last = (span - 1) * width;
++    skew_second(acc, [h.t6, h.t7, h.t8, h.t9, h.t10, h.t11], fir)
++        .store(&mut peaks[last..last + width]);
++    *taps = h;
++}
++''' + HALVES)
++
++if 'skew' in parts:
++    rep(DC_BODY, '''    let width = L::WIDTH;
++    debug_assert_eq!(io.len(), peaks.len());
++    debug_assert_eq!(io.len() % width, 0);
++    // Software-pipelined by half a frame over a tap buffer: slot j holds x[j - 11], so frame f
++    // reads its tap k at slot f + 11 - k.
++    let span = io.len() / width;
++    let mut buffer = [0.0_f32; (HISTORY_WORDS - 1 + DETECTOR_CHUNK) * MAXIMUM_WIDTH];
++    let old = [
++        taps.t10, taps.t9, taps.t8, taps.t7, taps.t6, taps.t5, taps.t4, taps.t3, taps.t2, taps.t1,
++        taps.t0,
++    ];
++    for (index, word) in old.into_iter().enumerate() {
++        word.store(&mut buffer[index * width..(index + 1) * width]);
++    }
++    let used = (HISTORY_WORDS - 1 + span) * width;
++    buffer[(HISTORY_WORDS - 1) * width..used].copy_from_slice(io);
++    let view = &buffer[..used];
++    let tap = |w: &[f32], slot: usize| L::load(&w[slot * width..(slot + 1) * width]);
++    let w0 = &view[..12 * width];
++    let mut acc = skew_first(
++        [tap(w0, 11), tap(w0, 10), tap(w0, 9), tap(w0, 8), tap(w0, 7), tap(w0, 6)],
++        fir,
++    );
++    for (f, out) in peaks.chunks_exact_mut(width).take(span - 1).enumerate() {
++        let w = &view[f * width..(f + 13) * width];
++        let peak = skew_second(
++            acc,
++            [tap(w, 5), tap(w, 4), tap(w, 3), tap(w, 2), tap(w, 1), tap(w, 0)],
++            fir,
++        );
++        acc = skew_first(
++            [tap(w, 12), tap(w, 11), tap(w, 10), tap(w, 9), tap(w, 8), tap(w, 7)],
++            fir,
++        );
++        peak.store(out);
++    }
++    let f = span - 1;
++    let w = &view[f * width..(f + 12) * width];
++    skew_second(
++        acc,
++        [tap(w, 5), tap(w, 4), tap(w, 3), tap(w, 2), tap(w, 1), tap(w, 0)],
++        fir,
++    )
++    .store(&mut peaks[f * width..(f + 1) * width]);
++    let last = |k: usize| L::load(&view[(span + 10 - k) * width..(span + 11 - k) * width]);
++    *taps = History {
++        t0: last(0),
++        t1: last(1),
++        t2: last(2),
++        t3: last(3),
++        t4: last(4),
++        t5: last(5),
++        t6: last(6),
++        t7: last(7),
++        t8: last(8),
++        t9: last(9),
++        t10: last(10),
++        t11: last(11),
++    };
++}
++''' + HALVES)
++
++if 'pair' in parts:
++    rep(DC_BODY, '''    let width = L::WIDTH;
++    debug_assert_eq!(io.len(), peaks.len());
++    debug_assert_eq!(io.len() % width, 0);
++    // Two frames per iteration, taps in registers, the eight accumulators interleaved.
++    let span = io.len() / width;
++    let pairs = span / 2;
++    let mut h = *taps;
++    for (input, out) in io
++        .chunks_exact(2 * width)
++        .zip(peaks.chunks_exact_mut(2 * width))
++        .take(pairs)
++    {
++        let e = h.t10;
++        h.shift(L::load(&input[..width]));
++        h.shift(L::load(&input[width..]));
++        let tb = [h.t0, h.t1, h.t2, h.t3, h.t4, h.t5, h.t6, h.t7, h.t8, h.t9, h.t10, h.t11];
++        let ta = [h.t1, h.t2, h.t3, h.t4, h.t5, h.t6, h.t7, h.t8, h.t9, h.t10, h.t11, e];
++        let (mut a0, mut a1, mut a2, mut a3, mut b0, mut b1, mut b2, mut b3);
++        {
++            let row = &fir[0];
++''' + PAIR_INIT + '''        }
++        macro_rules! step {
++            ($k:literal) => {{
++                let row = &fir[$k];
++                let (sa, sb) = (ta[$k], tb[$k]);
++                a0 = a0.add(row[0].mul(sa));
++                b0 = b0.add(row[0].mul(sb));
++                a1 = a1.add(row[1].mul(sa));
++                b1 = b1.add(row[1].mul(sb));
++                a2 = a2.add(row[2].mul(sa));
++                b2 = b2.add(row[2].mul(sb));
++                a3 = a3.add(row[3].mul(sa));
++                b3 = b3.add(row[3].mul(sb));
++            }};
++        }
++        step!(1);
++        step!(2);
++        step!(3);
++        step!(4);
++        step!(5);
++        step!(6);
++        step!(7);
++        step!(8);
++        step!(9);
++        step!(10);
++        step!(11);
++        let mut pa = ta[6].abs();
++        for phase in [a0, a1, a2, a3] {
++            pa = pa.max(phase.abs());
++        }
++        let mut pb = tb[6].abs();
++        for phase in [b0, b1, b2, b3] {
++            pb = pb.max(phase.abs());
++        }
++        pa.store(&mut out[..width]);
++        pb.store(&mut out[width..]);
++    }
++    if span % 2 == 1 {
++        let last = (span - 1) * width;
++        let x = L::load(&io[last..last + width]);
++        detector_peak(&mut h, x, fir).store(&mut peaks[last..last + width]);
++    }
++    *taps = h;
++}
++''')
++
++if 'splat' in parts:
++    # The pair detector with each coefficient splatted from a scalar the compiler must load, so
++    # one broadcast feeds both frames' multiplies (a folded memory operand cannot be shared).
++    assert 'pair' in parts
++    rep('''    // Two frames per iteration, taps in registers, the eight accumulators interleaved.
++''', '''    // Two frames per iteration, taps in registers, the eight accumulators interleaved; each
++    // coefficient is one broadcast shared by both frames.
++    let _ = fir;
++''')
++    rep('''        let e = h.t10;
++''', '''        let tab: &[[f32; 4]; HISTORY_WORDS] = core::hint::black_box(&ANNEX2_FIR);
++        let e = h.t10;
++''')
++    if seed:
++        rep(PAIR_INIT, '''            let c = L::splat(row[0]);
++            a0 = c.mul(ta[0]);
++            b0 = c.mul(tb[0]);
++            let c = L::splat(row[1]);
++            a1 = c.mul(ta[0]);
++            b1 = c.mul(tb[0]);
++            let c = L::splat(row[2]);
++            a2 = c.mul(ta[0]);
++            b2 = c.mul(tb[0]);
++            let c = L::splat(row[3]);
++            a3 = c.mul(ta[0]);
++            b3 = c.mul(tb[0]);
++''')
++    rep('''        {
++            let row = &fir[0];
++''', '''        {
++            let row = &tab[0];
++''')
++    rep('''                let row = &fir[$k];
++                let (sa, sb) = (ta[$k], tb[$k]);
++                a0 = a0.add(row[0].mul(sa));
++                b0 = b0.add(row[0].mul(sb));
++                a1 = a1.add(row[1].mul(sa));
++                b1 = b1.add(row[1].mul(sb));
++                a2 = a2.add(row[2].mul(sa));
++                b2 = b2.add(row[2].mul(sb));
++                a3 = a3.add(row[3].mul(sa));
++                b3 = b3.add(row[3].mul(sb));
++''', '''                let row = &tab[$k];
++                let (sa, sb) = (ta[$k], tb[$k]);
++                let c = L::splat(row[0]);
++                a0 = a0.add(c.mul(sa));
++                b0 = b0.add(c.mul(sb));
++                let c = L::splat(row[1]);
++                a1 = a1.add(c.mul(sa));
++                b1 = b1.add(c.mul(sb));
++                let c = L::splat(row[2]);
++                a2 = a2.add(c.mul(sa));
++                b2 = b2.add(c.mul(sb));
++                let c = L::splat(row[3]);
++                a3 = a3.add(c.mul(sa));
++                b3 = b3.add(c.mul(sb));
++''')
++
++open(out, 'w').write(s)
++print(f'wrote {spec}')
+diff --git a/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/variants2.py b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/variants2.py
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/variants2.py
+@@ -0,0 +1,710 @@
++"""Gain-loop variants appended to variants.py's output (run after it, on the same file).
++
++usage: variants2.py FILE SPEC   (SPEC's parts: vh = change 2, bcf = change 3 no-copy (needs vh),
++                                 unchk = unchecked ring access, a diagnostic)
++"""
++import sys
++
++path, spec = sys.argv[1], sys.argv[2]
++parts = set(spec.split('+'))
++s = open(path).read()
++
++
++def rep(old, new, count=1):
++    global s
++    assert s.count(old) == count, (old[:100], s.count(old))
++    s = s.replace(old, new)
++
++
++if 'unchk' in parts:
++    rep('''fn ring_lane<L: Lane>(ring: &[f32], slot: usize) -> L {
++    let base = slot * L::WIDTH;
++    L::load(&ring[base..base + L::WIDTH])
++}''', '''#[allow(unsafe_code)]
++fn ring_lane<L: Lane>(ring: &[f32], slot: usize) -> L {
++    let base = slot * L::WIDTH;
++    // SAFETY: diagnostic build only (prices the bounds checks); never shippable.
++    L::load(unsafe { ring.get_unchecked(base..base + L::WIDTH) })
++}''')
++    rep('''fn store_ring_lane<L: Lane>(ring: &mut [f32], slot: usize, value: L) {
++    let base = slot * L::WIDTH;
++    value.store(&mut ring[base..base + L::WIDTH]);
++}''', '''#[allow(unsafe_code)]
++fn store_ring_lane<L: Lane>(ring: &mut [f32], slot: usize, value: L) {
++    let base = slot * L::WIDTH;
++    // SAFETY: diagnostic build only (prices the bounds checks); never shippable.
++    value.store(unsafe { ring.get_unchecked_mut(base..base + L::WIDTH) });
++}''')
++
++FUNCS = r'''
++/// Change 2: [`channel_frame_uniform`]'s steps 1-5 and the release target `1 - s`.
++#[inline(always)]
++fn channel_target_uniform<L: Lane>(
++    peak: L,
++    limit: L,
++    hot: &mut HotChannel<L>,
++    uniform: &mut UniformHot<'_, L>,
++    ring: usize,
++    slots: FrameSlots,
++) -> L {
++    let one = L::splat(1.0);
++    let required = L::select(peak.gt(limit), limit.div(peak), one);
++    store_ring_lane::<L>(uniform.required_ring, slots.ring_cursor, required);
++    let minimum = sliding_minimum_uniform::<L>(
++        uniform.required_ring,
++        uniform.offsets.window,
++        ring,
++        slots.end,
++        slots.start,
++        &mut uniform.prefix,
++        &mut uniform.phase,
++    );
++    let quantised = minimum
++        .mul(L::splat(BOX_GRID))
++        .floor()
++        .mul(L::splat(1.0 / BOX_GRID));
++    let expired = ring_lane::<L>(uniform.box_ring, slots.expiring);
++    hot.box_sum = hot.box_sum.add(quantised).sub(expired);
++    store_ring_lane::<L>(uniform.box_ring, slots.ring_cursor, quantised);
++    let smoothed = hot.box_sum.div(hot.window);
++    one.sub(smoothed)
++}
++
++/// Change 2: [`linked_frame_uniform`]'s steps 1-5 with its mirrored ring stores.
++#[inline(always)]
++fn linked_target_uniform<L: Lane>(
++    peak: L,
++    limit: L,
++    hot: &mut HotChannel<L>,
++    left: &mut UniformHot<'_, L>,
++    right: &mut UniformHot<'_, L>,
++    ring: usize,
++    slots: FrameSlots,
++) -> L {
++    let one = L::splat(1.0);
++    let required = L::select(peak.gt(limit), limit.div(peak), one);
++    store_ring_lane::<L>(left.required_ring, slots.ring_cursor, required);
++    store_ring_lane::<L>(right.required_ring, slots.ring_cursor, required);
++    let minimum = sliding_minimum_uniform_mirrored::<L>(
++        left.required_ring,
++        right.required_ring,
++        left.offsets.window,
++        ring,
++        slots.end,
++        slots.start,
++        &mut left.prefix,
++        &mut left.phase,
++    );
++    let quantised = minimum
++        .mul(L::splat(BOX_GRID))
++        .floor()
++        .mul(L::splat(1.0 / BOX_GRID));
++    let expired = ring_lane::<L>(left.box_ring, slots.expiring);
++    hot.box_sum = hot.box_sum.add(quantised).sub(expired);
++    store_ring_lane::<L>(left.box_ring, slots.ring_cursor, quantised);
++    store_ring_lane::<L>(right.box_ring, slots.ring_cursor, quantised);
++    let smoothed = hot.box_sum.div(hot.window);
++    one.sub(smoothed)
++}
++
++/// Change 2: [`channel_target_uniform`] for a frame that cannot complete its van Herk block.
++#[inline(always)]
++fn channel_target_steady<L: Lane>(
++    peak: L,
++    limit: L,
++    hot: &mut HotChannel<L>,
++    uniform: &mut UniformHot<'_, L>,
++    slots: FrameSlots,
++) -> L {
++    let one = L::splat(1.0);
++    let required = L::select(peak.gt(limit), limit.div(peak), one);
++    store_ring_lane::<L>(uniform.required_ring, slots.ring_cursor, required);
++    let newest = ring_lane::<L>(uniform.required_ring, slots.end);
++    let running = uniform.prefix.min(newest);
++    uniform.prefix = running;
++    let minimum = ring_lane::<L>(uniform.required_ring, slots.start).min(running);
++    let quantised = minimum
++        .mul(L::splat(BOX_GRID))
++        .floor()
++        .mul(L::splat(1.0 / BOX_GRID));
++    let expired = ring_lane::<L>(uniform.box_ring, slots.expiring);
++    hot.box_sum = hot.box_sum.add(quantised).sub(expired);
++    store_ring_lane::<L>(uniform.box_ring, slots.ring_cursor, quantised);
++    let smoothed = hot.box_sum.div(hot.window);
++    one.sub(smoothed)
++}
++
++/// Change 2: [`linked_target_uniform`] for a frame that cannot complete its van Herk block.
++#[inline(always)]
++fn linked_target_steady<L: Lane>(
++    peak: L,
++    limit: L,
++    hot: &mut HotChannel<L>,
++    left: &mut UniformHot<'_, L>,
++    right: &mut UniformHot<'_, L>,
++    slots: FrameSlots,
++) -> L {
++    let one = L::splat(1.0);
++    let required = L::select(peak.gt(limit), limit.div(peak), one);
++    store_ring_lane::<L>(left.required_ring, slots.ring_cursor, required);
++    store_ring_lane::<L>(right.required_ring, slots.ring_cursor, required);
++    let newest = ring_lane::<L>(left.required_ring, slots.end);
++    let running = left.prefix.min(newest);
++    left.prefix = running;
++    let minimum = ring_lane::<L>(left.required_ring, slots.start).min(running);
++    let quantised = minimum
++        .mul(L::splat(BOX_GRID))
++        .floor()
++        .mul(L::splat(1.0 / BOX_GRID));
++    let expired = ring_lane::<L>(left.box_ring, slots.expiring);
++    hot.box_sum = hot.box_sum.add(quantised).sub(expired);
++    store_ring_lane::<L>(left.box_ring, slots.ring_cursor, quantised);
++    store_ring_lane::<L>(right.box_ring, slots.ring_cursor, quantised);
++    let smoothed = hot.box_sum.div(hot.window);
++    one.sub(smoothed)
++}
++
++/// Change 2 pass 2: step 6's recursion from a stored target, returning the gain.
++#[inline(always)]
++fn release_step<L: Lane>(target: L, release: L, reduction: &mut L) -> L {
++    let one = L::splat(1.0);
++    let released = release.fma(target.sub(*reduction), *reduction);
++    *reduction = flush(target.max(released));
++    one.sub(*reduction)
++}
++
++/// Change 2 pass 2: step 7, the delay line and the output, for one channel-frame.
++#[inline(always)]
++fn output_step<L: Lane>(
++    io_frame: &mut [f32],
++    main_ring: &mut [f32],
++    main_cursor: usize,
++    gain: L,
++    bypass: <L as Lane>::Mask,
++) {
++    let x = L::load(io_frame);
++    let delayed = ring_lane::<L>(main_ring, main_cursor);
++    store_ring_lane::<L>(main_ring, main_cursor, x);
++    L::select(bypass, delayed, delayed.mul(gain)).store(io_frame);
++}
++
++/// One ramp's value for this frame: [`ramp_values`] for a single ramp.
++#[inline(always)]
++fn ramp_value<const DISPATCH: u8, L: Lane>(stationary: bool, ramp: &mut RampLanes<L>) -> L {
++    match DISPATCH {
++        DISPATCH_RUNTIME => {
++            if stationary {
++                ramp.resting_value()
++            } else {
++                ramp.advance()
++            }
++        }
++        DISPATCH_STATIONARY => ramp.resting_value(),
++        DISPATCH_RAMPING => ramp.advance(),
++        _ => unreachable!("invalid limiter dispatch"),
++    }
++}
++
++/// Change 3 prototype (no copies, no `unsafe`): the linked steady pass 1 over split borrows.
++///
++/// Preconditions, checked by the caller: `window < ring`, `2 <= steady <= ring - window`, and the
++/// `steady + 1` frames from `slots` are wrap-free and completion-free except the last. The walk is
++/// skewed: iteration `j` finishes frame `j - 1` (whose oldest slot is the *old* word of cursor slot
++/// `j`) before starting frame `j` (which overwrites that slot).
++#[inline(always)]
++#[allow(clippy::too_many_arguments)]
++fn linked_steady_streams<const DISPATCH: u8, L: Lane>(
++    left_peaks: &[f32],
++    right_peaks: &[f32],
++    targets: &mut [f32],
++    stationary: bool,
++    hot: &mut HotChannel<L>,
++    left: &mut UniformHot<'_, L>,
++    right: &mut UniformHot<'_, L>,
++    slots: FrameSlots,
++    steady: usize,
++) {
++    let width = L::WIDTH;
++    let one = L::splat(1.0);
++    let grid = L::splat(BOX_GRID);
++    let step = L::splat(1.0 / BOX_GRID);
++    let c = slots.ring_cursor;
++    let e = slots.end;
++    let x = slots.expiring;
++    let (cursor_block, newest): (&mut [f32], &[f32]) = if e > c {
++        let (lo, hi) = left.required_ring.split_at_mut(e * width);
++        (&mut lo[c * width..(c + steady + 1) * width], &hi[..steady * width])
++    } else {
++        let (lo, hi) = left.required_ring.split_at_mut(c * width);
++        (&mut hi[..(steady + 1) * width], &lo[e * width..(e + steady) * width])
++    };
++    let (box_block, expiring): (&mut [f32], &[f32]) = if x > c {
++        let (lo, hi) = left.box_ring.split_at_mut(x * width);
++        (&mut lo[c * width..(c + steady) * width], &hi[..steady * width])
++    } else {
++        let (lo, hi) = left.box_ring.split_at_mut(c * width);
++        (&mut hi[..steady * width], &lo[x * width..(x + steady) * width])
++    };
++    let mirror_required = &mut right.required_ring[c * width..(c + steady) * width];
++    let mirror_box = &mut right.box_ring[c * width..(c + steady) * width];
++    let targets = &mut targets[..steady * width];
++    let left_peaks = &left_peaks[..steady * width];
++    let right_peaks = &right_peaks[..steady * width];
++    let window = hot.window;
++    let mut prefix = left.prefix;
++    let mut box_sum = hot.box_sum;
++
++    // Prologue: start frame 0.
++    let limit = ramp_value::<DISPATCH, L>(stationary, &mut hot.limit);
++    let peak = L::load(&right_peaks[..width]).max(L::load(&left_peaks[..width]));
++    let required = L::select(peak.gt(limit), limit.div(peak), one);
++    required.store(&mut cursor_block[..width]);
++    required.store(&mut mirror_required[..width]);
++    let mut running = prefix.min(L::load(&newest[..width]));
++    prefix = running;
++
++    let last = steady - 1;
++    for ((((((((cursor, newest), left_peak), right_peak), mirror_r), expired), box_slot), mirror_b), target) in
++        cursor_block[width..steady * width]
++            .chunks_exact_mut(width)
++            .zip(newest[width..].chunks_exact(width))
++            .zip(left_peaks[width..].chunks_exact(width))
++            .zip(right_peaks[width..].chunks_exact(width))
++            .zip(mirror_required[width..].chunks_exact_mut(width))
++            .zip(expiring[..last * width].chunks_exact(width))
++            .zip(box_block[..last * width].chunks_exact_mut(width))
++            .zip(mirror_box[..last * width].chunks_exact_mut(width))
++            .zip(targets[..last * width].chunks_exact_mut(width))
++    {
++        // Finish frame j - 1: its oldest slot is this cursor slot's old word.
++        let minimum = L::load(cursor).min(running);
++        let quantised = minimum.mul(grid).floor().mul(step);
++        box_sum = box_sum.add(quantised).sub(L::load(expired));
++        quantised.store(box_slot);
++        quantised.store(mirror_b);
++        one.sub(box_sum.div(window)).store(target);
++        // Start frame j.
++        let limit = ramp_value::<DISPATCH, L>(stationary, &mut hot.limit);
++        let peak = L::load(right_peak).max(L::load(left_peak));
++        let required = L::select(peak.gt(limit), limit.div(peak), one);
++        required.store(cursor);
++        required.store(mirror_r);
++        running = prefix.min(L::load(newest));
++        prefix = running;
++    }
++    // Epilogue: finish frame steady - 1.
++    let minimum = L::load(&cursor_block[steady * width..(steady + 1) * width]).min(running);
++    let quantised = minimum.mul(grid).floor().mul(step);
++    box_sum = box_sum.add(quantised).sub(L::load(&expiring[last * width..steady * width]));
++    quantised.store(&mut box_block[last * width..steady * width]);
++    quantised.store(&mut mirror_box[last * width..steady * width]);
++    one.sub(box_sum.div(window))
++        .store(&mut targets[last * width..steady * width]);
++    left.prefix = prefix;
++    hot.box_sum = box_sum;
++}
++'''
++
++if 'vh' in parts:
++    anchor = '/// The one block kernel: `frames` frames of `L::WIDTH` tracks, both channels, one pass.'
++    rep(anchor, FUNCS.lstrip('\n') + '\n' + anchor)
++    # Target scratch.
++    body_start = s.index('fn limiter_block_uniform<const DISPATCH: u8, L: Lane>(')
++    peaks_decl = '    let mut peaks_right = [0.0_f32; DETECTOR_CHUNK * MAXIMUM_WIDTH];\n'
++    i = s.index(peaks_decl, body_start) + len(peaks_decl)
++    s = s[:i] + '''    let mut targets_left = [0.0_f32; DETECTOR_CHUNK * MAXIMUM_WIDTH];
++    let mut targets_right = [0.0_f32; DETECTOR_CHUNK * MAXIMUM_WIDTH];
++''' + s[i:]
++    start_marker = '                let run = walk.run;\n'
++    a = s.index(start_marker, body_start)
++    end_marker = '''                frame += run;
++                ring_cursor = wrapped(ring_cursor + run, ring);
++                main_cursor = wrapped(main_cursor + run, main);
++            }
++        }
++'''
++    b = s.index(end_marker, a)
++    if 'bcf' in parts:
++        pass1_linked = '''                    let streams = uniform_left.offsets.window < ring
++                        && steady >= 2
++                        && steady <= ring - uniform_left.offsets.window;
++                    if streams {
++                        linked_steady_streams::<DISPATCH, L>(
++                            left_peaks,
++                            right_peaks,
++                            targets,
++                            stationary,
++                            &mut hot_left,
++                            &mut uniform_left,
++                            &mut uniform_right,
++                            walk.left,
++                            steady,
++                        );
++                    } else {
++                        for (step, ((left_peak, right_peak), target)) in left_peaks
++                            .chunks_exact(width)
++                            .zip(right_peaks.chunks_exact(width))
++                            .zip(targets.chunks_exact_mut(width))
++                            .take(steady)
++                            .enumerate()
++                        {
++                            let limit =
++                                ramp_value::<DISPATCH, L>(stationary, &mut hot_left.limit);
++                            let peak = L::load(right_peak).max(L::load(left_peak));
++                            linked_target_steady::<L>(
++                                peak,
++                                limit,
++                                &mut hot_left,
++                                &mut uniform_left,
++                                &mut uniform_right,
++                                walk.left.advanced(step),
++                            )
++                            .store(target);
++                        }
++                    }
++'''
++    else:
++        pass1_linked = '''                    for (step, ((left_peak, right_peak), target)) in left_peaks
++                        .chunks_exact(width)
++                        .zip(right_peaks.chunks_exact(width))
++                        .zip(targets.chunks_exact_mut(width))
++                        .take(steady)
++                        .enumerate()
++                    {
++                        let limit = ramp_value::<DISPATCH, L>(stationary, &mut hot_left.limit);
++                        let peak = L::load(right_peak).max(L::load(left_peak));
++                        linked_target_steady::<L>(
++                            peak,
++                            limit,
++                            &mut hot_left,
++                            &mut uniform_left,
++                            &mut uniform_right,
++                            walk.left.advanced(step),
++                        )
++                        .store(target);
++                    }
++'''
++    new = '''                // Change 2: also cut the segment where the van Herk block completes.
++                let mut run = walk
++                    .run
++                    .min(uniform_left.offsets.window - uniform_left.phase as usize);
++                if !linked {
++                    run = run.min(uniform_right.offsets.window - uniform_right.phase as usize);
++                }
++                let steady = run - 1;
++
++                let base = (chunk + frame) * width;
++                let words = run * width;
++                let left_segment = &mut left_io[base..base + words];
++                let right_segment = &mut right_io[base..base + words];
++                let left_peaks = &peaks_left[frame * width..(frame + run) * width];
++                let right_peaks = &peaks_right[frame * width..(frame + run) * width];
++                let main_base = walk.left.main_cursor;
++
++                if linked {
++                    let targets = &mut targets_left[..words];
++                    if uniform_left.phase == 0 {
++                        uniform_left.prefix = L::splat(f32::INFINITY);
++                    }
++''' + pass1_linked + '''                    uniform_left.phase += steady as u32;
++                    let limit = ramp_value::<DISPATCH, L>(stationary, &mut hot_left.limit);
++                    let peak = L::load(&right_peaks[steady * width..])
++                        .max(L::load(&left_peaks[steady * width..]));
++                    linked_target_uniform::<L>(
++                        peak,
++                        limit,
++                        &mut hot_left,
++                        &mut uniform_left,
++                        &mut uniform_right,
++                        ring,
++                        walk.left.advanced(steady),
++                    )
++                    .store(&mut targets[steady * width..]);
++                    for (step, ((left_frame, right_frame), target)) in left_segment
++                        .chunks_exact_mut(width)
++                        .zip(right_segment.chunks_exact_mut(width))
++                        .zip(targets.chunks_exact(width))
++                        .enumerate()
++                    {
++                        let release = ramp_value::<DISPATCH, L>(stationary, &mut hot_left.release);
++                        let gain = release_step(L::load(target), release, &mut hot_left.reduction);
++                        output_step::<L>(
++                            left_frame,
++                            uniform_left.main_ring,
++                            main_base + step,
++                            gain,
++                            bypass,
++                        );
++                        output_step::<L>(
++                            right_frame,
++                            uniform_right.main_ring,
++                            main_base + step,
++                            gain,
++                            bypass,
++                        );
++                    }
++                    frame += run;
++                    ring_cursor = wrapped(ring_cursor + run, ring);
++                    main_cursor = wrapped(main_cursor + run, main);
++                    continue;
++                }
++
++                let targets_l = &mut targets_left[..words];
++                let targets_r = &mut targets_right[..words];
++                if uniform_left.phase == 0 {
++                    uniform_left.prefix = L::splat(f32::INFINITY);
++                }
++                if uniform_right.phase == 0 {
++                    uniform_right.prefix = L::splat(f32::INFINITY);
++                }
++                for (step, (((left_peak, right_peak), target_l), target_r)) in left_peaks
++                    .chunks_exact(width)
++                    .zip(right_peaks.chunks_exact(width))
++                    .zip(targets_l.chunks_exact_mut(width))
++                    .zip(targets_r.chunks_exact_mut(width))
++                    .take(steady)
++                    .enumerate()
++                {
++                    let limit_left = ramp_value::<DISPATCH, L>(stationary, &mut hot_left.limit);
++                    let limit_right = ramp_value::<DISPATCH, L>(stationary, &mut hot_right.limit);
++                    let peak_left = L::load(left_peak);
++                    let peak_right = L::load(right_peak);
++                    let linked_peak = peak_right.max(peak_left);
++                    let peak_left = L::select(link, linked_peak, peak_left);
++                    let peak_right = L::select(link, linked_peak, peak_right);
++                    channel_target_steady::<L>(
++                        peak_left,
++                        limit_left,
++                        &mut hot_left,
++                        &mut uniform_left,
++                        walk.left.advanced(step),
++                    )
++                    .store(target_l);
++                    channel_target_steady::<L>(
++                        peak_right,
++                        limit_right,
++                        &mut hot_right,
++                        &mut uniform_right,
++                        walk.right.advanced(step),
++                    )
++                    .store(target_r);
++                }
++                uniform_left.phase += steady as u32;
++                uniform_right.phase += steady as u32;
++                let limit_left = ramp_value::<DISPATCH, L>(stationary, &mut hot_left.limit);
++                let limit_right = ramp_value::<DISPATCH, L>(stationary, &mut hot_right.limit);
++                let peak_left = L::load(&left_peaks[steady * width..]);
++                let peak_right = L::load(&right_peaks[steady * width..]);
++                let linked_peak = peak_right.max(peak_left);
++                let peak_left = L::select(link, linked_peak, peak_left);
++                let peak_right = L::select(link, linked_peak, peak_right);
++                channel_target_uniform::<L>(
++                    peak_left,
++                    limit_left,
++                    &mut hot_left,
++                    &mut uniform_left,
++                    ring,
++                    walk.left.advanced(steady),
++                )
++                .store(&mut targets_l[steady * width..]);
++                channel_target_uniform::<L>(
++                    peak_right,
++                    limit_right,
++                    &mut hot_right,
++                    &mut uniform_right,
++                    ring,
++                    walk.right.advanced(steady),
++                )
++                .store(&mut targets_r[steady * width..]);
++                for (step, (((left_frame, right_frame), target_l), target_r)) in left_segment
++                    .chunks_exact_mut(width)
++                    .zip(right_segment.chunks_exact_mut(width))
++                    .zip(targets_l.chunks_exact(width))
++                    .zip(targets_r.chunks_exact(width))
++                    .enumerate()
++                {
++                    let release_left = ramp_value::<DISPATCH, L>(stationary, &mut hot_left.release);
++                    let release_right =
++                        ramp_value::<DISPATCH, L>(stationary, &mut hot_right.release);
++                    let gain_left =
++                        release_step(L::load(target_l), release_left, &mut hot_left.reduction);
++                    let gain_right =
++                        release_step(L::load(target_r), release_right, &mut hot_right.reduction);
++                    output_step::<L>(
++                        left_frame,
++                        uniform_left.main_ring,
++                        main_base + step,
++                        gain_left,
++                        bypass,
++                    );
++                    output_step::<L>(
++                        right_frame,
++                        uniform_right.main_ring,
++                        main_base + step,
++                        gain_right,
++                        bypass,
++                    );
++                }
++
++'''
++    if 'p2s' in parts:
++        # Pass 2 over bounds-check-free delay-line streams (read-before-write on the same slot).
++        old_linked = '''                    for (step, ((left_frame, right_frame), target)) in left_segment
++                        .chunks_exact_mut(width)
++                        .zip(right_segment.chunks_exact_mut(width))
++                        .zip(targets.chunks_exact(width))
++                        .enumerate()
++                    {
++                        let release = ramp_value::<DISPATCH, L>(stationary, &mut hot_left.release);
++                        let gain = release_step(L::load(target), release, &mut hot_left.reduction);
++                        output_step::<L>(
++                            left_frame,
++                            uniform_left.main_ring,
++                            main_base + step,
++                            gain,
++                            bypass,
++                        );
++                        output_step::<L>(
++                            right_frame,
++                            uniform_right.main_ring,
++                            main_base + step,
++                            gain,
++                            bypass,
++                        );
++                    }
++'''
++        new_linked = '''                    let main_words = main_base * width;
++                    let delay_left = &mut uniform_left.main_ring[main_words..main_words + words];
++                    let delay_right = &mut uniform_right.main_ring[main_words..main_words + words];
++                    for ((((left_frame, right_frame), target), slot_left), slot_right) in left_segment
++                        .chunks_exact_mut(width)
++                        .zip(right_segment.chunks_exact_mut(width))
++                        .zip(targets.chunks_exact(width))
++                        .zip(delay_left.chunks_exact_mut(width))
++                        .zip(delay_right.chunks_exact_mut(width))
++                    {
++                        let release = ramp_value::<DISPATCH, L>(stationary, &mut hot_left.release);
++                        let gain = release_step(L::load(target), release, &mut hot_left.reduction);
++                        delay_step::<L>(left_frame, slot_left, gain, bypass);
++                        delay_step::<L>(right_frame, slot_right, gain, bypass);
++                    }
++'''
++        assert new.count(old_linked) == 1
++        new = new.replace(old_linked, new_linked)
++        old_dual = '''                for (step, (((left_frame, right_frame), target_l), target_r)) in left_segment
++                    .chunks_exact_mut(width)
++                    .zip(right_segment.chunks_exact_mut(width))
++                    .zip(targets_l.chunks_exact(width))
++                    .zip(targets_r.chunks_exact(width))
++                    .enumerate()
++                {
++                    let release_left = ramp_value::<DISPATCH, L>(stationary, &mut hot_left.release);
++                    let release_right =
++                        ramp_value::<DISPATCH, L>(stationary, &mut hot_right.release);
++                    let gain_left =
++                        release_step(L::load(target_l), release_left, &mut hot_left.reduction);
++                    let gain_right =
++                        release_step(L::load(target_r), release_right, &mut hot_right.reduction);
++                    output_step::<L>(
++                        left_frame,
++                        uniform_left.main_ring,
++                        main_base + step,
++                        gain_left,
++                        bypass,
++                    );
++                    output_step::<L>(
++                        right_frame,
++                        uniform_right.main_ring,
++                        main_base + step,
++                        gain_right,
++                        bypass,
++                    );
++                }
++'''
++        new_dual = '''                let main_words = main_base * width;
++                let delay_left = &mut uniform_left.main_ring[main_words..main_words + words];
++                let delay_right = &mut uniform_right.main_ring[main_words..main_words + words];
++                for (((((left_frame, right_frame), target_l), target_r), slot_left), slot_right) in
++                    left_segment
++                        .chunks_exact_mut(width)
++                        .zip(right_segment.chunks_exact_mut(width))
++                        .zip(targets_l.chunks_exact(width))
++                        .zip(targets_r.chunks_exact(width))
++                        .zip(delay_left.chunks_exact_mut(width))
++                        .zip(delay_right.chunks_exact_mut(width))
++                {
++                    let release_left = ramp_value::<DISPATCH, L>(stationary, &mut hot_left.release);
++                    let release_right =
++                        ramp_value::<DISPATCH, L>(stationary, &mut hot_right.release);
++                    let gain_left =
++                        release_step(L::load(target_l), release_left, &mut hot_left.reduction);
++                    let gain_right =
++                        release_step(L::load(target_r), release_right, &mut hot_right.reduction);
++                    delay_step::<L>(left_frame, slot_left, gain_left, bypass);
++                    delay_step::<L>(right_frame, slot_right, gain_right, bypass);
++                }
++'''
++        assert new.count(old_dual) == 1
++        new = new.replace(old_dual, new_dual)
++    if 'statonly' in parts:
++        # The new walk in the stationary dispatch only; the ramping dispatch keeps today's loop.
++        original = s[a:b]
++        s = (s[:a] + '                let run = if DISPATCH == DISPATCH_RAMPING {\n' + original
++             + '                run\n                } else {\n' + new
++             + '                run\n                };\n' + s[b:])
++    else:
++        s = s[:a] + new + s[b:]
++    if 'p2s' in parts:
++        anchor2 = '/// One ramp\'s value for this frame: [`ramp_values`] for a single ramp.'
++        rep(anchor2, '''/// Pass 2 over a delay-line stream: step 7 with the slot as a view (read before write).
++#[inline(always)]
++fn delay_step<L: Lane>(io_frame: &mut [f32], slot: &mut [f32], gain: L, bypass: <L as Lane>::Mask) {
++    let x = L::load(io_frame);
++    let delayed = L::load(slot);
++    x.store(slot);
++    L::select(bypass, delayed, delayed.mul(gain)).store(io_frame);
++}
++
++''' + anchor2)
++
++if 'nogain' in parts:
++    # Diagnostic truncation: skip the uniform gain frame loops; the detector's stores stay live.
++    body_start = s.index('fn limiter_block_uniform<const DISPATCH: u8, L: Lane>(')
++    start_marker = '                let run = walk.run;\n'
++    a = s.index(start_marker, body_start)
++    end_marker = """                frame += run;
++                ring_cursor = wrapped(ring_cursor + run, ring);
++                main_cursor = wrapped(main_cursor + run, main);
++            }
++        }
++"""
++    b = s.index(end_marker, a)
++    s = s[:a] + """                let run = walk.run;
++                core::hint::black_box(&mut peaks_left);
++                core::hint::black_box(&mut peaks_right);
++""" + s[b:]
++
++if 'nodet' in parts:
++    # Diagnostic truncation: skip the uniform body's detector passes (peaks stay as they were).
++    body_start = s.index('fn limiter_block_uniform<const DISPATCH: u8, L: Lane>(')
++    old = """            detector_chunk::<L>(
++                &mut hot_left.history,
++                &left_io[active_base..active_base + active_words],
++                &coef.fir,
++                &mut peaks_left[..active_words],
++            );
++            detector_chunk::<L>(
++                &mut hot_right.history,
++                &right_io[active_base..active_base + active_words],
++                &coef.fir,
++                &mut peaks_right[..active_words],
++            );
++"""
++    a = s.index(old, body_start)
++    s = s[:a] + """            let _ = active_base;
++            core::hint::black_box(&mut peaks_left[..active_words]);
++            core::hint::black_box(&mut peaks_right[..active_words]);
++""" + s[a + len(old):]
++
++open(path, 'w').write(s)
++print(f'variants2: {spec}')
+diff --git a/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/clean.sh b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/clean.sh
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/clean.sh
+@@ -0,0 +1,18 @@
++#!/bin/bash
++# usage: clean.sh native|web|src NAME SPEC  -> a clean build from the pristine tree (wt-base) with
++# only SPEC's changes (variants.py + variants2.py; "none" = the pristine source). "src" writes the
++# source to src/NAME.rs without building. Restores the pristine lib.rs.
++set -euo pipefail
++D=/tmp/claude-1002/-home-bl-misofm-engine/43895396-e183-427f-b08f-a0b72f15ae5f/scratchpad/verify-limiter-2
++kind=$1; name=$2; spec=$3
++lib=$D/wt-base/crates/true-peak-limiter/src/lib.rs
++trap 'cp "$D/lib.rs.orig" "$lib"' EXIT
++python3 "$D/variants.py" "$D/lib.rs.orig" "$lib" "$spec"
++python3 "$D/variants2.py" "$lib" "$spec"
++mkdir -p "$D/src"
++cp "$lib" "$D/src/$name.rs"
++if [[ "$kind" == native ]]; then
++  R=$D/wt-base T=$D/target-base "$D/build.sh" "$name" - -
++elif [[ "$kind" == web ]]; then
++  R=$D/wt-base T=$D/target-web-base "$D/build-web.sh" "$name" - -
++fi
+diff --git a/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/build.sh b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/build.sh
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/build.sh
+@@ -0,0 +1,19 @@
++#!/bin/bash
++# usage: [R=tree] [T=targetdir] build.sh NAME LD2BITS V2BITS  -> bin/NAME (native harness);
++# "-" leaves a variable unset.
++set -euo pipefail
++D=/tmp/claude-1002/-home-bl-misofm-engine/43895396-e183-427f-b08f-a0b72f15ae5f/scratchpad/verify-limiter-2
++R=${R:-$D/wt}
++T=${T:-$D/target-native}
++H=$R/docs/handoffs/effects-2026-09-27/limiter-diag-2-harness
++name=$1; bits=$2; v2=${3:--}
++mkdir -p "$D/bin" "$D/logs"
++cd "$H"
++rm -f "$D/bin/$name"
++log="$D/logs/build-$name.log"
++envs=(-u LIMDIAG2 -u LIMVER2)
++[[ "$bits" != "-" ]] && envs+=(LIMDIAG2="$bits")
++[[ "$v2" != "-" ]] && envs+=(LIMVER2="$v2")
++env "${envs[@]}" CARGO_INCREMENTAL=0 CARGO_TARGET_DIR="$T" cargo build --release --features console --bin ld2 >"$log" 2>&1 || { grep -E "^error" -A8 "$log" | head -60; echo "BUILD FAILED: $name"; exit 1; }
++cp "$T/release/ld2" "$D/bin/$name"
++echo "built $name (tree $R, LIMDIAG2=$bits LIMVER2=$v2) $(sha256sum "$D/bin/$name" | cut -c1-12)"
+diff --git a/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/build-web.sh b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/build-web.sh
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/build-web.sh
+@@ -0,0 +1,19 @@
++#!/bin/bash
++# usage: [R=tree] [T=targetdir] build-web.sh NAME LD2BITS V2BITS -> web/NAME.wasm, host_web built
++# with scripts/build-web-audioworklet.sh's cargo line (no pin check). "-" leaves a variable unset.
++set -euo pipefail
++D=/tmp/claude-1002/-home-bl-misofm-engine/43895396-e183-427f-b08f-a0b72f15ae5f/scratchpad/verify-limiter-2
++R=${R:-$D/wt}
++T=${T:-$D/target-web}
++name=$1; bits=$2; v2=${3:--}
++mkdir -p "$D/web" "$D/logs"
++cargo_home=${CARGO_HOME:-$HOME/.cargo}
++remap="--remap-path-prefix=$cargo_home=/cargo --remap-path-prefix=$R=/repo"
++cd "$R"
++envs=(-u LIMDIAG2 -u LIMVER2)
++[[ "$bits" != "-" ]] && envs+=(LIMDIAG2="$bits")
++[[ "$v2" != "-" ]] && envs+=(LIMVER2="$v2")
++env "${envs[@]}" CARGO_INCREMENTAL=0 CARGO_TARGET_DIR="$T" RUSTFLAGS="-C target-feature=+simd128 -C strip=debuginfo $remap" \
++  cargo build --locked --release --target wasm32-unknown-unknown -p host-web > "$D/logs/build-web-$name.log" 2>&1 || { grep -E "^error" -A8 "$D/logs/build-web-$name.log" | head -40; echo "BUILD FAILED"; exit 1; }
++rm -f "$D/web/$name.wasm"; cp "$T/wasm32-unknown-unknown/release/host_web.wasm" "$D/web/$name.wasm"
++echo "built web/$name.wasm (tree $R, LIMDIAG2=$bits LIMVER2=$v2) sha256 $(sha256sum "$D/web/$name.wasm" | cut -c1-16)"
+diff --git a/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/abba.sh b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/abba.sh
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/abba.sh
+@@ -0,0 +1,19 @@
++#!/bin/bash
++# usage: abba.sh MODE ROUNDS BLOCKS PASSES bin1 bin2 ...  (run under the timing lock)
++# Runs the binaries forward then reverse, PASSES times, each pinned to cpu 31.
++set -u
++D=/tmp/claude-1002/-home-bl-misofm-engine/43895396-e183-427f-b08f-a0b72f15ae5f/scratchpad/verify-limiter-2
++mode=$1; rounds=$2; blocks=$3; passes=$4; shift 4
++bins=("$@")
++echo "abba start $(date +%T) load $(cat /proc/loadavg)"
++for ((p = 0; p < passes; p++)); do
++  order=("${bins[@]}")
++  if ((p % 2 == 1)); then
++    order=()
++    for ((i = ${#bins[@]} - 1; i >= 0; i--)); do order+=("${bins[i]}"); done
++  fi
++  for b in "${order[@]}"; do
++    taskset -c 31 "$D/bin/$b" "$mode" "$b" "$rounds" "$blocks"
++  done
++done
++echo "abba end $(date +%T) load $(cat /proc/loadavg)"
+diff --git a/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/diff.sh b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/diff.sh
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/diff.sh
+@@ -0,0 +1,10 @@
++#!/bin/bash
++# usage: diff.sh WIDTH START COUNT BLOCKS bin1 bin2 ...  -> the #990 differential's combined digest
++# per binary (not timed; pinned away from cpu 31).
++set -u
++D=/tmp/claude-1002/-home-bl-misofm-engine/43895396-e183-427f-b08f-a0b72f15ae5f/scratchpad/verify-limiter-2
++w=$1; start=$2; count=$3; blocks=$4; shift 4
++for b in "$@"; do
++  printf '%-16s %s\n' "$b" "$(taskset -c 2-13 "$D/bin/$b" diff "$w" "$start" "$count" "$blocks")" &
++done
++wait
+diff --git a/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/quiet.sh b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/quiet.sh
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/quiet.sh
+@@ -0,0 +1,14 @@
++#!/bin/bash
++# usage: quiet.sh MAXLOAD MAXWAITSEC CMD...  -> waits until the 1-minute load average is below
++# MAXLOAD (or MAXWAITSEC passes), then runs CMD under the timing lock.
++L=/tmp/claude-1002/-home-bl-misofm-engine/43895396-e183-427f-b08f-a0b72f15ae5f/scratchpad/timing.lock
++max=$1; wait=$2; shift 2
++start=$(date +%s)
++while :; do
++  load=$(cut -d' ' -f1 /proc/loadavg)
++  if awk -v l="$load" -v m="$max" 'BEGIN { exit !(l < m) }'; then break; fi
++  if (( $(date +%s) - start > wait )); then echo "quiet.sh: waited ${wait}s, load still $load"; break; fi
++  sleep 10
++done
++echo "quiet.sh: start at load $(cat /proc/loadavg)"
++timeout 1150 flock -w 7200 "$L" "$@"
+diff --git a/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/queue2.sh b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/queue2.sh
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/queue2.sh
+@@ -0,0 +1,16 @@
++#!/bin/bash
++# The remaining timed runs, each gated on load (below 13, waiting up to 40 minutes) and each held
++# under the lock separately.
++D=/tmp/claude-1002/-home-bl-misofm-engine/43895396-e183-427f-b08f-a0b72f15ae5f/scratchpad/verify-limiter-2
++cd "$D"
++export LD2_SHAPES=HotLinked,HotDualMono,QuietLinked,RampLinked
++./quiet.sh 13 2400 ./abba.sh kbench 4 800 4 base c-seed c-bcf-seed-st c-p2s-st c-all-st > raw-k8.txt 2>&1
++echo "k8 done $(date +%T)"
++./quiet.sh 13 2400 ./webtime.sh 3 c-base c-seed c-bcf-seed c-bcf-seed-st c-p2s-st c-all-st > raw-w6.txt 2>&1
++echo "w6 done $(date +%T)"
++./quiet.sh 13 2400 ./abba.sh kbench 4 800 3 base c-seed c-skewr c-skewr-seed c-skew-seed c-pair-seed c-tree c-tree2 > raw-k9.txt 2>&1
++echo "k9 done $(date +%T)"
++./quiet.sh 13 2400 ./webtime.sh 3 c-base c-seed c-skewr-seed c-pair-seed c-tree c-tree2 > raw-w5.txt 2>&1
++echo "w5 done $(date +%T)"
++./quiet.sh 13 2400 ./detrep.sh 3 40 > raw-det5.txt 2>&1
++echo "queue2 done $(date +%T)"
+diff --git a/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/webtime.sh b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/webtime.sh
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/webtime.sh
+@@ -0,0 +1,13 @@
++#!/bin/bash
++# usage: webtime.sh PROCS arm1 arm2 ...   (run under the timing lock) -> PROCS separate Node
++# processes, each timing every arm (web/ARM.wasm) with ROUNDS rounds rotated per round.
++set -u
++D=/tmp/claude-1002/-home-bl-misofm-engine/43895396-e183-427f-b08f-a0b72f15ae5f/scratchpad/verify-limiter-2
++cd "$D"
++procs=$1; shift
++files=()
++for a in "$@"; do files+=("web/$a.wasm"); done
++for ((p = 0; p < procs; p++)); do
++  echo "== process $p $(date +%T)"
++  ROWS=${ROWS:-lim-hot,limdm-hot,bi-hot,console-hot,nolim-hot} ROUNDS=${ROUNDS:-10} taskset -c 31 node web.mjs time "${files[@]}"
++done
+diff --git a/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/websumm.py b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/websumm.py
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/websumm.py
+@@ -0,0 +1,40 @@
++"""Summarise webtime.sh output: per arm, the mean over processes of each isolate (cycles per
++lane-sample), its per-process values, and the change of the mean against the base arm.
++
++usage: websumm.py RAW BASE_ARM
++"""
++import collections
++import re
++import sys
++
++path, base = sys.argv[1], sys.argv[2]
++prefix = sys.argv[3] if len(sys.argv) > 3 else 'web'
++iso = collections.defaultdict(lambda: collections.defaultdict(list))
++order = []
++loads = []
++for line in open(path):
++    m = re.match(r'^' + prefix + r' (\S+)\s.*\| cyc/ls isolates: (.*)$', line)
++    if m:
++        arm = m.group(1)
++        if arm not in order:
++            order.append(arm)
++        for name, value in re.findall(r'(\S+) (-?\d+\.\d+)', m.group(2)):
++            iso[arm][name].append(float(value))
++    m = re.search(r'loadavg (\d+\.\d+)', line)
++    if m:
++        loads.append(float(m.group(1)))
++names = []
++for arm in order:
++    for n in iso[arm]:
++        if n not in names:
++            names.append(n)
++print(f'load average: {min(loads):.1f}-{max(loads):.1f}' if loads else '')
++for n in names:
++    print(f'-- {n} (mean over processes; per-process values; change of mean vs {base})')
++    b = iso[base][n]
++    bm = sum(b) / len(b)
++    for arm in order:
++        v = iso[arm][n]
++        mean = sum(v) / len(v)
++        d = '' if arm == base else f'{100 * (mean / bm - 1):+.1f}%'
++        print(f'   {arm:<16} {mean:7.2f}  [{" ".join(f"{x:.2f}" for x in v)}]  {d}')
+diff --git a/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/web.mjs b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/web.mjs
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/web.mjs
+@@ -0,0 +1,121 @@
++// Limiter diagnosis round 2: time the shipped AudioWorklet artifact's render export under V8.
++// Adapted from the EQ verifier's scratch driver (scratchpad/verify-977/timing/web.mjs).
++// usage: node web.mjs time|digest ARM.wasm ...   (arm name = file basename)
++import { readFileSync } from 'node:fs';
++const D = '/tmp/claude-1002/-home-bl-misofm-engine/43895396-e183-427f-b08f-a0b72f15ae5f/scratchpad/verify-limiter-2';
++const ABI_VERSION = 0x00010000, BOOT_OPTIONS_BYTES = 64, BUFFER_SOURCE_ID = 2, BUFFER_SOURCE_PCM = 3, BUFFER_OUTPUT_PCM = 5;
++const Q = 128, GHZ = Number(process.env.GHZ || 3.7), LANE_SAMPLES = 64 * 2 * Q;
++const [mode, ...files] = process.argv.slice(2);
++const docs = Object.fromEntries(['console', 'nolim', 'lim', 'bi', 'limdm'].map((n) => [n, readFileSync(`${D}/web/web-${n}.json`)]));
++// Rows: [label, session, signal, amplitude]
++const ROWS = (process.env.ROWS || 'lim-hot,limdm-hot,bi-hot,console-hot,nolim-hot').split(',').map((r) => {
++  const [session, signal] = r.split('-');
++  const amplitude = { lim: 4.0, limdm: 4.0, bi: 4.0, console: 10.0, nolim: 10.0 }[session];
++  return [r, session, signal, signal === 'tone' ? 0.6 : amplitude];
++});
++function boot(module, docName) {
++  const e = new WebAssembly.Instance(module, {}).exports;
++  const doc = docs[docName];
++  const opt = e.miso_engine_web_v1_boot_options_ptr();
++  const view = new DataView(e.memory.buffer, opt, BOOT_OPTIONS_BYTES);
++  view.setUint32(0, BOOT_OPTIONS_BYTES, true); view.setUint32(4, ABI_VERSION, true);
++  view.setUint32(8, 48000, true); view.setUint32(12, Q, true); view.setUint32(16, 8192, true);
++  view.setUint32(20, 0, true); view.setBigUint64(24, 0n, true);
++  for (let i = 0; i < 4; i++) view.setBigUint64(32 + i * 8, 0n, true);
++  const p = e.miso_engine_web_v1_document_ptr(doc.byteLength);
++  new Uint8Array(e.memory.buffer, p, doc.byteLength).set(doc);
++  const handle = e.miso_engine_web_v1_boot(doc.byteLength);
++  if (handle === 0) {
++    const n = e.miso_engine_web_v1_boot_diagnostic_bytes();
++    throw new Error(`boot ${e.miso_engine_web_v1_boot_result()}: ${new TextDecoder().decode(new Uint8Array(e.memory.buffer, p, n))}`);
++  }
++  return {
++    e, handle,
++    idPtr: e.miso_engine_web_v1_buffer_ptr(handle, BUFFER_SOURCE_ID),
++    pcmPtr: e.miso_engine_web_v1_buffer_ptr(handle, BUFFER_SOURCE_PCM),
++    outPtr: e.miso_engine_web_v1_buffer_ptr(handle, BUFFER_OUTPUT_PCM),
++    id: new TextEncoder().encode('fixture-source'), frame: 0n, n: 0,
++    left: new Float32Array(Q), right: new Float32Array(Q), seed: 0x9E3779B9 >>> 0,
++  };
++}
++function rnd(a) { // xorshift32, deterministic per instance
++  let x = a.seed; x ^= x << 13; x >>>= 0; x ^= x >>> 17; x ^= x << 5; x >>>= 0; a.seed = x;
++  return (x / 4294967296) * 2 - 1;
++}
++function feed(a, signal, amplitude) {
++  if (signal === 'tone') {
++    for (let i = 0; i < Q; i++) { const t = (a.n * Q + i) * 0.017; a.left[i] = Math.sin(t) * amplitude; a.right[i] = -Math.sin(t) * amplitude * 0.75; }
++  } else {
++    for (let i = 0; i < Q; i++) { a.left[i] = rnd(a) * amplitude; a.right[i] = rnd(a) * amplitude; }
++  }
++  const mem = a.e.memory.buffer;
++  new Uint8Array(mem, a.idPtr, a.id.length).set(a.id);
++  const pcm = new Float32Array(mem, a.pcmPtr, 2 * Q);
++  pcm.set(a.left, 0); pcm.set(a.right, Q);
++  const r = a.e.miso_engine_web_v1_source_submit(a.handle, a.id.length, 1n, a.frame, 2, Q, 0);
++  if (r !== 0) throw new Error(`submit ${r}`);
++  a.frame += BigInt(Q); a.n++;
++}
++function render(a) {
++  const r = a.e.miso_engine_web_v1_render(a.handle, Q);
++  if (r !== 0) throw new Error(`render ${r}`);
++}
++const arms = files.map((f) => [f.split('/').pop().replace(/\.wasm$/, ''), new WebAssembly.Module(readFileSync(f))]);
++if (mode === 'digest') {
++  const blocks = Number(process.env.BLOCKS || 400);
++  for (const [name, module] of arms) {
++    const line = [];
++    for (const [label, session, signal, amplitude] of ROWS) {
++      const a = boot(module, session);
++      for (let i = 0; i < 4; i++) feed(a, signal, amplitude);
++      let h = 0x811c9dc5 >>> 0;
++      for (let b = 0; b < blocks; b++) {
++        feed(a, signal, amplitude); render(a);
++        const out = new Uint32Array(a.e.memory.buffer, a.outPtr, 2 * Q);
++        for (let i = 0; i < out.length; i++) { h ^= out[i]; h = Math.imul(h, 0x01000193) >>> 0; }
++      }
++      line.push(`${label} ${h.toString(16).padStart(8, '0')}`);
++    }
++    console.log(`digest ${name.padEnd(14)} ${line.join('  ')}`);
++  }
++  process.exit(0);
++}
++const instances = arms.map(([name, module]) => [name, ROWS.map(([label, session, signal, amplitude]) => {
++  const a = boot(module, session); a.signal = signal; a.amplitude = amplitude; return a;
++})]);
++for (const [, list] of instances) for (const a of list) for (let i = 0; i < 4; i++) feed(a, a.signal, a.amplitude);
++const measure = (a, blocks) => {
++  const s = new Float64Array(blocks);
++  for (let i = 0; i < blocks; i++) {
++    feed(a, a.signal, a.amplitude);
++    const t0 = process.hrtime.bigint();
++    render(a);
++    s[i] = Number(process.hrtime.bigint() - t0);
++  }
++  s.sort();
++  return s[blocks >> 1] / 1000;
++};
++for (const [, list] of instances) for (const a of list) measure(a, 1500);
++const ROUNDS = Number(process.env.ROUNDS || 8), BLOCKS = Number(process.env.BLOCKS || 800);
++const table = instances.map(([, list]) => list.map(() => []));
++for (let round = 0; round < ROUNDS; round++) {
++  for (let s = 0; s < instances.length; s++) {
++    const i = (s + round) % instances.length;
++    instances[i][1].forEach((a, w) => { measure(a, 64); table[i][w].push(measure(a, BLOCKS)); });
++  }
++}
++const med = (v) => { const x = [...v].sort((p, q) => p - q); return (x[(x.length - 1) >> 1] + x[x.length >> 1]) / 2; };
++const cyc = (us) => us * 1e-6 * GHZ * 1e9 / LANE_SAMPLES;
++console.log(`node ${process.version} loadavg ${readFileSync('/proc/loadavg', 'utf8').trim()} rounds ${ROUNDS} blocks ${BLOCKS}`);
++const index = Object.fromEntries(ROWS.map(([label], w) => [label, w]));
++for (const [stat, fn] of [['med', med], ['min', (v) => Math.min(...v)]]) {
++  for (let i = 0; i < instances.length; i++) {
++    const m = table[i].map(fn);
++    const iso = [];
++    if ('lim-hot' in index && 'bi-hot' in index) iso.push(`lim-bi ${cyc(m[index['lim-hot']] - m[index['bi-hot']]).toFixed(2)}`);
++    if ('limdm-hot' in index && 'bi-hot' in index) iso.push(`limdm-bi ${cyc(m[index['limdm-hot']] - m[index['bi-hot']]).toFixed(2)}`);
++    if ('console-hot' in index && 'nolim-hot' in index) iso.push(`console-nolim ${cyc(m[index['console-hot']] - m[index['nolim-hot']]).toFixed(2)}`);
++    console.log(`${stat === 'med' ? 'web' : 'wmin'} ${instances[i][0].padEnd(16)} ` + ROWS.map(([label], w) => `${label} ${m[w].toFixed(1)}us`).join(' ') + ` | cyc/ls isolates: ${iso.join(' ')}`);
++  }
++}
++console.log(`end loadavg ${readFileSync('/proc/loadavg', 'utf8').trim()}`);
+diff --git a/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/roster.sh b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/roster.sh
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/roster.sh
+@@ -0,0 +1,11 @@
++#!/bin/bash
++# usage: roster.sh ARM... -> the shipped-artifact callgraph and kernel-shape gates on web/ARM.wasm
++set -u
++D=/tmp/claude-1002/-home-bl-misofm-engine/43895396-e183-427f-b08f-a0b72f15ae5f/scratchpad/verify-limiter-2
++R=$D/wt-base
++for arm in "$@"; do
++  dis=$(wasm-objdump -d "$D/web/$arm.wasm")
++  echo "== $arm"
++  printf '%s\n' "$dis" | python3 -B "$R/scripts/check-web-audioworklet-callgraph.py" --callgraph miso_engine_web_v1_render 2>&1 | tail -2
++  printf '%s\n' "$dis" | python3 -B "$R/scripts/check-web-audioworklet-callgraph.py" --kernel-shape --kernel-pattern '4wide6f32x[48]' --kernel-min 11 2>&1 | grep -i -E "limiter|kernel count|rule|fail" | head -8
++done
+diff --git a/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/dis.sh b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/dis.sh
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/dis.sh
+@@ -0,0 +1,15 @@
++#!/bin/bash
++# usage: dis.sh BIN...  -> dis/BIN-w8.s, dis/BIN-w4.s, and the loop census of each (loops >= 60 ins)
++set -euo pipefail
++D=/tmp/claude-1002/-home-bl-misofm-engine/43895396-e183-427f-b08f-a0b72f15ae5f/scratchpad/verify-limiter-2
++cd "$D"
++mkdir -p dis
++for b in "$@"; do
++  for w in 8 4; do
++    objdump -d -M intel --no-show-raw-insn -C \
++      --disassemble="<true_peak_limiter::LimiterCore<wide::f32x${w}_::f32x${w}>>::process_block" \
++      "bin/$b" > "dis/$b-w$w.s"
++    echo "== $b W$w: $(python3 py/norm.py "dis/$b-w$w.s" | wc -l) instructions in process_block"
++    python3 py/loops.py "dis/$b-w$w.s" 60 | grep -E 'mulps=(4[0-9]|9[0-9])' || true
++  done
++done
+diff --git a/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/fnloops.sh b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/fnloops.sh
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/fnloops.sh
+@@ -0,0 +1,6 @@
++#!/bin/bash
++# usage: fnloops.sh LISTING SYMBOL-SUBSTRING [min] -> loop census of one function of an objdump listing
++set -euo pipefail
++D=/tmp/claude-1002/-home-bl-misofm-engine/43895396-e183-427f-b08f-a0b72f15ae5f/scratchpad/verify-limiter-2
++awk -v f="$2" '/^[0-9a-f]+ </{p = index($0, f) > 0} p' "$1" > "$D/dis/fn.tmp.s"
++python3 "$D/py/loops.py" "$D/dis/fn.tmp.s" "${3:-30}" | cut -c1-240
+diff --git a/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/detrep.sh b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/detrep.sh
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/detrep.sh
+@@ -0,0 +1,7 @@
++#!/bin/bash
++# usage: detrep.sh N ROUNDS -> N separate processes of the isolated detector benchmark (under the lock)
++D=/tmp/claude-1002/-home-bl-misofm-engine/43895396-e183-427f-b08f-a0b72f15ae5f/scratchpad/verify-limiter-2
++for ((i = 0; i < $1; i++)); do
++  echo "== process $i"
++  taskset -c 31 "$D/bin/detbench" "$2"
++done
+diff --git a/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/test.sh b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/test.sh
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/test.sh
+@@ -0,0 +1,14 @@
++#!/bin/bash
++# usage: test.sh dev|release SPEC -> the limiter crate's own test suite on a clean variant
++# (pinned away from cpu 31). Restores the pristine lib.rs.
++set -uo pipefail
++D=/tmp/claude-1002/-home-bl-misofm-engine/43895396-e183-427f-b08f-a0b72f15ae5f/scratchpad/verify-limiter-2
++profile=$1; spec=$2
++lib=$D/wt-base/crates/true-peak-limiter/src/lib.rs
++trap 'cp "$D/lib.rs.orig" "$lib"' EXIT
++python3 "$D/variants.py" "$D/lib.rs.orig" "$lib" "$spec"
++python3 "$D/variants2.py" "$lib" "$spec"
++cd "$D/wt-base"
++flag=()
++[[ "$profile" == release ]] && flag=(--release)
++CARGO_INCREMENTAL=0 CARGO_TARGET_DIR="$D/target-test" taskset -c 0-13 cargo test --locked "${flag[@]}" -p true-peak-limiter 2>&1 | grep -E '^test result|FAILED|panicked|error(\[|:)|^failures' | head -40
+diff --git a/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/policy.sh b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/policy.sh
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/policy.sh
+@@ -0,0 +1,9 @@
++#!/bin/bash
++# usage: policy.sh NAME -> lane and realtime policy scripts on src/NAME.rs in wt-base; restores.
++D=/tmp/claude-1002/-home-bl-misofm-engine/43895396-e183-427f-b08f-a0b72f15ae5f/scratchpad/verify-limiter-2
++lib=$D/wt-base/crates/true-peak-limiter/src/lib.rs
++trap 'cp "$D/lib.rs.orig" "$lib"' EXIT
++cp "$D/src/$1.rs" "$lib"
++cd "$D/wt-base"
++echo "lane policy:"; bash scripts/check-lane-policy.sh 2>&1 | tail -3
++echo "realtime policy:"; bash scripts/check-realtime-policy.sh 2>&1 | tail -3
+diff --git a/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/summ.py b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/summ.py
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/summ.py
+@@ -0,0 +1,48 @@
++"""Summarise kbench raw output: per (arm, width, shape) min and median over every round of every pass,
++and the change against the arm named `base` (or the first arm) by min and by median.
++
++usage: summ.py RAW [BASE_ARM]
++"""
++import collections
++import re
++import statistics
++import sys
++
++path = sys.argv[1]
++base_arm = sys.argv[2] if len(sys.argv) > 2 else 'base'
++rows = collections.defaultdict(list)
++order = []
++loads = []
++for line in open(path):
++    m = re.match(r'^\[(\S+)\] (W\d) (\S+)\s+cyc/ls med \S+ min \S+ rounds \[([^\]]*)\]', line)
++    if m:
++        arm, width, shape, rounds = m.groups()
++        vals = [float(v) for v in rounds.split()]
++        key = (width, shape)
++        rows[(arm, key)].extend(vals)
++        if arm not in order:
++            order.append(arm)
++    m = re.search(r'load (\d+\.\d+)', line)
++    if m:
++        loads.append(float(m.group(1)))
++keys = sorted({k for (_, k) in rows}, key=lambda k: (-int(k[0][1:]), k[1]))
++print(f'load average during run: {min(loads):.1f}-{max(loads):.1f}' if loads else '')
++header = f"{'row':<20}" + ''.join(f'{a:>22}' for a in order)
++print(header)
++for key in keys:
++    base = rows.get((base_arm, key))
++    line = f'{key[0] + " " + key[1]:<20}'
++    for arm in order:
++        vals = rows.get((arm, key))
++        if not vals:
++            line += f'{"-":>22}'
++            continue
++        mn, md = min(vals), statistics.median(vals)
++        if base and arm != base_arm:
++            dm = 100 * (mn / min(base) - 1)
++            dd = 100 * (md / statistics.median(base) - 1)
++            line += f'{mn:>7.2f}/{md:<6.2f}({dm:+.0f}/{dd:+.0f}%)'
++        else:
++            line += f'{mn:>7.2f}/{md:<6.2f}         '
++    print(line)
++print('cells: min/median cycles per lane-sample over all rounds (change against base by min/median)')
+diff --git a/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/v8all.sh b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/v8all.sh
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/v8all.sh
+@@ -0,0 +1,10 @@
++#!/bin/bash
++# usage: v8all.sh ARM... -> dis/v8-ARM.txt, TurboFan code of LimiterCore<f32x4>::process_block
++set -u
++D=/tmp/claude-1002/-home-bl-misofm-engine/43895396-e183-427f-b08f-a0b72f15ae5f/scratchpad/verify-limiter-2
++cd "$D"
++for arm in "$@"; do
++  idx=$(wasm-objdump -x "web/$arm.wasm" | grep -E "func\[[0-9]+\].*11LimiterCore.*4wide6f32x4.*13process_blockB5_" | head -1 | sed -E 's/.*func\[([0-9]+)\].*/\1/')
++  timeout 600 node --print-wasm-code-function-index="$idx" v8dump.mjs "web/$arm.wasm" lim > "dis/v8-$arm.txt" 2>&1
++  echo "$arm: function $idx, $(grep -c 'compiler: TurboFan' "dis/v8-$arm.txt") TurboFan listing(s)"
++done
+diff --git a/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/v8dump.mjs b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/v8dump.mjs
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/v8dump.mjs
+@@ -0,0 +1,29 @@
++// Run one limiter session long enough for TurboFan tier-up (used with --print-wasm-code-function-index).
++// usage: node --print-wasm-code-function-index=N v8dump.mjs ARM.wasm SESSION
++import { readFileSync } from 'node:fs';
++const D = '/tmp/claude-1002/-home-bl-misofm-engine/43895396-e183-427f-b08f-a0b72f15ae5f/scratchpad/verify-limiter-2';
++const [file, session] = process.argv.slice(2);
++const Q = 128;
++const e = new WebAssembly.Instance(new WebAssembly.Module(readFileSync(file)), {}).exports;
++const doc = readFileSync(`${D}/web/web-${session}.json`);
++const opt = e.miso_engine_web_v1_boot_options_ptr();
++const view = new DataView(e.memory.buffer, opt, 64);
++view.setUint32(0, 64, true); view.setUint32(4, 0x00010000, true);
++view.setUint32(8, 48000, true); view.setUint32(12, Q, true); view.setUint32(16, 8192, true);
++view.setUint32(20, 0, true); view.setBigUint64(24, 0n, true);
++for (let i = 0; i < 4; i++) view.setBigUint64(32 + i * 8, 0n, true);
++const p = e.miso_engine_web_v1_document_ptr(doc.byteLength);
++new Uint8Array(e.memory.buffer, p, doc.byteLength).set(doc);
++const handle = e.miso_engine_web_v1_boot(doc.byteLength);
++if (handle === 0) throw new Error('boot');
++const idPtr = e.miso_engine_web_v1_buffer_ptr(handle, 2), pcmPtr = e.miso_engine_web_v1_buffer_ptr(handle, 3);
++const id = new TextEncoder().encode('fixture-source');
++let frame = 0n, seed = 0x12345678;
++for (let b = 0; b < 3000; b++) {
++  new Uint8Array(e.memory.buffer, idPtr, id.length).set(id);
++  const pcm = new Float32Array(e.memory.buffer, pcmPtr, 2 * Q);
++  for (let i = 0; i < 2 * Q; i++) { seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5; pcm[i] = ((seed >>> 0) / 4294967296 * 2 - 1) * 4; }
++  if (e.miso_engine_web_v1_source_submit(handle, id.length, 1n, frame, 2, Q, 0) !== 0) throw new Error('submit');
++  frame += BigInt(Q);
++  if (b >= 4 && e.miso_engine_web_v1_render(handle, Q) !== 0) throw new Error('render');
++}
+diff --git a/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/mkpatch.py b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/mkpatch.py
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/mkpatch.py
+@@ -0,0 +1,35 @@
++"""Write the two evidence patches into the repo's handoff directory.
++
++1. verify-limiter-2-harness.patch: the verification's scripts, variant generators and the isolated
++   detector benchmark, as new files under docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/.
++2. verify-limiter-2-prototype.patch: the recommended merged slice (seed + limiter-2-2 cut and pass
++   split + limiter-2-3 no-copy streams + pass-2 delay streams, stationary dispatch only) as a diff
++   of crates/true-peak-limiter/src/lib.rs against the pristine tree. Evidence only.
++"""
++import subprocess
++import sys
++
++D = '/tmp/claude-1002/-home-bl-misofm-engine/43895396-e183-427f-b08f-a0b72f15ae5f/scratchpad/verify-limiter-2'
++out_dir = sys.argv[1]
++prefix = 'docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/'
++files = [
++    'README.txt', 'variants.py', 'variants2.py', 'clean.sh', 'build.sh', 'build-web.sh', 'abba.sh',
++    'diff.sh', 'quiet.sh', 'queue2.sh', 'webtime.sh', 'websumm.py', 'web.mjs', 'roster.sh',
++    'dis.sh', 'fnloops.sh', 'detrep.sh', 'test.sh', 'policy.sh', 'summ.py', 'v8all.sh', 'v8dump.mjs', 'mkpatch.py', 'bundle.py',
++    'detbench/Cargo.toml', 'detbench/rust-toolchain.toml', 'detbench/.cargo/config.toml',
++    'detbench/src/main.rs',
++]
++chunks = []
++for rel in files:
++    r = subprocess.run(['diff', '-Nu', '--label', '/dev/null', '--label', 'b/' + prefix + rel,
++                        '/dev/null', f'{D}/{rel}'], capture_output=True, text=True)
++    assert r.returncode == 1, (rel, r.stderr)
++    chunks.append(f'diff --git a/{prefix}{rel} b/{prefix}{rel}\nnew file mode 100644\n' + r.stdout.replace(
++        '--- /dev/null\n', '--- /dev/null\n', 1))
++open(f'{out_dir}/verify-limiter-2-harness.patch', 'w').write(''.join(chunks))
++lib = 'crates/true-peak-limiter/src/lib.rs'
++r = subprocess.run(['diff', '-u', '--label', 'a/' + lib, '--label', 'b/' + lib,
++                    f'{D}/lib.rs.orig', f'{D}/src/c-p2s-st.rs'], capture_output=True, text=True)
++assert r.returncode == 1
++open(f'{out_dir}/verify-limiter-2-prototype.patch', 'w').write(f'diff --git a/{lib} b/{lib}\n' + r.stdout)
++print('patches written')
+diff --git a/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/bundle.py b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/bundle.py
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/bundle.py
+@@ -0,0 +1,41 @@
++"""Bundle every raw timing output of the verification, in run order, with a header per file."""
++import os
++import sys
++
++D = '/tmp/claude-1002/-home-bl-misofm-engine/43895396-e183-427f-b08f-a0b72f15ae5f/scratchpad/verify-limiter-2'
++out = sys.argv[1]
++runs = [
++    ('raw-k1.txt', 'native kernel rig; SCAFFOLDED arms (pristine/seed/skewr/skewr-seed built in the diagnosis tree plus this verification\'s dead prototypes) against the clean base; load 8-10. Source of F1.'),
++    ('raw-k2.txt', 'native; clean detector shapes (seed, skewr, skewr-seed, skew-seed, pair-seed, tree2, tree); load 18-20 (contended; minima only).'),
++    ('raw-w1.txt', 'V8; clean detector shapes; load 12-14.'),
++    ('raw-k3.txt', 'native; base / pair-seed / seed repeated over 6 passes (W4 bimodality check); load 16.'),
++    ('raw-k4.txt', 'native; clean gain-loop variants (seed, vh-seed, bcf-seed, vh, unchk); load 18-20 (contended; minima only).'),
++    ('raw-w2.txt', 'V8; load 26-44: CONTAMINATED, not quoted.'),
++    ('raw-det1.txt', 'isolated detector benchmark, sequential variants; load 27: contended, not quoted.'),
++    ('raw-det2.txt', 'isolated detector benchmark, interleaved rounds; load 30: contended, not quoted.'),
++    ('raw-det3.txt', 'isolated detector benchmark; load 17; W8 seed/skew show a per-process placement outlier (F10).'),
++    ('raw-det4.txt', 'isolated detector benchmark, four processes; load 26 (process 0 contended).'),
++    ('raw-w3.txt', 'V8; seed, pair-seed, vh-seed, bcf-seed, all, unchk; load 8-12.'),
++    ('raw-k5.txt', 'native; seed, pair-seed, vh-seed, bcf-seed, all, unchk, psplat-seed; load 9-10.'),
++    ('raw-k6.txt', 'native; load 20-28: CONTAMINATED, not quoted.'),
++    ('raw-k7.txt', 'native; seed, vh-seed, bcf-seed, bcf-seed-st (stationary only); load 11-12.'),
++    ('raw-k8.txt', 'native; seed, bcf-seed-st, p2s-st, all-st; load 8-13.'),
++    ('raw-w6.txt', 'V8; seed, bcf-seed, bcf-seed-st, p2s-st, all-st; load 4-6.'),
++    ('raw-k9.txt', 'native; clean detector shapes repeated; load 4-6.'),
++    ('raw-w5.txt', 'V8; clean detector shapes repeated; load 2-4.'),
++    ('raw-det5.txt', 'isolated detector benchmark, three processes; load 5.'),
++]
++with open(out, 'w') as f:
++    f.write('Sol verification of the limiter dense-path diagnosis, round 2: raw timing outputs in run order.\n')
++    f.write('Every run held the shared timing lock and was pinned with taskset -c 31. Arm names: base = pristine\n')
++    f.write('(clean, byte-identical to c-base); c-* = clean single-change builds from the pristine tree (see\n')
++    f.write('verify-limiter-2-harness/variants*.py); n-* = truncations; "-st" = stationary dispatch only.\n')
++    f.write('Native lines: [arm] Wn shape cyc/ls med/min rounds [...]. V8 lines: "web" = per-process medians\n')
++    f.write('of rounds, "wmin" = per-process minima, both as cycles per lane-sample isolates.\n\n')
++    for name, note in runs:
++        path = f'{D}/{name}'
++        if not os.path.exists(path) or os.path.getsize(path) == 0:
++            continue
++        f.write(f'==== {name}: {note}\n')
++        f.write(open(path).read().rstrip('\n') + '\n\n')
++print('bundled')
+diff --git a/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/detbench/Cargo.toml b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/detbench/Cargo.toml
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/detbench/Cargo.toml
+@@ -0,0 +1,16 @@
++[package]
++name = "detbench"
++version = "0.1.0"
++edition = "2024"
++publish = false
++
++[dependencies]
++lane = { path = "../wt-base/crates/lane" }
++
++[profile.release]
++lto = "fat"
++codegen-units = 1
++panic = "abort"
++debug = 1
++
++[workspace]
+diff --git a/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/detbench/rust-toolchain.toml b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/detbench/rust-toolchain.toml
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/detbench/rust-toolchain.toml
+@@ -0,0 +1,7 @@
++[toolchain]
++channel = "1.97.1"
++profile = "minimal"
++components = ["clippy", "rustfmt"]
++targets = [
++    "wasm32-unknown-unknown",
++]
+diff --git a/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/detbench/.cargo/config.toml b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/detbench/.cargo/config.toml
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/detbench/.cargo/config.toml
+@@ -0,0 +1,8 @@
++# Master plan #83 D4 (revision 4): native x86-64 is pinned to x86-64-v3 at compile time so that
++# `wide` selects its AVX2 backend and `Lane::fma` is the fused `vfmadd` instruction. There is no
++# runtime SIMD dispatch; `lane::attest_host` refuses to start a host whose CPU lacks
++# the pinned features, and `crates/lane/src/lib.rs` fails to compile without them.
++# This is the only approved global ISA configuration (scripts/check-workspace-policy.sh enforces
++# that exact shape); `-C target-cpu` and a global `[build] rustflags` remain forbidden.
++[target.'cfg(target_arch = "x86_64")']
++rustflags = ["-C", "target-feature=+avx2,+fma"]
+diff --git a/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/detbench/src/main.rs b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/detbench/src/main.rs
+new file mode 100644
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/verify-limiter-2-harness/detbench/src/main.rs
+@@ -0,0 +1,358 @@
++//! Sol, round-2 verification: the Annex-2 detector shapes in isolation (L1-resident input), plus
++//! a port-throughput probe with the detector's operand mix. Scratch only.
++#![allow(clippy::all)]
++
++use std::hint::black_box;
++use std::time::Instant;
++
++use lane::{Lane, Simd4, Simd8};
++
++const FIR: [[f32; 4]; 12] = [
++    [0.001_708_984_4, -0.029_174_805, -0.018_920_898, -0.008_300_781],
++    [0.010_986_328, 0.029_296_875, 0.033_081_055, 0.014_892_578],
++    [-0.019_653_32, -0.051_757_812, -0.058_227_54, -0.026_611_328],
++    [0.033_203_125, 0.089_111_33, 0.101_562_5, 0.047_607_422],
++    [-0.059_448_242, -0.166_503_9, -0.200_317_38, -0.102_294_92],
++    [0.137_329_1, 0.465_087_9, 0.779_785_16, 0.972_167_97],
++    [0.972_167_97, 0.779_785_16, 0.465_087_9, 0.137_329_1],
++    [-0.102_294_92, -0.200_317_38, -0.166_503_9, -0.059_448_242],
++    [0.047_607_422, 0.101_562_5, 0.089_111_33, 0.033_203_125],
++    [-0.026_611_328, -0.058_227_54, -0.051_757_812, -0.019_653_32],
++    [0.014_892_578, 0.033_081_055, 0.029_296_875, 0.010_986_328],
++    [-0.008_300_781, -0.018_920_898, -0.029_174_805, 0.001_708_984_4],
++];
++
++#[derive(Clone, Copy)]
++struct H<L: Lane> {
++    t: [L; 12],
++}
++
++impl<L: Lane> H<L> {
++    #[inline(always)]
++    fn shift(&mut self, x: L) {
++        let t = &mut self.t;
++        t[11] = t[10];
++        t[10] = t[9];
++        t[9] = t[8];
++        t[8] = t[7];
++        t[7] = t[6];
++        t[6] = t[5];
++        t[5] = t[4];
++        t[4] = t[3];
++        t[3] = t[2];
++        t[2] = t[1];
++        t[1] = t[0];
++        t[0] = x;
++    }
++}
++
++#[inline(always)]
++fn fold<L: Lane>(t6: L, p: [L; 4]) -> L {
++    let mut peak = t6.abs();
++    for v in p {
++        peak = peak.max(v.abs());
++    }
++    peak
++}
++
++#[inline(always)]
++fn phases<const SEED: bool, L: Lane>(t: &[L; 12], fir: &[[L; 4]; 12]) -> [L; 4] {
++    let (mut a0, mut a1, mut a2, mut a3);
++    if SEED {
++        a0 = fir[0][0].mul(t[0]);
++        a1 = fir[0][1].mul(t[0]);
++        a2 = fir[0][2].mul(t[0]);
++        a3 = fir[0][3].mul(t[0]);
++    } else {
++        let z = L::zero();
++        a0 = z.add(fir[0][0].mul(t[0]));
++        a1 = z.add(fir[0][1].mul(t[0]));
++        a2 = z.add(fir[0][2].mul(t[0]));
++        a3 = z.add(fir[0][3].mul(t[0]));
++    }
++    macro_rules! s {
++        ($k:literal) => {{
++            a0 = a0.add(fir[$k][0].mul(t[$k]));
++            a1 = a1.add(fir[$k][1].mul(t[$k]));
++            a2 = a2.add(fir[$k][2].mul(t[$k]));
++            a3 = a3.add(fir[$k][3].mul(t[$k]));
++        }};
++    }
++    s!(1);
++    s!(2);
++    s!(3);
++    s!(4);
++    s!(5);
++    s!(6);
++    s!(7);
++    s!(8);
++    s!(9);
++    s!(10);
++    s!(11);
++    [a0, a1, a2, a3]
++}
++
++#[inline(always)]
++fn tree<L: Lane>(t: &[L; 12], fir: &[[L; 4]; 12]) -> [L; 4] {
++    let phase = |p: usize| {
++        let m = |k: usize| fir[k][p].mul(t[k]);
++        let s01 = m(0).add(m(1));
++        let s23 = m(2).add(m(3));
++        let s45 = m(4).add(m(5));
++        let s67 = m(6).add(m(7));
++        let s89 = m(8).add(m(9));
++        let s1011 = m(10).add(m(11));
++        s01.add(s23).add(s45.add(s67)).add(s89.add(s1011))
++    };
++    [phase(0), phase(1), phase(2), phase(3)]
++}
++
++/// The shipped shape (`SEED` = false) or change 1 (`SEED` = true); `TREE` = round 1's class-B tree.
++#[inline(never)]
++fn chunk_plain<const SEED: bool, const TREE: bool, L: Lane>(
++    h: &mut H<L>,
++    io: &[f32],
++    fir: &[[L; 4]; 12],
++    peaks: &mut [f32],
++) {
++    let w = L::WIDTH;
++    let mut hh = *h;
++    for (input, out) in io.chunks_exact(w).zip(peaks.chunks_exact_mut(w)) {
++        hh.shift(L::load(input));
++        let p = if TREE { tree(&hh.t, fir) } else { phases::<SEED, L>(&hh.t, fir) };
++        fold(hh.t[6], p).store(out);
++    }
++    *h = hh;
++}
++
++#[inline(always)]
++fn first<L: Lane>(t: [L; 6], fir: &[[L; 4]; 12]) -> [L; 4] {
++    let (mut a0, mut a1, mut a2, mut a3) =
++        (fir[0][0].mul(t[0]), fir[0][1].mul(t[0]), fir[0][2].mul(t[0]), fir[0][3].mul(t[0]));
++    macro_rules! s {
++        ($k:literal) => {{
++            a0 = a0.add(fir[$k][0].mul(t[$k]));
++            a1 = a1.add(fir[$k][1].mul(t[$k]));
++            a2 = a2.add(fir[$k][2].mul(t[$k]));
++            a3 = a3.add(fir[$k][3].mul(t[$k]));
++        }};
++    }
++    s!(1);
++    s!(2);
++    s!(3);
++    s!(4);
++    s!(5);
++    [a0, a1, a2, a3]
++}
++
++#[inline(always)]
++fn second<L: Lane>(acc: [L; 4], t: [L; 6], fir: &[[L; 4]; 12]) -> L {
++    let [mut a0, mut a1, mut a2, mut a3] = acc;
++    macro_rules! s {
++        ($k:literal) => {{
++            a0 = a0.add(fir[$k][0].mul(t[$k - 6]));
++            a1 = a1.add(fir[$k][1].mul(t[$k - 6]));
++            a2 = a2.add(fir[$k][2].mul(t[$k - 6]));
++            a3 = a3.add(fir[$k][3].mul(t[$k - 6]));
++        }};
++    }
++    s!(6);
++    s!(7);
++    s!(8);
++    s!(9);
++    s!(10);
++    s!(11);
++    fold(t[0], [a0, a1, a2, a3])
++}
++
++/// Class A, seedless: software-pipelined by half a frame, taps in registers.
++#[inline(never)]
++fn chunk_skew<L: Lane>(h: &mut H<L>, io: &[f32], fir: &[[L; 4]; 12], peaks: &mut [f32]) {
++    let w = L::WIDTH;
++    let span = io.len() / w;
++    let mut hh = *h;
++    hh.shift(L::load(&io[..w]));
++    let t = hh.t;
++    let mut acc = first([t[0], t[1], t[2], t[3], t[4], t[5]], fir);
++    for (input, out) in io[w..].chunks_exact(w).zip(peaks.chunks_exact_mut(w)) {
++        let dropped = hh.t[11];
++        hh.shift(L::load(input));
++        let t = hh.t;
++        let peak = second(acc, [t[7], t[8], t[9], t[10], t[11], dropped], fir);
++        acc = first([t[0], t[1], t[2], t[3], t[4], t[5]], fir);
++        peak.store(out);
++    }
++    let t = hh.t;
++    let last = (span - 1) * w;
++    second(acc, [t[6], t[7], t[8], t[9], t[10], t[11]], fir).store(&mut peaks[last..last + w]);
++    *h = hh;
++}
++
++/// Class A, seedless: two frames per iteration, taps in registers.
++#[inline(never)]
++fn chunk_pair<L: Lane>(h: &mut H<L>, io: &[f32], fir: &[[L; 4]; 12], peaks: &mut [f32]) {
++    let w = L::WIDTH;
++    let mut hh = *h;
++    for (input, out) in io.chunks_exact(2 * w).zip(peaks.chunks_exact_mut(2 * w)) {
++        let e = hh.t[10];
++        hh.shift(L::load(&input[..w]));
++        hh.shift(L::load(&input[w..]));
++        let tb = hh.t;
++        let ta = [tb[1], tb[2], tb[3], tb[4], tb[5], tb[6], tb[7], tb[8], tb[9], tb[10], tb[11], e];
++        let (mut a, mut b) = ([L::zero(); 4], [L::zero(); 4]);
++        for p in 0..4 {
++            a[p] = fir[0][p].mul(ta[0]);
++            b[p] = fir[0][p].mul(tb[0]);
++        }
++        macro_rules! s {
++            ($k:literal) => {{
++                for p in 0..4 {
++                    let c = fir[$k][p];
++                    a[p] = a[p].add(c.mul(ta[$k]));
++                    b[p] = b[p].add(c.mul(tb[$k]));
++                }
++            }};
++        }
++        s!(1);
++        s!(2);
++        s!(3);
++        s!(4);
++        s!(5);
++        s!(6);
++        s!(7);
++        s!(8);
++        s!(9);
++        s!(10);
++        s!(11);
++        fold(ta[6], a).store(&mut out[..w]);
++        fold(tb[6], b).store(&mut out[w..]);
++    }
++    *h = hh;
++}
++
++/// Port probe: the detector's operand mix (48 `mul` with the coefficient reloaded from memory, 44
++/// `add`, 5 `abs`, 4 `max`) with short chains: 12 accumulators of depth mul + 3 adds, restarted
++/// every frame, every tap the frame's fresh input.
++#[inline(never)]
++fn probe<L: Lane>(io: &[f32], fir: &[[L; 4]; 12], peaks: &mut [f32]) {
++    let w = L::WIDTH;
++    for (input, out) in io.chunks_exact(w).zip(peaks.chunks_exact_mut(w)) {
++        let x = L::load(input);
++        let fir = black_box(fir);
++        let mut acc = [L::zero(); 12];
++        for k in 0..12 {
++            for p in 0..4 {
++                let slot = (k % 3) * 4 + p;
++                acc[slot] = if k < 3 { fir[k][p].mul(x) } else { acc[slot].add(fir[k][p].mul(x)) };
++            }
++        }
++        let mut peak = x.abs();
++        for p in 0..4 {
++            let v = acc[p].add(acc[4 + p]).add(acc[8 + p]);
++            peak = peak.max(v.abs());
++        }
++        peak.store(out);
++    }
++}
++
++fn core_hz() -> f64 {
++    const ADDS: u64 = 200_000_000;
++    let mut best = f64::MAX;
++    for _ in 0..3 {
++        let mut x = black_box(0.0_f32);
++        let d = black_box(1.0e-3_f32);
++        let start = Instant::now();
++        for _ in 0..ADDS {
++            x += d;
++        }
++        best = best.min(start.elapsed().as_secs_f64());
++        black_box(x);
++    }
++    3.0 * ADDS as f64 / best
++}
++
++struct Case<L: Lane> {
++    name: &'static str,
++    f: fn(&mut H<L>, &[f32], &[[L; 4]; 12], &mut [f32]),
++}
++
++fn run_all<L: Lane>(hz: f64, cases: &[Case<L>], rounds: usize) {
++    let w = L::WIDTH;
++    let frames = 32;
++    let chunks = 8; // 8 channels' chunks, L1-resident
++    let mut io = vec![0.0_f32; chunks * frames * w];
++    let mut seed = 0x1234_5678_u32;
++    for v in io.iter_mut() {
++        seed ^= seed << 13;
++        seed ^= seed >> 17;
++        seed ^= seed << 5;
++        *v = (seed as f32 / u32::MAX as f32) * 2.0 - 1.0;
++    }
++    let mut fir = [[L::zero(); 4]; 12];
++    for k in 0..12 {
++        for p in 0..4 {
++            fir[k][p] = L::splat(FIR[k][p]);
++        }
++    }
++    let fir = black_box(fir);
++    let mut peaks = vec![0.0_f32; frames * w];
++    let mut hs = vec![H { t: [L::zero(); 12] }; chunks];
++    let reps = 1_000;
++    let mut all: Vec<Vec<f64>> = vec![Vec::new(); cases.len()];
++    for _ in 0..rounds {
++        for (i, case) in cases.iter().enumerate() {
++            let start = Instant::now();
++            for _ in 0..reps {
++                for (c, h) in hs.iter_mut().enumerate() {
++                    (case.f)(h, black_box(&io[c * frames * w..(c + 1) * frames * w]), &fir, &mut peaks);
++                }
++                black_box(&mut peaks);
++            }
++            all[i].push(start.elapsed().as_secs_f64() * hz / (reps * chunks * frames) as f64);
++        }
++    }
++    for (i, case) in cases.iter().enumerate() {
++        let mut v = all[i].clone();
++        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
++        println!(
++            "W{w} {:<10} min {:6.2}  p10 {:6.2}  median {:6.2} cycles per channel-frame ({rounds} interleaved rounds)",
++            case.name,
++            v[0],
++            v[v.len() / 10],
++            v[v.len() / 2]
++        );
++    }
++}
++
++fn main() {
++    let hz = core_hz();
++    let load = || std::fs::read_to_string("/proc/loadavg").unwrap_or_default().trim().to_string();
++    println!("core {:.3} GHz, load {}", hz / 1e9, load());
++    let rounds = std::env::args().nth(1).and_then(|v| v.parse().ok()).unwrap_or(60);
++    run_all::<Simd8>(
++        hz,
++        &[
++            Case { name: "base", f: chunk_plain::<false, false, Simd8> },
++            Case { name: "seed", f: chunk_plain::<true, false, Simd8> },
++            Case { name: "skew-seed", f: chunk_skew::<Simd8> },
++            Case { name: "pair-seed", f: chunk_pair::<Simd8> },
++            Case { name: "tree(B)", f: chunk_plain::<false, true, Simd8> },
++            Case { name: "probe", f: |_h, io, f, p| probe::<Simd8>(io, f, p) },
++        ],
++        rounds,
++    );
++    run_all::<Simd4>(
++        hz,
++        &[
++            Case { name: "base", f: chunk_plain::<false, false, Simd4> },
++            Case { name: "seed", f: chunk_plain::<true, false, Simd4> },
++            Case { name: "skew-seed", f: chunk_skew::<Simd4> },
++            Case { name: "pair-seed", f: chunk_pair::<Simd4> },
++            Case { name: "tree(B)", f: chunk_plain::<false, true, Simd4> },
++            Case { name: "probe", f: |_h, io, f, p| probe::<Simd4>(io, f, p) },
++        ],
++        rounds,
++    );
++    println!("end load {}", load());
++}
++

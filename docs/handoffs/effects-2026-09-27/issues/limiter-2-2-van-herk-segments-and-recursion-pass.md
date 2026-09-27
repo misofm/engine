@@ -218,3 +218,115 @@ Steps:
   the channels. Take the minimum of both channels' distances to completion.
 * **The target scratch has to exist per channel in the dual body.** The linked pair needs one.
 * **Keep `x`'s load in pass 2.** Pass 1 must not touch `io`. The detector has already read the chunk.
+
+## Amendments (Sol verification, 2026-09-27)
+
+Evidence: `docs/handoffs/effects-2026-09-27/VERIFY-LIMITER-2.md` (F1-F4, F8) and
+`verify-limiter-2-raw-timings.txt`. The prototype of the amended slice is
+`verify-limiter-2-prototype.patch`. It is evidence only; do not commit it. **These amendments
+supersede the body wherever they conflict.**
+
+### A1. This slice absorbs limiter-2-3; alone it fails its own gate 7
+
+Built clean, this draft alone measured against the slice-1 tree (minimum over rounds, load 9-12):
+
+| row | `Simd8` | `Simd4` |
+|---|---:|---:|
+| `HotDualMono` | -3 % | -4 to -5 % |
+| `HotLinked` | **+1 %** | **+1 to +2 %** |
+| `QuietLinked` | **+1 to +2 %** | **+1 to +2 %** |
+| `RampLinked` | **+8 to +9 %** | **+5 to +6 %** |
+
+Gate 7 requires the stationary rows ≤ slice 1 and `RampLinked` ≤ +0 %, so this draft cannot pass
+it alone. The diagnosis's own increment ("linked +0.5 to +1.6 %") said so. For the linked pair,
+the cut and the pass split are a precondition, not a product outcome.
+
+* The slice is now **limiter-2-2 + limiter-2-3**.
+* Limiter-2-3's stream facts, contracts 1-3, mutations and codegen record become this slice's
+  contracts 5-7, mutations M7-M11 and gate 8b.
+* Limiter-2-3's two-attempt limit applies to the merged slice.
+* Authorized paths are the union of the two drafts'.
+
+### A2. Scope: the stationary dispatch only
+
+Delete "What the implementer will hit", item 1 ("Do not restrict the change to the stationary
+dispatch"). Its evidence, `P_STATONLY`, was measured inside the diagnosis's scaffold (VERIFY F1).
+
+* In `limiter_block_uniform`, the new walk runs only when `DISPATCH == DISPATCH_STATIONARY`. Under
+  `DISPATCH_RAMPING` the segment loop is today's fused loop, **token for token**.
+* `DISPATCH_RUNTIME`, the test-only oracle, takes the new walk.
+
+Built clean this way, every stationary gain stays and the ramping regression goes. Minimum over
+rounds, cycles per lane-sample (`raw-k7`, load 11-12):
+
+| row | slice 1 | merged, all dispatches | **merged, stationary only** |
+|---|---:|---:|---:|
+| `Simd8` dual / linked / quiet | 9.65 / 8.30 / 8.18 | 9.49 / 8.01 / 7.98 | **9.10 / 7.87 / 8.03** |
+| `Simd8` ramping | 8.71 | 9.13 (+5 %) | **8.79 (+1 %)** |
+| `Simd4` dual / linked / quiet | 17.63 / 14.79 / 14.86 | 16.92 / 14.17 / 14.18 | **16.98 / 14.20 / 14.25** |
+| `Simd4` ramping | 15.59 | 15.89 (+2 %) | **15.64 (+0 %)** |
+
+A second clean run (`raw-k8`, load 8-13) reproduced this. Against slice 1, the stationary-only
+slice read -7 % on each `Simd8` stationary row and -4 % on each `Simd4` one; `RampLinked` read
+-2 % and +0 %.
+
+Under V8, against slice 1 (three processes, load 4-6, `raw-w6`), the merged stationary-only slice
+reads:
+
+* `lim - bi` -9.5 %;
+* `limdm - bi` -2.4 %;
+* `console - nolim` -9.5 %.
+
+The all-dispatch form reads -8.6 %, -2.4 % and -8.6 %.
+
+### A3. Measured and not added: pass 2 over delay-line streams
+
+Step 7 reads each `main_ring` slot and then writes it, frame by frame, and `segment` guarantees
+`main_cursor + run ≤ B`. So pass 2 can zip the frames with
+`main_ring[main_base·W .. (main_base + run)·W].chunks_exact_mut(W)`, in safe Rust.
+
+The prototype (`p2s` in the verification harness) is bit-identical and passes the crate's suite.
+On top of A2 it measured:
+
+* native: -1 to +1 %;
+* V8: -0.1 % (`lim - bi`), +0.7 % (`limdm - bi`), +0.2 % (`console - nolim`).
+
+It is not part of this slice. Pass 2's checks were not what cost time.
+
+### A4. Gate 7, for the merged slice
+
+Freeze the workload first. The method is limiter-2-1's gate 7 as amended there (A1: clean builds;
+A3: exact statistic). Against the slice-1 tree:
+
+* **Stationary rows** (`HotLinked`, `HotDualMono`, `QuietLinked`), native `Simd8` and `Simd4`:
+  each faster.
+* **V8** (three processes): `lim - bi` and `console - nolim` faster by more than 2 %, and
+  `limdm - bi` faster.
+* **`RampLinked`**, whose source is unchanged under A2: at most slice 1 + 2 %, an allowance for
+  codegen movement of an untouched path. Two clean runs read -2 to +1 %.
+  * The allowance holds only while the review confirms the ramping arm is today's loop token for
+    token.
+  * The owner may rule it to +0 % (VERIFY section 7, item 2).
+* **The V8 sessions have no ramping row.** V8's ramping dispatch is unmeasured. A V8 ramping row,
+  with parameter events through `command_submit`, is a harness follow-up, not this slice.
+* If the gate fails, record it and stop.
+
+### A5. Mutations, replacing M3 and adding the guard
+
+* **M3 is replaced.** "Advance the release ramp in pass 1" is equivalent if the per-frame values are
+  carried to pass 2. Under A2 the release ramp is also resting in the only dispatch that changes.
+  **M3′:** pass 2 reads the previous frame's target (`targets[step - 1]`; frame 0 reads the
+  segment's last). Red.
+* **M12:** drop the dispatch guard of A2, so the new walk also runs under `DISPATCH_RAMPING`.
+  Record it as **equivalent (green)**: the all-dispatch prototype is bit-identical on the
+  differential and the V8 digests. The guard is a performance choice. Gate 2 must count ramping
+  blocks that took the old loop, and that count must be nonzero.
+
+### A6. Codegen record
+
+* Quote the linked stream loop (limiter-2-3's gate 5): at most 25 instructions at `Simd8` and
+  `Simd4` in the stationary instantiation, one backward branch, no panic edge. The prototype has 23.
+* Quote the V8 loop census of both passes.
+* The roster row stays one function, the rule-3 count does not drop, and the render callgraph and
+  trap owners are unchanged. The prototype's vector count is 913, with or without A3 (910 pristine,
+  878 with the seed).
