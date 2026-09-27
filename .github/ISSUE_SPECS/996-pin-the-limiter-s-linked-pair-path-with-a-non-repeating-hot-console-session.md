@@ -139,3 +139,98 @@ All builds used `CARGO_INCREMENTAL=0`. There was no timed benchmark.
   `MISO_VERIFY_*` names outside the `MISO_ENGINE_` prefix. The new
   `MISO_ENGINE_REPIN_LIMITER_LINKED_SESSION` is crate-local and prefixed, like
   `MISO_ENGINE_REPIN_TRUE_PEAK_LIMITER_LINKED`.
+
+## Sol attempt 1 verdict: PASS
+
+Reviewer: Sol, 2026-09-27, on `53fa26bb`, alone and merged onto the batch head `077fb31e` (which
+also carries #980's EQ change and the env-vocabulary fix). Branch code untouched. Every mutation
+was applied to a scratch copy, and `src/lib.rs` was checked byte-identical by SHA-256 after each
+row. Scratch trees, harnesses and target directories were deleted.
+
+### What was reproduced
+
+* **The pin is honest.** `b22ef17c…` renders in dev and in release from five trees:
+  * the branch;
+  * the branch with `src/lib.rs` from `bbcf8ce1`;
+  * the branch with the whole `crates/true-peak-limiter` from `bbcf8ce1`;
+  * the complete `bbcf8ce1` tree plus the new test;
+  * the branch merged onto `077fb31e`.
+
+  It also passes under CI's `test-debug-a` features (`engine/realtime-audit` included).
+* **Widths.** The scenario was run as a scratch host-core unit test through the existing
+  `#[cfg(test)]` seam `prepare_host_runtime_with_console_backend` (`crates/host-core/src/prepare.rs:596`).
+  `Simd4` and `Scalar` both render the pin on this host, so the doc comment's W4 claim holds.
+* **The claimed rows.** M1, M2, M6, M7, K1 and K2 are red, with the recorded digests, in dev and
+  in release. A readings dump confirms the recorded effects:
+  * M1 moves the right channel of 38 tracks: 5 to 7 lanes in each of the six W8 banks that
+    unlink, from the unlink block on. Banks 2 and 6 do not move.
+  * K2 moves exactly `ch03`, `ch12`, `ch37`, `ch42` and `ch57`, each from the block after it is
+    made equal again.
+  * M1, M2 and K2 are red at 8 of 8 noise seeds.
+
+  Through the seam, all six rows are also red at `Simd4` and at `Scalar`.
+* **Other #990 rows.** M5, M8 and M10 are red. M9 is green (finding 2).
+* **Invented mutations**, each red unless stated:
+  * X1: the shared gain fed by the left detector alone.
+  * X2 and K1d: the landing block of a one-sided retarget renders linked (the decision one block
+    late, or the kernel handed the previous record).
+  * K1c: the linked body runs while the record is cleared (`link_max` passed to the kernel).
+  * X5b: one mid-block suffix store not mirrored.
+  * X9: the right box term stored at the expiring slot.
+  * X6: the right `prefix` written back from its stale register.
+  * X7: agreement ignores the release ramps.
+  * X8: the right output read from the left delay ring.
+  * X3 and X4, agreement skipping the last lane or lane 0: **green at W8** (finding 3). They are
+    red at `Simd4` and `Scalar` through the seam, and in the kernel's own tests.
+  * X5, the mirror store to the backward pass's oldest slot skipped: green, and equivalent. That
+    slot is `start = cursor + 1`, which the next frame's required store overwrites before any read.
+* **The session edits are sound.** The widened source and the live bypasses go through the real
+  grammar, compile and host-prepare path. Bypass is the rack's runtime shunt, so the plan and the
+  bank formation are unchanged. #990's decision is internal to the limiter, and the compressor only
+  shapes its input, so the bypass hides no interaction #990 could have.
+  * With the compressors in circuit, M1 is still widely visible (finding 4).
+  * The bypass is justified by the non-vacuity floor: with the compressors in, track 14 falls to
+    0.49 at block 16.
+* **Gates.**
+  * On the merged tree:
+    * format clean;
+    * clippy clean (workspace, all targets, all features, `-D warnings`);
+    * host-core, all targets, pass in dev (CI features) and release;
+    * `console-workload` release 39 of 39.
+  * Policies ok: host-core, workspace, env-vocabulary (merged tree), realtime, realtime-audit-leak,
+    artifact-evidence-leak, dsp-research, session and lane.
+  * The non-vacuity figures reproduce: shallowest 0.7556, deepest 0.9566, rises 8 to 26.
+  * Runtime is 2.3 s in dev and 0.05 s in release. Every run was bit-deterministic.
+
+### Findings (severity-ranked; none fails a gate)
+
+1. **Medium: the width deviation is wrong, and width coverage is cheap.**
+   * *The claim:* `Simd4` at session level needs tooling or engine code.
+   * *The fact:* the seam above is test-only and already used by host-core unit tests. W8-only
+     meets #996's gates, which name no width.
+   * *Failure scenario:* a defect that shows only at four-lane bank edges (X4) passes CI here and
+     reaches AArch64 and wasm hosts.
+   * *Successor (bounded, test code only):* a host-core unit test that runs this scenario at
+     `Simd4` and `Scalar` through the seam against the same `PIN`, with findings 2 and 3 folded in.
+2. **Low: M9 is green.** #990's M9 strands the right ramps in the linked ramping dispatch.
+   * The scenario has one linked ramping trial (`ch18` at block 12, one lane), and M9 is red at
+     only 3 of 8 seeds. The kernel's gates 1-3 catch it.
+   * *Failure scenario:* that regression passes this test on the pinned seed.
+   * *Fix:* retarget both channels on every lane of a linked bank.
+3. **Low: no one-sided retarget lands on W8 lanes 0, 6 or 7.** So X3 and X4 pass at W8. The
+   successor should add one on lanes 0 and 7.
+4. **Low: the recorded measurement does not reproduce.** The spec and `MUTATIONS.md` say that with
+   the compressors in circuit and per-track streams, M1 moved only one or two lanes in two banks.
+   * On the committed schedule it moves 26 tracks at +6 to +18 dBFS and 27 tracks at +16 to
+     +22 dBFS, in all six unlinking banks.
+   * *Failure scenario:* the note is cited as a reason never to test the standing strip.
+   * *Fix:* re-date or correct it.
+5. **Info.** "Each event lands in a different bank at both launch widths" is false at W8 for
+   `ch03` and `ch05`, which share bank 0. The table row says so.
+
+### For the owner
+
+* Rule on wasm session coverage. It needs tooling: a per-block source for the wasm console guest,
+  or a wasm32 runner for host-core tests. The #990 verification checked kernel identity under
+  Node.
+* File finding 1's successor, with findings 2-4 folded in.
