@@ -219,3 +219,179 @@ varies, and the binary's tests run in parallel. The code before the fix needs ab
   tree and fails the same way. No CI job runs `--check`, only the fresh-process determinism loop,
   which passes. This is left for its own issue.
 - **Extra sizes.** The step-1 table adds 16,384 and 32,768 tracks, to show the growth rate.
+
+## Sol attempt 1 verdict: PASS
+
+Reviewer: Claude Opus 5.5 (Sol), 2026-09-27, `git diff 0109d841..1d3ae356`, built in the branch
+worktree with `CARGO_INCREMENTAL=0` and a detached scratch worktree of `0109d841` for the "before"
+arm. The timed console benchmark was not run.
+
+### Byte identity (before and after)
+
+- **The implementer's probes, re-run on both trees:** all 112 graph fingerprints (28 sessions at
+  four widths) are identical, and they match the recorded `fp-final.txt`. All 51 console rows
+  (digest, census, unit rows) are identical, and they match `cw-after.txt`.
+- **`graph_fixture`:** the fingerprint and `--manifest` output are identical on both trees.
+- **An independent randomized probe** (scratch, not committed) covered 800 seeds. Each seed
+  generates a session with:
+  - odd and even track counts from 1 to 37, and a 35% "console" shape (all tracks one strip, one
+    post-matrix route each) so that route folds occur;
+  - 1-2 native effects per rack from all eight, with bypass, maximum link, and compressor or gate
+    sidechains from earlier tracks at every tap;
+  - per-side builtin delays, mono channel mappings, sends at every tap, and submix chains;
+  - per-track meters at every tap, through all three builtins entries (plain, console controls,
+    and between render calls), plus effect console channels;
+  - external observers on random stage nodes, aliases included.
+
+  Each seed was compiled at Scalar, Simd4 and Simd8 and bound twice, once with processor feeds and
+  once with a played-planes source set: 4,800 lines. Each line records the compile fingerprint as
+  above, a six-block PCM digest, meter snapshot contents, an observer hash, the selected split
+  fader, bank shape, transposes, symmetry, collapse counters, folds, redirects, dispatch and
+  qualification counters, source-plane counts, and every `unit_eligibility` row.
+
+  The 4,800 lines are **byte-identical** on both trees, and no line panicked. Coverage: 496 split
+  pairs selected, 294 lines with route folds, 2,066 with scatter redirects, 918 with effect banks,
+  3,354 metered, 2,594 observed, 64 collapsed, and 3,975 with source planes read in place.
+
+### Each rewritten scan
+
+Each lookup answers the scan's question exactly. The key types (`GraphNodeId`, `EffectNodeId`,
+`BufferRef`, `EffectRack`) all derive `Ord` with `Eq`, so set and map membership equals `==`
+membership.
+
+- **`with_builtin_banks`:** binary search of a sorted borrow copy. The short-circuit order is
+  unchanged.
+- **`effect_control_resource`:** the same key triple as the scan's conjunction.
+- **`has_valid_structural_layout`:** any-over-all-edges becomes any-over-each-member's-incoming-
+  edges. This is the same boolean, because members are strictly increasing and every edge kind is
+  kept.
+- **`units_of`:** the same `(position, op)` pairs are pushed in op order and sorted the same way.
+  The old key `bank + ops.len()` could collide only if an effect bank index reached `ops.len()`,
+  which is impossible in a validated plan.
+- **`chains_into` and `observed`:** `taps_by_op` of the same `program` and `spec`, built in each
+  caller. An index above `u32::MAX` matched no tap before and matches none now.
+- **`BorrowedPlanningMetadata`:** sets built from the same lists. `route` keeps the last entry,
+  as `rev().find()` did.
+- **`crossing_sources`:** the set of the scan's sources.
+- **`ops_naming_buffers` plus `partition_point`:** each buffer's list is built in ascending op
+  order over the same five naming roles, so "the first namer after the fader is at or past the
+  matrix" is exactly "no op strictly between the pair names the buffer".
+
+**The split-pass premise is not a property of plans.** It is `chains_into`'s own clause
+(`crates/graph/src/runtime.rs:6886`, `readers[before].len() != 1 || readers[before][0] != after`),
+evaluated on the same `readers` array the lookup uses (`:5293`). No plan can violate it.
+
+- Multiple readers, sends, and sidechain reads (`op_dataflow` counts sidechain reads): `readers`
+  has more than one entry, so the old loop failed every candidate at `chains_into` and the new one
+  has no candidate.
+- Duplicate reads of one producer: the same result, because the length check fails.
+- Observers: these are not readers. Both paths test them with the identical `has_observer`
+  clauses.
+- Delayed consumers: both paths reject them in the same predicate, and staging slots are named in
+  the interval index.
+
+Every condition ahead of the ownership moves is side-effect-free. So skipping the non-candidate
+runs cannot change which pair is chosen, or the state of `parts.bindings` for any other pair.
+`run_units` partitions the ops, so the op-to-run map is single-valued.
+
+### Render, realtime, unsafe
+
+- Every hunk is at `lib.rs:1205-1362` or `runtime.rs:4550` and later. The `REALTIME_POLICY` regions
+  are at `lib.rs:1969-1985` and `2580-2728`, and in `runtime.rs` they end at 3637, so no hunk
+  overlaps one.
+- Every changed function is reached only from compile or from `bind` / `preflight_sequential` /
+  `build_sequential`.
+- `check-realtime-policy.sh` passes (55 regions) and `test-realtime-policy.sh` is ok.
+- The workspace denies `unsafe_code`, and the diff adds none.
+
+### The scale gate
+
+| test | release | debug | peak RSS |
+|---|---:|---:|---:|
+| `compiles_and_binds_65_537_tracks_with_builtins`, run alone | 17.0 s | 59.9 s | 1.31 GB |
+| the whole `scale` binary | - | 60.3 s | 1.87 GB |
+
+Release was built with the `panic="unwind"` override. These times reproduce the evidence.
+
+CI's `test-debug-a` ran the existing scale test in 32.7 s, against about 30 s here, so the binary
+should take about 66 s on CI. Recent `test-debug-a` jobs took 3.5-5 min of their 15-minute
+budget, which leaves ample room. The missing wall-clock bound is acceptable under the brief's own
+wording. The job timeout catches a regression of fixes 1, 3 or 4, whose debug cost would run to
+tens of minutes; smaller regressions go undetected (finding 1).
+
+**Growth is linear up to a log factor.** Debug, the gate's own session at 8,192 / 16,384 / 32,768
+/ 65,537 tracks:
+
+- compile: 3.59 / 7.67 / 16.34 / 35.46 s;
+- bind: 1.38 / 3.13 / 6.90 / 14.64 s;
+- so each doubling costs 2.12-2.27x.
+
+Three shapes host-core actually prepares were also timed in debug from 1,024 to 8,192 tracks:
+
+- EQ and compressor banks with console channels, a meter and a route per track, observers, and a
+  source set, at Simd8;
+- the same with a compressor per track sidechained to the previous track;
+- the same at Scalar.
+
+Compile and bind grew 2.1-2.3x per doubling in all three.
+
+### Scope ruling
+
+The widening to bind is **accepted, and the issue stays whole**. Step 3 requires the gate to bind
+at 65,537 tracks, and bind took 983 s in release before fixes 3-8. So step 3 cannot pass without
+them. They stay inside step 2's two crates, change no architecture, and are individually
+equivalence-proved. Splitting them out would ship a gate that cannot run.
+
+### Pre-existing items, confirmed not caused here
+
+- **Release test builds.** `cargo test --release -p graph-compiler --test scale` fails with E0463
+  and an `effect_package` output filename collision on `0109d841` too. The diff touches no
+  manifest.
+- **`graph_fixture --check`.** It exits 1 on both trees, with identical fingerprint and manifest
+  output. The checked-in `MANIFEST.tsv` is stale since `5cf9709d`.
+
+### Gates re-run on the branch
+
+All pass:
+
+- `cargo fmt --all --check`;
+- `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`;
+- `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`;
+- `cargo test --locked -p graph -p graph-compiler`: 108 / 1 / 1 / 8 and 75 / 1 / 3 / 2 / 8 / 6;
+- `-p builtins-compiler --features test-support`: 58 / 9 / 3 / 6 / 1 / 2;
+- `-p host-core --all-features`;
+- `-p console-workload` in debug: 8 / 4 / 23 / 3;
+- `check-graph-policy.sh` and `test-graph-policy.sh`;
+- `check-graph-determinism.sh` (100/100);
+- `check-builtins-fixtures.sh` (50 files).
+
+### Findings, most severe first
+
+1. **Low. The gate's regression claim is wider than its coverage.** The doc comment at
+   `crates/graph-compiler/tests/scale.rs:118` says a regression "shows up as this test's time".
+   The session has no effects, one route, and Simd8 on CI.
+   - Fix 2 (`effect_control_resource`), fix 7 (the Scalar interval scan) and fix 8 (the metadata
+     sets on the route fold, with one route per track) are not exercised at scale.
+   - A regression of fix 5 or 6 (16 s and 7 s in release) adds well under the job timeout.
+   - Only fixes 1, 3 and 4 are guarded by the timeout backstop.
+
+   This is not blocking, because step 3 named this session. Recommended follow-up: a second
+   bounded shape (one route and one banked effect per track) or a doubling-ratio check.
+2. **Low. `scatter_redirects` is still superlinear, and it is left unclassified.** The evidence
+   shows 2.3 ms at 8,192 tracks and 47 ms at 65,537, about n^1.45. The likely cause is
+   `scatter_target`'s per-op `run.contains` inside a window scan (`runtime.rs:6069-6072`). It is
+   harmless at 65,537 tracks. AGENTS.md asks for diminishing-return work to be recorded as an
+   issue, and "left alone" is not that record.
+3. **Info, out of scope and pre-existing.** The randomized probe found compile-admitted plans that
+   bind refuses with `graph.scheduler.layout`: 44 of 4,800 binds, 22 seed-width pairs, identical on
+   `0109d841`. `has_valid_structural_layout` (`crates/graph/src/lib.rs:1233`) rejects an effect bank
+   whose members sit at different dependency levels. Seed 412 at Simd8 reproduces it:
+   - nine tracks, where seven carry `soft-clip` at dynamic slot 0 and one carries it at slot 1
+     behind an EQ;
+   - all eight are banked together, at levels 5,5,5,6,5,5,5,5;
+   - the same session binds at Simd4.
+
+   A host would fail prepare on a session the compiler accepted. This needs its own issue. It is
+   not #962's.
+4. **Info.** `units_of`'s key change from `bank + ops.len()` to `(is_builtin, bank)` changes
+   behaviour only in a state no validated plan reaches, as proved above.
