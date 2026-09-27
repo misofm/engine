@@ -928,8 +928,8 @@ const METER_BLOCK_FRAMES: [usize; 5] = [1, 3, 64, 128, 129];
 /// `f64x2.add` under `simd128`, a per-lane array without it), and no native gate executes either
 /// wasm lowering. A count, with no pin: the inputs are full of NaNs.
 ///
-/// Per width, hostile and tone input, one stream per [`METER_BLOCK_FRAMES`] entry of
-/// [`METER_BLOCK_BLOCKS`] blocks, each block's energy carried into the next as its seed from
+/// Per width, hostile and tone input, one stream per frame count (1, 3, 64, 128 and 129) of 16
+/// blocks, each block's energy carried into the next as its seed from
 /// random positive seeds. Per lane and block, the peak, the two counts and the energy are compared
 /// with an independent scalar loop written here -- sanitize with `is_finite() &&
 /// !is_subnormal()`, take the magnitude, `if a > p`, `e += f64(s) * f64(s)` -- by bits (the
