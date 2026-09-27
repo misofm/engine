@@ -532,3 +532,13 @@ The row measures what it claims, in the host's shapes. Its central premises disc
 lowering, the held bases for the EQ and the compressor, per-effect movement, A6's collapse
 counters, and the push counts. The findings above are prose, test-isolation and provenance
 follow-ups.
+
+## Erratum (root, after the Sol verdict)
+
+Finding 1 is corrected in `LIMITER_STEP_DB`'s doc comment. The attempt-1 evidence above says that
+`ch16` "never engages natively anywhere in the ceiling's [-24, 0] dB domain" and that its
+compressor holds the track below -24 dBFS. Both statements are false. A ceiling held at -20 dB or
+below engages `ch16`'s limiter natively, and so does a -16/-24 per-block ride. Only this row's
+`base ± step` ride cannot engage it, because its upper value clamps to 0 dB. No step or track
+change is needed: the row's premise is per effect, and `ch16`'s ride costs the same as `ch40`'s.
+Findings 2 to 4 are filed as a test-hardening follow-up.

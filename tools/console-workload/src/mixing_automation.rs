@@ -79,10 +79,12 @@ pub const COMPRESSOR_STEP_DB: f32 = 0.5;
 /// `base + step` clamps to the domain's `0` dB top, so the ride alternates `0` and `base - 8`.
 ///
 /// It moves bits through `ch40` (held `-1.75` dB), which engages from a `-9.75` dB ceiling on
-/// both arms. `ch16` (held `-1.0` dB) never engages natively anywhere in the ceiling's `[-24, 0]`
-/// domain: its compressor (threshold `-30` dB, ratio `6.75`) holds the track below `-24` dBFS on
-/// the native tone. Its ride still takes the ramp, so it is priced, but it moves no bit, and the
-/// premise is therefore stated per effect (VERIFY-AUTOMATION A3), never per track.
+/// both arms. `ch16` (held `-1.0` dB) does not engage natively under this ride, although its
+/// limiter can: a ceiling held at `-20` dB or below moves its bits, so its native peak sits between
+/// `-20` and `-18` dBFS. The ride cannot reach it because `base + step` clamps to `0` dB, so the
+/// ceiling climbs back to the top every other block (#1003 Sol verdict, finding 1). Its ride still
+/// takes the ramp at the same cost as `ch40`'s, so it is priced, and the premise is stated per
+/// effect (VERIFY-AUTOMATION A3), never per track.
 pub const LIMITER_STEP_DB: f32 = 8.0;
 
 /// The effect an automated control belongs to.
