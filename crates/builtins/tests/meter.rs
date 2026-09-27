@@ -738,11 +738,31 @@ fn peak_hostile_pool() -> Vec<f32> {
     pool
 }
 
+/// Words the meter sanitizes to `+0.0`: NaN, both infinities, both zeros, and the extreme
+/// subnormals of both signs.
+const PEAK_INVALID: [u32; 8] = [
+    0x7FC0_0000,
+    0xFFC0_0714,
+    0x7F80_0000,
+    0xFF80_0000,
+    0x0000_0000,
+    0x8000_0000,
+    0x0000_0001,
+    0x807F_FFFF,
+];
+
 /// Fills one strided 8-lane plane: hostile words from the pool, or a triangle tone whose
 /// amplitude differs per lane.
+///
+/// On hostile input, lanes 1 and 5 carry only [`PEAK_INVALID`] words, so their windows' scalar
+/// peak is exactly `+0.0`: a kernel that admitted a subnormal or an infinity would publish
+/// something else there, where a lane that also carries normal words would hide it behind a
+/// larger peak.
 fn peak_fill(rng: &mut PeakRng, pool: &[f32], plane: &mut [f32], hostile: bool, phase: usize) {
     for (index, word) in plane.iter_mut().enumerate() {
-        *word = if hostile {
+        *word = if hostile && matches!(index % 8, 1 | 5) {
+            f32::from_bits(PEAK_INVALID[rng.below(PEAK_INVALID.len())])
+        } else if hostile {
             pool[rng.below(pool.len())]
         } else {
             let lane = index % 8;
@@ -830,6 +850,13 @@ fn peak_differential(
                 ) {
                     (Ok(a), Ok(b)) => {
                         assert_snapshot_bits(b, a);
+                        if hostile && matches!(lane, 1 | 5) {
+                            assert_eq!(
+                                [a.left.sample_peak.to_bits(), a.right.sample_peak.to_bits()],
+                                [0, 0],
+                                "an invalid-only lane's window peak is +0.0"
+                            );
+                        }
                         compared += 1;
                     }
                     (Err(_), Err(_)) => break,

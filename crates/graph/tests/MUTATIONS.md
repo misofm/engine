@@ -498,3 +498,22 @@ before writing), the suites were run with `--no-fail-fast`, and the file was res
 | 937-2b | drop the silent-read counter call (`None => silence,`) | `graph/src/lib.rs` `GraphSourcePlanes::played_planes_group` | `cargo test -p graph --features test-support`; console-workload `--lib` | RED. graph 4 of 114: the lent test (`width 1, 1 frames, fan-in 9`, the first fan-in with a silent input: `[0, 5, 0]` against `[0, 5, 1]`), the group test (`[0, 2, 0]` against `[0, 2, 3]`), #927's gates 1 and 2 at the block-3 underrun (`[0, 63, 0]` against `[0, 63, 1]`). GREEN on the console counter gate: the ring row never underruns. |
 | 937-3 | resolve a group of eight but reduce only its first seven (`&planes[..7]`, `&table[..7]` when the group is full) | `graph/src/runtime.rs` `route_reduce` | `cargo test -p graph --features test-support`; `cargo test -p console-workload` | RED. graph 7 of 114: gate 1 at `width 1, 1 frames, fan-in 8, -0.0 false: left` (`1254604654` against `1254604426`), the first fan-in with a full group; #926's fold gate, #927's gates 1 and 2 and #936's three gates as in 937-1. Console: both console digests (`133d291a...`). GREEN: the lent test and the console counter gate (kernel against itself; every lent claim is still resolved and counted). |
 | 937-4 | inline the tail into the vector kernel (`route_tail` marked `#[inline(always)]`), #920's failure shape | `graph/src/runtime.rs` `route_tail` | rule 3 | RED: `FAIL kernel ...route_group...4wide6f32x4...: vector=38 scalar=122`. The committed tree reads `vector=38 scalar=0`, so rule 3 does inspect `route_group<f32x4>`. |
+
+## Issue #943 — the banked sample-peak pass
+
+The witnesses are graph-compiler gate G3,
+`tests::post_matrix_peak_meters_merge_one_bank_pass_per_cohort_and_publish_the_scalar_frames`
+(64-track intended fixture, a `SAMPLE_PEAK` `PostMatrix` meter per track, both selected deliveries,
+periods 512 and 300, the pass on against `test_only_set_bank_sample_peak_declined(true)`; its
+controls are ALL-metric meters and a plan bound with an observation activation), and this crate's
+source scan `runtime::tests::resident_meter_entry_has_one_final_output_dispatch_and_admission_control`,
+whose own control rows now include the pass forced on (`let peaks = if true {`), the peak withheld
+from the member call, the lane index shifted, the planes swapped, and the whole-block borrow
+replaced. Each row below was applied alone to `1975fc44` as an exact-text replacement (match count
+one), run in dev, and restored.
+
+| # | mutation | G3 | source scan |
+| --- | --- | --- | --- |
+| G-1 | `row.sample_peak = unit.accepts_sample_peak();` becomes `row.sample_peak = true;` | RED at the ALL control: `ALL meters must not make a bank run the pass` (`192` against `0`). PCM and every frame stay equal: the counter is the only witness | GREEN (the flag's derivation is not pinned there) |
+| G-2 | the final lane's hand-off reads lane `lane ^ 1` of both planes | RED: `between_render_calls false period 512: meter 1 window 0` (left and right peaks are lane 1's) | RED: `valid(source)` |
+| G-3 | the right plane's pass reads the left plane (`meter_sample_peak_block::<L>(left, ..)` into `peaks[1]`) | RED: `meter 1 window 0`, right `sample_peak` bits `543241058` against `994846919` (needs the L-differs-from-R window) | GREEN (`bank_sample_peak`'s body is not pinned there) |

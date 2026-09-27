@@ -234,3 +234,29 @@ Each mutation was applied alone, run in dev and release (gate 4 in dev), and rev
 
 Four rows, all red; none argued equivalent. M2 and M4 render the base bits by construction, so
 only the witness sees them, which is the reason gate 2 exists.
+
+## Issue #943 — the block-peak merge
+
+Gate G2 is `a_block_peak_merge_publishes_the_scalar_meters_snapshots` (`tests/meter.rs`, run with
+`--features test-support`): eight meters per arm over a strided 8-lane block, arm A through
+`observe_input`, arm B through `observe_input_with_block_peak` with the lane kernel's seeded-zero
+peaks, at periods 512, 300, 128 and 64, hostile and tone input, 64 blocks, plain and with a skip, a
+restart, a zero-frame block and all three; `ALL` and `SAMPLE_PEAK | COUNTS` must decline. Every
+snapshot is compared on every field by bits (56,208 per run), and the merge count is pinned
+(512 at periods 512 and 128, 0 at 64, 296 at 300). Each row was applied alone as an exact-text
+replacement (match count one) to `1975fc44` plus the final G2 of the evidence commit (the
+invalid-only lanes below), run in dev, and restored.
+
+| # | mutation | file | G2 result |
+| --- | --- | --- | --- |
+| B-1 | the fast-path window test `len <= (period - self.frames) as usize` becomes `true` | `src/lib.rs` | RED: `metrics 1 period 300 event 2 lane 0: publication count differs` (512 is green: every block fits) |
+| B-2 | the fast path taken when `self.metrics.contains(SAMPLE_PEAK)` | `src/lib.rs` | RED on the `ALL` arm: `present_metrics: 15`, `rms`, `energy`, `held_peak` and the counts are `0` in the merge arm |
+| B-3 | the fast path does not `emit()` at `frames == period` | `src/lib.rs` | RED: `metrics 1 period 512 event 3 lane 0: publication count differs` |
+| L-1 | the lane kernel's `a.ge(low)` becomes `a.ge(L::zero())` | `lane/src/kernels/builtins.rs` | RED: handle 2 (lane 1) window 0 publishes `sample_peak 1.1754942e-38` against `0.0` |
+| L-2 | the lane kernel's `a.lt(high)` term dropped | `lane/src/kernels/builtins.rs` | RED: handle 1 window 0 publishes `inf` against `3.4028235e38` |
+
+L-1 was **green** on the first form of G2, whose hostile lanes each carried normal words: a window's
+peak was then always a normal value, which hides an admitted subnormal. G2 now gives lanes 1 and 5
+only words the meter sanitizes to `+0.0` (NaN, both infinities, both zeros, extreme subnormals),
+asserts their published peaks are `+0.0`, and the row is red. The lane rows are also in
+`crates/lane/tests/MUTATIONS.md`.

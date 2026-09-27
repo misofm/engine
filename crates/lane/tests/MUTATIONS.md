@@ -319,3 +319,26 @@ Command form: `cargo test -p lane --test fader_matrix select_free` (and with `--
 
 The same mutation is red in `builtins` (gate 3) and `console-workload` (gate 4); those rows, and
 M1, M2 and M4, are in `crates/builtins/tests/MUTATIONS.md`.
+
+## Issue #943 — the banked sample-peak kernel
+
+`meter_sample_peak_block` (`src/kernels/builtins.rs`) is gate G1's subject:
+`tests/meter_peak.rs` holds `Simd8` and `Simd4` against the kernel at `Lane = f32` over the
+de-interleaved lane and against the builtin meter's own serial loop, over 64 carried blocks at frames
+1, 2, 3, 127, 128 and 129, plus an invalid-only lane and a bit sweep of every exponent's boundary
+mantissas. The same mutations were run against gate G2 (`crates/builtins/tests/MUTATIONS.md`) and
+against the wasm-gate corpus case `meter_sample_peak_block/hostile` (case 55), whose native leg
+compares every width with the pin taken from the scalar `Lane` oracle. Each row was applied alone
+as an exact-text replacement (match count one) to `1975fc44` plus the evidence commit's final G2,
+run in dev (the corpus in release), and restored. Host AMD EPYC 7313P, rustc 1.97.1, pin `+avx2,+fma`.
+
+| # | mutation | G1 `meter_peak` | corpus `g5_native_digests_match_pins` |
+| --- | --- | --- | --- |
+| L-1 | `a.ge(low)` becomes `a.ge(L::zero())` (admits subnormals) | RED, 3 of 4: `width 8 frames 1 block 0 lane 3: the vector kernel against the meter's serial loop` (`1` against `0`); the invalid-only lane `frames 127 lane 1` (`8388607` against `0`); the sweep at input `0x00000001` | RED at case 55, every width |
+| L-2 | drop the `a.lt(high)` term: `L::select(a.ge(low), a, L::zero())` (admits infinity) | RED, 3 of 4: `width 8 frames 1 block 6 lane 4` (`2139095040`, `+inf`, against `2^1`); `frames 3 lane 1` (`+inf` against `0`); the sweep at `0x7f800000` | RED at case 55 |
+| L-green | `L::max(c, peak)` becomes `L::max(peak, c)` | GREEN, 4 of 4 | GREEN |
+
+L-green is the expected-green row: on the sanitized domain `{+0.0} ∪ [MIN_POSITIVE, MAX]` the D8
+select form is commutative by bits, so the operand order is free.
+`g1_select_max_is_order_free_only_on_the_sanitized_domain` witnesses that argument directly, and
+also that it fails off the domain (`max(+0, -0)` and `max(1, NaN)` depend on the order).
