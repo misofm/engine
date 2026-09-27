@@ -384,3 +384,56 @@ M4 was withdrawn by the verification amendment and is not made here. The verific
 console digests green under both M1 and M4: the console fixture barely limits, and every console
 transition desymmetrizes. These rows were not re-run against `console-workload`; the discriminating
 gates are this crate's.
+
+## Issue #996 — the linked pair at session level
+
+The gate is `crates/host-core/tests/limiter_linked_session.rs`
+(`the_hot_console_renders_the_pre_990_words_through_link_and_unlink`): the standing 64-track
+console, one noise stream per track, compressors bypassed, fourteen live limiter retargets that
+keep, break and re-equal pairs, 96 blocks. Its digest was pinned on the pre-#990 kernel (this tree
+with `src/lib.rs` at `bbcf8ce1`). Driver: one mutation at a time, applied to `src/lib.rs`, then
+`cargo test -p host-core --test limiter_linked_session` (dev profile), then the file restored with
+`git checkout` and checked clean. Every row turned red.
+
+The test has three assertion groups ahead of its pin: every limiter is limiting (above 6 dB of
+reduction at every block end from block 3, raised at least four times), a pair's two readings stay
+bit-equal until a one-sided retarget reaches it, and every one-sided retarget parts them. The
+"fired" column names the assertion that stopped the run. The "digest" column is the digest the
+mutated run rendered, taken from a temporary print placed ahead of the assertions while the
+scenario was being built; the scenario and its fold did not change afterwards, and the unmutated
+run printed the pin, `b22ef17c…`.
+
+| # | mutation | fired | digest |
+|---|---|---|---|
+| 996-M1 | #990 M1: the mirrored backward pass skips its store into the right ring (`sliding_minimum_uniform_mirrored`) | channels stay equal: `ch00` parts at block 17 | `881bf62b…` |
+| 996-K1 | the pair keeps the shared path after it unlinks: the decision in `LimiterCore::process_block` drops `designed_gain_agree`, so a one-sided retarget renders linked | one-sided retarget parts nothing: `ch03` at block 17 | `4c664808…` |
+| 996-K2 | #990 M12: `LimiterCore::process_block` no longer writes the decision back to `gain_linked`, so a pair relinks as soon as its designed words agree again, without reset, restore or `desymmetrize` | the pin | `198af660…` |
+| 996-M2 | #990 M2: the box term is not stored into the right box ring (`linked_frame_uniform`) | channels stay equal: `ch00` at block 17 | `a6cf49f7…` |
+| 996-M6 | #990 M6: the required gain is not stored into the right ring at the cursor (`linked_frame_uniform`) | channels stay equal: `ch00` at block 17 | `2abf0380…` |
+| 996-M7 | #990 M7: the right box sum is not set from the left at block end (`limiter_block_uniform`) | reduction floor | `c25993b2…` |
+
+The brief asked for M1 and K1. K2 is the mutation that tests the relink note in the test's doc
+comment. Its readings move on exactly the five pairs made equal again (`ch03`, `ch12`, `ch37`,
+`ch42`, `ch57`), each from the block after the one that made it equal, and on no other track. M2, M6 and M7 are the rows the #990 verification's finding 1 named.
+
+### Where M1 shows, and why the scenario is shaped the way it is
+
+M1 is invisible while a pair stays linked, because the linked body never reads the right ring.
+After an unlink, the right channel answers the part of its window that lies in the previous van
+Herk block from raw requirements instead of suffix minima. That changes a reduction word only if
+the window's minimum lies in that part, strictly after its oldest slot, while the limiter is
+still raising its reduction. With the reading dump, M1 moved the published reduction words of
+five to seven lanes in each of the six W8 banks that unlink. The first moved block is the unlink
+block in every bank. The two banks that never unlink did not move. The same scenario went red
+under M1 at twelve of twelve noise seeds.
+
+Two earlier shapes of this test stayed green under M1, and both are recorded so they are not
+retried:
+
+* **The fixture's one stereo source shared by every track.** An unlink is then one trial rather
+  than eight, because every lane of the bank hears the same noise. Three unlinks, compressors
+  bypassed: green.
+* **Compressors in circuit.** On the shared source at +16 to +22 dBFS, 46 of 64 limiters never
+  raised their reduction after block 32. They were releasing from the onset transient. With per-track streams
+  and the compressors still in circuit, M1 went red, but on only one or two lanes in two of the
+  six banks.
