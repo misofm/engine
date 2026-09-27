@@ -9846,10 +9846,18 @@ mod tests {
                 })
                 .collect();
         eprintln!("failure boundary: commits per block {per_block:?}");
-        let failing = per_block[FAILING_BLOCK as usize];
+        // Bank 0, `ch00` to `ch03` or `ch07`, is the first observed unit at either width, so
+        // exactly `ch00`'s and `ch01`'s meters commit the failing block.
+        assert_eq!(
+            per_block[FAILING_BLOCK as usize], 2,
+            "ch00 and ch01 commit the failing block and no later meter does"
+        );
         assert!(
-            (2..64).contains(&failing),
-            "ch00 and ch01 commit the failing block and the later meters do not ({failing})"
+            per_block
+                .iter()
+                .enumerate()
+                .all(|(block, &commits)| block == FAILING_BLOCK as usize || commits == 64),
+            "every other block commits every meter"
         );
         // `ch02`'s meter (handle 3) missed block 5, so its next window starts at a
         // discontinuity; `ch01`'s (handle 2) observed it and did not.

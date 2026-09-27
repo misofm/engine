@@ -1389,8 +1389,7 @@ fn banked_sweep(period: u32) -> (usize, u64) {
 /// Built with `--features test-support`, it also pins the commit counter: every block of a plain
 /// 64-block stream at period 512 and 1536, none at 64, some at 300; none on a held peak with a hold
 /// or a decay; none with the block withheld; none with the seed moved by one ulp; a block after a
-/// skipped gap commits; and an `ALL` meter behind a `SAMPLE_PEAK` meter on the same lane commits
-/// every block, because the peak meter has no seed to answer with.
+/// skipped gap commits.
 #[test]
 fn a_banked_block_commit_publishes_the_scalar_meters_snapshots() {
     use MeterMetricSet as M;
@@ -1476,9 +1475,17 @@ fn a_banked_block_commit_publishes_the_scalar_meters_snapshots() {
     {
         assert_eq!(commits, [8, 8, 16], "the block after the skip commits");
     }
+}
 
-    // Two meters on one lane: a `SAMPLE_PEAK` meter first answers no seed, so the `ALL` meter
-    // behind it seeds its lane and commits every block (amendment 2's seed pollution).
+/// Gate M2's two-meter row (issue #950, amendment 2): with a `SAMPLE_PEAK` meter bound before an
+/// `ALL` meter on every lane, the peak meter answers no seed -- it keeps no energy -- so the bank's
+/// first-answer search reaches the `ALL` meter, which commits every block of a plain stream at
+/// period 512. Had the peak meter answered its unused `+0.0`, the `ALL` meter would commit only
+/// the blocks that start a window. Both meters' snapshots equal the scalar arm's by bits.
+#[test]
+fn a_peak_meter_bound_first_leaves_the_seed_to_the_all_meter_behind_it() {
+    use MeterMetricSet as M;
+    let plain = banked_plain_stream(64);
     for (hostile, seed) in [(false, 7), (true, 8)] {
         let pair = BankedRun {
             metrics: vec![M::SAMPLE_PEAK, M::ALL],
