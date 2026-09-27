@@ -429,3 +429,62 @@ Re-run on `10172c71` with `CARGO_INCREMENTAL=0`, the worktree's own `target/`, s
 | 964-12, 964-13, 964-3 and S5 rechecks | RED as recorded |
 
 The timed benchmark was not run. `target/` is deleted.
+
+## Sol attempt 2 verdict: PASS
+
+Reviewed `git diff c4e178f6..HEAD` (`10172c71`, `aaded427`). Same host and rules as attempt 1:
+x86-64-v3, eight lanes, `CARGO_INCREMENTAL=0`, the worktree's own `target/`. Every mutation was
+applied, run and reverted; none is committed.
+
+### The attempt-1 findings are resolved
+
+- **Finding 1 is fixed.** All five launch cap tests (limiter, multiband, soft clip, transient
+  shaper, delay) now read `graph_resource_estimate().incremental_plan_bytes`. My mutations, each
+  run against the five tests plus `effect_control_resource_…` and `runtime_bank_slot_reservation_…`:
+
+  | mutation | what it changes in `compile.rs` | the five launch tests | the other two |
+  |---|---|---|---|
+  | M-b | the slot reservation is dropped from `capped_estimate` | RED, all five | RED |
+  | MB2 | the builtin payload is dropped from `capped_estimate` | RED, all five | RED |
+  | OB1 | lenient off-by-one on the plan-bytes cap (`> cap + 1`) | RED, all five | RED |
+  | OB2 | strict off-by-one (`>=`) | GREEN | RED |
+
+  OB2 is not a weakening. It needs an exact-cap accept arm, and the builtins-less originals never
+  had one; tests 4 and 5 carry it.
+- **The new `assert_builtin_attachment_matches` is non-vacuous** (`lib.rs:1057-1109`). My own
+  mutation turns all four callers RED with "the builtin attachment adds the same bytes to both
+  arms": the attachment also charges `effect_bank_scratch_bytes / 8` to `session_plus_plan_bytes`
+  in `PreparedGraphPlan::with_builtin_banks`.
+- **Finding 2 is taken.** `track_delay` compiles at `Backend::current()`. All 8 tests pass, and
+  the digest is unchanged at `957e97ca…`. 964-3 (the digest falls back to `eb3ca776…`) and S5 (2
+  vs 4) are both RED at `current()`. `a_ring_is_a_named_allocation` stays non-vacuous: the zero-delay
+  largest allocation is 48,915 bytes, well under the 192,000-byte ring.
+- **Finding 3 is recorded** in the evidence.
+
+### Sweep spot-check
+
+I listed every `estimate` read in the test module independently. It matches the implementer's
+table:
+
+- The remaining `report().estimate` reads in the delay test, `rack_placement_…` and
+  `accepted_session_…` are `effect_bank_*`, `effects`, `declared_effect_bytes`, counts or `> 0`
+  checks.
+- `checked_add_builtin_banks` (`graph/src/lib.rs:686-716`) never touches any of those fields.
+- None of them sets a cap.
+
+### Gates (all pass on `aaded427`)
+
+- `cargo fmt --all --check`
+- `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
+- `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`
+- `cargo test -p graph-compiler`:
+  - dev: 80/1/3/2/8/6;
+  - release with `panic="unwind"`: the same counts;
+  - CI's `graph/test-support,builtins-compiler/test-support` feature set: the same counts.
+- `-p graph` (109/1/1/1), `-p builtins-compiler --features test-support`,
+  `-p host-core --all-features`, and `-p console-workload` in dev and release, so the console
+  digests are unchanged. The branch still has no product code.
+- `check-graph-policy.sh` PASS, `test-graph-policy.sh` ok, `check-graph-determinism.sh` PASS
+  (100/100).
+
+No new findings. The timed benchmark was not run.
