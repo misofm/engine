@@ -220,9 +220,10 @@ pub(crate) fn bind_rack_banks_indexed(
         .collect();
     let mut plan = plan_bank_groups(&levels_in, width)
         .map_err(|_| diag("graph.effect.bank_members", "$.effects"))?;
-    let bind = |plan: &BankPlan<RackChainId>| {
-        bind_planned_banks(
-            plan,
+    let bind_group = |index: usize, group: &BankGroup<RackChainId>| {
+        bind_group_banks(
+            index,
+            group,
             &chains,
             &level_by_node,
             effects,
@@ -231,7 +232,13 @@ pub(crate) fn bind_rack_banks_indexed(
             width,
         )
     };
-    let (mut banks, mut bound_slots) = bind(&plan)?;
+    // One entry per plan group, in plan order: the banks bound from that group's slots.
+    let mut bound: Vec<BoundGroup> = plan
+        .groups
+        .iter()
+        .enumerate()
+        .map(|(index, group)| bind_group(index, group))
+        .collect::<Result<_, _>>()?;
 
     // Issue #971: keep the mono pool a whole number of cohorts. The plan above is the trial.
     // A mono track every one of whose effect groups is a *partial* mono group banks nowhere in
@@ -261,20 +268,81 @@ pub(crate) fn bind_rack_banks_indexed(
         }
         let replan = plan_bank_groups(&levels_in, width)
             .map_err(|_| diag("graph.effect.bank_members", "$.effects"))?;
+
+        // Issue #1002: only the groups the move changed are bound for the comparison. A re-plan
+        // group equal to a trial group (same level, rack, class, leader program, members in the
+        // same lanes and the same active slots) binds to the same banks: the bind reads nothing
+        // but the group, the chains, the levels, the prepared entries, the width and the
+        // dispatch, and none of those moved. So the trial's banks for such a group are reused,
+        // and the two plans' bank counts differ only by the changed groups: the re-plan's new
+        // ones (bound here) against the trial's vanished ones (bound above). That is the
+        // comparison #971 made over whole plans, without binding the unchanged majority twice.
+        // Every member of a plan sits in exactly one group, so a group's first member finds the
+        // one trial group it could equal.
+        let trial_group_of: BTreeMap<&RackChainId, usize> = plan
+            .groups
+            .iter()
+            .enumerate()
+            .filter_map(|(index, group)| Some((group.members.first()?.as_ref()?, index)))
+            .collect();
+        let unchanged: Vec<Option<usize>> = replan
+            .groups
+            .iter()
+            .map(|group| {
+                let first = group.members.first()?.as_ref()?;
+                trial_group_of
+                    .get(first)
+                    .copied()
+                    .filter(|index| plan.groups[*index] == *group)
+            })
+            .collect();
         // Issue #1001: the re-plan is speculative, and the trial above is already bound and
-        // valid, so a factory error while binding the re-plan keeps the unmoved plan and its banks
-        // rather than failing the compile (#95: a cohort a factory cannot bank never costs the
-        // user the compile). The re-plan's banks bound before the error are dropped with it, and
-        // `classes` is still the unmoved map: only the clone was changed.
-        if let Ok((replan_banks, replan_slots)) = bind(&replan)
-            && replan_banks.len() > banks.len()
-        {
-            *classes = demoted;
-            plan = replan;
-            banks = replan_banks;
-            bound_slots = replan_slots;
+        // valid, so a factory error while binding the re-plan's changed groups keeps the unmoved
+        // plan and its banks rather than failing the compile. This is the one exception to #95's
+        // rule that an `Err` fails the compile, and it rests on #95's own reasoning (a planner
+        // bug must not cost the user their session) applied to a plan that was only ever
+        // speculative. The banks bound before the error are dropped with it, and `classes` is
+        // still the unmoved map: only the clone was changed.
+        let fresh: Result<Vec<Option<BoundGroup>>, GraphDiagnostic> = replan
+            .groups
+            .iter()
+            .zip(&unchanged)
+            .enumerate()
+            .map(|(index, (group, unchanged))| match unchanged {
+                Some(_) => Ok(None),
+                None => bind_group(index, group).map(Some),
+            })
+            .collect();
+        if let Ok(mut fresh) = fresh {
+            let reused: BTreeSet<usize> = unchanged.iter().flatten().copied().collect();
+            let gained: usize = fresh.iter().flatten().map(Vec::len).sum();
+            let lost: usize = bound
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !reused.contains(index))
+                .map(|(_, group)| group.len())
+                .sum();
+            if gained > lost {
+                let mut trial = core::mem::take(&mut bound);
+                for (index, (unchanged, fresh)) in unchanged.iter().zip(&mut fresh).enumerate() {
+                    let mut group = match unchanged {
+                        Some(trial_index) => core::mem::take(&mut trial[*trial_index]),
+                        None => fresh.take().unwrap_or_default(),
+                    };
+                    let cohort_group = u32::try_from(index)
+                        .map_err(|_| diag("graph.resource.arithmetic_overflow", "$.graph"))?;
+                    for (bank, slot) in &mut group {
+                        bank.cohort.group = cohort_group;
+                        slot.group = index;
+                    }
+                    bound.push(group);
+                }
+                *classes = demoted;
+                plan = replan;
+            }
         }
     }
+    let (banks, bound_slots) = bound.into_iter().flatten().unzip();
     Ok((
         banks,
         GraphRackBankReport {
@@ -313,83 +381,88 @@ fn stranded_mono_tracks(plan: &BankPlan<RackChainId>) -> Vec<String> {
         .collect()
 }
 
-/// Binds every slot of `plan` that can be one homogeneous bank and whose factory consents:
-/// the banks and the report's `(group, slot, members)` entries, in plan order.
-fn bind_planned_banks(
-    plan: &BankPlan<RackChainId>,
+/// The banks bound from one plan group's slots, each with its report entry, in slot order.
+type BoundGroup = Vec<(graph::GraphPreparedEffectBank, GraphRackBoundSlot)>;
+
+/// Binds every slot of plan group `group_index` that can be one homogeneous bank and whose
+/// factory consents.
+#[allow(clippy::too_many_arguments)] // The binder's whole context, passed from one closure.
+fn bind_group_banks(
+    group_index: usize,
+    group: &BankGroup<RackChainId>,
     chains: &BTreeMap<RackChainId, Vec<EffectNodeId>>,
     level_by_node: &BTreeMap<GraphNodeId, u64>,
     effects: &EffectPreparedSession,
     prepared: &PreparedEffectIndex<'_>,
     dispatch: Backend,
     width: BankWidth,
-) -> Result<(Vec<graph::GraphPreparedEffectBank>, Vec<GraphRackBoundSlot>), GraphDiagnostic> {
-    let mut banks = Vec::new();
-    let mut bound_slots = Vec::new();
-    for (group_index, group) in plan.groups.iter().enumerate() {
-        for slot in 0..group.program.len() {
-            let Some(members) = bindable_slot_members(group, slot, chains, level_by_node)? else {
-                continue;
-            };
-            let entries: Vec<&EffectPreparedEntry> = members
-                .iter()
-                .map(|node| {
-                    let slot = prepared
-                        .get(node.track_id.as_str(), node.rack, node.effect_id.as_str())
-                        .expect("prepared effect node has an entry");
-                    &effects.entries[slot.index()]
-                })
-                .collect();
-            let requests: Vec<_> = entries
-                .iter()
-                .map(|entry| entry.bank_preparation.request())
-                .collect();
-            let request = PrepareEffectBankRequest {
-                backend: dispatch,
-                width,
-                requests: &requests,
-            };
-            // Equal program key implies the same registry factory: the registry maps one
-            // `EffectId` to one `Arc` (#96 F12), so a per-chunk `Arc::ptr_eq` scan proved nothing.
-            let Some(processor) = entries[0]
-                .factory
-                .bind_homogeneous_bank(request)
-                .map_err(|error| diag(error.code, "$.effects"))?
-            else {
-                continue;
-            };
-            if processor.metadata().width != width
-                || processor.metadata().program_key != group.program[slot]
-            {
-                return Err(diag("graph.effect.bank_metadata", "$.effects"));
-            }
-            let scratch = rack::AoSoaScratch::new(width, effects.session.quantum().0)
-                .map_err(|_| diag("graph.resource.arithmetic_overflow", "$.graph"))?;
-            banks.push(graph::GraphPreparedEffectBank {
-                members: members.clone().into_boxed_slice(),
-                active_mask: group.active_mask.clone(),
-                processor,
-                response_snapshot_declared: entries[0].factory.response_analysis().is_some(),
-                native_id: entries[0].factory.descriptor().id.as_str(),
-                scratch,
-                // Issue #181: the group this slot came out of, carried forward so the runtime can
-                // build one chain per cohort instead of one per slot. It is the same `(group,
-                // slot)` pair `bound_slots` already reports; the report was the only consumer.
-                cohort: graph::GraphBankCohort {
-                    group: u32::try_from(group_index)
-                        .map_err(|_| diag("graph.resource.arithmetic_overflow", "$.graph"))?,
-                    slot: u32::try_from(slot)
-                        .map_err(|_| diag("graph.resource.arithmetic_overflow", "$.graph"))?,
-                },
-            });
-            bound_slots.push(GraphRackBoundSlot {
+) -> Result<BoundGroup, GraphDiagnostic> {
+    let mut bound = Vec::new();
+    for slot in 0..group.program.len() {
+        let Some(members) = bindable_slot_members(group, slot, chains, level_by_node)? else {
+            continue;
+        };
+        let entries: Vec<&EffectPreparedEntry> = members
+            .iter()
+            .map(|node| {
+                let slot = prepared
+                    .get(node.track_id.as_str(), node.rack, node.effect_id.as_str())
+                    .expect("prepared effect node has an entry");
+                &effects.entries[slot.index()]
+            })
+            .collect();
+        let requests: Vec<_> = entries
+            .iter()
+            .map(|entry| entry.bank_preparation.request())
+            .collect();
+        let request = PrepareEffectBankRequest {
+            backend: dispatch,
+            width,
+            requests: &requests,
+        };
+        // Equal program key implies the same registry factory: the registry maps one
+        // `EffectId` to one `Arc` (#96 F12), so a per-chunk `Arc::ptr_eq` scan proved nothing.
+        let Some(processor) = entries[0]
+            .factory
+            .bind_homogeneous_bank(request)
+            .map_err(|error| diag(error.code, "$.effects"))?
+        else {
+            continue;
+        };
+        if processor.metadata().width != width
+            || processor.metadata().program_key != group.program[slot]
+        {
+            return Err(diag("graph.effect.bank_metadata", "$.effects"));
+        }
+        let scratch = rack::AoSoaScratch::new(width, effects.session.quantum().0)
+            .map_err(|_| diag("graph.resource.arithmetic_overflow", "$.graph"))?;
+        let bank = graph::GraphPreparedEffectBank {
+            members: members.clone().into_boxed_slice(),
+            active_mask: group.active_mask.clone(),
+            processor,
+            response_snapshot_declared: entries[0].factory.response_analysis().is_some(),
+            native_id: entries[0].factory.descriptor().id.as_str(),
+            scratch,
+            // Issue #181: the group this slot came out of, carried forward so the runtime can
+            // build one chain per cohort instead of one per slot. It is the same `(group,
+            // slot)` pair `bound_slots` already reports; the report was the only consumer.
+            cohort: graph::GraphBankCohort {
+                group: u32::try_from(group_index)
+                    .map_err(|_| diag("graph.resource.arithmetic_overflow", "$.graph"))?,
+                slot: u32::try_from(slot)
+                    .map_err(|_| diag("graph.resource.arithmetic_overflow", "$.graph"))?,
+            },
+        };
+        bound.push((
+            bank,
+            GraphRackBoundSlot {
                 group: group_index,
                 slot,
                 members,
-            });
-        }
+            },
+        ));
     }
-    Ok((banks, bound_slots))
+    Ok(bound)
 }
 
 /// The effect node each lane of `group` runs at leader slot `slot`, when that slot can be one
