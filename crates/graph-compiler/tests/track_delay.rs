@@ -141,7 +141,8 @@ impl Compiled {
 }
 
 /// The production compile: the session's own builtins, prepared with no meters and no live
-/// controls, attached through `compile_with_builtins` (#964).
+/// controls, attached through `compile_with_builtins` at the width this build renders at (#964).
+/// The canonical digest is dispatch-independent, so the pin below holds on every host.
 fn compile(session: CompiledSession, caps: GraphCompileCaps) -> Result<Compiled, String> {
     let registry = launch_native_effect_registry().expect("launch registry");
     let builtins = prepare_session_builtins(
@@ -171,7 +172,7 @@ fn compile(session: CompiledSession, caps: GraphCompileCaps) -> Result<Compiled,
     )
     .expect("the fixture's native effects prepare");
     let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
-        dispatch: Backend::Scalar,
+        dispatch: Backend::current(),
         plan_id: 1,
         effects,
         builtins,
@@ -187,8 +188,8 @@ fn compile(session: CompiledSession, caps: GraphCompileCaps) -> Result<Compiled,
             .join(",")
     })?;
     let sha256 = GraphCompiler::sha256(artifact.graph(), artifact.report());
-    // The whole-plan estimate, with any builtin banks attached: the one the caps are checked
-    // against. At `Backend::Scalar` no bank attaches, so it equals the report's.
+    // The whole-plan estimate, with the builtin banks attached: the one the caps are checked
+    // against, and the one a host publishes.
     let estimate = artifact.graph_resource_estimate().clone();
     Ok(Compiled {
         output_latency: artifact.report().output_latency.0,

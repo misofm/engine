@@ -1054,6 +1054,60 @@ mod tests {
             .collect()
     }
 
+    /// #964: the bank-against-scalar byte deltas a launch-effect test pins on the report's estimate
+    /// hold on the whole-plan estimate too -- the figure the compile caps and a host publishes.
+    ///
+    /// Builtins-less, the two were one figure. With builtins, the whole-plan estimate is the
+    /// report's plus the builtin-bank attachment. Both arms attach the same builtin banks at the
+    /// same dispatch, so the attachment must add the same amount to every field in both; with the
+    /// report deltas pinned, the whole-plan deltas are then pinned to exactly the same values.
+    fn assert_builtin_attachment_matches(
+        bank: &PreparedGraphBuiltinsArtifact,
+        scalar: &PreparedGraphBuiltinsArtifact,
+        what: &str,
+    ) {
+        let attached = |artifact: &PreparedGraphBuiltinsArtifact| {
+            let report = &artifact.report().estimate;
+            let whole = artifact.graph_resource_estimate();
+            let delta = |whole: u64, report: u64| i128::from(whole) - i128::from(report);
+            [
+                delta(whole.audio_buffer_samples, report.audio_buffer_samples),
+                delta(whole.graph_metadata_bytes, report.graph_metadata_bytes),
+                delta(whole.incremental_plan_bytes, report.incremental_plan_bytes),
+                delta(
+                    whole.session_plus_plan_bytes,
+                    report.session_plus_plan_bytes,
+                ),
+                delta(whole.effect_bank_count, report.effect_bank_count),
+                delta(
+                    whole.effect_bank_scratch_bytes,
+                    report.effect_bank_scratch_bytes,
+                ),
+                delta(
+                    whole.effect_bank_runtime_buffer_bytes,
+                    report.effect_bank_runtime_buffer_bytes,
+                ),
+                delta(
+                    whole.effect_bank_metadata_bytes,
+                    report.effect_bank_metadata_bytes,
+                ),
+                delta(whole.builtin_bank_count, report.builtin_bank_count),
+            ]
+        };
+        let banked = attached(bank);
+        assert_eq!(
+            banked,
+            attached(scalar),
+            "{what}: the builtin attachment adds the same bytes to both arms"
+        );
+        if BankWidth::for_backend(bank.report().rack_cohorts.dispatch).is_some() {
+            assert!(
+                banked[2] > 0 && banked[8] > 0,
+                "{what}: the builtin banks attach, or the whole-plan comparison is vacuous"
+            );
+        }
+    }
+
     fn assert_pcm_bits_equal(left: &[Vec<f32>], right: &[Vec<f32>], what: &str) {
         assert_eq!(left.len(), right.len(), "{what}: block count");
         for (block, (left, right)) in left.iter().zip(right).enumerate() {
@@ -11649,6 +11703,7 @@ mod tests {
                 + expected_bank_metadata_bytes
                 + expected_bank_slot_bytes
         );
+        assert_builtin_attachment_matches(&artifact, &scalar_artifact, "limiter");
         assert_eq!(
             artifact.graph().sequential_schedule,
             scalar_artifact.graph().sequential_schedule
@@ -11688,7 +11743,8 @@ mod tests {
             .clone();
         let expected_output_latency = artifact.report().output_latency;
         let expected_output_tail = artifact.report().output_tail;
-        let minimum_plan_bytes = artifact.report().estimate.incremental_plan_bytes;
+        // The whole-plan figure, builtin banks attached: the one the compile caps (#964).
+        let minimum_plan_bytes = artifact.graph_resource_estimate().incremental_plan_bytes;
 
         let envelope = artifact.envelope();
         let frames = envelope.quantum.0 as usize;
@@ -12028,6 +12084,7 @@ mod tests {
                 + expected_bank_metadata_bytes
                 + expected_bank_slot_bytes
         );
+        assert_builtin_attachment_matches(&artifact, &scalar_artifact, "multiband");
         assert_eq!(
             artifact.graph().sequential_schedule,
             scalar_artifact.graph().sequential_schedule
@@ -12056,7 +12113,8 @@ mod tests {
         let expected_canonical_bytes = GraphCompiler::evidence(artifact.graph(), artifact.report())
             .canonical_bytes
             .clone();
-        let minimum_plan_bytes = artifact.report().estimate.incremental_plan_bytes;
+        // The whole-plan figure, builtin banks attached: the one the compile caps (#964).
+        let minimum_plan_bytes = artifact.graph_resource_estimate().incremental_plan_bytes;
 
         let envelope = artifact.envelope();
         let frames = envelope.quantum.0 as usize;
@@ -12385,6 +12443,7 @@ mod tests {
                 + expected_bank_metadata_bytes
                 + expected_bank_slot_bytes
         );
+        assert_builtin_attachment_matches(&artifact, &scalar_artifact, "soft clip");
         assert_eq!(
             artifact.graph().sequential_schedule,
             scalar_artifact.graph().sequential_schedule
@@ -12413,7 +12472,8 @@ mod tests {
         let expected_canonical_bytes = GraphCompiler::evidence(artifact.graph(), artifact.report())
             .canonical_bytes
             .clone();
-        let minimum_plan_bytes = artifact.report().estimate.incremental_plan_bytes;
+        // The whole-plan figure, builtin banks attached: the one the compile caps (#964).
+        let minimum_plan_bytes = artifact.graph_resource_estimate().incremental_plan_bytes;
 
         let envelope = artifact.envelope();
         let frames = envelope.quantum.0 as usize;
@@ -12745,6 +12805,7 @@ mod tests {
             artifact.report().estimate.session_plus_plan_bytes,
             scalar_artifact.report().estimate.session_plus_plan_bytes + bank_overhead
         );
+        assert_builtin_attachment_matches(&artifact, &scalar_artifact, "transient shaper");
         assert_eq!(
             artifact.graph().sequential_schedule,
             scalar_artifact.graph().sequential_schedule
@@ -12773,7 +12834,8 @@ mod tests {
         let expected_canonical_bytes = GraphCompiler::evidence(artifact.graph(), artifact.report())
             .canonical_bytes
             .clone();
-        let minimum_plan_bytes = artifact.report().estimate.incremental_plan_bytes;
+        // The whole-plan figure, builtin banks attached: the one the compile caps (#964).
+        let minimum_plan_bytes = artifact.graph_resource_estimate().incremental_plan_bytes;
 
         let envelope = artifact.envelope();
         let frames = envelope.quantum.0 as usize;
@@ -13054,7 +13116,8 @@ mod tests {
         let expected_canonical = GraphCompiler::evidence(artifact.graph(), artifact.report())
             .canonical_bytes
             .clone();
-        let minimum_plan_bytes = artifact.report().estimate.incremental_plan_bytes;
+        // The whole-plan figure, builtin banks attached: the one the compile caps (#964).
+        let minimum_plan_bytes = artifact.graph_resource_estimate().incremental_plan_bytes;
 
         let frames = artifact.envelope().quantum.0 as usize;
         let mut plan = bind_session_builtins(artifact, delay_input_binding, Vec::new());
