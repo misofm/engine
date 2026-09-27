@@ -1825,7 +1825,8 @@ impl<'a> ResidentOutputLane<'a> {
 ///
 /// # The mono collapse
 ///
-/// A chain whose every active lane renders a track doing bit-identical work on both channels runs
+/// A chain that gathers its tracks' inputs (issue #970) and whose every active lane renders a track
+/// doing bit-identical work on both channels runs
 /// its **upstream** slots over one plane and duplicates that plane into its seam-side slots. The
 /// whole mechanism is four decisions and one copy:
 ///
@@ -2746,7 +2747,9 @@ impl BankChain {
     /// Record the structural half of this cohort's witness: the `SOURCE` term, joined at bind.
     ///
     /// `structural` is "every active lane of this chain renders a track whose two channels read
-    /// one source channel". Passing `false`, or never calling this at all, makes the chain decline
+    /// one source channel **and this chain gathers that track's input**" (issue #970: a later chain
+    /// of a split strip reads planes an earlier stage produced, which the source mapping says
+    /// nothing about). Passing `false`, or never calling this at all, makes the chain decline
     /// forever. See the `collapse_source` field for why the chain cannot derive this itself.
     ///
     /// # The obligation, which M3's invariant rests on
