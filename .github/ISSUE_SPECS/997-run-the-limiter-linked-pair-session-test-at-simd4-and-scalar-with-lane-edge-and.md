@@ -163,3 +163,103 @@ directory and the worktree's `target/` were deleted afterwards.
   carries the #996 verification's finding 4: the compressors-in-circuit note did not reproduce.
   The note was annotated, not deleted.
 * **Out of scope, as the spec says:** the wasm guest.
+
+## Sol attempt 1 verdict: PASS
+
+Reviewer: Sol, 2026-09-27, on `6f85dc6a`, and merged onto the batch head `60d4f1b6`. The merge
+adds documents only. Branch code untouched. Every mutation was applied to a scratch copy, and
+`src/lib.rs` was checked byte-identical by SHA-256 after each row. Scratch trees, harnesses and
+target directories were deleted.
+
+### What was reproduced
+
+* **The pin is honest.** Each tree was built in its own **fresh** target directory, and the
+  compile log was checked to show the limiter compiled from that tree. As a canary, the base test
+  binaries hold no `designed_gain_agree` symbol and the head's does.
+  * `6d87267b…` renders at `Simd8`, `Simd4` and `Scalar`, in dev and in release, on:
+    * the branch with the whole `crates/true-peak-limiter` from `bbcf8ce1`;
+    * the complete `bbcf8ce1` tree plus this module;
+    * the head.
+  * At eight seeds of my own (`0x1`, `0x2`, `0xBEEF`, `0xC0FFEE`, `0x1234`, `0x4D`, `0xA5A5`,
+    `0x5EED`), base and head render identical digests at every width, and every check holds
+    unmutated.
+* **The mutation table.** All eleven rows are red at every width with the recorded digests, and
+  fire the recorded checks. At my eight seeds every row is red at 8 of 8 at every width.
+* **Mutations of my own.** Each is red at 8 of 8 seeds at every width:
+  * R6L: the right required store keeps the last lane's old word;
+  * B20: the right box store keeps lane 0's old word;
+  * M9L: M9 on the last lane only;
+  * M70: the right box-sum copy misses lane 0.
+
+  Also red at the pinned seed at every width:
+  * X1: the shared gain fed by the left detector alone;
+  * X2: the decision a block late;
+  * X10: the linked body run while the record is cleared.
+* **The lane assertion reads the real plan.**
+  * Under S0 and SL, the readings move on exactly the tracks the plan places on lane 0 and on the
+    last lane. That is 6 W8 banks and 7 W4 banks each, and M9 moves the same 11 pairs at every
+    width.
+  * Moving `ch48`'s rows to `ch49` fires the assertion at `Simd8`, with lanes `[3, 2, 1, 5, 4, 7,
+    6, 1]`.
+  * At `Simd4` the plan has 16 one-stage and 16 three-stage banked units over the same four-track
+    groups. At `Simd8` it has 8 six-stage chains.
+* **Gates**, on the merged tree:
+  * `cargo fmt --all --check` is clean;
+  * clippy with `-D warnings` is clean at workspace, all targets, with and without
+    `--all-features`, and for `-p host-core` alone;
+  * host-core, all targets, passes in dev with `test-debug-a`'s features (227 tests) and in release
+    (182 tests);
+  * `console-workload` release: 39 of 39.
+* **Policies** ok: host-core (check and mutation test), workspace, env vocabulary (check and
+  mutation test), realtime, realtime-audit-leak, artifact-evidence-leak, dsp-research, session,
+  lane, effect-runtime, builtins, graph and rack. The CI routing contract is ok.
+* **Runtime**, dev, under the timing lock at host load 8-9: 3.2-3.6 s on the default parallel
+  harness, 7.4 s on one thread. It is under the 10 s gate.
+
+### Rulings asked of the verifier
+
+* **`src/` over `tests/`: accepted.**
+  * The seam is `#[cfg(test)] pub(crate)`. Widening it would publish a backend override that
+    production must not call (production is pinned to `Backend::current()`).
+  * Gating it on host-core's `test-support` feature would not work either. CI's `test-debug-a`
+    does not enable that feature, so a `tests/` file behind `required-features` would silently
+    not run.
+  * The unit module runs wherever host-core's lib tests run: `test-debug-a` runs
+    `--workspace --all-targets`, and host-core is not excluded. There is precedent in
+    `builtin_batch_endpoint.rs`, which reads fixtures through `include_str!` from `#[cfg(test)]`
+    code.
+  * The module does not ship. Non-test builds of host-core (dev, and release with
+    `--all-features`) contain none of its strings, while the test binary does.
+* **Dropping #996's `tests/` file loses no coverage.**
+  * #996 prepared through `prepare_host_session_with_console`. That is `compile_host_session`
+    plus the same policy call the seam makes, with `Backend::current()`. So the `Simd8` test is
+    the public path on x86-64, and the `Simd4` test is the public path on AArch64.
+  * host-core's other `#[cfg(test)]` sites are test modules or spectrum test constructors. None
+    touches this render path.
+  * The scenario is a superset of #996's: `ch18`'s ramp is widened to its whole bank, and `ch37`
+    moves to `ch38` with lane 5 still covered by `ch29`. The only thing gone is a bank that stays
+    linked for all 96 blocks. That bank was a diagnostic control, not a gate, and the longest
+    linked stretch is now 85 blocks.
+  * Both the old file and the new module run in the same CI job, in dev.
+
+### Findings (none fails a gate)
+
+1. **Info.** A mutation that writes the right `prefix` back from its stale register (#990 M10
+   without the phase) is red at `Simd8` and `Simd4` at 8 of 8 seeds. At `Scalar` it is red at
+   7 of 8, and green at the pinned seed. The kernel's gates own it, and it is outside this brief.
+2. **Info.** The lane assertion's message reads as a statement of success ("some bank is unlinked
+   by a retarget on its lane 0"). "no bank is unlinked from lane 0" would read better when it
+   fires.
+
+### Erratum to the #996 verdict (Sol)
+
+That verdict's pin reproduction used one target directory shared across scratch trees. The trees
+came from `git archive`, which carries old file mtimes, and cargo keys workspace members by
+package-relative paths. So later trees could reuse earlier artifacts; this was confirmed here, when
+a head build reused a sibling tree's binary. Its base and merged rows are therefore not evidence.
+
+* Re-run in fresh target directories, with the same compile witness and canary: #996's head
+  `53fa26bb`, and that tree with the whole limiter crate at `bbcf8ce1`, both render `b22ef17c…` in
+  dev and in release. The conclusion stands.
+* The #996 verdict's mutation and width rows are unaffected, because every mutated or copied file
+  carried a new mtime.
