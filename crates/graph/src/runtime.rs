@@ -4778,7 +4778,7 @@ pub fn test_only_source_plane_counts() -> [u64; 3] {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn test_only_count_source_plane(slot: usize) {
+fn test_only_count_source_plane(slot: usize) {
     SOURCE_PLANE_COUNTS.with(|counts| {
         let mut value = counts.get();
         value[slot] += 1;
@@ -12900,7 +12900,9 @@ mod tests {
     enum PlayedBlock {
         /// A whole quantum.
         Full,
-        /// This many played frames, then `+0.0` to the quantum: a short end-of-region block.
+        /// This many played frames, then `+0.0` to the quantum: a short end-of-region block. The
+        /// count is capped one frame below the quantum, so the block is short at every quantum;
+        /// at the quanta issue #918's gate 1 renders (13 and 16) the cap changes nothing.
         Short(usize),
         /// Nothing was played: the whole quantum is the underrun.
         Underrun,
@@ -12956,7 +12958,7 @@ mod tests {
             let block = (first_sample / u64::from(frames)) as usize;
             let played = match PLAYED_SCRIPT[block % PLAYED_SCRIPT.len()] {
                 PlayedBlock::Full => Some(self.frames),
-                PlayedBlock::Short(played) => Some(played),
+                PlayedBlock::Short(played) => Some(played.min(self.frames - 1)),
                 PlayedBlock::Underrun => None,
             };
             self.played = played.is_some();
@@ -12967,8 +12969,12 @@ mod tests {
                     for word in &mut plane[..played] {
                         *word = lcg(&mut state);
                     }
-                    // A negative zero survives only a bit-exact path.
-                    plane[0] = -0.0;
+                    // A negative zero survives only a bit-exact path. A block of one played frame
+                    // keeps its noise word, so a one-frame quantum still carries audio; at every
+                    // quantum issue #918's gate 1 renders, at least nine frames play.
+                    if played > 1 {
+                        plane[0] = -0.0;
+                    }
                     plane[played..].fill(0.0);
                 }
             }
@@ -13704,9 +13710,10 @@ mod tests {
     // Issue #936 on issue #918's banked source fixture (ported by issue #957).
     // -----------------------------------------------------------------------------------------
 
-    /// The quanta every ported issue #936 shape renders at: each longer than [`PLAYED_SCRIPT`]'s
-    /// nine-frame short block, three of them with a ragged four-lane tail.
-    const INERT_FRAMES: [u32; 4] = [10, 13, 16, 128];
+    /// The quanta every ported issue #936 shape renders at, #936's own: one frame (a tail and no
+    /// vector, and a `(3, 5)` delay line longer than the quantum), seven (a ragged four-lane
+    /// tail), and two whole multiples. [`PLAYED_SCRIPT`]'s short block is capped below each.
+    const INERT_FRAMES: [u32; 4] = [1, 7, 16, 128];
 
     /// The blocks each ported gate renders: [`PLAYED_SCRIPT`] twice over.
     const INERT_BLOCKS: u64 = 16;
@@ -13727,7 +13734,9 @@ mod tests {
         /// A meter on `K`'s `PostSimd1`, a rack boundary between `K`'s input and its bank stage.
         /// The boundary is an elided alias of the input's buffer, so its meter binds to the input
         /// op (clause (c) through the alias). It meters with the observed input's handle, so the
-        /// two observed shapes digest alike.
+        /// two observed shapes digest alike. The order is test-only: no with-builtins compile puts
+        /// `PostSimd1` before the builtin bank. It is the graph layer's shape of an elided alias
+        /// directly on a claimed input, and a rack boundary is an alias whatever the plan lists.
         ObservedAlias,
         /// `K`'s input is delayed in place (`NodeKind::TrackDelay`, clause (a)).
         TrackDelayed,
@@ -13762,10 +13771,10 @@ mod tests {
     /// loop dispatched every unit. The two observed shapes meter the same words under one handle,
     /// so their digests agree.
     const INERT_PRE_CHANGE: [(InertShape, u64); 4] = [
-        (InertShape::Plain, 0x3adf_c3ee_a1b4_75ab),
-        (InertShape::ObservedInput, 0x51c6_c3cf_4cdc_5509),
-        (InertShape::ObservedAlias, 0x51c6_c3cf_4cdc_5509),
-        (InertShape::TrackDelayed, 0xd1eb_c3d4_2404_cb33),
+        (InertShape::Plain, 0x59ac_7ce2_0913_f0e1),
+        (InertShape::ObservedInput, 0x57be_32ec_07e5_88cd),
+        (InertShape::ObservedAlias, 0x57be_32ec_07e5_88cd),
+        (InertShape::TrackDelayed, 0x5669_2e20_31f4_30b1),
     ];
 
     /// One more `u64` into a running FNV-1a hash, byte by byte.
@@ -13919,6 +13928,15 @@ mod tests {
                     meters_per_block * INERT_BLOCKS as usize,
                     "{case}: every meter published every block"
                 );
+                let stride = frames as usize + 3;
+                assert!(
+                    run.run.masters.iter().any(|master| master
+                        .iter()
+                        .enumerate()
+                        .any(|(index, word)| index % stride < frames as usize
+                            && *word & 0x7fff_ffff != 0)),
+                    "{case}: the master carries audio"
+                );
                 combined = inert_fnv(combined, run.run.digest());
                 run
             })
@@ -13937,7 +13955,7 @@ mod tests {
 
     /// Issue #936 gate 1, ported by issue #957 onto issue #918's banked fixture: six tracks
     /// `Input -> PostInputBuiltins (a four-lane and a two-lane bank) -> Route -> Output`, every
-    /// claim gathered in place by its bank ([`InertShape::Plain`]), frames `{10, 13, 16, 128}`,
+    /// claim gathered in place by its bank ([`InertShape::Plain`]), frames `{1, 7, 16, 128}`,
     /// sixteen blocks of [`PLAYED_SCRIPT`] with every claim's slot poisoned before each.
     ///
     /// The six input units are plain unobserved source inputs, which bind leaves out of the
@@ -13965,7 +13983,7 @@ mod tests {
     /// and its bank stage, which is an elided alias whose observer binds to the input op. Either
     /// way `K`'s input op holds an observer and its unit is `observed`, so the table is every unit
     /// but the other five inputs, dispatched every block. The observer also keeps `K`'s claim on
-    /// the copy, so `K`'s lane gathers the arena. Over sixteen blocks at frames `{10, 13, 16, 128}`,
+    /// the copy, so `K`'s lane gathers the arena. Over sixteen blocks at frames `{1, 7, 16, 128}`,
     /// the `K` meter publishes every block, and every meter window and host word is the base
     /// tree's ([`INERT_PRE_CHANGE`]).
     ///
@@ -13995,7 +14013,7 @@ mod tests {
     /// [`InertShape::TrackDelayed`] delays track `K`'s input by `(3, 5)` samples, so `K`'s claim
     /// keeps the copy, its delay line runs over the copied words and `K`'s lane gathers the arena.
     /// The table is every unit but the other five inputs; over sixteen blocks at frames
-    /// `{10, 13, 16, 128}` every host word and meter window is the base tree's
+    /// `{1, 7, 16, 128}` every host word and meter window is the base tree's
     /// ([`INERT_PRE_CHANGE`]).
     ///
     /// Red mutations: `crates/graph/tests/MUTATIONS.md`, issues #936 and #957.
@@ -14079,21 +14097,21 @@ mod tests {
     /// [`INERT_FRAMES`], recorded by this fixture compiled against `64b155d0`, as
     /// [`INERT_PRE_CHANGE`] is.
     const DEAD_CLAIM_PRE_CHANGE: [(bool, u64); 2] = [
-        (false, 0xe889_005e_2b7c_170c),
-        (true, 0xe889_005e_2b7c_170c),
+        (false, 0x6813_ae30_0a55_754d),
+        (true, 0x6813_ae30_0a55_754d),
     ];
 
     /// Issue #927's dead claim, ported by issue #957 onto issue #918's banked fixture: the only
     /// test of clause (b)'s zero-reader arm, which binds a claim nothing reads in place, and whose
-    /// slot the colouring then hands to a later value.
+    /// slot the colouring then hands to a later value that a bank gathers.
     ///
     /// [`SourceShape::dead`] adds `track99`'s claimed `Input`, which nothing reads, last among the
-    /// six inputs of the `W4 x 6` plan. It is checked to build its hazard on the lowered program:
-    /// the dead input's slot is freed at once, and a later op writes it and a later op reads it
-    /// (the first bank member's dedicated output and its route). With the redirects bound, the
-    /// bank's scatter then leaves that slot for its route's buffer; with them declined, the bank
-    /// scatters into it and the route reads it from the arena. Both arms, at frames
-    /// `{10, 13, 16, 128}` ([`render_source_shape`], every claim's slot poisoned before each block):
+    /// six inputs of a `W4 x 6` plan with two bank stages, `PostInputBuiltins` then `PostMatrix`.
+    /// The dead input's slot is freed at once and handed to a later value, and the table names it
+    /// for the dead claim, so only the lane marking keeps a gather of that slot on the arena. The
+    /// test checks, on the bound runtime, that the hazard is built: a bank after the dead input
+    /// gathers the slot on a lane its unit does not mark. Both redirect arms, at frames
+    /// `{1, 7, 16, 128}` ([`render_source_shape`], every claim's slot poisoned before each block):
     ///
     /// * **The mode table.** In place: all seven claims, the dead one by the zero-reader arm.
     ///   Declined: none.
@@ -14116,26 +14134,48 @@ mod tests {
                 let shape = SourceShape {
                     dead: true,
                     redirect_declined,
+                    stages: &[TrackStage::PostInputBuiltins, TrackStage::PostMatrix],
                     ..SourceShape::banked(BankWidth::Four, 6, frames)
                 };
                 let case = format!("{shape:?}");
-                let (plan, _, _) = source_fixture_parts(shape, &Published::default());
-                let program = plan.lowered().expect("lowered");
-                let dead = GraphNodeId::TrackStage {
-                    track_id: crate::StableGraphId::parse("track99").expect("stable id"),
-                    stage: TrackStage::Input,
-                };
-                let index = crate::program::node_index(&plan.spec, &dead).expect("dead input");
-                let dead_op = program.node_op[index as usize].expect("dead input op") as usize;
-                let slot = program.node_buffer[index as usize];
-                let later = &program.ops[dead_op + 1..];
-                assert!(
-                    later.iter().any(|op| op.output == slot)
-                        && later.iter().any(|op| program
-                            .inputs_of(op)
+                let (plan, bindings, source_set) =
+                    source_fixture_parts(shape, &Published::default());
+                let slot = source_slots(&plan, shape)[shape.tracks];
+                test_only_set_scatter_redirect_declined(redirect_declined);
+                let (executor, _, _) = bind_executor(plan, bindings, false, Some(source_set));
+                test_only_set_scatter_redirect_declined(false);
+                let runtime = &executor.runtime;
+                let dead_unit = runtime
+                    .units
+                    .iter()
+                    .position(|unit| {
+                        matches!(unit, RuntimeUnit::Op(op)
+                            if op.output == slot && matches!(op.kind, NodeKind::SourceInput))
+                    })
+                    .expect("the dead input's unit");
+                let unmarked_gathers = runtime
+                    .units
+                    .iter()
+                    .enumerate()
+                    .skip(dead_unit + 1)
+                    .filter_map(|(unit, bank)| match bank {
+                        RuntimeUnit::Bank { members, lanes, .. } => Some((unit, members, *lanes)),
+                        RuntimeUnit::Op(_) => None,
+                    })
+                    .flat_map(|(unit, members, lanes)| {
+                        members[..lanes]
                             .iter()
-                            .any(|input| input.buffer == slot)),
-                    "{case}: the dead claim's slot is recoloured to a value a later op reads"
+                            .enumerate()
+                            .map(move |(lane, member)| (unit, lane, member))
+                    })
+                    .filter(|(unit, lane, member)| {
+                        bank_gather_source(member).unwrap_or(member.output) == slot
+                            && runtime.identity[*unit].source_lanes & (1 << lane) == 0
+                    })
+                    .count();
+                assert!(
+                    unmarked_gathers > 0,
+                    "{case}: a later bank gathers the dead claim's recoloured slot, unmarked"
                 );
                 let in_place = render_source_shape(shape, false);
                 let copy = render_source_shape(shape, true);
@@ -14159,6 +14199,14 @@ mod tests {
                         PLAYED_SCRIPT[block]
                     );
                 }
+                assert!(
+                    in_place
+                        .masters
+                        .iter()
+                        .flatten()
+                        .any(|word| *word & 0x7fff_ffff != 0),
+                    "{case}: the master carries audio"
+                );
                 assert_eq!(
                     in_place.meters, copy.meters,
                     "{case}: every meter window is the copy arm's"

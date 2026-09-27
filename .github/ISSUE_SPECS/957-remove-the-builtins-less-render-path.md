@@ -227,9 +227,10 @@ blocks of `PLAYED_SCRIPT`, host stride `frames + 3`, every claim's slot poisoned
   `64b155d0`, whose loop dispatched every unit. It printed the digests above. The same recorder on
   this issue's base (`d86dd62d`, before the deletion) printed the same six values, and the ported
   gates pass after the deletion, so the deletion moves no bit.
-- **Deviation: frames.** #936 used `{1, 7, 16, 128}`. #918's `PLAYED_SCRIPT` has a nine-frame short
-  block, which panics below nine frames, so the port uses `{10, 13, 16, 128}` (the short block is
-  short at every quantum; three quanta have a ragged four-lane tail).
+- **Deviation: frames** (withdrawn in the follow-up below, which restores `{1, 7, 16, 128}`).
+  #936 used `{1, 7, 16, 128}`. #918's `PLAYED_SCRIPT` has a nine-frame short block, which panics
+  below nine frames, so the port uses `{10, 13, 16, 128}` (the short block is short at every
+  quantum; three quanta have a ragged four-lane tail).
 - **Gate 5** is renamed from `the_metadata_charge_covers_the_ring_plans_executor_tables`, and it now
   also asserts that the table is nine units whether the claims are copied or not.
 - **DeadClaim (amendment 3), ported.** The test checks, on the lowered program, that the dead
@@ -237,11 +238,11 @@ blocks of `PLAYED_SCRIPT`, host stride `frames + 3`, every claim's slot poisoned
   dedicated output and its route). Bound, the scatter redirect then leaves that slot for the
   route's buffer; declined, the bank scatters into it and the route reads it from the arena. The
   mode table is all seven claims in place, the counts are `[0, 6 × 7, 6 × 1]` against the copy
-  arm's `[7 × 8, 0, 0]`, and the bits equal the copy arm's. Limitation: #927's shape recoloured the
-  dead slot to an Output input, which read by position; on the banked fixture the next op after
-  the inputs is a bank member, so no bank *gathers* the recoloured slot, and the port's red
-  mutation (957-4) is mode-level. A bank gather of a dead slot would need a scalar stage between the
-  inputs and the first bank, which the fixture cannot express without a new stage kind.
+  arm's `[7 × 8, 0, 0]`, and the bits equal the copy arm's. Limitation: no bank *gathers* the
+  recoloured slot in this shape, so a lane-marking leak stays green on it. **Corrected (Sol's
+  finding 1):** this paragraph first said a bank gather of a dead slot needs a stage the fixture
+  cannot express. That is wrong: two bank stages (`PostInputBuiltins` then `PostMatrix`) build it,
+  and the follow-up below makes the test that shape.
 
 ### Deleted tests, and why
 
@@ -321,7 +322,8 @@ All in `crates/graph`. Graph lib tests go from 114 to 108; rt10 from 2 to 1.
    - skip a `TrackDelay` unit (957-3): RED on gate 3; bits-only RED on its digest (the undelayed
      `Plain` digest).
    - the dead claim (957-4, clause (b) refuses a zero-reader claim): RED at its mode table;
-     bits-only GREEN, disclosed.
+     bits-only GREEN, disclosed. (A lane-marking leak stayed green on this attempt's dead claim
+     test; the follow-up below fixes that, row 957-5.)
 9. **Build, lint, tests, scripts** (`scratchpad/957/gates.sh` on `bf3bacab`'s tree, one log per
    step, all exit 0; after `10b53a56`, which changes one assertion message in a test, `cargo fmt
    --all --check`, `cargo clippy -p graph --all-targets --all-features -- -D warnings` and both graph
@@ -358,7 +360,8 @@ All in `crates/graph`. Graph lib tests go from 114 to 108; rt10 from 2 to 1.
    stays banked and the alias meter alone keeps its copy and its dispatch. With `routed` the same
    field would put the alias before the route, as VERIFY.md §7 describes; the gate does not use that
    combination.
-5. **Amendment 3: ported, with a limit** (the ported-gates section above, and row 957-4).
+5. **Amendment 3: ported, with a limit** (the ported-gates section above, and row 957-4). The
+   limit and its stated reason are corrected in the follow-up below.
 6. **A hazard kept in prose, not fixed.** Deleting clause (e) removes the only clause that named
    the colouring exposure of an input scheduled after a value that takes its slot. That exposure
    stays for (b) on hand-built plans (no compiled plan builds it: with builtins every input has a
@@ -468,3 +471,50 @@ boundary is always an alias, this gate survives #958, which #936's `PostFader` s
    AudioWorklet pin were already stale before this branch. Because of the pin, the delivery script
    refuses before it copies anything, so gate 6's check can only run on a hand-assembled set until
    the batch boundary re-pins.
+
+## Attempt 1 follow-up: Sol's findings 1-4
+
+Implementer: Claude Opus 5.5, 2026-09-27, on `d802f5c1`. Test-only in effect: `runtime.rs` +89/−41,
+all in `#[cfg(test)]` code except one `#[cfg(any(test, feature = "test-support"))]` counter helper
+made private. Same host and settings as attempt 1; `target/` deleted afterwards.
+
+1. **Finding 1, the dead claim now sees its hazard.**
+   - `a_claim_nothing_reads_is_bound_in_place_and_its_recoloured_slot_moves_no_bit` runs Sol's shape:
+     `SourceShape { dead: true, stages: &[PostInputBuiltins, PostMatrix], ..banked(Four, 6, f) }`.
+   - Its structural check moved from the lowered program to the bound runtime. In each redirect arm
+     and at each quantum, it requires a bank unit after the dead input's unit whose lane gathers
+     the dead slot (`bank_gather_source(member).unwrap_or(member.output)`) while its unit's
+     `source_lanes` leaves that lane unmarked. It passes in both arms at all four quanta.
+   - Red proof. A gather that ignores `source_lanes` (row 957-5, 918-5's form) turns it RED at the
+     bits: `dead: true, 1 frames, redirects bound, block 0 (Full): the master is the copy arm's`.
+     The same happens with the mode table and counters made vacuous, and with a leak limited to the
+     dead claim's index (957-5b). Under 957-5 attempt 1's test stayed GREEN (Sol's verdict).
+   - The wrong reason is corrected in place: the attempt 1 evidence and `MUTATIONS.md` row 957-4
+     said the fixture could not express a bank gather of the dead slot. It can.
+2. **Finding 2, the one- and seven-frame quanta are restored.** `INERT_FRAMES` is #936's
+   `{1, 7, 16, 128}` again. That took two fixture changes in `PlayedSource::begin_block`:
+   - `Short(played)` is capped at `quantum − 1`.
+   - A block of one played frame keeps its noise word instead of taking the `-0.0` marker.
+   Without the second change, every word a one-frame quantum plays is `-0.0`. Under that data
+   957-5 first stayed green at one frame; it failed only on the counters.
+   Both changes are inert at the quanta #918's gate 1 renders (13 and 16, at least nine frames
+   played), and its pins pass unchanged. The ported gates and the dead claim test now also assert
+   that the master carries audio (a word that is not `±0`) at every quantum.
+3. **Re-recorded pins.** The scratch recorder (`scratchpad/957/record-on-64b155d0-2.patch`) ran on a
+   detached `64b155d0`, whose #918 fixture region was first checked byte-identical to the head's
+   (739 lines). It printed exactly the head's values:
+
+   | shape | digest (`64b155d0` = head) |
+   |---|---|
+   | `Plain` | `0x59ac_7ce2_0913_f0e1` |
+   | `ObservedInput`, `ObservedAlias` | `0x57be_32ec_07e5_88cd` |
+   | `TrackDelayed` | `0x5669_2e20_31f4_30b1` |
+   | dead claim, redirects bound and declined (in-place = copy) | `0x6813_ae30_0a55_754d` |
+4. **Findings 3 and 4.** `InertShape::ObservedAlias`'s doc says the `Input → PostSimd1 → bank` order
+   is test-only. `test_only_count_source_plane` is private again.
+5. **Mutations re-run on this tree** (`MUTATIONS.md`, #957 follow-up table): 957-1 RED (tables),
+   957-2 and 957-3 bits-only RED on the new digests, 957-4 RED at the mode table (bits-only GREEN,
+   corrected reason), 957-5 and 957-5b RED at the bits.
+6. **Gates:** `cargo fmt --all --check`; `cargo clippy --locked --workspace --all-targets
+   --all-features -- -D warnings` (exit 0); `cargo test --locked -p graph` (108/1/1/1) and
+   `--features test-support` (108/1/1/8), all green.
