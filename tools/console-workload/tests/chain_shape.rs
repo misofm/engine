@@ -909,6 +909,57 @@ fn the_plumbing_row_is_input_route_output_and_renders_the_base_bits() {
     assert_eq!(runtime.symmetry_counters(), [1, 65]);
 }
 
+/// Issue #944: the settled pan matrix takes a select-free arm when no lane of its bank is the
+/// identity, and every row that renders a banked matrix renders the bits it rendered before.
+///
+/// Every banked row prepares builtins through `Concurrent` delivery, so its fader and matrix are
+/// never paired and each bank's matrix renders through `MatrixStage::process`. No standing row has
+/// an identity lane in a full bank -- the pan law's `cos(pi / 2)` is `6.1e-17`, not `0.0`, and
+/// `dispatch_only`'s pan is hard right on both inputs -- so all of these rows take the new arm on
+/// every bank. Class A: `select(no lane, a, b)` is `b`, bit for bit. The four pins are the 64-block
+/// digests of `14f2917b`, unchanged by #936 and #945 on the base of this issue. The plumbing row
+/// binds no bank and must not move either; its own pin is
+/// `the_plumbing_row_is_input_route_output_and_renders_the_base_bits`.
+///
+/// Red mutation (issue #944 M3, `crates/builtins/tests/MUTATIONS.md`): swap `lr` and `rl` in
+/// `matrix2x2_block_without_identity`; every pin below moves.
+#[test]
+fn the_select_free_matrix_arm_renders_the_base_bits() {
+    const BASE_DIGESTS: [(Workload, &str); 4] = [
+        (
+            Workload::SixtyFourTrackGainPanOnly,
+            "01e465a797036fb4267e895d9319a911bc108d554705d268d9a84a2e2e2dfdb4",
+        ),
+        (
+            Workload::SixtyFourTrackDispatchOnly,
+            "15688888612d161e507bc400b9eed356fc1776797c8c66ca52d1e7c9114d3a2d",
+        ),
+        (
+            Workload::SixtyFourTrackBuiltinsOnly,
+            "b63eccd09c19eb7a6e0608144024ac5b14c7d5f7d1c56012cbbd49d6aad8f7f0",
+        ),
+        (
+            Workload::SixtyFourTrackConsole,
+            "fe5bed9becdbc101d7ad4b77e7e1969ca3888cae34857333f79531b03a4868de",
+        ),
+    ];
+    for (workload, base) in BASE_DIGESTS {
+        let (digest, shape, _) = render(workload, PlanConfig::BASELINE, BLOCKS);
+        assert_ne!(
+            shape,
+            [0, 0],
+            "{}: the row binds bank chains",
+            workload.kind()
+        );
+        assert_eq!(
+            digest,
+            base,
+            "{}: the select-free matrix arm moved a bit",
+            workload.kind()
+        );
+    }
+}
+
 /// The folded master carries the reduction's own bits, and the declined arm is the oracle that says
 /// so.
 ///
