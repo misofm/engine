@@ -272,3 +272,101 @@ registers and a splat).
    `build_arm.sh`, `v8web.sh`, `webhold.sh`, `nathold.sh`, `webpool.py`, `natpool.py`, `mutate.sh`,
    the hold logs, the V8 listings, and the rebuilt differential harness (`diff/`); target
    directories and source copies were deleted.
+
+## Sol attempt 1 verdict: FAIL
+
+Verifier: Sol, 2026-09-27, on `a9adc750`, judged merged onto the current batch head `b03edde4`,
+which carries #1000's V8 spill gate. The merge is clean (`git merge-tree`), and between `fc43c97d`
+and `b03edde4` the batch changed nothing in `lane`, `parametric-eq`, `effect-runtime` or
+`host-web`. Every arm was built from `git archive` into its own target, `CARGO_INCREMENTAL=0`,
+outside the lock.
+
+**The change is exact (class A).**
+
+- **The verdict is `check_block`'s.** `StoreBound` folds the same predicate, `abs(y).lt(limit)`,
+  over exactly the words the depth-one tail stores, and those are the block's final words.
+  Elided sections after the tail do not run, and nothing writes the planes between the cascade and
+  the check. For a masked tail it is the selected word.
+- **Same fold, same range.** The fold starts from the same all-true mask and reduces with
+  `mask_any(mask_not)`. `render`'s planes are exactly `frames * W` words (`EffectProcessBlock` and
+  `EffectBankProcessBlock` enforce it), so the fold and the scan cover the same range.
+- **Zeroing and reset.** A failing verdict still runs `nonfinite_lane_mask` and zeroes and resets
+  from the plane, so both are unchanged.
+- **Which blocks fold.** Only an odd, admitted list returns a verdict. Ramped, refused, all-live,
+  nothing-live and even-length lists still scan.
+
+**Differential.** My harness adds a block-limit shape: a 0 dB bell that stores its input
+unchanged, dry LPF lanes, and input at `1e30`, one ulp below, `9.99e29` and `+0.0`. Against
+`b03edde4`:
+
+| build | differing runs |
+|---|---|
+| native release | 0 of 140,000 |
+| native dev | 0 of 4,200 |
+| wasm `simd128` release | 0 of 28,000 |
+| wasm `simd128` dev | 0 of 1,400 |
+
+Those runs contain 3.94M folded blocks: 692k faulted, and 585k carried input at or above the
+limit's predecessor. The 90 native and 30 wasm console digests are identical.
+
+**Mutations and gates.** M1 (the second stream ignored), M2 (`<=`) and M3 (a pass verdict on the
+six-entry list) are red when re-run in a scratch copy; M3 also turns the pinned bank scenario red.
+On the merged tree these are green:
+
+- `-p parametric-eq`, 111 passed and 3 ignored, dev and release, with and without `test-support`;
+- `-p lane` 70; effect-runtime, console-workload (dev and release), `chain_shape`,
+  builtins-compiler, `wasm-gates` tests, bench floor;
+- fmt, clippy and doc `-D warnings`;
+- the lane, realtime, EQ-contract, env-vocabulary, unfused-seal and workspace policies, and
+  `test-console-benchmark.sh`.
+
+**AudioWorklet checks.** The render, `meter_poll` and `command_submit` callgraphs are identical to
+base. Rule 3 holds: 14 kernels, `--kernel-min 11`. The roster is unchanged, EQ dual 672 and
+collapsed 336 with scalar 0; the fold's `f32x4.abs`/`lt`/`v128.and` are not counted.
+
+Findings:
+
+1. **HIGH (blocking): the merge fails the batch's wasm gates.** `bash scripts/run-wasm-gates.sh` on
+   the merged tree exits 1. So does
+   `scripts/check-web-audioworklet-v8-spill.py <merged host_web.wasm>`, while the batch head's
+   artifact passes:
+
+   ```text
+   FAIL dual depth-1 tail, select-free: V8 carries [rbp-0x100], [rbp-0x120] from one iteration to the next (96 instructions ...)
+   ```
+
+   - **What the slots are.** They are the tail's two new verdict accumulators. V8 stores each at the
+     loop top and reloads it just before its `vpand`, so `acc = acc AND cmp` runs through memory
+     every iteration. This is a real recurrence through a slot, and the path crosses the loop
+     header, so #1009's planned fix for intra-iteration false positives will not clear it.
+   - **Benign for speed?** Probably. The chain is one `vpand` plus a store-to-load forward, far off
+     the roughly 20-cycle integrator recurrence, and the one-band timing is faster. But the gate is
+     `qualification.yml`'s `wasm-guests` job, which the merge must pass. The implementer's evidence
+     predates #1000, so this could not have been seen then.
+   - **A remedy exists.** I built one scratch variant: keep a per-stream `bool` and fold
+     `failed |= mask_any(mask_not(abs(y) < limit))` at each store. It is the same predicate, so it
+     is exact by construction. It passes the spill gate: tail 109 instructions, no carried slot,
+     mono tail 53.
+   - **For attempt 2.** Adopt that or an equivalent. Show the spill gate green on the merge. Re-time
+     one band against the batch head, since the variant adds a `movmsk`/`or` per stored vector. Do
+     not loosen the gate.
+2. **INFO (timing).**
+   - **My own holds are inconclusive.** I ran two, under `timing.lock` with `taskset -c 31`, but other
+     agents held the host at load average 18-31, and only 2 of 14 web invocations meet the
+     implementer's undisturbed rule. Those two read one band -0.47 us and two bands -0.48 us.
+   - **The implementer's filter is sound.** It drops whole invocations, both arms at once, on
+     within-invocation dispersion only. The three it dropped had two-band deltas of -0.71, +2.48 and
+     -13.97, mixed in sign. Dropping them moves the pooled two-band delta from -0.60 to +0.10, which
+     is against the change.
+   - **The +0.35 us is not supported.** Holds 1-3's two-band +0.35 us (5 of 6 positive) is
+     contradicted by holds 4-5's nine undisturbed pairs (-0.07). Pooled, 7 of 15 are lower. The pair
+     path's source is unchanged, and V8's pair loops keep their shape. I read it as noise. It is not
+     a regression shown.
+3. **LOW.** The pair was left unfolded on evidence (v1 carried four slots, two of them integrators).
+   Deviation 1 narrows the brief's "pair or tail" correctly and should be recorded on the issue.
+
+**#998.** It should not start on top of this branch yet. Attempt 2 will rewrite the same depth-one
+tail and its accumulators. #998 then edits `cascade_sections` and the state-write sites in the same
+`process_bank` body, whose V8 allocation both issues must keep green. Start #998 after #999's
+attempt 2 passes and lands, and re-run the spill gate and the one-band artifact timing on the
+combined code.
