@@ -108,3 +108,94 @@ change, because the compile does not produce them.
   this change does not touch them.
 - **The #650 audit's `--variant` label** is still an operator tag. The counts above are one local
   run, recorded for review; nothing pins them.
+
+## Sol attempt 1 verdict: PASS
+
+Reviewed `git diff 6ffc644c..9730c912` in the `engine-963` worktree. Every ported audit still
+checks the same property, at least as strongly, and now on the compile every host runs. There
+are no blocking findings.
+
+### Old and new, side by side
+
+- **`graph_fixture` and the determinism gate.** The fingerprint fields are unchanged. The base
+  was already stale: a base build (source from `git archive 6ffc644c`) fails `--check` with
+  "graph fixture manifest mismatch". Its canonical text differs from the checked-in file only in
+  the last `estimate` field (15,580 generated, 27,868 checked in). Its resource report reads
+  6,048 / 16,292 / 16,292. The fixture diff is explained file by file, and the resource figures
+  add up exactly:
+  - metadata: 6,048 + 3 × 216 = 6,696;
+  - plan bytes: 16,292 + 6,503 + 24,576 + 648 = 48,019;
+  - audio samples: 2,561 + 6,144 = 8,705.
+- **`resources.json` figure.** The file now reads `graph_resource_estimate()`, the estimate after
+  the builtin banks attach. That is the figure the compile caps, and it matches #964's finding
+  that the report's estimate is taken before the banks attach. Keeping `schema` at 1 follows the
+  V1 rule.
+- **`audit graph`.** Every assertion and record field is kept, and the render now crosses three
+  builtin banks. Mutation M3 (an allocation in `Silence` for plan 8) aborts the audit with exit
+  134.
+- **`audit source`.** The identity strip keeps the bit-exact 0.25 checks meaningful:
+  - M1: restoring the 20 Hz HPF fails block 0 with 0.2495….
+  - M2: making the #918 in-place gather drop the played PCM fails block 0 with zeros.
+  - So the new audit catches source faults on the production gather path, which the hand-built
+    plan never reached.
+- **#650 audit.** All three corpora compile at `Backend::current()`, and the `dispatch()` switch
+  is gone. Builtin preparation happens outside the counted region. Rebuilding base and port gave
+  exactly the evidence table's figures.
+- **#006 benchmark.** `graph_validate_65537_tracks` is still a timed row in `Workload::ALL`. The
+  `#[ignore]`d test is an extra untimed dry run, not a replacement. The record format and its jq
+  validators are unchanged, so the runner still emits the same six records.
+- **Regeneration command.** Using `--write` is acceptable: #947 gave the environment variable only
+  as an example, and `--write` is documented in the module docs and in the test's failure
+  message.
+
+### Gates re-run (all green)
+
+1. Both `rg` searches in `tools` find nothing.
+2. The CI steps:
+   - release `-p audit -p bench -p console-workload`: 49, 64 (+1 ignored), and 8 + 4 + 23 + 3
+     passed;
+   - `trace-source-audit.sh`: PASS, 0 violations;
+   - `trace-graph-audit.sh`: PASS, 1,000,000 blocks, strace clean;
+   - `test-graph-benchmark.sh`: PASS, 0 workload launches;
+   - the scale dry run: passed in 12.1 s.
+3. The #947 test fails on the base corpus and passes on the regenerated one, including under
+   CI's `test-debug-a` feature unification. Three mutations turn it red:
+   - A (graph metadata charge): `canonical.txt` stale;
+   - B (builtin-bank payload charge): `resources.json` stale;
+   - C (runtime-metadata charge, added in this review): `resources.json` stale.
+4. `check-graph-determinism.sh`: PASS, 100/100.
+5. Console digests: nothing under `crates/` except the `graph_fixture` bin changed, and the
+   release console-workload suites pass.
+6. Also green: fmt, workspace clippy `-D warnings`, doc `-D warnings`, and the workspace, graph
+   (check and test), bench (check and test) and env-vocabulary policy scripts.
+
+### Findings (none blocking)
+
+1. **Low: a comment and the evidence confuse two estimates.** `graph_fixture.rs:154-156` and the
+   evidence row say "the report's `estimate` is the pre-bank semantic estimate the canonical text
+   records". The canonical text records `report.semantic_estimate` (`canonical.rs:202`):
+   5,336 / 15,580. `report.estimate` adds the control-owner and runtime-metadata charges: 6,048 /
+   16,292 on the base. Only the wording is wrong; the figure the port chose is right.
+2. **Low: the fixture now depends on the build's SIMD width.**
+   - `resources.json` changes with `Backend::current()`: builtin scratch is 3 × 128 × lanes × 2
+     × 4 bytes.
+   - On an AArch64 or scalar build, `checked_in_fixtures_are_the_generated_bytes`
+     (`graph_fixture.rs:413`) fails and tells the developer to regenerate. That would commit
+     Simd4 bytes that break x86 CI.
+   - `prepared_effect_allocations.rs:540` hard-codes `64 * 3 / 8`.
+   - CI is x86-64-v3 only and AArch64 is unsupported, so this does not block. A follow-up should
+     make the test refuse to run below Simd8, with a message naming the pinned width.
+3. **Low: the evidence overclaims what the determinism gate covers.** It says the gate covers
+   "bank attachment included". But `fingerprint` (`graph_fixture.rs:308`) hashes only the semantic
+   graph and its counts, so a nondeterministic bank membership or order would pass all 100 runs.
+   This is no weaker than the base, which had no banks.
+4. **Info: `audit source` no longer runs the dispatched copy path.** It used to exercise the
+   executor's dispatched copy of a claimed input. It now exercises the in-place gather (M2). The
+   copy path is still reachable in production for observed or delayed claims, and only #936's
+   unit tests cover it now.
+5. **Info: #006 `total_ns` now includes builtin preparation.** Builtin preparation has no phase
+   timer of its own (`tools/bench/src/graph.rs:291`). The numbers are descriptive only, and the
+   change is documented above.
+6. **Info, pre-existing: the resume frame is set, not observed.** `SyntheticWave` is a constant
+   0.25, so `resumed_source_frame` is assigned by the audit (`source.rs:200`) rather than read
+   from the PCM. The port did not change this.
