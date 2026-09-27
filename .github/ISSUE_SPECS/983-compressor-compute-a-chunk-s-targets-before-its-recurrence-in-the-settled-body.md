@@ -267,3 +267,71 @@ always detect `Main`, so no bank reaches it.
 ### A/B
 
 Measured once as the set #981-#985 against a separately built B0; see #985's evidence.
+
+## Sol attempt 1 verdict: PASS (#983, with #984)
+
+Adversarial verification, 2026-09-27, of `0bfc2fd0` (#983 and #984) against a separately built
+`197db1c9`. The harness is the one described in #981's verdict: scratch only, independent, and not
+committed. This verdict covers #984, which has no verdict of its own.
+
+**Exactness.** 0 failures:
+
+* native release, 480,000 blocks per width at `f32`, `Simd4` and `Simd8`;
+* native dev;
+* wasm `simd128` (TurboFan and default tiering) and scalar wasm;
+* the effect-boundary differential.
+
+Coverage per width:
+
+* 66,000 settled bodies starting mid-block, about 26,000 of them not 32-aligned;
+* multi-chunk and short-tail slices, from 1 to 399 frames;
+* every link mode, with 105,000-110,000 DualMono settled blocks.
+
+The two-pass body and the `abs` arm add no NaN relaxation of their own. The payload-difference
+counts are exactly #982's (1,319, 4,427 and 9,114 words at `f32`, `Simd4` and `Simd8`). Every
+one is an sNaN on #982's arm, in a rejected channel. `scenario_983` (`47ffff05...`) reproduces on
+the true base kernel, in dev and release. At this commit fmt and clippy are green and
+`cargo test -p compressor` passes 91 in dev and in release. The copy-rule justification is in
+the code (`crates/compressor/src/kernel.rs:623-626`) and in this spec.
+
+**Mutations, re-derived.**
+
+* 983-M1 to M4 are red at every width.
+* 984-M1 (the arm for every link mode) and M2 (`(|left|, |left|)`) are red.
+* **984-M3 (the arm never taken): accepted as performance-only.** Under DualMono,
+  `link_frame`'s `linked` mask is all zero and `select` is bitwise, so its result is `abs` of the
+  same word on every backend. No bit test can separate the two, and the brief assigns this
+  mutation to the recorded codegen evidence (#944's M2 precedent). The harness confirms it: M3 is
+  green in both the kernel and the effect-boundary differential.
+
+**Performance of the reachable shapes.** A public-API A/B of the head (`3514a4e4`) against base:
+64 tracks, 128-frame blocks, the two builds from separate sources, under the timing lock, pinned
+to cpu 31, load 5 to 9. Change against base:
+
+| shape | native `Simd8` | V8 (`simd128`) |
+|---|---:|---:|
+| bank, DualMono, all wet | -41 % | -25 % |
+| bank, Maximum link, mix 0.7 | -21 % | -5 % |
+| bank, one lane's threshold ramping every block | -11 % | -6 % |
+| bank, all lanes ramping | -7 % | -4 % |
+| scalar `Main` (unbanked `f32`) | -75 % | -68 % |
+| scalar with a connected sidechain, `Silent` | -1 % | -2 % |
+| scalar with a connected sidechain, `Sidechain` | +0.2 % | **+3.5 %** |
+| scalar `Sidechain` with a ramp every block | +0.6 % | +0.5 % |
+
+Every digest is identical between the builds.
+
+**Findings (severity-ranked).** None blocking.
+
+1. *Low: a reachable browser shape is slower.* A compressor with a connected sidechain never banks
+   (`crates/compressor/src/lib.rs:789-796`). It renders as unbanked `f32` instances, whose
+   `Sidechain` blocks run the retained `frames_loop::<f32, false>` inside the enlarged
+   `process_block::<f32>` (`kernel.rs:521`). Under V8 that shape is +3.5 % (three runs: +3.4 %,
+   +3.5 % and +3.9 %; 373 to 386-388 us for 64 instances). Natively it is flat (+0.2 %).
+   * It first appears in this commit. Per-commit V8 against base: `aa3c0d27` -1.0 %, `3acd0e88`
+     -0.7 %, `0bfc2fd0` +3.6 %.
+   * This spec's evidence (line 265) accounts only for the `Simd4` instantiation ("no bank reaches
+     it"). It should also record the `f32` path.
+   * Nothing is gated or budgeted on this shape, and the rows the product runs gain 25 to 75 %.
+     Per the standing rule: record it here and open a weekly-optimization issue (for example, the
+     sidechain arm of `process_block::<f32>` under V8). Do not chase it inside this slice.

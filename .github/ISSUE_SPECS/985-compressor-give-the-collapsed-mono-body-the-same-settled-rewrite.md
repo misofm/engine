@@ -242,3 +242,69 @@ The V8 row digests matched between the two modules (`95c93754...`, `fc96d91f...`
 with the verification's reproduction (-41 % native, -26 % V8, mono rows -10 % native and -17 %
 V8). `scripts/run-console-benchmark.sh` was not run; the paired console benchmark is the batch
 boundary's.
+
+## Sol attempt 1 verdict: PASS
+
+Adversarial verification, 2026-09-27, of `3514a4e4` (the head) against a separately built
+`197db1c9`. The harness is the one described in #981's verdict: scratch only, independent, and not
+committed.
+
+**Exactness.** 0 failures:
+
+* native release, 480,000 blocks per width, of which 166,000-174,000 were collapsed and
+  114,000-119,000 were settled collapsed `Main` blocks, with 10,500 collapse transitions
+  (`copy_state_from` at disengage);
+* native dev;
+* wasm `simd128` (TurboFan and default tiering) and scalar wasm;
+* 153,600 blocks through the public factory, including `process_bank_mono` and
+  `desymmetrize_channels`.
+
+The collapsed right plane and the right channel's state are never touched. The collapsed wet arm
+adds payload differences only on its own predicted blocks, every one an sNaN in a rejected
+channel. `scenario_985` (`b48776f5...`) reproduces on the true base kernel, in dev and release.
+
+**985-M1 is truly equivalent, not a weak gate.** Every `f32` bit pattern `m`, at `f32`, `Simd4`
+and `Simd8`, natively and under V8, was run through the collapsed Average detector
+(`0.5|m| + 0.5|m|`) and through `|m|`:
+
+* the two differ raw on 25,165,822 patterns: every odd-mantissa `|m| < 2^-125` (the halving is
+  inexact) and every sNaN (the multiply quiets it);
+* after `curve_target`'s `max(detected, 1e-8)`, the detector's only consumer, they differ on
+  **none**.
+
+The mutation also stays green in the kernel and effect-boundary differentials, and so does 985-M5
+(Maximum takes `abs`). 985-M2, M3 and M4, and a further mono mutation (pass 2 reads the next
+frame's target), are red. The body still keeps `link_frame` for Average and Maximum, as the brief
+freezes.
+
+**The set #981-#985, reproduced against a separately built base.** In process, under the timing
+lock, pinned to cpu 31, load 5 to 9, microseconds per block:
+
+| row | base | head | change | claimed |
+|---|---:|---:|---:|---:|
+| native `Simd8` compressor-only isolate | 40.56, 40.44 | 24.64, 24.44 | -40 % | 40.6 to 23.5 |
+| native `Simd4` dispatch (unbanked `f32`) isolate | 315.5, 315.6 | 82.5, 82.1 | -74 % | 315 to 82 |
+| native `console_mono` row | 71.6, 71.6 | 64.8, 64.4 | -10 % | -11 % |
+| V8 compressor-only isolate | 80.36 | 60.07 | -25 % | 80.9 to 60.3 |
+| V8 `console_mono` row | 192.2 | 163.0 | -15 % | -16 % |
+
+Every claim reproduces, the native `Simd8` isolate within 1 us. On the collapsed bank shapes of
+the public-API A/B (#983's verdict), the head changes against base:
+
+* DualMono, all wet: -36 % native, -48 % under V8;
+* with one lane ramping every block: -10 % native, -13 % under V8.
+
+The AudioWorklet artifact grows from 3,345,615 to 3,365,419 bytes (+19,804). The compressor roster
+rows stay one function each, scalar 0: the dual row goes from 178 to 516 vector instructions and
+the collapsed row from 92 to 262. Rule 3, `meter_poll`, `command_submit` and the boot budget pass. All 30 native console
+digests, and all 15 wasm console digests, are identical between base and head.
+
+**Findings (severity-ranked).** None blocking.
+
+1. *Low, set level (from #983).* The only reachable shape that is slower is a connected-sidechain
+   compressor under V8: +3.5 %. It is recorded in #983's verdict, with a follow-up issue
+   recommended. It does not touch this slice's collapsed body: collapsed banks only ever detect
+   `Main`.
+2. *Info.* `crates/compressor/tests/MUTATIONS.md:263` says "NaN and `inf` agree" for 985-M1.
+   That holds after the `1e-8` floor. Before it, an sNaN comes out quieted, so the row should say
+   the floor is what makes them agree. The row's conclusion (equivalent) is correct.

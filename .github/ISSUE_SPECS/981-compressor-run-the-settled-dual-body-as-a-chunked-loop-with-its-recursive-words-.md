@@ -323,3 +323,84 @@ memory) and 2 branches. The retained `frames_loop::<Simd4, false>` bodies for `S
 
 Measured once, as the set #981-#985, against a separately built B0 (verification amendment 4);
 see #985's evidence. The brief's descriptive figures are not re-quoted here.
+
+## Sol attempt 1 verdict: PASS
+
+Adversarial verification, 2026-09-27, of `aa3c0d27` on branch `codex/981-compressor-settled-body`
+(head `3514a4e4`). The oracle is a separately built base: `git archive 197db1c9` in scratch, whose
+kernel was exposed through a scratch-only hook and linked beside each commit's own kernel. The
+harness and logs are scratch only and were not committed.
+
+**Exactness (independent of `kernel::settled_body_tests`).** A seeded differential ran each
+block on identically prepared channels in the base kernel and in `aa3c0d27`'s. Per seed it drew:
+
+* a link mode;
+* a sample rate from 44.1 to 192 kHz;
+* per-lane parameters at the domain edges: subnormal threshold, knees `2.8e-45`, `1e-40` and
+  `MIN_POSITIVE`, ratio `1.0000001`, mix `0.99999994` and `1e-45`, raw `-0.0` makeup;
+* optionally all-wet or makeup-zero tables;
+* optionally a partial bank, with dead lanes held at zero.
+
+Per block it drew:
+
+* automation on random lanes and channels, and resets;
+* a bypass toggle, and `Main`, `Silent` or `Sidechain` with hostile sidechain planes;
+* 1 to 399 frames;
+* dual, collapsed, or collapse transitions (`copy_state_from` at disengage);
+* thirteen input profiles: ±0, subnormals, qNaN and sNaN payloads, ±inf, ±MAX, `1e29` to `-3e30`
+  around `BLOCK_LIMIT`, exact threshold levels, levels at the detector floor, sNaN over silence.
+
+It compared by bits every output word and every state word: all 64 coefficient words, the
+four fields of all 72 ramps (seven parameter and two rate ramps per lane), and the recursive
+words. It then applied `finish_channel` on both sides and
+compared the masks, every word and the state again. For this commit no NaN relaxation is admitted.
+Results, 0 failures everywhere:
+
+* native release: 3,000 seeds x 160 blocks per width at `f32`, `Simd4` and `Simd8` (480,000 blocks
+  each; 324,000 settled `Main`, 66,000 mid-block starts, 26,000 not 32-aligned, 167,000
+  collapsed, 10,500 transitions);
+* native dev: 96 seeds x 128 blocks;
+* wasm under Node 22.23.2: `simd128` under TurboFan (`--no-liftoff`, 200 seeds) and under default
+  tiering (48 seeds), and scalar wasm (64 seeds), each x 128 blocks;
+* an effect-boundary differential through the public factory, scalar with and without a
+  connected sidechain, and banks dual, collapsed and transitioning: 1,200 seeds.
+
+The harness is live. With 981-M1, M2, M3 and M4 applied to a scratch copy, it fails at every width,
+and M3 also fails through the public factory.
+
+**In-tree oracle.** `settled_body_tests::reference` diffed against `197db1c9`'s `process_block`,
+`frames_loop`, `process_block_mono` and `frames_loop_mono`. It is verbatim except for the dropped
+`debug_assert`s and `#[inline(always)]`. `scenario_981` (`57cfd7ce...`) reproduces on the true base
+kernel (base production code carrying head's test module), in dev and release.
+
+**Gates.** At this commit: fmt, compressor clippy `-D warnings`, and `cargo test -p compressor`
+(87 passed in dev and in release). At the head, all green:
+
+* fmt, workspace clippy `-D warnings`, rustdoc `-D warnings`;
+* `-p compressor`: 93 passed in dev and 93 in release;
+* `-p effect-runtime` 86, `-p console-workload` 39, `-p builtins-compiler --features test-support` 79;
+* lane, math and wasm-gates in release: 113;
+* `run-wasm-gates.sh`: 0 mismatches;
+* the lane, realtime and unfused policy scripts;
+* the AudioWorklet stages: rule 3, the roster (compressor dual row is one function), `meter_poll`,
+  `command_submit` and the boot budget;
+* all 30 native console digests identical to base, and to the brief's quoted values.
+
+**981-M3 is enough.** Two public-API tests catch it (`contract::links_are_exact_...`,
+`nonfinite::a_nan_in_the_sidechain_alone_...`), independently of the in-tree oracle, and so do the
+grid's `Silent`/`Sidechain` cases. That is the fallback the brief prescribes. My boundary
+differential also goes red on it. `causality` and `partition` cannot see it: the mutation stays
+causal and partition-invariant.
+
+**The three clamps are kept.** `curve_target` still ends `.max(reduction_min).min(zero)`
+(`crates/compressor/src/kernel.rs:363-365`), and `crates/math` is untouched. Removing
+`max(-100)` in scratch turns the differential red, because the knee-`2.8e-45` NaN is reachable.
+The knee defect stays with #994.
+
+**Findings (severity-ranked).** None blocking.
+
+1. *Info.* The in-tree `reference` (`kernel.rs:1149`) shares `link_frame`, `one_frame`, `Coef`,
+   `Invariants` and `advance_ramps` with production. It is therefore a fixed oracle only for loop
+   structure, which the module doc states (`kernel.rs:1112`). A future slice that edits a frame-law
+   helper (#986, or the clamp ruling) must diff against a separately built base, as this
+   verification did.

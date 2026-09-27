@@ -273,3 +273,67 @@ for the general settled loop in the same function (and 239 for B0's settled loop
 ### A/B
 
 Measured once as the set #981-#985 against a separately built B0; see #985's evidence.
+
+## Sol attempt 1 verdict: PASS
+
+Adversarial verification, 2026-09-27, of `3acd0e88` against a separately built `197db1c9`. The
+harness is the one described in #981's verdict: scratch only, independent of
+`settled_body_tests`, and not committed.
+
+**Exactness and the NaN relaxation.** The harness predicts the arm itself, without the test
+witness. It admits one difference and only that one:
+
+* the block is a settled `Main` block, unbypassed, and every lane's mix word on both channels
+  (the left one alone when collapsed) is `0x3f800000` after the ramp prefix;
+* the frame is at or past the ramp prefix;
+* both words are NaN, and the base word equals the input word, so it came through the
+  dry-identity select;
+* the candidate's channel is then rejected by `finish_channel`.
+
+Everything else is compared by bits, and after the boundary every word, the masks and the whole
+state are compared by bits. Results: 0 failures.
+
+* **Native release**, 480,000 blocks per width. Payload differences: 1,319 words at `f32`, 4,427
+  at `Simd4` and 9,114 at `Simd8`. **Every one had a signalling-NaN input and fell in a rejected
+  channel.** None fell in an accepted block, and none came from a quiet-NaN input.
+* **Native dev** and **wasm** (`simd128` under TurboFan and under default tiering, and scalar
+  wasm): the same, 0 failures.
+* **Strict mode**, with no relaxation admitted, fails exactly on those sNaN words. The relaxation
+  is therefore real and necessary, and the harness sees it.
+* **Through the public factory**: 153,600 blocks, 0 differences in output, reports or state
+  payloads. Nothing crosses the effect boundary.
+* **Exhaustively**, over all 2^32 inputs at `f32`, `Simd4` and `Simd8`, natively and under V8,
+  with the gain kept out of constant folding:
+  * `fast_gain_from_db(+0 + (±0))` is `0x3f800000`;
+  * `x * gain == x` for every non-NaN `x`;
+  * only the 8,388,606 sNaNs change.
+
+The frozen-013 identity point still needs the owner's explicit acknowledgement. The evidence
+states it, and this verification confirms that the relaxation is confined to rejected blocks.
+
+**Mutations, re-derived on the harness.**
+
+* M1, M3 and M5 are red at every width.
+* M2 is red at `Simd4` and `Simd8`. It is equivalent at `f32`, where one lane makes "any" and
+  "every" the same test.
+* An extra M6, the arm also taken when the left channel's makeup is zero on every lane even
+  though its mix is not 1, is red.
+* M4 is performance-only, as recorded. The witness gate that sees it is sound.
+
+**Pinned scenario and commit hygiene.**
+
+* `scenario_982` (`cd2d5b11...`) reproduces on the true base kernel, in dev and release.
+* At this commit fmt and clippy are green, and `cargo test -p compressor` passes 90 in dev and
+  in release.
+* The FAST-DB-CROSSING and `disallowed_methods` sites are the same set as base, minus line
+  numbers: X2 moved to `applied_gain`, and there are still eight crossings.
+* The 30 console digests are identical to base.
+
+**Findings (severity-ranked).** None blocking.
+
+1. *Info.* The arm's doc (`crates/compressor/src/kernel.rs:416-418`) names `Instance::render` and
+   `render_mono` as the callers that expose kernel output. `corpus::run_case`
+   (`crates/compressor/src/corpus.rs:203`) is a third, public caller. It hashes raw kernel output
+   with no `finish_channel`, for `cross_target` and the wasm gates. It is safe, because its inputs
+   are finite by construction, so no NaN can reach the arm. The doc should name it, with that
+   reason, so a later corpus change that adds NaN input knows it must pass through the boundary.
