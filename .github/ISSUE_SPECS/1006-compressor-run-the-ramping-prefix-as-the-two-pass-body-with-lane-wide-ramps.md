@@ -521,3 +521,165 @@ rely on).
   identity, so adding #986's arms would change a frozen measurement; the arms were measured here
   with the diagnosis harness instead.
 * Scratch harness sources, session documents and raw logs: `scratchpad/impl-1006/{tools,logs}`.
+
+## Sol attempt 1 verdict: PASS
+
+Adversarial verification of `3a293404`, `ef585bf5` and `e407e462`, 2026-09-27. The branch was
+judged as merged onto the **current** batch head, `9693f577`, which carries #1004 (P1, `f8556aaf`)
+and #1012. The merge is clean (tree `98dff59d`). The base is the batch head built separately
+from its own sources.
+
+**Bit-identity.** A fresh independent differential was used (scratch only, not committed). It runs
+the batch-head kernel against #1006's, block by block, and compares by bits:
+
+* every output word, every coefficient word, every field of every parameter and rate ramp, and
+  the recursive words;
+* then the `finish_channel` masks and every word after the boundary.
+
+The #982 relaxation is admitted only where the harness itself predicts the wet arm. For the
+prefix, the prediction is taken from the pre-block state (unbypassed, `Main`, no mix ramp open
+and every lane's mix exactly 1). For the settled body it is taken after the prefix. In both
+cases the base word must be the input sNaN and the channel must then be rejected.
+
+Coverage:
+
+* **Automation styles:** knob drags (a Point every block), all-lanes rides, random multi-parameter
+  retargets, one channel or both with one value.
+* **Blocks:** 1 to 399 frames, so windows start, end and cross block boundaries. A lane often
+  stops mid-prefix while others continue (15,000 blocks per width at `Simd4`/`Simd8`).
+* **Payload restores:** through `validate_channel`/`commit_channel`, 10,500 of them at
+  `remaining = 0` with `current != target`.
+* **Resets:** discontinuity and full resets mid-window.
+* **Domain edges:** knees at +0, the smallest subnormal and either side of `MIN_SOFT_KNEE_DB`;
+  every other parameter at both domain ends.
+* **Detectors and bodies:** `Silent` and `Sidechain`; dual, collapsed and transitioning.
+
+**0 failures** in each of these runs:
+
+* native release, 3,000 seeds x 160 blocks at `f32`, `Simd4` and `Simd8`: 480,000 blocks per
+  width, with 142,000-147,000 dual and 110,000-112,000 collapsed prefixes, 31,000-39,500 of them on
+  the wet arm;
+* native dev, 160 seeds;
+* the public factory (spans every block, payload restores, `process_bank_mono`,
+  `desymmetrize_channels`), 1,500 seeds;
+* V8 TurboFan `simd128`, 800 seeds at `f32`, `Simd4` and `Simd8`, plus 400 factory seeds;
+* V8 default tiering;
+* scalar wasm.
+
+**"NaN and extreme targets"** at the kernel level (NaN, sNaN, ±inf, ±MAX, -0.0 and out-of-domain
+values, in 10 % of seeds) match the base in every non-NaN word. Where two NaNs meet, for example
+a NaN parameter and an sNaN input, the propagated payload can differ. That is operand
+commutation, which LLVM is free to choose. It was 345 words in 480,000 blocks, all NaN in both
+builds. The contract refuses every such target (`parameter_value_valid` on spans, initial values
+and restores), so it is unreachable. The factory differential, which cannot inject such targets,
+has none.
+
+`scenario_1006` (`162979dd...`) and `tests/ramping_prefix_scenario.rs` (`61ecffd0...`) reproduce on
+the batch-head kernel. All 30 native console digests are identical base and merged. The shipped
+artifact's preflight digests are identical base and merged for all 7 arms of
+`console_mixing_automation` and of two compressor-only tables (8 of 64, all 64 on the mono
+console).
+
+**The equivalence proofs (flag b) hold.**
+
+* **M2 (rate ramps gated by their own `remaining`).** Every write site keeps
+  `rate.remaining ∈ {0, parameter.remaining}`:
+  * `set_parameter_target` gives 64 or a hoisted 0, and its cancel branch re-arms the parameter
+    ramp to the rate ramp's 64;
+  * `restore_rate_ramps` uses the parameter's `remaining` or hoists to 0;
+  * resets and `copy_state_from` keep both together;
+  * both advance together.
+
+  Where the rate ramp is at 0, its `current` already equals the word, so both gates write the
+  same bits.
+* **M4 (redesign every lane).** This is C2b's invariant, `words[0..4] == design(current)`, which
+  every write site maintains.
+* `design_curve` is `GainComputerCoef::new` operation for operation:
+  * `1.0 / R - 1.0`;
+  * `0.5 * W`;
+  * `1.0 / (2.0 * W)`;
+  * `is_finite` as `< +inf`, which is the same for `W > 0`.
+
+Both mutations are green in my harness, kernel and factory. The production code relies on
+neither invariant.
+
+**Mutations are live.** In my harness the spec's M1, M3, M5, M6, M7, M8, M9 and M10 are red at
+every width, plus six of mine:
+
+* S1: the snap one frame early;
+* S2: `design_curve` without #994's overflow guard;
+* S3: the rate word taken from the milliseconds ramp;
+* S4: `step` not scattered (red in the kernel's state comparison; green through the factory,
+  because a payload does not carry `step`);
+* S5: the wet arm tested on the left channel only;
+* S6: the right channel reading the left's ramps.
+
+M1 goes red only through a raw kernel `-0.0` target, which the contract normalises. S1, S2, S5,
+S6, M8 and S4 are also red in-tree, with 16, 4, 5, 14, 6 and 6 tests.
+
+**Timings** (flag a). Taken under the lock, pinned to cpu 31, at load 8-10. The committed
+`web-mixing-automation-benchmark.mjs` was run on the shipped `host_web.wasm`, the real #1004 in
+both builds, two alternating reps each. Values are the paired ramp Δ (automated minus restated,
+µs per block):
+
+| row | base | #1006 |
+|---|---:|---:|
+| `console_mixing_automation` (8 controls, 3 of them compressor thresholds) | 23.2 / 23.1 | **13.6 / 13.4** |
+| mono console, compressor threshold, 8 of 64 (collapsed) | 32.9 / 32.3 | **6.7 / 6.7** |
+| mono console, compressor threshold, all 64 (collapsed) | 91.9 / 91.1 | **13.5 / 12.7** |
+
+The quiet (settled) rows are flat, +0.3 % on the median of six. The collapse Δ is unchanged.
+
+Bank API A/B over 64 tracks, native then V8 (V8 varies ±15 % between runs on the ramp shapes):
+
+| shape | native base | native #1006 | V8 base | V8 #1006 |
+|---|---:|---:|---:|---:|
+| threshold, 8 of 64 | 64.0 | 33.5 | 150 | 84-115 |
+| threshold, all 64 | 103.0 | 34.7 | 205-210 | 86-100 |
+| attack, all 64 | 79.7 | 36.7 | — | — |
+| collapsed threshold, 8 of 64 | 41.2 | 19.8 | 101 | 48-55 |
+| collapsed threshold, all 64 | 60.7 | 21.3 | 129 | 49-56 |
+| unbanked threshold rides | 316.8 | 148.1 | 437 | 318 |
+| settled, dual | — | ±0.2 % | — | flat |
+| settled, collapsed | — | ±0.2 % | — | flat |
+| sidechain | — | ±0.2 % | — | flat |
+
+All digests are identical.
+
+**The spills (flag c) have no consistent cost.** I built a scratch probe that bypasses
+`advance_output` when no output ramp is open. It is bit-exact in the differential, and it runs
+pass 2 as the settled pass 2 on threshold rides. Natively it is identical to #1006. Under V8 it is
+7-21 % faster on the dual banks but 7-8 % slower on the collapsed ones. So the carried slots are
+not a measurable, one-directional cost, and V8's variance dominates.
+
+The compressor does not belong under #1000's gate as written. That gate's loop finder is the EQ's
+op-shape, and its rule is zero carried slots, which the compressor's settled pass 2 already breaks
+by one value. A compressor spill gate would need a pinned per-loop ceiling on the settled bodies.
+That is a follow-up, not this slice.
+
+**Gates on the merged tree.** All green:
+
+* fmt, clippy `-D warnings` (all features), rustdoc `-D warnings`;
+* `-p compressor`: 101 passed in dev and in release;
+* effect-runtime 90, effect-contract 64, console-workload 57, builtins-compiler 79,
+  graph-compiler 119;
+* lane, math and wasm-gates in release: 114;
+* `run-wasm-gates.sh`, with the V8 spill gate ok;
+* the lane, realtime, unfused, env-vocabulary and workspace policy scripts;
+* the AudioWorklet stages: rule 3, the roster (dual 427 → 949 and collapsed 262 → 524, each one
+  function with scalar 0), `meter_poll`, `command_submit` and the boot budget.
+
+The artifact grows from 3,425,844 to 3,482,814 bytes (+56,970).
+
+**Findings (severity-ranked).** None blocking.
+
+1. *Low.* Native unbanked settled instances are +0.5 % (76.0 → 76.4 µs, slower in 4 of 4
+   alternations; the out-of-line `ramping_main_scalar` did not remove it all). Also, under V8 an
+   unbanked connected-sidechain compressor with a ramp every block is +1.0 % and +1.4 % in two runs
+   (444 → 449 µs). Its prefix source is untouched (`kernel.rs:549`). Both are under the 2 % gate;
+   record them, don't chase them (weekly rule).
+2. *Info.* With non-finite kernel-level targets, which the contract refuses, NaN-versus-NaN
+   payloads can differ from the base by operand commutation. The class-A statement holds for
+   every reachable input.
+3. *Info.* A compressor V8 spill gate would need a pinned ceiling, not #1000's zero-carry rule.
+   Recommend it as a follow-up if the settled bodies are to be protected the way the EQ's are.
