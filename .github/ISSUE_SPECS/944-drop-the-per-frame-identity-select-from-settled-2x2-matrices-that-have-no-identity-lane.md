@@ -692,3 +692,172 @@ Replica per bank (cycles, three repeats within 1 %):
 | today's chain | 4,523 |
 | chain with the select-free matrix | 3,300 |
 | paired chain | 3,103 |
+
+## Attempt 1 evidence
+
+Implementer: Terra (Claude Opus 5.5), 2026-09-27, branch `codex/944-matrix-without-identity-select`
+on top of #936 and #945 (`21a0dfcf`, the unmodified base of this attempt). Host AMD EPYC 7313P
+(Zen 3), rustc 1.97.1, `CARGO_INCREMENTAL=0`, one private scratch target directory. No timed
+benchmark was run.
+
+Commits:
+
+- `c41b1c97` test: gates 3 and 4 written and pinned on the unmodified base (step 1).
+- `1f3a2ddf` the kernel, `MatrixStage::settled_block`, the witness, gates 1 and 2.
+- `20295947` amendment 5 docs (floor comment, `GainPan` doc, ruling 4's `dispatch_only` doc).
+- the evidence commit carrying this section and both `MUTATIONS.md` records.
+
+### Design
+
+- `lane::kernels::builtins::matrix2x2_block_without_identity` is contract 1 verbatim: two loads,
+  `ll*l + lr*r`, `rl*l + rr*r`, two stores, no `L::select` anywhere, and
+  `debug_assert!(!L::mask_any(c.identity))`. Its doc states why it exists, the precondition, and
+  the class statement as amended (every non-NaN word unchanged; a NaN word stays a NaN).
+  `matrix2x2_block` is not edited.
+- `MatrixStage::settled_block` is contract 2 verbatim, inside the existing `REALTIME_POLICY`
+  region, with the `#[cfg(test)]` increment of `MATRIX_SELECT_FREE_BLOCKS` (beside
+  `FILTER_PREFIX_KERNEL_FRAMES`) in the select-free arm. Both settled call sites use it; the tail
+  runs after `sync_settled`. No field was added to `MatrixStage`, and the mask is tested per call.
+- **Deviation (small):** `settled_block` carries `#[inline(always)]`, as its neighbour
+  `is_settled` does, so each width's body stays specialised inside `process`. The release
+  disassembly below confirms all four loops are inline.
+- Gate 1 reuses `compare_case`'s inputs by extracting them into `family_source`,
+  `hostile_planes` and `hostile_matrix`; `compare_case` renders exactly the words it did.
+- Gate 3's input has no non-finite word: every plan sanitises before the matrix, and a NaN
+  payload is outside the amended class statement, so a NaN in the pinned scenario would make the
+  pin depend on LLVM's operand order.
+
+### Gates
+
+| # | command | result |
+| --- | --- | --- |
+| 1 | `cargo test -p lane --test fader_matrix`, dev and `--release`; also CI's line `cargo test --locked --release -p lane -p math -p wasm-gates --features math/lane` | green (lane 52 tests dev and release; CI line 97). The negative control holds over the frame-count union at every width. With the NaN clause removed, release is red at `width=4 frames=1 family=3: R[3] new=7fc00000 old=7fc01234` and dev is green, reproducing amendment 1 |
+| 2 | `cargo test -p builtins --lib settled_matrix_takes_the_select_free_arm_only_without_an_identity_lane` | green in dev and release. W8, W4 and scalar: 1 per settled block for a full non-identity bank; 0 for an identity member, a `W-1` bank, a 1-member bank; 1 for a mid-block tail toward a non-identity target; 0 for a ramp covering the block; 0 for a tail toward `IDENTITY` and every block after |
+| 3 | `cargo test -p builtins --test matrix`, dev and `--release` | step 1 on `21a0dfcf` printed `0e1c5af8e3aa66b66b2bb127149a8eaf10529fed838d69a4912c73bf345640c3` in both profiles; pinned in `c41b1c97`. Re-run on the base checkout and on `20295947`, dev and release: the same digest. The ramp-endpoint asserts (words `0..4 == 4..8`, word 13 `== 0` after block 4) hold for (c) and (d) at every width and member count. The four named existing tests stay green |
+| 4 | `cargo test -p console-workload --test chain_shape` | green on the base and on `20295947`: `gain_pan 01e465a7...`, `dispatch 15688888...`, `builtins b63eccd0...`, `console fe5bed9b...`, and the plumbing pin `57535244...` unmoved. All 16 `WORKLOADS` digests unchanged in dev and in release (table below) |
+| 5 | mutations M1 to M4 | all red as the brief predicts; recorded in `crates/builtins/tests/MUTATIONS.md` and `crates/lane/tests/MUTATIONS.md` |
+| 6 | `cargo test -p builtins-compiler --features test-support --test allocation_tracker`; `check-realtime-policy.sh`, `check-builtins-policy.sh`, `check-lane-policy.sh` | allocation tracker 9 passed; `realtime policy: ok (54 marked regions in 16 files)`; builtins and lane policy ok; `check-workspace-policy.sh` ok |
+| 7 | amendment 4 (below) | kernel count 15, roster identical, render closure unchanged |
+| 8 | `cargo fmt --all --check`; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`; `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`; `cargo test` of `lane` (dev, release), `builtins` (with and without `test-support`), `builtins-compiler --features test-support`, `console-workload`, `host-core`, `capi`, `bench floor`; `check-builtins-fixtures.sh` | all green: builtins 113 and 113, builtins-compiler 79, console-workload 37, host-core 174, capi 36, bench floor 10; fixtures ok |
+| 9 | `objdump -d --no-show-raw-insn -C target/release/bench` | below |
+
+### Codegen (gate 9)
+
+Base (`c41b1c97`), `<builtins::BuiltinMatrixBank>::process`, settled `f32x8` loop: 4 `vmaskmovps`
+in the function (settled and tail, `f32x8` and `f32x4`), no `vtestps`.
+
+```text
+vmovups (%rdx,%rax,1),%ymm6
+vmovups (%r8,%rax,1),%ymm7
+vmulps  %ymm6,%ymm1,%ymm8
+vmulps  %ymm7,%ymm2,%ymm9
+vaddps  %ymm9,%ymm8,%ymm8
+vmulps  %ymm6,%ymm3,%ymm6
+vmulps  %ymm7,%ymm4,%ymm9
+vaddps  %ymm6,%ymm9,%ymm6
+vblendvps %ymm0,%ymm7,%ymm6,%ymm6
+vmaskmovps %ymm8,%ymm5,(%rdx,%rax,1)
+vmovups %ymm6,(%r8,%rax,1)
+```
+
+After (`20295947`): each of the four sites is `vtestps` on the identity mask and a `je` to a
+select-free loop. The settled `f32x8` loop:
+
+```text
+vmovups (%rdx,%rax,1),%ymm4
+vmovups (%r8,%rax,1),%ymm5
+vmulps  %ymm4,%ymm0,%ymm6
+vmulps  %ymm5,%ymm1,%ymm7
+vaddps  %ymm7,%ymm6,%ymm6
+vmulps  %ymm4,%ymm2,%ymm4
+vmulps  %ymm5,%ymm3,%ymm5
+vaddps  %ymm5,%ymm4,%ymm4
+vmovups %ymm6,(%rdx,%rax,1)
+vmovups %ymm4,(%r8,%rax,1)
+```
+
+The settled `f32x4` loop and both post-ramp tail loops have the same shape at `xmm` and `ymm`:
+two `vmovups` stores, no `vblendvps`, no `vmaskmovps`. The mixed arm keeps its masked store
+(the function still has 4 `vmaskmovps`, all in the select form, and 12 `vblendvps` before and
+after). The workspace masked-store census (the brief's table) is identical before and after, per
+function. Note that the select-free loop computes the right output as `rl*l + rr*r` where the
+base computes `rr*r + rl*l`: that is amendment 1's operand order, visible in the code.
+
+### Browser artifact (gate 7, amendment 4)
+
+Built with `scripts/build-web-audioworklet.sh`'s own cargo line (`RUSTFLAGS="-C
+target-feature=+simd128 -C strip=debuginfo <remaps>" cargo build --locked --release --target
+wasm32-unknown-unknown -p host-web`) from one scratch checkout at base and after, and
+`wasm-objdump -d` piped into `check-web-audioworklet-callgraph.py`:
+
+| | base | after |
+| --- | --- | --- |
+| artifact sha256 | `0b5d6055...` | `025b6b20...` |
+| `--callgraph miso_engine_web_v1_render` | closure 8, traps 5, one owner (`render_inner`) | identical |
+| `--kernel-shape --kernel-pattern '4wide6f32x[48]' --kernel-min 11` | 15 kernels, `f32x4_arith` 11,683 | 15 kernels, 11,725; roster lines identical |
+| `meter_poll`, `command_submit` callgraphs | pass | identical |
+| `BuiltinMatrixBank::process` ops | 1,648 | 1,963 |
+| its `v128.bitselect` / `v128.store` / `f32x4.mul` | 24 / 40 / 36 | 24 / 52 / 60 |
+
+The new arms add 24 multiplies and 12 stores (two widths, two sites) and no `v128.bitselect`,
+so the select-free arm carries none. The artifact pin `8934cdd9...` is not repinned here
+(it already differs on the base, which carries #945); it is repinned once at the batch boundary.
+
+### All console workloads, 64 blocks (gate 4)
+
+Harness: `digests` from `gain-pan-diagnosis-harnesses.patch`, applied only in a detached scratch
+worktree (moved from `c41b1c97` to `20295947`; removed afterwards). Dev and release outputs are
+identical, before and after:
+
+```text
+nine_track_baseline                 e7c6ef01770ab7da98d4b793a6a817bd50a4dfe682321ecfc023ddc275285a80
+nine_track_ragged_strip             17613a3ab693d3f0dfc457b41f77669f880581fa19c433941a1ef2437684198a
+sixty_four_track_console            fe5bed9becdbc101d7ad4b77e7e1969ca3888cae34857333f79531b03a4868de
+one_twenty_eight_track_stretch      cba2c94f81544caad0945f0720480b568b1a47808d25fd95911f61bd37f5f9b1
+sixty_four_track_eq_only            9b2c56a1da62ebda8aef595973870ea077477d209aacdcd6321637e949d5c828
+sixty_four_track_compressor_only    95c9375429fbca3449bf9c5134508a6220f17fc9adda0b3267c061b75bb14175
+sixty_four_track_builtins_only      b63eccd09c19eb7a6e0608144024ac5b14c7d5f7d1c56012cbbd49d6aad8f7f0
+sixty_four_track_dispatch_only      15688888612d161e507bc400b9eed356fc1776797c8c66ca52d1e7c9114d3a2d
+sixty_four_track_idle               de2f256064a0af797747c2b97505dc0b9f3df0de4f489eac731c23ae9ca9cc31
+sixty_four_track_console_legacy     f68febb7a10e242be704a7646e17b66213a52e6b833633fb13a71d7a3f89a177
+sixty_four_track_eq_comp_simd1      f68febb7a10e242be704a7646e17b66213a52e6b833633fb13a71d7a3f89a177
+sixty_four_track_plumbing_only      57535244ba953d82f6c9c19428dc83a8ac412018c66acc167818e1917283f800
+sixty_four_track_gain_pan_only      01e465a797036fb4267e895d9319a911bc108d554705d268d9a84a2e2e2dfdb4
+sixty_four_track_console_mono       fc96d91f6a397e916bb02651300163782170e5caee3d23189ff640b5c545b3d7
+sixty_four_track_console_mono_dual  fc96d91f6a397e916bb02651300163782170e5caee3d23189ff640b5c545b3d7
+sixty_four_track_console_half_mono  4a656cdf63882999b720b7dd765c1b4f7bbcb95e2ab38c10445f71d269665180
+```
+
+`sixty_four_track_plumbing_ring` is not in `WORKLOADS`; its own `console-workload` tests are green.
+
+### Mutations (gate 5)
+
+| # | mutation | red |
+| --- | --- | --- |
+| M1 | always select-free | gate 2, gate 3, `settled_identity_matrix_preserves_signed_zero` (dev by the kernel's `debug_assert!`; release by the counter and by bits, gate 3 digest `b76c1305...`) |
+| M2 | never select-free | gate 2 only (`full non-identity bank`, 0 against 3) |
+| M3 | `lr` and `rl` swapped in the new kernel | gate 1 (dev and release), gate 3, gate 4 (`gain_pan_only` digest `b8332f35...`) |
+| M4 | tail keeps `matrix2x2_block` | gate 2 only (`settled tail`, 0 against 1) |
+
+### For the verifier
+
+1. **A shared-target incident.** The first pass of this attempt used a scratch target directory
+   that another agent's verifier was using and deleted at about 00:43 UTC. Every result in this
+   section was re-run afterwards in a private target directory. In that window, one gate-4 run
+   under M2 failed on its first workload. It never reproduced: 4 more runs under M2 and 53 runs of
+   the committed test binary in that same window, then the clean mutation pass in the private
+   target. It is attributed to the deletion, and it
+   is recorded here rather than dropped.
+2. `cargo test -p builtins-compiler` **without** `--features test-support` does not compile (its
+   lib tests call graph's test-only functions). `builtins-compiler` is untouched here, and the
+   brief's gate uses the feature, which is green.
+3. **Stale sentences outside the authorised ranges, not edited.** Each still says
+   `dispatch_only` asks the matrix for the identity, or that an identity matrix costs what a real
+   one costs:
+   - `tools/console-workload/src/lib.rs:232`, the plumbing row's doc;
+   - `tools/bench/src/floor.rs:121-123`, the `BUILTINS_IDENTITY_LANE_OPS` doc;
+   - `tools/bench/src/floor.rs:580`, a test doc.
+
+   The `floor.rs:122` clause "a settled identity matrix still evaluates both arms" is still true
+   of a real identity matrix. They belong with S-G, or with the batch-boundary doc pass.
+4. `check-web-audioworklet.sh` itself was not run (amendment 4).

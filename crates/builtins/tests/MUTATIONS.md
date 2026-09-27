@@ -205,3 +205,32 @@ what the rows below record.
 ### Row count
 
 Three rows: two red, one argued-equivalent with its premise asserted in code (C-3).
+
+## Issue #944 — the settled matrix's select-free arm
+
+`MatrixStage::settled_block` takes `matrix2x2_block_without_identity` when
+`L::mask_any(coef.identity)` is false over all `L::WIDTH` lanes, padding included, and
+`matrix2x2_block` otherwise; both settled call sites (the `maximum == 0` block and the post-ramp
+tail) go through it. The gates:
+
+- gate 2, `tests::settled_matrix_takes_the_select_free_arm_only_without_an_identity_lane`
+  (`src/tests.rs`): the `#[cfg(test)]` witness `MATRIX_SELECT_FREE_BLOCKS` counts the arm per
+  settled segment, at W8, W4 and the scalar stage;
+- gate 3, `settled_matrix_shapes_render_the_base_bits` (`tests/matrix.rs`): one SHA-256 over every
+  output word and every block's retained lane words, pinned on the unmodified base;
+- gate 4, `the_select_free_matrix_arm_renders_the_base_bits`
+  (`tools/console-workload/tests/chain_shape.rs`): the four banked rows' 64-block digests.
+
+Each mutation was applied alone, run in dev and release (gate 4 in dev), and reverted.
+
+| # | mutation | red | green (expected) |
+| --- | --- | --- | --- |
+| M1 | `settled_block` always takes the select-free arm (`if false {`) | gate 2, gate 3 and `settled_identity_matrix_preserves_signed_zero`. Dev: the kernel's `debug_assert!` fires in all three (`lane/src/kernels/builtins.rs:316`). Release, by the counter and by bits: gate 2 `width=8: identity member` `left: 3 right: 0`; gate 3 digest `b76c1305...` against `0e1c5af8...`; the signed-zero test `left: 0 right: 2147483648` | gate 1; gate 4 (no standing row has an identity lane, so the arm is already taken everywhere) |
+| M2 | `settled_block` never takes it (`if true {`) | gate 2, dev and release: `width=8: full non-identity bank` `left: 0 right: 3` | gates 1, 3 and 4 -- the performance-only regression the counter exists to see |
+| M3 | swap `c.lr` and `c.rl` in `matrix2x2_block_without_identity` | gate 1 (dev and release, `crates/lane/tests/MUTATIONS.md`); gate 3 (dev and release) digest `b4d1d647...`; gate 4 `sixty_four_track_gain_pan_only` digest `b8332f35...` against `01e465a7...` | gate 2 |
+| M4 | the post-ramp tail keeps calling `matrix2x2_block` unconditionally | gate 2, dev and release: `width=8: settled tail` `left: 0 right: 1` | gates 1, 3 and 4 (class A: the tail's bits do not depend on the arm) |
+
+### Row count
+
+Four rows, all red; none argued equivalent. M2 and M4 render the base bits by construction, so
+only the witness sees them, which is the reason gate 2 exists.

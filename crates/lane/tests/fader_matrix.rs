@@ -214,7 +214,7 @@ fn select_free_width<L: Lane>() {
 /// Every family, every frame count, every width, guard words included; NaN words compare as "both
 /// NaN" (see [`same_word`]). Runs in dev and in release, which is the build CI tests `lane` in.
 ///
-/// Red mutation (issue #944 M3, `crates/builtins/tests/MUTATIONS.md`): swap `c.lr` and `c.rl` in
+/// Red mutation (issue #944 M3, `crates/lane/tests/MUTATIONS.md`): swap `c.lr` and `c.rl` in
 /// `matrix2x2_block_without_identity`; the finite family differs on the first frame.
 #[test]
 fn select_free_matrix_matches_the_select_form_when_no_lane_is_identity() {
