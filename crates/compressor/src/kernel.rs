@@ -715,15 +715,22 @@ fn settled_main<L: Lane>(
 ///   reviewed; a sidechained block renders the general law, which is `frames_loop`'s word for word,
 ///   NaN payloads included.
 ///
-/// Outlined and `#[cold]`, unlike `settled_main`, and for a measured reason: inlined beside the
-/// four main-detector bodies it reshuffled their register allocation (natively, an extra spill in
-/// the unbanked instance's vectorised first pass, +0.4 % on 64 unbanked main-detector instances;
+/// Outlined, unlike `settled_main`, and for a measured reason: inlined beside the four
+/// main-detector bodies it reshuffled their register allocation (natively, an extra spill in the
+/// unbanked instance's vectorised first pass, +0.4 % on 64 unbanked main-detector instances;
 /// under V8, an extra reload in a linked bank's first pass), while out of line it leaves them as
-/// they were. `#[cold]` is what keeps them: `#[inline(never)]` alone did not. It weights the call site, not this body, whose loops are
-/// optimised as usual; one call per sidechained block costs nothing measurable. No bank reaches
-/// it -- a connected sidechain never banks -- so the roster's `process_block::<Simd4>` still
-/// carries every banked body, and this function's `Simd4` instantiation is dead code the roster
-/// does not need to name.
+/// they were. One call per sidechained block costs nothing measurable.
+///
+/// `#[cold]` changes nothing in this body, which is instruction-identical without it. It weights
+/// the call site, and so moves only the callers' register and stack-slot allocation: in the #995
+/// build, without it the unbanked instance's vectorised first pass kept two more stack accesses
+/// per iteration than the batch head's, and in the #1006 build one of that instance's settled
+/// loops keeps one more instruction and one more stack access. It is kept for that, and it is the
+/// kind of effect any change around `process_block` can move again.
+///
+/// No bank reaches it -- a connected sidechain never banks -- so the roster's
+/// `process_block::<Simd4>` still carries every banked body, and this function's `Simd4`
+/// instantiation is dead code the roster does not need to name.
 #[allow(clippy::too_many_arguments)]
 #[cold]
 #[inline(never)]
