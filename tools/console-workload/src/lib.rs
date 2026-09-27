@@ -43,8 +43,8 @@ use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::collections::BTreeSet;
 
 use bench_support::digest::Sha256Sink;
-use builtins::{MeterConfig, MeterHandle, MeterTap};
-use builtins_compiler::{MeterConsumer, MeterRequest};
+use builtins::{MeterConfig, MeterHandle, MeterMetricSet, MeterSnapshot, MeterTap};
+use builtins_compiler::{MeterConsumer, MeterRequest, SelectedMeterRequest};
 use effect_compiler::{
     EffectCompileCaps, EffectControlProducer, EffectObservationHandle, attach_effect_console,
     attach_effect_observation, launch_native_effect_registry, prepare_native_session_effects,
@@ -85,6 +85,16 @@ pub const CONTROL_QUEUE_DEPTH: usize = 8;
 pub const MAXIMUM_OBSERVATION_TAPS: u32 = 8;
 /// Bounded depth of each meter stream. Drained outside the clock after every observation.
 pub const METER_QUEUE_DEPTH: usize = 8;
+/// Blocks per meter window on the metered console row (issue #881): the default web boot's.
+///
+/// `WebBootOptions::console_defaults` sets `console_meter_blocks` to the web host's
+/// `DEFAULT_METER_BLOCKS`, twelve, and its `console_request` turns that into a period of
+/// `12 * quantum_frames`. Mirrored here rather than imported: the browser host is not a
+/// dependency of this subject, and this crate names the number it renders with.
+pub const WEB_METER_BLOCKS: u32 = 12;
+/// Bounded depth of each meter stream on the metered console row: the depth the web host's
+/// `console_request` asks for (one window per post, plus headroom for a stalled control side).
+pub const WEB_METER_QUEUE_DEPTH: usize = 8;
 
 const NINE_TRACK: &str = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
 /// The retired 64-track fixture: EQ on `simd1`, compressor in the `dynamic` rack, no limiter.
@@ -331,9 +341,43 @@ pub enum Workload {
     /// wasm host reports no shape, which is why that gate lives beside the fixtures rather than in
     /// the record.
     SixtyFourTrackConsoleHalfMono,
+    /// The standing console session with the meter every browser track carries (issue #881).
+    ///
+    /// [`Self::SixtyFourTrackConsole`] exactly as written -- the same fixture, strip, compile,
+    /// sources and graph -- prepared with one `SAMPLE_PEAK` meter at `PostMatrix` on every track.
+    /// That is the meter set the default web boot binds: a window of [`WEB_METER_BLOCKS`] blocks
+    /// (12 x 128 frames), no peak hold, peak decay off, a queue [`WEB_METER_QUEUE_DEPTH`] snapshots
+    /// deep, and handles `index + 1` in the compiled session's normalized track order. The meters
+    /// are bound as **permanent** observers through
+    /// `builtins_compiler::prepare_selected_session_builtins_between_render_calls`, which is the
+    /// entry `host_core::prepare_host_runtime_with_selected_meters_between_render_calls` calls for
+    /// that boot. No live-console control channel is attached, so the meters are the only thing
+    /// this row adds.
+    ///
+    /// It is the row the observer path can move. Every other session row renders with no
+    /// observer, and the `console_meters` arm binds all-metric meters at a four-block window
+    /// through the concurrent entry, which is not what a browser binds. This is the configuration
+    /// issue #943 (one sample-peak pass per bank, at the resident final lane) moves.
+    ///
+    /// Meters observe and never change signal flow, so this row renders the standing console row's
+    /// bits: the run asserts it before it emits either record, and the aggregate validator pins it.
+    /// Its snapshots are consumed after every block, outside the clock, as a host holding the meter
+    /// lease consumes them.
+    ///
+    /// Not in [`WORKLOADS`]: see [`METERED_WORKLOADS`].
+    SixtyFourTrackConsoleMetered,
 }
 
 impl Workload {
+    /// Whether this row is prepared with the default web boot's meter set (issue #881).
+    ///
+    /// True for exactly one row, [`Self::SixtyFourTrackConsoleMetered`]. Every other row's meters
+    /// come from [`PlanConfig::meters`], which is false on every session row.
+    #[must_use]
+    pub const fn web_meters(self) -> bool {
+        matches!(self, Self::SixtyFourTrackConsoleMetered)
+    }
+
     /// Whether this row renders with the mono collapse **forced off**.
     ///
     /// True for exactly one row. `sixty_four_track_console_mono_dual` compiles the same
@@ -423,6 +467,27 @@ pub const WORKLOADS: [Workload; 16] = [
 /// row -- no bank collapse, no transition, and for a bankless row no bank, no transpose and no
 /// fold -- is asserted of this row beside its bound twin by this crate's own test of the pair.
 pub const DRIVER_FED_WORKLOADS: [Workload; 1] = [Workload::SixtyFourTrackPlumbingRing];
+
+/// The session rows the native bench emits after [`DRIVER_FED_WORKLOADS`]: the rows prepared with
+/// the default web boot's meter set (issue #881).
+///
+/// Kept out of [`WORKLOADS`] for the reason [`DRIVER_FED_WORKLOADS`] is: that array is the wasm
+/// console arm's address space, and a row appended there would change what that arm measures.
+/// Carrying the metered row into the wasm arm is that arm's own change.
+///
+/// The census and shape tests under `tests/` iterate [`WORKLOADS`] only. What this row must share
+/// with the standing console row -- its bits, its bank shape and its folds -- is asserted beside
+/// it by this crate's own test of the pair.
+pub const METERED_WORKLOADS: [Workload; 1] = [Workload::SixtyFourTrackConsoleMetered];
+
+/// Every session row the native bench emits, in emission order: [`WORKLOADS`], then
+/// [`DRIVER_FED_WORKLOADS`], then [`METERED_WORKLOADS`].
+pub fn native_session_rows() -> impl Iterator<Item = Workload> {
+    WORKLOADS
+        .into_iter()
+        .chain(DRIVER_FED_WORKLOADS)
+        .chain(METERED_WORKLOADS)
+}
 
 /// What a decomposition row does to the fixture's channel strip before it is compiled.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -515,6 +580,7 @@ impl Workload {
             Self::SixtyFourTrackConsoleMono => "sixty_four_track_console_mono",
             Self::SixtyFourTrackConsoleMonoDual => "sixty_four_track_console_mono_dual",
             Self::SixtyFourTrackConsoleHalfMono => "sixty_four_track_console_half_mono",
+            Self::SixtyFourTrackConsoleMetered => "sixty_four_track_console_metered",
         }
     }
     /// How many console tracks this workload renders.
@@ -557,6 +623,9 @@ impl Workload {
                 // digest equality will rest on once the collapse exists.
                 | Self::SixtyFourTrackConsoleMono
                 | Self::SixtyFourTrackConsoleMonoDual
+                // The metered row renders the standing fixture as written. Its meters are a
+                // preparation facility, not an edit to the session.
+                | Self::SixtyFourTrackConsoleMetered
         )
     }
     /// The edit this row makes to the fixture's channel strip.
@@ -823,6 +892,40 @@ fn meter_requests(model: &SessionModel) -> Vec<MeterRequest> {
         .collect()
 }
 
+/// The meter set the default web boot binds, one per track (issue #881).
+///
+/// The request `host_core` builds when a browser boots with its console defaults: one
+/// [`MeterMetricSet::SAMPLE_PEAK`] meter at [`MeterTap::PostMatrix`] per track of the compiled
+/// session's normalized model, handles `index + 1` in that order, a window of
+/// [`WEB_METER_BLOCKS`] blocks, no peak hold, peak decay off, a [`WEB_METER_QUEUE_DEPTH`]-deep
+/// queue and reset generation zero. Transcribed field for field from
+/// `prepare_host_runtime_with_console_policy_and_spectrum_with_hop` and the web host's
+/// `console_request`, because this subject does not link either host.
+fn web_meter_requests(session: &session::CompiledSession) -> Vec<SelectedMeterRequest> {
+    let config = MeterConfig {
+        period_frames: NonZeroU32::new(WEB_METER_BLOCKS * QUANTUM as u32).expect("nonzero period"),
+        peak_hold_frames: 0,
+        peak_decay_db_per_second: 0.0,
+        queue_capacity: NonZeroUsize::new(WEB_METER_QUEUE_DEPTH).expect("nonzero depth"),
+        reset_generation: 0,
+    };
+    session
+        .normalized_model()
+        .tracks
+        .iter()
+        .enumerate()
+        .map(|(index, track)| SelectedMeterRequest {
+            request: MeterRequest {
+                handle: MeterHandle(NonZeroU64::new(index as u64 + 1).expect("nonzero handle")),
+                track_id: track.id.as_str().to_owned(),
+                tap: MeterTap::PostMatrix,
+                config,
+            },
+            metrics: MeterMetricSet::SAMPLE_PEAK,
+        })
+        .collect()
+}
+
 /// A block the plan refused, or an output buffer it could not be given.
 ///
 /// Deliberately opaque, and deliberately not a `Result<_, ()>`: a driver counts these into a
@@ -933,6 +1036,19 @@ impl SessionRuntime {
         );
         let meters = if config.meters {
             meter_requests(&model)
+        } else {
+            Vec::new()
+        };
+        // Issue #881: the metered row carries the default web boot's meter set and nothing else,
+        // so a facility arm on top of it would meter every track twice and measure a shape no host
+        // prepares.
+        assert!(
+            !workload.web_meters() || config == PlanConfig::BASELINE,
+            "{}: the metered row carries its own meters and no other console facility",
+            workload.kind()
+        );
+        let web_meters = if workload.web_meters() {
+            web_meter_requests(&session)
         } else {
             Vec::new()
         };
@@ -1052,9 +1168,22 @@ impl SessionRuntime {
                 "{}: a driver-fed row must take the builtins-less path",
                 workload.kind()
             );
-            let builtins =
+            // Issue #881: the metered row is prepared through the builtins entry the default web
+            // boot's host preparation reaches, which binds its selected meters as permanent
+            // observers. It attaches no control channel, so its between-render-calls delivery has
+            // nothing to deliver. Every other row keeps the entry it has always been prepared
+            // through.
+            let builtins = if workload.web_meters() {
+                builtins_compiler::prepare_selected_session_builtins_between_render_calls(
+                    &session,
+                    &web_meters,
+                    &[],
+                    builtin_caps(),
+                )
+            } else {
                 builtins_compiler::prepare_session_builtins(&session, &meters, builtin_caps())
-                    .expect("prepared console builtins");
+            }
+            .expect("prepared console builtins");
             let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
                 dispatch,
                 plan_id: PLAN_ID,
@@ -1085,7 +1214,7 @@ impl SessionRuntime {
         };
         assert_eq!(
             meter_consumers.len(),
-            meters.len(),
+            meters.len() + web_meters.len(),
             "{}: every requested meter stream must reach the plan",
             workload.kind()
         );
@@ -1498,13 +1627,33 @@ impl SessionRuntime {
 
     /// Meter frames drained from every stream. Outside the clock, like every evidence step.
     pub fn drain_meters(&mut self) -> u64 {
-        let mut frames = 0;
+        self.drain_meter_snapshots(|_| {})
+    }
+
+    /// Meter streams bound into this plan: one per track on a metered arm, none on any other.
+    #[must_use]
+    pub fn meter_streams(&self) -> usize {
+        self.meter_consumers.len()
+    }
+
+    /// The tap each bound meter stream observes, in stream order.
+    pub fn meter_taps(&self) -> impl Iterator<Item = MeterTap> + '_ {
+        self.meter_consumers.iter().map(|stream| stream.tap)
+    }
+
+    /// Pops every published meter snapshot, stream by stream, hands each to `visit`, and returns
+    /// how many there were. Outside the clock, like every evidence step, and allocation-free, so a
+    /// driver can consume every snapshot after every block the way a host holding the meter lease
+    /// does.
+    pub fn drain_meter_snapshots(&mut self, mut visit: impl FnMut(&MeterSnapshot)) -> u64 {
+        let mut snapshots = 0;
         for stream in &mut self.meter_consumers {
-            while stream.consumer.try_pop().is_ok() {
-                frames += 1;
+            while let Ok(snapshot) = stream.consumer.try_pop() {
+                visit(&snapshot);
+                snapshots += 1;
             }
         }
-        frames
+        snapshots
     }
 
     /// Renders exactly one block. This is the whole of what a driver may time.
@@ -2326,5 +2475,193 @@ mod tests {
             count / 2,
             "the half-mono model maps half its tracks mono"
         );
+    }
+
+    /// Issue #881: the metered row states every fact the standing console row states -- it is that
+    /// session as written -- and it is the only row prepared with the web boot's meter set.
+    #[test]
+    fn the_metered_row_states_the_console_rows_facts_and_is_the_only_web_metered_row() {
+        let console = Workload::SixtyFourTrackConsole;
+        let metered = Workload::SixtyFourTrackConsoleMetered;
+        assert_eq!(metered.kind(), "sixty_four_track_console_metered");
+        assert_eq!(stated_facts(metered), stated_facts(console));
+        assert_eq!(metered.input_signal(), console.input_signal());
+        assert_eq!(metered.warmup_blocks(), console.warmup_blocks());
+        assert!(metered.strip() == Strip::AsWritten && console.strip() == Strip::AsWritten);
+        assert_eq!(metered.source_feed(), SourceFeed::Bound);
+        assert!(!metered.collapse_forced_off());
+        assert!(metered.web_meters());
+        assert!(
+            METERED_WORKLOADS == [metered],
+            "the metered row is the only one"
+        );
+        for workload in WORKLOADS.into_iter().chain(DRIVER_FED_WORKLOADS) {
+            assert!(!workload.web_meters(), "{}", workload.kind());
+        }
+        let rows: Vec<Workload> = native_session_rows().collect();
+        assert_eq!(
+            rows.len(),
+            WORKLOADS.len() + DRIVER_FED_WORKLOADS.len() + METERED_WORKLOADS.len()
+        );
+        assert!(
+            rows.last() == Some(&metered),
+            "the metered row is emitted last, after the driver-fed row"
+        );
+        let mut kinds: Vec<&str> = rows.iter().map(|workload| workload.kind()).collect();
+        kinds.sort_unstable();
+        kinds.dedup();
+        assert_eq!(kinds.len(), rows.len(), "every emitted kind is distinct");
+    }
+
+    /// Issue #881 gate 3: the metered row renders the standing console row's bits, and every track
+    /// publishes one sample-peak snapshot per twelve-block window, on time, with none dropped.
+    ///
+    /// Sixty-four blocks of both rows, digested by `hash_output`. The pin is the standing console
+    /// row's 64-block digest (`tests/chain_shape.rs`,
+    /// `the_select_free_matrix_arm_renders_the_base_bits`), and the metered row reproduces it,
+    /// because a meter observes and never changes signal flow. Beside the bits, the plan shape the
+    /// fold and redirect counters state: the meters change no bank, no transpose, no fold (every
+    /// route of the console folds, the #885 contract) and no scatter redirect (#886).
+    ///
+    /// The snapshots are drained after every block, which is what the bench does outside its
+    /// clock. Sixty-four blocks close five twelve-block windows per track, so the row publishes
+    /// `5 * 64` snapshots, and each window is published by the block that closes it: sixty-four
+    /// snapshots after blocks 11, 23, 35, 47 and 59 and none after any other. Each track's five
+    /// carry its own handle, consecutive window sequences, contiguous 1536-frame sample spans from
+    /// sample zero, the `SAMPLE_PEAK` presence mask the selected entry prepares, zero dropped
+    /// snapshots and zero discontinuities, and a positive peak on both channels (the tone is
+    /// audible and no fader is muted). The unmetered row binds no stream and publishes nothing.
+    ///
+    /// Red mutations (run): select `MeterMetricSet::ALL` in `web_meter_requests` -- the presence
+    /// assertion fails; set `WEB_METER_BLOCKS` to 4 -- the window count fails.
+    #[test]
+    fn the_metered_console_row_renders_the_console_bits_and_publishes_every_window() {
+        const BLOCKS: u64 = 64;
+        const CONSOLE_DIGEST: &str =
+            "fe5bed9becdbc101d7ad4b77e7e1969ca3888cae34857333f79531b03a4868de";
+        // The browser's window, written out rather than read back from `WEB_METER_BLOCKS`: the
+        // web host's `DEFAULT_METER_BLOCKS` (12) blocks of the 128-frame quantum. A mirror that
+        // drifted from the host would otherwise move this test with it.
+        let window = 12;
+        let window_frames = window * 128;
+        assert_eq!(QUANTUM, 128);
+        let run = |workload: Workload| {
+            let mut runtime = SessionRuntime::new(workload);
+            let mut digest = Sha256Sink::new();
+            let mut published: Vec<(u64, MeterSnapshot)> = Vec::new();
+            audit::warm_up();
+            audit::reset();
+            for block in 0..BLOCKS {
+                runtime.render(block).expect("console render");
+                runtime.hash_output(&mut digest);
+                runtime.drain_meter_snapshots(|snapshot| published.push((block, *snapshot)));
+            }
+            let forbidden = audit::snapshot().total();
+            (runtime, digest.finish_hex(), published, forbidden)
+        };
+        let (console, console_digest, console_published, console_forbidden) =
+            run(Workload::SixtyFourTrackConsole);
+        let (metered, metered_digest, metered_published, metered_forbidden) =
+            run(Workload::SixtyFourTrackConsoleMetered);
+
+        assert_eq!(
+            console_digest, CONSOLE_DIGEST,
+            "the standing console row moved: this is not the row the pin was taken on"
+        );
+        assert_eq!(
+            metered_digest, console_digest,
+            "the metered row must render the standing console row's bits: a meter observes and \
+             never changes signal flow"
+        );
+        assert_eq!(
+            (console_forbidden, metered_forbidden),
+            (0, 0),
+            "no forbidden operation on either render path"
+        );
+        assert_eq!(metered.bank_shape(), console.bank_shape(), "no bank moves");
+        assert_eq!(metered.bank_transposes(), console.bank_transposes());
+        let tracks = u64::from(Workload::SixtyFourTrackConsoleMetered.tracks());
+        assert_eq!(
+            [console.bank_route_folds(), metered.bank_route_folds()],
+            [tracks, tracks],
+            "every route of the console folds, metered or not (#885)"
+        );
+        assert_eq!(
+            metered.bank_scatter_redirects(),
+            console.bank_scatter_redirects(),
+            "a post-matrix meter moves no scatter redirect (#886)"
+        );
+
+        assert_eq!(console.meter_streams(), 0);
+        assert!(
+            console_published.is_empty(),
+            "the unmetered row publishes nothing"
+        );
+        assert_eq!(
+            metered.meter_streams() as u64,
+            tracks,
+            "one stream per track"
+        );
+        assert!(
+            metered.meter_taps().all(|tap| tap == MeterTap::PostMatrix),
+            "every stream observes the post-matrix tap"
+        );
+        let windows = BLOCKS / window;
+        assert_eq!(
+            metered_published.len() as u64,
+            tracks * windows,
+            "five windows per track, none dropped and none extra"
+        );
+        for block in 0..BLOCKS {
+            let drained = metered_published
+                .iter()
+                .filter(|(after, _)| *after == block)
+                .count() as u64;
+            let closes = (block + 1) % window == 0;
+            assert_eq!(
+                drained,
+                if closes { tracks } else { 0 },
+                "block {block}: every track publishes on the block that closes its window"
+            );
+        }
+        for handle in 1..=tracks {
+            let stream: Vec<&(u64, MeterSnapshot)> = metered_published
+                .iter()
+                .filter(|(_, snapshot)| snapshot.handle.0.get() == handle)
+                .collect();
+            assert_eq!(
+                stream.len() as u64,
+                windows,
+                "handle {handle}: every window"
+            );
+            for (sequence, (after, snapshot)) in stream.into_iter().enumerate() {
+                let sequence = sequence as u64;
+                assert_eq!(snapshot.window_sequence, sequence, "handle {handle}");
+                assert_eq!(*after, (sequence + 1) * window - 1, "handle {handle}");
+                assert_eq!(snapshot.start_sample, sequence * window_frames);
+                assert_eq!(snapshot.end_sample, (sequence + 1) * window_frames);
+                assert_eq!(u64::from(snapshot.frames), window_frames);
+                assert!(
+                    snapshot.present_metrics == MeterMetricSet::SAMPLE_PEAK,
+                    "handle {handle}: the selected entry computes the sample peak only"
+                );
+                assert_eq!(
+                    (snapshot.reset_generation, snapshot.observation_generation),
+                    (0, 0),
+                    "handle {handle}: a permanent observer is never re-armed"
+                );
+                assert_eq!(
+                    snapshot.cumulative_dropped_snapshots, 0,
+                    "handle {handle}: dropped a snapshot"
+                );
+                assert_eq!(snapshot.cumulative_discontinuities, 0, "handle {handle}");
+                for peak in [snapshot.left.sample_peak, snapshot.right.sample_peak] {
+                    assert!(
+                        peak.is_finite() && peak > 0.0,
+                        "handle {handle}: the meter read the audible tone ({peak})"
+                    );
+                }
+            }
+        }
     }
 }

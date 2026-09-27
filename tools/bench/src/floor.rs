@@ -159,10 +159,16 @@ impl FloorRow {
 /// fixture (`fixtures/session/v1/parametric-eq-nine-track.json`), whose band count and builtins
 /// were never inventoried, and a floor stated for the wrong fixture would be worse than no floor
 /// at all. The record says so: its `floor_basis` is `not_derived` and its floor columns are null.
+///
+/// `sixty_four_track_console_metered` (issue #881) is absent for the same reason. Its strip is the
+/// standing console's, but its meters are arithmetic the rulings have never inventoried, and
+/// costing it at the unmetered strip's floor would publish the meters' cost as a gap in the
+/// strip's. It names no control either: a subtraction against the standing row would be an
+/// isolate of the meters against a floor nobody derived.
 pub(crate) fn floor_row(workload: Workload) -> Option<FloorRow> {
     let full = 1.0_f64;
     Some(match workload {
-        Workload::NineTrackBaseline => return None,
+        Workload::NineTrackBaseline | Workload::SixtyFourTrackConsoleMetered => return None,
         Workload::NineTrackRaggedStrip => FloorRow {
             lane_ops: BUILTINS_LANE_OPS + EQ_LANE_OPS + COMPRESSOR_LANE_OPS + LIMITER_LANE_OPS,
             width_factor: RAGGED_NINE_TRACK_WIDTH_FACTOR,
@@ -387,17 +393,12 @@ mod tests {
         BANK_WIDTH, BUILTINS_IDENTITY_LANE_OPS, COMPRESSOR_LANE_OPS, EQ_LANE_OPS, LIMITER_LANE_OPS,
         OPS_PER_CYCLE, PLUMBING_LANE_OPS, floor_row, lane_samples_per_block,
     };
-    use console_workload::{DRIVER_FED_WORKLOADS, WORKLOADS, Workload};
-
-    /// Every session row the bench emits: [`WORKLOADS`], then the driver-fed rows.
-    fn session_rows() -> impl Iterator<Item = Workload> {
-        WORKLOADS.into_iter().chain(DRIVER_FED_WORKLOADS)
-    }
+    use console_workload::{Workload, native_session_rows};
 
     fn rust_floor_table() -> String {
         let mut keys = BTreeSet::new();
         let mut table = String::from("{");
-        for (index, workload) in session_rows().enumerate() {
+        for (index, workload) in native_session_rows().enumerate() {
             let key = workload.kind();
             assert!(keys.insert(key), "duplicate floor workload key: {key}");
             if index != 0 {
@@ -420,7 +421,10 @@ mod tests {
                     table.push('"');
                 }
                 None => {
-                    assert!(matches!(workload, Workload::NineTrackBaseline));
+                    assert!(matches!(
+                        workload,
+                        Workload::NineTrackBaseline | Workload::SixtyFourTrackConsoleMetered
+                    ));
                     table.push_str("null,1,\"none\",\"not_derived\"");
                 }
             }
@@ -510,9 +514,12 @@ input as $rust |
 
     #[test]
     fn every_derived_row_names_its_ruling_and_composes_a_positive_floor() {
-        for workload in session_rows() {
+        for workload in native_session_rows() {
             let Some(row) = floor_row(workload) else {
-                assert!(matches!(workload, Workload::NineTrackBaseline));
+                assert!(matches!(
+                    workload,
+                    Workload::NineTrackBaseline | Workload::SixtyFourTrackConsoleMetered
+                ));
                 continue;
             };
             assert!(
@@ -527,7 +534,7 @@ input as $rust |
 
     #[test]
     fn a_control_row_is_always_cheaper_than_the_row_it_isolates() {
-        for workload in session_rows() {
+        for workload in native_session_rows() {
             let Some(row) = floor_row(workload) else {
                 continue;
             };
@@ -582,7 +589,7 @@ input as $rust |
     #[test]
     fn the_plumbing_row_is_the_floor_of_the_table_and_the_identity_pair_shares_one_inventory() {
         let plumbing = floor_row(Workload::SixtyFourTrackPlumbingOnly).expect("a derived row");
-        for workload in session_rows() {
+        for workload in native_session_rows() {
             let Some(row) = floor_row(workload) else {
                 continue;
             };
@@ -627,7 +634,7 @@ input as $rust |
                 < 1.0e-12
         );
         assert!(ring.control.is_none());
-        for workload in session_rows() {
+        for workload in native_session_rows() {
             let control = floor_row(workload).and_then(|row| row.control);
             assert!(
                 control != Some(Workload::SixtyFourTrackPlumbingRing)
