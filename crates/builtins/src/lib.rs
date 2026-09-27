@@ -4451,6 +4451,30 @@ pub struct MeterSnapshot {
     pub cumulative_dropped_snapshots: u64,
 }
 
+/// One block's full meter partials for one meter's `[left, right]` lanes, computed by the bank
+/// that produced the block (issue #950): what [`MeterAccumulator::observe_input_banked`] commits
+/// instead of reading the samples.
+///
+/// Every field is what the meter's own scalar loop would compute over the same block, and the
+/// commit relies on it: `lane::kernels::builtins::meter_block` over the block's final words,
+/// seeded with `energy_seed`, gives exactly this.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MeterBankedBlock {
+    /// The maximum of `+0.0` and every sanitized magnitude of the block, per channel.
+    pub sample_peak: [f32; 2],
+    /// How many sanitized magnitudes of the block are `>= 1.0`, per channel.
+    pub clipped: [u64; 2],
+    /// How many of the block's words the sanitization replaced (NaN, `±inf` and nonzero
+    /// subnormals), per channel.
+    pub sanitized: [u64; 2],
+    /// The energy the pass started from, per channel: the meter commits only if these are its own
+    /// post-preamble energies, bit for bit.
+    pub energy_seed: [f64; 2],
+    /// `energy_seed` plus the square of every sanitized sample, added one sample at a time in
+    /// frame order, per channel. It replaces the meter's energy; it is never added to it.
+    pub energy: [f64; 2],
+}
+
 struct MeterLane {
     peak: f32,
     energy: f64,
@@ -4521,6 +4545,27 @@ pub fn test_only_reset_block_peak_merges() {
 #[must_use]
 pub fn test_only_block_peak_merges() -> u64 {
     METER_BLOCK_PEAK_MERGES.with(Cell::get)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+std::thread_local! {
+    static METER_BANKED_COMMITS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Reset the count of banked blocks committed by [`MeterAccumulator::observe_input_banked`]
+/// (issue #950).
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn test_only_reset_banked_meter_commits() {
+    METER_BANKED_COMMITS.with(|commits| commits.set(0));
+}
+
+/// Banked blocks committed since the last reset: one per meter per block that took the commit.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_banked_meter_commits() -> u64 {
+    METER_BANKED_COMMITS.with(Cell::get)
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -4642,6 +4687,102 @@ impl MeterAccumulator {
         first_sample: u64,
         block_peak: Option<[f32; 2]>,
     ) -> Result<(), MeterObservationError> {
+        self.observe_block(input, first_sample, block_peak, None)
+    }
+
+    /// Whether this meter can ever commit a banked block (issue #950): every metric it keeps is an
+    /// order-free block partial or the seeded energy sum.
+    ///
+    /// Only a held peak with a hold or a decay is not. Its per-sample state machine counts frames
+    /// down and multiplies by the decay, so it has no block partial; with neither, it is the plain
+    /// select-form maximum `held = a >= held ? a : held`, which merges exactly. Fixed at
+    /// preparation, since nothing changes the configuration or the selection afterwards.
+    #[must_use]
+    pub fn banked_eligible(&self) -> bool {
+        !self.metrics.contains(MeterMetricSet::HELD_PEAK)
+            || (self.config.peak_hold_frames == 0 && self.config.peak_decay_db_per_second == 0.0)
+    }
+
+    /// The `[left, right]` energy this meter's scalar loop would start a `frames`-frame block at
+    /// `first_sample` from, or `None` if [`Self::observe_input_banked`] could not commit that block
+    /// (issue #950).
+    ///
+    /// A pure read of this meter's own state, bounded and allocation-free. It mirrors
+    /// [`Self::observe_input`]'s preamble without performing it: a block that does not continue the
+    /// window is a discontinuity, which will zero both the window's frame count and its energy, and
+    /// a meter with no window yet already has both at zero. `None` unless the meter can bank at all
+    /// ([`Self::banked_eligible`]), keeps [`MeterMetricSet::ENERGY_RMS`] -- a meter without an
+    /// energy has no seed, and answering one would stop a bank's seed search at a meter whose answer
+    /// means nothing -- and the whole non-empty block lies inside the window.
+    #[must_use]
+    pub fn banked_seed(&self, first_sample: u64, frames: usize) -> Option<[f64; 2]> {
+        if !self.banked_eligible()
+            || !self.metrics.contains(MeterMetricSet::ENERGY_RMS)
+            || frames == 0
+        {
+            return None;
+        }
+        let discontinuous = self
+            .start
+            .is_some_and(|start| first_sample != start.saturating_add(u64::from(self.frames)));
+        let (now, seed) = if discontinuous {
+            (0, [0.0, 0.0])
+        } else {
+            (self.frames, [self.left.energy, self.right.energy])
+        };
+        if frames > self.config.period_frames.get().saturating_sub(now) as usize {
+            return None;
+        }
+        Some(seed)
+    }
+
+    /// [`Self::observe_input`], with this block's full meter partials already computed by the bank
+    /// that produced it (issue #950).
+    ///
+    /// `banked` must be what the meter's own loop would compute over this block: the lane pass
+    /// `lane::kernels::builtins::meter_block` over the block's words, seeded with
+    /// `banked.energy_seed`. The preamble runs unchanged first -- the time check, the discontinuity
+    /// and the window start -- and then the block is committed without reading a sample only when
+    /// all of these hold:
+    ///
+    /// * `banked` is `Some`, and this meter is [`Self::banked_eligible`];
+    /// * the block is non-empty and lies inside the current window;
+    /// * if the meter keeps [`MeterMetricSet::ENERGY_RMS`], `banked.energy_seed` is its own
+    ///   post-preamble energy, bit for bit, on both channels.
+    ///
+    /// The commit, per channel, left then right: the peak and the held peak merge with the loop's
+    /// select forms (`q > peak`, `q >= held`); the energy is **replaced** by `banked.energy`, the
+    /// seeded sample-serial sum, and never has a partial added to it; the counts `saturating_add`
+    /// into the window's and then the lifetime counters. Then the window advances and emits at its
+    /// period, exactly as the loop would. Every other block ignores `banked` and takes the loop, so
+    /// every published word is the one [`Self::observe_input`] would publish.
+    ///
+    /// The seed check is what keeps the protocol safe: whoever computed `banked` read the seed from
+    /// this meter's own state through [`Self::banked_seed`], and this meter accepts the result
+    /// only for that state. A wrong seed can only make the block fall back to the loop.
+    ///
+    /// # Errors
+    /// [`MeterObservationError::SampleTimeOverflow`] before any state mutation if the
+    /// block would run past `u64::MAX`.
+    pub fn observe_input_banked(
+        &mut self,
+        input: MeterInput<'_>,
+        first_sample: u64,
+        banked: Option<MeterBankedBlock>,
+    ) -> Result<(), MeterObservationError> {
+        self.observe_block(input, first_sample, None, banked)
+    }
+
+    /// The one body behind [`Self::observe_input`], [`Self::observe_input_with_block_peak`] and
+    /// [`Self::observe_input_banked`]: the preamble, then a banked commit, a block-peak merge or
+    /// the scalar loop.
+    fn observe_block(
+        &mut self,
+        input: MeterInput<'_>,
+        first_sample: u64,
+        block_peak: Option<[f32; 2]>,
+        banked: Option<MeterBankedBlock>,
+    ) -> Result<(), MeterObservationError> {
         let len = match u64::try_from(input.frames)
             .ok()
             .and_then(|len| first_sample.checked_add(len))
@@ -4659,6 +4800,13 @@ impl MeterAccumulator {
             self.start = Some(first_sample);
         }
         let period = self.config.period_frames.get();
+        // Issue #950: the bank computed this block's partials and this meter's seeded energy, and
+        // the commit checks that the block and the seed are this meter's own.
+        if let Some(banked) = banked
+            && self.commit_banked(banked, len, period)
+        {
+            return Ok(());
+        }
         // Issue #943: the block's peak arrives precomputed and the whole block lies inside this
         // window, so the window's peak is one select-form merge per channel and the frame count.
         // Nothing else a `SAMPLE_PEAK` window keeps reads a sample.
@@ -4781,6 +4929,48 @@ impl MeterAccumulator {
         }
         Ok(())
     }
+
+    /// Commit one banked block after the preamble, or return `false` and leave the meter untouched
+    /// (issue #950). See [`Self::observe_input_banked`] for the conditions and the commit.
+    fn commit_banked(&mut self, banked: MeterBankedBlock, len: usize, period: u32) -> bool {
+        let seeded = !self.metrics.contains(MeterMetricSet::ENERGY_RMS)
+            || (banked.energy_seed[0].to_bits() == self.left.energy.to_bits()
+                && banked.energy_seed[1].to_bits() == self.right.energy.to_bits());
+        if !self.banked_eligible()
+            || len == 0
+            || len > period.saturating_sub(self.frames) as usize
+            || !seeded
+        {
+            return false;
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        METER_BANKED_COMMITS.with(|commits| commits.set(commits.get().saturating_add(1)));
+        commit_banked_lane(
+            &mut self.left,
+            self.metrics,
+            banked.sample_peak[0],
+            banked.clipped[0],
+            banked.sanitized[0],
+            banked.energy[0],
+            &mut self.cumulative_clipped,
+            &mut self.cumulative_sanitized,
+        );
+        commit_banked_lane(
+            &mut self.right,
+            self.metrics,
+            banked.sample_peak[1],
+            banked.clipped[1],
+            banked.sanitized[1],
+            banked.energy[1],
+            &mut self.cumulative_clipped,
+            &mut self.cumulative_sanitized,
+        );
+        self.frames = self.frames.saturating_add(len as u32);
+        if self.frames == period {
+            self.emit();
+        }
+        true
+    }
     // REALTIME_POLICY_END
     pub fn reset(&mut self, kind: BuiltinResetKind) {
         self.start = None;
@@ -4898,6 +5088,53 @@ fn clear_interval(lane: &mut MeterLane) {
     lane.clipped = 0;
     lane.sanitized = 0;
 }
+
+// REALTIME_POLICY_BEGIN
+/// One channel of a banked commit (issue #950): what [`observe_segment`] and
+/// [`observe_selected_segment`] would leave in `lane` and the lifetime counters after one segment,
+/// from that segment's partials.
+///
+/// * `SAMPLE_PEAK`: `peak` merges `q` with the loop's `if a > p` form. On the sanitized domain
+///   `{+0.0} ∪ [MIN_POSITIVE, MAX]` that select form is associative and commutative by bits, so
+///   merging the block's maximum equals the loop.
+/// * `HELD_PEAK`, reached only without a hold or a decay: the loop's state machine is then
+///   `held = a >= held ? a : held` with `hold_remaining` fixed at `0`, the same maximum merged with
+///   its own `>=` form; `hold_remaining` is not touched.
+/// * `ENERGY_RMS`: `energy` is replaced by the seeded, sample-serial sum. Replaced, never added
+///   to: adding a zero-seeded partial rounds differently.
+/// * `COUNTS`: the window's counts, then the lifetime counts, `saturating_add` the block's, as the
+///   loop does.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one channel's four partials and the two lifetime counters it shares with its sibling"
+)]
+fn commit_banked_lane(
+    lane: &mut MeterLane,
+    metrics: MeterMetricSet,
+    q: f32,
+    clipped: u64,
+    sanitized: u64,
+    energy: f64,
+    cumulative_clipped: &mut u64,
+    cumulative_sanitized: &mut u64,
+) {
+    if metrics.contains(MeterMetricSet::SAMPLE_PEAK) {
+        lane.peak = if q > lane.peak { q } else { lane.peak };
+    }
+    if metrics.contains(MeterMetricSet::ENERGY_RMS) {
+        lane.energy = energy;
+    }
+    if metrics.contains(MeterMetricSet::COUNTS) {
+        lane.clipped = lane.clipped.saturating_add(clipped);
+        lane.sanitized = lane.sanitized.saturating_add(sanitized);
+        *cumulative_clipped = cumulative_clipped.saturating_add(clipped);
+        *cumulative_sanitized = cumulative_sanitized.saturating_add(sanitized);
+    }
+    if metrics.contains(MeterMetricSet::HELD_PEAK) {
+        lane.held = if q >= lane.held { q } else { lane.held };
+    }
+}
+// REALTIME_POLICY_END
 
 /// Accumulates one lane over a segment that lies entirely inside one meter window.
 ///

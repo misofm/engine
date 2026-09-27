@@ -7,10 +7,12 @@
 //! deliberately not the arithmetic: every value below is class A and its JSON fixtures are
 //! byte-identical.
 
+use core::hint::black_box;
 use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 
 use bench_support::alloc as bench_alloc;
 use builtins::*;
+use lane::{LaneF64, Simd4, Simd8, Widen};
 
 #[test]
 fn meter_windows_are_exact() {
@@ -967,4 +969,537 @@ fn a_block_peak_merge_publishes_the_scalar_meters_snapshots() {
         }
     }
     eprintln!("G2: {total} snapshots bit-identical across both arms");
+}
+
+// Issue #950, gate M2: the banked commit publishes the scalar meter's snapshots.
+
+/// One event of an M2 stream, applied to every meter of both arms.
+#[derive(Clone, Copy, Debug)]
+enum BankedEvent {
+    /// A block of this many frames at the running sample time.
+    Block(usize),
+    /// Skip this many samples, so the next block is a discontinuity.
+    Skip(u64),
+    /// `restart_observation` with this generation.
+    Restart(u64),
+    /// `reset` with this kind.
+    Reset(BuiltinResetKind),
+}
+
+/// How arm B hands each lane its banked block.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BankedMode {
+    /// The protocol: the first seed in binding order, the pass from those seeds, and the result.
+    Seeded,
+    /// No pass: every meter is handed `None`.
+    Withheld,
+    /// The safety net: every seed is moved by one ulp before the pass runs from it and is handed
+    /// on, so no energy-keeping meter may commit.
+    MovedSeed,
+}
+
+/// One M2 configuration. `metrics` is one lane's meters, in binding order; every lane has the same.
+#[derive(Clone, Debug)]
+struct BankedRun {
+    metrics: Vec<MeterMetricSet>,
+    period: u32,
+    hold: u32,
+    decay: f32,
+    hostile: bool,
+    mode: BankedMode,
+}
+
+/// What one M2 run saw: snapshots compared, and the banked commit count after every event when
+/// the counter is built.
+struct BankedOutcome {
+    compared: usize,
+    commits: Option<Vec<u64>>,
+}
+
+#[cfg(feature = "test-support")]
+fn banked_commits() -> Option<u64> {
+    Some(builtins::test_only_banked_meter_commits())
+}
+
+#[cfg(not(feature = "test-support"))]
+fn banked_commits() -> Option<u64> {
+    None
+}
+
+#[cfg(feature = "test-support")]
+fn reset_banked_commits() {
+    builtins::test_only_reset_banked_meter_commits();
+}
+
+#[cfg(not(feature = "test-support"))]
+fn reset_banked_commits() {}
+
+/// Every field of one snapshot as bits, so a float compares by its bits rather than `==`.
+fn banked_snapshot_bits(snapshot: &MeterSnapshot) -> [u64; 24] {
+    let lane = |lane: &MeterLaneSnapshot| {
+        [
+            u64::from(lane.sample_peak.to_bits()),
+            lane.rms.to_bits(),
+            lane.energy.to_bits(),
+            u64::from(lane.held_peak.to_bits()),
+            lane.clipped_samples,
+            lane.sanitized_samples,
+        ]
+    };
+    let [l0, l1, l2, l3, l4, l5] = lane(&snapshot.left);
+    let [r0, r1, r2, r3, r4, r5] = lane(&snapshot.right);
+    [
+        snapshot.handle.0.get(),
+        u64::from(snapshot.present_metrics.bits()),
+        snapshot.reset_generation,
+        snapshot.observation_generation,
+        snapshot.window_sequence,
+        snapshot.start_sample,
+        snapshot.end_sample,
+        u64::from(snapshot.frames),
+        snapshot.cumulative_clipped_samples,
+        snapshot.cumulative_sanitized_samples,
+        snapshot.cumulative_discontinuities,
+        snapshot.cumulative_dropped_snapshots,
+        l0,
+        l1,
+        l2,
+        l3,
+        l4,
+        l5,
+        r0,
+        r1,
+        r2,
+        r3,
+        r4,
+        r5,
+    ]
+}
+
+/// One arm's meters, `[lane][binding]`.
+fn banked_meters(run: &BankedRun, width: usize) -> Vec<Vec<PreparedMeter>> {
+    (0..width)
+        .map(|lane| {
+            run.metrics
+                .iter()
+                .enumerate()
+                .map(|(binding, &metrics)| {
+                    MeterAccumulator::prepare_selected(
+                        MeterHandle(
+                            NonZeroU64::new((lane * 8 + binding) as u64 + 1).expect("constant"),
+                        ),
+                        MeterConfig {
+                            period_frames: NonZeroU32::new(run.period).expect("period"),
+                            peak_hold_frames: run.hold,
+                            peak_decay_db_per_second: run.decay,
+                            queue_capacity: NonZeroUsize::new(1024).expect("constant"),
+                            reset_generation: 950,
+                        },
+                        48_000,
+                        metrics,
+                    )
+                    .expect("meter")
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Fills one strided plane of `width` lanes: hostile words (lane 1, and lane 5 at eight lanes,
+/// only words the meter sanitizes to `+0.0`), or a triangle tone whose amplitude differs per lane
+/// and clips on some.
+fn banked_fill(
+    rng: &mut PeakRng,
+    pool: &[f32],
+    plane: &mut [f32],
+    width: usize,
+    hostile: bool,
+    phase: usize,
+) {
+    for (index, word) in plane.iter_mut().enumerate() {
+        let lane = index % width;
+        *word = if hostile && matches!(lane, 1 | 5) {
+            f32::from_bits(PEAK_INVALID[rng.below(PEAK_INVALID.len())])
+        } else if hostile {
+            pool[rng.below(pool.len())]
+        } else {
+            let step = ((index / width + phase) * (3 + lane)) % 256;
+            let triangle = (step as f32 / 64.0 - 2.0).abs() - 1.0;
+            (0.375 * (1 + (lane + phase) % 4) as f32) * triangle
+        };
+    }
+}
+
+/// Runs one stream through two arms at `L`'s width -- arm A through `observe_input`, arm B through
+/// the banked protocol of `run.mode` -- and asserts every published snapshot is the same on every
+/// field by bits.
+///
+/// Arm B is what the graph and `MeterObserver` do together: per lane, the first `banked_seed` in
+/// binding order; the pass only if some lane answered, from `+0.0` for a lane that did not; then
+/// each meter, in binding order, commits through `observe_input_banked` if it banks and is not
+/// exactly `SAMPLE_PEAK`, and otherwise takes issue #943's call with the pass's peak.
+fn banked_differential<L: Widen>(
+    run: &BankedRun,
+    events: &[BankedEvent],
+    seed: u64,
+) -> BankedOutcome {
+    use lane::kernels::builtins::meter_block;
+    let width = L::WIDTH;
+    let pool = peak_hostile_pool();
+    let mut rng = PeakRng(seed);
+    let mut scalar = banked_meters(run, width);
+    let mut banked = banked_meters(run, width);
+    let mut time = 1_000_u64;
+    let mut compared = 0;
+    let mut commits = banked_commits().map(|_| Vec::with_capacity(events.len()));
+    reset_banked_commits();
+    for (index, event) in events.iter().enumerate() {
+        match *event {
+            BankedEvent::Block(frames) => {
+                let mut left = vec![0.0_f32; frames * width];
+                let mut right = vec![0.0_f32; frames * width];
+                banked_fill(&mut rng, &pool, &mut left, width, run.hostile, index * 5);
+                banked_fill(
+                    &mut rng,
+                    &pool,
+                    &mut right,
+                    width,
+                    run.hostile,
+                    index * 11 + 3,
+                );
+                let mut seeds = [[0.0_f64; 8]; 2];
+                let mut seeded = false;
+                if run.mode != BankedMode::Withheld {
+                    for (lane, meters) in banked.iter().enumerate() {
+                        if let Some([l, r]) = meters
+                            .iter()
+                            .find_map(|meter| meter.accumulator.banked_seed(time, frames))
+                        {
+                            let moved = |x: f64| match run.mode {
+                                BankedMode::MovedSeed => f64::from_bits(x.to_bits() + 1),
+                                _ => x,
+                            };
+                            seeds[0][lane] = moved(l);
+                            seeds[1][lane] = moved(r);
+                            seeded = true;
+                        }
+                    }
+                }
+                let blocks: Option<Vec<MeterBankedBlock>> = seeded.then(|| {
+                    let mut peak = [[0.0_f32; 8]; 2];
+                    let mut clipped = [[0.0_f32; 8]; 2];
+                    let mut sanitized = [[0.0_f32; 8]; 2];
+                    let mut energy = [[0.0_f64; 8]; 2];
+                    for (plane, words) in [&left, &right].into_iter().enumerate() {
+                        let result = black_box(meter_block::<L>(
+                            words,
+                            frames,
+                            <L::F64 as LaneF64>::load(&seeds[plane][..width]),
+                        ));
+                        result.peak.store(&mut peak[plane][..width]);
+                        result.clipped.store(&mut clipped[plane][..width]);
+                        result.sanitized.store(&mut sanitized[plane][..width]);
+                        result.energy.store(&mut energy[plane][..width]);
+                    }
+                    (0..width)
+                        .map(|lane| MeterBankedBlock {
+                            sample_peak: [peak[0][lane], peak[1][lane]],
+                            clipped: [clipped[0][lane] as u64, clipped[1][lane] as u64],
+                            sanitized: [sanitized[0][lane] as u64, sanitized[1][lane] as u64],
+                            energy_seed: [seeds[0][lane], seeds[1][lane]],
+                            energy: [energy[0][lane], energy[1][lane]],
+                        })
+                        .collect()
+                });
+                for lane in 0..width {
+                    let input =
+                        MeterInput::strided(&left, &right, frames, width, lane).expect("view");
+                    let block = blocks.as_ref().map(|blocks| blocks[lane]);
+                    for (a, b) in scalar[lane].iter_mut().zip(banked[lane].iter_mut()) {
+                        let expected = a.accumulator.observe_input(input, time);
+                        let meter = &mut b.accumulator;
+                        let actual = match block {
+                            Some(block)
+                                if meter.banked_eligible()
+                                    && meter.metrics() != MeterMetricSet::SAMPLE_PEAK =>
+                            {
+                                meter.observe_input_banked(input, time, Some(block))
+                            }
+                            _ if run.mode == BankedMode::Withheld => {
+                                meter.observe_input_banked(input, time, None)
+                            }
+                            _ => meter.observe_input_with_block_peak(
+                                input,
+                                time,
+                                block.map(|block| block.sample_peak),
+                            ),
+                        };
+                        assert_eq!(expected, actual);
+                    }
+                }
+                time += frames as u64;
+            }
+            BankedEvent::Skip(samples) => time += samples,
+            BankedEvent::Restart(generation) => {
+                for meter in scalar.iter_mut().chain(banked.iter_mut()).flatten() {
+                    meter.accumulator.restart_observation(generation);
+                }
+            }
+            BankedEvent::Reset(kind) => {
+                for meter in scalar.iter_mut().chain(banked.iter_mut()).flatten() {
+                    meter.accumulator.reset(kind);
+                }
+            }
+        }
+        if let Some(commits) = commits.as_mut() {
+            commits.push(banked_commits().expect("built with the counter"));
+        }
+        for (lane, (a_meters, b_meters)) in scalar.iter_mut().zip(banked.iter_mut()).enumerate() {
+            for (binding, (a, b)) in a_meters.iter_mut().zip(b_meters.iter_mut()).enumerate() {
+                loop {
+                    match (a.consumer.try_pop(), b.consumer.try_pop()) {
+                        (Ok(expected), Ok(actual)) => {
+                            let (expected_bits, actual_bits) = (
+                                banked_snapshot_bits(&expected),
+                                banked_snapshot_bits(&actual),
+                            );
+                            if actual_bits != expected_bits {
+                                panic!(
+                                    "{run:?} width {width} event {index} ({event:?}) lane {lane} \
+                                     binding {binding}: window {} differs\n banked {actual:?}\n \
+                                     scalar {expected:?}",
+                                    expected.window_sequence
+                                );
+                            }
+                            compared += 1;
+                        }
+                        (Err(_), Err(_)) => break,
+                        _ => panic!(
+                            "{run:?} width {width} event {index} lane {lane} binding {binding}: \
+                             publication count differs"
+                        ),
+                    }
+                }
+            }
+        }
+    }
+    BankedOutcome { compared, commits }
+}
+
+/// The random M2 stream: 150 events of blocks of the brief's sizes, zero-frame blocks, skips,
+/// restarts and both reset kinds.
+fn banked_random_stream(seed: u64) -> Vec<BankedEvent> {
+    const SIZES: [usize; 11] = [1, 2, 3, 63, 64, 127, 128, 129, 256, 300, 511];
+    let mut rng = PeakRng(seed);
+    (0..150)
+        .map(|_| match rng.below(20) {
+            0 | 1 => BankedEvent::Skip(1 + rng.below(5_000) as u64),
+            2 => BankedEvent::Restart(rng.below(1 << 20) as u64),
+            3 => BankedEvent::Reset(BuiltinResetKind::FullToPrepared),
+            4 => BankedEvent::Reset(BuiltinResetKind::DiscontinuityKeepTargets),
+            5 => BankedEvent::Block(0),
+            _ => BankedEvent::Block(SIZES[rng.below(SIZES.len())]),
+        })
+        .collect()
+}
+
+fn banked_plain_stream(blocks: usize) -> Vec<BankedEvent> {
+    (0..blocks).map(|_| BankedEvent::Block(128)).collect()
+}
+
+fn metric_set(bits: &[MeterMetricSet]) -> MeterMetricSet {
+    MeterMetricSet::from_bits_retain(bits.iter().fold(0, |set, metric| set | metric.bits()))
+}
+
+/// M2's sweep at one period: nine metric selections, four hold/decay settings, hostile and tone
+/// input, the fixed and a random stream, at both vector widths. Returns the snapshots compared and
+/// the banked commits counted (zero without the counter).
+fn banked_sweep(period: u32) -> (usize, u64) {
+    use MeterMetricSet as M;
+    let sets = [
+        M::ALL,
+        M::ENERGY_RMS,
+        M::COUNTS,
+        M::HELD_PEAK,
+        M::SAMPLE_PEAK,
+        metric_set(&[M::SAMPLE_PEAK, M::ENERGY_RMS]),
+        metric_set(&[M::SAMPLE_PEAK, M::COUNTS]),
+        metric_set(&[M::ENERGY_RMS, M::HELD_PEAK]),
+        metric_set(&[M::COUNTS, M::HELD_PEAK]),
+    ];
+    let ballistics = [(0_u32, 0.0_f32), (7, 0.0), (0, 12.0), (100, 60.0)];
+    let fixed: Vec<BankedEvent> = banked_plain_stream(48);
+    let mut seed = 0x0950_5A3B_1E00_0001_u64 ^ u64::from(period) << 32;
+    let mut total = 0;
+    let mut committed = 0_u64;
+    for metrics in sets {
+        for (hold, decay) in ballistics {
+            for hostile in [true, false] {
+                seed = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
+                let random = banked_random_stream(seed);
+                let run = BankedRun {
+                    metrics: vec![metrics],
+                    period,
+                    hold,
+                    decay,
+                    hostile,
+                    mode: BankedMode::Seeded,
+                };
+                for (fixed_stream, stream) in [(true, &fixed), (false, &random)] {
+                    let eight = banked_differential::<Simd8>(&run, stream, seed);
+                    let four = banked_differential::<Simd4>(&run, stream, seed ^ 0x4);
+                    // 48 blocks of 128 frames outlast every period; a random stream's resets and
+                    // gaps may leave a long window unfinished.
+                    assert!(
+                        !fixed_stream || (eight.compared > 0 && four.compared > 0),
+                        "{run:?}: windows were published"
+                    );
+                    total += eight.compared + four.compared;
+                    for outcome in [eight, four] {
+                        let Some(commits) = outcome.commits else {
+                            continue;
+                        };
+                        let last = commits.last().copied().unwrap_or(0);
+                        committed += last;
+                        if metrics.contains(M::HELD_PEAK) && (hold != 0 || decay != 0.0) {
+                            assert_eq!(last, 0, "{run:?}: a held peak with ballistics never banks");
+                        }
+                        if !metrics.contains(M::ENERGY_RMS) {
+                            assert_eq!(last, 0, "{run:?}: no energy, no seed, no pass");
+                        }
+                        if fixed_stream
+                            && metrics.contains(M::ENERGY_RMS)
+                            && (!metrics.contains(M::HELD_PEAK) || (hold == 0 && decay == 0.0))
+                            && period.is_multiple_of(128)
+                        {
+                            assert!(last > 0, "{run:?}: a bankable meter commits");
+                        }
+                    }
+                }
+            }
+        }
+    }
+    (total, committed)
+}
+
+/// Gate M2. Every snapshot of the banked arm equals the scalar arm's on every field by bits, at
+/// both vector widths, over nine periods, nine metric selections, four hold/decay settings, hostile
+/// and tone input, a fixed stream of 48 blocks of 128 frames and a random stream of 150 events.
+///
+/// Built with `--features test-support`, it also pins the commit counter: every block of a plain
+/// 64-block stream at period 512 and 1536, none at 64, some at 300; none on a held peak with a hold
+/// or a decay; none with the block withheld; none with the seed moved by one ulp; a block after a
+/// skipped gap commits; and an `ALL` meter behind a `SAMPLE_PEAK` meter on the same lane commits
+/// every block, because the peak meter has no seed to answer with.
+#[test]
+fn a_banked_block_commit_publishes_the_scalar_meters_snapshots() {
+    use MeterMetricSet as M;
+    // One thread per period: the sweep is 2,592 runs, and the counters are thread-local.
+    let periods = [1_u32, 64, 127, 128, 129, 300, 512, 1536, 4096];
+    let sweeps: Vec<(usize, u64)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = periods
+            .iter()
+            .map(|&period| scope.spawn(move || banked_sweep(period)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect()
+    });
+    let total: usize = sweeps.iter().map(|sweep| sweep.0).sum();
+    let committed: u64 = sweeps.iter().map(|sweep| sweep.1).sum();
+    eprintln!(
+        "M2 sweep: {total} snapshots bit-identical across both arms, {committed} banked commits"
+    );
+    assert!(total > 0);
+
+    // The commit counter on a plain stream of 64 blocks of 128 frames, eight ALL meters.
+    let plain = banked_plain_stream(64);
+    let all = |period, hold, decay, mode| BankedRun {
+        metrics: vec![M::ALL],
+        period,
+        hold,
+        decay,
+        hostile: false,
+        mode,
+    };
+    let last = |outcome: BankedOutcome| outcome.commits.map(|commits| commits[commits.len() - 1]);
+    for (period, expected) in [(512_u32, Some(8 * 64)), (64, Some(0)), (1536, Some(8 * 64))] {
+        let commits = last(banked_differential::<Simd8>(
+            &all(period, 0, 0.0, BankedMode::Seeded),
+            &plain,
+            7,
+        ));
+        if commits.is_some() {
+            assert_eq!(commits, expected, "ALL at period {period}");
+        }
+    }
+    if let Some(commits) = last(banked_differential::<Simd8>(
+        &all(300, 0, 0.0, BankedMode::Seeded),
+        &plain,
+        7,
+    )) {
+        assert!(
+            commits > 0 && commits < 8 * 64,
+            "ALL at period 300: {commits}"
+        );
+    }
+    for (hold, decay) in [(7, 0.0), (0, 12.0), (100, 60.0)] {
+        if let Some(commits) = last(banked_differential::<Simd8>(
+            &all(512, hold, decay, BankedMode::Seeded),
+            &plain,
+            7,
+        )) {
+            assert_eq!(commits, 0, "hold {hold} decay {decay}");
+        }
+    }
+    for mode in [BankedMode::Withheld, BankedMode::MovedSeed] {
+        let outcome = banked_differential::<Simd8>(&all(512, 0, 0.0, mode), &plain, 7);
+        assert_eq!(outcome.compared, 8 * 64 * 128 / 512, "{mode:?}");
+        if let Some(commits) = outcome.commits {
+            assert_eq!(commits[commits.len() - 1], 0, "{mode:?} commits nothing");
+        }
+    }
+
+    // A discontinuity: the block after the gap commits too.
+    let gap = [
+        BankedEvent::Block(128),
+        BankedEvent::Skip(7),
+        BankedEvent::Block(128),
+    ];
+    if let Some(commits) =
+        banked_differential::<Simd8>(&all(512, 0, 0.0, BankedMode::Seeded), &gap, 7).commits
+    {
+        assert_eq!(commits, [8, 8, 16], "the block after the skip commits");
+    }
+
+    // Two meters on one lane: a `SAMPLE_PEAK` meter first answers no seed, so the `ALL` meter
+    // behind it seeds its lane and commits every block (amendment 2's seed pollution).
+    for (hostile, seed) in [(false, 7), (true, 8)] {
+        let pair = BankedRun {
+            metrics: vec![M::SAMPLE_PEAK, M::ALL],
+            period: 512,
+            hold: 0,
+            decay: 0.0,
+            hostile,
+            mode: BankedMode::Seeded,
+        };
+        let outcome = banked_differential::<Simd8>(&pair, &plain, seed);
+        assert_eq!(outcome.compared, 2 * 8 * 64 * 128 / 512);
+        if let Some(commits) = outcome.commits {
+            assert_eq!(
+                commits[commits.len() - 1],
+                8 * 64,
+                "the ALL meter commits every block"
+            );
+        }
+        let outcome = banked_differential::<Simd4>(&pair, &plain, seed);
+        if let Some(commits) = outcome.commits {
+            assert_eq!(commits[commits.len() - 1], 4 * 64);
+        }
+    }
 }

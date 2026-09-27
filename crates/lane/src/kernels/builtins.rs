@@ -1554,6 +1554,89 @@ pub fn meter_sample_peak_block<L: Lane>(words: &[f32], frames: usize, peak: L) -
     peak
 }
 
+/// The full meter's partials over one resident AoSoA block, per lane (issue #950): what
+/// [`meter_block`] returns.
+///
+/// `peak`, `clipped` and `sanitized` are order-free block partials that the meter merges into its
+/// window. `energy` is not a partial: it is the meter's own running sum carried through this block
+/// sample by sample, from the seed the caller passed in.
+#[derive(Clone, Copy, Debug)]
+pub struct MeterBlock<L: crate::Widen> {
+    /// Per lane, the maximum of `+0.0` and every sanitized magnitude of the block: bit for bit
+    /// [`meter_sample_peak_block`] seeded with `L::zero()`.
+    pub peak: L,
+    /// Per lane, how many sanitized magnitudes are `>= 1.0`, as an exact `f32` integer.
+    pub clipped: L,
+    /// Per lane, how many words the sanitization replaced (NaN, `±inf` and nonzero subnormals), as
+    /// an exact `f32` integer.
+    pub sanitized: L,
+    /// Per lane, the seed plus the square of every sanitized sample, added one sample at a time in
+    /// frame order.
+    pub energy: L::F64,
+}
+
+/// The full meter's block pass over one resident AoSoA block (issue #950): the sample peak, the
+/// clipped and sanitized counts, and the energy sum, for every lane at once.
+///
+/// This is the builtin meter's scalar per-sample loop (`builtins::MeterAccumulator`, the `ALL`
+/// selection) run across lanes: each lane reads its own words, in frame order, and nothing moves
+/// between lanes. Four facts make every result bit-identical to that loop:
+///
+/// * `peak` equals [`meter_sample_peak_block`]`(words, frames, L::zero())` bit for bit: steps 1 to
+///   3 below are that kernel's, in its order.
+/// * The counts are exact integers in `f32`: each adds `+0.0` or `1.0` per frame, and a block never
+///   has more than `2^24` frames (as [`sanitize_gain_block`] states), so no sum rounds.
+/// * `w * w` is exact in binary64 for every widened `f32` `w`: its significand has at most 24 bits,
+///   so the square has at most 48, and its exponent stays inside binary64's normal range. The
+///   scalar loop's `f64::from(s) * f64::from(s)` is the same exact value, because the sanitized
+///   sample `s` and its magnitude `c` have the same square.
+/// * The energy's only rounding is therefore its add, and each lane performs the scalar loop's adds
+///   in the scalar loop's order from the scalar loop's seed. No partial sum, pairwise sum or
+///   reassociation exists here: that form moves the published `energy`/`rms` bits (issue #950,
+///   R3), and is refused.
+///
+/// The validity test is the meter's `normal_or_zero` on the magnitude, as in
+/// [`meter_sample_peak_block`]. `sanitized` counts a word exactly when its magnitude was replaced:
+/// `a != c` holds for NaN, `±inf` and a nonzero subnormal, and fails for `±0.0` and every normal.
+///
+/// Frozen operation order, per frame:
+/// 1. `a = |load(frame)|`
+/// 2. `c = select(a >= MIN_POSITIVE & a < INFINITY, a, +0.0)`
+/// 3. `peak = max(c, peak)`, the D8 `select(c > peak, c, peak)`
+/// 4. `sanitized = sanitized + (1.0 & !(a == c))`
+/// 5. `clipped = clipped + (1.0 & (c >= 1.0))`
+/// 6. `w = widen(c)`, then `energy = energy + w * w`: two roundings' worth of operations, never
+///    fused, of which only the add rounds
+///
+/// Branch free per frame. The caller must keep `frames <= 2^24`.
+#[inline(always)]
+pub fn meter_block<L: crate::Widen>(words: &[f32], frames: usize, energy: L::F64) -> MeterBlock<L> {
+    use crate::LaneF64;
+    debug_assert!(words.len() >= frames * L::WIDTH);
+    let low = L::splat(f32::MIN_POSITIVE);
+    let high = L::splat(f32::INFINITY);
+    let one = L::splat(1.0);
+    let mut peak = L::zero();
+    let mut clipped = L::zero();
+    let mut sanitized = L::zero();
+    let mut energy = energy;
+    for frame in words[..frames * L::WIDTH].chunks_exact(L::WIDTH) {
+        let a = L::load(frame).abs();
+        let c = L::select(L::mask_and(a.ge(low), a.lt(high)), a, L::zero());
+        peak = L::max(c, peak);
+        sanitized = sanitized.add(one.andnot(a.eq(c)));
+        clipped = clipped.add(one.andnot(L::mask_not(c.ge(one))));
+        let w = c.widen();
+        energy = energy.add(w.mul(w));
+    }
+    MeterBlock {
+        peak,
+        clipped,
+        sanitized,
+        energy,
+    }
+}
+
 #[cfg(test)]
 std::thread_local! {
     static MIXED_PLAN_SELECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
