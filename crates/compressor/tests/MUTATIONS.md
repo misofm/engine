@@ -245,3 +245,20 @@ frames with ramps ending at frame 40.
 | # | mutation | why it survives |
 |---|---|---|
 | 984-M3 | the `abs` arm is never taken (`dual_mono = false`) | Applied and run: **GREEN** in every test, and necessarily so: the arm's bits are `link_frame`'s under DualMono (the `linked` mask is all zero and `select` is bitwise). It is a performance-only regression, caught by the recorded codegen evidence (#984 gate 7: DualMono pass 1 loads `abs` straight into the level floor with no link `vblendvps`), not by a test, as #944's M2 was |
+
+### #985 — the collapsed body's settled rewrite
+
+From #985 on, gate 1's collapsed half (`Mono::block` in the grid and the differentials) applies the
+same witness-keyed "both NaN" rule as the dual half, and the grid runs a third parameter set,
+`COMPRESSING_TRACKS`.
+
+| # | mutation | red |
+|---|---|---|
+| 985-M2 | the short last chunk is skipped (`chunks_exact_mut` on the outer loop), the verification's replacement for "the body reads the right plane", which cannot be written | gate 1 (its 31-, 33- and 97-frame blocks: the grid on every table and the three differentials), `scenario_985_collapsed_render_is_pinned` (7 red) |
+| 985-M3 | the recursive word's write-back is dropped | gate 1, `scenario_985_*`, and four `mono_collapse` tests including `the_collapsed_body_renders_the_dual_bodys_left_plane` (11 red) |
+| 985-M4 | the collapsed wet arm ignores `bypass` | `mono_collapse::a_statically_bypassed_bank_collapses_to_the_dual_bits`, gate 1 (7 red) |
+
+| # | mutation | why it survives |
+|---|---|---|
+| 985-M1 | the Average case takes the `abs` arm in the collapsed body | Applied and run: **GREEN** everywhere, including `mono_collapse::a_halved_subnormal_does_not_come_back` and gate 1's subnormal-only input, and it is equivalent. On one plane `0.5|m| + 0.5|m|` differs from `|m|` only where `0.5|m|` is inexact, which needs `|m| < 2 * f32::MIN_POSITIVE`; the linked value's only consumer is `curve_target`'s `max(detected, 1e-8)` floor, which maps both to `1e-8`, and NaN and `inf` agree. It was red in the retired design because a detector ring stored the linked value (M2-C1). The body keeps `link_frame` for Average and Maximum anyway, as the brief freezes, so the collapsed arithmetic stays the dual body's word for word |
+| 985-M5 | Maximum also takes the `abs` arm | Applied and run: **GREEN**, as the verification predicted: `max(|m|, |m|)` is `|m|` on every backend. Recorded, never listed as red |

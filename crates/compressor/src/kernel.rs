@@ -753,17 +753,99 @@ pub(crate) fn process_block_mono<L: Lane>(
         );
     }
     if ramping < frames {
-        frames_loop_mono::<L, false>(
-            left,
-            detector,
-            ramping,
-            frames,
-            link,
-            bypass,
-            sample_rate,
-            channel_left,
-        );
+        match detector {
+            Detector::Main => {
+                settled_main_mono::<L>(left, ramping, frames, link, bypass, channel_left);
+            }
+            Detector::Silent | Detector::Sidechain(..) => frames_loop_mono::<L, false>(
+                left,
+                detector,
+                ramping,
+                frames,
+                link,
+                bypass,
+                sample_rate,
+                channel_left,
+            ),
+        }
     }
+}
+
+/// The collapsed body's settled frames: `settled_main`'s rewrite on the one plane (issue #985).
+///
+/// All four of #981-#984 land here together -- the chunked slice with the recursive word in a
+/// local, the output law chosen once per block, the two passes, and the DualMono detector arm --
+/// because the loop hygiene alone made this body slower natively. The collapsed contract does not
+/// change: the block reads and writes the left plane only, and its detector is
+/// `link_frame(main, main).0`, which under DualMono is `abs(main)` bit for bit. Under Maximum and
+/// Average it stays `link_frame`: Average's `0.5|m| + 0.5|m|` is not `|m|` for a subnormal `m`, and
+/// the collapsed body must render the dual body's left plane exactly.
+///
+/// `#[inline(always)]`, for the roster's `process_block_mono::<Simd4>` row, as `settled_main`.
+#[inline(always)]
+fn settled_main_mono<L: Lane>(
+    left: &mut [f32],
+    start: usize,
+    end: usize,
+    link: LinkMode,
+    bypass: bool,
+    channel_left: &mut Channel<L>,
+) {
+    let width = L::WIDTH;
+    let invariants = Invariants::<L>::new(link, bypass);
+    let coef = Coef::load(&channel_left.words);
+    let dual_mono = matches!(link, LinkMode::DualMono);
+    let wet = !bypass && every_lane::<L>(coef.wet_identity);
+    let left = &mut left[start * width..end * width];
+    let mut gain = channel_left.gain_reduction_db;
+    #[cfg(test)]
+    if wet {
+        SETTLED_WET_BLOCKS.with(|blocks| blocks.set(blocks.get() + 1));
+    }
+    match (dual_mono, wet) {
+        (true, true) => {
+            settled_frames_mono::<L, true, true>(left, &coef, &mut gain, &invariants);
+        }
+        (true, false) => {
+            settled_frames_mono::<L, true, false>(left, &coef, &mut gain, &invariants);
+        }
+        (false, true) => {
+            settled_frames_mono::<L, false, true>(left, &coef, &mut gain, &invariants);
+        }
+        (false, false) => {
+            settled_frames_mono::<L, false, false>(left, &coef, &mut gain, &invariants);
+        }
+    }
+    channel_left.gain_reduction_db = gain;
+}
+
+/// `settled_frames` on the one plane. Its scratch is `SETTLED_CHUNK` lane words, 1 KiB at
+/// `Simd8`, under the same justification: targets, never audio, and no in-place form.
+#[inline(always)]
+fn settled_frames_mono<L: Lane, const DUAL_MONO: bool, const WET: bool>(
+    left: &mut [f32],
+    coef: &Coef<L>,
+    gain: &mut L,
+    invariants: &Invariants<L>,
+) {
+    let width = L::WIDTH;
+    let mut gain_left = *gain;
+    let mut targets = [L::zero(); SETTLED_CHUNK];
+    for chunk in left.chunks_mut(SETTLED_CHUNK * width) {
+        // Pass 1: every frame's target, from the plane alone.
+        for (frame, target) in chunk.chunks_exact(width).zip(targets.iter_mut()) {
+            let main = L::load(frame);
+            let (detected, _) = settled_detect::<L, DUAL_MONO>(main, main, invariants);
+            *target = curve_target(detected, coef, invariants);
+        }
+        // Pass 2: the recurrence, then the output of the same frame.
+        for (frame, target) in chunk.chunks_exact_mut(width).zip(targets.iter()) {
+            let main = L::load(frame);
+            let smoothed = ballistic(*target, &mut gain_left, coef);
+            settled_output::<L, WET>(main, smoothed, coef, invariants).store(frame);
+        }
+    }
+    *gain = gain_left;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1835,20 +1917,32 @@ mod settled_body_tests {
                 self.sample_rate,
                 &mut self.candidate,
             );
-            assert_eq!(
-                wet_arm_blocks(),
-                wet_before,
-                "the collapsed body has no all-wet arm"
-            );
+            let wet_arm = wet_arm_blocks() - wet_before;
             let settled = ramping < frames;
             let all_wet_settled =
                 settled && source == Source::Main && !bypass && all_wet(&self.oracle);
             let context = || format!("{} (frames {frames}, ramping {ramping})", context());
-            assert_words(&format!("{} kernel", context()), &oracle, &candidate);
+            assert_eq!(
+                wet_arm,
+                usize::from(all_wet_settled),
+                "{}: the collapsed all-wet arm runs exactly once on an all-wet, unbypassed settled block",
+                context()
+            );
+            let relaxed = assert_words_relaxed(
+                &format!("{} kernel", context()),
+                &oracle,
+                &candidate,
+                wet_arm == 1,
+            );
             assert_state(&context(), &self.oracle, &self.candidate);
             let oracle_mask = finish_channel::<L>(&mut oracle, &mut self.oracle);
             let candidate_mask = finish_channel::<L>(&mut candidate, &mut self.candidate);
             assert_eq!(oracle_mask, candidate_mask, "{}: finish mask", context());
+            assert!(
+                relaxed == 0 || oracle_mask != 0,
+                "{}: a NaN payload differs in an accepted block",
+                context()
+            );
             assert_words(&format!("{} finished", context()), &oracle, &candidate);
             assert_state(
                 &format!("{} finished", context()),
@@ -1862,7 +1956,7 @@ mod settled_body_tests {
                 all_wet_settled: usize::from(all_wet_settled),
                 rejected: usize::from(oracle_mask != 0),
                 sidechain: usize::from(source != Source::Main),
-                nan_payload: 0,
+                nan_payload: relaxed,
             }
         }
     }
@@ -2043,6 +2137,29 @@ mod settled_body_tests {
         assert!(
             coverage.all_wet_settled > 0,
             "the fixture tracks must take the arm"
+        );
+    }
+
+    /// A heavily compressing all-wet table: low thresholds, high ratios, fast attacks, makeup.
+    const COMPRESSING_TRACKS: [[f32; PARAMETER_COUNT]; 8] = [
+        [-40.0, 20.0, 0.0, 0.1, 5.0, 12.0, 1.0],
+        [-36.0, 16.0, 6.0, 0.5, 20.0, 9.0, 1.0],
+        [-32.0, 12.0, 12.0, 1.0, 50.0, 6.0, 1.0],
+        [-44.0, 10.0, 3.0, 0.2, 10.0, 15.0, 1.0],
+        [-50.0, 8.0, 24.0, 2.0, 80.0, 18.0, 1.0],
+        [-30.0, 20.0, 1.0e-3, 0.3, 5.0, 24.0, 1.0],
+        [-60.0, 6.0, 9.0, 5.0, 200.0, 20.0, 1.0],
+        [-80.0, 4.0, 18.0, 10.0, 500.0, 24.0, 1.0],
+    ];
+
+    /// #985 gate 1's three parameter sets: the fixture (all-wet), a compressing set (all-wet) and
+    /// the parallel corpus table (mixed), through the collapsed body as well as the dual one.
+    #[test]
+    fn the_collapsed_settled_body_is_the_base_body_on_the_three_parameter_sets() {
+        let coverage = grid_all(&COMPRESSING_TRACKS, true);
+        assert!(
+            coverage.all_wet_settled > 0,
+            "the compressing set must take the arm"
         );
     }
 
@@ -2473,5 +2590,73 @@ mod settled_body_tests {
         let digest = hex(hasher);
         println!("scenario 983 digest {digest}");
         assert_eq!(digest, SCENARIO_983);
+    }
+    /// The collapsed twin of [`scenario_dual`]: `process_block_mono` over the left defaults.
+    fn scenario_mono<L: Lane>(
+        hasher: &mut Sha256,
+        table: &[[f32; PARAMETER_COUNT]; 8],
+        link: LinkMode,
+        schedule: &[ScenarioBlock],
+        canonical: bool,
+    ) -> usize {
+        let width = L::WIDTH;
+        let mut mid_block = 0;
+        for group in 0..8 / width {
+            let defaults = table_defaults(table, group * width, 0);
+            let mut channel = Channel::<L>::new(&defaults, SAMPLE_RATE);
+            let mut rng = Rng::new(0x5ce1 + group as u64);
+            for (block, &(frames, retarget)) in schedule.iter().enumerate() {
+                if let Some((parameter, lane, value)) = retarget {
+                    channel.set_parameter_target(parameter, lane % width, value, SAMPLE_RATE);
+                }
+                let ramping = channel.max_remaining() as usize;
+                mid_block += usize::from(ramping > 0 && ramping < frames);
+                let mut plane = vec![0.0_f32; frames * width];
+                fill(&mut rng, block % PROFILES, width, &mut plane);
+                process_block_mono::<L>(
+                    &mut plane,
+                    Detector::Main,
+                    frames,
+                    link,
+                    false,
+                    SAMPLE_RATE,
+                    &mut channel,
+                );
+                fold(hasher, &plane, canonical);
+                fold_state(hasher, &channel);
+                let mask = finish_channel::<L>(&mut plane, &mut channel);
+                hasher.update(mask.to_le_bytes());
+                fold(hasher, &plane, false);
+                fold_state(hasher, &channel);
+            }
+        }
+        mid_block
+    }
+
+    /// #985 gate 2: the collapsed body, `Simd4` and `Simd8`, DualMono and Average, all-wet and
+    /// mixed, chunk-straddling blocks, hostile input (its subnormal profile is the Average case).
+    /// Pinned on the unmodified base (`197db1c9`) and on #983, in dev and release.
+    const SCENARIO_985: &str = "b48776f5e0d8609db1df969b051c066c8eac0c8abd0be373de4de529c1d9ff8c";
+
+    #[test]
+    fn scenario_985_collapsed_render_is_pinned() {
+        let schedule = straddling_schedule(1, [2.5, 5.5, 1.25, 9.0, 3.25, 7.0]);
+        let mut hasher = Sha256::new();
+        let mut mid_block = 0;
+        for link in [LinkMode::DualMono, LinkMode::Average] {
+            for (table, canonical) in [(&CORPUS_TRACKS, false), (&FIXTURE_TRACKS, true)] {
+                mid_block += scenario_mono::<Simd4>(&mut hasher, table, link, &schedule, canonical);
+                mid_block += scenario_mono::<Simd8>(&mut hasher, table, link, &schedule, canonical);
+            }
+        }
+        // Six ramps end at frame 40, per group, table and link mode.
+        assert_eq!(
+            mid_block,
+            6 * 3 * 2 * 2,
+            "every retarget must leave a mid-chunk start"
+        );
+        let digest = hex(hasher);
+        println!("scenario 985 digest {digest}");
+        assert_eq!(digest, SCENARIO_985);
     }
 }
