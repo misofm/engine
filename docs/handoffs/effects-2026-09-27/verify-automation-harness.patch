@@ -1,0 +1,125 @@
+--- a/docs/handoffs/effects-2026-09-27/automation-diag-tools/web_auto.mjs
++++ b/docs/handoffs/effects-2026-09-27/automation-diag-tools/web_auto.mjs
+@@ -7,11 +7,11 @@
+ // env: ROUNDS (6), BLOCKS (600), WARM (64)
+ import { readFileSync } from "node:fs";
+ import { createHash } from "node:crypto";
+-import { createPreparedControl } from "/home/bl/misofm/engine/.claude/worktrees/agent-ae53afa6e6b89a559/hosts/host-web/web/prepared-control.js";
++import { createPreparedControl } from "/home/bl/misofm/engine/.claude/worktrees/agent-a3ee67f6a2dff6af2/hosts/host-web/web/prepared-control.js";
+ 
+-const ROOT = "/tmp/claude-1002/-home-bl-misofm-engine/43895396-e183-427f-b08f-a0b72f15ae5f/scratchpad/automation-diag/web";
++const ROOT = "/tmp/claude-1002/-home-bl-misofm-engine/43895396-e183-427f-b08f-a0b72f15ae5f/scratchpad/verify-automation/web";
+ const ABI_LAYOUT = JSON.parse(readFileSync(
+-  "/home/bl/misofm/engine/.claude/worktrees/agent-ae53afa6e6b89a559/sdk/assets/miso-engine-v1-abi-layout.json"));
++  "/home/bl/misofm/engine/.claude/worktrees/agent-a3ee67f6a2dff6af2/sdk/assets/miso-engine-v1-abi-layout.json"));
+ const ABI_VERSION = ABI_LAYOUT.abiVersion;
+ const BOOT_OPTIONS_BYTES = 64, BUFFER_SOURCE_ID = 2, BUFFER_SOURCE_PCM = 3, BUFFER_COMMAND = 6;
+ const Q = 128, RATE = 48000;
+@@ -37,6 +37,10 @@
+ };
+ SUBJECTS.console_mix = { doc: "console", mix: true };
+ SUBJECTS.mono_mix = { doc: "mono", mix: true };
++// Sol verify: the mono console with one effect's control written (the other two never touched).
++SUBJECTS.mono_eq = { ...SUBJECTS.eq_gain, doc: "mono", effectIndex: 0 };
++SUBJECTS.mono_comp = { ...SUBJECTS.comp_threshold, doc: "mono", effectIndex: 1 };
++SUBJECTS.mono_lim = { ...SUBJECTS.lim_ceiling, doc: "mono", effectIndex: 0 };
+ const MIX_PARTS = [
+   { ...SUBJECTS.eq_gain, effectIndex: 0 },
+   { ...SUBJECTS.comp_threshold, effectIndex: 1 },
+@@ -243,6 +247,39 @@
+ }
+ 
+ const [subjectList, armList, ...files] = process.argv.slice(2);
++if (process.env.P1BREAK) {
++  // Sol verify: three separate prepared EQ submissions on one mono track before one render:
++  // left-only g1, both-channel g2 (the SDK coalesces it into one Both target), right-only g1.
++  // The final state is L = g2, R = g1: the channels differ, so the witness must decline.
++  const blocks = Number(process.env.P1BREAK);
++  const track = Number(process.env.P1TRACK ?? 0);
++  for (const f of files) {
++    const module = new WebAssembly.Module(readFileSync(f));
++    const a = boot(module, "mono");
++    for (let i = 0; i < 4; i++) feed(a);
++    for (let i = 0; i < 64; i++) { feed(a); render(a); }
++    const hash = createHash("sha256");
++    const outPtr = a.e.miso_engine_web_v1_buffer_ptr(a.handle, 5);
++    const fx = { eq: { rack: 0, effectIndex: 0, parameterId: 4, g: [4.5, 1.5] },
++      comp: { rack: 0, effectIndex: 1, parameterId: 1, g: [-20, -12] },
++      lim: { rack: 2, effectIndex: 0, parameterId: 1, g: [-20, -17] } }[process.env.P1FX ?? "eq"];
++    const one = (channel, value) => submit(a, [{ rack: fx.rack, effectIndex: fx.effectIndex, channel, track, parameterId: fx.parameterId, value: Math.fround(value) }]);
++    for (let i = 0; i < blocks; i++) {
++      feed(a);
++      if (i === 4) {
++        const [g1, g2] = fx.g;
++        if (process.env.P1ORDER === "pair") { one(0, g1); one(1, g1); }
++        else if (process.env.P1ORDER === "both") { one(2, g1); }
++        else if (process.env.P1ORDER === "left") { one(0, g1); }
++        else { one(0, g1); one(2, g2); one(1, g1); }
++      }
++      render(a);
++      hash.update(new Uint8Array(a.e.memory.buffer, outPtr, 2 * Q * 4));
++    }
++    console.log(`${f.split("/").slice(-4, -3)[0]} p1break fx ${process.env.P1FX ?? "eq"} order ${process.env.P1ORDER ?? "split"} digest ${hash.digest("hex").slice(0, 16)} refused ${a.refused}`);
++  }
++  process.exit(0);
++}
+ if (process.env.DIGEST) {
+   const mods = files.map((f) => [f.split("/").slice(-4, -3)[0].replace("t-web-", ""), new WebAssembly.Module(readFileSync(f))]);
+   const armsD = armList === "all" ? Object.keys(ARMS) : armList.split(",");
+--- a/tools/console-workload/tests/automation_diag.rs
++++ b/tools/console-workload/tests/automation_diag.rs
+@@ -278,6 +278,16 @@
+     }
+ }
+ 
++/// Sol verify: `AUTO_DIAG_EQ_BOTH=1` pushes an EQ both-channel edit as one `Both` owner edit.
++fn sides_for(part: &Subject, sides: &'static [ParameterChannel]) -> &'static [ParameterChannel] {
++    let both = std::env::var("AUTO_DIAG_EQ_BOTH").is_ok_and(|v| v == "1");
++    if both && part.effect_id == "miso.parametric-eq" && sides.len() == 2 {
++        &[ParameterChannel::Both]
++    } else {
++        sides
++    }
++}
++
+ struct ArmRuntime {
+     arm: Arm,
+     mode: u32,
+@@ -315,7 +325,7 @@
+             let channel = runtime
+                 .control_channel(&track_id(track), part.effect_id)
+                 .expect("a control channel per track");
+-            for side in [ParameterChannel::Left, ParameterChannel::Right] {
++            for &side in sides_for(part, &[ParameterChannel::Left, ParameterChannel::Right]) {
+                 assert!(runtime.push_parameter(channel, part.parameter, side, part.base));
+             }
+         }
+@@ -355,7 +365,7 @@
+     for _ in 0..blocks {
+         for &(channel, part) in &arm.channels {
+             let value = part.value(arm.arm, arm.block);
+-            for &side in arm.arm.channels() {
++            for &side in sides_for(&part, arm.arm.channels()) {
+                 if !arm.runtime.push_parameter(channel, part.parameter, side, value) {
+                     arm.refused += 1;
+                 }
+--- a/crates/effect-contract/src/live.rs
++++ b/crates/effect-contract/src/live.rs
+@@ -285,7 +285,7 @@
+             // does to the witness (`symmetry::LiveConsoleRecord`).
+             let one_channel = match record {
+                 EffectControlRecord::Parameter { channel, .. } => channel.writes_one_channel(),
+-                EffectControlRecord::PreparedTarget(target) => target.channel.writes_one_channel(),
++                EffectControlRecord::PreparedTarget(_) => false,
+                 _ => false,
+             };
+             if paired && one_channel {
+@@ -377,7 +377,7 @@
+             staging[position] = span;
+             staged += 1;
+         }
+-        if deferred && !writes_pair(&staging[..staged], self.prepared_targets()) {
++        if deferred && !writes_pair(&staging[..staged], &[]) {
+             self.symmetry.clear(ChannelSymmetryWitness::LIVE);
+         }
+         Staged {

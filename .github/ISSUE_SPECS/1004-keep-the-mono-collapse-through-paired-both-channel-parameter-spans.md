@@ -1,4 +1,8 @@
-# Keep the mono collapse through paired both-channel effect writes
+# Keep the mono collapse through paired both-channel parameter spans
+
+Source: `docs/handoffs/effects-2026-09-27/AUTOMATION-DIAGNOSIS.md`, verified in `VERIFY-AUTOMATION.md`. **The Amendments section at the end supersedes the body wherever they conflict.** Draft names map to issues: automation-5 = #1003, automation-1 = #1004, automation-2 = #1005, automation-3 = #1006, automation-4 = #1007.
+
+**Decision recorded (root, 2026-09-27):** the form is *spans only*: pair both-channel `Parameter` spans at the drain, and fold one-channel `PreparedTarget`s into the witness as today (amendments). The prototype's target half renders wrong audio (VERIFY-AUTOMATION F1). The host-`Both` alternative can acknowledge a command and then drop it (F5), which fails the acked-batch rule in `AGENTS.md`. The owner may overrule the form; the product need is not in question.
 
 Automation follow-up P1 (research 2026-09-27, base `codex/batch-plumbing-floor-2` at `49f696c7`;
 every `file:line` below was read on that tree). Evidence:

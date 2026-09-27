@@ -1,5 +1,7 @@
 # EQ: write a target's lane with a vector select, and snap ended lanes by mask
 
+Source: `docs/handoffs/effects-2026-09-27/AUTOMATION-DIAGNOSIS.md`, verified in `VERIFY-AUTOMATION.md`. **The Amendments section at the end supersedes the body wherever they conflict.** Draft names map to issues: automation-5 = #1003, automation-1 = #1004, automation-2 = #1005, automation-3 = #1006, automation-4 = #1007.
+
 Automation follow-up E2 (research 2026-09-27, base `codex/batch-plumbing-floor-2` at `49f696c7`;
 every `file:line` is `crates/parametric-eq/src/lib.rs` on that tree). Evidence:
 `docs/handoffs/effects-2026-09-27/AUTOMATION-DIAGNOSIS.md`, sections 3 ("Target application")

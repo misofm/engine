@@ -1,5 +1,9 @@
 # Bench: add the `console_mixing_automation` row (mono console, 8 of 64 tracks automated)
 
+Source: `docs/handoffs/effects-2026-09-27/AUTOMATION-DIAGNOSIS.md`, verified in `VERIFY-AUTOMATION.md`. **The Amendments section at the end supersedes the body wherever they conflict.** Draft names map to issues: automation-5 = #1003, automation-1 = #1004, automation-2 = #1005, automation-3 = #1006, automation-4 = #1007.
+
+**Decision recorded (root, 2026-09-27):** the browser arm is the shipped `host_web.wasm` under V8 (amendment A4), not a guest control export. The owner's standing rule is that only paths a real host reaches are benchmarked. Land this row first, so each automation fix below is measured on it.
+
 Automation follow-up, measurement only (research 2026-09-27, base `codex/batch-plumbing-floor-2` at
 `49f696c7`). Evidence: `docs/handoffs/effects-2026-09-27/AUTOMATION-DIAGNOSIS.md`, sections 2
 and 6.

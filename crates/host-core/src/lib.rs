@@ -111,6 +111,11 @@ pub mod shape;
 pub mod solo;
 pub mod source;
 pub mod spectrum;
+// Issues #996 and #997: the true-peak limiter's linked-pair session test. A unit test rather than
+// a `tests/` file because it prepares at every bank width through the `#[cfg(test)]` backend seam
+// in `prepare`, which `tests/` cannot see.
+#[cfg(test)]
+mod limiter_linked_session;
 
 #[cfg(feature = "control-provider")]
 pub use control_provider::{

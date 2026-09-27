@@ -1,5 +1,9 @@
 # Compressor: run the ramping prefix as the two-pass body with lane-wide ramps
 
+Source: `docs/handoffs/effects-2026-09-27/AUTOMATION-DIAGNOSIS.md`, verified in `VERIFY-AUTOMATION.md`. **The Amendments section at the end supersedes the body wherever they conflict.** Draft names map to issues: automation-5 = #1003, automation-1 = #1004, automation-2 = #1005, automation-3 = #1006, automation-4 = #1007.
+
+**Scope recorded (root, 2026-09-27):** the collapsed (mono) prefix is in scope and is the half that matters (VERIFY-AUTOMATION F4: the prototype's dual-only rewrite gave mono stems nothing). C2b (per-word curve design) is exact by an invariant that holds today but is worth about 1-2 us; it stays out of this slice pending an owner ruling.
+
 Automation follow-up C2 (research 2026-09-27, base `codex/batch-plumbing-floor-2` at `49f696c7`;
 every `file:line` is `crates/compressor/src/kernel.rs` on that tree unless named). Evidence:
 `docs/handoffs/effects-2026-09-27/AUTOMATION-DIAGNOSIS.md`, sections 2, 3 ("Compressor") and 5

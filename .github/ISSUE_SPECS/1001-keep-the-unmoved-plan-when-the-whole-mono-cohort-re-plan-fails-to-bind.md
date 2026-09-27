@@ -93,3 +93,138 @@ each other. `effect-compiler` then fails against the wrong one. The error varies
 run: `E0463` "can't find crate", or `E0277`/`E0308` inside `effect-compiler`. It reproduces with
 `-j1`. The release leg above therefore overrides `panic` to unwind, which keeps opt-level 3 and
 fat LTO. The collision may deserve its own issue.
+
+
+## Sol attempt 1 verdict: PASS
+
+Sol, 2026-09-27. I judged `f216649a` merged onto the current batch head `53024efc` (#997 and a
+bench record landed after the branch's base `9539c3d9`). The merge is clean (tree `bd133c08`,
+scratch only, not kept) and every gate below ran on it. Host x86-64-v3, `CARGO_INCREMENTAL=0`.
+The four-lane legs use the research `--cfg miso_native_simd4` lane hunk in their own scratch tree
+and target. Nothing was timed. The worktree was left clean.
+
+The change does what the brief asks, and nothing of the failed re-plan survives into the kept
+plan. Both gates discriminate, and every claim in the evidence reproduces. The two findings are
+Low and do not block.
+
+### Reproduced
+
+* `cargo fmt --all --check` passes, and so does `cargo clippy --locked --workspace --all-targets
+  -- -D warnings`.
+* `cargo test --locked -p graph-compiler` (dev): 118 passed (lib 88).
+  `CARGO_PROFILE_RELEASE_PANIC=unwind cargo test --locked --release -p graph-compiler`: 118 passed.
+  `cargo test --locked -p console-workload`: 39 passed, and `check-env-vocabulary.sh` is ok.
+* On the four-lane build the lib gives 85 passed and 3 failed. The three failures are the known
+  scratch-cfg artefacts (`launch_soft_clip_fixture_*`, `misaligned_lane_sets_decline_the_merge`,
+  `frozen_issue_037_*`). Both #1001 gates and every #971 test pass there.
+* **Mutations.** For each one I ran the whole lib at 8 lanes and at 4 lanes, then reverted it.
+  The red sets below leave out the three artefacts.
+
+  | mutation in `banks.rs` | red at 8 and at 4 lanes |
+  |---|---|
+  | M1: restore `?` on the re-plan bind | both gates (`test.bank.bind_refused`: Simd8 and Simd4 in gate 1, host width in gate 2) |
+  | M2: on `Err`, apply the demoted map but keep the trial plan | both: gate 1 on shape (`[2,3]` against the unmoved plan), gate 2 on the mono post-input bank (`[8]` against `[1]`) |
+  | M3: on `Err`, drop the trial's banks | gate 2 (`live` 0) |
+  | M4: leak the partial re-plan's banks (`mem::forget` on the factory-error return) | gate 2 (`live` 2) |
+  | M5: swallow a **trial** bind error (`unwrap_or_default`) | `mixed_twelve_track_plan_binds_…` (`lib.rs:4993`, "factory failure must reject transactionally") |
+  | M6: on `Err`, report the re-plan's plan with the trial's banks | both gates (the mono track is missing from the mono pool) |
+
+* **Standing rows, by construction.** I instrumented the re-plan to log each entry and to panic
+  on a bind error. I then built all 17 `native_session_rows()` through `build_with_dispatch` at
+  `Simd8` and `Simd4`, on both the 8-lane and the 4-lane builds: 68 compiles. **None of them
+  reaches the re-plan.** A positive control shows the instrumentation does fire: the dogfood gate
+  logs a re-plan and a kept move. The changed statement is therefore never executed on a
+  standing row, so row identity follows without a digest comparison. It also agrees with the
+  implementer's SHA-256 table.
+
+### The questions asked
+
+1. **Leakage into the kept plan: none.**
+   * `classes` is written only in the success arm. The clone and the in-place class rewrite of
+     `levels_in` are both locals that are never read after the `if`.
+   * `plan_bank_groups` can only return `DuplicateId`. The re-plan uses the trial's ids, so its
+     `?` cannot fire.
+   * Bank-resource and scratch accounting run later in `compile.rs`, over the returned banks
+     only.
+   * `bind_homogeneous_bank` takes `&self`. The launch factories keep no shared state apart from
+     `thread_local` test counters.
+   * On an error, `bind_planned_banks` returns early and drops its local `Vec`. That frees every
+     bank the re-plan bound, on the compile (control) thread; M4 shows gate 2 would catch a leak.
+2. **Errors.** A trial bind error still fails the compile exactly as before (`bind(&plan)?` is
+   untouched, and M5 is red). On the re-plan, **every** `Err` kind is swallowed. Under #95's
+   three-outcome rule none of them means "this cohort cannot bank", because that answer is
+   `Ok(None)` and never reaches this branch. What reaches it:
+   * a factory contract violation: the factory's `Err`, or `graph.effect.bank_metadata`;
+   * graph-compiler's own `graph.internal.invariant`, from `bindable_slot_members`;
+   * a scratch overflow, which depends only on width and quantum and is harmless to drop here.
+   
+   The owner's #971 ruling chose to keep the unmoved plan, and the result is always the valid
+   move-disabled plan. I accept it; see findings 1 and 2.
+3. **Gates.** Both are discriminating (see the table). Gate 1's reference is the bank-free
+   registry's compile. That is the move-disabled plan, because there both the trial and the
+   re-plan bind 0 banks. In gate 2, `bound == 2` together with `live == 1` proves that the second
+   group errored rather than declined: had it bound, `bound` would be 3 and the move kept.
+
+### Findings, by severity
+
+1. **Low (contract text).** `crates/effect-contract/src/lib.rs:1513`, the frozen #95 table, still
+   says that in `graph-compiler` an `Err(code)` "fails the whole graph compile". The new comment
+   (`banks.rs:264-268`, and the spec's product outcome) cites #95 as "a cohort a factory cannot
+   bank never costs the user the compile". #95 says that about `Ok(None)`. It defines `Err` as a
+   contract violation that must fail the compile.
+   *Scenario:* an effect's bank path rejects a member that `prepare` accepts, which is a real
+   defect under the table. If that member only ever completes a full group through the re-plan
+   (a lone stranded mono track), the session compiles silently. The table promises a refusal, so
+   the defect surfaces only when the member later lands in a trial group.
+   *Fix (one sentence each, can ride the batch or #1002):* amend the table's `graph-compiler`
+   cell to name the speculative-re-plan exception, and cite #95 correctly in the comment.
+2. **Low (observability).** The swallow is total and leaves no trace. There is no counter or
+   report field, and the compiler has no channel for non-fatal notes, as the evidence says. So
+   an internal `graph.internal.invariant` raised by a planner regression that only affects
+   demoted classes would not be seen. The #971 gates cover a *systematic* re-plan failure, which
+   would show on the dogfood gate as banks 27 against 30. A session-specific one would render
+   the move-disabled plan with no signal. I recommend no change now. If a notes channel ever
+   exists, this is its first entry.
+3. **Informational: release test builds (separate tooling issue).** Reproduced; see below. It is
+   independent of this change.
+
+### Release-test clobber: problem statement for a tooling issue
+
+**Problem.** `[profile.release] panic = "abort"` plus Cargo's unwind-only test harnesses mean
+that one `cargo test --release` invocation can build two panic variants of a lib. `effect-package`
+(`rlib`+`cdylib`), `capi` (`rlib`+`staticlib`+`cdylib`) and `host-web` (`rlib`+`cdylib`) get
+un-hashed output names, so the two variants write the same `target/release/deps/lib*.{rlib,so}`.
+Cargo warns `output filename collision … (rust-lang/cargo#6313)`, and a dependent then fails.
+
+**Reproduced** on batch head `53024efc`, toolchain 1.97.1, in a fresh target each time:
+
+* `cargo test --locked --release -p graph-compiler`: ``error[E0463]: can't find crate for
+  `effect_compiler` `` in the lib test and the `graph_fixture` test. A second fresh run failed in
+  the abort `graph_fixture` bin instead, with E0463 for `graph_compiler` and `effect_compiler`.
+* `-p session-validator`: ``error[E0460]: found possibly newer version of crate
+  `effect_package` ``.
+* `-p native-pcm-runner` (collides on `capi` and `effect-package`) and `-p parameter-metadata`
+  (collides on `effect-package` and `host-web`): E0463 inside `host-core`.
+
+**Scope.** A `--unit-graph` check of `cargo test --release -p <pkg>` for all 45 workspace
+packages finds exactly these four with both panic variants of a cdylib or staticlib lib. The
+other 41 have one variant.
+
+**Doc contradiction.** `docs/REALTIME_DEPENDENCY_POLICY.md:280` says per-package invocations
+"never put two panic variants of a clobbering lib unit in the same run". That is false for these
+four packages.
+
+**CI.** No release `cargo test` command in `qualification.yml` hits it. That covers
+`test-release`'s lane/math/wasm-gates, `m3_determinism`, the loom leg and m1/f1, and
+`audit-native`'s `-p audit -p bench -p console-workload`. Nightly's four `--ignored` release
+tests do not hit it either: each builds one variant. So CI is green, but nothing runs these four
+packages' tests in release. A later separate invocation heals itself: Cargo marks the unit dirty
+("the profile configuration changed"), which I checked on a toy workspace. The failure is
+therefore confined to one invocation.
+
+**Workaround.** `CARGO_PROFILE_RELEASE_PANIC=unwind`.
+
+**Gate for the issue.** Either the four packages' `cargo test --locked --release --no-run` builds
+in a fresh target, or the policy doc names them and the supported invocation, and
+`check-release-shape.py` pins that set. The owner's deferred `dist`-profile decision is the
+structural option.
