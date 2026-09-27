@@ -570,3 +570,19 @@ The failure boundary also pins the realtime claim #714's clause rests on: the pa
 later meters (their seeds, through `&self`), so when `ch01`'s second observer fails on block 5,
 `ch02`'s meter has neither observed nor committed that block and opens its next window at a
 discontinuity, exactly as in the declined arm; both arms' frames are equal by bits.
+
+### Issue #950 attempt 2: the `2^24` decline and a schedule-independent failure boundary
+
+Two gates changed, with no production change. `runtime::tests::the_full_meter_pass_declines_a_block_whose_counts_would_not_be_exact`
+hands `bank_meter_pass` `2^24 + 1` lazily zero-mapped frames at `Four` and `Eight` (5.6 MB peak RSS:
+the pass refuses on the slice length before it reads a word) and checks a three-frame block is
+computed. The failure boundary now reads the tracks' observation order from a probe plan with an
+order recorder on every post-matrix node, and requires exactly the meters up to `ch01` in that
+order to see and commit the failing block, at the host width and `Simd4`, instead of assuming bank
+0 is observed first. Rows applied alone to `958c7066` and restored:
+
+| # | mutation | result |
+| --- | --- | --- |
+| D-1 | the `frames > BANK_METER_MAX_FRAMES` term deleted from `bank_meter_pass` | RED: `Four: 2^24 + 1 frames decline the pass` (the kernel then reads the zero pages: 17.8 s in dev, 6 MB RSS) |
+| G-5 | the member loop keeps observing after a failure and returns the first error at the end | RED on the rewritten gate: `Simd8 failure boundary: exactly the meters observed before the failing observer saw block 5`, handles `[1, 2, 3, 4, 5, 6, 7, 8]` against `[1, 2]` |
+| S-2 | `commit_banked`'s window check deleted (`crates/builtins`) | RED on the new mixed-bank gate (`crates/builtins/tests/MUTATIONS.md`) |

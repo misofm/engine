@@ -294,3 +294,24 @@ unsigned addition is associative and commutative, so the order of the lifetime-c
 The existing probes of the scalar path -- `test_only_peak_samples`, the `cfg(test)`
 `meter_work_probe` -- are green unchanged: their tests call `observe_input`, which never commits a
 banked block.
+
+### Issue #950 attempt 2: the lane-level fallback and each half of the seed check
+
+Sol's attempt 1 verdict found two commit guards no gate saw alone. Two gates were added, with no
+production change: the end-to-end mixed bank
+`a_bank_of_mixed_periods_and_metric_sets_publishes_the_declined_arms_frames` (graph-compiler: one
+bank holds eight meters of different periods and metric sets, with and without `ENERGY_RMS`, at
+`Simd8` and `Simd4` through both deliveries, every frame against the declined arm by bits, with the
+passes, merges and commits pinned, the non-energy meters' commits included), and M2's safety net
+moving the left seed alone and the right seed alone as well as both, at both widths. Each row was
+applied alone to `958c7066` as an exact-text replacement (match count one), run in dev, and
+restored.
+
+| # | mutation | result |
+| --- | --- | --- |
+| S-2 | `commit_banked`'s window check `len > period - frames` deleted | RED on the mixed bank: a `COUNTS` meter at period 300 (no seed to fail) commits a block that crosses its window, its window overruns its period and never emits, and the next block's scalar split underflows (`attempt to subtract with overflow` at `src/lib.rs:4881`, dev). GREEN on M2, M3 and the M3 controls, whose banks run every lane in lockstep: this row is why the mixed bank exists |
+| S-1L | the left half of the seed check dropped (`true && right == right`) | RED on M2's `MovedLeftSeed` row: `period: 512 ... mode: MovedLeftSeed ... event 3 (Block(128)) lane 1 binding 0: window 0 differs` |
+| S-1R | the right half dropped | RED on M2's `MovedRightSeed` row: `... mode: MovedRightSeed ... event 3 (Block(128)) lane 0 binding 0: window 0 differs` |
+
+Before attempt 2 both S-1 rows were green, because the safety net moved both seeds at once and
+either half refused the commit.
