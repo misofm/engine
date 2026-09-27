@@ -115,8 +115,11 @@ fn compiles_65_537_tracks_or_rejects_only_a_configured_resource() {
 /// is how a bank-membership scan quadratic in the track count stayed hidden on every host's compile
 /// path (`PreparedGraphPlan::with_builtin_banks`, about 160 s in release before the fix). This one
 /// attaches the builtin banks every host renders and then binds the plan, because bind had
-/// quadratic scans of its own. Both are exercised by the track count alone, so a regression shows
-/// up as this test's time rather than as an assertion.
+/// quadratic scans of its own. The bank-membership scan and the bind scans this session reaches
+/// are exercised by the track count alone, so a regression in them shows up as this test's time
+/// rather than as an assertion. This session has no effects and one route, so #962's
+/// effect-control, `Backend::Scalar` interval and route-fold metadata fixes are not exercised here
+/// at scale (a follow-up issue adds sessions that reach them).
 ///
 /// There is no wall-clock bound, because a test-harness clock is not one CI can hold reliably: the
 /// runners' speed varies and this binary's tests run in parallel. The backstop is the debug job's
