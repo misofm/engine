@@ -215,3 +215,104 @@ Red mutations run, each restored and confirmed with `cmp`:
 - **Gate 3 (timed run) not run.** The coordinator records it, per the amendment.
 - **Scratch.** No new target directory was created beyond this worktree's own `target/` (2.2 GB).
   Scratch files live only in the session scratchpad.
+
+## Sol attempt 1 verdict: FAIL
+
+Reviewer: Sol, 2026-09-27, `git diff 64665d99..2f93ecb4` in the `engine-881` worktree. Re-run
+here, all green: `cargo fmt --all --check`; workspace clippy `-D warnings`;
+`RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`;
+`cargo test --locked -p bench -p console-workload` (65; 7, 4, 25, 3, 2 ignored);
+`scripts/test-console-benchmark.sh`; `scripts/check-console-benchmark-fixture.sh`;
+`scripts/check-bench-policy.sh`; `scripts/test-bench-policy.sh`; realtime, conformance-boundary,
+workspace and lane policies; and `preflight-console-benchmark.sh --step preflight-881-sol`
+(PASS, `records_required: 50`, no artifact directory left). Two red mutations were re-run and both
+went red: deleting the aggregate's console-pair digest pin (2 cases) and deleting the
+`meter_dropped_snapshots == 0` pin (4 cases). No timed run was made.
+
+The row is shaped like the product, and the gates discriminate. It fails on one false claim:
+the implementation and its evidence say the claim holds, and that claim is the premise of the
+gate 3 comparison.
+
+### Findings, by severity
+
+1. **Major: meters are not the only difference between the row and `sixty_four_track_console`.**
+   - **The entry changes control delivery.** The amendment requires
+     `prepare_selected_session_builtins_between_render_calls`. That entry selects
+     `BuiltinControlDelivery::BetweenRenderCalls` (`crates/builtins-compiler/src/lib.rs:3301-3316`).
+   - **Under that delivery, fader and matrix fuse.** The chain builder
+     (`crates/graph/src/runtime.rs:4524`) and `make_fader_matrix`
+     (`crates/builtins-compiler/src/lib.rs:1008-1040`) pair each cohort's fader bank and matrix bank
+     into one `FaderMatrixBankProcessor`. That stage renders through
+     `try_process_settled_with_matrix` (`:1079`).
+   - **The standing row keeps them apart.** It is prepared through `Concurrent`
+     `prepare_session_builtins`, so it keeps two stages, and its matrix runs through
+     `MatrixStage::process`, which carries #944's select-free arm.
+   - **Probe (temporary test, deleted).**
+     `graph::test_only_bank_chain_construction_facts().runtime_slots` is **48** on the standing
+     row and **40** on the metered row. `bank_shape` is `[8, 48]` on both, because it counts
+     memberships and not runtime stages. Folds are 64 and redirects 0 on both.
+   - **Consequence for the ratio.** Metered minus standing is the meter cost plus the difference
+     between the fused and unfused fader/matrix. #943 F2 measured the unmetered web-shape plan
+     about 2 us below the concurrent one. Any fader/matrix optimisation, #944 included, can also
+     move one row of the pair and not the other.
+   - **False statements to correct:**
+     - `tools/console-workload/src/lib.rs:354-356`: "the meters are the only thing this row adds";
+     - `:1171-1175`: "its between-render-calls delivery has nothing to deliver";
+     - `:2523` and `:2581`: "the meters change no bank" / "no bank moves";
+     - `tools/bench/src/console.rs:165-167`: "one session, rendered with and without the ... meter
+       set";
+     - this spec's Design, line 74.
+   - **Invariant this change falsifies.** `tools/console-workload/tests/chain_shape.rs:915-916`
+     (#944): "Every banked row prepares builtins through `Concurrent` delivery, so its fader and
+     matrix are never paired".
+   - **Required for attempt 2** (authorized paths only; no engine change):
+     - State the delivery difference truthfully at each site above.
+     - Correct the #944 sentence.
+     - Pin the difference in the pair test: runtime stages 48 against 40 through
+       `graph::test_only_bank_chain_construction_facts`, which console-workload's `graph`
+       test-support dev-dependency already exposes. Replace "no bank moves" with the true
+       statement: memberships are unchanged and each chain's fader and matrix are fused.
+     - Keep the delivery, which is the product's.
+   - **Coordinator's option.** An unmetered between-render-calls control row would isolate the
+     meters. It is not required if the gate 3 ratio is labelled as meters plus delivery.
+
+2. **Low: the aggregate compares the redirect counts of two different plans.**
+   `scripts/console-benchmark-validator.jq` (the #881 block) pins the metered row's
+   `bank_scatter_redirects` to `console_meters`' `meters_off` arm, which is a `Concurrent`,
+   unfused plan. The comment says the two are the same session unmetered, and they are not. Both
+   counts are 0 today. Restate the comment, or accept that a change which makes the counts depend
+   on delivery will refuse a truthful record.
+
+3. **Info: product parity of the observer path.** This is the answer to verification item 1. The
+   two differences are no host-core link and no control channels, and neither changes the
+   observer path. Nothing to fix.
+   - **The product.** The default web boot is `compile_ready`'s `(None, None)` arm
+     (`hosts/host-web/src/lib.rs:7794-7801`), which calls
+     `prepare_host_runtime_with_selected_meters_between_render_calls` with no observation
+     demand. It binds through `into_bound_with_source_set` without an activation
+     (`crates/host-core/src/prepare.rs:1392-1406`).
+   - **The row.** It binds through `into_bound`, also without an activation.
+   - **The same render path.** In both, `selective_observation` is false and every meter runs
+     through the permanent `observe_unit` (`crates/graph/src/lib.rs:2692-2708`).
+     `MeterBindingPolicy::Permanent` is fixed by the entry (`builtins-compiler/src/lib.rs:3315`),
+     and track controls do not affect it.
+   - **So #943 moves the row and the product alike.** The product's control channels add per-block
+     empty-queue drains outside the observer path, and the row omits them, as its notes say.
+     Request fields match `host_core`'s selected-meter branch
+     (`crates/host-core/src/prepare.rs:1097-1127`) and the web host's `console_request`
+     (`hosts/host-web/src/lib.rs:8284-8308`): 12 x 128, hold 0, decay 0, depth 8, handles
+     `index + 1` over `compiled.normalized_model()`.
+
+4. **Info: items 2 to 6 verified.**
+   - **Timing.** `timing::timed` wraps `runtime.render` alone. The drain follows `hash_output`,
+     outside the clock, as in the `console_meters` arm. So the row times observation and window
+     publication inside render and never times the host's drain.
+   - **Digest and cadence.** The 64-block digest equals the `fe5bed9b...` pin
+     (`chain_shape.rs:943`). 5 x 64 snapshots are published, on blocks 11, 23, 35, 47 and 59, with
+     none dropped. The bench record gives 192 snapshots over 36 blocks, and the frozen record is
+     pinned at 5312.
+   - **Record counts.** The count is 50 in the runner, the preflight, the aggregate and the suite
+     index map. The suite rejects a set missing the row.
+   - **No drift.** Existing rows' prepare path, record shape, floor pins and digests are
+     unchanged. `WORKLOADS`, and so the wasm arm, is untouched. The scope is within the amended
+     paths, and no engine, host or effect file changes.
