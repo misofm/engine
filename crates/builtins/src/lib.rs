@@ -56,8 +56,8 @@ use lane::{
             gain_mute_ramp_block, input_chain_block_elided, input_chain_block_mono_elided,
             input_chain_plan, input_chain_ramp_block_elided, input_chain_ramp_block_filter,
             input_chain_ramp_block_filter_mono, input_chain_ramp_block_mono_elided, lanes_below,
-            mask_from_flags, matrix2x2_block, matrix2x2_ramp_block, no_lanes,
-            plan_is_channel_symmetric, zero_lanes_block,
+            mask_from_flags, matrix2x2_block, matrix2x2_block_without_identity,
+            matrix2x2_ramp_block, no_lanes, plan_is_channel_symmetric, zero_lanes_block,
         },
     },
 };
@@ -875,6 +875,8 @@ thread_local! {
     static CHANNEL_SYMMETRY_OBSERVE_POST_RAMP: Cell<bool> = const { Cell::new(false) };
     static CHANNEL_SYMMETRY_LAST_POST_RAMP_READS: Cell<usize> = const { Cell::new(usize::MAX) };
     static FILTER_PREFIX_KERNEL_FRAMES: Cell<usize> = const { Cell::new(usize::MAX) };
+    /// Settled matrix blocks that took the select-free arm (issue #944), counted per call.
+    static MATRIX_SELECT_FREE_BLOCKS: Cell<usize> = const { Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -2975,6 +2977,25 @@ impl<L: Lane> MatrixStage<L> {
             .all(|&remaining| remaining == 0)
     }
 
+    /// Renders a settled segment on the current coefficients.
+    ///
+    /// With no identity lane over all `L::WIDTH` lanes -- padding lanes included, so a partial
+    /// bank, whose padding lanes are the identity, always keeps the select -- the per-lane select
+    /// of [`matrix2x2_block`] returns its second arm on every word, and
+    /// [`matrix2x2_block_without_identity`] is that arm without the select LLVM folds into an x86
+    /// masked store (issue #944). Class A. The mask is tested here, once per call; it is never
+    /// cached, because `sync_settled` rewrites it on every event and settle.
+    #[inline(always)]
+    fn settled_block(&self, left: &mut [f32], right: &mut [f32], frames: usize) {
+        if L::mask_any(self.coef.identity) {
+            matrix2x2_block::<L>(left, right, frames, &self.coef);
+        } else {
+            #[cfg(test)]
+            MATRIX_SELECT_FREE_BLOCKS.with(|blocks| blocks.set(blocks.get() + 1));
+            matrix2x2_block_without_identity::<L>(left, right, frames, &self.coef);
+        }
+    }
+
     /// Renders one block of both channels.
     fn process(&mut self, left: &mut [f32], right: &mut [f32], frames: usize) {
         let maximum = self
@@ -2985,7 +3006,7 @@ impl<L: Lane> MatrixStage<L> {
             .max()
             .unwrap_or(0);
         if maximum == 0 {
-            matrix2x2_block::<L>(left, right, frames, &self.coef);
+            self.settled_block(left, right, frames);
             return;
         }
         let ramp_frames = (maximum as usize).min(frames);
@@ -3014,11 +3035,10 @@ impl<L: Lane> MatrixStage<L> {
         self.write_current(&current);
         self.sync_settled();
         if ramp_frames < frames {
-            matrix2x2_block::<L>(
+            self.settled_block(
                 &mut left[split..],
                 &mut right[split..],
                 frames - ramp_frames,
-                &self.coef,
             );
         }
     }

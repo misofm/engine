@@ -863,3 +863,168 @@ fn prepared_filters_design_only_before_runtime_application() {
     input.reset_with_kind(BuiltinResetKind::FullToPrepared);
     assert_eq!(FILTER_DESIGN_CALLS.with(Cell::get), 0);
 }
+
+/// Issue #944 gate 2: a settled matrix block takes the select-free arm exactly when no lane of the
+/// stage -- padding lanes included -- is the identity, once per settled segment.
+///
+/// `MATRIX_SELECT_FREE_BLOCKS` counts the arm, so this is the one gate that sees a
+/// performance-only regression: never taking the arm (issue #944 M2) renders the same bits.
+#[test]
+fn settled_matrix_takes_the_select_free_arm_only_without_an_identity_lane() {
+    use super::{BuiltinMatrixBank, MATRIX_SELECT_FREE_BLOCKS};
+    use effect_contract::BankWidth;
+    use lane::Backend;
+
+    const FRAMES: usize = 64;
+    /// Ends 24 frames into a 64-frame block, so the block has a settled tail.
+    const WINDOW: u32 = 24;
+
+    fn non_identity(lane: usize) -> Matrix2x2 {
+        let k = lane as f32 * 0.0625;
+        Matrix2x2 {
+            ll: 0.75 - k,
+            lr: -0.25 + k,
+            rl: 0.5 - k,
+            rr: 0.875 - k,
+        }
+    }
+
+    fn counted(render: impl FnOnce()) -> usize {
+        MATRIX_SELECT_FREE_BLOCKS.with(|blocks| blocks.set(0));
+        render();
+        MATRIX_SELECT_FREE_BLOCKS.with(Cell::get)
+    }
+
+    for (backend, width) in [
+        (Backend::Simd8, BankWidth::Eight),
+        (Backend::Simd4, BankWidth::Four),
+    ] {
+        let lanes = width.lanes() as usize;
+        let bank = |members: usize, identity_member: Option<usize>| {
+            let prepared = (0..members)
+                .map(|lane| {
+                    let matrix = if identity_member == Some(lane) {
+                        Matrix2x2::IDENTITY
+                    } else {
+                        non_identity(lane)
+                    };
+                    (matrix, 0)
+                })
+                .collect();
+            BuiltinMatrixBank::new(backend, width, prepared).unwrap()
+        };
+        let mut left = vec![0.25; FRAMES * lanes];
+        let mut right = vec![-0.5; FRAMES * lanes];
+        let mut render = |bank: &mut BuiltinMatrixBank, blocks: usize| {
+            counted(|| {
+                for _ in 0..blocks {
+                    bank.process(&mut left, &mut right, FRAMES as u32);
+                }
+            })
+        };
+
+        // A full bank with no identity lane: once per settled block, never per frame.
+        let mut full = bank(lanes, None);
+        assert_eq!(
+            render(&mut full, 3),
+            3,
+            "width={lanes}: full non-identity bank"
+        );
+
+        // One identity member keeps the select form.
+        let mut one_identity = bank(lanes, Some(lanes / 2));
+        assert_eq!(
+            render(&mut one_identity, 3),
+            0,
+            "width={lanes}: identity member"
+        );
+
+        // A partial bank carries identity padding lanes, so it keeps the select form too.
+        let mut partial = bank(lanes - 1, None);
+        assert_eq!(
+            render(&mut partial, 3),
+            0,
+            "width={lanes}: identity padding lane"
+        );
+        let mut single = bank(1, None);
+        assert_eq!(render(&mut single, 3), 0, "width={lanes}: one member");
+
+        // A ramp that ends mid-block toward a non-identity target: its settled tail is one
+        // select-free segment, and the next block is another.
+        let mut retarget = bank(lanes, None);
+        retarget
+            .set_target_smoothed(0, non_identity(lanes), WINDOW)
+            .unwrap();
+        assert_eq!(render(&mut retarget, 1), 1, "width={lanes}: settled tail");
+        assert_eq!(render(&mut retarget, 1), 1, "width={lanes}: after the ramp");
+
+        // A ramp that covers the whole block has no settled segment at all.
+        retarget
+            .set_target_smoothed(1, non_identity(lanes + 1), FRAMES as u32 + WINDOW)
+            .unwrap();
+        assert_eq!(
+            render(&mut retarget, 1),
+            0,
+            "width={lanes}: ramp covers block"
+        );
+        assert_eq!(
+            render(&mut retarget, 1),
+            1,
+            "width={lanes}: ramp ends mid-block"
+        );
+
+        // A ramp that ends mid-block on the identity: its tail and every block after keep the
+        // select, because `sync_settled` has set that lane's mask before the tail runs.
+        let mut to_identity = bank(lanes, None);
+        to_identity
+            .set_target_smoothed(0, Matrix2x2::IDENTITY, WINDOW)
+            .unwrap();
+        assert_eq!(
+            render(&mut to_identity, 1),
+            0,
+            "width={lanes}: identity tail"
+        );
+        assert_eq!(
+            render(&mut to_identity, 2),
+            0,
+            "width={lanes}: identity settled"
+        );
+    }
+
+    // The scalar per-track stage takes the same method; its mask is the lane's own flag.
+    let chain = |matrix: Matrix2x2| {
+        BuiltinChain::new(
+            48_000,
+            BuiltinParameters {
+                matrix,
+                ..BuiltinParameters::default()
+            },
+        )
+        .unwrap()
+    };
+    let render = |chain: &mut BuiltinChain, blocks: usize| {
+        counted(|| {
+            for _ in 0..blocks {
+                let mut left = [0.25; FRAMES];
+                let mut right = [-0.5; FRAMES];
+                chain
+                    .matrix
+                    .process(DualMonoBlock::new(&mut left, &mut right, 0).unwrap());
+            }
+        })
+    };
+    let mut scalar = chain(non_identity(3));
+    assert_eq!(render(&mut scalar, 2), 2, "scalar non-identity");
+    let mut identity = chain(Matrix2x2::IDENTITY);
+    assert_eq!(render(&mut identity, 2), 0, "scalar identity");
+    scalar
+        .matrix
+        .set_target_smoothed(Matrix2x2::IDENTITY, WINDOW)
+        .unwrap();
+    assert_eq!(render(&mut scalar, 1), 0, "scalar identity tail");
+    identity
+        .matrix
+        .set_target_smoothed(non_identity(5), WINDOW)
+        .unwrap();
+    assert_eq!(render(&mut identity, 1), 1, "scalar settled tail");
+}
