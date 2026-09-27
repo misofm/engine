@@ -299,3 +299,28 @@ On the merged tree, these all pass:
     pairs before the `unzip` (`banks.rs:345`). That ties it to the gated field.
 
   This can ride the batch merge or a one-line follow-up. It does not block.
+
+## Follow-up: renumbering gate
+
+This closes Sol's Low finding, that nothing checked the renumbering of reused banks. Branch
+`codex/1002-renumber-gate`, from the batch head `16c66f73`.
+
+* **Test.** `the_mono_pool_keeps_whole_cohorts_on_the_dogfood_layout` now asserts, on the folded
+  artifact, that every `report().rack_cohorts.bound_slots` entry's members (track id and rack, in
+  lane order) equal the members of `plan.groups[bound.group]`. The move shifts the group
+  indices on this layout, so a stale index points at another group.
+* **Debug assertion.** `bind_rack_banks_indexed` now has a `debug_assert!` over the final bound
+  groups, before the `unzip`: every `slot.group` and every bank's `cohort.group` equals the
+  group's final index. `cohort.group` has no public reader, so this is its gate.
+
+Mutations, each alone, in `banks.rs`:
+
+| mutation | dev, 8 lanes | dev, 4 lanes (scratch cfg) | release (`panic = "unwind"`) |
+|---|---|---|---|
+| drop `slot.group = index` | red: the dogfood, odd-track and discriminating tests, on the debug assertion | red, the same three | red: the dogfood test, "bound slot 0 of group 3 names that group's lanes" |
+| drop `bank.cohort.group = cohort_group` | red, the same three | red, the same three | **green**: a debug assertion does not run in release, and nothing reads the field there |
+
+Gates: `cargo fmt --all --check`; clippy `--workspace --all-targets -- -D warnings`, also with
+`--all-features`; `cargo test -p graph-compiler` in dev (119) and in release (119,
+`CARGO_PROFILE_RELEASE_PANIC=unwind`, the #1008 workaround). No rendered bit or plan changes:
+the change adds one test assertion and one debug assertion.

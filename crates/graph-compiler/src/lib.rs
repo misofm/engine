@@ -8592,6 +8592,29 @@ mod tests {
             81 - kept,
             "everything else pools as stereo"
         );
+        // Issue #1002: the move shifts the group indices, and the banks of the groups it did not
+        // change are reused from the trial plan with their index renumbered. Every bound slot of
+        // the report must still name the plan group whose lanes it binds.
+        let report = &folded_artifact.report().rack_cohorts;
+        for bound in &report.bound_slots {
+            let group = &report.plan.groups[bound.group];
+            let lanes: Vec<(&str, RackId)> = group
+                .members
+                .iter()
+                .flatten()
+                .map(|chain| (chain.track_id.as_str(), chain.rack))
+                .collect();
+            let members: Vec<(&str, RackId)> = bound
+                .members
+                .iter()
+                .map(|node| (node.track_id.as_str(), node.rack))
+                .collect();
+            assert_eq!(
+                members, lanes,
+                "bound slot {} of group {} names that group's lanes",
+                bound.slot, bound.group
+            );
+        }
 
         let reference = render_armed_console_blocks(stereo_artifact, BLOCKS, &mono, &none);
         let folded_render = render_armed_console_blocks(folded_artifact, BLOCKS, &mono, &mono);
