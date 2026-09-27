@@ -233,10 +233,13 @@ pub(crate) fn floor_row(workload: Workload) -> Option<FloorRow> {
         // sanitisation, one identity add, the boundary scan, the fader, the pan and the routing.
         // The two rows that share the identity inventory, and share it on purpose. `gain_pan_only`
         // asks for the fixture's real fader trims and pan positions where `dispatch_only` asks for
-        // 0 dB and hard identity, and the inventory does not move -- because `gain_mute_block` has
-        // no identity arm and `matrix2x2_block` evaluates both arms of its per-lane select
-        // unconditionally. One basis string for both is the claim: a gap between the two rows'
-        // measurements would mean one of those two kernels had grown a data-dependent path.
+        // 0 dB and a pan of `left = right = 1.0`, and the inventory does not move. `gain_mute_block`
+        // has no identity arm. The settled matrix has had one data-dependent path since issue #944
+        // -- a bank with no identity lane skips the per-lane identity select -- but neither row
+        // has an identity lane: `dispatch_only`'s pan routes both inputs hard right, which is not
+        // the identity matrix, so both rows take the same select-free arm. One basis string for
+        // both is the claim: a gap between the two rows' measurements would mean one of those two
+        // kernels had grown another data-dependent path.
         Workload::SixtyFourTrackDispatchOnly => FloorRow {
             lane_ops: BUILTINS_IDENTITY_LANE_OPS,
             width_factor: full,

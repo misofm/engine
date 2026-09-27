@@ -298,3 +298,24 @@ Red mutations run against it, each reverted after it was seen to fail:
 
 The third is the phase-3 twin of the `svf_block` reassociation mutation above: it is the one that
 proves the gate is an identity and not a tolerance.
+
+## Issue #944 — the select-free settled matrix kernel
+
+`matrix2x2_block_without_identity` is `matrix2x2_block`'s second arm with no `L::select` in the
+body. Gate 1, `select_free_matrix_matches_the_select_form_when_no_lane_is_identity`
+(`tests/fader_matrix.rs`), holds it equal to `matrix2x2_block` with no identity lane over the four
+hostile families, frame counts `[1, 3, 8, 9, 128]`, guard words included, at `f32`, `Simd4` and
+`Simd8`, in dev and in release. NaN words compare as "both NaN" (amendment 1): in the release
+build LLVM commutes the right-output sum differently in the two kernels, and x86 keeps the first
+operand's payload. With that clause removed from the comparator the release run is red at
+`width=4 frames=1 family=3: R[3] new=7fc00000 old=7fc01234` while dev stays green -- which is why
+the clause exists and why the gate runs in both profiles.
+
+Command form: `cargo test -p lane --test fader_matrix select_free` (and with `--release`).
+
+| # | mutation | gate | observed |
+| --- | --- | --- | --- |
+| M3 | swap `c.lr` and `c.rl` in `matrix2x2_block_without_identity` | gate 1, dev and release | FAILED, `width=1 frames=1 family=0: L[1] new=bfc00000 old=c04c0000` |
+
+The same mutation is red in `builtins` (gate 3) and `console-workload` (gate 4); those rows, and
+M1, M2 and M4, are in `crates/builtins/tests/MUTATIONS.md`.

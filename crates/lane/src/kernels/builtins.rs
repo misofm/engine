@@ -276,6 +276,60 @@ pub fn matrix2x2_block<L: Lane>(
     }
 }
 
+/// [`matrix2x2_block`] for a coefficient set with **no** identity lane: its second arm alone.
+///
+/// Why it exists: on `x86-64-v3`, LLVM folds [`matrix2x2_block`]'s left output -- a store of a
+/// select whose first arm is the word just loaded from the same address -- into one `vmaskmovps`
+/// masked store under `!identity`. On Zen 2 to Zen 4 that store is about 42 uops with a 12-cycle
+/// reciprocal throughput, so a settled pan matrix costs several times its arithmetic (issue #944).
+/// No standing session has an identity lane in a full bank: the equal-power pan law never yields
+/// one, because `cos(pi / 2)` rounds to `6.1e-17` in `f32`.
+///
+/// Frozen operation order, per frame -- [`matrix2x2_block`]'s second arm verbatim:
+/// 1. `l = load(left)`, `r = load(right)`
+/// 2. `yl = ll * l + lr * r` -- multiply, multiply, add; no fusion
+/// 3. `yr = rl * l + rr * r`
+/// 4. `store(left, yl)`, `store(right, yr)`
+///
+/// There is no `L::select` anywhere in the body, not even one on a constant mask: a select is
+/// exactly what LLVM rebuilds the masked store from.
+///
+/// Precondition: `!L::mask_any(c.identity)` over all `L::WIDTH` lanes, padding lanes included,
+/// checked by a `debug_assert!`. The caller tests it once per call, never per frame.
+///
+/// Class A: with no identity lane, [`matrix2x2_block`]'s per-lane select returns its second arm,
+/// so the two kernels compute the same products and sums on every lane of every word, padding
+/// included. Every non-NaN word is bit-identical. A NaN word stays a NaN: LLVM may commute the
+/// commutative `fadd` differently in the two bodies, and when both products are NaN with different
+/// payloads x86 keeps the first operand's. Rendered plans never reach that case -- the input stage
+/// sanitises every non-finite sample before the matrix -- and the payload is not part of the
+/// class-A statement.
+#[inline(always)]
+pub fn matrix2x2_block_without_identity<L: Lane>(
+    left: &mut [f32],
+    right: &mut [f32],
+    frames: usize,
+    c: &Matrix2x2Coef<L>,
+) {
+    debug_assert_eq!(left.len(), frames * L::WIDTH);
+    debug_assert_eq!(right.len(), frames * L::WIDTH);
+    debug_assert!(
+        !L::mask_any(c.identity),
+        "the select-free matrix arm requires a coefficient set with no identity lane"
+    );
+    for (left_frame, right_frame) in left
+        .chunks_exact_mut(L::WIDTH)
+        .zip(right.chunks_exact_mut(L::WIDTH))
+    {
+        let l = L::load(left_frame);
+        let r = L::load(right_frame);
+        let yl = c.ll.mul(l).add(c.lr.mul(r));
+        let yr = c.rl.mul(l).add(c.rr.mul(r));
+        yl.store(left_frame);
+        yr.store(right_frame);
+    }
+}
+
 /// Applies the settled fader/mute and 2x2 matrix in one frame traversal.
 ///
 /// Frozen operation order, per frame:
