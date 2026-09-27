@@ -343,3 +343,89 @@ One blocking finding: five ported tests got weaker. The rest of the port is fait
 - Take finding 2, or hand it to #959 explicitly.
 - Record finding 3 in the evidence.
 - No other change is needed.
+
+## Attempt 2 evidence
+
+Implementer: attempt 2, on the attempt-1 tree plus Sol's verdict (`c4e178f6`). Commits:
+`10172c71` (tests) and the evidence commit carrying this section and the `MUTATIONS.md` rows.
+
+### Finding 1 (blocking): fixed
+
+- The five launch-effect cap tests read `artifact.graph_resource_estimate().incremental_plan_bytes`:
+  the limiter, multiband, soft-clip, transient-shaper and delay `launch_*` tests (formerly
+  `lib.rs:11691`, `:12059`, `:12416`, `:12776`, `:13057`). Their one-byte-below cap again sits
+  exactly one byte below the figure the compile caps.
+- Sol's M-b (964-12 in `MUTATIONS.md`: the slot reservation is left out of `capped_estimate`
+  only) turns all five RED. Attempt 1's versions stayed GREEN under it.
+- The limiter, multiband, soft-clip and transient-shaper tests also pin bank-against-scalar byte
+  deltas, which they state on the report's estimate. Builtins-less, that was the published and
+  capped figure too. They now also call `assert_builtin_attachment_matches`: the builtin
+  attachment (whole-plan minus report, per field) is the same in both arms and non-zero at a SIMD
+  dispatch. With the report deltas pinned, that pins the whole-plan deltas to the same values.
+  964-13 (the attachment charges the effect-bank metadata a second time) turns all four RED.
+
+### Finding 2 (low): taken
+
+`tests/track_delay.rs` compiles at `Backend::current()`; the comment that explained `Scalar` is
+rewritten. All 8 tests pass unchanged, and the digest is still `957e97ca…` (dispatch-independent).
+964-3 and Sol's S5 were re-run at `current()`: both RED.
+
+### Finding 3 (info): recorded
+
+The objective gate holds for the 47 scoped tests, not literally for every test target in the
+crate: the `graph_fixture` bin's own unit test (`src/bin/graph_fixture.rs:366`, through its
+`compile_fixture` at `:88`) still reaches the builtins-less entry. That bin is a tool, and #963's
+brief owns its port (it moves `fixtures/graph/v1` bytes).
+
+### Sweep: every pre-builtins estimate read in the ported tests
+
+A cap is checked against the whole-plan estimate (`capped_estimate`, published as
+`graph_resource_estimate()`, which is `graph().estimate`). The builtin attachment
+(`checked_add_builtin_banks`) changes only `audio_buffer_samples`, `graph_metadata_bytes`,
+`incremental_plan_bytes`, `session_plus_plan_bytes`, `largest_allocation_bytes` and the three
+`builtin_bank_*` fields. Every read of `report().estimate` (or `.report.estimate`) in the 47 ported
+tests was checked:
+
+| test | read | verdict |
+|---|---|---|
+| limiter, multiband, soft clip, transient shaper, delay `launch_*` | one-byte-below plan cap | **was the finding; fixed** |
+| limiter, multiband, soft clip, transient shaper `launch_*` | bank-against-scalar deltas of samples, graph, plan and session bytes | budget statements on the report; **strengthened** with the whole-plan check above |
+| the same four, and `launch_delay_…` | `effect_bank_*` counts and bytes, `effects`, `declared_effect_bytes` | fields the attachment does not touch; report and whole-plan agree by construction (the new check asserts a zero delta for the `effect_bank_*` fields) |
+| `effect_control_resource_uses_…` | owner deltas and exact / one-below caps | fixed in attempt 1 (964-6): deltas on both estimates, caps on the whole-plan one |
+| `runtime_bank_slot_reservation_…` | fold arithmetic on a copied estimate (`below_largest`, `above_largest`, `zero`) | a template struct for `checked_add_bank_slot_owners`; its values are overwritten, no cap |
+| `runtime_bank_slot_reservation_…` | "published estimate carries slots" (`artifact.report().estimate == expected`) | the report is the figure under test there, as before the port (that arm compiled with builtins before #964 too); the mixed arm pins the whole-plan estimate exactly, and the exact / one-below caps use it |
+| `post_bank_graph_cap_…` | pre-attachment `audio_buffer_samples` | used only as the figure the cap must exceed; the cap is set from the whole-plan figure (Sol's S2 is RED) |
+| `rack_placement_changes_the_bank_but_never_the_samples` | `effect_bank_*`, `declared_effect_bytes` equal across placements | not caps, and fields the attachment does not touch |
+| `accepted_session_compiles_…` | `routes`, `effects`, `reductions`, `logical_nodes`, three `> 0` | counts and sanity, no cap |
+| `scale::compiles_65_537_…` | `logical_nodes`, `edges`, `routes`, `effects`; the `maximum_nodes = 1` cap | counts the attachment does not touch; the cap is on `materialized_nodes`, which it does not touch either |
+| `track_delay` (8 tests) | `graph_resource_estimate()` and `plan().estimate` | already the whole-plan figure (`plan()` is `graph()`), including the oversized-delay cap |
+
+Not ported, so not swept: `live_scalar_owner_bytes_are_published_and_capped_before_binding`
+already compiled with builtins before #964 (its caps read `graph_resource_estimate()`).
+
+### Correction to the attempt-1 port table
+
+Rows 27 to 31 said the launch cap assertions were unchanged. They were not: attempt 1 left the
+cap reading the pre-attachment figure. As of attempt 2 they cap on the whole-plan figure, and rows
+27, 28, 29 and 30 also carry the whole-plan delta check.
+
+### Gates
+
+Re-run on `10172c71` with `CARGO_INCREMENTAL=0`, the worktree's own `target/`, sequentially.
+
+| command | result |
+|---|---|
+| `cargo fmt --all --check` | pass |
+| `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | pass |
+| `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps` | pass |
+| `cargo test --locked -p graph-compiler` (dev) | pass: 80/1/3/2/8/6 (`scale` 60.4 s) |
+| the same, `--release --config 'profile.release.panic="unwind"'` | pass: 80/1/3/2/8/6 (`scale` 17.3 s) |
+| the same, `--features graph/test-support,builtins-compiler/test-support` | pass: 80/1/3/2/8/6 |
+| `cargo test --locked -p graph` | pass: 109/1/1/1 |
+| `cargo test --locked -p builtins-compiler --features test-support` | pass: 58/9/3/6/1/2 |
+| `cargo test --locked -p host-core --all-features` | pass (18 binaries) |
+| `cargo test --locked -p console-workload`, dev and `--release` | pass: 8/4/23/3 both. Still no product code in the branch diff, so no console digest can move |
+| `check-graph-policy.sh .`, `test-graph-policy.sh`, `check-graph-determinism.sh` | PASS, ok, PASS (100/100) |
+| 964-12, 964-13, 964-3 and S5 rechecks | RED as recorded |
+
+The timed benchmark was not run. `target/` is deleted.
