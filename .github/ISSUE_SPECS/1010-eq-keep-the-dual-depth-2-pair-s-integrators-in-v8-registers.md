@@ -39,3 +39,13 @@ recurrence latency. Then check whether V8 keeps the eight integrators in registe
 4. Stop after one prototype if gate 2 or gate 3 fails. Record the listing and the numbers, and name
    the reason for the gap: V8 x64's 15 XMM registers at S=2, D=2 is class B. Do not chase it further.
    This is weekly-optimisation work, not launch-critical.
+
+## Amendment (root, from the #1009 verification)
+
+The candidate reshapes the dual depth-2 pair, so #1000's gate (as amended by #1009) will fail
+closed on the held dual tail until its row definitions are updated for the new shape. Update the
+gate's rows in the same change, and show the gate green on the new shape and still red on the
+#977 attempt-1 build and the one-token edit.
+
+Also carried from the #1009 verdict (LOW, not in this issue's scope): the CI routing check does not
+notice a gate step that is commented out, suffixed `|| true`, or guarded `if: false`.
