@@ -143,3 +143,73 @@ host-core suites in dev, reverted with `git checkout`)
   `node_kind`/`build_op` would change the infallible graph bind API, which this slice does not own.
 - `ProcessBlockError` and `RackError` each gain a variant; no exhaustive `match` on either exists in
   the tree.
+
+## Sol attempt 1 verdict: PASS
+
+Sol, 2026-09-27. I judged `6c3e29e9` merged onto the current batch head `f4cc12db`, which adds
+#1002 and its renumbering gate after the branch's base `b2f312c2`. The merge is clean and was made
+in scratch only. The base for the artifact and digest comparisons is `f4cc12db`, built from a
+`git archive`. Host AMD EPYC 7313P, `CARGO_INCREMENTAL=0`. Nothing was timed or pushed, and all
+scratch and target directories were deleted.
+
+### The questions
+
+1. **The panic is unreachable, and I accept it.**
+   * **It cannot fire.** `graph::runtime::ConsoleEffect::new` allocates the window as
+     `vec![_; effect.metadata.automation_capacity as usize]` and checks it against that same
+     field, three lines later, with nothing in between. So no session, host, restore or re-plan
+     can make it fire. Only an edit to the sizing line can, which is K4.
+   * **It never runs on the render thread.** It runs in `RuntimeParts::node_kind`, during plan
+     construction (`graph/src/lib.rs:2559`). On the web host that is boot, on the worklet thread
+     but outside `process()`.
+   * **A panic is the right tool here.** The same builder already uses
+     `.expect("validated width")` for a bind invariant. Making the infallible graph bind API
+     return a `Result` would add an error path that cannot be taken.
+2. **Coverage.** The window has exactly two production owners, the rack's
+   `ConsoleEffectBankStage::new` and graph's `ConsoleEffect::new`, and both now check it.
+   * **Hosts.** Every host that attaches an effect console reaches those owners through host-core
+     `prepare`, then `effect-compiler`, then `graph-compiler`. That covers the web host
+     (`control_queue_depth`), the builtin batch endpoint and the linked-limiter session. The C ABI,
+     the native host and the mobile host attach no console.
+   * **Re-plans.** A plan swap or re-plan binds a changed cohort through `stage_for`, which is the
+     rack constructor. A reused bank keeps a stage that was already checked.
+   * **Restore.** A restore writes state payloads only, and never touches a window.
+3. **The finding-1 scenario is now impossible, in two independent ways.**
+   * **The bind check.** A window of capacity + 1 is refused at bind by either owner. I reproduced
+     K2 as red myself.
+   * **The queue bound.** A drain stages at most the number of records it pops. Preparation sizes
+     every production queue to `depth.min(capacity)` (`effect-compiler/src/prepare.rs:2066`). So
+     `staged <= automation_capacity` holds even for an oversized window.
+4. **Gates, on the merge.**
+   * **Tests.** `effect-contract`, `effect-compiler`, `host-core`, `rack`, `graph`,
+     `console-workload` and `host-web` all pass: 752 passed, 0 failed and 7 ignored in both dev
+     and release.
+   * **Lint.** Clippy (workspace, all targets, `-D warnings`) and fmt are clean.
+   * **Policy scripts.** Ten pass: realtime (57 regions), workspace, effect-contract, rack,
+     env-vocabulary, host-core, graph, effect-runtime, lane and session.
+   * **`run-wasm-gates.sh`.** It passes, including the V8 spill gate.
+   * **Web artifact.** `check-web-audioworklet.sh` reports are identical for base and change
+     (render closure 8, one trap owner `render_inner`). The artifact grows by +873 bytes, the same
+     delta as the evidence reports.
+   * **Standing digests.** All 17 64-block console digests are identical on base and change.
+   * **My fuzzes.**
+     * Drain model: 1.5M runs in release, including windows up to queue + 7, all sound.
+     * Rendered bank differential: 2,000 scenarios against forced dual, 946 keeping the collapse
+       throughout and 1,054 retiring it, every block bit-exact.
+   * **Findings 2 and 4** are closed as the evidence says.
+
+### Findings
+
+1. **Info: both checks guard an edit, not an input.**
+   * Each check compares a window against the capacity it was just sized from. The rack reads
+     `metadata()` a second time for the check, so only a non-deterministic `metadata()` or an edit
+     to the sizing line can make it fire.
+   * `EffectControlLane::stage` still accepts any slice, so a future third owner of a window is
+     bound only by the new doc precondition.
+   * **Failure scenario.** A new drain site allocates its own window and its own queue deeper than
+     the capacity, and skips the check. Nothing in the tree does this today.
+   * **Structural fix, if wanted.** Let the lane own its window, sized from the metadata at
+     construction.
+2. **Info: gate 1's wording was not followable, and the deviation is correct.** The
+   `EffectProcessBlock::new` and `EffectBankProcessBlock::new` constructors run per block, on the
+   render thread, and never see the window. The typed check at bind meets the gate's intent.
