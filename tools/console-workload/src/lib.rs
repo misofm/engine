@@ -67,6 +67,8 @@ use session::{
     parse_session_json,
 };
 
+pub mod mixing_automation;
+
 /// Sample rate every console workload is prepared and rendered at.
 pub const SAMPLE_RATE_HZ: u32 = 48_000;
 /// Frames per rendered block.
@@ -1214,6 +1216,19 @@ impl SessionRuntime {
             .filter(|(_, producer)| producer.descriptor.id.as_str() == effect_id)
             .min_by(|(_, left), (_, right)| left.track_id.cmp(&right.track_id))
             .map(|(index, _)| index)
+    }
+
+    /// The live-console control channel of `track_id`'s `effect_id` (a contract id), by stable
+    /// identity rather than by position (issue #1003).
+    ///
+    /// `attach_effect_console` returns channels in prepared-entry order, which moves when the
+    /// entry set does, so a row that automates named tracks resolves each one by its session id.
+    /// Returns `None` for a `control: false` plan or when the track carries no such effect.
+    #[must_use]
+    pub fn control_channel(&self, track_id: &str, effect_id: &str) -> Option<usize> {
+        self.controls.iter().position(|producer| {
+            &*producer.track_id == track_id && producer.descriptor.id.as_str() == effect_id
+        })
     }
 
     /// Session-stable `(track_id, effect_id)` identity of one prepared control channel.

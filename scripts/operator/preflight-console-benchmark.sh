@@ -138,6 +138,9 @@ fi
 if "$binary" console extra-argument >/dev/null 2>&1; then
     fail 'the console subject accepted an argument'
 fi
+# Issue #1003: the mixing-automation row's premises, untimed -- every control resolves by id, every
+# automated effect moves bits, restating is bit-exact and the EQ's restatement keeps the collapse.
+"$binary" console --preflight >/dev/null || fail 'the mixing-automation preflight refused'
 
 candidate_commit=$(git rev-parse --verify HEAD)
 jq -n -S \
@@ -157,7 +160,7 @@ jq -n -S \
     --arg library_sha256 "$(sha256sum scripts/console-benchmark-record-lib.jq | awk '{print $1}')" \
     --arg preconditions_sha256 "$(sha256sum scripts/check-bench-preconditions.sh | awk '{print $1}')" \
     '{schema_version: 1, issue: 149, kind: "console_benchmark_preflight",
-      workload_launches: 0, warmup_rounds: 1, measured_rounds: 2, records_required: 48,
+      workload_launches: 0, warmup_rounds: 1, measured_rounds: 2, records_required: 50,
       candidate_commit: $commit, candidate_commit_sha256: $commit_sha256,
       binary_sha256: $binary_sha256, benchmark_source_sha256: $subject_sha256,
       floor_table_sha256: $floor_table_sha256,
