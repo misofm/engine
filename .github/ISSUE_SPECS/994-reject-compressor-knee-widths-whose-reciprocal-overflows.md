@@ -157,3 +157,93 @@ Each was applied, run, and then restored byte for byte from a saved copy.
   subnormal widths, as the point above shows. It is harmless: after this change the only subnormal
   soft knees are `(2^-129, 2^-126)`, where `v * v` underflows to zero and the knee arm is `+-0`. It
   is left unchanged as outside this issue.
+
+## Sol attempt 1 verdict: PASS
+
+Reviewer: Sol (Claude Opus 5.5), adversarial review of `git diff 8eebf17b..a854b7ff`
+(`bb7fbb82`, `1a1a2a18`, `a854b7ff`). Every number below was reproduced independently in the
+worktree (debug profile, `CARGO_INCREMENTAL=0`, x86_64 AVX2 + FMA pin, rustc 1.97.1) or by a
+release-built scratch checker that links the real `effect_runtime::dynamics` from this branch.
+
+### Findings, by severity
+
+No blocking, high or medium findings.
+
+* **Low L1 — doc, pre-existing.** `crates/effect-runtime/src/dynamics.rs:115` ("`W/2` ... Exact:
+  halving does not round") and `:36-38` ("halving is exact in binary floating point, so the two are
+  the same predicate") are false for odd-significand subnormal widths, and after this change the
+  range `(2^-129, 2^-126)` is a live soft design (`0x0010_0001` gets a half word of `2^-130`, not
+  `2^-130 + 2^-150`). Harmless: the knee arm there is `+-0` and the edge moves by at most
+  `2^-150` dB. The implementer disclosed it; a doc-only follow-up, not a gate.
+* **Low L2 — record sync.** The GitHub issue's title and body still say "Reject ... with a typed
+  parameter diagnostic". When the issue closes, its evidence comment must state the ruling taken
+  here (snap to the hard knee at design, stored value unchanged, no diagnostic) so the remote
+  record matches this spec.
+* **Info I1.** The finiteness argument rests on the frozen left-associated knee arm
+  `((v * v) * inv_two_knee) * (1/R - 1)` (`dynamics.rs:182`). A future optimisation that folds
+  `inv_two_knee * (1/R - 1)` into one word stays finite for the compressor (`|1/R - 1| <= 0.95`)
+  but overflows for an expander with `R < 1/2` at knees just above the bound, and `0 * inf` is back.
+  Any such fold must re-derive the bound.
+* **Info I2.** `MIN_SOFT_KNEE_DB` (`dynamics.rs:63`) is exact in the default IEEE environment only.
+  Under DAZ every subnormal width designs as hard, and under FTZ every width below `2^-127` does.
+  The doc already says the rule, not the constant, is environment-independent. Checked under
+  MXCSR FTZ + DAZ for every width `0..=0x0200_0000`: no non-finite word and no non-finite delta.
+
+### The five review questions
+
+1. **The bound: exact.** Every one of the 2^32 `f32` bit patterns was checked: negatives, both
+   zeros, both infinities and every NaN. Exactly 1,048,576 widths (`0x0000_0001..=0x0010_0000`,
+   that is `(0, 2^-129]`) had an overflowing old reciprocal, and each now gets `(+0.0, +0.0)`. All
+   other 4,293,918,720 patterns give the pre-#994 words bit for bit.
+   **The knee arm is finite for every soft knee.** All 1,102,053,376 of them (`0x0010_0001` to
+   24.0) were evaluated at the largest reachable `v = 2 * (W/2)`, with `|1/R - 1| = 0.95` and also
+   with `99`, an expander outside the domain. All results are finite. The worst
+   `(v * v) * inv - W/2` is `9.5e-7`, three roundings at `W = 24`.
+   Round-to-nearest is monotone, so this maximum covers every level inside the knee.
+   **The real `gain_delta_db` agrees.** It was evaluated at `T` in `{0, -0, -1e-45}` and at both
+   knee edges for every soft knee, and at every 97th soft knee for `T` in
+   `{-80, -18, -0.5, -1e-30, 0}`, `R` in `{1, 1.0000001, 4, 20}` and ten levels clamped to the
+   kernel's `[-160, 24]`, both scalar and `Simd8`. It never gave a NaN, an infinity or a positive
+   delta, and every lane was identical.
+   A finite reciprocal is therefore enough, and `half_knee` cannot overflow.
+2. **Hard-knee semantics: right, and applied everywhere.**
+   *Continuity.* Every level within `8 * 2^-129` of `T` was checked at ratios 1, 1.5, 4 and 20. The
+   hard design at `2^-129` and at 2.8e-45 differs from the narrowest soft knee by at most
+   `6.98e-40` dB. It differs from each width's own exact `f64` curve by that same `6.98e-40` dB.
+   The snap is therefore no worse than the rounding of the soft evaluation beside it, and no audible
+   knee moves a bit.
+   *Coverage.* `GainComputerCoef::new` -> `knee_coefficients` is the only writer of the
+   compressor's `COEF_HALF_KNEE` and `COEF_INV_TWO_KNEE` (`crates/compressor/src/design.rs:164-168`;
+   there is no other in the workspace). It is reached from:
+   * prepare (`seed_from_defaults`);
+   * the full reset and the discontinuity reset;
+   * restore (`commit_channel` -> `redesign`);
+   * every knee-ramp sample (`advance_ramps` -> `design_lane`).
+   Both the scalar path and the bank reach it through a per-lane scalar design. With the guard
+   removed, the `Linear 64` ramp test from 0 to `1e-38` renders a ducked output (red), which
+   confirms both the ramp premise and why option (b) could not close the defect.
+3. **No typed diagnostic: acceptable.** The stored width is rendered within `7e-40` dB of its own
+   exact curve, so a host would observe nothing to be told about. A diagnostic at an entry point
+   also could not see the values inside a ramp. Snapshot and restore round-trip the stored value,
+   and the design is a pure function of it, so the report and the render stay consistent. No
+   reporting surface exposes the designed words.
+4. **Multiband: enough.** `BAND_KNEE` is evaluated at compile time and pinned bit-identical to
+   the old inline words. `band_target` is the render path's own step 2 (`#[inline(always)]`,
+   `crates/multiband-compressor/src/lib.rs:838`), so testing it directly exercises production
+   arithmetic. No session, control or automation entry sets this knee, so there is none to test.
+5. **Gates reproduced.**
+   * 17 of 17 console digests are identical. The base ran from a detached `8eebf17b` worktree
+     against this branch, and the implementation was not touched.
+   * `cargo test -p effect-runtime -p compressor -p multiband-compressor -p math -p
+     console-workload`: 312 passed, 0 failed.
+   * `-p builtins-compiler --features test-support`: 79 passed.
+   * `fmt --check`, workspace `clippy -D warnings` and `doc -D warnings` are clean.
+   * The lane, realtime (57 regions), effect-runtime and workspace policy scripts pass, and the
+     `wasm32 +simd128` check is clean.
+   * Mutation 994-R1 (guard dropped), run in a throwaway worktree with `--no-fail-fast`: 229
+     passed, and exactly the eight #994 tests failed. The first failure was the prepare test at
+     frame 0 (`0.11473124` against the reference's `1`, the 18.8 dB duck).
+   * The timed benchmark was not run.
+
+Verdict: **PASS**. The fix closes the defect at the one design every entry reaches, the bound is
+exact over the whole `f32` space, and no output bit moves for any knee whose reciprocal is finite.
