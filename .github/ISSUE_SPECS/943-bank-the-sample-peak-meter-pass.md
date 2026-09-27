@@ -1070,3 +1070,67 @@ cohorts. Sol's S-7 (`Four => planes::<lane::Simd8>`) is now RED on G3:
 | O-2 | `observed()` becomes `matches!(self, Self::Observed)` | RED: G3 `every meter publishes every whole window` (`0` against `384`) |
 | L-A | attempt 1's separate `bool` restored | native check GREEN, wasm32 check RED on the const assertion |
 | L-B | `#[repr(u16)]` on `UnitObservation` | native check GREEN, wasm32 check RED on the const assertion |
+
+## Sol attempt 2 verdict: PASS
+
+Reviewer: Sol, attempt 2, 2026-09-27, on `20f79016` (code `921ccc48`, base `79601b8f`). Nothing was
+pushed. Every mutation, probe and throwaway test was applied in place and reverted; the tree is
+`20f79016` plus this section. Both attempt 1 findings are closed, and no attempt 1 gate regressed.
+
+### Findings, most severe first
+
+No blocking or required findings.
+
+1. **Info: the enum packing behaves exactly as the two flags did.** Before #943 there were three
+   production read sites, and each maps one to one:
+   - the constructor (`runtime.rs:2830`);
+   - `unit_inert`, #936's inert-unit predicate (`:2935`);
+   - `observe_unit`'s early return and the peak gate (`:3276-3283`).
+
+   `observe_active_unit` and the activation paths never read the flag. `of(h, a).observed() == h`,
+   and `of(h, a).sample_peak() == h && a == a`, because accepting the peak requires an observer. The
+   unreachable `(false, true)` input maps to `Unobserved`.
+   - O-1, O-2, O-3 (`sample_peak()` true for `Observed`) and S-7 are red. O-3 goes red on G3's ALL
+     control.
+   - O-4 (the inert predicate's `observed` term dropped) is green. It is an equivalent mutation:
+     the predicate also requires `op.observers.is_empty()`. This redundancy predates #943.
+2. **Info: the `const` assertion runs on wasm32 in CI.** It sits at module scope in production
+   code (`runtime.rs:2464`) with no `cfg`, so every build of `graph` evaluates it.
+   - The router classifies a `crates/graph` change as `route=full`.
+   - That route runs `qualification.yml`'s `artifact` job (`build-web-audioworklet.sh`, host-web
+     at `+simd128`) and its `wasm-guests` scalar build of host-web, and both compile `graph` for
+     `wasm32-unknown-unknown`.
+   - Probes on the real type: 20 bytes on wasm32 and 32 natively (both pass; 24 fails on both).
+   - Attempt 1's fifth `bool`, re-applied: `cargo check -p graph` is green natively, and the wasm32
+     check is red with "a UnitIdentity flag no longer fits the row's padding".
+3. **Info: the `Simd4` G3 discriminates the four-lane dispatch.**
+   - S-7 is red on G3's `Simd4` arm: "Simd4 between_render_calls false period 512: meter 6
+     window 0".
+   - Pinning four-lane cohorts through the pass count (24 blocks x 16 = 384) is adequate. The
+     dispatch is an explicit `Backend::Simd4`, which can only bind `BankWidth::Four` chains.
+     Frames and PCM are compared by bits, and the shape tuple must match across arms, which is
+     I3's claim.
+   - The `Simd4` plan's `[32, 64]` shape and its 60 redirects come from the existing compiler, and
+     the pass does not move them.
+
+### Re-verified
+
+- **Differential:** the throwaway `sol943_diff.rs` from attempt 1, re-run unchanged and deleted.
+  - It covers 4 seeds x 96 blocks; three sessions; `Simd8`, `Simd4` and `Scalar`; the concurrent,
+    between-render-calls and controlled deliveries; hostile input; and partial and collapsed banks.
+  - 4,533,495 snapshots and 104,832 handed peaks came out bit-identical. These are the same counts
+    as attempt 1.
+- **G3:** all 8 configurations and both controls pass. The table matches the evidence.
+- **Suites:** lane 56; builtins 114 and 114; rack 54; graph 118 and 125; graph-compiler 94;
+  builtins-compiler 79; host-core 225; host-web 206; console-workload 39; capi 36.
+- **Static checks:** fmt, workspace clippy `-D warnings` and rustdoc `-D warnings` pass, and so do
+  all eight policy scripts.
+- **Wasm:**
+  - The AudioWorklet build reproduces `0fe086b4...1014283b` (3,308,848 bytes).
+  - All four callgraph checks, `--kernel-min 11` and `--self-test` pass.
+  - The `bank_sample_peak` census is unchanged.
+  - `run-wasm-gates.sh` passes all three legs: 142 cases, 358 comparisons, no mismatches.
+- **Scope:** the diff is inside attempt 1's attempt-2 scope.
+
+The paired console benchmark row and the AudioWorklet repin remain batch-boundary work, as the brief
+says.
