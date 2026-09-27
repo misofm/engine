@@ -402,3 +402,71 @@ The console-pair digest pin is kept.
 
 No timed run was made; the coordinator records gate 3. Finding 3 (product parity of the observer
 path) needed no change.
+
+## Sol attempt 2 verdict: PASS
+
+Reviewer: Sol, 2026-09-27, `git diff a26f6224..8b026950`. Scope is unchanged, and no engine, host
+or effect file is touched.
+
+**Gates.** Re-run at `8b026950`, all green:
+
+- `cargo fmt --all --check`, workspace clippy `-D warnings`, and
+  `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`.
+- `cargo test --locked -p bench -p console-workload`: bench 65; console-workload lib 7,
+  automation 4, chain_shape 25, placement 3; 2 ignored.
+- `scripts/test-console-benchmark.sh` and `scripts/check-console-benchmark-fixture.sh`.
+- `scripts/check-bench-policy.sh` and `scripts/test-bench-policy.sh`.
+- Realtime, conformance-boundary, workspace and lane policies.
+- `preflight-console-benchmark.sh --step preflight-881-sol-a2`: PASS, with
+  `records_required: 50` and `workload_launches: 0`. No `artifacts/steps/preflight-881*`
+  directory was left, and the tree is clean.
+
+No attempt-1 gate regressed.
+
+**Red mutations, each restored.** Every one went red:
+
+- **Metered row prepared through `Concurrent` delivery.** The row was prepared through
+  `prepare_selected_session_builtins_with_console`. The pair test failed with
+  `[48, 48, 48, 48]` against the pinned `[48, 48, 48, 40]`, so the 48/40 pin discriminates. The
+  facts are reset before each bind and read straight after it, so no bind leaks into another's
+  count.
+- **Aggregate console-pair digest pin deleted.** 2 cases failed.
+- **Per-record `bank_route_folds == .tracks` deleted.** 2 cases failed.
+
+### Findings
+
+1. **Resolved: attempt 1's major finding.**
+   - Every site named in the attempt 1 verdict now states the delivery difference:
+     `lib.rs` (the variant doc, `METERED_WORKLOADS`, `build_full`, and the pair test's doc and
+     assertions); `console.rs` (the module doc and `METERED_PAIR`); `chain_shape.rs:915-921`;
+     the record library; and this spec's Design bullet.
+   - A sweep of every changed file found no other statement that meters are the only difference.
+     The remaining "unmetered" mentions describe the `console_meters` arm, which is two
+     `Concurrent` plans (`console.rs:1983-2006`, `record-lib.jq:510`), or the floor's arithmetic,
+     which fusion does not change (`floor.rs`, `record-lib.jq:150-153`).
+   - `fader_matrix_block` is the kernel the fused stage actually calls
+     (`crates/builtins/src/lib.rs`, the `try_process_settled_with_matrix` arms).
+2. **Resolved: attempt 1's low finding. Dropping the aggregate comparison is acceptable.**
+   - No record in the run shares the metered row's delivery, so a cross-record pin was unsound
+     in both directions.
+   - Folds stay pinned per record, and each plan's redirect count is pinned in the pair test.
+   - The bench and the test run the same code, so a moved count still fails CI.
+   - A same-delivery baseline is not needed to close this issue. #943's and #954's before/after
+     motions are both read on this row against itself, and gate 3's ratio is now labelled as
+     meters plus fusion.
+3. **Info: this spec's attempt-1 evidence still describes the removed aggregate tie.** This is at
+   lines 91, 107 and 165 ("the same session unmetered"). Unlike line 74, these lines carry no
+   correction marker. Attempt 2's evidence supersedes them, and they are historical record, so
+   there is no action for this issue.
+
+### Follow-ups beyond #954
+
+- **Recommended, not blocking: the product's delivery on an unmetered row.** Every standing
+  console row is prepared with `Concurrent` delivery, which the browser never uses. Either add an
+  unmetered between-render-calls console row, or move the standing row to the product's delivery.
+  Either way the meters' absolute cost becomes readable (metered minus that row). It also makes
+  the fused fader/matrix a first-class row, so a split-path optimisation like #944 cannot report
+  a saving the product never sees.
+- **Optional: carry the metered row into the wasm console arm.** The product runs in the
+  browser. `WORKLOADS` is index-addressed there, so this is that arm's own change, as the row's
+  doc says.
