@@ -742,6 +742,11 @@ jobs:
         with:
           shared-key: wasm-guests
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # Issue #1000: run-wasm-gates.sh's V8 spill gate reads TurboFan's register allocation, which is
+      # a property of one V8, so the Node version is exact; the gate refuses any other.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22.23.2
       - name: Install pinned Rust toolchain, Wasm standard library, and wabt
         run: |
           rustup toolchain install 1.97.1 --profile minimal
@@ -775,7 +780,8 @@ jobs:
       - name: Issue-005 scalar and SIMD protocol golden parity
         run: bash scripts/check-protocol-wasm-parity.sh
       # Gate G5 (native corpus, every scalar/SIMD4/SIMD8 target) and the wasm replay of gates M3
-      # and D1 under wasmtime, plus G6's detector-residency pin. Kept as one atomic invocation:
+      # and D1 under wasmtime, plus G6's detector-residency pin and #1000's V8 spill gate over the
+      # shipped AudioWorklet module's EQ loops. Kept as one atomic invocation:
       # run-wasm-gates.sh is not in this work package's edit scope, so its native and guest legs
       # cannot be split the way design §6.4 describes without a script change owned elsewhere.
       - name: Native and WebAssembly cross-target digest gates

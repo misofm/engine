@@ -9,6 +9,9 @@
 #   wasm+simd128 -- and with it (backend simd4), which is the only place the v128 software FMA of
 #                   master plan §3.5 is actually executed.
 #
+# After the legs, `check_v8_spill` (issue #1000) holds the shipped AudioWorklet module's EQ cascade
+# loops to V8's register allocation under the pinned Node; it needs that Node on PATH.
+#
 # Every leg compares against pins generated from the scalar `Lane` oracle. A mismatch is never
 # fixed by re-pinning: it means a target stopped agreeing with the oracle, which is the whole
 # reason this gate exists (§10 fallback: compare lane by lane, do not re-pin from the wasm run).
@@ -25,6 +28,10 @@ output_dir="${1:-target/ci/wasm-gates}"
 mkdir -p "$output_dir"
 evidence="$output_dir/wasm-gates.jsonl"
 : >"$evidence"
+
+# The V8 spill gate's pinned Node, V8 and host (issue #1000), checked before anything is built.
+python3 -B scripts/check-web-audioworklet-v8-spill.py --check-toolchain
+python3 -B scripts/check-web-audioworklet-v8-spill.py --self-test
 
 # The host runner and the native leg. `--locked` everywhere: the pinned wasmtime is part of the
 # gate, and a resolver that quietly moved it would change which modules validate.
@@ -160,6 +167,31 @@ check_f64_lane_lowering() {
     done
 }
 
+# Issue #1000: V8's register allocation of the parametric EQ's stationary cascade loops in the
+# shipped AudioWorklet module. `check-web-audioworklet-v8-spill.py` has the rule and what it does
+# and does not prove; it times nothing. The module is built with `build-web-audioworklet.sh`'s cargo
+# line, its strip and path-remap flags included, so these are the bytes that ship at this commit.
+# That script's digest pin is its own gate and is not repeated here: a batch repins it once, at its
+# boundary, and the loops are a property of the source whether or not the pin has caught up.
+check_v8_spill() {
+    local web_target="target/ci/wasm-gates-web" physical_root rustflags started finished module
+    physical_root="$(pwd -P)"
+    rustflags="-C target-feature=+simd128 -C strip=debuginfo"
+    rustflags+=" --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
+    rustflags+=" --remap-path-prefix=$physical_root=/repo"
+    (
+        cd "$physical_root"
+        CARGO_TARGET_DIR="$web_target" RUSTFLAGS="$rustflags" \
+            cargo build --locked --release --target "$TARGET" -p host-web
+    )
+    module="$web_target/$TARGET/release/host_web.wasm"
+    started="$EPOCHREALTIME"
+    python3 -B scripts/check-web-audioworklet-v8-spill.py "$module"
+    finished="$EPOCHREALTIME"
+    awk -v a="$started" -v b="$finished" \
+        'BEGIN { printf "wasm gates: V8 spill gate ran in %.1f s (build excluded)\n", b - a }'
+}
+
 command -v wasm-objdump >/dev/null 2>&1 || {
     printf 'wasm gates: wasm-objdump is required for the detector-residency and f64 lane pins\n' >&2
     exit 1
@@ -173,5 +205,7 @@ for leg in scalar simd128; do
 done
 printf 'wasm gates: detector history resident in locals on both guest legs\n'
 check_f64_lane_lowering "target/ci/wasm-gates-simd128/$TARGET/release/$GUEST"
+check_v8_spill
 
-printf 'wasm gates: ok (native + wasm scalar + wasm simd128), evidence in %s\n' "$evidence"
+printf 'wasm gates: ok (native + wasm scalar + wasm simd128 + V8 EQ loops), evidence in %s\n' \
+    "$evidence"

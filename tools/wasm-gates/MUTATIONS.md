@@ -208,3 +208,46 @@ the new probe while the #949 probe stays green:
 wasm gates: miso_gate_f64_lane_probe census (simd128): f64x2.promote_low_f32x4=2 f64x2.mul=2 f64x2.add=2 f64.promote_f32=0 ...
 wasm gates: miso_gate_meter_block_probe is not vectorised on the simd128 leg: f64x2.promote_low_f32x4=0 f64x2.mul=2 f64x2.add=2 f64.promote_f32=4 f64.mul=0 f64.add=0 f32.{add,gt,abs}=0 f32x4.abs=1 f32x4.add=2
 ```
+
+## The EQ's stationary cascade loops under V8 (issue #1000)
+
+`scripts/check-web-audioworklet-v8-spill.py`, run last by `scripts/run-wasm-gates.sh` on the
+AudioWorklet module that script builds with `build-web-audioworklet.sh`'s cargo line. The pinned
+Node (`v22.23.2`, V8 `12.4.254.21-node.56`, Linux x64, an x86-64-v3 host) compiles the parametric
+EQ's `f32x4` `process_bank` and `process_bank_mono` with TurboFan (`--no-liftoff
+--no-wasm-lazy-compilation`), and the gate fails when an innermost loop of the stationary,
+select-free cascade keeps a stack slot live across its back edge: read on an iteration path before
+it is written, and written in the loop. The functions are found by symbol, the loops by what they
+compute (SVF steps per iteration and streams, select-free), never by offset; a row that finds no
+loop fails closed.
+
+**What it proves.** That the reference V8 carries no value of those loops through a stack slot
+across the back edge, beyond the dual pair's allowance below: the mechanism that made #977 attempt
+1's standing one-band browser EQ about 20 % slower while every other gate stayed green. **What it
+does not.** It times nothing and says nothing else about speed. Node's V8 is not a given browser's,
+and eager TurboFan is not a page's tier-up, so green is not "the browser EQ is as fast as before";
+red is "this build brings back the #977 mechanism".
+
+**Red mutations, applied and reverted on the delivery host.** The one-token edit #977's attempt-2
+verifier recorded, in `interleave`'s depth-one tail, `if !admitted && (L::mask_any(…) ||
+L::mask_any(…))`, and #977 attempt 1 itself (`codex/977-eq-elision-and-passes-attempt1`), each
+red on the dual tail row, ten runs in ten with the same output; with the tail edit applied in the
+tree, `run-wasm-gates.sh` exits 1 there. The tail edit:
+
+```
+FAIL dual depth-1 tail, select-free: V8 carries [rbp-0xc0] across the back edge (allowance 0; 84 instructions in 4 blocks, 2 SVF steps, 2 streams, select-free, vmulps=14 vaddps=18 vsubps=4). Listing, carried slots marked:
+  …
+  *   817e  vmovups xmm0,[rbp-0xc0]
+  …
+  *   8238  vmovups [rbp-0xc0],xmm10
+      82e9  addl rdi,0xff
+      82ec  jnz <+0x8140>
+```
+
+**The dual pair's allowance of two.** When the gate landed it found that the select-free dual
+depth-2 pair already keeps both integrators of one (stream, section) chain in stack slots at
+#977-#979 (`ic2`, read by `v3 = x - ic2` and written after its flush, and `ic1`). The #977 scans
+reported that loop clean because it is entered in the middle: read in a straight line from the
+back edge's target, the rotated body stores each slot before it loads it. Whether the two slots cost
+time is not measured. The allowance holds the pair to no worse; a change that removes them lowers
+it (the gate says so), and it is never raised to pass a change.
