@@ -204,3 +204,121 @@ Run with `cargo test --locked -p graph-compiler --lib --test track_delay`.
 - The private carriers `CompiledGraph` and `GraphFailure` exist because the pipeline has to hand
   the effects back on failure while the builtins stay borrowed. They are not an entry: nothing
   outside `compile.rs` can name them.
+
+## Sol attempt 1 verdict: PASS
+
+Verifier: Claude Opus 5.5 (Sol role), 2026-09-27, on `37bf68bd` (implementation `1fea862a`), base
+`792a1e87`. Nothing pushed; the implementation was not edited. Probes and mutations ran in scratch
+copies of the base and head trees (`git archive`), each with its own target directory, and were
+never committed. The timed benchmark was not run.
+
+### Checks
+
+1. **Completeness: no builtins-less compile remains.** `GraphCompiler` has one compile entry,
+   `compile_with_builtins`. `compile_graph` is private, takes a required `&PreparedBuiltinsSession`
+   and has one caller (`compile.rs:102`). No `Option<&PreparedBuiltinsSession>`, `prepared_builtins`
+   option, `builtin_stages_bindable`, `GraphCompileRequest`, `GraphCompileFailure` or
+   `PreparedGraphArtifact` is left in `crates`, `tools`, `hosts`, `sdk`, `fixtures`, `scripts` or
+   `docs` (outside `docs/handoffs` and history in `.github/ISSUE_SPECS` and `artifacts/`). No doc,
+   ruling, SDK or C ABI text describes the mode as available; the remaining mentions are history.
+   The only `PreparedGraphPlan::new` callers outside `crates/graph` are the compiler itself and the
+   ruled-out tests in `crates/source` and `crates/builtins-compiler` (both inside `mod tests`).
+2. **Byte identity: unchanged.**
+   - Randomized compile-bind-render probe (my own): 240 variants of 12 session fixtures with random
+     input sections (symmetric and asymmetric), source mappings, fader, pan, bypass flags, dropped
+     rack slots, live-control tracks (infinite tails), both control deliveries, and a tight graph
+     cap in one variant in four, each at `Simd8`, `Simd4` and `Scalar`. It prints, per compile,
+     the canonical SHA, the report and whole-plan estimates, `required_bindings`, levels, delays,
+     effect and builtin bank members, external nodes, six rendered blocks' PCM hash and the bank
+     counters; and the diagnostics of every rejection. Base and head: 718 lines, byte-identical
+     (576 bound renders, 81 compile rejections, 3 bind rejections). The probe is sensitive to the
+     input witness: under mutation 959-4 below, 81 lines move.
+   - Console rows: all 17 `native_session_rows()` at `Simd8`, `Simd4` and `Scalar`, 64 blocks,
+     PCM hash, bank shape, transposes, symmetry and collapse counters, folds, redirects and
+     `unit_eligibility`: 51 lines, byte-identical. `sixty_four_track_gain_pan_ring` at `Simd8` is
+     `01e465a7…2dfdb4`, census `[129, 129]`, as the evidence says.
+   - `graph_fixture` default fingerprint and `--manifest`: identical on base and head; `--check`
+     passes on both. `check-graph-determinism.sh`: PASS (100/100).
+3. **The new `expect` (`compile.rs:218`) is unreachable from public input.** `compile_with_builtins`
+   runs `validate_for_session` first and returns on any diagnostic. That check re-derives one tail
+   per `normalized_model()` track from the same `effects.session` the loop walks, and rejects any
+   difference as `builtin.prepared.tail_set` (`builtins-compiler/src/lib.rs:2068`). A session track
+   always has an input section (`Track::builtins` is not optional), and `bank_inputs` and `tails`
+   are built for every track. The C ABI, the web host and the native runner all reach the compile
+   through host-core's `prepare_host_runtime`, which calls `compile_with_builtins`. The real guard
+   is the `TailMissing` case of `each_forged_builtin_seal_tuple_is_rejected_before_graph_attachment`
+   (`graph-compiler/src/lib.rs:14036`), not mutation 959-3: when I dropped the `self.tails`
+   comparison from the validator, that test panicked at `compile.rs:218`. Mutation 959-3 pins the
+   tail *value*. It turns two tests red, not one: also `track_delay`'s
+   `the_zero_delay_plan_digest_is_the_current_semantic_plan`. Restoring the old
+   `unwrap_or(Finite(0))` fallback survives every test, as an equivalent mutant should.
+4. **`builtin_stages_bindable`.** On the base it was `prepared_builtins.is_some()`, which was always
+   true on the with-builtins path, so the with-builtins result cannot move. Check 2 compares
+   `required_bindings` and the unit census directly, and both are identical. Dropping `PostMatrix`
+   from the new `matches!` turns 75 of 92 graph-compiler tests red. **What #958 still has to do**,
+   all in `crates/graph`:
+   - remove `lower`'s `bindable` elision (`program.rs:547`, `:578`) and `is_builtin_stage`
+     (`:212`);
+   - delete the two #925 tests;
+   - re-shape or delete #936 gate 2's `ObservedAlias` arm, which meters an unlisted `PostFader`;
+   - drop `builtins_bound` from the `program/tests.rs` call sites;
+   - update the #925 rows in `crates/graph/tests/MUTATIONS.md`;
+   - rewrite the three doc comments this change pointed at #958.
+5. **Mutation 959-4 is pre-existing, and it survives more than the evidence says.**
+   - On the head, dropping the loop at `compile.rs:442` leaves every existing test green: all
+     graph-compiler targets (`scale` included), and console-workload, host-core, capi, bench and
+     audit with all features (411 tests).
+   - On `792a1e87`, dropping the `if let Some` witness block leaves graph-compiler and
+     console-workload green (139 tests).
+   - Rendered bits are not at stake: pool class regroups lanes. What moves is bank grouping.
+   - **Test that catches it, for a follow-up** (I ran it as a scratch file: green on both trees,
+     red under the mutation on both):
+     - parse `console-sixty-four-track-mono.json` and set `tracks[7].builtins.left.polarity_invert
+       = true`;
+     - compile through `compile_with_builtins` at `Simd8` and at `Simd4`;
+     - assert `graph().prepared_bank_count()` is below the unmodified fixture's (21 against 24 at
+       `Simd8`; the mutant gives 24), and that every `prepared_builtin_banks()` entry containing
+       `ch07` has exactly one member.
+     - It is `a_single_odd_track_strands_both_pools_remainders` (`lib.rs:8331`) with the odd
+       track made odd by its input section rather than by its source mapping, and fits there as a
+       second arm.
+6. **Gates, all green**, each with `CARGO_INCREMENTAL=0`:
+   - fmt, and clippy `--workspace --all-targets --all-features -D warnings`;
+   - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps`;
+   - graph-compiler in dev, in release with `panic="unwind"`, and with CI's feature set: lib 80,
+     `graph_fixture` 2, `route_gain` 3, `scale` 2, `track_delay` 8, doc 6;
+   - graph: 109, 1, 1, 1;
+   - builtins-compiler with `test-support`: 58, 9, 3, 6, 1, 2;
+   - host-core `--all-features`: lib 86 and every other binary;
+   - capi: 32, 4;
+   - console-workload in dev: 8, 4, 23, 3;
+   - audit, bench and console-workload in release: 49, 64 (1 ignored), 8, 4, 23, 3;
+   - native-pcm-runner, parameter-metadata, session-validator, stem-hasher;
+   - `graph_fixture --check`, the determinism script, graph policy and its fixtures, realtime
+     policy and its mutation tests, workspace policy.
+
+   The diff touches nothing under `crates/capi`, `crates/protocol`, `hosts` or `sdk`. I did not
+   re-run the wasm32 check or the wasm gate scripts.
+
+### Findings, by severity
+
+1. **Low: coverage gap (pre-existing, not this change's).** Nothing pins the input-builtins
+   `DESIGNED` term (`compile.rs:442`). The follow-up test is specified in check 5.
+2. **Low: evidence precision.**
+   - 959-3 is red in two tests, not one.
+   - The evidence says 959-3 shows the tail source is pinned. That is right, but the missing-tail
+     path is guarded by the forged-seal `TailMissing` test, not by 959-3 (check 3).
+3. **Nit.** `crates/graph-compiler/src/lib.rs:135` is a 126-column doc line; `rustfmt.toml` sets
+   `max_width = 100`. fmt passes only because comments are not wrapped.
+4. **Out of scope, pre-existing: more evidence for #966.** The probe's three bind rejections are
+   #966's defect (`graph.scheduler.layout` after a successful compile). There is a simpler
+   reproducer on a checked-in fixture, an ordinary console edit:
+   - Take `console-sixty-four-track-intended.json` and remove `eq` from `ch00`'s (or `ch62`'s)
+     `simd1` rack.
+   - `prepare_host_session` (and `into_bound`) then refuses with `graph.scheduler.layout` at
+     `Simd8`, and the session binds at `Simd4`.
+   - Removing a track's `limiter` instead binds.
+   - This happens identically on `792a1e87`, on this head, and on `main` `14f2917b`.
+   - Mutation 959-4 shifts which random sessions hit it, so pool classes interact with it.
+
+No finding blocks this issue.
