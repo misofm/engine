@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::ids::{PreparedEffectIndex, diag, prepared_effect_node};
+use rack_compiler::CohortPoolClass;
 
 /// The `RackLocation` a graph rack id addresses.
 ///
@@ -69,13 +70,18 @@ pub(crate) fn banks_are_permitted(identity: &session::EffectIdentity) -> bool {
 /// whose program skips an earlier leader slot runs a later one at a lower rank, so the bucket
 /// aligns every lane's slot 0 and nothing after it. A slot binds only when its members also share
 /// a level; the misaligned ones render per node.
+///
+/// `classes` is the compile's one pool-class map, and this is the only place it is changed: a
+/// mono track that would strand in a partial mono group is moved to the stereo pool before the
+/// kept plan is formed (issue #971, [`stranded_mono_tracks`]), and the builtin-stage planner reads
+/// the map afterwards, so it pools that track exactly as the rack chains were pooled.
 pub(crate) fn bind_rack_banks_indexed(
     effects: &EffectPreparedSession,
     prepared: &PreparedEffectIndex<'_>,
     ids: &[Option<EffectNodeId>],
     levels: &[DependencyLevel],
     dispatch: Backend,
-    classes: &SessionPoolClasses,
+    classes: &mut SessionPoolClasses,
 ) -> Result<(Vec<graph::GraphPreparedEffectBank>, GraphRackBankReport), GraphDiagnostic> {
     let model = effects.session.normalized_model();
     // One chain per (track, bankable rack), in session slot order.
@@ -208,65 +214,50 @@ pub(crate) fn bind_rack_banks_indexed(
                 program: programs[chain].clone(),
             });
     }
-    let levels_in: Vec<_> = candidates_by_level
+    let mut levels_in: Vec<_> = candidates_by_level
         .into_iter()
         .map(|(level, candidates)| CohortLevel { level, candidates })
         .collect();
-    let plan = plan_bank_groups(&levels_in, width)
+    let mut plan = plan_bank_groups(&levels_in, width)
         .map_err(|_| diag("graph.effect.bank_members", "$.effects"))?;
+
+    // Issue #971: keep the mono pool a whole number of cohorts. The plan above is the trial.
+    // A mono track every one of whose effect groups is a *partial* mono group banks nowhere in
+    // it, so it is moved to the stereo pool, where it renders dual but can fill a bank; the
+    // classes are then re-read and the session is planned again. The move is kept only if the
+    // new plan binds more effect slots than the trial did, which is the whole point of it: a
+    // track in the stereo pool gives up its builtin stages' collapse, and it can join a stereo
+    // cohort in a way that costs a bank (a longer program taking the leader of stereo tracks
+    // whose programs are disjoint subsequences of it). Either way the map is updated **before**
+    // the builtin-stage planner reads it, so both planners still see one class per track.
+    let stranded = stranded_mono_tracks(&plan);
+    if !stranded.is_empty() {
+        let mut demoted = classes.clone();
+        for track in &stranded {
+            demoted.pool_as_stereo(track);
+        }
+        for level in &mut levels_in {
+            for candidate in &mut level.candidates {
+                candidate.class = demoted.class_of(&candidate.id.track_id);
+            }
+        }
+        let replan = plan_bank_groups(&levels_in, width)
+            .map_err(|_| diag("graph.effect.bank_members", "$.effects"))?;
+        if bindable_slot_count(&replan, &chains, &level_by_node)?
+            > bindable_slot_count(&plan, &chains, &level_by_node)?
+        {
+            *classes = demoted;
+            plan = replan;
+        }
+    }
 
     let mut banks = Vec::new();
     let mut bound_slots = Vec::new();
     for (group_index, group) in plan.groups.iter().enumerate() {
-        if !group.is_full() {
-            continue;
-        }
         for slot in 0..group.program.len() {
-            if group.slot_is_identity_everywhere(slot) {
+            let Some(members) = bindable_slot_members(group, slot, &chains, &level_by_node)? else {
                 continue;
-            }
-            // Every lane must run this slot: the effect contract has no per-lane bypass mask
-            // (#96 F7), so a bank whose lanes disagree cannot be expressed.
-            if !group.active_slots.iter().all(|lane| lane[slot]) {
-                continue;
-            }
-            // Lane `i` runs its own chain in order, so the leader slot maps to the lane's slot by
-            // the rank of `slot` among that lane's active positions.
-            let mut members = Vec::with_capacity(group.members.len());
-            for (lane, id) in group.members.iter().enumerate() {
-                let id = id.as_ref().expect("full group");
-                let rank = group.active_slots[lane][..slot]
-                    .iter()
-                    .filter(|active| **active)
-                    .count();
-                let Some(node) = chains[id].get(rank) else {
-                    return Err(diag("graph.internal.invariant", "$.effects"));
-                };
-                members.push(node.clone());
-            }
-            // Issue #966: every member must sit at one dependency level, or bind refuses the
-            // plan (`graph.scheduler.layout`). An identity slot is a planner fiction with no
-            // graph node, so a lane's member for leader slot `slot` sits at `group.level + rank`,
-            // not at `group.level + slot`: a lane that skips an earlier slot another lane runs
-            // reaches this one a level early. Such a bank would run as one unit at its first
-            // member's position, before the late lanes' producers had written their blocks. The
-            // slot is left unbound instead and its members render per node, exactly as a slot
-            // some lane skips does. Equal ranks and equal levels are the same condition (the path
-            // arithmetic above asserts `slot_level == level + offset` for every bankable chain),
-            // and this reads the levels because they are what bind checks.
-            let member_level = |node: &EffectNodeId| {
-                level_by_node
-                    .get(&GraphNodeId::Effect(node.clone()))
-                    .copied()
             };
-            let first_level = member_level(&members[0]);
-            if first_level.is_none()
-                || members
-                    .iter()
-                    .any(|member| member_level(member) != first_level)
-            {
-                continue;
-            }
             let entries: Vec<&EffectPreparedEntry> = members
                 .iter()
                 .map(|node| {
@@ -334,6 +325,109 @@ pub(crate) fn bind_rack_banks_indexed(
             chains,
         },
     ))
+}
+
+/// The mono-class tracks the trial `plan` strands (issue #971): every effect group each one sits in
+/// is a **partial** group of the mono pool, so none of its effect slots can bind.
+///
+/// The test is per track over all its groups, not per program. A track whose simd1 chain fills a
+/// mono cohort while its simd2 chain is a partial one is not stranded: moving it would break the
+/// full cohort, and its builtin stages' collapse with it, to gain a bank that may not exist. A
+/// track in no effect group at all (builtins only, or every chain on the per-node path) is not
+/// stranded either: builtin banks pad a partial cohort, so its remainder still banks and still
+/// collapses where it is. A group is class-homogeneous, so a member of a partial mono group is a
+/// mono-class track.
+fn stranded_mono_tracks(plan: &BankPlan<RackChainId>) -> Vec<String> {
+    let mut stranded: BTreeMap<&str, bool> = BTreeMap::new();
+    for group in &plan.groups {
+        let partial_mono =
+            group.class == CohortPoolClass::MonoSymmetricAtPrepare && !group.is_full();
+        for id in group.members.iter().flatten() {
+            let entry = stranded.entry(id.track_id.as_str()).or_insert(true);
+            *entry = *entry && partial_mono;
+        }
+    }
+    stranded
+        .into_iter()
+        .filter(|(_, stranded)| *stranded)
+        .map(|(track, _)| track.to_owned())
+        .collect()
+}
+
+/// How many slots of `plan` pass [`bindable_slot_members`]: the effect banks the plan can bind,
+/// short of the factory's own consent, which is the same for every plan of one session.
+fn bindable_slot_count(
+    plan: &BankPlan<RackChainId>,
+    chains: &BTreeMap<RackChainId, Vec<EffectNodeId>>,
+    level_by_node: &BTreeMap<GraphNodeId, u64>,
+) -> Result<usize, GraphDiagnostic> {
+    let mut count = 0;
+    for group in &plan.groups {
+        for slot in 0..group.program.len() {
+            if bindable_slot_members(group, slot, chains, level_by_node)?.is_some() {
+                count += 1;
+            }
+        }
+    }
+    Ok(count)
+}
+
+/// The effect node each lane of `group` runs at leader slot `slot`, when that slot can be one
+/// homogeneous bank; `None` when it cannot, and its members render per node.
+fn bindable_slot_members(
+    group: &BankGroup<RackChainId>,
+    slot: usize,
+    chains: &BTreeMap<RackChainId, Vec<EffectNodeId>>,
+    level_by_node: &BTreeMap<GraphNodeId, u64>,
+) -> Result<Option<Vec<EffectNodeId>>, GraphDiagnostic> {
+    // A bank binds only a full group (#96 F7): every launch effect factory refuses
+    // `requests.len() != lanes`.
+    if !group.is_full() || group.slot_is_identity_everywhere(slot) {
+        return Ok(None);
+    }
+    // Every lane must run this slot: the effect contract has no per-lane bypass mask
+    // (#96 F7), so a bank whose lanes disagree cannot be expressed.
+    if !group.active_slots.iter().all(|lane| lane[slot]) {
+        return Ok(None);
+    }
+    // Lane `i` runs its own chain in order, so the leader slot maps to the lane's slot by
+    // the rank of `slot` among that lane's active positions.
+    let mut members = Vec::with_capacity(group.members.len());
+    for (lane, id) in group.members.iter().enumerate() {
+        let id = id.as_ref().expect("full group");
+        let rank = group.active_slots[lane][..slot]
+            .iter()
+            .filter(|active| **active)
+            .count();
+        let Some(node) = chains[id].get(rank) else {
+            return Err(diag("graph.internal.invariant", "$.effects"));
+        };
+        members.push(node.clone());
+    }
+    // Issue #966: every member must sit at one dependency level, or bind refuses the
+    // plan (`graph.scheduler.layout`). An identity slot is a planner fiction with no
+    // graph node, so a lane's member for leader slot `slot` sits at `group.level + rank`,
+    // not at `group.level + slot`: a lane that skips an earlier slot another lane runs
+    // reaches this one a level early. Such a bank would run as one unit at its first
+    // member's position, before the late lanes' producers had written their blocks. The
+    // slot is left unbound instead and its members render per node, exactly as a slot
+    // some lane skips does. Equal ranks and equal levels are the same condition (the path
+    // arithmetic in `bind_rack_banks_indexed` asserts `slot_level == level + offset` for every
+    // bankable chain), and this reads the levels because they are what bind checks.
+    let member_level = |node: &EffectNodeId| {
+        level_by_node
+            .get(&GraphNodeId::Effect(node.clone()))
+            .copied()
+    };
+    let first_level = member_level(&members[0]);
+    if first_level.is_none()
+        || members
+            .iter()
+            .any(|member| member_level(member) != first_level)
+    {
+        return Ok(None);
+    }
+    Ok(Some(members))
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

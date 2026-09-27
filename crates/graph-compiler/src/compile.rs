@@ -430,6 +430,10 @@ impl GraphCompiler {
         // The contributors are the prepare-time terms of every upstream-of-seam stage this compile
         // prepared: `SOURCE` from the compiled session, and `DESIGNED` from each prepared native
         // effect and from each track's prepared input section.
+        //
+        // `bind_rack_banks_indexed` is the one place the map then changes (issue #971): a mono
+        // track that every effect group would strand is pooled as stereo, before the rack plan it
+        // keeps and before the builtin-stage planner below reads the map.
         let mut pool_classes = SessionPoolClasses::from_session(session);
         for entry in &effects.entries {
             let mut witness = ChannelSymmetryWitness::SYMMETRIC;
@@ -448,7 +452,7 @@ impl GraphCompiler {
             &effect_ids,
             &levels,
             dispatch,
-            &pool_classes,
+            &mut pool_classes,
         ) {
             Ok(value) => value,
             Err(diagnostic) => return Err(failure(effects, vec![diagnostic])),

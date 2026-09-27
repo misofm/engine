@@ -3409,7 +3409,7 @@ mod tests {
         assert_eq!(scalar_mixed.report().estimate.effect_bank_count, 0);
         let (_, effect_inputs) = rack_chain_fixture(8, 1, |_| 1);
         let mixed_session = effect_inputs.session.clone();
-        let mixed_classes = SessionPoolClasses::from_session(&mixed_session);
+        let mut mixed_classes = SessionPoolClasses::from_session(&mixed_session);
         let (effect_index, effect_ids) = indexed_effect_ids(&effect_inputs);
         let (effect_banks, _) = bind_rack_banks_indexed(
             &effect_inputs,
@@ -3417,7 +3417,7 @@ mod tests {
             &effect_ids,
             &scalar_mixed.graph().dependency_levels,
             host_dispatch(),
-            &mixed_classes,
+            &mut mixed_classes,
         )
         .expect("the fixture's effect banks bind");
         let effect_resource =
@@ -4837,7 +4837,7 @@ mod tests {
                 &ids,
                 &dependency_levels,
                 dispatch,
-                &SessionPoolClasses::default(),
+                &mut SessionPoolClasses::default(),
             )
             .expect("off-render factory bind");
             assert_eq!(banks.len(), 12 / lanes);
@@ -4883,7 +4883,7 @@ mod tests {
             &connected_ids,
             &dependency_levels,
             eight,
-            &SessionPoolClasses::default(),
+            &mut SessionPoolClasses::default(),
         )
         .expect("connected sidechain is scalar fallback, not failure");
         assert!(connected_banks.0.iter().all(|bank| {
@@ -4931,7 +4931,7 @@ mod tests {
             &same_wave_ids,
             &incompatible_levels,
             eight,
-            &SessionPoolClasses::default(),
+            &mut SessionPoolClasses::default(),
         )
         .expect("a level split is a scalar fallback, not a failure");
         assert!(
@@ -4988,7 +4988,7 @@ mod tests {
             &rejected_ids,
             &dependency_levels,
             eight,
-            &SessionPoolClasses::default(),
+            &mut SessionPoolClasses::default(),
         ) {
             Ok(_) => panic!("factory failure must reject transactionally"),
             Err(error) => error,
@@ -8304,31 +8304,29 @@ mod tests {
         assert!(pcm.iter().flatten().any(|sample| *sample != 0.0));
     }
 
-    /// Mono-collapse M1: what class pooling costs, and on which sessions -- the effect banks.
+    /// Mono-collapse M1, then issue #971: a single odd track no longer strands a pool's remainder.
     ///
-    /// # The finding, measured rather than argued
+    /// # What M1 measured here
     ///
     /// An effect bank binds only when its group is **full**: every launch effect factory refuses
     /// `requests.len() != lanes` (#96 F7), so a group of fewer than `lanes` members renders on the
     /// per-node scalar path. Pooling by class therefore has a remainder cost that pooling by rack
-    /// and level did not: a class whose pool is not a multiple of the lane width strands its tail,
-    /// and *both* classes now have a tail where one cohort had none.
+    /// and level did not: a class whose pool is not a multiple of the lane width strands its tail.
+    /// Under M1 alone, 63 mono tracks and one stereo one bound seven full eight-lane cohorts and
+    /// stranded seven tracks, and the lone stereo track stranded too: 21 effect banks against the
+    /// unsplit session's 24, one cohort in eight lost to a single odd track.
     ///
-    /// One odd track out of 64 is the worst realistic case and it is what this measures: 63 tracks
-    /// in one pool bind seven full banks and strand seven, and the lone track in the other pool
-    /// strands too -- eight tracks' worth of effect slots lost out of 64, one cohort in eight.
+    /// # What issue #971 changes
     ///
-    /// It is a **forfeited optimisation and not a wrong render**: the digest is asserted equal to
-    /// the unsplit session's, because the split changes which tracks bank and never what a lane
-    /// computes.
+    /// The mono remainder sits in nothing but partial mono groups in the trial plan, so it is
+    /// pooled as stereo, where it fills the odd track's cohort: the pools become 56 and 8 at eight
+    /// lanes (60 and 4 at four), nothing strands, and the bank count and the strip's chain shape
+    /// equal the unsplit session's.
     ///
-    /// This is the number a ruling on the class predicate has to be made against. The predicate
-    /// M1 was briefed with is `SOURCE && DESIGNED`, both prepare-time terms; narrowing it to
-    /// `SOURCE` alone would make this case cost nothing (a polarity flip would no longer split a
-    /// pool) at the price of pooling some tracks as mono that will decline at dispatch. Neither is
-    /// unsound; the choice is a measurement, and this is the measurement.
+    /// It regroups lanes and never changes what a lane computes, so the digest assertions stand:
+    /// both sessions render the bits the bank-free registry renders.
     #[test]
-    fn a_single_odd_track_strands_both_pools_remainders() {
+    fn a_single_odd_track_no_longer_strands_a_pool_remainder() {
         const BLOCKS: u64 = 12;
         let Some(width) = BankWidth::for_backend(host_dispatch()) else {
             return;
@@ -8352,31 +8350,435 @@ mod tests {
             3 * (64 / lanes),
             "every cohort of 64 is full"
         );
-        let full_cohorts_after = (64 - 1) / lanes;
         assert_eq!(
-            split_slots,
-            3 * full_cohorts_after,
-            "the 63-track pool binds {full_cohorts_after} full cohorts and strands its tail; the \
-             one-track pool strands outright"
+            split_slots, unsplit_slots,
+            "the mono remainder fills the odd track's cohort, so no cohort is lost"
+        );
+        let kept_mono = (63 / lanes) * lanes;
+        let pooled = pooled_tracks(&split);
+        assert_eq!(
+            pooled[0].len(),
+            kept_mono,
+            "the mono pool keeps a whole number of cohorts"
         );
         assert_eq!(
-            unsplit_slots - split_slots,
-            3,
-            "one whole cohort's worth of effect slots, lost to a single odd track"
+            pooled[1],
+            BTreeSet::from_iter(
+                (kept_mono + 1..64)
+                    .chain([7])
+                    .map(|index| format!("ch{index:02}"))
+            ),
+            "the stereo pool is the odd track and the mono remainder, the highest ids"
         );
 
-        // Class A: the tracks that stopped banking render the same bits per lane.
-        let (unsplit_pcm, ..) = render_console_builtins_blocks(unsplit, BLOCKS, Vec::new());
+        // Class A: the tracks that moved pool render the same bits per lane.
+        let (unsplit_pcm, _, unsplit_chains, unsplit_shape_slots, ..) =
+            render_console_builtins_blocks(unsplit, BLOCKS, Vec::new());
         let scalar =
             compile_console_model_with_builtins(&uniform, 2_076, &[], &scalar_console_registry());
         let (scalar_pcm, ..) = render_console_builtins_blocks(scalar, BLOCKS, Vec::new());
         assert_pcm_bits_equal(&unsplit_pcm, &scalar_pcm, "uniform mono strip");
-        let (split_pcm, ..) = render_console_builtins_blocks(split, BLOCKS, Vec::new());
+        let (split_pcm, _, split_chains, split_shape_slots, ..) =
+            render_console_builtins_blocks(split, BLOCKS, Vec::new());
+        assert_eq!(
+            [split_chains, split_shape_slots],
+            [unsplit_chains, unsplit_shape_slots],
+            "both planners pooled the moved tracks alike: one strip chain per cohort"
+        );
         let scalar_split =
             compile_console_model_with_builtins(&odd, 2_077, &[], &scalar_console_registry());
         let (scalar_split_pcm, ..) =
             render_console_builtins_blocks(scalar_split, BLOCKS, Vec::new());
         assert_pcm_bits_equal(&split_pcm, &scalar_split_pcm, "one-odd-track strip");
+    }
+
+    /// The dogfood first-listen session's layout (issue #971): the 18 of its 81 tracks, in
+    /// normalized track order, whose stems are bit-identical dual mono. Interleaved, as imported
+    /// stems' ids are.
+    const DOGFOOD_MONO_POSITIONS: [usize; 18] = [
+        0, 4, 10, 18, 19, 20, 22, 35, 36, 38, 40, 42, 43, 44, 53, 58, 60, 66,
+    ];
+
+    /// The 64-track mono fixture cloned to `count` tracks, `ch00` onwards, each carrying the
+    /// fixture's own strip (track `i` copies fixture track `i % 64`) and routed to the main output
+    /// the way the fixture's tracks are. Every track is mono-mapped, as in the fixture.
+    fn mono_fixture_with_tracks(count: usize) -> session::SessionModel {
+        let mut model =
+            parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_MONO_FIXTURE).expect("mono fixture");
+        let tracks = model.tracks.clone();
+        let routes = model.routes.clone();
+        model.tracks = (0..count)
+            .map(|index| {
+                let mut track = tracks[index % tracks.len()].clone();
+                track.id = StableId::parse(&format!("ch{index:02}")).expect("track id");
+                track
+            })
+            .collect();
+        model.routes = (0..count)
+            .map(|index| {
+                let mut route = routes[index % routes.len()].clone();
+                route.id = StableId::parse(&format!("ch{index:02}-main")).expect("route id");
+                let RouteSource::Track { track_id, .. } = &mut route.source else {
+                    panic!("the fixture routes tracks");
+                };
+                *track_id = StableId::parse(&format!("ch{index:02}")).expect("track id");
+                route
+            })
+            .collect();
+        model
+    }
+
+    /// The tracks of every effect group of `artifact`'s rack plan, by pool: `[mono, stereo]`.
+    fn pooled_tracks(artifact: &PreparedGraphBuiltinsArtifact) -> [BTreeSet<String>; 2] {
+        let mut pooled = [BTreeSet::new(), BTreeSet::new()];
+        for group in &artifact.report().rack_cohorts.plan.groups {
+            let pool =
+                usize::from(group.class != rack_compiler::CohortPoolClass::MonoSymmetricAtPrepare);
+            pooled[pool].extend(group.members.iter().flatten().map(|id| id.track_id.clone()));
+        }
+        pooled
+    }
+
+    /// What an armed render of a console artifact observed.
+    struct ArmedConsoleRender {
+        pcm: Vec<Vec<f32>>,
+        /// `bank_shape()`: `[chains, slots]`.
+        shape: [u64; 2],
+        /// `bank_collapse_counters()`: `[collapsed chain blocks, armed chains]`.
+        collapse: [u64; 2],
+        folds: u64,
+    }
+
+    /// Bind `artifact`, arm its mono collapse the way `host-core`'s prepare join does, and render.
+    ///
+    /// `symmetric` tracks are fed one impulse on both planes, which is what a mono source mapping
+    /// delivers (and what a bit-identical dual-mono stem declared stereo delivers); every other
+    /// track gets the fixture's asymmetric impulse. `armed` is the structural mono set the join
+    /// arms from: the tracks whose two lanes read one source channel.
+    fn render_armed_console_blocks(
+        artifact: PreparedGraphBuiltinsArtifact,
+        blocks: u64,
+        symmetric: &BTreeSet<String>,
+        armed: &BTreeSet<String>,
+    ) -> ArmedConsoleRender {
+        let envelope = artifact.envelope();
+        let frames = envelope.quantum.0 as usize;
+        let nodes = artifact
+            .external_binding_nodes()
+            .map(|node| {
+                let binding: Box<dyn GraphRuntimeProcessor> = match node {
+                    GraphNodeId::TrackStage {
+                        track_id,
+                        stage: TrackStage::Input,
+                    } if symmetric.contains(track_id.as_str()) => {
+                        let index = track_id
+                            .as_str()
+                            .strip_prefix("ch")
+                            .and_then(|value| value.parse::<u32>().ok())
+                            .expect("console fixture track id");
+                        let level = 0.03125 * (index % 7 + 1) as f32;
+                        Box::new(AsymmetricTrackImpulseBinding {
+                            left: level,
+                            right: level,
+                        })
+                    }
+                    _ => console_track_input_binding(node),
+                };
+                GraphNodeBinding::new(node.clone(), binding)
+            })
+            .collect();
+        let bound = artifact
+            .into_bound(GraphRuntimeBindings {
+                envelope,
+                nodes,
+                observers: Vec::new(),
+            })
+            .unwrap_or_else(|failure| panic!("production console bind: {}", failure.code));
+        let mut plan = bound.plan;
+        plan.arm_mono_collapse(&|track: &str| armed.contains(track));
+        let pcm = (0..blocks)
+            .map(|block| {
+                let mut pcm = vec![0.0_f32; frames * 2];
+                plan.render(
+                    RenderIo {
+                        input: None,
+                        output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames)
+                            .expect("output"),
+                    },
+                    RenderTime {
+                        absolute_sample: block * frames as u64,
+                    },
+                )
+                .expect("console render");
+                pcm
+            })
+            .collect();
+        ArmedConsoleRender {
+            pcm,
+            shape: plan.bank_shape(),
+            collapse: plan.bank_collapse_counters(),
+            folds: plan.bank_route_folds(),
+        }
+    }
+
+    /// Issue #971's gate: on the dogfood session's layout the mono pool keeps a whole number of
+    /// cohorts, and the session binds exactly what it would bind with no mono track at all.
+    ///
+    /// The session is the 64-track mono fixture cloned to 81 tracks with every track stereo but
+    /// the 18 [`DOGFOOD_MONO_POSITIONS`]: the dogfood first-listen mix with its bit-identical
+    /// dual-mono stems folded to one channel and the standing EQ + compressor + limiter strip on
+    /// every track. Before #971 the 18 mono tracks pooled apart, and both pools stranded a tail
+    /// (18 and 63 are not multiples of the width): 27 effect banks at eight lanes where the
+    /// all-stereo session binds 30, so folding the stems made the mix slower than leaving them
+    /// declared stereo. Now the two tracks past the last whole mono cohort pool as stereo and
+    /// complete the stereo pool's partial cohort; the one track left over strands exactly as it
+    /// does in the all-stereo session, whose 81 tracks are not a multiple of the width either.
+    ///
+    /// * The bank count **and** the chain shape equal the all-stereo session's. The shape is what
+    ///   sees a move applied to one planner only: the rack planner's banks would count the same,
+    ///   and the strip's chain merges would decline silently.
+    /// * The kept mono tracks are the first `16` in track order (at 8 or 4 lanes), and exactly
+    ///   their cohorts arm: `16 / lanes` chains.
+    /// * The render is the all-stereo session's, bit for bit (the same feed; pooling and the
+    ///   collapse move no bit), and the bank-free registry's.
+    /// * A builtins-only strip is left alone: builtin banks pad a partial cohort, so all 18 stay
+    ///   mono and every one of their `ceil(18 / lanes)` cohorts arms.
+    ///
+    /// The route fold is printed, not gated: pooling an interleaved session forfeits it with or
+    /// without #971 (ruling 07 is the owner's).
+    #[test]
+    fn the_mono_pool_keeps_whole_cohorts_on_the_dogfood_layout() {
+        const BLOCKS: u64 = 12;
+        let Some(width) = BankWidth::for_backend(host_dispatch()) else {
+            return;
+        };
+        let lanes = width.lanes() as usize;
+        let registry = launch_native_effect_registry().expect("launch registry");
+        let mono: BTreeSet<String> = DOGFOOD_MONO_POSITIONS
+            .iter()
+            .map(|index| format!("ch{index:02}"))
+            .collect();
+        let none = BTreeSet::new();
+        let mut stereo = mono_fixture_with_tracks(81);
+        for track in &mut stereo.tracks {
+            track.right_source_channel = 1;
+        }
+        let mut folded = stereo.clone();
+        for index in DOGFOOD_MONO_POSITIONS {
+            folded.tracks[index].right_source_channel = 0;
+        }
+
+        let stereo_artifact = compile_console_model_with_builtins(&stereo, 2_078, &[], &registry);
+        let folded_artifact = compile_console_model_with_builtins(&folded, 2_079, &[], &registry);
+        let stereo_banks = stereo_artifact.graph().prepared_bank_count();
+        assert_eq!(stereo_banks, 3 * (81 / lanes), "the all-stereo reference");
+        assert_eq!(
+            folded_artifact.graph().prepared_bank_count(),
+            stereo_banks,
+            "no effect bank is lost to the mono pool's remainder"
+        );
+        let kept = (18 / lanes) * lanes;
+        let pooled = pooled_tracks(&folded_artifact);
+        assert_eq!(
+            pooled[0],
+            DOGFOOD_MONO_POSITIONS[..kept]
+                .iter()
+                .map(|index| format!("ch{index:02}"))
+                .collect::<BTreeSet<_>>(),
+            "the mono pool keeps the first whole cohorts in track order"
+        );
+        assert_eq!(
+            pooled[1].len(),
+            81 - kept,
+            "everything else pools as stereo"
+        );
+
+        let reference = render_armed_console_blocks(stereo_artifact, BLOCKS, &mono, &none);
+        let folded_render = render_armed_console_blocks(folded_artifact, BLOCKS, &mono, &mono);
+        assert_eq!(
+            folded_render.shape, reference.shape,
+            "both planners moved the remainder alike, so every strip chain merges as it does \
+             with no mono track"
+        );
+        assert_eq!(
+            reference.collapse[1], 0,
+            "an all-stereo session arms nothing"
+        );
+        assert_eq!(
+            folded_render.collapse[1],
+            (kept / lanes) as u64,
+            "each kept mono cohort's strip chain arms"
+        );
+        assert!(folded_render.collapse[0] > 0, "and collapses");
+        assert_pcm_bits_equal(
+            &folded_render.pcm,
+            &reference.pcm,
+            "folded dogfood layout against the all-stereo session",
+        );
+        assert!(
+            reference.pcm.iter().flatten().any(|sample| *sample != 0.0),
+            "the dogfood layout rendered audio"
+        );
+        let scalar =
+            compile_console_model_with_builtins(&folded, 2_080, &[], &scalar_console_registry());
+        let scalar_render = render_armed_console_blocks(scalar, BLOCKS, &mono, &mono);
+        assert_pcm_bits_equal(
+            &folded_render.pcm,
+            &scalar_render.pcm,
+            "folded dogfood layout against the bank-free registry",
+        );
+
+        // A builtins-only strip: no effect group, so nothing moves.
+        let mut builtins_only = folded.clone();
+        for track in &mut builtins_only.tracks {
+            track.simd1.effects.clear();
+            track.dynamic.effects.clear();
+            track.simd2.effects.clear();
+        }
+        let builtins_artifact =
+            compile_console_model_with_builtins(&builtins_only, 2_081, &[], &registry);
+        let mono_builtin_banks = builtins_artifact
+            .prepared_builtin_banks()
+            .filter(|bank| {
+                bank.members.iter().all(|node| match node {
+                    GraphNodeId::TrackStage { track_id, .. } => mono.contains(track_id.as_str()),
+                    other => panic!("a builtin bank named {other:?}"),
+                })
+            })
+            .count();
+        assert_eq!(
+            mono_builtin_banks,
+            3 * 18_usize.div_ceil(lanes),
+            "all 18 tracks stay in the mono pool of every strip stage"
+        );
+        let builtins_render = render_armed_console_blocks(builtins_artifact, BLOCKS, &mono, &mono);
+        assert_eq!(
+            builtins_render.collapse[1],
+            18_usize.div_ceil(lanes) as u64,
+            "the padded remainder cohort still arms"
+        );
+        println!(
+            "#971 dogfood layout at {lanes} lanes: banks {stereo_banks}, shape {:?}, collapse {:?}, \
+             route folds {} (all stereo {}); builtins only: shape {:?}, collapse {:?}, folds {}",
+            folded_render.shape,
+            folded_render.collapse,
+            folded_render.folds,
+            reference.folds,
+            builtins_render.shape,
+            builtins_render.collapse,
+            builtins_render.folds,
+        );
+    }
+
+    /// Issue #971's over-demotion gate: a mono track that fills a cohort anywhere stays mono.
+    ///
+    /// `2 * lanes` tracks of the mono fixture: the even ones mono, the odd ones stereo, and the
+    /// even ones in the upper half without their `simd2` limiter. The mono tracks fill one `simd1`
+    /// cohort (EQ, compressor) whose strip chain collapses, while their `simd2` limiters form a
+    /// partial group of `lanes / 2`. Keyed by the whole `(simd1, dynamic, simd2)` program, the
+    /// mono tracks are two partial groups of `lanes / 2`, so the brief's first rule moved all of
+    /// them to the stereo pool: the collapse went from one armed chain to none, and no bank was
+    /// gained, because the limiter remainder still strands among the stereo tracks. #971's rule
+    /// moves a track only when **every** effect group it sits in is a partial mono group, so here
+    /// it moves none.
+    ///
+    /// This gate is the rule's. The bank-gain check that follows the rule would refuse the
+    /// brief's move here as well, since it binds no more banks;
+    /// `the_mono_remainder_stays_when_moving_it_binds_no_more_banks` is that check's gate.
+    #[test]
+    fn a_mono_track_that_fills_a_cohort_is_not_pooled_as_stereo() {
+        const BLOCKS: u64 = 12;
+        let Some(width) = BankWidth::for_backend(host_dispatch()) else {
+            return;
+        };
+        let lanes = width.lanes() as usize;
+        let registry = launch_native_effect_registry().expect("launch registry");
+        let mut model = mono_fixture_with_tracks(2 * lanes);
+        for (index, track) in model.tracks.iter_mut().enumerate() {
+            if !index.is_multiple_of(2) {
+                track.right_source_channel = 1;
+            } else if index >= lanes {
+                track.simd2.effects.clear();
+            }
+        }
+        let mono: BTreeSet<String> = (0..2 * lanes)
+            .step_by(2)
+            .map(|index| format!("ch{index:02}"))
+            .collect();
+        let artifact = compile_console_model_with_builtins(&model, 2_082, &[], &registry);
+        let pooled = pooled_tracks(&artifact);
+        assert_eq!(pooled[0], mono, "every mono track stays in the mono pool");
+        // simd1: one mono and one stereo cohort (EQ, compressor); simd2: the stereo limiters.
+        assert_eq!(artifact.graph().prepared_bank_count(), 5);
+        let render = render_armed_console_blocks(artifact, BLOCKS, &mono, &mono);
+        assert_eq!(
+            render.collapse[1], 1,
+            "the mono cohort's builtins -> EQ -> compressor chain arms"
+        );
+        assert!(render.collapse[0] > 0, "and collapses");
+        // Mono PIB + stereo PIB, then the fader and matrix per level (the tracks without a
+        // limiter reach them a level early): 8 builtin banks and 5 effect banks in 4 chains.
+        assert_eq!(render.shape, [4, 13], "the strip's chains");
+        let scalar =
+            compile_console_model_with_builtins(&model, 2_083, &[], &scalar_console_registry());
+        let scalar_render = render_armed_console_blocks(scalar, BLOCKS, &mono, &mono);
+        assert_pcm_bits_equal(&render.pcm, &scalar_render.pcm, "mixed strip");
+    }
+
+    /// Issue #971: moving the mono remainder is declined when the stereo pool cannot use it.
+    ///
+    /// `2 * lanes` stereo tracks carry one `simd1` effect each, the first `lanes` an EQ and the
+    /// rest a compressor, and `lanes / 2` mono tracks carry both. The mono tracks strand in the
+    /// trial plan, but in the stereo pool their longer program would lead one cohort over every
+    /// stereo track (a one-slot program is a subsequence of it), whose banks then mix EQ lanes with
+    /// compressor lanes: one bank bound where the trial bound two. The move is kept only when it
+    /// binds more effect slots than the trial, so here the mono tracks stay mono, the two stereo
+    /// banks bind, and the mono cohort's builtins still collapse.
+    #[test]
+    fn the_mono_remainder_stays_when_moving_it_binds_no_more_banks() {
+        const BLOCKS: u64 = 12;
+        let Some(width) = BankWidth::for_backend(host_dispatch()) else {
+            return;
+        };
+        let lanes = width.lanes() as usize;
+        let registry = launch_native_effect_registry().expect("launch registry");
+        let mono_count = lanes / 2;
+        let mut model = mono_fixture_with_tracks(2 * lanes + mono_count);
+        for (index, track) in model.tracks.iter_mut().enumerate() {
+            track.simd2.effects.clear();
+            if index < 2 * lanes {
+                track.right_source_channel = 1;
+                // EQ is slot 0 and the compressor slot 1 of the fixture's simd1 chain.
+                if index < lanes {
+                    track.simd1.effects.truncate(1);
+                } else {
+                    track.simd1.effects.remove(0);
+                }
+            }
+        }
+        let mono: BTreeSet<String> = (2 * lanes..2 * lanes + mono_count)
+            .map(|index| format!("ch{index:02}"))
+            .collect();
+        let artifact = compile_console_model_with_builtins(&model, 2_084, &[], &registry);
+        assert_eq!(
+            pooled_tracks(&artifact)[0],
+            mono,
+            "the mono tracks stay mono"
+        );
+        assert_eq!(
+            artifact.graph().prepared_bank_count(),
+            2,
+            "the stereo EQ cohort and the stereo compressor cohort"
+        );
+        let render = render_armed_console_blocks(artifact, BLOCKS, &mono, &mono);
+        assert!(
+            render.collapse[1] > 0,
+            "the mono cohort's builtin chain arms"
+        );
+        let scalar =
+            compile_console_model_with_builtins(&model, 2_085, &[], &scalar_console_registry());
+        let scalar_render = render_armed_console_blocks(scalar, BLOCKS, &mono, &mono);
+        assert_pcm_bits_equal(&render.pcm, &scalar_render.pcm, "disjoint stereo programs");
     }
 
     /// Mono-collapse M1: what class pooling costs, and on which sessions -- the route fold.
