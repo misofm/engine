@@ -1,0 +1,842 @@
+# Automation diagnosis raw timing output (2026-09-27)
+# Host: AMD EPYC 7313P (Zen 3), cpu 31 pinned, timing lock held per run; loadavg printed in each record.
+# Units: us per 64-track block. 'isolate' = row - builtins_only of the same round; 'vs settled' = isolate delta.
+# Modes (hex): bits 0-7 EQ (1 E1, 2 E2), bits 8-15 compressor (1 C2, 2 C1, 4 lean gather, 8 C2b), bit 24 P1.
+
+====================================================================================================
+== native-base-1.txt: Native base cost table (all subjects, Simd8 then Simd4; isolates vs builtins_only)
+====================================================================================================
+request 18:45:24 loadavg 10.14 9.47 8.14 4/1880 2552690
+hold start 18:45:24 loadavg 10.14 9.47 8.14 3/1882 2552694
+
+running 1 test
+test rows ... clock 3.701 GHz loadavg 10.14 9.47 8.14 4/1882 2552698
+width 8 rounds 6 blocks 800 load start [10.14 9.47 8.14 3/1882 2552776] end [10.06 9.47 8.16 21/1971 2555676]
+  builtins_only p50 24.89 us
+  w8 eq_gain         settled        row    34.75 us  isolate     9.86 us    2.23 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [34.52..34.98] refused 0
+  w8 eq_gain         one_point      row    43.26 us  isolate    18.34 us    4.14 cyc/ls  vs settled   +8.51 us ( +86.4 %)  rounds [43.07..54.08] refused 0
+  w8 eq_gain         one_segment    row    43.41 us  isolate    18.39 us    4.15 cyc/ls  vs settled   +8.66 us ( +87.9 %)  rounds [43.25..43.80] refused 0
+  w8 eq_gain         one_left_only  row    42.99 us  isolate    18.11 us    4.09 cyc/ls  vs settled   +8.25 us ( +83.7 %)  rounds [42.97..43.49] refused 0
+  w8 eq_gain         eight_of_64    row   101.92 us  isolate    77.04 us   17.40 cyc/ls  vs settled  +67.18 us (+681.7 %)  rounds [101.91..102.55] refused 0
+  w8 eq_gain         all_64         row   123.93 us  isolate    99.04 us   22.37 cyc/ls  vs settled  +89.18 us (+905.0 %)  rounds [123.66..125.89] refused 0
+  w8 eq_freq         settled        row    34.99 us  isolate    10.10 us    2.28 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [34.94..35.46] refused 0
+  w8 eq_freq         one_point      row    43.65 us  isolate    18.75 us    4.24 cyc/ls  vs settled   +8.66 us ( +85.7 %)  rounds [43.60..44.07] refused 0
+  w8 eq_freq         one_segment    row    43.72 us  isolate    18.83 us    4.25 cyc/ls  vs settled   +8.73 us ( +86.4 %)  rounds [43.39..44.25] refused 0
+  w8 eq_freq         one_left_only  row    43.39 us  isolate    18.39 us    4.15 cyc/ls  vs settled   +8.40 us ( +83.2 %)  rounds [43.23..43.61] refused 0
+  w8 eq_freq         eight_of_64    row   102.75 us  isolate    77.83 us   17.58 cyc/ls  vs settled  +67.76 us (+670.9 %)  rounds [102.68..103.36] refused 0
+  w8 eq_freq         all_64         row   124.49 us  isolate    99.60 us   22.50 cyc/ls  vs settled  +89.50 us (+886.1 %)  rounds [124.16..126.36] refused 0
+  w8 comp_threshold  settled        row    49.71 us  isolate    24.75 us    5.59 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [49.59..50.13] refused 0
+  w8 comp_threshold  one_point      row    54.67 us  isolate    29.67 us    6.70 cyc/ls  vs settled   +4.96 us ( +20.0 %)  rounds [54.28..54.89] refused 0
+  w8 comp_threshold  one_segment    row    55.63 us  isolate    30.56 us    6.90 cyc/ls  vs settled   +5.92 us ( +23.9 %)  rounds [55.08..55.74] refused 0
+  w8 comp_threshold  one_left_only  row    54.27 us  isolate    29.38 us    6.64 cyc/ls  vs settled   +4.56 us ( +18.4 %)  rounds [54.20..55.02] refused 0
+  w8 comp_threshold  eight_of_64    row    89.80 us  isolate    64.89 us   14.66 cyc/ls  vs settled  +40.09 us (+161.5 %)  rounds [89.66..90.38] refused 0
+  w8 comp_threshold  all_64         row   126.77 us  isolate   101.86 us   23.01 cyc/ls  vs settled  +77.06 us (+310.5 %)  rounds [126.69..127.16] refused 0
+  w8 comp_attack     settled        row    50.31 us  isolate    25.24 us    5.70 cyc/ls  vs settled   -0.00 us (  -0.0 %)  rounds [49.92..50.74] refused 0
+  w8 comp_attack     one_point      row    53.74 us  isolate    28.84 us    6.51 cyc/ls  vs settled   +3.44 us ( +13.5 %)  rounds [53.71..54.49] refused 0
+  w8 comp_attack     one_segment    row    54.71 us  isolate    29.81 us    6.73 cyc/ls  vs settled   +4.41 us ( +17.3 %)  rounds [54.64..55.27] refused 0
+  w8 comp_attack     one_left_only  row    53.95 us  isolate    29.03 us    6.56 cyc/ls  vs settled   +3.65 us ( +14.4 %)  rounds [53.85..54.42] refused 0
+  w8 comp_attack     eight_of_64    row    86.26 us  isolate    61.24 us   13.83 cyc/ls  vs settled  +35.95 us (+141.5 %)  rounds [85.96..86.61] refused 0
+  w8 comp_attack     all_64         row   109.51 us  isolate    84.57 us   19.10 cyc/ls  vs settled  +59.20 us (+233.0 %)  rounds [107.07..109.94] refused 0
+  w8 lim_ceiling     settled        row    71.06 us  isolate    46.16 us   10.43 cyc/ls  vs settled   -0.00 us (  -0.0 %)  rounds [70.21..72.42] refused 0
+  w8 lim_ceiling     one_point      row    71.35 us  isolate    46.44 us   10.49 cyc/ls  vs settled   +0.29 us (  +0.6 %)  rounds [71.17..71.76] refused 0
+  w8 lim_ceiling     one_segment    row    70.83 us  isolate    45.85 us   10.36 cyc/ls  vs settled   -0.23 us (  -0.5 %)  rounds [70.66..72.43] refused 0
+  w8 lim_ceiling     one_left_only  row    72.53 us  isolate    47.65 us   10.76 cyc/ls  vs settled   +1.47 us (  +3.2 %)  rounds [71.41..74.02] refused 0
+  w8 lim_ceiling     eight_of_64    row    72.16 us  isolate    47.26 us   10.67 cyc/ls  vs settled   +1.10 us (  +2.4 %)  rounds [71.82..73.97] refused 0
+  w8 lim_ceiling     all_64         row    76.16 us  isolate    51.27 us   11.58 cyc/ls  vs settled   +5.10 us ( +11.1 %)  rounds [75.28..78.05] refused 0
+  w8 lim_release     settled        row    71.26 us  isolate    46.36 us   10.47 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [69.77..72.81] refused 0
+  w8 lim_release     one_point      row    71.04 us  isolate    46.15 us   10.42 cyc/ls  vs settled   -0.21 us (  -0.5 %)  rounds [70.35..72.80] refused 0
+  w8 lim_release     one_segment    row    70.76 us  isolate    45.87 us   10.36 cyc/ls  vs settled   -0.49 us (  -1.1 %)  rounds [70.46..70.97] refused 0
+  w8 lim_release     one_left_only  row    71.96 us  isolate    47.07 us   10.63 cyc/ls  vs settled   +0.70 us (  +1.5 %)  rounds [71.70..74.79] refused 0
+  w8 lim_release     eight_of_64    row    72.61 us  isolate    47.62 us   10.76 cyc/ls  vs settled   +1.36 us (  +2.9 %)  rounds [72.21..72.74] refused 0
+  w8 lim_release     all_64         row    76.66 us  isolate    51.77 us   11.69 cyc/ls  vs settled   +5.40 us ( +11.6 %)  rounds [75.21..78.68] refused 0
+width 4 rounds 6 blocks 800 load start [10.06 9.47 8.16 14/1950 2555871] end [8.80 9.24 8.11 11/2039 2559192]
+  builtins_only p50 42.20 us
+  w4 eq_gain         settled        row    61.58 us  isolate    19.36 us    4.37 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [61.55..61.76] refused 0
+  w4 eq_gain         one_point      row    69.92 us  isolate    27.76 us    6.27 cyc/ls  vs settled   +8.34 us ( +43.0 %)  rounds [69.88..70.28] refused 0
+  w4 eq_gain         one_segment    row    70.22 us  isolate    27.98 us    6.32 cyc/ls  vs settled   +8.64 us ( +44.6 %)  rounds [70.12..70.28] refused 0
+  w4 eq_gain         one_left_only  row    70.25 us  isolate    27.98 us    6.32 cyc/ls  vs settled   +8.67 us ( +44.7 %)  rounds [70.03..70.36] refused 0
+  w4 eq_gain         eight_of_64    row   127.60 us  isolate    85.41 us   19.29 cyc/ls  vs settled  +66.02 us (+340.7 %)  rounds [127.37..127.89] refused 0
+  w4 eq_gain         all_64         row   210.06 us  isolate   167.83 us   37.91 cyc/ls  vs settled +148.48 us (+766.3 %)  rounds [209.73..212.36] refused 0
+  w4 eq_freq         settled        row    62.09 us  isolate    19.87 us    4.49 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [61.99..62.14] refused 0
+  w4 eq_freq         one_point      row    70.05 us  isolate    27.83 us    6.29 cyc/ls  vs settled   +7.96 us ( +40.0 %)  rounds [70.00..70.09] refused 0
+  w4 eq_freq         one_segment    row    70.04 us  isolate    27.82 us    6.28 cyc/ls  vs settled   +7.94 us ( +39.9 %)  rounds [69.99..70.21] refused 0
+  w4 eq_freq         one_left_only  row    69.90 us  isolate    27.69 us    6.25 cyc/ls  vs settled   +7.80 us ( +39.2 %)  rounds [69.86..70.15] refused 0
+  w4 eq_freq         eight_of_64    row   127.64 us  isolate    85.48 us   19.31 cyc/ls  vs settled  +65.54 us (+329.6 %)  rounds [127.61..128.14] refused 0
+  w4 eq_freq         all_64         row   210.28 us  isolate   168.10 us   37.97 cyc/ls  vs settled +148.18 us (+745.1 %)  rounds [209.84..212.27] refused 0
+  w4 comp_threshold  settled        row    89.50 us  isolate    47.34 us   10.69 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [89.45..89.94] refused 0
+  w4 comp_threshold  one_point      row    93.49 us  isolate    51.28 us   11.58 cyc/ls  vs settled   +3.99 us (  +8.4 %)  rounds [93.36..93.81] refused 0
+  w4 comp_threshold  one_segment    row    93.64 us  isolate    51.34 us   11.60 cyc/ls  vs settled   +4.14 us (  +8.8 %)  rounds [93.19..94.07] refused 0
+  w4 comp_threshold  one_left_only  row    92.54 us  isolate    50.30 us   11.36 cyc/ls  vs settled   +3.04 us (  +6.4 %)  rounds [92.17..93.07] refused 0
+  w4 comp_threshold  eight_of_64    row   120.19 us  isolate    77.95 us   17.61 cyc/ls  vs settled  +30.70 us ( +64.9 %)  rounds [119.73..120.79] refused 0
+  w4 comp_threshold  all_64         row   183.35 us  isolate   141.11 us   31.87 cyc/ls  vs settled  +93.86 us (+198.5 %)  rounds [183.17..183.96] refused 0
+  w4 comp_attack     settled        row    89.13 us  isolate    46.92 us   10.60 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [89.01..117.71] refused 0
+  w4 comp_attack     one_point      row    92.25 us  isolate    50.07 us   11.31 cyc/ls  vs settled   +3.12 us (  +6.6 %)  rounds [92.08..93.36] refused 0
+  w4 comp_attack     one_segment    row    92.67 us  isolate    50.43 us   11.39 cyc/ls  vs settled   +3.54 us (  +7.5 %)  rounds [92.45..93.23] refused 0
+  w4 comp_attack     one_left_only  row    92.21 us  isolate    50.07 us   11.31 cyc/ls  vs settled   +3.08 us (  +6.6 %)  rounds [92.12..121.89] refused 0
+  w4 comp_attack     eight_of_64    row   115.79 us  isolate    73.50 us   16.60 cyc/ls  vs settled  +26.66 us ( +56.8 %)  rounds [115.59..116.37] refused 0
+  w4 comp_attack     all_64         row   160.03 us  isolate   117.73 us   26.59 cyc/ls  vs settled  +70.90 us (+151.1 %)  rounds [159.67..160.50] refused 0
+  w4 lim_ceiling     settled        row   120.44 us  isolate    78.27 us   17.68 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [120.38..154.57] refused 0
+  w4 lim_ceiling     one_point      row   120.31 us  isolate    78.01 us   17.62 cyc/ls  vs settled   -0.13 us (  -0.2 %)  rounds [119.68..122.44] refused 0
+  w4 lim_ceiling     one_segment    row   120.21 us  isolate    77.94 us   17.60 cyc/ls  vs settled   -0.23 us (  -0.3 %)  rounds [120.03..121.46] refused 0
+  w4 lim_ceiling     one_left_only  row   121.99 us  isolate    79.76 us   18.02 cyc/ls  vs settled   +1.54 us (  +2.0 %)  rounds [121.74..123.00] refused 0
+  w4 lim_ceiling     eight_of_64    row   121.38 us  isolate    79.16 us   17.88 cyc/ls  vs settled   +0.93 us (  +1.2 %)  rounds [121.23..122.06] refused 0
+  w4 lim_ceiling     all_64         row   124.18 us  isolate    82.02 us   18.52 cyc/ls  vs settled   +3.74 us (  +4.8 %)  rounds [124.13..125.50] refused 0
+  w4 lim_release     settled        row   119.85 us  isolate    77.72 us   17.55 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [119.55..121.64] refused 0
+  w4 lim_release     one_point      row   120.21 us  isolate    77.97 us   17.61 cyc/ls  vs settled   +0.36 us (  +0.5 %)  rounds [119.49..121.30] refused 0
+  w4 lim_release     one_segment    row   120.00 us  isolate    77.79 us   17.57 cyc/ls  vs settled   +0.15 us (  +0.2 %)  rounds [119.89..120.70] refused 0
+  w4 lim_release     one_left_only  row   121.14 us  isolate    78.97 us   17.84 cyc/ls  vs settled   +1.29 us (  +1.7 %)  rounds [120.58..124.21] refused 0
+  w4 lim_release     eight_of_64    row   121.93 us  isolate    79.80 us   18.02 cyc/ls  vs settled   +2.07 us (  +2.7 %)  rounds [121.34..128.39] refused 0
+  w4 lim_release     all_64         row   125.55 us  isolate    83.39 us   18.83 cyc/ls  vs settled   +5.70 us (  +7.3 %)  rounds [125.44..126.63] refused 0
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 39.46s
+
+hold end 18:46:03 loadavg 8.80 9.24 8.11 12/2007 2559196
+
+====================================================================================================
+== v8-base-1.txt: V8 base cost table (shipped host_web.wasm, Node 22.23.2 --no-liftoff)
+====================================================================================================
+request 18:58:17 loadavg 8.81 8.52 7.79 8/2255 2644125
+hold start 18:58:17 loadavg 8.81 8.52 7.79 8/2257 2644129
+node v22.23.2 loadavg 8.81 8.52 7.79 10/2264 2644137
+end loadavg 10.44 8.90 7.95 7/1923 2645697
+module base builtins 49.98 us
+  base eq_gain         settled        row    71.86 us  isolate    21.91 us    4.95 cyc/ls@3.7  vs settled +0.00 us (0.0 %)  rounds [71.14..104.72] refused 0
+  base eq_gain         one_point      row    81.53 us  isolate    31.21 us    7.05 cyc/ls@3.7  vs settled +9.31 us (42.5 %)  rounds [80.98..82.60] refused 0
+  base eq_gain         one_segment    row    83.32 us  isolate    31.91 us    7.21 cyc/ls@3.7  vs settled +10.00 us (45.7 %)  rounds [80.95..114.66] refused 0
+  base eq_gain         one_left_only  row    81.69 us  isolate    31.83 us    7.19 cyc/ls@3.7  vs settled +9.92 us (45.3 %)  rounds [80.83..114.20] refused 0
+  base eq_gain         eight_of_64    row   136.41 us  isolate    86.60 us   19.56 cyc/ls@3.7  vs settled +64.69 us (295.3 %)  rounds [136.02..171.59] refused 0
+  base eq_gain         all_64         row   217.50 us  isolate   167.50 us   37.83 cyc/ls@3.7  vs settled +145.60 us (664.6 %)  rounds [217.02..218.37] refused 0
+  base eq_freq         settled        row    71.49 us  isolate    21.55 us    4.87 cyc/ls@3.7  vs settled +0.00 us (0.0 %)  rounds [71.29..72.03] refused 0
+  base eq_freq         one_point      row    81.96 us  isolate    32.03 us    7.23 cyc/ls@3.7  vs settled +10.48 us (48.6 %)  rounds [81.90..82.24] refused 0
+  base eq_freq         one_segment    row    81.25 us  isolate    31.28 us    7.07 cyc/ls@3.7  vs settled +9.73 us (45.2 %)  rounds [80.99..81.45] refused 0
+  base eq_freq         one_left_only  row    81.44 us  isolate    31.46 us    7.10 cyc/ls@3.7  vs settled +9.91 us (46.0 %)  rounds [81.19..81.65] refused 0
+  base eq_freq         eight_of_64    row   136.82 us  isolate    86.89 us   19.62 cyc/ls@3.7  vs settled +65.34 us (303.2 %)  rounds [136.61..136.92] refused 0
+  base eq_freq         all_64         row   217.46 us  isolate   167.47 us   37.82 cyc/ls@3.7  vs settled +145.92 us (677.1 %)  rounds [217.03..218.28] refused 0
+  base comp_threshold  settled        row   111.71 us  isolate    61.87 us   13.97 cyc/ls@3.7  vs settled +0.00 us (0.0 %)  rounds [111.34..113.52] refused 0
+  base comp_threshold  one_point      row   118.55 us  isolate    68.49 us   15.47 cyc/ls@3.7  vs settled +6.61 us (10.7 %)  rounds [117.93..119.49] refused 0
+  base comp_threshold  one_segment    row   118.19 us  isolate    68.09 us   15.38 cyc/ls@3.7  vs settled +6.21 us (10.0 %)  rounds [117.77..119.77] refused 0
+  base comp_threshold  one_left_only  row   117.31 us  isolate    67.27 us   15.19 cyc/ls@3.7  vs settled +5.40 us (8.7 %)  rounds [117.01..118.47] refused 0
+  base comp_threshold  eight_of_64    row   157.91 us  isolate   108.09 us   24.41 cyc/ls@3.7  vs settled +46.22 us (74.7 %)  rounds [157.74..158.30] refused 0
+  base comp_threshold  all_64         row   255.76 us  isolate   205.71 us   46.46 cyc/ls@3.7  vs settled +143.84 us (232.5 %)  rounds [255.46..256.43] refused 0
+  base comp_attack     settled        row   112.43 us  isolate    62.39 us   14.09 cyc/ls@3.7  vs settled +0.00 us (0.0 %)  rounds [111.62..113.17] refused 0
+  base comp_attack     one_point      row   117.79 us  isolate    67.95 us   15.35 cyc/ls@3.7  vs settled +5.56 us (8.9 %)  rounds [117.23..118.51] refused 0
+  base comp_attack     one_segment    row   118.34 us  isolate    68.31 us   15.43 cyc/ls@3.7  vs settled +5.93 us (9.5 %)  rounds [117.73..119.01] refused 0
+  base comp_attack     one_left_only  row   117.62 us  isolate    67.53 us   15.25 cyc/ls@3.7  vs settled +5.15 us (8.2 %)  rounds [117.02..118.39] refused 0
+  base comp_attack     eight_of_64    row   150.93 us  isolate   100.82 us   22.77 cyc/ls@3.7  vs settled +38.43 us (61.6 %)  rounds [150.32..151.78] refused 0
+  base comp_attack     all_64         row   218.69 us  isolate   168.87 us   38.14 cyc/ls@3.7  vs settled +106.48 us (170.7 %)  rounds [218.48..219.69] refused 0
+  base lim_ceiling     settled        row   159.89 us  isolate   110.08 us   24.86 cyc/ls@3.7  vs settled +0.00 us (0.0 %)  rounds [159.62..160.38] refused 0
+  base lim_ceiling     one_point      row   160.88 us  isolate   111.04 us   25.08 cyc/ls@3.7  vs settled +0.96 us (0.9 %)  rounds [160.50..161.15] refused 0
+  base lim_ceiling     one_segment    row   160.31 us  isolate   110.42 us   24.94 cyc/ls@3.7  vs settled +0.34 us (0.3 %)  rounds [160.16..160.97] refused 0
+  base lim_ceiling     one_left_only  row   162.08 us  isolate   112.32 us   25.37 cyc/ls@3.7  vs settled +2.24 us (2.0 %)  rounds [161.56..162.46] refused 0
+  base lim_ceiling     eight_of_64    row   162.67 us  isolate   112.85 us   25.48 cyc/ls@3.7  vs settled +2.77 us (2.5 %)  rounds [162.37..236.09] refused 0
+  base lim_ceiling     all_64         row   167.24 us  isolate   117.42 us   26.52 cyc/ls@3.7  vs settled +7.34 us (6.7 %)  rounds [166.77..252.23] refused 0
+  base lim_release     settled        row   160.22 us  isolate   110.33 us   24.91 cyc/ls@3.7  vs settled +0.00 us (0.0 %)  rounds [159.86..239.50] refused 0
+  base lim_release     one_point      row   160.76 us  isolate   110.78 us   25.02 cyc/ls@3.7  vs settled +0.45 us (0.4 %)  rounds [160.28..241.25] refused 0
+  base lim_release     one_segment    row   161.13 us  isolate   111.10 us   25.09 cyc/ls@3.7  vs settled +0.77 us (0.7 %)  rounds [160.53..242.25] refused 0
+  base lim_release     one_left_only  row   162.73 us  isolate   112.80 us   25.47 cyc/ls@3.7  vs settled +2.48 us (2.2 %)  rounds [161.97..244.79] refused 0
+  base lim_release     eight_of_64    row   162.47 us  isolate   112.71 us   25.45 cyc/ls@3.7  vs settled +2.39 us (2.2 %)  rounds [162.11..245.40] refused 0
+  base lim_release     all_64         row   167.72 us  isolate   117.96 us   26.64 cyc/ls@3.7  vs settled +7.63 us (6.9 %)  rounds [167.27..253.98] refused 0
+hold end 18:58:53 loadavg 10.44 8.90 7.95 6/1916 2645699
+
+====================================================================================================
+== native-eq-e1.txt: Native EQ A/B: mode 0 base, 1 E1
+====================================================================================================
+request 18:51:55 loadavg 5.40 6.59 7.22 5/1886 2579713
+hold start 18:51:55 loadavg 5.40 6.59 7.22 5/1888 2579717
+
+running 1 test
+test rows ... clock 3.701 GHz loadavg 5.40 6.59 7.22 4/1890 2579746
+width 8 rounds 6 blocks 800 load start [5.40 6.59 7.22 4/1890 2579746] end [5.82 6.64 7.23 15/1952 2580750]
+  builtins_only p50 24.46 us
+  w8 m000000 eq_gain         settled        row    35.12 us  isolate    10.66 us    2.41 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [35.02..35.89] refused 0
+  w8 m000001 eq_gain         settled        row    35.11 us  isolate    10.64 us    2.40 cyc/ls  vs settled   -0.00 us (  -0.0 %)  rounds [35.04..35.43] refused 0
+  w8 m000000 eq_gain         one_point      row    43.58 us  isolate    19.11 us    4.32 cyc/ls  vs settled   +8.46 us ( +79.4 %)  rounds [43.54..43.63] refused 0
+  w8 m000001 eq_gain         one_point      row    36.34 us  isolate    11.86 us    2.68 cyc/ls  vs settled   +1.23 us ( +11.5 %)  rounds [36.27..36.48] refused 0
+  w8 m000000 eq_gain         one_segment    row    43.70 us  isolate    19.24 us    4.35 cyc/ls  vs settled   +8.58 us ( +80.5 %)  rounds [43.63..47.28] refused 0
+  w8 m000001 eq_gain         one_segment    row    36.10 us  isolate    11.64 us    2.63 cyc/ls  vs settled   +0.99 us (  +9.3 %)  rounds [36.02..36.42] refused 0
+  w8 m000000 eq_gain         one_left_only  row    43.97 us  isolate    19.50 us    4.40 cyc/ls  vs settled   +8.85 us ( +83.0 %)  rounds [43.92..44.18] refused 0
+  w8 m000001 eq_gain         one_left_only  row    36.02 us  isolate    11.55 us    2.61 cyc/ls  vs settled   +0.91 us (  +8.6 %)  rounds [36.00..36.19] refused 0
+  w8 m000000 eq_gain         eight_of_64    row   101.81 us  isolate    77.36 us   17.47 cyc/ls  vs settled  +66.69 us (+625.6 %)  rounds [101.79..102.11] refused 0
+  w8 m000001 eq_gain         eight_of_64    row    43.02 us  isolate    18.57 us    4.19 cyc/ls  vs settled   +7.90 us ( +74.2 %)  rounds [42.99..43.04] refused 0
+  w8 m000000 eq_gain         all_64         row   123.44 us  isolate    99.00 us   22.36 cyc/ls  vs settled  +88.32 us (+828.5 %)  rounds [123.19..124.32] refused 0
+  w8 m000001 eq_gain         all_64         row    64.28 us  isolate    39.81 us    8.99 cyc/ls  vs settled  +29.16 us (+273.8 %)  rounds [64.18..65.75] refused 0
+  w8 m000000 eq_freq         settled        row    35.23 us  isolate    10.78 us    2.44 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [35.21..35.53] refused 0
+  w8 m000001 eq_freq         settled        row    35.40 us  isolate    10.94 us    2.47 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [35.31..35.72] refused 0
+  w8 m000000 eq_freq         one_point      row    42.99 us  isolate    18.54 us    4.19 cyc/ls  vs settled   +7.76 us ( +72.1 %)  rounds [42.97..43.20] refused 0
+  w8 m000001 eq_freq         one_point      row    36.30 us  isolate    11.85 us    2.68 cyc/ls  vs settled   +0.90 us (  +8.2 %)  rounds [36.26..44.77] refused 0
+  w8 m000000 eq_freq         one_segment    row    43.38 us  isolate    18.90 us    4.27 cyc/ls  vs settled   +8.16 us ( +75.8 %)  rounds [43.27..43.60] refused 0
+  w8 m000001 eq_freq         one_segment    row    36.04 us  isolate    11.58 us    2.62 cyc/ls  vs settled   +0.65 us (  +5.9 %)  rounds [36.02..36.42] refused 0
+  w8 m000000 eq_freq         one_left_only  row    43.44 us  isolate    18.95 us    4.28 cyc/ls  vs settled   +8.21 us ( +76.3 %)  rounds [43.30..43.70] refused 0
+  w8 m000001 eq_freq         one_left_only  row    36.20 us  isolate    11.76 us    2.66 cyc/ls  vs settled   +0.80 us (  +7.3 %)  rounds [36.15..36.65] refused 0
+  w8 m000000 eq_freq         eight_of_64    row   101.85 us  isolate    77.39 us   17.48 cyc/ls  vs settled  +66.63 us (+618.9 %)  rounds [101.83..102.08] refused 0
+  w8 m000001 eq_freq         eight_of_64    row    42.99 us  isolate    18.55 us    4.19 cyc/ls  vs settled   +7.60 us ( +69.5 %)  rounds [42.96..43.33] refused 0
+  w8 m000000 eq_freq         all_64         row   123.07 us  isolate    98.59 us   22.27 cyc/ls  vs settled  +87.84 us (+816.0 %)  rounds [122.84..123.81] refused 0
+  w8 m000001 eq_freq         all_64         row    65.17 us  isolate    40.70 us    9.19 cyc/ls  vs settled  +29.78 us (+272.3 %)  rounds [65.04..65.56] refused 0
+width 4 rounds 6 blocks 800 load start [5.82 6.64 7.23 13/1952 2580822] end [6.58 6.78 7.27 5/1920 2581636]
+  builtins_only p50 42.62 us
+  w4 m000000 eq_gain         settled        row    61.09 us  isolate    18.43 us    4.16 cyc/ls  vs settled   -0.00 us (  -0.0 %)  rounds [60.89..61.18] refused 0
+  w4 m000001 eq_gain         settled        row    60.86 us  isolate    18.27 us    4.13 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [60.70..60.94] refused 0
+  w4 m000000 eq_gain         one_point      row    69.38 us  isolate    26.76 us    6.04 cyc/ls  vs settled   +8.29 us ( +44.9 %)  rounds [69.27..69.46] refused 0
+  w4 m000001 eq_gain         one_point      row    61.97 us  isolate    19.36 us    4.37 cyc/ls  vs settled   +1.11 us (  +6.1 %)  rounds [61.81..62.02] refused 0
+  w4 m000000 eq_gain         one_segment    row    69.44 us  isolate    26.80 us    6.05 cyc/ls  vs settled   +8.35 us ( +45.2 %)  rounds [69.28..69.56] refused 0
+  w4 m000001 eq_gain         one_segment    row    62.02 us  isolate    19.41 us    4.38 cyc/ls  vs settled   +1.16 us (  +6.4 %)  rounds [61.88..62.14] refused 0
+  w4 m000000 eq_gain         one_left_only  row    68.85 us  isolate    26.23 us    5.93 cyc/ls  vs settled   +7.76 us ( +42.0 %)  rounds [68.70..68.94] refused 0
+  w4 m000001 eq_gain         one_left_only  row    61.48 us  isolate    18.80 us    4.25 cyc/ls  vs settled   +0.62 us (  +3.4 %)  rounds [61.39..61.54] refused 0
+  w4 m000000 eq_gain         eight_of_64    row   126.38 us  isolate    83.80 us   18.93 cyc/ls  vs settled  +65.28 us (+353.5 %)  rounds [126.26..127.12] refused 0
+  w4 m000001 eq_gain         eight_of_64    row    69.24 us  isolate    26.63 us    6.01 cyc/ls  vs settled   +8.38 us ( +45.9 %)  rounds [69.14..71.31] refused 0
+  w4 m000000 eq_gain         all_64         row   208.39 us  isolate   165.77 us   37.45 cyc/ls  vs settled +147.30 us (+797.5 %)  rounds [207.86..208.50] refused 0
+  w4 m000001 eq_gain         all_64         row    93.16 us  isolate    50.54 us   11.42 cyc/ls  vs settled  +32.30 us (+177.1 %)  rounds [93.11..93.74] refused 0
+  w4 m000000 eq_freq         settled        row    60.61 us  isolate    17.97 us    4.06 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [60.45..60.73] refused 0
+  w4 m000001 eq_freq         settled        row    60.85 us  isolate    18.21 us    4.11 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [60.73..61.23] refused 0
+  w4 m000000 eq_freq         one_point      row    69.15 us  isolate    26.53 us    5.99 cyc/ls  vs settled   +8.54 us ( +47.5 %)  rounds [69.07..69.26] refused 0
+  w4 m000001 eq_freq         one_point      row    61.57 us  isolate    18.97 us    4.28 cyc/ls  vs settled   +0.72 us (  +3.9 %)  rounds [61.48..61.65] refused 0
+  w4 m000000 eq_freq         one_segment    row    69.29 us  isolate    26.70 us    6.03 cyc/ls  vs settled   +8.68 us ( +48.2 %)  rounds [69.21..69.39] refused 0
+  w4 m000001 eq_freq         one_segment    row    62.10 us  isolate    19.49 us    4.40 cyc/ls  vs settled   +1.25 us (  +6.8 %)  rounds [62.00..62.34] refused 0
+  w4 m000000 eq_freq         one_left_only  row    68.87 us  isolate    26.24 us    5.93 cyc/ls  vs settled   +8.26 us ( +45.9 %)  rounds [68.74..68.97] refused 0
+  w4 m000001 eq_freq         one_left_only  row    61.94 us  isolate    19.35 us    4.37 cyc/ls  vs settled   +1.09 us (  +6.0 %)  rounds [61.83..62.14] refused 0
+  w4 m000000 eq_freq         eight_of_64    row   126.51 us  isolate    83.89 us   18.95 cyc/ls  vs settled  +65.90 us (+366.3 %)  rounds [126.38..126.64] refused 0
+  w4 m000001 eq_freq         eight_of_64    row    69.09 us  isolate    26.48 us    5.98 cyc/ls  vs settled   +8.23 us ( +45.2 %)  rounds [69.02..69.18] refused 0
+  w4 m000000 eq_freq         all_64         row   207.78 us  isolate   165.11 us   37.30 cyc/ls  vs settled +147.16 us (+818.0 %)  rounds [207.54..208.02] refused 0
+  w4 m000001 eq_freq         all_64         row    93.42 us  isolate    50.76 us   11.47 cyc/ls  vs settled  +32.57 us (+178.7 %)  rounds [93.38..93.84] refused 0
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 25.21s
+
+hold end 18:52:20 loadavg 6.58 6.78 7.27 5/1916 2581638
+
+====================================================================================================
+== native-eq-e12.txt: Native EQ A/B: modes 0 base, 1 E1, 2 E2, 3 E1+E2
+====================================================================================================
+request 18:54:28 loadavg 4.41 6.12 6.98 4/1884 2596174
+hold start 18:54:28 loadavg 4.41 6.12 6.98 4/1886 2596178
+
+running 1 test
+test rows ... clock 3.699 GHz loadavg 4.41 6.12 6.98 6/1890 2596184
+width 8 rounds 6 blocks 800 load start [4.45 6.10 6.97 4/1906 2596278] end [4.34 6.05 6.95 4/1907 2596951]
+  builtins_only p50 24.85 us
+  w8 m000000 eq_gain         settled        row    34.41 us  isolate     9.59 us    2.16 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [34.38..34.86] refused 0
+  w8 m000001 eq_gain         settled        row    34.52 us  isolate     9.69 us    2.19 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [34.48..34.98] refused 0
+  w8 m000002 eq_gain         settled        row    35.27 us  isolate    10.42 us    2.35 cyc/ls  vs settled   -0.00 us (  -0.0 %)  rounds [35.22..35.63] refused 0
+  w8 m000003 eq_gain         settled        row    34.57 us  isolate     9.73 us    2.20 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [34.53..34.93] refused 0
+  w8 m000000 eq_gain         one_point      row    43.43 us  isolate    18.59 us    4.20 cyc/ls  vs settled   +9.02 us ( +94.3 %)  rounds [43.40..43.76] refused 0
+  w8 m000001 eq_gain         one_point      row    36.32 us  isolate    11.41 us    2.58 cyc/ls  vs settled   +1.80 us ( +18.6 %)  rounds [36.10..36.51] refused 0
+  w8 m000002 eq_gain         one_point      row    42.98 us  isolate    18.11 us    4.09 cyc/ls  vs settled   +7.71 us ( +73.9 %)  rounds [42.93..43.39] refused 0
+  w8 m000003 eq_gain         one_point      row    36.20 us  isolate    11.35 us    2.56 cyc/ls  vs settled   +1.63 us ( +16.8 %)  rounds [36.17..36.51] refused 0
+  w8 m000000 eq_gain         one_segment    row    43.39 us  isolate    18.54 us    4.19 cyc/ls  vs settled   +8.98 us ( +93.9 %)  rounds [43.37..43.75] refused 0
+  w8 m000001 eq_gain         one_segment    row    35.76 us  isolate    10.89 us    2.46 cyc/ls  vs settled   +1.24 us ( +12.8 %)  rounds [35.72..36.15] refused 0
+  w8 m000002 eq_gain         one_segment    row    43.32 us  isolate    18.48 us    4.17 cyc/ls  vs settled   +8.05 us ( +77.2 %)  rounds [43.29..43.65] refused 0
+  w8 m000003 eq_gain         one_segment    row    36.50 us  isolate    11.65 us    2.63 cyc/ls  vs settled   +1.93 us ( +19.8 %)  rounds [36.38..36.92] refused 0
+  w8 m000000 eq_gain         one_left_only  row    42.83 us  isolate    18.00 us    4.06 cyc/ls  vs settled   +8.42 us ( +88.0 %)  rounds [42.79..51.57] refused 0
+  w8 m000001 eq_gain         one_left_only  row    35.72 us  isolate    10.88 us    2.46 cyc/ls  vs settled   +1.20 us ( +12.4 %)  rounds [35.69..36.07] refused 0
+  w8 m000002 eq_gain         one_left_only  row    43.51 us  isolate    18.68 us    4.22 cyc/ls  vs settled   +8.23 us ( +79.0 %)  rounds [43.47..43.87] refused 0
+  w8 m000003 eq_gain         one_left_only  row    35.98 us  isolate    11.12 us    2.51 cyc/ls  vs settled   +1.41 us ( +14.5 %)  rounds [35.95..36.11] refused 0
+  w8 m000000 eq_gain         eight_of_64    row   102.08 us  isolate    77.25 us   17.44 cyc/ls  vs settled  +67.67 us (+707.7 %)  rounds [102.00..102.38] refused 0
+  w8 m000001 eq_gain         eight_of_64    row    43.38 us  isolate    18.55 us    4.19 cyc/ls  vs settled   +8.86 us ( +91.5 %)  rounds [43.23..43.70] refused 0
+  w8 m000002 eq_gain         eight_of_64    row   101.53 us  isolate    76.72 us   17.32 cyc/ls  vs settled  +66.26 us (+635.5 %)  rounds [101.47..101.99] refused 0
+  w8 m000003 eq_gain         eight_of_64    row    42.11 us  isolate    17.25 us    3.89 cyc/ls  vs settled   +7.53 us ( +77.5 %)  rounds [42.07..42.49] refused 0
+  w8 m000000 eq_gain         all_64         row   123.06 us  isolate    98.12 us   22.15 cyc/ls  vs settled  +88.65 us (+927.0 %)  rounds [122.78..123.25] refused 0
+  w8 m000001 eq_gain         all_64         row    64.27 us  isolate    39.45 us    8.91 cyc/ls  vs settled  +29.75 us (+307.5 %)  rounds [64.14..64.86] refused 0
+  w8 m000002 eq_gain         all_64         row   111.88 us  isolate    87.02 us   19.64 cyc/ls  vs settled  +76.60 us (+734.7 %)  rounds [111.79..113.00] refused 0
+  w8 m000003 eq_gain         all_64         row    52.61 us  isolate    27.74 us    6.26 cyc/ls  vs settled  +18.04 us (+185.5 %)  rounds [52.57..52.89] refused 0
+width 4 rounds 6 blocks 800 load start [4.31 6.01 6.93 5/1899 2596951] end [5.75 6.26 7.00 7/1916 2598641]
+  builtins_only p50 42.31 us
+  w4 m000000 eq_gain         settled        row    61.19 us  isolate    18.88 us    4.26 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [61.15..61.28] refused 0
+  w4 m000001 eq_gain         settled        row    60.67 us  isolate    18.36 us    4.14 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [60.44..62.39] refused 0
+  w4 m000002 eq_gain         settled        row    61.04 us  isolate    18.73 us    4.23 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [60.97..61.12] refused 0
+  w4 m000003 eq_gain         settled        row    61.08 us  isolate    18.79 us    4.24 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [61.05..61.32] refused 0
+  w4 m000000 eq_gain         one_point      row    69.29 us  isolate    26.99 us    6.09 cyc/ls  vs settled   +8.10 us ( +42.9 %)  rounds [69.25..69.40] refused 0
+  w4 m000001 eq_gain         one_point      row    62.18 us  isolate    19.85 us    4.48 cyc/ls  vs settled   +1.51 us (  +8.2 %)  rounds [62.05..63.93] refused 0
+  w4 m000002 eq_gain         one_point      row    69.20 us  isolate    26.90 us    6.07 cyc/ls  vs settled   +8.16 us ( +43.5 %)  rounds [69.16..76.55] refused 0
+  w4 m000003 eq_gain         one_point      row    61.60 us  isolate    19.32 us    4.36 cyc/ls  vs settled   +0.52 us (  +2.8 %)  rounds [61.52..62.71] refused 0
+  w4 m000000 eq_gain         one_segment    row    68.82 us  isolate    26.54 us    5.99 cyc/ls  vs settled   +7.62 us ( +40.4 %)  rounds [68.77..69.44] refused 0
+  w4 m000001 eq_gain         one_segment    row    61.75 us  isolate    19.46 us    4.39 cyc/ls  vs settled   +1.08 us (  +5.9 %)  rounds [61.70..62.03] refused 0
+  w4 m000002 eq_gain         one_segment    row    68.77 us  isolate    26.52 us    5.99 cyc/ls  vs settled   +7.72 us ( +41.2 %)  rounds [68.73..69.14] refused 0
+  w4 m000003 eq_gain         one_segment    row    61.52 us  isolate    19.21 us    4.34 cyc/ls  vs settled   +0.44 us (  +2.3 %)  rounds [61.45..61.85] refused 0
+  w4 m000000 eq_gain         one_left_only  row    68.96 us  isolate    26.62 us    6.01 cyc/ls  vs settled   +7.76 us ( +41.1 %)  rounds [68.77..70.63] refused 0
+  w4 m000001 eq_gain         one_left_only  row    61.46 us  isolate    19.17 us    4.33 cyc/ls  vs settled   +0.79 us (  +4.3 %)  rounds [61.40..61.51] refused 0
+  w4 m000002 eq_gain         one_left_only  row    68.77 us  isolate    26.46 us    5.97 cyc/ls  vs settled   +7.72 us ( +41.2 %)  rounds [68.67..69.07] refused 0
+  w4 m000003 eq_gain         one_left_only  row    61.25 us  isolate    18.97 us    4.28 cyc/ls  vs settled   +0.17 us (  +0.9 %)  rounds [61.20..61.86] refused 0
+  w4 m000000 eq_gain         eight_of_64    row   126.18 us  isolate    83.86 us   18.93 cyc/ls  vs settled  +64.99 us (+344.2 %)  rounds [126.07..128.17] refused 0
+  w4 m000001 eq_gain         eight_of_64    row    69.34 us  isolate    27.08 us    6.11 cyc/ls  vs settled   +8.67 us ( +47.2 %)  rounds [69.29..71.49] refused 0
+  w4 m000002 eq_gain         eight_of_64    row   125.46 us  isolate    83.15 us   18.77 cyc/ls  vs settled  +64.42 us (+343.9 %)  rounds [125.40..125.50] refused 0
+  w4 m000003 eq_gain         eight_of_64    row    67.38 us  isolate    25.10 us    5.67 cyc/ls  vs settled   +6.30 us ( +33.6 %)  rounds [67.33..67.45] refused 0
+  w4 m000000 eq_gain         all_64         row   209.28 us  isolate   166.94 us   37.68 cyc/ls  vs settled +148.09 us (+784.3 %)  rounds [208.86..210.10] refused 0
+  w4 m000001 eq_gain         all_64         row    94.35 us  isolate    51.89 us   11.71 cyc/ls  vs settled  +33.68 us (+183.4 %)  rounds [93.61..95.51] refused 0
+  w4 m000002 eq_gain         all_64         row   196.49 us  isolate   154.11 us   34.79 cyc/ls  vs settled +135.45 us (+723.1 %)  rounds [196.33..197.12] refused 0
+  w4 m000003 eq_gain         all_64         row    81.31 us  isolate    38.93 us    8.79 cyc/ls  vs settled  +20.23 us (+107.8 %)  rounds [80.89..82.03] refused 0
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 24.87s
+
+hold end 18:54:53 loadavg 5.75 6.26 7.00 6/1914 2598643
+
+====================================================================================================
+== v8-eq12-1.txt: V8 EQ A/B: base against E1+E2 (clean builds)
+====================================================================================================
+request 18:58:59 loadavg 9.60 8.77 7.91 6/1901 2645784
+hold start 18:58:59 loadavg 9.60 8.77 7.91 6/1903 2645788
+node v22.23.2 loadavg 9.60 8.77 7.91 7/1910 2645796
+end loadavg 9.62 8.82 7.94 8/1919 2646597
+module base builtins 50.06 us
+  base eq_gain         settled        row    71.92 us  isolate    21.94 us    4.95 cyc/ls@3.7  vs settled +0.00 us (0.0 %)  rounds [71.72..73.42] refused 0
+  base eq_gain         one_point      row    82.84 us  isolate    32.81 us    7.41 cyc/ls@3.7  vs settled +10.87 us (49.5 %)  rounds [82.61..113.85] refused 0
+  base eq_gain         one_segment    row    81.66 us  isolate    31.63 us    7.14 cyc/ls@3.7  vs settled +9.69 us (44.2 %)  rounds [81.13..82.49] refused 0
+  base eq_gain         one_left_only  row    81.03 us  isolate    30.97 us    6.99 cyc/ls@3.7  vs settled +9.03 us (41.1 %)  rounds [80.75..81.55] refused 0
+  base eq_gain         eight_of_64    row   137.90 us  isolate    87.63 us   19.79 cyc/ls@3.7  vs settled +65.69 us (299.4 %)  rounds [137.35..138.22] refused 0
+  base eq_gain         all_64         row   217.30 us  isolate   167.20 us   37.76 cyc/ls@3.7  vs settled +145.26 us (662.0 %)  rounds [217.04..218.77] refused 0
+module eq12 builtins 49.91 us
+  eq12 eq_gain         settled        row    71.98 us  isolate    21.72 us    4.90 cyc/ls@3.7  vs settled +0.00 us (0.0 %)  rounds [71.37..104.09] refused 0
+  eq12 eq_gain         one_point      row    74.64 us  isolate    24.22 us    5.47 cyc/ls@3.7  vs settled +2.50 us (11.5 %)  rounds [74.05..107.91] refused 0
+  eq12 eq_gain         one_segment    row    74.57 us  isolate    24.43 us    5.52 cyc/ls@3.7  vs settled +2.71 us (12.5 %)  rounds [73.93..108.01] refused 0
+  eq12 eq_gain         one_left_only  row    74.63 us  isolate    24.53 us    5.54 cyc/ls@3.7  vs settled +2.81 us (12.9 %)  rounds [73.89..108.46] refused 0
+  eq12 eq_gain         eight_of_64    row    81.51 us  isolate    31.43 us    7.10 cyc/ls@3.7  vs settled +9.71 us (44.7 %)  rounds [81.08..115.71] refused 0
+  eq12 eq_gain         all_64         row    96.40 us  isolate    46.13 us   10.42 cyc/ls@3.7  vs settled +24.41 us (112.4 %)  rounds [95.97..136.16] refused 0
+hold end 18:59:15 loadavg 9.62 8.82 7.94 7/1912 2646599
+
+====================================================================================================
+== v8-eq-attrib.txt: V8 EQ A/B: base, E1, E1+E2 (clean builds)
+====================================================================================================
+request 19:07:19 loadavg 9.69 9.47 8.67 18/1903 2705884
+hold start 19:07:19 loadavg 9.69 9.47 8.67 17/1905 2705888
+node v22.23.2 loadavg 9.69 9.47 8.67 18/1912 2705896
+end loadavg 9.69 9.52 8.71 7/1908 2706507
+module base builtins 49.89 us
+  base eq_gain         settled        row    71.35 us  isolate    21.48 us    4.85 cyc/ls@3.7  vs settled +0.00 us (0.0 %)  rounds [71.19..72.40] refused 0
+  base eq_gain         one_point      row    81.88 us  isolate    31.99 us    7.22 cyc/ls@3.7  vs settled +10.52 us (49.0 %)  rounds [81.53..83.35] refused 0
+  base eq_gain         one_segment    row    81.16 us  isolate    31.34 us    7.08 cyc/ls@3.7  vs settled +9.86 us (45.9 %)  rounds [80.86..84.46] refused 0
+  base eq_gain         one_left_only  row    80.90 us  isolate    30.98 us    7.00 cyc/ls@3.7  vs settled +9.51 us (44.3 %)  rounds [80.57..84.45] refused 0
+  base eq_gain         eight_of_64    row   136.24 us  isolate    86.38 us   19.51 cyc/ls@3.7  vs settled +64.90 us (302.2 %)  rounds [136.02..138.33] refused 0
+  base eq_gain         all_64         row   217.38 us  isolate   167.42 us   37.81 cyc/ls@3.7  vs settled +145.95 us (679.6 %)  rounds [217.23..217.95] refused 0
+module eq1 builtins 49.93 us
+  eq1 eq_gain         settled        row    71.45 us  isolate    21.53 us    4.86 cyc/ls@3.7  vs settled +0.00 us (0.0 %)  rounds [71.23..71.59] refused 0
+  eq1 eq_gain         one_point      row    74.37 us  isolate    24.40 us    5.51 cyc/ls@3.7  vs settled +2.87 us (13.3 %)  rounds [74.29..74.44] refused 0
+  eq1 eq_gain         one_segment    row    74.32 us  isolate    24.40 us    5.51 cyc/ls@3.7  vs settled +2.88 us (13.4 %)  rounds [74.29..74.37] refused 0
+  eq1 eq_gain         one_left_only  row    74.06 us  isolate    24.14 us    5.45 cyc/ls@3.7  vs settled +2.61 us (12.1 %)  rounds [74.01..74.10] refused 0
+  eq1 eq_gain         eight_of_64    row    82.70 us  isolate    32.77 us    7.40 cyc/ls@3.7  vs settled +11.24 us (52.2 %)  rounds [82.56..83.54] refused 0
+  eq1 eq_gain         all_64         row   110.13 us  isolate    60.22 us   13.60 cyc/ls@3.7  vs settled +38.70 us (179.8 %)  rounds [109.89..110.89] refused 0
+module eq12 builtins 50.06 us
+  eq12 eq_gain         settled        row    71.74 us  isolate    21.82 us    4.93 cyc/ls@3.7  vs settled +0.00 us (0.0 %)  rounds [71.64..72.44] refused 0
+  eq12 eq_gain         one_point      row    74.05 us  isolate    24.13 us    5.45 cyc/ls@3.7  vs settled +2.31 us (10.6 %)  rounds [73.94..74.80] refused 0
+  eq12 eq_gain         one_segment    row    74.12 us  isolate    24.03 us    5.43 cyc/ls@3.7  vs settled +2.22 us (10.2 %)  rounds [74.07..74.44] refused 0
+  eq12 eq_gain         one_left_only  row    75.07 us  isolate    25.14 us    5.68 cyc/ls@3.7  vs settled +3.32 us (15.2 %)  rounds [75.06..75.61] refused 0
+  eq12 eq_gain         eight_of_64    row    80.87 us  isolate    30.90 us    6.98 cyc/ls@3.7  vs settled +9.09 us (41.7 %)  rounds [80.71..81.98] refused 0
+  eq12 eq_gain         all_64         row    95.75 us  isolate    45.69 us   10.32 cyc/ls@3.7  vs settled +23.87 us (109.4 %)  rounds [95.52..95.95] refused 0
+hold end 19:07:41 loadavg 9.69 9.52 8.71 7/1901 2706509
+
+====================================================================================================
+== native-comp-c12.txt: Native compressor A/B: m000 base, m100 C2, m200 C1
+====================================================================================================
+request 19:04:02 loadavg 9.00 9.66 8.57 11/1936 2658195
+hold start 19:04:02 loadavg 9.00 9.66 8.57 11/1938 2658199
+
+running 1 test
+test rows ... clock 3.699 GHz loadavg 9.00 9.66 8.57 13/1944 2658234
+width 8 rounds 6 blocks 800 load start [9.00 9.66 8.57 10/1952 2658292] end [8.79 9.58 8.56 9/1957 2658912]
+  builtins_only p50 24.36 us
+  w8 m000000 comp_threshold  settled        row    49.56 us  isolate    25.21 us    5.69 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [49.53..49.69] refused 0
+  w8 m000100 comp_threshold  settled        row    50.41 us  isolate    26.05 us    5.88 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [50.39..50.47] refused 0
+  w8 m000200 comp_threshold  settled        row    50.59 us  isolate    26.20 us    5.92 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [50.45..50.63] refused 0
+  w8 m000000 comp_threshold  one_point      row    55.34 us  isolate    30.98 us    7.00 cyc/ls  vs settled   +5.77 us ( +22.9 %)  rounds [55.24..56.11] refused 0
+  w8 m000100 comp_threshold  one_point      row    51.64 us  isolate    27.30 us    6.16 cyc/ls  vs settled   +1.23 us (  +4.7 %)  rounds [51.62..52.27] refused 0
+  w8 m000200 comp_threshold  one_point      row    52.70 us  isolate    28.34 us    6.40 cyc/ls  vs settled   +2.11 us (  +8.0 %)  rounds [52.66..52.73] refused 0
+  w8 m000000 comp_threshold  one_segment    row    55.52 us  isolate    31.15 us    7.03 cyc/ls  vs settled   +5.95 us ( +23.6 %)  rounds [55.42..56.32] refused 0
+  w8 m000100 comp_threshold  one_segment    row    51.38 us  isolate    27.01 us    6.10 cyc/ls  vs settled   +0.97 us (  +3.7 %)  rounds [51.35..52.33] refused 0
+  w8 m000200 comp_threshold  one_segment    row    52.56 us  isolate    28.20 us    6.37 cyc/ls  vs settled   +1.97 us (  +7.5 %)  rounds [52.53..68.67] refused 0
+  w8 m000000 comp_threshold  one_left_only  row    56.03 us  isolate    31.67 us    7.15 cyc/ls  vs settled   +6.47 us ( +25.7 %)  rounds [55.97..56.69] refused 0
+  w8 m000100 comp_threshold  one_left_only  row    51.07 us  isolate    26.71 us    6.03 cyc/ls  vs settled   +0.66 us (  +2.5 %)  rounds [51.05..51.24] refused 0
+  w8 m000200 comp_threshold  one_left_only  row    52.25 us  isolate    27.89 us    6.30 cyc/ls  vs settled   +1.66 us (  +6.3 %)  rounds [52.23..52.76] refused 0
+  w8 m000000 comp_threshold  eight_of_64    row    89.88 us  isolate    65.51 us   14.79 cyc/ls  vs settled  +40.31 us (+159.9 %)  rounds [89.82..89.96] refused 0
+  w8 m000100 comp_threshold  eight_of_64    row    58.81 us  isolate    34.42 us    7.77 cyc/ls  vs settled   +8.40 us ( +32.2 %)  rounds [58.69..58.83] refused 0
+  w8 m000200 comp_threshold  eight_of_64    row    70.07 us  isolate    45.71 us   10.32 cyc/ls  vs settled  +19.49 us ( +74.3 %)  rounds [70.05..70.12] refused 0
+  w8 m000000 comp_threshold  all_64         row   129.16 us  isolate   104.78 us   23.66 cyc/ls  vs settled  +79.59 us (+315.8 %)  rounds [129.08..129.27] refused 0
+  w8 m000100 comp_threshold  all_64         row    60.31 us  isolate    35.95 us    8.12 cyc/ls  vs settled   +9.90 us ( +38.0 %)  rounds [60.24..60.40] refused 0
+  w8 m000200 comp_threshold  all_64         row    72.19 us  isolate    47.83 us   10.80 cyc/ls  vs settled  +21.60 us ( +82.4 %)  rounds [72.13..72.22] refused 0
+  w8 m000000 comp_attack     settled        row    50.30 us  isolate    25.95 us    5.86 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [50.19..50.61] refused 0
+  w8 m000100 comp_attack     settled        row    49.85 us  isolate    25.48 us    5.75 cyc/ls  vs settled   -0.00 us (  -0.0 %)  rounds [49.72..49.88] refused 0
+  w8 m000200 comp_attack     settled        row    50.11 us  isolate    25.73 us    5.81 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [50.03..50.18] refused 0
+  w8 m000000 comp_attack     one_point      row    54.63 us  isolate    30.28 us    6.84 cyc/ls  vs settled   +4.34 us ( +16.7 %)  rounds [54.58..54.73] refused 0
+  w8 m000100 comp_attack     one_point      row    51.43 us  isolate    27.09 us    6.12 cyc/ls  vs settled   +1.58 us (  +6.2 %)  rounds [51.41..51.49] refused 0
+  w8 m000200 comp_attack     one_point      row    53.55 us  isolate    29.22 us    6.60 cyc/ls  vs settled   +3.45 us ( +13.4 %)  rounds [53.51..70.75] refused 0
+  w8 m000000 comp_attack     one_segment    row    54.59 us  isolate    30.23 us    6.83 cyc/ls  vs settled   +4.29 us ( +16.6 %)  rounds [54.53..55.20] refused 0
+  w8 m000100 comp_attack     one_segment    row    51.62 us  isolate    27.28 us    6.16 cyc/ls  vs settled   +1.77 us (  +6.9 %)  rounds [51.61..64.34] refused 0
+  w8 m000200 comp_attack     one_segment    row    52.39 us  isolate    28.03 us    6.33 cyc/ls  vs settled   +2.29 us (  +8.9 %)  rounds [52.33..52.55] refused 0
+  w8 m000000 comp_attack     one_left_only  row    54.46 us  isolate    30.10 us    6.80 cyc/ls  vs settled   +4.16 us ( +16.1 %)  rounds [54.39..55.16] refused 0
+  w8 m000100 comp_attack     one_left_only  row    51.03 us  isolate    26.67 us    6.02 cyc/ls  vs settled   +1.18 us (  +4.6 %)  rounds [50.94..51.22] refused 0
+  w8 m000200 comp_attack     one_left_only  row    52.81 us  isolate    28.44 us    6.42 cyc/ls  vs settled   +2.71 us ( +10.5 %)  rounds [52.79..52.83] refused 0
+  w8 m000000 comp_attack     eight_of_64    row    86.22 us  isolate    61.84 us   13.96 cyc/ls  vs settled  +35.92 us (+138.5 %)  rounds [86.19..86.30] refused 0
+  w8 m000100 comp_attack     eight_of_64    row    59.55 us  isolate    35.19 us    7.94 cyc/ls  vs settled   +9.70 us ( +38.1 %)  rounds [59.46..59.57] refused 0
+  w8 m000200 comp_attack     eight_of_64    row    70.61 us  isolate    46.24 us   10.44 cyc/ls  vs settled  +20.50 us ( +79.6 %)  rounds [70.58..70.64] refused 0
+  w8 m000000 comp_attack     all_64         row   107.19 us  isolate    82.84 us   18.70 cyc/ls  vs settled  +56.90 us (+219.4 %)  rounds [106.04..108.37] refused 0
+  w8 m000100 comp_attack     all_64         row    62.69 us  isolate    38.33 us    8.66 cyc/ls  vs settled  +12.84 us ( +50.4 %)  rounds [62.59..65.53] refused 0
+  w8 m000200 comp_attack     all_64         row    74.07 us  isolate    49.71 us   11.23 cyc/ls  vs settled  +23.97 us ( +93.1 %)  rounds [74.00..77.02] refused 0
+width 4 rounds 6 blocks 800 load start [8.79 9.58 8.56 11/1936 2658931] end [8.32 9.42 8.53 5/1929 2659398]
+  builtins_only p50 42.16 us
+  w4 m000000 comp_threshold  settled        row    90.11 us  isolate    47.97 us   10.83 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [90.03..90.51] refused 0
+  w4 m000100 comp_threshold  settled        row    89.43 us  isolate    47.29 us   10.68 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [89.22..89.49] refused 0
+  w4 m000200 comp_threshold  settled        row    90.27 us  isolate    48.19 us   10.88 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [89.82..90.36] refused 0
+  w4 m000000 comp_threshold  one_point      row    93.92 us  isolate    51.81 us   11.70 cyc/ls  vs settled   +3.81 us (  +7.9 %)  rounds [93.88..94.53] refused 0
+  w4 m000100 comp_threshold  one_point      row    91.18 us  isolate    49.05 us   11.08 cyc/ls  vs settled   +1.76 us (  +3.7 %)  rounds [91.14..91.23] refused 0
+  w4 m000200 comp_threshold  one_point      row    92.25 us  isolate    50.09 us   11.31 cyc/ls  vs settled   +1.98 us (  +4.1 %)  rounds [92.14..92.89] refused 0
+  w4 m000000 comp_threshold  one_segment    row    93.64 us  isolate    51.52 us   11.63 cyc/ls  vs settled   +3.53 us (  +7.4 %)  rounds [93.56..94.23] refused 0
+  w4 m000100 comp_threshold  one_segment    row    91.25 us  isolate    49.08 us   11.08 cyc/ls  vs settled   +1.82 us (  +3.9 %)  rounds [91.16..91.44] refused 0
+  w4 m000200 comp_threshold  one_segment    row    92.20 us  isolate    50.05 us   11.30 cyc/ls  vs settled   +1.92 us (  +4.0 %)  rounds [92.17..92.38] refused 0
+  w4 m000000 comp_threshold  one_left_only  row    93.25 us  isolate    51.12 us   11.54 cyc/ls  vs settled   +3.14 us (  +6.6 %)  rounds [93.20..93.38] refused 0
+  w4 m000100 comp_threshold  one_left_only  row    90.67 us  isolate    48.50 us   10.95 cyc/ls  vs settled   +1.25 us (  +2.6 %)  rounds [90.50..90.72] refused 0
+  w4 m000200 comp_threshold  one_left_only  row    92.03 us  isolate    49.92 us   11.27 cyc/ls  vs settled   +1.76 us (  +3.7 %)  rounds [91.92..92.25] refused 0
+  w4 m000000 comp_threshold  eight_of_64    row   120.53 us  isolate    78.39 us   17.70 cyc/ls  vs settled  +30.41 us ( +63.4 %)  rounds [120.24..120.61] refused 0
+  w4 m000100 comp_threshold  eight_of_64    row    98.24 us  isolate    56.09 us   12.67 cyc/ls  vs settled   +8.82 us ( +18.7 %)  rounds [98.16..98.99] refused 0
+  w4 m000200 comp_threshold  eight_of_64    row   110.52 us  isolate    68.40 us   15.44 cyc/ls  vs settled  +20.25 us ( +42.1 %)  rounds [110.41..110.62] refused 0
+  w4 m000000 comp_threshold  all_64         row   184.55 us  isolate   142.36 us   32.14 cyc/ls  vs settled  +94.44 us (+196.9 %)  rounds [184.06..184.73] refused 0
+  w4 m000100 comp_threshold  all_64         row   107.90 us  isolate    65.76 us   14.85 cyc/ls  vs settled  +18.47 us ( +39.1 %)  rounds [107.82..108.19] refused 0
+  w4 m000200 comp_threshold  all_64         row   131.40 us  isolate    89.28 us   20.16 cyc/ls  vs settled  +41.13 us ( +85.5 %)  rounds [131.12..135.01] refused 0
+  w4 m000000 comp_attack     settled        row    90.07 us  isolate    47.96 us   10.83 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [89.95..90.31] refused 0
+  w4 m000100 comp_attack     settled        row    89.94 us  isolate    47.80 us   10.79 cyc/ls  vs settled   -0.00 us (  -0.0 %)  rounds [89.80..90.00] refused 0
+  w4 m000200 comp_attack     settled        row    89.76 us  isolate    47.62 us   10.75 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [89.72..89.84] refused 0
+  w4 m000000 comp_attack     one_point      row    93.08 us  isolate    50.99 us   11.51 cyc/ls  vs settled   +3.02 us (  +6.3 %)  rounds [92.92..93.33] refused 0
+  w4 m000100 comp_attack     one_point      row    90.95 us  isolate    48.79 us   11.02 cyc/ls  vs settled   +1.01 us (  +2.1 %)  rounds [90.83..91.10] refused 0
+  w4 m000200 comp_attack     one_point      row    92.35 us  isolate    50.22 us   11.34 cyc/ls  vs settled   +2.59 us (  +5.4 %)  rounds [92.26..92.76] refused 0
+  w4 m000000 comp_attack     one_segment    row    93.88 us  isolate    51.71 us   11.68 cyc/ls  vs settled   +3.81 us (  +8.0 %)  rounds [93.78..93.91] refused 0
+  w4 m000100 comp_attack     one_segment    row    91.05 us  isolate    48.90 us   11.04 cyc/ls  vs settled   +1.11 us (  +2.3 %)  rounds [90.95..91.20] refused 0
+  w4 m000200 comp_attack     one_segment    row    92.09 us  isolate    49.94 us   11.28 cyc/ls  vs settled   +2.33 us (  +4.9 %)  rounds [92.04..92.12] refused 0
+  w4 m000000 comp_attack     one_left_only  row    93.24 us  isolate    51.09 us   11.54 cyc/ls  vs settled   +3.17 us (  +6.6 %)  rounds [93.18..93.30] refused 0
+  w4 m000100 comp_attack     one_left_only  row    90.29 us  isolate    48.11 us   10.86 cyc/ls  vs settled   +0.35 us (  +0.7 %)  rounds [90.22..90.38] refused 0
+  w4 m000200 comp_attack     one_left_only  row    91.91 us  isolate    49.73 us   11.23 cyc/ls  vs settled   +2.15 us (  +4.5 %)  rounds [91.86..91.97] refused 0
+  w4 m000000 comp_attack     eight_of_64    row   117.14 us  isolate    75.01 us   16.94 cyc/ls  vs settled  +27.08 us ( +56.5 %)  rounds [117.09..117.24] refused 0
+  w4 m000100 comp_attack     eight_of_64    row    98.54 us  isolate    56.41 us   12.74 cyc/ls  vs settled   +8.60 us ( +18.0 %)  rounds [98.46..98.61] refused 0
+  w4 m000200 comp_attack     eight_of_64    row   109.21 us  isolate    67.05 us   15.14 cyc/ls  vs settled  +19.45 us ( +40.9 %)  rounds [109.08..109.69] refused 0
+  w4 m000000 comp_attack     all_64         row   160.76 us  isolate   118.64 us   26.79 cyc/ls  vs settled  +70.69 us (+147.6 %)  rounds [160.59..160.88] refused 0
+  w4 m000100 comp_attack     all_64         row   109.21 us  isolate    67.08 us   15.15 cyc/ls  vs settled  +19.27 us ( +40.3 %)  rounds [109.16..109.33] refused 0
+  w4 m000200 comp_attack     all_64         row   130.55 us  isolate    88.43 us   19.97 cyc/ls  vs settled  +40.79 us ( +85.7 %)  rounds [130.39..130.65] refused 0
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 32.82s
+
+hold end 19:04:34 loadavg 8.32 9.42 8.53 5/1927 2659400
+
+====================================================================================================
+== native-comp-lean.txt: Native compressor A/B: m100 C2, m500 C2 + lean gather
+====================================================================================================
+request 19:09:03 loadavg 7.52 8.83 8.53 6/1910 2709339
+hold start 19:09:03 loadavg 7.52 8.83 8.53 6/1912 2709343
+
+running 1 test
+test rows ... clock 3.697 GHz loadavg 7.52 8.83 8.53 6/1914 2709346
+width 8 rounds 6 blocks 800 load start [7.52 8.83 8.53 5/1903 2709351] end [7.40 8.78 8.52 7/1911 2709421]
+  builtins_only p50 24.86 us
+  w8 m000000 comp_threshold  settled        row    50.10 us  isolate    25.22 us    5.69 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [50.08..50.37] refused 0
+  w8 m000100 comp_threshold  settled        row    50.42 us  isolate    25.57 us    5.77 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [50.35..51.55] refused 0
+  w8 m000500 comp_threshold  settled        row    49.90 us  isolate    25.06 us    5.65 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [49.78..51.16] refused 0
+  w8 m000000 comp_threshold  one_point      row    55.55 us  isolate    30.74 us    6.94 cyc/ls  vs settled   +5.45 us ( +21.6 %)  rounds [55.32..56.70] refused 0
+  w8 m000100 comp_threshold  one_point      row    52.13 us  isolate    26.84 us    6.06 cyc/ls  vs settled   +1.72 us (  +6.7 %)  rounds [51.52..52.62] refused 0
+  w8 m000500 comp_threshold  one_point      row    52.09 us  isolate    27.24 us    6.15 cyc/ls  vs settled   +2.19 us (  +8.8 %)  rounds [51.90..53.53] refused 0
+  w8 m000000 comp_threshold  eight_of_64    row    89.03 us  isolate    64.14 us   14.47 cyc/ls  vs settled  +38.93 us (+154.2 %)  rounds [88.97..89.14] refused 0
+  w8 m000100 comp_threshold  eight_of_64    row    60.87 us  isolate    36.04 us    8.13 cyc/ls  vs settled  +10.45 us ( +40.9 %)  rounds [60.82..61.93] refused 0
+  w8 m000500 comp_threshold  eight_of_64    row    60.62 us  isolate    35.81 us    8.08 cyc/ls  vs settled  +10.72 us ( +42.8 %)  rounds [60.55..61.51] refused 0
+  w8 m000000 comp_threshold  all_64         row   132.71 us  isolate   107.87 us   24.34 cyc/ls  vs settled  +82.61 us (+327.3 %)  rounds [132.33..133.92] refused 0
+  w8 m000100 comp_threshold  all_64         row    62.48 us  isolate    37.63 us    8.49 cyc/ls  vs settled  +12.06 us ( +47.2 %)  rounds [62.40..63.50] refused 0
+  w8 m000500 comp_threshold  all_64         row    62.82 us  isolate    37.96 us    8.57 cyc/ls  vs settled  +12.92 us ( +51.6 %)  rounds [62.72..63.73] refused 0
+width 4 rounds 6 blocks 800 load start [7.40 8.78 8.52 5/1910 2709421] end [7.42 8.74 8.51 6/1907 2709879]
+  builtins_only p50 42.40 us
+  w4 m000000 comp_threshold  settled        row    90.09 us  isolate    47.50 us   10.72 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [89.44..90.24] refused 0
+  w4 m000100 comp_threshold  settled        row    90.15 us  isolate    47.58 us   10.74 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [89.54..90.47] refused 0
+  w4 m000500 comp_threshold  settled        row    89.73 us  isolate    47.45 us   10.71 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [89.51..90.17] refused 0
+  w4 m000000 comp_threshold  one_point      row    93.64 us  isolate    51.30 us   11.58 cyc/ls  vs settled   +3.55 us (  +7.4 %)  rounds [93.52..94.11] refused 0
+  w4 m000100 comp_threshold  one_point      row    90.77 us  isolate    48.46 us   10.94 cyc/ls  vs settled   +0.62 us (  +1.3 %)  rounds [90.58..91.52] refused 0
+  w4 m000500 comp_threshold  one_point      row    90.67 us  isolate    48.32 us   10.90 cyc/ls  vs settled   +0.94 us (  +2.0 %)  rounds [90.56..91.31] refused 0
+  w4 m000000 comp_threshold  eight_of_64    row   120.90 us  isolate    78.35 us   17.68 cyc/ls  vs settled  +30.80 us ( +64.6 %)  rounds [120.47..121.54] refused 0
+  w4 m000100 comp_threshold  eight_of_64    row    98.04 us  isolate    55.65 us   12.56 cyc/ls  vs settled   +7.89 us ( +16.5 %)  rounds [97.25..98.65] refused 0
+  w4 m000500 comp_threshold  eight_of_64    row    98.28 us  isolate    55.89 us   12.61 cyc/ls  vs settled   +8.55 us ( +18.1 %)  rounds [97.66..98.60] refused 0
+  w4 m000000 comp_threshold  all_64         row   185.61 us  isolate   143.25 us   32.32 cyc/ls  vs settled  +95.52 us (+200.3 %)  rounds [185.43..185.97] refused 0
+  w4 m000100 comp_threshold  all_64         row   107.39 us  isolate    65.00 us   14.67 cyc/ls  vs settled  +17.24 us ( +36.1 %)  rounds [106.62..107.84] refused 0
+  w4 m000500 comp_threshold  all_64         row   108.05 us  isolate    65.50 us   14.78 cyc/ls  vs settled  +18.32 us ( +38.7 %)  rounds [107.28..108.40] refused 0
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 11.70s
+
+hold end 19:09:14 loadavg 7.42 8.74 8.51 6/1905 2709881
+
+====================================================================================================
+== native-comp-perword.txt: Native compressor A/B: m500 C2 + lean, md00 + per-word design (C2b)
+====================================================================================================
+request 19:10:45 loadavg 6.62 8.16 8.32 6/1897 2713942
+hold start 19:10:45 loadavg 6.62 8.16 8.32 5/1899 2713946
+
+running 1 test
+test rows ... clock 3.700 GHz loadavg 6.62 8.16 8.32 5/1901 2713949
+width 8 rounds 6 blocks 800 load start [6.62 8.16 8.32 6/1901 2713949] end [6.73 8.16 8.32 8/1911 2714144]
+  builtins_only p50 25.50 us
+  w8 m000000 comp_threshold  settled        row    50.55 us  isolate    25.06 us    5.66 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [50.55..51.66] refused 0
+  w8 m000500 comp_threshold  settled        row    50.70 us  isolate    25.24 us    5.70 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [50.68..51.79] refused 0
+  w8 m000d00 comp_threshold  settled        row    49.58 us  isolate    24.11 us    5.44 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [49.51..50.59] refused 0
+  w8 m000000 comp_threshold  one_point      row    55.81 us  isolate    30.36 us    6.86 cyc/ls  vs settled   +5.26 us ( +21.0 %)  rounds [55.79..57.05] refused 0
+  w8 m000500 comp_threshold  one_point      row    51.88 us  isolate    26.41 us    5.96 cyc/ls  vs settled   +1.18 us (  +4.7 %)  rounds [51.85..53.22] refused 0
+  w8 m000d00 comp_threshold  one_point      row    52.22 us  isolate    26.65 us    6.02 cyc/ls  vs settled   +2.64 us ( +11.0 %)  rounds [52.00..53.54] refused 0
+  w8 m000000 comp_threshold  eight_of_64    row    89.80 us  isolate    64.35 us   14.53 cyc/ls  vs settled  +39.25 us (+156.7 %)  rounds [89.66..90.66] refused 0
+  w8 m000500 comp_threshold  eight_of_64    row    60.40 us  isolate    34.95 us    7.89 cyc/ls  vs settled   +9.70 us ( +38.5 %)  rounds [60.27..61.31] refused 0
+  w8 m000d00 comp_threshold  eight_of_64    row    58.45 us  isolate    32.98 us    7.45 cyc/ls  vs settled   +8.87 us ( +36.8 %)  rounds [58.33..59.53] refused 0
+  w8 m000000 comp_threshold  all_64         row   131.50 us  isolate   106.01 us   23.94 cyc/ls  vs settled  +80.94 us (+323.1 %)  rounds [131.44..131.69] refused 0
+  w8 m000500 comp_threshold  all_64         row    62.26 us  isolate    36.75 us    8.30 cyc/ls  vs settled  +11.56 us ( +45.9 %)  rounds [62.22..62.27] refused 0
+  w8 m000d00 comp_threshold  all_64         row    60.65 us  isolate    35.10 us    7.93 cyc/ls  vs settled  +11.08 us ( +46.0 %)  rounds [60.56..62.01] refused 0
+width 4 rounds 6 blocks 800 load start [6.73 8.16 8.32 8/1913 2714146] end [7.16 8.22 8.34 11/1910 2714257]
+  builtins_only p50 41.98 us
+  w4 m000000 comp_threshold  settled        row    89.05 us  isolate    47.09 us   10.63 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [88.61..89.67] refused 0
+  w4 m000500 comp_threshold  settled        row    89.46 us  isolate    47.50 us   10.73 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [89.38..115.69] refused 0
+  w4 m000d00 comp_threshold  settled        row    89.13 us  isolate    47.17 us   10.65 cyc/ls  vs settled   -0.00 us (  -0.0 %)  rounds [89.06..115.49] refused 0
+  w4 m000000 comp_threshold  one_point      row    93.45 us  isolate    51.49 us   11.63 cyc/ls  vs settled   +4.40 us (  +9.4 %)  rounds [93.34..122.32] refused 0
+  w4 m000500 comp_threshold  one_point      row    90.31 us  isolate    48.34 us   10.92 cyc/ls  vs settled   +0.86 us (  +1.8 %)  rounds [90.24..117.46] refused 0
+  w4 m000d00 comp_threshold  one_point      row    89.84 us  isolate    47.88 us   10.81 cyc/ls  vs settled   +0.70 us (  +1.5 %)  rounds [89.71..117.12] refused 0
+  w4 m000000 comp_threshold  eight_of_64    row   120.40 us  isolate    78.44 us   17.71 cyc/ls  vs settled  +31.35 us ( +66.6 %)  rounds [120.20..161.71] refused 0
+  w4 m000500 comp_threshold  eight_of_64    row    97.72 us  isolate    55.76 us   12.59 cyc/ls  vs settled   +8.27 us ( +17.4 %)  rounds [97.69..130.59] refused 0
+  w4 m000d00 comp_threshold  eight_of_64    row    95.25 us  isolate    53.30 us   12.04 cyc/ls  vs settled   +6.12 us ( +13.0 %)  rounds [95.07..126.64] refused 0
+  w4 m000000 comp_threshold  all_64         row   184.90 us  isolate   142.94 us   32.28 cyc/ls  vs settled  +95.86 us (+203.6 %)  rounds [184.81..289.87] refused 0
+  w4 m000500 comp_threshold  all_64         row   107.13 us  isolate    65.04 us   14.69 cyc/ls  vs settled  +17.67 us ( +37.2 %)  rounds [106.84..146.37] refused 0
+  w4 m000d00 comp_threshold  all_64         row   102.49 us  isolate    60.48 us   13.66 cyc/ls  vs settled  +13.35 us ( +28.3 %)  rounds [102.38..139.95] refused 0
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 12.08s
+
+hold end 19:10:57 loadavg 7.16 8.22 8.34 12/1909 2714260
+
+====================================================================================================
+== v8-comp2-1.txt: V8 compressor A/B: base against C2 (clean build; carries C1 for non-Main detectors)
+====================================================================================================
+request 19:06:29 loadavg 10.08 9.49 8.64 7/1926 2680002
+hold start 19:06:30 loadavg 10.08 9.49 8.64 7/1926 2680012
+node v22.23.2 loadavg 10.08 9.49 8.64 7/1933 2680020
+end loadavg 8.50 9.16 8.55 6/1908 2699068
+module base builtins 51.91 us
+  base comp_threshold  settled        row   114.17 us  isolate    62.21 us   14.05 cyc/ls@3.7  vs settled +0.00 us (0.0 %)  rounds [113.63..114.38] refused 0
+  base comp_threshold  one_point      row   120.33 us  isolate    68.48 us   15.46 cyc/ls@3.7  vs settled +6.27 us (10.1 %)  rounds [120.13..120.66] refused 0
+  base comp_threshold  one_segment    row   120.04 us  isolate    68.14 us   15.39 cyc/ls@3.7  vs settled +5.93 us (9.5 %)  rounds [119.79..120.29] refused 0
+  base comp_threshold  one_left_only  row   119.60 us  isolate    67.66 us   15.28 cyc/ls@3.7  vs settled +5.45 us (8.8 %)  rounds [119.33..120.18] refused 0
+  base comp_threshold  eight_of_64    row   159.06 us  isolate   107.16 us   24.20 cyc/ls@3.7  vs settled +44.96 us (72.3 %)  rounds [158.21..159.38] refused 0
+  base comp_threshold  all_64         row   261.85 us  isolate   209.90 us   47.40 cyc/ls@3.7  vs settled +147.69 us (237.4 %)  rounds [260.59..263.59] refused 0
+  base comp_attack     settled        row   117.23 us  isolate    65.33 us   14.75 cyc/ls@3.7  vs settled +0.00 us (0.0 %)  rounds [116.34..117.84] refused 0
+  base comp_attack     one_point      row   119.54 us  isolate    67.63 us   15.27 cyc/ls@3.7  vs settled +2.29 us (3.5 %)  rounds [119.00..120.14] refused 0
+  base comp_attack     one_segment    row   119.52 us  isolate    67.59 us   15.26 cyc/ls@3.7  vs settled +2.26 us (3.5 %)  rounds [119.21..120.17] refused 0
+  base comp_attack     one_left_only  row   119.34 us  isolate    67.35 us   15.21 cyc/ls@3.7  vs settled +2.01 us (3.1 %)  rounds [118.50..119.85] refused 0
+  base comp_attack     eight_of_64    row   154.54 us  isolate   102.51 us   23.15 cyc/ls@3.7  vs settled +37.18 us (56.9 %)  rounds [153.85..154.85] refused 0
+  base comp_attack     all_64         row   229.61 us  isolate   177.64 us   40.12 cyc/ls@3.7  vs settled +112.31 us (171.9 %)  rounds [229.28..230.09] refused 0
+module comp2 builtins 50.39 us
+  comp2 comp_threshold  settled        row   113.17 us  isolate    62.71 us   14.16 cyc/ls@3.7  vs settled +0.00 us (0.0 %)  rounds [112.67..113.42] refused 0
+  comp2 comp_threshold  one_point      row   115.76 us  isolate    65.27 us   14.74 cyc/ls@3.7  vs settled +2.56 us (4.1 %)  rounds [115.25..115.92] refused 0
+  comp2 comp_threshold  one_segment    row   115.59 us  isolate    65.09 us   14.70 cyc/ls@3.7  vs settled +2.38 us (3.8 %)  rounds [115.05..115.94] refused 0
+  comp2 comp_threshold  one_left_only  row   115.47 us  isolate    65.18 us   14.72 cyc/ls@3.7  vs settled +2.46 us (3.9 %)  rounds [115.21..115.85] refused 0
+  comp2 comp_threshold  eight_of_64    row   126.67 us  isolate    76.28 us   17.23 cyc/ls@3.7  vs settled +13.57 us (21.6 %)  rounds [126.37..126.90] refused 0
+  comp2 comp_threshold  all_64         row   141.40 us  isolate    91.02 us   20.55 cyc/ls@3.7  vs settled +28.30 us (45.1 %)  rounds [141.14..142.19] refused 0
+  comp2 comp_attack     settled        row   113.13 us  isolate    62.79 us   14.18 cyc/ls@3.7  vs settled +0.00 us (0.0 %)  rounds [112.58..113.88] refused 0
+  comp2 comp_attack     one_point      row   115.35 us  isolate    64.98 us   14.68 cyc/ls@3.7  vs settled +2.19 us (3.5 %)  rounds [114.77..115.73] refused 0
+  comp2 comp_attack     one_segment    row   115.18 us  isolate    64.79 us   14.63 cyc/ls@3.7  vs settled +2.00 us (3.2 %)  rounds [114.95..115.59] refused 0
+  comp2 comp_attack     one_left_only  row   115.25 us  isolate    64.92 us   14.66 cyc/ls@3.7  vs settled +2.13 us (3.4 %)  rounds [114.89..121.80] refused 0
+  comp2 comp_attack     eight_of_64    row   126.50 us  isolate    76.13 us   17.19 cyc/ls@3.7  vs settled +13.34 us (21.2 %)  rounds [126.16..127.29] refused 0
+  comp2 comp_attack     all_64         row   141.90 us  isolate    91.59 us   20.68 cyc/ls@3.7  vs settled +28.80 us (45.9 %)  rounds [141.36..142.52] refused 0
+hold end 19:06:50 loadavg 8.50 9.16 8.55 6/1902 2699096
+
+====================================================================================================
+== native-mix.txt: Native stereo console, realistic mix: m000000 base, m000103 E1+E2+C2
+====================================================================================================
+request 19:12:29 loadavg 6.27 7.62 8.11 4/1893 2744573
+hold start 19:12:29 loadavg 6.27 7.62 8.11 4/1895 2744577
+
+running 1 test
+test rows ... clock 3.699 GHz loadavg 6.27 7.62 8.11 4/1897 2744580
+width 8 rounds 6 blocks 800 load start [6.01 7.54 8.08 10/1893 2744580] end [6.09 7.53 8.08 19/2326 2746110]
+  builtins_only p50 25.58 us
+  w8 m000000 console_mix     settled        row   106.69 us  isolate    81.11 us   18.31 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [106.32..108.40] refused 0
+  w8 m000103 console_mix     settled        row   106.67 us  isolate    81.13 us   18.32 cyc/ls  vs settled   -0.00 us (  -0.0 %)  rounds [106.42..110.76] refused 0
+  w8 m000000 console_mix     one_point      row   114.65 us  isolate    89.08 us   20.11 cyc/ls  vs settled   +7.97 us (  +9.8 %)  rounds [114.56..122.07] refused 0
+  w8 m000103 console_mix     one_point      row   107.21 us  isolate    81.27 us   18.35 cyc/ls  vs settled   +0.54 us (  +0.7 %)  rounds [106.72..110.77] refused 0
+  w8 m000000 console_mix     eight_of_64    row   148.66 us  isolate   123.09 us   27.79 cyc/ls  vs settled  +41.97 us ( +51.7 %)  rounds [147.22..152.19] refused 0
+  w8 m000103 console_mix     eight_of_64    row   116.31 us  isolate    90.04 us   20.33 cyc/ls  vs settled   +9.63 us ( +11.9 %)  rounds [113.83..118.89] refused 0
+  w8 m000000 console_mix     all_64         row   226.57 us  isolate   200.85 us   45.35 cyc/ls  vs settled +119.88 us (+147.8 %)  rounds [226.35..227.85] refused 0
+  w8 m000103 console_mix     all_64         row   127.92 us  isolate   102.02 us   23.04 cyc/ls  vs settled  +21.25 us ( +26.2 %)  rounds [127.46..128.76] refused 0
+width 4 rounds 6 blocks 800 load start [6.09 7.53 8.08 11/2319 2746193] end [6.47 7.56 8.08 8/2283 2747491]
+  builtins_only p50 42.55 us
+  w4 m000000 console_mix     settled        row   185.68 us  isolate   143.14 us   32.32 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [184.84..186.94] refused 0
+  w4 m000103 console_mix     settled        row   185.77 us  isolate   143.28 us   32.35 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [185.51..186.06] refused 0
+  w4 m000000 console_mix     one_point      row   194.03 us  isolate   151.56 us   34.22 cyc/ls  vs settled   +8.36 us (  +5.8 %)  rounds [193.73..195.32] refused 0
+  w4 m000103 console_mix     one_point      row   186.65 us  isolate   144.14 us   32.54 cyc/ls  vs settled   +0.88 us (  +0.6 %)  rounds [186.55..187.23] refused 0
+  w4 m000000 console_mix     eight_of_64    row   222.70 us  isolate   180.11 us   40.67 cyc/ls  vs settled  +37.03 us ( +25.9 %)  rounds [222.35..223.40] refused 0
+  w4 m000103 console_mix     eight_of_64    row   192.41 us  isolate   149.93 us   33.85 cyc/ls  vs settled   +6.64 us (  +4.6 %)  rounds [192.11..193.57] refused 0
+  w4 m000000 console_mix     all_64         row   386.83 us  isolate   344.34 us   77.74 cyc/ls  vs settled +201.15 us (+140.5 %)  rounds [385.39..391.68] refused 0
+  w4 m000103 console_mix     all_64         row   217.80 us  isolate   175.29 us   39.58 cyc/ls  vs settled  +32.03 us ( +22.4 %)  rounds [216.70..219.28] refused 0
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 16.99s
+
+hold end 19:12:46 loadavg 6.47 7.56 8.08 8/2281 2747493
+
+====================================================================================================
+== v8-mix.txt: V8 stereo console, realistic mix: base against E1+E2+C2
+====================================================================================================
+request 19:13:53 loadavg 6.53 7.43 8.00 4/1876 2752631
+hold start 19:13:53 loadavg 6.53 7.43 8.00 4/1878 2752635
+node v22.23.2 loadavg 6.53 7.43 8.00 8/1883 2752643
+end loadavg 9.98 8.11 8.21 6/1910 2755665
+module base builtins 50.43 us
+  base console_mix     settled        row   245.41 us  isolate   195.52 us   44.15 cyc/ls@3.7  vs settled +0.00 us (0.0 %)  rounds [240.66..352.84] refused 0
+  base console_mix     one_point      row   250.92 us  isolate   200.41 us   45.26 cyc/ls@3.7  vs settled +4.88 us (2.5 %)  rounds [249.42..353.90] refused 0
+  base console_mix     eight_of_64    row   285.75 us  isolate   235.59 us   53.20 cyc/ls@3.7  vs settled +40.07 us (20.5 %)  rounds [282.57..419.26] refused 0
+  base console_mix     all_64         row   471.43 us  isolate   420.97 us   95.07 cyc/ls@3.7  vs settled +225.44 us (115.3 %)  rounds [464.18..668.88] refused 0
+module all builtins 50.44 us
+  all console_mix     settled        row   245.28 us  isolate   195.02 us   44.04 cyc/ls@3.7  vs settled +0.00 us (0.0 %)  rounds [240.02..348.39] refused 0
+  all console_mix     one_point      row   242.65 us  isolate   192.13 us   43.39 cyc/ls@3.7  vs settled -2.89 us (-1.5 %)  rounds [241.38..358.68] refused 0
+  all console_mix     eight_of_64    row   251.48 us  isolate   201.34 us   45.47 cyc/ls@3.7  vs settled +6.32 us (3.2 %)  rounds [250.27..368.10] refused 0
+  all console_mix     all_64         row   286.41 us  isolate   236.18 us   53.34 cyc/ls@3.7  vs settled +41.16 us (21.1 %)  rounds [283.25..433.46] refused 0
+hold end 19:14:13 loadavg 9.98 8.11 8.21 5/1903 2755667
+
+====================================================================================================
+== native-monomix.txt: Native mono console, realistic mix (collapse counters printed): m000000 base, m000103
+====================================================================================================
+request 19:16:26 loadavg 9.87 8.96 8.53 11/1915 2762699
+hold start 19:16:26 loadavg 9.87 8.96 8.53 11/1917 2762703
+
+running 1 test
+test rows ... clock 3.700 GHz loadavg 9.87 8.96 8.53 11/1919 2762706
+width 8 rounds 6 blocks 800 load start [9.87 8.96 8.53 12/1926 2762713] end [9.80 8.96 8.54 6/1926 2763323]
+  builtins_only p50 25.19 us
+    collapse [0 block-cohorts, 8 cohorts] over 5248 blocks
+  w8 m000000 mono_mix        settled        row   108.05 us  isolate    82.83 us   18.71 cyc/ls  vs settled   -0.00 us (  -0.0 %)  rounds [107.95..109.80] refused 0
+    collapse [0 block-cohorts, 8 cohorts] over 5248 blocks
+  w8 m000103 mono_mix        settled        row   107.65 us  isolate    82.44 us   18.62 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [107.41..108.27] refused 0
+    collapse [0 block-cohorts, 8 cohorts] over 5248 blocks
+  w8 m000000 mono_mix        one_point      row   116.28 us  isolate    91.03 us   20.56 cyc/ls  vs settled   +8.24 us (  +9.9 %)  rounds [116.12..117.12] refused 0
+    collapse [0 block-cohorts, 8 cohorts] over 5248 blocks
+  w8 m000103 mono_mix        one_point      row   108.31 us  isolate    83.14 us   18.78 cyc/ls  vs settled   +0.66 us (  +0.8 %)  rounds [108.17..108.89] refused 0
+    collapse [0 block-cohorts, 8 cohorts] over 5248 blocks
+  w8 m000000 mono_mix        one_left_only  row   116.01 us  isolate    90.88 us   20.52 cyc/ls  vs settled   +7.96 us (  +9.6 %)  rounds [115.91..116.71] refused 0
+    collapse [0 block-cohorts, 8 cohorts] over 5248 blocks
+  w8 m000103 mono_mix        one_left_only  row   109.39 us  isolate    84.17 us   19.01 cyc/ls  vs settled   +1.74 us (  +2.1 %)  rounds [109.02..109.81] refused 0
+    collapse [0 block-cohorts, 8 cohorts] over 5248 blocks
+  w8 m000000 mono_mix        eight_of_64    row   148.58 us  isolate   123.39 us   27.86 cyc/ls  vs settled  +40.54 us ( +48.9 %)  rounds [148.36..204.33] refused 0
+    collapse [0 block-cohorts, 8 cohorts] over 5248 blocks
+  w8 m000103 mono_mix        eight_of_64    row   115.32 us  isolate    90.01 us   20.33 cyc/ls  vs settled   +7.67 us (  +9.3 %)  rounds [115.06..118.80] refused 0
+    collapse [0 block-cohorts, 8 cohorts] over 5248 blocks
+  w8 m000000 mono_mix        all_64         row   228.93 us  isolate   203.71 us   46.00 cyc/ls  vs settled +120.88 us (+145.9 %)  rounds [228.79..229.03] refused 0
+    collapse [0 block-cohorts, 8 cohorts] over 5248 blocks
+  w8 m000103 mono_mix        all_64         row   129.40 us  isolate   104.21 us   23.53 cyc/ls  vs settled  +21.75 us ( +26.4 %)  rounds [129.14..129.74] refused 0
+width 4 rounds 6 blocks 800 load start [9.57 8.93 8.53 6/1926 2763323] end [9.63 8.96 8.54 30/1959 2765006]
+  builtins_only p50 42.36 us
+    collapse [0 block-cohorts, 16 cohorts] over 5248 blocks
+  w4 m000000 mono_mix        settled        row   188.02 us  isolate   145.67 us   32.90 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [187.15..254.88] refused 0
+    collapse [0 block-cohorts, 16 cohorts] over 5248 blocks
+  w4 m000103 mono_mix        settled        row   187.95 us  isolate   145.59 us   32.88 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [186.99..256.73] refused 0
+    collapse [0 block-cohorts, 16 cohorts] over 5248 blocks
+  w4 m000000 mono_mix        one_point      row   195.74 us  isolate   153.38 us   34.64 cyc/ls  vs settled   +7.72 us (  +5.3 %)  rounds [195.18..262.93] refused 0
+    collapse [0 block-cohorts, 16 cohorts] over 5248 blocks
+  w4 m000103 mono_mix        one_point      row   188.93 us  isolate   146.65 us   33.12 cyc/ls  vs settled   +0.98 us (  +0.7 %)  rounds [188.01..259.69] refused 0
+    collapse [0 block-cohorts, 16 cohorts] over 5248 blocks
+  w4 m000000 mono_mix        one_left_only  row   195.93 us  isolate   153.58 us   34.68 cyc/ls  vs settled   +7.91 us (  +5.4 %)  rounds [195.28..264.82] refused 0
+    collapse [0 block-cohorts, 16 cohorts] over 5248 blocks
+  w4 m000103 mono_mix        one_left_only  row   188.00 us  isolate   145.75 us   32.91 cyc/ls  vs settled   +0.05 us (  +0.0 %)  rounds [187.83..189.74] refused 0
+    collapse [0 block-cohorts, 16 cohorts] over 5248 blocks
+  w4 m000000 mono_mix        eight_of_64    row   225.12 us  isolate   182.74 us   41.27 cyc/ls  vs settled  +37.10 us ( +25.5 %)  rounds [223.63..226.51] refused 0
+    collapse [0 block-cohorts, 16 cohorts] over 5248 blocks
+  w4 m000103 mono_mix        eight_of_64    row   194.67 us  isolate   152.31 us   34.40 cyc/ls  vs settled   +6.72 us (  +4.6 %)  rounds [193.43..196.05] refused 0
+    collapse [0 block-cohorts, 16 cohorts] over 5248 blocks
+  w4 m000000 mono_mix        all_64         row   389.29 us  isolate   346.91 us   78.34 cyc/ls  vs settled +201.27 us (+138.2 %)  rounds [387.14..395.38] refused 0
+    collapse [0 block-cohorts, 16 cohorts] over 5248 blocks
+  w4 m000103 mono_mix        all_64         row   219.65 us  isolate   177.42 us   40.07 cyc/ls  vs settled  +31.71 us ( +21.8 %)  rounds [219.05..297.17] refused 0
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 20.84s
+
+hold end 19:16:47 loadavg 9.63 8.96 8.54 33/1957 2765008
+
+====================================================================================================
+== native-mono-untouched.txt: Native mono and stereo consoles: untouched against written-once
+====================================================================================================
+request 19:18:34 loadavg 7.74 8.44 8.40 6/1914 2770103
+hold start 19:18:34 loadavg 7.74 8.44 8.40 7/1915 2770108
+
+running 1 test
+test rows ... clock 3.699 GHz loadavg 7.60 8.40 8.38 5/1917 2770140
+width 8 rounds 6 blocks 800 load start [7.60 8.40 8.38 6/1916 2770140] end [7.60 8.40 8.38 4/1911 2770247]
+  builtins_only p50 25.42 us
+  w8 m000000 console_mix     untouched      row   105.92 us  isolate    80.55 us   18.18 cyc/ls  vs settled   -0.36 us (  -0.4 %)  rounds [105.89..106.29] refused 0
+  w8 m000000 console_mix     settled        row   106.28 us  isolate    80.85 us   18.25 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [106.10..106.89] refused 0
+  w8 m000000 console_mix     one_point      row   114.81 us  isolate    89.40 us   20.18 cyc/ls  vs settled   +8.53 us ( +10.6 %)  rounds [114.65..114.94] refused 0
+    collapse [41920 block-cohorts, 8 cohorts] over 5248 blocks
+  w8 m000000 mono_mix        untouched      row    69.81 us  isolate    44.42 us   10.03 cyc/ls  vs settled  -38.30 us ( -46.3 %)  rounds [69.58..69.90] refused 0
+    collapse [0 block-cohorts, 8 cohorts] over 5248 blocks
+  w8 m000000 mono_mix        settled        row   108.11 us  isolate    82.67 us   18.66 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [107.95..108.14] refused 0
+    collapse [0 block-cohorts, 8 cohorts] over 5248 blocks
+  w8 m000000 mono_mix        one_point      row   116.93 us  isolate    91.50 us   20.66 cyc/ls  vs settled   +8.83 us ( +10.7 %)  rounds [116.79..116.99] refused 0
+width 4 rounds 6 blocks 800 load start [7.60 8.40 8.38 4/1908 2770247] end [7.40 8.34 8.37 7/1905 2770356]
+  builtins_only p50 42.33 us
+  w4 m000000 console_mix     untouched      row   185.29 us  isolate   142.99 us   32.28 cyc/ls  vs settled   -0.33 us (  -0.2 %)  rounds [184.89..185.56] refused 0
+  w4 m000000 console_mix     settled        row   185.62 us  isolate   143.29 us   32.35 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [185.49..185.96] refused 0
+  w4 m000000 console_mix     one_point      row   193.94 us  isolate   151.61 us   34.23 cyc/ls  vs settled   +8.33 us (  +5.8 %)  rounds [193.76..194.26] refused 0
+    collapse [83840 block-cohorts, 16 cohorts] over 5248 blocks
+  w4 m000000 mono_mix        untouched      row   120.39 us  isolate    78.02 us   17.61 cyc/ls  vs settled  -67.06 us ( -46.2 %)  rounds [119.82..120.73] refused 0
+    collapse [0 block-cohorts, 16 cohorts] over 5248 blocks
+  w4 m000000 mono_mix        settled        row   187.45 us  isolate   145.16 us   32.77 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [187.03..187.98] refused 0
+    collapse [0 block-cohorts, 16 cohorts] over 5248 blocks
+  w4 m000000 mono_mix        one_point      row   195.16 us  isolate   152.83 us   34.50 cyc/ls  vs settled   +7.71 us (  +5.3 %)  rounds [194.98..195.84] refused 0
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 9.66s
+
+hold end 19:18:44 loadavg 7.40 8.34 8.37 7/1903 2770358
+
+====================================================================================================
+== native-mono-p1.txt: Native mono console: m000000 base, m1000000 P1, m1000103 P1+E1+E2+C2
+====================================================================================================
+request 19:21:31 loadavg 6.30 7.46 8.02 5/1896 2784286
+hold start 19:23:54 loadavg 5.03 6.44 7.55 3/1889 2787471
+
+running 1 test
+test rows ... clock 3.700 GHz loadavg 5.03 6.44 7.55 2/1891 2787499
+width 8 rounds 6 blocks 800 load start [5.03 6.44 7.55 4/1891 2787499] end [4.44 6.24 7.46 3/1915 2787626]
+  builtins_only p50 24.63 us
+    collapse [41920 block-cohorts, 8 cohorts] over 5248 blocks
+  w8 m000000 mono_mix        untouched      row    69.22 us  isolate    44.65 us   10.08 cyc/ls  vs settled  -38.40 us ( -46.3 %)  rounds [69.13..69.34] refused 0
+    collapse [41920 block-cohorts, 8 cohorts] over 5248 blocks
+  w8 m1000000 mono_mix        untouched      row    69.72 us  isolate    45.08 us   10.18 cyc/ls  vs settled   +0.47 us (  +1.1 %)  rounds [69.62..69.78] refused 0
+    collapse [41920 block-cohorts, 8 cohorts] over 5248 blocks
+  w8 m1000103 mono_mix        untouched      row    69.83 us  isolate    45.14 us   10.19 cyc/ls  vs settled   +0.12 us (  +0.3 %)  rounds [69.56..70.20] refused 0
+    collapse [0 block-cohorts, 8 cohorts] over 5248 blocks
+  w8 m000000 mono_mix        settled        row   107.62 us  isolate    83.08 us   18.76 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [107.42..108.29] refused 0
+    collapse [42112 block-cohorts, 8 cohorts] over 5248 blocks
+  w8 m1000000 mono_mix        settled        row    69.25 us  isolate    44.68 us   10.09 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [69.03..69.51] refused 0
+    collapse [42112 block-cohorts, 8 cohorts] over 5248 blocks
+  w8 m1000103 mono_mix        settled        row    69.71 us  isolate    45.09 us   10.18 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [69.52..69.92] refused 0
+    collapse [0 block-cohorts, 8 cohorts] over 5248 blocks
+  w8 m000000 mono_mix        one_point      row   115.41 us  isolate    90.93 us   20.54 cyc/ls  vs settled   +7.79 us (  +9.4 %)  rounds [115.29..115.96] refused 0
+    collapse [42112 block-cohorts, 8 cohorts] over 5248 blocks
+  w8 m1000000 mono_mix        one_point      row    73.92 us  isolate    49.25 us   11.12 cyc/ls  vs settled   +4.67 us ( +10.5 %)  rounds [73.69..75.20] refused 0
+    collapse [42112 block-cohorts, 8 cohorts] over 5248 blocks
+  w8 m1000103 mono_mix        one_point      row    70.02 us  isolate    45.29 us   10.23 cyc/ls  vs settled   +0.32 us (  +0.7 %)  rounds [69.66..72.01] refused 0
+    collapse [0 block-cohorts, 8 cohorts] over 5248 blocks
+  w8 m000000 mono_mix        one_left_only  row   115.63 us  isolate    90.93 us   20.54 cyc/ls  vs settled   +8.01 us (  +9.7 %)  rounds [115.45..115.71] refused 0
+    collapse [36928 block-cohorts, 8 cohorts] over 5248 blocks
+  w8 m1000000 mono_mix        one_left_only  row    82.83 us  isolate    58.20 us   13.14 cyc/ls  vs settled  +13.58 us ( +30.4 %)  rounds [82.66..85.32] refused 0
+    collapse [36928 block-cohorts, 8 cohorts] over 5248 blocks
+  w8 m1000103 mono_mix        one_left_only  row    74.88 us  isolate    50.23 us   11.35 cyc/ls  vs settled   +5.18 us ( +11.5 %)  rounds [74.81..75.07] refused 0
+    collapse [0 block-cohorts, 8 cohorts] over 5248 blocks
+  w8 m000000 mono_mix        eight_of_64    row   147.76 us  isolate   123.20 us   27.82 cyc/ls  vs settled  +40.14 us ( +48.4 %)  rounds [147.69..147.96] refused 0
+    collapse [42112 block-cohorts, 8 cohorts] over 5248 blocks
+  w8 m1000000 mono_mix        eight_of_64    row    91.92 us  isolate    67.26 us   15.19 cyc/ls  vs settled  +22.67 us ( +50.8 %)  rounds [91.77..92.11] refused 0
+    collapse [42112 block-cohorts, 8 cohorts] over 5248 blocks
+  w8 m1000103 mono_mix        eight_of_64    row    80.54 us  isolate    55.88 us   12.62 cyc/ls  vs settled  +10.83 us ( +24.0 %)  rounds [80.42..82.28] refused 0
+    collapse [0 block-cohorts, 8 cohorts] over 5248 blocks
+  w8 m000000 mono_mix        all_64         row   228.89 us  isolate   204.36 us   46.15 cyc/ls  vs settled +121.27 us (+146.1 %)  rounds [228.78..229.18] refused 0
+    collapse [42112 block-cohorts, 8 cohorts] over 5248 blocks
+  w8 m1000000 mono_mix        all_64         row   138.69 us  isolate   113.99 us   25.74 cyc/ls  vs settled  +69.44 us (+155.6 %)  rounds [138.47..138.84] refused 0
+    collapse [42112 block-cohorts, 8 cohorts] over 5248 blocks
+  w8 m1000103 mono_mix        all_64         row   105.79 us  isolate    81.12 us   18.32 cyc/ls  vs settled  +36.08 us ( +80.1 %)  rounds [105.70..105.92] refused 0
+width 4 rounds 6 blocks 800 load start [4.44 6.24 7.46 3/1915 2787626] end [3.82 6.02 7.37 1/1884 2787815]
+  builtins_only p50 42.19 us
+    collapse [83840 block-cohorts, 16 cohorts] over 5248 blocks
+  w4 m000000 mono_mix        untouched      row   119.20 us  isolate    77.00 us   17.39 cyc/ls  vs settled  -69.05 us ( -47.3 %)  rounds [118.97..119.60] refused 0
+    collapse [83840 block-cohorts, 16 cohorts] over 5248 blocks
+  w4 m1000000 mono_mix        untouched      row   119.28 us  isolate    77.08 us   17.41 cyc/ls  vs settled   -0.17 us (  -0.2 %)  rounds [118.87..120.10] refused 0
+    collapse [83840 block-cohorts, 16 cohorts] over 5248 blocks
+  w4 m1000103 mono_mix        untouched      row   120.08 us  isolate    77.90 us   17.59 cyc/ls  vs settled   +0.58 us (  +0.7 %)  rounds [119.71..120.41] refused 0
+    collapse [0 block-cohorts, 16 cohorts] over 5248 blocks
+  w4 m000000 mono_mix        settled        row   188.24 us  isolate   146.04 us   32.98 cyc/ls  vs settled   -0.00 us (  -0.0 %)  rounds [187.29..188.43] refused 0
+    collapse [84224 block-cohorts, 16 cohorts] over 5248 blocks
+  w4 m1000000 mono_mix        settled        row   119.45 us  isolate    77.28 us   17.45 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [118.87..119.56] refused 0
+    collapse [84224 block-cohorts, 16 cohorts] over 5248 blocks
+  w4 m1000103 mono_mix        settled        row   119.50 us  isolate    77.34 us   17.47 cyc/ls  vs settled   +0.00 us (  +0.0 %)  rounds [119.30..119.61] refused 0
+    collapse [0 block-cohorts, 16 cohorts] over 5248 blocks
+  w4 m000000 mono_mix        one_point      row   196.05 us  isolate   153.89 us   34.76 cyc/ls  vs settled   +7.80 us (  +5.3 %)  rounds [195.64..197.16] refused 0
+    collapse [84224 block-cohorts, 16 cohorts] over 5248 blocks
+  w4 m1000000 mono_mix        one_point      row   123.58 us  isolate    81.46 us   18.40 cyc/ls  vs settled   +4.13 us (  +5.3 %)  rounds [123.36..123.82] refused 0
+    collapse [84224 block-cohorts, 16 cohorts] over 5248 blocks
+  w4 m1000103 mono_mix        one_point      row   119.77 us  isolate    77.60 us   17.53 cyc/ls  vs settled   +0.27 us (  +0.3 %)  rounds [119.40..120.18] refused 0
+    collapse [0 block-cohorts, 16 cohorts] over 5248 blocks
+  w4 m000000 mono_mix        one_left_only  row   195.88 us  isolate   153.72 us   34.72 cyc/ls  vs settled   +7.63 us (  +5.2 %)  rounds [195.29..196.85] refused 0
+    collapse [79040 block-cohorts, 16 cohorts] over 5248 blocks
+  w4 m1000000 mono_mix        one_left_only  row   132.26 us  isolate    90.05 us   20.34 cyc/ls  vs settled  +12.81 us ( +16.6 %)  rounds [131.90..132.42] refused 0
+    collapse [79040 block-cohorts, 16 cohorts] over 5248 blocks
+  w4 m1000103 mono_mix        one_left_only  row   125.34 us  isolate    83.19 us   18.79 cyc/ls  vs settled   +5.84 us (  +7.5 %)  rounds [124.68..125.56] refused 0
+    collapse [0 block-cohorts, 16 cohorts] over 5248 blocks
+  w4 m000000 mono_mix        eight_of_64    row   224.71 us  isolate   182.58 us   41.24 cyc/ls  vs settled  +36.46 us ( +25.0 %)  rounds [224.56..225.06] refused 0
+    collapse [84224 block-cohorts, 16 cohorts] over 5248 blocks
+  w4 m1000000 mono_mix        eight_of_64    row   139.67 us  isolate    97.51 us   22.02 cyc/ls  vs settled  +20.22 us ( +26.2 %)  rounds [139.25..139.89] refused 0
+    collapse [84224 block-cohorts, 16 cohorts] over 5248 blocks
+  w4 m1000103 mono_mix        eight_of_64    row   128.94 us  isolate    86.74 us   19.59 cyc/ls  vs settled   +9.43 us ( +12.2 %)  rounds [128.43..129.07] refused 0
+    collapse [0 block-cohorts, 16 cohorts] over 5248 blocks
+  w4 m000000 mono_mix        all_64         row   387.68 us  isolate   345.49 us   78.03 cyc/ls  vs settled +199.43 us (+136.6 %)  rounds [386.86..387.88] refused 0
+    collapse [84224 block-cohorts, 16 cohorts] over 5248 blocks
+  w4 m1000000 mono_mix        all_64         row   229.98 us  isolate   187.81 us   42.42 cyc/ls  vs settled +110.53 us (+143.1 %)  rounds [229.57..230.19] refused 0
+    collapse [84224 block-cohorts, 16 cohorts] over 5248 blocks
+  w4 m1000103 mono_mix        all_64         row   170.32 us  isolate   128.12 us   28.94 cyc/ls  vs settled  +50.82 us ( +65.7 %)  rounds [169.91..170.50] refused 0
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 27.98s
+
+hold end 19:24:22 loadavg 3.82 6.02 7.37 1/1882 2787817
+
+====================================================================================================
+== v8-mono-p1.txt: V8 mono console: base, P1, P1+E1+E2+C2 (clean builds)
+====================================================================================================
+request 19:26:13 loadavg 5.35 5.80 7.13 7/1902 2792807
+hold start 19:26:13 loadavg 5.35 5.80 7.13 8/1904 2792811
+node v22.23.2 loadavg 5.35 5.80 7.13 9/1918 2792826
+end loadavg 5.39 5.78 7.09 38/2074 2795108
+module base builtins 50.73 us
+  base mono_mix        untouched      row   151.22 us  isolate   100.74 us   22.75 cyc/ls@3.7  vs settled -91.60 us (-47.6 %)  rounds [150.90..227.84] refused 0
+  base mono_mix        settled        row   243.21 us  isolate   192.35 us   43.44 cyc/ls@3.7  vs settled +0.00 us (0.0 %)  rounds [242.88..244.18] refused 0
+  base mono_mix        one_point      row   251.93 us  isolate   201.15 us   45.43 cyc/ls@3.7  vs settled +8.81 us (4.6 %)  rounds [251.77..254.24] refused 0
+  base mono_mix        eight_of_64    row   284.75 us  isolate   233.95 us   52.83 cyc/ls@3.7  vs settled +41.60 us (21.6 %)  rounds [284.33..285.12] refused 0
+  base mono_mix        all_64         row   464.85 us  isolate   414.50 us   93.61 cyc/ls@3.7  vs settled +222.15 us (115.5 %)  rounds [464.75..467.73] refused 0
+module p1 builtins 50.60 us
+  p1 mono_mix        untouched      row   151.64 us  isolate   100.99 us   22.81 cyc/ls@3.7  vs settled +0.10 us (0.1 %)  rounds [151.00..151.77] refused 0
+  p1 mono_mix        settled        row   151.50 us  isolate   100.89 us   22.78 cyc/ls@3.7  vs settled +0.00 us (0.0 %)  rounds [151.48..152.06] refused 0
+  p1 mono_mix        one_point      row   155.45 us  isolate   104.70 us   23.64 cyc/ls@3.7  vs settled +3.81 us (3.8 %)  rounds [155.30..156.00] refused 0
+  p1 mono_mix        eight_of_64    row   177.26 us  isolate   126.63 us   28.60 cyc/ls@3.7  vs settled +25.74 us (25.5 %)  rounds [176.78..177.52] refused 0
+  p1 mono_mix        all_64         row   290.85 us  isolate   240.26 us   54.26 cyc/ls@3.7  vs settled +139.36 us (138.1 %)  rounds [290.55..290.99] refused 0
+module allp1 builtins 50.50 us
+  allp1 mono_mix        untouched      row   150.77 us  isolate   100.21 us   22.63 cyc/ls@3.7  vs settled -0.62 us (-0.6 %)  rounds [150.60..151.41] refused 0
+  allp1 mono_mix        settled        row   150.89 us  isolate   100.83 us   22.77 cyc/ls@3.7  vs settled +0.00 us (0.0 %)  rounds [150.58..217.40] refused 0
+  allp1 mono_mix        one_point      row   152.19 us  isolate   102.06 us   23.05 cyc/ls@3.7  vs settled +1.23 us (1.2 %)  rounds [152.00..224.69] refused 0
+  allp1 mono_mix        eight_of_64    row   168.53 us  isolate   118.00 us   26.65 cyc/ls@3.7  vs settled +17.16 us (17.0 %)  rounds [167.80..249.41] refused 0
+  allp1 mono_mix        all_64         row   232.00 us  isolate   181.53 us   40.99 cyc/ls@3.7  vs settled +80.69 us (80.0 %)  rounds [231.69..350.62] refused 0
+hold end 19:26:34 loadavg 5.39 5.78 7.09 40/2069 2795137
+
+====================================================================================================
+== v8-stereo-p1.txt: V8 stereo console: base against P1 (P1 costs nothing without a collapse)
+====================================================================================================
+request 19:38:43 loadavg 19.67 13.79 10.12 32/2015 2897504
+hold start 19:38:43 loadavg 19.67 13.79 10.12 35/2023 2897518
+node v22.23.2 loadavg 19.67 13.79 10.12 31/2019 2897635
+end loadavg 20.31 14.24 10.33 14/1947 2900206
+module base builtins 50.64 us
+  base console_mix     settled        row   239.44 us  isolate   188.80 us   42.64 cyc/ls@3.7  vs settled +0.00 us (0.0 %)  rounds [238.56..242.91] refused 0
+  base console_mix     eight_of_64    row   281.92 us  isolate   231.28 us   52.23 cyc/ls@3.7  vs settled +42.48 us (22.5 %)  rounds [281.46..284.35] refused 0
+  base console_mix     all_64         row   464.69 us  isolate   412.75 us   93.21 cyc/ls@3.7  vs settled +223.96 us (118.6 %)  rounds [461.47..467.71] refused 0
+module p1 builtins 50.93 us
+  p1 console_mix     settled        row   241.12 us  isolate   190.26 us   42.97 cyc/ls@3.7  vs settled +0.00 us (0.0 %)  rounds [239.91..242.83] refused 0
+  p1 console_mix     eight_of_64    row   282.61 us  isolate   231.66 us   52.32 cyc/ls@3.7  vs settled +41.40 us (21.8 %)  rounds [280.98..283.09] refused 0
+  p1 console_mix     all_64         row   463.95 us  isolate   413.01 us   93.27 cyc/ls@3.7  vs settled +222.74 us (117.1 %)  rounds [462.36..465.48] refused 0
+hold end 19:38:58 loadavg 20.31 14.24 10.33 14/1936 2900208
+
+====================================================================================================
+== native stereo console P1 check (printed, not tee'd; loadavg 18.9-19.7, absolute numbers inflated by load)
+====================================================================================================
+  w8 m000000 console_mix     settled        row   146.66 us  isolate   110.79 us   24.95 cyc/ls
+  w8 m1000000 console_mix     settled        row   146.77 us  isolate   110.77 us   24.95 cyc/ls
+  w8 m000000 console_mix     eight_of_64    row   201.10 us  isolate   164.64 us   37.08 cyc/ls
+  w8 m1000000 console_mix     eight_of_64    row   199.09 us  isolate   163.95 us   36.93 cyc/ls
+  w8 m000000 console_mix     all_64         row   318.06 us  isolate   283.29 us   63.81 cyc/ls
+  w8 m1000000 console_mix     all_64         row   323.51 us  isolate   288.37 us   64.95 cyc/ls
+
+====================================================================================================
+== identity and differential runs (untimed)
+====================================================================================================
+console digests: every subject x arm, modes 0/1/2/3 (EQ), 0/100/200/500/600/d00 (compressor), 0/103, 0/1000000/1000103 (mono and stereo mix): SAME at W8 and W4.
+V8 digests (DIGEST=150/200): base vs eq1, eq12, comp2, all, p1, allp1 on every subject and arm: all identical.
+EQ bank differential (automation_diag_identity.rs), release, 300 scenarios x 96 blocks per width:
+  mode 1 W4/W8, mode 2 W4/W8, mode 3 W4/W8: 300/300 bound, 28800 blocks bit-identical each; E1 engaged on ~4000 ramping blocks per width per mode.
+  dev: 40 scenarios x 96 blocks, all bit-identical.
+  mutations: drop leg (a) -> red (seed 2 block 58 W4 right output); elide ramping identity -> red (seed 0 block 16 W4 state);
+             drop unsafe-ramp rule -> GREEN at 600 scenarios (needs a structural gate).
+Compressor diag_ramping_prefix_randomized (reference kernel oracle), release, 320 seeds x 128 blocks x {f32, Simd4, Simd8}:
+  modes 1 (C2), 2 (C1), 13 (C2 + lean + C2b): all pass; NaN payload differences only in rejected blocks (wet arm).
+KERNEL_ROSTER (check-web-audioworklet-callgraph.py --kernel-shape --kernel-min 11):
+  base ok (14 kernels); eq12 first build FAIL rule 1 (EQ arithmetic outlined into render, then process_bank_inner), ok after #[inline(always)] on both (vector 312);
+  comp2 ok (compressor f32x4 dual vector 516 -> 1084; collapsed scalar 0 -> 9); all/allp1 ok.
+Artifact bytes: base 3,373,005; p1 3,373,588; eq12 3,377,944; eq1 3,380,706; comp2 3,428,762; all 3,433,701; allp1 3,434,284.
