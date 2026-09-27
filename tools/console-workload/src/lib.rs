@@ -228,9 +228,11 @@ pub enum Workload {
     /// The overhead floor: every rack emptied **and no builtin bindings prepared at all**.
     ///
     /// The row below `sixty_four_track_dispatch_only`, and the reason it exists is that
-    /// `dispatch_only` is not a floor. An identity strip still pays the D7 input sanitisation and
-    /// output boundary scan, a 0 dB fader's multiply and mask clear, and a settled identity pan
-    /// matrix's per-lane select -- 22 lane-ops of real arithmetic on every lane of every block.
+    /// `dispatch_only` is not a floor. Its strip still pays the D7 input sanitisation and output
+    /// boundary scan, a 0 dB fader's multiply and mask clear, and a settled pan matrix's multiplies
+    /// and adds (its pan is hard right on both inputs, not the identity, so since #944 it takes the
+    /// select-free arm) -- 22 lane-ops of real arithmetic on every lane of every block, as the
+    /// inventory still counts it until the prepared-identity recount.
     /// This row pays none of it: `prepare_session_builtins` is never called, so the strip's input
     /// stage, fader and matrix do not exist as bindings, every `TrackStage` lowers to an elided
     /// alias, and what remains between a track's source and the master bus is the route's

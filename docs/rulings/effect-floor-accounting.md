@@ -476,19 +476,23 @@ Sanitisation, the boundary scan, the fader and the pan matrix keep their full co
 whole reason this is 22 and not something smaller. The D7 policy requires the input clear and the
 output scan of *every* block regardless of what the chain between them does; a 0 dB fader is still a
 multiply and a mask clear (`gain_mute_block` has no identity arm, deliberately — the `andnot` is
-what makes a muted `-1.0` exactly `+0.0`); and a settled identity pan matrix evaluates both arms of
-its per-lane select unconditionally (`matrix2x2_block`). Only the input sections have a
-prepared-identity rewrite.
+what makes a muted `-1.0` exactly `+0.0`); and a settled pan matrix with an exact identity lane
+evaluates both arms of its per-lane select (`matrix2x2_block`). Since #944 a settled matrix with no
+identity lane takes the select-free `matrix2x2_block_without_identity`, chosen once per call. Only
+the input sections have a prepared-identity rewrite.
 
 That last claim was, until the strip round's job 4, an argument rather than a measurement. It has a
 row now: `sixty_four_track_gain_pan_only` makes the *same* strip edit as `dispatch_only` but for one
 field — it keeps the fixture's declared per-channel fader trims and pan positions where
-`dispatch_only` asks for 0 dB and hard identity. The two rows therefore execute the same
+`dispatch_only` asks for 0 dB and what was meant as the identity pan (its `Pan { left: 1.0,
+right: 1.0 }` is in fact hard right on both inputs, #944 ruling 4). The two rows therefore execute
+the same
 instructions over the same lanes with different constants, they are costed at **one** inventory in
 `floor.rs` and in the jq restatement, and that shared inventory *is* the claim. A material gap
-between the two measured rows would mean `gain_mute_block` or `matrix2x2_block` had acquired a
-data-dependent path, and the shared basis string is what makes that show up as a contradiction
-between two rows rather than as an unexplained microsecond.
+between the two measured rows would mean a data-dependent path inside one of those kernels. Since
+#944 the settled matrix chooses its arm once per call, but neither row has an identity lane, so
+both take the same select-free arm; the shared basis string is still what makes a gap show up as a
+contradiction between two rows rather than as an unexplained microsecond.
 
 ---
 

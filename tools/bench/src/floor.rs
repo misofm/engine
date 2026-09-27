@@ -118,10 +118,12 @@ const PLUMBING_LANE_OPS: f64 = ROUTE_LANE_OPS + REDUCTION_LANE_OPS;
 /// arithmetic of the `dispatch_only` row is the 69 with both 24-op sections replaced by that single
 /// add: 7 sanitise + 1 identity add + 4 boundary scan + 2 fader + 4 pan + 3 route + 1 reduction.
 ///
-/// The fader and the pan matrix stay at their full cost even though this row asks both for their
-/// identity: a 0 dB fader is still a multiply and a mask clear, and a settled identity matrix still
-/// evaluates both arms of its per-lane select. Only the input sections have a prepared-identity
-/// rewrite; `docs/rulings/effect-floor-accounting.md`, "Builtins inventory".
+/// The fader and the pan matrix stay at their full cost: a 0 dB fader is still a multiply and a
+/// mask clear, and the row's pan (hard right on both inputs, not the identity; see the workload's
+/// doc) is a settled matrix with no identity lane, which since #944 takes the select-free arm. The
+/// pan is still counted at 4 lane-ops here; it is recounted with the prepared-identity elision
+/// successor of #944, not before. Only the input sections have a prepared-identity rewrite;
+/// `docs/rulings/effect-floor-accounting.md`, "Builtins inventory".
 const BUILTINS_IDENTITY_LANE_OPS: f64 = 22.0;
 
 /// The width penalty of a ragged track count, as a multiple of the full-bank floor.
@@ -577,8 +579,8 @@ input as $rust |
     /// Both halves matter. If some row were ever costed below the route and the reduction it must
     /// pay to reach the master at all, this table would be claiming a session can render for less
     /// than it can be summed; and if `gain_pan_only` ever stopped matching `dispatch_only`, the
-    /// claim that a 0 dB fader and a settled identity matrix cost what a real one costs would have
-    /// been quietly abandoned in the table rather than argued in the ruling.
+    /// claim that a 0 dB fader and the row's settled pan cost what real trims and pans cost would
+    /// have been quietly abandoned in the table rather than argued in the ruling.
     #[test]
     fn the_plumbing_row_is_the_floor_of_the_table_and_the_identity_pair_shares_one_inventory() {
         let plumbing = floor_row(Workload::SixtyFourTrackPlumbingOnly).expect("a derived row");
