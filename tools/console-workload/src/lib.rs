@@ -343,26 +343,37 @@ pub enum Workload {
     SixtyFourTrackConsoleHalfMono,
     /// The standing console session with the meter every browser track carries (issue #881).
     ///
-    /// [`Self::SixtyFourTrackConsole`] exactly as written -- the same fixture, strip, compile,
-    /// sources and graph -- prepared with one `SAMPLE_PEAK` meter at `PostMatrix` on every track.
+    /// [`Self::SixtyFourTrackConsole`]'s session exactly as written -- the same fixture, strip,
+    /// compile and sources -- prepared with one `SAMPLE_PEAK` meter at `PostMatrix` on every track.
     /// That is the meter set the default web boot binds: a window of [`WEB_METER_BLOCKS`] blocks
     /// (12 x 128 frames), no peak hold, peak decay off, a queue [`WEB_METER_QUEUE_DEPTH`] snapshots
     /// deep, and handles `index + 1` in the compiled session's normalized track order. The meters
     /// are bound as **permanent** observers through
     /// `builtins_compiler::prepare_selected_session_builtins_between_render_calls`, which is the
     /// entry `host_core::prepare_host_runtime_with_selected_meters_between_render_calls` calls for
-    /// that boot. No live-console control channel is attached, so the meters are the only thing
-    /// this row adds.
+    /// that boot. No live-console control channel is attached.
+    ///
+    /// **The meters are not the only difference from the standing row.** That entry also selects
+    /// `BuiltinControlDelivery::BetweenRenderCalls`, as the default web boot does, and under that
+    /// delivery the builtins pair each cohort's fader bank and matrix bank into one fused stage
+    /// (`FaderMatrixBankProcessor`, rendering through `fader_matrix_block`). The standing row is
+    /// prepared with `Concurrent` delivery, so it keeps the fader and the matrix as two stages and
+    /// its matrix renders through `MatrixStage::process`. Both plans bank the same 48 memberships
+    /// in eight chains, but the standing row runs 48 bank-chain stages per block and this row 40;
+    /// this crate's pair test pins both counts. So this row minus the standing row is the meters'
+    /// cost **plus** the fused-versus-split fader and matrix, and a change to either fader/matrix
+    /// path can move one row of the pair and not the other.
     ///
     /// It is the row the observer path can move. Every other session row renders with no
     /// observer, and the `console_meters` arm binds all-metric meters at a four-block window
     /// through the concurrent entry, which is not what a browser binds. This is the configuration
     /// issue #943 (one sample-peak pass per bank, at the resident final lane) moves.
     ///
-    /// Meters observe and never change signal flow, so this row renders the standing console row's
-    /// bits: the run asserts it before it emits either record, and the aggregate validator pins it.
-    /// Its snapshots are consumed after every block, outside the clock, as a host holding the meter
-    /// lease consumes them.
+    /// Meters observe and never change signal flow, and the fused fader and matrix render the
+    /// split pair's bits, so this row renders the standing console row's bits: the run asserts it
+    /// before it emits either record, and the aggregate validator pins it. Its snapshots are
+    /// consumed after every block, outside the clock, as a host holding the meter lease consumes
+    /// them.
     ///
     /// Not in [`WORKLOADS`]: see [`METERED_WORKLOADS`].
     SixtyFourTrackConsoleMetered,
@@ -475,9 +486,10 @@ pub const DRIVER_FED_WORKLOADS: [Workload; 1] = [Workload::SixtyFourTrackPlumbin
 /// console arm's address space, and a row appended there would change what that arm measures.
 /// Carrying the metered row into the wasm arm is that arm's own change.
 ///
-/// The census and shape tests under `tests/` iterate [`WORKLOADS`] only. What this row must share
-/// with the standing console row -- its bits, its bank shape and its folds -- is asserted beside
-/// it by this crate's own test of the pair.
+/// The census and shape tests under `tests/` iterate [`WORKLOADS`] only. What this row shares with
+/// the standing console row -- its bits, its bank memberships and its folds -- and where it
+/// differs -- its fused fader and matrix -- are asserted beside it by this crate's own test of the
+/// pair.
 pub const METERED_WORKLOADS: [Workload; 1] = [Workload::SixtyFourTrackConsoleMetered];
 
 /// Every session row the native bench emits, in emission order: [`WORKLOADS`], then
@@ -1039,9 +1051,9 @@ impl SessionRuntime {
         } else {
             Vec::new()
         };
-        // Issue #881: the metered row carries the default web boot's meter set and nothing else,
-        // so a facility arm on top of it would meter every track twice and measure a shape no host
-        // prepares.
+        // Issue #881: the metered row carries the default web boot's meter set and delivery and no
+        // other console facility, so a facility arm on top of it would meter every track twice and
+        // measure a shape no host prepares.
         assert!(
             !workload.web_meters() || config == PlanConfig::BASELINE,
             "{}: the metered row carries its own meters and no other console facility",
@@ -1170,9 +1182,11 @@ impl SessionRuntime {
             );
             // Issue #881: the metered row is prepared through the builtins entry the default web
             // boot's host preparation reaches, which binds its selected meters as permanent
-            // observers. It attaches no control channel, so its between-render-calls delivery has
-            // nothing to deliver. Every other row keeps the entry it has always been prepared
-            // through.
+            // observers. It attaches no control channel, but its between-render-calls delivery is
+            // not inert: under it each cohort's fader and matrix banks fuse into one stage, as they
+            // do in the browser, where the `Concurrent` rows keep two
+            // (`Workload::SixtyFourTrackConsoleMetered` says what that means for the pair). Every
+            // other row keeps the entry it has always been prepared through.
             let builtins = if workload.web_meters() {
                 builtins_compiler::prepare_selected_session_builtins_between_render_calls(
                     &session,
@@ -2513,15 +2527,26 @@ mod tests {
         assert_eq!(kinds.len(), rows.len(), "every emitted kind is distinct");
     }
 
-    /// Issue #881 gate 3: the metered row renders the standing console row's bits, and every track
-    /// publishes one sample-peak snapshot per twelve-block window, on time, with none dropped.
+    /// Issue #881 gate 3: the metered row renders the standing console row's bits, differs from it
+    /// in plan shape exactly by its fused fader and matrix, and every track publishes one
+    /// sample-peak snapshot per twelve-block window, on time, with none dropped.
     ///
     /// Sixty-four blocks of both rows, digested by `hash_output`. The pin is the standing console
     /// row's 64-block digest (`tests/chain_shape.rs`,
     /// `the_select_free_matrix_arm_renders_the_base_bits`), and the metered row reproduces it,
-    /// because a meter observes and never changes signal flow. Beside the bits, the plan shape the
-    /// fold and redirect counters state: the meters change no bank, no transpose, no fold (every
-    /// route of the console folds, the #885 contract) and no scatter redirect (#886).
+    /// because a meter observes and never changes signal flow and the fused fader and matrix render
+    /// the split pair's bits.
+    ///
+    /// The plan shape is **not** the standing row's, and this test pins how it differs. The
+    /// metered row is prepared with between-render-calls delivery, the default web boot's, which
+    /// fuses each cohort's fader and matrix banks into one stage; the standing row's `Concurrent`
+    /// delivery keeps two. Both bank the same `[chains, slots]` (eight chains, 48 memberships) and
+    /// transpose the same number of times, and both fold every route of the console (the #885
+    /// contract). What moves is the stage count their chains run each block
+    /// (`graph::test_only_bank_chain_construction_facts`, read across each bind): 48 on the
+    /// standing row, one per membership, and 40 on the metered row, one fewer per cohort. Each
+    /// plan's scatter redirect count is pinned on its own (0 on both today), because the two plans
+    /// are two deliveries and neither is the other's baseline.
     ///
     /// The snapshots are drained after every block, which is what the bench does outside its
     /// clock. Sixty-four blocks close five twelve-block windows per track, so the row publishes
@@ -2546,7 +2571,9 @@ mod tests {
         let window_frames = window * 128;
         assert_eq!(QUANTUM, 128);
         let run = |workload: Workload| {
+            graph::test_only_reset_bank_chain_construction_facts();
             let mut runtime = SessionRuntime::new(workload);
+            let chains = graph::test_only_bank_chain_construction_facts();
             let mut digest = Sha256Sink::new();
             let mut published: Vec<(u64, MeterSnapshot)> = Vec::new();
             audit::warm_up();
@@ -2557,11 +2584,11 @@ mod tests {
                 runtime.drain_meter_snapshots(|snapshot| published.push((block, *snapshot)));
             }
             let forbidden = audit::snapshot().total();
-            (runtime, digest.finish_hex(), published, forbidden)
+            (runtime, chains, digest.finish_hex(), published, forbidden)
         };
-        let (console, console_digest, console_published, console_forbidden) =
+        let (console, console_chains, console_digest, console_published, console_forbidden) =
             run(Workload::SixtyFourTrackConsole);
-        let (metered, metered_digest, metered_published, metered_forbidden) =
+        let (metered, metered_chains, metered_digest, metered_published, metered_forbidden) =
             run(Workload::SixtyFourTrackConsoleMetered);
 
         assert_eq!(
@@ -2578,18 +2605,38 @@ mod tests {
             (0, 0),
             "no forbidden operation on either render path"
         );
-        assert_eq!(metered.bank_shape(), console.bank_shape(), "no bank moves");
+        assert_eq!(
+            [console.bank_shape(), metered.bank_shape()],
+            [[8, 48], [8, 48]],
+            "both plans bank the same memberships in the same eight chains"
+        );
         assert_eq!(metered.bank_transposes(), console.bank_transposes());
+        // The delivery difference, pinned rather than described: the same 48 memberships run as 48
+        // chain stages on the standing row and as 40 on the metered row, whose between-render-
+        // calls delivery fuses each of the eight cohorts' fader and matrix into one stage.
+        assert_eq!(
+            [
+                console_chains.run_memberships,
+                console_chains.runtime_slots,
+                metered_chains.run_memberships,
+                metered_chains.runtime_slots,
+            ],
+            [48, 48, 48, 40],
+            "[standing memberships, standing stages, metered memberships, metered stages]"
+        );
         let tracks = u64::from(Workload::SixtyFourTrackConsoleMetered.tracks());
         assert_eq!(
             [console.bank_route_folds(), metered.bank_route_folds()],
             [tracks, tracks],
-            "every route of the console folds, metered or not (#885)"
+            "every route of the console folds, under either delivery and metered or not (#885)"
         );
         assert_eq!(
-            metered.bank_scatter_redirects(),
-            console.bank_scatter_redirects(),
-            "a post-matrix meter moves no scatter redirect (#886)"
+            [
+                console.bank_scatter_redirects(),
+                metered.bank_scatter_redirects()
+            ],
+            [0, 0],
+            "each plan's own redirect count: two deliveries, so two pins and not one comparison"
         );
 
         assert_eq!(console.meter_streams(), 0);

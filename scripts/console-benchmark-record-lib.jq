@@ -224,8 +224,8 @@ def session_row_floor_keys: (session_row_keys + floor_keys) | sort;
 # block, so each of the `observations` timed blocks that closes a window yields one snapshot per
 # stream, and a stream that dropped one or published off its cadence changes the count. The fold
 # and redirect counters are the #914 pair, which the digest cannot see: every route of the console
-# folds whether or not a post-matrix meter reads it (#885), and the aggregate pins the redirects to
-# the unmetered plan's.
+# folds whether or not a post-matrix meter reads it (#885). The redirect count is the metered plan's
+# own; no record in the run shares its delivery, so none is its baseline (see the aggregate).
 def metered_session_shape:
   .meter_streams == .tracks and .meter_tap == "post_matrix" and
   .meter_metrics == "sample_peak" and .meter_window_blocks == 12 and
@@ -272,9 +272,11 @@ def session_kind_shape:
     .strip_content == "eq+compressor+limiter" and
     .strip_layout == "simd1:eq+compressor,simd2:limiter" and .input_signal == "tone" and
     .fixture_id == console_fixture
-  # The metered console row (#881) is that session as written, prepared with meters. Its meters are
-  # not strip content -- they observe and change nothing the strip computes -- so it states the
-  # standing row's six facts, and its meter group says what else it prepared.
+  # The metered console row (#881) is that session as written, prepared as the default web boot
+  # prepares it: meters, and the between-render-calls delivery that fuses each cohort's fader and
+  # matrix into one stage. Neither is strip content -- a meter observes, and the fused stage computes
+  # the split pair's arithmetic -- so it states the standing row's six facts, and its meter group
+  # says what else it prepared.
   elif .workload_kind == "sixty_four_track_console_metered" then
     .tracks == 64 and .synthetic_fixture == false and
     .strip_content == "eq+compressor+limiter" and

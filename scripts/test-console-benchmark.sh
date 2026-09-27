@@ -6,9 +6,9 @@
 # one host, one admissibility state, the decomposition rows' pinned strip contents, every session
 # row's pinned source feed, the class-A statements that neither the stationary smoother nor a
 # meter nor an armed observation tap nor a restated parameter nor the mono collapse nor the
-# driver-fed source feed nor the metered row's web meters changes a rendered bit, the meters
-# pair's equal fold and redirect counters, and the metered row's pinned meter group and its
-# counters' agreement with the unmetered plan -- are properties the suite can actually lose.
+# driver-fed source feed nor the metered row's web meters and fused fader and matrix changes a
+# rendered bit, the meters pair's equal fold and redirect counters, and the metered row's pinned
+# meter group -- are properties the suite can actually lose.
 set -euo pipefail
 [[ "$#" -le 1 ]] || { printf 'usage: %s\n' "$0" >&2; exit 2; }
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -583,9 +583,9 @@ metered_mutation '.fixture_id = "fixtures/session/v1/console-sixty-four-track-mo
 metered_mutation '.source_feed = "played_planes"' 'a metered row claiming the driver-fed feed'
 metered_mutation '.tracks = 9' 'a metered row that is not eight full banks'
 metered_mutation '.observations = 100' 'a shortened metered run'
-# The redirect count is the unmetered plan's, whatever it is; only the aggregate knows that plan's.
+# The redirect count is the metered plan's own, whatever it is: any non-negative integer.
 expect_accept "$(printf '%s' "$session_metered" | jq -c '.bank_scatter_redirects = 8')" \
-    'a metered row redirecting lanes (the aggregate pins the count)'
+    'a metered row redirecting lanes'
 # Its floor group states none: no ruling has inventoried a metered strip, and the standing strip's
 # inventory would publish the meters' cost as a gap in the strip's.
 expect_reject "$(printf '%s' "$session_floor_metered" | jq -c \
@@ -955,7 +955,7 @@ records=$(jq -cn --argjson session "$session" --argjson hoist "$hoist" \
      layout: "plumbing", signal: "tone", fixture: console_fixture, digest: "0",
      feed: "played_planes"},
     # #881: emitted last, rendering the bits of the standing console row, and carrying the meter
-    # group with the fold and redirect counts of the unmetered meters arm.
+    # group and the counters of its own plan.
     {kind: "sixty_four_track_console_metered", tracks: 64, synthetic: false,
      strip: "eq+compressor+limiter", layout: intended_layout, signal: "tone",
      fixture: console_fixture, digest: "3",
@@ -1035,16 +1035,16 @@ expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.worklo
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '(.[] | select(.workload_kind == "sixty_four_track_plumbing_ring")).output_sha256 = $c | .[]')" 'a driver-fed row that rendered other bits than the bound row'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '(.[] | select(.workload_kind == "sixty_four_track_plumbing_only")).output_sha256 = $c | .[]')" 'a bound plumbing row that rendered other bits than the driver-fed row'
 expect_aggregate_accept "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '(.[] | select(.workload_kind == "sixty_four_track_plumbing_only" or .workload_kind == "sixty_four_track_plumbing_ring")).output_sha256 = $c | .[]')" 'the plumbing pair moving together'
-# #881: the metered console row is a row of the set, its digest is the standing console row's, and
-# its fold and redirect counts are the unmetered meters arm's. Both rounds are moved together so the
-# rounds rule is satisfied and only the pair pins can refuse it.
+# #881: the metered console row is a row of the set and its digest is the standing console row's.
+# Both rounds are moved together so the rounds rule is satisfied and only the pair pin can refuse
+# it. Its counters are compared with no other record: every other plan in the run is a
+# `Concurrent` one, so a redirect count that differs from theirs is a truthful record.
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_console_metered")] | .[]')" 'a set missing the metered console row'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '(.[] | select(.workload_kind == "sixty_four_track_console_metered")).output_sha256 = $c | .[]')" 'a metered row that rendered other bits than the standing row'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '(.[] | select(.record == "console_session" and .workload_kind == "sixty_four_track_console")).output_sha256 = $c | .[]')" 'a standing row that rendered other bits than the metered row'
 expect_aggregate_accept "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '(.[] | select(.record == "console_session" and (.workload_kind == "sixty_four_track_console" or .workload_kind == "sixty_four_track_console_metered"))).output_sha256 = $c | .[]')" 'the console pair moving together'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c '(.[] | select(.workload_kind == "sixty_four_track_console_metered")).bank_scatter_redirects = 8 | .[]')" 'a metered row redirecting lanes the unmetered plan does not'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c '(.[] | select(.record == "console_meters")) |= (.meters_off_bank_scatter_redirects = 8 | .meters_on_bank_scatter_redirects = 8) | .[]')" 'an unmetered plan redirecting lanes the metered row does not'
-expect_aggregate_accept "$(printf '%s' "$records" | jq -c '(.[] | select(.workload_kind == "sixty_four_track_console_metered")).bank_scatter_redirects = 8 | (.[] | select(.record == "console_meters")) |= (.meters_off_bank_scatter_redirects = 8 | .meters_on_bank_scatter_redirects = 8) | .[]')" 'the metered row and the meters arm redirecting the same lanes'
+expect_aggregate_accept "$(printf '%s' "$records" | jq -c '(.[] | select(.workload_kind == "sixty_four_track_console_metered")).bank_scatter_redirects = 8 | .[]')" 'a metered row redirecting lanes the Concurrent meters arm does not'
+expect_aggregate_accept "$(printf '%s' "$records" | jq -c '(.[] | select(.record == "console_meters")) |= (.meters_off_bank_scatter_redirects = 8 | .meters_on_bank_scatter_redirects = 8) | .[]')" 'a Concurrent meters arm redirecting lanes the metered row does not'
 
 # ---------------------------------------------------------------------------------------------
 # #184 at the aggregate: the isolate is a subtraction between two rows, so only a whole run has

@@ -34,21 +34,22 @@ all(.[]; console_benchmark_record_valid_lib) and
                (.workload_kind == "sixty_four_track_plumbing_only" or
                 .workload_kind == "sixty_four_track_plumbing_ring"))
       | .output_sha256] | length == 4 and (unique | length) == 1) and
-# #881: the metered console row is the standing console row with a meter on every track, and a
-# meter observes: the two rows render the same bits in both rounds, and a difference is refused
-# rather than published as the price of metering. Its plan-shape counters are the #914 pair the
-# `console_meters` arm states for the same session unmetered, and a post-matrix meter moves
-# neither (#885, #886), so the metered row's fold and redirect counts must be the unmetered arm's.
+# #881: the metered console row is the standing console session prepared as the default web boot
+# prepares it -- a meter on every track and between-render-calls delivery, which fuses each
+# cohort's fader and matrix into one stage. A meter observes and the fused stage renders the split
+# pair's bits, so the two rows render the same bits in both rounds, and a difference is refused
+# rather than published as the price of metering.
+#
+# Its #914 counters are deliberately *not* compared with any other record's. No record in the run
+# is its baseline: the `console_meters` arms and the standing row are `Concurrent` plans, a
+# different delivery and a different chain shape, so agreement with them today would be a
+# coincidence and disagreement tomorrow would refuse a truthful record. The fold count is pinned per
+# record instead (every route of the console folds, on every plan that states one), and the
+# redirect count is the metered plan's own, pinned in `console-workload`'s pair test.
 ([.[] | select(.record == "console_session" and
                (.workload_kind == "sixty_four_track_console" or
                 .workload_kind == "sixty_four_track_console_metered"))
       | .output_sha256] | length == 4 and (unique | length) == 1) and
-([.[] | select(.record == "console_session" and .workload_kind == "sixty_four_track_console_metered")
-      | .bank_route_folds] + [.[] | select(.record == "console_meters") | .meters_off_bank_route_folds]
-  | length == 4 and (unique | length) == 1) and
-([.[] | select(.record == "console_session" and .workload_kind == "sixty_four_track_console_metered")
-      | .bank_scatter_redirects] + [.[] | select(.record == "console_meters") | .meters_off_bank_scatter_redirects]
-  | length == 4 and (unique | length) == 1) and
 ([.[] | .backend] | unique | length) == 1 and
 # Ragged versus full, and every decomposition subtraction, are the whole point of the fixture set,
 # so the per-track costs must be comparable numbers taken on one host in one run: same binary,

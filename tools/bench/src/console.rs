@@ -105,12 +105,17 @@
 //! row that meters it the way the default web boot does -- one `SAMPLE_PEAK` meter at `PostMatrix`
 //! per track, a twelve-block window, no hold, no decay, bound as permanent observers through
 //! `prepare_selected_session_builtins_between_render_calls` -- so the observer path the browser
-//! pays for has a row that can move. It is timed exactly like every other session row: the clock
-//! holds the render call alone, and the row's meter streams are drained of every snapshot after
-//! each block, outside the clock, where the output identity is also taken. Its record adds a meter
-//! group (streams, tap, metric set, window, snapshots consumed, snapshots dropped) and the plan's
-//! `bank_route_folds` and `bank_scatter_redirects`, read once at bind; the rows' digests are
-//! asserted equal to `sixty_four_track_console`'s in-run, because a meter observes.
+//! pays for has a row that can move. That entry also brings the browser's between-render-calls
+//! control delivery, which fuses each cohort's fader and matrix into one chain stage where the
+//! standing row's `Concurrent` delivery keeps two (48 chain stages against 40, pinned in
+//! `console-workload`'s pair test). So the row minus `sixty_four_track_console` is the meters plus
+//! the fused fader and matrix, and must be read that way. It is timed exactly like every other
+//! session row: the clock holds the render call alone, and the row's meter streams are drained of
+//! every snapshot after each block, outside the clock, where the output identity is also taken.
+//! Its record adds a meter group (streams, tap, metric set, window, snapshots consumed, snapshots
+//! dropped) and the plan's `bank_route_folds` and `bank_scatter_redirects`, read once at bind; the
+//! rows' digests are asserted equal to `sixty_four_track_console`'s in-run, because a meter
+//! observes and the fused fader and matrix render the split pair's bits.
 //!
 //! # The automation-active row (`console_automation`)
 //!
@@ -162,9 +167,12 @@ const PLUMBING_FEED_PAIR: [Workload; 2] = [
     Workload::SixtyFourTrackPlumbingRing,
 ];
 
-/// The standing console row and its metered twin (issue #881): one session, rendered with and
-/// without the default web boot's meter set. A meter observes and never changes signal flow, so
-/// their digests must agree, and the run asserts it before it emits either record.
+/// The standing console row and its metered twin (issue #881): one session, prepared once through
+/// the `Concurrent` entry with no meter and once as the default web boot prepares it, with its
+/// meter set and its between-render-calls delivery, which fuses each cohort's fader and matrix
+/// into one stage. A meter observes and never changes signal flow, and the fused stage renders the
+/// split pair's bits, so their digests must agree, and the run asserts it before it emits either
+/// record. Their timings differ by the meters and the fusion together.
 const METERED_PAIR: [Workload; 2] = [
     Workload::SixtyFourTrackConsole,
     Workload::SixtyFourTrackConsoleMetered,
@@ -2211,7 +2219,9 @@ mod tests {
             .as_ref()
             .expect("the metered row carries its meter evidence");
         let tracks = u64::from(Workload::SixtyFourTrackConsoleMetered.tracks());
-        let console = SessionRuntime::new(Workload::SixtyFourTrackConsole);
+        // The metered plan's own counter, read from a fresh bind of the same row: the standing
+        // row is prepared with the other delivery and is not this plan's baseline.
+        let plan = SessionRuntime::new(Workload::SixtyFourTrackConsoleMetered);
         assert!(evidence.post_matrix && evidence.uniform);
         assert!(
             evidence.shape
@@ -2234,11 +2244,11 @@ mod tests {
                 tracks * WINDOWS as u64,
                 0,
                 tracks,
-                console.bank_scatter_redirects(),
+                plan.bank_scatter_redirects(),
             ],
             "[streams, snapshots, dropped, folds, redirects]: one stream per track, one snapshot \
-             per track per window with none dropped, every route folded (#885) and the unmetered \
-             plan's redirects (#886)"
+             per track per window with none dropped, every route folded (#885) and the metered \
+             plan's own redirects"
         );
 
         let [standing, metered] = [0, 1].map(|index| {
@@ -2262,7 +2272,7 @@ mod tests {
             ("bank_route_folds", tracks.to_string()),
             (
                 "bank_scatter_redirects",
-                console.bank_scatter_redirects().to_string(),
+                plan.bank_scatter_redirects().to_string(),
             ),
         ];
         for (key, value) in &group {
