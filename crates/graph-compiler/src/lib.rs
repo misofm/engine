@@ -8682,9 +8682,10 @@ mod tests {
     /// moves a track only when **every** effect group it sits in is a partial mono group, so here
     /// it moves none.
     ///
-    /// This gate is the rule's. The bank-gain check that follows the rule would refuse the
-    /// brief's move here as well, since it binds no more banks;
-    /// `the_mono_remainder_stays_when_moving_it_binds_no_more_banks` is that check's gate.
+    /// The bank-gain check that follows the rule would refuse the brief's move here as well,
+    /// since it binds no more banks, so this session gates the rule only without the check.
+    /// `the_rule_not_the_bank_gain_check_picks_the_moved_tracks` gates the rule with the check in
+    /// place, and `the_mono_remainder_stays_when_moving_it_binds_no_more_banks` gates the check.
     #[test]
     fn a_mono_track_that_fills_a_cohort_is_not_pooled_as_stereo() {
         const BLOCKS: u64 = 12;
@@ -8731,9 +8732,9 @@ mod tests {
     /// rest a compressor, and `lanes / 2` mono tracks carry both. The mono tracks strand in the
     /// trial plan, but in the stereo pool their longer program would lead one cohort over every
     /// stereo track (a one-slot program is a subsequence of it), whose banks then mix EQ lanes with
-    /// compressor lanes: one bank bound where the trial bound two. The move is kept only when it
-    /// binds more effect slots than the trial, so here the mono tracks stay mono, the two stereo
-    /// banks bind, and the mono cohort's builtins still collapse.
+    /// compressor lanes: one bank bound where the trial bound two. The move is kept only when the
+    /// factories bind more effect banks for it than for the trial, so here the mono tracks stay
+    /// mono, the two stereo banks bind, and the mono cohort's builtins still collapse.
     #[test]
     fn the_mono_remainder_stays_when_moving_it_binds_no_more_banks() {
         const BLOCKS: u64 = 12;
@@ -8779,6 +8780,239 @@ mod tests {
             compile_console_model_with_builtins(&model, 2_085, &[], &scalar_console_registry());
         let scalar_render = render_armed_console_blocks(scalar, BLOCKS, &mono, &mono);
         assert_pcm_bits_equal(&render.pcm, &scalar_render.pcm, "disjoint stereo programs");
+    }
+
+    /// Issue #971: the rule, not the bank-gain check, decides which tracks move.
+    ///
+    /// In every other #971 gate session, either the rule moves nothing or every looser rule moves
+    /// exactly the tracks the rule moves, so the bank-gain check can hide a wrong rule by
+    /// cancelling its whole move. This session hands the check one move it must accept, beside
+    /// the moves a looser rule adds. If the check accepts the whole set, it moves tracks the rule
+    /// keeps; if it refuses the whole set, it cancels the move the rule makes. Either way the
+    /// pools go red. (Sol's attempt-1 verdict gave this test.)
+    ///
+    /// * V (`ch00`): mono, no effect. The rule never moves it, so its builtin banks stay mono.
+    /// * P (`ch01..=ch{2W}`): `W + 1` mono and `W - 1` stereo tracks, with only `dynamic: [comp]`.
+    ///   The last mono one strands in the trial and completes the stereo cohort, for one more bank.
+    /// * T (the next `2W`): the over-demotion session: even mono, odd stereo, `simd1: [eq, comp]`,
+    ///   and the limiter on every stereo track and on the lower half's mono tracks. The rule moves
+    ///   none of them, because their `simd1` cohort is full.
+    ///
+    /// Red, at 8 and 4 lanes, with the check kept, under: no move; the brief's per-program rule
+    /// (T's mono tracks move and the whole set is accepted); the global prototype (the set is
+    /// cancelled and P's stranded track stays mono); the "any group" rule (cancelled); and the
+    /// vacuous rule (V moves).
+    #[test]
+    fn the_rule_not_the_bank_gain_check_picks_the_moved_tracks() {
+        const BLOCKS: u64 = 12;
+        let Some(width) = BankWidth::for_backend(host_dispatch()) else {
+            return;
+        };
+        let lanes = width.lanes() as usize;
+        let registry = launch_native_effect_registry().expect("launch registry");
+        let (p, t) = (2 * lanes, 2 * lanes);
+        let mut model = mono_fixture_with_tracks(1 + p + t);
+        let comp = model.tracks[1].simd1.effects[1].clone();
+        for (index, track) in model.tracks.iter_mut().enumerate() {
+            if index == 0 {
+                track.simd1.effects.clear();
+                track.dynamic.effects.clear();
+                track.simd2.effects.clear();
+            } else if index <= p {
+                if index > lanes + 1 {
+                    track.right_source_channel = 1;
+                }
+                track.simd1.effects.clear();
+                track.simd2.effects.clear();
+                track.dynamic.effects = vec![comp.clone()];
+            } else {
+                let local = index - 1 - p;
+                if !local.is_multiple_of(2) {
+                    track.right_source_channel = 1;
+                } else if local >= lanes {
+                    track.simd2.effects.clear();
+                }
+            }
+        }
+        let name = |index: usize| format!("ch{index:02}");
+        let mono: BTreeSet<String> = model
+            .tracks
+            .iter()
+            .filter(|track| track.left_source_channel == track.right_source_channel)
+            .map(|track| track.id.as_str().to_owned())
+            .collect();
+        let stranded = name(lanes + 1);
+        let artifact = compile_console_model_with_builtins(&model, 2_086, &[], &registry);
+        let pooled = pooled_tracks(&artifact);
+        assert_eq!(
+            pooled[0],
+            (1..=lanes)
+                .chain((1 + p..1 + p + t).step_by(2))
+                .map(name)
+                .collect::<BTreeSet<_>>(),
+            "the mono effect pool: P's whole cohort and every T mono track"
+        );
+        assert_eq!(
+            pooled[1],
+            (lanes + 1..=p)
+                .chain((2 + p..1 + p + t).step_by(2))
+                .map(name)
+                .collect::<BTreeSet<_>>(),
+            "the stereo effect pool: exactly P's stranded track ({stranded}) joined it"
+        );
+        // P: one mono and one (completed) stereo compressor cohort. T: one mono and one stereo
+        // EQ + compressor cohort, and one stereo limiter cohort.
+        assert_eq!(artifact.graph().prepared_bank_count(), 7);
+        // V is in no effect group, so it is not moved: its post-input builtin bank is all mono
+        // and full (V sorts first, beside P's mono tracks).
+        let v_banks: Vec<Vec<String>> = artifact
+            .prepared_builtin_banks()
+            .filter(|bank| bank.stage == TrackStage::PostInputBuiltins)
+            .map(|bank| {
+                bank.members
+                    .iter()
+                    .map(|node| match node {
+                        GraphNodeId::TrackStage { track_id, .. } => track_id.as_str().to_owned(),
+                        other => panic!("a builtin bank named {other:?}"),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .filter(|members| members.contains(&name(0)))
+            .collect();
+        assert_eq!(v_banks.len(), 1);
+        assert_eq!(v_banks[0].len(), lanes, "V's post-input bank is full");
+        assert!(
+            v_banks[0]
+                .iter()
+                .all(|track| mono.contains(track) && *track != stranded),
+            "V stays in the mono pool: {:?}",
+            v_banks[0]
+        );
+        let render = render_armed_console_blocks(artifact, BLOCKS, &mono, &mono);
+        assert!(render.collapse[0] > 0, "a kept mono cohort collapses");
+        let scalar =
+            compile_console_model_with_builtins(&model, 2_087, &[], &scalar_console_registry());
+        let scalar_render = render_armed_console_blocks(scalar, BLOCKS, &mono, &mono);
+        assert_pcm_bits_equal(&render.pcm, &scalar_render.pcm, "discriminating session");
+    }
+
+    /// A `miso.delay` slot at its declared defaults, with slot id `id`. The delay factory never
+    /// binds a bank (`Ok(None)` at every width), so a full group of delays is planned but never
+    /// bound.
+    fn declining_delay_slot(model: &session::SessionModel, id: &str) -> session::Effect {
+        let mut delay = model.tracks[0].simd1.effects[1].clone();
+        delay.params.clear();
+        delay.identity = EffectIdentity::Native {
+            effect_id: StableId::parse("miso.delay").expect("delay id"),
+        };
+        delay.id = StableId::parse(id).expect("slot id");
+        delay
+    }
+
+    /// Issue #971: a move that makes a full group the factory declines is not a bank gain.
+    ///
+    /// `ch00..=ch{W}` are mono and the rest stereo, each carrying only `dynamic: [delay]`. Moving
+    /// the stranded `ch{W}` completes the stereo delay group, but no plan of this session binds an
+    /// effect bank, so the move would only cost `ch{W}` its collapse. The check counts banks the
+    /// factories bound, not full groups the planner formed, so the move is not kept. (Sol's
+    /// attempt-1 verdict measured this: under a planned-slot count `ch{W}` moved for 0 → 0 banks.)
+    #[test]
+    fn a_move_that_binds_no_bank_is_not_kept() {
+        const BLOCKS: u64 = 12;
+        let Some(width) = BankWidth::for_backend(host_dispatch()) else {
+            return;
+        };
+        let lanes = width.lanes() as usize;
+        let registry = launch_native_effect_registry().expect("launch registry");
+        let mut model = mono_fixture_with_tracks(2 * lanes);
+        let delay = declining_delay_slot(&model, "delay");
+        for (index, track) in model.tracks.iter_mut().enumerate() {
+            if index > lanes {
+                track.right_source_channel = 1;
+            }
+            track.simd1.effects.clear();
+            track.simd2.effects.clear();
+            track.dynamic.effects = vec![delay.clone()];
+        }
+        let name = |index: usize| format!("ch{index:02}");
+        let mono: BTreeSet<String> = (0..=lanes).map(name).collect();
+        let artifact = compile_console_model_with_builtins(&model, 2_088, &[], &registry);
+        assert_eq!(
+            pooled_tracks(&artifact)[0],
+            mono,
+            "the stranded {} stays mono",
+            name(lanes)
+        );
+        assert_eq!(
+            artifact.graph().prepared_bank_count(),
+            0,
+            "a delay never banks"
+        );
+        let render = render_armed_console_blocks(artifact, BLOCKS, &mono, &mono);
+        let scalar =
+            compile_console_model_with_builtins(&model, 2_089, &[], &scalar_console_registry());
+        let scalar_render = render_armed_console_blocks(scalar, BLOCKS, &mono, &mono);
+        assert_pcm_bits_equal(&render.pcm, &scalar_render.pcm, "delay-only session");
+    }
+
+    /// Issue #971: a move that plans more full groups but binds fewer banks is not kept.
+    ///
+    /// The guard session's `2W` stereo tracks (`simd1: [eq]` or `simd1: [comp]`) bind 2 banks.
+    /// Two mono tracks strand: one with `simd1: [eq, comp]`, and one with `dynamic: [delay]` and
+    /// `simd2: [delay]` beside `W - 1` stereo tracks carrying the same two delay chains. Moved
+    /// together, the first re-leads the stereo `simd1` cohort and loses a real bank, while the
+    /// second completes two delay groups that the factory declines. The planner's slots go from
+    /// 2 to 3, but the banks bound go from 2 to 1. (Sol's attempt-1 verdict measured this: a
+    /// planned-slot check kept the move.)
+    #[test]
+    fn a_move_that_binds_fewer_banks_is_not_kept() {
+        const BLOCKS: u64 = 12;
+        let Some(width) = BankWidth::for_backend(host_dispatch()) else {
+            return;
+        };
+        let lanes = width.lanes() as usize;
+        let registry = launch_native_effect_registry().expect("launch registry");
+        let mut model = mono_fixture_with_tracks(3 * lanes + 1);
+        let delay = declining_delay_slot(&model, "delay");
+        let delay_simd2 = declining_delay_slot(&model, "delay2");
+        for (index, track) in model.tracks.iter_mut().enumerate() {
+            track.simd2.effects.clear();
+            track.dynamic.effects.clear();
+            if index < 2 * lanes {
+                track.right_source_channel = 1;
+                // EQ is slot 0 and the compressor slot 1 of the fixture's simd1 chain.
+                if index < lanes {
+                    track.simd1.effects.truncate(1);
+                } else {
+                    track.simd1.effects.remove(0);
+                }
+            } else if index > 2 * lanes {
+                if index > 2 * lanes + 1 {
+                    track.right_source_channel = 1;
+                }
+                track.simd1.effects.clear();
+                track.dynamic.effects = vec![delay.clone()];
+                track.simd2.effects = vec![delay_simd2.clone()];
+            }
+        }
+        let name = |index: usize| format!("ch{index:02}");
+        let mono: BTreeSet<String> = [name(2 * lanes), name(2 * lanes + 1)].into();
+        let artifact = compile_console_model_with_builtins(&model, 2_090, &[], &registry);
+        assert_eq!(
+            pooled_tracks(&artifact)[0],
+            mono,
+            "both mono tracks stay mono"
+        );
+        assert_eq!(
+            artifact.graph().prepared_bank_count(),
+            2,
+            "the stereo EQ cohort and the stereo compressor cohort, as with no move"
+        );
+        let render = render_armed_console_blocks(artifact, BLOCKS, &mono, &mono);
+        let scalar =
+            compile_console_model_with_builtins(&model, 2_091, &[], &scalar_console_registry());
+        let scalar_render = render_armed_console_blocks(scalar, BLOCKS, &mono, &mono);
+        assert_pcm_bits_equal(&render.pcm, &scalar_render.pcm, "phantom-loss session");
     }
 
     /// Mono-collapse M1: what class pooling costs, and on which sessions -- the route fold.
@@ -11417,7 +11651,8 @@ mod tests {
     ///
     /// The bank-free arm is the oracle a merged chain is compared against: it binds no bank at
     /// all, so no merge is expressible in it and the audio it renders is the strip's arithmetic
-    /// with none of this machinery in the way.
+    /// with none of this machinery in the way. The delay, which never banks anyway, is here for
+    /// issue #971's sessions that carry one.
     fn scalar_console_registry() -> NativeEffectRegistry {
         let registry = launch_native_effect_registry().expect("launch registry");
         NativeEffectRegistry::new(
@@ -11425,6 +11660,7 @@ mod tests {
                 "miso.parametric-eq",
                 "miso.compressor",
                 "miso.true-peak-limiter",
+                "miso.delay",
             ]
             .map(|id| {
                 Box::new(ScalarOnlyDelegateFactory {

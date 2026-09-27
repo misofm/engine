@@ -3999,8 +3999,10 @@ pub fn session_structural_symmetry(
 /// multiple of the lane width strands its tail: those tracks' effects render per node. The rack
 /// planner therefore runs a trial plan and, where every effect group a mono track sits in is a
 /// partial mono group, moves the track to the stereo pool with
-/// [`SessionPoolClasses::pool_as_stereo`], where it renders dual inside a bank; it keeps the move
-/// only when the plan it then forms binds more effect banks than the trial. That is a
+/// [`SessionPoolClasses::pool_as_stereo`], where it renders dual inside a bank. It binds both
+/// plans and keeps the move only when the factories bound more effect banks for the new plan
+/// than for the trial: a planned full group is not a bank, because a factory may decline it (the
+/// delay never banks). The move is all or nothing, one decision for every stranded track. That is a
 /// **pooling** decision, not a symmetry fact, so it is kept beside the witness rather than
 /// written into it: the track's witness still says its source is mono, and the host's
 /// structural arming join (which never reads this map) is untouched. It happens before either

@@ -220,16 +220,34 @@ pub(crate) fn bind_rack_banks_indexed(
         .collect();
     let mut plan = plan_bank_groups(&levels_in, width)
         .map_err(|_| diag("graph.effect.bank_members", "$.effects"))?;
+    let bind = |plan: &BankPlan<RackChainId>| {
+        bind_planned_banks(
+            plan,
+            &chains,
+            &level_by_node,
+            effects,
+            prepared,
+            dispatch,
+            width,
+        )
+    };
+    let (mut banks, mut bound_slots) = bind(&plan)?;
 
     // Issue #971: keep the mono pool a whole number of cohorts. The plan above is the trial.
     // A mono track every one of whose effect groups is a *partial* mono group banks nowhere in
     // it, so it is moved to the stereo pool, where it renders dual but can fill a bank; the
-    // classes are then re-read and the session is planned again. The move is kept only if the
-    // new plan binds more effect slots than the trial did, which is the whole point of it: a
-    // track in the stereo pool gives up its builtin stages' collapse, and it can join a stereo
-    // cohort in a way that costs a bank (a longer program taking the leader of stereo tracks
-    // whose programs are disjoint subsequences of it). Either way the map is updated **before**
-    // the builtin-stage planner reads it, so both planners still see one class per track.
+    // classes are then re-read and the session is planned again.
+    //
+    // The move is kept only if the new plan **binds** more effect banks than the trial did, and
+    // both counts are the banks the factories actually bound, not the slots the planner formed:
+    // a factory may decline a full group (the delay never banks; an effect built for another
+    // width declines that width), so a planned slot proves nothing. The check exists because a
+    // move can cost: a track in the stereo pool gives up its builtin stages' collapse, and it can
+    // join a stereo cohort in a way that loses a bank (a longer program taking the leader of
+    // stereo tracks whose programs are disjoint subsequences of it). The check is one decision
+    // for the whole move set, not one per stranded track (a follow-up recorded in #971's spec).
+    // Either way the map is updated **before** the builtin-stage planner reads it, so both
+    // planners still see one class per track.
     let stranded = stranded_mono_tracks(&plan);
     if !stranded.is_empty() {
         let mut demoted = classes.clone();
@@ -243,19 +261,68 @@ pub(crate) fn bind_rack_banks_indexed(
         }
         let replan = plan_bank_groups(&levels_in, width)
             .map_err(|_| diag("graph.effect.bank_members", "$.effects"))?;
-        if bindable_slot_count(&replan, &chains, &level_by_node)?
-            > bindable_slot_count(&plan, &chains, &level_by_node)?
-        {
+        let (replan_banks, replan_slots) = bind(&replan)?;
+        if replan_banks.len() > banks.len() {
             *classes = demoted;
             plan = replan;
+            banks = replan_banks;
+            bound_slots = replan_slots;
         }
     }
+    Ok((
+        banks,
+        GraphRackBankReport {
+            dispatch,
+            plan,
+            bound_slots,
+            chains,
+        },
+    ))
+}
 
+/// The mono-class tracks the trial `plan` strands (issue #971): every effect group each one sits in
+/// is a **partial** group of the mono pool, so none of its effect slots can bind.
+///
+/// The test is per track over all its groups, not per program. A track whose simd1 chain fills a
+/// mono cohort while its simd2 chain is a partial one is not stranded: moving it would break the
+/// full cohort, and its builtin stages' collapse with it, to gain a bank that may not exist. A
+/// track in no effect group at all (builtins only, or every chain on the per-node path) is not
+/// stranded either: builtin banks pad a partial cohort, so its remainder still banks and still
+/// collapses where it is. A group is class-homogeneous, so a member of a partial mono group is a
+/// mono-class track.
+fn stranded_mono_tracks(plan: &BankPlan<RackChainId>) -> Vec<String> {
+    let mut stranded: BTreeMap<&str, bool> = BTreeMap::new();
+    for group in &plan.groups {
+        let partial_mono =
+            group.class == CohortPoolClass::MonoSymmetricAtPrepare && !group.is_full();
+        for id in group.members.iter().flatten() {
+            let entry = stranded.entry(id.track_id.as_str()).or_insert(true);
+            *entry = *entry && partial_mono;
+        }
+    }
+    stranded
+        .into_iter()
+        .filter(|(_, stranded)| *stranded)
+        .map(|(track, _)| track.to_owned())
+        .collect()
+}
+
+/// Binds every slot of `plan` that can be one homogeneous bank and whose factory consents:
+/// the banks and the report's `(group, slot, members)` entries, in plan order.
+fn bind_planned_banks(
+    plan: &BankPlan<RackChainId>,
+    chains: &BTreeMap<RackChainId, Vec<EffectNodeId>>,
+    level_by_node: &BTreeMap<GraphNodeId, u64>,
+    effects: &EffectPreparedSession,
+    prepared: &PreparedEffectIndex<'_>,
+    dispatch: Backend,
+    width: BankWidth,
+) -> Result<(Vec<graph::GraphPreparedEffectBank>, Vec<GraphRackBoundSlot>), GraphDiagnostic> {
     let mut banks = Vec::new();
     let mut bound_slots = Vec::new();
     for (group_index, group) in plan.groups.iter().enumerate() {
         for slot in 0..group.program.len() {
-            let Some(members) = bindable_slot_members(group, slot, &chains, &level_by_node)? else {
+            let Some(members) = bindable_slot_members(group, slot, chains, level_by_node)? else {
                 continue;
             };
             let entries: Vec<&EffectPreparedEntry> = members
@@ -316,60 +383,7 @@ pub(crate) fn bind_rack_banks_indexed(
             });
         }
     }
-    Ok((
-        banks,
-        GraphRackBankReport {
-            dispatch,
-            plan,
-            bound_slots,
-            chains,
-        },
-    ))
-}
-
-/// The mono-class tracks the trial `plan` strands (issue #971): every effect group each one sits in
-/// is a **partial** group of the mono pool, so none of its effect slots can bind.
-///
-/// The test is per track over all its groups, not per program. A track whose simd1 chain fills a
-/// mono cohort while its simd2 chain is a partial one is not stranded: moving it would break the
-/// full cohort, and its builtin stages' collapse with it, to gain a bank that may not exist. A
-/// track in no effect group at all (builtins only, or every chain on the per-node path) is not
-/// stranded either: builtin banks pad a partial cohort, so its remainder still banks and still
-/// collapses where it is. A group is class-homogeneous, so a member of a partial mono group is a
-/// mono-class track.
-fn stranded_mono_tracks(plan: &BankPlan<RackChainId>) -> Vec<String> {
-    let mut stranded: BTreeMap<&str, bool> = BTreeMap::new();
-    for group in &plan.groups {
-        let partial_mono =
-            group.class == CohortPoolClass::MonoSymmetricAtPrepare && !group.is_full();
-        for id in group.members.iter().flatten() {
-            let entry = stranded.entry(id.track_id.as_str()).or_insert(true);
-            *entry = *entry && partial_mono;
-        }
-    }
-    stranded
-        .into_iter()
-        .filter(|(_, stranded)| *stranded)
-        .map(|(track, _)| track.to_owned())
-        .collect()
-}
-
-/// How many slots of `plan` pass [`bindable_slot_members`]: the effect banks the plan can bind,
-/// short of the factory's own consent, which is the same for every plan of one session.
-fn bindable_slot_count(
-    plan: &BankPlan<RackChainId>,
-    chains: &BTreeMap<RackChainId, Vec<EffectNodeId>>,
-    level_by_node: &BTreeMap<GraphNodeId, u64>,
-) -> Result<usize, GraphDiagnostic> {
-    let mut count = 0;
-    for group in &plan.groups {
-        for slot in 0..group.program.len() {
-            if bindable_slot_members(group, slot, chains, level_by_node)?.is_some() {
-                count += 1;
-            }
-        }
-    }
-    Ok(count)
+    Ok((banks, bound_slots))
 }
 
 /// The effect node each lane of `group` runs at leader slot `slot`, when that slot can be one
