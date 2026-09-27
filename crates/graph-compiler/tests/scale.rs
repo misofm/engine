@@ -5,7 +5,7 @@ use effect_compiler::EffectPreparedSession;
 use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use graph::{GraphCompileCaps, GraphNodeBinding, GraphRuntimeBindings};
 use graph_compiler::Backend;
-use graph_compiler::{GraphBuiltinsCompileRequest, GraphCompileRequest, GraphCompiler};
+use graph_compiler::{GraphBuiltinsCompileRequest, GraphCompiler};
 use session::{
     CompileCaps, CompiledSession, RouteSource, SendTap, StableId, compile_session,
     parse_session_json,
@@ -66,19 +66,43 @@ fn scale_session() -> CompiledSession {
     .expect("session scale gate")
 }
 
+fn builtin_caps() -> BuiltinCompileCaps {
+    BuiltinCompileCaps {
+        maximum_total_state_bytes: u64::MAX,
+        maximum_total_retained_payload_bytes: u64::MAX,
+        maximum_total_meter_items: u64::MAX,
+        maximum_total_meter_bytes: u64::MAX,
+        maximum_single_allocation_bytes: u64::MAX,
+        maximum_meter_streams: u64::MAX,
+        maximum_period_frames: u32::MAX,
+        maximum_peak_hold_frames: u32::MAX,
+        maximum_smoothing_samples: u32::MAX,
+    }
+}
+
+/// The session compiles at 65,537 tracks, and the only thing that can refuse it is a cap the
+/// host configured.
+///
+/// Issue #964: through `compile_with_builtins` at `Backend::current()`, the production entry at
+/// the width this build renders at. It compiled without builtins at `Backend::Scalar` until then,
+/// where no bank attaches; both compiles now carry the builtin banks, and the refused one hands
+/// both prepared inputs back.
 #[test]
 fn compiles_65_537_tracks_or_rejects_only_a_configured_resource() {
     let session = scale_session();
+    let dispatch = Backend::current();
 
     let mut constrained = graph_caps();
     constrained.maximum_nodes = 1;
-    let failure = GraphCompiler::compile(GraphCompileRequest {
-        dispatch: Backend::Scalar,
+    let failure = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        dispatch,
         plan_id: 1,
         effects: EffectPreparedSession {
             session: session.clone(),
             entries: Vec::new(),
         },
+        builtins: prepare_session_builtins(&session, &[], builtin_caps())
+            .expect("constrained scale builtins"),
         caps: constrained,
     })
     .err()
@@ -90,33 +114,40 @@ fn compiles_65_537_tracks_or_rejects_only_a_configured_resource() {
             .iter()
             .all(|diagnostic| diagnostic.code == "graph.resource.limit")
     );
+    assert_eq!(
+        failure.builtins.tails().count(),
+        TRACKS as usize,
+        "the refused compile hands every track's builtins back"
+    );
 
-    let artifact = GraphCompiler::compile(GraphCompileRequest {
-        dispatch: Backend::Scalar,
+    let builtins = prepare_session_builtins(&session, &[], builtin_caps()).expect("scale builtins");
+    let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        dispatch,
         plan_id: 2,
         effects: EffectPreparedSession {
             session,
             entries: Vec::new(),
         },
+        builtins,
         caps: graph_caps(),
     })
     .unwrap_or_else(|failure| panic!("scale diagnostics: {:?}", failure.diagnostics));
-    assert_eq!(artifact.report.estimate.logical_nodes, 458_761);
-    assert_eq!(artifact.report.estimate.edges, 393_224);
-    assert_eq!(artifact.report.estimate.routes, 1);
-    assert_eq!(artifact.report.estimate.effects, 0);
-    assert_eq!(artifact.graph.sequential_schedule.len(), 458_761);
+    assert_eq!(artifact.report().estimate.logical_nodes, 458_761);
+    assert_eq!(artifact.report().estimate.edges, 393_224);
+    assert_eq!(artifact.report().estimate.routes, 1);
+    assert_eq!(artifact.report().estimate.effects, 0);
+    assert_eq!(artifact.graph().sequential_schedule.len(), 458_761);
 }
 
 /// Issue #962: the same session through the production entry, at the width this build renders at,
 /// then bound and rendered for one block.
 ///
-/// The gate above compiles without builtins at `Backend::Scalar`, where no bank attaches, and that
-/// is how a bank-membership scan quadratic in the track count stayed hidden on every host's compile
-/// path (`PreparedGraphPlan::with_builtin_banks`, about 160 s in release before the fix). This one
-/// attaches the builtin banks every host renders and then binds the plan, because bind had
-/// quadratic scans of its own. Both are exercised by the track count alone, so a regression shows
-/// up as this test's time rather than as an assertion.
+/// Until #964 the gate above compiled without builtins at `Backend::Scalar`, where no bank
+/// attaches, and that is how a bank-membership scan quadratic in the track count stayed hidden on
+/// every host's compile path (`PreparedGraphPlan::with_builtin_banks`, about 160 s in release
+/// before the fix). This one attaches the builtin banks every host renders and then binds the
+/// plan, because bind had quadratic scans of its own. Both are exercised by the track count alone,
+/// so a regression shows up as this test's time rather than as an assertion.
 ///
 /// There is no wall-clock bound, because a test-harness clock is not one CI can hold reliably: the
 /// runners' speed varies and this binary's tests run in parallel. The backstop is the debug job's
@@ -125,22 +156,7 @@ fn compiles_65_537_tracks_or_rejects_only_a_configured_resource() {
 #[test]
 fn compiles_and_binds_65_537_tracks_with_builtins() {
     let session = scale_session();
-    let builtins = prepare_session_builtins(
-        &session,
-        &[],
-        BuiltinCompileCaps {
-            maximum_total_state_bytes: u64::MAX,
-            maximum_total_retained_payload_bytes: u64::MAX,
-            maximum_total_meter_items: u64::MAX,
-            maximum_total_meter_bytes: u64::MAX,
-            maximum_single_allocation_bytes: u64::MAX,
-            maximum_meter_streams: u64::MAX,
-            maximum_period_frames: u32::MAX,
-            maximum_peak_hold_frames: u32::MAX,
-            maximum_smoothing_samples: u32::MAX,
-        },
-    )
-    .expect("scale builtins");
+    let builtins = prepare_session_builtins(&session, &[], builtin_caps()).expect("scale builtins");
     let dispatch = Backend::current();
     let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
         dispatch,
