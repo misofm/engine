@@ -298,9 +298,11 @@ pub(crate) fn bind_rack_banks_indexed(
             .collect();
         // Issue #1001: the re-plan is speculative, and the trial above is already bound and
         // valid, so a factory error while binding the re-plan's changed groups keeps the unmoved
-        // plan and its banks rather than failing the compile (#95: a cohort a factory cannot bank
-        // never costs the user the compile). The banks bound before the error are dropped with
-        // it, and `classes` is still the unmoved map: only the clone was changed.
+        // plan and its banks rather than failing the compile. This is the one exception to #95's
+        // rule that an `Err` fails the compile, and it rests on #95's own reasoning (a planner
+        // bug must not cost the user their session) applied to a plan that was only ever
+        // speculative. The banks bound before the error are dropped with it, and `classes` is
+        // still the unmoved map: only the clone was changed.
         let fresh: Result<Vec<Option<BoundGroup>>, GraphDiagnostic> = replan
             .groups
             .iter()
