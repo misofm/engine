@@ -52,12 +52,13 @@ use lane::{
         SvfCoef,
         builtins::{
             GainMuteRamp, InputChainCoef, InputChainPlan, InputChainState, InputTrimRamp,
-            Matrix2x2Coef, Matrix2x2Ramp, fader_matrix_block, gain_mute_block,
-            gain_mute_ramp_block, input_chain_block_elided, input_chain_block_mono_elided,
-            input_chain_plan, input_chain_ramp_block_elided, input_chain_ramp_block_filter,
-            input_chain_ramp_block_filter_mono, input_chain_ramp_block_mono_elided, lanes_below,
-            mask_from_flags, matrix2x2_block, matrix2x2_block_without_identity,
-            matrix2x2_ramp_block, no_lanes, plan_is_channel_symmetric, zero_lanes_block,
+            Matrix2x2Coef, Matrix2x2Ramp, fader_matrix_block, fader_matrix_block_without_identity,
+            gain_mute_block, gain_mute_ramp_block, input_chain_block_elided,
+            input_chain_block_mono_elided, input_chain_plan, input_chain_ramp_block_elided,
+            input_chain_ramp_block_filter, input_chain_ramp_block_filter_mono,
+            input_chain_ramp_block_mono_elided, lanes_below, mask_from_flags, matrix2x2_block,
+            matrix2x2_block_without_identity, matrix2x2_ramp_block, no_lanes,
+            plan_is_channel_symmetric, zero_lanes_block,
         },
     },
 };
@@ -877,6 +878,9 @@ thread_local! {
     static FILTER_PREFIX_KERNEL_FRAMES: Cell<usize> = const { Cell::new(usize::MAX) };
     /// Settled matrix blocks that took the select-free arm (issue #944), counted per call.
     static MATRIX_SELECT_FREE_BLOCKS: Cell<usize> = const { Cell::new(0) };
+    /// Settled fused fader/matrix blocks that took the select-free arm (issue #954), counted per
+    /// call.
+    static FUSED_SELECT_FREE_BLOCKS: Cell<usize> = const { Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -2996,6 +3000,42 @@ impl<L: Lane> MatrixStage<L> {
         }
     }
 
+    /// Renders one settled block of the fused fader and matrix on the current coefficients.
+    ///
+    /// The fused twin of [`Self::settled_block`] (issue #954). With no identity lane over all
+    /// `L::WIDTH` lanes -- padding lanes included, so a partial bank always keeps the select --
+    /// the per-lane select of [`fader_matrix_block`] returns its second arm on every word, and
+    /// [`fader_matrix_block_without_identity`] is that arm with no select. Class A.
+    ///
+    /// Every caller runs this only after its own settled check, which runs after the block's
+    /// controls have drained, so `coef.identity` is the mask `sync_settled` wrote for exactly these
+    /// coefficients, including a same-block instant retarget to the identity. It is tested here,
+    /// once per call, and never cached.
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    fn fused_settled_block(
+        &self,
+        left: &mut [f32],
+        right: &mut [f32],
+        frames: usize,
+        gain_left: L,
+        mute_left: L::Mask,
+        gain_right: L,
+        mute_right: L::Mask,
+    ) {
+        if L::mask_any(self.coef.identity) {
+            fader_matrix_block::<L>(
+                left, right, frames, gain_left, mute_left, gain_right, mute_right, &self.coef,
+            );
+        } else {
+            #[cfg(test)]
+            FUSED_SELECT_FREE_BLOCKS.with(|blocks| blocks.set(blocks.get() + 1));
+            fader_matrix_block_without_identity::<L>(
+                left, right, frames, gain_left, mute_left, gain_right, mute_right, &self.coef,
+            );
+        }
+    }
+
     /// Renders one block of both channels.
     fn process(&mut self, left: &mut [f32], right: &mut [f32], frames: usize) {
         let maximum = self
@@ -3116,7 +3156,7 @@ impl BuiltinChain {
             {
                 self.fused_dispatches += 1;
             }
-            fader_matrix_block::<f32>(
+            self.matrix.stage.fused_settled_block(
                 left,
                 right,
                 frames,
@@ -3124,7 +3164,6 @@ impl BuiltinChain {
                 self.fader_mute.stage.mute[0],
                 self.fader_mute.stage.gain[1],
                 self.fader_mute.stage.mute[1],
-                &self.matrix.stage.coef,
             );
         } else {
             self.fader_mute.stage.process(left, right, frames);
@@ -3830,7 +3869,7 @@ impl BuiltinFaderBank {
         }
         match (&self.stage, &matrix.stage) {
             (FaderStageKernel::Simd4(fader), MatrixStageKernel::Simd4(matrix)) => {
-                fader_matrix_block::<Simd4>(
+                matrix.fused_settled_block(
                     left,
                     right,
                     frames as usize,
@@ -3838,11 +3877,10 @@ impl BuiltinFaderBank {
                     fader.ramp[0].mute,
                     fader.ramp[1].current,
                     fader.ramp[1].mute,
-                    &matrix.coef,
                 );
             }
             (FaderStageKernel::Simd8(fader), MatrixStageKernel::Simd8(matrix)) => {
-                fader_matrix_block::<Simd8>(
+                matrix.fused_settled_block(
                     left,
                     right,
                     frames as usize,
@@ -3850,7 +3888,6 @@ impl BuiltinFaderBank {
                     fader.ramp[0].mute,
                     fader.ramp[1].current,
                     fader.ramp[1].mute,
-                    &matrix.coef,
                 );
             }
             _ => return false,
@@ -4176,7 +4213,7 @@ impl FaderMuteRampBuiltins {
         }
         let DualMonoBlock { left, right, .. } = block;
         let frames = left.len();
-        fader_matrix_block::<f32>(
+        matrix.stage.fused_settled_block(
             left,
             right,
             frames,
@@ -4184,7 +4221,6 @@ impl FaderMuteRampBuiltins {
             self.stage.ramp[0].mute,
             self.stage.ramp[1].current,
             self.stage.ramp[1].mute,
-            &matrix.stage.coef,
         );
         true
     }
