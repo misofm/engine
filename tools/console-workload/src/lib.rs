@@ -147,17 +147,23 @@ pub enum Workload {
     SixtyFourTrackCompressorOnly,
     /// Decomposition: every rack emptied. Input trim/HPF/LPF, fader and pan matrix only.
     SixtyFourTrackBuiltinsOnly,
-    /// Decomposition: every rack emptied **and** every builtin asked for its identity.
+    /// Decomposition: every rack emptied, **and** every input builtin and the fader asked for their
+    /// identity.
     ///
-    /// Polarity off, trim 0 dB, HPF and LPF at 0 Hz, fader 0 dB unmuted, pan hard identity with no
-    /// smoothing.
+    /// Polarity off, trim 0 dB, HPF and LPF at 0 Hz, fader 0 dB unmuted, and a pan of
+    /// `left = right = 1.0` with no smoothing. That pan is **not** the identity matrix: it routes
+    /// both inputs hard right (`ll = lr = cos(pi / 2)`, which is `6.1e-17` in `f32`, and
+    /// `rl = rr = 1`). The pan law cannot produce the identity, so no standing row exercises an
+    /// identity matrix; ruling 4 of issue #944 corrected this doc and kept the row's content, and
+    /// with it the row's digest.
     ///
     /// What this row is **not**: it is not the cost of dispatch alone, and the record says
     /// `identity` rather than `dispatch` for that reason. A builtin filter at 0 Hz is *disabled*,
     /// and `SvfSection::design` implements disabled by designing an identity section -- `m0 = 1`,
     /// `m1 = m2 = 0`, `k = 0` (`builtins`, the version-1 cutoff contract). A 0 dB fader
-    /// is still a multiply and a mask clear, and a settled identity pan matrix still evaluates both
-    /// arms of its per-lane select; both of those run over the same lanes every block.
+    /// is still a multiply and a mask clear, and the hard-right pan is a real 2x2 matrix: with no
+    /// identity lane in any bank, it runs the settled matrix's select-free arm (issue #944), the
+    /// same arm `sixty_four_track_gain_pan_only` runs. Both run over the same lanes every block.
     ///
     /// The two SVF sections no longer do. A prepared section that is the exact identity in every
     /// lane and every word is the map `v |-> v + 0.0`, so a run of them is one `add(+0.0)`, and
@@ -167,7 +173,8 @@ pub enum Workload {
     ///
     /// So this row measures: source fill, per-node graph dispatch, buffer plumbing, route
     /// summation, the sanitisation and boundary-scan passes the D7 policy requires of every block,
-    /// and the fader and matrix kernels running their identity coefficients.
+    /// the fader kernel running its identity coefficients, and the matrix kernel running a
+    /// hard-right pan.
     ///
     /// **The near-equality reading is retired.** Before the elision, the two rack-free rows ran the
     /// same instructions over the same lanes with different constants, and their near-equality was
@@ -270,15 +277,18 @@ pub enum Workload {
     ///
     /// The controlled partner of `sixty_four_track_dispatch_only`. The two rows execute the same
     /// instructions over the same lanes -- both elide their prepared-identity input sections, both
-    /// run `gain_mute_block` and `matrix2x2_block` unconditionally -- and differ only in the
-    /// *constants* those two kernels carry: 0 dB and hard identity there, the fixture's declared
-    /// per-channel fader trims and pan positions here.
+    /// run `gain_mute_block` and the settled matrix's select-free arm on every bank -- and differ
+    /// only in the *constants* those two kernels carry: 0 dB and a hard-right pan there, the
+    /// fixture's declared per-channel fader trims and pan positions here.
     ///
-    /// That makes the pair a direct measurement of a claim the floor table asserts and nothing had
-    /// yet tested: a 0 dB fader and a settled identity matrix cost exactly what a real one costs,
-    /// because neither kernel has an identity arm. The two rows share a floor (22 lane-ops) for
-    /// precisely that reason, and a material gap between them would mean one of the two kernels
-    /// had acquired a data-dependent path.
+    /// That makes the pair a direct measurement of a claim the floor table asserts: a 0 dB fader
+    /// costs exactly what a real one costs, because `gain_mute_block` has no identity arm, and a
+    /// hard-right pan costs what a real pan costs, because neither is the identity matrix. The
+    /// settled matrix does have one data-dependent path since issue #944 -- a bank with any
+    /// identity lane keeps the per-lane identity select, and a bank with none skips it -- and
+    /// neither row has an identity lane, so both take the same arm. The two rows share a floor
+    /// (22 lane-ops) for precisely that reason, and a material gap between them would mean one of
+    /// the two kernels had acquired another data-dependent path.
     SixtyFourTrackGainPanOnly,
     /// The mono qualification session: sixty-four collapse-eligible strips, rendered as written.
     ///
@@ -677,8 +687,12 @@ fn apply_strip(model: &mut SessionModel, strip: Strip) {
                     channel.lpf_hz = 0.0;
                 }
                 // The one field that separates the two rows. `GainPan` keeps the fixture's
-                // declared fader trims and pan positions; `Identity` asks both kernels for the
-                // value that would let them do nothing, which neither of them has an arm for.
+                // declared fader trims and pan positions; `Identity` asks the fader for 0 dB and
+                // the pan for `left = right = 1.0`. That pan is not the identity matrix: it routes
+                // both inputs hard right (`ll = lr = 6.1e-17`, `rl = rr = 1`), so this row's
+                // matrix banks have no identity lane and run the same select-free arm as
+                // `GainPan`'s (issue #944). The doc is corrected; the content, and so the digest,
+                // is kept (ruling 4).
                 if strip == Strip::Identity {
                     track.fader = DualMonoFader {
                         left_db: 0.0,
