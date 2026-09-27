@@ -176,3 +176,35 @@ scalar loop (F-4) leaves every count at zero and fails the lowering pin instead:
 ```
 wasm gates: the f64 lane probe is not vectorised on the simd128 leg: f64x2.promote_low_f32x4=0 f64x2.mul=2 f64x2.add=2 f64.promote_f32=4 f64.mul=0 f64.add=0
 ```
+
+## The full meter pass (issue #950): the kernel count and its lowering pin
+
+The guest gained `miso_gate_meter_block_mismatches(width)`, which runs
+`wasm_gate_corpus::meter_block_mismatches` (`lane::kernels::builtins::meter_block` against an
+independent scalar `ALL` loop over hostile and tone streams of 16 carried blocks at five frame
+counts, peak, counts and energy by bits) and returns the lane fields that disagree. Every leg
+requires zero and carries the count in its evidence line as `meter_block_mismatches`. It also gained
+`miso_gate_meter_block_probe`, which calls the real `meter_block::<Simd4>`; `check_f64_lane_lowering`
+censuses it beside the #949 probe and additionally refuses scalar `f32.add`, `f32.gt` and `f32.abs`
+in it.
+
+**Red mutations, applied and reverted on the delivery host** (the full table is in
+`crates/lane/tests/MUTATIONS.md`, rows K-1, K-5, K-6 and M-W). The clipped count on `c > 1.0`
+(K-6), on all three legs:
+
+```
+{"schema_version":1,"kind":"wasm_gates","leg":"native",…,"f64_lane_mismatches":0,"meter_block_mismatches":662,"mismatches":[]}
+native meter block: 662 lane fields disagree with the meter's scalar loop; meter_block in crates/lane/src/kernels/builtins.rs is not the builtin meter's ALL loop on this target
+{"schema_version":1,"kind":"wasm_gates","leg":"wasm",…,"backend":0,…,"meter_block_mismatches":662,"mismatches":[]}
+{"schema_version":1,"kind":"wasm_gates","leg":"wasm",…,"backend":1,…,"meter_block_mismatches":662,"mismatches":[]}
+```
+
+The zero-seeded partial plus seed (K-1) gives `686` and the sanitized count that also counts zeros
+(K-5) `1315` on the native leg; all 358 digest comparisons stay green under each. The kernel
+widening through a `black_box`ed scalar loop (M-W) leaves every count at zero and fails the pin on
+the new probe while the #949 probe stays green:
+
+```
+wasm gates: miso_gate_f64_lane_probe census (simd128): f64x2.promote_low_f32x4=2 f64x2.mul=2 f64x2.add=2 f64.promote_f32=0 ...
+wasm gates: miso_gate_meter_block_probe is not vectorised on the simd128 leg: f64x2.promote_low_f32x4=0 f64x2.mul=2 f64x2.add=2 f64.promote_f32=4 f64.mul=0 f64.add=0 f32.{add,gt,abs}=0 f32x4.abs=1 f32x4.add=2
+```

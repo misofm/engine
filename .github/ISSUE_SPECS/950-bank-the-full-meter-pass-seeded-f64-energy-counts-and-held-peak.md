@@ -676,3 +676,514 @@ All harnesses were throwaway, run in the research worktree and reverted.
 - **Native widen check.** All 2^32 patterns at `Simd4` and `Simd8` against the integer-construction
   oracle, with `black_box` on the vector result: 9.7 s, 0 mismatches. Without `black_box`, against
   `f64::from`, the sweep folded to 5 ms.
+
+## Attempt 1 evidence
+
+Implementer: attempt 1, 2026-09-27, on branch `codex/950-banked-full-meters` from `e2b5b9c8` (the
+optimisation batch with #943 and #949 merged). Host AMD EPYC 7313P, `x86-64-v3`, rustc 1.97.1,
+node 22.23.2, wasmtime 47.0.3. `CARGO_INCREMENTAL=0`, the worktree's own `target/` (deleted at the
+end). Nothing pushed; no timed benchmark; the AudioWorklet pin is not repinned.
+
+Commits: `b0ee0f1e` (lane kernel, meter accumulator, M1, M2), `b4265212` (graph pass,
+`MeterObserver`, M3, controls, failure boundary, M4, source scan), `232eb989` (wasm count, probe,
+lowering pin, G6 assertion), `326607ce` (seeds written in place: two 128-byte copies removed),
+`9696f74d` (M2's two-meter row isolated, failure-boundary commits pinned), `9073fffb` (rustdoc
+links), `646bc0dd` (mutations), and this section.
+
+### Design
+
+- **Kernel** (`crates/lane/src/kernels/builtins.rs`): `MeterBlock<L: Widen>` and
+  `meter_block<L: Widen>(words, frames, energy: L::F64)`, the frozen six-step order of interface
+  item 1, `#[inline(always)]`, with the four facts in its doc. `peak` is steps 1-3 of
+  `meter_sample_peak_block`, so it equals that kernel seeded with `+0.0`.
+- **Accumulator** (`crates/builtins/src/lib.rs`, meter only): `MeterBankedBlock`,
+  `banked_eligible`, `banked_seed` (pure; `None` unless eligible, **`ENERGY_RMS` selected**
+  (amendment 2) and `frames > 0`; mirrors the preamble's discontinuity; `None` when the block would
+  cross the window), and `observe_input_banked`. `observe_input`, `observe_input_with_block_peak`
+  and `observe_input_banked` share one private body: preamble, then the banked commit
+  (`commit_banked`, before `settled_silence`), then #943's merge, then the unchanged loop. The
+  commit checks eligibility, `0 < len <= period - frames` and, with `ENERGY_RMS`, both seeds' bits;
+  it then merges peak (`q > peak`) and held (`q >= held`), **replaces** the energy, and
+  `saturating_add`s the counts into the window and then the lifetime counters, left then right
+  (`commit_banked_lane`, a new realtime-marked region). Test support:
+  `test_only_banked_meter_commits` / `test_only_reset_banked_meter_commits`.
+- **Graph** (`crates/graph/src/{lib,runtime}.rs`): `GraphBankedMeterLane`,
+  `GraphResidentObservationBlock::meter`, and `GraphRuntimeObserver::{accepts_banked_meter,
+  banked_meter_seed}` with declining defaults. The bind-time flag lives in #943's
+  `UnitObservation` byte, now five states (`Unobserved`, `Observed`, `ObservedWithPeak`,
+  `ObservedWithMeter`, `ObservedWithPeakAndMeter`), derived through a shared
+  `RuntimeUnit::final_slot_accepts` with #943's `checked_sub`; #943's `const` layout assertion
+  holds (`cargo check --target wasm32-unknown-unknown -p graph` passes: still 20 bytes there). In
+  `observe_unit`'s bank arm, when the flag, `eligible`, `frames` and the test switch allow:
+  `bank_meter_seeds` fills an in-place `Option<[[f64; 8]; 2]>` with each final lane's first seed in
+  binding order and returns whether any lane answered (amendment 5: no answer, no pass); then
+  `final_output_block` and the `#[inline(never)]` `bank_meter_pass`, which dispatches the width,
+  borrows exactly `frames * W` words with `get` (amendment 5), declines above `2^24` frames
+  (amendment 5), and calls `meter_block` once per plane. When the full pass ran, #943's pass does
+  not, and its peak becomes every final member's `sample_peak`; otherwise #943's pass runs
+  unchanged. Each final member gets `meter = Some(lane l)` with counts as `u32` and `energy_seed`
+  from the seeds; every other member, the `Op` arm and `observe_one` pass `None`. Test support:
+  `test_only_set_bank_meter_declined` (resets the count) and `test_only_bank_meter_passes`.
+- **Observer** (`crates/builtins-compiler/src/lib.rs`, `MeterObserver` only):
+  `accepts_banked_meter = banked_eligible() && metrics() != SAMPLE_PEAK`; `banked_meter_seed`
+  forwards to `banked_seed`; `observe_resident` calls `observe_input_banked` only when
+  `block.meter.is_some() && accepts_banked_meter()` (amendment 1) and #943's call with
+  `block.sample_peak` otherwise.
+- **#714** (amendment 3). The owner's 2026-09-26 ruling supersedes #714 line 167's "no new `f64`
+  lanes"; its "no energy reassociation, per-lane sample order" is kept (I6, and K-1 below goes red
+  on it). The seed is a `&self` read of each meter's own state, the kernel a pure function of that
+  seed and the resident block, and each meter re-checks the seed after its own preamble and
+  commits its own lane in binding order behind the `?` short-circuit. The failure-boundary gate
+  below witnesses I4.
+
+### Deviations and decisions
+
+1. **The flag is a `UnitObservation` state, not a `bool`** (interface item 4). #943 attempt 2 packed
+   its flag into one byte because a fifth `bool` grew the row on wasm32; a sixth would too. Two
+   states were added instead, and the `const` assertion is unchanged.
+2. **The seeds are not stored in the pass's result.** The first build's census showed two
+   `memory.copy` of 128 bytes per bank per block (the seeds returned by value, then copied into
+   the result). `326607ce` writes them once into an `Option` in `observe_unit` that the pass and the
+   hand-off read by reference, per the owner's copy rule; `bank_meter_pass` now has no
+   `memory.copy`, and the caller has only the `+0.0` fill.
+3. **Full passes are one per cohort per block that some window holds**, not `BLOCKS x cohorts` at
+   every period (amendment 5 skips blocks where no lane answered). At period 300 every meter's
+   window crosses on the same blocks, so M3 asserts `passes == cohorts x inside` and `commits == 64 x
+   inside` with `inside` computed by a window simulation in the test (14 of 24 blocks); at 512 it is
+   `BLOCKS x cohorts`.
+4. **G-4's witness is the mixed control**, not the #943 fixture control: after amendment 2 a
+   `SAMPLE_PEAK` meter answers no seed, so no pass runs on that fixture even if it accepts; the
+   mixed control sees the peak meters commit through the banked path instead of merging.
+5. **`observe()` has eight parameters**, under `#[expect(clippy::too_many_arguments)]` with a
+   reason, as `observe_one` already does.
+6. **The source scan** now counts `.final_output_block(` twice (one borrow in each of the two
+   exclusive pass arms) and pins `bank_meter_pass(` and `bank_meter_seeds(` twice each, the new
+   gate, seed walk and hand-off terms, the Op arm's two-line form, and `meter,` in the member call
+   and in `observe`'s block. New control rows: the full pass forced on, #943's pass run beside it,
+   the meter lane withheld and shifted, the seeds not read, and one plane passed twice.
+7. **M2's two-meter row is its own test** (`a_peak_meter_bound_first_leaves_the_seed_to_the_all_meter_behind_it`),
+   so amendment 2's pollution is reported by the row itself rather than by the sweep failing first.
+   M2's sweep runs one thread per period (the counters are thread-local): 20 s in dev.
+8. **The `2^24`-frame decline has no test.** A block that long needs 512 MiB of planes at four lanes.
+   It is one comparison in `bank_meter_pass`, whose body is otherwise read off the census.
+9. **The G6 assertion** is on the canonical arm only, per the issue comment: under DAZ a subnormal
+   widen input reads as zero, which is the environment every render entry clears.
+10. **The lowering probe also refuses scalar `f32.add`, `f32.gt` and `f32.abs`** and requires
+    `f32x4.abs` and `f32x4.add`, so a scalarised sanitize or count is caught as well as a scalarised
+    widen.
+11. **Twin meters** (two energy-keeping meters on one member) are left as the verification found
+    them: the second commits the first's seeded result when the seed bits are equal, which is
+    value-exact. No shipped host binds two.
+
+### Gates
+
+| gate | command | result |
+|---|---|---|
+| M1 | `cargo test --locked -p lane --test meter_block` (dev and `--release`) | PASS, 3 tests: per input family (hostile, tone) `Simd8` 3,072, `Simd4` 1,536 and `f32` 384 lane-blocks bit-identical to the `f32` kernel and the independent oracle on peak, both counts (as integers) and energy, over 64 carried blocks at frames 1, 2, 3, 127, 128, 129 from random positive seeds; `peak` equal to `meter_sample_peak_block(.., L::zero())`; the count-boundary bit sweep; the zero-seeded-partial witness differs at least once |
+| M2 | `cargo test --locked -p builtins --features test-support --test meter` (and without the feature: equality only) | PASS: 19,127,808 snapshots bit-identical on every field, 187,908 banked commits. Counters on 64 x 128 frames, 8 ALL meters: 512 at period 512, 0 at 64, 512 at 1536, strictly between at 300; 0 with any hold or decay on a held peak; 0 for every set without `ENERGY_RMS`; 0 withheld; 0 with the seed moved one ulp (snapshots still equal); `[8, 8, 16]` across "block, skip 7, block"; the `[SAMPLE_PEAK, ALL]` row commits 512 (`Simd8`) and 256 (`Simd4`) |
+| M3 | `cargo test --locked -p graph-compiler --lib post_matrix_all_meters` | PASS, table below |
+| M3 controls | `... --lib the_full_meter_pass_stays_off` | PASS: mixed (on) passes 192, #943 passes 0, merges 768, commits 768; (declined) 0, 192, 768, 0; frames equal. #943's `SAMPLE_PEAK` fixture: 0 full passes, 192 #943 passes, 1,536 merges. Ballistics (hold 8): 0 passes and 0 commits in both arms, frames equal, held peaks non-zero. Activation: 0 passes, 0 commits, the controlled row called 24 times, PCM and 384 frames equal to the declined web arm |
+| failure boundary | `... --lib an_observer_failing_mid_bank` | PASS: an observer bound after `ch01`'s meter fails block 5 in both arms; commits per block `[64 x 5, 2, 64 x 10]`; `ch01`'s meter has no discontinuity, `ch02`'s has one; PCM of every good block and every frame equal to the declined arm's |
+| M4 | `... --lib the_full_meter_pass_renders_without` | PASS: 1,000 blocks, `audit::snapshot().total() == 0`, full passes 8,000 (`1,000 x 8`), #943 passes 0, commits 64,000, windows 16,000 |
+| rt9 / layout | `cargo test -p graph --features test-support`; `cargo check --locked --target wasm32-unknown-unknown -p graph` | PASS (`rt9_identity_metadata_has_no_retained_or_peak_layout_delta` green; the `const` assertion holds on wasm32) |
+| M5 kernel differential | `bash scripts/run-wasm-gates.sh` | PASS: native, wasm scalar and wasm simd128 legs each `cases 142, comparisons 358, minmax_lowering_mismatches 0, f64_lane_mismatches 0, meter_block_mismatches 0, mismatches []` |
+| M5 lowering pin (amendment 4) | same script, `check_f64_lane_lowering` | PASS: `miso_gate_f64_lane_probe` 2/2/2 `f64x2` promote/mul/add, no scalar `f64`; `miso_gate_meter_block_probe` (the real `meter_block::<Simd4>`) 2/2/2, no scalar `f64`, no scalar `f32.{add,gt,abs}`, `f32x4.abs` 1, `f32x4.add` 2 |
+| M5 artifact | the build script's cargo line into `target/web-950`, `wasm-objdump -d`, the four callgraph checks | PASS: `--callgraph miso_engine_web_v1_render` (closure 8, traps 5, #943's owner); `--kernel-shape --kernel-pattern '4wide6f32x[48]' --kernel-min 11` (15 kernels, unchanged); `--callgraph miso_engine_web_v1_meter_poll --trap-owner ...poll_meters`; `--callgraph miso_engine_web_v1_command_submit --allocation-only`; `--self-test`. `host_web.wasm` 3,313,930 bytes, sha256 `b005b58b...5efeaac2`; the pin `8934cdd9...` is not repinned |
+| G6 FTZ | `cargo test --locked -p wasm-gates` | PASS, with the new assertions (`f64_lane_mismatches == 0`, `meter_block_mismatches == 0` on the canonical arm) |
+| fmt | `cargo fmt --all --check` | PASS |
+| clippy | `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | PASS |
+| doc | `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps` | PASS |
+| suites | `cargo test --locked -p ...` | PASS: lane 67 (2 ignored); builtins 116 and 116 with `test-support`; builtins-compiler `test-support` 79; graph 118 and 125 with `test-support`; graph-compiler 98; host-core `--all-features` 225; host-web 206; console-workload 40; capi 36; wasm-gates + wasm-gate-corpus 9 |
+| policy | `scripts/check-{lane-policy,unfused-seal,builtins-policy,builtins-fixtures,graph-policy,graph-determinism,realtime-policy,workspace-policy}.sh` | PASS, all eight (realtime: 58 marked regions in 16 files, two new; determinism 100/100) |
+
+`crates/graph`'s dependency list and every `Cargo.toml` are unchanged; no `unsafe` was added; only
+`crates/lane` names `wide` (the tools name `<Simd4 as Widen>::F64`). The builtins scalar-path
+probes (`test_only_peak_samples`, `meter_work_probe`) are green unchanged.
+
+**M3, per configuration** (24 blocks, pass on / declined; PCM bit-identical, every frame equal on
+every field by bits, shape tuple equal, frames carry signal, some window's L and R energies differ,
+#943 passes 0 / 0 everywhere):
+
+| dispatch, delivery, period | `[chains, slots]` | transposes | folds | redirects | frames | full passes | commits |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Simd8, both deliveries, 512 | [8, 48] | 192 | 64 | 0 | 384 | 192 / 0 | 1,536 / 0 |
+| Simd8, both deliveries, 300 | [8, 48] | 192 | 64 | 0 | 640 | 112 / 0 | 896 / 0 |
+| Simd4, both deliveries, 512 | [32, 64] | 768 | 64 | 60 | 384 | 384 / 0 | 1,536 / 0 |
+| Simd4, both deliveries, 300 | [32, 64] | 768 | 64 | 60 | 640 | 224 / 0 | 896 / 0 |
+| `console_meters` path (`compile_console_model_with_builtins`), Simd8, 512 | [8, 48] | 192 | 64 | 0 | 384 | 192 / 0 | 1,536 / 0 |
+
+Meter differential totals: M2 19,127,808 snapshots; M3's frames per configuration as in the table
+(each control 384 per arm); M4 16,000 windows; the A/B below 104,192 snapshots per arm. Zero
+mismatches anywhere.
+
+### wasm census of `bank_meter_pass` (M5)
+
+In the artifact above `bank_meter_pass` is `func[2254]`, with one call site (in
+`GraphExecutor::render`, `observe_unit` inlined); `bank_meter_seeds` is inlined into that caller.
+`bank_sample_peak` is `func[2256]`, unchanged.
+
+| opcode | count | | opcode | count |
+|---|---:|---|---|---:|
+| `f64x2.promote_low_f32x4` | 12 | | `f32x4.pmax` | 2 |
+| `f64x2.mul` | 12 | | `f32x4.lt` | 4 |
+| `f64x2.add` | 12 | | `v128.bitselect` | 10 |
+| `f32x4.abs` | 6 | | `f32x4.ge` | 6 |
+| `f32x4.add` | 12 | | `f32x4.ne` | 6 |
+| `i32x4.sub`, `i32x4.lt_u` | 6, 6 | | `i8x16.shuffle` | 6 |
+| `loop` | 4 | | `memory.copy`, `call`, `unreachable` | 0 |
+| forbidden `f64.promote_f32`, `f64.mul`, `f64.add` | 0 | | forbidden `f32.add`, `f32.gt`, `f32.abs` | 0 |
+
+- The live `Simd4` arm has 4 each of the three `f64x2` opcodes; the `Simd8` arm, dead on wasm, has
+  8 (two `v128` halves), as the verification predicted. `i8x16.shuffle` moves the high pair of each
+  `f32x4` down for its second `promote_low`.
+- The sanitize is #943's integer range test (`i32x4.sub`, `i32x4.lt_u`); the sanitized count lowers
+  as `f32x4.ne` plus `and`; the clipped count as `f32x4.ge` plus `and`.
+- Each of the four loops has one conditional branch, its back edge: branch free per frame. No call
+  and no trap: the `get` borrow removed the prototype's `slice_index_fail`.
+- The caller around the call site has one `memory.fill` of 128 bytes (the seeds' `+0.0`) and no
+  `memory.copy` (the first build had two of 128 bytes; deviation 2).
+
+### In-process A/B (throwaway, descriptive, deleted)
+
+A temporary `tools/console-workload/tests/zz_ab_950.rs`: two `SessionRuntime`s of
+`Workload::SixtyFourTrackConsole` with `PlanConfig { meters: true, .. }` (the `console_meters`
+meters-on arm: ALL at `PostMatrix`, 4 x 128, hold 0, decay 0), one with the full pass and one with
+`test_only_set_bank_meter_declined(true)`, alternated per block with the order swapped every block,
+512 warm-up and 6,000 timed blocks, release, `taskset -c 29`, meters drained and PCM hashed outside
+the clock. Load average 2.3-2.8 (other agents building).
+
+| run | p50 pass on | p50 declined | paired median (declined - on) | p10 / p90 of the delta |
+|---|---:|---:|---:|---:|
+| 1 | 137.4 us | 160.3 us | 22.7 us | 17.4 / 28.2 us |
+| 2 | 137.6 us | 159.9 us | 22.1 us | 16.8 / 27.7 us |
+
+Both arms rendered the same PCM digest over 6,512 blocks and published the same 104,192 snapshots
+(handles, windows, starts, peaks, energies, `rms`, counts and held peaks by bits); the pass ran
+52,096 times (`6,512 x 8`) on and 0 declined. This is not the benchmark row and not the issue's
+result.
+
+### Red mutations
+
+Each applied alone as an exact-text replacement and restored with `git checkout`; the tables with
+the failing messages are in `crates/{lane,builtins,graph}/tests/MUTATIONS.md` and
+`tools/wasm-gates/MUTATIONS.md`.
+
+| # | mutation | red on |
+|---|---|---|
+| K-1 | the kernel's energy is a zero-seeded partial plus the seed | M1 (one ulp), M2, M3 (`meter 1 window 1`), the native count (686) |
+| K-2 | `banked_seed` ignores the discontinuity | M2's skip counter (`[8, 8, 8]` against `[8, 8, 16]`); snapshots stay equal, as the brief says |
+| K-3 | the commit drops the seed-bit check | M2's safety net (moved seed: window 0 differs) |
+| K-4 | `banked_eligible` ignores the decay | M2 (`period 129, hold 0, decay 12`) |
+| K-5 | the sanitized count also counts zeros | M1, M2, the native count (1,315) |
+| K-6 | the clipped count uses `c > 1.0` | M1, M2, the count on all three legs (662); green on M3 (no post-matrix word is exactly 1.0) |
+| A-2 | `banked_seed` answers without `ENERGY_RMS` | M2 (`no energy, no seed, no pass`) and the two-meter row alone (128 against 512) |
+| A-5 | the pass runs when no lane answered | M3 at period 300 (192 against 112 passes); the source scan |
+| G-1 | the hand-off reads lane `lane ^ 1` | M3 frames; the source scan |
+| G-2 | the right plane's pass reads the left plane | M3 frames |
+| G-3 | #943's pass also runs where the full pass ran | the mixed control (#943 passes 192 against 0) |
+| G-4 | `accepts_banked_meter` accepts `SAMPLE_PEAK`-only meters | the mixed control (merges 0 against 768); green on the #943 fixture control (deviation 4) |
+| G-5 | the member loop keeps observing after a failure | the failure boundary (8 commits in the failing block against 2) |
+| M-W | the kernel widens through a `black_box`ed scalar loop | the lowering pin on `miso_gate_meter_block_probe` (`f64.promote_f32=4`); every count stays 0 and the #949 probe stays green |
+| E-1 | held merge `>` for `>=` | green, as expected |
+| E-2 | counts committed right channel first | green, as expected |
+
+### For the verifier
+
+- The `2^24` decline (deviation 8) is untested by construction.
+- The #943 G3 control that says "ALL meters must not make a bank run the pass" still passes and is
+  still true of #943's pass; on that fixture the full pass now runs.
+- `sample_peak` and `meter` reach every observer of a final member, not only meters; both field
+  docs say to ignore them unless accepted, and `MeterObserver` re-checks its acceptance at render.
+- The failure-boundary gate relies on bank 0 (`ch00`..) being the first observed unit, which holds
+  at both widths on the intended fixture.
+
+## Sol attempt 1 verdict: FAIL
+
+Verifier: Sol, 2026-09-27, on `b84447d0` (base `e2b5b9c8`), host AMD EPYC 7313P, rustc 1.97.1,
+`CARGO_INCREMENTAL=0`, the worktree's own `target/` (deleted at the end). Nothing pushed; no console
+benchmark run; no implementation file edited (throwaway tests were added, run and reverted).
+
+**The implementation is correct; the evidence is not yet complete.** Every published meter word
+reproduced bit for bit in every configuration I could build, including ones the committed gates
+never reach. The failure is one test-only gap: the check that makes the protocol safe when the
+lanes of one bank disagree is witnessed by no gate, and deleting it passes every suite. Attempt 2
+is a bounded test addition inside the authorized paths; no production line needs to change.
+
+### Findings, by severity
+
+1. **Medium, blocking: the lane-level fallback is unwitnessed.** `commit_banked`'s window guard
+   (`crates/builtins/src/lib.rs:4941`, `len > period - frames`) and the whole commit path of a meter
+   without `ENERGY_RMS` (`:4936`, `seeded` true without a seed) are load-bearing whenever one bank
+   holds lanes whose windows or metric sets differ: one lane's seed makes the pass run, and every
+   other lane's meter is handed `meter: Some` and must refuse a block that crosses its own window.
+   The builtins-compiler API admits exactly that bank (a period and a metric set per
+   `SelectedMeterRequest`). No committed gate builds one: M2 runs every lane in lockstep (one
+   `run.metrics`, one period, one event stream: `crates/builtins/tests/meter.rs:1080`, `:1341`), M3
+   and its controls give every meter one period (`crates/graph-compiler/src/lib.rs:9418`), and a
+   bank whose meters keep no energy never seeds, so a non-energy meter never commits in any gate.
+   **Mutation S-2** (delete the `len > period - frames` term) is green on `-p builtins
+   --features test-support`, `-p builtins-compiler --features test-support`, `-p graph --features
+   test-support`, `-p graph-compiler`, `-p host-core --all-features`, `-p host-web` and `-p
+   console-workload`. My heterogeneous differential (below) catches it within 0.2 s: the
+   over-committed window passes its period, never emits, and the next block's scalar split
+   underflows `period - self.frames` (`crates/builtins/src/lib.rs:4881`; a debug panic, a wrap in
+   release). **Required for attempt 2:**
+   a gate row whose bank mixes periods (including one that does not divide the block) and metric
+   sets with and without `ENERGY_RMS`, against the declined arm by bits, with S-2 recorded red
+   beside it, and a row where a non-energy meter commits beside an energy lane.
+2. **Low: each half of the two-channel seed check is unwitnessed alone.** M2's safety net moves both
+   seeds by one ulp (`crates/builtins/tests/meter.rs:1179`), so **mutation S-1** (drop the right
+   channel's comparison, `crates/builtins/src/lib.rs:4938`) is green on M2 (run), and the left
+   mirror is green by the same argument (not run).
+   In the protocol both seeds come from one answer, so the halves cannot diverge today; add a
+   moved-right-only row so the brief's "and likewise for the right" is a checked claim.
+3. **Low: the `2^24` decline is testable, contrary to deviation 8 (spec lines 767 and 892).**
+   `planes::<L>` refuses before it reads a word (`crates/graph/src/runtime.rs:4131`), so a unit test
+   can hand `bank_meter_pass` a lazily mapped zero `vec![0.0; (2^24 + 1) * W]` at no physical memory
+   cost. I ran that throwaway test: it declines at `Four` and `Eight`, and exactly `2^24` frames of
+   `1.0` at `Four` (256 MiB, 18.6 s in dev) gives clipped `2^24` per channel, sanitized 0, energy
+   `0.5 + 2^24` and peak `1.0`. The decline-only half costs nothing; add it.
+4. **Low: the failure-boundary count leans on the schedule.** `per_block[5] == 2`
+   (`crates/graph-compiler/src/lib.rs:9852`) holds only while bank 0 is the first observed unit, and
+   the test runs at the host width only although its comment says "either width" (`:9849`). The
+   assumption fails safe: a reordered schedule makes the test red, not vacuous, and what actually
+   discriminates -- every frame against the declined arm, `ch01` without a discontinuity and `ch02`
+   with one -- does not depend on it (G-5 still goes red through the discontinuity rows). Derive the
+   expected count from the observed order, or assert only that no meter after `ch01` committed.
+5. **Info.** (a) The lowering pin censuses the real `meter_block::<Simd4>` in a probe
+   (`tools/wasm-gate-guest/src/lib.rs:174`), as amendment 4 asks; a scalarisation specific to
+   `bank_meter_pass`'s own context would be caught only by the recorded artifact census. (b) Two
+   energy-keeping observers on one member can commit a result seeded by the first when the bits
+   are equal: value-exact, and unreachable through builtins-compiler (one meter per track and tap).
+   (c) A bank whose accepting meters all lack `ENERGY_RMS` (for example `P|H` or `COUNTS`) holds the
+   flag, queries seeds each block and never runs the pass: exact, a performance gap only, and no
+   host binds it. (d) `Some(meters.peaks())` (`crates/graph/src/runtime.rs:3423`) copies 64 bytes per
+   bank per block; not block-sized, but a borrow would remove it.
+
+### Gates re-run on `b84447d0`
+
+| gate | result |
+|---|---|
+| M1 `-p lane --test meter_block` | PASS, 3 tests |
+| M2 `-p builtins --features test-support --test meter` | PASS, 13 tests (20 s); the `[SAMPLE_PEAK, ALL]` row passes |
+| M3, controls, failure boundary, M4 (`graph-compiler --lib`) | PASS; M3 table reproduced exactly (Simd8 passes 192/112, Simd4 384/224, commits 1,536/896); failure boundary `[64 x 5, 2, 64 x 10]`; M4 1,000 blocks, audit total 0 |
+| layout | `cargo check --target wasm32-unknown-unknown -p graph` (with and without `test-support`) PASS: the `const` assertion holds; a five-variant fieldless enum is one byte on every target |
+| fmt / clippy `-D warnings` / `RUSTDOCFLAGS='-D warnings' cargo doc` | PASS / PASS / PASS |
+| suites | PASS: lane, builtins (both), builtins-compiler `test-support`, graph 118 and 125, graph-compiler 98, host-core `--all-features`, host-web 206, console-workload, capi 36, wasm-gates + wasm-gate-corpus 9 |
+| policy scripts (all eight) | PASS; realtime 58 regions in 16 files; determinism 100/100 |
+| `scripts/run-wasm-gates.sh` | PASS: native, wasm scalar and wasm simd128 each `meter_block_mismatches 0`, `f64_lane_mismatches 0`, 358 comparisons; both probes 2/2/2 `f64x2`, no scalar `f64`, the meter probe no scalar `f32.{add,gt,abs}` |
+| AudioWorklet (the build script's cargo line) | sha256 `b005b58b...5efeaac2`, 3,313,930 bytes (the implementer's); `--callgraph render` (closure 8, traps 5), `--kernel-shape ... --kernel-min 11` (15 kernels), `meter_poll`, `command_submit --allocation-only`, `--self-test`, opcode self-test: all rc 0 |
+
+**Census, re-taken.** `bank_meter_pass` is `func[2254]`, one call site in `GraphExecutor::render`:
+`f64x2.promote_low_f32x4`, `.mul`, `.add` 12 each; `f32x4.abs` 6, `f32x4.add` 12; zero scalar
+`f64.*`/`f32.*` arithmetic, `memory.copy`, `call` or `unreachable`. The caller around the call site
+has one `memory.fill` (the seeds' `+0.0`) and no `memory.copy`: `326607ce`'s replacement is exact
+(the seeds are written once, in place, and read by reference; the hand-off requires both `meters`
+and `seeds`) and allocation-free (a stack `Option`). **FMA:** the linked native `bank_meter_pass`
+(fat-LTO release binary) has 6 `vcvtps2pd`, 6 `vmulpd`, 6 `vaddpd` and no `vfmadd*`/`vcvtss2sd`; its
+LLVM IR has no `contract`, `fast`, `fmuladd` or `llvm.fma`.
+
+**My differential** (throwaway, reverted). A graph-level randomized differential against
+`test_only_set_bank_meter_declined(true)`: 600 scenarios, `Simd8` 289 and `Simd4` 311; the intended
+and mono fixtures (a third mono, half of those partly re-stereoed); 1, 3, 5, 9, 13, 61 and 64
+tracks (partial banks at both widths); quanta 64, 96, 100, 128 and 257; both deliveries; per track a
+`PostMatrix` meter with a random metric set (all fifteen), a random period from
+`{1, 7, 64, 100, 127, 128, 129, 200, 256, 300, 384, 512, 640, 1000, 1536, 4096}` and occasional
+hold 5, decay 12 or decay `-0.0`, plus meters at non-final taps; random time skips
+(discontinuities); hostile input (NaN, `±inf`, subnormals, `±MAX`, the clip boundary) with fader
+gains in `[-144, 24]` dB and matrix coefficients down to `1e-45`, so sanitized words reached the
+meter in 415 scenarios and clipped words in 476; and in 152 scenarios a custom observer on every
+other final member answering the bogus seed `[0.5, 0.25]`. Result: PCM and **4,038,379 meter frames
+equal by bits**, 82,718 passes, 162,793 commits. Activation and restart are covered by the
+implementer's activation control and M2's random stream; I did not add to them.
+
+**Effect (in-process A/B, throwaway, reverted).** Two `SixtyFourTrackConsole` runtimes with
+`PlanConfig { meters: true, .. }` (the `console_meters` meters-on arm), one declined, alternated per
+block with the order swapped, 512 warm-up and 6,000 timed blocks, release, `taskset -c 27`, load
+about 4.5: paired median (declined - on) **21.8 and 22.2 us** (p10 16.4-16.8, p90 27.4-27.8), p50
+138.2-138.4 against 160.1-160.5 us; identical PCM digest over 6,512 blocks; 104,192 snapshots equal
+by bits; 52,096 passes on (`6,512 x 8`), 0 declined. Descriptive, not the benchmark row.
+
+### The brief's questions
+
+1. **Meter words:** bit-identical in every configuration above. The claim holds; finding 1 is that
+   the committed gates do not show it for mixed banks.
+2. **Seed and accept:** a meter commits only after its own preamble, against its own post-preamble
+   energy bits and window, so a stale seed, one taken before a discontinuity, or a bogus one only
+   falls back (K-2, the moved seed, and my bogus seeder). The only acceptance of another observer's
+   seed is 5(b): equal bits, so an equal value. Amendment 2 holds (`banked_seed` is `None` without
+   `ENERGY_RMS`; the pair commits `8 x 64` at `Simd8` and `4 x 64` at `Simd4`). #714 is respected
+   as amendment 3 states, and the supersession of its line 167 is recorded above. The
+   failure-boundary assumption: finding 4.
+3. **Layout:** holds on wasm32 and natively. `UnitObservation::of` maps the old pairs to the old
+   states, `observed()` is unchanged, so `unit_inert` and `observe_unit`'s early return behave as
+   before; `sample_peak()` differs only in the new `ObservedWithPeakAndMeter` state.
+4. **Lowering and wasm:** the pin calls the real kernel and caught M-W in the implementer's run;
+   see 5(a). All three legs, the G6 FTZ assertion (canonical arm) and the AudioWorklet callgraph
+   checks pass. No FMA contraction anywhere in the linked energy step.
+5. **`2^24`:** testable cheaply (finding 3); also correct by inspection (`frames > 1 << 24`
+   declines, and `2^24` itself is exact).
+6. **Seed copies:** the replacement is exact and allocation-free.
+7. **Effect:** 21.8-22.2 us per 64-track block, in agreement with the implementer's 22.1-22.7 us.
+8. **Hygiene:** fmt, clippy, doc, suites and policy all pass; every path is authorized; no `unsafe`
+   block (the guest's two new exports use the crate's existing `#[unsafe(no_mangle)]` form); only
+   `crates/lane` names `wide`.
+
+### Attempt 2, bounded
+
+Test-only, in `crates/builtins/tests/meter.rs` and/or `crates/graph-compiler/src/lib.rs`: a
+mixed-bank differential (finding 1) with S-2 recorded red in `crates/builtins/tests/MUTATIONS.md`;
+a moved-right-only seed row (finding 2); the decline-only `2^24` unit test in `crates/graph`
+(finding 3); and a schedule-independent failure-boundary count (finding 4). No production change,
+so every census, pin and A/B above stands.
+
+## Attempt 2 evidence
+
+Implementer: attempt 2, 2026-09-27, on `385fcbdf` (Sol's attempt 1 verdict). Scope: Sol's four test
+findings only. **No production line changed**: the diff from `b84447d0` is test code in
+`crates/builtins/tests/meter.rs`, `crates/graph-compiler/src/lib.rs` (inside `mod tests`) and
+`crates/graph/src/runtime.rs` (inside `mod tests`), plus two `MUTATIONS.md` files and this section.
+Same host and toolchain, `CARGO_INCREMENTAL=0`, the worktree's own `target/` (rebuilt, then deleted).
+Nothing pushed; no timed benchmark; no artifact repin.
+
+Commits: `958c7066` (the tests), `f8562bdc` (mutations), and this section.
+
+### Findings addressed
+
+1. **Blocking: the lane-level fallback.** New graph-compiler gate
+   `a_bank_of_mixed_periods_and_metric_sets_publishes_the_declined_arms_frames`. The 64-track
+   intended fixture, with the tracks cycling through eight `PostMatrix` meters: `ALL`/512,
+   `COUNTS`/300, `SAMPLE_PEAK|HELD_PEAK`/129, `ENERGY_RMS|COUNTS`/100, `SAMPLE_PEAK`/384, `ALL`
+   with hold 5/512, `ENERGY_RMS`/1536 and `COUNTS|HELD_PEAK`/64. So one bank holds periods that
+   divide the block, that do not (300, 129) and that are shorter than it (100, 64); sets with and
+   without an energy; a meter that never accepts; and one on #943's merge. At `Simd8` and `Simd4`,
+   both deliveries, 24 blocks, pass on against declined:
+   - PCM, shape and all 1,064 frames equal by bits (`8 x` the windows of each period);
+   - full passes `BLOCKS x cohorts` (192 at `Simd8`, 384 at `Simd4`) against 0: every bank holds a
+     lane that seeds every block (`ALL`/512 or `ENERGY_RMS`/1536);
+   - #943 passes 0 on against 192 declined; merges 192 in both arms;
+   - commits exactly `8 x (24 + 14 + 1 + 24) = 504` against 0: the `ALL`/512 and `ENERGY_RMS`/1536
+     meters every block, `COUNTS`/300 on the 14 blocks its window holds and `SAMPLE_PEAK|HELD_PEAK`/129
+     on the 1. That is 120 commits by meters without `ENERGY_RMS` beside an energy lane (Sol's second
+     requirement); `ENERGY_RMS|COUNTS`/100 and `COUNTS|HELD_PEAK`/64 are handed `meter: Some` every
+     block and refuse every one.
+
+   **S-2** (delete `commit_banked`'s window check) is **red** here: `COUNTS`/300 commits a
+   window-crossing block, overruns its period and never emits, and the next block's scalar split
+   underflows (`attempt to subtract with overflow`, `crates/builtins/src/lib.rs:4881`). It stays
+   green on M2, M3 and the controls, as Sol found. The counts depend on this fixture's grouping of
+   consecutive tracks into banks; a different grouping would change them and turn the gate red,
+   not vacuous.
+2. **Each half of the seed check.** M2's safety net runs `MovedSeed` (both), `MovedLeftSeed` and
+   `MovedRightSeed`, at `Simd8` and `Simd4`; each commits nothing and publishes the scalar arm's
+   snapshots. **S-1L** (drop the left comparison) is red on `MovedLeftSeed` and **S-1R** on
+   `MovedRightSeed` (both `period 512, event 3 (Block(128)): window 0 differs`); before attempt 2
+   both were green.
+3. **The `2^24` decline**, which attempt 1's deviation 8 wrongly called untestable. New graph unit
+   test `the_full_meter_pass_declines_a_block_whose_counts_would_not_be_exact`: pins
+   `BANK_METER_MAX_FRAMES == 1 << 24`; `bank_meter_pass` declines `2^24 + 1` zero-filled frames at
+   `Four` and `Eight` (lazily mapped; the pass refuses on the length before it reads a word; the
+   test binary's peak RSS is 5.6 MB and the test takes under 10 ms); and a three-frame block of
+   `1.0` at each width gives peak 1, clipped 3, sanitized 0 and energy `0.5 + 3` per lane. **D-1**
+   (delete the `frames > BANK_METER_MAX_FRAMES` term) is red: `Four: 2^24 + 1 frames decline the
+   pass`, after the kernel reads the zero pages (17.8 s in dev, 6 MB RSS).
+4. **A schedule-independent failure boundary.** The gate now learns the observation order from a
+   probe plan of the same artifact with an order-recording observer on every track's post-matrix
+   node (one block), and requires, per dispatch (host width and `Simd4`): the meters with no
+   discontinuity are exactly the tracks up to and including `ch01` in that order; the failing block's
+   commits equal their count; every other block commits 64; some meter comes after `ch01`; and every
+   frame and every good block's PCM equal the declined arm's. Measured: `ch00` and `ch01` at both
+   widths, commits `[64 x 5, 2, 64 x 10]`. **G-5** (keep observing after a failure) is red:
+   handles `[1..8]` against `[1, 2]`. Nothing asserts bank 0 is first any more.
+
+Sol's info items are unchanged by design: 5(c), a bank whose accepting meters all lack
+`ENERGY_RMS`, queries seeds and never passes (performance only); 5(d), the 64-byte
+`Some(meters.peaks())` copy, is a production change and out of this test-only attempt.
+
+### Gates (attempt 2 tree, `f8562bdc`)
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | PASS |
+| `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | PASS |
+| `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps` | PASS |
+| `cargo check --locked --target wasm32-unknown-unknown -p graph` | PASS (the `const` layout assertion) |
+| M1 | PASS (lane suite) |
+| M2 (`-p builtins --features test-support --test meter`) | PASS: the sweep unchanged (19,127,808 snapshots, 187,908 commits), the safety net's four modes at both widths, the two-meter row |
+| M3, controls, mixed bank, failure boundary, M4 (`graph-compiler --lib`) | PASS: M3 table unchanged (Simd8 passes 192/112, Simd4 384/224, commits 1,536/896); the mixed bank as above; the failure boundary as above at both widths; M4 audit total 0 |
+| suites | PASS: lane 67; builtins 116 and 116 with `test-support`; builtins-compiler `test-support` 79; graph 119 and 126 with `test-support` (one new); graph-compiler 99 (one new); host-core `--all-features` 225; host-web 206; console-workload 40; capi 36; wasm-gates + wasm-gate-corpus 9 |
+| policy | PASS, all eight (realtime 58 regions in 16 files; determinism 100/100) |
+| `bash scripts/run-wasm-gates.sh` | PASS: three legs, `meter_block_mismatches 0`, `f64_lane_mismatches 0`, 358 comparisons; both probes 2/2/2 `f64x2`, no scalar `f64`, the meter probe no scalar `f32.{add,gt,abs}` |
+| AudioWorklet (the build script's cargo line) | `host_web.wasm` 3,313,930 bytes, sha256 `b005b58b...5efeaac2`: byte-identical to attempt 1, as a test-only change must be; `--callgraph render`, `--kernel-shape ... --kernel-min 11`, `meter_poll`, `command_submit --allocation-only` and `--self-test` all rc 0. Not repinned |
+
+The in-process A/B and the census are attempt 1's: the artifact is the same bytes.
+
+### Mutations (recorded in `crates/builtins/tests/MUTATIONS.md` and `crates/graph/tests/MUTATIONS.md`)
+
+| # | mutation | red on |
+|---|---|---|
+| S-2 | `commit_banked`'s window check deleted | the mixed bank (underflow on the next block); green on M2, M3 and controls |
+| S-1L | the left half of the seed check dropped | M2 `MovedLeftSeed` |
+| S-1R | the right half dropped | M2 `MovedRightSeed` |
+| D-1 | the `2^24` decline deleted | the decline test (`Four`) |
+| G-5 | observers keep running after a failure | the rewritten failure boundary (`[1..8]` against `[1, 2]`) |
+
+## Sol attempt 2 verdict: PASS
+
+Verifier: Sol, 2026-09-27, on `e0c1b4ad` (attempt 2: `958c7066`, `f8562bdc`, `e0c1b4ad`), same host
+and toolchain, `CARGO_INCREMENTAL=0`, the worktree's own `target/` (rebuilt, then deleted). Nothing
+pushed; no implementation file left edited (mutations and my throwaway differential were applied,
+run and restored).
+
+**Scope.** Test code and records only. The `crates/graph/src/runtime.rs` hunk lies inside `mod tests`
+(from line 8836; the module opens at 8067), and the `crates/graph-compiler/src/lib.rs` changes are
+all inside its `mod tests`. No `tools/`, `hosts/` or `scripts/` change. The AudioWorklet build (the
+build script's cargo line), rebuilt here: sha256 `b005b58b...5efeaac2`, byte-identical to attempt 1,
+so attempt 1's census, pins and A/B stand.
+
+**Every attempt 1 finding is closed, and each new test catches the fault it targets.** I applied
+each mutation alone, as an exact-text replacement, and restored it:
+
+| # | mutation | result |
+|---|---|---|
+| S-2 | `commit_banked`'s window check deleted | RED on the mixed bank in dev (the underflow at `crates/builtins/src/lib.rs:4881`) **and in release**, where overflow checks are off: frame count 176 against 1,064 |
+| S-1L | left half of the seed check dropped | RED on M2 `MovedLeftSeed` (energy `180.35156250000003` against `180.3515625`) |
+| S-1R | right half dropped | RED on M2 `MovedRightSeed` |
+| N-1 (mine) | meters without `ENERGY_RMS` never commit | RED on the mixed bank: commits 384 against 504. The non-energy commit path is now witnessed |
+| D-1 | the `2^24` decline deleted | RED on the new graph unit test |
+| D-2 (mine) | decline at `>= 2^24` instead of `>` | GREEN, as expected: refusing exactly `2^24` frames is conservative and exact, so no gate can or should see it |
+| G-5 | the member loop keeps observing after a failure | RED on the rewritten failure boundary: handles `[1..8]` against `[1, 2]` |
+
+**The mixed bank is robust, not merely red when the fixture changes.** Its assertion
+`passes == BLOCKS x cohorts` holds only if every bank holds a seeding lane (`ALL`/512 or
+`ENERGY_RMS`/1536) in every block. At `Simd8` that places every lane beside a seeder; at `Simd4`,
+with 16 seeders and 16 banks, exactly one sits in each. So under **any** grouping that keeps the gate
+green, every crossing lane is handed `meter: Some` every block. The commit and merge counts then
+depend only on each meter's own window, not on the grouping, and S-2 stays exercised. A grouping
+that leaves a bank without a seeder fails loudly on the pass count and never passes vacuously. The
+implementer's note is conservative: most regroupings would not change the counts at all.
+
+**The failure boundary** now derives the set of meters that observed the failing block from a probe
+plan's observation order and checks it against the discontinuity set and the commit count, at both
+widths. If the probe's order ever differed from the real plan's, the gate would go red, not vacuous,
+and `observed_before_failure.len() < 64` keeps it from being trivially satisfied.
+
+**No regression.** fmt, clippy `-D warnings` and `RUSTDOCFLAGS='-D warnings' cargo doc` pass. The
+suites pass: lane; builtins, with and without `test-support`; builtins-compiler `test-support`;
+graph, with and without `test-support`; graph-compiler; host-core `--all-features`; host-web;
+console-workload; capi; wasm-gates and wasm-gate-corpus. All eight policy scripts pass (realtime 58
+regions in 16 files; determinism 100/100). M3 reproduces exactly (Simd8 passes 192/112, Simd4
+384/224, commits 1,536/896). The mixed bank gives 1,064 frames, passes 192 (Simd8) and 384 (Simd4),
+#943 passes 0 on and 192 declined, merges 192/192, and commits 504/0 with 120 non-energy. The failure
+boundary gives `[64 x 5, 2, 64 x 10]` at both widths.
+
+**My randomized differential**, re-run on the attempt 2 tree: 150 scenarios against the declined arm
+(same generator as attempt 1: both widths, partial banks, mono, mixed periods and metric sets,
+hostile input, discontinuities, bogus seeders). PCM and **1,066,862 meter frames equal by bits**,
+20,266 passes and 40,717 commits; sanitized words reached a meter in 104 scenarios and clipped words
+in 120.
+
+**Carried as info, not blocking.** Attempt 1's 5(a) to 5(d) stand. 5(c): a bank whose accepting meters
+all lack `ENERGY_RMS` queries seeds but never runs the pass; this is performance only. 5(d): the
+64-byte `Some(meters.peaks())` copy per bank per block is a production nit for a later pass under
+the owner's copy rule.

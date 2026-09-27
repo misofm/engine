@@ -128,6 +128,7 @@ fn run_native() -> ExitCode {
     if report.mismatches.is_empty()
         && report.minmax_lowering_mismatches == 0
         && report.f64_lane_mismatches == 0
+        && report.meter_block_mismatches == 0
     {
         ExitCode::SUCCESS
     } else {
@@ -136,6 +137,7 @@ fn run_native() -> ExitCode {
         }
         report_minmax_lowering("native", report.minmax_lowering_mismatches);
         report_f64_lane("native", report.f64_lane_mismatches);
+        report_meter_block("native", report.meter_block_mismatches);
         ExitCode::FAILURE
     }
 }
@@ -162,6 +164,18 @@ fn report_f64_lane(leg: &str, mismatches: u32) {
     }
 }
 
+/// Names a full meter pass divergence (issue #950), which is a lane-crate defect rather than a pin
+/// drift.
+fn report_meter_block(leg: &str, mismatches: u32) {
+    if mismatches != 0 {
+        eprintln!(
+            "{leg} meter block: {mismatches} lane fields disagree with the meter's scalar loop; \
+             meter_block in crates/lane/src/kernels/builtins.rs is not the builtin meter's \
+             ALL loop on this target"
+        );
+    }
+}
+
 /// The wasm leg: the same corpus executed under wasmtime against the same pins.
 fn run_wasm(path: PathBuf, expected: ExpectedBackend) -> ExitCode {
     match wasm_report(&path, expected) {
@@ -170,6 +184,7 @@ fn run_wasm(path: PathBuf, expected: ExpectedBackend) -> ExitCode {
             if report.mismatches.is_empty()
                 && report.minmax_lowering_mismatches == 0
                 && report.f64_lane_mismatches == 0
+                && report.meter_block_mismatches == 0
             {
                 ExitCode::SUCCESS
             } else {
@@ -178,6 +193,7 @@ fn run_wasm(path: PathBuf, expected: ExpectedBackend) -> ExitCode {
                 }
                 report_minmax_lowering("wasm", report.minmax_lowering_mismatches);
                 report_f64_lane("wasm", report.f64_lane_mismatches);
+                report_meter_block("wasm", report.meter_block_mismatches);
                 ExitCode::FAILURE
             }
         }

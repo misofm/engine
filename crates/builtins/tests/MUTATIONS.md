@@ -297,3 +297,58 @@ Four rows, all red; none argued equivalent. There is no M4: the fused path has n
 ramping block declines the fused call and runs the split stages, whose tail is #944's
 `settled_block`), so there is no tail site to mutate. M2 and M5 render the base bits by
 construction, so only the witness sees them.
+
+## Issue #950 — the banked meter commit
+
+Gate M2 is `a_banked_block_commit_publishes_the_scalar_meters_snapshots` and its two-meter row
+`a_peak_meter_bound_first_leaves_the_seed_to_the_all_meter_behind_it` (`tests/meter.rs`, run with
+`--features test-support`). Arm A calls `observe_input`; arm B is the graph and `MeterObserver`
+protocol: per lane the first `banked_seed` in binding order, `meter_block` at `Simd8` (8 meters) or
+`Simd4` (4 meters) only if some lane answered, then `observe_input_banked` for a meter that banks
+and is not exactly `SAMPLE_PEAK`, and issue #943's call otherwise. The sweep is 9 periods x 9 metric
+sets x 4 hold/decay settings x hostile and tone input x a fixed 48-block stream and a random
+150-event stream x both widths (19,127,808 snapshots, every field by bits, 187,908 commits), then
+the commit counters on a plain 64-block stream, the skip, the withheld block and the moved-seed
+safety net. Each row was applied alone as an exact-text replacement (match count one) to
+`326607ce` (the two-meter row to `9696f74d`), run in dev, and restored with `git checkout`.
+
+| # | mutation | file | M2 result |
+| --- | --- | --- | --- |
+| K-1 | the kernel's energy is a zero-seeded partial plus the seed | `lane/src/kernels/builtins.rs` | RED: `metrics 15 period 1536 hold 0 decay 0 hostile ... width 8 event 11 (Block(128)) lane 0 binding 0: window 0 differs` |
+| K-2 | `banked_seed` ignores the discontinuity (`let discontinuous = false;`) | `src/lib.rs` | RED on the witness the brief names: `the block after the skip commits`, `[8, 8, 8]` against `[8, 8, 16]`. The snapshots stay equal: the seed check declines the block |
+| K-3 | the commit drops the seed-bit check (`!(seeded \|\| true)`) | `src/lib.rs` | RED on the safety net: `mode: MovedSeed ... event 3 (Block(128)) lane 0 binding 0: window 0 differs` |
+| K-4 | `banked_eligible` ignores the decay (`peak_hold_frames == 0` alone) | `src/lib.rs` | RED: `metrics 15 period 129 hold 0 decay 12.0 hostile ... window 0 differs` |
+| K-5 | the kernel's sanitized count also counts zeros | `lane/src/kernels/builtins.rs` | RED: `metrics 15 period 128 ... event 0 lane 0: window 0 differs` |
+| K-6 | the kernel's clipped count uses `c > 1.0` | `lane/src/kernels/builtins.rs` | RED: the same row and window |
+| A-2 | `banked_seed` answers without `ENERGY_RMS` (amendment 2's seed pollution) | `src/lib.rs` | RED on the sweep's `no energy, no seed, no pass` (`8` against `0` for `COUNTS` at period 129), and on the two-meter row alone: `the ALL meter commits every block`, `128` against `512` |
+| E-1 | the held merge uses `q > held` for `q >= held` | `src/lib.rs` | GREEN (expected) |
+| E-2 | the two channels committed right first | `src/lib.rs` | GREEN (expected) |
+
+E-1 and E-2 are the brief's expected-green rows, the domain argument witnessed: on the sanitized
+domain equal magnitudes have equal bits, so `>` and `>=` select the same word; and saturating
+unsigned addition is associative and commutative, so the order of the lifetime-count adds is free.
+
+The existing probes of the scalar path -- `test_only_peak_samples`, the `cfg(test)`
+`meter_work_probe` -- are green unchanged: their tests call `observe_input`, which never commits a
+banked block.
+
+### Issue #950 attempt 2: the lane-level fallback and each half of the seed check
+
+Sol's attempt 1 verdict found two commit guards no gate saw alone. Two gates were added, with no
+production change: the end-to-end mixed bank
+`a_bank_of_mixed_periods_and_metric_sets_publishes_the_declined_arms_frames` (graph-compiler: one
+bank holds eight meters of different periods and metric sets, with and without `ENERGY_RMS`, at
+`Simd8` and `Simd4` through both deliveries, every frame against the declined arm by bits, with the
+passes, merges and commits pinned, the non-energy meters' commits included), and M2's safety net
+moving the left seed alone and the right seed alone as well as both, at both widths. Each row was
+applied alone to `958c7066` as an exact-text replacement (match count one), run in dev, and
+restored.
+
+| # | mutation | result |
+| --- | --- | --- |
+| S-2 | `commit_banked`'s window check `len > period - frames` deleted | RED on the mixed bank: a `COUNTS` meter at period 300 (no seed to fail) commits a block that crosses its window, its window overruns its period and never emits, and the next block's scalar split underflows (`attempt to subtract with overflow` at `src/lib.rs:4881`, dev). GREEN on M2, M3 and the M3 controls, whose banks run every lane in lockstep: this row is why the mixed bank exists |
+| S-1L | the left half of the seed check dropped (`true && right == right`) | RED on M2's `MovedLeftSeed` row: `period: 512 ... mode: MovedLeftSeed ... event 3 (Block(128)) lane 1 binding 0: window 0 differs` |
+| S-1R | the right half dropped | RED on M2's `MovedRightSeed` row: `... mode: MovedRightSeed ... event 3 (Block(128)) lane 0 binding 0: window 0 differs` |
+
+Before attempt 2 both S-1 rows were green, because the safety net moved both seeds at once and
+either half refused the commit.

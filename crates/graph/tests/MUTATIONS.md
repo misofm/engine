@@ -535,3 +535,54 @@ attempt 2 tree and restored:
 | O-2 | `UnitObservation::observed` becomes `matches!(self, Self::Observed)` (a peak unit's observers skipped) | RED: G3 `every meter publishes every whole window` (`0` against `384`). GREEN on `-p graph --features test-support`: no graph test binds a peak-accepting observer, so G3 is the witness |
 | L-A | the attempt 1 layout restored: a separate `sample_peak_flag: bool` after `source_lanes` | `cargo check -p graph` GREEN natively (32 bytes either way); `cargo check --target wasm32-unknown-unknown -p graph` RED: `evaluation panicked: a UnitIdentity flag no longer fits the row's padding` |
 | L-B | `#[repr(u16)]` on `UnitObservation` | the same: native check GREEN, wasm32 check RED with the same message |
+
+## Issue #950 — the banked full meter pass
+
+The witnesses are graph-compiler gate M3,
+`tests::post_matrix_all_meters_run_one_full_bank_pass_per_cohort_and_publish_the_scalar_frames`
+(64-track intended fixture, an `ALL` `PostMatrix` meter per track, both selected deliveries,
+`Simd8` and `Simd4`, periods 512 and 300, plus the `console_meters` path through
+`compile_console_model_with_builtins`, each against `test_only_set_bank_meter_declined(true)`); its
+controls `tests::the_full_meter_pass_stays_off_where_no_meter_can_commit_it` (mixed `SAMPLE_PEAK`
+and `ALL`, issue #943's `SAMPLE_PEAK` fixture, an eight-frame hold, an activation-bound plan); the
+failure boundary `tests::an_observer_failing_mid_bank_leaves_every_later_meter_as_the_declined_arm_does`;
+and this crate's source scan
+`runtime::tests::resident_meter_entry_has_one_final_output_dispatch_and_admission_control`, whose
+control rows now include the full pass forced on, #943's pass run beside it, the meter lane withheld
+or shifted, the seeds not read, and the pass handed one plane twice. Each row was applied alone to
+`326607ce` as an exact-text replacement (match count one), run in dev, and restored with `git
+checkout`; G-5 was rerun on `9696f74d`.
+
+| # | mutation | result |
+| --- | --- | --- |
+| G-1 | the final lane's hand-off reads lane `lane ^ 1` (`meters.lane(lane ^ 1, seeds)`) | RED: M3 `Simd8 between_render_calls false period 512: meter 1 window 0` (lane 1's energies and peaks); the source scan |
+| G-2 | the right plane's pass reads the left plane (`plane::<L>(left, frames, right_seeds)`) | RED: M3 `meter 1 window 0`, the right channel's words are the left's (needs the L-differs-from-R window). GREEN on the source scan (`bank_meter_pass`'s body is not pinned there) |
+| G-3 | issue #943's pass also runs where the full pass ran (`let peaks = if sample_peak && eligible {`) | RED: the mixed control, `mixed: no sample-peak pass beside it` (`192` against `0`) |
+| G-4 | `MeterObserver::accepts_banked_meter` also accepts `SAMPLE_PEAK`-only meters | RED: the mixed control, `mixed: the peak meters merge its peak` (`0` against `768`): the peak meters commit through the banked path instead. GREEN on #943's `SAMPLE_PEAK` fixture control (checked with the mixed control skipped): such a meter has no energy, so it answers no seed and no pass runs (amendment 2). The brief's "M3 P1-fixture control" witness predates that amendment; the mixed control is the witness |
+| G-5 | the member loop keeps observing after an observer fails and returns the first error at the end | RED: the failure boundary, `ch00 and ch01 commit the failing block and no later meter does` (`8` against `2`: `ch02` to `ch07` observed the failing block) |
+| A-5 | the pass runs when no lane answered a seed (amendment 5: the `bank_meter_seeds` result ignored) | RED: M3 `Simd8 between_render_calls false period 300: one pass per cohort per block a window holds` (`192` against `112`); the source scan |
+| K-1 | the kernel's energy is a zero-seeded partial plus the seed (`crates/lane`) | RED: M3 `Simd8 between_render_calls false period 512: meter 1 window 1`, the energy and `rms` a few ulps off |
+
+K-6 (`c > 1.0` for the clipped count) is GREEN on M3: no post-matrix word of the fixture is exactly
+`1.0`. M1 and M2 are its witnesses.
+
+The failure boundary also pins the realtime claim #714's clause rests on: the pass only reads the
+later meters (their seeds, through `&self`), so when `ch01`'s second observer fails on block 5,
+`ch02`'s meter has neither observed nor committed that block and opens its next window at a
+discontinuity, exactly as in the declined arm; both arms' frames are equal by bits.
+
+### Issue #950 attempt 2: the `2^24` decline and a schedule-independent failure boundary
+
+Two gates changed, with no production change. `runtime::tests::the_full_meter_pass_declines_a_block_whose_counts_would_not_be_exact`
+hands `bank_meter_pass` `2^24 + 1` lazily zero-mapped frames at `Four` and `Eight` (5.6 MB peak RSS:
+the pass refuses on the slice length before it reads a word) and checks a three-frame block is
+computed. The failure boundary now reads the tracks' observation order from a probe plan with an
+order recorder on every post-matrix node, and requires exactly the meters up to `ch01` in that
+order to see and commit the failing block, at the host width and `Simd4`, instead of assuming bank
+0 is observed first. Rows applied alone to `958c7066` and restored:
+
+| # | mutation | result |
+| --- | --- | --- |
+| D-1 | the `frames > BANK_METER_MAX_FRAMES` term deleted from `bank_meter_pass` | RED: `Four: 2^24 + 1 frames decline the pass` (the kernel then reads the zero pages: 17.8 s in dev, 6 MB RSS) |
+| G-5 | the member loop keeps observing after a failure and returns the first error at the end | RED on the rewritten gate: `Simd8 failure boundary: exactly the meters observed before the failing observer saw block 5`, handles `[1, 2, 3, 4, 5, 6, 7, 8]` against `[1, 2]` |
+| S-2 | `commit_banked`'s window check deleted (`crates/builtins`) | RED on the new mixed-bank gate (`crates/builtins/tests/MUTATIONS.md`) |

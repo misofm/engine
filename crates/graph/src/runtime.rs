@@ -61,6 +61,9 @@ thread_local! {
         const { std::cell::Cell::new(false) };
     static TEST_ONLY_BANK_SAMPLE_PEAK_PASSES: std::cell::Cell<u64> =
         const { std::cell::Cell::new(0) };
+    static TEST_ONLY_BANK_METER_DECLINED: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+    static TEST_ONLY_BANK_METER_PASSES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// Decline (`true`) or restore (`false`) the banked sample-peak pass of issue #943, and reset its
@@ -80,6 +83,26 @@ pub fn test_only_set_bank_sample_peak_declined(declined: bool) {
 #[must_use]
 pub fn test_only_bank_sample_peak_passes() -> u64 {
     TEST_ONLY_BANK_SAMPLE_PEAK_PASSES.with(std::cell::Cell::get)
+}
+
+/// Decline (`true`) or restore (`false`) the banked full meter pass of issue #950, and reset its
+/// pass count. A declined pass seeds nothing and hands every observer `meter: None`, so a meter
+/// takes its scalar sample loop, or issue #943's peak merge where that pass still runs under its
+/// own switch: the oracle arm the full pass is compared against.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn test_only_set_bank_meter_declined(declined: bool) {
+    TEST_ONLY_BANK_METER_DECLINED.with(|value| value.set(declined));
+    TEST_ONLY_BANK_METER_PASSES.with(|value| value.set(0));
+}
+
+/// Banked full meter passes run since the last [`test_only_set_bank_meter_declined`]: one per bank
+/// unit per block that ran it.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_bank_meter_passes() -> u64 {
+    TEST_ONLY_BANK_METER_PASSES.with(std::cell::Cell::get)
 }
 
 /// Reset the test-only counts of prepared observer and bank-member object accesses.
@@ -1747,6 +1770,22 @@ impl RuntimeUnit {
     /// final-slot member of which holds an observer that accepts the peak. Bind-time only; a
     /// malformed bank whose member count is below its lane count accepts nothing.
     fn accepts_sample_peak(&self) -> bool {
+        self.final_slot_accepts(|observer| observer.accepts_sample_peak())
+    }
+
+    /// Whether `observe_unit` runs this unit's banked full meter pass (issue #950): a bank some
+    /// final-slot member of which holds an observer that accepts it. Bind-time only, on the same
+    /// terms as [`Self::accepts_sample_peak`].
+    fn accepts_banked_meter(&self) -> bool {
+        self.final_slot_accepts(|observer| observer.accepts_banked_meter())
+    }
+
+    /// Whether some observer of some final-slot member of this bank satisfies `accepts`; `false`
+    /// for an op and for a malformed bank whose member count is below its lane count.
+    fn final_slot_accepts(
+        &self,
+        accepts: impl Fn(&dyn crate::GraphRuntimeObserver) -> bool,
+    ) -> bool {
         match self {
             Self::Op(_) => false,
             Self::Bank { members, lanes, .. } => members
@@ -1758,7 +1797,7 @@ impl RuntimeUnit {
                         member
                             .observers
                             .iter()
-                            .any(|observer| observer.observer.accepts_sample_peak())
+                            .any(|observer| accepts(observer.observer.as_ref()))
                     })
                 }),
         }
@@ -2390,7 +2429,7 @@ pub(crate) struct UnitIdentity {
     /// Proven from final adjacent emitted units at bind; fits the existing identity padding.
     resident_input: bool,
     /// Whether any op of this unit holds an observer binding (issue #900), and whether this bank
-    /// unit runs its sample-peak pass (issue #943). Derived from the final units by
+    /// unit runs its sample-peak pass (issue #943) or its full meter pass (issue #950). Derived from the final units by
     /// [`Runtime::new_with_observation_activation`], the one constructor every runtime passes
     /// through, so a caller's value is a placeholder; nothing changes an op's observer slice after
     /// that. One byte for both facts, so it fits the existing identity padding on every target,
@@ -2407,31 +2446,41 @@ pub(crate) struct UnitIdentity {
 }
 
 /// What `Runtime::observe_unit` dispatches for one unit, fixed at bind: nothing, its observers,
-/// or its observers after the bank's sample-peak pass (issues #900 and #943).
+/// or its observers after one of the bank's meter passes (issues #900, #943 and #950).
 ///
-/// One byte for two facts, because the second implies the first -- a final-slot observer that
-/// accepts the peak is an observer -- and because a second `bool` beside `observed` did not fit
-/// `UnitIdentity`'s padding on 32-bit targets: there the row's four flag bytes already fill the
-/// only slack, and a fifth grew the row from 20 to 24 bytes on wasm32.
+/// One byte for three facts, because the second and third each imply the first -- a final-slot
+/// observer that accepts a pass is an observer -- and because a second `bool` beside `observed`
+/// did not fit `UnitIdentity`'s padding on 32-bit targets: there the row's four flag bytes already
+/// fill the only slack, and a fifth grew the row from 20 to 24 bytes on wasm32.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum UnitObservation {
     /// No op of the unit holds an observer: `observe_unit` returns at once.
     #[default]
     Unobserved,
-    /// Some op holds an observer, and no final-slot observer accepts a sample peak.
+    /// Some op holds an observer, and no final-slot observer accepts a bank pass.
     Observed,
-    /// A bank some final-slot member of which holds an observer that accepts the sample peak.
+    /// A bank some final-slot member of which holds an observer that accepts the sample peak, and
+    /// none of whose final-slot observers accepts the full meter pass.
     ObservedWithPeak,
+    /// A bank some final-slot member of which holds an observer that accepts the full meter pass,
+    /// and none of whose final-slot observers accepts the sample peak.
+    ObservedWithMeter,
+    /// A bank whose final slot has an observer that accepts the full meter pass and one that
+    /// accepts the sample peak: the full pass runs when it can, and the sample-peak pass otherwise.
+    ObservedWithPeakAndMeter,
 }
 
 impl UnitObservation {
     /// The row for a unit that holds observers (`observed`) and whose final slot accepts the peak
-    /// (`sample_peak`); the peak alone, which no real unit has, is still unobserved.
-    const fn of(observed: bool, sample_peak: bool) -> Self {
-        match (observed, sample_peak) {
-            (false, _) => Self::Unobserved,
-            (true, false) => Self::Observed,
-            (true, true) => Self::ObservedWithPeak,
+    /// (`sample_peak`) and the full meter pass (`banked_meter`); a pass alone, which no real unit
+    /// has, is still unobserved.
+    const fn of(observed: bool, sample_peak: bool, banked_meter: bool) -> Self {
+        match (observed, sample_peak, banked_meter) {
+            (false, _, _) => Self::Unobserved,
+            (true, false, false) => Self::Observed,
+            (true, true, false) => Self::ObservedWithPeak,
+            (true, false, true) => Self::ObservedWithMeter,
+            (true, true, true) => Self::ObservedWithPeakAndMeter,
         }
     }
 
@@ -2440,13 +2489,25 @@ impl UnitObservation {
         !matches!(self, Self::Unobserved)
     }
 
-    /// Whether this unit runs the banked sample-peak pass before its observers.
+    /// Whether this unit runs the banked sample-peak pass before its observers, when its full
+    /// meter pass does not run.
     const fn sample_peak(self) -> bool {
-        matches!(self, Self::ObservedWithPeak)
+        matches!(
+            self,
+            Self::ObservedWithPeak | Self::ObservedWithPeakAndMeter
+        )
+    }
+
+    /// Whether this unit runs the banked full meter pass before its observers.
+    const fn banked_meter(self) -> bool {
+        matches!(
+            self,
+            Self::ObservedWithMeter | Self::ObservedWithPeakAndMeter
+        )
     }
 }
 
-/// `UnitIdentity` before the per-unit flags of issues #885, #900, #918 and #943: the row's shape
+/// `UnitIdentity` before the per-unit flags of issues #885, #900, #918, #943 and #950: the row's shape
 /// with none of them, which is what the flags must not grow.
 #[allow(dead_code)]
 struct UnitIdentityWithoutFlags {
@@ -2827,7 +2888,11 @@ impl Runtime {
             "a folded route table belongs to the Output op's identity reduction"
         );
         for (row, unit) in identity.iter_mut().zip(&units) {
-            row.observation = UnitObservation::of(unit.has_observers(), unit.accepts_sample_peak());
+            row.observation = UnitObservation::of(
+                unit.has_observers(),
+                unit.accepts_sample_peak(),
+                unit.accepts_banked_meter(),
+            );
         }
         #[cfg(any(test, feature = "test-support"))]
         if !split_pairs.is_empty() {
@@ -3284,13 +3349,19 @@ impl Runtime {
         #[cfg(any(test, feature = "test-support"))]
         let sample_peak =
             sample_peak && !TEST_ONLY_BANK_SAMPLE_PEAK_DECLINED.with(std::cell::Cell::get);
+        let banked_meter = observation.banked_meter();
+        #[cfg(any(test, feature = "test-support"))]
+        let banked_meter =
+            banked_meter && !TEST_ONLY_BANK_METER_DECLINED.with(std::cell::Cell::get);
         let output = self.output_unit == Some(index);
         let Self { lease, units, .. } = self;
         match &mut units[index] {
             RuntimeUnit::Op(op) if output => {
                 observe_output(op, host.planes(), first_sample, validity)
             }
-            RuntimeUnit::Op(op) => observe(op, lease, first_sample, None, false, validity, None),
+            RuntimeUnit::Op(op) => {
+                observe(op, lease, first_sample, None, false, validity, None, None)
+            }
             RuntimeUnit::Bank {
                 members,
                 lanes,
@@ -3320,21 +3391,48 @@ impl Runtime {
                 let frames = u32::try_from(lease.frames()).ok();
                 let final_start = members.len().checked_sub(population);
                 let chain: &BankChain = chain;
-                // Issue #943: one lane pass per plane over the same resident words every final
-                // lane's view below borrows, before the first observer runs. It only reads them,
-                // and it covers the scratch lanes of a partial bank too; only an active lane's
-                // result is ever handed on, because only an active lane has a final member.
-                let peaks = if sample_peak && eligible {
-                    frames
-                        .and_then(|frames| chain.final_output_block(frames))
-                        .and_then(|(left, right)| bank_sample_peak(chain.width(), left, right))
+                // Issue #950: the full meter pass, before the first observer runs. First each
+                // final lane's energy seed, read from its observers in binding order without
+                // changing any of them; then, only if some lane answered, one lane pass per plane
+                // from those seeds over the same resident words every final lane's view below
+                // borrows. It only reads them, and it covers the scratch lanes of a partial bank
+                // too, from `+0.0`; only an active lane's result is ever handed on, because only
+                // an active lane has a final member. Each observer then commits its own lane, in
+                // binding order, and only if the seed is still its own.
+                // The seeds are written once, where the hand-off below reads them, and never copied.
+                let mut seeds: Option<[[f64; 8]; 2]> = None;
+                let meters = if banked_meter && eligible {
+                    frames.zip(final_start).and_then(|(frames, final_start)| {
+                        let seeds = seeds.insert([[0.0; 8]; 2]);
+                        if !bank_meter_seeds(members, final_start, first_sample, frames, seeds) {
+                            return None;
+                        }
+                        let (left, right) = chain.final_output_block(frames)?;
+                        bank_meter_pass(chain.width(), left, right, seeds)
+                    })
                 } else {
                     None
                 };
                 #[cfg(any(test, feature = "test-support"))]
-                if peaks.is_some() {
-                    TEST_ONLY_BANK_SAMPLE_PEAK_PASSES.with(|value| value.set(value.get() + 1));
+                if meters.is_some() {
+                    TEST_ONLY_BANK_METER_PASSES.with(|value| value.set(value.get() + 1));
                 }
+                // Issue #943: one lane pass per plane over the same words, when the full pass did
+                // not run; when it did, its peak is the same peak and this pass is not run.
+                let peaks = if let Some(meters) = &meters {
+                    Some(meters.peaks())
+                } else if sample_peak && eligible {
+                    let peaks = frames
+                        .and_then(|frames| chain.final_output_block(frames))
+                        .and_then(|(left, right)| bank_sample_peak(chain.width(), left, right));
+                    #[cfg(any(test, feature = "test-support"))]
+                    if peaks.is_some() {
+                        TEST_ONLY_BANK_SAMPLE_PEAK_PASSES.with(|value| value.set(value.get() + 1));
+                    }
+                    peaks
+                } else {
+                    None
+                };
                 for (index, member) in members.iter_mut().enumerate() {
                     #[cfg(any(test, feature = "test-support"))]
                     test_only_observation_dispatch_member_access();
@@ -3352,6 +3450,9 @@ impl Runtime {
                         .and_then(|(lane, [left, right])| {
                             Some([*left.get(lane)?, *right.get(lane)?])
                         });
+                    let meter = final_lane
+                        .zip(meters.as_ref().zip(seeds.as_ref()))
+                        .and_then(|(lane, (meters, seeds))| meters.lane(lane, seeds));
                     observe(
                         member,
                         lease,
@@ -3360,6 +3461,7 @@ impl Runtime {
                         folded,
                         validity,
                         peak,
+                        meter,
                     )?;
                 }
                 Ok(())
@@ -3899,6 +4001,154 @@ fn bank_sample_peak(width: BankWidth, left: &[f32], right: &[f32]) -> Option<[[f
 // REALTIME_POLICY_END
 
 // REALTIME_POLICY_BEGIN
+/// The most frames the full meter pass takes in one block (issue #950): its counts are `f32` lanes,
+/// exact integers only up to `2^24`. A longer block declines the pass and its meters read their
+/// samples.
+const BANK_METER_MAX_FRAMES: usize = 1 << 24;
+
+/// One plane of the full meter pass (issue #950), for every lane of the bank: the partials of
+/// `lane::kernels::builtins::MeterBlock`, stored.
+#[derive(Clone, Copy)]
+struct BankMeterPlane {
+    peak: [f32; 8],
+    clipped: [f32; 8],
+    sanitized: [f32; 8],
+    energy: [f64; 8],
+}
+
+/// The full meter pass over one final resident block (issue #950): both planes' results,
+/// `[left, right]`, for every lane of the bank. The seeds it started from stay where
+/// [`bank_meter_seeds`] wrote them.
+struct BankMeterResults {
+    planes: [BankMeterPlane; 2],
+}
+
+impl BankMeterResults {
+    /// Every lane's `[left, right]` peak, in the shape issue #943's pass returns.
+    fn peaks(&self) -> [[f32; 8]; 2] {
+        let [left, right] = &self.planes;
+        [left.peak, right.peak]
+    }
+
+    /// Lane `lane`'s results, started from `seeds`, with its counts as integers: an `f32` count
+    /// below `2^24` converts exactly. `None` past the eighth lane.
+    fn lane(&self, lane: usize, seeds: &[[f64; 8]; 2]) -> Option<crate::GraphBankedMeterLane> {
+        let [left, right] = &self.planes;
+        let [left_seed, right_seed] = seeds;
+        Some(crate::GraphBankedMeterLane {
+            sample_peak: [*left.peak.get(lane)?, *right.peak.get(lane)?],
+            clipped: [
+                *left.clipped.get(lane)? as u32,
+                *right.clipped.get(lane)? as u32,
+            ],
+            sanitized: [
+                *left.sanitized.get(lane)? as u32,
+                *right.sanitized.get(lane)? as u32,
+            ],
+            energy_seed: [*left_seed.get(lane)?, *right_seed.get(lane)?],
+            energy: [*left.energy.get(lane)?, *right.energy.get(lane)?],
+        })
+    }
+}
+
+/// Writes each final lane's `[left, right]` energy seed for the full meter pass into `seeds`
+/// (issue #950): the first [`crate::GraphRuntimeObserver::banked_meter_seed`] answer among that
+/// lane's final member's observers, in binding order. A lane nobody answers keeps the `+0.0` the
+/// caller filled. Returns whether any lane answered, so a block no meter can commit does not pay
+/// for the pass.
+///
+/// Only reads the observers: the query is `&self`, so an observer that fails later in this block
+/// has changed nothing, and neither has any other.
+fn bank_meter_seeds(
+    members: &[RuntimeOp],
+    final_start: usize,
+    first_sample: u64,
+    frames: u32,
+    seeds: &mut [[f64; 8]; 2],
+) -> bool {
+    let mut answered = false;
+    let [left, right] = seeds;
+    let Some(finals) = members.get(final_start..) else {
+        return false;
+    };
+    for ((member, left), right) in finals.iter().zip(left.iter_mut()).zip(right.iter_mut()) {
+        if let Some([l, r]) = member
+            .observers
+            .iter()
+            .find_map(|binding| binding.observer.banked_meter_seed(first_sample, frames))
+        {
+            *left = l;
+            *right = r;
+            answered = true;
+        }
+    }
+    answered
+}
+
+/// The banked full meter pass of issue #950: every lane's `[left, right]` sample peak, clipped and
+/// sanitized counts, and energy over one final resident block, one
+/// [`meter_block`](lane::kernels::builtins::meter_block) call per plane at the chain's own width,
+/// each seeded with that plane's `seeds`.
+///
+/// Out of line on purpose, like [`bank_sample_peak`]: it is the one function that holds the pass,
+/// so its instructions can be read off a built artifact, and the width dispatch happens once per
+/// bank. `None` when the planes are not the same whole number of frames of that width, which
+/// `BankChain::final_output_block` never returns, or when there are more than
+/// [`BANK_METER_MAX_FRAMES`]. The words handed to the kernel are borrowed with `get`, at exactly
+/// `frames` frames, so the kernel's own slice cannot fail and the function keeps no panic path.
+#[inline(never)]
+fn bank_meter_pass(
+    width: BankWidth,
+    left: &[f32],
+    right: &[f32],
+    seeds: &[[f64; 8]; 2],
+) -> Option<BankMeterResults> {
+    use lane::kernels::builtins::meter_block;
+    use lane::{LaneF64, Widen};
+    fn plane<L: Widen>(words: &[f32], frames: usize, seeds: &[f64; 8]) -> Option<BankMeterPlane> {
+        let words = words.get(..frames * L::WIDTH)?;
+        let block = meter_block::<L>(words, frames, <L::F64 as LaneF64>::load(&seeds[..L::WIDTH]));
+        let mut plane = BankMeterPlane {
+            peak: [0.0; 8],
+            clipped: [0.0; 8],
+            sanitized: [0.0; 8],
+            energy: [0.0; 8],
+        };
+        block.peak.store(&mut plane.peak[..L::WIDTH]);
+        block.clipped.store(&mut plane.clipped[..L::WIDTH]);
+        block.sanitized.store(&mut plane.sanitized[..L::WIDTH]);
+        block.energy.store(&mut plane.energy[..L::WIDTH]);
+        Some(plane)
+    }
+    fn planes<L: Widen>(
+        left: &[f32],
+        right: &[f32],
+        seeds: &[[f64; 8]; 2],
+    ) -> Option<BankMeterResults> {
+        let frames = left.len() / L::WIDTH;
+        if left.len() != right.len()
+            || !left.len().is_multiple_of(L::WIDTH)
+            || frames > BANK_METER_MAX_FRAMES
+        {
+            return None;
+        }
+        let [left_seeds, right_seeds] = seeds;
+        Some(BankMeterResults {
+            planes: [
+                plane::<L>(left, frames, left_seeds)?,
+                plane::<L>(right, frames, right_seeds)?,
+            ],
+        })
+    }
+    match width {
+        BankWidth::Four => planes::<lane::Simd4>(left, right, seeds),
+        BankWidth::Eight => planes::<lane::Simd8>(left, right, seeds),
+    }
+}
+
+// REALTIME_POLICY_END
+
+// REALTIME_POLICY_BEGIN
 /// Run one op's observers in binding order, offering each the resident view first.
 ///
 /// `folded` says the chain folded this member's route (issue #885), so its scatter never wrote
@@ -3906,6 +4156,13 @@ fn bank_sample_peak(width: BankWidth, left: &[f32], right: &[f32]) -> Option<[[f
 /// there before any planar block is formed. `resident` is the only source of those words. The
 /// planar block is re-sliced per declining observer rather than cached, because the lease has to
 /// stay writable until that first acquisition.
+///
+/// `sample_peak` and `meter` are this member's lane of the bank's meter passes (issues #943 and
+/// #950), `None` for every member but a final one whose unit ran a pass this block.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "issue #950 adds the banked meter lane beside issue #943's banked peak"
+)]
 fn observe(
     op: &mut RuntimeOp,
     lease: &mut ArenaLease,
@@ -3914,6 +4171,7 @@ fn observe(
     folded: bool,
     validity: GraphObservationValidity,
     sample_peak: Option<[f32; 2]>,
+    meter: Option<crate::GraphBankedMeterLane>,
 ) -> Result<(), RenderError> {
     #[cfg(test)]
     TEST_ONLY_OBSERVE_CALLS.with(|calls| calls.set(calls.get() + 1));
@@ -3940,6 +4198,7 @@ fn observe(
                         first_sample,
                         validity,
                         sample_peak,
+                        meter,
                     })
             {
                 #[cfg(any(test, feature = "test-support"))]
@@ -4014,9 +4273,10 @@ fn observe_one(
                     lane,
                     first_sample,
                     validity,
-                    // Issue #943 banks the permanent path only; a controlled row's meter reads
-                    // its samples.
+                    // Issues #943 and #950 bank the permanent path only; a controlled row's meter
+                    // reads its samples.
                     sample_peak: None,
+                    meter: None,
                 })
         {
             #[cfg(any(test, feature = "test-support"))]
@@ -8115,6 +8375,7 @@ mod tests {
                 false,
                 GraphObservationValidity::CLEAR,
                 None,
+                None,
             );
             let take = accepts
                 .iter()
@@ -8143,7 +8404,8 @@ mod tests {
 
     #[test]
     fn resident_meter_entry_has_one_final_output_dispatch_and_admission_control() {
-        /// The member dispatch as rustfmt lays it out since issue #943 added the block peak.
+        /// The member dispatch as rustfmt lays it out since issue #943 added the block peak and
+        /// issue #950 the banked meter lane.
         const MEMBER_CALL: &str = concat!(
             "                    observe(\n",
             "                        member,\n",
@@ -8153,6 +8415,7 @@ mod tests {
             "                        folded,\n",
             "                        validity,\n",
             "                        peak,\n",
+            "                        meter,\n",
             "                    )?;\n",
         );
         fn valid(source: &str) -> bool {
@@ -8178,14 +8441,21 @@ mod tests {
                 && dispatcher.contains("if folded {")
                 && dispatcher.contains("write_resident_lane(lease, op.output, words)?;")
                 && dispatcher.contains("sample_peak,\n")
+                && dispatcher.contains("                        meter,\n")
                 && production.matches(".final_output_lane(").count() == 1
-                // Issue #943: one whole-block borrow, and one out-of-line pass over it.
-                && production.matches(".final_output_block(").count() == 1
+                // Issues #943 and #950: one whole-block borrow in each of the two exclusive pass
+                // arms, and one out-of-line pass over each.
+                && production.matches(".final_output_block(").count() == 2
                 && production.matches("bank_sample_peak(").count() == 2
+                && production.matches("bank_meter_pass(").count() == 2
+                && production.matches("bank_meter_seeds(").count() == 2
                 && observation.contains(MEMBER_CALL)
                 && [
                     "let Self { lease, units, .. } = self;",
-                    "RuntimeUnit::Op(op) => observe(op, lease, first_sample, None, false, validity, None)",
+                    concat!(
+                        "RuntimeUnit::Op(op) => {\n",
+                        "                observe(op, lease, first_sample, None, false, validity, None, None)",
+                    ),
                     "let eligible = population > 0",
                     "population <= width",
                     "!members.is_empty()",
@@ -8198,7 +8468,16 @@ mod tests {
                     "let chain: &BankChain = chain;",
                     "let observation = self.identity[index].observation;",
                     "let sample_peak = observation.sample_peak();",
-                    "let peaks = if sample_peak && eligible {",
+                    "let banked_meter = observation.banked_meter();",
+                    "let meters = if banked_meter && eligible {",
+                    "frames.zip(final_start).and_then(|(frames, final_start)| {",
+                    "let seeds = seeds.insert([[0.0; 8]; 2]);",
+                    "if !bank_meter_seeds(members, final_start, first_sample, frames, seeds) {",
+                    "let (left, right) = chain.final_output_block(frames)?;",
+                    "bank_meter_pass(chain.width(), left, right, seeds)",
+                    "let peaks = if let Some(meters) = &meters {",
+                    "Some(meters.peaks())",
+                    "} else if sample_peak && eligible {",
                     ".and_then(|frames| chain.final_output_block(frames))",
                     ".and_then(|(left, right)| bank_sample_peak(chain.width(), left, right))",
                     "let resident = if eligible",
@@ -8207,6 +8486,8 @@ mod tests {
                     "chain.fold_lanes().get(lane) == Some(&true)",
                     ".zip(peaks.as_ref())",
                     "Some([*left.get(lane)?, *right.get(lane)?])",
+                    ".zip(meters.as_ref().zip(seeds.as_ref()))",
+                    ".and_then(|(lane, (meters, seeds))| meters.lane(lane, seeds))",
                 ]
                 .iter()
                 .all(|term| observation.contains(term))
@@ -8243,9 +8524,30 @@ mod tests {
             ),
             // Issue #943: the pass forced on, run without the bind-time opt-in and without the
             // shape the resident views are admitted under.
+            ("} else if sample_peak && eligible {", "} else if true {"),
+            // Issue #950: the full pass forced on the same way; the sample-peak pass run beside
+            // it; the meter lane withheld from the member or read off its neighbour; the seeds
+            // not read; the pass handed a plane twice.
             (
-                "let peaks = if sample_peak && eligible {",
-                "let peaks = if true {",
+                "let meters = if banked_meter && eligible {",
+                "let meters = if true {",
+            ),
+            (
+                "let peaks = if let Some(meters) = &meters {",
+                "let peaks = if let Some(meters) = &None::<BankMeterResults> {",
+            ),
+            (MEMBER_CALL, &member_call("meter,\n", "None,\n")),
+            (
+                ".and_then(|(lane, (meters, seeds))| meters.lane(lane, seeds))",
+                ".and_then(|(lane, (meters, seeds))| meters.lane(lane ^ 1, seeds))",
+            ),
+            (
+                "if !bank_meter_seeds(members, final_start, first_sample, frames, seeds) {",
+                "if false {",
+            ),
+            (
+                "bank_meter_pass(chain.width(), left, right, seeds)",
+                "bank_meter_pass(chain.width(), left, left, seeds)",
             ),
             // The block peak withheld from the member, or the lane's peak read off its neighbour.
             (MEMBER_CALL, &member_call("peak,\n", "None,\n")),
@@ -8531,6 +8833,43 @@ mod tests {
         }
     }
 
+    /// Issue #950 amendment 5: the full meter pass declines a block of more than `2^24` frames,
+    /// where its `f32` counts would stop being exact integers, at both bank widths.
+    ///
+    /// The planes are zero-filled `vec!`s, which the allocator maps lazily, and the pass refuses
+    /// on the slice length before it reads a word, so the `2^24 + 1`-frame block costs address
+    /// space and no physical memory. A three-frame block of the same width is accepted and
+    /// computed, so the refusal is the frame count's and nothing else's.
+    #[test]
+    fn the_full_meter_pass_declines_a_block_whose_counts_would_not_be_exact() {
+        assert_eq!(
+            BANK_METER_MAX_FRAMES,
+            1 << 24,
+            "the largest exact f32 count"
+        );
+        let seeds = [[0.5_f64; 8]; 2];
+        for width in [BankWidth::Four, BankWidth::Eight] {
+            let lanes = width.lanes() as usize;
+            let over = vec![0.0_f32; (BANK_METER_MAX_FRAMES + 1) * lanes];
+            assert!(
+                bank_meter_pass(width, &over, &over, &seeds).is_none(),
+                "{width:?}: 2^24 + 1 frames decline the pass"
+            );
+            drop(over);
+            let short = vec![1.0_f32; 3 * lanes];
+            let results = bank_meter_pass(width, &short, &short, &seeds)
+                .unwrap_or_else(|| panic!("{width:?}: three frames run the pass"));
+            for lane in 0..lanes {
+                let lane = results.lane(lane, &seeds).expect("an active lane");
+                assert_eq!(lane.sample_peak, [1.0, 1.0]);
+                assert_eq!(lane.clipped, [3, 3]);
+                assert_eq!(lane.sanitized, [0, 0]);
+                assert_eq!(lane.energy_seed, [0.5, 0.5]);
+                assert_eq!(lane.energy, [3.5, 3.5]);
+            }
+        }
+    }
+
     #[test]
     fn rt9_identity_metadata_has_no_retained_or_peak_layout_delta() {
         // The every-target form of this pin is the `const` assertion after
@@ -8601,7 +8940,7 @@ mod tests {
         let row = |observed| UnitIdentity {
             banked: false,
             resident_input: false,
-            observation: UnitObservation::of(observed, false),
+            observation: UnitObservation::of(observed, false, false),
             source_lanes: 0,
             stages: 1,
             upstream_of_seam_stages: 0,

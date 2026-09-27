@@ -89,16 +89,26 @@ check_detector_residency() {
 # release profile's fat LTO, not a spelling. Correctness never depends on it (a scalarised widen is
 # the same conversion per lane, with the same bits, and the f64_lane_mismatches count above holds
 # both guest legs to that), but the reason the vocabulary exists is to stop doing this arithmetic
-# one lane at a time. So the census is taken over the body of the exported probe
-# `miso_gate_f64_lane_probe` (`e = e.add(w.mul(w))` at Simd4, tools/wasm-gate-guest): it must
+# one lane at a time. So the census is taken over the body of each exported probe, and each must
 # contain `f64x2.promote_low_f32x4`, `f64x2.mul` and `f64x2.add`, and none of the scalar
-# `f64.promote_f32`, `f64.mul` or `f64.add`. The simd128 leg only: without simd128, `wide`'s
-# `f64x2` is an array and scalar code is the correct lowering.
-check_f64_lane_lowering() {
-    local module="$1" census seen promote vector_mul vector_add scalar_promote scalar_mul scalar_add
-    census="$(wasm-objdump -d "$module" | awk '
+# `f64.promote_f32`, `f64.mul` or `f64.add`:
+#
+#   miso_gate_f64_lane_probe     the energy shape `e = e.add(w.mul(w))` at Simd4 (issue #949);
+#   miso_gate_meter_block_probe  the real `lane::kernels::builtins::meter_block::<Simd4>`, the
+#                                kernel of the graph's banked full meter pass on the browser's
+#                                four-lane banks (issue #950, amendment 4). Its body must also
+#                                have no scalar `f32.add`, `f32.gt` or `f32.abs`: the sanitize,
+#                                peak and counts stay `f32x4` too.
+#
+# The graph's own pass is reached through `call_indirect` in the AudioWorklet artifact, so no other
+# required gate reads its instructions; the second probe is the pin on the kernel it runs. The
+# simd128 leg only: without simd128, `wide`'s `f64x2` is an array and scalar code is the correct
+# lowering.
+census_f64_probe() {
+    local module="$1" probe="$2"
+    wasm-objdump -d "$module" | awk -v probe="<$probe>:" '
         /^[0-9a-f]+ func\[[0-9]+\] </ {
-            inside = /<miso_gate_f64_lane_probe>:/
+            inside = index($0, probe) > 0
             if (inside) seen++
             next
         }
@@ -108,27 +118,46 @@ check_f64_lane_lowering() {
         inside && /f64\.promote_f32/ { scalar_promote++ }
         inside && /f64\.mul/ { scalar_mul++ }
         inside && /f64\.add/ { scalar_add++ }
+        inside && /[^x]f32\.(add|gt|abs)/ { scalar_f32++ }
+        inside && /f32x4\.abs/ { vector_abs++ }
+        inside && /f32x4\.add/ { vector_f32_add++ }
         END {
-            printf "%d %d %d %d %d %d %d\n", seen, promote, vector_mul, vector_add,
-                scalar_promote, scalar_mul, scalar_add
+            printf "%d %d %d %d %d %d %d %d %d %d\n", seen, promote, vector_mul, vector_add,
+                scalar_promote, scalar_mul, scalar_add, scalar_f32, vector_abs, vector_f32_add
         }
-    ')"
-    read -r seen promote vector_mul vector_add scalar_promote scalar_mul scalar_add <<<"$census"
-    local summary="f64x2.promote_low_f32x4=$promote f64x2.mul=$vector_mul f64x2.add=$vector_add"
-    summary="$summary f64.promote_f32=$scalar_promote f64.mul=$scalar_mul f64.add=$scalar_add"
-    [[ "$seen" == 1 ]] || {
-        printf 'wasm gates: miso_gate_f64_lane_probe not found exactly once in %s (found %s)\n' \
-            "$module" "$seen" >&2
-        return 1
-    }
-    if ((promote == 0 || vector_mul == 0 || vector_add == 0 ||
-        scalar_promote != 0 || scalar_mul != 0 || scalar_add != 0)); then
-        printf 'wasm gates: the f64 lane probe is not vectorised on the simd128 leg: %s\n' \
-            "$summary" >&2
-        printf 'wasm gates: see crates/lane/src/f64_lane.rs, "Lowering"\n' >&2
-        return 1
-    fi
-    printf 'wasm gates: f64 lane probe census (simd128): %s\n' "$summary"
+    '
+}
+
+check_f64_lane_lowering() {
+    local module="$1" probe census seen promote vector_mul vector_add scalar_promote scalar_mul
+    local scalar_add scalar_f32 vector_abs vector_f32_add summary
+    for probe in miso_gate_f64_lane_probe miso_gate_meter_block_probe; do
+        census="$(census_f64_probe "$module" "$probe")"
+        read -r seen promote vector_mul vector_add scalar_promote scalar_mul scalar_add scalar_f32 \
+            vector_abs vector_f32_add <<<"$census"
+        summary="f64x2.promote_low_f32x4=$promote f64x2.mul=$vector_mul f64x2.add=$vector_add"
+        summary="$summary f64.promote_f32=$scalar_promote f64.mul=$scalar_mul f64.add=$scalar_add"
+        summary="$summary f32.{add,gt,abs}=$scalar_f32 f32x4.abs=$vector_abs f32x4.add=$vector_f32_add"
+        [[ "$seen" == 1 ]] || {
+            printf 'wasm gates: %s not found exactly once in %s (found %s)\n' \
+                "$probe" "$module" "$seen" >&2
+            return 1
+        }
+        if ((promote == 0 || vector_mul == 0 || vector_add == 0 ||
+            scalar_promote != 0 || scalar_mul != 0 || scalar_add != 0)); then
+            printf 'wasm gates: %s is not vectorised on the simd128 leg: %s\n' \
+                "$probe" "$summary" >&2
+            printf 'wasm gates: see crates/lane/src/f64_lane.rs, "Lowering"\n' >&2
+            return 1
+        fi
+        if [[ "$probe" == miso_gate_meter_block_probe ]] &&
+            ((scalar_f32 != 0 || vector_abs == 0 || vector_f32_add == 0)); then
+            printf 'wasm gates: %s left f32 lane arithmetic scalar on the simd128 leg: %s\n' \
+                "$probe" "$summary" >&2
+            return 1
+        fi
+        printf 'wasm gates: %s census (simd128): %s\n' "$probe" "$summary"
+    done
 }
 
 command -v wasm-objdump >/dev/null 2>&1 || {
