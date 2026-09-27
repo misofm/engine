@@ -9015,6 +9015,350 @@ mod tests {
         assert_pcm_bits_equal(&render.pcm, &scalar_render.pcm, "phantom-loss session");
     }
 
+    /// Issue #1001: a test-only compressor whose bank bind errors on some cohorts.
+    ///
+    /// Everything but the bank bind is the real compressor's. The bind errors on every group when
+    /// `marker` is `None`, and otherwise only on a group one of whose members carries a parameter
+    /// equal to the marker bit for bit; every other group binds the real bank, wrapped so that the
+    /// test can count the banks alive (`live`) and ever bound (`bound`).
+    struct ErroringBankFactory {
+        delegate: Arc<dyn NativeEffectFactory>,
+        marker: Option<f32>,
+        live: Arc<AtomicU64>,
+        bound: Arc<AtomicU64>,
+    }
+    impl NativeEffectFactory for ErroringBankFactory {
+        fn descriptor(&self) -> &'static effect_contract::EffectDescriptor {
+            self.delegate.descriptor()
+        }
+        fn prepare(
+            &self,
+            request: PrepareEffectRequest<'_>,
+        ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
+            self.delegate.prepare(request)
+        }
+        fn bind_homogeneous_bank(
+            &self,
+            request: PrepareEffectBankRequest<'_>,
+        ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+            let marked = self.marker.is_none_or(|marker| {
+                request.requests.iter().any(|member| {
+                    member
+                        .initial_values
+                        .iter()
+                        .any(|value| value.value.to_bits() == marker.to_bits())
+                })
+            });
+            if marked {
+                return Err(EffectPrepareError {
+                    code: "test.bank.bind_refused",
+                });
+            }
+            let Some(inner) = self.delegate.bind_homogeneous_bank(request)? else {
+                return Ok(None);
+            };
+            self.live.fetch_add(1, Ordering::SeqCst);
+            self.bound.fetch_add(1, Ordering::SeqCst);
+            Ok(Some(Box::new(CountedBank {
+                inner,
+                live: Arc::clone(&self.live),
+            })))
+        }
+    }
+
+    /// A bank that decrements `live` when it is dropped, and is otherwise its inner bank.
+    struct CountedBank {
+        inner: Box<dyn PreparedNativeEffectBank>,
+        live: Arc<AtomicU64>,
+    }
+    impl Drop for CountedBank {
+        fn drop(&mut self) {
+            self.live.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    impl PreparedNativeEffectBank for CountedBank {
+        fn metadata(&self) -> effect_contract::PreparedBankMetadata {
+            self.inner.metadata()
+        }
+        fn reset(&mut self, kind: effect_contract::ResetKind) {
+            self.inner.reset(kind);
+        }
+        fn process_bank(
+            &mut self,
+            block: effect_contract::EffectBankProcessBlock<'_>,
+        ) -> effect_contract::BankProcessReport {
+            self.inner.process_bank(block)
+        }
+        fn apply_prepared_target_lane(
+            &mut self,
+            lane: usize,
+            target: &PreparedEffectTarget,
+        ) -> Result<(), effect_contract::EffectTargetError> {
+            self.inner.apply_prepared_target_lane(lane, target)
+        }
+        fn observe_resident_bank(
+            &self,
+            tap_index: u32,
+            out: &mut [effect_contract::ObservationSample],
+        ) -> bool {
+            self.inner.observe_resident_bank(tap_index, out)
+        }
+        fn copy_response_snapshot_lane(
+            &self,
+            lane: usize,
+            request: effect_contract::ResponseSnapshotRequest<'_>,
+        ) -> Result<effect_contract::ResponseSnapshotSummary, effect_contract::ResponseAnalysisError>
+        {
+            self.inner.copy_response_snapshot_lane(lane, request)
+        }
+        fn snapshot_track_state_payload(
+            &self,
+            track_index: u32,
+            output: StatePayloadOutput<'_>,
+        ) -> Result<(), effect_contract::StatePayloadError> {
+            self.inner.snapshot_track_state_payload(track_index, output)
+        }
+        fn restore_track_state_payload(
+            &mut self,
+            track_index: u32,
+            state_layout_version: u32,
+            input: effect_contract::StatePayloadInput<'_>,
+        ) -> Result<(), effect_contract::StatePayloadError> {
+            self.inner
+                .restore_track_state_payload(track_index, state_layout_version, input)
+        }
+        fn lane_channel_symmetry(&self, lane: usize) -> bool {
+            self.inner.lane_channel_symmetry(lane)
+        }
+        fn supports_mono_collapse(&self) -> bool {
+            self.inner.supports_mono_collapse()
+        }
+        fn process_bank_mono(
+            &mut self,
+            block: effect_contract::EffectBankProcessBlock<'_>,
+        ) -> effect_contract::BankProcessReport {
+            self.inner.process_bank_mono(block)
+        }
+        fn desymmetrize_channels(&mut self) {
+            self.inner.desymmetrize_channels();
+        }
+        fn channels_agree(&self) -> bool {
+            self.inner.channels_agree()
+        }
+    }
+
+    /// A registry whose only effect is [`ErroringBankFactory`] over the launch compressor.
+    fn erroring_compressor_registry(
+        marker: Option<f32>,
+    ) -> (NativeEffectRegistry, Arc<AtomicU64>, Arc<AtomicU64>) {
+        let launch = launch_native_effect_registry().expect("launch registry");
+        let (live, bound) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+        let registry = NativeEffectRegistry::new([Box::new(ErroringBankFactory {
+            delegate: launch
+                .get_shared_ascii("miso.compressor")
+                .expect("registered launch effect"),
+            marker,
+            live: Arc::clone(&live),
+            bound: Arc::clone(&bound),
+        }) as Box<dyn NativeEffectFactory>])
+        .expect("erroring compressor registry");
+        (registry, live, bound)
+    }
+
+    /// `count` tracks of the mono fixture carrying only `dynamic: [comp]`, stereo except `mono`.
+    fn dynamic_compressor_session(count: usize, mono: usize) -> session::SessionModel {
+        let mut model = mono_fixture_with_tracks(count);
+        let comp = model.tracks[0].simd1.effects[1].clone();
+        for (index, track) in model.tracks.iter_mut().enumerate() {
+            if index != mono {
+                track.right_source_channel = 1;
+            }
+            track.simd1.effects.clear();
+            track.simd2.effects.clear();
+            track.dynamic.effects = vec![comp.clone()];
+        }
+        model
+    }
+
+    /// Issue #1001: a factory error while binding the re-plan keeps the unmoved plan.
+    ///
+    /// The session is `ch00` mono and `ch01..ch{W-1}` stereo, each carrying only
+    /// `dynamic: [comp]`, and the compressor's bank bind always errors (Sol's #971 attempt-2
+    /// session). The trial plan has no full group, so it never calls the bind. Moving the
+    /// stranded `ch00` completes the stereo group, so the re-plan does call it and gets the
+    /// error. The re-plan is speculative, so the compile must go on with the unmoved plan: it
+    /// compiles at both bank widths, `ch00` stays mono, and it renders the bits and the chain
+    /// shape of the plan with the move disabled. Here that plan is the bank-free registry's:
+    /// there the re-plan binds nothing, so the move is refused.
+    ///
+    /// Red mutation: restore `?` on the re-plan bind, and the compile is refused with the
+    /// factory's code at both widths.
+    #[test]
+    fn a_replan_that_fails_to_bind_keeps_the_unmoved_plan() {
+        const BLOCKS: u64 = 12;
+        let session = |dispatch: Backend| {
+            let lanes = BankWidth::for_backend(dispatch)
+                .expect("a vector dispatch")
+                .lanes() as usize;
+            dynamic_compressor_session(lanes, 0)
+        };
+        let mono: BTreeSet<String> = ["ch00".to_owned()].into();
+        // Both widths are compiled before anything is asserted, so a refusal names every width it
+        // happens at.
+        let mut compiled = Vec::new();
+        let mut refused = Vec::new();
+        for dispatch in [Backend::Simd8, Backend::Simd4] {
+            let (registry, _, bound) = erroring_compressor_registry(None);
+            match try_compile_console_model_at(&session(dispatch), 2_092, &[], dispatch, &registry)
+            {
+                Ok(artifact) => compiled.push((dispatch, artifact, bound)),
+                Err(diagnostics) => refused.push((dispatch, diagnostics)),
+            }
+        }
+        assert!(
+            refused.is_empty(),
+            "a re-plan bind error refused the compile: {refused:?}"
+        );
+        for (dispatch, artifact, bound) in compiled {
+            let model = session(dispatch);
+            assert_eq!(
+                pooled_tracks(&artifact)[0],
+                mono,
+                "{dispatch:?}: ch00 stays mono"
+            );
+            assert_eq!(artifact.graph().prepared_bank_count(), 0, "{dispatch:?}");
+            assert_eq!(
+                bound.load(Ordering::SeqCst),
+                0,
+                "{dispatch:?}: no bank ever bound"
+            );
+            let unmoved = try_compile_console_model_at(
+                &model,
+                2_093,
+                &[],
+                dispatch,
+                &scalar_console_registry(),
+            )
+            .unwrap_or_else(|_| panic!("{dispatch:?}: the bank-free plan compiles"));
+            assert_eq!(
+                pooled_tracks(&unmoved)[0],
+                mono,
+                "{dispatch:?}: no move there"
+            );
+            let render = render_armed_console_blocks(artifact, BLOCKS, &mono, &mono);
+            let unmoved_render = render_armed_console_blocks(unmoved, BLOCKS, &mono, &mono);
+            assert_eq!(
+                render.shape, unmoved_render.shape,
+                "{dispatch:?}: the same plan"
+            );
+            assert_eq!(render.collapse, unmoved_render.collapse, "{dispatch:?}");
+            assert_pcm_bits_equal(
+                &render.pcm,
+                &unmoved_render.pcm,
+                &format!("{dispatch:?}: erroring re-plan against the move-disabled plan"),
+            );
+            assert!(
+                render.pcm.iter().flatten().any(|sample| *sample != 0.0),
+                "{dispatch:?}: the session rendered audio"
+            );
+        }
+    }
+
+    /// Issue #1001: a re-plan that fails part way leaves nothing of itself behind.
+    ///
+    /// `ch00..ch{2W-2}` are stereo and `ch{2W-1}` is mono, each carrying only `dynamic: [comp]`;
+    /// the mono track's compressor carries a marker threshold, and the bank bind errors only on a
+    /// group holding the marker. The trial binds the stereo cohort `ch00..ch{W-1}`. Moving the
+    /// mono track re-plans the stereo pool as two full groups, and the re-plan binds the first
+    /// (a second bank over `ch00..ch{W-1}`) before the second, which holds the marker, errors.
+    /// The compile keeps the trial: its one bank, its pools (the mono track still mono), and no
+    /// bank of the failed re-plan alive once the compile returns. Dropping the artifact then
+    /// drops the last bank.
+    ///
+    /// At the host width only: the real compressor binds a bank only at the width the build
+    /// executes, and declines any other.
+    #[test]
+    fn a_replan_that_fails_part_way_drops_its_banks() {
+        const MARKER: f32 = -6.25;
+        let dispatch = host_dispatch();
+        let Some(width) = BankWidth::for_backend(dispatch) else {
+            return;
+        };
+        let lanes = width.lanes() as usize;
+        let mono_index = 2 * lanes - 1;
+        let mut model = dynamic_compressor_session(2 * lanes, mono_index);
+        let threshold = model.tracks[mono_index].dynamic.effects[0]
+            .params
+            .iter_mut()
+            .find(|param| param.parameter_id == 1)
+            .expect("the fixture compressor's threshold");
+        threshold.value = MARKER;
+        let mono: BTreeSet<String> = [format!("ch{mono_index:02}")].into();
+        let (registry, live, bound) = erroring_compressor_registry(Some(MARKER));
+        let artifact = try_compile_console_model_at(&model, 2_094, &[], dispatch, &registry)
+            .unwrap_or_else(|diagnostics| {
+                panic!("{dispatch:?}: a re-plan bind error refused the compile: {diagnostics:?}")
+            });
+        assert_eq!(
+            bound.load(Ordering::SeqCst),
+            2,
+            "{dispatch:?}: the trial's bank, then the re-plan's first before its error"
+        );
+        assert_eq!(
+            live.load(Ordering::SeqCst),
+            1,
+            "{dispatch:?}: only the trial's bank is alive; the re-plan's was dropped"
+        );
+        assert_eq!(
+            pooled_tracks(&artifact)[0],
+            mono,
+            "{dispatch:?}: still mono"
+        );
+        let members: Vec<Vec<String>> = artifact
+            .graph()
+            .effect_bank_members()
+            .map(|bank| {
+                bank.iter()
+                    .map(|member| member.track_id.as_str().to_owned())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            members,
+            vec![
+                (0..lanes)
+                    .map(|index| format!("ch{index:02}"))
+                    .collect::<Vec<_>>()
+            ],
+            "{dispatch:?}: the trial's bank, over the trial's stereo cohort"
+        );
+        // Nothing is half-applied: the builtin-stage planner read the unmoved map too, so the
+        // mono track's post-input bank holds it alone rather than beside the stereo tracks.
+        let mono_track = format!("ch{mono_index:02}");
+        let mono_builtin_banks: Vec<usize> = artifact
+            .prepared_builtin_banks()
+            .filter(|bank| bank.stage == TrackStage::PostInputBuiltins)
+            .filter(|bank| {
+                bank.members.iter().any(|node| {
+                    matches!(node, GraphNodeId::TrackStage { track_id, .. }
+                        if track_id.as_str() == mono_track)
+                })
+            })
+            .map(|bank| bank.members.len())
+            .collect();
+        assert_eq!(
+            mono_builtin_banks,
+            vec![1],
+            "{dispatch:?}: the mono track's post-input bank"
+        );
+        drop(artifact);
+        assert_eq!(
+            live.load(Ordering::SeqCst),
+            0,
+            "{dispatch:?}: nothing leaked"
+        );
+    }
+
     /// Mono-collapse M1: what class pooling costs, and on which sessions -- the route fold.
     ///
     /// # The finding
@@ -11405,6 +11749,19 @@ mod tests {
         meters: &[MeterRequest],
         registry: &NativeEffectRegistry,
     ) -> PreparedGraphBuiltinsArtifact {
+        try_compile_console_model_at(model, plan_id, meters, host_dispatch(), registry)
+            .unwrap_or_else(|_| panic!("production console graph"))
+    }
+
+    /// [`compile_console_model_with_builtins`] at an explicit bank `dispatch`, handing back the
+    /// graph compile's diagnostics instead of panicking on a refusal.
+    fn try_compile_console_model_at(
+        model: &session::SessionModel,
+        plan_id: u64,
+        meters: &[MeterRequest],
+        dispatch: Backend,
+        registry: &NativeEffectRegistry,
+    ) -> Result<PreparedGraphBuiltinsArtifact, GraphDiagnosticSet> {
         let session = compile_session(
             model,
             CompileCaps {
@@ -11434,7 +11791,7 @@ mod tests {
         )
         .expect("prepared console builtins");
         GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
-            dispatch: host_dispatch(),
+            dispatch,
             plan_id,
             effects: prepare_native_session_effects(
                 &session,
@@ -11449,7 +11806,7 @@ mod tests {
             builtins,
             caps: integration_caps(),
         })
-        .unwrap_or_else(|_| panic!("production console graph"))
+        .map_err(|failure| failure.diagnostics)
     }
 
     /// [`compile_console_model_with_builtins`] for metric-selected meters (issue #943), through the
