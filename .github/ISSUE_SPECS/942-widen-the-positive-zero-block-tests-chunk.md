@@ -451,3 +451,94 @@ other issues, and the pin is repinned at the batch boundary.
 all clean. The four suites are as in gate 2. `cargo test --locked -p console-workload` gives 37
 passed, 0 failed and 2 ignored. `scripts/check-realtime-policy.sh` reports ok (55 marked regions
 in 16 files). All ran with `CARGO_INCREMENTAL=0`. The timed console runner was not run.
+
+## Sol attempt 3 verdict: PASS
+
+Reviewed `git diff 7eeaa743..HEAD`: only `crates/effect-runtime/src/bank.rs` and this spec change.
+Every gate was re-run independently. The builds used scratch source copies (`git archive HEAD`),
+with `bank.rs` swapped between today (`7eeaa743`), the shipped form (`#[inline(always)]`) and a
+plain-`#[inline]` copy of the same body. Each variant had its own target directory. Timing was
+pinned to core 6 with `taskset`, and the arms rotated within every round. Scratch was deleted
+afterwards. The timed console runner was not run.
+
+### Gates
+
+| gate | result |
+|---|---|
+| 1 truth value | pass. Committed test: 221,581 blocks, count recomputed. Independent check: 46,526,834 blocks, all agree with `iter().all(bits == 0)`. It covers every length 0..=2,100, every word position, seven patterns (`-0.0`, smallest subnormal, qNaN, `0xffc00000`, all-ones, `1.0`, smallest normal), slice offsets 0, 1 and 3, and 200,000 random two-`-0.0` pairs |
+| 2 standing tests | pass. Five crates (`effect-runtime`, `parametric-eq`, `compressor`, `true-peak-limiter`, `console-workload`): 349 passed, 0 failed, 7 ignored, 60 suites. The named silent-path tests pass |
+| 3 timing, shipped (inlined) form | pass (table below) |
+| 3 disassembly | pass. x86: head is 2 x `vpor ymm` per 16-word step; wide loop is 4 x `vpor ymm` per 32-word step with one `vextracti128`/`vpshufd`/`vmovd` reduction per 128-word chunk. Wasm (shipped artifact, PEQ f32x4 `process_bank`): `v128.load 2 0` + `v128.or` per 4 words, one shuffle/`extract_lane` reduction per chunk. `i32.or` appears only in the two 1-word remainder loops |
+| 4 digests | pass. All 17 (16 `WORKLOADS` + the ring row, 64 blocks) are identical base vs change in dev and release, and dev equals release. The plumbing row equals the pinned `57535244...f800` |
+| 5 AudioWorklet | pass. The build script's cargo line gives base sha `0b6b0632...`, the implementer's base. Base, shipped and plain-`#[inline]` artifacts give identical results: render closure 8, traps 5; kernel shape `f32x4_arith` 11,719, 15 kernels, all 11 roster rows ok; `meter_poll` closure 9, traps 2; `command_submit` closure 39. Opcode policy: `f32x4.mul` 4,908, no `relaxed`, no atomics |
+| 6 lint/doc/policy | pass. `fmt --check`, clippy `-D warnings` (workspace, all targets, all features), doc `-D warnings`, `check-realtime-policy.sh` ok (55 regions in 16 files) |
+
+Timing, per call. x86 is in TSC ticks (measured at 2.994 GHz), minimum of 40 x 2,000 calls, three
+runs. Wasm is in ns, Node 22.23.2, minimum of 30 x 20,000 calls, three runs. "Inlined" means the
+predicate is folded into the timing loop, as it ships.
+
+| input | x86 today | x86 change | wasm today | wasm change |
+|---|---:|---:|---:|---:|
+| 128 silent, inlined | 25.0 | 16.1 (-36 %) | 15.08 | 11.05 (-27 %) |
+| 512 silent, inlined | 92.8 | 44.2-45.1 (-52 %) | 57.27 | 36.09 (**-37 %**) |
+| 1,024 silent, inlined | 196.0-196.2 | 85.0-86.7 (**-56 %**) | 118.1 | 69.7 (**-41 %**) |
+| live from word 0, inlined | 7.3 | 7.3 (**+0**) | 4.04 | 4.04 (**+0.00 ns**) |
+| live, both outlined | 10.5 | 9.7 | 5.39 | 5.93 |
+| live, change outlined vs today inlined | 7.3 | 9.7 | 4.04 | 5.93 (+1.89 ns) |
+
+Each corrected bound passes on both targets, and the implementer's tables reproduce within about
+2 %.
+
+### Deviation ruling: `#[inline(always)]` is accepted
+
+The claim reproduces, and it holds natively as well as in wasm:
+
+- **Wasm.** The plain-`#[inline]` two-loop form emits 3 outlined copies, called from 7, 4 and 4
+  sites (15 in all). Those sites include the f32x4 bank paths of all three effects. Today's
+  `#[inline]` body has no symbol in the base artifact: its 33 fold loops sit inside the effect
+  functions, which is 33 inlined instances.
+- **Shipped form.** The artifact has 66 fold loops (2 per instance, 33 instances), no
+  `block_is_positive_zero` symbol and no `or_bits` symbol.
+- **Native.** In the x86 release `bench` binary, plain `#[inline]` outlines 1 copy called from 10
+  sites, among them the f32x8 bank paths of the compressor, PEQ and limiter. Base and shipped have
+  no symbol.
+- **Cost.** Wasm code section +7,563 B (+0.27 %) with the function count unchanged at 2,700.
+  x86 `bench` `.text` +13,008 B (+0.34 %). No callgraph number moves.
+
+`check_block` in the same file already uses the attribute.
+
+### Findings (none blocking)
+
+1. **Low, `crates/effect-runtime/src/bank.rs:128-130`.** The doc sentence says `chunks_exact` is
+   emitted on wasm32 `simd128` as a scalar `i32.or` chain. That is true only of the measured
+   `chunks_exact(64)`. A standalone probe with the same flags compiled it to 64 `i32.or` per
+   chunk. `chunks_exact(128)` compiled to 32 unrolled `v128.or` per chunk (1-2 `i32.or`), both
+   alone and after the head. Suggest "`chunks_exact(64)`" or "a fixed-width `chunks_exact`". The
+   code is unaffected.
+2. **Low, `bank.rs:155` / test at `:413-461`.** The committed test places one nonzero word per
+   block, so it cannot tell `|=` from `^=` or `wrapping_add` in `or_bits`. Both mutants stay
+   green. A second case with the same pattern at two positions (two `-0.0` words) kills both;
+   the independent pair check above does. `max` also survives, but it is an equivalent mutant.
+   The test meets gate 1 as written. Mutations M1-M4 reproduce with the recorded first failures.
+   Eight further structural mutants are all red: head drops its last word, skip the first wide
+   chunk, drop word 32, chunk drops its last word, lowest bit dropped, float compare, and the
+   `> 1` thresholds on head and chunk.
+3. **Low (outside the gate's live-from-word-0 definition): onset window.** Take a block whose
+   first nonzero word falls in words 32 to 95. The change scans the head plus a whole 128-word
+   chunk, where today scans two or three 32-word chunks. Wasm 1,024-word sweep in steps of 8:
+   onsets at 32-56 cost 7.5 to 12.4 ns (+4.85), onsets at 64-88 cost +1.1 to 1.4 ns, and every
+   onset from 96 on is faster (128: 18.3 to 12.4; 384: 46.6 to 29.1). The change is slower at 8
+   of 129 onset positions and faster at 117. The x86 worst case is +3.8 tsc (1.3 ns) at onset 32.
+   The cost is paid at most once per onset per plane, against 21-48 ns saved on every silent
+   call. The coordinator should note it; it is not a stop.
+4. **Info, spec line 424 ("Gate 1 is the discriminating test").** This is incomplete. Under the
+   return-after-head mutant, four `true-peak-limiter` lib tests also fail:
+   `silence_restores_exact_identity_including_signed_zero`,
+   `a_settled_silent_limiter_renders_exactly_the_never_fast_path`,
+   `a_negative_zero_input_block_is_not_treated_as_silence` and
+   `a_stale_detector_history_refuses_the_claim`. They fail because `is_at_silent_rest` passes it
+   state arrays whose nonzero words lie past word 32. The 17 digests do not move under that
+   mutant (reproduced). The witnesses are therefore the exhaustive unit property test, which
+   covers the whole truth-value claim that every caller relies on, and the limiter's rest tests
+   end to end. That is sufficient for a class A predicate change. The digests are
+   non-regression only.
