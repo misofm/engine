@@ -1,5 +1,6 @@
-//! Issue #996: the standing 64-track console, fed non-repeating hot noise, renders the pre-#990
-//! limiter's words while its linked stereo pairs link, unlink and are made equal again mid-run.
+//! Issues #996 and #997: the standing 64-track console, fed non-repeating hot noise, renders the
+//! pre-#990 limiter's words at every bank width (`Simd8`, `Simd4` and `Scalar`) while its linked
+//! stereo pairs link, ramp, unlink and are made equal again mid-run.
 //!
 //! # Why this test exists
 //!
@@ -16,10 +17,16 @@
 //! into the right ring) every session digest stayed green. This is the session test the #990
 //! verification asked for (its finding 1).
 //!
+//! Issue #997 closed the three gaps the #996 verification found: the test ran only at the host's
+//! own width (W8 here, while the browser renders four-lane banks); one linked-ramp trial left
+//! #990's M9 (the right ramps not set from the left at block end) green at five of eight seeds;
+//! and no retarget unlinked a W8 bank from its lane 0 or its last lane, so a defect confined to a
+//! bank's edge lanes passed at W8.
+//!
 //! # The session
 //!
-//! `console-sixty-four-track-intended.json`, prepared through the host facade as a host prepares
-//! it: sixty-four strips of builtins, EQ and compressor on `simd1`, and a true-peak limiter
+//! `console-sixty-four-track-intended.json`, compiled and prepared through the host facade's own
+//! pipeline: sixty-four strips of builtins, EQ and compressor on `simd1`, and a true-peak limiter
 //! (`channel: "both"`, `maximum` link) alone on `simd2`. Two edits, each made for a measured
 //! reason:
 //!
@@ -31,47 +38,74 @@
 //!   latency-preserving shunt). The fixture's compressors, up to 7.5:1 from -19.5 dB, hold most
 //!   tracks under their ceilings: on the shared source, 46 of 64 limiters never raised their
 //!   reduction after block 32, because they were only releasing from the onset transient, and a
-//!   limiter that only releases never reads its window's older half. With them bypassed, every
-//!   unlink below turns M1 red on five to seven of its bank's eight lanes.
+//!   limiter that only releases never reads its window's older half. With them bypassed, M1 moves
+//!   the readings of five to seven of the eight lanes of every W8 bank that unlinks, from its
+//!   unlink block on.
 //!
 //! The streams are seeded SplitMix64 noise, each 96-frame segment at its own level between +6 and
 //! +18 dBFS peak. The segment divides neither the quantum nor the window, so nothing repeats.
 //! Each limiter's gain-reduction tap is armed at a one-block window from block 0. Every retarget
 //! goes through the limiter's own live control channel and lands as a `Point` span at the first
-//! sample of its block; `ceiling` is parameter index 0 and `release` index 1.
+//! sample of its block; `ceiling` is parameter index 0 and `release` index 1. "Both" is two
+//! single-channel spans in one block, left then right, which leave the pair's designed words
+//! equal.
 //!
-//! | block | track | retarget | its pair |
+//! | block | tracks | retarget | the pairs |
 //! |---|---|---|---|
-//! | 12 | `ch18` | ceiling -3 dB, left **and** right in one block | stays linked through the ramp |
+//! | 12 | `ch16`-`ch23` | ceiling -3 dB, both | stay linked through the ramp |
 //! | 17 | `ch03` | ceiling -4 dB, left | unlinks |
 //! | 21 | `ch42` | release 400 ms, right | unlinks |
+//! | 26 | `ch48`-`ch55` | release 250 ms, both | stay linked through the ramp |
 //! | 34 | `ch03` | ceiling -4 dB, right: equal again | stays dual |
 //! | 36 | `ch42` | release back to 112.5 ms, right: equal again | stays dual |
+//! | 44 | `ch48`-`ch55` | ceiling -3.5 dB, both | stay linked |
 //! | 49 | `ch57` | ceiling -2 dB, left | unlinks, after 49 linked blocks |
 //! | 51 | `ch29` | release 30 ms, left | unlinks |
 //! | 53 | `ch12` | ceiling -6 dB, left | unlinks |
-//! | 60 | `ch18` | ceiling back to -1.0625 dB, both in one block | stays linked |
+//! | 60 | `ch16`-`ch23` | ceiling -1.5 dB, both | stay linked |
+//! | 66 | `ch23` | ceiling -4 dB, left | unlinks from the bank's last lane |
 //! | 66 | `ch57` | ceiling -2 dB, right: equal again | stays dual |
 //! | 68 | `ch12` | ceiling -6 dB, right: equal again | stays dual |
-//! | 81 | `ch37` | ceiling -3 dB, left | unlinks, after 81 linked blocks |
+//! | 81 | `ch38` | ceiling -3 dB, left | unlinks, after 81 linked blocks |
 //! | 83 | `ch05` | release 250 ms, left | unlinks at W4; at W8 its bank is dual since block 17 |
-//! | 90 | `ch37` | ceiling -3 dB, right: equal again | stays dual |
+//! | 85 | `ch48` | release 180 ms, right | unlinks from the bank's lane 0, after 85 linked blocks |
+//! | 90 | `ch38` | ceiling -3 dB, right: equal again | stays dual |
+//! | 90 | `ch23` | ceiling -4 dB, right: equal again | stays dual |
+//! | 92 | `ch48` | release back to 250 ms, right: equal again | stays dual |
 //!
-//! Each event lands in a different bank at both launch widths (eight tracks per bank at W8, four
-//! at W4). At W8, `ch16`-`ch23` and `ch48`-`ch55` stay linked for the whole run. Every unlink
-//! lands where the van Herk phase, `128 * block mod 241`, is at most 37. So for the first 203 to
-//! 235 frames after it, part of the right channel's window is still answered from the previous
-//! van Herk block, which is where a stale right ring gives a wrong minimum.
+//! Banks are eight consecutive tracks at W8 and four at W4; at `Scalar` nothing banks and every
+//! track is its own one-lane instance. The test reads each track's bank and lane from the
+//! prepared plan rather than assuming them.
+//!
+//! * **Linked ramps.** The four "both" rows retarget every lane of a bank that is still linked
+//!   (bank 2 and bank 6 at W8, four W4 banks). The 64-sample ramp runs inside the landing block,
+//!   so that block renders linked through the ramping dispatch, and the right ramps must leave it
+//!   equal to the left's. Under M9 they do not, the next block finds the designed words apart
+//!   and renders dual, and the right channel ramps a block late. At each of eight seeds that
+//!   parts three to five of `ch16`-`ch22` and six or seven of `ch49`-`ch55` (the pairs the first
+//!   two ramps reach and no one-sided retarget does), at every width, and the channels-equal
+//!   check fires.
+//! * **Unlinks.** The first one-sided retarget of each bank unlinks it: all eight banks at W8,
+//!   nine banks at W4, nine instances at `Scalar`. At W8 those eight retargets land on eight
+//!   different lanes, `ch48` on lane 0 and `ch23` on lane 7; at W4 they cover all four lanes
+//!   (`ch12` and `ch48` on lane 0, `ch03` and `ch23` on lane 3). The test asserts that every lane
+//!   of its width carries one. Every unlink lands where the van Herk phase,
+//!   `128 * block mod 241`, is at most 37. So for the first 203 to 235 frames after it, part of
+//!   the right channel's window is still answered from the previous van Herk block, which is where
+//!   a stale right ring gives a wrong minimum.
 //!
 //! # What is pinned, and how
 //!
 //! One SHA-256 over, after every block, the master's 256 output words and every limiter's
 //! published window (its sequence number and both channels' reduction words). It was recorded on
-//! the **pre-#990 kernel**: this tree with `crates/true-peak-limiter/src/lib.rs` put back to its
-//! text at `bbcf8ce1`, which never links. The batch head renders the same digest.
+//! the **pre-#990 kernel**, which never links: this tree with `crates/true-peak-limiter` put back
+//! to its text at `bbcf8ce1`. `Simd8`, `Simd4` and `Scalar` rendered the same digest there, in
+//! dev and in release, and so does the batch head. One pin serves every width because banking
+//! regroups lanes and never changes a lane's arithmetic.
 //!
-//! Three checks run ahead of the pin, and all three held on the pre-#990 kernel:
+//! Four checks run ahead of the pin, and all four held on the pre-#990 kernel:
 //!
+//! * every lane of a bank carries the retarget that unlinks some bank (above);
 //! * every limiter is limiting: from block 3, more than 6 dB of reduction on both channels at
 //!   every block end, and a left reading that rises in at least four blocks, so no limiter is
 //!   only releasing;
@@ -82,7 +116,7 @@
 //! # A pair relinks only after `reset`, a restore or `desymmetrize`: intended
 //!
 //! Once a one-sided retarget unlinks a pair, the pair stays unlinked when its designed words come
-//! back together (blocks 34, 36, 66, 68 and 90). It links again only after `reset`, a restore
+//! back together (blocks 34, 36, 66, 68, 90 and 92). It links again only after `reset`, a restore
 //! whose gain words compare equal, or `desymmetrize`. That is **intended**. It is the #990
 //! brief's invariant: equal designed words are no proof of equal gain words. This scenario shows
 //! why. When `ch03`'s right ceiling reaches the left's at block 34, the right channel's rings
@@ -98,27 +132,32 @@
 //! What this test asserts about it: a session cannot see *whether* a pair relinked, only the
 //! words it rendered. So it asserts that every block after a pair is equal again renders the
 //! pre-#990 words. A kernel that relinks on designed agreement alone (row 996-K2 of
-//! `crates/true-peak-limiter/tests/MUTATIONS.md`) moves the readings of exactly those five pairs,
-//! and the digest. The relink decision itself is asserted inside the crate, where the kernel's
-//! choice is visible (`the_linked_body_engages_exactly_where_the_record_allows`, #990 gate 2).
+//! `crates/true-peak-limiter/tests/MUTATIONS.md`) moves the digest. The relink decision itself is
+//! asserted inside the crate, where the kernel's choice is visible
+//! (`the_linked_body_engages_exactly_where_the_record_allows`, #990 gate 2).
 //!
 //! # Width
 //!
-//! The host facade prepares at `Backend::current()`, so this renders W8 on `x86-64-v3` (the only
-//! arm CI runs it on) and W4 on AArch64. The pin was recorded at W8. Banking regroups lanes and
-//! never changes a lane's arithmetic, so a W4 host must render the same digest. The kernel's own
-//! pinned scenario, `crates/true-peak-limiter/tests/linked.rs`, covers W4 and scalar per width.
+//! A unit test, so that it can prepare through `prepare_host_runtime_with_console_backend`, the
+//! `#[cfg(test)]` seam that is `prepare_host_runtime_with_console` at a named backend. It renders
+//! all three widths on every host, CI's `x86-64-v3` arm included. The wasm guest is not covered:
+//! it plays one frozen block per track, and a per-block source there is tooling (the #996
+//! verdict's owner ruling).
 
 use core::num::NonZeroUsize;
+use core::ops::RangeInclusive;
 
 use bench_support::digest::Sha256Sink;
 use effect_contract::{EffectControlRecord, ParameterChannel};
 use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
-use host_core::{
-    EffectRack, HostConsoleHandles, HostConsoleRequest, HostPrepareCaps, HostShapePolicy,
-    PreparedHost, SourceSubmission, prepare_host_session_with_console,
-};
+use graph_compiler::Backend;
 use session::{canonical_session_json, parse_session_json};
+
+use crate::prepare::{compile_host_session, prepare_host_runtime_with_console_backend};
+use crate::{
+    EffectRack, HostConsoleHandles, HostConsoleRequest, HostPrepareCaps, HostShapePolicy,
+    PrepareDiagnostics, PreparedHost, SourceSubmission,
+};
 
 const FIXTURE: &str =
     include_str!("../../../fixtures/session/v1/console-sixty-four-track-intended.json");
@@ -142,32 +181,68 @@ const REDUCTION_FLOOR: f32 = 0.5;
 /// Blocks, from [`LIMITING_FROM`], at whose end each limiter's reduction must have risen.
 const MINIMUM_RISES: usize = 4;
 
-/// SHA-256 of the scenario, recorded on the pre-#990 kernel (see the module note).
-const PIN: &str = "b22ef17ce523cc4bfa79ef3948469983636ffabffedad01d9de34203934f54d5";
-
-/// One scheduled retarget: `(block, track, parameter index, channels, value)`.
-type Retarget = (usize, usize, u32, &'static [ParameterChannel], f32);
+/// SHA-256 of the scenario, recorded on the pre-#990 kernel at every width (see the module note).
+const PIN: &str = "6d87267b7502a4b4cb663315629d777350ce6ecc62a2d14e0eaebca9b88d9ff9";
 
 const LEFT: &[ParameterChannel] = &[ParameterChannel::Left];
 const RIGHT: &[ParameterChannel] = &[ParameterChannel::Right];
 const BOTH: &[ParameterChannel] = &[ParameterChannel::Left, ParameterChannel::Right];
 
+/// One scheduled retarget: every track in `tracks` moves `parameter` to `value` on `channels`, at
+/// the first sample of `block`.
+struct Retarget {
+    block: usize,
+    tracks: RangeInclusive<usize>,
+    parameter: u32,
+    channels: &'static [ParameterChannel],
+    value: f32,
+}
+
+impl Retarget {
+    /// A retarget of one channel: it designs the pair apart (or back together).
+    fn one_sided(&self) -> bool {
+        self.channels.len() == 1
+    }
+}
+
+const fn at(
+    block: usize,
+    tracks: RangeInclusive<usize>,
+    parameter: u32,
+    channels: &'static [ParameterChannel],
+    value: f32,
+) -> Retarget {
+    Retarget {
+        block,
+        tracks,
+        parameter,
+        channels,
+        value,
+    }
+}
+
 /// The module note's table, in block order.
-const RETARGETS: [Retarget; 14] = [
-    (12, 18, CEILING, BOTH, -3.0),
-    (17, 3, CEILING, LEFT, -4.0),
-    (21, 42, RELEASE, RIGHT, 400.0),
-    (34, 3, CEILING, RIGHT, -4.0),
-    (36, 42, RELEASE, RIGHT, 112.5),
-    (49, 57, CEILING, LEFT, -2.0),
-    (51, 29, RELEASE, LEFT, 30.0),
-    (53, 12, CEILING, LEFT, -6.0),
-    (60, 18, CEILING, BOTH, -1.062_5),
-    (66, 57, CEILING, RIGHT, -2.0),
-    (68, 12, CEILING, RIGHT, -6.0),
-    (81, 37, CEILING, LEFT, -3.0),
-    (83, 5, RELEASE, LEFT, 250.0),
-    (90, 37, CEILING, RIGHT, -3.0),
+const RETARGETS: [Retarget; 20] = [
+    at(12, 16..=23, CEILING, BOTH, -3.0),
+    at(17, 3..=3, CEILING, LEFT, -4.0),
+    at(21, 42..=42, RELEASE, RIGHT, 400.0),
+    at(26, 48..=55, RELEASE, BOTH, 250.0),
+    at(34, 3..=3, CEILING, RIGHT, -4.0),
+    at(36, 42..=42, RELEASE, RIGHT, 112.5),
+    at(44, 48..=55, CEILING, BOTH, -3.5),
+    at(49, 57..=57, CEILING, LEFT, -2.0),
+    at(51, 29..=29, RELEASE, LEFT, 30.0),
+    at(53, 12..=12, CEILING, LEFT, -6.0),
+    at(60, 16..=23, CEILING, BOTH, -1.5),
+    at(66, 23..=23, CEILING, LEFT, -4.0),
+    at(66, 57..=57, CEILING, RIGHT, -2.0),
+    at(68, 12..=12, CEILING, RIGHT, -6.0),
+    at(81, 38..=38, CEILING, LEFT, -3.0),
+    at(83, 5..=5, RELEASE, LEFT, 250.0),
+    at(85, 48..=48, RELEASE, RIGHT, 180.0),
+    at(90, 38..=38, CEILING, RIGHT, -3.0),
+    at(90, 23..=23, CEILING, RIGHT, -4.0),
+    at(92, 48..=48, RELEASE, RIGHT, 250.0),
 ];
 
 fn caps() -> HostPrepareCaps {
@@ -248,16 +323,23 @@ struct Console {
     observers: Vec<usize>,
 }
 
-fn prepare() -> Console {
-    let (_session, prepared, handles) =
-        prepare_host_session_with_console(&session(), &caps(), &console()).unwrap_or_else(
-            |failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())),
-        );
+fn refused(failure: &PrepareDiagnostics) -> ! {
+    panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
+}
+
+fn prepare(backend: Backend) -> Console {
+    let compiled = compile_host_session(&session(), &caps()).unwrap_or_else(|f| refused(&f));
+    let (prepared, handles) =
+        prepare_host_runtime_with_console_backend(&compiled, &caps(), &console(), backend)
+            .unwrap_or_else(|f| refused(&f));
     assert_eq!(handles.tracks.len(), TRACKS);
-    assert!(
-        prepared.report.effect_bank_scratch_bytes > 0,
-        "the cohort planner bound homogeneous banks on this host"
-    );
+    for (index, track) in handles.tracks.iter().enumerate() {
+        assert_eq!(
+            **track,
+            *format!("ch{index:02}"),
+            "track {index} is the table's ch{index:02}"
+        );
+    }
     let controls = |rack: EffectRack, effect_index: u32, effect: &str| -> Vec<usize> {
         handles
             .tracks
@@ -303,6 +385,59 @@ fn prepare() -> Console {
     }
 }
 
+/// Where each track renders at `backend`'s width, read from the prepared plan: `(bank, lane)`,
+/// with a bank named by the track on its lane 0.
+///
+/// Every banked unit that renders a track must agree on its bank-mates and its lane, and every
+/// bank must be full: `width` lanes. At `Scalar` nothing banks, and every track is its own
+/// one-lane instance, `(track, 0)`.
+fn placement(console: &Console, backend: Backend) -> Vec<(usize, usize)> {
+    let width = backend.width();
+    let [chains, _slots] = console.prepared.plan.bank_shape();
+    let units = console.prepared.plan.unit_eligibility();
+    let banks: Vec<&[Box<str>]> = units
+        .iter()
+        .filter(|unit| unit.banked)
+        .map(|unit| &unit.lane_tracks[..])
+        .collect();
+    if backend == Backend::Scalar {
+        assert_eq!(chains, 0, "nothing banks at Scalar");
+        assert!(banks.is_empty(), "nothing banks at Scalar");
+        return (0..TRACKS).map(|track| (track, 0)).collect();
+    }
+    assert!(chains > 0, "the cohort planner bound banks at {backend:?}");
+    console
+        .handles
+        .tracks
+        .iter()
+        .map(|track| {
+            let mut found: Option<(&[Box<str>], usize)> = None;
+            for bank in &banks {
+                let Some(lane) = bank.iter().position(|member| member == track) else {
+                    continue;
+                };
+                assert_eq!(bank.len(), width, "{track}'s bank at {backend:?} is full");
+                if let Some((mates, known)) = found {
+                    assert!(
+                        mates == *bank && known == lane,
+                        "every unit renders {track} in one bank and lane at {backend:?}"
+                    );
+                }
+                found = Some((bank, lane));
+            }
+            let (mates, lane) =
+                found.unwrap_or_else(|| panic!("{track} renders in a bank at {backend:?}"));
+            let first = console
+                .handles
+                .tracks
+                .iter()
+                .position(|member| *member == mates[0])
+                .expect("a bank-mate is a track");
+            (first, lane)
+        })
+        .collect()
+}
+
 fn push(handles: &mut HostConsoleHandles, channel: usize, record: EffectControlRecord) {
     handles.effect_controls[channel]
         .try_push(record)
@@ -314,10 +449,13 @@ struct Run {
     digest: String,
     /// `[block][track]` published reduction words, `(left, right)`.
     readings: Vec<Vec<(f32, f32)>>,
+    /// Track -> `(bank, lane)` at the run's width (see [`placement`]).
+    placement: Vec<(usize, usize)>,
 }
 
-fn run() -> Run {
-    let mut console = prepare();
+fn run(backend: Backend) -> Run {
+    let mut console = prepare(backend);
+    let placement = placement(&console, backend);
     let mut hash = Sha256Sink::new();
     let mut readings = Vec::with_capacity(BLOCKS);
     // Before block 0, so both land at its first sample.
@@ -339,16 +477,16 @@ fn run() -> Run {
     }
     let mut planes = vec![[0.0_f32; QUANTUM]; CHANNELS];
     for block in 0..BLOCKS {
-        for &(at, track, parameter_index, channels, value) in &RETARGETS {
-            if at == block {
-                for &channel in channels {
+        for retarget in RETARGETS.iter().filter(|retarget| retarget.block == block) {
+            for track in retarget.tracks.clone() {
+                for &channel in retarget.channels {
                     push(
                         &mut console.handles,
                         console.limiters[track],
                         EffectControlRecord::Parameter {
-                            parameter_index,
+                            parameter_index: retarget.parameter,
                             channel,
-                            value,
+                            value: retarget.value,
                         },
                     );
                 }
@@ -420,6 +558,7 @@ fn run() -> Run {
     Run {
         digest: hash.finish_hex(),
         readings,
+        placement,
     }
 }
 
@@ -427,14 +566,59 @@ fn run() -> Run {
 fn first_asymmetric_block(track: usize) -> Option<usize> {
     RETARGETS
         .iter()
-        .filter(|&&(_, retargeted, _, channels, _)| retargeted == track && channels.len() == 1)
-        .map(|&(block, ..)| block)
+        .filter(|retarget| retarget.one_sided() && retarget.tracks.contains(&track))
+        .map(|retarget| retarget.block)
         .min()
 }
 
+/// The lanes that receive the first one-sided retarget of their bank (the one that unlinks it).
+fn unlinking_lanes(placement: &[(usize, usize)]) -> Vec<usize> {
+    let mut first: Vec<(usize, usize, usize)> = Vec::new(); // (bank, block, lane)
+    for retarget in RETARGETS.iter().filter(|retarget| retarget.one_sided()) {
+        for track in retarget.tracks.clone() {
+            let (bank, lane) = placement[track];
+            match first.iter_mut().find(|(known, ..)| *known == bank) {
+                Some(entry) if retarget.block < entry.1 => *entry = (bank, retarget.block, lane),
+                Some(_) => {}
+                None => first.push((bank, retarget.block, lane)),
+            }
+        }
+    }
+    first.into_iter().map(|(_, _, lane)| lane).collect()
+}
+
 #[test]
-fn the_hot_console_renders_the_pre_990_words_through_link_and_unlink() {
-    let run = run();
+fn the_hot_console_renders_the_pre_990_words_at_simd8() {
+    check(Backend::Simd8);
+}
+
+#[test]
+fn the_hot_console_renders_the_pre_990_words_at_simd4() {
+    check(Backend::Simd4);
+}
+
+#[test]
+fn the_hot_console_renders_the_pre_990_words_at_scalar() {
+    check(Backend::Scalar);
+}
+
+fn check(backend: Backend) {
+    let run = run(backend);
+
+    println!(
+        "limiter linked session digest at {backend:?}: {}",
+        run.digest
+    );
+
+    // Every lane of a bank, the two edge lanes included, carries the retarget that unlinks some
+    // bank.
+    let lanes = unlinking_lanes(&run.placement);
+    for lane in 0..backend.width() {
+        assert!(
+            lanes.contains(&lane),
+            "at {backend:?}, some bank is unlinked by a retarget on its lane {lane}: {lanes:?}"
+        );
+    }
 
     // Every limiter is limiting, on both channels, all run: more than 6 dB of reduction at every
     // block end, and a reduction that keeps being raised rather than only released (read on the
@@ -444,21 +628,25 @@ fn the_hot_console_renders_the_pre_990_words_through_link_and_unlink() {
         for (track, &(left, right)) in row.iter().enumerate() {
             assert!(
                 left > REDUCTION_FLOOR && right > REDUCTION_FLOOR,
-                "block {block}: track {track}'s limiter reduces too little ({left}, {right})"
+                "{backend:?} block {block}: track {track}'s limiter reduces too little ({left}, {right})"
             );
             shallowest = shallowest.min(left).min(right);
         }
     }
+    let mut fewest = usize::MAX;
     for track in 0..TRACKS {
         let rises = (LIMITING_FROM + 1..BLOCKS)
             .filter(|&block| run.readings[block][track].0 > run.readings[block - 1][track].0)
             .count();
         assert!(
             rises >= MINIMUM_RISES,
-            "track {track}'s limiter raised its reduction in {rises} blocks: it is only releasing"
+            "{backend:?}: track {track}'s limiter raised its reduction in {rises} blocks: it is only releasing"
         );
+        fewest = fewest.min(rises);
     }
-    println!("shallowest reduction word from block {LIMITING_FROM}: {shallowest}");
+    println!(
+        "{backend:?}: shallowest reduction word from block {LIMITING_FROM}: {shallowest}, fewest rises {fewest}"
+    );
 
     // The retargets landed where the table says, and no pair parted anywhere else.
     for track in 0..TRACKS {
@@ -470,26 +658,26 @@ fn the_hot_console_renders_the_pre_990_words_through_link_and_unlink() {
         match apart {
             None => assert_eq!(
                 first_split, None,
-                "track {track} was never retargeted on one side and its channels stay equal"
+                "{backend:?}: track {track} was never retargeted on one side and its channels stay equal"
             ),
             Some(block) => {
                 let split = first_split.unwrap_or_else(|| {
-                    panic!("track {track}'s one-sided retarget at block {block} parted nothing")
+                    panic!("{backend:?}: track {track}'s one-sided retarget at block {block} parted nothing")
                 });
                 assert!(
                     split >= block,
-                    "track {track}'s channels parted at block {split}, before its retarget"
+                    "{backend:?}: track {track}'s channels parted at block {split}, before its retarget"
                 );
             }
         }
     }
 
     if std::env::var_os("MISO_ENGINE_REPIN_LIMITER_LINKED_SESSION").is_some() {
-        println!("limiter linked session digest: {}", run.digest);
+        println!("limiter linked session checks pass at {backend:?}");
         return;
     }
     assert_eq!(
         run.digest, PIN,
-        "the hot console's words moved from the pre-#990 kernel's"
+        "{backend:?}: the hot console's words moved from the pre-#990 kernel's"
     );
 }
