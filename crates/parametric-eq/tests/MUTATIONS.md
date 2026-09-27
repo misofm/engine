@@ -251,3 +251,37 @@ the `#[cfg(test)]` rejection-accumulator oracle `block_admits_elision_oracle`);
 
 M2 is invisible to every test that predates the gate: the ceiling is `BLOCK_LIMIT` itself, and no
 earlier fixture places a word of exactly `1e30`. Only the edge set (and the exhaustive run) does.
+
+## Issue #977 — every depth-two pass of an admitted plan runs select-free
+
+Driver: one mutation at a time applied to `src/lib.rs`, then
+`cargo test --release -p parametric-eq --features test-support --lib --test bank --no-fail-fast`,
+tree restored byte for byte between rows. Gate 1 is `admitted_blocks_render_the_base_bits_without_selects`
+(`tests/bank.rs`; digests pinned on the unmodified base: scalar `9316456b…`, bank `d4a1dc9d…`,
+bank-mono `f442a0d3…`). Gate 2 is its masked depth-two pass counter (`test_only_masked_pair_passes`,
+so `--features test-support`): zero on the admitted stationary blocks and non-zero on the refused
+ones of the two switching shapes. The in-crate rows are
+`elision::an_admitted_plan_runs_every_pair_select_free` (which also pins the tail's #976 rule
+through the select-free tail counter) and `elision::a_non_finite_state_in_a_live_section_refuses_elision`.
+Rows re-run for attempt 2 (the tail keeps #976's rule; see the issue's attempt 2 evidence).
+
+| # | mutation | gate that goes red | result |
+|---|---|---|---|
+| 977-M1 | `interleave`: `admitted = true` | gate 1 scalar `cbbb3c83…` and bank `5f519f25…` (the poisoned dry lane's `NaN` state reaches the output on its refused blocks and the plane faults); gate 2 (refused blocks ran 0 masked pairs); in-crate (a refused block ran 0) | RED |
+| 977-M1m | `interleave_mono`: `admitted = true` | gate 1 bank-mono `ded71138…`; gate 2 (mono refused 0); in-crate; and `interleave_identity::disabled_cuts_preserve_all_high_pass_signed_zero_against_four_section_oracle` (`+0.0` where the oracle keeps `-0.0`) | RED |
+| 977-M2 | `interleave`: `admitted = false` | gate 2 (scalar DryHpfInPair: 228 masked pairs on admitted blocks); in-crate (2 masked pairs on an admitted block); no digest moves | RED |
+| 977-M2m | `interleave_mono`: `admitted = false` | gate 2 (bank-mono: 26); in-crate (mono); no digest moves | RED |
+| 977-M3 | `interleave`: the tail made select-free on admitted blocks too (`if !admitted && (…dry…)`), attempt 1's rule | in-crate: `Simd4 hpf 00000000 lpf 01100110: the tail keeps #976's rule` (1 select-free tail, want 0); no digest moves | RED |
+| 977-M3m | the same in `interleave_mono` | in-crate: `the mono tail keeps #976's rule` | RED |
+| 977-M4 | leg (c) without the finiteness term (`-0.0` only, as briefed before the amendment) | gate 1 scalar `f14e7956…` and bank `c79e11df…`; `a_non_finite_state_in_a_live_section_refuses_elision` | RED |
+
+M2, M2m, M3 and M3m move no rendered bit: a select whose every lane returns the wet word is
+invisible, so the counters are their only gates. M3 is attempt 1's tail rule: exact, and in the
+shipped `simd128` artifact the change that let V8 keep an integrator of the one-band tail loop in a
+stack slot, so its gate is the counter that pins the rule rather than a bit. (Attempt 1's M3 row,
+"the tail skips its `admitted` arm", has no subject in attempt 2: the tail has no such arm.) M1 and
+M4 are the correctness rows. The brief expected M1 to show as a `-0.0` rendered `+0.0` on a dry lane
+of a refused block; in gate 1 that `-0.0` is rewritten to `+0.0` downstream by the dead general
+bands a refused block executes, so M1 shows instead through the poisoned dry lane (and, in mono,
+through the older all-high-pass signed-zero oracle, whose general bands are all live). In mono the
+poisoned HPF is a dead section, refused by leg (b), so M4 moves only the dual legs.

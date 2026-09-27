@@ -15,7 +15,7 @@ use effect_contract::{
     StatePayloadOutput, TailSamples,
 };
 use lane::Backend;
-use parametric_eq::{EqBandKind, ParametricEqFactory, design_svf};
+use parametric_eq::{EqBandKind, PARAMETRIC_EQ_DESCRIPTOR, ParametricEqFactory, design_svf};
 use sha2::{Digest, Sha256};
 use support::{
     COMMON_BYTES, LANE_BYTES, Payload, apply_prepared_targets, apply_prepared_targets_lane,
@@ -1147,5 +1147,539 @@ fn odd_live_counts_render_the_base_bits() {
             digest, pinned,
             "#976 gate 1: the {leg} leg moved a bit, a report or a state word"
         );
+    }
+}
+
+/// Tracks in the admitted-select scenario: one eight-lane bank, or two four-lane banks.
+const SELECT_TRACKS: usize = 8;
+/// Blocks in the admitted-select scenario.
+const SELECT_BLOCKS: usize = 32;
+/// The block before which the dedicated cuts switch on, and the one before which they switch off.
+const SELECT_ENABLE: usize = 0;
+const SELECT_DISABLE: usize = 5;
+/// The blocks whose input carries the `1.1e31` spike that poisons a restored dry lane.
+const SELECT_SPIKES: [usize; 2] = [2, 18];
+
+/// The configurations of [`admitted_blocks_render_the_base_bits_without_selects`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SelectShape {
+    /// Two live general bands (a bell and a high shelf) and the HPF, switched on everywhere at
+    /// block 0 and off at block 5 on the left of even tracks and the right of odd tracks: the pass
+    /// that carries the HPF has dry lanes holding a frozen, non-zero state.
+    DryHpfInPair,
+    /// The same with the LPF on the opposite lanes: the depth-one tail carries the dry lanes.
+    DryLpfInTail,
+    /// Both cuts on everywhere at block 0 and off on both channels of even tracks at block 5: a
+    /// pass of two dedicated cuts, dry together on those lanes.
+    DryCutsTogether,
+    /// VERIFY-EQ finding 2: the HPF live on the right, a 10 Hz LPF live on the left, and a
+    /// restored `ic2 = -f32::MAX` in track 0's (dry) left HPF before blocks 0 and 16. A refused
+    /// block carrying `1.1e31` there overflows the dry lane's `v3`, which leaves its state `NaN`
+    /// while the dry select passes the spike on and the LPF keeps the output under the §4.4 bound.
+    /// Every later block is refused on that `NaN` (leg (c)'s finiteness term) until the fault
+    /// block that resets the plane.
+    PoisonedDryHpf,
+}
+
+const SELECT_SHAPES: [SelectShape; 4] = [
+    SelectShape::DryHpfInPair,
+    SelectShape::DryLpfInTail,
+    SelectShape::DryCutsTogether,
+    SelectShape::PoisonedDryHpf,
+];
+
+/// Marks every parameter of a dedicated cut on `channel` as changed.
+fn mark_cut(changed: &mut [bool], first: usize, channel: ParameterChannel) {
+    let lane = usize::from(matches!(channel, ParameterChannel::Right));
+    for parameter in first..first + 3 {
+        changed[parameter * 2 + lane] = true;
+    }
+}
+
+fn select_configuration(
+    shape: SelectShape,
+    track: usize,
+) -> (Vec<effect_contract::InitialParameterValue>, Vec<OddEvent>) {
+    use ParameterChannel::{Left, Right};
+    let mut initial = values();
+    let mut events = Vec::new();
+    // `cuts` switch on at `SELECT_ENABLE` on both channels, and off at `SELECT_DISABLE` on
+    // `off(track)`'s channels.
+    let mut switch = |initial: &[effect_contract::InitialParameterValue],
+                      cuts: &[usize],
+                      off: &[ParameterChannel]| {
+        let mut on = initial.to_vec();
+        let mut changed = vec![false; on.len()];
+        for &first in cuts {
+            for channel in [Left, Right] {
+                odd_cut(&mut on, first, channel, track);
+                mark_cut(&mut changed, first, channel);
+            }
+        }
+        events.push((SELECT_ENABLE, on.clone(), changed));
+        let mut changed = vec![false; on.len()];
+        for &first in cuts {
+            for &channel in off {
+                set_initial(&mut on, first, channel, 0.0);
+                mark_cut(&mut changed, first, channel);
+            }
+        }
+        events.push((SELECT_DISABLE, on, changed));
+    };
+    let alternate = if track.is_multiple_of(2) {
+        [Left]
+    } else {
+        [Right]
+    };
+    let opposite = if track.is_multiple_of(2) {
+        [Right]
+    } else {
+        [Left]
+    };
+    match shape {
+        SelectShape::DryHpfInPair | SelectShape::DryLpfInTail => {
+            for channel in [Left, Right] {
+                odd_band(&mut initial, 0, EqBandKind::Bell, channel, track);
+                odd_band(&mut initial, 2, EqBandKind::HighShelf, channel, track);
+            }
+            if shape == SelectShape::DryHpfInPair {
+                switch(&initial, &[HPF_PARAMETERS], &alternate);
+            } else {
+                switch(&initial, &[LPF_PARAMETERS], &opposite);
+            }
+        }
+        SelectShape::DryCutsTogether => {
+            let off: &[ParameterChannel] = if track.is_multiple_of(2) {
+                &[Left, Right]
+            } else {
+                &[]
+            };
+            switch(&initial, &[HPF_PARAMETERS, LPF_PARAMETERS], off);
+        }
+        SelectShape::PoisonedDryHpf => {
+            odd_cut(&mut initial, HPF_PARAMETERS, Right, track);
+            set_initial(&mut initial, LPF_PARAMETERS, Left, 1.0);
+            set_initial(&mut initial, LPF_PARAMETERS + 1, Left, 10.0);
+        }
+    }
+    (initial, events)
+}
+
+/// Frames in block `block`: mostly one quantum, and a short ragged block every fifth.
+fn select_frames(block: usize) -> usize {
+    odd_frames(block)
+}
+
+/// One hostile input word for `(block, frame, track, channel)` of shape `shape`.
+///
+/// The body has [`odd_word`]'s distribution under its own seed: `+0.0` (one in sixteen), a
+/// subnormal of either sign (one in sixteen), or a normal with magnitude in `2^-24..2^26`. Block `8k + 3` carries one `-0.0` on
+/// track `2k` (a lane that is dry in [`SelectShape::DryCutsTogether`]), plane `k mod 2`; block
+/// `8k + 6` carries one non-finite word on tracks 0 and 4 of plane `k mod 2`, which faults, zeroes
+/// and resets that plane of every bank the same way at either width. The poisoned shape adds the
+/// `1.1e31` spike on track 0's left plane at [`SELECT_SPIKES`]. Each of those words refuses the
+/// elision for the bank (or the scalar track) that carries it.
+fn select_word(
+    shape: SelectShape,
+    block: usize,
+    frame: usize,
+    track: usize,
+    channel: usize,
+) -> f32 {
+    let frames = select_frames(block);
+    if shape == SelectShape::PoisonedDryHpf
+        && SELECT_SPIKES.contains(&block)
+        && frame == 10
+        && track == 0
+        && channel == 0
+    {
+        return 1.1e31;
+    }
+    let k = block / 8;
+    if block % 8 == 3 && frame == (block * 7) % frames && track == 2 * k && channel == k % 2 {
+        return -0.0;
+    }
+    if block % 8 == 6
+        && frame == (block * 13) % frames
+        && track.is_multiple_of(4)
+        && channel == k % 2
+    {
+        return [f32::INFINITY, f32::NEG_INFINITY, f32::NAN, f32::INFINITY][k];
+    }
+    let mut state = ((block as u64) << 40)
+        ^ ((frame as u64) << 20)
+        ^ ((track as u64) << 4)
+        ^ channel as u64
+        ^ 0x0977_0977_0977_0977;
+    let word = support::splitmix64(&mut state);
+    let sign = ((word >> 63) as u32) << 31;
+    match word & 15 {
+        0 => 0.0,
+        1 => f32::from_bits(sign | (((word >> 8) as u32 & 0x007f_ffff) | 1)),
+        _ => {
+            let exponent = ((word >> 8) % 50) as u32 + 127 - 24;
+            let mantissa = (word >> 16) as u32 & 0x007f_ffff;
+            f32::from_bits(sign | (exponent << 23) | mantissa)
+        }
+    }
+}
+
+/// `true` when the elision gate's input leg (a) admits `plane`: no `-0.0`, finite, inside the
+/// §4.4 bound. The test's own statement of it, independent of the crate's.
+fn plane_admits(plane: &[f32]) -> bool {
+    plane
+        .iter()
+        .all(|word| word.to_bits() != 0x8000_0000 && word.is_finite() && word.abs() <= 1.0e30)
+}
+
+/// The blocks of a switching shape that run the stationary cascade: every block but the two
+/// that start a ramp (a ramp is 64 samples, and both switches land on a 128-frame block).
+fn select_stationary(block: usize) -> bool {
+    block != SELECT_ENABLE && block != SELECT_DISABLE
+}
+
+/// Resets this thread's count of masked stationary depth-two passes (issue #977); a no-op
+/// without `test-support`.
+fn reset_masked_passes() {
+    #[cfg(feature = "test-support")]
+    parametric_eq::test_only_reset_masked_pair_passes();
+}
+
+/// This thread's count of masked stationary depth-two passes, or `None` without `test-support`.
+fn masked_passes() -> Option<usize> {
+    #[cfg(feature = "test-support")]
+    let count = Some(parametric_eq::test_only_masked_pair_passes());
+    #[cfg(not(feature = "test-support"))]
+    let count = None;
+    count
+}
+
+/// Masked depth-two passes a leg ran, per shape: `(on admitted blocks, on refused blocks)`, counted
+/// only for the switching shapes (whose admission the test can state from the input alone).
+type SelectCounts = Vec<Option<(usize, usize)>>;
+
+/// One leg of the admitted-select scenario: its digest, its masked-pass counts, and whether the
+/// poisoned shape poisoned as intended.
+type SelectLeg = (String, SelectCounts, bool);
+
+/// Sets `ic2` of section `section` of the left channel in a lane payload.
+fn plant_left_ic2(payload: &mut Payload, section: usize, value: f32) {
+    let word = section * support::WORDS_PER_BAND + 1;
+    payload.1[word * 4..word * 4 + 4].copy_from_slice(&value.to_bits().to_le_bytes());
+}
+
+/// Non-vacuity of [`SelectShape::PoisonedDryHpf`]: `true` unless `block` is a spike block and
+/// track 0's dry left HPF was not left holding `NaN` integrators, or the block did not pass the
+/// §4.4 check (a fault would reset the lane). Collected rather than asserted in place, so a leg
+/// that breaks it still prints its digest first.
+fn poisoned_as_intended(
+    block: usize,
+    payload: &Payload,
+    report: &effect_contract::ProcessReport,
+) -> bool {
+    !SELECT_SPIKES.contains(&block)
+        || ((0..2).all(|integrator| f32::from_bits(support::word(&payload.1, integrator)).is_nan())
+            && report.nonfinite_left_blocks == 0)
+}
+
+/// The scalar leg of the admitted-select scenario.
+fn select_scalar_digest() -> SelectLeg {
+    let factory = ParametricEqFactory;
+    let mut hasher = Sha256::new();
+    let mut counts = Vec::new();
+    let mut poisoned = true;
+    for shape in SELECT_SHAPES {
+        let counted = shape != SelectShape::PoisonedDryHpf && shape != SelectShape::DryCutsTogether;
+        let mut tally = (0_usize, 0_usize);
+        let configurations: Vec<_> = (0..SELECT_TRACKS)
+            .map(|track| select_configuration(shape, track))
+            .collect();
+        let mut effects: Vec<_> = configurations
+            .iter()
+            .map(|(initial, _)| {
+                factory
+                    .prepare(request(initial, false))
+                    .expect("scalar prepare")
+            })
+            .collect();
+        let mut position = 0_u64;
+        for block in 0..SELECT_BLOCKS {
+            let frames = select_frames(block);
+            for (track, effect) in effects.iter_mut().enumerate() {
+                for (at, target, changed) in &configurations[track].1 {
+                    if *at == block {
+                        apply_prepared_targets(effect.as_mut(), target, changed);
+                    }
+                }
+                if shape == SelectShape::PoisonedDryHpf && track == 0 && block % 16 == 0 {
+                    let mut payload = snapshot(effect.as_ref());
+                    plant_left_ic2(&mut payload, 0, -f32::MAX);
+                    effect
+                        .restore_state_payload(
+                            PARAMETRIC_EQ_DESCRIPTOR.state_layout_version,
+                            StatePayloadInput::new(
+                                &payload.0,
+                                &payload.1,
+                                &payload.2,
+                                effect.metadata().state_sizes,
+                            )
+                            .expect("state input"),
+                        )
+                        .expect("a finite integrator restores");
+                }
+                let mut left: Vec<f32> = (0..frames)
+                    .map(|frame| select_word(shape, block, frame, track, 0))
+                    .collect();
+                let mut right: Vec<f32> = (0..frames)
+                    .map(|frame| select_word(shape, block, frame, track, 1))
+                    .collect();
+                let admitted =
+                    select_stationary(block) && plane_admits(&left) && plane_admits(&right);
+                let before = masked_passes();
+                let report = effect.process(
+                    EffectProcessBlock::new(&mut left, &mut right, None, position, &[], 128)
+                        .expect("scalar block"),
+                );
+                if let (Some(before), Some(after)) = (before, masked_passes())
+                    && select_stationary(block)
+                {
+                    if admitted {
+                        tally.0 += after - before;
+                    } else {
+                        tally.1 += after - before;
+                    }
+                }
+                if shape == SelectShape::PoisonedDryHpf && track == 0 {
+                    poisoned &= poisoned_as_intended(block, &snapshot(effect.as_ref()), &report);
+                }
+                fold_words(&mut hasher, left.into_iter().chain(right));
+                fold_report(&mut hasher, &report);
+                fold_payload(&mut hasher, &snapshot(effect.as_ref()));
+            }
+            position += frames as u64;
+        }
+        counts.push((counted && masked_passes().is_some()).then_some(tally));
+    }
+    reset_masked_passes();
+    (hex(&hasher.finalize()), counts, poisoned)
+}
+
+/// The bank legs of the admitted-select scenario, folded per track in track order so the digest
+/// does not depend on the bank width. `mono` renders the collapsed body over the left plane.
+fn select_bank_digest(width: BankWidth, backend: Backend, mono: bool) -> SelectLeg {
+    let lanes = width.lanes() as usize;
+    assert_eq!(SELECT_TRACKS % lanes, 0, "the scenario fills whole banks");
+    let factory = ParametricEqFactory;
+    let mut hasher = Sha256::new();
+    let mut counts = Vec::new();
+    let mut poisoned = true;
+    for shape in SELECT_SHAPES {
+        let counted = shape != SelectShape::PoisonedDryHpf && shape != SelectShape::DryCutsTogether;
+        let mut tally = (0_usize, 0_usize);
+        let configurations: Vec<_> = (0..SELECT_TRACKS)
+            .map(|track| select_configuration(shape, track))
+            .collect();
+        let mut banks: Vec<_> = configurations
+            .chunks(lanes)
+            .map(|group| {
+                let requests: Vec<_> = group
+                    .iter()
+                    .map(|(initial, _)| request(initial, false))
+                    .collect();
+                factory
+                    .bind_homogeneous_bank(PrepareEffectBankRequest {
+                        backend,
+                        width,
+                        requests: &requests,
+                    })
+                    .expect("valid bank request")
+                    .expect("the native width must bind")
+            })
+            .collect();
+        let offsets = vec![0_u32; lanes + 1];
+        let mut position = 0_u64;
+        for block in 0..SELECT_BLOCKS {
+            let frames = select_frames(block);
+            for (group, bank) in banks.iter_mut().enumerate() {
+                for lane in 0..lanes {
+                    for (at, target, changed) in &configurations[group * lanes + lane].1 {
+                        if *at == block {
+                            apply_prepared_targets_lane(
+                                bank.as_mut(),
+                                lane,
+                                48_000,
+                                target,
+                                changed,
+                            );
+                        }
+                    }
+                }
+                if shape == SelectShape::PoisonedDryHpf && group == 0 && block % 16 == 0 {
+                    let mut payload = snapshot_bank(bank.as_ref(), 0);
+                    plant_left_ic2(&mut payload, 0, -f32::MAX);
+                    let sizes = bank.metadata().program_key.state_sizes;
+                    bank.restore_track_state_payload(
+                        0,
+                        PARAMETRIC_EQ_DESCRIPTOR.state_layout_version,
+                        StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes)
+                            .expect("state input"),
+                    )
+                    .expect("a finite integrator restores");
+                }
+                let plane = |channel: usize| -> Vec<f32> {
+                    (0..frames * lanes)
+                        .map(|cell| {
+                            select_word(
+                                shape,
+                                block,
+                                cell / lanes,
+                                group * lanes + cell % lanes,
+                                channel,
+                            )
+                        })
+                        .collect()
+                };
+                let mut left = plane(0);
+                let mut right = if mono {
+                    vec![f32::from_bits(0x7F7F_FFFF); frames * lanes]
+                } else {
+                    plane(1)
+                };
+                let admitted = select_stationary(block)
+                    && plane_admits(&left)
+                    && (mono || plane_admits(&right));
+                let before = masked_passes();
+                let process = EffectBankProcessBlock::new(
+                    &mut left,
+                    &mut right,
+                    None,
+                    frames as u32,
+                    width,
+                    position,
+                    &[],
+                    &offsets,
+                    128,
+                )
+                .expect("bank block");
+                let report = if mono {
+                    bank.process_bank_mono(process)
+                } else {
+                    bank.process_bank(process)
+                };
+                if let (Some(before), Some(after)) = (before, masked_passes())
+                    && select_stationary(block)
+                {
+                    if admitted {
+                        tally.0 += after - before;
+                    } else {
+                        tally.1 += after - before;
+                    }
+                }
+                if shape == SelectShape::PoisonedDryHpf && group == 0 {
+                    poisoned &= poisoned_as_intended(
+                        block,
+                        &snapshot_bank(bank.as_ref(), 0),
+                        &report.reports[0],
+                    );
+                }
+                for lane in 0..lanes {
+                    let column = |plane: &[f32]| -> Vec<f32> {
+                        (0..frames)
+                            .map(|frame| plane[frame * lanes + lane])
+                            .collect()
+                    };
+                    if mono {
+                        fold_words(&mut hasher, column(&left).into_iter());
+                    } else {
+                        fold_words(&mut hasher, column(&left).into_iter().chain(column(&right)));
+                    }
+                    fold_report(&mut hasher, &report.reports[lane]);
+                    fold_payload(&mut hasher, &snapshot_bank(bank.as_ref(), lane as u32));
+                }
+            }
+            position += frames as u64;
+        }
+        counts.push((counted && masked_passes().is_some()).then_some(tally));
+    }
+    reset_masked_passes();
+    (hex(&hasher.finalize()), counts, poisoned)
+}
+
+/// The digests [`admitted_blocks_render_the_base_bits_without_selects`] pins, recorded on the
+/// unmodified base of issue #977 (every stationary pass still masked).
+const SELECT_DIGESTS: [(&str, &str); 3] = [
+    (
+        "scalar",
+        "9316456b588c8e1d52e7c2a0070df003bb01de5b9ba890c91c802eff1853ce2e",
+    ),
+    (
+        "bank",
+        "d4a1dc9db58fa425e74034f8c8fedf77fc5a6e1e3a3596053fe07ca1318e71bf",
+    ),
+    (
+        "bank-mono",
+        "f442a0d3ea61ce2ca6af9d502b1fb0958ef5632a51554e0c95c350de9db5c162",
+    ),
+];
+
+/// Issue #977 gate 1: on an admitted block every select of the stationary cascade is a no-op,
+/// including a dedicated cut's dry lanes, so running the depth-two passes select-free renders the
+/// bits the masked kernel rendered (the depth-one tail keeps #976's rule).
+///
+/// Through the public API only: dry lanes holding a frozen non-zero state (a cut switched on and
+/// then off again through prepared targets) in a depth-two pass, in the depth-one tail, and in a
+/// pass of two dry cuts; and the poisoned dry lane of VERIFY-EQ finding 2, whose `NaN` state must
+/// keep its bank on the masked kernel. Hostile input (`+0.0`, subnormals, magnitudes
+/// `2^-24..2^26`, ragged blocks) with `-0.0`, non-finite and oversized words on some blocks, which
+/// refuse the elision where they land. Every output word, every report and every lane's state
+/// payload after every block is folded into one SHA-256 per leg, raw bits (state words included,
+/// `NaN` ones too).
+///
+/// Gate 2, under `--features test-support`: over the two switching shapes whose admission the
+/// input alone decides, the masked depth-two pass counter reads zero on every admitted stationary
+/// block and is non-zero on the refused ones.
+#[test]
+fn admitted_blocks_render_the_base_bits_without_selects() {
+    let mut legs = vec![("scalar", select_scalar_digest())];
+    if let Some((width, backend)) = native_bank() {
+        legs.push(("bank", select_bank_digest(width, backend, false)));
+        legs.push(("bank-mono", select_bank_digest(width, backend, true)));
+    }
+    for (leg, (digest, counts, _)) in &legs {
+        println!("admitted-select digest {leg} {digest}");
+        println!(
+            "admitted-select masked passes {leg} (admitted, refused) {counts:?} (shapes {SELECT_SHAPES:?})"
+        );
+    }
+    for (leg, (digest, _, _)) in &legs {
+        let pinned = SELECT_DIGESTS
+            .iter()
+            .find(|(name, _)| name == leg)
+            .map(|(_, pin)| *pin)
+            .expect("every leg is pinned");
+        assert_eq!(
+            digest, pinned,
+            "#977 gate 1: the {leg} leg moved a bit, a report or a state word"
+        );
+    }
+    for (leg, (_, _, poisoned)) in &legs {
+        assert!(
+            poisoned,
+            "the {leg} leg's spike blocks must leave the dry lane NaN and pass the §4.4 check"
+        );
+    }
+    for (leg, (_, counts, _)) in &legs {
+        for (shape, count) in SELECT_SHAPES.iter().zip(counts) {
+            if let Some((admitted, refused)) = count {
+                assert_eq!(
+                    *admitted, 0,
+                    "#977 gate 2: the {leg} leg ran a masked pair on an admitted block ({shape:?})"
+                );
+                assert!(
+                    *refused > 0,
+                    "#977 gate 2: the {leg} leg's refused blocks must keep the masks ({shape:?})"
+                );
+            }
+        }
     }
 }
