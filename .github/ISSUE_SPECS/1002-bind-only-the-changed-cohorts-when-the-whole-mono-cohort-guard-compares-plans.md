@@ -166,3 +166,136 @@ the same at both widths.
    reason; there is precedent in `parametric-eq` and `gate-expander`.
 4. The #1001 doc finding (the #95 table cell and the #95 citation at the re-plan bind) is fixed
    in `13b9ae27`, a doc-only commit, as the coordinator asked.
+
+
+## Sol attempt 1 verdict: PASS
+
+Sol, 2026-09-27. I judged `d50eb9cd` merged onto the batch head `b03edde4`, as a detached
+scratch merge `2408d63d` that is not kept. Host x86-64-v3, `CARGO_INCREMENTAL=0`. The four-lane
+legs used the research `--cfg miso_native_simd4` hunk, applied for measurement only. The worktree
+was left clean.
+
+The change is sound. It makes exactly #971's decisions, with #971's banks and plan, and removes
+#971's extra peak memory. The one finding is Low: renumbering the reused banks' group index is
+correct but no test gates it.
+
+### The questions
+
+1. **Reuse soundness: sound.** The trial bank reused for a group has no state or configuration
+   that a fresh bind of the same group in the re-plan would set differently. The reasons:
+   * **What a bind reads.** `bind_group_banks` reads only the group, `chains`, `level_by_node`,
+     the prepared entries, the width and the dispatch. None of them depends on the class map or on
+     the rest of the plan.
+   * **What "unchanged" means.** A group counts as unchanged only under full `BankGroup` equality
+     (`banks.rs:296`): level, rack, class, the leader's program keys, the members in lane order,
+     the active mask and the active slots. So a group whose members are the same but sit in
+     different lanes, or that changed class or program, is rebound.
+   * **Nothing else can differ.**
+     * Scratch is `(width, quantum)` for every bank.
+     * The `native_id` and the snapshot flag come from the factory.
+     * The processor is fresh prepared state that has not rendered yet.
+     * Collapse arming happens at runtime and is structural. It never reads the bank objects.
+   * **The only group-dependent fields are renumbered.** They are `cohort.group` and
+     `slot.group` (`:335-336`). Both are report fields, and the runtime no longer reads
+     `cohort` (`crates/graph/src/lib.rs:924`).
+   * **The probe confirms it.** Across 4,260 rows at 8 and 4 lanes, head equals #971 (the batch's
+     `banks.rs`) in every field. The fields are:
+     * hashes of the plan's `Debug`, `bound_slots`, the effect banks' ordered members and the
+       builtin banks;
+     * the effect and builtin bank counts, and the mono pool;
+     * `bank_shape`, the collapse counters, the route folds, the transposes and the scatter
+       redirects;
+     * the digest.
+2. **The equivalent mutant: the argument holds.** Pools are planned independently, and plan
+   order is level, then rack, then class, with the mono pool first. So the earliest pool a move
+   touches is the mono pool at the earliest `(level, rack)` that holds a moved track's chain.
+   * Leaders chosen before the moved track's cohort are unchanged, and so are the chunks before
+     its position. The first vanished trial group is therefore that track's group, which is
+     partial (the track is stranded). A partial group binds nothing (`bindable_slot_members`
+     refuses `!is_full()`), so skipping it never changes `lost`.
+   * Measured: it is green in the lib suite at both widths, and matches head on every probe row.
+   * A related weakening, "unchanged when the members alone are equal", is also green and matches
+     on every probe row. Full equality is the conservative choice; keep it.
+3. **The #1001 test change does not weaken coverage.** With the old layout, the re-plan's first
+   group was identical to the trial's. Under reuse it is not rebound, so the error would come
+   before any fresh bank existed, and the "part way" case would go unexercised.
+   * The new layout (`ch{W-1}` mono, the marker on `ch{2W-1}`) changes both re-plan groups. The
+     first binds (`bound` 2), then the second errors.
+   * The test still asserts that 1 bank is alive, the trial's bank and pools, the mono track's
+     lone post-input bank, and 0 banks alive after the drop.
+   * The fallback frees every bank:
+     * On an error, the collected `Result<Vec<_>>` drops what it had bound.
+     * On a refusal, `fresh` drops at the end of its scope.
+     * On an acceptance, the vanished trial groups drop with `trial`.
+     * The trial's banks are moved out (`mem::take`) only after `gained > lost`.
+   * Letting the error propagate turns both #1001 gates red at both widths.
+4. **Reproduced.** My probe was deleted, so I rebuilt it. It covers 400 mixed sessions, the 22
+   #971 shapes, the as-many session and a new multi-level `multi-{4,8}` session, rendered at
+   Scalar, Simd4 and Simd8, unarmed and armed.
+
+   | build | rows | head against #971 | head against pre-#971 (`b90ce6f2`'s three files) |
+   |---|---:|---|---|
+   | 8 lanes | 2,130 | **0 differing fields** | 70 rows moved in 28 models, 0 fewer banks, 0 moves without a gain, 0 digest differences |
+   | 4 lanes | 2,130 | **0 differing fields** | 60 rows moved in 30 models, the same zeros |
+
+   No render differs from the Scalar oracle.
+5. **Scale: the limiter row (refused, 65,537 tracks, debug), under the lock.** Peak RSS
+   reproduces: pre-#971 3.214 GB, **#1002 3.218 GB (+0.1%)**, #971 3.988 GB (+24%).
+   * The compile times are pre-#971 59.5 / 56.8 s, #1002 53.3 / 73.3 s and #971 55.7 s.
+   * They are noise: other builds held the load at 17 to 28, so I cannot confirm or refute
+     the implementer's ±1% from this run.
+   * On this row the only changed groups are the stranded one-member mono group and a
+     one-member stereo group. Neither binds, so the second bind does no factory work.
+6. **The doc commit is accurate.** The #95 table cell (`crates/effect-contract/src/lib.rs:1513`)
+   now names the speculative re-plan exception. The `banks.rs` comment no longer credits #95 with
+   the `Ok(None)` rule, and rests the exception on #95's own reasoning that a planner bug must not
+   cost the user their session. That closes Sol's #1001 finding 1.
+
+### Mutations (my driver; the whole lib suite at 8 lanes, the #971 and #1001 set at 4)
+
+| mutation | red at 8 and 4 lanes |
+|---|---|
+| reuse by first member only | the part-way test, the odd-track test, the discriminating test and the dogfood test |
+| skip the first changed group in `gained` | the discriminating test |
+| skip the last vanished group in `lost` | the as-many gate |
+| `gained >= lost` | the as-many gate, the no-bank gate, the #1001 keep-plan gate |
+| let the re-plan error propagate | both #1001 gates |
+| no move | the part-way test, the odd-track test, the discriminating test and the dogfood test |
+| skip the first vanished group in `lost` | **green**: an equivalent mutant (question 2) |
+| do not renumber `slot.group` | **green**, see the finding |
+| do not renumber `cohort.group` | **green**, see the finding |
+
+This matches the attempt-1 evidence on every row it reports.
+
+### Gates
+
+On the merged tree, these all pass:
+* fmt;
+* clippy `-D warnings` on the workspace, all targets and features;
+* rustdoc `-D warnings`;
+* `graph-compiler` 119, `effect-contract` 50, `host-core --all-features` 237, `console-workload`
+  39, `capi` 36;
+* the graph policy and determinism scripts (100/100) and the env-vocabulary script.
+
+### Finding
+
+**Low (gate gap): the renumbering of reused banks is ungated.** Dropping either assignment
+(`banks.rs:335` or `:336`) passes every committed test.
+
+* **It matters, because the index does shift.** My probe shows `bound_slots` changing on the
+  dogfood layout at both widths, and on 22 of 2,000 random rows at 8 lanes.
+* **The runtime is unaffected.** It never reads `cohort`.
+* **The report is not.** `bound_slots_in`, `scalar_in` and `bound_groups_in` index
+  `plan.groups[bound.group]`, and `tools/audit` and `tools/bench` read the report. A regression
+  would therefore silently misattribute racks in the report, or index out of bounds.
+* **Recommended gate** (validated in scratch: green at head, red under the `slot.group` mutation
+  at 8 and 4 lanes):
+  * **Where:** in `the_mono_pool_keeps_whole_cohorts_on_the_dogfood_layout` (`lib.rs:8550`), on
+    the folded artifact, assert that every `bound` in `report().rack_cohorts.bound_slots` has
+    `bound.members` (track ids, in order) equal to
+    `plan.groups[bound.group].members.iter().flatten()`, with the same rack.
+  * **For `cohort.group`, which has no public reader:** add a
+    `debug_assert_eq!(bank.cohort.group as usize, slot.group)` over the final `(bank, slot)`
+    pairs before the `unzip` (`banks.rs:345`). That ties it to the gated field.
+
+  This can ride the batch merge or a one-line follow-up. It does not block.
