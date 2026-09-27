@@ -24,6 +24,12 @@ const LEVEL_MIN_DB: f32 = -160.0;
 const LEVEL_MAX_DB: f32 = 24.0;
 const GAIN_REDUCTION_MIN_DB: f32 = -100.0;
 
+#[cfg(test)]
+thread_local! {
+    /// Settled blocks that took the all-wet arm (issue #982), counted once per block.
+    static SETTLED_WET_BLOCKS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
 /// Detector source selected by the prepared port configuration and current block buffers.
 #[derive(Clone, Copy)]
 pub(crate) enum Detector<'a> {
@@ -363,14 +369,21 @@ fn ballistic<L: Lane>(target: L, gain_reduction_db: &mut L, coef: &Coef<L>) -> L
     smoothed
 }
 
+/// The applied gain, `fast_gain_from_db(smoothed + makeup)`: the one place the output law crosses
+/// into the fast dB tier, shared by `gain_mix` and the all-wet arm (issue #982).
 #[inline(always)]
 // FAST-DB-CROSSING X2: applied gain conversion is a dynamics result, never a pinned coefficient.
 #[expect(
     clippy::disallowed_methods,
     reason = "FAST-DB-CROSSING X2: applied gain from a smoothed reduction, never a pinned coefficient"
 )]
+fn applied_gain<L: Lane>(smoothed: L, coef: &Coef<L>) -> L {
+    fast_gain_from_db(smoothed.add(coef.makeup))
+}
+
+#[inline(always)]
 fn gain_mix<L: Lane>(input: L, smoothed: L, coef: &Coef<L>, invariants: &Invariants<L>) -> L {
-    let gain = fast_gain_from_db(smoothed.add(coef.makeup));
+    let gain = applied_gain(smoothed, coef);
     let wet = input.mul(gain);
     let mixed = gain_mix_step(input, gain, coef.mix);
     let dry_identity = L::mask_or(
@@ -382,6 +395,41 @@ fn gain_mix<L: Lane>(input: L, smoothed: L, coef: &Coef<L>, invariants: &Invaria
     );
     let output = L::select(coef.wet_identity, wet, mixed);
     L::select(dry_identity, input, output)
+}
+
+/// The settled body's output law: `gain_mix`, or on an all-wet, unbypassed block its wet arm
+/// alone, `input * gain` (issue #982).
+///
+/// When every lane has `mix == 1` and the block is unbypassed, `gain_mix` reduces to
+/// `select(smoothed == 0 && makeup == 0, input, input * gain)`. Where that select picks `input`,
+/// `smoothed` is `+0.0` (`flush` never leaves `-0.0`) and `makeup` is `±0`, so the gain is
+/// `fast_gain_from_db(+0.0)`, exactly `1.0` by the form of the sealed tier's `exp2`, and
+/// `input * 1.0` is `input` for every word but a signalling NaN, which the multiply quiets.
+///
+/// That one word is the arm's only difference from `gain_mix`, and it cannot leave the effect:
+/// a NaN fails the block-boundary check, which zeroes the whole channel and resets its state, and
+/// the rejection mask depends on NaN-ness, not on the payload. The relaxation therefore rests on
+/// every production caller (`Instance::render` and `render_mono`) applying `finish_channel` before
+/// the output leaves the effect. A new caller that exposes kernel output unchecked must render
+/// the general law. The recursive word never reads the output, so it is never affected.
+#[inline(always)]
+fn settled_output<L: Lane, const WET: bool>(
+    input: L,
+    smoothed: L,
+    coef: &Coef<L>,
+    invariants: &Invariants<L>,
+) -> L {
+    if WET {
+        input.mul(applied_gain(smoothed, coef))
+    } else {
+        gain_mix(input, smoothed, coef, invariants)
+    }
+}
+
+/// `true` when every lane of `mask` is set. A once-per-block decision, like `Lane::mask_any`.
+#[inline(always)]
+fn every_lane<L: Lane>(mask: L::Mask) -> bool {
+    !L::mask_any(L::mask_not(mask))
 }
 
 #[inline(always)]
@@ -470,7 +518,11 @@ pub(crate) fn process_block<L: Lane>(
 /// * the frames are visited as `chunks_exact_mut` of the settled slice, so no frame indexes a
 ///   plane and there is no per-frame bounds check;
 /// * both recursive words live in locals for the whole slice and are written back to their
-///   channels once, after the loop.
+///   channels once, after the loop;
+/// * the output law is chosen once per block (issue #982): when neither channel has a lane that
+///   needs anything but the wet arm, and the block is unbypassed, `settled_output`'s `input * gain`
+///   replaces `gain_mix`. The masks come from the `Coef` loaded here, after the ramp prefix, so an
+///   automated `mix` is seen on the block its ramp finishes in.
 ///
 /// `#[inline(always)]` is load-bearing: `process_block::<Simd4>` is the one arithmetic-carrying
 /// function the wasm callgraph roster names for this kernel, and an outlined body would leave the
@@ -491,10 +543,39 @@ fn settled_main<L: Lane>(
     let invariants = Invariants::<L>::new(link, bypass);
     let coef_left = Coef::load(&channel_left.words);
     let coef_right = Coef::load(&channel_right.words);
+    let wet = !bypass
+        && every_lane::<L>(coef_left.wet_identity)
+        && every_lane::<L>(coef_right.wet_identity);
     let left = &mut left[start * width..end * width];
     let right = &mut right[start * width..end * width];
-    let mut gain_left = channel_left.gain_reduction_db;
-    let mut gain_right = channel_right.gain_reduction_db;
+    let coefs = (&coef_left, &coef_right);
+    let mut gains = (
+        channel_left.gain_reduction_db,
+        channel_right.gain_reduction_db,
+    );
+    if wet {
+        #[cfg(test)]
+        SETTLED_WET_BLOCKS.with(|blocks| blocks.set(blocks.get() + 1));
+        settled_frames::<L, true>(left, right, coefs, &mut gains, &invariants);
+    } else {
+        settled_frames::<L, false>(left, right, coefs, &mut gains, &invariants);
+    }
+    channel_left.gain_reduction_db = gains.0;
+    channel_right.gain_reduction_db = gains.1;
+}
+
+/// The settled frames of both channels, with the output law `settled_output::<L, WET>`.
+#[inline(always)]
+fn settled_frames<L: Lane, const WET: bool>(
+    left: &mut [f32],
+    right: &mut [f32],
+    coefs: (&Coef<L>, &Coef<L>),
+    gains: &mut (L, L),
+    invariants: &Invariants<L>,
+) {
+    let width = L::WIDTH;
+    let (coef_left, coef_right) = coefs;
+    let (mut gain_left, mut gain_right) = *gains;
     for (frame_left, frame_right) in left
         .chunks_exact_mut(width)
         .zip(right.chunks_exact_mut(width))
@@ -502,26 +583,16 @@ fn settled_main<L: Lane>(
         let main_left = L::load(frame_left);
         let main_right = L::load(frame_right);
         let (detected_left, detected_right) =
-            link_frame(Detector::Main, 0, main_left, main_right, &invariants);
-        one_frame(
-            main_left,
-            detected_left,
-            &coef_left,
-            &mut gain_left,
-            &invariants,
-        )
-        .store(frame_left);
-        one_frame(
-            main_right,
-            detected_right,
-            &coef_right,
-            &mut gain_right,
-            &invariants,
-        )
-        .store(frame_right);
+            link_frame(Detector::Main, 0, main_left, main_right, invariants);
+        let target_left = curve_target(detected_left, coef_left, invariants);
+        let smoothed_left = ballistic(target_left, &mut gain_left, coef_left);
+        settled_output::<L, WET>(main_left, smoothed_left, coef_left, invariants).store(frame_left);
+        let target_right = curve_target(detected_right, coef_right, invariants);
+        let smoothed_right = ballistic(target_right, &mut gain_right, coef_right);
+        settled_output::<L, WET>(main_right, smoothed_right, coef_right, invariants)
+            .store(frame_right);
     }
-    channel_left.gain_reduction_db = gain_left;
-    channel_right.gain_reduction_db = gain_right;
+    *gains = (gain_left, gain_right);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -892,8 +963,11 @@ mod settled_body_tests {
     //! Every comparison is by bits: rendered words, the recursive words, every coefficient word and
     //! every ramp field, then the `finish_channel` masks, and the same words again after it.
 
-    use super::{Channel, Detector, finish_channel, process_block, process_block_mono};
+    use super::{
+        Channel, Detector, SETTLED_WET_BLOCKS, finish_channel, process_block, process_block_mono,
+    };
     use crate::design::{MAX_WIDTH, PARAMETER_COUNT};
+    use core::cell::Cell;
     use effect_contract::LinkMode;
     use lane::{Lane, Simd4, Simd8};
     use sha2::{Digest, Sha256};
@@ -1357,15 +1431,37 @@ mod settled_body_tests {
 
     /// Asserts two rendered planes equal by bits.
     fn assert_words(context: &str, oracle: &[f32], candidate: &[f32]) {
+        assert_words_relaxed(context, oracle, candidate, false);
+    }
+
+    /// Asserts two rendered planes equal by bits, except that with `nan_relaxed` two NaN words may
+    /// differ in payload: the all-wet arm's one relaxation (#982). Returns how many did.
+    fn assert_words_relaxed(
+        context: &str,
+        oracle: &[f32],
+        candidate: &[f32],
+        nan_relaxed: bool,
+    ) -> usize {
         assert_eq!(oracle.len(), candidate.len());
+        let mut relaxed = 0;
         for (index, (a, b)) in oracle.iter().zip(candidate).enumerate() {
+            if a.to_bits() == b.to_bits() {
+                continue;
+            }
             assert!(
-                a.to_bits() == b.to_bits(),
+                nan_relaxed && a.is_nan() && b.is_nan(),
                 "{context}: word {index} differs: oracle {:#010x}, candidate {:#010x}",
                 a.to_bits(),
                 b.to_bits()
             );
+            relaxed += 1;
         }
+        relaxed
+    }
+
+    /// The all-wet arm's witness: how many settled blocks have taken it on this thread.
+    fn wet_arm_blocks() -> usize {
+        SETTLED_WET_BLOCKS.with(Cell::get)
     }
 
     /// Which detector a block runs with. A sidechain block carries its own planes.
@@ -1392,7 +1488,7 @@ mod settled_body_tests {
     }
 
     /// What one block did, for the coverage assertions.
-    #[derive(Default)]
+    #[derive(Debug, Default)]
     struct Coverage {
         blocks: usize,
         settled: usize,
@@ -1400,6 +1496,9 @@ mod settled_body_tests {
         all_wet_settled: usize,
         rejected: usize,
         sidechain: usize,
+        /// Words the all-wet arm rendered as a NaN of another payload, every one of them in a
+        /// block the boundary check rejected.
+        nan_payload: usize,
     }
 
     impl Coverage {
@@ -1410,6 +1509,7 @@ mod settled_body_tests {
             self.all_wet_settled += other.all_wet_settled;
             self.rejected += other.rejected;
             self.sidechain += other.sidechain;
+            self.nan_payload += other.nan_payload;
         }
     }
 
@@ -1492,6 +1592,7 @@ mod settled_body_tests {
                 self.sample_rate,
                 (&mut self.oracle.0, &mut self.oracle.1),
             );
+            let wet_before = wet_arm_blocks();
             process_block::<L>(
                 &mut candidate_left,
                 &mut candidate_right,
@@ -1502,6 +1603,7 @@ mod settled_body_tests {
                 self.sample_rate,
                 (&mut self.candidate.0, &mut self.candidate.1),
             );
+            let wet_arm = wet_arm_blocks() - wet_before;
             let settled = ramping < frames;
             let all_wet_settled = settled
                 && source == Source::Main
@@ -1509,15 +1611,23 @@ mod settled_body_tests {
                 && all_wet(&self.oracle.0)
                 && all_wet(&self.oracle.1);
             let context = || format!("{} (frames {frames}, ramping {ramping})", context());
-            assert_words(
+            assert_eq!(
+                wet_arm,
+                usize::from(all_wet_settled),
+                "{}: the all-wet arm runs exactly once on an all-wet, unbypassed settled block",
+                context()
+            );
+            let relaxed_left = assert_words_relaxed(
                 &format!("{} left kernel", context()),
                 &oracle_left,
                 &candidate_left,
+                wet_arm == 1,
             );
-            assert_words(
+            let relaxed_right = assert_words_relaxed(
                 &format!("{} right kernel", context()),
                 &oracle_right,
                 &candidate_right,
+                wet_arm == 1,
             );
             assert_state(
                 &format!("{} left", context()),
@@ -1538,6 +1648,17 @@ mod settled_body_tests {
                 finish_channel::<L>(&mut candidate_right, &mut self.candidate.1),
             );
             assert_eq!(oracle_masks, candidate_masks, "{}: finish masks", context());
+            // A payload difference is admissible only where the boundary check rejects the block.
+            assert!(
+                relaxed_left == 0 || oracle_masks.0 != 0,
+                "{}: a left NaN payload differs in an accepted block",
+                context()
+            );
+            assert!(
+                relaxed_right == 0 || oracle_masks.1 != 0,
+                "{}: a right NaN payload differs in an accepted block",
+                context()
+            );
             assert_words(
                 &format!("{} left finished", context()),
                 &oracle_left,
@@ -1565,6 +1686,7 @@ mod settled_body_tests {
                 all_wet_settled: usize::from(all_wet_settled),
                 rejected: usize::from(oracle_masks != (0, 0)),
                 sidechain: usize::from(source != Source::Main),
+                nan_payload: relaxed_left + relaxed_right,
             }
         }
     }
@@ -1622,6 +1744,7 @@ mod settled_body_tests {
                 self.sample_rate,
                 &mut self.oracle,
             );
+            let wet_before = wet_arm_blocks();
             process_block_mono::<L>(
                 &mut candidate,
                 detector,
@@ -1630,6 +1753,11 @@ mod settled_body_tests {
                 bypass,
                 self.sample_rate,
                 &mut self.candidate,
+            );
+            assert_eq!(
+                wet_arm_blocks(),
+                wet_before,
+                "the collapsed body has no all-wet arm"
             );
             let settled = ramping < frames;
             let all_wet_settled =
@@ -1653,6 +1781,7 @@ mod settled_body_tests {
                 all_wet_settled: usize::from(all_wet_settled),
                 rejected: usize::from(oracle_mask != 0),
                 sidechain: usize::from(source != Source::Main),
+                nan_payload: 0,
             }
         }
     }
@@ -1780,6 +1909,7 @@ mod settled_body_tests {
         let mut coverage = grid::<f32>("f32", table, wet);
         coverage.add(&grid::<Simd4>("Simd4", table, wet));
         coverage.add(&grid::<Simd8>("Simd8", table, wet));
+        println!("grid coverage {coverage:?}");
         assert!(
             coverage.settled_mid_block > 0,
             "the grid must start settled bodies mid-block"
@@ -1798,6 +1928,129 @@ mod settled_body_tests {
     #[test]
     fn the_settled_body_is_the_base_body_on_the_corpus_table() {
         grid_all(&CORPUS_TRACKS, false);
+    }
+
+    /// An all-wet table on which the arm is taken (#982 gate 1): every lane `mix == 1` and
+    /// `makeup`, and the lanes cross ratio `{1, 4, 20}` with knee `{0, 6}`.
+    fn wet_table(makeup: f32) -> [[f32; PARAMETER_COUNT]; 8] {
+        core::array::from_fn(|lane| {
+            let lane_f = lane as f32;
+            [
+                -6.0 - 3.0 * lane_f,
+                [1.0, 4.0, 20.0][lane % 3],
+                [0.0, 6.0][lane % 2],
+                2.0 + 1.5 * lane_f,
+                40.0 + 15.0 * lane_f,
+                makeup,
+                1.0,
+            ]
+        })
+    }
+
+    /// #982 gate 1. Makeup `0` is also what the parameter layer delivers for `-0`; the raw `-0.0`
+    /// word, which that layer never delivers, is covered as well.
+    #[test]
+    fn the_all_wet_arm_is_the_base_body_on_all_wet_tables() {
+        for makeup in [0.0, -0.0, 3.0, -12.0] {
+            let coverage = grid_all(&wet_table(makeup), true);
+            assert!(
+                coverage.all_wet_settled > 0,
+                "makeup {makeup}: the arm must be taken"
+            );
+        }
+        let coverage = grid_all(&FIXTURE_TRACKS, true);
+        assert!(
+            coverage.all_wet_settled > 0,
+            "the fixture tracks must take the arm"
+        );
+    }
+
+    /// Runs one `Detector::Main` block and returns how many times it took the all-wet arm.
+    fn wet_blocks<L: Lane>(
+        channels: &mut (Channel<L>, Channel<L>),
+        frames: usize,
+        bypass: bool,
+    ) -> usize {
+        let before = wet_arm_blocks();
+        let mut left = vec![0.25_f32; frames * L::WIDTH];
+        let mut right = vec![-0.5_f32; frames * L::WIDTH];
+        process_block::<L>(
+            &mut left,
+            &mut right,
+            Detector::Main,
+            frames,
+            LinkMode::DualMono,
+            bypass,
+            SAMPLE_RATE,
+            (&mut channels.0, &mut channels.1),
+        );
+        wet_arm_blocks() - before
+    }
+
+    /// #982 gate 3: the arm's dispatch, which no bit-exactness gate can see.
+    fn wet_arm_witness<L: Lane>() {
+        let wet = table_defaults(&FIXTURE_TRACKS, 0, 0);
+        let pair = |left: &Defaults, right: &Defaults| {
+            (
+                Channel::<L>::new(left, SAMPLE_RATE),
+                Channel::<L>::new(right, SAMPLE_RATE),
+            )
+        };
+        let mut channels = pair(&wet, &wet);
+        for frames in [1, 7, 32, 128] {
+            assert_eq!(
+                wet_blocks(&mut channels, frames, false),
+                1,
+                "once per all-wet settled block of {frames} frames"
+            );
+        }
+        assert_eq!(wet_blocks(&mut pair(&wet, &wet), 128, true), 0, "bypass");
+        let mut nearly = wet;
+        nearly[L::WIDTH - 1][6] = 0.999;
+        assert_eq!(
+            wet_blocks(&mut pair(&nearly, &wet), 128, false),
+            0,
+            "one left lane at mix 0.999"
+        );
+        assert_eq!(
+            wet_blocks(&mut pair(&wet, &nearly), 128, false),
+            0,
+            "only the right channel has a non-wet lane"
+        );
+        let mut channels = pair(&wet, &wet);
+        channels.0.set_parameter_target(0, 0, -30.0, SAMPLE_RATE);
+        assert_eq!(
+            wet_blocks(&mut channels, 64, false),
+            0,
+            "a block that is all ramping prefix"
+        );
+        let mut start = wet;
+        for lane in &mut start {
+            lane[6] = 0.9;
+        }
+        let mut channels = pair(&start, &start);
+        assert_eq!(wet_blocks(&mut channels, 128, false), 0, "mix 0.9");
+        for lane in 0..L::WIDTH {
+            channels.0.set_parameter_target(6, lane, 1.0, SAMPLE_RATE);
+            channels.1.set_parameter_target(6, lane, 1.0, SAMPLE_RATE);
+        }
+        assert_eq!(
+            wet_blocks(&mut channels, 40, false),
+            0,
+            "40 frames of the 64-frame ramp to mix 1"
+        );
+        assert_eq!(
+            wet_blocks(&mut channels, 128, false),
+            1,
+            "the ramp to mix 1 ends at frame 24, and the tail takes the arm"
+        );
+    }
+
+    #[test]
+    fn the_all_wet_arm_is_taken_exactly_when_every_lane_is_wet() {
+        wet_arm_witness::<f32>();
+        wet_arm_witness::<Simd4>();
+        wet_arm_witness::<Simd8>();
     }
 
     /// Randomized dual and collapsed blocks at width `L`, one seed.
@@ -1901,6 +2154,7 @@ mod settled_body_tests {
         for seed in 0..seeds() {
             coverage.add(&randomized::<L>(seed, 128));
         }
+        println!("W{} randomized coverage {coverage:?}", L::WIDTH);
         assert!(
             coverage.settled > coverage.blocks / 2,
             "most blocks must reach the settled body"
@@ -2060,5 +2314,45 @@ mod settled_body_tests {
         let digest = hex(hasher);
         println!("scenario 981 digest {digest}");
         assert_eq!(digest, SCENARIO_981);
+    }
+
+    /// The standing console fixture's first eight compressors
+    /// (`fixtures/session/v1/console-sixty-four-track-intended.json`, tracks 0-7): heterogeneous
+    /// and all-wet, so every `Simd4` and `Simd8` bank of them takes the all-wet arm (#982).
+    const FIXTURE_TRACKS: [[f32; PARAMETER_COUNT]; 8] = [
+        [-6.0, 1.5, 3.0, 2.0, 40.0, 0.0, 1.0],
+        [-7.5, 2.25, 4.5, 3.5, 55.0, 0.5, 1.0],
+        [-9.0, 3.0, 6.0, 5.0, 70.0, 1.0, 1.0],
+        [-10.5, 3.75, 7.5, 6.5, 85.0, 1.5, 1.0],
+        [-12.0, 4.5, 9.0, 8.0, 100.0, 2.0, 1.0],
+        [-13.5, 5.25, 3.0, 9.5, 115.0, 2.5, 1.0],
+        [-15.0, 6.0, 4.5, 11.0, 130.0, 3.0, 1.0],
+        [-16.5, 6.75, 6.0, 12.5, 145.0, 0.0, 1.0],
+    ];
+
+    /// #982 gate 2: 24 all-wet heterogeneous blocks, `Simd4` and `Simd8`, DualMono and Average,
+    /// hostile input. NaN words fold canonically before the boundary check (the arm's one
+    /// relaxation) and by bits after it. Pinned on the unmodified base (`197db1c9`) and on
+    /// #981, in dev and release.
+    const SCENARIO_982: &str = "cd2d5b11da315893f13e5585bf82fcbb71f9026046497626544a6573ed97c8cf";
+
+    #[test]
+    fn scenario_982_all_wet_render_is_pinned() {
+        let schedule: Vec<ScenarioBlock> = [
+            128, 128, 1, 7, 31, 32, 33, 128, 41, 128, 64, 97, 128, 127, 2, 128, 65, 63, 128, 16,
+            128, 100, 3, 128,
+        ]
+        .iter()
+        .enumerate()
+        .map(|(block, &frames)| (frames, (block == 8).then_some((0, 2, -21.0))))
+        .collect();
+        let mut hasher = Sha256::new();
+        for link in [LinkMode::DualMono, LinkMode::Average] {
+            scenario_dual::<Simd4>(&mut hasher, &FIXTURE_TRACKS, link, &schedule, true);
+            scenario_dual::<Simd8>(&mut hasher, &FIXTURE_TRACKS, link, &schedule, true);
+        }
+        let digest = hex(hasher);
+        println!("scenario 982 digest {digest}");
+        assert_eq!(digest, SCENARIO_982);
     }
 }

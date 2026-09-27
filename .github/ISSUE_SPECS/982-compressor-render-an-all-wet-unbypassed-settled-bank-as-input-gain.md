@@ -180,3 +180,96 @@ permitted relaxation of bit comparison.
   identity law. The wet arm keeps one of them. The rest of the saving comes from a shorter chain
   after `fast_exp2`.
 
+
+## Attempt 1 evidence
+
+Implementer attempt 1, 2026-09-27, on top of #981 (`aa3c0d27`), branch
+`codex/981-compressor-settled-body`. The verification amendments were followed: M3 names
+`cross_target`, not `oracle`; `all_lanes` is named `every_lane` (a `lane::kernels::builtins::
+all_lanes` already exists with another meaning); the relaxation's dependence on the callers is
+stated at the arm.
+
+### The change
+
+`crates/compressor/src/kernel.rs` only.
+
+* `applied_gain(smoothed, coef)` is `fast_gain_from_db(smoothed + makeup)` and now carries the
+  `FAST-DB-CROSSING X2` comment and the one `#[expect(clippy::disallowed_methods)]`. `gain_mix`
+  calls it; its operation order is unchanged. The workspace still has exactly eight crossings
+  (X1-X8) and no new `#[expect]` for the tier; clippy, which enforces the seal, passes.
+* `settled_output::<L, WET>` returns `input.mul(applied_gain(..))` for `WET` and `gain_mix(..)`
+  otherwise. `every_lane(mask) = !mask_any(mask_not(mask))`.
+* `settled_main` decides `wet = !bypass && every_lane(left.wet_identity) &&
+  every_lane(right.wet_identity)` once per block, from the `Coef` it loads after the ramp prefix,
+  and runs `settled_frames::<L, WET>`. The frame loop calls `curve_target`, `ballistic` and
+  `settled_output` in `one_frame`'s order. No new field on `Channel`, `Coef` or `Instance`.
+* `#[cfg(test)] thread_local SETTLED_WET_BLOCKS`, incremented once per block the arm runs.
+
+### The NaN relaxation, for the owner's acknowledgement
+
+Every output word whose input is not a NaN is bit-identical. An output word whose input is a
+signalling NaN may come out as a different NaN on the arm (`x * 1.0` quiets it on x86, and wasm
+may canonicalise it); the base's dry-identity select returned the sNaN unchanged. Every block
+holding such a word is rejected by `finish_channel` (`lib.rs:544`, `:597`), which zeroes the
+channel and resets its state, and the mask depends on NaN-ness only, so output, state, reports and
+masks are identical at the effect boundary. This rests on every production caller
+(`Instance::render`, `render_mono`) applying `finish_channel` before the output leaves the effect;
+the arm's doc says so and that a new caller exposing kernel output must use the general law. The
+frozen 013 identity ("`G == 0` and makeup `+0` returns `z` exactly for any mix") therefore now
+holds at the effect boundary rather than at the kernel word. **This needs the owner's explicit
+acknowledgement**; it cannot be avoided without re-adding the select (3 of the 9 saved operations).
+
+Measured: in release the three randomized differentials took the arm in 13,547 (`f32`), 9,728
+(`Simd4`) and 10,617 (`Simd8`) settled blocks and saw 307, 2,004 and 5,304 NaN-payload
+differences, every one in a block the boundary check rejected (asserted per block), and none in an
+accepted block. Only makeup-zero tables produce them (the dry-identity case); the grid saw 93 on
+each of the makeup `0` and raw `-0.0` tables and none on the others.
+
+### Gates
+
+* **Gate 1** (`the_all_wet_arm_is_the_base_body_on_all_wet_tables`): #981's grid (`f32`, `Simd4`,
+  `Simd8`; every link mode; both `bypass`; every detector; starts 0, 1, 18, 40; the hostile input)
+  on all-wet tables with makeup `0` (which is also what the parameter layer delivers for `-0`), a
+  raw `-0.0` word, `3` and `-12`, the lanes crossing ratio `{1, 4, 20}` with knee `{0, 6}`, and on
+  the fixture's first eight compressors. NaN words compare "both NaN" only where the witness says
+  the arm ran; the masks, finished planes and state after `finish_channel` compare by bits, and a
+  payload difference must be in a rejected channel. The differentials apply the same rule. Dev
+  and release.
+* **Gate 2** (`scenario_982_all_wet_render_is_pinned`): 24 all-wet heterogeneous blocks (the
+  standing fixture's tracks 0-7), `Simd4` and `Simd8`, DualMono and Average, hostile input; NaN
+  words fold canonically before the boundary check and by bits after it. Recorded on B0
+  (`197db1c9`) and on this slice's base (#981): `cd2d5b11da315893f13e5585bf82fcbb71f9026046497626544a6573ed97c8cf`,
+  dev and release; unchanged after the arm. #981's digest is unchanged.
+* **Gate 3** (`the_all_wet_arm_is_taken_exactly_when_every_lane_is_wet`, `f32`, `Simd4`, `Simd8`):
+  once per settled all-wet block of 1, 7, 32 and 128 frames; never with `bypass`, with one left
+  lane at mix 0.999, with only the right channel non-wet, or in a block that is all ramping
+  prefix; once for the tail of a block whose ramp to mix 1 on every lane ends at frame 24.
+* **Gate 4**: `identity` (6), `nonfinite` (5), `cross_target`, `lane_identity`, `partition`,
+  `oracle`: green. `cargo test --locked -p compressor`: 90 passed in dev and in release.
+* **Gate 5**: all 30 console digests identical to B0.
+* **Gate 7**: browser artifact rule 3, roster (compressor dual matches one function: vector 350,
+  scalar 0), `meter_poll`, `command_submit` and boot budget PASS; artifact 3,351,106 bytes (+2,377
+  over #981, +5,491 over B0). fmt, workspace clippy, rustdoc, the other crates' tests, the wasm
+  gates and the policy scripts: see the table below.
+
+| gate | command | result |
+|---|---|---|
+| toolchain | `cargo fmt --all --check`; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`; `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps` | PASS |
+| compressor | `cargo test --locked -p compressor`, and `--release` | 90 passed, 0 failed, each |
+| other crates | `-p effect-runtime` (86), `-p console-workload` (39), `-p builtins-compiler --features test-support` (79) | all passed |
+| wasm | `cargo test --locked --release -p lane -p math -p wasm-gates --features math/lane` (113 passed); `bash scripts/run-wasm-gates.sh` | PASS, 0 mismatches on the native, wasm and wasm `simd128` legs |
+| policy | `check-lane-policy.sh`, `check-realtime-policy.sh`, `check-unfused-seal.sh` | PASS |
+
+### Mutations (gate 6)
+
+`MUTATIONS.md`, section "#982": M1-M5 all red (9, 7, 7, 5 and 5 red tests). M4 is caught by gate 3
+and by gate 1's dispatch assertion; no bit-exactness test can see it.
+
+### Codegen (recorded)
+
+x86 `Simd8` release: the wet settled loop is 195 instructions per frame (3 scalar), against 220
+for the general settled loop in the same function (and 239 for B0's settled loop).
+
+### A/B
+
+Measured once as the set #981-#985 against a separately built B0; see #985's evidence.

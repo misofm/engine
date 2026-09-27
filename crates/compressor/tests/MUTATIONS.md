@@ -207,3 +207,19 @@ Driver: one mutation at a time, `CARGO_INCREMENTAL=0 cargo test --locked -p comp
 The brief's original M4, "right is processed before left", is not recorded as a gate: the
 verification applied it and it is equivalent (the two channels' recurrences share nothing), which
 is the same independence #983's pass 2 relies on.
+
+### #982 — the all-wet arm, `input * gain`
+
+Gate 1 compares NaN words as "both NaN" only in a block whose witness `SETTLED_WET_BLOCKS` says the
+arm ran, and then requires `finish_channel` to have rejected that channel; everything else, and
+everything after the boundary check, compares by bits. Gate 1 also asserts the witness moved
+exactly when the block was an all-wet, unbypassed, settled `Main` block, so the grid and the
+differentials see dispatch as well as bits.
+
+| # | mutation | red |
+|---|---|---|
+| 982-M1 | the arm ignores `bypass` | `identity::bypass_preserves_exact_dry_bits_at_sample_zero`, gate 1 (`the_all_wet_arm_is_the_base_body_on_all_wet_tables`, the three differentials), gate 3, `conformance`, `contract::every_launch_rate_processes_scalar_and_supported_bank_at_zero_latency`, `mono_collapse::a_statically_bypassed_bank_collapses_to_the_dual_bits` (9 red) |
+| 982-M2 | the arm is taken when any lane is wet (`mask_any`) | gate 1 on the mixed corpus banks (`the_settled_body_is_the_base_body_on_the_corpus_table`, `randomized_differential_simd4`/`_simd8`), gate 3, `scenario_981_*`, `cross_target`, `lane_identity::every_width_produces_the_same_words` (7 red) |
+| 982-M3 | the arm drops `+ makeup` | gate 1, `scenario_982_all_wet_render_is_pinned`, `cross_target` (its `f32` lane 7 has mix 1 and makeup 6), `lane_identity::every_width_produces_the_same_words` (7 red). `oracle` stays green, as the verification found |
+| 982-M4 | the arm is never taken | gate 3 (`the_all_wet_arm_is_taken_exactly_when_every_lane_is_wet`) and gate 1's dispatch assertion (5 red). No bit-exactness test can see it: it is a performance-only regression |
+| 982-M5 | only the left channel's mask is tested | gate 3's "only the right channel has a non-wet lane" case, and gate 1 (5 red) |
