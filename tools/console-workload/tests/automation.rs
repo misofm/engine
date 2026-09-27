@@ -244,6 +244,41 @@ mod mixing {
         assert_eq!(automation.pushes_per_block(None), 13);
     }
 
+    /// `restated` pushes exactly each control's held base, on every block, and `automated`
+    /// alternates the two ride values (issue #1011).
+    ///
+    /// The row's `quiet == restated` digest equality cannot say this for the limiter: neither
+    /// limiter engages near its held ceiling, so a ceiling restated off it renders the same bits.
+    /// So the restated value is pinned here, against the held values the fixture declares
+    /// (VERIFY-AUTOMATION A2's table), for every control and not only the ones whose bits move.
+    #[test]
+    fn restated_pushes_exactly_the_held_bases() {
+        let runtime = SessionRuntime::build(mixing_automation::WORKLOAD, mixing_automation::CONFIG);
+        let automation = MixingAutomation::resolve(&runtime).expect("the eight controls resolve");
+        let held: [f32; 8] = [-7.5, -18.0, -1.0, 1.5, -27.0, -1.75, -4.5, -9.0];
+        for (control, held) in automation.controls().iter().zip(held) {
+            let track = control.control.track_id;
+            assert_eq!(control.base.to_bits(), held.to_bits(), "{track}: base");
+            for block in [0, 1, 2, 3, 63, 64, 1_063, 1_064] {
+                assert_eq!(
+                    control.value(Arm::Restated, block).map(f32::to_bits),
+                    Some(held.to_bits()),
+                    "{track}: restated before block {block}"
+                );
+                assert_eq!(
+                    control.value(Arm::Quiet, block),
+                    None,
+                    "{track}: quiet pushes"
+                );
+                assert_eq!(
+                    control.value(Arm::Automated, block).map(f32::to_bits),
+                    Some(control.values[usize::from(block % 2 == 1)].to_bits()),
+                    "{track}: automated before block {block}"
+                );
+            }
+        }
+    }
+
     /// A plan without the control channel resolves nothing, and says which control it missed.
     #[test]
     fn a_plan_without_a_control_channel_refuses_the_row() {
