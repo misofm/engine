@@ -370,6 +370,68 @@ pub fn fader_matrix_block<L: Lane>(
     }
 }
 
+/// [`fader_matrix_block`] for a coefficient set with **no** identity lane: its second arm alone.
+///
+/// Why it exists: [`fader_matrix_block`] evaluates the per-lane identity select on both outputs of
+/// every frame. With no identity lane both selects return their second arm, so the select is pure
+/// cost: on `x86-64-v3` two `vblendvps` per frame that compete with the six multiplies for the same
+/// ports, and on wasm `simd128` two `v128.bitselect` per frame, about 1.1 us of a 64-track
+/// gain/pan block under V8 (issue #954). No standing session has an identity lane in a full bank:
+/// the equal-power pan law never yields one, because `cos(pi / 2)` rounds to `6.1e-17` in `f32`.
+///
+/// Frozen operation order, per frame -- [`fader_matrix_block`]'s second arm verbatim:
+/// 1. `l = load(left) * gain_left`, `r = load(right) * gain_right`, then clear each muted lane
+/// 2. `yl = ll * l + lr * r` and `yr = rl * l + rr * r` -- multiply, multiply, add; no fusion
+/// 3. store both planes
+///
+/// Both input planes are loaded before either is written; the operand orders are
+/// [`fader_matrix_block`]'s. There is no `L::select` anywhere in the body, not even one on a
+/// constant mask: a select is what brings the blend back.
+///
+/// Precondition: `!L::mask_any(matrix.identity)` over all `L::WIDTH` lanes, padding lanes included,
+/// checked by a `debug_assert!`. The caller tests it once per call, never per frame.
+///
+/// Class A: with no identity lane, [`fader_matrix_block`]'s per-lane select returns its second arm,
+/// so the two kernels compute the same products and sums on every lane of every word, padding
+/// included, and so does [`gain_mute_block`] on each plane followed by
+/// [`matrix2x2_block_without_identity`]. Every non-NaN word is bit-identical. A NaN word stays a
+/// NaN: LLVM may commute the commutative `fadd` differently in the two bodies, and when both
+/// products are NaN with different payloads x86 keeps the first operand's. Rendered plans never
+/// reach that case -- the input stage sanitises every non-finite sample before the fader -- and the
+/// payload is not part of the class-A statement.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+pub fn fader_matrix_block_without_identity<L: Lane>(
+    left: &mut [f32],
+    right: &mut [f32],
+    frames: usize,
+    gain_left: L,
+    mute_left: L::Mask,
+    gain_right: L,
+    mute_right: L::Mask,
+    matrix: &Matrix2x2Coef<L>,
+) {
+    debug_assert_eq!(left.len(), frames * L::WIDTH);
+    debug_assert_eq!(right.len(), frames * L::WIDTH);
+    debug_assert!(
+        !L::mask_any(matrix.identity),
+        "the select-free fused arm requires a coefficient set with no identity lane"
+    );
+    for (left_frame, right_frame) in left
+        .chunks_exact_mut(L::WIDTH)
+        .zip(right.chunks_exact_mut(L::WIDTH))
+    {
+        let left_input = L::load(left_frame);
+        let right_input = L::load(right_frame);
+        let l = left_input.mul(gain_left).andnot(mute_left);
+        let r = right_input.mul(gain_right).andnot(mute_right);
+        let yl = matrix.ll.mul(l).add(matrix.lr.mul(r));
+        let yr = matrix.rl.mul(l).add(matrix.rr.mul(r));
+        yl.store(left_frame);
+        yr.store(right_frame);
+    }
+}
+
 /// State of a ramping 2x2 channel matrix, one set per lane. Coefficient order is `[ll, lr, rl, rr]`.
 #[derive(Clone, Copy)]
 pub struct Matrix2x2Ramp<L: Lane> {

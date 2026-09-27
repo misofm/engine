@@ -464,3 +464,283 @@ fn settled_matrix_shapes_render_the_base_bits() {
     println!("settled_matrix_shapes_render_the_base_bits digest: {digest}");
     assert_eq!(digest, BASE_DIGEST, "a settled matrix shape moved a bit");
 }
+
+/// One fused fader/matrix shape of issue #954's scenario gate.
+#[derive(Clone, Copy, Debug)]
+enum FusedShape {
+    /// Every member non-identity: with a full bank, the one shape with no identity lane at all.
+    NonIdentity,
+    /// One member exactly [`Matrix2x2::IDENTITY`], the rest non-identity.
+    OneIdentityMember,
+    /// Every member non-identity; member 0 retargets **instantly** (a 0-sample window) to
+    /// [`Matrix2x2::IDENTITY`] at [`FUSED_TO_IDENTITY_BLOCK`] and instantly back to a pan at
+    /// [`FUSED_FROM_IDENTITY_BLOCK`]. Both retargets settle before the next render, so every block
+    /// stays on the fused path while the identity mask changes under it.
+    InstantToIdentity,
+    /// Every member non-identity; member 0's matrix ramps from [`FUSED_TO_IDENTITY_BLOCK`] over
+    /// 200 samples and member 1's fader ramps from [`FUSED_FADER_RAMP_BLOCK`]: those blocks fall
+    /// back to the split stages, and the fused path resumes once both settle.
+    SmoothedRetargets,
+}
+
+/// The block at which [`FusedShape::InstantToIdentity`] makes member 0 the identity.
+const FUSED_TO_IDENTITY_BLOCK: usize = 3;
+/// The block at which [`FusedShape::InstantToIdentity`] makes member 0 a pan again.
+const FUSED_FROM_IDENTITY_BLOCK: usize = 7;
+/// The block at which [`FusedShape::SmoothedRetargets`] starts member 1's fader ramp.
+const FUSED_FADER_RAMP_BLOCK: usize = 10;
+
+/// Prepared fader parameters for one member: unity gain on the members that meet the signed-zero
+/// frames on an identity lane, mixed gains and per-side mutes on the rest.
+fn fused_fader(lane: usize) -> BuiltinParameters {
+    let channel = |fader_db: f32, muted: bool| ChannelParameters {
+        fader_db,
+        muted,
+        ..ChannelParameters::default()
+    };
+    let (left, right) = match lane % 4 {
+        0 => (channel(0.0, false), channel(0.0, false)),
+        1 => (channel(-6.0, true), channel(3.5, false)),
+        2 => (channel(0.0, false), channel(-144.0, true)),
+        _ => (channel(12.0, false), channel(-0.5, false)),
+    };
+    BuiltinParameters {
+        left,
+        right,
+        ..BuiltinParameters::default()
+    }
+}
+
+/// Issue #954 scenario gate: the fused fader/matrix pair renders the bits the base rendered.
+///
+/// One deterministic scenario, 16 blocks of 128 frames, through
+/// [`BuiltinFaderBank::try_process_settled_with_matrix`] at both bank widths with `{1, W - 1, W}`
+/// members, over the four [`FusedShape`]s. A block the fused call declines (a ramp in flight) runs
+/// the split stages, exactly as the product's bank processor does. Every output word, whether the
+/// block was fused, and every block's per-lane retained fader and matrix words (padding lanes
+/// included) are folded into one SHA-256, pinned at the value the unmodified base (`e0f25bb6`)
+/// printed in both dev and release before the select-free fused arm existed.
+///
+/// The input is [`hostile_pair`]'s, so every lane meets `l = -0.0, r = +0.0` at unity gain,
+/// unmuted, on lanes `0 mod 4`: an identity lane passes that `-0.0` through, and
+/// `1 * -0.0 + 0 * +0.0` would be `+0.0`. Only a full non-identity bank -- shape (a), and shapes
+/// (c) and (d) outside their identity or ramp blocks -- has no identity lane; partial banks carry
+/// identity padding lanes and keep the select.
+///
+/// Red mutations (issue #954, `MUTATIONS.md`): M1, the fused dispatch always select-free, moves the
+/// digest through the identity lanes' `-0.0` (in dev the kernel's `debug_assert!` fires first); M3,
+/// `lr` and `rl` swapped in the select-free fused kernel, moves it through shape (a).
+#[test]
+fn fused_fader_matrix_shapes_render_the_base_bits() {
+    const BASE_DIGEST: &str = "46cc00962fac4916a0d5dfed9b197fb12c85082acd0cae806774876c3744abce";
+    /// 384 blocks, less the 16 a matrix or fader ramp holds on the split stages.
+    const FUSED_BLOCKS: usize = 368;
+    const BLOCKS: usize = 16;
+    const FRAMES: usize = 128;
+    const WINDOW: u32 = 200;
+    let _canonical = lane::CanonicalFpEnv::enter();
+    let mut sink = bench_support::digest::Sha256Sink::new();
+    let mut fused_blocks = 0_usize;
+    for (backend, width) in [
+        (lane::Backend::Simd4, effect_contract::BankWidth::Four),
+        (lane::Backend::Simd8, effect_contract::BankWidth::Eight),
+    ] {
+        let lanes = width.lanes() as usize;
+        for members in [1, lanes - 1, lanes] {
+            for shape in [
+                FusedShape::NonIdentity,
+                FusedShape::OneIdentityMember,
+                FusedShape::InstantToIdentity,
+                FusedShape::SmoothedRetargets,
+            ] {
+                let identity_member =
+                    matches!(shape, FusedShape::OneIdentityMember).then_some(members / 2);
+                let prepared = (0..members)
+                    .map(|lane| {
+                        let matrix = if identity_member == Some(lane) {
+                            Matrix2x2::IDENTITY
+                        } else {
+                            non_identity(lane)
+                        };
+                        (matrix, 0)
+                    })
+                    .collect();
+                let mut matrix =
+                    BuiltinMatrixBank::new(backend, width, prepared).expect("prepared matrix");
+                let mut fader =
+                    BuiltinFaderBank::new(backend, width, (0..members).map(fused_fader).collect())
+                        .expect("prepared fader");
+                let mut state = (lanes * 1_000 + members * 10 + 7) as u64;
+                let mut left = vec![0.0_f32; FRAMES * lanes];
+                let mut right = vec![0.0_f32; FRAMES * lanes];
+                for block in 0..BLOCKS {
+                    match (shape, block) {
+                        (FusedShape::InstantToIdentity, FUSED_TO_IDENTITY_BLOCK) => matrix
+                            .set_target_smoothed(0, Matrix2x2::IDENTITY, 0)
+                            .expect("instant retarget"),
+                        (FusedShape::InstantToIdentity, FUSED_FROM_IDENTITY_BLOCK) => matrix
+                            .set_target_smoothed(0, non_identity(lanes - 2), 0)
+                            .expect("instant retarget"),
+                        (FusedShape::SmoothedRetargets, FUSED_TO_IDENTITY_BLOCK) => matrix
+                            .set_target_smoothed(0, non_identity(lanes - 1), WINDOW)
+                            .expect("smoothed retarget"),
+                        (FusedShape::SmoothedRetargets, FUSED_FADER_RAMP_BLOCK) if members > 1 => {
+                            fader
+                                .set_fader_db(1, BuiltinLaneSelector::Both, -9.5, 100)
+                                .expect("smoothed fader");
+                        }
+                        _ => {}
+                    }
+                    for frame in 0..FRAMES {
+                        for lane in 0..lanes {
+                            let (l, r) = hostile_pair(frame + lane, &mut state);
+                            left[frame * lanes + lane] = l;
+                            right[frame * lanes + lane] = r;
+                        }
+                    }
+                    let fused = fader.try_process_settled_with_matrix(
+                        &mut matrix,
+                        &mut left,
+                        &mut right,
+                        FRAMES as u32,
+                    );
+                    if fused {
+                        fused_blocks += 1;
+                    } else {
+                        fader.process(&mut left, &mut right, FRAMES as u32);
+                        matrix.process(&mut left, &mut right, FRAMES as u32);
+                    }
+                    sink.update([u8::from(fused)]);
+                    for word in left.iter().chain(&right) {
+                        sink.update(word.to_bits().to_le_bytes());
+                    }
+                    for lane in 0..lanes {
+                        for word in test_support::fader_bank_lane_words(&fader, lane) {
+                            sink.update(word.to_le_bytes());
+                        }
+                        for word in test_support::matrix_bank_lane_words(&matrix, lane) {
+                            sink.update(word.to_le_bytes());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let digest = sink.finish_hex();
+    println!(
+        "fused_fader_matrix_shapes_render_the_base_bits digest: {digest} fused={fused_blocks}"
+    );
+    assert_eq!(
+        fused_blocks, FUSED_BLOCKS,
+        "the fused path's coverage moved"
+    );
+    assert_eq!(
+        digest, BASE_DIGEST,
+        "a fused fader/matrix shape moved a bit"
+    );
+}
+
+/// Issue #954 scenario gate, scalar sites: the per-track fused fader/matrix renders the base bits.
+///
+/// The two `f32` call sites of the fused kernel -- [`BuiltinChain::process_dual_mono`] and
+/// [`FaderMuteRampBuiltins::process_fader_matrix`] -- over four tracks: an exact identity matrix at
+/// unity gain, a pan with a muted left side, a pan that retargets instantly to the identity at
+/// [`FUSED_TO_IDENTITY_BLOCK`] and back at [`FUSED_FROM_IDENTITY_BLOCK`], and a pan whose matrix
+/// ramps over 200 samples (the per-track fused call declines those blocks and the split stages
+/// run). A scalar track's identity mask is its own flag, so the identity tracks keep the select and
+/// the pan tracks take the select-free arm. Every output word and whether the block was fused are
+/// folded into one SHA-256, pinned at the unmodified base (`e0f25bb6`) in dev and release.
+///
+/// Red mutation (issue #954 M1, `MUTATIONS.md`): the fused dispatch always select-free moves the
+/// digest through the identity track's `-0.0` at the `process_fader_matrix` site. At the
+/// `BuiltinChain` site the chain's input stage has already turned `-0.0` into `+0.0`, so this test
+/// cannot see M1 there; that site is tools-only, and the dispatch witness (M5) guards it.
+#[test]
+fn scalar_fused_fader_matrix_renders_the_base_bits() {
+    const BASE_DIGEST: &str = "c51310190d189b0432ae56f97e331ee79a9e2c1dd222b5cccc086b4abbcaaafe";
+    /// 48 blocks, less the 4 the 200-sample matrix ramp holds on the split stages.
+    const FUSED_BLOCKS: usize = 44;
+    const BLOCKS: usize = 12;
+    const FRAMES: usize = 64;
+    const WINDOW: u32 = 200;
+    let _canonical = lane::CanonicalFpEnv::enter();
+    let mut sink = bench_support::digest::Sha256Sink::new();
+    let mut fused_blocks = 0_usize;
+    for track in 0..4_usize {
+        let matrix = if track == 0 {
+            Matrix2x2::IDENTITY
+        } else {
+            non_identity(track + 1)
+        };
+        let parameters = BuiltinParameters {
+            matrix,
+            ..fused_fader(track)
+        };
+        let mut chain = BuiltinChain::new(48_000, parameters).expect("prepared chain");
+        let (_, _, mut split_matrix) = BuiltinChain::new(48_000, parameters)
+            .expect("prepared sections")
+            .into_sections();
+        let mut ramp_fader = FaderMuteRampBuiltins::new(parameters).expect("prepared fader");
+        let mut state = (track * 100 + 3) as u64;
+        for block in 0..BLOCKS {
+            let retarget = match (track, block) {
+                (2, FUSED_TO_IDENTITY_BLOCK) => Some((Matrix2x2::IDENTITY, 0)),
+                (2, FUSED_FROM_IDENTITY_BLOCK) => Some((non_identity(6), 0)),
+                (3, FUSED_TO_IDENTITY_BLOCK) => Some((non_identity(7), WINDOW)),
+                _ => None,
+            };
+            if let Some((target, window)) = retarget {
+                test_support::chain_matrix_mut(&mut chain)
+                    .set_target_smoothed(target, window)
+                    .expect("chain retarget");
+                split_matrix
+                    .set_target_smoothed(target, window)
+                    .expect("section retarget");
+            }
+            let mut chain_left = [0.0_f32; FRAMES];
+            let mut chain_right = [0.0_f32; FRAMES];
+            for frame in 0..FRAMES {
+                (chain_left[frame], chain_right[frame]) = hostile_pair(frame + track, &mut state);
+            }
+            let mut ramp_left = chain_left;
+            let mut ramp_right = chain_right;
+            chain.process_dual_mono(
+                DualMonoBlock::new(&mut chain_left, &mut chain_right, 0).expect("chain block"),
+            );
+            let mut ramp_block =
+                DualMonoBlock::new(&mut ramp_left, &mut ramp_right, 0).expect("fader block");
+            let fused = ramp_fader.process_fader_matrix(&mut split_matrix, &mut ramp_block);
+            if fused {
+                fused_blocks += 1;
+            } else {
+                ramp_fader.process(
+                    DualMonoBlock::new(&mut ramp_left, &mut ramp_right, 0).expect("split block"),
+                );
+                split_matrix.process(
+                    DualMonoBlock::new(&mut ramp_left, &mut ramp_right, 0).expect("split block"),
+                );
+            }
+            sink.update([u8::from(fused)]);
+            for word in chain_left
+                .iter()
+                .chain(&chain_right)
+                .chain(&ramp_left)
+                .chain(&ramp_right)
+            {
+                sink.update(word.to_bits().to_le_bytes());
+            }
+        }
+    }
+    let digest = sink.finish_hex();
+    println!(
+        "scalar_fused_fader_matrix_renders_the_base_bits digest: {digest} fused={fused_blocks}"
+    );
+    assert_eq!(
+        fused_blocks, FUSED_BLOCKS,
+        "the scalar fused path's coverage moved"
+    );
+    assert_eq!(
+        digest, BASE_DIGEST,
+        "a scalar fused fader/matrix track moved a bit"
+    );
+}
