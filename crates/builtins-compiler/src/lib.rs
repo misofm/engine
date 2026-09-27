@@ -4672,6 +4672,13 @@ fn make_scalar_split_pair(
 }
 struct MeterObserver(MeterAccumulator);
 impl GraphRuntimeObserver for MeterObserver {
+    /// Issue #943: a meter that selects exactly `SAMPLE_PEAK` merges the bank's block peak instead
+    /// of reading its samples, so it asks the bank to compute one. Any other selection still needs
+    /// the samples and never makes a bank run the pass.
+    fn accepts_sample_peak(&self) -> bool {
+        self.0.metrics() == builtins::MeterMetricSet::SAMPLE_PEAK
+    }
+
     fn activation_changed(&mut self, active: bool, generation: u64, _first_sample: u64) {
         if active {
             self.0.restart_observation(generation);
@@ -4699,7 +4706,10 @@ impl GraphRuntimeObserver for MeterObserver {
                 block.lane.width().lanes() as usize,
                 block.lane.lane(),
             )
-            .and_then(|input| self.0.observe_input(input, block.first_sample))
+            .and_then(|input| {
+                self.0
+                    .observe_input_with_block_peak(input, block.first_sample, block.sample_peak)
+            })
             .map_err(|error| match error {
                 builtins::MeterObservationError::SampleTimeOverflow => RenderError::TimeOverflow,
                 builtins::MeterObservationError::LaneLength => RenderError::InvalidEnvelope,

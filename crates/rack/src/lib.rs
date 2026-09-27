@@ -2175,6 +2175,30 @@ impl BankChain {
         })
     }
 
+    /// Borrow the actual final scratch planes of the whole bank: `frames * width` words each, every
+    /// lane interleaved, inactive lanes included (issue #943).
+    ///
+    /// [`Self::final_output_lane`]'s shape checks without its per-lane activity test, and under the
+    /// same terms: this validates dimensions only, and the caller must establish successful
+    /// execution in the current block before reading it. An inactive lane's words are scratch, so
+    /// whatever the caller derives from them must never reach an observer.
+    #[must_use]
+    pub fn final_output_block(&self, frames: u32) -> Option<(&[f32], &[f32])> {
+        let lanes = self.scratch.width.lanes() as usize;
+        if frames == 0
+            || frames > self.scratch.quantum
+            || self.lanes != lanes
+            || self.active.len() != lanes
+        {
+            return None;
+        }
+        let words = usize::try_from(frames).ok()?.checked_mul(lanes)?;
+        Some((
+            self.scratch.left.get(..words)?,
+            self.scratch.right.get(..words)?,
+        ))
+    }
+
     /// Gather every active lane, run every non-identity slot over the resident block, scatter every
     /// active lane back. No allocation, no shape `Result`, one transpose round-trip.
     pub fn run<M: BankMembers + ?Sized>(

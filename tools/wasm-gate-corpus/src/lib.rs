@@ -31,7 +31,10 @@
 //!
 //! An effect crate's cases are appended, never inserted: [`LANE_DIGESTS`] is indexed by case
 //! number, so a new block of cases has to go on the end for the existing pins to keep describing
-//! the same computations. The original layout ends with the compressor family of issue #88.
+//! the same computations. Issue #943 appended one lane case, the banked sample-peak meter kernel,
+//! after the element-wise block: it extends [`LANE_DIGESTS`] at its end, so every existing lane
+//! pin keeps its index, while the delegated blocks after it -- whose pins live in their own crates
+//! and are indexed there -- move up by one. The original layout ends with the compressor family of issue #88.
 //! Issue #213 appends two builtin cases after that family, preserving the original eight-case
 //! builtin block and every later index. `tests/g5_native_corpus.rs` checks both the preserved
 //! layout and the two appended cases.
@@ -69,7 +72,17 @@ pub const FRAMES: usize = 1024;
 pub const WIDTHS: usize = 3;
 
 /// Cases built from the `Lane` trait and the block kernels.
-pub const LANE_CASE_COUNT: usize = KERNELS.len() * SIGNALS.len() + ELEMENTWISE.len();
+pub const LANE_CASE_COUNT: usize =
+    KERNELS.len() * SIGNALS.len() + ELEMENTWISE.len() + METER_PEAK_CASE_COUNT;
+
+/// The banked sample-peak meter cases (issue #943), after the element-wise ones.
+///
+/// One case: `lane::kernels::builtins::meter_sample_peak_block` over hostile words. On wasm the
+/// kernel's validity test lowers to an integer range test on the magnitude bits and its D8 `max`
+/// to an operand-swapped `f32x4.pmax`, neither of which any native gate executes, so this is the
+/// case that would move if either lowering stopped being the meter's `normal_or_zero` and select
+/// form.
+pub const METER_PEAK_CASE_COUNT: usize = 1;
 
 /// Cases delegated to [`math::corpus`] (gate M3, replayed under wasm).
 pub const MATH_CASE_COUNT: usize = math_corpus::CASE_COUNT;
@@ -373,6 +386,8 @@ enum Case {
     Kernel(Kernel, Signal),
     /// An element-wise lane operation.
     Elementwise(Elementwise),
+    /// The banked sample-peak meter kernel (issue #943).
+    MeterPeak,
     /// One case of the `math` M3 corpus.
     Math(usize),
     /// One case of the `effect-runtime` D1 corpus.
@@ -416,6 +431,10 @@ fn case_of(index: usize) -> Case {
         return Case::Elementwise(ELEMENTWISE[index]);
     }
     let index = index - ELEMENTWISE.len();
+    if index < METER_PEAK_CASE_COUNT {
+        return Case::MeterPeak;
+    }
+    let index = index - METER_PEAK_CASE_COUNT;
     if index < MATH_CASE_COUNT {
         return Case::Math(index);
     }
@@ -491,7 +510,10 @@ pub fn is_width_dependent(index: usize) -> bool {
 /// Panics if `index >= CASE_COUNT`.
 #[must_use]
 pub fn has_lane_values(index: usize) -> bool {
-    matches!(case_of(index), Case::Kernel(..) | Case::Elementwise(_))
+    matches!(
+        case_of(index),
+        Case::Kernel(..) | Case::Elementwise(_) | Case::MeterPeak
+    )
 }
 
 /// Human-readable name of a case, used in the failure reports of both legs.
@@ -504,6 +526,7 @@ pub fn case_name(index: usize) -> String {
     match case_of(index) {
         Case::Kernel(kernel, signal) => format!("{}/{}", kernel.name(), signal.name()),
         Case::Elementwise(operation) => operation.name().to_string(),
+        Case::MeterPeak => "meter_sample_peak_block/hostile".to_string(),
         Case::Math(case) => format!("math/{}", math_corpus::CASE_NAMES[case]),
         Case::Runtime(case) => format!("runtime/{}", runtime_corpus::CASE_NAMES[case]),
         Case::TransientShaper(case) => transient_shaper_corpus::CASE_NAMES[case].to_string(),
@@ -640,7 +663,7 @@ pub fn width_name(width: usize) -> &'static str {
 #[must_use]
 pub fn expected_digest(index: usize) -> [u8; 32] {
     match case_of(index) {
-        Case::Kernel(..) | Case::Elementwise(_) => LANE_DIGESTS[index],
+        Case::Kernel(..) | Case::Elementwise(_) | Case::MeterPeak => LANE_DIGESTS[index],
         Case::Math(case) => math_corpus::M3_DIGESTS[case],
         Case::Runtime(case) => runtime_corpus::D1_DIGESTS[case],
         Case::TransientShaper(case) => transient_shaper_corpus::CROSS_TARGET_DIGESTS[case],
@@ -666,7 +689,9 @@ pub fn expected_digest(index: usize) -> [u8; 32] {
 pub fn digest_case(index: usize, width: usize) -> [u8; 32] {
     assert!(width < WIDTHS, "width index out of range");
     match case_of(index) {
-        Case::Kernel(..) | Case::Elementwise(_) => digest_lanes(&lane_values(index, width, true)),
+        Case::Kernel(..) | Case::Elementwise(_) | Case::MeterPeak => {
+            digest_lanes(&lane_values(index, width, true))
+        }
         Case::Math(case) => digest_math(case),
         Case::Runtime(case) => match width {
             0 => digest_runtime::<f32>(case),
@@ -791,6 +816,11 @@ fn lane_values(index: usize, width: usize, fused: bool) -> [[f32; FRAMES]; LANES
             0 => elementwise_values::<f32>(operation, fused),
             1 => elementwise_values::<lane::Simd4>(operation, fused),
             _ => elementwise_values::<lane::Simd8>(operation, fused),
+        },
+        Case::MeterPeak => match width {
+            0 => meter_peak_values::<f32>(),
+            1 => meter_peak_values::<lane::Simd4>(),
+            _ => meter_peak_values::<lane::Simd8>(),
         },
         Case::Math(_)
         | Case::Runtime(_)
@@ -1142,6 +1172,114 @@ fn elementwise_values<L: Lane>(operation: Elementwise, fused: bool) -> [[f32; FR
         }
     }
 
+    lanes
+}
+
+/// The meter blocks of the sample-peak case: lengths straddling one and two vector widths and the
+/// 128-frame quantum, repeated until [`FRAMES`] is covered.
+const METER_PEAK_BLOCKS: [usize; 10] = [1, 2, 3, 5, 16, 31, 64, 127, 128, 129];
+
+/// Blocks per meter window: the window's peak restarts from `+0.0` every third block.
+const METER_PEAK_WINDOW_BLOCKS: usize = 3;
+
+/// `(first frame, frames, window)` of every block of the sample-peak case, in order.
+fn meter_peak_blocks() -> Vec<(usize, usize, usize)> {
+    let mut blocks = Vec::new();
+    let mut start = 0;
+    while start < FRAMES {
+        let frames = METER_PEAK_BLOCKS[blocks.len() % METER_PEAK_BLOCKS.len()].min(FRAMES - start);
+        blocks.push((start, frames, blocks.len() / METER_PEAK_WINDOW_BLOCKS));
+        start += frames;
+    }
+    blocks
+}
+
+/// One lane's words for the sample-peak case.
+///
+/// Every window whose index is `1 mod 4` carries only words the meter must sanitize to `+0.0` --
+/// NaN with two payloads, both infinities, both zeros, and subnormals of both signs -- so a
+/// lowering that admitted any of them would publish a non-zero peak where the oracle's is `+0.0`.
+/// The other windows mix those with the magnitude boundaries (`MIN_POSITIVE`, `f32::MAX`, `1e30`)
+/// and moderate audio-shaped values, which is where the D8 `max` has something to choose between.
+/// The words are inputs only: what is digested is the sanitized peak, which is always finite.
+fn meter_peak_words(lane: usize) -> [f32; FRAMES] {
+    const INVALID: [u32; 8] = [
+        0x7FC0_0000,
+        0xFFC0_0943,
+        0x7F80_0000,
+        0xFF80_0000,
+        0x0000_0000,
+        0x8000_0000,
+        0x0000_0001,
+        0x807F_FFFF,
+    ];
+    const BOUNDARY: [u32; 8] = [
+        0x0080_0000,
+        0x8080_0000,
+        0x7F7F_FFFF,
+        0xFF7F_FFFF,
+        0x7149_F2CA,
+        0x3F80_0000,
+        0xBF80_0000,
+        0x007F_FFFF,
+    ];
+    let mut random = Xorshift64Star::new(lane_seed(lane) ^ 0x0943_0943_0943_0943);
+    let mut words = [0.0_f32; FRAMES];
+    for (start, frames, window) in meter_peak_blocks() {
+        for word in &mut words[start..start + frames] {
+            let bits = random.next_u32();
+            *word = if window % 4 == 1 {
+                f32::from_bits(INVALID[(bits % 8) as usize])
+            } else {
+                match bits % 8 {
+                    0 => f32::from_bits(INVALID[((bits >> 3) % 8) as usize]),
+                    1 => f32::from_bits(BOUNDARY[((bits >> 3) % 8) as usize]),
+                    _ => moderate(random.next_u32()),
+                }
+            };
+        }
+    }
+    words
+}
+
+/// Runs the sample-peak case at width `L::WIDTH`: every frame's value is the running window peak
+/// after that frame, computed by one kernel call over the block's prefix up to it, seeded with the
+/// window's peak after the previous block (`+0.0` at a window's first block, which is the seed a
+/// bank's pass uses).
+fn meter_peak_values<L: Lane>() -> [[f32; FRAMES]; LANES] {
+    use lane::kernels::builtins::meter_sample_peak_block;
+    let mut words = [[0.0_f32; FRAMES]; LANES];
+    for (lane, slot) in words.iter_mut().enumerate() {
+        *slot = meter_peak_words(lane);
+    }
+    let width = L::WIDTH;
+    let blocks = meter_peak_blocks();
+    let mut block = vec![0.0_f32; METER_PEAK_BLOCKS.iter().max().copied().unwrap_or(0) * width];
+    let mut out = vec![0.0_f32; width];
+    let mut lanes = [[0.0_f32; FRAMES]; LANES];
+    for group in 0..LANES / width {
+        let mut peak = L::zero();
+        let mut window = usize::MAX;
+        for &(start, frames, block_window) in &blocks {
+            if block_window != window {
+                window = block_window;
+                peak = L::zero();
+            }
+            for frame in 0..frames {
+                for offset in 0..width {
+                    block[frame * width + offset] = words[group * width + offset][start + frame];
+                }
+            }
+            for prefix in 1..=frames {
+                meter_sample_peak_block::<L>(&block[..prefix * width], prefix, peak)
+                    .store(&mut out);
+                for offset in 0..width {
+                    lanes[group * width + offset][start + prefix - 1] = out[offset];
+                }
+            }
+            peak = meter_sample_peak_block::<L>(&block[..frames * width], frames, peak);
+        }
+    }
     lanes
 }
 

@@ -26,12 +26,13 @@ pub use runtime::{
 #[doc(hidden)]
 pub use runtime::{
     TestOnlyFailedBufferCapture, TestOnlySelectedSplitFader, TestOnlySplitPairTableWitness,
-    test_only_arm_failed_buffer_capture, test_only_completion_disabled,
-    test_only_failed_buffer_capture, test_only_meter_input_counts, test_only_meter_input_reset,
-    test_only_observation_dispatch_counts, test_only_observation_dispatch_reset,
-    test_only_reset_selected_split_fader, test_only_reset_split_pair_table_witness,
-    test_only_resident_input_counts, test_only_resident_input_reset,
-    test_only_selected_split_fader, test_only_set_completion_disabled,
+    test_only_arm_failed_buffer_capture, test_only_bank_sample_peak_passes,
+    test_only_completion_disabled, test_only_failed_buffer_capture, test_only_meter_input_counts,
+    test_only_meter_input_reset, test_only_observation_dispatch_counts,
+    test_only_observation_dispatch_reset, test_only_reset_selected_split_fader,
+    test_only_reset_split_pair_table_witness, test_only_resident_input_counts,
+    test_only_resident_input_reset, test_only_selected_split_fader,
+    test_only_set_bank_sample_peak_declined, test_only_set_completion_disabled,
     test_only_set_output_route_fold_declined, test_only_set_route_fold_declined,
     test_only_set_scatter_redirect_declined, test_only_set_source_in_place_declined,
     test_only_source_plane_counts, test_only_source_plane_reset,
@@ -2177,6 +2178,16 @@ pub struct GraphResidentObservationBlock<'a> {
     pub first_sample: u64,
     /// Source facts for the graph block containing this resident lane.
     pub validity: GraphObservationValidity,
+    /// This lane's `[left, right]` sample peak over this block, computed once for the whole bank
+    /// (issue #943): the maximum of `+0.0` and every **sanitized** magnitude of the lane's final
+    /// words, where sanitized is the meter's `normal_or_zero` (finite and not subnormal, else
+    /// `+0.0`). Left is read from the left plane and right from the right plane.
+    ///
+    /// `Some` only when this unit's bank pass ran this block, which it does only for a unit bound
+    /// with at least one final-slot observer whose [`GraphRuntimeObserver::accepts_sample_peak`]
+    /// is true. It is then offered to every observer of the lane, so an observer that did not ask
+    /// for it must ignore it.
+    pub sample_peak: Option<[f32; 2]>,
 }
 /// A bounded observer invoked after its node has completed.
 pub trait GraphRuntimeObserver: Send {
@@ -2206,6 +2217,15 @@ pub trait GraphRuntimeObserver: Send {
         _block: GraphResidentObservationBlock<'_>,
     ) -> Option<Result<(), RenderError>> {
         None
+    }
+
+    /// Whether this observer consumes [`GraphResidentObservationBlock::sample_peak`] (issue #943).
+    ///
+    /// Read once, when the runtime is bound, and never on the render path: a bank runs its
+    /// sample-peak pass only if some observer of its final slot answers `true` here. The default
+    /// declines, so an observer that would not use the peak never pays for it.
+    fn accepts_sample_peak(&self) -> bool {
+        false
     }
 
     /// Invalidate a pending capture after a failed graph render.
