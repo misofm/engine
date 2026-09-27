@@ -178,3 +178,32 @@ bank both ways rather than by arguing that the bypass is per plane inside the ke
 
 `lookahead_ms` and `delay` are on the copy list and are **not** individually red: no rendered block
 writes them. See `copy_state_from`'s doc for why they are copied anyway.
+
+## Issues #981-#985 — the settled-body rewrite
+
+`kernel::settled_body_tests` (in `src/kernel.rs`) is the gate for this series. It keeps the kernel
+as it stood before #981 -- `process_block`, `process_block_mono` and their one-pass `frames_loop`
+bodies, verbatim -- as `settled_body_tests::reference`, and compares the production kernel with it
+block by block: every output word, the recursive words, every coefficient word and every ramp
+field, then the `finish_channel` masks and the same words again after the boundary check. Its
+three kinds of gate are the deterministic grid (`the_settled_body_is_the_base_body_*`), the seeded
+randomized differential (`randomized_differential_{f32,simd4,simd8}`, dual and collapsed), and the
+`scenario_*` digests, each pinned on the unmodified base `197db1c9` before its slice landed.
+
+Driver: one mutation at a time, `CARGO_INCREMENTAL=0 cargo test --locked -p compressor
+--no-fail-fast` (dev), every red test recorded, tree restored before the next row. Host: `x86_64`
+(AMD EPYC 7313P, Zen 3), workspace `.cargo/config.toml` pin `-C target-feature=+avx2,+fma`.
+"Gate 1" below means the grid and all three randomized differentials.
+
+### #981 — the chunked settled body, recursive words in locals
+
+| # | mutation | red |
+|---|---|---|
+| 981-M1 | the recursive words are never written back to their channels | gate 1, `scenario_981_heterogeneous_hostile_render_is_pinned`, `cross_target`, and 22 more tests across `conformance`, `identity`, `lane_identity`, `mono_collapse`, `nonfinite`, `observation`, `oracle`, `partition` and `ramps` (27 red) |
+| 981-M2 | `start` is ignored: the settled slice begins at frame 0 | gate 1, `scenario_981_*`, `cross_target`, `lane_identity::bank_matches_scalar_per_lane_bits`, `partition::block_partitions_are_invariant`, `partition::bank_block_partitions_are_invariant`, and three `ramps` tests (12 red) |
+| 981-M3 | every detector takes `settled_main`, so `Silent` and `Sidechain` blocks read the main input | gate 1 (its `Silent` and `Sidechain` cases under a quiet main), `contract::links_are_exact_and_connected_sidechain_is_distinct_from_main_detection`, `nonfinite::a_nan_in_the_sidechain_alone_is_clamped_to_the_level_floor` (6 red). Neither `causality` nor `partition::linked_sidechain_partitions_are_invariant` went red, which is why the grid carries the sidechain cases |
+| 981-M4 | the right channel's `one_frame` updates the left recursive word (`&mut gain_left`), the verification's replacement for "right before left" | gate 1, `scenario_981_*`, `cross_target`, `lane_identity`, four `mono_collapse` tests, two `nonfinite`, `observation`, `oracle` and two `ramps` tests (17 red) |
+
+The brief's original M4, "right is processed before left", is not recorded as a gate: the
+verification applied it and it is equivalent (the two channels' recurrences share nothing), which
+is the same independence #983's pass 2 relies on.

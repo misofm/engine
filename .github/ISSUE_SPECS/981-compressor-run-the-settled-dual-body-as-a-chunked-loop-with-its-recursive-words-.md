@@ -228,3 +228,98 @@ See `COMPRESSOR-DIAGNOSIS.md`, sections 1-3. On the per-frame costs this slice r
   Neither loop materialises splat constants in place; the ramping loop does (22 per frame), and
   slice 6 owns it.
 
+
+## Attempt 1 evidence
+
+Implementer attempt 1, 2026-09-27, branch `codex/981-compressor-settled-body` from the local
+optimisation batch at `197db1c9` (the unmodified base, "B0" below). The verification amendments
+posted on the issue (`VERIFY-COMPRESSOR.md`) override this body where they conflict and were
+followed: M4 is "the right channel updates `gl`"; gate 1 drives a non-zero `start`.
+
+### The change
+
+`crates/compressor/src/kernel.rs` only. `process_block`'s idle call now matches the detector once:
+`Detector::Main` goes to the new `#[inline(always)] settled_main`, and `Silent`/`Sidechain` keep
+`frames_loop::<L, false>` unchanged. `settled_main` loads `Invariants` and both `Coef`s once,
+slices the planes to `start..end`, iterates `chunks_exact_mut(W)` of both planes, keeps both
+recursive words in locals, runs `link_frame(Detector::Main, ..)` then `one_frame` left then right
+per frame, and writes both words back after the loop. `frames_loop`, `link_frame`, `one_frame`,
+`curve_target`, `ballistic` and `gain_mix` are not edited. All three clamps are untouched.
+
+### The gate module (`kernel::settled_body_tests`)
+
+* `reference`: `process_block`, `process_block_mono` and both `frames_loop` bodies exactly as they
+  stood at B0, kept in the test code as the fixed oracle. Every comparison is production against
+  it, by bits: both output planes, the recursive words, every coefficient word, every ramp field;
+  then the `finish_channel` masks, the finished planes and the state again.
+* **Gate 1, deterministic grid** (`the_settled_body_is_the_base_body_on_the_corpus_table`): the
+  corpus track table as per-lane coefficients (right channel rotated by three lanes), `f32` (eight
+  one-lane groups), `Simd4` (two groups) and `Simd8`, every `LinkMode`, `bypass` false and true,
+  and every detector (`Main`, `Silent`, `Sidechain` under a main scaled by 1e-3), dual and
+  collapsed. The schedule is 42 blocks: each count of `[1, 7, 31, 32, 33, 128]` is preceded in turn
+  by nothing and by a fully ramping block of `64 - p` frames, so the settled body starts at frame
+  `p` in `{0, 1, 18, 40}`. Input cycles through ten profiles covering every hostile word of the
+  brief (`±0` on every lane, subnormals, `1e29`, `-3e30`, `±inf`, `±MAX`, NaN payloads
+  `0x7fc01234`, `0xffa00001`, `0x7f800001`, noise at 0.2, 0.7 and 1.5, exact threshold levels,
+  levels at the detector floor). NaN words compare by bits. (Deviation: 42 blocks per configuration
+  rather than 48; the schedule is the exhaustive cross of the counts and the four starts.)
+* **Randomized differential** (`randomized_differential_{f32,simd4,simd8}`), the verification's
+  differential committed: per seed, random per-lane parameters at the domain edges (subnormal
+  knees included), 60 % all-wet seeds, a random link mode and sample rate, automation on random
+  lanes in 25 % of blocks, discontinuity and full resets, bypass toggles, 10 % `Silent` and 10 %
+  `Sidechain` blocks, and frame counts from `{1, 7, 31, 32, 33, 63, 64, 65, 97, 127, 128}` or
+  `1..=128`; dual and collapsed. 10 seeds x 128 blocks in dev, 320 x 128 in release, per width.
+  Coverage is asserted non-vacuous (settled, mid-block starts, all-wet settled, rejected and
+  sidechain blocks).
+* **Gate 2** (`scenario_981_heterogeneous_hostile_render_is_pinned`): 24 blocks, `Simd4` and
+  `Simd8`, DualMono and Maximum, the corpus table, hostile input, one automation point that leaves
+  a 23-frame ramp prefix. SHA-256 over every kernel output word, the recursive words, the masks,
+  the finished words and the recursive words again. Recorded on B0 before the change:
+  `57cfd7ce05050c68ab73e6585ccc72bd5403543565cd38471fce47bb263e62a0` in dev and in release
+  (identical), then pinned; unchanged after it.
+
+### Gates
+
+| gate | command | result |
+|---|---|---|
+| 1, 2, 3 | `cargo test --locked -p compressor` / `--release` | 87 passed, 0 failed, each |
+| 4 console digests | throwaway harness (the brief's `digests`, without the mode switch), B0 and #981 built separately | all 30 rows (15 workloads x `Simd8`/`Simd4` dispatch) identical to B0 and to the brief's six quoted values |
+| 6 browser | the `build-web-audioworklet.sh` cargo line, then `check-web-audioworklet-callgraph.py --callgraph miso_engine_web_v1_render`, `--kernel-shape --kernel-pattern '4wide6f32x[48]' --kernel-min 11`, the `meter_poll` and `command_submit` closures, `check-web-boot-budget.mjs` | all PASS; compressor dual row matches exactly one function (vector 178 -> 267, scalar 0); artifact 3,345,615 -> 3,348,729 bytes (+3,114). Not repinned (the in-tree pin `8934cdd9...` already differs from B0's own build, `574f6ce9...`; the batch repins once) |
+| 7 | `cargo fmt --all --check`; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`; `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps` | PASS |
+| 7 | `check-realtime-policy.sh`, `check-lane-policy.sh`, `check-unfused-seal.sh` | PASS |
+| other crates | `-p effect-runtime` (86), `-p console-workload` (39), `-p builtins-compiler --features test-support` (79) | all passed |
+| wasm | `cargo test --locked --release -p lane -p math -p wasm-gates --features math/lane` (113 passed); `bash scripts/run-wasm-gates.sh` | PASS: native, wasm scalar and wasm `simd128` legs, 142 cases, 358 comparisons, 0 mismatches (the compressor corpus is among them) |
+
+### Mutations (gate 5)
+
+Recorded in `crates/compressor/tests/MUTATIONS.md`, section "#981". All four are red: M1 (no
+write-back) 27 red tests, M2 (`start` ignored) 12, M3 (every detector takes `settled_main`) 6, M4
+(the right channel updates `gl`) 17. M3 is caught by gate 1's `Sidechain`/`Silent` cases and by
+`contract::links_are_exact_and_connected_sidechain_is_distinct_from_main_detection` and
+`nonfinite::a_nan_in_the_sidechain_alone_is_clamped_to_the_level_floor`; `causality` and
+`partition::linked_sidechain_partitions_are_invariant` stayed green, which is why the grid
+carries the sidechain cases.
+
+### Codegen evidence (gate 8, recorded)
+
+x86 (`Simd8`, release, the harness binary's
+`Instance<f32x8>::render` into which `process_block::<f32x8>` is inlined; `x86_loops.py`):
+
+* B0 settled loop: 239 instructions per frame, 19 scalar: the four bounds-check pairs
+  (`cmp %r15,%rdi; ja`, `cmp $0x7,%r9; jbe`, `cmp %r13,%rdi; ja`, `cmp $0x7,%r8; jbe`), the
+  detector test (`test %rcx,%rcx; je`), two spilled-pointer reloads (`mov 0x40(%rsp),%r11`) and
+  the counters; the recursive words are stored every frame (`vmovaps %ymm6,0x660(%r14)`,
+  `vmovaps %ymm2,0xce0(%r14)`).
+* #981 settled loop: 226 instructions per frame, 3 scalar (`add $0x20,%r8; dec %r15; jne`), no
+  bounds check, no detector test, and no store other than the two output planes.
+
+V8 (Node 22.23.2, `--no-liftoff --print-wasm-code`, the wasm console guest, function 383
+`process_block<f32x4>`, `v8_loops.py`): B0's settled loop is 325 instructions per frame with 60
+scalar (30 register, 30 memory) and 16 branches; #981's is 254 with 8 scalar (3 register, 5
+memory) and 2 branches. The retained `frames_loop::<Simd4, false>` bodies for `Silent` and
+`Sidechain` follow it unchanged in shape (309 and 432 instructions).
+
+### A/B
+
+Measured once, as the set #981-#985, against a separately built B0 (verification amendment 4);
+see #985's evidence. The brief's descriptive figures are not re-quoted here.
