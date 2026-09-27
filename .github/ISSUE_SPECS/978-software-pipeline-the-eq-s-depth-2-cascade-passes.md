@@ -353,3 +353,24 @@ recorded: they are required by `KERNEL_ROSTER` rule 1. Against attempt 1's numbe
 row no longer carries #977's regression (Sol measured 24.1 -> 23.7-24.0 us through this commit's
 parent; now 20.07 -> 20.49, within noise of base). The two-band gain over #977 is unchanged:
 33.50 -> 30.02 us.
+
+## Sol attempt 2 verdict: PASS
+
+Verifier: Sol, 2026-09-27, on `9e7a342e`, merged onto the batch head `f12d1466`. Attempt 1's
+verdict still holds.
+
+- **Unchanged.** The rebase changed no code line of this issue. The skewed kernels are
+  byte-identical.
+- **Exact.** The differential in #977's attempt-2 verdict shows zero differing runs through the
+  stacked tip. Gates 1 and 2 and the row digests are green on the merged tree.
+- **Artifact checks.**
+  - Roster: dual 672, collapsed 336, scalar 0, 14 kernels. The callgraph is identical to base.
+  - V8 listing: the skewed pairs, 181 instructions select-free and 216-219 masked, carry no stack
+    slot. The one-band tail loop stays at 83 with none.
+- **Timing (merged, shipped artifact).**
+  - Two bands: #977 33.3 to 30.3 us.
+  - One band: 20.05 to 20.2 us in 9 runs. That is within noise of #977, though slightly positive
+    in one hold.
+  - Native console two-band isolate: 14.9 to 13.4 us. The one-band isolate is flat.
+
+No new findings; attempt 1's LOW 1 (the inline pins, a path amendment) stands.

@@ -475,3 +475,75 @@ stacked tip (`f2952432`), two holds in both orders, EQ isolates in us, native `S
    `build_web.sh`, `v8web.sh`, `carried.py`, `webhold.sh` and `webgate.py`. Sol's finding 3 already
    asks for a tooling issue that times or inspects `host_web.wasm` itself.
 5. Sol's LOW finding 2 (a direct `-0.0` witness for M1) is not added; it was optional.
+
+## Sol attempt 2 verdict: PASS
+
+Verifier: Sol, 2026-09-27, on `52460097`, judged merged onto the batch head `f12d1466` (which
+already carries #980). The set merges cleanly: `git merge-tree f12d1466 f2952432`, and between
+`1d8c4851` and `f12d1466` the batch touched `parametric-eq` only through #980. Every arm was built
+from `git archive` into its own target, `CARGO_INCREMENTAL=0`, outside the lock. The attempt-2
+commit on `1d8c4851` rebuilds to the recorded artifact, `a6dc00bb…`.
+
+**Exact (class A).** The tail is #976's code again, and #976's rule was already exact. The pairs keep
+attempt 1's rule, which I proved exact then. Leg (c)'s finiteness term is still present and still
+does work: dropping it moves 631 of 21,000 differential runs.
+
+**Differential.** Same harness as attempt 1, run on `f12d1466` against `f12d1466` plus
+#977/#978/#979:
+
+| build | differing runs |
+|---|---|
+| native release | 0 of 140,000 |
+| native dev | 0 of 5,040 |
+| wasm `simd128` release | 0 of 28,000 |
+| wasm `simd128` dev | 0 of 1,400 |
+
+The 90 native and 30 wasm console digests (standing and two-band) are identical.
+
+**Gates.** All green on the merged tree:
+
+- the suite, 109 passed and 3 ignored, dev and release, with and without `test-support`;
+- the ignored exhaustive tests;
+- lane, effect-runtime, console-workload, `chain_shape`, builtins-compiler, wasm-gates, bench floor;
+- fmt, clippy and doc `-D warnings`;
+- the lane, realtime and EQ-contract policy scripts, and `test-console-benchmark.sh`.
+
+**The spill is gone, in the listing as well as the timing.** I compiled the shipped
+`PreparedParametricEq<f32x4, 4>::process_bank` with
+`node --no-liftoff --no-wasm-lazy-compilation --print-wasm-code-function-index`. The dual
+select-free depth-one tail loop is 83 instructions with no stack slot carried across iterations, the
+same as base, in the merged artifacts for #977, #978 and #979. The same scan run on attempt 1's
+listing finds its 84-instruction loop and the carried slot.
+
+**Timing.** Shipped artifact through its render export, `web.mjs`. Three holds under `timing.lock`
+with `taskset -c 31`, arms in both orders; load average 5-19. Isolates in us per 64-track block,
+mean of the runs with the range:
+
+| arm | runs | one band | two bands |
+|---|---:|---|---|
+| batch head | 15 | 19.89 (19.40-20.98) | 42.3 |
+| + #977 | 15 | 20.05 (19.21-21.93) | 33.3 |
+| + #978 | 9 | 20.2 | 30.3 |
+| + #979 | 15 | 20.36 (19.74-20.73) | 30.4 |
+
+#977's one-band move of +0.16 us is within noise.
+
+Findings:
+
+1. **MEDIUM (follow-up, not blocking): the fix is held by codegen luck and no committed gate.**
+   - **What respills.** I tried a one-token edit to the tail condition, `!admitted && (…)`. It brings
+     the carried slot back: 84 instructions, `[rbp-0xc0]`.
+   - **What does not.** Swapping the arms produces the same wasm bytes. Hoisting the mask decision
+     above the state loads keeps the loop spill-free.
+   - **What catches it today.** The roster (672/336) and the callgraph stay green on the respilled
+     artifact. Only `an_admitted_plan_runs_every_pair_select_free` catches that edit, and only
+     because the edit changes the tail rule.
+   - **What would not be caught.** A rule-preserving change can move V8's allocation with every
+     gate green: a rustc or LLVM bump, EQ-7's leg caching in the same function, or a V8 upgrade.
+   - **Guard.** A committed listing check in the AudioWorklet gate: compile the EQ `process_bank`
+     with Node's TurboFan and fail when the select-free dual tail loop (14 `vmulps`, no select)
+     carries a stack slot. The rule is `carried.py`'s. Add the render-export timing as a
+     descriptive nightly row. Node's V8 is not Chrome's, so both remain proxies. This belongs in
+     a tooling issue, as attempt 1's finding 3 already says.
+2. **LOW.** Gate 7's "no greater than base" compares with `1d8c4851`, which lacks #980. On the merge
+   base this commit passes it (+0.16 us, noise), but the stacked tip does not: see #979.

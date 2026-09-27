@@ -338,3 +338,32 @@ boundary, as the verdict says.
 isolates, us): native `Simd8` one band 9.82 / 9.56 -> 9.09 / 9.17, two bands 15.40 / 15.49 ->
 13.11 / 13.32. V8 guest one band 20.94 / 21.17 -> 20.01 / 20.25, two bands 43.74 / 43.95 -> 30.29 /
 30.84. The shipped artifact is in the gate 7 row above.
+
+## Sol attempt 2 verdict: PASS
+
+Verifier: Sol, 2026-09-27, on `f2952432`, merged onto the batch head `f12d1466`.
+
+**The new `lane_is_inert` is exact.** For `m >= FLOOR`, `(m - FLOOR) <= CEILING - FLOOR` is
+`m <= CEILING`. For `m < FLOOR`, the subtraction wraps to at least `2^32 - FLOOR = 0xe1c31af8`,
+which is above `CEILING - FLOOR = 0x530d0dc2`. `+0.0` is admitted through `word == 0`.
+
+**The rest.** The differential shows zero differing runs, over 1.33M admitted blocks with a non-zero
+dead-section state. Gates 1-3 and the renamed test are green on the merged tree. Attempt 1's NIT 3
+(the stale comment) is fixed.
+
+Findings:
+
+1. **LOW (performance, not blocking): the standing one-band browser EQ gives back part of #980's
+   gain.**
+   - **Size.** Against the batch head, the shipped artifact's one-band isolate at this commit is
+     +0.47 us on average (+2.4 %) over 15 runs. It was higher in all three holds, by +0.23 to
+     +0.72 us. That is about +0.7 % of the `eq_only` row.
+   - **Where it lands.** Mostly at this commit: +0.15 to +0.22 us over #978. The likely cause is the
+     dead-section check that runs on every stationary block, 20 calls per four-lane bank. Native is
+     flat (-0.1 us).
+   - **Why the evidence missed it.** The attempt-2 gate 7 "PASS, no greater than base" compared with
+     `1d8c4851`, which lacks #980's -0.6 us.
+   - **Remedy.** Two bands still gain 12 us, so this is a weekly-optimisation item, not a blocker.
+     EQ-7, caching the legs per block, is the planned remedy.
+2. **LOW (carried).** `docs/rulings/effect-floor-accounting.md:244` still says "non-`+0.0` state in a
+   dead section". Fix it at the batch boundary.
