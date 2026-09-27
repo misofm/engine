@@ -215,18 +215,20 @@ wasm gates: miso_gate_meter_block_probe is not vectorised on the simd128 leg: f6
 AudioWorklet module that script builds with `build-web-audioworklet.sh`'s cargo line. The pinned
 Node (`v22.23.2`, V8 `12.4.254.21-node.56`, Linux x64, an x86-64-v3 host) compiles the parametric
 EQ's `f32x4` `process_bank` and `process_bank_mono` with TurboFan (`--no-liftoff
---no-wasm-lazy-compilation`), and the gate fails when an innermost loop of the stationary,
-select-free cascade keeps a stack slot live across its back edge: read on an iteration path before
-it is written, and written in the loop. The functions are found by symbol, the loops by what they
-compute (SVF steps per iteration and streams, select-free), never by offset; a row that finds no
-loop fails closed.
+--no-wasm-lazy-compilation`). The gate fails when an innermost loop of the stationary, select-free
+cascade carries a value from one iteration to the next through a stack slot: a slot live across the
+back edge (read from the header before it is written), or a slot on a recurrence (a value loaded
+from it reaches a store to it around the loop). It holds the dual depth-one tail and the mono pair
+and tail. It reports the dual pair and does not hold it. The functions are found by symbol and the
+loops by what they compute (SVF steps per iteration, streams, select-free), never by offset. A held
+row that finds no loop fails closed.
 
-**What it proves.** That the reference V8 carries no value of those loops through a stack slot
-across the back edge, beyond the dual pair's allowance below: the mechanism that made #977 attempt
-1's standing one-band browser EQ about 20 % slower while every other gate stayed green. **What it
-does not.** It times nothing and says nothing else about speed. Node's V8 is not a given browser's,
-and eager TurboFan is not a page's tier-up, so green is not "the browser EQ is as fast as before";
-red is "this build brings back the #977 mechanism".
+**What it proves.** That the reference V8 runs none of the held loops' values through memory from
+one iteration to the next: the mechanism that made #977 attempt 1's standing one-band browser EQ
+about 20 % slower while every other gate stayed green. **What it does not.** It times nothing and
+says nothing else about speed. Node's V8 is not a given browser's, and eager TurboFan is not a
+page's tier-up, so green is not "the browser EQ is as fast as before"; red is "this build brings
+back the #977 mechanism".
 
 **Red mutations, applied and reverted on the delivery host.** The one-token edit #977's attempt-2
 verifier recorded, in `interleave`'s depth-one tail, `if !admitted && (L::mask_any(…) ||
@@ -235,7 +237,7 @@ red on the dual tail row, ten runs in ten with the same output; with the tail ed
 tree, `run-wasm-gates.sh` exits 1 there. The tail edit:
 
 ```
-FAIL dual depth-1 tail, select-free: V8 carries [rbp-0xc0] across the back edge (allowance 0; 84 instructions in 4 blocks, 2 SVF steps, 2 streams, select-free, vmulps=14 vaddps=18 vsubps=4). Listing, carried slots marked:
+FAIL dual depth-1 tail, select-free: V8 carries [rbp-0xc0] from one iteration to the next (84 instructions in 4 blocks, 2 SVF steps, 2 streams, select-free, vmulps=14 vaddps=18 vsubps=4). Listing, carried slots marked:
   …
   *   817e  vmovups xmm0,[rbp-0xc0]
   …
@@ -244,10 +246,11 @@ FAIL dual depth-1 tail, select-free: V8 carries [rbp-0xc0] across the back edge 
       82ec  jnz <+0x8140>
 ```
 
-**The dual pair's allowance of two.** When the gate landed it found that the select-free dual
-depth-2 pair already keeps both integrators of one (stream, section) chain in stack slots at
-#977-#979 (`ic2`, read by `v3 = x - ic2` and written after its flush, and `ic1`). The #977 scans
-reported that loop clean because it is entered in the middle: read in a straight line from the
-back edge's target, the rotated body stores each slot before it loads it. Whether the two slots cost
-time is not measured. The allowance holds the pair to no worse; a change that removes them lowers
-it (the gate says so), and it is never raised to pass a change.
+**The dual pair is reported, not held.** It carries ten values across its back edge (eight
+integrators, two skew carries) beside 24 loop-invariant coefficients in sixteen vector registers,
+and at #977-#979 TurboFan routes ten stack slots through its recurrences. Among them are `ic2`
+(`v3 = x - ic2`) and `ic1` of one chain, stored by the back edge's gap moves and reloaded in the
+body. #977's scans reported the loop clean because it is entered in the middle: read in a straight
+line from the back edge's target, the rotated body stores each slot before it loads it. Whether
+this costs time is not measured, and in a loop that starved the count moves with any allocation
+change, so a count would be a byte pin by another name.

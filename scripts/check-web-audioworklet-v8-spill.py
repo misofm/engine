@@ -4,8 +4,8 @@
 Issue #1000. The input is the shipped AudioWorklet module, `host_web.wasm` built with
 `scripts/build-web-audioworklet.sh`'s cargo line. The pinned Node's V8 compiles the parametric EQ's
 two `f32x4` bank bodies with TurboFan; the gate finds the stationary cascade's innermost loops in
-that machine code and fails when one keeps a value in a stack slot across its back edge. It times
-nothing. `scripts/run-wasm-gates.sh` builds the module and runs it.
+that machine code and fails when one carries a value from one iteration to the next through a stack
+slot. It times nothing. `scripts/run-wasm-gates.sh` builds the module and runs it.
 
 Why it exists
 -------------
@@ -20,10 +20,18 @@ shipped bytes, so the gate reads that and nothing else.
 
 What it proves, and what it does not
 ------------------------------------
-For the pinned Node/V8 on an x86-64-v3 Linux host: in TurboFan's code for each loop below, the stack
-slots live across the back edge -- read on a path from the loop's header before they are written,
-and written somewhere in the loop -- number no more than the row's allowance, which is zero for all
-rows but one. A loop-invariant spill that is only ever reloaded is not carried and is allowed.
+For the pinned Node/V8 on an x86-64-v3 Linux host, in TurboFan's code for each held loop below, no
+stack slot written in the loop carries a value from one iteration to a later one. Two rules find
+such a slot, and either one fails the loop:
+
+* **Live across the back edge**: the slot is read on a path from the loop's header before it is
+  written (the #977 attempt-1 tail: reloaded at the top, stored mid-iteration).
+* **On a recurrence**: a value loaded from the slot reaches, through registers and slots and around
+  the back edge, a store to the same slot. This is the same mechanism wherever V8 lays out the
+  store and the reload, including a reload on the back-edge path itself, which leaves nothing live
+  across the header in memory (the masked mono tail does exactly that).
+
+A loop-invariant spill that is only ever reloaded is neither, and is allowed.
 
 It proves nothing about speed beyond that one mechanism, and it measures no time. It is a proxy
 for the browser twice over: Node's V8 is not a given Chrome's, and eager TurboFan without Liftoff's
@@ -46,24 +54,24 @@ where it sits in the listing:
 * **Select-free**: no `vpor`/`vorps`/blend. The dry-mask kernels' bitselect needs one; the flush
   does not.
 
-| function | loop | streams | steps | allowance |
-|---|---|---:|---:|---:|
-| dual | depth-2 pair (`svf_cascade_skewed`, admitted plan) | 2 | 4 | 2 |
-| dual | depth-1 tail (`svf_cascade_interleaved`, no dry lane) | 2 | 2 | 0 |
-| mono | depth-2 pair | 1 | 2 | 0 |
-| mono | depth-1 tail | 1 | 1 | 0 |
+| function | loop | streams | steps | |
+|---|---|---:|---:|---|
+| dual | depth-1 tail (`svf_cascade_interleaved`, no dry lane) | 2 | 2 | held |
+| mono | depth-2 pair (`svf_cascade_skewed`, admitted plan) | 1 | 2 | held |
+| mono | depth-1 tail | 1 | 1 | held |
+| dual | depth-2 pair | 2 | 4 | reported |
 
-Every select-free innermost loop of a row's function and shape is held to the row, and a row that
-matches no loop fails closed, printing the loops that were found. The masked kernels (a refused or
-all-live plan's pairs, a tail with a dry lane) are out of scope: the masked depth-one tails carried
-a slot before #977.
+Every select-free innermost loop of a held row's function and shape is held to the rule, and a held
+row that matches no loop fails closed, printing the loops that were found. The masked kernels (a
+refused or all-live plan's pairs, a tail with a dry lane) are out of scope: the masked depth-one
+tails carried a slot before #977.
 
-**The dual pair's allowance.** At #977-#979 TurboFan keeps both integrators of one (stream,
-section) chain of the select-free dual pair in stack slots: this gate found them when it landed
-(issue #1000 evidence). The #977 scan missed them because the loop is entered in the middle and a
-straight-line read of the rotated body sees the store first. Whether they cost time is not
-measured; the allowance keeps the pair from getting worse and is lowered when a change removes
-them, never raised to pass one.
+**Why the dual pair is reported, not held.** It carries ten values across its back edge (eight
+integrators and two skew carries) beside 24 loop-invariant coefficients, in sixteen vector
+registers. At #977-#979 TurboFan routes ten stack slots through its recurrences, among them `ic1`
+and `ic2` of one chain live across the back edge (issue #1000 evidence); #977's scan reported the
+loop clean because it is entered in the middle. In a loop that starved, the count moves with any
+allocation change and says nothing about time, so the gate prints it and does not hold it.
 
 Loops are natural loops of the listing's control-flow graph (a back edge is a jump to a block that
 dominates its source). Blocks that make a call are left out of a loop's body: inside these kernels
@@ -123,12 +131,12 @@ class Row:
     label: str
     streams: int
     steps: int
-    allowance: int = 0
+    held: bool = True
 
 
 LOOPS = (
-    Row("dual", "depth-2 pair, select-free", streams=2, steps=4, allowance=2),
     Row("dual", "depth-1 tail, select-free", streams=2, steps=2),
+    Row("dual", "depth-2 pair, select-free", streams=2, steps=4, held=False),
     Row("mono", "depth-2 pair, select-free", streams=1, steps=2),
     Row("mono", "depth-1 tail, select-free", streams=1, steps=1),
 )
@@ -145,6 +153,9 @@ STACK_SLOT = re.compile(r"^(rbp|rsp)([+-]0x[0-9a-f]+)?$")
 TABLE_ADDRESS = re.compile(r"^leaq r10,\[rip\+0x([0-9a-f]+)\]$")
 PURE_STORES = re.compile(r"^(v?mov|v?pextr|v?extractps)")
 COMPARES = re.compile(r"^(cmp|test|v?u?comis|v?ptest|bt)")
+NO_VALUE_OPS = ("j", "call", "ret", "push", "pop", "nop")
+ZEROING = re.compile(r"^(xor|sub|vxorp|vpxor|vpsub|vsubp)")
+REGISTER = re.compile(r"^([xy]mm\d+|r\d+|r[a-z]{2})$")
 
 
 class GateError(Exception):
@@ -394,7 +405,7 @@ def slot_accesses(instruction: Instruction) -> tuple[set[str], set[str]]:
     return reads, writes
 
 
-def carried_slots(blocks: dict[int, Block], header: int, body: set[int]) -> list[str]:
+def live_across(blocks: dict[int, Block], header: int, body: set[int]) -> set[str]:
     """Slots live into the header along the back edge: read before written on some path from the
     header, and written somewhere in the loop."""
     exposed: dict[int, set[str]] = {}
@@ -417,7 +428,73 @@ def carried_slots(blocks: dict[int, Block], header: int, body: set[int]) -> list
             if new != live_in[node]:
                 live_in[node] = new
                 changed = True
-    return sorted(live_in[header] & set().union(*stored.values()))
+    return live_in[header] & set().union(*stored.values())
+
+
+def data_flow(instruction: Instruction) -> tuple[list[str], list[str]]:
+    """(locations written, locations read) by one instruction's values: registers and stack slots.
+
+    Address registers are not values, flags are ignored, and a load from non-stack memory reads
+    nothing this analysis tracks. Unknown shapes read every operand, which can only add a path."""
+    op, operands = instruction.op, instruction.operands
+
+    def location(operand: str) -> str | None:
+        memory = MEMORY.search(operand)
+        if memory is not None:
+            return f"[{memory[1]}]" if STACK_SLOT.match(memory[1]) else None
+        return operand if REGISTER.match(operand) else None
+
+    if not operands or COMPARES.match(op) or op.startswith(NO_VALUE_OPS):
+        return [], []
+    if op.startswith("lea"):
+        address = MEMORY.search(operands[1]) if len(operands) > 1 else None
+        registers = re.findall(r"[a-z][a-z0-9]*", address[1]) if address else []
+        return [operands[0]], [r for r in registers if REGISTER.match(r) and r != "rip"]
+    written = [loc for loc in [location(operands[0])] if loc is not None]
+    if PURE_STORES.match(op) or (op.startswith("v") and len(operands) >= 3):
+        sources = operands[1:]
+    else:
+        sources = operands  # two-operand arithmetic reads its destination
+    read = [loc for loc in map(location, sources) if loc is not None]
+    if ZEROING.match(op) and len(set(operands)) == 1:
+        read = []  # `xor x,x`, `vpxor x,x,x`: no input
+    return written, read
+
+
+def recurrent_slots(blocks: dict[int, Block], header: int, body: set[int]) -> set[str]:
+    """Slots on a loop-carried dependence cycle: a value loaded from the slot reaches, through
+    registers and slots and around the back edge, a store to the same slot. This is the #977
+    mechanism wherever V8 lays out the store and the reload, including a reload on the back-edge
+    path itself, which leaves nothing live across the header in memory."""
+    stored = {
+        slot
+        for node in body
+        for instruction in blocks[node].instructions
+        for slot in slot_accesses(instruction)[1]
+    }
+    found = set()
+    for slot in stored:
+        tainted: dict[int, set[str]] = {node: set() for node in body}
+        changed = True
+        while changed:
+            changed = False
+            for node in body:
+                state = set(tainted[node])
+                for instruction in blocks[node].instructions:
+                    written, read = data_flow(instruction)
+                    hot = slot in read or bool(state.intersection(read))
+                    if hot and slot in written:
+                        found.add(slot)
+                    for location in written:
+                        if hot:
+                            state.add(location)
+                        else:
+                            state.discard(location)
+                for child in blocks[node].successors:
+                    if child in body and not state <= tainted[child]:
+                        tainted[child] |= state
+                        changed = True
+    return found
 
 
 def analyse(listing: str) -> list[Loop]:
@@ -447,7 +524,7 @@ def analyse(listing: str) -> list[Loop]:
             and STACK_SLOT.match(memory[1]) is None
         )
         select_free = not any(ops[op] for op in SELECT_OPS)
-        carried = carried_slots(blocks, header, body)
+        carried = sorted(live_across(blocks, header, body) | recurrent_slots(blocks, header, body))
         result.append(Loop(code, len(body), ops, steps, streams, select_free, carried))
     return result
 
@@ -474,6 +551,15 @@ def check_function(name: str, listing: str, rows: tuple[Row, ...] = LOOPS) -> in
             for loop in loops
             if loop.select_free and loop.steps == row.steps and loop.streams == row.streams
         ]
+        if not row.held:
+            for loop in matched or [None]:
+                state = (
+                    f"{describe(loop)}; {len(loop.carried)} carried slots"
+                    if loop is not None
+                    else "no loop of its shape"
+                )
+                print(f"info {label} (reported, not held): {state}")
+            continue
         if not matched:
             failures += 1
             print(
@@ -486,26 +572,19 @@ def check_function(name: str, listing: str, rows: tuple[Row, ...] = LOOPS) -> in
                     print(f"  {describe(loop)}", file=sys.stderr)
             continue
         for loop in matched:
-            carried = ", ".join(loop.carried)
-            if len(loop.carried) > row.allowance:
-                failures += 1
-                print(
-                    f"FAIL {label}: V8 carries {carried} across the back edge (allowance "
-                    f"{row.allowance}; {describe(loop)}). Listing, carried slots marked:",
-                    file=sys.stderr,
-                )
-                for instruction in loop.instructions:
-                    touched = set().union(*slot_accesses(instruction)) & set(loop.carried)
-                    mark = "*" if touched else " "
-                    print(f"  {mark} {instruction.offset:6x}  {instruction.text}", file=sys.stderr)
-            elif loop.carried:
-                note = "" if len(loop.carried) == row.allowance else "; lower the allowance"
-                print(
-                    f"ok   {label}: {describe(loop)}; carries {carried}, within its allowance of "
-                    f"{row.allowance}{note}"
-                )
-            else:
+            if not loop.carried:
                 print(f"ok   {label}: {describe(loop)}; no carried stack slot")
+                continue
+            failures += 1
+            print(
+                f"FAIL {label}: V8 carries {', '.join(loop.carried)} from one iteration to the "
+                f"next ({describe(loop)}). Listing, carried slots marked:",
+                file=sys.stderr,
+            )
+            for instruction in loop.instructions:
+                touched = set().union(*slot_accesses(instruction)) & set(loop.carried)
+                mark = "*" if touched else " "
+                print(f"  {mark} {instruction.offset:6x}  {instruction.text}", file=sys.stderr)
     return failures
 
 
@@ -674,6 +753,14 @@ def self_test() -> int:
         # The #977 shape: an integrator reloaded at the top and stored mid-iteration.
         ("carried", synthetic(carried), (2, 2, ["[rbp-0xc0]"], True)),
         ("rotated", rotated, (2, 2, ["[rbp-0xc0]"], True)),
+        # The masked mono tail's shape: the new integrator is spilled mid-iteration and reloaded
+        # on the back-edge path, so nothing is live across the header in memory.
+        ("back-edge reload", synthetic(["vandps xmm11,xmm10,xmm0", "vminps xmm13,xmm11,xmm0",
+                                        "vmovups [rbp-0xa0],xmm13", *tail,
+                                        "vmovups xmm0,[rbp-0xa0]"]), (2, 2, ["[rbp-0xa0]"], True)),
+        # The same slot, but the value stored is a fresh zero: no recurrence.
+        ("zero idiom", synthetic(["vpxor xmm13,xmm13,xmm13", "vmovups [rbp-0xa0],xmm13", *tail,
+                                  "vmovups xmm13,[rbp-0xa0]"]), (2, 2, [], True)),
         # A read-modify-write, a slot read as an arithmetic operand, and a compare that only reads.
         ("rmw", synthetic([*tail, "addl [rbp-0x18],0x1"]), (2, 2, ["[rbp-0x18]"], True)),
         ("compare", synthetic(["cmpl [rbp-0x18],r8", *tail]), (2, 2, [], True)),
@@ -696,15 +783,15 @@ def self_test() -> int:
         if got != [expected]:
             failures += 1
             print(f"self-test FAIL {label}: got {got}, want [{expected}]", file=sys.stderr)
-    # Verdicts: carried fails, carried within an allowance passes, no loop fails closed, clean
-    # passes.
+    # Verdicts: carried fails, a reported row never fails, no loop fails closed, clean passes.
     verdicts = []
     with open(os.devnull, "w") as sink:
         stdout, stderr = sys.stdout, sys.stderr
         sys.stdout = sys.stderr = sink
         try:
-            for listing, allowance in ((carried, 0), (carried, 1), (svf_step("rax"), 0), (tail, 0)):
-                rows = (Row("t", "tail", streams=2, steps=2, allowance=allowance),)
+            for listing, held in ((carried, True), (carried, False), (svf_step("rax"), True),
+                                  (tail, True)):
+                rows = (Row("t", "tail", streams=2, steps=2, held=held),)
                 verdicts.append(check_function("t", synthetic(listing), rows))
         finally:
             sys.stdout, sys.stderr = stdout, stderr
