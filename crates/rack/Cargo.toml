@@ -9,6 +9,11 @@ publish.workspace = true
 [lib]
 name = "rack"
 
+[features]
+# Issue #960: the bank chain's sub-phase probes (`test_only_bank_phase_profile`). Test builds
+# only; `graph/test-support` forwards it, and no production build enables it.
+test-support = []
+
 [dependencies]
 engine.workspace = true
 effect-contract.workspace = true

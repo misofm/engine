@@ -43,15 +43,24 @@ pub use runtime::{
 #[doc(hidden)]
 pub use observation_activation::test_only_observation_transition_entries;
 
-/// Phase-level timing of `GraphExecutor::render` for the plumbing-floor diagnosis
-/// (`.github/ISSUE_SPECS/DRAFTS/PLAN.md`). Test builds only: nothing here exists in a production
-/// build, and a `test-support` build that never calls [`test_only_phase_profile::enable`] pays one
-/// thread-local read per block and nothing per unit.
+/// Phase-level timing of `GraphExecutor::render`: the instrument of the gain/pan phase profile
+/// (issue #960, `tools/console-workload/tests/gain_pan_profile.rs`), first built for the
+/// plumbing-floor diagnosis. Test builds only: nothing here exists in a production build, and a
+/// `test-support` build that never calls [`test_only_phase_profile::enable`] pays one
+/// thread-local read per block and nothing per unit (plus, with the feature, one per bank-chain
+/// probe site).
 ///
 /// The clock is `std::time::Instant` (the vDSO monotonic clock), because `crates/graph` may not
 /// carry the `unsafe` block `_rdtsc` needs. A probe is taken only where the *kind* of unit
 /// changes, so a block whose units are grouped by kind costs a handful of probes rather than one
 /// per unit; the harness measures the probe cost and states it beside the numbers.
+///
+/// A bank unit is one [`BANK`](test_only_phase_profile::BANK) phase here. With the
+/// `test-support` feature, [`bank`](test_only_phase_profile::bank) splits the chain inside it
+/// into the gather, each slot, the collapse seam, the scatter and the route/master fold (issue
+/// #960); [`enable`](test_only_phase_profile::enable) and
+/// [`reset`](test_only_phase_profile::reset) drive both profiles together. What `BANK` holds
+/// beyond the chain's sub-phases is the unit's dispatch, member setup and observation.
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod test_only_phase_profile {
@@ -61,11 +70,12 @@ pub mod test_only_phase_profile {
     /// Render entry to the first source work: the host planes' shape check and
     /// `begin_observation_block`.
     pub const ENTER: usize = 0;
-    /// The source set's `begin_block` and the `copy_track_input` loop (empty when the plan binds
-    /// no source set, as the console rows do).
+    /// The source set's `begin_block` and the `copy_track_input` loop. Empty when the plan binds
+    /// no source set, as the bound-feed console rows do; on `sixty_four_track_gain_pan_ring` it is
+    /// the driver's `begin_block` alone, because every claim is read in place (issue #918).
     pub const SOURCE: usize = 1;
-    /// Plain units whose op is a host-bound processor (`NodeKind::Bound`): on the console rows,
-    /// the sixty-four `FrozenGraphSource` copies.
+    /// Plain units whose op is a host-bound processor (`NodeKind::Bound`): on the bound-feed
+    /// console rows, the sixty-four `FrozenGraphSource` copies.
     pub const BOUND: usize = 2;
     /// Plain units whose op is a route (`NodeKind::Route`).
     pub const ROUTE: usize = 3;
@@ -77,7 +87,8 @@ pub mod test_only_phase_profile {
     pub const IDENTITY_ALIAS: usize = 6;
     /// Any other plain unit.
     pub const OTHER_OP: usize = 7;
-    /// A bank unit.
+    /// A bank unit: its dispatch, member setup and observation, and the whole chain run that
+    /// [`bank`] splits.
     pub const BANK: usize = 8;
     /// The unit loop's end to the return (on the pre-#916 tree, the end-of-block master copy).
     pub const EXIT: usize = 9;
@@ -102,18 +113,28 @@ pub mod test_only_phase_profile {
         RUNS.with(Cell::get)
     }
 
-    /// Switch the probes on or off for this thread. Off, `render` reads one thread-local per
-    /// block and nothing else.
+    /// The bank chain's sub-phase profile (issue #960): the gather, each slot, the collapse seam,
+    /// the scatter and the route/master fold inside every [`BANK`] unit.
+    #[cfg(feature = "test-support")]
+    pub use rack::test_only_bank_phase_profile as bank;
+
+    /// Switch the probes on or off for this thread, the bank chain's sub-phase probes included.
+    /// Off, `render` reads one thread-local per block and nothing else, and a bank chain one per
+    /// probe site.
     pub fn enable(enabled: bool) {
         ENABLED.with(|value| value.set(enabled));
+        #[cfg(feature = "test-support")]
+        bank::enable(enabled);
     }
 
-    /// Zero the accumulators.
+    /// Zero the accumulators, the bank chain's sub-phase totals included.
     pub fn reset() {
         NANOS.with(|value| value.set([0; COUNT]));
         BLOCKS.with(|value| value.set(0));
         PROBES.with(|value| value.set(0));
         RUNS.with(|value| value.set([(COUNT, 0); RUNS_CAPACITY]));
+        #[cfg(feature = "test-support")]
+        bank::reset();
     }
 
     /// `(nanoseconds per phase, blocks profiled, probes taken)` since the last reset.
