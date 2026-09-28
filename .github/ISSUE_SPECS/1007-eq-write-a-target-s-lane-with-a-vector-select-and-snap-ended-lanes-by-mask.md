@@ -271,3 +271,91 @@ No settled row is slower. The saving is per target: all 64 saves 12-14 µs (ster
 * The `snap_ended` placement is the one choice here that the brief did not make; the loop scan
   above is why.
 * M1 breaks most EQ unit tests, because preparation settles every lane through `lane_put`.
+
+## Sol attempt 1 verdict: PASS
+
+Sol, 2026-09-28. Judged merged onto the batch head `94690a84` (`git merge-tree`; the merged EQ
+`lib.rs` equals `6ce112c1`). The shipped module built with the delivery recipe is `7a86a2c4…`,
+3,498,302 bytes, the same bytes as the evidence's timed module; base is 3,501,074 bytes. Every
+timed command held the shared lock, pinned to one core, at load 1.6 to 4.6.
+
+**Identity: holds.** A scratch public-surface differential compared the batch head with the merge
+by bits after every block, on outputs, reports, payloads and snapshots. It covers the scalar
+channel, `Simd4` and `Simd8` banks, and dual, collapsed and mixed bodies. Scenarios include
+several targets on one lane in one block (a group cut plus a per-track edit, up to 12 targets
+each), symmetric both-channel edits, blocks of 1 to 128 frames (so ramp ends land on a block's
+last frame), resets mid-ramp and hostile restores.
+
+* Differences: native release 0 of 140,000 runs, dev 0 of 8,400 (debug assertions on), wasm
+  `simd128` 0 of 28,000.
+* Ramping-elided counts are equal on both sides: 1,853,311 in release, 112,724 in dev.
+* The harness catches a snap that keeps its increment: 14,000 of 14,000 runs differ.
+* V8 `DIGEST=150`: `eq_gain`, `mono_eq`, `eq6` and `meq6` × `settled`, `one_point`,
+  `eight_of_64` and `all_64`, all identical.
+
+**Gate 6 (A3): holds.** Two paired `web_auto.mjs` runs in opposite module order, 6 × 500, µs per
+64-track block.
+
+| subject | settled isolate, base → change | 8 of 64 Δ | all 64 Δ |
+|---|---|---|---|
+| `eq_gain` | 21.94 → 22.18 (+1.1 %); 22.07 → 22.09 (+0.1 %) | +11.22 → +9.57 | +38.55 → +23.76; +38.54 → +24.45 |
+| `mono_eq` | 100.72 → 100.65; 105.38 → 104.67 | +3.79 → +3.19 | +19.90 → +9.55; +19.89 → +9.93 |
+
+* All six bands live: stereo all 64 goes +77.25 → +63.96 and mono +40.67 → +29.71. Their settled
+  isolates are -0.6 % and +1.6 %.
+* One point per block is within the spread either way.
+* Stationary `web.mjs` rows, paired and run twice in opposite order: every isolate is within
+  -1.6 % to +1.1 %.
+
+**Gates on the merged tree: pass.**
+
+* `cargo fmt --check`.
+* `clippy -D warnings` on `parametric-eq` and `console-workload`, all targets and all features.
+* `cargo doc -D warnings`.
+* `parametric-eq`: 124 tests in 12 binaries, in dev and release, with and without
+  `test-support`.
+* `console-workload --release`: 62 tests. `lane`: pass.
+* The workspace, realtime, lane, env-vocabulary and EQ render-contract policy scripts.
+* `run-wasm-gates.sh`: the V8 spill gate passes; the dual tail, mono pair and mono tail carry
+  nothing.
+* `KERNEL_ROSTER` is identical, with 15 kernels. The render, meter-poll and command-submit
+  callgraphs are unchanged.
+
+**`#[inline(never)]` on `snap_ended`: acceptable.** The render rules ban allocation, locks, I/O,
+syscalls and data-dependent unbounded calls. A bounded direct call is none of those. There is at
+most one per segment per section, and it contains no loop over frames.
+
+* **Precedent.** `start_ramp` already has this attribute and runs on the render thread. So do
+  functions in `compressor/src/kernel.rs` and `true-peak-limiter`.
+* **Outlining stands.** The loop census confirms it.
+* **Doc comment.** "For the same reason as `start_ramp`" is loose. `start_ramp`'s reason is the
+  roster, and this one's is V8 register allocation, which the comment's next sentence says.
+* **Trap paths.** The function carries two panicking bounds checks on `section`, as `settle` and
+  `start_ramp` do. They are unreachable (`section < 6`) and outside the gated render closure. The
+  one-hot index uses `get`, as A1 requires.
+
+**Loop census: the evidence overstates it.** I ran the gate's `analyse` on every innermost loop of
+both EQ `process_bank` functions, on the same bytes. What is confirmed:
+
+* The dual masked depth-2 pair goes from 12 carried slots to 11.
+* The per-lane snap loops are gone: two in dual, one in mono. Each had 188 instructions and 60
+  memory streams.
+* The mono function is otherwise unchanged.
+
+What is not: the evidence says every other loop has "identical instruction counts and carried
+slots … No new carried slot". That is wrong for one loop.
+
+* **Which loop.** The dual function's per-block leg (c) section scan (stride `0x140`, the -0.0 and
+  finite checks, then the flush-shape test).
+* **What changed.** It went from 194 to 208 instructions and from 0 carried slots to 1 (one store
+  and one reload per section).
+* **Size.** It runs once per section per block, not per frame. The worst case is about 0.2 µs per
+  64-track block, inside the settled spread above.
+* **Status.** This is descriptive, not a failed gate. The record is corrected here. Two tiny scan
+  loops also moved by ±1 instruction.
+
+**Dead code: none in production.** `lane_set` still serves `restore_track`, and `snap_section`
+still serves `discontinuity_reset`. The per-lane `snap` is now `#[cfg(test)]`, which is right,
+since nothing in production snapped one lane. The oracle (`LANE_SET_WRITES`,
+`settle_by_lane_set`, `start_ramp_by_lane_set`, `snap`) is test-only. It can go with #1005's
+`RAMPING_LIST` switch in a later cleanup; that does not block this.
