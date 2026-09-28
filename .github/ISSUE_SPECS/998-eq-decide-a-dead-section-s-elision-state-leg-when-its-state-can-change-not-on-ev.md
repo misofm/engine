@@ -25,3 +25,8 @@ recommends not merging it and root agrees: the gain is about 0.5 us on the brows
 isolate (under 0.2 % of the console), while every future write site must keep the per-channel cache
 fresh, and a miss is silent in release. The branch is kept. If the owner wants it, the merge must
 also mark the cache stale in #1005's ramping arm (now merged).
+
+## Owner ruling (2026-09-28): dropped
+
+"I don't think a 0.5us improvement is worth it for a flimsy cache." Not merged. The branch
+`codex/998-eq-dead-leg-cache` is kept for the record only.

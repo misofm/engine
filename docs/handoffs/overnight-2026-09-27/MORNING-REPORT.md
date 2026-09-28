@@ -83,3 +83,11 @@ worktrees with uncommitted changes (left alone).
   verifier ran one 10-second untimed run outside the lock by mistake (timings discarded).
 * Stale worktree cleanup freed about 85 GB at the start of the night (61 worktrees and two idle
   build directories).
+
+## Owner answers (2026-09-28)
+
+1. #998 dropped (a 0.5 us gain is not worth a fragile cache).
+2. The +2 % allowance is accepted when the implementation is genuinely better.
+3. No target-specific code: the browser-only limiter detector is not pursued.
+4. Explanation requested (given in conversation).
+5. Take the batch to `main`.

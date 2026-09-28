@@ -848,3 +848,10 @@ all scratch worktrees and target directories were deleted.
    * **Failure scenario.** One more such outlier turns A4's "faster" criterion red for a slice
      that is faster in 11 of 12 paired processes.
    * **Fix, if wanted.** Judge on paired per-process deltas.
+
+## Owner rulings (2026-09-28)
+
+* The `RampLinked` allowance of slice 1 + 2 % is accepted: "If the implementation is genuinely
+  better, I'm okay with 2% slower."
+* No target-specific code: the wasm-only two-frame detector is not pursued ("No target-specific
+  code please").
