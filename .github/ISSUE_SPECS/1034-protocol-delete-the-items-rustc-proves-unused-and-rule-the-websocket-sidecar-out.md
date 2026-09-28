@@ -196,7 +196,7 @@ and `audit protocol` build `MockProvider` through `Default`, which stays.
 **Kept although rustc flags them:** five re-exports, `SessionCommit`, `EventFrame`, `FrameHeader`,
 `ReplayDecision` and `ReplayHit`. No other crate names them, but the types are live and appear in
 public signatures (`DecodedFrame::header`, `Frame::Event`, `ReplayCache::preflight`,
-`SessionStore`'s commit). Removing the re-export would leave live types unnameable; it deletes no
+`SessionStore::apply_transaction`). Removing the re-export would leave live types unnameable; it deletes no
 code. The product-crate items in "Context" (`RenderMode::wire`, `F32Planar`, spsc `generation`)
 stay because the kept protocol uses them.
 
@@ -219,7 +219,7 @@ RFC 6455 citation in the research list and every other paragraph are unchanged.
 ### Size
 
 `git diff --shortstat eca8779d..3ef5f9b9`: 9 files, **22 insertions, 332 deletions**. Protocol
-production code: 314 lines removed, 5 added (`controller.rs` -227, `queue.rs` -42/+3,
+production code: 323 lines removed, 5 added (`controller.rs` -227, `queue.rs` -42/+3,
 `message_wire.rs` -28, `wire.rs` -16, `model.rs` -6, `lib.rs` -4/+2). Tests: +16/-8 (re-pins and
 their comments). AGENTS.md: 1/1.
 
