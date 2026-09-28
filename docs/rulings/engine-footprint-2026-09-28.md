@@ -57,3 +57,8 @@ aim, in the owner's words, is "minimizing the engine footprint".
   personal mix is represented and what happens when the producer updates the session).
 * #140 closes as descoped: its stored-automation outcome moves to #1058; sample-timed
   `AutomationEnqueue` delivery has no product consumer.
+
+## Test rulings (2026-09-28)
+
+* **Decision 4, memory accounting:** tests assert budgets (upper limits) plus one independent
+  completeness check that every allocation is counted, instead of exact byte counts (#1060).
