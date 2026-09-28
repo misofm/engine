@@ -309,3 +309,174 @@ g4, #1026 g3, #1027 g3, #1028 g3, #1030 g3, #1032 g3, #1033 g3, #1034 g3, #1035 
 - `scripts/run-wasm-gates.sh` (all legs, 431 s): pass, `wasm gates: ok (native + wasm scalar + wasm
   simd128 + V8 EQ loops)`. Its V8 leg built the module through `--module-only` (`f7bd75ca...`).
 - `cargo fmt --all --check`: pass. No Rust changed, so clippy was not rerun.
+
+## Sol verdict, attempt 1
+
+**FAIL.** One defect: the per-PR report is false for a toolchain change. Release integrity, the
+fresh-bytes gates, reproducibility and every gate on the merge hold. The fix is one step.
+
+Reviewer: Sol, 2026-09-28, on `77048ab7`, merged into a scratch detached checkout of
+`codex/batch-slim-2` at `8b3c0794` (merge `7625b8c6`). The workflow's own `run:` blocks were run by a
+scratch harness that supplies `RUNNER_TEMP`, `GITHUB_OUTPUT`, `GITHUB_STEP_SUMMARY` and the
+`${{ }}` values, in a clone at a different path from the merge.
+
+### Findings, by severity
+
+1. **HIGH: the base module is built with the PR's toolchain, so a toolchain change reports
+   `ARTIFACT UNCHANGED`.** `qualification.yml` sets `RUSTUP_TOOLCHAIN` for the whole workflow, and
+   the "Build the base's module" step inherits it. rustup's environment override beats the base
+   worktree's `rust-toolchain.toml`. So the base's source is rebuilt with the toolchain the PR
+   chose, not the one `main` shipped with.
+   - Reproduced: a scratch PR on `7625b8c6` changes 1.97.1 to 1.98.1 in `qualification.yml` and
+     `rust-toolchain.toml`, with no source change.
+     - `artifact` built `749ffb71...`, and the twin agreed.
+     - The base was rebuilt with 1.98.1 and gave `749ffb71...`. Its real module, as `main`'s CI
+       builds it, is `e34073a2...`.
+     - The job passed, and its summary said `ARTIFACT UNCHANGED: 749ffb71... at 4b4188f8... is the
+       base 7625b8c6...'s module`. That is false.
+   - A toolchain bump changes the shipped bytes with no source diff, so the report is the only
+     place that change can show. The per-PR pin used to catch it.
+   - Fix: build the base with the base's own toolchain. Read it from the base's `qualification.yml`
+     `RUSTUP_TOOLCHAIN` or its `rust-toolchain.toml`, install it with the `wasm32` target, and set
+     it for that step. Then pin that step in `check-ci-path-routing.py` and plant this scenario.
+2. **MEDIUM: the policy lint does not pin the base wiring, so the release check can disappear with
+   CI green.** `IDENTITY_LINES` pins the twin build, the self-test and the report, but not the base
+   step or the `base_args` line. On a copy of the merge, each of these mutants passes
+   `check-ci-path-routing.py`:
+   - the `[[ -z "$BASE" ]] || base_args=(...)` line deleted;
+   - `--event "$EVENT"` replaced by `--event none`;
+   - `BEFORE:` emptied;
+   - `fetch-depth: 0` dropped;
+   - a twin symlinked to the workspace.
+
+   With any of the first four, a `main` push, or every run, says `ARTIFACT BASE UNAVAILABLE` and
+   skips the release checks. `npm-publish.yml` still refuses mismatched bytes, but the
+   fresh-qualification requirement would be gone. Pin the base step, its env and the `base_args`
+   line.
+3. **LOW: with no base, the report makes a false statement.** It says "this change does not edit
+   the pin or `npm-publish.yml`'s release identity" even when the change does. A `workflow_dispatch`
+   run over a release commit shows it. The line should say that the release was not checked because
+   there is no base.
+4. **LOW, docs:** `docs/RELEASE.md`, `hosts/host-web/DEPLOYMENT.md` and the report's "pinned release
+   module" wording say that the pin, `results.json` and the matrix describe the last release.
+   - They do not. On the batch, `origin/main` and `8b3c0794`, the pin is `f7bd75ca...`, the last
+     per-PR pin. 0.4.3's `EXPECTED_WORKLET_SHA256` is `e18acf9c...`. So `npm-publish.yml`'s pin
+     assertion already refuses on `main`; that is pre-existing and the same on base.
+   - Say so until the first release PR under #1061.
+   - Step 3 should also note the PulseAudio socket's 108-byte path limit, which the attempt
+     itself hit.
+5. **LOW, cosmetic:** the header comment says "thirteen leaf jobs"; with `artifact-identity` there
+   are 14.
+   - With #1017 merged there are 16, and #1017's header says "fifteen".
+   - The evidence says the env count would go from 70 to 69 on a #1017 merge. That is stale: on
+     this batch the count auto-merges to 67, which is correct.
+
+### Merges
+
+- **#1061 into `8b3c0794`** has two textual conflicts:
+  - `docs/README.md`: #1037 removed the three effect-package rows; keep only the `RELEASE.md` row.
+  - `scripts/test-env-vocabulary.sh`: the count is 68 on the batch, and 67 after #1061's
+    retirement. `check-env-vocabulary.sh` reports 67 and `test-env-vocabulary.sh` passes.
+- **No semantic conflict with the batch.** The batch's pin equals `origin/main`'s (`f7bd75ca...`,
+  after the slim-1 batch merged as `5379e46c`), so the batch's PR to `main` is not a release change.
+  - Scenario S1 ran it: a synthetic merge of the batch into `5379e46c`, as a `pull_request` run.
+  - This is also the first run: the base module was built by the pre-#1061 script's
+    `--module-only`.
+  - The job passed with `ARTIFACT CHANGED: f7bd75ca... -> e34073a2...`, which is correct, and the
+    twin reproduced.
+- **#1017 (`f3644ff6`) on top** conflicts only in two places, both mechanical unions:
+  - the verdict's `needs:` list in `qualification.yml`;
+  - `test-ci-path-routing.py`: the `needs` mutation, plus both new mutation blocks.
+
+  After resolving them, `check-ci-path-routing.py` and `test-ci-path-routing.py` pass, and
+  `check-env-vocabulary.sh` (67) and `test-env-vocabulary.sh` pass. #1017's branch was not
+  edited.
+
+### The questions
+
+1. **Release integrity holds.**
+   - **What `npm-publish.yml` accepts.** It is `workflow_dispatch` only, from `main`, with
+     `expected_sha` in `origin/main`. Its checks:
+     - `qualify` refuses unless `EXPECTED_WORKLET_SHA256` is the pin file;
+     - it rebuilds, and refuses bytes other than `EXPECTED_WORKLET_SHA256`;
+     - `publish` sends only that run's archive.
+   - **Why the published bytes are reviewed bytes.** A release PR edits the pin or
+     `EXPECTED_WORKLET_SHA256`. The pin path routes `full`, and `artifact-identity` holds the
+     change to pin == built == `EXPECTED_WORKLET_SHA256` and `results.json` == built, on the PR and
+     on the merge push. That same run's `artifact-gates` and browser legs read those bytes.
+   - **A change that moved the artifact but not the pin cannot publish.** It is stopped at
+     `qualify`'s build step. Re-pinning it is a release change, which needs a fresh
+     `results.json`.
+   - **Re-run.**
+     - R1: the version is bumped and `EXPECTED_WORKLET_SHA256` is set to the stale pin while the
+       tree builds `e34073a2...`. `artifact-identity` fails on the pin and on lineage. In
+       `npm-publish.yml` the pin assertion passes, and "Build ... prove its Linux pin" exits 1.
+     - R2: the whole release identity for `e34073a2...`. Every check passes, and both
+       `npm-publish.yml` steps pass.
+2. **Every artifact gate reads the freshly built bytes.** `artifact` builds once and exports the
+   digest. Each reader checks its download against that digest before any gate script runs:
+   - `sdk`;
+   - `artifact-gates`: `check-web-audioworklet.sh`, `check-browser-expected-resources.py
+     --artifacts` and the V8 spill gate;
+   - the three browser legs.
+
+   The filed "shipped artifact" gates cite `artifact-identity`, which compares that same digest
+   with a fresh build of the base: #1021 g4, #1022 g3, #1023 g4, #1024 g3, #1025 g4, #1026 g3,
+   #1027 g3, #1028 g3, #1030 g3, #1032 g3, #1033 g3, #1034 g3, #1035 g3, #1036 g3, #1037 g3,
+   #1038 g3, #1040 g3, #1041 g2 and #1056 g3. None of them changes the toolchain, so finding 1
+   does not reach them.
+
+   Plants re-run here:
+   - **A one-bit PCM flip** of the first rendered sample in `render_next` (`758e3dc3...`): the
+     chromium leg is red at `native-corpus-digest: browser PCM differs from the native corpus pin`.
+   - **Soft-clip's mix and output arithmetic, scalarised lane by lane**, with `black_box` on every
+     intermediate (`12fb3b06...`): `check-web-audioworklet.sh` is red at `vector=20 scalar=20` in
+     both the kernel rule and the roster rule. A weaker version, with `black_box` on the inputs
+     only, moved the digest, but LLVM re-vectorised it (`vector=25 scalar=0`, by disassembly too).
+     Its green was correct.
+   - **A flipped download byte**: the verify step of `sdk`, `artifact-gates` and `browser` each
+     exit 1. An empty `BUILT` also exits 1.
+3. **The report is visible and its base is right.**
+   - **Visible.** `artifact` writes the digest to its summary, `artifact-identity` tees the report
+     into its summary even when it fails, and the verdict writes the evidence-route line.
+   - **Correct outside the toolchain case.**
+     - S1 is CHANGED, correctly.
+     - U, a comment-only PR, is `ARTIFACT UNCHANGED: e34073a2...`, correctly.
+     - No evidence-route path is read by a build: no `include_str!` or `include_bytes!` names one,
+       and there is no `build.rs`.
+   - **The base.** It is the first parent of GitHub's merge commit for `pull_request`, and
+     `event.before` for a `main` push. `merge_group` is not a trigger. `workflow_dispatch` says
+     `ARTIFACT BASE UNAVAILABLE` and stays green.
+   - **The first run** builds the base from source with the base's own script, so it needs no base
+     artifact. S1 shows no spurious failure.
+4. **Reproducibility.**
+   - The twin is a `git worktree` at `$RUNNER_TEMP/twin` with a fresh
+     `CARGO_HOME=$RUNNER_TEMP/twin-cargo-home`. In S1, U and TC it downloaded the crates again and
+     reproduced from another path.
+   - Plant: `black_box(env!("CARGO_MANIFEST_DIR").as_ptr())` in an export. `artifact` built
+     `f9a2ed16...` and the twin `2d946f52...`, so the job fails with `NOT REPRODUCIBLE`.
+5. **Wiring.**
+   - `artifact-identity` is in the verdict's `needs` and its expectation table (`artifact_expected`).
+     It is gated by the router's `route`, with no `paths:` filter.
+   - `check-ci-path-routing.py` and `test-ci-path-routing.py` pass.
+   - `check-script-reachability.py` (134 files) and `test-script-reachability.py` (18 cases) pass.
+   - actionlint 1.7.7 passes on `qualification.yml` and `npm-publish.yml`. With shellcheck 0.10.0,
+     the same four pre-existing warnings appear on base and merge, and none in the new blocks.
+   - Vacuous-pass gaps: finding 2.
+6. **`docs/RELEASE.md`** gives a correct pin, qualification record and matrix.
+   - Its step 4 literal list matches the repository: five in `npm-publish.yml`; `VERSION`,
+     `release_pin` and its mutation in `test-npm-publish-modes.py`; `sdk/package*.json` and
+     `sdk/README.md`.
+   - Gaps: finding 4.
+7. **Gates on the merge: all pass, so there is no base comparison to make.**
+   - `check-web-audioworklet.sh` and `test-web-audioworklet.sh`.
+   - `check-browser-expected-resources.py --artifacts`: 26 red mutations.
+   - The V8 spill gate: its self-test and the module.
+   - `test-sdk-artifact-builder-output-contract.sh`, `test-npm-publish-modes.py` and
+     `cargo fmt --check`.
+   - The identity self-test.
+   - All 35 `scripts/check-*.sh`.
+   - Every argument-free `check-*.py` (10). Six take arguments and ran through their callers.
+   - `run-wasm-gates.sh`, 320 s. Its V8 leg built `e34073a2...`.
+   - The three-browser PR mode (`--check-matrix --self-test-mutations`) on `e34073a2...`: chromium
+     151.0.7922.34, firefox 153.0 and webkit 26.5.
