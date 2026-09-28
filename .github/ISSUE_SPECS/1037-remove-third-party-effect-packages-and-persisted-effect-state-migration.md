@@ -383,3 +383,171 @@ Base 2,456 and change 2,347: 109 removed and none added. The same 109 went again
   - #1036 (`effect-package/src/wire.rs`, `check-effect-descriptor-v1.sh`);
   - #1046 and #1047 (effect-package and migration test rows, already marked as #1037's);
   - #1062 (the package and descriptor scalar legs, which its amendment 2 anticipates).
+
+## Sol verdict, attempt 1
+
+**PASS.** Sol, 2026-09-28, on head `07c053fc`, merged into batch head `92ef396f` (`codex/batch-slim-1`, which
+adds the two repin commits to `c867ec2a`) in a scratch detached worktree. The merge is clean, with no
+conflicts. Its tree equals `07c053fc` plus the four repin files (`git diff --stat 07c053fc` on the
+merge), so no semantic conflict arises beyond the ones this branch already resolved:
+
+- #1052: exactly the eight `#1037` allow-list rows are gone. `check-workspace-policy.sh` and
+  `test-workspace-policy.sh` pass, and #1052's AGENTS.md test-value text is intact.
+- #1026 and #1025: `test-bench-policy.sh` and the 17 digests pass.
+- #1021: `check-test-support-ci.py` passes.
+
+Each finding is ranked by severity. None is a deleted live path, a lost claim or a broken gate.
+
+1. **Medium, not blocking: AGENTS.md drops some sandbox sub-rules along with the paragraph.**
+   R6a and R6b are stated faithfully:
+   - The paragraph says out of scope until reopened.
+   - It says there is no persisted state or migration without a product need.
+   - It says in-memory handoff across a plan replacement is not persisted state, matching the
+     ruling's wording.
+   - The scope line swaps the third-party item for the two ruled exclusions.
+
+   No rule outside this paragraph and the scope line changed. The paragraph's "a reopening issue
+   inherits these constraints" list keeps these:
+   - dynamic rack only;
+   - never banks, wherever it sits;
+   - sandbox workers behind a bounded, at-least-one-quantum pipeline with latency-preserving
+     bypass;
+   - promotion evidence.
+
+   It silently drops these old sub-rules:
+   - no WASI or syscalls;
+   - bounded memory, state and scratch;
+   - declared latency and tail;
+   - compiled and validated off the render thread;
+   - resolution, download, signature and cache verification off render, with no
+     installation or licensing-dongle dependency;
+   - "a CID identifies exact bytes, not trust, quality or cross-CPU bit identity".
+
+   The ruling authorizes amending this paragraph, and nothing live depends on these rules, so this
+   does not fail the attempt. Restoring the sandbox clause in the inherited-constraints sentence
+   would make the list complete. It is a one-line edit, due before the batch merges or in a
+   follow-up.
+2. **Low: the evidence has one stale sentence.** "What was delivered" says the
+   `test-bench-policy.sh` delegate cases were re-pointed to `tools/bench/src/builtins.rs`, "the one
+   remaining delegating wrapper". #1026 deleted that file. The code actually seeds a delegating
+   wrapper into `tools/bench/src/conformance.rs`, as the merge note above says. The behavior is
+   right; only the sentence is stale.
+3. **Low: one evidence claim does not reproduce on this host.** The evidence says the iOS and
+   Android `--workspace --lib --all-features` check and clippy pass. Here they fail, identically on
+   base `92ef396f`. The failures are C build scripts with no iOS/Android C cross-compiler:
+   - `blake3`, pulled only by `native-pcm-runner` and `stem-hasher`;
+   - `wasmtime`, pulled only by the wasm tool crates.
+
+   So the failure is pre-existing and not caused by this change. Every `crates/*` and `hosts/*`
+   package (31 packages) passes on both targets, both `check` and clippy `-D warnings` with
+   `--lib --all-features`. The `--all-targets --all-features` product set also passes:
+   capi, host-core, host-mobile, effect-compiler, effect-contract, graph-compiler, engine and
+   session.
+4. **Information.** These are expected, and the evidence already records them:
+   - `ChannelSymmetryWitness::RESTORED` can no longer be cleared.
+   - The per-effect payload hooks now have only test and evidence-tool callers. Every effect crate
+     still tests its hooks (delay in-source), and step 5's follow-up removes them.
+   - The pinned-artifact gates (`check-web-audioworklet.sh`, `test-web-audioworklet.mjs`,
+     `sdk-package.sh`) stay red until the batch boundary repins `6867027b…`.
+
+**Checks.**
+
+- **Nothing live deleted.**
+  - A grep of the merged tree for every removed crate, module, public item, script, fixture
+    directory, fuzz target, doc and env name finds only history comments. The places checked were
+    `artifacts/`, specs, handoffs, audits, rulings and derivations.
+  - One exception: `MISO_ENGINE_BENCH_PHASE` is still printed by `compressor/tests/bench_ramp.rs` as
+    a stderr marker. No script reads it, and `check-env-vocabulary.sh` passes.
+  - Nothing in `crates/capi` (header included), `check-capi-abi.sh`, `sdk/` or `hosts/` changed, and
+    neither did engine, graph, graph-compiler, rack, rack-compiler, session or host-core.
+  - The descriptor path hosts use, the `effect-contract` static descriptors through host-core, the
+    capi parameter catalog and the generated SDK metadata, is untouched.
+  - The 135 wasm exports are identical, and none names a package, state, migration, CID or
+    descriptor-wire item.
+  - `fuzz.yml`'s `paths:` equals the fuzz crate's `cargo metadata` closure:
+    `engine`, `protocol` and `session`.
+  - The qualification jobs and the `verdict` table are unchanged. Only steps inside `lint` and
+    `cross-target` moved, and nothing left in `cross-target` uses wabt.
+- **R6b boundary.** The only thing a plan swap hands across is the absolute-sample clock, in
+  `plan_exchange.rs`, together with the control and provider epochs. No DSP state crosses. The
+  removal deleted one contiguous `prepare.rs` span, the unpublished-temporary envelope snapshot and
+  restore, and touched none of that. These tests still cover the swap and in-memory state, and all
+  pass on the merge:
+  - capi: `control_calls_inside_a_plan_swapping_render_call_keep_replacement_live`,
+    `structural_command_keeps_protocol_plan_provider_and_event_epochs_atomic` and
+    `c_commands_publish_the_replacement_parameter_catalog`;
+  - host-web: `dispose_borrow_refusal_preserves_live_owner_and_failed_replacement_preserves_handoff`;
+  - graph-compiler: `a_replan_that_fails_to_bind_keeps_the_unmoved_plan`;
+  - the four `a_desymmetrized_bank_is_a_never_collapsed_bank` tests, which cover `copy_state_from`.
+- **Third-party refusal.**
+  - A copy of `fixtures/session/v1/compressor-dynamic-bank-observation.json` with one `cid`
+    identity was run through the release `session_validator`. It passes stages 1-4 and fails
+    stage 5 with `effect.third_party.unavailable_at_launch  $.tracks[id=comp0].effects[id=comp]`.
+    The unmodified fixture passes.
+  - These tests pass: `third_party_dynamic_effects_are_never_bank_candidates`, which checks both
+    the never-bank identity gate and the preparation refusal, and
+    `empty_third_party_cid_is_reported_at_the_identity_leaf`.
+  - The set of files naming `ThirdPartyCid` or the refusal code is the same on base and merge.
+- **Test lists.** The `--list` output was diffed per test binary, by running each
+  `--no-run --message-format=json` executable. The totals are base 2,456 and merge 2,347: 109
+  removed and none added, matching the evidence's table row for row.
+  - Every removed test exercised the deleted crate, the envelope, migration or wire, or the retired
+    bench subject.
+  - `observation_identity` keeps "only the four dynamics effects declare a tap". The dropped
+    `validate_descriptor` call is implied by `NativeEffectRegistry::new`.
+  - Test value (#1052) for the one rewritten Rust test,
+    `a_declared_tap_moves_contract_minor_and_leaves_the_state_layout_alone`: it turns red if a
+    non-dynamics effect gains a tap, or a dynamics tap changes its id, name, unit or cost or
+    skips the `contract_minor` bump. No other test pins the registry's tap menu.
+  - The re-pointed gate mutations turn red if their gates regress. The two in
+    `test-artifact-evidence-leak.sh` catch `effect-compiler` leaving `shipped` while conformance
+    features unify into its wasm build. The ones in `test-effect-runtime-policy.sh` catch the
+    effect-compiler dependency-set pin going slack. All suites pass.
+- **AudioWorklet module.** Built on one machine with `build-web-audioworklet.sh --module-only`:
+  - base `f7bd75ca…`, which reproduces its pin;
+  - merge `6867027b…`.
+
+  Both modules are 3,486,194 bytes, and every section has the same size. Both have 2,733
+  functions and 1,315,283 instructions, and the per-function multisets of name and body are equal
+  once call targets and the mangled crate hashes, `Ms`/backref disambiguators are normalized.
+  196 data bytes differ, all in these places:
+  - the two `prepare.rs` panic lines, 1042 to 280 and 1289 to 527;
+  - one moved `Hz` string;
+  - the pointer words that address it.
+
+  The implementer's claim holds. The batch boundary repins.
+- **Gates on the merge, all pass:**
+  - `cargo check --locked --workspace --all-targets --all-features`;
+  - clippy `-D warnings`, default and all features;
+  - `cargo fmt --check`;
+  - the wasm `simd128` check of `host-web` and `effect-compiler`;
+  - `cargo check` of `fuzz/Cargo.toml --bins` on stable (six binaries);
+  - `cargo test --workspace --all-targets --all-features`: 2,310 passed, 0 failed, 38 ignored;
+  - release `-p audit -p bench -p console-workload` tests, which cover #1028's
+    `cargo test --release -p bench`;
+  - console digests: 17 rows, byte-identical to base;
+  - `run-wasm-gates.sh`, with native, wasm scalar, wasm simd128 and the V8 spill leg;
+  - `check-capi-abi.sh` (shared and static) and its `--self-test`;
+  - `audit capi`: 100,000 calls, 0 violations;
+  - all 34 argument-free `scripts/check-*.sh` and all 13 argument-free `check-*.py`;
+  - the argument-taking `.py` checks' `--self-test`, and the `--self-test` of `check-release-shape.py`,
+    `check-sdk-deletions.py` and `check-protocol-wasm-parity.sh`;
+  - `test-ci-path-routing.py`;
+  - `check-bench-policy.sh` and `test-bench-policy.sh`;
+  - the effect-runtime, realtime, conformance-boundary, artifact-evidence-leak, env-vocabulary and
+    workspace-policy mutation suites.
+
+  `check-capi-abi.sh` and `check-graph-determinism.sh` read a repo-local `target/`, so they were run
+  without `CARGO_TARGET_DIR`. `check-sdk-types.sh` was run against the primary checkout's
+  `sdk/node_modules`. The only pre-existing failure is finding 3.
+- **#1028 can close as absorbed.** Its gates:
+  - Gates 1 and 2 are met.
+  - Gate 3 ("no crate in the closure changes") is superseded by R6 absorbing it. #1037's function
+    identity proof above replaces it.
+  - Gate 4 is met, except that its two interchange scripts were deleted under R6 rather than
+    edited. #1028 leaves that decision to R6.
+  - Gate 5 is met. `exact_four_rate_migration_envelope_without_timing` is recorded as lost with
+    R6b, as #1028 allows when R6 is ruled first, and `bench-support`'s own `abc` known-answer test
+    holds the digest helper.
+  - Slice steps 3 and 4 are done (the #455 artifact and the env names), and so is amendment 1
+    (the bench-policy cases were re-pointed, and both of its gates pass).
