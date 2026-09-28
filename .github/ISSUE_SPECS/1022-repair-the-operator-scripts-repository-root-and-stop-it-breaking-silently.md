@@ -211,3 +211,41 @@ A symlinked script or a symlinked `scripts/operator/` resolves as it would at ru
    spelling that avoids `dirname` (for example `${BASH_SOURCE[0]%/*}/..`) is not inspected when a
    canonical line also exists. Nested directories (`scripts/operator/sub/*.sh`), `.bash` files and
    extensionless scripts are outside the `*.sh` glob. All of these are contrived or out of scope.
+
+## Follow-up: Sol findings
+
+Terra, 2026-09-28, on `d94d4a41`. This change touches only `scripts/check-bench-policy.sh` and
+`scripts/test-bench-policy.sh`. No timed workload was launched.
+
+1. **Script count.** The suite no longer needs seven scripts. Every case now mutates whichever
+   operator scripts exist instead of a named one: #1026, #1027 and #1039 delete six of the seven.
+   The per-script loop requires at least one regular script, so it cannot pass vacuously. New
+   cases: `operator-one-script` passes with a single survivor, and `operator-directory-absent` is
+   refused, like the existing `operator-scripts-absent`.
+2. **Directory named `*.sh`.** The rule counts only regular files (`[[ -f ]]`), and it clears
+   `operator_line` before each read loop. New cases: `operator-directory-named-script` (`aaa.sh/`
+   beside the real scripts) passes with the real count, and `operator-only-directory-named-script`
+   is refused. Every operator case is run under `timeout 20`, so a hang is red, not a stuck job.
+3. **Unanchored match.** The root expression must be the whole value of a `NAME=` or `NAME="…"`
+   line. New cases: `operator-root-trailing-path` (`$(… && pwd)/scripts`) and
+   `operator-root-leading-text` (`/tmp$(…)`) are refused as unrecognised.
+
+The same mutations were run against the old and new check. The suite rows ran on a copy of the
+tree with only the listed scripts kept:
+
+| finding | `d94d4a41` check and suite | fixed check and suite |
+|---|---|---|
+| 1: 6 scripts left (#1026 deletes `preflight-rack-benchmark.sh`) | suite exit 1, `covered only 6 scripts` | suite exit 0 |
+| 1: only `preflight-console-benchmark.sh` left | suite exit 1, `covered only 1 scripts` | suite exit 0 |
+| 2: `scripts/operator/aaa.sh/` | killed by `timeout 10` (exit 124) after writing 32 MB of `read error: 0: Is a directory` | exit 0, `7 operator scripts rooted` |
+| 3: `root=$(… && pwd)/scripts` | exit 0 | exit 1, `root expression is unrecognised at …:100` |
+| 3: `root=/tmp$(…)` | exit 0 | exit 1, `root expression is unrecognised at …:100` |
+
+The new suite, run against the `d94d4a41` check, also goes red at
+`operator-directory-named-script`.
+
+Re-run on the real tree:
+
+- `check-bench-policy.sh` passes (`7 operator scripts rooted at the workspace`).
+- `test-bench-policy.sh` passes (`bench policy mutations: ok`, 12.8 s).
+- `check-ci-path-routing.py` and `test-ci-path-routing.py` pass.

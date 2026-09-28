@@ -314,31 +314,44 @@ done < "$scratch/manifests.sorted"
 # (`scripts/operator/README.md`). Four of them are benchmark preflights and runners, which is why
 # the rule lives here. It is static and launches nothing. Each script's own root expression is
 # resolved from the script's own directory, and the result must be this repository's root, which
-# must hold the workspace `Cargo.toml`. Any other spelling of a script's own location is refused as
-# unrecognised rather than skipped, and so is a script that computes no root at all. Bash builtins
-# only, so no external tool's exit status can be lost here.
+# must hold the workspace `Cargo.toml`. The root expression must be the whole value of a `NAME=`
+# or `NAME="..."` assignment line, so `$(... && pwd)/scripts` cannot pass as the root. Any other
+# spelling of a script's own location is refused as unrecognised rather than skipped, and so is a
+# script that computes no root at all. Only regular files count as scripts: an entry named `*.sh`
+# that is a directory is not one, and reading it would never reach end of file. Bash builtins only,
+# so no external tool's exit status can be lost here.
 operator_self_pattern='dirname[^|;&]*(BASH_SOURCE|\$0|\$\{0\})'
-operator_root_pattern='\$\(cd[[:space:]]+"\$\(dirname[[:space:]]+"\$\{BASH_SOURCE\[0\]\}"\)(/[^"]*)?"[[:space:]]+&&[[:space:]]+pwd([[:space:]]+-P)?\)'
+operator_assignment_pattern='^[[:blank:]]*[A-Za-z_][A-Za-z0-9_]*=(.*)$'
+operator_quoted_pattern='^"(.*)"$'
+operator_root_pattern='^\$\(cd[[:space:]]+"\$\(dirname[[:space:]]+"\$\{BASH_SOURCE\[0\]\}"\)(/[^"]*)?"[[:space:]]+&&[[:space:]]+pwd([[:space:]]+-P)?\)$'
 [[ -f Cargo.toml ]] || fail 'operator scripts: the repository root holds no Cargo.toml'
 operator_workspace_manifest=0
+operator_line=
 while IFS= read -r operator_line || [[ -n "$operator_line" ]]; do
     [[ "$operator_line" == '[workspace]' ]] && { operator_workspace_manifest=1; break; }
 done <Cargo.toml
 ((operator_workspace_manifest == 1)) || fail 'operator scripts: the repository root Cargo.toml is not the workspace manifest'
 operator_workspace_root="$(pwd -P)"
-shopt -s nullglob
-operator_scripts=(scripts/operator/*.sh)
-shopt -u nullglob
+operator_scripts=()
+for operator_candidate in scripts/operator/*.sh; do
+    if [[ -f "$operator_candidate" ]]; then operator_scripts+=("$operator_candidate"); fi
+done
 ((${#operator_scripts[@]} > 0)) || fail 'no operator shell scripts under scripts/operator/'
 for operator_script in "${operator_scripts[@]}"; do
     operator_roots=0
     operator_line_number=0
+    operator_line=
     while IFS= read -r operator_line || [[ -n "$operator_line" ]]; do
         operator_line_number=$((operator_line_number + 1))
         [[ "$operator_line" =~ ^[[:space:]]*# ]] && continue
         [[ "$operator_line" =~ $operator_self_pattern ]] || continue
-        [[ "$operator_line" =~ $operator_root_pattern ]] ||
-            fail "operator script root expression is unrecognised at $operator_script:$operator_line_number (expected \$(cd \"\$(dirname \"\${BASH_SOURCE[0]}\")/../..\" && pwd)): $operator_line"
+        operator_value=
+        if [[ "$operator_line" =~ $operator_assignment_pattern ]]; then
+            operator_value=${BASH_REMATCH[1]}
+            if [[ "$operator_value" =~ $operator_quoted_pattern ]]; then operator_value=${BASH_REMATCH[1]}; fi
+        fi
+        [[ "$operator_value" =~ $operator_root_pattern ]] ||
+            fail "operator script root expression is unrecognised at $operator_script:$operator_line_number (expected NAME=\$(cd \"\$(dirname \"\${BASH_SOURCE[0]}\")/../..\" && pwd)): $operator_line"
         operator_resolved="$(cd "${operator_script%/*}${BASH_REMATCH[1]}" 2>/dev/null && pwd -P)" ||
             operator_resolved='<unresolvable>'
         [[ "$operator_resolved" == "$operator_workspace_root" ]] ||

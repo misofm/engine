@@ -19,7 +19,9 @@ new_case() {
     cp "$root/scripts/check-bench-policy.sh" "$case_root/scripts/"
     mkdir -p "$case_root/scripts/operator"
     cp "$root/Cargo.toml" "$case_root/"
-    cp "$root"/scripts/operator/*.sh "$case_root/scripts/operator/"
+    for operator_source in "$root"/scripts/operator/*.sh; do
+        if [[ -f "$operator_source" ]]; then cp "$operator_source" "$case_root/scripts/operator/"; fi
+    done
 }
 
 check() { bash "$case_root/scripts/check-bench-policy.sh" "$case_root"; }
@@ -111,63 +113,93 @@ printf '#!/usr/bin/env bash\nif [[ " $* " == *"file=hosts/fixture/Cargo.toml"* ]
 chmod +x "$case_root/shim/awk"
 expect_failure_with_path manifest-awk-error "$case_root/shim" 'dependency parser failed for hosts/fixture/Cargo.toml with status 2; output: <empty>; stderr: manifest-awk-error'
 
-# #1022: an operator shell script's repository root. Every mutation must change the file it
-# names, or the case would pass for the wrong reason.
+# #1022: an operator shell script's repository root. Every case targets whichever scripts exist,
+# never a named one, because the footprint cleanup (#1026, #1027, #1039) deletes operator scripts:
+# the suite must hold for any population of one or more. Every mutation must change the file it
+# names, or the case would pass for the wrong reason. Each run is bounded, so a check that stops
+# terminating is red rather than a hung job, and only the tail of its output is kept.
+operator_check() {
+    if timeout 20 bash "$case_root/scripts/check-bench-policy.sh" "$case_root" \
+        >"$scratch/operator-check.out" 2>&1; then operator_status=0; else operator_status=$?; fi
+    operator_output="$(tail -c 4000 "$scratch/operator-check.out")"
+}
 expect_diagnostic() {
-    local label=$1 expected=$2 output status
-    if output="$(check 2>&1)"; then status=0; else status=$?; fi
-    ((status != 0)) || { printf 'bench policy mutation escaped: %s\n' "$label" >&2; exit 1; }
-    [[ "$output" == *"$expected"* ]] || {
-        printf 'bench policy wrong diagnostic: %s\n%s\n' "$label" "$output" >&2
+    local label=$1 expected=$2
+    operator_check
+    ((operator_status != 0)) || { printf 'bench policy mutation escaped: %s\n' "$label" >&2; exit 1; }
+    ((operator_status != 124)) || { printf 'bench policy check did not terminate: %s\n' "$label" >&2; exit 1; }
+    [[ "$operator_output" == *"$expected"* ]] || {
+        printf 'bench policy wrong diagnostic: %s\n%s\n' "$label" "$operator_output" >&2
         exit 1
     }
 }
+expect_operator_pass() {
+    local label=$1 expected=$2
+    operator_check
+    ((operator_status == 0)) || {
+        printf 'bench policy rejected a valid operator tree: %s (status %s)\n%s\n' \
+            "$label" "$operator_status" "$operator_output" >&2
+        exit 1
+    }
+    [[ "$operator_output" == *"$expected"* ]] || {
+        printf 'bench policy wrong success line: %s\n%s\n' "$label" "$operator_output" >&2
+        exit 1
+    }
+}
+first_operator_script() {
+    local candidate
+    for candidate in "$case_root"/scripts/operator/*.sh; do
+        if [[ -f "$candidate" ]]; then printf '%s\n' "${candidate##*/}"; return 0; fi
+    done
+    printf 'bench policy operator case has no script to mutate: %s\n' "$case_root" >&2
+    exit 1
+}
 mutate_operator_root() {
-    local script=$1 replacement=$2
+    local script=$1 sed_script=$2
     cp "$case_root/scripts/operator/$script" "$scratch/operator-before"
-    sed -i "s|$replacement|" "$case_root/scripts/operator/$script"
+    sed -i "$sed_script" "$case_root/scripts/operator/$script"
     ! cmp -s "$scratch/operator-before" "$case_root/scripts/operator/$script" ||
         { printf 'bench policy operator mutation did not apply: %s\n' "$script" >&2; exit 1; }
 }
+root_line='/dirname "\${BASH_SOURCE\[0\]}")\/\.\.\/\.\." && pwd/'
 
 # The #319 defect itself, reintroduced into each operator script in turn, so no script is exempt.
 operator_script_count=0
 for operator_script in "$root"/scripts/operator/*.sh; do
+    [[ -f "$operator_script" ]] || continue
     operator_script=${operator_script##*/}
     new_case "operator-root-one-level-$operator_script"
-    mutate_operator_root "$operator_script" '")/\.\./\.\." \&\& pwd|")/.." \&\& pwd'
+    mutate_operator_root "$operator_script" 's|")/\.\./\.\." \&\& pwd|")/.." \&\& pwd|'
     expect_diagnostic "operator-root-one-level-$operator_script" \
         "operator script does not resolve the repository root: scripts/operator/$operator_script:"
     operator_script_count=$((operator_script_count + 1))
 done
-((operator_script_count >= 7)) ||
-    { printf 'bench policy operator mutations covered only %s scripts\n' "$operator_script_count" >&2; exit 1; }
+# Sol finding 1: any population of one or more, but never none -- a glob that matched nothing
+# would otherwise make the loop above vacuous.
+((operator_script_count > 0)) ||
+    { printf 'bench policy operator mutations found no operator script under %s\n' "$root" >&2; exit 1; }
 
 new_case operator-root-past-the-repository
-mutate_operator_root run-wasm-console-benchmark.sh '")/\.\./\.\." \&\& pwd|")/../../.." \&\& pwd'
-expect_diagnostic operator-root-past-the-repository \
-    'operator script does not resolve the repository root: scripts/operator/run-wasm-console-benchmark.sh:'
+mutate_operator_root "$(first_operator_script)" 's|")/\.\./\.\." \&\& pwd|")/../../.." \&\& pwd|'
+expect_diagnostic operator-root-past-the-repository 'operator script does not resolve the repository root: scripts/operator/'
 
 new_case operator-root-own-directory
-mutate_operator_root preflight-rack-benchmark.sh '")/\.\./\.\." \&\& pwd|")" \&\& pwd'
-expect_diagnostic operator-root-own-directory \
-    'operator script does not resolve the repository root: scripts/operator/preflight-rack-benchmark.sh:'
+mutate_operator_root "$(first_operator_script)" 's|")/\.\./\.\." \&\& pwd|")" \&\& pwd|'
+expect_diagnostic operator-root-own-directory 'operator script does not resolve the repository root: scripts/operator/'
 
 new_case operator-root-unresolvable
-mutate_operator_root run-wasm-kernel-timing.sh '")/\.\./\.\." \&\& pwd|")/../../no-such-directory" \&\& pwd'
+mutate_operator_root "$(first_operator_script)" 's|")/\.\./\.\." \&\& pwd|")/../../no-such-directory" \&\& pwd|'
 expect_diagnostic operator-root-unresolvable 'which is <unresolvable>'
 
 # A re-spelling is refused, not skipped: a check that skipped what it cannot parse could be escaped
 # by any new spelling of the same defect.
 new_case operator-root-unrecognised-spelling
-mutate_operator_root prepare-builtins-listening.sh '^root=.*$|root="$(dirname "$0")/.."'
-expect_diagnostic operator-root-unrecognised-spelling \
-    'operator script root expression is unrecognised at scripts/operator/prepare-builtins-listening.sh:'
+mutate_operator_root "$(first_operator_script)" "${root_line}"'s|\$(cd "\$(dirname "\${BASH_SOURCE\[0\]}")/\.\./\.\." && pwd[^)]*)|$(dirname "$0")/..|'
+expect_diagnostic operator-root-unrecognised-spelling 'operator script root expression is unrecognised at scripts/operator/'
 
 new_case operator-root-removed
-mutate_operator_root seal-web-audioworklet-browser-correctness.sh '^repo_root=.*$|repo_root=.'
-expect_diagnostic operator-root-removed \
-    'operator script computes no repository root from its own location: scripts/operator/seal-web-audioworklet-browser-correctness.sh'
+mutate_operator_root "$(first_operator_script)" "${root_line}d"
+expect_diagnostic operator-root-removed 'operator script computes no repository root from its own location: scripts/operator/'
 
 new_case operator-root-missing-manifest
 rm "$case_root/Cargo.toml"
@@ -181,6 +213,40 @@ expect_diagnostic operator-root-member-manifest \
 new_case operator-scripts-absent
 rm "$case_root"/scripts/operator/*.sh
 expect_diagnostic operator-scripts-absent 'no operator shell scripts under scripts/operator/'
+
+# Sol finding 1: a single surviving script is a valid population; a missing directory is not.
+new_case operator-one-script
+operator_kept=$(first_operator_script)
+for operator_script in "$case_root"/scripts/operator/*.sh; do
+    [[ "${operator_script##*/}" == "$operator_kept" ]] || rm "$operator_script"
+done
+expect_operator_pass operator-one-script ', 1 operator scripts rooted at the workspace)'
+
+new_case operator-directory-absent
+rm -rf "$case_root/scripts/operator"
+expect_diagnostic operator-directory-absent 'no operator shell scripts under scripts/operator/'
+
+# Sol finding 2: an entry named `*.sh` that is not a regular file is not a script. A directory that
+# sorted first once made `read` fail forever on it.
+new_case operator-directory-named-script
+mkdir "$case_root/scripts/operator/aaa.sh"
+expect_operator_pass operator-directory-named-script \
+    ", $operator_script_count operator scripts rooted at the workspace)"
+
+new_case operator-only-directory-named-script
+rm "$case_root"/scripts/operator/*.sh
+mkdir "$case_root/scripts/operator/aaa.sh"
+expect_diagnostic operator-only-directory-named-script 'no operator shell scripts under scripts/operator/'
+
+# Sol finding 3: the root expression is the whole assigned value, so nothing may follow or precede
+# it -- `$(... && pwd)/scripts` names a directory that is not the root.
+new_case operator-root-trailing-path
+mutate_operator_root "$(first_operator_script)" "${root_line}"'s|\(&& pwd\( -P\)\{0,1\})\)|\1/scripts|'
+expect_diagnostic operator-root-trailing-path 'operator script root expression is unrecognised at scripts/operator/'
+
+new_case operator-root-leading-text
+mutate_operator_root "$(first_operator_script)" "${root_line}"'s|=\("\{0,1\}\)\$(cd|=\1/tmp$(cd|'
+expect_diagnostic operator-root-leading-text 'operator script root expression is unrecognised at scripts/operator/'
 
 new_case second-allocator
 printf '\nunsafe impl GlobalAlloc for Second {}\n' \
