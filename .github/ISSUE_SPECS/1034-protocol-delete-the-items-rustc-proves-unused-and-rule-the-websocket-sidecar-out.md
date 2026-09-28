@@ -140,3 +140,120 @@ amendment), **the protocol cannot be removed.**
 5. **Revised recommendation:** retire this draft. Replace it with (a) the draft-01 follow-up for
    the 20 dead protocol items, and (b) a ruling that the sidecar/WebSocket transport is out of
    scope, which edits only AGENTS.md and closes #25.
+
+## Attempt 1 evidence
+
+Terra, attempt 1, branch `codex/1034-protocol-unused-items` from `codex/batch-slim-2`
+(`eca8779d`). Commits `271c220d` (deletions and re-pins), `0745cfaf` (AGENTS.md) and `3ef5f9b9`
+(one stale doc comment). Scope is the owner ruling and Amendment 3: the body's removal plan is
+superseded, so `crates/protocol`, its fuzz targets, corpus, scripts and docs all stay.
+
+### How "unused" was proved
+
+In a scratch copy, every `pub` item, field and re-export of `crates/protocol` was demoted to
+`pub(crate)` (grouped re-exports split one per name). A loop then built every consumer and
+re-promoted exactly the items an error named, until all of these compiled:
+
+- `cargo check --workspace --all-targets --all-features`, and the same without `--all-features`;
+- `cargo check --manifest-path fuzz/Cargo.toml --bins`;
+- `-p capi -p protocol -p host-core -p conformance --all-targets --all-features` for
+  `aarch64-apple-ios` and `aarch64-linux-android`;
+- `-p conformance -p protocol --all-targets --all-features` for `wasm32-unknown-unknown`,
+  scalar and `+simd128` (the conformance golden runner carries protocol onto wasm).
+
+rustc's `dead_code` lint then judged the protocol library in four builds: lib and lib-test
+(`--profile test`), each with and without features. An item was deleted only if it was dead in
+every one of those builds in which it compiles. Items used only by protocol's own tests (66 of
+them) stay, as do the items capi, conformance, host-core, bench, audit and the fuzz targets use.
+
+The same loop, re-run on the changed tree, finds no dead item left.
+
+### Deleted (25 items; file:line at `eca8779d`, all in `crates/protocol/src/`)
+
+Dead in all four builds (20, the audit's count):
+
+| item | where |
+|---|---|
+| `PreparedImmediateCommandFrame::len`, `::is_empty` | `controller.rs:1229`, `:1235` |
+| `CommittedCommandFrame::len`, `::is_empty` | `controller.rs:1330`, `:1336` |
+| `ProtocolController::encode_session_committed_event` | `controller.rs:3543` |
+| `ProtocolController::encode_automation_canceled_event` | `controller.rs:3603` |
+| `TLV_PREFIX_BYTES` (the public copy; `btlv.rs` keeps its private one) | `lib.rs:63` |
+| `CapabilityFlags::B2B_BASE`, `::B3A_BASE` | `message_wire.rs:57`, `:59` |
+| `DecodedAutomationEnqueue::record_bytes`, `DecodedMeterBatch::record_bytes` | `message_wire.rs:439`, `:614` |
+| `ProtocolCodec::encoded_diagnostic_message_len`, `::decode_diagnostic_message` | `message_wire.rs:902`, `:909` |
+| `PreparedSessionTransaction::applied_operations` | `model.rs:728` |
+| `ProtocolQueues::control_used_bytes` (field, read only by the next two) | `queue.rs:650` |
+| `ProtocolQueues::try_enqueue_control`, `::try_dequeue_control`, `::try_dequeue_response` | `queue.rs:773`, `:797`, `:864` |
+| `FrameHeader::kind`, `DecodeScratch::used` | `wire.rs:265`, `:435` |
+
+Dead in every build that compiles them (`cfg(any(test, feature = "test-support"))`; no test,
+tool or target calls them), 5: `MockProviderConfig` (`controller.rs:623`, with its re-export)
+and `MockProvider::try_with_retained_capacity`, `::retained_capacities`,
+`::try_with_retained_capacity_and_automation`, `::new` (`:698`, `:715`, `:726`, `:744`). Tests
+and `audit protocol` build `MockProvider` through `Default`, which stays.
+
+**Kept although rustc flags them:** five re-exports, `SessionCommit`, `EventFrame`, `FrameHeader`,
+`ReplayDecision` and `ReplayHit`. No other crate names them, but the types are live and appear in
+public signatures (`DecodedFrame::header`, `Frame::Event`, `ReplayCache::preflight`,
+`SessionStore`'s commit). Removing the re-export would leave live types unnameable; it deletes no
+code. The product-crate items in "Context" (`RenderMode::wire`, `F32Planar`, spsc `generation`)
+stay because the kept protocol uses them.
+
+### Consequence: 8 bytes smaller, three exact layout pins moved
+
+Dropping `control_used_bytes` shrinks `ProtocolQueues`, held inline by `ProtocolController` and
+the C ABI session handle, by one `usize`. Three tests failed on the first run with exactly -8 and
+were re-pinned with that reason, as #1023 and #1024 did:
+`ProtocolController<MockProvider>` 6,040 → 6,032 (`controller/tests.rs`); active CAPI 160,901 →
+160,893, double-live CAPI 204,319 → 204,311 (both occurrences) and tiny-frame 178,434 → 178,426
+(`capi/tests/resource_lifecycle.rs`). This is the one edit outside `crates/protocol`.
+
+### AGENTS.md
+
+"Interfaces and transports" only: the sentence promising a local IPC sidecar and optional binary
+WebSocket now says both are out of scope until a new issue reopens them (ruling R3; #25 closes
+as descoped), and a reopened transport never sits in a render path. The protocol sentences, the
+RFC 6455 citation in the research list and every other paragraph are unchanged.
+
+### Size
+
+`git diff --shortstat eca8779d..3ef5f9b9`: 9 files, **22 insertions, 332 deletions**. Protocol
+production code: 314 lines removed, 5 added (`controller.rs` -227, `queue.rs` -42/+3,
+`message_wire.rs` -28, `wire.rs` -16, `model.rs` -6, `lib.rs` -4/+2). Tests: +16/-8 (re-pins and
+their comments). AGENTS.md: 1/1.
+
+### Gates (all on this machine, `CARGO_INCREMENTAL=0`)
+
+| gate | result |
+|---|---|
+| `cargo check --locked --workspace --all-targets --all-features` | pass, no warnings |
+| `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | pass |
+| `cargo fmt --all -- --check` | pass |
+| `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps` (and `-p protocol --all-features`) | pass |
+| `cargo check --locked --target {aarch64-apple-ios,aarch64-linux-android} --lib --all-features` over every `crates/*` and `hosts/*` package | pass |
+| `cargo check --locked --target {ios,android} -p capi -p protocol -p host-core -p conformance --all-targets --all-features` | pass |
+| `RUSTFLAGS='-C target-feature=+simd128' cargo check --locked --target wasm32-unknown-unknown -p host-web -p conformance -p protocol -p target-smoke`; scalar `-simd128` for `-p protocol -p conformance -p host-core` | pass |
+| `cargo check --locked --manifest-path fuzz/Cargo.toml --bins` | pass |
+| `cargo test --locked --no-fail-fast --all-features -p protocol -p capi -p conformance -p host-core -p host-web` | 598 passed, 0 failed, 4 ignored |
+| `bash scripts/check-capi-abi.sh` and `--self-test` | pass |
+| `target/release/audit capi` (CI's release package set) | 0 violations, same record shape |
+| `bash scripts/run-protocol-allocation-audit.sh target/release/audit` | pass |
+| `bash scripts/check-protocol-wasm-parity.sh` | pass (scalar + simd128) |
+| the 41 policy scripts and mutation tests of `qualification.yml`'s policy steps (`python3 -B` for the Python ones, incl. `check-ci-path-routing.py`, `check-script-reachability.py`, `check-release-shape.py --self-test`) | all pass |
+
+**`cargo test -- --list` diff: empty.** `cargo test --locked --workspace --all-features -- --list`
+on base (`git archive eca8779d`) and change: 2,331 tests and benches in the same 253 test
+binaries, identical. No test was added or removed.
+
+The shipped AudioWorklet cannot move: `cargo tree -p host-web --target wasm32-unknown-unknown -e
+normal` has no `protocol`.
+
+### Not caused by this change (pre-existing, for the record)
+
+- `cargo fmt --check` run inside `fuzz/` (outside the workspace) reports formatting in
+  `fuzz_targets/protocol_support.rs`; no fuzz file is touched here.
+- For aarch64 `--all-targets`, `host-core`'s x86-only `tests/fp_environment.rs` warns six
+  unused helpers (#1017's territory).
+- An aarch64 `--workspace` check needs cross C compilers for `blake3` (native-pcm-runner,
+  stem-hasher) and `wasmtime` build scripts; those tools are not product crates.
