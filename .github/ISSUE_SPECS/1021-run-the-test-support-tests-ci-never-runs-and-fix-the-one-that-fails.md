@@ -141,3 +141,226 @@ Reproduced on `a9414c0c`; see `../VERIFY-DEAD-CODE.md`, finding F1.
    pair). If R9 is ruled "keep", or waits, nothing repairs the wasm console scripts. See the new
    draft `00b-repair-the-operator-script-roots.md`.
 5. **Mobile scope.** No change to this draft. Instrumented builds are native x86 only.
+
+## Attempt 1 evidence
+
+Implementer: Terra (Claude Opus 5.5), branch `codex/1021-run-test-support-tests` from
+`codex/batch-slim-1` at `d70956bf`. Commits: `cb6cb530` (the test), `df847b72` (CI features and
+the guard). Nothing is pushed.
+
+### Step 1: the failing test (test-only)
+
+- **Reproduced on the base.** `tests.rs:3220`, `process_calls` left 2, right 1.
+- **Cause, as Amendment 1 says.** #916 (`608f0379`, scope amendment `9c762d7c`) made the session
+  Output dedicated storage, so track 0 pairs. Tracks 0-7 now take one fused eight-lane bank call
+  before the track-8 tail.
+- **Witness on the base:** `process_calls 2`, `fused_calls 2`, `fallback_calls 0`,
+  `process_members 9` (8 + 1), records drained 1 and 1. This is the intended dispatch, not a
+  regression.
+- **Edit.** The counts become 2, 9, 2 (`fused + fallback`) and 2 (`fused`).
+  - The `process_members` message now reads "eight bank members plus the one scalar track-8 tail
+    member".
+  - The claim "the acknowledged records reached the selected track-8 tail" moves to the per-call
+    witness that already exists: `first_left_bits`/`first_right_bits`, which the last call records.
+    Only track 8 carries the acknowledged -6 dB and `[0.5, 0, 0, 1]`.
+  - The `fused_calls` message now says both calls fuse.
+  - Nothing else in the test and no other test changes.
+- **The claim still discriminates.** In a red run with both records aimed at track 0 instead of
+  track 8, the counts still pass, but the reworded assertion fails with `0.5`: that is track 8's
+  identity output.
+- **A per-call member field was tried and dropped.** I added `first_output_members` to the
+  test-support witness in `builtins-compiler/src/lib.rs`, compiled only under
+  `cfg(any(test, feature = "test-support"))`. It moved the shipped artifact anyway:
+  `4288feac…` against the pin `476e58ad…`.
+  - The cause is line numbers. Inserting lines in that file shifts the panic-location line numbers
+    compiled into the release wasm.
+  - A single added comment line inside the test-support-only struct also moved it (`eb545691…`).
+  - Amendment 1 says the artifact cannot move, so the test uses the existing output witness
+    instead.
+
+### Step 2: the CI features
+
+The guard (below) found two packages the audit missed: `protocol` and `builtins`.
+
+| job | `--features` added | what now runs |
+|---|---|---|
+| `test-debug-a` | `host-web/test-support`, `host-core/test-support`, `effect-compiler/test-support`, `protocol/test-support` | the 4 tests from Amendment 2, protocol's `controller_facade_preparation_has_one_queue_allocation_authority`, and the gated blocks in host-web and host-core |
+| `test-debug-b` | `parametric-eq/test-support`, `builtins/test-support` | the gated pass-count blocks in `parametric-eq` `tests/bank.rs` and the peak-merge block in `builtins` `tests/meter.rs` |
+
+- **Forwarding makes some entries redundant.** `host-web/test-support` also forwards to
+  `host-core`, `effect-compiler`, `builtins-compiler` and `parametric-eq`. The explicit entries
+  follow the brief.
+- **The comments above both steps are rewritten.** The old test-debug-a comment said every named
+  feature is unified in anyway. That was true only for `builtins-compiler` and `graph`: nothing
+  enables `source/test-support` under that step without the flag.
+- **Workflow shape.** Job names, the router, leaf `route` gating and the verdict table are
+  unchanged. The lint job gains one step (the guard). No job is added.
+
+### Step 3: test lists (`cargo test <job command> -- --list`, names with their binary)
+
+- **test-debug-a:** 1529 names before, 1534 after. The five added names:
+  - `host_web` `tests::acknowledged_pair_render_records_the_same_live_dispatch`;
+  - `host_web` `tests::prepared_eq_owner_transaction_is_design_and_allocation_free_after_preparation`;
+  - `host_web` `tests::prepared_mixed_eq_builtin_fader_commits_and_refuses_atomically`;
+  - `observation_demand` `dormant_controlled_spectrum_does_no_capture_work_on_render`;
+  - `delivery_ownership` `controller_facade_preparation_has_one_queue_allocation_authority`.
+- **test-debug-b:** 834 names before and after. Its gain is gated assertions only.
+- **The "after" lists are the baseline** for later cleanup drafts. The same lists come out of the
+  final tree.
+
+**Gated blocks proven to execute.** In each red run I altered one assertion or counter in a
+scratch edit, ran with and without the feature, then restored the file.
+
+| block | mutation | feature on | feature off |
+|---|---|---|---|
+| host-web spectrum counts (`protected_eq_boot_is_dormant…`, `protected_eq_controls_use_native_receipts…`) | `assert_eq!` to `assert_ne!` | 2 FAILED | 2 ok |
+| host-core `observation_demand.rs` (`continuous_spectrum_replaces…`, `protected_track_spectrum_preserves…`) | `assert_eq!` to `assert_ne!` | 2 FAILED | 2 ok |
+| parametric-eq `bank.rs` pass counts | counts forced to 0 | `odd_live_counts_render_the_base_bits`, `admitted_blocks_render_the_base_bits_without_selects` FAILED | 11 ok |
+| builtins `meter.rs` peak merges | count + 1 | `a_block_peak_merge_publishes_the_scalar_meters_snapshots` FAILED | 13 ok |
+
+The first parametric-eq mutation (count + 1) stayed green. Those assertions use `after - before`
+deltas and `> 0`, so they had to be forced to 0 instead.
+
+### Recurrence guard
+
+`scripts/check-test-support-ci.py` is static: it needs no toolchain and reads only the manifests
+and `qualification.yml`.
+
+- **The rule.** Every workspace package that declares `test-support` needs an unconditional,
+  whole-package `cargo test` step that enables `<pkg>/test-support`, in `--features` or by
+  `[features]` forwarding.
+  - "Whole-package" means: it selects the package, has no `--no-run`, no narrower target than
+    `--all-targets`/`--tests`, and no harness filter.
+  - A feature turned on by a dependency declaration does not count, because a local
+    `cargo test -p <pkg>` would not reproduce it.
+- **It fails on the base:** `builtins, effect-compiler, host-core, host-web, parametric-eq,
+  protocol`. It passes now, for all 10 packages.
+- **`scripts/test-test-support-ci.py`** holds 20 hermetic mutation cases: 17 must fail and 3 must
+  pass. Each red case asserts the exact set of packages reported as uncovered. It goes red when:
+  - any non-redundant feature, or all of them, is removed from test-debug-a or test-debug-b;
+  - host-web is excluded;
+  - the step gets a step-level `if:`, `--no-run`, `--lib`, a harness filter or a positional
+    filter;
+  - the feature appears only in a shell comment;
+  - a new package declares `test-support`;
+  - a feature name is misspelt;
+  - host-web's manifest stops forwarding `host-core/test-support`.
+
+  It stays green when a redundant entry is removed and forwarding still covers it. The unmutated
+  baseline must pass and report every declaring package.
+- **The guard runs in the lint job.** `check-ci-path-routing.py` pins that step, and a new
+  mutation case in `test-ci-path-routing.py` covers the pin.
+
+### Objective gates
+
+1. **Tests.** Both job commands pass with the new features, from a workspace with cleaned
+   workspace members:
+   - test-debug-a: 1526 passed, 0 failed, 10 ignored. Before: 1521 passed.
+   - test-debug-b: 807 passed, 0 failed, 28 ignored.
+   - The audit's four-crate command: 589 passed, 0 failed, 8 ignored. The audit got 588 passed and
+     1 failed.
+2. **Builds.** Both pass:
+   - `cargo clippy --locked --workspace --all-targets -- -D warnings`, and the same with
+     `--all-features`;
+   - `RUSTFLAGS='-C target-feature=+simd128' cargo check --locked --target wasm32-unknown-unknown -p host-web`.
+3. **Console digests.** `gain_pan_profile` `digests` output is byte-identical on base and change,
+   apart from the `finished in` timing line. `d70956bf..HEAD` changes only one Rust file,
+   `hosts/host-web/src/tests.rs`.
+4. **Shipped artifact.** `scripts/build-web-audioworklet.sh` in pinned mode passes: the build equals
+   the pin `476e58ad…`. There is no repin.
+5. **Routing.** `check-ci-path-routing.py` and `test-ci-path-routing.py` pass. The workflow parses
+   as YAML.
+6. **Nothing deleted.** The only test edit is the one step 1 justifies.
+
+**Also passing:** `cargo fmt --check`, and every hermetic lint-job policy pair: workspace, session,
+env-vocabulary, bench, host-core, protocol-control, realtime, realtime-audit-leak,
+artifact-evidence-leak, lane, rack, builtins, graph, effect-runtime, conformance-boundaries,
+parametric-eq render contract, and the release-shape self-test.
+
+### CI wall time
+
+Measured locally on 32 cores, one run each. `cargo clean --workspace` ran first, keeping
+dependencies as rust-cache does.
+
+| step | before | after | change |
+|---|---|---|---|
+| test-debug-a | 247.3 s | 249.6 s | +2.3 s, about 1% (compile 10.1 s to 11.7 s; the new tests' binaries +0.05 s) |
+| test-debug-b | 227.4 s | 227.7 s | +0.3 s (noise) |
+| lint job | | | about +2 s: the guard 0.1 s, its mutations 1.8 s, plus two path-routing mutation cases |
+
+On the 4-vCPU runner, expect roughly +10 s on test-debug-a from compiling the extra test-support
+code; the added tests themselves take under 0.1 s. No external crate's features change, so the
+rust-cache dependency caches stay valid.
+
+### Not done
+
+- No push, PR or GitHub edit.
+- The operator-script half (Amendment 4) belongs to 00b.
+
+## Sol attempt 1 verdict: PASS
+
+Reviewer: Sol (Claude Opus 5.5), on `86b96383` in the `engine-1021` worktree, with
+`CARGO_INCREMENTAL=0`. Nothing is pushed.
+
+**1. The counts are #916's intended dispatch.** I instrumented the fader-matrix witness in scratch
+`git archive` extracts, with every file touched so that no stale artifact from a shared target
+could be reused, and ran the test at each commit.
+
+| commit | pair calls per render (members) | result |
+|---|---|---|
+| `86be6792` (parent) | one call, the one-lane track-8 tail | pass |
+| `608f0379` (#916) | an eight-lane `FaderMatrixBankProcessor` call over tracks 0-7, then the one-lane tail | `tests.rs:3220` fails, 2 against 1 |
+| `9c762d7c` | the same as `608f0379` | fails |
+
+- The bank call is fused, drains nothing, and outputs 0.5. The tail is fused, drains one fader
+  record and one matrix record, and outputs 0.1252968.
+- That gives 2 calls, 9 members, 2 fused, 0 fallback, and 1 and 1 records drained: exactly the
+  edited assertions.
+- The first failing commit is `608f0379`. #916 made the Output dedicated storage, so the cohort
+  that contains track 0 now fuses.
+
+**2. The output witness discriminates.** Each of these mutations fails at the reworded assertion
+(`tests.rs:3236`) with `0.5`:
+
+- both records staged to track 0;
+- both records staged to track 7, inside the bank;
+- in the product, host-web admission changed to `(track + 1) % track_count`;
+- in the product, host-web admission changed to `track - 1`.
+
+A record fanned out to two tracks would also raise `*_records_drained`, which the test pins at 1.
+
+**3. Guard coverage.** It is complete for every package that declares `test-support`, and it fails
+closed on parser drift.
+
+- It goes red, as tested, for: a new declaring package, `--list`, `--ignored`, `--no-run`, name
+  filters, and removing a feature.
+- A covering step in a job outside the verdict is refused by `check-ci-path-routing.py`. A job
+  with `if: false` fails the verdict table.
+- Every other `cfg(feature)` that gates tests is on today:
+  - `lane` and `realtime-audit` are named on the command line;
+  - `c-abi` comes from effect-package's own dev-dependency;
+  - `control-provider` comes from capi, unified under `--workspace`: 20 + 10 tests run in
+    test-debug-a.
+
+  Non-blocking follow-ups:
+
+  - (a) The guard is bound to the name `test-support`. A renamed test feature that is also dropped
+    from CI passes.
+  - (b) Failure masking passes both this guard and the routing checker: a step or job with
+    `continue-on-error: true`, `|| true` or `; exit 0` after `cargo test`, or a shell `if false`.
+    This is a gap for every job, not one #1021 introduced.
+
+**4. Workflow.** The diff adds one lint step, the features and comments, and nothing else. The
+router, the leaf `route` gating, the job names and the verdict table are unchanged.
+`check-ci-path-routing.py` and `test-ci-path-routing.py` pass. Both new scripts pass (20 cases,
+1.8 s). The new paths route to `full`.
+
+**5. Runs.**
+
+- test-debug-a: 1526 passed, 0 failed, 10 ignored, 1534 listed. All five new tests ran.
+- test-debug-b: 807 passed, 0 failed, 28 ignored.
+- The builtins peak-merge block is red with a count + 1 when its feature is on, and green when it
+  is off.
+- `cargo fmt --check` and the host-web `--all-features` clippy are clean.
+- `build-web-audioworklet.sh` in pinned mode produces `476e58ad…`, equal to the pin.
+- Not re-measured: CI wall time.

@@ -3217,21 +3217,31 @@ fn acknowledged_pair_render_records_the_same_live_dispatch() {
     builtins_compiler::test_only_reset_fader_matrix_witness();
     feed_and_render(&mut host, 2, 0, 0.5);
     let witness = builtins_compiler::test_only_fader_matrix_witness();
-    assert_eq!(witness.process_calls, 1);
+    // #916 (608f0379, scope amendment 9c762d7c) made the session Output dedicated storage, so
+    // track 0 pairs: tracks 0-7 now take one fused eight-lane bank call before the track-8 tail.
+    // `process_members` sums both calls. The per-call witness is the first output sample, which
+    // the last call records: only track 8 carries the acknowledged -6 dB and [0.5, 0, 0, 1].
     assert_eq!(
-        witness.process_members, 1,
-        "the acknowledged records reached the selected scalar track-8 tail"
+        witness.process_calls, 2,
+        "one eight-lane bank call over tracks 0-7 and the scalar track-8 tail"
+    );
+    assert_eq!(
+        witness.process_members, 9,
+        "eight bank members plus the one scalar track-8 tail member"
     );
     assert_eq!(witness.fader_records_drained, 1);
     assert_eq!(witness.matrix_records_drained, 1);
     let selected_left = f32::from_bits(witness.first_left_bits);
     let selected_right = f32::from_bits(witness.first_right_bits);
-    assert!(selected_left > 0.11 && selected_left < 0.14);
+    assert!(
+        selected_left > 0.11 && selected_left < 0.14,
+        "the acknowledged records reached the selected track-8 tail, the last call: {selected_left}"
+    );
     assert_eq!(selected_right.to_bits(), (selected_left * 2.0).to_bits());
-    assert_eq!(witness.fused_calls + witness.fallback_calls, 1);
+    assert_eq!(witness.fused_calls + witness.fallback_calls, 2);
     assert_eq!(
-        witness.fused_calls, 1,
-        "acknowledged commands settle before this call"
+        witness.fused_calls, 2,
+        "both calls fuse: the acknowledged commands settle before the tail call"
     );
     assert_eq!(report.applied_at_sample, u64::from(QUANTUM));
     let output = host.output_pcm().expect("output");
