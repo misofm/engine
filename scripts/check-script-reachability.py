@@ -3,9 +3,10 @@
 
 Issue #1027. `scripts/operator/README.md` states the rule; nothing checked it, and by
 2026-09-28 eighteen files had quietly stopped being reached: seventeen used-up one-shot
-benchmark runners, validators and fixtures whose records were long sealed, and the live console
-benchmark a person runs. A file that no workflow reaches is either a tool a person runs, which
-belongs in `scripts/operator/`, or dead.
+benchmark runners, validators and fixtures whose records were long sealed (deleted), and the live
+console benchmark a person runs (moved to `scripts/operator/`). A file that no workflow reaches is
+either a tool a person runs, which belongs in `scripts/operator/`, or dead. There are no
+exceptions.
 
 Reachability is a fixed point over mentions. The seeds are every workflow under
 `.github/workflows/` and every `package.json` (the npm scripts a workflow runs). A reached file
@@ -24,9 +25,6 @@ are themselves reached. Rust sources are deliberately not carriers: an `#[ignore
 scripts/..."]` note or a doc string would otherwise keep a dead runner alive, which is exactly
 how the one-shots this rule caught hid.
 
-`NAMED_EXCEPTIONS` lists the files allowed to be unreached, each with its reason. An exception
-that is reached again, or no longer exists, fails too, so the list cannot rot.
-
 The checker is static and launches nothing. `scripts/test-script-reachability.py` proves it
 rejects each protected mutation.
 """
@@ -39,15 +37,9 @@ import subprocess
 import sys
 
 OPERATOR = "scripts/operator/"
-NAMED_EXCEPTIONS = {
-    "scripts/run-console-benchmark.sh": (
-        "the live native console benchmark, run by a person; its move to scripts/operator/ "
-        "waits for #1025, which rewrites the same file in the same batch"
-    ),
-}
 # This rule's own checker and mutation test name scripts as data, never to run them, so they are
-# reached (a workflow runs them) but never carriers: otherwise `NAMED_EXCEPTIONS` would reach every
-# exception it lists.
+# reached (a workflow runs them) but never carriers: otherwise the test's own mention of a library
+# would keep it alive after its last real reference went.
 SELF = ("scripts/check-script-reachability.py", "scripts/test-script-reachability.py")
 HASH_COMMENTS = (".sh", ".bash", ".py", ".jq", ".yml", ".yaml")
 SLASH_COMMENTS = (".mjs", ".cjs", ".js", ".ts")
@@ -164,22 +156,16 @@ def main() -> int:
         return 1
     problems = []
     for path in governed:
-        if path not in reached and path not in NAMED_EXCEPTIONS:
+        if path not in reached:
             problems.append(f"unreached from any workflow: {path} (wire it into a workflow, "
                             f"move a tool a person runs to {OPERATOR}, or delete it)")
-    for path in sorted(NAMED_EXCEPTIONS):
-        if path not in paths:
-            problems.append(f"named exception no longer exists: {path}")
-        elif path in reached:
-            problems.append(f"named exception is reached again; remove it from the list: {path}")
     if problems:
         for problem in problems:
             print(f"script reachability failure: {problem}", file=sys.stderr)
         return 1
     operator = sum(1 for path in paths if path.startswith(OPERATOR))
-    print(f"script reachability: ok ({len(governed) - len(NAMED_EXCEPTIONS)} files under scripts/ "
-          f"reached from workflows, {operator} under {OPERATOR} exempt, "
-          f"{len(NAMED_EXCEPTIONS)} named exception)")
+    print(f"script reachability: ok ({len(governed)} files under scripts/ reached from workflows, "
+          f"{operator} under {OPERATOR} exempt)")
     return 0
 
 

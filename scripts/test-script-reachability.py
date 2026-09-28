@@ -4,8 +4,7 @@
 Each case copies the repository's workflows, `scripts/`, every `package.json` and every other
 shell/Python/jq/JavaScript/TypeScript/YAML file outside `artifacts/`, `docs/` and the issue specs
 into a scratch Git work tree, applies one mutation and runs the checker there. The unmutated
-scratch must pass and report its one named exception, or each "refused" below could be refusing
-for an unrelated reason.
+scratch must pass, or each "refused" below could be refusing for an unrelated reason.
 """
 from __future__ import annotations
 
@@ -24,7 +23,6 @@ NOT_COPIED = ("artifacts/", "docs/", ".github/ISSUE_SPECS/")
 # The lint step every case anchors a new workflow line on. It must occur exactly once.
 ANCHOR = "          python3 -B scripts/check-script-reachability.py\n"
 DEAD = "scripts/run-one-shot-benchmark.sh"
-EXCEPTION = "scripts/run-console-benchmark.sh"
 JQ_LIBRARY = "scripts/protocol-benchmark-record-validator.jq"
 
 Mutation = Callable[[pathlib.Path], None]
@@ -79,12 +77,6 @@ def write(relative: str, text: str) -> Mutation:
     return apply
 
 
-def remove(relative: str) -> Mutation:
-    def apply(root: pathlib.Path) -> None:
-        (root / relative).unlink()
-    return apply
-
-
 def remove_tree(relative: str) -> Mutation:
     def apply(root: pathlib.Path) -> None:
         shutil.rmtree(root / relative)
@@ -127,7 +119,7 @@ DEAD_SCRIPT = write(DEAD, "#!/usr/bin/env bash\necho one-shot\n")
 
 def main() -> int:
     baseline = outcome([])
-    if baseline.returncode != 0 or "1 named exception" not in baseline.stdout:
+    if baseline.returncode != 0:
         raise AssertionError(f"unmutated scratch rejected: {baseline.stdout}{baseline.stderr}")
     cases = 0
 
@@ -204,16 +196,6 @@ def main() -> int:
     # scripts/operator/ is exempt by design.
     passes("an unreached operator tool", write("scripts/operator/new-tool.sh", ":\n"))
     cases += 1
-
-    # The named-exception list cannot rot in either direction.
-    stale = outcome([workflow_line(f"          bash {EXCEPTION} --help")])
-    if stale.returncode == 0 or f"named exception is reached again; remove it from the list: " \
-            f"{EXCEPTION}" not in stale.stderr:
-        raise AssertionError(f"a reached exception was accepted: {stale.stderr}")
-    gone = outcome([remove(EXCEPTION)])
-    if gone.returncode == 0 or f"named exception no longer exists: {EXCEPTION}" not in gone.stderr:
-        raise AssertionError(f"a missing exception was accepted: {gone.stderr}")
-    cases += 2
 
     # No workflow directory is a refusal, not a vacuous pass.
     empty = outcome([remove_tree(".github/workflows")])

@@ -75,7 +75,7 @@ jq -n -S \
     --arg fixture_generator_sha256 "$(sha256sum scripts/derive-intended-console-fixture.py | awk '{print $1}')" \
     --arg mono_fixture_sha256 "$(sha256sum fixtures/session/v1/console-sixty-four-track-mono.json | awk '{print $1}')" \
     --arg mono_fixture_generator_sha256 "$(sha256sum scripts/derive-mono-console-fixture.py | awk '{print $1}')" \
-    --arg runner_sha256 "$(sha256sum scripts/run-console-benchmark.sh | awk '{print $1}')" \
+    --arg runner_sha256 "$(sha256sum scripts/operator/run-console-benchmark.sh | awk '{print $1}')" \
     --arg record_validator_sha256 "$(sha256sum scripts/console-benchmark-record-validator.jq | awk '{print $1}')" \
     --arg aggregate_validator_sha256 "$(sha256sum scripts/console-benchmark-validator.jq | awk '{print $1}')" \
     --arg library_sha256 "$(sha256sum scripts/console-benchmark-record-lib.jq | awk '{print $1}')" \

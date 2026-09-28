@@ -19,9 +19,8 @@ for everything above this directory:
 
 That rule is mechanically checked: `scripts/check-script-reachability.py` (run
 by the lint job) fails on any file above this directory that no workflow
-reaches, and lists the one named exception with its reason. The rule exists
-because it was previously false in a way nobody could see. Historical note: the retired
-`scripts/sweep.sh` ran 102 gate
+reaches. The rule exists because it was previously false in a way nobody could
+see. Historical note: the retired `scripts/sweep.sh` ran 102 gate
 rows and was invoked by no workflow and by no human — so a crate move
 silently blinded five gates while the suite printed 101/101 PASS, and a
 rename left a C-ABI evidence ledger verifying 0 of its 26 rows. Both were
