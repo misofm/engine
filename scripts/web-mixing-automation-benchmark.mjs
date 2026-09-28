@@ -18,13 +18,21 @@
 // `mixing_automation_controls` example rather than transcribed, and each base is checked against
 // the document this arm boots.
 //
+// The input is not the native row's (#1011). The native row binds each track to one frozen
+// 128-frame block of the tone, phase-offset by track and repeated every block
+// (`console_workload::source_block`). This arm streams the fixture's one source, so every track
+// reads the same tone, in phase and continuous across blocks. The rate and the amplitude are the
+// native tone's, from the same table. Both feeds are stated in the record, because how a limiter
+// engages depends on them.
+//
 // usage: node --no-liftoff web-mixing-automation-benchmark.mjs preflight MODULE.wasm CONTROLS.json
-//        node --no-liftoff web-mixing-automation-benchmark.mjs run MODULE.wasm CONTROLS.json
+//        node --no-liftoff web-mixing-automation-benchmark.mjs run MODULE.wasm CONTROLS.json ROUND
 //
 // `preflight` is untimed: seven arms over the pre-roll and the preflight blocks, and the row's
 // premises asserted on their digests. `run` asserts the same premises first, then times the three
-// arms alternated per observation and prints one JSON record. Every assertion throws, so a broken
-// premise exits non-zero before any number is printed.
+// arms alternated per observation and prints one JSON record for ROUND (`warmup`, `1` or `2`; the
+// runner launches one process per round, as the console runner does). Every assertion throws, so
+// a broken premise exits non-zero before any number is printed.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -79,12 +87,14 @@ const SOURCE_RING_FRAMES = (() => {
 // Inputs: the module, the native row's control table, and the session document.
 // ---------------------------------------------------------------------------------------------
 
-const [mode, modulePath, controlsPath] = process.argv.slice(2);
-if (!["preflight", "run"].includes(mode) || modulePath === undefined || controlsPath === undefined
-    || process.argv.length !== 5) {
-  process.stderr.write("usage: web-mixing-automation-benchmark.mjs preflight|run MODULE.wasm CONTROLS.json\n");
+const [mode, modulePath, controlsPath, roundArgument] = process.argv.slice(2);
+const ROUNDS = { warmup: 0, 1: 1, 2: 2 };
+if (!((mode === "preflight" && process.argv.length === 5)
+      || (mode === "run" && process.argv.length === 6 && Object.hasOwn(ROUNDS, roundArgument)))) {
+  process.stderr.write("usage: web-mixing-automation-benchmark.mjs preflight MODULE.wasm CONTROLS.json | run MODULE.wasm CONTROLS.json warmup|1|2\n");
   process.exit(2);
 }
+const ROUND = mode === "run" ? ROUNDS[roundArgument] : null;
 const moduleBytes = readFileSync(modulePath);
 const moduleSha256 = createHash("sha256").update(moduleBytes).digest("hex");
 const pinnedSha256 = readFileSync(new URL(PIN_FILE, ROOT), "utf8").trim();
@@ -93,6 +103,21 @@ assert.equal(table.fixture_id, FIXTURE_ID, "the control table names another fixt
 assert.equal(table.controls.length, 8, "the row automates eight controls");
 const PREROLL = table.preroll_blocks;
 const PREFLIGHT_BLOCKS = table.preflight_blocks;
+// The native tone's rate and amplitude, streamed continuously and in phase on every track.
+const NATIVE_FEED = table.native_input_feed;
+assert.equal(NATIVE_FEED.waveform, "sine", "the native feed is a sine");
+assert.equal(NATIVE_FEED.continuous_across_blocks, false, "the native feed is a frozen block");
+const TONE_RADIANS_PER_FRAME = NATIVE_FEED.radians_per_frame;
+const TONE_AMPLITUDE = NATIVE_FEED.amplitude;
+const INPUT_FEED = {
+  waveform: "sine",
+  radians_per_frame: TONE_RADIANS_PER_FRAME,
+  amplitude: TONE_AMPLITUDE,
+  track_phase_radians: 0,
+  delivery: "streamed_source",
+  block_frames: Q,
+  continuous_across_blocks: true,
+};
 
 const fixtureText = readFileSync(new URL(FIXTURE_ID, ROOT), "utf8");
 const fixture = JSON.parse(fixtureText);
@@ -221,12 +246,13 @@ function boot() {
   };
 }
 
-// The tone: one 130 Hz sine the mono fixture maps onto both channels of every track.
+// The tone: one continuous sine on the fixture's one source. The mono fixture maps source channel
+// 0 onto both channels of every track, so the right plane is carried and never read.
 function feed(engine) {
   const block = Number(engine.frame / BigInt(Q));
   for (let i = 0; i < Q; i++) {
-    const t = (block * Q + i) * 0.017;
-    engine.left[i] = Math.sin(t) * 0.6;
+    const t = (block * Q + i) * TONE_RADIANS_PER_FRAME;
+    engine.left[i] = Math.sin(t) * TONE_AMPLITUDE;
     engine.right[i] = -Math.sin(t) * 0.45;
   }
   const idPointer = engine.e.miso_engine_web_v1_buffer_ptr(engine.handle, BUFFER_SOURCE_ID);
@@ -289,6 +315,13 @@ function submit(state, arm = state.arm) {
   if (arm === "quiet" || state.controls.length === 0) return;
   const block = state.engine.block;
   const records = state.controls.map((control) => ({ ...control, value: Math.fround(value(control, arm, block)) }));
+  // A restatement pushes exactly the held value (#1011): the digests cannot say so for a limiter,
+  // which does not engage near its held ceiling.
+  if (arm === "restated") {
+    for (const record of records) {
+      assert.equal(record.value, Math.fround(record.base), `${record.track_id}: restated value`);
+    }
+  }
   const reply = state.engine.control.submitSync(encode(records), records.length);
   state.submitted += records.length;
   if (reply.result === RESULT_OK) state.admitted += reply.admitted;
@@ -394,10 +427,14 @@ const record = {
   schema_version: 1,
   issue: 1003,
   record: "web_mixing_automation",
+  round: ROUND,
   workload_kind: "sixty_four_track_console_mono_mixing_automation",
   fixture_id: FIXTURE_ID,
   source_frames: SOURCE_FRAMES,
   tracks: fixture.tracks.length,
+  input_signal: "tone",
+  input_feed: INPUT_FEED,
+  native_input_feed: NATIVE_FEED,
   sample_rate_hz: RATE,
   quantum_frames: Q,
   module_sha256: moduleSha256,
@@ -413,9 +450,10 @@ const record = {
   pairing: "alternating_per_observation",
   arms: ARMS,
   controls: table.controls.map((control) => ({
-    track_id: control.track_id, effect: control.effect, parameter: control.parameter,
+    track_id: control.track_id, slot_id: control.slot_id, effect: control.effect,
+    parameter: control.parameter, parameter_index: control.parameter_index,
     parameter_id: control.parameter_id, lowering: control.lowering, base: control.base,
-    even_value: control.even_value, odd_value: control.odd_value,
+    step: control.step, even_value: control.even_value, odd_value: control.odd_value,
   })),
   command_records_per_block: table.controls.length,
   records_admitted: Object.fromEntries(arms.map((state) => [state.arm, state.admitted])),
@@ -431,10 +469,11 @@ const record = {
   automated_output_sha256: digests[2],
   preflight_output_sha256: preflightDigests,
   bit_identity: "quiet == restated, asserted in-run",
-  bank_collapse_counters: "not exported by host_web.wasm; the native row states them",
+  // host_web.wasm exports no collapse counter; the native row states them.
+  bank_collapse_counters_exported: false,
   loadavg_start: loadStart,
   loadavg_end: loadEnd,
   descriptive_only: true,
-  statistical_method: "three arms alternated per observation; nearest-rank percentiles over per-block nanoseconds of miso_engine_web_v1_render alone; ramp delta is automated minus restated and collapse delta is restated minus quiet, per observation; descriptive only; no threshold",
+  statistical_method: "three arms alternated per observation; one warmup launch and two measured launches; nearest-rank percentiles over per-block nanoseconds of miso_engine_web_v1_render alone; ramp delta is automated minus restated and collapse delta is restated minus quiet, per observation; descriptive only; no threshold",
 };
 process.stdout.write(`${JSON.stringify(record)}\n`);

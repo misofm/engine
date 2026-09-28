@@ -1707,6 +1707,17 @@ fn graph_caps() -> graph::GraphCompileCaps {
 /// Values in one track's frozen input block: `QUANTUM` left samples then `QUANTUM` right.
 pub const SOURCE_BLOCK_VALUES: usize = QUANTUM * 2;
 
+/// The tone's phase advance per frame, in radians (about 130 Hz at 48 kHz).
+///
+/// Named (issue #1011) so the browser arm of `console_mixing_automation`, which streams a tone of
+/// its own through the web host, can state its tone against this one from the constants rather
+/// than from a transcription. [`source_block`] computes exactly what it always did.
+pub const TONE_RADIANS_PER_FRAME: f32 = 0.017;
+/// The tone's per-track phase offset, in radians: track `t` starts its block at `t` times this.
+pub const TONE_TRACK_PHASE_RADIANS: f32 = 0.31;
+/// The tone's left-channel peak amplitude. The right channel is the left scaled by `-0.75`.
+pub const TONE_AMPLITUDE: f32 = 0.6;
+
 /// One track's frozen input block, left channel followed by right.
 ///
 /// # Why this is public
@@ -1726,7 +1737,10 @@ pub fn source_block(track: usize, silent: bool) -> Vec<f32> {
     let mut values = vec![0.0; SOURCE_BLOCK_VALUES];
     if !silent {
         for frame in 0..QUANTUM {
-            let value = ((frame as f32) * 0.017 + track as f32 * 0.31).sin() * 0.6;
+            let value = ((frame as f32) * TONE_RADIANS_PER_FRAME
+                + track as f32 * TONE_TRACK_PHASE_RADIANS)
+                .sin()
+                * TONE_AMPLITUDE;
             values[frame] = value;
             values[QUANTUM + frame] = -value * 0.75;
         }

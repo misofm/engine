@@ -6,21 +6,32 @@
 # module built with the delivery recipe, booted and driven under Node's V8 through
 # `prepared-control.js` and `miso_engine_web_v1_command_submit` exactly as the SDK drives it, with
 # `miso_engine_web_v1_render` alone inside the clock (`scripts/web-mixing-automation-benchmark.mjs`
-# says what else it does and why).
+# says what else it does and why, and how its input differs from the native row's).
 #
 # Three subcommands, so that nothing is built while anything is timed:
 #
-#   prepare WORKDIR        Untimed. WORKDIR must be an empty directory. Builds host_web.wasm with
-#                          the flags of `scripts/build-web-audioworklet.sh` into WORKDIR, and
-#                          writes the native row's resolved control table beside it
-#                          (`cargo run --example mixing_automation_controls`).
+#   prepare WORKDIR        Untimed. WORKDIR must be an empty directory, and the tracked files
+#                          unmodified. Builds host_web.wasm with the flags of
+#                          `scripts/build-web-audioworklet.sh` into WORKDIR, writes the native
+#                          row's resolved control table beside it (`cargo run --example
+#                          mixing_automation_controls`), and records the commit both were built at,
+#                          with their digests, in `provenance.json` (#1011).
 #   preflight WORKDIR      Untimed. The seven-arm premises (restated == quiet, every automated
 #                          effect moves bits) on the prepared module.
-#   run WORKDIR --step N   The one timed invocation: the premises, then the three arms alternated
-#                          per observation. Writes `artifacts/steps/N/web-mixing-automation.jsonl`
-#                          and refuses to overwrite it. Requires unmodified tracked files, pins the
-#                          process to the highest online CPU, and refuses a loaded host unless
-#                          `MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1`, in which case the record says
+#   run WORKDIR --step N   The one timed invocation. It refuses a module or a control table that
+#                          was not prepared at HEAD, or that changed after `prepare` recorded it.
+#                          Then it launches the harness three times, as the console runner does: one
+#                          warmup, whose record is discarded, and two measured rounds (#1011). After
+#                          the rounds it checks HEAD, the tracked files, the module, the table and
+#                          `provenance.json` again. The two records must pass
+#                          `scripts/web-mixing-automation-validator.jq`, which requires them to agree
+#                          on every digest, before they are written to
+#                          `artifacts/steps/N/web-mixing-automation.jsonl`. A refusal after the
+#                          rounds keeps them as `web-mixing-automation.refused.jsonl` and prints why;
+#                          no artifact is ever overwritten, and all three names are checked before
+#                          anything is launched. Requires unmodified tracked files, pins every launch
+#                          to the highest online CPU, and refuses a loaded host unless
+#                          `MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1`, in which case the records say
 #                          `uncontrolled`, as the console runner's do.
 #
 # The module is built here rather than taken from `build-web-audioworklet.sh` because that script
@@ -40,6 +51,15 @@ command=$1
 workdir=$2
 harness="$root/scripts/web-mixing-automation-benchmark.mjs"
 
+# Tracked files only: every input a build or a run reads -- the sources, this script, the harness,
+# `prepared-control.js`, the fixture, the ABI layout -- is tracked, and the console runner's own step
+# artifacts may already sit untracked in the directory a run writes to.
+require_clean_tree() {
+    [[ -z "$(git status --porcelain=v1 --untracked-files=no)" ]] ||
+        { printf '%s requires unmodified tracked files\n' "$1" >&2; exit 1; }
+}
+digest() { sha256sum "$1" | awk '{print $1}'; }
+
 case "$command" in
     prepare)
         [[ "$#" == 2 ]] || usage
@@ -47,6 +67,9 @@ case "$command" in
         [[ -z "$(find "$workdir" -mindepth 1 -maxdepth 1 -print -quit)" ]] ||
             { printf 'WORKDIR must be empty; refusing overwrite\n' >&2; exit 2; }
         workdir=$(cd "$workdir" && pwd -P)
+        # The commit is what `run` holds the module to, so it has to describe what is built.
+        require_clean_tree prepare
+        commit=$(git rev-parse --verify HEAD)
         cargo_home=${CARGO_HOME:-$HOME/.cargo}
         # The delivery recipe, flag for flag: `simd128`, stripped debug information, and the two
         # path remaps that make the digest a function of the source alone.
@@ -57,9 +80,17 @@ case "$command" in
         cargo run --locked --release --quiet -p console-workload \
             --example mixing_automation_controls >"$workdir/controls.json"
         jq -e '.controls | length == 8' "$workdir/controls.json" >/dev/null
-        observed=$(sha256sum "$workdir/host_web.wasm" | awk '{print $1}')
+        # Nothing moved under the build: the recorded commit is still the tree that was built.
+        require_clean_tree prepare
+        [[ "$(git rev-parse --verify HEAD)" == "$commit" ]] ||
+            { printf 'HEAD moved during prepare; refusing to record a commit\n' >&2; exit 1; }
+        jq -n --arg commit "$commit" --arg module "$(digest "$workdir/host_web.wasm")" \
+            --arg controls "$(digest "$workdir/controls.json")" \
+            '{commit: $commit, module_sha256: $module, controls_sha256: $controls}' \
+            >"$workdir/provenance.json"
+        observed=$(digest "$workdir/host_web.wasm")
         pinned=$(tr -d '\n' <hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256)
-        printf 'host_web.wasm %s (pin %s: %s)\n' "$observed" "$pinned" \
+        printf 'host_web.wasm %s at %s (pin %s: %s)\n' "$observed" "$commit" "$pinned" \
             "$([[ "$observed" == "$pinned" ]] && printf match || printf 'differs; this tree is not repinned')"
         ;;
     preflight)
@@ -71,18 +102,33 @@ case "$command" in
         [[ "$4" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]] || { printf 'invalid --step name: %s\n' "$4" >&2; exit 2; }
         artifact_dir="$root/artifacts/steps/$4"
         record="$artifact_dir/web-mixing-automation.jsonl"
+        refused="$artifact_dir/web-mixing-automation.refused.jsonl"
         stderr_log="$artifact_dir/web-mixing-automation.stderr.log"
-        for path in "$record" "$stderr_log"; do
+        # Every artifact of a run is created and never replaced, and this is checked before anything
+        # is launched. `noclobber` below makes each write refuse a file that appeared since.
+        for path in "$record" "$refused" "$stderr_log"; do
             [[ ! -e "$path" && ! -L "$path" ]] ||
                 { printf 'refusing to overwrite web artifact: %s\n' "$path" >&2; exit 1; }
         done
-        # Tracked files only: every input the run reads -- this script, the harness,
-        # `prepared-control.js`, the fixture, the ABI layout -- is tracked, and the console runner's
-        # own step artifacts may already sit untracked in the directory this run writes to.
-        [[ -z "$(git status --porcelain=v1 --untracked-files=no)" ]] ||
-            { printf 'the browser arm requires a clean committed candidate\n' >&2; exit 1; }
-        [[ -f "$workdir/host_web.wasm" && -f "$workdir/controls.json" ]] ||
+        require_clean_tree 'the browser arm'
+        provenance="$workdir/provenance.json"
+        [[ -f "$workdir/host_web.wasm" && -f "$workdir/controls.json" && -f "$provenance" ]] ||
             { printf 'run prepare first\n' >&2; exit 1; }
+        # The module and the control table belong to the commit the rounds run at, and are the
+        # bytes `prepare` recorded. Either mismatch would publish one commit's module under another
+        # commit's name. What is read here is held for the check after the rounds.
+        commit=$(git rev-parse --verify HEAD)
+        prepared_commit=$(jq -r '.commit' "$provenance")
+        module_sha256=$(jq -r '.module_sha256' "$provenance")
+        controls_sha256=$(jq -r '.controls_sha256' "$provenance")
+        provenance_sha256=$(digest "$provenance")
+        [[ "$prepared_commit" == "$commit" ]] ||
+            { printf 'the module was prepared at %s, not at HEAD %s; run prepare again\n' \
+                "$prepared_commit" "$commit" >&2; exit 1; }
+        [[ "$(digest "$workdir/host_web.wasm")" == "$module_sha256" ]] ||
+            { printf 'host_web.wasm changed after prepare recorded it\n' >&2; exit 1; }
+        [[ "$(digest "$workdir/controls.json")" == "$controls_sha256" ]] ||
+            { printf 'controls.json changed after prepare recorded it\n' >&2; exit 1; }
         source "$root/scripts/check-bench-preconditions.sh"
         cpu=$(bench_highest_cpu "$(< /sys/devices/system/cpu/online)")
         loadavg_text=$(< /proc/loadavg)
@@ -98,26 +144,59 @@ case "$command" in
         umask 077
         mkdir -p "$artifact_dir"
         set -o noclobber
-        raw=$(mktemp)
-        trap 'rm -f -- "$raw"' EXIT
-        taskset -c "$cpu" node --no-liftoff "$harness" run "$workdir/host_web.wasm" \
-            "$workdir/controls.json" >|"$raw" 2>"$stderr_log"
-        # The premises the harness asserted in-run, restated on the record it printed: a record
-        # that says otherwise was not produced by this harness.
-        jq -e '
-            .record == "web_mixing_automation" and .observations == 1000 and
-            .arms == ["quiet","restated","automated"] and (.controls | length) == 8 and
-            .quiet_output_sha256 == .restated_output_sha256 and
-            .restated_output_sha256 != .automated_output_sha256 and
-            (.preflight_output_sha256 | [.automated_eq_only, .automated_compressor_only,
-                .automated_limiter_only] | all(. != $restated)) and
-            .records_admitted.restated == 8000 and .records_admitted.automated == 8000 and
-            .descriptive_only == true' \
-            --arg restated "$(jq -r .restated_output_sha256 "$raw")" "$raw" >/dev/null
-        jq -c --arg commit "$(git rev-parse --verify HEAD)" --arg control "$control" \
-            --arg cpu "$cpu" \
-            '. + {candidate_commit: $commit, measurement_control: $control, cpu_affinity: $cpu}' \
-            "$raw" >"$record"
+        : >"$stderr_log"
+        raw=$(mktemp -d)
+        trap 'rm -rf -- "$raw"' EXIT
+        # A refused run keeps what it measured (AGENTS.md: preserve the raw output and record the
+        # failure). The measured records taken so far go to `web-mixing-automation.refused.jsonl`,
+        # which no validator accepts by name, and the reason goes to the terminal and the log.
+        refuse_run() {
+            local kept=''
+            if [[ -s "$raw/rounds.jsonl" ]]; then
+                if cat -- "$raw/rounds.jsonl" >"$refused"; then
+                    kept="; the measured records are kept at $refused"
+                else
+                    kept="; the measured records could not be kept at $refused"
+                fi
+            fi
+            printf 'the browser run is refused: %s%s\n' "$1" "$kept" | tee -a "$stderr_log" >&2
+            exit 1
+        }
+        # One process per round, as the console runner launches its binary: the warmup's record is
+        # discarded, and its in-run assertions still have to pass.
+        for round in warmup 1 2; do
+            taskset -c "$cpu" node --no-liftoff "$harness" run "$workdir/host_web.wasm" \
+                "$workdir/controls.json" "$round" >"$raw/$round.json" 2>>"$stderr_log" ||
+                refuse_run "the $round launch failed; its assertion is in $stderr_log"
+            [[ "$round" == warmup ]] && continue
+            jq -c --arg commit "$commit" --arg prepared "$prepared_commit" \
+                --arg control "$control" --arg cpu "$cpu" \
+                '. + {candidate_commit: $commit, prepared_commit: $prepared,
+                      measurement_control: $control, cpu_affinity: $cpu}' \
+                "$raw/$round.json" >>"$raw/rounds.jsonl" ||
+                refuse_run "the $round launch printed no record"
+        done
+        # Every launch re-read the tracked harness, fixture and ABI layout and the prepared module
+        # and table, so the provenance the records carry is checked again after the last of them.
+        [[ -z "$(git status --porcelain=v1 --untracked-files=no)" ]] ||
+            refuse_run 'a tracked file changed while the rounds ran'
+        [[ "$(git rev-parse --verify HEAD)" == "$commit" ]] ||
+            refuse_run "HEAD moved from $commit while the rounds ran"
+        [[ "$(digest "$workdir/host_web.wasm")" == "$module_sha256" ]] ||
+            refuse_run 'host_web.wasm changed while the rounds ran'
+        [[ "$(digest "$workdir/controls.json")" == "$controls_sha256" ]] ||
+            refuse_run 'controls.json changed while the rounds ran'
+        [[ "$(digest "$provenance")" == "$provenance_sha256" ]] ||
+            refuse_run 'provenance.json changed while the rounds ran'
+        if ! jq -s -e -L "$root/scripts" -f "$root/scripts/web-mixing-automation-validator.jq" \
+            "$raw/rounds.jsonl" >/dev/null; then
+            reasons=$(jq -s -r -L "$root/scripts" \
+                'include "web-mixing-automation-lib"; web_mixing_refusal_reasons' \
+                "$raw/rounds.jsonl" | paste -sd ';' -) || reasons='no reason could be computed'
+            refuse_run "the validator refused the rounds: ${reasons:-no reason given}"
+        fi
+        cat -- "$raw/rounds.jsonl" >"$record" ||
+            refuse_run "$record appeared while the rounds ran; it is left as it was"
         printf '%s\n' "$record"
         ;;
     *) usage ;;

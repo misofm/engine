@@ -689,9 +689,13 @@ def mono_record_valid:
 # claim VERIFY-AUTOMATION F2 turned on -- the EQ goes as one owner edit on `Both`, which keeps a
 # mono cohort's collapse, and the compressor and the limiter as a Left and a Right record -- so a
 # record that pushed the EQ as two one-channel edits measured a loss the product does not have and
-# is refused. The bases are not pinned here: they are the fixture's held values, and the digest
-# equality below is what proves the row restated exactly those. Each ride must move: its two values
-# straddle the base.
+# is refused. The bases are not pinned here: they are the fixture's held values, read from the
+# model. The digest equality below shows the row restated a held value only where restating another
+# value would move bits -- the EQ gains and the compressor thresholds. Neither limiter engages near
+# its held ceiling, so a ceiling restated off it renders the same bits and passes every rule here;
+# `restated_pushes_exactly_the_held_bases` in `tools/console-workload/tests/automation.rs` is what
+# pins the restated value of all eight controls to their bases (#1011). Each ride must move: its
+# two values straddle the base.
 def mixing_automation_controls:
   [["ch00","eq","miso.parametric-eq","band-1-gain",3,"owner_both",0.25],
    ["ch08","comp","miso.compressor","threshold",0,"left_then_right",0.5],

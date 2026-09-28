@@ -302,6 +302,49 @@ The independent head-against-candidate differential of the attempt evidence (spe
 M1, M2 and M5 at `f32`, `Simd4` and `Simd8`; on M1 and M2 also through the public factory; on M5
 only at the kernel word, as the boundary check predicts.
 
+## Issue #1006 — the ramping prefix as the two-pass body with lane-wide ramps
+
+The main detector's ramping prefix, dual (`ramping_main`) and collapsed (`ramping_main_mono`),
+now advances each channel's ramps as lane vectors (`ChannelRamps`) inside the settled body's two
+passes: the threshold, ratio and knee ramps and the curve redesign in pass 1, attack, release,
+makeup and mix in pass 2. The oracle is `settled_body_tests::reference`'s one-pass
+`frames_loop::<L, true>` and `frames_loop_mono::<L, true>`, verbatim. The grid and the three
+randomized differentials assert, per block, that the two-pass prefix ran (dual and collapsed
+witnesses) exactly on a `Main` block with an open window, and that it took the all-wet arm exactly
+when the block was unbypassed, no mix ramp was open and every lane's mix was `1`; #982's NaN
+relaxation is granted only in a block whose witness shows an arm ran. The differentials also
+retarget both channels with one value in one block, and restore ramps through the payload codec at
+`remaining = 0` with `current != target`. Two scenarios were pinned on the unmodified batch head
+(`081fdc6c`) before the change: `scenario_1006_ramping_prefix_is_pinned` (kernel, `f32`, `Simd4`,
+`Simd8`, dual and collapsed, payload words) and `ramping_prefix_scenario.rs` (the bank contract at
+this build's width, dual and collapsed, reports and payloads).
+
+Driver as for #981-#985, dev profile, one mutation at a time on a scratch copy.
+
+| # | mutation | red |
+|---|---|---|
+| 1006-M1 | the `remaining == 0` hold dropped: a ramp at rest takes its target, as on its last sample | `randomized_differential_simd4`/`_simd8` (their payload restores at `remaining = 0`), both #1006 scenarios (4 red) |
+| 1006-M3 | the output ramps (attack, release, makeup, mix) advanced in pass 1 as well, the brief's "attack in pass 1" | gate 1, both #1006 scenarios, `partition::block_partitions_are_invariant`, `payload::an_active_attack_restore_*`, `ramps::an_attack_cancel_to_current_*`, `native_points`, `cross_target`, two `mono_collapse` tests and `bench_ramp`'s preflight (16 red) |
+| 1006-M5 | the wet arm taken while a mix ramp is open (both bodies) | gate 1 (its witness and its bits), both #1006 scenarios, `partition`, `lane_identity::every_width_produces_the_same_words`, `cross_target` (9 red) |
+| 1006-M6 | the words scattered from before the prefix (the dual prefix's word write-back dropped) | gate 1, `scenario_981`, `982`, `983` and `1006`, the bank scenario, #982's witness gate, `cross_target`, two `ramps` tests, `mono_collapse` (16 red) |
+| 1006-M7 | the collapsed prefix skips the curve redesign on a moved lane | gate 1, `scenario_985`, `scenario_1006`, the bank scenario, two `mono_collapse` tests (11 red) |
+| 1006-M8 | the collapsed prefix takes the wet arm while a mix ramp is open | gate 1, both #1006 scenarios (6 red) |
+| 1006-M9 | the prefix's DualMono `abs` arm for every link mode | gate 1, `scenario_981`, `982`, `983` and `1006`, the bank scenario (11 red) |
+| 1006-M10 | the threshold ramp never advanced in the prefix (a moving parameter dropped) | gate 1, `scenario_981`, `982`, `983` and `1006`, the bank scenario, four `ramps` tests, `payload::a_mid_ramp_restore_*`, `cross_target` (17 red) |
+| 1006-M11 | #986's "the mask from one channel": the right channel's ramping set taken from the left's | gate 1, `scenario_1006` (7 red) |
+| 1006-M12 | #986's "a changed word not reloaded": makeup and mix advance but their words are not written | gate 1, both #1006 scenarios, #982's witness gate, `ramps::a_ramp_onto_an_identity_boundary_*`, `native_points`, `cross_target` (12 red) |
+
+| # | mutation | why it survives |
+|---|---|---|
+| 1006-M2 | the rate ramps gated by their own `remaining` rather than their parameter ramp's | Applied and run: **GREEN**, and equivalent. Every write site keeps a rate ramp's `remaining` at `0` or at its parameter ramp's: `set_parameter_target` arms both with the same window (and re-arms the parameter ramp when only the rate ramp would move), `restore_rate_ramps` copies the parameter's `remaining`, and the resets and `copy_state_from` move both together. So a rate ramp is never in flight on a lane whose parameter ramp is at rest, and the two gates select the same lanes. The prefix keeps `advance_ramps`' gate anyway |
+| 1006-M4 | the redesigned curve written on every lane rather than the moved lanes | Applied and run: **GREEN**, and equivalent by an invariant, not by construction: every write site keeps `words[0..4] == GainComputerCoef::new(ramps[0..3].current)` on every lane (VERIFY-AUTOMATION section 4), so rewriting an unmoved lane rewrites the word it holds. This is C2b's invariant, which is out of this slice pending the owner's ruling; the prefix keeps `design_lane`'s `changed` rule, so it does not depend on it |
+
+The independent head-against-candidate differential of the attempt evidence (spec #1006) is red on
+M3, M5 and M6 at `f32`, `Simd4` and `Simd8`, and on M1 at `Simd4` and `Simd8`. M1 cannot fail at
+`f32`: the prefix advances a parameter only when some lane of it is in flight, and a one-lane
+parameter at rest is never advanced, so the hold is exercised only by a resting lane beside a
+moving one.
+
 ## Issue #994 — a knee whose `1 / (2 W)` overflows, through the compressor's entry points
 
 The fix is in `effect-runtime` (`dynamics::knee_coefficients`); this crate's source is unchanged
