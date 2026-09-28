@@ -63,6 +63,29 @@ create_valid_fixture() {
         'default = []' \
         >"$fixture_root/hosts/binary/Cargo.toml"
     printf 'fn main() {}\n' >"$fixture_root/hosts/binary/src/main.rs"
+    materialize_source_scrape_allowance "$fixture_root"
+}
+
+# #1052: the policy under test allows each pre-existing source scrape exactly, per file and
+# literal path, so a valid tree holds exactly that many reads of each. The rows are read from the
+# policy itself, so the fixture follows every row an owning issue lowers or deletes. Each file is
+# truncated first, so re-creating a fixture root does not double its reads.
+materialize_source_scrape_allowance() {
+    local fixture_root="$1" rows count file path _owner directories=()
+    rows="$(sed -n "/^source_scrape_allowlist='\$/,/^'\$/p" "$policy_script")"
+    while read -r count file path _owner; do
+        [[ -n "$path" ]] && directories+=("$fixture_root/${file%/*}")
+    done <<<"$rows"
+    (( ${#directories[@]} == 0 )) || mkdir -p "${directories[@]}"
+    while read -r count file path _owner; do
+        [[ -n "$path" ]] && : >"$fixture_root/$file"
+    done <<<"$rows"
+    while read -r count file path _owner; do
+        [[ -n "$path" ]] || continue
+        for ((; count > 0; count--)); do
+            printf 'const _: &str = include_str!("%s");\n' "$path" >>"$fixture_root/$file"
+        done
+    done <<<"$rows"
 }
 
 expect_failure() {
@@ -98,6 +121,26 @@ expect_failure_with_message() {
             "$fixture_name" "$expected_substring" "$output" >&2
         exit 1
     fi
+}
+
+# Like expect_failure_with_message, but every row must appear: one run proves several planted
+# violations are each caught, so none can hide behind another.
+expect_failure_with_rows() {
+    local fixture_name="$1" mutation="$2"
+    local fixture_root="$scratch_root/$fixture_name" output row
+    shift 2
+    create_valid_fixture "$fixture_root"
+    "$mutation" "$fixture_root"
+    if output="$(bash "$policy_script" "$fixture_root" 2>&1)"; then
+        printf 'policy mutation unexpectedly passed: %s\n' "$fixture_name" >&2
+        exit 1
+    fi
+    for row in "$@"; do
+        [[ "$output" == *"$row"* ]] || {
+            printf 'policy mutation %s did not report %q: %s\n' "$fixture_name" "$row" "$output" >&2
+            exit 1
+        }
+    done
 }
 
 expect_git_failure_with_message() {
@@ -522,6 +565,27 @@ expect_failure workspace-license mutate_workspace_license
 expect_failure package-license-inheritance mutate_package_license_inheritance
 expect_failure npm-license mutate_npm_license
 
+# #1052: each literal-path form of reading Rust source or a Cargo manifest, in each scan root.
+plant_source_reads() {
+    local root="$1" dir="$1/crates/library/tests"
+    mkdir -p "$dir" "$root/tools/probe/src"
+    printf '%s\n' 'const _: &str = include_str!("../src/lib.rs");' >"$dir/plain.rs"
+    printf '%s\n' 'const _: &str = include_str!(' '    "../../../crates/library/src/lib.rs"' ');' >"$dir/wrapped.rs"
+    printf '%s\n' 'const _: &str = include_str!["../src/lib.rs"];' >"$dir/bracket.rs"
+    printf '%s\n' 'const _: &str = include_str!(r"../src/lib.rs");' >"$dir/raw.rs"
+    printf '%s\n' 'const _: &str = include_str!(r#"../src/lib.rs"#);' >"$dir/raw_hash.rs"
+    printf '%s\n' 'const _: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"));' >"$dir/concat.rs"
+    printf '%s\n' 'fn f() { let _ = std::fs::read_to_string("src/lib.rs"); }' >"$dir/read_to_string.rs"
+    printf '%s\n' 'fn f() { let _ = std::fs::read("src/lib.rs"); }' >"$root/tools/probe/src/read.rs"
+    printf '%s\n' 'fn f() { let _ = std::fs::File::open("Cargo.toml"); }' >"$root/hosts/binary/src/open.rs"
+}
+expect_failure_with_rows source-reads plant_source_reads \
+    'read as text: crates/library/tests/plain.rs:' 'read as text: crates/library/tests/wrapped.rs:' \
+    'read as text: crates/library/tests/bracket.rs:' 'read as text: crates/library/tests/raw.rs:' \
+    'read as text: crates/library/tests/raw_hash.rs:' 'read as text: crates/library/tests/concat.rs:' \
+    'read as text: crates/library/tests/read_to_string.rs:' 'read as text: tools/probe/src/read.rs:' \
+    'read as text: hosts/binary/src/open.rs:'
+
 allow_secondary_tool_bin "$scratch_root/secondary-tool-bin"
 allow_approved_isa_pin "$scratch_root/approved-isa-pin"
 allow_host_valid "$scratch_root/host-valid"
@@ -850,6 +914,39 @@ set -e
 [[ "$mutant_status" == 97 ]] || { printf 'late scan mutant assertion status %s, expected 97\n' "$mutant_status" >&2; exit 1; }
 policy_script="$production_policy"
 printf 'workspace production counter-mutants rejected by same assertions (status 97)\n'
+
+# #1052: a copy of the policy with a controlled two-row allowance proves the count is exact in
+# both directions, whatever rows the production list still holds. Fixture data stays allowed.
+ratchet_policy="$scratch_root/mutants/scripts/check-workspace-scrape-ratchet.sh"
+awk -v rows='2 crates/library/src/lib.rs lib.rs #0\n1 tools/probe/src/probe.rs probe.rs #0' '
+    $0 == "source_scrape_allowlist='\''" { print; print rows; skip = 1; next }
+    skip && $0 == "'\''" { skip = 0 }
+    !skip
+' "$production_policy" >"$ratchet_policy"
+rg -qF '1 tools/probe/src/probe.rs probe.rs #0' "$ratchet_policy" || {
+    printf 'ratchet allow-list patch did not apply\n' >&2; exit 1;
+}
+policy_script="$ratchet_policy"
+ratchet_exact="$scratch_root/ratchet-exact"
+create_valid_fixture "$ratchet_exact"
+printf '%s\n' 'const _: &[u8] = include_bytes!("../../../fixtures/data/probe.toml");' \
+    'const _: &str = include_str!("fixtures/probe.rs");' >>"$ratchet_exact/tools/probe/src/probe.rs"
+bash "$policy_script" "$ratchet_exact" >/dev/null
+spend_and_orphan() {
+    printf '%s\n' 'const _: &str = include_str!("lib.rs");' >>"$1/crates/library/src/lib.rs"
+    rm -- "$1/tools/probe/src/probe.rs"
+}
+expect_failure_with_rows ratchet-over-and-orphan spend_and_orphan \
+    'read as text: crates/library/src/lib.rs:' \
+    'stale allow-list row: tools/probe/src/probe.rs probe.rs allows 1, found 0'
+respend_freed_allowance() {
+    sed -i '0,/include_str!("lib.rs")/{s|include_str!("lib.rs")|include_str!("../Cargo.toml")|}' \
+        "$1/crates/library/src/lib.rs"
+}
+expect_failure_with_rows ratchet-respend respend_freed_allowance \
+    'stale allow-list row: crates/library/src/lib.rs lib.rs allows 2, found 1' \
+    'read as text: crates/library/src/lib.rs:'
+policy_script="$production_policy"
 
 # Keep the shared helper contract on the existing required-CI mutation entry point.
 bash "$script_directory/test-gate-lib.sh" || exit "$?"

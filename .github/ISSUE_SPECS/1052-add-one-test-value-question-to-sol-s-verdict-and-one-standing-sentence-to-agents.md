@@ -269,3 +269,82 @@ still works, and nothing makes its allow-list shrink. All results were checked o
 - A comment that quotes the forbidden form goes red.
 - The lint scans production code, but its message says "a test".
 - A path through `fixtures/..` evades the lint, which is deliberate evasion.
+
+## Attempt 2 evidence
+
+Terra, 2026-09-28. Merged `codex/batch-slim-1` (`7d0d4adf`) first; the merge was clean.
+
+**Changed.**
+- **`AGENTS.md`:** "behavioural claim" is now "behavior", the spelling the file already uses.
+- **`scripts/check-workspace-policy.sh`, the allow-list.** It is now exact per file *and* literal
+  path: 25 rows for the same 32 scrapes.
+  - A key whose count exceeds its allowance prints every read of that key as `read as text: …`.
+  - A row that finds fewer reads, zero included, prints `stale allow-list row: … allows N, found
+    M; lower or delete it (#issue)`.
+  - So a removed scrape must lower its row in the same change, and a freed allowance cannot be
+    spent on another path.
+  - The failure message no longer says "a test", because the scan also covers production code.
+- **`scripts/check-workspace-policy.sh`, the pattern.** It also matches `read` and `open`, raw
+  strings (`r"…"`, `r#"…"#`) and the `[`/`{` macro delimiters. It still matches `include_str!`,
+  `include_bytes!` and `read_to_string`, rustfmt wrapping, and `concat!(env!("CARGO_MANIFEST_DIR"), …)`.
+  - Deliberately left to review: helpers, `Path::join`, `format!`, a split `concat!` and a `const`
+    path. Each builds the path away from the call, so matching them needs a parser, not a line.
+  - On the merged tree it still finds exactly the 32 scrapes. `read`/`open` add no false hits.
+- **`scripts/test-workspace-policy.sh`, the fixture.** Every valid fixture gets the production
+  allowance. The rows are read from the policy under test, so a row lowered by #1035, #1037 or
+  #1047 needs no self-test edit. Each file is truncated first, because some cases re-create a
+  fixture root, `fault-isa-build-late` among them.
+- **`scripts/test-workspace-policy.sh`, the cases.** There are four new policy runs:
+  - `source-reads` plants nine forms in all three scan roots. Every row must be reported, so no
+    form hides behind another;
+  - on a copy of the policy whose allowance is two controlled rows, which is independent of the
+    production rows:
+    - the exact fixture, plus two `fixtures/` reads, is green;
+    - `ratchet-over-and-orphan` (one more read, and one allowed file deleted) reports both;
+    - `ratchet-respend` swaps one allowed read for `../Cargo.toml`, and reports the stale row and
+      the new read.
+- **#1047's spec** is amended:
+  - its Outcome, Scope and gate 5 now say that #1047 removes scrapes and deletes allow-list rows.
+    Gate 5 is "the allow-list is empty";
+  - amendment 6 records the move.
+  - Its title still ends "then lint the pattern". That is its GitHub identity, so it is left to
+    root.
+
+**Proof that the lint and its cases discriminate.** Each run is on a scratch copy of the tree.
+
+| mutation | `check-workspace-policy.sh` on the tree | `test-workspace-policy.sh` |
+|---|---|---|
+| none | green | green |
+| pattern made vacuous (`rs\|toml` → `rsx\|tomlx`) | **red**, 25 stale rows | **red** |
+| the same, with every production row deleted (the state after #1047) | n/a | **red**: `source-reads` passed unexpectedly |
+| `open` dropped / `read` dropped | green (no live scrape uses it) | **red**, each on its own row |
+| raw strings dropped / `[` `{` delimiters dropped / `concat!` branch dropped | green | **red**, each on its own row |
+| stale-row check disabled (`if (0)`) | green | **red**, the orphan row is missing |
+| keyed per file instead of per path | green | **red** |
+
+On the real tree:
+
+| change | result |
+|---|---|
+| Sol's re-spend: remove 2 of `source/src/lib.rs`'s `lib.rs` reads, add `native_source.rs` and `../Cargo.toml` reads | **red**: both new reads, plus `allows 4, found 2` |
+| delete `native_wave.rs` | **red**: `allows 1, found 0 (#1035)` |
+| remove the `f1_fast_db_bounds.rs` scrape, keep its row | **red**: `allows 1, found 0` |
+| the same, row deleted | green |
+
+**Cost.** The scan is about 15 ms. The self-test was timed alternately under host load average
+45-60, so wall times are not usable. Its CPU (user plus sys) rose from about 19.2 s to about 22 s.
+That includes one batched `mkdir` per fixture; the first draft ran one `mkdir` per row and cost
+about 28 s.
+
+**Checks on the result.**
+- **PASS:** `check-workspace-policy.sh` and `test-workspace-policy.sh`, `check-ci-path-routing.py`
+  and `test-ci-path-routing.py`, `check-env-vocabulary.sh` and `test-env-vocabulary.sh`, and the
+  bench, builtins, effect-runtime, graph, host-core, lane, protocol-control, rack, realtime and
+  session `check-*-policy.sh` scripts.
+- **FAIL, and not introduced here:** `check-step-vocabulary.py` refuses
+  `.github/ISSUE_SPECS/1025-retire-the-used-up-console-benchmark-arms.md:238` (the word "nudge").
+  It fails identically on a `git archive` of `codex/batch-slim-1`. That spec is outside this issue's
+  paths, so root should fix it on the batch.
+
+**Still open, non-blocking.** A comment that quotes a forbidden form goes red. A `fixtures/..`
+path evades the lint; that is deliberate evasion, left to review.

@@ -289,46 +289,65 @@ versioned_worklet_implementation_pattern='class[[:space:]]+MisoEngine'V'[0-9]+Au
 scan_forbidden "AudioWorklet processor implementation classes must be unversioned" \
     "$versioned_worklet_implementation_pattern" '*.js' crates hosts tools
 
-# Issue #1052 (AGENTS.md "Test value"): a test must not read Rust source or a Cargo manifest as
-# text. This catches the literal-path form -- `include_str!`, `include_bytes!` or `read_to_string`
-# of a `.rs` or `.toml` path, however rustfmt wraps it; a path through a `fixtures/` directory is
-# data, and a path built at run time is left to review. The scrapes that predate the rule are
-# counted per file with the issue that removes them. The list only shrinks, and #1047 deletes it.
+# Issue #1052 (AGENTS.md "Test value"): code must not read Rust source or a Cargo manifest as
+# text. This refuses the literal-path form: `include_str!`, `include_bytes!`, `read_to_string`,
+# `read` or `open` of a plain or raw `.rs` or `.toml` string, with any macro delimiter, however
+# rustfmt wraps it, and through `concat!(env!("CARGO_MANIFEST_DIR"), ...)`. A path through a
+# `fixtures/` directory is data. A path built at run time, through a helper, `Path::join`,
+# `format!` or a `const`, is left to review. The scrapes that predate the rule are allowed per
+# file and literal path, each row naming the issue that removes it. The count must match
+# exactly, so a removed scrape must lower or delete its row in the same change and a freed
+# allowance cannot be spent again. #1047 deletes the last row.
 source_scrape_allowlist='
-1 crates/capi/src/ffi.rs #1047
-5 crates/effect-compiler/tests/migration.rs #1037
-1 crates/effect-compiler/tests/migration_terminal.rs #1037
-2 crates/effect-package/tests/state_vectors.rs #1037
-4 crates/graph/src/runtime.rs #1047
-3 crates/lane/tests/input_chain_elision.rs #1047
-1 crates/math/tests/f1_fast_db_bounds.rs #1047
-4 crates/source/src/lib.rs #1047
-4 crates/source/src/native_source.rs #1035
-1 crates/source/src/native_wave.rs #1035
-3 tools/audit/src/builtins_fixture_check.rs #1047
-1 tools/audit/src/builtins_graph.rs #1047
-1 tools/audit/src/capi.rs #1047
-1 tools/audit/src/fixture_builtins.rs #1047
+1 crates/capi/src/ffi.rs ffi.rs #1047
+1 crates/effect-compiler/tests/migration.rs ../../effect-package/Cargo.toml #1037
+1 crates/effect-compiler/tests/migration.rs ../../engine/src/realtime/mod.rs #1037
+1 crates/effect-compiler/tests/migration.rs ../../engine/src/realtime/plan.rs #1037
+1 crates/effect-compiler/tests/migration.rs ../Cargo.toml #1037
+1 crates/effect-compiler/tests/migration.rs ../src/migration.rs #1037
+1 crates/effect-compiler/tests/migration_terminal.rs ../src/migration.rs #1037
+1 crates/effect-package/tests/state_vectors.rs ../src/state.rs #1037
+1 crates/effect-package/tests/state_vectors.rs ../src/wire.rs #1037
+1 crates/graph/src/runtime.rs ../../rack/src/lib.rs #1047
+1 crates/graph/src/runtime.rs lib.rs #1047
+2 crates/graph/src/runtime.rs runtime.rs #1047
+1 crates/lane/tests/input_chain_elision.rs ../src/kernels.rs #1047
+1 crates/lane/tests/input_chain_elision.rs ../src/kernels/builtins.rs #1047
+1 crates/lane/tests/input_chain_elision.rs ../src/lib.rs #1047
+1 crates/math/tests/f1_fast_db_bounds.rs f1_fast_db_bounds.rs #1047
+4 crates/source/src/lib.rs lib.rs #1047
+4 crates/source/src/native_source.rs native_source.rs #1035
+1 crates/source/src/native_wave.rs native_wave.rs #1035
+1 tools/audit/src/builtins_fixture_check.rs builtins.rs #1047
+1 tools/audit/src/builtins_fixture_check.rs builtins_fixture_check.rs #1047
+1 tools/audit/src/builtins_fixture_check.rs builtins_graph.rs #1047
+1 tools/audit/src/builtins_graph.rs builtins_graph.rs #1047
+1 tools/audit/src/capi.rs capi.rs #1047
+1 tools/audit/src/fixture_builtins.rs fixture_builtins.rs #1047
 '
-source_scrape_pattern='(?:include_str!|include_bytes!|read_to_string)\s*\(\s*(?:concat!\(\s*env!\(\s*"CARGO_MANIFEST_DIR"\s*\)\s*,\s*)?"([^"\n]*\.(?:rs|toml))"'
+source_scrape_pattern='(?:\binclude_str!|\binclude_bytes!|\bread_to_string|\bread|\bopen)\s*[(\[{]\s*(?:concat!\(\s*env!\(\s*"CARGO_MANIFEST_DIR"\s*\)\s*,\s*)?r?#*"([^"\n]*\.(?:rs|toml))"'
 capture source-scrapes rg -U -n -o --no-heading --with-filename --glob '*.rs' -r '$1' "$source_scrape_pattern" crates hosts tools
 (( CAPTURE_STATUS <= 1 )) || execution_failure 'source-scrape scan' "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR"
 source_scrape_hits="$CAPTURE_OUT"
 printf '%s\n' "$source_scrape_allowlist" >"$scratch_dir/source-scrape-allowlist"
-capture source-scrape-excess awk '
-    NR == FNR { if (NF) allowed[$2] = $1; next }
+capture source-scrape-accounting awk '
+    NR == FNR { if (NF) { allowed[$2 " " $3] = $1; owner[$2 " " $3] = $4 }; next }
     {
         file = $0; sub(/:.*/, "", file)
         path = $0; sub(/^[^:]*:[^:]*:/, "", path)
         if (path ~ /(^|\/)fixtures\//) next
-        count[file]++; rows[file] = rows[file] $0 "\n"
+        key = file " " path; found[key]++; rows[key] = rows[key] "read as text: " $0 "\n"
     }
-    END { for (file in count) if (count[file] > allowed[file] + 0) printf "%s", rows[file] }
+    END {
+        for (key in found) if (found[key] > allowed[key] + 0) printf "%s", rows[key]
+        for (key in allowed) if (found[key] + 0 < allowed[key] + 0)
+            printf "stale allow-list row: %s allows %d, found %d; lower or delete it (%s)\n", key, allowed[key], found[key] + 0, owner[key]
+    }
 ' "$scratch_dir/source-scrape-allowlist" "$source_scrape_hits"
-(( CAPTURE_STATUS == 0 )) || execution_failure 'source-scrape allowance' "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR"
+(( CAPTURE_STATUS == 0 )) || execution_failure 'source-scrape accounting' "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR"
 [[ ! -s "$CAPTURE_OUT" ]] || {
     sort "$CAPTURE_OUT" >&2
-    fail 'a test reads Rust source or a Cargo manifest as text; name the behaviour it defends and assert that instead (AGENTS.md "Test value")'
+    fail 'Rust source or a Cargo manifest is read as text, or the source-scrape allow-list is not exact: assert the behavior instead, and lower or delete a stale row (AGENTS.md "Test value")'
 }
 
 # Master plan #83 D4 (revision 4): exactly one global ISA configuration is approved, the
