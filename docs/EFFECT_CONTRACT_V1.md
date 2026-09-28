@@ -158,8 +158,8 @@ State is three exact caller buffers: common, left, and right. Snapshot is determ
 all-or-none. Restore accepts only the current nonzero `state_layout_version` and exact prepared
 sizes. Since #1037 (R6b) no engine path snapshots or restores a payload: the compiler's
 unpublished-temporary restore and its persisted envelope went with `effect-package`, and the
-per-effect `snapshot_state_payload`/`restore_state_payload` hooks keep only test callers until a
-follow-up removes them with their own digest evidence.
+per-effect `snapshot_state_payload`/`restore_state_payload` hooks keep only test and evidence-tool
+callers (`conformance`, `tools/bench`) until a follow-up removes them with their own digest evidence.
 
 **A version or length word inside the payload outranks the caller's claim.** The
 `state_layout_version` argument of `restore_state_payload` arrives out of band, from the
