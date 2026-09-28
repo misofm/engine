@@ -22,7 +22,9 @@ DEBUG_A_FEATURES = (
     "host-web/test-support,host-core/test-support,effect-compiler/test-support,"
     "protocol/test-support,engine/realtime-audit\n"
 )
-DEBUG_B_FEATURES = "--features math/lane,parametric-eq/test-support,builtins/test-support\n"
+DEBUG_B_FEATURES = (
+    "--features math/lane,parametric-eq/test-support,builtins/test-support,lane/test-support\n"
+)
 
 
 def workspace() -> pathlib.Path:
@@ -114,14 +116,14 @@ def main() -> int:
     for package in ("host-web", "protocol"):
         fails(f"{package}/test-support removed from test-debug-a", {package},
               feature_a(f"{package}/test-support"))
-    for package in ("parametric-eq", "builtins"):
+    for package in ("parametric-eq", "builtins", "lane"):
         fails(f"{package}/test-support removed from test-debug-b", {package},
               feature_b(f"{package}/test-support"))
     fails("every test-support feature removed from test-debug-a",
           {"builtins-compiler", "effect-compiler", "graph", "host-core", "host-web", "protocol",
            "rack"},
           (WORKFLOW, DEBUG_A_FEATURES, "--features engine/realtime-audit\n"))
-    fails("every test-support feature removed from test-debug-b", {"builtins", "parametric-eq"},
+    fails("every test-support feature removed from test-debug-b", {"builtins", "lane", "parametric-eq"},
           (WORKFLOW, DEBUG_B_FEATURES, "--features math/lane\n"))
 
     # Forwarding is modelled from the manifests, not from the feature list's spelling: host-web
@@ -146,17 +148,17 @@ def main() -> int:
           (WORKFLOW, "--exclude wasm-console-guest --exclude wasm-gate-corpus \\\n",
            "--exclude wasm-console-guest --exclude wasm-gate-corpus --exclude host-web \\\n"))
     step_b = "      - name: DSP crates debug tests (lane feature unification pinned explicitly)\n"
-    fails("test-debug-b behind a step-level if:", {"builtins", "parametric-eq"},
+    fails("test-debug-b behind a step-level if:", {"builtins", "lane", "parametric-eq"},
           (WORKFLOW, step_b, step_b + "        if: needs.route.outputs.math_closure == 'true'\n"))
-    fails("test-debug-b with --no-run", {"builtins", "parametric-eq"},
+    fails("test-debug-b with --no-run", {"builtins", "lane", "parametric-eq"},
           (WORKFLOW, "cargo test --locked --all-targets \\\n            -p lane",
            "cargo test --locked --no-run --all-targets \\\n            -p lane"))
-    fails("test-debug-b narrowed to --lib", {"builtins", "parametric-eq"},
+    fails("test-debug-b narrowed to --lib", {"builtins", "lane", "parametric-eq"},
           (WORKFLOW, "cargo test --locked --all-targets \\\n            -p lane",
            "cargo test --locked --lib \\\n            -p lane"))
-    fails("test-debug-b with a harness name filter", {"builtins", "parametric-eq"},
+    fails("test-debug-b with a harness name filter", {"builtins", "lane", "parametric-eq"},
           (WORKFLOW, DEBUG_B_FEATURES, DEBUG_B_FEATURES[:-1] + " -- --exact bank\n"))
-    fails("test-debug-b with a positional name filter", {"builtins", "parametric-eq"},
+    fails("test-debug-b with a positional name filter", {"builtins", "lane", "parametric-eq"},
           (WORKFLOW, "cargo test --locked --all-targets \\\n            -p lane",
            "cargo test --locked --all-targets bank \\\n            -p lane"))
     fails("the feature only in a shell comment", {"parametric-eq"},
