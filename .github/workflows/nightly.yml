@@ -6,9 +6,6 @@ name: nightly
 #   * `native production-kernel release-probe report (non-blocking)` carries
 #     `continue-on-error: true` on its only assertive step and is not a required check -- it cannot
 #     fail a build by construction. It produces a report.
-#   * `bounded descriptive benchmarks` is descriptive by its own documentation: every runner it
-#     invokes records timings and asserts no threshold, so a pull request cannot fail it by getting
-#     slower. It produces evidence.
 #   * the two bounded fuzz jobs stayed per-PR, behind a `paths:` filter, in `fuzz.yml`. What moved
 #     here is DEPTH: 10,000 executions per target is a smoke test, and running it on every pull
 #     request buys breadth over diffs that mostly cannot affect a decoder. This job trades that for
@@ -79,56 +76,6 @@ jobs:
           path: target/ci/native-vectorization/report.json
           overwrite: true
 
-
-  benchmark:
-    name: bounded descriptive benchmarks
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.97.1 --profile minimal
-      - name: Run one descriptive two-round benchmark
-        run: |
-          set -o pipefail
-          mkdir -p target
-          bash scripts/run-conformance-benchmark.sh 2 | tee target/conformance-benchmark.jsonl
-          test -f target/conformance-benchmark.jsonl && test -s target/conformance-benchmark.jsonl
-      - name: Build issue-003 audit harness
-        run: cargo build --locked --release -p audit
-      - name: Run one descriptive two-round realtime benchmark
-        run: |
-          set -o pipefail
-          mkdir -p target
-          bash scripts/run-realtime-benchmark.sh 2 1000000 | tee target/realtime-benchmark.jsonl
-          test -f target/realtime-benchmark.jsonl && test -s target/realtime-benchmark.jsonl
-      - name: Run session benchmark once with two internal rounds
-        run: |
-          set -o pipefail
-          mkdir -p target
-          bash scripts/run-session-benchmark.sh | tee target/session-benchmark.jsonl
-          test -f target/session-benchmark.jsonl && test -s target/session-benchmark.jsonl
-      - name: Run native effect benchmark once with two internal rounds
-        run: bash scripts/run-effect-contract-benchmark.sh
-      # Issue #146 E5: what pinning the floating-point environment costs a 128-frame block.
-      # Descriptive only -- the record carries no threshold and nothing gates on it.
-      - name: Run one descriptive two-round FP-environment guard benchmark
-        run: |
-          set -o pipefail
-          mkdir -p target
-          bash scripts/run-fp-environment-benchmark.sh 2 1000000 | tee target/fp-environment-benchmark.jsonl
-          test -s target/fp-environment-benchmark.jsonl
-      - name: Upload benchmark evidence
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: conformance-benchmark
-          path: |
-            target/conformance-benchmark.jsonl
-            target/realtime-benchmark.jsonl
-            target/session-benchmark.jsonl
-            target/fp-environment-benchmark.jsonl
-            target/issue11/effect-contract-benchmark.jsonl
-          overwrite: true
 
   deep-fuzz:
     name: deep fuzzing over every target
@@ -221,15 +168,13 @@ jobs:
         run: bash scripts/run-release-workspace-tests.sh --no-run
 
   math-sweeps:
-    name: math exhaustive sweeps and wasm-console guest check
+    name: math exhaustive sweeps
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - name: Install pinned Rust toolchain and Wasm standard library
-        run: |
-          rustup toolchain install 1.97.1 --profile minimal
-          rustup target add --toolchain 1.97.1 wasm32-unknown-unknown
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
       # M1 exhaustive and F1 exhaustive run PR-side only when the diff touches math's tiny
       # reverse closure (math_closure, design §2); nightly runs both unconditionally so a
       # closure-missed regression is still found within a day.
@@ -237,12 +182,6 @@ jobs:
         run: cargo test --locked --release -p math --features lane --test m1_exhaustive -- --ignored
       - name: Fast dB tier gate F1, exhaustive over both operating domains
         run: cargo test --locked --release -p math --features lane --test f1_fast_db_bounds -- --ignored
-      # design §6.3: the wasm-console-guest build moved off the per-PR wasm job to nightly as a
-      # `cargo check` -- it exists so the nightly measurement does not discover a broken input,
-      # and this is that nightly.
-      - name: Wasm console benchmark guest compiles for Wasm (not an artifact)
-        run: |
-          CARGO_TARGET_DIR=target/ci/wasm-console RUSTFLAGS='-C target-feature=+simd128' cargo check --locked --release --target wasm32-unknown-unknown -p wasm-console-guest -p console-workload
 
   # design §6.2 moved these ledgers off the per-PR lint job. #1026 retired the builtins and graph
   # benchmark-lifecycle suites with their benchmarks, and with them this job's only ripgrep user;
@@ -278,7 +217,7 @@ jobs:
 
   failure-notice:
     name: report nightly failure as an issue
-    needs: [native-vectorization-report, benchmark, deep-fuzz, release-link-proof, math-sweeps,
+    needs: [native-vectorization-report, deep-fuzz, release-link-proof, math-sweeps,
             moved-mutation-suites, release-budgets]
     if: ${{ always() && contains(needs.*.result, 'failure') }}
     runs-on: ubuntu-24.04
@@ -304,7 +243,6 @@ jobs:
           ASSIGNEE: ${{ vars.NIGHTLY_ASSIGNEE || 'tamashi095' }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           REPORT_RESULT: ${{ needs.native-vectorization-report.result }}
-          BENCHMARK_RESULT: ${{ needs.benchmark.result }}
           DEEP_FUZZ_RESULT: ${{ needs.deep-fuzz.result }}
           RELEASE_LINK_PROOF_RESULT: ${{ needs.release-link-proof.result }}
           MATH_SWEEPS_RESULT: ${{ needs.math-sweeps.result }}
@@ -313,8 +251,8 @@ jobs:
         run: |
           set -euo pipefail
           title='nightly workflow is failing'
-          body=$(printf 'The scheduled nightly workflow failed.\n\n| job | result |\n| --- | --- |\n| native production-kernel release-probe report | %s |\n| bounded descriptive benchmarks | %s |\n| deep fuzzing over every target | %s |\n| workspace release link proof | %s |\n| math exhaustive sweeps and wasm-console guest check | %s |\n| stem-store mutation ledger | %s |\n| release-mode wall-clock budgets | %s |\n\nRun: %s\n\nClose this issue once the failure is dealt with. The next failing night after that opens a fresh one; while it is open, further failures are added as comments.\n' \
-            "$REPORT_RESULT" "$BENCHMARK_RESULT" "$DEEP_FUZZ_RESULT" "$RELEASE_LINK_PROOF_RESULT" \
+          body=$(printf 'The scheduled nightly workflow failed.\n\n| job | result |\n| --- | --- |\n| native production-kernel release-probe report | %s |\n| deep fuzzing over every target | %s |\n| workspace release link proof | %s |\n| math exhaustive sweeps | %s |\n| stem-store mutation ledger | %s |\n| release-mode wall-clock budgets | %s |\n\nRun: %s\n\nClose this issue once the failure is dealt with. The next failing night after that opens a fresh one; while it is open, further failures are added as comments.\n' \
+            "$REPORT_RESULT" "$DEEP_FUZZ_RESULT" "$RELEASE_LINK_PROOF_RESULT" \
             "$MATH_SWEEPS_RESULT" "$MOVED_MUTATION_SUITES_RESULT" "$RELEASE_BUDGETS_RESULT" "$RUN_URL")
           existing=$(gh issue list --state open --search "$title in:title" --json number,title \
             --jq "[.[] | select(.title == \"$title\") | .number] | first // empty")

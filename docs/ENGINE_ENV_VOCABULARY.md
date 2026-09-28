@@ -70,7 +70,6 @@ One name per fact. Set by the runner, read by the bench binary; a name the runne
 | `MISO_ENGINE_BENCH_CPU_AFFINITY` | the CPU number the workload was pinned to, or `uncontrolled` when affinity could not be obtained. |
 | `MISO_ENGINE_BENCH_CORE_CLOCK_HZ` | cycles per second the pinned core actually ran at, measured by `perf stat` over the warmup launch as `cycles / task-clock` and re-checked against each measured round. Empty on a host with no usable performance counter, which is what makes the #184 cycle columns absent rather than wrong. |
 | `MISO_ENGINE_BENCH_CORE_CLOCK_SOURCE` | how `MISO_ENGINE_BENCH_CORE_CLOCK_HZ` was obtained, carried into the record verbatim so a derived cycle count names its instrument. |
-| `MISO_ENGINE_BENCH_RUNTIME_OR_BROWSER` | Wasm runtime or browser identity. |
 | `MISO_ENGINE_BENCH_WASM_HOST` | Wasm host name. |
 | `MISO_ENGINE_BENCH_WASM_HOST_VERSION` | Wasm host version. |
 | `MISO_ENGINE_BENCH_WASM_SCALAR_BYTES` | size of the scalar Wasm artifact. |

@@ -360,8 +360,6 @@ jobs:
       # binaries; only the hermetic mutation-test suite stays here.
       - name: Standing builtins fixture manifest mutation tests
         run: bash scripts/test-builtins-fixtures.sh
-      - name: Wasm console benchmark validator mutation tests
-        run: bash scripts/test-wasm-console-benchmark.sh
       # Everything in this bundle is a hermetic validator self-test.
       - name: Benchmark preconditions and validator mutation tests
         run: |
@@ -486,8 +484,8 @@ jobs:
             --exclude true-peak-limiter --exclude transient-shaper --exclude soft-clip \
             --exclude parametric-eq --exclude builtins --exclude dsp-reference \
             --exclude conformance --exclude audit --exclude bench --exclude console-workload \
-            --exclude wasm-gates --exclude wasm-console --exclude wasm-gate-guest \
-            --exclude wasm-console-guest --exclude wasm-gate-corpus \
+            --exclude wasm-gates --exclude wasm-gate-guest \
+            --exclude wasm-gate-corpus \
             --features builtins-compiler/test-support,graph/test-support,host-web/test-support,host-core/test-support,effect-compiler/test-support,protocol/test-support,engine/realtime-audit
       - name: Native host smoke
         run: cargo run --locked -p host-native
@@ -873,7 +871,7 @@ jobs:
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal
       # cargo-metadata asserts the cdylib/staticlib set is exactly {capi, host-web,
-      # wasm-gate-guest, wasm-console-guest} and [profile.release].panic == "abort".
+      # wasm-gate-guest} and [profile.release].panic == "abort".
       - name: Release shape policy
         run: python3 -B scripts/check-release-shape.py
       # The panic-variant filename clobber (docs/REALTIME_DEPENDENCY_POLICY.md) is prevented by

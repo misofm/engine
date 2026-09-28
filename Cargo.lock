@@ -2376,26 +2376,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "wasm-console"
-version = "0.1.0"
-dependencies = [
- "bench-support",
- "console-workload",
- "engine",
- "lane",
- "wasmtime",
-]
-
-[[package]]
-name = "wasm-console-guest"
-version = "0.1.0"
-dependencies = [
- "bench-support",
- "console-workload",
- "lane",
-]
-
-[[package]]
 name = "wasm-encoder"
 version = "0.252.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

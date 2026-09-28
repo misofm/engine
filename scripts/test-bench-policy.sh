@@ -54,17 +54,6 @@ expect_failure_with_path() {
 new_case baseline
 check >/dev/null
 
-# #557: a subject cannot grow a direct common host probe after delegation.
-new_case shared-subject-direct-common-probe
-printf '\nfn shared_probe() { let _ = std::fs::read("/proc/cpuinfo"); }\n' \
-    >>"$case_root/tools/bench/src/session.rs"
-expect_failure shared-subject-direct-common-probe
-
-# #557: each subject must retain an explicit delegation to the shared collector.
-new_case shared-subject-missing-delegation
-sed -i '/HostToolchainFacts::gather()/d' "$case_root/tools/bench/src/conformance.rs"
-expect_failure shared-subject-missing-delegation
-
 for required_root in crates hosts; do
     new_case "missing-$required_root"
     rm -rf "$case_root/$required_root"
@@ -255,12 +244,12 @@ expect_failure second-allocator
 
 new_case second-global-allocator-attribute
 printf '\n#[global_allocator]\nstatic A: X = X;\n' \
-    >>"$case_root/tools/bench/src/session.rs"
+    >>"$case_root/tools/bench/src/protocol.rs"
 expect_failure second-global-allocator-attribute
 
 new_case second-escaper
 printf '\nfn json_escape(value: &str) -> String {\n    value.to_owned()\n}\n' \
-    >>"$case_root/tools/bench/src/conformance.rs"
+    >>"$case_root/tools/bench/src/protocol.rs"
 expect_failure second-escaper
 
 # #380: the widened escaper pattern also has to catch a `json_string`/`json_quote`-named
@@ -268,19 +257,20 @@ expect_failure second-escaper
 # `tools/audit/src/vectorization.rs`'s `json_string` had before this issue removed it.
 new_case second-json-string-name
 printf '\nfn json_string(value: &str) -> String {\n    value.replace('"'"'\\\\'"'"', "\\\\\\\\")\n}\n' \
-    >>"$case_root/tools/bench/src/conformance.rs"
+    >>"$case_root/tools/bench/src/protocol.rs"
 expect_failure second-json-string-name
 
 # A local wrapper that only calls the shared `escape` is not the defect. No tool carries one any
 # more (#1026 and #1037 deleted the last two), so the cases below that need one append it to
-# `tools/bench/src/conformance.rs` first, exactly as the delegate-stays-green cases do.
+# `tools/bench/src/protocol.rs` first, exactly as the delegate-stays-green cases do. (They used
+# `tools/bench/src/protocol.rs` until #1039 retired that benchmark subject.)
 
 # A delegating wrapper whose signature rustfmt has wrapped across multiple lines is still a
 # delegate, not a reimplementation: the window scan has to reach the line that actually calls
 # `escape(`, however many signature lines come first.
 new_case json-string-multiline-signature-delegate-stays-green
 printf '\nfn json_string(\n    value: &str,\n) -> String {\n    format!("\\"{}\\"", json::escape(value))\n}\n' \
-    >>"$case_root/tools/bench/src/conformance.rs"
+    >>"$case_root/tools/bench/src/protocol.rs"
 check >/dev/null || {
     printf 'bench policy rejects a delegating json_string whose signature spans multiple lines\n' >&2
     exit 1
@@ -291,7 +281,7 @@ check >/dev/null || {
 # `}`, or a 40-line cap, not on brace balance.
 new_case json-string-one-liner-delegate-followed-by-other-code-stays-green
 printf '\nfn json_string(value: &str) -> String { format!("\\"{}\\"", json::escape(value)) }\n\nfn something_else() -> u32 {\n    1\n}\n' \
-    >>"$case_root/tools/bench/src/conformance.rs"
+    >>"$case_root/tools/bench/src/protocol.rs"
 check >/dev/null || {
     printf 'bench policy rejects a one-line delegating json_string followed by other code\n' >&2
     exit 1
@@ -299,7 +289,7 @@ check >/dev/null || {
 
 new_case json-string-non-delegating-one-liner-as-last-item
 printf '\nfn json_string(value: &str) -> String { value.to_owned() }\n' \
-    >>"$case_root/tools/bench/src/conformance.rs"
+    >>"$case_root/tools/bench/src/protocol.rs"
 expect_failure json-string-non-delegating-one-liner-as-last-item
 
 # The exact partial-escaper shape this rule exists to catch: it calls the shared `escape` and then
@@ -307,25 +297,25 @@ expect_failure json-string-non-delegating-one-liner-as-last-item
 # with `.replace('\\', ...)`.
 new_case json-string-delegates-then-replaces
 printf '\nfn json_string(value: &str) -> String {\n    let escaped = json::escape(value);\n    escaped.replace("<", "&lt;")\n}\n' \
-    >>"$case_root/tools/bench/src/conformance.rs"
+    >>"$case_root/tools/bench/src/protocol.rs"
 expect_failure json-string-delegates-then-replaces
 
 # `escape(` appearing only in a comment is not a delegating call.
 new_case json-string-escape-mentioned-only-in-a-comment
 printf '\nfn json_string(value: &str) -> String {\n    // escape(value) used to be called here\n    value.to_owned()\n}\n' \
-    >>"$case_root/tools/bench/src/conformance.rs"
+    >>"$case_root/tools/bench/src/protocol.rs"
 expect_failure json-string-escape-mentioned-only-in-a-comment
 
 # The widened definition anchor (`^\s*(pub(\([a-z]+\))? )?fn`) has to see a reimplementation that
 # is indented (inside a module) or spelled `pub(crate)`, not just a column-zero `pub`/bare `fn`.
 new_case json-string-indented-inside-a-module
 printf '\nmod scratch {\n    fn json_string(value: &str) -> String {\n        value.to_owned()\n    }\n}\n' \
-    >>"$case_root/tools/bench/src/conformance.rs"
+    >>"$case_root/tools/bench/src/protocol.rs"
 expect_failure json-string-indented-inside-a-module
 
 new_case json-string-pub-crate-non-delegating
 printf '\npub(crate) fn json_string(value: &str) -> String {\n    value.to_owned()\n}\n' \
-    >>"$case_root/tools/bench/src/conformance.rs"
+    >>"$case_root/tools/bench/src/protocol.rs"
 expect_failure json-string-pub-crate-non-delegating
 
 # A nested block (an `if` with its own more-indented `}`) inside a delegating wrapper's body must
@@ -333,7 +323,7 @@ expect_failure json-string-pub-crate-non-delegating
 # line's own indentation followed by `}`, not the first lone `}` at any depth.
 new_case json-string-nested-if-before-delegating-call-stays-green
 printf '\nfn json_string(value: &str) -> String {\n    if value.is_empty() {\n        return "\\"\\"".to_owned();\n    }\n    format!("\\"{}\\"", bench_support::json::escape(value))\n}\n' \
-    >>"$case_root/tools/bench/src/conformance.rs"
+    >>"$case_root/tools/bench/src/protocol.rs"
 check >/dev/null || {
     printf 'bench policy rejects a delegating json_string with a nested if before the call\n' >&2
     exit 1
@@ -345,18 +335,19 @@ check >/dev/null || {
 # `.replace(` anywhere -- is still the partial-escaper defect and must still fail.
 new_case json-string-delegates-then-hand-rolls-backslash-via-flat-map
 printf '\nfn json_string(value: &str) -> String {\n    let escaped = bench_support::json::escape(value);\n    let doubled: String = escaped\n        .chars()\n        .flat_map(|c| if c == '"'"'\\\\'"'"' { vec!['"'"'\\\\'"'"', '"'"'\\\\'"'"'] } else { vec![c] })\n        .collect();\n    doubled\n}\n' \
-    >>"$case_root/tools/bench/src/conformance.rs"
+    >>"$case_root/tools/bench/src/protocol.rs"
 expect_failure json-string-delegates-then-hand-rolls-backslash-via-flat-map
 
-# #380: the private SHA-256 round-constant table `tools/bench/src/session.rs` used to carry.
+# #380: the private SHA-256 round-constant table `tools/bench/src/session.rs` used to carry (#1039
+# retired that subject).
 new_case second-sha256-round-constant
 printf '\nconst K: [u32; 64] = [0; 64];\n' \
-    >>"$case_root/tools/bench/src/conformance.rs"
+    >>"$case_root/tools/bench/src/protocol.rs"
 expect_failure second-sha256-round-constant
 
 new_case second-sha256-initial-constant
 printf '\nconst INITIAL: u32 = 0x6a09_e667;\n' \
-    >>"$case_root/tools/bench/src/conformance.rs"
+    >>"$case_root/tools/bench/src/protocol.rs"
 expect_failure second-sha256-initial-constant
 
 new_case second-percentile
@@ -497,49 +488,49 @@ grep_fault digest-grep-error 'Sha256Sink' 'grep failed with status 7; output: to
 grep_fault digest-grep-empty-error 'Sha256Sink' 'grep failed with status 7; output: <empty>; stderr: grep-error-sentinel' empty
 grep_fault escaper-presence-error 'tools/bench-support/src/json.rs' 'shared-definition grep failed or is empty for tools/bench-support/src/json.rs; status 7; output:'
 grep_fault escaper-presence-empty-error 'tools/bench-support/src/json.rs' 'shared-definition grep failed or is empty for tools/bench-support/src/json.rs; status 7; output: <empty>; stderr: grep-error-sentinel' empty
-multifile_grep_fault escaper-candidate-grep-error 'json_(escape|string|quote)' grep grep-error-sentinel $'tools/bench/src/conformance.rs\ntools/bench-support/src/json.rs' tools/bench/src/conformance.rs
+multifile_grep_fault escaper-candidate-grep-error 'json_(escape|string|quote)' grep grep-error-sentinel $'tools/bench/src/protocol.rs\ntools/bench-support/src/json.rs' tools/bench/src/protocol.rs
 new_case escaper-candidate-grep-empty-error
 mkdir -p "$case_root/shim"
 printf '#!/usr/bin/env bash\nif [[ " $* " == *"--include=*.rs"* && " $* " == *"json_(escape|string|quote)"* ]]; then printf "grep-error-sentinel\\n" >&2; exit 7; fi\nexec /usr/bin/grep "$@"\n' >"$case_root/shim/grep"
 chmod +x "$case_root/shim/grep"
 expect_failure_with_path escaper-candidate-grep-empty-error "$case_root/shim" 'grep failed with status 7; output: <empty>; stderr: grep-error-sentinel'
 grep_fault private-sha-grep-error '0x6a09_' 'grep failed with status 7; output: <empty>; stderr: grep-error-sentinel' empty
-multifile_grep_fault unsafe-owner-grep-error 'unsafe_code' 'unsafe-owner scan' grep-error-sentinel $'tools/bench-support/src/alloc.rs\ntools/audit/src/capi.rs\ntools/native-pcm-runner/src/lib.rs\ntools/bench/src/protocol.rs\ntools/wasm-gate-guest/src/lib.rs\ntools/wasm-console-guest/src/lib.rs'
+multifile_grep_fault unsafe-owner-grep-error 'unsafe_code' 'unsafe-owner scan' grep-error-sentinel $'tools/bench-support/src/alloc.rs\ntools/audit/src/capi.rs\ntools/native-pcm-runner/src/lib.rs\ntools/bench/src/protocol.rs\ntools/wasm-gate-guest/src/lib.rs'
 grep_fault unsafe-owner-grep-empty-error 'unsafe_code' 'unsafe-owner scan failed with status 7; output: <empty>; stderr: grep-error-sentinel' empty
 multifile_grep_fault environment-reader-grep-error 'env::var' 'environment-reader scan' grep-error-sentinel $'tools/audit/src/main.rs\ntools/bench/src/main.rs'
 grep_fault environment-reader-grep-empty-error 'env::var' 'environment-reader scan failed with status 7; output: <empty>; stderr: grep-error-sentinel' empty
 
 new_case delegate-parser-output-error
-printf '%s' "$delegating_wrapper" >>"$case_root/tools/bench/src/conformance.rs"
+printf '%s' "$delegating_wrapper" >>"$case_root/tools/bench/src/protocol.rs"
 mkdir -p "$case_root/shim"
-printf '#!/usr/bin/env bash\nif [[ -n "${MISO_ENGINE_BENCH_POLICY_NEEDLE:-}" && "${@: -1}" == "tools/bench/src/conformance.rs" ]]; then /usr/bin/awk "$@"; printf "delegate-error-sentinel\\n" >&2; exit 6; fi\nexec /usr/bin/awk "$@"\n' >"$case_root/shim/awk"
+printf '#!/usr/bin/env bash\nif [[ -n "${MISO_ENGINE_BENCH_POLICY_NEEDLE:-}" && "${@: -1}" == "tools/bench/src/protocol.rs" ]]; then /usr/bin/awk "$@"; printf "delegate-error-sentinel\\n" >&2; exit 6; fi\nexec /usr/bin/awk "$@"\n' >"$case_root/shim/awk"
 chmod +x "$case_root/shim/awk"
-expect_failure_with_path delegate-parser-output-error "$case_root/shim" 'delegate parser failed for tools/bench/src/conformance.rs with status 6; output: delegate; stderr: delegate-error-sentinel'
+expect_failure_with_path delegate-parser-output-error "$case_root/shim" 'delegate parser failed for tools/bench/src/protocol.rs with status 6; output: delegate; stderr: delegate-error-sentinel'
 
 new_case delegate-parser-empty-error
-printf '%s' "$delegating_wrapper" >>"$case_root/tools/bench/src/conformance.rs"
+printf '%s' "$delegating_wrapper" >>"$case_root/tools/bench/src/protocol.rs"
 mkdir -p "$case_root/shim"
-printf '#!/usr/bin/env bash\nif [[ -n "${MISO_ENGINE_BENCH_POLICY_NEEDLE:-}" && "${@: -1}" == "tools/bench/src/conformance.rs" ]]; then printf "delegate-empty-error-sentinel\\n" >&2; exit 6; fi\nexec /usr/bin/awk "$@"\n' >"$case_root/shim/awk"
+printf '#!/usr/bin/env bash\nif [[ -n "${MISO_ENGINE_BENCH_POLICY_NEEDLE:-}" && "${@: -1}" == "tools/bench/src/protocol.rs" ]]; then printf "delegate-empty-error-sentinel\\n" >&2; exit 6; fi\nexec /usr/bin/awk "$@"\n' >"$case_root/shim/awk"
 chmod +x "$case_root/shim/awk"
-expect_failure_with_path delegate-parser-empty-error "$case_root/shim" 'delegate parser failed for tools/bench/src/conformance.rs with status 6; output: <empty>; stderr: delegate-empty-error-sentinel'
+expect_failure_with_path delegate-parser-empty-error "$case_root/shim" 'delegate parser failed for tools/bench/src/protocol.rs with status 6; output: <empty>; stderr: delegate-empty-error-sentinel'
 
-new_case later-timed-marker-error
+new_case timed-marker-error
 mkdir -p "$case_root/shim"
-printf '#!/usr/bin/env bash\nif [[ " $* " == *"timing::timed"* && "${@: -1}" == "tools/wasm-console/src/main.rs" ]]; then /usr/bin/grep "$@"; printf "later-timer-error-sentinel\\n" >&2; exit 7; fi\nexec /usr/bin/grep "$@"\n' >"$case_root/shim/grep"
+printf '#!/usr/bin/env bash\nif [[ " $* " == *"timing::timed"* && "${@: -1}" == "tools/bench/src/console.rs" ]]; then /usr/bin/grep "$@"; printf "timer-error-sentinel\\n" >&2; exit 7; fi\nexec /usr/bin/grep "$@"\n' >"$case_root/shim/grep"
 chmod +x "$case_root/shim/grep"
-expect_failure_with_path later-timed-marker-error "$case_root/shim" 'converted subject timer scan failed or is empty for tools/wasm-console/src/main.rs; status 7; output:' 'later-timer-error-sentinel'
+expect_failure_with_path timed-marker-error "$case_root/shim" 'converted subject timer scan failed or is empty for tools/bench/src/console.rs; status 7; output:' 'timer-error-sentinel'
 
-new_case later-timed-marker-empty-error
+new_case timed-marker-empty-error
 mkdir -p "$case_root/shim"
-printf '#!/usr/bin/env bash\nif [[ " $* " == *"timing::timed"* && "${@: -1}" == "tools/wasm-console/src/main.rs" ]]; then printf "later-timer-empty-error-sentinel\\n" >&2; exit 7; fi\nexec /usr/bin/grep "$@"\n' >"$case_root/shim/grep"
+printf '#!/usr/bin/env bash\nif [[ " $* " == *"timing::timed"* && "${@: -1}" == "tools/bench/src/console.rs" ]]; then printf "timer-empty-error-sentinel\\n" >&2; exit 7; fi\nexec /usr/bin/grep "$@"\n' >"$case_root/shim/grep"
 chmod +x "$case_root/shim/grep"
-expect_failure_with_path later-timed-marker-empty-error "$case_root/shim" 'converted subject timer scan failed or is empty for tools/wasm-console/src/main.rs; status 7; output: <empty>; stderr: later-timer-empty-error-sentinel'
+expect_failure_with_path timed-marker-empty-error "$case_root/shim" 'converted subject timer scan failed or is empty for tools/bench/src/console.rs; status 7; output: <empty>; stderr: timer-empty-error-sentinel'
 
-new_case later-timed-forbidden-error
+new_case timed-forbidden-error
 mkdir -p "$case_root/shim"
-printf '#!/usr/bin/env bash\nif [[ " $* " == *"Instant::now"* && "${@: -1}" == "tools/wasm-console/src/main.rs" ]]; then printf "later-forbidden-error-sentinel\\n" >&2; exit 7; fi\nexec /usr/bin/grep "$@"\n' >"$case_root/shim/grep"
+printf '#!/usr/bin/env bash\nif [[ " $* " == *"Instant::now"* && "${@: -1}" == "tools/bench/src/console.rs" ]]; then printf "forbidden-error-sentinel\\n" >&2; exit 7; fi\nexec /usr/bin/grep "$@"\n' >"$case_root/shim/grep"
 chmod +x "$case_root/shim/grep"
-expect_failure_with_path later-timed-forbidden-error "$case_root/shim" 'subject scan failed with status 7; output: <empty>; stderr: later-forbidden-error-sentinel'
+expect_failure_with_path timed-forbidden-error "$case_root/shim" 'subject scan failed with status 7; output: <empty>; stderr: forbidden-error-sentinel'
 
 sort_fault() {
     local label=$1 ordinal=$2 expected=$3 mode=${4:-real}
@@ -576,7 +567,7 @@ new_case count-error
 mkdir -p "$case_root/shim"
 printf '#!/usr/bin/env bash\n/usr/bin/wc "$@"\nprintf "count-error-sentinel\\n" >&2\nexit 9\n' >"$case_root/shim/wc"
 chmod +x "$case_root/shim/wc"
-expect_failure_with_path count-error "$case_root/shim" 'unsafe-owner count failed with status 9; output: 6; stderr: count-error-sentinel'
+expect_failure_with_path count-error "$case_root/shim" 'unsafe-owner count failed with status 9; output: 5; stderr: count-error-sentinel'
 
 new_case count-empty-error
 mkdir -p "$case_root/shim"
@@ -588,12 +579,12 @@ new_case count-formatter-error
 mkdir -p "$case_root/shim"
 printf '#!/usr/bin/env bash\n/usr/bin/tr "$@"\nprintf "formatter-error-sentinel\\n" >&2\nexit 10\n' >"$case_root/shim/tr"
 chmod +x "$case_root/shim/tr"
-expect_failure_with_path count-formatter-error "$case_root/shim" 'unsafe-owner count formatter failed with status 10; output: 6; input: 6; stderr: formatter-error-sentinel'
+expect_failure_with_path count-formatter-error "$case_root/shim" 'unsafe-owner count formatter failed with status 10; output: 5; input: 5; stderr: formatter-error-sentinel'
 
 new_case count-formatter-empty-error
 mkdir -p "$case_root/shim"
 printf '#!/usr/bin/env bash\nprintf "formatter-empty-error-sentinel\\n" >&2\nexit 10\n' >"$case_root/shim/tr"
 chmod +x "$case_root/shim/tr"
-expect_failure_with_path count-formatter-empty-error "$case_root/shim" 'unsafe-owner count formatter failed with status 10; output: <empty>; input: 6; stderr: formatter-empty-error-sentinel'
+expect_failure_with_path count-formatter-empty-error "$case_root/shim" 'unsafe-owner count formatter failed with status 10; output: <empty>; input: 5; stderr: formatter-empty-error-sentinel'
 
 printf 'bench policy mutations: ok\n'
