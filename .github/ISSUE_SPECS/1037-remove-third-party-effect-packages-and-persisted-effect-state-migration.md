@@ -182,3 +182,204 @@ See `../VERIFY-DEAD-CODE.md`, finding F10. The recommendation stands.
    rebuild base and change on one machine.
 4. **The C ABI stays live for mobile (R2 amended).** R6a removes only `effect-package`'s own C
    header and `c-abi` feature; it must not touch `crates/capi`.
+
+## Attempt 1 evidence
+
+Terra, 2026-09-28. The branch is `codex/1037-remove-effect-packages`:
+
+- `c59f9345` holds the change.
+- `14674297` merges batch head `9644196d` (#1052, #1042, #1024, #1025).
+- `0cf45472` drops #1052's source-scrape allow-list rows for the deleted files.
+- `75c4c080` merges batch head `c867ec2a` (#1026, #1056). Its message lists the conflict
+  resolutions, each the union of both removals. #1026 deleted `tools/bench/src/builtins.rs` and
+  this change deleted `effect_interchange.rs`, which were the last two delegating escaper wrappers.
+  So `test-bench-policy.sh`'s escaper-candidate and delegate-parser cases now seed a wrapper into
+  `conformance.rs` first.
+- `7e252bc4` drops the five env names the merged tree no longer reads.
+
+The comparisons below use base `c867ec2a` against the merged head. Two earlier passes, with bases
+`b8bea8e1` and `9644196d`, gave the same result.
+
+### What was delivered
+
+- **R6a and R6b (steps 1-3).** Deleted:
+  - `crates/effect-package`, with its C header, C smoke test, `c-abi` feature and `cdylib`;
+  - effect-compiler's `migration.rs`;
+  - the `prepare.rs` persisted-state span: `state_replay`, `WireBoundNativeEffectFactory`,
+    `bind_native_effect_factory_state`, restore admission, the unpublished bank state and the
+    scalar and bank snapshot and restore;
+  - the test files `bank_state.rs`, `scalar_state.rs`, `migration.rs`, `migration_terminal.rs` and
+    `symmetry_restore.rs`;
+  - the 14 package, descriptor, state and interchange-qualification scripts;
+  - the four fixture directories, the two fuzz targets and the five `EFFECT_*_V1.md` docs.
+
+  `observation_identity.rs` keeps tests 2 and 3, now reading only the `effect-contract`
+  descriptors. Test 2 loses one line, the 48-byte record arithmetic, which was wire accounting.
+  `lane` becomes an effect-compiler dev-dependency, because only `tests/symmetry_designed_words.rs`
+  uses it now.
+- **#1028 absorbed.** R6 was ruled before #1028 merged, and #1028 says it is absorbed in that case.
+  This deletes the `effect-interchange` bench subject, its seven scripts, its env-vocabulary names
+  and the unread `artifacts/issue455-interchange-completion/`. After the #1026 merge, the
+  benchmark binary-digest, phase-marker and fake-bench names lost their last readers too. #1028's amendment is applied:
+  `test-bench-policy.sh`'s delegate cases are re-pointed to `tools/bench/src/builtins.rs`, the one
+  remaining delegating wrapper.
+- **CI and policies.**
+  - `qualification.yml`: dropped the lint interchange step and the two cross-target
+    package/descriptor steps. The cross-target job no longer installs wabt, since nothing in
+    `check-cross-targets.sh` uses `wasm-objdump` now.
+  - Nightly: dropped the two fuzz targets and the `package_allocation` budget.
+  - `fuzz.yml`'s `paths:` now equals the fuzz crate's `cargo metadata` workspace closure:
+    `engine`, `protocol` and `session`. `effect-contract`, `lane` and `math` left it along with
+    `effect-package`.
+  - Updated gates: `check-release-shape.py` (four cdylib/staticlib packages),
+    `check-cross-targets.sh`, `check-realtime-policy.sh` (three unsafe exclusions),
+    `check-effect-runtime-policy.sh` (the package-reference and migration scans are gone),
+    `check-conformance-boundaries.sh` and `check-ci-path-routing.py` (three nightly budgets).
+    Their mutation suites were updated to match.
+  - `check-artifact-evidence-leak.sh` now counts `effect-compiler` as shipped, so the N1 split in
+    `check-cross-targets.sh` is still gated. effect-compiler is in every host's closure.
+  - The `verdict` table is unchanged.
+- **Docs (step 6).** Updated AGENTS.md's third-party paragraph and scope line, `EFFECT_CONTRACT_V1.md`,
+  `SESSION_SCHEMA_V1.md`, `IMPLEMENTATION_PLAN.md`, `REALTIME_DEPENDENCY_POLICY.md`,
+  `TARGET_MATRIX.md`, `STEM_IDENTITY_V1.md`, `STEM_STORE_V1.md`, `docs/README.md` and
+  `ENGINE_ENV_VOCABULARY.md`. Documented env names went from 117 to 90, and
+  `test-env-vocabulary.sh`'s pinned count follows.
+- **Not done: step 4, the `cid` grammar.** It needs its own approval, and R6a/R6b do not record
+  one. The grammar, the SDK's canonical writer (`sdk/src/internal/session-json.ts:91`), the
+  compile-time refusal `effect.third_party.unavailable_at_launch` and
+  `third_party_dynamic_effects_are_never_bank_candidates` all stay, and they stay consistent with
+  each other. `crates/capi` is untouched.
+- **Step 5 is the follow-up.** `ChannelSymmetryWitness::RESTORED` is now never cleared: only the
+  deleted span cleared it. So the `MonoSymmetricAtPrepare` test row that reads it
+  (`rack-compiler/src/lib.rs:916`, inside `mod tests`) describes a witness no production path can
+  produce any more. The per-effect
+  `snapshot_state_payload`/`restore_state_payload` hooks and their bank variants now have only test
+  and evidence-tool callers (`conformance`, `tools/bench`). The follow-up removes them with its own
+  digest evidence.
+- **Lines, against `c867ec2a`, before this evidence:** +199 / -38,004. The deletions break down
+  as:
+
+  | area | lines removed |
+  | --- | ---: |
+  | `crates/effect-package` | 14,856 |
+  | effect-compiler | 7,896 |
+  | the #455 artifact | 7,188 |
+  | scripts | 5,379 |
+  | fixtures, fuzz, bench, CI and manifests | 2,107 |
+  | docs and AGENTS.md | 567 |
+
+### R6b: nothing live used the deleted state paths
+
+- **Compile proof.** With the span and the crate deleted, these all pass:
+  - the native workspace check with `--all-targets --all-features`;
+  - the wasm `simd128` check of `host-web` and `effect-compiler`;
+  - `aarch64-apple-ios` and `aarch64-linux-android`: `--workspace --lib --all-features` check and
+    clippy, and `--all-targets --all-features` for capi, host-core, host-mobile, effect-compiler,
+    effect-contract, graph-compiler, engine and session.
+
+  So no Rust caller exists in capi, host-core, host-web or host-mobile.
+- **The SDK.** It reaches Rust only through host-web's wasm exports, and it has no state
+  snapshot or restore surface: a grep of `sdk/src` and `hosts/host-web/web` finds none. The
+  shipped module's functions are unchanged; see the artifact section below.
+- **Tests of live claims.** The deleted tests are listed below. Every one exercised the persisted
+  envelope, migration, the wire or the removed benchmark.
+- **In-memory state kept.** None of it is touched:
+  - `EffectBankPreparation`, which graph-compiler bank binding and host-core `control_provider`
+    use;
+  - the effect-contract payload hooks;
+  - the banks' `copy_state_from` and `desymmetrize_channels`;
+  - everything plan replacement uses.
+
+### Gates
+
+| gate | result |
+| --- | --- |
+| `cargo check --locked --workspace --all-targets --all-features` | pass |
+| clippy `-D warnings`, default and `--all-features` | pass |
+| `cargo fmt --all --check` | pass |
+| `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` | pass |
+| wasm `simd128` check of `-p host-web -p effect-compiler` | pass |
+| `cargo check --locked --manifest-path fuzz/Cargo.toml --bins` | pass (six binaries) |
+| iOS and Android `--lib` check and clippy, plus the `--all-targets` product set | pass |
+| `cargo test --locked --workspace` | pass: 2,320 passed, 0 failed, 38 ignored |
+| effect-compiler, graph-compiler, host-core and host-web with test-support | pass: 541 passed |
+| release `-p bench -p console-workload -p audit` | pass: 154 passed |
+| console `gain_pan_profile digests` | 17 rows, byte-identical to base |
+| `bash scripts/run-wasm-gates.sh` (native, wasm scalar, wasm simd128, V8 EQ loops) | pass |
+| `check-cross-targets.sh` | pass |
+| `check-release-shape.py` and `--self-test` | pass |
+| `check-ci-path-routing.py` and `test-ci-path-routing.py` | pass |
+| `check-effect-runtime-policy.sh`, `test-effect-runtime-policy.sh`, `check-effect-runtime-fixtures.sh`, `test-effect-runtime-fixtures.sh` | pass |
+| realtime, conformance-boundary, artifact-evidence-leak, bench and env-vocabulary checks and their tests | pass |
+| `check-workspace-policy.sh` and `test-workspace-policy.sh`, after the #1052 merge | pass |
+| `check-step-vocabulary.py` | pass at `c867ec2a`; it failed at `9644196d` on #1052's own spec, which the batch then fixed |
+| the remaining `check-*.sh` and argument-free `check-*.py` | pass |
+| `check-sdk-generated.sh`, `check-sdk-types.sh`, `check-sdk-deletions.py` and `--self-test`, `check-sdk-headless.sh` | pass |
+| `check-capi-abi.sh` | pass (shared and static linkage); `crates/capi` and its header are unchanged |
+| `check-graph-determinism.sh`, `check-protocol-wasm-parity.sh`, `check-realtime-audit-leak.sh`, `check-wasm-realtime-atomics.sh`, `check-effect-contract.sh` | pass |
+
+`sdk-package.sh check` was not run. It needs the full pinned artifact closure, and mid-batch
+`build-web-audioworklet.sh` refuses to produce that without a re-pin, which this brief rules out.
+`sdk/` is unchanged.
+
+### Gate 3: the shipped artifact
+
+Both modules were built on one machine with `build-web-audioworklet.sh --module-only`:
+
+- base `c867ec2a`: `f7bd75ca…`, the same module as at `9644196d`;
+- change: `6867027b…`.
+
+Neither is re-pinned; the batch boundary does that.
+
+- **Sizes.** Both modules have the same section sizes: code 2,965,873 and data 101,679.
+- **Functions.** Both have 2,733 functions, with body bytes 2,961,091 in each and the same
+  body-size multiset.
+- **Instructions.** Every function is instruction-for-instruction identical (1,315,283
+  instructions) once these are normalised:
+  - call targets, because function order moved;
+  - symbol crate hashes;
+  - `Ms<n>_` impl disambiguators, because effect-compiler's metadata and impl order moved.
+- **Data.** 196 bytes differ, and the data size is the same:
+  - two panic `Location` line numbers in `effect-compiler/src/prepare.rs`, 1042 to 280 and 1289
+    to 527, which are the 762 deleted lines above them;
+  - a reordering of the transient-shaper and multiband-compressor descriptor strings in rodata,
+    with the 16 pointer words that address them moving by 2 bytes.
+
+No rendered code moved, which agrees with the unchanged console digests and wasm gates.
+
+### Tests: `cargo test --workspace --all-targets --all-features -- --list`
+
+Base 2,456 and change 2,347: 109 removed and none added. The same 109 went against `b8bea8e1`
+(2,556 to 2,447) and against `9644196d` (2,560 to 2,451). Each removed test is listed with the feature it covered:
+
+- **effect-package, 73 tests. All removed under R6a (wire, package and CID, C header) or R6b
+  (state):**
+  - lib unit tests: 35;
+  - `descriptor_v1_qualification`: 9;
+  - `effect_interchange_abi`: 2;
+  - `effect_interchange_mutation`: 1;
+  - `package_v1_qualification`: 3;
+  - `package_vectors`: 2;
+  - `state_vectors`: 15;
+  - `package_allocation`: 6.
+- **effect-compiler, 36 tests:**
+  - the persisted-envelope snapshot and restore (R6b): `bank_state` 6, `scalar_state` 7 and
+    `symmetry_restore` 3. The per-effect hook round trips they drove through the envelope are
+    still tested in each effect crate: `soft-clip/tests/state_roundtrip.rs`,
+    `gate-expander/tests/state.rs` and the parametric-eq `contract.rs` tests;
+  - state migration (R6b): `migration` 6 and `migration_terminal` 11;
+  - `observation_identity::every_declared_tap_costs_exactly_its_record_and_its_two_strings`, which
+    was descriptor-wire byte accounting (R6a).
+- **bench, 2 tests, from the #1028 subject:**
+  - `exact_four_rate_migration_envelope_without_timing` is lost with R6b, as #1028's gate 5
+    allows when R6 is ruled first;
+  - `digest_hex_matches_known_abc_digest` is held by `bench-support/src/digest.rs`'s own `abc`
+    known-answer test.
+
+### Notes for root
+
+- #27 and #28 close as descoped, under R6a. Per this brief, I did not edit GitHub.
+- These open specs name files this change deletes:
+  - #1036 (`effect-package/src/wire.rs`, `check-effect-descriptor-v1.sh`);
+  - #1046 and #1047 (effect-package and migration test rows, already marked as #1037's);
+  - #1062 (the package and descriptor scalar legs, which its amendment 2 anticipates).
