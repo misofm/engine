@@ -537,10 +537,7 @@ mod tests {
 
     #[test]
     fn extended_and_unrelated_rates_reject_before_plan_publication() {
-        for rate in crate::EXTENDED_COMPATIBILITY_SAMPLE_RATES
-            .into_iter()
-            .chain([SampleRateHz(0), SampleRateHz(32_000), SampleRateHz(192_001)])
-        {
+        for rate in [176_400, 192_000, 352_800, 384_000, 0, 32_000, 192_001].map(SampleRateHz) {
             assert!(matches!(
                 PreparedRenderPlan::prepare(PrepareRenderPlan {
                     plan_id: 0,

@@ -235,14 +235,15 @@ fn oracle_pcm_within_derived_tolerance_scalar() {
 }
 
 #[test]
+#[cfg_attr(
+    not(any(target_arch = "x86", target_arch = "x86_64")),
+    ignore = "an eight-lane bank binds only on the eight-lane launch build (#1017)"
+)]
 fn oracle_pcm_within_derived_tolerance_w8() {
     let (source_left, source_right) = corpus_signals();
     for link in [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average] {
         let values = [corpus_values(); 8];
-        let Some(mut bank) = prepare_bank_w8(&values, link) else {
-            eprintln!("no eight-lane backend on this build; scalar leg still gates");
-            return;
-        };
+        let mut bank = prepare_bank_w8(&values, link).expect("an eight-lane build binds W8");
         let mut left = support::packed_w8(&vec![source_left.clone(); 8]);
         let mut right = support::packed_w8(&vec![source_right.clone(); 8]);
         let offsets = [0_u32; 9];

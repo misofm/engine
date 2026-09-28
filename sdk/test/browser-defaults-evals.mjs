@@ -200,6 +200,25 @@ test("scratch settlement clears timers and abort listeners; removed callbacks re
   }
 });
 
+test("browser boot refuses the removed extended research rates typed, before any AudioContext", async () => {
+  // Owner ruling R5 (#1036): 176.4, 192, 352.8 and 384 kHz are not accepted anywhere. The browser
+  // boot's scratch entry refuses such a document with the session's own diagnostic, so no
+  // AudioContext is ever asked for one of those rates.
+  const bytes = await moduleBytes();
+  const options = scratchBootOptions({});
+  for (const rate of [176_400, 192_000, 352_800, 384_000]) {
+    const document = new TextEncoder().encode(sessionDocument({ sampleRateHz: rate }));
+    await assert.rejects(scratchBootInWorker({ moduleBytes: bytes, document, options }), error => {
+      assert.ok(error instanceof MisoEngineError, `${rate}`);
+      assert.equal(error.phase, "boot", `${rate}`);
+      assert.equal(error.code, "refusedDocument", `${rate}`);
+      assert.equal(error.diagnosticCode, "sample_rate.unsupported_at_launch", `${rate}`);
+      assert.equal(error.diagnosticPath, "$.sample_rate_hz", `${rate}`);
+      return true;
+    });
+  }
+});
+
 test("actual scratch entry and client retain real Wasm refusal and usage error types", async () => {
   const bytes = await moduleBytes();
   const document = new TextEncoder().encode("{}");

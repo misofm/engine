@@ -813,6 +813,60 @@ fn each_boot_option_rule_has_its_own_typed_refusal() {
         .expect("all-zero options select defaults");
 }
 
+/// Owner ruling R5 (#1036): browser boot refuses a document at a former extended research rate
+/// (176.4-384 kHz) with the session's typed launch-rate diagnostic, both through the host and
+/// through the raw boot export the shipped module exposes, and an AudioContext running at such a
+/// rate cannot boot a launch-rate document: the physical shape mismatch refuses first.
+#[test]
+fn extended_rates_refuse_typed_at_browser_boot() {
+    const RATE: &str = "\"sample_rate_hz\": 48000";
+    const DIAGNOSTIC: &[u8] = b"sample_rate.unsupported_at_launch\t$.sample_rate_hz\n";
+    let launch = one_track_session(128);
+    assert_eq!(launch.matches(RATE).count(), 1, "fixture shape drifted");
+    for rate in [176_400_u32, 192_000, 352_800, 384_000] {
+        let document = launch.replacen(RATE, &format!("\"sample_rate_hz\": {rate}"), 1);
+        for options in [
+            WebBootOptions::default(),
+            WebBootOptions {
+                require_sample_rate_hz: rate,
+                ..boot_options(128)
+            },
+        ] {
+            let failure = AudioWorkletEngineHost::boot(document.as_bytes(), options)
+                .err()
+                .expect("an extended-rate document must refuse");
+            assert_eq!(failure.result(), RESULT_REFUSED_DOCUMENT, "{rate}");
+            assert_eq!(failure.diagnostic(), DIAGNOSTIC, "{rate}");
+        }
+
+        assert_eq!(miso_engine_web_v1_dispose(0), RESULT_OK);
+        assert_eq!(
+            crate::ffi::test_boot(document.as_bytes(), WebBootOptions::default()),
+            0,
+            "a refused boot never returns a live handle"
+        );
+        assert_eq!(miso_engine_web_v1_boot_result(), RESULT_REFUSED_DOCUMENT);
+        let diagnostic_bytes = miso_engine_web_v1_boot_diagnostic_bytes() as usize;
+        assert_eq!(
+            &crate::ffi::test_staged_document()[..diagnostic_bytes],
+            DIAGNOSTIC,
+            "{rate}"
+        );
+
+        let failure = AudioWorkletEngineHost::boot(
+            launch.as_bytes(),
+            WebBootOptions {
+                require_sample_rate_hz: rate,
+                ..boot_options(128)
+            },
+        )
+        .err()
+        .expect("a launch-rate document must not boot on an extended-rate context");
+        assert_eq!(failure.result(), RESULT_REPREPARE_REQUIRED, "{rate}");
+        assert_eq!(failure.diagnostic(), b"host.session.shape\t$\n", "{rate}");
+    }
+}
+
 #[test]
 fn decoded_command_resource_is_exact_for_console_modes_without_effects_or_meters() {
     let document = one_track_resource_session(128);

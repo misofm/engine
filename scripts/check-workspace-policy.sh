@@ -300,14 +300,6 @@ scan_forbidden "AudioWorklet processor implementation classes must be unversione
 # allowance cannot be spent again. #1047 deletes the last row.
 source_scrape_allowlist='
 1 crates/capi/src/ffi.rs ffi.rs #1047
-1 crates/effect-compiler/tests/migration.rs ../../effect-package/Cargo.toml #1037
-1 crates/effect-compiler/tests/migration.rs ../../engine/src/realtime/mod.rs #1037
-1 crates/effect-compiler/tests/migration.rs ../../engine/src/realtime/plan.rs #1037
-1 crates/effect-compiler/tests/migration.rs ../Cargo.toml #1037
-1 crates/effect-compiler/tests/migration.rs ../src/migration.rs #1037
-1 crates/effect-compiler/tests/migration_terminal.rs ../src/migration.rs #1037
-1 crates/effect-package/tests/state_vectors.rs ../src/state.rs #1037
-1 crates/effect-package/tests/state_vectors.rs ../src/wire.rs #1037
 1 crates/graph/src/runtime.rs ../../rack/src/lib.rs #1047
 1 crates/graph/src/runtime.rs lib.rs #1047
 2 crates/graph/src/runtime.rs runtime.rs #1047
@@ -315,9 +307,7 @@ source_scrape_allowlist='
 1 crates/lane/tests/input_chain_elision.rs ../src/kernels/builtins.rs #1047
 1 crates/lane/tests/input_chain_elision.rs ../src/lib.rs #1047
 1 crates/math/tests/f1_fast_db_bounds.rs f1_fast_db_bounds.rs #1047
-4 crates/source/src/lib.rs lib.rs #1047
-4 crates/source/src/native_source.rs native_source.rs #1035
-1 crates/source/src/native_wave.rs native_wave.rs #1035
+2 crates/source/src/lib.rs lib.rs #1047
 1 tools/audit/src/builtins_fixture_check.rs builtins.rs #1047
 1 tools/audit/src/builtins_fixture_check.rs builtins_fixture_check.rs #1047
 1 tools/audit/src/builtins_fixture_check.rs builtins_graph.rs #1047

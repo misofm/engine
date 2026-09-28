@@ -20,8 +20,6 @@ mod parametric_eq;
 mod protocol;
 mod realtime;
 mod record;
-mod source;
-mod source_duration;
 mod source_fixture;
 mod unfused_fma;
 mod vectorization;
@@ -43,8 +41,6 @@ const SUBJECTS: &[&str] = &[
     "parametric-eq",
     "protocol",
     "realtime",
-    "source",
-    "source-duration",
     "unfused-fma",
     "vectorization",
 ];
@@ -66,8 +62,6 @@ fn run_subject(subject: &str) {
         "parametric-eq" => parametric_eq::main(),
         "protocol" => protocol::main(),
         "realtime" => realtime::main(),
-        "source" => source::main(),
-        "source-duration" => source_duration::main(),
         "unfused-fma" => unfused_fma::main(),
         "vectorization" => vectorization::main(),
         _ => unreachable!("dispatcher validates internal subjects"),

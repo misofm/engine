@@ -7,8 +7,8 @@
 //! that does not. This gate asserts that on the flushed quantities, and asserts the opposite on an
 //! *unflushed* arithmetic arm so that the gate cannot pass vacuously by failing to enable FTZ.
 //!
-//! The MXCSR helpers live in `lane::softfma` because the workspace allows `unsafe` in
-//! that one lane file and forbids inline assembly everywhere.
+//! The control word is reached through `lane::fpenv` (MXCSR on x86, FPCR on AArch64), whose
+//! `unsafe` is allowlisted inside `lane`; the workspace forbids it everywhere else.
 //!
 //! Red-mutation proven for this gate (see `tests/MUTATIONS.md`): raise `FLUSH_EPS` below the
 //! subnormal boundary (`1e-40`), which lets subnormal state words survive the flush and makes the
@@ -85,23 +85,36 @@ fn all_arms() -> (Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>) {
     )
 }
 
+/// The control-word bits that make hardware flush: MXCSR's FTZ and DAZ on x86, FPCR's `FZ` on
+/// AArch64 (which flushes subnormal inputs and results alike; issue #1017).
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+const FLUSH_BITS: lane::fpenv::FpControlWord = lane::softfma::MXCSR_FTZ | lane::softfma::MXCSR_DAZ;
+
+/// See the x86 definition.
+#[cfg(target_arch = "aarch64")]
+const FLUSH_BITS: lane::fpenv::FpControlWord = lane::fpenv::FPCR_FZ;
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64"))]
 #[test]
 fn g6_flush_makes_hardware_ftz_inert() {
-    use lane::softfma::{MXCSR_DAZ, MXCSR_FTZ, read_mxcsr, write_mxcsr};
+    use lane::fpenv::{read_fp_control_word, write_fp_control_word};
 
-    let saved = read_mxcsr();
+    let saved = read_fp_control_word();
     assert_eq!(
-        saved & (MXCSR_FTZ | MXCSR_DAZ),
+        saved & FLUSH_BITS,
         0,
-        "G6: the test host must start with FTZ and DAZ clear"
+        "G6: the test host must start with hardware flush-to-zero clear"
     );
 
     let without = all_arms();
-    write_mxcsr(saved | MXCSR_FTZ | MXCSR_DAZ);
+    write_fp_control_word(saved | FLUSH_BITS);
     let with = all_arms();
-    write_mxcsr(saved);
-    assert_eq!(read_mxcsr(), saved, "G6: MXCSR must be restored");
+    write_fp_control_word(saved);
+    assert_eq!(
+        read_fp_control_word(),
+        saved,
+        "G6: the control word must be restored"
+    );
 
     assert_eq!(with.0, without.0, "G6: the flush law must be FTZ-inert");
     assert_eq!(
@@ -118,11 +131,11 @@ fn g6_flush_makes_hardware_ftz_inert() {
     );
 }
 
-#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")))]
 #[test]
 fn g6_flush_makes_hardware_ftz_inert() {
-    // Off x86 the FTZ control word is not reachable without inline assembly, which the workspace
-    // forbids; the wasm leg of G6 runs the same corpus under `wasmtime` (issue #83, job 83d).
+    // wasm has no flush-to-zero mode to set (the core specification forbids one); the wasm leg of
+    // G6 runs the same corpus under `wasmtime` (issue #83, job 83d).
     let arms = all_arms();
     assert!(!arms.0.is_empty(), "G6: the corpus must not be empty");
 }

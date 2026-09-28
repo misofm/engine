@@ -24,7 +24,7 @@ use core::cell::Cell;
 use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 
 use engine::{
-    SampleRateHz, is_extended_compatibility_sample_rate, is_launch_sample_rate,
+    SampleRateHz, is_launch_sample_rate,
     realtime::{Consumer, Producer, QueueGeneration, bounded_spsc},
 };
 pub mod corpus;
@@ -331,35 +331,23 @@ pub const fn builtin_filter_cutoff_maximum_hz(sample_rate: u32) -> Option<f32> {
 
 /// Validate the V1 public/preparation cutoff contract without entering coefficient preparation.
 ///
-/// Session compilation rejects unsupported rates before builtins preparation. For the retained
-/// direct TPT compatibility checks at extended research rates, the helper keeps their previous
-/// finite open-Nyquist mathematical domain; it does not expand the launch descriptor contract.
+/// Session compilation rejects unsupported rates before builtins preparation; this helper refuses
+/// them too, since only a launch rate has a cutoff domain (owner ruling R5, #1036).
 pub fn validate_builtin_filter_cutoff(
     value: f32,
     sample_rate: u32,
     disabled: f32,
     minimum_hz: f32,
 ) -> Result<(), BuiltinParameterError> {
-    let launch_maximum = builtin_filter_cutoff_maximum_hz(sample_rate);
-    let is_extended_compatibility =
-        is_extended_compatibility_sample_rate(SampleRateHz(sample_rate));
-    if launch_maximum.is_none() && !is_extended_compatibility {
+    let Some(maximum_hz) = builtin_filter_cutoff_maximum_hz(sample_rate) else {
         return Err(BuiltinParameterError::FilterCutoff);
-    }
-    if value.to_bits() == disabled.to_bits() {
-        return Ok(());
-    }
-    match launch_maximum {
-        Some(maximum_hz) if value.is_finite() && value >= minimum_hz && value <= maximum_hz => {
-            Ok(())
-        }
-        None if value.is_finite()
-            && value >= minimum_hz
-            && f64::from(value) < f64::from(sample_rate) * 0.5 =>
-        {
-            Ok(())
-        }
-        _ => Err(BuiltinParameterError::FilterCutoff),
+    };
+    if value.to_bits() == disabled.to_bits()
+        || (value.is_finite() && value >= minimum_hz && value <= maximum_hz)
+    {
+        Ok(())
+    } else {
+        Err(BuiltinParameterError::FilterCutoff)
     }
 }
 

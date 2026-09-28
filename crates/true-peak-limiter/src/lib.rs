@@ -5770,10 +5770,15 @@ mod tests {
                 scalar_out.push((left, right));
             }
 
+            // Every width this build binds: a bank wider than the backend declines, so a four-lane
+            // AArch64 build (#1017) checks W4 and an x86-64-v3 build checks W4 and W8.
             for (width, backend, lanes) in [
                 (BankWidth::Four, Backend::Simd4, 4_usize),
                 (BankWidth::Eight, Backend::Simd8, 8),
-            ] {
+            ]
+            .into_iter()
+            .filter(|&(_, _, lanes)| lanes <= Backend::current().width())
+            {
                 for group in 0..8 / lanes {
                     let members: Vec<_> = (0..lanes)
                         .map(|lane| tracks[group * lanes + lane])
@@ -5860,7 +5865,15 @@ mod tests {
     /// One track's state payload: the common, left and right sections a snapshot produces.
     type LanePayload = (Vec<u8>, Vec<u8>, Vec<u8>);
 
-    /// Renders `tracks` through one W8 bank over `blocks` blocks of 128 frames.
+    /// This build's native bank: eight lanes on x86-64-v3, four on AArch64 NEON (#1017). A bank
+    /// wider than the backend does not bind, so the cohort tests below run at this width.
+    fn native_bank() -> (BankWidth, Backend, usize) {
+        let backend = Backend::current();
+        let width = BankWidth::for_backend(backend).expect("every product target has a bank width");
+        (width, backend, width.lanes() as usize)
+    }
+
+    /// Renders `tracks` through one bank of the native width over `blocks` blocks of 128 frames.
     ///
     /// The bank arm of [`cohort_run`] on its own, over the same per-lane signal, for the
     /// comparisons whose oracle is another *bank* rather than a scalar twin. A scalar instance is
@@ -5870,29 +5883,29 @@ mod tests {
         tracks: &[[InitialParameterValue; PARAMETER_COUNT * 2]],
         blocks: usize,
     ) -> (Vec<f32>, Vec<f32>) {
-        const LANES: usize = 8;
-        assert_eq!(tracks.len(), LANES);
+        let (width, backend, lanes) = native_bank();
+        assert_eq!(tracks.len(), lanes);
         let frames = blocks * 128;
-        let mut left = vec![0.0_f32; frames * LANES];
-        let mut right = vec![0.0_f32; frames * LANES];
-        for lane in 0..LANES {
+        let mut left = vec![0.0_f32; frames * lanes];
+        let mut right = vec![0.0_f32; frames * lanes];
+        for lane in 0..lanes {
             let mut noise = Noise(0x5182_0000 + lane as u64);
             let lane_left: Vec<f32> = (0..frames).map(|_| noise.next() * 3.0).collect();
             let lane_right: Vec<f32> = (0..frames).map(|_| noise.next() * 3.0).collect();
             for frame in 0..frames {
-                left[frame * LANES + lane] = lane_left[frame];
-                right[frame * LANES + lane] = lane_right[frame];
+                left[frame * lanes + lane] = lane_left[frame];
+                right[frame * lanes + lane] = lane_right[frame];
             }
         }
-        let mut bank = bank_for(tracks, LinkMode::DualMono, BankWidth::Eight, Backend::Simd8);
+        let mut bank = bank_for(tracks, LinkMode::DualMono, width, backend);
         for block in 0..blocks {
-            let start = block * 128 * LANES;
-            let end = start + 128 * LANES;
+            let start = block * 128 * lanes;
+            let end = start + 128 * lanes;
             process_bank(
                 bank.as_mut(),
                 &mut left[start..end],
                 &mut right[start..end],
-                BankWidth::Eight,
+                width,
                 128,
                 (block * 128) as u64,
             );
@@ -5900,7 +5913,8 @@ mod tests {
         (left, right)
     }
 
-    /// Renders `tracks` through eight scalar instances and one W8 bank over `blocks` blocks of 128.
+    /// Renders `tracks` through scalar instances and one bank of the native width over `blocks`
+    /// blocks of 128.
     ///
     /// `swap_after` optionally restores `donor` into track 0 of both arms after that many blocks,
     /// which is how the phase leg of [`lanes_uniform`] is reached: a payload carries its own van
@@ -5911,10 +5925,10 @@ mod tests {
         blocks: usize,
         swap_after: Option<(usize, LanePayload)>,
     ) -> CohortRun {
-        const LANES: usize = 8;
-        assert_eq!(tracks.len(), LANES);
+        let (width, backend, lanes) = native_bank();
+        assert_eq!(tracks.len(), lanes);
         let frames = blocks * 128;
-        let inputs: Vec<(Vec<f32>, Vec<f32>)> = (0..LANES)
+        let inputs: Vec<(Vec<f32>, Vec<f32>)> = (0..lanes)
             .map(|lane| {
                 let mut noise = Noise(0x5182_0000 + lane as u64);
                 (
@@ -5937,13 +5951,13 @@ mod tests {
             .map(|(left, right)| (left.clone(), right.clone()))
             .collect();
 
-        let mut bank = bank_for(tracks, LinkMode::DualMono, BankWidth::Eight, Backend::Simd8);
-        let mut bank_left = vec![0.0_f32; frames * LANES];
-        let mut bank_right = vec![0.0_f32; frames * LANES];
+        let mut bank = bank_for(tracks, LinkMode::DualMono, width, backend);
+        let mut bank_left = vec![0.0_f32; frames * lanes];
+        let mut bank_right = vec![0.0_f32; frames * lanes];
         for frame in 0..frames {
-            for lane in 0..LANES {
-                bank_left[frame * LANES + lane] = inputs[lane].0[frame];
-                bank_right[frame * LANES + lane] = inputs[lane].1[frame];
+            for lane in 0..lanes {
+                bank_left[frame * lanes + lane] = inputs[lane].0[frame];
+                bank_right[frame * lanes + lane] = inputs[lane].1[frame];
             }
         }
 
@@ -5984,9 +5998,9 @@ mod tests {
             }
             process_bank(
                 bank.as_mut(),
-                &mut bank_left[start * LANES..(start + 128) * LANES],
-                &mut bank_right[start * LANES..(start + 128) * LANES],
-                BankWidth::Eight,
+                &mut bank_left[start * lanes..(start + 128) * lanes],
+                &mut bank_right[start * lanes..(start + 128) * lanes],
+                width,
                 128,
                 start as u64,
             );
@@ -5997,7 +6011,7 @@ mod tests {
             bank_left,
             bank_right,
             frames,
-            lanes: LANES,
+            lanes,
         }
     }
 
@@ -6140,7 +6154,7 @@ mod tests {
     /// but a pinned digest says *which* bits, not *why*, and this test names the why.
     #[test]
     fn a_uniform_cohort_renders_exactly_the_per_lane_path() {
-        let tracks: Vec<[InitialParameterValue; PARAMETER_COUNT * 2]> = (0..8)
+        let tracks: Vec<[InitialParameterValue; PARAMETER_COUNT * 2]> = (0..native_bank().2)
             .map(|lane| values_with(-6.0 - lane as f32, 100.0, 5.0))
             .collect();
         cohort_run(&tracks, 6, None).assert_lane_identity("uniform cohort");
@@ -6168,8 +6182,9 @@ mod tests {
     /// → `fill(position)`, and `state.lane[0].box_offset` → `end_offset` in the uniform gather.
     #[test]
     fn a_mixed_lookahead_cohort_falls_back_bit_identically() {
-        let mut tracks: Vec<[InitialParameterValue; PARAMETER_COUNT * 2]> =
-            (0..8).map(|_| values_with(-6.0, 100.0, 5.0)).collect();
+        let mut tracks: Vec<[InitialParameterValue; PARAMETER_COUNT * 2]> = (0..native_bank().2)
+            .map(|_| values_with(-6.0, 100.0, 5.0))
+            .collect();
         tracks[3] = values_with(-6.0, 100.0, 1.0);
         cohort_run(&tracks, 6, None).assert_lane_identity("mixed lookahead cohort");
     }
@@ -6205,14 +6220,15 @@ mod tests {
     /// So the oracle has to be a rendering of the same asymmetric configuration that does **not**
     /// run the uniform write-back. The per-lane fallback body is exactly that: it writes each
     /// lane's phase from that lane's own `sliding_minimum`, per channel, and shares no code with
-    /// the crossed line. Both arms below are W8 banks over the same signal; lane 7 of the oracle
-    /// arm carries a third, different *left* lookahead, which makes `lanes_uniform(left)` false
-    /// and sends the whole bank down the fallback. Lanes 0 through 6 are prepared identically in
-    /// the two arms, so their rendered samples must agree to the bit.
+    /// the crossed line. Both arms below are banks of the native width (W8 on x86-64-v3, W4 on
+    /// AArch64) over the same signal; the oracle arm's last lane carries a third, different *left*
+    /// lookahead, which makes `lanes_uniform(left)` false and sends the whole bank down the
+    /// fallback. Every other lane is prepared identically in the two arms, so their rendered
+    /// samples must agree to the bit.
     #[test]
     fn the_two_channels_of_a_uniform_cohort_keep_their_own_phases() {
         const BLOCKS: usize = 16;
-        const LANES: usize = 8;
+        let lanes = native_bank().2;
         // The three windows this test needs to be distinct. Asserted rather than assumed: if the
         // clamp in `LaneShape::new` ever swallowed one of them, the comparison below would still
         // pass and would be gating nothing.
@@ -6233,20 +6249,20 @@ mod tests {
 
         // Subject: every lane the same asymmetric program, so both channels are internally uniform
         // and the bank takes `limiter_block_uniform`.
-        let subject: Vec<[InitialParameterValue; PARAMETER_COUNT * 2]> = (0..LANES)
+        let subject: Vec<[InitialParameterValue; PARAMETER_COUNT * 2]> = (0..lanes)
             .map(|_| values_split(-6.0, 100.0, 5.0, 1.0))
             .collect();
-        // Oracle: lane 7's *left* lookahead differs, so `lanes_uniform(left)` is false and both
-        // channels take the per-lane body. Lanes 0..7 are byte-identical to the subject's.
+        // Oracle: the last lane's *left* lookahead differs, so `lanes_uniform(left)` is false and
+        // both channels take the per-lane body. Every other lane is byte-identical to the subject's.
         let mut oracle = subject.clone();
-        oracle[7] = values_split(-6.0, 100.0, 3.0, 1.0);
+        oracle[lanes - 1] = values_split(-6.0, 100.0, 3.0, 1.0);
 
         let (subject_left, subject_right) = bank_planes(&subject, BLOCKS);
         let (oracle_left, oracle_right) = bank_planes(&oracle, BLOCKS);
 
-        for lane in 0..LANES - 1 {
+        for lane in 0..lanes - 1 {
             for frame in 0..BLOCKS * 128 {
-                let index = frame * LANES + lane;
+                let index = frame * lanes + lane;
                 assert_eq!(
                     subject_left[index].to_bits(),
                     oracle_left[index].to_bits(),
@@ -6284,7 +6300,7 @@ mod tests {
     fn a_restore_that_desyncs_the_phase_falls_back() {
         let values = values_with(-6.0, 100.0, 5.0);
         let tracks: Vec<[InitialParameterValue; PARAMETER_COUNT * 2]> =
-            (0..8).map(|_| values).collect();
+            (0..native_bank().2).map(|_| values).collect();
 
         // The donor: the same program, two blocks into a different signal, so its phase is 15.
         let mut donor = TruePeakLimiterFactory
@@ -7476,20 +7492,17 @@ mod tests {
 
     #[test]
     fn bank_binding_validates_before_fallback_and_retains_exact_width_bytes() {
+        // At this build's native width (#1017): a bank wider than the backend does not bind.
+        let (width, backend, lanes) = native_bank();
         let values = initial_values();
-        let members: Vec<_> = (0..8).map(|_| values).collect();
-        let bank = bank_for(
-            &members,
-            LinkMode::DualMono,
-            BankWidth::Eight,
-            Backend::Simd8,
-        );
+        let members: Vec<_> = (0..lanes).map(|_| values).collect();
+        let bank = bank_for(&members, LinkMode::DualMono, width, backend);
         let key = bank.metadata().program_key;
         assert_eq!(key.state_layout_version, 1);
         assert_eq!(key.state_sizes.left_bytes, 5_900);
         assert_eq!(key.state_sizes.common_bytes, 8);
         assert_eq!(key.state_sizes.total(), Some(11_808));
-        assert_eq!(bank.metadata().width, BankWidth::Eight);
+        assert_eq!(bank.metadata().width, width);
 
         // Mismatched backend and width are rejected before anything is prepared.
         let requests: Vec<_> = members.iter().map(|values| request(values)).collect();
@@ -7512,8 +7525,8 @@ mod tests {
         heterogeneous[3].link_mode = LinkMode::Maximum;
         let heterogeneous =
             TruePeakLimiterFactory.bind_homogeneous_bank(PrepareEffectBankRequest {
-                backend: Backend::Simd8,
-                width: BankWidth::Eight,
+                backend,
+                width,
                 requests: &heterogeneous,
             });
         assert!(
@@ -7525,12 +7538,12 @@ mod tests {
         // A member that would fail `prepare` on its own is still a typed error, and it is the
         // diagnostic `prepare` would have returned — an absent capability must never hide it.
         let mut malformed: Vec<PrepareEffectRequest<'_>> = requests.clone();
-        malformed[5].quality = EffectQuality::Draft;
+        malformed[lanes - 1].quality = EffectQuality::Draft;
         assert_eq!(
             TruePeakLimiterFactory
                 .bind_homogeneous_bank(PrepareEffectBankRequest {
-                    backend: Backend::Simd8,
-                    width: BankWidth::Eight,
+                    backend,
+                    width,
                     requests: &malformed,
                 })
                 .err()

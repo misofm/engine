@@ -45,11 +45,22 @@ fn render_corpus() -> Vec<(usize, usize, [u8; 32])> {
     rendered
 }
 
+/// The control-word bits that make hardware flush: MXCSR's FTZ and DAZ on x86, FPCR's `FZ` on
+/// AArch64, which flushes subnormal inputs and results alike (issue #1017).
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-mod x86 {
+const FLUSH_BITS: lane::fpenv::FpControlWord = lane::softfma::MXCSR_FTZ | lane::softfma::MXCSR_DAZ;
+
+/// See the x86 definition.
+#[cfg(target_arch = "aarch64")]
+const FLUSH_BITS: lane::fpenv::FpControlWord = lane::fpenv::FPCR_FZ;
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64"))]
+mod pinned {
     use super::*;
-    use lane::fpenv::CanonicalFpEnv;
-    use lane::softfma::{MXCSR_DAZ, MXCSR_FTZ, read_mxcsr, write_mxcsr};
+    use lane::fpenv::{
+        CanonicalFpEnv, FpControlWord, read_fp_control_word as read_word,
+        write_fp_control_word as write_word,
+    };
     use wasm_gates::{Report, native_report};
 
     /// The smallest divergence the control arm may show and still be a real control.
@@ -60,45 +71,45 @@ mod x86 {
     /// number, because the control's job is to be non-empty, not to pin a count.
     const CONTROL_ARM_FLOOR: usize = 16;
 
-    struct MxcsrGuard {
-        saved: u32,
+    struct WordGuard {
+        saved: FpControlWord,
     }
 
-    impl MxcsrGuard {
-        fn set(value: u32) -> Self {
-            let saved = read_mxcsr();
-            write_mxcsr(value);
+    impl WordGuard {
+        fn set(value: FpControlWord) -> Self {
+            let saved = read_word();
+            write_word(value);
             assert_eq!(
-                read_mxcsr(),
+                read_word(),
                 value,
-                "G6 corpus gate did not install the requested MXCSR word"
+                "G6 corpus gate did not install the requested control word"
             );
             Self { saved }
         }
     }
 
-    impl Drop for MxcsrGuard {
+    impl Drop for WordGuard {
         fn drop(&mut self) {
-            write_mxcsr(self.saved);
+            write_word(self.saved);
         }
     }
 
-    fn render_with_mxcsr(value: u32) -> Vec<(usize, usize, [u8; 32])> {
-        let _guard = MxcsrGuard::set(value);
+    fn render_with_word(value: FpControlWord) -> Vec<(usize, usize, [u8; 32])> {
+        let _guard = WordGuard::set(value);
         render_corpus()
     }
 
     /// The corpus rendered against its pins with `value` as the caller's control word and **no**
     /// render entry: this is what a host got before issue #146.
-    fn unguarded_report(value: u32) -> Report {
-        let _caller = MxcsrGuard::set(value);
+    fn unguarded_report(value: FpControlWord) -> Report {
+        let _caller = WordGuard::set(value);
         native_report()
     }
 
     /// The corpus rendered against its pins with `value` as the caller's control word, through the
     /// same guard every native render entry installs.
-    fn guarded_report(value: u32) -> Report {
-        let _caller = MxcsrGuard::set(value);
+    fn guarded_report(value: FpControlWord) -> Report {
+        let _caller = WordGuard::set(value);
         let _entry = CanonicalFpEnv::enter();
         native_report()
     }
@@ -115,9 +126,9 @@ mod x86 {
     /// E1: a caller that has set FTZ+DAZ still gets the frozen pins out of a guarded render.
     #[test]
     fn g6_full_wasm_gate_corpus_is_canonical_under_caller_ftz() {
-        let saved = read_mxcsr();
-        let clear = saved & !(MXCSR_FTZ | MXCSR_DAZ);
-        let hostile = clear | MXCSR_FTZ | MXCSR_DAZ;
+        let saved = read_word();
+        let clear = saved & !FLUSH_BITS;
+        let hostile = clear | FLUSH_BITS;
 
         let canonical = unguarded_report(clear);
         assert!(
@@ -161,7 +172,11 @@ mod x86 {
             "both arms must compare the whole corpus"
         );
 
-        assert_eq!(read_mxcsr(), saved, "G6 corpus gate leaked MXCSR state");
+        assert_eq!(
+            read_word(),
+            saved,
+            "G6 corpus gate leaked control-word state"
+        );
     }
 
     /// E3 class-A identity: a caller who never set FTZ renders the same bytes with the guard as
@@ -169,12 +184,12 @@ mod x86 {
     /// host.
     #[test]
     fn g6_the_guard_is_an_identity_for_a_caller_who_never_set_ftz() {
-        let saved = read_mxcsr();
-        let clear = saved & !(MXCSR_FTZ | MXCSR_DAZ);
+        let saved = read_word();
+        let clear = saved & !FLUSH_BITS;
 
-        let without = render_with_mxcsr(clear);
+        let without = render_with_word(clear);
         let with = {
-            let _caller = MxcsrGuard::set(clear);
+            let _caller = WordGuard::set(clear);
             let _entry = CanonicalFpEnv::enter();
             render_corpus()
         };
@@ -205,11 +220,15 @@ mod x86 {
             mismatches.len(),
             mismatches.join("\n")
         );
-        assert_eq!(read_mxcsr(), saved, "G6 corpus gate leaked MXCSR state");
+        assert_eq!(
+            read_word(),
+            saved,
+            "G6 corpus gate leaked control-word state"
+        );
     }
 }
 
-#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")))]
 #[test]
 fn g6_full_wasm_gate_corpus_portable_smoke() {
     let rendered = render_corpus();

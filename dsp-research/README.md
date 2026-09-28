@@ -24,9 +24,9 @@ This directory is the engine's implementation evidence base. It documents decisi
 
 Realtime code receives finite planar `f32` blocks and must have prepared, bounded state. It cannot allocate, lock, perform I/O, log, mutate graph structure, or make data-dependent unbounded calls. Numerical validation uses an independent test-only `f64` model that imports no production kernel. Scalar repetition for the same input/state/event sequence must be byte-identical; cross-backend comparisons use the declared tolerance for that kernel.
 
-The corpus launch gates apply exactly to 44,100, 48,000, 88,200, and 96,000 Hz. The 176,400,
-192,000, 352,800, and 384,000 Hz observations are preserved extended compatibility/research
-evidence only and do not establish engine, host, effect, or release support. Source-rate conversion
+The corpus launch gates apply exactly to 44,100, 48,000, 88,200, and 96,000 Hz, the only rates the
+engine accepts. The former extended research rates (176,400, 192,000, 352,800, and 384,000 Hz) are
+refused everywhere (owner ruling R5, #1036). Source-rate conversion
 is out of scope unless a later issue explicitly adds it. Audio remains dual-mono unless an explicit
 detector-link mode or smoothed 2x2 matrix says otherwise.
 

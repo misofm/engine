@@ -14,8 +14,6 @@ mod console;
 #[cfg(not(target_arch = "wasm32"))]
 mod effect_contract;
 #[cfg(not(target_arch = "wasm32"))]
-mod effect_interchange;
-#[cfg(not(target_arch = "wasm32"))]
 mod floor;
 mod protocol;
 #[cfg(not(target_arch = "wasm32"))]
@@ -28,7 +26,6 @@ const SUBJECTS: &[&str] = &[
     "conformance",
     "console",
     "effect-contract",
-    "effect-interchange",
     "protocol",
     "session",
 ];
@@ -39,7 +36,6 @@ fn run_subject(subject: &str) {
         "conformance" => conformance::main(),
         "console" => console::main(),
         "effect-contract" => effect_contract::main(),
-        "effect-interchange" => effect_interchange::main(),
         "protocol" => protocol::main(),
         "session" => session::main(),
         _ => unreachable!("dispatcher validates internal subjects"),

@@ -44,13 +44,7 @@ Set by `scripts/run-*-benchmark.sh` before the single launch; read by the bench 
 | name | meaning |
 |---|---|
 | `MISO_ENGINE_BENCH_CANDIDATE_COMMIT` | 40-hex commit the candidate binary was built from. |
-| `MISO_ENGINE_BENCH_CANDIDATE_TREE` | 40-hex tree of that commit. |
-| `MISO_ENGINE_BENCH_BINARY_SHA256` | sha256 of the launched binary. |
 | `MISO_ENGINE_BENCH_ROUND` | `warmup`, `1` or `2` for the runners that launch per round. |
-| `MISO_ENGINE_BENCH_TOOL_SOURCE_SHA256` | sha256 of the bench tool source (interchange). |
-| `MISO_ENGINE_BENCH_TOOL_MANIFEST_SHA256` | sha256 of the bench package manifest (interchange). |
-| `MISO_ENGINE_BENCH_FIXTURE_MANIFEST_SHA256` | sha256 of the accepted fixture manifest (interchange). |
-| `MISO_ENGINE_BENCH_HERMETIC_CHILD` | set by a test harness so a re-entered runner refuses to launch. |
 
 
 ## Benchmark host and toolchain metadata
@@ -83,15 +77,6 @@ One name per fact. Set by the runner, read by the bench binary; a name the runne
 | `MISO_ENGINE_BENCH_WASM_SIMD_BYTES` | size of the simd128 Wasm artifact. |
 
 
-## Benchmark phase marker
-
-Written to stderr by every bench binary, counted by the runner. Not an environment variable. Payload words: `workload_started`, `warmup_complete`, `timed_started`, `round_<n>_complete`.
-
-| name | meaning |
-|---|---|
-| `MISO_ENGINE_BENCH_PHASE` | the one bench phase marker. |
-
-
 ## Benchmark admissibility ceilings
 
 Frozen shell constants in `scripts/check-bench-preconditions.sh`, read by the one-shot runners that source it. Not environment variables, and deliberately not overridable: a ceiling an operator can raise is a ceiling that gets raised on the day the measurement matters. `MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED` is the one honest way past them, and it changes what the record says.
@@ -119,8 +104,6 @@ Written to stdout by an audit binary immediately outside its armed render scope,
 | `MISO_ENGINE_BUILTINS_RT_END` | builtin direct-chain audit: disarmed. |
 | `MISO_ENGINE_BUILTINS_GRAPH_RT_BEGIN` | builtin graph audit: armed. |
 | `MISO_ENGINE_BUILTINS_GRAPH_RT_END` | builtin graph audit: disarmed. |
-| `MISO_ENGINE_SOURCE_RT_BEGIN` | source audit: armed. |
-| `MISO_ENGINE_SOURCE_RT_END` | source audit: disarmed. |
 | `MISO_ENGINE_EFFECT_RT_BEGIN` | effect-contract audit: armed. |
 | `MISO_ENGINE_EFFECT_RT_END` | effect-contract audit: disarmed. |
 | `MISO_ENGINE_PARAMETRIC_EQ_RT_BEGIN` | parametric-EQ audit: armed. |
@@ -160,18 +143,6 @@ Read by one subject each.
 | `MISO_ENGINE_BENCH_POLICY_NEEDLE` | `check-bench-policy.sh`'s `sole_owner_or_delegate`: internal transport of the four-character backslash char-literal needle from bash to the `awk` subprocess through `ENVIRON`, chosen over `-v` because `-v` assignments go through awk's own C-style escape processing a second time. Set and read only inside that one function invocation; not user-facing. |
 
 
-## Test harness hooks
-
-Read only by a `scripts/test-*.sh` fake, never by a real run. A runner that reads one of these outside a `MISO_ENGINE_TEST_`-guarded branch is a defect.
-
-| name | meaning |
-|---|---|
-| `MISO_ENGINE_TEST_BENCH_MODE` | which scripted outcome the fake bench produces. |
-| `MISO_ENGINE_TEST_FAKE_BENCH` | path of a fake bench binary to launch instead of building. |
-| `MISO_ENGINE_TEST_LAUNCH_LOG` | file the stub appends one line to per launch. |
-| `MISO_ENGINE_TEST_GIT_DIRTY` | make the runner see a dirty tree. |
-| `MISO_ENGINE_TEST_CARGO_FAIL` | make the cargo stub fail. |
-
 ## Re-pin hooks
 
 Read by a test in order to print an oracle-derived pin instead of asserting it. The comparison
@@ -185,25 +156,3 @@ release fingerprint check (`docs/RELEASE.md`).
 | name | meaning |
 |---|---|
 | `MISO_ENGINE_REPIN_NATIVE_PCM_RUNNER` | print the five native PCM runner output digests instead of asserting them. |
-
-## Interchange policy test shims
-
-These variables belong only to the hermetic interchange policy suites.
-
-| name | meaning |
-|---|---|
-| `MISO_ENGINE_INTERCHANGE_TEST_DELEGATE_ERROR` | Captured real delegate stderr path. |
-| `MISO_ENGINE_INTERCHANGE_TEST_DELEGATE_OUTPUT` | Captured real delegate stdout path. |
-| `MISO_ENGINE_INTERCHANGE_TEST_EXPECT_DELEGATE` | Expected real delegate exit status. |
-| `MISO_ENGINE_INTERCHANGE_TEST_FAULT_LABEL` | Fault diagnostic label. |
-| `MISO_ENGINE_INTERCHANGE_TEST_FAULT_MODE` | Forwarded fault output mode. |
-| `MISO_ENGINE_INTERCHANGE_TEST_FAULT_NEEDLE` | Fault argv selector. |
-| `MISO_ENGINE_INTERCHANGE_TEST_FAULT_OCCURRENCE` | Selected fault occurrence. |
-| `MISO_ENGINE_INTERCHANGE_TEST_FAULT_STATE` | Fault occurrence counter file. |
-| `MISO_ENGINE_INTERCHANGE_TEST_OPTIONAL_FIND_MODE` | Optional-find expected shape. |
-| `MISO_ENGINE_INTERCHANGE_TEST_OUTPUT_SHAPE` | Expected real stdout shape. |
-| `MISO_ENGINE_INTERCHANGE_TEST_PYTHON_OCCURRENCE` | Selected Python invocation. |
-| `MISO_ENGINE_INTERCHANGE_TEST_READ_MARKER` | Read-hook reached marker path. |
-| `MISO_ENGINE_INTERCHANGE_TEST_READ_PROGRAM` | Original Python program capture path. |
-| `MISO_ENGINE_INTERCHANGE_TEST_READ_TARGET` | Exact refused read target path. |
-| `MISO_ENGINE_INTERCHANGE_TEST_REAL_TOOL` | Resolved real delegate executable. |

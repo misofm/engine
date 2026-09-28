@@ -1,7 +1,8 @@
 //! Prepared gate/expander realtime audit (#89 gate 7.10).
 //!
-//! Drives the two production shapes -- an eight-lane homogeneous bank and a scalar instance with a
-//! connected sidechain -- for [`BLOCKS`] blocks inside an armed render scope, and reports whether
+//! Drives the two production shapes -- a homogeneous bank at the build's native width (eight lanes
+//! on x86-64-v3, four on AArch64 NEON, #1017) and a scalar instance with a connected sidechain --
+//! for [`BLOCKS`] blocks inside an armed render scope, and reports whether
 //! anything allocated, locked, logged or reached the operating system. The markers are what
 //! `strace` brackets: nothing between `MISO_ENGINE_GATE_EXPANDER_RT_BEGIN` and `..._RT_END` may be a
 //! syscall.
@@ -27,8 +28,16 @@ const BLOCKS: u64 = 100_000;
 /// Frozen render quantum.
 const QUANTUM: u32 = 128;
 
-/// Lanes in the audited bank.
+/// Lanes in the widest audited bank; the bank itself is the build's native width.
 const WIDTH: usize = 8;
+
+/// The build's native bank: eight lanes on x86-64-v3, four on AArch64 NEON (#1017). A wider bank
+/// does not bind, so auditing a fixed eight-lane bank would audit no bank at all there.
+fn native_bank() -> (Backend, BankWidth, usize) {
+    let backend = Backend::current();
+    let width = BankWidth::for_backend(backend).expect("every product target has a bank width");
+    (backend, width, width.lanes() as usize)
+}
 
 /// Holds the prepared shapes so their destruction can be asserted to happen off render.
 struct OffRenderDrop {
@@ -60,14 +69,18 @@ pub(crate) fn main() {
         scalar: prepare_scalar(true),
     };
     let bank_available = prepared.bank.is_some();
+    let (_, width, lanes) = native_bank();
 
-    let mut bank_left = [0.0_f32; QUANTUM as usize * WIDTH];
-    let mut bank_right = [0.0_f32; QUANTUM as usize * WIDTH];
+    let mut bank_storage_left = [0.0_f32; QUANTUM as usize * WIDTH];
+    let mut bank_storage_right = [0.0_f32; QUANTUM as usize * WIDTH];
+    let bank_left = &mut bank_storage_left[..QUANTUM as usize * lanes];
+    let bank_right = &mut bank_storage_right[..QUANTUM as usize * lanes];
     let mut left = [0.0_f32; QUANTUM as usize];
     let mut right = [0.0_f32; QUANTUM as usize];
     let mut sidechain_left = [0.0_f32; QUANTUM as usize];
     let mut sidechain_right = [0.0_f32; QUANTUM as usize];
     let offsets = [0_u32; WIDTH + 1];
+    let offsets = &offsets[..=lanes];
     let bank_left_address = bank_left.as_ptr() as usize;
     let left_address = left.as_ptr() as usize;
 
@@ -91,27 +104,27 @@ pub(crate) fn main() {
                 right[frame] = -tone;
                 sidechain_left[frame] = tone;
                 sidechain_right[frame] = tone;
-                for lane in 0..WIDTH {
-                    bank_left[frame * WIDTH + lane] = tone;
-                    bank_right[frame * WIDTH + lane] = -tone;
+                for lane in 0..lanes {
+                    bank_left[frame * lanes + lane] = tone;
+                    bank_right[frame * lanes + lane] = -tone;
                 }
             }
             if let Some(bank) = prepared.bank.as_mut() {
                 let report = bank.process_bank(
                     EffectBankProcessBlock::new(
-                        &mut bank_left,
-                        &mut bank_right,
+                        bank_left,
+                        bank_right,
                         None,
                         QUANTUM,
-                        BankWidth::Eight,
+                        width,
                         first,
                         &[],
-                        &offsets,
+                        offsets,
                         QUANTUM,
                     )
                     .expect("prepared 128-frame bank block"),
                 );
-                for lane in 0..WIDTH {
+                for lane in 0..lanes {
                     assert_eq!(report.reports[lane].nonfinite_left_blocks, 0);
                     assert_eq!(report.reports[lane].nonfinite_right_blocks, 0);
                     assert_eq!(report.reports[lane].invalid_spans, 0);
@@ -143,12 +156,13 @@ pub(crate) fn main() {
     println!(
         concat!(
             "{{\"schema_version\":1,\"kind\":\"issue089_gate_expander_realtime_audit\",",
-            "\"blocks\":100000,\"quantum_frames\":128,\"bank_width\":8,",
+            "\"blocks\":100000,\"quantum_frames\":128,\"bank_width\":{},",
             "\"bank_available\":{},\"connected_scalar\":true,",
             "\"destruction_off_render\":true,\"bank_left_address\":{},\"left_address\":{},",
             "\"allocations\":{},\"deallocations\":{},\"locks\":{},\"logs\":{},",
             "\"file_io\":{},\"network_io\":{},\"syscalls\":{},\"total_violations\":{}}}"
         ),
+        lanes,
         bank_available,
         bank_left_address,
         left_address,
@@ -192,15 +206,16 @@ static SINE: [f32; 48] = {
     table
 };
 
-/// The eight-lane bank, or `None` when this build has no eight-lane backend.
+/// The bank at the build's native width, or `None` if the factory declines it.
 fn prepare_bank() -> Option<Box<dyn PreparedNativeEffectBank>> {
+    let (backend, width, lanes) = native_bank();
     let values = active_values();
     let requests: Vec<PrepareEffectRequest<'_>> =
-        (0..WIDTH).map(|_| request(&values, false)).collect();
+        (0..lanes).map(|_| request(&values, false)).collect();
     GateExpanderFactory
         .bind_homogeneous_bank(PrepareEffectBankRequest {
-            backend: Backend::Simd8,
-            width: BankWidth::Eight,
+            backend,
+            width,
             requests: &requests,
         })
         .expect("valid bank request")

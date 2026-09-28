@@ -17,9 +17,6 @@ The issue bodies in [`.github/ISSUE_SPECS`](../.github/ISSUE_SPECS/README.md) re
 | Fixed scalar track chain and transparent meters | [Builtins and metering V1](BUILTINS_AND_METERING_V1.md) |
 | Native effect factory and process boundary | [Effect contract V1](EFFECT_CONTRACT_V1.md) |
 | Launch feed-forward peak compressor authority | [Issue 013 spec](../.github/ISSUE_SPECS/013-compressor.md) and [Sol brief](../.github/ISSUE_SPECS/BRIEFS/013-compressor.md) |
-| Provisional issue-029 descriptor representation | [Effect descriptor wire V1](EFFECT_DESCRIPTOR_WIRE_V1.md) |
-| Provisional issue-029 package identity and artifact hashes | [Effect package V1](EFFECT_PACKAGE_V1.md) |
-| Provisional issue-029 prepared-state envelope | [Effect state V1](EFFECT_STATE_V1.md) |
 | Releasing `@misofm/engine`: the shipped module's fingerprint, the release PR | [Release procedure](RELEASE.md) |
 
 `protocol` is control-plane-only. It has no renderer, `PreparedRenderPlan`, PCM payload, transport framing, or exported C ABI.

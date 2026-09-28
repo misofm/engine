@@ -260,16 +260,6 @@ pub enum FrameHeader {
 }
 
 impl FrameHeader {
-    /// Return this header's frozen frame class.
-    #[must_use]
-    pub const fn kind(self) -> FrameKind {
-        match self {
-            Self::Command(_) => FrameKind::Command,
-            Self::Response(_) => FrameKind::Response,
-            Self::Event(_) => FrameKind::Event,
-        }
-    }
-
     /// Borrow a typed command header only when this is a command.
     #[must_use]
     pub const fn command(self) -> Option<CommandHeader> {
@@ -428,12 +418,6 @@ impl<'a> DecodeScratch<'a> {
     #[must_use]
     pub fn new(field_ids: &'a mut [u16]) -> Self {
         Self { field_ids, used: 0 }
-    }
-
-    /// Number of top-level TLV entries validated by the last decode.
-    #[must_use]
-    pub const fn used(&self) -> usize {
-        self.used
     }
 
     fn reset(&mut self) {

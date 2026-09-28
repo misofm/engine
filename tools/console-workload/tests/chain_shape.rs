@@ -24,6 +24,7 @@ use console_workload::{
 };
 use effect_contract::ChannelSymmetryWitness;
 use engine::realtime::PlanUnitEligibility;
+use lane::Backend;
 
 /// Enough blocks for the limiter's lookahead to clear and every detector to settle.
 const BLOCKS: u64 = 64;
@@ -275,12 +276,23 @@ fn the_ragged_tail_banks_like_any_other_cohort_and_pays_one_chain_for_it() {
         chains < slots,
         "the ragged fixture must still fuse something, or it is not testing a chain"
     );
-    // Read as: the eight-lane cohort runs the whole strip as one chain of six slots; the one-track
-    // tail runs its post-input bank alone and its fader and matrix banks as a pair.
+    // Read as: each full cohort runs the whole strip as one chain of six slots; the one-track tail
+    // runs its post-input bank alone and its fader and matrix banks as a pair. At the eight-lane
+    // launch width that is one full cohort, `[3, 9]`; a four-lane build (AArch64 NEON, #1017) has
+    // two, `[4, 15]`.
+    let width = Backend::current().width() as u64;
+    let tracks = u64::from(Workload::NineTrackRaggedStrip.tracks());
+    assert_eq!(
+        tracks % width,
+        1,
+        "the fixture's tail must be one track at width {width}"
+    );
+    let full = tracks / width;
     assert_eq!(
         [chains, slots],
-        [3, 9],
-        "one full strip chain, plus the tail's lone post-input bank and its fused fader/matrix pair"
+        [full + 2, SLOTS_PER_COHORT * full + 3],
+        "{full} full strip chain(s) at width {width}, plus the tail's lone post-input bank and its \
+         fused fader/matrix pair"
     );
     // Bits, against the same fixture rendered with every console facility attached: a partial
     // bank's scalar transpose must be the tiled path's equal, whatever is bound around it.
@@ -366,10 +378,12 @@ fn every_standing_workload_folds_one_route_per_track() {
                 "the alternating row's pooled lane sets are not the reduction's order, so the \
                  fold declines"
             );
+            let cohorts = u64::from(workload.tracks()) / Backend::current().width() as u64;
             assert_eq!(
                 runtime.bank_shape(),
-                [8, 48],
-                "and it declines without moving a bank: the shape is the uniform rows'"
+                [cohorts, SLOTS_PER_COHORT * cohorts],
+                "and it declines without moving a bank: the shape is the uniform rows' ({cohorts} \
+                 cohorts at this width)"
             );
             continue;
         }

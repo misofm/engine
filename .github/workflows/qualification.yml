@@ -1,7 +1,8 @@
 name: qualification
 
 # Design #359 WP-4: one PR workflow, one required status context (the `verdict` job, whose own
-# `name:` is `qualification`), thirteen leaf jobs behind one router, one aggregate. Stage 3 (§12)
+# `name:` is `qualification`), sixteen leaf jobs behind one router, one aggregate (#1017 added the
+# two AArch64 jobs, #1061 `artifact-identity`). Stage 3 (§12)
 # retired the four workflows this one replaced -- ci.yml, sdk.yml, browser-qualification.yml and
 # release-build.yml -- once this workflow had reported on >= 10 PRs and agreed with them; this is
 # now the sole required PR workflow. See design §4/§5/§7/§12.
@@ -467,13 +468,6 @@ jobs:
           bash scripts/test-effect-runtime-policy.sh
           bash scripts/check-effect-runtime-fixtures.sh
           bash scripts/test-effect-runtime-fixtures.sh
-      # Effect-interchange qualification boundary and its own policy-test mutation suite (design
-      # §5 lint content: "effect-interchange qualification + policy test"); the cross-target job
-      # re-runs the qualification check as check-cross-targets.sh's own precondition.
-      - name: Effect interchange qualification and policy mutation tests
-        run: |
-          bash scripts/check-effect-interchange-qualification.sh
-          bash scripts/test-effect-interchange-policy.sh
       # check-effect-contract.sh has no hermetic no-binary mode either (S1): with no bench binary
       # argument it falls back to `cargo run --locked --release -q -p bench`, a full release build
       # inside the lint shard, and it re-runs the effect-runtime-policy/fixtures checks the
@@ -555,7 +549,7 @@ jobs:
             --exclude conformance --exclude audit --exclude bench --exclude console-workload \
             --exclude wasm-gates --exclude wasm-console --exclude wasm-gate-guest \
             --exclude wasm-console-guest --exclude wasm-gate-corpus \
-            --features builtins-compiler/test-support,source/test-support,graph/test-support,host-web/test-support,host-core/test-support,effect-compiler/test-support,protocol/test-support,engine/realtime-audit
+            --features builtins-compiler/test-support,graph/test-support,host-web/test-support,host-core/test-support,effect-compiler/test-support,protocol/test-support,engine/realtime-audit
       - name: Native host smoke
         run: cargo run --locked -p host-native
 
@@ -651,18 +645,9 @@ jobs:
           set -e
           if (( pipeline_status[0] != 0 )); then exit "${pipeline_status[0]}"; fi
           if (( pipeline_status[1] != 0 )); then exit "${pipeline_status[1]}"; fi
-      - name: Issue-544 source-duration runtime caller audit
-        run: |
-          set -o pipefail
-          set +e
-          ./target/release/audit source-duration 2>target/issue544-source-duration-audit.stderr | tee target/issue544-source-duration-audit.json
-          pipeline_status=("${PIPESTATUS[@]}")
-          set -e
-          if (( pipeline_status[0] != 0 )); then exit "${pipeline_status[0]}"; fi
-          if (( pipeline_status[1] != 0 )); then exit "${pipeline_status[1]}"; fi
       - name: Validate Issue-544 runtime audit records
         run: |
-          python3 -B - target/issue544-capi-audit.json target/issue544-source-duration-audit.json <<'PY'
+          python3 -B - target/issue544-capi-audit.json <<'PY'
           import json
           import re
           import sys
@@ -695,7 +680,7 @@ jobs:
                   raise AssertionError(f"{path}: {field} is not an integer")
               return value
 
-          capi_path, source_path = sys.argv[1:]
+          (capi_path,) = sys.argv[1:]
           capi = record(capi_path)
           capi_expected = {
               "schema_version", "kind", "calls", "sample_rate_hz", "quantum_frames",
@@ -720,39 +705,6 @@ jobs:
               raise AssertionError(f"{capi_path}: stable_output_address")
           if type(capi["pcm_digest"]) is not str or re.fullmatch(r"[0-9a-f]{16}", capi["pcm_digest"]) is None:
               raise AssertionError(f"{capi_path}: pcm_digest")
-
-          source = record(source_path)
-          source_expected = {
-              "schema_version", "kind", "minute_frames", "multi_hour_frames",
-              "minute_file_bytes", "multi_hour_file_bytes", "layout_entries",
-              "layout_total_bytes", "layout_equal", "source_report_equal",
-              "graph_report_equal", "minute_rss_bytes", "multi_hour_rss_bytes", "os",
-              "arch", "rust", "timed_benchmark_invocations",
-          }
-          exact_keys(source, source_expected, source_path)
-          if type(source["schema_version"]) is not int or source["schema_version"] != 1:
-              raise AssertionError(f"{source_path}: schema_version")
-          if source["kind"] != "issue041_source_duration_layout":
-              raise AssertionError(f"{source_path}: kind")
-          for field, expected in {
-              "minute_frames": 2880000, "multi_hour_frames": 518400000,
-              "minute_file_bytes": 11520044, "multi_hour_file_bytes": 2073600044,
-              "layout_entries": 16, "layout_total_bytes": 6472,
-              "timed_benchmark_invocations": 0,
-          }.items():
-              if integer(source[field], field, source_path) != expected:
-                  raise AssertionError(f"{source_path}: {field} != {expected}")
-          for field in ("layout_equal", "source_report_equal", "graph_report_equal"):
-              if type(source[field]) is not bool or not source[field]:
-                  raise AssertionError(f"{source_path}: {field}")
-          for field in ("minute_rss_bytes", "multi_hour_rss_bytes"):
-              if integer(source[field], field, source_path) < 0:
-                  raise AssertionError(f"{source_path}: {field} is negative")
-          if source["os"] != "linux":
-              raise AssertionError(f"{source_path}: os")
-          for field in ("arch", "rust"):
-              if type(source[field]) is not str or not source[field]:
-                  raise AssertionError(f"{source_path}: {field}")
           PY
       - name: Delay realtime allocation and syscall audit
         run: ./target/release/audit delay --blocks 100000
@@ -768,10 +720,8 @@ jobs:
         run: |
           bash scripts/trace-builtins-audit.sh target/release/audit
           bash scripts/trace-builtins-graph-audit.sh target/release/audit
-      - name: Source and graph realtime audits
-        run: |
-          bash scripts/trace-source-audit.sh target/release/audit
-          bash scripts/trace-graph-audit.sh target/release/audit
+      - name: Graph realtime audit
+        run: bash scripts/trace-graph-audit.sh target/release/audit
       - name: Protocol caller-buffer allocation audit
         run: bash scripts/run-protocol-allocation-audit.sh target/release/audit
       - name: Realtime audit hooks and syscall trace
@@ -872,11 +822,11 @@ jobs:
           overwrite: true
 
   cross-target:
-    name: native and wasm cross-target checks
+    name: native, AArch64 and wasm cross-target checks
     needs: route
     if: needs.route.outputs.route == 'full'
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -884,22 +834,86 @@ jobs:
           shared-key: cross-target
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # armv7-linux-androideabi is installed only so check-cross-targets.sh can prove lane refuses
-      # it (#1041: mobile ships 64-bit only); nothing is built for it.
-      - name: Install pinned Rust toolchain, cross targets, and wabt
+      # it (#1041: mobile ships 64-bit only); nothing is built for it. aarch64-apple-ios and
+      # aarch64-linux-android are the mobile product targets (#1017): the product crates are
+      # checked and linted for both, and their iOS release assembly is scanned (#1018).
+      - name: Install pinned Rust toolchain, cross targets, and ripgrep
         run: |
-          rustup toolchain install 1.97.1 --profile minimal
-          rustup target add --toolchain 1.97.1 wasm32-unknown-unknown armv7-linux-androideabi
+          rustup toolchain install 1.97.1 --profile minimal --component clippy
+          rustup target add --toolchain 1.97.1 wasm32-unknown-unknown armv7-linux-androideabi aarch64-apple-ios aarch64-linux-android
           sudo apt-get update
-          sudo apt-get install -y ripgrep wabt
-      # Replaces check-parametric-eq-targets.sh, check-builtins-targets.sh, and
-      # check-effect-interchange-targets.sh's cargo halves with one script, one cached target dir
-      # per triple (WP-3 contract). The render-contract rg half moved to lint.
-      - name: Cross-target cargo checks (parametric-eq, builtins, effect-interchange)
+          sudo apt-get install -y ripgrep
+      # Replaces check-parametric-eq-targets.sh's and check-builtins-targets.sh's cargo halves with
+      # one script, one cached target dir per triple (WP-3 contract). The render-contract rg half
+      # moved to lint.
+      - name: Cross-target cargo checks (AArch64 iOS/Android product crates, parametric-eq, builtins, effect-compiler)
         run: bash scripts/check-cross-targets.sh
-      - name: Effect package V1 corpus and inspection surface
-        run: bash scripts/check-effect-package-v1.sh
-      - name: Effect descriptor V1 corpus and inspection surface
-        run: bash scripts/check-effect-descriptor-v1.sh
+
+  # Issue #1017: native AArch64 (iOS and Android arm64) is a product target, so its tests run on
+  # arm64 hardware, where lane::Backend is Simd4 (NEON) and lane::fpenv pins FPCR. Two jobs in
+  # parallel keep the wall time inside the x86 jobs'. scripts/run-aarch64-tests.sh owns the package
+  # lists, the no-silent-skip gate and the known defects' expected failures, by name. `-D warnings`
+  # makes an aarch64-only warning red here as well as in cross-target's clippy rows. The arm64
+  # image is a partner image: rustup is installed if it is absent, before the cache (whose key
+  # reads rustc).
+  aarch64-debug:
+    name: AArch64 product crate debug tests (NEON Simd4, FPCR)
+    needs: route
+    if: needs.route.outputs.route == 'full'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    env:
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install pinned Rust toolchain and ripgrep
+        run: |
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup toolchain install 1.97.1 --profile minimal
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: aarch64-debug
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Product crate debug tests on arm64, known defects as named expected failures
+        run: bash scripts/run-aarch64-tests.sh debug
+
+  aarch64-release:
+    name: AArch64 release digest gates and realtime audits (NEON Simd4, FPCR)
+    needs: route
+    if: needs.route.outputs.route == 'full'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    env:
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install pinned Rust toolchain and ripgrep
+        run: |
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup toolchain install 1.97.1 --profile minimal
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: aarch64-release
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # #1048: g5_native_digests_match_pins is the one native owner of the cross-target digest
+      # corpora; on arm64 it proves phones render the x86 and browser pins. Its own unfiltered
+      # step, so no expected-failure row or skip can reach it.
+      - name: G5 class-A corpus on arm64 (the native owner, #1048)
+        run: cargo test --locked --release -p wasm-gates --features math/lane
+      - name: Release lane and math gates, console digests and realtime audits on arm64, known defects as named expected failures
+        run: bash scripts/run-aarch64-tests.sh release
 
   release-shape:
     name: release shape and panic-clobber policy
@@ -919,8 +933,8 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal
-      # cargo-metadata asserts the cdylib/staticlib set is exactly {capi, effect-package,
-      # host-web, wasm-gate-guest, wasm-console-guest} and [profile.release].panic == "abort".
+      # cargo-metadata asserts the cdylib/staticlib set is exactly {capi, host-web,
+      # wasm-gate-guest, wasm-console-guest} and [profile.release].panic == "abort".
       - name: Release shape policy
         run: python3 -B scripts/check-release-shape.py
       # The panic-variant filename clobber (docs/REALTIME_DEPENDENCY_POLICY.md) is prevented by
@@ -932,7 +946,7 @@ jobs:
   verdict:
     name: qualification
     if: always()
-    needs: [route, docs-gates, artifact, artifact-identity, sdk, artifact-gates, browser, lint, test-debug-a, test-debug-b, test-release, audit-native, wasm-guests, cross-target, release-shape]
+    needs: [route, docs-gates, artifact, artifact-identity, sdk, artifact-gates, browser, lint, test-debug-a, test-debug-b, test-release, audit-native, wasm-guests, cross-target, aarch64-debug, aarch64-release, release-shape]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -955,6 +969,8 @@ jobs:
       AUDIT_NATIVE_RESULT: ${{ needs.audit-native.result }}
       WASM_GUESTS_RESULT: ${{ needs.wasm-guests.result }}
       CROSS_TARGET_RESULT: ${{ needs.cross-target.result }}
+      AARCH64_DEBUG_RESULT: ${{ needs.aarch64-debug.result }}
+      AARCH64_RELEASE_RESULT: ${{ needs.aarch64-release.result }}
       RELEASE_SHAPE_RESULT: ${{ needs.release-shape.result }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -1005,6 +1021,8 @@ jobs:
           check audit-native "$AUDIT_NATIVE_RESULT" "$full_expected"
           check wasm-guests "$WASM_GUESTS_RESULT" "$full_expected"
           check cross-target "$CROSS_TARGET_RESULT" "$full_expected"
+          check aarch64-debug "$AARCH64_DEBUG_RESULT" "$full_expected"
+          check aarch64-release "$AARCH64_RELEASE_RESULT" "$full_expected"
           check release-shape "$RELEASE_SHAPE_RESULT" "$release_shape_expected"
           [[ "$failed" == 0 ]] || exit 1
       # Issue #1061: every PR says whether the shipped module changed. The artifact routes say it in

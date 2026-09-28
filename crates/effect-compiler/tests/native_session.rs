@@ -69,15 +69,11 @@ const fn quality(sample_rate: u32) -> QualityDescriptor {
         scratch_bytes_per_frame: 1,
     }
 }
-const QUALITIES: [QualityDescriptor; 8] = [
+const QUALITIES: [QualityDescriptor; 4] = [
     quality(44_100),
     quality(48_000),
     quality(88_200),
     quality(96_000),
-    quality(176_400),
-    quality(192_000),
-    quality(352_800),
-    quality(384_000),
 ];
 static DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     id: EFFECT_ID,
