@@ -823,10 +823,12 @@ jobs:
         with:
           shared-key: cross-target
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # armv7-linux-androideabi is installed only so check-cross-targets.sh can prove lane refuses
+      # it (#1041: mobile ships 64-bit only); nothing is built for it.
       - name: Install pinned Rust toolchain, cross targets, and wabt
         run: |
           rustup toolchain install 1.97.1 --profile minimal
-          rustup target add --toolchain 1.97.1 wasm32-unknown-unknown
+          rustup target add --toolchain 1.97.1 wasm32-unknown-unknown armv7-linux-androideabi
           sudo apt-get update
           sudo apt-get install -y ripgrep wabt
       # Replaces check-parametric-eq-targets.sh, check-builtins-targets.sh, and

@@ -57,6 +57,8 @@ impl Backend {
         {
             Self::Simd8
         }
+        // Reached only through the scalar-wasm CI exception (wasm32 without `simd128`): `lib.rs`
+        // refuses to compile for every other target this arm used to catch (issue #1041).
         #[cfg(not(any(
             target_arch = "x86",
             target_arch = "x86_64",
