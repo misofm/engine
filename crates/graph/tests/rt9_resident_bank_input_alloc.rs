@@ -447,7 +447,6 @@ fn prepared_with_options(
     let envelope = RenderEnvelope {
         sample_rate: engine::SampleRateHz(48_000),
         quantum: QuantumFrames(frames),
-        input_channels: None,
         output_channels: core::num::NonZeroUsize::new(2).expect("dual mono"),
     };
     let node = |lane, stage| GraphNodeId::TrackStage {
@@ -765,7 +764,6 @@ fn render(
 ) -> Result<realtime::RenderReport, RenderError> {
     plan.render(
         realtime::RenderIo {
-            input: None,
             output: PlanarBufferMut::try_new(pcm, 2, frames, frames).expect("output"),
         },
         realtime::RenderTime {

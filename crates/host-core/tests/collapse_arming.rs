@@ -291,10 +291,7 @@ fn render(document: &str, tap: MeterTap, live: Option<&LiveWrite>, forced_off: b
         prepared
             .plan
             .render(
-                RenderIo {
-                    input: None,
-                    output,
-                },
+                RenderIo { output },
                 RenderTime {
                     absolute_sample: base as u64,
                 },

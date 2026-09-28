@@ -218,10 +218,7 @@ impl Owner {
             .expect("prepared output buffer");
         let (elapsed, result) = observe(
             &mut self.plan,
-            RenderIo {
-                input: None,
-                output,
-            },
+            RenderIo { output },
             RenderTime {
                 absolute_sample: self.next_sample,
             },

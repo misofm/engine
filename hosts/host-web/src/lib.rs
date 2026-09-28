@@ -4854,10 +4854,7 @@ impl AudioWorkletEngineHost {
         };
         let render_first_sample = self.status.next_absolute_sample;
         let result = ready.host.plan.render(
-            RenderIo {
-                input: None,
-                output,
-            },
+            RenderIo { output },
             RenderTime {
                 absolute_sample: self.status.next_absolute_sample,
             },

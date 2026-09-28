@@ -11209,7 +11209,6 @@ mod tests {
         let envelope = engine::realtime::RenderEnvelope {
             sample_rate: engine::SampleRateHz(48_000),
             quantum: engine::QuantumFrames(fixture.frames),
-            input_channels: None,
             output_channels: NonZeroUsize::new(2).expect("stereo"),
         };
         let backend = match fixture.width {
@@ -11383,7 +11382,6 @@ mod tests {
             let mut pcm = vec![f32::from_bits(0x7fc0_0885); frames * 2];
             plan.render(
                 engine::realtime::RenderIo {
-                    input: None,
                     output: engine::realtime::PlanarBufferMut::try_new(&mut pcm, 2, frames, frames)
                         .expect("stereo output"),
                 },
@@ -11772,7 +11770,6 @@ mod tests {
         let envelope = engine::realtime::RenderEnvelope {
             sample_rate: engine::SampleRateHz(48_000),
             quantum: engine::QuantumFrames(FRAMES),
-            input_channels: None,
             output_channels: NonZeroUsize::new(2).expect("stereo"),
         };
         let bank = |members: Vec<GraphNodeId>| GraphPreparedBuiltinBank {
@@ -12064,7 +12061,6 @@ mod tests {
         let envelope = engine::realtime::RenderEnvelope {
             sample_rate: engine::SampleRateHz(48_000),
             quantum: engine::QuantumFrames(FRAMES),
-            input_channels: None,
             output_channels: NonZeroUsize::new(2).expect("stereo"),
         };
         let plan = crate::PreparedGraphPlan::new(crate::PreparedGraphPlanParts {
@@ -12188,7 +12184,6 @@ mod tests {
         let mut arena = engine::realtime::BufferArena::try_new(&[]).expect("empty arena");
         executor.render(
             &mut arena,
-            None,
             output,
             engine::realtime::RenderTime {
                 absolute_sample: first_sample,
@@ -12590,7 +12585,6 @@ mod tests {
         let envelope = engine::realtime::RenderEnvelope {
             sample_rate: engine::SampleRateHz(48_000),
             quantum: engine::QuantumFrames(FRAMES),
-            input_channels: None,
             output_channels: NonZeroUsize::new(2).expect("stereo"),
         };
         let plan = crate::PreparedGraphPlan::new(crate::PreparedGraphPlanParts {
@@ -12947,7 +12941,6 @@ mod tests {
         };
         plan.render(
             engine::realtime::RenderIo {
-                input: None,
                 output: engine::realtime::PlanarBufferMut::try_new(&mut storage, 2, frames, stride)
                     .expect("host output"),
             },
@@ -12958,7 +12951,6 @@ mod tests {
         assert_eq!(
             plan.render(
                 engine::realtime::RenderIo {
-                    input: None,
                     output: engine::realtime::PlanarBufferMut::try_new(
                         &mut storage,
                         2,
@@ -13762,7 +13754,6 @@ mod tests {
         let envelope = engine::realtime::RenderEnvelope {
             sample_rate: engine::SampleRateHz(48_000),
             quantum: engine::QuantumFrames(shape.frames),
-            input_channels: None,
             output_channels: NonZeroUsize::new(2).expect("stereo"),
         };
         let backend = match shape.width {

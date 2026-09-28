@@ -168,10 +168,7 @@ fn render(host: &mut Host, blocks: usize) -> Vec<u32> {
         host.prepared
             .plan
             .render(
-                RenderIo {
-                    input: None,
-                    output,
-                },
+                RenderIo { output },
                 RenderTime {
                     absolute_sample: (block * QUANTUM) as u64,
                 },

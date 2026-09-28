@@ -58,14 +58,15 @@ except where the "result" column says otherwise.
 | N2 | accept a read of a producer in the reader's own wave (delete the I2 check) | `engine` `ArenaLeaseSetBuilder::finish` | `disjoint::tests::a_read_from_the_same_wave_is_rejected` | RED |
 | N3 | read a muted buffer directly instead of the silence slot | `engine` `ArenaLease::effective` | `disjoint::tests::a_muted_read_is_silence_and_unmuting_restores_it` | RED |
 | N4 | off-by-one in the arena's write address, so a lease writes its neighbour | `engine` `ArenaLease::write` | `disjoint::tests::concurrent_leases_never_write_a_foreign_word` (`--release`) | RED |
-| N5 | never take the executor hand-over at the block-boundary swap | `engine` `RealtimePlanOwner::enter_block` | `realtime::tests::enter_block_moves_the_executor_handover_and_returns_a_refused_one` | RED |
 | N6 | add `unsafe` to a second `realtime/` file | `scripts/check-realtime-policy.sh` fixture | `scripts/test-realtime-policy.sh` (`unsafe-outside-disjoint-arena`) | RED |
 | N17 | forget the silence-slot offset in the sequential executor's output buffer | `graph` `GraphExecutor::new` | builtins-fixture `issue067_graph_pdc_and_dependent_identity_mutations_are_rejected` | RED (observed as a real defect during this work, then fixed) |
 
 N7-N16 covered the native dependency-wave scheduler and were retired with it: the scheduler crate,
 the `bind_native` family and the cross-executor 50-DAG oracle no longer exist, so none of those
-mutations can be expressed. N1-N5 are unaffected -- the disjoint arena and its lease API are what
-the *sequential* executor renders through, so they remain live production code with live gates.
+mutations can be expressed. N5 (never take the executor hand-over at the block-boundary swap) was
+retired by #1024, which deleted the hand-over itself and the test that guarded it. N1-N4 are
+unaffected -- the disjoint arena and its lease API are what the *sequential* executor renders
+through, so they remain live production code with live gates.
 
 N4 is the one row whose mutation is not the check it guards: I1 makes a foreign write unexpressible
 through the builder, so the stress is mutated at the address arithmetic instead, which is the

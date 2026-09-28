@@ -198,13 +198,7 @@ impl PlanState {
     ) -> Result<(), u32> {
         let report = self
             .owner
-            .render_contiguous(
-                RenderIo {
-                    input: None,
-                    output,
-                },
-                absolute_sample,
-            )
+            .render_contiguous(RenderIo { output }, absolute_sample)
             .map_err(|error| match error {
                 RenderError::OutputShape => plan_error::OUTPUT_SHAPE,
                 RenderError::TimeDiscontinuity { .. } => plan_error::TIME_DISCONTINUITY,
