@@ -815,3 +815,80 @@ fn a_both_lane_record_drained_while_collapsed_keeps_the_collapse() {
         "and rendered no dual block on account of it"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// 5. A drained ramp's arithmetic, end to end.
+// ---------------------------------------------------------------------------------------------
+
+/// A trim ride retargeted on every block ramps linearly from the value it reached, on both
+/// channels, through the whole prepared plan.
+///
+/// Every other test here commands a zero-length window or compares two arms that share one drain,
+/// so neither would see a drain that lost the record's window, or a retarget that restarted from
+/// the old target instead of the value the ramp had reached. This one pins the ramp against an
+/// oracle computed here: each block every track receives `TrimDb { Both, -6 / -12 dB, 256 }`, so
+/// the ramp never settles inside a block (128 frames), and the gain `g` follows
+/// `g += (target - g) / 256` per frame, restarted from the unsettled `g` at each block. The
+/// fixture is linear and memoryless downstream of the trim (EQ bands at 0 dB, no filters, unity
+/// faders), and all eight tracks carry the same source and the same ride, so the ridden output is
+/// the uncommanded twin's output times `g`, frame by frame.
+///
+/// Ported by #1027 from the #600 input-trim qualification
+/// (`tools/bench/src/input_symmetry.rs`, `connected_runtime_oracle_covers_retargeted_both_channel_ramp`),
+/// retired with its capture tooling. That test pinned a frozen digest at native W8 only; this runs
+/// at the build's own width.
+///
+/// Red mutation: drain `TrimDb` with a window of `0` in `BuiltinBankProcessor::begin_block`
+/// (`set_trim_db(lane, lanes, db, 0)`) -> every block jumps to its target and the first frame
+/// already misses the oracle.
+#[test]
+fn a_drained_trim_ride_ramps_from_the_value_it_reached_on_both_channels() {
+    const SMOOTHING: u32 = 256;
+    const BLOCKS: usize = 4;
+    let mut ridden = prepare_with_console(SESSION);
+    let mut twin = prepare_with_console(SESSION);
+    let mut gain = 1.0_f32;
+    let mut discriminated = false;
+    // 10^(-6/20) and 10^(-12/20), written out: the two targets as linear gains.
+    const TARGETS: [(f32, f32); 2] = [(-6.0, 0.501_187_2), (-12.0, 0.251_188_64)];
+    for block in 0..BLOCKS {
+        let (db, target) = TARGETS[block % 2];
+        for track in 0..TRACKS {
+            push(
+                &mut ridden,
+                track,
+                TrackInputRecord::TrimDb {
+                    lanes: BuiltinLaneSelector::Both,
+                    db,
+                    smoothing_samples: SMOOTHING,
+                },
+            );
+        }
+        let ridden_bits = render(&mut ridden, 1);
+        let twin_bits = render(&mut twin, 1);
+        let step = (target - gain) / SMOOTHING as f32;
+        for frame in 0..QUANTUM {
+            gain += step;
+            for plane in 0..2 {
+                let index = plane * QUANTUM + frame;
+                let reference = f32::from_bits(twin_bits[index]);
+                let actual = f32::from_bits(ridden_bits[index]);
+                let expected = reference * gain;
+                assert!(
+                    (actual - expected).abs() <= 1.0e-5,
+                    "block {block} frame {frame} plane {plane}: {actual} vs oracle {expected}"
+                );
+                discriminated |= (actual - reference).abs() > 1.0e-3;
+            }
+        }
+        assert_ne!(
+            gain.to_bits(),
+            target.to_bits(),
+            "block {block}: the next record must retarget a ramp still in flight"
+        );
+    }
+    assert!(
+        discriminated,
+        "the ride never moved the output away from the uncommanded twin, so the oracle proves nothing"
+    );
+}

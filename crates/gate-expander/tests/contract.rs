@@ -232,6 +232,52 @@ fn enabled_ratio_one_is_exact_identity_with_a_nonzero_sample_zero() {
     }
 }
 
+/// A plateau far below the threshold settles on the range floor, not on silence.
+///
+/// At the frozen active values (`T = -20`, `rho = 20`, range 48 dB) a -60 dBFS plateau asks for
+/// `19 * -40 = -760 dB`, and the range clamps it: once the 5 ms release has settled, every output
+/// sample is its input times `10^(-48/20)`, nonzero, on both channels of an antiphase pair.
+///
+/// Ported by #1027 from the #746 active benchmark's untimed preflight
+/// (`tools/bench/src/gate_active.rs`, `untimed_preflight_runs_the_actual_shapes_without_timing_calls`),
+/// retired with the benchmark: its quiet plateaus had to stay nonzero and below 1 % of the input.
+/// The f64 oracle (`oracle.rs`) stays inside the range on purpose, so before this only the pinned
+/// corpus digest in `determinism.rs` crossed the clamp.
+///
+/// Red mutation: drop `.max(range.neg())` from the curve in `kernel.rs` -> the gain falls far
+/// below the floor and the settled ratio misses it.
+#[test]
+fn a_quiet_plateau_settles_on_the_range_floor_not_silence() {
+    const FRAMES: usize = 4_800;
+    const QUIET: f32 = 1.0 / 1_024.0;
+    let values = support::active_values();
+    let mut effect = prepare(request(&values));
+    let input: Vec<f32> = (0..FRAMES)
+        .map(|frame| if (frame / 8) % 2 == 0 { QUIET } else { -QUIET })
+        .collect();
+    let mut left = input.clone();
+    let mut right: Vec<f32> = input.iter().map(|value| -value).collect();
+    render_scalar(effect.as_mut(), &mut left, &mut right, 128);
+    // 10^(-48/20), written out: the range floor as a linear gain.
+    let floor = 0.003_981_071_7_f32;
+    for frame in FRAMES - 480..FRAMES {
+        for (channel, output, source) in [
+            ("left", left[frame], input[frame]),
+            ("right", right[frame], -input[frame]),
+        ] {
+            assert_ne!(
+                output, 0.0,
+                "{channel} frame {frame}: the floor is not silence"
+            );
+            let ratio = output / source;
+            assert!(
+                (ratio - floor).abs() <= floor * 1.0e-3,
+                "{channel} frame {frame}: gain {ratio} is not the 48 dB floor {floor}"
+            );
+        }
+    }
+}
+
 #[test]
 fn enabled_range_zero_is_exact_identity_with_a_nonzero_sample_zero() {
     for rate in [44_100, 48_000, 88_200, 96_000] {
