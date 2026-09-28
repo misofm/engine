@@ -752,8 +752,8 @@ def main() -> int:
         workflow_mutation_fails("qualification.yml", identity_head, identity_head + extra)
     workflow_mutation_fails(
         "qualification.yml", checker.ARTIFACT_PERMISSIONS,
-        checker.ARTIFACT_PERMISSIONS + "    env:\n      CARGO_PROFILE_RELEASE_OPT_LEVEL: s\n",
-    )  # a job-level build variable on the job that builds the shipped bytes
+        checker.ARTIFACT_PERMISSIONS + "    env:\n      PATH: /tmp/forged-gh:/usr/bin:/bin\n",
+    )  # a job PATH that puts another gh first could forge main's record
     report_step = checker.IDENTITY_REPORT_STEP
     workflow_mutation_fails(
         "qualification.yml", report_step,

@@ -361,8 +361,12 @@ ARTIFACT_READERS = ("sdk", "artifact-gates", "browser")
 # - on `main`, `artifact` posts the record, on pushes only, with the one permission it needs;
 # - the build step writes the digest and the rustc release the record and the report carry;
 # - `artifact-identity` fetches and compares in one step with no `if:`, keeps its twin build, and
-#   has the one read permission; neither job may carry `continue-on-error`, `defaults` or `env`,
-#   which could skip or mask the comparison.
+#   has the one read permission;
+# - neither job carries a job-level `continue-on-error` (a failed record or comparison would still
+#   pass), `defaults` (`shell: bash {0}` drops `-e` and masks a failed self-test) or `env` (a job
+#   `PATH` could put another `gh` first and forge the record or the lookup).
+# The build environment itself is deliberately not pinned: the record is what the base's own run
+# built in its own environment, so a change to that environment reads CHANGED, as it should.
 ARTIFACT_PERMISSIONS = "    permissions:\n      contents: read\n      statuses: write\n"
 ARTIFACT_BUILD_LINES = (
     '          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"\n',
