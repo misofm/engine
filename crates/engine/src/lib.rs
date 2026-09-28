@@ -52,14 +52,6 @@ pub const LAUNCH_SAMPLE_RATES: [SampleRateHz; 4] = [
     SampleRateHz(96_000),
 ];
 
-/// Exact extended compatibility rates retained for corpus and descriptor evidence only.
-pub const EXTENDED_COMPATIBILITY_SAMPLE_RATES: [SampleRateHz; 4] = [
-    SampleRateHz(176_400),
-    SampleRateHz(192_000),
-    SampleRateHz(352_800),
-    SampleRateHz(384_000),
-];
-
 const fn rate_set_contains(rates: &[SampleRateHz], rate: SampleRateHz) -> bool {
     let mut index = 0;
     while index < rates.len() {
@@ -77,12 +69,6 @@ pub const fn is_launch_sample_rate(rate: SampleRateHz) -> bool {
     rate_set_contains(&LAUNCH_SAMPLE_RATES, rate)
 }
 
-/// Returns whether `rate` is an extended compatibility-only corpus rate.
-#[must_use]
-pub const fn is_extended_compatibility_sample_rate(rate: SampleRateHz) -> bool {
-    rate_set_contains(&EXTENDED_COMPATIBILITY_SAMPLE_RATES, rate)
-}
-
 /// A caller-selected render quantum in PCM frames.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -94,8 +80,8 @@ pub mod realtime;
 #[cfg(test)]
 mod tests {
     use super::{
-        EXTENDED_COMPATIBILITY_SAMPLE_RATES, EngineVersion, LAUNCH_SAMPLE_RATES, QuantumFrames,
-        SampleRateHz, hex_lower, is_extended_compatibility_sample_rate, is_launch_sample_rate,
+        EngineVersion, LAUNCH_SAMPLE_RATES, QuantumFrames, SampleRateHz, hex_lower,
+        is_launch_sample_rate,
     };
 
     #[test]
@@ -107,27 +93,19 @@ mod tests {
         );
     }
 
+    /// Owner ruling R5 (#1036): the launch rates are the only accepted rates. The former extended
+    /// research tier (176.4-384 kHz) is refused like any other rate.
     #[test]
-    fn sample_rate_tiers_are_exact_sorted_disjoint_and_classified() {
+    fn launch_sample_rates_are_exact_and_the_only_accepted_rates() {
         assert_eq!(
             LAUNCH_SAMPLE_RATES.map(|rate| rate.0),
             [44_100, 48_000, 88_200, 96_000]
         );
-        assert_eq!(
-            EXTENDED_COMPATIBILITY_SAMPLE_RATES.map(|rate| rate.0),
-            [176_400, 192_000, 352_800, 384_000]
-        );
         for rate in LAUNCH_SAMPLE_RATES {
             assert!(is_launch_sample_rate(rate));
-            assert!(!is_extended_compatibility_sample_rate(rate));
         }
-        for rate in EXTENDED_COMPATIBILITY_SAMPLE_RATES {
-            assert!(!is_launch_sample_rate(rate));
-            assert!(is_extended_compatibility_sample_rate(rate));
-        }
-        for rate in [SampleRateHz(0), SampleRateHz(32_000), SampleRateHz(192_001)] {
-            assert!(!is_launch_sample_rate(rate));
-            assert!(!is_extended_compatibility_sample_rate(rate));
+        for rate in [176_400, 192_000, 352_800, 384_000, 0, 32_000, 192_001] {
+            assert!(!is_launch_sample_rate(SampleRateHz(rate)), "{rate}");
         }
     }
 

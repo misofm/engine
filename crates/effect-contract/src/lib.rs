@@ -40,9 +40,7 @@ pub use symmetry::{
 };
 
 use core::{fmt, hash::Hash};
-use engine::{
-    LAUNCH_SAMPLE_RATES, SampleRateHz, is_extended_compatibility_sample_rate, is_launch_sample_rate,
-};
+use engine::{LAUNCH_SAMPLE_RATES, SampleRateHz, is_launch_sample_rate};
 use lane::{Backend, Simd4, Simd8};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -729,8 +727,7 @@ pub fn validate_descriptor(d: &'static EffectDescriptor) -> Result<(), Descripto
             })
         }
         qprior = Some(key);
-        let rate = SampleRateHz(q.sample_rate);
-        if !(is_launch_sample_rate(rate) || is_extended_compatibility_sample_rate(rate)) {
+        if !is_launch_sample_rate(SampleRateHz(q.sample_rate)) {
             e.push(DescriptorError {
                 path: "qualities",
                 code: DescriptorDiagnosticCode::Quality,

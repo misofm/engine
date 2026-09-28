@@ -20,10 +20,7 @@ use effect_contract::{
     TailSamples, default_initial_values, expected_prepared_metadata, valid_runtime_span,
     validate_descriptor,
 };
-use engine::{
-    EXTENDED_COMPATIBILITY_SAMPLE_RATES, LAUNCH_SAMPLE_RATES, SampleRateHz,
-    is_extended_compatibility_sample_rate, is_launch_sample_rate, realtime::audit,
-};
+use engine::{LAUNCH_SAMPLE_RATES, realtime::audit};
 
 const MOCK_ID: EffectId = match EffectId::new("conformance.delay") {
     Ok(value) => value,
@@ -96,15 +93,11 @@ const fn quality(sample_rate: u32) -> QualityDescriptor {
         scratch_bytes_per_frame: 0,
     }
 }
-const QUALITIES: [QualityDescriptor; 8] = [
+const QUALITIES: [QualityDescriptor; 4] = [
     quality(LAUNCH_SAMPLE_RATES[0].0),
     quality(LAUNCH_SAMPLE_RATES[1].0),
     quality(LAUNCH_SAMPLE_RATES[2].0),
     quality(LAUNCH_SAMPLE_RATES[3].0),
-    quality(EXTENDED_COMPATIBILITY_SAMPLE_RATES[0].0),
-    quality(EXTENDED_COMPATIBILITY_SAMPLE_RATES[1].0),
-    quality(EXTENDED_COMPATIBILITY_SAMPLE_RATES[2].0),
-    quality(EXTENDED_COMPATIBILITY_SAMPLE_RATES[3].0),
 ];
 pub static DUAL_ACCUMULATOR_DELAY_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     id: MOCK_ID,
@@ -139,7 +132,6 @@ pub enum FaultKind {
     NondeterministicSnapshot,
     PartialSnapshot,
     BadRestore,
-    ExtendedRatePreparation,
     Panic,
     /// Issue #105 F2: a real heap allocation inside the armed render scope. Unlike
     /// [`FaultKind::AllocationHook`] it calls nothing in `engine::realtime::audit` --
@@ -178,13 +170,6 @@ impl NativeEffectFactory for DualAccumulatorDelayFactory {
         &self,
         request: PrepareEffectRequest<'_>,
     ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
-        if self.fault == FaultKind::ExtendedRatePreparation
-            && is_extended_compatibility_sample_rate(SampleRateHz(request.sample_rate))
-        {
-            return Err(EffectPrepareError {
-                code: "effect.conformance.extended_rate_probe",
-            });
-        }
         let metadata = expected_prepared_metadata(self.descriptor(), request)?;
         let left = request
             .initial_values
@@ -682,7 +667,6 @@ impl EffectConformanceTierReport {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EffectConformanceReport {
     pub launch_gates: EffectConformanceTierReport,
-    pub extended_compatibility_probes: EffectConformanceTierReport,
 }
 impl EffectConformanceReport {
     pub fn passed(&self) -> bool {
@@ -1059,7 +1043,6 @@ pub fn run_effect_conformance(
 ) -> EffectConformanceReport {
     let mut report = EffectConformanceReport {
         launch_gates: EffectConformanceTierReport::new(),
-        extended_compatibility_probes: EffectConformanceTierReport::new(),
     };
     let descriptor = factory.descriptor();
     if validate_descriptor(descriptor).is_err() {
@@ -1074,15 +1057,10 @@ pub fn run_effect_conformance(
         report.launch_gates.failures.push(failure);
         return report;
     }
+    // `validate_descriptor` admits launch-rate rows only (owner ruling R5, #1036), so every
+    // declared quality row is a launch gate.
     for quality in descriptor.qualities {
-        let tier = if is_launch_sample_rate(SampleRateHz(quality.sample_rate)) {
-            &mut report.launch_gates
-        } else {
-            debug_assert!(is_extended_compatibility_sample_rate(SampleRateHz(
-                quality.sample_rate
-            )));
-            &mut report.extended_compatibility_probes
-        };
+        let tier = &mut report.launch_gates;
         for link_mode in [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average] {
             if !descriptor.supported_link_modes.contains(link_mode) {
                 continue;
@@ -1221,7 +1199,6 @@ pub fn run_effect_conformance(
         }
     }
     report.launch_gates.finish();
-    report.extended_compatibility_probes.finish();
     report
 }
 

@@ -8,12 +8,12 @@ file with header CRC bytes zeroed. `MANIFEST.tsv` starts with
 `miso-engine-fixture-manifest-v1`; each sorted row contains the canonical stored CRC-32C, byte length,
 and safe relative path. It is intentionally a corruption/integrity check, not authenticity.
 
-The eleven checked-in files and `MANIFEST.tsv` are byte-frozen. The four files at 44,100, 48,000,
-88,200, and 96,000 Hz are launch conformance inputs. Files at 176,400, 192,000, 352,800, and
-384,000 Hz remain readable extended compatibility evidence only; they do not make those rates
-launch engine, host, effect, or release support.
+The seven checked-in files and `MANIFEST.tsv` are byte-frozen. Every file is at a launch rate
+(44,100, 48,000, 88,200 or 96,000 Hz), the only rates the parser accepts. Owner ruling R5 (#1036)
+removed the four files at the former extended research rates (176,400, 192,000, 352,800 and
+384,000 Hz); the remaining files' bytes did not change.
 
-Run `cargo run --locked -p miso-engine-conformance --example miso_engine_conformance_fixtures -- --check`.
+Run `cargo run --locked -p conformance --example conformance_fixtures -- --check`.
 Only a maintainer deliberately updating the corpus may run `--write`, then review every checksum change.
 
 Regeneration is pinned to the generating platform's libm (audit #105, finding F9). The sine content

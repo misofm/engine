@@ -13,7 +13,7 @@
 use builtins::*;
 use dsp_reference::{ReferenceRetainedTptF32, ReferenceTptOutput};
 use effect_contract::BankWidth;
-use engine::{EXTENDED_COMPATIBILITY_SAMPLE_RATES, LAUNCH_SAMPLE_RATES};
+use engine::LAUNCH_SAMPLE_RATES;
 use lane::Backend;
 
 /// Both bank widths, exercised on every host: `wide` implements four and eight lanes everywhere,
@@ -23,11 +23,8 @@ const BANKS: [(Backend, BankWidth); 2] = [
     (Backend::Simd8, BankWidth::Eight),
 ];
 
-fn launch_and_extended_compatibility_rates() -> impl Iterator<Item = u32> {
-    LAUNCH_SAMPLE_RATES
-        .into_iter()
-        .chain(EXTENDED_COMPATIBILITY_SAMPLE_RATES)
-        .map(|rate| rate.0)
+fn launch_rates() -> impl Iterator<Item = u32> {
+    LAUNCH_SAMPLE_RATES.into_iter().map(|rate| rate.0)
 }
 
 /// Xorshift64\*: seeded and portable, so a gate's corpus never depends on a system generator.
@@ -85,7 +82,7 @@ fn prepared_input(rate: u32, parameters: BuiltinParameters) -> InputBuiltins {
 /// below and is invisible in the cast words.
 #[test]
 fn prepared_sections_match_reference_coefficients() {
-    for rate in launch_and_extended_compatibility_rates() {
+    for rate in launch_rates() {
         let mut cutoffs = vec![10.0_f32, 100.0, 1_000.0, 0.45 * rate as f32];
         if let Some(maximum) = builtin_filter_cutoff_maximum_hz(rate) {
             cutoffs.push(maximum);
@@ -118,7 +115,7 @@ fn prepared_sections_match_reference_coefficients() {
 #[test]
 fn engine_tan_agrees_with_the_platform_to_one_ulp_over_the_cutoff_domain() {
     let mut worst = 0_i64;
-    for rate in launch_and_extended_compatibility_rates() {
+    for rate in launch_rates() {
         let maximum = 0.45 * rate as f32;
         let mut bits = 10.0_f32.to_bits();
         while f32::from_bits(bits) <= maximum {
