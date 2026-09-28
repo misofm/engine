@@ -283,6 +283,10 @@ fn old_lengths_and_one_byte_short_payloads_reject_scalar_and_bank() {
 }
 
 #[test]
+#[cfg_attr(
+    not(any(target_arch = "x86", target_arch = "x86_64")),
+    ignore = "an eight-lane bank binds only on the eight-lane launch build (#1017)"
+)]
 fn malformed_final_right_word_leaves_both_channels_unchanged() {
     let values = active_values();
     let mut effect = prepare(request(&values));
@@ -315,12 +319,10 @@ fn malformed_final_right_word_leaves_both_channels_unchanged() {
         support::set_parameter(&mut values, 0, -20.0 - track as f32, -20.0 - track as f32);
         values
     });
-    let Some(mut control) = prepare_bank_w8(&values, LinkMode::DualMono) else {
-        return;
-    };
-    let Some(mut target) = prepare_bank_w8(&values, LinkMode::DualMono) else {
-        return;
-    };
+    let mut control =
+        prepare_bank_w8(&values, LinkMode::DualMono).expect("an eight-lane build binds W8");
+    let mut target =
+        prepare_bank_w8(&values, LinkMode::DualMono).expect("an eight-lane build binds W8");
     let prefix_left = packed_w8(&vec![vec![0.01_f32; 17]; 8]);
     let prefix_right = prefix_left.clone();
     let mut control_prefix_left = prefix_left.clone();
@@ -388,6 +390,10 @@ fn malformed_final_right_word_leaves_both_channels_unchanged() {
 }
 
 #[test]
+#[cfg_attr(
+    not(any(target_arch = "x86", target_arch = "x86_64")),
+    ignore = "an eight-lane bank binds only on the eight-lane launch build (#1017)"
+)]
 fn scalar_and_bank_recovery_is_channel_and_lane_local() {
     let mut values = active_values();
     support::set_parameter(&mut values, 2, 40.0, 40.0);
@@ -468,12 +474,10 @@ fn scalar_and_bank_recovery_is_channel_and_lane_local() {
         support::set_parameter(&mut values, 2, 40.0, 40.0);
         values
     });
-    let Some(mut control) = prepare_bank_w8(&values, LinkMode::DualMono) else {
-        return;
-    };
-    let Some(mut bank) = prepare_bank_w8(&values, LinkMode::DualMono) else {
-        return;
-    };
+    let mut control =
+        prepare_bank_w8(&values, LinkMode::DualMono).expect("an eight-lane build binds W8");
+    let mut bank =
+        prepare_bank_w8(&values, LinkMode::DualMono).expect("an eight-lane build binds W8");
     let warm_left = packed_w8(&vec![vec![0.01; 17]; 8]);
     let warm_right = warm_left.clone();
     let mut control_warm_left = warm_left.clone();
@@ -598,6 +602,10 @@ fn scalar_and_bank_recovery_is_channel_and_lane_local() {
 }
 
 #[test]
+#[cfg_attr(
+    not(any(target_arch = "x86", target_arch = "x86_64")),
+    ignore = "an eight-lane bank binds only on the eight-lane launch build (#1017)"
+)]
 fn scalar_and_bank_state_payloads_interchange_without_changing_audio() {
     let values = active_values();
     let source_left = noise(41, 160, 0.3);
@@ -630,9 +638,8 @@ fn scalar_and_bank_state_payloads_interchange_without_changing_audio() {
     );
 
     let bank_values = [values; 8];
-    let Some(mut scalar_to_bank) = prepare_bank_w8(&bank_values, LinkMode::DualMono) else {
-        return;
-    };
+    let mut scalar_to_bank =
+        prepare_bank_w8(&bank_values, LinkMode::DualMono).expect("an eight-lane build binds W8");
     let sizes = scalar_to_bank.metadata().program_key.state_sizes;
     scalar_to_bank
         .restore_track_state_payload(
@@ -662,9 +669,8 @@ fn scalar_and_bank_state_payloads_interchange_without_changing_audio() {
     );
 
     // Bank -> scalar: snapshot the same track after a partial W8 render and continue it in W1.
-    let Some(mut bank) = prepare_bank_w8(&bank_values, LinkMode::DualMono) else {
-        return;
-    };
+    let mut bank =
+        prepare_bank_w8(&bank_values, LinkMode::DualMono).expect("an eight-lane build binds W8");
     let mut bank_prefix_left = packed_w8(&vec![source_left[..17].to_vec(); 8]);
     let mut bank_prefix_right = packed_w8(&vec![source_right[..17].to_vec(); 8]);
     render_bank(
@@ -715,14 +721,16 @@ fn scalar_and_bank_state_payloads_interchange_without_changing_audio() {
 }
 
 #[test]
+#[cfg_attr(
+    not(any(target_arch = "x86", target_arch = "x86_64")),
+    ignore = "an eight-lane bank binds only on the eight-lane launch build (#1017)"
+)]
 fn bank_restore_of_one_track_does_not_mutate_peers() {
     let values: [Values; 8] = core::array::from_fn(|_| initial_values());
-    let Some(mut donor_bank) = prepare_bank_w8(&values, LinkMode::DualMono) else {
-        return;
-    };
-    let Some(mut target_bank) = prepare_bank_w8(&values, LinkMode::DualMono) else {
-        return;
-    };
+    let mut donor_bank =
+        prepare_bank_w8(&values, LinkMode::DualMono).expect("an eight-lane build binds W8");
+    let mut target_bank =
+        prepare_bank_w8(&values, LinkMode::DualMono).expect("an eight-lane build binds W8");
     let mut left = packed_w8(&vec![vec![0.1; 128]; 8]);
     let mut right = left.clone();
     render_bank(&mut *donor_bank, &mut left, &mut right, 128);

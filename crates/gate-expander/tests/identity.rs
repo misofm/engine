@@ -67,12 +67,14 @@ fn render_bank8(
 }
 
 #[test]
+#[cfg_attr(
+    not(any(target_arch = "x86", target_arch = "x86_64")),
+    ignore = "an eight-lane bank binds only on the eight-lane launch build (#1017)"
+)]
 fn scalar_and_w8_are_bit_exact_for_all_link_modes_and_ramps() {
     let values = track_values();
     for link in [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average] {
-        let Some(mut bank) = prepare_bank_w8(&values, link) else {
-            return;
-        };
+        let mut bank = prepare_bank_w8(&values, link).expect("an eight-lane build binds W8");
         let mut scalar = Vec::new();
         for values in &values {
             let mut request = request(values);
@@ -220,20 +222,21 @@ fn equal_input_is_dual_mono_and_zero_input_has_no_tail() {
 }
 
 #[test]
+#[cfg_attr(
+    any(target_arch = "x86", target_arch = "x86_64"),
+    ignore = "a four-lane bank binds only on a four-lane build; the AArch64 legs run it (#1017)"
+)]
 fn w4_binding_is_internal_lane_evidence_without_factory_width_claim() {
-    if Backend::current() != Backend::Simd4 {
-        return;
-    }
+    assert_eq!(Backend::current(), Backend::Simd4, "a four-lane build");
     let values = track_values();
-    let Some(mut bank) = prepare_bank(
+    let mut bank = prepare_bank(
         &values,
         LinkMode::DualMono,
         BankWidth::Four,
         Backend::Simd4,
         128,
-    ) else {
-        return;
-    };
+    )
+    .expect("a four-lane build binds W4");
     let mut left = vec![0.0_f32; 8 * 4];
     for frame in 0..8 {
         for track in 0..4 {

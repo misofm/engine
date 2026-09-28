@@ -2693,15 +2693,21 @@ mod tests {
             (0, 0),
             "no forbidden operation on either render path"
         );
+        // One cohort per lane-width of tracks, six bank slots each: eight cohorts at the eight-lane
+        // launch width, sixteen on a four-lane (AArch64 NEON) build (#1017).
+        let tracks = u64::from(Workload::SixtyFourTrackConsoleMetered.tracks());
+        let width = Backend::current().width() as u64;
+        let cohorts = tracks / width;
         assert_eq!(
             [console.bank_shape(), metered.bank_shape()],
-            [[8, 48], [8, 48]],
-            "both plans bank the same memberships in the same eight chains"
+            [[cohorts, 6 * cohorts], [cohorts, 6 * cohorts]],
+            "both plans bank the same memberships in the same {cohorts} chains at width {width}"
         );
         assert_eq!(metered.bank_transposes(), console.bank_transposes());
-        // The delivery difference, pinned rather than described: the same 48 memberships run as 48
-        // chain stages on the standing row and as 40 on the metered row, whose between-render-
-        // calls delivery fuses each of the eight cohorts' fader and matrix into one stage.
+        // The delivery difference, pinned rather than described: the same six memberships per
+        // cohort (48 at the launch width) run as six chain stages per cohort on the standing row and
+        // as five on the metered row, whose between-render-calls delivery fuses each cohort's fader
+        // and matrix into one stage.
         assert_eq!(
             [
                 console_chains.run_memberships,
@@ -2709,10 +2715,10 @@ mod tests {
                 metered_chains.run_memberships,
                 metered_chains.runtime_slots,
             ],
-            [48, 48, 48, 40],
-            "[standing memberships, standing stages, metered memberships, metered stages]"
+            [6 * cohorts, 6 * cohorts, 6 * cohorts, 5 * cohorts].map(|count| count as usize),
+            "[standing memberships, standing stages, metered memberships, metered stages] at width \
+             {width}"
         );
-        let tracks = u64::from(Workload::SixtyFourTrackConsoleMetered.tracks());
         assert_eq!(
             [console.bank_route_folds(), metered.bank_route_folds()],
             [tracks, tracks],

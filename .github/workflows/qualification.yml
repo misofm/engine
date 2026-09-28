@@ -1,7 +1,8 @@
 name: qualification
 
 # Design #359 WP-4: one PR workflow, one required status context (the `verdict` job, whose own
-# `name:` is `qualification`), thirteen leaf jobs behind one router, one aggregate. Stage 3 (§12)
+# `name:` is `qualification`), fifteen leaf jobs behind one router, one aggregate (#1017 added the
+# two AArch64 jobs). Stage 3 (§12)
 # retired the four workflows this one replaced -- ci.yml, sdk.yml, browser-qualification.yml and
 # release-build.yml -- once this workflow had reported on >= 10 PRs and agreed with them; this is
 # now the sole required PR workflow. See design §4/§5/§7/§12.
@@ -760,11 +761,11 @@ jobs:
           overwrite: true
 
   cross-target:
-    name: native and wasm cross-target checks
+    name: native, AArch64 and wasm cross-target checks
     needs: route
     if: needs.route.outputs.route == 'full'
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -772,18 +773,86 @@ jobs:
           shared-key: cross-target
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # armv7-linux-androideabi is installed only so check-cross-targets.sh can prove lane refuses
-      # it (#1041: mobile ships 64-bit only); nothing is built for it.
+      # it (#1041: mobile ships 64-bit only); nothing is built for it. aarch64-apple-ios and
+      # aarch64-linux-android are the mobile product targets (#1017): the product crates are
+      # checked and linted for both, and their iOS release assembly is scanned (#1018).
       - name: Install pinned Rust toolchain, cross targets, and ripgrep
         run: |
-          rustup toolchain install 1.97.1 --profile minimal
-          rustup target add --toolchain 1.97.1 wasm32-unknown-unknown armv7-linux-androideabi
+          rustup toolchain install 1.97.1 --profile minimal --component clippy
+          rustup target add --toolchain 1.97.1 wasm32-unknown-unknown armv7-linux-androideabi aarch64-apple-ios aarch64-linux-android
           sudo apt-get update
           sudo apt-get install -y ripgrep
       # Replaces check-parametric-eq-targets.sh's and check-builtins-targets.sh's cargo halves with
       # one script, one cached target dir per triple (WP-3 contract). The render-contract rg half
       # moved to lint.
-      - name: Cross-target cargo checks (parametric-eq, builtins, effect-compiler)
+      - name: Cross-target cargo checks (AArch64 iOS/Android product crates, parametric-eq, builtins, effect-compiler)
         run: bash scripts/check-cross-targets.sh
+
+  # Issue #1017: native AArch64 (iOS and Android arm64) is a product target, so its tests run on
+  # arm64 hardware, where lane::Backend is Simd4 (NEON) and lane::fpenv pins FPCR. Two jobs in
+  # parallel keep the wall time inside the x86 jobs'. scripts/run-aarch64-tests.sh owns the package
+  # lists, the no-silent-skip gate and the known defects' expected failures, by name. `-D warnings`
+  # makes an aarch64-only warning red here as well as in cross-target's clippy rows. The arm64
+  # image is a partner image: rustup is installed if it is absent, before the cache (whose key
+  # reads rustc).
+  aarch64-debug:
+    name: AArch64 product crate debug tests (NEON Simd4, FPCR)
+    needs: route
+    if: needs.route.outputs.route == 'full'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    env:
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install pinned Rust toolchain and ripgrep
+        run: |
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup toolchain install 1.97.1 --profile minimal
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: aarch64-debug
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Product crate debug tests on arm64, known defects as named expected failures
+        run: bash scripts/run-aarch64-tests.sh debug
+
+  aarch64-release:
+    name: AArch64 release digest gates and realtime audits (NEON Simd4, FPCR)
+    needs: route
+    if: needs.route.outputs.route == 'full'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    env:
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install pinned Rust toolchain and ripgrep
+        run: |
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup toolchain install 1.97.1 --profile minimal
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: aarch64-release
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # #1048: g5_native_digests_match_pins is the one native owner of the cross-target digest
+      # corpora; on arm64 it proves phones render the x86 and browser pins. Its own unfiltered
+      # step, so no expected-failure row or skip can reach it.
+      - name: G5 class-A corpus on arm64 (the native owner, #1048)
+        run: cargo test --locked --release -p wasm-gates --features math/lane
+      - name: Release lane and math gates, console digests and realtime audits on arm64, known defects as named expected failures
+        run: bash scripts/run-aarch64-tests.sh release
 
   release-shape:
     name: release shape and panic-clobber policy
@@ -816,7 +885,7 @@ jobs:
   verdict:
     name: qualification
     if: always()
-    needs: [route, docs-gates, artifact, sdk, artifact-gates, browser, lint, test-debug-a, test-debug-b, test-release, audit-native, wasm-guests, cross-target, release-shape]
+    needs: [route, docs-gates, artifact, sdk, artifact-gates, browser, lint, test-debug-a, test-debug-b, test-release, audit-native, wasm-guests, cross-target, aarch64-debug, aarch64-release, release-shape]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -838,6 +907,8 @@ jobs:
       AUDIT_NATIVE_RESULT: ${{ needs.audit-native.result }}
       WASM_GUESTS_RESULT: ${{ needs.wasm-guests.result }}
       CROSS_TARGET_RESULT: ${{ needs.cross-target.result }}
+      AARCH64_DEBUG_RESULT: ${{ needs.aarch64-debug.result }}
+      AARCH64_RELEASE_RESULT: ${{ needs.aarch64-release.result }}
       RELEASE_SHAPE_RESULT: ${{ needs.release-shape.result }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -887,6 +958,8 @@ jobs:
           check audit-native "$AUDIT_NATIVE_RESULT" "$full_expected"
           check wasm-guests "$WASM_GUESTS_RESULT" "$full_expected"
           check cross-target "$CROSS_TARGET_RESULT" "$full_expected"
+          check aarch64-debug "$AARCH64_DEBUG_RESULT" "$full_expected"
+          check aarch64-release "$AARCH64_RELEASE_RESULT" "$full_expected"
           check release-shape "$RELEASE_SHAPE_RESULT" "$release_shape_expected"
           [[ "$failed" == 0 ]] || exit 1
       # Best-effort observability (design §11): never masks the verdict above, which has already

@@ -217,6 +217,7 @@ def workspace() -> pathlib.Path:
     shutil.copy2(ROUTER, root / "scripts/ci-path-router.py")
     shutil.copy2(CHECKER, root / "scripts/check-ci-path-routing.py")
     shutil.copy2(TEST, root / "scripts/test-ci-path-routing.py")
+    shutil.copy2(ROOT / "scripts/check-cross-targets.sh", root / "scripts/check-cross-targets.sh")
     return root
 
 
@@ -231,6 +232,15 @@ def workflow_mutation_fails(workflow: str, old: str, new: str) -> None:
     root = workspace()
     try:
         mutate(root / ".github/workflows" / workflow, old, new)
+        checker_fails(root)
+    finally:
+        shutil.rmtree(root)
+
+
+def script_mutation_fails(script: str, old: str, new: str) -> None:
+    root = workspace()
+    try:
+        mutate(root / "scripts" / script, old, new)
         checker_fails(root)
     finally:
         shutil.rmtree(root)
@@ -573,10 +583,10 @@ def main() -> int:
         mutate(root / ".github/workflows/qualification.yml",
                "    needs: [route, docs-gates, artifact, sdk, artifact-gates, browser, lint, "
                "test-debug-a, test-debug-b, test-release, audit-native, wasm-guests, "
-               "cross-target, release-shape]",
+               "cross-target, aarch64-debug, aarch64-release, release-shape]",
                "    needs: [route, docs-gates, artifact, sdk, artifact-gates, browser, lint, "
                "test-debug-a, test-debug-b, test-release, audit-native, wasm-guests, "
-               "cross-target]")
+               "cross-target, aarch64-debug, aarch64-release]")
         checker_fails(root)  # a job dropped from verdict's needs: escapes the aggregate entirely
     finally:
         shutil.rmtree(root)
@@ -677,6 +687,66 @@ def main() -> int:
         "target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm\n",
     )
 
+    # Issue #1017: the AArch64 compile rows and test jobs. Deleting a row, either half of the
+    # row, a job's arm64 runner, its script, its full-route gating or its success expectation, or a
+    # mobile target from cross-target's install, must each fail the checker.
+    installed = "armv7-linux-androideabi aarch64-apple-ios aarch64-linux-android\n"
+    for target in ("aarch64-apple-ios", "aarch64-linux-android"):
+        script_mutation_fails("check-cross-targets.sh", f"aarch64_row {target}\n", "")
+        script_mutation_fails("check-cross-targets.sh", f"aarch64_row {target}\n",
+                              f"# aarch64_row {target}\n")
+        workflow_mutation_fails("qualification.yml", installed,
+                                installed.replace(f" {target}", ""))
+    script_mutation_fails(
+        "check-cross-targets.sh",
+        '        "${product_packages[@]}" -- -D warnings\n',
+        '        "${product_packages[@]}"\n',
+    )
+    script_mutation_fails(
+        "check-cross-targets.sh",
+        "        cargo clippy --quiet --locked --all-targets --all-features",
+        "        cargo check --quiet --locked --all-targets --all-features",
+    )
+    script_mutation_fails(
+        "check-cross-targets.sh",
+        "        cargo check --quiet --locked --all-targets --all-features",
+        "        cargo check --quiet --locked --all-features",
+    )
+    script_mutation_fails(
+        "check-cross-targets.sh", "printf '%s\\n' \"$product_list\" >\"$asm_out/products\"\n",
+        "printf 'parametric-eq\\nbuiltins\\n' >\"$asm_out/products\"\n",
+    )  # the iOS memset judge handed a hand-picked subset
+    script_mutation_fails(
+        "check-cross-targets.sh",
+        '"${known_defects[@]}" judge-memset "$asm_out/counts" "$asm_out/products" ||\n',
+        'true ||\n',
+    )  # the per-crate judge dropped
+    for name, mode in (("aarch64-debug", "debug"), ("aarch64-release", "release")):
+        variable = name.replace("-", "_").upper() + "_RESULT"
+        workflow_mutation_fails(
+            "qualification.yml", f"        run: bash scripts/run-aarch64-tests.sh {mode}\n",
+            "        run: true\n",
+        )
+        workflow_mutation_fails(
+            "qualification.yml",
+            f'check {name} "${variable}" "$full_expected"',
+            f'check {name} "${variable}" "$artifact_expected"',
+        )
+    workflow_mutation_fails(
+        "qualification.yml",
+        "    runs-on: ubuntu-24.04-arm\n    timeout-minutes: 30\n    env:\n"
+        "      RUSTFLAGS: -D warnings\n    steps:\n      - uses: actions/checkout@",
+        "    runs-on: ubuntu-24.04\n    timeout-minutes: 30\n    env:\n"
+        "      RUSTFLAGS: -D warnings\n    steps:\n      - uses: actions/checkout@",
+    )
+    workflow_mutation_fails(
+        "qualification.yml",
+        "  aarch64-release:\n    name: AArch64 release digest gates and realtime audits "
+        "(NEON Simd4, FPCR)\n    needs: route\n    if: needs.route.outputs.route == 'full'\n",
+        "  aarch64-release:\n    name: AArch64 release digest gates and realtime audits "
+        "(NEON Simd4, FPCR)\n    needs: route\n    if: needs.route.outputs.route == 'sdk'\n",
+    )
+
     # #1048 review finding 2: the V8 pairing is found by token, so reordering the flags cannot
     # slip the spill leg out of CI once artifact-gates stops running it.
     root = workspace()
@@ -728,14 +798,23 @@ def main() -> int:
         "    if: needs.route.outputs.math_closure == 'true'\n",
     )  # the owner's job on a narrower route than wasm-guests
 
-    # Issue #1048 amendment 2: an AArch64 job (#1017) must carry the G5 owner in release. A job
-    # moved onto an arm64 runner without it fails; the owner's own job moved there passes.
+    # Issue #1048 amendment 2: an AArch64 job (#1017) must carry the G5 owner in release.
+    # `aarch64-release` does, in its own step; dropping, filtering, demoting or conditioning that
+    # step fails, and the owner's own job moved onto an arm64 runner passes.
+    aarch64_g5 = ("      - name: G5 class-A corpus on arm64 (the native owner, #1048)\n"
+                  "        run: cargo test --locked --release -p wasm-gates --features math/lane\n")
+    workflow_mutation_fails("qualification.yml", aarch64_g5, "")
     workflow_mutation_fails(
-        "qualification.yml",
-        "    name: DSP crates debug tests\n    needs: route\n"
-        "    if: needs.route.outputs.route == 'full'\n    runs-on: ubuntu-24.04\n",
-        "    name: DSP crates debug tests\n    needs: route\n"
-        "    if: needs.route.outputs.route == 'full'\n    runs-on: ubuntu-24.04-arm\n",
+        "qualification.yml", aarch64_g5,
+        aarch64_g5.replace("--features math/lane\n",
+                           "--features math/lane -- --skip g5_native_digests_match_pins\n"),
+    )
+    workflow_mutation_fails("qualification.yml", aarch64_g5,
+                            aarch64_g5.replace(" --release", ""))
+    workflow_mutation_fails(
+        "qualification.yml", aarch64_g5,
+        aarch64_g5.replace("        run:",
+                           "        if: needs.route.outputs.math_closure == 'true'\n        run:"),
     )
     root = workspace()
     try:

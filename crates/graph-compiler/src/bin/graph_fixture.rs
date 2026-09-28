@@ -3,9 +3,11 @@
 //! Generates, verifies, or fingerprints the checked-in issue-006 graph fixtures.
 //!
 //! The fixture plan is compiled the way every host compiles one: through
-//! [`GraphCompiler::compile_with_builtins`] at the build's own [`Backend::current`], so the
-//! checked-in canonical text, Graphviz rendering and resource report describe a plan with its
-//! builtin banks attached (#963). The checked-in corpus is regenerated with
+//! [`GraphCompiler::compile_with_builtins`], so the checked-in canonical text, Graphviz rendering
+//! and resource report describe a plan with its builtin banks attached (#963). It is compiled at
+//! the eight-lane launch width, [`Backend::Simd8`], on every host: the corpus is one plan, and a
+//! four-lane AArch64 build (#1017) must verify that plan rather than generate its own. The
+//! checked-in corpus is regenerated with
 //! `cargo run -p graph-compiler --bin graph_fixture -- --write` and verified byte for byte by
 //! this binary's `checked_in_fixtures_are_the_generated_bytes` test (#947) and by `--check`.
 
@@ -112,9 +114,10 @@ fn compile_fixture() -> PreparedGraphBuiltinsArtifact {
     )
     .unwrap_or_else(|diagnostics| panic!("builtin diagnostics: {diagnostics:?}"));
     GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
-        // The width this build renders at, as every host compiles (#963). Native x86-64 is pinned
-        // to x86-64-v3 at compile time, so this is `Simd8` wherever the fixtures are checked.
-        dispatch: Backend::current(),
+        // The eight-lane launch width, named rather than read from `Backend::current()`: the
+        // checked-in corpus describes one plan, which a four-lane AArch64 build (#1017) verifies
+        // byte for byte like the x86-64-v3 build does.
+        dispatch: Backend::Simd8,
         plan_id: 0,
         effects: EffectPreparedSession {
             session,

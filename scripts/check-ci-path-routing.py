@@ -362,6 +362,73 @@ def check_qualification_v8_spill(text: str) -> None:
             "spill gate reads it")
 
 
+AARCH64_JOBS = {
+    "aarch64-debug": "bash scripts/run-aarch64-tests.sh debug",
+    "aarch64-release": "bash scripts/run-aarch64-tests.sh release",
+}
+AARCH64_TARGETS = ("aarch64-apple-ios", "aarch64-linux-android")
+CROSS_TARGET_SCRIPT = "scripts/check-cross-targets.sh"
+
+
+def check_qualification_aarch64(text: str) -> None:
+    """Issue #1017: native AArch64 (iOS and Android arm64) is a product target. Its two test jobs
+    run on arm64 hardware on every full route and the verdict expects them to succeed there, and
+    cross-target installs both mobile targets for the compile rows. Any of these drifting would
+    drop the mobile target out of the required workflow with every remaining job green."""
+    for name, command in AARCH64_JOBS.items():
+        block = job(text, name)
+        require("    runs-on: ubuntu-24.04-arm\n" in block,
+                f"qualification.yml: {name} must run on the ubuntu-24.04-arm runner")
+        require("    if: needs.route.outputs.route == 'full'\n" in block,
+                f"qualification.yml: {name} must run on every full route")
+        require(f"        run: {command}\n" in block,
+                f"qualification.yml: {name} must run `{command}`")
+        variable = result_variable(name)
+        require(f'check {name} "${variable}" "$full_expected"' in job(text, "verdict"),
+                f"qualification.yml: the verdict must expect {name} to succeed on the full route")
+    cross = job(text, "cross-target")
+    require(f"        run: bash {CROSS_TARGET_SCRIPT}\n" in cross,
+            f"qualification.yml: cross-target must run {CROSS_TARGET_SCRIPT}")
+    install = next((line for line in cross.splitlines() if "rustup target add" in line), "")
+    for target in AARCH64_TARGETS:
+        require(target in install.split(),
+                f"qualification.yml: cross-target must install the {target} standard library")
+
+
+def check_cross_target_aarch64_rows(root: pathlib.Path) -> None:
+    """Issue #1017: the compile rows are one `aarch64_row <target>` line per mobile target, and the
+    row checks the product crates with --all-targets --all-features and lints them with clippy
+    -D warnings. Deleting a row, or either half of the row, must fail here rather than silently
+    shrink the matrix."""
+    text = (root / CROSS_TARGET_SCRIPT).read_text(encoding="utf-8")
+    lines = text.splitlines()
+    for target in AARCH64_TARGETS:
+        require(f"aarch64_row {target}" in lines,
+                f"{CROSS_TARGET_SCRIPT}: missing the `aarch64_row {target}` compile row")
+    match = re.search(r"^aarch64_row\(\) \{\n(.*?)^\}$", text, re.MULTILINE | re.DOTALL)
+    require(match is not None, f"{CROSS_TARGET_SCRIPT}: missing the aarch64_row function")
+    # One logical line per command: backslash continuations joined, so each flag is checked on
+    # the command it belongs to and never on its neighbour.
+    commands = re.sub(r"\s*\\\n\s*", " ", match.group(1)).splitlines()
+    tail = ' --all-targets --all-features --target "$target" "${product_packages[@]}"'
+    for tool, suffix in (("cargo check", ""), ("cargo clippy", " -- -D warnings")):
+        require(any(tool in command and command.rstrip().endswith(tail + suffix)
+                    for command in commands),
+                f"{CROSS_TARGET_SCRIPT}: aarch64_row must run `{tool} ...{tail}{suffix}` over the "
+                "product crates")
+    # The iOS memset scan (#1018's expected failures): the judge refuses a product crate it has no
+    # count for, so it must be handed the whole product list and must run. Scanning a hand-picked
+    # subset, or dropping the judge, would read a partly fixed defect as fixed.
+    for line, why in (
+        ("printf '%s\\n' \"$product_list\" >\"$asm_out/products\"",
+         "hand the judge every product crate"),
+        ('"${known_defects[@]}" judge-memset "$asm_out/counts" "$asm_out/products" ||',
+         "judge the per-crate counts"),
+    ):
+        require(line in lines,
+                f"{CROSS_TARGET_SCRIPT}: the ios-asm-memset-pattern16 scan must {why} (`{line}`)")
+
+
 # Cargo target selectors that would leave `wasm-gates`' integration tests, and with them
 # `g5_native_digests_match_pins`, out of a `cargo test` invocation.
 NON_INTEGRATION_TARGET_SELECTORS = (
@@ -492,6 +559,7 @@ def check_qualification_workflow(root: pathlib.Path) -> None:
     check_qualification_route_job(text)
     check_qualification_closures(text)
     check_qualification_v8_spill(text)
+    check_qualification_aarch64(text)
     check_qualification_native_g5(text)
     check_qualification_aarch64_g5(text, names)
 
@@ -539,6 +607,7 @@ def check(root: pathlib.Path) -> None:
     check_retired_workflows_absent(root)
     check_classifier_contract(root)
     check_qualification_workflow(root)
+    check_cross_target_aarch64_rows(root)
     check_nightly_budgets(root)
 
 
