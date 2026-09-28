@@ -459,3 +459,112 @@ invocation set was discarded: the load rose from 7.4 to 13.3 during it, and the 
   identity sections, so the merge must keep the direct read here or refresh the cache after a
   ramping block.
 * M3, M7 and M8 are red only in the structural gates, by construction.
+
+## Sol attempt 1 verdict: PASS
+
+Verifier: Sol, 2026-09-28, on `e6be0c0a`, judged merged onto the batch head `ecadb646` (#1014 and
+the #1015 spec on top of `27cf2413`). The merge is clean, and the batch changed only the limiter
+since the branch's merge. Every arm was built from `git archive` in its own target,
+`CARGO_INCREMENTAL=0`, outside the lock.
+
+**Exact (class A).** A skipped section is the identity on every lane of both channels with no lane
+in flight, so its `identity` flag is fresh. Executing such a section would leave its inert state
+where it is (leg (b)).
+
+- **Its output.** A dead cut returns `x` through its all-dry select; a dead band returns `x` except
+  that it turns `-0.0` into `+0.0`.
+- **No `-0.0` can reach it.** Leg (a) keeps it out of the input. A safe ramp (`m0 = 1.0`, `+0.0`
+  step on every lane) cannot emit a `-0.0` from any state, since `(m1*v1 + v0)` and the outer sum
+  are `-0.0` only when both addends are. An unsafe ramp keeps every later dead section. A settled
+  live section falls under the stationary proof, whose high-shelf case needs kernel-written states:
+  that is what the flush-shaped leg (c) restores.
+- **Non-finite words.** One arriving at a dead section leaves that lane non-finite in both arms, so
+  §4.4 zeroes and resets both.
+
+**My differential** runs through the public surface against `ecadb646`.
+
+- **Coverage.** It adds a shape aimed at this change: a -6.0206 dB high shelf with restored
+  `+-2^-149` integrators and `-2^-149` input, while the HPF toggles on one or both channels every
+  other block (a safe ramp). Across the scenarios, cut and band ramps start, end and cross blocks of
+  1-128 frames, sections enter and leave the identity, extreme states are restored, and banks run
+  dual, collapsed and transitioning. Native release saw 1.85M ramping blocks with a shortened list.
+
+| build | differing runs |
+|---|---|
+| native release | 0 of 140,000 |
+| native dev (debug asserts on) | 0 of 8,400 |
+| wasm `simd128` release (V8, `Simd4`) | 0 of 28,000 |
+| wasm `simd128` dev | 0 of 1,400 |
+
+- **M8 check.** With M8 (the stationary leg (c) in the ramping lists), 7,371 runs differ, all in the
+  new shape: the harness does reach the subnormal hazard.
+- **Output identity.** The implementer's V8 check (`DIGEST=150`) is identical for `eq_gain`,
+  `mono_eq`, all-six stereo and all-six mono across four arms.
+
+**Gates.** All green on the merged tree:
+
+- `-p parametric-eq` 117 passed and 3 ignored, dev and release, with and without `test-support`
+  (the `ramping_elision` gates included);
+- `-p lane` 70; console-workload dev and release, `eq_ramping_scenario` and `chain_shape` included;
+- builtins-compiler, `wasm-gates` tests, bench floor, `mono_collapse`, rack;
+- fmt, clippy and doc `-D warnings`;
+- every policy script and `test-console-benchmark.sh`;
+- `run-wasm-gates.sh`, spill gate ok: dual tail 109, mono pair 78, mono tail 53.
+
+The roster and rule 3 (15 kernels) are identical to the head, and so are the three callgraphs.
+
+**Headline timing reproduces.** V8, `web_auto.mjs`, `ROUNDS=6 BLOCKS=500`, load about 4. Extra
+cost over settled:
+
+| session | arm | head | change |
+|---|---|---:|---:|
+| stereo | one lane | +9.85 | +2.95 |
+| stereo | 8 of 64 | +64.67 | +11.20 |
+| stereo | all 64 | +146.0 | +38.21 |
+| mono | 8 of 64 | +30.10 | +3.87 |
+| mono | all 64 | +73.09 | +20.28 |
+
+Settled isolate: stereo 21.80 → 21.97 us, mono 100.88 → 100.84.
+
+**The masked pair's extra slot.** Across all 14 EQ loops, the only allocation change is the dual
+masked pair (11 → 12 carried slots, 216 → 215 instructions); the masked mono tail grows 54 → 56
+with none carried. I measured the shapes it serves through the shipped artifact: 16 paired
+invocations under the lock, load 4-8, arms in both orders, all six sections live on 64 tracks.
+
+| row | change | 95 % CI | runs lower |
+|---|---|---|---|
+| dual isolate | -0.95 us (-1.1 %) | [-1.22, -0.67] | 16/16 |
+| mono isolate | +0.26 us (+0.8 %) | [+0.08, +0.45] | 2/16 |
+| mono row | +0.11 us | not significant | |
+
+So the extra slot costs nothing measurable and the dual masked row is faster. The "+-4 us noise"
+figure was too wide: the effects are well below 1 us. In the V8 bank bench (four runs), refused
+blocks, which run the same masked pairs, are -4.7 % dual and +0.2 % mono, and six-live is -4.2 % dual
+and -0.1 % mono.
+
+**#1015 is confirmed, and option 1 is the sound fix.**
+
+- **Reproduction.** On `ecadb646` (in-crate, scratch): a high shelf at -6.0206 dB designs to
+  `m0 = m2 = 0.5`. With restored `ic1 = ic2 = -2^-149` and input `-2^-149`, the elided cascade
+  renders `0x80000000` and the full one `0x00000000`, at `f32`, `Simd4` and `Simd8`, dual and mono.
+  Input `+2^-149` and normal inputs agree.
+- **Option 1** (the flush-shaped leg (c)) closes it: the same probe refuses (six kept) and matches.
+  It restores exactly the premise the proof uses, namely kernel-written states, and costs a leg (c)
+  bit test. I recommend it.
+- **Option 2 is weaker.** Refusing sub-`FLUSH_EPS` integrators at restore changes which payloads
+  the contract accepts, and it breaks #979's gate 3, which restores `1e-30` and the word under the
+  floor and expects success. Flushing at restore silently changes restored state, and so the
+  first frame's bits against today's full cascade.
+
+Findings:
+
+1. **LOW.** The collapsed all-six-live isolate is +0.26 us (+0.8 %) in the shipped artifact. That is
+   real but small; the row is not significantly slower. Not blocking.
+2. **INFO (merge order with #998).** #998 marks its leg (b) cache stale in `process_block`, and this
+   change's ramping arm no longer calls `process_block`. So whichever of the two lands second must
+   mark both channels stale (the dual arm) or the one channel (mono) on every ramping block. The
+   list's `process_section` ends ramps, which changes identity flags, and executes identity sections
+   that can flush a restored word. The ramping lists should keep scanning leg (b), or refresh a
+   stale cache before they read it.
+3. **INFO.** The in-crate differential (deviation) is accepted. The public-surface differential
+   above covers the product path.
