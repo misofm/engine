@@ -418,3 +418,119 @@ There are no semantic conflicts:
   caused by this change (next item).
 - **AudioWorklet module.** It is byte-identical on base and merge (`f7bd75ca…`). The pin
   (`476e58ad…`) is the batch boundary's to refresh.
+
+## Attempt 2 evidence
+
+Implementer attempt 2 (Terra), 2026-09-28, on the same branch.
+
+Commits:
+- `863df03d`: merge of the batch head `92ef396f`.
+- `d788e613`: the drain port and the LOW fixes.
+- `0e92893b`: the env-vocabulary suite re-pointed at the moved runner.
+
+No timed workload ran.
+
+### Merge of `codex/batch-slim-1` (`92ef396f`)
+
+Each of the six conflicts was resolved by keeping both issues' removals:
+
+- `tools/bench/src/input_symmetry.rs` was deleted here and edited by #1024. It stays deleted.
+- `tools/bench/src/main.rs` keeps neither side's subjects: #1026 retired graph, rack and builtins, and this issue retired the other four.
+- `scripts/check-builtins-targets.sh` was deleted by #1026 and had a comment edit here. It stays deleted.
+- `scripts/check-cross-targets.sh`: one comment now names both retired wrappers.
+- The `qualification.yml` lint job keeps the reachability step. #1026's rack and builtins-current lines and this issue's kernel-timing line are all gone.
+- `test-env-vocabulary.sh` pins the merged tree's documented-name count, 97.
+
+`cargo check --locked --workspace --all-targets --all-features` passes on the merge.
+
+One break only showed after the merge. #1026 had pointed `test-env-vocabulary.sh`'s injections at `scripts/run-console-benchmark.sh`, and this issue moved that runner, so the suite failed with "env checker unexpectedly succeeded". `0e92893b` points its five occurrences at `scripts/operator/run-console-benchmark.sh`, which the checker still scans, and the suite passes.
+
+### HIGH: the full-capacity drain, ported
+
+The new test is `crates/builtins-compiler/tests/input_drain.rs` `a_block_drains_every_input_record_queued_at_its_entry`. It is gated on `test-support` and runs in test-debug-a.
+
+It runs on two fixtures:
+- the SIMD fixture (`test_only_prepared_pair_graph`, capacity 8), whose eight-lane cohort and one-lane tail both use `BuiltinBankProcessor::begin_block`;
+- the scalar-dispatch fixture, which uses `ConsoleInputProcessor::process`.
+
+What it does:
+1. Fill every track's queue to capacity with a walk of immediate trims ending at -40 dB. A further push must be refused.
+2. Render one block.
+3. Refill, ending at -20 dB. By now the ring's cursors have wrapped.
+4. Render a second block.
+
+What it asserts:
+- **Applied:** each block's bits equal those of a twin that was sent only that block's last record.
+- **Non-trivial:** a third, uncommanded twin differs, so a trim is visible in the output.
+- **Nothing pending:** after each block, every queue accepts another full capacity of records.
+
+Each mutation below was applied to a saved copy, then restored and checked with `cmp`.
+
+| mutation | result |
+|---|---|
+| Sol's: banked drain `for _ in 0..available.min(2)` (`lib.rs:451`) | red: `banked block 0: the block did not apply every queued record` |
+| the same cap on the scalar drain (`lib.rs:4147`) | red: `scalar block 0: …` |
+| Sol's cap, with the bits assertion removed | red on the pending check alone: `banked t00: a record from before the block is still pending` |
+| `available_at_entry` reads a wrapped count as empty (`spsc.rs`, wrapped branch returns `0`) | red: `banked block 1: …`; also `engine` `available_at_entry_is_bounded_and_handles_wrapped_cursors` |
+| none (restored) | green |
+
+### The other matched claims, checked against their bounds
+
+For each claim below, I asked what bound the retired test enforced. Then I applied a mutation that breaks only that bound, and listed which surviving tests (not my ports) go red. The runs were `--no-fail-fast` on saved copies, each restored and checked with `cmp`.
+
+| retired claim | its bound | mutation | surviving tests red |
+|---|---|---|---|
+| `owners_are_w8_nonzero_and_phase_results_match` | 4,608 blocks of 8 records each, so the queues cycle through thousands of ring wraps; and independent preparations agree | wrapped count read as empty (above) | `engine` spsc wrap test, plus this port's second block. Independent-preparation bit equality is asserted by `input_liveness_console.rs:538`, `:242` and this port. The frozen 4,608-block digest is not re-pinned: it is a change detector over the trim ramp, which the host-core port pins |
+| `gate_active` preflight, loud plateaus | the gate opens: output/input > 0.9 | `target = curve` (the open state ignored, `kernel.rs:245`) | `oracle_pcm_within_derived_tolerance_scalar`, `…_w8`, `every_case_agrees_at_every_width_and_matches_its_pin`, `production_hold_is_k_plus_one_and_retrigger_is_current_sample` |
+| `gate_active` preflight, quiet plateaus | < 0.01 and nonzero | range clamp removed | attempt 1's port (`contract.rs`), red |
+| `multiband_active` preflight | both bands compress: band-gain witnesses < -3 dB | high band summed uncompressed (`lib.rs` near-channel `high_near.mul(amplitude_near_high)` becomes `high_near`) | `active_causal_oracle_engages_releases_and_starts_on_current_sample`, `isolated_low_and_high_band_compression_reduce_only_the_selected_band` (and the dual-mono port) |
+| `multiband_active` `descriptor_has_all_frozen_active_values` | 11 parameters × 2 channels | not run | `product.rs:50` asserts the exact list of parameter IDs, so any addition or removal breaks it |
+| `prepared_effect_allocations` `banks64_…` (non-bypass half) | at scale, every full group binds and the tail falls back | `bind_group_banks` binds only group 0 (`banks.rs`, `if group_index > 0 { return Ok(bound) }`) | 29 tests across graph-compiler and rack-compiler, including `console_sixty_four_track_fixture_banks_its_dynamic_compressor_bit_identically`, `mixed_twelve_track_plan_binds_renders_full_banks_and_scalar_tails_without_graph_changes` and `the_sixty_four_track_console_less_one_eq_binds_at_every_width`. rack-compiler's 200-case randomized `single_slot_programs_reproduce_exact_equal_chunking` holds the chunking |
+| `prepared_effect_allocations` `crossed_small_…` (order half) | the entry order it asserted comes after the subject's own `reverse()` | not applicable | this is a harness fact. The product claim, that membership does not depend on entry order, is `bank_membership_is_independent_of_entry_order` |
+
+Only `separate_capacity_sixteen_…` had the weakness Sol found: a surviving test that exercises the path but not the bound.
+
+### LOW fixes
+
+- The attempt 1 evidence is corrected in place, and each correction is marked "attempt 2 correction":
+  - 17 bench tests + 5 audit tests = 22;
+  - 17 digest lines;
+  - docs and CI = 50 lines (`ENGINE_ENV_VOCABULARY.md` -49, `qualification.yml` -1);
+  - the step-vocabulary note now says the batch head already fixed it.
+- The host-core port's doc now describes the oracle as a linear ramp restarted each block, with one step `(target - g0) / 256` added per frame.
+
+### Test lists (gate 5)
+
+I compared `cargo test --locked --workspace --all-targets --all-features -- --list` on the batch head (`92ef396f`, built in my own scratch worktree and target directory) against `0e92893b`:
+
+- **Left:** exactly 26 tests. They are 17 bench-subject tests, 5 audit-subject tests, `mq1_transient_shaper_ns_per_lane_sample` and the 3 `bench_ramp` tests. Every one is defined in a deleted file.
+- **Arrived:** exactly 7 tests, the six ports and `a_block_drains_every_input_record_queued_at_its_entry`.
+- Nothing else changed.
+
+### Gates (on `0e92893b` unless noted)
+
+| gate | result |
+|---|---|
+| `cargo check` / `clippy -D warnings`, `--workspace --all-targets --all-features`; `cargo fmt --check` | pass |
+| wasm `+simd128` check of `host-web` | pass |
+| test-debug-a's full command | pass (1,448; the new port included) |
+| test-debug-b's full command | pass (809) |
+| test-release (`-p lane -p math -p wasm-gates --features math/lane`, release) | pass (115) |
+| audit-native (`-p audit -p bench -p console-workload`, release) | pass (134) |
+| `gain_pan_profile digests` | 17 digest lines byte-identical to the batch head |
+| `bash scripts/run-wasm-gates.sh` | pass |
+| shipped module, `--module-only` on the batch head and on the change | byte-identical, `f7bd75ca…`, which equals the batch's new pin |
+| every `scripts/check-*.sh` (41 after the merge) | 40 pass; `check-sdk-types.sh` exits 2 because `sdk/node_modules` is absent (it needs `npm ci`). `check-web-audioworklet.sh` and `check-sdk-headless.sh` now pass against the refreshed pin |
+| every argument-free `scripts/check-*.py` | all 10 pass, including `check-step-vocabulary.py`, `check-script-reachability.py` (155 reached, 8 operator files exempt) and `check-ci-path-routing.py`. The other 6 require arguments |
+| `test-ci-path-routing.py`, `test-console-benchmark.sh`, `test-bench-policy.sh`, `check-/test-env-vocabulary.sh` (97 names), `test-script-reachability.py` | pass (`test-env-vocabulary.sh` after `0e92893b`) |
+| router, `--base codex/batch-slim-1 --head HEAD` | `route=full`, `math_closure=false`, `release_inputs=true` |
+
+### Totals against the current batch head
+
+127 files changed, +1,403 / -17,348 lines. The additions include this evidence and Sol's verdict.
+
+| deleted | files | lines |
+|---|---|---|
+| scripts | 22 | 4,535 |
+| Rust files | 7 | 4,057 (#1024 had shortened `input_symmetry.rs` by 3 lines) |
+| artifacts | 68 | 8,298 |
