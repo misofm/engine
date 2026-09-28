@@ -677,6 +677,21 @@ def main() -> int:
         "target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm\n",
     )
 
+    # #1048 review finding 2: the V8 pairing is found by token, so reordering the flags cannot
+    # slip the spill leg out of CI once artifact-gates stops running it.
+    root = workspace()
+    try:
+        workflow = root / ".github/workflows/qualification.yml"
+        mutate(workflow, "bash scripts/run-wasm-gates.sh --without-v8-spill --without-native\n",
+               "bash scripts/run-wasm-gates.sh --without-native --without-v8-spill\n")
+        mutate(workflow,
+               "          python3 -B scripts/check-web-audioworklet-v8-spill.py "
+               "target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm\n",
+               "")
+        checker_fails(root)
+    finally:
+        shutil.rmtree(root)
+
     # Issue #1048: wasm-guests leaves run-wasm-gates.sh's native leg to test-release's G5 Rust
     # test, so test-release must run wasm-gates' tests in release, unfiltered, unconditionally and
     # on the same route.

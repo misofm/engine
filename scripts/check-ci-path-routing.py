@@ -351,7 +351,7 @@ def check_qualification_v8_spill(text: str) -> None:
     wasm = job(text, "wasm-guests")
     require("bash scripts/run-wasm-gates.sh" in wasm,
             "qualification.yml: wasm-guests must run scripts/run-wasm-gates.sh")
-    if "run-wasm-gates.sh --without-v8-spill" not in wasm:
+    if "--without-v8-spill" not in run_wasm_gates_flags(wasm):
         return
     gates = job(text, "artifact-gates")
     require(V8_SPILL_ARTIFACT_LINE in gates and ARTIFACT_PIN_STEP in gates,
@@ -375,14 +375,14 @@ def job_if(job_text: str) -> str | None:
     return match.group(1).strip() if match else None
 
 
-def unconditional_step_commands(job_text: str) -> list[str]:
-    """Every shell command line of the job's steps that carry no step-level `if:`, with `\\`
-    continuations joined. Enough YAML for this workflow's fixed shape, as the rest of the checker
-    is."""
+def step_commands(job_text: str, conditional: bool = True) -> list[str]:
+    """Every shell command line of the job's steps, with `\\` continuations joined; with
+    `conditional=False`, only the steps that carry no step-level `if:`. Enough YAML for this
+    workflow's fixed shape, as the rest of the checker is."""
     commands: list[str] = []
     for step in re.split(r"^      - ", job_text, flags=re.MULTILINE)[1:]:
         lines = step.splitlines()
-        if any(line.strip().startswith("if:") for line in lines):
+        if not conditional and any(line.strip().startswith("if:") for line in lines):
             continue
         for index, line in enumerate(lines):
             stripped = line.strip()
@@ -397,6 +397,26 @@ def unconditional_step_commands(job_text: str) -> list[str]:
             elif stripped.startswith("run: "):
                 commands.append(stripped[len("run: "):])
     return commands
+
+
+def unconditional_step_commands(job_text: str) -> list[str]:
+    return step_commands(job_text, conditional=False)
+
+
+def run_wasm_gates_flags(job_text: str) -> set[str]:
+    """The options any invocation of `run-wasm-gates.sh` in the job passes, as tokens, so a leg the
+    job leaves out is found whatever the flag order (#1009's and #1048's pairings)."""
+    flags: set[str] = set()
+    for command in step_commands(job_text):
+        try:
+            words = shlex.split(command)
+        except ValueError:
+            words = command.split()
+        for index, word in enumerate(words):
+            if word.endswith("run-wasm-gates.sh"):
+                flags.update(following for following in words[index + 1:]
+                             if following.startswith("--"))
+    return flags
 
 
 def runs_g5_native_test(command: str) -> bool:
@@ -424,7 +444,7 @@ def check_qualification_native_g5(text: str) -> None:
     `test-release`, filtering its tests or making the step conditional would take the native digest
     comparison of every cross-target corpus out of CI with every job green."""
     wasm = job(text, "wasm-guests")
-    if "run-wasm-gates.sh" not in wasm or "--without-native" not in wasm:
+    if "--without-native" not in run_wasm_gates_flags(wasm):
         return
     release = job(text, "test-release")
     require(any(runs_g5_native_test(command) for command in unconditional_step_commands(release)),
