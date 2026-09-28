@@ -163,3 +163,51 @@ was written to the tree and no seal file was produced.
 * `python3 scripts/test-ci-path-routing.py` leaves an untracked, unignored `scripts/__pycache__/`.
   That makes the clean-tree preconditions of the operator scripts refuse until it is removed. It was
   removed by hand before the gate 1 runs.
+
+## Sol attempt 1 verdict: PASS
+
+Reviewer: Sol, 2026-09-28, on `4f5b584e` (work `0b83d0f5`). No timed workload was launched.
+
+**Repair.** All seven `scripts/operator/*.sh` now compute `../..`. Every repository path that the
+seven scripts name exists, apart from placeholders and outputs they create themselves. No other
+file names a pre-#319 operator path, except one Rust doc comment
+(`tools/wasm-gates/src/lib.rs:527`). The runner-hash fix is proven end to end. In a disposable
+clone with `artifacts/mono3/` removed, `preflight-wasm-console-benchmark.sh --mono3` ran to
+`PASS (workload launches 0)` in 5 min 14 s. It emitted 24 fields, none of them empty, and
+`runner_sha256` = `5af27a49…`, which equals `sha256sum scripts/operator/run-wasm-console-benchmark.sh`.
+In the same clone with `artifacts/issue038/` removed, `preflight-rack-benchmark.sh` ran to exit 0
+with `workload_launches: 0`, and every hash field was populated.
+
+**Gate 1.** I ran each script from the scratchpad as the working directory, on a clean worktree.
+Every run matched the table above. The rack preflight, both wasm console scripts, kernel timing and
+the console preflight each stopped at their artifact-exists guard. The listening script passed
+`check-builtins-listening.sh`, then refused the dummy source. The seal script built the artifact
+and passed its three checks, then stopped at `/usr/bin/false --version`. No seal was written.
+The tree stayed clean.
+
+**Gates 2 and 3.** These all pass: `check-bench-policy.sh` (0.25 s), `test-bench-policy.sh`
+(11.1 s, up from 7.4 s at `d70956bf`), `check-ci-path-routing.py`, `test-ci-path-routing.py`, and
+`check`/`test-workspace-policy.sh` and `-env-vocabulary.sh`. The router sends any
+`scripts/operator/**` path to `full`, so lint runs the rule. I ran the new check against the
+`d70956bf` tree with each script reverted in turn. The six broken scripts are red and the
+already-fixed `preflight-console-benchmark.sh` is green. The diff touches `scripts/` and this spec
+only.
+
+**Vacuity probes.** Each of these fails:
+- `git rev-parse` or `${BASH_SOURCE%/*}` as the only root, and a new script without a root: "computes no root".
+- `dirname "$0"`, `realpath`, a two-line `here=` form, `${ROOT:-…/..}`, a new `/..` script, a symlink to a `/..` script, CRLF with `/..`, a good line only in a comment, and a `[workspace]` header that is commented or indented.
+
+A symlinked script or a symlinked `scripts/operator/` resolves as it would at runtime.
+
+**Findings. None blocks the gates.**
+1. The `operator_script_count >= 7` floor in `test-bench-policy.sh` will turn lint red when #1026,
+   #1027 or #1039 deletes an operator script in this batch. Each of them must lower it. Better
+   still, replace it with a non-empty check, because the loop already walks the real glob.
+2. `operator_line` is not reset after the `Cargo.toml` loop, which exits holding `[workspace]`.
+   A directory named `*.sh` that sorts first (`aaa.sh`) makes `read` fail forever, flooding stderr
+   (59 MB in 10 s) until the job times out. If it sorts last, the check fails cleanly. The rule
+   fails in this case, so the pass is never vacuous. It is still a hang.
+3. The spelling match is unanchored, so `$(…/../.. && pwd)/scripts` passes. A second own-location
+   spelling that avoids `dirname` (for example `${BASH_SOURCE[0]%/*}/..`) is not inspected when a
+   canonical line also exists. Nested directories (`scripts/operator/sub/*.sh`), `.bash` files and
+   extensionless scripts are outside the `*.sh` glob. All of these are contrived or out of scope.
