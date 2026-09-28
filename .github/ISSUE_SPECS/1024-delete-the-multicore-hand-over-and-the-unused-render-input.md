@@ -346,3 +346,84 @@ With `TMPDIR` set, a second run in the same `TMPDIR` starts from a stale count a
 policy mutation escaped: allocator-owner-sort-error". My change run hit this after the base run
 had used the same `TMPDIR`. It passed once the stale files (mine) were removed. CI is unaffected
 (no `TMPDIR`, fresh runner). It is worth a one-line fix in a tooling issue.
+
+## Sol attempt 1 verdict: PASS
+
+Verifier: Sol (Claude Opus 5.5), 2026-09-28. `codex/1024-multicore-handover-render-input` was merged
+(clean, no conflicts) onto the current `codex/batch-slim-1` head `b8bea8e1` in a scratch worktree,
+and every gate below ran on that merge. The base was `b8bea8e1` itself; its only drift from
+`ed0556a9` is docs (#1055's findings and the R6 sub-rulings). `CARGO_INCREMENTAL=0` throughout.
+While the gates ran, the batch moved to `7d0d4adf` (#1025). That change touches docs and two
+console-benchmark shell scripts, and no Rust. `git merge-tree` against it is clean.
+
+1. **No live user of the render input.** Every host passed `input: None`, and the only plan
+   constructors set `input_channels: None`. The C entry `miso_engine_v1_render_f32_planar` has no
+   input planes. The engine's AudioWorkletNode is `numberOfInputs: 0`. `host-mobile` has no render
+   code, and `fuzz/` does not touch render. `InputShape` had no host-visible code: capi mapped it
+   to `PLAN_REJECTED` through `_`, and no JS or SDK string names it. The SDK's PCM feed worklet
+   carries decoded source chunks, not engine input. This matches
+   `product-scope-stems-for-mixing.md` (no capture path in the engine, hosts or SDK), so no product
+   path is lost. `reserve_replacement`, `epoch`, `commit`, `next_absolute_sample` and
+   `render_contiguous` are kept (Amendment 3).
+2. **The -56 re-pin is exact.** It was measured with a size probe on both trees (x86-64):
+   - `RenderEnvelope` 24 to 16;
+   - `PreparedRenderPlan` 120 to 112;
+   - `capi::Plan` 416 to 400 (active plan and pending candidate);
+   - `capi::Session` 6,456 to 6,448.
+
+   The rings have capacity 1 and so 2 slots each. `PublishedPlanMirror` goes 136 to 128 and
+   `RetiredPlanMirror` 128 to 120, so the rows move by -16, -16, -16 and -8, for -56 in total.
+   `resource_lifecycle` passes on the merge.
+3. **The render-path change is benign.** Both `--module-only` builds reproduce the recorded
+   hashes (`3f744b03…25da` and `f7bd75ca…b75d`).
+   - **Instruction changes.** A per-function `wasm-objdump -d` diff (keyed by symbol, calls
+     compared by name) finds exactly two instruction-level changes on the render path:
+     `render_inner` loses the input-shape branch and the input copy into the executor call, and
+     `render_next` loses the `None` store.
+   - **`GraphExecutor::render`.** It differs only by a consistent local-index bijection (one
+     parameter fewer), `GraphExecutor` field offsets (`source_set` embeds a `RenderEnvelope`),
+     static `.rodata` shifts and `RenderError` discriminants.
+   - **Discriminants.** The processors reached through `call_indirect` differ only in the
+     discriminant renumbering (`TimeOverflow` 4 to 3, `Buffer` 6 to 5), and panic helpers in
+     table indices.
+   - **Everything else.** Every other instruction change is control-plane: prepare, bind, compile,
+     drop glue and `Debug`.
+   - **Full `check-web-audioworklet.sh` passes on both modules.** It ran on a seven-file set
+     assembled exactly as the build script does, less its pin gate. The six sidecars are
+     byte-identical. The render closure (8 functions, 5 traps), `meter_poll` (9, 2),
+     `command_submit` (39, 77) and the kernel shape are unchanged.
+   - **`audit capi`.** The record is byte-identical to the base: 0 allocations, syscalls and
+     violations, and the inline validator passes.
+   - **Realtime audits.** `trace-realtime-audit.sh` (1,000,000 blocks), the realtime, builtins
+     and builtins-graph probes, the builtins, graph, source and protocol traces, and
+     `check-capi-abi.sh` (and `--self-test`) pass.
+4. **The test lists differ by exactly one test.** On four sets (test-debug-a, test-debug-b,
+   `--workspace --all-targets --all-features`, and release audit/bench/console-workload), the only
+   change is the removal of
+   `engine::realtime::tests::enter_block_moves_the_executor_handover_and_returns_a_refused_one`.
+   Its subject was the removed hand-over.
+5. **The gates pass on the merge.**
+   - **Lint:** fmt, clippy `-D warnings`, `cargo check --all-targets --all-features` and doc
+     `-D warnings`.
+   - **wasm32:** simd128 and scalar `cargo check` of host-web and host-core.
+   - **aarch64-apple-ios and aarch64-linux-android:** clippy `-D warnings` over the workspace libs
+     (the four C-toolchain crates excluded), and `cargo check --all-targets` of lane, engine,
+     host-core, capi, source, graph, soft-clip and host-mobile. The only warnings are the
+     pre-existing x86-gated test bodies, as on the base (#1017).
+   - **Loom** passes.
+   - **Tests:** test-debug-a 1,525, test-debug-b 807, `cargo test --workspace` 2,532, release
+     audit/bench/console-workload 176, and `-p engine -p capi` 80, with 0 failures. The
+     `host-native` smoke run passes.
+   - **Console digests:** all 17 rows are identical to the base.
+   - **`run-wasm-gates.sh`** passes, including the V8 spill gate. `wasm-gates.jsonl` is
+     byte-identical to the base.
+   - **Policy:** all 67 lint-job and routing invocations pass, including
+     `check-browser-expected-resources.py` (no browser re-pin needed), `check-sdk-generated.sh` and
+     `test-web-audioworklet.mjs`.
+
+Non-blocking nits:
+
+- Two engine test calls keep a stray trailing comma, `render_contiguous(RenderIo { output }, 4,)`
+  and `(…, 0,)`, in `realtime/mod.rs`. rustfmt accepts them.
+- `--callgraph` walks direct calls only, so the executor's `call_indirect` subtree is outside its
+  closure. That limitation predates this change; the diff above covered that subtree instead.
