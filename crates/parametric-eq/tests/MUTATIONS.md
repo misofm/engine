@@ -311,3 +311,36 @@ Gate 2 is green under M2, M3 and M4 (a switched-off band's frozen state is alway
 under M1-M3 (the fixtures never restore a sub-`FLUSH_EPS` or `-0.0` word); each row is caught by the
 gate built for it. On the unmodified base gate 2 reports 0 of 9 at every width and section, in dev
 and release; after the change, 9 of 9.
+
+## Issue #1005 — a ramping block runs only live or ramping sections
+
+Driver: one mutation at a time applied to `ramping_sections`, `ramping_sections_mono` or
+`ramp_keeps_unit_m0` in `src/lib.rs`, then `cargo test -p parametric-eq --lib ramping_elision`
+(dev: 40 scenarios × 96 blocks per width and body), tree restored byte for byte between rows. M3,
+M5-dual and M7 were re-run in release (300 scenarios). Gate 1 is the bank differential
+`ramping_elision::a_ramping_block_renders_the_batch_head_bits_{scalar,simd4,simd8}` (dual and
+collapsed; the oracle arm renders ramping blocks through `Channel::process_block`, the batch-head
+path and the unit-test default of the `RAMPING_LIST` switch, which only the candidate arm sets).
+Gate 2 is the list itself,
+`ramping_elision::the_unsafe_ramp_rule_keeps_every_dead_section_after_it` and
+`ramping_elision::a_ramping_identity_section_is_never_dead`, at `f32`, `Simd4` and `Simd8`.
+
+| # | mutation | gate that goes red | result |
+|---|---|---|---|
+| 1005-M1 | leg (a) dropped from both lists (`if false`) | gate 1 at every width (`W8 seed 2 block 10 mono false: left output`, W4 seed 2, W1 seed 23); gate 2 (`a -0.0 input refuses`) | RED |
+| 1005-M1d | leg (a) dropped from the dual list only | the same as M1 | RED |
+| 1005-M1m | leg (a) dropped from the collapsed list only | gate 1 collapsed at every width (`W1 seed 4294967305 block 47 mono true: left output`); gate 2 | RED |
+| 1005-M2 | both lists: `dead` without the "not ramping" term (a ramping identity section treated as dead) | gate 1 at every width (`W8 seed 0 block 13: state`, `W1 …: right output`, `W4 …: report`); gate 2 (`LPF toggle`, `the left ramp keeps the HPF`) | RED |
+| 1005-M3 | the unsafe-ramp rule dropped (`unsafe_before` never set) | gate 2 only (`ramping high shelf: the dual list`); gate 1 stays green in dev and in release | RED |
+| 1005-M4 | the collapsed list's `dead` without the "not ramping" term | gate 1 collapsed at every width (`W1 seed 4294967296 block 15 mono true: state`); gate 2 (`the ramp keeps the HPF (collapsed)`, `LPF toggle: the collapsed list`) | RED |
+| 1005-M5 | leg (b) skipped for dead sections in both lists | gate 1 at every width (`… : state`: the executed dead section flushes a restored `-0.0` or sub-`FLUSH_EPS` integrator, the elided one keeps it); gate 2 (`a -0.0 dead state refuses`) | RED |
+| 1005-M5d | leg (b) skipped in the dual list only | gate 2; gate 1 at W8 in dev (`W8 seed 26 block 26 mono false: state`), and at every width in release | RED |
+| 1005-M5m | leg (b) skipped in the collapsed list only | gate 1 collapsed at every width; gate 2 | RED |
+| 1005-M6 | the dual list's `dead` without the "not ramping" term | as M2, dual rows | RED |
+| 1005-M7 | `ramp_keeps_unit_m0` checks `coef.m0` only, not `step.m0` | gate 2 only (`identity to high shelf: the dual list`); gate 1 stays green in dev and in release | RED |
+
+M3 and M7 are the rows the random differential cannot see, as the automation diagnosis found for M3:
+dropping a dead section after an unsafe ramp is wrong only when that ramp emits `-0.0`, which needs a
+constructed underflow the scenarios never produce. Gate 2 exists for them. M7's shape is reachable in
+production -- a high shelf at 0 dB designs `m0 = A^2 = 1` exactly, and a ride away from 0 dB moves it
+-- and gate 2 asserts that shape as well as the identity-to-shelf ramp.
