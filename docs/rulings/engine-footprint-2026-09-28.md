@@ -65,3 +65,4 @@ aim, in the owner's words, is "minimizing the engine footprint".
 * **Decision 5, browser artifact fingerprint:** checked at release; every PR builds the module, runs the artifact gates on it and reports changed/unchanged (#1061).
 * **Decision 6, fat LTO in release test builds:** deferred; measure after the tooling deletions land, then decide (audit draft 11 held).
 * **Decision 7, scalar wasm test builds:** retire once #1017's AArch64 CI job runs, with #1041's scalar-wasm exception (#1062).
+* **Decision 8, leftovers:** remove the `dependency_waves` session token (#1063) and the browser adapter's legacy observation path, after proving nothing uses it (#1064).
