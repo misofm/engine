@@ -52,6 +52,22 @@ done <"$manifest"
 find "$root" -type f ! -name MANIFEST.tsv -printf '%P\n' | sort >"$actual"
 cmp -s "$listed" "$actual" || { printf 'builtins fixture missing/unlisted file\n' >&2; exit 1; }
 
+# #1026 (verification finding F16): `audit builtins-graph` records ACCEPTED_MANIFEST_SHA256 but
+# never compares it with this manifest, and the retired builtins benchmark's manifest-consumer
+# check was the only thing that did. That one consumer is checked here, before any audit run: a
+# manifest change that leaves the constant stale is red. It must be declared exactly once.
+consumer="tools/audit/src/builtins_graph.rs"
+[[ -f "$consumer" ]] || { printf 'missing builtins manifest consumer: %s\n' "$consumer" >&2; exit 1; }
+manifest_sha256="$(sha256sum "$manifest" | awk '{print $1}')"
+accepted_sha256="$(tr '\n' ' ' <"$consumer" |
+    grep -oE 'const ACCEPTED_MANIFEST_SHA256: &str =[[:space:]]*"[0-9a-f]{64}";' |
+    grep -oE '[0-9a-f]{64}' || true)"
+[[ "$accepted_sha256" == "$manifest_sha256" ]] || {
+    printf 'stale or missing builtins manifest consumer: %s ACCEPTED_MANIFEST_SHA256 is %s, the manifest hashes to %s\n' \
+        "$consumer" "${accepted_sha256:-<none>}" "$manifest_sha256" >&2
+    exit 1
+}
+
 # B1: `fixture-builtins --check` is silent on success (it only ever prints on failure), so a
 # stale/wrong binary -- or a stand-in like /bin/true -- exits 0 with nothing to distinguish it
 # from a real pass. Prove the binary actually performs the check: corrupt a scratch copy's first

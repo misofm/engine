@@ -13,9 +13,10 @@
 # scripts/check-builtins-targets.sh and scripts/check-effect-interchange-targets.sh with one script
 # that runs each distinct package/target/feature combination exactly once, under one cached target
 # dir per target triple (`target/ci/cross-target/<triple>`, or under `$CARGO_TARGET_DIR` if the
-# caller has set it). The three original scripts are now thin wrappers that call this one, so any
-# remaining caller by the old name keeps working; scripts/check-parametric-eq-targets.sh's hermetic
-# render-contract half moved to scripts/check-parametric-eq-render-contract.sh instead.
+# caller has set it). The original scripts became thin wrappers that call this one, so any
+# remaining caller by the old name keeps working; #1026 deleted the builtins wrapper, which had no
+# caller left. scripts/check-parametric-eq-targets.sh's hermetic render-contract half moved to
+# scripts/check-parametric-eq-render-contract.sh instead.
 #
 # Not moved here (still owned by their original scripts, or already run elsewhere):
 #   * scripts/check-effect-interchange-targets.sh's `cargo test -p effect-package -p effect-compiler

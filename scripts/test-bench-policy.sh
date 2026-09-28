@@ -250,7 +250,7 @@ expect_diagnostic operator-root-leading-text 'operator script root expression is
 
 new_case second-allocator
 printf '\nunsafe impl GlobalAlloc for Second {}\n' \
-    >>"$case_root/tools/bench/src/rack.rs"
+    >>"$case_root/tools/bench/src/console.rs"
 expect_failure second-allocator
 
 new_case second-global-allocator-attribute
@@ -271,9 +271,9 @@ printf '\nfn json_string(value: &str) -> String {\n    value.replace('"'"'\\\\'"
     >>"$case_root/tools/bench/src/conformance.rs"
 expect_failure second-json-string-name
 
-# A local wrapper that only calls the shared `escape` is not the defect (`tools/bench/src/builtins.rs`
-# and `tools/bench/src/effect_interchange.rs` both carry one); the baseline case above already
-# proves that shape stays green.
+# A local wrapper that only calls the shared `escape` is not the defect
+# (`tools/bench/src/effect_interchange.rs` carries one); the baseline case above already proves that
+# shape stays green.
 
 # A delegating wrapper whose signature rustfmt has wrapped across multiple lines is still a
 # delegate, not a reimplementation: the window scan has to reach the line that actually calls
@@ -361,17 +361,17 @@ expect_failure second-sha256-initial-constant
 
 new_case second-percentile
 printf '\nfn percentile(sorted: &[u64], p: usize) -> u64 {\n    sorted[p]\n}\n' \
-    >>"$case_root/tools/bench/src/graph.rs"
+    >>"$case_root/tools/bench/src/console.rs"
 expect_failure second-percentile
 
 new_case second-percentile-summary-owner
 printf '\nstruct Percentiles { min: u64 }\n' \
-    >>"$case_root/tools/bench/src/graph.rs"
+    >>"$case_root/tools/bench/src/console.rs"
 expect_failure second-percentile-summary-owner
 
 new_case second-digest-sink
 printf '\nstruct Sha256Sink;\n' \
-    >>"$case_root/tools/bench/src/builtins.rs"
+    >>"$case_root/tools/bench/src/console.rs"
 expect_failure second-digest-sink
 
 new_case removed-escaper
@@ -388,22 +388,22 @@ sed -i '/^#!\[allow(unsafe_code)\]$/d' "$case_root/tools/audit/src/capi.rs"
 expect_failure retired-unsafe-owner
 
 new_case converted-subject-loses-the-shared-timer
-sed -i 's/timing::timed/inline_timed/' "$case_root/tools/bench/src/rack.rs"
+sed -i 's/timing::timed/inline_timed/g' "$case_root/tools/bench/src/console.rs"
 expect_failure converted-subject-loses-the-shared-timer
 
 new_case converted-subject-regrows-a-clock
 printf '\nfn t() { let _ = Instant::now(); }\n' \
-    >>"$case_root/tools/bench/src/rack.rs"
+    >>"$case_root/tools/bench/src/console.rs"
 expect_failure converted-subject-regrows-a-clock
 
 new_case converted-subject-regrows-a-digest
 printf '\nfn h() { let _ = Sha256::new(); }\n' \
-    >>"$case_root/tools/bench/src/rack.rs"
+    >>"$case_root/tools/bench/src/console.rs"
 expect_failure converted-subject-regrows-a-digest
 
 new_case subject-bypasses-metadata-snapshot
 printf '\nfn bypass() { let _ = std::env::var("CPU"); }\n' \
-    >>"$case_root/tools/bench/src/rack.rs"
+    >>"$case_root/tools/bench/src/console.rs"
 expect_failure subject-bypasses-metadata-snapshot
 
 new_case production-dependency
@@ -493,7 +493,7 @@ grep_fault digest-grep-error 'Sha256Sink' 'grep failed with status 7; output: to
 grep_fault digest-grep-empty-error 'Sha256Sink' 'grep failed with status 7; output: <empty>; stderr: grep-error-sentinel' empty
 grep_fault escaper-presence-error 'tools/bench-support/src/json.rs' 'shared-definition grep failed or is empty for tools/bench-support/src/json.rs; status 7; output:'
 grep_fault escaper-presence-empty-error 'tools/bench-support/src/json.rs' 'shared-definition grep failed or is empty for tools/bench-support/src/json.rs; status 7; output: <empty>; stderr: grep-error-sentinel' empty
-multifile_grep_fault escaper-candidate-grep-error 'json_(escape|string|quote)' grep grep-error-sentinel $'tools/bench/src/effect_interchange.rs\ntools/bench/src/builtins.rs\ntools/bench-support/src/json.rs'
+multifile_grep_fault escaper-candidate-grep-error 'json_(escape|string|quote)' grep grep-error-sentinel $'tools/bench/src/effect_interchange.rs\ntools/bench-support/src/json.rs'
 new_case escaper-candidate-grep-empty-error
 mkdir -p "$case_root/shim"
 printf '#!/usr/bin/env bash\nif [[ " $* " == *"--include=*.rs"* && " $* " == *"json_(escape|string|quote)"* ]]; then printf "grep-error-sentinel\\n" >&2; exit 7; fi\nexec /usr/bin/grep "$@"\n' >"$case_root/shim/grep"
