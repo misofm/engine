@@ -256,3 +256,98 @@ dB by `1 + f32::EPSILON` under `cfg!(debug_assertions)` only.
 - `wasm-guests` no longer runs the native report; it still builds the runner.
 - Ten pin-compare sites and nine REPIN switches are gone. A re-pin now happens in one place: G5's
   scalar-oracle report.
+
+## Sol verdict, attempt 1
+
+**PASS.** Sol, 2026-09-28.
+
+**Setup.**
+- Verified on a scratch merge of this branch (`e5a4b7e5`) into the batch head
+  `codex/batch-slim-1` at `570a79f0`, the boundary re-pin after `c867ec2a`.
+- The merge is textually clean.
+- There is no semantic conflict with #1021, #1025, #1026 or #1052. Their gates pass on the merge:
+  - `check-test-support-ci.py`;
+  - `check-bench-policy.sh` and `test-bench-policy.sh`;
+  - `check-workspace-policy.sh`, with #1052's exact source-scrape allow-list, and
+    `test-workspace-policy.sh`.
+
+**Coverage.** Every (corpus, target, width) pair that a removed pin compared is still compared by
+a required `qualification.yml` job on a runner of that target.
+
+| corpus | target, widths | before (base) | after (merge) |
+|---|---|---|---|
+| builtins, compressor, effect-runtime, gate-expander, multiband, parametric-eq, soft-clip, transient-shaper, true-peak-limiter | x86-64-v3 native: `f32`, `Simd4`, `Simd8` | per-crate test (debug, `test-debug-b`); G5 test (release, `test-release`); script `--native` (release, `wasm-guests`) | G5 test (release, `test-release`, `ubuntu-24.04`) |
+| delay | x86-64-v3 native: `f32` | the same three | G5 test |
+| all ten | wasm32 without and with `simd128`, three widths | guest legs in `wasm-guests` | unchanged |
+| all ten | native AArch64 | none in required CI on this batch | none on this batch; with #1017, `aarch64-release` runs G5 in release, and only #1017's debug compares are forgone (amendment 3) |
+| lane, math M3 | all | unchanged | unchanged |
+
+No pair is now covered only outside the required workflow. The only loss is the debug profile on
+x86, which amendment 3 accepts.
+
+**Discrimination, re-run by Sol in release.** Every plant was reverted afterwards.
+- **`gate-expander` `kernel.rs`, Simd8 only.** The gain is multiplied by `1 + ε` only when
+  `L::WIDTH == 8`. `g5_native_digests_match_pins` goes red on cases 120 and 121, "at simd8" only,
+  and prints no scalar re-pin rows.
+- **`soft-clip` `cubic`, scalar only.** `div(3)` becomes `mul(1/3)` only at `W == 1`. G5 goes red
+  on 3 cases "at scalar" and prints their scalar-oracle pin rows.
+- **`transient-shaper` `frame`, wasm without `simd128` only.** The wet signal is multiplied by
+  `1 + ε`. `run-wasm-gates.sh --without-v8-spill --without-native` exits 1, with 9 wasm-scalar
+  mismatches (3 cases at 3 widths).
+- **Reverted.** G5 and the CI form of the script are green again.
+- **Finiteness.** A NaN seeded in the multiband corpus turns `every_case_is_finite_and_moves` red.
+
+**Test list.** On the merge, `cargo test --workspace -- --list` goes from 2466 to 2455 tests: 13
+names removed and 2 added (the renames). Every removed name is in the attempt's table with a
+surviving owner.
+
+**Gates on the merge.**
+- **Build and lint.** `cargo check --workspace --all-targets --all-features`,
+  `clippy -D warnings` and `fmt --check` are clean.
+- **Dev tests.** The `test-debug-b` command: 800 passed, 0 failed. `wasm-gates`: 9 passed.
+- **Release tests.**
+  - The ten crates, with the CI features: 641 passed.
+  - The `test-release` step: green.
+  - `audit`, `bench` and `console-workload`: 156 passed, with the console digests unchanged.
+- **`run-wasm-gates.sh`.**
+  - The default run (native, both guests, V8) makes 358 comparisons per leg with 0 mismatches.
+  - The artifact `f7bd75ca…` matches its pin.
+  - The CI form is green with 2 evidence lines.
+  - An unknown `--without-*` flag exits 2.
+- **Policy scripts.** All 60 `check-*` scripts and the routing, env-vocabulary, bench-policy and
+  workspace-policy suites pass, or only print usage. The one exception is `check-sdk-types.sh`,
+  which needs `sdk/node_modules`. It fails the same way on base, so the cause is the environment.
+
+**Findings, by severity.**
+1. **Medium: the #1017 hand-off fails as #1017 stands.**
+   - Sol merged `401fc362` onto the merge above, resolving the routing scripts' textual conflicts
+     as the union of both sides. `check-ci-path-routing.py` then fails: "an AArch64 job
+     (aarch64-debug, aarch64-release) must run an unconditional, unfiltered
+     `cargo test --release -p wasm-gates`".
+   - The cause: #1017 runs G5 inside `scripts/run-aarch64-tests.sh release`, as
+     `cargo test ... -- --exact --skip m2_…`. `runs_g5_native_test` refuses any `--`, and it does
+     not read scripts.
+   - **What #1017 must add:** an unconditional step in `aarch64-release` whose run line is exactly
+     `cargo test --locked --release -p wasm-gates --features math/lane`, with no `--` and no
+     target selector. It should also drop `-p wasm-gates` from the script's release `gates`, so G5
+     does not run twice. With that step added, the checker passes on the trial merge.
+   - The alternative is a change to #1048's checker: let `runs_g5_native_test` accept
+     `-- --exact --skip X` when no skipped name is a G5 test.
+2. **Medium: flag order now bypasses #1009's V8 pairing.**
+   - `run-wasm-gates.sh` now takes its flags in any order. `check_qualification_v8_spill` still
+     matches the substring `run-wasm-gates.sh --without-v8-spill`.
+   - Proof: with `wasm-guests` changed to `--without-native --without-v8-spill` and
+     `artifact-gates`' V8 spill command deleted, `check-ci-path-routing.py` passes.
+   - Fix: test for the `--without-v8-spill` token in the `run-wasm-gates.sh` command, as
+     `check_qualification_native_g5` does for `--without-native`, and add the reordered mutation
+     to `test-ci-path-routing.py`.
+3. **Low: gaps in the G5 pairing rule.**
+   - These are accepted: a step-level or job-level `continue-on-error: true` on the owner, and a
+     contrived `... && echo -p wasm-gates`.
+   - The implementer's six mutations are refused, and so are three of Sol's: a positional name
+     filter, `--test g6_full_corpus_ftz`, and a debug `run: |` block.
+4. **Low: stale documentation.**
+   - The `digest_*` docs in `tools/wasm-gate-corpus/src/lib.rs` still say "exactly as that
+     crate's `tests/determinism.rs` does natively", but most of those tests no longer digest.
+   - `crates/delay/tests/MUTATIONS.md` M13 names `corpus_digests_match_their_pins`, reproduced
+     with `cargo test -p delay`. That no longer goes red; G5 does.
