@@ -245,16 +245,38 @@ jobs:
           CARGO_TARGET_DIR=target/ci/wasm-console RUSTFLAGS='-C target-feature=+simd128' cargo check --locked --release --target wasm32-unknown-unknown -p wasm-console-guest -p console-workload
 
   # design §6.2 moved these ledgers off the per-PR lint job. #1026 retired the builtins and graph
-  # benchmark-lifecycle suites with their benchmarks, and with them this job's only ripgrep user;
-  # the stem-store ledger is node alone.
+  # benchmark-lifecycle suites with their benchmarks. #1043 moved the script-gate self-test suites
+  # here too: on a pull request each runs only when a file it reads changes (qualification.yml's
+  # `gate-self-tests`), so every one runs here every night, and a gate edit the router misses is
+  # found within a day. Every step runs even after another fails, so one red suite hides no other.
   moved-mutation-suites:
-    name: stem-store mutation ledger
+    name: stem-store mutation ledger and script-gate self-tests
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install ripgrep (not on the runner image; the conformance and research gates grep with rg)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
       - name: Stem store V1 mutation ledger
+        if: ${{ !cancelled() }}
         run: node scripts/check-stem-store-v1.mjs --self-test --budgets
+      - name: Environment and marker vocabulary mutation tests
+        if: ${{ !cancelled() }}
+        run: bash scripts/test-env-vocabulary.sh
+      - name: Conformance boundary mutation tests
+        if: ${{ !cancelled() }}
+        run: bash scripts/test-conformance-boundaries.sh
+      - name: Console benchmark validator and runner mutation tests
+        if: ${{ !cancelled() }}
+        run: bash scripts/test-console-benchmark.sh
+      - name: SDK deletion gate self-test
+        if: ${{ !cancelled() }}
+        run: python3 -B scripts/check-sdk-deletions.py --self-test
+      - name: DSP research gate mutation tests
+        if: ${{ !cancelled() }}
+        run: bash scripts/test-dsp-research.sh
 
   release-budgets:
     name: release-mode wall-clock budgets (host-web, host-core)
@@ -313,7 +335,7 @@ jobs:
         run: |
           set -euo pipefail
           title='nightly workflow is failing'
-          body=$(printf 'The scheduled nightly workflow failed.\n\n| job | result |\n| --- | --- |\n| native production-kernel release-probe report | %s |\n| bounded descriptive benchmarks | %s |\n| deep fuzzing over every target | %s |\n| workspace release link proof | %s |\n| math exhaustive sweeps and wasm-console guest check | %s |\n| stem-store mutation ledger | %s |\n| release-mode wall-clock budgets | %s |\n\nRun: %s\n\nClose this issue once the failure is dealt with. The next failing night after that opens a fresh one; while it is open, further failures are added as comments.\n' \
+          body=$(printf 'The scheduled nightly workflow failed.\n\n| job | result |\n| --- | --- |\n| native production-kernel release-probe report | %s |\n| bounded descriptive benchmarks | %s |\n| deep fuzzing over every target | %s |\n| workspace release link proof | %s |\n| math exhaustive sweeps and wasm-console guest check | %s |\n| stem-store mutation ledger and script-gate self-tests | %s |\n| release-mode wall-clock budgets | %s |\n\nRun: %s\n\nClose this issue once the failure is dealt with. The next failing night after that opens a fresh one; while it is open, further failures are added as comments.\n' \
             "$REPORT_RESULT" "$BENCHMARK_RESULT" "$DEEP_FUZZ_RESULT" "$RELEASE_LINK_PROOF_RESULT" \
             "$MATH_SWEEPS_RESULT" "$MOVED_MUTATION_SUITES_RESULT" "$RELEASE_BUDGETS_RESULT" "$RUN_URL")
           existing=$(gh issue list --state open --search "$title in:title" --json number,title \
