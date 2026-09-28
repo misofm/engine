@@ -596,8 +596,6 @@ pub trait BankStage: Send {
     fn observation_retained_bytes(&self) -> usize {
         0
     }
-    /// Drop every subscription this stage carries (issue #143 D7).
-    fn disarm_observations(&mut self) {}
 
     /// This stage's channel-symmetry witness for one lane of the cohort.
     ///
@@ -872,6 +870,19 @@ impl BankStage for EffectBankStage {
     // REALTIME_POLICY_END
 }
 
+/// The same witness from an already-taken designed-word comparison.
+///
+/// One body, so a cached answer and a freshly pulled one cannot disagree about which term a
+/// `false` clears.
+#[must_use]
+pub const fn witness_of_designed(designed: bool) -> ChannelSymmetryWitness {
+    if designed {
+        ChannelSymmetryWitness::SYMMETRIC
+    } else {
+        ChannelSymmetryWitness::symmetric_except(ChannelSymmetryWitness::DESIGNED)
+    }
+}
+
 /// The live-console twin of [`EffectBankStage`] (issue #140 A).
 ///
 /// It is a **separate stage type** on purpose, exactly as `ConsoleMatrixProcessor` is a separate
@@ -897,32 +908,6 @@ impl BankStage for EffectBankStage {
 /// `first_sample`, and every lane is staged independently into a disjoint window. A bank therefore
 /// applies a command timeline to lane `l` exactly as the per-node scalar path applies it to the
 /// same effect: same spans, same block, same order.
-/// One bank lane's witness from the effect's own designed-word comparison alone.
-///
-/// The other four terms are left set: a bank slot speaks only to `DESIGNED`, and `SOURCE`,
-/// `RESTORED` and the two live terms are conjoined by whoever owns them. Leaving them set is what
-/// makes the conjunction in [`BankChain::lane_symmetry`] mean "every stage agreed" rather than
-/// "every stage claimed everything".
-pub fn designed_lane_witness(
-    processor: &dyn PreparedNativeEffectBank,
-    lane: usize,
-) -> ChannelSymmetryWitness {
-    witness_of_designed(processor.lane_channel_symmetry(lane))
-}
-
-/// The same witness from an already-taken designed-word comparison.
-///
-/// One body, so a cached answer and a freshly pulled one cannot disagree about which term a
-/// `false` clears.
-#[must_use]
-pub const fn witness_of_designed(designed: bool) -> ChannelSymmetryWitness {
-    if designed {
-        ChannelSymmetryWitness::SYMMETRIC
-    } else {
-        ChannelSymmetryWitness::symmetric_except(ChannelSymmetryWitness::DESIGNED)
-    }
-}
-
 pub struct ConsoleEffectBankStage {
     processor: Box<dyn PreparedNativeEffectBank>,
     width: BankWidth,
@@ -1212,10 +1197,6 @@ impl BankStage for ConsoleEffectBankStage {
 
     fn observation_retained_bytes(&self) -> usize {
         ConsoleEffectBankStage::observation_retained_bytes(self)
-    }
-
-    fn disarm_observations(&mut self) {
-        ConsoleEffectBankStage::disarm_observations(self);
     }
 
     // REALTIME_POLICY_BEGIN
@@ -1569,14 +1550,6 @@ impl<'a> FoldCohort<'a> {
     }
     #[must_use]
     pub fn right(&self) -> &[f32] {
-        self.right
-    }
-    #[must_use]
-    pub fn left_mut(&mut self) -> &mut [f32] {
-        self.left
-    }
-    #[must_use]
-    pub fn right_mut(&mut self) -> &mut [f32] {
         self.right
     }
     pub fn planes_mut(&mut self, index: usize) -> Option<(&mut [f32], &mut [f32])> {
@@ -3227,13 +3200,6 @@ impl BankChain {
             .iter()
             .map(|slot| slot.stage.observation_retained_bytes())
             .sum()
-    }
-
-    /// Drop every subscription every slot of this chain carries (issue #143 D7).
-    pub fn disarm_observations(&mut self) {
-        for slot in self.slots.iter_mut() {
-            slot.stage.disarm_observations();
-        }
     }
 }
 

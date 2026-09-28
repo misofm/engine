@@ -10,3 +10,4 @@ docs/derivations/281-qualification-harness-boot.md
 docs/rulings/canonical-json-migration-inventory.md
 docs/rulings/de-versioning-inventory.md
 hosts/host-web/MUTATIONS.md
+docs/handoffs/test-value-2026-09-28/data/script-gates-verify.md

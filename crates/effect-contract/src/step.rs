@@ -18,18 +18,6 @@ impl super::StepSize {
     /// All sizes in ascending ladder order.
     pub const ALL: [Self; 5] = [Self::Xs, Self::Sm, Self::Md, Self::Lg, Self::Xl];
 
-    /// Canonical lowercase spelling used by metadata and agent surfaces.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Xs => "xs",
-            Self::Sm => "sm",
-            Self::Md => "md",
-            Self::Lg => "lg",
-            Self::Xl => "xl",
-        }
-    }
-
     const fn offset(self) -> usize {
         self as usize - 1
     }

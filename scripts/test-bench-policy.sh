@@ -17,6 +17,11 @@ new_case() {
     printf '[package]\nname = "later-fixture"\nversion = "0.1.0"\nedition = "2021"\n' \
         >"$case_root/hosts/fixture/Cargo.toml"
     cp "$root/scripts/check-bench-policy.sh" "$case_root/scripts/"
+    mkdir -p "$case_root/scripts/operator"
+    cp "$root/Cargo.toml" "$case_root/"
+    for operator_source in "$root"/scripts/operator/*.sh; do
+        if [[ -f "$operator_source" ]]; then cp "$operator_source" "$case_root/scripts/operator/"; fi
+    done
 }
 
 check() { bash "$case_root/scripts/check-bench-policy.sh" "$case_root"; }
@@ -108,9 +113,144 @@ printf '#!/usr/bin/env bash\nif [[ " $* " == *"file=hosts/fixture/Cargo.toml"* ]
 chmod +x "$case_root/shim/awk"
 expect_failure_with_path manifest-awk-error "$case_root/shim" 'dependency parser failed for hosts/fixture/Cargo.toml with status 2; output: <empty>; stderr: manifest-awk-error'
 
+# #1022: an operator shell script's repository root. Every case targets whichever scripts exist,
+# never a named one, because the footprint cleanup (#1026, #1027, #1039) deletes operator scripts:
+# the suite must hold for any population of one or more. Every mutation must change the file it
+# names, or the case would pass for the wrong reason. Each run is bounded, so a check that stops
+# terminating is red rather than a hung job, and only the tail of its output is kept.
+operator_check() {
+    if timeout 20 bash "$case_root/scripts/check-bench-policy.sh" "$case_root" \
+        >"$scratch/operator-check.out" 2>&1; then operator_status=0; else operator_status=$?; fi
+    operator_output="$(tail -c 4000 "$scratch/operator-check.out")"
+}
+expect_diagnostic() {
+    local label=$1 expected=$2
+    operator_check
+    ((operator_status != 0)) || { printf 'bench policy mutation escaped: %s\n' "$label" >&2; exit 1; }
+    ((operator_status != 124)) || { printf 'bench policy check did not terminate: %s\n' "$label" >&2; exit 1; }
+    [[ "$operator_output" == *"$expected"* ]] || {
+        printf 'bench policy wrong diagnostic: %s\n%s\n' "$label" "$operator_output" >&2
+        exit 1
+    }
+}
+expect_operator_pass() {
+    local label=$1 expected=$2
+    operator_check
+    ((operator_status == 0)) || {
+        printf 'bench policy rejected a valid operator tree: %s (status %s)\n%s\n' \
+            "$label" "$operator_status" "$operator_output" >&2
+        exit 1
+    }
+    [[ "$operator_output" == *"$expected"* ]] || {
+        printf 'bench policy wrong success line: %s\n%s\n' "$label" "$operator_output" >&2
+        exit 1
+    }
+}
+first_operator_script() {
+    local candidate
+    for candidate in "$case_root"/scripts/operator/*.sh; do
+        if [[ -f "$candidate" ]]; then printf '%s\n' "${candidate##*/}"; return 0; fi
+    done
+    printf 'bench policy operator case has no script to mutate: %s\n' "$case_root" >&2
+    exit 1
+}
+mutate_operator_root() {
+    local script=$1 sed_script=$2
+    cp "$case_root/scripts/operator/$script" "$scratch/operator-before"
+    sed -i "$sed_script" "$case_root/scripts/operator/$script"
+    ! cmp -s "$scratch/operator-before" "$case_root/scripts/operator/$script" ||
+        { printf 'bench policy operator mutation did not apply: %s\n' "$script" >&2; exit 1; }
+}
+root_line='/dirname "\${BASH_SOURCE\[0\]}")\/\.\.\/\.\." && pwd/'
+
+# The #319 defect itself, reintroduced into each operator script in turn, so no script is exempt.
+operator_script_count=0
+for operator_script in "$root"/scripts/operator/*.sh; do
+    [[ -f "$operator_script" ]] || continue
+    operator_script=${operator_script##*/}
+    new_case "operator-root-one-level-$operator_script"
+    mutate_operator_root "$operator_script" 's|")/\.\./\.\." \&\& pwd|")/.." \&\& pwd|'
+    expect_diagnostic "operator-root-one-level-$operator_script" \
+        "operator script does not resolve the repository root: scripts/operator/$operator_script:"
+    operator_script_count=$((operator_script_count + 1))
+done
+# Sol finding 1: any population of one or more, but never none -- a glob that matched nothing
+# would otherwise make the loop above vacuous.
+((operator_script_count > 0)) ||
+    { printf 'bench policy operator mutations found no operator script under %s\n' "$root" >&2; exit 1; }
+
+new_case operator-root-past-the-repository
+mutate_operator_root "$(first_operator_script)" 's|")/\.\./\.\." \&\& pwd|")/../../.." \&\& pwd|'
+expect_diagnostic operator-root-past-the-repository 'operator script does not resolve the repository root: scripts/operator/'
+
+new_case operator-root-own-directory
+mutate_operator_root "$(first_operator_script)" 's|")/\.\./\.\." \&\& pwd|")" \&\& pwd|'
+expect_diagnostic operator-root-own-directory 'operator script does not resolve the repository root: scripts/operator/'
+
+new_case operator-root-unresolvable
+mutate_operator_root "$(first_operator_script)" 's|")/\.\./\.\." \&\& pwd|")/../../no-such-directory" \&\& pwd|'
+expect_diagnostic operator-root-unresolvable 'which is <unresolvable>'
+
+# A re-spelling is refused, not skipped: a check that skipped what it cannot parse could be escaped
+# by any new spelling of the same defect.
+new_case operator-root-unrecognised-spelling
+mutate_operator_root "$(first_operator_script)" "${root_line}"'s|\$(cd "\$(dirname "\${BASH_SOURCE\[0\]}")/\.\./\.\." && pwd[^)]*)|$(dirname "$0")/..|'
+expect_diagnostic operator-root-unrecognised-spelling 'operator script root expression is unrecognised at scripts/operator/'
+
+new_case operator-root-removed
+mutate_operator_root "$(first_operator_script)" "${root_line}d"
+expect_diagnostic operator-root-removed 'operator script computes no repository root from its own location: scripts/operator/'
+
+new_case operator-root-missing-manifest
+rm "$case_root/Cargo.toml"
+expect_diagnostic operator-root-missing-manifest 'operator scripts: the repository root holds no Cargo.toml'
+
+new_case operator-root-member-manifest
+printf '[package]\nname = "not-the-workspace"\n' >"$case_root/Cargo.toml"
+expect_diagnostic operator-root-member-manifest \
+    'operator scripts: the repository root Cargo.toml is not the workspace manifest'
+
+new_case operator-scripts-absent
+rm "$case_root"/scripts/operator/*.sh
+expect_diagnostic operator-scripts-absent 'no operator shell scripts under scripts/operator/'
+
+# Sol finding 1: a single surviving script is a valid population; a missing directory is not.
+new_case operator-one-script
+operator_kept=$(first_operator_script)
+for operator_script in "$case_root"/scripts/operator/*.sh; do
+    [[ "${operator_script##*/}" == "$operator_kept" ]] || rm "$operator_script"
+done
+expect_operator_pass operator-one-script ', 1 operator scripts rooted at the workspace)'
+
+new_case operator-directory-absent
+rm -rf "$case_root/scripts/operator"
+expect_diagnostic operator-directory-absent 'no operator shell scripts under scripts/operator/'
+
+# Sol finding 2: an entry named `*.sh` that is not a regular file is not a script. A directory that
+# sorted first once made `read` fail forever on it.
+new_case operator-directory-named-script
+mkdir "$case_root/scripts/operator/aaa.sh"
+expect_operator_pass operator-directory-named-script \
+    ", $operator_script_count operator scripts rooted at the workspace)"
+
+new_case operator-only-directory-named-script
+rm "$case_root"/scripts/operator/*.sh
+mkdir "$case_root/scripts/operator/aaa.sh"
+expect_diagnostic operator-only-directory-named-script 'no operator shell scripts under scripts/operator/'
+
+# Sol finding 3: the root expression is the whole assigned value, so nothing may follow or precede
+# it -- `$(... && pwd)/scripts` names a directory that is not the root.
+new_case operator-root-trailing-path
+mutate_operator_root "$(first_operator_script)" "${root_line}"'s|\(&& pwd\( -P\)\{0,1\})\)|\1/scripts|'
+expect_diagnostic operator-root-trailing-path 'operator script root expression is unrecognised at scripts/operator/'
+
+new_case operator-root-leading-text
+mutate_operator_root "$(first_operator_script)" "${root_line}"'s|=\("\{0,1\}\)\$(cd|=\1/tmp$(cd|'
+expect_diagnostic operator-root-leading-text 'operator script root expression is unrecognised at scripts/operator/'
+
 new_case second-allocator
 printf '\nunsafe impl GlobalAlloc for Second {}\n' \
-    >>"$case_root/tools/bench/src/rack.rs"
+    >>"$case_root/tools/bench/src/console.rs"
 expect_failure second-allocator
 
 new_case second-global-allocator-attribute
@@ -131,9 +271,9 @@ printf '\nfn json_string(value: &str) -> String {\n    value.replace('"'"'\\\\'"
     >>"$case_root/tools/bench/src/conformance.rs"
 expect_failure second-json-string-name
 
-# A local wrapper that only calls the shared `escape` is not the defect (`tools/bench/src/builtins.rs`
-# and `tools/bench/src/effect_interchange.rs` both carry one); the baseline case above already
-# proves that shape stays green.
+# A local wrapper that only calls the shared `escape` is not the defect
+# (`tools/bench/src/effect_interchange.rs` carries one); the baseline case above already proves that
+# shape stays green.
 
 # A delegating wrapper whose signature rustfmt has wrapped across multiple lines is still a
 # delegate, not a reimplementation: the window scan has to reach the line that actually calls
@@ -221,17 +361,17 @@ expect_failure second-sha256-initial-constant
 
 new_case second-percentile
 printf '\nfn percentile(sorted: &[u64], p: usize) -> u64 {\n    sorted[p]\n}\n' \
-    >>"$case_root/tools/bench/src/graph.rs"
+    >>"$case_root/tools/bench/src/console.rs"
 expect_failure second-percentile
 
 new_case second-percentile-summary-owner
 printf '\nstruct Percentiles { min: u64 }\n' \
-    >>"$case_root/tools/bench/src/graph.rs"
+    >>"$case_root/tools/bench/src/console.rs"
 expect_failure second-percentile-summary-owner
 
 new_case second-digest-sink
 printf '\nstruct Sha256Sink;\n' \
-    >>"$case_root/tools/bench/src/builtins.rs"
+    >>"$case_root/tools/bench/src/console.rs"
 expect_failure second-digest-sink
 
 new_case removed-escaper
@@ -248,22 +388,22 @@ sed -i '/^#!\[allow(unsafe_code)\]$/d' "$case_root/tools/audit/src/capi.rs"
 expect_failure retired-unsafe-owner
 
 new_case converted-subject-loses-the-shared-timer
-sed -i 's/timing::timed/inline_timed/' "$case_root/tools/bench/src/rack.rs"
+sed -i 's/timing::timed/inline_timed/g' "$case_root/tools/bench/src/console.rs"
 expect_failure converted-subject-loses-the-shared-timer
 
 new_case converted-subject-regrows-a-clock
 printf '\nfn t() { let _ = Instant::now(); }\n' \
-    >>"$case_root/tools/bench/src/rack.rs"
+    >>"$case_root/tools/bench/src/console.rs"
 expect_failure converted-subject-regrows-a-clock
 
 new_case converted-subject-regrows-a-digest
 printf '\nfn h() { let _ = Sha256::new(); }\n' \
-    >>"$case_root/tools/bench/src/rack.rs"
+    >>"$case_root/tools/bench/src/console.rs"
 expect_failure converted-subject-regrows-a-digest
 
 new_case subject-bypasses-metadata-snapshot
 printf '\nfn bypass() { let _ = std::env::var("CPU"); }\n' \
-    >>"$case_root/tools/bench/src/rack.rs"
+    >>"$case_root/tools/bench/src/console.rs"
 expect_failure subject-bypasses-metadata-snapshot
 
 new_case production-dependency
@@ -353,7 +493,7 @@ grep_fault digest-grep-error 'Sha256Sink' 'grep failed with status 7; output: to
 grep_fault digest-grep-empty-error 'Sha256Sink' 'grep failed with status 7; output: <empty>; stderr: grep-error-sentinel' empty
 grep_fault escaper-presence-error 'tools/bench-support/src/json.rs' 'shared-definition grep failed or is empty for tools/bench-support/src/json.rs; status 7; output:'
 grep_fault escaper-presence-empty-error 'tools/bench-support/src/json.rs' 'shared-definition grep failed or is empty for tools/bench-support/src/json.rs; status 7; output: <empty>; stderr: grep-error-sentinel' empty
-multifile_grep_fault escaper-candidate-grep-error 'json_(escape|string|quote)' grep grep-error-sentinel $'tools/bench/src/effect_interchange.rs\ntools/bench/src/builtins.rs\ntools/bench-support/src/json.rs'
+multifile_grep_fault escaper-candidate-grep-error 'json_(escape|string|quote)' grep grep-error-sentinel $'tools/bench/src/effect_interchange.rs\ntools/bench-support/src/json.rs'
 new_case escaper-candidate-grep-empty-error
 mkdir -p "$case_root/shim"
 printf '#!/usr/bin/env bash\nif [[ " $* " == *"--include=*.rs"* && " $* " == *"json_(escape|string|quote)"* ]]; then printf "grep-error-sentinel\\n" >&2; exit 7; fi\nexec /usr/bin/grep "$@"\n' >"$case_root/shim/grep"

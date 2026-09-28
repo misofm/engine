@@ -202,12 +202,6 @@ impl EffectControlLane {
         self.bypass
     }
 
-    /// The bounded capacity of the underlying queue.
-    #[must_use]
-    pub fn capacity(&self) -> usize {
-        self.control.capacity()
-    }
-
     /// Exact queue-owned payload layout, including the sentinel slot and shared header.
     ///
     /// This is a control-plane accounting query; it is never called from `stage` or any other
@@ -813,13 +807,6 @@ impl BypassShunt {
             line_right: vec![0.0; latency].into_boxed_slice(),
             cursor: 0,
         }
-    }
-
-    /// Retained bytes: the two dry planes and the two delay lines.
-    #[must_use]
-    pub fn retained_bytes(&self) -> usize {
-        (self.dry_left.len() + self.dry_right.len() + self.line_left.len() + self.line_right.len())
-            * core::mem::size_of::<f32>()
     }
 
     /// Whether this shunt carries a latency line that has to be fed on every block.

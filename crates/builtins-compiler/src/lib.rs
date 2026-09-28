@@ -4066,21 +4066,6 @@ impl SessionPoolClasses {
                 CohortPoolClass::of_prepare_witness(witness)
             })
     }
-
-    /// Every track's class, in normalized track order. Evidence and diagnosis only.
-    pub fn classes(&self) -> impl Iterator<Item = (&str, CohortPoolClass)> {
-        self.by_track
-            .keys()
-            .map(|track| (track.as_ref(), self.class_of(track)))
-    }
-
-    /// How many tracks fall in [`CohortPoolClass::MonoSymmetricAtPrepare`].
-    #[must_use]
-    pub fn mono_track_count(&self) -> usize {
-        self.classes()
-            .filter(|(_, class)| *class == CohortPoolClass::MonoSymmetricAtPrepare)
-            .count()
-    }
 }
 
 struct InputProcessor(InputBuiltins);
@@ -5172,7 +5157,6 @@ mod tests {
         let envelope = RenderEnvelope {
             sample_rate: SampleRateHz(48_000),
             quantum: QuantumFrames(4),
-            input_channels: None,
             output_channels: NonZeroUsize::new(2).expect("two output channels"),
         };
         let track_id = StableGraphId::parse("source-track").expect("test ID");
@@ -6188,7 +6172,6 @@ mod tests {
         let envelope = RenderEnvelope {
             sample_rate: SampleRateHz(48_000),
             quantum: QuantumFrames(HARNESS_QUANTUM),
-            input_channels: None,
             output_channels: NonZeroUsize::new(2).expect("two output channels"),
         };
         let stage = |index: usize, stage: TrackStage| GraphNodeId::TrackStage {
@@ -6657,7 +6640,6 @@ mod tests {
         for block in 0..HARNESS_BLOCKS {
             plan.render(
                 engine::realtime::RenderIo {
-                    input: None,
                     output: engine::realtime::PlanarBufferMut::try_new(&mut pcm, 2, frames, frames)
                         .expect("harness output"),
                 },
@@ -7275,7 +7257,6 @@ mod tests {
             .plan
             .render(
                 engine::realtime::RenderIo {
-                    input: None,
                     output: engine::realtime::PlanarBufferMut::try_new(
                         pcm,
                         2,
@@ -11510,7 +11491,6 @@ mod tests {
             let envelope = RenderEnvelope {
                 sample_rate: SampleRateHz(48_000),
                 quantum: QuantumFrames(HARNESS_QUANTUM),
-                input_channels: None,
                 output_channels: NonZeroUsize::new(2).expect("two output channels"),
             };
             let mut nodes = (0..n)
@@ -11959,7 +11939,6 @@ mod tests {
                 let mut words = vec![0.0; HARNESS_QUANTUM as usize * 2];
                 let report = bound.plan.render(
                     engine::realtime::RenderIo {
-                        input: None,
                         output: engine::realtime::PlanarBufferMut::try_new(
                             &mut words,
                             2,

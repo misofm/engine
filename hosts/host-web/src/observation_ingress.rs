@@ -34,7 +34,6 @@ const F: u64 = 4;
 
 /// Prepared shape facts needed by the checked ingress projection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(dead_code)]
 pub(crate) struct ObservationIngressShape {
     /// Number of compiled tracks in the prepared session.
     pub(crate) all_compiled_tracks: u64,
@@ -46,7 +45,6 @@ pub(crate) struct ObservationIngressShape {
 
 /// Existing bridge and future protected staging bytes supplied by the boot transaction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(dead_code)]
 pub(crate) struct ObservationIngressBridge {
     /// Full retained bridge/audio/document staging already projected by the host.
     pub(crate) projected_full_retained: u64,
@@ -62,7 +60,6 @@ pub(crate) struct ObservationIngressBridge {
 /// `size_of` values are read directly by [`project_observation_ingress`] so a mirror layout or a
 /// guessed byte constant cannot enter the budget arithmetic.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(dead_code)]
 struct ObservationIngressSizes {
     host_controller: u64,
     response_snapshot_section: u64,
@@ -83,7 +80,6 @@ struct ObservationIngressSizes {
 
 impl ObservationIngressSizes {
     /// Read the actual sizes of the existing native and browser records.
-    #[allow(dead_code)]
     fn actual() -> Result<Self, BootFailure> {
         Ok(Self {
             host_controller: actual_size::<HostObservationController>()?,
@@ -107,7 +103,6 @@ impl ObservationIngressSizes {
 
 /// Checked source-derived ingress bounds cached by a protected owner.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(dead_code)]
 pub(crate) struct ObservationIngressBounds {
     pub(crate) admission_entry_visits: u64,
     pub(crate) response_binding_visits: u64,
@@ -120,7 +115,6 @@ pub(crate) struct ObservationIngressBounds {
 
 /// Fixed per-call work intentionally excluded from the per-boundary payload-copy bound.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(dead_code)]
 pub(crate) struct ObservationIngressPerCallFacts {
     pub(crate) diagnostic_bytes_per_call: u64,
     pub(crate) raw_kind_scan_visits_per_call: u64,
@@ -129,7 +123,6 @@ pub(crate) struct ObservationIngressPerCallFacts {
 
 /// Complete checked ingress projection returned to the later protected boot step.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(dead_code)]
 pub(crate) struct ObservationIngressProjection {
     pub(crate) bounds: ObservationIngressBounds,
     pub(crate) packed_response_bytes: u64,
@@ -139,7 +132,6 @@ pub(crate) struct ObservationIngressProjection {
 
 /// Scalar protected ingress state prepared for the later operation-mediation checkpoint.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(dead_code)]
 pub(crate) struct ObservationIngressState {
     pub(crate) epoch: u64,
     pub(crate) exhausted: bool,
@@ -149,7 +141,6 @@ pub(crate) struct ObservationIngressState {
     pub(crate) bounds: ObservationIngressBounds,
 }
 
-#[allow(dead_code)]
 impl ObservationIngressState {
     pub(crate) const INITIAL_EPOCH: u64 = 1;
 
@@ -173,7 +164,6 @@ impl ObservationIngressState {
     /// part of the protected ingress contract: a caller cannot retry a refused oversized request
     /// in the same render epoch. The owner and epoch are copied into the permit only after the
     /// class credit has been spent; no permit is ever fabricated for exhausted ingress.
-    #[allow(dead_code)]
     pub(crate) fn begin_observation(
         &mut self,
         owner: ObservationOwnerId,
@@ -248,7 +238,6 @@ impl ObservationIngressState {
     ///
     /// A checked overflow permanently closes admission instead of wrapping the epoch. Failed
     /// renders never call this method, so they cannot replenish either operation class.
-    #[allow(dead_code)]
     pub(crate) fn on_successful_render(&mut self) {
         if self.exhausted {
             return;
@@ -265,7 +254,6 @@ impl ObservationIngressState {
 
 /// The two independent operation-credit classes in one render epoch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(dead_code)]
 pub(crate) enum ObservationClass {
     /// Ordinary capture, publication or read work.
     Ordinary,
@@ -275,7 +263,6 @@ pub(crate) enum ObservationClass {
 
 /// Encoded ingress lengths checked against one class credit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(dead_code)]
 pub(crate) struct ObservationLengths {
     /// Encoded control/request bytes.
     pub(crate) control_bytes: u64,
@@ -290,14 +277,12 @@ pub(crate) struct ObservationLengths {
 /// The fields deliberately remain private and the type is affine: callers can move it through
 /// nested admitted helpers, but cannot clone or copy it into a second native operation.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub(crate) struct ObservationPermit {
     owner: ObservationOwnerId,
     epoch: u64,
     class: ObservationClass,
 }
 
-#[allow(dead_code)]
 impl ObservationPermit {
     /// Validate the fixed owner/epoch/class scalars before any native operation.
     pub(crate) fn validate(
@@ -327,7 +312,6 @@ impl ObservationPermit {
 }
 
 /// Project the frozen protected observation ingress envelope with checked arithmetic.
-#[allow(dead_code)]
 pub(crate) fn project_observation_ingress(
     shape: ObservationIngressShape,
     bridge: ObservationIngressBridge,
@@ -531,7 +515,6 @@ pub(crate) fn project_observation_ingress(
 }
 
 /// Validate explicit caller-supplied ingress limits against a checked projection.
-#[allow(dead_code)]
 pub(crate) fn validate_observation_ingress_limits(
     limits: ObservationIngressLimits,
     projection: &ObservationIngressProjection,

@@ -226,13 +226,9 @@ use effect_contract::{
     PreparedEffectMetadata, PreparedNativeEffect, ResponseAnalysisError, ResponseSnapshotRequest,
     ResponseSnapshotSummary, SeamSide, TailSamples,
 };
-use engine::{
-    QuantumFrames,
-    realtime::{
-        BufferArena, PlanUnitEligibility, PlanarBufferMut, PlanarBufferRef, PrepareRenderPlan,
-        PreparedPlanExecutor, PreparedRenderPlan, RenderEnvelope, RenderError,
-        ResponseSnapshotError, ResponseSnapshotSink,
-    },
+use engine::realtime::{
+    BufferArena, PlanUnitEligibility, PlanarBufferMut, PrepareRenderPlan, PreparedPlanExecutor,
+    PreparedRenderPlan, RenderEnvelope, RenderError, ResponseSnapshotError, ResponseSnapshotSink,
 };
 use lane::Backend;
 use rack::AoSoaScratch;
@@ -2675,7 +2671,6 @@ impl PreparedPlanExecutor for GraphExecutor {
     fn render(
         &mut self,
         _arena: &mut BufferArena,
-        _input: Option<PlanarBufferRef<'_>>,
         mut output: PlanarBufferMut<'_>,
         time: engine::realtime::RenderTime,
     ) -> Result<(), RenderError> {
@@ -2902,10 +2897,6 @@ impl PreparedPlanExecutor for GraphExecutor {
     }
 }
 
-pub fn quantum_samples(quantum: QuantumFrames, count: u64) -> Option<u64> {
-    u64::from(quantum.0).checked_mul(count)
-}
-
 #[cfg(test)]
 mod observation_size_accounting {
     //! Issue #143 R7: the byte accounting for what the binding added, derived rather than pinned.
@@ -2970,7 +2961,7 @@ mod tests {
         PreparedPorts, PreparedSidechainPort, ProcessReport, ResetKind, StatePayloadError,
         StatePayloadInput, StatePayloadOutput, StatePayloadSizes,
     };
-    use engine::LAUNCH_SAMPLE_RATES;
+    use engine::{LAUNCH_SAMPLE_RATES, QuantumFrames};
     use std::sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -3445,7 +3436,6 @@ mod tests {
         let envelope = RenderEnvelope {
             sample_rate: engine::SampleRateHz(48_000),
             quantum: QuantumFrames(1),
-            input_channels: None,
             output_channels: core::num::NonZeroUsize::new(2).expect("two"),
         };
         let required = vec![input.clone(), output.clone()];
@@ -3629,7 +3619,6 @@ mod tests {
         let envelope = RenderEnvelope {
             sample_rate: engine::SampleRateHz(48_000),
             quantum: QuantumFrames(1),
-            input_channels: None,
             output_channels: core::num::NonZeroUsize::new(2).expect("two"),
         };
         let inputs: Vec<_> = (0..4)
@@ -4053,10 +4042,7 @@ mod tests {
             let output = PlanarBufferMut::try_new(&mut pcm[block * 2..block * 2 + 2], 2, 1, 1)
                 .expect("output");
             plan.render(
-                engine::realtime::RenderIo {
-                    input: None,
-                    output,
-                },
+                engine::realtime::RenderIo { output },
                 engine::realtime::RenderTime {
                     absolute_sample: block as u64,
                 },
@@ -4647,10 +4633,7 @@ mod tests {
             let mut samples = [f32::NAN; 2];
             let output = PlanarBufferMut::try_new(&mut samples, 2, 1, 1).expect("output");
             plan.render(
-                engine::realtime::RenderIo {
-                    input: None,
-                    output,
-                },
+                engine::realtime::RenderIo { output },
                 engine::realtime::RenderTime { absolute_sample: 0 },
             )
             .expect("render");
@@ -4693,10 +4676,7 @@ mod tests {
         let output = PlanarBufferMut::try_new(&mut samples, 2, 1, 1).expect("output");
         let report = plan
             .render(
-                engine::realtime::RenderIo {
-                    input: None,
-                    output,
-                },
+                engine::realtime::RenderIo { output },
                 engine::realtime::RenderTime { absolute_sample: 9 },
             )
             .expect("render");
@@ -4843,7 +4823,6 @@ mod tests {
         let envelope = RenderEnvelope {
             sample_rate: engine::SampleRateHz(48_000),
             quantum: QuantumFrames(16),
-            input_channels: None,
             output_channels: core::num::NonZeroUsize::new(2).expect("two"),
         };
         let effect_metadata = PreparedEffectMetadata {
@@ -5243,7 +5222,6 @@ mod tests {
             samples.fill(0.0);
             plan.render(
                 engine::realtime::RenderIo {
-                    input: None,
                     output: PlanarBufferMut::try_new(&mut samples, 2, frames, frames)
                         .expect("output"),
                 },
@@ -5536,7 +5514,6 @@ mod tests {
             render_plan
                 .render(
                     engine::realtime::RenderIo {
-                        input: None,
                         output: PlanarBufferMut::try_new(&mut output, 2, 1, 1).expect("output"),
                     },
                     engine::realtime::RenderTime {
@@ -5573,7 +5550,6 @@ mod tests {
             let mut output = [0.0; 2];
             plan.render(
                 engine::realtime::RenderIo {
-                    input: None,
                     output: PlanarBufferMut::try_new(&mut output, 2, 1, 1).expect("output"),
                 },
                 engine::realtime::RenderTime {
@@ -5948,7 +5924,6 @@ mod tests {
         let envelope = RenderEnvelope {
             sample_rate: engine::SampleRateHz(48_000),
             quantum: QuantumFrames(FRAMES as u32),
-            input_channels: None,
             output_channels: core::num::NonZeroUsize::new(2).expect("two"),
         };
         let build = |materialise: bool, observed: Option<TapSink>| {
@@ -6613,7 +6588,6 @@ mod tests {
         let envelope = RenderEnvelope {
             sample_rate: engine::SampleRateHz(48_000),
             quantum: QuantumFrames(4),
-            input_channels: None,
             output_channels: core::num::NonZeroUsize::new(2).expect("two"),
         };
         let nodes = schedule
@@ -6705,10 +6679,7 @@ mod tests {
         let mut samples = [0.0_f32; 8];
         let output = PlanarBufferMut::try_new(&mut samples, 2, 4, 4).expect("output");
         plan.render(
-            engine::realtime::RenderIo {
-                input: None,
-                output,
-            },
+            engine::realtime::RenderIo { output },
             engine::realtime::RenderTime { absolute_sample: 0 },
         )
         .expect("render");
@@ -6868,7 +6839,6 @@ mod tests {
         let envelope = RenderEnvelope {
             sample_rate: engine::SampleRateHz(48_000),
             quantum: QuantumFrames(4),
-            input_channels: None,
             output_channels: core::num::NonZeroUsize::new(2).expect("two"),
         };
         let metadata = PreparedEffectMetadata {
@@ -7025,10 +6995,7 @@ mod tests {
             let mut samples = [0.0_f32; 8];
             let output = PlanarBufferMut::try_new(&mut samples, 2, 4, 4).expect("output");
             plan.render(
-                engine::realtime::RenderIo {
-                    input: None,
-                    output,
-                },
+                engine::realtime::RenderIo { output },
                 engine::realtime::RenderTime {
                     absolute_sample: (block * 4) as u64,
                 },
@@ -7282,7 +7249,6 @@ mod tests {
         let envelope = RenderEnvelope {
             sample_rate: engine::SampleRateHz(48_000),
             quantum: QuantumFrames(4),
-            input_channels: None,
             output_channels: core::num::NonZeroUsize::new(2).expect("two"),
         };
         let metadata = PreparedEffectMetadata {
@@ -7438,10 +7404,7 @@ mod tests {
             let mut samples = [0.0_f32; 8];
             let output = PlanarBufferMut::try_new(&mut samples, 2, 4, 4).expect("output");
             plan.render(
-                engine::realtime::RenderIo {
-                    input: None,
-                    output,
-                },
+                engine::realtime::RenderIo { output },
                 engine::realtime::RenderTime { absolute_sample: 0 },
             )
             .expect("render");
@@ -7589,7 +7552,6 @@ mod tests {
         let envelope = RenderEnvelope {
             sample_rate: engine::SampleRateHz(rate),
             quantum: QuantumFrames(quantum),
-            input_channels: None,
             output_channels: core::num::NonZeroUsize::new(2).expect("two"),
         };
         let identity = RouteTransform {
@@ -7709,10 +7671,7 @@ mod tests {
                         let output =
                             PlanarBufferMut::try_new(&mut pcm, 2, frames, frames).expect("output");
                         plan.render(
-                            engine::realtime::RenderIo {
-                                input: None,
-                                output,
-                            },
+                            engine::realtime::RenderIo { output },
                             engine::realtime::RenderTime {
                                 absolute_sample: u64::from(block) * u64::from(quantum),
                             },
@@ -7763,7 +7722,6 @@ mod tests {
         let envelope = RenderEnvelope {
             sample_rate: engine::SampleRateHz(48_000),
             quantum: QuantumFrames(FRAMES as u32),
-            input_channels: None,
             output_channels: core::num::NonZeroUsize::new(2).expect("stereo"),
         };
         let claim = |track: &str| GraphSourceInputClaim {

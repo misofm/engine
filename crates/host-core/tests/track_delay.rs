@@ -154,10 +154,7 @@ fn render(document: &str, pad: usize, blocks: usize, collapse: Option<bool>) -> 
         prepared
             .plan
             .render(
-                RenderIo {
-                    input: None,
-                    output: buffer,
-                },
+                RenderIo { output: buffer },
                 RenderTime {
                     absolute_sample: base as u64,
                 },

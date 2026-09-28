@@ -15,7 +15,6 @@ use effect_compiler::*;
 use effect_contract::*;
 use effect_package::*;
 use lane::Backend;
-use sha2::{Digest, Sha256};
 
 const OBSERVATIONS: usize = 256;
 const WORKLOADS: [&str; 4] = [
@@ -69,12 +68,6 @@ fn hex_bytes(text: &str) -> Vec<u8> {
             digit(pair[0]) << 4 | digit(pair[1])
         })
         .collect()
-}
-
-// Retained as the raw digest helper for callers/tests that need digest bytes rather than text.
-#[allow(dead_code)]
-fn digest(bytes: &[u8]) -> [u8; 32] {
-    Sha256::digest(bytes).into()
 }
 
 static STATE_PARAMETERS: [ParameterDescriptor; 2] = [
@@ -1069,6 +1062,12 @@ pub(crate) fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
+
+    // The raw digest helper, for the test that needs digest bytes rather than text.
+    fn digest(bytes: &[u8]) -> [u8; 32] {
+        Sha256::digest(bytes).into()
+    }
 
     #[test]
     fn exact_four_rate_migration_envelope_without_timing() {

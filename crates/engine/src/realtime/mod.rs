@@ -12,9 +12,7 @@ mod plan;
 mod plan_exchange;
 mod spsc;
 
-pub use buffer::{
-    BufferArena, BufferArenaError, BufferIndex, PlanarBufferMut, PlanarBufferRef, PlanarBufferSpec,
-};
+pub use buffer::{BufferArena, BufferArenaError, BufferIndex, PlanarBufferMut, PlanarBufferSpec};
 pub use disjoint::{
     ARENA_SILENCE_BUFFER, ArenaLease, ArenaLeaseSetBuilder, ArenaStereoPair, ArenaStereoPlanes,
     DisjointArena, DisjointArenaError,
@@ -24,9 +22,9 @@ pub use observe::{
     observation_slot_retained_bytes,
 };
 pub use plan::{
-    ExecutorHandover, PlanUnitEligibility, PrepareRenderPlan, PreparedPlanExecutor,
-    PreparedProgram, PreparedRenderPlan, RenderEnvelope, RenderError, RenderIo, RenderReport,
-    RenderTime, ResponseSnapshotAvailability, ResponseSnapshotCapture, ResponseSnapshotError,
+    PlanUnitEligibility, PrepareRenderPlan, PreparedPlanExecutor, PreparedProgram,
+    PreparedRenderPlan, RenderEnvelope, RenderError, RenderIo, RenderReport, RenderTime,
+    ResponseSnapshotAvailability, ResponseSnapshotCapture, ResponseSnapshotError,
     ResponseSnapshotOwnerInfo, ResponseSnapshotRequest, ResponseSnapshotSection,
     ResponseSnapshotSink,
 };
@@ -83,7 +81,6 @@ mod tests {
         fn render(
             &mut self,
             _arena: &mut BufferArena,
-            _input: Option<PlanarBufferRef<'_>>,
             mut output: PlanarBufferMut<'_>,
             _time: RenderTime,
         ) -> Result<(), RenderError> {
@@ -118,7 +115,6 @@ mod tests {
         let envelope = RenderEnvelope {
             sample_rate: SampleRateHz(48_000),
             quantum: QuantumFrames(4),
-            input_channels: None,
             output_channels: NonZeroUsize::new(2).expect("two"),
         };
         let mut plan = PreparedRenderPlan::prepare_with_executor(
@@ -145,14 +141,8 @@ mod tests {
 
         let mut samples = [0.0_f32; 8];
         let output = PlanarBufferMut::try_new(&mut samples, 2, 4, 4).expect("output");
-        plan.render_contiguous(
-            RenderIo {
-                input: None,
-                output,
-            },
-            0,
-        )
-        .expect("render");
+        plan.render_contiguous(RenderIo { output }, 0)
+            .expect("render");
         let after = plan
             .copy_response_snapshot(ResponseSnapshotRequest {
                 track_id: "track",
@@ -165,13 +155,7 @@ mod tests {
         let mut malformed = [0.0_f32; 4];
         let output = PlanarBufferMut::try_new(&mut malformed, 1, 4, 4).expect("shape");
         assert_eq!(
-            plan.render_contiguous(
-                RenderIo {
-                    input: None,
-                    output,
-                },
-                4,
-            ),
+            plan.render_contiguous(RenderIo { output }, 4,),
             Err(RenderError::OutputShape)
         );
         assert_eq!(
@@ -191,7 +175,6 @@ mod tests {
         let envelope = RenderEnvelope {
             sample_rate: SampleRateHz(48_000),
             quantum: QuantumFrames(4),
-            input_channels: None,
             output_channels: NonZeroUsize::new(2).expect("two"),
         };
         let mut plan = PreparedRenderPlan::prepare(PrepareRenderPlan {
@@ -205,38 +188,20 @@ mod tests {
         let mut samples = [0.0_f32; 8];
         let output = PlanarBufferMut::try_new(&mut samples, 2, 4, 4).expect("output");
         let report = plan
-            .render_contiguous(
-                RenderIo {
-                    input: None,
-                    output,
-                },
-                0,
-            )
+            .render_contiguous(RenderIo { output }, 0)
             .expect("first block");
         assert_eq!(report.next_absolute_sample, 4);
         assert_eq!(plan.next_absolute_sample(), 4);
 
         let output = PlanarBufferMut::try_new(&mut samples, 2, 4, 4).expect("output");
         assert_eq!(
-            plan.render_contiguous(
-                RenderIo {
-                    input: None,
-                    output,
-                },
-                0,
-            ),
+            plan.render_contiguous(RenderIo { output }, 0,),
             Err(RenderError::TimeDiscontinuity { expected: 4 })
         );
 
         let output = PlanarBufferMut::try_new(&mut samples, 2, 4, 4).expect("output");
-        plan.render_contiguous(
-            RenderIo {
-                input: None,
-                output,
-            },
-            4,
-        )
-        .expect("second block");
+        plan.render_contiguous(RenderIo { output }, 4)
+            .expect("second block");
         assert_eq!(plan.next_absolute_sample(), 8);
     }
 
@@ -329,121 +294,12 @@ mod tests {
             envelope: RenderEnvelope {
                 sample_rate: SampleRateHz(48_000),
                 quantum: QuantumFrames(2),
-                input_channels: None,
                 output_channels: NonZeroUsize::new(1).expect("one"),
             },
             scratch: &[],
         })
         .expect("plan")
     }
-    /// A token executor that owns one hand-over resource and can be told to refuse one.
-    struct HandoverExecutor {
-        token: Option<ExecutorHandover>,
-        accepts: bool,
-        accepted: std::sync::Arc<core::sync::atomic::AtomicU64>,
-    }
-    impl PreparedPlanExecutor for HandoverExecutor {
-        fn render(
-            &mut self,
-            _arena: &mut BufferArena,
-            _input: Option<PlanarBufferRef<'_>>,
-            mut output: PlanarBufferMut<'_>,
-            _time: RenderTime,
-        ) -> Result<(), RenderError> {
-            output.plane_mut(0)?.fill(0.0);
-            Ok(())
-        }
-        fn take_handover(&mut self) -> Option<ExecutorHandover> {
-            self.token.take()
-        }
-        fn accept_handover(&mut self, handover: ExecutorHandover) -> Option<ExecutorHandover> {
-            if self.accepts && self.token.is_none() {
-                self.accepted
-                    .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                self.token = Some(handover);
-                None
-            } else {
-                Some(handover)
-            }
-        }
-    }
-    fn handover_plan(
-        id: u64,
-        token: Option<u64>,
-        accepts: bool,
-        accepted: &std::sync::Arc<core::sync::atomic::AtomicU64>,
-    ) -> PreparedRenderPlan {
-        PreparedRenderPlan::prepare_with_executor(
-            PrepareRenderPlan {
-                plan_id: id,
-                envelope: RenderEnvelope {
-                    sample_rate: SampleRateHz(48_000),
-                    quantum: QuantumFrames(2),
-                    input_channels: None,
-                    output_channels: NonZeroUsize::new(1).expect("one"),
-                },
-                scratch: &[],
-            },
-            Box::new(HandoverExecutor {
-                token: token.map(|value| Box::new(value) as ExecutorHandover),
-                accepts,
-                accepted: std::sync::Arc::clone(accepted),
-            }),
-        )
-        .expect("plan")
-    }
-
-    /// The block-boundary swap moves an executor-owned resource to the replacement, and gives it
-    /// back to the retiring executor when the replacement refuses it.
-    ///
-    /// Red mutation: delete the hand-over block in `enter_block` -- the replacement never
-    /// receives the token and the retiring plan never gets it back.
-    #[test]
-    fn enter_block_moves_the_executor_handover_and_returns_a_refused_one() {
-        let config = PlanExchangeConfig {
-            publication_capacity: NonZeroUsize::new(1).expect("one"),
-            retirement_capacity: NonZeroUsize::new(2).expect("two"),
-        };
-        let accepted = std::sync::Arc::new(core::sync::atomic::AtomicU64::new(0));
-        let load = |value: &std::sync::Arc<core::sync::atomic::AtomicU64>| {
-            value.load(core::sync::atomic::Ordering::Relaxed)
-        };
-        let (mut publisher, mut realtime, mut retirer) =
-            plan_exchange(handover_plan(1, Some(0xfeed), true, &accepted), config)
-                .expect("exchange");
-        assert!(
-            publisher
-                .publish(handover_plan(2, None, true, &accepted))
-                .is_ok()
-        );
-        assert_eq!(render_once(&mut realtime, 0).swap, SwapOutcome::Applied);
-        assert_eq!(load(&accepted), 1, "the replacement took the hand-over");
-        let (_epoch, mut retired) = retirer.try_reclaim().expect("reclaim");
-        assert!(
-            retired
-                .executor_mut()
-                .and_then(PreparedPlanExecutor::take_handover)
-                .is_none(),
-            "the retiring plan gave its resource away"
-        );
-
-        // Now a replacement that refuses: the token must come back to the retiring plan.
-        assert!(
-            publisher
-                .publish(handover_plan(3, None, false, &accepted))
-                .is_ok()
-        );
-        assert_eq!(render_once(&mut realtime, 2).swap, SwapOutcome::Applied);
-        // The refusing replacement never took it; the retiring executor re-accepted its own.
-        assert_eq!(load(&accepted), 2);
-        let (_epoch, mut refused) = retirer.try_reclaim().expect("reclaim");
-        let returned = refused
-            .executor_mut()
-            .and_then(PreparedPlanExecutor::take_handover)
-            .expect("a refused hand-over returns to the retiring executor");
-        assert_eq!(*returned.downcast::<u64>().expect("token"), 0xfeed);
-    }
-
     #[test]
     fn exchange_defers_without_retirement_capacity_then_applies() {
         let config = PlanExchangeConfig {
@@ -539,7 +395,6 @@ mod tests {
             envelope: RenderEnvelope {
                 sample_rate: SampleRateHz(44_100),
                 quantum: QuantumFrames(2),
-                input_channels: None,
                 output_channels: NonZeroUsize::new(1).expect("one"),
             },
             scratch: &[],
@@ -641,7 +496,6 @@ mod tests {
     fn render_once(owner: &mut RealtimePlanOwner, sample: u64) -> RealtimeRenderReport {
         let mut output = [1.0_f32; 2];
         let io = RenderIo {
-            input: None,
             output: PlanarBufferMut::try_new(&mut output, 1, 2, 2).expect("output"),
         };
         let report = owner
@@ -664,7 +518,6 @@ mod tests {
                 envelope: RenderEnvelope {
                     sample_rate: rate,
                     quantum: QuantumFrames(1),
-                    input_channels: None,
                     output_channels: NonZeroUsize::new(1).expect("one"),
                 },
                 scratch: &[],
@@ -673,7 +526,6 @@ mod tests {
             let mut output = [1.0];
             plan.render(
                 RenderIo {
-                    input: None,
                     output: PlanarBufferMut::try_new(&mut output, 1, 1, 1).expect("output"),
                 },
                 RenderTime { absolute_sample: 0 },
@@ -695,7 +547,6 @@ mod tests {
                     envelope: RenderEnvelope {
                         sample_rate: rate,
                         quantum: QuantumFrames(1),
-                        input_channels: None,
                         output_channels: NonZeroUsize::new(1).expect("one"),
                     },
                     scratch: &[],

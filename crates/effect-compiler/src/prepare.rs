@@ -1240,16 +1240,6 @@ pub struct EffectControlResources {
 }
 
 impl EffectControlResources {
-    /// Empty resource facts for a console-free preparation.
-    #[must_use]
-    pub const fn empty() -> Self {
-        Self {
-            producer_table_bytes: 0,
-            owned_payload_bytes: 0,
-            largest_owned_allocation_bytes: 0,
-        }
-    }
-
     /// Total native effect-control bytes retained by the table and its transferred payload.
     #[must_use]
     pub const fn total_bytes(self) -> Option<u64> {

@@ -1,0 +1,18 @@
+# Remove the libc memset calls from the EQ's SVF flush on Apple targets
+
+Issue key for the footprint cleanup: AArch64 CI = #1017, Darwin memset = #1018, LANE-3 = #1019, live-control research = #1020, 00 = #1021, 00b = #1022, 01 = #1023, 03 = #1024, 04a = #1025, 04b = #1026, 04c = #1027, 05 = #1028, 06 = #1029, 07 = #1030, 08 = #1031, R1 = #1032, R2 = #1033, R3 = #1034, R4 = #1035, R5 = #1036, R6 = #1037, R7 = #1038, R9 = #1039, R10 = #1040.
+
+## Problem
+
+On Darwin (`aarch64-apple-ios`, and by extension `aarch64-apple-darwin`), `svf_step`'s `L::splat(FLUSH_EPS)` in `crates/lane/src/kernels.rs` (around lines 280-281) compiles to `bl _memset_pattern16`: two libc calls per frame inside the kernel loop. The dead-code verification reproduced 151 `memset_pattern16` calls in `parametric-eq`'s iOS release assembly. Render must perform no libc or other calls of this kind (AGENTS.md, "Approved audio architecture"), so this breaches the realtime rules on every iPhone. It has no effect on `x86_64` or `wasm32`. Registered in `docs/TARGET_MATRIX.md` ("Deferred-defect register"); evidence in `docs/handoffs/dead-code-2026-09-28/VERIFY-DEAD-CODE.md`, finding F4. Native AArch64 is now an official target (`docs/rulings/engine-footprint-2026-09-28.md`).
+
+## Smallest closable slice
+
+Change the constant's construction (for example, hoist the splat out of the loop, or build the vector from a register constant) so that no Apple build of any EQ or builtin kernel calls `memset_pattern16` or any other libc routine in render. Class A: the rendered bits must not change on any target. One code shape for all targets; no target-specific code.
+
+## Objective gates
+
+1. The iOS release assembly of `parametric-eq`, `builtins` and every other crate that uses `svf_step` contains no `memset_pattern16` (or other libc) call inside render, checked by a committed script that fails if one appears; the script runs on the AArch64 CI leg (the #1017 issue).
+2. Every console digest and the EQ differentials are unchanged on x86, wasm and AArch64.
+3. The shipped AudioWorklet artifact's performance does not regress (V8 one-band and two-band isolates through the render export, under the timing lock); `scripts/run-wasm-gates.sh` (including the V8 spill gate) passes.
+4. Remove the entry from the deferred-defect register.

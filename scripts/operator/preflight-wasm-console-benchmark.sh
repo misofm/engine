@@ -18,7 +18,7 @@
 set -euo pipefail
 [[ "$#" -le 1 ]] || { printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline|--strip4|--mono2|--mono3|--mono3-baseline]
 ' "$0" >&2; exit 2; }
-root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$root"
 
 fail() { printf 'wasm console preflight failure: %s\n' "$1" >&2; exit 1; }
@@ -248,7 +248,7 @@ jq -n -S \
     --arg fixture_generator_sha256 "$(sha256sum scripts/derive-intended-console-fixture.py | awk '{print $1}')" \
     --arg mono_fixture_sha256 "$(sha256sum fixtures/session/v1/console-sixty-four-track-mono.json | awk '{print $1}')" \
     --arg mono_fixture_generator_sha256 "$(sha256sum scripts/derive-mono-console-fixture.py | awk '{print $1}')" \
-    --arg runner_sha256 "$(sha256sum scripts/run-wasm-console-benchmark.sh | awk '{print $1}')" \
+    --arg runner_sha256 "$(sha256sum scripts/operator/run-wasm-console-benchmark.sh | awk '{print $1}')" \
     --arg validator_sha256 "$(sha256sum scripts/wasm-console-benchmark-validator.jq | awk '{print $1}')" \
     --arg preconditions_sha256 "$(sha256sum scripts/check-bench-preconditions.sh | awk '{print $1}')" \
     '{schema_version: 1, issue: 163, phase: "2-step1",

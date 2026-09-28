@@ -12,7 +12,7 @@
 //!   entry. It must *differ*, or the guarded arm proves nothing and the test is vacuous.
 //!
 //! Red mutation (recorded in `tests/MUTATIONS.md`): delete the `CanonicalFpEnv::enter()` line from
-//! `StartedRenderSession::render_contiguous`. The guarded arm then equals the unguarded control
+//! `StartedRenderSession::render_planar`. The guarded arm then equals the unguarded control
 //! arm and differs from the canonical pin.
 
 use engine::realtime::{PlanarBufferMut, PreparedRenderPlan, RenderIo};
@@ -85,14 +85,8 @@ fn render_unguarded(plan: &mut PreparedRenderPlan, sources: &mut SourceControlSe
         let mut samples = [0.0_f32; QUANTUM * 2];
         let output =
             PlanarBufferMut::try_new(&mut samples, 2, QUANTUM, QUANTUM).expect("output planes");
-        plan.render_contiguous(
-            RenderIo {
-                input: None,
-                output,
-            },
-            (block * QUANTUM) as u64,
-        )
-        .expect("render");
+        plan.render_contiguous(RenderIo { output }, (block * QUANTUM) as u64)
+            .expect("render");
         rendered.extend(samples.iter().map(|value| value.to_bits()));
     }
     rendered

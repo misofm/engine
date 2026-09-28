@@ -543,7 +543,6 @@ impl SpectrumCapture {
     /// This path intentionally does not use the public arm/start/cancel methods. The controlled
     /// owner has already consumed the removal receipt that made the slot free, and staging must
     /// leave the observer inactive until the graph publishes its new activation snapshot.
-    #[allow(dead_code)] // C2 private seam is consumed by controlled host admission in C3/C4.
     fn reset_for_controlled_stage(&mut self, mode: HostSpectrumMode, cadence: SpectrumCadence) {
         // The queue is bounded to one record. A free slot normally has no record, but the single
         // bounded pop makes the ownership invariant explicit without a render-side drain loop.
@@ -590,7 +589,6 @@ impl SpectrumCapture {
     }
 
     /// Clean one retired controlled slot after its graph removal receipt.
-    #[allow(dead_code)] // C2 private seam is consumed by controlled host admission in C4.
     fn retire_controlled_after_receipt(&mut self) {
         // The prepared queue has one item, so retirement is bounded to one off-render pop.
         let _ = self.consumer.try_pop();
@@ -1582,11 +1580,9 @@ pub(crate) fn prepare_capture_collection(
     Ok((observers, SpectrumCaptureCollection::new(captures)))
 }
 
-#[allow(dead_code)] // Paired slots are consumed by the controlled host path in C3/C4.
 pub(crate) const CONTROLLED_SLOTS_PER_ENTRY: usize = 2;
 
 /// One private paired slot for a host-controlled capture entry.
-#[allow(dead_code)]
 struct ControlledSpectrumSlot {
     capture: SpectrumCapture,
     handle: u64,
@@ -1596,7 +1592,6 @@ struct ControlledSpectrumSlot {
     retiring_at_revision: Option<u64>,
 }
 
-#[allow(dead_code)]
 impl ControlledSpectrumSlot {
     fn new(capture: SpectrumCapture, handle: u64) -> Self {
         Self {
@@ -1618,14 +1613,12 @@ impl ControlledSpectrumSlot {
 }
 
 /// The paired storage and lifecycle state for one exact public target/channel entry.
-#[allow(dead_code)]
 struct ControlledSpectrumCaptureEntry {
     slots: [ControlledSpectrumSlot; CONTROLLED_SLOTS_PER_ENTRY],
 }
 
 /// Copyable scalar identity used by the host owner when it prepares a publication snapshot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(dead_code)]
 pub(crate) struct ControlledSpectrumDescriptor {
     pub(crate) entry_index: usize,
     pub(crate) slot_index: usize,
@@ -1634,18 +1627,16 @@ pub(crate) struct ControlledSpectrumDescriptor {
 }
 
 /// An affine staged controlled capture candidate. It owns no render resources.
-#[allow(dead_code)]
 pub(crate) struct ControlledSpectrumCandidate {
     entry_index: usize,
     slot_index: usize,
     observer_handle: u64,
     mode: HostSpectrumMode,
-    cadence: SpectrumCadence,
 }
 
-#[allow(dead_code)]
 impl ControlledSpectrumCandidate {
     /// Return the internal controlled graph observer handle.
+    #[cfg(test)]
     #[must_use]
     pub(crate) const fn observer_handle(&self) -> u64 {
         self.observer_handle
@@ -1664,7 +1655,6 @@ impl ControlledSpectrumCandidate {
 }
 
 /// Host-controlled paired spectrum storage with at most one accepted active slot.
-#[allow(dead_code)]
 pub(crate) struct ControlledSpectrumCaptureCollection {
     entries: Box<[ControlledSpectrumCaptureEntry]>,
     touched: [usize; CONTROLLED_SLOTS_PER_ENTRY],
@@ -1672,7 +1662,6 @@ pub(crate) struct ControlledSpectrumCaptureCollection {
     accepted_slot: Option<usize>,
 }
 
-#[allow(dead_code)]
 impl ControlledSpectrumCaptureCollection {
     fn new(entries: Vec<ControlledSpectrumCaptureEntry>) -> Self {
         Self {
@@ -1777,6 +1766,7 @@ impl ControlledSpectrumCaptureCollection {
     }
 
     /// Stage one exact prepared target on an inactive alternate slot.
+    #[cfg(test)]
     pub(crate) fn stage(
         &mut self,
         target: &SpectrumTarget,
@@ -1822,7 +1812,6 @@ impl ControlledSpectrumCaptureCollection {
             slot_index,
             observer_handle,
             mode,
-            cadence,
         })
     }
 
@@ -2949,9 +2938,6 @@ pub struct SpectrumSmoothingConfig {
 }
 
 impl SpectrumSmoothingConfig {
-    /// The normalized service default, in milliseconds.
-    pub const DEFAULT_SMOOTHING_MS: f64 = SPECTRUM_DEFAULT_SMOOTHING_MS;
-
     /// Validate and normalize one smoothing duration.
     pub fn new(smoothing_ms: f64) -> Result<Self, SpectrumSmoothingConfigError> {
         if !smoothing_ms.is_finite() || !(0.0..=SPECTRUM_MAX_SMOOTHING_MS).contains(&smoothing_ms) {

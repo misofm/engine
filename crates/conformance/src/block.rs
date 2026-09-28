@@ -65,10 +65,4 @@ impl<'a, T> PlanarBlock<'a, T> {
     pub const fn samples(&self) -> &'a [T] {
         self.samples
     }
-    /// Returns one channel when in range.
-    pub fn channel(&self, channel: usize) -> Option<&'a [T]> {
-        let start = channel.checked_mul(self.frames)?;
-        let end = channel.checked_add(1)?.checked_mul(self.frames)?;
-        self.samples.get(start..end)
-    }
 }

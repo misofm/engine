@@ -82,13 +82,6 @@ impl ReferenceLr4Crossover {
         (low, high)
     }
 
-    /// Resets both cascades to zero state.
-    pub fn reset(&mut self) {
-        for section in self.low.iter_mut().chain(self.high.iter_mut()) {
-            section.reset();
-        }
-    }
-
     /// Returns `(H_lp^2, H_hp^2)` at a finite frequency inside Nyquist.
     #[must_use]
     pub fn response(&self, frequency_hz: f64) -> Option<(Complex64, Complex64)> {

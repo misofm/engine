@@ -142,7 +142,6 @@ dependencies = [
  "graph-compiler",
  "lane",
  "protocol",
- "rack",
  "session",
  "sha2 0.11.0",
 ]
@@ -1771,7 +1770,6 @@ name = "rack-compiler"
 version = "0.1.0"
 dependencies = [
  "effect-contract",
- "engine",
  "rack",
 ]
 

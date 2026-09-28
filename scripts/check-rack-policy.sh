@@ -22,7 +22,7 @@ compiler_manifest=crates/rack-compiler/Cargo.toml
 if ! rack_dependencies="$(dependencies "$rack_manifest")"; then fail 'rack dependency extraction failed'; fi
 [[ "$rack_dependencies" == $'effect-contract\nengine' ]] || fail 'rack render dependency boundary changed'
 if ! compiler_dependencies="$(dependencies "$compiler_manifest")"; then fail 'rack compiler dependency extraction failed'; fi
-[[ "$compiler_dependencies" == $'effect-contract\nengine\nrack' ]] || fail 'rack compiler dependency boundary changed'
+[[ "$compiler_dependencies" == $'effect-contract\nrack' ]] || fail 'rack compiler dependency boundary changed'
 
 # The MAX_TRACKS ban lives once, in scripts/check-workspace-policy.sh, which scans the whole
 # {crates,hosts,tools} tree -- rack/rack-compiler included -- rather than five copies

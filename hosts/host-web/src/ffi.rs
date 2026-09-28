@@ -5264,7 +5264,6 @@ fn boot_staged(len: u32, mode: StagedBootMode, spectrum_hop: Option<SpectrumHop>
 }
 
 /// Private protected staged boot used by the checkpoint-A fixtures.
-#[allow(dead_code)]
 pub(crate) fn boot_staged_observation_demand(len: u32) -> u32 {
     boot_staged(len, StagedBootMode::ProtectedObservation, None)
 }

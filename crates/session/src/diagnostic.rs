@@ -148,14 +148,6 @@ impl DiagnosticPath {
         Self(segments)
     }
 
-    /// Append a stable-ID selector.
-    #[must_use]
-    pub fn id(&self, id: &str) -> Self {
-        let mut segments = self.0.clone();
-        segments.push(PathSegment::Id(id.to_owned()));
-        Self(segments)
-    }
-
     /// Borrow structured path components.
     #[must_use]
     pub fn segments(&self) -> &[PathSegment] {

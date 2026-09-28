@@ -536,7 +536,6 @@ fn graph_tap_fixtures() -> (Vec<u8>, String) {
     let mut pcm = vec![0.0_f32; frames * 2];
     plan.render(
         RenderIo {
-            input: None,
             output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames).expect("output"),
         },
         RenderTime { absolute_sample: 0 },

@@ -12,7 +12,7 @@ make_fixture() {
     mkdir -p "$fixture/crates/rack/src" "$fixture/crates/rack-compiler/src"
     printf '[workspace]\nmembers = []\n' >"$fixture/Cargo.toml"
     printf '[package]\nname = "rack"\n[dependencies]\nengine.workspace = true\neffect-contract.workspace = true\n' >"$fixture/crates/rack/Cargo.toml"
-    printf '[package]\nname = "rack-compiler"\n[dependencies]\nengine.workspace = true\neffect-contract.workspace = true\nrack.workspace = true\n' >"$fixture/crates/rack-compiler/Cargo.toml"
+    printf '[package]\nname = "rack-compiler"\n[dependencies]\neffect-contract.workspace = true\nrack.workspace = true\n' >"$fixture/crates/rack-compiler/Cargo.toml"
     printf '//! fixture\n' >"$fixture/crates/rack/src/lib.rs"
     printf '//! fixture\n' >"$fixture/crates/rack-compiler/src/lib.rs"
 }

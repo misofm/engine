@@ -20,7 +20,7 @@
 # from the same file, so a timing number and a console number were taken under the same rules.
 set -euo pipefail
 [[ "$#" == 0 ]] || { printf 'usage: %s\n' "$0" >&2; exit 2; }
-root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$root"
 # shellcheck source=scripts/check-bench-preconditions.sh
 source "$root/scripts/check-bench-preconditions.sh"

@@ -631,7 +631,6 @@ fn feed_sources(
     Ok(())
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Default)]
 enum RealOutputFault {
     #[default]

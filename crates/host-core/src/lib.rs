@@ -50,7 +50,7 @@
 //! |---|---|---|
 //! | [`prepare_host_session`] / [`prepare_host_runtime`] | control | allocates, parses and compiles; never inside an audio callback |
 //! | [`PreparedHost::start_render_session`] / [`StartedRenderSession::start`] | render, once | attests this thread's floating-point environment before the first block and returns the plan on refusal |
-//! | [`StartedRenderSession::render_contiguous`] | render, exclusively | the guarded render entry: pins the canonical floating-point environment for the block and restores the caller's exact control word |
+//! | [`StartedRenderSession::render_planar`] | render, exclusively | the guarded render entry: pins the canonical floating-point environment for the block and restores the caller's exact control word |
 //! | [`SourceControlSet::submit`] / [`SourceControlSet::seek`] | control, one thread at a time | copies once into the ring, returns typed backpressure, never blocks and never allocates |
 //! | `PreparedRenderPlan::render(io, RenderTime { absolute_sample })` | render, exclusively | exactly once per quantum; `absolute_sample` must equal the previous report's `next_absolute_sample`, and `0` on the first call; no other call touches the plan from any other thread |
 //! | `drop(PreparedHost)` / `PlanRetirer::try_reclaim` | control | only after the render thread has quiesced; never from the callback |
@@ -89,8 +89,6 @@
 //!   attested. [`PreparedHost`] stays `Send`, because moving *preparation* to the render thread is
 //!   the supported hand-off.
 
-#[cfg(feature = "control-provider")]
-pub mod builtin_batch_endpoint;
 pub mod control_preparation;
 #[cfg(feature = "control-provider")]
 pub mod control_provider;
@@ -105,8 +103,6 @@ pub use control_preparation::{
 pub mod prepare;
 pub mod render_session;
 pub mod response;
-#[cfg(feature = "control-provider")]
-pub mod scalar_point_endpoint;
 pub mod shape;
 pub mod solo;
 pub mod source;
@@ -221,11 +217,6 @@ pub use spectrum::{
 /// and the reason the join is an explicit call rather than an inference.
 pub use builtins_compiler::{session_structural_symmetry, track_mono_source};
 pub use effect_contract::{ChannelSymmetryWitness, LiveConsoleRecord, SeamSide, SymmetryEvent};
-
-#[cfg(feature = "control-provider")]
-pub use builtin_batch_endpoint::*;
-#[cfg(feature = "control-provider")]
-pub use scalar_point_endpoint::*;
 
 #[doc(hidden)]
 pub use session::CompiledSession;

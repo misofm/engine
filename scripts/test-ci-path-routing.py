@@ -654,6 +654,12 @@ def main() -> int:
         "        run: bash scripts/check-workspace-policy.sh\n",
         "        run: true\n",
     )
+    # Issue #1021: the test-support coverage guard and its mutation tests stay on the lint job.
+    spec = importlib.util.spec_from_file_location("ci_checker", CHECKER)
+    checker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checker)
+    for line in checker.TEST_SUPPORT_CI_LINES:
+        workflow_mutation_fails("qualification.yml", "          " + line, "")
     # Issue #1009: wasm-guests leaves the V8 spill leg to artifact-gates, so artifact-gates must run
     # it on the downloaded artifact, after the pin check.
     workflow_mutation_fails(

@@ -150,7 +150,7 @@ elif [[ "$#" != 0 ]]; then
 ' "$0" >&2
     exit 2
 fi
-root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$root"
 # shellcheck source=scripts/check-bench-preconditions.sh
 source "$root/scripts/check-bench-preconditions.sh"

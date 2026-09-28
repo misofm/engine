@@ -6,8 +6,6 @@
 
 mod btlv;
 mod controller;
-mod controller_delivery;
-mod delivery;
 mod message_wire;
 mod model;
 mod queue;
@@ -78,13 +76,3 @@ pub use controller::{
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use controller::{MockProvider, MockProviderConfig};
-pub use controller_delivery::{
-    ControllerAutomationDelivery, ControllerAutomationPrepareError, ControllerAutomationResources,
-};
-pub use delivery::{
-    AutomationDeliveryControl, AutomationDeliveryRender, CancelComplete, CancelToken,
-    CoreCancelComplete, CoreCancelToken, CoreCompletion, CoreTerminalDisposition, CoreTicket,
-    DeliveryCoreControl, DeliveryCoreRender, DeliveryError, DeliveryResourceReport, DeliveryTicket,
-    HandoffResult, PendingAutomation, PreparedAutomationDelivery, PreparedDelivery,
-    PreparedDeliveryCapabilities, TerminalAutomation,
-};

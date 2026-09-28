@@ -1,112 +1,33 @@
 #!/usr/bin/env bash
-# Issue-149 console benchmark preflight: everything that can fail without launching the workload.
+# Native console benchmark preflight: everything that can fail without launching the workload.
 #
 # AGENTS.md requires benchmark infrastructure to preflight arguments, schema, output persistence,
 # shell exit semantics and overwrite refusal *before* the timed workload runs, so that a runner
 # defect cannot consume the one authorised measurement. Nothing here is timed.
 #
-# It takes the same optional phase argument the runner does, and checks the overwrite refusal
-# against the directory that run would actually write. Hardcoding phase 1's directory made this
-# script unusable the moment phase 1's record was committed, which defeated the purpose: the
-# preflight has to be runnable immediately before the run it protects.
+# Usage: preflight-console-benchmark.sh --step NAME
 #
-# `--round2-lane` and `--round2-lane-baseline` are the paired class-A arms of round 2's lane
-# lowerings; see the runner's header for what they measure and why their digests must match.
-#
-# `--strip2` and `--strip2-baseline` are the paired arms of the strip/overhead round's job 2: the
-# fader and the pan matrix become strip-intrinsic banked chain slots. They were 128 individually
-# dispatched per-track `Bound` ops at `L = f32` sitting *between* the cohorts' chains; they are now
-# builtin banks at the cohort's lane order, so issue #202 rec 2's dataflow candidacy fuses
-# `builtins -> EQ -> compressor -> limiter -> fader -> matrix` into ONE chain per cohort. The
-# counters say so without ambiguity: the 64-track fixture goes from 32 bank slots to 48 with
-# `chains` and `transposes` staying at one per cohort per block. Class **A** -- every
-# `output_sha256` must reproduce the baseline arm's exactly, on every row and every leg, and the
-# two records differ only in time.
-#
-# What is removed: 128 per-op passes, their buffers and most of the `execute_op` scaffolding for
-# them, and the 64 `reduce_plane` stereo block copies out of the limiter's dedicated buffer -- the
-# fader is now a chain *slot*, and a later slot's op is never executed at all. What is added:
-# 63 arena buffers on this fixture, because a chain that spans two more stages holds its bank
-# window over a longer op range. `dispatch_only` is the row that should move most; `console` is the
-# row the round is for. The nine-track ragged row is expected to move the *other* way by a little:
-# its one-track tail now banks its fader and matrix like any other cohort and pays one extra
-# planar/AoSoA round-trip per block for them, which is reported rather than hidden.
-#
-# The baseline arm is the base commit with this arm registration and nothing else.
-#
-# `--strip1` and `--strip1-baseline` are the paired class-A arms of the strip round's job 1,
-# the prepared-identity builtin-section elision; see the runner's header.
-#
-# `--mono3` and `--mono3-baseline` are the paired arms of mono re-engage M3 (PR #230) and of #210
-# phase 3's class-A OFF claim (PR #231); see the runner's header for the two trees, the four
-# readings they carry, and why phase 3 gets no directory of its own.
+# It takes the runner's one form and checks the overwrite refusal against the directory that run
+# would actually write, `artifacts/steps/NAME`, so it is runnable immediately before the run it
+# protects. Any other invocation, including none, is a usage error (exit 2). #1025 retired the
+# historical one-shot arms; the runner's header points at where they are kept.
 set -euo pipefail
-phase_directory=issue149
-# `--step NAME` is the per-issue arm of a sequential optimisation batch: one record per merged
-# issue, written to `artifacts/steps/NAME`, so each issue's motion is read against the step
-# before it rather than against one paired baseline. NAME is lowercase kebab-case, at most 64
-# characters, and like every arm it refuses to overwrite an existing record.
-if [[ "$#" == 2 && "$1" == --step ]]; then
-    [[ "$2" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]] || { printf 'invalid --step name: %s\n' "$2" >&2; exit 2; }
-    phase_directory="steps/$2"
-elif [[ "$#" == 1 ]]; then
-    case "$1" in
-        --phase2) phase_directory=issue149-phase2 ;;
-        --phase3) phase_directory=issue149-phase3 ;;
-        --issue163-phase0) phase_directory=issue163-phase0 ;;
-        --issue163-phase1) phase_directory=issue163-phase1 ;;
-        --issue163-phase2) phase_directory=issue163-phase2 ;;
-        --issue163-phase3) phase_directory=issue163-phase3 ;;
-        --issue163-phase4) phase_directory=issue163-phase4 ;;
-        --issue175) phase_directory=issue175 ;;
-        --issue182) phase_directory=issue182 ;;
-        --issue-loop-eq-r1) phase_directory=issue-loop-eq-r1 ;;
-        --compressor-round1) phase_directory=compressor-round1 ;;
-        --compressor-round1-baseline) phase_directory=compressor-round1-baseline ;;
-        --round1-composed) phase_directory=round1-composed ;;
-        --issue184) phase_directory=issue184 ;;
-        --round2-lane) phase_directory=round2-lane ;;
-        --round2-lane-baseline) phase_directory=round2-lane-baseline ;;
-        --round2-eqrack) phase_directory=round2-eqrack ;;
-        --round2-eqrack-baseline) phase_directory=round2-eqrack-baseline ;;
-        --round2-comp) phase_directory=round2-comp ;;
-        --round2-comp-baseline) phase_directory=round2-comp-baseline ;;
-        --round2-lim) phase_directory=round2-lim ;;
-        --round2-lim-baseline) phase_directory=round2-lim-baseline ;;
-        --round2-composed) phase_directory=round2-composed ;;
-        --audit-chain-merge) phase_directory=audit-chain-merge ;;
-        --audit-chain-merge-baseline) phase_directory=audit-chain-merge-baseline ;;
-        --strip1) phase_directory=strip1 ;;
-        --strip1-baseline) phase_directory=strip1-baseline ;;
-        --strip2) phase_directory=strip2 ;;
-        --strip2-baseline) phase_directory=strip2-baseline ;;
-        --strip3) phase_directory=strip3 ;;
-        --strip3-baseline) phase_directory=strip3-baseline ;;
-        --strip4) phase_directory=strip4 ;;
-        --mono2) phase_directory=mono2 ;;
-        --mono3) phase_directory=mono3 ;;
-        --mono3-baseline) phase_directory=mono3-baseline ;;
-        --issue368-floor-recount) phase_directory=issue368-floor-recount ;;
-        --issue399-rt1) phase_directory=issue399-rt1 ;;
-        --issue415-rt1-measurement) phase_directory=issue415-rt1-measurement ;;
-        --issue419-rt2) phase_directory=issue419-rt2 ;;
-        --issue420-rt3) phase_directory=issue420-rt3 ;;
-        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline|--strip4|--mono2|--mono3|--mono3-baseline|--issue368-floor-recount|--issue399-rt1|--issue415-rt1-measurement|--issue419-rt2|--issue420-rt3]\n' "$0" >&2; exit 2 ;;
-    esac
-elif [[ "$#" != 0 ]]; then
-    printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline|--strip4|--mono2|--mono3|--mono3-baseline|--issue368-floor-recount|--issue399-rt1|--issue415-rt1-measurement|--issue419-rt2|--issue420-rt3]\n' "$0" >&2
+if [[ "$#" != 2 || "$1" != --step ]]; then
+    printf 'usage: %s --step NAME\n' "$0" >&2
     exit 2
 fi
+[[ "$2" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]] || { printf 'invalid --step name: %s\n' "$2" >&2; exit 2; }
+step_directory="steps/$2"
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$root"
 
 fail() { printf 'console preflight failure: %s\n' "$1" >&2; exit 1; }
 
-artifact_dir="$root/artifacts/$phase_directory"
+artifact_dir="$root/artifacts/$step_directory"
 for name in console-benchmark.raw.jsonl console-benchmark.accepted.jsonl \
     console-benchmark.stderr.log console-benchmark.disposition.json; do
     path="$artifact_dir/$name"
-    [[ ! -e "$path" && ! -L "$path" ]] || fail "issue-149 artifact already exists: $path"
+    [[ ! -e "$path" && ! -L "$path" ]] || fail "console artifact already exists: $path"
 done
 
 for tool in awk cmp cp git jq sha256sum wc; do

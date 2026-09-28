@@ -175,5 +175,7 @@ in it should be read as having built one. The gate is restated at the validation
 * **HPF/LPF liveness**: a workload that needs live filter moves, *plus* the elision-invalidation
   hook above, *plus* #191's slope decision, designed together.
 * **`delay_samples` liveness**: a re-timing story that does not glitch.
-* **Builtin automation rendering**: #140's span feed.
+* **Builtin automation rendering**: #140's span feed. (Re-pointed 2026-09-28: #140 was descoped,
+  and rendering stored session automation is now owned by #1058; see
+  `engine-footprint-2026-09-28.md`.)
 * **`LIVE` recoverability**: an M-series change that consults the state proof before the witness.
