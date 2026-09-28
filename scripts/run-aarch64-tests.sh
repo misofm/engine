@@ -135,7 +135,7 @@ if [[ "$mode" == debug ]]; then
         packages+=(-p "$crate")
     done <<<"$product_list"
     packages+=(-p dsp-reference -p conformance -p target-smoke)
-    features=builtins-compiler/test-support,source/test-support,graph/test-support
+    features=builtins-compiler/test-support,graph/test-support
     features+=,host-core/test-support,effect-compiler/test-support,protocol/test-support
     features+=,engine/realtime-audit,math/lane,parametric-eq/test-support,builtins/test-support
     check_skip_names --locked --all-targets "${packages[@]}" --features "$features"
