@@ -37,7 +37,7 @@ mod state;
 pub mod corpus;
 
 use effect_contract::{
-    AutomationRate, AutomationSpanKind, BankProcessReport, EffectBankProcessBlock,
+    AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
     EffectDescriptor, EffectPrepareError, EffectProcessBlock, EffectQuality, InitialParameterValue,
     LatencySamples, LinkModeSet, NativeEffectFactory, ObservationCadence, ObservationChannels,
     ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind, ObservationSample,
@@ -804,16 +804,18 @@ impl NativeEffectFactory for CompressorFactory {
             width: request.width,
             program_key: metadata.program_key(),
         };
-        Ok(Some(match Backend::current() {
-            Backend::Simd4 => Box::new(PreparedCompressorBank::<Simd4> {
+        // The check above proved this build's backend runs `request.width`, so the width picks the
+        // lane type. Matching the `Backend` variants instead would have to name the test-only
+        // `Backend::Scalar` (#1059).
+        Ok(Some(match request.width {
+            BankWidth::Four => Box::new(PreparedCompressorBank::<Simd4> {
                 metadata: bank_metadata,
                 instance: Instance::new(metadata, &left_defaults, &right_defaults),
             }) as Box<dyn PreparedNativeEffectBank>,
-            Backend::Simd8 => Box::new(PreparedCompressorBank::<Simd8> {
+            BankWidth::Eight => Box::new(PreparedCompressorBank::<Simd8> {
                 metadata: bank_metadata,
                 instance: Instance::new(metadata, &left_defaults, &right_defaults),
             }) as Box<dyn PreparedNativeEffectBank>,
-            Backend::Scalar => return Ok(None),
         }))
     }
 }

@@ -45,6 +45,11 @@ target: the one shipped artifact is `simd128` (W4-D1). It stays allowed only bec
 When the legs go, delete the one marked arm of the guard. The scalar arm of
 `lane::Backend::current()` will then be unreachable.
 
+The exception is also why `lane::Backend::Scalar` exists without `lane/test-support` on those
+builds (#1059). A scalar-wasm build names the variant but compiles none of the whole-plan scalar
+lowering, which is test-only: nothing on those legs compiles a plan, and one that tried would stop
+at a named panic in `builtins-compiler`.
+
 ## Dispatch contract
 
 **Superseded by #83 D4 (revision 4) via #84 phase A.** There is no runtime SIMD dispatch and no
@@ -56,6 +61,14 @@ CI exception above, since every other target fails to compile), and
 `lane::attest_host()` refuses at boot on an x86 CPU that lacks the pinned AVX2/FMA
 rather than degrading silently. `effect_contract::BankWidth::for_backend` is the
 workspace's single backend-to-width law.
+
+**The whole-plan scalar backend is a test-only oracle** (owner ruling 2026-09-28, decision 3;
+#1059). `lane::Backend::Scalar` exists only with `lane/test-support` (and on the scalar-wasm
+exception), and the per-node strip lowering, its scalar pair owners and the graph's scalar
+pairing passes compile only for tests and the `test-support` features. Tests compile a plan at
+`Scalar` to prove that banking never moves a rendered bit. `scripts/check-scalar-oracle-absent.py`
+fails if the shipped AudioWorklet module or a release `capi` library contains any of it. The
+one-lane `f32` `Lane`, each effect's per-node leg and every frame loop's tail, is not gated.
 
 No Cargo feature is named `simd128`, `neon`, `avx2`, or `fma`. CPU ISA flags must never be made
 global in `.cargo/config.toml`, package manifests, or release defaults beyond the workspace's
