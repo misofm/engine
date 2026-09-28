@@ -1,1 +1,0 @@
-python3 artifacts/issue630-attempt1-checks/lease-run.py --tag 04 -- git diff --check origin/main...HEAD

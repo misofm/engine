@@ -1,2 +1,0 @@
-command=PATH=/home/bl/.cargo/bin:$PATH bash scripts/check-builtins-policy.sh
-status=pass

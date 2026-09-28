@@ -1,1 +1,0 @@
-cargo test --locked -p bench --bin bench

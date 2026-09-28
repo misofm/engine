@@ -1,1 +1,0 @@
-clippy --locked -p protocol --all-targets --all-features -- -D warnings

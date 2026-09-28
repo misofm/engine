@@ -1,1 +1,0 @@
-PASS: scalar excludes simd128/atomics feature and supports pointer atomics; SIMD includes simd128. Both rustc producers exited0.
