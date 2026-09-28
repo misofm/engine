@@ -878,7 +878,6 @@ fn control_calls_inside_a_plan_swapping_render_call_keep_replacement_live() {
             .owner
             .render_contiguous(
                 RenderIo {
-                    input: None,
                     output: PlanarBufferMut::try_new(&mut pcm, 2, 128, 128).expect("output"),
                 },
                 sample,
@@ -1034,7 +1033,6 @@ fn a_valid_edit_inside_the_swap_window_is_backpressured_not_compile_rejected() {
         .owner
         .render_contiguous(
             RenderIo {
-                input: None,
                 output: PlanarBufferMut::try_new(&mut pcm, 2, 128, 128).expect("output"),
             },
             128,
