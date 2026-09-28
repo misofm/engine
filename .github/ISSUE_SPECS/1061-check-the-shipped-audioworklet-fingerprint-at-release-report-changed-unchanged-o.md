@@ -602,3 +602,120 @@ The header comment now reads "sixteen leaf jobs (#1017 added the two AArch64 job
     their usage message. They ran through their callers or with their arguments above.
 - **The rest.** `web-audioworklet-identity.py --self-test` passes; `check-env-vocabulary.sh` (67)
   and `test-env-vocabulary.sh` pass; `cargo fmt --all --check` passes.
+
+## Sol verdict, attempt 2
+
+**FAIL.** Attempt 1's toolchain case is fixed, but its root cause is not. The base module is still
+rebuilt in the PR's build environment. So a workflow-level cargo variable, which the checker lets
+through, reports `ARTIFACT UNCHANGED` while the module CI built has moved. Everything else holds.
+
+Reviewer: Sol, 2026-09-28, on `d0e55daf`.
+- Scenarios are synthetic `pull_request` merge commits onto `d0e55daf`. They run through the
+  workflow's own `run:` blocks, with workflow-, job- and step-level env, in a clone at another path.
+- Merges were checked against `codex/batch-slim-2` at `6709552c`, which carries the slim-2 re-pin.
+
+### Findings, by severity
+
+1. **HIGH: the base is still built in the PR's environment, so a build-affecting variable gives a
+   false `ARTIFACT UNCHANGED`.**
+   - Only `RUSTUP_TOOLCHAIN` is taken from the base. Everything else the PR's workflow sets reaches
+     the base build, because cargo reads it from the environment. That includes `CARGO_PROFILE_*`,
+     `CARGO_ENCODED_RUSTFLAGS` (which overrides the build script's `RUSTFLAGS`), `GITHUB_ENV` and
+     `GITHUB_PATH`.
+   - **T5.** The PR adds one line to the workflow-level `env:`,
+     `CARGO_PROFILE_RELEASE_OPT_LEVEL: s`. `check-ci-path-routing.py` stays green.
+     - `artifact` built `6d9e8945...`, where the base's CI built `6c952a2c...`. The twin agreed.
+     - The base was rebuilt under the same variable, gave `6d9e8945...`, and the job passed:
+       `ARTIFACT UNCHANGED: 6d9e8945... is the base d0e55daf...'s module`. That is false.
+     - From then on every artifact gate tests bytes that `npm-publish.yml`, which has no such
+       variable, does not build. The next release PR fails only at `qualify`. The per-PR pin
+       caught this at once.
+   - **Job-level toolchain overrides.** A job-level `RUSTUP_TOOLCHAIN` on `artifact` is allowed
+     (T2), but `toolchain` never reads it. Once one merges, every later PR rebuilds the base with
+     the workflow-level value and reports a false `ARTIFACT CHANGED`. `toolchain --commit` over
+     T2's merge prints `1.97.1`, while that commit's `artifact` job built with `1.98.1`.
+   - **A deliberate route.** The toolchain install step is not pinned. One line in it,
+     `echo "$(dirname "$(rustup +1.98.1 which cargo)")" >> "$GITHUB_PATH"`, keeps the checker
+     green and builds the base with 1.98.1 despite `RUSTUP_TOOLCHAIN=1.97.1`. Measured: `cargo`
+     and `rustc` resolve to 1.98.1 under that `PATH`.
+   - **Fix: pin the build environment in the checker, not only the steps.**
+     - The workflow-level `env:` allows exactly `CARGO_TERM_COLOR` and `RUSTUP_TOOLCHAIN`.
+     - `artifact` and `artifact-identity` carry no job-level `env:` or `defaults:`.
+     - The install step's body is the two `rustup` lines, and their version equals the
+       workflow's `RUSTUP_TOOLCHAIN`.
+     - Plant T5, a job-level override and a `GITHUB_PATH` or `GITHUB_ENV` write in the install
+       step; each must go red.
+2. **LOW: the release check does not tie `npm-publish.yml`'s `RUSTUP_TOOLCHAIN` to
+   `qualification.yml`'s.**
+   - After a toolchain bump in `qualification.yml` alone (T1), a release PR passes
+     `artifact-identity`, then `qualify` builds with 1.97.1 and refuses.
+   - That fails safe, but `docs/RELEASE.md` step 4 should name that literal, or `release_checks`
+     should compare the two.
+3. **LOW: the docs will be stale after the slim-2 re-pin.** `docs/RELEASE.md` ("The pin is
+   `f7bd75ca...` ... `570a79f0`") and `hosts/host-web/DEPLOYMENT.md` name the slim-1 pin. The
+   batch-2 boundary (`cbfaf9de`) re-pins to `6c952a2c...`, with `results.json` over `cbfaf9de`.
+   Update the literals when #1061 merges into batch 3, or stop naming them.
+4. **Pre-existing, not #1061: vacuous-pass classes the routing checker misses for every job.** Each
+   of these is green on `c69736c1` for `sdk`, and green on this branch for `artifact-identity`:
+   - a job-level `continue-on-error: true`;
+   - `defaults.run.shell: bash {0}`, which masks the identity self-test's exit;
+   - a verdict env hard-coded to `success`;
+   - an expectation-table entry swapped.
+
+   These belong in a follow-up issue.
+
+### Attempt 1's findings
+
+- **HIGH (toolchain): fixed for every toolchain route I tried.**
+  - **T1**, workflow-level `RUSTUP_TOOLCHAIN` 1.97.1 to 1.98.1 only: the base read `1.97.1` from
+    the base commit and built `6c952a2c...`; `artifact` and the twin built `b7dfd909...`. The report
+    is `ARTIFACT CHANGED`, with "(a toolchain change)".
+  - **T2**, job-level `RUSTUP_TOOLCHAIN: 1.98.1` on `artifact` and `artifact-identity` only: the
+    same result, CHANGED.
+  - **`rust-toolchain.toml` only**: the workflow `RUSTUP_TOOLCHAIN` beats the file (`rustc -V` in
+    a 1.98.1 `rust-toolchain.toml` directory gives 1.97.1 under the env). So neither CI nor
+    `npm-publish.yml` builds differently, and `UNCHANGED` is right.
+  - **Components and targets**: these do not change codegen.
+  - **The base toolchain comes from the base commit.** `pinned_toolchain` reads it through
+    `git show BASE:`. The base step's `RUSTUP_TOOLCHAIN="$toolchain"` is pinned, and it beats job
+    env and `GITHUB_ENV`. Only the `GITHUB_PATH` route in finding 1 gets past it.
+- **MEDIUM (lint): fixed.** My mutants, run on the new checker:
+  - `base_args` deleted: killed;
+  - `--event none`: killed;
+  - `fetch-depth` dropped: killed;
+  - my new one, the identity job needing `[route, artifact, sdk]`: killed.
+
+  Job-level `continue-on-error` and `defaults` survive; that is finding 4.
+- **LOW (no-base wording, docs, header): fixed**, apart from finding 3.
+
+### Merges
+
+- **`665ae26e` (batch-2 head `c69736c1`).** Against `c69736c1`, `qualification.yml` differs only in
+  #1061's hunks. These survive intact:
+  - #1017's `aarch64-debug` and `aarch64-release` jobs;
+  - their verdict `needs:`, env and `check` lines (`full_expected`);
+  - `cross-target`'s mobile targets.
+
+  The routing scripts lose only the old `ARTIFACT_PIN_STEP` and the old `needs:` mutation string.
+- **`d0e55daf` into `6709552c` (the slim-2 re-pin).** One conflict, in
+  `scripts/test-web-audioworklet.mjs`: `cbfaf9de` re-pinned `REAL_WASM_SHA256` inside the block
+  #1061 deletes.
+  - Taking #1061's side leaves the file identical to the branch's.
+  - The pin and `results.json` merge cleanly and keep the batch's `6c952a2c...` over `cbfaf9de`.
+  - The module built on the merge is `6c952a2c...`.
+
+### Gates
+
+On the re-pin merge, all of these pass:
+- `check-web-audioworklet.sh` on the freshly built set, `test-web-audioworklet.sh`,
+  `test-web-audioworklet.mjs`, `test-sdk-artifact-builder-output-contract.sh`, and the V8 spill
+  gate on the module;
+- `check-env-vocabulary.sh` (67);
+- every `check-*.py` and `test-*.py` under `python3 -B`, including `check-ci-path-routing.py`,
+  `test-ci-path-routing.py`, `check-script-reachability.py` (137), `test-script-reachability.py`,
+  `check-browser-expected-resources.py` (26 mutations), `test-npm-publish-modes.py` and
+  `test-test-support-ci.py`. The six scripts that need arguments exit with their usage;
+- the identity self-test;
+- actionlint 1.7.7 on `qualification.yml` and `npm-publish.yml`, on the branch and on the merge.
+  With shellcheck 0.10.0 the warnings are the same four (SC2034 once, SC2251 three times) as on
+  `c69736c1`, and none come from the #1061 blocks.
