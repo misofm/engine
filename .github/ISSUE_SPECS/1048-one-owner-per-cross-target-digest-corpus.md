@@ -100,3 +100,159 @@ See [`../VERIFY-TEST-VALUE.md`](../VERIFY-TEST-VALUE.md). **These amendments sup
    shows the loss is accepted: the per-crate finiteness test stays green and G5, in release, cannot
    see it. State this in the PR.
 4. **Gate 3.** Baseline `wasm-gates` unmutated with the same environment before the mutant runs (F4).
+
+## Attempt 1 evidence
+
+Terra, 2026-09-28, branch `codex/1048-one-digest-owner` from `codex/batch-slim-1` (`b8bea8e1`).
+Commits `a7f6fd65` and `a3ddee82`. Excluding this spec: 33 files, +434/-695 lines against the base
+(the Rust files alone: +235/-664).
+
+**Changed.**
+- **The ten per-crate compares.** Each loses its pin comparison, its width sweep (which only fed
+  the pin claim) and its `MISO_ENGINE_REPIN_*_CORPUS` switch. Each keeps its finiteness and
+  non-vacuity assertions, and each rewritten test names its claim in its doc comment (the
+  AGENTS.md test-value rule on `codex/1052-test-value-rule`). `compressor`'s `no_case_is_vacuous`
+  now checks distinctness over the rendered words instead of the pin table, whose distinctness
+  G5's `g5_case_digests_are_distinct` already checks.
+- **The owner.** `g5_native_digests_match_pins` (`tools/wasm-gates/tests/g5_native_corpus.rs:33`)
+  now also holds the three truth-table counts that `wasm_gates --native` reports (min/max
+  lowering, `f64` lanes, meter block) to zero, so it covers everything the script's native leg
+  covers. On a mismatch it prints the scalar oracle's digest of every case that moved at `f32`, in
+  pin-table form (`:73`). That replaces the nine per-crate re-pin printers. A case that moved only
+  at a vector width is not printed, because it is a defect, not a re-pin.
+- **Amendment 1.** `scripts/run-wasm-gates.sh` keeps its native leg by default and gains
+  `--without-native`. The flags can come in any order, and an unknown `--without-*` exits 2.
+  `wasm-guests` passes `--without-v8-spill --without-native`, and its `wasm-gates.jsonl` now holds
+  only the two guest lines. `check-ci-path-routing.py:420` `check_qualification_native_g5` refuses
+  `--without-native` unless `test-release` runs an unconditional, unfiltered
+  `cargo test --release -p wasm-gates`, on the same job-level route as `wasm-guests`.
+  `test-ci-path-routing.py` has six mutations, each red for this reason: the owner dropped, the
+  owner in debug, `-- --skip g5_native_digests_match_pins`, `--lib`, a step `if:`, and a narrower
+  job route.
+- **Amendment 2.** #1017's AArch64 job is not on this batch (its branch has no workflow change
+  yet), so the guard is mechanical. `check_qualification_aarch64_g5` (`:444`) activates when any
+  qualification job runs on a GitHub-hosted arm64 label (`ubuntu-*-arm`, or `macos-14` and later
+  but not `-large`). It then requires one such job to run the same release G5 test. Two mutation
+  tests cover it: `test-debug-b` on `ubuntu-24.04-arm` is refused, and `test-release` on
+  `macos-15` passes.
+  **Hand-off to #1017:** its AArch64 job must run `cargo test --locked --release -p wasm-gates`, or
+  this checker fails. On this host, the ten crates' tests and `wasm-gate-corpus` pass
+  `cargo check --target aarch64-unknown-linux-gnu`. `wasm-gates` itself cannot be checked
+  cross: wasmtime's C helper needs an aarch64 sysroot, which this host lacks.
+- **Docs.** `docs/ENGINE_ENV_VOCABULARY.md` retires the REPIN corpus family and says where
+  re-pinning happens now.
+- **Scope beyond the listed paths.** All of these are consequential and doc-only or dependency
+  hygiene:
+  - the `corpus.rs` module docs of eight crates, `parametric-eq/src/lib.rs:3721`,
+    `soft-clip/tests/lane_identity.rs` and two `MUTATIONS.md` test-index rows no longer call the
+    per-crate test the pin comparer;
+  - four crates (`effect-runtime`, `multiband-compressor`, `gate-expander`, `soft-clip`) drop
+    their now-unused `sha2` dev-dependency, which removes 4 lines from `Cargo.lock`;
+  - `qualification.yml` and both routing scripts, per amendment 1.
+- The historical `MUTATIONS.md` rows that name a per-crate compare as RED are dated records and
+  are left alone. Those catches now land in G5; gate 3 shows this for the compressor.
+
+**Removed tests and their surviving owner.** `cargo test -- --list` over the affected packages
+(dev, the CI features) goes from 718 to 707 tests. 13 lines are removed and 2 are added: the 2
+renames.
+
+| removed | surviving owner |
+|---|---|
+| `builtins` `determinism::every_corpus_case_matches_its_pin_at_every_width` | G5 `builtins/*` cases (all 10) at 3 widths, plus the wasm guests |
+| `compressor` `cross_target::the_corpus_matches_its_pins_at_every_width` | G5 `effect/compressor/*` at 3 widths (identical catch set, gate 3) |
+| `delay` `determinism::corpus_digests_match_their_pins` | G5 `delay/*`, width 0 only, as before (`W = 1` effect) |
+| `effect-runtime` `determinism::the_corpus_matches_its_pins` | G5 `runtime/*` at 3 widths |
+| `gate-expander` `determinism::every_case_agrees_at_every_width_and_matches_its_pin` | G5 `effect/gate_expander/*` at 3 widths |
+| `parametric-eq` `determinism::the_corpus_digests_match_the_pins_at_every_width` | G5 `effect/parametric_eq/*` at 3 widths |
+| `soft-clip` `determinism::every_case_matches_its_pin_at_every_width` | G5 `effect/soft_clip/*` at 3 widths |
+| `transient-shaper` `cross_target::the_pinned_digests_hold` | G5, transient-shaper cases at 3 widths; the crate's `every_width_produces_the_same_words` is untouched |
+| `true-peak-limiter` `determinism::every_case_has_one_digest_at_every_width` → `every_case_is_finite_and_not_vacuous` | pin and width half: G5 `effect/true_peak_limiter/*`; the finiteness half is kept |
+| `multiband-compressor` `cross_target_digest::the_corpus_digests_are_pinned_and_width_independent` → `every_case_is_finite_and_moves` | pin and width half: G5 `multiband/*`; the finiteness half is kept |
+| `delay` `print_pins`, `effect-runtime` `print_digests`, `parametric-eq` `print_pins` (all `#[ignore]` re-pin printers) | G5's scalar-oracle report |
+
+**Guarded identically.**
+- **Same inputs.** G5's `digest_case` (`tools/wasm-gate-corpus/src/lib.rs:1082`) calls each
+  crate's own `run_case` or `case_values` at `f32`, `Simd4` and `Simd8`. It hashes the same words
+  the same way (`:1681-1805`) and compares them against the same constants
+  (`expected_digest`, `:1057`). `g5_delegated_cases_use_the_owning_crates_pins` asserts that every
+  family's case count and pins are covered.
+- **Same targets.** Both ran natively on x86-64. Only the profile differs: debug in `test-debug-b`,
+  release in `test-release`. That is amendment 3's accepted loss, below.
+- **Wasm.** The wasm side is unchanged: the same pins in both guest legs.
+- **M3 is untouched.** `crates/math/tests/m3_determinism.rs` keeps its pins and its FMA-build step.
+
+**Spec gates.**
+1. **Every width is still compared.** The plant is in the compressor's `applied_gain`:
+   `smoothed.add(coef.makeup)` becomes `.sub` only when `L::WIDTH == 4`.
+   - `g5_native_digests_match_pins` goes red in dev and in release (release build 6 m 9 s).
+   - All 4 compressor cases fail, "`at simd4`" only.
+   - The same plant with `L::WIDTH == 1` goes red "`at scalar`", and the report prints the 4
+     scalar-oracle pin rows.
+2. **Wasm is still compared.** The same `.sub`, under
+   `cfg!(all(target_arch = "wasm32", target_feature = "simd128"))`, then
+   `run-wasm-gates.sh --without-v8-spill`:
+
+   | leg | mismatches (of 358) |
+   |---|---:|
+   | native | 0 |
+   | wasm scalar | 0 |
+   | wasm `simd128` | **12**: the 4 compressor cases × 3 widths; exit 1 |
+3. **Mutation equivalence, compressor.**
+   - **Command deviation.** cargo-mutants 27.1's `--test-package` *replaces* the tested package
+     set; it does not add to it. The spec's literal `--test-package wasm-gates` therefore ran only
+     `wasm-gates` tests for every mutant (seen in the mutant logs; that run was aborted). Both runs
+     below used `run-mutants.sh compressor 5 10 --test-package compressor,wasm-gates`, on
+     `b8bea8e1` and on `a7f6fd65`.
+   - **Both runs:** 654 mutants, 513 caught, 96 missed, 43 unviable, 2 timeouts. The mutant keys
+     are identical.
+   - **The caught set is identical.** That holds for all mutants and for the 390 caught product
+     mutants excluding `src/corpus.rs`; none lost, none gained.
+   - **The removed test and G5 had the same catch set.** Both caught 209 mutants: 86 product in
+     `kernel.rs` and `design.rs`, and 123 in `corpus.rs`. The removed test had no unique catch, and
+     G5 catches the same 209 after the change.
+   - `no_case_is_vacuous` gains two `corpus.rs` catches, from the distinctness change.
+   - **Amendment 4 (F4).** Before the mutant runs, `cargo test --package=compressor
+     --package=wasm-gates --no-fail-fast` ran unmutated, with `run-mutants.sh`'s environment. It
+     was green on both trees: 110 passed on the base, 109 after.
+4. **Historical bugs.**
+   - `revert.py 994` turns the compressor's 3 `randomized_differential_*` red, plus 6 knee
+     reproducers. The seventh, `an_automated_knee_ramp_through_the_overflow_band_does_not_duck`,
+     is the one VERIFY F6 already found green on its revert; this change does not touch it.
+   - `revert.py 1015` turns the 3 `stationary_subnormal` tests red.
+5. **Finiteness is kept.** A NaN was seeded mid-output in all ten corpora (scratch tree). Each of
+   the ten kept tests goes red, with its own non-finite or NaN message.
+
+**Amendment 3 (debug-only divergence), stated for the PR.** The plant multiplies the applied gain's
+dB by `1 + f32::EPSILON` under `cfg!(debug_assertions)` only.
+- The kept `cross_target` finiteness and non-vacuity tests stay green in debug.
+- `g5_native_digests_match_pins` in release stays green: it cannot see the change.
+- On the base, the removed debug pin compare was red on all 4 cases at `W=1`.
+- The loss is accepted. In the compressor, 7 other debug-pinned render scenarios happen to catch
+  this plant; that is not a general guarantee.
+
+**Other gates.**
+- `cargo check --workspace --all-targets --all-features`: clean.
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`: clean.
+- `cargo fmt --check`: clean.
+- `RUSTDOCFLAGS=-D warnings cargo doc` for the 11 touched packages: clean.
+- `cargo test` for the ten crates plus `wasm-gates` and `math` (CI features): 685 passed, 0
+  failed, 23 ignored, in dev and in release. The release build needed no
+  `CARGO_PROFILE_RELEASE_PANIC=unwind`.
+- `bash scripts/run-wasm-gates.sh`, the default with the V8 leg: native, wasm scalar and wasm
+  `simd128` each compare 358 with 0 mismatches and zero counts. The CI form
+  `--without-v8-spill --without-native` is green, with 2 evidence lines.
+- `check-ci-path-routing.py` and `test-ci-path-routing.py`: pass.
+- `check-env-vocabulary.sh` and `test-env-vocabulary.sh`: pass.
+- **Policy scripts,** all 60 `scripts/check-*` run with no arguments: 50 pass and 8 only print
+  usage.
+  - `check-sdk-headless.sh` and `check-web-audioworklet.sh` fail on the AudioWorklet artifact pin:
+    expected `476e58ad…`, observed `3f744b03…`. The base `b8bea8e1` builds the same `3f744b03…`
+    module byte for byte, so this is the batch's pending re-pin, not this change.
+  - `check-sdk-types.sh` needs `sdk/node_modules`, which this host lacks.
+
+**Saving.**
+- Serially in debug, the ten binaries ran 7.5 s before and 2.5-3.4 s after, under load average
+  70-85.
+- `wasm-guests` no longer runs the native report; it still builds the runner.
+- Ten pin-compare sites and nine REPIN switches are gone. A re-pin now happens in one place: G5's
+  scalar-oracle report.
