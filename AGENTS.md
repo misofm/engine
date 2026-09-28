@@ -144,7 +144,8 @@ When the user requests fewer CI/CD invocations, use this delivery mode until the
 - A job that cannot fail a merge does not belong on `qualification.yml`.  `fuzz.yml` and
   `nightly.yml` are the non-required workflows: `fuzz.yml` is a paths-filtered per-PR workflow for
   the two bounded fuzz jobs, and `nightly.yml` carries the jobs that gate nothing at all (the
-  non-blocking vectorization report, the descriptive benchmarks, the release-workspace link proof)
+  non-blocking vectorization report and the release-workspace link proof; #1039 retired the
+  descriptive benchmarks under owner ruling R9)
   plus the deep fuzzing and math sweeps the per-PR budget cannot afford.  A check that stops
   reporting on some pull requests must be removed from `main`'s required status checks first, or
   every pull request that skips it stays permanently pending.
