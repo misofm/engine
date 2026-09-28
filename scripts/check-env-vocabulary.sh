@@ -8,48 +8,35 @@ vocabulary=docs/ENGINE_ENV_VOCABULARY.md
 [[ -d tools ]] || fail 'missing required source root: tools'
 [[ -d scripts ]] || fail 'missing required source root: scripts'
 tmp="$(mktemp -d)"; trap 'rm -rf -- "$tmp"' EXIT
-paths0="$tmp/paths0"; classification="$tmp/git-classification"
+# One pass (#1043): a single `git grep` reads every file the gate scans, in place of one `grep` per
+# listed file (12,128 processes on 2026-09-28). The path set is unchanged. In a work tree it is
+# the tracked files and the untracked files Git does not ignore (`git ls-files --cached --others
+# --exclude-standard`); outside one it is every regular file below the root except `.git/` and the
+# top-level `target/` (the former `find` listing). Both drop the vocabulary and the issue specs.
+classification="$tmp/git-classification"
+exclusions=(":(exclude,literal)$vocabulary" ':(exclude,literal).github/ISSUE_SPECS/')
 if git rev-parse --is-inside-work-tree >"$classification" 2>&1; then
     [[ "$(<"$classification")" == true ]] || fail 'Git classification returned unexpected output'
-    git ls-files -z --cached --others --exclude-standard >"$paths0" 2>"$tmp/git-listing-error" || {
-        tr '\0' '\n' <"$paths0" >&2 || true
-        cat "$tmp/git-listing-error" >&2; fail 'Git file listing failed'
-    }
+    mode=--untracked
 else
     rc=$?; classification_output="$(<"$classification")"
     if [[ "$rc" == 128 && -z "${GIT_DIR+x}" && -z "${GIT_WORK_TREE+x}" &&
           "$classification_output" == 'fatal: not a git repository (or any of the parent directories): .git' ]]; then
-        find . -type f -not -path './.git/*' -not -path './target/*' -print0 >"$paths0" 2>"$tmp/find-error" || {
-            tr '\0' '\n' <"$paths0" >&2 || true
-            cat "$tmp/find-error" >&2; fail 'fallback file traversal failed'
-        }
+        mode=--no-index
+        exclusions+=(':(exclude,literal)target/')
     else
         printf '%s\n' "$classification_output" >&2
         fail "Git classification failed (status $rc)"
     fi
 fi
-paths="$tmp/paths"; normalised="$tmp/normalised"
-filtered_once="$tmp/filtered-once"; filtered="$tmp/filtered"
-tr '\0' '\n' <"$paths0" >"$paths" 2>"$tmp/path-tr-error" || { rc=$?; cat "$paths" "$tmp/path-tr-error" >&2; fail "path NUL conversion failed (tr status $rc)"; }
-sed 's|^\./||' "$paths" >"$normalised" 2>"$tmp/path-sed-error" || { rc=$?; cat "$normalised" "$tmp/path-sed-error" >&2; fail "path normalization failed (sed status $rc)"; }
-if grep -v -x -F -e "$vocabulary" "$normalised" >"$filtered_once"; then :; else
-    rc=$?; [[ "$rc" == 1 ]] || { cat "$filtered_once" >&2; fail "vocabulary path exclusion failed (grep status $rc)"; }
-    : >"$filtered_once"
+# `git grep` reports a file it cannot read on stderr and still exits 0 or 1, so any stderr output
+# is a failed scan, as a nonzero `grep` status was.
+stray="$tmp/stray"
+if git grep "$mode" --no-color --no-line-number --no-column -hoE 'MISO_[A-Z0-9_]+' -- . "${exclusions[@]}" >"$stray" 2>"$tmp/scan-error"; then rc=0; else rc=$?; fi
+if [[ "$rc" -gt 1 || -s "$tmp/scan-error" ]]; then
+    cat "$stray" "$tmp/scan-error" >&2
+    fail "source scan failed (git grep $mode status $rc)"
 fi
-if grep -v '^\.github/ISSUE_SPECS/' "$filtered_once" >"$filtered"; then :; else
-    rc=$?; [[ "$rc" == 1 ]] || { cat "$filtered" >&2; fail "issue-spec path exclusion failed (grep status $rc)"; }
-    : >"$filtered"
-fi
-stray="$tmp/stray"; : >"$stray"
-while IFS= read -r path; do
-    [[ -n "$path" ]] || continue
-    output=''; if output="$(grep -hoE 'MISO_[A-Z0-9_]+' -- "$path" 2>&1)"; then rc=0; else rc=$?; fi
-    case "$rc" in
-        0) printf '%s\n' "$output" >>"$stray" ;;
-        1) ;;
-        *) printf '%s\n' "$output" >&2; fail "source scan failed for $path (grep status $rc)" ;;
-    esac
-done <"$filtered"
 sort -u "$stray" >"$tmp/stray-sorted" 2>"$tmp/stray-sort-error" || { rc=$?; cat "$tmp/stray-sorted" "$tmp/stray-sort-error" >&2; fail "stray-name sort failed (sort status $rc)"; }
 if grep -v '^MISO_ENGINE_' "$tmp/stray-sorted" >"$tmp/stray-names"; then
     cat "$tmp/stray-names" >&2; fail 'identifier outside the MISO_ENGINE_ prefix'

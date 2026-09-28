@@ -9,6 +9,7 @@ path through `--base` and `--head`.
 from __future__ import annotations
 
 import argparse
+import json
 import pathlib
 import re
 import subprocess
@@ -42,6 +43,50 @@ RELEASE_INPUT_FILES = {
     ".cargo/config.toml",
     "scripts/check-release-shape.py",
 }
+
+# Issue #1043: a script gate's self-test suite re-proves the gate's own rules, so a change can alter
+# its verdict only by changing a file the suite reads. Each suite runs in qualification.yml's
+# `gate-self-tests` job when a changed path hits its key, and every night in nightly.yml; the gate
+# itself still runs on every change. A key is every file its suite reads -- the suite, its gate,
+# `lib/gate.sh`, the jq libraries, validators and runners it loads, the tree it reads -- not only
+# the gate script; an entry ending in `/` is a prefix. check-ci-path-routing.py proves each key
+# covers every script its suite mentions, and pins the table's suites to the workflow's steps.
+SELF_TEST_INPUTS = {
+    "env-vocabulary": {
+        "scripts/check-env-vocabulary.sh",
+        "scripts/test-env-vocabulary.sh",
+    },
+    "conformance-boundaries": {
+        "scripts/check-conformance-boundaries.sh",
+        "scripts/lib/gate.sh",
+        "scripts/test-conformance-boundaries.sh",
+    },
+    "console-benchmark": {
+        "scripts/build-web-audioworklet.sh",
+        "scripts/check-bench-preconditions.sh",
+        "scripts/console-benchmark-record-lib.jq",
+        "scripts/console-benchmark-record-validator.jq",
+        "scripts/console-benchmark-validator.jq",
+        "scripts/run-web-mixing-automation-benchmark.sh",
+        "scripts/test-console-benchmark.sh",
+        "scripts/web-mixing-automation-benchmark.mjs",
+        "scripts/web-mixing-automation-lib.jq",
+        "scripts/web-mixing-automation-validator.jq",
+    },
+    "sdk-deletions": {
+        "scripts/check-sdk-deletions.py",
+        "sdk/",
+    },
+    "dsp-research": {
+        "scripts/check-dsp-research.sh",
+        "scripts/lib/gate.sh",
+        "scripts/operator/README.md",
+        "scripts/test-dsp-research.sh",
+    },
+}
+# The workflow hosting the `gate-self-tests` job: editing it selects every suite, as editing the
+# release-shape job selects release_inputs.
+SELF_TEST_SHARED_INPUTS = {".github/workflows/qualification.yml"}
 
 
 def is_untrusted_path(path: str) -> bool:
@@ -118,6 +163,25 @@ def compute_flags(paths: list[str] | None) -> tuple[bool, bool]:
     return math_closure, release_inputs
 
 
+def self_test_key_hit(path: str, key: set[str]) -> bool:
+    return any(path == entry or (entry.endswith("/") and path.startswith(entry)) for entry in key)
+
+
+def select_self_tests(paths: list[str] | None) -> list[str]:
+    """The suites whose key a changed path hits, in table order.
+
+    Every suite is selected, fail-safe, whenever the path list is unavailable, empty or holds a
+    path `is_untrusted_path` refuses -- exactly when `compute_flags` forces both flags true -- and
+    whenever the workflow hosting the suites changes.
+    """
+    if not paths or any(is_untrusted_path(path) for path in paths):
+        return list(SELF_TEST_INPUTS)
+    if any(path in SELF_TEST_SHARED_INPUTS for path in paths):
+        return list(SELF_TEST_INPUTS)
+    return [suite for suite, key in SELF_TEST_INPUTS.items()
+            if any(self_test_key_hit(path, key) for path in paths)]
+
+
 def parse_name_status(raw: bytes) -> list[str] | None:
     """Parse `git diff --name-status -z`, retaining both rename/copy names."""
     fields = raw.split(b"\0")
@@ -180,9 +244,9 @@ def main() -> int:
     parser.add_argument("--name-status-file", type=pathlib.Path)
     parser.add_argument("--path", action="append", default=[])
     parser.add_argument("--flags", action="store_true",
-                         help="print only GITHUB_OUTPUT-style route/math_closure/release_inputs "
-                              "key=value lines, suitable for appending straight to $GITHUB_OUTPUT, "
-                              "instead of bare mode's single route line")
+                         help="print only GITHUB_OUTPUT-style route/math_closure/release_inputs/"
+                              "self_tests key=value lines, suitable for appending straight to "
+                              "$GITHUB_OUTPUT, instead of bare mode's single route line")
     args = parser.parse_args()
 
     if args.event == "workflow_dispatch":
@@ -199,6 +263,7 @@ def main() -> int:
 
     route = classify_paths(paths) if paths is not None else "full"
     math_closure, release_inputs = compute_flags(paths)
+    self_tests = select_self_tests(paths)
 
     # Bare mode is unchanged: exactly the route, one line, for existing callers. `--flags` mode
     # prints only `key=value` lines -- no bare route line first -- so its whole stdout can be
@@ -208,6 +273,8 @@ def main() -> int:
         print(f"route={route}")
         print(f"math_closure={'true' if math_closure else 'false'}")
         print(f"release_inputs={'true' if release_inputs else 'false'}")
+        # A compact JSON list, read by `fromJSON` in the workflow; `[]` selects no suite.
+        print(f"self_tests={json.dumps(self_tests, separators=(',', ':'))}")
     else:
         print(route)
     return 0
