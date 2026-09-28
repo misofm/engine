@@ -555,3 +555,50 @@ What the rows say:
 * **E1b's peak leg discriminates on its own.** With the phase-by-phase induction check made
   non-failing, M1 (frame 0), M2 (frame 2) and M3 (frame 2) are each still red on the peak-bit
   comparison.
+
+## Issue #1014 — the stationary walk (segments cut at completion, two passes, linked ring streams)
+
+In the stationary dispatch, `limiter_block_uniform` cuts each segment where the van Herk block
+completes, renders pass 1 (steps 1-5 and the target) and pass 2 (the recursion and the delay line)
+separately, and walks a linked pair's steady frames over bounds-check-free ring streams
+(`linked_steady_streams`). Class A. The gates are #990's identity suite (its oracle is the kernel
+before #990, token for token), gate 2 (`the_stationary_walk_renders_exactly_the_unmodified_kernel`,
+the same oracle on a generator aimed at the walk, with the kernel's test-only segment census) and
+gate 3 (`tests/segments.rs`, pinned on the unmodified kernel).
+
+Driver: one mutation at a time, applied to `src/lib.rs`, then
+`cargo test -p true-peak-limiter --no-fail-fast` and
+`cargo test -p host-core --lib limiter_linked_session`, both in the dev profile, then the file
+restored and checked byte-identical by SHA-256. M1-M6 are limiter-2-2's (M3 replaced per its
+amendment A5); M7-M11 are limiter-2-3's M1-M5; M12 is A5's dispatch guard.
+
+| # | mutation | result | where it fires (of gates 1-3) |
+|---|---|---|---|
+| 1014-M1 | no `+inf` preset at phase 0 (all three) | RED, 22 tests | gate 1 (`randomized_scenarios…`, `the_linked_body…`, `stationary_dispatch…`), gate 2, gate 3; also D90, E5, `linked.rs`, `seedless.rs`, the session test at every width |
+| 1014-M2 | the cut is `Wb - phase + 1`, so the steady loop includes the completing frame (its backward pass is skipped) | RED, 37 tests | gates 1-3, `a_uniform_cohort…` included |
+| 1014-M3′ | pass 2 reads the previous frame's target (`targets[step - 1]`, frame 0 the segment's last), both bodies | RED, 25 tests | gates 1-3; the session test at every width |
+| 1014-M4 | `phase` advanced by `run`, not `run - 1`, before the last frame (all three) | RED, 39 tests | gates 1-3 |
+| 1014-M5 | the dual body cuts only at the left channel's completion | RED, 5 tests | gate 1 (`randomized_scenarios…`), gate 2, gate 3 (the 5 ms / 9.9 ms arms) |
+| 1014-M6 | `linked_target_steady` skips the mirrored box store | RED, 12 tests | gate 1 (`randomized_scenarios…`), gate 2, gate 3, through the payload comparison |
+| 1014-M7 | `E` split from `C` at `c` instead of the larger index | DOES NOT COMPILE | `error[E0502]`: with `e > c` both views borrow the upper half |
+| 1014-M8 | the stream body reads the oldest word of `C[j]` after writing `r_j` | RED, 16 tests | gates 1-3 |
+| 1014-M9 | the `steady <= R - Wb` leg dropped | RED (panic), 2 tests | gate 2 and gate 3 panic in `linked_steady_streams` (`range end index … out of range`), at `Wb = 476` |
+| 1014-M10 | the stream body skips the mirrored required-gain store | RED, 13 tests | gates 1-3, through the payload |
+| 1014-M11 | the stream body finishes frame `j - 1` after starting frame `j` | RED, 16 tests | gates 1-3 |
+| 1014-M12 | the dispatch guard dropped: the walk also runs under `DISPATCH_RAMPING` | EQUIVALENT | Every identity comparison is green in dev and in release (54 of 54 with the coverage assertion reporting instead of failing). Only gate 2's coverage count "ramping blocks on the fused loop" falls to zero, at every width, which is that counter witnessing the guard |
+
+What the rows say:
+
+* **M12 is equivalent**, as the amendment predicted: the walk is bit-identical in the ramping
+  dispatch too, and the guard is a performance choice (the ramping row). Gate 2 therefore does not
+  assert the guard's *value*; it asserts that ramping blocks reached the fused loop, so the guard
+  is live code.
+* **M9 panics rather than rendering wrong words.** Past `R - Wb` the `E` or `X` view runs off its
+  split half and safe Rust stops at the slice. Gate 3's 9.9 ms arms (`R - Wb = 5`) reach it as
+  well as gate 2.
+* **M5 is caught only where the channels' windows differ**, which is why gate 2 draws asymmetric
+  lookaheads and gate 3 pins the 5 ms / 9.9 ms mix; the census's "right-channel cuts" counter is
+  the non-vacuity check.
+* **M6 and M10 are payload-only defects**: the right channel's ring words go stale while every
+  output word of a linked block is right, until the pair unlinks. The payload and complete-state
+  comparisons after every block are what see them.

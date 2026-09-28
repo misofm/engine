@@ -874,6 +874,161 @@ thread_local! {
     static REFERENCE_KERNEL: Cell<bool> = const { Cell::new(false) };
 }
 
+/// Issue #1014 gate 2: what the stationary walk's segments were, on this thread.
+///
+/// Instrumentation for the identity tests' coverage checks, not render state. Counted at segment
+/// entry, from the words the walk decides on.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct SegmentCensus {
+    /// Segments the stationary walk rendered.
+    segments: u64,
+    /// Segments whose last frame completes a van Herk block (either channel's, in the dual body).
+    completions: u64,
+    /// ... of a one-frame segment: the completion is on the segment's first frame.
+    completion_first_frame: u64,
+    /// ... of a segment of two or more frames: the completion is on its last frame.
+    completion_last_frame: u64,
+    /// ... that also ends the chunk (or the block).
+    completion_chunk_boundary: u64,
+    /// ... that also ends where a ring index wraps.
+    completion_ring_wrap: u64,
+    /// Dual segments cut by the right channel's completion while the left's is later.
+    right_cut: u64,
+    /// Dual segments whose two channels have different windows.
+    asymmetric: u64,
+    /// Linked segments by steady-frame count: 0, 1, 2, 3 and 31.
+    linked_steady: [u64; 5],
+    /// Linked runs that took `linked_steady_streams`.
+    streams: u64,
+    /// ... whose newest stream wrapped (`e < c`).
+    streams_newest_wrapped: u64,
+    /// ... whose expiring stream wrapped (`x < c`).
+    streams_expiring_wrapped: u64,
+    /// ... with neither wrapped.
+    streams_unwrapped: u64,
+    /// Linked runs of one or more steady frames that took the checked loop instead.
+    fallback: u64,
+    /// ... with two or more steady frames, refused by `Wb == R` or `steady > R - Wb`.
+    fallback_bound: u64,
+}
+
+#[cfg(test)]
+thread_local! {
+    static SEGMENT_CENSUS: Cell<SegmentCensus> = const {
+        Cell::new(SegmentCensus {
+            segments: 0,
+            completions: 0,
+            completion_first_frame: 0,
+            completion_last_frame: 0,
+            completion_chunk_boundary: 0,
+            completion_ring_wrap: 0,
+            right_cut: 0,
+            asymmetric: 0,
+            linked_steady: [0; 5],
+            streams: 0,
+            streams_newest_wrapped: 0,
+            streams_expiring_wrapped: 0,
+            streams_unwrapped: 0,
+            fallback: 0,
+            fallback_bound: 0,
+        })
+    };
+}
+
+#[cfg(test)]
+fn update_census(update: impl FnOnce(&mut SegmentCensus)) {
+    SEGMENT_CENSUS.with(|census| {
+        let mut value = census.get();
+        update(&mut value);
+        census.set(value);
+    });
+}
+
+/// This thread's census so far.
+#[cfg(test)]
+fn peek_census() -> SegmentCensus {
+    SEGMENT_CENSUS.with(Cell::get)
+}
+
+/// Returns this thread's census and clears it.
+#[cfg(test)]
+fn take_census() -> SegmentCensus {
+    SEGMENT_CENSUS.with(|census| census.replace(SegmentCensus::default()))
+}
+
+/// One segment of the stationary walk, at its entry. `wrap_run` is [`segment`]'s run and
+/// `remaining` the frames left in the chunk; `(phase, window)` per channel are read before the
+/// segment advances them.
+#[cfg(test)]
+fn census_segment(
+    linked: bool,
+    run: usize,
+    wrap_run: usize,
+    remaining: usize,
+    steady: usize,
+    left: (usize, usize),
+    right: (usize, usize),
+) {
+    let left_completes = left.0 + run == left.1;
+    let right_completes = !linked && right.0 + run == right.1;
+    let completes = left_completes || right_completes;
+    update_census(|census| {
+        census.segments += 1;
+        if completes {
+            census.completions += 1;
+            if run == 1 {
+                census.completion_first_frame += 1;
+            } else {
+                census.completion_last_frame += 1;
+            }
+            if run == remaining {
+                census.completion_chunk_boundary += 1;
+            }
+            if run == wrap_run && wrap_run < remaining {
+                census.completion_ring_wrap += 1;
+            }
+        }
+        if right_completes && !left_completes {
+            census.right_cut += 1;
+        }
+        if !linked && left.1 != right.1 {
+            census.asymmetric += 1;
+        }
+        if let Some(bucket) = [0, 1, 2, 3, 31]
+            .iter()
+            .position(|count| linked && *count == steady)
+        {
+            census.linked_steady[bucket] += 1;
+        }
+    });
+}
+
+/// One linked run's pass-1 choice: the streams, or the checked loop.
+#[cfg(test)]
+fn census_streams(streams: bool, steady: usize, slots: FrameSlots) {
+    update_census(|census| {
+        if streams {
+            census.streams += 1;
+            let cursor = slots.ring_cursor;
+            if slots.end < cursor {
+                census.streams_newest_wrapped += 1;
+            }
+            if slots.expiring < cursor {
+                census.streams_expiring_wrapped += 1;
+            }
+            if slots.end > cursor && slots.expiring > cursor {
+                census.streams_unwrapped += 1;
+            }
+        } else if steady >= 1 {
+            census.fallback += 1;
+            if steady >= 2 {
+                census.fallback_bound += 1;
+            }
+        }
+    });
+}
+
 /// A linear ramp of one coefficient, held as lanes for the block loop.
 #[derive(Clone, Copy)]
 struct RampLanes<L: Lane> {
@@ -1952,6 +2107,385 @@ fn linked_frame_uniform<L: Lane>(
     L::select(bypass, delayed, delayed.mul(gain)).store(right_frame);
 }
 
+// ---------------------------------------------------------------------------------------------
+// Issue #1014: the stationary walk.
+//
+// In the stationary dispatch, [`limiter_block_uniform`] cuts each wrap-free segment also where the
+// van Herk block completes, and renders the segment in two passes instead of one fused frame loop.
+// Pass 1 runs steps 1-5 of the frozen order and the target `t = 1 - s` for every frame of the
+// segment, storing `t` into a stack scratch; pass 2 runs step 6 (the release recursion) and step 7
+// (the delay line and the output). Every frame before a segment's last is a *steady* frame: it
+// cannot complete, so it needs no `position == 0` branch, no completion test and no backward pass.
+// The functions below are the pieces; the four proofs are on `limiter_block_uniform`.
+//
+// [`channel_frame_uniform`], [`linked_frame_uniform`], [`sliding_minimum_uniform`] (and its
+// mirrored twin) and [`segment`] keep their bodies: the ramping dispatch and #990's test oracle
+// still run them.
+// ---------------------------------------------------------------------------------------------
+
+/// Issue #1014 pass 1, a segment's last frame: [`channel_frame_uniform`]'s steps 1-5, then the
+/// release target `1 - s`.
+///
+/// Token for token the first half of [`channel_frame_uniform`], through
+/// [`sliding_minimum_uniform`], so the completing frame and its backward pass are today's.
+#[inline(always)]
+fn channel_target_uniform<L: Lane>(
+    peak: L,
+    limit: L,
+    hot: &mut HotChannel<L>,
+    uniform: &mut UniformHot<'_, L>,
+    ring: usize,
+    slots: FrameSlots,
+) -> L {
+    let one = L::splat(1.0);
+    let required = L::select(peak.gt(limit), limit.div(peak), one);
+    store_ring_lane::<L>(uniform.required_ring, slots.ring_cursor, required);
+    let minimum = sliding_minimum_uniform::<L>(
+        uniform.required_ring,
+        uniform.offsets.window,
+        ring,
+        slots.end,
+        slots.start,
+        &mut uniform.prefix,
+        &mut uniform.phase,
+    );
+    let quantised = minimum
+        .mul(L::splat(BOX_GRID))
+        .floor()
+        .mul(L::splat(1.0 / BOX_GRID));
+    let expired = ring_lane::<L>(uniform.box_ring, slots.expiring);
+    hot.box_sum = hot.box_sum.add(quantised).sub(expired);
+    store_ring_lane::<L>(uniform.box_ring, slots.ring_cursor, quantised);
+    let smoothed = hot.box_sum.div(hot.window);
+    one.sub(smoothed)
+}
+
+/// Issue #1014 pass 1, a linked segment's last frame: [`linked_frame_uniform`]'s steps 1-5, with
+/// its mirrored ring stores, then the release target `1 - s`.
+///
+/// Token for token the first half of [`linked_frame_uniform`]: the required gain and the box term
+/// are stored into both channels' rings, and the backward pass runs through
+/// [`sliding_minimum_uniform_mirrored`].
+#[inline(always)]
+fn linked_target_uniform<L: Lane>(
+    peak: L,
+    limit: L,
+    hot: &mut HotChannel<L>,
+    left: &mut UniformHot<'_, L>,
+    right: &mut UniformHot<'_, L>,
+    ring: usize,
+    slots: FrameSlots,
+) -> L {
+    let one = L::splat(1.0);
+    let required = L::select(peak.gt(limit), limit.div(peak), one);
+    store_ring_lane::<L>(left.required_ring, slots.ring_cursor, required);
+    store_ring_lane::<L>(right.required_ring, slots.ring_cursor, required);
+    let minimum = sliding_minimum_uniform_mirrored::<L>(
+        left.required_ring,
+        right.required_ring,
+        left.offsets.window,
+        ring,
+        slots.end,
+        slots.start,
+        &mut left.prefix,
+        &mut left.phase,
+    );
+    let quantised = minimum
+        .mul(L::splat(BOX_GRID))
+        .floor()
+        .mul(L::splat(1.0 / BOX_GRID));
+    let expired = ring_lane::<L>(left.box_ring, slots.expiring);
+    hot.box_sum = hot.box_sum.add(quantised).sub(expired);
+    store_ring_lane::<L>(left.box_ring, slots.ring_cursor, quantised);
+    store_ring_lane::<L>(right.box_ring, slots.ring_cursor, quantised);
+    let smoothed = hot.box_sum.div(hot.window);
+    one.sub(smoothed)
+}
+
+/// Issue #1014 pass 1, a steady frame: [`channel_target_uniform`] for a frame that cannot complete
+/// its van Herk block.
+///
+/// [`sliding_minimum_uniform`] with its two branches decided: `position != 0` (the caller presets
+/// `prefix` to `+inf` at phase 0, so `prefix.min(newest)` is `newest` there) and not complete (the
+/// caller cut the segment at the completion). `prefix.min(newest)` and `oldest.min(running)` keep
+/// the operand order of the function they replace.
+#[inline(always)]
+fn channel_target_steady<L: Lane>(
+    peak: L,
+    limit: L,
+    hot: &mut HotChannel<L>,
+    uniform: &mut UniformHot<'_, L>,
+    slots: FrameSlots,
+) -> L {
+    let one = L::splat(1.0);
+    let required = L::select(peak.gt(limit), limit.div(peak), one);
+    store_ring_lane::<L>(uniform.required_ring, slots.ring_cursor, required);
+    let newest = ring_lane::<L>(uniform.required_ring, slots.end);
+    let running = uniform.prefix.min(newest);
+    uniform.prefix = running;
+    let minimum = ring_lane::<L>(uniform.required_ring, slots.start).min(running);
+    let quantised = minimum
+        .mul(L::splat(BOX_GRID))
+        .floor()
+        .mul(L::splat(1.0 / BOX_GRID));
+    let expired = ring_lane::<L>(uniform.box_ring, slots.expiring);
+    hot.box_sum = hot.box_sum.add(quantised).sub(expired);
+    store_ring_lane::<L>(uniform.box_ring, slots.ring_cursor, quantised);
+    let smoothed = hot.box_sum.div(hot.window);
+    one.sub(smoothed)
+}
+
+/// Issue #1014 pass 1, a linked steady frame: [`channel_target_steady`] on the left words, with
+/// the required gain and the box term also stored into the right channel's rings, as
+/// [`linked_frame_uniform`] stores them.
+///
+/// The checked form, kept for the runs the streams of [`linked_steady_streams`] cannot take.
+#[inline(always)]
+fn linked_target_steady<L: Lane>(
+    peak: L,
+    limit: L,
+    hot: &mut HotChannel<L>,
+    left: &mut UniformHot<'_, L>,
+    right: &mut UniformHot<'_, L>,
+    slots: FrameSlots,
+) -> L {
+    let one = L::splat(1.0);
+    let required = L::select(peak.gt(limit), limit.div(peak), one);
+    store_ring_lane::<L>(left.required_ring, slots.ring_cursor, required);
+    store_ring_lane::<L>(right.required_ring, slots.ring_cursor, required);
+    let newest = ring_lane::<L>(left.required_ring, slots.end);
+    let running = left.prefix.min(newest);
+    left.prefix = running;
+    let minimum = ring_lane::<L>(left.required_ring, slots.start).min(running);
+    let quantised = minimum
+        .mul(L::splat(BOX_GRID))
+        .floor()
+        .mul(L::splat(1.0 / BOX_GRID));
+    let expired = ring_lane::<L>(left.box_ring, slots.expiring);
+    hot.box_sum = hot.box_sum.add(quantised).sub(expired);
+    store_ring_lane::<L>(left.box_ring, slots.ring_cursor, quantised);
+    store_ring_lane::<L>(right.box_ring, slots.ring_cursor, quantised);
+    let smoothed = hot.box_sum.div(hot.window);
+    one.sub(smoothed)
+}
+
+/// Issue #1014 pass 2, step 6: the release recursion from a stored target, returning the gain.
+///
+/// [`channel_frame_uniform`]'s `fma`, `max` and `flush`, then `1 - d`, on the same operands: the
+/// target is the word pass 1 stored, and `d` is the previous frame's, in a register.
+#[inline(always)]
+fn release_step<L: Lane>(target: L, release: L, reduction: &mut L) -> L {
+    let one = L::splat(1.0);
+    let released = release.fma(target.sub(*reduction), *reduction);
+    *reduction = flush(target.max(released));
+    one.sub(*reduction)
+}
+
+/// Issue #1014 pass 2, step 7: the delay line and the output, for one channel-frame.
+///
+/// Read before write on `main_ring`, then `select(bypass, z, z * g)`, as in
+/// [`channel_frame_uniform`]. `x` is loaded here, in pass 2: pass 1 never touches the block, whose
+/// chunk the detector has already read.
+#[inline(always)]
+fn output_step<L: Lane>(
+    io_frame: &mut [f32],
+    main_ring: &mut [f32],
+    main_cursor: usize,
+    gain: L,
+    bypass: <L as Lane>::Mask,
+) {
+    let x = L::load(io_frame);
+    let delayed = ring_lane::<L>(main_ring, main_cursor);
+    store_ring_lane::<L>(main_ring, main_cursor, x);
+    L::select(bypass, delayed, delayed.mul(gain)).store(io_frame);
+}
+
+/// One ramp's value for this frame: [`ramp_values`] for a single ramp.
+///
+/// Issue #1014 advances the limit ramp in pass 1 and the release ramp in pass 2, each once per
+/// frame in frame order. `RampLanes::advance` reads only its own four words, so splitting the pair
+/// between the passes moves no value. (Under `DISPATCH_STATIONARY` both are resting anyway; the
+/// test-only `DISPATCH_RUNTIME` oracle is where the split is exercised while ramping.)
+#[inline(always)]
+fn ramp_value<const DISPATCH: u8, L: Lane>(stationary: bool, ramp: &mut RampLanes<L>) -> L {
+    match DISPATCH {
+        DISPATCH_RUNTIME => {
+            if stationary {
+                ramp.resting_value()
+            } else {
+                ramp.advance()
+            }
+        }
+        DISPATCH_STATIONARY => ramp.resting_value(),
+        DISPATCH_RAMPING => ramp.advance(),
+        _ => unreachable!("invalid limiter dispatch"),
+    }
+}
+
+/// Issue #1014 pass 1 of a linked pair's steady frames, over bounds-check-free ring streams.
+///
+/// [`linked_target_steady`] for frames `0 .. steady` of a segment, with every ring access an
+/// element of an exact-length `chunks_exact(_mut)` view instead of an indexed, range-checked slot.
+/// Safe Rust, no copy of ring data, and one induction variable for the whole loop.
+///
+/// # Preconditions (checked by the caller)
+///
+/// `Wb < R`, `2 <= steady <= R - Wb`, and the `steady + 1` frames from `slots` are one wrap-free
+/// segment whose only completing frame, if any, is the last (which the caller runs afterwards).
+///
+/// # The stream facts
+///
+/// Write `c` for the cursor, `e = c + Wb` for the newest slot, `c + 1` for the oldest and
+/// `x = c + (R - Wb)` for the expiring box slot, each mod `R`, all as `slots` holds them.
+///
+/// 1. **The cursor block `C = [c, c + steady]` (`steady + 1` slots) fits in the ring.** The segment
+///    has `steady + 1` frames and is wrap-free, so [`segment`] bounded its run by `R - (c + 1)`.
+/// 2. **The newest stream `E = [e, e + steady)` is disjoint from `C`.** `steady <= 31` (a segment
+///    lies inside one 32-frame chunk) and `Wb >= 32`, so `steady + 1 <= Wb`.
+///    * Unwrapped: `e = c + Wb >= c + steady + 1`, past `C`'s end.
+///    * Wrapped: `e = c + Wb - R`, and `e + steady <= c` because `steady <= R - Wb`.
+///
+///    So no frame of the run reads a newest slot the run has written. That is why `Wb == R`, where
+///    `e == c`, is excluded.
+/// 3. **The oldest slot of frame `s` is `c + 1 + s`, the next slot of `C`.** Frame `s` reads it and
+///    frame `s + 1` overwrites it. A walk that visits each slot of `C` once, reading its old word
+///    before writing the new one, reads frame `s`'s oldest as the old word of slot `c + 1 + s`.
+/// 4. **The expiring stream `X = [x, x + steady)` of the box ring is disjoint from the box cursor
+///    stream `B = [c, c + steady)`.**
+///    * Unwrapped: `x - c = R - Wb >= steady`.
+///    * Wrapped: `x = c - Wb`, and `x + steady <= c` because `steady < 32 <= Wb`.
+///
+///    `Wb == R`, where `x == c`, is excluded.
+/// 5. **The right channel's rings are separate allocations.** Its mirrored stores go to
+///    `[c, c + steady)` of each.
+///
+/// So `E` and `C` are two disjoint borrows of one ring (`split_at_mut` at whichever of `e` and `c`
+/// is larger), and so are `X` and `B`.
+///
+/// # The skewed walk
+///
+/// The prologue starts frame 0: required gain into `C[0]` and its mirror, then
+/// `running = prefix.min(E[0])`. Iteration `j` of the body finishes frame `j - 1` (its oldest is
+/// the old word of `C[j]`, fact 3; quantise; `box_sum = (box_sum + q) - X[j - 1]`; `q` into
+/// `B[j - 1]` and its mirror; the target `1 - box_sum / Wb`) before it starts frame `j` (ramp,
+/// peak, required gain into `C[j]` and its mirror, `running = prefix.min(E[j])`). The epilogue
+/// finishes frame `steady - 1` from the old word of `C[steady]`. Every frame's operations and
+/// operand order are [`linked_target_steady`]'s: `limit.div(peak)` inside the same select,
+/// `prefix.min(newest)`, `oldest.min(running)`, `box_sum.add(q).sub(expired)`. Only the program
+/// interleaving across frames changes, and the finishing half of frame `j - 1` reads nothing the
+/// starting half of frame `j` writes but the old word of `C[j]`, which it reads first.
+///
+/// `prefix`, `box_sum`, `phase` (advanced by the caller) and the limit ramp leave as
+/// [`linked_target_steady`]'s loop leaves them.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn linked_steady_streams<const DISPATCH: u8, L: Lane>(
+    left_peaks: &[f32],
+    right_peaks: &[f32],
+    targets: &mut [f32],
+    stationary: bool,
+    hot: &mut HotChannel<L>,
+    left: &mut UniformHot<'_, L>,
+    right: &mut UniformHot<'_, L>,
+    slots: FrameSlots,
+    steady: usize,
+) {
+    let width = L::WIDTH;
+    let one = L::splat(1.0);
+    let grid = L::splat(BOX_GRID);
+    let step = L::splat(1.0 / BOX_GRID);
+    let c = slots.ring_cursor;
+    let e = slots.end;
+    let x = slots.expiring;
+    let (cursor_block, newest): (&mut [f32], &[f32]) = if e > c {
+        let (lo, hi) = left.required_ring.split_at_mut(e * width);
+        (
+            &mut lo[c * width..(c + steady + 1) * width],
+            &hi[..steady * width],
+        )
+    } else {
+        let (lo, hi) = left.required_ring.split_at_mut(c * width);
+        (
+            &mut hi[..(steady + 1) * width],
+            &lo[e * width..(e + steady) * width],
+        )
+    };
+    let (box_block, expiring): (&mut [f32], &[f32]) = if x > c {
+        let (lo, hi) = left.box_ring.split_at_mut(x * width);
+        (
+            &mut lo[c * width..(c + steady) * width],
+            &hi[..steady * width],
+        )
+    } else {
+        let (lo, hi) = left.box_ring.split_at_mut(c * width);
+        (
+            &mut hi[..steady * width],
+            &lo[x * width..(x + steady) * width],
+        )
+    };
+    let mirror_required = &mut right.required_ring[c * width..(c + steady) * width];
+    let mirror_box = &mut right.box_ring[c * width..(c + steady) * width];
+    let targets = &mut targets[..steady * width];
+    let left_peaks = &left_peaks[..steady * width];
+    let right_peaks = &right_peaks[..steady * width];
+    let window = hot.window;
+    let mut prefix = left.prefix;
+    let mut box_sum = hot.box_sum;
+
+    // Prologue: start frame 0.
+    let limit = ramp_value::<DISPATCH, L>(stationary, &mut hot.limit);
+    let peak = L::load(&right_peaks[..width]).max(L::load(&left_peaks[..width]));
+    let required = L::select(peak.gt(limit), limit.div(peak), one);
+    required.store(&mut cursor_block[..width]);
+    required.store(&mut mirror_required[..width]);
+    let mut running = prefix.min(L::load(&newest[..width]));
+    prefix = running;
+
+    let last = steady - 1;
+    for (
+        (((((((cursor, newest), left_peak), right_peak), mirror_r), expired), box_slot), mirror_b),
+        target,
+    ) in cursor_block[width..steady * width]
+        .chunks_exact_mut(width)
+        .zip(newest[width..].chunks_exact(width))
+        .zip(left_peaks[width..].chunks_exact(width))
+        .zip(right_peaks[width..].chunks_exact(width))
+        .zip(mirror_required[width..].chunks_exact_mut(width))
+        .zip(expiring[..last * width].chunks_exact(width))
+        .zip(box_block[..last * width].chunks_exact_mut(width))
+        .zip(mirror_box[..last * width].chunks_exact_mut(width))
+        .zip(targets[..last * width].chunks_exact_mut(width))
+    {
+        // Finish frame j - 1: its oldest slot is this cursor slot's old word.
+        let minimum = L::load(cursor).min(running);
+        let quantised = minimum.mul(grid).floor().mul(step);
+        box_sum = box_sum.add(quantised).sub(L::load(expired));
+        quantised.store(box_slot);
+        quantised.store(mirror_b);
+        one.sub(box_sum.div(window)).store(target);
+        // Start frame j.
+        let limit = ramp_value::<DISPATCH, L>(stationary, &mut hot.limit);
+        let peak = L::load(right_peak).max(L::load(left_peak));
+        let required = L::select(peak.gt(limit), limit.div(peak), one);
+        required.store(cursor);
+        required.store(mirror_r);
+        running = prefix.min(L::load(newest));
+        prefix = running;
+    }
+    // Epilogue: finish frame steady - 1.
+    let minimum = L::load(&cursor_block[steady * width..(steady + 1) * width]).min(running);
+    let quantised = minimum.mul(grid).floor().mul(step);
+    box_sum = box_sum
+        .add(quantised)
+        .sub(L::load(&expiring[last * width..steady * width]));
+    quantised.store(&mut box_block[last * width..steady * width]);
+    quantised.store(&mut mirror_box[last * width..steady * width]);
+    one.sub(box_sum.div(window))
+        .store(&mut targets[last * width..steady * width]);
+    left.prefix = prefix;
+    hot.box_sum = box_sum;
+}
+
 /// The one block kernel: `frames` frames of `L::WIDTH` tracks, both channels, one pass.
 ///
 /// Decision D10. The frame loop lives here and nothing per-sample crosses a call boundary: the
@@ -2260,6 +2794,42 @@ fn limiter_block_per_lane<const DISPATCH: u8, L: Lane>(
 /// frame. So the right channel leaves the block in exactly the state a dual block leaves it in:
 /// `snapshot_track`, the resident reduction tap, the silent-rest test and the mono collapse's
 /// disengage copy all read the same words.
+///
+/// # The stationary walk (issue #1014)
+///
+/// Under `DISPATCH_STATIONARY` (and the test-only `DISPATCH_RUNTIME`) each segment is also cut
+/// where the van Herk block completes: `run = min(walk.run, Wb_L - phase_L[, Wb_R - phase_R])`,
+/// the bracketed term in the dual body only. The segment is then rendered in two passes. Pass 1
+/// runs steps 1-5 and the target `t = 1 - s` for the `run - 1` steady frames
+/// ([`channel_target_steady`], [`linked_target_steady`] or [`linked_steady_streams`]) and then for
+/// the last frame through today's steps ([`channel_target_uniform`], [`linked_target_uniform`]),
+/// storing `t` into a stack scratch. Pass 2 runs step 6 ([`release_step`]) and step 7
+/// ([`output_step`]) for every frame, with `d` in a register. Under `DISPATCH_RAMPING` the segment
+/// loop is the fused one above, token for token: the walk is a stationary-block change only.
+///
+/// 1. **The `+inf` preset.** D8's `min(a, b)` is `select(a < b, a, b)`. With `a = +inf`, `a < b`
+///    is false for every `b` -- nothing exceeds `+inf`, and a NaN compares false -- so
+///    `min(+inf, newest)` is `newest` bit for bit, `-0.0`, subnormals and every NaN payload
+///    included. That is [`sliding_minimum_uniform`]'s `position == 0` result. The preset is
+///    overwritten by the first frame's `prefix = running`, and a segment has at least one frame
+///    ([`segment`] asserts `run >= 1`), so `+inf` never reaches the arena.
+/// 2. **Steady frames never complete.** Frame `s` of a segment is at position `phase + s`, and it
+///    completes iff `phase + s + 1 == Wb`. With `run <= Wb - phase` that is possible only for
+///    `s == run - 1`, the last frame, which is not a steady frame. In the dual body both channels'
+///    `Wb - phase` bound `run`, because the channels' windows may differ.
+/// 3. **The passes commute.** Within a segment, pass 1 of frame `s` reads and writes only what
+///    pass 1 of the frames before `s` left: the required-gain and box rings, `prefix`, `phase`,
+///    the box sum, the limit ramp and the peak scratch. It never reads the block, the main ring,
+///    `d` or the release ramp. Pass 2 of frame `s` reads `t_s`, `d_{s-1}`, the release ramp, the
+///    main ring and the block. Neither pass reads anything the other writes except `t`, and the
+///    detector read the block's chunk before the segment began. Each ramp advances once per frame
+///    in frame order, the limit ramp in pass 1 and the release ramp in pass 2, and
+///    `RampLanes::advance` reads only its own words. So every value is computed by the same
+///    operations on the same operands as in the fused frame.
+/// 4. **The linked pair** mirrors in pass 1 exactly the writes [`linked_frame_uniform`] mirrors:
+///    the required gain and the box term at the cursor, and every suffix minimum of the backward
+///    pass, which stays in the last frame through [`sliding_minimum_uniform_mirrored`]. The block-end
+///    copy of the right channel's register words and ramps is unchanged, and so is #990's record.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn limiter_block_uniform<const DISPATCH: u8, L: Lane>(
@@ -2299,6 +2869,8 @@ fn limiter_block_uniform<const DISPATCH: u8, L: Lane>(
     let mut ring_cursor = cursors.ring as usize;
     let mut peaks_left = [0.0_f32; DETECTOR_CHUNK * MAXIMUM_WIDTH];
     let mut peaks_right = [0.0_f32; DETECTOR_CHUNK * MAXIMUM_WIDTH];
+    let mut targets_left = [0.0_f32; DETECTOR_CHUNK * MAXIMUM_WIDTH];
+    let mut targets_right = [0.0_f32; DETECTOR_CHUNK * MAXIMUM_WIDTH];
 
     // The ring views borrow the two channels for the whole walk, so the two van Herk words come
     // back out of the scope and are written to the arena below, once.
@@ -2335,16 +2907,64 @@ fn limiter_block_uniform<const DISPATCH: u8, L: Lane>(
                     uniform_left.offsets,
                     uniform_right.offsets,
                 );
-                let run = walk.run;
+                // Issue #1014 A2: the new walk runs in the stationary dispatch (and the test-only
+                // runtime oracle). Under `DISPATCH_RAMPING` this arm is the fused loop as it was,
+                // token for token.
+                let run = if DISPATCH == DISPATCH_RAMPING {
+                    let run = walk.run;
 
-                let base = (chunk + frame) * width;
-                let words = run * width;
-                let left_segment = &mut left_io[base..base + words];
-                let right_segment = &mut right_io[base..base + words];
-                let left_peaks = &peaks_left[frame * width..(frame + run) * width];
-                let right_peaks = &peaks_right[frame * width..(frame + run) * width];
+                    let base = (chunk + frame) * width;
+                    let words = run * width;
+                    let left_segment = &mut left_io[base..base + words];
+                    let right_segment = &mut right_io[base..base + words];
+                    let left_peaks = &peaks_left[frame * width..(frame + run) * width];
+                    let right_peaks = &peaks_right[frame * width..(frame + run) * width];
 
-                if linked {
+                    if linked {
+                        for (step, (((left_frame, right_frame), left_peak), right_peak)) in
+                            left_segment
+                                .chunks_exact_mut(width)
+                                .zip(right_segment.chunks_exact_mut(width))
+                                .zip(left_peaks.chunks_exact(width))
+                                .zip(right_peaks.chunks_exact(width))
+                                .enumerate()
+                        {
+                            let (limit, release) = ramp_values::<DISPATCH, L>(
+                                stationary,
+                                &mut hot_left.limit,
+                                &mut hot_left.release,
+                            );
+
+                            // The dual body's `select(link, linked, peak)` with `link` all-true, which
+                            // is `linked` bit for bit: a linked pair is `LinkMode::Maximum` by the
+                            // caller's decision.
+                            let peak = L::load(right_peak).max(L::load(left_peak));
+
+                            let x_left = L::load(left_frame);
+                            let x_right = L::load(right_frame);
+
+                            linked_frame_uniform::<L>(
+                                left_frame,
+                                right_frame,
+                                x_left,
+                                x_right,
+                                peak,
+                                limit,
+                                release,
+                                &mut hot_left,
+                                &mut uniform_left,
+                                &mut uniform_right,
+                                ring,
+                                walk.left.advanced(step),
+                                bypass,
+                            );
+                        }
+                        frame += run;
+                        ring_cursor = wrapped(ring_cursor + run, ring);
+                        main_cursor = wrapped(main_cursor + run, main);
+                        continue;
+                    }
+
                     for (step, (((left_frame, right_frame), left_peak), right_peak)) in left_segment
                         .chunks_exact_mut(width)
                         .zip(right_segment.chunks_exact_mut(width))
@@ -2352,95 +2972,289 @@ fn limiter_block_uniform<const DISPATCH: u8, L: Lane>(
                         .zip(right_peaks.chunks_exact(width))
                         .enumerate()
                     {
-                        let (limit, release) = ramp_values::<DISPATCH, L>(
+                        let (limit_left, release_left) = ramp_values::<DISPATCH, L>(
                             stationary,
                             &mut hot_left.limit,
                             &mut hot_left.release,
                         );
+                        let (limit_right, release_right) = ramp_values::<DISPATCH, L>(
+                            stationary,
+                            &mut hot_right.limit,
+                            &mut hot_right.release,
+                        );
 
-                        // The dual body's `select(link, linked, peak)` with `link` all-true, which
-                        // is `linked` bit for bit: a linked pair is `LinkMode::Maximum` by the
-                        // caller's decision.
-                        let peak = L::load(right_peak).max(L::load(left_peak));
+                        let peak_left = L::load(left_peak);
+                        let peak_right = L::load(right_peak);
+                        let linked = peak_right.max(peak_left);
+                        let peak_left = L::select(link, linked, peak_left);
+                        let peak_right = L::select(link, linked, peak_right);
 
                         let x_left = L::load(left_frame);
                         let x_right = L::load(right_frame);
 
-                        linked_frame_uniform::<L>(
+                        channel_frame_uniform::<L>(
                             left_frame,
-                            right_frame,
                             x_left,
-                            x_right,
-                            peak,
-                            limit,
-                            release,
+                            peak_left,
+                            limit_left,
+                            release_left,
                             &mut hot_left,
                             &mut uniform_left,
-                            &mut uniform_right,
                             ring,
                             walk.left.advanced(step),
                             bypass,
                         );
+                        channel_frame_uniform::<L>(
+                            right_frame,
+                            x_right,
+                            peak_right,
+                            limit_right,
+                            release_right,
+                            &mut hot_right,
+                            &mut uniform_right,
+                            ring,
+                            walk.right.advanced(step),
+                            bypass,
+                        );
                     }
-                    frame += run;
-                    ring_cursor = wrapped(ring_cursor + run, ring);
-                    main_cursor = wrapped(main_cursor + run, main);
-                    continue;
-                }
 
-                for (step, (((left_frame, right_frame), left_peak), right_peak)) in left_segment
-                    .chunks_exact_mut(width)
-                    .zip(right_segment.chunks_exact_mut(width))
-                    .zip(left_peaks.chunks_exact(width))
-                    .zip(right_peaks.chunks_exact(width))
-                    .enumerate()
-                {
-                    let (limit_left, release_left) = ramp_values::<DISPATCH, L>(
-                        stationary,
-                        &mut hot_left.limit,
-                        &mut hot_left.release,
+                    run
+                } else {
+                    // Proof 2: also cut the segment where the van Herk block completes, so only
+                    // its last frame can. The dual body's two windows may differ (`LaneShape` is
+                    // per channel), so it takes both channels' distances; a linked pair has one.
+                    let mut run = walk
+                        .run
+                        .min(uniform_left.offsets.window - uniform_left.phase as usize);
+                    if !linked {
+                        run = run.min(uniform_right.offsets.window - uniform_right.phase as usize);
+                    }
+                    let steady = run - 1;
+                    #[cfg(test)]
+                    census_segment(
+                        linked,
+                        run,
+                        walk.run,
+                        span - frame,
+                        steady,
+                        (uniform_left.phase as usize, uniform_left.offsets.window),
+                        (uniform_right.phase as usize, uniform_right.offsets.window),
                     );
-                    let (limit_right, release_right) = ramp_values::<DISPATCH, L>(
-                        stationary,
-                        &mut hot_right.limit,
-                        &mut hot_right.release,
-                    );
 
-                    let peak_left = L::load(left_peak);
-                    let peak_right = L::load(right_peak);
-                    let linked = peak_right.max(peak_left);
-                    let peak_left = L::select(link, linked, peak_left);
-                    let peak_right = L::select(link, linked, peak_right);
+                    let base = (chunk + frame) * width;
+                    let words = run * width;
+                    let left_segment = &mut left_io[base..base + words];
+                    let right_segment = &mut right_io[base..base + words];
+                    let left_peaks = &peaks_left[frame * width..(frame + run) * width];
+                    let right_peaks = &peaks_right[frame * width..(frame + run) * width];
+                    let main_base = walk.left.main_cursor;
 
-                    let x_left = L::load(left_frame);
-                    let x_right = L::load(right_frame);
+                    if linked {
+                        // Proof 4: one target scratch; pass 1 mirrors the required gain and the
+                        // box term into the right channel's rings, and the backward pass (the last
+                        // frame's, through the mirrored minimum) as `linked_frame_uniform` does.
+                        let targets = &mut targets_left[..words];
+                        // Proof 1: `min(+inf, newest)` is `newest`, bit for bit.
+                        if uniform_left.phase == 0 {
+                            uniform_left.prefix = L::splat(f32::INFINITY);
+                        }
+                        // The stream facts of `linked_steady_streams` hold exactly here.
+                        let streams = uniform_left.offsets.window < ring
+                            && steady >= 2
+                            && steady <= ring - uniform_left.offsets.window;
+                        #[cfg(test)]
+                        census_streams(streams, steady, walk.left);
+                        if streams {
+                            linked_steady_streams::<DISPATCH, L>(
+                                left_peaks,
+                                right_peaks,
+                                targets,
+                                stationary,
+                                &mut hot_left,
+                                &mut uniform_left,
+                                &mut uniform_right,
+                                walk.left,
+                                steady,
+                            );
+                        } else {
+                            for (step, ((left_peak, right_peak), target)) in left_peaks
+                                .chunks_exact(width)
+                                .zip(right_peaks.chunks_exact(width))
+                                .zip(targets.chunks_exact_mut(width))
+                                .take(steady)
+                                .enumerate()
+                            {
+                                let limit =
+                                    ramp_value::<DISPATCH, L>(stationary, &mut hot_left.limit);
+                                let peak = L::load(right_peak).max(L::load(left_peak));
+                                linked_target_steady::<L>(
+                                    peak,
+                                    limit,
+                                    &mut hot_left,
+                                    &mut uniform_left,
+                                    &mut uniform_right,
+                                    walk.left.advanced(step),
+                                )
+                                .store(target);
+                            }
+                        }
+                        // The steady frames advanced the van Herk position by one each; the last
+                        // frame's `sliding_minimum_uniform_mirrored` reads and advances it.
+                        uniform_left.phase += steady as u32;
+                        let limit = ramp_value::<DISPATCH, L>(stationary, &mut hot_left.limit);
+                        let peak = L::load(&right_peaks[steady * width..])
+                            .max(L::load(&left_peaks[steady * width..]));
+                        linked_target_uniform::<L>(
+                            peak,
+                            limit,
+                            &mut hot_left,
+                            &mut uniform_left,
+                            &mut uniform_right,
+                            ring,
+                            walk.left.advanced(steady),
+                        )
+                        .store(&mut targets[steady * width..]);
+                        // Pass 2 (proof 3): the recursion and the delay line, one gain for both
+                        // channels, with `d` in a register.
+                        for (step, ((left_frame, right_frame), target)) in left_segment
+                            .chunks_exact_mut(width)
+                            .zip(right_segment.chunks_exact_mut(width))
+                            .zip(targets.chunks_exact(width))
+                            .enumerate()
+                        {
+                            let release =
+                                ramp_value::<DISPATCH, L>(stationary, &mut hot_left.release);
+                            let gain =
+                                release_step(L::load(target), release, &mut hot_left.reduction);
+                            output_step::<L>(
+                                left_frame,
+                                uniform_left.main_ring,
+                                main_base + step,
+                                gain,
+                                bypass,
+                            );
+                            output_step::<L>(
+                                right_frame,
+                                uniform_right.main_ring,
+                                main_base + step,
+                                gain,
+                                bypass,
+                            );
+                        }
+                        frame += run;
+                        ring_cursor = wrapped(ring_cursor + run, ring);
+                        main_cursor = wrapped(main_cursor + run, main);
+                        continue;
+                    }
 
-                    channel_frame_uniform::<L>(
-                        left_frame,
-                        x_left,
+                    // The dual body: a target scratch per channel.
+                    let targets_l = &mut targets_left[..words];
+                    let targets_r = &mut targets_right[..words];
+                    // Proof 1, per channel.
+                    if uniform_left.phase == 0 {
+                        uniform_left.prefix = L::splat(f32::INFINITY);
+                    }
+                    if uniform_right.phase == 0 {
+                        uniform_right.prefix = L::splat(f32::INFINITY);
+                    }
+                    for (step, (((left_peak, right_peak), target_l), target_r)) in left_peaks
+                        .chunks_exact(width)
+                        .zip(right_peaks.chunks_exact(width))
+                        .zip(targets_l.chunks_exact_mut(width))
+                        .zip(targets_r.chunks_exact_mut(width))
+                        .take(steady)
+                        .enumerate()
+                    {
+                        let limit_left = ramp_value::<DISPATCH, L>(stationary, &mut hot_left.limit);
+                        let limit_right =
+                            ramp_value::<DISPATCH, L>(stationary, &mut hot_right.limit);
+                        let peak_left = L::load(left_peak);
+                        let peak_right = L::load(right_peak);
+                        let linked_peak = peak_right.max(peak_left);
+                        let peak_left = L::select(link, linked_peak, peak_left);
+                        let peak_right = L::select(link, linked_peak, peak_right);
+                        channel_target_steady::<L>(
+                            peak_left,
+                            limit_left,
+                            &mut hot_left,
+                            &mut uniform_left,
+                            walk.left.advanced(step),
+                        )
+                        .store(target_l);
+                        channel_target_steady::<L>(
+                            peak_right,
+                            limit_right,
+                            &mut hot_right,
+                            &mut uniform_right,
+                            walk.right.advanced(step),
+                        )
+                        .store(target_r);
+                    }
+                    uniform_left.phase += steady as u32;
+                    uniform_right.phase += steady as u32;
+                    // The last frame, completing or not, through today's steps 1-5.
+                    let limit_left = ramp_value::<DISPATCH, L>(stationary, &mut hot_left.limit);
+                    let limit_right = ramp_value::<DISPATCH, L>(stationary, &mut hot_right.limit);
+                    let peak_left = L::load(&left_peaks[steady * width..]);
+                    let peak_right = L::load(&right_peaks[steady * width..]);
+                    let linked_peak = peak_right.max(peak_left);
+                    let peak_left = L::select(link, linked_peak, peak_left);
+                    let peak_right = L::select(link, linked_peak, peak_right);
+                    channel_target_uniform::<L>(
                         peak_left,
                         limit_left,
-                        release_left,
                         &mut hot_left,
                         &mut uniform_left,
                         ring,
-                        walk.left.advanced(step),
-                        bypass,
-                    );
-                    channel_frame_uniform::<L>(
-                        right_frame,
-                        x_right,
+                        walk.left.advanced(steady),
+                    )
+                    .store(&mut targets_l[steady * width..]);
+                    channel_target_uniform::<L>(
                         peak_right,
                         limit_right,
-                        release_right,
                         &mut hot_right,
                         &mut uniform_right,
                         ring,
-                        walk.right.advanced(step),
-                        bypass,
-                    );
-                }
+                        walk.right.advanced(steady),
+                    )
+                    .store(&mut targets_r[steady * width..]);
+                    // Pass 2 (proof 3).
+                    for (step, (((left_frame, right_frame), target_l), target_r)) in left_segment
+                        .chunks_exact_mut(width)
+                        .zip(right_segment.chunks_exact_mut(width))
+                        .zip(targets_l.chunks_exact(width))
+                        .zip(targets_r.chunks_exact(width))
+                        .enumerate()
+                    {
+                        let release_left =
+                            ramp_value::<DISPATCH, L>(stationary, &mut hot_left.release);
+                        let release_right =
+                            ramp_value::<DISPATCH, L>(stationary, &mut hot_right.release);
+                        let gain_left =
+                            release_step(L::load(target_l), release_left, &mut hot_left.reduction);
+                        let gain_right = release_step(
+                            L::load(target_r),
+                            release_right,
+                            &mut hot_right.reduction,
+                        );
+                        output_step::<L>(
+                            left_frame,
+                            uniform_left.main_ring,
+                            main_base + step,
+                            gain_left,
+                            bypass,
+                        );
+                        output_step::<L>(
+                            right_frame,
+                            uniform_right.main_ring,
+                            main_base + step,
+                            gain_right,
+                            bypass,
+                        );
+                    }
 
+                    run
+                };
                 frame += run;
                 ring_cursor = wrapped(ring_cursor + run, ring);
                 main_cursor = wrapped(main_cursor + run, main);
@@ -7724,6 +8538,309 @@ mod tests {
                 engaged > rendered / 8,
                 "{label}: the linked body ran on {engaged} of {rendered} blocks"
             );
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Issue #1014 gate 2: the stationary walk against the unmodified kernel, where it is fragile.
+    //
+    // The oracle is #990's: `reference_block`, the kernel as it stood before #990, token for token,
+    // reached through `LinkedPair`. The generator aims at what the walk turns on -- windows at and
+    // around its thresholds, asymmetric channel windows, every block length up to 256, completions
+    // on every kind of frame, the ring streams' three wrap cases and their refusals, ramping
+    // blocks, and restores that put the van Herk phase at 0 and at `Wb - 1` -- and the census the
+    // kernel keeps in test builds says whether it got there.
+    // ---------------------------------------------------------------------------------------
+
+    /// Lookaheads whose 48 kHz windows are the ones the walk turns on. `Wb = L + 1` for `L >= 31`:
+    /// 0 ms is `Wb = 32` (the floor), 32 samples `33`, 5 ms `241`, 469, 475 and 479 samples `470`,
+    /// `476` and `480` (`R - Wb` = 11, 5 and 1), and 10 ms `481`, which is `R`.
+    const SEGMENT_LOOKAHEADS: [f32; 7] = [
+        0.0,
+        32.0 / 48.0,
+        5.0,
+        469.0 / 48.0,
+        475.0 / 48.0,
+        479.0 / 48.0,
+        10.0,
+    ];
+
+    /// The windows [`SEGMENT_LOOKAHEADS`] must produce at 48 kHz.
+    const SEGMENT_WINDOWS: [u32; 7] = [32, 33, 241, 470, 476, 480, 481];
+
+    /// Block lengths for gate 2: around the 32-frame chunk, the 128-frame quantum and the
+    /// 256-frame one the cores are prepared with.
+    const SEGMENT_BLOCK_LENGTHS: [usize; 17] = [
+        1, 2, 3, 4, 5, 31, 32, 33, 63, 64, 65, 127, 128, 129, 200, 255, 256,
+    ];
+
+    /// [`linked_core`] at a 256-frame quantum.
+    fn segment_core<L: Lane>(
+        tracks: &[[InitialParameterValue; PARAMETER_COUNT * 2]],
+        link: LinkMode,
+        rate: u32,
+    ) -> LimiterCore<L> {
+        assert_eq!(tracks.len(), L::WIDTH);
+        let mut preparation = request_at(&tracks[0], rate, 256);
+        preparation.link_mode = link;
+        let metadata = expected_prepared_metadata(&TRUE_PEAK_LIMITER_DESCRIPTOR, preparation)
+            .expect("metadata");
+        let mut left_defaults = Vec::with_capacity(L::WIDTH);
+        let mut right_defaults = Vec::with_capacity(L::WIDTH);
+        for values in tracks {
+            let (left, right) = initial_defaults(values).expect("defaults");
+            left_defaults.push(left);
+            right_defaults.push(right);
+        }
+        LimiterCore::<L>::new(
+            metadata,
+            left_defaults.into_boxed_slice(),
+            right_defaults.into_boxed_slice(),
+        )
+        .expect("core")
+    }
+
+    /// What one width of gate 2 did, beside the kernel's census.
+    #[derive(Default)]
+    struct SegmentRun {
+        blocks: u32,
+        linked: u32,
+        /// Uniform dual blocks in the ramping dispatch that ran no segment of the stationary walk:
+        /// the fused loop, which A2 keeps there.
+        ramping_fused: u32,
+        /// Restores of the whole bank at phase 0 and at `Wb - 1`.
+        phase_zero: u32,
+        phase_last: u32,
+    }
+
+    /// One gate-2 scenario. Scenario `index` takes lookahead `index % 7` on the left, and
+    /// `(index / 7) % 4` picks linked-symmetric, dual-mono-symmetric, maximum-asymmetric or
+    /// dual-mono-asymmetric, so every width's first 28 scenarios cover every pairing.
+    fn segment_scenario<L: Lane>(index: u64, label: &str, totals: &mut SegmentRun) {
+        let mut draw = Draw(0x1014_5EED_0000 ^ index);
+        let rate = if index >= 28 && draw.chance(1, 8) {
+            draw.pick(&[44_100, 88_200, 96_000])
+        } else {
+            48_000
+        };
+        let pattern = (index / 7) % 4;
+        let link = if pattern.is_multiple_of(2) {
+            LinkMode::Maximum
+        } else {
+            LinkMode::DualMono
+        };
+        let left_index = (index % 7) as usize;
+        let right_index = if pattern < 2 {
+            left_index
+        } else {
+            (left_index + 1 + draw.below(6)) % 7
+        };
+        let (left_lookahead, right_lookahead) = (
+            SEGMENT_LOOKAHEADS[left_index],
+            SEGMENT_LOOKAHEADS[right_index],
+        );
+        let tracks: Vec<_> = (0..L::WIDTH)
+            .map(|_| {
+                let ceiling = draw.pick(&[-0.5, -1.0, -3.0, -6.0, -12.0]);
+                let release = draw.pick(&[10.0, 60.0, 100.0, 500.0, 2000.0]);
+                linked_values(
+                    [ceiling, release, left_lookahead],
+                    [ceiling, release, right_lookahead],
+                )
+            })
+            .collect();
+        let run = format!(
+            "{label} scenario {index} {rate} Hz {link:?} lookahead {left_lookahead}/{right_lookahead}"
+        );
+        let mut pair = LinkedPair::<L> {
+            shipped: segment_core::<L>(&tracks, link, rate),
+            oracle: segment_core::<L>(&tracks, link, rate),
+            first_sample: 0,
+            engaged: 0,
+            rendered: 0,
+            label: run,
+        };
+        pair.compare("prepared");
+        if rate == 48_000 {
+            assert_eq!(
+                (
+                    pair.shipped.left.lane[0].window,
+                    pair.shipped.right.lane[0].window
+                ),
+                (SEGMENT_WINDOWS[left_index], SEGMENT_WINDOWS[right_index]),
+                "{}: windows",
+                pair.label
+            );
+        }
+        let blocks = 32 + draw.below(16);
+        for block in 0..blocks {
+            let at = format!("block {block}");
+            match draw.below(100) {
+                0..=2 => pair.reset(if draw.chance(1, 2) {
+                    ResetKind::FullToDefaults
+                } else {
+                    ResetKind::DiscontinuityKeepParameters
+                }),
+                3..=9 => {
+                    // The whole bank at one van Herk phase, so the cohort stays uniform: 0, or the
+                    // last position of each channel's window, whose next frame completes.
+                    let last = draw.chance(1, 2);
+                    let windows = [
+                        pair.shipped.left.lane[0].window,
+                        pair.shipped.right.lane[0].window,
+                    ];
+                    let mut restored = true;
+                    for track in 0..L::WIDTH {
+                        let mut payload = core_snapshot(&pair.shipped, track);
+                        for (section, window) in
+                            [&mut payload.1, &mut payload.2].into_iter().zip(windows)
+                        {
+                            write_u32(section, words::PHASE, if last { window - 1 } else { 0 });
+                        }
+                        restored &= pair.restore(track, &payload);
+                    }
+                    // A payload whose main ring holds a non-finite word the §4.4 check has not
+                    // reached yet is refused, by both arms alike (`restore` compares verdicts).
+                    if restored && last {
+                        totals.phase_last += 1;
+                    } else if restored {
+                        totals.phase_zero += 1;
+                    }
+                }
+                _ => {}
+            }
+            let mut spans = no_spans(L::WIDTH);
+            if draw.chance(1, 5) {
+                // A retarget: of both channels (a left span and a right span of one value, so a
+                // linked pair stays linked through the ramp) or of one.
+                let parameter = draw.below(RAMP_COUNT) as u32;
+                let value = if parameter == 0 {
+                    draw.pick(&[-0.5, -1.0, -3.0, -6.0])
+                } else {
+                    draw.pick(&[10.0, 60.0, 100.0, 500.0])
+                };
+                let first = pair.first_sample;
+                let both = draw.chance(3, 4);
+                let lanes: Vec<usize> = if draw.chance(1, 2) {
+                    (0..L::WIDTH).collect()
+                } else {
+                    vec![draw.below(L::WIDTH)]
+                };
+                for lane in lanes {
+                    spans[lane] = if both {
+                        vec![
+                            point_span(first, parameter, ParameterChannel::Left, value),
+                            point_span(first, parameter, ParameterChannel::Right, value),
+                        ]
+                    } else if draw.chance(1, 2) {
+                        vec![point_span(first, parameter, ParameterChannel::Left, value)]
+                    } else {
+                        vec![point_span(first, parameter, ParameterChannel::Right, value)]
+                    };
+                }
+            }
+            let frames = if draw.chance(1, 2) {
+                draw.pick(&SEGMENT_BLOCK_LENGTHS)
+            } else {
+                1 + draw.below(256)
+            };
+            let signal = if draw.chance(3, 4) {
+                LinkedSignal::Hot
+            } else {
+                draw.pick(&LINKED_SIGNALS)
+            };
+            let (left, right) = linked_planes(signal, &mut draw, frames, &pair.shipped);
+            clear_dispatch_observation();
+            let walked = peek_census().segments;
+            let linked = pair.dual(&left, &right, &spans, &at);
+            let observed = dispatch_observation();
+            totals.blocks += 1;
+            totals.linked += u32::from(linked);
+            if observed.route == DispatchRoute::DualUniform
+                && observed.mode == StationaryDispatch::Ramping
+                && peek_census().segments == walked
+            {
+                totals.ramping_fused += 1;
+            }
+        }
+    }
+
+    /// **Issue #1014 gate 2: the stationary walk renders exactly the unmodified kernel.**
+    ///
+    /// Randomized scenarios at every width (24 per width in dev, 1,000 in release) against #990's
+    /// oracle, comparing every output word (NaN as "both NaN"), every track's payload and the
+    /// complete state after every block. Every counter below must be nonzero: segments ending at a
+    /// completion on their first frame, on their last frame, on a chunk boundary and on a ring
+    /// wrap; dual segments cut by the right channel and asymmetric ones; linked runs of 0, 1, 2, 3
+    /// and 31 steady frames; the ring streams with the newest stream wrapped, the expiring stream
+    /// wrapped and neither; the checked fallback, and the fallback refused by `Wb == R` or
+    /// `steady > R - Wb`; ramping blocks that took the fused loop; and restores at phase 0 and at
+    /// `Wb - 1`.
+    #[test]
+    fn the_stationary_walk_renders_exactly_the_unmodified_kernel() {
+        let scenarios = if cfg!(debug_assertions) { 24 } else { 1000 };
+        for (label, run) in [
+            (
+                "scalar",
+                segment_scenario::<f32> as fn(u64, &str, &mut SegmentRun),
+            ),
+            ("W4", segment_scenario::<Simd4>),
+            ("W8", segment_scenario::<Simd8>),
+        ] {
+            let _ = take_census();
+            let mut totals = SegmentRun::default();
+            for scenario in 0..scenarios {
+                run(scenario, label, &mut totals);
+            }
+            let census = take_census();
+            println!(
+                "{label}: {scenarios} scenarios, {} blocks ({} linked, {} ramping on the fused \
+                 loop), phase restores {}/{}; {census:?}",
+                totals.blocks,
+                totals.linked,
+                totals.ramping_fused,
+                totals.phase_zero,
+                totals.phase_last
+            );
+            for (name, count) in [
+                ("segments", census.segments),
+                ("completions", census.completions),
+                (
+                    "completions on a first frame",
+                    census.completion_first_frame,
+                ),
+                ("completions on a last frame", census.completion_last_frame),
+                (
+                    "completions on a chunk boundary",
+                    census.completion_chunk_boundary,
+                ),
+                ("completions on a ring wrap", census.completion_ring_wrap),
+                ("right-channel cuts", census.right_cut),
+                ("asymmetric dual segments", census.asymmetric),
+                ("linked runs of 0 steady frames", census.linked_steady[0]),
+                ("linked runs of 1 steady frame", census.linked_steady[1]),
+                ("linked runs of 2 steady frames", census.linked_steady[2]),
+                ("linked runs of 3 steady frames", census.linked_steady[3]),
+                ("linked runs of 31 steady frames", census.linked_steady[4]),
+                ("stream runs", census.streams),
+                ("stream runs, newest wrapped", census.streams_newest_wrapped),
+                (
+                    "stream runs, expiring wrapped",
+                    census.streams_expiring_wrapped,
+                ),
+                ("stream runs, unwrapped", census.streams_unwrapped),
+                ("checked fallback runs", census.fallback),
+                ("refused stream runs", census.fallback_bound),
+                (
+                    "ramping blocks on the fused loop",
+                    u64::from(totals.ramping_fused),
+                ),
+                ("linked blocks", u64::from(totals.linked)),
+                ("phase-0 restores", u64::from(totals.phase_zero)),
+                ("phase Wb - 1 restores", u64::from(totals.phase_last)),
+            ] {
+                assert!(count > 0, "{label}: no {name}");
+            }
         }
     }
 
