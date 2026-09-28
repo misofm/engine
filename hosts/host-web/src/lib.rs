@@ -652,7 +652,6 @@ impl Default for WebObservationCaptureIdentity {
 /// mediation can fill them without changing the host's allocation shape or introducing a second
 /// queue/ledger. Free receipt rows have state zero and are never exported.
 #[derive(Default)]
-#[allow(dead_code)]
 struct ObservationSideRecords {
     admission: WebObservationAdmission,
     status: WebObservationStatus,
@@ -768,7 +767,6 @@ const fn observation_refusal_reason(reason: ObservationRefusalReason) -> u32 {
     }
 }
 
-#[allow(dead_code)]
 fn observation_refusal_result(reason: ObservationRefusalReason) -> u32 {
     match reason {
         ObservationRefusalReason::NotPrepared => RESULT_UNSUPPORTED,
@@ -1897,7 +1895,6 @@ impl PreparedSpectrumCapture {
 }
 
 /// Protected preparation ownership and the retained spectrum demand/caches.
-#[allow(dead_code)] // Private preparation is wired in the next bounded #825 checkpoint.
 struct ProtectedObservationStorage {
     controller: HostObservationController,
     ingress: ObservationIngressState,
@@ -1918,7 +1915,6 @@ struct ProtectedObservationStorage {
 }
 
 /// The only spectrum/observation owner a ready host may carry.
-#[allow(dead_code)]
 // Private preparation is wired in the next bounded #825 checkpoint.
 // Keep the single prepared owner inline; the full containing allocation is resource-accounted.
 #[allow(clippy::large_enum_variant)]
@@ -2537,7 +2533,7 @@ impl AudioWorkletEngineHost {
     /// Prepare one private protected observation owner alongside the shared host transaction.
     ///
     /// This path remains crate-private until the protected operation aliases have been guarded.
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn boot_with_observation_demand(
         document: &[u8],
         options: WebBootOptions,
@@ -2787,14 +2783,12 @@ impl AudioWorkletEngineHost {
 
     /// Return the last protected-observation admission/refusal record.
     #[must_use]
-    #[allow(dead_code)]
     pub(crate) const fn observation_admission(&self) -> &WebObservationAdmission {
         &self.side_records.admission
     }
 
     /// Return the last successfully committed protected capture identity.
     #[must_use]
-    #[allow(dead_code)]
     pub(crate) const fn observation_capture_identity(&self) -> &WebObservationCaptureIdentity {
         &self.side_records.capture_identity
     }
@@ -2854,7 +2848,6 @@ impl AudioWorkletEngineHost {
     /// The ingress state spends the selected class before checking the request lengths, preserving
     /// the refusal semantics for retries in the same render epoch. No public protected operation
     /// calls this seam yet; later mediation passes the moved permit through native helpers.
-    #[allow(dead_code)]
     fn begin_observation(
         &mut self,
         class: ObservationClass,
@@ -3270,7 +3263,6 @@ impl AudioWorkletEngineHost {
     /// Ordinary work keeps one additional row available for a removal. The cached row counts
     /// reject impossible requests without walking the four slots; only an admissible request
     /// performs the single bounded free-row search.
-    #[allow(dead_code)]
     fn reserve_receipt(&mut self, class: ObservationClass) -> Result<usize, ObservationRefusal> {
         if self.side_records.terminal_finalized {
             return Err(ObservationRefusal {
@@ -3325,7 +3317,6 @@ impl AudioWorkletEngineHost {
     }
 
     /// Release an unused receipt reservation without touching an authoritative row.
-    #[allow(dead_code)]
     fn release_receipt(&mut self, slot: usize) {
         let Some(receipt) = self.side_records.receipts.get(slot) else {
             return;
@@ -3336,7 +3327,6 @@ impl AudioWorkletEngineHost {
     }
 
     /// Commit one accepted native publication as a Pending graph receipt.
-    #[allow(dead_code)]
     fn commit_receipt(&mut self, slot: usize, accepted: ObservationAccepted, operation: u32) {
         assert!(
             slot < self.side_records.receipts.len(),
@@ -3375,7 +3365,6 @@ impl AudioWorkletEngineHost {
     }
 
     /// Reconcile at most two native application acknowledgements into the authoritative rows.
-    #[allow(dead_code)]
     fn reconcile_observation_applications(&mut self) {
         if self.side_records.terminal_finalized || self.side_records.pending_count == 0 {
             return;
@@ -3422,7 +3411,6 @@ impl AudioWorkletEngineHost {
     }
 
     /// Copy completed rows in stable slot order and release only those source rows.
-    #[allow(dead_code)]
     fn take_observation_applications(&mut self) -> &[WebObservationReceipt] {
         if self.side_records.pending_count != 0 && !self.side_records.terminal_finalized {
             self.reconcile_observation_applications();
@@ -3458,7 +3446,6 @@ impl AudioWorkletEngineHost {
     }
 
     /// Close the owner once, preserving Applied rows and exposing terminal Pending rows.
-    #[allow(dead_code)]
     fn close_observation_receipts(&mut self, failed: bool) {
         if self.side_records.terminal_finalized {
             return;
@@ -3493,7 +3480,6 @@ impl AudioWorkletEngineHost {
     }
 
     /// Map one private refusal or native result into the fixed admission side record.
-    #[allow(dead_code)]
     fn record_observation_admission(
         &mut self,
         operation: u32,
@@ -3553,7 +3539,6 @@ impl AudioWorkletEngineHost {
     }
 
     /// Derive the checked identity accompanying one native continuous spectrum window.
-    #[allow(dead_code)]
     fn spectrum_capture_identity(
         window: &ObservedContinuousSpectrumWindow,
     ) -> Result<WebObservationCaptureIdentity, u32> {
@@ -3578,7 +3563,6 @@ impl AudioWorkletEngineHost {
     }
 
     /// Commit a successfully derived capture identity using scalar assignment only.
-    #[allow(dead_code)]
     fn commit_observation_capture_identity(&mut self, identity: WebObservationCaptureIdentity) {
         self.side_records.capture_identity = identity;
     }

@@ -113,7 +113,10 @@ impl BufferArena {
     }
 }
 
-/// Borrowed planar input/view with an explicit per-plane stride.
+/// The shape of an external planar render input.
+///
+/// It carries no samples: no executor reads an input's planes, nothing constructs one, and every
+/// host passes `input: None`. Only the render entry's input-shape check reads it.
 #[derive(Clone, Copy)]
 pub struct PlanarBufferRef<'a> {
     channels: usize,

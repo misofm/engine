@@ -20,8 +20,9 @@
 //!   so a handle that could be moved or shared would let a host launder it onto a thread that was
 //!   never attested. [`PreparedHost`] stays `Send` (moving preparation to the render thread is the
 //!   supported hand-off); what cannot move is the *started* session.
-//! * [`StartedRenderSession::render`] is the guarded entry: it pins the canonical environment for
-//!   the block and restores the caller's exact word on every path out, success or rejection.
+//! * [`StartedRenderSession::render_planar`] is the guarded entry: it pins the canonical
+//!   environment for the block and restores the caller's exact word on every path out, success or
+//!   rejection.
 //! * There is no `plan_mut`. A host cannot borrow the plan out of a started session and render it
 //!   unguarded; it calls [`StartedRenderSession::stop`], which consumes the handle and gives the
 //!   plan back for a control-thread teardown or a plan replacement.
@@ -90,10 +91,15 @@ impl StartedRenderSession {
 
     /// Render one quantum into caller-owned contiguous planar storage.
     ///
+    /// The canonical floating-point environment is pinned for the whole call and the caller's exact
+    /// word is restored on every path out, including a rejection and an unwind (issue #146).
+    ///
     /// # Errors
     ///
-    /// Whatever [`Self::render_contiguous`] rejects, plus the buffer-layout rejection of
-    /// `PlanarBufferMut::try_new`.
+    /// Whatever `PreparedRenderPlan::render_contiguous` rejects: a discontinuous absolute sample, a
+    /// mismatched output envelope, or a clock overflow. Also the buffer-layout rejection of
+    /// `PlanarBufferMut::try_new`. A [`RenderError`] is sticky and frees nothing; see the
+    /// crate-level host callback contract.
     pub fn render_planar(
         &mut self,
         samples: &mut [f32],

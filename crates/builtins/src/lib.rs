@@ -389,7 +389,7 @@ pub enum BuiltinParameterReset {
 pub struct BuiltinLatticePoints {
     /// Sorted in-domain values. Their `index` is the persisted step index.
     pub points: Vec<effect_contract::LatticePoint>,
-    /// Canonical disabled sentinel carried by [`DISABLED_LATTICE_INDEX`], when declared.
+    /// Canonical disabled sentinel, when declared. It sits outside `points`.
     pub disabled: Option<String>,
 }
 
@@ -398,7 +398,7 @@ pub struct BuiltinLatticePoints {
 /// The builtin vocabulary has a rate-keyed cutoff domain that effect descriptors do not. This
 /// adapter supplies the selected rate's declared maximum, then delegates all arithmetic,
 /// geometric rendering, intrinsic endpoints/defaults and index ordering to effect-contract's one
-/// authority. The disabled sentinel stays outside the ordered domain under its reserved index.
+/// authority. The disabled sentinel stays outside the ordered domain.
 pub fn builtin_parameter_lattice_points(
     descriptor: &BuiltinParameterDescriptor,
     sample_rate: u32,

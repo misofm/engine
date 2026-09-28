@@ -1,7 +1,5 @@
 //! Structurally immutable prepared plan and bounded silence reference renderer.
 
-#![allow(dead_code)] // State fields are intentionally prepared now for later issue-owned kernels.
-
 use super::{BufferArena, BufferArenaError, PlanarBufferMut, PlanarBufferRef};
 use crate::{QuantumFrames, SampleRateHz, is_launch_sample_rate};
 use core::{cell::Cell, num::NonZeroUsize};

@@ -4,8 +4,9 @@
 //! These live here, next to [`svf_block`](super::svf_block), for the same reason every other
 //! kernel does: one generic body, instantiated at every width, is what makes lane identity a
 //! property of the code rather than of a corpus (master plan §1, §4.2). The builtin chain is
-//! `sanitize_gain_block` -> `svf_block` (HPF) -> `svf_block` (LPF) -> `nonfinite_lanes_block`
-//! -> `gain_mute_block` -> `matrix2x2_block`, with one AoSoA transpose pair per chain per block.
+//! `sanitize_gain_block` -> `svf_block` (HPF) -> `svf_block` (LPF) -> the D7 per-lane non-finite
+//! check -> `gain_mute_block` -> `matrix2x2_block`, with one AoSoA transpose pair per chain per
+//! block.
 //!
 //! # Operation order is frozen
 //!
@@ -111,7 +112,8 @@ pub fn sanitize_gain_block<L: Lane>(io: &mut [f32], frames: usize, gain: L) -> L
 
 /// Clears every frame of the lanes selected by `m` to exactly `+0.0`.
 ///
-/// The rare arm of [`nonfinite_lanes_block`]: lanes that are not selected keep their bits exactly.
+/// The rare arm of the D7 block-boundary check: lanes that are not selected keep their bits
+/// exactly.
 ///
 /// Frozen operation order, per frame: `store(frame, andnot(load(frame), m))`.
 #[inline(always)]
@@ -517,10 +519,10 @@ pub struct InputChainReport<L: Lane> {
 /// Every operation, and the order of every operation, is the one the separate kernels use:
 /// [`sanitize_gain_block`] for step 1, [`super::svf_step`] — the single copy of the recurrence,
 /// shared with [`super::svf_block`] — plus that kernel's output mix for steps 2 and 3, and
-/// [`nonfinite_lanes_block`] for step 4. The intermediate value that used
-/// to be stored and reloaded between passes is now kept in a register, which is exact, and the
-/// counter and mask accumulations keep their per-frame order. This is a scheduling change, not a
-/// numeric one (master plan §8 class A).
+/// the D7 per-lane non-finite check (one ordered compare and one mask OR per frame) for step 4.
+/// The intermediate value that used to be stored and reloaded between passes is now kept in a
+/// register, which is exact, and the counter and mask accumulations keep their per-frame order.
+/// This is a scheduling change, not a numeric one (master plan §8 class A).
 ///
 /// Frozen operation order, per frame and per channel `ch`:
 /// 1. `x = load(frame)`

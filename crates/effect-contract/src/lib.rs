@@ -2111,6 +2111,9 @@ impl NativeEffectRegistry {
     pub fn len(&self) -> usize {
         self.factories.len()
     }
+    pub fn is_empty(&self) -> bool {
+        self.factories.is_empty()
+    }
     /// Every registered descriptor, in stable [`EffectId`] order (issue #137 D4).
     ///
     /// The parameter-metadata codegen reads the registry through this, so "an effect in the

@@ -50,8 +50,8 @@
 //! produced only by the comparison and mask operations of this trait" — and that closure is real
 //! rather than aspirational: the only mask producers in the workspace are this trait's five
 //! ordered comparisons, its three mask combinators (which map canonical masks to canonical masks),
-//! and the four constructors in [`crate::kernels::builtins`]
-//! (`no_lanes`, `all_lanes`, `lanes_below`, `mask_from_flags`), each of which is itself written as
+//! and the three constructors in [`crate::kernels::builtins`]
+//! (`no_lanes`, `lanes_below`, `mask_from_flags`), each of which is itself written as
 //! an ordered comparison for precisely this reason. Every reachable mask is canonical, so the two
 //! lowerings coincide bit for bit on every input the engine can construct.
 //!

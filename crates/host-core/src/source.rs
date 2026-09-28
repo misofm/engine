@@ -223,6 +223,12 @@ impl SourceControlSet {
         self.sources.len()
     }
 
+    /// Whether the session declared no sources.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.sources.is_empty()
+    }
+
     /// Total bytes of source ID text retained by the set.
     #[must_use]
     pub fn id_bytes(&self) -> usize {
