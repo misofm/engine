@@ -242,3 +242,138 @@ from another checkout path), shows exactly:
 
 Every other function is identical. The module held 33 `i32.const` 176400, 352800 or 384000
 operands before and none after.
+
+## Sol verdict, attempt 1
+
+**PASS.**
+
+Verified on a scratch merge of `d10edc8e` into `codex/batch-slim-2` at `8b3c0794` (#1035 and the
+env-count repin included). Base for every comparison is `8b3c0794`.
+
+### Merge
+
+- **One textual conflict:** `AGENTS.md`, in the Sources paragraph. #1035 rewrote its first
+  sentences and #1036 its rate clause. Resolution: keep #1035's host-decode sentences and #1036's
+  rate clause.
+- **No semantic conflict.** The merged tree builds, lints and tests green, and no removed
+  identifier survives outside historical specs, handoffs and `artifacts/`.
+- `git merge-tree` of `codex/1049-shrink-dominated-slow-tests` onto the merge is clean.
+
+### Findings, by severity
+
+No defect. An extended rate is refused on every host path, every validator mutation is caught,
+launch-rate output is unchanged and every gate passes.
+
+1. **Low: stale "extended" test names.** The helper `launch_and_extended_compatibility_rates` in
+   `crates/builtins/tests/response.rs` and four test names built on it still claim
+   extended-rate coverage that no longer exists. So do
+   `protocol::model::tests::temporary_extended_rate_is_permitted_when_final_candidate_is_launch_rate`
+   and the `"extended rate refuses"` expect messages in `host-core` spectrum.
+   - The protocol test is rate-agnostic transaction semantics: any intermediate rate is permitted
+     and only the final candidate is checked.
+   - #1049's amendment 3 does not carry the rename. Add the rename to #1049 or to a successor
+     issue, so that it is not lost.
+2. **Nit: digest row count.** The evidence says the digests have 18 rows. `gain_pan_profile
+   digests` prints 17, and `console-workload` is unchanged since `eca8779d`. The rows are
+   byte-identical either way.
+
+### Extended rates in accepted sets
+
+The merged tree was grepped for `176[_,]?400`, `192[_,]?000`, `352[_,]?800`, `384[_,]?000`,
+`176.4`, `352.8`, `192k` and `384k`, and for every rate set. Every survivor is one of three kinds:
+
+- **A refusal test:**
+  - engine, realtime, session, protocol and controller;
+  - host-core prepare and spectrum;
+  - capi, host-web and SDK;
+  - conformance;
+  - builtins `contract.rs` and `filter_response.rs`;
+  - parametric-eq response;
+  - effect-compiler owner;
+  - native-pcm-runner.
+- **A documented non-acceptance:**
+  - AGENTS.md;
+  - `EFFECT_CONTRACT_V1.md`, `SESSION_SCHEMA_V1.md` and `IMPLEMENTATION_PLAN.md`;
+  - the dsp-research and fixture READMEs.
+- **An unrelated number:** frame counts, probe frequencies, byte bounds or vendored constants.
+
+The accepted sets hold the launch rates only:
+
+- `docs/session-v1.schema.json`: `sample_rate_hz` enum;
+- the C ABI header: `EXACT_LAUNCH_RATE_MASK = 15`;
+- `sdk/src`: `SessionSampleRateHz`;
+- `fixtures/builtins/v1`: `rate_hz` values.
+
+### Refusal on every host path
+
+Each validator was mutated to also admit 192 kHz, and at least one test went red for each:
+
+| mutation | tests that went red |
+|---|---|
+| `validate_descriptor` | `descriptor_requires_launch_rows_and_refuses_extended_rows` |
+| `validate_builtin_filter_cutoff` | `extended_and_unrelated_rates_have_no_cutoff_domain_and_refuse_preparation` |
+| `session::validate` | capi `extended_rate_session_and_chunks_are_refused_typed`; host-web `extended_rates_refuse_typed_at_browser_boot`; host-core `session_validation_owns_the_launch_rate_set`; session, protocol, controller and native-pcm-runner rate tests |
+| `session::validate`, in a module rebuilt with it | SDK eval "browser boot refuses the removed extended research rates" (284/285) |
+| `engine::is_launch_sample_rate` | 10 tests, including the engine tier, realtime, conformance fixtures, capi and host-web |
+| `PlanarBlock::try_new`, `PcmFixture::parse`, `PcmFixture::encode` (each mutated separately) | `planar_blocks_and_fixtures_accept_only_launch_rates` |
+| `RenderEnvelope::validate` | `realtime::tests::extended_and_unrelated_rates_reject_before_plan_publication` |
+
+### Launch rates
+
+- **Console digests:** `gain_pan_profile digests` prints 17 rows, byte-identical on base and merge.
+- **All four launch rates prepare and render on every path. Tests that pass on the merge:**
+  - `realtime::tests::launch_sample_rates_prepare_and_render`;
+  - `session` `launch_rates_parse_compile_and_canonicalize`;
+  - capi `direct_and_c_render_match_one_and_ten_tracks_across_launch_rates`;
+  - host-web `meter_spans_cover_all_launch_rates_and_a_nine_track_tail`;
+  - SDK boot evals;
+  - the conformance mock (8 launch configurations) and all 8 production effects' conformance
+    tests.
+- **Builtins cutoff:**
+  - The new function is equivalent to the old one for `Some(maximum)`.
+  - `representable_cutoff_domain_is_shared_by_descriptors_and_preparation` is unchanged and passes
+    on base and merge.
+  - Mutating `<= maximum_hz` to `<` turns it and `descriptor_domains_are_exhaustive_at_launch_rates`
+    red.
+
+### Module
+
+- **Size:** base 3,485,448 bytes, merge 3,485,631, so +183.
+- **Function-level `wasm-objdump -d` diff,** with crate hashes normalized:
+  - `builtins::filter_control::validate_input_filter_pair` is removed. Base had 9 call sites in
+    the four functions that grew; the merge has none, and each of those functions gains the
+    launch-rate compares that the removed function carried.
+  - `prepare_sections`, `parameter_diagnostic` and `validate_descriptor` shrank.
+  - The 44 `i32.const` operands for the extended rates drop to 0.
+  - Every other function is identical.
+- **Gates:** the callgraph gates (render, meter_poll, command_submit, kernel-shape), the V8 spill
+  gate and its self-test, and the boot budget all pass.
+
+### Test list
+
+`cargo test --workspace --all-features -- --list` goes from 2,272 to 2,273. The diff matches the
+evidence's inventory exactly: 4 tests flipped and renamed, 1 removed, 2 added. No launch-rate claim
+is lost.
+
+### Gates on the merge
+
+All pass:
+
+- `cargo check` and `cargo clippy -D warnings` (`--workspace --all-targets --all-features`), and
+  `cargo fmt --check`;
+- `cargo check` for aarch64-apple-ios and aarch64-linux-android (capi and the product crates), and
+  for wasm `simd128` (host-web, dsp-reference, conformance);
+- tests of the affected crates, dev and release: 1,153 passed, 0 failed;
+- the conformance tests of the effect crates: 11 passed;
+- `run-wasm-gates.sh`;
+- SDK: 285/285 evals; `check-sdk-generated`, `check-sdk-types` and `check-sdk-deletions` with its
+  self-test;
+- `check-capi-abi.sh` and its self-test;
+- `conformance_fixtures --check`;
+- every `scripts/check-*.sh`, `check-*.py` and `check-*.mjs`, with the argument-requiring ones run
+  as `--self-test` or on the built module;
+- `test-ci-path-routing.py` and `test-effect-runtime-fixtures.sh`.
+
+**Expected red: the AudioWorklet pin.** `check-web-audioworklet.sh` and `check-sdk-headless.sh`
+run without an argument fail only there. The pin is already red on base: base builds `e34073a2…`
+against the pin `f7bd75ca…`. The batch boundary re-pins it.
