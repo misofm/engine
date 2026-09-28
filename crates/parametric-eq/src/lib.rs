@@ -1156,16 +1156,6 @@ fn lane_bits_all<L: Lane>(value: L, bits: u32) -> bool {
 /// NaN.
 const NON_FINITE_MAGNITUDE: u32 = 0x7f80_0000;
 
-/// `true` when every lane of `value` is finite and none is `-0.0`.
-fn lane_is_finite_without_negative_zero<L: Lane>(value: L) -> bool {
-    debug_assert!(L::WIDTH <= MAX_LANES);
-    let mut words = [0_u32; MAX_LANES];
-    value.store_bits(&mut words[..L::WIDTH]);
-    words[..L::WIDTH]
-        .iter()
-        .all(|word| *word != NEGATIVE_ZERO_BITS && (*word & MAGNITUDE_MASK) < NON_FINITE_MAGNITUDE)
-}
-
 /// Magnitude bits of [`lane::FLUSH_EPS`], the smallest magnitude `flush` keeps.
 const INERT_MAGNITUDE_FLOOR: u32 = lane::FLUSH_EPS.to_bits();
 
@@ -1195,12 +1185,6 @@ fn lane_is_inert<L: Lane>(value: L) -> bool {
 /// argument is on [`cascade_sections`]).
 fn section_state_is_inert<L: Lane>(section: &Section<L>) -> bool {
     lane_is_inert::<L>(section.state.ic1) && lane_is_inert::<L>(section.state.ic2)
-}
-
-/// `true` when every integrator word of `section` is finite and none is `-0.0`, on every lane.
-fn section_state_is_finite_without_negative_zero<L: Lane>(section: &Section<L>) -> bool {
-    lane_is_finite_without_negative_zero::<L>(section.state.ic1)
-        && lane_is_finite_without_negative_zero::<L>(section.state.ic2)
 }
 
 /// `true` when no word of `io` is `-0.0` and every word is finite and inside [`BLOCK_LIMIT`].
@@ -1918,7 +1902,7 @@ fn cascade_sections_mono<L: Lane, const W: usize>(
         let admissible = if dead(section) {
             section_state_is_inert(&channel.sections[section])
         } else {
-            section_state_is_finite_without_negative_zero(&channel.sections[section])
+            section_state_is_flush_shaped(&channel.sections[section])
         };
         if !admissible {
             return all;
@@ -2036,13 +2020,11 @@ fn interleave_mono<L: Lane, const W: usize, const DEPTH: usize>(
 /// ([`ramp_keeps_unit_m0`]); any other ramping section keeps every dead section after it. The
 /// argument is the ramping paragraph of [`cascade_sections`]' proof.
 ///
-/// * **The gate is [`cascade_sections`]', leg for leg, with (c) tightened**: (a) neither input
-///   plane carries `-0.0`, a non-finite word or a magnitude above the ceiling; (b) every dead
-///   section's state is inert on both channels; (c) every other section's state is a word `flush`
-///   can leave -- `+0.0`, or finite with a magnitude of at least `FLUSH_EPS` -- which is finite and
-///   free of `-0.0` as the stationary leg asks, and also free of the tiny restored words
-///   [`section_state_is_flush_shaped`] documents. Any refusal returns all six, and the block
-///   renders as it did before this function existed.
+/// * **The gate is [`cascade_sections`]', leg for leg**: (a) neither input plane carries `-0.0`, a
+///   non-finite word or a magnitude above the ceiling; (b) every dead section's state is inert on
+///   both channels; (c) every other section's state is a word `flush` can leave -- `+0.0`, or
+///   finite with a magnitude of at least `FLUSH_EPS` ([`section_state_is_flush_shaped`]). Any
+///   refusal returns all six, and the block renders as it did before this function existed.
 /// * **Freshness.** `identity[s]` is only read for a section with no lane in flight on either
 ///   channel, and that flag is fresh: every ramp ends in a snap followed by `refresh_identity`, and
 ///   `settle`, `start_ramp`, the resets and a restore refresh too. A ramping section's flag can be
@@ -2080,7 +2062,7 @@ fn ramping_sections<L: Lane, const W: usize>(
             section_state_is_inert(&left_channel.sections[section])
                 && section_state_is_inert(&right_channel.sections[section])
         } else {
-            // (c), tightened to the words `flush` leaves: see `section_state_is_flush_shaped`.
+            // (c)
             section_state_is_flush_shaped(&left_channel.sections[section])
                 && section_state_is_flush_shaped(&right_channel.sections[section])
         };
@@ -2182,19 +2164,20 @@ fn lane_is_flush_shaped<L: Lane>(value: L) -> bool {
     })
 }
 
-/// Leg (c) of [`ramping_sections`]: both integrator words of a kept section are words the kernel
-/// can have written ([`lane_is_flush_shaped`]) on every lane.
+/// Leg (c) of [`cascade_sections`] and [`ramping_sections`]: both integrator words of a kept
+/// section are words the kernel can have written ([`lane_is_flush_shaped`]) on every lane.
 ///
-/// The stationary leg asks only for finite words free of `-0.0`, and that admits a restored
-/// subnormal. The `-0.0` induction on [`cascade_sections`] argues its high-shelf case from
-/// kernel-written states (`v1 = ic1 + d1` is `+0.0` or at least `FLUSH_EPS * 2^-24`), and a
-/// restored payload is the one way around that: a live high shelf whose `m0` and `m2` are both
-/// exactly `0.5` (gain `-6.0206` dB as an `f32`, the one gain that designs them), holding
-/// `ic1 = ic2 = -2^-149`, turns an input of `-2^-149` into `y = (-0.0) + ((-0.0) + (-0.0)) = -0.0`
-/// on its first frame, and an elided identity section after it passes that `-0.0` on where the
-/// executed one writes `+0.0`. A stationary block at the batch head already elides there; a
-/// ramping block at the batch head never elides at all, so this list must not inherit it. After
-/// one refused block the kernel has flushed the words and the list engages again.
+/// That is finite and free of `-0.0`, which is what the leg asked before issue #1015, and also
+/// free of the tiny words only a restore can put there. The `-0.0` induction on
+/// [`cascade_sections`] argues its high-shelf case from kernel-written states (`v1 = ic1 + d1` is
+/// `+0.0` or at least `FLUSH_EPS * 2^-24`), and a restored payload was the one way around that: a
+/// live high shelf whose `m0` and `m2` are both exactly `0.5` (gain `-6.0206` dB as an `f32`, the
+/// one gain that designs them), holding `ic1 = ic2 = -2^-149`, turns an input of `-2^-149` into
+/// `y = (-0.0) + ((-0.0) + (-0.0)) = -0.0` on its first frame, and an elided identity section after
+/// it passed that `-0.0` on where the executed one writes `+0.0`. Refusing costs one block: the
+/// refused block runs every section, the kernel flushes the words, and the next block engages.
+/// Kernel-written states always pass, so a session that restores nothing tiny elides exactly as it
+/// did.
 #[inline(always)]
 fn section_state_is_flush_shaped<L: Lane>(section: &Section<L>) -> bool {
     lane_is_flush_shaped::<L>(section.state.ic1) && lane_is_flush_shaped::<L>(section.state.ic2)
@@ -2289,7 +2272,10 @@ fn section_state_is_flush_shaped<L: Lane>(section: &Section<L>) -> bool {
 ///     on every kind, so `a2 * v3` at `|v3| = 2^-149` underflows to a zero, `d1` is a zero, and
 ///     `v1 = ic1 + d1` is either `+0.0` (giving `m1 * v1 = +0.0`, since a cut high shelf has
 ///     `m1 = shelf_k * (1 - A) * A > 0`) or has `|v1| >= FLUSH_EPS * 2^-24`, far too large to
-///     underflow. Either way `m1 * v1 != -0.0` and the conjunction fails.
+///     underflow. Either way `m1 * v1 != -0.0` and the conjunction fails. That last step needs
+///     `ic1` to be `+0.0` or at least `FLUSH_EPS` in magnitude: every word the kernel writes is,
+///     and gate (c) refuses a restored one that is not (issue #1015; a restored `-2^-149` there is
+///     a counterexample, see [`section_state_is_flush_shaped`]).
 ///   - `m0 = +0.0`, i.e. a low pass, whose other words are `m1 = +0.0` and `m2 = 1.0`. Then
 ///     `m2 * v2 = v2`, so `y = -0.0` needs `v2 = -0.0`, which by the addition rule needs
 ///     `ic2 = -0.0`. `flush` maps every zero to `+0.0`, so no integrator word the kernel writes is
@@ -2307,9 +2293,7 @@ fn section_state_is_flush_shaped<L: Lane>(section: &Section<L>) -> bool {
 /// # A ramping block (issue #1005)
 ///
 /// [`ramping_sections`] drops dead sections from a block on which some lane ramps, under the same
-/// three legs, with leg (c) tightened to the words the kernel writes: the high-shelf case above
-/// argues from kernel-written integrators, and [`section_state_is_flush_shaped`] shows the
-/// restored subnormal that leg (c) as written lets past it. Everything above is per dead section,
+/// three legs. Everything above is per dead section,
 /// and a dead section of a ramping block is an identity section with no lane in flight on either
 /// channel, so it applies unchanged once one more input is closed: a dead section may now sit
 /// downstream of a **ramping** live section, whose words are interpolated, not designed, and the
@@ -2419,16 +2403,18 @@ fn cascade_sections<L: Lane, const W: usize>(
             section_state_is_inert(&left_channel.sections[section])
                 && section_state_is_inert(&right_channel.sections[section])
         } else {
-            // (c) A live section must carry no `-0.0` and no non-finite integrator word. Nothing
-            // the kernel writes is ever `-0.0`, but a restored state payload is admitted on
-            // finiteness alone, and a low pass with `ic2 = -0.0` is the one shape that can emit
-            // `-0.0` into a later elided section. A non-finite word can be written: a dry lane
+            // (c) A live section's integrators must be words the kernel can write: `+0.0`, or
+            // finite with a magnitude of at least `FLUSH_EPS` (issue #1015). Nothing the kernel
+            // writes is ever `-0.0` or tiny, but a restored state payload is admitted on
+            // finiteness alone: a low pass with `ic2 = -0.0` can emit `-0.0` into a later elided
+            // section, and so can a high shelf at `m0 = m2 = 0.5` holding a restored subnormal
+            // (`section_state_is_flush_shaped`). A non-finite word can be written: a dry lane
             // of a dedicated cut still runs the recurrence, and a refused block can overflow a
             // large restored integrator there to `NaN` while the select passes the dry input on
             // (issue #977). The admitted plan's pairs run select-free, so they need every dry
             // lane's state finite; see "Why an admitted plan runs select-free" above.
-            section_state_is_finite_without_negative_zero(&left_channel.sections[section])
-                && section_state_is_finite_without_negative_zero(&right_channel.sections[section])
+            section_state_is_flush_shaped(&left_channel.sections[section])
+                && section_state_is_flush_shaped(&right_channel.sections[section])
         };
         if !admissible {
             return all;
@@ -4760,10 +4746,12 @@ mod elision {
                 for section in 0..EQ_SECTION_COUNT {
                     // Only *live* sections are seeded: a non-inert state in a dead section is a
                     // refusal leg with its own test, and seeding it here would silently disable
-                    // the very engagement this function is asserting.
+                    // the very engagement this function is asserting. The seeds are words the
+                    // kernel can write, just above `FLUSH_EPS`: since issue #1015 a restored
+                    // subnormal in a live section refuses too (`stationary_subnormal`).
                     if left_live & (1 << section) != 0 {
-                        left_channel.sections[section].state.ic1 = L::splat(1.0e-40);
-                        left_channel.sections[section].state.ic2 = L::splat(-1.0e-41);
+                        left_channel.sections[section].state.ic1 = L::splat(1.5e-20);
+                        left_channel.sections[section].state.ic2 = L::splat(-1.25e-20);
                     }
                     if right_live & (1 << section) != 0 {
                         right_channel.sections[section].state.ic1 = L::splat(-3.5e-7);
@@ -4829,8 +4817,8 @@ mod elision {
             if seed_state {
                 for section in 0..EQ_SECTION_COUNT {
                     if live & (1 << section) != 0 {
-                        channel.sections[section].state.ic1 = L::splat(1.0e-40);
-                        channel.sections[section].state.ic2 = L::splat(-1.0e-41);
+                        channel.sections[section].state.ic1 = L::splat(1.5e-20);
+                        channel.sections[section].state.ic2 = L::splat(-1.25e-20);
                     }
                 }
             }
@@ -7777,5 +7765,259 @@ mod ramping_elision {
     #[test]
     fn select_lane_writes_alone_render_the_lane_set_bits_simd8() {
         differential::<Simd8, 8>("Simd8", "#1007 alone", WRITES_ALONE);
+    }
+}
+
+/// Issue #1015: a restored subnormal integrator in a live section refuses the stationary elision.
+///
+/// The shape: one live high shelf at `m0 = m2 = 0.5` (gain `-6.0206` dB as an `f32`), every other
+/// section dead, a restored `ic1 = ic2 = -2^-149` on the last lane, and an input word of `-2^-149`
+/// there. The shelf emits `-0.0` on its first frame; an elided identity after it passes that `-0.0`
+/// on, and the executed one writes `+0.0`. Before the fix the stationary cascade rendered
+/// `0x80000000` where the full per-section cascade rendered `0x00000000`.
+#[cfg(test)]
+mod stationary_subnormal {
+    use super::*;
+
+    const RATE: SampleRateHz = SampleRateHz(48_000);
+    const FRAMES: usize = 16;
+    const TINY: u32 = 0x8000_0001;
+
+    fn sections() -> [BandTarget; EQ_SECTION_COUNT] {
+        let off = BandTarget {
+            enabled: false,
+            kind: EqBandKind::Bell,
+            frequency: 1_000.0,
+            gain: 0.0,
+            q: 1.0,
+            slope: 1.0,
+        };
+        let mut sections = [off; EQ_SECTION_COUNT];
+        sections[BAND_SECTION_OFFSET] = BandTarget {
+            enabled: true,
+            kind: EqBandKind::HighShelf,
+            frequency: 3_000.0,
+            gain: -6.020_6,
+            q: 0.7,
+            slope: 1.0,
+        };
+        sections
+    }
+
+    /// The input: ordinary words, and `-2^-149` on the last lane's first frame.
+    fn input<const W: usize>() -> Vec<f32> {
+        let mut io = vec![0.25_f32; FRAMES * W];
+        io[W - 1] = f32::from_bits(TINY);
+        io
+    }
+
+    fn bits(words: &[f32]) -> Vec<u32> {
+        words.iter().map(|word| word.to_bits()).collect()
+    }
+
+    fn state<L: Lane, const W: usize>(channel: &Channel<L, W>) -> Vec<u32> {
+        let mut words = [0_u32; EQ_SECTION_COUNT * 2 * MAX_LANES];
+        channel.state_bits(&mut words);
+        words.to_vec()
+    }
+
+    /// The channel level: the stationary cascade against the full per-section one (the
+    /// unit-test default of `process_channels(.., false)`), dual and collapsed.
+    fn channel_level<L: Lane, const W: usize>(width: &str, mismatches: &mut Vec<String>) {
+        let words = sections()[BAND_SECTION_OFFSET]
+            .words(RATE)
+            .expect("a legal shelf");
+        assert_eq!(
+            (words.m0.to_bits(), words.m2.to_bits()),
+            (0.5_f32.to_bits(), 0.5_f32.to_bits()),
+            "{width}: the shelf designs m0 = m2 = 0.5"
+        );
+        let build = || {
+            let mut channel = Channel::<L, W>::new([sections(); W], RATE).expect("legal");
+            let slot = &mut channel.sections[BAND_SECTION_OFFSET];
+            lane_set(&mut slot.state.ic1, W - 1, f32::from_bits(TINY));
+            lane_set(&mut slot.state.ic2, W - 1, f32::from_bits(TINY));
+            channel
+        };
+        for mono in [false, true] {
+            let mut arms = Vec::new();
+            for stationary in [true, false] {
+                let (mut left, mut right) = (build(), build());
+                let (mut l, mut r) = (input::<W>(), input::<W>());
+                if mono {
+                    process_channels_mono::<L, W>(&mut left, &mut l, FRAMES, stationary);
+                } else {
+                    process_channels::<L, W>(
+                        (&mut left, &mut right),
+                        &mut l,
+                        &mut r,
+                        FRAMES,
+                        stationary,
+                    );
+                }
+                arms.push((bits(&l), bits(&r), state(&left), state(&right)));
+            }
+            let (elided, full) = (&arms[0], &arms[1]);
+            if elided != full {
+                mismatches.push(format!(
+                    "{width} mono {mono}: the stationary cascade rendered {:08x} where the full \
+                     cascade rendered {:08x}",
+                    elided.0[W - 1],
+                    full.0[W - 1]
+                ));
+            }
+        }
+    }
+
+    /// The contract level: the payload restores (the shape is reachable), and the bank renders
+    /// the full cascade's bits through `process_bank` / `process_bank_mono` (or, for the scalar
+    /// instance, the `render` that `process` wraps).
+    fn contract_level<L: Lane, const W: usize>(width: &str, mismatches: &mut Vec<String>) {
+        let mut values: Vec<InitialParameterValue> =
+            effect_contract::default_initial_values(&PARAMETRIC_EQ_DESCRIPTOR).collect();
+        for (field, value) in [(0, 1.0), (1, 3.0), (2, 3_000.0), (3, -6.020_6), (4, 0.7)] {
+            for side in 0..2 {
+                values[field * 2 + side].value = value;
+            }
+        }
+        let request = PrepareEffectRequest {
+            sample_rate: RATE.0,
+            quantum: 128,
+            quality: Quality::Normal,
+            bypass: false,
+            link_mode: effect_contract::LinkMode::DualMono,
+            ports: effect_contract::PreparedPorts {
+                sidechain: effect_contract::PreparedSidechainPort::None,
+            },
+            initial_values: &values,
+            limits: effect_contract::PrepareEffectLimits {
+                maximum_total_state_bytes: 1 << 16,
+                maximum_scratch_bytes: 1 << 16,
+                maximum_automation_spans_per_block: 48,
+            },
+        };
+        let requests = vec![request; W];
+        let metadata =
+            expected_prepared_metadata(&PARAMETRIC_EQ_DESCRIPTOR, request).expect("metadata");
+        let width_tag = if W == 8 {
+            BankWidth::Eight
+        } else {
+            BankWidth::Four
+        };
+        let prepare = || prepare_width::<L, W>(metadata, width_tag, &requests).expect("prepared");
+        let lane = W - 1;
+        let payload = {
+            let eq = prepare();
+            let mut words = [[0_u32; STATE_LANE_WORDS]; 2];
+            eq.left.snapshot_track(lane, &mut words[0]);
+            eq.right.snapshot_track(lane, &mut words[1]);
+            for channel in &mut words {
+                let base = BAND_SECTION_OFFSET * STATE_WORDS_PER_BAND;
+                channel[base] = TINY;
+                channel[base + 1] = TINY;
+            }
+            let mut common = vec![0_u8; STATE_SIZES.common];
+            let mut left = vec![0_u8; STATE_SIZES.left];
+            let mut right = vec![0_u8; STATE_SIZES.right];
+            write_payload(
+                StatePayloadOutput {
+                    common: &mut common,
+                    left: &mut left,
+                    right: &mut right,
+                },
+                &words[0],
+                &words[1],
+            )
+            .expect("encode");
+            [common, left, right]
+        };
+        let restored = || {
+            let mut eq = prepare();
+            PreparedNativeEffectBank::restore_track_state_payload(
+                &mut eq,
+                lane as u32,
+                STATE_LAYOUT_VERSION,
+                StatePayloadInput {
+                    common: &payload[0],
+                    left: &payload[1],
+                    right: &payload[2],
+                },
+            )
+            .expect("a finite subnormal integrator restores");
+            eq
+        };
+        for mono in [false, true] {
+            let mut shipped = restored();
+            let mut full = restored();
+            let (mut l, mut r) = (input::<W>(), input::<W>());
+            if W == 1 {
+                if mono {
+                    shipped.render_mono(&mut l, FRAMES);
+                } else {
+                    shipped.render(&mut l, &mut r, FRAMES);
+                }
+            } else {
+                let offsets = [0_u32; MAX_LANES + 1];
+                let block = EffectBankProcessBlock::new(
+                    &mut l,
+                    &mut r,
+                    None,
+                    FRAMES as u32,
+                    width_tag,
+                    0,
+                    &[],
+                    &offsets[..=W],
+                    128,
+                )
+                .expect("block");
+                if mono {
+                    PreparedNativeEffectBank::process_bank_mono(&mut shipped, block);
+                } else {
+                    PreparedNativeEffectBank::process_bank(&mut shipped, block);
+                }
+            }
+            let (mut fl, mut fr) = (input::<W>(), input::<W>());
+            if mono {
+                process_channels_mono::<L, W>(&mut full.left, &mut fl, FRAMES, false);
+            } else {
+                process_channels::<L, W>(
+                    (&mut full.left, &mut full.right),
+                    &mut fl,
+                    &mut fr,
+                    FRAMES,
+                    false,
+                );
+            }
+            if !(bits(&l) == bits(&fl)
+                && (mono || bits(&r) == bits(&fr))
+                && state(&shipped.left) == state(&full.left)
+                && (mono || state(&shipped.right) == state(&full.right)))
+            {
+                mismatches.push(format!(
+                    "{width} mono {mono}: the bank rendered {:08x} where the full cascade \
+                     rendered {:08x}",
+                    l[W - 1].to_bits(),
+                    fl[W - 1].to_bits()
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn a_restored_subnormal_live_state_renders_the_full_cascade_bits() {
+        let mut mismatches = Vec::new();
+        channel_level::<f32, 1>("Scalar", &mut mismatches);
+        channel_level::<Simd4, 4>("Simd4", &mut mismatches);
+        channel_level::<Simd8, 8>("Simd8", &mut mismatches);
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    #[test]
+    fn a_restored_subnormal_live_state_renders_the_full_cascade_bits_through_the_contract() {
+        let mut mismatches = Vec::new();
+        contract_level::<f32, 1>("Scalar", &mut mismatches);
+        contract_level::<Simd4, 4>("Simd4", &mut mismatches);
+        contract_level::<Simd8, 8>("Simd8", &mut mismatches);
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
     }
 }
