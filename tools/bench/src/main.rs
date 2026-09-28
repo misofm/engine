@@ -20,15 +20,7 @@ mod effect_interchange;
 #[cfg(not(target_arch = "wasm32"))]
 mod floor;
 #[cfg(not(target_arch = "wasm32"))]
-mod gate_active;
-#[cfg(not(target_arch = "wasm32"))]
 mod graph;
-#[cfg(not(target_arch = "wasm32"))]
-mod input_symmetry;
-#[cfg(not(target_arch = "wasm32"))]
-mod input_symmetry_capture;
-#[cfg(not(target_arch = "wasm32"))]
-mod multiband_active;
 mod protocol;
 #[cfg(not(target_arch = "wasm32"))]
 mod rack;
@@ -44,11 +36,7 @@ const SUBJECTS: &[&str] = &[
     "console",
     "effect-contract",
     "effect-interchange",
-    "gate-active",
-    "multiband-active",
     "graph",
-    "input-symmetry",
-    "input-symmetry-capture",
     "protocol",
     "rack",
     "session",
@@ -62,11 +50,7 @@ fn run_subject(subject: &str) {
         "console" => console::main(),
         "effect-contract" => effect_contract::main(),
         "effect-interchange" => effect_interchange::main(),
-        "gate-active" => gate_active::main(),
-        "multiband-active" => multiband_active::main(),
         "graph" => graph::main(),
-        "input-symmetry" => input_symmetry::main(),
-        "input-symmetry-capture" => input_symmetry_capture::main(),
         "protocol" => protocol::main(),
         "rack" => rack::main(),
         "session" => session::main(),

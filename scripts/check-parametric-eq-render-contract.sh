@@ -2,9 +2,9 @@
 # Prove the parametric EQ's render path keeps the issue-087 render contract. Hermetic: no cargo, no
 # network, no clock.
 #
-# Split out of scripts/check-parametric-eq-targets.sh, which now only builds the cross-target
-# matrix (delegated to scripts/check-cross-targets.sh) and calls this script. See that file's
-# header for the full history of what issue #87's audit removed from this crate.
+# Split out of scripts/check-parametric-eq-targets.sh, whose cross-target matrix moved to
+# scripts/check-cross-targets.sh; #1027 retired that wrapper. Its header, in git history (last
+# present at ed0556a9), has the full history of what issue #87's audit removed from this crate.
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
