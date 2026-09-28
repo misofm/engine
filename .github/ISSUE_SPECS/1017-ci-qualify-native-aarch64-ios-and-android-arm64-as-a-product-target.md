@@ -643,3 +643,146 @@ Nothing is pushed.
   - the gate-expander W8-only claims should become width-generic tests.
 - **Reconcile at merge.** #1049 may delete compressor `scenario_*_is_pinned` tests that the debug
   rows name. Root reconciles this at merge: a deleted row test fails `judge-skips` by name.
+
+## Sol verdict, attempt 2
+
+**PASS.** Attempt 1's HIGH finding and its MEDIUM finding are both closed. So is the #1048
+change, and nothing on the new head weakens a test, leaves a leg vacuous or breaks the CI wiring.
+Everything that remains is LOW and belongs to successor issues.
+
+I verified head `f3644ff6`, which merges `codex/batch-slim-2` at `eca8779d`, in scratch detached
+worktrees. I also trial-merged it into the current `codex/batch-slim-2` head, `5a549e5a`, which
+adds #1034:
+
+- The merge is clean. Two files auto-merged: `qualification.yml` and `resource_lifecycle.rs`.
+- Both routing scripts pass, as do the reachability and test-support checks and workspace clippy
+  `-D warnings`.
+- `host-core`, `capi` and `lane` pass 296 tests, with 0 failures.
+
+The Rust test hunks are byte-identical to attempt 1's for all 22 files that remain. The other two
+test files, `bench_ramp.rs` and `bank_state.rs`, are gone because batch 2 deleted them (#1027,
+#1037). So attempt 1's x86-strength analysis and its test-value answers still hold.
+
+### Attempt 1 HIGH, the iOS memset scan: closed
+
+- **Counts re-derived independently.** I ran the script's own command (`cargo rustc --release
+  --target aarch64-apple-ios -p <crate> --lib --crate-type rlib -- --emit asm`) over all 25
+  product crates, `capi` included.
+  - 3,494 `bl _memset_pattern16` calls, in exactly the ten crates of the rows and at exactly
+    their ceilings.
+  - `host-core`'s 4 calls sit in `SpectrumAnalyzer::analyze` and `analyze_continuous`.
+  - No crate has a tail-call `b _memset_pattern16`. `grep -c _memset_pattern16` equals the `bl`
+    count in every crate.
+- **Plants against the real scan block,** extracted verbatim from `check-cross-targets.sh`:
+  - one extra stored splat in `soft-clip` fails with "soft-clip: memset_pattern16 calls rose from
+    22 to 23 (#1018)";
+  - a splat planted in `delay`, which has no row, fails with "delay: 1 memset_pattern16 calls and
+    no row";
+  - a `delay` row with 0 calls fails with "delay: expected failure … now passes: delete its row".
+- **No silent skip.** A crate that fails to build in the iOS release step stops the script with
+  exit 101 (`set -e`). A crate that emits no assembly fails with "no iOS release assembly for
+  delay". The judge also refuses an unmeasured product crate and a row outside the closure.
+- **The routing checker pins both judge lines**, and `test-ci-path-routing.py`'s two new
+  mutations are red: a hand-picked product list, and the judge dropped.
+- `check-cross-targets.sh` passes end to end in 5m06s. The register and #1018's "Scope found by
+  #1017" name the ten crates and their render functions, and root has ruled that #1018 is widened.
+
+### Attempt 1 MEDIUM, expected-failure reasons: closed
+
+Unplanted, all six debug rows and both release rows pass the judge.
+
+- **Debug.** `scenario_981`, through the leg's own `expect_failure` and judge, with each plant
+  failing with "failed for another reason … did not fail as its row says":
+  - a planted `panic!` at the top of the test;
+  - a real render change: the automation point moved from −30 to −29 dB, giving digest
+    `615e9210…` where the row expects `ea812b3a…`.
+- **Release**, through the real `run-aarch64-tests.sh release` under qemu, with the leg exiting 1:
+  - an extra input in `m2_exp2_lane_identity` gives a different scalar digest;
+  - a planted `panic!` in `m2_log2_lane_identity` fails as the other-reason case.
+- **Stability.** Each reason is a deterministic value: a render digest, or a first-mismatch word.
+  qemu-user recorded them from the same target triple and toolchain, so the codegen matches the
+  arm64 runner's. A disagreement on hardware turns the leg red rather than green, which is the
+  safe direction.
+
+### #1048's test replacement: the guard is not weakened
+
+- **The guard itself is unchanged.** #1048's `check_qualification_aarch64_g5` and
+  `runs_g5_native_test` are byte-identical to #1048's.
+- **Why the old mutation had to go.** It moved `test-debug-b` onto an arm runner without G5. Now
+  that `aarch64-release` carries G5, that move is legal, so the mutation can no longer be red.
+- **What replaces it.** Four mutations of the new step: removed, `--skip`, demoted to debug, and
+  made conditional. The positive macOS-runner case is kept.
+- **Plants in the merged workflow.** The checker refuses each of the following:
+  - the G5 step deleted, leaving an arm job without G5;
+  - G5 with `-- --nocapture`;
+  - G5 with `-- --exact --skip …`;
+  - G5 narrowed to `--test g6_full_corpus_ftz`;
+  - G5 narrowed to `--lib`;
+  - `aarch64-release` moved off the arm runner.
+- **The one plant it accepts is still correct.** G5 moved into `aarch64-debug` instead still
+  runs in release on arm64, so it is right to accept.
+
+### Findings, by severity
+
+1. **LOW: the G5 guard, and pre-existing, `continue-on-error`.** `|| true` appended to the G5
+   step, or `continue-on-error: true` on it, still passes `check-ci-path-routing.py`. #1048's
+   `runs_g5_native_test` tokenises the command without rejecting `||`. The same hole exists for
+   `test-release`'s G5 step, and no workflow check refuses `continue-on-error` (attempt 1, LOW 5).
+   This belongs in a successor issue on the guard, not to #1017.
+2. **LOW: two rows mask whatever follows their first mismatch.** While LANE-3 is open:
+   - `m2_log2_lane_identity`'s reason is the first mismatch, at input 870. So a regression at a
+     later input, or in the log2 digest pin, stays invisible on AArch64.
+   - The EQ row's reason is the first mismatching leg's digest, so the later legs' select, poison
+     and count assertions do not run.
+
+   This is inherent to failing by name. The other seven reasons pin a whole-render or
+   whole-function digest.
+3. **LOW: the scan matches one call form only.** It counts only the exact `bl _memset_pattern16`
+   form. Today a tail-call `b` form, or another libc routine, does not occur. It is enough for
+   #1018's scope, but it is not a general libc-call gate.
+4. **Carried forward: the gate-expander W8-only claims** (attempt 1, LOW 6). The spec now records
+   these as a successor, and they are unchanged.
+5. **For the first CI run:** real-hardware reproduction of the eight recorded reasons, the
+   re-executing tests and audits, and wall times. #1049 may delete compressor `scenario_*` tests
+   that the rows name, and `judge-skips` fails by name when that merges.
+
+### Gates on `f3644ff6` (x86 unless noted)
+
+- `cargo check --workspace --all-targets --all-features`, clippy `-D warnings` and `fmt --check`:
+  pass.
+- The CI test commands:
+
+  | command | passed | failed |
+  |---|---|---|
+  | `test-debug-a` | 1,343 | 0 |
+  | `test-debug-b` | 800 | 0 |
+  | `test-release`'s `lane`/`math`/`wasm-gates` | 115 | 0 |
+  | `cargo test --release -p audit -p bench -p console-workload` (console digests included) | 132 | 0 |
+
+- `check-ci-path-routing.py`, `test-ci-path-routing.py`, `check-script-reachability.py` and its
+  test, `check-test-support-ci.py` and its test, and `aarch64-known-defects.py --self-test`: pass.
+- actionlint 1.7.7 on every workflow: no findings.
+- Every `scripts/check-*policy*.sh`, `check-env-vocabulary.sh`, the leak, seal, boundary, DSP
+  research and EQ render-contract checks, and every argument-free `check-*.py`, all run with
+  `python3 -B` where they are Python, plus `test-workspace-policy.sh`: pass. Six `.py` scripts
+  exit with usage, because they need arguments.
+- **AArch64 under qemu-user 8.2.2.**
+  - The G5 step, `cargo test --release -p wasm-gates --features math/lane`, passes 7 tests,
+    `g5_native_digests_match_pins` included, and G6 under `FPCR.FZ` passes.
+  - **Release leg** (the real script):
+    - main run: 165 passed, 0 failed;
+    - both M2 rows fail with their recorded reasons;
+    - `console-workload`: pass.
+
+    The script's own `audit` call then stops at the qemu re-exec artifact (no binfmt_misc). Run
+    as subjects, the audits pass:
+    - `capi`: 100,000 calls, `pcm_digest` `ff6cdcb96cdcdad5`, 0 violations;
+    - `delay`, `compressor` and `parametric-eq`: 0 violations;
+    - `gate-expander`: `bank_width` 4, `bank_available` true, 0 violations.
+  - **Debug leg, complete:** all 217 binaries, built with `RUSTFLAGS=-D warnings`.
+    - `judge-skips` passes on the leg's `--list`.
+    - The main run, with the exact skip arguments: 1,797 passed, 37 ignored and 6 filtered.
+    - The one failure is compressor `conformance`'s allocation child, the qemu re-exec artifact.
+      Run directly, the child passes.
+    - All six debug rows, rerun on this head through `expect_failure` and the judge, fail with
+      their recorded reasons.
