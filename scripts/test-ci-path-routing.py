@@ -712,6 +712,15 @@ def main() -> int:
         "        cargo check --quiet --locked --all-targets --all-features",
         "        cargo check --quiet --locked --all-features",
     )
+    script_mutation_fails(
+        "check-cross-targets.sh", "printf '%s\\n' \"$product_list\" >\"$asm_out/products\"\n",
+        "printf 'parametric-eq\\nbuiltins\\n' >\"$asm_out/products\"\n",
+    )  # the iOS memset judge handed a hand-picked subset
+    script_mutation_fails(
+        "check-cross-targets.sh",
+        '"${known_defects[@]}" judge-memset "$asm_out/counts" "$asm_out/products" ||\n',
+        'true ||\n',
+    )  # the per-crate judge dropped
     for name, mode in (("aarch64-debug", "debug"), ("aarch64-release", "release")):
         variable = name.replace("-", "_").upper() + "_RESULT"
         workflow_mutation_fails(

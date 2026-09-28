@@ -10,15 +10,20 @@
 #       the DSP oracles `dsp-reference` and `conformance` and `target-smoke`'s width pin, in the
 #       debug profile with the test-support features test-debug-a/b name on x86.
 #   run-aarch64-tests.sh release
-#       `lane`, `math` and `wasm-gates` (G1-G6, M1-M3, the G5 class-A corpus, G6 under FPCR.FZ) in
-#       the shipping release profile, because LANE-3 is an optimizer fold a debug build does not
-#       make; `console-workload`'s class-A console digests; and the realtime audits: `audit capi`
-#       and the per-effect allocation and syscall audits.
+#       `lane` and `math` (G1-G4, G6 under FPCR.FZ, P1, M1-M3) in the shipping release profile,
+#       because LANE-3 is an optimizer fold a debug build does not make; `console-workload`'s
+#       class-A console digests; and the realtime audits: `audit capi` and the per-effect allocation
+#       and syscall audits. G5, `wasm-gates`' native owner of the cross-target digest corpora, is
+#       `aarch64-release`'s own unfiltered workflow step (#1048), so no row or skip here reaches it.
 #
-# Known defects are expected failures, by name, in EXPECTED_FAILURES below; each row names its
-# issue. A named test is skipped (`--exact --skip`) in its leg's main run and then run alone, where
-# it must fail as a test. If it passes, this script fails and says to delete the row, so a fixed
-# defect cannot leave a stale marker. Nothing else is skipped, and no job is.
+# Known defects are expected failures, by name and by reason, in
+# scripts/lib/aarch64-known-defects.py; each row names its issue. Before the main run each row's
+# name must name exactly one test in the leg, because `--exact --skip` reaches every test binary.
+# The main run skips the rows' tests. Each row's test then runs alone and must fail as that one
+# test, with the row's reason (the AArch64 digest or assertion text the defect produces) in its
+# panic. A pass, another panic or another failure reason fails the leg, so a fixed defect cannot
+# leave a stale row and a new regression cannot hide behind an old one. Nothing else is skipped,
+# and no job is.
 #
 # Both modes first run a no-silent-skip gate over the packages the legs run: no test returns early
 # on a SIMD backend width (`if Backend::current() != Backend::Simd8 { return; }`, or
@@ -66,35 +71,17 @@ if [[ -n "${CARGO_BUILD_TARGET:-}" ]]; then
 fi
 binary_dir="${CARGO_TARGET_DIR:-$root/target}${CARGO_BUILD_TARGET:+/$CARGO_BUILD_TARGET}/release"
 
-# issue|package|target|test. `target` is `lib` or `test:<integration test name>`.
-EXPECTED_FAILURES_DEBUG=(
-    # NaN encodings (#1065), not LANE-3: a debug build makes no fmaxnm fold. An arithmetic NaN is
-    # 0x7FC00000 (positive) on AArch64 where x86 answers 0xFFC00000 (negative), and a signalling
-    # operand wins NaN propagation, so these pins, which fold raw NaN words from hostile input, move
-    # on AArch64 and on nothing else. With every NaN folded as one word the six compressor scenarios
-    # and the EQ select legs are identical on both architectures (#1017 attempt 1 evidence). #1065
-    # rules how class-A identity treats NaN encodings.
-    "1065|compressor|lib|kernel::settled_body_tests::scenario_981_heterogeneous_hostile_render_is_pinned"
-    "1065|compressor|lib|kernel::settled_body_tests::scenario_983_chunk_straddling_render_is_pinned"
-    "1065|compressor|lib|kernel::settled_body_tests::scenario_985_collapsed_render_is_pinned"
-    "1065|compressor|lib|kernel::settled_body_tests::scenario_995_sidechain_render_is_pinned"
-    "1065|compressor|lib|kernel::settled_body_tests::scenario_1006_ramping_prefix_is_pinned"
-    "1065|parametric-eq|test:bank|admitted_blocks_render_the_base_bits_without_selects"
-)
-EXPECTED_FAILURES_RELEASE=(
-    # LANE-3 (#1019): in release the D8 `select(a > b, a, b)` folds into `fmaxnm`/`fminnm` inside
-    # `exp2_lane` and `log2_lane`, scalar and vector alike, which answer differently on NaN and
-    # signed-zero inputs. The same tests pass in the debug leg.
-    "1019|math|test:m2_lane_identity|m2_exp2_lane_identity"
-    "1019|math|test:m2_lane_identity|m2_log2_lane_identity"
-)
+known_defects=(python3 -B "$root/scripts/lib/aarch64-known-defects.py")
+"${known_defects[@]}" --self-test >/dev/null || fail 'the known-defect judges failed their self-test'
+mapfile -t rows < <("${known_defects[@]}" rows "$mode")
+((${#rows[@]} > 0)) || fail "no $mode expected-failure rows could be read"
 
 # --- no silent skip on a backend width ----------------------------------------------------------
 silent_skip='(?:Backend::current\(\)|\bbackend|\bdispatch)\s*!=\s*(?:\w+::)*Backend::Simd[48]\s*\{[^{}]*?\breturn\b'
 silent_skip+='|let\s+Some\([^=;]*\)\s*=\s*[^;]*?(?:_w[48]\b|Simd[48]|BankWidth::(?:Four|Eight))[^;]*?\belse\s*\{[^{}]*?\breturn\b'
 skip_roots=(crates tools/console-workload tools/wasm-gates tools/wasm-gate-corpus)
-if skips="$(rg -n -U --pcre2 --glob '*.rs' "$silent_skip" "${skip_roots[@]}")"; then
-    printf '%s\n' "$skips" >&2
+if found="$(rg -n -U --pcre2 --glob '*.rs' "$silent_skip" "${skip_roots[@]}")"; then
+    printf '%s\n' "$found" >&2
     fail 'a test returns early on a SIMD backend width; make it width-agnostic or #[ignore] the other width with its reason'
 else
     status=$?
@@ -102,36 +89,43 @@ else
 fi
 
 # --- expected failures ---------------------------------------------------------------------------
-# Runs `cargo test "$@" <target> -- --exact <name>` for one row, which must fail as a test.
+# Each row's name must name exactly one test among the binaries `cargo test "$@"` runs.
+check_skip_names() {
+    local listing
+    listing="$(mktemp)"
+    cargo test "$@" -- --list >"$listing" || fail 'could not list the leg'"'"'s tests'
+    "${known_defects[@]}" judge-skips "$mode" "$listing" || fail 'an expected-failure row is ambiguous'
+    rm -f "$listing"
+}
+
+# Runs `cargo test "$@" <target> -- --exact <name>` for one row, which must fail as that one test
+# and for the row's reason.
 expect_failure() {
-    local row=$1 issue package selector name log
+    local row=$1 package selector name log status
     shift
-    IFS='|' read -r issue package selector name <<<"$row"
+    IFS='|' read -r _ package selector name <<<"$row"
     local select=(--lib)
     [[ "$selector" == test:* ]] && select=(--test "${selector#test:}")
     log="$(mktemp)"
-    if cargo test "$@" "${select[@]}" -- --exact "$name" >"$log" 2>&1; then
+    status=0
+    cargo test "$@" "${select[@]}" -- --exact "$name" >"$log" 2>&1 || status=$?
+    if ! "${known_defects[@]}" judge-test "$mode" "$name" "$log" "$status"; then
         cat "$log" >&2
-        fail "expected failure $package $name (#$issue) now passes: delete its row from scripts/run-aarch64-tests.sh"
-    fi
-    if ! rg -qxF "test $name ... FAILED" "$log" ||
-        [[ "$(rg -c '^test result: FAILED\. 0 passed; 1 failed;' "$log")" != 1 ]]; then
-        cat "$log" >&2
-        fail "expected failure $package $name (#$issue) did not fail as that one test"
+        fail "expected failure $package $name did not fail as its row says"
     fi
     rm -f "$log"
-    printf 'expected failure (#%s): %s %s\n' "$issue" "$package" "$name"
 }
 
 # Skip arguments for a leg's main run: `--exact`, then one `--skip` per expected failure.
 skip_arguments() {
     local row name
     printf '%s\n' --exact
-    for row in "$@"; do
+    for row in "${rows[@]}"; do
         IFS='|' read -r _ _ _ name <<<"$row"
         printf '%s\n%s\n' --skip "$name"
     done
 }
+mapfile -t skips < <(skip_arguments)
 
 if [[ "$mode" == debug ]]; then
     source "$root/scripts/lib/product-crates.sh"
@@ -144,20 +138,20 @@ if [[ "$mode" == debug ]]; then
     features=builtins-compiler/test-support,source/test-support,graph/test-support
     features+=,host-core/test-support,effect-compiler/test-support,protocol/test-support
     features+=,engine/realtime-audit,math/lane,parametric-eq/test-support,builtins/test-support
-    mapfile -t skips < <(skip_arguments "${EXPECTED_FAILURES_DEBUG[@]}")
+    check_skip_names --locked --all-targets "${packages[@]}" --features "$features"
     cargo test --locked --all-targets "${packages[@]}" --features "$features" -- "${skips[@]}"
-    for row in "${EXPECTED_FAILURES_DEBUG[@]}"; do
+    for row in "${rows[@]}"; do
         expect_failure "$row" --locked "${packages[@]}" --features "$features"
     done
     printf 'aarch64 debug leg: PASS (%d product crates, %d expected failures)\n' \
-        "$(wc -l <<<"$product_list")" "${#EXPECTED_FAILURES_DEBUG[@]}"
+        "$(wc -l <<<"$product_list")" "${#rows[@]}"
     exit 0
 fi
 
-gates=(-p lane -p math -p wasm-gates --features math/lane)
-mapfile -t skips < <(skip_arguments "${EXPECTED_FAILURES_RELEASE[@]}")
+gates=(-p lane -p math --features math/lane)
+check_skip_names --locked --release "${gates[@]}"
 cargo test --locked --release "${gates[@]}" -- "${skips[@]}"
-for row in "${EXPECTED_FAILURES_RELEASE[@]}"; do
+for row in "${rows[@]}"; do
     expect_failure "$row" --locked --release "${gates[@]}"
 done
 
@@ -196,4 +190,4 @@ rg -qF '"total_violations":0' "$binary_dir/aarch64-gate-expander-audit.json" ||
 rg -qF '"bank_available":true' "$binary_dir/aarch64-gate-expander-audit.json" ||
     fail 'audit gate-expander bound no bank at the native width'
 
-printf 'aarch64 release leg: PASS (%d expected failures)\n' "${#EXPECTED_FAILURES_RELEASE[@]}"
+printf 'aarch64 release leg: PASS (%d expected failures)\n' "${#rows[@]}"

@@ -95,31 +95,31 @@ aarch64_row() {
 aarch64_row aarch64-apple-ios
 aarch64_row aarch64-linux-android
 
-# --- known defect #1018, an expected failure by name: `ios-asm-memset-pattern16` ----------------
-# On Apple targets LLVM lowers a stored splat (the SVF flush's `L::splat(FLUSH_EPS)` among others) to
-# `bl _memset_pattern16`, a libc call inside the EQ and builtin render kernels, which the realtime
-# rules forbid. This check counts every such call in the iOS release assembly of `parametric-eq`
-# and `builtins`. While #1018 is open the count must be nonzero; when it reaches zero the check
-# fails and says so, so that the fix removes this marker and the register entry in
-# docs/TARGET_MATRIX.md together. #1018 owns the render-precise replacement gate. A fresh `--emit`
-# path per run keeps cargo from treating the crate as fresh and skipping the assembly.
+# --- known defect #1018, expected failures by crate: `ios-asm-memset-pattern16` -----------------
+# On Apple targets LLVM lowers a stored `f32x4` splat constant (`lane::FLUSH_EPS`, `1.0`, `0.5` and
+# others) to `bl _memset_pattern16`: a libc call, nearly always inside a render function, which the
+# realtime rules forbid. This scan emits every product crate's iOS release assembly (as an rlib,
+# so `capi`'s cdylib is never linked and no Xcode is needed) and counts those calls per crate.
+# scripts/lib/aarch64-known-defects.py holds one row per affected crate with its ceiling, and
+# judges the counts: a row at zero, a count above its ceiling, a crate with calls and no row, or a
+# row for a crate outside the product closure each fail here. The defect reads fixed only when every
+# row is gone. A fresh `--emit` path per run keeps cargo from treating a crate as fresh and
+# skipping its assembly.
+known_defects=(python3 -B "$root/scripts/lib/aarch64-known-defects.py")
+"${known_defects[@]}" --self-test >/dev/null || fail 'the known-defect judges failed their self-test'
 asm_out="$(mktemp -d)"
 trap 'rm -rf "$asm_out"' EXIT
-memset_calls=0
-for crate in parametric-eq builtins; do
+while read -r crate; do
     CARGO_TARGET_DIR="$base_target_dir/aarch64-apple-ios-asm" \
         cargo rustc --quiet --locked --release --target aarch64-apple-ios -p "$crate" --lib \
-        -- --emit "asm=$asm_out/$crate.s"
+        --crate-type rlib -- --emit "asm=$asm_out/$crate.s"
     [[ -s "$asm_out/$crate.s" ]] || fail "no iOS release assembly for $crate"
     count="$(rg -c '^\tbl\t_memset_pattern16$' "$asm_out/$crate.s" || true)"
-    count="${count:-0}"
-    printf 'ios-asm-memset-pattern16: %s: %s calls\n' "$crate" "$count"
-    memset_calls=$((memset_calls + count))
-done
-if ((memset_calls == 0)); then
-    fail 'expected failure ios-asm-memset-pattern16 (#1018) now passes: remove it from scripts/check-cross-targets.sh and from the register in docs/TARGET_MATRIX.md'
-fi
-printf 'ios-asm-memset-pattern16: expected failure (#1018), %d calls\n' "$memset_calls"
+    printf '%s %s\n' "$crate" "${count:-0}" >>"$asm_out/counts"
+done <<<"$product_list"
+printf '%s\n' "$product_list" >"$asm_out/products"
+"${known_defects[@]}" judge-memset "$asm_out/counts" "$asm_out/products" ||
+    fail 'ios-asm-memset-pattern16 moved; see above'
 
 for mode in scalar simd; do
     if [[ "$mode" == scalar ]]; then
