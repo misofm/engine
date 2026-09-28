@@ -616,47 +616,72 @@ impl SessionState {
             .ok_or(CommandError::Internal)
     }
 
+    /// Brings the provider epochs and the resource-report table up to the render thread.
+    ///
+    /// A render call swaps plans and retires the outgoing one at its *start*, but publishes
+    /// `active_epoch` only after it returns (issue #1042). A control call in between reads an
+    /// atomic that lags the plan actually rendering, so the atomic alone cannot drive promotion:
+    /// a reclaimed plan whose epoch is still the current provider's proves that the one pending
+    /// candidate has replaced it, and promotes that candidate there. After such a promotion the
+    /// atomic lags the providers until the render call returns, so the atomic promotes only when
+    /// it is ahead of them.
     pub(crate) fn synchronize_plan_epochs(&mut self) -> Result<(), CommandError> {
         let active_epoch = self.shared.active_epoch.load(Ordering::Acquire);
-        if active_epoch != self.providers.epoch {
-            let index = self
-                .pending_providers
-                .iter()
-                .position(|provider| provider.epoch == active_epoch)
-                .ok_or(CommandError::Internal)?;
-            let next = self.pending_providers.remove(index);
-            let previous = core::mem::replace(&mut self.providers, next);
-            if self.retired_providers.len() == self.retired_providers.capacity() {
-                return Err(CommandError::Internal);
-            }
-            self.retired_providers.push(previous);
+        if active_epoch > self.providers.epoch {
+            self.promote_pending_provider(active_epoch)?;
         }
 
         while let Ok((retired_epoch, retired_plan)) = self.retirer.try_reclaim() {
             drop(ObservedRetiredPlan::new(retired_plan));
-            if let Some(index) = self
+            if retired_epoch.0 == self.providers.epoch {
+                let replacement = self
+                    .pending_providers
+                    .first()
+                    .ok_or(CommandError::Internal)?
+                    .epoch;
+                self.promote_pending_provider(replacement)?;
+            }
+            let index = self
                 .retired_providers
                 .iter()
                 .position(|provider| provider.epoch == retired_epoch.0)
-            {
-                self.retired_providers.remove(index);
-            } else {
-                return Err(CommandError::Internal);
-            }
-            let active = self.shared.active_epoch.load(Ordering::Acquire);
-            let mut reports = self
-                .shared
-                .reports
-                .lock()
-                .map_err(|_| CommandError::Internal)?;
-            if retired_epoch.0 != active
-                && let Some(index) = reports
-                    .iter()
-                    .position(|(epoch, _)| *epoch == retired_epoch.0)
-            {
-                reports.remove(index);
-            }
+                .ok_or(CommandError::Internal)?;
+            self.retired_providers.remove(index);
         }
+
+        // Keep exactly the rows a reader can still ask for: the atomic's (possibly lagging), the
+        // current provider's, and a pending candidate's. The atomic is read under the lock, and
+        // `retain` shrinks in place.
+        let current = self.providers.epoch;
+        let pending = &self.pending_providers;
+        let mut reports = self
+            .shared
+            .reports
+            .lock()
+            .map_err(|_| CommandError::Internal)?;
+        let active = self.shared.active_epoch.load(Ordering::Acquire);
+        reports.retain(|(epoch, _)| {
+            *epoch == active
+                || *epoch == current
+                || pending.iter().any(|provider| provider.epoch == *epoch)
+        });
+        Ok(())
+    }
+
+    /// Makes the pending provider of `epoch` current and parks the previous one until its plan
+    /// is reclaimed.
+    fn promote_pending_provider(&mut self, epoch: u64) -> Result<(), CommandError> {
+        let index = self
+            .pending_providers
+            .iter()
+            .position(|provider| provider.epoch == epoch)
+            .ok_or(CommandError::Internal)?;
+        if self.retired_providers.len() == self.retired_providers.capacity() {
+            return Err(CommandError::Internal);
+        }
+        let next = self.pending_providers.remove(index);
+        let previous = core::mem::replace(&mut self.providers, next);
+        self.retired_providers.push(previous);
         Ok(())
     }
 

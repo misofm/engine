@@ -2827,3 +2827,236 @@ fn tiny_control_frame_still_accounts_three_provider_counters_exactly() {
     // SAFETY: The helper verifies atomic rejection without published children.
     unsafe { compile_rejected_c(SESSION, &below) };
 }
+
+/// Stops the render thread of [`control_calls_racing_plan_swapping_renders_never_wedge_replacement`]
+/// however the control thread leaves the scope, so a failed assertion cannot hang the join.
+struct StopOnDrop<'a>(&'a AtomicBool);
+
+impl Drop for StopOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, core::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Dequeues one frame from `lane` into `storage`, returning the result code.
+///
+/// # Safety
+///
+/// `session` must be live and used by this thread alone for the call.
+unsafe fn dequeue_c(session: *mut Session, lane: u32, storage: &mut [u8; 4_096]) -> u32 {
+    let mut event = BytesOut {
+        struct_size: BYTES_OUT_SIZE,
+        reserved0: 0,
+        data: storage.as_mut_ptr(),
+        capacity_bytes: storage.len() as u64,
+        required_bytes: 0,
+    };
+    // SAFETY: The caller guarantees a live session; the descriptor names complete owned storage.
+    unsafe { miso_engine_v1_dequeue_event(session, lane, &mut event) }
+}
+
+/// Issue #1042 (`docs/handoffs/live-control-2026-09-28/VERIFY.md`, F1): control calls racing a
+/// plan-swapping render call.
+///
+/// The render thread renders back-to-back blocks through the exported entry. The control thread
+/// commits `SWAPS` structural transactions; after each one it spins on the two dequeue entries,
+/// which synchronize plan epochs first, until two more blocks have rendered. The swap therefore
+/// lands inside a render call that the control thread is racing. On the unmodified base, a
+/// control call that fell between the swap at the start of that render call and the
+/// `active_epoch` publication at its end returned `RESULT_INTERNAL`, and every structural command
+/// after it returned `RESULT_BACKPRESSURE` for good.
+///
+/// The control thread also reads `miso_engine_v1_plan_resources` inside that window, which must
+/// still find the row of the epoch the lagging atomic names. The render thread counts its own
+/// allocations and frees: swapping plans adds none.
+#[test]
+fn control_calls_racing_plan_swapping_renders_never_wedge_replacement() {
+    use core::sync::atomic::Ordering;
+
+    const SWAPS: u64 = 24;
+    /// Render blocks after an admission beyond which `RESULT_BACKPRESSURE` is a wedge. A healthy
+    /// replacement is admitted again once its swapping block has rendered.
+    const WEDGE_BLOCKS: u64 = 256;
+    const SESSION_IDS: [&str; 2] = ["race-even", "race-odd"];
+
+    // SAFETY: The returned handles are uniquely owned until the matching destroy calls below.
+    let (session, plan) = unsafe { compile_c(SESSION, &limits()) };
+    let session_address = session as usize;
+    let plan_address = plan as usize;
+    let stop = AtomicBool::new(false);
+    let in_render = AtomicBool::new(false);
+    let rendered = AtomicU64::new(0);
+
+    let (control, (render_observed, blocks, render_failure)) = std::thread::scope(|scope| {
+        let render = scope.spawn(|| {
+            let plan = plan_address as *mut Plan;
+            let mut pcm = [f32::NAN; 256];
+            let output = PlanarOutput {
+                struct_size: PLANAR_OUTPUT_SIZE,
+                channels: 2,
+                samples: pcm.as_mut_ptr(),
+                sample_capacity: pcm.len() as u64,
+                frames: 128,
+                plane_stride_samples: 128,
+                reserved: [0; 2],
+            };
+            let mut block = 0_u64;
+            let mut failure = None;
+            begin();
+            while !stop.load(Ordering::Acquire) {
+                in_render.store(true, Ordering::SeqCst);
+                // SAFETY: This thread is the plan's only renderer; `output` names owned storage.
+                let code = unsafe { miso_engine_v1_render_f32_planar(plan, block * 128, &output) };
+                in_render.store(false, Ordering::SeqCst);
+                if code != RESULT_OK {
+                    failure = Some((block, code));
+                    stop.store(true, Ordering::Release);
+                    break;
+                }
+                block += 1;
+                rendered.store(block, Ordering::Release);
+            }
+            (finish(), block, failure)
+        });
+
+        let _stop = StopOnDrop(&stop);
+        let session = session_address as *mut Session;
+        let mut response = [0_u8; 4_096];
+        let mut event = [0_u8; 4_096];
+        let mut fields = [0_u16; 64];
+        let mut revision = 42_u64;
+        let mut request_id = 1_u64;
+        let mut request = command(request_id, revision, SESSION_IDS[0]);
+        let mut admitted = 0_u64;
+        let mut overlapped = 0_u64;
+        let mut failure = None;
+        let mut admission_block = rendered.load(Ordering::Acquire);
+        'race: while admitted < SWAPS && !stop.load(Ordering::Acquire) {
+            // Race the synchronizing entries against the swapping block, draining the reliable
+            // lane so `SESSION_COMMITTED` never backpressures a later transaction. The block in
+            // flight at admission may predate the publication; the one after it swaps.
+            loop {
+                if stop.load(Ordering::Acquire) {
+                    break 'race;
+                }
+                for lane in [EVENT_LANE_RELIABLE, EVENT_LANE_LOSSY] {
+                    let overlapping = in_render.load(Ordering::SeqCst);
+                    // SAFETY: This thread is the session's only control caller.
+                    let code = unsafe { dequeue_c(session, lane, &mut event) };
+                    if code != RESULT_OK {
+                        failure = Some(format!(
+                            "dequeue lane {lane} after {admitted} swaps: {code}"
+                        ));
+                        break 'race;
+                    }
+                    overlapped += u64::from(overlapping && in_render.load(Ordering::SeqCst));
+                }
+                // The any-thread query reads the row of the atomic's epoch, lagging or not.
+                // SAFETY: The plan outlives the scope, and a zeroed report is a valid value
+                // whose size field is then set for the complete fixed-size write.
+                let code = unsafe {
+                    let mut report: PlanResourceReport = core::mem::zeroed();
+                    report.struct_size = PLAN_RESOURCE_REPORT_SIZE;
+                    miso_engine_v1_plan_resources(plan_address as *const Plan, &mut report)
+                };
+                if code != RESULT_OK {
+                    failure = Some(format!("plan resources after {admitted} swaps: {code}"));
+                    break 'race;
+                }
+                if rendered.load(Ordering::Acquire) >= admission_block + 2 {
+                    break;
+                }
+            }
+            let blocks = rendered.load(Ordering::Acquire);
+            let mut output = BytesOut {
+                struct_size: BYTES_OUT_SIZE,
+                reserved0: 0,
+                data: response.as_mut_ptr(),
+                capacity_bytes: response.len() as u64,
+                required_bytes: 0,
+            };
+            // SAFETY: This thread is the session's only control caller; buffers are owned.
+            let code = unsafe {
+                miso_engine_v1_submit_command(
+                    session,
+                    request.as_ptr(),
+                    request.len() as u64,
+                    &mut output,
+                )
+            };
+            match code {
+                RESULT_OK => {
+                    let (header, refusal) = match ProtocolCodec::default()
+                        .decode_typed_response(
+                            &response[..output.required_bytes as usize],
+                            &mut protocol::DecodeScratch::new(&mut fields),
+                        )
+                        .expect("structural response")
+                    {
+                        protocol::DecodedTypedResponseFrame::Success { header, .. } => {
+                            (header, None)
+                        }
+                        protocol::DecodedTypedResponseFrame::NonOk { header, payload } => {
+                            (header, Some(payload))
+                        }
+                    };
+                    if header.status != StatusCode::Ok
+                        || header.revision != SessionRevision(revision + 1)
+                    {
+                        failure = Some(format!(
+                            "swap {admitted}: {:?} at revision {}: {refusal:?}",
+                            header.status, header.revision.0
+                        ));
+                        break;
+                    }
+                    admitted += 1;
+                    revision += 1;
+                    request_id += 1;
+                    request = command(request_id, revision, SESSION_IDS[(admitted % 2) as usize]);
+                    admission_block = rendered.load(Ordering::Acquire);
+                }
+                RESULT_BACKPRESSURE if blocks - admission_block <= WEDGE_BLOCKS => {}
+                other => {
+                    failure = Some(format!(
+                        "submit after {admitted} swaps and {} blocks: {other}",
+                        blocks - admission_block
+                    ));
+                    break;
+                }
+            }
+        }
+        stop.store(true, Ordering::Release);
+        (
+            (admitted, overlapped, failure),
+            render.join().expect("render thread"),
+        )
+    });
+
+    // SAFETY: These are the exact live handles returned by `compile_c` and are destroyed once.
+    unsafe {
+        miso_engine_v1_session_destroy(session);
+        miso_engine_v1_plan_destroy(plan);
+    }
+    let (admitted, overlapped, failure) = control;
+    assert_eq!(render_failure, None, "render refused a block");
+    assert_eq!(
+        failure, None,
+        "a control call lost the race with a plan swap"
+    );
+    assert_eq!(admitted, SWAPS);
+    assert!(
+        overlapped > 0,
+        "vacuous: no control call overlapped a render call"
+    );
+    assert!(blocks > SWAPS, "each swap rendered its own block");
+    assert_eq!(
+        render_observed,
+        Snapshot {
+            allocations: 0,
+            deallocations: 0,
+            allocated_bytes: 0,
+            deallocated_bytes: 0,
+        },
+        "render stayed allocation-free across {SWAPS} plan swaps"
+    );
+}

@@ -808,6 +808,151 @@ fn structural_command_keeps_protocol_plan_provider_and_event_epochs_atomic() {
     assert!(children.session.pending_providers.is_empty());
 }
 
+/// The outcome of one control call, reduced to what issue #1042 distinguishes.
+fn control_outcome<T, E: core::fmt::Debug>(result: &Result<T, E>) -> String {
+    match result {
+        Ok(_) => "ok".to_owned(),
+        Err(error) => format!("{error:?}"),
+    }
+}
+
+/// Issue #1042: a control call that lands inside a plan-swapping render call.
+///
+/// `RealtimePlanOwner::render_contiguous` swaps plans and commits the retired plan to the
+/// retirement queue at the *start* of a render call, while `PlanState::render` publishes
+/// `active_epoch` only after that call returns. This test runs the two halves of
+/// `PlanState::render` separately and makes control calls between them, so the interleaving a
+/// second thread reaches by chance is reached here on every round.
+///
+/// On the unmodified base the first control call in that window returned `Internal`; the next
+/// synchronization parked the old provider in `retired_providers` for good; and the old epoch's
+/// report row, skipped because it matched the lagging atomic, kept the table full, so every later
+/// structural command returned `Backpressure`.
+#[test]
+fn control_calls_inside_a_plan_swapping_render_call_keep_replacement_live() {
+    let mut children = compile_children(SESSION, limits()).expect("children");
+    let mut pcm = [0.0_f32; 256];
+    children
+        .plan
+        .render(
+            0,
+            PlanarBufferMut::try_new(&mut pcm, 2, 128, 128).expect("output"),
+        )
+        .expect("first block");
+    let structural = |request_id: u64, revision: u64, session_id: &str| {
+        let edit = protocol::SessionEdit::SetSessionId {
+            session_id: session::StableId::parse(session_id).expect("stable ID"),
+        };
+        command_bytes_at_revision(
+            request_id,
+            ExpectedRevision::Exact(SessionRevision(revision)),
+            protocol::CommandPayload::SessionTransactionApply(core::slice::from_ref(&edit)),
+        )
+    };
+    let mut request_id = 1;
+    let mut revision = 42;
+    let mut pending = structural(request_id, revision, "split-0");
+    children
+        .session
+        .command(&pending, 4_096)
+        .expect("first structural command");
+    revision += 1;
+
+    for round in 1..=4_u64 {
+        let sample = round * 128;
+        // Drain the round's `SESSION_COMMITTED`, so the reliable lane never backpressures.
+        assert!(
+            children
+                .session
+                .dequeue_event(EventLane::Reliable, 4_096)
+                .expect("reliable event")
+                .is_some()
+        );
+        let old_epoch = children.session.providers.epoch;
+        let new_epoch = children.session.pending_providers[0].epoch;
+        assert_eq!(new_epoch, old_epoch + 1);
+
+        // First half of `PlanState::render`: the owner swaps and retires the old plan.
+        let report = children
+            .plan
+            .owner
+            .render_contiguous(
+                RenderIo {
+                    input: None,
+                    output: PlanarBufferMut::try_new(&mut pcm, 2, 128, 128).expect("output"),
+                },
+                sample,
+            )
+            .expect("swapping block");
+        assert_eq!(report.swap, engine::realtime::SwapOutcome::Applied);
+        assert_eq!(report.active_epoch.0, new_epoch);
+        assert_eq!(
+            children.plan.shared.active_epoch.load(Ordering::Acquire),
+            old_epoch,
+            "the window is open: the atomic still names the retired plan"
+        );
+
+        // Inside the window: an immediate command, a lossy dequeue, and a structural command.
+        request_id += 1;
+        let capabilities = command_bytes(request_id, protocol::CommandPayload::CapabilitiesGet);
+        let window_immediate = children.session.command(&capabilities, 4_096);
+        let window_lossy = children.session.dequeue_event(EventLane::Lossy, 4_096);
+        request_id += 1;
+        pending = structural(request_id, revision, &format!("split-{round}"));
+        let window_structural = children.session.command(&pending, 4_096);
+        let window_revision = children.session.controller.session().revision().0;
+        // Both queries read the lagging atomic's row, which must still be there.
+        let window_query = children.plan.queries().resources();
+        let window_report = children
+            .session
+            .active_resource_report()
+            .expect("control-side report inside the window");
+        assert_eq!(window_query, window_report);
+
+        // Second half of `PlanState::render`: publish the epoch that rendered the block.
+        children
+            .plan
+            .shared
+            .active_epoch
+            .store(report.active_epoch.0, Ordering::Release);
+        let after_structural = children.session.command(&pending, 4_096);
+        let snapshot = children.session.test_transaction_snapshot();
+        let rows = snapshot
+            .resource_rows
+            .iter()
+            .map(|(epoch, _)| *epoch)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            (
+                control_outcome(&window_immediate),
+                control_outcome(&window_lossy),
+                control_outcome(&window_structural),
+                window_revision,
+                control_outcome(&after_structural),
+                snapshot.provider_epoch,
+                snapshot.retired_provider_epochs,
+                snapshot.pending_provider_epochs,
+                rows,
+            ),
+            (
+                "ok".to_owned(),
+                "ok".to_owned(),
+                // The window's structural command waits for the lagging row (transient
+                // backpressure), acks nothing, and commits nothing.
+                "Backpressure".to_owned(),
+                revision,
+                "ok".to_owned(),
+                new_epoch,
+                Vec::new(),
+                vec![new_epoch + 1],
+                vec![new_epoch, new_epoch + 1],
+            ),
+            "round {round}: a control call inside the swapping render call"
+        );
+        revision += 1;
+    }
+}
+
 #[test]
 fn all_six_event_families_cross_c_dequeue_with_exact_oracle_bytes() {
     const RESPONSES: [&str; 8] = [
