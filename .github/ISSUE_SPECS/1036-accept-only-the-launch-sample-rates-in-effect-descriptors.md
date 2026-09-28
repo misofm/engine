@@ -100,3 +100,145 @@ See `../VERIFY-DEAD-CODE.md`, finding F9. The recommendation stands; the scope i
    module diff to the `builtins` cutoff branch.
 4. **Mobile scope: no change.** A device whose hardware rate is outside the launch set is the
    separate "no implicit SRC" rule, which this ruling does not touch.
+
+## Attempt 1 evidence
+
+Terra, attempt 1, branch `codex/1036-launch-rates-only` from `codex/batch-slim-2` (`eca8779d`,
+`main` plus #1048, #1027, #1037 and #1063). Implementation commit `9ae0f9fa`.
+
+### What changed
+
+The engine accepts exactly 44.1, 48, 88.2 and 96 kHz everywhere. Removed:
+
+| item | what it covered |
+|---|---|
+| `engine::EXTENDED_COMPATIBILITY_SAMPLE_RATES`, `is_extended_compatibility_sample_rate` | the extended tier and its predicate |
+| the extended branch of `effect_contract::validate_descriptor` | a quality row at 176.4-384 kHz was accepted; it now refuses with `Quality` at `qualities` |
+| the extended fallback of `builtins::validate_builtin_filter_cutoff` (amendment 1) | an open-Nyquist cutoff domain at 176.4-384 kHz, which let `BuiltinChain::new` prepare there; only a launch rate has a domain now |
+| conformance: the mock's four extended quality rows, `EffectConformanceReport::extended_compatibility_probes`, `FaultKind::ExtendedRatePreparation` | the extended probe tier; every declared row is now a launch gate |
+| conformance: extended acceptance in `PlanarBlock::try_new`, `PcmFixture::parse` and `encode` | blocks and `.mepcm` fixtures at extended rates |
+| `fixtures/conformance/v1/rate-{176400,192000,352800,384000}-impulse-dual-mono.mepcm` and their `MANIFEST.tsv` rows | 4 of the 11 fixtures; the other 7 are byte-unchanged and `conformance_fixtures` generates launch rates only |
+| the `extended_compatibility_*` fields of `bench effect-contract --conformance` | the tier's JSON record; `check-effect-contract.sh` reads only the launch fields |
+| extended rows in test descriptors (`effect-contract/tests/response_analysis.rs`, `effect-compiler/tests/native_session.rs`) and in `fixtures/effects/runtime-v1/valid/descriptor.toml` (manifest re-hashed) | descriptors the tightened validator would refuse |
+| extended rates in `builtins/tests/stage.rs` and `response.rs` rate lists | RBJ-oracle and stage gates at 176.4-384 kHz; launch-rate coverage is unchanged |
+
+`crates/builtins/tests/response.rs` (shared with #1049): only the import, the rate-list helper's
+body and its comment changed, so the merge stays mechanical. The helper's and four tests' names
+still say "extended"; renaming them is left until #1049 lands.
+
+Docs: the one rate sentence in AGENTS.md, `docs/EFFECT_CONTRACT_V1.md` (evidence contract),
+`docs/SESSION_SCHEMA_V1.md`, `docs/IMPLEMENTATION_PLAN.md`, `dsp-research/README.md` and
+`fixtures/conformance/README.md` (whose run command also named the pre-rename crates).
+`scripts/effect-descriptor-v1-reference.py`, `check-effect-descriptor-v1.sh`, the descriptor wire
+and `fixtures/effect-descriptor/` went with #1037, so nothing was left there.
+
+Diff against `eca8779d`: 305 lines added, 223 removed, in 28 text files, plus 4 binary fixtures
+deleted. Rust: 268 added, 201 removed; 147 of the Rust additions are the two new host-path refusal
+tests (capi 93, host-web 54), and the SDK eval adds 19 JavaScript lines. Without those tests the
+change is 121 Rust lines added and 201 removed.
+
+### Refusal on every host path
+
+The session layer already refused extended rates (`session::validate`), so these tests pin
+existing host behaviour at each entry point rather than discriminate this change; the
+discriminating flips are listed under "Test inventory".
+
+| host path | test | asserts, for 176.4, 192, 352.8 and 384 kHz |
+|---|---|---|
+| session parse, typed compile, canonical write | `session/tests/sample_rate_tiers.rs::extended_and_unrelated_engine_rates_reject_with_one_stable_diagnostic` (existing) | one `sample_rate.unsupported_at_launch` at `$.sample_rate_hz` |
+| shared host preparation | `host-core/tests/prepare.rs::session_validation_owns_the_launch_rate_set` (existing, 176.4 and 192) | `PrepareRejection::Session`, same diagnostic |
+| C ABI prepare | `capi::ffi::tests::extended_rate_session_and_chunks_are_refused_typed` (new) | `miso_engine_v1_compile_session` returns `RESULT_COMPILE_REJECTED`, publishes no handle, writes and `last_error`s `sample_rate.unsupported_at_launch\t$.sample_rate_hz\n`; a chunk at the rate into a 48 kHz plan refuses with `source.rate.mismatch` |
+| browser boot (Rust) | `host_web::tests::extended_rates_refuse_typed_at_browser_boot` (new) | `AudioWorkletEngineHost::boot` and the raw `miso_engine_web_v1_boot` export return `RESULT_REFUSED_DOCUMENT` with the session diagnostic, with and without `require_sample_rate_hz` set to the rate; a 48 kHz document on a context at the rate refuses `RESULT_REPREPARE_REQUIRED`, `host.session.shape` |
+| browser boot (SDK, shipped module) | `sdk/test/browser-defaults-evals.mjs` "browser boot refuses the removed extended research rates typed, before any AudioContext" (new) | `scratchBootInWorker` rejects with `MisoEngineError`, phase `boot`, code `refusedDocument`, `sample_rate.unsupported_at_launch` at `$.sample_rate_hz` |
+| render plan | `engine::realtime::tests::extended_and_unrelated_rates_reject_before_plan_publication` (existing, literals now inline) | `RenderError::UnsupportedRate` |
+
+The C ABI already reported `exact_launch_rate_mask == 0x0f`; unchanged.
+
+### Test inventory (`cargo test --workspace --all-features -- --list`)
+
+Base 2,331, change 2,332. The whole diff:
+
+```
+- builtins/test:contract::compatibility_fallback_is_limited_to_the_exact_extended_rate_tier
++ builtins/test:contract::extended_and_unrelated_rates_have_no_cutoff_domain_and_refuse_preparation
++ capi/rlib:capi::ffi::tests::extended_rate_session_and_chunks_are_refused_typed
+- conformance/test:effect_contract::descriptor_requires_launch_rows_and_accepts_optional_extended_rows
++ conformance/test:effect_contract::descriptor_requires_launch_rows_and_refuses_extended_rows
+- conformance/test:effect_contract::extended_rate_failures_are_reported_but_do_not_fail_launch_gates
+- conformance/test:fixtures::planar_blocks_group_launch_gates_and_extended_compatibility_inputs
++ conformance/test:fixtures::planar_blocks_and_fixtures_accept_only_launch_rates
+- engine/lib:engine::tests::sample_rate_tiers_are_exact_sorted_disjoint_and_classified
++ engine/lib:engine::tests::launch_sample_rates_are_exact_and_the_only_accepted_rates
++ host-web/rlib:host_web::tests::extended_rates_refuse_typed_at_browser_boot
+```
+
+- Flipped (accept to refuse), renamed because the old names stated the removed claim:
+  the builtins cutoff test (extended rates now have no domain and `BuiltinChain::new` refuses
+  `FilterCutoff`); the conformance descriptor test (every non-empty subset of extended rows refuses
+  with exactly `[Quality at qualities]`; the launch-only, missing-row, draft, duplicate, unordered
+  and 192,001 Hz cases are kept, the unordered case now swapping two launch rows); the conformance
+  fixtures test (extended `PlanarBlock`, `encode` and `parse` all refuse); the engine tier test
+  (launch set exact, extended and unrelated rates not launch rates).
+- Removed: `extended_rate_failures_are_reported_but_do_not_fail_launch_gates`. Its claim, that an
+  extended-tier failure does not fail the launch gates, has no subject once the tier is gone;
+  `validate_descriptor` refuses such a row before the harness runs (flipped test above).
+- `correct_mock_passes_every_enabled_conformance_gate` keeps its launch assertions (8 prepared
+  configurations, at least 800 process calls) and loses only the extended ones.
+- Kept: launch-rate descriptor acceptance (every production effect's `validate_descriptor`
+  test, the conformance launch-only case) and session rate refusal. The five builtins response and
+  two stage tests run at the four launch rates, as before.
+
+### Gates
+
+- **Native and wasm build.** `cargo check --locked --workspace --all-targets --all-features` and
+  `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`: clean.
+  `cargo fmt --all --check`: clean. `RUSTFLAGS='-C target-feature=+simd128' cargo check --locked
+  --target wasm32-unknown-unknown -p host-web -p dsp-reference -p conformance`: pass.
+  `cargo check --locked --target aarch64-apple-ios` and `--target aarch64-linux-android` of
+  `capi host-core session engine effect-contract builtins builtins-compiler effect-compiler
+  graph-compiler rack-compiler`: pass.
+- **Tests.** `cargo test --locked --all-targets -p engine -p effect-contract -p builtins
+  -p conformance -p effect-compiler -p capi -p host-web -p host-core -p session --features
+  builtins/test-support,host-web/test-support,host-core/test-support,effect-compiler/test-support,engine/realtime-audit`:
+  784 passed, 0 failed, 8 ignored in dev, and the same in release. The eight production effects'
+  `conformance` tests (harness consumers): 11 passed in dev and in release.
+- **Console digests.** `cargo test --locked --release -p console-workload --test gain_pan_profile
+  -- --ignored --exact digests --nocapture` on base and change: the 18 digest rows are
+  byte-identical; the outputs differ only in the `finished in` timing line.
+- **Wasm gates.** `bash scripts/run-wasm-gates.sh`: ok (native, wasm scalar, wasm simd128, V8 EQ
+  loops; Node v22.23.2).
+- **SDK.** `check-sdk-headless.sh` against this commit's module: 285/285 evals pass, including the
+  new one. `check-sdk-generated.sh`: current (no SDK table or error changed).
+- **C ABI.** `check-capi-abi.sh` (shared and static linkage) and `check-capi-abi.sh --self-test`:
+  ok.
+- **CI routing and fixtures.** `cargo run --locked -p conformance --example conformance_fixtures --
+  --check`: pass with the 7-file corpus. `check-ci-path-routing.py`, `test-ci-path-routing.py`:
+  pass. `check-effect-runtime-fixtures.sh` and its mutation test: ok (4 files).
+  `check-effect-contract.sh target/release/bench`: ok, record
+  `{"launch_prepared_configurations":8,"launch_process_calls":4608,"launch_failed_gates":0}`.
+- **Policy.** 60 script runs, all pass: every static policy invocation of `qualification.yml`'s
+  lint job (including `check-stem-store-v1.mjs` and `check-parametric-eq-render-contract.sh`) and
+  `check-sdk-deletions.py` with its self-test; Python ones with `python3 -B`.
+
+### AudioWorklet artifact
+
+Not re-pinned (the batch boundary does that). `build-web-audioworklet.sh --module-only` on the same
+machine: base `eca8779d` builds `f58b55e9…` (3,485,448 bytes); this commit builds `52ee8595…`
+(3,485,631 bytes), **183 bytes larger**: code section +260, name section -76, one function fewer.
+`wasm-objdump -d`, compared per function with crate-hash disambiguators normalized (base was built
+from another checkout path), shows exactly:
+
+- removed: `builtins::filter_control::validate_input_filter_pair`. With the extended branch gone
+  from the `validate_builtin_filter_cutoff` it inlines, it is small enough to be inlined itself:
+  base called it from 9 sites, the change from none.
+- grew, from absorbing that inlined body: `host_web::compile_ready` (6,295 to 6,538 instructions),
+  `host_core::…::InputFilterPreparer::prepare` (791 to 1,053),
+  `host_core::…::apply_input_filter_edit` (434 to 603), `builtins::…::prepare_input_filter_pair`
+  (435 to 566).
+- shrank, from losing the extended branch: `builtins::prepare_sections` (1,119 to 915) and
+  `builtins_compiler::parameter_diagnostic` (1,230 to 1,019), each losing four sets of
+  `i32.const 176400/192000/352800/384000` compares and the `f64` open-Nyquist compare;
+  `effect_contract::validate_descriptor` (5,314 to 5,284), losing the four extended-rate compares.
+
+Every other function is identical. The module held 33 `i32.const` 176400, 352800 or 384000
+operands before and none after.
