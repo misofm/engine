@@ -1,2 +1,0 @@
-command=/home/bl/.cargo/bin/cargo test --locked --release -p host-core --test input_liveness_console
-status=pass
