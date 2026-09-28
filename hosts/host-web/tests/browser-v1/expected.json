@@ -9,7 +9,7 @@
     "left": "identity(input_builtins)*identity(racks)*identity(fader)*identity_matrix*identity_route",
     "right": "positive-zero source through the same identity path",
     "timeline": "three successful 128-frame direct render transitions",
-    "resources": "exact repr(C)/configured staging rows plus positive retained-production rows"
+    "resources": "exact repr(C)/configured staging rows; retained-production rows within resourceCeilings (#1060)"
   },
   "pcm": {
     "leftBlocks": [
@@ -59,20 +59,22 @@
         "idStagingBytes": "14",
         "sourcePcmStagingBytes": "1024",
         "outputPcmBytes": "1024",
-        "bridgeMetadataBytes": "1149255",
-        "bridgeRetainedBytes": "1169764",
         "largestBridgeAllocationBytes": "1048576",
-        "sourceTotalBytes": "3286",
-        "sourceOverheadBytes": "2262",
         "effectScalarStateBytes": "0",
         "effectScalarScratchBytes": "0",
-        "builtinRetainedBytes": "1817",
-        "graphSessionPlusPlanBytes": "32402",
-        "graphIncrementalPlanBytes": "32402",
-        "graphMetadataBytes": "4131",
         "graphDelayBytes": "0",
         "largestNamedAllocationBytes": "1048576",
         "observationRetainedBytes": "0"
+      },
+      "resourceCeilings": {
+        "bridgeMetadataBytes": "1159360",
+        "bridgeRetainedBytes": "1181888",
+        "sourceTotalBytes": "3648",
+        "sourceOverheadBytes": "2496",
+        "builtinRetainedBytes": "2048",
+        "graphSessionPlusPlanBytes": "35648",
+        "graphIncrementalPlanBytes": "35648",
+        "graphMetadataBytes": "4608"
       },
       "results": {
         "first": 0,
