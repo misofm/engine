@@ -32,12 +32,19 @@ impl host_core::PlanSampleSource for SharedPlanState {
     }
 }
 
+/// Copies the resource report of the epoch the render thread last published.
+///
+/// The epoch is read under the report lock (issue #1042). The control thread removes a row only
+/// under that lock, and only once the atomic has moved past it; the atomic never moves back. So an
+/// epoch read under the lock always has its row. Read before the lock, a render could publish the
+/// next epoch and a control call remove the old row in between, and the lookup below would panic.
 pub(crate) fn active_resources(shared: &SharedPlanState) -> PlanResourceReport {
-    let active = shared.active_epoch.load(Ordering::Acquire);
-    shared
+    let reports = shared
         .reports
         .lock()
-        .expect("plan resource report lock is not poisoned")
+        .expect("plan resource report lock is not poisoned");
+    let active = shared.active_epoch.load(Ordering::Acquire);
+    reports
         .iter()
         .find_map(|(epoch, report)| (*epoch == active).then_some(*report))
         .expect("active plan epoch retains its resource report")
