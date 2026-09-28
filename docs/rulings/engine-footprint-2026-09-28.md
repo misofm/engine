@@ -46,3 +46,14 @@ aim, in the owner's words, is "minimizing the engine footprint".
   platform, with one documented default table in the session schema and a per-change override
   (#1054). The default values come from cited research, measurement and listening (#1055); the
   starting proposal is about 5 ms for mute/solo and about 20 ms for fader and pan moves.
+
+## Automation, session ownership and saves (decision 2, 2026-09-28)
+
+* A producer's automation is rendered by the core engine from the session file, identically on
+  every platform (#1058, research first).
+* The core engine owns the current, edited session on every platform, browser included; apps save
+  by asking for a canonical JSON snapshot and store it themselves (#1057, research first).
+* A fan's edits are saved as a personal mix; the producer's original is untouched (#1057 asks how a
+  personal mix is represented and what happens when the producer updates the session).
+* #140 closes as descoped: its stored-automation outcome moves to #1058; sample-timed
+  `AutomationEnqueue` delivery has no product consumer.
