@@ -200,3 +200,29 @@ Findings:
 3. **INFO (proof text).** The high-shelf paragraph uses `|v3| = 2^-149` without deriving
    `ic2 = +0.0`, and its #1015 sentence names only `ic1`'s bound. `ic2`'s bound is load-bearing
    too (see the soundness argument above).
+
+## Follow-up: boundary test
+
+Terra, 2026-09-28, branch `codex/1015-boundary-test` from the batch head `63dc9d27`. It closes
+Sol's two LOW findings and the INFO note.
+
+* **Finding 1.** `stationary_subnormal::leg_c_refuses_below_flush_eps_admits_it_and_re_engages`
+  checks every case at `f32`, `Simd4` and `Simd8`, dual and collapsed, in each integrator of the
+  live shelf. Each word is restored through `Channel::restore_track`.
+  * Refused: `+-1e-30`, the word just under `FLUSH_EPS` at either sign, `+-2^-149`, the old seeds
+    `1e-40` and `-1e-41`, and `-0.0`.
+  * Admitted: `+-FLUSH_EPS` exactly, `+0.0`, `+-1.0` and the new seeds.
+  * After a refusal, the next block elides again. Every block renders the full cascade's bits and
+    integrators.
+* **Mutations** (`tests/MUTATIONS.md` 1015-B1 to B3), all red in dev and release:
+  * `>` instead of `>=` on `FLUSH_EPS`;
+  * the old leg (c) in both stationary lists;
+  * refusing subnormals only.
+* **Finding 2.** The `elision` module doc now describes the seeds as words just above `FLUSH_EPS`,
+  and lists leg (c)'s refusals: `-0.0`, non-finite, or a non-zero magnitude below `FLUSH_EPS`.
+* **Info.** The high-shelf paragraph now derives `ic2 = +0.0` from gate (c) before it uses
+  `|v3| = 2^-149`.
+* **Checks.** `cargo test -p parametric-eq` passes in dev and release, each with and without
+  `test-support`: 12 binaries, 127 tests. Clippy `-D warnings` (workspace, and `--all-features`
+  on the crate), `cargo fmt --check` and `RUSTDOCFLAGS=-D warnings cargo doc` are clean. The
+  change is test and doc only; no rendered code moves.
