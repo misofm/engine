@@ -18,7 +18,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 CHECKER = ROOT / "scripts/check-test-support-ci.py"
 WORKFLOW = ".github/workflows/qualification.yml"
 DEBUG_A_FEATURES = (
-    "--features builtins-compiler/test-support,source/test-support,graph/test-support,"
+    "--features builtins-compiler/test-support,graph/test-support,"
     "host-web/test-support,host-core/test-support,effect-compiler/test-support,"
     "protocol/test-support,engine/realtime-audit\n"
 )
@@ -106,12 +106,12 @@ def main() -> int:
                        if "test-support" in manifest.get("features", {}))
     reported = sorted(line.split("/", 1)[0] for line in baseline.stdout.splitlines()
                       if "/test-support: " in line)
-    if reported != declaring or len(declaring) < 10:
+    if reported != declaring or len(declaring) < 9:
         raise AssertionError(
             f"baseline must report every declaring package: {reported} vs {declaring}")
 
     # Removing a feature that nothing else in the step forwards leaves its package uncovered.
-    for package in ("host-web", "protocol", "source"):
+    for package in ("host-web", "protocol"):
         fails(f"{package}/test-support removed from test-debug-a", {package},
               feature_a(f"{package}/test-support"))
     for package in ("parametric-eq", "builtins"):
@@ -119,7 +119,7 @@ def main() -> int:
               feature_b(f"{package}/test-support"))
     fails("every test-support feature removed from test-debug-a",
           {"builtins-compiler", "effect-compiler", "graph", "host-core", "host-web", "protocol",
-           "rack", "source"},
+           "rack"},
           (WORKFLOW, DEBUG_A_FEATURES, "--features engine/realtime-audit\n"))
     fails("every test-support feature removed from test-debug-b", {"builtins", "parametric-eq"},
           (WORKFLOW, DEBUG_B_FEATURES, "--features math/lane\n"))

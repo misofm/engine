@@ -31,7 +31,7 @@ Audio buffers are planar `f32`, banked AoSoA across tracks: at each sample, a ve
 
 Single-thread execution is the render model.  Should multicore render return, the standing rules are that workers write disjoint outputs and reduce in stable node-ID order, are prestarted, and cannot allocate, steal heap jobs, or make the render coordinator wait on an OS mutex.
 
-Sources stream just-in-time: native WAV/RF64 decode workers fill bounded SPSC PCM rings, seeks are generation-tagged, and underrun emits zero plus a counter.  Browser/mobile hosts provide decoded chunks to equivalent bounded rings.  Never load whole stems solely to render a session.  Launch-supported session/render rates are exactly 44.1, 48, 88.2, and 96 kHz; 176.4, 192, 352.8, and 384 kHz are extended compatibility/research evidence only, not host or release support.  There is no implicit SRC in this sprint; host-rate mismatch is rejected or made explicit in a later plan.
+Sources stream just-in-time: hosts decode and submit planar chunks into bounded SPSC PCM rings, seeks are generation-tagged, and underrun emits zero plus a counter.  The browser decodes with its stem store and PCM pump, and mobile apps decode with the platform decoder and submit planar `f32` through the C ABI; the engine runs no decode worker threads.  Never load whole stems solely to render a session.  Launch-supported session/render rates are exactly 44.1, 48, 88.2, and 96 kHz; 176.4, 192, 352.8, and 384 kHz are extended compatibility/research evidence only, not host or release support.  There is no implicit SRC in this sprint; host-rate mismatch is rejected or made explicit in a later plan.
 
 ## Effects and plugins
 

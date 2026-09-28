@@ -5,16 +5,15 @@
 use core::{
     alloc::Layout,
     cell::{Cell, UnsafeCell},
-    marker::PhantomData,
     mem::{MaybeUninit, size_of},
     ptr,
     sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize},
 };
 use std::alloc::{GlobalAlloc, System};
-use std::{sync::Mutex, thread::JoinHandle};
+use std::sync::Mutex;
 
 use capi::*;
-use engine::realtime::{PlanEpoch, PreparedRenderPlan, Producer, QueueGeneration};
+use engine::realtime::{PlanEpoch, PreparedRenderPlan, QueueGeneration};
 use lane::Backend;
 use protocol::{
     AUTOMATION_BATCH_RECORDS, AutomationBatchSlot, AutomationRecord, CommandPayload,
@@ -543,6 +542,9 @@ fn frozen_scratch_report(capi_retained_bytes: u64) -> PlanResourceReport {
         // 2_862 -> 3_950 and `source_total_bytes` 11_054 -> 12_142, +1_088 = 1_024 retained PCM
         // + 48 metadata + 2 x 8 queue slots + 8 consumer field - 8 deleted driver field (see
         // `source_owners`).
+        // #1035 deletes the native decode workers and the driver's 16-byte retirement-worker
+        // slice with them: `source_overhead_bytes` 3_950 -> 3_934, `source_total_bytes`
+        // 12_142 -> 12_126.
         // #241 deletes 64 x 64 = 4_096 control-queue bytes and 1_024 x 2 x 4 = 8_192
         // declarative source-ring bytes from the session compiler's runtime projection. The host
         // still reports the chosen ring exactly in the source rows below.
@@ -588,8 +590,8 @@ fn frozen_scratch_report(capi_retained_bytes: u64) -> PlanResourceReport {
         builtin_bank_bytes: 14_233,
         builtin_bank_scratch_bytes: 49_152,
         source_pcm_payload_bytes: 8_192,
-        source_overhead_bytes: 3_950,
-        source_total_bytes: 12_142,
+        source_overhead_bytes: 3_934,
+        source_total_bytes: 12_126,
         effect_scalar_state_bytes: 7_560,
         effect_scalar_scratch_bytes: 216,
         builtin_processor_payload_bytes: 17_451,
@@ -799,27 +801,18 @@ struct TransferBlockMirror {
     samples: Box<[f32]>,
 }
 
-#[allow(dead_code)]
-struct NativeSourceWorkerMirror {
-    join: Option<JoinHandle<source::NativeSourceWorkerExit>>,
-    stopped: bool,
-    stop: Producer<()>,
-    not_sync: PhantomData<Cell<()>>,
-}
-
 /// #124: the entry is consumer-only — planes were deleted (graph fan-out copies the retained
-/// block directly) and retirement ownership moved onto the driver so workers stop before
-/// consumers drop.
+/// block directly).
 #[allow(dead_code)]
 struct GraphSourceEntryMirror {
     consumer: source::PcmSourceConsumer,
 }
 
-/// #124: `_retirement_workers` is declared first for drop order. #917 deleted the per-block
-/// `copied_claims` count (-8 bytes): no claim releases the played block any more.
+/// #917 deleted the per-block `copied_claims` count (-8 bytes): no claim releases the played
+/// block any more. #1035 deleted the native decode workers and with them the driver's
+/// retirement-worker slice (-16 bytes).
 #[allow(dead_code)]
 struct SourceGraphSourceSetDriverMirror {
-    retirement_workers: Box<[NativeSourceWorkerMirror]>,
     sources: Box<[GraphSourceEntryMirror]>,
     mappings: Box<[source::SourceGraphTrackMapping]>,
     quantum_frames: u32,
@@ -2280,18 +2273,20 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
         "double-live graph/model",
     );
 
+    // #1035: the graph source driver lost its 16-byte native retirement-worker slice, so each
+    // plan's source overhead is 16 bytes smaller (12_142 -> 12_126, 3_950 -> 3_934).
     let source = source_owners();
-    assert_eq!(owner_total(&source), 12_142, "primitive source total");
+    assert_eq!(owner_total(&source), 12_126, "primitive source total");
     let source_overhead_rows = source[1..].to_vec();
-    assert_effective_owner_mutations(&source_overhead_rows, 3_950, "source overhead");
+    assert_effective_owner_mutations(&source_overhead_rows, 3_934, "source overhead");
     let mut source_total_rows = source.clone();
     source_total_rows.extend(source.clone());
-    assert_effective_owner_mutations(&source_total_rows, 24_284, "double-live source total");
+    assert_effective_owner_mutations(&source_total_rows, 24_252, "double-live source total");
     let mut double_source_overhead = source_overhead_rows.clone();
     double_source_overhead.extend(source_overhead_rows);
     assert_effective_owner_mutations(
         &double_source_overhead,
-        7_900,
+        7_868,
         "double-live source overhead",
     );
 
@@ -2703,8 +2698,9 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
             + 2 * observation_runtime_owner_bytes()
             + 2 * executor_table_bytes
     );
-    assert_eq!(oracle.source_total, 24_284);
-    assert_eq!(oracle.source_overhead, 7_900);
+    // #1035: -16 per live plan, the driver's deleted retirement-worker slice.
+    assert_eq!(oracle.source_total, 24_252);
+    assert_eq!(oracle.source_overhead, 7_868);
     assert_eq!(oracle.effect_state, 15_120);
     assert_eq!(oracle.effect_scratch, 432);
     // #808: 2 x 17_451 (see `builtin_owners`). The #430 outer allowance is graph-owned.
