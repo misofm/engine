@@ -7650,11 +7650,36 @@ mod ramping_elision {
         if cfg!(debug_assertions) { 40 } else { 300 }
     }
 
-    /// The per-PR share of [`scenarios`] at `Simd4` and `Simd8` (issue #1049): a quarter.
-    /// [`the_vector_differentials_render_their_bits_at_the_full_scenario_count`] runs the full
-    /// count at both widths in `nightly.yml`. The scalar differentials keep the full count.
-    fn per_pr_vector_scenarios() -> u64 {
-        scenarios() / 4
+    /// The seeds a differential draws: every `stride`-th from `first`, until `count` scenarios
+    /// have run (a seed whose designs are not all legal is not a scenario).
+    #[derive(Clone, Copy)]
+    struct Seeds {
+        first: u64,
+        stride: u64,
+        count: u64,
+    }
+
+    /// Every seed from `0`, [`scenarios`] of them: the scalar differentials per PR, and the
+    /// vector ones in [`the_vector_differentials_render_their_bits_at_the_full_scenario_count`],
+    /// which `nightly.yml` runs.
+    fn all_seeds() -> Seeds {
+        Seeds {
+            first: 0,
+            stride: 1,
+            count: scenarios(),
+        }
+    }
+
+    /// The per-PR share at `Simd4` and `Simd8` (issue #1049): a quarter of the scenarios, every
+    /// fourth seed of the same range. It starts at seed 2 because 1005-M5d, a `Simd8`-only catch
+    /// (`tests/MUTATIONS.md`), is red on seed 26 and on no other seed of the dev build's range
+    /// (#1049 scanned seeds 0-119: 26, 46, 53 and 101 at `Simd8`), and 26 is 2 modulo 4.
+    fn per_pr_vector_seeds() -> Seeds {
+        Seeds {
+            first: 2,
+            stride: 4,
+            count: scenarios() / 4,
+        }
     }
 
     /// #1005's gate: the list against the batch-head `process_block`, both on the shipped writes.
@@ -7696,20 +7721,20 @@ mod ramping_elision {
         width: &str,
         label: &str,
         paths: [Path; 2],
-        count: u64,
+        seeds: Seeds,
     ) {
         for mono in [false, true] {
             reset_ramping_elided_blocks();
             let mut tally = Tally::default();
-            let mut seed = 0;
-            while tally.scenarios < count {
+            let mut seed = seeds.first;
+            while tally.scenarios < seeds.count {
                 scenario::<L, W>(
                     seed + if mono { 1 << 32 } else { 0 },
                     mono,
                     paths,
                     &mut tally,
                 );
-                seed += 1;
+                seed += seeds.stride;
             }
             println!(
                 "{label} differential {width} {}: {} scenarios, {} blocks bit-identical, {} ramping, \
@@ -7754,60 +7779,50 @@ mod ramping_elision {
 
     #[test]
     fn a_ramping_block_renders_the_batch_head_bits_scalar() {
-        differential::<f32, 1>("Scalar", "#1005", LIST, scenarios());
+        differential::<f32, 1>("Scalar", "#1005", LIST, all_seeds());
     }
 
     #[test]
     fn a_ramping_block_renders_the_batch_head_bits_simd4() {
-        differential::<Simd4, 4>("Simd4", "#1005", LIST, per_pr_vector_scenarios());
+        differential::<Simd4, 4>("Simd4", "#1005", LIST, per_pr_vector_seeds());
     }
 
     #[test]
     fn a_ramping_block_renders_the_batch_head_bits_simd8() {
-        differential::<Simd8, 8>("Simd8", "#1005", LIST, per_pr_vector_scenarios());
+        differential::<Simd8, 8>("Simd8", "#1005", LIST, per_pr_vector_seeds());
     }
 
     /// Issue #1007 gate 1: `select` lane writes and the masked segment snap against the #1005
     /// kernel's `lane_set` writes, with the list on both arms.
     #[test]
     fn select_lane_writes_render_the_1005_bits_scalar() {
-        differential::<f32, 1>("Scalar", "#1007", WRITES_ON_1005, scenarios());
+        differential::<f32, 1>("Scalar", "#1007", WRITES_ON_1005, all_seeds());
     }
 
     #[test]
     fn select_lane_writes_render_the_1005_bits_simd4() {
-        differential::<Simd4, 4>("Simd4", "#1007", WRITES_ON_1005, per_pr_vector_scenarios());
+        differential::<Simd4, 4>("Simd4", "#1007", WRITES_ON_1005, per_pr_vector_seeds());
     }
 
     #[test]
     fn select_lane_writes_render_the_1005_bits_simd8() {
-        differential::<Simd8, 8>("Simd8", "#1007", WRITES_ON_1005, per_pr_vector_scenarios());
+        differential::<Simd8, 8>("Simd8", "#1007", WRITES_ON_1005, per_pr_vector_seeds());
     }
 
     /// Issue #1007's writes alone, on the batch-head ramping path (VERIFY-AUTOMATION A2).
     #[test]
     fn select_lane_writes_alone_render_the_lane_set_bits_scalar() {
-        differential::<f32, 1>("Scalar", "#1007 alone", WRITES_ALONE, scenarios());
+        differential::<f32, 1>("Scalar", "#1007 alone", WRITES_ALONE, all_seeds());
     }
 
     #[test]
     fn select_lane_writes_alone_render_the_lane_set_bits_simd4() {
-        differential::<Simd4, 4>(
-            "Simd4",
-            "#1007 alone",
-            WRITES_ALONE,
-            per_pr_vector_scenarios(),
-        );
+        differential::<Simd4, 4>("Simd4", "#1007 alone", WRITES_ALONE, per_pr_vector_seeds());
     }
 
     #[test]
     fn select_lane_writes_alone_render_the_lane_set_bits_simd8() {
-        differential::<Simd8, 8>(
-            "Simd8",
-            "#1007 alone",
-            WRITES_ALONE,
-            per_pr_vector_scenarios(),
-        );
+        differential::<Simd8, 8>("Simd8", "#1007 alone", WRITES_ALONE, per_pr_vector_seeds());
     }
 
     /// The six `Simd4` and `Simd8` differentials above at the full scenario count, which they ran
@@ -7815,12 +7830,12 @@ mod ramping_elision {
     #[test]
     #[ignore = "nightly: the full scenario count of the Simd4 and Simd8 differentials (#1049)"]
     fn the_vector_differentials_render_their_bits_at_the_full_scenario_count() {
-        differential::<Simd4, 4>("Simd4", "#1005", LIST, scenarios());
-        differential::<Simd8, 8>("Simd8", "#1005", LIST, scenarios());
-        differential::<Simd4, 4>("Simd4", "#1007", WRITES_ON_1005, scenarios());
-        differential::<Simd8, 8>("Simd8", "#1007", WRITES_ON_1005, scenarios());
-        differential::<Simd4, 4>("Simd4", "#1007 alone", WRITES_ALONE, scenarios());
-        differential::<Simd8, 8>("Simd8", "#1007 alone", WRITES_ALONE, scenarios());
+        differential::<Simd4, 4>("Simd4", "#1005", LIST, all_seeds());
+        differential::<Simd8, 8>("Simd8", "#1005", LIST, all_seeds());
+        differential::<Simd4, 4>("Simd4", "#1007", WRITES_ON_1005, all_seeds());
+        differential::<Simd8, 8>("Simd8", "#1007", WRITES_ON_1005, all_seeds());
+        differential::<Simd4, 4>("Simd4", "#1007 alone", WRITES_ALONE, all_seeds());
+        differential::<Simd8, 8>("Simd8", "#1007 alone", WRITES_ALONE, all_seeds());
     }
 }
 
