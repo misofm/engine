@@ -84,7 +84,8 @@ pub enum Known {
     /// A lane's rendered bits depend on where its in-flight ramps are cut: by another lane's
     /// retarget in the same bank (so the bank is not its scalar instances), and by a block
     /// boundary (so the render is not partition-invariant, master plan P1). Narrowing: a scenario
-    /// either carries automation, on one lane only, or renders chunked blocks, never both.
+    /// either carries automation, on one lane only, or renders chunked blocks, never both; and a
+    /// restore carries the lane's own untouched snapshot, so it starts no ramp elsewhere.
     RampCutsMoveBits,
 }
 
@@ -374,9 +375,8 @@ fn run_scalar(
                         );
                         continue;
                     }
-                    assert_eq!(
-                        snapshot_scalar(effect.as_ref(), sizes),
-                        payload,
+                    assert!(
+                        same_payload(&snapshot_scalar(effect.as_ref(), sizes), &payload),
                         "{context}: lane {lane}'s snapshot does not survive its own restore"
                     );
                 }
@@ -1344,6 +1344,28 @@ fn snapshot_lane(
     payload
 }
 
+/// Whether two payloads carry the same words, where a restore may write a signed zero back as
+/// `+0.0` (the multiband compressor and the compressor normalise the zeros they read).
+fn same_payload(a: &Payload, b: &Payload) -> bool {
+    let zero = |word: u32| word & 0x7fff_ffff == 0;
+    [
+        (&a.common, &b.common),
+        (&a.left, &b.left),
+        (&a.right, &b.right),
+    ]
+    .into_iter()
+    .all(|(x, y)| {
+        x.len() == y.len()
+            && x.chunks_exact(4).zip(y.chunks_exact(4)).all(|(p, q)| {
+                let (p, q) = (
+                    u32::from_le_bytes(p.try_into().expect("a word")),
+                    u32::from_le_bytes(q.try_into().expect("a word")),
+                );
+                p == q || (zero(p) && zero(q))
+            })
+    })
+}
+
 fn compare_state(
     scalars: &[Box<dyn PreparedNativeEffect>],
     bank: &dyn PreparedNativeEffectBank,
@@ -1443,7 +1465,10 @@ fn restore(
 ) {
     let lanes = scalars.len();
     let lane = draw.below(lanes);
-    let source = if draw.chance(1, 4) {
+    // Under `RampCutsMoveBits` a restore may not start a ramp on a lane the scenario keeps free
+    // of them, so it restores the lane's own untouched snapshot only.
+    let untouched = spec.known.contains(&Known::RampCutsMoveBits);
+    let source = if !untouched && draw.chance(1, 4) {
         draw.below(lanes)
     } else {
         lane
@@ -1451,7 +1476,7 @@ fn restore(
     let mut payload = snapshot_scalar(scalars[source].as_ref(), sizes);
     let mut claim = None;
     let mut rewritten = true;
-    match draw.below(4) {
+    match if untouched { 3 } else { draw.below(4) } {
         0 if spec.craft.is_some() => {
             claim = spec.craft.expect("checked")(draw, metadata, &mut payload);
             coverage.crafted_restores += 1;
@@ -1515,14 +1540,12 @@ fn restore(
             Ok(()),
             "{context}: lane {lane} refused its own snapshot"
         );
-        assert_eq!(
-            snapshot_scalar(scalars[lane].as_ref(), sizes),
-            payload,
+        assert!(
+            same_payload(&snapshot_scalar(scalars[lane].as_ref(), sizes), &payload),
             "{context}: lane {lane}'s snapshot does not survive its own restore"
         );
-        assert_eq!(
-            snapshot_lane(bank, lane, sizes),
-            payload,
+        assert!(
+            same_payload(&snapshot_lane(bank, lane, sizes), &payload),
             "{context}: bank lane {lane}'s snapshot does not survive its own restore"
         );
     }

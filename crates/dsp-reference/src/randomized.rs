@@ -221,9 +221,14 @@ impl Draw {
         values[self.below(values.len())]
     }
 
-    /// A subnormal of either sign, never zero.
+    /// A subnormal of either sign, never zero; half the time one of the three smallest, where a
+    /// product with any coefficient below `0.5` in magnitude rounds to a signed zero.
     pub fn subnormal(&mut self) -> f32 {
-        let magnitude = 1 + (self.next_u64() as u32 & 0x007f_fffe);
+        let magnitude = if self.chance(1, 2) {
+            1 + self.below(3) as u32
+        } else {
+            1 + (self.next_u64() as u32 & 0x007f_fffe)
+        };
         let sign = if self.chance(1, 2) { 0x8000_0000 } else { 0 };
         f32::from_bits(magnitude | sign)
     }
