@@ -8,6 +8,7 @@ mod fixture;
 mod manifest;
 mod prng;
 mod protocol_corpus;
+mod randomized;
 
 pub use block::{BlockError, PlanarBlock};
 pub use compare::{
@@ -27,6 +28,10 @@ pub use prng::SplitMix64;
 pub use protocol_corpus::{
     COMPLETE_SCHEMA_HASH, ConformanceDecoder, ConformanceFrame, complete_all_opcode_fixture,
     complete_all_opcode_fixture_bytes, complete_schema_corpus,
+};
+pub use randomized::{
+    Craft, DifferentialCoverage, EffectDifferential, Known, Payload, assert_reached,
+    run_effect_differential,
 };
 
 #[cfg(test)]

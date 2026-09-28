@@ -14,6 +14,7 @@ mod lr4;
 mod parametric_eq;
 mod processor;
 mod ramp;
+pub mod randomized;
 mod signals;
 mod soft_clip;
 mod spectrum;
