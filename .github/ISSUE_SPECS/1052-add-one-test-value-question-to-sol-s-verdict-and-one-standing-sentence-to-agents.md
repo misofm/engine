@@ -348,3 +348,60 @@ about 28 s.
 
 **Still open, non-blocking.** A comment that quotes a forbidden form goes red. A `fixtures/..`
 path evades the lint; that is deliberate evasion, left to review.
+
+## Sol attempt 2 verdict: PASS
+
+Sol, 2026-09-28, commit `4706f1e9`. All three attempt 1 findings are fixed. All results were
+checked on `git archive` scratch copies of `4706f1e9` and of `eb23b9b0`, the tree before this
+attempt.
+
+**What was re-run.**
+- **The pattern-break mutation** (`rs|toml` → `rsx|tomlx`) is now red two ways:
+  - the tree check reports 25 stale rows;
+  - `test-workspace-policy.sh` is red.
+- **The allow-list cannot pass vacuously.**
+  - With every row deleted, as after #1047, the vacuous pattern is still red: the `source-reads`
+    case passes unexpectedly.
+  - Excluding every path in the `fixtures/` test (`if (1) next`) is red too.
+  - Dropping only the `open` branch is red on its own planted row.
+  - Every production row requires its exact count, so the rows are the lint's live positive
+    control. Once #1047 empties the list, the planted cases in all three roots take over.
+- **Ratchet on the real tree.**
+  - Re-spending freed allowance is red: two `lib.rs` reads were removed from `source/src/lib.rs`
+    and a `native_source.rs` read and a `../Cargo.toml` read were added. The two new reads and
+    `allows 4, found 2` are reported.
+  - Deleting `native_wave.rs` is red, and names #1035.
+  - The ratchet gives identical results under gawk, mawk and busybox awk.
+- **Bypass plants: 27 forms.**
+  - Now red: `fs::read`, `File::open`, `OpenOptions::open`, `r"…"`, `r#"…"#`, `[ ]`, `{ }`,
+    `concat!(env!…, r"…")`, plus every attempt 1 red case.
+  - Still green: a helper, `Path::join`, `format!`, a `const`, a split `concat!`, `file!()` and
+    `fixtures/..`. All of these are declared as left to review.
+  - `include_str !(` with a space is also green, but `cargo fmt --check` rewrites it.
+- **Cost.** Two alternating runs each, at load average 45-50, on user plus sys CPU.
+  `test-workspace-policy.sh` went from 19.0 s to 22.0 s, about 3 s or +16 %. That is
+  proportionate:
+  - it pays for the positive controls;
+  - most of it is materializing the allowance, which shrinks with the rows and goes when #1047
+    empties the list.
+  The tree scan is still about 10 ms.
+- **Checks.** These pass: `check-workspace-policy.sh`, `test-workspace-policy.sh` (three runs),
+  `check-ci-path-routing.py`, `test-ci-path-routing.py` and `check-env-vocabulary.sh`.
+  `check-step-vocabulary.py` was not judged: it fails on #1025's spec, which root is fixing.
+- **`AGENTS.md`** now says "behavior". #1047's Outcome, Scope and gate 5 now stand alone.
+
+**Test value for the new self-test cases.**
+- `source-reads` goes red when any single pattern branch or scan root is dropped. It is the lint's
+  only positive control once the list is empty.
+- `ratchet-over-and-orphan` and `ratchet-respend` go red when the stale-row check is disabled or the
+  key becomes per file. No other case sees either defect.
+
+**Notes, not blocking.**
+- These forms are still green, in the same class as the helpers the comment already lists:
+  - `Path::new("…")`, `PathBuf::from("…")` or `&"…"` inside a read;
+  - a swap of the same path within one file;
+  - a comment that quotes a forbidden form, which goes red (a false positive).
+- **Merge order.** #1035's and #1037's bodies do not yet authorize deleting their rows.
+  - #1037 is in flight, and nine rows name #1035 or #1037.
+  - Whichever of #1052 or #1035/#1037 lands second must delete those rows, or the lint goes red.
+    The red message names the row and the issue.
