@@ -296,3 +296,71 @@ rust-cache dependency caches stay valid.
 
 - No push, PR or GitHub edit.
 - The operator-script half (Amendment 4) belongs to 00b.
+
+## Sol attempt 1 verdict: PASS
+
+Reviewer: Sol (Claude Opus 5.5), on `86b96383` in the `engine-1021` worktree, with
+`CARGO_INCREMENTAL=0`. Nothing is pushed.
+
+**1. The counts are #916's intended dispatch.** I instrumented the fader-matrix witness in scratch
+`git archive` extracts, with every file touched so that no stale artifact from a shared target
+could be reused, and ran the test at each commit.
+
+| commit | pair calls per render (members) | result |
+|---|---|---|
+| `86be6792` (parent) | one call, the one-lane track-8 tail | pass |
+| `608f0379` (#916) | an eight-lane `FaderMatrixBankProcessor` call over tracks 0-7, then the one-lane tail | `tests.rs:3220` fails, 2 against 1 |
+| `9c762d7c` | the same as `608f0379` | fails |
+
+- The bank call is fused, drains nothing, and outputs 0.5. The tail is fused, drains one fader
+  record and one matrix record, and outputs 0.1252968.
+- That gives 2 calls, 9 members, 2 fused, 0 fallback, and 1 and 1 records drained: exactly the
+  edited assertions.
+- The first failing commit is `608f0379`. #916 made the Output dedicated storage, so the cohort
+  that contains track 0 now fuses.
+
+**2. The output witness discriminates.** Each of these mutations fails at the reworded assertion
+(`tests.rs:3236`) with `0.5`:
+
+- both records staged to track 0;
+- both records staged to track 7, inside the bank;
+- in the product, host-web admission changed to `(track + 1) % track_count`;
+- in the product, host-web admission changed to `track - 1`.
+
+A record fanned out to two tracks would also raise `*_records_drained`, which the test pins at 1.
+
+**3. Guard coverage.** It is complete for every package that declares `test-support`, and it fails
+closed on parser drift.
+
+- It goes red, as tested, for: a new declaring package, `--list`, `--ignored`, `--no-run`, name
+  filters, and removing a feature.
+- A covering step in a job outside the verdict is refused by `check-ci-path-routing.py`. A job
+  with `if: false` fails the verdict table.
+- Every other `cfg(feature)` that gates tests is on today:
+  - `lane` and `realtime-audit` are named on the command line;
+  - `c-abi` comes from effect-package's own dev-dependency;
+  - `control-provider` comes from capi, unified under `--workspace`: 20 + 10 tests run in
+    test-debug-a.
+
+  Non-blocking follow-ups:
+
+  - (a) The guard is bound to the name `test-support`. A renamed test feature that is also dropped
+    from CI passes.
+  - (b) Failure masking passes both this guard and the routing checker: a step or job with
+    `continue-on-error: true`, `|| true` or `; exit 0` after `cargo test`, or a shell `if false`.
+    This is a gap for every job, not one #1021 introduced.
+
+**4. Workflow.** The diff adds one lint step, the features and comments, and nothing else. The
+router, the leaf `route` gating, the job names and the verdict table are unchanged.
+`check-ci-path-routing.py` and `test-ci-path-routing.py` pass. Both new scripts pass (20 cases,
+1.8 s). The new paths route to `full`.
+
+**5. Runs.**
+
+- test-debug-a: 1526 passed, 0 failed, 10 ignored, 1534 listed. All five new tests ran.
+- test-debug-b: 807 passed, 0 failed, 28 ignored.
+- The builtins peak-merge block is red with a count + 1 when its feature is on, and green when it
+  is off.
+- `cargo fmt --check` and the host-web `--all-features` clippy are clean.
+- `build-web-audioworklet.sh` in pinned mode produces `476e58ad…`, equal to the pin.
+- Not re-measured: CI wall time.
