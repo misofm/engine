@@ -281,12 +281,13 @@ jobs:
           cargo test --locked --release -p host-core --test prepare -- --ignored --exact dense_refusal_diagnostics_finish_under_one_second_in_release
           cargo test --locked --release -p effect-package --test package_allocation -- --ignored --exact encode_at_the_frozen_artifact_cap_finishes_in_ten_milliseconds_in_release
 
-  # Issue #1049 shrank these tests per PR -- a quarter of the Simd4/Simd8 ramping-elision
-  # scenarios, four of the 48 million-sample EQ sequences, 10,000 of the million mutated protocol
-  # frames, and the bank meter pass on an 8-track console -- and moved their full size here. Each
-  # is an `#[ignore]`d test selected by its exact name, in a dev build (the per-PR debug jobs'
-  # profile, overflow checks and debug assertions on), with the per-PR features its package uses.
   full-size-tests:
+    # Issue #1049 shrank these tests per PR -- a quarter of the Simd4/Simd8 ramping-elision
+    # scenarios, four of the 48 million-sample EQ sequences, 10,000 of the million mutated protocol
+    # frames, and the bank meter pass on an 8-track console -- and moved their full size here.
+    # Each is an `#[ignore]`d test selected by its exact name, in a dev build (the per-PR debug
+    # jobs' profile, overflow checks and debug assertions on), with the per-PR features its
+    # package uses.
     name: full-size debug test sweeps (a share of each runs per PR)
     runs-on: ubuntu-24.04
     timeout-minutes: 40
