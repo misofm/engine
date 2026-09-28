@@ -49,8 +49,8 @@ fi
 # The MAX_TRACKS ban lives once, in scripts/check-workspace-policy.sh (P12): it scans the whole
 # {crates,hosts,tools} tree, graph/graph-compiler included, rather than one of five
 # copies of the same regex over five different root lists.
-# Production code only: a `#[cfg(test)]` module may implement the seam to exercise it (issue 100
-# tests the block-boundary hand-over inside `engine`), but nothing that ships may.
+# Production code only: a `#[cfg(test)]` module may implement the seam to exercise it (`engine`'s
+# own tests capture a response snapshot through one), but nothing that ships may.
 all_sources_raw="$(gate_find_collect 'workspace Rust discovery' crates -name '*.rs' -type f)" || exit $?
 [[ -n "$all_sources_raw" ]] || fail 'workspace Rust discovery returned no Rust files'
 all_sources="$(gate_sort_lines 'workspace Rust discovery' "$all_sources_raw")" || exit $?

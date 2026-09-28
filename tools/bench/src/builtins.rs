@@ -537,7 +537,6 @@ impl RealMeterTapPlan {
         self.plan
             .render(
                 RenderIo {
-                    input: None,
                     output: PlanarBufferMut::try_new(&mut self.pcm, 2, QUANTUM, QUANTUM)
                         .expect("fixed benchmark output"),
                 },

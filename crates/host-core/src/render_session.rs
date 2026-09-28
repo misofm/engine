@@ -110,13 +110,8 @@ impl StartedRenderSession {
     ) -> Result<RenderReport, RenderError> {
         let _fp_env = CanonicalFpEnv::enter();
         let output = PlanarBufferMut::try_new(samples, channels, frames, plane_stride)?;
-        self.plan.render_contiguous(
-            RenderIo {
-                input: None,
-                output,
-            },
-            absolute_sample,
-        )
+        self.plan
+            .render_contiguous(RenderIo { output }, absolute_sample)
     }
 
     /// Apply an admitted source seek between render blocks on this exclusive render owner.

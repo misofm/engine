@@ -353,7 +353,6 @@ fn render(
         owner
             .render(
                 RenderIo {
-                    input: None,
                     output: PlanarBufferMut::try_new(output, 2, QUANTUM, QUANTUM)
                         .expect("fixed planar output"),
                 },
@@ -695,7 +694,6 @@ mod tests {
         let mut output = [0.0; QUANTUM * 2];
         plan.render(
             RenderIo {
-                input: None,
                 output: PlanarBufferMut::try_new(&mut output, 2, QUANTUM, QUANTUM)
                     .expect("fixed output"),
             },

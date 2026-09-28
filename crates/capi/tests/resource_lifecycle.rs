@@ -1628,7 +1628,11 @@ fn complete_capi_owners(
     // #1023 re-pin (-24): `CompiledSession` dropped its unread `graph_entity_indexes` map, a
     // 24-byte `BTreeMap` header, and the session handle's controller holds the compiled session
     // inline.
-    assert_effective_owner_mutations(&active, 160_957, "active CAPI");
+    // #1024 re-pin (-56): `RenderEnvelope` lost its unused `input_channels` (an 8-byte
+    // `Option<NonZeroUsize>`), so every retained `PreparedRenderPlan` is 8 bytes smaller: the
+    // publication and retirement queues' two slots each (-32), the plan handle's active plan and
+    // pending candidate (-16), and the session handle's `PlanPublisher` envelope (-8).
+    assert_effective_owner_mutations(&active, 160_901, "active CAPI");
 
     let candidate_epoch_rows = [
         PrimitiveOwner {
@@ -2371,7 +2375,8 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
     // #338: canonical JSON adds 8,082 retained bytes to each live session model.
     // #1023 re-pin (-48): the current and the prepared `CompiledSession` each lose the unread
     // 24-byte `graph_entity_indexes` map.
-    assert_effective_owner_mutations(&capi_rows, 204_375, "double-live CAPI");
+    // #1024 re-pin (-56): the current CAPI owners' envelope rows (see `complete_capi_owners`).
+    assert_effective_owner_mutations(&capi_rows, 204_319, "double-live CAPI");
 
     let graph_rows = graph_owners();
     // The eight graph-metadata rows begin after the five audio/effect rows. #241 removed the
@@ -2705,7 +2710,8 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
     // #808: 2 x 17_451 (see `builtin_owners`). The #430 outer allowance is graph-owned.
     assert_eq!(oracle.builtin, 34_902);
     // #1023: -48, the two `CompiledSession`s' unread `graph_entity_indexes` maps.
-    assert_eq!(oracle.capi, 204_375);
+    // #1024: -56, the current CAPI owners' `RenderEnvelope` rows.
+    assert_eq!(oracle.capi, 204_319);
     // #241: 58_694 - (29 x 10 locator) + (40 x 10 content identity) = 58_804.
     assert_eq!(oracle.largest, 58_804);
 
@@ -2737,7 +2743,7 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
         // SAFETY: These handles are uniquely owned until their matching destroy calls.
         unsafe {
             let (session, plan) = compile_c(&session_document, &exact_limits);
-            assert_eq!(resources_c(plan), frozen_scratch_report(160_957));
+            assert_eq!(resources_c(plan), frozen_scratch_report(160_901));
             let request = command(1, 42, "double-live-cap");
             let mut response = [0xa5_u8; 4_096];
             assert_eq!(submit(session, &request, &mut response), RESULT_OK, "{row}");
@@ -2756,7 +2762,7 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
                 RESULT_OK
             );
             // The prospective session ID is nine bytes shorter than the current one.
-            assert_eq!(resources_c(plan), frozen_scratch_report(160_957 - 9));
+            assert_eq!(resources_c(plan), frozen_scratch_report(160_901 - 9));
             miso_engine_v1_session_destroy(session);
             miso_engine_v1_plan_destroy(plan);
         }
@@ -2807,10 +2813,12 @@ fn tiny_control_frame_still_accounts_three_provider_counters_exactly() {
     // metadata/state/string growth is restated independently above, so this remains an exact
     // budget assertion rather than an observed-value pin. #1023 then removes 24 bytes: the
     // session handle's compiled session no longer carries the unread `graph_entity_indexes` map.
+    // #1024 removes 56 more: `RenderEnvelope`'s unused `input_channels`, once in each of the
+    // seven retained envelopes (see `complete_capi_owners`).
     let (eq_descriptor_bytes, eq_state_bytes, eq_string_bytes) = prepared_eq_catalog_growth();
     assert_eq!(
         required,
-        178_490 + eq_descriptor_bytes + eq_state_bytes + eq_string_bytes,
+        178_434 + eq_descriptor_bytes + eq_state_bytes + eq_string_bytes,
         "tiny-frame retained authority"
     );
     let mut exact = roomy;

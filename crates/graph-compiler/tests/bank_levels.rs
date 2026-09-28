@@ -346,7 +346,6 @@ pub fn compile_bind_render(
             pcm.fill(0.0);
             plan.render(
                 RenderIo {
-                    input: None,
                     output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames)
                         .expect("output planes"),
                 },

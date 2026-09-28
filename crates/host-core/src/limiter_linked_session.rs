@@ -521,10 +521,7 @@ fn run(backend: Backend) -> Run {
             .prepared
             .plan
             .render(
-                RenderIo {
-                    input: None,
-                    output,
-                },
+                RenderIo { output },
                 RenderTime {
                     absolute_sample: first,
                 },

@@ -171,7 +171,6 @@ fn prepared_plan(lend: bool, calls: &Arc<Calls>) -> engine::realtime::PreparedRe
     let envelope = RenderEnvelope {
         sample_rate: engine::SampleRateHz(48_000),
         quantum: QuantumFrames(FRAMES),
-        input_channels: None,
         output_channels: core::num::NonZeroUsize::new(2).expect("stereo"),
     };
     let stage = |lane: usize, stage| GraphNodeId::TrackStage {
@@ -334,10 +333,7 @@ fn render(plan: &mut engine::realtime::PreparedRenderPlan, masters: &mut [u32]) 
     for block in 0..BLOCKS {
         let output = PlanarBufferMut::try_new(&mut pcm, 2, frames, frames).expect("output");
         plan.render(
-            realtime::RenderIo {
-                input: None,
-                output,
-            },
+            realtime::RenderIo { output },
             realtime::RenderTime {
                 absolute_sample: block * u64::from(FRAMES),
             },
