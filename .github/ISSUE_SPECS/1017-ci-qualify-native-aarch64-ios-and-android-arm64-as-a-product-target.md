@@ -504,3 +504,142 @@ For each new or rewritten test: which plausible defect turns it red that no exis
   pre-existing, and #1017 only makes them width-correct.
 - **The audit gate subject.** The gate audit covers a bank on AArch64 at all: before this
   change, `bank_available` was false there.
+
+## Attempt 2 evidence
+
+Terra. On branch `codex/1017-aarch64-ci`:
+
+- `0d3ba25d` merges `codex/batch-slim-2` (`eca8779d`: #1048, #1027, #1037, #1063).
+- `a586f89f` is the fix, and this section is the evidence commit.
+
+Nothing is pushed.
+
+### Merge
+
+- **Resolved conflicts.**
+  - `qualification.yml` `cross-target` takes #1037's ripgrep-only install and step name, plus the
+    two mobile targets.
+  - `check-cross-targets.sh` takes #1037's summary line.
+  - `check-ci-path-routing.py` and `test-ci-path-routing.py` keep both sides.
+- **Deletions kept.** `bench_ramp.rs` (#1027), `bank_state.rs`,
+  `EFFECT_INTERCHANGE_QUALIFICATION_V1.md` and `check-effect-interchange-targets.sh` (#1037) stay
+  deleted, as the batch deleted them.
+- **#1048's mutation, adapted.** It moved `test-debug-b` onto an arm64 runner without G5. That can
+  no longer fail, because `aarch64-release` now carries G5. It is replaced by four mutations of
+  that step: removed, filtered with `--skip`, demoted to debug, and made conditional. All four are
+  red.
+- **Product crates.** `product_crates` now derives 25 crates (`effect-package` is gone).
+
+### The three required changes
+
+1. **The iOS memset scan covers every product crate.**
+   - `check-cross-targets.sh` emits each product crate's `aarch64-apple-ios` release assembly with
+     `cargo rustc --crate-type rlib`, so `capi`'s cdylib is never linked. All 25 crates scan,
+     `capi` included (0 calls).
+   - The counts on the merged tree are 3,494 calls in ten crates:
+
+     | crate | calls |
+     |---|---|
+     | `multiband-compressor` | 1,132 |
+     | `compressor` | 970 |
+     | `transient-shaper` | 534 |
+     | `builtins` | 376 |
+     | `gate-expander` | 181 |
+     | `parametric-eq` | 151 |
+     | `true-peak-limiter` | 104 |
+     | `soft-clip` | 22 |
+     | `graph` | 20 |
+     | `host-core` | 4 |
+
+     These are Sol's nine crates, plus `host-core`'s 4 in
+     `SpectrumAnalyzer::analyze`/`analyze_continuous`, which Sol could not scan.
+   - `scripts/lib/aarch64-known-defects.py` holds one row per crate: owner #1018, count as ceiling.
+     - A crate at zero fails ("now passes: delete its row").
+     - A count above its ceiling fails ("rose").
+     - A crate with calls and no row fails.
+     - A row for a crate outside the product closure fails.
+     - A product crate with no measured count fails.
+     - A count below its ceiling passes, and the report says "lower its row".
+   - The register (`docs/TARGET_MATRIX.md`) and #1018's new "Scope found by #1017" section give
+     the ten crates and their render functions. **Root to rule:** widen #1018, or split it.
+2. **#1048's G5 guard is satisfied.**
+   - `aarch64-release` gains an unconditional step:
+     `cargo test --locked --release -p wasm-gates --features math/lane`.
+   - The script's release `gates` drop `-p wasm-gates`.
+   - `check-ci-path-routing.py` and `test-ci-path-routing.py` pass on the merged tree.
+   - Under qemu, the step passes 7 tests, `g5_native_digests_match_pins` included, and G6's full
+     corpus under `FPCR.FZ` passes.
+3. **Expected failures check their reason.**
+   - Each test row now carries its reason: the AArch64 digest in the assertion's `left:` line, or
+     M2's assertion text. The reasons were recorded under qemu on the merged tree.
+   - `judge-test` requires all of the following:
+     - a nonzero exit;
+     - exactly `test <name> ... FAILED` and `0 passed; 1 failed`;
+     - exactly one panic from that test;
+     - the reason inside that panic's message.
+   - Before the main run, `judge-skips` requires each row's name to name exactly one test in the
+     leg's `--list` (Sol's LOW finding 4). The debug leg lists 1,841 tests in 217 binaries, and
+     every row is unique.
+
+### Mutations (each red, then restored)
+
+- **M4, the real scan** (`check-cross-targets.sh` against edited rows).
+  - Deleting `graph`'s row, lowering `compressor`'s ceiling to 969 and raising `soft-clip`'s to 23
+    exit 1 with:
+    - "compressor: memset_pattern16 calls rose from 969 to 970";
+    - "graph: 20 memset_pattern16 calls and no row".
+  - `soft-clip` below its ceiling passes, as designed.
+  - The judges' hermetic self-test covers a row at zero, a rise, a new crate, a stale row, an
+    unmeasured crate, a duplicate count, and a partial fix passing.
+- **M5, a planted panic in an expected-failure test.**
+  - Release, through the real `run-aarch64-tests.sh release` under qemu:
+    `panic!("PLANTED: an unrelated regression")` at the top of `m2_exp2_lane_identity` gives
+    exit 1, "failed for another reason: its panic does not contain 'exp2_lane: scalar digest
+    69c5e8f5… does not match the pin'", and "leg failure: expected failure math
+    m2_exp2_lane_identity did not fail as its row says".
+  - Debug: the same plant in compressor `scenario_981` is refused, "failed for another reason:
+    its panic does not contain 'left: "ea812b3a…"'". This ran through the leg's exact per-row
+    command and judge, not the whole 2.5-hour debug leg.
+  - The self-test also refuses a pass, another digest, the reason outside the panic, two failures
+    and a different test name.
+- **Routing.** `test-ci-path-routing.py` adds two mutations, and both are red: handing the memset
+  judge a hand-picked product list, and dropping the judge. With the four G5-step mutations, all
+  earlier ones still pass.
+
+### Gates rerun on the merged tree
+
+- **x86.**
+  - Workspace clippy `-D warnings` and `cargo fmt --check`: pass.
+  - The touched crates' debug tests: 769 passed, 0 failed.
+  - Release `lane`/`math`/`wasm-gates` plus `console-workload`: 177 passed, 0 failed.
+  - `audit gate-expander`: W8, bank bound, 0 violations.
+- **Policy scripts.** All pass: script reachability and its test (the new helper is reached),
+  workspace, env-vocabulary, test-support-ci, step vocabulary, realtime, lane, bench, unfused
+  seal, host-core, session, leak, conformance, graph, rack, builtins, effect-runtime, protocol,
+  EQ render contract and dsp-research.
+- **`check-cross-targets.sh`: PASS.** It took 4m37s cold and 1m39s warm locally, at 32 cores. The
+  25-crate asm scan is about 1m30s of the warm run, and it is single-threaded per crate.
+- **actionlint 1.7.7:** no findings.
+- **AArch64 under qemu.**
+  - The release leg's main run passed 165 tests, and both M2 rows failed with their reasons.
+  - The audits then stop at the known qemu re-exec artifact. Run as subjects, they pass: `capi`
+    `pcm_digest` `ff6cdcb96cdcdad5`; delay, compressor, EQ and gate at 0 violations (gate W4, bank
+    bound).
+  - The six debug rows fail with their reasons.
+  - The full 2.5-hour debug leg was not rerun. Its changed logic (skip names, per-row reruns,
+    judges) was exercised as above, and attempt 1's full run on the pre-merge tree passed.
+
+### Still for the first CI run, or for root
+
+- **First CI run.**
+  - The reasons were recorded under qemu, and the first hardware run must reproduce them. If
+    hardware disagrees, the leg fails, which is the point.
+  - The G5 step, the tests that re-execute themselves, and wall times.
+- **CI cost update.** `cross-target` now adds about +4-7 minutes warm, from the 25-crate release
+  asm scan and the two check/clippy rows. It adds about +10-15 minutes cold, against its 25-minute
+  timeout. The arm64 jobs are unchanged from attempt 1, except that G5 is now its own step.
+- **Successors for root.** Sol's LOW findings 5 and 6 are left to successor issues:
+  - `continue-on-error` is not refused anywhere in the workflow;
+  - the gate-expander W8-only claims should become width-generic tests.
+- **Reconcile at merge.** #1049 may delete compressor `scenario_*_is_pinned` tests that the debug
+  rows name. Root reconciles this at merge: a deleted row test fails `judge-skips` by name.
