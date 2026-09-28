@@ -2004,6 +2004,7 @@ dependencies = [
 name = "source"
 version = "0.1.0"
 dependencies = [
+ "dsp-reference",
  "effect-contract",
  "engine",
  "graph",
