@@ -9,21 +9,17 @@
 # only). The armv7-linux-androideabi row below is a refusal row: it passes only while `lane`
 # fails to compile for that target with its 64-bit-only message.
 #
-# Replaces the cargo/wasm-objdump halves of scripts/check-parametric-eq-targets.sh,
-# scripts/check-builtins-targets.sh and scripts/check-effect-interchange-targets.sh with one script
-# that runs each distinct package/target/feature combination exactly once, under one cached target
-# dir per target triple (`target/ci/cross-target/<triple>`, or under `$CARGO_TARGET_DIR` if the
-# caller has set it). The three original scripts are now thin wrappers that call this one, so any
-# remaining caller by the old name keeps working; scripts/check-parametric-eq-targets.sh's hermetic
-# render-contract half moved to scripts/check-parametric-eq-render-contract.sh instead.
+# Replaces the cargo/wasm-objdump halves of scripts/check-parametric-eq-targets.sh and
+# scripts/check-builtins-targets.sh with one script that runs each distinct package/target/feature
+# combination exactly once, under one cached target dir per target triple
+# (`target/ci/cross-target/<triple>`, or under `$CARGO_TARGET_DIR` if the caller has set it). The
+# two original scripts are now thin wrappers that call this one, so any remaining caller by the old
+# name keeps working; scripts/check-parametric-eq-targets.sh's hermetic render-contract half moved
+# to scripts/check-parametric-eq-render-contract.sh instead.
 #
-# Not moved here (still owned by their original scripts, or already run elsewhere):
-#   * scripts/check-effect-interchange-targets.sh's `cargo test -p effect-package -p effect-compiler
-#     -p conformance --lib --tests` -- an exact subset of the workspace test run.
-#   * scripts/test-effect-descriptor-capi.sh -- already run by scripts/check-effect-descriptor-v1.sh.
-#   * The second scripts/check-effect-interchange-qualification.sh run scripts/
-#     check-effect-interchange-targets.sh used to make at its own end -- this script runs it once,
-#     first.
+# #1037 (owner ruling R6) removed the effect-package crate, and with it the third original script
+# (check-effect-interchange-targets.sh), its qualification precondition and the effect-package
+# cdylib object row. effect-compiler keeps its wasm `check --all-targets` row below.
 set -euo pipefail
 
 [[ $# -eq 0 ]] || { printf 'usage: check-cross-targets.sh\n' >&2; exit 2; }
@@ -36,7 +32,7 @@ fail() {
     exit 1
 }
 
-for tool in cargo rustc rustup wasm-objdump rg uname; do
+for tool in cargo rustc rustup rg uname; do
     command -v "$tool" >/dev/null 2>&1 || fail "missing tool $tool"
 done
 [[ "$(uname -s)" == Linux ]] || fail 'native row requires Linux'
@@ -46,23 +42,12 @@ for target in x86_64-unknown-linux-gnu wasm32-unknown-unknown armv7-linux-androi
     rustup target list --installed | rg -qx "$target" || fail "required target unavailable: $target"
 done
 
-# Issue #081's static/qualification half, exactly once (scripts/check-effect-interchange-targets.sh
-# used to run this at both its own start and its own end).
-bash scripts/check-effect-interchange-qualification.sh . >/dev/null
-
-# scripts/check-effect-interchange-targets.sh's `validate_wasm_exports` Wasm-export parser: sourced
-# rather than duplicated, so scripts/test-effect-interchange-target-export-parser.sh's synthetic
-# regression keeps exercising the one live implementation. Sourcing only defines the function --
-# the file's own `[[ "${BASH_SOURCE[0]}" != "$0" ]]` guard returns before any of its own work runs.
-source "$root/scripts/check-effect-interchange-targets.sh"
-
 base_target_dir="${CARGO_TARGET_DIR:-target}/ci/cross-target"
 
 # --- native x86-64-v3 release check: parametric-eq, builtins, builtins-compiler -----------------
 # `.cargo/config.toml` pins `+avx2,+fma` for every x86_64 build in this workspace (master plan #83
-# D4), so no explicit RUSTFLAGS is needed or set here. effect-package/effect-compiler/conformance
-# have no native `check` row in the original three scripts -- their native coverage is the
-# workspace test run, not this matrix.
+# D4), so no explicit RUSTFLAGS is needed or set here. effect-compiler/conformance have no native
+# `check` row -- their native coverage is the workspace test run, not this matrix.
 CARGO_TARGET_DIR="$base_target_dir/x86_64-unknown-linux-gnu" \
     cargo check --quiet --locked --release \
     -p parametric-eq -p builtins -p builtins-compiler
@@ -102,41 +87,18 @@ for mode in scalar simd; do
         cargo build --quiet --locked --release --target wasm32-unknown-unknown \
         -p builtins -p builtins-compiler
 
-    # effect-package + effect-compiler: `check --all-targets`, debug (issue #081). Split from the
-    # conformance row below (N1): effect-package ships a cdylib, so one invocation naming it
-    # together with the evidence crate conformance would unify conformance's feature/dependency
-    # edges into the artifact build -- exactly what scripts/check-artifact-evidence-leak.sh exists
-    # to catch. Both invocations share $target_dir, so the split costs no extra fetch/compile work
-    # on an incremental rerun.
+    # effect-compiler: `check --all-targets`, debug (issue #081). Kept apart from the conformance
+    # row below (N1) so the evidence crate's feature/dependency edges never unify into a shipped
+    # crate's build -- what scripts/check-artifact-evidence-leak.sh exists to catch. Both
+    # invocations share $target_dir, so the split costs no extra fetch/compile work on an
+    # incremental rerun.
     CARGO_TARGET_DIR="$target_dir" RUSTFLAGS="$flags" \
         cargo check --quiet --locked --all-targets --target wasm32-unknown-unknown \
-        -p effect-package -p effect-compiler
+        -p effect-compiler
     # conformance: `check --all-targets`, debug -- evidence-only, no shipped package (N1).
     CARGO_TARGET_DIR="$target_dir" RUSTFLAGS="$flags" \
         cargo check --quiet --locked --all-targets --target wasm32-unknown-unknown \
         -p conformance
-
-    # effect-package cdylib object + export/SIMD assertions (issue #081's wasm row).
-    CARGO_TARGET_DIR="$target_dir" RUSTFLAGS="$flags" \
-        cargo rustc --quiet --locked -p effect-package --features c-abi \
-        --target wasm32-unknown-unknown --lib -- --crate-type=cdylib
-    # Named explicitly rather than globbed (N3): `cargo rustc --crate-type=cdylib -p effect-package`
-    # always produces exactly this path, and a persistent (non-mktemp) target dir means a stale
-    # object from a different commit could otherwise win a `find -print -quit` race.
-    wasm="$target_dir/wasm32-unknown-unknown/debug/effect_package.wasm"
-    [[ -f "$wasm" ]] || fail "missing effect-package Wasm object ($mode)"
-    metadata="$base_target_dir/$mode.wasm-metadata.txt"
-    wasm-objdump -x "$wasm" >"$metadata"
-    validate_wasm_exports "$metadata" "$mode"
-    if [[ "$mode" == scalar ]]; then
-        # Captured to a variable first (N2) so `set -e` semantics apply to `wasm-objdump` itself --
-        # inside an `if` condition (or the left side of a pipeline under only `pipefail`) a failing
-        # objdump would otherwise make the SIMD ban silently vacuous rather than fatal.
-        disasm="$(wasm-objdump -d "$wasm")"
-        if printf '%s' "$disasm" | rg -q 'v128|f32x4|f64x2|i8x16|i16x8|i32x4|i64x2'; then
-            fail 'SIMD opcode in scalar effect-package object'
-        fi
-    fi
 done
 
-printf 'cross-target matrix: PASS (x86-64-v3; wasm scalar/simd128; armv7 refused (#1041); parametric-eq, builtins, effect-interchange rows deduplicated; native aarch64 unsupported, see #378)\n'
+printf 'cross-target matrix: PASS (x86-64-v3; wasm scalar/simd128; armv7 refused (#1041); parametric-eq, builtins, effect-compiler rows deduplicated; native aarch64 unsupported, see #378)\n'

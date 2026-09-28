@@ -397,7 +397,6 @@ NIGHTLY_BUDGET_COMMANDS = [
     'cargo test --locked --release -p host-web --lib -- --ignored --exact tests::maximum_document_dense_invalid_boot_finishes_under_one_second_in_release',
     'cargo test --locked --release -p host-core --test effect_observation -- --ignored --exact observation_cost_classes_are_separated_from_a_computed_scan_in_release',
     'cargo test --locked --release -p host-core --test prepare -- --ignored --exact dense_refusal_diagnostics_finish_under_one_second_in_release',
-    'cargo test --locked --release -p effect-package --test package_allocation -- --ignored --exact encode_at_the_frozen_artifact_cap_finishes_in_ten_milliseconds_in_release',
 ]
 
 
@@ -415,7 +414,7 @@ def nightly_budget_script(root: pathlib.Path) -> str:
 def check_nightly_budgets(root: pathlib.Path) -> None:
     expected = "set -euo pipefail\n" + "\n".join(NIGHTLY_BUDGET_COMMANDS) + "\n"
     require(nightly_budget_script(root) == expected,
-            "nightly: run each of the four exact release budgets once with failure propagation")
+            "nightly: run each of the three exact release budgets once with failure propagation")
 
 
 def check(root: pathlib.Path) -> None:

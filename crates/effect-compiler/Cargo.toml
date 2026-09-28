@@ -10,11 +10,9 @@ publish.workspace = true
 name = "effect_compiler"
 
 [dependencies]
-lane.workspace = true
 engine.workspace = true
 session.workspace = true
 effect-contract.workspace = true
-effect-package.workspace = true
 parametric-eq.workspace = true
 compressor.workspace = true
 gate-expander.workspace = true
@@ -25,6 +23,8 @@ transient-shaper.workspace = true
 delay.workspace = true
 
 [dev-dependencies]
+# Only `tests/symmetry_designed_words.rs` names the running backend; the library does not use `lane`.
+lane.workspace = true
 # The catalog lattice sweep checks the builtin strip rows alongside the effect rows: they are
 # one shipped controllable surface even though they are two descriptor tables.
 builtins.workspace = true

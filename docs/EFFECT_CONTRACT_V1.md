@@ -1,14 +1,14 @@
 # Native effect runtime contract V1
 
-Issue 011 defines semantic Rust runtime interfaces only. Descriptor wire/C records, package and
-artifact bytes, CID identity, persisted state envelopes, and migration belong to issue 029,
-**Canonical effect interchange, state migration, and CID package identity**. They are neither
-runtime identities nor issue-011 gates.
+Issue 011 defines semantic Rust runtime interfaces only. The descriptor wire and its C records,
+package and artifact bytes, CID identity, persisted state envelopes and state migration were issue
+029's `effect-package` crate. #1037 removed that crate under owner rulings R6a ("third-party
+effects are out of scope until a new issue reopens them") and R6b ("there is no persisted DSP
+state or state migration without a product need"); git history keeps it. None of it was a runtime
+identity or an issue-011 gate.
 
-The contract crate's Rust types are deliberately **not** `repr(C)` and it publishes no C header.
-The only C ABI for descriptors is
-`crates/effect-package/include/miso_engine_effect_descriptor_v1.h` (80/24/64/16-byte
-records, asserted in `effect-package`). A second, orphaned header once sat at
+The contract crate's Rust types are deliberately **not** `repr(C)` and it publishes no C header;
+descriptors have no C ABI. A second, orphaned header once sat at
 `include/miso_engine_effect_contract_v1.h` describing 32-byte ports and 48-byte quality rows that
 nothing implemented; issue #95 deleted it and `scripts/check-effect-runtime-policy.sh` keeps it
 gone.
@@ -156,7 +156,10 @@ transitions use cached words and do not invoke the coefficient designer.
 
 State is three exact caller buffers: common, left, and right. Snapshot is deterministic and
 all-or-none. Restore accepts only the current nonzero `state_layout_version` and exact prepared
-sizes; the compiler restores only into an unpublished temporary.
+sizes. Since #1037 (R6b) no engine path snapshots or restores a payload: the compiler's
+unpublished-temporary restore and its persisted envelope went with `effect-package`, and the
+per-effect `snapshot_state_payload`/`restore_state_payload` hooks keep only test callers until a
+follow-up removes them with their own digest evidence.
 
 **A version or length word inside the payload outranks the caller's claim.** The
 `state_layout_version` argument of `restore_state_payload` arrives out of band, from the
@@ -167,7 +170,7 @@ the bytes. Where a payload carries none, the argument is checked against the des
 `state_layout_version` and the prepared sizes. The header is two little-endian words at the front
 of the common section — layout version, then the effect's data word count — implemented once in
 `effect_runtime::state_payload`. Adopting it moves `maximum_state.common_bytes` from 0
-to 8, which is a canonical descriptor byte and an effect CID, so adoption travels with a
+to 8, which is a descriptor identity change, so adoption travels with a
 `state_layout_version` bump (decision W2-D2): the crates that had to bump anyway carry a header
 today, the rest adopt one in a coordinated identity change. The **rule** above is frozen now for
 all of them.

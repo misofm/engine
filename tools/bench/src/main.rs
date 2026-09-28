@@ -16,8 +16,6 @@ mod console;
 #[cfg(not(target_arch = "wasm32"))]
 mod effect_contract;
 #[cfg(not(target_arch = "wasm32"))]
-mod effect_interchange;
-#[cfg(not(target_arch = "wasm32"))]
 mod floor;
 #[cfg(not(target_arch = "wasm32"))]
 mod gate_active;
@@ -43,7 +41,6 @@ const SUBJECTS: &[&str] = &[
     "conformance",
     "console",
     "effect-contract",
-    "effect-interchange",
     "gate-active",
     "multiband-active",
     "graph",
@@ -61,7 +58,6 @@ fn run_subject(subject: &str) {
         "conformance" => conformance::main(),
         "console" => console::main(),
         "effect-contract" => effect_contract::main(),
-        "effect-interchange" => effect_interchange::main(),
         "gate-active" => gate_active::main(),
         "multiband-active" => multiband_active::main(),
         "graph" => graph::main(),

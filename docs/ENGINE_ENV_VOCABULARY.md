@@ -94,14 +94,9 @@ Set by `scripts/run-*-benchmark.sh` before the single launch; read by the bench 
 | name | meaning |
 |---|---|
 | `MISO_ENGINE_BENCH_CANDIDATE_COMMIT` | 40-hex commit the candidate binary was built from. |
-| `MISO_ENGINE_BENCH_CANDIDATE_TREE` | 40-hex tree of that commit. |
 | `MISO_ENGINE_BENCH_CANDIDATE_SHA256` | sha256 of the candidate commit string (rack). |
 | `MISO_ENGINE_BENCH_BINARY_SHA256` | sha256 of the launched binary. |
 | `MISO_ENGINE_BENCH_ROUND` | `warmup`, `1` or `2` for the runners that launch per round. |
-| `MISO_ENGINE_BENCH_TOOL_SOURCE_SHA256` | sha256 of the bench tool source (interchange). |
-| `MISO_ENGINE_BENCH_TOOL_MANIFEST_SHA256` | sha256 of the bench package manifest (interchange). |
-| `MISO_ENGINE_BENCH_FIXTURE_MANIFEST_SHA256` | sha256 of the accepted fixture manifest (interchange). |
-| `MISO_ENGINE_BENCH_HERMETIC_CHILD` | set by a test harness so a re-entered runner refuses to launch. |
 
 
 ## Benchmark host and toolchain metadata
@@ -229,8 +224,6 @@ Read only by a `scripts/test-*.sh` fake, never by a real run. A runner that read
 | `MISO_ENGINE_TEST_RECORDS` | records the fake bench emits. |
 | `MISO_ENGINE_TEST_FROZEN_RAW` | raw payload the stub replays. |
 | `MISO_ENGINE_TEST_CANDIDATE` | candidate identity the stub reports. |
-| `MISO_ENGINE_TEST_GIT_DIRTY` | make the runner see a dirty tree. |
-| `MISO_ENGINE_TEST_CARGO_FAIL` | make the cargo stub fail. |
 | `MISO_ENGINE_TEST_PREFLIGHT_ROOT` | root the preflight stub inspects. |
 | `MISO_ENGINE_TEST_PREFLIGHT_LAUNCH_LOG` | preflight launch log. |
 | `MISO_ENGINE_TEST_PREFLIGHT_CARGO_LOG` | preflight cargo log. |
@@ -249,25 +242,3 @@ runs, so re-pin mode cannot turn a backend disagreement into a new pin (master p
 |---|---|
 | `MISO_ENGINE_WEB_AUDIOWORKLET_REPIN` | `build-web-audioworklet.sh`: print the reproducibly built AudioWorklet artifact digest instead of comparing it to the committed pin. |
 | `MISO_ENGINE_REPIN_NATIVE_PCM_RUNNER` | print the five native PCM runner output digests instead of asserting them. |
-
-## Interchange policy test shims
-
-These variables belong only to the hermetic interchange policy suites.
-
-| name | meaning |
-|---|---|
-| `MISO_ENGINE_INTERCHANGE_TEST_DELEGATE_ERROR` | Captured real delegate stderr path. |
-| `MISO_ENGINE_INTERCHANGE_TEST_DELEGATE_OUTPUT` | Captured real delegate stdout path. |
-| `MISO_ENGINE_INTERCHANGE_TEST_EXPECT_DELEGATE` | Expected real delegate exit status. |
-| `MISO_ENGINE_INTERCHANGE_TEST_FAULT_LABEL` | Fault diagnostic label. |
-| `MISO_ENGINE_INTERCHANGE_TEST_FAULT_MODE` | Forwarded fault output mode. |
-| `MISO_ENGINE_INTERCHANGE_TEST_FAULT_NEEDLE` | Fault argv selector. |
-| `MISO_ENGINE_INTERCHANGE_TEST_FAULT_OCCURRENCE` | Selected fault occurrence. |
-| `MISO_ENGINE_INTERCHANGE_TEST_FAULT_STATE` | Fault occurrence counter file. |
-| `MISO_ENGINE_INTERCHANGE_TEST_OPTIONAL_FIND_MODE` | Optional-find expected shape. |
-| `MISO_ENGINE_INTERCHANGE_TEST_OUTPUT_SHAPE` | Expected real stdout shape. |
-| `MISO_ENGINE_INTERCHANGE_TEST_PYTHON_OCCURRENCE` | Selected Python invocation. |
-| `MISO_ENGINE_INTERCHANGE_TEST_READ_MARKER` | Read-hook reached marker path. |
-| `MISO_ENGINE_INTERCHANGE_TEST_READ_PROGRAM` | Original Python program capture path. |
-| `MISO_ENGINE_INTERCHANGE_TEST_READ_TARGET` | Exact refused read target path. |
-| `MISO_ENGINE_INTERCHANGE_TEST_REAL_TOOL` | Resolved real delegate executable. |

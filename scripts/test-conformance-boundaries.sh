@@ -32,7 +32,6 @@ conformance="1"
 console-workload="1"
 effect-compiler="1"
 effect-contract="1"
-effect-package="1"
 engine="1"
 flatbuffers="1"
 graph="1"
@@ -45,7 +44,7 @@ session="1"
 sha2="1"
 EOF
 printf 'fn main() {}\n' >"$base/tools/bench/src/main.rs"
-for crate in engine session protocol capi target-smoke effect-contract effect-compiler effect-package lane math; do
+for crate in engine session protocol capi target-smoke effect-contract effect-compiler lane math; do
   mkdir -p "$base/crates/$crate/src"
   ident=${crate//-/_}
   if [[ $crate == target-smoke ]]; then printf '[package]\nname = "%s"\n[[bin]]\nname = "%s"\npath = "src/main.rs"\n' "$crate" "$crate" >"$base/crates/$crate/Cargo.toml"; else printf '[package]\nname = "%s"\n[lib]\nname = "%s"\n' "$crate" "$ident" >"$base/crates/$crate/Cargo.toml"; fi
@@ -81,8 +80,8 @@ require_protocol_fixture_children "$base"
 pass bash "$checker" "$base"
 (cd "$root" && pass bash scripts/check-conformance-boundaries.sh "$base")
 reset; printf '\n[dependencies]\n' >>"$work/crates/dsp-reference/Cargo.toml"; fail 'f64 reference must have zero dependencies' bash "$checker" "$work"
-for crate in engine session protocol capi target-smoke effect-contract effect-compiler effect-package lane math; do reset; rm "$work/crates/$crate/Cargo.toml"; fail "missing manifest for $crate" bash "$checker" "$work"; done
-for crate in engine session protocol capi target-smoke effect-contract effect-compiler effect-package lane math; do
+for crate in engine session protocol capi target-smoke effect-contract effect-compiler lane math; do reset; rm "$work/crates/$crate/Cargo.toml"; fail "missing manifest for $crate" bash "$checker" "$work"; done
+for crate in engine session protocol capi target-smoke effect-contract effect-compiler lane math; do
   reset; rm -rf "$work/crates/$crate/src"
   if [[ "$crate" == protocol ]]; then
     fail 'protocol test-child parent is unreadable' bash "$checker" "$work"
@@ -90,7 +89,7 @@ for crate in engine session protocol capi target-smoke effect-contract effect-co
     fail "unreadable source root for $crate" bash "$checker" "$work"
   fi
 done
-for crate in engine session protocol capi target-smoke effect-contract effect-compiler effect-package lane math; do
+for crate in engine session protocol capi target-smoke effect-contract effect-compiler lane math; do
   reset; rm "$work/crates/$crate/src/lib.rs"
   if [[ "$crate" == protocol ]]; then
     fail 'protocol default corpus exports scan could not run' bash "$checker" "$work"
@@ -108,7 +107,7 @@ reset; printf 'use engine::Engine;\n' >"$work/crates/dsp-reference/src/lib.rs"; 
 reset; rm -rf "$work/hosts"; fail 'required hosts root missing' bash "$checker" "$work"
 reset; sed -i '/sha2=/d' "$work/tools/bench/Cargo.toml"; fail 'consolidated benchmark dependency union changed' bash "$checker" "$work"
 reset; find "$work" -name Cargo.toml -exec sed -i '/^\[lib\]$/,/^name = /d' {} +; fail 'no workspace library names found' bash "$checker" "$work"
-reset; for crate in engine session protocol capi effect-contract effect-compiler effect-package lane math; do sed -i '/^\[lib\]$/,/^name = /d' "$work/crates/$crate/Cargo.toml"; done; fail 'no production library names found' bash "$checker" "$work"
+reset; for crate in engine session protocol capi effect-contract effect-compiler lane math; do sed -i '/^\[lib\]$/,/^name = /d' "$work/crates/$crate/Cargo.toml"; done; fail 'no production library names found' bash "$checker" "$work"
 make_shim() { local dir=$1 name=$2 body=$3; mkdir -p "$dir"; printf '#!/usr/bin/env bash\n%s\n' "$body" >"$dir/$name"; chmod +x "$dir/$name"; }
 reset; make_shim "$scratch/find-error" find 'case "$*" in "crates hosts tools -name Cargo.toml -type f") [[ -z ${SHIM_PARTIAL:-} ]] || printf "crates/engine/Cargo.toml\n"; exit 7;; esac; exec /usr/bin/find "$@"'; for partial in '' 1; do fail 'workspace library manifest discovery traversal errored (find status 7)' env SHIM_PARTIAL="$partial" PATH="$scratch/find-error:$PATH" bash "$checker" "$work"; done
 reset; make_shim "$scratch/awk-error" awk 'case "$*" in *"in_lib = 1"*) [[ -z ${SHIM_PARTIAL:-} ]] || printf "engine\n"; exit 8;; esac; exec /usr/bin/awk "$@"'; for partial in '' 1; do fail 'library name extraction failed' env SHIM_PARTIAL="$partial" PATH="$scratch/awk-error:$PATH" bash "$checker" "$work"; done

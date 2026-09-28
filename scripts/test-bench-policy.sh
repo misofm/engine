@@ -272,8 +272,7 @@ printf '\nfn json_string(value: &str) -> String {\n    value.replace('"'"'\\\\'"
 expect_failure second-json-string-name
 
 # A local wrapper that only calls the shared `escape` is not the defect (`tools/bench/src/builtins.rs`
-# and `tools/bench/src/effect_interchange.rs` both carry one); the baseline case above already
-# proves that shape stays green.
+# carries one); the baseline case above already proves that shape stays green.
 
 # A delegating wrapper whose signature rustfmt has wrapped across multiple lines is still a
 # delegate, not a reimplementation: the window scan has to reach the line that actually calls
@@ -493,7 +492,7 @@ grep_fault digest-grep-error 'Sha256Sink' 'grep failed with status 7; output: to
 grep_fault digest-grep-empty-error 'Sha256Sink' 'grep failed with status 7; output: <empty>; stderr: grep-error-sentinel' empty
 grep_fault escaper-presence-error 'tools/bench-support/src/json.rs' 'shared-definition grep failed or is empty for tools/bench-support/src/json.rs; status 7; output:'
 grep_fault escaper-presence-empty-error 'tools/bench-support/src/json.rs' 'shared-definition grep failed or is empty for tools/bench-support/src/json.rs; status 7; output: <empty>; stderr: grep-error-sentinel' empty
-multifile_grep_fault escaper-candidate-grep-error 'json_(escape|string|quote)' grep grep-error-sentinel $'tools/bench/src/effect_interchange.rs\ntools/bench/src/builtins.rs\ntools/bench-support/src/json.rs'
+multifile_grep_fault escaper-candidate-grep-error 'json_(escape|string|quote)' grep grep-error-sentinel $'tools/bench/src/builtins.rs\ntools/bench-support/src/json.rs'
 new_case escaper-candidate-grep-empty-error
 mkdir -p "$case_root/shim"
 printf '#!/usr/bin/env bash\nif [[ " $* " == *"--include=*.rs"* && " $* " == *"json_(escape|string|quote)"* ]]; then printf "grep-error-sentinel\\n" >&2; exit 7; fi\nexec /usr/bin/grep "$@"\n' >"$case_root/shim/grep"
@@ -507,15 +506,15 @@ grep_fault environment-reader-grep-empty-error 'env::var' 'environment-reader sc
 
 new_case delegate-parser-output-error
 mkdir -p "$case_root/shim"
-printf '#!/usr/bin/env bash\nif [[ -n "${MISO_ENGINE_BENCH_POLICY_NEEDLE:-}" && "${@: -1}" == "tools/bench/src/effect_interchange.rs" ]]; then /usr/bin/awk "$@"; printf "delegate-error-sentinel\\n" >&2; exit 6; fi\nexec /usr/bin/awk "$@"\n' >"$case_root/shim/awk"
+printf '#!/usr/bin/env bash\nif [[ -n "${MISO_ENGINE_BENCH_POLICY_NEEDLE:-}" && "${@: -1}" == "tools/bench/src/builtins.rs" ]]; then /usr/bin/awk "$@"; printf "delegate-error-sentinel\\n" >&2; exit 6; fi\nexec /usr/bin/awk "$@"\n' >"$case_root/shim/awk"
 chmod +x "$case_root/shim/awk"
-expect_failure_with_path delegate-parser-output-error "$case_root/shim" 'delegate parser failed for tools/bench/src/effect_interchange.rs with status 6; output: delegate; stderr: delegate-error-sentinel'
+expect_failure_with_path delegate-parser-output-error "$case_root/shim" 'delegate parser failed for tools/bench/src/builtins.rs with status 6; output: delegate; stderr: delegate-error-sentinel'
 
 new_case delegate-parser-empty-error
 mkdir -p "$case_root/shim"
-printf '#!/usr/bin/env bash\nif [[ -n "${MISO_ENGINE_BENCH_POLICY_NEEDLE:-}" && "${@: -1}" == "tools/bench/src/effect_interchange.rs" ]]; then printf "delegate-empty-error-sentinel\\n" >&2; exit 6; fi\nexec /usr/bin/awk "$@"\n' >"$case_root/shim/awk"
+printf '#!/usr/bin/env bash\nif [[ -n "${MISO_ENGINE_BENCH_POLICY_NEEDLE:-}" && "${@: -1}" == "tools/bench/src/builtins.rs" ]]; then printf "delegate-empty-error-sentinel\\n" >&2; exit 6; fi\nexec /usr/bin/awk "$@"\n' >"$case_root/shim/awk"
 chmod +x "$case_root/shim/awk"
-expect_failure_with_path delegate-parser-empty-error "$case_root/shim" 'delegate parser failed for tools/bench/src/effect_interchange.rs with status 6; output: <empty>; stderr: delegate-empty-error-sentinel'
+expect_failure_with_path delegate-parser-empty-error "$case_root/shim" 'delegate parser failed for tools/bench/src/builtins.rs with status 6; output: <empty>; stderr: delegate-empty-error-sentinel'
 
 new_case later-timed-marker-error
 mkdir -p "$case_root/shim"

@@ -135,7 +135,6 @@ dependencies = [
  "console-workload",
  "effect-compiler",
  "effect-contract",
- "effect-package",
  "engine",
  "flatbuffers",
  "graph",
@@ -618,7 +617,6 @@ dependencies = [
  "compressor",
  "delay",
  "effect-contract",
- "effect-package",
  "engine",
  "gate-expander",
  "lane",
@@ -638,24 +636,6 @@ dependencies = [
  "engine",
  "lane",
  "math",
-]
-
-[[package]]
-name = "effect-package"
-version = "0.1.0"
-dependencies = [
- "compressor",
- "delay",
- "effect-contract",
- "effect-package",
- "engine",
- "gate-expander",
- "multiband-compressor",
- "parametric-eq",
- "sha2 0.11.0",
- "soft-clip",
- "transient-shaper",
- "true-peak-limiter",
 ]
 
 [[package]]

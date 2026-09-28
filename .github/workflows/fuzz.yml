@@ -26,19 +26,17 @@ name: fuzz
 # (now `nightly.yml`'s `release-link-proof` job, which is unconditional). This filter is not a
 # heuristic. It is the transitive workspace-dependency closure of the fuzz crate,
 # computed from `cargo metadata`, and the fuzz binaries link nothing outside it. `fuzz/Cargo.toml`
-# depends on exactly four workspace crates:
+# depends on exactly two workspace crates:
 #
 #   session          -> engine
 #   protocol         -> engine, session
-#   effect-contract  -> engine, lane, math
-#   effect-package   -> engine, effect-contract
 #
-# which closes over seven crates: core, effect-contract, effect-package, lane, math, protocol,
-# session. All four roots are listed, not just the three the per-PR targets execute, because both
-# jobs run `cargo check --manifest-path fuzz/Cargo.toml --bins`, which builds all eight fuzz
-# binaries including `effect_package` and `effect_state`. Nothing outside that closure can change
-# what these binaries do, so a change outside it has nothing to catch -- and if a new dependency
-# edge is ever added without extending this list, the unfiltered nightly finds it within a day.
+# which closes over three crates: engine, protocol, session. Both jobs run
+# `cargo check --manifest-path fuzz/Cargo.toml --bins`, which builds all six fuzz binaries. Nothing
+# outside that closure can change what these binaries do, so a change outside it has nothing to
+# catch -- and if a new dependency edge is ever added without extending this list, the unfiltered
+# nightly finds it within a day. (#1037 removed the `effect_package` and `effect_state` targets and
+# with them the effect-contract, effect-package, lane and math roots.)
 #
 # The remaining entries are the other real inputs: the fuzz crate and its own lockfile and seed
 # corpus (`fuzz/**`), the seed input the session targets are handed
@@ -53,10 +51,6 @@ on:
       - main
     paths:
       - 'crates/engine/**'
-      - 'crates/effect-contract/**'
-      - 'crates/effect-package/**'
-      - 'crates/lane/**'
-      - 'crates/math/**'
       - 'crates/protocol/**'
       - 'crates/session/**'
       - 'fuzz/**'
@@ -71,10 +65,6 @@ on:
       - main
     paths:
       - 'crates/engine/**'
-      - 'crates/effect-contract/**'
-      - 'crates/effect-package/**'
-      - 'crates/lane/**'
-      - 'crates/math/**'
       - 'crates/protocol/**'
       - 'crates/session/**'
       - 'fuzz/**'

@@ -38,8 +38,9 @@ target: the one shipped artifact is `simd128` (W4-D1). It stays allowed only bec
   `scripts/check-wasm-realtime-atomics.sh`, the scalar variant of
   `scripts/check-protocol-wasm-parity.sh`, and the scalar guest of `scripts/run-wasm-gates.sh`
   (gate G5's scalar-width leg);
-- `qualification.yml` `cross-target`: the scalar rows of `scripts/check-cross-targets.sh`, plus
-  `scripts/check-effect-package-v1.sh` and `scripts/check-effect-descriptor-v1.sh`.
+- `qualification.yml` `cross-target`: the scalar rows of `scripts/check-cross-targets.sh`. (Its
+  `check-effect-package-v1.sh` and `check-effect-descriptor-v1.sh` legs went with the
+  `effect-package` crate in #1037.)
 
 When the legs go, delete the one marked arm of the guard. The scalar arm of
 `lane::Backend::current()` will then be unreachable.
