@@ -34,4 +34,15 @@ aim, in the owner's words, is "minimizing the engine footprint".
 | R8 whole-plan scalar backend | 32-bit is not a target (below). Removal waits on one more ruling: keep an unbanked per-node plan as a test-only oracle for "banking never moves a bit", or accept a weaker guarantee. |
 | R9 wasmtime console benchmark | Retire it, and the nightly descriptive benchmarks if nothing uses them. The native console `--step` rows and the V8 rows on the shipped artifact are the benchmarks. |
 | R10 closed issue specs | Keep only open specs locally, with the verification's corrections (re-point citations; keep `BRIEFS/`). |
-| Draft 02 unwired control endpoints (#140) | Held. Mobile live control ("they should be able to change it live") needs an engine path; decide after checking whether the C ABI can reuse the browser's live-control lane. |
+| Draft 02 unwired control endpoints (#140) | Delete, including the protocol delivery files (#1056). Mobile live control uses the core's console lanes instead (#1053, after #1042). #140 closes as descoped, not superseded. |
+
+## Live control and ramps (decision 1, 2026-09-28)
+
+* The C ABI adapter moves onto the core's existing live-control lanes for fader, mute and pan
+  (#1053), after the plan-swap fix (#1042). Browser-specific code stays in the browser adapter
+  (`hosts/host-web`, `sdk/`); the lanes and ramps are portable core code.
+* Ramp lengths are **not hardcoded**: they are optional session settings
+  (`controlSmoothing`: mute, fader, pan in milliseconds), so a session carries them to every
+  platform, with one documented default table in the session schema and a per-change override
+  (#1054). The default values come from cited research, measurement and listening (#1055); the
+  starting proposal is about 5 ms for mute/solo and about 20 ms for fader and pan moves.
