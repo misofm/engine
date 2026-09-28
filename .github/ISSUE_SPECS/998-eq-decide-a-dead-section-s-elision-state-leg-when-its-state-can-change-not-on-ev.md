@@ -17,3 +17,11 @@ Cache leg (b) per section (and per channel, if the state is per channel) beside 
 3. **Mutations** (each alone, red): the cache is not refreshed on restore; not refreshed when a ramp ends on the identity; refreshed from the wrong channel.
 4. **Timing, no regression** (descriptive, under the timing lock, built first outside it): the shipped `host_web.wasm` one-band, two-band and builtins isolates through its render export (harness as in #977's attempt-2 evidence), and native `Simd8`/`Simd4` `eq_only` isolates. The one-band browser isolate must not be slower than the batch head.
 5. `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --check`, `scripts/check-web-audioworklet-callgraph.py` and the wasm gates pass. Render stays allocation-free.
+
+## Held (root, 2026-09-28): not merged, owner to decide
+
+Attempt 2 passed its gates (verdict `b02ceeaa` on `codex/998-eq-dead-leg-cache`), but Sol
+recommends not merging it and root agrees: the gain is about 0.5 us on the browser one-band EQ
+isolate (under 0.2 % of the console), while every future write site must keep the per-channel cache
+fresh, and a miss is silent in release. The branch is kept. If the owner wants it, the merge must
+also mark the cache stale in #1005's ramping arm (now merged).
