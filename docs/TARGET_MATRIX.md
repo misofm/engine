@@ -144,11 +144,12 @@ AArch64 legs. Each open entry is an expected failure, by name:
   (1.97.1). The fold shows in `math`'s M2 inside `exp2_lane` and `log2_lane`, scalar and vector
   alike. Expected failures in `aarch64-release`: `math` `m2_lane_identity`
   `m2_exp2_lane_identity` and `m2_log2_lane_identity`. Both pass in the debug leg.
-- **AArch64 NaN encodings (attributed to #1019; root to confirm).** Found by #1017. An arithmetic
+- **AArch64 NaN encodings (#1065).** Found by #1017. Not LANE-3: no code shape changes a CPU's NaN
+  rule, and the wasm spec leaves the same bits unspecified in the browser. An arithmetic
   NaN on AArch64 is `0x7FC00000`, where x86 answers `0xFFC00000`, and a signalling operand wins NaN
   propagation. So a pin that folds raw NaN words from hostile input moves on AArch64 in every
   profile. With every NaN folded as one word, these pins are identical on both architectures.
-  #1019's gate 1 already requires NaN-payload identity for the compressor on this leg. Expected
+  #1065 asks the owner to rule whether class-A identity treats every NaN as one value. Expected
   failures in `aarch64-debug`: `compressor`
   `kernel::settled_body_tests::scenario_{981,983,985,995}_*_is_pinned` and
   `scenario_1006_ramping_prefix_is_pinned`, and `parametric-eq` `bank`

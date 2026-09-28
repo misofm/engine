@@ -68,18 +68,18 @@ binary_dir="${CARGO_TARGET_DIR:-$root/target}${CARGO_BUILD_TARGET:+/$CARGO_BUILD
 
 # issue|package|target|test. `target` is `lib` or `test:<integration test name>`.
 EXPECTED_FAILURES_DEBUG=(
-    # LANE-3 (#1019). Not the fmaxnm fold (a debug build makes none): AArch64's own NaN rules. An
-    # arithmetic NaN is 0x7FC00000 (positive) where x86 answers 0xFFC00000 (negative), and a
-    # signalling operand wins NaN propagation, so these pins, which fold raw NaN words from hostile
-    # input, move on AArch64 and on nothing else. With every NaN folded as one word the six compressor scenarios and the
-    # EQ select legs are identical on both architectures (#1017 attempt 1 evidence). #1019's gate 1
-    # owns compressor NaN-payload identity on this leg.
-    "1019|compressor|lib|kernel::settled_body_tests::scenario_981_heterogeneous_hostile_render_is_pinned"
-    "1019|compressor|lib|kernel::settled_body_tests::scenario_983_chunk_straddling_render_is_pinned"
-    "1019|compressor|lib|kernel::settled_body_tests::scenario_985_collapsed_render_is_pinned"
-    "1019|compressor|lib|kernel::settled_body_tests::scenario_995_sidechain_render_is_pinned"
-    "1019|compressor|lib|kernel::settled_body_tests::scenario_1006_ramping_prefix_is_pinned"
-    "1019|parametric-eq|test:bank|admitted_blocks_render_the_base_bits_without_selects"
+    # NaN encodings (#1065), not LANE-3: a debug build makes no fmaxnm fold. An arithmetic NaN is
+    # 0x7FC00000 (positive) on AArch64 where x86 answers 0xFFC00000 (negative), and a signalling
+    # operand wins NaN propagation, so these pins, which fold raw NaN words from hostile input, move
+    # on AArch64 and on nothing else. With every NaN folded as one word the six compressor scenarios
+    # and the EQ select legs are identical on both architectures (#1017 attempt 1 evidence). #1065
+    # rules how class-A identity treats NaN encodings.
+    "1065|compressor|lib|kernel::settled_body_tests::scenario_981_heterogeneous_hostile_render_is_pinned"
+    "1065|compressor|lib|kernel::settled_body_tests::scenario_983_chunk_straddling_render_is_pinned"
+    "1065|compressor|lib|kernel::settled_body_tests::scenario_985_collapsed_render_is_pinned"
+    "1065|compressor|lib|kernel::settled_body_tests::scenario_995_sidechain_render_is_pinned"
+    "1065|compressor|lib|kernel::settled_body_tests::scenario_1006_ramping_prefix_is_pinned"
+    "1065|parametric-eq|test:bank|admitted_blocks_render_the_base_bits_without_selects"
 )
 EXPECTED_FAILURES_RELEASE=(
     # LANE-3 (#1019): in release the D8 `select(a > b, a, b)` folds into `fmaxnm`/`fminnm` inside
