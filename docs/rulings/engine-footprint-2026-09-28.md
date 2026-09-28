@@ -63,3 +63,5 @@ aim, in the owner's words, is "minimizing the engine footprint".
 * **Decision 4, memory accounting:** tests assert budgets (upper limits) plus one independent
   completeness check that every allocation is counted, instead of exact byte counts (#1060).
 * **Decision 5, browser artifact fingerprint:** checked at release; every PR builds the module, runs the artifact gates on it and reports changed/unchanged (#1061).
+* **Decision 6, fat LTO in release test builds:** deferred; measure after the tooling deletions land, then decide (audit draft 11 held).
+* **Decision 7, scalar wasm test builds:** retire once #1017's AArch64 CI job runs, with #1041's scalar-wasm exception (#1062).
