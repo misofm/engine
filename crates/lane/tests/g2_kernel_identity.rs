@@ -1080,3 +1080,258 @@ fn check_skew<L: Lane, const S: usize, const D: usize>(width: &str) {
 fn same_or_both_nan(a: f32, b: f32) -> bool {
     a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan())
 }
+
+/// Carried blocks per case of the bounded-cascade gate.
+const BOUNDED_BLOCKS: usize = 24;
+/// Frame counts of the bounded-cascade gate.
+const BOUNDED_FRAMES: [usize; 4] = [1, 2, 3, 128];
+/// Limits the bounded-cascade gate judges against: the effects' §4.4 bound, one that the G2
+/// coefficients straddle, and one that only non-finite words fail.
+const BOUNDED_LIMITS: [f32; 3] = [1.0e30, 1.0, f32::INFINITY];
+/// Words at and around the §4.4 bound, and the non-finite ones, in both signs.
+const BOUNDED_EDGES: [f32; 10] = [
+    1.0e30,
+    -1.0e30,
+    9.999_999e29,
+    -9.999_999e29,
+    1.000_000_1e30,
+    -1.000_000_1e30,
+    f32::INFINITY,
+    f32::NEG_INFINITY,
+    f32::NAN,
+    -0.0,
+];
+
+/// `effect_runtime::bank::check_block`'s fold, written out with the `Lane` operations it uses:
+/// `ok = ok AND (|x| < limit)` per frame, then `NOT mask_any(NOT ok)`. The bounded kernels reduce each
+/// stored vector at once instead (issue #999, attempt 2); the verdicts must still agree.
+fn bounded_scan<L: Lane>(io: &[f32], limit: f32) -> bool {
+    let limit = L::splat(limit);
+    let mut ok = L::zero().eq(L::zero());
+    for frame in io.chunks_exact(L::WIDTH) {
+        ok = L::mask_and(ok, L::load(frame).abs().lt(limit));
+    }
+    !L::mask_any(L::mask_not(ok))
+}
+
+/// One input word for `(block, frame, lane, stream)`: [`skew_hostile`]'s family, with one plane of
+/// most blocks carrying an edge word on one lane. The two streams take their edges on different
+/// blocks, so a block can fail on either stream alone.
+fn bounded_word(block: usize, frame: usize, lane: usize, stream: usize) -> f32 {
+    let edged = match stream {
+        0 => block % 3 != 2,
+        _ => block % 4 != 1,
+    };
+    if edged && frame == block % (frame + 1) && lane == (block + stream) % 3 {
+        return BOUNDED_EDGES[(block * 3 + stream) % BOUNDED_EDGES.len()];
+    }
+    skew_hostile(block, frame, lane, stream)
+}
+
+/// The identity words: a section that returns its input for every finite state (the EQ's
+/// disabled band), so an edge word reaches the store unchanged.
+fn bounded_identity<L: Lane>() -> lane::kernels::SvfCoef<L> {
+    lane::kernels::SvfCoef {
+        c1: L::zero(),
+        a2: L::zero(),
+        a3: L::zero(),
+        m0: L::splat(1.0),
+        m1: L::zero(),
+        m2: L::zero(),
+    }
+}
+
+/// Verdict tallies of one width: stream verdicts `(true, true)`, `(false, true)`, `(true, false)`,
+/// `(false, false)` over two-stream cases, and output words exactly at the limit.
+#[derive(Default)]
+struct BoundedSeen {
+    verdicts: [usize; 4],
+    at_limit: usize,
+}
+
+fn check_bounded<L: Lane, const S: usize, const D: usize>(width: &str, seen: &mut BoundedSeen) {
+    use lane::kernels::{
+        SvfCoef, svf_cascade_interleaved, svf_cascade_interleaved_bounded,
+        svf_cascade_interleaved_with_dry_masks, svf_cascade_interleaved_with_dry_masks_bounded,
+    };
+
+    let masks: [[L::Mask; D]; S] = core::array::from_fn(|stream| {
+        core::array::from_fn(|section| {
+            let decisions: Vec<f32> = (0..L::WIDTH)
+                .map(|lane| f32::from(u8::from((stream * 3 + section * 5 + lane) % 3 == 0)))
+                .collect();
+            L::load(&decisions).eq(L::splat(1.0))
+        })
+    });
+    for identity in [false, true] {
+        let coefficients: [[SvfCoef<L>; D]; S] = core::array::from_fn(|stream| {
+            core::array::from_fn(|section| {
+                if identity {
+                    bounded_identity()
+                } else {
+                    cascade_coefficients(stream * 4 + section)
+                }
+            })
+        });
+        for masked in [false, true] {
+            for limit in BOUNDED_LIMITS {
+                for frames in BOUNDED_FRAMES {
+                    let label = format!(
+                        "G2 bounded {width} S={S} D={D} identity={identity} masked={masked} \
+                         limit={limit:e} frames={frames}"
+                    );
+                    let initial: [[SvfState<L>; D]; S] = core::array::from_fn(|stream| {
+                        core::array::from_fn(|section| cascade_state::<L>(stream * 4 + section))
+                    });
+                    let mut oracle_state = initial;
+                    let mut bounded_state = initial;
+                    for block in 0..BOUNDED_BLOCKS {
+                        let span = frames * L::WIDTH;
+                        let fresh: [Vec<f32>; S] = core::array::from_fn(|stream| {
+                            (0..span)
+                                .map(|cell| {
+                                    bounded_word(block, cell / L::WIDTH, cell % L::WIDTH, stream)
+                                })
+                                .collect()
+                        });
+                        let mut oracle = fresh.clone();
+                        let mut bounded = fresh;
+                        let io = oracle.each_mut().map(Vec::as_mut_slice);
+                        if masked {
+                            svf_cascade_interleaved_with_dry_masks::<L, S, D>(
+                                io,
+                                frames,
+                                &coefficients,
+                                &mut oracle_state,
+                                &masks,
+                            );
+                        } else {
+                            svf_cascade_interleaved::<L, S, D>(
+                                io,
+                                frames,
+                                &coefficients,
+                                &mut oracle_state,
+                            );
+                        }
+                        let io = bounded.each_mut().map(Vec::as_mut_slice);
+                        let verdict = if masked {
+                            svf_cascade_interleaved_with_dry_masks_bounded::<L, S, D>(
+                                io,
+                                frames,
+                                &coefficients,
+                                &mut bounded_state,
+                                &masks,
+                                limit,
+                            )
+                        } else {
+                            svf_cascade_interleaved_bounded::<L, S, D>(
+                                io,
+                                frames,
+                                &coefficients,
+                                &mut bounded_state,
+                                limit,
+                            )
+                        };
+                        for stream in 0..S {
+                            for (index, (want, got)) in
+                                oracle[stream].iter().zip(&bounded[stream]).enumerate()
+                            {
+                                assert!(
+                                    same_or_both_nan(*want, *got),
+                                    "{label}: block {block}, stream {stream}, word {index}: \
+                                     {:#010x} != unbounded {:#010x}",
+                                    got.to_bits(),
+                                    want.to_bits()
+                                );
+                            }
+                            for section in 0..D {
+                                let (want, got) = (
+                                    oracle_state[stream][section],
+                                    bounded_state[stream][section],
+                                );
+                                for (name, a, b) in [
+                                    ("ic1", bits::<L>(want.ic1), bits::<L>(got.ic1)),
+                                    ("ic2", bits::<L>(want.ic2), bits::<L>(got.ic2)),
+                                ] {
+                                    for (lane, (a, b)) in a.iter().zip(&b).enumerate() {
+                                        assert!(
+                                            same_or_both_nan(
+                                                f32::from_bits(*a),
+                                                f32::from_bits(*b)
+                                            ),
+                                            "{label}: block {block}, stream {stream}, section \
+                                             {section}, lane {lane}: {name} {b:#010x} != {a:#010x}"
+                                        );
+                                    }
+                                }
+                            }
+                            let scan = bounded_scan::<L>(&bounded[stream], limit);
+                            let words = bounded[stream].iter().all(|word| word.abs() < limit);
+                            assert_eq!(
+                                scan, words,
+                                "{label}: block {block}, stream {stream}: the vector scan \
+                                 disagrees with the per-word oracle"
+                            );
+                            assert_eq!(
+                                verdict[stream], scan,
+                                "{label}: block {block}, stream {stream}: the folded verdict is \
+                                 not the scan of the stored words"
+                            );
+                            if limit == 1.0e30 {
+                                seen.at_limit += bounded[stream]
+                                    .iter()
+                                    .filter(|word| word.abs() == limit)
+                                    .count();
+                            }
+                        }
+                        if S == 2 {
+                            let first = usize::from(!verdict[0]);
+                            let second = usize::from(!verdict[S - 1]);
+                            seen.verdicts[first + 2 * second] += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn check_bounded_width<L: Lane>(width: &str) {
+    let mut seen = BoundedSeen::default();
+    check_bounded::<L, 1, 1>(width, &mut seen);
+    check_bounded::<L, 1, 2>(width, &mut seen);
+    check_bounded::<L, 2, 1>(width, &mut seen);
+    check_bounded::<L, 2, 2>(width, &mut seen);
+    assert!(
+        seen.verdicts.iter().all(|&count| count > 0),
+        "G2 bounded {width}: every pair of stream verdicts must occur, saw \
+         (pass, pass), (fail, pass), (pass, fail), (fail, fail) = {:?}",
+        seen.verdicts
+    );
+    assert!(
+        seen.at_limit > 0,
+        "G2 bounded {width}: some stored word must sit exactly at the limit"
+    );
+}
+
+/// Issue #999: the bounded cascade is the cascade, and its verdict is the scan of what it stored.
+///
+/// [`svf_cascade_interleaved_bounded`] and its dry-mask twin, against the kernels they extend, for
+/// every width, one and two streams, depths one and two, with and without dry masks, over the
+/// frozen G2 coefficients and the identity words (which store the input unchanged, so the edge
+/// words reach the store), frame counts 1 to 128, and 24 carried blocks of the hostile family with
+/// edge words: the §4.4 bound and its neighbours, both infinities, `NaN` and `-0.0`. After every
+/// block the output words and every integrator word equal the unbounded kernel's ("both NaN, or
+/// equal bits"), and each stream's verdict equals `check_block`'s fold over the words stored in
+/// that stream (itself checked against `|x| < limit` word by word). Every pair of two-stream verdicts
+/// occurs, and some stored word sits exactly at the limit.
+///
+/// Red mutations (`tests/MUTATIONS.md`, issue #999): the fold ignores the second stream; the fold
+/// compares with `<=`.
+#[test]
+fn g2_bounded_cascade_is_the_cascade_and_judges_what_it_stores() {
+    let _canonical = CanonicalFpEnv::enter();
+    check_bounded_width::<f32>("Scalar");
+    check_bounded_width::<Simd4>("Simd4");
+    check_bounded_width::<Simd8>("Simd8");
+}

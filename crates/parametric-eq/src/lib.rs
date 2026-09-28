@@ -57,8 +57,8 @@ use effect_runtime::state_payload as payload;
 use engine::{SampleRateHz, is_launch_sample_rate};
 use lane::kernels::{
     SvfCoef, SvfCoefStep, SvfState, svf_block, svf_block_ramped, svf_block_ramped_with_dry_mask,
-    svf_cascade_interleaved, svf_cascade_interleaved_with_dry_masks, svf_cascade_skewed,
-    svf_cascade_skewed_with_dry_masks,
+    svf_cascade_interleaved_bounded, svf_cascade_interleaved_with_dry_masks_bounded,
+    svf_cascade_skewed, svf_cascade_skewed_with_dry_masks,
 };
 use lane::{Backend, Lane, Simd4, Simd8};
 
@@ -1582,6 +1582,12 @@ impl<L: Lane, const W: usize> Channel<L, W> {
 /// A ramping block falls back to the per-section path, which owns the block-splitting rule
 /// that a moving coefficient needs. Ramps run for at most a smoothing window after a
 /// parameter change; a console rendering audio is stationary on essentially every block.
+///
+/// Returns the §4.4 verdict per channel when the cascade's last pass judged it as it stored
+/// (issue #999; see [`interleave`]), and `None` when the caller must scan the planes: a ramped
+/// block, a refused or all-live plan, and a plan with no live section.
+///
+/// [`svf_cascade_interleaved`]: lane::kernels::svf_cascade_interleaved
 #[inline(always)]
 fn process_channels<L: Lane, const W: usize>(
     channels: (&mut Channel<L, W>, &mut Channel<L, W>),
@@ -1589,11 +1595,11 @@ fn process_channels<L: Lane, const W: usize>(
     right: &mut [f32],
     frames: usize,
     stationary: bool,
-) {
+) -> Option<[bool; 2]> {
     if !stationary {
         channels.0.process_block(left, frames);
         channels.1.process_block(right, frames);
-        return;
+        return None;
     }
     debug_assert!(channels.0.identity_flags_agree());
     debug_assert!(channels.1.identity_flags_agree());
@@ -1601,7 +1607,7 @@ fn process_channels<L: Lane, const W: usize>(
     // The kept (live) sections run in passes of the effective stationary depth of two on every
     // backend, and an odd count ends in one depth-one pass: #976 removed the identity padding
     // section that used to make the count even.
-    interleave::<L, W, EFFECTIVE_CASCADE_DEPTH>(channels, left, right, frames, sections);
+    interleave::<L, W, EFFECTIVE_CASCADE_DEPTH>(channels, left, right, frames, sections)
 }
 
 /// [`process_channels`] over one plane: the collapsed track's live channel.
@@ -1620,20 +1626,22 @@ fn process_channels<L: Lane, const W: usize>(
 ///
 /// What is **not** restated is the `-0.0` gate on the input planes: it is evaluated on the one
 /// plane the chain gathered, which is the only plane the collapsed cascade reads.
+///
+/// The folded §4.4 verdict is [`process_channels`]', one plane of it.
 #[inline(always)]
 fn process_channels_mono<L: Lane, const W: usize>(
     channel: &mut Channel<L, W>,
     io: &mut [f32],
     frames: usize,
     stationary: bool,
-) {
+) -> Option<bool> {
     if !stationary {
         channel.process_block(io, frames);
-        return;
+        return None;
     }
     debug_assert!(channel.identity_flags_agree());
     let sections = cascade_sections_mono::<L, W>(channel, io, frames);
-    interleave_mono::<L, W, EFFECTIVE_CASCADE_DEPTH>(channel, io, frames, sections);
+    interleave_mono::<L, W, EFFECTIVE_CASCADE_DEPTH>(channel, io, frames, sections)
 }
 
 /// [`cascade_sections`] over one channel. Every leg is [`cascade_sections`]'s, gated on the one
@@ -1679,7 +1687,8 @@ fn cascade_sections_mono<L: Lane, const W: usize>(
 }
 
 /// [`interleave`] over one stream. Same kernels (the skewed pair, issue #978), same list, same
-/// tail rule, same select-free pairs on an admitted plan (issue #977), one channel of it.
+/// tail rule, same select-free pairs on an admitted plan (issue #977), same §4.4 verdict folded
+/// into the depth-one pass (issue #999), one channel of it.
 ///
 /// This is a second instantiation of [`svf_cascade_interleaved`] -- at `CHANNELS = 1` where the
 /// dual path uses `2` -- and [`cascade_sections`] warns that a second arithmetic-carrying EQ kernel
@@ -1688,15 +1697,17 @@ fn cascade_sections_mono<L: Lane, const W: usize>(
 /// cascades inline into `process_bank_inner`. The compressor and the limiter did grow a second
 /// symbol each, and the roster names them. If a later change splits this one out, the fix is a
 /// roster row, not a looser pattern. The depth-one tail (issue #976) is two more instantiations,
-/// `<L, 1, 1>` with and without the dry select, and the pairs run [`svf_cascade_skewed`] and its
-/// dry-mask twin (issue #978), all inlined the same way.
+/// `<L, 1, 1>` with and without the dry select (their bounded twins since issue #999), and the
+/// pairs run [`svf_cascade_skewed`] and its dry-mask twin (issue #978), all inlined the same way.
+///
+/// [`svf_cascade_interleaved`]: lane::kernels::svf_cascade_interleaved
 #[inline(always)]
 fn interleave_mono<L: Lane, const W: usize, const DEPTH: usize>(
     channel: &mut Channel<L, W>,
     io: &mut [f32],
     frames: usize,
     sections: ([usize; EQ_SECTION_COUNT], usize),
-) {
+) -> Option<bool> {
     debug_assert_eq!(EQ_SECTION_COUNT % DEPTH, 0);
     let (list, length) = sections;
     debug_assert!(
@@ -1704,7 +1715,10 @@ fn interleave_mono<L: Lane, const W: usize, const DEPTH: usize>(
         "the tail rule is one section at depth one"
     );
     let admitted = length < EQ_SECTION_COUNT;
-    for pass in 0..length / DEPTH {
+    let pairs = length / DEPTH;
+    let tail = length % DEPTH == 1;
+    let mut within = None;
+    for pass in 0..pairs {
         let base = pass * DEPTH;
         let at: [usize; DEPTH] = core::array::from_fn(|k| list[base + k]);
         let coefficients: [[SvfCoef<L>; DEPTH]; 1] =
@@ -1731,27 +1745,36 @@ fn interleave_mono<L: Lane, const W: usize, const DEPTH: usize>(
             channel.sections[at[k]].state = word;
         }
     }
-    if length % DEPTH == 1 {
+    if tail {
         let at = list[length - 1];
         let coefficients: [[SvfCoef<L>; 1]; 1] = [[channel.sections[at].coef]];
         let mut state: [[SvfState<L>; 1]; 1] = [[channel.sections[at].state]];
         // #976's rule, unchanged by #977: see `interleave`.
         let dry_masks: [[L::Mask; 1]; 1] = [[channel.dry_mask(at)]];
-        if L::mask_any(dry_masks[0][0]) {
-            svf_cascade_interleaved_with_dry_masks::<L, 1, 1>(
+        let [verdict] = if L::mask_any(dry_masks[0][0]) {
+            svf_cascade_interleaved_with_dry_masks_bounded::<L, 1, 1>(
                 [&mut *io],
                 frames,
                 &coefficients,
                 &mut state,
                 &dry_masks,
-            );
+                BLOCK_LIMIT,
+            )
         } else {
             #[cfg(any(test, feature = "test-support"))]
             count_select_free_tail_pass();
-            svf_cascade_interleaved::<L, 1, 1>([&mut *io], frames, &coefficients, &mut state);
-        }
+            svf_cascade_interleaved_bounded::<L, 1, 1>(
+                [&mut *io],
+                frames,
+                &coefficients,
+                &mut state,
+                BLOCK_LIMIT,
+            )
+        };
         channel.sections[at].state = state[0][0];
+        within = Some(verdict);
     }
+    within
 }
 
 /// The cascade positions this stationary block will actually run, in cascade order.
@@ -1897,6 +1920,8 @@ fn interleave_mono<L: Lane, const W: usize, const DEPTH: usize>(
 /// Every leg is a refusal: any doubt returns all six sections and the block renders exactly as it
 /// did before this function existed. The gate is a performance predicate, and the only thing a
 /// wrong *engagement* rule could cost is speed.
+///
+/// [`svf_cascade_interleaved`]: lane::kernels::svf_cascade_interleaved
 #[inline(always)]
 fn cascade_sections<L: Lane, const W: usize>(
     left_channel: &Channel<L, W>,
@@ -1975,7 +2000,7 @@ fn cascade_sections<L: Lane, const W: usize>(
 /// sections of an iteration no longer wait on each other within the frame (issue #978). Every
 /// `(stream, section)` chain runs the same operations on the same inputs in the same order as in
 /// [`svf_cascade_interleaved`], so this is a schedule change and moves no bit. The depth-one tail
-/// has nothing to pipeline and keeps [`svf_cascade_interleaved`].
+/// has nothing to pipeline and keeps [`svf_cascade_interleaved`], in its bounded twin (below).
 ///
 /// # Select-free pairs on an admitted plan (issue #977)
 ///
@@ -1999,6 +2024,26 @@ fn cascade_sections<L: Lane, const W: usize>(
 /// iterations, and the one-band EQ rendered about 20 % slower through the render export (issue
 /// #977, attempt 2). A tail with a dry lane (a dedicated cut that is the last live section and off
 /// on some lanes) keeps the masked depth-one pass it had.
+///
+/// # The tail judges the §4.4 bound as it stores (issue #999)
+///
+/// When the list ends in the depth-one pass, that pass writes every output word of the block, so
+/// it runs the bounded twin of its kernel ([`svf_cascade_interleaved_bounded`], or the dry-mask
+/// one), which folds `|y| < BLOCK_LIMIT` per channel as it stores `y` -- `check_block`'s
+/// conjunction over the same words -- and the verdict is returned for
+/// [`PreparedParametricEq::render`] to use instead of re-reading both planes. The tail only runs
+/// on an odd list, which is always admitted. Every other list returns `None` and `render` scans:
+/// no live section (nothing is stored, and the block's own words meet the limit), a refused or
+/// all-live list, and an even list, whose last pass is a pair. The pair keeps its kernel because
+/// a bounded pair measured worse, not better: in the shipped `simd128` artifact V8 carried four
+/// values of the bounded two-stream pair through stack slots across iterations, and natively the
+/// per-node (`f32`) two-band row was about 5 % slower (#999, attempt 1). The bounded tail's fold
+/// reduces each stored vector to a per-channel `bool` at once (attempt 2): folded into a vector mask
+/// instead, the two accumulators went through stack slots across the loop's back edge in V8, which
+/// the spill gate (issue #1000) refuses; as `bool`s they stay in general-purpose registers, and the
+/// tail's integrators stay in vector registers (no carried stack slot).
+///
+/// [`svf_cascade_interleaved`]: lane::kernels::svf_cascade_interleaved
 #[inline(always)]
 fn interleave<L: Lane, const W: usize, const DEPTH: usize>(
     channels: (&mut Channel<L, W>, &mut Channel<L, W>),
@@ -2006,7 +2051,7 @@ fn interleave<L: Lane, const W: usize, const DEPTH: usize>(
     right: &mut [f32],
     frames: usize,
     sections: ([usize; EQ_SECTION_COUNT], usize),
-) {
+) -> Option<[bool; 2]> {
     debug_assert_eq!(EQ_SECTION_COUNT % DEPTH, 0);
     let (list, length) = sections;
     debug_assert!(
@@ -2014,7 +2059,10 @@ fn interleave<L: Lane, const W: usize, const DEPTH: usize>(
         "the tail rule is one section at depth one"
     );
     let admitted = length < EQ_SECTION_COUNT;
-    for pass in 0..length / DEPTH {
+    let pairs = length / DEPTH;
+    let tail = length % DEPTH == 1;
+    let mut within = None;
+    for pass in 0..pairs {
         let base = pass * DEPTH;
         let at: [usize; DEPTH] = core::array::from_fn(|k| list[base + k]);
         let coefficients: [[SvfCoef<L>; DEPTH]; 2] = [
@@ -2055,7 +2103,7 @@ fn interleave<L: Lane, const W: usize, const DEPTH: usize>(
             channels.1.sections[at[k]].state = word;
         }
     }
-    if length % DEPTH == 1 {
+    if tail {
         let at = list[length - 1];
         let coefficients: [[SvfCoef<L>; 1]; 2] = [
             [channels.0.sections[at].coef],
@@ -2069,28 +2117,32 @@ fn interleave<L: Lane, const W: usize, const DEPTH: usize>(
         // channel is dry there. See "The tail keeps #976's rule" above for why the admitted plan's
         // tail is not made select-free as well.
         let dry_masks: [[L::Mask; 1]; 2] = [[channels.0.dry_mask(at)], [channels.1.dry_mask(at)]];
-        if L::mask_any(dry_masks[0][0]) || L::mask_any(dry_masks[1][0]) {
-            svf_cascade_interleaved_with_dry_masks::<L, 2, 1>(
+        let verdict = if L::mask_any(dry_masks[0][0]) || L::mask_any(dry_masks[1][0]) {
+            svf_cascade_interleaved_with_dry_masks_bounded::<L, 2, 1>(
                 [&mut *left, &mut *right],
                 frames,
                 &coefficients,
                 &mut state,
                 &dry_masks,
-            );
+                BLOCK_LIMIT,
+            )
         } else {
             #[cfg(any(test, feature = "test-support"))]
             count_select_free_tail_pass();
-            svf_cascade_interleaved::<L, 2, 1>(
+            svf_cascade_interleaved_bounded::<L, 2, 1>(
                 [&mut *left, &mut *right],
                 frames,
                 &coefficients,
                 &mut state,
-            );
-        }
+                BLOCK_LIMIT,
+            )
+        };
         let [[left_state], [right_state]] = state;
         channels.0.sections[at].state = left_state;
         channels.1.sections[at].state = right_state;
+        within = Some(verdict);
     }
+    within
 }
 
 /// Reads increment `index` of a step set in the pinned order.
@@ -2361,8 +2413,12 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
 
     /// Runs both channels over one block and applies the master plan §4.4 boundary check.
     ///
-    /// The check is one vector scan per channel per block, from `effect-runtime`. A
-    /// rejected block is zeroed and the channel's integrators are cleared; coefficients and ramps
+    /// The check is `check_block`'s, one verdict per channel per block. When the stationary
+    /// cascade ends in its depth-one pass on an admitted plan, that pass has already judged every
+    /// word as it stored it, and its verdict is used (issue #999; see [`interleave`]); every other
+    /// block -- ramped, refused, all-live, an even live count, nothing live -- scans the plane
+    /// after the cascade. The verdict is the same either way, so the zeroing and the reset are too.
+    /// A rejected block is zeroed and the channel's integrators are cleared; coefficients and ramps
     /// survive, because a non-finite block is a fault report, not an automation event. The two
     /// channels are judged independently: they carry independent state and independent counters,
     /// which is what dual-mono means here.
@@ -2409,7 +2465,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
             self.left.state_bits(&mut before_left);
             self.right.state_bits(&mut before_right);
         }
-        process_channels(
+        let within = process_channels(
             (&mut self.left, &mut self.right),
             left,
             right,
@@ -2421,7 +2477,13 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
                 .into_iter()
                 .enumerate()
         {
-            if check_block::<L>(block) {
+            // Issue #999: an admitted stationary block's last pass judged every word as it stored
+            // it; every other block scans the plane.
+            let passed = match within {
+                Some(verdict) => verdict[index],
+                None => check_block::<L>(block),
+            };
+            if passed {
                 continue;
             }
             let mask = nonfinite_lane_mask::<L>(block);
@@ -2468,8 +2530,8 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         if quiet {
             self.left.state_bits(&mut before_left);
         }
-        process_channels_mono(&mut self.left, left, frames, stationary);
-        if !check_block::<L>(left) {
+        let within = process_channels_mono(&mut self.left, left, frames, stationary);
+        if !within.unwrap_or_else(|| check_block::<L>(left)) {
             let mask = nonfinite_lane_mask::<L>(left);
             left.fill(0.0);
             self.left.reset_states();
@@ -5346,6 +5408,393 @@ mod elision {
         reset_mid_ramp_case::<f32, 1>("Scalar");
         reset_mid_ramp_case::<Simd4, 4>("Simd4");
         reset_mid_ramp_case::<Simd8, 8>("Simd8");
+    }
+}
+
+/// Issue #999 gate 1: the §4.4 verdict the stationary cascade folds into its depth-one pass is
+/// [`check_block`] of the planes that pass wrote, and only a block that runs that pass on an
+/// admitted plan takes it.
+///
+/// [`interleave`] returns the tail's verdict for an admitted list of odd length (1, 3 or 5
+/// sections) and `None` for everything else -- an even list (0, 2 or 4), a refused or all-live list
+/// (6), and a ramped block -- where [`PreparedParametricEq::render`] keeps the scan. Each block
+/// below is rendered through [`process_channels`] and [`process_channels_mono`] exactly as `render`
+/// calls them, and the returned verdict is compared with `check_block` of the rendered planes.
+///
+/// The words that reach the tail's store are steered to the limit with *scale* sections -- live
+/// sections holding `c1 = a2 = a3 = m1 = m2 = +0.0` and a chosen `m0`, whose output is `m0 * x`
+/// rounded once for every finite state and every `x != -0.0` -- so the stored words include the
+/// limit itself (`m0 = 1.0` on an admitted `1e30`), its neighbours, both infinities and `NaN` (a
+/// *clash* section, whose `m2 * v2` is `-inf` against a restored `ic2 = 1e30`). Every input word
+/// is admitted: finite, at most `1e30` in magnitude, never `-0.0`. A second family renders the
+/// corpus bands over admitted input scaled to `1e30` with huge restored integrators, the states
+/// elision leg (c) admits in a live section. At `f32`, `Simd4` and `Simd8`, dual and collapsed
+/// mono; every category of stored word and every combination of the two channels' verdicts
+/// occurs at every width.
+#[cfg(test)]
+mod boundary_fold {
+    use super::{
+        BLOCK_LIMIT, Channel, EQ_SECTION_COUNT, EqSvfWords, cascade_sections,
+        cascade_sections_mono, check_block, corpus, lane_set, process_channels,
+        process_channels_mono,
+    };
+    use lane::{Lane, Simd4, Simd8};
+
+    /// `2^104`: times `1e30` it overflows, times `1.0` it does not.
+    const HUGE: f32 = f32::from_bits(0x7380_0000);
+    /// The largest `f32` below the limit, and the smallest above it.
+    const BELOW: f32 = f32::from_bits(BLOCK_LIMIT.to_bits() - 1);
+    const ABOVE: f32 = f32::from_bits(BLOCK_LIMIT.to_bits() + 1);
+
+    /// A live section whose output is `m0 * x` (see the module comment). `m0 = 1.0` is the
+    /// identity words: that lane stores its input unchanged, and is dry in a dedicated cut.
+    fn scale(m0: f32) -> EqSvfWords {
+        EqSvfWords {
+            c1: 0.0,
+            a2: 0.0,
+            a3: 0.0,
+            m0,
+            m1: 0.0,
+            m2: 0.0,
+        }
+    }
+
+    /// A live section whose mix meets itself at infinity once `ic2 = 1e30`: `m2 * v2 = -inf`, so
+    /// `x = 1e30` gives `-inf + inf = NaN` and a small `x` gives `-inf`.
+    fn clash() -> EqSvfWords {
+        EqSvfWords {
+            c1: 0.0,
+            a2: 0.0,
+            a3: 0.0,
+            m0: HUGE,
+            m1: 0.0,
+            m2: -HUGE,
+        }
+    }
+
+    /// Words that never amplify: ahead of the tail, and on a channel meant to pass.
+    fn tame(index: usize) -> EqSvfWords {
+        [
+            scale(1.0),
+            scale(0.5),
+            scale(f32::from_bits(0x3f7f_ffff)),
+            scale(1.0),
+        ][index % 4]
+    }
+
+    /// Words that push the stored word past the limit, to infinity, or to `NaN`.
+    fn hot(index: usize) -> EqSvfWords {
+        [
+            scale(1.0),
+            scale(f32::from_bits(0x3f80_0001)),
+            scale(HUGE),
+            clash(),
+            scale(1.0),
+            scale(0.5),
+        ][index % 6]
+    }
+
+    /// Admitted input words at the limit and around it.
+    const LOUD: [f32; 10] = [
+        1.0e30, BELOW, 1.0, -1.0e30, 5.0e29, 0.0, 1.0e-39, -BELOW, 7.0, -3.0e-5,
+    ];
+    /// Admitted input words that no tame section carries past the limit.
+    const QUIET: [f32; 5] = [1.0, 0.5, 0.0, 2.0, -1.0];
+
+    /// What the folded blocks stored, and how their verdicts fell.
+    #[derive(Default, Debug)]
+    struct Seen {
+        folded: usize,
+        scanned: usize,
+        /// Dual verdicts `(left, right)`: pass-pass, fail-pass, pass-fail, fail-fail.
+        dual: [usize; 4],
+        /// Mono verdicts: pass, fail.
+        mono: [usize; 2],
+        at: usize,
+        below: usize,
+        above: usize,
+        positive_infinity: usize,
+        negative_infinity: usize,
+        nan: usize,
+        /// Folded dual blocks of the corpus family where a channel failed, and where both passed.
+        designed: [usize; 2],
+    }
+
+    impl Seen {
+        fn stored(&mut self, words: &[f32]) {
+            for &word in words {
+                match word {
+                    _ if word.is_nan() => self.nan += 1,
+                    f32::INFINITY => self.positive_infinity += 1,
+                    f32::NEG_INFINITY => self.negative_infinity += 1,
+                    _ if word.abs() == BLOCK_LIMIT => self.at += 1,
+                    _ if word.abs() == BELOW => self.below += 1,
+                    _ if word.abs() == ABOVE => self.above += 1,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// One AoSoA plane of `frames` frames from `word(frame, lane)`.
+    fn plane<const W: usize>(frames: usize, word: impl Fn(usize, usize) -> f32) -> Vec<f32> {
+        (0..frames * W)
+            .map(|cell| word(cell / W, cell % W))
+            .collect()
+    }
+
+    /// Renders one block both ways `render` can: the dual body over `(left, right)` and the
+    /// collapsed body over `left`; asserts the verdict rule and records what was stored.
+    #[allow(clippy::too_many_arguments)]
+    fn judge<L: Lane, const W: usize>(
+        label: &str,
+        build: &dyn Fn(usize) -> Channel<L, W>,
+        left: &[f32],
+        right: &[f32],
+        frames: usize,
+        stationary: bool,
+        designed: bool,
+        seen: &mut Seen,
+    ) {
+        let (mut left_channel, mut right_channel) = (build(0), build(1));
+        let (mut left_plane, mut right_plane) = (left.to_vec(), right.to_vec());
+        let kept = cascade_sections::<L, W>(
+            &left_channel,
+            &right_channel,
+            &left_plane,
+            &right_plane,
+            frames,
+        )
+        .1;
+        let within = process_channels(
+            (&mut left_channel, &mut right_channel),
+            &mut left_plane,
+            &mut right_plane,
+            frames,
+            stationary,
+        );
+        let scan = [
+            check_block::<L>(&left_plane),
+            check_block::<L>(&right_plane),
+        ];
+        assert_eq!(
+            within.is_some(),
+            stationary && kept % 2 == 1,
+            "{label} dual: kept {kept}, stationary {stationary}: only an admitted list ending in \
+             the depth-one pass folds the verdict"
+        );
+        if let Some(verdict) = within {
+            assert_eq!(
+                verdict, scan,
+                "{label} dual: kept {kept}: the folded verdict is not the scan"
+            );
+            seen.folded += 1;
+            seen.dual[usize::from(!verdict[0]) + 2 * usize::from(!verdict[1])] += 1;
+            seen.stored(&left_plane);
+            seen.stored(&right_plane);
+            if designed {
+                seen.designed[usize::from(verdict == [true; 2])] += 1;
+            }
+        } else {
+            seen.scanned += 1;
+        }
+
+        let mut channel = build(0);
+        let mut io = left.to_vec();
+        let kept = cascade_sections_mono::<L, W>(&channel, &io, frames).1;
+        let within = process_channels_mono(&mut channel, &mut io, frames, stationary);
+        let scan = check_block::<L>(&io);
+        assert_eq!(
+            within.is_some(),
+            stationary && kept % 2 == 1,
+            "{label} mono: kept {kept}, stationary {stationary}: only an admitted list ending in \
+             the depth-one pass folds the verdict"
+        );
+        if let Some(verdict) = within {
+            assert_eq!(
+                verdict, scan,
+                "{label} mono: kept {kept}: the folded verdict is not the scan"
+            );
+            seen.folded += 1;
+            seen.mono[usize::from(!verdict)] += 1;
+            seen.stored(&io);
+        } else {
+            seen.scanned += 1;
+        }
+    }
+
+    /// A channel whose sections in `live` are scale or clash sections and the rest the identity.
+    /// The last live section takes its words from `tail`, the others from [`tame`]; a lane holding
+    /// [`clash`] starts from `ic2 = 1e30`.
+    fn steered<L: Lane, const W: usize>(
+        live: u8,
+        tail: fn(usize) -> EqSvfWords,
+        variant: usize,
+        side: usize,
+    ) -> Channel<L, W> {
+        let mut disabled = corpus::sections(0);
+        for band in &mut disabled {
+            band.enabled = false;
+        }
+        let mut channel = Channel::<L, W>::new([disabled; W], corpus::CORPUS_RATE)
+            .expect("a disabled band is a legal design");
+        let last = (0..EQ_SECTION_COUNT).rev().find(|s| live & (1 << s) != 0);
+        for section in (0..EQ_SECTION_COUNT).filter(|s| live & (1 << s) != 0) {
+            for lane in 0..W {
+                let index = lane + 2 * section + side + variant;
+                let words = if Some(section) == last {
+                    tail(index)
+                } else {
+                    tame(index)
+                };
+                channel.settle(section, lane, words);
+                if words.m2 != 0.0 {
+                    lane_set(&mut channel.sections[section].state.ic2, lane, 1.0e30);
+                }
+            }
+        }
+        channel
+    }
+
+    /// Masks of live sections: nothing, one (a cut, a band, the other cut), two, three, four, five
+    /// (the LPF last, and the HPF first), all six.
+    const LIVE: [u8; 11] = [
+        0b00_0000, 0b00_0001, 0b00_0100, 0b10_0000, 0b10_0001, 0b01_0110, 0b10_0110, 0b01_1110,
+        0b11_1101, 0b01_1111, 0b11_1111,
+    ];
+
+    fn sweep<L: Lane, const W: usize>(width: &str) -> Seen {
+        let mut seen = Seen::default();
+        type Table = fn(usize) -> EqSvfWords;
+        let pairs: [(Table, Table, bool); 5] = [
+            (tame, tame, true),
+            (tame, tame, false),
+            (tame, hot, true),
+            (hot, tame, true),
+            (hot, hot, true),
+        ];
+        for live in LIVE {
+            for (pair, &(left_tail, right_tail, loud)) in pairs.iter().enumerate() {
+                for variant in 0..3 {
+                    for frames in [1_usize, 16] {
+                        let tails = [left_tail, right_tail];
+                        let build = |side: usize| steered::<L, W>(live, tails[side], variant, side);
+                        let word = |side: usize| {
+                            move |frame: usize, lane: usize| {
+                                let index = frame + 3 * lane + 5 * side + variant;
+                                if loud {
+                                    LOUD[index % LOUD.len()]
+                                } else {
+                                    QUIET[index % QUIET.len()]
+                                }
+                            }
+                        };
+                        let left = plane::<W>(frames, word(0));
+                        let right = plane::<W>(frames, word(1));
+                        let label = format!(
+                            "{width} live {live:06b} pair {pair} variant {variant} frames {frames}"
+                        );
+                        for stationary in [true, false] {
+                            judge::<L, W>(
+                                &label, &build, &left, &right, frames, stationary, false, &mut seen,
+                            );
+                        }
+                        // Refused: one `-0.0`, then one `NaN`, on the right plane.
+                        for poison in [-0.0_f32, f32::NAN] {
+                            let mut refused = right.clone();
+                            refused[frames * W - 1] = poison;
+                            judge::<L, W>(
+                                &format!("{label} poisoned {poison}"),
+                                &build,
+                                &left,
+                                &refused,
+                                frames,
+                                true,
+                                false,
+                                &mut seen,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // The corpus bands (odd live counts of general bands) over admitted input scaled to the
+        // limit, some lanes holding huge restored integrators in a live band; and, quiet, over the
+        // same input scaled to `1e20` with no restored state.
+        for live in [0b00_0100_u8, 0b01_0110, 0b01_1110 | 0b00_0001] {
+            for seed in 0..6 {
+                let loud = seed < 4;
+                let build = |side: usize| {
+                    let targets = core::array::from_fn(|lane| {
+                        let mut bands = corpus::sections((lane + 3 * side) % corpus::LANES);
+                        for (section, band) in bands.iter_mut().enumerate() {
+                            band.enabled = live & (1 << section) != 0 && section != 0;
+                        }
+                        bands
+                    });
+                    let mut channel = Channel::<L, W>::new(targets, corpus::CORPUS_RATE)
+                        .expect("every corpus row is a legal design");
+                    for lane in (0..W).filter(|lane| loud && (lane + side + seed).is_multiple_of(3))
+                    {
+                        let section = 2 + (lane + seed) % 2;
+                        if live & (1 << section) != 0 {
+                            let state = &mut channel.sections[section].state;
+                            lane_set(&mut state.ic1, lane, f32::MAX);
+                            lane_set(&mut state.ic2, lane, -f32::MAX);
+                        }
+                    }
+                    channel
+                };
+                let frames = 64;
+                let word = |side: usize| {
+                    move |frame: usize, lane: usize| {
+                        let mut samples = [0.0_f32; corpus::FRAMES];
+                        corpus::fill(0, (lane + side + seed) % corpus::LANES, &mut samples);
+                        samples[frame] * if loud { 1.0e30 } else { 1.0e20 }
+                    }
+                };
+                let left = plane::<W>(frames, word(0));
+                let right = plane::<W>(frames, word(1));
+                let label = format!("{width} corpus live {live:06b} seed {seed}");
+                judge::<L, W>(&label, &build, &left, &right, frames, true, true, &mut seen);
+            }
+        }
+        seen
+    }
+
+    fn check<L: Lane, const W: usize>(width: &str) {
+        let seen = sweep::<L, W>(width);
+        println!("boundary fold {width}: {seen:?}");
+        assert!(seen.folded > 0 && seen.scanned > 0, "{width}: {seen:?}");
+        assert!(
+            seen.dual.iter().all(|&count| count > 0) && seen.mono.iter().all(|&count| count > 0),
+            "{width}: every combination of verdicts must occur: {seen:?}"
+        );
+        assert!(
+            [
+                seen.at,
+                seen.below,
+                seen.above,
+                seen.positive_infinity,
+                seen.negative_infinity,
+                seen.nan,
+            ]
+            .iter()
+            .all(|&count| count > 0),
+            "{width}: the folded blocks must store words at, just below and just above the limit, \
+             both infinities and NaN: {seen:?}"
+        );
+        assert!(
+            seen.designed.iter().all(|&count| count > 0),
+            "{width}: the corpus family must fold failing and passing blocks: {seen:?}"
+        );
+    }
+
+    #[test]
+    fn the_folded_verdict_is_the_boundary_scan() {
+        check::<f32, 1>("Scalar");
+        check::<Simd4, 4>("Simd4");
+        check::<Simd8, 8>("Simd8");
     }
 }
 

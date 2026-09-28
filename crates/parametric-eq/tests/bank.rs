@@ -2351,3 +2351,508 @@ fn a_cut_switched_off_keeps_the_bank_eliding() {
         );
     }
 }
+
+/// Tracks in the block-limit scenario. Track `t` and track `t + 4` share one voice (`t % 4`): the
+/// same configuration and the same input. A fault zeroes and resets a whole bank plane, so on a
+/// four-lane host both banks fault on exactly the blocks and planes the one eight-lane bank does,
+/// and the per-track digest does not depend on the bank width.
+const LIMIT_TRACKS: usize = 8;
+/// Blocks in the block-limit scenario.
+const LIMIT_BLOCKS: usize = 24;
+/// Voices in the block-limit scenario (see [`LIMIT_TRACKS`]).
+const LIMIT_VOICES: usize = 4;
+
+/// The configurations of [`admitted_blocks_over_the_block_limit_render_the_base_bits`], named by
+/// the stationary cascade's shape on an admitted block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LimitShape {
+    /// One live bell boosting 1 kHz by 18 dB: the cascade is one depth-one pass without selects.
+    HotBell,
+    /// The HPF, the boosting bell and a +12 dB high shelf: one depth-two pass, then the shelf alone.
+    HotThree,
+    /// The HPF and the boosting bell, then an LPF on some lanes of each channel through prepared
+    /// targets: the depth-one pass is the LPF, with dry lanes.
+    HotDryLpf,
+    /// Two boosting bells: one depth-two pass and no depth-one pass.
+    HotPair,
+    /// Nothing live: an admitted block runs no section, and its own words meet the limit.
+    NothingLive,
+    /// One live +6 dB bell whose integrators are restored huge but finite (`MAX`, `-MAX`), which
+    /// turns admitted input into infinities and `NaN` inside the cascade.
+    RestoredHuge,
+}
+
+const LIMIT_SHAPES: [LimitShape; 6] = [
+    LimitShape::HotBell,
+    LimitShape::HotThree,
+    LimitShape::HotDryLpf,
+    LimitShape::HotPair,
+    LimitShape::NothingLive,
+    LimitShape::RestoredHuge,
+];
+
+/// Enables general band `band` on both channels; the right channel is detuned, and so is each voice.
+fn limit_band(
+    values: &mut [effect_contract::InitialParameterValue],
+    band: usize,
+    kind: EqBandKind,
+    frequency: f32,
+    gain: f32,
+    voice: usize,
+) {
+    for channel in [ParameterChannel::Left, ParameterChannel::Right] {
+        let detune = if matches!(channel, ParameterChannel::Right) {
+            1.1
+        } else {
+            1.0
+        };
+        let base = band * 6;
+        set_initial(values, base, channel, 1.0);
+        set_initial(values, base + 1, channel, kind as u32 as f32);
+        set_initial(
+            values,
+            base + 2,
+            channel,
+            frequency * detune * (1.0 + voice as f32 * 0.05),
+        );
+        set_initial(values, base + 3, channel, gain);
+        set_initial(values, base + 4, channel, 0.8 + voice as f32 * 0.1);
+        set_initial(values, base + 5, channel, 1.0);
+    }
+}
+
+/// One voice's prepare-time values and its prepared cut targets: `(block, final values, changed)`.
+fn limit_configuration(
+    shape: LimitShape,
+    voice: usize,
+) -> (Vec<effect_contract::InitialParameterValue>, Vec<OddEvent>) {
+    use ParameterChannel::{Left, Right};
+    let mut initial = values();
+    let mut events = Vec::new();
+    match shape {
+        LimitShape::HotBell => {
+            limit_band(&mut initial, 0, EqBandKind::Bell, 1_000.0, 18.0, voice);
+        }
+        LimitShape::HotThree => {
+            for channel in [Left, Right] {
+                odd_cut(&mut initial, HPF_PARAMETERS, channel, voice);
+            }
+            limit_band(&mut initial, 0, EqBandKind::Bell, 1_000.0, 18.0, voice);
+            limit_band(&mut initial, 3, EqBandKind::HighShelf, 6_000.0, 12.0, voice);
+        }
+        LimitShape::HotDryLpf => {
+            for channel in [Left, Right] {
+                odd_cut(&mut initial, HPF_PARAMETERS, channel, voice);
+            }
+            limit_band(&mut initial, 1, EqBandKind::Bell, 1_000.0, 18.0, voice);
+            let mut channels = Vec::new();
+            if voice < 2 {
+                channels.push(Left);
+            }
+            if voice == 1 || voice == 2 {
+                channels.push(Right);
+            }
+            if !channels.is_empty() {
+                let mut target = initial.clone();
+                let mut changed = vec![false; target.len()];
+                for &channel in &channels {
+                    let lane = usize::from(matches!(channel, Right));
+                    for parameter in odd_cut(&mut target, LPF_PARAMETERS, channel, voice) {
+                        changed[parameter * 2 + lane] = true;
+                    }
+                }
+                events.push((0, target, changed));
+            }
+        }
+        LimitShape::HotPair => {
+            limit_band(&mut initial, 0, EqBandKind::Bell, 1_000.0, 18.0, voice);
+            limit_band(&mut initial, 2, EqBandKind::Bell, 3_000.0, 12.0, voice);
+        }
+        LimitShape::NothingLive => {}
+        LimitShape::RestoredHuge => {
+            limit_band(&mut initial, 0, EqBandKind::Bell, 1_000.0, 6.0, voice);
+        }
+    }
+    (initial, events)
+}
+
+/// Frames in block `block`: mostly one quantum, a ragged block every fifth, and one single frame.
+fn limit_frames(block: usize) -> usize {
+    match block {
+        9 => 1,
+        _ if block % 5 == 4 => 37,
+        _ => 128,
+    }
+}
+
+/// How loud plane `channel` of block `block` is: 0 cold (hostile small words), 1 warm (a `1e28`
+/// sine, inside the limit after every shape's gain), 2 hot (a `9e29` sine, outside it after a
+/// boost), 3 edge (the limit itself and its neighbours). The two planes differ, so a block can
+/// fault on the left only, on the right only, on both or on neither.
+fn limit_heat(block: usize, channel: usize) -> usize {
+    let left = [0, 2, 1, 2, 3, 0, 2, 3];
+    let right = [0, 0, 2, 2, 3, 1, 3, 1];
+    [left, right][channel][block % 8]
+}
+
+/// Admitted words at the limit and around it.
+const LIMIT_EDGE_WORDS: [f32; 6] = [1.0e30, -1.0e30, 9.999_999e29, -9.999_999e29, 1.0, 5.0e29];
+
+/// One input word for `(block, frame, voice, channel)`. Every word is admitted by the elision gate
+/// (finite, at most `1e30` in magnitude, never `-0.0`) except on block 13, which carries one `-0.0`,
+/// and block 21, which carries one `NaN`, on voice 0 of one plane: those refuse the bank's elision.
+fn limit_word(block: usize, frame: usize, voice: usize, channel: usize) -> f32 {
+    if voice == 0 && frame == 3 % limit_frames(block) {
+        if block == 13 && channel == 1 {
+            return -0.0;
+        }
+        if block == 21 && channel == 0 {
+            return f32::NAN;
+        }
+    }
+    let position = block * 128 + frame;
+    let phase = voice as f64 * 0.7 + channel as f64 * 1.9;
+    let sine = |amplitude: f64| -> f32 {
+        let value = (amplitude
+            * (core::f64::consts::TAU * 1_000.0 * position as f64 / 48_000.0 + phase).sin())
+            as f32;
+        // `+ 0.0` turns a `-0.0` into `+0.0`.
+        value + 0.0
+    };
+    match limit_heat(block, channel) {
+        1 => sine(1.0e28),
+        2 => sine(9.0e29),
+        3 => LIMIT_EDGE_WORDS[(frame + voice + channel) % LIMIT_EDGE_WORDS.len()],
+        _ => {
+            let mut state = ((block as u64) << 40)
+                ^ ((frame as u64) << 20)
+                ^ ((voice as u64) << 4)
+                ^ channel as u64
+                ^ 0x0999_0999_0999_0999;
+            let word = support::splitmix64(&mut state);
+            let sign = ((word >> 63) as u32) << 31;
+            match word & 15 {
+                0 => 0.0,
+                1 => f32::from_bits(sign | (((word >> 8) as u32 & 0x007f_ffff) | 1)),
+                _ => {
+                    let exponent = ((word >> 8) % 50) as u32 + 127 - 24;
+                    let mantissa = (word >> 16) as u32 & 0x007f_ffff;
+                    f32::from_bits(sign | (exponent << 23) | mantissa)
+                }
+            }
+        }
+    }
+}
+
+/// Sets both integrators of physical section `section` of one channel in a lane payload.
+fn plant_integrators(payload: &mut Payload, right: bool, section: usize, ic1: f32, ic2: f32) {
+    let lane = if right {
+        &mut payload.2
+    } else {
+        &mut payload.1
+    };
+    for (offset, value) in [(0, ic1), (1, ic2)] {
+        let word = section * support::WORDS_PER_BAND + offset;
+        lane[word * 4..word * 4 + 4].copy_from_slice(&value.to_bits().to_le_bytes());
+    }
+}
+
+/// `Some(right)` when voice 0 of [`LimitShape::RestoredHuge`] receives huge integrators in its
+/// live bell (physical section 1) before `block`: the left channel's, then the right one's.
+fn limit_restore(shape: LimitShape, block: usize) -> Option<bool> {
+    if shape != LimitShape::RestoredHuge {
+        return None;
+    }
+    // Each lands on a block whose plane is otherwise cold, so its fault is the restore's.
+    match block {
+        5 | 16 => Some(false),
+        8 | 17 => Some(true),
+        _ => None,
+    }
+}
+
+/// Fault counts of one shape: blocks that faulted the left plane only, the right plane only, and
+/// both, summed over tracks.
+type LimitFaults = [u64; 3];
+
+fn limit_tally(faults: &mut LimitFaults, left: u64, right: u64) {
+    match (left != 0, right != 0) {
+        (true, false) => faults[0] += 1,
+        (false, true) => faults[1] += 1,
+        (true, true) => faults[2] += 1,
+        (false, false) => {}
+    }
+}
+
+/// One leg of the block-limit scenario: its digest and its fault counts per shape.
+type LimitLeg = (String, Vec<LimitFaults>);
+
+/// The scalar leg of the block-limit scenario.
+fn limit_scalar_digest() -> LimitLeg {
+    let factory = ParametricEqFactory;
+    let mut hasher = Sha256::new();
+    let mut tallies = Vec::new();
+    for shape in LIMIT_SHAPES {
+        let mut faults = [0_u64; 3];
+        let configurations: Vec<_> = (0..LIMIT_TRACKS)
+            .map(|track| limit_configuration(shape, track % LIMIT_VOICES))
+            .collect();
+        let mut effects: Vec<_> = configurations
+            .iter()
+            .map(|(initial, _)| {
+                factory
+                    .prepare(request(initial, false))
+                    .expect("scalar prepare")
+            })
+            .collect();
+        let mut position = 0_u64;
+        for block in 0..LIMIT_BLOCKS {
+            let frames = limit_frames(block);
+            for (track, effect) in effects.iter_mut().enumerate() {
+                let voice = track % LIMIT_VOICES;
+                for (at, target, changed) in &configurations[track].1 {
+                    if *at == block {
+                        apply_prepared_targets(effect.as_mut(), target, changed);
+                    }
+                }
+                if let Some(right) = limit_restore(shape, block)
+                    && voice == 0
+                {
+                    let mut payload = snapshot(effect.as_ref());
+                    plant_integrators(&mut payload, right, 1, f32::MAX, -f32::MAX);
+                    effect
+                        .restore_state_payload(
+                            PARAMETRIC_EQ_DESCRIPTOR.state_layout_version,
+                            StatePayloadInput::new(
+                                &payload.0,
+                                &payload.1,
+                                &payload.2,
+                                effect.metadata().state_sizes,
+                            )
+                            .expect("state input"),
+                        )
+                        .expect("finite integrators restore");
+                }
+                let mut left: Vec<f32> = (0..frames)
+                    .map(|frame| limit_word(block, frame, voice, 0))
+                    .collect();
+                let mut right: Vec<f32> = (0..frames)
+                    .map(|frame| limit_word(block, frame, voice, 1))
+                    .collect();
+                let report = effect.process(
+                    EffectProcessBlock::new(&mut left, &mut right, None, position, &[], 128)
+                        .expect("scalar block"),
+                );
+                limit_tally(
+                    &mut faults,
+                    report.nonfinite_left_blocks,
+                    report.nonfinite_right_blocks,
+                );
+                fold_words(&mut hasher, left.into_iter().chain(right));
+                fold_report(&mut hasher, &report);
+                fold_payload(&mut hasher, &snapshot(effect.as_ref()));
+            }
+            position += frames as u64;
+        }
+        tallies.push(faults);
+    }
+    (hex(&hasher.finalize()), tallies)
+}
+
+/// The bank legs of the block-limit scenario, folded per track in track order. `mono` renders the
+/// collapsed body over the left plane.
+fn limit_bank_digest(width: BankWidth, backend: Backend, mono: bool) -> LimitLeg {
+    let lanes = width.lanes() as usize;
+    assert_eq!(LIMIT_TRACKS % lanes, 0, "the scenario fills whole banks");
+    let factory = ParametricEqFactory;
+    let mut hasher = Sha256::new();
+    let mut tallies = Vec::new();
+    for shape in LIMIT_SHAPES {
+        let mut faults = [0_u64; 3];
+        let configurations: Vec<_> = (0..LIMIT_TRACKS)
+            .map(|track| limit_configuration(shape, track % LIMIT_VOICES))
+            .collect();
+        let mut banks: Vec<_> = configurations
+            .chunks(lanes)
+            .map(|group| {
+                let requests: Vec<_> = group
+                    .iter()
+                    .map(|(initial, _)| request(initial, false))
+                    .collect();
+                factory
+                    .bind_homogeneous_bank(PrepareEffectBankRequest {
+                        backend,
+                        width,
+                        requests: &requests,
+                    })
+                    .expect("valid bank request")
+                    .expect("the native width must bind")
+            })
+            .collect();
+        let offsets = vec![0_u32; lanes + 1];
+        let mut position = 0_u64;
+        for block in 0..LIMIT_BLOCKS {
+            let frames = limit_frames(block);
+            for (group, bank) in banks.iter_mut().enumerate() {
+                assert!(!mono || bank.supports_mono_collapse());
+                for lane in 0..lanes {
+                    let track = group * lanes + lane;
+                    for (at, target, changed) in &configurations[track].1 {
+                        if *at == block {
+                            apply_prepared_targets_lane(
+                                bank.as_mut(),
+                                lane,
+                                48_000,
+                                target,
+                                changed,
+                            );
+                        }
+                    }
+                    if let Some(right) = limit_restore(shape, block)
+                        && track.is_multiple_of(LIMIT_VOICES)
+                    {
+                        let mut payload = snapshot_bank(bank.as_ref(), lane as u32);
+                        plant_integrators(&mut payload, right, 1, f32::MAX, -f32::MAX);
+                        let sizes = bank.metadata().program_key.state_sizes;
+                        bank.restore_track_state_payload(
+                            lane as u32,
+                            PARAMETRIC_EQ_DESCRIPTOR.state_layout_version,
+                            StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes)
+                                .expect("state input"),
+                        )
+                        .expect("finite integrators restore");
+                    }
+                }
+                let plane = |channel: usize| -> Vec<f32> {
+                    (0..frames * lanes)
+                        .map(|cell| {
+                            let track = group * lanes + cell % lanes;
+                            limit_word(block, cell / lanes, track % LIMIT_VOICES, channel)
+                        })
+                        .collect()
+                };
+                let mut left = plane(0);
+                let mut right = if mono {
+                    vec![f32::from_bits(0x7F7F_FFFF); frames * lanes]
+                } else {
+                    plane(1)
+                };
+                let process = EffectBankProcessBlock::new(
+                    &mut left,
+                    &mut right,
+                    None,
+                    frames as u32,
+                    width,
+                    position,
+                    &[],
+                    &offsets,
+                    128,
+                )
+                .expect("bank block");
+                let report = if mono {
+                    bank.process_bank_mono(process)
+                } else {
+                    bank.process_bank(process)
+                };
+                for lane in 0..lanes {
+                    let column = |plane: &[f32]| -> Vec<f32> {
+                        (0..frames)
+                            .map(|frame| plane[frame * lanes + lane])
+                            .collect()
+                    };
+                    let entry = &report.reports[lane];
+                    if mono {
+                        limit_tally(&mut faults, entry.nonfinite_left_blocks, 0);
+                        fold_words(&mut hasher, column(&left).into_iter());
+                    } else {
+                        limit_tally(
+                            &mut faults,
+                            entry.nonfinite_left_blocks,
+                            entry.nonfinite_right_blocks,
+                        );
+                        fold_words(&mut hasher, column(&left).into_iter().chain(column(&right)));
+                    }
+                    fold_report(&mut hasher, entry);
+                    fold_payload(&mut hasher, &snapshot_bank(bank.as_ref(), lane as u32));
+                }
+            }
+            position += frames as u64;
+        }
+        tallies.push(faults);
+    }
+    (hex(&hasher.finalize()), tallies)
+}
+
+/// The digests [`admitted_blocks_over_the_block_limit_render_the_base_bits`] pins, recorded on the
+/// unmodified base of issue #999 (every block's §4.4 verdict still a separate scan of the planes).
+const LIMIT_DIGESTS: [(&str, &str); 3] = [
+    (
+        "scalar",
+        "69929ee05f9192faebe174ef7a6d48a5de4abd584e18e1a4834ec0913b4a7c95",
+    ),
+    (
+        "bank",
+        "033bb41c2daae4fcc72b4cc61e62ce74e298cbb0234479be41fbf4f40518ff0c",
+    ),
+    (
+        "bank-mono",
+        "0da773b7d5ee458d4175f31b1523a035673dc39c6dc8c16eb5f425335864e289",
+    ),
+];
+
+/// Issue #999 gate 2: admitted stationary blocks whose output crosses the §4.4 block limit render
+/// the bits, reports and states they rendered when every verdict was a separate scan of the planes.
+///
+/// Through the public API only, 24 blocks of input that every elision leg admits but whose output
+/// the boost carries past `1e30` on some planes and not others (left only, right only, both,
+/// neither), plus the limit itself and its neighbours: one live bell (a depth-one pass without
+/// selects), three live sections (a pair, then the depth-one pass), an LPF with dry lanes as the
+/// depth-one pass, two live bells (a pair and nothing after it), nothing live (the words themselves
+/// meet the limit), and a bell restored with huge finite integrators, which turns admitted input
+/// into infinities and `NaN`. Ramped blocks (the LPF's prepared target), a `-0.0` and a `NaN` refuse
+/// the elision where they land. Every output word, every report and every lane's state payload
+/// after every block, one SHA-256 per leg (scalar, bank, bank-mono).
+///
+/// Non-vacuity: every shape but nothing-live faults a plane alone on the left and alone on the
+/// right; nothing-live and the restored bell fault.
+#[test]
+fn admitted_blocks_over_the_block_limit_render_the_base_bits() {
+    let mut legs = vec![("scalar", limit_scalar_digest())];
+    if let Some((width, backend)) = native_bank() {
+        legs.push(("bank", limit_bank_digest(width, backend, false)));
+        legs.push(("bank-mono", limit_bank_digest(width, backend, true)));
+    }
+    for (leg, (digest, faults)) in &legs {
+        println!("block-limit digest {leg} {digest}");
+        println!(
+            "block-limit faults {leg} (left only, right only, both) {faults:?} (shapes {LIMIT_SHAPES:?})"
+        );
+    }
+    for (leg, (_, faults)) in &legs {
+        for (shape, [left, right, both]) in LIMIT_SHAPES.iter().zip(faults) {
+            assert!(
+                left + right + both > 0,
+                "non-vacuity: the {leg} leg's {shape:?} shape must fault a plane"
+            );
+            if *leg != "bank-mono"
+                && !matches!(shape, LimitShape::NothingLive | LimitShape::RestoredHuge)
+            {
+                assert!(
+                    *left > 0 && *right > 0,
+                    "non-vacuity: the {leg} leg's {shape:?} shape must fault each plane alone"
+                );
+            }
+        }
+    }
+    for (leg, (digest, _)) in &legs {
+        let pinned = LIMIT_DIGESTS
+            .iter()
+            .find(|(name, _)| name == leg)
+            .map(|(_, pin)| *pin)
+            .expect("every leg is pinned");
+        assert_eq!(
+            digest, pinned,
+            "#999 gate 2: the {leg} leg moved a bit, a report or a state word"
+        );
+    }
+}

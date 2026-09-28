@@ -311,3 +311,38 @@ Gate 2 is green under M2, M3 and M4 (a switched-off band's frozen state is alway
 under M1-M3 (the fixtures never restore a sub-`FLUSH_EPS` or `-0.0` word); each row is caught by the
 gate built for it. On the unmodified base gate 2 reports 0 of 9 at every width and section, in dev
 and release; after the change, 9 of 9.
+
+## Issue #999 — the §4.4 verdict folded into the depth-one pass
+
+`interleave` and `interleave_mono` run the depth-one tail through the bounded twins of its kernels
+and return its per-channel verdict; `render` and `render_mono` use it instead of `check_block`, and
+every other block (ramped, refused, all-live, an even live count, nothing live) still scans. Gate 1
+is `boundary_fold::the_folded_verdict_is_the_boundary_scan` (in-crate: the verdict equals
+`check_block` of the rendered planes on every folded block, and only an admitted odd list folds, at
+`f32`, `Simd4` and `Simd8`, dual and mono). Gate 2 is
+`admitted_blocks_over_the_block_limit_render_the_base_bits` (`tests/bank.rs`; pinned on the
+unmodified base `fc43c97d`: scalar `69929ee0…`, bank `033bb41c…`, bank-mono `0da773b7…`, identical in
+dev and release), beside the #976-#979 scenarios. Driver: one mutation at a time as an exact-text
+replacement in a scratch copy of the change, then, release,
+`cargo test -p lane --test g2_kernel_identity g2_bounded`, `cargo test -p parametric-eq --lib
+boundary_fold` and `cargo test -p parametric-eq --test bank`, restored between rows. Host AMD EPYC
+7313P, rustc 1.97.1, `x86-64-v3`.
+
+| # | mutation | gate that goes red | result |
+|---|---|---|---|
+| 999-M1 | `lane`: the fold ignores the second stream | lane gate; gate 1 `Scalar live 000001 pair 0 variant 2 frames 16 dual: kept 1: the folded verdict is not the scan` (`[true, true]` against `[true, false]`); gate 2 non-vacuity (no right-only fault), digests scalar `914a4db8…`, bank `e301d357…` | RED |
+| 999-M2 | `lane`: the fold compares with `<=` | lane gate; gate 1 `Scalar live 000001 pair 0 variant 0 frames 1 dual: kept 1` (`[true, true]` against `[false, true]`) | RED |
+| 999-M3 | `interleave`: a refused or all-live block (the masked pairs) takes a verdict of `[true, true]` | gate 1 `Scalar live 000000 pair 0 variant 0 frames 1 poisoned -0 dual: kept 6, stationary true: only an admitted list ending in the depth-one pass folds the verdict`; gate 2 scalar `8cde7a90…`, bank `c81dfdae…`; and the #976 (`956e94ab…`), #977, #978 (`17748e17…`) and #979 (`e47ca081…`) scenarios | RED |
+| 999-M3m | the same in `interleave_mono` (`Some(true)`) | gate 1 `Simd4 live 111111 pair 0 variant 0 frames 1 mono: kept 6`; the bank-mono leg of all five scenarios (gate 2 `7ba20ee8…`) | RED |
+| 999-M4 | `interleave`: a plan with no live section takes a verdict of `[true, true]` | gate 1 `Scalar live 000000 pair 0 variant 0 frames 1 dual: kept 0`; gate 2 scalar `99dc6ad1…`, bank `edf60b47…` (the nothing-live shape's `1e30` words are no longer zeroed) | RED |
+| 999-M5 | `interleave`: the dry-lane tail judges against `f32::INFINITY` instead of `BLOCK_LIMIT` | gate 1 `Scalar live 000001 pair 0 variant 0 frames 1 dual: kept 1` (`[true, true]` against `[false, true]`); gate 2 non-vacuity (the dry-LPF shape faults no plane alone), digests scalar `2f36e7b8…`, bank `bd32c51c…` | RED |
+
+M1-M3 are the brief's three rows; M3m, M4 and M5 are added. M2 moves no public-API digest: no
+scenario stores a word exactly at `1e30` on a folded block (the nothing-live shape's `1e30` words are
+scanned, not folded), so gate 1's scale sections are its gate. The lane gate is green under M3-M5,
+which are EQ-side rows.
+
+Re-run on attempt 2 (the verdict folded into a per-stream `bool`, merged onto the batch head
+`07e0f45f`), each alone in a scratch copy, release: M1-M5 and M3m red on the same gates and first
+messages as above (M1: lane gate, gate 1, gate 2 non-vacuity; M2: lane gate and gate 1; M3/M3m:
+gate 1 and all five pinned scenarios; M4: gate 1 and gate 2; M5: gate 1 and gate 2 non-vacuity).
