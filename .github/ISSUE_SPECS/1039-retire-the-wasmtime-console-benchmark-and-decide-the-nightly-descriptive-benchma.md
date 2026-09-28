@@ -135,3 +135,273 @@ See `../VERIFY-DEAD-CODE.md`, finding F12. The recommendation stands, with one m
    with `converted subject is missing`. The draft must edit that list, and its "never shrinks"
    comment, with an explicit reason, and update `scripts/test-bench-policy.sh`'s cases that write
    into those files.
+
+## Attempt 1 evidence
+
+Terra, attempt 1. Branch `codex/1039-retire-wasmtime-console-bench` from the batch-2 head
+`52016391`; implementation commit `9530ee3d`. Every comparison below is against `52016391`. No timed
+workload was launched.
+
+### Decision: the nightly descriptive benchmarks are retired
+
+The owner ruling retires them "if nothing actively uses them". Nothing does:
+
+- The five runners are named only by `nightly.yml`'s `benchmark` job (`git grep`, outside closed
+  specs).
+- They assert no threshold, and nothing downloads the `conformance-benchmark` upload: the only
+  `download-artifact` steps fetch `audioworklet-*` and `engine-sdk-qualify-*`.
+
+### One deviation from the body: `bench conformance` is deleted, not kept
+
+The body keeps the `bench conformance` subject because "audit-native's `check-effect-contract.sh`
+runs the first two as conformance gates". That premise is wrong for `conformance`:
+
+- `check-effect-contract.sh:76` runs `bench effect-contract --conformance`. Its failure text, "bench
+  conformance output", names that mode, not the `conformance` subject.
+- `bench conformance` (`tools/bench/src/conformance.rs`) is a timed descriptive benchmark of two
+  conformance primitives (fixture decode with CRC32C, and the f32-to-f64 compare). Only
+  `run-conformance-benchmark.sh` launched it.
+
+So it is one of the nightly descriptive benchmarks the ruling retires. The two subjects that are
+real gates stay whole as gates:
+
+- `bench effect-contract --conformance` and `--audit`;
+- `audit realtime --audit` and `--probe`.
+
+Only their timing modes went, because only the retired runners passed them. Then the compiler
+proved the rest dead:
+
+| removed | only caller | then flagged dead by `cargo check` and removed |
+|---|---|---|
+| `bench effect-contract --benchmark-two-rounds` | `run-effect-contract-benchmark.sh` | `benchmark()`, `NoopBank` and its `PreparedNativeEffectBank` impl, `metadata()`, `project_metadata()` and its one test |
+| `audit realtime --benchmark-rounds` (`Mode::Benchmark`) | `run-realtime-benchmark.sh` | `RoundEvidence::elapsed` with its `Instant`, and all of `tools/audit/src/record.rs` (its three helpers had no other caller once `fp_env.rs` went) |
+
+`audit fp-env` guarded no live claim. It measured the guard's cost, with no threshold. The #146
+record that backs "negligible" stays at `artifacts/issue146/`, which `lane/src/fpenv.rs:75` cites.
+The FP environment itself stays guarded by `lane --test fp_env`, `capi --lib fp_environment` and
+`host-core --test fp_environment`.
+
+The retired entry points now refuse:
+
+- `bench session` and `bench conformance` print the usage `bench <console|effect-contract|protocol>`
+  and exit 2;
+- `audit fp-env` prints the usage and exits 2;
+- `bench effect-contract --benchmark-two-rounds` prints the usage and exits 2;
+- `audit realtime --benchmark-rounds 2` panics with "unknown argument", as any unknown argument
+  already did.
+
+### What was deleted, and what it covered
+
+| category | files | lines removed | lines added | bytes removed |
+|---|---:|---:|---:|---:|
+| wasmtime console tool and scripts | 8 | 2,421 | 0 | 124,317 |
+| nightly runners and subjects (`tools/bench`, `tools/audit`, 5 runners) | 13 | 1,733 | 6 | 66,877 |
+| `artifacts/` (15 folders) | 117 | 1,902 | 0 | 4,199,320 |
+| CI, policy, docs and manifests | 15 | 210 | 112 | 15,268 (10,655 added) |
+| **total** | **153** | **6,266** | **118** | **4,405,782** |
+
+Code and scripts alone: 4,364 lines removed, 206,462 bytes.
+
+- **Wasmtime console** (Cranelift ahead-of-time on wasmtime 47.0.3, not V8; broken since
+  2026-09-01):
+  - `tools/wasm-console` (823 + 37 lines) and `tools/wasm-console-guest` (271 + 23);
+  - `scripts/operator/run-wasm-console-benchmark.sh` (496) and
+    `preflight-wasm-console-benchmark.sh` (269);
+  - `scripts/wasm-console-benchmark-validator.jq` (225) and `scripts/test-wasm-console-benchmark.sh`
+    (277).
+  - It covered 29 named arms and a default, the #183 W4/W8 leg, and the
+    `comparable_with_console_records: false` wasm record family.
+- **Nightly benchmarks:**
+  - `run-conformance-benchmark.sh`, `run-realtime-benchmark.sh`, `run-session-benchmark.sh`,
+    `run-effect-contract-benchmark.sh` and `run-fp-environment-benchmark.sh` (269 lines);
+  - `tools/bench/src/session.rs` (514; the #004 parse and compile timing of 256 tracks);
+  - `tools/bench/src/conformance.rs` (435);
+  - `tools/audit/src/fp_env.rs` (178) and `tools/audit/src/record.rs` (43);
+  - the timing branches of `effect_contract.rs` (-225, +4) and `realtime.rs` (-52, +1).
+- **CI:**
+  - the lint step "Wasm console benchmark validator mutation tests";
+  - the nightly `benchmark` job (about 30 minutes a night);
+  - the nightly step "Wasm console benchmark guest compiles for Wasm", with `math-sweeps`'s wasm32
+    target install (the job is renamed "math exhaustive sweeps");
+  - the two `--exclude wasm-console*` in `test-debug-a`.
+
+### The 21 runner-named artifact folders: 15 deleted, 6 kept
+
+**Method.** For each of the 21 folders from #1030's hand-off, a scanner looked for `artifacts/<name>`
+in every tracked file, expanding brace lists (`round2-{comp,…}`). A second pass matched bare names
+(`-w`). Then the bodies of the 107 open issues (`gh issue list --state open`) were scanned for the
+same names.
+
+**The rule applied.** A folder stays if any tracked file outside the deleted set cites it, a kept
+sealed record included, iterated to a fixed point. This is stricter than #1030's README rule, which
+counts only live citers. Under that rule, `issue182`, `round2-comp` and `round2-comp-baseline`
+would also go: 3 more folders, 30 files, 828,923 bytes. That call is root's.
+
+**Kept (6 folders, 57 files, 2,032,550 bytes):**
+
+| folder | cited by |
+|---|---|
+| `mono2` | `docs/handoffs/dual-mono-2026-09-27/DUAL-MONO.md:363`, which takes its wasm number from `mono2/README.md`. #1031 keeps that note (checked on `codex/1031-prune-handoffs`), and open #972-#975 and #987 cite it. |
+| `mono3`, `mono3-baseline` | `crates/rack/tests/MUTATIONS.md:271`: "the sealed `--mono3` pair measured it at +39-42%". This bare arm name was missed by #1030's path scan, and `crates/` cannot change here (gate 3). |
+| `issue182` | the kept, ruling-cited `artifacts/compressor-round1/README.md:31` ("the cause … `artifacts/issue182/README.md` records"). |
+| `round2-comp` | the kept `artifacts/mono3/README.md:29` ("for the reason `artifacts/round2-comp/README.md` records"). |
+| `round2-comp-baseline` | the kept `artifacts/round2-comp/README.md:23,116` (its paired arm). |
+
+**Deleted (15 folders, 117 files, 4,199,320 bytes):** `audit-chain-merge{,-baseline}`,
+`round2-{eqrack,lane,lim}{,-baseline}`, `round2-composed` and `strip{1,2,3}{,-baseline}`.
+
+- On the base tree, their only path citers were the two operator scripts this change deletes. On
+  HEAD, the scanner finds none.
+- Bare names appear only in deletion lists and descriptions: the dead-code drafts and the #1022,
+  #1030 and #1039 specs.
+- No open issue body names any of them.
+
+### Ratchets and counts, updated honestly
+
+- **`timed_subjects`** (`check-bench-policy.sh`) goes from three to one. `fp_env.rs` and
+  `wasm-console/src/main.rs` leave with their benchmarks. No surviving file under `tools/` calls
+  `timing::timed` except `console.rs`, so no slot can be refilled. The ratchet comment says so.
+  `test-bench-policy.sh`'s three `later-timed-*` cases now target `console.rs`, renamed
+  `timed-*`.
+- **Unsafe owners under `tools/`** go from six to five: `wasm-console-guest` left the list in
+  `check-bench-policy.sh`, `check-realtime-policy.sh` and `test-bench-policy.sh` (counts 6 to 5).
+- **Release shape:** the cdylib set goes from four to three (`capi`, `host-web`,
+  `wasm-gate-guest`). The self-test's "missing crate" mutation now removes `wasm-gate-guest`.
+- **Env vocabulary:** 68 names become 67. `MISO_ENGINE_BENCH_RUNTIME_OR_BROWSER` was set only by
+  the realtime and FP-environment runners and read only by the deleted record paths.
+- **#557 rule removed.** Its two subjects (`session.rs`, `conformance.rs`) are gone. The mutation
+  cases that wrote into those files now write into `tools/bench/src/protocol.rs`, and the two #557
+  cases are dropped.
+  - **Follow-up, not done:** `bench-support`'s `sysinfo::HostToolchainFacts`,
+    `physical_core_count` and `json::json_string_array` now have no caller outside `bench-support`.
+  - They are public items of a library, so the compiler cannot prove them dead.
+  - The spec limits this change to what compile proves, so they stay.
+
+### Gates
+
+Gates 1 to 5 and the policy run below were taken on the tree before four of the kept folders were
+restored. The amend that restored them changed only `artifacts/`. The artifact-sensitive checks
+were then run again on the amended commit.
+
+1. **Native and wasm build.** All pass, with zero warnings in the check logs:
+   - `cargo check --locked --workspace --all-targets --all-features`;
+   - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`;
+   - `RUSTFLAGS='-C target-feature=+simd128' cargo check --locked --target wasm32-unknown-unknown -p host-web`;
+   - `CARGO_PROFILE_RELEASE_PANIC=unwind cargo check --locked --release --workspace --all-targets`
+     (the release-shape job);
+   - `cargo fmt --all -- --check`.
+2. **Console digests.** `gain_pan_profile digests` gives 17 rows on base and change, byte-identical
+   (the row file's SHA-256 is `dd0e7194…` on both). The change run recompiled nothing.
+   `tools/console-workload` is untouched.
+3. **Shipped artifact unchanged.**
+   - `git diff --stat 52016391 HEAD -- crates hosts` is empty.
+   - `cargo tree --locked -p host-web --target wasm32-unknown-unknown -e normal` is identical on
+     base and change.
+   - `Cargo.lock` loses only the two workspace-member entries. `wasmtime` stays, for `wasm-gates`.
+4. **CI routing.** All pass:
+   - `check-release-shape.py` and `--self-test`;
+   - `check-bench-policy.sh` and `test-bench-policy.sh`;
+   - `check-ci-path-routing.py` and `test-ci-path-routing.py`.
+
+   `failure-notice` was checked by parsing `nightly.yml`:
+   - its `needs:` equals the six remaining jobs;
+   - every `*_RESULT` env maps to one of them;
+   - the body has six rows, in job order, with seven `%s` for seven arguments.
+
+   The `verdict` table is untouched (no hunk in `qualification.yml` touches it).
+   `ci-path-router.py --flags` on `52016391..HEAD` gives `route=full`, `math_closure=true` and
+   `release_inputs=true`. `math_closure` comes from `Cargo.toml` and `Cargo.lock`, which dropping
+   two members must change. actionlint and shellcheck are not installed on this host, so neither
+   ran.
+5. **No live claim lost.**
+   - `bash scripts/check-effect-contract.sh target/release/bench` passes (8 production factories;
+     `launch_failed_gates: 0`).
+   - So do the other audit-native uses of the two kept subjects:
+     - `test-realtime-audit-probes.sh realtime` (7 operations);
+     - `trace-realtime-audit.sh … 1000000`;
+     - `trace-effect-contract-audit.sh … 1000000`;
+     - `cargo test --locked --release -p audit -p bench` (42 and 18 passed).
+   - `cargo test --locked --workspace --all-targets --all-features -- --list` goes from 2,260
+     tests to 2,252. All 8 removed tests belong to a deleted subject or runner path:
+
+| removed test (`bench` bin) | claim | where it stands now |
+|---|---|---|
+| `conformance::tests::percentile_is_nearest_rank_and_escape_is_json_safe` | shared percentile and escaper | `bench-support` `stats::tests::*` (8) and `json::tests::*` (7) |
+| `conformance::tests::shared_host_toolchain_facts_preserve_conformance_projection` | the deleted record's projection | removed with the record; the collector keeps `sysinfo::tests::*` (13) |
+| `conformance::tests::metadata_command_projection_preserves_empty_status_and_unknown_failures` | the deleted record's command projection | removed with the record |
+| `conformance::tests::workspace_dirty_projection_preserves_clean_dirty_and_unavailable_states` | the deleted record's `workspace_dirty` field | removed with the record |
+| `session::tests::percentile_and_sha256_are_contract_stable` | shared percentile and digest | `stats::tests::*` and `digest::tests::matches_the_published_vectors` |
+| `session::tests::representative_fixture_has_the_frozen_workload_and_stable_bytes` | the deleted session benchmark's workload | removed with the benchmark |
+| `session::tests::shared_host_toolchain_facts_preserve_session_projection` | the deleted record's projection | removed with the record |
+| `effect_contract::tests::metadata_projection_replaces_quotes_without_changing_other_bytes` | the deleted `--benchmark-two-rounds` record's metadata | removed with the mode |
+
+`tools/wasm-console` and `tools/wasm-console-guest` had no tests (0 base entries).
+
+**Brief's extra gates, and every policy script.** 75 of 75 pass on the implementation commit. The
+Python ones ran with `python3 -B`. The list is the lint job's whole hermetic list:
+
+- `test-web-audioworklet.mjs`;
+- the workspace, session, env-vocabulary, bench, test-support and script-reachability policies,
+  each with its mutation suite (`test-script-reachability.py`: 18 cases);
+- the console-fixture check, `test-builtins-fixtures.sh`, `check-bench-preconditions.sh` and
+  `test-console-benchmark.sh`;
+- the host-core, protocol-control, realtime, realtime-audit-leak, artifact-evidence-leak, lane,
+  rack, builtins, graph, effect-runtime (with its fixtures), native-pcm-runner and
+  conformance-boundaries policies, each with its mutation suite, and
+  `test-realtime-trace-validator.sh`;
+- the unfused seal and its self-test;
+- `check-step-vocabulary.py` and `--self-test`;
+- `check-parametric-eq-render-contract.sh`;
+- `check-release-shape.py` and `--self-test`;
+- `test-npm-publish-modes.py` and `check-stem-store-v1.mjs`.
+
+Beyond that list, these also pass:
+
+- `check-ci-path-routing.py` and `test-ci-path-routing.py`;
+- `check-dsp-research.sh`, `test-dsp-research.sh` and `check-builtins-listening.sh`;
+- the command-kind and command-reason vocabularies, each with `--self-test`;
+- `check-parameter-metadata-v1.py --self-test`, `check-session-map-shape.py`, and
+  `check-sdk-deletions.py` with `--self-test`;
+- `check-abi-layout-v1.py --self-test` and `check-web-audioworklet-callgraph.py --self-test`;
+- `test-gate-lib.sh`, `test-protocol-benchmark.sh`,
+  `test-native-vectorization-report.sh target/release/audit`, `test-wasm-realtime-atomics.sh` and
+  `check-capi-abi.sh --self-test`;
+- `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`.
+
+After the six folders were restored, the artifact-sensitive checks were run again, and all pass:
+artifact-evidence-leak with its suite, script reachability, CI routing, `check-dsp-research.sh`,
+`check-bench-preconditions.sh`, step vocabulary and workspace policy.
+
+Not run:
+
+- the browser and Playwright gates, `check-web-audioworklet.sh` and the artifact build, because no
+  input to them changed (gate 3);
+- the full `cargo test --workspace`. Only `tools/bench` and `tools/audit` changed; their release
+  tests ran, and every other package's test list is identical.
+
+### Notes for root
+
+- **Merging with the parallel branches** (`git merge-tree` against this commit).
+  - #1029, #1030 and #1031 merge cleanly.
+  - #1033 conflicts in four files:
+    - `check-bench-policy.sh`, `check-realtime-policy.sh` and `test-bench-policy.sh`: delete both
+      rows (native-pcm-runner and wasm-console-guest), which leaves four unsafe owners;
+    - `tools/audit/src/main.rs`: drop `fp_env`, `record` and `source_fixture`.
+  - **Silent edits.** Both branches make three identical edits, so git applies each once with no
+    conflict, and each leaves a wrong number. Each is caught by its own suite, but should be set by
+    hand:
+    - `test-bench-policy.sh`'s three count cases (6 to 5) must read 4;
+    - the "these five files … A sixth file" comment in `check-bench-policy.sh` must read four and
+      fifth;
+    - `test-env-vocabulary.sh`'s count (68 to 67) must read 66.
+  - #1049 conflicts in `nightly.yml`'s `failure-notice`: keep #1049's `full-size-tests` row, env
+    and argument, and drop `benchmark` and `BENCHMARK_RESULT`.
+  - #1059 gets modify/delete conflicts on the two wasm-console sources: resolve by deleting them.
+  - #1061's conflict (`scripts/test-web-audioworklet.mjs`) exists against the base `52016391`
+    already, and is not from this branch.
+- **`AGENTS.md:147`** still lists "the descriptive benchmarks" among `nightly.yml`'s jobs. It is now
+  stale. It was not edited, because it is the instruction file; the owner or root should amend it.
+- **CI cost:**
+  - `route=full` and `math_closure=true`, because of `Cargo.toml` and `Cargo.lock`.
+  - Nightly loses about 30 minutes (the `benchmark` job) and the guest check.
+  - Lint loses one step.
