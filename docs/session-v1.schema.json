@@ -33,7 +33,7 @@
     "unit": { "enum": ["db", "hz", "milliseconds", "samples", "linear", "ratio"] },
     "render_profile": {
       "type": "object", "additionalProperties": false, "required": ["id", "mode"],
-      "properties": { "id": { "$ref": "#/$defs/id" }, "mode": { "enum": ["single_thread", "dependency_waves"] } }
+      "properties": { "id": { "$ref": "#/$defs/id" }, "mode": { "const": "single_thread" } }
     },
     "output_profile": {
       "type": "object", "additionalProperties": false, "required": ["id", "channels", "sample_format"],
