@@ -715,3 +715,136 @@ The detector loop is unchanged at 129.
   and a V8 run 50 s.
 * **Scratch commits.** The code commit was made off-branch in the scratch worktree first. The branch
   was fast-forwarded to it after gate 7 passed.
+
+## Sol attempt 1 verdict: PASS
+
+Sol, 2026-09-28. I judged `94fc8675` (code `bbdf6822`) merged onto the current batch head
+`27cf2413`. The batch head moved during the review: it now adds #999 (the EQ and `lane` kernels)
+after `d09d5024`, the head the branch had merged. The merge is clean and was made in scratch only.
+Host AMD EPYC 7313P, cpu 31 under the timing lock, `CARGO_INCREMENTAL=0`. Nothing was pushed, and
+all scratch worktrees and target directories were deleted.
+
+### The questions
+
+1. **Exactness: class A holds everywhere I could reach.**
+   * **My own differential against the #1013 kernel.** I built the diagnosis rig on `bfec4bba` and
+     on `bbdf6822`, and gave it a second generator of my own beside #990's.
+     * My generator draws every launch rate, blocks of 1-256 frames (half of them variable), and
+       lookaheads concentrated at the thresholds: 0, 0.67, 5, 9.8-9.99 and 10 ms.
+     * It draws symmetric and asymmetric channel windows under `Maximum` and `DualMono`, plus
+       ragged and partial banks.
+     * It draws retargets of one channel (unlink) and of both, resets, and desymmetrize and
+       mono-collapse runs.
+     * It restores the whole bank with the van Herk phase moved to 0, 1, 31-33, `Wb - 1`, near
+       `N`, or out of range (refused by both arms), sometimes with a new prefix.
+     * It draws hostile audio: NaN, ±inf, `±1e30`, `-0.0`, subnormals and limit-edge words.
+     * Every block folds every output word, report, payload, observation and restore verdict.
+   * **Coverage, all identical.**
+
+     | build | scenarios |
+     |---|---|
+     | Native release, per width (W8, W4, scalar) | 140,000 of mine and 140,000 of #990's at 96 blocks, plus 7,000 of mine at 1,000 blocks |
+     | Native dev (overflow checks and `debug_assert`s on) | 7,000 per width, plus 4,200 of #990's at W8 |
+     | V8, the rig built for wasm32 with simd128 (W4 and scalar) | 56,000 of mine and 28,000 of #990's |
+
+   * **The fuzz discriminates the new paths.** Each of these mutations of the change is red in
+     every 2,000-seed chunk, at W8 and at scalar:
+     * the epilogue reading the wrong oldest slot;
+     * the right channel's `+inf` preset removed;
+     * the wrapped expiring stream shifted by one slot (wrong words, not a panic);
+     * the wrapped newest stream shifted by one slot (a panic).
+     The right-preset mutant built for wasm fails 52 of 200 scenarios at W4 and 100 of 200 at
+     scalar.
+   * **M12 is equivalent under my fuzz too.** With the walk also running under
+     `DISPATCH_RAMPING`, 70,000 scenarios of each generator at each width stay identical. That is
+     proof 3 (the passes commute, with each ramp advanced in its own pass) tested with ramps
+     actually moving.
+   * **The proofs check out against the code.**
+     * The cut gives `steady + 1 <= Wb - phase <= Wb` by itself, so facts 2 and 4 hold at any
+       window, not only at `Wb >= 32`.
+     * `phase < Wb` is enforced by restore (`phase as usize >= window` is refused) and kept by
+       every advance.
+     * Every slice in `linked_steady_streams` is in range under its three preconditions.
+2. **The ramping arm is token-identical.** I tokenised the arm myself, with comments and
+   whitespace ignored.
+   * It is the base's segment loop body, 581 tokens, followed by `run`.
+   * With the arm substituted back, the whole function differs from the base only by the two
+     `targets_*` declarations (24 tokens).
+   * The +2 % allowance therefore applies.
+3. **Codegen.**
+   * **The stream loop.** At `Simd8` and at `Simd4` it is 23 instructions with one backward
+     `jne`, and no other branch, call or `ud2`.
+     * The `minps` operand order is D8's.
+     * The slice-bound checks sit in the setup, outside the loop, where the stream facts make
+       them unreachable.
+     * The other loops quoted in the evidence have `nested = 0`: the checked fallback 66, dual
+       pass 1 107, linked pass 2 35, dual pass 2 49.
+     * In the shipped wasm the stream loop has one `br_if`, no `unreachable` and no call.
+   * **The roster.** "true-peak-limiter f32x4 dual" goes from 878 vector / 0 scalar to
+     913 / 0.
+     * The collapsed row stays at 424 / 0.
+     * The kernel count stays at 15 (minimum 11).
+     * The render, meter-poll and command-submit analyser reports are byte-identical.
+   * **What grows.** Only two functions change:
+     * `LimiterCore<f32x4>::process_block` gains 35 vector ops and no scalar ones.
+     * `LimiterCore<f32>::process_block`, the scalar lane, gains 35 scalar ops. That is its own
+       arithmetic, not a vector kernel scalarising.
+   * **So rule 3 holds.**
+4. **Gate 7 (A4): passes.**
+   * **The arms.** Rig `5e13e01e…` / `a7be6366…`; `host_web.wasm` `0fc45359…` / `f4e98eb4…`, the
+     evidence's bytes.
+   * **Native.** 4 passes of 4 rounds, forward then reverse, minimum over 16 rounds, change
+     against slice 1:
+
+     | row | run 1 (load 5.9-6.3) | run 2 (load 5.0-5.2) | run 3 (load 2.3-2.4) | merge vs `27cf2413` (load 14.3-14.9) |
+     |---|---:|---:|---:|---:|
+     | `Simd8` `HotDualMono` | -8.5 % | -7.8 % | -8.7 % | -5.6 % |
+     | `Simd8` `HotLinked` | -6.3 % | -6.0 % | -6.4 % | -6.9 % |
+     | `Simd8` `QuietLinked` | -3.4 % | -6.4 % | -7.0 % | -5.5 % |
+     | `Simd8` `RampLinked` | +1.2 % | +0.5 % | -0.4 % | +1.3 % |
+     | `Simd4` `HotDualMono` | -5.4 % | -5.2 % | -5.3 % | -3.7 % |
+     | `Simd4` `HotLinked` | -5.1 % | -5.8 % | -5.6 % | -3.9 % |
+     | `Simd4` `QuietLinked` | -5.7 % | -5.1 % | -4.7 % | -4.1 % |
+     | `Simd4` `RampLinked` | -0.4 % | +0.4 % | -0.4 % | +0.3 % |
+
+   * **V8.** Three Node processes each, mean of per-process medians, with the paired per-process
+     changes in brackets:
+
+     | isolate | run 1 (load 5.1-5.4) | run 2 (load 4.4-4.7) | run 3 (load 5.5-6.1) | merge (load 13.1-14.1) |
+     |---|---:|---:|---:|---:|
+     | `lim - bi` | -9.1 % [-9.5 -9.2 -8.7] | -9.3 % [-8.6 -8.9 -10.4] | -9.6 % [-8.9 -9.5 -10.4] | -8.5 % [-8.7 -7.9 -9.0] |
+     | `limdm - bi` | -2.3 % [-2.9 -2.4 -1.5] | -0.6 % [-2.2 **+4.0** -3.7] | -3.2 % [-2.4 -3.0 -4.4] | -2.4 % [-2.9 -2.3 -2.0] |
+     | `console - nolim` | -8.2 % [-8.9 -8.3 -7.5] | -9.1 % [-8.4 -8.4 -10.5] | -10.0 % [-9.4 -9.2 -11.3] | -8.5 % [-7.5 -8.4 -9.6] |
+
+   * **On the merge.** The limiter's wasm function bodies and its native `process_block` listings
+     (addresses normalised) are identical to the branch's. So #999 does not move this kernel.
+5. **Other gates, on the merge onto `27cf2413`: green.**
+   * The limiter crate (54 passed, 1 ignored), in dev and in release.
+   * `limiter_linked_session` at all three widths, and `console-workload` (58 passed), in dev and
+     in release.
+   * `run-wasm-gates.sh`: G5 has 142 cases and 0 mismatches on every leg, the detector stays
+     resident, and the V8 spill gate is ok.
+   * `check-web-audioworklet.sh`, with the stale pin replaced by the merge module's digest
+     (`c75de10e…`) in scratch, then restored.
+   * The realtime, lane, env-vocabulary and workspace policy scripts.
+   * `cargo fmt --check`, workspace clippy (`-D warnings`) and `cargo doc`.
+   * The V8 digests on the diagnosis sessions are unchanged. Gate 3 passes with `bfec4bba`'s
+     `lib.rs` in dev and in release, so its pin is the base's. M5, re-run here, is red on 5
+     tests, as recorded.
+
+### Findings
+
+1. **Info: `RampLinked` passes only under the provisional allowance.**
+   * **The numbers.** `Simd8` read +1.2, +0.5 and -0.4 % against slice 1, and +1.3 % on the
+     merge.
+   * **The cause.** The arm is token-identical, so this is codegen movement: its fused loops grow
+     by 0-3 instructions.
+   * **Failure scenario.** The owner rules the allowance to +0 %. This row then fails in three
+     runs of four, on a path whose source did not change.
+2. **Info: `limdm - bi` has little margin against V8 placement noise.**
+   * **The outlier.** In my run 2, one process rendered the change's `limdm` instance at
+     161.1 µs, against 153.6 and 153.8 µs in the other two. That paired value is +4.0 %.
+   * **The effect.** It pulls the mean to -0.6 %. The other runs read -2.3 to -3.2 %.
+   * **Failure scenario.** One more such outlier turns A4's "faster" criterion red for a slice
+     that is faster in 11 of 12 paired processes.
+   * **Fix, if wanted.** Judge on paired per-process deltas.
