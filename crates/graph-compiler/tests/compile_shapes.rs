@@ -1,0 +1,588 @@
+//! Untimed compile-shape claims that #1026 moved here from the retired one-shot benchmarks.
+//!
+//! The rack (#038), builtins (#072/#431) and graph-compiler (#006) benchmark subjects were
+//! deleted with their runners. Their unit tests prepared production plans without timing them, and
+//! three of those claims had no other gate in this crate:
+//!
+//! * a mixed twelve-track session, whose tracks do not all carry the same rack depth, banks every
+//!   builtin stage and forms one two-slot rack-chain cohort, leaves the tracks that carry only a
+//!   subsequence of the chain in the unbound remainder, and leaves connected-sidechain tracks as
+//!   scalar fallbacks (from `rack::zero_launch_preflight_prepares_each_exact_production_workload`);
+//! * a representative 256-track console with 1,024 routes, 32 submixes, 64 effects and 32 routed
+//!   sidechains compiles with builtins and reports its own shape (from
+//!   `graph::canonical_benchmark_fixture_prepares_and_compiles`);
+//! * a plan with meters at all seven taps binds seven consumers in tap order, and a full queue
+//!   drops exactly one window (from
+//!   `builtins::real_meter_tap_plans_use_the_compiled_seven_taps_and_preserve_full_queue_state`).
+//!
+//! The mixed session is compiled at both SIMD widths explicitly, so its expectations do not
+//! depend on the development host.
+
+use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
+
+use builtins::{MeterConfig, MeterHandle, MeterTap};
+use builtins_compiler::{BuiltinCompileCaps, MeterRequest, prepare_session_builtins};
+use conformance::DualAccumulatorDelayFactory;
+use effect_compiler::{EffectCompileCaps, EffectPreparedSession, prepare_native_session_effects};
+use effect_contract::{NativeEffectFactory, NativeEffectRegistry};
+use engine::realtime::{PlanarBufferMut, PreparedRenderPlan, RenderError, RenderIo, RenderTime};
+use graph::{
+    GraphBindingBlock, GraphCompileCaps, GraphNodeBinding, GraphNodeId, GraphRuntimeBindings,
+    GraphRuntimeProcessor, TrackStage,
+};
+use graph_compiler::{
+    Backend, GraphBuiltinsCompileRequest, GraphCompiler, PreparedGraphBuiltinsArtifact,
+    PreparedGraphBuiltinsBound,
+};
+use rack::RackLocation;
+use session::{
+    ChannelMatrix, CompileCaps, CompiledSession, EffectIdentity, EffectParam, ParameterChannel,
+    ParameterUnit, Route, RouteDestination, RouteSource, SendTap, SessionModel, Sidechain,
+    SidechainDeclaration, StableId, Submix, compile_session, parse_session_json,
+};
+
+const SESSION: &str = include_str!("../../../fixtures/session/v1/canonical.json");
+const QUANTUM: usize = 128;
+
+fn stable(value: &str) -> StableId {
+    StableId::parse(value).expect("generated stable ID")
+}
+
+fn compile_caps() -> CompileCaps {
+    CompileCaps {
+        max_compiled_model_bytes: u64::MAX,
+        max_requested_runtime_bytes: u64::MAX,
+        max_single_allocation_bytes: u64::MAX,
+        max_queue_items: u64::MAX,
+        max_source_ring_frames: u64::MAX,
+        max_source_ring_bytes: u64::MAX,
+    }
+}
+
+fn builtin_caps() -> BuiltinCompileCaps {
+    BuiltinCompileCaps {
+        maximum_total_state_bytes: u64::MAX,
+        maximum_total_retained_payload_bytes: u64::MAX,
+        maximum_total_meter_items: u64::MAX,
+        maximum_total_meter_bytes: u64::MAX,
+        maximum_single_allocation_bytes: u64::MAX,
+        maximum_meter_streams: u64::MAX,
+        maximum_period_frames: u32::MAX,
+        maximum_peak_hold_frames: u32::MAX,
+        maximum_smoothing_samples: u32::MAX,
+    }
+}
+
+fn graph_caps() -> GraphCompileCaps {
+    GraphCompileCaps {
+        maximum_nodes: u64::MAX,
+        maximum_edges: u64::MAX,
+        maximum_schedule_items: u64::MAX,
+        maximum_dependency_levels: u64::MAX,
+        maximum_audio_buffer_samples: u64::MAX,
+        maximum_delay_samples_per_edge: u64::MAX,
+        maximum_total_delay_samples: u64::MAX,
+        maximum_graph_bytes: u64::MAX,
+        maximum_plan_bytes: u64::MAX,
+        maximum_single_allocation_bytes: u64::MAX,
+        maximum_finite_tail_samples: u64::MAX,
+    }
+}
+
+/// The conformance delay, the one native effect every fixture here uses.
+fn prepared_effects(session: &CompiledSession) -> EffectPreparedSession {
+    let registry = NativeEffectRegistry::new([
+        Box::new(DualAccumulatorDelayFactory::correct()) as Box<dyn NativeEffectFactory>
+    ])
+    .expect("conformance registry");
+    prepare_native_session_effects(
+        session,
+        &registry,
+        EffectCompileCaps {
+            maximum_total_state_bytes: u64::MAX,
+            maximum_scratch_bytes: u64::MAX,
+            maximum_automation_spans_per_block: u32::MAX,
+        },
+    )
+    .expect("prepared effects")
+}
+
+fn compile(
+    session: &CompiledSession,
+    requests: &[MeterRequest],
+    dispatch: Backend,
+) -> PreparedGraphBuiltinsArtifact {
+    let effects = prepared_effects(session);
+    let builtins =
+        prepare_session_builtins(&effects.session, requests, builtin_caps()).expect("builtins");
+    GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        dispatch,
+        plan_id: 1026,
+        effects,
+        builtins,
+        caps: graph_caps(),
+    })
+    .unwrap_or_else(|failure| panic!("graph compile: {:?}", failure.diagnostics))
+}
+
+/// Every input stage emits a fixed nonzero block; every other external node is the identity.
+struct ConstantSource;
+impl GraphRuntimeProcessor for ConstantSource {
+    fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+        block.left.fill(0.25);
+        block.right.fill(-0.125);
+        Ok(())
+    }
+}
+struct Identity;
+impl GraphRuntimeProcessor for Identity {
+    fn process(&mut self, _block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+        Ok(())
+    }
+}
+
+fn bind(artifact: PreparedGraphBuiltinsArtifact) -> PreparedGraphBuiltinsBound {
+    let envelope = artifact.envelope();
+    let nodes = artifact
+        .external_binding_nodes()
+        .cloned()
+        .map(|node| {
+            let processor: Box<dyn GraphRuntimeProcessor> = match node {
+                GraphNodeId::TrackStage {
+                    stage: TrackStage::Input,
+                    ..
+                } => Box::new(ConstantSource),
+                _ => Box::new(Identity),
+            };
+            GraphNodeBinding::new(node, processor)
+        })
+        .collect();
+    artifact
+        .into_bound(GraphRuntimeBindings {
+            envelope,
+            nodes,
+            observers: Vec::new(),
+        })
+        .unwrap_or_else(|_| panic!("graph bind"))
+}
+
+fn render(plan: &mut PreparedRenderPlan, output: &mut [f32; QUANTUM * 2], first_sample: u64) {
+    plan.render(
+        RenderIo {
+            input: None,
+            output: PlanarBufferMut::try_new(output, 2, QUANTUM, QUANTUM).expect("output"),
+        },
+        RenderTime {
+            absolute_sample: first_sample,
+        },
+    )
+    .expect("render");
+}
+
+/// Twelve tracks: `rack00`..`rack09` carry a two-slot SIMD-1 chain `[delay-leading (bypassed),
+/// delay-main]`, except `rack02` and `rack05`, which carry only `delay-main`; `fallback10` and
+/// `fallback11` carry `delay-main` with a connected sidechain. The rack depths differ, so the
+/// fader and matrix stages straddle two dependency levels.
+fn mixed_twelve_track_session() -> CompiledSession {
+    let mut model = parse_session_json(SESSION).expect("canonical session");
+    let template = model.tracks[0].clone();
+    let route = model.routes[0].clone();
+    model.automation.clear();
+    model.tracks = (0..12)
+        .map(|index| {
+            let mut track = template.clone();
+            let track_id = if index < 10 {
+                format!("rack{index:02}")
+            } else {
+                format!("fallback{index}")
+            };
+            track.id = stable(&track_id);
+            let lane = index as f32;
+            track.builtins.left.trim_db = -3.0 + lane * 0.25;
+            track.builtins.left.hpf_hz = 40.0 + lane * 3.0;
+            track.builtins.left.lpf_hz = 15_000.0 - lane * 100.0;
+            track.builtins.right.trim_db = 2.0 - lane * 0.2;
+            track.builtins.right.hpf_hz = 60.0 + lane * 2.0;
+            track.builtins.right.lpf_hz = 14_000.0 - lane * 80.0;
+            track.dynamic.effects.clear();
+            track.simd2.effects.clear();
+            let mut effect = template.dynamic.effects[0].clone();
+            effect.id = stable("delay-main");
+            effect.identity = EffectIdentity::Native {
+                effect_id: stable("conformance.delay"),
+            };
+            effect.params = vec![EffectParam {
+                parameter_id: 1,
+                channel: ParameterChannel::Both,
+                unit: ParameterUnit::Linear,
+                value: 0.75 + index as f32 * 0.031_25,
+            }];
+            effect.bypass = false;
+            effect.sidechain = if index < 10 {
+                SidechainDeclaration::None
+            } else {
+                SidechainDeclaration::Routed(Sidechain {
+                    source: RouteSource::Track {
+                        track_id: track.id.clone(),
+                        tap: SendTap::Input,
+                    },
+                    port_id: stable("sidechain-in"),
+                })
+            };
+            track.simd1.effects = if matches!(index, 2 | 5) || index >= 10 {
+                vec![effect]
+            } else {
+                let mut leading = effect.clone();
+                leading.id = stable("delay-leading");
+                leading.bypass = true;
+                vec![leading, effect]
+            };
+            track
+        })
+        .collect();
+    model.routes = model
+        .tracks
+        .iter()
+        .enumerate()
+        .map(|(index, track)| {
+            let mut next = route.clone();
+            next.id = stable(&format!("bank-route{index}"));
+            next.source = RouteSource::Track {
+                track_id: track.id.clone(),
+                tap: SendTap::PostMatrix,
+            };
+            next
+        })
+        .collect();
+    compile_session(&model, compile_caps()).expect("mixed session")
+}
+
+#[test]
+fn mixed_rack_depths_bank_every_stage_and_leave_subsequences_and_sidechains_scalar() {
+    const TRACKS: usize = 12;
+    const BANKABLE_STAGES: usize = 3;
+    const FULL_CHAIN_TRACKS: usize = 8;
+    let session = mixed_twelve_track_session();
+    for dispatch in [Backend::Simd4, Backend::Simd8] {
+        let lanes = dispatch.width();
+        let artifact = compile(&session, &[], dispatch);
+
+        // Post-input builtins, fader and matrix each bank all twelve tracks: full banks first,
+        // then the padded remainder, whichever dependency levels the stage straddles.
+        let mut expected_sizes = vec![lanes; TRACKS / lanes];
+        if !TRACKS.is_multiple_of(lanes) {
+            expected_sizes.push(TRACKS % lanes);
+        }
+        expected_sizes.sort_unstable();
+        assert_eq!(
+            artifact.prepared_builtin_bank_count(),
+            BANKABLE_STAGES * expected_sizes.len(),
+            "{dispatch:?}: builtin banks"
+        );
+        let banks: Vec<_> = artifact.prepared_builtin_banks().collect();
+        assert!(
+            banks
+                .iter()
+                .all(|bank| bank.backend == dispatch && bank.width.lanes() as usize == lanes),
+            "{dispatch:?}: every builtin bank runs at the compile's width"
+        );
+        let mut by_stage: std::collections::BTreeMap<u8, Vec<usize>> = Default::default();
+        for bank in &banks {
+            let GraphNodeId::TrackStage { stage, .. } = &bank.members[0] else {
+                panic!("a builtin bank member is a track stage");
+            };
+            by_stage
+                .entry(*stage as u8)
+                .or_default()
+                .push(bank.members.len());
+        }
+        assert_eq!(by_stage.len(), BANKABLE_STAGES, "{dispatch:?}: stages");
+        for (stage, mut sizes) in by_stage {
+            sizes.sort_unstable();
+            assert_eq!(sizes, expected_sizes, "{dispatch:?}: stage {stage} banks");
+        }
+
+        // One cohort for the two-slot chain. The eight tracks that carry all of it fill the full
+        // groups and bind one bank per slot; the two subsequence tracks land in the unbound
+        // remainder and render per node, beside the two connected-sidechain fallbacks.
+        let cohorts = &artifact.report().rack_cohorts;
+        assert_eq!(cohorts.dispatch, dispatch);
+        let bound_groups: Vec<_> = cohorts.bound_groups_in(RackLocation::Simd1).collect();
+        assert_eq!(
+            bound_groups.len(),
+            FULL_CHAIN_TRACKS / lanes,
+            "{dispatch:?}"
+        );
+        assert!(bound_groups.iter().all(|group| group.program.len() == 2));
+        assert!(bound_groups.iter().all(|group| group.is_full()));
+        assert!(
+            bound_groups
+                .iter()
+                .all(|group| group.active_count() == lanes)
+        );
+        let bound_slots: Vec<_> = cohorts.bound_slots_in(RackLocation::Simd1).collect();
+        assert_eq!(
+            bound_slots.len(),
+            2 * FULL_CHAIN_TRACKS / lanes,
+            "{dispatch:?}"
+        );
+        assert!(bound_slots.iter().all(|bound| bound.members.len() == lanes));
+        assert!(
+            bound_slots
+                .iter()
+                .flat_map(|bound| &bound.members)
+                .all(|member| !matches!(member.track_id.as_str(), "rack02" | "rack05")),
+            "{dispatch:?}: a subsequence track joined a bound bank"
+        );
+        assert_eq!(
+            bound_slots.len() as u64,
+            artifact.graph_resource_estimate().effect_bank_count,
+            "{dispatch:?}: the report is the bound plan"
+        );
+        let mut scalar: Vec<_> = cohorts
+            .scalar_in(RackLocation::Simd1)
+            .into_iter()
+            .map(|member| member.track_id.as_str().to_owned())
+            .collect();
+        scalar.sort_unstable();
+        assert_eq!(
+            scalar,
+            ["fallback10", "fallback11", "rack02", "rack05"],
+            "{dispatch:?}: compatible scalar tail and connected-sidechain fallbacks"
+        );
+
+        // The plan binds and renders.
+        let mut bound = bind(artifact);
+        render(&mut bound.plan, &mut [0.0; QUANTUM * 2], 0);
+    }
+}
+
+fn taps() -> [SendTap; 7] {
+    [
+        SendTap::Input,
+        SendTap::PostInputBuiltins,
+        SendTap::PostSimd1,
+        SendTap::PostDynamic,
+        SendTap::PostSimd2PreFader,
+        SendTap::PostFader,
+        SendTap::PostMatrix,
+    ]
+}
+
+/// 256 tracks, every fourth carrying a dynamic-rack delay and every eighth a routed sidechain;
+/// 992 track routes into 32 submixes from all seven taps, and 32 submix routes to the output.
+fn representative_console() -> SessionModel {
+    let mut model = parse_session_json(SESSION).expect("seed session");
+    let track_template = model.tracks.pop().expect("seed track");
+    let route_template = model.routes.pop().expect("seed route");
+    model.automation.clear();
+    model.submixes = (0..32)
+        .map(|index| Submix {
+            id: stable(&format!("submix-{index:02}")),
+        })
+        .collect();
+    model.tracks = (0..256)
+        .map(|index| {
+            let mut track = track_template.clone();
+            track.id = stable(&format!("track-{index:03}"));
+            track.simd1.effects.clear();
+            track.simd2.effects.clear();
+            track.dynamic.effects.clear();
+            if index % 4 == 1 {
+                let mut effect = track_template.dynamic.effects[0].clone();
+                effect.id = stable("delay");
+                effect.identity = EffectIdentity::Native {
+                    effect_id: stable("conformance.delay"),
+                };
+                effect.params = [ParameterChannel::Left, ParameterChannel::Right]
+                    .map(|channel| EffectParam {
+                        parameter_id: 1,
+                        channel,
+                        unit: ParameterUnit::Linear,
+                        value: 1.0,
+                    })
+                    .to_vec();
+                effect.sidechain = if index % 8 == 1 {
+                    SidechainDeclaration::Routed(Sidechain {
+                        source: RouteSource::Track {
+                            track_id: stable("track-000"),
+                            tap: SendTap::Input,
+                        },
+                        port_id: stable("sidechain-in"),
+                    })
+                } else {
+                    SidechainDeclaration::None
+                };
+                track.dynamic.effects.push(effect);
+            }
+            track
+        })
+        .collect();
+    model.routes.clear();
+    for index in 0..992 {
+        let mut route = route_template.clone();
+        route.id = stable(&format!("track-route-{index:04}"));
+        route.source = RouteSource::Track {
+            track_id: stable(&format!("track-{:03}", index % 256)),
+            tap: taps()[index % taps().len()],
+        };
+        route.destination = RouteDestination::SubmixInput {
+            submix_id: stable(&format!("submix-{:02}", index % 32)),
+        };
+        model.routes.push(route);
+    }
+    for index in 0..32 {
+        model.routes.push(Route {
+            id: stable(&format!("submix-route-{index:02}")),
+            source: RouteSource::SubmixOutput {
+                submix_id: stable(&format!("submix-{index:02}")),
+            },
+            destination: RouteDestination::OutputInput {
+                output_id: model.outputs[0].id.clone(),
+            },
+            channel_matrix: ChannelMatrix {
+                ll: 1.0,
+                lr: 0.0,
+                rl: 0.0,
+                rr: 1.0,
+            },
+            gain_db: 0.0,
+        });
+    }
+    model
+}
+
+#[test]
+fn representative_console_compiles_with_builtins_and_reports_its_shape() {
+    let model = representative_console();
+    assert_eq!(model.tracks.len(), 256);
+    assert_eq!(model.routes.len(), 1_024);
+    assert_eq!(model.submixes.len(), 32);
+    let effects: Vec<_> = model
+        .tracks
+        .iter()
+        .flat_map(|track| {
+            track
+                .simd1
+                .effects
+                .iter()
+                .chain(&track.dynamic.effects)
+                .chain(&track.simd2.effects)
+        })
+        .collect();
+    assert_eq!(effects.len(), 64);
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|effect| matches!(effect.sidechain, SidechainDeclaration::Routed(_)))
+            .count(),
+        32
+    );
+    let session = compile_session(&model, compile_caps()).expect("representative session");
+    // The production compile, at the host's dispatch: every shipped target has a SIMD width.
+    let dispatch = Backend::current();
+    assert!(dispatch.width() > 1);
+    let artifact = compile(&session, &[], dispatch);
+    let estimate = artifact.graph_resource_estimate();
+    assert_eq!(estimate.routes, 1_024);
+    assert_eq!(estimate.effects, 64);
+    assert!(estimate.builtin_bank_count > 0);
+    // Every track's post-input, fader and matrix stages are builtin bank members.
+    assert_eq!(artifact.graph().builtin_bank_members().count(), 3 * 256);
+    let evidence = GraphCompiler::evidence(artifact.graph(), artifact.report());
+    assert!(!evidence.canonical_bytes.is_empty());
+    assert!(!evidence.dot.is_empty());
+}
+
+/// The canonical session with the conformance delay in each of track `vocal`'s three racks, and
+/// a meter at each of its seven taps: one-quantum windows, a one-slot queue, reset generation 7.
+fn seven_tap_artifact() -> PreparedGraphBuiltinsArtifact {
+    let mut model = parse_session_json(SESSION).expect("canonical session");
+    model.automation.clear();
+    let mut delay = model.tracks[0].dynamic.effects[0].clone();
+    delay.identity = EffectIdentity::Native {
+        effect_id: stable("conformance.delay"),
+    };
+    delay.params.clear();
+    delay.id = stable("simd1-delay");
+    model.tracks[0].simd1.effects = vec![delay.clone()];
+    delay.id = stable("dynamic-delay");
+    model.tracks[0].dynamic.effects = vec![delay.clone()];
+    delay.id = stable("simd2-delay");
+    model.tracks[0].simd2.effects = vec![delay];
+    let session = compile_session(&model, compile_caps()).expect("canonical session");
+    assert_eq!(session.quantum().0 as usize, QUANTUM);
+    let config = MeterConfig {
+        period_frames: NonZeroU32::new(QUANTUM as u32).expect("constant"),
+        peak_hold_frames: 0,
+        peak_decay_db_per_second: 0.0,
+        queue_capacity: NonZeroUsize::new(1).expect("constant"),
+        reset_generation: 7,
+    };
+    let requests: Vec<_> = TAPS
+        .into_iter()
+        .enumerate()
+        .map(|(index, tap)| MeterRequest {
+            handle: MeterHandle(NonZeroU64::new(index as u64 + 1).expect("one-based handle")),
+            track_id: model.tracks[0].id.as_str().to_owned(),
+            tap,
+            config,
+        })
+        .collect();
+    compile(&session, &requests, Backend::current())
+}
+
+const TAPS: [MeterTap; 7] = [
+    MeterTap::Input,
+    MeterTap::PostInputBuiltins,
+    MeterTap::PostSimd1,
+    MeterTap::PostDynamic,
+    MeterTap::PostSimd2PreFader,
+    MeterTap::PostFader,
+    MeterTap::PostMatrix,
+];
+
+#[test]
+fn seven_meter_taps_bind_in_tap_order_and_a_full_queue_drops_one_window() {
+    let (success, full) = (seven_tap_artifact(), seven_tap_artifact());
+    assert_eq!(success.report(), full.report());
+    let (mut success, mut full) = (bind(success), bind(full));
+    for bound in [&success, &full] {
+        assert_eq!(
+            bound
+                .meter_consumers
+                .iter()
+                .map(|consumer| consumer.tap)
+                .collect::<Vec<_>>(),
+            TAPS
+        );
+    }
+    let mut output = [0.0; QUANTUM * 2];
+
+    // Two windows into one-slot queues: the second is dropped, the first stays queued.
+    render(&mut full.plan, &mut output, 0);
+    render(&mut full.plan, &mut output, QUANTUM as u64);
+    for consumer in &mut full.meter_consumers {
+        let window = consumer.consumer.try_pop().expect("the first window");
+        assert_eq!(window.end_sample, QUANTUM as u64);
+        assert_eq!(window.reset_generation, 7);
+        assert_eq!(window.cumulative_dropped_snapshots, 0);
+    }
+    render(&mut full.plan, &mut output, 2 * QUANTUM as u64);
+    for consumer in &mut full.meter_consumers {
+        let window = consumer
+            .consumer
+            .try_pop()
+            .expect("the window after the drop");
+        assert_eq!(window.cumulative_dropped_snapshots, 1, "{:?}", consumer.tap);
+    }
+
+    // A queue that is drained in time drops nothing.
+    render(&mut success.plan, &mut output, QUANTUM as u64);
+    for consumer in &mut success.meter_consumers {
+        let window = consumer.consumer.try_pop().expect("one window");
+        assert_eq!(window.end_sample, 2 * QUANTUM as u64);
+        assert_eq!(window.reset_generation, 7);
+        assert_eq!(window.cumulative_dropped_snapshots, 0);
+    }
+}
