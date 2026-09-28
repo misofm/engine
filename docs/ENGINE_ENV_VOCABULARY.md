@@ -94,7 +94,6 @@ Set by `scripts/run-*-benchmark.sh` before the single launch; read by the bench 
 | name | meaning |
 |---|---|
 | `MISO_ENGINE_BENCH_CANDIDATE_COMMIT` | 40-hex commit the candidate binary was built from. |
-| `MISO_ENGINE_BENCH_BINARY_SHA256` | sha256 of the launched binary. |
 | `MISO_ENGINE_BENCH_ROUND` | `warmup`, `1` or `2` for the runners that launch per round. |
 
 
@@ -126,15 +125,6 @@ One name per fact. Set by the runner, read by the bench binary; a name the runne
 | `MISO_ENGINE_BENCH_WASM_HOST_VERSION` | Wasm host version. |
 | `MISO_ENGINE_BENCH_WASM_SCALAR_BYTES` | size of the scalar Wasm artifact. |
 | `MISO_ENGINE_BENCH_WASM_SIMD_BYTES` | size of the simd128 Wasm artifact. |
-
-
-## Benchmark phase marker
-
-Written to stderr by every bench binary, counted by the runner. Not an environment variable. Payload words: `workload_started`, `warmup_complete`, `timed_started`, `round_<n>_complete`.
-
-| name | meaning |
-|---|---|
-| `MISO_ENGINE_BENCH_PHASE` | the one bench phase marker. |
 
 
 ## Benchmark admissibility ceilings
@@ -204,16 +194,6 @@ Read by one subject each.
 | `MISO_ENGINE_EFFECT_CONTRACT_V1_H` | the C include guard `check-effect-contract.sh` asserts. Not an environment variable. |
 | `MISO_ENGINE_BENCH_POLICY_NEEDLE` | `check-bench-policy.sh`'s `sole_owner_or_delegate`: internal transport of the four-character backslash char-literal needle from bash to the `awk` subprocess through `ENVIRON`, chosen over `-v` because `-v` assignments go through awk's own C-style escape processing a second time. Set and read only inside that one function invocation; not user-facing. |
 
-
-## Test harness hooks
-
-Read only by a `scripts/test-*.sh` fake, never by a real run. A runner that reads one of these outside a `MISO_ENGINE_TEST_`-guarded branch is a defect.
-
-| name | meaning |
-|---|---|
-| `MISO_ENGINE_TEST_BENCH_MODE` | which scripted outcome the fake bench produces. |
-| `MISO_ENGINE_TEST_FAKE_BENCH` | path of a fake bench binary to launch instead of building. |
-| `MISO_ENGINE_TEST_LAUNCH_LOG` | file the stub appends one line to per launch. |
 
 ## Re-pin hooks
 
