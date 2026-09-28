@@ -62,3 +62,4 @@ aim, in the owner's words, is "minimizing the engine footprint".
 
 * **Decision 4, memory accounting:** tests assert budgets (upper limits) plus one independent
   completeness check that every allocation is counted, instead of exact byte counts (#1060).
+* **Decision 5, browser artifact fingerprint:** checked at release; every PR builds the module, runs the artifact gates on it and reports changed/unchanged (#1061).
