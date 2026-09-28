@@ -145,3 +145,125 @@ Commits `9be7eb86`, `95f511c4`, `db39d8e8` and this record. Diff `c69736c1..HEAD
   digest unchanged.
 - **Release `libcapi.so`.** Text is 3,861,237 → 3,792,617 bytes (−68,620). Function symbols are
   3,146 → 3,063.
+
+## Sol verdict, attempt 1
+
+**PASS.** Sol, 2026-09-28. Verified on a scratch merge of this branch (`b16350f9`) into the batch
+head `codex/batch-slim-2` (`6709552c`). The merge was clean. A trial merge of #1033
+(`codex/1033-remove-native-pcm-runner`) on top was also clean, textually and semantically:
+`cargo check --workspace --all-targets` passes with and without `--all-features`, and the
+routing, reachability, test-support and scalar-oracle policy scripts pass. The two branches share
+only `qualification.yml`, in different jobs.
+
+### What was verified
+
+- **Shipped builds exclude the scalar path.**
+  - `cargo tree -e features` shows `lane` with only its `default` feature in the normal closure of
+    `host-web` (wasm32), `capi` (x86-64, `aarch64-apple-ios`, `aarch64-linux-android`),
+    `host-mobile` and `host-native`. Even `--workspace` normal dependencies never turn on
+    `lane/test-support`. Only dev-dependencies and the named CI `--features` enable it.
+  - A planted `lane::Backend::Scalar` in `host-core` fails to compile (E0599) for `capi` on all
+    three native targets and for `host-web` on wasm `simd128`, and compiles with
+    `lane/test-support`. A shipped build cannot name the variant, so it cannot fall back to it.
+  - The release module has 0 of 17 scalar-path identifiers and all 4 banked controls. So do the
+    release `libcapi.so` and `libcapi.a` (x86-64), the Android `libcapi.a` and the iOS `libcapi.a`
+    (read with `llvm-nm`). The base module is red on 15 of the 17.
+- **The check discriminates.** Every re-exposed build goes red; the rebuilt shipped control is
+  green and reproduces `d8d03ba9…`.
+
+  | re-exposed build | wasm module | x86-64 `libcapi.so` |
+  |---|---|---|
+  | the graph half's cfg gating reverted in code | red, 1 identifier | not built |
+  | a `graph/test-support` feature leak | red, 1 identifier | red, 1 identifier |
+  | a `builtins-compiler/test-support` feature leak | red, 14 identifiers | red, 14 identifiers |
+
+  - CI runs the gate in `artifact-gates` and in `audit-native`. The `audit-native` step reads the
+    library that `check-capi-abi.sh` builds with `-p capi` alone. If that step's inputs ever
+    change to the four-package build, the gate fails closed, because `audit` turns on
+    `graph/test-support`.
+  - The gate's `--self-test` runs in `lint`.
+  - `check-ci-path-routing.py`, `test-ci-path-routing.py` and both reachability scripts pass. The
+    router gives `full` for this diff.
+- **The oracle still works, and runs in required CI.** `test-debug-a` names
+  `builtins-compiler/test-support`, which forwards `lane/test-support`. I planted two new
+  mutations, each identical at both widths:
+  - **A.** `program_key()` sets `bypass: false`.
+    `randomized_consoles_compile_bind_and_render_the_scalar_bits` fails with "banking moved
+    rendered bits" at both `Simd4` and `Simd8`, and one structural test fails too.
+  - **B.** Every banked fader command's smoothing is one sample longer.
+    `a_banked_fader_command_lands_on_the_block_it_was_admitted_in` fails with "banked fader drain
+    vs the per-node console: block 14 differs". This is the console `Backend::Scalar` comparison.
+    The builtins-compiler composite test fails too.
+  - `limiter_linked_session` stays green under both mutations. It does not exercise either one.
+- **The shipped-only branches hold on the whole test corpus.** In test builds I asserted two
+  things:
+  - `unbanked_strip_bindings` never sees a strip left over at a bank width;
+  - `graph_scalar_owner_resource` at a bank width equals the zero estimate that the shipped build
+    returns.
+
+  All 1,290 `test-debug-a` tests passed with both asserts.
+- **No target-specific behaviour.** The removed `target_arch = "x86"` arms are dead, because
+  `lane/src/lib.rs` refuses every target outside x86-64, AArch64 and wasm32 (#1041).
+- **The module shrink.** It went from 3,485,631 to 3,415,107 bytes (`d8d03ba9…`). With hashes,
+  call indices and relocated immediates normalized, 95 functions are removed, 12 added (the
+  ADDED column is mostly merge and rename artefacts) and 25 changed.
+  - The only render-path function that changed is
+    `BuiltinFaderBank::try_process_settled_with_matrix`. Two `u8` field loads swap offsets, 676
+    and 677, and no instruction changes (finding 3).
+  - `check-web-audioworklet.sh` passes: the callgraph for the render, `meter_poll` and
+    `command_submit` closures, and the kernel roster. `f32x4` arithmetic went from 14,139 to
+    14,007.
+  - The V8 spill gate passes on Node 22.23.2.
+  - `check-browser-expected-resources.py --artifacts` passes: every resource row and every
+    digest.
+- **Gates on the merge.** All of these pass:
+  - `cargo check --workspace --all-targets`, with and without `--all-features`;
+  - clippy `-D warnings`: the workspace with `--all-features`, re-run after touching the changed
+    files, and the shipped feature sets (`--lib` without features) on x86-64, iOS, Android and wasm
+    `simd128`;
+  - fmt and rustdoc;
+  - `check-cross-targets.sh`. Every iOS memset count equals its ceiling (`graph` 20,
+    `compressor` 970, `builtins` 376, `host-core` 4); none dropped, and none reached zero;
+  - the `wasm-guests` steps: the scalar-wasm 18-package build, the atomics check, protocol parity,
+    and `run-wasm-gates.sh` with backend 2 native, 0 scalar-wasm and 1 `simd128`;
+  - `release-shape` and `check-capi-abi.sh`;
+  - every `route`, `lint` and `docs-gates` step, 37 in all, Python under `-B`.
+
+  Test results:
+
+  | leg | passed | ignored |
+  |---|---|---|
+  | `test-debug-a` | 1,290 | 7 |
+  | `test-debug-b` | 799 | 24 |
+  | release: `lane`, `math`, `wasm-gates`, `audit`, `bench`, `console-workload` | 245 | 18 |
+  | release: `bank_levels` | 9 | 0 |
+
+  `host-native` runs. The 17 `gain_pan_profile digests` rows are byte-identical to base.
+- **Expected red.** The AudioWorklet pin (`6c952a2c…` against `d8d03ba9…`) stays red until the
+  boundary repin.
+
+### Findings, by severity (none blocks)
+
+1. **Low: two new `target_arch` cfgs in `lane`.** They sit on `Backend::Scalar` and on its
+   `width()` arm, and repeat the target list of the existing complement arm of `current()` so the
+   scalar-wasm exception keeps the variant. On every product target the cfg reduces to
+   `feature = "test-support"`, so no behaviour becomes target-specific. #1062 must delete both,
+   together with the exception.
+2. **Low: the gate sees the graph half only through one function.** Both graph-half
+   re-exposures were caught by `scalar_pair_is_in_place` alone. Fat LTO inlined or merged the
+   other four graph identifiers. An inlining change could silence the graph half. Follow-up:
+   give it a non-inlinable marker, for example `#[inline(never)]` on `select_scalar_pairs`.
+3. **Low: the evidence overstates one claim.** It says "no render-path function differs", but
+   `try_process_settled_with_matrix` differs by a field-order swap. That comes from `Backend`'s
+   variant count: test-support and shipped builds order `Backend`-bearing structs differently.
+   Sizes and resource rows agree.
+4. **Low: no Rust test compiles the shipped branches.** Every test leg enables
+   `builtins-compiler/test-support`, so `unbanked_strip_bindings`' refusal and the zero estimate
+   run only in the module, `capi`, `console-workload` and `host-native`. The probes above show
+   the invariant holds. Keeping them as permanent test-build asserts would pin it.
+5. **Pre-existing on base, not #1059.**
+   - `scripts/run-aarch64-tests.sh debug` names `source/test-support`, which #1035 removed. At
+     `6709552c` its feature list fails resolution ("failed to select a version for `source`"),
+     so the `aarch64-debug` job should be red. It needs its own fix before the batch pushes.
+   - `cargo check -p builtins-compiler --all-targets` without test-support has 21 errors at
+     base and 20 on the merge. CI never runs it.
