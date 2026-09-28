@@ -799,3 +799,157 @@ fn a_ramp_onto_an_identity_boundary_lands_on_the_identity() {
         "a ramp that landed on the wet/makeup identities does not render the identity"
     );
 }
+
+/// Asserts `parameter`'s ramp words on both channels of every lane of `bank`.
+fn assert_bank_ramp(
+    bank: &dyn effect_contract::PreparedNativeEffectBank,
+    sizes_from: &dyn effect_contract::PreparedNativeEffect,
+    parameter: usize,
+    target: f32,
+    remaining: u32,
+) {
+    let lanes = support::native_bank_width()
+        .expect("a native bank width")
+        .1
+        .lanes();
+    for track in 0..lanes {
+        let (left, right) = support::snapshot_track(bank, track, sizes_from);
+        for (name, channel) in [("left", &left), ("right", &right)] {
+            assert_eq!(
+                read_f32(channel, 2 + parameter * 3).to_bits(),
+                target.to_bits(),
+                "lane {track} {name}: parameter {parameter}'s target"
+            );
+            assert_eq!(
+                read_u32(channel, 3 + parameter * 3),
+                remaining,
+                "lane {track} {name}: parameter {parameter}'s remaining samples"
+            );
+        }
+    }
+}
+
+/// One bank block of `frames` at `first_sample`, with `points` on both channels of every lane.
+fn process_bank_points(
+    bank: &mut dyn effect_contract::PreparedNativeEffectBank,
+    first_sample: u64,
+    frames: usize,
+    points: &[(u32, f32)],
+) {
+    let (_, width) = support::native_bank_width().expect("a native bank width");
+    let lanes = width.lanes() as usize;
+    let mut left = vec![0.25_f32; frames * lanes];
+    let mut right = vec![-0.25_f32; frames * lanes];
+    let mut spans = Vec::new();
+    let mut offsets = vec![0_u32; lanes + 1];
+    for offset in offsets.iter_mut().skip(1) {
+        // Canonical span order within a track: `(start_sample, parameter_index, channel)`.
+        for (parameter, value) in points {
+            for channel in [ParameterChannel::Left, ParameterChannel::Right] {
+                spans.push(PreparedAutomationSpan {
+                    kind: AutomationSpanKind::Point,
+                    channel,
+                    parameter_index: *parameter,
+                    start_sample: first_sample,
+                    end_sample: first_sample,
+                    start_value: *value,
+                    end_value: *value,
+                });
+            }
+        }
+        *offset = spans.len() as u32;
+    }
+    bank.process_bank(
+        effect_contract::EffectBankProcessBlock::new(
+            &mut left,
+            &mut right,
+            None,
+            frames as u32,
+            width,
+            first_sample,
+            &spans,
+            &offsets,
+            128,
+        )
+        .expect("bank block"),
+    );
+}
+
+/// A both-channel Point on every lane of a bank arms that parameter's 64-sample ramp on every lane
+/// and both channels; the ramp runs to rest, and the next block's Point restarts it; and two
+/// parameters moved in one block ramp together.
+///
+/// Ported by #1027 from the #880 MQ-2 benchmark's untimed preflight
+/// (`compressor/tests/bench_ramp.rs`, `mq2_preflight_payloads_prove_ramps_restart_on_each_block`,
+/// retired with the benchmark). The preflight ran only at `Simd8`; this runs at the build's own
+/// bank width. The benchmark's rate-coefficient call counts (`[128, 256, 0]`) were arithmetic on
+/// its own arm constants and went with it.
+///
+/// Red mutation (MUTATIONS.md row 1006-M3): advance the output ramps (attack, release, makeup,
+/// mix) in the ramping prefix's pass 1 as well -> each frame steps them twice and the first
+/// block's `remaining` is 62, not 63.
+#[test]
+fn a_both_channel_point_on_every_bank_lane_restarts_its_ramp_each_block() {
+    const RELEASE: u32 = 4;
+    const ATTACK: u32 = 3;
+    let values = initial_values();
+    let reference = prepare(request_with_quantum(&values, 128));
+    let (_, width) = support::native_bank_width().expect("a native bank width");
+    let requests: Vec<_> = (0..width.lanes())
+        .map(|_| request_with_quantum(&values, 128))
+        .collect();
+    let mut bank = support::bind_bank(&requests).expect("bank must bind at this build's width");
+
+    process_bank_points(bank.as_mut(), 0, 1, &[(RELEASE, 800.0)]);
+    assert_bank_ramp(
+        bank.as_ref(),
+        reference.as_ref(),
+        RELEASE as usize,
+        800.0,
+        SMOOTHING - 1,
+    );
+    process_bank_points(bank.as_mut(), 1, SMOOTHING as usize - 1, &[]);
+    assert_bank_ramp(
+        bank.as_ref(),
+        reference.as_ref(),
+        RELEASE as usize,
+        800.0,
+        0,
+    );
+    process_bank_points(
+        bank.as_mut(),
+        u64::from(SMOOTHING),
+        1,
+        &[(RELEASE, 1_600.0)],
+    );
+    assert_bank_ramp(
+        bank.as_ref(),
+        reference.as_ref(),
+        RELEASE as usize,
+        1_600.0,
+        SMOOTHING - 1,
+    );
+
+    let both_values = support::values_with(&[(ATTACK as usize, 10.0)]);
+    let both_reference = prepare(request_with_quantum(&both_values, 128));
+    let both_requests: Vec<_> = (0..width.lanes())
+        .map(|_| request_with_quantum(&both_values, 128))
+        .collect();
+    let mut both =
+        support::bind_bank(&both_requests).expect("bank must bind at this build's width");
+    process_bank_points(both.as_mut(), 0, 1, &[(ATTACK, 20.0), (RELEASE, 600.0)]);
+    assert_bank_ramp(
+        both.as_ref(),
+        both_reference.as_ref(),
+        ATTACK as usize,
+        20.0,
+        SMOOTHING - 1,
+    );
+    assert_bank_ramp(
+        both.as_ref(),
+        both_reference.as_ref(),
+        RELEASE as usize,
+        600.0,
+        SMOOTHING - 1,
+    );
+}

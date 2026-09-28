@@ -3,7 +3,10 @@
 # runner is what supplies the round marker and the host metadata, and a direct invocation produces
 # a record whose provenance is a guess.
 #
-# Usage: run-console-benchmark.sh --step NAME
+# Usage: scripts/operator/run-console-benchmark.sh --step NAME
+#
+# A person runs it; no workflow does, which is why it lives in `scripts/operator/` (moved from
+# `scripts/` by #1027).
 #
 # `--step NAME` is the per-issue arm of a sequential optimisation batch: one record per merged
 # issue, written to `artifacts/steps/NAME`, so each issue's motion is read against the step before
@@ -17,8 +20,8 @@
 # admitted run takes one untimed warmup and exactly two measured rounds, validates the 50 records
 # with `console-benchmark-validator.jq`, and promotes them to the accepted file beside a
 # disposition.
-# `operator/preflight-console-benchmark.sh --step NAME` checks everything that can fail without
-# launching the workload; run it first.
+# `scripts/operator/preflight-console-benchmark.sh --step NAME` checks everything that can fail
+# without launching the workload; run it first.
 #
 # #1025 retired the 48 historical one-shot arms (`--phase2` ... `--plumbing-floor-baseline`) and
 # the no-argument default (`artifacts/issue149`): each had its record and could only refuse. Their
@@ -40,7 +43,7 @@ if [[ "$#" != 2 || "$1" != --step ]]; then
 fi
 [[ "$2" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]] || { printf 'invalid --step name: %s\n' "$2" >&2; exit 2; }
 step_directory="steps/$2"
-root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$root"
 # shellcheck source=scripts/check-bench-preconditions.sh
 source "$root/scripts/check-bench-preconditions.sh"

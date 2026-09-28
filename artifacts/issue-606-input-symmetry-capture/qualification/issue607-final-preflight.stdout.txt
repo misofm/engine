@@ -1,1 +1,0 @@
-READY #606 preflight seal: artifacts/issue-606-input-symmetry-capture/input-symmetry-capture.seal.json

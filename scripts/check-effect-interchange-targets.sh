@@ -6,7 +6,7 @@
 # The cargo/wasm-objdump matrix itself, the qualification-policy call, and the literal
 # target-triple/Wasm-feature-flag strings scripts/check-effect-interchange-qualification.sh
 # polices, now all live in scripts/check-cross-targets.sh (one cached target dir per target
-# triple, deduplicated against scripts/check-parametric-eq-targets.sh and
+# triple, deduplicated against the parametric EQ's matrix and
 # scripts/check-builtins-targets.sh; B2 removed this file's own decorative copy of the per-mode
 # loop, which the qualification gate used to police instead of the real matrix). This file keeps:
 #   * `validate_wasm_exports`, sourced directly by

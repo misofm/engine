@@ -342,6 +342,11 @@ jobs:
         run: |
           python3 -B scripts/check-test-support-ci.py
           python3 -B scripts/test-test-support-ci.py
+      # #1027: every file under scripts/ outside scripts/operator/ is reached from a workflow.
+      - name: Script reachability policy and mutation tests
+        run: |
+          python3 -B scripts/check-script-reachability.py
+          python3 -B scripts/test-script-reachability.py
       - name: Console benchmark fixture integrity
         run: bash scripts/check-console-benchmark-fixture.sh
       # check-console-fixtures.sh and check-builtins-fixtures.sh (S1/S2): neither script has a
@@ -361,7 +366,6 @@ jobs:
         run: |
           bash scripts/check-bench-preconditions.sh
           bash scripts/test-console-benchmark.sh
-          bash scripts/test-wasm-kernel-timing.sh
       - name: Shared host facade policy and mutation tests
         run: |
           bash scripts/check-host-core-policy.sh

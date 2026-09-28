@@ -911,6 +911,92 @@ fn isolated_low_and_high_band_compression_reduce_only_the_selected_band() {
     }
 }
 
+/// Dual-mono bands compress each channel from its own level.
+///
+/// A loud channel beside a quiet one: under `DualMono` the quiet channel renders exactly the bits
+/// it renders beside another quiet channel, while the loud one is compressed; the swap holds too.
+/// `Maximum` is the control that shows the comparison can see a linked detector: there the loud
+/// channel pulls the quiet one down. `identity.rs::lane_identity_across_widths` carries the
+/// scalar result to both bank widths.
+///
+/// Ported by #1027 from the #748 active benchmark's untimed preflight
+/// (`tools/bench/src/multiband_active.rs`, `untimed_preflight_runs_actual_scalar_and_bank_shapes`),
+/// retired with the benchmark. Its activity check required the loud channel's band gain below
+/// -3 dB while the quiet channel's stayed above -0.1 dB; no surviving test compressed one channel
+/// of a dual-mono instance and not the other.
+///
+/// Red mutation: dispatch `LinkMode::DualMono` to `LINK_MAXIMUM` in `render` -> the quiet channel
+/// follows the loud one's gain and its bits move.
+#[test]
+fn dual_mono_bands_compress_each_channel_from_its_own_level() {
+    const FRAMES: usize = 3_072;
+    let values = active_values();
+    let tone = |amplitude: f32| {
+        (0..FRAMES)
+            .map(|index| {
+                let time = index as f32 / 48_000.0;
+                amplitude
+                    * 0.5
+                    * ((core::f32::consts::TAU * 120.0 * time).sin()
+                        + (core::f32::consts::TAU * 4_000.0 * time).sin())
+            })
+            .collect::<Vec<_>>()
+    };
+    let run = |link: LinkMode, left: &[f32], right: &[f32]| {
+        let mut effect = MultibandCompressorFactory
+            .prepare(request_with(&values, link, 128, false))
+            .expect("prepare");
+        let (mut left, mut right) = (left.to_vec(), right.to_vec());
+        for start in (0..FRAMES).step_by(128) {
+            process(
+                effect.as_mut(),
+                &mut left[start..start + 128],
+                &mut right[start..start + 128],
+                start as u64,
+                &[],
+                128,
+            );
+        }
+        (left, right)
+    };
+    let bits = |values: &[f32]| {
+        values
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>()
+    };
+    let loud = tone(0.8);
+    let quiet = tone(1.0e-4);
+    let (alone_left, alone_right) = run(LinkMode::DualMono, &quiet, &quiet);
+
+    let (loud_left, quiet_right) = run(LinkMode::DualMono, &loud, &quiet);
+    assert_eq!(
+        bits(&quiet_right),
+        bits(&alone_right),
+        "a loud left moved the quiet right of a dual-mono instance"
+    );
+    assert!(
+        rms(&loud_left[1_600..]) < rms(&loud[1_600..]) * 0.5,
+        "the loud left is compressed"
+    );
+    let (quiet_left, loud_right) = run(LinkMode::DualMono, &quiet, &loud);
+    assert_eq!(
+        bits(&quiet_left),
+        bits(&alone_left),
+        "a loud right moved the quiet left of a dual-mono instance"
+    );
+    assert!(
+        rms(&loud_right[1_600..]) < rms(&loud[1_600..]) * 0.5,
+        "the loud right is compressed"
+    );
+
+    let (_, linked_right) = run(LinkMode::Maximum, &loud, &quiet);
+    assert!(
+        rms(&linked_right[1_600..]) < rms(&alone_right[1_600..]) * 0.5,
+        "control: under the Maximum link the loud left pulls the quiet right down"
+    );
+}
+
 /// Every bank request is validated before any fallback, and the widths bind the right lane type.
 #[test]
 fn bank_requests_are_validated_before_any_fallback() {

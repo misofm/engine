@@ -11,9 +11,8 @@
 # up to and including #184; the paired four-leg set is issue #183's W4/W8 arm, derived from the
 # first so the two cannot drift apart here, and it carries its own block of cases at the bottom.
 #
-# The no-pipe shape is deliberate and is the same one `test-wasm-kernel-timing.sh` uses: the
-# helpers take JSON as an *argument*, never on stdin, because a helper on the right of a pipe runs
-# in a subshell and would discard the failure counter.
+# The no-pipe shape is deliberate: the helpers take JSON as an *argument*, never on stdin, because
+# a helper on the right of a pipe runs in a subshell and would discard the failure counter.
 set -euo pipefail
 [[ "$#" -le 1 ]] || { printf 'usage: %s\n' "$0" >&2; exit 2; }
 export LC_ALL=C
