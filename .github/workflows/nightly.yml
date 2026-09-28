@@ -223,7 +223,7 @@ jobs:
   math-sweeps:
     name: math exhaustive sweeps and wasm-console guest check
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install pinned Rust toolchain and Wasm standard library
@@ -237,6 +237,10 @@ jobs:
         run: cargo test --locked --release -p math --features lane --test m1_exhaustive -- --ignored
       - name: Fast dB tier gate F1, exhaustive over both operating domains
         run: cargo test --locked --release -p math --features lane --test f1_fast_db_bounds -- --ignored
+      # Issue #1045: per PR the session's canonical f32 spelling round-trips one million patterns;
+      # this is all 2^32, about six minutes on four cores.
+      - name: Session canonical f32 spelling, exhaustive round trip
+        run: cargo test --locked --release -p session --lib -- --ignored value::tests::exhaustive_f32_round_trip
       # design §6.3: the wasm-console-guest build moved off the per-PR wasm job to nightly as a
       # `cargo check` -- it exists so the nightly measurement does not discover a broken input,
       # and this is that nightly.
@@ -257,9 +261,9 @@ jobs:
         run: node scripts/check-stem-store-v1.mjs --self-test --budgets
 
   release-budgets:
-    name: release-mode wall-clock budgets (host-web, host-core)
+    name: release-mode wall-clock budgets (host-web, host-core, graph-compiler, builtins-compiler)
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install pinned Rust toolchain
@@ -269,12 +273,21 @@ jobs:
       # number recorded against a product budget instead of a debug-build guess.
       #
       # Exact selectors keep unrelated opt-in timing tests out of this product-budget job.
+      #
+      # Issue #1045 moved the 65,537-track gates here off the per-PR debug job, which keeps a
+      # constrained compile at that size: graph-compiler's compile and bind under its own 60 s
+      # bound (the only guard of #962's linear compile and bind), then builtin preparation and the
+      # phase-two allocation row at the same size. Overflow checks are on for these three, so a
+      # narrowed track counter panics instead of wrapping.
       - name: Release-mode wall-clock budget tests
         run: |
           set -euo pipefail
           cargo test --locked --release -p host-web --lib -- --ignored --exact tests::maximum_document_dense_invalid_boot_finishes_under_one_second_in_release
           cargo test --locked --release -p host-core --test effect_observation -- --ignored --exact observation_cost_classes_are_separated_from_a_computed_scan_in_release
           cargo test --locked --release -p host-core --test prepare -- --ignored --exact dense_refusal_diagnostics_finish_under_one_second_in_release
+          cargo test --locked --release --config profile.release.overflow-checks=true -p graph-compiler --test scale -- --ignored --exact compiles_and_binds_65_537_tracks_with_builtins
+          cargo test --locked --release --config profile.release.overflow-checks=true -p builtins-compiler --features test-support --test scale -- --ignored --exact prepares_65_537_tracks_or_rejects_only_the_configured_resource
+          cargo test --locked --release --config profile.release.overflow-checks=true -p builtins-compiler --features test-support --test allocation_tracker -- --ignored --exact phase_two_allocator_layouts_match_the_checked_resource_report_at_65_537_tracks
 
   failure-notice:
     name: report nightly failure as an issue

@@ -16,6 +16,9 @@ const SESSION: &str = include_str!("../../../fixtures/session/v1/canonical.json"
 /// One past the former 65,536 boundary.
 const TRACKS: u32 = 65_537;
 
+/// The graph [`scale_session`] lowers to: seven stage nodes per track, the route and the output.
+const NODES: u64 = 7 * TRACKS as u64 + 2;
+
 fn graph_caps() -> GraphCompileCaps {
     GraphCompileCaps {
         maximum_nodes: u64::MAX,
@@ -85,28 +88,34 @@ fn builtin_caps() -> BuiltinCompileCaps {
 ///
 /// Issue #964: through `compile_with_builtins` at `Backend::current()`, the production entry at
 /// the width this build renders at. It compiled without builtins at `Backend::Scalar` until then,
-/// where no bank attaches; both compiles now carry the builtin banks, and the refused one hands
-/// both prepared inputs back.
+/// where no bank attaches; the refused compile hands both prepared inputs back.
+///
+/// Issue #1045: this is the per-PR half, in the debug job with overflow checks on. The node cap
+/// sits one below the graph this session lowers to, so the refusal is also a count of that graph
+/// at 65,537 tracks: a compiled track ceiling adds a diagnostic other than
+/// `graph.resource.limit`, and a narrowed track index that drops any track's nodes fits under the
+/// cap and is no longer refused. The unconstrained compile, the bind and the render run nightly,
+/// in release under a wall-clock bound, in [`compiles_and_binds_65_537_tracks_with_builtins`].
 #[test]
 fn compiles_65_537_tracks_or_rejects_only_a_configured_resource() {
     let session = scale_session();
-    let dispatch = Backend::current();
+    let builtins = prepare_session_builtins(&session, &[], builtin_caps())
+        .expect("constrained scale builtins");
 
     let mut constrained = graph_caps();
-    constrained.maximum_nodes = 1;
+    constrained.maximum_nodes = NODES - 1;
     let failure = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
-        dispatch,
+        dispatch: Backend::current(),
         plan_id: 1,
         effects: EffectPreparedSession {
-            session: session.clone(),
+            session,
             entries: Vec::new(),
         },
-        builtins: prepare_session_builtins(&session, &[], builtin_caps())
-            .expect("constrained scale builtins"),
+        builtins,
         caps: constrained,
     })
     .err()
-    .expect("configured cap rejects");
+    .expect("a node cap one below the session's graph rejects");
     assert!(
         failure
             .diagnostics
@@ -119,24 +128,11 @@ fn compiles_65_537_tracks_or_rejects_only_a_configured_resource() {
         TRACKS as usize,
         "the refused compile hands every track's builtins back"
     );
-
-    let builtins = prepare_session_builtins(&session, &[], builtin_caps()).expect("scale builtins");
-    let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
-        dispatch,
-        plan_id: 2,
-        effects: EffectPreparedSession {
-            session,
-            entries: Vec::new(),
-        },
-        builtins,
-        caps: graph_caps(),
-    })
-    .unwrap_or_else(|failure| panic!("scale diagnostics: {:?}", failure.diagnostics));
-    assert_eq!(artifact.report().estimate.logical_nodes, 458_761);
-    assert_eq!(artifact.report().estimate.edges, 393_224);
-    assert_eq!(artifact.report().estimate.routes, 1);
-    assert_eq!(artifact.report().estimate.effects, 0);
-    assert_eq!(artifact.graph().sequential_schedule.len(), 458_761);
+    assert_eq!(
+        failure.builtins.processor_count(),
+        3 * TRACKS as usize,
+        "every track's three builtin processors were prepared"
+    );
 }
 
 /// Issue #962: the same session through the production entry, at the width this build renders at,
@@ -148,16 +144,21 @@ fn compiles_65_537_tracks_or_rejects_only_a_configured_resource() {
 /// before the fix). This one attaches the builtin banks every host renders and then binds the
 /// plan, because bind had quadratic scans of its own. The bank-membership scan and the bind scans
 /// this session reaches are exercised by the track count alone, so a regression in them shows up
-/// as this test's time rather than as an assertion. This session has no effects and one route, so
-/// #962's effect-control, `Backend::Scalar` interval and route-fold metadata fixes are not
-/// exercised here at scale (#967 adds sessions that reach them).
+/// as this test's time, which the bound below turns into a failure. This session has no effects
+/// and one route, so #962's effect-control, `Backend::Scalar` interval and route-fold metadata
+/// fixes are not exercised here at scale (#967 adds sessions that reach them).
 ///
-/// There is no wall-clock bound, because a test-harness clock is not one CI can hold reliably: the
-/// runners' speed varies and this binary's tests run in parallel. The backstop is the debug job's
-/// timeout, which the quadratic code cannot finish inside. The measured times are recorded in the
-/// #962 brief's evidence.
+/// Issue #1045: this runs nightly, in release with overflow checks on (`nightly.yml`,
+/// `release-budgets`), under a 60 s wall-clock bound on the whole path from the session compile to
+/// the rendered block. The linear code takes about a third of that; #962's quadratic scans took
+/// minutes. It is the only test that compiles without a cap and binds at this size, so a track
+/// ceiling or a narrowed index in bank attachment or bind is caught here, a day late at most.
 #[test]
+#[ignore = "release-mode 65,537-track budget; runs nightly"]
 fn compiles_and_binds_65_537_tracks_with_builtins() {
+    use std::time::{Duration, Instant};
+
+    let started = Instant::now();
     let session = scale_session();
     let builtins = prepare_session_builtins(&session, &[], builtin_caps()).expect("scale builtins");
     let dispatch = Backend::current();
@@ -172,7 +173,11 @@ fn compiles_and_binds_65_537_tracks_with_builtins() {
         caps: graph_caps(),
     })
     .unwrap_or_else(|failure| panic!("with-builtins scale diagnostics: {:?}", failure.diagnostics));
-    assert_eq!(artifact.graph().sequential_schedule.len(), 458_761);
+    assert_eq!(artifact.report().estimate.logical_nodes, NODES);
+    assert_eq!(artifact.report().estimate.edges, 6 * u64::from(TRACKS) + 2);
+    assert_eq!(artifact.report().estimate.routes, 1);
+    assert_eq!(artifact.report().estimate.effects, 0);
+    assert_eq!(artifact.graph().sequential_schedule.len() as u64, NODES);
     // Every track's three bankable builtin stages -- post-input, fader, matrix -- are bank members
     // at a SIMD width; at scalar width no bank attaches at all.
     let members = if dispatch.width() > 1 {
@@ -210,4 +215,9 @@ fn compiles_and_binds_65_537_tracks_with_builtins() {
             RenderTime { absolute_sample: 0 },
         )
         .expect("the bound plan renders");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(60),
+        "65,537-track session compile, builtins, graph compile, bind and one block took {elapsed:?}"
+    );
 }
