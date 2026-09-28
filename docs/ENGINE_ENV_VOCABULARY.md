@@ -169,8 +169,6 @@ Written to stdout by an audit binary immediately outside its armed render scope,
 | `MISO_ENGINE_BUILTINS_RT_END` | builtin direct-chain audit: disarmed. |
 | `MISO_ENGINE_BUILTINS_GRAPH_RT_BEGIN` | builtin graph audit: armed. |
 | `MISO_ENGINE_BUILTINS_GRAPH_RT_END` | builtin graph audit: disarmed. |
-| `MISO_ENGINE_SOURCE_RT_BEGIN` | source audit: armed. |
-| `MISO_ENGINE_SOURCE_RT_END` | source audit: disarmed. |
 | `MISO_ENGINE_EFFECT_RT_BEGIN` | effect-contract audit: armed. |
 | `MISO_ENGINE_EFFECT_RT_END` | effect-contract audit: disarmed. |
 | `MISO_ENGINE_PARAMETRIC_EQ_RT_BEGIN` | parametric-EQ audit: armed. |

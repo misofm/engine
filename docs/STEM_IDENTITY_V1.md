@@ -47,9 +47,9 @@ stay integer-valued through this boundary; an implementation may not make identi
 floating-point decoder's rounding behavior.
 
 BLAKE3-256 is the canonical PCM identity vocabulary. No whole-stem residency is permitted, so a
-shipped incremental implementation is mandatory where one-shot WebCrypto cannot cover the input.
-The Rust reference oracle uses the pinned workspace `blake3` implementation. Artifact, package,
-effect, and render hashes retain their own schemes and are outside this contract.
+shipped incremental implementation is mandatory where one-shot WebCrypto cannot cover the input:
+the browser stem store's is `hosts/host-web/web/stem-store/incremental-blake3.js`. Artifact,
+package, effect, and render hashes retain their own schemes and are outside this contract.
 
 ## Frozen conformance vectors
 
@@ -74,42 +74,24 @@ All six rows have committed headerless `.pcm` files. The stereo row at each dept
 committed `.wav` fixture. The reference WAVE path MUST strip the two different wrappers and
 produce bytes and identity equal to the corresponding `.pcm` row.
 
-## Reference oracle
+## Implementations and the corpus gate
 
-`stem-hasher` is the publishing and migration oracle. It streams raw PCM or parses
-RIFF/WAVE and RF64/WAVE through the engine's own `source` parser, serializes each
-sample through the rules above, optionally emits the canonical preimage, and prints the identity.
-It never retains a complete stem.
+The engine carries no reference hashing tool. Hosts decode stems themselves and submit planar PCM
+(#1035 removed the native decode workers and the Rust `stem-hasher` oracle with them), so the
+contract is implemented where stems are decoded and published:
 
-Raw input is little-endian canonical PCM at the explicitly supplied shape: signed two's-complement
-for depths 16/24, or raw IEEE-754 bit patterns for `32f`:
+* the browser stem store, `hosts/host-web/web/stem-store/identity.js`, tested by
+  `hosts/host-web/tests/stem-store-hash-v1.mjs` and `stem-store-core-v1.mjs`;
+* the release CLI (`misofm/cli`, `src/stem-identity.ts`), which pins itself to a copy of
+  `VECTORS.tsv`.
 
-```sh
-cargo run --locked -p stem-hasher -- raw \
-  --input stem.pcm --channels 2 --bit-depth 24 --frames 10617984
-```
-
-WAVE supplies its shape through the engine parser and is accepted only for signed PCM16, packed
-PCM24, or IEEE float32:
-
-```sh
-cargo run --locked -p stem-hasher -- wave --input stem.wav
-```
-
-With no `--output`, stdout is the identity. `--output PATH` creates a new canonical-PCM file and
-still prints the identity to stdout; it refuses to replace an existing path. `--output -` writes
-canonical bytes to stdout and writes the identity to stderr, keeping the binary stream pure.
-
-The corpus gate is:
+Any other implementation, a mobile app's included, MUST reproduce every row of the corpus. The
+corpus gate is the independent Python-standard-library generator, which re-derives every `.pcm`
+preimage, `.wav` wrapper and identity and fails on any drift:
 
 ```sh
 python3 fixtures/stem-identity/v1/generate.py --check
-cargo test --locked -p stem-hasher
 ```
-
-It exercises every row through the raw library and CLI paths and both WAVE fixtures through the
-engine parser and CLI. Reversing sample endianness makes every pinned vector fail; changing stereo
-channel order makes both stereo vectors fail.
 
 ## Render identity and future backends
 

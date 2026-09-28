@@ -37,7 +37,6 @@ members = [
     "tools/console-workload",
     "tools/audit",
     "tools/native-pcm-runner",
-    "tools/stem-hasher",
     "tools/wasm-gate-corpus",
     "tools/wasm-gate-guest",
     "tools/wasm-console-guest",
@@ -90,7 +89,6 @@ bench-support = { path = "tools/bench-support", version = "0.1.0" }
 console-workload = { path = "tools/console-workload", version = "0.1.0" }
 wasm-gate-corpus = { path = "tools/wasm-gate-corpus", version = "0.1.0" }
 wasm-gate-guest = { path = "tools/wasm-gate-guest", version = "0.1.0" }
-stem-hasher = { path = "tools/stem-hasher", version = "0.1.0" }
 sha2 = { version = "=0.11.0", default-features = false }
 blake3 = { version = "=1.8.3", default-features = false }
 wide = { version = "=1.6.1", default-features = false }

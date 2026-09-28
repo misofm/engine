@@ -490,7 +490,7 @@ jobs:
             --exclude conformance --exclude audit --exclude bench --exclude console-workload \
             --exclude wasm-gates --exclude wasm-console --exclude wasm-gate-guest \
             --exclude wasm-console-guest --exclude wasm-gate-corpus \
-            --features builtins-compiler/test-support,source/test-support,graph/test-support,host-web/test-support,host-core/test-support,effect-compiler/test-support,protocol/test-support,engine/realtime-audit
+            --features builtins-compiler/test-support,graph/test-support,host-web/test-support,host-core/test-support,effect-compiler/test-support,protocol/test-support,engine/realtime-audit
       - name: Native host smoke
         run: cargo run --locked -p host-native
 
@@ -584,18 +584,9 @@ jobs:
           set -e
           if (( pipeline_status[0] != 0 )); then exit "${pipeline_status[0]}"; fi
           if (( pipeline_status[1] != 0 )); then exit "${pipeline_status[1]}"; fi
-      - name: Issue-544 source-duration runtime caller audit
-        run: |
-          set -o pipefail
-          set +e
-          ./target/release/audit source-duration 2>target/issue544-source-duration-audit.stderr | tee target/issue544-source-duration-audit.json
-          pipeline_status=("${PIPESTATUS[@]}")
-          set -e
-          if (( pipeline_status[0] != 0 )); then exit "${pipeline_status[0]}"; fi
-          if (( pipeline_status[1] != 0 )); then exit "${pipeline_status[1]}"; fi
       - name: Validate Issue-544 runtime audit records
         run: |
-          python3 -B - target/issue544-capi-audit.json target/issue544-source-duration-audit.json <<'PY'
+          python3 -B - target/issue544-capi-audit.json <<'PY'
           import json
           import re
           import sys
@@ -628,7 +619,7 @@ jobs:
                   raise AssertionError(f"{path}: {field} is not an integer")
               return value
 
-          capi_path, source_path = sys.argv[1:]
+          (capi_path,) = sys.argv[1:]
           capi = record(capi_path)
           capi_expected = {
               "schema_version", "kind", "calls", "sample_rate_hz", "quantum_frames",
@@ -653,39 +644,6 @@ jobs:
               raise AssertionError(f"{capi_path}: stable_output_address")
           if type(capi["pcm_digest"]) is not str or re.fullmatch(r"[0-9a-f]{16}", capi["pcm_digest"]) is None:
               raise AssertionError(f"{capi_path}: pcm_digest")
-
-          source = record(source_path)
-          source_expected = {
-              "schema_version", "kind", "minute_frames", "multi_hour_frames",
-              "minute_file_bytes", "multi_hour_file_bytes", "layout_entries",
-              "layout_total_bytes", "layout_equal", "source_report_equal",
-              "graph_report_equal", "minute_rss_bytes", "multi_hour_rss_bytes", "os",
-              "arch", "rust", "timed_benchmark_invocations",
-          }
-          exact_keys(source, source_expected, source_path)
-          if type(source["schema_version"]) is not int or source["schema_version"] != 1:
-              raise AssertionError(f"{source_path}: schema_version")
-          if source["kind"] != "issue041_source_duration_layout":
-              raise AssertionError(f"{source_path}: kind")
-          for field, expected in {
-              "minute_frames": 2880000, "multi_hour_frames": 518400000,
-              "minute_file_bytes": 11520044, "multi_hour_file_bytes": 2073600044,
-              "layout_entries": 16, "layout_total_bytes": 6472,
-              "timed_benchmark_invocations": 0,
-          }.items():
-              if integer(source[field], field, source_path) != expected:
-                  raise AssertionError(f"{source_path}: {field} != {expected}")
-          for field in ("layout_equal", "source_report_equal", "graph_report_equal"):
-              if type(source[field]) is not bool or not source[field]:
-                  raise AssertionError(f"{source_path}: {field}")
-          for field in ("minute_rss_bytes", "multi_hour_rss_bytes"):
-              if integer(source[field], field, source_path) < 0:
-                  raise AssertionError(f"{source_path}: {field} is negative")
-          if source["os"] != "linux":
-              raise AssertionError(f"{source_path}: os")
-          for field in ("arch", "rust"):
-              if type(source[field]) is not str or not source[field]:
-                  raise AssertionError(f"{source_path}: {field}")
           PY
       - name: Delay realtime allocation and syscall audit
         run: ./target/release/audit delay --blocks 100000
@@ -701,10 +659,8 @@ jobs:
         run: |
           bash scripts/trace-builtins-audit.sh target/release/audit
           bash scripts/trace-builtins-graph-audit.sh target/release/audit
-      - name: Source and graph realtime audits
-        run: |
-          bash scripts/trace-source-audit.sh target/release/audit
-          bash scripts/trace-graph-audit.sh target/release/audit
+      - name: Graph realtime audit
+        run: bash scripts/trace-graph-audit.sh target/release/audit
       - name: Protocol caller-buffer allocation audit
         run: bash scripts/run-protocol-allocation-audit.sh target/release/audit
       - name: Realtime audit hooks and syscall trace
