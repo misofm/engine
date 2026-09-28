@@ -85,3 +85,30 @@ with `08-…`, so the full CI route runs once.
 - Delete only. Do not rewrite history, do not move records to another path in the same change, and
   do not touch `artifacts/steps/`.
 - Commit on `codex/<issue>-prune-artifacts`.
+
+## Amendments (Sol verification, 2026-09-28)
+
+See `../VERIFY-DEAD-CODE.md`, finding F15. The central claim holds.
+
+1. **Reproduced:** 275 folders plus one loose file, 10,685 of 12,789 tracked files, 62,445,918 of
+   102,503,598 bytes; 28 ruling links in 12 rulings naming 17 folders (2,931,608 bytes); 23 live-doc
+   links in 9 files, 19 in `docs/issue880-*`. No script, test, jq validator,
+   `check-step-vocabulary.py`, `run-console-benchmark.sh`, its preflight or
+   `run-web-mixing-automation-benchmark.sh` reads a sealed record outside `artifacts/steps/`; the
+   only readers of real folders are three test scripts deleted together with their folders by
+   04b/04c. On a scratch copy with this draft, 06 and 08 applied, `check-dsp-research.sh`,
+   `test-dsp-research.sh`, `check-builtins-listening.sh`, `check-session-policy.sh`,
+   `test-session-policy.sh`, `check-artifact-evidence-leak.sh`, `check-bench-preconditions.sh`,
+   `check-step-vocabulary.py`, `check-ci-path-routing.py` and `test-ci-path-routing.py` pass.
+2. **Missed: citations that live only on GitHub.** Open #560 (no local spec) points readers at
+   `artifacts/issue470-delivery-qualification`, the loose `artifacts/issue470-wasm-resource-derivation.md`,
+   and the `issue555-*`, `issue557-qualification`, `issue558-*`, `issue563-*` and `issue570-*`
+   folders as "durable raw evidence". Gate 4's `rg` cannot see issue bodies. Add a step: grep the
+   bodies of all open issues (`gh issue list --state open --json number,body`) for `artifacts/`
+   and either keep those folders or post a comment on each issue with the commit permalink.
+3. **CI cost of step 4:** the doc-comment edits in `crates/lane` also turn on the router's
+   `math_closure` (the M1 and F1 exhaustive sweeps in `test-release`), not only the `full` route.
+   Prefer the in-place comment edit that keeps line counts, and batch it with 08 as drafted.
+4. **Keep `artifacts/compressor-round1/`** (already in the 17): the wasm floor rule of
+   `docs/rulings/effect-floor-accounting.md:815-840` derives its residual from it (R9 amendment).
+5. Mobile scope: no effect.

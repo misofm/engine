@@ -121,3 +121,45 @@ protocol's only shipped consumer. `R4-…`'s WAV-parser slice is tied to this.
 ## Standing rules for the implementer
 
 - Commit on `codex/<issue>-remove-c-abi`. Do not run timed benchmarks.
+
+## Amendments (Sol verification, 2026-09-28)
+
+See `../VERIFY-DEAD-CODE.md`, finding F3. **The owner corrected the product scope after the audit:
+fans open and play sessions in native iOS and Android apps.** The recommendation "remove unless a
+native or cloud embedder is on the roadmap" now resolves to **keep the C ABI**. The ruling text
+above ("No native or cloud embedding is planned") contradicts the owner and must not be recorded.
+
+1. **`crates/capi` is the mobile playback surface, and it already covers playback.**
+   - It builds as `rlib`, `staticlib` and `cdylib` (`crates/capi/Cargo.toml:11`): a static library
+     for an iOS framework, a shared library behind a JNI shim for Android.
+   - `include/miso_engine_v1.h:213-249` exposes session compile from JSON, planar PCM submission
+     and seek, render at an absolute sample, command submission and event readout (meters and
+     diagnostics).
+   - It compiles for `aarch64-apple-ios` and `aarch64-linux-android` (`cargo check --all-targets
+     --all-features`, Rust 1.98.1; not linked, not run: there is no NDK, Xcode or device here, and
+     no CI leg).
+2. **Its dependencies are live with it:** `host-core`'s `control-provider` and
+   `control_provider.rs`, the engine's block-boundary plan replacement (`reserve_replacement`,
+   `commit`, `render_contiguous`; used from `capi/src/runtime/control.rs` and
+   `capi/src/runtime/plan.rs:201`), `lane::fpenv` (which has an AArch64 branch), and `protocol`
+   (R3). The audit is right that the browser uses none of these and that only capi exercises plan
+   replacement.
+3. **Keep `audit capi`.** Its 100,000-call render audit (zero allocations, locks, syscalls) is the
+   only realtime audit of the entry point a mobile app will call. It runs on x86 only; an aarch64
+   equivalent is part of R1's recommended CI leg.
+4. **Native benchmarking does not depend on capi.** `tools/console-workload` and `tools/bench` do
+   not link it; `tools/audit` links it only for its `capi` subject.
+5. **What is still a separate, optional call:** `tools/native-pcm-runner` (a desktop WAV-file
+   reference runner through the C ABI) is not a mobile deliverable, and its CI step is a static
+   seal. It can go on its own ruling, together with R4 Part B; `fixtures/capi-qualification/v1`
+   (draft 06) is dead either way.
+6. **Known mobile gaps this draft should hand to new issues rather than hide:**
+   - live control: per `#140`'s spec (line 13), admitted protocol automation has no production
+     consumer except cancellation, so a fan's live parameter change through the C ABI reaches PCM
+     only by a structural plan replacement, which resets source rings at the boundary
+     (`capi/src/runtime/control.rs:46-53`). See the amendment to `02-…`;
+   - no aarch64 build, lint or test in CI (R1 amendment).
+7. **Revised recommendation:** retire this draft as written. If the owner wants the runner gone,
+   file a narrower "remove native-pcm-runner" draft (runner, its fixtures, its lint step and the
+   `docs/NATIVE_PCM_REFERENCE_RUNNER_V1.md` doc), gated by the capi tests and `audit capi` staying
+   green.

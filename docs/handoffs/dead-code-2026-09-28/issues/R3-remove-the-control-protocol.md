@@ -108,3 +108,29 @@ The owner ruling, then `R2-…` (capi carries protocol frames: 179 `protocol::` 
 ## Standing rules for the implementer
 
 - Commit on `codex/<issue>-remove-protocol`. Do not run timed benchmarks.
+
+## Amendments (Sol verification, 2026-09-28)
+
+See `../VERIFY-DEAD-CODE.md`, finding F3. With mobile playback in scope and the C ABI kept (R2
+amendment), **the protocol cannot be removed.**
+
+1. **The C ABI's command path is the protocol.** `miso_engine_v1_submit_command` decodes a binary
+   protocol frame through the protocol controller (`capi/src/runtime/control.rs:675-690`,
+   `prepare_command_frame`), and events leave as protocol frames. capi names `protocol::` 55 times
+   outside its tests (`ffi.rs` 21, `runtime/control.rs` 29, `runtime/compile.rs` 4,
+   `runtime/mod.rs` 1) and 115 times in `runtime/tests.rs`.
+2. **The browser facts hold.** `protocol` is not in host-web's closure on `wasm32` or on
+   `aarch64`, and neither `sdk/` nor `hosts/host-web/web/` mentions it. host-web's command ABI
+   cannot simply be reused natively: its exports pass pointers as 32-bit values
+   (`hosts/host-web/src/ffi.rs:2725`), so a native version would need a new wrapper around
+   `admit_commands`.
+3. **What is still genuinely unneeded:** the WebSocket sidecar (no code; open #25) and the local
+   sidecar transport text in AGENTS.md; the 20 protocol items rustc proves unused (draft 01, "Out of
+   scope"), which can now be deleted in a protocol-only follow-up of draft 01.
+4. **Open question the owner must rule on:** whether mobile live control (a fan's fader, mute or
+   effect change during playback) goes through protocol automation (#140, still open; the partial
+   endpoints of `02-…` and protocol's `delivery.rs`/`controller_delivery.rs` are its unwired
+   pieces) or through structural plan replacement only.
+5. **Revised recommendation:** retire this draft. Replace it with (a) the draft-01 follow-up for
+   the 20 dead protocol items, and (b) a ruling that the sidecar/WebSocket transport is out of
+   scope, which edits only AGENTS.md and closes #25.

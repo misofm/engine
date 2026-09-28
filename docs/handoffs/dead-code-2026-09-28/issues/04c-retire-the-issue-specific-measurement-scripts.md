@@ -119,3 +119,22 @@ operator shell scripts, only `preflight-console-benchmark.sh` resolves the root 
 
 - Launch no timed workload.
 - Commit on `codex/<issue>-retire-measurement-scripts`.
+
+## Amendments (Sol verification, 2026-09-28)
+
+See `../VERIFY-DEAD-CODE.md`. The slice is sound; three facts need correcting.
+
+1. **Two of the "unreached" Rust files run in CI today.** `crates/compressor/tests/bench_ramp.rs`
+   has two non-ignored tests (`:375`, `:541`), including the MQ-2 preflight test the draft ports;
+   `test-debug-b` (`--all-targets -p compressor`) runs them. The four `tools/bench/src/input_symmetry.rs`
+   tests run in audit-native's `cargo test --release -p bench`. So "reached by no workflow" is
+   true of the scripts only, and the `-- --list` diff in gate 5 will show these tests leaving
+   `test-debug-b` and audit-native. The port-first rule in step 1 already covers them.
+2. **Operator-script roots.** `prepare-builtins-listening.sh`'s repair (step 4) now also lives in
+   the new `00b-repair-the-operator-script-roots.md`; do it in whichever lands first.
+3. **Reachability gate (4, last bullet):** the verifier's reachability run (jq `include`, Python
+   imports, `source`, and `bash scripts/…` inside scripts) reproduced the 18-file count, and every
+   `scripts/operator/` script except the stem-store eval runner is unreached, as the README intends.
+   Make the reachability check a committed lint script with a mutation test, or the rule in
+   `scripts/operator/README.md` stays unenforced.
+4. Mobile scope: no effect.

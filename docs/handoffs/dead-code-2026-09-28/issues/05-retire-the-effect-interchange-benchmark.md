@@ -87,3 +87,16 @@ ruled first, it absorbs this draft.
 
 - Launch no timed workload.
 - Commit on `codex/<issue>-retire-interchange-benchmark`.
+
+## Amendments (Sol verification, 2026-09-28)
+
+See `../VERIFY-DEAD-CODE.md`, finding F14.
+
+1. **Lint coupling the draft omits:** `scripts/test-bench-policy.sh:356-394` mutates
+   `tools/bench/src/effect_interchange.rs`. Deleting the subject turns those cases red. Re-point
+   them (keeping each case's intent) and add `check-bench-policy.sh` and `test-bench-policy.sh` to
+   gate 4.
+2. Confirmed: `exact_four_rate_migration_envelope_without_timing` is the only test of the four-rate
+   envelope digest (`migration_terminal.rs:2147`/`:2154` is ignored or 48 kHz only).
+3. Mobile scope: no effect. Mobile playback carries no effect state (R6 amendment), so if R6b is
+   ruled first this draft is absorbed as written.

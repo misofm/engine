@@ -106,3 +106,26 @@ executor.
 
 - No product behaviour change; a moved console digest is a hard stop.
 - Commit on `codex/<issue>-delete-handover-and-render-input`. Do not run timed benchmarks.
+
+## Amendments (Sol verification, 2026-09-28)
+
+See `../VERIFY-DEAD-CODE.md`, finding F3. Spot-checked facts hold: the only production executor is
+`GraphExecutor` (`crates/graph/src/lib.rs:2626`), which ignores `_input` (`:2678`); the only
+`PreparedPlanExecutor` implementers besides it are engine's test executors
+(`realtime/mod.rs:52`, `:345`); the `plan_exchange.rs`/`plan.rs` wrappers were deleted in a scratch
+copy and every build passed, `aarch64-apple-ios` and `aarch64-linux-android` included. Part 2 was
+not compile-proved here.
+
+**The corrected scope makes this draft touch the mobile path.** With the C ABI kept for mobile
+playback (R2 amendment), `RealtimePlanOwner::enter_block` (`plan_exchange.rs:395-420`) is the
+block-boundary plan swap capi uses on every structural edit, and `capi/src/runtime/plan.rs:201-206`
+is a Part-2 call site. Neither the header nor capi's behaviour should change (the C render entry
+has no input planes), but the gates must prove it:
+
+1. Add `cargo test --locked -p engine -p capi` (plan replacement, resource lifecycle and the
+   layout mirrors in `crates/capi/tests/resource_lifecycle.rs`) and the audit-native capi runtime
+   audit with its inline validator (`qualification.yml:572-654`) on base and change.
+2. Add `cargo check --target aarch64-apple-ios` and `--target aarch64-linux-android` for
+   `-p engine -p graph -p capi -p host-core` (a toolchain with the aarch64 std; CI has none).
+3. Keep `reserve_replacement`, `epoch`, `commit`, `next_absolute_sample` and `render_contiguous`:
+   they are capi's, not multicore remnants.

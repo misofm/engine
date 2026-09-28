@@ -126,3 +126,48 @@ the ruling-dependent removals so their diffs stay small.
 
 - No product behaviour change; a moved console digest is a hard stop.
 - Commit on `codex/<issue>-delete-unused-items`. Do not run timed benchmarks.
+
+## Amendments (Sol verification, 2026-09-28)
+
+See `../VERIFY-DEAD-CODE.md`, findings F8 and F3. A scratch copy with **47 of the 129 items deleted
+outright** (18 crates, every host-web constant, the engine plan/exchange wrappers, lane, source,
+rack, dsp-reference, builtins, session, effect-contract, effect-package, graph, rack-compiler with
+its `engine` dependency, conformance, effect-compiler, builtins-compiler, host-core and stem-hasher)
+was built natively (`--workspace --all-targets --all-features`), for `wasm32` `simd128`
+(`-p host-web -p host-core`), for the scalar-wasm package list, for the fuzz bins, and with Rust
+1.98.1 for `aarch64-apple-ios` and `aarch64-linux-android` (`--workspace --lib --all-features`,
+excluding the two tools whose `blake3` build script needs a cross C compiler) and
+`aarch64-unknown-linux-gnu` `--all-targets` for lane, soft-clip, graph, engine, capi and host-core.
+45 of the 47 are dead on every one of those builds. Two are not:
+
+1. **`parametric-eq` `lib.rs:239` `reset_ramping_elided_blocks` and `:244`
+   `ramping_elided_block_count` are used.** The `#[cfg(test)] mod ramping_elision` (`lib.rs:6379`)
+   calls them at `:7601`, `:7604` and `:7677`; deleting them gives E0425 in the `parametric-eq` lib
+   test build. Delete only the two `test_only_*` hooks (`:250`, `:258`) and narrow the two helpers
+   from `cfg(any(test, feature = "test-support"))` to `#[cfg(test)]`, or clippy `--all-features`
+   warns on them. So the table's parametric-eq row is 2 deletions plus 2 narrowings, and the
+   "unused in both builds" statement is wrong for these two.
+2. **`Cargo.lock` changes.** Removing `rack-compiler`'s `engine` dependency rewrites the lockfile.
+   Commit it in the same change, or every `--locked` gate fails.
+3. **Expected knock-on warnings** (clippy `-D warnings` fails until removed): unused imports
+   `ResponseSnapshot*` (`engine/src/realtime/plan_exchange.rs:15`), `QuantumFrames`
+   (`graph/src/lib.rs:230`), `RenderTime` (`host-core/src/render_session.rs:35`). Step 1 already
+   covers these ("delete that too and list it").
+4. **The no-op `allow(dead_code)` count is at most 45, not 47.** Stripping all 56 non-test
+   attributes (55 outer, plus the inner `#![allow(dead_code)]` at `engine/src/realtime/plan.rs:3`,
+   which suppresses nothing) leaves 13 warnings natively, 11 on `wasm32` and 12 on iOS. The draft's
+   keep-list misses `tools/native-pcm-runner/src/lib.rs:733` (`fault`, read only by test fault
+   injection at `:1004-1159`). No extra warning appears on aarch64.
+5. **Mobile scope (the owner's correction): no item here is used by AArch64-only code**, and all
+   of them compile out of the capi closure cleanly. But the draft's "Out of scope" list changes:
+   - the 20 `protocol` items: R3 is now retired (the C ABI needs the protocol), so delete them in a
+     protocol-only follow-up of this draft, with the same gates;
+   - `host-mobile::mobile_target_smoke`: goes only if R1's reduced stub removal is ruled.
+6. **Non-Rust consumers checked:** the four host-web constants have none. The SDK reads those sizes
+   through `miso_engine_web_v1_spectrum_result_bytes` (`hosts/host-web/src/ffi.rs:3127`) and
+   `…_observation_status_bytes` (`:4832`), which compute their own values;
+   `tools/parameter-metadata/src/abi_layout.rs` imports none of them; `node sdk/codegen/assets.mjs
+   --check` passes on the scratch tree.
+7. **Add gates:** an aarch64 `cargo check --lib` for `-p lane -p engine -p host-core -p capi -p
+   source` (a toolchain with the aarch64 std; CI has none yet), and `cargo check --manifest-path
+   fuzz/Cargo.toml --bins`.

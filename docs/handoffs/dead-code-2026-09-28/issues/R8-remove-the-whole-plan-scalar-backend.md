@@ -134,3 +134,37 @@ then banked.
 
 - Step 1 is its own checkpoint commit; the deletion must not land without it.
 - Commit on `codex/<issue>-remove-scalar-plans`. Do not run timed benchmarks.
+
+## Amendments (Sol verification, 2026-09-28)
+
+See `../VERIFY-DEAD-CODE.md`, findings F6 and F7. **Defer this draft.** Two facts change it.
+
+1. **"No shipped target produces Scalar" is an Android-ABI question now.**
+   `lane::Backend::current()` (`crates/lane/src/backend.rs:60-68`) gives `Scalar` for every
+   architecture other than x86, x86_64, aarch64 and `wasm32`+`simd128`, silently: only x86 has a
+   `compile_error!` guard (`lane/src/lib.rs:72-80`). With mobile playback in scope, a 32-bit
+   `armeabi-v7a` Android build (`target_arch = "arm"`) would run exactly the whole-plan Scalar path
+   this draft deletes. Failure scenario: the owner ships `armeabi-v7a` for older devices, R8 has
+   landed, and that build either no longer compiles or has no execution mode. The owner must first
+   rule which Android ABIs ship (R1 amendment, item 5c). If only `arm64-v8a` ships, add a
+   `compile_error!` for 32-bit ARM like the x86 guard, in the same change.
+2. **The proposed replacement oracle is strictly weaker.** Simd4-vs-Simd8 compares two banked
+   plans. It cannot see a banking bug that is the same at both widths: a cohort key that ignores a
+   per-track field (a Draft-quality track grouped with High ones), a non-identity absent slot, a
+   state or sidechain bound to the wrong member, a bank-path PDC error. Failure scenario: such a
+   key omission lands, both widths render the same wrong output, the new oracle passes, and the
+   AGENTS.md claim "a placement change must not move a rendered bit" is no longer guarded.
+   `dsp-reference` and lane-kernel comparisons are per effect and cannot see plan-level
+   regrouping. The owner must choose between (a) keeping an unbanked per-node plan as a stated
+   test-only oracle exception to "modes production never needs are removed", or (b) accepting the
+   weaker guarantee in writing.
+3. **Class-A proofs do not depend on the Scalar path.** They rest on console `output_sha256`
+   equality (`scripts/run-console-benchmark.sh`, `scripts/test-console-benchmark.sh:718`, `:823`)
+   and on the per-effect one-lane scalar leg (W=1, #976), which lane's `FrameLane` keeps. The audit
+   is right on this point.
+4. **The atomics check is not a pure duplicate.** `scripts/check-wasm-realtime-atomics.sh:36-41`
+   inspects the whole non-LTO `engine` and `source` rlibs before link-time dead-code removal;
+   `check-web-audioworklet.sh` sees only the linked module. If the `-simd128` build goes, re-target
+   the atomics check at `+simd128` rather than delete it, or record the narrower guarantee.
+5. **Mobile gap either way:** every Simd4 bit-identity test runs on x86 through `wide`'s
+   SSE/AVX lowering; nothing runs Simd4 on NEON (R1 amendment).

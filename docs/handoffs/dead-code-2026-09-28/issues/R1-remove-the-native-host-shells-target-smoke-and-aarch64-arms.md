@@ -102,3 +102,60 @@ The owner ruling. It is independent of `R2-…` to `R10-…`. Land it after `00-
 ## Standing rules for the implementer
 
 - Commit on `codex/<issue>-remove-native-shells`. Do not run timed benchmarks.
+
+## Amendments (Sol verification, 2026-09-28)
+
+See `../VERIFY-DEAD-CODE.md`, findings F3 and F4. **The owner corrected the product scope after the
+audit: fans open and play sessions in native iOS and Android apps as well as the web app.** Mobile
+embedding, and therefore native AArch64, is live scope. This draft's premise ("the engine ships
+only as the browser AudioWorklet") no longer holds.
+
+1. **Do not remove the AArch64 arms.** They are the mobile product path:
+   - `lane::Backend::current()` gives `Simd4` (NEON) on `aarch64` (`crates/lane/src/backend.rs:36-39`);
+   - `crates/lane/src/fpenv.rs`'s FPCR flush-to-zero handling is what makes AArch64 renders
+     denormal-safe, the counterpart of the x86 MXCSR code;
+   - `graph/src/runtime.rs:323`, `:331` and `soft-clip/src/lib.rs:906` are their AArch64 lowering.
+
+   Step 4 (delete the arms, and `compile_error!` on every target except x86-64-v3 and
+   `wasm32`+`simd128`) would make the mobile build impossible. Drop step 4 entirely.
+2. **What is true today for mobile** (checked with Rust 1.98.1's `aarch64-apple-ios` and
+   `aarch64-linux-android` standard libraries; no NDK, Xcode or device, so compile only):
+   - every product crate, `capi` and `protocol` included, passes `cargo check --all-targets
+     --all-features` for both targets. A workspace-wide iOS check fails only on tool crates whose
+     build scripts need `xcrun` (`blake3` via native-pcm-runner and stem-hasher; `wasmtime` via
+     wasm-gates and wasm-console);
+   - none of the audit's 129 dead items is referenced from any AArch64-only code path;
+   - seven test-only warnings appear on aarch64 (`host-core/tests/fp_environment.rs:25,26,52,63,81,102`,
+     `lane/tests/fp_env.rs:14`), which CI's `-D warnings` would reject if an aarch64 leg existed;
+   - **no CI job builds, lints or tests any AArch64 target.** `scripts/check-cross-targets.sh:4-5`
+     records that the Android and iOS rows were removed under #378;
+   - both register defects in `docs/TARGET_MATRIX.md` are still present: 151 `memset_pattern16`
+     calls in `parametric-eq`'s iOS release assembly (reproduced) and `fmaxnm`/`fminnm` folds in
+     the compressor's Android release assembly (LANE-3, #366, closed as deferred, not fixed). The
+     first is a realtime-rule breach inside render on Apple targets; the second makes mobile output
+     differ from the x86 and browser oracles bit for bit;
+   - 32-bit `armeabi-v7a` Android falls silently to `Backend::Scalar` (`backend.rs:60-68`; only x86
+     has a `compile_error!` guard, `lane/src/lib.rs:72-80`), and x86-64 Android emulators and iOS
+     simulators inherit the AVX2+FMA pin from `.cargo/config.toml`, so the engine refuses to start
+     on a CPU without them.
+3. **Rulings that must be revisited before mobile work:** #378 ("native AArch64 unsupported, no
+   claim") and #023 ("iOS and Android embedding examples", closed 2026-08-22), with spec 001's "Mobile support is browser-based; native iOS and Android embedding targets are deferred" (`.github/ISSUE_SPECS/001-…md:43`).
+4. **What is still genuinely unneeded:** `hosts/host-mobile` (26 lines, one function nothing calls)
+   and `hosts/host-native` (30 lines) are stubs that no mobile app would link; the real mobile
+   surface is `crates/capi`. `target-smoke` is worth keeping only as the width assertion of a future
+   aarch64 CI leg.
+5. **Replacement recommendation (owner ruling needed):** "Native AArch64 (iOS, Android arm64-v8a)
+   is a product target." Then, as separate issues rather than this draft:
+   - (a) an aarch64 CI leg: `cargo check`/`clippy -D warnings` for `aarch64-apple-ios` and
+     `aarch64-linux-android` on the product crates, plus `cargo test` of `lane`, `math` and the
+     console digests under an aarch64 runner or emulator;
+   - (b) fix LANE-3 (#366) and the Darwin `memset_pattern16` in the SVF flush;
+   - (c) rule which Android ABIs ship. If `armeabi-v7a` ships, the whole-plan Scalar path is its
+     production path (see R8); if not, add a `compile_error!` for 32-bit ARM like the x86 guard;
+   - (d) decide whether emulator/simulator builds need a non-v3 x86 profile.
+
+   Removing the two stub hosts may stay in this draft, reduced to steps 1-3 without
+   `target-smoke`, if the owner wants it.
+6. **Gates for whatever remains:** add `cargo +<toolchain with aarch64 std> check --target
+   aarch64-apple-ios` and `--target aarch64-linux-android` for `-p capi -p host-core -p lane -p graph
+   -p soft-clip` on base and change.

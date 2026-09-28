@@ -78,3 +78,18 @@ None. It can land in the same CI-conscious batch as `04b-…` and `04c-…`.
 - Do not run the benchmark. The gates need only argument and preflight paths, which launch no
   workload.
 - Commit on `codex/<issue>-retire-console-arms`.
+
+## Amendments (Sol verification, 2026-09-28)
+
+See `../VERIFY-DEAD-CODE.md`. The draft is sound. Reproduced: 48 named arms plus the `issue149`
+default, all 49 folders hold records; the preflight has 40 named arms plus the default and lacks
+exactly the eight listed; `--step base` and `--strip4` both print "refusing to overwrite" and exit
+1 without launching anything; no test or validator names a historical arm.
+
+1. Gate 1 expects `--strip4` to "exit 2 with the new usage" after the change; today it exits 1
+   (refusal). Say explicitly that the exit code changes from 1 to 2 for removed arms.
+2. **Records the rulings cite stay reproducible from git, not from the runner.** Rulings such as
+   `docs/rulings/effect-floor-accounting.md` cite arms and records by folder. The runner's arm
+   history leaves the header, so add a one-line pointer in the new header to the commit before this
+   change (a permalink), so a reader can still find each arm's exact invocation.
+3. Mobile scope: no effect.

@@ -75,3 +75,20 @@ The owner ruling. It is simpler after `R1-…` and `R9-…`.
 ## Standing rules for the implementer
 
 - Commit on `codex/<issue>-remove-wasm-w8`. Do not run timed benchmarks.
+
+## Amendments (Sol verification, 2026-09-28)
+
+See `../VERIFY-DEAD-CODE.md`, finding F11. The recommendation is sound; the context is incomplete.
+
+1. **The kept re-measurement path is already dead.** `docs/rulings/wasm-simd8-null.md:36-43` kept
+   the cfg and the `--issue183` arm so the paired capture could be re-run, and requires "a fresh
+   paired record on the then-current base" to reopen. That capture cannot run today:
+   `artifacts/issue183/` exists and the runner refuses to overwrite it, and the operator script's
+   repository root is wrong (finding F2). Removing the hooks forecloses nothing that works.
+2. **The cfg had a live test use on 2026-09-28.** Spec #976 (closed that day, lines 466-469) ran a
+   `--cfg miso_wasm_simd8` leg of its bit-exact differential harness (15,000 scenarios, Simd8 in
+   wasm). State that this ad-hoc leg is lost; a harness can still run Simd8 on wasm through
+   `lane::Simd8` directly, as `wasm-gate-corpus` does.
+3. **It is a lane-width measurement hook, not target-specific code** in the sense of the owner's
+   rule; the ruling rests on "modes production never needs are removed", which does apply.
+4. **Mobile scope: no effect.** The cfg is `wasm32`-only.

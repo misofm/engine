@@ -64,3 +64,26 @@ None.
 ## Standing rules for the implementer
 
 - Commit on `codex/<issue>-delete-dead-fixtures`.
+
+## Amendments (Sol verification, 2026-09-28)
+
+See `../VERIFY-DEAD-CODE.md`, finding F3.
+
+1. **Step 3's target table contradicts the corrected scope.** "Everything else unsupported" would
+   write native AArch64 out of the matrix just as the owner ruled mobile playback (iOS, Android) in
+   scope. Rewrite the table as: native x86-64-v3 (AVX2+FMA pinned, `Simd8`) for tooling and tests;
+   one `simd128` AudioWorklet artifact (`Simd4`); native AArch64 iOS and Android (`Simd4`, NEON)
+   as **product targets pending the R1 ruling**, with the #378 register kept and marked as the list
+   of defects to clear. Do not state a support level the owner has not ruled; if the ruling is not
+   in yet, leave the two AArch64 rows as they are and change only the stale x86 and wasm rows.
+2. **The "When native AArch64 is revived" recipe** (`TARGET_MATRIX.md:52-68`) names
+   `-p target-smoke -p host-mobile`. Keep it until R1 decides those crates, and add
+   `-p host-core` to it, since `capi` wraps host-core.
+3. `fixtures/capi-qualification/v1` stays dead under the corrected scope: it names two scripts that
+   no longer exist, and the C ABI's live gates are `scripts/check-capi-abi.sh`, the capi tests and
+   `audit capi`.
+4. **An open issue cites the fixture.** The open #26 spec (`.github/ISSUE_SPECS/026-…md:88-92`)
+   names `fixtures/capi-qualification/v1` as the superseded C-ABI result whose re-run #26 owns.
+   The fixture is still unread by any code, so deleting it is safe, but step 1 must re-point #26's
+   spec text to a commit permalink in the same change (and #26 is now mobile-relevant, since it
+   qualifies the native C ABI and runner target matrix).

@@ -96,3 +96,31 @@ The owner ruling. Part A after `00-…`; Part B after `R2-…`.
 ## Standing rules for the implementer
 
 - Commit on `codex/<issue>-remove-native-decode`. Do not run timed benchmarks.
+
+## Amendments (Sol verification, 2026-09-28)
+
+See `../VERIFY-DEAD-CODE.md`, findings F3 and F5. With mobile playback in scope and the C ABI kept
+(R2 amendment), the recommendation still stands for mobile, with one correction.
+
+1. **Mobile does not use the native decoder.** capi takes host-decoded planar chunks
+   (`miso_engine_v1_source_submit_planar_f32`) and never names `native_source` or `native_wave`
+   in `src/`. A mobile app decodes with the platform (AVAudioFile/ExtAudioFile on iOS,
+   MediaExtractor/MediaCodec on Android) and submits planar `f32`, which is what AGENTS.md
+   already says for "browser/mobile hosts". The stem-identity contract hashes decoded PCM, so no
+   WAV parser is needed on the device either.
+2. **Correction: the native-only hooks are compiled into mobile builds.** They are
+   `cfg(not(target_arch = "wasm32"))`, not "native desktop only", so every AArch64 build of capi
+   carries `SourceGraphSource::retirement_worker` (`crates/source/src/lib.rs:1636`) and
+   `SourceGraphSourceSetDriver::_retirement_workers` (`:1707`), unused. Removing them changes the
+   capi source-ring layout on mobile as on x86. So Part A step 3 (re-pin
+   `crates/capi/tests/resource_lifecycle.rs`'s `NativeSourceWorkerMirror` and
+   `SourceGraphSourceSetDriverMirror`, `:803-826`, and the resource numbers they feed) is
+   **mandatory**, not conditional on R2.
+3. **Part B no longer depends on R2 landing.** R2 keeps capi, so Part B depends only on the
+   separate native-pcm-runner decision (R2 amendment, item 5): the WAV parser's only non-audit
+   users are native-pcm-runner and stem-hasher.
+4. **Owner question the draft should state:** the ruling text removes the decoder for every native
+   host. If a native desktop or cloud renderer (for example a server-side export) is still wanted,
+   it would need a decoder; the owner's correction names web and mobile only.
+5. **Gates:** add `cargo test -p capi` (the layout mirror) and an aarch64 `cargo check -p source
+   -p capi` on base and change.

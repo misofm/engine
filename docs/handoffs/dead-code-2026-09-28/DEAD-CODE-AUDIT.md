@@ -4,6 +4,12 @@ Date: 2026-09-28. Tree: `main` at `a9414c0c` (branch `dead-code-audit`). Read-on
 product code, test, script or workflow was changed, nothing was pushed, and no GitHub issue was
 created or edited. The issue drafts are in `issues/` beside this file.
 
+> **Read `VERIFY-DEAD-CODE.md` first.** An adversarial verification (2026-09-28) corrects this
+> audit in place. The owner's later scope correction puts native iOS and Android playback in scope,
+> which reverses the R1, R2 and R3 recommendations below and moves draft 02 to "needs a ruling".
+> The failing test of section 5.2 is an intended #916 change, not a regression. Every draft now
+> ends with an "Amendments" section, and a new draft `00b` repairs the operator scripts.
+
 ## 1. The verdict, in plain words
 
 **The Rust code itself is clean. Very little of it is dead in the strict sense.** Across about

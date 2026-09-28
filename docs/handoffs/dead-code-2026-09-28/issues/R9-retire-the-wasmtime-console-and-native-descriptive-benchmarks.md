@@ -99,3 +99,33 @@ The owner ruling. It absorbs the tool half of `R7-…` if it lands first.
 
 - Launch no timed workload.
 - Commit on `codex/<issue>-retire-wasmtime-console`.
+
+## Amendments (Sol verification, 2026-09-28)
+
+See `../VERIFY-DEAD-CODE.md`, finding F12. The recommendation stands, with one missed dependency.
+
+1. **Holds:** `isolated_cycles_per_lane_sample` comes only from the native console
+   (`tools/bench/src/floor.rs:315`), and the exit-report clause names
+   `scripts/run-console-benchmark.sh` (`docs/rulings/effect-floor-accounting.md:896-902`).
+   `tools/wasm-console` produces no floor field. The V8 benchmark covers one row
+   (`console_mixing_automation`).
+2. **Missed:** the **wasm floor rule** (`docs/rulings/effect-floor-accounting.md:815-840`) derives
+   its per-row residual from `artifacts/compressor-round1/wasm-console-benchmark.accepted.jsonl`,
+   and `docs/rulings/compressor-identity-mask-hoist-wasm-null.md:55-65` cites the same record. The
+   wasmtime console is the only committed source of per-row wasm numbers (Cranelift, not V8). Step 4
+   must append a dated history note to both rulings: the tool that produced those residuals is
+   retired, and a future wasm floor comes from V8 rows or is not stated. `artifacts/compressor-round1/`
+   is one of the 17 ruling-cited folders draft 07 keeps, so the record itself survives.
+3. **If this ruling waits or is "keep",** the wasm console scripts stay broken (finding F2). Draft
+   `00b-…` repairs their root in the meantime.
+4. **Mobile scope:** nothing in the repository measures AArch64/NEON performance
+   (`scripts/check-cross-targets.sh:124` prints "native aarch64 unsupported, see #378"). Deleting
+   the wasmtime console does not change that; a NEON console leg belongs to R1's recommended
+   aarch64 CI work, not to this draft.
+5. **A lint ratchet names two files this draft deletes.** `scripts/check-bench-policy.sh:184-185`
+   holds a `timed_subjects` list that "never shrinks": `tools/bench/src/rack.rs`,
+   `tools/audit/src/fp_env.rs` and `tools/wasm-console/src/main.rs`. Deleting
+   `tools/wasm-console` (step 1) or the `audit fp-env` subject (step 2, "if retired") fails lint
+   with `converted subject is missing`. The draft must edit that list, and its "never shrinks"
+   comment, with an explicit reason, and update `scripts/test-bench-policy.sh`'s cases that write
+   into those files.

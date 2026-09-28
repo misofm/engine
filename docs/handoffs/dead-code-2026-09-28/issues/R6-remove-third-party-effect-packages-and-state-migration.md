@@ -158,3 +158,21 @@ The owner rulings, then `00-…` and `05-…`.
 ## Standing rules for the implementer
 
 - Commit on `codex/<issue>-remove-effect-packages`. Do not run timed benchmarks.
+
+## Amendments (Sol verification, 2026-09-28)
+
+See `../VERIFY-DEAD-CODE.md`, finding F10. The recommendation stands.
+
+1. **Mobile playback does not need persisted state or migration.** Sessions carry no effect state
+   (`docs/session-v1.schema.json` has no state member), `prepare_native_session_effects`
+   (`effect-compiler/src/prepare.rs:873-1272`) never touches `effect_package` or restore, and
+   neither host-core, host-web nor capi calls the state or migration paths (the one call in
+   `graph-compiler/src/lib.rs:14269` is inside `mod tests`). Third-party Wasm on iOS would also
+   need an interpreter, since iOS forbids JIT; that strengthens R6a rather than weakening it.
+2. **The optional grammar step (4) must edit the SDK too.** `sdk/src/internal/session-json.ts:91`
+   knows the `cid` identity in its canonical writer. No fixture or SDK test uses `cid`.
+3. **Gate 3 is plausible but was not re-proved here.** The module-identity claim (same functions,
+   code bytes and data size) is consistent with the call graph above; the implementer must still
+   rebuild base and change on one machine.
+4. **The C ABI stays live for mobile (R2 amended).** R6a removes only `effect-package`'s own C
+   header and `c-abi` feature; it must not touch `crates/capi`.

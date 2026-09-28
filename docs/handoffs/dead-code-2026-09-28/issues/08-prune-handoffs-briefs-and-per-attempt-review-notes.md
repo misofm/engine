@@ -74,3 +74,44 @@ is needed. These are history that git keeps. One light call is yours: whether `B
 ## Standing rules for the implementer
 
 - Commit on `codex/<issue>-prune-handoffs`.
+
+## Amendments (Sol verification, 2026-09-28)
+
+See `../VERIFY-DEAD-CODE.md`, finding F13.
+
+1. **Do not delete `.github/ISSUE_SPECS/BRIEFS/` wholesale. Some briefs are normative DSP
+   sources, not history.** "The only reader is one allowlist line" counts machine readers only:
+   - `BRIEFS/019-antialiased-saturator-clipper.md` is the frozen source of the soft-clip graph and
+     the 63-tap half-band coefficients, copied "character for character"
+     (`crates/soft-clip/src/lib.rs:3`, `src/kernel.rs:3`, `tests/polyphase_identity.rs:5`, `:20`;
+     `crates/lane/src/kernels/halfband.rs:3`, `:58`);
+   - `BRIEFS/016-true-peak-limiter.md` is the source of `crates/dsp-reference/src/true_peak_limiter.rs:57`;
+   - `BRIEFS/013-compressor.md` is named the compressor's authority in `docs/README.md:19` and is
+     cited throughout `crates/compressor/tests/MUTATIONS.md`.
+
+   Failure scenario: step 3 lands, and the citation chain AGENTS.md requires for every effect
+   ("primary/official citations", frozen coefficients) points at deleted files; a reviewer checking a
+   coefficient table has no in-tree source. Step 3 becomes: keep every brief cited from `crates/`,
+   `docs/README.md` or a `MUTATIONS.md` (at least 013, 016 and 019); delete the rest only if the
+   owner agrees; retitle `ISSUE_SPECS/README.md`.
+2. **Gate 2's link grep must include `crates/**` source comments**, not only live docs, because
+   the BRIEFS citations above are in `.rs` files.
+3. Everything else in this draft is unaffected by the mobile scope correction.
+4. **Several "history" files are cited by open issues or live code** (verified against issue bodies
+   and the tree):
+   - `effects-2026-09-27/`: open #988, #989, #991 and #992 cite `LIMITER-DIAGNOSIS.md` and
+     `limiter-diagnosis-prototypes.patch`;
+   - `plumbing-floor-2026-09-26/DIAGNOSIS-2.md` is cited by open #938;
+   - `builtins-less-removal-2026-09-27/VERIFY.md` is cited by open #965 (the draft keeps only
+     `SCOPE.md` there);
+   - `docs/issue880-mb1.md` is the recorded provenance of committed coefficients
+     (`crates/math/src/lane_math.rs:42`, `:85`), and `docs/issue880-mb2.md` records the tolerance
+     amendment behind `crates/transient-shaper/tests/oracle.rs:30`;
+   - `docs/research/legacy-v2old/02-numerics-determinism.md` is cited by `crates/lane/src/fpenv.rs:30`;
+   - `docs/issue905-astra-review.md:7` links `docs/issue880-class-b-astra-review.md`.
+
+   Keep each of these until its citing issue closes, or re-point the citation to a commit permalink
+   in the same change. Re-pointing the `lane` and `math` comments routes CI to `full` and turns on
+   `math_closure`.
+5. **Widen gate 2 and gate 5** to `crates`, `hosts`, `tools` source comments and to the bodies of
+   open GitHub issues.

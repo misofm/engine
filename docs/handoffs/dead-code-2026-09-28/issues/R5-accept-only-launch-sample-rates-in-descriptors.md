@@ -64,3 +64,33 @@ The owner ruling. It can land before or after `R6-…`.
 ## Standing rules for the implementer
 
 - Commit on `codex/<issue>-launch-rates-only`. Do not run timed benchmarks.
+
+## Amendments (Sol verification, 2026-09-28)
+
+See `../VERIFY-DEAD-CODE.md`, finding F9. The recommendation stands; the scope is larger than
+"descriptor metadata, about 50 lines".
+
+1. **A shipped-module predicate also accepts extended rates.**
+   `builtins::validate_builtin_filter_cutoff` (`crates/builtins/src/lib.rs:343-370`) admits
+   176.4-384 kHz through `is_extended_compatibility_sample_rate`, and `BuiltinChain::new` relies
+   on it (pinned by `builtins/tests/contract.rs:297-309`). It is reached from
+   `builtins-compiler/src/lib.rs:4937` and `builtins/src/lib.rs:3217`, both in the shipped module.
+   Add it to step 2. The module changes in `builtins` as well as `effect-contract`.
+2. **Files the slice omits** (`rg 'EXTENDED_COMPATIBILITY_SAMPLE_RATES|is_extended_compatibility_sample_rate'`
+   lists 12 files outside `engine/src/lib.rs`):
+   - the conformance mock effect declares eight quality rows, four of them extended
+     (`crates/conformance/src/effect.rs:99-107`); a tightened `validate_descriptor` rejects it, so
+     `conformance` tests go red unless the mock is trimmed;
+   - `conformance/src/block.rs`, `src/fixture.rs`, `tests/fixtures.rs` and
+     `examples/conformance_fixtures.rs`;
+   - `builtins/tests/response.rs`, `tests/stage.rs` (RBJ-oracle and stage tests at extended rates);
+   - `engine/src/realtime/mod.rs:688`; `effect-contract/tests/response_analysis.rs:71-74`;
+   - `fixtures/effect-descriptor/v1/comprehensive-b.json` and
+     `fixtures/effects/runtime-v1/valid/descriptor.toml:5` (hash-checked; goes stale).
+
+   Failure scenario: an implementer follows the listed files only and the `conformance` and
+   `builtins` test binaries go red on files the draft never named.
+3. **Gates.** Add `-p builtins -p conformance` to gate 1's test run, and extend gate 3's expected
+   module diff to the `builtins` cutoff branch.
+4. **Mobile scope: no change.** A device whose hardware rate is outside the launch set is the
+   separate "no implicit SRC" rule, which this ruling does not touch.

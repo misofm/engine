@@ -90,3 +90,26 @@ even `capi`.
 
 - No product behaviour change.
 - Commit on `codex/<issue>-delete-unused-endpoints`. Do not run timed benchmarks.
+
+## Amendments (Sol verification, 2026-09-28)
+
+See `../VERIFY-DEAD-CODE.md`, finding F3. **Hold this draft for an owner ruling. "Dead whatever you
+rule on the C ABI and the protocol" is wrong under the corrected scope.**
+
+1. **The compile facts hold.** With both source files, both test files and their `mod`/`pub use`
+   lines removed: native `--all-targets --all-features` passes with no new warning, `wasm32`
+   `simd128` passes, iOS and Android `--lib` pass, and `-p capi -p host-core --all-targets` passes
+   on iOS. No `control-provider` item becomes unused.
+2. **But they are unwired, not dead.** Mobile playback is live scope and the C ABI stays (R2
+   amendment). The open #140 spec targets delivery of admitted protocol automation "through the
+   actual C ABI command and render calls"; per its own text (line 13) the only production consumer
+   of that queue today cancels it. These endpoints (#528-#608) and protocol's `delivery.rs` /
+   `controller_delivery.rs` are the partial implementation of exactly that. Deleting them is a
+   #140 design decision.
+3. **Failure scenario:** the draft lands as "no ruling needed"; the owner then schedules mobile live
+   control (a fan's fader or mute during playback), and #140's successor must re-derive about 8,200
+   lines of qualified, tested endpoint code that git history holds but no current test exercises.
+4. **Revised recommendation:** move this draft to the "needs your ruling" set, decided together
+   with #140: either (a) #140's plan uses these endpoints, so keep them and wire them; or (b) #140
+   re-plans from scratch, so delete them as drafted. Step 4 (protocol delivery files) follows the
+   same decision.

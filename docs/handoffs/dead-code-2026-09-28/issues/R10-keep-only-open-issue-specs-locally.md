@@ -64,3 +64,24 @@ The owner ruling, and `04b-…` (spec 068's readers).
 
 - Do not close, reopen or edit any GitHub issue as part of this change.
 - Commit on `codex/<issue>-open-specs-only`.
+
+## Amendments (Sol verification, 2026-09-28)
+
+See `../VERIFY-DEAD-CODE.md`, finding F13. Counts confirmed: 560 numbered specs, 509 closed
+(10,193,899 bytes), 51 open; 115 GitHub issues have no spec (20 open); no spec lacks an issue.
+
+1. **Gate 2 cannot pass as written.** `rg 'ISSUE_SPECS/[0-9]' crates hosts tools scripts …` finds
+   comments that cite closed specs by path: `crates/dsp-reference/src/svf.rs:443` (045),
+   `crates/effect-package/Cargo.toml:23` (083), `scripts/check-effect-interchange-qualification.sh:11`
+   (081), `scripts/check-effect-interchange-benchmark-108.sh:11` (108),
+   `scripts/promote-issue006-graph-benchmark.sh:7` (006). Add a step that re-points each to the
+   GitHub issue or a commit permalink, or narrow the gate to machine readers.
+2. **Open specs link closed spec paths:** 1010 → 1000, 1008 → 1001, 026 → 114. Re-point them to
+   permalinks in the same change.
+3. **Machine readers** are only spec 068 (04b's runners) and five allowlist lines, as the draft says.
+4. **`.github/ISSUE_SPECS/BRIEFS/` is not closed-spec history and must not be swept up here or in
+   `08-…`**: `BRIEFS/019` is the cited normative source of the frozen soft-clip and half-band
+   coefficients (`crates/soft-clip/src/lib.rs:3`, `src/kernel.rs:3`,
+   `tests/polyphase_identity.rs:5`, `:20`; `crates/lane/src/kernels/halfband.rs:3`, `:58`), and
+   `BRIEFS/016` is the source for `crates/dsp-reference/src/true_peak_limiter.rs:57`.
+5. **Mobile scope: no effect.**

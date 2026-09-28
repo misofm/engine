@@ -92,3 +92,32 @@ outputs as constants and reads none of these files.
 
 - Launch no benchmark workload.
 - Commit on `codex/<issue>-retire-one-shot-benchmarks`.
+
+## Amendments (Sol verification, 2026-09-28)
+
+See `../VERIFY-DEAD-CODE.md`, finding F14. A scratch copy with the three subjects deleted builds and
+`cargo test --release -p bench -p audit -p wasm-gates --no-run` passes, but **the required lint job
+fails**, and the draft does not budget for it.
+
+1. **`scripts/check-bench-policy.sh:184-185` fails.** Its `timed_subjects` ratchet ("it never
+   shrinks") names `tools/bench/src/rack.rs`; on the scratch tree lint stops with
+   `converted subject is missing: tools/bench/src/rack.rs`. The slice must replace that entry (for
+   example with `tools/bench/src/console.rs`, which already uses the shared timer) and amend the
+   "never shrinks" comment with the reason. `check-bench-policy.sh:205-252` names further bench
+   files; re-check each.
+2. **Mutation tests that write into the deleted files** must be re-pointed, keeping each case's
+   intent: `scripts/test-bench-policy.sh` (rack.rs at `:113`, `:251-266`; graph.rs at `:224`,
+   `:229`; builtins.rs at `:234`), `scripts/test-realtime-policy.sh:281` (rack.rs),
+   `scripts/test-effect-runtime-policy.sh:93-99` (rack.rs) and `scripts/test-env-vocabulary.sh:39`
+   (rack.rs, in addition to the `run-rack-benchmark.sh` lines the draft already names).
+3. **Do not delete the only check of a live audit constant.** The "Builtins benchmark real-tree
+   manifest consumers" step (`qualification.yml:355-356`) is the only thing that ties
+   `tools/audit/src/builtins_graph.rs:48` `ACCEPTED_MANIFEST_SHA256` to
+   `fixtures/builtins/v1/MANIFEST.tsv`: `audit builtins-graph` only prints the constant (`:297`),
+   and `check-builtins-fixtures.sh` never compares it. Failure scenario: the fixture manifest
+   changes, the audit constant silently goes stale, and nothing turns red. Keep a one-consumer
+   check (a few lines in `check-builtins-fixtures.sh` comparing the constant with the manifest's
+   hash, with a mutation case) before deleting `test-builtins-benchmark.sh`.
+4. **Gates:** add `check-realtime-policy.sh`, `test-realtime-policy.sh`,
+   `check-effect-runtime-policy.sh` and `test-effect-runtime-policy.sh` to gate 4.
+5. Mobile scope: no effect (`tools/bench` is x86 tooling).
