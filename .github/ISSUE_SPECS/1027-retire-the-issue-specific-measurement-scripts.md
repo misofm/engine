@@ -142,3 +142,171 @@ See `../VERIFY-DEAD-CODE.md`. The slice is sound; three facts need correcting.
    Make the reachability check a committed lint script with a mutation test, or the rule in
    `scripts/operator/README.md` stays unenforced.
 4. Mobile scope: no effect.
+
+## Attempt 1 evidence
+
+Implementer attempt 1 (Terra), 2026-09-28. Branch `codex/1027-retire-issue-scripts`, from
+`codex/batch-slim-1` at `ed0556a9`. Commits: `7234970c` and `5304d95e` (the ports, before any
+deletion), `b5aa74fb` (the retirement and the reachability lint), `632203fc` (merge of the batch
+head `7d0d4adf`, which carries #1025's runner rewrite), `f8142178` (the runner move). Host x86_64
+(x86-64-v3). No timed workload ran: every runner and preflight call below stops at argument
+parsing or at an overwrite or input refusal.
+
+### What was removed
+
+Against the batch head `7d0d4adf`: **126 files changed, +992 / -17,348 lines.**
+
+| kind | files | lines removed |
+|---|---:|---:|
+| scripts deleted (19 under `scripts/`, 3 under `scripts/operator/`) | 22 | 4,535 |
+| Rust files deleted: `compressor/tests/bench_ramp.rs`, `transient-shaper/tests/bench.rs`, bench `gate_active`, `multiband_active`, `input_symmetry`, `input_symmetry_capture`, audit `prepared_effect_allocations` | 7 | 4,060 |
+| Rust edits: `wasm-gates` timing arm and modes (lib -274, main -72/+2), bench and audit dispatchers (-19) | 4 | 365 |
+| `artifacts/issue880/`, `artifacts/issue-60{2,3,6}-input-symmetry-capture/` | 68 | 8,298 |
+| docs and CI: 20 env-vocabulary rows, the kernel-timing lint line | | 56 |
+
+Added: the ports (+542 lines in 6 test files), the reachability lint and its suite, two dated
+history notes, and comment corrections. Every file in the table of the brief is gone, as are the two
+artifact families. `artifacts/issue163-phase0/` is kept. `wasm-gates` loses only the
+`--native-timing`/`--wasm-timing` modes and the timing arm only they reached (`TimingReport`,
+`timing_run`, `native_timing_report`, `wasm_timing_report`). Its `bench-support` dependency stays,
+because `digest::hex` still uses it. Clippy `-D warnings` over the workspace reports no dead code left.
+
+### The runner move (the eighteenth file)
+
+#1025 landed its rewrite of `scripts/run-console-benchmark.sh` in the batch while this attempt ran.
+I merged the batch head and then moved that version, as the spec asks, to
+`scripts/operator/run-console-benchmark.sh`:
+
+- its root is now `../..`, so #1022's operator-root rule covers it (`check-bench-policy.sh`:
+  6 operator scripts);
+- the preflight hashes it at the new path;
+- `check-bench-preconditions.sh` and the standing instructions in `effect-floor-accounting.md`
+  (`:901`, `:1164`) name the new path;
+- rulings that cite the runner as the provenance of an old record keep the path it had then
+  (`d7-check-block-fusion`, `de-versioning-inventory`, and the three rulings #1025 edited).
+
+Argument paths, with no workload:
+
+| invocation | exit |
+|---|---|
+| `scripts/operator/run-console-benchmark.sh` | 2, usage |
+| `… --step base` | 1, `refusing to overwrite console artifact: <repo>/artifacts/steps/base/…` |
+| the same, from `/tmp` | 1, the same repository path |
+| `scripts/operator/preflight-console-benchmark.sh --step base` | 1, `console artifact already exists` |
+
+No exception is left, so the checker has no exception list.
+
+**Step 4.** `prepare-builtins-listening.sh` already resolves `../..` since #1022. With no arguments
+it exits 2 (usage). Given an empty inbox it refuses at `missing inbox member: source.mepcm` after
+`cd` to the repository root, from which `scripts/check-builtins-listening-033.py` resolves.
+
+### Reachability lint (amendment 3, gate 4)
+
+`scripts/check-script-reachability.py` (lint job, new step) takes a fixed point over mentions. Its
+seeds are the workflows and every `package.json`. Carriers are shell, Python, jq, JavaScript,
+TypeScript and YAML files. It counts basenames after one level of brace expansion, jq's
+extension-less `include`/`import "name"`, and Python `import`. It never counts comments, Rust
+sources or `docs/`.
+
+- On the base tree it reports exactly the 18 files (17 plus the runner). The audit's `reach.py`
+  gives the same list.
+- On the change: `ok (179 files under scripts/ reached from workflows, 9 under scripts/operator/ exempt)`.
+- `scripts/test-script-reachability.py` has 18 cases on a scratch copy of the real carriers. One
+  case removes the three jq includes, and `protocol-benchmark-record-validator.jq` is then refused.
+  Others cover a dead script, mentions in a comment, a Rust note, a `docs/` tool or a document
+  (all refused), transitive reach and its break, Python imports, brace lists, fixtures, the
+  operator exemption, and a tree with no workflows.
+- Nine mutations of the checker itself were each red under the suite: jq includes ignored, comment
+  stripping off, imports ignored, brace expansion off, `docs/` carriers allowed, Rust carriers
+  allowed, self-exclusion dropped, workflow guard dropped, and every file treated as reached.
+
+### Live claims (gate 5): ports and matches
+
+Each port was run green, then red under the named mutation on a saved copy, then restored
+(`cmp` clean):
+
+| retired test | where the claim lives now | red under |
+|---|---|---|
+| `bench_ramp.rs` `mq2_preflight_payloads_prove_ramps_restart_on_each_block` | ported: `compressor/tests/ramps.rs` `a_both_channel_point_on_every_bank_lane_restarts_its_ramp_each_block`, at the build's own bank width (was Simd8 only); `MUTATIONS.md` row 1006-M3 now names it | 1006-M3 (output ramps also advanced in pass 1): `lane 0 left: parameter 4's remaining samples`, 62 vs 63, as the original |
+| `input_symmetry` `connected_runtime_oracle_covers_retargeted_both_channel_ramp` | ported: `host-core/tests/input_liveness_console.rs` `a_drained_trim_ride_ramps_from_the_value_it_reached_on_both_channels` (twin-times-ramp oracle, 4 retargeted blocks) | bank drain with a zero window: block 0 frame 0, 3.007 vs oracle 5.988 |
+| `input_symmetry` `qualification_phase_constants_and_zero_render_allocations` | ported: `builtins-compiler/tests/allocation_tracker.rs` `actual_queued_input_trim_drain_allocates_and_frees_nothing` | allocating `TrimDb` arm: `(9, 9)` vs `(0, 0)` |
+| `input_symmetry` `separate_capacity_sixteen_drain_witness_has_no_pending_records` | matched: `input_liveness_console.rs:538` `a_symmetric_ride_renders_the_same_bits_collapsed_or_not` (two records per track must both drain in block 0) | — |
+| `input_symmetry` `owners_are_w8_nonzero_and_phase_results_match` | matched: `:538` (two independent preparations, identical bits) and `:242`; bank structure by `graph-compiler` `scalar_dispatch_compiles_without_banks_on_any_host` (`:2543`). The frozen 4,608-block digest is not re-pinned | — |
+| `gate_active` `untimed_preflight_runs_the_actual_shapes_without_timing_calls` | matched: `gate-expander/tests/oracle.rs:183`/`:238`, `identity.rs:70`, `graph-compiler` `launch_gate_expander_fixture_retains_width_correct_banks_and_scalar_fallbacks`, `contract.rs:24`. Ported for the range floor, which only a corpus digest crossed: `contract.rs` `a_quiet_plateau_settles_on_the_range_floor_not_silence` | range clamp removed: gain 1.2e-38 vs floor 0.00398 |
+| `multiband_active` `untimed_preflight_runs_actual_scalar_and_bank_shapes` | matched for resources, engagement and widths: `product.rs:50`, `:463`, `identity.rs:326`. Ported for dual-mono independence: `product.rs` `dual_mono_bands_compress_each_channel_from_its_own_level`, with a Maximum-link control | `DualMono` dispatched as `LINK_MAXIMUM`: `a loud left moved the quiet right`; the other 10 product tests stayed green |
+| `multiband_active` `descriptor_has_all_frozen_active_values` | matched: `product.rs:50` (the 11-parameter descriptor) | — |
+| `prepared_effect_allocations` `banks64_…` and `crossed_small_…` | ported: `graph-compiler` `a_prepare_time_bypassed_slot_takes_its_chain_out_of_the_cohort`. Bypass alone separates the program keys, the bypassed chain falls back per node, only the full group binds, and one slot id in two racks gives two programs. Entry order was the subject's own `reverse()` and is proven order-independent by `bank_membership_is_independent_of_entry_order` | `program_key` drops `bypass`: red at the key assertions. With those removed, the cohort half is red on its own: 4 bound slots vs 2 |
+
+The other removed tests check only their own harness: argument parsers, stimulus constants, record
+splicing, activity validators, injected clocks, the allocator control, and the MQ-2 marker probe.
+The rate-coefficient counts `[128, 256, 0]` were arithmetic on the benchmark's own arm constants,
+so they were not ported. The input-trim allocation port covers the banked drain. The fixture's
+ninth track is a one-lane bank, not `ConsoleInputProcessor`, which is the coverage the original had.
+
+`-- --list`, base against change, CI feature sets:
+
+- **audit-native** (`-p audit -p bench -p console-workload`, release): exactly the 22 tests of the
+  four bench subjects and the 5 of the audit subject leave. Nothing else changes.
+- **test-debug-b**: the 4 `mq1_`/`mq2_` tests leave, and 3 ports arrive (compressor, gate,
+  multiband).
+- **test-release** (`-p lane -p math -p wasm-gates`): no change.
+- **test-debug-a**: additions only (host-core, builtins-compiler, graph-compiler).
+
+The debug-b base list was captured while the compressor port was being written. Its one line for
+that port was removed by hand; no other file had changed.
+
+### Gates
+
+| gate | result |
+|---|---|
+| `cargo check --locked --workspace --all-targets --all-features` | pass |
+| `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | pass |
+| `RUSTFLAGS='-C target-feature=+simd128' cargo check --locked --target wasm32-unknown-unknown -p host-web` | pass |
+| `cargo fmt --all -- --check` | pass |
+| `cargo test --locked --release -p audit -p bench -p wasm-gates` | pass |
+| `cargo test --locked --all-targets -p compressor -p transient-shaper --features math/lane` | pass (124) |
+| test-debug-b's full command | pass |
+| test-debug-a's features over `-p host-core -p builtins-compiler -p graph-compiler` | pass |
+| `cargo test --locked --release -p audit -p bench -p console-workload` | pass |
+| `gain_pan_profile digests` | 16 digest lines byte-identical to base (only the `finished in` time differs) |
+| `bash scripts/run-wasm-gates.sh` | pass (native, wasm scalar, simd128, V8 spill) |
+| shipped module | `build-web-audioworklet.sh --module-only` on the change, and with `graph-compiler/src/lib.rs` swapped back to base (the only closure `src` change, and it is inside `mod tests`): byte-identical, `3f744b03…` |
+| `git diff --stat` for `crates hosts` | test files plus `graph-compiler/src/lib.rs` test module only |
+| every `scripts/check-*.sh` | 40 of 43 pass; the 3 failures are below |
+| every argument-free `scripts/check-*.py` | 9 of 10 pass; `check-step-vocabulary.py` fails, below |
+| `check-ci-path-routing.py`, `test-ci-path-routing.py` | pass; `verdict` table unchanged (one lint step added, one lint line removed, no job added) |
+| `test-console-benchmark.sh`, `check-bench-policy.sh`, `test-bench-policy.sh`, `check-env-vocabulary.sh`, `test-env-vocabulary.sh`, `test-wasm-console-benchmark.sh`, `test-script-reachability.py` | pass |
+| router, `--base codex/batch-slim-1 --head HEAD` | `route=full`, `math_closure=false`, `release_inputs=true` (the workflow and `wasm-gates/Cargo.toml` changed) |
+
+Failures, none caused by this change:
+
+- `check-web-audioworklet.sh` and `check-sdk-headless.sh` fail on the pin: local module `3f744b03…`
+  against pin `476e58ad…`. The module is byte-identical on base (A/B above). The audit (§9, §11)
+  says a local build is not compared with the pin; CI's `artifact` job is the authority.
+- `check-sdk-types.sh` exits 2: `sdk/node_modules` is missing (it needs `npm ci`).
+- `check-step-vocabulary.py` refuses `.github/ISSUE_SPECS/1025-…md:238`, which quotes the retired
+  word in #1025's evidence. That line is on the batch head as merged, and this change adds no such
+  word. **The batch's lint job will be red on it until #1025's spec is reworded or #1050 retires
+  the rule.**
+- Six `check-*.py` take required arguments (`abi-layout-v1`, `builtins-listening-033`/`-111`,
+  `parameter-metadata-v1`, and the two AudioWorklet checkers). They are not argument-free, so they
+  were not run as gates.
+
+### Gates the change had to edit, and why
+
+- `qualification.yml`: the lint line `bash scripts/test-wasm-kernel-timing.sh` is gone with its
+  script (step 3), and the new reachability step is added.
+- `docs/ENGINE_ENV_VOCABULARY.md`: the 20 `MISO_ENGINE_606_*` and `MISO_ENGINE_CAPTURE_*` rows went.
+  `check-env-vocabulary.sh` refused them as unused, and it now reports 114 names.
+  `test-env-vocabulary.sh` pins the documented-name count in its `COUNT`/`COUNT_TR` payloads, so
+  134 became 114. #1043 removes that pin.
+- The rack-chain fixture in `graph-compiler` gains an edit hook for the bypass port. Its existing
+  callers are unchanged.
+
+### Left for other issues
+
+- `docs/issue880-*.md` (08, #1031): it now links into the deleted `artifacts/issue880/` and names
+  the deleted MQ runners.
+- `artifacts/issue880-mq2/` (07, #1030) is not in this brief.
+- `docs/audits/60x-*` per-attempt reviews (08).
+- Open specs #1030, #1039 and #1050 still cite `scripts/run-console-benchmark.sh` at its old path.
