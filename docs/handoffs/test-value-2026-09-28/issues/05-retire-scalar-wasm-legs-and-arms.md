@@ -94,3 +94,28 @@ Authorized paths:
 - **Saving:** about 117 s of runner time per full PR, plus three code arms.
 - **Risk:** done before issue 12, the portable `max`/`min` arm that AArch64 uses would lose its only
   CI execution. That is why gate 1 comes first.
+
+## Amendments (Sol verification, 2026-09-28)
+
+See [`../VERIFY-TEST-VALUE.md`](../VERIFY-TEST-VALUE.md). **These amendments supersede the body wherever they conflict.**
+
+1. **Re-scope: this is the pending decision #1041 left open.** #1041's implementation
+   (`4ef7c986`, branch `codex/1041-refuse-32-bit-targets`) adds the unsupported-target
+   `compile_error!` this draft proposed. It keeps wasm32 *without* `simd128` as a named
+   "scalar-wasm CI exception, a separate, pending decision", and lists the legs in
+   `docs/TARGET_MATRIX.md`. So this draft no longer adds a guard. It:
+   - deletes that marked exception arm and the now-unreachable `Backend::Scalar` selection arm in
+     `lane/src/backend.rs`;
+   - retires the legs.
+2. **The legs shrink before this lands.** #1037 deletes `check-effect-package-v1.sh`,
+   `check-effect-descriptor-v1.sh` and the interchange qualification, so those scalar legs go with
+   it. #1038 edits the neighbouring `miso_wasm_simd8` arm in `backend.rs`. Land after #1037 and
+   #1038.
+3. **The AArch64 dependency is now #1017.** Gate 1 reads "#1017's job runs the lane G-gates and G5
+   on AArch64 in the shipping profile". Issue 12 is merged into #1017.
+4. **Relation to footprint R8.** R8 covers the whole-plan `Backend::Scalar` path *and* the scalar wasm
+   CI build. This draft removes only the wasm build. `Backend::Scalar` and the per-node oracle stay,
+   so R8's oracle question is untouched. Ask the owner to confirm that the two are separable.
+5. **Measured saving.** The scalar build, the atomics check and the scalar G5 guest take a median
+   88 s across 8 full-route runs (108 s on PR #1016's run). The cross-target scalar share cannot be
+   split from its step, so gate 5's "at least 100 s" becomes "at least 80 s".

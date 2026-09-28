@@ -104,3 +104,20 @@ verdict table is a follow-up, once the job is green.
   time.
 - **Risk of not doing it:** the mobile apps ship an engine whose class-A claim is already known false
   on their CPU (LANE-3), with no gate that would say so.
+
+## Amendments (Sol verification, 2026-09-28)
+
+See [`../VERIFY-TEST-VALUE.md`](../VERIFY-TEST-VALUE.md). **These amendments supersede the body wherever they conflict.**
+
+1. **Do not file: merge into #1017.**
+   - #1017 (filed) owns the AArch64 CI leg, the `aarch64-apple-ios` and `aarch64-linux-android`
+     cross-target rows, a macOS arm64 leg for Darwin, and the realtime audits on AArch64.
+   - It marks LANE-3 (#1019) and the Darwin `memset` (#1018) as expected failures **by name**. That
+     supersedes this draft's "start outside the required workflow".
+2. **Carry these into #1017 as an amendment.** #1017 lacks them:
+   - the lane, math and G5 legs run in the **shipping release profile**, because LANE-3 is an
+     optimizer fold;
+   - `bank_levels.rs`'s `Simd4` pins run natively, and re-injecting #966 turns them red at `Simd4`;
+   - a no-silent-skip gate over the packages the job runs;
+   - the two `cfg(not(x86))` stubs gain real assertions.
+3. **References.** LANE-3's fix is #1019 (not #366), and the Darwin `memset` is #1018.

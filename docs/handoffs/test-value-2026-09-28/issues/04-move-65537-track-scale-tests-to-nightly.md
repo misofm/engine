@@ -88,3 +88,43 @@ Authorized paths:
   that stays in `scale.rs:91` still walks 458,761 nodes, so the scale binary does not drop to zero.
 - **Risk:** a defect that shows only above 65,536 tracks in *graph binding with builtins*, and not
   in session compile, is caught nightly instead of per PR.
+
+## Amendments (Sol verification, 2026-09-28)
+
+See [`../VERIFY-TEST-VALUE.md`](../VERIFY-TEST-VALUE.md). **These amendments supersede the body wherever they conflict.**
+
+1. **The evidence does not see the claim these tests exist for (finding F1).**
+   - `cargo mutants` never plants an O(n) → O(n²) change, so "0 of 80 surviving mutants" says nothing
+     about #962, a compile and bind that is linear in track count.
+   - I re-injected #962 fix 1 (`Vec::contains` per bank member in `with_builtin_banks`) and ran the
+     debug binaries under the timing lock:
+
+     | test | base | #962 re-injected |
+     |---|---:|---:|
+     | this draft's per-PR remnant (the constrained compile of `scale.rs:91`) | 16.9 s; re-run 19.3 s | 17.7 s; re-run 16.6 s |
+     | `scale.rs:160` | 73.2 s | **673.9 s** |
+
+   - `compile.rs:389` refuses on `maximum_nodes` before any bank attaches or any bind runs. So the
+     remnant cannot see #962.
+2. **Two of the listed per-PR guards are not guards.**
+   - `tools/audit/src/fixture_builtins.rs:1370` only prepares builtins: no graph compile, no bind, no
+     render.
+   - `bench graph_validate_65537_tracks` is `#[ignore]`d (`tools/bench/src/graph.rs:691`), and #1026
+     deletes it.
+
+   After this draft, **nothing per PR** guards #962's fixes 1 and 3-8.
+3. **The nightly job needs an explicit budget, not only overflow checks.**
+   - Put `scale.rs:160` in `nightly.yml`'s `release-budgets` job, in release, with a wall-clock
+     bound of 60 s. Linear takes about 17 s and quadratic about 20 minutes (#962 spec).
+   - Graph-compiler release tests need `--config 'profile.release.panic="unwind"'` (#962 spec,
+     "Deviations").
+   - New gate: re-inject #962 fix 1 in a scratch branch; the nightly job goes red by its bound, not by
+     its timeout.
+4. **#1002's memory claim was never guarded here.** The scale session has no effects, so it never
+   takes the #971/#1002 path (#1002 spec). Record it as a gap. Its guard would be a nightly RSS
+   budget on the 65,537-track limiter session; that belongs to its own issue, not this one.
+5. **Risk statement.** Per-PR detection of a quadratic regression is lost; it becomes up to one day
+   late. That is an owner ruling. The verification recommends accepting it with the bound above;
+   otherwise keep `scale.rs:160` per PR and move only the rest.
+6. **The saving, measured.** The four binaries take a median 114 s over 8 full-route runs, and 149 s
+   on PR #1016's run. Minus the kept constrained compile that is about 95-125 s.

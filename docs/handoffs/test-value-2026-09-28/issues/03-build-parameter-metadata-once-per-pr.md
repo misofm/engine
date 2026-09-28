@@ -63,3 +63,21 @@ Authorized paths:
   `rust-cache` does not keep workspace crates, so a separate target dir would not help. Setting
   `SKIP_BUILD=1` would point the ABI check at an audit-feature build. No cheap fix was found.
 - **Risk:** none identified. Each removed step duplicated a check that stays.
+
+## Amendments (Sol verification, 2026-09-28)
+
+See [`../VERIFY-TEST-VALUE.md`](../VERIFY-TEST-VALUE.md). **These amendments supersede the body wherever they conflict.**
+
+1. **Measured.** Over 8 full-route runs the two duplicate `parameter-metadata` builds take a median
+   65.8 s (`artifact-gates`) and 56.2 s (`sdk`), 122 s in all; PR #1016's run took 147 s. Set gate
+   4's targets to about −55 s for `artifact-gates` and about −50 s for `sdk`, plus toolchain setup.
+2. **The claims hold.**
+   - The CI `--check` compares the generator with itself at the same commit.
+   - The M3 "FMA" step's `RUSTFLAGS` replaces `.cargo/config.toml`'s rustflags. It builds `math`
+     without `lane` on `+fma` alone, a configuration that ships nowhere, and the main leg already runs
+     M3 with FMA on.
+3. **Scope addition.** `scripts/check-ci-path-routing.py` pins the `sdk` job's command lines
+   (`SDK_CLOSURE_LINES`, `:294-301`), including `bash scripts/check-sdk-generated.sh`. Add it and
+   `scripts/test-ci-path-routing.py` to the authorized paths if any pinned line changes.
+4. **Keep the local check.** Local no-argument `check-web-audioworklet.sh` keeps `--check`: it is the
+   one check that catches a stale committed metadata file before a push.

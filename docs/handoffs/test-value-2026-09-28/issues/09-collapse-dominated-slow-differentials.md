@@ -92,3 +92,24 @@ No product code.
   off test-debug-b and about 30 s off test-debug-a.
 - **Risk:** low, bounded by gate 1. A width-only or arm-only defect is protected by gate 2's
   recorded mutations.
+
+## Amendments (Sol verification, 2026-09-28)
+
+See [`../VERIFY-TEST-VALUE.md`](../VERIFY-TEST-VALUE.md). **These amendments supersede the body wherever they conflict.**
+
+1. **A deletion needs full mutation equivalence, not a shard (finding F8).**
+   - Deleting `the_two_channels_are_judged_together`, the compressor all-wet grid or the five
+     compressor scenario pins requires equivalence over **all** mutants of the files those tests
+     exercise, with `--file`.
+   - 1005-M5d, a W8-only catch that sampling missed, shows why.
+   - Shrinks and seed reductions may use shards.
+2. **Reproduced.** The compressor all-wet grid (23.4 s) has exactly the 142-mutant catch set of
+   `the_collapsed_settled_body_is_the_base_body_on_the_three_parameter_sets` (4.7 s). This was a
+   full 654-mutant re-run.
+3. **The builtins response trim to launch rates overlaps #1036.** Land after it, and keep only the
+   one-DFT-per-(rate, cutoff, kind) and stride trims.
+4. **Cost gates are HEAD-specific.** The graph-compiler lib binary grew from 11 s to 46 s, and the
+   compressor lib from 0 s to 21 s, in the #1016 batch. Measure "before" on the base of this
+   change, not on the audit's figures.
+5. **Gate 1 with `--test-package graph-compiler`.** Baseline the graph-compiler tests unmutated
+   first (F4).

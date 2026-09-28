@@ -78,3 +78,23 @@ Authorized paths:
 - **Saving:** a few seconds per PR, and about ten fewer re-pin sites per corpus change.
 - **Risk:** a digest change is now reported by `test-release`'s G5 test instead of the effect crate's
   debug tests, so the failure is further from the change. The message names the case and width.
+
+## Amendments (Sol verification, 2026-09-28)
+
+See [`../VERIFY-TEST-VALUE.md`](../VERIFY-TEST-VALUE.md). **These amendments supersede the body wherever they conflict.**
+
+1. **Do not remove `run-wasm-gates.sh`'s `--native` leg from the script (finding F7).**
+   - "`bash scripts/run-wasm-gates.sh` passes" is the class-A gate of #1021, #1024, #1027, #1033,
+     #1034, #1036, #1037 and #1038, and #1018 runs the script too.
+   - Removing the leg silently weakens all of them.
+   - Instead add `--without-native` for CI's `wasm-guests` only. Make `check-ci-path-routing.py`
+     require it to be paired with `g5_native_digests_match_pins` in `test-release`, as it pairs
+     `--without-v8-spill` with the artifact-gates spill step (#1009).
+2. **AArch64 is official now (#1017).** The single owner, G5, must run on the #1017 job in the
+   shipping profile. That job is how "bit-identical on phones" is proven.
+3. **The per-crate compares run in debug, and G5 in release.** Dropping the debug compare loses only
+   debug-only divergence. A `cfg(debug_assertions)`-dependent arithmetic path is the one plausible
+   source. Gate 1 adds a seeded `cfg(debug_assertions)` arithmetic difference in one effect and
+   shows the loss is accepted: the per-crate finiteness test stays green and G5, in release, cannot
+   see it. State this in the PR.
+4. **Gate 3.** Baseline `wasm-gates` unmutated with the same environment before the mutant runs (F4).
