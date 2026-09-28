@@ -384,3 +384,163 @@ every comparison below uses that rebuild.
      `test-env-vocabulary.sh` and `check-step-vocabulary.py`. Each flags text under
      `docs/handoffs/test-value-2026-09-28/`, merged docs-only in `73e50f7d`, so they are not this
      change's.
+
+## Sol attempt 1 verdict: PASS
+
+Sol, 2026-09-28, reviewing `7594307d`..`6589bdd5` against base `4a0d60bd`. I also merged
+`6589bdd5` onto the current batch head `8347c16d`, in a detached scratch worktree. The merge had
+no conflicts and was not pushed. Everything ran on one machine with rustc 1.97.1,
+`CARGO_INCREMENTAL=0` and scratch target directories.
+
+### 1. Dead really was dead
+
+- **Non-Rust consumers.** I sampled 27 deleted items: `ChannelLinkMode`,
+  `DISABLED_LATTICE_INDEX`, `reset_lifetime_recovered_state`, `balance_matrix`,
+  `mono_track_count`, `delay_target_ms`, `fast_envelope`, `slow_envelope`, `required_delay`,
+  `verify_raw_bytes`, `copy_worker_audit_snapshots`, `dispatch_counters`, `overflow_count`,
+  `underrun_count`, `quantum_samples`, `DEFAULT_SMOOTHING_MS`, the four host-web size constants,
+  `nonfinite_lanes_block`, both `test_only_*` hooks, `designed_lane_witness`,
+  `graph_entity_index`, `read_block_contiguous` and the host-core `copy_response_snapshot`.
+  - **Nothing references them** in these places:
+    - `sdk/`, including `codegen`, `src/generated` and the ABI-layout and parameter-metadata JSON
+      assets;
+    - `hosts/host-web/web` and `hosts/host-web/qualification`;
+    - `docs/` outside `docs/handoffs/`;
+    - `.github/workflows` and `scripts`;
+    - `fuzz` and `tools/parameter-metadata`.
+  - **Same-name hits are other, live items:**
+    - `delay`'s own `delay_target_ms`;
+    - the single-lane `trim_target`, `target_gain` and `is_muted` in `builtins`;
+    - `PreparedRenderPlan::render_contiguous`;
+    - the inherent `ConsoleEffectBankStage::disarm_observations`.
+  - **No mobile code.** The repository has no Swift, Kotlin, Java or Objective-C. `capi/src` and
+    its header are untouched.
+- **Generated surfaces.** The SDK reads the two removed host-web sizes through
+  `miso_engine_web_v1_spectrum_result_bytes` and `…_observation_status_bytes`. Both still exist,
+  and the export list is identical (135 names). `check-sdk-generated.sh` passes. The ABI-layout and
+  parameter-metadata JSON regenerated from the merge are byte-identical to `sdk/assets`.
+- **Rust users, per target.** The merge builds clean on:
+  - **x86-64:** check, clippy `-D warnings` and doc `-D warnings`, `--workspace --all-targets
+    --all-features`.
+  - **wasm32:** `simd128` for `host-web` and `host-core`; CI's 18-package scalar build; the
+    evidence-crate checks.
+  - **fuzz:** the fuzz binaries.
+  - **`aarch64-apple-ios` and `aarch64-linux-android`:**
+    - check and clippy `-D warnings` of `--workspace --lib --all-features`, minus the four
+      C-build-script tools;
+    - `--all-targets --all-features` for lane, engine, host-core, capi, source and graph (plus
+      soft-clip on check).
+
+  The aarch64 all-targets warnings (the x86-gated bodies of `fp_env` and `fp_environment`) are the
+  same at the batch head.
+- **The keeps hold.** Deleting `NativeEffectRegistry::is_empty` fails clippy with
+  `len_without_is_empty`.
+
+### 2. The re-pins are honest
+
+I tested whether the one removed field accounts for every re-pin. In a copy of the merge I restored
+only `CompiledSession::graph_entity_indexes` and its build, and put back every **old** pin. These
+all pass:
+
+- the protocol size test (6,064 and 752);
+- all four `capi` `resource_lifecycle` tests (160,981; 24,736; 204,423; 178,514);
+- `check-browser-expected-resources.py` against the old `expected.json`.
+
+The merge, with the field gone, passes the **new** pins. So every delta is exactly that one field:
+
+- **64-bit.** The `BTreeMap` header is 24 bytes.
+
+  | pin | arithmetic |
+  |---|---|
+  | active CAPI (one compiled session, inline in the session handle) | 160,981 − 24 = 160,957 |
+  | `frozen_scratch_report` | 160,957, and 160,957 − 9 |
+  | prepared protocol | 24,736 − 24 = 24,712 |
+  | double-live CAPI and `oracle.capi` | 204,423 − 2 × 24 = 204,375 |
+  | tiny-frame base | 178,514 − 24 = 178,490 |
+  | `ProtocolController` | 6,064 − 24 = 6,040 |
+  | `PreparedStructuralCommand` | 752 − 24 = 728 |
+
+- **wasm32.** The 12-byte header saves 8 bytes after alignment padding.
+  - `bridgeMetadataBytes`: 1,149,263 − 8 = 1,149,255.
+  - `bridgeRetainedBytes`: 1,169,772 − 8 = 1,169,764.
+  - In the module, `project_buffers`' constant goes from 1,113,205 to 1,113,197.
+  - `check-browser-expected-resources.py --artifacts` passes on the branch's own module, rows and
+    PCM digest parity included.
+
+### 3. The artifact change is control-plane only
+
+- **Hashes.** The base and the batch head both build `476e58ad…`, which equals the pin. The branch
+  and the merge both build `3f744b03…25da`. The module shrinks from 3,498,409 to 3,486,775 bytes,
+  and the exports are identical.
+- **Function counts.** I compared demangled, crate-hash-normalized function bodies. The count goes
+  from 2,749 to 2,736:
+  - 2,725 functions are identical up to integer immediates.
+  - 14 exist only in the base: four vtable-only trait bodies and the `graph_entity_indexes` build
+    (`indexed`, its `GenericShunt`, the sort trio, `bulk_build`, and four `BTreeMap` drop glues).
+  - 9 names differ in instructions:
+    - `compile_session`, `compile_host_model`, `compile_ready` and
+      `prepare_native_session_effects`;
+    - the drop glue of `CompiledSession`, `EffectPreparedSession` and `ReadyOwnership`;
+    - `stage_prepared_entry` and `publish_candidate`.
+
+  That reproduces the evidence's 24 base and 11 change bodies.
+- **Render path.** I took the render-thread closure of `render` and `meter_poll`: direct calls, plus
+  every table entry whose type matches a `call_indirect` (1,005 functions).
+  - The only instruction-level changes in it are the four removed vtable bodies, and nothing
+    called those.
+  - The 16-function direct closure differs only in load/store offsets (−8, from the smaller host
+    struct) and static addresses. `render_inner` has one changed `i32.const` (−48).
+- **Constants.** No `f32` or `f64` constant changed anywhere. The six `v128.const` changes and the
+  data-segment changes are:
+  - builtins-compiler's `Any::type_id` constants (from the crate-hash change);
+  - panic-location line numbers;
+  - pointers;
+  - the 48 bytes of removed vtable slots.
+- **Artifact gates.** `check-web-audioworklet.sh` passes on the branch module. It covers the export
+  set, the render/meter/command closures and the kernel roster. The V8 spill gate also passes.
+
+### 4. Coverage survives
+
+I diffed `-- --list` between the batch head and the merge. Test names and test binaries are
+identical:
+
+- `test-debug-a`: 1,534 tests in both;
+- `test-debug-b`: 834 in both;
+- `--workspace --all-targets`: 2,552 in both.
+
+### 5. It merges and builds on the batch
+
+On the merge:
+
+- **Builds:** fmt, check, clippy and doc pass with no warnings (see gate 1).
+- **Tests:**
+  - `test-debug-a`: 1,526 passed, 0 failed, and `host-native` runs;
+  - `test-debug-b`: 807 passed, 0 failed;
+  - `cargo test --workspace`: 2,533 passed, 0 failed.
+- **Console digests:** all 17 rows are byte-identical to the batch head.
+- **`run-wasm-gates.sh`:** passes on the native, wasm scalar and wasm `simd128` legs (142 cases and
+  358 comparisons each, with no mismatches) and on the V8 spill leg.
+- **Cross-target and C ABI:** `check-cross-targets.sh` passes, including the armv7 refusal.
+  `check-capi-abi.sh` passes. So does `test-web-audioworklet.sh`.
+- **Policy:** every lint-job policy check and mutation test passes, as do the CI-routing,
+  release-shape, SDK-deletion and test-support scripts. That includes the four that failed on the
+  attempt's base.
+- **One flaky script.** `test-bench-policy.sh` fails intermittently: its
+  `allocator-owner-sort-error` mutation escapes. It does so the same way on the unmodified batch
+  head, and none of its inputs changed, so the failure is not this change's.
+
+### Findings (not blocking; root should apply them)
+
+1. **Stale doc comment.** `crates/host-core/tests/fp_environment.rs:14-16` still names the deleted
+   `StartedRenderSession::render_contiguous` as the red-mutation site. It should name
+   `render_planar`, as `tests/MUTATIONS.md` M-146 does. Step 4 missed it. The comment was already
+   wrong at base, because the test renders through `render_planar`.
+2. **Unrecorded hand-off.** The #1024 spec does not list the items this attempt hands to it:
+   `PlanarBufferRef`'s `try_new`, `plane` and `plane_range`, and its fields `storage` and
+   `stride`. Amend #1024 before it starts, or nothing owns them.
+3. **Pre-existing staleness.** `crates/builtins/tests/MUTATIONS.md:42` quotes a
+   `nonfinite_lanes_block` call that did not exist even at base.
+4. **Estimate left as is.** `session/src/estimate.rs:153` still budgets 128 index bytes for each
+   track, submix and output, for the map that is gone. The estimate stays a conservative upper
+   bound. Changing it would change which sessions a cap refuses, so leaving it is right for an
+   issue that must not change behaviour.
