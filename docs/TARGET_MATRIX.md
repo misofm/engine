@@ -10,7 +10,39 @@ The session model and its semantics do not vary by Cargo feature or target capab
 | Native AVX2/FMA | `x86_64-unknown-linux-gnu` | A future FMA kernel requires both independently detected AVX2 and FMA. | Separate `+avx2,+fma` compile directory and cfg assertion. |
 | ARM64 Android | `aarch64-linux-android` | Unsupported; no claim. | Deferred, see #366 and #378. |
 | ARM64 iOS | `aarch64-apple-ios` | Unsupported; no claim. | Deferred, see #366 and #378. |
+| Refused | `armv7-linux-androideabi` (armeabi-v7a), `i686-*`, ILP32 ABIs and every other unlisted target | Refused at compile time by `lane` (#1041). | `scripts/check-cross-targets.sh` refusal row on `armv7-linux-androideabi`. |
 | Browser Wasm | `wasm32-unknown-unknown` | Baseline and `+simd128` are distinct artifacts. Four-lane processing uses multiply plus add; relaxed SIMD and FMA assumptions are forbidden. | Two distinct release artifact directories. |
+
+## 64-bit only (issue #1041)
+
+Owner ruling 2026-09-28 (`docs/rulings/engine-footprint-2026-09-28.md`): "Yes let's go 64bit
+only." iOS arm64 and Android arm64-v8a ship; 32-bit ARM (armeabi-v7a) does not. `lane` refuses
+to compile for any target outside this set (`crates/lane/src/lib.rs`, beside the x86-64-v3 guard):
+
+- `x86_64` with 64-bit pointers and the pinned AVX2 and FMA (the x86-64-v3 guard);
+- `aarch64` with 64-bit pointers;
+- `wasm32` with `simd128`.
+
+`capi`, `host-core`, `host-web`, `graph` and every effect depend on `lane`, so the refusal covers
+everything a mobile app or a browser embeds. The error reads
+"lane supports 64-bit targets only". The pointer-width condition also refuses the ILP32 ABIs that
+share an architecture name (`x86_64-unknown-linux-gnux32`, `arm64_32-apple-watchos`).
+`scripts/check-cross-targets.sh` proves the refusal on `armv7-linux-androideabi` in CI's
+`cross-target` job, and fails if that target ever compiles.
+
+**The scalar-wasm CI exception.** `wasm32` *without* `simd128` still compiles. It is not a product
+target: the one shipped artifact is `simd128` (W4-D1). It stays allowed only because CI builds
+`lane` that way today, and removing those legs is a separate, pending decision. The legs are:
+
+- `qualification.yml` `wasm-guests`: the scalar Wasm build, the scalar evidence-crate check,
+  `scripts/check-wasm-realtime-atomics.sh`, the scalar variant of
+  `scripts/check-protocol-wasm-parity.sh`, and the scalar guest of `scripts/run-wasm-gates.sh`
+  (gate G5's scalar-width leg);
+- `qualification.yml` `cross-target`: the scalar rows of `scripts/check-cross-targets.sh`, plus
+  `scripts/check-effect-package-v1.sh` and `scripts/check-effect-descriptor-v1.sh`.
+
+When the legs go, delete the one marked arm of the guard. The scalar arm of
+`lane::Backend::current()` will then be unreachable.
 
 ## Dispatch contract
 
@@ -18,7 +50,8 @@ The session model and its semantics do not vary by Cargo feature or target capab
 capability struct: `engine::target_capabilities()`, `TargetCapabilities` and
 `KernelBackendV1` were deleted together with `crates/engine/src/arch`.
 `lane::Backend::current()` is a compile-time constant (`Simd8` on `x86-64-v3`, `Simd4`
-on AArch64 and on a wasm artifact built with `simd128`, `Scalar` otherwise), and
+on AArch64 and on a wasm artifact built with `simd128`, and `Scalar` only under the scalar-wasm
+CI exception above, since every other target fails to compile), and
 `lane::attest_host()` refuses at boot on an x86 CPU that lacks the pinned AVX2/FMA
 rather than degrading silently. `effect_contract::BankWidth::for_backend` is the
 workspace's single backend-to-width law.

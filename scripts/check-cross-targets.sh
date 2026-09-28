@@ -5,6 +5,10 @@
 # android/ios rows this script used to build were removed. A future revival must reopen the
 # deferred-defect register in docs/TARGET_MATRIX.md before restoring them.
 #
+# 32-bit targets are refused at compile time (#1041, owner ruling 2026-09-28: mobile ships 64-bit
+# only). The armv7-linux-androideabi row below is a refusal row: it passes only while `lane`
+# fails to compile for that target with its 64-bit-only message.
+#
 # Replaces the cargo/wasm-objdump halves of scripts/check-parametric-eq-targets.sh,
 # scripts/check-builtins-targets.sh and scripts/check-effect-interchange-targets.sh with one script
 # that runs each distinct package/target/feature combination exactly once, under one cached target
@@ -38,7 +42,7 @@ done
 [[ "$(uname -s)" == Linux ]] || fail 'native row requires Linux'
 host_triple="$(rustc -vV | sed -n 's/^host: //p')"
 [[ "$host_triple" == x86_64-unknown-linux-gnu ]] || fail 'native row requires x86_64 Linux host'
-for target in x86_64-unknown-linux-gnu wasm32-unknown-unknown; do
+for target in x86_64-unknown-linux-gnu wasm32-unknown-unknown armv7-linux-androideabi; do
     rustup target list --installed | rg -qx "$target" || fail "required target unavailable: $target"
 done
 
@@ -62,6 +66,20 @@ base_target_dir="${CARGO_TARGET_DIR:-target}/ci/cross-target"
 CARGO_TARGET_DIR="$base_target_dir/x86_64-unknown-linux-gnu" \
     cargo check --quiet --locked --release \
     -p parametric-eq -p builtins -p builtins-compiler
+
+# --- 64-bit only: lane refuses 32-bit ARM Android (#1041) ----------------------------------------
+# Owner ruling 2026-09-28 (docs/rulings/engine-footprint-2026-09-28.md): iOS arm64 and Android
+# arm64-v8a ship, armeabi-v7a does not, and a 32-bit build is refused at compile time. Deleting or
+# loosening the guard in crates/lane/src/lib.rs turns this row red. `cargo check` links nothing, so
+# no NDK is needed; only the target's standard library.
+refusal_log="$base_target_dir/armv7-linux-androideabi.refusal.log"
+mkdir -p "$base_target_dir"
+if CARGO_TARGET_DIR="$base_target_dir/armv7-linux-androideabi" \
+    cargo check --quiet --locked --target armv7-linux-androideabi -p lane 2>"$refusal_log"; then
+    fail 'lane compiled for armv7-linux-androideabi: the 64-bit-only guard (#1041) is gone'
+fi
+rg -qF 'lane supports 64-bit targets only' "$refusal_log" ||
+    fail "armv7-linux-androideabi failed without lane's 64-bit-only message (#1041); see $refusal_log"
 
 for mode in scalar simd; do
     if [[ "$mode" == scalar ]]; then
@@ -121,4 +139,4 @@ for mode in scalar simd; do
     fi
 done
 
-printf 'cross-target matrix: PASS (x86-64-v3; wasm scalar/simd128; parametric-eq, builtins, effect-interchange rows deduplicated; native aarch64 unsupported, see #378)\n'
+printf 'cross-target matrix: PASS (x86-64-v3; wasm scalar/simd128; armv7 refused (#1041); parametric-eq, builtins, effect-interchange rows deduplicated; native aarch64 unsupported, see #378)\n'

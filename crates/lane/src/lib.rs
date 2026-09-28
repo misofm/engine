@@ -80,6 +80,37 @@ compile_error!(
      silent scalar fallback."
 );
 
+// Issue #1041: the engine builds for 64-bit targets only and refuses every other target here.
+// Owner ruling 2026-09-28 (`docs/rulings/engine-footprint-2026-09-28.md`), "Yes let's go 64bit
+// only": iOS arm64 and Android arm64-v8a ship, 32-bit ARM (armeabi-v7a) does not. Before this
+// guard `Backend::current()` gave `Scalar` to every architecture it did not name, so a 32-bit ARM
+// build compiled and ran the whole-plan scalar path without a word. The supported set is x86-64
+// (its AVX2+FMA pin is the guard above), AArch64, and wasm32 with `simd128`. The two native arms
+// also require 64-bit pointers, which keeps out the ILP32 ABIs that share an architecture name
+// (`x86_64-unknown-linux-gnux32`, `arm64_32-apple-watchos`).
+//
+// The scalar-wasm CI exception: wasm32 *without* `simd128` still builds. It is not a product
+// target -- the one shipped wasm artifact is `simd128` (owner decision W4-D1) -- but CI builds
+// `lane` that way today, gate G5's scalar wasm guest (`scripts/run-wasm-gates.sh`) among others;
+// `docs/TARGET_MATRIX.md` lists them. Whether to remove those legs is a separate, pending
+// decision. When it is taken, delete the marked arm and nothing else.
+//
+// Unlike the guard above this one needs no `not(doc)` escape: with the exception its outcome
+// depends only on `target_arch` and `target_pointer_width`, which rustdoc sees correctly.
+#[cfg(not(any(
+    all(target_arch = "x86_64", target_pointer_width = "64"),
+    all(target_arch = "aarch64", target_pointer_width = "64"),
+    all(target_arch = "wasm32", target_feature = "simd128"),
+    // The scalar-wasm CI exception (above). Not a product target.
+    all(target_arch = "wasm32", not(target_feature = "simd128"))
+)))]
+compile_error!(
+    "lane supports 64-bit targets only: x86-64 (with AVX2 and FMA), AArch64 (iOS arm64, Android \
+     arm64-v8a) and wasm32 with simd128. 32-bit ARM (armeabi-v7a), 32-bit x86 and every other \
+     target are refused, with no silent scalar fallback (owner ruling 2026-09-28, \
+     docs/rulings/engine-footprint-2026-09-28.md; issue #1041)."
+);
+
 mod backend;
 mod bits;
 mod f64_lane;
