@@ -69,9 +69,9 @@ binary_dir="${CARGO_TARGET_DIR:-$root/target}${CARGO_BUILD_TARGET:+/$CARGO_BUILD
 # issue|package|target|test. `target` is `lib` or `test:<integration test name>`.
 EXPECTED_FAILURES_DEBUG=(
     # LANE-3 (#1019). Not the fmaxnm fold (a debug build makes none): AArch64's own NaN rules. An
-    # arithmetic NaN is +0x7FC00000 where x86 answers -0xFFC00000, and a signalling operand wins
-    # NaN propagation, so these pins, which fold raw NaN words from hostile input, move on AArch64
-    # and on nothing else. With every NaN folded as one word the six compressor scenarios and the
+    # arithmetic NaN is 0x7FC00000 (positive) where x86 answers 0xFFC00000 (negative), and a
+    # signalling operand wins NaN propagation, so these pins, which fold raw NaN words from hostile
+    # input, move on AArch64 and on nothing else. With every NaN folded as one word the six compressor scenarios and the
     # EQ select legs are identical on both architectures (#1017 attempt 1 evidence). #1019's gate 1
     # owns compressor NaN-payload identity on this leg.
     "1019|compressor|lib|kernel::settled_body_tests::scenario_981_heterogeneous_hostile_render_is_pinned"
