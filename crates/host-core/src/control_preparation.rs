@@ -452,12 +452,6 @@ impl EqTargetPreparer {
         Ok(())
     }
 
-    /// Returns the factory retained by this facade.
-    #[must_use]
-    pub fn factory(&self) -> &Arc<dyn NativeEffectFactory> {
-        &self.factory
-    }
-
     /// Actual retained allocation size of the shared factory `Arc`.
     #[must_use]
     pub fn factory_allocation_bytes(&self) -> usize {

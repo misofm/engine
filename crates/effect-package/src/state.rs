@@ -844,9 +844,6 @@ pub struct VerifiedEffectState<'a> {
 }
 
 impl<'a> VerifiedEffectState<'a> {
-    pub const fn as_bytes(self) -> &'a [u8] {
-        self.bytes
-    }
     pub const fn descriptor_identity(self) -> EffectDescriptorIdentity {
         self.descriptor_identity
     }
@@ -880,12 +877,6 @@ impl<'a> VerifiedEffectState<'a> {
             self.sidechain_id,
             self.sidechain_required,
         )
-    }
-    pub const fn latency_samples(self) -> u64 {
-        self.latency_samples
-    }
-    pub const fn tail(self) -> TailSamples {
-        self.tail
     }
     pub const fn state_sizes(self) -> StatePayloadSizes {
         self.state_sizes

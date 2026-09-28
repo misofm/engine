@@ -36,11 +36,13 @@ fn replay_layout_stays_within_the_capi_resource_oracle() {
     assert_eq!(core::mem::size_of::<ReplayCache>(), 88);
     // #241 re-pin (-24): deleting three source/limit edit variants narrows the embedded
     // prepared-command enum by 24 bytes; all twelve queue endpoints are otherwise unchanged.
+    // #1023 re-pin (-24 each): `CompiledSession`, held inline by both, drops its unread
+    // `graph_entity_indexes` map, a 24-byte `BTreeMap` header.
     assert_eq!(
         core::mem::size_of::<ProtocolController<MockProvider>>(),
-        6_064
+        6_040
     );
-    assert_eq!(core::mem::size_of::<PreparedStructuralCommand>(), 752);
+    assert_eq!(core::mem::size_of::<PreparedStructuralCommand>(), 728);
 }
 
 #[test]

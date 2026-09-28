@@ -4,8 +4,9 @@
 //! These live here, next to [`svf_block`](super::svf_block), for the same reason every other
 //! kernel does: one generic body, instantiated at every width, is what makes lane identity a
 //! property of the code rather than of a corpus (master plan §1, §4.2). The builtin chain is
-//! `sanitize_gain_block` -> `svf_block` (HPF) -> `svf_block` (LPF) -> `nonfinite_lanes_block`
-//! -> `gain_mute_block` -> `matrix2x2_block`, with one AoSoA transpose pair per chain per block.
+//! `sanitize_gain_block` -> `svf_block` (HPF) -> `svf_block` (LPF) -> the D7 per-lane non-finite
+//! check -> `gain_mute_block` -> `matrix2x2_block`, with one AoSoA transpose pair per chain per
+//! block.
 //!
 //! # Operation order is frozen
 //!
@@ -28,12 +29,6 @@ pub const NONFINITE_LIMIT: f32 = 1.0e30;
 #[inline(always)]
 pub fn no_lanes<L: Lane>() -> L::Mask {
     L::zero().lt(L::zero())
-}
-
-/// A mask with every lane set.
-#[inline(always)]
-pub fn all_lanes<L: Lane>() -> L::Mask {
-    L::zero().eq(L::zero())
 }
 
 /// A mask set in the lanes whose index is below `count`.
@@ -115,31 +110,10 @@ pub fn sanitize_gain_block<L: Lane>(io: &mut [f32], frames: usize, gain: L) -> L
     count
 }
 
-/// The D7 block boundary check (master plan §4.4), at per-lane granularity.
-///
-/// Returns the mask of lanes that produced a non-finite sample anywhere in the block: one ordered
-/// compare and one mask OR per frame, and no `mask_any` inside the loop. The caller calls
-/// [`Lane::mask_any`] once per block, and only on that rare path does it pay for
-/// [`zero_lanes_block`] and a state reset.
-///
-/// Per-lane granularity is deliberate: one track's non-finite block must not change another
-/// track's bits, or a track's output would depend on its cohort membership.
-///
-/// Frozen operation order, per frame: `bad = bad | !(|load(frame)| < NONFINITE_LIMIT)`.
-#[inline(always)]
-pub fn nonfinite_lanes_block<L: Lane>(io: &[f32], frames: usize) -> L::Mask {
-    debug_assert_eq!(io.len(), frames * L::WIDTH);
-    let limit = L::splat(NONFINITE_LIMIT);
-    let mut bad = no_lanes::<L>();
-    for frame in io.chunks_exact(L::WIDTH) {
-        bad = L::mask_or(bad, L::mask_not(L::load(frame).abs().lt(limit)));
-    }
-    bad
-}
-
 /// Clears every frame of the lanes selected by `m` to exactly `+0.0`.
 ///
-/// The rare arm of [`nonfinite_lanes_block`]: lanes that are not selected keep their bits exactly.
+/// The rare arm of the D7 block-boundary check: lanes that are not selected keep their bits
+/// exactly.
 ///
 /// Frozen operation order, per frame: `store(frame, andnot(load(frame), m))`.
 #[inline(always)]
@@ -545,10 +519,10 @@ pub struct InputChainReport<L: Lane> {
 /// Every operation, and the order of every operation, is the one the separate kernels use:
 /// [`sanitize_gain_block`] for step 1, [`super::svf_step`] — the single copy of the recurrence,
 /// shared with [`super::svf_block`] — plus that kernel's output mix for steps 2 and 3, and
-/// [`nonfinite_lanes_block`] for step 4. The intermediate value that used
-/// to be stored and reloaded between passes is now kept in a register, which is exact, and the
-/// counter and mask accumulations keep their per-frame order. This is a scheduling change, not a
-/// numeric one (master plan §8 class A).
+/// the D7 per-lane non-finite check (one ordered compare and one mask OR per frame) for step 4.
+/// The intermediate value that used to be stored and reloaded between passes is now kept in a
+/// register, which is exact, and the counter and mask accumulations keep their per-frame order.
+/// This is a scheduling change, not a numeric one (master plan §8 class A).
 ///
 /// Frozen operation order, per frame and per channel `ch`:
 /// 1. `x = load(frame)`

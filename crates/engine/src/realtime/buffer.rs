@@ -68,16 +68,6 @@ impl BufferArena {
         })
     }
 
-    /// Number of logical buffers.
-    #[must_use]
-    pub fn count(&self) -> usize {
-        self.specs.len()
-    }
-    /// Total preallocated PCM samples.
-    #[must_use]
-    pub fn total_samples(&self) -> usize {
-        self.storage.len()
-    }
     /// Shape of one buffer.
     pub fn spec(&self, index: BufferIndex) -> Result<PlanarBufferSpec, BufferArenaError> {
         self.specs
@@ -120,10 +110,6 @@ impl BufferArena {
     ) -> Result<&mut [f32], BufferArenaError> {
         let range = self.range(index, channel)?;
         Ok(&mut self.storage[range])
-    }
-    /// Clear all prepared PCM samples.
-    pub fn clear(&mut self) {
-        self.storage.fill(0.0);
     }
 }
 

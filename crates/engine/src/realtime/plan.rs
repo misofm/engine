@@ -1,7 +1,5 @@
 //! Structurally immutable prepared plan and bounded silence reference renderer.
 
-#![allow(dead_code)] // State fields are intentionally prepared now for later issue-owned kernels.
-
 use super::{BufferArena, BufferArenaError, PlanarBufferMut, PlanarBufferRef};
 use crate::{QuantumFrames, SampleRateHz, is_launch_sample_rate};
 use core::{cell::Cell, num::NonZeroUsize};
@@ -461,11 +459,6 @@ pub trait PreparedPlanExecutor: Send {
     fn observation_retained_bytes(&self) -> u64 {
         0
     }
-    /// Copy cumulative auxiliary-worker audit snapshots after render is disarmed.
-    #[doc(hidden)]
-    fn copy_worker_audit_snapshots(&self, _output: &mut [super::audit::AuditSnapshot]) -> usize {
-        0
-    }
     /// Give up an executor-owned resource at the block-boundary swap.
     ///
     /// This exists so a persistent auxiliary worker pool outlives the plan that used it: the
@@ -484,11 +477,6 @@ pub trait PreparedPlanExecutor: Send {
     #[doc(hidden)]
     fn accept_handover(&mut self, handover: ExecutorHandover) -> Option<ExecutorHandover> {
         Some(handover)
-    }
-    /// Bounded implementation-owned dispatch counters, read only after rendering is disarmed.
-    #[doc(hidden)]
-    fn dispatch_counters(&self) -> [u64; 4] {
-        [0; 4]
     }
 }
 
@@ -649,18 +637,6 @@ impl PreparedRenderPlan {
         self.executor
             .as_deref()
             .map_or([0, 0], PreparedPlanExecutor::qualification_counters)
-    }
-    /// Read bounded executor dispatch counters outside the render scope.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn dispatch_counters(&self) -> [u64; 4] {
-        assert!(
-            !super::audit::is_render_scope_active(),
-            "dispatch counters are sealed until the render audit is disarmed"
-        );
-        self.executor
-            .as_deref()
-            .map_or([0; 4], PreparedPlanExecutor::dispatch_counters)
     }
     /// Prevalidate source preparation before a host admits the producer-side seek.
     /// Requires the plan owner; it provides no concurrent control-side consumer handle.
@@ -858,17 +834,6 @@ impl PreparedRenderPlan {
         if let Some(executor) = self.executor.as_deref_mut() {
             executor.force_mono_collapse_off(forced);
         }
-    }
-    /// Copy cumulative auxiliary-worker audit snapshots in stable worker order.
-    #[doc(hidden)]
-    pub fn copy_worker_audit_snapshots(&self, output: &mut [super::audit::AuditSnapshot]) -> usize {
-        assert!(
-            !super::audit::is_render_scope_active(),
-            "worker audit snapshots are sealed until the render audit is disarmed"
-        );
-        self.executor
-            .as_deref()
-            .map_or(0, |executor| executor.copy_worker_audit_snapshots(output))
     }
     #[cfg(test)]
     pub(crate) fn set_drop_observer(

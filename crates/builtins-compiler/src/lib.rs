@@ -4066,21 +4066,6 @@ impl SessionPoolClasses {
                 CohortPoolClass::of_prepare_witness(witness)
             })
     }
-
-    /// Every track's class, in normalized track order. Evidence and diagnosis only.
-    pub fn classes(&self) -> impl Iterator<Item = (&str, CohortPoolClass)> {
-        self.by_track
-            .keys()
-            .map(|track| (track.as_ref(), self.class_of(track)))
-    }
-
-    /// How many tracks fall in [`CohortPoolClass::MonoSymmetricAtPrepare`].
-    #[must_use]
-    pub fn mono_track_count(&self) -> usize {
-        self.classes()
-            .filter(|(_, class)| *class == CohortPoolClass::MonoSymmetricAtPrepare)
-            .count()
-    }
 }
 
 struct InputProcessor(InputBuiltins);

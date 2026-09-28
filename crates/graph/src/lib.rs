@@ -226,13 +226,10 @@ use effect_contract::{
     PreparedEffectMetadata, PreparedNativeEffect, ResponseAnalysisError, ResponseSnapshotRequest,
     ResponseSnapshotSummary, SeamSide, TailSamples,
 };
-use engine::{
-    QuantumFrames,
-    realtime::{
-        BufferArena, PlanUnitEligibility, PlanarBufferMut, PlanarBufferRef, PrepareRenderPlan,
-        PreparedPlanExecutor, PreparedRenderPlan, RenderEnvelope, RenderError,
-        ResponseSnapshotError, ResponseSnapshotSink,
-    },
+use engine::realtime::{
+    BufferArena, PlanUnitEligibility, PlanarBufferMut, PlanarBufferRef, PrepareRenderPlan,
+    PreparedPlanExecutor, PreparedRenderPlan, RenderEnvelope, RenderError, ResponseSnapshotError,
+    ResponseSnapshotSink,
 };
 use lane::Backend;
 use rack::AoSoaScratch;
@@ -2902,10 +2899,6 @@ impl PreparedPlanExecutor for GraphExecutor {
     }
 }
 
-pub fn quantum_samples(quantum: QuantumFrames, count: u64) -> Option<u64> {
-    u64::from(quantum.0).checked_mul(count)
-}
-
 #[cfg(test)]
 mod observation_size_accounting {
     //! Issue #143 R7: the byte accounting for what the binding added, derived rather than pinned.
@@ -2970,7 +2963,7 @@ mod tests {
         PreparedPorts, PreparedSidechainPort, ProcessReport, ResetKind, StatePayloadError,
         StatePayloadInput, StatePayloadOutput, StatePayloadSizes,
     };
-    use engine::LAUNCH_SAMPLE_RATES;
+    use engine::{LAUNCH_SAMPLE_RATES, QuantumFrames};
     use std::sync::{
         Arc,
         atomic::{AtomicU64, Ordering},

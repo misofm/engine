@@ -1771,7 +1771,6 @@ name = "rack-compiler"
 version = "0.1.0"
 dependencies = [
  "effect-contract",
- "engine",
  "rack",
 ]
 

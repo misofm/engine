@@ -12,7 +12,6 @@ use super::{Consumer, Producer, QueueEmpty, QueueFull, QueueGeneration, SpscErro
 pub struct PlanEpoch(pub u64);
 use super::{
     PreparedPlanExecutor, PreparedRenderPlan, RenderError, RenderIo, RenderReport, RenderTime,
-    ResponseSnapshotCapture, ResponseSnapshotError, ResponseSnapshotRequest,
 };
 use core::{
     alloc::Layout,
@@ -431,23 +430,6 @@ impl RealtimePlanOwner {
         self.active.1.next_absolute_sample()
     }
 
-    /// Copy one selected track's retained response owners from the active plan without applying
-    /// a pending replacement or draining any queued controls.
-    pub fn copy_response_snapshot(
-        &mut self,
-        request: ResponseSnapshotRequest<'_>,
-    ) -> Result<RealtimeResponseSnapshot, ResponseSnapshotError> {
-        let active_epoch = self.active.0;
-        let ResponseSnapshotCapture {
-            captured_sample,
-            owners,
-        } = self.active.1.copy_response_snapshot(request)?;
-        Ok(RealtimeResponseSnapshot {
-            active_epoch,
-            captured_sample,
-            owners,
-        })
-    }
     /// Publish at the boundary, then render the block that must start at
     /// [`Self::next_absolute_sample`].
     pub fn render_contiguous(
@@ -492,19 +474,6 @@ impl RealtimePlanOwner {
     }
 }
 // REALTIME_POLICY_END
-impl RealtimePlanOwner {
-    /// Copy cumulative auxiliary-worker audit snapshots after callback rendering is disarmed.
-    pub fn copy_worker_audit_snapshots(&self, output: &mut [super::audit::AuditSnapshot]) -> usize {
-        self.active.1.copy_worker_audit_snapshots(output)
-    }
-
-    /// Read the active plan's bounded dispatch counters after callback rendering is disarmed.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn dispatch_counters(&self) -> [u64; 4] {
-        self.active.1.dispatch_counters()
-    }
-}
 impl Drop for RealtimePlanOwner {
     fn drop(&mut self) {
         if let Some(candidate) = self.pending.take() {

@@ -175,3 +175,372 @@ excluding the two tools whose `blake3` build script needs a cross C compiler) an
 7. **Add gates:** an aarch64 `cargo check --lib` for `-p lane -p engine -p host-core -p capi -p
    source` (a toolchain with the aarch64 std; CI has none yet), and `cargo check --manifest-path
    fuzz/Cargo.toml --bins`.
+
+## Attempt 1 evidence
+
+Implementer: Terra (Claude Opus 5.5), branch `codex/1023-delete-proven-dead-items` from
+`codex/batch-slim-1` at `4a0d60bd`. Commits `7594307d` (the item deletions), `7829d9fd` (the
+`allow(dead_code)` pass), `528fee3f` (render input kept for #1024, the rack policy pin and the capi
+re-pins) and `fa708d0b` (protocol and browser re-pins), plus this record. Nothing is pushed.
+
+**Size:** 52 files, 845 lines deleted and 81 added, net **-764** (Rust -763). The item count is 95
+of the table's 104 deleted, 2 narrowed to `cfg(test)`, and 7 kept for the reasons below. There
+are 51 `allow(dead_code)` attributes removed and none added.
+
+### Deleted beyond the table (step 1's cascade rule)
+
+- **`ConsoleEffectBankStage`'s override of `BankStage::disarm_observations`.** The trait method is
+  in the table. The inherent `ConsoleEffectBankStage::disarm_observations` stays, because
+  `rack/tests/console_bank.rs:628` calls it.
+- **`compile_session`'s `graph_entity_indexes` build.** It goes with the field (the `indexed(..)`
+  call over tracks, submixes and outputs). Its only failure mode was an index that does not fit in
+  a `u64`.
+- **`ControlledSpectrumCandidate::cadence` (host-core `spectrum.rs`).** No build reads this field,
+  tests included: `cargo check -p host-core --profile test --lib` warns. So it is deleted, not
+  moved behind `cfg(test)` as the spec proposed. `stage_prepared_entry` still passes `cadence` to
+  `reset_for_controlled_stage`.
+- **parametric-eq's `RAMPING_ELIDED_BLOCKS` and `count_ramping_plan`.** These, and the counter's
+  two call sites, narrow to `#[cfg(test)]` along with Amendment 1's two helpers. The deleted
+  `test_only_*` hooks were the counter's only readers in a `test-support` build.
+- **Leftovers:**
+  - five impl blocks left empty (`RealtimePlanOwner`'s second block, `HostChunkError`,
+    `SourceSeekError`, `ObservationTapId`, `DescriptorDiagnosticCode`);
+  - Amendment 3's imports. `QuantumFrames` moves into graph's test module, whose tests use it.
+- **A misplaced doc.** At the base, `ConsoleEffectBankStage`'s #140 doc block sat on
+  `designed_lane_witness`. It now sits on the struct.
+- **Docs that named deleted items now name what remains:**
+  - `StartedRenderSession::render_planar` is host-core's guarded entry. It inherits the removed
+    `render_contiguous`'s environment and error paragraph.
+  - The D7 check is described in place of `nonfinite_lanes_block`.
+  - `wide_impl.rs`'s list of mask producers drops `all_lanes`.
+  - `BuiltinLatticePoints::disabled` no longer links `DISABLED_LATTICE_INDEX`.
+
+### Kept (step 3), with the reason
+
+- **`NativeEffectRegistry::is_empty` (effect-contract `lib.rs:2147`) and
+  `SourceControlSet::is_empty` (host-core `source.rs:228`).** rustc proves both unused. But each
+  sits beside a public `len`, and without it `clippy::len_without_is_empty` fails the lint job's
+  `-D warnings` (natively and on both aarch64 targets). The audit's proof was rustc-only.
+  `NativeEffectRegistry::len` also feeds the generated metadata
+  (`tools/parameter-metadata/src/lib.rs:272`).
+- **engine `PlanarBufferRef`'s `try_new`, `plane`, `plane_range` and fields `storage`/`stride`
+  (`buffer.rs:133-288`): moved to #1024.** Deleting the fields removes the struct's null-pointer
+  niche, so `Option<PlanarBufferRef>` in `RenderIo` grows a tag. In the shipped module,
+  `PreparedRenderPlan::render_inner` then changed instruction by instruction: a tag compare
+  replaced the null check, and the blocks were reordered (298 to 323 disassembly lines). That was
+  the only render-path function to change. #1024 removes the whole render input, and its spec
+  already expects the pin to move.
+- **parametric-eq `reset_ramping_elided_blocks` and `ramping_elided_block_count`:** narrowed to
+  `#[cfg(test)]`, per Amendment 1.
+
+### `allow(dead_code)` (step 2)
+
+I stripped all 60 plain `#[allow(dead_code)]`/`#![allow(dead_code)]` attributes outside `tests/`
+directories, in 12 files. Then I built:
+
+- native `--lib --bins --examples --all-features`;
+- native `--all-targets --all-features`;
+- native default features;
+- wasm32 `simd128` (`-p host-web -p host-core`);
+- the wasm-guests scalar package list;
+- iOS and Android `--workspace --lib --all-features`.
+
+That gave 15 warnings, all native. wasm32 and aarch64 added none.
+
+- **Kept (10):**
+  - graph's seven layout mirrors (`lib.rs` 2, `runtime.rs` 5);
+  - `capi/src/runtime/compile.rs:70`;
+  - native-pcm-runner's `fault` field (Amendment 4);
+  - **rack `lib.rs:1450` `has_active_lanes_scan`, a finding.** It is a `#[cfg(test)]` helper that
+    no test calls, so its attribute hides a *test-build* warning. The audit's `--lib`-only strip
+    could not see it. I kept it rather than deleting it, because this is a test-value question:
+    without a caller, `prepared_slot_dispatch_uses_constant_activity_checks`'s
+    `lane_inspections == 0` assertion cannot fail.
+- **Moved behind `#[cfg(test)]` (5):**
+  - spectrum's `observer_handle` and `stage`;
+  - host-web's `boot_with_observation_demand`;
+  - graph-compiler's `edge_text_len` (its `cfg_attr(not(test), allow(dead_code))` became
+    `#[cfg(test)]`);
+  - bench's `digest`, which moved into its test module together with the `sha2` import it alone
+    used.
+- **Deleted: spectrum's `cadence`** (above).
+
+That makes 51 attributes removed: `observation_ingress.rs` 17, host-web `lib.rs` 17,
+`spectrum.rs` 11, and one each in `plan.rs` (the inner one), `ffi.rs`,
+`builtin_batch_endpoint.rs`, native-pcm-runner's enum, bench and `canonical.rs`.
+
+### Changes the spec said would not be needed
+
+- **Script (gate 6 said "no script change").** `scripts/check-rack-policy.sh` pinned
+  rack-compiler's dependencies to exactly `effect-contract`, `engine` and `rack`. It now pins
+  `effect-contract` and `rack`, and `test-rack-policy.sh`'s fixture follows. The
+  `test-workspace-policy.sh` failure that surfaced this is gone.
+- **Size re-pins (no test deleted, no claim changed).** Each follows the 24-byte (64-bit)
+  `BTreeMap` header that every retained `CompiledSession` no longer carries:
+  - `capi/tests/resource_lifecycle.rs`: active CAPI 160,981 to 160,957; prepared protocol 24,736 to
+    24,712; double-live CAPI and `oracle.capi` 204,423 to 204,375; the two
+    `frozen_scratch_report` calls; and the tiny-frame base 178,514 to 178,490.
+  - `protocol/src/controller/tests.rs`: `ProtocolController` 6,064 to 6,040 and
+    `PreparedStructuralCommand` 752 to 728.
+  - `hosts/host-web/tests/browser-v1/expected.json` (wasm32):
+    - `bridgeMetadataBytes` 1,149,263 to 1,149,255;
+    - `bridgeRetainedBytes` 1,169,772 to 1,169,764;
+    - derived by `check-browser-expected-resources.py`; no other row moved.
+
+### Gates
+
+All runs were on one machine, with toolchain 1.97.1 and no `rust-src` installed. A cleanup of the
+shared scratch directory by another agent deleted my first base worktree mid-run. The base
+(`4a0d60bd`) was rebuilt in a fresh detached worktree with its own target directories (F21), and
+every comparison below uses that rebuild.
+
+1. **Native.** All pass:
+   - `cargo check --locked --workspace --all-targets --all-features` (no warnings);
+   - `cargo clippy … --all-targets --all-features -- -D warnings`;
+   - `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`;
+   - `cargo fmt --all -- --check`.
+2. **wasm32.** All pass with no warnings:
+   - `simd128` check of `-p host-web -p host-core`;
+   - the wasm-guests scalar `cargo build --release` line (18 packages);
+   - the `dsp-reference`/`conformance` scalar and `simd128` checks;
+   - `cargo check --manifest-path fuzz/Cargo.toml --bins`.
+3. **aarch64 (Amendment 7).** The pinned 1.97.1 has the `aarch64-apple-ios` and
+   `aarch64-linux-android` standard libraries, so no other toolchain was needed. On both targets:
+   - **Passes:**
+     - `cargo check` and `cargo clippy -- -D warnings` of `--workspace --lib --all-features`;
+     - `cargo check --all-targets --all-features` of lane, engine, host-core, capi, source, graph
+       and soft-clip.
+   - **Excluded from the workspace check:** `native-pcm-runner` and `stem-hasher` (the `blake3`
+     build script needs a C cross-compiler), and `wasm-console` and `wasm-gates` (`wasmtime`'s
+     build needs one too).
+   - **Warnings that predate this change:** `--all-targets` warns in `lane/tests/fp_env.rs:14` and
+     `host-core/tests/fp_environment.rs`, test bodies gated to x86. The base shows the same
+     warnings.
+4. **Console digests.** All 17 digest rows are byte-identical between base and change. Only the
+   `finished in` elapsed-time line differs. `bash scripts/run-wasm-gates.sh` passes: native, wasm
+   scalar, wasm `simd128` and the V8 spill gate.
+5. **Shipped artifact.**
+   - **Hashes:** the base is `476e58ad…`, equal to the pin. The change is `3f744b03e22e…25da`.
+   - **Size:** 3,498,409 to 3,486,775 bytes (-11,634). The export list is identical (135 exports).
+   - **Not re-pinned:** this is not the panic-line-only case, and the batch re-pins at its
+     boundary. The CI `artifact` job is the authority.
+   - **Function-by-function `wasm-objdump -d`.** Symbol names were normalized for the crate-hash
+     change (below). The function count went from 2,749 to 2,736:
+     - 2,181 functions are identical.
+     - 544 differ only in integer constants and load/store offsets:
+       - static addresses shift, mostly by -48 (the data section is 48 bytes shorter; see the vtable
+         slots below);
+       - field offsets shift in the hosts that embed a smaller `CompiledSession`.
+     - 24 base and 11 change bodies differ in instructions, all control-plane:
+       - **Removed: four bodies reachable only through vtables.** These are
+         `BankStage::disarm_observations` for `EffectBankStage` and `ConsoleEffectBankStage`, and
+         `GraphExecutor`'s `PreparedPlanExecutor::dispatch_counters` and
+         `copy_worker_audit_snapshots` defaults. Their vtable slots are the data section's lost 48
+         bytes, and the element segment is 8 bytes shorter.
+       - **Removed: the `graph_entity_indexes` build.** That is `session::compile::indexed` over
+         the chained iterator, its `GenericShunt`, the `(StableId, u64)` stable-sort trio,
+         `BTreeMap::bulk_build_from_sorted_iter`, and four per-crate `BTreeMap<StableId, u64>`
+         drop glues.
+       - **Changed: code that drops or builds a `CompiledSession`.** `compile_session`,
+         `compile_host_model`, `compile_ready`, `prepare_native_session_effects`, and the drop
+         glue of `ReadyOwnership`, `CompiledSession` and `EffectPreparedSession` now handle one map
+         fewer, and their inlining shifts.
+       - **Changed: the two functions that stored `cadence`.**
+         `ControlledSpectrumCaptureCollection::stage_prepared_entry` and
+         `HostObservationController::publish_candidate`.
+     - **Crate hashes.** Removing rack-compiler's dependency changed the crate disambiguators of
+       rack-compiler, builtins-compiler, graph-compiler, host-core and host-web. That moves the
+       `name` section, and six `v128.const` `TypeId`s in builtins-compiler.
+     - **Render path:** `render_inner`, `render_next` and every kernel are identical, or differ in
+       constants and offsets only.
+6. **Tests (gate 5).** The `-- --list` output is identical between base and change (and so is the
+   list of test binaries run) for:
+   - the `test-debug-a` set (1,534 tests);
+   - the `test-debug-b` set (834);
+   - `--workspace --all-targets` (2,552).
+
+   Runs with `--no-fail-fast`:
+   - `test-debug-a`: 1,526 passed, 0 failed.
+   - `test-debug-b`: 807 passed, 0 failed.
+   - `cargo test --workspace`: 2,533 passed, 0 failed. This run includes the doc tests.
+   - The first `test-debug-a` run failed only the protocol size pin, which is now re-pinned.
+7. **CI routing.** `check-ci-path-routing.py` and `test-ci-path-routing.py` pass.
+8. **Policy and generated surfaces.**
+   - **These pass:**
+     - `check-`/`test-` workspace, realtime, lane, graph, rack, builtins, host-core,
+       effect-runtime, bench and protocol-control policy;
+     - `test-session-policy`;
+     - `test-effect-interchange-policy`;
+     - both native-pcm-runner policy tests;
+     - realtime-audit-leak check and test;
+     - `check-unfused-seal`, `check-wasm-realtime-atomics`, `check-effect-contract`,
+       `check-capi-abi`, `check-conformance-boundaries` and `check-artifact-evidence-leak`;
+     - `check-test-support-ci.py`, `test-test-support-ci.py`, `check-release-shape.py` and
+       `check-sdk-deletions.py`;
+     - `test-gate-lib.sh`;
+     - `check-sdk-generated.sh`, which regenerates the parameter metadata, ABI layout JSON and SDK
+       modules and compares them.
+   - **These fail identically on the base:** `check-session-policy.sh`, `check-env-vocabulary.sh`,
+     `test-env-vocabulary.sh` and `check-step-vocabulary.py`. Each flags text under
+     `docs/handoffs/test-value-2026-09-28/`, merged docs-only in `73e50f7d`, so they are not this
+     change's.
+
+## Sol attempt 1 verdict: PASS
+
+Sol, 2026-09-28, reviewing `7594307d`..`6589bdd5` against base `4a0d60bd`. I also merged
+`6589bdd5` onto the current batch head `8347c16d`, in a detached scratch worktree. The merge had
+no conflicts and was not pushed. Everything ran on one machine with rustc 1.97.1,
+`CARGO_INCREMENTAL=0` and scratch target directories.
+
+### 1. Dead really was dead
+
+- **Non-Rust consumers.** I sampled 27 deleted items: `ChannelLinkMode`,
+  `DISABLED_LATTICE_INDEX`, `reset_lifetime_recovered_state`, `balance_matrix`,
+  `mono_track_count`, `delay_target_ms`, `fast_envelope`, `slow_envelope`, `required_delay`,
+  `verify_raw_bytes`, `copy_worker_audit_snapshots`, `dispatch_counters`, `overflow_count`,
+  `underrun_count`, `quantum_samples`, `DEFAULT_SMOOTHING_MS`, the four host-web size constants,
+  `nonfinite_lanes_block`, both `test_only_*` hooks, `designed_lane_witness`,
+  `graph_entity_index`, `read_block_contiguous` and the host-core `copy_response_snapshot`.
+  - **Nothing references them** in these places:
+    - `sdk/`, including `codegen`, `src/generated` and the ABI-layout and parameter-metadata JSON
+      assets;
+    - `hosts/host-web/web` and `hosts/host-web/qualification`;
+    - `docs/` outside `docs/handoffs/`;
+    - `.github/workflows` and `scripts`;
+    - `fuzz` and `tools/parameter-metadata`.
+  - **Same-name hits are other, live items:**
+    - `delay`'s own `delay_target_ms`;
+    - the single-lane `trim_target`, `target_gain` and `is_muted` in `builtins`;
+    - `PreparedRenderPlan::render_contiguous`;
+    - the inherent `ConsoleEffectBankStage::disarm_observations`.
+  - **No mobile code.** The repository has no Swift, Kotlin, Java or Objective-C. `capi/src` and
+    its header are untouched.
+- **Generated surfaces.** The SDK reads the two removed host-web sizes through
+  `miso_engine_web_v1_spectrum_result_bytes` and `…_observation_status_bytes`. Both still exist,
+  and the export list is identical (135 names). `check-sdk-generated.sh` passes. The ABI-layout and
+  parameter-metadata JSON regenerated from the merge are byte-identical to `sdk/assets`.
+- **Rust users, per target.** The merge builds clean on:
+  - **x86-64:** check, clippy `-D warnings` and doc `-D warnings`, `--workspace --all-targets
+    --all-features`.
+  - **wasm32:** `simd128` for `host-web` and `host-core`; CI's 18-package scalar build; the
+    evidence-crate checks.
+  - **fuzz:** the fuzz binaries.
+  - **`aarch64-apple-ios` and `aarch64-linux-android`:**
+    - check and clippy `-D warnings` of `--workspace --lib --all-features`, minus the four
+      C-build-script tools;
+    - `--all-targets --all-features` for lane, engine, host-core, capi, source and graph (plus
+      soft-clip on check).
+
+  The aarch64 all-targets warnings (the x86-gated bodies of `fp_env` and `fp_environment`) are the
+  same at the batch head.
+- **The keeps hold.** Deleting `NativeEffectRegistry::is_empty` fails clippy with
+  `len_without_is_empty`.
+
+### 2. The re-pins are honest
+
+I tested whether the one removed field accounts for every re-pin. In a copy of the merge I restored
+only `CompiledSession::graph_entity_indexes` and its build, and put back every **old** pin. These
+all pass:
+
+- the protocol size test (6,064 and 752);
+- all four `capi` `resource_lifecycle` tests (160,981; 24,736; 204,423; 178,514);
+- `check-browser-expected-resources.py` against the old `expected.json`.
+
+The merge, with the field gone, passes the **new** pins. So every delta is exactly that one field:
+
+- **64-bit.** The `BTreeMap` header is 24 bytes.
+
+  | pin | arithmetic |
+  |---|---|
+  | active CAPI (one compiled session, inline in the session handle) | 160,981 − 24 = 160,957 |
+  | `frozen_scratch_report` | 160,957, and 160,957 − 9 |
+  | prepared protocol | 24,736 − 24 = 24,712 |
+  | double-live CAPI and `oracle.capi` | 204,423 − 2 × 24 = 204,375 |
+  | tiny-frame base | 178,514 − 24 = 178,490 |
+  | `ProtocolController` | 6,064 − 24 = 6,040 |
+  | `PreparedStructuralCommand` | 752 − 24 = 728 |
+
+- **wasm32.** The 12-byte header saves 8 bytes after alignment padding.
+  - `bridgeMetadataBytes`: 1,149,263 − 8 = 1,149,255.
+  - `bridgeRetainedBytes`: 1,169,772 − 8 = 1,169,764.
+  - In the module, `project_buffers`' constant goes from 1,113,205 to 1,113,197.
+  - `check-browser-expected-resources.py --artifacts` passes on the branch's own module, rows and
+    PCM digest parity included.
+
+### 3. The artifact change is control-plane only
+
+- **Hashes.** The base and the batch head both build `476e58ad…`, which equals the pin. The branch
+  and the merge both build `3f744b03…25da`. The module shrinks from 3,498,409 to 3,486,775 bytes,
+  and the exports are identical.
+- **Function counts.** I compared demangled, crate-hash-normalized function bodies. The count goes
+  from 2,749 to 2,736:
+  - 2,725 functions are identical up to integer immediates.
+  - 14 exist only in the base: four vtable-only trait bodies and the `graph_entity_indexes` build
+    (`indexed`, its `GenericShunt`, the sort trio, `bulk_build`, and four `BTreeMap` drop glues).
+  - 9 names differ in instructions:
+    - `compile_session`, `compile_host_model`, `compile_ready` and
+      `prepare_native_session_effects`;
+    - the drop glue of `CompiledSession`, `EffectPreparedSession` and `ReadyOwnership`;
+    - `stage_prepared_entry` and `publish_candidate`.
+
+  That reproduces the evidence's 24 base and 11 change bodies.
+- **Render path.** I took the render-thread closure of `render` and `meter_poll`: direct calls, plus
+  every table entry whose type matches a `call_indirect` (1,005 functions).
+  - The only instruction-level changes in it are the four removed vtable bodies, and nothing
+    called those.
+  - The 16-function direct closure differs only in load/store offsets (−8, from the smaller host
+    struct) and static addresses. `render_inner` has one changed `i32.const` (−48).
+- **Constants.** No `f32` or `f64` constant changed anywhere. The six `v128.const` changes and the
+  data-segment changes are:
+  - builtins-compiler's `Any::type_id` constants (from the crate-hash change);
+  - panic-location line numbers;
+  - pointers;
+  - the 48 bytes of removed vtable slots.
+- **Artifact gates.** `check-web-audioworklet.sh` passes on the branch module. It covers the export
+  set, the render/meter/command closures and the kernel roster. The V8 spill gate also passes.
+
+### 4. Coverage survives
+
+I diffed `-- --list` between the batch head and the merge. Test names and test binaries are
+identical:
+
+- `test-debug-a`: 1,534 tests in both;
+- `test-debug-b`: 834 in both;
+- `--workspace --all-targets`: 2,552 in both.
+
+### 5. It merges and builds on the batch
+
+On the merge:
+
+- **Builds:** fmt, check, clippy and doc pass with no warnings (see gate 1).
+- **Tests:**
+  - `test-debug-a`: 1,526 passed, 0 failed, and `host-native` runs;
+  - `test-debug-b`: 807 passed, 0 failed;
+  - `cargo test --workspace`: 2,533 passed, 0 failed.
+- **Console digests:** all 17 rows are byte-identical to the batch head.
+- **`run-wasm-gates.sh`:** passes on the native, wasm scalar and wasm `simd128` legs (142 cases and
+  358 comparisons each, with no mismatches) and on the V8 spill leg.
+- **Cross-target and C ABI:** `check-cross-targets.sh` passes, including the armv7 refusal.
+  `check-capi-abi.sh` passes. So does `test-web-audioworklet.sh`.
+- **Policy:** every lint-job policy check and mutation test passes, as do the CI-routing,
+  release-shape, SDK-deletion and test-support scripts. That includes the four that failed on the
+  attempt's base.
+- **One flaky script.** `test-bench-policy.sh` fails intermittently: its
+  `allocator-owner-sort-error` mutation escapes. It does so the same way on the unmodified batch
+  head, and none of its inputs changed, so the failure is not this change's.
+
+### Findings (not blocking; root should apply them)
+
+1. **Stale doc comment.** `crates/host-core/tests/fp_environment.rs:14-16` still names the deleted
+   `StartedRenderSession::render_contiguous` as the red-mutation site. It should name
+   `render_planar`, as `tests/MUTATIONS.md` M-146 does. Step 4 missed it. The comment was already
+   wrong at base, because the test renders through `render_planar`.
+2. **Unrecorded hand-off.** The #1024 spec does not list the items this attempt hands to it:
+   `PlanarBufferRef`'s `try_new`, `plane` and `plane_range`, and its fields `storage` and
+   `stride`. Amend #1024 before it starts, or nothing owns them.
+3. **Pre-existing staleness.** `crates/builtins/tests/MUTATIONS.md:42` quotes a
+   `nonfinite_lanes_block` call that did not exist even at base.
+4. **Estimate left as is.** `session/src/estimate.rs:153` still budgets 128 index bytes for each
+   track, submix and output, for the map that is gone. The estimate stays a conservative upper
+   bound. Changing it would change which sessions a cap refuses, so leaving it is right for an
+   issue that must not change behaviour.

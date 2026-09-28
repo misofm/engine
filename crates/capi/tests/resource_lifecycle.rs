@@ -1625,7 +1625,10 @@ fn complete_capi_owners(
     // #779's response boundary validity flag grows `PreparedRenderPlan` by 16 bytes on this
     // pinned ABI. One publication slot, one retirement slot, and the active `Plan` handle retain
     // that plan layout, so these independently sized rows add 48 bytes to active CAPI storage.
-    assert_effective_owner_mutations(&active, 160_981, "active CAPI");
+    // #1023 re-pin (-24): `CompiledSession` dropped its unread `graph_entity_indexes` map, a
+    // 24-byte `BTreeMap` header, and the session handle's controller holds the compiled session
+    // inline.
+    assert_effective_owner_mutations(&active, 160_957, "active CAPI");
 
     let candidate_epoch_rows = [
         PrimitiveOwner {
@@ -1679,7 +1682,9 @@ fn complete_capi_owners(
     // #338: canonical JSON adds 8,082 retained bytes to the candidate session model.
     assert_effective_owner_mutations(&candidate_epoch_rows, 18_706, "candidate CAPI epoch");
     // #241: `PreparedStructuralCommand` loses the same deleted edit payload (-24).
-    assert_effective_owner_mutations(&prepared_rows, 24_736, "prepared protocol");
+    // #1023 re-pin (-24): the prepared command's prospective `CompiledSession` no longer carries
+    // the unread `graph_entity_indexes` map.
+    assert_effective_owner_mutations(&prepared_rows, 24_712, "prepared protocol");
     let largest = active
         .iter()
         .chain(candidate_epoch_rows.iter())
@@ -2364,7 +2369,9 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
         },
     ];
     // #338: canonical JSON adds 8,082 retained bytes to each live session model.
-    assert_effective_owner_mutations(&capi_rows, 204_423, "double-live CAPI");
+    // #1023 re-pin (-48): the current and the prepared `CompiledSession` each lose the unread
+    // 24-byte `graph_entity_indexes` map.
+    assert_effective_owner_mutations(&capi_rows, 204_375, "double-live CAPI");
 
     let graph_rows = graph_owners();
     // The eight graph-metadata rows begin after the five audio/effect rows. #241 removed the
@@ -2697,7 +2704,8 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
     assert_eq!(oracle.effect_scratch, 432);
     // #808: 2 x 17_451 (see `builtin_owners`). The #430 outer allowance is graph-owned.
     assert_eq!(oracle.builtin, 34_902);
-    assert_eq!(oracle.capi, 204_423);
+    // #1023: -48, the two `CompiledSession`s' unread `graph_entity_indexes` maps.
+    assert_eq!(oracle.capi, 204_375);
     // #241: 58_694 - (29 x 10 locator) + (40 x 10 content identity) = 58_804.
     assert_eq!(oracle.largest, 58_804);
 
@@ -2729,7 +2737,7 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
         // SAFETY: These handles are uniquely owned until their matching destroy calls.
         unsafe {
             let (session, plan) = compile_c(&session_document, &exact_limits);
-            assert_eq!(resources_c(plan), frozen_scratch_report(160_981));
+            assert_eq!(resources_c(plan), frozen_scratch_report(160_957));
             let request = command(1, 42, "double-live-cap");
             let mut response = [0xa5_u8; 4_096];
             assert_eq!(submit(session, &request, &mut response), RESULT_OK, "{row}");
@@ -2748,7 +2756,7 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
                 RESULT_OK
             );
             // The prospective session ID is nine bytes shorter than the current one.
-            assert_eq!(resources_c(plan), frozen_scratch_report(160_981 - 9));
+            assert_eq!(resources_c(plan), frozen_scratch_report(160_957 - 9));
             miso_engine_v1_session_destroy(session);
             miso_engine_v1_plan_destroy(plan);
         }
@@ -2797,11 +2805,12 @@ fn tiny_control_frame_still_accounts_three_provider_counters_exactly() {
     // retirement, and active-plan handle layout; the exact three-owner total is therefore +48.
     // #805 then adds six per-lane EQ cut rows to each of the nine tracks. The catalog's exact
     // metadata/state/string growth is restated independently above, so this remains an exact
-    // budget assertion rather than an observed-value pin.
+    // budget assertion rather than an observed-value pin. #1023 then removes 24 bytes: the
+    // session handle's compiled session no longer carries the unread `graph_entity_indexes` map.
     let (eq_descriptor_bytes, eq_state_bytes, eq_string_bytes) = prepared_eq_catalog_growth();
     assert_eq!(
         required,
-        178_514 + eq_descriptor_bytes + eq_state_bytes + eq_string_bytes,
+        178_490 + eq_descriptor_bytes + eq_state_bytes + eq_string_bytes,
         "tiny-frame retained authority"
     );
     let mut exact = roomy;

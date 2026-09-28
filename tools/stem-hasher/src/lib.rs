@@ -39,16 +39,6 @@ impl CanonicalBitDepth {
         }
     }
 
-    /// Exact declaration/CLI token.
-    #[must_use]
-    pub const fn token(self) -> &'static str {
-        match self {
-            Self::Pcm16 => "16",
-            Self::Pcm24 => "24",
-            Self::Float32 => "32f",
-        }
-    }
-
     /// Parse one exact declaration/CLI token.
     #[must_use]
     pub fn from_token(token: &str) -> Option<Self> {

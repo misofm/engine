@@ -167,16 +167,6 @@ impl core::fmt::Debug for EffectStateMigrationRegistration<'_> {
 }
 
 impl<'wire> EffectStateMigrationRegistration<'wire> {
-    pub fn new(
-        edge: BoundEffectStateMigrationEdge<'wire>,
-        step: Arc<dyn EffectStateMigrationStep>,
-    ) -> Self {
-        Self {
-            edge: Ok(edge),
-            step,
-        }
-    }
-
     pub fn from_bound_descriptors(
         source: BoundEffectDescriptorWire<'wire>,
         target: BoundEffectDescriptorWire<'wire>,
@@ -184,10 +174,6 @@ impl<'wire> EffectStateMigrationRegistration<'wire> {
     ) -> Self {
         let edge = bind_effect_state_migration_edge(source, target);
         Self { edge, step }
-    }
-
-    pub fn step(&self) -> &Arc<dyn EffectStateMigrationStep> {
-        &self.step
     }
 }
 
@@ -384,10 +370,6 @@ impl<'registry, 'wire, 'factory_wire, 'state>
 {
     pub const fn requirements(&self) -> EffectStateMigrationWorkspaceRequirements {
         self.requirements
-    }
-
-    pub fn replay(&self) -> &EffectBankPreparation {
-        &self.replay
     }
 
     pub fn chain_step_count(&self) -> usize {

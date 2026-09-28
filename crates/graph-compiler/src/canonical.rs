@@ -102,7 +102,7 @@ pub(crate) fn node_text_len(node: &GraphNodeId) -> usize {
     length
 }
 /// Byte length of [`edge_text`] without building it. See [`node_text_len`].
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(crate) fn edge_text_len(edge: &GraphEdgeId) -> usize {
     let mut length = 0;
     visit_edge_text(edge, &mut |piece| length += piece.len());

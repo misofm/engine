@@ -218,7 +218,7 @@ pub fn test_only_masked_pair_passes() -> usize {
     masked_pair_pass_count()
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 std::thread_local! {
     /// Ramping blocks whose section list dropped at least one section (issue #1005).
     static RAMPING_ELIDED_BLOCKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -228,35 +228,21 @@ std::thread_local! {
 ///
 /// Test builds only: issue #1005's differential has to show that the ramping list engaged, and no
 /// rendered bit says so -- an elided identity section renders what the executed one renders.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 fn count_ramping_plan(length: usize) {
     if length < EQ_SECTION_COUNT {
         RAMPING_ELIDED_BLOCKS.with(|blocks| blocks.set(blocks.get().saturating_add(1)));
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 fn reset_ramping_elided_blocks() {
     RAMPING_ELIDED_BLOCKS.with(|blocks| blocks.set(0));
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 fn ramping_elided_block_count() -> usize {
     RAMPING_ELIDED_BLOCKS.with(std::cell::Cell::get)
-}
-
-/// Resets this thread's count of ramping blocks that dropped a section (issue #1005).
-#[cfg(feature = "test-support")]
-pub fn test_only_reset_ramping_elided_blocks() {
-    reset_ramping_elided_blocks();
-}
-
-/// This thread's count of ramping blocks (per channel pair, or per collapsed channel) whose
-/// `ramping_sections` list was shorter than the full cascade.
-#[cfg(feature = "test-support")]
-#[must_use]
-pub fn test_only_ramping_elided_blocks() -> usize {
-    ramping_elided_block_count()
 }
 
 #[cfg(test)]
@@ -1812,7 +1798,7 @@ fn process_channels<L: Lane, const W: usize>(
             return None;
         }
         let (list, length) = ramping_sections::<L, W>(channels.0, channels.1, left, right, frames);
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(test)]
         count_ramping_plan(length);
         for &section in &list[..length] {
             channels.0.process_section(section, left, frames);
@@ -1866,7 +1852,7 @@ fn process_channels_mono<L: Lane, const W: usize>(
             return None;
         }
         let (list, length) = ramping_sections_mono::<L, W>(channel, io, frames);
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(test)]
         count_ramping_plan(length);
         for &section in &list[..length] {
             channel.process_section(section, io, frames);

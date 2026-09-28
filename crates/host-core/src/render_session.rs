@@ -20,8 +20,9 @@
 //!   so a handle that could be moved or shared would let a host launder it onto a thread that was
 //!   never attested. [`PreparedHost`] stays `Send` (moving preparation to the render thread is the
 //!   supported hand-off); what cannot move is the *started* session.
-//! * [`StartedRenderSession::render`] is the guarded entry: it pins the canonical environment for
-//!   the block and restores the caller's exact word on every path out, success or rejection.
+//! * [`StartedRenderSession::render_planar`] is the guarded entry: it pins the canonical
+//!   environment for the block and restores the caller's exact word on every path out, success or
+//!   rejection.
 //! * There is no `plan_mut`. A host cannot borrow the plan out of a started session and render it
 //!   unguarded; it calls [`StartedRenderSession::stop`], which consumes the handle and gives the
 //!   plan back for a control-thread teardown or a plan replacement.
@@ -31,10 +32,7 @@
 
 use core::marker::PhantomData;
 
-use engine::realtime::{
-    PlanarBufferMut, PreparedRenderPlan, RenderError, RenderIo, RenderReport, RenderTime,
-    ResponseSnapshotCapture, ResponseSnapshotError, ResponseSnapshotSink,
-};
+use engine::realtime::{PlanarBufferMut, PreparedRenderPlan, RenderError, RenderIo, RenderReport};
 use lane::CanonicalFpEnv;
 use lane::fpenv::FpEnvironmentRejection;
 
@@ -91,7 +89,7 @@ impl StartedRenderSession {
         }
     }
 
-    /// Render the block that must start at this plan's next absolute sample.
+    /// Render one quantum into caller-owned contiguous planar storage.
     ///
     /// The canonical floating-point environment is pinned for the whole call and the caller's exact
     /// word is restored on every path out, including a rejection and an unwind (issue #146).
@@ -99,40 +97,9 @@ impl StartedRenderSession {
     /// # Errors
     ///
     /// Whatever `PreparedRenderPlan::render_contiguous` rejects: a discontinuous absolute sample, a
-    /// mismatched output envelope, or a clock overflow. A [`RenderError`] is sticky and frees
-    /// nothing; see the crate-level host callback contract.
-    pub fn render_contiguous(
-        &mut self,
-        io: RenderIo<'_>,
-        absolute_sample: u64,
-    ) -> Result<RenderReport, RenderError> {
-        let _fp_env = CanonicalFpEnv::enter();
-        self.plan.render_contiguous(io, absolute_sample)
-    }
-
-    /// Render one fixed quantum at an explicit absolute sample time.
-    ///
-    /// The same guarantee as [`Self::render_contiguous`]; this is the form for a host that owns its
-    /// own clock continuity rule.
-    ///
-    /// # Errors
-    ///
-    /// Whatever `PreparedRenderPlan::render` rejects.
-    pub fn render(
-        &mut self,
-        io: RenderIo<'_>,
-        time: RenderTime,
-    ) -> Result<RenderReport, RenderError> {
-        let _fp_env = CanonicalFpEnv::enter();
-        self.plan.render(io, time)
-    }
-
-    /// Render one quantum into caller-owned contiguous planar storage.
-    ///
-    /// # Errors
-    ///
-    /// Whatever [`Self::render_contiguous`] rejects, plus the buffer-layout rejection of
-    /// `PlanarBufferMut::try_new`.
+    /// mismatched output envelope, or a clock overflow. Also the buffer-layout rejection of
+    /// `PlanarBufferMut::try_new`. A [`RenderError`] is sticky and frees nothing; see the
+    /// crate-level host callback contract.
     pub fn render_planar(
         &mut self,
         samples: &mut [f32],
@@ -172,19 +139,6 @@ impl StartedRenderSession {
     #[must_use]
     pub fn next_absolute_sample(&self) -> u64 {
         self.plan.next_absolute_sample()
-    }
-
-    /// Copy one selected track's response owners after a successful render boundary.
-    ///
-    /// The callback is exclusive with rendering because this handle owns the plan on the render
-    /// thread. It never evaluates DSP or allocates on behalf of the engine.
-    pub fn copy_response_snapshot(
-        &mut self,
-        track_id: &str,
-        sink: &mut dyn ResponseSnapshotSink,
-    ) -> Result<ResponseSnapshotCapture, ResponseSnapshotError> {
-        self.plan
-            .copy_response_snapshot(engine::realtime::ResponseSnapshotRequest { track_id, sink })
     }
 
     /// Stop the session and hand the plan back for control-thread teardown or replacement.

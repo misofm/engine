@@ -56,15 +56,6 @@ impl EffectCid {
         Ok(CID_TEXT_BYTES)
     }
 
-    /// Raw-byte comparison retained beside the official primitive vector.
-    pub fn verify_raw_bytes(&self, bytes: &[u8]) -> Result<(), CidError> {
-        if *self == Self::from_raw_bytes(bytes) {
-            Ok(())
-        } else {
-            Err(CidError::Mismatch)
-        }
-    }
-
     pub fn verify_package(
         &self,
         bytes: &[u8],

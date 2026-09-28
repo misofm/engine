@@ -318,11 +318,6 @@ impl<T: Send + 'static> Producer<T> {
     pub const fn full_count(&self) -> u64 {
         self.full
     }
-    /// Alias naming a full result as producer overflow.
-    #[must_use]
-    pub const fn overflow_count(&self) -> u64 {
-        self.full
-    }
     /// Snapshots the number of queue slots that can accept a complete producer prefix.
     ///
     /// The consumer cursor is loaded exactly once with `Acquire`; this observation does not
@@ -411,11 +406,6 @@ impl<T: Send + 'static> Consumer<T> {
     pub fn capacity(&self) -> usize {
         self.ring().logical_capacity
     }
-    /// Immutable queue generation.
-    #[must_use]
-    pub fn generation(&self) -> QueueGeneration {
-        self.ring().generation
-    }
     /// Consumer-local saturating successful-pop count.
     #[must_use]
     pub const fn success_count(&self) -> u64 {
@@ -424,11 +414,6 @@ impl<T: Send + 'static> Consumer<T> {
     /// Consumer-local saturating empty/underrun count.
     #[must_use]
     pub const fn empty_count(&self) -> u64 {
-        self.empty
-    }
-    /// Alias naming an empty result as consumer underrun.
-    #[must_use]
-    pub const fn underrun_count(&self) -> u64 {
         self.empty
     }
     /// Snapshots the number of records available at this drain entry.
@@ -447,14 +432,6 @@ impl<T: Send + 'static> Consumer<T> {
         } else {
             self.ring().slots_len - consumer + producer
         }
-    }
-    /// Whether the queue currently holds nothing for this consumer.
-    ///
-    /// This is the bounded, counter-free observation the scheduler uses to decide whether a
-    /// worker is idle; it never pops and never touches the empty/underrun counters.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.local == self.ring().producer.0.load(Ordering::Acquire)
     }
     /// Whether the queue is empty, reloading the shared line only if it looks so.
     ///

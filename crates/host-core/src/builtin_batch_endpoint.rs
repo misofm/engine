@@ -717,7 +717,6 @@ pub enum BuiltinBatchRenderError {
 
 impl StartedBuiltinBatchRender {
     #[cfg(test)]
-    #[allow(dead_code)]
     fn inject_post_graph_fault_for_test(&mut self) {
         self.fail_after_graph = true;
     }
