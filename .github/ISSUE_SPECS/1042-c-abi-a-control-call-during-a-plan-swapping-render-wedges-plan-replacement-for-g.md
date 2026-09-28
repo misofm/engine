@@ -4,7 +4,7 @@
 
 `RealtimePlanOwner::enter_block` swaps plans and commits the retired plan to the retirement queue at the *start* of a render call (`crates/engine/src/realtime/plan_exchange.rs:361-424`), but capi publishes `active_epoch` only after the render call returns (`crates/capi/src/runtime/plan.rs:215-216`). A control call in that window reaches `synchronize_plan_epochs` (`crates/capi/src/runtime/control.rs:619-661`), sees `active_epoch == providers.epoch`, does not promote, reclaims the retired plan, finds no retired provider for its epoch and returns `Internal`; it also skips removing that epoch's report row because it compares against the stale atomic. On the next call the stale provider is pushed into `retired_providers` and never leaves, the report table stays full, and every later structural command returns `Backpressure`.
 
-Reproduced on the unmodified base by a deterministic split-render test (`Err(Internal)`, then `retired [0]` forever, then permanent `Backpressure`) and by a two-thread test racing edits against a structural swap (14 of 20 runs). Every control entry point synchronizes (submit, seek, command, event), so a mobile app that feeds PCM from a decode thread while the audio callback renders can hit it on the first structural edit during playback. Evidence: `docs/handoffs/live-control-2026-09-28/VERIFY.md`, finding F1. This is the mobile playback surface (`docs/rulings/engine-footprint-2026-09-28.md`), so it is a product bug, not a cleanup item.
+Reproduced on the unmodified base by a deterministic split-render test (`Err(Internal)`, then `retired [0]` forever, then permanent `Backpressure`) and by a two-thread test racing edits against a structural swap (14 of 20 runs). A second thread is not required: `enter_block` swaps before `render_contiguous` checks the block's time and shape, so a *rejected* render call (for example a wrong `absolute_sample`) swaps plans and never publishes the atomic, and the next control call on the same thread fails the same way (Sol, attempt 1 verdict). Every control entry point synchronizes (submit, seek, command, event), so a mobile app that feeds PCM from a decode thread while the audio callback renders can hit it on the first structural edit during playback. Evidence: `docs/handoffs/live-control-2026-09-28/VERIFY.md`, finding F1. This is the mobile playback surface (`docs/rulings/engine-footprint-2026-09-28.md`), so it is a product bug, not a cleanup item.
 
 ## Smallest closable slice
 
@@ -172,3 +172,102 @@ Sol, 2026-09-28, reviewing `95ddc0eb`. Scratch work (an isolated `git archive` c
 3. Recommended, not blocking: commit the single-thread rejected-render C-ABI test, and correct the Problem text, since F1 does not need a second thread.
 
 Note: `promote_pending_provider` could fail inside the reclaim loop after the plan was already popped. That is unreachable at capi's capacities, and the model never hits it, so leave it.
+
+## Attempt 2 evidence
+
+Terra, 2026-09-28. First the batch head (`b8bea8e1`) was merged into the branch (`70502112`). The attempt-1 fix (`95ddc0eb`) is unchanged; this attempt adds to it. Rust 1.97.1, x86-64-v3 Linux host. Scratch and `target/` were outside the repository and were deleted afterwards.
+
+### Changes
+
+The code changes are in two files: `crates/capi/src/runtime/plan.rs` (+10/-3) and `crates/capi/src/runtime/control.rs` (+21/-4).
+
+1. **Reader reorder (verdict item 1).** `active_resources` backs `miso_engine_v1_plan_resources`. It now takes the report lock before it loads `active_epoch`.
+   - The control thread removes a row only under that lock, and only once the atomic has moved past it.
+   - The atomic never moves back, so an epoch read under the lock always has its row.
+2. **Window peak check (verdict item 2).** While `active_epoch < providers.epoch`, the structural arm returns `Backpressure` right after the `plan_alive` check. That is before `prepare_runtime`, so the call compiles nothing and acks nothing.
+3. **The same misclassification before the swap (an extension; please rule on it).** The peak check reads the row from the new `replacement_base_report`, which replaces `active_resource_report`. That row belongs to the newest plan: the pending candidate while one waits, else the current provider.
+   - **The problem.** The old code paired a candidate with the atomic's row. While a candidate is pending, that row belongs to a plan the new candidate can never coexist with.
+   - **Reproduced.** The problem predates this issue, on `ed0556a9` and `95ddc0eb` alike. Under Sol's tight limit, the same valid edit sent while the eight-EQ plan was pending returned `CompileRejected(effect.resource.limit)`.
+   - **Why this form of the fix.** An alternative was to move the pending check ahead of the compile. I did not, because that would change the existing pinned owner counters (the "publication-full canceled candidate" path in `exported_c_replay_revision_event_and_publication_pressure_statuses_are_exact`).
+   - **What is unchanged.** With nothing pending and the atomic caught up, the newest row is the rendering plan's row, as before. Admission itself is unchanged.
+4. **Problem text.** The Problem section now notes that a rejected render call opens the window on one thread.
+
+### Tests
+
+**Tight-limit window test.** `runtime::tests::a_valid_edit_inside_the_swap_window_is_backpressured_not_compile_rejected` sets `maximum_effect_state_bytes` to the nine-EQ bytes plus the eight-EQ bytes, both measured. It removes eq0's EQ, then puts it back twice:
+- once while the eight-EQ plan is pending;
+- once inside the split-render window, where the call must also compile no candidate (the owner counter must not move).
+
+After publication, the same request must be admitted at revision 44.
+
+| tree | result |
+|---|---|
+| `95ddc0eb` | red: the window call returns `CompileRejected(effect.resource.limit)` |
+| `ed0556a9` | red: the window call returns `Internal` |
+| attempt 2 | green |
+
+**Single-thread rejected-render test.** `runtime::tests::a_rejected_render_call_that_swaps_plans_leaves_the_c_session_live` runs 4 rounds through the C wrappers. Each round:
+1. renders at a wrong sample, which returns `RESULT_RENDER_REJECTED` and swaps plans;
+2. makes a lossy dequeue;
+3. sends a structural command, which must get `BACKPRESSURE` with the canary untouched and the revision unchanged;
+4. renders the good block;
+5. sends the same request again, which must be admitted.
+
+| tree | result |
+|---|---|
+| `ed0556a9` | red: `(0, 8, 255, 6, true, 43, 0, 1, 0, 6)`. The dequeue returns `INTERNAL`, and the retry stays at `BACKPRESSURE`. |
+| `95ddc0eb` | green |
+| attempt 2 | green |
+
+**Reader race.** `resource_lifecycle::resource_queries_racing_plan_swaps_always_find_the_published_row` runs 200 swaps with two reader threads polling `miso_engine_v1_plan_resources`. It shares one helper, `race_plan_swaps`, with the attempt-1 race, which becomes `race_plan_swaps(24, 0)` and is otherwise unchanged.
+
+| tree | runs passed | how it fails |
+|---|---|---|
+| `95ddc0eb`, release | 0 of 100 | Every run panics at `plan.rs:43` ("active plan epoch retains its resource report"). The lock is then poisoned, and 88 runs also panic at `plan.rs:40`. |
+| `95ddc0eb`, dev | 0 of 20 | same |
+| `ed0556a9`, release and dev | 0 of 20 each | The wedge comes first: `INTERNAL` from a dequeue. |
+| attempt 2 with only the reorder reverted, release | 3 of 20 (17 fail) | panic at `plan.rs:43` |
+| attempt 2, dev | 20 of 20 | |
+| attempt 2, release | 1,000 of 1,000 (479 s) | |
+
+**Swap race (attempt 1).**
+
+| tree | runs passed |
+|---|---|
+| attempt 2, dev | 20 of 20 |
+| attempt 2, release | 1,000 of 1,000 (54 s) |
+| `ed0556a9`, dev and release | 0 of 20 each |
+
+**Whole `resource_lifecycle` binary, parallel harness, dev.** 20 of 20 runs pass.
+
+**Split-render test (attempt 1).** It stays green. It now checks the any-thread query in the window against the lagging epoch's row in the snapshot, because the control-side `active_resource_report` it used to call is gone.
+
+**Mutations of the attempt-2 changes.** Each one turns the named test red.
+
+| mutation | red test |
+|---|---|
+| remove the lag check | tight-limit test (the window call compiles a candidate) |
+| base row ignores the pending candidate | tight-limit test (pending arm: `CompileRejected`) |
+| base row is the atomic's | tight-limit test |
+| revert only the reader reorder | reader race (17 of 20 runs fail) |
+
+### Gates
+
+1. **Tests.** Every new test is red on the tree it targets and green with the fix (tables above).
+2. **Races.** The swap race passes 1,000 of 1,000 release runs, and the reader race passes 1,000 of 1,000.
+3. **No ack precedes a drop.**
+   - The window refusal happens before the compile, the replay entry and the ack.
+   - The pending path is unchanged except for which row its peak check reads.
+   - `audit capi` (release) gives the same record as attempt 1: `calls 100000`, `render_errors 0`, `allocations 0`, `deallocations 0`, `locks 0`, `syscalls 0`, `panic_unwinds 0`, `total_violations 0`, `pcm_digest ff6cdcb96cdcdad5`.
+   - Render takes no new lock. The reorder touches only the any-thread reader.
+   - `cargo test -p capi` passes in dev and in release (lib 35, `resource_lifecycle` 6).
+   - `scripts/check-capi-abi.sh` passes for shared and static linkage.
+4. **The browser is unaffected.**
+   - `cargo tree -p host-web -i capi` finds no path from host-web to capi.
+   - The `--module-only` AudioWorklet module is byte-identical with and without this attempt: `3f744b03…`.
+   - The pin mismatch (`476e58ad…`) is the batch's own, as recorded in attempt 1.
+5. **Other checks.**
+   - `cargo clippy --workspace --all-targets -- -D warnings` passes, with and without `--all-features`.
+   - `fmt` passes, and so does `cargo doc -p capi` with `-D warnings`.
+   - For `aarch64-apple-ios` and `aarch64-linux-android`: `cargo check --release`, `cargo clippy -p capi --all-targets -D warnings`, and a release codegen to `libcapi.a` with a no-op linker all pass. Linking the cdylib needs Xcode or the NDK.
+   - All 22 policy scripts listed in attempt 1 pass.

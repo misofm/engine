@@ -605,14 +605,24 @@ impl SessionState {
         ]
     }
 
-    pub(crate) fn active_resource_report(&self) -> Result<PlanResourceReport, CommandError> {
-        let active = self.shared.active_epoch.load(Ordering::Acquire);
+    /// The resource row a structural candidate must fit beside (issue #1042).
+    ///
+    /// That is the newest plan, the one still live when the candidate would be published: the
+    /// pending candidate's while it waits for its swap, else the current provider's. With nothing
+    /// pending and the atomic caught up, this is the rendering plan's row, as before. Pairing a
+    /// candidate with an older row would report a valid edit as a compile rejection whenever the
+    /// two plans could never coexist.
+    pub(crate) fn replacement_base_report(&self) -> Result<PlanResourceReport, CommandError> {
+        let newest = self
+            .pending_providers
+            .last()
+            .map_or(self.providers.epoch, |provider| provider.epoch);
         self.shared
             .reports
             .lock()
             .map_err(|_| CommandError::Internal)?
             .iter()
-            .find_map(|(epoch, report)| (*epoch == active).then_some(*report))
+            .find_map(|(epoch, report)| (*epoch == newest).then_some(*report))
             .ok_or(CommandError::Internal)
     }
 
@@ -721,6 +731,13 @@ impl SessionState {
                 if !self.shared.plan_alive.load(Ordering::Acquire) {
                     return Err(CommandError::Backpressure);
                 }
+                // Issue #1042: while the atomic lags the providers, a render call has swapped plans
+                // but not yet published the epoch. The retired plan's row stays for any-thread
+                // readers, so the report table is full and no candidate could be admitted: refuse
+                // before compiling, with retryable backpressure rather than a wasted compile.
+                if self.shared.active_epoch.load(Ordering::Acquire) < self.providers.epoch {
+                    return Err(CommandError::Backpressure);
+                }
                 let response_len = prepared.get().response_len();
                 if response_len > self.response_scratch.len() || response_len > output_capacity {
                     return Err(CommandError::BufferTooSmall {
@@ -758,7 +775,7 @@ impl SessionState {
                     }
                 }
                 validate_replacement_peak(
-                    self.active_resource_report()?,
+                    self.replacement_base_report()?,
                     resources,
                     prospective_capi,
                     compiled_model_admission(
