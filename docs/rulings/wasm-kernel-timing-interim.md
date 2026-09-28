@@ -141,3 +141,14 @@ The requirement list and the phase-0b kernel measurement below stand as taken; f
 only the claim that a console arm was out of reach. Supersede the remainder when a native
 `lane_fma` width anomaly is explained. Do not supersede it with a re-run on different hardware:
 add a row.
+
+## Runner retired (2026-09-28, #1027)
+
+The runner `scripts/run-wasm-kernel-timing.sh` (by then `scripts/operator/`), its validator
+`scripts/wasm-kernel-timing-validator.jq`, the validator's self-test and the `--native-timing` and
+`--wasm-timing` modes of `tools/wasm-gates` were retired as used-up one-shot tooling: the record
+above was taken, and the runner refused to overwrite it. The record,
+`artifacts/issue163-phase0/wasm-kernel-timing.accepted.jsonl`, stays, and so does every
+measurement in this ruling. The runner, the validator and the two modes remain in git history
+(last present at `ed0556a9`). A new kernel measurement needs a new issue that re-earns its
+harness; per "Reopening", it adds a row rather than re-running this one.

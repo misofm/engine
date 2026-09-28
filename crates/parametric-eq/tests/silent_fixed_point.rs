@@ -77,14 +77,23 @@ fn native_bank() -> Option<(BankWidth, Backend)> {
     BankWidth::for_backend(backend).map(|width| (width, backend))
 }
 
+/// The lane count whose interleaved layout the tone is laid out in, whatever the bank's width.
+const REFERENCE_LANES: usize = 8;
+
 /// One block of tone, or one block of exact `+0.0`.
+///
+/// A track's tone depends on its own index only, laid out as an eight-lane bank lays it out, so a
+/// four-lane (AArch64 NEON) bank's tracks hear exactly what the first four tracks of an eight-lane
+/// bank hear and settle on the same block (#1017).
 fn plane(block: usize, lanes: usize, silent: bool, negate: bool) -> Vec<f32> {
     (0..FRAMES * lanes)
         .map(|index| {
             if silent {
                 0.0
             } else {
-                let value = (((block * FRAMES * lanes + index) as f32) * 0.017).sin() * 0.4;
+                let (frame, track) = (index / lanes, index % lanes);
+                let step = (block * FRAMES + frame) * REFERENCE_LANES + track;
+                let value = ((step as f32) * 0.017).sin() * 0.4;
                 if negate { -value } else { value }
             }
         })

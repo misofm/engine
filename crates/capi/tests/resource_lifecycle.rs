@@ -5,16 +5,15 @@
 use core::{
     alloc::Layout,
     cell::{Cell, UnsafeCell},
-    marker::PhantomData,
     mem::{MaybeUninit, size_of},
     ptr,
     sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize},
 };
 use std::alloc::{GlobalAlloc, System};
-use std::{sync::Mutex, thread::JoinHandle};
+use std::sync::Mutex;
 
 use capi::*;
-use engine::realtime::{PlanEpoch, PreparedRenderPlan, Producer, QueueGeneration};
+use engine::realtime::{PlanEpoch, PreparedRenderPlan, QueueGeneration};
 use lane::Backend;
 use protocol::{
     AUTOMATION_BATCH_RECORDS, AutomationBatchSlot, AutomationRecord, CommandPayload,
@@ -543,6 +542,9 @@ fn frozen_scratch_report(capi_retained_bytes: u64) -> PlanResourceReport {
         // 2_862 -> 3_950 and `source_total_bytes` 11_054 -> 12_142, +1_088 = 1_024 retained PCM
         // + 48 metadata + 2 x 8 queue slots + 8 consumer field - 8 deleted driver field (see
         // `source_owners`).
+        // #1035 deletes the native decode workers and the driver's 16-byte retirement-worker
+        // slice with them: `source_overhead_bytes` 3_950 -> 3_934, `source_total_bytes`
+        // 12_142 -> 12_126.
         // #241 deletes 64 x 64 = 4_096 control-queue bytes and 1_024 x 2 x 4 = 8_192
         // declarative source-ring bytes from the session compiler's runtime projection. The host
         // still reports the chosen ring exactly in the source rows below.
@@ -588,8 +590,8 @@ fn frozen_scratch_report(capi_retained_bytes: u64) -> PlanResourceReport {
         builtin_bank_bytes: 14_233,
         builtin_bank_scratch_bytes: 49_152,
         source_pcm_payload_bytes: 8_192,
-        source_overhead_bytes: 3_950,
-        source_total_bytes: 12_142,
+        source_overhead_bytes: 3_934,
+        source_total_bytes: 12_126,
         effect_scalar_state_bytes: 7_560,
         effect_scalar_scratch_bytes: 216,
         builtin_processor_payload_bytes: 17_451,
@@ -799,27 +801,18 @@ struct TransferBlockMirror {
     samples: Box<[f32]>,
 }
 
-#[allow(dead_code)]
-struct NativeSourceWorkerMirror {
-    join: Option<JoinHandle<source::NativeSourceWorkerExit>>,
-    stopped: bool,
-    stop: Producer<()>,
-    not_sync: PhantomData<Cell<()>>,
-}
-
 /// #124: the entry is consumer-only — planes were deleted (graph fan-out copies the retained
-/// block directly) and retirement ownership moved onto the driver so workers stop before
-/// consumers drop.
+/// block directly).
 #[allow(dead_code)]
 struct GraphSourceEntryMirror {
     consumer: source::PcmSourceConsumer,
 }
 
-/// #124: `_retirement_workers` is declared first for drop order. #917 deleted the per-block
-/// `copied_claims` count (-8 bytes): no claim releases the played block any more.
+/// #917 deleted the per-block `copied_claims` count (-8 bytes): no claim releases the played
+/// block any more. #1035 deleted the native decode workers and with them the driver's
+/// retirement-worker slice (-16 bytes).
 #[allow(dead_code)]
 struct SourceGraphSourceSetDriverMirror {
-    retirement_workers: Box<[NativeSourceWorkerMirror]>,
     sources: Box<[GraphSourceEntryMirror]>,
     mappings: Box<[source::SourceGraphTrackMapping]>,
     quantum_frames: u32,
@@ -1632,7 +1625,9 @@ fn complete_capi_owners(
     // `Option<NonZeroUsize>`), so every retained `PreparedRenderPlan` is 8 bytes smaller: the
     // publication and retirement queues' two slots each (-32), the plan handle's active plan and
     // pending candidate (-16), and the session handle's `PlanPublisher` envelope (-8).
-    assert_effective_owner_mutations(&active, 160_901, "active CAPI");
+    // #1034 re-pin (-8): the session handle's controller holds `ProtocolQueues` inline, and the
+    // queues drop their unread `control_used_bytes` counter (a `usize`).
+    assert_effective_owner_mutations(&active, 160_893, "active CAPI");
 
     let candidate_epoch_rows = [
         PrimitiveOwner {
@@ -2280,18 +2275,20 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
         "double-live graph/model",
     );
 
+    // #1035: the graph source driver lost its 16-byte native retirement-worker slice, so each
+    // plan's source overhead is 16 bytes smaller (12_142 -> 12_126, 3_950 -> 3_934).
     let source = source_owners();
-    assert_eq!(owner_total(&source), 12_142, "primitive source total");
+    assert_eq!(owner_total(&source), 12_126, "primitive source total");
     let source_overhead_rows = source[1..].to_vec();
-    assert_effective_owner_mutations(&source_overhead_rows, 3_950, "source overhead");
+    assert_effective_owner_mutations(&source_overhead_rows, 3_934, "source overhead");
     let mut source_total_rows = source.clone();
     source_total_rows.extend(source.clone());
-    assert_effective_owner_mutations(&source_total_rows, 24_284, "double-live source total");
+    assert_effective_owner_mutations(&source_total_rows, 24_252, "double-live source total");
     let mut double_source_overhead = source_overhead_rows.clone();
     double_source_overhead.extend(source_overhead_rows);
     assert_effective_owner_mutations(
         &double_source_overhead,
-        7_900,
+        7_868,
         "double-live source overhead",
     );
 
@@ -2376,7 +2373,9 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
     // #1023 re-pin (-48): the current and the prepared `CompiledSession` each lose the unread
     // 24-byte `graph_entity_indexes` map.
     // #1024 re-pin (-56): the current CAPI owners' envelope rows (see `complete_capi_owners`).
-    assert_effective_owner_mutations(&capi_rows, 204_319, "double-live CAPI");
+    // #1034 re-pin (-8): the current session handle's `ProtocolQueues` counter (see
+    // `complete_capi_owners`).
+    assert_effective_owner_mutations(&capi_rows, 204_311, "double-live CAPI");
 
     let graph_rows = graph_owners();
     // The eight graph-metadata rows begin after the five audio/effect rows. #241 removed the
@@ -2659,7 +2658,15 @@ fn render_diagnostic_egress_reuses_eager_capi_storage_without_allocation() {
     }
 }
 
+/// The totals below are the eight-lane launch plan's exact bytes: a four-lane (AArch64 NEON) plan
+/// banks at a different width and retains different, equally valid, byte counts. So the test is
+/// ignored there, by name and with its reason, until #1060 replaces the exact totals with budgets
+/// that hold at every width (#1017).
 #[test]
+#[cfg_attr(
+    not(any(target_arch = "x86", target_arch = "x86_64")),
+    ignore = "exact eight-lane plan byte totals; #1060 replaces them with budgets (#1017)"
+)]
 fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
     let session_document = scratch_session();
     let prospective_document = session_document.replacen(
@@ -2703,15 +2710,17 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
             + 2 * observation_runtime_owner_bytes()
             + 2 * executor_table_bytes
     );
-    assert_eq!(oracle.source_total, 24_284);
-    assert_eq!(oracle.source_overhead, 7_900);
+    // #1035: -16 per live plan, the driver's deleted retirement-worker slice.
+    assert_eq!(oracle.source_total, 24_252);
+    assert_eq!(oracle.source_overhead, 7_868);
     assert_eq!(oracle.effect_state, 15_120);
     assert_eq!(oracle.effect_scratch, 432);
     // #808: 2 x 17_451 (see `builtin_owners`). The #430 outer allowance is graph-owned.
     assert_eq!(oracle.builtin, 34_902);
     // #1023: -48, the two `CompiledSession`s' unread `graph_entity_indexes` maps.
     // #1024: -56, the current CAPI owners' `RenderEnvelope` rows.
-    assert_eq!(oracle.capi, 204_319);
+    // #1034: -8, the current session handle's unread `ProtocolQueues` counter.
+    assert_eq!(oracle.capi, 204_311);
     // #241: 58_694 - (29 x 10 locator) + (40 x 10 content identity) = 58_804.
     assert_eq!(oracle.largest, 58_804);
 
@@ -2743,7 +2752,7 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
         // SAFETY: These handles are uniquely owned until their matching destroy calls.
         unsafe {
             let (session, plan) = compile_c(&session_document, &exact_limits);
-            assert_eq!(resources_c(plan), frozen_scratch_report(160_901));
+            assert_eq!(resources_c(plan), frozen_scratch_report(160_893));
             let request = command(1, 42, "double-live-cap");
             let mut response = [0xa5_u8; 4_096];
             assert_eq!(submit(session, &request, &mut response), RESULT_OK, "{row}");
@@ -2762,7 +2771,7 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
                 RESULT_OK
             );
             // The prospective session ID is nine bytes shorter than the current one.
-            assert_eq!(resources_c(plan), frozen_scratch_report(160_901 - 9));
+            assert_eq!(resources_c(plan), frozen_scratch_report(160_893 - 9));
             miso_engine_v1_session_destroy(session);
             miso_engine_v1_plan_destroy(plan);
         }
@@ -2814,11 +2823,12 @@ fn tiny_control_frame_still_accounts_three_provider_counters_exactly() {
     // budget assertion rather than an observed-value pin. #1023 then removes 24 bytes: the
     // session handle's compiled session no longer carries the unread `graph_entity_indexes` map.
     // #1024 removes 56 more: `RenderEnvelope`'s unused `input_channels`, once in each of the
-    // seven retained envelopes (see `complete_capi_owners`).
+    // seven retained envelopes (see `complete_capi_owners`). #1034 removes 8 more: the session
+    // handle's `ProtocolQueues` no longer carries the unread `control_used_bytes` counter.
     let (eq_descriptor_bytes, eq_state_bytes, eq_string_bytes) = prepared_eq_catalog_growth();
     assert_eq!(
         required,
-        178_434 + eq_descriptor_bytes + eq_state_bytes + eq_string_bytes,
+        178_426 + eq_descriptor_bytes + eq_state_bytes + eq_string_bytes,
         "tiny-frame retained authority"
     );
     let mut exact = roomy;

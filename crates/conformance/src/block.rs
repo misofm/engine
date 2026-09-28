@@ -1,11 +1,11 @@
 //! Validated borrowed planar blocks.
 
-use engine::{SampleRateHz, is_extended_compatibility_sample_rate, is_launch_sample_rate};
+use engine::{SampleRateHz, is_launch_sample_rate};
 
 /// `PlanarBlock` construction errors.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BlockError {
-    /// Rate is neither a launch rate nor an extended compatibility corpus rate.
+    /// Rate is not a launch rate.
     InvalidRate,
     /// Channels or frames is zero.
     Empty,
@@ -32,7 +32,7 @@ impl<'a, T> PlanarBlock<'a, T> {
         frames: usize,
         samples: &'a [T],
     ) -> Result<Self, BlockError> {
-        if !(is_launch_sample_rate(rate) || is_extended_compatibility_sample_rate(rate)) {
+        if !is_launch_sample_rate(rate) {
             return Err(BlockError::InvalidRate);
         }
         if channels == 0 || frames == 0 {

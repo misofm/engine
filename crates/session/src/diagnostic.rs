@@ -65,8 +65,6 @@ pub enum DiagnosticCode {
     CapacityArithmeticOverflow,
     /// A configured resource limit was exceeded.
     ResourceLimitExceeded,
-    /// A render_profile mode token is not supported at launch.
-    RenderModeUnsupportedAtLaunch,
 }
 
 impl DiagnosticCode {
@@ -99,7 +97,6 @@ impl DiagnosticCode {
             Self::CapacityZero => "capacity.zero",
             Self::CapacityArithmeticOverflow => "capacity.arithmetic_overflow",
             Self::ResourceLimitExceeded => "resource.limit_exceeded",
-            Self::RenderModeUnsupportedAtLaunch => "render_mode.unsupported_at_launch",
         }
     }
 }

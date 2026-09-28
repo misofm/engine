@@ -281,8 +281,9 @@ impl AutomationBatchSlot {
     }
 }
 
-/// One fixed lightweight control-command reservation; byte payload copying belongs to the later
-/// decoded-command schema but its bounded byte accounting is prepared here.
+/// One fixed lightweight control-command reservation. The control queue is prepared and reported
+/// with these slots, but nothing enqueues one: its never-called enqueue/dequeue methods and their
+/// byte accounting were removed as unused (#1034).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ControlCommandSlot {
     /// Request whose fully copied command bytes occupy this reservation.
@@ -647,7 +648,6 @@ pub struct ProtocolQueues {
     counter_telemetry: QueuePair<CounterTelemetryRecord>,
     counter_telemetry_staging: Box<[Option<CounterTelemetryRecord>]>,
     telemetry_counters: TelemetryCounters,
-    control_used_bytes: usize,
     automation_frontier: Option<SampleTime>,
     automation_density: Box<[AutomationDensityEntry]>,
     automation_intervals: Box<[AutomationIntervalEntry]>,
@@ -752,7 +752,6 @@ impl ProtocolQueues {
             counter_telemetry: QueuePair::new(config.telemetry_slots, QueueGeneration(6))?,
             counter_telemetry_staging: vec![None; config.telemetry_slots.get()].into_boxed_slice(),
             telemetry_counters: TelemetryCounters::default(),
-            control_used_bytes: 0,
             automation_frontier: None,
             automation_density: vec![AutomationDensityEntry::default(); density_entries]
                 .into_boxed_slice(),
@@ -767,39 +766,6 @@ impl ProtocolQueues {
     #[must_use]
     pub const fn config(&self) -> ProtocolQueueConfig {
         self.config
-    }
-
-    /// Try to reserve copied command bytes and one reliable command queue slot atomically.
-    pub fn try_enqueue_control(
-        &mut self,
-        value: ControlCommandSlot,
-    ) -> Result<(), ControlCommandSlot> {
-        let bytes = usize::try_from(value.byte_len).unwrap_or(usize::MAX);
-        if bytes
-            > self
-                .config
-                .control_command_bytes
-                .get()
-                .saturating_sub(self.control_used_bytes)
-        {
-            return Err(value);
-        }
-        match self.control.producer.try_push(value) {
-            Ok(()) => {
-                self.control_used_bytes = self.control_used_bytes.saturating_add(bytes);
-                Ok(())
-            }
-            Err(full) => Err(full.value),
-        }
-    }
-
-    /// Pop one fixed command reservation and return its bytes to the configured budget.
-    pub fn try_dequeue_control(&mut self) -> Result<ControlCommandSlot, QueueEmpty> {
-        let value = self.control.consumer.try_pop()?;
-        self.control_used_bytes = self
-            .control_used_bytes
-            .saturating_sub(usize::try_from(value.byte_len).unwrap_or(usize::MAX));
-        Ok(value)
     }
 
     /// Validate and enqueue one entire fixed automation batch; no partial batch is ever queued.
@@ -858,11 +824,6 @@ impl ProtocolQueues {
                 report: self.report(QueueKind::ReliableResponse),
             }),
         }
-    }
-
-    /// Pop one reliable response.
-    pub fn try_dequeue_response(&mut self) -> Result<ReliableSlot, QueueEmpty> {
-        self.responses.consumer.try_pop()
     }
 
     /// Enqueue a reliable event or preserve it exactly on full.

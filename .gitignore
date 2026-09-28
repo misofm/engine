@@ -37,3 +37,6 @@ artifacts/**/*.ll
 sdk/node_modules/
 sdk/dist/
 .claude/worktrees/
+
+# Python bytecode from running the gate scripts locally without -B.
+__pycache__/

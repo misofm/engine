@@ -29,7 +29,7 @@ lane.workspace = true
 parametric-eq.workspace = true
 protocol = { workspace = true, features = ["test-support"] }
 session.workspace = true
-source = { workspace = true, features = ["test-support"] }
+source.workspace = true
 sha2.workspace = true
 
 [features]

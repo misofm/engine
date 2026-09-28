@@ -27,10 +27,10 @@ miso-stems-blake3-v1/
 ```
 
 The stem directory is one artifact namespace, not a generic content store.
-CID effect packages will use the declared sibling namespace
-`miso-effect-packages-v1`; they never share stem filenames or index rows. The
-scheme prefix (`blake3:` for stems, CID vocabulary for packages) selects the
-namespace before resolution; package storage remains deferred.
+Third-party effect packages (CID identities) are out of scope until a new issue
+reopens them (owner ruling R6a, #1037); such an issue must give them a sibling
+namespace that never shares stem filenames or index rows. The `blake3:` scheme
+prefix selects the stem namespace before resolution.
 
 Only indexed final files are playable. A move is index-last: decoded bytes are
 hashed while written, the staging file is reopened and fully verified, then a

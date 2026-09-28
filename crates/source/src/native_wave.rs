@@ -177,19 +177,6 @@ impl PlanarSink for [&mut [f32]] {
     }
 }
 
-pub(crate) struct Strided<'a> {
-    out: &'a mut [f32],
-    stride: usize,
-}
-
-impl PlanarSink for Strided<'_> {
-    #[inline(always)]
-    fn plane(&mut self, channel: usize) -> &mut [f32] {
-        let start = channel * self.stride;
-        &mut self.out[start..start + self.stride]
-    }
-}
-
 impl<R: Read + Seek> NativeWaveDecoder<R> {
     /// Preallocate bounded worker scratch and validate the exact requested region.
     pub fn prepare(
@@ -297,66 +284,6 @@ impl<R: Read + Seek> NativeWaveDecoder<R> {
     #[must_use]
     pub const fn region(&self) -> NativeWaveRegion {
         self.region
-    }
-
-    /// Return the absolute source frame that the next decode will read.
-    #[must_use]
-    pub(crate) fn next_source_frame(&self) -> SourceFrame {
-        SourceFrame(
-            self.region
-                .start_frame
-                .0
-                .saturating_add(self.next_region_frame),
-        )
-    }
-
-    /// Reposition the prepared decoder at a validated absolute source frame in its region.
-    pub(crate) fn seek_to_source_frame(
-        &mut self,
-        frame: SourceFrame,
-    ) -> Result<(), NativeWaveError> {
-        validate_seek_frame(self.region, frame)?;
-        let target = frame.0 - self.region.start_frame.0;
-        let buffered_end = self
-            .buffer_region_frame
-            .checked_add(u64::try_from(self.buffer_frames).expect("usize fits u64"))
-            .ok_or(NativeWaveError::ArithmeticOverflow)?;
-        if target >= self.buffer_region_frame && target < buffered_end {
-            self.buffer_cursor = usize::try_from(target - self.buffer_region_frame)
-                .map_err(|_| NativeWaveError::ArithmeticOverflow)?;
-        } else {
-            self.buffer_region_frame = target;
-            self.buffer_frames = 0;
-            self.buffer_cursor = 0;
-        }
-        self.next_region_frame = target;
-        Ok(())
-    }
-
-    /// Decode into a contiguous `[channel][frames]` worker block.
-    pub(crate) fn decode_planar(
-        &mut self,
-        out: &mut [f32],
-        frames: usize,
-    ) -> Result<NativeDecodeReport, NativeWaveError> {
-        let channels = usize::from(self.metadata.channel_count);
-        let expected_samples = channels
-            .checked_mul(frames)
-            .ok_or(NativeWaveError::OutputShape)?;
-        if channels == 0
-            || frames == 0
-            || frames > self.max_frames_per_decode.get()
-            || out.len() != expected_samples
-        {
-            return Err(NativeWaveError::OutputShape);
-        }
-        self.decode_next(
-            frames,
-            &mut Strided {
-                out,
-                stride: frames,
-            },
-        )
     }
 
     fn validate_output_shape(
@@ -612,21 +539,6 @@ pub(crate) fn validate_region(
         .checked_add(region.length_frames)
         .ok_or(NativeWaveError::ArithmeticOverflow)?;
     if end > metadata.total_frames {
-        return Err(NativeWaveError::RegionOutOfBounds);
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_seek_frame(
-    region: NativeWaveRegion,
-    frame: SourceFrame,
-) -> Result<(), NativeWaveError> {
-    let end = region
-        .start_frame
-        .0
-        .checked_add(region.length_frames)
-        .ok_or(NativeWaveError::ArithmeticOverflow)?;
-    if frame.0 < region.start_frame.0 || frame.0 > end {
         return Err(NativeWaveError::RegionOutOfBounds);
     }
     Ok(())
@@ -993,40 +905,26 @@ mod tests {
     }
 
     #[test]
-    fn buffered_quanta_seek_and_straddled_refill_preserve_exact_pcm() {
+    fn buffered_decodes_share_one_fill_and_a_straddled_refill_keeps_the_reader_position() {
         let mut decoder = buffered_float_decoder(24);
-        for quantum in 0..4 {
-            let mut planar = [0.0; 4];
+        for call in 0..5 {
+            let mut plane = [0.0; 3];
             decoder
-                .decode_planar(&mut planar, 4)
-                .expect("buffered quantum");
+                .decode_into(&mut [&mut plane])
+                .expect("buffered decode");
             assert_eq!(
-                planar,
-                core::array::from_fn(|frame| (quantum * 4 + frame) as f32)
+                plane,
+                core::array::from_fn(|frame| (call * 3 + frame) as f32)
             );
         }
-        assert_eq!(decoder.reader.reads, 1, "four quanta share one fill");
+        assert_eq!(decoder.reader.reads, 1, "five decodes share one fill");
         assert_eq!(decoder.reader.seeks, 1, "initial fill seeks once");
 
-        decoder
-            .seek_to_source_frame(SourceFrame(3))
-            .expect("in-buffer seek");
-        let mut in_buffer = [0.0; 4];
-        decoder
-            .decode_planar(&mut in_buffer, 4)
-            .expect("in-buffer decode");
-        assert_eq!(in_buffer, [3.0, 4.0, 5.0, 6.0]);
-        assert_eq!(decoder.reader.reads, 1);
-        assert_eq!(decoder.reader.seeks, 1);
-
-        decoder
-            .seek_to_source_frame(SourceFrame(14))
-            .expect("nonaligned buffered seek");
         let mut straddled = [0.0; 4];
         decoder
-            .decode_planar(&mut straddled, 4)
+            .decode_into(&mut [&mut straddled])
             .expect("straddled refill");
-        assert_eq!(straddled, [14.0, 15.0, 16.0, 17.0]);
+        assert_eq!(straddled, [15.0, 16.0, 17.0, 18.0]);
         assert_eq!(decoder.reader.reads, 2, "straddle performs one refill");
         assert_eq!(
             decoder.reader.seeks, 1,
@@ -1040,35 +938,39 @@ mod tests {
         decoder.reader.fail_next_seek = true;
         let mut first = [0.0; 4];
         assert_eq!(
-            decoder.decode_planar(&mut first, 4),
+            decoder.decode_into(&mut [&mut first]),
             Err(NativeWaveError::Io(io::ErrorKind::Other))
         );
         assert_eq!(decoder.reader_position, None);
         decoder
-            .decode_planar(&mut first, 4)
+            .decode_into(&mut [&mut first])
             .expect("retry after seek failure");
         assert_eq!(decoder.reader.seeks, 2);
+        assert_eq!(first, [0.0, 1.0, 2.0, 3.0]);
 
+        // Drain the rest of the first fill, so the next decode must read.
+        let mut rest = [0.0; 12];
         decoder
-            .seek_to_source_frame(SourceFrame(18))
-            .expect("outside buffer");
+            .decode_into(&mut [&mut rest])
+            .expect("buffered remainder");
         decoder.reader.fail_next_read = true;
         let seeks_before_read_failure = decoder.reader.seeks;
         let mut second = [0.0; 4];
         assert_eq!(
-            decoder.decode_planar(&mut second, 4),
+            decoder.decode_into(&mut [&mut second]),
             Err(NativeWaveError::Io(io::ErrorKind::Other))
         );
         assert_eq!(decoder.reader_position, None);
         decoder
-            .decode_planar(&mut second, 4)
+            .decode_into(&mut [&mut second])
             .expect("retry after read failure");
-        assert_eq!(decoder.reader.seeks, seeks_before_read_failure + 2);
-        assert_eq!(second, [18.0, 19.0, 20.0, 21.0]);
+        // The contiguous refill needed no seek; the retry after the failed read does.
+        assert_eq!(decoder.reader.seeks, seeks_before_read_failure + 1);
+        assert_eq!(second, [16.0, 17.0, 18.0, 19.0]);
     }
 
     #[test]
-    fn plane_and_strided_sinks_match_every_encoding_across_chunks_refills_and_seek() {
+    fn every_encoding_decodes_the_same_bits_however_the_region_is_partitioned() {
         let cases = [
             (
                 NativeWaveEncoding::UnsignedPcm8,
@@ -1115,8 +1017,9 @@ mod tests {
             let bytes = riff_wave(format_chunk(encoding, false), &data, &[]);
             let mut metadata_cursor = Cursor::new(bytes.clone());
             let metadata = parse_native_wave(&mut metadata_cursor, CAPS).expect("metadata");
-            let prepare = || {
-                NativeWaveDecoder::prepare(
+            // A four-frame buffer, so every partition below crosses at least one refill.
+            let decode = |partition: &[usize]| {
+                let mut decoder = NativeWaveDecoder::prepare(
                     Cursor::new(bytes.clone()),
                     metadata,
                     NativeWaveRegion {
@@ -1125,85 +1028,29 @@ mod tests {
                     },
                     NonZeroUsize::new(4).expect("four-frame buffer"),
                 )
-                .expect("decoder")
-            };
-            let mut planes_decoder = prepare();
-            let mut strided_decoder = prepare();
-
-            for frames in [2, 3] {
-                let mut plane = vec![0.0; frames];
-                let plane_report = planes_decoder
-                    .decode_into(&mut [&mut plane])
-                    .expect("plane decode");
-                let mut strided = vec![0.0; frames];
-                let strided_report = strided_decoder
-                    .decode_planar(&mut strided, frames)
-                    .expect("strided decode");
-                assert_eq!(
-                    plane
-                        .iter()
-                        .map(|value| value.to_bits())
-                        .collect::<Vec<_>>(),
-                    strided
-                        .iter()
-                        .map(|value| value.to_bits())
-                        .collect::<Vec<_>>(),
-                    "sink bits differ for {encoding:?}"
-                );
-                assert_eq!(plane_report, strided_report);
-                if frames == 2 {
-                    planes_decoder
-                        .seek_to_source_frame(SourceFrame(3))
-                        .expect("plane in-buffer seek");
-                    strided_decoder
-                        .seek_to_source_frame(SourceFrame(3))
-                        .expect("strided in-buffer seek");
+                .expect("decoder");
+                let mut bits = Vec::new();
+                let mut last = None;
+                for &frames in partition {
+                    let mut plane = vec![0.0_f32; frames];
+                    let report = decoder.decode_into(&mut [&mut plane]).expect("decode");
+                    assert_eq!(report.decoded_frames as usize, frames);
+                    bits.extend(plane.iter().map(|value| value.to_bits()));
+                    last = Some((report.end_of_region, report.sanitized_sample_count));
                 }
-            }
-
-            planes_decoder
-                .seek_to_source_frame(SourceFrame(0))
-                .expect("plane rewind");
-            strided_decoder
-                .seek_to_source_frame(SourceFrame(0))
-                .expect("strided rewind");
-            for frames in [1, 2, 3] {
-                let mut plane = vec![0.0; frames];
-                let plane_report = planes_decoder
-                    .decode_into(&mut [&mut plane])
-                    .expect("partitioned plane decode");
-                let mut strided = vec![0.0; frames];
-                let strided_report = strided_decoder
-                    .decode_planar(&mut strided, frames)
-                    .expect("partitioned strided decode");
+                (bits, last.expect("one decode at least"))
+            };
+            let reference = decode(&[2, 3, 1]);
+            assert_eq!(reference.0.len(), 6);
+            assert!(reference.1.0, "the region ends with the last frame");
+            for partition in [&[1, 2, 3][..], &[3, 3], &[4, 2], &[1, 1, 1, 1, 1, 1]] {
                 assert_eq!(
-                    plane
-                        .iter()
-                        .map(|value| value.to_bits())
-                        .collect::<Vec<_>>(),
-                    strided
-                        .iter()
-                        .map(|value| value.to_bits())
-                        .collect::<Vec<_>>()
+                    decode(partition),
+                    reference,
+                    "bits differ for {encoding:?} decoded as {partition:?}"
                 );
-                assert_eq!(plane_report, strided_report);
             }
         }
-
-        let source = include_str!("native_wave.rs");
-        let conversion = &source[source.find("fn convert_frames").expect("conversion")
-            ..source.find("fn sanitize_f32").expect("sanitizer")];
-        assert_eq!(conversion.matches("match metadata.encoding").count(), 1);
-        assert!(conversion.contains("sink.plane(channel)"));
-        assert!(conversion.contains("src.chunks_exact(block_align).zip(dst.iter_mut())"));
-        assert!(!conversion.contains(&["sink", ".write"].concat()));
-        assert!(!source.contains(&["fn decode", "_sample"].concat()));
-
-        let sanitizers = &source[source.find("fn sanitize_f32").expect("f32 sanitizer")
-            ..source.find("fn le_u16").expect("post-sanitizer helper")];
-        assert!(sanitizers.contains("(exponent != 0) & (exponent != EXPONENT)"));
-        assert!(sanitizers.contains("accepted64 & (rejected32 == 0)"));
-        assert!(!sanitizers.contains("return "));
     }
 
     #[test]
@@ -1371,44 +1218,6 @@ mod tests {
         let rf64_metadata = parse_native_wave(&mut rf64_cursor, CAPS).expect("rf64");
         assert_eq!(rf64_metadata.container, NativeWaveContainer::Rf64);
         assert_eq!(rf64_metadata.total_frames, 1);
-    }
-
-    #[test]
-    fn prepared_quantum_decode_uses_contiguous_planar_worker_storage() {
-        let bytes = riff_wave(
-            format_chunk(NativeWaveEncoding::Float32, false),
-            &[
-                0.25_f32.to_le_bytes(),
-                (-0.5_f32).to_le_bytes(),
-                0.75_f32.to_le_bytes(),
-                (-1.0_f32).to_le_bytes(),
-            ]
-            .concat(),
-            &[],
-        );
-        let mut cursor = Cursor::new(bytes);
-        let metadata = parse_native_wave(&mut cursor, CAPS).expect("parse");
-        let mut decoder = NativeWaveDecoder::prepare(
-            cursor,
-            metadata,
-            NativeWaveRegion {
-                start_frame: SourceFrame(0),
-                length_frames: 4,
-            },
-            NonZeroUsize::new(4).expect("four"),
-        )
-        .expect("decoder");
-        assert_eq!(decoder.next_source_frame(), SourceFrame(0));
-        let mut planar = [0.0; 4];
-        let report = decoder
-            .decode_planar(&mut planar, 4)
-            .expect("decode quantum");
-        assert_eq!(report.decoded_frames, 4);
-        assert_eq!(planar, [0.25, -0.5, 0.75, -1.0]);
-        decoder
-            .seek_to_source_frame(SourceFrame(2))
-            .expect("prepared seek");
-        assert_eq!(decoder.next_source_frame(), SourceFrame(2));
     }
 
     #[test]

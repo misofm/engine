@@ -17,12 +17,9 @@ mod fp_env;
 mod gate_expander;
 mod graph;
 mod parametric_eq;
-mod prepared_effect_allocations;
 mod protocol;
 mod realtime;
 mod record;
-mod source;
-mod source_duration;
 mod source_fixture;
 mod unfused_fma;
 mod vectorization;
@@ -42,11 +39,8 @@ const SUBJECTS: &[&str] = &[
     "gate-expander",
     "graph",
     "parametric-eq",
-    "prepared-effect-allocations",
     "protocol",
     "realtime",
-    "source",
-    "source-duration",
     "unfused-fma",
     "vectorization",
 ];
@@ -66,11 +60,8 @@ fn run_subject(subject: &str) {
         "gate-expander" => gate_expander::main(),
         "graph" => graph::main(),
         "parametric-eq" => parametric_eq::main(),
-        "prepared-effect-allocations" => prepared_effect_allocations::main(),
         "protocol" => protocol::main(),
         "realtime" => realtime::main(),
-        "source" => source::main(),
-        "source-duration" => source_duration::main(),
         "unfused-fma" => unfused_fma::main(),
         "vectorization" => vectorization::main(),
         _ => unreachable!("dispatcher validates internal subjects"),

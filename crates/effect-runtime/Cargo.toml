@@ -20,7 +20,6 @@ math = { workspace = true, features = ["lane"] }
 # boundary that stops them being one function. Dev-only: no production edge is created.
 effect-contract.workspace = true
 engine.workspace = true
-sha2.workspace = true
 
 [lints]
 workspace = true

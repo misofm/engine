@@ -1953,6 +1953,99 @@ mod tests {
         destroy(engine);
     }
 
+    /// Owner ruling R5 (#1036): a session at a former extended research rate (176.4-384 kHz) is
+    /// refused at C ABI prepare with the session's typed launch-rate diagnostic, publishes no
+    /// handle, and leaves the same diagnostic for `last_error`. A host feeding chunks at such a
+    /// rate into a launch-rate plan is refused as a rate mismatch.
+    #[test]
+    fn extended_rate_session_and_chunks_are_refused_typed() {
+        const JSON: &str =
+            include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+        const RATE: &str = "\"sample_rate_hz\": 48000";
+        const DIAGNOSTIC: &[u8] = b"sample_rate.unsupported_at_launch\t$.sample_rate_hz\n";
+        assert_eq!(JSON.matches(RATE).count(), 1, "fixture shape drifted");
+        let mut engine = ptr::null_mut();
+        assert_eq!(create(&config(), &mut engine), RESULT_OK);
+        for rate in [176_400_u32, 192_000, 352_800, 384_000] {
+            let document = JSON.replacen(RATE, &format!("\"sample_rate_hz\": {rate}"), 1);
+            let mut storage = vec![0_u8; 256];
+            let mut diagnostics = BytesOut {
+                struct_size: BYTES_OUT_SIZE,
+                reserved0: 0,
+                data: storage.as_mut_ptr(),
+                capacity_bytes: storage.len() as u64,
+                required_bytes: 0,
+            };
+            let mut session = ptr::dangling_mut::<Session>();
+            let mut plan = ptr::dangling_mut::<Plan>();
+            // SAFETY: Every pointer names a complete local ABI value or the mutated document bytes.
+            let result = unsafe {
+                miso_engine_v1_compile_session(
+                    engine,
+                    document.as_ptr(),
+                    document.len() as u64,
+                    &limits(),
+                    &mut diagnostics,
+                    &mut session,
+                    &mut plan,
+                )
+            };
+            assert_eq!(result, RESULT_COMPILE_REJECTED, "{rate}");
+            assert!(session.is_null() && plan.is_null(), "{rate}");
+            storage.truncate(diagnostics.required_bytes as usize);
+            assert_eq!(storage, DIAGNOSTIC, "{rate}");
+            assert_eq!(read_last_error(engine.cast()), DIAGNOSTIC, "{rate}");
+        }
+        destroy(engine);
+
+        let (engine, session, plan) = compiled_fixture();
+        let left = [0.25_f32; 128];
+        let right = [-0.5_f32; 128];
+        let planes = [left.as_ptr(), right.as_ptr()];
+        let mut report = SubmitReport {
+            struct_size: crate::SUBMIT_REPORT_SIZE,
+            reserved0: 0,
+            accepted_frames: 0,
+            cumulative_written_frames: 0,
+            active_generation: 0,
+        };
+        for rate in [176_400_u32, 192_000, 352_800, 384_000] {
+            let chunk = SourceChunk {
+                struct_size: crate::SOURCE_CHUNK_SIZE,
+                sample_rate_hz: rate,
+                generation: 1,
+                start_frame: 0,
+                planes: planes.as_ptr(),
+                plane_count: 2,
+                frames: 128,
+                end_of_region: 0,
+                reserved0: 0,
+            };
+            let id = b"fixture-source";
+            assert_eq!(
+                // SAFETY: The session is live and every borrowed plane and ABI struct outlives the
+                // call; the submission is rejected before any plane is read.
+                unsafe {
+                    miso_engine_v1_source_submit_planar_f32(
+                        session,
+                        id.as_ptr(),
+                        id.len() as u64,
+                        &chunk,
+                        &mut report,
+                    )
+                },
+                RESULT_INVALID_ARGUMENT,
+                "{rate}"
+            );
+            assert_eq!(
+                read_last_error(session.cast()),
+                b"source.rate.mismatch",
+                "{rate}"
+            );
+        }
+        destroy_fixture(engine, session, plan);
+    }
+
     /// F6, end to end: a rejected source submission or seek reaches a C host as the diagnostic for
     /// the rule it broke, through the real entry point and the real `last_error` path. Every one of
     /// these used to be `RESULT_INVALID_ARGUMENT` with `source.submit.rejected` or

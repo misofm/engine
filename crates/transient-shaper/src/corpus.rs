@@ -2,8 +2,8 @@
 //!
 //! Master plan #83 D5 claims a rendered block is bit-identical across `Scalar`/`Simd4`/`Simd8`
 //! **and** across `x86_64`/`aarch64`/`wasm32`. This module is the transient shaper's contribution
-//! to that claim: one definition, digested natively by this crate's own test and replayed under
-//! wasmtime by `tools/wasm-gates` through `wasm-gate-corpus`, against the
+//! to that claim: one definition, digested natively and replayed under wasmtime by gate G5
+//! (`tools/wasm-gates`, through `wasm-gate-corpus`), against the
 //! pins in [`CROSS_TARGET_DIGESTS`], which live here rather than in the tool so that the gate and
 //! the pins it replays cannot drift apart.
 //!

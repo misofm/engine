@@ -169,3 +169,24 @@ above ("No native or cloud embedding is planned") contradicts the owner and must
    file a narrower "remove native-pcm-runner" draft (runner, its fixtures, its lint step and the
    `docs/NATIVE_PCM_REFERENCE_RUNNER_V1.md` doc), gated by the capi tests and `audit capi` staying
    green.
+
+## Amendment (root, 2026-09-28): absorb #1035's Part B step 4 and its doc follow-ups
+
+#1035 (merged into the batch) removed the native decode workers but had to keep the pieces the
+native PCM runner still imports. Once this issue removes the runner, remove them here too (owner
+ruling R4 approved them):
+
+- `crates/source/src/native_wave.rs` and the `NativeWave*` re-exports;
+- `audit fixture-source` and `fixtures/sources/v1`, unless a surviving test or tool still reads
+  them (prove non-use by compile and grep first).
+
+Also close #1035's verifier's Low findings (see `1035-*.md`, "Sol verdict, attempt 1"):
+
+- `docs/STEM_IDENTITY_V1.md`: name the release CLI as the serializer and WAVE-stripping owner;
+  the browser stem store only parses the `blake3:` spelling and hashes the canonical bytes it is
+  given. Give the stem-identity corpus a CI consumer (`generate.py --check` in the lint job) or
+  say why it has none.
+- Stale references: `docs/derivations/241-browser-source-identities.md:186-195` (`stem-hasher`
+  commands), `docs/DELIVERY_CODEC_BOUNDARY.md:12` (native WAVE/RF64 control-worker path),
+  `crates/source/src/lib.rs:1407` ("native worker/decoder bytes"), and the `qualification.yml`
+  test-debug-a comment that still lists `source`.

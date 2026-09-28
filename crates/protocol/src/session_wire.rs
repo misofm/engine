@@ -640,7 +640,6 @@ fn tx_render_profile(sink: &mut dyn Sink, value: &RenderProfile) -> Result<(), E
         schema::session::render_profile::MODE,
         match value.mode {
             session::RenderMode::SingleThread => 1,
-            session::RenderMode::DependencyWaves => 2,
         },
     )
 }
@@ -1266,7 +1265,8 @@ fn parse_render_profile(message: Message<'_>) -> Result<RenderProfile, DecodeErr
     let message = message.schema_spec(&schema::session::render_profile::SPEC)?;
     let mode = match read_u8_exact(one_spec!(message, schema::session::render_profile::MODE)?)? {
         1 => session::RenderMode::SingleThread,
-        2 => session::RenderMode::DependencyWaves,
+        // `2` was the retired `dependency_waves` (#1063): refused like any unallocated code and
+        // never reallocated within v1.
         _ => return Err(DecodeError::InvalidTlv),
     };
     Ok(RenderProfile {

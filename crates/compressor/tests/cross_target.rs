@@ -1,23 +1,21 @@
-//! E4 — the frozen corpus renders the same bits at every width, and the digests are pinned.
+//! E4's corpus can fail: every case is finite, busy and distinct from the others.
 //!
-//! `tools/wasm-gates` replays exactly this corpus inside a WebAssembly module, with
-//! and without `simd128`, against these same pins. That is the cross-target half of master plan
-//! #83 D5 for this crate; this file is the native half and the pin's home.
+//! The corpus's cross-target claim -- one pinned digest per case, identical at `W = 1`, 4 and 8,
+//! natively and under wasmtime (master plan #83 D5) -- has one owner, gate G5 (issue #1048):
+//! `g5_native_digests_match_pins` in `tools/wasm-gates/tests/g5_native_corpus.rs` compares every
+//! case at every width against `corpus::C1_DIGESTS` in the shipping profile, and the wasm guests of
+//! `scripts/run-wasm-gates.sh` compare the same cases against the same pins.
+//! `tests/lane_identity.rs` compares the widths to each other in this crate's own debug run.
 //!
 //! A digest is not an oracle. `tests/oracle.rs` is what says the compressor is a compressor;
 //! `tests/static_curve.rs` is what says the curve is Giannoulis, Massberg and Reiss equation 4.
-//! This file only says the answer does not move — and, through the width sweep, that it does not
-//! depend on the backend.
 
-use compressor::corpus::{C1_DIGESTS, CASE_COUNT, CASE_NAMES, POINTS, run_case};
-use lane::{Lane, Simd4, Simd8};
+use compressor::corpus::{CASE_COUNT, CASE_NAMES, POINTS, run_case};
 use sha2::{Digest, Sha256};
 
-fn case_digest<L: Lane>(case: usize) -> [u8; 32] {
-    let mut out = vec![0_u32; POINTS];
-    run_case::<L>(case, &mut out);
+fn digest(words: &[u32]) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    for word in &out {
+    for word in words {
         hasher.update(word.to_le_bytes());
     }
     hasher.finalize().into()
@@ -43,63 +41,9 @@ fn shared_hex_adapter_matches_literal_bytes() {
     );
 }
 
-/// Every case matches its pin, at `W = 1`, 4 and 8.
-///
-/// Red mutations (MUTATIONS.md rows 7, 11, 19): the recursive word kept in a local instead of
-/// written back to the channel; the ballistic coefficient designed through an `f32`
-/// `0.001 * ms * fs` product instead of the `f64` one; the corpus rendered in one block instead of
-/// the frozen partition. Each moves the digest at every width. MC-2 intentionally moves only the
-/// scalar oracle pin for the ramping case after changing its coefficient trajectory.
-/// Set `MISO_ENGINE_REPIN_COMPRESSOR_CORPUS=1` to print the scalar pins in `C1_DIGESTS` form.
-///
-/// Per master plan §8.3 the pins come from the `f32` instantiation and from nowhere else; the
-/// vector widths and the wasm legs *confirm* them. Re-pin mode suppresses only the comparison
-/// against the pin: `Simd4` and `Simd8` are still required to agree with the scalar oracle, so a
-/// width disagreement cannot be laundered into a fresh pin.
-#[test]
-fn the_corpus_matches_its_pins_at_every_width() {
-    let repinning = std::env::var_os("MISO_ENGINE_REPIN_COMPRESSOR_CORPUS").is_some();
-    let mut mismatches = Vec::new();
-    let mut repin = String::new();
-    for (case, name) in CASE_NAMES.iter().enumerate() {
-        let scalar = case_digest::<f32>(case);
-        for (width, digest) in [
-            ("W=4", case_digest::<Simd4>(case)),
-            ("W=8", case_digest::<Simd8>(case)),
-        ] {
-            if digest != scalar {
-                mismatches.push(format!(
-                    "{name} at {width}: {} (scalar oracle {})",
-                    hex(&digest),
-                    hex(&scalar)
-                ));
-            }
-        }
-        if !repinning && scalar != C1_DIGESTS[case] {
-            mismatches.push(format!(
-                "{name} at W=1: {} (pinned {})",
-                hex(&scalar),
-                hex(&C1_DIGESTS[case])
-            ));
-        }
-        let bytes: Vec<String> = scalar.iter().map(|byte| format!("0x{byte:02x}")).collect();
-        repin.push_str(&format!("    // {name}\n"));
-        repin.push_str(&format!("    [{}],\n", bytes.join(", ")));
-    }
-    assert!(
-        mismatches.is_empty(),
-        "E4 digest mismatch:\n{}\n\nA mismatch is never repaired by re-pinning from the run that \
-         failed. If an operation order changed deliberately, re-pin from the L = f32 oracle in the \
-         same commit and state the deviation (master plan section 8).",
-        mismatches.join("\n")
-    );
-    if repinning {
-        println!("{repin}");
-        panic!("re-pin mode: copy the block above into C1_DIGESTS in src/corpus.rs");
-    }
-}
-
 /// The corpus is NaN-free and Inf-free, so the pins survive wasm's NaN canonicalisation (D5).
+///
+/// Claim: a corpus change that makes a case emit NaN or an infinity turns this red.
 #[test]
 fn the_corpus_is_finite() {
     let mut out = vec![0_u32; POINTS];
@@ -115,6 +59,9 @@ fn the_corpus_is_finite() {
 /// No case is vacuous: each one produces many distinct non-zero values, and the cases differ from
 /// one another. Without this a corpus that rendered silence would agree with itself on every target
 /// and prove nothing.
+///
+/// Claim: a corpus change that silences a case, collapses it to few words, or makes two cases the
+/// same computation turns this red.
 #[test]
 fn no_case_is_vacuous() {
     let mut digests = Vec::new();
@@ -137,10 +84,10 @@ fn no_case_is_vacuous() {
             "{name}: only {} distinct words",
             distinct.len()
         );
-        digests.push(C1_DIGESTS[case]);
+        digests.push(digest(&out));
     }
     let mut unique = digests.clone();
     unique.sort_unstable();
     unique.dedup();
-    assert_eq!(unique.len(), CASE_COUNT, "two cases share a digest");
+    assert_eq!(unique.len(), CASE_COUNT, "two cases render the same words");
 }

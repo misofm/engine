@@ -154,20 +154,17 @@ jobs:
       # `-max_total_time` rather than a bigger `-runs`: the budget is then bounded in the unit the
       # bill is denominated in, and does not drift with runner speed.
       #
-      # Eight targets x 180 s = 24 minutes of fuzzing, ~26 job-minutes with setup, once a night.
+      # Six targets x 180 s = 18 minutes of fuzzing, ~20 job-minutes with setup, once a night.
       # The move that created this file removes ~58 job-minutes per 25 pull-request and push runs,
-      # so this stays well inside what it saves.
-      #
-      # Eight, not six: `effect_package` and `effect_state` are declared in `fuzz/Cargo.toml` and
-      # were COMPILED by CI (`cargo check --bins`) but never executed by any job. They are executed
-      # here.
+      # so this stays well inside what it saves. (#1037 removed the `effect_package` and
+      # `effect_state` targets with the effect-package crate.)
       #
       # No fixed `-seed`. The per-PR jobs pin seeds so a red is reproducible from the log; a
       # nightly wants a different walk each night, and any crash it finds is reproducible from the
       # uploaded artifact instead.
       #
       # Every target runs even after one fails, and the job fails at the end, so one crashing
-      # target does not hide the other seven.
+      # target does not hide the other five.
       - name: Deep fuzz every target
         env:
           # lane's D4 guard requires x86-64-v3; cargo-fuzz rebuilds RUSTFLAGS and would drop the
@@ -179,8 +176,7 @@ jobs:
           root="$PWD/target/ci/nightly-fuzz"
           status=0
           for target in session_parse session_compile \
-                        protocol_command protocol_session_transaction protocol_event protocol_response \
-                        effect_package effect_state; do
+                        protocol_command protocol_session_transaction protocol_event protocol_response; do
             corpus="$root/corpus/$target"
             mkdir -p "$corpus" "$root/artifacts/$target"
             if compgen -G "fuzz/corpus/$target/*" > /dev/null; then
@@ -261,7 +257,7 @@ jobs:
         run: node scripts/check-stem-store-v1.mjs --self-test --budgets
 
   release-budgets:
-    name: release-mode wall-clock budgets (host-web, host-core, effect-package)
+    name: release-mode wall-clock budgets (host-web, host-core)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -279,7 +275,6 @@ jobs:
           cargo test --locked --release -p host-web --lib -- --ignored --exact tests::maximum_document_dense_invalid_boot_finishes_under_one_second_in_release
           cargo test --locked --release -p host-core --test effect_observation -- --ignored --exact observation_cost_classes_are_separated_from_a_computed_scan_in_release
           cargo test --locked --release -p host-core --test prepare -- --ignored --exact dense_refusal_diagnostics_finish_under_one_second_in_release
-          cargo test --locked --release -p effect-package --test package_allocation -- --ignored --exact encode_at_the_frozen_artifact_cap_finishes_in_ten_milliseconds_in_release
 
   failure-notice:
     name: report nightly failure as an issue

@@ -211,30 +211,27 @@ fn the_render_path_allocates_nothing() {
         "scalar render path allocated"
     );
 
-    let requests: Vec<PrepareEffectRequest<'_>> = (0..8).map(|_| request(&values)).collect();
+    // A bank of this build's native width: eight lanes on x86-64-v3, four on AArch64 NEON (#1017).
+    let backend = Backend::current();
+    let width = BankWidth::for_backend(backend).expect("every product target has a bank width");
+    let lanes = width.lanes() as usize;
+    let requests: Vec<PrepareEffectRequest<'_>> = (0..lanes).map(|_| request(&values)).collect();
     let mut bank = TruePeakLimiterFactory
         .bind_homogeneous_bank(PrepareEffectBankRequest {
-            backend: Backend::Simd8,
-            width: BankWidth::Eight,
+            backend,
+            width,
             requests: &requests,
         })
         .expect("bank binding")
         .expect("bank available");
-    let mut left = vec![0.0_f32; 128 * 8];
-    let mut right = vec![0.0_f32; 128 * 8];
-    let offsets = [0_u32, 1, 1, 1, 1, 1, 1, 1, 1];
+    let mut left = vec![0.0_f32; 128 * lanes];
+    let mut right = vec![0.0_f32; 128 * lanes];
+    // Lane 0 carries the one span; every other lane carries none.
+    let offsets: Vec<u32> = (0..=lanes).map(|lane| u32::from(lane > 0)).collect();
     let spans = automation(0);
     bank.process_bank(
         EffectBankProcessBlock::new(
-            &mut left,
-            &mut right,
-            None,
-            128,
-            BankWidth::Eight,
-            0,
-            &spans,
-            &offsets,
-            128,
+            &mut left, &mut right, None, 128, width, 0, &spans, &offsets, 128,
         )
         .expect("bank block"),
     );
@@ -256,7 +253,7 @@ fn the_render_path_allocates_nothing() {
                     &mut right,
                     None,
                     128,
-                    BankWidth::Eight,
+                    width,
                     (block * 128) as u64,
                     &spans,
                     &offsets,
@@ -278,21 +275,21 @@ fn the_render_path_allocates_nothing() {
 
     let mut mono_bank = TruePeakLimiterFactory
         .bind_homogeneous_bank(PrepareEffectBankRequest {
-            backend: Backend::Simd8,
-            width: BankWidth::Eight,
+            backend,
+            width,
             requests: &requests,
         })
         .expect("mono bank binding")
         .expect("mono bank available");
-    let mut mono_left = vec![0.0_f32; 128 * 8];
-    let mut mono_right = vec![0.0_f32; 128 * 8];
+    let mut mono_left = vec![0.0_f32; 128 * lanes];
+    let mut mono_right = vec![0.0_f32; 128 * lanes];
     mono_bank.process_bank_mono(
         EffectBankProcessBlock::new(
             &mut mono_left,
             &mut mono_right,
             None,
             128,
-            BankWidth::Eight,
+            width,
             0,
             &spans,
             &offsets,
@@ -318,7 +315,7 @@ fn the_render_path_allocates_nothing() {
                     &mut mono_right,
                     None,
                     128,
-                    BankWidth::Eight,
+                    width,
                     (block * 128) as u64,
                     &spans,
                     &offsets,
