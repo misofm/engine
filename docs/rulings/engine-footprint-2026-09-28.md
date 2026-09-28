@@ -31,7 +31,7 @@ aim, in the owner's words, is "minimizing the engine footprint".
 | R5 extended sample rates | Remove; accept only the launch rates. |
 | R6 third-party effect packages and state migration | Remove. |
 | R7 eight-lane wasm measurement build | Remove (reverses the #183 ruling). |
-| R8 whole-plan scalar backend | 32-bit is not a target (below). Removal waits on one more ruling: keep an unbanked per-node plan as a test-only oracle for "banking never moves a bit", or accept a weaker guarantee. |
+| R8 whole-plan scalar backend | Keep as a test-only correctness reference for vector banking (decision 3), a named exception to "modes production never needs are removed"; compile it only for tests (#1059 replaces R8). |
 | R9 wasmtime console benchmark | Retire it, and the nightly descriptive benchmarks if nothing uses them. The native console `--step` rows and the V8 rows on the shipped artifact are the benchmarks. |
 | R10 closed issue specs | Keep only open specs locally, with the verification's corrections (re-point citations; keep `BRIEFS/`). |
 | Draft 02 unwired control endpoints (#140) | Delete, including the protocol delivery files (#1056). Mobile live control uses the core's console lanes instead (#1053, after #1042). #140 closes as descoped, not superseded. |
