@@ -804,18 +804,20 @@ impl NativeEffectFactory for CompressorFactory {
             width: request.width,
             program_key: metadata.program_key(),
         };
-        // The check above proved this build's backend runs `request.width`, so the width picks the
-        // lane type. Matching the `Backend` variants instead would have to name the test-only
-        // `Backend::Scalar` (#1059).
-        Ok(Some(match request.width {
-            BankWidth::Four => Box::new(PreparedCompressorBank::<Simd4> {
+        // The build's own width, as a constant, so only its bank is instantiated: a runtime match on
+        // `request.width` would compile the other width's bank into every artifact. By width, not
+        // by `Backend` variant, because `Backend::Scalar` is test-only (#1059).
+        const NATIVE: Option<BankWidth> = BankWidth::for_backend(Backend::current());
+        Ok(Some(match NATIVE {
+            Some(BankWidth::Four) => Box::new(PreparedCompressorBank::<Simd4> {
                 metadata: bank_metadata,
                 instance: Instance::new(metadata, &left_defaults, &right_defaults),
             }) as Box<dyn PreparedNativeEffectBank>,
-            BankWidth::Eight => Box::new(PreparedCompressorBank::<Simd8> {
+            Some(BankWidth::Eight) => Box::new(PreparedCompressorBank::<Simd8> {
                 metadata: bank_metadata,
                 instance: Instance::new(metadata, &left_defaults, &right_defaults),
             }) as Box<dyn PreparedNativeEffectBank>,
+            None => return Ok(None),
         }))
     }
 }
