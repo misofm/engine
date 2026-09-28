@@ -3,9 +3,9 @@
 // The native row renders the mono console through a `PreparedRenderPlan` in-process. This arm
 // renders the same session through the product's browser path and nothing else:
 //
-// * the shipped `host_web.wasm`, built with the delivery recipe of
-//   `scripts/build-web-audioworklet.sh` (the runner builds it and states its digest beside the
-//   repository's pin);
+// * the shipped `host_web.wasm`, built by `scripts/build-web-audioworklet.sh --module-only` (the
+//   runner builds it and states its digest beside the release pin, the digest of the module the
+//   last release shipped, issue #1061);
 // * booted from the checked-in mono fixture, its one source stretched so the tone never ends;
 // * every block's control traffic submitted as one command batch through `prepared-control.js`
 //   and `miso_engine_web_v1_command_submit` / `miso_engine_web_v1_prepared_command_submit`,
@@ -42,6 +42,8 @@ import { createPreparedControl } from "../hosts/host-web/web/prepared-control.js
 const ROOT = new URL("../", import.meta.url);
 const ABI_LAYOUT = JSON.parse(readFileSync(new URL("sdk/assets/miso-engine-v1-abi-layout.json", ROOT)));
 const FIXTURE_ID = "fixtures/session/v1/console-sixty-four-track-mono.json";
+// The release pin (#1061): `module_matches_pin` says whether the measured module is the one the
+// last release shipped, not whether the tree was re-pinned.
 const PIN_FILE = "hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256";
 
 const OBSERVATIONS = 1000;

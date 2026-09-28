@@ -104,7 +104,7 @@ check_builder() {
   local output="$scratch/$prefix-empty"
   local log="$scratch/$prefix-success.log"
   mkdir "$output"
-  run_builder "$builder" "$output" "$log"
+  run_builder "$builder" "$output" "$log" >/dev/null
   [[ -s $log ]] || {
     echo "$builder did not run its mocked build" >&2
     exit 1
@@ -160,8 +160,8 @@ check_builder build-web-audioworklet.sh web
 
 # Issue #1009: `build-web-audioworklet.sh --module-only` is the one home of the shipped module's
 # cargo line for every reader that is not the delivery build (`run-wasm-gates.sh`'s V8 spill gate).
-# It must run exactly the delivery build's cargo line, write the module alone, not hold it to the
-# pin, refuse what the delivery build refuses, and follow a flag changed in the script.
+# It must run exactly the delivery build's cargo line, write the module alone, refuse what the
+# delivery build refuses, and follow a flag changed in the script.
 run_module_only() {
   local root=$1 output=$2 log=$3
   local mock_log="$mock_bin/cargo.log"
@@ -178,7 +178,7 @@ module_name=miso-engine-v1-audio-worklet.simd128.wasm
 full="$scratch/module-full"
 module="$scratch/module-only"
 mkdir "$full" "$module"
-run_builder build-web-audioworklet.sh "$full" "$scratch/module-full.log"
+run_builder build-web-audioworklet.sh "$full" "$scratch/module-full.log" >/dev/null
 run_module_only "$repo_root" "$module" "$scratch/module-only.log"
 [[ $(find "$module" -mindepth 1 -printf '%f\n') == "$module_name" ]] || {
   echo "--module-only wrote more or less than the module" >&2
@@ -193,18 +193,54 @@ cmp -s "$full/$module_name" "$module/$module_name" || {
   echo "--module-only did not run exactly the delivery build's cargo line, and only it" >&2
   exit 1
 }
+# Issue #1061: no mode but --check-pin holds the module to the committed pin. The delivery build and
+# --module-only write a module that differs from the pin and print its digest; --check-pin, the
+# release fingerprint check, refuses it and writes nothing, and accepts the pinned module.
+pin=$(tr -d '\n' <"$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256")
+unpinned_digest=$(printf '%064d' 0)
 unpinned_full="$scratch/unpinned-full"
 unpinned_module="$scratch/unpinned-module"
-mkdir "$unpinned_full" "$unpinned_module"
-status=0
-MOCK_UNPINNED=1 run_builder build-web-audioworklet.sh "$unpinned_full" "$scratch/unpinned.log" \
-  >/dev/null 2>&1 || status=$?
-[[ $status == 1 && -z $(find "$unpinned_full" -mindepth 1 -print -quit) ]] || {
-  echo "the delivery build accepted a module that does not match its pin" >&2
+unpinned_checked="$scratch/unpinned-checked"
+pinned_checked="$scratch/pinned-checked"
+mkdir "$unpinned_full" "$unpinned_module" "$unpinned_checked" "$pinned_checked"
+printed=$(MOCK_UNPINNED=1 PATH="$mock_bin:$PATH" \
+  bash "$repo_root/scripts/build-web-audioworklet.sh" "$unpinned_full") || {
+  echo "the delivery build refused a module that does not match the pin" >&2
   exit 1
 }
-MOCK_UNPINNED=1 run_module_only "$repo_root" "$unpinned_module" "$scratch/unpinned.log" || {
+[[ $printed == "AudioWorklet module $unpinned_digest" ]] &&
+  cmp -s "$full/$module_name" "$unpinned_full/$module_name" || {
+  echo "the delivery build did not write an unpinned module and print its digest: $printed" >&2
+  exit 1
+}
+printed=$(MOCK_UNPINNED=1 PATH="$mock_bin:$PATH" \
+  bash "$repo_root/scripts/build-web-audioworklet.sh" --module-only "$unpinned_module") || {
   echo "--module-only refused a module that does not match the pin" >&2
+  exit 1
+}
+[[ $printed == "AudioWorklet module $unpinned_digest" ]] || {
+  echo "--module-only did not print the module's digest: $printed" >&2
+  exit 1
+}
+status=0
+MOCK_UNPINNED=1 PATH="$mock_bin:$PATH" \
+  bash "$repo_root/scripts/build-web-audioworklet.sh" --check-pin "$unpinned_checked" \
+  >/dev/null 2>"$scratch/unpinned-checked.err" || status=$?
+[[ $status == 1 && -z $(find "$unpinned_checked" -mindepth 1 -print -quit) ]] &&
+  grep -q "AudioWorklet artifact pin mismatch: expected=$pin observed=$unpinned_digest" \
+    "$scratch/unpinned-checked.err" || {
+  echo "--check-pin accepted a module that does not match the pin, or wrote output" >&2
+  exit 1
+}
+printed=$(PATH="$mock_bin:$PATH" \
+  bash "$repo_root/scripts/build-web-audioworklet.sh" --check-pin "$pinned_checked") || {
+  echo "--check-pin refused the pinned module" >&2
+  exit 1
+}
+[[ $printed == "AudioWorklet module $pin" ]] &&
+  cmp -s "$full/$module_name" "$pinned_checked/$module_name" &&
+  cmp -s <(printf 'parameter metadata fixture\n') "$pinned_checked/parameter-metadata.json" || {
+  echo "--check-pin did not write the whole delivery closure for the pinned module" >&2
   exit 1
 }
 refused="$scratch/module-refused"
@@ -217,12 +253,11 @@ run_module_only "$repo_root" "$refused" "$scratch/module-refused.log" 2>/dev/nul
   exit 1
 }
 # A flag changed in the script reaches the module. The copy keeps one root, so the path remap in
-# RUSTFLAGS is the same for both builds and the flag is the only difference.
+# RUSTFLAGS is the same for both builds and the flag is the only difference. The copy carries no
+# pin file: --module-only never reads it.
 copy="$scratch/flag-copy"
-mkdir -p "$copy/scripts" "$copy/hosts/host-web/web" "$scratch/flag-before" "$scratch/flag-after"
+mkdir -p "$copy/scripts" "$scratch/flag-before" "$scratch/flag-after"
 cp "$repo_root/scripts/build-web-audioworklet.sh" "$copy/scripts/"
-cp "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256" \
-  "$copy/hosts/host-web/web/"
 run_module_only "$copy" "$scratch/flag-before" "$scratch/flag-before.log"
 sed -i 's/-C target-feature=+simd128 /-C target-feature=+simd128 -C opt-level=s /' \
   "$copy/scripts/build-web-audioworklet.sh"
@@ -247,4 +282,4 @@ if node "$repo_root/sdk/codegen/stage-package.mjs" first second >/dev/null 2>&1;
   echo "package staging accepted a retired second codec artifact directory" >&2
   exit 1
 fi
-echo "SDK artifact builder output-directory, single-directory and --module-only contract passed"
+echo "SDK artifact builder output-directory, single-directory, --module-only and --check-pin contract passed"

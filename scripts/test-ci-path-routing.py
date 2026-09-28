@@ -581,12 +581,13 @@ def main() -> int:
     root = workspace()
     try:
         mutate(root / ".github/workflows/qualification.yml",
-               "    needs: [route, docs-gates, artifact, sdk, artifact-gates, browser, lint, "
-               "test-debug-a, test-debug-b, test-release, audit-native, wasm-guests, "
-               "cross-target, aarch64-debug, aarch64-release, release-shape]",
-               "    needs: [route, docs-gates, artifact, sdk, artifact-gates, browser, lint, "
-               "test-debug-a, test-debug-b, test-release, audit-native, wasm-guests, "
-               "cross-target, aarch64-debug, aarch64-release]")
+               "    needs: [route, docs-gates, artifact, artifact-identity, artifact-record, sdk, "
+               "artifact-gates, browser, lint, test-debug-a, test-debug-b, test-release, "
+               "audit-native, wasm-guests, cross-target, aarch64-debug, aarch64-release, "
+               "release-shape]",
+               "    needs: [route, docs-gates, artifact, artifact-identity, artifact-record, sdk, "
+               "artifact-gates, browser, lint, test-debug-a, test-debug-b, test-release, "
+               "audit-native, wasm-guests, cross-target, aarch64-debug, aarch64-release]")
         checker_fails(root)  # a job dropped from verdict's needs: escapes the aggregate entirely
     finally:
         shutil.rmtree(root)
@@ -671,7 +672,7 @@ def main() -> int:
     for line in checker.TEST_SUPPORT_CI_LINES:
         workflow_mutation_fails("qualification.yml", "          " + line, "")
     # Issue #1009: wasm-guests leaves the V8 spill leg to artifact-gates, so artifact-gates must run
-    # it on the downloaded artifact, after the pin check.
+    # it on the downloaded artifact, after the digest check.
     workflow_mutation_fails(
         "qualification.yml",
         "          python3 -B scripts/check-web-audioworklet-v8-spill.py "
@@ -682,10 +683,156 @@ def main() -> int:
         "qualification.yml",
         "          shared-key: artifact-gates\n",
         "          shared-key: artifact-gates\n"
-        "      - name: V8 spill gate before the pin check\n"
+        "      - name: V8 spill gate before the digest check\n"
         "        run: python3 -B scripts/check-web-audioworklet-v8-spill.py "
         "target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm\n",
     )
+
+    # Issue #1061: every reader of the shipped module checks its download against the digest the
+    # artifact job published, and the identity job reports ARTIFACT CHANGED or UNCHANGED, proves
+    # the build reproducible and holds a release change to its pin, on the artifact job's routes.
+    digest_step = checker.ARTIFACT_DIGEST_STEP
+    workflow_mutation_fails("qualification.yml", checker.ARTIFACT_DIGEST_OUTPUT, "")
+    for reader in checker.ARTIFACT_READERS:
+        root = workspace()
+        try:
+            workflow = root / ".github/workflows/qualification.yml"
+            text = workflow.read_text(encoding="utf-8")
+            start = text.index(f"\n  {reader}:\n")
+            step = text.index(digest_step, start)
+            end = text.index("      - ", step + len(digest_step))
+            workflow.write_text(text[:step] + text[end:], encoding="utf-8")
+            checker_fails(root)  # a reader that stops verifying its download
+        finally:
+            shutil.rmtree(root)
+    root = workspace()
+    try:
+        # The pre-#1061 step: the download held to the committed pin instead of the built digest.
+        workflow = root / ".github/workflows/qualification.yml"
+        text = workflow.read_text(encoding="utf-8")
+        start = text.index("\n  browser:\n")
+        step = text.index(digest_step, start)
+        workflow.write_text(text[:step] + text[step:].replace(
+            digest_step,
+            "      - name: Verify the downloaded artifact against its source pin\n"
+            "        env:\n"
+            "          BUILT: hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256\n",
+            1), encoding="utf-8")
+        checker_fails(root)
+    finally:
+        shutil.rmtree(root)
+    for step in checker.IDENTITY_STEPS:
+        workflow_mutation_fails("qualification.yml", step, "")  # a pinned step deleted
+    # Issue #1061 attempt 3: the record on main and the fetch-and-compare on every change. Each
+    # mutant would leave the comparison without a record, skipped, or masked, with CI green.
+    record_step = checker.ARTIFACT_RECORD_STEP
+    workflow_mutation_fails("qualification.yml", record_step, "")  # main records nothing
+    workflow_mutation_fails(
+        "qualification.yml", checker.RECORD_HEAD,
+        checker.RECORD_HEAD.replace("github.event_name == 'push' && ", ""),
+    )  # the record job reachable by pull requests
+    workflow_mutation_fails(
+        "qualification.yml", checker.RECORD_HEAD,
+        checker.RECORD_HEAD.replace(" && github.ref == 'refs/heads/main'", ""),
+    )  # the record job run on any push
+    workflow_mutation_fails(
+        "qualification.yml", checker.RECORD_PERMISSIONS, "    permissions:\n      contents: read\n",
+    )  # the post is refused on main
+    workflow_mutation_fails(
+        "qualification.yml", checker.RECORD_PERMISSIONS + "    steps:\n",
+        checker.RECORD_PERMISSIONS + "    steps:\n      - uses: actions/checkout@"
+        "11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2\n",
+    )  # the write-token job checks out, and so runs, repository code
+    # #1061 attempt 3 verdict, finding 1: a write token on any job a pull request reaches lets a
+    # same-repository change forge its base's record. Each grant is red.
+    for anchor, grant in (
+        ("    timeout-minutes: 15\n    outputs:\n      sha256:",
+         "    timeout-minutes: 15\n    permissions:\n      contents: read\n      statuses: write\n"
+         "    outputs:\n      sha256:"),  # artifact, which runs on every pull request
+        (checker.IDENTITY_PERMISSIONS,
+         "    permissions:\n      contents: read\n      statuses: write\n"),  # artifact-identity
+        ("    timeout-minutes: 20\n    permissions:\n      contents: read\n      statuses: read\n",
+         "    timeout-minutes: 20\n    permissions: write-all\n"),
+    ):
+        workflow_mutation_fails("qualification.yml", anchor, grant)
+    for line in checker.ARTIFACT_BUILD_LINES:
+        workflow_mutation_fails("qualification.yml", line, "")
+    workflow_mutation_fails("qualification.yml", "      rustc: ${{ steps.build.outputs.rustc }}\n", "")
+    workflow_mutation_fails(
+        "qualification.yml", checker.IDENTITY_PERMISSIONS,
+        "    permissions:\n      contents: read\n",
+    )  # the lookup is refused on every change
+    identity_head = ("    runs-on: ubuntu-24.04\n    timeout-minutes: 20\n"
+                     + checker.IDENTITY_PERMISSIONS)
+    for label, extra in (
+        ("continue-on-error", "    continue-on-error: true\n"),
+        ("defaults", "    defaults:\n      run:\n        shell: bash {0}\n"),
+        ("env", "    env:\n      GH_TOKEN: ''\n"),
+    ):
+        workflow_mutation_fails("qualification.yml", identity_head, identity_head + extra)
+    workflow_mutation_fails(
+        "qualification.yml", checker.RECORD_PERMISSIONS,
+        checker.RECORD_PERMISSIONS + "    env:\n      PATH: /tmp/forged-gh:/usr/bin:/bin\n",
+    )  # a job PATH that puts another gh first could forge main's record
+    report_step = checker.IDENTITY_REPORT_STEP
+    workflow_mutation_fails(
+        "qualification.yml", report_step,
+        report_step.replace("        env:\n", "        if: github.event_name == 'push'\n        env:\n", 1),
+    )  # the comparison skipped on pull requests
+    workflow_mutation_fails("qualification.yml", 'report --event "$EVENT"', "report --event none")
+    workflow_mutation_fails("qualification.yml", "          BEFORE: ${{ github.event.before }}\n",
+                            '          BEFORE: ""\n')
+    workflow_mutation_fails(
+        "qualification.yml", "          GH_TOKEN: ${{ github.token }}\n          EVENT:",
+        "          EVENT:",
+    )  # gh unauthenticated
+    workflow_mutation_fails(
+        "qualification.yml", 'python3 -B scripts/web-audioworklet-identity.py --self-test\n', "",
+    )
+    workflow_mutation_fails(
+        "qualification.yml", report_step,
+        "      - name: Remove the twin module\n        run: rm -rf \"$RUNNER_TEMP/twin-module\"\n"
+        + report_step,
+    )  # a step slipped in before the report
+    workflow_mutation_fails(
+        "qualification.yml",
+        "        with:\n          fetch-depth: 0\n"
+        "      - name: Install pinned Rust toolchain and Wasm standard library\n",
+        "      - name: Install pinned Rust toolchain and Wasm standard library\n",
+    )  # the identity job's full history dropped: no base is reachable
+    workflow_mutation_fails(
+        "qualification.yml", 'git worktree add --detach "$RUNNER_TEMP/twin" HEAD\n',
+        'ln -s "$GITHUB_WORKSPACE" "$RUNNER_TEMP/twin"\n',
+    )  # a twin symlinked to the workspace rebuilds from the artifact job's own path
+    workflow_mutation_fails(
+        "qualification.yml",
+        'CARGO_HOME="$RUNNER_TEMP/twin-cargo-home" bash "$RUNNER_TEMP/twin/',
+        'bash "$RUNNER_TEMP/twin/',
+    )  # a twin sharing the artifact job's CARGO_HOME proves nothing about it
+    workflow_mutation_fails(
+        "qualification.yml",
+        "    name: shipped AudioWorklet artifact identity (changed or unchanged, reproducible, "
+        "release pin)\n    needs: [route, artifact]\n"
+        "    if: needs.route.outputs.route == 'sdk' || needs.route.outputs.route == 'full'\n",
+        "    name: shipped AudioWorklet artifact identity (changed or unchanged, reproducible, "
+        "release pin)\n    needs: [route, artifact]\n"
+        "    if: needs.route.outputs.route == 'full'\n",
+    )  # an sdk-route PR would build the module and say nothing about it
+    workflow_mutation_fails(
+        "qualification.yml",
+        "    name: shipped AudioWorklet artifact identity (changed or unchanged, reproducible, "
+        "release pin)\n    needs: [route, artifact]\n",
+        "    name: shipped AudioWorklet artifact identity (changed or unchanged, reproducible, "
+        "release pin)\n    needs: [route]\n",
+    )
+    workflow_mutation_fails(
+        "qualification.yml",
+        '          check artifact-identity "$ARTIFACT_IDENTITY_RESULT" "$artifact_expected"\n', "",
+    )  # the identity job dropped from the expectation table
+    workflow_mutation_fails(
+        "qualification.yml",
+        '          check artifact-record "$ARTIFACT_RECORD_RESULT" "$record_expected"\n', "",
+    )  # the record job dropped from the expectation table
 
     # Issue #1017: the AArch64 compile rows and test jobs. Deleting a row, either half of the
     # row, a job's arm64 runner, its script, its full-route gating or its success expectation, or a

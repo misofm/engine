@@ -18,7 +18,7 @@
 # After the legs, `check_v8_spill` (issues #1000, #1009) holds the shipped AudioWorklet module's EQ
 # cascade loops to V8's register allocation under the pinned Node; it needs that Node on PATH, and
 # only it does. `--without-v8-spill` leaves it out. CI passes that flag in `wasm-guests`, because
-# `artifact-gates` runs the same gate on the downloaded, pin-verified artifact: the bytes that ship,
+# `artifact-gates` runs the same gate on the downloaded, digest-verified artifact: the bytes that ship,
 # with no second fat-LTO build.
 #
 # Every leg compares against pins generated from the scalar `Lane` oracle. A mismatch is never
@@ -191,9 +191,9 @@ check_f64_lane_lowering() {
 # in the shipped AudioWorklet module. `check-web-audioworklet-v8-spill.py` has the rule and what it
 # does and does not prove; it times nothing. The module comes from `build-web-audioworklet.sh
 # --module-only`, so the cargo line has one home and these are the bytes that ship at this commit.
-# That mode does not hold the module to the digest pin: a batch repins once, at its boundary, and
-# the loops are a property of the source whether or not the pin has caught up. The pins are checked
-# first, so a Node other than the pinned one fails before the build.
+# It does not hold the module to the release pin (#1061): the loops are a property of the source,
+# not of a release. The toolchain pins are checked first, so a Node other than the pinned one fails
+# before the build.
 check_v8_spill() {
     local module_dir="target/ci/wasm-gates-web" started finished
     python3 -B scripts/check-web-audioworklet-v8-spill.py --check-toolchain

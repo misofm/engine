@@ -340,25 +340,206 @@ V8_SPILL_ARTIFACT_LINE = (
     "python3 -B scripts/check-web-audioworklet-v8-spill.py "
     "target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm"
 )
-ARTIFACT_PIN_STEP = "      - name: Verify the downloaded artifact against its source pin\n"
+# Issue #1061: every job that reads the shipped module checks its download against the digest of
+# the bytes the `artifact` job built -- not against the committed pin, which is the release
+# fingerprint -- so every artifact gate in a run reads exactly those bytes.
+ARTIFACT_DIGEST_STEP = (
+    "      - name: Verify the downloaded artifact against the artifact job's digest\n"
+    "        env:\n"
+    "          BUILT: ${{ needs.artifact.outputs.sha256 }}\n"
+)
+ARTIFACT_DIGEST_OUTPUT = (
+    "    outputs:\n"
+    "      sha256: ${{ steps.build.outputs.sha256 }}\n"
+    "      rustc: ${{ steps.build.outputs.rustc }}\n"
+)
+ARTIFACT_READERS = ("sdk", "artifact-gates", "browser")
+# Issue #1061, attempt 3: a change's report compares its module with the digest its base's own CI
+# run recorded, never with a base rebuilt inside the change's workflow. Attempts 1 and 2 rebuilt the
+# base there, and a toolchain bump, one workflow-level cargo variable or one `GITHUB_PATH` line
+# steered that rebuild and read UNCHANGED. What is pinned is what the comparison rests on:
+# - on `main`, `artifact-record` posts the record: a job run only on a push to `main`, checking out
+#   nothing, and the only job in the workflow holding a write permission, so no job a pull request
+#   reaches can forge its base's record (#1061 attempt 3 verdict, finding 1);
+# - the build step writes the digest and the rustc release the record and the report carry;
+# - `artifact-identity` fetches and compares in one step with no `if:`, keeps its twin build, and
+#   has the one read permission;
+# - neither job carries a job-level `continue-on-error` (a failed record or comparison would still
+#   pass), `defaults` (`shell: bash {0}` drops `-e` and masks a failed self-test) or `env` (a job
+#   `PATH` could put another `gh` first and forge the record or the lookup).
+# The build environment itself is deliberately not pinned: the record is what the base's own run
+# built in its own environment, so a change to that environment reads CHANGED, as it should.
+ARTIFACT_BUILD_LINES = (
+    '          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"\n',
+    '          echo "rustc=$(rustc -vV | sed -n \'s/^release: //p\')" >> "$GITHUB_OUTPUT"\n',
+)
+RECORD_JOB = "artifact-record"
+RECORD_HEAD = (
+    "    needs: [route, artifact]\n"
+    "    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && "
+    "(needs.route.outputs.route == 'sdk' || needs.route.outputs.route == 'full')\n"
+)
+RECORD_PERMISSIONS = "    permissions:\n      statuses: write\n"
+ARTIFACT_RECORD_STEP = """      - name: Record this commit's module for later changes to compare against
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA256: ${{ needs.artifact.outputs.sha256 }}
+          RUSTC: ${{ needs.artifact.outputs.rustc }}
+        run: |
+          [[ "$SHA256" =~ ^[0-9a-f]{64}$ && "$RUSTC" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+(-[A-Za-z0-9.]+)?$ ]] || { echo "malformed record: '$SHA256' rustc '$RUSTC'" >&2; exit 1; }
+          gh api -X POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" -f state=success -f context=audioworklet-sha256 -f "description=$SHA256 rustc $RUSTC" -f "target_url=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+"""
+WRITE_PERMISSION = re.compile(r"^\s+[a-z-]+: write\s*$|^\s*permissions: write-all\s*$",
+                              re.MULTILINE)
+IDENTITY_PERMISSIONS = "    permissions:\n      contents: read\n      statuses: read\n"
+IDENTITY_CHECKOUT = re.compile(
+    r"      - uses: actions/checkout@[0-9a-f]{40} # v\S+\n        with:\n          fetch-depth: 0\n\Z")
+IDENTITY_INSTALL = "      - name: Install pinned Rust toolchain and Wasm standard library\n"
+IDENTITY_TWIN_STEP = """      - name: Rebuild the module from another checkout path and CARGO_HOME
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/twin" HEAD
+          mkdir "$RUNNER_TEMP/twin-module"
+          CARGO_HOME="$RUNNER_TEMP/twin-cargo-home" bash "$RUNNER_TEMP/twin/scripts/build-web-audioworklet.sh" --module-only "$RUNNER_TEMP/twin-module"
+"""
+IDENTITY_REPORT_STEP = """      - name: Report ARTIFACT CHANGED or UNCHANGED against the base's recorded digest, and hold a release change to its pin
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          BUILT: ${{ needs.artifact.outputs.sha256 }}
+          RUSTC: ${{ needs.artifact.outputs.rustc }}
+        run: |
+          set -o pipefail
+          python3 -B scripts/web-audioworklet-identity.py --self-test
+          python3 -B scripts/web-audioworklet-identity.py report --event "$EVENT" --before "$BEFORE" --repository "$GITHUB_REPOSITORY" --built "$BUILT" --rustc "$RUSTC" --twin "$RUNNER_TEMP/twin-module/miso-engine-v1-audio-worklet.simd128.wasm" | tee -a "$GITHUB_STEP_SUMMARY"
+"""
+IDENTITY_STEPS = (IDENTITY_TWIN_STEP, IDENTITY_REPORT_STEP)
+UNMASKABLE = re.compile(r"^    (continue-on-error|defaults|env):", re.MULTILINE)
+
+
+def job_steps(job_text: str) -> list[str]:
+    """A job's steps, each from its `      - ` line to the next, with comment-only lines and blank
+    lines removed (comments document a step; they never change what it runs)."""
+    body = job_text.split("    steps:\n", 1)
+    require(len(body) == 2, "qualification.yml: job has no steps")
+    lines = [line for line in body[1].splitlines(keepends=True)
+             if line.strip() and not line.lstrip().startswith("#")]
+    steps: list[str] = []
+    for line in lines:
+        if line.startswith("      - "):
+            steps.append(line)
+        else:
+            require(bool(steps), "qualification.yml: text before the first step")
+            steps[-1] += line
+    return steps
+
+def check_qualification_artifact_digest(text: str) -> None:
+    """Issue #1061: the `artifact` job publishes its module's digest and rustc release, posts
+    main's record on pushes, and every job that reads the module verifies its download against
+    that digest before anything reads it."""
+    artifact = job(text, "artifact")
+    require(ARTIFACT_DIGEST_OUTPUT in artifact,
+            "qualification.yml: the artifact job must publish its module's sha256 and rustc "
+            "release as outputs")
+    require(UNMASKABLE.search(artifact) is None,
+            "qualification.yml: the artifact job must carry no job-level continue-on-error, "
+            "defaults or env")
+    steps = job_steps(artifact)
+    build = [index for index, step in enumerate(steps)
+             if step.startswith("      - name: Build the exact shipped artifact\n")]
+    require(len(build) == 1, "qualification.yml: the artifact job must have one build step")
+    for line in ARTIFACT_BUILD_LINES:
+        require(line in steps[build[0]],
+                f"qualification.yml: the artifact build step is missing {line.strip()!r}")
+    for name in ARTIFACT_READERS:
+        reader = job(text, name)
+        require(re.search(r"^    needs: \[route, artifact\]$", reader, re.MULTILINE) is not None,
+                f"qualification.yml: {name} must need exactly [route, artifact]")
+        require(ARTIFACT_DIGEST_STEP in reader,
+                f"qualification.yml: {name} must verify its download against the artifact job's "
+                "digest")
+        download = reader.index("path: target/ci/qualification-artifacts")
+        verify = reader.index(ARTIFACT_DIGEST_STEP)
+        require(download < verify, f"qualification.yml: {name} verifies before it downloads")
+        later = [reader.index(line) for line in ("bash scripts/", "python3 -B scripts/",
+                                                 "npm run qualify") if line in reader]
+        require(all(verify < index for index in later),
+                f"qualification.yml: {name} reads the artifact before verifying its digest")
+
+
+def check_qualification_artifact_record(text: str, names: list[str]) -> None:
+    """Issue #1061: main's record is posted by one job, on a push to `main` only, which checks out
+    nothing and runs no repository code; it holds the workflow's only write permission, so no job a
+    pull request reaches holds a write token (the top level is already exactly contents: read)."""
+    record = job(text, RECORD_JOB)
+    require(RECORD_HEAD in record,
+            f"qualification.yml: {RECORD_JOB} must need [route, artifact] and run only on a push to "
+            "main that built the module")
+    require(RECORD_PERMISSIONS in record,
+            f"qualification.yml: {RECORD_JOB}'s permissions must be exactly statuses: write")
+    require(UNMASKABLE.search(record) is None,
+            f"qualification.yml: {RECORD_JOB} must carry no job-level continue-on-error, defaults "
+            "or env")
+    require(job_steps(record) == [ARTIFACT_RECORD_STEP],
+            f"qualification.yml: {RECORD_JOB} must be exactly its one pinned step, checking out "
+            "nothing (scripts/check-ci-path-routing.py ARTIFACT_RECORD_STEP)")
+    for name in names:
+        if name == RECORD_JOB:
+            continue
+        require(WRITE_PERMISSION.search(job(text, name)) is None,
+                f"qualification.yml: job {name!r} holds a write permission; only {RECORD_JOB}, "
+                "which no pull request reaches, may")
+
+
+def check_qualification_artifact_identity(text: str) -> None:
+    """Issue #1061 (owner decision 5): every PR that builds the module reports whether it changed
+    against its base's recorded digest, proves it reproducible, and holds a release change to the
+    pin. The identity job must run exactly where `artifact` runs, after it, with full history, the
+    one read permission, nothing that could skip or mask a step, and its twin and report steps
+    exactly as pinned."""
+    identity = job(text, "artifact-identity")
+    require(job_if(identity) == job_if(job(text, "artifact")),
+            "qualification.yml: artifact-identity must run on exactly the artifact job's routes")
+    require(re.search(r"^    needs: \[route, artifact\]$", identity, re.MULTILINE) is not None,
+            "qualification.yml: artifact-identity must need exactly [route, artifact]")
+    require(IDENTITY_PERMISSIONS in identity,
+            "qualification.yml: artifact-identity's permissions must be exactly contents: read and "
+            "statuses: read")
+    require(UNMASKABLE.search(identity) is None,
+            "qualification.yml: artifact-identity must carry no job-level continue-on-error, "
+            "defaults or env")
+    steps = job_steps(identity)
+    require(len(steps) == 4,
+            "qualification.yml: artifact-identity must be exactly checkout, toolchain, twin and "
+            "report steps")
+    require(IDENTITY_CHECKOUT.fullmatch(steps[0]) is not None,
+            "qualification.yml: artifact-identity must check out full history (fetch-depth: 0), "
+            "or no run finds its base")
+    require(steps[1].startswith(IDENTITY_INSTALL),
+            "qualification.yml: artifact-identity's second step must install the toolchain")
+    for step, pinned in zip(steps[2:], IDENTITY_STEPS):
+        require(step == pinned,
+                "qualification.yml: artifact-identity step differs from its pin: "
+                f"{pinned.splitlines()[0].strip()!r} (scripts/check-ci-path-routing.py "
+                "IDENTITY_STEPS)")
 
 
 def check_qualification_v8_spill(text: str) -> None:
     """Issue #1009: `wasm-guests` may leave `run-wasm-gates.sh`'s V8 spill leg out only because
-    `artifact-gates` runs the same gate on the downloaded artifact, after verifying it against its
-    pin. Without this rule, deleting that step would take the gate out of CI with every job
-    green."""
+    `artifact-gates` runs the same gate on the downloaded artifact, after verifying it against the
+    artifact job's digest. Without this rule, deleting that step would take the gate out of CI with
+    every job green."""
     wasm = job(text, "wasm-guests")
     require("bash scripts/run-wasm-gates.sh" in wasm,
             "qualification.yml: wasm-guests must run scripts/run-wasm-gates.sh")
     if "--without-v8-spill" not in run_wasm_gates_flags(wasm):
         return
     gates = job(text, "artifact-gates")
-    require(V8_SPILL_ARTIFACT_LINE in gates and ARTIFACT_PIN_STEP in gates,
+    require(V8_SPILL_ARTIFACT_LINE in gates and ARTIFACT_DIGEST_STEP in gates,
             "qualification.yml: wasm-guests runs run-wasm-gates.sh --without-v8-spill, so "
-            "artifact-gates must run the V8 spill gate on the pin-verified artifact")
-    require(gates.index(ARTIFACT_PIN_STEP) < gates.index(V8_SPILL_ARTIFACT_LINE),
-            "qualification.yml: artifact-gates must verify the artifact's pin before the V8 "
+            "artifact-gates must run the V8 spill gate on the digest-verified artifact")
+    require(gates.index(ARTIFACT_DIGEST_STEP) < gates.index(V8_SPILL_ARTIFACT_LINE),
+            "qualification.yml: artifact-gates must verify the artifact's digest before the V8 "
             "spill gate reads it")
 
 
@@ -558,6 +739,9 @@ def check_qualification_workflow(root: pathlib.Path) -> None:
     check_qualification_release_shape_guard(text)
     check_qualification_route_job(text)
     check_qualification_closures(text)
+    check_qualification_artifact_digest(text)
+    check_qualification_artifact_record(text, names)
+    check_qualification_artifact_identity(text)
     check_qualification_v8_spill(text)
     check_qualification_aarch64(text)
     check_qualification_native_g5(text)

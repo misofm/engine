@@ -7,9 +7,9 @@ cascade's innermost loops in that machine code and fails when one carries a valu
 to the next through a stack slot. It times nothing.
 
 It reads the bytes that ship, from one build. CI runs it in `artifact-gates` on the downloaded
-artifact after that job has verified it against its pin. Locally `scripts/run-wasm-gates.sh` runs
-it on `scripts/build-web-audioworklet.sh --module-only`'s output: the delivery build's own cargo
-line, without the pin check, since a batch repins only at its boundary.
+artifact after that job has verified it against the `artifact` job's digest. Locally
+`scripts/run-wasm-gates.sh` runs it on `scripts/build-web-audioworklet.sh --module-only`'s output:
+the delivery build's own cargo line. Neither holds the module to the release pin (#1061).
 
 Why it exists
 -------------
