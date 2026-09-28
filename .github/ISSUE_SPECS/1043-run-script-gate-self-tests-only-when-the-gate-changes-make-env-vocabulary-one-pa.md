@@ -305,3 +305,127 @@ No Rust changed, so `cargo check` was not needed.
 - **Conflict with #1039.** `nightly.yml`'s `failure-notice` row label and the
   `moved-mutation-suites` job are edited here, and #1039 also edits `nightly.yml`. The conflict,
   if any, is mechanical.
+
+## Sol verdict, attempt 1
+
+**PASS.** Sol, 2026-09-28. Verified on a scratch merge of this branch (`b9b6fbbe`) into
+`codex/batch-slim-3` at `1c3b0531` (main plus #1029, #1030, #1031, #1033, #1039, #1059, #1061).
+No self-test lost a trigger, the env gate is equivalent on every tree CI can see, no check is
+vacuous, and the CI wiring is exact. CI was not run; gate 5 remains a projection.
+
+### Merge fixes root must apply
+
+There are three textual conflicts, and one of them has a semantic trap.
+
+1. **`scripts/test-env-vocabulary.sh`.** Take this branch's side (`$count`) and drop the batch's
+   hand pin `65`. After the merge, `git grep` finds no pinned count anywhere. The gate reports
+   65 names on the merged tree.
+2. **`qualification.yml`, lint.**
+   - Drop `Wasm console benchmark validator mutation tests`: #1039 deleted the script.
+   - Keep this branch's lone `Benchmark preconditions` step, without `test-console-benchmark.sh`.
+3. **`nightly.yml`, `failure-notice`.** Keep the batch's body: no `bounded descriptive
+   benchmarks` row, no `BENCHMARK_RESULT`, and the row `math exhaustive sweeps`. Change only the
+   `stem-store mutation ledger` label to `... and script-gate self-tests`.
+   - Do not take this branch's side here. It passes `"$BENCHMARK_RESULT"` under `set -u`, and #1039
+     removed that variable, so the failure notice would itself crash on the first red night.
+
+The spec's line saying `test-wasm-console-benchmark.sh` "still runs in lint" goes stale with the
+merge. The line is cosmetic.
+
+### Findings, by severity
+
+1. **Medium: the merge hazard in item 3 above.** It is a merge instruction, not a defect of this
+   branch.
+2. **Low: the conformance recursion's standing claim is gone, as the spec ordered.**
+   - **The claim.** The suite's own assertions go red on two fail-open gates:
+     - `gate_sort_lines` swallowing `sort`'s status in `lib/gate.sh`, which the `:118` workspace-sort
+       case catches;
+     - the module probe's `|| exit $?` turned into `|| true`, which the `:121-122` case catches.
+   - **Planted today.** Both mutants are still killed with the exact diagnostics the recursion
+     asserted.
+   - **Why little is lost.** `fail()` is two-sided: it needs a nonzero exit and the named
+     diagnostic. A swallowed status therefore reds the suite either way. Only an edit that
+     deletes or weakens those lines of the suite itself is no longer caught.
+   - **Optional follow-up.** A same-assertion counter-mutant, as the env and research suites use,
+     would restore the claim in under a second.
+3. **Low: the degenerate-tree list in the evidence misses one divergence.** In the non-git
+   fallback, `find` read a nested `.git/` directory below the top level, and `git grep --no-index`
+   skips it. Planted, the old gate went red on `vendor/x/.git/COMMIT_EDITMSG` and the new one
+   passed. CI always runs in a work tree, so no CI verdict changes. Add it to the list.
+4. **Low: the derived count is not vacuous, but it is weak, as the pin was.**
+   - These mutants go red:
+     - a zero-name fixture (`documented=()`);
+     - a gate that prints a pinned `65`;
+     - dropping the unused rule, the untracked files, the stderr rule or the `target/` exclusion.
+   - A gate that counts rows instead of unique names survives. The old pin did not catch that
+     either: the live vocabulary has 65 rows and 65 unique names.
+5. **Info.**
+   - A vocabulary-only change routes `evidence`, so the env gate in lint does not run. The route
+     was the same at `a509b681`, so this predates the issue. It is a candidate follow-up.
+   - #1059's `check-scalar-oracle-absent.py --self-test` is a new per-PR lint self-test that this
+     issue did not cover. It is a candidate for the same treatment.
+   - Gate 5's 90 s median and 100 s per-run bounds must be confirmed from the batch's first CI run.
+
+### What was checked, and how
+
+- **Keys are complete.**
+  - `strace -f` of each suite on the merge: every repo file it opened is in its key.
+  - Each suite passes in a tree holding only its key's files: env, conformance, console, SDK
+    (`sdk/` plus the gate) and research.
+  - No key file sources anything outside the key. The conformance and research gates source only
+    `lib/gate.sh`. The runner sources `check-bench-preconditions.sh`. The jq files include only
+    in-key libraries.
+- **Routing, planted.** 28 commits on the merge, each routed with `--base/--head`.
+  - Every suite is selected by:
+    - its gate and its self-test;
+    - `lib/gate.sh` (for both conformance and research);
+    - each jq library and validator, and the runner;
+    - an edited SDK file and a new SDK file;
+    - deleting `lib/gate.sh`, and renaming the record library away.
+  - These select `[]`, with the route unchanged:
+    - product code, an unrelated gate and an unrelated `lib/` file (full route);
+    - the env vocabulary doc, a research note and a docs file (evidence route);
+    - `nightly.yml` and the router (full route).
+  - `qualification.yml` selects all five. So do `workflow_dispatch`, a zero-SHA push, an untrusted
+    path and an empty diff.
+- **The verdict table.** The verdict's bash was extracted and run for each planted route.
+  - It passes only on `success` when the list is non-empty, and fails on `skipped`, `failure` and
+    `cancelled`.
+  - It passes only on `skipped` when the list is `[]`.
+  - The job-level `if:` agrees with the list, and `paths:` filters are still refused.
+- **Independent mutants.** 25 mutants, all killed by the checker or the routing tests:
+  - 9 router key and selection mutants, including dropping `lib/gate.sh`, `sdk/`, the runner, the
+    aggregate validator or the fail-safe;
+  - 13 workflow mutants: a step condition typo, a verdict line dropped or inverted,
+    `continue-on-error`, a gate dropped or conditioned, `tail -n 3`, a `paths-ignore`, a wrong
+    command, and `needs`;
+  - 3 nightly mutants.
+- **Env equivalence.** The old gate (identical at `a509b681` and `1c3b0531`) and the new gate
+  gave byte-identical stdout, stderr and exit codes in 11 comparisons, in git and plain copies:
+  - the merged tree;
+  - an undocumented `MISO-ENGINE-…` name in a tracked `tools/` file, and in an untracked script;
+  - a documented row nothing uses;
+  - a stray `MISO-FOO` in a crate;
+  - a stray name under the top-level `target/`.
+
+  The scanned-name multisets are identical in both modes: 2,739 occurrences. Wall time at load 63
+  was 10.9 s for the old gate and 0.2 s for the new one.
+- **Real gates on seeded trees.** Each exits 1:
+  - `conformance` in engine's `[dependencies]`;
+  - `dsp-reference` in session's `[dependencies]`;
+  - `use dsp_reference::` in engine;
+  - `getUint32(24, true)` in `sdk/src/core/abi.ts`.
+- **Gates on the merge.** All pass:
+  - `check-ci-path-routing.py` and `test-ci-path-routing.py`;
+  - actionlint 1.7.7 on both workflows (no shellcheck on this host);
+  - the script-reachability lint and its self-test;
+  - `check-env-vocabulary.sh` (65 names) and `test-env-vocabulary.sh`;
+  - all 58 policy commands of route, docs-gates, lint and `gate-self-tests`, plus the SDK gate,
+    with Python under `-B`.
+
+  No Rust or Cargo file changed, so `cargo check` was not needed.
+- **Evidence re-derived.**
+  - The history count is exact: 284 commits, 80 selecting a suite, 46 selecting only the SDK
+    suite, and 141 of 203 full-route commits selecting none.
+  - `test-ci-path-routing.py`'s user CPU rose from 25.1 s to 29.2 s locally, which fits the
+    claimed ~3 s on the route job.
