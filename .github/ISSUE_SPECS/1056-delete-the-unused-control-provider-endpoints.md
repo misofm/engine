@@ -269,3 +269,79 @@ I did not post it, per the brief. Suggested text:
 - **#1034** (protocol items rustc proves unused) should rebase on this change. The two decode-counter
   accessors, `release_automation_admission` and its helper are gone here.
 - **`docs/audits/` history is left as is** (see "Kept").
+
+## Sol attempt 1 verdict: PASS
+
+Verifier: Sol, 2026-09-28, on `c46d5b36`/`d468b80c` merged onto the current batch head `7d0d4adf`
+(scratch merge, not kept). Since `ed0556a9` the batch moved only docs and two console-benchmark
+scripts, so the merged Rust tree equals the branch's. Host EPYC 7313P, rustc 1.97.1,
+`CARGO_INCREMENTAL=0`, one fresh target shared by the merge and a base worktree at `7d0d4adf`.
+
+- **C ABI and mobile path.** The controller diff is the `None` arm verbatim. Every removed branch
+  was guarded by a `Some` delivery context or scalar slot, and only the deleted facade ever passed
+  one. The public `ProtocolController` signatures and `capability_registry` are identical to base.
+  `crates/capi` and `include/` are untouched. All 36 capi tests pass, among them
+  `capi_controller_dispatches_every_advertised_command_family`,
+  `all_six_event_families_cross_c_dequeue_with_exact_oracle_bytes`,
+  `structural_command_keeps_protocol_plan_provider_and_event_epochs_atomic` and
+  `exported_c_candidates_replay_render_and_both_destroy_orders_balance_exactly`. `audit capi` ran
+  100,000 calls with 0 violations. `check-capi-abi.sh` and its self-test pass. On iOS and Android,
+  the `--lib` set, `--all-targets --all-features -p capi -p host-core -p protocol` and both clippy
+  sets pass.
+- **Removed tests.** I compared `--list` on base and change, qualified by binary, for test-debug-a
+  and for `--all-features -p protocol -p host-core -p capi`: 88 removed, 0 added. test-debug-b is
+  unchanged. The removed tests are `builtin_batch_endpoint::tests` (11),
+  `controller_delivery::tests` (16), `delivery::tests` (20) and the three deleted integration
+  binaries (20, 10, 11).
+  - Every test body drives a deleted type or helper: the endpoints, the delivery service, or the
+    `facade()` fixture. `pcm_case` calls `prepare_scalar_point_endpoint`.
+  - Three tests guard no product code: two std-only thread-scope harness checks and the signed-zero
+    `to_bits` tautology. All three are on #1046's H-list.
+  - One test touched surviving code: `endpoint_selects_existing_pair_factories_without_observer_barriers`
+    checked pair selection through the endpoint's `BetweenRenderCalls` lowering. That selection is
+    still covered by builtins-compiler's `test_only_fader_matrix_witness` tests and by host-core's
+    `observation_demand` between-render-calls variants.
+  - `apply_parameter_point` survives. It keeps its tests in `compressor/tests/native_points.rs` and
+    `conformance.rs`.
+- **Protocol.**
+  - The wire, message and typed-frame sources are untouched.
+  - `try_dequeue_automation` inlines the old two-step path and releases density and intervals the
+    same way.
+  - `record_canceled_automation` and `validate_records` keep their callers.
+  - These pass: the protocol tests, `conformance` (in test-debug-b), `conformance_fixtures --check`,
+    `check-protocol-wasm-parity.sh` (scalar and simd128), the caller-buffer allocation audit, and
+    the fuzz `--bins` check.
+- **Merged-tree gates.**
+  - Lint and docs: fmt passes. Check and clippy `-D warnings` pass with all features and with
+    default features. `cargo doc -D warnings` passes for the workspace and for
+    `-p host-core -p protocol --all-features`.
+  - Tests:
+    - test-debug-a: 1,436 passed, 10 ignored; `host-native` runs.
+    - test-debug-b: 807 passed, 28 ignored.
+    - All-features protocol, host-core and capi: 351 passed, 2 ignored.
+    - Release audit, bench and console-workload: 176 passed, 3 ignored.
+  - Targets: wasm32 simd128 checks and `check-cross-targets.sh` pass.
+  - `run-wasm-gates.sh`: 0 mismatches over 358 comparisons in each of three legs; the V8 spill gate
+    passes.
+  - Byte-identical to base: all 17 `gain_pan_profile digests` rows, and the `--module-only`
+    artifact `3f744b03…` from fresh builds of both trees.
+  - Scripts: the routing check and its mutation test pass. Every lint-job policy script passes
+    except the one below.
+- **Failures that are not this change.**
+  - aarch64 `clippy --all-targets -p host-core` shows the same six `fp_environment.rs` errors on
+    base (#1017).
+  - `check-step-vocabulary.py` fails on the batch head itself, at `1025-…md:238` (a retired step
+    spelling), introduced by #1025. The branch alone passes. This lint-job step must be fixed
+    before the batch is pushed.
+
+Findings:
+
+1. LOW `docs/CONTROL_PROTOCOL_SEMANTICS.md:15` (and the evidence above) name "#370, audit row IO-5"
+   as the owner of the `AUTOMATION_ENQUEUE` refusal follow-up. #370 is CLOSED (docs-only,
+   2026-09-04). The open owner is #349's IO-5 row, as #1053 A5 says. Replace `#370` with `#349`
+   before the batch boundary.
+2. NIT, evidence "Kept": the public `prepare_host_runtime_between_render_calls` did not lose a
+   caller here, because it had none on base either. It and `apply_parameter_point` are now unused
+   in production. Leave both for the dead-code pass.
+3. NOTE: some open specs still name deleted tests or files: #1021 (its baseline list), #1046 (three
+   H-list rows), #1023, #1034, #957 and #997. Refresh them when each is next touched.
