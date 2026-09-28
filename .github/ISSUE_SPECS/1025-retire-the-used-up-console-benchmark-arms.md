@@ -235,7 +235,7 @@ Reviewer: Sol, 2026-09-28, on `d1b1b844` (work `03101cea`), and on a scratch mer
 - `floor.rs` names no arm and no folder. The floor-accounting clause needs "a record produced by
   `scripts/run-console-benchmark.sh`", and the `--step` path still produces one.
 - `test-console-benchmark.sh` and the policy scripts do not run either script.
-  `check-step-vocabulary.py` is about the word "nudge". The only other reader of `artifacts/steps`
+  `check-step-vocabulary.py` is about a retired parameter-step spelling. The only other reader of `artifacts/steps`
   is the web mixing-automation runner, which is untouched and uses the same NAME regex.
 - The permalink is right: `d3349b72` is an ancestor of `origin/main` (`a9414c0c`), and its two
   scripts equal the base's and carry all 48 arms.
