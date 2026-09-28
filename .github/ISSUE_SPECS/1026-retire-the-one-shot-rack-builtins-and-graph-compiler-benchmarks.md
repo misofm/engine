@@ -231,3 +231,80 @@ Red mutations, each applied, run and reverted:
 - `identity_chain`:
   - an allocation inside the armed scope: the audit snapshot goes red;
   - left trim 0.5 dB: the identity check goes red.
+
+## Sol attempt 1 verdict: PASS
+
+Sol, 2026-09-28. Reviewed `560f2119`, `b9295585` and `37e9620a`, merged onto the batch head
+`e38f2147` (#1024 and #1025 merged) in a scratch worktree. `CARGO_INCREMENTAL=0`, one shared
+target. No benchmark workload was launched.
+
+**Merge instruction (binding).** The merge is not clean:
+- `tools/bench/src/rack.rs` and `tools/bench/src/builtins.rs` are modify/delete conflicts, because
+  #1024 dropped `input: None` from both. Resolve them by deleting the files.
+- There is also a semantic conflict. #1024 removed `RenderIo::input`, so
+  `crates/graph-compiler/tests/compile_shapes.rs:172` (`input: None,`) fails with E0560. Delete
+  that line in the merge.
+
+Every result below is on the merged tree with those resolutions.
+
+**1. Ported tests.** Each of the five keeps every assertion of the test it replaces, and each is
+stronger:
+- the mixed session runs at both widths and pins the exact scalar set;
+- the identity chain checks values, not only that two rounds agree;
+- the 256-track preparation compares the whole estimate at 48 and 96 kHz.
+
+The one dropped call is `canonical_session_json` in the graph fixture. It asserted nothing.
+
+Product mutations, each applied, run and reverted:
+
+| mutation | red test |
+|---|---|
+| rack-compiler fill order ignores `active_count` | `mixed_rack_depths…` (`Simd4` bound groups 0) |
+| graph `is_bankable_track_stage` drops `PostMatrix` | `representative_console…` |
+| estimate route count off by one | `representative_console…` (1023) |
+| meter drop counter not incremented | `seven_meter_taps…` (0) |
+| meter items use `slot_count - 1` | `metered_256_track…` (224) |
+| lane `identity_chain_block` loses `.add(zero)` | `identity_chain…` (the value check) |
+| an allocation in `process_dual_mono` | `identity_chain…` (the audit snapshot) |
+| fader gain × 1.000001 | `identity_chain…` |
+
+The deleted `all_render_workloads…` compared round hashes only, so it could not catch the
+signed-zero mutant; the port does.
+
+**Ruling on gate 3 against gate 5: gate 5 governs.** Its port option requires the owning crate's
+tests, and gate 3's intent holds: the merged diff under `crates/` and `hosts/` is exactly three
+new `tests/*.rs` files, with no `src/`, manifest, feature or build-script change. The crates are
+the right owners. The port is minimal. Its one overlap, the seven-tap test beside `audit`'s
+`issue069_…saturation…` unit test, is kept because it alone asserts tap order.
+
+**2. Nothing live is removed.**
+- No live code or CI reference to a deleted file remains. Stale history comments are left at
+  `qualification.yml:826`, `check-effect-interchange-targets.sh:10` and
+  `check-parametric-eq-targets.sh:5`; they are non-blocking.
+- `floor.rs` and the rulings use console workloads only.
+- The ratchet is honoured by retiring subjects, not by weakening it. `console.rs` obeys the
+  timer rule. As a counter-mutant, dropping `console.rs` from `timed_subjects` makes
+  `test-bench-policy.sh` red (`converted-subject-loses-the-shared-timer` escaped).
+
+**3. Gate edits.**
+- `check-env-vocabulary.sh` reports 117 names. None of the 17 dropped names has a user outside
+  history.
+- The re-pointed suites, the conformance union and its test pass.
+- The F16 consumer check discriminates. Editing a fixture and its manifest row consistently makes
+  it red. With the comparison disabled, `test-builtins-fixtures.sh` goes red.
+
+**4. Nightly.** `check-stem-store-v1.mjs --self-test --budgets` passes with `rg` shadowed by a
+failing shim. No `rg` call was made.
+
+**5. Merged gates.** All of these pass:
+- `cargo fmt`, the workspace `check`, `clippy -D warnings`, `doc -D warnings`, and the
+  `host-web` wasm check;
+- the `bench` and `console-workload` release tests. Their list goes from 130 to 109, and the
+  difference is exactly the 21 named;
+- the digests: 17 rows, byte-identical to the batch head;
+- `test-console-benchmark.sh`, and the CI-routing check and test;
+- `check-builtins-fixtures.sh` with the real audit binary (50 files);
+- every argument-free lint command but one.
+
+The exception is `check-step-vocabulary.py`, which fails on `e38f2147` itself: #1025's spec line
+238 quotes the retired spelling. It is not #1026's defect, but it blocks the batch boundary.
