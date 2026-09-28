@@ -864,3 +864,117 @@ reads CANNOT TELL, because no record exists yet. The #1061 merge push writes the
   forgery.
 - Sol's attempt 2 finding 4, the job-level masking classes for every other job, remains the
   follow-up issue he proposed. This attempt closes it only for the two #1061 jobs.
+
+## Sol verdict, attempt 3
+
+**PASS.** The redesign closes attempts 1 and 2 by design. A change is now compared with the digest
+its base's own `main` run recorded, not with a base rebuilt in the change's environment. Every
+environment plant now reports the truth. Release integrity is unchanged and gains a toolchain check.
+What remains can only make the informational report lie through a deliberate, reviewable edit. None
+of it reaches release integrity.
+
+Reviewer: Sol, 2026-09-28, on `d9054cac`.
+- The workflow's own `run:` blocks ran through a scratch harness: workflow-, job- and step-level
+  env; `if:` evaluated; a stateful fake `gh` that stores posted statuses and serves the combined
+  status as the latest status per context. It ran in a clone at another path.
+- A `push` of `d9054cac` to `main` ran `artifact`, which built `6c952a2c...` and posted
+  `6c952a2c... rustc 1.97.1` on `d9054cac`.
+- Each scenario is a synthetic `pull_request` merge onto it, run through `artifact` and
+  `artifact-identity`.
+
+### Findings, by severity
+
+1. **LOW: a same-repository change can forge its base's record, and the forgery moves only the
+   report.**
+   - **How.** `artifact` holds `statuses: write` on every event, not only the `main` push that uses
+     it. `actions/checkout` persists that token in `.git/config`. So any of these can post
+     `audioworklet-sha256` onto the base sha:
+     - an extra step before the pinned record step;
+     - a build step that reads the persisted token;
+     - PR code run by the build, such as a proc macro or `cargo run -p parameter-metadata`;
+     - a second workflow with `statuses: write`.
+
+     The checker stays green for the first, second and fourth. The fake API showed the effect:
+     after a forged post of the PR's own digest onto `d9054cac`, T5 reads `ARTIFACT UNCHANGED`.
+     A later genuine post restores CHANGED, because the latest status per context wins. A forged
+     `failure` status forces `ARTIFACT CANNOT TELL`.
+   - **Who can do it.** Fork PRs get a read-only token, so they cannot. Same-repository authors
+     already have status write through their own access.
+   - **What it cannot do.** `main`'s required check is pinned to the Actions app
+     (`checks: [{app_id: 15368, context: qualification}]`), so a forged status cannot satisfy it.
+     The release checks read only git and the `artifact` job's outputs, never the record. And
+     `npm-publish.yml` rebuilds and refuses bytes other than `EXPECTED_WORKLET_SHA256`.
+   - **Hardening, cheap.** Move the record into its own push-only job that runs no PR code, with
+     `persist-credentials: false`. Then no PR-event job of the required workflow holds a write
+     token, which was true before #1061.
+2. **LOW: the non-`success` record branch is untested.** Deleting `row.get("state") != "success"`
+   from `recorded` leaves the self-test green: every record fixture is `success`. Add a `failure`
+   record fixture. Three other hand mutations of mine each turn the self-test red:
+   - every diff treated as documentation;
+   - a failed lookup swallowed;
+   - the result forced to UNCHANGED.
+3. **LOW, operational.**
+   - **Sequencing.** #1061 must reach `main` in a push that does not also move the pin. The planned
+     order meets this: slim-2 merges first, under the old rule, with its re-pin; #1061 then goes
+     into batch 3. My real-API read of the batch-2 merge against today's `origin/main` goes red,
+     because relative to that `main` it is a release change and `EXPECTED_WORKLET_SHA256` is
+     still 0.4.3's. From #1061 on, a batch-boundary re-pin is a release change, so the boundary
+     habit of `570a79f0` and `cbfaf9de` must stop.
+   - **Timing.** A newer `main` push replaces a pending one in the same concurrency group, and a
+     replaced run never posts its record. PRs on such a base read CANNOT TELL, unless it is
+     documentation-only from a recorded ancestor.
+   - **No retry.** A transient API failure in the record step turns `main`'s `artifact` job red.
+
+### The questions
+
+1. **The environment findings are closed by design.** Each scenario, run through the workflow's own
+   steps against `d9054cac`'s recorded `6c952a2c...`:
+   - **T5**, workflow-level `CARGO_PROFILE_RELEASE_OPT_LEVEL: s` (checker green):
+     `ARTIFACT CHANGED: 6c952a2c... -> 6d9e8945...`.
+   - **T1**, workflow-level `RUSTUP_TOOLCHAIN` 1.98.1: `ARTIFACT CHANGED ... -> b7dfd909...`,
+     "(a toolchain change)".
+   - **T2**, a job-level `RUSTUP_TOOLCHAIN` on both jobs: the checker is now red ("no job-level
+     ... env"), and the report is truthful anyway, the same CHANGED line.
+   - **U**, comment-only: `ARTIFACT UNCHANGED`.
+   - **Can a change alter the record it is compared against?** Only by forging, which is finding
+     1; reading a different context means editing the script, a reviewable diff.
+   - **Can CANNOT TELL be forced?** Only by a forged `failure` status. It never skips the release
+     checks, which key on the git base, not on the record. A refused lookup exits 2, not CANNOT
+     TELL.
+   - **Relevance.** None of these touches release integrity; they affect only the report.
+2. **Permissions and events.**
+   - **Scoping.** `statuses: write` is on `artifact` only, and the record step is pinned to
+     `push` on `main`. Each job's permissions are pinned exactly. Finding 1 has the scoping
+     caveat.
+   - **Fork PRs work.** The repository is public, and the combined status endpoint answers
+     unauthenticated: a real read-only lookup of `5379e46c` returns `pending`, with 0 statuses.
+     So the fork read-only token suffices. Through the script, that lookup reads
+     `ARTIFACT CANNOT TELL ... has no audioworklet-sha256 status`.
+   - **Other events.** `merge_group` is not a trigger, and `workflow_dispatch` has no base, so it
+     reads CANNOT TELL.
+   - **Several statuses.** The combined status is the latest per context, as demonstrated, and a
+     re-run re-posts the same reproducible bytes. `main` commits carry no other statuses today;
+     Actions uses check runs.
+3. **Release integrity is unchanged.**
+   - `npm-publish.yml` is byte-identical to `main`'s.
+   - Toolchain plant, a release identity for `6c952a2c...` with `npm-publish.yml`
+     `RUSTUP_TOOLCHAIN: "1.98.1"` while CI built with 1.97.1: exit 1, with `**FAIL**
+     ... RUSTUP_TOOLCHAIN is 1.98.1, but the artifact job built with rustc 1.97.1`.
+   - The same release with `"1.97.1"` passes all five lines.
+4. **Gates, on `d9054cac` merged into `codex/batch-slim-2` at `6709552c`.**
+   - **The merge.** One conflict, `scripts/test-web-audioworklet.mjs`; #1061's version is taken.
+     The merge then differs from the branch only in the pin, `results.json` and the matrix, all
+     `6c952a2c...` over `cbfaf9de`, with no build input.
+   - **Workflow and routing:**
+     - `check-ci-path-routing.py` and `test-ci-path-routing.py`: pass;
+     - `check-script-reachability.py` (137) and `test-script-reachability.py`: pass;
+     - actionlint 1.7.7 on both workflows: clean. With shellcheck 0.10.0 the same four
+       pre-existing warnings appear.
+   - **On the recorded module `6c952a2c...`:** `check-web-audioworklet.sh`,
+     `test-web-audioworklet.sh`, `test-web-audioworklet.mjs` and
+     `test-sdk-artifact-builder-output-contract.sh` pass.
+   - **Script and policy checks:**
+     - the identity self-test passes;
+     - `check-env-vocabulary.sh` passes (67);
+     - every `check-*.py` and `test-*.py` passes under `python3 -B`. The six that need arguments
+       exit with their usage.
