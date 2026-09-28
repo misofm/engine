@@ -310,3 +310,110 @@ Failures, none caused by this change:
 - `artifacts/issue880-mq2/` (07, #1030) is not in this brief.
 - `docs/audits/60x-*` per-attempt reviews (08).
 - Open specs #1030, #1039 and #1050 still cite `scripts/run-console-benchmark.sh` at its old path.
+
+## Sol verdict, attempt 1
+
+**FAIL.** One live claim is lost. Everything else holds, and the fix is one small port.
+
+Reviewer: Sol, 2026-09-28, on `5c72f2c8`, merged into a scratch detached checkout of the
+`codex/batch-slim-1` head `d416d8c8` (which carries #1056 and the #1052/#1025 step-vocabulary
+rewordings). No timed workload was launched.
+
+### Findings, by severity
+
+1. **HIGH: a lost live claim.** `input_symmetry::tests::separate_capacity_sixteen_drain_witness_has_no_pending_records`
+   is listed as "matched" by `input_liveness_console.rs:538`, but that test pushes two records per
+   track. The retired test filled every track's input queue to its capacity (16) after a render,
+   rendered once, and required all 16 more pushes to be accepted. That proves the banked input
+   drain (`BuiltinBankProcessor::begin_block`, `crates/builtins-compiler/src/lib.rs:451`) applies
+   every record available at block entry in that block. The proof:
+   - Mutation: `for _ in 0..available {` becomes `for _ in 0..available.min(2) {`.
+   - On the merge, no surviving test goes red under it. I ran `-p builtins -p builtins-compiler
+     -p graph-compiler -p rack -p host-core` (554 passed) and `-p host-web -p capi
+     -p effect-contract` (314 passed), with the test-support features. These are every package
+     that pushes a `TrackInputRecord`.
+   - On base, the retired test goes red under the same mutation, at `input_symmetry.rs:541`
+     (`try_push` refused), and green when the mutation is reverted.
+
+   **Fix:** port it. For example, add a test in `builtins-compiler/tests/` on
+   `test_only_prepared_pair_graph`: fill each track's input queue to its capacity, render one
+   block, then require another capacity's worth of pushes to be accepted. Show it red under the
+   mutation above.
+2. **LOW, evidence wording.**
+   - "exactly the 22 tests of the four bench subjects and the 5 of the audit subject" should say
+     17 bench tests plus 5 audit tests, 22 in all.
+   - The digest gate prints 17 lines on this merge, not 16. All 17 are byte-identical to base.
+   - "docs and CI … 56" does not reproduce: `ENGINE_ENV_VOCABULARY.md` loses 49 lines and
+     `qualification.yml` loses 1, so 50. The other rows of the removal table reproduce exactly:
+     126 files, +992/-17,348 at `f8142178`; 22 scripts, 4,535 lines; 7 Rust files, 4,060 lines;
+     Rust edits 365 lines; 68 artifacts, 8,298 lines; 20 env names.
+   - The `check-step-vocabulary.py` failure the evidence reports is already fixed on the batch
+     head. It passes on the merge.
+3. **LOW, a doc comment.** The host-core port's doc says the gain follows
+   `g += (target - g) / 256` per frame. The oracle takes one step per block,
+   `(target - g0) / 256`, which is a linear ramp restarted each block. The code is right; the
+   sentence reads as a one-pole.
+
+### Merge
+
+There was one conflict. `tools/bench/src/input_symmetry.rs` is deleted here and modified by #1024
+(`RenderIo { output }`). It resolves by deletion.
+
+There are no semantic conflicts:
+- **#1056:** nothing deleted here is named by it.
+- **#1052:** no deleted file held a source-scrape row. `check-workspace-policy.sh` and
+  `test-workspace-policy.sh` pass.
+- **#1025:** the moved runner is #1025's file. Only the usage comment and the `../..` root differ.
+- **#1022:** `check-bench-policy.sh` reports 6 operator scripts rooted at the workspace, and
+  `test-bench-policy.sh` passes.
+
+### What holds
+
+- **Nothing live deleted.** No workflow, `package.json`, `Cargo.toml`, script, `tools/`,
+  `hosts/`, `sdk/` or operator doc names a deleted script, subject, mode or artifact folder. The
+  remaining mentions are rulings history (with the new dated notes) and `docs/issue880-*.md`, which
+  belongs to #1031 and is disclosed. `artifacts/issue163-phase0/` stays.
+- **The moved runner:**
+  - it prints usage and exits 2;
+  - `--step base` refuses to overwrite and exits 1, run from the repository and from `/tmp`;
+  - the preflight hashes the new path.
+- **Test lists.** I diffed `cargo test --workspace --all-targets --all-features -- --list`
+  between base and merge, with a separate target directory for each. Exactly 26 tests leave: 17
+  bench, 5 audit and the 4 `mq1_`/`mq2_` tests. Every one is defined in a deleted file. The 6
+  ports arrive. Nothing else changes. The change touches no Cargo feature, so a default-feature
+  list can differ only in the same way.
+- **Ports.**
+  - All 6 pass.
+  - I re-ran two of the mutation proofs, and each went red, then green when reverted:
+    - with the range clamp dropped, the gate test fails at `gain 1.18e-38` against the floor
+      0.00398;
+    - with `DualMono` dispatched as `LINK_MAXIMUM`, only the multiband port fails and the other
+      10 tests stay green.
+  - The other matches I spot-checked hold at their cited `file:line` on the branch.
+- **The lint.**
+  - A planted dead script and a script named only in a comment are refused.
+  - A script reached through a reached script, and a jq module reached only by `include`, are
+    accepted.
+  - The lint names exactly the 18 files on base.
+  - Two mutations of the checker (jq includes ignored, comment stripping off) turn the suite red.
+  - The step runs in the `lint` job, and `check-`/`test-ci-path-routing.py` pass.
+- **Gates on the merge.** All of these pass:
+  - `cargo check` and `clippy -D warnings`, `--workspace --all-targets --all-features`, and fmt;
+  - wasm `+simd128` `host-web`;
+  - `aarch64-apple-ios` and `aarch64-linux-android` checks of every product crate, `capi` and
+    `host-mobile`;
+  - `test-debug-b`'s full command (808 passed);
+  - `test-debug-a`'s features over host-core, builtins-compiler and graph-compiler (379);
+  - audit-native (154) and test-release;
+  - `run-wasm-gates.sh`;
+  - `gain_pan_profile digests`, 17 lines identical to base;
+  - every argument-free `check-*.py`, and the self-tests of the three that take arguments;
+  - `test-console-benchmark.sh`, `test-wasm-console-benchmark.sh`, `check-`/`test-env-vocabulary.sh`
+    and `check-sdk-types.sh` (after `npm ci`).
+  - 41 of the 43 `check-*.sh`.
+
+  The other two, `check-web-audioworklet.sh` and `check-sdk-headless.sh`, fail only on the pin
+  (`476e58ad…` against the local `f7bd75ca…`). The module is identical on base, so this is not
+  caused by this change (next item).
+- **AudioWorklet module.** It is byte-identical on base and merge (`f7bd75ca…`). The pin
+  (`476e58ad…`) is the batch boundary's to refresh.
