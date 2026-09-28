@@ -504,7 +504,7 @@ printf '#!/usr/bin/env bash\nif [[ " $* " == *"--include=*.rs"* && " $* " == *"j
 chmod +x "$case_root/shim/grep"
 expect_failure_with_path escaper-candidate-grep-empty-error "$case_root/shim" 'grep failed with status 7; output: <empty>; stderr: grep-error-sentinel'
 grep_fault private-sha-grep-error '0x6a09_' 'grep failed with status 7; output: <empty>; stderr: grep-error-sentinel' empty
-multifile_grep_fault unsafe-owner-grep-error 'unsafe_code' 'unsafe-owner scan' grep-error-sentinel $'tools/bench-support/src/alloc.rs\ntools/audit/src/capi.rs\ntools/native-pcm-runner/src/lib.rs\ntools/bench/src/protocol.rs\ntools/wasm-gate-guest/src/lib.rs\ntools/wasm-console-guest/src/lib.rs'
+multifile_grep_fault unsafe-owner-grep-error 'unsafe_code' 'unsafe-owner scan' grep-error-sentinel $'tools/bench-support/src/alloc.rs\ntools/audit/src/capi.rs\ntools/bench/src/protocol.rs\ntools/wasm-gate-guest/src/lib.rs\ntools/wasm-console-guest/src/lib.rs'
 grep_fault unsafe-owner-grep-empty-error 'unsafe_code' 'unsafe-owner scan failed with status 7; output: <empty>; stderr: grep-error-sentinel' empty
 multifile_grep_fault environment-reader-grep-error 'env::var' 'environment-reader scan' grep-error-sentinel $'tools/audit/src/main.rs\ntools/bench/src/main.rs'
 grep_fault environment-reader-grep-empty-error 'env::var' 'environment-reader scan failed with status 7; output: <empty>; stderr: grep-error-sentinel' empty

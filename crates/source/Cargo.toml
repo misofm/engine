@@ -16,6 +16,7 @@ session.workspace = true
 
 [dev-dependencies]
 effect-contract.workspace = true
+sha2.workspace = true
 
 [lints]
 workspace = true

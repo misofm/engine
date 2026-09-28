@@ -2,7 +2,7 @@
 
 ## Mission
 
-`misofm/engine` is a greenfield, headless Rust music-production engine for agents that work between musicians and the engine.  Agents require a deliberately broad, granular semantic API; the runtime ABI remains narrow, stable, and efficient.  Build for native/cloud embedding, iOS, Android, and browser WebAssembly.  PCM is the engine output; delivery codecs live outside this repository.
+`misofm/engine` is a greenfield, headless Rust music-production engine for agents that work between musicians and the engine.  Agents require a deliberately broad, granular semantic API; the runtime ABI remains narrow, stable, and efficient.  Build for browser WebAssembly and for iOS and Android apps, which embed the engine through the C ABI; native desktop and cloud embedding are expected later and are not live scope (owner ruling R2, `docs/rulings/engine-footprint-2026-09-28.md`).  PCM is the engine output; delivery codecs live outside this repository.
 
 Never inspect, copy, benchmark against, or inherit an architecture from a legacy engine source.  A useful idea may be independently re-derived and justified, but this engine is not a port.
 
@@ -193,7 +193,7 @@ closed GitHub issues and deployable capabilities, not local file counts or unpus
 
 ## Scope boundaries for this sprint
 
-Deliver a mixing/mastering engine, session compiler, effect foundation, PCM runner, host adapters, streaming, and control foundation.  Do not deliver a timeline editor, human-oriented DAW UI, delivery codecs, unlimited in-memory stem cache, implicit feedback graph, third-party effects (out of scope until a new issue reopens them), persisted effect state or state migration without a product need, a general remote audio-streaming protocol, or live audio input (recording, input monitoring or a tracking mode; `docs/rulings/product-scope-stems-for-mixing.md`).
+Deliver a mixing/mastering engine, session compiler, effect foundation, host adapters (the browser adapter and the C ABI), streaming, and control foundation.  Do not deliver a native file-rendering PCM runner (desktop tooling; #1033 removed it), a timeline editor, human-oriented DAW UI, delivery codecs, unlimited in-memory stem cache, implicit feedback graph, third-party effects (out of scope until a new issue reopens them), persisted effect state or state migration without a product need, a general remote audio-streaming protocol, or live audio input (recording, input monitoring or a tracking mode; `docs/rulings/product-scope-stems-for-mixing.md`).
 
 - **The acked-batch question**: v1's worst correctness bug was a fully validated, *acked* event batch silently dropped at queue overflow while the ledger advanced. Our #139/#140 admission already encodes the lesson (validate-everything-then-admit-atomically; ack carries application sample); keep it as the review question for every future queue: *can an ack ever precede a drop?*
 - **The ceremony boundary**: the legacy engine drowned in evidence (924 record files, a comment-digest ledger, `Cargo.lock` SHA pinned inside a test) while its headline number stayed fiction — every byte-gate green. The next abandoned attempt spent ~50 PRs on certification cadence and never shipped an effect. Gates must discriminate *claims*; byte-pinning prose is cost without evidence. Adopt the useful artifacts of both predecessors, never their pace.

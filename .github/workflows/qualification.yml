@@ -414,11 +414,6 @@ jobs:
       # already ran. audit-native runs the whole script (preconditions, factory-count grep, and
       # the bench conformance record) once, with the prebuilt release bench binary; nothing here
       # is lost by removing the bare call.
-      - name: Native PCM runner static seal and mutation tests
-        run: |
-          bash scripts/check-native-pcm-runner.sh
-          bash scripts/test-native-pcm-runner-v1-policy.sh
-          bash scripts/test-native-pcm-runner-portability-v1-policy.sh
       - name: Conformance boundaries
         run: |
           bash scripts/check-conformance-boundaries.sh
@@ -437,6 +432,10 @@ jobs:
         run: python3 -B scripts/test-npm-publish-modes.py
       - name: Stem store V1 gate (mutation ledger moved to nightly)
         run: node scripts/check-stem-store-v1.mjs
+      # The stem-identity corpus's only consumer in this repository (#1033): the release CLI copies
+      # these frozen bytes, and the Rust oracle that used to read them is gone (#1035).
+      - name: Stem identity corpus drift check
+        run: python3 -B fixtures/stem-identity/v1/generate.py --check
       # x86-probes job folded in (design §6.2): three distinct sub-v3-refusal claims, dominated by
       # toolchain install, which lint already paid for.
       - name: Sub-v3 builds are refused by the lane guard (scalar)
@@ -475,8 +474,8 @@ jobs:
       # audit-native and wasm-guests in release. Explicit --features (design §10 finding 1): a
       # local reproduction must name the same features to compile the same program. Dev-dependency
       # unification would turn on builtins-compiler and graph test-support anyway; nothing turns on
-      # source, host-web, host-core, effect-compiler or protocol test-support, whose gated tests
-      # never ran before #1021. scripts/check-test-support-ci.py (lint job) fails when a workspace
+      # host-web, host-core, effect-compiler or protocol test-support, whose gated tests never ran
+      # before #1021. scripts/check-test-support-ci.py (lint job) fails when a workspace
       # test-support feature is left out of every whole-package cargo test step.
       - name: Workspace debug tests (excluding DSP crates, audit, and wasm evidence tools)
         run: |

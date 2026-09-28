@@ -71,23 +71,32 @@ The `32f` sample text is exact hexadecimal IEEE-754 bits. Those rows cover NaN p
 positive subnormal, and negative zero without relying on host-language float formatting.
 
 All six rows have committed headerless `.pcm` files. The stereo row at each depth also has a
-committed `.wav` fixture. The reference WAVE path MUST strip the two different wrappers and
-produce bytes and identity equal to the corresponding `.pcm` row.
+committed `.wav` fixture. Every WAVE path (today only the release CLI's, below) MUST strip the two
+different wrappers and produce bytes and identity equal to the corresponding `.pcm` row.
 
 ## Implementations and the corpus gate
 
-The engine carries no reference hashing tool. Hosts decode stems themselves and submit planar PCM
-(#1035 removed the native decode workers and the Rust `stem-hasher` oracle with them), so the
-contract is implemented where stems are decoded and published:
+The engine carries no reference hashing tool and no container parser. Hosts decode stems
+themselves and submit planar PCM: #1035 removed the native decode workers and the Rust
+`stem-hasher` oracle, and #1033 removed the native WAV/RF64 parser that was left. The contract has
+two owners, and they own different halves of it:
 
-* the browser stem store, `hosts/host-web/web/stem-store/identity.js`, tested by
-  `hosts/host-web/tests/stem-store-hash-v1.mjs` and `stem-store-core-v1.mjs`;
-* the release CLI (`misofm/cli`, `src/stem-identity.ts`), which pins itself to a copy of
-  `VECTORS.tsv`.
+* **Serialization and WAVE stripping: the release CLI** (`misofm/cli`, `src/stem-identity.ts`).
+  It is the only implementation that reads a WAVE (RIFF or RF64) container, serializes its samples
+  canonically and hashes them into a `blake3:` identity. Its `tests/stem-identity.test.ts` runs
+  against byte-identical copies of the ten corpus files (`VECTORS.tsv`, six `.pcm`, three `.wav`).
+* **Identity grammar and the hash of given canonical bytes: the browser stem store.**
+  `hosts/host-web/web/stem-store/identity.js` only parses the `blake3:` spelling, and
+  `opfs-store.js` streams the canonical bytes a resolver hands it through `incremental-blake3.js`,
+  checks the declared byte length and re-verifies on open. It has no container decoder and never
+  serializes decoded PCM. `hosts/host-web/tests/stem-store-hash-v1.mjs` and
+  `stem-store-core-v1.mjs` test it, through `scripts/check-stem-store-v1.mjs`.
 
-Any other implementation, a mobile app's included, MUST reproduce every row of the corpus. The
-corpus gate is the independent Python-standard-library generator, which re-derives every `.pcm`
-preimage, `.wav` wrapper and identity and fails on any drift:
+Any other implementation that serializes samples or strips a container, a mobile app's included,
+MUST reproduce every row of the corpus. The corpus gate is the independent
+Python-standard-library generator, which re-derives every `.pcm` preimage, `.wav` wrapper and
+identity and fails on any drift. The required workflow's lint job runs it on every full-route pull
+request (#1033), so the frozen bytes the CLI copies cannot drift here unnoticed:
 
 ```sh
 python3 fixtures/stem-identity/v1/generate.py --check
