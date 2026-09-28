@@ -17,3 +17,11 @@ Owner ruling (2026-09-28, `docs/rulings/engine-footprint-2026-09-28.md`): ramp l
 - A per-change smoothing value still overrides the session value.
 - Every existing console digest is unchanged for sessions that omit the field *and* whose commands carry explicit smoothing; any digest that changes because the default is no longer 0 is listed and re-pinned with the reason.
 - Render stays allocation-free.
+
+## Defaults from #1055 (root, 2026-09-28)
+
+The research (`docs/handoffs/control-smoothing-defaults/FINDINGS.md`) recommends the default table:
+`muteMs` 10 ms (provisional until the owner's listening test; 5 ms if the preregistered rule says
+so), `faderMs` 20 ms, `panMs` 20 ms. Rounding: `floor(ms * rate / 1000 + 1/2)` in `f64` from the
+`f32` value. Bounds: finite, `0 <= ms <= 1000`, zero legal. The listening packet is in
+`docs/handoffs/control-smoothing-defaults/listening/`.
