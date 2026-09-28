@@ -68,7 +68,8 @@ tolerance.
 
 Frozen workload: `fixtures/session/v1/console-sixty-four-track.toml`, 48 kHz, 128-frame quantum,
 1000 observations, three arms alternated per observation, one warmup pass and two measured rounds.
-Runner `scripts/run-console-benchmark.sh`; record
+Runner `scripts/run-console-benchmark.sh` with no argument (the one-shot `issue149` default #1025
+retired; the runner's header links a version that still carries it); record
 `artifacts/issue149/console-benchmark.accepted.jsonl`.
 
 | workload | quiet | restated | moving | paired delta |
