@@ -211,3 +211,296 @@ is not included.
    that is red, and G1 is green.
 4. Not done here: x86-64 Android emulator and iOS simulator builds (the AVX2/FMA pin), device and
    simulator linking, and NEON performance.
+
+## Sol verdict, attempt 1
+
+**FAIL.** No x86 test is weakened, and no product code is target-specific. Under emulation the two
+AArch64 legs pass on the batch head, and on the trial merge with #1048 as well. Attempt 2 must
+address one defect and two required changes:
+
+- **The defect.** The iOS memset scan sees only 527 of 3,490 `bl _memset_pattern16` calls in
+  the product crates' iOS release assembly, and nearly all of those calls sit in render
+  functions. So once #1018 lands it would report the Darwin
+  defect fixed while most of it remains, and the register misstates the defect's scope.
+- **The #1048 guard.** As it stands, this branch turns `lint` red once #1048 lands, and #1048
+  lands first.
+- **Expected-failure reasons.** The expected-failure rows accept a failure for any reason.
+
+The spec has no Amendments section. I judged the branch against its body, the rulings of
+2026-09-28 and the batch `AGENTS.md`, test-value rule included.
+
+### Merge onto `codex/batch-slim-1` (`92ef396f`)
+
+- **Textual merge: clean.** `7084961c` merged into a scratch detached worktree. Nine files
+  auto-merged: `qualification.yml`, `check-cross-targets.sh`, `graph-compiler/src/lib.rs`,
+  `capi/tests/resource_lifecycle.rs`, the four host-core tests and `console-workload/src/lib.rs`.
+- **Semantic conflicts: none** with #1024, #1026, #1021, #1042, #1052 or #1056. The merge
+  compiles, lints, passes fmt and passes every x86 test (below).
+  - `check-test-support-ci.py` (#1021) passes.
+  - `scripts/lib/product-crates.sh` derives 26 crates on the batch, since #1056 removed nothing
+    from capi's closure.
+
+**#1048 (`e5a4b7e5`, unmerged), trial merge on top.**
+
+- **Conflicts.** There are two textual conflicts, in `check-ci-path-routing.py` and
+  `test-ci-path-routing.py`. Both are purely additive, and I kept both sides.
+- **The checker fails.** `check-ci-path-routing.py` then fails with: "an AArch64 job
+  (aarch64-debug, aarch64-release) must run an unconditional, unfiltered
+  `cargo test --release -p wasm-gates` (g5_native_digests_match_pins)". The baseline of
+  `test-ci-path-routing.py` fails the same way.
+- **Why.** The leg does run G5, and it skips only math's two M2 tests. But it runs G5 inside
+  `run-aarch64-tests.sh release`. #1048's `runs_g5_native_test` reads only YAML `run:` lines,
+  and it refuses any command that contains `--`.
+- **The proposed fix works.** This is #1048's verifier's fix, and I confirmed it on the trial
+  merge:
+  - Add an unconditional step to `aarch64-release` whose run line is exactly
+    `cargo test --locked --release -p wasm-gates --features math/lane`. The checker then passes.
+    `--features math/lane` resolves with `-p wasm-gates` alone.
+  - Drop `-p wasm-gates` from the script's release `gates`, so G5 does not run twice. The M2
+    expected failures live in `math`, so the new step needs no `--skip`.
+  - Keep the step before or after the script step. #1017's own `check_qualification_aarch64`
+    still finds its script line.
+- **G5 on AArch64 with #1048.** Under qemu, on the trial merge, the release leg passes G5's seven
+  tests, `g5_native_digests_match_pins` included, with #1048's delegated effect-family pins.
+  LANE-3 does not reach those corpora, so no new expected failure is needed.
+- **Nothing is required of #1048's branch.**
+
+### Findings, by severity
+
+1. **HIGH (FAIL): `ios-asm-memset-pattern16` scans 2 of the 9 affected crates, so it cannot tell a
+   fixed defect from a partly fixed one.**
+
+   I emitted every product crate's `aarch64-apple-ios` release assembly with the script's own
+   command, `cargo rustc --release --target aarch64-apple-ios -p <crate> --lib -- --emit asm`.
+   Nine crates contain `bl _memset_pattern16`:
+
+   | crate | calls |
+   |---|---|
+   | `multiband-compressor` | 1,132 |
+   | `compressor` | 970 |
+   | `transient-shaper` | 534 |
+   | `builtins` | 376 |
+   | `gate-expander` | 181 |
+   | `parametric-eq` | 151 |
+   | `true-peak-limiter` | 104 |
+   | `soft-clip` | 22 |
+   | `graph` | 20 |
+   | **total** | **3,490** |
+
+   The scan counts only `parametric-eq` and `builtins`, which together hold 527. The rest sit in
+   render functions:
+
+   - `compressor::kernel::process_block`, `process_block_mono`, `ramping_main_scalar` and
+     `settled_sidechain` (at `f32x4`);
+   - `PreparedMultibandCompressorBank::process_bank`;
+   - `transient_shaper::Shaper::process_block`;
+   - `PreparedGate::process_bank`;
+   - `LimiterCore::process_block` and `process_bank_inner`;
+   - `soft_clip::Channel::process`;
+   - `graph::runtime::bank_meter_pass` and `bank_sample_peak`.
+
+   **The cause is not the SVF flush alone.** The stored patterns are `lane::FLUSH_EPS` (`1e-20`,
+   `0x1e3ce508`) plus other splat constants: `1.0`, `0.5`, `2.0`, `1e-8`, `f32::MIN_POSITIVE`
+   and others.
+
+   **The consequence.** #1018's gate covers "every crate that uses `svf_step`", which does not
+   include compressor, transient-shaper, gate-expander, true-peak-limiter, soft-clip or
+   `graph`. `multiband-compressor` is in #1018's scope, but this scan does not cover it. Once
+   #1018 clears EQ and builtins, this scan reports "now passes: remove it". At that point about
+   2,000 calls remain in the `f32x4` and scalar instantiations an iPhone runs.
+
+   **The register is also wrong.** `docs/TARGET_MATRIX.md` places the defect "inside the EQ and
+   builtin render kernels" and counts those two crates only.
+
+   **Required.**
+   - Scan every product crate, reusing `product_crates`, and keep one expected-failure row per
+     crate that names its owning issue. A partial fix then fails the right row, and a new crate
+     with calls fails for want of a row.
+   - Correct the register.
+   - Ask root to widen #1018 to the stored-splat shape in every kernel, or to open a successor
+     issue.
+   - Five crates could not be scanned this way without Xcode, because `cargo rustc` links their
+     `cdylib`/`staticlib`: `capi`, `effect-package`, `effect-compiler`, `graph-compiler` and
+     `host-core`. The scan must emit assembly without linking for them, or state that they are
+     excluded and why.
+
+2. **REQUIRED (#1048 lands first): the `aarch64-release` G5 step.** See "Merge" above: add the
+   YAML step and drop `-p wasm-gates` from the script's `gates`.
+
+3. **MEDIUM: the expected-failure rows do not discriminate the failure's reason.**
+   - (a) **A row that starts passing fails the leg.** I showed this for a planted passing row
+     (`randomized_differential_f32`) and for a missing test name. Both end with "now passes:
+     delete its row".
+   - (b) **A different failure reason is accepted.** I replaced `scenario_981`'s body with
+     `panic!("PLANTED: an unrelated regression")`, and `expect_failure` still printed
+     "expected failure (#1065)" with exit 0. The check requires only one `FAILED` line and
+     `0 passed; 1 failed`. A real AArch64 regression in those six pins, or in M2, is therefore
+     invisible. Fix: have each row carry the failure it expects, such as the AArch64 digest the
+     test prints (`scenario 981 digest <hex>`) or the assertion's `left:` value, and grep for it.
+   - (c) **An unrelated failure in the same package still fails the main run.** A planted
+     `assert!(false)` in compressor's `randomized_differential_f32` gave "FAILED. 12 passed;
+     1 failed" with exit 101. The unplanted control gave "13 passed" with exit 0.
+
+   **Should the six NaN pins also be expected failures in the release leg?** No. The release leg
+   runs only `lane`, `math`, `wasm-gates` and `console-workload`, so it never runs compressor's
+   lib tests or EQ's `bank` test. They would need rows only if the leg ever ran those packages in
+   release. #1065's "in debug and release" comes from ad-hoc runs, not from this leg.
+
+4. **LOW: the skip names apply to every test binary in the run.** `--exact --skip <name>` goes
+   to every binary in the debug leg's single `cargo test`. Each of the six names matches exactly
+   one test in the workspace today, but a future test with the same name elsewhere would be
+   skipped silently. Consider failing when a skip name matches more than one listed test.
+
+5. **LOW: the vacuity guards have gaps.**
+   - `check-ci-path-routing.py` pins each job's exact `run:` line, so appending `|| true` is
+     caught.
+   - `continue-on-error: true`, at either job or step level, passes the routing checker and
+     `check-test-support-ci.py`. No check in the workflow refuses it for any job. The gap
+     predates #1017, and I did not verify how Actions reports such a job's result to the
+     verdict's `needs`, so a successor issue should decide it.
+   - The no-silent-skip scan catches the planted `if Backend::current() != Backend::Simd8 { return; }`
+     and `let Some(..) = prepare_bank_w8(..) else { eprintln!(..); return; }`.
+   - It misses `if !matches!(Backend::current(), Backend::Simd8) { return; }`, which is
+     acceptable for a heuristic lint.
+   - Zero tests or an empty package list cannot pass: `product_crates` requires at least 20
+     crates and six named ones, and a missing expected-failure name fails.
+
+6. **LOW: W8-only gate-expander claims are not checked at W4.** Six gate-expander tests are
+   ignored off x86 with a correct reason, because a W8 bank cannot bind on `Simd4`:
+   - identity `scalar_and_w8_…`;
+   - oracle `…_w8`;
+   - state `malformed_final_right_word…`, `scalar_and_bank_recovery…`,
+     `scalar_and_bank_state_payloads_interchange…` and `bank_restore_of_one_track…`.
+
+   On AArch64 only three tests cover these claims: the lib tests
+   `internal_w4_pcm_and_serialized_continuation_are_bit_exact` and
+   `injected_nonfinite_gain_has_scalar_parity_at_the_native_width`, plus the W4 binding smoke.
+   Payload interchange, restore isolation and malformed-word rejection are therefore unchecked at
+   the width phones run. The other ignores are sound with a named owner:
+   - capi byte totals (#1060);
+   - MQ-2 (#1027);
+   - symmetry-witness per-node arm, which is width-independent scalar code that x86 runs.
+
+   Make the gate tests width-generic, as the lib test now is, in a successor issue.
+
+7. **LOW, unverifiable here.** The tests that re-execute their own binary need real arm64:
+   compressor `conformance`'s allocation child, and the audits' dispatcher. Under qemu the child
+   passes when run directly. The Simd4 issue-037 transcript and the re-recorded cliff rows were
+   also recorded under qemu only. The first CI run must confirm them on hardware.
+
+### Adversarial checks
+
+1. **No weakened x86 test.**
+   - I diffed x86 `--list` and `--list --ignored` for `--workspace --all-targets
+     --all-features`, before and after the merge.
+     - Tests: 2,282 before and after. Six renames and no removals: `fp_environment::x86::*` and
+       `g6_full_corpus_ftz::x86::*` became `pinned::*`, and two tests were renamed from `w8` to
+       `native_width`.
+     - Ignored: 39 before, 40 after. The one added is gate `w4_binding_…`, which used to return
+       early on x86 and report a pass.
+   - I read every changed test.
+     - On x86, `Backend::current().width()` is 8. So the derived counts reproduce the old
+       literals exactly: `[8,48]`, `[48,48,48,40]`, `quiet[1]=8`, `[3,9]`, `redirects=4`,
+       `collapsed=BLOCKS`. So do the `native_bank()` and `for_backend` widths (W8), the
+       `silent_fixed_point` tone (index arithmetic identical at 8 lanes) and the issue-037 pin
+       (`0xe095_f3ad_a9cc_cf46`).
+     - `fp_control_bits` is `& MXCSR_CONTROL_MASK` (`0xFFC0`), the old `MXCSR_CONTROL_BITS`.
+     - `read/write_fp_control_word` are `read/write_mxcsr`.
+     - Four changes are stricter on x86. Every former `let Some(..) = prepare_bank_w8(..) else
+       { return }` is now `expect(..)`. `input_liveness_console` went from `engaged > 0` to
+       `== 2`. MQ-2 and the effect-compiler bank test now assert rather than return.
+   - Two changes on x86 are not weaker, but I name them:
+     - The TPL `bank_binding_validates…` malformed member moves from lane 5 to lane 7.
+     - The EQ cliff scenario now plants tracks 0 and 4 in the one W8 bank. This re-records two
+       digests. No product code changed, so no render moved.
+
+2. **Expected failures:** see finding 3.
+   - All six debug rows and both release rows fail alone under qemu, as the named test.
+   - The debug main run, with the script's exact skip arguments, covered 232 binaries: 1,904
+     passed, 45 ignored and 6 filtered. The one failure is the qemu re-exec artifact of finding 7.
+
+3. **CI wiring.**
+   - Both jobs sit in `verdict.needs`, in its `*_RESULT` env and in the table as
+     `"$full_expected"`.
+   - Both are gated on `needs.route.outputs.route == 'full'`, with no `paths:` filter.
+   - `check-ci-path-routing.py` and `test-ci-path-routing.py` pass on the merge.
+   - actionlint 1.7.7 reports nothing. shellcheck is not installed.
+
+4. **Cross targets.**
+   - `check-cross-targets.sh` passes on the merge: 2m41s cold, both clippy rows at `-D warnings`.
+   - On the base, clippy `-D warnings` for `aarch64-linux-android` fails in two places:
+     - `lane/tests/fp_env.rs:14` (unused `self`);
+     - `host-core/tests/fp_environment.rs:25,26,52,63,81,102`, the pre-existing `host-core`
+       failure #1056's verifier noted.
+   - The branch fixes both with FPCR arms, not with `cfg` deletions.
+   - A planted `#[cfg(target_arch = "aarch64")] fn` in `session`:
+     - fails the Android clippy row ("never used");
+     - leaves x86 clippy green.
+   - A planted `assert_eq!(Backend::current(), Simd8)` in `lane/tests/fp_env.rs`:
+     - fails on aarch64 with `left: Simd4, right: Simd8`;
+     - leaves x86 green.
+
+5. **The iOS memset scan.** It counts 151 and 376 calls. On a zero count it fails with "now
+   passes: remove it": I pointed its crate list at `delay` and `rack` to show this. It passes on
+   any nonzero count: `compressor` alone gave 970. It has no row list, so "no entry" is not a
+   state it can be in. Finding 1 covers its scope.
+
+6. **No target-specific product code.** Every added `cfg(target_arch)` is in a `tests/` file.
+   The non-test files that changed use `Backend::current()` at run time, or name `Backend::Simd8`
+   without a `cfg`:
+   - the `src/lib.rs` hunks, all inside `#[cfg(test)] mod tests`;
+   - the `graph_fixture` bin;
+   - `tools/audit/src/gate_expander.rs`.
+
+7. **Gates on the merge (x86).**
+   - `cargo check --workspace --all-targets --all-features`: pass.
+   - clippy `-D warnings`: pass.
+   - `fmt --check`: pass.
+   - `test-debug-a`'s command: 1,444 passed, 0 failed.
+   - `test-debug-b`'s: 807 passed.
+   - `test-release`'s: 115 passed.
+   - `cargo test --release -p audit -p bench -p console-workload`: 156 passed. This includes the
+     console digests. #1017 changes no console digest constant.
+   - `scripts/run-wasm-gates.sh`: pass. That covers native, wasm scalar and wasm simd128 (142
+     cases, 0 mismatches) and the V8 EQ spill gate, with the AudioWorklet module on its pin.
+   - Every `check-*.sh` and argument-free `check-*.py` passes, with three exceptions, none caused
+     by the branch:
+     - `check-capi-abi.sh` and `check-graph-determinism.sh` hard-code `target/`, so they failed
+       under my `CARGO_TARGET_DIR`. Rerun with `target/` linked, they pass.
+     - `check-sdk-types.sh` needs `sdk/node_modules`.
+     - The seven `.py` scripts that exit with usage need arguments.
+
+8. **AArch64 under qemu-user 8.2.2.**
+   - Debug leg, complete (above).
+   - Release leg on the #1048 trial merge:
+     - `lane`/`math`/`wasm-gates`: pass.
+     - M2 rows: fail as named.
+     - `console-workload`: pass.
+   - Audits, as subjects:
+     - `capi`: 100,000 calls, `pcm_digest` `ff6cdcb96cdcdad5`, 0 violations.
+     - `delay`, `compressor`, `parametric-eq`: 0 violations.
+     - `gate-expander`: `bank_width` 4, `bank_available` true, 0 violations.
+   - CI cost and hardware wall times are not verifiable here.
+
+### Test value
+
+For each new or rewritten test: which plausible defect turns it red that no existing test catches?
+
+- **`lane` `fp_env::aarch64::*` (4 tests).** A `CanonicalFpEnv` that fails to install FPCR 0,
+  or fails to restore a caller's FZ/DN/RMode word, including across an unwind. So does an
+  `in_canonical_fp_environment` or attestation that misreads FPCR. Nothing else runs the FPCR
+  path.
+- **`g6_ftz_inert`, `host-core` `fp_environment::pinned::*` and `wasm-gates`
+  `g6_full_corpus_ftz::pinned::*` on AArch64.** The D8 flush law, `render_planar`'s pin or the
+  G5 corpus going off-pin under a caller's `FPCR.FZ` on phones. On x86 the claims are unchanged.
+- **gate `injected_nonfinite_gain_…_native_width`.** A NaN gain in one NEON lane leaking into
+  its siblings or diverging from the scalar peer. It previously ran only at W8.
+- **TPL cohort tests and `allocation`, and effect-compiler
+  `production_soft_clip_native_width_…`.** A W4 uniform-cohort body diverging from the per-lane
+  path, a W4 bank render allocating, or a W4 member restore moving a sibling. None was reachable
+  at W4 before.
+- **EQ cliff, issue-037 `Simd4` row and the console/host-core derived counts.** The W4 fault
+  reset, layout, counters or cohort formation diverging from the W8 plan's. These pins are
+  pre-existing, and #1017 only makes them width-correct.
+- **The audit gate subject.** The gate audit covers a bank on AArch64 at all: before this
+  change, `bank_available` was false there.
