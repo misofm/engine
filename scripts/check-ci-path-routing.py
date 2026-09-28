@@ -350,17 +350,71 @@ ARTIFACT_DIGEST_STEP = (
 )
 ARTIFACT_DIGEST_OUTPUT = "    outputs:\n      sha256: ${{ steps.build.outputs.sha256 }}\n"
 ARTIFACT_READERS = ("sdk", "artifact-gates", "browser")
-# Issue #1061: the identity job's twin build (another checkout path and CARGO_HOME), its self-test
-# and its report, which says ARTIFACT CHANGED or UNCHANGED and holds a release change to its pin.
-IDENTITY_LINES = (
-    'CARGO_HOME="$RUNNER_TEMP/twin-cargo-home" bash '
-    '"$RUNNER_TEMP/twin/scripts/build-web-audioworklet.sh" --module-only "$RUNNER_TEMP/twin-module"\n',
-    "          BUILT: ${{ needs.artifact.outputs.sha256 }}\n",
-    "python3 -B scripts/web-audioworklet-identity.py --self-test\n",
-    'python3 -B scripts/web-audioworklet-identity.py report --built "$BUILT" '
-    '--twin "$RUNNER_TEMP/twin-module/$module" "${base_args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"\n',
-)
+# Issue #1061: the identity job, step by step. Its checkout carries full history (the base must be
+# reachable), its toolchain step is free (a toolchain bump edits it), and its last three steps are
+# pinned exactly: the twin build from another checkout path and CARGO_HOME; the base, found from the
+# event and built with the base's own script and pinned toolchain; and the self-tested report, which
+# says ARTIFACT CHANGED or UNCHANGED and holds a release change to its pin. Attempt 1 pinned lines
+# of the twin and the report only, and five mutants of the base wiring (the base arguments dropped,
+# `--event none`, an empty `BEFORE`, no full history, a twin symlinked to the workspace) each left
+# every run without a base, and so without release checks, with this checker green.
+IDENTITY_CHECKOUT = re.compile(
+    r"      - uses: actions/checkout@[0-9a-f]{40} # v\S+\n        with:\n          fetch-depth: 0\n\Z")
+IDENTITY_INSTALL = "      - name: Install pinned Rust toolchain and Wasm standard library\n"
+IDENTITY_TWIN_STEP = """      - name: Rebuild the module from another checkout path and CARGO_HOME
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/twin" HEAD
+          mkdir "$RUNNER_TEMP/twin-module"
+          CARGO_HOME="$RUNNER_TEMP/twin-cargo-home" bash "$RUNNER_TEMP/twin/scripts/build-web-audioworklet.sh" --module-only "$RUNNER_TEMP/twin-module"
+"""
+IDENTITY_BASE_STEP = """      - name: Build the base's module with the base's own build script and toolchain
+        id: base
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          base="$(python3 -B scripts/web-audioworklet-identity.py base --event "$EVENT" --before "$BEFORE")"
+          echo "commit=$base" >> "$GITHUB_OUTPUT"
+          [[ -n "$base" ]] || exit 0
+          toolchain="$(python3 -B scripts/web-audioworklet-identity.py toolchain --commit "$base")"
+          echo "toolchain=$toolchain" >> "$GITHUB_OUTPUT"
+          rustup toolchain install "$toolchain" --profile minimal
+          rustup target add --toolchain "$toolchain" wasm32-unknown-unknown
+          git worktree add --detach "$RUNNER_TEMP/base" "$base"
+          mkdir "$RUNNER_TEMP/base-module"
+          RUSTUP_TOOLCHAIN="$toolchain" bash "$RUNNER_TEMP/base/scripts/build-web-audioworklet.sh" --module-only "$RUNNER_TEMP/base-module"
+"""
+IDENTITY_REPORT_STEP = """      - name: Report ARTIFACT CHANGED or UNCHANGED, and hold a release change to its pin
+        env:
+          BUILT: ${{ needs.artifact.outputs.sha256 }}
+          BASE: ${{ steps.base.outputs.commit }}
+          BASE_TOOLCHAIN: ${{ steps.base.outputs.toolchain }}
+        run: |
+          set -o pipefail
+          python3 -B scripts/web-audioworklet-identity.py --self-test
+          module=miso-engine-v1-audio-worklet.simd128.wasm
+          base_args=()
+          [[ -z "$BASE" ]] || base_args=(--base "$BASE" --base-toolchain "$BASE_TOOLCHAIN" --base-module "$RUNNER_TEMP/base-module/$module")
+          python3 -B scripts/web-audioworklet-identity.py report --built "$BUILT" --toolchain "$RUSTUP_TOOLCHAIN" --twin "$RUNNER_TEMP/twin-module/$module" "${base_args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+"""
+IDENTITY_STEPS = (IDENTITY_TWIN_STEP, IDENTITY_BASE_STEP, IDENTITY_REPORT_STEP)
 
+
+def job_steps(job_text: str) -> list[str]:
+    """A job's steps, each from its `      - ` line to the next, with comment-only lines and blank
+    lines removed (comments document a step; they never change what it runs)."""
+    body = job_text.split("    steps:\n", 1)
+    require(len(body) == 2, "qualification.yml: job has no steps")
+    lines = [line for line in body[1].splitlines(keepends=True)
+             if line.strip() and not line.lstrip().startswith("#")]
+    steps: list[str] = []
+    for line in lines:
+        if line.startswith("      - "):
+            steps.append(line)
+        else:
+            require(bool(steps), "qualification.yml: text before the first step")
+            steps[-1] += line
+    return steps
 
 def check_qualification_artifact_digest(text: str) -> None:
     """Issue #1061: the `artifact` job publishes its module's digest, and every job that reads the
@@ -387,16 +441,27 @@ def check_qualification_artifact_digest(text: str) -> None:
 def check_qualification_artifact_identity(text: str) -> None:
     """Issue #1061 (owner decision 5): every PR that builds the module reports whether it changed,
     proves it reproducible, and holds a release change to the pin. The identity job must run
-    exactly where `artifact` runs, after it, and keep its twin build, self-test and report."""
+    exactly where `artifact` runs, after it, with full history, and with its twin, base and report
+    steps exactly as pinned."""
     identity = job(text, "artifact-identity")
     require(job_if(identity) == job_if(job(text, "artifact")),
             "qualification.yml: artifact-identity must run on exactly the artifact job's routes")
     require(re.search(r"^    needs: \[route, artifact\]$", identity, re.MULTILINE) is not None,
             "qualification.yml: artifact-identity must need exactly [route, artifact]")
-    for line in IDENTITY_LINES:
-        require(line in identity, f"qualification.yml: artifact-identity is missing {line.strip()!r}")
-    require(identity.index(IDENTITY_LINES[2]) < identity.index(IDENTITY_LINES[3]),
-            "qualification.yml: artifact-identity must self-test the report before trusting it")
+    steps = job_steps(identity)
+    require(len(steps) == 5,
+            "qualification.yml: artifact-identity must be exactly checkout, toolchain, twin, base "
+            "and report steps")
+    require(IDENTITY_CHECKOUT.fullmatch(steps[0]) is not None,
+            "qualification.yml: artifact-identity must check out full history (fetch-depth: 0), "
+            "or no run finds its base")
+    require(steps[1].startswith(IDENTITY_INSTALL),
+            "qualification.yml: artifact-identity's second step must install the toolchain")
+    for step, pinned in zip(steps[2:], IDENTITY_STEPS):
+        require(step == pinned,
+                "qualification.yml: artifact-identity step differs from its pin: "
+                f"{pinned.splitlines()[0].strip()!r} (scripts/check-ci-path-routing.py "
+                "IDENTITY_STEPS)")
 
 
 def check_qualification_v8_spill(text: str) -> None:

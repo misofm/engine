@@ -19,8 +19,9 @@ artifact that was qualified. `qualification/generate-matrix.mjs` (run through `n
 records that identity beside the artifact digest; later commits may regenerate evidence files, and a
 squash merge does not retroactively change the source candidate named by an existing qualification.
 Record the source candidate and any later evidence or merge commit together when publishing a matrix.
-Since issue #1061 the matrix, `results.json` and the artifact pin describe the last release: a
-release PR re-records them for the bytes it ships, and nothing re-pins them in between
+Since issue #1061 only a release PR re-records the matrix, `results.json` and the artifact pin, for
+the bytes it ships; nothing re-pins them in between. Until the first such release they still describe
+the last per-change pin (`f7bd75ca...`), not release 0.4.3's module
 ([release procedure](../../docs/RELEASE.md)).
 
 For a local run:

@@ -720,8 +720,45 @@ def main() -> int:
         checker_fails(root)
     finally:
         shutil.rmtree(root)
-    for line in checker.IDENTITY_LINES:
-        workflow_mutation_fails("qualification.yml", line.lstrip(" "), "true\n")
+    for step in checker.IDENTITY_STEPS:
+        workflow_mutation_fails("qualification.yml", step, "")  # a pinned step deleted
+    # Attempt 1 finding 2: each of these left every run without a base, and so without release
+    # checks, while the checker stayed green.
+    base_args = ('[[ -z "$BASE" ]] || base_args=(--base "$BASE" --base-toolchain '
+                 '"$BASE_TOOLCHAIN" --base-module "$RUNNER_TEMP/base-module/$module")\n')
+    workflow_mutation_fails("qualification.yml", "          " + base_args, "")
+    workflow_mutation_fails("qualification.yml", 'base --event "$EVENT"', "base --event none")
+    workflow_mutation_fails("qualification.yml", "          BEFORE: ${{ github.event.before }}\n",
+                            '          BEFORE: ""\n')
+    workflow_mutation_fails(
+        "qualification.yml",
+        "        with:\n          fetch-depth: 0\n"
+        "      - name: Install pinned Rust toolchain and Wasm standard library\n",
+        "      - name: Install pinned Rust toolchain and Wasm standard library\n",
+    )  # the identity job's full history dropped: no base is reachable
+    workflow_mutation_fails(
+        "qualification.yml", 'git worktree add --detach "$RUNNER_TEMP/twin" HEAD\n',
+        'ln -s "$GITHUB_WORKSPACE" "$RUNNER_TEMP/twin"\n',
+    )  # a twin symlinked to the workspace rebuilds from the artifact job's own path
+    # Attempt 1 finding 1: the base rebuilt with this run's toolchain reports a toolchain change
+    # as ARTIFACT UNCHANGED.
+    workflow_mutation_fails(
+        "qualification.yml",
+        'RUSTUP_TOOLCHAIN="$toolchain" bash "$RUNNER_TEMP/base/',
+        'bash "$RUNNER_TEMP/base/',
+    )
+    workflow_mutation_fails("qualification.yml", 'toolchain --commit "$base"',
+                            "toolchain --commit HEAD")
+    workflow_mutation_fails(
+        "qualification.yml",
+        "          BASE_TOOLCHAIN: ${{ steps.base.outputs.toolchain }}\n",
+        '          BASE_TOOLCHAIN: ${{ env.RUSTUP_TOOLCHAIN }}\n',
+    )
+    workflow_mutation_fails(
+        "qualification.yml", checker.IDENTITY_REPORT_STEP,
+        "      - name: Remove the base module\n        run: rm -rf \"$RUNNER_TEMP/base-module\"\n"
+        + checker.IDENTITY_REPORT_STEP,
+    )  # a step slipped in between
     workflow_mutation_fails(
         "qualification.yml",
         'CARGO_HOME="$RUNNER_TEMP/twin-cargo-home" bash "$RUNNER_TEMP/twin/',

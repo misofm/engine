@@ -158,7 +158,11 @@ jobs:
           git worktree add --detach "$RUNNER_TEMP/twin" HEAD
           mkdir "$RUNNER_TEMP/twin-module"
           CARGO_HOME="$RUNNER_TEMP/twin-cargo-home" bash "$RUNNER_TEMP/twin/scripts/build-web-audioworklet.sh" --module-only "$RUNNER_TEMP/twin-module"
-      - name: Build the base's module with the base's own build script
+      # The base's module as the base's own CI built it: the base's build script, run with the
+      # toolchain the base pinned (its workflow's RUSTUP_TOOLCHAIN, else its rust-toolchain.toml).
+      # A toolchain change moves the module with no source change, so the base is never rebuilt
+      # with this run's toolchain (#1061 attempt 1, finding 1).
+      - name: Build the base's module with the base's own build script and toolchain
         id: base
         env:
           EVENT: ${{ github.event_name }}
@@ -167,20 +171,25 @@ jobs:
           base="$(python3 -B scripts/web-audioworklet-identity.py base --event "$EVENT" --before "$BEFORE")"
           echo "commit=$base" >> "$GITHUB_OUTPUT"
           [[ -n "$base" ]] || exit 0
+          toolchain="$(python3 -B scripts/web-audioworklet-identity.py toolchain --commit "$base")"
+          echo "toolchain=$toolchain" >> "$GITHUB_OUTPUT"
+          rustup toolchain install "$toolchain" --profile minimal
+          rustup target add --toolchain "$toolchain" wasm32-unknown-unknown
           git worktree add --detach "$RUNNER_TEMP/base" "$base"
           mkdir "$RUNNER_TEMP/base-module"
-          bash "$RUNNER_TEMP/base/scripts/build-web-audioworklet.sh" --module-only "$RUNNER_TEMP/base-module"
+          RUSTUP_TOOLCHAIN="$toolchain" bash "$RUNNER_TEMP/base/scripts/build-web-audioworklet.sh" --module-only "$RUNNER_TEMP/base-module"
       - name: Report ARTIFACT CHANGED or UNCHANGED, and hold a release change to its pin
         env:
           BUILT: ${{ needs.artifact.outputs.sha256 }}
           BASE: ${{ steps.base.outputs.commit }}
+          BASE_TOOLCHAIN: ${{ steps.base.outputs.toolchain }}
         run: |
           set -o pipefail
           python3 -B scripts/web-audioworklet-identity.py --self-test
           module=miso-engine-v1-audio-worklet.simd128.wasm
           base_args=()
-          [[ -z "$BASE" ]] || base_args=(--base "$BASE" --base-module "$RUNNER_TEMP/base-module/$module")
-          python3 -B scripts/web-audioworklet-identity.py report --built "$BUILT" --twin "$RUNNER_TEMP/twin-module/$module" "${base_args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+          [[ -z "$BASE" ]] || base_args=(--base "$BASE" --base-toolchain "$BASE_TOOLCHAIN" --base-module "$RUNNER_TEMP/base-module/$module")
+          python3 -B scripts/web-audioworklet-identity.py report --built "$BUILT" --toolchain "$RUSTUP_TOOLCHAIN" --twin "$RUNNER_TEMP/twin-module/$module" "${base_args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
 
   sdk:
     name: SDK package and generated-surface qualification
