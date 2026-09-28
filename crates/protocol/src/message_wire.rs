@@ -53,10 +53,6 @@ pub struct CapabilityFlags(pub u64);
 impl CapabilityFlags {
     /// Canonical BTLV, caller-buffer, replay, revisioned-edit, and snapshot support.
     pub const B1B_BASE: Self = Self((1 << 5) - 1);
-    /// B1b behavior plus fixed transient automation batches and parameter metadata.
-    pub const B2B_BASE: Self = Self((1 << 8) - 1);
-    /// B2b behavior plus typed transport provider support.
-    pub const B3A_BASE: Self = Self((1 << 9) - 1);
     /// Complete issue-005 typed provider, telemetry, and reliable-event registry.
     pub const B4_BASE: Self = Self((1 << 14) - 1);
     /// Reliable session-committed event support.
@@ -434,12 +430,6 @@ pub struct DecodedAutomationEnqueue<'a> {
 }
 
 impl<'a> DecodedAutomationEnqueue<'a> {
-    /// Borrow the exact canonical fixed-record bytes.
-    #[must_use]
-    pub const fn record_bytes(self) -> &'a [u8] {
-        self.record_bytes
-    }
-
     /// Decode one already bounds-checked fixed record without allocation.
     pub fn record(self, index: usize) -> Result<crate::AutomationRecord, DecodeError> {
         let offset = index
@@ -609,12 +599,6 @@ pub struct DecodedMeterBatch<'a> {
 }
 
 impl<'a> DecodedMeterBatch<'a> {
-    /// Borrow the already validated exact `count * 16` record byte range.
-    #[must_use]
-    pub const fn record_bytes(self) -> &'a [u8] {
-        self.record_bytes
-    }
-
     /// Decode one bounded fixed record without allocation.
     pub fn record(self, index: usize) -> Result<MeterRecord, DecodeError> {
         if index >= usize::from(self.count) {
@@ -896,18 +880,6 @@ impl ProtocolCodec {
             return Err(DecodeError::LimitExceeded);
         }
         decode_non_ok(self, Message::top_level(payload, tlv_count, self.limits())?)
-    }
-
-    /// Return the exact canonical nested-message length for one typed diagnostic.
-    pub fn encoded_diagnostic_message_len(&self, value: &Diagnostic) -> Result<usize, EncodeError> {
-        let mut sink = CountSink::new(self.limits());
-        write_diagnostic_message(self, &mut sink, value)?;
-        checked_sink_len(self, &mut sink)
-    }
-
-    /// Decode one nested typed diagnostic payload.
-    pub fn decode_diagnostic_message(&self, value: &[u8]) -> Result<Diagnostic, DecodeError> {
-        decode_diagnostic(self, Message::nested_at_depth(value, self.limits(), 0)?)
     }
 
     /// Exact payload length for the 27-field successful capabilities response.
