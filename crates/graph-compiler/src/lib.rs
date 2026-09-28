@@ -5347,6 +5347,12 @@ mod tests {
     /// web period of 12 blocks -- renders 1,000 blocks under the allocation audit with zero events,
     /// one pass per cohort per block and one merge per meter per block, on the
     /// [`METER_CONSOLE_TRACKS`]-track console.
+    ///
+    /// The audit's events here are the render path's own forbidden-operation hooks: this test
+    /// binary installs no counting allocator, so an allocation is not one of them (issue #1049
+    /// injected one into the pass and this stayed green, on 64 tracks as on 8). The bench
+    /// console's `the_metered_console_row_prints_its_meters_and_the_validator_pins_them`, under
+    /// the audited allocator, aborts on it.
     #[test]
     fn the_banked_sample_peak_pass_renders_without_an_audited_event() {
         const BLOCKS: u64 = 1_000;
@@ -5420,15 +5426,21 @@ mod tests {
     /// Issue #950 gate M4: the full meter pass is realtime-clean. The `console_meters` shape -- an
     /// `ALL` meter on every post-matrix boundary through `prepare_session_builtins`, period 4 x 128,
     /// no hold, no decay -- renders 1,000 blocks under the allocation audit with zero events, one
-    /// full pass per cohort per block and one commit per meter per block.
+    /// full pass per cohort per block and one commit per meter per block, on the
+    /// [`METER_CONSOLE_TRACKS`]-track console.
+    ///
+    /// As for #943's G4 above, the audit's events are the render path's own hooks, not
+    /// allocations: this binary installs no counting allocator (issue #1049). The bench console's
+    /// `the_meters_record_carries_each_arms_fold_and_redirect_counters`, under the audited
+    /// allocator, aborts on an allocation in the pass.
     #[test]
     fn the_full_meter_pass_renders_without_an_audited_event() {
         full_meter_pass_renders_without_an_audited_event(METER_CONSOLE_TRACKS);
     }
 
-    /// [`the_full_meter_pass_renders_without_an_audited_event`] on the whole 64-track console: an
-    /// allocation that appears only at size cannot be seen on the small one. `nightly.yml` runs it,
-    /// in a dev build (issue #1049).
+    /// [`the_full_meter_pass_renders_without_an_audited_event`] on the whole 64-track console, so a
+    /// hook event, pass count or commit count that appears only at size is still seen.
+    /// `nightly.yml` runs it, in a dev build (issue #1049).
     #[test]
     #[ignore = "nightly: the 64-track console (#1049); the small console runs per PR"]
     fn the_full_meter_pass_renders_without_an_audited_event_on_sixty_four_tracks() {
