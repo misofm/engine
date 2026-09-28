@@ -253,3 +253,95 @@ there and at `c69736c1`, which is not upstream yet. Each citation is marked "rem
 - Open #881-#899 (16 issues) cite `docs/audits/render-path-cost-audit-2026-09-24.md`. It exists
   only on the unmerged branch `codex/render-path-cost-audit` (`54804bc1`).
 - Open #560 cites `docs/audits/524-merge-base-addendum.md`, which was removed before this issue.
+
+## Sol verdict, attempt 1
+
+**PASS.** Sol, 2026-09-28, reviewing `441722c2` (prune) and `d1d86303` (evidence). Nothing that
+is still cited or read was deleted. No gate broke. Every open issue keeps its evidence paths.
+
+**What was verified**
+
+- **Merge.** A scratch merge onto the batch head `codex/batch-slim-2` (`6709552c`) is clean.
+  A trial merge of `codex/1030-prune-artifacts` (`103091eb`) on top is also clean, and the two
+  branches change no file in common.
+- **Scope.** The removal is 114 files and 1,569,237 bytes. The per-group counts and bytes match
+  the evidence table exactly. The other changes are 11 modified files: this spec, the README
+  retitle, 3 `.md` citation files, 3 handoff notes and 3 `.rs` files.
+- **Citations.** The whole merged tree (12,437 tracked files) was grepped for 515 tokens:
+  - each deleted path, with and without `docs/`;
+  - `parent/basename` for each file;
+  - each distinctive basename and stem;
+  - the folder names;
+  - `audits/<n>-` for each audit note.
+
+  Permalinks were stripped first. A second case-insensitive sweep looked for name-only forms
+  (`limiter diagnosis 2`, `GAIN-PAN`, `v2old`, `issue880-m*` and others). It covered `crates`,
+  `hosts`, `tools`, `scripts`, `sdk`, `fuzz`, the workflows, `docs/rulings`, top-level `docs/*.md`,
+  `AGENTS.md`, `dsp-research` and `fixtures`.
+  - No `include_str!`, `include_bytes!`, test, script or workflow reads a deleted file.
+  - Every hit in code, `MUTATIONS.md` or a kept doc is a re-pointed permalink, or is scope text
+    in the dead-code audit or this issue.
+  - Hits on `issue880-mq*` name the `scripts/` benchmark files, not the deleted notes.
+- **Permalinks.** The 9 distinct permalink targets all exist at `5379e46c` (`git cat-file -e`).
+  Each is the same blob as at `c69736c1`. Each also resolves on GitHub (read-only contents API,
+  same blob SHA), and `5379e46c` is on `origin/main`. `bug-966-2026-09-27/README.md#L13-L19` is
+  the "Reproducing the `Simd4` pins" passage.
+- **Open issues.** The check covered all 107 open GitHub issue bodies and their 87 local specs:
+  226 `docs/handoffs`, `docs/audits`, `docs/research` or `docs/issue*` mentions. Every one exists
+  on the merge, with three exceptions:
+  - this issue's own scope text;
+  - the scope mentions in #1027 and #1030 (`docs/issue880-*`, `docs/audits/60x-*`);
+  - #560 and #881-#899, which predate this change: their targets are absent at `c69736c1` and at
+    `5379e46c`.
+
+  A token scan of the open bodies finds no name-only citation of a deleted file.
+- **Code edits.**
+  - The `.rs` diff is comment-only: every changed line is `//!` or `///`.
+  - `cargo check --workspace --all-targets` passes, and `cargo doc -D warnings` passes for
+    `math` (also with `--document-private-items`) and `lane`.
+  - `rustfmt --check` passes on the three files, and so does
+    `cargo clippy -p math -p lane -p transient-shaper --all-targets --all-features -D warnings`.
+  - These tests pass: `transient-shaper --test oracle` (2), `session --test json_contract_artifacts`
+    (3) and `session-validator --test skill` (1).
+- **AudioWorklet module.** Built with `build-web-audioworklet.sh --module-only` on `6709552c` and
+  on the merge. The two builds are byte-identical, `6c952a2c26f4…57c2e7`, which equals the batch
+  pin.
+- **Gates.** 67 invocations were run on `6709552c` and on the merge. The results are identical,
+  and all of them pass:
+  - the "docs and research evidence gates" job;
+  - the path-routing check and test;
+  - every lint-job policy script (check and test), including session, step vocabulary
+    (with `--self-test`) and script reachability;
+  - `check-sdk-deletions.py`, the command-kind, command-reason and session-map checkers, the
+    builtins and console fixture checks, and `test-gate-lib.sh`;
+  - `check-parameter-metadata-v1.py` and `check-abi-layout-v1.py`, which need an argument and
+    pass in `--self-test`.
+
+  No failure is pre-existing. `ci-path-router.py` routes the merge `full` with
+  `math_closure=true`, the same route as the batch.
+
+**Findings, by severity (none blocks)**
+
+1. **Low: the comment edits add lines.** `lane_math.rs` gains 3 lines, `fpenv.rs` 1 and
+   `oracle.rs` 2. The module is still byte-identical, as above. Two open citations drift by one
+   line:
+   - #1030's `crates/lane/src/fpenv.rs:75` is now `:76`;
+   - #1033's `fpenv.rs:239` (`in_canonical_fp_environment`) is now `:240`. #1033 is not merged
+     yet.
+
+   Those issues' owners can re-cite; nothing here needs to change.
+2. **Info: a name-only citation of the deleted limiter-2 drafts.**
+   `crates/true-peak-limiter/tests/MUTATIONS.md:572-573` names limiter-2-2, its amendment A5 and
+   limiter-2-3. The citation still resolves: #1014's spec carries both drafts, amendments included,
+   and every nonblank draft line except the title is there verbatim. Once R10 (#1040) removes the
+   closed specs, the GitHub #1014 body will carry this chain.
+3. **Info: closed specs still cite deleted paths.** 28 closed specs do so: 147, 571-603, 804-809,
+   822, 880, 902, 937-954, 966, 986, 1013 and 1014. They are historical records, and R10 removes
+   closed specs.
+4. **Info, overlap with #1030.** After both merges, dangling `artifacts/` references rise from 78
+   to 86. Seven are in #1030's own files (`docs/C_ABI_V1_QUALIFICATION.md` and draft 07). The
+   eighth is `docs/handoffs/plumbing-floor-2026-09-26/PLAN.md:149`: that file is kept here, and
+   it names `artifacts/copy-removal-without-920/`, which #1030 deletes. It is a historical mention,
+   for #1030's verifier.
+5. **Info, unrelated to #1031.** `codex/1061-artifact-fingerprint-at-release` conflicts with the
+   batch head in `scripts/test-web-audioworklet.mjs`, with or without this merge.
