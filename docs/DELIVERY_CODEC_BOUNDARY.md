@@ -9,7 +9,7 @@ own chosen package or platform facility, verify the declared PCM shape and canon
 submit bounded decoded PCM through the existing generic ingress APIs. Browser OPFS, resolver,
 ring, and AudioWorklet seams remain generic; none selects or embeds a delivery format.
 
-The only in-repository source-file reader remains the native WAVE/RF64 control-worker path. It is
-not a browser delivery contract and does not add a packaged codec asset. New delivery support
-requires a separately reviewed external-package or platform-tool issue; do not restore removed
-code here.
+There is no in-repository source-file reader: #1035 removed the native WAVE/RF64 decode workers
+and #1033 the native WAV/RF64 parser and the native PCM runner that used it. Every host, the C ABI
+included, submits decoded planar PCM. New delivery support requires a separately reviewed
+external-package or platform-tool issue; do not restore removed code here.

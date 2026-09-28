@@ -20,7 +20,6 @@ mod parametric_eq;
 mod protocol;
 mod realtime;
 mod record;
-mod source_fixture;
 mod unfused_fma;
 mod vectorization;
 
@@ -34,7 +33,6 @@ const SUBJECTS: &[&str] = &[
     "delay",
     "fixture-builtins",
     "fixture-builtins-listening",
-    "fixture-source",
     "fp-env",
     "gate-expander",
     "graph",
@@ -55,7 +53,6 @@ fn run_subject(subject: &str) {
         "delay" => delay::main(),
         "fixture-builtins" => fixture_builtins::main(),
         "fixture-builtins-listening" => fixture_builtins_listening::main(),
-        "fixture-source" => source_fixture::main(),
         "fp-env" => fp_env::main(),
         "gate-expander" => gate_expander::main(),
         "graph" => graph::main(),

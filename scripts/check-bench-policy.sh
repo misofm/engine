@@ -202,11 +202,12 @@ for subject in "${timed_subjects[@]}"; do
     fi
 done
 
-# `allow(unsafe_code)` is denied workspace-wide; these six files are the approved exceptions under
+# `allow(unsafe_code)` is denied workspace-wide; these five files are the approved exceptions under
 # `tools/`, and `scripts/check-realtime-policy.sh` holds the matching list for `crates/` and
-# `hosts/`. A seventh file is a new unsafe ownership boundary and needs a decision, not a grep.
+# `hosts/`. A sixth file is a new unsafe ownership boundary and needs a decision, not a grep.
+# (#1033 removed `tools/native-pcm-runner` and its row.)
 #
-# The decision for the sixth, `wasm-console-guest` (#163 phase 2 step 1): it is the
+# The decision for `wasm-console-guest` (#163 phase 2 step 1): it is the
 # *same* boundary this list already grants `wasm-gate-guest`, for the same reason and
 # with the same shape. Exporting a function from a `cdylib` requires `#[unsafe(no_mangle)]` under
 # edition 2024 and there is no safe spelling of it. Both guests are `u32`-in/`u32`-out, neither
@@ -217,7 +218,6 @@ done
 if printf '%s\n' \
     tools/bench-support/src/alloc.rs \
     tools/audit/src/capi.rs \
-    tools/native-pcm-runner/src/lib.rs \
     tools/bench/src/protocol.rs \
     tools/wasm-gate-guest/src/lib.rs \
     tools/wasm-console-guest/src/lib.rs | LC_ALL=C sort >"$scratch/expected-unsafe" 2>"$scratch/sort.err"; then sort_status=0; else sort_status=$?; fi

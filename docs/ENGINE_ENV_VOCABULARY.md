@@ -138,7 +138,7 @@ Read by one subject each.
 | `MISO_ENGINE_WEB_WORKLET_TEST_MODULE` | Hermetic worklet test: override module path for the bootstrap-under-test (#132). |
 | `MISO_ENGINE_WEB_HOST_TEST_MODULE` | Hermetic worklet test: override module path for the main-realm host under test, so a red mutation of the host runs the same suite (#151). |
 | `MISO_ENGINE_WEB_HOST_MAX_SAFE_TEST` | Hermetic host allocator test selector; when `1`, the existing test runs the transformed private counter at `MAX_SAFE_INTEGER - 1`, proves the final safe ID once, then proves repeatable local exhaustion with no post, wrap or reuse. |
-| `MISO_ENGINE_PRINT_HELPER_MANIFEST` | native PCM runner portability gate: helper manifest path. |
+| `MISO_ENGINE_PRINT_HELPER_MANIFEST` | `check-effect-runtime-policy.sh`: set to `1` to print its pinned duplicated-helper manifest and exit instead of checking it. |
 | `MISO_ENGINE_EFFECT_CONTRACT_V1_H` | the C include guard `check-effect-contract.sh` asserts. Not an environment variable. |
 | `MISO_ENGINE_BENCH_POLICY_NEEDLE` | `check-bench-policy.sh`'s `sole_owner_or_delegate`: internal transport of the four-character backslash char-literal needle from bash to the `awk` subprocess through `ENVIRON`, chosen over `-v` because `-v` assignments go through awk's own C-style escape processing a second time. Set and read only inside that one function invocation; not user-facing. |
 
@@ -152,4 +152,3 @@ runs, so re-pin mode cannot turn a backend disagreement into a new pin (master p
 | name | meaning |
 |---|---|
 | `MISO_ENGINE_WEB_AUDIOWORKLET_REPIN` | `build-web-audioworklet.sh`: print the reproducibly built AudioWorklet artifact digest instead of comparing it to the committed pin. |
-| `MISO_ENGINE_REPIN_NATIVE_PCM_RUNNER` | print the five native PCM runner output digests instead of asserting them. |

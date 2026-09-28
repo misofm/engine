@@ -1,5 +1,8 @@
 # C ABI V1 native qualification
 
+#1033 (owner ruling R2, 2026-09-28) removed the native PCM reference runner, its fixtures and its
+checks; the C ABI stays as the mobile interface. The runner rows below are historical.
+
 Issue 114 qualifies the joined, accepted Issue-116 native PCM runner and Issue-121 C ABI product.
 It does not change or reseal either product. The accepted C header, CAPI/protocol implementation,
 runner, runner contract, portability checks, Cargo lock, session fixture, and native runner corpus

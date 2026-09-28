@@ -51,7 +51,6 @@ is_historical() { local path=$1 entry; for entry in "${historical[@]}"; do [[ "$
 
 find_text=
 if ! value="$(gate_find_collect 'fixtures/session find' fixtures/session -type f -name '*.toml')"; then fail 'fixtures/session find failed'; fi; [[ -n "$value" ]] && find_text+="$value"$'\n'
-if ! value="$(gate_find_collect 'fixtures/native-pcm-runner find' fixtures/native-pcm-runner -type f -name '*.toml')"; then fail 'fixtures/native-pcm-runner find failed'; fi; [[ -n "$value" ]] && find_text+="$value"$'\n'
 if ! value="$(gate_find_collect 'host qualification find' hosts/host-web/qualification hosts/host-web/tests/browser-v1 -type f -name '*.toml')"; then fail 'host qualification find failed'; fi; [[ -n "$value" ]] && find_text+="$value"$'\n'
 if ! value="$(gate_find_collect 'sdk/fuzz session find' sdk fuzz -type f \( -name '*.session.toml' -o -path '*/session_*/*.toml' \))"; then fail 'sdk/fuzz session find failed'; fi; [[ -n "$value" ]] && find_text+="$value"$'\n'
 if ! sorted="$(gate_sort_lines 'session TOML discovery' "$find_text")"; then fail 'session TOML discovery sort failed'; fi
