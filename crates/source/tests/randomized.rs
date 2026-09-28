@@ -480,6 +480,9 @@ fn random_schedules_match_the_independent_ring_model() {
     let mut reach = Reach::default();
     let seeds = run_seeds(TEST, REPLAY, 256, |seed| schedule(seed, &mut reach));
     println!("{seeds} seeds: {reach:?}");
+    if dsp_reference::randomized::replaying() {
+        return;
+    }
     assert!(
         reach.submits.iter().all(|count| *count > 0)
             && reach.seeks.iter().all(|count| *count > 0)

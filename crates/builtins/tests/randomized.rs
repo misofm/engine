@@ -453,6 +453,9 @@ fn the_banks_render_their_scalar_sections_under_random_retargets() {
         }
     });
     println!("{seeds} seeds: {reach:?}");
+    if dsp_reference::randomized::replaying() {
+        return;
+    }
     assert!(
         reach.blocks > 0
             && reach.chunked > 0

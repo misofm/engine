@@ -34,6 +34,20 @@ fn variable(name: &str) -> Option<u64> {
     )
 }
 
+/// Whether [`SEED_VARIABLE`] is replaying one seed. A test skips its reach assertions then: one
+/// seed is not expected to reach everything the whole range does.
+#[must_use]
+pub fn replaying() -> bool {
+    variable(SEED_VARIABLE).is_some()
+}
+
+/// Whether either variable overrides the pull-request seeds. A test whose own count differs by
+/// profile passes its debug count to [`run_seeds`] then, so the nightly scale means one thing.
+#[must_use]
+pub fn overridden() -> bool {
+    replaying() || variable(SCALE_VARIABLE).is_some()
+}
+
 /// The seeds this run covers for a differential whose pull-request share is `0..per_pr`.
 ///
 /// # Panics

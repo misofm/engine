@@ -1694,10 +1694,16 @@ fn bind_eligibility(
 /// bound, blocks compared, chunked and restored, and every bind-eligibility probe answered. An
 /// effect that supports the mono collapse must also have collapsed and disengaged.
 ///
+/// Replaying one seed (`MISO_ENGINE_RANDOMIZED_SEED`) asserts nothing here: one seed is not
+/// expected to reach everything.
+///
 /// # Panics
 ///
 /// When a part of the harness was never reached, which makes the gate weaker than it reads.
 pub fn assert_reached(coverage: &DifferentialCoverage) {
+    if dsp_reference::randomized::replaying() {
+        return;
+    }
     assert!(
         coverage.audited,
         "the allocation audit cannot fail in this binary: install bench_support's allocator and \

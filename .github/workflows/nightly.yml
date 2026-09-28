@@ -219,6 +219,22 @@ jobs:
       # once a day instead of on every PR and every main push.
       - name: Workspace release build (single panic variant, --no-run)
         run: bash scripts/run-release-workspace-tests.sh --no-run
+      # Issue #1051: every committed randomized differential at 100 times its per-PR seeds, on the
+      # build above -- the same panic override and `--workspace` feature set, so nothing is rebuilt.
+      # A failing seed prints the one command that replays it; PROBE_966_COUNT is graph-compiler's
+      # #966 probe's own seed count (64 per PR).
+      - name: Randomized differentials at 100x the per-PR seeds
+        env:
+          CARGO_PROFILE_RELEASE_PANIC: unwind
+          MISO_ENGINE_RANDOMIZED_SCALE: '100'
+          PROBE_966_COUNT: '6400'
+        run: |
+          set -euo pipefail
+          cargo test --locked --release --workspace --test randomized
+          cargo test --locked --release --workspace --lib -- randomized_differential witness_tests \
+            randomized_scenarios_render_exactly_the_unmodified_kernel randomized_restores
+          cargo test --locked --release --workspace --test bank_levels -- --exact \
+            randomized_consoles_compile_bind_and_render_the_scalar_bits
 
   math-sweeps:
     name: math exhaustive sweeps and wasm-console guest check

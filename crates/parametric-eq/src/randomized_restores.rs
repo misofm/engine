@@ -498,6 +498,9 @@ fn the_stationary_cascade_renders_the_full_cascade_after_random_restores() {
             tiny_state_cases::<Simd8, 8>(seed, mono, &mut reach);
         }
     });
+    if dsp_reference::randomized::replaying() {
+        return;
+    }
     assert!(
         reach.restores > 0 && reach.stationary_after_restore > 0 && reach.tiny_cases > 0,
         "the stationary cascade must run after restores of live integrator words"
