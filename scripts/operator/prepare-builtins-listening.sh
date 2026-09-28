@@ -15,7 +15,7 @@
 #   OUT_DIR must not exist; the assembled public packet is written there.
 set -euo pipefail
 
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$root"
 
 fail() { printf 'listening preparation failure: %s\n' "$1" >&2; exit 1; }

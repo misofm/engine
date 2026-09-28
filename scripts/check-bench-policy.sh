@@ -307,9 +307,63 @@ while IFS= read -r manifest; do
     [[ -z "$violation" ]] || fail "a production package depends on the bench support crate: $violation"
 done < "$scratch/manifests.sorted"
 
+# #1022: every operator shell script finds the repository root from its own location. Six of the
+# seven under `scripts/operator/` kept `$(dirname ...)/..` when #319 (`f0509c3f`) moved them there
+# from `scripts/`, so each one named `scripts/` as the root and none could run, for four weeks,
+# unnoticed: an operator script is by design not a gate and no workflow runs one
+# (`scripts/operator/README.md`). Four of them are benchmark preflights and runners, which is why
+# the rule lives here. It is static and launches nothing. Each script's own root expression is
+# resolved from the script's own directory, and the result must be this repository's root, which
+# must hold the workspace `Cargo.toml`. The root expression must be the whole value of a `NAME=`
+# or `NAME="..."` assignment line, so `$(... && pwd)/scripts` cannot pass as the root. Any other
+# spelling of a script's own location is refused as unrecognised rather than skipped, and so is a
+# script that computes no root at all. Only regular files count as scripts: an entry named `*.sh`
+# that is a directory is not one, and reading it would never reach end of file. Bash builtins only,
+# so no external tool's exit status can be lost here.
+operator_self_pattern='dirname[^|;&]*(BASH_SOURCE|\$0|\$\{0\})'
+operator_assignment_pattern='^[[:blank:]]*[A-Za-z_][A-Za-z0-9_]*=(.*)$'
+operator_quoted_pattern='^"(.*)"$'
+operator_root_pattern='^\$\(cd[[:space:]]+"\$\(dirname[[:space:]]+"\$\{BASH_SOURCE\[0\]\}"\)(/[^"]*)?"[[:space:]]+&&[[:space:]]+pwd([[:space:]]+-P)?\)$'
+[[ -f Cargo.toml ]] || fail 'operator scripts: the repository root holds no Cargo.toml'
+operator_workspace_manifest=0
+operator_line=
+while IFS= read -r operator_line || [[ -n "$operator_line" ]]; do
+    [[ "$operator_line" == '[workspace]' ]] && { operator_workspace_manifest=1; break; }
+done <Cargo.toml
+((operator_workspace_manifest == 1)) || fail 'operator scripts: the repository root Cargo.toml is not the workspace manifest'
+operator_workspace_root="$(pwd -P)"
+operator_scripts=()
+for operator_candidate in scripts/operator/*.sh; do
+    if [[ -f "$operator_candidate" ]]; then operator_scripts+=("$operator_candidate"); fi
+done
+((${#operator_scripts[@]} > 0)) || fail 'no operator shell scripts under scripts/operator/'
+for operator_script in "${operator_scripts[@]}"; do
+    operator_roots=0
+    operator_line_number=0
+    operator_line=
+    while IFS= read -r operator_line || [[ -n "$operator_line" ]]; do
+        operator_line_number=$((operator_line_number + 1))
+        [[ "$operator_line" =~ ^[[:space:]]*# ]] && continue
+        [[ "$operator_line" =~ $operator_self_pattern ]] || continue
+        operator_value=
+        if [[ "$operator_line" =~ $operator_assignment_pattern ]]; then
+            operator_value=${BASH_REMATCH[1]}
+            if [[ "$operator_value" =~ $operator_quoted_pattern ]]; then operator_value=${BASH_REMATCH[1]}; fi
+        fi
+        [[ "$operator_value" =~ $operator_root_pattern ]] ||
+            fail "operator script root expression is unrecognised at $operator_script:$operator_line_number (expected NAME=\$(cd \"\$(dirname \"\${BASH_SOURCE[0]}\")/../..\" && pwd)): $operator_line"
+        operator_resolved="$(cd "${operator_script%/*}${BASH_REMATCH[1]}" 2>/dev/null && pwd -P)" ||
+            operator_resolved='<unresolvable>'
+        [[ "$operator_resolved" == "$operator_workspace_root" ]] ||
+            fail "operator script does not resolve the repository root: $operator_script:$operator_line_number names '${operator_script%/*}${BASH_REMATCH[1]}', which is $operator_resolved, not $operator_workspace_root"
+        operator_roots=$((operator_roots + 1))
+    done <"$operator_script"
+    ((operator_roots > 0)) || fail "operator script computes no repository root from its own location: $operator_script"
+done
+
 if printf '%s\n' "$expected_unsafe" | wc -l >"$scratch/count" 2>"$scratch/count.err"; then count_status=0; else count_status=$?; fi
 ((count_status == 0)) || fail "unsafe-owner count failed with status $count_status; output: $(captured "$scratch/count"); stderr: $(captured "$scratch/count.err")"
 if tr -d ' ' <"$scratch/count" >"$scratch/count.formatted" 2>"$scratch/count.err"; then format_status=0; else format_status=$?; fi
 ((format_status == 0)) || fail "unsafe-owner count formatter failed with status $format_status; output: $(captured "$scratch/count.formatted"); input: $(captured "$scratch/count"); stderr: $(captured "$scratch/count.err")"
-printf 'bench policy: ok (1 allocator, 1 escaper, 1 percentile, 1 digest sink, %s unsafe owners, %s subjects on the shared timer)\n' \
-    "$(<"$scratch/count.formatted")" "${#timed_subjects[@]}"
+printf 'bench policy: ok (1 allocator, 1 escaper, 1 percentile, 1 digest sink, %s unsafe owners, %s subjects on the shared timer, %s operator scripts rooted at the workspace)\n' \
+    "$(<"$scratch/count.formatted")" "${#timed_subjects[@]}" "${#operator_scripts[@]}"
