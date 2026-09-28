@@ -46,7 +46,6 @@ Set by `scripts/run-*-benchmark.sh` before the single launch; read by the bench 
 |---|---|
 | `MISO_ENGINE_BENCH_CANDIDATE_COMMIT` | 40-hex commit the candidate binary was built from. |
 | `MISO_ENGINE_BENCH_CANDIDATE_TREE` | 40-hex tree of that commit. |
-| `MISO_ENGINE_BENCH_CANDIDATE_SHA256` | sha256 of the candidate commit string (rack). |
 | `MISO_ENGINE_BENCH_BINARY_SHA256` | sha256 of the launched binary. |
 | `MISO_ENGINE_BENCH_ROUND` | `warmup`, `1` or `2` for the runners that launch per round. |
 | `MISO_ENGINE_BENCH_TOOL_SOURCE_SHA256` | sha256 of the bench tool source (interchange). |
@@ -62,11 +61,6 @@ One name per fact. Set by the runner, read by the bench binary; a name the runne
 | name | meaning |
 |---|---|
 | `MISO_ENGINE_BENCH_CPU_MODEL` | CPU model string. |
-| `MISO_ENGINE_BENCH_CPU_ARCHITECTURE` | CPU architecture. |
-| `MISO_ENGINE_BENCH_LOGICAL_CORE_COUNT` | logical cores. |
-| `MISO_ENGINE_BENCH_PHYSICAL_CORE_COUNT` | physical cores. |
-| `MISO_ENGINE_BENCH_OS` | operating system. |
-| `MISO_ENGINE_BENCH_KERNEL` | kernel release. |
 | `MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE` | cpufreq governor or platform power mode. |
 | `MISO_ENGINE_BENCH_POWER_SOURCE` | mains or battery. |
 | `MISO_ENGINE_BENCH_RUST_VERSION` | `rustc -V`. |
@@ -173,22 +167,11 @@ Read only by a `scripts/test-*.sh` fake, never by a real run. A runner that read
 
 | name | meaning |
 |---|---|
-| `MISO_ENGINE_TEST_MODE` | which scripted outcome the stub produces. |
 | `MISO_ENGINE_TEST_BENCH_MODE` | which scripted outcome the fake bench produces. |
 | `MISO_ENGINE_TEST_FAKE_BENCH` | path of a fake bench binary to launch instead of building. |
 | `MISO_ENGINE_TEST_LAUNCH_LOG` | file the stub appends one line to per launch. |
-| `MISO_ENGINE_TEST_RECORDS` | records the fake bench emits. |
-| `MISO_ENGINE_TEST_FROZEN_RAW` | raw payload the stub replays. |
-| `MISO_ENGINE_TEST_CANDIDATE` | candidate identity the stub reports. |
 | `MISO_ENGINE_TEST_GIT_DIRTY` | make the runner see a dirty tree. |
 | `MISO_ENGINE_TEST_CARGO_FAIL` | make the cargo stub fail. |
-| `MISO_ENGINE_TEST_PREFLIGHT_ROOT` | root the preflight stub inspects. |
-| `MISO_ENGINE_TEST_PREFLIGHT_LAUNCH_LOG` | preflight launch log. |
-| `MISO_ENGINE_TEST_PREFLIGHT_CARGO_LOG` | preflight cargo log. |
-| `MISO_ENGINE_TEST_PREFLIGHT_DRIFT` | make the preflight see authority drift. |
-| `MISO_ENGINE_TEST_REAL_RUSTC` | real rustc behind the stub. |
-| `MISO_ENGINE_TEST_REAL_SHA256SUM` | real sha256sum behind the stub. |
-| `MISO_ENGINE_TEST_RUSTC_PIPE_FAIL` | make the rustc stub break the pipe. |
 
 ## Re-pin hooks
 

@@ -278,7 +278,7 @@ create_fixture() {
         >"$root/tools/bench/src/protocol.rs"
     printf '%s\n' \
         'fn measure() {}' \
-        >"$root/tools/bench/src/rack.rs"
+        >"$root/tools/bench/src/console.rs"
 }
 
 expect_failure() {

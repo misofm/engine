@@ -90,13 +90,13 @@ fi
 cp "$root/fuzz/fuzz_targets/session_parse.rs" "$temp/fuzz/fuzz_targets/session_parse.rs"
 
 printf '\nuse effect_package as leaked_state_package;\n' \
-    >>"$temp/tools/bench/src/rack.rs"
+    >>"$temp/tools/bench/src/console.rs"
 if bash "$temp/scripts/check-effect-runtime-policy.sh" "$temp" >/dev/null 2>&1; then
     printf 'effect runtime package unrelated-tool mutation escaped\n' >&2
     exit 1
 fi
-cp "$root/tools/bench/src/rack.rs" \
-    "$temp/tools/bench/src/rack.rs"
+cp "$root/tools/bench/src/console.rs" \
+    "$temp/tools/bench/src/console.rs"
 
 printf '\npub fn effect_state_migration_render_leak() {}\n' \
     >>"$temp/crates/engine/src/realtime/plan.rs"

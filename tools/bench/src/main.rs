@@ -8,8 +8,6 @@ use std::ffi::OsString;
 use std::process::Command;
 
 #[cfg(not(target_arch = "wasm32"))]
-mod builtins;
-#[cfg(not(target_arch = "wasm32"))]
 mod conformance;
 #[cfg(not(target_arch = "wasm32"))]
 mod console;
@@ -19,11 +17,7 @@ mod effect_contract;
 mod effect_interchange;
 #[cfg(not(target_arch = "wasm32"))]
 mod floor;
-#[cfg(not(target_arch = "wasm32"))]
-mod graph;
 mod protocol;
-#[cfg(not(target_arch = "wasm32"))]
-mod rack;
 #[cfg(not(target_arch = "wasm32"))]
 mod session;
 
@@ -31,28 +25,22 @@ mod session;
 const INTERNAL_SUBJECT: &str = "ENGINE_V1_INTERNAL_BENCH_SUBJECT";
 #[cfg(not(target_arch = "wasm32"))]
 const SUBJECTS: &[&str] = &[
-    "builtins",
     "conformance",
     "console",
     "effect-contract",
     "effect-interchange",
-    "graph",
     "protocol",
-    "rack",
     "session",
 ];
 
 #[cfg(not(target_arch = "wasm32"))]
 fn run_subject(subject: &str) {
     match subject {
-        "builtins" => builtins::main(),
         "conformance" => conformance::main(),
         "console" => console::main(),
         "effect-contract" => effect_contract::main(),
         "effect-interchange" => effect_interchange::main(),
-        "graph" => graph::main(),
         "protocol" => protocol::main(),
-        "rack" => rack::main(),
         "session" => session::main(),
         _ => unreachable!("dispatcher validates internal subjects"),
     }

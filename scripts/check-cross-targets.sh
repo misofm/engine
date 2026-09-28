@@ -14,8 +14,9 @@
 # that runs each distinct package/target/feature combination exactly once, under one cached target
 # dir per target triple (`target/ci/cross-target/<triple>`, or under `$CARGO_TARGET_DIR` if the
 # caller has set it). The original scripts became thin wrappers that call this one, so any
-# remaining caller by the old name keeps working (#1027 retired check-parametric-eq-targets.sh's,
-# which nothing called); its hermetic render-contract half moved to
+# remaining caller by the old name keeps working; #1026 deleted the builtins wrapper and #1027 the
+# parametric EQ wrapper (scripts/check-parametric-eq-targets.sh), neither of which had a caller left.
+# The parametric EQ wrapper's hermetic render-contract half moved to
 # scripts/check-parametric-eq-render-contract.sh instead.
 #
 # Not moved here (still owned by their original scripts, or already run elsewhere):

@@ -206,7 +206,6 @@ fn audit_graph_render(
             .plan
             .render(
                 RenderIo {
-                    input: None,
                     output: PlanarBufferMut::try_new(output, 2, 64, 64).expect("output"),
                 },
                 RenderTime { absolute_sample },
@@ -239,7 +238,6 @@ fn audit_failed_graph_render(
             .plan
             .render(
                 RenderIo {
-                    input: None,
                     output: PlanarBufferMut::try_new(output, 2, 64, 64).expect("output"),
                 },
                 RenderTime { absolute_sample },

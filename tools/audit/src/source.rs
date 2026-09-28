@@ -148,7 +148,6 @@ pub(crate) fn main() {
         let report = plan
             .render(
                 RenderIo {
-                    input: None,
                     output: PlanarBufferMut::try_new(
                         &mut output_pcm,
                         2,

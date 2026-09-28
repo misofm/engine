@@ -89,8 +89,6 @@
 //!   attested. [`PreparedHost`] stays `Send`, because moving *preparation* to the render thread is
 //!   the supported hand-off.
 
-#[cfg(feature = "control-provider")]
-pub mod builtin_batch_endpoint;
 pub mod control_preparation;
 #[cfg(feature = "control-provider")]
 pub mod control_provider;
@@ -105,8 +103,6 @@ pub use control_preparation::{
 pub mod prepare;
 pub mod render_session;
 pub mod response;
-#[cfg(feature = "control-provider")]
-pub mod scalar_point_endpoint;
 pub mod shape;
 pub mod solo;
 pub mod source;
@@ -221,11 +217,6 @@ pub use spectrum::{
 /// and the reason the join is an explicit call rather than an inference.
 pub use builtins_compiler::{session_structural_symmetry, track_mono_source};
 pub use effect_contract::{ChannelSymmetryWitness, LiveConsoleRecord, SeamSide, SymmetryEvent};
-
-#[cfg(feature = "control-provider")]
-pub use builtin_batch_endpoint::*;
-#[cfg(feature = "control-provider")]
-pub use scalar_point_endpoint::*;
 
 #[doc(hidden)]
 pub use session::CompiledSession;

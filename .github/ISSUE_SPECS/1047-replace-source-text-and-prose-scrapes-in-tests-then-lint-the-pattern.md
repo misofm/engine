@@ -46,17 +46,18 @@ The full list, with the classifier's note per test, is the rows flagged `scrape`
 - No test reads Rust source or a Cargo manifest as text. The prose pins in the table are gone. The
   one test that still reads a `.md` (`skill.rs`, rewritten) reads it in order to execute its
   commands.
-- `scripts/check-workspace-policy.sh` gains one rule: `git grep` fails on `include_str!`,
-  `include_bytes!` or `read_to_string` of a literal `.rs` or `.toml` path under `crates/`, `hosts/` or
-  `tools/`, excluding `fixtures/`. It adds no new mutation cases: the rule is one line (AGENTS.md "The
-  ceremony boundary").
+- The allow-list is empty. #1052 landed the lint in `scripts/check-workspace-policy.sh`, with an
+  exact allow-list of the scrapes that predate it: one row per file and literal path, each naming
+  #1047, #1035 or #1037. Each deletion or rewrite here lowers or deletes its row in the same PR, and
+  the lint stays red until the count matches. With no row left, the lint refuses every literal-path
+  read of a `.rs` or `.toml` file. #1047 adds no lint and no mutation case.
 - The lint cannot see scrapes whose path is built at run time (`read_dir`, joined paths), as in
-  `m3_determinism.rs:101`. Those are left to the review question in issue 16.
+  `m3_determinism.rs:101`. Those are left to #1052's review question.
 
 ## Scope
 
 Authorized paths: the test files in the table, `scripts/check-lane-policy.sh`,
-`scripts/check-realtime-policy.sh`, `scripts/check-workspace-policy.sh`,
+`scripts/check-realtime-policy.sh`, `scripts/check-workspace-policy.sh` (its allow-list rows only),
 `scripts/check-web-audioworklet.sh` (the export list only), and this issue's spec.
 
 ## Gates
@@ -72,9 +73,10 @@ Authorized paths: the test files in the table, `scripts/check-lane-policy.sh`,
    mutation that is also red elsewhere. For graph, re-record G-2, A-5, 936-4 and 957-1b from
    `crates/graph/tests/MUTATIONS.md` and show each is still red after the deletions.
 4. **Historical bugs.** `../tools/revert.py` for all four bugs; the red set is unchanged.
-5. **The lint works.** It passes on the result, and fails on a scratch branch that adds
-   `include_str!("../src/lib.rs")` to any test. Today's tree has 32 such literal-path hits outside
-   `fixtures/`, so the lint lands in the same PR as the last deletion.
+5. **The allow-list is empty.** No `source_scrape_allowlist` row is left.
+   `check-workspace-policy.sh` and `test-workspace-policy.sh` pass, and the latter's planted
+   `source-reads` case stays red. The rows #1035 and #1037 own go with their code; any still
+   present are deleted here.
 
 ## Saving and risk
 
@@ -92,7 +94,8 @@ See [`../VERIFY-TEST-VALUE.md`](../VERIFY-TEST-VALUE.md). **These amendments sup
    - `effect-compiler/tests/migration.rs:1053`, `migration_terminal.rs:1833` and
      `effect-package/tests/state_vectors.rs:1351` (#1037).
 
-   Land after #1035 and #1037, or skip those rows.
+   Land after #1035 and #1037, or skip those rows. Each of those issues lowers or deletes its
+   allow-list rows when it deletes the code.
 2. **The lint pattern must exclude literal paths that contain `/fixtures/`, not files under
    `fixtures/`.** `tools/bench/src/builtins.rs:279` and `:283` legitimately `include_bytes!` fixture
    `.toml` files. A pathspec exclusion still flags them.
@@ -107,3 +110,7 @@ See [`../VERIFY-TEST-VALUE.md`](../VERIFY-TEST-VALUE.md). **These amendments sup
    - No workflow runs Miri, so `capi/src/ffi.rs:2516` is correctly a rewrite.
 5. **Size.** If the pruned list still exceeds half a day, split it: (a) the deletions plus the lint;
    (b) the three rewrites.
+6. **The lint landed in #1052** (root brief, 2026-09-28). The body above is amended to match:
+   #1047 removes the scrapes and deletes the allow-list rows, and adds no lint. Amendment 2's
+   `fixtures/` exclusion is in #1052's pattern. In amendment 5's split, slice (a) is the deletions
+   and their rows.

@@ -6,17 +6,17 @@ architecture. All allocations and validation occur before a plan reaches the ren
 ## Prepared memory
 
 `BufferArena` owns one planar `Box<[f32]>` plus fixed offset/shape tables. Construction checks every
-channel/frame multiplication and accumulated offset. Borrowed `PlanarBufferRef` and
-`PlanarBufferMut` contain slices and scalar shape metadata only. Issue 003 promises contiguous
-planar `f32`; SIMD alignment and AoSoA layout belong to issue 008.
+channel/frame multiplication and accumulated offset. The borrowed `PlanarBufferMut` output holds a
+slice and scalar shape metadata only. Issue 003 promises contiguous planar `f32`; SIMD alignment
+and AoSoA layout belong to issue 008.
 
-Live parameter delivery is owned by the per-effect `EffectControlLane` (#140), fed by the `EffectControlProducer`s prepared with the plan; the protocol crate's accepted-automation queue (#102) admits, retains and cancels sample-timed batches but has no render-side consumer yet (see `CONTROL_PROTOCOL_SEMANTICS.md`, "Delivery status"). The plan itself carries no parameter store. (#84 phase C deleted the unused issue-003 slot/event
+Live parameter delivery is owned by the per-effect `EffectControlLane` (#140 A), fed by the `EffectControlProducer`s prepared with the plan; the protocol crate's accepted-automation queue (#102) admits, retains and cancels sample-timed batches and has no render-side consumer (see `CONTROL_PROTOCOL_SEMANTICS.md`, "Delivery status"). Rendering the session's stored automation is owned by #1058, and live fader, mute and pan on the C ABI by #1053 through the same console lanes. The plan itself carries no parameter store. (#84 phase C deleted the unused issue-003 slot/event
 store; `PlanEpoch` now lives with the plan exchange, whose publication epochs it names.)
 
 `PreparedRenderPlan` privately separates immutable `PreparedProgram`/`RenderEnvelope` from mutable
 arena and render-counter state. It is `Send`, deliberately not `Sync`, not
 cloneable, and renders only through exclusive `&mut self`. The issue-003 reference renderer checks
-the complete fixed I/O shape and writes silence; graph execution replaces that inner implementation
+the fixed output shape and writes silence; graph execution replaces that inner implementation
 in issue 006 without changing the lifetime contract.
 
 ## SPSC cursor protocol
