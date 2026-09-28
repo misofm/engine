@@ -576,7 +576,7 @@ new_case count-error
 mkdir -p "$case_root/shim"
 printf '#!/usr/bin/env bash\n/usr/bin/wc "$@"\nprintf "count-error-sentinel\\n" >&2\nexit 9\n' >"$case_root/shim/wc"
 chmod +x "$case_root/shim/wc"
-expect_failure_with_path count-error "$case_root/shim" 'unsafe-owner count failed with status 9; output: 6; stderr: count-error-sentinel'
+expect_failure_with_path count-error "$case_root/shim" 'unsafe-owner count failed with status 9; output: 5; stderr: count-error-sentinel'
 
 new_case count-empty-error
 mkdir -p "$case_root/shim"
@@ -588,12 +588,12 @@ new_case count-formatter-error
 mkdir -p "$case_root/shim"
 printf '#!/usr/bin/env bash\n/usr/bin/tr "$@"\nprintf "formatter-error-sentinel\\n" >&2\nexit 10\n' >"$case_root/shim/tr"
 chmod +x "$case_root/shim/tr"
-expect_failure_with_path count-formatter-error "$case_root/shim" 'unsafe-owner count formatter failed with status 10; output: 6; input: 6; stderr: formatter-error-sentinel'
+expect_failure_with_path count-formatter-error "$case_root/shim" 'unsafe-owner count formatter failed with status 10; output: 5; input: 5; stderr: formatter-error-sentinel'
 
 new_case count-formatter-empty-error
 mkdir -p "$case_root/shim"
 printf '#!/usr/bin/env bash\nprintf "formatter-empty-error-sentinel\\n" >&2\nexit 10\n' >"$case_root/shim/tr"
 chmod +x "$case_root/shim/tr"
-expect_failure_with_path count-formatter-empty-error "$case_root/shim" 'unsafe-owner count formatter failed with status 10; output: <empty>; input: 6; stderr: formatter-empty-error-sentinel'
+expect_failure_with_path count-formatter-empty-error "$case_root/shim" 'unsafe-owner count formatter failed with status 10; output: <empty>; input: 5; stderr: formatter-empty-error-sentinel'
 
 printf 'bench policy mutations: ok\n'
