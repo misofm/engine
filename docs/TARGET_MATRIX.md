@@ -1,17 +1,15 @@
 # Target matrix
 
-Issue 001 establishes build policy, not a platform audio callback, device link, or browser runtime.
+Which targets the engine builds for, the SIMD policy of each, and the CI rows that qualify it.
 The session model and its semantics do not vary by Cargo feature or target capability.
 
-| Artifact | Architecture and target | SIMD policy | CI evidence in issue 001 |
+| Artifact | Architecture and target | SIMD policy | CI evidence |
 | --- | --- | --- | --- |
-| Native baseline | `x86_64-unknown-linux-gnu` | Scalar baseline. It must not receive a global AVX2 or FMA flag. | Host check/test plus a `-avx2,-fma` compile probe. |
-| Native AVX2 | `x86_64-unknown-linux-gnu` | A future internal AVX2 kernel is entered only after runtime AVX2 detection. | Separate `+avx2,-fma` compile directory and injected capability-assembly test. |
-| Native AVX2/FMA | `x86_64-unknown-linux-gnu` | A future FMA kernel requires both independently detected AVX2 and FMA. | Separate `+avx2,+fma` compile directory and cfg assertion. |
+| Native x86-64 (tooling and tests) | `x86_64-unknown-linux-gnu` | Not a shipped product target. Pinned x86-64-v3 (#83 D4): `.cargo/config.toml` gives every `x86_64` build AVX2 and FMA, so `lane::Backend::current()` is `Simd8`, a compile-time constant. No runtime detection or dispatch. `lane` refuses to compile without both features, and `lane::attest_host()` refuses at boot on a CPU that lacks them. | `lint`: the `-avx2,-fma` and `+avx2,-fma` probes must fail with `requires x86-64-v3`; the `+avx2,+fma` probe compiles, with a cfg assertion. `lint`, `test-debug-a`, `test-debug-b`, `test-release` and `audit-native` run on this target. |
 | ARM64 Android | `aarch64-linux-android` (arm64-v8a) | Product target (#1017). NEON `Simd4`, a compile-time constant; FPCR pinned per render block. | `cross-target`: the product crates checked with `--all-targets --all-features` and linted with clippy `-D warnings`. `aarch64-debug`/`aarch64-release`: tests on `ubuntu-24.04-arm`. |
 | ARM64 iOS | `aarch64-apple-ios` | Product target (#1017). As Android. | `cross-target`: the same check and clippy rows, and the release-assembly scan `ios-asm-memset-pattern16` over every product crate (expected failures per crate until #1018). Tests run on the Linux arm64 legs; see "Native AArch64" below. |
 | Refused | `armv7-linux-androideabi` (armeabi-v7a), `i686-*`, ILP32 ABIs and every other unlisted target | Refused at compile time by `lane` (#1041). | `scripts/check-cross-targets.sh` refusal row on `armv7-linux-androideabi`. |
-| Browser Wasm | `wasm32-unknown-unknown` | Baseline and `+simd128` are distinct artifacts. Four-lane processing uses multiply plus add; relaxed SIMD and FMA assumptions are forbidden. | Two distinct release artifact directories. |
+| Browser Wasm | `wasm32-unknown-unknown` with `+simd128` | One shipped AudioWorklet artifact, `miso-engine-v1-audio-worklet.simd128.wasm` (W4-D1), built by `scripts/build-web-audioworklet.sh`. `Simd4`, a compile-time constant. Four-lane processing uses multiply plus add; relaxed SIMD and FMA assumptions are forbidden. The host refuses a browser without `simd128` with a typed `miso.unsupported.v1` error. A scalar build is not an artifact (see the scalar-wasm CI exception below). | `artifact` builds the module once; `artifact-gates` (`check-web-audioworklet.sh`) and `browser` (Chromium, Firefox, WebKit) qualify that module. |
 
 ## 64-bit only (issue #1041)
 
@@ -59,17 +57,21 @@ workspace's single backend-to-width law.
 
 No Cargo feature is named `simd128`, `neon`, `avx2`, or `fma`. CPU ISA flags must never be made
 global in `.cargo/config.toml`, package manifests, or release defaults beyond the workspace's
-`x86-64-v3` pin. CI's deliberately scoped probe flags are evidence that separate artifacts
-compile, not deployment defaults.
+`x86-64-v3` pin. CI's deliberately scoped probe flags prove that sub-v3 builds are refused and
+that the pinned set compiles; they are not deployment defaults.
 
 ## Reproducible checks
 
 The pinned `rust-toolchain.toml` installs Rust 1.97.1 with `clippy`, `rustfmt`, and the browser
-Wasm standard library. After the workspace exists, the relevant commands are:
+Wasm standard library. The relevant commands are:
 
 ```bash
 cargo check --locked --workspace --all-targets
 
+# The shipped browser artifact (W4-D1), into an existing empty directory.
+bash scripts/build-web-audioworklet.sh <output-dir>
+
+# Compile checks for the browser crates: the scalar-wasm CI exception, then simd128.
 CARGO_TARGET_DIR=target/ci/wasm-scalar RUSTFLAGS="-C target-feature=-simd128" \
   cargo build --locked --release --target wasm32-unknown-unknown \
   -p engine -p session -p protocol \
@@ -80,8 +82,9 @@ CARGO_TARGET_DIR=target/ci/wasm-simd RUSTFLAGS="-C target-feature=+simd128" \
   -p target-smoke -p host-web
 ```
 
-`cargo check` verifies Rust compilation only. Browser execution needs a browser test harness,
-explicitly deferred to the platform adapter issues.
+`cargo check` verifies Rust compilation only. The browser runtime is qualified on the shipped
+module by the `artifact-gates` and `browser` jobs (`hosts/host-web/qualification`), and native
+AArch64 as below.
 
 ### Native AArch64 (#1017)
 
