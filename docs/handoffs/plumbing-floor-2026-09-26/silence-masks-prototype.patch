@@ -1,0 +1,378 @@
+diff --git a/crates/graph/src/lib.rs b/crates/graph/src/lib.rs
+index 336bae88..9648911f 100644
+--- a/crates/graph/src/lib.rs
++++ b/crates/graph/src/lib.rs
+@@ -34,7 +34,7 @@ pub use runtime::{
+     test_only_selected_split_fader, test_only_set_completion_disabled,
+     test_only_set_output_route_fold_declined, test_only_set_route_fold_declined,
+     test_only_set_scatter_redirect_declined, test_only_set_source_in_place_declined,
+-    test_only_source_plane_counts, test_only_source_plane_reset,
++    test_only_set_silence_skip, test_only_source_plane_counts, test_only_source_plane_reset,
+     test_only_split_pair_table_witness,
+ };
+ 
+diff --git a/crates/graph/src/runtime.rs b/crates/graph/src/runtime.rs
+index 60b9edb7..3c306086 100644
+--- a/crates/graph/src/runtime.rs
++++ b/crates/graph/src/runtime.rs
+@@ -662,6 +662,183 @@ impl<'a> OutputSources<'a> {
+     }
+ }
+ 
++impl<'a> OutputSources<'a> {
++    /// PROTOTYPE: [`Self::input`], but `None` for an in-place claim whose source played no block.
++    #[inline]
++    fn input_or_unplayed<'b>(
++        self,
++        lease: &'b ArenaLease,
++        position: usize,
++        buffer: u32,
++    ) -> Option<(&'b [f32], &'b [f32])>
++    where
++        'a: 'b,
++    {
++        let claim = self
++            .claims
++            .get(position)
++            .copied()
++            .unwrap_or(NO_SOURCE_CLAIM);
++        if claim != NO_SOURCE_CLAIM
++            && let Some(planes) = self.planes
++        {
++            return planes.played_planes(claim as usize);
++        }
++        Some(lease.read_stereo(buffer))
++    }
++}
++
++/// PROTOTYPE: the per-plane word the fused kernel adds for an all-`+0.0` input under `route`,
++/// computed with the kernel's own operations (`lr.fma(+0, ll.mul(+0))`, unfused).
++#[inline]
++fn silent_mix(route: [f32; 4]) -> [f32; 2] {
++    let [ll, lr, rl, rr] = route;
++    [
++        <f32 as Lane>::fma(lr, 0.0, <f32 as Lane>::mul(ll, 0.0)),
++        <f32 as Lane>::fma(rr, 0.0, <f32 as Lane>::mul(rl, 0.0)),
++    ]
++}
++
++/// PROTOTYPE: one resolved pair (or lone input) into both host planes, outlined so its chunk loop
++/// keeps today's register allocation whatever the caller's loop holds live.
++#[inline(never)]
++fn route_pair_planes<L: Lane, const G: usize>(
++    planes: [(&[f32], &[f32]); G],
++    table: &[[f32; 4]; G],
++    left: &mut [f32],
++    right: &mut [f32],
++    vectored: usize,
++    initial_store: bool,
++) -> bool {
++    let lefts = planes.map(|(left, _)| left);
++    let rights = planes.map(|(_, right)| right);
++    let frames = left.len();
++    if vectored > frames
++        || right.len() != frames
++        || lefts
++            .iter()
++            .chain(rights.iter())
++            .any(|plane| plane.len() != frames)
++    {
++        return false;
++    }
++    let (left_vectors, left_tail) = left.split_at_mut(vectored);
++    let (right_vectors, right_tail) = right.split_at_mut(vectored);
++    route_run::<L, G>(
++        left_vectors,
++        right_vectors,
++        lefts.map(|plane| &plane[..vectored]),
++        rights.map(|plane| &plane[..vectored]),
++        table,
++        initial_store,
++    ) && (left_tail.is_empty()
++        || route_tail(
++            left_tail,
++            right_tail,
++            &lefts.map(|plane| &plane[vectored..]),
++            &rights.map(|plane| &plane[vectored..]),
++            table,
++            initial_store,
++        ))
++}
++
++/// PROTOTYPE: `x + (+0.0)` over one plane: `-0.0` becomes `+0.0`, every other word is unchanged.
++#[inline(never)]
++fn plus_zero_plane<L: Lane>(plane: &mut [f32], vectored: usize) {
++    let (vectors, tail) = plane.split_at_mut(vectored.min(plane.len()));
++    for chunk in vectors.chunks_exact_mut(L::WIDTH) {
++        L::load(chunk).add(L::zero()).store(chunk);
++    }
++    plus_zero_tail(tail);
++}
++
++#[inline(never)]
++fn plus_zero_tail(tail: &mut [f32]) {
++    if tail.len() >= <lane::Simd8 as Lane>::WIDTH {
++        return;
++    }
++    for word in tail {
++        *word = <f32 as Lane>::add(*word, 0.0);
++    }
++}
++
++/// PROTOTYPE: [`route_reduce`] that skips every input whose claim played no block this quantum.
++///
++/// Live inputs pair up in edge order as they come; each skipped input's silent mix is a signed
++/// zero, and if any of them is `+0.0` on a plane, that plane gets one `+ 0.0` after the chain.
++#[inline(never)]
++fn route_reduce_skip<L: Lane>(
++    lease: &ArenaLease,
++    inputs: &[u32],
++    routes: &[[f32; 4]],
++    sources: OutputSources<'_>,
++    left: &mut [f32],
++    right: &mut [f32],
++    skip: bool,
++) -> bool {
++    let frames = lease.frames();
++    if inputs.len() != routes.len()
++        || inputs.len() < 2
++        || (!sources.claims.is_empty() && sources.claims.len() != inputs.len())
++        || left.len() != frames
++        || right.len() != frames
++    {
++        return false;
++    }
++    let vectored = frames - frames % L::WIDTH;
++    let mut pending: Option<(usize, (&[f32], &[f32]))> = None;
++    let mut initial = true;
++    let mut fix = [false; 2];
++    for (position, (&input, &route)) in inputs.iter().zip(routes).enumerate() {
++        let planes = match sources.input_or_unplayed(lease, position, input) {
++            Some(planes) => planes,
++            None => {
++                let [zl, zr] = silent_mix(route);
++                if skip && zl == 0.0 && zr == 0.0 {
++                    fix[0] |= zl.to_bits() == 0;
++                    fix[1] |= zr.to_bits() == 0;
++                    continue;
++                }
++                lease.read_stereo(ARENA_SILENCE_BUFFER)
++            }
++        };
++        match pending.take() {
++            None => pending = Some((position, planes)),
++            Some((first, first_planes)) => {
++                if !route_pair_planes::<L, 2>(
++                    [first_planes, planes],
++                    &[routes[first], route],
++                    left,
++                    right,
++                    vectored,
++                    initial,
++                ) {
++                    return false;
++                }
++                initial = false;
++            }
++        }
++    }
++    if let Some((only, planes)) = pending {
++        if !route_pair_planes::<L, 1>([planes], &[routes[only]], left, right, vectored, initial) {
++            return false;
++        }
++        initial = false;
++    }
++    if initial {
++        left.fill(if fix[0] { 0.0 } else { -0.0 });
++        right.fill(if fix[1] { 0.0 } else { -0.0 });
++    } else {
++        if fix[0] {
++            plus_zero_plane::<L>(left, vectored);
++        }
++        if fix[1] {
++            plus_zero_plane::<L>(right, vectored);
++        }
++    }
++    true
++}
++
+ /// The session Output op's reduction with each contributor's route fused in, one **pair** of
+ /// inputs at a time (issue #926; the fold's eligibility is issue #920's, [`output_route_fold`]).
+ ///
+@@ -3402,7 +3579,19 @@ fn execute_op(
+                 // refused shape cannot occur for an admitted fold; were it to, the error path
+                 // silences the host planes rather than play a partial sum.
+                 let (left, right) = host.planes_mut();
+-                if !route_reduce::<FrameLane>(lease, &op.inputs, routes, sources, left, right) {
++                #[cfg(any(test, feature = "test-support"))]
++                let mode = test_only_silence_skip();
++                let reduced = if mode != 0 {
++                    route_reduce_skip::<FrameLane>(
++                        lease, &op.inputs, routes, sources, left, right, mode == 1,
++                    )
++                } else {
++                    route_reduce::<FrameLane>(lease, &op.inputs, routes, sources, left, right)
++                };
++                #[cfg(not(any(test, feature = "test-support")))]
++                let reduced =
++                    route_reduce::<FrameLane>(lease, &op.inputs, routes, sources, left, right);
++                if !reduced {
+                     return Err(RenderError::InvalidEnvelope);
+                 }
+             }
+@@ -5040,6 +5229,24 @@ pub fn test_only_source_plane_counts() -> [u64; 3] {
+     SOURCE_PLANE_COUNTS.with(std::cell::Cell::get)
+ }
+ 
++#[cfg(any(test, feature = "test-support"))]
++thread_local! {
++    static SILENCE_SKIP_PROTO: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
++}
++
++/// PROTOTYPE (silence-mask research, never committed): route the Output op's fused reduction
++/// through the skip-aware kernel.
++#[cfg(any(test, feature = "test-support"))]
++#[doc(hidden)]
++pub fn test_only_set_silence_skip(mode: u8) {
++    SILENCE_SKIP_PROTO.with(|slot| slot.set(mode));
++}
++
++#[cfg(any(test, feature = "test-support"))]
++fn test_only_silence_skip() -> u8 {
++    SILENCE_SKIP_PROTO.with(std::cell::Cell::get)
++}
++
+ #[cfg(any(test, feature = "test-support"))]
+ fn test_only_count_source_plane(slot: usize) {
+     SOURCE_PLANE_COUNTS.with(|counts| {
+diff --git a/tools/console-workload/src/lib.rs b/tools/console-workload/src/lib.rs
+index abd16759..e0dd2f7b 100644
+--- a/tools/console-workload/src/lib.rs
++++ b/tools/console-workload/src/lib.rs
+@@ -1808,6 +1808,11 @@ fn source_binding(
+ /// the arena buffer the executor hands it, and `played_planes` lends the same words in place.
+ /// Which one a claim takes is decided by the graph at bind (the lent-claims path of issue #918),
+ /// not by this driver.
++/// PROTOTYPE (silence-mask research, never committed): claims at or past this index play no
++/// block (`played_planes` is `None`, the copy writes `+0.0`).
++pub static PROTO_FIRST_ABSENT_CLAIM: core::sync::atomic::AtomicUsize =
++    core::sync::atomic::AtomicUsize::new(usize::MAX);
++
+ struct FrozenSourceDriver {
+     /// Claim `i`'s `(left, right)` block, one allocation for the whole set.
+     claims: Box<[FrozenGraphSource]>,
+@@ -1884,6 +1889,11 @@ impl GraphPreparedSourceSetDriver for FrozenSourceDriver {
+         if left.len() != QUANTUM || right.len() != QUANTUM {
+             return Err(RenderError::InvalidEnvelope);
+         }
++        if claim_index >= PROTO_FIRST_ABSENT_CLAIM.load(core::sync::atomic::Ordering::Relaxed) {
++            left.fill(0.0);
++            right.fill(0.0);
++            return Ok(());
++        }
+         left.copy_from_slice(&claim.left);
+         right.copy_from_slice(&claim.right);
+         Ok(())
+@@ -1895,6 +1905,9 @@ impl GraphPreparedSourceSetDriver for FrozenSourceDriver {
+ 
+     /// Lends claim `claim_index`'s frozen block in place: the words `copy_track_input` copies.
+     fn played_planes(&self, claim_index: usize) -> Option<(&[f32], &[f32])> {
++        if claim_index >= PROTO_FIRST_ABSENT_CLAIM.load(core::sync::atomic::Ordering::Relaxed) {
++            return None;
++        }
+         self.claims
+             .get(claim_index)
+             .map(|claim| (&claim.left[..], &claim.right[..]))
+diff --git a/tools/console-workload/tests/silence_proto.rs b/tools/console-workload/tests/silence_proto.rs
+new file mode 100644
+index 00000000..f8f78f2c
+--- /dev/null
++++ b/tools/console-workload/tests/silence_proto.rs
+@@ -0,0 +1,87 @@
++//! PROTOTYPE (silence-mask research, never committed).
++use std::hint::black_box;
++use std::sync::atomic::Ordering;
++use std::time::Instant;
++
++use bench_support::digest::Sha256Sink;
++use console_workload::{PROTO_FIRST_ABSENT_CLAIM, PlanConfig, SessionRuntime, Workload};
++
++fn core_hz() -> f64 {
++    const ADDS: u64 = 200_000_000;
++    let mut best = f64::MAX;
++    for _ in 0..3 {
++        let mut x = black_box(0.0_f32);
++        let d = black_box(1.0e-3_f32);
++        let start = Instant::now();
++        for _ in 0..ADDS {
++            x += d;
++        }
++        best = best.min(start.elapsed().as_secs_f64());
++        black_box(x);
++    }
++    3.0 * ADDS as f64 / best
++}
++
++fn digest(runtime: &mut SessionRuntime, observation: &mut u64) -> String {
++    let mut sink = Sha256Sink::new();
++    for _ in 0..64 {
++        runtime.render(*observation).expect("block");
++        *observation += 1;
++        runtime.hash_output(&mut sink);
++    }
++    sink.finish_hex()
++}
++
++fn p50(runtime: &mut SessionRuntime, observation: &mut u64, hz: f64) -> (f64, f64) {
++    for _ in 0..256 {
++        runtime.render(*observation).expect("warm");
++        *observation += 1;
++    }
++    let mut samples = Vec::with_capacity(4000);
++    for _ in 0..4000 {
++        let start = Instant::now();
++        let result = runtime.render(*observation);
++        samples.push(start.elapsed().as_nanos() as f64);
++        result.expect("block");
++        *observation += 1;
++    }
++    samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
++    (samples[0] * hz / 1e9, samples[2000] * hz / 1e9)
++}
++
++#[test]
++#[ignore = "prototype measurement"]
++fn silence_proto() {
++    let hz = core_hz();
++    println!("core clock {:.3} GHz", hz / 1e9);
++    for first_absent in [usize::MAX, 63, 60, 56, 48, 32, 16, 8, 0] {
++        PROTO_FIRST_ABSENT_CLAIM.store(first_absent, Ordering::Relaxed);
++        let mut runtime =
++            SessionRuntime::build(Workload::SixtyFourTrackPlumbingRing, PlanConfig::BASELINE);
++        let mut observation = 0;
++        graph::test_only_set_silence_skip(0);
++        let off = digest(&mut runtime, &mut observation);
++        graph::test_only_set_silence_skip(1);
++        let on = digest(&mut runtime, &mut observation);
++        graph::test_only_set_silence_skip(2);
++        let restructured = digest(&mut runtime, &mut observation);
++        assert_eq!(off, on, "skip must render the same bits (first absent {first_absent})");
++        assert_eq!(off, restructured, "restructure must render the same bits");
++        let absent = 64 - first_absent.min(64);
++        let mut line = format!("absent {absent:2}: digest {}..", &on[..12]);
++        for _ in 0..3 {
++            for mode in [0_u8, 2, 1] {
++                graph::test_only_set_silence_skip(mode);
++                let (min, p50) = p50(&mut runtime, &mut observation, hz);
++                line += &format!(
++                    "  {} {:5.0}/{:5.0}",
++                    ["base", "skip", "restr"][mode as usize],
++                    min,
++                    p50
++                );
++            }
++        }
++        println!("{line}");
++    }
++    PROTO_FIRST_ABSENT_CLAIM.store(usize::MAX, Ordering::Relaxed);
++}
