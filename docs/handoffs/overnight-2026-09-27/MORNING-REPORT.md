@@ -31,7 +31,7 @@ The start-of-batch metered figure is from the first run that recorded that row. 
   are not moving. #996/#997: the linked-pair session test now runs at every width.
 * **EQ.** #999 (fold the block check into the last pass), #1005 (skip dead sections while a
   setting moves: browser 8 of 64 stereo +64.7 -> +11.2 us, mono +30.1 -> +3.9 us), #1007 (vector
-  lane writes: all 64 automated, a further -12 to -15 us), #1015 (a class-A bug fix, below).
+  lane writes: all 64 automated, a further -10 to -15 us), #1015 (a class-A bug fix, below).
 * **Mono and automation.** #1004: editing a compressor or limiter no longer knocks a mono stem off
   its one-channel path (browser mono console, 8 of 64 automated: 292 -> 175 us). #1012 enforces its
   precondition. #1003 and #1011: a new benchmark row that automates 8 of 64 tracks exactly as the
@@ -79,7 +79,7 @@ worktrees with uncommitted changes (left alone).
 
 ## Process notes
 
-* All timings ran one at a time under a shared lock, with two exceptions noted in the log: a
+* All timings ran one at a time under a shared lock, with one exception noted in the log: a
   verifier ran one 10-second untimed run outside the lock by mistake (timings discarded).
 * Stale worktree cleanup freed about 85 GB at the start of the night (61 worktrees and two idle
   build directories).
