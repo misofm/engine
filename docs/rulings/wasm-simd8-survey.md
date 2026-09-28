@@ -402,3 +402,12 @@ has switched anything: the default `wasm32` guest module is byte-identical to `o
   `comparable_with_console_records: false` and `browser_field_measurement: false`. None of these
   numbers is a browser number, and none of them may be quoted beside the 124.0 us native console
   figure as if it were the same measurement.
+
+## Note: the kernel-timing runner retired (2026-09-28, #1027)
+
+Blocker 2's `scripts/run-wasm-kernel-timing.sh:183-184` bullet names a runner #1027 retired,
+together with its validator and the `--native-timing`/`--wasm-timing` modes of `tools/wasm-gates`.
+That expectation no longer exists in the tree; the other bullets stand as written. The runner and
+its record stay citable: the record is `artifacts/issue163-phase0/wasm-kernel-timing.accepted.jsonl`,
+and the runner remains in git history (last present at `ed0556a9`). See
+`docs/rulings/wasm-kernel-timing-interim.md`.

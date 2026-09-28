@@ -108,7 +108,7 @@ done
 # that *names* the harness while recording a red mutation is evidence, not a dependency, and a
 # test target that uses the harness is exactly what issue #95's eval E6 requires. Both forms are
 # checked, so this is stricter about production code than the directory scan it replaces.
-production_crates=(engine session protocol capi target-smoke effect-contract effect-compiler effect-package lane math)
+production_crates=(engine session protocol capi target-smoke effect-contract effect-compiler lane math)
 for production in "${production_crates[@]}"; do
     crate_dir="$(workspace_crate_dir "$production")" || {
         printf 'conformance boundary failure: no crate directory found for %s\n' "$production" >&2
@@ -216,7 +216,7 @@ gate_scan_forbidden 'protocol production fixture definition' \
 gate_scan_forbidden 'protocol inline extracted tests' \
     '^[[:space:]]*mod[[:space:]]+tests[[:space:]]*\{' '' \
     crates/protocol/src/controller.rs crates/protocol/src/message_wire.rs crates/protocol/src/session_wire.rs || exit $?
-expected_conformance_bench=$'bench-support\nbuiltins\nbuiltins-compiler\nconformance\nconsole-workload\neffect-compiler\neffect-contract\neffect-package\nengine\nflatbuffers\ngraph\ngraph-compiler\nlane\nprotocol\nrack\nsession\nsha2'
+expected_conformance_bench=$'bench-support\nbuiltins\nbuiltins-compiler\nconformance\nconsole-workload\neffect-compiler\neffect-contract\nengine\nflatbuffers\ngraph\ngraph-compiler\nlane\nprotocol\nsession\nsha2'
 [[ "$(dependency_names tools/bench/Cargo.toml)" == "$expected_conformance_bench" ]] || {
     printf 'conformance boundary failure: consolidated benchmark dependency union changed\n' >&2
     exit 1

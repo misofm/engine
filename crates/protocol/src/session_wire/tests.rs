@@ -711,6 +711,32 @@ fn deleted_source_and_limits_opcodes_are_typed_refusals() {
     }
 }
 
+/// Render-profile mode `1` is `single_thread`, the only live code. `2` was the retired
+/// `dependency_waves` (#1063): it refuses like `0` and the unallocated tail, never reinterpreted.
+#[test]
+fn render_profile_mode_decodes_only_single_thread() {
+    let profile = |mode: u8| {
+        raw_message(vec![
+            (1, WIRE_UTF8, true, b"native".to_vec()),
+            (2, WIRE_U8, true, vec![mode]),
+        ])
+    };
+    assert_eq!(
+        parse_render_profile(Message::nested(&profile(1)).expect("nested")),
+        Ok(RenderProfile {
+            id: id("native"),
+            mode: RenderMode::SingleThread,
+        })
+    );
+    for refused in [0_u8, 2, 3, u8::MAX] {
+        assert_eq!(
+            parse_render_profile(Message::nested(&profile(refused)).expect("nested")),
+            Err(DecodeError::InvalidTlv),
+            "render mode code {refused} must refuse"
+        );
+    }
+}
+
 #[test]
 fn every_track_effect_opcode_and_nested_variant_round_trips_canonically() {
     let mut full_track = track();

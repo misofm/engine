@@ -1611,7 +1611,6 @@ impl SessionRuntime {
         self.plan
             .render(
                 RenderIo {
-                    input: None,
                     output: PlanarBufferMut::try_new(&mut self.output.0, 2, QUANTUM, QUANTUM)
                         .map_err(|_| RenderFailed)?,
                 },

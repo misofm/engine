@@ -88,14 +88,8 @@ fn render_unguarded(plan: &mut PreparedRenderPlan, sources: &mut SourceControlSe
         let mut samples = [0.0_f32; QUANTUM * 2];
         let output =
             PlanarBufferMut::try_new(&mut samples, 2, QUANTUM, QUANTUM).expect("output planes");
-        plan.render_contiguous(
-            RenderIo {
-                input: None,
-                output,
-            },
-            (block * QUANTUM) as u64,
-        )
-        .expect("render");
+        plan.render_contiguous(RenderIo { output }, (block * QUANTUM) as u64)
+            .expect("render");
         rendered.extend(samples.iter().map(|value| value.to_bits()));
     }
     rendered

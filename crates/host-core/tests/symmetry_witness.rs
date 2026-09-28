@@ -174,10 +174,7 @@ fn render(console: &mut Console, blocks: usize) {
             .prepared
             .plan
             .render(
-                RenderIo {
-                    input: None,
-                    output,
-                },
+                RenderIo { output },
                 RenderTime {
                     absolute_sample: (block * QUANTUM) as u64,
                 },

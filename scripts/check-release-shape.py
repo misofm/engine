@@ -2,7 +2,7 @@
 """Pin the inputs of the panic-variant filename clobber (issue #359 WP-1, design §5/§6.7).
 
 `scripts/run-release-workspace-tests.sh` explains at length why `--release --workspace
---all-targets` overrides `[profile.release].panic` back to `unwind`: three packages carry a
+--all-targets` overrides `[profile.release].panic` back to `unwind`: two native packages carry a
 `cdylib`/`staticlib` lib target, whose crate-type outputs are NOT hashed into their filenames the
 way an rlib's are, so building both panic variants of one of those libs in the same invocation
 lets the second clobber the first on disk and a downstream unit link whichever landed last. That
@@ -12,10 +12,11 @@ build or link anything itself: `cargo metadata` is read-only, and the root manif
 text. If either input drifts (a new shipped cdylib, a changed profile), the override's reasoning
 should be re-derived, not silently kept valid by a stale pin.
 
-The five packages below are exactly the shipped-cdylib/staticlib set as of #359: `capi` (rlib +
-staticlib + cdylib, the native C ABI), `effect-package` and `host-web` (rlib + cdylib), and the two
-wasm guest test cdylibs `wasm-gate-guest`/`wasm-console-guest` (their own target triple, so they do
-not actually clobber, but they are still exactly-pinned membership, not "cdylib crates in general").
+The four packages below are exactly the shipped-cdylib/staticlib set: `capi` (rlib + staticlib +
+cdylib, the native C ABI), `host-web` (rlib + cdylib), and the two wasm guest test cdylibs
+`wasm-gate-guest`/`wasm-console-guest` (their own target triple, so they do not actually clobber,
+but they are still exactly-pinned membership, not "cdylib crates in general"). #359 pinned five;
+#1037 removed `effect-package` (rlib + cdylib) with the third-party effect package surface.
 
 By default this runs `cargo metadata --format-version 1 --locked --no-deps` itself. `--metadata
 <file>` accepts a saved `cargo metadata` JSON document instead, so the crate-type assertion can be
@@ -35,7 +36,6 @@ import tomllib
 
 EXPECTED_CDYLIB_OR_STATICLIB = frozenset({
     "capi",
-    "effect-package",
     "host-web",
     "wasm-gate-guest",
     "wasm-console-guest",
@@ -216,7 +216,6 @@ def _pkg(name: str, crate_types: list[str]) -> dict:
 def _valid_metadata() -> dict:
     packages = [
         _pkg("capi", ["rlib", "staticlib", "cdylib"]),
-        _pkg("effect-package", ["rlib", "cdylib"]),
         _pkg("host-web", ["rlib", "cdylib"]),
         _pkg("wasm-gate-guest", ["cdylib"]),
         _pkg("wasm-console-guest", ["cdylib"]),
@@ -261,10 +260,10 @@ def self_test() -> None:
     assert actual == EXPECTED_CDYLIB_OR_STATICLIB, actual
     check_release_profile(VALID_CARGO_TOML)
 
-    # A sixth cdylib crate is rejected.
-    sixth = _valid_metadata()
-    sixth["packages"].append(_pkg("sixth-shipped-cdylib", ["cdylib"]))
-    _expect_invalid("sixth cdylib crate", check_crate_types, sixth, needle="unexpected")
+    # A fifth cdylib crate is rejected.
+    fifth = _valid_metadata()
+    fifth["packages"].append(_pkg("fifth-shipped-cdylib", ["cdylib"]))
+    _expect_invalid("fifth cdylib crate", check_crate_types, fifth, needle="unexpected")
 
     # A missing expected crate is rejected.
     missing = _valid_metadata()

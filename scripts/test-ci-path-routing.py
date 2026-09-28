@@ -290,19 +290,19 @@ def test_nightly_budget_selection() -> None:
             "sys.exit(37 if len(rows) + 1 == int(os.environ['FAIL_CALL']) else 0)\n"
         )
         cargo.chmod(0o755)
-        for fail_call in range(5):
+        for fail_call in range(4):
             log = scratch / f"calls-{fail_call}.jsonl"
             env = dict(os.environ, PATH=f"{scratch}:{os.environ['PATH']}",
                        BUDGET_CALL_LOG=str(log), FAIL_CALL=str(fail_call))
             result = subprocess.run(["bash", "-c", body], env=env, check=False)
             calls = [json.loads(line) for line in log.read_text().splitlines()]
             assert result.returncode == (37 if fail_call else 0)
-            assert calls == expected[:fail_call or 4]
+            assert calls == expected[:fail_call or 3]
     for command in checker.NIGHTLY_BUDGET_COMMANDS:
         workflow_mutation_fails("nightly.yml", command, "true")
     workflow_mutation_fails("nightly.yml", "--ignored --exact", "--ignored")
     workflow_mutation_fails("nightly.yml", checker.NIGHTLY_BUDGET_COMMANDS[0],
-                            "cargo test --locked --release -p host-web -p host-core -p effect-package -- --ignored")
+                            "cargo test --locked --release -p host-web -p host-core -- --ignored")
     workflow_mutation_fails("nightly.yml", "          set -euo pipefail\n" +
                             "          " + checker.NIGHTLY_BUDGET_COMMANDS[0],
                             "          " + checker.NIGHTLY_BUDGET_COMMANDS[0])
@@ -737,6 +737,86 @@ def main() -> int:
         "  aarch64-release:\n    name: AArch64 release digest gates and realtime audits "
         "(NEON Simd4, FPCR)\n    needs: route\n    if: needs.route.outputs.route == 'sdk'\n",
     )
+
+    # #1048 review finding 2: the V8 pairing is found by token, so reordering the flags cannot
+    # slip the spill leg out of CI once artifact-gates stops running it.
+    root = workspace()
+    try:
+        workflow = root / ".github/workflows/qualification.yml"
+        mutate(workflow, "bash scripts/run-wasm-gates.sh --without-v8-spill --without-native\n",
+               "bash scripts/run-wasm-gates.sh --without-native --without-v8-spill\n")
+        mutate(workflow,
+               "          python3 -B scripts/check-web-audioworklet-v8-spill.py "
+               "target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm\n",
+               "")
+        checker_fails(root)
+    finally:
+        shutil.rmtree(root)
+
+    # Issue #1048: wasm-guests leaves run-wasm-gates.sh's native leg to test-release's G5 Rust
+    # test, so test-release must run wasm-gates' tests in release, unfiltered, unconditionally and
+    # on the same route.
+    g5_step = ("        run: cargo test --locked --release -p lane -p math -p wasm-gates "
+               "--features math/lane\n")
+    workflow_mutation_fails(
+        "qualification.yml", g5_step,
+        "        run: cargo test --locked --release -p lane -p math --features math/lane\n",
+    )  # the owner dropped from test-release
+    workflow_mutation_fails(
+        "qualification.yml", g5_step,
+        "        run: cargo test --locked -p lane -p math -p wasm-gates --features math/lane\n",
+    )  # the owner demoted to the debug profile
+    workflow_mutation_fails(
+        "qualification.yml", g5_step,
+        g5_step.replace("--features math/lane\n",
+                        "--features math/lane -- --skip g5_native_digests_match_pins\n"),
+    )  # the owner filtered out by name
+    workflow_mutation_fails(
+        "qualification.yml", g5_step,
+        g5_step.replace("-p wasm-gates", "-p wasm-gates --lib"),
+    )  # the owner's integration tests deselected
+    workflow_mutation_fails(
+        "qualification.yml", g5_step,
+        "        if: needs.route.outputs.math_closure == 'true'\n" + g5_step,
+    )  # the owner made conditional on a narrower step condition
+    workflow_mutation_fails(
+        "qualification.yml",
+        "    name: release-mode lane, math, and wasm-gates digest gates\n"
+        "    needs: route\n"
+        "    if: needs.route.outputs.route == 'full'\n",
+        "    name: release-mode lane, math, and wasm-gates digest gates\n"
+        "    needs: route\n"
+        "    if: needs.route.outputs.math_closure == 'true'\n",
+    )  # the owner's job on a narrower route than wasm-guests
+
+    # Issue #1048 amendment 2: an AArch64 job (#1017) must carry the G5 owner in release.
+    # `aarch64-release` does, in its own step; dropping, filtering, demoting or conditioning that
+    # step fails, and the owner's own job moved onto an arm64 runner passes.
+    aarch64_g5 = ("      - name: G5 class-A corpus on arm64 (the native owner, #1048)\n"
+                  "        run: cargo test --locked --release -p wasm-gates --features math/lane\n")
+    workflow_mutation_fails("qualification.yml", aarch64_g5, "")
+    workflow_mutation_fails(
+        "qualification.yml", aarch64_g5,
+        aarch64_g5.replace("--features math/lane\n",
+                           "--features math/lane -- --skip g5_native_digests_match_pins\n"),
+    )
+    workflow_mutation_fails("qualification.yml", aarch64_g5,
+                            aarch64_g5.replace(" --release", ""))
+    workflow_mutation_fails(
+        "qualification.yml", aarch64_g5,
+        aarch64_g5.replace("        run:",
+                           "        if: needs.route.outputs.math_closure == 'true'\n        run:"),
+    )
+    root = workspace()
+    try:
+        mutate(root / ".github/workflows/qualification.yml",
+               "    name: release-mode lane, math, and wasm-gates digest gates\n    needs: route\n"
+               "    if: needs.route.outputs.route == 'full'\n    runs-on: ubuntu-24.04\n",
+               "    name: release-mode lane, math, and wasm-gates digest gates\n    needs: route\n"
+               "    if: needs.route.outputs.route == 'full'\n    runs-on: macos-15\n")
+        run(sys.executable, str(CHECKER), "--root", str(root))
+    finally:
+        shutil.rmtree(root)
 
     # Baseline: the unmutated workspace() -- qualification.yml plus the router/checker/test
     # scripts, with none of the four retired workflows present -- must pass the checker outright.

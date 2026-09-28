@@ -33,7 +33,6 @@ fn prepared_plan(id: u64) -> PreparedRenderPlan {
         envelope: RenderEnvelope {
             sample_rate: SampleRateHz(48_000),
             quantum: QuantumFrames(1),
-            input_channels: None,
             output_channels: NonZeroUsize::new(1).expect("one output channel"),
         },
         scratch: &[],
@@ -76,7 +75,6 @@ fn run_round(blocks: u64, trace_markers: bool) -> RoundEvidence {
                 .unwrap_or_else(|_| panic!("third audit plan must publish"));
         }
         let io = RenderIo {
-            input: None,
             output: PlanarBufferMut::try_new(&mut output, 1, 1, 1).expect("fixed output view"),
         };
         let report = owner

@@ -9,6 +9,12 @@
 #   wasm+simd128 -- and with it (backend simd4), which is the only place the v128 software FMA of
 #                   master plan §3.5 is actually executed.
 #
+# `--without-native` leaves the native leg out (issue #1048). CI passes it in `wasm-guests`,
+# because `test-release` runs the same comparison as the Rust test `g5_native_digests_match_pins`
+# (tools/wasm-gates/tests/g5_native_corpus.rs), in the shipping profile, where mutation testing
+# can see it; `scripts/check-ci-path-routing.py` refuses the flag without that pairing. A local
+# run keeps the leg by default, so "run-wasm-gates.sh passes" still compares the native digests.
+#
 # After the legs, `check_v8_spill` (issues #1000, #1009) holds the shipped AudioWorklet module's EQ
 # cascade loops to V8's register allocation under the pinned Node; it needs that Node on PATH, and
 # only it does. `--without-v8-spill` leaves it out. CI passes that flag in `wasm-guests`, because
@@ -28,10 +34,18 @@ readonly GUEST="wasm_gate_guest.wasm"
 cd "$repository_root"
 
 v8_spill=1
-if [[ ${1-} == --without-v8-spill ]]; then
-    v8_spill=0
+native=1
+while [[ ${1-} == --without-* ]]; do
+    case "$1" in
+        --without-v8-spill) v8_spill=0 ;;
+        --without-native) native=0 ;;
+        *)
+            printf 'wasm gates: unknown option %s\n' "$1" >&2
+            exit 2
+            ;;
+    esac
     shift
-fi
+done
 output_dir="${1:-target/ci/wasm-gates}"
 mkdir -p "$output_dir"
 evidence="$output_dir/wasm-gates.jsonl"
@@ -39,7 +53,9 @@ evidence="$output_dir/wasm-gates.jsonl"
 
 # The host runner and the native leg. `--locked` everywhere: the pinned wasmtime is part of the
 # gate, and a resolver that quietly moved it would change which modules validate.
-cargo run --locked --release -q -p wasm-gates -- --native | tee -a "$evidence"
+if ((native)); then
+    cargo run --locked --release -q -p wasm-gates -- --native | tee -a "$evidence"
+fi
 
 run_guest() {
     local name="$1"
@@ -206,7 +222,11 @@ for leg in scalar simd128; do
 done
 printf 'wasm gates: detector history resident in locals on both guest legs\n'
 check_f64_lane_lowering "target/ci/wasm-gates-simd128/$TARGET/release/$GUEST"
-legs="native + wasm scalar + wasm simd128"
+if ((native)); then
+    legs="native + wasm scalar + wasm simd128"
+else
+    legs="wasm scalar + wasm simd128; native left out (--without-native)"
+fi
 if ((v8_spill)); then
     check_v8_spill
     legs+=" + V8 EQ loops"

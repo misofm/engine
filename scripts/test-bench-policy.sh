@@ -250,7 +250,7 @@ expect_diagnostic operator-root-leading-text 'operator script root expression is
 
 new_case second-allocator
 printf '\nunsafe impl GlobalAlloc for Second {}\n' \
-    >>"$case_root/tools/bench/src/rack.rs"
+    >>"$case_root/tools/bench/src/console.rs"
 expect_failure second-allocator
 
 new_case second-global-allocator-attribute
@@ -271,9 +271,9 @@ printf '\nfn json_string(value: &str) -> String {\n    value.replace('"'"'\\\\'"
     >>"$case_root/tools/bench/src/conformance.rs"
 expect_failure second-json-string-name
 
-# A local wrapper that only calls the shared `escape` is not the defect (`tools/bench/src/builtins.rs`
-# and `tools/bench/src/effect_interchange.rs` both carry one); the baseline case above already
-# proves that shape stays green.
+# A local wrapper that only calls the shared `escape` is not the defect. No tool carries one any
+# more (#1026 and #1037 deleted the last two), so the cases below that need one append it to
+# `tools/bench/src/conformance.rs` first, exactly as the delegate-stays-green cases do.
 
 # A delegating wrapper whose signature rustfmt has wrapped across multiple lines is still a
 # delegate, not a reimplementation: the window scan has to reach the line that actually calls
@@ -361,17 +361,17 @@ expect_failure second-sha256-initial-constant
 
 new_case second-percentile
 printf '\nfn percentile(sorted: &[u64], p: usize) -> u64 {\n    sorted[p]\n}\n' \
-    >>"$case_root/tools/bench/src/graph.rs"
+    >>"$case_root/tools/bench/src/console.rs"
 expect_failure second-percentile
 
 new_case second-percentile-summary-owner
 printf '\nstruct Percentiles { min: u64 }\n' \
-    >>"$case_root/tools/bench/src/graph.rs"
+    >>"$case_root/tools/bench/src/console.rs"
 expect_failure second-percentile-summary-owner
 
 new_case second-digest-sink
 printf '\nstruct Sha256Sink;\n' \
-    >>"$case_root/tools/bench/src/builtins.rs"
+    >>"$case_root/tools/bench/src/console.rs"
 expect_failure second-digest-sink
 
 new_case removed-escaper
@@ -388,22 +388,22 @@ sed -i '/^#!\[allow(unsafe_code)\]$/d' "$case_root/tools/audit/src/capi.rs"
 expect_failure retired-unsafe-owner
 
 new_case converted-subject-loses-the-shared-timer
-sed -i 's/timing::timed/inline_timed/' "$case_root/tools/bench/src/rack.rs"
+sed -i 's/timing::timed/inline_timed/g' "$case_root/tools/bench/src/console.rs"
 expect_failure converted-subject-loses-the-shared-timer
 
 new_case converted-subject-regrows-a-clock
 printf '\nfn t() { let _ = Instant::now(); }\n' \
-    >>"$case_root/tools/bench/src/rack.rs"
+    >>"$case_root/tools/bench/src/console.rs"
 expect_failure converted-subject-regrows-a-clock
 
 new_case converted-subject-regrows-a-digest
 printf '\nfn h() { let _ = Sha256::new(); }\n' \
-    >>"$case_root/tools/bench/src/rack.rs"
+    >>"$case_root/tools/bench/src/console.rs"
 expect_failure converted-subject-regrows-a-digest
 
 new_case subject-bypasses-metadata-snapshot
 printf '\nfn bypass() { let _ = std::env::var("CPU"); }\n' \
-    >>"$case_root/tools/bench/src/rack.rs"
+    >>"$case_root/tools/bench/src/console.rs"
 expect_failure subject-bypasses-metadata-snapshot
 
 new_case production-dependency
@@ -448,13 +448,17 @@ grep_fault() {
     expect_failure_with_path "$label" "$case_root/shim" "$expected" 'grep-error-sentinel'
 }
 
+# A delegating `json_string`, for the cases that need a wrapper beside the shared escaper.
+delegating_wrapper=$'\nfn json_string(value: &str) -> String {\n    format!("\\"{}\\"", json::escape(value))\n}\n'
+
 multifile_grep_fault() {
-    local label=$1 selector=$2 operation=$3 sentinel=$4 expected_files=$5 mode case_label
+    local label=$1 selector=$2 operation=$3 sentinel=$4 expected_files=$5 seed=${6:-} mode case_label
     local output status prefix suffix bounded replay expected_sorted actual_sorted line_count
     for mode in real reversed; do
         case_label=$label
         [[ "$mode" == real ]] || case_label="$label-reversed"
         new_case "$case_label"
+        [[ -z "$seed" ]] || printf '%s' "$delegating_wrapper" >>"$case_root/$seed"
         mkdir -p "$case_root/shim"
         printf '#!/usr/bin/env bash\nselector=%q\nmode=%q\npayload=%q\nreplay=%q\nif [[ " $* " == *"--include=*.rs"* && " $* " == *"$selector"* ]]; then\n    if /usr/bin/grep "$@" >"$payload"; then producer_status=0; else producer_status=$?; fi\n    printf "%%s\\n" "$producer_status" >"$payload.status"\n    ((producer_status == 0)) || { printf "selected-grep-setup-status=%%s\\n" "$producer_status" >&2; exit 96; }\n    if [[ "$mode" == reversed ]]; then /usr/bin/tac "$payload" >"$replay"; else cp "$payload" "$replay"; fi\n    /usr/bin/cat "$replay"\n    printf "%%s\\n" %q >&2\n    exit 7\nfi\nexec /usr/bin/grep "$@"\n' \
             "$selector" "$mode" "$case_root/selected.payload" "$case_root/replayed.payload" "$sentinel" \
@@ -493,7 +497,7 @@ grep_fault digest-grep-error 'Sha256Sink' 'grep failed with status 7; output: to
 grep_fault digest-grep-empty-error 'Sha256Sink' 'grep failed with status 7; output: <empty>; stderr: grep-error-sentinel' empty
 grep_fault escaper-presence-error 'tools/bench-support/src/json.rs' 'shared-definition grep failed or is empty for tools/bench-support/src/json.rs; status 7; output:'
 grep_fault escaper-presence-empty-error 'tools/bench-support/src/json.rs' 'shared-definition grep failed or is empty for tools/bench-support/src/json.rs; status 7; output: <empty>; stderr: grep-error-sentinel' empty
-multifile_grep_fault escaper-candidate-grep-error 'json_(escape|string|quote)' grep grep-error-sentinel $'tools/bench/src/effect_interchange.rs\ntools/bench/src/builtins.rs\ntools/bench-support/src/json.rs'
+multifile_grep_fault escaper-candidate-grep-error 'json_(escape|string|quote)' grep grep-error-sentinel $'tools/bench/src/conformance.rs\ntools/bench-support/src/json.rs' tools/bench/src/conformance.rs
 new_case escaper-candidate-grep-empty-error
 mkdir -p "$case_root/shim"
 printf '#!/usr/bin/env bash\nif [[ " $* " == *"--include=*.rs"* && " $* " == *"json_(escape|string|quote)"* ]]; then printf "grep-error-sentinel\\n" >&2; exit 7; fi\nexec /usr/bin/grep "$@"\n' >"$case_root/shim/grep"
@@ -506,16 +510,18 @@ multifile_grep_fault environment-reader-grep-error 'env::var' 'environment-reade
 grep_fault environment-reader-grep-empty-error 'env::var' 'environment-reader scan failed with status 7; output: <empty>; stderr: grep-error-sentinel' empty
 
 new_case delegate-parser-output-error
+printf '%s' "$delegating_wrapper" >>"$case_root/tools/bench/src/conformance.rs"
 mkdir -p "$case_root/shim"
-printf '#!/usr/bin/env bash\nif [[ -n "${MISO_ENGINE_BENCH_POLICY_NEEDLE:-}" && "${@: -1}" == "tools/bench/src/effect_interchange.rs" ]]; then /usr/bin/awk "$@"; printf "delegate-error-sentinel\\n" >&2; exit 6; fi\nexec /usr/bin/awk "$@"\n' >"$case_root/shim/awk"
+printf '#!/usr/bin/env bash\nif [[ -n "${MISO_ENGINE_BENCH_POLICY_NEEDLE:-}" && "${@: -1}" == "tools/bench/src/conformance.rs" ]]; then /usr/bin/awk "$@"; printf "delegate-error-sentinel\\n" >&2; exit 6; fi\nexec /usr/bin/awk "$@"\n' >"$case_root/shim/awk"
 chmod +x "$case_root/shim/awk"
-expect_failure_with_path delegate-parser-output-error "$case_root/shim" 'delegate parser failed for tools/bench/src/effect_interchange.rs with status 6; output: delegate; stderr: delegate-error-sentinel'
+expect_failure_with_path delegate-parser-output-error "$case_root/shim" 'delegate parser failed for tools/bench/src/conformance.rs with status 6; output: delegate; stderr: delegate-error-sentinel'
 
 new_case delegate-parser-empty-error
+printf '%s' "$delegating_wrapper" >>"$case_root/tools/bench/src/conformance.rs"
 mkdir -p "$case_root/shim"
-printf '#!/usr/bin/env bash\nif [[ -n "${MISO_ENGINE_BENCH_POLICY_NEEDLE:-}" && "${@: -1}" == "tools/bench/src/effect_interchange.rs" ]]; then printf "delegate-empty-error-sentinel\\n" >&2; exit 6; fi\nexec /usr/bin/awk "$@"\n' >"$case_root/shim/awk"
+printf '#!/usr/bin/env bash\nif [[ -n "${MISO_ENGINE_BENCH_POLICY_NEEDLE:-}" && "${@: -1}" == "tools/bench/src/conformance.rs" ]]; then printf "delegate-empty-error-sentinel\\n" >&2; exit 6; fi\nexec /usr/bin/awk "$@"\n' >"$case_root/shim/awk"
 chmod +x "$case_root/shim/awk"
-expect_failure_with_path delegate-parser-empty-error "$case_root/shim" 'delegate parser failed for tools/bench/src/effect_interchange.rs with status 6; output: <empty>; stderr: delegate-empty-error-sentinel'
+expect_failure_with_path delegate-parser-empty-error "$case_root/shim" 'delegate parser failed for tools/bench/src/conformance.rs with status 6; output: <empty>; stderr: delegate-empty-error-sentinel'
 
 new_case later-timed-marker-error
 mkdir -p "$case_root/shim"

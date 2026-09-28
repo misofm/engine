@@ -14,10 +14,11 @@ use std::sync::Mutex;
 use builtins::{BuiltinLaneSelector, Matrix2x2, MeterConfig, MeterTap};
 use builtins_compiler::{
     BuiltinCompileCaps, MeterRequest, TestOnlyFaderMatrixPair, TrackControlRecord,
-    TrackFaderRecord, prepare_session_builtins, test_only_begin_phase_two_allocation_observation,
-    test_only_fader_matrix_witness, test_only_observed_scalar_declined_split_pair_binding,
-    test_only_observed_scalar_pair_binding, test_only_observed_scalar_split_pair_binding,
-    test_only_phase_two_allocation_snapshot, test_only_prepared_scalar_split_pair_graph,
+    TrackFaderRecord, TrackInputRecord, prepare_session_builtins,
+    test_only_begin_phase_two_allocation_observation, test_only_fader_matrix_witness,
+    test_only_observed_scalar_declined_split_pair_binding, test_only_observed_scalar_pair_binding,
+    test_only_observed_scalar_split_pair_binding, test_only_phase_two_allocation_snapshot,
+    test_only_prepared_scalar_split_pair_graph,
     test_only_prepared_scalar_split_pair_graph_with_observer_error,
     test_only_record_phase_two_allocation, test_only_record_phase_two_deallocation,
     test_only_reset_fader_matrix_witness, test_only_reset_phase_two_allocation_tracker,
@@ -205,7 +206,6 @@ fn audit_graph_render(
             .plan
             .render(
                 RenderIo {
-                    input: None,
                     output: PlanarBufferMut::try_new(output, 2, 64, 64).expect("output"),
                 },
                 RenderTime { absolute_sample },
@@ -238,7 +238,6 @@ fn audit_failed_graph_render(
             .plan
             .render(
                 RenderIo {
-                    input: None,
                     output: PlanarBufferMut::try_new(output, 2, 64, 64).expect("output"),
                 },
                 RenderTime { absolute_sample },
@@ -468,6 +467,58 @@ fn actual_queued_scalar_graph_allocates_and_frees_nothing() {
     assert!(
         observed.meter_consumers[0].consumer.try_pop().is_ok(),
         "observed fallback publishes its meter window"
+    );
+}
+
+/// Input trim records drained into a running graph allocate and free nothing, through the banked
+/// drain (`BuiltinBankProcessor::begin_block`) of the fixture's eight-lane cohort and its one-lane
+/// tail.
+///
+/// Every track's input queue receives a `TrimDb { Both, -6 / -12 dB, 256 }` on each of four
+/// blocks, so each drain retargets a ramp still in flight; the uncommanded twin shows the records
+/// took effect, so an allocation-free pass cannot come from a drain that did nothing.
+///
+/// Ported by #1027 from the #600 input-trim qualification (`tools/bench/src/input_symmetry.rs`,
+/// `qualification_phase_constants_and_zero_render_allocations`), retired with its capture
+/// tooling. The fader and matrix queues are gated by the test above; before this, the input
+/// queue's `TrimDb` arm had no allocation gate in CI.
+///
+/// Red mutation: allocate in the banked drain's `TrimDb` arm (`vec![smoothing_samples][0]` for
+/// the window) -> the first ridden block counts nine allocations and nine frees, one per track.
+#[test]
+fn actual_queued_input_trim_drain_allocates_and_frees_nothing() {
+    let _session_guard = SESSION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut ridden = builtins_compiler::test_only_prepared_pair_graph(false);
+    let mut quiet = builtins_compiler::test_only_prepared_pair_graph(false);
+    assert_eq!(
+        ridden.track_controls.len(),
+        9,
+        "an eight-lane cohort and a one-lane tail"
+    );
+    let mut ridden_output = [0.0_f32; 128];
+    let mut quiet_output = [0.0_f32; 128];
+    let mut moved = false;
+    for block in 0..4_u64 {
+        let db = if block % 2 == 0 { -6.0 } else { -12.0 };
+        for control in &mut ridden.track_controls {
+            control
+                .input
+                .try_push(TrackInputRecord::TrimDb {
+                    lanes: BuiltinLaneSelector::Both,
+                    db,
+                    smoothing_samples: 256,
+                })
+                .expect("input queue room");
+        }
+        audit_graph_render(&mut ridden, &mut ridden_output, block * 64);
+        audit_graph_render(&mut quiet, &mut quiet_output, block * 64);
+        moved |= ridden_output != quiet_output;
+    }
+    assert!(
+        moved,
+        "the trim records never moved the output, so the drain they went through proves nothing"
     );
 }
 

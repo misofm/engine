@@ -343,10 +343,13 @@ jobs:
         run: |
           python3 -B scripts/check-test-support-ci.py
           python3 -B scripts/test-test-support-ci.py
-      - name: Console and rack benchmark fixture integrity
+      # #1027: every file under scripts/ outside scripts/operator/ is reached from a workflow.
+      - name: Script reachability policy and mutation tests
         run: |
-          bash scripts/check-console-benchmark-fixture.sh
-          bash scripts/check-rack-benchmark-fixture.sh
+          python3 -B scripts/check-script-reachability.py
+          python3 -B scripts/test-script-reachability.py
+      - name: Console benchmark fixture integrity
+        run: bash scripts/check-console-benchmark-fixture.sh
       # check-console-fixtures.sh and check-builtins-fixtures.sh (S1/S2): neither script has a
       # hermetic no-binary mode -- with no binary argument, check-console-fixtures.sh's
       # derive-intended-console-fixture.py falls back to `cargo run -q -p session-validator`
@@ -357,20 +360,13 @@ jobs:
       # binaries; only the hermetic mutation-test suite stays here.
       - name: Standing builtins fixture manifest mutation tests
         run: bash scripts/test-builtins-fixtures.sh
-      - name: Builtins benchmark real-tree manifest consumers
-        run: bash scripts/test-builtins-benchmark.sh --check-manifest-consumers
       - name: Wasm console benchmark validator mutation tests
         run: bash scripts/test-wasm-console-benchmark.sh
-      # test-builtins-benchmark.sh and test-graph-benchmark.sh moved to nightly's
-      # moved-mutation-suites job (design §6.2/deliverable C); everything else in this bundle is
-      # a hermetic validator self-test.
+      # Everything in this bundle is a hermetic validator self-test.
       - name: Benchmark preconditions and validator mutation tests
         run: |
           bash scripts/check-bench-preconditions.sh
           bash scripts/test-console-benchmark.sh
-          bash scripts/test-rack-benchmark.sh
-          env -u CARGO_INCREMENTAL bash scripts/test-builtins-current-benchmark.sh
-          bash scripts/test-wasm-kernel-timing.sh
       - name: Shared host facade policy and mutation tests
         run: |
           bash scripts/check-host-core-policy.sh
@@ -411,13 +407,6 @@ jobs:
           bash scripts/test-effect-runtime-policy.sh
           bash scripts/check-effect-runtime-fixtures.sh
           bash scripts/test-effect-runtime-fixtures.sh
-      # Effect-interchange qualification boundary and its own policy-test mutation suite (design
-      # §5 lint content: "effect-interchange qualification + policy test"); the cross-target job
-      # re-runs the qualification check as check-cross-targets.sh's own precondition.
-      - name: Effect interchange qualification and policy mutation tests
-        run: |
-          bash scripts/check-effect-interchange-qualification.sh
-          bash scripts/test-effect-interchange-policy.sh
       # check-effect-contract.sh has no hermetic no-binary mode either (S1): with no bench binary
       # argument it falls back to `cargo run --locked --release -q -p bench`, a full release build
       # inside the lint shard, and it re-runs the effect-runtime-policy/fixtures checks the
@@ -544,6 +533,8 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal
+      # wasm-gates' G5 test `g5_native_digests_match_pins` is the one native owner of every
+      # cross-target digest corpus (#1048); wasm-guests leaves the script's native leg to it.
       - name: Lane and math gates (G1-G4, G6, P1, M1-M3) and wasm-gates G5/G6 in release
         run: cargo test --locked --release -p lane -p math -p wasm-gates --features math/lane
       # Own CARGO_TARGET_DIR per distinct RUSTFLAGS (design §8): a per-crate override must not
@@ -796,14 +787,15 @@ jobs:
           CARGO_TARGET_DIR=target/ci/wasm-simd RUSTFLAGS='-C target-feature=+simd128' cargo check --locked --target wasm32-unknown-unknown -p dsp-reference -p conformance
       - name: Issue-005 scalar and SIMD protocol golden parity
         run: bash scripts/check-protocol-wasm-parity.sh
-      # Gate G5 (native corpus, every scalar/SIMD4/SIMD8 target) and the wasm replay of gates M3
-      # and D1 under wasmtime, plus G6's detector-residency pin. Kept as one atomic invocation:
-      # run-wasm-gates.sh is not in this work package's edit scope, so its native and guest legs
-      # cannot be split the way design §6.4 describes without a script change owned elsewhere.
-      # `--without-v8-spill` (#1009): the script's V8 spill leg runs in `artifact-gates`, on the
-      # downloaded, pin-verified artifact, rather than on a second fat-LTO build of it here.
-      - name: Native and WebAssembly cross-target digest gates
-        run: bash scripts/run-wasm-gates.sh --without-v8-spill
+      # Gate G5's wasm legs: the frozen corpus (lane cases and every delegated family's pins)
+      # replayed under wasmtime with and without simd128, plus the detector-residency and f64-lane
+      # lowering pins. `--without-native` (#1048): the native leg is the Rust test
+      # `g5_native_digests_match_pins` in `test-release`, in the shipping profile, so it is not run a
+      # second time here. `--without-v8-spill` (#1009): the script's V8 spill leg runs in
+      # `artifact-gates`, on the downloaded, pin-verified artifact, rather than on a second fat-LTO
+      # build of it here. check-ci-path-routing.py refuses either flag without its pairing.
+      - name: WebAssembly cross-target digest gates
+        run: bash scripts/run-wasm-gates.sh --without-v8-spill --without-native
       - name: Upload cross-target gate evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -827,22 +819,18 @@ jobs:
       # armv7-linux-androideabi is installed only so check-cross-targets.sh can prove lane refuses
       # it (#1041: mobile ships 64-bit only); nothing is built for it. aarch64-apple-ios and
       # aarch64-linux-android are the mobile product targets (#1017): the product crates are
-      # checked and linted for both, and the iOS release assembly is scanned (#1018).
-      - name: Install pinned Rust toolchain, cross targets, and wabt
+      # checked and linted for both, and their iOS release assembly is scanned (#1018).
+      - name: Install pinned Rust toolchain, cross targets, and ripgrep
         run: |
           rustup toolchain install 1.97.1 --profile minimal --component clippy
           rustup target add --toolchain 1.97.1 wasm32-unknown-unknown armv7-linux-androideabi aarch64-apple-ios aarch64-linux-android
           sudo apt-get update
-          sudo apt-get install -y ripgrep wabt
-      # Replaces check-parametric-eq-targets.sh, check-builtins-targets.sh, and
-      # check-effect-interchange-targets.sh's cargo halves with one script, one cached target dir
-      # per triple (WP-3 contract). The render-contract rg half moved to lint.
-      - name: Cross-target cargo checks (AArch64 iOS/Android product crates, parametric-eq, builtins, effect-interchange)
+          sudo apt-get install -y ripgrep
+      # Replaces check-parametric-eq-targets.sh's and check-builtins-targets.sh's cargo halves with
+      # one script, one cached target dir per triple (WP-3 contract). The render-contract rg half
+      # moved to lint.
+      - name: Cross-target cargo checks (AArch64 iOS/Android product crates, parametric-eq, builtins, effect-compiler)
         run: bash scripts/check-cross-targets.sh
-      - name: Effect package V1 corpus and inspection surface
-        run: bash scripts/check-effect-package-v1.sh
-      - name: Effect descriptor V1 corpus and inspection surface
-        run: bash scripts/check-effect-descriptor-v1.sh
 
   # Issue #1017: native AArch64 (iOS and Android arm64) is a product target, so its tests run on
   # arm64 hardware, where lane::Backend is Simd4 (NEON) and lane::fpenv pins FPCR. Two jobs in
@@ -902,7 +890,12 @@ jobs:
         with:
           shared-key: aarch64-release
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Release lane, math, G5 and console digests and realtime audits on arm64, known defects as named expected failures
+      # #1048: g5_native_digests_match_pins is the one native owner of the cross-target digest
+      # corpora; on arm64 it proves phones render the x86 and browser pins. Its own unfiltered
+      # step, so no expected-failure row or skip can reach it.
+      - name: G5 class-A corpus on arm64 (the native owner, #1048)
+        run: cargo test --locked --release -p wasm-gates --features math/lane
+      - name: Release lane and math gates, console digests and realtime audits on arm64, known defects as named expected failures
         run: bash scripts/run-aarch64-tests.sh release
 
   release-shape:
@@ -923,8 +916,8 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal
-      # cargo-metadata asserts the cdylib/staticlib set is exactly {capi, effect-package,
-      # host-web, wasm-gate-guest, wasm-console-guest} and [profile.release].panic == "abort".
+      # cargo-metadata asserts the cdylib/staticlib set is exactly {capi, host-web,
+      # wasm-gate-guest, wasm-console-guest} and [profile.release].panic == "abort".
       - name: Release shape policy
         run: python3 -B scripts/check-release-shape.py
       # The panic-variant filename clobber (docs/REALTIME_DEPENDENCY_POLICY.md) is prevented by

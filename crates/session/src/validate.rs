@@ -1,8 +1,8 @@
 //! Semantic validation owned by issue 004, deliberately before graph/DSP/effect resolution.
 use crate::{
     AutomationShape, AutomationTarget, Diagnostic, DiagnosticCode, DiagnosticSet, Effect,
-    MatrixOrPan, ParameterChannel, ParameterUnit, Rack, RackName, RenderMode, RouteDestination,
-    RouteSource, SESSION_SCHEMA_VERSION_V1, SessionModel, Source, Track,
+    MatrixOrPan, ParameterChannel, ParameterUnit, Rack, RackName, RouteDestination, RouteSource,
+    SESSION_SCHEMA_VERSION_V1, SessionModel, Source, Track,
     diagnostic::{MAXIMUM_SESSION_DIAGNOSTICS, PathRef},
 };
 use engine::{SampleRateHz, is_launch_sample_rate};
@@ -39,14 +39,6 @@ pub(crate) fn validate_session(session: &SessionModel) -> Result<(), DiagnosticS
             DiagnosticCode::SampleRateUnsupportedAtLaunch,
             &root.key("sample_rate_hz"),
             "launch sample_rate_hz must be one of 44100, 48000, 88200, or 96000 Hz",
-        );
-    }
-    if session.render_profile.mode != RenderMode::SingleThread {
-        error(
-            &mut diagnostics,
-            DiagnosticCode::RenderModeUnsupportedAtLaunch,
-            &root.key("render_profile").key("mode"),
-            "launch render_profile.mode must be single_thread",
         );
     }
     if session.quantum_frames == 0 {
@@ -509,11 +501,11 @@ pub const BUILTIN_AUTOMATION_TARGETS: [(u32, bool); 11] = [
 /// It extends the target **vocabulary** and nothing else. No lowering reads the session's
 /// automation table -- for this rack or for any of the other three -- so a valid `builtins` target
 /// is valid-and-inert syntax today: it authors, it round-trips, it survives the canonical writer,
-/// and it renders nothing. Builtin automation *rendering* is gated on issue #140's span feed,
-/// whose natural destination is the very drains #210 phases 1 and 3 built
-/// (`TrackInputRecord`, `TrackFaderRecord`, `TrackControlRecord`), because a span's
-/// block-first-sample semantics already match the drain contract. Nothing here builds that feed
-/// and nothing here should be read as having built it.
+/// and it renders nothing. Rendering stored session automation, builtin targets included, is
+/// owned by #1058 (research first); #140, which once gated it, was descoped by the 2026-09-28
+/// owner ruling. The natural destination is still the drains #210 phases 1 and 3 built
+/// (`TrackInputRecord`, `TrackFaderRecord`, `TrackControlRecord`), whose block-first-sample
+/// semantics match a span. Nothing here builds that feed or should be read as having built it.
 fn validate_builtin_automation_target(
     target: &AutomationTarget,
     path: &PathRef<'_>,

@@ -1,11 +1,12 @@
 //! The cross-target determinism corpus for this crate's lane-generic functions.
 //!
 //! Each case evaluates one function over a fixed input set and yields one `u32` result word per
-//! input point. `tests/determinism.rs` hashes each case and compares it against [`D1_DIGESTS`];
-//! job 83d replays the identical corpus under wasmtime, at the wasm `Simd4` and scalar backends,
-//! against these same pins. That is the whole of the cross-target claim for the effect runtime:
-//! the dB curve a compressor rides, the follower it rides it with, and the level conversions
-//! between them produce the same bits in a browser as on a native host (D5).
+//! input point. Gate G5 (`tools/wasm-gates/tests/g5_native_corpus.rs`) hashes each case at every
+//! width and compares it against [`D1_DIGESTS`] natively, and replays the identical corpus under
+//! wasmtime, at the wasm `Simd4` and scalar backends, against these same pins. That is the whole of
+//! the cross-target claim for the effect runtime: the dB curve a compressor rides, the follower it
+//! rides it with, and the level conversions between them produce the same bits in a browser as on a
+//! native host (D5).
 //!
 //! # Why the inputs are built from integers
 //!

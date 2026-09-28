@@ -4,7 +4,8 @@ Every test in `crates/delay` (the `tests` module of `src/lib.rs` and
 `tests/determinism.rs`) was seen **red** under the mutation named here before it was committed
 green, per issue #125's rule and master plan #83 §1.6. Each row is one edit to production code, the
 test that caught it, and what the failure looked like. Reproduce by applying the edit and running
-`cargo test -p delay --all-targets`.
+`cargo test -p delay --all-targets`; a digest row (M13) belongs to gate G5 instead, as that row
+says.
 
 Mutations are listed in the order the gates appear in the issue-#93 plan's eval table.
 
@@ -24,7 +25,7 @@ Mutations are listed in the order the gates appear in the issue-#93 plan's eval 
 | M10 | E9 | the D7 `flush` is removed from the ring write | `dry_identities_warm_histories_with_canonical_zero_state` | the ring keeps `1e-30` and `-0.0` instead of canonical `+0.0` |
 | M11 | specs | `PARAMETER_SPECS[1]` is derived from the delay-time descriptor | `descriptor_and_specs_agree` | spec minimum 1.0 against descriptor minimum -0.95 |
 | M12 | automation | `apply_automation` accepts out-of-order spans | `malformed_automation_is_counted_and_never_applied` | 4 invalid spans counted where 5 are malformed |
-| M13 | G5 | `mix_sample`: the wet mix is a multiply and an add instead of one `Lane::fma` | `corpus_digests_match_their_pins` | the `dual_mono` digest moves |
+| M13 | G5 | `mix_sample`: the wet mix is a multiply and an add instead of one `Lane::fma` | `corpus_digests_match_their_pins` when recorded. **Now equivalent, so no test can go red:** since issue #163 phase 2 `Lane::fma` is itself an unfused multiply then add (`docs/rulings/unfused-multiply-add-audit.md`), and re-applied on 2026-09-28 the edit leaves `g5_native_digests_match_pins` green. Since issue #1048 that test is the only native compare of the delay's pins: `cargo test -p wasm-gates --test g5_native_corpus` natively, `bash scripts/run-wasm-gates.sh` under wasm | the `dual_mono` digest moved (historical) |
 | M14 | G5 vacuity | `corpus::run_case` reports zeros instead of what it rendered | `corpus_cases_are_finite_distinct_and_alive` | `case dual_mono is silent` -- the guard that stops a vacuous digest passing |
 | M15 | E10 | `bind_homogeneous_bank` answers `Ok(None)` before validating its members | `bank_fallback_validates_every_member` | a malformed member is accepted instead of rejected |
 | M16 | E3 oracle | the oracle's `damping_coefficient` returns `G` instead of `G / (1 + G)` | `damped_matrix_tail_matches_reference_oracle` | worst deviation 5.2e-2 -- the oracle is independent of the engine's mapping |

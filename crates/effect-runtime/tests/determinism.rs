@@ -1,83 +1,21 @@
-//! Gate D1 — the effect runtime's lane functions compute the same bits on every target.
+//! Gate D1's corpus can fail: every case is NaN-free and has a wide output spread.
 //!
-//! SHA-256 digests over a fixed corpus per function, pinned in `corpus::D1_DIGESTS`. Job 83d
-//! replays the identical corpus under wasmtime, at the wasm scalar and `Simd4` backends, and
-//! compares against these same pins; until that harness exists the pins are this crate's guard
-//! against an accidental change to a frozen operation order.
+//! The corpus's cross-target claim -- the effect runtime's lane functions compute the same bits at
+//! `f32`, `Simd4` and `Simd8`, natively and under wasmtime -- has one owner, gate G5 (issue #1048):
+//! `g5_native_digests_match_pins` in `tools/wasm-gates/tests/g5_native_corpus.rs` compares every
+//! case at every width against `corpus::D1_DIGESTS` in the shipping profile, and the wasm guests of
+//! `scripts/run-wasm-gates.sh` compare the same cases against the same pins.
+//! `tests/lane_identity.rs` compares the widths to each other in this crate's own debug run.
 //!
 //! A digest is not an oracle. `tests/dynamics.rs` is what says the curve is Giannoulis, Massberg
-//! and Reiss equation 4, and `tests/envelope.rs` is what says the followers round once. This file
-//! only says the answer does not move.
+//! and Reiss equation 4, and `tests/envelope.rs` is what says the followers round once.
 
-use effect_runtime::corpus::{CASE_NAMES, D1_DIGESTS, POINTS, run_case};
-use lane::{Lane, Simd4, Simd8};
-use sha2::{Digest, Sha256};
-
-fn case_digest<L: Lane>(case: usize) -> [u8; 32] {
-    let mut out = vec![0u32; POINTS];
-    run_case::<L>(case, &mut out);
-    let mut hasher = Sha256::new();
-    for word in &out {
-        hasher.update(word.to_le_bytes());
-    }
-    hasher.finalize().into()
-}
-
-fn hex(bytes: &[u8; 32]) -> String {
-    engine::hex_lower(bytes)
-}
-
-/// Every case matches its pin, at all three widths.
-///
-/// Set `MISO_ENGINE_REPIN_EFFECT_RUNTIME_CORPUS=1` to print the scalar pins in `D1_DIGESTS` form.
-///
-/// Per master plan §8.3 the pins come from the `f32` instantiation and from nowhere else; the
-/// vector widths and the wasm legs *confirm* them. Re-pin mode suppresses only the comparison
-/// against the pin: the widths are still required to agree with the scalar oracle, so a corpus
-/// that stopped being width independent cannot be laundered into a fresh pin.
-#[test]
-fn the_corpus_matches_its_pins() {
-    let repinning = std::env::var_os("MISO_ENGINE_REPIN_EFFECT_RUNTIME_CORPUS").is_some();
-    let mut mismatches = Vec::new();
-    let mut repin = String::new();
-    for (case, name) in CASE_NAMES.iter().enumerate() {
-        let scalar = case_digest::<f32>(case);
-        for (width, digest) in [
-            ("W=4", case_digest::<Simd4>(case)),
-            ("W=8", case_digest::<Simd8>(case)),
-        ] {
-            if digest != scalar {
-                mismatches.push(format!(
-                    "{name} at {width}: {} (scalar oracle {})",
-                    hex(&digest),
-                    hex(&scalar)
-                ));
-            }
-        }
-        if !repinning && scalar != D1_DIGESTS[case] {
-            mismatches.push(format!(
-                "{name} at W=1: {} (pinned {})",
-                hex(&scalar),
-                hex(&D1_DIGESTS[case])
-            ));
-        }
-        let bytes: Vec<String> = scalar.iter().map(|b| format!("0x{b:02x}")).collect();
-        repin.push_str(&format!("    // {name}\n"));
-        repin.push_str(&format!("    [{}],\n", bytes.join(", ")));
-    }
-    assert!(
-        mismatches.is_empty(),
-        "D1 digest mismatch:\n{}\n\nIf an operation order changed deliberately, re-pin \
-         corpus::D1_DIGESTS in the same commit and record the reason.",
-        mismatches.join("\n")
-    );
-    if repinning {
-        println!("{repin}");
-        panic!("re-pin mode: copy the block above into D1_DIGESTS in src/corpus.rs");
-    }
-}
+use effect_runtime::corpus::{CASE_NAMES, POINTS, run_case};
 
 /// The corpus is NaN-free, so the pins survive wasm's NaN canonicalisation (D5).
+///
+/// Claim: a corpus change that makes a case emit NaN turns this red; G5 would otherwise compare a
+/// payload wasm canonicalises.
 #[test]
 fn the_corpus_is_nan_free() {
     let mut out = vec![0u32; POINTS];
@@ -94,6 +32,8 @@ fn the_corpus_is_nan_free() {
 
 /// The corpus actually exercises its functions: a case whose outputs are nearly all the same value
 /// would pass a digest check while proving nothing.
+///
+/// Claim: a corpus change that collapses a case to a few output words turns this red.
 #[test]
 fn every_case_has_a_wide_output_spread() {
     let mut out = vec![0u32; POINTS];
@@ -119,18 +59,5 @@ fn every_case_has_a_wide_output_spread() {
             "{name}: only {} distinct outputs out of {POINTS}",
             distinct.len()
         );
-    }
-}
-
-/// Prints the digests in the form `corpus.rs` pins them. Run with `--ignored` after a deliberate
-/// change to a frozen operation order.
-#[test]
-#[ignore = "re-pinning helper"]
-fn print_digests() {
-    for (case, name) in CASE_NAMES.iter().enumerate() {
-        let digest = case_digest::<f32>(case);
-        let bytes: Vec<String> = digest.iter().map(|b| format!("0x{b:02x}")).collect();
-        println!("    // {name}");
-        println!("    [{}],", bytes.join(", "));
     }
 }

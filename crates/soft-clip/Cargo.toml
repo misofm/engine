@@ -24,7 +24,6 @@ bench-support.workspace = true
 # Issue #105 phase 2: effect-contract conformance harness against the production factory.
 conformance = { workspace = true, features = ["realtime-audit"] }
 dsp-reference.workspace = true
-sha2.workspace = true
 
 [lints]
 workspace = true

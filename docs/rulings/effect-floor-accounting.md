@@ -898,7 +898,8 @@ document adds is the content of the exit report, and it is a requirement rather 
 **On exit, the loop's report must state, for every effect on the standing strip:**
 
 1. the effect's measured `isolated_cycles_per_lane_sample` and its derived floor, both from a
-   record produced by `scripts/run-console-benchmark.sh`, cited by artifact directory and round;
+   record produced by `scripts/operator/run-console-benchmark.sh`, cited by artifact directory and
+   round;
 2. the **residual floor gap** — the difference, and the percentage — and
 3. a **named reason** for that gap. "Not investigated" is a permissible reason and "diminishing
    returns" is not: the reason names a mechanism, in the form boundaries 2 to 5 above use, or it
@@ -1161,7 +1162,7 @@ untouched by the elision and run bit-identically on every path.
   (`input_chain_plan`, `input_chain_block_elided`),
   `crates/lane/tests/input_chain_elision.rs`,
   `crates/builtins/tests/stage.rs` T11.
-* **Runner and its counter:** `scripts/run-console-benchmark.sh`,
+* **Runner and its counter:** `scripts/operator/run-console-benchmark.sh` (`scripts/` until #1027),
   `scripts/check-bench-preconditions.sh`.
 * **Inventoried sources:** `crates/compressor/src/kernel.rs`,
   `crates/parametric-eq/src/lib.rs`,

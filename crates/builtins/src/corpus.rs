@@ -1,12 +1,12 @@
 //! The cross-target determinism corpus for the builtin chain.
 //!
 //! Each case renders eight independent tracks through the production stages and yields the audio
-//! lane by lane, followed by the report counters. `tests/determinism.rs` hashes each case at every
-//! width and compares it against [`BUILTINS_DIGESTS`]; `tools/wasm-gates` replays the
-//! identical corpus under `wasmtime`, at the wasm `Simd4` and scalar backends, against these same
-//! pins. That is the whole of the cross-target claim for this crate: the filter a track rides,
-//! the fader under it and the matrix after it produce the same bits in a browser as on a native
-//! host (master plan #83 D5).
+//! lane by lane, followed by the report counters. Gate G5
+//! (`tools/wasm-gates/tests/g5_native_corpus.rs`) hashes each case at every width and compares it
+//! against [`BUILTINS_DIGESTS`] natively, and `tools/wasm-gates` replays the identical corpus under
+//! `wasmtime`, at the wasm `Simd4` and scalar backends, against these same pins. That is the whole
+//! of the cross-target claim for this crate: the filter a track rides, the fader under it and the
+//! matrix after it produce the same bits in a browser as on a native host (master plan #83 D5).
 //!
 //! # Why the lanes are independent
 //!

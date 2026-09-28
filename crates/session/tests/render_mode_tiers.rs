@@ -1,17 +1,15 @@
 //! Launch render-mode policy coverage.
 //!
-//! `dependency_waves` stays a parseable V1 token -- the model, the parser and the protocol wire
-//! all still carry it, and canonical round-trip doctrine forbids normalizing it away. What it no
-//! longer does is launch: the native dependency-wave executor it named was removed as
-//! production-unreachable, so declaring it is now a typed rejection rather than a declaration
-//! that silently renders single-threaded.
+//! `single_thread` is the only V1 render-mode token. The retired `dependency_waves` named a native
+//! dependency-wave executor that was removed as production-unreachable, and #1063 removed the token
+//! too: the model, the parser, the canonical writer and the protocol wire no longer know it, so a
+//! session that spells it is an unknown value like any other misspelling.
 
 use session::{
     CompileCaps, DiagnosticCode, canonical_session_json, compile_session, parse_session_json,
 };
 
 const SESSION: &str = include_str!("../../../fixtures/session/v1/canonical.json");
-const MESSAGE: &str = "launch render_profile.mode must be single_thread";
 
 fn caps() -> CompileCaps {
     CompileCaps {
@@ -32,17 +30,6 @@ fn source_with_mode(mode: &str) -> String {
     )
 }
 
-fn assert_launch_diagnostic(diagnostics: &session::DiagnosticSet) {
-    assert_eq!(diagnostics.diagnostics().len(), 1);
-    let diagnostic = &diagnostics.diagnostics()[0];
-    assert_eq!(
-        diagnostic.code,
-        DiagnosticCode::RenderModeUnsupportedAtLaunch
-    );
-    assert_eq!(diagnostic.path.to_string(), "$.render_profile.mode");
-    assert_eq!(diagnostic.message, MESSAGE);
-}
-
 #[test]
 fn single_thread_parses_compiles_and_canonicalizes() {
     let model = parse_session_json(&source_with_mode("single_thread")).expect("launch parse");
@@ -53,31 +40,23 @@ fn single_thread_parses_compiles_and_canonicalizes() {
     );
 }
 
-/// The same three entry points the sample-rate tier gates, so no caller reaches a prepared plan
-/// through a door that forgot to check.
+/// The retired token refuses at parse exactly as an unallocated spelling does: one
+/// `schema.invalid_enum` at the mode field, whose message names `single_thread` as the only token.
 #[test]
-fn dependency_waves_rejects_with_one_stable_diagnostic_at_every_entry_point() {
-    let parsed = parse_session_json(&source_with_mode("dependency_waves"));
-    assert_launch_diagnostic(&parsed.expect_err("unsupported at launch"));
-
-    let mut typed = parse_session_json(SESSION).expect("valid baseline");
-    typed.render_profile.mode = session::RenderMode::DependencyWaves;
-    assert_launch_diagnostic(&compile_session(&typed, caps()).expect_err("typed rejection"));
-    assert_launch_diagnostic(&canonical_session_json(&typed).expect_err("canonical rejection"));
-}
-
-/// The token is rejected, not deleted: it still parses as a known token rather than an unknown
-/// enum value, which is what keeps the wire and the canonical form lossless.
-#[test]
-fn dependency_waves_is_still_a_known_token_and_not_an_unknown_enum() {
-    let error = parse_session_json(&source_with_mode("dependency_waves"))
-        .expect_err("unsupported at launch");
-    assert_eq!(
-        error.diagnostics()[0].code,
-        DiagnosticCode::RenderModeUnsupportedAtLaunch
-    );
-
-    let unknown = parse_session_json(&source_with_mode("wave_farm"))
-        .expect_err("unknown token is a different failure");
-    assert_eq!(unknown.diagnostics()[0].code, DiagnosticCode::InvalidEnum);
+fn retired_dependency_waves_is_an_unknown_enum_value() {
+    for mode in ["dependency_waves", "wave_farm"] {
+        let error = parse_session_json(&source_with_mode(mode)).expect_err("unknown render mode");
+        assert_eq!(error.diagnostics().len(), 1, "{mode}");
+        let diagnostic = &error.diagnostics()[0];
+        assert_eq!(diagnostic.code, DiagnosticCode::InvalidEnum, "{mode}");
+        assert_eq!(
+            diagnostic.path.to_string(),
+            "$.render_profile.mode",
+            "{mode}"
+        );
+        assert_eq!(
+            diagnostic.message, "expected one of: single_thread",
+            "{mode}"
+        );
+    }
 }

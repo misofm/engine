@@ -66,3 +66,11 @@ aim, in the owner's words, is "minimizing the engine footprint".
 * **Decision 6, fat LTO in release test builds:** deferred; measure after the tooling deletions land, then decide (audit draft 11 held).
 * **Decision 7, scalar wasm test builds:** retire once #1017's AArch64 CI job runs, with #1041's scalar-wasm exception (#1062).
 * **Decision 8, leftovers:** remove the `dependency_waves` session token (#1063) and the browser adapter's legacy observation path, after proving nothing uses it (#1064).
+
+## R6 sub-rulings (recorded 2026-09-28 from the owner's approval of R6)
+
+* **R6a:** third-party effects are out of scope until a new issue reopens them; #27 and #28 close
+  as descoped. AGENTS.md's third-party effect paragraph is amended by #1037 to say so.
+* **R6b:** there is no persisted DSP state or state migration without a product need. This is about
+  persisted, versioned effect-state payloads and their migration; in-memory state handoff the
+  engine uses today (for example across plan replacement) is not affected.

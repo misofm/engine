@@ -180,8 +180,12 @@ forbidden_under_tools 'a private SHA-256 initial hash word (H0) or round-constan
 # its own: it cannot reintroduce the defect without leaving this list.
 #
 # The list is the conversion ratchet. It grows as the remaining benchmark subjects move onto the
-# shared harness; it never shrinks.
-timed_subjects=(tools/bench/src/rack.rs tools/audit/src/fp_env.rs
+# shared harness; it never shrinks while its subjects exist. A subject leaves only when the
+# benchmark itself is retired, and its slot then goes to a surviving subject that already uses the
+# shared timer: #1026 retired the one-shot rack benchmark (`tools/bench/src/rack.rs`), and
+# `tools/bench/src/console.rs`, the native console benchmark, took its place, so the list kept its
+# length.
+timed_subjects=(tools/bench/src/console.rs tools/audit/src/fp_env.rs
     tools/wasm-console/src/main.rs)
 for subject in "${timed_subjects[@]}"; do
     [[ -f "$subject" ]] || fail "converted subject is missing: $subject"

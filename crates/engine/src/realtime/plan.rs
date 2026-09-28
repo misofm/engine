@@ -1,6 +1,6 @@
 //! Structurally immutable prepared plan and bounded silence reference renderer.
 
-use super::{BufferArena, BufferArenaError, PlanarBufferMut, PlanarBufferRef};
+use super::{BufferArena, BufferArenaError, PlanarBufferMut};
 use crate::{QuantumFrames, SampleRateHz, is_launch_sample_rate};
 use core::{cell::Cell, num::NonZeroUsize};
 
@@ -104,15 +104,13 @@ pub struct ResponseSnapshotCapture {
     pub owners: u32,
 }
 
-/// Exact rate, quantum, and external I/O shape accepted by a plan.
+/// Exact rate, quantum, and external output shape accepted by a plan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RenderEnvelope {
     /// Caller-selected engine rate; no implicit sample-rate conversion occurs.
     pub sample_rate: SampleRateHz,
     /// Fixed number of frames in every full render block.
     pub quantum: QuantumFrames,
-    /// Optional external planar input channel count.
-    pub input_channels: Option<NonZeroUsize>,
     /// Required external planar PCM output channel count.
     pub output_channels: NonZeroUsize,
 }
@@ -160,10 +158,8 @@ impl PreparedProgram {
         self.envelope
     }
 }
-/// Render inputs and outputs. This only owns borrowed scalar/slice references.
+/// Render outputs. This only owns borrowed scalar/slice references.
 pub struct RenderIo<'a> {
-    /// Optional external planar input.
-    pub input: Option<PlanarBufferRef<'a>>,
     /// External planar PCM output.
     pub output: PlanarBufferMut<'a>,
 }
@@ -299,7 +295,6 @@ pub trait PreparedPlanExecutor: Send {
     fn render(
         &mut self,
         arena: &mut BufferArena,
-        input: Option<PlanarBufferRef<'_>>,
         output: PlanarBufferMut<'_>,
         time: RenderTime,
     ) -> Result<(), RenderError>;
@@ -459,33 +454,8 @@ pub trait PreparedPlanExecutor: Send {
     fn observation_retained_bytes(&self) -> u64 {
         0
     }
-    /// Give up an executor-owned resource at the block-boundary swap.
-    ///
-    /// This exists so a persistent auxiliary worker pool outlives the plan that used it: the
-    /// retiring executor hands its worker lease to the replacement instead of stopping and
-    /// respawning threads on every structural change. It runs on the render thread, so it is a
-    /// move and nothing else: no allocation, no drop, no wait.
-    #[doc(hidden)]
-    fn take_handover(&mut self) -> Option<ExecutorHandover> {
-        None
-    }
-    /// Accept a hand-over, or refuse it by returning it unchanged.
-    ///
-    /// A refused hand-over is given back to the retiring executor by
-    /// [`RealtimePlanOwner::enter_block`], so it is dropped only when the retired plan is
-    /// reclaimed off the render thread. Implementations never drop the value here.
-    #[doc(hidden)]
-    fn accept_handover(&mut self, handover: ExecutorHandover) -> Option<ExecutorHandover> {
-        Some(handover)
-    }
 }
 
-/// One executor-owned resource moved between prepared plans at a block boundary.
-///
-/// The box is allocated at bind and only ever *moved* on the render thread. `Box<dyn Any>` moves
-/// and `downcast` are pointer operations; neither allocates nor frees.
-#[doc(hidden)]
-pub type ExecutorHandover = Box<dyn core::any::Any + Send>;
 /// Absolute sample time supplied by the host; no wall clock is used.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RenderTime {
@@ -499,8 +469,6 @@ pub enum RenderError {
     UnsupportedRate,
     /// The prepared envelope contains a zero or otherwise invalid dimension.
     InvalidEnvelope,
-    /// External input is absent or does not match the prepared envelope.
-    InputShape,
     /// External output does not match the prepared envelope.
     OutputShape,
     /// Advancing the absolute sample clock would overflow `u64`.
@@ -683,10 +651,6 @@ impl PreparedRenderPlan {
         })
     }
 
-    /// The plan's internal executor, for the block-boundary hand-over in `plan_exchange`.
-    pub(crate) fn executor_mut(&mut self) -> Option<&mut (dyn PreparedPlanExecutor + 'static)> {
-        self.executor.as_deref_mut()
-    }
     /// Walk the built runtime for observation bindings, outside the render scope (issue #143 E5).
     #[doc(hidden)]
     #[must_use]
@@ -892,18 +856,12 @@ impl PreparedRenderPlan {
         if io.output.frames() != frames || io.output.channels() != envelope.output_channels.get() {
             return Err(RenderError::OutputShape);
         }
-        match (io.input, envelope.input_channels) {
-            (None, None) => {}
-            (Some(input), Some(channels))
-                if input.frames() == frames && input.channels() == channels.get() => {}
-            _ => return Err(RenderError::InputShape),
-        }
         let next = time
             .absolute_sample
             .checked_add(u64::from(envelope.quantum.0))
             .ok_or(RenderError::TimeOverflow)?;
         if let Some(executor) = &mut self.executor {
-            executor.render(&mut self.arena, io.input, io.output, time)?;
+            executor.render(&mut self.arena, io.output, time)?;
         } else {
             let mut channel = 0;
             while channel < envelope.output_channels.get() {

@@ -67,19 +67,21 @@ expect_failure wasm-compile-coverage-deleted
 #    workflow this gate scans, cases 1 and 3 above already cover it directly and the duplicate is
 #    gone.
 
-# 6. N1: scripts/check-cross-targets.sh mixes the shipped cdylib crate effect-package with the
-#    evidence crate conformance in one invocation (the exact regression the split under N1 fixed).
-new_case cross-targets-script-mixes-effect-package-with-conformance
-sed -i 's|-p effect-package -p effect-compiler$|-p effect-package -p effect-compiler -p conformance|' \
+# 6. N1: scripts/check-cross-targets.sh mixes the shipped crate effect-compiler with the evidence
+#    crate conformance in one invocation (the exact regression the split under N1 fixed; the row
+#    named effect-package too until #1037).
+new_case cross-targets-script-mixes-effect-compiler-with-conformance
+sed -i 's|^        -p effect-compiler$|        -p effect-compiler -p conformance|' \
     "$case_root/scripts/check-cross-targets.sh"
-expect_failure cross-targets-script-mixes-effect-package-with-conformance
+expect_failure cross-targets-script-mixes-effect-compiler-with-conformance
 
 # 7. The same regression, but in a workflow YAML cargo line rather than check-cross-targets.sh --
-#    proves effect-package's membership in `shipped` is enforced wherever a cross-target invocation
-#    names it, not only inside the script this gate was extended to scan.
-new_case workflow-mixes-effect-package-with-conformance
-sed -i 's|-p host-web -p lane|-p host-web -p effect-package -p conformance -p lane|' \
+#    proves effect-compiler's membership in `shipped` is enforced wherever a cross-target
+#    invocation names it, not only inside the script this gate was extended to scan: the mutated
+#    line no longer names host-web, so only effect-compiler makes it an artifact invocation.
+new_case workflow-mixes-effect-compiler-with-conformance
+sed -i 's|-p host-core -p host-web -p lane|-p conformance -p lane|' \
     "$case_root/.github/workflows/qualification.yml"
-expect_failure workflow-mixes-effect-package-with-conformance
+expect_failure workflow-mixes-effect-compiler-with-conformance
 
 printf 'artifact evidence gate mutations: ok\n'

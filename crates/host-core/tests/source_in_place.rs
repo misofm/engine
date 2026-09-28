@@ -143,10 +143,7 @@ fn render(document: &str, declined: bool) -> Run {
         prepared
             .plan
             .render(
-                engine::realtime::RenderIo {
-                    input: None,
-                    output,
-                },
+                engine::realtime::RenderIo { output },
                 engine::realtime::RenderTime {
                     absolute_sample: (block * frames) as u64,
                 },

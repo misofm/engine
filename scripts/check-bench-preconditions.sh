@@ -4,13 +4,13 @@
 #
 # # Why this file exists
 #
-# Before it, `scripts/run-console-benchmark.sh` controlled nothing about the machine it measured.
-# It read `/proc/loadavg` once and copied the numbers into a record field literally spelled
-# `"not-controlled; pre-run loadavg ..."`. That is a *note*, and a note is not a precondition: it
-# makes an inadmissible measurement fully admissible and merely well documented. The sealed
-# issue-149 records all carry it, and there is no way to tell from any of them whether the host was
-# quiet, whether the process stayed on one core, or whether another tenant was on the sibling
-# hyperthread for half the run.
+# Before it, the console runner (`scripts/operator/run-console-benchmark.sh`) controlled nothing
+# about the machine it measured. It read `/proc/loadavg` once and copied the numbers into a record
+# field literally spelled `"not-controlled; pre-run loadavg ..."`. That is a *note*, and a note is
+# not a precondition: it makes an inadmissible measurement fully admissible and merely well
+# documented. The sealed issue-149 records all carry it, and there is no way to tell from any of
+# them whether the host was quiet, whether the process stayed on one core, or whether another tenant
+# was on the sibling hyperthread for half the run.
 #
 # The rule this file implements instead: a run that cannot be controlled **refuses**, and names
 # which control it could not obtain. An operator on a machine where control is genuinely
