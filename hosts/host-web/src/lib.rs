@@ -220,17 +220,10 @@ pub const SPECTRUM_CAPTURE_BYTES: usize = 1 << 20;
 /// Zero means the collection is caller-sized and has no compiled target-count ceiling. The
 /// bridge returns the checked capacity after the caller stages its entry count.
 pub const SPECTRUM_MAXIMUM_PREPARED_TARGETS: u32 = 0;
-/// Fixed 2048-sample raw capture header.
-pub const SPECTRUM_WINDOW_BYTES: u32 = size_of::<WebSpectrumWindow>() as u32;
-/// Fixed analyzed spectrum result header.
-pub const SPECTRUM_RESULT_BYTES: u32 = size_of::<WebSpectrumResult>() as u32;
 /// Fixed one-shot spectrum output bin count.
 pub const SPECTRUM_BIN_COUNT: u32 = host_core::SPECTRUM_BIN_COUNT as u32;
 /// Fixed one-shot spectrum window length.
 pub const SPECTRUM_WINDOW_FRAMES: u32 = host_core::SPECTRUM_WINDOW_FRAMES as u32;
-/// Maximum bytes of a serialized one-shot capture.
-pub const SPECTRUM_MAXIMUM_RESULT_BYTES: u32 =
-    SPECTRUM_WINDOW_BYTES + SPECTRUM_WINDOW_FRAMES * size_of::<f32>() as u32 * 2;
 
 /// A continuous spectrum stream has not been started on this prepared host.
 pub const SPECTRUM_STREAM_STATUS_INACTIVE: u32 = 0;
@@ -491,8 +484,6 @@ pub const OBSERVATION_WORK_LIMITS_BYTES: u32 = size_of::<WebObservationWorkLimit
 pub const OBSERVATION_INGRESS_LIMITS_BYTES: u32 = size_of::<WebObservationIngressLimits>() as u32;
 #[allow(missing_docs)]
 pub const OBSERVATION_PREPARATION_BYTES: u32 = size_of::<WebObservationPreparationRecord>() as u32;
-#[allow(missing_docs)]
-pub const OBSERVATION_STATUS_BYTES: u32 = size_of::<WebObservationStatus>() as u32;
 /// Unprotected legacy observation profile (`observationProfiles.legacyUnprotected`).
 pub const OBSERVATION_PROFILE_LEGACY_UNPROTECTED: u32 = 0;
 /// Protected EQ spectrum observation profile (`observationProfiles.eqSpectrum`).

@@ -31,10 +31,7 @@
 
 use core::marker::PhantomData;
 
-use engine::realtime::{
-    PlanarBufferMut, PreparedRenderPlan, RenderError, RenderIo, RenderReport, RenderTime,
-    ResponseSnapshotCapture, ResponseSnapshotError, ResponseSnapshotSink,
-};
+use engine::realtime::{PlanarBufferMut, PreparedRenderPlan, RenderError, RenderIo, RenderReport};
 use lane::CanonicalFpEnv;
 use lane::fpenv::FpEnvironmentRejection;
 
@@ -91,42 +88,6 @@ impl StartedRenderSession {
         }
     }
 
-    /// Render the block that must start at this plan's next absolute sample.
-    ///
-    /// The canonical floating-point environment is pinned for the whole call and the caller's exact
-    /// word is restored on every path out, including a rejection and an unwind (issue #146).
-    ///
-    /// # Errors
-    ///
-    /// Whatever `PreparedRenderPlan::render_contiguous` rejects: a discontinuous absolute sample, a
-    /// mismatched output envelope, or a clock overflow. A [`RenderError`] is sticky and frees
-    /// nothing; see the crate-level host callback contract.
-    pub fn render_contiguous(
-        &mut self,
-        io: RenderIo<'_>,
-        absolute_sample: u64,
-    ) -> Result<RenderReport, RenderError> {
-        let _fp_env = CanonicalFpEnv::enter();
-        self.plan.render_contiguous(io, absolute_sample)
-    }
-
-    /// Render one fixed quantum at an explicit absolute sample time.
-    ///
-    /// The same guarantee as [`Self::render_contiguous`]; this is the form for a host that owns its
-    /// own clock continuity rule.
-    ///
-    /// # Errors
-    ///
-    /// Whatever `PreparedRenderPlan::render` rejects.
-    pub fn render(
-        &mut self,
-        io: RenderIo<'_>,
-        time: RenderTime,
-    ) -> Result<RenderReport, RenderError> {
-        let _fp_env = CanonicalFpEnv::enter();
-        self.plan.render(io, time)
-    }
-
     /// Render one quantum into caller-owned contiguous planar storage.
     ///
     /// # Errors
@@ -172,19 +133,6 @@ impl StartedRenderSession {
     #[must_use]
     pub fn next_absolute_sample(&self) -> u64 {
         self.plan.next_absolute_sample()
-    }
-
-    /// Copy one selected track's response owners after a successful render boundary.
-    ///
-    /// The callback is exclusive with rendering because this handle owns the plan on the render
-    /// thread. It never evaluates DSP or allocates on behalf of the engine.
-    pub fn copy_response_snapshot(
-        &mut self,
-        track_id: &str,
-        sink: &mut dyn ResponseSnapshotSink,
-    ) -> Result<ResponseSnapshotCapture, ResponseSnapshotError> {
-        self.plan
-            .copy_response_snapshot(engine::realtime::ResponseSnapshotRequest { track_id, sink })
     }
 
     /// Stop the session and hand the plan back for control-thread teardown or replacement.

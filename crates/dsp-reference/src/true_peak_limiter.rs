@@ -188,9 +188,6 @@ impl ReferenceRamp {
 /// State-owning, offline `f64` reference limiter lane.
 #[derive(Clone, Debug)]
 pub struct ReferenceTruePeakLimiter {
-    sample_rate_hz: f64,
-    parameters: ReferenceTruePeakLimiterParameters,
-    n: usize,
     latency: usize,
     ring_length: usize,
     ramp_window: usize,
@@ -250,9 +247,6 @@ impl ReferenceTruePeakLimiter {
             ((parameters.lookahead_ms * sample_rate_hz / 1000.0 + 0.5).floor() as usize).min(n);
         let ramp_window = (lookahead + 1).clamp(REFERENCE_MINIMUM_RAMP_WINDOW, ring_length);
         Ok(Self {
-            sample_rate_hz,
-            parameters,
-            n,
             latency,
             ring_length,
             ramp_window,
@@ -278,22 +272,10 @@ impl ReferenceTruePeakLimiter {
         self.latency
     }
 
-    /// `N = Fs/100`: the delay between a detector estimate and the sample it guards.
-    #[must_use]
-    pub const fn required_delay(&self) -> usize {
-        self.n
-    }
-
     /// The box-ramp window `Wb` this lane's lookahead produced.
     #[must_use]
     pub const fn ramp_window(&self) -> usize {
         self.ramp_window
-    }
-
-    /// The parameters this lane was constructed with.
-    #[must_use]
-    pub const fn parameters(&self) -> ReferenceTruePeakLimiterParameters {
-        self.parameters
     }
 
     /// Pushes `x` through the detector and returns the Annex-2 estimate `P[n]` for this lane.
@@ -382,29 +364,6 @@ impl ReferenceTruePeakLimiter {
         }
 
         delayed * gain
-    }
-
-    /// The gain this lane applied on the most recent [`Self::apply`].
-    #[must_use]
-    pub fn gain(&self) -> f64 {
-        1.0 - self.reduction
-    }
-
-    /// Clears every runtime word to the `FullToDefaults` state.
-    pub fn reset(&mut self) {
-        self.history = [0.0; HISTORY];
-        self.main_ring.fill(0.0);
-        self.required_ring.fill(1.0);
-        self.box_ring.fill(1.0);
-        self.main_cursor = 0;
-        self.ring_cursor = 0;
-        self.box_cursor = 0;
-        self.reduction = 0.0;
-        self.limit = ReferenceRamp::fixed(reference_true_peak_limit(self.parameters.ceiling_db));
-        self.release = ReferenceRamp::fixed(reference_release_coefficient(
-            self.parameters.release_ms,
-            self.sample_rate_hz,
-        ));
     }
 }
 

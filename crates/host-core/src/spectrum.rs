@@ -2949,9 +2949,6 @@ pub struct SpectrumSmoothingConfig {
 }
 
 impl SpectrumSmoothingConfig {
-    /// The normalized service default, in milliseconds.
-    pub const DEFAULT_SMOOTHING_MS: f64 = SPECTRUM_DEFAULT_SMOOTHING_MS;
-
     /// Validate and normalize one smoothing duration.
     pub fn new(smoothing_ms: f64) -> Result<Self, SpectrumSmoothingConfigError> {
         if !smoothing_ms.is_finite() || !(0.0..=SPECTRUM_MAX_SMOOTHING_MS).contains(&smoothing_ms) {

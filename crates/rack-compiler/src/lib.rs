@@ -87,15 +87,6 @@ impl CohortPoolClass {
             Self::Stereo
         }
     }
-
-    /// The stable evidence name of this class.
-    #[must_use]
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::MonoSymmetricAtPrepare => "mono_symmetric_at_prepare",
-            Self::Stereo => "stereo",
-        }
-    }
 }
 
 /// One track's ordered rack program, addressed by a caller-chosen stable id.

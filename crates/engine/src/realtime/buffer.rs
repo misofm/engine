@@ -1,7 +1,7 @@
 //! Preallocated planar PCM storage.
 
 use crate::QuantumFrames;
-use core::num::NonZeroUsize;
+use core::{marker::PhantomData, num::NonZeroUsize};
 
 /// Index of a buffer prepared in an arena.
 #[repr(transparent)]
@@ -68,16 +68,6 @@ impl BufferArena {
         })
     }
 
-    /// Number of logical buffers.
-    #[must_use]
-    pub fn count(&self) -> usize {
-        self.specs.len()
-    }
-    /// Total preallocated PCM samples.
-    #[must_use]
-    pub fn total_samples(&self) -> usize {
-        self.storage.len()
-    }
     /// Shape of one buffer.
     pub fn spec(&self, index: BufferIndex) -> Result<PlanarBufferSpec, BufferArenaError> {
         self.specs
@@ -121,19 +111,14 @@ impl BufferArena {
         let range = self.range(index, channel)?;
         Ok(&mut self.storage[range])
     }
-    /// Clear all prepared PCM samples.
-    pub fn clear(&mut self) {
-        self.storage.fill(0.0);
-    }
 }
 
 /// Borrowed planar input/view with an explicit per-plane stride.
 #[derive(Clone, Copy)]
 pub struct PlanarBufferRef<'a> {
-    storage: &'a [f32],
     channels: usize,
     frames: usize,
-    stride: usize,
+    borrow: PhantomData<&'a [f32]>,
 }
 /// Borrowed mutable planar output/view with an explicit per-plane stride.
 pub struct PlanarBufferMut<'a> {
@@ -144,21 +129,6 @@ pub struct PlanarBufferMut<'a> {
 }
 
 impl<'a> PlanarBufferRef<'a> {
-    /// Validate a borrowed planar layout without allocation.
-    pub fn try_new(
-        storage: &'a [f32],
-        channels: usize,
-        frames: usize,
-        stride: usize,
-    ) -> Result<Self, BufferArenaError> {
-        validate_borrow(storage.len(), channels, frames, stride)?;
-        Ok(Self {
-            storage,
-            channels,
-            frames,
-            stride,
-        })
-    }
     /// Number of planes.
     #[must_use]
     pub const fn channels(&self) -> usize {
@@ -168,16 +138,6 @@ impl<'a> PlanarBufferRef<'a> {
     #[must_use]
     pub const fn frames(&self) -> usize {
         self.frames
-    }
-    /// Borrow one plane.
-    pub fn plane(&self, channel: usize) -> Result<&'a [f32], BufferArenaError> {
-        plane_range(
-            self.storage,
-            self.channels,
-            self.frames,
-            self.stride,
-            channel,
-        )
     }
 }
 // REALTIME_POLICY_BEGIN
@@ -267,24 +227,6 @@ fn validate_borrow(
         return Err(BufferArenaError::InvalidBorrow);
     }
     Ok(())
-}
-fn plane_range(
-    storage: &[f32],
-    channels: usize,
-    frames: usize,
-    stride: usize,
-    channel: usize,
-) -> Result<&[f32], BufferArenaError> {
-    if channel >= channels {
-        return Err(BufferArenaError::InvalidPlane);
-    }
-    let start = channel
-        .checked_mul(stride)
-        .ok_or(BufferArenaError::CapacityOverflow)?;
-    let end = start
-        .checked_add(frames)
-        .ok_or(BufferArenaError::CapacityOverflow)?;
-    Ok(&storage[start..end])
 }
 
 #[cfg(test)]

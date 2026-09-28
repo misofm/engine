@@ -99,22 +99,10 @@ impl core::fmt::Debug for DisjointArena {
 }
 
 impl DisjointArena {
-    /// Number of planes (2 for the stereo render graph).
-    #[must_use]
-    pub const fn planes(&self) -> usize {
-        self.planes
-    }
-
     /// Number of reserved buffers, including the silence buffer.
     #[must_use]
     pub const fn buffers(&self) -> usize {
         self.buffers
-    }
-
-    /// Frames in one buffer.
-    #[must_use]
-    pub const fn frames(&self) -> usize {
-        self.frames
     }
 
     /// Exact retained payload bytes, excluding allocator headers.
@@ -514,12 +502,6 @@ impl ArenaLeaseSetBuilder {
         buffer
     }
 
-    /// Number of buffers reserved so far, including silence.
-    #[must_use]
-    pub const fn reserved(&self) -> usize {
-        self.reserved
-    }
-
     /// Declare one execution lease and return its index in the finished set.
     pub fn lease(&mut self, wave: usize, writes: Vec<u32>, reads: Vec<u32>) -> usize {
         self.leases.push(PendingLease {
@@ -528,15 +510,6 @@ impl ArenaLeaseSetBuilder {
             reads,
         });
         self.leases.len() - 1
-    }
-
-    /// Exact retained payload bytes of the arena this builder would produce.
-    #[must_use]
-    pub fn total_bytes(&self) -> Option<usize> {
-        self.planes
-            .checked_mul(self.reserved)?
-            .checked_mul(self.frames)?
-            .checked_mul(core::mem::size_of::<f32>())
     }
 
     /// Check I1 and I2 and allocate the arena.

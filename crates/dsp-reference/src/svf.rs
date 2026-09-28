@@ -389,18 +389,6 @@ impl ReferenceSvf {
         c.m0 * input + c.m1 * v1 + c.m2 * v2
     }
 
-    /// Resets both retained words to positive zero.
-    pub fn reset(&mut self) {
-        self.ic1 = 0.0;
-        self.ic2 = 0.0;
-    }
-
-    /// Returns the retained `(ic1, ic2)` words.
-    #[must_use]
-    pub const fn state(self) -> (f64, f64) {
-        (self.ic1, self.ic2)
-    }
-
     /// Returns the immutable coefficients of this section.
     #[must_use]
     pub const fn coefficients(self) -> ReferenceSvfCoefficients {

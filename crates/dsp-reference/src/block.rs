@@ -30,22 +30,6 @@ impl F64PlanarBuffer {
         })
     }
 
-    /// Creates a buffer from channel-major samples.
-    pub fn from_samples(
-        channels: usize,
-        frames: usize,
-        samples: Vec<f64>,
-    ) -> Result<Self, ReferenceBlockError> {
-        if checked_length(channels, frames)? != samples.len() {
-            return Err(ReferenceBlockError::WrongLength);
-        }
-        Ok(Self {
-            channels,
-            frames,
-            samples,
-        })
-    }
-
     /// Returns the channel count.
     pub const fn channels(&self) -> usize {
         self.channels

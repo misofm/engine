@@ -84,18 +84,6 @@ impl ReferenceTransientShaper {
             input + self.parameters.mix * (wet - input)
         }
     }
-
-    /// Returns the retained fast follower.
-    #[must_use]
-    pub const fn fast_envelope(self) -> f64 {
-        self.fast
-    }
-
-    /// Returns the retained slow follower.
-    #[must_use]
-    pub const fn slow_envelope(self) -> f64 {
-        self.slow
-    }
 }
 
 /// Independently derives one one-pole time coefficient from milliseconds and sample rate.

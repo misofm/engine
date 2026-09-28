@@ -35,7 +35,6 @@ pub enum ReferenceDelayError {
 
 #[derive(Clone, Debug)]
 struct ReferenceLane {
-    delay_target_ms: f64,
     active_delay: usize,
     transition_delay: usize,
     pending_delay: usize,
@@ -49,7 +48,6 @@ impl ReferenceLane {
     fn new(delay_ms: f64, sample_rate_hz: f64, ring_length: usize) -> Self {
         let delay = delay_samples(delay_ms, sample_rate_hz).expect("validated delay");
         Self {
-            delay_target_ms: delay_ms,
             active_delay: delay,
             transition_delay: delay,
             pending_delay: delay,
@@ -58,17 +56,6 @@ impl ReferenceLane {
             valid_history: 0,
             ring: vec![0.0; ring_length],
         }
-    }
-
-    fn set_delay(
-        &mut self,
-        milliseconds: f64,
-        sample_rate_hz: f64,
-    ) -> Result<(), ReferenceDelayError> {
-        let delay = delay_samples(milliseconds, sample_rate_hz)?;
-        self.delay_target_ms = milliseconds;
-        self.pending_delay = delay;
-        Ok(())
     }
 
     fn start_transition(&mut self) {
@@ -114,7 +101,6 @@ impl ReferenceLane {
 /// Independent `f64` fixed-two-second circular-delay pair.
 #[derive(Clone, Debug)]
 pub struct ReferenceDelayPair {
-    sample_rate_hz: f64,
     cursor: usize,
     parameters: ReferenceDelayParameters,
     left_damping_g: f64,
@@ -136,7 +122,6 @@ impl ReferenceDelayPair {
             .checked_add(3)
             .ok_or(ReferenceDelayError::InvalidInput)?;
         Ok(Self {
-            sample_rate_hz,
             cursor: 0,
             parameters,
             left_damping_g: damping_coefficient(parameters.left_damping, sample_rate_hz),
@@ -144,18 +129,6 @@ impl ReferenceDelayPair {
             left: ReferenceLane::new(parameters.left_delay_ms, sample_rate_hz, ring_length),
             right: ReferenceLane::new(parameters.right_delay_ms, sample_rate_hz, ring_length),
         })
-    }
-
-    /// Queues one rounded integer-tap change without interrupting an active crossfade.
-    pub fn set_delay(
-        &mut self,
-        left_milliseconds: f64,
-        right_milliseconds: f64,
-    ) -> Result<(), ReferenceDelayError> {
-        self.left
-            .set_delay(left_milliseconds, self.sample_rate_hz)?;
-        self.right
-            .set_delay(right_milliseconds, self.sample_rate_hz)
     }
 
     /// Processes one finite input pair using the fixed damping and explicit feedback matrix.

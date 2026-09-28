@@ -64,12 +64,6 @@ use lane::{
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ChannelLinkMode {
-    DualMono,
-    ExplicitMatrix2x2,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BuiltinResetKind {
     FullToPrepared,
     DiscontinuityKeepTargets,
@@ -389,9 +383,6 @@ pub enum BuiltinParameterReset {
     RestorePreparedValue,
     KeepTargetResetCurrent,
 }
-
-/// Reserved persisted-wire index for a descriptor's out-of-range disabled sentinel.
-pub const DISABLED_LATTICE_INDEX: u32 = u32::MAX;
 
 /// One builtin lattice at a prepared sample rate.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3183,9 +3174,6 @@ impl BuiltinChain {
             self.fader_mute.reset();
         }
     }
-    pub fn link_mode(&self) -> ChannelLinkMode {
-        ChannelLinkMode::ExplicitMatrix2x2
-    }
     pub fn tail(&self) -> BuiltinTail {
         self.input.tail()
     }
@@ -3375,9 +3363,6 @@ impl InputBuiltins {
             self.stage.lifetime_recovered[0],
             self.stage.lifetime_recovered[1],
         )
-    }
-    pub fn reset_lifetime_recovered_state(&mut self) {
-        self.stage.lifetime_recovered = [0; 2];
     }
 }
 
@@ -3645,15 +3630,6 @@ impl BuiltinInputBank {
         }
     }
 
-    /// The trim coefficient one lane and channel is ramping toward. Readback only.
-    #[must_use]
-    pub fn trim_target(&self, lane: usize, channel: usize) -> f32 {
-        match &self.stage {
-            InputStageKernel::Simd4(stage) => stage.trim_target(lane, channel),
-            InputStageKernel::Simd8(stage) => stage.trim_target(lane, channel),
-        }
-    }
-
     /// Resets only the per-lane filter state; prepared coefficients remain unchanged.
     pub fn reset(&mut self) {
         match &mut self.stage {
@@ -3810,24 +3786,6 @@ impl BuiltinFaderBank {
             }
         }
         Ok(())
-    }
-
-    /// The settled gain of one lane and channel, for tests and control-plane readback.
-    #[must_use]
-    pub fn target_gain(&self, lane: usize, channel: usize) -> f32 {
-        match &self.stage {
-            FaderStageKernel::Simd4(stage) => stage.target_gain(lane, channel % 2),
-            FaderStageKernel::Simd8(stage) => stage.target_gain(lane, channel % 2),
-        }
-    }
-
-    /// Whether one lane and channel is muted.
-    #[must_use]
-    pub const fn is_muted(&self, lane: usize, channel: usize) -> bool {
-        match &self.stage {
-            FaderStageKernel::Simd4(stage) => stage.is_muted(lane, channel % 2),
-            FaderStageKernel::Simd8(stage) => stage.is_muted(lane, channel % 2),
-        }
     }
 
     /// Renders one AoSoA block of `frames * width.lanes()` samples per channel.
@@ -4321,28 +4279,6 @@ pub fn pan_matrix(left: f32, right: f32) -> Result<Matrix2x2, BuiltinParameterEr
     let (ll, rl) = gains(left);
     let (lr, rr) = gains(right);
     Matrix2x2 { ll, lr, rl, rr }.checked()
-}
-
-pub fn balance_matrix(balance: f32) -> Result<Matrix2x2, BuiltinParameterError> {
-    if !balance.is_finite() || !(-1.0..=1.0).contains(&balance) {
-        return Err(BuiltinParameterError::MatrixCoefficient);
-    }
-    let gain = math::cos(f64::from(balance.abs()) * core::f64::consts::FRAC_PI_2) as f32;
-    if balance >= 0.0 {
-        Ok(Matrix2x2 {
-            ll: gain,
-            lr: 0.0,
-            rl: 0.0,
-            rr: 1.0,
-        })
-    } else {
-        Ok(Matrix2x2 {
-            ll: 1.0,
-            lr: 0.0,
-            rl: 0.0,
-            rr: gain,
-        })
-    }
 }
 
 #[repr(u8)]

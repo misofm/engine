@@ -10,7 +10,6 @@ publish.workspace = true
 name = "rack_compiler"
 
 [dependencies]
-engine.workspace = true
 effect-contract.workspace = true
 rack.workspace = true
 

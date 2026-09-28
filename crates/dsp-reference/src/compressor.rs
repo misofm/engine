@@ -98,10 +98,4 @@ impl ReferencePeakCompressor {
         let wet = main * gain;
         main + self.parameters.mix * (wet - main)
     }
-
-    /// The causal compressor has no added processing latency.
-    #[must_use]
-    pub const fn latency_samples(&self) -> usize {
-        0
-    }
 }

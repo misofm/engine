@@ -54,7 +54,6 @@ pub struct CompiledSession {
     quantum: QuantumFrames,
     output_shape: OutputShape,
     source_indexes: BTreeMap<StableId, u64>,
-    graph_entity_indexes: BTreeMap<StableId, u64>,
     resource_estimate: ResourceEstimate,
 }
 #[derive(Clone, Debug)]
@@ -92,11 +91,6 @@ impl CompiledSession {
     #[must_use]
     pub fn source_index(&self, id: &StableId) -> Option<u64> {
         self.source_indexes.get(id).copied()
-    }
-    /// Stable normalized graph-entity position, if declared.
-    #[must_use]
-    pub fn graph_entity_index(&self, id: &StableId) -> Option<u64> {
-        self.graph_entity_indexes.get(id).copied()
     }
     /// Checked, duration-independent resource estimate.
     #[must_use]
@@ -162,15 +156,6 @@ pub fn compile_session(
         normalized.sources.iter().map(|item| &item.id),
         "source_indexes",
     )?;
-    let graph_entity_indexes = indexed(
-        normalized
-            .tracks
-            .iter()
-            .map(|item| &item.id)
-            .chain(normalized.submixes.iter().map(|item| &item.id))
-            .chain(normalized.outputs.iter().map(|item| &item.id)),
-        "graph_entity_indexes",
-    )?;
     Ok(CompiledSession {
         normalized: NormalizedSession(normalized),
         canonical_json,
@@ -180,7 +165,6 @@ pub fn compile_session(
             channels: session.output_profile.channels,
         },
         source_indexes,
-        graph_entity_indexes,
         resource_estimate: estimate,
     })
 }

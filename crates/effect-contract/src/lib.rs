@@ -205,13 +205,6 @@ scalar_enum!(ObservationChannels {Shared=1,PerLane=2});
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ObservationTapId(pub u32);
-impl ObservationTapId {
-    /// `None` for zero, which the addressing ABI reserves as "no tap".
-    #[must_use]
-    pub const fn new(v: u32) -> Option<Self> {
-        if v == 0 { None } else { Some(Self(v)) }
-    }
-}
 scalar_enum!(SmoothingRule {None=1,Linear=2,OnePole99=3});
 
 /// Returns whether a parameter's automation and smoothing parts form a valid combination.
@@ -476,27 +469,6 @@ pub enum DescriptorDiagnosticCode {
     ObservationOrder,
     Observation,
     Lattice,
-}
-impl DescriptorDiagnosticCode {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::ContractMajor => "effect.descriptor.contract_major",
-            Self::StateLayoutVersion => "effect.descriptor.state_layout_version",
-            Self::Text => "effect.descriptor.text",
-            Self::LinkModes => "effect.descriptor.link_modes",
-            Self::ParameterId => "effect.descriptor.parameter_id",
-            Self::ParameterOrder => "effect.descriptor.parameter_order",
-            Self::Parameter => "effect.descriptor.parameter",
-            Self::Port => "effect.descriptor.port",
-            Self::Quality => "effect.descriptor.quality",
-            Self::QualityOrder => "effect.descriptor.quality_order",
-            Self::StateSizes => "effect.descriptor.state_sizes",
-            Self::ObservationId => "effect.descriptor.observation_id",
-            Self::ObservationOrder => "effect.descriptor.observation_order",
-            Self::Observation => "effect.descriptor.observation",
-            Self::Lattice => "effect.descriptor.lattice",
-        }
-    }
 }
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct DescriptorError {
@@ -1456,11 +1428,6 @@ impl ParameterSmoother {
             }
         }
     }
-    pub fn snap(&mut self) {
-        self.current = self.target;
-        self.step = 0.0;
-        self.remaining = 0;
-    }
     pub const fn current(self) -> f32 {
         self.current
     }
@@ -2143,9 +2110,6 @@ impl NativeEffectRegistry {
     }
     pub fn len(&self) -> usize {
         self.factories.len()
-    }
-    pub fn is_empty(&self) -> bool {
-        self.factories.is_empty()
     }
     /// Every registered descriptor, in stable [`EffectId`] order (issue #137 D4).
     ///

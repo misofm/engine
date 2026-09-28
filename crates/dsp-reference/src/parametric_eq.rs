@@ -193,12 +193,6 @@ impl ReferenceParametricEqCoefficients {
         (self.b0, self.b1, self.b2, self.a1, self.a2)
     }
 
-    /// Returns whether this is the exact identity section.
-    #[must_use]
-    pub const fn is_identity(self) -> bool {
-        self.identity
-    }
-
     /// Returns whether the normalized denominator meets all frozen strict Jury inequalities.
     #[must_use]
     pub fn is_strictly_jury_stable(self) -> bool {
@@ -278,12 +272,6 @@ impl ReferenceParametricEqSection {
         self.y2 = self.y1;
         self.y1 = output;
         output
-    }
-
-    /// Returns the immutable coefficient design used by this reference state.
-    #[must_use]
-    pub const fn coefficients(self) -> ReferenceParametricEqCoefficients {
-        self.coefficients
     }
 }
 

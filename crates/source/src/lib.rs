@@ -392,24 +392,6 @@ pub enum HostChunkError {
     InternalInvariant,
 }
 
-impl HostChunkError {
-    /// Stable diagnostics where a host error maps to a source registry reason.
-    #[must_use]
-    pub const fn diagnostic_code(self) -> Option<SourceDiagnosticCode> {
-        match self {
-            Self::WrongSampleRate { .. } => Some(SourceDiagnosticCode::RateMismatch),
-            Self::ChannelCount { .. } => Some(SourceDiagnosticCode::ChannelsMismatch),
-            Self::StaleGeneration { .. } => Some(SourceDiagnosticCode::GenerationNonMonotonic),
-            Self::FrameCount { .. }
-            | Self::PlaneLength { .. }
-            | Self::NonContiguous { .. }
-            | Self::EndOfRegionAlreadySubmitted
-            | Self::Full { .. }
-            | Self::InternalInvariant => None,
-        }
-    }
-}
-
 /// Rejection of a source seek before it reaches the render consumer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SourceSeekError {
@@ -421,14 +403,6 @@ pub enum SourceSeekError {
     Backpressure {
         full_count: u64,
     },
-}
-
-impl SourceSeekError {
-    /// Stable source registry reason for rejected generation changes.
-    #[must_use]
-    pub const fn diagnostic_code(self) -> SourceDiagnosticCode {
-        SourceDiagnosticCode::GenerationNonMonotonic
-    }
 }
 
 /// Failure to copy one prepared source quantum into caller-owned source planes.
@@ -806,18 +780,6 @@ impl PcmSourceProducer {
             }
             Err(QueueFull { full_count, .. }) => Err(SourceSeekError::Backpressure { full_count }),
         }
-    }
-
-    /// Exact configured source channel count.
-    #[must_use]
-    pub const fn channel_count(&self) -> u32 {
-        self.channel_count
-    }
-
-    /// Exact configured source render quantum.
-    #[must_use]
-    pub const fn quantum_frames(&self) -> u32 {
-        self.quantum_frames
     }
 
     /// Copy producer-local telemetry outside render.
@@ -1254,39 +1216,6 @@ impl PcmSourceConsumer {
                     u32::try_from(channel).expect("prepared channel count fits u32"),
                     output,
                 )?;
-            }
-            Ok(())
-        })();
-        self.end_block();
-        copied.map(|()| report)
-    }
-
-    /// Copy one exact render quantum into preallocated contiguous planar storage.
-    ///
-    /// Planes are laid out consecutively, each with `quantum_frames()` samples. This is the
-    /// coordinator-facing variant used by graph source fan-out and performs no allocation.
-    pub fn read_block_contiguous(
-        &mut self,
-        output: &mut [f32],
-    ) -> Result<SourceReadReport, SourceReadError> {
-        let expected = usize::try_from(self.channel_count)
-            .expect("u32 fits usize")
-            .checked_mul(usize::try_from(self.quantum_frames).expect("u32 fits usize"))
-            .expect("prepared source shape");
-        if output.len() != expected {
-            return Err(SourceReadError::PlaneLength {
-                expected_frames: self.quantum_frames,
-            });
-        }
-        let report = self.begin_block();
-        let quantum = usize::try_from(self.quantum_frames).expect("u32 fits usize");
-        let copied = (|| {
-            for channel in 0..self.channel_count {
-                let offset = usize::try_from(channel)
-                    .expect("u32 fits usize")
-                    .checked_mul(quantum)
-                    .expect("prepared channel offset");
-                self.copy_channel(channel, &mut output[offset..offset + quantum])?;
             }
             Ok(())
         })();

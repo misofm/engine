@@ -30,12 +30,6 @@ pub fn no_lanes<L: Lane>() -> L::Mask {
     L::zero().lt(L::zero())
 }
 
-/// A mask with every lane set.
-#[inline(always)]
-pub fn all_lanes<L: Lane>() -> L::Mask {
-    L::zero().eq(L::zero())
-}
-
 /// A mask set in the lanes whose index is below `count`.
 ///
 /// Control-plane only: this is how a partially populated bank marks its padding lanes once, at
@@ -113,28 +107,6 @@ pub fn sanitize_gain_block<L: Lane>(io: &mut [f32], frames: usize, gain: L) -> L
         x.andnot(bad).mul(gain).store(frame);
     }
     count
-}
-
-/// The D7 block boundary check (master plan §4.4), at per-lane granularity.
-///
-/// Returns the mask of lanes that produced a non-finite sample anywhere in the block: one ordered
-/// compare and one mask OR per frame, and no `mask_any` inside the loop. The caller calls
-/// [`Lane::mask_any`] once per block, and only on that rare path does it pay for
-/// [`zero_lanes_block`] and a state reset.
-///
-/// Per-lane granularity is deliberate: one track's non-finite block must not change another
-/// track's bits, or a track's output would depend on its cohort membership.
-///
-/// Frozen operation order, per frame: `bad = bad | !(|load(frame)| < NONFINITE_LIMIT)`.
-#[inline(always)]
-pub fn nonfinite_lanes_block<L: Lane>(io: &[f32], frames: usize) -> L::Mask {
-    debug_assert_eq!(io.len(), frames * L::WIDTH);
-    let limit = L::splat(NONFINITE_LIMIT);
-    let mut bad = no_lanes::<L>();
-    for frame in io.chunks_exact(L::WIDTH) {
-        bad = L::mask_or(bad, L::mask_not(L::load(frame).abs().lt(limit)));
-    }
-    bad
 }
 
 /// Clears every frame of the lanes selected by `m` to exactly `+0.0`.

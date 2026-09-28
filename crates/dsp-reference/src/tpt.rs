@@ -67,7 +67,6 @@ pub struct ReferenceRetainedTptF32 {
     m2: f32,
     s1: f32,
     s2: f32,
-    output: ReferenceTptOutput,
 }
 
 impl ReferenceRetainedTptF32 {
@@ -110,7 +109,6 @@ impl ReferenceRetainedTptF32 {
             m2,
             s1: 0.0,
             s2: 0.0,
-            output,
         })
     }
 
@@ -137,12 +135,6 @@ impl ReferenceRetainedTptF32 {
             self.m1.to_bits(),
             self.m2.to_bits(),
         ]
-    }
-
-    /// The output selection this section was designed for.
-    #[must_use]
-    pub const fn output(self) -> ReferenceTptOutput {
-        self.output
     }
 
     /// Overwrites the two retained words.
@@ -277,12 +269,6 @@ impl ReferenceTptStateSpace {
     pub fn response(self, rate_hz: f64, frequency_hz: f64) -> Option<(f64, f64)> {
         let response = self.0.response(rate_hz, frequency_hz)?;
         Some((response.re, response.im))
-    }
-
-    /// Returns response magnitude in dB, floored only by IEEE zero behavior.
-    #[must_use]
-    pub fn magnitude_db(self, rate_hz: f64, frequency_hz: f64) -> Option<f64> {
-        self.0.magnitude_db(rate_hz, frequency_hz)
     }
 }
 
