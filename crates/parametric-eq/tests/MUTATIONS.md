@@ -323,7 +323,10 @@ collapsed; the oracle arm renders ramping blocks through `Channel::process_block
 path and the unit-test default of the `RAMPING_LIST` switch, which only the candidate arm sets).
 Gate 2 is the list itself,
 `ramping_elision::the_unsafe_ramp_rule_keeps_every_dead_section_after_it` and
-`ramping_elision::a_ramping_identity_section_is_never_dead`, at `f32`, `Simd4` and `Simd8`.
+`ramping_elision::a_ramping_identity_section_is_never_dead`, at `f32`, `Simd4` and `Simd8`. Gate
+2b is `ramping_elision::a_restored_subnormal_live_state_refuses_the_list`: a live high shelf at
+`m0 = m2 = 0.5` holding restored integrators of `-2^-149`, behind a ramping HPF toggle, rendered
+through the list and through the batch-head path.
 
 | # | mutation | gate that goes red | result |
 |---|---|---|---|
@@ -338,9 +341,13 @@ Gate 2 is the list itself,
 | 1005-M5m | leg (b) skipped in the collapsed list only | gate 1 collapsed at every width; gate 2 | RED |
 | 1005-M6 | the dual list's `dead` without the "not ramping" term | as M2, dual rows | RED |
 | 1005-M7 | `ramp_keeps_unit_m0` checks `coef.m0` only, not `step.m0` | gate 2 only (`identity to high shelf: the dual list`); gate 1 stays green in dev and in release | RED |
+| 1005-M8 | leg (c) back to the stationary gate's form (`section_state_is_finite_without_negative_zero`) in both lists | gate 2b only: `Scalar mono false: the list moved a bit behind a restored subnormal` (the elided dead band passes `-0.0`, the executed one writes `+0.0`) | RED |
+| 1005-M8d | the same, dual list only | gate 2b (`mono false`) | RED |
+| 1005-M8m | the same, collapsed list only | gate 2b (`mono true`) | RED |
 
 M3 and M7 are the rows the random differential cannot see, as the automation diagnosis found for M3:
 dropping a dead section after an unsafe ramp is wrong only when that ramp emits `-0.0`, which needs a
 constructed underflow the scenarios never produce. Gate 2 exists for them. M7's shape is reachable in
 production -- a high shelf at 0 dB designs `m0 = A^2 = 1` exactly, and a ride away from 0 dB moves it
--- and gate 2 asserts that shape as well as the identity-to-shelf ramp.
+-- and gate 2 asserts that shape as well as the identity-to-shelf ramp. M8 is the same kind of row:
+its counterexample is one `f32` gain and a restored payload, which no random draw reaches.

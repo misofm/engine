@@ -1858,10 +1858,13 @@ fn interleave_mono<L: Lane, const W: usize, const DEPTH: usize>(
 /// ([`ramp_keeps_unit_m0`]); any other ramping section keeps every dead section after it. The
 /// argument is the ramping paragraph of [`cascade_sections`]' proof.
 ///
-/// * **The gate is [`cascade_sections`]', leg for leg**: (a) neither input plane carries `-0.0`, a
-///   non-finite word or a magnitude above the ceiling; (b) every dead section's state is inert on
-///   both channels; (c) every other section's state is finite and free of `-0.0`. Any refusal
-///   returns all six, and the block renders as it did before this function existed.
+/// * **The gate is [`cascade_sections`]', leg for leg, with (c) tightened**: (a) neither input
+///   plane carries `-0.0`, a non-finite word or a magnitude above the ceiling; (b) every dead
+///   section's state is inert on both channels; (c) every other section's state is a word `flush`
+///   can leave -- `+0.0`, or finite with a magnitude of at least `FLUSH_EPS` -- which is finite and
+///   free of `-0.0` as the stationary leg asks, and also free of the tiny restored words
+///   [`section_state_is_flush_shaped`] documents. Any refusal returns all six, and the block
+///   renders as it did before this function existed.
 /// * **Freshness.** `identity[s]` is only read for a section with no lane in flight on either
 ///   channel, and that flag is fresh: every ramp ends in a snap followed by `refresh_identity`, and
 ///   `settle`, `start_ramp`, the resets and a restore refresh too. A ramping section's flag can be
@@ -1899,9 +1902,9 @@ fn ramping_sections<L: Lane, const W: usize>(
             section_state_is_inert(&left_channel.sections[section])
                 && section_state_is_inert(&right_channel.sections[section])
         } else {
-            // (c)
-            section_state_is_finite_without_negative_zero(&left_channel.sections[section])
-                && section_state_is_finite_without_negative_zero(&right_channel.sections[section])
+            // (c), tightened to the words `flush` leaves: see `section_state_is_flush_shaped`.
+            section_state_is_flush_shaped(&left_channel.sections[section])
+                && section_state_is_flush_shaped(&right_channel.sections[section])
         };
         if !admissible {
             return all;
@@ -1949,7 +1952,7 @@ fn ramping_sections_mono<L: Lane, const W: usize>(
         let admissible = if dead(section) {
             section_state_is_inert(&channel.sections[section])
         } else {
-            section_state_is_finite_without_negative_zero(&channel.sections[section])
+            section_state_is_flush_shaped(&channel.sections[section])
         };
         if !admissible {
             return all;
@@ -1986,6 +1989,37 @@ fn section_is_ramping<const W: usize>(remaining: &[u32; W]) -> bool {
 #[inline(always)]
 fn ramp_keeps_unit_m0<L: Lane>(section: &Section<L>) -> bool {
     lane_bits_all::<L>(section.coef.m0, 1.0_f32.to_bits()) && lane_bits_all::<L>(section.step.m0, 0)
+}
+
+/// `true` when every lane of `value` is a word `flush` can leave behind: exactly `+0.0`, or finite
+/// with a magnitude of at least [`lane::FLUSH_EPS`]. No `-0.0`, no subnormal, no tiny normal.
+#[inline(always)]
+fn lane_is_flush_shaped<L: Lane>(value: L) -> bool {
+    debug_assert!(L::WIDTH <= MAX_LANES);
+    let mut words = [0_u32; MAX_LANES];
+    value.store_bits(&mut words[..L::WIDTH]);
+    words[..L::WIDTH].iter().all(|word| {
+        *word == 0
+            || (INERT_MAGNITUDE_FLOOR..NON_FINITE_MAGNITUDE).contains(&(*word & MAGNITUDE_MASK))
+    })
+}
+
+/// Leg (c) of [`ramping_sections`]: both integrator words of a kept section are words the kernel
+/// can have written ([`lane_is_flush_shaped`]) on every lane.
+///
+/// The stationary leg asks only for finite words free of `-0.0`, and that admits a restored
+/// subnormal. The `-0.0` induction on [`cascade_sections`] argues its high-shelf case from
+/// kernel-written states (`v1 = ic1 + d1` is `+0.0` or at least `FLUSH_EPS * 2^-24`), and a
+/// restored payload is the one way around that: a live high shelf whose `m0` and `m2` are both
+/// exactly `0.5` (gain `-6.0206` dB as an `f32`, the one gain that designs them), holding
+/// `ic1 = ic2 = -2^-149`, turns an input of `-2^-149` into `y = (-0.0) + ((-0.0) + (-0.0)) = -0.0`
+/// on its first frame, and an elided identity section after it passes that `-0.0` on where the
+/// executed one writes `+0.0`. A stationary block at the batch head already elides there; a
+/// ramping block at the batch head never elides at all, so this list must not inherit it. After
+/// one refused block the kernel has flushed the words and the list engages again.
+#[inline(always)]
+fn section_state_is_flush_shaped<L: Lane>(section: &Section<L>) -> bool {
+    lane_is_flush_shaped::<L>(section.state.ic1) && lane_is_flush_shaped::<L>(section.state.ic2)
 }
 
 /// The cascade positions this stationary block will actually run, in cascade order.
@@ -2095,11 +2129,13 @@ fn ramp_keeps_unit_m0<L: Lane>(section: &Section<L>) -> bool {
 /// # A ramping block (issue #1005)
 ///
 /// [`ramping_sections`] drops dead sections from a block on which some lane ramps, under the same
-/// three legs. Everything above is per dead section, and a dead section of a ramping block is an
-/// identity section with no lane in flight on either channel, so it applies unchanged once one
-/// more input is closed: a dead section may now sit downstream of a **ramping** live section,
-/// whose words are interpolated, not designed, and the `-0.0` induction above was argued for
-/// designed words.
+/// three legs, with leg (c) tightened to the words the kernel writes: the high-shelf case above
+/// argues from kernel-written integrators, and [`section_state_is_flush_shaped`] shows the
+/// restored subnormal that leg (c) as written lets past it. Everything above is per dead section,
+/// and a dead section of a ramping block is an identity section with no lane in flight on either
+/// channel, so it applies unchanged once one more input is closed: a dead section may now sit
+/// downstream of a **ramping** live section, whose words are interpolated, not designed, and the
+/// `-0.0` induction above was argued for designed words.
 ///
 /// * **A safe ramping section.** Its `m0` word is exactly `1.0` with a `+0.0` increment on every
 ///   lane of both channels, so `m0` stays `1.0` on every frame the ramp runs (`1.0 + 0.0 = 1.0`),
@@ -6016,6 +6052,83 @@ mod ramping_elision {
         ramping_identity_runs::<f32, 1>("Scalar");
         ramping_identity_runs::<Simd4, 4>("Simd4");
         ramping_identity_runs::<Simd8, 8>("Simd8");
+    }
+
+    /// The one restored state leg (c) as the stationary gate writes it lets past: a live high shelf
+    /// at `m0 = m2 = 0.5` holding `ic1 = ic2 = -2^-149`, fed `-2^-149`, emits `-0.0` on its first
+    /// frame (see [`section_state_is_flush_shaped`]). Behind a ramping HPF toggle, with every
+    /// section after the shelf dead, the tightened leg refuses the list, and the block renders
+    /// the batch-head bits. Red with leg (c) as the stationary gate has it (M8): the dead band
+    /// after the shelf is elided and passes the `-0.0` the executed one rewrites to `+0.0`.
+    fn restored_subnormal_live_state<L: Lane, const W: usize>(width: &str) {
+        let magic = target(true, EqBandKind::HighShelf, 3_000.0, -6.020_6, 0.7);
+        let words = magic.words(RATE).expect("a legal shelf");
+        assert_eq!(
+            (words.m0.to_bits(), words.m2.to_bits()),
+            (0.5_f32.to_bits(), 0.5_f32.to_bits()),
+            "{width}: the shelf designs m0 = m2 = 0.5"
+        );
+        let mut sections = layout(off());
+        sections[BAND] = magic;
+        let hpf = design(EqBandKind::HighPass, 80.0, 0.0, 0.7);
+        let tiny = f32::from_bits(0x8000_0001);
+        let build = || {
+            let mut c = channel::<L, W>(sections);
+            c.start_ramp(HPF_SECTION, 0, hpf);
+            lane_set(&mut c.sections[BAND].state.ic1, 0, tiny);
+            lane_set(&mut c.sections[BAND].state.ic2, 0, tiny);
+            c
+        };
+        let mut io = admitted::<W>();
+        io[0] = tiny;
+        for mono in [false, true] {
+            let mut rendered = Vec::new();
+            for list in [false, true] {
+                let (mut left, mut right) = (build(), build());
+                let (mut l, mut r) = (io.clone(), io.clone());
+                RAMPING_LIST.with(|switch| switch.set(list));
+                if mono {
+                    process_channels_mono::<L, W>(&mut left, &mut l, QUANTUM, false);
+                } else {
+                    process_channels::<L, W>(
+                        (&mut left, &mut right),
+                        &mut l,
+                        &mut r,
+                        QUANTUM,
+                        false,
+                    );
+                }
+                RAMPING_LIST.with(|switch| switch.set(false));
+                let mut state = [0_u32; EQ_SECTION_COUNT * 2 * MAX_LANES];
+                left.state_bits(&mut state);
+                let bits: Vec<u32> = l.iter().chain(&r).map(|word| word.to_bits()).collect();
+                rendered.push((bits, state));
+            }
+            assert!(
+                rendered[0] == rendered[1],
+                "{width} mono {mono}: the list moved a bit behind a restored subnormal"
+            );
+        }
+        let (dual, mono) = lists::<L, W>(&build(), &build(), &io);
+        assert_eq!(
+            (dual.len(), mono.len()),
+            (6, 6),
+            "{width}: a restored subnormal in a live section refuses the list"
+        );
+        // Once the kernel has flushed the words, the list engages again.
+        let mut flushed = (build(), build());
+        for channel in [&mut flushed.0, &mut flushed.1] {
+            lane_set(&mut channel.sections[BAND].state.ic1, 0, 0.0);
+            lane_set(&mut channel.sections[BAND].state.ic2, 0, 0.0);
+        }
+        expect_list(width, "flushed shelf state", &flushed, &[0, 1]);
+    }
+
+    #[test]
+    fn a_restored_subnormal_live_state_refuses_the_list() {
+        restored_subnormal_live_state::<f32, 1>("Scalar");
+        restored_subnormal_live_state::<Simd4, 4>("Simd4");
+        restored_subnormal_live_state::<Simd8, 8>("Simd8");
     }
 
     // ---------------------------------------------------------------------------------------
