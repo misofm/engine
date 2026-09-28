@@ -824,11 +824,12 @@ fn a_both_lane_record_drained_while_collapsed_keeps_the_collapse() {
 /// so neither would see a drain that lost the record's window, or a retarget that restarted from
 /// the old target instead of the value the ramp had reached. This one pins the ramp against an
 /// oracle computed here: each block every track receives `TrimDb { Both, -6 / -12 dB, 256 }`, so
-/// the ramp never settles inside a block (128 frames), and the gain `g` follows
-/// `g += (target - g) / 256` per frame, restarted from the unsettled `g` at each block. The
-/// fixture is linear and memoryless downstream of the trim (EQ bands at 0 dB, no filters, unity
-/// faders), and all eight tracks carry the same source and the same ride, so the ridden output is
-/// the uncommanded twin's output times `g`, frame by frame.
+/// the ramp never settles inside a block (128 frames). The gain `g` is a linear ramp restarted at
+/// each block: from the value `g0` it had reached, one step `(target - g0) / 256` is computed at
+/// the block's record and added once per frame. The fixture is linear and memoryless downstream
+/// of the trim (EQ bands at 0 dB, no filters, unity faders), and all eight tracks carry the same
+/// source and the same ride, so the ridden output is the uncommanded twin's output times `g`,
+/// frame by frame.
 ///
 /// Ported by #1027 from the #600 input-trim qualification
 /// (`tools/bench/src/input_symmetry.rs`, `connected_runtime_oracle_covers_retargeted_both_channel_ramp`),

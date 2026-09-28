@@ -162,7 +162,7 @@ Against the batch head `7d0d4adf`: **126 files changed, +992 / -17,348 lines.**
 | Rust files deleted: `compressor/tests/bench_ramp.rs`, `transient-shaper/tests/bench.rs`, bench `gate_active`, `multiband_active`, `input_symmetry`, `input_symmetry_capture`, audit `prepared_effect_allocations` | 7 | 4,060 |
 | Rust edits: `wasm-gates` timing arm and modes (lib -274, main -72/+2), bench and audit dispatchers (-19) | 4 | 365 |
 | `artifacts/issue880/`, `artifacts/issue-60{2,3,6}-input-symmetry-capture/` | 68 | 8,298 |
-| docs and CI: 20 env-vocabulary rows, the kernel-timing lint line | | 56 |
+| docs and CI: 20 env-vocabulary rows, the kernel-timing lint line | | 50 (attempt 2 correction; was 56: `ENGINE_ENV_VOCABULARY.md` -49, `qualification.yml` -1) |
 
 Added: the ports (+542 lines in 6 test files), the reachability lint and its suite, two dated
 history notes, and comment corrections. Every file in the table of the brief is gone, as are the two
@@ -245,8 +245,9 @@ ninth track is a one-lane bank, not `ConsoleInputProcessor`, which is the covera
 
 `-- --list`, base against change, CI feature sets:
 
-- **audit-native** (`-p audit -p bench -p console-workload`, release): exactly the 22 tests of the
-  four bench subjects and the 5 of the audit subject leave. Nothing else changes.
+- **audit-native** (`-p audit -p bench -p console-workload`, release): exactly 22 tests leave, 17
+  of the four bench subjects and 5 of the audit subject (attempt 2 correction; this read "22 …
+  and 5"). Nothing else changes.
 - **test-debug-b**: the 4 `mq1_`/`mq2_` tests leave, and 3 ports arrive (compressor, gate,
   multiband).
 - **test-release** (`-p lane -p math -p wasm-gates`): no change.
@@ -268,7 +269,7 @@ that port was removed by hand; no other file had changed.
 | test-debug-b's full command | pass |
 | test-debug-a's features over `-p host-core -p builtins-compiler -p graph-compiler` | pass |
 | `cargo test --locked --release -p audit -p bench -p console-workload` | pass |
-| `gain_pan_profile digests` | 16 digest lines byte-identical to base (only the `finished in` time differs) |
+| `gain_pan_profile digests` | every digest line byte-identical to base (only the `finished in` time differs); 17 lines, not 16 (attempt 2 correction) |
 | `bash scripts/run-wasm-gates.sh` | pass (native, wasm scalar, simd128, V8 spill) |
 | shipped module | `build-web-audioworklet.sh --module-only` on the change, and with `graph-compiler/src/lib.rs` swapped back to base (the only closure `src` change, and it is inside `mod tests`): byte-identical, `3f744b03…` |
 | `git diff --stat` for `crates hosts` | test files plus `graph-compiler/src/lib.rs` test module only |
@@ -287,7 +288,7 @@ Failures, none caused by this change:
 - `check-step-vocabulary.py` refuses `.github/ISSUE_SPECS/1025-…md:238`, which quotes the retired
   word in #1025's evidence. That line is on the batch head as merged, and this change adds no such
   word. **The batch's lint job will be red on it until #1025's spec is reworded or #1050 retires
-  the rule.**
+  the rule.** (Attempt 2: already reworded on the batch head; it passes on the merge.)
 - Six `check-*.py` take required arguments (`abi-layout-v1`, `builtins-listening-033`/`-111`,
   `parameter-metadata-v1`, and the two AudioWorklet checkers). They are not argument-free, so they
   were not run as gates.

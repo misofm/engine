@@ -189,3 +189,134 @@ fn both_variants_answer_the_hook_identically_for_the_same_selector() {
         );
     }
 }
+
+/// A block applies every input record queued at its entry, however full the queue is.
+///
+/// The drain reads the queue's length once at block entry (`available_at_entry`) and pops that
+/// many. Every other test in the tree queues one or two records per track, so a drain that stopped
+/// early -- a per-block cap, an off-by-one on the count, a `break` on the first retarget -- would
+/// leave the rest pending and apply them blocks late without any of them noticing. Here each
+/// track's queue is filled to capacity with a walk of immediate trims ending on -40 dB, rendered,
+/// then filled again, ending on -20 dB, and rendered again. The second fill starts where the first
+/// drain left the ring's cursors, so the second block's drain reads a wrapped count.
+///
+/// * Every record was **applied** in its block: each block renders exactly the bits a twin renders
+///   when it is sent only that block's last record, and a third, uncommanded twin shows the
+///   comparison can see a trim at all.
+/// * Nothing is **pending**: after each block every queue takes another capacity's worth of
+///   records.
+///
+/// Both drains are held: the banked one (`BuiltinBankProcessor::begin_block`, through the
+/// eight-lane cohort and one-lane tail of the SIMD fixture) and the scalar one
+/// (`ConsoleInputProcessor::process`, through the scalar-dispatch fixture).
+///
+/// Ported by #1027 from the #600 input-trim qualification (`tools/bench/src/input_symmetry.rs`,
+/// `separate_capacity_sixteen_drain_witness_has_no_pending_records`), retired with its capture
+/// tooling.
+///
+/// Red mutation (Sol, #1027 attempt 1): cap the banked drain at two records per block,
+/// `for _ in 0..available.min(2)` -> the banked arm's first block renders the second record's trim
+/// instead of the last one's; with that assertion removed, the refill finds records still pending.
+/// The same cap on the scalar drain turns the scalar arm red. A consumer that reads a wrapped count
+/// as empty turns the second block red.
+#[cfg(feature = "test-support")]
+#[test]
+fn a_block_drains_every_input_record_queued_at_its_entry() {
+    use builtins_compiler::{
+        PreparedBuiltinsGraphBound, test_only_prepared_pair_graph,
+        test_only_prepared_scalar_pair_graph,
+    };
+    use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
+
+    fn trim(db: f32) -> TrackInputRecord {
+        TrackInputRecord::TrimDb {
+            lanes: BuiltinLaneSelector::Both,
+            db,
+            smoothing_samples: 0,
+        }
+    }
+
+    fn render(bound: &mut PreparedBuiltinsGraphBound, block: u64) -> Vec<u32> {
+        let mut output = [0.0_f32; 128];
+        bound
+            .plan
+            .render(
+                RenderIo {
+                    output: PlanarBufferMut::try_new(&mut output, 2, 64, 64).expect("output"),
+                },
+                RenderTime {
+                    absolute_sample: block * 64,
+                },
+            )
+            .expect("render");
+        output.iter().map(|value| value.to_bits()).collect()
+    }
+
+    /// Fills every track's queue: a walk of trims ending on `last` dB. Returns the capacities.
+    fn fill(bound: &mut PreparedBuiltinsGraphBound, arm: &str, last: f32) -> Vec<usize> {
+        let mut capacities = Vec::new();
+        for control in &mut bound.track_controls {
+            let capacity = control.input.capacity();
+            assert!(
+                capacity > 2,
+                "{arm}: a queue of {capacity} cannot tell a cap of two apart"
+            );
+            for index in 1..capacity {
+                control
+                    .input
+                    .try_push(trim(-(index as f32)))
+                    .unwrap_or_else(|_| {
+                        panic!(
+                            "{arm} {}: a record from before the block is still pending",
+                            control.track_id
+                        )
+                    });
+            }
+            control.input.try_push(trim(last)).unwrap_or_else(|_| {
+                panic!(
+                    "{arm} {}: a record from before the block is still pending",
+                    control.track_id
+                )
+            });
+            assert!(
+                control.input.try_push(trim(-6.0)).is_err(),
+                "{arm}: the queue is full before the block"
+            );
+            capacities.push(capacity);
+        }
+        capacities
+    }
+
+    type Build = fn() -> PreparedBuiltinsGraphBound;
+    let arms: [(&str, Build); 2] = [
+        ("banked", || test_only_prepared_pair_graph(false)),
+        ("scalar", || test_only_prepared_scalar_pair_graph(false)),
+    ];
+    for (arm, build) in arms {
+        let mut filled = build();
+        let mut last_only = build();
+        let mut quiet = build();
+        // Block 0: an empty ring filled to capacity. Block 1: refilled after the drain, so the
+        // ring's cursors have wrapped, and the drain reads a wrapped count.
+        for (block, last) in [(0_u64, -40.0_f32), (1, -20.0)] {
+            fill(&mut filled, arm, last);
+            for control in &mut last_only.track_controls {
+                control.input.try_push(trim(last)).expect("queue room");
+            }
+            let filled_bits = render(&mut filled, block);
+            let last_only_bits = render(&mut last_only, block);
+            assert_ne!(
+                last_only_bits,
+                render(&mut quiet, block),
+                "{arm} block {block}: the trim moves no bit, so the comparison proves nothing"
+            );
+            assert_eq!(
+                filled_bits, last_only_bits,
+                "{arm} block {block}: the block did not apply every queued record: the last one \
+                 did not decide it"
+            );
+        }
+        // Nothing from block 1 is pending either: every queue takes another capacity's worth.
+        fill(&mut filled, arm, -6.0);
+    }
+}
