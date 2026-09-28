@@ -999,9 +999,10 @@ fn scalar_min(a: f32, b: f32) -> f32 {
 ///
 /// Nothing about the arithmetic moves: [`History::shift`] writes exactly the assignments the
 /// `while tap > 0` loop wrote, in the same order, and [`annex2_phases`] walks the same taps against
-/// the same table rows in the same tap-major order with the same twelve separately rounded
-/// `add(mul(..))` steps per accumulator. The native target reaches the same code either way once
-/// SROA has promoted the array, which is why this is a wasm change with a native no-op attached.
+/// the same table rows in the same tap-major order with the same separately rounded
+/// `add(mul(..))` steps per accumulator (twelve then; eleven since #1013 dropped the `+0.0` seed).
+/// The native target reaches the same code either way once SROA has promoted the array, which is
+/// why this is a wasm change with a native no-op attached.
 #[derive(Clone, Copy)]
 struct History<L: Lane> {
     t0: L,
@@ -1110,10 +1111,12 @@ impl<L: Lane> History<L> {
 
 /// Shifts the history and returns `P[n] = max(|h[6]|, |v0|, |v1|, |v2|, |v3|)`.
 ///
-/// The FIR is tap-major and lockstep across lanes: for each phase the accumulator starts at exactly
-/// `+0.0` and takes twelve separately rounded `add(mul(...))` steps in increasing tap order, which
-/// is the frozen order of the 016 brief and therefore bit-identical to the scalar detector this
-/// replaces (#90 F4). No fusion, no reassociation, no horizontal work.
+/// The FIR is tap-major and lockstep across lanes: for each phase the accumulator starts at its
+/// first product and takes the eleven remaining separately rounded `add(mul(...))` steps in
+/// increasing tap order. That is the frozen order of the 016 brief without its leading `+0.0 +`,
+/// and every peak word it produces is the one the brief's order produces (#90 F4 for the order,
+/// #1013 for the seed; the proof is on [`annex2_phases`]). No fusion, no reassociation, no
+/// horizontal work.
 ///
 /// The sample term is `|h[6]|`, not `|h[0]|`: `h[6]` is the input sample the four phases are
 /// centred on, so the estimate and the phases now describe the same instant. Layout 1 compared the
@@ -1131,18 +1134,87 @@ fn detector_peak<L: Lane>(history: &mut History<L>, x: L, fir: &[[L; 4]; HISTORY
 
 /// The four Annex-2 phase outputs of a history, tap-major and lockstep across lanes.
 ///
-/// Each accumulator starts at exactly `+0.0` and takes twelve separately rounded `add(mul(..))`
-/// steps in increasing tap order. Walking taps on the outside and phases on the inside reads the
-/// table in its stored order and keeps each lane's summation order exactly the one the 016 brief
-/// froze, which is why the reorder is bit-preserving (#90 F4).
+/// Each accumulator starts at its first product, `fir[0][p] * t0`, and takes the eleven remaining
+/// separately rounded `add(mul(..))` steps in increasing tap order. Walking taps on the outside and
+/// phases on the inside reads the table in its stored order and keeps each lane's summation order
+/// the one the 016 brief froze, which is why the tap-major reorder is bit-preserving (#90 F4).
 ///
-/// The twelve steps are written out rather than iterated (round 2 R2). The order is the loop's,
-/// tap for tap and phase for phase; what the unrolling buys is that each table row is read as a
-/// single-use load feeding its multiply — the wasm backend sinks such a load into its consumer,
-/// where a hoisted row would have had to be kept live — and that the four accumulators are four
-/// values rather than an array a backend might decide to spill.
+/// The steps are written out rather than iterated (round 2 R2). The order is the loop's, tap for
+/// tap and phase for phase; what the unrolling buys is that each table row is read as a single-use
+/// load feeding its multiply — the wasm backend sinks such a load into its consumer, where a
+/// hoisted row would have had to be kept live — and that the four accumulators are four values
+/// rather than an array a backend might decide to spill.
+///
+/// # No `+0.0` seed (#1013)
+///
+/// The brief starts each accumulator at `+0.0` and adds all twelve products; that form is kept as
+/// the test oracle `annex2_phases_seeded`. Starting at the first product instead takes one add
+/// off each of the four dependent chains a frame carries, and it is class A. Write `a_k` for the
+/// `k`-th product of one lane and phase, `S_k` for the seeded accumulator after tap `k` and `T_k`
+/// for this one, rounding to nearest throughout.
+///
+/// * **Tap 0.** `S_0 = +0.0 + a_0` and `T_0 = a_0`. For every `a_0` but `-0.0` they are the same
+///   word, or both NaN when `a_0` is (`+0.0 + a` is `a` exactly for a nonzero `a`, `+0.0 + +0.0`
+///   is `+0.0`). For `a_0 = -0.0`, `S_0` is `+0.0` and `T_0` is `-0.0`.
+/// * **Taps 1 to 11, by induction.** If `S_{k-1}` and `T_{k-1}` are the same word, or both NaN,
+///   so are `S_k` and `T_k`: the same add of the same operands, or an add of a NaN. If they are
+///   zeros of opposite sign, then `x + a_k` is the same word for either zero `x` when `a_k` is
+///   nonzero (it is `a_k`) or NaN, and a zero for either when `a_k` is a zero. So each phase is
+///   the seeded phase, or that phase with the sign of a zero flipped, or NaN where it is NaN.
+/// * **The one reader.** [`detector_peak`] reads a phase only as `peak.max(phase.abs())`. `abs`
+///   erases a zero's sign, and `max` selects on an ordered compare, which reads a NaN of any
+///   payload as unordered. So every peak word is the seeded form's, except that a NaN peak may
+///   carry another payload.
+/// * **A NaN peak is inert.** A peak goes only to the stack scratch, through the link's `max`
+///   (again a compare-and-select), to `select(p > l, l / p, 1)`: a NaN `p` fails the ordered
+///   compare and gives exactly `1.0`, whatever its payload. The base form never fixed the payload
+///   either: `fadd` commutes, so the backend may emit either operand order, x86 returns the first
+///   NaN operand's payload, and wasm leaves NaN payloads nondeterministic outright.
+///
+/// Hence every output word, state payload, report and observation is unchanged at every width and
+/// on every target; only a phase value, which is not state, may differ in the sign of a zero. Seeding
+/// with `-0.0`, the additive identity, is the same computation as this one; seeding with `+0.0` is
+/// not, and that is the whole of the difference.
 #[inline(always)]
 fn annex2_phases<L: Lane>(history: &History<L>, fir: &[[L; 4]; HISTORY_WORDS]) -> [L; 4] {
+    let row = &fir[0];
+    let sample = history.t0;
+    let mut phase0 = row[0].mul(sample);
+    let mut phase1 = row[1].mul(sample);
+    let mut phase2 = row[2].mul(sample);
+    let mut phase3 = row[3].mul(sample);
+    macro_rules! tap {
+        ($index:literal, $sample:expr) => {{
+            let row = &fir[$index];
+            let sample = $sample;
+            phase0 = phase0.add(row[0].mul(sample));
+            phase1 = phase1.add(row[1].mul(sample));
+            phase2 = phase2.add(row[2].mul(sample));
+            phase3 = phase3.add(row[3].mul(sample));
+        }};
+    }
+    tap!(1, history.t1);
+    tap!(2, history.t2);
+    tap!(3, history.t3);
+    tap!(4, history.t4);
+    tap!(5, history.t5);
+    tap!(6, history.t6);
+    tap!(7, history.t7);
+    tap!(8, history.t8);
+    tap!(9, history.t9);
+    tap!(10, history.t10);
+    tap!(11, history.t11);
+    [phase0, phase1, phase2, phase3]
+}
+
+/// The brief's order as it stood before #1013: each accumulator starts at exactly `+0.0` and takes
+/// all twelve `add(mul(..))` steps.
+///
+/// Test-only. It is the statement of the frozen order that E1 checks against the scalar loop typed
+/// from the brief, and the oracle E1b checks [`annex2_phases`]'s peaks against.
+#[cfg(test)]
+#[inline(always)]
+fn annex2_phases_seeded<L: Lane>(history: &History<L>, fir: &[[L; 4]; HISTORY_WORDS]) -> [L; 4] {
     let mut phase0 = L::zero();
     let mut phase1 = L::zero();
     let mut phase2 = L::zero();
@@ -4040,6 +4112,9 @@ mod tests {
     }
 
     /// E1: the tap-major reorder is bit-preserving against the frozen scalar order of the brief.
+    ///
+    /// Since #1013 this is a statement about `annex2_phases_seeded`, the brief's order as written
+    /// (`+0.0` accumulator). The render path's seedless form is held to it by E1b.
     #[test]
     fn phase_outputs_match_the_frozen_scalar_order() {
         let coefficients = LimiterCoef::<f32>::new(false, false);
@@ -4067,7 +4142,7 @@ mod tests {
                 expected
             };
             let _ = detector_peak(&mut kernel_history, sample, &coefficients.fir);
-            let produced = annex2_phases(&kernel_history, &coefficients.fir);
+            let produced = annex2_phases_seeded(&kernel_history, &coefficients.fir);
             for (phase, value) in produced.iter().enumerate() {
                 assert_eq!(
                     value.to_bits(),
@@ -4076,6 +4151,271 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The Annex-2 table phase-major: `annex2_columns()[phase][tap]`.
+    fn annex2_columns() -> [[f32; HISTORY_WORDS]; 4] {
+        core::array::from_fn(|phase| core::array::from_fn(|tap| ANNEX2_FIR[tap][phase]))
+    }
+
+    /// E1b's inputs: named sample streams. Each lane of a bank runs one stream from a zero
+    /// history, so every window of twelve consecutive samples of a stream is a history both
+    /// detectors see.
+    fn seedless_streams() -> Vec<(&'static str, Vec<f32>)> {
+        // SplitMix64, for the drawn bit patterns.
+        let mut state = 0x1013_E1B0_0001_u64;
+        let mut word = move || {
+            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut mixed = state;
+            mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            mixed ^ (mixed >> 31)
+        };
+        let mut noise = Noise(0x1013_E1B0_0002);
+        let mut loud =
+            move |count: usize| -> Vec<f32> { (0..count).map(|_| noise.next() * 3.0).collect() };
+        let mut streams = Vec::new();
+
+        // E1's noise, as E1 draws it.
+        let mut e1 = Noise(0x5150_0090_0001);
+        streams.push(("E1 noise", (0..4096).map(|_| e1.next() * 3.0).collect()));
+
+        // A single impulse walking through all twelve taps, on a background of either zero.
+        for background in [0.0_f32, -0.0] {
+            for impulse in [0.0_f32, -0.0, 1.0, -1.0] {
+                let mut stream = vec![background; HISTORY_WORDS];
+                stream.push(impulse);
+                stream.extend([background; HISTORY_WORDS]);
+                streams.push(("impulse", stream));
+            }
+        }
+
+        // For each phase, the one signed-zero history whose twelve products are all `-0.0`: tap `k`
+        // is the zero of the sign opposite to `fir[k][phase]`. Only there does the seeded
+        // accumulator end `+0.0` against the seedless one's `-0.0`; a random mix of signed zeros
+        // gets there once in 4096 windows per phase.
+        for column in annex2_columns() {
+            let stream: Vec<f32> = column
+                .iter()
+                .rev()
+                .map(|coefficient| if *coefficient > 0.0 { -0.0 } else { 0.0 })
+                .collect();
+            streams.push(("all products -0.0", stream));
+        }
+
+        // Histories of mixed signed zeros.
+        streams.push((
+            "signed zeros",
+            (0..4096)
+                .map(|_| f32::from_bits(((word() >> 17) as u32 & 1) << 31))
+                .collect(),
+        ));
+
+        // Random subnormals, sign and mantissa drawn, exponent field zero.
+        streams.push((
+            "subnormals",
+            (0..4096)
+                .map(|_| f32::from_bits(word() as u32 & 0x807F_FFFF))
+                .collect(),
+        ));
+
+        // One NaN tap in noise, with each of two payloads: a positive quiet NaN and a negative
+        // signalling one.
+        for payload in [0x7FC0_1234_u32, 0xFFA0_5A5A] {
+            let mut stream = loud(2 * HISTORY_WORDS);
+            stream.push(f32::from_bits(payload));
+            stream.extend(loud(2 * HISTORY_WORDS));
+            streams.push(("NaN tap", stream));
+        }
+
+        // One infinite tap in noise, of either sign.
+        for infinity in [f32::INFINITY, f32::NEG_INFINITY] {
+            let mut stream = loud(2 * HISTORY_WORDS);
+            stream.push(infinity);
+            stream.extend(loud(2 * HISTORY_WORDS));
+            streams.push(("infinite tap", stream));
+        }
+
+        // `+inf` and `-inf` in one window, at every spacing and in either order: a phase whose
+        // products take both signs of infinity makes its NaN inside the chain, at an add, rather
+        // than receiving one from a tap.
+        for (first, second) in [
+            (f32::INFINITY, f32::NEG_INFINITY),
+            (f32::NEG_INFINITY, f32::INFINITY),
+        ] {
+            for spacing in 1..HISTORY_WORDS {
+                let mut stream = loud(2 * HISTORY_WORDS);
+                stream.push(first);
+                stream.extend(loud(spacing - 1));
+                stream.push(second);
+                stream.extend(loud(2 * HISTORY_WORDS));
+                streams.push(("NaN made in a chain", stream));
+            }
+        }
+        streams
+    }
+
+    /// The pre-#1013 detector, E1b's oracle: [`detector_peak`] with `annex2_phases_seeded`.
+    fn detector_peak_seeded<L: Lane>(
+        history: &mut History<L>,
+        x: L,
+        fir: &[[L; 4]; HISTORY_WORDS],
+    ) -> L {
+        history.shift(x);
+        let mut peak = history.t6.abs();
+        for phase in annex2_phases_seeded(history, fir) {
+            peak = peak.max(phase.abs());
+        }
+        peak
+    }
+
+    /// What one width of E1b saw, for the non-vacuity checks.
+    #[derive(Default)]
+    struct SeedlessCounts {
+        frames: usize,
+        signed_zero_flips: usize,
+        nan_peaks: usize,
+    }
+
+    /// One width of E1b. Streams are packed `L::WIDTH` to a bank, one per lane, and a lane whose
+    /// stream has ended is fed `+0.0`.
+    fn seedless_peaks_match_the_seeded_order<L: Lane>() -> SeedlessCounts {
+        let fir = LimiterCoef::<L>::new(false, false).fir;
+        let streams = seedless_streams();
+        let mut counts = SeedlessCounts::default();
+        for (group, bank) in streams.chunks(L::WIDTH).enumerate() {
+            let mut candidate = History::<L>::zero();
+            let mut oracle = History::<L>::zero();
+            let length = bank
+                .iter()
+                .map(|(_, stream)| stream.len())
+                .max()
+                .expect("streams");
+            for frame in 0..length {
+                let mut input = [0.0_f32; MAXIMUM_WIDTH];
+                for (lane, (_, stream)) in bank.iter().enumerate() {
+                    input[lane] = stream.get(frame).copied().unwrap_or(0.0);
+                }
+                let x = L::load(&input);
+                let mut produced = [0.0_f32; MAXIMUM_WIDTH];
+                let mut expected = [0.0_f32; MAXIMUM_WIDTH];
+                detector_peak(&mut candidate, x, &fir).store(&mut produced);
+                detector_peak_seeded(&mut oracle, x, &fir).store(&mut expected);
+
+                // The proof's induction, checked phase by phase: the same word, zeros of opposite
+                // sign, or both NaN.
+                let seedless = annex2_phases(&candidate, &fir);
+                let seeded = annex2_phases_seeded(&candidate, &fir);
+                for (phase, (seedless, seeded)) in seedless.iter().zip(seeded.iter()).enumerate() {
+                    let mut new = [0.0_f32; MAXIMUM_WIDTH];
+                    let mut old = [0.0_f32; MAXIMUM_WIDTH];
+                    seedless.store(&mut new);
+                    seeded.store(&mut old);
+                    for lane in 0..bank.len() {
+                        let (new, old) = (new[lane], old[lane]);
+                        if new.to_bits() == old.to_bits() || (new.is_nan() && old.is_nan()) {
+                            continue;
+                        }
+                        assert!(
+                            new == 0.0 && old == 0.0,
+                            "W{} group {group} lane {lane} ({}) frame {frame} phase {phase}: \
+                             {:#010x} against {:#010x}",
+                            L::WIDTH,
+                            bank[lane].0,
+                            new.to_bits(),
+                            old.to_bits()
+                        );
+                        counts.signed_zero_flips += 1;
+                    }
+                }
+
+                for lane in 0..bank.len() {
+                    let (new, old) = (produced[lane], expected[lane]);
+                    if old.is_nan() {
+                        assert!(
+                            new.is_nan(),
+                            "W{} group {group} lane {lane} ({}) frame {frame}: {:#010x} for NaN",
+                            L::WIDTH,
+                            bank[lane].0,
+                            new.to_bits()
+                        );
+                        counts.nan_peaks += 1;
+                    } else {
+                        assert_eq!(
+                            new.to_bits(),
+                            old.to_bits(),
+                            "W{} group {group} lane {lane} ({}) frame {frame}: peak bits",
+                            L::WIDTH,
+                            bank[lane].0
+                        );
+                    }
+                    counts.frames += 1;
+                }
+            }
+        }
+        counts
+    }
+
+    /// E1b (#1013): the seedless detector's peaks are the `+0.0`-seeded detector's, bit for bit
+    /// (NaN peaks as "both NaN"), at every width.
+    ///
+    /// E1 cannot see the seed: its noise never makes a signed-zero first product. The signed-zero
+    /// rows here are the discriminating ones, and the non-vacuity checks below say that they did
+    /// discriminate: phases did come out as zeros of opposite sign, peaks did come out NaN, and a
+    /// NaN was made inside a chain from two infinite products, not only received from a tap.
+    #[test]
+    fn seedless_peaks_match_the_seeded_order_at_every_width() {
+        let samples: usize = seedless_streams()
+            .iter()
+            .map(|(_, stream)| stream.len())
+            .sum();
+        for counts in [
+            seedless_peaks_match_the_seeded_order::<f32>(),
+            seedless_peaks_match_the_seeded_order::<Simd4>(),
+            seedless_peaks_match_the_seeded_order::<Simd8>(),
+        ] {
+            assert!(
+                counts.frames >= samples,
+                "{} of {samples} frames",
+                counts.frames
+            );
+            // At least the four designed histories, one per phase.
+            assert!(
+                counts.signed_zero_flips >= 4,
+                "{} phases flipped a zero's sign",
+                counts.signed_zero_flips
+            );
+            assert!(counts.nan_peaks > 0, "no NaN peak");
+        }
+
+        // A NaN made inside a chain: every tap and every product of the window is non-NaN, and
+        // the seeded accumulator still ends NaN. Checked once, in scalar arithmetic, over the
+        // streams' windows.
+        let mut made = 0;
+        for (_, stream) in seedless_streams() {
+            for end in HISTORY_WORDS..=stream.len() {
+                let window: Vec<f32> = stream[end - HISTORY_WORDS..end]
+                    .iter()
+                    .rev()
+                    .copied()
+                    .collect();
+                for column in annex2_columns() {
+                    let products: Vec<f32> = column
+                        .iter()
+                        .zip(&window)
+                        .map(|(coefficient, tap)| coefficient * tap)
+                        .collect();
+                    if products.iter().any(|product| product.is_nan()) {
+                        continue;
+                    }
+                    let sum = products.iter().fold(0.0_f32, |sum, product| sum + *product);
+                    if sum.is_nan() {
+                        made += 1;
+                    }
+                }
+            }
+        }
+        assert!(made > 0, "no NaN was made inside a chain");
     }
 
     /// E2: the frozen table and the phase outputs against the independent `f64` oracle.

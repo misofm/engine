@@ -519,3 +519,39 @@ banks), 31 at W4 (two to four lanes of each of nine) and 9 at `Scalar` (exactly 
 retargeted pairs), each from its unlink block. That is why M1 fires on the channels-equal check at
 W8 and W4, where a bank-mate parts, and only on the pin at `Scalar`, where the only pair that
 unlinks is the retargeted one.
+
+## Issue #1013 — the seedless Annex-2 accumulators
+
+`annex2_phases` starts each phase accumulator at its first product instead of at `+0.0`. The
+change is class A, so no output gate can see it: the only gate that does is E1b's phase leg, and
+the rows below say so. E1b is `seedless_peaks_match_the_seeded_order_at_every_width` (the unit
+test beside E1); gate 4 is `tests/seedless.rs`, pinned on the unmodified kernel.
+
+Driver: one mutation at a time, applied to the render-path `annex2_phases` only (the test oracle
+`annex2_phases_seeded` is never touched), then `cargo test -p true-peak-limiter --no-fail-fast`
+and `cargo test -p host-core --lib limiter_linked_session`, both in the dev profile, then the file
+restored and checked byte-identical by SHA-256.
+
+| # | mutation | result | tests that turned red |
+|---|---|---|---|
+| 1013-M1 | drop the first product instead of the seed: every phase starts at `L::zero()` and tap 0 is never added | RED | E1b (E1's noise, frame 0, phase 0: `0x00000000` against `0xbb5f8c77`); E2; D90; E5 (`production_tracks_the_f64_oracle`); `linked.rs`; `seedless.rs`; `limiter_linked_session` at all three widths |
+| 1013-M2 | phase 3 seeded with phase 0's first product (`row[0]` for `row[3]`) | RED | E1b (frame 0, phase 3); E2; D90; E5; `linked.rs`; `seedless.rs`; `limiter_linked_session` at all three widths |
+| 1013-M3 | start from tap 1's product and add tap 0's at the end (a reorder) | RED | E1b (frame 2, phase 0, one ulp: `0x3d0430da` against `0x3d0430db`); `linked.rs`; `seedless.rs` |
+| 1013-G1 | seed with `-0.0`: `L::splat(-0.0).add(first product)` | GREEN, equivalent | none |
+| 1013-R0 | the slice reverted: `L::zero().add(first product)`, which is the pre-#1013 arithmetic | RED | E1b alone, on its non-vacuity check: `0 phases flipped a zero's sign` |
+
+What the rows say:
+
+* **M3 is a reorder and nothing else**, so E2's `2e-6` tolerance, D90 and the session pin stay
+  green: a one-ulp phase difference reaches a gain word only when it moves `l / p` across a line
+  of the `2^-14` grid. E1b, `linked.rs` and gate 4 see it.
+* **G1 is the proof's point.** `-0.0` is the additive identity: `-0.0 + a` is `a` for every `a`,
+  both zeros included. Seeding with it is the seedless form, word for word. `+0.0` is the one seed
+  that is not the identity, and only on a `-0.0` first product.
+* **R0 shows E1b sees the seed.** With the `+0.0` seed restored, the seedless and seeded forms are
+  the same computation, no phase flips a zero's sign, and E1b's `>= 4` count (one per phase, from
+  its four designed histories whose twelve products are all `-0.0`) fails. Every other gate is
+  green under R0, exactly as class A requires.
+* **E1b's peak leg discriminates on its own.** With the phase-by-phase induction check made
+  non-failing, M1 (frame 0), M2 (frame 2) and M3 (frame 2) are each still red on the peak-bit
+  comparison.
