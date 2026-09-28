@@ -480,3 +480,125 @@ scratch harness that supplies `RUNNER_TEMP`, `GITHUB_OUTPUT`, `GITHUB_STEP_SUMMA
    - `run-wasm-gates.sh`, 320 s. Its V8 leg built `e34073a2...`.
    - The three-browser PR mode (`--check-matrix --self-test-mutations`) on `e34073a2...`: chromium
      151.0.7922.34, firefox 153.0 and webkit 26.5.
+
+## Attempt 2 evidence
+
+Terra, 2026-09-28, same branch.
+- `665ae26e` merges the batch head `codex/batch-slim-2` (`c69736c1`: #1037, #1063, #1035, #1034,
+  #1036, #1017).
+- `20ffabf0` fixes the verdict's findings: 6 files, +317/-61.
+- Against the batch head, excluding specs, the branch is now 19 files, +1079/-952, with no Rust
+  file.
+
+**Merge.** Four conflicts, each mechanical:
+- the verdict's `needs:` line carries `artifact-identity` and #1017's two AArch64 jobs;
+- `test-ci-path-routing.py` gets the same union in its `needs` mutation and keeps both new mutation
+  blocks;
+- `docs/README.md` keeps only the `RELEASE.md` row after #1037's removals;
+- `test-env-vocabulary.sh` gets 67, the batch's 68 less the retired REPIN hook.
+  `check-env-vocabulary.sh` reports 67 names. Attempt 1's "70 -> 69" prediction was stale, as Sol
+  noted.
+
+The header comment now reads "sixteen leaf jobs (#1017 added the two AArch64 jobs, #1061
+`artifact-identity`)" (finding 5); the workflow parses to 16 leaves.
+
+**Finding 1 (HIGH), the base toolchain.**
+- *The step.* The base step, renamed "Build the base's module with the base's own build script and
+  toolchain", now runs `web-audioworklet-identity.py toolchain --commit "$base"`. It then installs
+  that toolchain with the `wasm32` target and builds the base with `RUSTUP_TOOLCHAIN="$toolchain"`.
+- *Where the toolchain comes from.* `toolchain` reads the base commit's own
+  `.github/workflows/qualification.yml` workflow-level `RUSTUP_TOOLCHAIN`: the value the base's
+  `artifact` job built with, which overrides `rust-toolchain.toml` in CI. Failing that, it reads the
+  base's `rust-toolchain.toml` channel. A job-level `RUSTUP_TOOLCHAIN` never counts. A missing or
+  malformed pin fails the step instead of guessing.
+- *The report* names both toolchains, and flags "(a toolchain change)" when they differ.
+- *Plant, run through both jobs' own `run:` blocks* (the attempt 1 harness, in a scratch clone at
+  another path):
+  - A push commit `5067d9b3` changes every `1.97.1` in `qualification.yml` and
+    `rust-toolchain.toml` to `1.98.1`, with no source change, over base `20ffabf0`.
+  - `artifact` built `b7dfd909...`, and the twin agreed.
+  - The base step read `toolchain=1.97.1` and built `6c952a2c...`, the base's real module.
+  - The report says `ARTIFACT CHANGED: 6c952a2c... at base 20ffabf0... -> b7dfd909... at
+    5067d9b3...`, then "Toolchains: this commit built with Rust `1.98.1`, the base with its own
+    pinned `1.97.1` (a toolchain change)". The job passes.
+- *Control.* The same base built with the PR's `1.98.1`, attempt 1's behaviour, gives `b7dfd909...`
+  exactly, which would have printed `ARTIFACT UNCHANGED`.
+- *Unchanged run.* A push of `20ffabf0` over `665ae26e` is `ARTIFACT UNCHANGED: 6c952a2c...`, with
+  both toolchains `1.97.1`.
+- *Committed tests.*
+  - The identity self-test adds a toolchain-only change. The base's toolchain is read as `1.97.1`
+    while `HEAD` pins `1.98.1`, and the report is CHANGED with the toolchain line. It also covers the
+    `rust-toolchain.toml` fallback, a job-level value that must not count, a missing pin and a
+    malformed pin, and the CLI.
+  - `test-ci-path-routing.py` goes red when the base build drops `RUSTUP_TOOLCHAIN="$toolchain"`,
+    reads `toolchain --commit HEAD`, or feeds `BASE_TOOLCHAIN` from `env.RUSTUP_TOOLCHAIN`.
+  - Nine hand mutations of the new identity rules each turn the self-test red:
+    - the toolchain read from `HEAD`;
+    - the channel read from `HEAD`;
+    - `rust-toolchain.toml` winning over the workflow;
+    - any-level `RUSTUP_TOOLCHAIN` counting;
+    - a missing pin guessed;
+    - a malformed name accepted;
+    - the no-base wording reverted;
+    - the toolchain flag dropped;
+    - the base toolchain made optional.
+
+**Finding 2 (MEDIUM), the base wiring.**
+- *The rule.* `check_qualification_artifact_identity` now splits the job into steps, ignoring
+  comment and blank lines, and requires exactly five of them:
+  1. the checkout, with `fetch-depth: 0`;
+  2. the toolchain install (free, so a toolchain bump edits only the workflow);
+  3. `IDENTITY_TWIN_STEP`, exactly;
+  4. `IDENTITY_BASE_STEP`, exactly;
+  5. `IDENTITY_REPORT_STEP`, exactly.
+- *Mutants.* `test-ci-path-routing.py` adds these, each red:
+  - Sol's five: the `base_args` line deleted; `--event none`; `BEFORE: ""`; the identity job's
+    `fetch-depth: 0` dropped; the twin replaced by `ln -s "$GITHUB_WORKSPACE" "$RUNNER_TEMP/twin"`.
+  - The three toolchain mutants above.
+  - Each pinned step deleted.
+  - A step inserted before the report.
+- *Result.* `check-ci-path-routing.py` and `test-ci-path-routing.py` pass on the merge.
+
+**Finding 3 (LOW), the no-base wording.**
+- With no base, the report now says "Release fingerprint not checked: with no base, this run cannot
+  tell whether the change edits the pin or `npm-publish.yml`'s release identity".
+- It never says "does not edit". The self-test holds this over a release commit, and a
+  `report` call with no base on a scratch re-pin commit (`3c27d044`) prints it.
+
+**Finding 4 (LOW), the docs.**
+- *`docs/RELEASE.md` "Between releases"* now says what the pin is until the first release PR
+  under #1061:
+  - it is `f7bd75ca...`, the last per-change re-pin, from slim-1 (`570a79f0`), and `results.json`
+    and the matrix record that module;
+  - release 0.4.3 shipped `e18acf9c...`;
+  - so `npm-publish.yml`'s pin assertion refuses on `main` today, which predates #1061.
+- *Step 2* says a release PR sets the pin to the digest of the release commit's own tree, built
+  with the toolchain its workflow pins, and puts the same digest in `EXPECTED_WORKLET_SHA256`.
+- *Step 3* notes the PulseAudio socket's 108-byte path limit.
+- *Elsewhere.* `hosts/host-web/DEPLOYMENT.md` says the same, and the report says "the committed
+  pin" / "the pinned module", not "the pinned release module".
+
+**Gates rerun on the merged branch.**
+- **actionlint.** Not available here: not on PATH, no Go toolchain, and the Docker socket is
+  refused. A PyYAML parse of `qualification.yml` passes; Sol ran actionlint 1.7.7 on attempt 1's
+  workflow.
+- **The workflow's own contract.**
+  - `check-ci-path-routing.py` and `test-ci-path-routing.py`: pass.
+  - `check-script-reachability.py` (137 files) and `test-script-reachability.py` (18 cases): pass.
+- **On the freshly built module `6c952a2c...`.**
+  - `check-web-audioworklet.sh` passes, with 11 roster rows ok; `test-web-audioworklet.sh` passes.
+  - `test-sdk-artifact-builder-output-contract.sh` passes.
+  - The V8 spill gate passes on the module, and its self-test passes (19 cases); the call-graph
+    self-test passes.
+- **Every Python policy script under `python3 -B`.**
+  - The argument-free `check-*.py` all pass: `check-browser-expected-resources.py` (26
+    mutations), `-ci-path-routing`, `-command-kind-vocabulary`, `-command-reason-vocabulary`,
+    `-release-shape`, `-script-reachability`, `-sdk-deletions`, `-session-map-shape`,
+    `-step-vocabulary`, `-test-support-ci`.
+  - Every `test-*.py` passes: `test-ci-path-routing`, `test-npm-publish-modes`,
+    `test-script-reachability`, `test-test-support-ci`.
+  - The six that need arguments (`check-abi-layout-v1.py`, `check-builtins-listening-033.py`,
+    `-111.py`, `check-parameter-metadata-v1.py`, the call-graph and V8 spill gates) exit with
+    their usage message. They ran through their callers or with their arguments above.
+- **The rest.** `web-audioworklet-identity.py --self-test` passes; `check-env-vocabulary.sh` (67)
+  and `test-env-vocabulary.sh` pass; `cargo fmt --all --check` passes.
