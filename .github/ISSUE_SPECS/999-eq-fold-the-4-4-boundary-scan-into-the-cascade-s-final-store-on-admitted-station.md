@@ -455,3 +455,35 @@ not one of the brief's timing rows. It is recorded, not claimed as noise.
    brings the batch head's own files.
 3. Scratch (never committed) in `scratchpad/impl-999b/`: arms, holds, the differential and mutation
    copies; target directories deleted.
+
+## Sol attempt 2 verdict: PASS
+
+Verifier: Sol, 2026-09-28, on `f285057b`, judged merged onto the batch head `a1fcab3d`. The merge is
+clean, and since the branch's merge base the batch changed nothing in `lane`, `parametric-eq`,
+`effect-runtime` or `host-web`. Every arm was built from `git archive` in its own target,
+`CARGO_INCREMENTAL=0`, outside the lock.
+
+- **Exact.** `failed |= mask_any(NOT (|y| < limit))` over the stored words is `check_block`'s
+  per-word predicate reduced per vector rather than per block, so the verdict is the same on every
+  block. The rest of attempt 1's argument is unchanged. My differential against `a1fcab3d` finds 0
+  differing runs in 140,000, native release, including the at-the-limit shape. M1 (the second stream
+  ignored) and M2 (`<=`) re-run red on gate 1.
+- **Spill gate: green.** `run-wasm-gates.sh` passes on the merged artifact: dual tail 109
+  instructions, mono tail 53, mono pair 79, no carried slot. It was red at attempt 1.
+- **Other gates.** Roster (EQ 672/336, scalar 0), rule 3 (15 kernels), and the render,
+  `meter_poll` and `command_submit` callgraphs are identical to the head. `-p parametric-eq` (111,
+  release with `test-support`) and `-p lane` (70) are green on the merged tree.
+- **Browser timing.** Shipped artifact through its render export, 14 invocations, all undisturbed,
+  load 7-12, `taskset -c 31`, orders rotated:
+  - one band: isolate -0.06 us (6/14 lower), row -0.25 (10/14);
+  - two bands: isolate +0.27, row +0.08 (6/14);
+  - builtins -0.19;
+  - all six sections live: +0.40 dual (median +0.08), -0.28 mono.
+
+  That is flat to slightly faster. The one-band gain is smaller here than the implementer's
+  -0.44 us.
+- **The flagged native per-node two-band +0.33 us is not real.** My `Simd4` (per-node) two-band
+  isolate is -0.20 us over 6 runs, and 64 per-node `f32` effects timed alone are -0.5 % (two bands)
+  and -3.2 % (one band). Native `Simd8` one-band isolate: -0.67 us.
+
+No findings. Attempt 1's LOW 3 (record the pair narrowing on the issue) still applies.
