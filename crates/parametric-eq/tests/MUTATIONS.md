@@ -386,3 +386,20 @@ constructed underflow the scenarios never produce. Gate 2 exists for them. M7's 
 production -- a high shelf at 0 dB designs `m0 = A^2 = 1` exactly, and a ride away from 0 dB moves it
 -- and gate 2 asserts that shape as well as the identity-to-shelf ramp. M8 is the same kind of row:
 its counterexample is one `f32` gain and a restored payload, which no random draw reaches.
+
+## Issue #1015 — the stationary leg (c) refuses a restored subnormal
+
+Driver: the old leg (c) (finite, not `-0.0`) put back into `cascade_sections`, `cascade_sections_mono`
+or both, then `cargo test -p parametric-eq --lib`, dev and release, tree restored byte for byte
+between rows. The gate is `stationary_subnormal`: one live high shelf at `m0 = m2 = 0.5` holding
+restored `ic1 = ic2 = -2^-149`, fed `-2^-149`, every other section dead, rendered by the stationary
+cascade against the full per-section cascade (channel level) and through a contract restore and
+`process_bank` / `process_bank_mono` (contract level), at `f32`, `Simd4` and `Simd8`. On the
+unmodified batch head both tests fail at every width, dual and collapsed, with the stationary
+cascade rendering `80000000` where the full one renders `00000000`.
+
+| # | mutation | gate that goes red | result |
+|---|---|---|---|
+| 1015-M1 | both stationary lists back to the old leg (c) | both `stationary_subnormal` tests at every width, dual and collapsed (`… rendered 80000000 where the full cascade rendered 00000000`), dev and release | RED |
+| 1015-M1d | the dual list only | both tests, `mono false` rows only | RED |
+| 1015-M1m | the collapsed list only | both tests, `mono true` rows only | RED |
