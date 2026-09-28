@@ -534,3 +534,87 @@ I compared `cargo test --locked --workspace --all-targets --all-features -- --li
 | scripts | 22 | 4,535 |
 | Rust files | 7 | 4,057 (#1024 had shortened `input_symmetry.rs` by 3 lines) |
 | artifacts | 68 | 8,298 |
+
+## Sol verdict, attempt 2
+
+**PASS.** Attempt 1's HIGH is closed: the new port covers the full-capacity drain claim. The merge with the batch is sound, and every gate I re-ran passes.
+
+Reviewer: Sol, 2026-09-28, on `ba02e7cc`, in a scratch detached checkout with its own target
+directory. No timed workload was launched.
+
+### Findings, by severity
+
+1. **LOW: the port's bound is smaller than the one it replaces.**
+   `a_block_drains_every_input_record_queued_at_its_entry` fills queues of capacity 8. The retired
+   test used 16. A drain capped at a constant of 8 or more would therefore pass the port, where the
+   original caught any constant below 16. Neither drain has such a constant (both loop to
+   `available_at_entry()`), so no claim is lost. A fixture with a larger capacity would make the
+   port as strong as the original.
+2. **LOW: evidence wording.** "127 files changed, +1,403 / -17,348 … The additions include this
+   evidence and Sol's verdict." +1,403 is the count at `0e92893b`. It includes the attempt 1
+   evidence and Sol's attempt 1 verdict, but not the attempt 2 evidence. At `ba02e7cc` the count is
+   +1,519.
+
+### The HIGH, re-checked
+
+I applied each mutation below to the scratch copy, ran
+`cargo test -p builtins-compiler --features builtins-compiler/test-support,graph/test-support --test input_drain`,
+and then restored the file (`git status` clean). The suite was green before and after (7 passed).
+
+| mutation | result |
+|---|---|
+| mine from attempt 1: banked drain `0..available.min(2)` (`lib.rs:451`) | red: `banked block 0: … the last one did not decide it` |
+| banked drain capped at capacity − 1: `available.min(control.capacity() - 1)` | red: `banked block 0: …` |
+| scalar drain capped at capacity − 1: `available.min(self.control.capacity() - 1)` (`:4147`) | red: `scalar block 0: …` |
+| banked and scalar drains stop one short: `available.saturating_sub(1)` | red on both paths. The one-record twin also stops applying, so the failing assertion is "the trim moves no bit" |
+| `spsc.rs` `available_at_entry`: the wrapped branch counts one fewer (`… + producer - 1`) | red: `banked block 1: …`, so the wrapped second block holds |
+
+### The "other six", spot-checked on their bounds
+
+I made three mutations of the kind the coordinator asked for, each changing a bound rather than
+only a path:
+
+- **Gate quiet floor.** The range floor is moved by 1 dB: `.max(range.neg().sub(one))`. Red:
+  - `contract.rs` `a_quiet_plateau_settles_on_the_range_floor_not_silence`;
+  - `determinism.rs` `every_case_agrees_at_every_width_and_matches_its_pin`.
+- **Multiband compression depth.** Gain reduction is halved:
+  `inv_ratio_minus_one = 0.5 * (1.0 / ratio - 1.0)`. Red:
+  `product.rs` `active_causal_oracle_engages_releases_and_starts_on_current_sample`.
+- **Bank-group fullness.** A group one lane short counts as full:
+  `is_full = active_count() + 1 >= lanes`. Red:
+  - graph-compiler `a_single_odd_track_no_longer_strands_a_pool_remainder`;
+  - rack-compiler `single_slot_programs_reproduce_exact_equal_chunking`.
+
+  Binding itself stays correct under this mutation, because `bindable_slot_members` has a second
+  guard: every lane must run the slot, and padding lanes run none. This agrees with the evidence
+  that the binding bound is held.
+
+### Merge with `92ef396f`
+
+I re-merged `2c85ef0d` into `92ef396f` myself. Every file outside the six conflicts is identical to
+the implementer's `863df03d`, and each of the six is resolved as the evidence says:
+- the reachability step is kept;
+- #1026's rack and builtins-current lines and this issue's kernel-timing line are all gone;
+- the documented-name count is 97;
+- `tools/bench/src/main.rs` keeps neither side's retired subjects.
+
+On the new head, nothing live names a deleted file: the three remaining mentions of
+`check-parametric-eq-targets.sh` are comments. `0e92893b`'s re-pointing of
+`test-env-vocabulary.sh` at `scripts/operator/run-console-benchmark.sh` is correct, and its suite
+passes.
+
+### Gates on `ba02e7cc`, all passing
+
+- `cargo check` and `clippy -D warnings`, `--workspace --all-targets --all-features`; fmt.
+- test-debug-a's full command: 1,448 passed, including the new port.
+- test-debug-b's full command: 809 passed.
+- audit-native: 134 passed.
+- Wasm `+simd128` check of `host-web`, and `check-web-audioworklet.sh` (the module matches the
+  batch's refreshed pin).
+- Reachability: `check-script-reachability.py` reports 155 files reached and 8 operator files
+  exempt, and `test-script-reachability.py` passes all 18 cases.
+- `check-`/`test-ci-path-routing.py`.
+- `check-`/`test-env-vocabulary.sh` (97 names).
+- `check-`/`test-bench-policy.sh` (5 operator scripts rooted at the workspace).
+- `check-step-vocabulary.py` and `test-console-benchmark.sh`.
+- 22 static `check-*.sh` policy scripts, plus `check-`/`test-workspace-policy.sh`.
