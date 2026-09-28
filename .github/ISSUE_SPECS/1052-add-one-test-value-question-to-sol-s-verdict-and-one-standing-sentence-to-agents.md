@@ -197,3 +197,75 @@ issues (#1043-#1051 and their successors), and is not closable in this PR.
 
 **CI routing** is unchanged. No step or script was added. `AGENTS.md` and `scripts/` route full,
 and the lint job already runs `check-workspace-policy.sh`.
+
+## Sol attempt 1 verdict: FAIL
+
+Sol, 2026-09-28, commit `37442b7e`. The `AGENTS.md` text is sound. The lint cannot show that it
+still works, and nothing makes its allow-list shrink. All results were checked on a
+`git archive` scratch copy of the commit.
+
+**What holds.**
+- The checks pass on the commit: `check-workspace-policy.sh`, `test-workspace-policy.sh`,
+  `check-ci-path-routing.py`, `test-ci-path-routing.py`, `check-env-vocabulary.sh`,
+  `test-env-vocabulary.sh` and `check-step-vocabulary.py`. The scan takes about 10 ms.
+- All six of Terra's plants reproduce. The plain, rustfmt-wrapped, `hosts/` `concat!(env!…)`,
+  fifth-in-an-allowed-file and `tools/` `include_bytes!` plants are red. The fixture `.toml` plant
+  is green.
+- On today's tree the lint finds all 32 literal-path scrapes. The other `.rs"` and `.toml"` string
+  literals under `crates/`, `hosts/` and `tools/` are package-path data, fixture names or panic
+  text, not scrapes.
+- **The ten counter-examples.** The amended rule reaches 7 of the 9 genuine ones.
+  - All five `.rs` scrapes use the plain `include_str!` form, which the lint refuses.
+  - `paired_spans.rs` gate 3 falls under the rendered-output digest clause and the one-time
+    comparison clause.
+  - `knee_overflow.rs:185` falls under the green-on-revert clause, but only after the fact, if
+    someone re-runs the revert.
+  - `track_delay.rs:253` is rightly kept. The two other redundant #994 reproducers stay exempt by
+    amendment 2.
+- **Gates 1 and 3 are met.** The question is in step 3 and the new paragraph, and the repo has no
+  other verdict template. The paragraph adds no file and no growing table. Its voice matches the
+  file: a bold lead-in and two spaces between sentences. It carries only the amended clauses. It is
+  six sentences where the draft proposed one, but amendments 2 and 5 require the extra clauses.
+
+**Findings.**
+1. **The lint has no positive control, and its allowance can be reused (medium, blocking).**
+   - Changing `(?:rs|toml)` to `(?:rsx|tomlx)` leaves `check-workspace-policy.sh` and
+     `test-workspace-policy.sh` green, with the 32 known scrapes and a new plant in the tree.
+   - Freed allowance can be spent again. Removing two `include_str!("lib.rs")` scrapes from
+     `source/src/lib.rs` and adding a `native_source.rs` scrape and a `../Cargo.toml` read to the
+     same file stays green.
+   - A deleted allow-listed file leaves a dead row.
+   - So "the list only shrinks" is prose, not enforcement. The body's reason for adding no mutation
+     case was "one `git grep` is its own proof". That reason assumed a one-line lint with no
+     allow-list. This implementation is an rg and awk accounting program.
+   - The attempt 1 evidence argues that a stale-row check would be "a pin red that catches
+     nothing". It would catch the vacuous-lint regression above. It fires only in the PRs of the
+     issue its row names, and those PRs edit the row anyway.
+   - **Fix.** Require the found count to equal the allowance per file, and fail on a row that has
+     no hits. The prototype is two awk lines. It is green on this tree, and red on the broken
+     pattern and on a removed `native_wave.rs`. Until #1047 deletes the list, the 32 live scrapes
+     are the lint's fixture, so it still needs no new mutation case.
+2. **Uncovered literal-path forms (low-medium).** Each of these is green:
+   - `std::fs::read("src/lib.rs")`;
+   - `File::open("src/lib.rs")` followed by `read_to_string(&mut s)`;
+   - `include_str!(r"…")` and `include_str!(r#"…"#)`;
+   - `include_str!["…"]`.
+
+   Each is a literal path, so `AGENTS.md`'s "lints the literal-path form" overclaims. Either extend
+   the pattern (`fs::read`, `File::open`, the `r#*"` form, and `[` or `{` delimiters; the tree has
+   none of these today) or narrow the parenthetical. Helpers, `Path::join`, `format!`, a split
+   `concat!` and a `const` path are rightly left to review.
+3. **#1047's spec is stale (low-medium).**
+   - Its Outcome still adds the lint.
+   - Its gate 5 still lands the lint with the last deletion.
+   - The new gate 5, "delete the allow-list; the lint stays green", exists only in this spec.
+
+   Amend #1047's body so that it stands alone. The ratchet in finding 1 will tell #1035 and #1037
+   to lower their rows.
+4. **Wording (low).** "behavioural" should be "behavior". The file already uses "behavior" three
+   times.
+
+**Noted, not blocking.**
+- A comment that quotes the forbidden form goes red.
+- The lint scans production code, but its message says "a test".
+- A path through `fixtures/..` evades the lint, which is deliberate evasion.
