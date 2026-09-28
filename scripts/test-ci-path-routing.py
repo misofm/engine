@@ -713,6 +713,26 @@ def main() -> int:
         "    if: needs.route.outputs.math_closure == 'true'\n",
     )  # the owner's job on a narrower route than wasm-guests
 
+    # Issue #1048 amendment 2: an AArch64 job (#1017) must carry the G5 owner in release. A job
+    # moved onto an arm64 runner without it fails; the owner's own job moved there passes.
+    workflow_mutation_fails(
+        "qualification.yml",
+        "    name: DSP crates debug tests\n    needs: route\n"
+        "    if: needs.route.outputs.route == 'full'\n    runs-on: ubuntu-24.04\n",
+        "    name: DSP crates debug tests\n    needs: route\n"
+        "    if: needs.route.outputs.route == 'full'\n    runs-on: ubuntu-24.04-arm\n",
+    )
+    root = workspace()
+    try:
+        mutate(root / ".github/workflows/qualification.yml",
+               "    name: release-mode lane, math, and wasm-gates digest gates\n    needs: route\n"
+               "    if: needs.route.outputs.route == 'full'\n    runs-on: ubuntu-24.04\n",
+               "    name: release-mode lane, math, and wasm-gates digest gates\n    needs: route\n"
+               "    if: needs.route.outputs.route == 'full'\n    runs-on: macos-15\n")
+        run(sys.executable, str(CHECKER), "--root", str(root))
+    finally:
+        shutil.rmtree(root)
+
     # Baseline: the unmutated workspace() -- qualification.yml plus the router/checker/test
     # scripts, with none of the four retired workflows present -- must pass the checker outright.
     # Every workflow_mutation_fails/checker_fails call above depends on this holding; if it ever

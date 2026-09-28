@@ -436,6 +436,27 @@ def check_qualification_native_g5(text: str) -> None:
             "because it owns the native leg wasm-guests leaves out")
 
 
+# GitHub-hosted AArch64 runner labels: the `-arm` Ubuntu images and the Apple-silicon macOS images
+# (macOS 14 onward, except the Intel `-large` sizes).
+AARCH64_RUNNER = re.compile(r"\b(?:ubuntu-[0-9.]+-arm|macos-(?:1[4-9]|[2-9][0-9]|latest)(?!-large))\b")
+
+
+def check_qualification_aarch64_g5(text: str, names: list[str]) -> None:
+    """Issue #1048, amendment 2: once a required job runs on AArch64 hardware (#1017), one of those
+    jobs must run the single native owner of the cross-target digest corpora,
+    `g5_native_digests_match_pins`, in the shipping profile. It is the only native test left that
+    compares the effect families' pins, so an AArch64 leg without it would prove nothing about
+    phones rendering the same bits as x86 and the browser."""
+    aarch64 = [name for name in names if AARCH64_RUNNER.search(job(text, name))]
+    if not aarch64:
+        return
+    require(any(runs_g5_native_test(command)
+                for name in aarch64 for command in unconditional_step_commands(job(text, name))),
+            "qualification.yml: an AArch64 job (" + ", ".join(aarch64) + ") must run an "
+            "unconditional, unfiltered `cargo test --release -p wasm-gates` "
+            "(g5_native_digests_match_pins)")
+
+
 def check_qualification_workflow(root: pathlib.Path) -> None:
     text = (root / ".github/workflows/qualification.yml").read_text(encoding="utf-8")
     check_qualification_no_path_filter(text)
@@ -452,6 +473,7 @@ def check_qualification_workflow(root: pathlib.Path) -> None:
     check_qualification_closures(text)
     check_qualification_v8_spill(text)
     check_qualification_native_g5(text)
+    check_qualification_aarch64_g5(text, names)
 
 
 RETIRED_WORKFLOWS = ("ci.yml", "sdk.yml", "browser-qualification.yml", "release-build.yml")
