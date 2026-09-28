@@ -422,3 +422,6 @@ cascade rendering `80000000` where the full one renders `00000000`.
 | 1015-M1 | both stationary lists back to the old leg (c) | both `stationary_subnormal` tests at every width, dual and collapsed (`… rendered 80000000 where the full cascade rendered 00000000`), dev and release | RED |
 | 1015-M1d | the dual list only | both tests, `mono false` rows only | RED |
 | 1015-M1m | the collapsed list only | both tests, `mono true` rows only | RED |
+| 1015-B1 | follow-up: `>` instead of `>=` on `FLUSH_EPS` in `lane_is_flush_shaped` (the range starts one word above the floor) | `leg_c_refuses_below_flush_eps_admits_it_and_re_engages` (`live integrator 0 holding 1e-20 …: block 0 must elide`), dev and release | RED |
+| 1015-B2 | follow-up: the old leg (c) in both stationary lists | the boundary test (`holding 1e-30 …: block 0 must refuse`) and both reproduction tests, dev and release | RED |
+| 1015-B3 | follow-up: refuse subnormals only (the range starts at the smallest normal) | the boundary test (`holding 1e-30 …: block 0 must refuse`), dev and release | RED |

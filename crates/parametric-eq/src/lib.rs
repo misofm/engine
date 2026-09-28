@@ -2267,7 +2267,11 @@ fn section_state_is_flush_shaped<L: Lane>(section: &Section<L>) -> bool {
 ///     `v0 = ±0.0` and contradicts. The one remaining `m0` is the high shelf's `A^2`, with
 ///     `A = 10^(gain/40)` and `gain` domain-limited to `[-24, 24]`, so `A^2 >= 0.063`; underflow
 ///     then needs `|v0| <= 2^-150 / A^2` **and** `A^2 <= 0.5`, hence `m2 = 1 - A^2 >= 0.5`, hence
-///     `m2 * v2 = -0.0` needs `v2 = -2^-149` exactly. `v2 = ic2 + d2` and `v1 = ic1 + d1`; every
+///     `m2 * v2 = -0.0` needs `v2 = -2^-149` exactly. `v2 = ic2 + d2` and `v1 = ic1 + d1`. That
+///     `v2` needs `ic2 = +0.0`: gate (c) leaves `ic2` either `+0.0` or at least `FLUSH_EPS` in
+///     magnitude, and in the second case `ic2 + d2` rounds to a multiple of at least `2^-91` (or
+///     stays above `FLUSH_EPS / 2` in magnitude), never to `-2^-149`. So `v3 = v0 - ic2 = v0`, of
+///     magnitude `2^-149` (issue #1015: `ic2`'s bound is load-bearing too). Every
 ///     `a2` this design produces is `g / (1 + g * (g + k)) <= 1 / (2 + k) < 0.5` because `k > 0`
 ///     on every kind, so `a2 * v3` at `|v3| = 2^-149` underflows to a zero, `d1` is a zero, and
 ///     `v1 = ic1 + d1` is either `+0.0` (giving `m1 * v1 = +0.0`, since a cut high shelf has
@@ -4647,10 +4651,14 @@ mod interleave_identity {
 /// re-transcription of it -- and no runtime knob is added to reach either arm.
 ///
 /// What is covered: every live/dead subset of the six sections, both channels agreeing and
-/// disagreeing, at all three widths, cold and with seeded subnormal-adjacent state; the three
-/// refusal legs of the gate (`-0.0` input, a non-`+0.0` state in an elided section, a `-0.0`
-/// integrator in a live one) and the magnitude ceiling; per-lane disagreement inside one section;
-/// and enable/disable transitions arriving mid-session through the ramp path.
+/// disagreeing, at all three widths, cold and with a seeded non-zero live state (words just above
+/// `FLUSH_EPS`, which the kernel can write); the three refusal legs of the gate (`-0.0`, a
+/// non-finite word or a word above the ceiling in the input; a non-inert state in an elided
+/// section, issue #979; a live integrator that is not a word `flush` can leave -- `-0.0`,
+/// non-finite, or a non-zero magnitude below `FLUSH_EPS`, issues #977 and #1015) and the
+/// magnitude ceiling; per-lane disagreement inside one section; and enable/disable transitions
+/// arriving mid-session through the ramp path. Leg (c)'s `FLUSH_EPS` boundary and the
+/// re-engagement after a refusal are pinned in `stationary_subnormal`.
 #[cfg(test)]
 mod elision {
     use super::{
@@ -8019,5 +8027,115 @@ mod stationary_subnormal {
         contract_level::<Simd4, 4>("Simd4", &mut mismatches);
         contract_level::<Simd8, 8>("Simd8", &mut mismatches);
         assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    /// Leg (c)'s `FLUSH_EPS` boundary, structurally (#1015 follow-up, Sol's LOW finding 1).
+    ///
+    /// One word goes into one integrator of the live shelf on the last lane through
+    /// [`Channel::restore_track`] (dual: the left channel; collapsed: the one channel), every other
+    /// section dead. Refused: every non-zero magnitude below `FLUSH_EPS` -- `+-1e-30`, the word
+    /// just under the floor at either sign, `+-2^-149`, and the elision test's old seeds `1e-40`
+    /// and `-1e-41` -- and `-0.0`. Admitted: `+-FLUSH_EPS` exactly, `+0.0`, `+-1.0`, and the seeds
+    /// that replaced the old ones. A refused block runs every section, which flushes the word, so
+    /// the next block elides again. Every block renders the full cascade's bits and integrators.
+    fn flush_eps_boundary<L: Lane, const W: usize>(width: &str) {
+        let floor = f32::from_bits(INERT_MAGNITUDE_FLOOR);
+        let under = f32::from_bits(INERT_MAGNITUDE_FLOOR - 1);
+        let refused = [
+            1.0e-30_f32,
+            -1.0e-30,
+            under,
+            -under,
+            f32::from_bits(1),
+            f32::from_bits(TINY),
+            1.0e-40,
+            -1.0e-41,
+            -0.0,
+        ];
+        let admitted = [floor, -floor, 0.0_f32, 1.0, -1.0, 1.5e-20, -1.25e-20];
+        let lane = W - 1;
+        let base = BAND_SECTION_OFFSET * STATE_WORDS_PER_BAND;
+        let input = |block: usize| -> Vec<f32> {
+            (0..FRAMES * W)
+                .map(|index| 0.25 - 0.013 * ((index + 7 * block) % 31) as f32)
+                .collect()
+        };
+        for (word, admit) in refused
+            .into_iter()
+            .map(|word| (word, false))
+            .chain(admitted.into_iter().map(|word| (word, true)))
+        {
+            for integrator in [0_usize, 1] {
+                for mono in [false, true] {
+                    let label = format!(
+                        "{width} mono {mono}: live integrator {integrator} holding {word:e} \
+                         ({:08x})",
+                        word.to_bits()
+                    );
+                    let build = || {
+                        let mut channel =
+                            Channel::<L, W>::new([sections(); W], RATE).expect("legal");
+                        let mut words = [0_u32; STATE_LANE_WORDS];
+                        channel.snapshot_track(lane, &mut words);
+                        words[base + integrator] = word.to_bits();
+                        let configuration = channel.targets[lane];
+                        channel
+                            .restore_track(lane, &words, &configuration, RATE)
+                            .expect("a finite integrator restores");
+                        channel
+                    };
+                    let clean = || Channel::<L, W>::new([sections(); W], RATE).expect("legal");
+                    // Arm 0 renders the stationary path, arm 1 the full per-section cascade.
+                    let mut arms = [(build(), clean()), (build(), clean())];
+                    for block in 0..2 {
+                        let io = input(block);
+                        let kept = if mono {
+                            cascade_sections_mono::<L, W>(&arms[0].0, &io, FRAMES).1
+                        } else {
+                            cascade_sections::<L, W>(&arms[0].0, &arms[0].1, &io, &io, FRAMES).1
+                        };
+                        let expected = if block == 0 && !admit {
+                            EQ_SECTION_COUNT
+                        } else {
+                            1
+                        };
+                        assert_eq!(
+                            kept,
+                            expected,
+                            "{label}: block {block} must {}",
+                            if expected == 1 { "elide" } else { "refuse" }
+                        );
+                        let mut rendered = Vec::new();
+                        for (stationary, (left, right)) in [true, false].into_iter().zip(&mut arms)
+                        {
+                            let (mut l, mut r) = (io.clone(), io.clone());
+                            if mono {
+                                process_channels_mono::<L, W>(left, &mut l, FRAMES, stationary);
+                            } else {
+                                process_channels::<L, W>(
+                                    (left, right),
+                                    &mut l,
+                                    &mut r,
+                                    FRAMES,
+                                    stationary,
+                                );
+                            }
+                            rendered.push((bits(&l), bits(&r), state(left), state(right)));
+                        }
+                        assert!(
+                            rendered[0] == rendered[1],
+                            "{label}: block {block} must render the full cascade's bits"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn leg_c_refuses_below_flush_eps_admits_it_and_re_engages() {
+        flush_eps_boundary::<f32, 1>("Scalar");
+        flush_eps_boundary::<Simd4, 4>("Simd4");
+        flush_eps_boundary::<Simd8, 8>("Simd8");
     }
 }
