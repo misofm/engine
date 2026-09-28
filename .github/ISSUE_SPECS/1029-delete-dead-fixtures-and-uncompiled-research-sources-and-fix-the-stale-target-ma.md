@@ -209,3 +209,92 @@ expected: nothing compiled or read the deleted files.
 `TARGET_MATRIX.md` in the dispatch section, in different hunks from this change. #1061 conflicts
 only in `scripts/test-web-audioworklet.mjs`, and it conflicts there with the base `52016391` too,
 so this change is not the cause.
+
+## Sol verdict, attempt 1
+
+**PASS.**
+
+Sol verified the change on a scratch merge of `0e73621a` into the batch head `codex/batch-slim-3`
+(`a509b681`: main, #1031, #1030, #1033 and #1061). The merge is clean, with no textual conflict.
+#1033's header note and #1030's `df8cebb3` re-points in `docs/C_ABI_V1_QUALIFICATION.md` compose
+with this change's paragraph, and the result reads coherently. `docs/TARGET_MATRIX.md` is untouched
+by batch 3. `ci-path-router.py` routes the merge `full`.
+
+### Checks
+
+1. **Nothing live was deleted.** The recount matches: 18 files, 5,635 lines and 199,897 bytes.
+   - A `git grep` of the merged tree finds no mention of `capi-qualification`, `dsp-research/archive`,
+     `archive/issue-0`, `issue-0NN/`, or any of the 13 fixture basenames (for example
+     `EXPECTED_SYMBOLS` and `runtime_consumer`). The search covered code, scripts, workflows,
+     manifests, `.cargo`, and fuzz. The only hits are dated docs, closed specs, #1033's spec,
+     `docs/handoffs`, and the re-pointed prose.
+   - `check-capi-abi.sh` derives its expected symbols from `crates/capi/include/miso_engine_v1.h` and
+     compiles `crates/capi/tests/c/abi_smoke.c`, not the fixture.
+   - No manifest or workspace `exclude` names `dsp-research`.
+   - `check-dsp-research.sh` reads only the named Markdown files.
+2. **Citations resolve.** `git cat-file -e 5379e46c:<path>` succeeds for three paths: the folder, all
+   13 fixture files, and `dsp-research/archive` with its four `.rs` files.
+   - `5379e46c` is an ancestor of `origin/main`. The GitHub contents API also serves both folders at
+     that commit (13 entries, and the README with four issue folders).
+   - `parametric_eq_recurrence_proof.rs:17-21` at `5379e46c` holds exactly the RATES…SLOPES
+     constants.
+   - `f0509c3f` (#319) deleted `run-capi-qualification-v1.sh` and both Python checkers, as #26 now
+     says.
+3. **`TARGET_MATRIX.md` is accurate.** Each changed statement holds against the merged code and CI:
+   - `.cargo/config.toml` pins `+avx2,+fma` for `x86_64`.
+   - `lane`'s `compile_error!` reads "requires x86-64-v3".
+   - `Backend::current()` is a `const fn` that returns `Simd8`/`Simd4`.
+   - `attest_host()` is called from `capi`, `host-mobile` and `host-native`.
+   - The `lint` job's three probes are at `qualification.yml:523-537`.
+   - `lint`, `test-debug-a`, `test-debug-b`, `test-release` and `audit-native` run on `ubuntu-24.04`.
+   - The one `miso-engine-v1-audio-worklet.simd128.wasm` is built once by `artifact`, and is gated
+     by `artifact-gates` (`check-web-audioworklet.sh`) and by `browser` (chromium, firefox, webkit).
+   - The host's typed refusal is `miso.unsupported.v1`, with capability `simd128`.
+   - `build-web-audioworklet.sh` requires an existing, empty output directory.
+
+   The following sections are byte-identical to `52016391`: the ARM64 and Refused rows, "64-bit only"
+   (#1041) through the dispatch contract, and everything from "Native AArch64 (#1017)" to the end
+   (#1017's register). The cross-target run's memset counts equal the register's ten ceilings.
+   Amendment 2 is moot, as claimed: `401fc362` removed the "revived" recipe.
+4. **Gates.** Every gate below was run on the merge, and every one passed.
+   - `cargo check --workspace --all-targets --all-features` passed with 0 warnings. Clippy
+     `-D warnings`, fmt, and `cargo doc` with `-D warnings` also passed.
+   - `host-web` `+simd128` check and the fuzz `--bins` check passed.
+   - `check-cross-targets.sh` passed: aarch64 iOS and Android check and clippy, the iOS memset
+     ceilings, and the armv7 refusal.
+   - The docs-gates trio, and routing check and test, passed.
+   - Script reachability check and test passed: 134 scripts reached and 8 exempt, with 18 mutation
+     cases.
+   - All 52 of the `lint` job's hermetic commands passed, with Python run as `python3 -B`. Also
+     passed: `check-release-shape.py`, `check-sdk-deletions.py` with its self-test,
+     `web-audioworklet-identity.py --self-test`, `test-wasm-realtime-atomics.sh`, and
+     `test-web-audioworklet.sh`.
+   - Debug `--all-features` tests of the 14 fixture-reading crates: 1,271 passed, 0 failed, 8
+     ignored.
+   - Release tests of `audit`, `bench` and `console-workload`: 128 passed, 0 failed, 2 ignored.
+   - The console digests are 17 rows, byte-identical to a separate build of `a509b681`.
+   - `audit capi`: 100,000 calls, 0 violations.
+   - `check-capi-abi.sh` and its `--self-test` passed.
+   - The builtins, console and conformance fixture checks passed, as did `check-effect-contract.sh`
+     and graph determinism (100/100).
+   - The shipped delivery closure is byte-identical on the merge and on `a509b681`, with module
+     `01dd58be…`. `check-web-audioworklet.sh` and `check-browser-expected-resources.py --artifacts`
+     pass on it.
+   - `build-web-audioworklet.sh --check-pin` fails the same way on base. The committed pin is
+     `6c952a2c…` from slim-2. This is not a per-PR gate under #1061; the pin is refreshed at the
+     release boundary.
+
+### Findings, by severity (none blocks)
+
+1. **Low: stale citations for #1040.** The svf.rs comment keeps its earlier pointer to
+   `.github/ISSUE_SPECS/045-*.md`, and #26 points to the closed 114 spec for its drifted paths. Once
+   #1040 (R10) prunes closed specs locally, both dangle, so #1040 must re-point them. Closed specs 002,
+   031, 042, 044 and 045 still name `dsp-research/archive/…`, and 083, 097, 104 and 114 name the
+   capi ledger. These are dated records of closed issues, which R10 owns.
+2. **Low: #26 is partly obsolete after #1033.** Its "one re-run of that matrix" obligation and line
+   31 ("Native PCM reference runner and C ABI qualification") include runner rows that #1033 made
+   impossible. #1029 correctly left the obligation unchanged. #26 needs a rebrief, which is not this
+   issue's scope.
+3. **Information: evidence counts moved on the batch base.** The attempt 1 evidence counted
+   1,281 and 130 tests, including `native-pcm-runner`. On the batch 3 merge, #1033 has removed that
+   crate, and the counts are 1,271 and 128. No failure is involved.
