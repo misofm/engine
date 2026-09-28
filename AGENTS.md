@@ -68,9 +68,11 @@ Create local Git checkpoint commits frequently at coherent, compiling or otherwi
 
 1. **Sol briefs** the issue and approves its scope, decision record, and objective gates.
 2. **Terra implements attempt 1** and attaches required evidence.
-3. **Sol adversarially reviews** the implementation against the issue, architecture, realtime rules, portability, and evidence.
+3. **Sol adversarially reviews** the implementation against the issue, architecture, realtime rules, portability, evidence, and test value.
 4. If needed, **Sol performs up to four additional implementation/revision attempts**, for a maximum of five total attempts. Each attempt receives one adversarial verdict.
 5. If attempt five fails, stop. A smaller limit explicitly set by the issue brief remains binding. Preserve the evidence; do not weaken gates to declare success. Rescope/rebrief before starting a newly bounded workflow.
+
+**Test value.** For every new or rewritten test, Sol's verdict answers in one sentence: *which plausible defect turns this red that no existing test catches?*  The answer names the behavioural claim the test defends; there is no PASS without it, and it is never a new file or ledger row.  A regression reproducer is exempt while its PR records it red on the bug's revert, and one found green on its revert is repaired or deleted; a randomized differential is judged by what its generator reaches, not by unique catches.  A test that greps source or prose is refused (`scripts/check-workspace-policy.sh` lints the literal-path form), and a change that supersedes a test deletes it in the same PR.  An exact resource byte count, or a digest of fixture bytes, rendered output or a compiled artifact, is used only for a wire, ABI or on-disk format or for the single owner of a cross-target corpus; a one-time "no bit moved" comparison against a pre-change base is PR evidence, not a committed test.  Resource budgets are ceilings, while counts that *are* the claim, such as `allocations == 0`, stay exact and are measured with `bench_support::alloc`'s thread-scoped counters after process statics are warmed.
 
 Research delegation should use Terra agents where possible to preserve Sol review capacity.  The workflow records who supplied evidence but never substitutes authority for testable gates.
 

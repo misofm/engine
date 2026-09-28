@@ -122,3 +122,78 @@ See [`../VERIFY-TEST-VALUE.md`](../VERIFY-TEST-VALUE.md). **These amendments sup
 6. **Cost.** One question per new test, and a lint of about 1 s. It is cheap. The lint discriminates
    mechanically; the question discriminates only as far as Sol's verdict enforces "no PASS without
    an answer".
+
+## Attempt 1 evidence
+
+Terra, 2026-09-28, branch `codex/1052-test-value-rule` from `codex/batch-slim-1` (`b8bea8e1`).
+
+**Changed.**
+- `AGENTS.md`, "Issue-first execution and review workflow": step 3 now reviews "evidence, and test
+  value", and a **Test value** paragraph follows the numbered steps. It carries the question, "no
+  PASS without it", no ledger row, amendment 2's reproducer and pin clauses, the randomized
+  differential clause, the supersede-deletes clause, source/prose greps refused, ceilings versus
+  exact claim counts, and amendment 5's `bench_support::alloc` clause. The owner edits the wording.
+- `scripts/check-workspace-policy.sh`: the issue-07 lint, one `rg -U` scan in the lint job's
+  existing "Workspace policy" step.
+
+**Scope deviation, by the root brief.** The body says the lint lands with #1047 and needs no
+allow-list. The brief asked for it now, with the existing scrapes allow-listed against the issue
+that removes them, so a *new* scrape is refused from this PR on.
+- The allow-list counts scrapes per file: 14 rows, 32 scrapes. Each row names #1047, or #1035 or
+  #1037 where #1047's amendment 1 hands the code to them. It only shrinks. #1047's gate 5 becomes
+  "delete the allow-list; the lint stays green".
+- A row whose scrapes are already gone does not go red. A stale-row failure would be a pin red
+  that catches nothing.
+- Gate 3 holds: no file is added, and no row grows with the test count.
+
+**Verdict template.** Outside `AGENTS.md` the repo keeps no Sol verdict template. The
+`artifacts/**/*review.md` and `docs/audits/*review.md` files are past verdicts. Step 3 is where
+the workflow defines the verdict, so gate 1 is met there.
+
+**Lint.** It matches `include_str!`, `include_bytes!` or `read_to_string` of a literal `.rs` or
+`.toml` path. It also matches a path wrapped by rustfmt and `concat!(env!("CARGO_MANIFEST_DIR"), …)`.
+A path with a `fixtures/` component is excluded (amendment 4). That also admits a relative
+`fixtures/…`, and it covers `tools/bench/src/builtins.rs`'s ten fixture `.toml` includes.
+On this tree it finds 32 non-fixture hits, the #1047 table as pruned. The line numbers drifted from
+the audit's, for example `source/src/lib.rs:2882` → `:2812`. Results on scratch copies of the tree
+(non-git fallback):
+
+| plant | result |
+|---|---|
+| none | green |
+| `include_str!("../src/lib.rs")` in a new `crates/lane/tests` file (#1047 gate 5's example) | **red** |
+| the same, wrapped by rustfmt across three lines, of `engine/src/realtime/plan.rs` | **red** |
+| `read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))` under `hosts/` | **red** |
+| a fifth `include_str!("lib.rs")` in allow-listed `crates/source/src/lib.rs` | **red** |
+| `include_bytes!` of `lib.rs` under `tools/bench/src` | **red** |
+| `include_bytes!` of a `fixtures/…/matrix_ramp-48000.toml` | green |
+
+- **Cost.** The scan takes about 14 ms. The whole script took 1.2-1.8 s before and after; the
+  difference is noise.
+- **awk.** The allowance awk gives identical output under gawk, mawk and busybox.
+- **Not seen, so left to the question:** paths built at run time (`m3_determinism.rs` `read_dir`),
+  literals wrapped in a helper call (none today), and `.md` prose pins (`json_contract_artifacts.rs:98`).
+- **No new mutation case**, per #1047's outcome. `test-workspace-policy.sh`'s valid fixture stays
+  green.
+
+**F6 re-count under the amended rule.**
+- The five `.rs` scrapes: a new one is refused by the lint. The existing ones are allow-listed
+  until #1047.
+- `paired_spans.rs` gate 3 is refused by the rendered-output digest clause and the "one-time
+  comparison is PR evidence" clause.
+- `knee_overflow.rs:185` must be repaired or deleted under the revert clause.
+- `track_delay.rs:253` is rightly kept.
+
+**Gate 2** is forward-looking. It binds the verdicts of the PRs for the audit's other cut
+issues (#1043-#1051 and their successors), and is not closable in this PR.
+
+**Checks, all PASS on the result:**
+- `check-workspace-policy.sh` and `test-workspace-policy.sh` (25 s);
+- `check-ci-path-routing.py` and `test-ci-path-routing.py`;
+- `check-env-vocabulary.sh` and `test-env-vocabulary.sh`;
+- `check-step-vocabulary.py`;
+- the bench, builtins, effect-runtime, graph, host-core, lane, protocol-control, rack, realtime
+  and session `check-*-policy.sh` scripts.
+
+**CI routing** is unchanged. No step or script was added. `AGENTS.md` and `scripts/` route full,
+and the lint job already runs `check-workspace-policy.sh`.

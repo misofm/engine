@@ -289,6 +289,48 @@ versioned_worklet_implementation_pattern='class[[:space:]]+MisoEngine'V'[0-9]+Au
 scan_forbidden "AudioWorklet processor implementation classes must be unversioned" \
     "$versioned_worklet_implementation_pattern" '*.js' crates hosts tools
 
+# Issue #1052 (AGENTS.md "Test value"): a test must not read Rust source or a Cargo manifest as
+# text. This catches the literal-path form -- `include_str!`, `include_bytes!` or `read_to_string`
+# of a `.rs` or `.toml` path, however rustfmt wraps it; a path through a `fixtures/` directory is
+# data, and a path built at run time is left to review. The scrapes that predate the rule are
+# counted per file with the issue that removes them. The list only shrinks, and #1047 deletes it.
+source_scrape_allowlist='
+1 crates/capi/src/ffi.rs #1047
+5 crates/effect-compiler/tests/migration.rs #1037
+1 crates/effect-compiler/tests/migration_terminal.rs #1037
+2 crates/effect-package/tests/state_vectors.rs #1037
+4 crates/graph/src/runtime.rs #1047
+3 crates/lane/tests/input_chain_elision.rs #1047
+1 crates/math/tests/f1_fast_db_bounds.rs #1047
+4 crates/source/src/lib.rs #1047
+4 crates/source/src/native_source.rs #1035
+1 crates/source/src/native_wave.rs #1035
+3 tools/audit/src/builtins_fixture_check.rs #1047
+1 tools/audit/src/builtins_graph.rs #1047
+1 tools/audit/src/capi.rs #1047
+1 tools/audit/src/fixture_builtins.rs #1047
+'
+source_scrape_pattern='(?:include_str!|include_bytes!|read_to_string)\s*\(\s*(?:concat!\(\s*env!\(\s*"CARGO_MANIFEST_DIR"\s*\)\s*,\s*)?"([^"\n]*\.(?:rs|toml))"'
+capture source-scrapes rg -U -n -o --no-heading --with-filename --glob '*.rs' -r '$1' "$source_scrape_pattern" crates hosts tools
+(( CAPTURE_STATUS <= 1 )) || execution_failure 'source-scrape scan' "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR"
+source_scrape_hits="$CAPTURE_OUT"
+printf '%s\n' "$source_scrape_allowlist" >"$scratch_dir/source-scrape-allowlist"
+capture source-scrape-excess awk '
+    NR == FNR { if (NF) allowed[$2] = $1; next }
+    {
+        file = $0; sub(/:.*/, "", file)
+        path = $0; sub(/^[^:]*:[^:]*:/, "", path)
+        if (path ~ /(^|\/)fixtures\//) next
+        count[file]++; rows[file] = rows[file] $0 "\n"
+    }
+    END { for (file in count) if (count[file] > allowed[file] + 0) printf "%s", rows[file] }
+' "$scratch_dir/source-scrape-allowlist" "$source_scrape_hits"
+(( CAPTURE_STATUS == 0 )) || execution_failure 'source-scrape allowance' "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR"
+[[ ! -s "$CAPTURE_OUT" ]] || {
+    sort "$CAPTURE_OUT" >&2
+    fail 'a test reads Rust source or a Cargo manifest as text; name the behaviour it defends and assert that instead (AGENTS.md "Test value")'
+}
+
 # Master plan #83 D4 (revision 4): exactly one global ISA configuration is approved, the
 # x86-64-v3 pin that lets `wide` lower `Lane` to AVX2 and `Lane::fma` to `vfmadd` with no runtime
 # dispatch (crates/lane refuses to compile without it, and every host attests the CPU
