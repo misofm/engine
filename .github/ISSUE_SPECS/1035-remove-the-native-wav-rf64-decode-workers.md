@@ -353,3 +353,190 @@ re-pins.
    stems) and the silence draft S2's "`tools/stem-hasher` subcommand" option. They need another
    home (the release CLI already detects dual-mono stems).
 5. Open #124 (decode pool) closes as descoped.
+
+## Sol verdict, attempt 1
+
+**PASS.** Sol, 2026-09-28. Verified on a scratch merge of `002f6c3d` into the batch head
+`92ef396f`. The merge is clean and the merge commit was not kept. `c867ec2a..92ef396f` touches only
+the AudioWorklet pin and the qualification records, and #1021, #1024, #1026 and #1052 are already
+inside the base, so the attempt was built on all four. Trial merges of the result with the in-flight
+#1017, #1027, #1037, #1048, #1063 and #1064 branches are textually clean. None of those branches
+names a deleted item or removes a `test-support` feature, so the declaring-package floor of 9 holds.
+#1017 ignores one of the two exact-total tests re-pinned here on AArch64, which does not conflict
+with the re-pin.
+
+### What was checked
+
+- **The live chunk path is unchanged.**
+  - In `crates/source/src/lib.rs` the diff deletes only `cfg(not(wasm32))` items and the
+    always-zero retirement-worker term of the retained report.
+  - The host path is unchanged: `submit`, `submit_planes`, `validate_submission_metadata`,
+    `take_recycled_block`, `publish_block`, `try_seek`, `read_block`, and all of capi's `src/` and
+    `include/`, `host-core` and `host-web`.
+  - The acked-batch question still holds: `publish_block` acks only after a successful push.
+- **The guards that survive, all green:**
+  - **C ABI submission and seeks:**
+    - capi tests: `compile_publishes_both_children_and_source_control_is_region_checked`,
+      `source_rejections_reach_the_c_host_as_their_own_diagnostic`, and `resource_lifecycle.rs`
+      (6 tests).
+    - `audit capi`: 100,000 calls over a host-fed ring followed by underruns, with 0 allocations,
+      locks and syscalls. It passes the edited inline validator, which refuses a second record
+      argument.
+    - `check-capi-abi.sh` and its `--self-test`.
+  - **Ring and `HostChunkProvider`:** `host_submission_is_fifo_wraparound_and_never_accepts_a_prefix`,
+    `report_separates_session_pcm_from_source_overhead`,
+    `played_planes_stay_intact_while_the_producer_fills_its_configured_depth`, and the two ports.
+  - **Generation-tagged seeks:**
+    - source: `seek_switches_at_boundary_and_discards_older_queued_audio`,
+      `paused_seek_prepares_full_queues_without_consuming_target`,
+      `graph_driver_forwards_underrun_and_seek_generation_facts`;
+    - host-core: `source_diagnostics.rs` and `prepare.rs::source_control_errors_are_typed` (seek
+      backpressure, generation zero, a generation that does not increase);
+    - the browser adapter (host-web): `source_backpressure_seek_render_and_stable_output_are_bounded`,
+      `paused_seek_recycles_full_internal_queue_before_first_target_quantum` and
+      `source_seek_keeps_the_meter_epoch_and_absolute_peak_clock`.
+  - **Underrun emits zero plus a counter:**
+    - `underrun_is_positive_zero_and_eof_is_not_an_underrun` covers per-block frames and the
+      event count.
+    - `played_block_retention_keeps_the_pre_change_admission_sequence` covers cumulative frames.
+    - host-core: `spectrum.rs::graph_wide_source_underrun_is_retained_in_the_completed_window`.
+    - host-web: `ring_prefill_survives_stall` and `default_ring_covers_stall_tolerance`.
+  - **Planted mutations in the ring:**
+    - Deleting the cumulative-underrun increment turns `played_block_retention_keeps_the_pre_change_admission_sequence`
+      red.
+    - Deleting the stale-discard increment turns three tests red:
+      `seek_switches_at_boundary_and_discards_older_queued_audio`,
+      `paused_seek_prepares_full_queues_without_consuming_target` and
+      `played_block_retention_keeps_the_pre_change_admission_sequence`.
+- **capi re-pin.** The 16 bytes per plan are the `Box<[NativeSourceWorker]>` fat pointer deleted
+  from `SourceGraphSourceSetDriver`.
+  - The saving is the same on x86-64 and on both AArch64 mobile targets.
+  - On `wasm32` the field was already compiled out, so no browser resource row moves
+    (`check-browser-expected-resources.py` passes).
+  - For a host-fed source, the deleted retirement-worker class was always zero.
+  - The C header, the exported symbols and the ABI layouts are unchanged. A mobile app sees only a
+    16-byte-smaller `source_overhead_bytes` value per plan.
+  - The test oracle and the production report agree at 12,126 total and 3,934 overhead per plan.
+- **Nothing live was deleted.**
+  - Outside specs, handoffs, `artifacts/` and `docs/audits/`, I searched the merged tree for every
+    deleted module, item, feature, script, CI step, audit record kind and tool. No code, workflow,
+    script, Cargo feature, SDK file or `hosts/` file still names one. Docs residue is listed under
+    finding 4.
+  - `stem-hasher` had no operator workflow and no browser coupling: `stem-store-hash-v1.mjs` uses
+    its own known-answer vectors.
+  - Stem identity still has owners. The release CLI (`misofm/cli`, `src/stem-identity.ts`) owns
+    serialization and WAVE stripping. Its copies of all ten corpus files are byte-identical to
+    `fixtures/stem-identity/v1`, and `bun test tests/stem-identity.test.ts` passes 4/4. The browser
+    stem store owns the BLAKE3-over-canonical-bytes check and the identity grammar.
+- **Test lists.** I diffed the binary-qualified output of
+  `cargo test --locked --workspace --all-targets --all-features -- --list`.
+  - Base has 2,456 tests and the merge 2,398: exactly the 62 removals and 4 additions listed above.
+  - Each removed test covers one of: the native worker or producer, the deleted decoder API, a
+    deleted audit subject, or stem-hasher's own contract.
+  - Where a claim is shared, host-path analogues exist:
+    - host-core `prepare.rs`: caps admit exactly and reject one byte below, typed source errors,
+      launch rates, sources fed independently;
+    - host-core `source_diagnostics.rs`: `PlaneLength`, seek backpressure.
+- **AGENTS.md.** The new sources paragraph matches the code.
+  - No thread is spawned in `crates/source`.
+  - capi and host-web feed `HostChunkProvider` through host-core's `SourceControlSet`.
+  - It keeps bounded rings, generation-tagged seeks, underrun zero-plus-counter, no whole-stem
+    loading, the rate set and no implicit SRC.
+  - It removes nothing except the decode-worker clause.
+- **Test value.** Each new or rewritten test was mutated; each went red, then green after revert.
+  The unique catches below were checked against the whole `source` suite. For the two ring tests
+  they were also checked against the host-core, capi, host-web and console-workload tests. For the
+  decoder tests they were also checked against `native-pcm-runner`'s tests and `audit fixture-source`.
+  - `one_quantum_ring_shape_matches_its_report_and_reads_back_planar`: a consumer
+    `transfer_block_capacity()` that counts the retained block. No other test catches it.
+  - `rejected_host_submission_publishes_nothing_and_leaves_the_producer_untouched`: a validator
+    that admits a short chunk not marked end-of-region. No other test catches it.
+  - `buffered_decodes_share_one_fill_and_a_straddled_refill_keeps_the_reader_position`: a decoder
+    that refills and reads on every call instead of serving from its buffer. Only it and the
+    rewritten failed-I/O test catch it.
+  - `every_encoding_decodes_the_same_bits_however_the_region_is_partitioned`: a buffer-cursor byte
+    offset computed with the `f32` stride instead of `block_align`, which corrupts every non-float
+    encoding after a partial decode. No other test catches it.
+  - `failed_io_forgets_reader_position_and_retry_reseeks` (rewritten): a failed read that keeps
+    the stale reader position, so the retry reads without re-seeking. No other test catches it.
+  - The three decoder tests go when `native_wave.rs` goes (finding 1).
+
+### Gates on the merge
+
+- `cargo check --locked --workspace --all-targets --all-features` passes with 0 warnings.
+- `cargo clippy` with the same flags and `-D warnings` passes on all 44 packages.
+- `cargo fmt --check` passes.
+- The simd128 `wasm32` check of `host-web`, `source` and `host-core` passes.
+- On `aarch64-apple-ios` and `aarch64-linux-android`, two checks pass:
+  - `--all-targets -p source -p capi -p host-core`;
+  - `--workspace --lib --all-features`, excluding `native-pcm-runner`, `wasm-console` and
+    `wasm-gates`.
+- test-debug-a's exact command, which runs the source, host-core, capi and host-web tests: 1,389
+  passed, 0 failed, 9 ignored.
+- `cargo test --release -p audit -p bench -p console-workload`: 154 passed.
+- The `gain_pan_profile digests` output: all 17 rows are byte-identical to base.
+- `scripts/run-wasm-gates.sh` passes.
+- Also passing: `trace-graph-audit.sh`, `audit fixture-source` and `generate.py --check`.
+- Of the 62 scripts (every `check-*.sh` and `check-*.py`, plus `test-ci-path-routing.py`,
+  `test-test-support-ci.py`, `test-realtime-policy.sh` and `test-bench-policy.sh`):
+  - 52 pass, including:
+    - `check-ci-path-routing.py` and `test-ci-path-routing.py`;
+    - `check-test-support-ci.py` and `test-test-support-ci.py`;
+    - `check-workspace-policy.sh`, with the exact source-scrape allow-list;
+    - `check-realtime-policy.sh` and `test-realtime-policy.sh`;
+    - `check-session-policy.sh`, `check-env-vocabulary.sh` and `check-cross-targets.sh`;
+    - `check-native-pcm-runner.sh`, `check-release-shape.py` and `check-host-core-policy.sh`.
+  - The other ten are the next three rows.
+- `check-web-audioworklet.sh` and `check-sdk-headless.sh` fail on the pin only. The merge builds
+  `fbc7c2ab…`, while `92ef396f` pins `f7bd75ca…`. Under a trial re-pin, since reverted, both
+  scripts pass in full. See finding 2.
+- `check-sdk-types.sh` was not run: it needs `npm ci`. Seven `check-*.py` scripts require a path
+  or a mode.
+- **Shipped artifact.** Base `f7bd75ca…` and merge `fbc7c2ab…` are both 3,486,194 bytes, and 17
+  bytes differ.
+  - The data bytes are seven `Location` line fields for `crates/source/src/lib.rs`: 544 -> 518,
+    860 -> 834, 861 -> 835 (twice), 1323 -> 1164 and 1324 -> 1165 (twice), with columns unchanged.
+  - The code bytes are one same-length reorder of three independent local initializations in
+    `func[597]` `source::prepare_graph_source_set`, which runs at preparation, not render.
+  - `wasm-objdump -d` shows nothing else.
+- **Pre-existing or environmental:**
+  - The AArch64 `--all-targets -p host-core` check emits six dead-code warnings in
+    `crates/host-core/tests/fp_environment.rs`, from x86-only helpers this change does not touch.
+  - `check-env-vocabulary.sh` failed only while my scratch `target` symlink was present, and
+    passes without it.
+
+### Findings, by severity
+
+1. **Medium: Part B step 4 has no tracked home.**
+   - #1033's spec does not mention `native_wave.rs`, `audit fixture-source`, `fixtures/sources/v1`
+     or the `NativeWave*` re-exports. Only this spec's evidence hands them on.
+   - R4 approved Part B, so before #1035 closes, amend #1033's spec and its GitHub issue to absorb
+     them, or open a stateless successor. Otherwise closing this issue drops approved scope.
+2. **Medium, batch action: the AudioWorklet pin is stale.** Adding #1035 to the batch changes the
+   shipped module, so the two pin gates are red on the batch until its boundary re-pin, which
+   #1009's batch rule defers there. That re-pin must record the reason given here, or the
+   combination of this reason with any other batch member that moves the module.
+3. **Low: `docs/STEM_IDENTITY_V1.md` overstates the browser's part.**
+   - The "Implementations" section names the browser stem store (`identity.js`) as implementing
+     the contract. In fact `identity.js` only parses the `blake3:` spelling, and the store hashes
+     canonical bytes it is given. It neither serializes decoded PCM nor strips WAVE; only the
+     release CLI does.
+   - "The reference WAVE path MUST strip…" now names no path in this repository.
+   - The corpus has no CI consumer here (follow-up 3). Name the CLI as the serializer and WAVE
+     owner, and add `generate.py --check` to the lint job.
+4. **Low: stale references remain.**
+   - `docs/derivations/241-browser-source-identities.md:186-195` still gives `stem-hasher`
+     reproduction commands and says "the repository's native reference oracle agrees".
+   - `docs/DELIVERY_CODEC_BOUNDARY.md:12` still names "the native WAVE/RF64 control-worker path".
+   - `crates/source/src/lib.rs:1407` still says "native worker/decoder bytes".
+   - `qualification.yml`'s test-debug-a comment still lists `source` among the packages whose
+     `test-support` nothing turns on.
+5. **Low: the producer's `deferred_block` arm is now reached by no test.** It lives in
+   `take_recycled_block` and `publish_block`'s `Full` branch, is unreachable in a prepared ring, and
+   ships in the browser module. Its only exercisers were the two deleted native deferred tests. It
+   acks nothing, so no ack can precede a drop. Follow-up 2 should delete it.
+6. **Info: duration-independent memory rests on structure alone on the host path.**
+   `PcmSourceRingConfig` takes no duration, and `host_region_preparation_preserves_resources_and_absolute_ownership`
+   varies only the origin. `audit source-duration` never measured the host path, so no claim is
+   lost. A host-core test that prepares two sessions differing only in `frames` would re-earn the
+   AGENTS.md gate for the shipping path.
