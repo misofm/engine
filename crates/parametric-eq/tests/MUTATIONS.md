@@ -386,3 +386,22 @@ constructed underflow the scenarios never produce. Gate 2 exists for them. M7's 
 production -- a high shelf at 0 dB designs `m0 = A^2 = 1` exactly, and a ride away from 0 dB moves it
 -- and gate 2 asserts that shape as well as the identity-to-shelf ramp. M8 is the same kind of row:
 its counterexample is one `f32` gain and a restored payload, which no random draw reaches.
+
+## Issue #1007 — lanes written with a `select`, ended lanes snapped by mask
+
+Driver: one mutation at a time applied to `src/lib.rs`, then `cargo test -p parametric-eq --lib`
+(dev), tree restored byte for byte between rows. Gate 1 is the bank differential against the #1005
+kernel, `ramping_elision::select_lane_writes_render_the_1005_bits_{scalar,simd4,simd8}` (the list
+on both arms; the oracle writes lanes with `lane_set` and snaps one lane at a time, the unit-test
+`LANE_SET_WRITES` switch), and the same against the batch-head ramping path,
+`select_lane_writes_alone_render_the_lane_set_bits_*`. Gate 1b is
+`ramping_elision::select_lane_writes_match_lane_set_word_for_word`: `settle`, `start_ramp`, the
+hoist and segment snaps on every lane including the last, with `+0.0`, `-0.0`, subnormals and
+`+-f32::MAX`, plus a `Both` target on the first and last lanes, compared word by word.
+
+| # | mutation | gate that goes red | result |
+|---|---|---|---|
+| 1007-M1 | one-hot row off by one lane (`rows[lane][(lane + 1) % MAX_LANES]`) | 21 unit tests, gates 1 and 1b among them (`W1 seed 0 …: state`; preparation's `settle` writes the wrong lane, so most EQ unit tests fail) | RED |
+| 1007-M2 | the snap mask built from `was_ramping` alone, without `remaining == 0` | gate 1b (`Scalar lane 0 step 3: a word moved`); gate 1 at Simd4 and Simd8 | RED |
+| 1007-M3 | the snap's increment set to the target instead of `+0.0` | gate 1 at every width, both forms (`W1 seed 0 block 0: state`); gate 1b (`step 5`) | RED |
+| 1007-M4 | `settle` without the target word | gate 1 at every width, both forms (`… block 0: state`); gate 1b (`step 0`) | RED |
