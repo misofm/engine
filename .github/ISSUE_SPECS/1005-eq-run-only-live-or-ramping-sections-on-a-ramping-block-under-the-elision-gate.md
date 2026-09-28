@@ -252,3 +252,193 @@ Gates:
 * **Engagement.** `eight_of_64` must show at least half of the saving above, on both subjects.
 * **Identity.** `DIGEST=150` on both subjects and all arms must print "all identical", and every
   arm quoted as identity evidence must differ from `settled` (F6).
+
+## Attempt 1 evidence
+
+Terra, 2026-09-28, branch `codex/1005-eq-ramping-elision` from the batch head `a1fcab3d`. Code:
+`b787233b` (the list) and `39908196` (leg (c) held to kernel-written states). Host: AMD EPYC 7313P,
+rustc 1.97.1, Node 22.23.2 (V8 12.4). Every timed command held the shared lock, was pinned with
+`taskset -c 31`, and printed its load average.
+
+### What changed
+
+* **Contracts 1, 2, 4.** `ramping_sections` / `ramping_sections_mono` return the list, and the
+  `!stationary` arms of `process_channels` / `process_channels_mono` run `process_section` for each
+  listed section, left then right. `Channel::process_block` stays (corpus, tests, oracle). The
+  proof on `cascade_sections` gains "# A ramping block": the safe-ramp case (`m0 = 1.0`, `+0.0`
+  step on every lane of both channels), the keep-everything-after-an-unsafe-ramp rule, and
+  finiteness, which needs no gain bound for interpolated words: an inert identity section is exact
+  on every finite non-`-0.0` input, and a non-finite word at a dead section leaves that lane
+  non-finite in both arms, so the §4.4 check zeroes the plane and clears the channel in both.
+* **Contract 3** needed no edit: `#[inline(always)]` has been on `render` and `process_bank_inner`
+  since #978. The roster is unchanged (below).
+* **Leg (c) is tightened in the ramping lists only** (`section_state_is_flush_shaped`: every
+  integrator of a kept section is `+0.0` or finite with `|x| >= FLUSH_EPS`). Leg (c) as the
+  stationary gate has it (finite, no `-0.0`) admits a restored subnormal, and the high-shelf case of
+  the `-0.0` induction argues from kernel-written states. A live high shelf at `m0 = m2 = 0.5`
+  (gain `-6.0206` dB as an `f32`) holding restored `ic1 = ic2 = -2^-149`, fed `-2^-149`, emits
+  `-0.0` on its first frame; an elided identity after it passes `-0.0` where the executed one writes
+  `+0.0`. The batch-head ramping path never elides, so without the tightening this change was not
+  class A there. It is stricter than the brief's "same three legs", never weaker; the refused block
+  flushes the words and the next one engages.
+* **Deviation: the differential is in-crate** (`mod ramping_elision` in `lib.rs`), not
+  `tests/ramping_elision.rs`. An x86 build's factory refuses four-lane banks, the base arm has to
+  be the batch-head code, and the list is private. The arms are `prepare_width` (the body of
+  `bind_homogeneous_bank`) driven through `process_bank`, `process_bank_mono`,
+  `apply_prepared_target_lane`, `reset`, `restore_track_state_payload` and
+  `snapshot_track_state_payload`; the scalar arm calls `render`/`render_mono`, which is what
+  `process` wraps. The oracle is `Channel::process_block`, selected by the unit-test-only
+  `RAMPING_LIST` switch, whose default is the batch-head path: every unit test written before
+  #1005 calls `process_channels(.., false)` as its full per-section oracle for the stationary
+  elision, and a list that elided too would have turned those gates into "elided == elided". No
+  feature build carries the switch; integration tests, the bench and the module take the list.
+* The test-support counter `test_only_ramping_elided_blocks` counts ramping blocks whose list was
+  shorter than six.
+
+### Gate 1: the bank differential (release, final code)
+
+Every output word, every report, every lane payload and every internal word (coefficients, steps,
+targets, integrators, `remaining`, identity flags, semantic targets, the fixed-point witness)
+compared by bits after every block, strictly, no NaN allowance. Scenarios draw rates, per-lane
+kinds (lane-mixed included), bands off on every lane, cut toggles, 1-3 retargets per block through
+`prepare_targets` (one- and two-row, so `Both` targets), bank-wide rides, refused targets (a
+family change), resets mid-ramp (both kinds, ~2 %), restores (hostile integrators `-0.0`, `1e31`,
+`-3e38`, NaN, inf, `1e-40`, `+-FLUSH_EPS`-ish, in dead and live sections; forged ramps from and to
+the identity; cut enables flipped with a matching ramp), boundary values (gain +-24, Q 0.1/18,
+frequency 10/20/20 000 Hz), block lengths 1-128 and hostile input (`-0.0`, raw bits, +-inf, NaN,
+`1e31`, `-3e38`, values at the ceiling).
+
+| width, body | scenarios x blocks | ramping blocks | elided a section | targets (`Both`) | restores accepted: integrator / identity ramp / cut toggle |
+|---|---|---:|---:|---|---|
+| f32 dual | 300 x 96 | 11,450 | 6,425 | 66,391 (5,552) | 541 / 418 / 257 |
+| f32 collapsed | 300 x 96 | 11,396 | 6,632 | 47,877 (all) | 500 / 436 / 288 |
+| Simd4 dual | 300 x 96 | 11,422 | 5,860 | 99,616 (10,594) | 550 / 414 / 268 |
+| Simd4 collapsed | 300 x 96 | 11,779 | 6,097 | 73,148 (all) | 545 / 443 / 308 |
+| Simd8 dual | 300 x 96 | 11,316 | 5,584 | 141,978 (18,376) | 558 / 437 / 297 |
+| Simd8 collapsed | 300 x 96 | 11,527 | 5,749 | 107,343 (all) | 501 / 398 / 304 |
+
+Dev runs 40 x 96 per width and body (677-893 elided blocks each). All pass.
+
+### Gate 2: the list, structurally (f32, Simd4, Simd8; dual and collapsed lists)
+
+`the_unsafe_ramp_rule_keeps_every_dead_section_after_it`: ramping high shelf in band 2 keeps
+3, 4, LPF (`[1,2,3,4,5]`); ramping bell drops them (`[1,2]`); LPF toggle keeps nothing extra
+(`[1,5]`); HPF toggle drops the dead bands (`[0,1]`); identity -> high-shelf ramp keeps them (M7's
+shape); a 0 dB high shelf (`m0 = 1.0` exactly) ridden to +6 dB keeps them; channel-mixed and
+lane-mixed bell/shelf sections keep them, also with only the bell lane ramping; `-0.0` input, a
+`-0.0` dead state and a `-0.0` live state refuse (six); all-live gives six.
+`a_ramping_identity_section_is_never_dead`: a one-channel HPF ramp from the identity is listed
+(dual either side, collapsed). `a_restored_subnormal_live_state_refuses_the_list`: the shape above
+renders the batch-head bits through the list, dual and collapsed, and the list is six; with the
+state flushed it engages (`[0,1]`).
+
+### Gate 3: console scenarios pinned on `a1fcab3d`
+
+`tools/console-workload/tests/eq_ramping_scenario.rs`, 64-block pre-roll then 128 blocks, band-1
+gain 3 +- 0.25 dB, at `Simd8` and `Simd4` dispatch (both widths render the same bits):
+
+* `sixty_four_track_eq_only`, `Left` then `Right` owner edits: settled `81363c22…`, eight_of_64
+  `5470166c…`, all_64 `b51448fd…`;
+* `sixty_four_track_console_mono`, one `Both` owner edit per block (asserted: every cohort collapsed
+  on every block): settled `f973869e…`, eight_of_64 `bf0e96d1…`, all_64 `6e063a3e…`.
+
+Each ride is asserted to differ from settled. Green on the change, dev and release.
+
+### Gate 4: existing gates
+
+`cargo test -p parametric-eq` dev and release, each with and without `test-support`: 12 binaries
+ok (`interleave_identity`, `elision`, `mono_collapse`, E9 `determinism`, `bank`, `conformance`
+with its allocation gate, ...). `cargo test -p console-workload` release and dev: all ok,
+`chain_shape` and every digest unchanged. `cargo clippy --workspace --all-targets -- -D warnings`
+and `-p parametric-eq -p console-workload --all-features`, `cargo fmt --check`,
+`RUSTDOCFLAGS=-D warnings cargo doc -p parametric-eq --features test-support`: clean.
+`check-realtime-policy.sh`, `check-lane-policy.sh`, `check-env-vocabulary.sh`,
+`check-parametric-eq-render-contract.sh`, `check-workspace-policy.sh`: ok. The crate has no
+`tests/allocation.rs`; the conformance harness's `process.allocation` gate is the EQ's.
+
+### Gate 5: mutations
+
+M1 (both lists, dual, collapsed), M2, M4, M5 (both, dual, collapsed), M6: red in the differential
+and gate 2. M3 and M7: red in gate 2 only (the differential stays green, dev and release, as the
+diagnosis found for M3). M8 (leg (c) back to the stationary form; both, dual, collapsed): red in
+`a_restored_subnormal_live_state_refuses_the_list` only, with a real bit (`-0.0` vs `+0.0`).
+Recorded in `tests/MUTATIONS.md`.
+
+### Gate 6: realtime and wasm
+
+The module built from `39908196` with the delivery recipe (`d74d513c…`, 3,489,960 bytes, +7,146
+over the base's 3,482,814; the same bytes as the timed module):
+
+* `KERNEL_ROSTER`: `parametric-eq f32x4 dual` vector 672 / scalar 0, `collapsed` 336 / 0, each one
+  function; kernels 15 and `f32x4` arithmetic 14,192, both as base. Render callgraph as base.
+  `check-web-audioworklet.sh` on the assembled seven-file directory: passes.
+* `run-wasm-gates.sh`: ok, V8 spill gate ok (dual tail 81 instructions, no carried slot; mono pair
+  78; mono tail 42).
+* V8 output identity (`web_auto.mjs`, `DIGEST=150`, `eq_gain` and `mono_eq`, all seven arms, base
+  vs change): all identical, and every moving arm differs from settled. The console
+  mixing-automation preflight: all seven digests equal base's.
+
+### Gate 7 and the timing table
+
+µs per 64-track block; Δ against settled in the same run.
+
+**V8** (`web_auto.mjs`, extracted from the diagnosis patch with `verify-automation-harness.patch`,
+paths fixed; 6 rounds x 500 blocks, final module, load 6.9 -> 5.7):
+
+| arm | `eq_gain` base | change | `mono_eq` base | change |
+|---|---:|---:|---:|---:|
+| settled isolate | 22.46 | 22.22 | 99.54 | 99.17 |
+| one lane | +9.97 | **+3.50** | +4.94 | **+0.88** |
+| 8 of 64 | +64.43 | **+10.77** | +31.18 | **+4.10** |
+| all 64 | +145.45 | **+37.77** | +73.68 | **+20.45** |
+
+Settled is within 2 % (-1.1 %, -0.4 %). Engagement: 8 of 64 saves 53.7 µs (stereo) and 27.1 µs
+(collapsed), against the half-saving thresholds 26.3 and 13.7. The two runs on the pre-tightening
+build agree (load 13.5, above the bound, and 4.5): settled +0.1 %/+0.2 % and -0.6 %/-0.1 %;
+8 of 64 +10.9/+11.3 and +4.4/+4.1.
+
+**Browser `console_mixing_automation` arm** (`web-mixing-automation-benchmark.mjs run`, one warmup and
+two measured launches per module, alternated; load 5.2 -> 4.7), p50 µs, rounds 1/2:
+
+| module | quiet | restated | automated | paired ramp Δ |
+|---|---|---|---|---|
+| base | 155.04 / 154.32 | 158.34 / 157.56 | 171.36 / 173.25 | 12.94 / 15.48 |
+| change | 152.61 / 153.99 | 157.15 / 157.89 | 160.71 / 161.26 | **3.39 / 3.29** |
+
+On the pre-tightening build this arm's quiet read +2.2 µs over base (155.4/155.7 vs 153.2/153.6),
+with identical EQ loops; it did not reproduce here, and `web_auto`'s untouched arms on one module
+differ by up to 4 µs between instances, so it is instance placement.
+
+**Native** (scratch harness after the diagnosis's `rows`, one `Both` owner edit per riding track,
+isolate = row - builtins-only in the same round; base, change, change, base; each 6 rounds x 800
+blocks; load 4.4 -> 7.9). `Simd4` binds four-lane EQ and compressor banks through a scratch-only
+switch in both builds, as the diagnosis did; the shipped x86 build renders them per node. Δ is the
+mean of the two invocations:
+
+| arm | stereo `Simd8` base / change | stereo `Simd4` | collapsed `Simd8` | collapsed `Simd4` |
+|---|---|---|---|---|
+| settled row | 35.77 / 36.26 | 62.02 / 62.49 | 70.02 / 69.40 | 94.79 / 94.66 |
+| one lane | +8.33 / **+0.64** | +8.27 / **+1.34** | +3.85 / **+1.36** | +3.76 / **+0.24** |
+| 8 of 64 | +66.31 / **+7.24** | +65.13 / **+8.48** | +31.53 / **+2.95** | +31.01 / **+2.15** |
+| all 64 | +88.19 / **+28.89** | +147.39 / **+33.12** | +46.88 / **+17.57** | +73.90 / **+16.72** |
+
+The stereo settled row reads +0.5 µs natively at both widths (1.4 % of the row; V8 shows nothing).
+It is code placement: the stationary depth-one tail loop's instructions are base's with renamed
+registers (checked on the pre-tightening build), and with `-C llvm-args=-align-loops=64` in both
+builds (diagnostic only, load 7.7 -> 5.9) the settled rows are 35.81 -> 35.58 at `Simd8` and
+62.75 -> 62.34 at `Simd4`, collapsed 69.34 -> 69.42 and 94.81 -> 95.50.
+
+### For the verifier
+
+* **A pre-existing class-A gap on the stationary path, not fixed here.** `cascade_sections` and
+  `cascade_sections_mono` admit the restored-subnormal shape above. A scratch probe at `a1fcab3d`
+  shapes (one live high shelf at `-6.0206` dB, `ic1 = ic2 = -2^-149`, input `-2^-149`) rendered
+  `0x80000000` through the elided cascade and `0x00000000` through the full one. It needs a restore
+  payload (the kernel never writes a subnormal). The same tightening of leg (c), or a restore that
+  refuses non-zero integrators below `FLUSH_EPS`, would close it; it wants its own issue, since
+  #998 and #999 are editing that gate.
+* **Rebase with #998:** it caches leg (b) per channel and refreshes the cache after an executed
+  identity section. The ramping lists read leg (b) directly and every ramping block may execute
+  identity sections, so the merge must either keep the direct read here or refresh the cache after
+  a ramping block. #999 changes `process_channels`' return value; the ramping arm returns `None`.
+* M3, M7 and M8 are red only in the structural gates, by construction.
