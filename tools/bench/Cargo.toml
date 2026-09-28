@@ -28,7 +28,7 @@ engine = { workspace = true, features = ["realtime-audit"] }
 effect-compiler.workspace = true
 effect-contract.workspace = true
 effect-package.workspace = true
-graph = { workspace = true, features = ["test-support"] }
+graph.workspace = true
 graph-compiler.workspace = true
 lane.workspace = true
 rack.workspace = true

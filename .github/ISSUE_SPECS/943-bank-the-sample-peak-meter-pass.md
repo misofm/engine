@@ -656,3 +656,481 @@ committed.
     field against 8 scalar ALL meters over 64 blocks (16 windows) on hostile and tone input.
 - **Recorded benchmark cross-check.** `artifacts/plumbing-floor-baseline/console-benchmark.accepted.jsonl`,
   record `console_meters`.
+
+## Attempt 1 evidence
+
+Implementer: attempt 1, 2026-09-27. Branch `codex/943-banked-sample-peak`, base `925f47d6` (#881's
+metered-row branch tip plus this brief). Code commit `1975fc44`; the follow-up commit carries this
+record, the mutation rows and G2's invalid-only lanes (deviation 2). Host AMD EPYC 7313P (Zen 3), rustc 1.97.1, `.cargo/config.toml` pin
+`+avx2,+fma`, `CARGO_INCREMENTAL=0`, the worktree's own `target/`. No timed console benchmark was
+run and no saving is quoted as the issue's result; the A/B below is a throwaway, in-process,
+descriptive run.
+
+### Design
+
+- **Kernel** (`crates/lane/src/kernels/builtins.rs`): `meter_sample_peak_block<L>(words, frames,
+  peak) -> L`, `#[inline(always)]`, amendment 1's spelling: `for frame in
+  words[..frames * L::WIDTH].chunks_exact(L::WIDTH)`, `a = |load|`, `c = select(a >= MIN_POSITIVE &
+  a < INFINITY, a, +0.0)`, `peak = L::max(c, peak)`. The doc lists the frozen order, says the test is
+  the meter's `normal_or_zero` and not `NONFINITE_LIMIT`, and states the reassociation argument.
+- **Rack**: `BankChain::final_output_block(frames) -> Option<(&[f32], &[f32])>`, beside
+  `final_output_lane`, with its shape checks minus the per-lane activity test.
+- **Graph** (`crates/graph/src/{lib,runtime}.rs`):
+  - `GraphResidentObservationBlock::sample_peak: Option<[f32; 2]>`, documented as the peak of the
+    **sanitized** magnitude (amendment 4), `Some` only when the unit's pass ran, and to be ignored
+    by an observer that did not ask for it.
+  - `GraphRuntimeObserver::accepts_sample_peak(&self) -> bool { false }`, read at bind only.
+  - `UnitIdentity::sample_peak: bool` in the existing padding, set in
+    `new_with_observation_activation` beside `observed` from `RuntimeUnit::accepts_sample_peak`,
+    which takes the final slot as `members.len().checked_sub(lanes)` (amendment 4).
+  - The pass, in `observe_unit`'s bank arm: `if sample_peak && eligible`, before the member loop,
+    `chain.final_output_block(frames)` then `bank_sample_peak(chain.width(), left, right)`. Each
+    final member at lane `l` passes `Some([left[l], right[l]])` (read with `get`, so it cannot
+    panic) to `observe`, which puts it in the resident block; every other member, the `Op` arm and
+    `observe_one` (the controlled path) pass `None`.
+  - `#[inline(never)] fn bank_sample_peak(width, left, right) -> Option<[[f32; 8]; 2]>`
+    (amendment 2): one kernel call per plane at `Simd4` or `Simd8`, each seeded `L::zero()`,
+    stored into a stack `[[f32; 8]; 2]`. It derives `frames` from the slice length and returns
+    `None` unless both planes are the same whole number of frames, so the kernel cannot slice past
+    a plane.
+  - Test support: `test_only_set_bank_sample_peak_declined(bool)` (the oracle arm; also resets the
+    count) and `test_only_bank_sample_peak_passes()`.
+- **Builtins**: `MeterAccumulator::observe_input_with_block_peak(input, first_sample, block_peak)`;
+  `observe_input` calls it with `None`. The fast path is the brief's, after the unchanged preamble:
+  `Some(p)`, `metrics == SAMPLE_PEAK`, `len > 0`, `len <= period - frames`; merge each channel with
+  `if p > peak { p } else { peak }`, add `len`, `emit()` at `frames == period`. Plus `metrics()` and
+  the test-support merge counter `test_only_block_peak_merges()` / `test_only_reset_block_peak_merges()`.
+- **Builtins-compiler**: `MeterObserver::accepts_sample_peak` is `metrics() == SAMPLE_PEAK`, and
+  `observe_resident` passes `block.sample_peak`.
+- No new `unsafe`, no `wide` outside `crates/lane`, `graph`'s dependencies unchanged, no retained
+  byte (`rt9_identity_metadata_has_no_retained_or_peak_layout_delta` green), no block-sized copy.
+
+### Deviations and decisions
+
+1. **The wasm-gate corpus case is a lane case, not a tail case.** `meter_sample_peak_block/hostile`
+   is appended to the lane-case block, after the element-wise cases (case 55): `LANE_DIGESTS` gains
+   one entry at its end and every existing lane pin keeps its index. It is not at the global tail
+   because `tools/wasm-gates/tests/g5_native_corpus.rs`, outside this issue's paths, pins the tail
+   layout (`compressor_base + COMPRESSOR_CASE_COUNT + 2 == CASE_COUNT`). The delegated blocks after
+   case 55 move up one global index; their pins are indexed in their own crates, and every
+   `wasm-gates` test is green unchanged. The corpus doc says so. The case: per lane, 1,024 words
+   from a seeded generator (every fourth window invalid-only: NaN payloads, infinities, zeros,
+   subnormals; the others mixing those with `MIN_POSITIVE`, `f32::MAX`, `1e30` and moderate
+   values), blocks of 1, 2, 3, 5, 16, 31, 64, 127, 128 and 129 frames, windows of three blocks;
+   every frame's value is the running window peak through one kernel call over the block's prefix.
+   Its pin `c108dcbd...e3e646` was taken from width 0 (the scalar `Lane` oracle) and equals widths 1
+   and 2.
+2. **G2's hostile family has invalid-only lanes.** Mutation L-1 (admit subnormals) was green on the
+   first G2, because every hostile lane also carried normal words. Lanes 1 and 5 now carry only
+   words the meter sanitizes to `+0.0`, their published peaks are asserted `+0.0`, and L-1 is red.
+3. **The source scan pins the member call as one multi-line constant.** With the added argument
+   rustfmt lays `observe(member, ..., peak)?` out vertically, so the test matches `MEMBER_CALL`
+   exactly rather than one line. It still pins everything it pinned, and adds: one
+   `.final_output_block(`, `bank_sample_peak(` exactly twice (definition and call), the gate
+   `let peaks = if sample_peak && eligible {`, the block borrow and the pass call, the per-lane
+   hand-off, and `sample_peak,` in `observe`'s block. New control rows: the pass forced on (the
+   brief's), the peak withheld, the lane index shifted, the planes swapped, and the block borrow
+   replaced.
+4. **G4 uses the product period** (12 x 128 frames) and also pins the merge count and the window
+   count.
+
+### Gates
+
+| gate | command | result |
+|---|---|---|
+| G1 | `cargo test -p lane --test meter_peak` | PASS, 4 tests: `Simd8` 3,072 and `Simd4` 1,536 lane-blocks bit-identical with the `f32` kernel and the meter's serial loop, and the seeded-zero partial merged with the select form equal to both; the invalid-only lane ends at `0x00000000`; the bit sweep (every exponent, both signs, boundary mantissas); the domain witness |
+| G2 | `cargo test -p builtins --features test-support --test meter` (and without the feature: equality only) | PASS: 56,208 snapshots bit-identical on every field; merges 512 at periods 512 and 128, 296 at 300, 0 at 64, on hostile and tone input; `ALL` and `SAMPLE_PEAK \| COUNTS` merge 0 |
+| G3 | `cargo test -p graph-compiler --lib post_matrix_peak_meters` | PASS, table below |
+| G4 | `cargo test -p graph-compiler --lib the_banked_sample_peak_pass` | PASS: 1,000 blocks, `audit::snapshot().total() == 0`, passes 8,000 (`1,000 x 8` cohorts), merges 64,000, 5,312 windows (`64 x 83`) |
+| G5 corpus | `bash scripts/run-wasm-gates.sh` | PASS: native, wasm scalar and wasm `simd128` legs each `cases 142, comparisons 358, mismatches [], minmax_lowering_mismatches 0` |
+| G5 census | see below | recorded |
+| G5 callgraph | the build script's cargo line into `target/web-943`, `wasm-objdump -d` piped into `check-web-audioworklet-callgraph.py` | PASS: `--callgraph miso_engine_web_v1_render`; `--kernel-shape --kernel-pattern '4wide6f32x[48]' --kernel-min 11` (unchanged); `--callgraph miso_engine_web_v1_meter_poll --trap-owner ...poll_meters`; `--callgraph miso_engine_web_v1_command_submit --allocation-only`; `--self-test` |
+| G6 fmt | `cargo fmt --all --check` | PASS |
+| G6 clippy | `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | PASS |
+| G6 doc | `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps` | PASS |
+| G6 suites | `cargo test --locked -p ...` | PASS: lane 56 (2 ignored); builtins 114 and 114 with `test-support`; rack 54; builtins-compiler `test-support` 79; graph 118 and 125 with `test-support`; graph-compiler 94; host-core `--all-features` 225; host-web 206; console-workload 39; capi 36; wasm-gate-corpus + wasm-gates 9 |
+| G6 policy | `scripts/check-{lane-policy,unfused-seal,builtins-policy,builtins-fixtures,graph-policy,graph-determinism,realtime-policy,workspace-policy}.sh` | PASS, all eight (realtime: 56 marked regions in 16 files; determinism 100/100) |
+
+The controlled-path probe tests (hazard 7, including `host-core/tests/observation_demand.rs`) are
+green unchanged: P1 did not leak into S1.
+
+**G3, per configuration** (24 blocks, pass on / declined):
+
+| delivery, period | `[chains, slots]` | transposes | folds | redirects | frames | passes | merges |
+|---|---|---:|---:|---:|---:|---:|---:|
+| concurrent, 512 | [8, 48] | 192 | 64 | 0 | 384 | 192 / 0 | 1,536 / 0 |
+| concurrent, 300 | [8, 48] | 192 | 64 | 0 | 640 | 192 / 0 | 896 / 0 |
+| between render calls, 512 | [8, 48] | 192 | 64 | 0 | 384 | 192 / 0 | 1,536 / 0 |
+| between render calls, 300 | [8, 48] | 192 | 64 | 0 | 640 | 192 / 0 | 896 / 0 |
+
+In every configuration the PCM is bit-identical, every frame is equal on every field by bits, the
+shape tuple is identical, the frames carry signal, and some window's left and right peaks differ.
+Control 1: ALL-metric `MeterRequest` meters run 0 passes and 0 merges (folds 64). Control 2
+(amendment 3): the web-shape plan bound through `into_bound_with_observation_activation` with one
+active controlled observer on `ch00` `PostMatrix` runs 0 passes and 0 merges, the controlled row is
+called on all 24 blocks, and the PCM and all 384 frames equal the declined arm's.
+
+### wasm opcode census (G5, amendment 2)
+
+Artifact: `scripts/build-web-audioworklet.sh`'s cargo line (`+simd128`, `-C strip=debuginfo`, both
+remaps), `host_web.wasm` 3,308,878 bytes, sha256 `890705fa...9e54a9b2` (the pin `8934cdd9...` is
+not repinned; that happens once at the batch boundary). `bank_sample_peak` is `func[2252]`, with
+one call site, in `GraphExecutor::render` (`observe_unit` inlined), and makes no calls itself.
+
+| opcode | count | | opcode | count |
+|---|---:|---|---|---:|
+| `f32x4.abs` | 6 | | `f32x4.pmax` | 2 |
+| `v128.and` | 6 | | `f32x4.lt` | 4 |
+| `i32x4.sub` | 6 | | `f32.*` (any scalar `f32` op) | 0 |
+| `i32x4.lt_u` | 6 | | `f32x4.ge` | 0 |
+| `v128.bitselect` | 10 | | `loop` | 4 |
+
+- The validity test lowers to the exact integer range test `(bits & 0x7fffffff) - 0x00800000 <u
+  0x7f000000`, as the verification found, so `f32x4.ge` never appears.
+- The live `Simd4` arm (the browser's bank width) is two loops of `abs, and, sub, lt_u, bitselect,
+  pmax`. The `Simd8` arm, dead on wasm, is two loops over two `v128` halves whose `max` lowers to
+  `f32x4.lt` plus `bitselect`, the same D8 select form.
+- Each of the four loops has exactly one `br_if`, its back edge: the per-frame body is branch free.
+- Zero scalar `f32` compares, maxima or arithmetic in the function.
+
+### In-process A/B on the metered row (throwaway, descriptive)
+
+A temporary `console-workload` test, deleted afterwards: two `SessionRuntime`s of
+`Workload::SixtyFourTrackConsoleMetered`, one with the pass and one with it declined, alternated per
+block with the order swapped every block, 512 warm-up blocks then 6,000 timed, release, meters
+drained outside the clock. Load average 1.4-1.9.
+
+| run | p50 pass on | p50 declined | paired median (declined - on) | p10 / p90 of the delta |
+|---|---:|---:|---:|---:|
+| 1 | 133.6 us | 147.9 us | 14.3 us | 9.1 / 19.8 us |
+| 2 | 132.1 us | 147.0 us | 14.8 us | 9.7 / 20.0 us |
+
+Both arms rendered the same PCM digest over the 6,512 blocks, published the same 208,128 meter words
+(peaks by bits, window numbers and bounds, handles), and the pass ran 52,096 times (`6,512 x 8`) on,
+0 declined. This is not the benchmark row and is not the issue's result.
+
+### Red mutations
+
+Nine rows, each applied alone and restored: the graph rows to `1975fc44`, the lane and builtins rows
+to `1975fc44` plus this commit's final G2 (deviation 2). Recorded in
+`crates/{lane,builtins,graph}/tests/MUTATIONS.md`.
+
+| # | mutation | red on |
+|---|---|---|
+| L-1 | `a.ge(MIN_POSITIVE)` becomes `a.ge(zero)` | G1 (3 of 4), G2, corpus case 55 |
+| L-2 | drop `a.lt(INFINITY)` | G1 (3 of 4), G2, corpus case 55 |
+| B-1 | window test becomes `true` | G2 (period 300: publication count) |
+| B-2 | fast path on `metrics.contains(SAMPLE_PEAK)` | G2 (the ALL arm's words) |
+| B-3 | fast path skips `emit()` | G2 (period 512: publication count) |
+| G-1 | identity flag forced `true` | G3's ALL-control pass counter only (`192` against `0`) |
+| G-2 | final lane index `lane ^ 1` | G3 frames; the source scan |
+| G-3 | right-plane pass reads the left plane | G3 frames (right peak) |
+| expected green | `L::max(c, peak)` becomes `L::max(peak, c)` | green on G1, G2 and the corpus, as the domain argument predicts |
+
+### For the verifier
+
+- The corpus placement (deviation 1) is the one choice outside the brief's letter; it keeps every
+  file outside `tools/wasm-gate-corpus` untouched.
+- `sample_peak: Some` reaches every observer on a final member, not only meters; the field doc says
+  to ignore it unless asked for, and `MeterObserver` re-checks `metrics == SAMPLE_PEAK`.
+- The pass runs for a unit whenever one final-slot observer accepts, including blocks whose windows
+  then take the sample loop (a window boundary inside the block, S4). It never runs in a plan bound
+  with an activation (control 2).
+
+## Sol attempt 1 verdict: FAIL
+
+Reviewer: Sol, attempt 1, 2026-09-27, on `69410f38` (code `1975fc44`, base `925f47d6`). Nothing was
+pushed and no timed benchmark was run beyond one throwaway in-process A/B. Every mutation and
+throwaway test was applied in place and reverted; the tree is `69410f38` plus this section.
+
+The render change is correct and class A: I could not make it publish a wrong word or move a PCM
+bit. The attempt fails because an explicit invariant (I6 "no retained byte", interface item 4
+"placed in the existing padding") does not hold on wasm32, the target this slice exists for, while
+the code and the evidence say it does; and no committed gate can see the bank width that target
+runs.
+
+### Findings, most severe first
+
+1. **Blocking (I6, interface 4): `UnitIdentity` grows from 20 to 24 bytes on wasm32.**
+   `crates/graph/src/runtime.rs:2405` adds a fifth one-byte field. On 64-bit targets the struct
+   stays 32 bytes (29 used). On `wasm32-unknown-unknown` the boxed slice is 8 bytes, so the four
+   existing flag bytes already fill the only slack (`8 + 4 + 4 + 4 = 20`) and the fifth rounds the
+   struct to 24. Measured on the real type: a probe `const _: [(); 20] = [(); size_of::<UnitIdentity>()]`
+   fails `cargo check --target wasm32-unknown-unknown -p graph` with "expected an array with a size
+   of 20, found one with a size of 24", and `[(); 24]` compiles. That is 4 retained bytes per
+   runtime unit in the browser build. The doc at `runtime.rs:2404` ("Fits the existing identity
+   padding") and this spec's evidence ("no retained byte (`rt9_...` green)") are false there, and
+   the pin `rt9_identity_metadata_has_no_retained_or_peak_layout_delta` (`runtime.rs:8478`) is a
+   native-only `#[test]` that cannot see it. The brief's F5 premise was wrong for 32-bit targets;
+   the implementation had to pack the flag or escalate, not rely on the native pin.
+   Fix, implementer's choice: carry the flag in an existing byte (for example, `sample_peak` implies
+   `observed`, so one byte can hold none, observed, or observed with peak), and make the layout pin
+   a `const` assertion in non-test code so every target build, wasm32 included, checks it. The
+   alternative is an owner ruling that accepts 4 bytes per unit on 32-bit targets, with the doc, the
+   evidence and the pin corrected to say so.
+
+2. **Required (I2 at the product width): no committed gate sees the `BankWidth::Four` dispatch.**
+   `bank_sample_peak`'s `BankWidth::Four => planes::<lane::Simd4>(left, right)` (`runtime.rs:3834`)
+   is the only arm the browser and NEON execute. G3 and G4 compile at `host_dispatch()`
+   (`crates/graph-compiler/src/lib.rs:9873`), which is `Simd8` on this host and on every CI runner
+   (`qualification.yml` is all `ubuntu-24.04` x86-64). Mutation S-7, `Four => planes::<lane::Simd8>`,
+   stays GREEN on `-p graph --features test-support` (125), `-p graph-compiler` (G3 and G4
+   included), `-p builtins-compiler --features test-support` (79) and `-p console-workload` (39).
+   G1 and corpus case 55 test the kernel, not the dispatch. My differential at `Backend::Simd4` goes
+   red at once ("same PCM as Simd8 but different meter words"). Required: run G3 (at least one
+   period through both selected deliveries) at `Backend::Simd4` as well, which compiles and renders
+   natively, and record S-7 red in `crates/graph/tests/MUTATIONS.md`.
+
+3. **Info.**
+   - The pass runs on blocks where every accepting meter then takes the sample loop (period shorter
+     than, or not dividing, the block). This is S4's territory and is disclosed above. No action.
+   - Placing the corpus case at global index 55 is sound. Nothing pins a global index:
+     `g5_native_corpus.rs` derives every family base from the counts,
+     `LANE_DIGESTS: [[u8; 32]; LANE_CASE_COUNT]` ties the pin count at compile time, the timing arm
+     resolves cases by name, and the only hard-coded numbers (`tools/wasm-gates/MUTATIONS.md:27-30`)
+     are historical rows that also carry names. This follows #463's precedent.
+   - host-core `--all-features` here is 224 passed and 2 ignored; the evidence says 225. Nothing
+     fails.
+   - Out of scope and pre-existing: under my hostile input the intended fixture's PCM differs
+     between `Simd8`, `Simd4` and `Scalar` dispatch in 3 of 4 seeds, while the mixed and mono
+     sessions are bit-identical across all three. The pass and declined arms agree within every
+     width, so #943 is not the cause. It deserves its own look against "banking never moves a bit".
+
+### Re-verified (green unless noted)
+
+- **Meter words, own differential** (throwaway `crates/graph-compiler/tests/sol943_diff.rs`,
+  deleted).
+  - Sessions: a 21-track stereo session (EQ on every third track, partial banks, pan and mixing
+    matrices, a mute per channel, filters on and off), the first 12 mono-fixture tracks with the
+    collapse armed, and the 64-track intended fixture.
+  - Matrix: `Simd8`, `Simd4` and `Scalar` dispatch; concurrent delivery, between-render-calls
+    delivery with and without controls, and controlled delivery with the activation toggled every
+    five blocks; 4 seeds of 96 blocks. Every run was paired against
+    `test_only_set_bank_sample_peak_declined(true)`.
+  - Meters: at `PostMatrix`, `SAMPLE_PEAK` mixed with ALL, `+COUNTS`, `+HELD_PEAK` and
+    `ENERGY_RMS`. Also `SAMPLE_PEAK` at `PostFader` (a split chain, so the pass runs on the earlier
+    chain), `Input` and `PostInputBuiltins`. Periods 1, 7, 64, 100, 127, 128, 129, 300, 512, 1,536
+    and 2,048, with hold and decay on and off, and discontinuities of 77 to 5,000 samples.
+  - Input: NaN payloads, ±inf, ±0, subnormals, ±`MIN_POSITIVE`, ±1, ±`MAX`, 9e29 and 1.5e30, plus
+    invalid-only and silent stretches.
+  - Caller probes on final lanes: accepting probes (which alone trigger the pass), probes that
+    decline the resident view (the planar path and #885's `write_resident_lane` on folded lanes),
+    and plain probes. Each probe checks every `Some` peak against its own sanitized-peak oracle over
+    the resident words.
+  - Result: 4,533,495 snapshots equal on every field by bits. PCM, shape, transposes, folds,
+    redirects and collapse counters are equal. All 104,832 handed peaks equal the oracle. No
+    declined, `Scalar` or activation-bound arm ran a pass. The mono collapse fired (`[288, 3]`) and
+    stayed bit-identical, and on the stereo and mono sessions the three dispatches published
+    identical meter words.
+  - What reached the meters: −0 (10.0 M words), subnormals (370 k) and `MIN_POSITIVE`. NaN and
+    ±inf never reach a post-matrix lane (the D7 input rule), so G1 and G2 alone cover them.
+- **Opt-in and order.**
+  - The flag is derived beside `observed` from observer slices that nothing mutates after bind, and
+    from `MeterAccumulator::metrics`, which has no setter, so it cannot go stale. A controlled binding
+    needs an activation (`graph.plan.observation_activation_required`), so it never reaches
+    `observe_unit`.
+  - The pass runs after a successful execute and before the member loop, and only reads. The `?`
+    short-circuit and `write_resident_lane` are unchanged.
+  - G3's two controls pass. S-2 (`accepts_sample_peak` on `contains`) and G-1 go red on the ALL
+    control.
+- **Layout and API.** Finding 1 aside, the new field and the trait default compile across the
+  workspace, and every implementor, `SpectrumCaptureObserver` included, keeps `false`. host-web
+  (206) and capi (36) are green, and the graph policy passes.
+- **Wasm.**
+  - The build script's cargo line reproduces the implementer's `host_web.wasm` (sha256
+    `890705fa...9e54a9b2`, 3,308,878 bytes). The four callgraph checks, `--kernel-min 11` (15
+    kernels) and `--self-test` pass.
+  - The census matches: `bank_sample_peak` is `func[2252]`, with one caller and no calls.
+    `f32x4.abs` 6, `v128.and` 6, `i32x4.sub` 6, `i32x4.lt_u` 6, `v128.bitselect` 10, `f32x4.lt` 4,
+    `f32x4.pmax` 2, `loop` 4; no scalar `f32` op and no `f32x4.ge`.
+  - Each loop's only `br_if` is its back edge. The range test
+    `(bits & 0x7fffffff) - 0x00800000 <u 0x7f000000` is exactly `normal_or_zero` on the magnitude.
+  - `scripts/run-wasm-gates.sh`: native, wasm scalar and wasm `simd128` legs each ran 142 cases and
+    358 comparisons, with no mismatches.
+- **Tests and mutations.**
+  - The source scan's multi-line `MEMBER_CALL` pin is at least as strong as the one-line pin it
+    replaced. It matches only in `observe_unit`'s production body, indentation included, and its
+    `false` and `.ok()` control is kept. The new control rows are real.
+  - All nine recorded rows reproduce. L-1 and L-2 are red on G1 (3 of 4), G2 and corpus case 55;
+    L-green stays green. B-1 (period 300), B-2 (the ALL arm) and B-3 (period 512) are red on G2.
+    G-1 is red only on G3's ALL control. G-2 is red on G3 and the scan, and G-3 on G3.
+  - Extra rows, red unless noted:
+
+    | # | mutation | red on |
+    |---|---|---|
+    | S-1 | the bank pass seeded with `MIN_POSITIVE` | G3, the differential |
+    | S-2 | `accepts_sample_peak` on `metrics().contains(SAMPLE_PEAK)` | G3's ALL control |
+    | S-3 | `<` for `<=` in the window test (output-equivalent) | G2's merge counter only |
+    | S-4 | the flag derived from the non-final members | G3, G4 |
+    | S-5 | channels swapped in the merge | G2 |
+    | S-6 | `eligible` dropped from the gate (output-equivalent) | the source scan only |
+    | S-7 | the `Four` arm dispatched at `Simd8` | GREEN on every committed gate (finding 2) |
+- **Effect.** A throwaway in-process A/B on `sixty_four_track_console_metered`: two runtimes
+  alternated per block with the order swapped, 512 warm-up and 6,000 timed blocks, release build,
+  meters drained outside the clock, load 1.8-2.4.
+  - Paired median saving: 16.0 and 15.3 us (p10/p90 11.1/21.1 and 10.2/20.8).
+  - p50: 133.7 against 149.7 us, and 133.9 against 149.3 us.
+  - The PCM digests and all 34,688 snapshots were equal; 52,096 passes ran with the pass on and 0
+    declined.
+  - Descriptive only; this is not the row's result.
+- **Suites and policy.**
+  - `cargo fmt --all --check`, workspace clippy `-D warnings` (all targets, all features) and
+    `RUSTDOCFLAGS='-D warnings' cargo doc`: pass.
+  - Suites: lane 56, builtins 114 and 114, rack 54, graph 118 and 125, graph-compiler 94,
+    builtins-compiler 79, host-core 224, host-web 206, console-workload 39, capi 36.
+  - All eight policy scripts pass (realtime 56 regions in 16 files; determinism 100/100).
+  - The diff stays inside the authorized paths, including amendment 2's corpus.
+
+### Attempt 2 scope
+
+Findings 1 and 2 only, inside `crates/graph/src/runtime.rs`, the `crates/graph-compiler/src/lib.rs`
+tests, `crates/graph/tests/MUTATIONS.md` and this spec.
+
+## Attempt 2 evidence
+
+Implementer: attempt 2, 2026-09-27, on `79601b8f` (Sol's attempt 1 verdict). Scope: Sol's findings 1
+and 2 only, in `crates/graph/src/runtime.rs`, the `crates/graph-compiler/src/lib.rs` tests,
+`crates/graph/tests/MUTATIONS.md` and this spec. Same host and toolchain as attempt 1,
+`CARGO_INCREMENTAL=0`, the worktree's own `target/` (rebuilt, then deleted). No timed benchmark.
+
+### Finding 1 (I6): the flag now shares `observed`'s byte, and the pin is compile-time
+
+- `UnitIdentity`'s `observed: bool` and attempt 1's `sample_peak: bool` are one field,
+  `observation: UnitObservation`, a one-byte enum `{ Unobserved, Observed, ObservedWithPeak }`.
+  The peak implies an observer, so the three states are the whole domain. The constructor writes
+  `UnitObservation::of(unit.has_observers(), unit.accepts_sample_peak())`; `observe_unit` reads the
+  row once and asks `.observed()` and `.sample_peak()`; `unit_inert` asks `.observed()`. No
+  behaviour changes: every read returns what the two `bool`s returned.
+- The layout pin is now a `const _: () = assert!(...)` in production code: `size_of` and
+  `align_of` of `UnitIdentity` equal those of `UnitIdentityWithoutFlags` (the row with none of the
+  #885/#900/#918/#943 flags, formerly the `rt9` test's local `Before`). Every build evaluates it,
+  wasm32 included. `rt9_identity_metadata_has_no_retained_or_peak_layout_delta` remains as its
+  native echo, now against the shared shape.
+- Size probes on the real type, `const _: [(); N] = [(); size_of::<UnitIdentity>()]`, applied and
+  reverted:
+
+  | probe | `cargo check -p graph` (x86-64) | `cargo check --target wasm32-unknown-unknown -p graph` |
+  |---|---|---|
+  | N = 32 on 64-bit, 20 on 32-bit | PASS | PASS |
+  | N = 24 on both (negative control) | FAIL, "found one with a size of 32" | FAIL, "found one with a size of 20" |
+
+  So the row is 32 bytes natively and back to **20 bytes on wasm32** (attempt 1: 24).
+- The const assertion is live on wasm32 and silent natively for exactly the attempt 1 defect: with
+  attempt 1's layout restored (a separate fifth `bool`), or with `#[repr(u16)]` on the enum,
+  `cargo check -p graph` passes natively and `cargo check --target wasm32-unknown-unknown -p graph`
+  fails with `evaluation panicked: a UnitIdentity flag no longer fits the row's padding`.
+
+### Finding 2: G3 runs at `Backend::Simd4` too
+
+`compile_console_model_with_selected_meters` takes the dispatch. G3 now loops over the host's
+dispatch and `Backend::Simd4` (only the host's when it is already four-lane), each through both
+selected deliveries and both periods, pass on against declined. The mixed and ALL controls and G4
+stay at the host width.
+
+| dispatch, delivery, period | `[chains, slots]` | transposes | folds | redirects | frames | passes | merges |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Simd8, both deliveries, 512 | [8, 48] | 192 | 64 | 0 | 384 | 192 / 0 | 1,536 / 0 |
+| Simd8, both deliveries, 300 | [8, 48] | 192 | 64 | 0 | 640 | 192 / 0 | 896 / 0 |
+| Simd4, both deliveries, 512 | [32, 64] | 768 | 64 | 60 | 384 | 384 / 0 | 1,536 / 0 |
+| Simd4, both deliveries, 300 | [32, 64] | 768 | 64 | 60 | 640 | 384 / 0 | 896 / 0 |
+
+At `Simd4` the PCM and every frame are bit-identical between the arms, the shape tuple is equal,
+and 384 passes (24 blocks x 16 four-lane cohorts) ran. The `Simd4` plan's shape on this host
+(`[32, 64]`, 60 redirects) differs from the `Simd8` plan's; that is the plan the pre-existing
+compiler binds at that dispatch, and the pass moves none of it (the arms are equal). I first pinned
+`[cohorts, 6 * cohorts]` and dropped it for that reason; the pass count is what pins four-lane
+cohorts. Sol's S-7 (`Four => planes::<lane::Simd8>`) is now RED on G3:
+`Simd4 between_render_calls false period 512: meter 6 window 0`.
+
+### Gates (attempt 2 tree)
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | PASS |
+| `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | PASS |
+| `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps` | PASS |
+| `cargo check --locked --target wasm32-unknown-unknown -p graph` | PASS (the const layout pin holds) |
+| G1, G2 | PASS (unchanged code; lane 56, builtins 114 and 114 with `test-support`) |
+| G3 | PASS, 8 configurations above plus both controls (14.5 s debug) |
+| G4 | PASS: audit total 0, passes 8,000, merges 64,000 |
+| suites | PASS: lane 56; builtins 114 / 114; rack 54; builtins-compiler `test-support` 79; graph 118 / 125 with `test-support`; graph-compiler 94; host-core `--all-features` 225 (summing every `test result` line, doctests included; Sol's 224 excludes one); host-web 206; console-workload 39; capi 36; wasm-gate-corpus + wasm-gates 9 |
+| policy | PASS, all eight scripts (realtime 56 regions in 16 files; determinism 100/100) |
+| `scripts/run-wasm-gates.sh` | PASS: native, wasm scalar and wasm `simd128` legs, each 142 cases, 358 comparisons, 0 mismatches, `minmax_lowering_mismatches` 0 |
+| AudioWorklet artifact (build script's cargo line) | 3,308,848 bytes (30 fewer than attempt 1), sha256 `0fe086b4...1014283b`, not repinned |
+| callgraph checks on it | PASS: render, `--kernel-shape --kernel-pattern '4wide6f32x[48]' --kernel-min 11`, meter_poll, command_submit, `--self-test` |
+| census of `bank_sample_peak` (`func[2252]`) | unchanged: `f32x4.abs` 6, `v128.and` 6, `i32x4.sub` 6, `i32x4.lt_u` 6, `v128.bitselect` 10, `f32x4.lt` 4, `f32x4.pmax` 2, `loop` 4, no scalar `f32` op |
+
+### Mutations (recorded in `crates/graph/tests/MUTATIONS.md`)
+
+| # | mutation | result |
+|---|---|---|
+| S-7 | `BankWidth::Four => planes::<lane::Simd8>` | RED on G3's `Simd4` arm (GREEN on every committed gate in attempt 1) |
+| G-1 | `UnitObservation::of(unit.has_observers(), true)` | RED on G3's ALL control (`192` against `0`), as in attempt 1 |
+| O-1 | the `(true, true)` arm returns `Observed` | RED: G3 `one pass per cohort` (`0` against `192`); G4 (`0` against `8000`) |
+| O-2 | `observed()` becomes `matches!(self, Self::Observed)` | RED: G3 `every meter publishes every whole window` (`0` against `384`) |
+| L-A | attempt 1's separate `bool` restored | native check GREEN, wasm32 check RED on the const assertion |
+| L-B | `#[repr(u16)]` on `UnitObservation` | native check GREEN, wasm32 check RED on the const assertion |
+
+## Sol attempt 2 verdict: PASS
+
+Reviewer: Sol, attempt 2, 2026-09-27, on `20f79016` (code `921ccc48`, base `79601b8f`). Nothing was
+pushed. Every mutation, probe and throwaway test was applied in place and reverted; the tree is
+`20f79016` plus this section. Both attempt 1 findings are closed, and no attempt 1 gate regressed.
+
+### Findings, most severe first
+
+No blocking or required findings.
+
+1. **Info: the enum packing behaves exactly as the two flags did.** Before #943 there were three
+   production read sites, and each maps one to one:
+   - the constructor (`runtime.rs:2830`);
+   - `unit_inert`, #936's inert-unit predicate (`:2935`);
+   - `observe_unit`'s early return and the peak gate (`:3276-3283`).
+
+   `observe_active_unit` and the activation paths never read the flag. `of(h, a).observed() == h`,
+   and `of(h, a).sample_peak() == h && a == a`, because accepting the peak requires an observer. The
+   unreachable `(false, true)` input maps to `Unobserved`.
+   - O-1, O-2, O-3 (`sample_peak()` true for `Observed`) and S-7 are red. O-3 goes red on G3's ALL
+     control.
+   - O-4 (the inert predicate's `observed` term dropped) is green. It is an equivalent mutation:
+     the predicate also requires `op.observers.is_empty()`. This redundancy predates #943.
+2. **Info: the `const` assertion runs on wasm32 in CI.** It sits at module scope in production
+   code (`runtime.rs:2464`) with no `cfg`, so every build of `graph` evaluates it.
+   - The router classifies a `crates/graph` change as `route=full`.
+   - That route runs `qualification.yml`'s `artifact` job (`build-web-audioworklet.sh`, host-web
+     at `+simd128`) and its `wasm-guests` scalar build of host-web, and both compile `graph` for
+     `wasm32-unknown-unknown`.
+   - Probes on the real type: 20 bytes on wasm32 and 32 natively (both pass; 24 fails on both).
+   - Attempt 1's fifth `bool`, re-applied: `cargo check -p graph` is green natively, and the wasm32
+     check is red with "a UnitIdentity flag no longer fits the row's padding".
+3. **Info: the `Simd4` G3 discriminates the four-lane dispatch.**
+   - S-7 is red on G3's `Simd4` arm: "Simd4 between_render_calls false period 512: meter 6
+     window 0".
+   - Pinning four-lane cohorts through the pass count (24 blocks x 16 = 384) is adequate. The
+     dispatch is an explicit `Backend::Simd4`, which can only bind `BankWidth::Four` chains.
+     Frames and PCM are compared by bits, and the shape tuple must match across arms, which is
+     I3's claim.
+   - The `Simd4` plan's `[32, 64]` shape and its 60 redirects come from the existing compiler, and
+     the pass does not move them.
+
+### Re-verified
+
+- **Differential:** the throwaway `sol943_diff.rs` from attempt 1, re-run unchanged and deleted.
+  - It covers 4 seeds x 96 blocks; three sessions; `Simd8`, `Simd4` and `Scalar`; the concurrent,
+    between-render-calls and controlled deliveries; hostile input; and partial and collapsed banks.
+  - 4,533,495 snapshots and 104,832 handed peaks came out bit-identical. These are the same counts
+    as attempt 1.
+- **G3:** all 8 configurations and both controls pass. The table matches the evidence.
+- **Suites:** lane 56; builtins 114 and 114; rack 54; graph 118 and 125; graph-compiler 94;
+  builtins-compiler 79; host-core 225; host-web 206; console-workload 39; capi 36.
+- **Static checks:** fmt, workspace clippy `-D warnings` and rustdoc `-D warnings` pass, and so do
+  all eight policy scripts.
+- **Wasm:**
+  - The AudioWorklet build reproduces `0fe086b4...1014283b` (3,308,848 bytes).
+  - All four callgraph checks, `--kernel-min 11` and `--self-test` pass.
+  - The `bank_sample_peak` census is unchanged.
+  - `run-wasm-gates.sh` passes all three legs: 142 cases, 358 comparisons, no mismatches.
+- **Scope:** the diff is inside attempt 1's attempt-2 scope.
+
+The paired console benchmark row and the AudioWorklet repin remain batch-boundary work, as the brief
+says.

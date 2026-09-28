@@ -189,6 +189,21 @@ pub(crate) fn effect_control_resource(
             largest = largest.max(lane);
         }
     }
+    // Every entry that carries a control channel, keyed once (issue #962). Asking each bank member
+    // "does any entry match me and carry a control" by scanning every entry made this estimate
+    // quadratic in the effect count, and so in the track count on any session with a banked
+    // effect per track.
+    let controlled: BTreeSet<(&str, EffectRack, &str)> = effects
+        .iter()
+        .filter(|entry| entry.control.is_some())
+        .map(|entry| {
+            (
+                entry.track_id.as_str(),
+                entry.rack,
+                entry.effect_id.as_str(),
+            )
+        })
+        .collect();
     for bank in banks {
         let has_control = bank.members.iter().any(|member| {
             let rack = match member.rack {
@@ -196,12 +211,7 @@ pub(crate) fn effect_control_resource(
                 RackId::Dynamic => EffectRack::Dynamic,
                 RackId::Simd2 => EffectRack::Simd2,
             };
-            effects.iter().any(|entry| {
-                entry.control.is_some()
-                    && entry.track_id == member.track_id.as_str()
-                    && entry.rack == rack
-                    && entry.effect_id == member.effect_id.as_str()
-            })
+            controlled.contains(&(member.track_id.as_str(), rack, member.effect_id.as_str()))
         });
         if has_control {
             let lanes = u64::from(bank.scratch.width().lanes());

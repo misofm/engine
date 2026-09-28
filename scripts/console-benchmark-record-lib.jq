@@ -1,13 +1,15 @@
 # Shared definitions for the console qualification benchmark records.
 #
-# Seven record shapes share one stream. `console_session` is a workload rendered through a real
+# Eight record shapes share one stream. `console_session` is a workload rendered through a real
 # prepared plan; `console_hoist` is the paired-alternation comparison of the stationary-smoother
 # arms; `console_meters` and `console_observation` are the #163 item 0d paired arms of the console
 # observation facilities; `console_placement` is the #175 chain-shape row-pair; and
 # `console_automation` is the automation-active row -- one Point span per block on one track,
 # which is the only place in this stream a compressor's ramping body is executed at all; and
 # `console_mono` is the mono-collapse row-pair, whose two arms are one session in this tree and
-# whose digest equality is the gate the collapse will be constrained by when it lands.
+# whose digest equality is the gate the collapse will be constrained by when it lands; and
+# `console_mixing_automation` (#1003) is the mono console riding eight controls on eight tracks in
+# the shapes a real host pushes them.
 # `console_benchmark_record_valid_lib` dispatches on `.record`, so a record that claims one shape
 # and carries another's keys fails rather than being validated against the wrong table.
 def sha256: type == "string" and test("^[0-9a-f]{64}$");
@@ -18,6 +20,11 @@ def positive_integer: type == "number" and floor == . and . > 0;
 def metadata_names: ["background_load_note","candidate_commit","cpu_affinity","cpu_model","governor_or_power_mode","llvm_version","measurement_control","profile","rust_version","target_features","target_triple"];
 
 def session_keys: ["backend","background_load_note","candidate_commit","cpu_affinity","cpu_model","descriptive_only","fixture_id","governor_or_power_mode","input_signal","issue","llvm_version","max_ns_per_block","max_us_per_block","measurement_control","min_ns_per_block","min_us_per_block","missing_metadata","observations","os","output_sha256","p50_ns_per_block","p50_us_per_block","p50_us_per_block_per_track","p95_ns_per_block","p95_us_per_block","p99_ns_per_block","p99_us_per_block","percentile_method","profile","quantum_frames","record","render_errors","render_total_forbidden_operations","round","rust_version","sample_rate_hz","schema_version","source_feed","statistical_method","strip_content","strip_layout","synthetic_fixture","target_features","target_triple","tracks","units","workload_kind"];
+
+# #881: the metered console row's meter group, carried by that row alone. Every other session
+# row validates on `session_keys` exactly as before, so a standing row that grew the group, or the
+# metered row without it, matches neither shape.
+def metered_session_keys: ["bank_route_folds","bank_scatter_redirects","meter_dropped_snapshots","meter_metrics","meter_snapshots","meter_streams","meter_tap","meter_window_blocks"];
 
 def hoist_keys: ["arms","backend","background_load_note","bank_boundary","bit_identity","candidate_commit","cpu_affinity","cpu_model","descriptive_only","governor_or_power_mode","issue","llvm_version","measurement_control","missing_metadata","moving_output_sha256","moving_p50_ns","moving_p95_ns","moving_p99_ns","observations","os","paired_delta_median_ns","pairing","percentile_method","profile","quiet_output_sha256","quiet_p50_ns","quiet_p99_ns","record","restated_output_sha256","restated_p50_ns","restated_p95_ns","restated_p99_ns","round","rust_version","schema_version","statistical_method","target_features","target_triple","tracks","units","workload_kind"];
 
@@ -32,6 +39,8 @@ def mono_keys: ["arm_difference","arms","backend","background_load_note","bit_id
 def observation_keys: ["absent_output_sha256","absent_p50_ns","absent_p95_ns","absent_p99_ns","armed_output_sha256","armed_p50_ns","armed_p95_ns","armed_p99_ns","armed_windows_published","arms","backend","background_load_note","bit_identity","candidate_commit","cpu_affinity","cpu_model","descriptive_only","governor_or_power_mode","issue","llvm_version","measurement_control","missing_metadata","observation_lanes","observation_taps","observation_window_blocks","observations","os","paired_arm_delta_median_ns","paired_capacity_delta_median_ns","pairing","percentile_method","profile","record","render_errors","render_total_forbidden_operations","round","rust_version","schema_version","statistical_method","target_features","target_triple","tracks","unarmed_output_sha256","unarmed_p50_ns","unarmed_p95_ns","unarmed_p99_ns","unarmed_windows_published","units","workload_kind"];
 
 def automation_keys: ["arms","automated_channel","automated_effect","automated_effect_id","automated_output_sha256","automated_p50_ns","automated_p95_ns","automated_p99_ns","automated_parameter","automated_parameter_index","automated_pushes_accepted","automated_track_id","automation_spans_per_block","backend","background_load_note","bit_identity","candidate_commit","cpu_affinity","cpu_model","descriptive_only","fixture_id","governor_or_power_mode","input_signal","issue","llvm_version","measurement_control","missing_metadata","observations","os","paired_control_delta_median_ns","paired_ramp_delta_median_ns","paired_ramp_delta_median_ns_per_track","pairing","percentile_method","profile","quantum_frames","quiet_output_sha256","quiet_p50_ns","quiet_p95_ns","quiet_p99_ns","record","render_errors","render_total_forbidden_operations","restated_output_sha256","restated_p50_ns","restated_p95_ns","restated_p99_ns","restated_pushes_accepted","round","rust_version","sample_rate_hz","schema_version","smoothing_samples","statistical_method","strip_content","strip_layout","synthetic_fixture","target_features","target_triple","tracks","units","workload_kind"];
+
+def mixing_automation_keys: ["arms","automated_bank_collapse_counters","automated_controls","automated_output_sha256","automated_p50_ns","automated_p95_ns","automated_p99_ns","automated_pushes_accepted","backend","background_load_note","bit_identity","candidate_commit","cpu_affinity","cpu_model","descriptive_only","fixture_id","governor_or_power_mode","input_signal","issue","llvm_version","measurement_control","missing_metadata","observations","os","owner_edits_per_block","paired_collapse_delta_median_ns","paired_ramp_delta_median_ns","pairing","parameter_records_per_block","percentile_method","preflight_bank_collapse_counters","preflight_blocks","preflight_output_sha256","preroll_blocks","profile","quantum_frames","quiet_bank_collapse_counters","quiet_output_sha256","quiet_p50_ns","quiet_p95_ns","quiet_p99_ns","record","render_errors","render_total_forbidden_operations","restated_bank_collapse_counters","restated_output_sha256","restated_p50_ns","restated_p95_ns","restated_p99_ns","restated_pushes_accepted","round","rust_version","sample_rate_hz","schema_version","smoothing_samples","statistical_method","strip_content","strip_layout","synthetic_fixture","target_features","target_triple","tracks","units","workload_kind"];
 
 # ---------------------------------------------------------------------------------------------
 # Issue #184: floor accounting. Additive, and additive means additive.
@@ -56,15 +65,14 @@ def builtins_lane_ops: 69;
 # elided, not executed, so the identity row's arithmetic is the 69 with both 24-op SVF sections
 # replaced by the single `add(+0.0)` a run of identity sections composes to:
 # 7 sanitise + 1 identity add + 4 boundary + 2 fader + 4 pan + 3 route + 1 reduction.
+# It is the floor of the whole table (#956). Its last two lines, the route's `mix2x2` (3) and the
+# output node's reduction amortised per track (1), are the routing component every row pays to
+# reach the master; no row is costed at them alone, because the builtins-less plumbing row that was
+# measured a plan no host compiles and was retired.
 def builtins_identity_lane_ops: 22;
-# The overhead floor: what a lane-sample pays with *no builtins prepared at all*. The route's
-# `mix2x2` is one `mul` and one deliberately unfused `fma` per channel (3), and the output node's
-# 64-input reduction amortises to 1 per track. Both are already lines of the two builtins
-# inventories above, which is what makes `gain_pan_only - plumbing_only` an exact 18 rather than an
-# estimate. Job 3's route fold moved neither: folding relocates the same `mix2x2_block` and the
-# same 63 adds into the cohort chain's epilogue, in the order `route_fold` proves at bind.
-def plumbing_lane_ops: 3 + 1;
-def eq_lane_ops: 53;
+# The EQ at the standing fixture's one live section: a select-free depth-one pass (24) and the
+# 4.4 boundary scan (3). #976 dropped the identity padding section that used to run beside it.
+def eq_lane_ops: 27;
 # Current-lowering recount (#368): max/min are one lane-op on x86 and wasm; the shared stereo
 # link contributes a fractional half-op per channel sample. exp2_int_in_range is two operations
 # after #367. These are inventories, not runtime measurements.
@@ -112,27 +120,17 @@ def floor_pins:
       [$bi, 1, "none", floor_document + "builtins, identity"],
     # The other row that composes the identity inventory. One basis string for both identity rows
     # is deliberate -- a real fader and pan cost what an identity fader and pan cost, because
-    # neither kernel has an identity arm, and that claim is what the shared inventory states.
-    #
-    # It names **no control**, and the plumbing row below is deliberately not one. The inventories
-    # subtract (22 - 4 = 18, the scaffolding) but the rows do not: this row binds eight bank chains
-    # so job 3's route fold fires, the plumbing row binds none so it pays 64 dispatched route ops
-    # and an unfolded reduction, and the difference between them is the fold's saving as well as
-    # the plumbing's arithmetic. The ruling records the measured evidence.
+    # neither kernel has an identity arm, and that claim is what the shared inventory states. It
+    # names no control.
     "sixty_four_track_gain_pan_only":
       [$bi, 1, "none", floor_document + "builtins, identity"],
-    # The floor of the whole table. Nothing in this stream can be costed below it: a row that
-    # renders sixty-four tracks into one master pays a route matrix and its share of the master
-    # reduction whatever else it does or does not prepare. Its own `percent_of_floor` is the
-    # interesting number -- unfolded plumbing against four lane-ops -- and it is nobody's control.
-    "sixty_four_track_plumbing_only":
-      [plumbing_lane_ops, 1, "none", floor_document + "plumbing"],
-    # Its driver-fed twin (#928): the same session with its track inputs claimed by a prepared
-    # source set. Moving a frozen block into the graph is a copy, not a lane-op, whichever feed does
-    # it, so the inventory is the plumbing row's -- equal to the floor, not below it -- and like the
-    # plumbing row it names no control.
-    "sixty_four_track_plumbing_ring":
-      [plumbing_lane_ops, 1, "none", floor_document + "plumbing"],
+    # Its driver-fed twin (#928, re-based onto the gain/pan session by #956) and the native
+    # pure-path target: the same session with its track inputs claimed by a prepared source set.
+    # Moving a frozen block into the graph is a copy, not a lane-op, whichever feed does it, so the
+    # inventory is the gain/pan row's -- the floor of the table, not below it -- and like its twin
+    # it names no control.
+    "sixty_four_track_gain_pan_ring":
+      [$bi, 1, "none", floor_document + "builtins, identity"],
     # The three mono rows carry the whole intended strip, so they carry its inventory. Their
     # fixture differs from the standing one in per-channel values only -- one source channel
     # instead of two, and the left channel's designed words on both sides -- and a floor is an
@@ -142,7 +140,12 @@ def floor_pins:
     "sixty_four_track_console_mono_dual":
       [$becl, 1, "none", floor_document + "builtins+eq+compressor+limiter"],
     "sixty_four_track_console_half_mono":
-      [$becl, 1, "none", floor_document + "builtins+eq+compressor+limiter"]
+      [$becl, 1, "none", floor_document + "builtins+eq+compressor+limiter"],
+    # The metered console row (#881). Its strip is the standing console's, but its meters are
+    # arithmetic no ruling has inventoried, so it states no floor rather than the unmetered strip's,
+    # and names no control rather than isolating the meters against a floor nobody derived.
+    "sixty_four_track_console_metered":
+      [null, 1, "none", "not_derived"]
   };
 
 # Absolute agreement to the precision the subject prints (three decimals), with a little slack for
@@ -182,9 +185,10 @@ def floor_shape:
    end);
 
 
-# The seventeen session workloads, sorted: `WORKLOADS`'s sixteen (append-only, in emission order)
-# and the driver-fed plumbing row the bench emits after them (#928, `DRIVER_FED_WORKLOADS`).
-def session_kinds: ["nine_track_baseline","nine_track_ragged_strip","one_twenty_eight_track_stretch","sixty_four_track_builtins_only","sixty_four_track_compressor_only","sixty_four_track_console","sixty_four_track_console_half_mono","sixty_four_track_console_legacy","sixty_four_track_console_mono","sixty_four_track_console_mono_dual","sixty_four_track_dispatch_only","sixty_four_track_eq_comp_simd1","sixty_four_track_eq_only","sixty_four_track_gain_pan_only","sixty_four_track_idle","sixty_four_track_plumbing_only","sixty_four_track_plumbing_ring"];
+# The seventeen session workloads, sorted: `WORKLOADS`'s fifteen (append-only, in emission order),
+# the driver-fed gain/pan row the bench emits after them (#928 and #956, `DRIVER_FED_WORKLOADS`)
+# and the metered console row it emits last (#881, `METERED_WORKLOADS`).
+def session_kinds: ["nine_track_baseline","nine_track_ragged_strip","one_twenty_eight_track_stretch","sixty_four_track_builtins_only","sixty_four_track_compressor_only","sixty_four_track_console","sixty_four_track_console_half_mono","sixty_four_track_console_legacy","sixty_four_track_console_metered","sixty_four_track_console_mono","sixty_four_track_console_mono_dual","sixty_four_track_dispatch_only","sixty_four_track_eq_comp_simd1","sixty_four_track_eq_only","sixty_four_track_gain_pan_only","sixty_four_track_gain_pan_ring","sixty_four_track_idle"];
 
 # #928: how a session row's track inputs reach the graph. `bound` is a `FrozenGraphSource`
 # processor per track input, dispatched once per track per block; `played_planes` is a prepared
@@ -194,10 +198,35 @@ def session_kinds: ["nine_track_baseline","nine_track_ragged_strip","one_twenty_
 # or the reverse, would attribute the feed's cost to the wrong row. The field is required on every
 # session record, so a record from before it existed is refused; the driver-fed row's digest
 # partner is pinned by the aggregate.
-def driver_fed_kinds: ["sixty_four_track_plumbing_ring"];
+def driver_fed_kinds: ["sixty_four_track_gain_pan_ring"];
 def session_source_feed:
   .workload_kind as $kind |
   .source_feed == (if any(driver_fed_kinds[]; . == $kind) then "played_planes" else "bound" end);
+
+# #881: the rows prepared with the default web boot's meter set -- one `SAMPLE_PEAK` meter at
+# `PostMatrix` per track, a twelve-block window, bound as permanent observers -- and the key sets a
+# session record of each kind must carry exactly.
+def metered_kinds: ["sixty_four_track_console_metered"];
+def session_metered: .workload_kind as $kind | any(metered_kinds[]; . == $kind);
+def session_row_keys: if session_metered then (session_keys + metered_session_keys) | sort else session_keys end;
+def session_row_floor_keys: (session_row_keys + floor_keys) | sort;
+
+# The metered row's meter group. The meter set is pinned field by field, because a row that metered
+# another tap, another metric set or another window would publish a cost the browser does not pay
+# under the name of the one it does. The count is exact: every stream is drained after every
+# block, so each of the `observations` timed blocks that closes a window yields one snapshot per
+# stream, and a stream that dropped one or published off its cadence changes the count. The fold
+# and redirect counters are the #914 pair, which the digest cannot see: every route of the console
+# folds whether or not a post-matrix meter reads it (#885). The redirect count is the metered plan's
+# own; no record in the run shares its delivery, so none is its baseline (see the aggregate).
+def metered_session_shape:
+  .meter_streams == .tracks and .meter_tap == "post_matrix" and
+  .meter_metrics == "sample_peak" and .meter_window_blocks == 12 and
+  (.meter_snapshots | positive_integer) and
+  .meter_snapshots == .meter_streams * ((.observations / .meter_window_blocks) | floor) and
+  .meter_dropped_snapshots == 0 and
+  ([.bank_route_folds,.bank_scatter_redirects] | all(nonnegative_integer)) and
+  .bank_route_folds == .tracks;
 
 # The standing qualification fixture (#175): the intended production layout, EQ and compressor as
 # one two-slot chain on `simd1` and a true-peak limiter on `simd2`.
@@ -232,6 +261,16 @@ def session_kind_shape:
     .strip_layout == "simd1:eq+compressor,simd2:limiter" and .input_signal == "tone" and
     .fixture_id == console_fixture
   elif .workload_kind == "sixty_four_track_console" then
+    .tracks == 64 and .synthetic_fixture == false and
+    .strip_content == "eq+compressor+limiter" and
+    .strip_layout == "simd1:eq+compressor,simd2:limiter" and .input_signal == "tone" and
+    .fixture_id == console_fixture
+  # The metered console row (#881) is that session as written, prepared as the default web boot
+  # prepares it: meters, and the between-render-calls delivery that fuses each cohort's fader and
+  # matrix into one stage. Neither is strip content -- a meter observes, and the fused stage computes
+  # the split pair's arithmetic -- so it states the standing row's six facts, and its meter group
+  # says what else it prepared.
+  elif .workload_kind == "sixty_four_track_console_metered" then
     .tracks == 64 and .synthetic_fixture == false and
     .strip_content == "eq+compressor+limiter" and
     .strip_layout == "simd1:eq+compressor,simd2:limiter" and .input_signal == "tone" and
@@ -283,19 +322,12 @@ def session_kind_shape:
     .tracks == 64 and .synthetic_fixture == true and
     .strip_content == "gain+pan" and .strip_layout == "builtins" and .input_signal == "tone" and
     .fixture_id == console_fixture
-  # The overhead floor row. `plumbing` is a third layout word, not an empty `builtins` one: the
-  # difference between this row and the `builtins` rows -- that no builtin binding exists at all --
-  # is exactly what the row measures, so a record that called it `builtins` would be naming the
-  # thing it is defined by not having.
-  elif .workload_kind == "sixty_four_track_plumbing_only" then
+  # Its driver-fed twin (#928, re-based by #956) states the same six facts: one session, fed two
+  # ways. What separates the two records is `source_feed`, pinned by `session_source_feed`, and
+  # nothing else.
+  elif .workload_kind == "sixty_four_track_gain_pan_ring" then
     .tracks == 64 and .synthetic_fixture == true and
-    .strip_content == "plumbing" and .strip_layout == "plumbing" and .input_signal == "tone" and
-    .fixture_id == console_fixture
-  # Its driver-fed twin (#928) states the same six facts: one session, fed two ways. What separates
-  # the two records is `source_feed`, pinned by `session_source_feed`, and nothing else.
-  elif .workload_kind == "sixty_four_track_plumbing_ring" then
-    .tracks == 64 and .synthetic_fixture == true and
-    .strip_content == "plumbing" and .strip_layout == "plumbing" and .input_signal == "tone" and
+    .strip_content == "gain+pan" and .strip_layout == "builtins" and .input_signal == "tone" and
     .fixture_id == console_fixture
   # The mono row-pair, as session rows. Both render the mono fixture exactly as it is checked in,
   # so both are `synthetic_fixture == false`: they are two rows of one session, which is the
@@ -377,6 +409,8 @@ def placement_statistical_method:
   "two arms alternated per observation; nearest-rank percentiles over per-block nanoseconds; paired delta is merged_chain minus split_chains per observation; descriptive only; no threshold";
 def automation_statistical_method:
   "three arms alternated per observation; nearest-rank percentiles over per-block nanoseconds; ramp delta is automated minus restated and control delta is restated minus quiet, per observation; descriptive only; no threshold";
+def mixing_automation_statistical_method:
+  "three arms alternated per observation; nearest-rank percentiles over per-block nanoseconds; ramp delta is automated minus restated and collapse delta is restated minus quiet, per observation; descriptive only; no threshold";
 def mono_statistical_method:
   "two arms alternated per observation; nearest-rank percentiles over per-block nanoseconds; paired delta is collapse_forced_off minus collapse_eligible per observation; descriptive only; no threshold";
 def observation_statistical_method:
@@ -394,7 +428,7 @@ def common_shape:
   honest_metadata and admissibility;
 
 def session_record_valid:
-  ((keys | sort) == session_keys or (keys | sort) == session_floor_keys) and
+  ((keys | sort) == session_row_keys or (keys | sort) == session_row_floor_keys) and
   .record == "console_session" and common_shape and
   # The method is pinned verbatim. A record that changed how it was measured but kept the old
   # sentence would be the most expensive kind of quiet drift, so the sentence is part of the shape.
@@ -407,7 +441,8 @@ def session_record_valid:
   ([.min_us_per_block,.p50_us_per_block,.p95_us_per_block,.p99_us_per_block,.max_us_per_block,.p50_us_per_block_per_track] | all(type == "number" and . > 0)) and
   (.output_sha256 | sha256) and
   .render_errors == 0 and .render_total_forbidden_operations == 0 and
-  (if (keys | sort) == session_floor_keys then floor_shape else true end);
+  (if session_metered then metered_session_shape else true end) and
+  (if (keys | sort) == session_row_floor_keys then floor_shape else true end);
 
 def hoist_record_valid:
   (keys | sort) == hoist_keys and
@@ -647,6 +682,101 @@ def mono_record_valid:
   .arm_difference == "collapse_eligible takes the mono collapse on every cohort; collapse_forced_off renders the same fixture dual" and
   .render_errors == 0 and .render_total_forbidden_operations == 0;
 
+# The mixing-automation row (#1003): the mono console riding eight controls on eight tracks.
+#
+# The row's controls are its workload, so they are pinned control by control: which track, which
+# slot, which parameter, the step, and the lowering each one is pushed in. The lowering is the
+# claim VERIFY-AUTOMATION F2 turned on -- the EQ goes as one owner edit on `Both`, which keeps a
+# mono cohort's collapse, and the compressor and the limiter as a Left and a Right record -- so a
+# record that pushed the EQ as two one-channel edits measured a loss the product does not have and
+# is refused. The bases are not pinned here: they are the fixture's held values, read from the
+# model. The digest equality below shows the row restated a held value only where restating another
+# value would move bits -- the EQ gains and the compressor thresholds. Neither limiter engages near
+# its held ceiling, so a ceiling restated off it renders the same bits and passes every rule here;
+# `restated_pushes_exactly_the_held_bases` in `tools/console-workload/tests/automation.rs` is what
+# pins the restated value of all eight controls to their bases (#1011). Each ride must move: its
+# two values straddle the base.
+def mixing_automation_controls:
+  [["ch00","eq","miso.parametric-eq","band-1-gain",3,"owner_both",0.25],
+   ["ch08","comp","miso.compressor","threshold",0,"left_then_right",0.5],
+   ["ch16","limiter","miso.true-peak-limiter","ceiling",0,"left_then_right",8],
+   ["ch24","eq","miso.parametric-eq","band-1-gain",3,"owner_both",0.25],
+   ["ch32","comp","miso.compressor","threshold",0,"left_then_right",0.5],
+   ["ch40","limiter","miso.true-peak-limiter","ceiling",0,"left_then_right",8],
+   ["ch48","eq","miso.parametric-eq","band-1-gain",3,"owner_both",0.25],
+   ["ch56","comp","miso.compressor","threshold",0,"left_then_right",0.5]];
+def mixing_automation_preflight_arms:
+  ["quiet","restated","automated","automated_eq_only","automated_compressor_only","automated_limiter_only","restated_eq_only"];
+def collapse_counters: type == "array" and length == 2 and all(nonnegative_integer) and .[1] > 0;
+
+# Three claims beyond the controls, each one a statement the digests or the timings cannot make.
+#
+# The digests: `quiet == restated` is the collapse's own class-A statement -- a restating record
+# may retire a cohort's collapse, and the dual bank renders the collapsed bank's bits -- and
+# `restated != automated` is the honesty half. The preflight repeats both and adds that each effect
+# moves bits on its own (VERIFY-AUTOMATION A3, F6): a whole-mix inequality could be carried by the
+# EQ alone while the limiter's ramps moved nothing.
+#
+# The collapse counters: the quiet arm collapses every cohort on every block it rendered, or the
+# row is not measuring a collapse at all; no arm collapses more than quiet; and the EQ-only
+# restated preflight arm collapses exactly what quiet does (A6), which is what pins the harness to
+# the SDK's `Both` shape. The restated and automated arms' counters are stated, not pinned: they
+# are what the automation fixes move.
+#
+# The pushes: every block of both pushing arms, every record accepted.
+def mixing_automation_record_valid:
+  (keys | sort) == mixing_automation_keys and
+  .record == "console_mixing_automation" and common_shape and
+  .statistical_method == mixing_automation_statistical_method and
+  .workload_kind == "sixty_four_track_console_mono_mixing_automation" and
+  # The mono session row's six pinned facts, verbatim from `session_kind_shape`.
+  .tracks == 64 and .synthetic_fixture == false and
+  .strip_content == "eq+compressor+limiter" and
+  .strip_layout == "simd1:eq+compressor,simd2:limiter" and .input_signal == "tone" and
+  .fixture_id == mono_console_fixture and
+  .sample_rate_hz == 48000 and .quantum_frames == 128 and
+  .pairing == "alternating_per_observation" and
+  .arms == ["quiet","restated","automated"] and
+  .preroll_blocks == 64 and
+  (.automated_controls | type == "array" and
+    map([.track_id,.slot_id,.effect,.parameter,.parameter_index,.lowering,.step])
+      == mixing_automation_controls and
+    all(.[]; ([.base,.even_value,.odd_value] | all(type == "number")) and
+             .even_value > .base and .base > .odd_value)) and
+  .owner_edits_per_block == ([.automated_controls[] | select(.lowering == "owner_both")] | length) and
+  .parameter_records_per_block
+    == 2 * ([.automated_controls[] | select(.lowering == "left_then_right")] | length) and
+  .smoothing_samples == 64 and
+  .restated_pushes_accepted == .observations * (.owner_edits_per_block + .parameter_records_per_block) and
+  .automated_pushes_accepted == .restated_pushes_accepted and
+  .units == "ns_per_block" and
+  ([.quiet_p50_ns,.quiet_p95_ns,.quiet_p99_ns,.restated_p50_ns,.restated_p95_ns,.restated_p99_ns,.automated_p50_ns,.automated_p95_ns,.automated_p99_ns] | all(positive_integer)) and
+  ordered_percentiles([.quiet_p50_ns,.quiet_p95_ns,.quiet_p99_ns]) and
+  ordered_percentiles([.restated_p50_ns,.restated_p95_ns,.restated_p99_ns]) and
+  ordered_percentiles([.automated_p50_ns,.automated_p95_ns,.automated_p99_ns]) and
+  ([.paired_ramp_delta_median_ns,.paired_collapse_delta_median_ns] | all(type == "number" and floor == .)) and
+  ([.quiet_bank_collapse_counters,.restated_bank_collapse_counters,.automated_bank_collapse_counters] | all(collapse_counters)) and
+  ([.quiet_bank_collapse_counters,.restated_bank_collapse_counters,.automated_bank_collapse_counters] | map(.[1]) | unique | length == 1) and
+  .quiet_bank_collapse_counters[0] == .quiet_bank_collapse_counters[1] * (.preroll_blocks + .observations) and
+  .restated_bank_collapse_counters[0] <= .quiet_bank_collapse_counters[0] and
+  .automated_bank_collapse_counters[0] <= .quiet_bank_collapse_counters[0] and
+  ([.quiet_output_sha256,.restated_output_sha256,.automated_output_sha256] | all(sha256)) and
+  .quiet_output_sha256 == .restated_output_sha256 and
+  .restated_output_sha256 != .automated_output_sha256 and
+  .bit_identity == "quiet == restated, asserted in-run" and
+  .preflight_blocks == .preroll_blocks + 64 and
+  (.preflight_output_sha256 | type == "object" and (keys_unsorted == mixing_automation_preflight_arms) and
+    all(.[]; sha256) and
+    .quiet == .restated and .restated_eq_only == .restated and
+    .automated != .restated and .automated_eq_only != .restated and
+    .automated_compressor_only != .restated and .automated_limiter_only != .restated) and
+  (.preflight_bank_collapse_counters | type == "object" and
+    (keys_unsorted == mixing_automation_preflight_arms) and all(.[]; collapse_counters)) and
+  .preflight_bank_collapse_counters.quiet[0]
+    == .preflight_bank_collapse_counters.quiet[1] * .preflight_blocks and
+  .preflight_bank_collapse_counters.restated_eq_only == .preflight_bank_collapse_counters.quiet and
+  .render_errors == 0 and .render_total_forbidden_operations == 0;
+
 def console_benchmark_record_valid_lib:
   type == "object" and (.record | type == "string") and
   (if .record == "console_session" then session_record_valid
@@ -656,4 +786,5 @@ def console_benchmark_record_valid_lib:
    elif .record == "console_placement" then placement_record_valid
    elif .record == "console_automation" then automation_record_valid
    elif .record == "console_mono" then mono_record_valid
+   elif .record == "console_mixing_automation" then mixing_automation_record_valid
    else false end);

@@ -1,0 +1,131 @@
+// Scan WAV stems: are the two channels bit-identical (dual mono), per file and per block?
+// Read-only over the input files. Research tool, not engine code.
+use std::fs;
+
+fn u16le(b: &[u8], o: usize) -> u16 {
+    u16::from_le_bytes([b[o], b[o + 1]])
+}
+fn u32le(b: &[u8], o: usize) -> u32 {
+    u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
+}
+
+fn main() {
+    let block: usize = std::env::var("BLOCK")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(128);
+    println!("file\tch\tbits\trate\tframes\tidentical\tdiff_frames\tmax_abs_diff_lsb\tneg_identical\tl_silent\tr_silent\tblocks\tblocks_eq\tblocks_silent\tblocks_eq_active\tfirst_diff_frame\tlast_diff_frame\tside_over_mid_db\tscan_ms_identical_check");
+    for path in std::env::args().skip(1) {
+        let b = fs::read(&path).expect("read");
+        assert!(&b[0..4] == b"RIFF" && &b[8..12] == b"WAVE", "not wave {path}");
+        let mut o = 12;
+        let (mut ch, mut bits, mut rate, mut fmt_tag) = (0usize, 0usize, 0u32, 0u16);
+        let mut data: &[u8] = &[];
+        while o + 8 <= b.len() {
+            let id = &b[o..o + 4];
+            let len = u32le(&b, o + 4) as usize;
+            let body = &b[o + 8..(o + 8 + len).min(b.len())];
+            if id == b"fmt " {
+                fmt_tag = u16le(body, 0);
+                ch = u16le(body, 2) as usize;
+                rate = u32le(body, 4);
+                bits = u16le(body, 14) as usize;
+            } else if id == b"data" {
+                data = body;
+            }
+            o += 8 + len + (len & 1);
+        }
+        let name = path.rsplit('/').next().unwrap();
+        assert!(fmt_tag == 1 || fmt_tag == 0xFFFE, "fmt {fmt_tag}");
+        let bps = bits / 8;
+        let fb = bps * ch;
+        let frames = data.len() / fb;
+        if ch != 2 {
+            println!("{name}\t{ch}\t{bits}\t{rate}\t{frames}\tmono-file");
+            continue;
+        }
+        // The cheap import-time check: a byte comparison of the two channels' sample words,
+        // stopping at the first difference. This is what a decoder worker would run.
+        let t0 = std::time::Instant::now();
+        let mut identical_fast = true;
+        for i in 0..frames {
+            let s = &data[i * fb..i * fb + fb];
+            if s[..bps] != s[bps..] {
+                identical_fast = false;
+                break;
+            }
+        }
+        let fast_ms = t0.elapsed().as_secs_f64() * 1e3;
+        let dec = |s: &[u8]| -> i64 {
+            match bps {
+                2 => i64::from(i16::from_le_bytes([s[0], s[1]])),
+                3 => i64::from(
+                    ((i32::from(s[2]) << 24) | (i32::from(s[1]) << 16) | (i32::from(s[0]) << 8))
+                        >> 8,
+                ),
+                4 => i64::from(i32::from_le_bytes([s[0], s[1], s[2], s[3]])),
+                _ => panic!("bps"),
+            }
+        };
+        let (mut diff, mut maxd, mut neg_ok, mut lsil, mut rsil) = (0u64, 0i64, true, true, true);
+        let (mut blocks, mut beq, mut bsil, mut beqa) = (0u64, 0u64, 0u64, 0u64);
+        let (mut first, mut last) = (u64::MAX, 0u64);
+        let (mut side2, mut mid2) = (0f64, 0f64);
+        let mut f = 0usize;
+        while f < frames {
+            let end = (f + block).min(frames);
+            let (mut eq, mut sil) = (true, true);
+            for i in f..end {
+                let s = &data[i * fb..i * fb + fb];
+                let l = dec(&s[..bps]);
+                let r = dec(&s[bps..]);
+                if l != r {
+                    eq = false;
+                    diff += 1;
+                    if first == u64::MAX {
+                        first = i as u64;
+                    }
+                    last = i as u64;
+                    maxd = maxd.max((l - r).abs());
+                }
+                if l != -r {
+                    neg_ok = false;
+                }
+                if l != 0 {
+                    lsil = false;
+                    sil = false;
+                }
+                if r != 0 {
+                    rsil = false;
+                    sil = false;
+                }
+                let (lf, rf) = (l as f64, r as f64);
+                side2 += (lf - rf) * (lf - rf);
+                mid2 += (lf + rf) * (lf + rf);
+            }
+            blocks += 1;
+            if eq {
+                beq += 1;
+            }
+            if sil {
+                bsil += 1;
+            }
+            if eq && !sil {
+                beqa += 1;
+            }
+            f = end;
+        }
+        assert_eq!(identical_fast, diff == 0);
+        let ratio_db = if mid2 > 0.0 {
+            10.0 * (side2 / mid2).log10()
+        } else {
+            f64::NAN
+        };
+        let fdf = if first == u64::MAX { -1i64 } else { first as i64 };
+        println!(
+            "{name}\t{ch}\t{bits}\t{rate}\t{frames}\t{}\t{diff}\t{maxd}\t{}\t{lsil}\t{rsil}\t{blocks}\t{beq}\t{bsil}\t{beqa}\t{fdf}\t{last}\t{ratio_db:.1}\t{fast_ms:.2}",
+            diff == 0,
+            neg_ok && !lsil
+        );
+    }
+}

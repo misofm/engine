@@ -298,3 +298,176 @@ Red mutations run against it, each reverted after it was seen to fail:
 
 The third is the phase-3 twin of the `svf_block` reassociation mutation above: it is the one that
 proves the gate is an identity and not a tolerance.
+
+## Issue #944 — the select-free settled matrix kernel
+
+`matrix2x2_block_without_identity` is `matrix2x2_block`'s second arm with no `L::select` in the
+body. Gate 1, `select_free_matrix_matches_the_select_form_when_no_lane_is_identity`
+(`tests/fader_matrix.rs`), holds it equal to `matrix2x2_block` with no identity lane over the four
+hostile families, frame counts `[1, 3, 8, 9, 128]`, guard words included, at `f32`, `Simd4` and
+`Simd8`, in dev and in release. NaN words compare as "both NaN" (amendment 1): in the release
+build LLVM commutes the right-output sum differently in the two kernels, and x86 keeps the first
+operand's payload. With that clause removed from the comparator the release run is red at
+`width=4 frames=1 family=3: R[3] new=7fc00000 old=7fc01234` while dev stays green -- which is why
+the clause exists and why the gate runs in both profiles.
+
+Command form: `cargo test -p lane --test fader_matrix select_free` (and with `--release`).
+
+| # | mutation | gate | observed |
+| --- | --- | --- | --- |
+| M3 | swap `c.lr` and `c.rl` in `matrix2x2_block_without_identity` | gate 1, dev and release | FAILED, `width=1 frames=1 family=0: L[1] new=bfc00000 old=c04c0000` |
+
+The same mutation is red in `builtins` (gate 3) and `console-workload` (gate 4); those rows, and
+M1, M2 and M4, are in `crates/builtins/tests/MUTATIONS.md`.
+
+## Issue #943 — the banked sample-peak kernel
+
+`meter_sample_peak_block` (`src/kernels/builtins.rs`) is gate G1's subject:
+`tests/meter_peak.rs` holds `Simd8` and `Simd4` against the kernel at `Lane = f32` over the
+de-interleaved lane and against the builtin meter's own serial loop, over 64 carried blocks at frames
+1, 2, 3, 127, 128 and 129, plus an invalid-only lane and a bit sweep of every exponent's boundary
+mantissas. The same mutations were run against gate G2 (`crates/builtins/tests/MUTATIONS.md`) and
+against the wasm-gate corpus case `meter_sample_peak_block/hostile` (case 55), whose native leg
+compares every width with the pin taken from the scalar `Lane` oracle. Each row was applied alone
+as an exact-text replacement (match count one) to `1975fc44` plus the evidence commit's final G2,
+run in dev (the corpus in release), and restored. Host AMD EPYC 7313P, rustc 1.97.1, pin `+avx2,+fma`.
+
+| # | mutation | G1 `meter_peak` | corpus `g5_native_digests_match_pins` |
+| --- | --- | --- | --- |
+| L-1 | `a.ge(low)` becomes `a.ge(L::zero())` (admits subnormals) | RED, 3 of 4: `width 8 frames 1 block 0 lane 3: the vector kernel against the meter's serial loop` (`1` against `0`); the invalid-only lane `frames 127 lane 1` (`8388607` against `0`); the sweep at input `0x00000001` | RED at case 55, every width |
+| L-2 | drop the `a.lt(high)` term: `L::select(a.ge(low), a, L::zero())` (admits infinity) | RED, 3 of 4: `width 8 frames 1 block 6 lane 4` (`2139095040`, `+inf`, against `2^1`); `frames 3 lane 1` (`+inf` against `0`); the sweep at `0x7f800000` | RED at case 55 |
+| L-green | `L::max(c, peak)` becomes `L::max(peak, c)` | GREEN, 4 of 4 | GREEN |
+
+L-green is the expected-green row: on the sanitized domain `{+0.0} ∪ [MIN_POSITIVE, MAX]` the D8
+select form is commutative by bits, so the operand order is free.
+`g1_select_max_is_order_free_only_on_the_sanitized_domain` witnesses that argument directly, and
+also that it fails off the domain (`max(+0, -0)` and `max(1, NaN)` depend on the order).
+
+## Issue #949 — the `f64` lane vocabulary
+
+`src/f64_lane.rs` adds `LaneF64` and `Widen`. Gates 1 to 3 are `tests/f64_lane.rs`; gate 4 is the
+`f64_lane_mismatches` count that `tools/wasm-gates` reads on its native, scalar-wasm and
+simd128-wasm legs; gate 5 is `check_f64_lane_lowering` in `scripts/run-wasm-gates.sh`. Each row was
+applied alone as an exact-text replacement (match count one per site) on top of the attempt-1 tree,
+run, and restored by copying the saved original back (`cmp` clean). Gates 1 to 3 were run in dev
+(`cargo test --locked -p lane --test f64_lane`); gate 4 on all three legs with the same build
+commands as `scripts/run-wasm-gates.sh`; gate 5 by running that script. Host AMD EPYC 7313P,
+rustc 1.97.1, pin `+avx2,+fma`, wasmtime 47.0.3.
+
+| # | mutation | gates 1-3 (`f64_lane`, dev) | gate 4 (`f64_lane_mismatches`) | gate 5 |
+| --- | --- | --- | --- | --- |
+| F-1 | `Widen for f32x8` puts lanes 4..8 first: `[a[4], a[5], a[6], a[7], a[0], a[1], a[2], a[3]].map(f64::from)` | RED: gate 1 `widen at Simd8 over the directed pool and sparse sweep` (`522496` against `0`); gate 3 `square witness at Simd8` (`100096`) | RED: `81676` on native, scalar wasm and simd128 wasm | green (the probe is `Simd4`) |
+| F-2 | both vector `widen`s map a subnormal input to `+0.0`: `map(\|x\| if x.is_subnormal() { 0.0 } else { f64::from(x) })` | RED: gate 1 `widen at Simd4 …` (`1047`); gate 3 `square witness at Simd4` (`369`) | RED: `518` on every leg, which is exactly the subnormal rows of the widen set (255 sparse patterns plus 4 pool entries, at the two vector widths) | green |
+| F-3 | vector `add` becomes `(self + b) + <$simd>::splat(0.0)` | RED: gate 2 `add/mul at Simd4 over the pool` (`4`: the `-0.0 + -0.0` pair at four rotations); the random pairs stay green | RED: `2` on every leg (`-0.0 + -0.0` at `Simd4` and `Simd8`) | green |
+| F-4 | the guest probe widens through a `black_box`ed scalar loop (`*value = black_box(f64::from(x))`, then `LaneF64::load`) | not applicable | green, `0` on every leg (the values are the same) | RED: `the f64 lane probe is not vectorised on the simd128 leg: f64x2.promote_low_f32x4=0 f64x2.mul=2 f64x2.add=2 f64.promote_f32=4 f64.mul=0 f64.add=0` |
+| F-green | vector `add` becomes `b + self` | GREEN, 8 of 8, dev and release | GREEN, `0` on every leg | green |
+
+F-green is the recorded expected-green row: IEEE addition is commutative bit for bit off NaN, and a
+NaN result is compared only as "is a NaN", so the operand order is free.
+
+Under F-1, F-2 and F-3 every one of the 358 corpus digest comparisons still matched its pin on all
+three legs. Nothing in production calls the new surface, so the frozen corpus cannot see a defect in
+it; the count exists beside the digests for the same reason `minmax_lowering_mismatches` does.
+
+## Issue #954 — the select-free fused fader/matrix kernel
+
+`fader_matrix_block_without_identity` is `fader_matrix_block`'s second arm with no `L::select` in
+the body. Gate 1, `select_free_fused_fader_matrix_matches_both_oracles_when_no_lane_is_identity`
+(`tests/fader_matrix.rs`), holds it equal to two oracles with no identity lane: oracle A is
+`fader_matrix_block` with an all-false mask, oracle B is `gain_mute_block` on each plane followed by
+`matrix2x2_block_without_identity`. It covers five input families (the four hostile ones and an
+overflow family that a gain of up to `15.85` drives to infinity), three gain sets (mixed; unity and
+zero; large), three mute sets (none, mixed, all), frame counts `[1, 3, 8, 9, 128]`, guard words
+included, at `f32`, `Simd4` and `Simd8`, in dev and in release, with a negative control over a mixed
+identity mask. NaN words compare as "both NaN" (amendment 4). Release reports
+`[[30, 0], [456, 0], [894, 0]]` NaN-payload differences `[oracle A, oracle B]` at
+`[f32, Simd4, Simd8]` and no other difference; dev reports none.
+
+Each row was applied alone as an exact-text replacement (match count one) to `ab9bdbd9`, run in dev
+and release, and restored with `git checkout`. Command form:
+`cargo test --locked -p lane --test fader_matrix select_free_fused` (and with `--release`).
+Host AMD EPYC 7313P, rustc 1.97.1, pin `+avx2,+fma`.
+
+| # | mutation | gate | observed |
+| --- | --- | --- | --- |
+| M3 | swap `matrix.lr` and `matrix.rl` in `fader_matrix_block_without_identity` | gate 1, dev and release | FAILED, `width=1 frames=1 family=0 gains=0 mutes=0: oracle A L[1] new=c0250000 old=c0688000` |
+
+The same mutation is red in `builtins` (the scenario gates), `builtins-compiler`
+(`composite_live_sequence_…`) and `console-workload` (the metered row); those rows, and M1, M2 and
+M5, are in `crates/builtins/tests/MUTATIONS.md`.
+
+## Issue #950 — the full meter block pass
+
+`src/kernels/builtins.rs` adds `meter_block` and `MeterBlock`. Gate M1 is `tests/meter_block.rs`
+(`Simd8`, `Simd4` and `f32` against the `f32` kernel over the de-interleaved lane and an
+independent scalar `ALL` oracle, 64 carried blocks at frames 1, 2, 3, 127, 128 and 129, hostile and
+tone input, random positive seeds; the bit sweep of the count boundaries; and the witness that a
+zero-seeded partial plus the seed is a different sum). The wasm count is
+`wasm_gate_corpus::meter_block_mismatches`, run by `tools/wasm-gates` on its native, scalar-wasm and
+simd128-wasm legs, and the lowering pin is `check_f64_lane_lowering`'s census of
+`miso_gate_meter_block_probe` in `scripts/run-wasm-gates.sh`. Each row was applied alone as an
+exact-text replacement (match count one) to `326607ce`, run, and restored with `git checkout`.
+M1 in dev; the count through `cargo run --release -p wasm-gates -- --native` (and, for K-6, both
+guest legs built with `run-wasm-gates.sh`'s commands); the pin by running that script. Host AMD EPYC
+7313P, rustc 1.97.1, pin `+avx2,+fma`, wasmtime 47.0.3.
+
+| # | mutation | M1 (`meter_block`, dev) | `meter_block_mismatches` | lowering pin |
+| --- | --- | --- | --- | --- |
+| K-1 | the energy starts from `+0.0` and the seed is added once after the loop (`seed.add(partial)`), the class-B form | RED, 2 of 3: `width 8 Hostile frames 2 block 2 lane 7: energy against the meter's serial loop` (`...022` against `...021`, one ulp); the reassociation witness (the two forms now agree) | RED, `686` on the native leg | not run |
+| K-5 | the sanitized count adds `1.0 & !(a >= MIN_POSITIVE & a < INFINITY)`, which also counts both zeros | RED, 2 of 3: `width 8 Hostile frames 1 block 4 lane 5: sanitized against the meter's serial loop` (`1` against `0`); the bit sweep | RED, `1315` native | not run |
+| K-6 | clipped counts `c > 1.0` | RED, 2 of 3: `width 8 Hostile frames 1 block 3 lane 3: clipped against the meter's serial loop` (`0` against `1`); the bit sweep | RED, `662` on native, wasm scalar and wasm simd128 | not run |
+| M-W | the kernel widens through a `black_box`ed scalar `f64::from` per lane, then `LaneF64::load` | not run (same values) | GREEN, `0` on every leg | RED: `miso_gate_meter_block_probe is not vectorised on the simd128 leg: f64x2.promote_low_f32x4=0 ... f64.promote_f32=4`; the #949 `miso_gate_f64_lane_probe` census stays green, so the new probe is the only pin on the production kernel's lowering |
+
+K-1, K-5 and K-6 are also red on gate M2 (`crates/builtins/tests/MUTATIONS.md`), and K-1 on gate M3
+(`crates/graph/tests/MUTATIONS.md`). All 358 corpus digest comparisons stay green under every row:
+the frozen digests do not run the new kernel.
+
+## Issue #978 — the skewed (software-pipelined) cascade
+
+`src/kernels.rs` adds `svf_cascade_skewed` and `svf_cascade_skewed_with_dry_masks` (one body,
+`svf_cascade_skewed_impl`). Gate 1 is `g2_skewed_cascade_equals_the_interleaved_cascade`
+(`tests/g2_kernel_identity.rs`): `f32`, `Simd4` and `Simd8`, one and two streams, depths 1 to 3,
+masked and select-free, frames 1, 2, 3, 128 and 1,024, the G2 signals plus a hostile family, 40
+carried blocks, outputs and integrators against `svf_cascade_interleaved[_with_dry_masks]` ("both
+NaN, or equal bits"), guard words, under `CanonicalFpEnv`. Driver: one mutation at a time as an
+exact-text replacement (match count one) in `src/kernels.rs`, then
+`cargo test --release -p lane --test g2_kernel_identity --no-fail-fast`, restored byte for byte.
+Host AMD EPYC 7313P, rustc 1.97.1, `x86-64-v3`.
+
+| # | mutation | gate 1 | result |
+|---|---|---|---|
+| 978-M1 | the steady state visits the sections `0..D` ascending, so section 0 overwrites the carry section 1 was about to read | `Scalar S=1 D=2 masked=false frames=2 noise: block 0, stream 0, word 8: 0xbd32fd2c != interleaved 0x3d2f6ceb` | RED |
+| 978-M2 | section `D - 1` stores to frame `i` instead of `i - (D - 1)` | the epilogue's store runs off the block (`range end index 3 out of range for slice of length 2`, `S=1 D=2 frames=2`) | RED |
+| 978-M2b | the same, clamped to the block's last frame so nothing panics | `Scalar S=1 D=2 masked=false frames=2 noise: block 0, stream 0, word 8: 0x3f7a5c00 != interleaved 0x3d2f6ceb` | RED |
+| 978-M3 | the epilogue deleted | `Scalar S=1 D=2 masked=false frames=2 noise: block 0, stream 0, word 9: 0xbf187800 != interleaved 0xbd57c751` (the last frame is never written) | RED |
+
+Each is red at its first case, the scalar two-section cascade over two frames, which is the
+shortest shape with a prologue, a steady state and an epilogue; the clamped M2b is added so the
+corruption is shown on the bit comparison as well as on the bounds check.
+
+## Issue #999 — the bounded cascade (the §4.4 verdict folded into the store)
+
+`src/kernels.rs` adds `svf_cascade_interleaved_bounded` and
+`svf_cascade_interleaved_with_dry_masks_bounded`: the interleaved body with a `StoreBound` observer
+that folds the verdict per stream as each word is stored (attempt 1: `ok = ok AND (|y| < limit)` into
+a vector mask; attempt 2: `failed |= mask_any(NOT (|y| < limit))` into a `bool`, so V8 keeps it in a
+general-purpose register). Gate 1 is
+`g2_bounded_cascade_is_the_cascade_and_judges_what_it_stores` (`tests/g2_kernel_identity.rs`):
+`f32`, `Simd4` and `Simd8`, one and two streams, depths 1 and 2, masked and select-free, the G2
+coefficients and the identity words, limits `1e30`, `1.0` and infinity, frames 1, 2, 3 and 128, 24
+carried blocks of the hostile family with edge words (the bound and its neighbours, both
+infinities, `NaN`, `-0.0`); outputs and integrators against the unbounded kernel ("both NaN, or
+equal bits"), each stream's verdict against `check_block`'s fold over what it stored. Driver: one
+mutation at a time as an exact-text replacement in `src/kernels.rs` of a scratch copy, then
+`cargo test --release -p lane --test g2_kernel_identity g2_bounded`, restored between rows. Host AMD
+EPYC 7313P, rustc 1.97.1, `x86-64-v3`. The same rows are also red on the EQ's gates
+(`crates/parametric-eq/tests/MUTATIONS.md`, issue #999).
+
+| # | mutation | gate 1 | result |
+|---|---|---|---|
+| 999-M1 | the fold ignores the second stream (`observe` updates stream 0 only; attempt 1 `within[0]`, attempt 2 `failed[0]`) | `Scalar S=2 D=1 identity=false masked=false limit=1e30 frames=1: block 2, stream 1: the folded verdict is not the scan of the stored words` (`true` against `false`) | RED |
+| 999-M2 | the fold compares with `<=` (`y.abs().le(limit)`) | `Scalar S=1 D=1 identity=false masked=true limit=1e30 frames=1: block 0, stream 0: the folded verdict is not the scan of the stored words` (a dry lane stored `1e30` exactly) | RED |
+
+Re-run on attempt 2 (the `bool` fold), each alone in a scratch copy, release: 999-M1 and 999-M2 red on
+gate 1 at the same first case and message as above, and on the EQ gates as recorded in
+`crates/parametric-eq/tests/MUTATIONS.md`.

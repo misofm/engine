@@ -62,11 +62,13 @@ const OPS_PER_CYCLE: f64 = 3.7;
 ///
 /// `docs/rulings/effect-floor-accounting.md`, "Compressor inventory".
 const COMPRESSOR_LANE_OPS: f64 = 81.5;
-/// Required arithmetic per lane-sample, parametric-EQ masked stationary cascade, at the standing
-/// fixture's effective two-section count.
+/// Required arithmetic per lane-sample, parametric-EQ stationary cascade, at the standing fixture's
+/// one live section: a select-free depth-one pass (`svf_step` 19 + output mix 5) and the 4.4
+/// boundary scan (3). Issue #976 dropped the identity padding section the depth-two pass used to
+/// run beside it.
 ///
 /// `docs/rulings/effect-floor-accounting.md`, "EQ inventory".
-const EQ_LANE_OPS: f64 = 53.0;
+const EQ_LANE_OPS: f64 = 27.0;
 /// Required arithmetic per lane-sample, true-peak limiter, post-round-1 uniform-cohort shape.
 ///
 /// `docs/rulings/effect-floor-accounting.md`, "Limiter inventory".
@@ -77,39 +79,6 @@ const LIMITER_LANE_OPS: f64 = 129.5;
 /// `docs/rulings/effect-floor-accounting.md`, "Builtins inventory".
 const BUILTINS_LANE_OPS: f64 = 69.0;
 
-/// Required arithmetic per lane-sample, the session's own route matrix.
-///
-/// `mix2x2_block` writes each output channel as one `mul` plus one deliberately unfused `fma`: six
-/// operations per frame, and a frame is two lane-samples. `docs/rulings/effect-floor-accounting.md`
-/// counts it as the "route `mix2x2`" line of the builtins inventory, and it is spelled separately
-/// here because the plumbing row is the builtins inventory *minus* everything but this and the
-/// reduction.
-const ROUTE_LANE_OPS: f64 = 3.0;
-/// Required arithmetic per lane-sample, the output node's reduction, amortised per track.
-///
-/// Sixty-four contributors summed is sixty-three adds, which is 0.984 adds per track; the ruling
-/// states it as 1, and the strip round's job 3 did not move it. The fold relocated the summation
-/// into the cohort chain's epilogue -- the first contributor stores and the rest accumulate --
-/// which is the same sixty-three adds over the same summands in the same order, by construction
-/// (`route_fold` proves the order at bind). A fold is a dispatch and buffer saving, not an
-/// arithmetic one, exactly as job 2's banking was.
-const REDUCTION_LANE_OPS: f64 = 1.0;
-
-/// Required arithmetic per lane-sample when **no builtins are prepared at all**.
-///
-/// The overhead floor row. `sixty_four_track_dispatch_only` is not this: an identity strip still
-/// pays the D7 sanitise and boundary passes, the fader's multiply and mask clear, and the pan
-/// matrix's per-lane select -- 22 lane-ops the spec requires of every block. What is left when the
-/// input stage, the fader and the matrix are not *bound* is the session's own route and the master
-/// reduction, and nothing else: the track stages lower to elided aliases, so a lane-sample passes
-/// from the source binding to the route with no arithmetic in between.
-///
-/// Both terms are already lines of [`BUILTINS_LANE_OPS`] and [`BUILTINS_IDENTITY_LANE_OPS`], which
-/// is what makes `gain_pan_only - plumbing_only` an exact subtraction rather than an estimate: it
-/// is 22 - 4 = 18, the sanitise, the collapsed identity section, the boundary scan, the fader and
-/// the pan matrix.
-const PLUMBING_LANE_OPS: f64 = ROUTE_LANE_OPS + REDUCTION_LANE_OPS;
-
 /// Required arithmetic per lane-sample when every builtin section is the prepared identity.
 ///
 /// The two rack-free rows no longer share a floor. A section whose prepared design is the exact
@@ -118,10 +87,18 @@ const PLUMBING_LANE_OPS: f64 = ROUTE_LANE_OPS + REDUCTION_LANE_OPS;
 /// arithmetic of the `dispatch_only` row is the 69 with both 24-op sections replaced by that single
 /// add: 7 sanitise + 1 identity add + 4 boundary scan + 2 fader + 4 pan + 3 route + 1 reduction.
 ///
-/// The fader and the pan matrix stay at their full cost even though this row asks both for their
-/// identity: a 0 dB fader is still a multiply and a mask clear, and a settled identity matrix still
-/// evaluates both arms of its per-lane select. Only the input sections have a prepared-identity
-/// rewrite; `docs/rulings/effect-floor-accounting.md`, "Builtins inventory".
+/// The fader and the pan matrix stay at their full cost: a 0 dB fader is still a multiply and a
+/// mask clear, and the row's pan (hard right on both inputs, not the identity; see the workload's
+/// doc) is a settled matrix with no identity lane, which since #944 takes the select-free arm. The
+/// pan is still counted at 4 lane-ops here; it is recounted with the prepared-identity elision
+/// successor of #944, not before. Only the input sections have a prepared-identity rewrite;
+/// `docs/rulings/effect-floor-accounting.md`, "Builtins inventory".
+///
+/// It is the floor of the whole table (issue #956). Its last two lines, the route's `mix2x2` (3)
+/// and the output node's reduction amortised per track (1), are the routing component every row
+/// pays to reach the master; no row is costed at them alone, because the only row that was, the
+/// builtins-less `sixty_four_track_plumbing_only`, measured a plan no host compiles and was
+/// retired. `docs/rulings/effect-floor-accounting.md`, "Routing component".
 const BUILTINS_IDENTITY_LANE_OPS: f64 = 22.0;
 
 /// The width penalty of a ragged track count, as a multiple of the full-bank floor.
@@ -159,10 +136,16 @@ impl FloorRow {
 /// fixture (`fixtures/session/v1/parametric-eq-nine-track.json`), whose band count and builtins
 /// were never inventoried, and a floor stated for the wrong fixture would be worse than no floor
 /// at all. The record says so: its `floor_basis` is `not_derived` and its floor columns are null.
+///
+/// `sixty_four_track_console_metered` (issue #881) is absent for the same reason. Its strip is the
+/// standing console's, but its meters are arithmetic the rulings have never inventoried, and
+/// costing it at the unmetered strip's floor would publish the meters' cost as a gap in the
+/// strip's. It names no control either: a subtraction against the standing row would be an
+/// isolate of the meters against a floor nobody derived.
 pub(crate) fn floor_row(workload: Workload) -> Option<FloorRow> {
     let full = 1.0_f64;
     Some(match workload {
-        Workload::NineTrackBaseline => return None,
+        Workload::NineTrackBaseline | Workload::SixtyFourTrackConsoleMetered => return None,
         Workload::NineTrackRaggedStrip => FloorRow {
             lane_ops: BUILTINS_LANE_OPS + EQ_LANE_OPS + COMPRESSOR_LANE_OPS + LIMITER_LANE_OPS,
             width_factor: RAGGED_NINE_TRACK_WIDTH_FACTOR,
@@ -233,52 +216,33 @@ pub(crate) fn floor_row(workload: Workload) -> Option<FloorRow> {
         // sanitisation, one identity add, the boundary scan, the fader, the pan and the routing.
         // The two rows that share the identity inventory, and share it on purpose. `gain_pan_only`
         // asks for the fixture's real fader trims and pan positions where `dispatch_only` asks for
-        // 0 dB and hard identity, and the inventory does not move -- because `gain_mute_block` has
-        // no identity arm and `matrix2x2_block` evaluates both arms of its per-lane select
-        // unconditionally. One basis string for both is the claim: a gap between the two rows'
-        // measurements would mean one of those two kernels had grown a data-dependent path.
+        // 0 dB and a pan of `left = right = 1.0`, and the inventory does not move. `gain_mute_block`
+        // has no identity arm. The settled matrix has had one data-dependent path since issue #944
+        // -- a bank with no identity lane skips the per-lane identity select -- but neither row
+        // has an identity lane: `dispatch_only`'s pan routes both inputs hard right, which is not
+        // the identity matrix, so both rows take the same select-free arm. One basis string for
+        // both is the claim: a gap between the two rows' measurements would mean one of those two
+        // kernels had grown another data-dependent path.
         Workload::SixtyFourTrackDispatchOnly => FloorRow {
             lane_ops: BUILTINS_IDENTITY_LANE_OPS,
             width_factor: full,
             control: None,
             basis: "docs/rulings/effect-floor-accounting.md: builtins, identity",
         },
-        Workload::SixtyFourTrackGainPanOnly => FloorRow {
+        // The driver-fed twin (issue #928, re-based onto this session by #956) is the same session
+        // with its track inputs claimed by a prepared source set, so it requires the same
+        // arithmetic: moving a frozen block into the graph is a copy, not a lane-op, whichever feed
+        // does it, and the production feed does not even copy -- each claim is gathered in place.
+        // Both rows are costed at the identity inventory, the floor of the table, and neither names
+        // a control nor is anybody's: a subtraction between the two feeds would publish the bound
+        // feed's copies as an isolate against a floor that has no copy in it. The driver-fed row
+        // is the native pure-path target, so its own `percent_of_floor` is the number the
+        // pure-path work reads.
+        Workload::SixtyFourTrackGainPanOnly | Workload::SixtyFourTrackGainPanRing => FloorRow {
             lane_ops: BUILTINS_IDENTITY_LANE_OPS,
             width_factor: full,
-            // **No control, and the plumbing row is deliberately not one.** The inventories do
-            // subtract -- 22 - 4 is the sanitise, the collapsed identity section, the boundary
-            // scan, the fader and the pan -- but the *rows* do not, because they realise different
-            // plumbing. This row binds eight bank chains, so job 3's route fold fires and its route
-            // and reduction cost almost nothing; the plumbing row binds none, so it pays 64
-            // individually dispatched route ops and an unfolded reduction. Subtracting the second
-            // from the first removes the fold's saving as well as the plumbing's arithmetic, and
-            // the result comes in *below* the 18-lane-op floor it is supposed to be measured
-            // against -- which is the floor table saying, correctly, that the subtraction is not
-            // the quantity it names. See the ruling's "why these two rows are not a control pair".
             control: None,
             basis: "docs/rulings/effect-floor-accounting.md: builtins, identity",
-        },
-        // The floor of the whole stream. Nothing in this table is cheaper, and nothing can be: a
-        // row that renders sixty-four tracks into one master pays a route and a share of the
-        // reduction whatever else it does or does not prepare.
-        //
-        // It has no control and is nobody's control. What its own `percent_of_floor` reports is the
-        // most interesting number the row carries: it is the *unfolded* plumbing -- 64 dispatched
-        // route ops and a reduction over 64 separate buffers -- against the four lane-ops that
-        // plumbing requires, so it is the worst standing in the table by a wide margin and that
-        // gap is the dispatch job 3's fold removed from every banked row.
-        //
-        // The driver-fed twin (issue #928) is the same session with its track inputs claimed by
-        // a prepared source set, so it requires the same arithmetic: moving a frozen block into
-        // the graph is a copy, not a lane-op, whichever feed does it. It is costed at this
-        // inventory, equal to the floor rather than below it, and it too names no control and is
-        // nobody's control -- the floor-of-the-table test stays anchored on the bound row.
-        Workload::SixtyFourTrackPlumbingOnly | Workload::SixtyFourTrackPlumbingRing => FloorRow {
-            lane_ops: PLUMBING_LANE_OPS,
-            width_factor: full,
-            control: None,
-            basis: "docs/rulings/effect-floor-accounting.md: plumbing",
         },
     })
 }
@@ -382,19 +346,14 @@ mod tests {
 
     use super::{
         BANK_WIDTH, BUILTINS_IDENTITY_LANE_OPS, COMPRESSOR_LANE_OPS, EQ_LANE_OPS, LIMITER_LANE_OPS,
-        OPS_PER_CYCLE, PLUMBING_LANE_OPS, floor_row, lane_samples_per_block,
+        OPS_PER_CYCLE, floor_row, lane_samples_per_block,
     };
-    use console_workload::{DRIVER_FED_WORKLOADS, WORKLOADS, Workload};
-
-    /// Every session row the bench emits: [`WORKLOADS`], then the driver-fed rows.
-    fn session_rows() -> impl Iterator<Item = Workload> {
-        WORKLOADS.into_iter().chain(DRIVER_FED_WORKLOADS)
-    }
+    use console_workload::{Workload, native_session_rows};
 
     fn rust_floor_table() -> String {
         let mut keys = BTreeSet::new();
         let mut table = String::from("{");
-        for (index, workload) in session_rows().enumerate() {
+        for (index, workload) in native_session_rows().enumerate() {
             let key = workload.kind();
             assert!(keys.insert(key), "duplicate floor workload key: {key}");
             if index != 0 {
@@ -417,7 +376,10 @@ mod tests {
                     table.push('"');
                 }
                 None => {
-                    assert!(matches!(workload, Workload::NineTrackBaseline));
+                    assert!(matches!(
+                        workload,
+                        Workload::NineTrackBaseline | Workload::SixtyFourTrackConsoleMetered
+                    ));
                     table.push_str("null,1,\"none\",\"not_derived\"");
                 }
             }
@@ -507,9 +469,12 @@ input as $rust |
 
     #[test]
     fn every_derived_row_names_its_ruling_and_composes_a_positive_floor() {
-        for workload in session_rows() {
+        for workload in native_session_rows() {
             let Some(row) = floor_row(workload) else {
-                assert!(matches!(workload, Workload::NineTrackBaseline));
+                assert!(matches!(
+                    workload,
+                    Workload::NineTrackBaseline | Workload::SixtyFourTrackConsoleMetered
+                ));
                 continue;
             };
             assert!(
@@ -524,7 +489,7 @@ input as $rust |
 
     #[test]
     fn a_control_row_is_always_cheaper_than_the_row_it_isolates() {
-        for workload in session_rows() {
+        for workload in native_session_rows() {
             let Some(row) = floor_row(workload) else {
                 continue;
             };
@@ -540,96 +505,76 @@ input as $rust |
         }
     }
 
-    /// The overhead *inventories* subtract to 18 lane-ops, and neither row claims that as an
-    /// isolate.
+    /// The identity inventory is the floor of the whole table, and the rows that share it share it
+    /// exactly (issue #956).
     ///
-    /// Both halves are the assertion. The arithmetic difference between the identity strip and the
-    /// bare plumbing is exactly the sanitise (7), the collapsed identity section (1), the boundary
-    /// scan (4), the fader (2) and the pan (4) -- so the two inventories are consistent with each
-    /// other and with the ruling. But the two *rows* are not a control pair, because they realise
-    /// different plumbing: a banked row's route and reduction fold into its chain's epilogue and an
-    /// unbanked row's do not. `floor_control_row` on both is `none`, and this test is what keeps a
-    /// future edit from quietly turning an inventory identity into a measured isolate.
+    /// Both halves matter. If some row were ever costed below the identity inventory, this table
+    /// would be claiming a session can render with less than the arithmetic the D7 policy, the
+    /// fader, the pan and the routing require of every block; and if `gain_pan_only` ever stopped
+    /// matching `dispatch_only`, the claim that a 0 dB fader and the row's settled pan cost what
+    /// real trims and pans cost would have been quietly abandoned in the table rather than argued
+    /// in the ruling. The builtins-less plumbing row that used to anchor the first half was
+    /// retired, because no host compiles such a plan; the identity inventory took its place.
     #[test]
-    fn the_overhead_inventories_differ_by_the_scaffolding_and_neither_row_claims_an_isolate() {
-        let expected =
-            (BUILTINS_IDENTITY_LANE_OPS - PLUMBING_LANE_OPS) / (BANK_WIDTH * OPS_PER_CYCLE);
-        assert!((expected - 18.0 / (BANK_WIDTH * OPS_PER_CYCLE)).abs() < 1.0e-9);
-        for workload in [
-            Workload::SixtyFourTrackGainPanOnly,
-            Workload::SixtyFourTrackPlumbingOnly,
-        ] {
-            let row = floor_row(workload).expect("a derived row");
-            assert!(
-                row.control.is_none(),
-                "{}: the unbanked plumbing row is not a control for a banked row",
-                workload.kind()
-            );
-        }
-    }
-
-    /// The plumbing row is the floor of the whole table, and the two rows that share the identity
-    /// inventory share it exactly.
-    ///
-    /// Both halves matter. If some row were ever costed below the route and the reduction it must
-    /// pay to reach the master at all, this table would be claiming a session can render for less
-    /// than it can be summed; and if `gain_pan_only` ever stopped matching `dispatch_only`, the
-    /// claim that a 0 dB fader and a settled identity matrix cost what a real one costs would have
-    /// been quietly abandoned in the table rather than argued in the ruling.
-    #[test]
-    fn the_plumbing_row_is_the_floor_of_the_table_and_the_identity_pair_shares_one_inventory() {
-        let plumbing = floor_row(Workload::SixtyFourTrackPlumbingOnly).expect("a derived row");
-        for workload in session_rows() {
+    fn the_identity_inventory_is_the_floor_of_the_table_and_the_identity_pair_shares_it() {
+        let identity = floor_row(Workload::SixtyFourTrackDispatchOnly).expect("a derived row");
+        for workload in native_session_rows() {
             let Some(row) = floor_row(workload) else {
                 continue;
             };
             assert!(
-                row.cycles_per_lane_sample() >= plumbing.cycles_per_lane_sample(),
-                "{} is costed below the route and reduction every row must pay",
+                row.cycles_per_lane_sample() >= identity.cycles_per_lane_sample(),
+                "{} is costed below the identity inventory every row must pay",
                 workload.kind()
             );
         }
-        let identity = floor_row(Workload::SixtyFourTrackDispatchOnly).expect("a derived row");
         let gain_pan = floor_row(Workload::SixtyFourTrackGainPanOnly).expect("a derived row");
         assert_eq!(identity.basis, gain_pan.basis);
         assert!(
             (identity.cycles_per_lane_sample() - gain_pan.cycles_per_lane_sample()).abs() < 1.0e-9
         );
-    }
-
-    /// The driver-fed plumbing row (issue #928) is costed at the plumbing inventory exactly, and it
-    /// isolates nothing.
-    ///
-    /// Equal to the floor, never below it: the floor-of-the-table test above holds with `>=`, and
-    /// this pins that the second row at that inventory is the plumbing row's arithmetic restated
-    /// -- same basis, same cycles -- rather than a new, cheaper inventory. And like the plumbing
-    /// row it names no control and nothing names it: a feed change is not an arithmetic change, so
-    /// a subtraction between the two feeds would publish a copy's cost as an isolate against a
-    /// floor that has no copy in it.
-    #[test]
-    fn the_driver_fed_plumbing_row_is_costed_at_the_plumbing_floor_and_isolates_nothing() {
-        let plumbing = floor_row(Workload::SixtyFourTrackPlumbingOnly).expect("a derived row");
-        let ring = floor_row(Workload::SixtyFourTrackPlumbingRing).expect("a derived row");
-        assert_eq!(ring.basis, plumbing.basis);
-        assert_eq!(
-            ring.basis,
-            "docs/rulings/effect-floor-accounting.md: plumbing"
-        );
         assert!(
-            (ring.cycles_per_lane_sample() - plumbing.cycles_per_lane_sample()).abs() < 1.0e-12
-        );
-        assert!(
-            (ring.cycles_per_lane_sample() - PLUMBING_LANE_OPS / (BANK_WIDTH * OPS_PER_CYCLE))
+            (identity.cycles_per_lane_sample()
+                - BUILTINS_IDENTITY_LANE_OPS / (BANK_WIDTH * OPS_PER_CYCLE))
                 .abs()
                 < 1.0e-12
         );
-        assert!(ring.control.is_none());
-        for workload in session_rows() {
+    }
+
+    /// The driver-fed gain/pan row (issues #928 and #956) is costed at the identity inventory
+    /// exactly, and it isolates nothing.
+    ///
+    /// Equal to its bound twin's floor, never below it: the floor-of-the-table test above holds
+    /// with `>=`, and this pins that the second row at that inventory is the gain/pan row's
+    /// arithmetic restated -- same basis, same cycles -- rather than a new, cheaper inventory. And
+    /// like its twin it names no control and nothing names either of them: a feed change is not
+    /// an arithmetic change, so a subtraction between the two feeds would publish the bound feed's
+    /// copies as an isolate against a floor that has no copy in it.
+    #[test]
+    fn the_driver_fed_gain_pan_row_is_costed_at_the_identity_inventory_and_isolates_nothing() {
+        let gain_pan = floor_row(Workload::SixtyFourTrackGainPanOnly).expect("a derived row");
+        let ring = floor_row(Workload::SixtyFourTrackGainPanRing).expect("a derived row");
+        assert_eq!(ring.basis, gain_pan.basis);
+        assert_eq!(
+            ring.basis,
+            "docs/rulings/effect-floor-accounting.md: builtins, identity"
+        );
+        assert!(
+            (ring.cycles_per_lane_sample() - gain_pan.cycles_per_lane_sample()).abs() < 1.0e-12
+        );
+        assert!(
+            (ring.cycles_per_lane_sample()
+                - BUILTINS_IDENTITY_LANE_OPS / (BANK_WIDTH * OPS_PER_CYCLE))
+                .abs()
+                < 1.0e-12
+        );
+        assert!(ring.control.is_none() && gain_pan.control.is_none());
+        for workload in native_session_rows() {
             let control = floor_row(workload).and_then(|row| row.control);
             assert!(
-                control != Some(Workload::SixtyFourTrackPlumbingRing)
-                    && control != Some(Workload::SixtyFourTrackPlumbingOnly),
-                "{} isolates against a plumbing row",
+                control != Some(Workload::SixtyFourTrackGainPanRing)
+                    && control != Some(Workload::SixtyFourTrackGainPanOnly),
+                "{} isolates against a gain/pan row",
                 workload.kind()
             );
         }
@@ -674,9 +619,9 @@ input as $rust |
         // compressor inventory. The limiter's shared link has the same accounting shape.
         assert_eq!(COMPRESSOR_LANE_OPS, 81.5);
         assert_eq!(LIMITER_LANE_OPS, 129.5);
-        assert_eq!(EQ_LANE_OPS, 53.0);
+        assert_eq!(EQ_LANE_OPS, 27.0);
         let console = floor_row(Workload::SixtyFourTrackConsole).expect("derived console row");
-        let expected = (69.0 + 53.0 + 81.5 + 129.5) / (BANK_WIDTH * OPS_PER_CYCLE);
+        let expected = (69.0 + 27.0 + 81.5 + 129.5) / (BANK_WIDTH * OPS_PER_CYCLE);
         assert!((console.cycles_per_lane_sample() - expected).abs() < 1.0e-12);
         let compressor = floor_row(Workload::SixtyFourTrackCompressorOnly).expect("compressor");
         let builtins = floor_row(Workload::SixtyFourTrackBuiltinsOnly).expect("builtins");

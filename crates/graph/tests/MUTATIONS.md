@@ -291,6 +291,10 @@ comparison, not the mode table, is what the row proves red.
 
 ## Issue #926 — in-place routes fused into the Output reduction in pairs
 
+**Retired (issue #957).** The Output route fold, its kernels and its tests were deleted: only a plan
+with no bank at all reached them, and no shipped host builds one. None of these mutations can be
+expressed any more. The rows stay as the record of what the gates proved while the code existed.
+
 Issue #920 designed this fold and never landed (its merge was reverted, `b04e044b`); #926 re-applied
 its eligibility, retire path, table, seam and tests unchanged (`da4a3f44`) and replaced its kernel
 (`67649092`). So every row below ran on the #926 tree, #920's rows included: rows 926-1 to 926-5
@@ -306,7 +310,8 @@ restored with `git checkout` before the next row. Host: `x86_64` (`.cargo/config
 - "Gate 1" is `runtime::tests::an_output_route_fold_is_the_route_ops_and_the_reduction_bit_for_bit`,
   which also carries gate 2's declining shapes.
 - "The tail test" is `runtime::tests::a_route_tail_refuses_a_run_as_long_as_the_widest_lane`.
-- "The console gate" is console-workload `chain_shape::the_plumbing_rows_output_fold_is_the_route_ops_own_bits`.
+- "The console gate" is console-workload `chain_shape::the_plumbing_rows_output_fold_is_the_route_ops_own_bits`
+  (deleted with the plumbing rows by issue #956; retired).
 - "The graph suite" is `cargo test -p graph --features test-support` (lib 104, rt1 1, rt9 8, rt10 1).
 - "The artifact gate" is gate 6: the simd128 AudioWorklet module built with
   `scripts/build-web-audioworklet.sh`'s own cargo invocation and flags (its digest is the script's
@@ -341,13 +346,21 @@ result column gives that second run's failure. For 926-12, the second run also d
 
 ## Issue #925 — identity-bound builtin stages of a builtins-less plan lower as aliases
 
+**Retired (issue #958).** The alias arm -- `is_builtin_stage`, `program::lower`'s `bindable`
+parameter and the `listed` clause of the elision predicate -- was reverted once issue #959 had
+deleted the builtins-less compile entry, the only producer of a plan that left a builtin stage out
+of `required_bindings`. Gate 1 and gate 2's graph half were deleted with it, and gate 2's
+graph-compiler half pins only the with-builtins shape since issue #964. The code these rows mutate
+no longer exists. The rows stay as the record of what the gates proved while it did.
+
 Each row was applied alone to `0973b805`, the three suites below were run with `--no-fail-fast`,
 and the file was restored with `git checkout`. Suites: `cargo test -p graph --lib` (103 tests),
 `cargo test -p graph-compiler --lib` (73), `cargo test -p console-workload --test chain_shape` (23).
 Gate 1 is `tests::identity_bound_builtin_stages_alias_without_moving_a_bit`; gate 2 is
 `program::tests::unlisted_builtin_stages_lower_as_aliases` with graph-compiler
 `builtins_replace_only_the_three_internal_track_bindings`; gate 3 is console-workload
-`the_plumbing_row_is_input_route_output_and_renders_the_base_bits`.
+`the_plumbing_row_is_input_route_output_and_renders_the_base_bits` (deleted with the plumbing rows
+by issue #956; retired).
 
 | # | mutation | file | test | result |
 |---|---|---|---|---|
@@ -358,6 +371,13 @@ Gate 1 is `tests::identity_bound_builtin_stages_alias_without_moving_a_bit`; gat
 | 925-5 | the builtins-less compile keeps listing the three stages (`=> true`) | `graph-compiler/src/compile.rs` `required_bindings` | the three suites | RED: graph-compiler `accepted_session_compiles_binds_and_renders_direct_route` (`required_bindings.len()`), `builtins_replace_only_the_three_internal_track_bindings` (the builtins-less op list), the merged-span test's builtins-less arm, and gate 3 (321 units). graph GREEN (no compiler there): the compile change is what moves the row. |
 
 ## Issue #927 — plain-strip sources read in place by the fused Output reduction
+
+**Retired (issue #957).** The fused Output's in-place read -- `OutputSources`, `source_plane_table`
+clauses (b') and (e), and the Output op's claim table -- was deleted with the fold it read through,
+and so were gates 1 and 2, the kernel test and rt10's bankless test. Rows 927-6, 927-7 and 927-9
+mutate code that stays (clause (a), clause (c) and the copy loop, all issue #918's); #918's rows
+918-3, 918-6 and 918-4 prove the same mutations red on #918's gate 1. Gate 2's `DeadClaim` shape is
+ported by issue #957 (row 957-4).
 
 Each row was applied alone to `7896ac7e` as exact-text replacements whose match counts were checked
 before writing, the suites were run with `--no-fail-fast`, and the files were restored with
@@ -399,3 +419,254 @@ is what goes red.
 | 927-11 | the lent planes read swapped, `(right, left)` | `graph/src/runtime.rs` `OutputSources::input` | gate 1, gate 2, the kernel test, rt10 | RED on all four (gate 1 and 2 at block 0, the kernel test at its first case). |
 | 927-12 | the fold records its retired routes in reverse (`producers` reversed) | `graph/src/runtime.rs` `output_route_fold` | gate 1, gate 2, rt10 | RED on all three at block 0: each claim is read at another claim's Output input, under that input's 2x2. The kernel test is bind-free and passes. |
 | 927-13 | each pair's planes are formed through a `Vec` (`.collect()` in `route_pair`) | `graph/src/runtime.rs` `route_pair` | rt10; `scripts/check-realtime-policy.sh`; gates 1 and 2, the kernel test | RED on rt10 `1000 in-place blocks allocate and free nothing` (`(2000, 2000)`: one per pair per block), and on the realtime policy (`runtime.rs:796: .collect();`, `marked realtime forbidden-body predicate`). GREEN on the bit gates: no bit moves. |
+
+## Issue #936 — skip inert source-input units at render dispatch
+
+Each row was applied alone to `3172be42` as an exact-text replacement whose match count (one) was
+checked before writing, the suites were run with `--no-fail-fast`, and the file was restored with
+`git checkout` before the next row. Host: `x86_64` (`.cargo/config.toml` pin
+`-C target-feature=+avx2,+fma`), debug profile. The tests these rows name:
+
+- graph "gate 1" is `runtime::tests::an_unobserved_source_input_is_not_dispatched_and_moves_no_bit`,
+  "gate 2" `runtime::tests::an_observed_source_input_stays_dispatched_and_meters_the_base_values`,
+  "gate 3" `runtime::tests::a_delayed_claim_stays_dispatched_and_renders_the_base_bits`, "gate 5"
+  `runtime::tests::the_metadata_charge_covers_the_ring_plans_executor_tables`, and "the metadata
+  test" `tests::runtime_metadata_charge_covers_mixed_ops_once_and_refuses_overflow`. Gates 1-3 pin
+  the digest this fixture recorded on the base tree (`INERT_PRE_CHANGE`, `64b155d0`). Issue #957
+  deleted the bankless ring fixture these rows ran on and ported the four gates onto issue #918's
+  banked fixture (gate 5 is now `the_metadata_charge_covers_the_banked_source_plans_executor_tables`);
+  the #957 rows below re-prove 936-1, 936-2 and 936-4 on the ported gates.
+- console-workload "gate 1" is `tests::the_driver_fed_gain_pan_row_dispatches_every_unit_but_its_inputs`
+  (then `the_driver_fed_plumbing_row_dispatches_only_its_output_unit`, re-homed by issue #956),
+  "gate 5" `tests::the_driver_fed_rows_metadata_charge_grows_by_exactly_the_executor_tables`, and
+  "gate 4" is chain_shape `the_plumbing_row_is_input_route_output_and_renders_the_base_bits`
+  (`BASE_DIGEST`; deleted with the plumbing rows by issue #956, retired) with the lib's
+  `the_driver_fed_gain_pan_row_renders_the_bound_rows_bits` (then
+  `the_driver_fed_plumbing_row_renders_the_bound_rows_bits`, re-homed by issue #956).
+- "Bits-only" means the row was run a second time with three structural assertions of the #936
+  helpers made vacuous in the same edit -- `render_ring_blocks`'s skipped-unit check,
+  `assert_inert_shape`'s table equality and its meter count -- so that only the pinned digest of
+  every host word and meter frame can go red.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 936-1 | the predicate ignores observation: both of its observation clauses dropped (`!identity.observed` and `op.observers.is_empty()`), the brief's "a predicate that ignores `observed`" | `graph/src/runtime.rs` `Runtime::unit_inert` | `cargo test -p graph --lib`; gate 2 bits-only | RED, graph 5 of 113: gate 2 `ObservedInput, 1 frames: skipped unit 5 is a plain unobserved source input`, #927's `a_claim_with_another_reader_keeps_the_copy_and_the_copy_bits`, #918's `a_banked_source_gathers_the_played_block_bit_for_bit_with_the_copy`, `controlled_legacy_bind_refusal_preserves_callers_for_plain_and_source_retry` and `route_fold_preflight_returns_original_owners_and_sources_for_retry`. Bits-only: RED `ObservedInput: every host word and meter frame is the pre-change executor's` (`0xce6b3a3d49968c67`, which is the Plain shape's digest because the input meter never publishes, against `0x1f149a39d035ceea`). |
+| 936-1a | only `!identity.observed` dropped | `graph/src/runtime.rs` `Runtime::unit_inert` | `cargo test -p graph --lib` | **GREEN, equivalent** (113 of 113). See 936-1b. |
+| 936-1b | only `op.observers.is_empty()` dropped | `graph/src/runtime.rs` `Runtime::unit_inert` | `cargo test -p graph --lib` | **GREEN, equivalent** (113 of 113). `Runtime::new_with_observation_activation`, which every runtime passes through, sets `identity.observed = unit.has_observers()`, and for a plain op that is `!op.observers.is_empty()`. The two clauses the brief lists name one fact, so dropping either alone moves nothing. 936-1 is the brief's mutation in the form that is not equivalent. |
+| 936-2 | a delayed claim is inert (`NodeKind::SourceInput \| NodeKind::TrackDelay { .. }`) | `graph/src/runtime.rs` `Runtime::unit_inert` | `cargo test -p graph --lib`; gate 3 bits-only | RED, graph 3 of 113: gate 3 `TrackDelayed, 1 frames: skipped unit 5 is a plain unobserved source input`, #927's gate 2, #918's gate 1. Bits-only: RED `TrackDelayed: every host word and meter frame is the pre-change executor's` (`0xce6b3a3d49968c67`, the undelayed Plain digest: the copied words reach the Output without their delay line, against `0xe8b0890ea031f463`). |
+| 936-3 | the loop iterates the table in reverse (`active_units.iter().rev()`) | `graph/src/lib.rs` `GraphExecutor::render` | console-workload lib and chain_shape; `cargo test -p graph --lib` | RED on gate 4: chain_shape `the_plumbing_row_is_input_route_output_and_renders_the_base_bits` (`eliding identity stages moved a bit`, `BASE_DIGEST`; retired by issue #956) and `the_folded_master_is_the_reductions_own_bits`, and the lib's `the_driver_fed_plumbing_row_renders_the_bound_rows_bits` (now `the_driver_fed_gain_pan_row_renders_the_bound_rows_bits`). The driver-fed row dispatches only its Output op, so reversing it changes nothing; the bound row's reversal is what the equality catches. graph: 27 of 113 red, gates 2 and 3 and the rt9 source pin among them. |
+| 936-4 | the loop dispatches every unit again (`let _ = &active_units; for unit in 0..runtime.units.len() {`) | `graph/src/lib.rs` `GraphExecutor::render` | `cargo test -p graph --lib`; console-workload lib and chain_shape | RED only on what counts dispatches: graph gates 1-3 (`Plain, 1 frames: units dispatched per block`, `[65; 16]` against `[1; 16]`) and the rt9 source pin (the pre-#936 header is refused); console gate 1 (`sixty_four_track_plumbing_ring, block 0: units dispatched`, 65 against 1; the row is now `sixty_four_track_gain_pan_ring` and the test `the_driver_fed_gain_pan_row_dispatches_every_unit_but_its_inputs`, issue #956). GREEN: chain_shape 24 of 24 and every digest. The change is class A, so a count is the only thing that can tell a skipped unit from a dispatched one. |
+| 936-5a | `GraphExecutorWithoutObservationActivation` omits `active_units` | `graph/src/lib.rs` | `cargo test -p graph --lib` | RED, the metadata test only: `the observation owner delta is the runtime state's alone` (272 against 256). |
+| 936-5b | `GraphExecutorWithoutSplitPairTable` omits `active_units` | `graph/src/lib.rs` | `cargo test -p graph --lib` | RED, the metadata test only: `the split owner delta is the runtime field's alone` (32 against 16). |
+| 936-6a | the copied-claim table is charged nothing (`source_input_entry_bytes.checked_mul(0)`) | `graph/src/lib.rs` `checked_for_with_response_bindings` | `cargo test -p graph --lib`; console-workload lib | RED: the metadata test, graph gate 5 (`declined true: the charge (516, 0) covers the tables (4, 1024)`), console gate 5. |
+| 936-6b | neither table is added to `total_bytes` | `graph/src/lib.rs` `checked_for_with_response_bindings` | `cargo test -p graph --lib`; console-workload lib | RED: the metadata test; console gate 5 `the charge grows by exactly the two tables` (15840 against 26100). |
+| 936-7 | the loop collects the table into a `Vec` every block (`active_units.iter().copied().collect::<Vec<u32>>().into_iter()`) | `graph/src/lib.rs` `GraphExecutor::render` | rt10, rt1 and rt9 alloc tests (`--features test-support`); `scripts/check-realtime-policy.sh` | RED: rt10 2 of 2 (`1000 in-place blocks allocate and free nothing`), rt1 1 of 1, rt9 3 of 8 failed and then the binary aborted (SIGABRT). **GREEN on `check-realtime-policy.sh`**: its forbidden-body pattern matches `\.collect\(`, not the turbofish `.collect::<`. The counting-allocator tests are what catch it. This gap in the script is disclosed here, not fixed: the script is outside this brief's paths. |
+
+## Issue #945 — read fold tiles without a stack copy
+
+Each row was applied alone to `b8df5b52` as an exact-text replacement of
+`core::array::from_fn(|row| rows[row])` in `tile_rows` (match count one, checked before writing),
+the suites were run with `--no-fail-fast`, and the file was restored before the next row. Host:
+`x86_64` (`.cargo/config.toml` pin `-C target-feature=+avx2,+fma`). The graph and chain_shape runs
+are the debug profile in this worktree. "Digests" is the `digests` harness of
+`docs/handoffs/gain-pan-2026-09-26/gain-pan-diagnosis-harnesses.patch` (every standing console
+workload's 64-block output digest), built `--release` in a scratch copy with the patch applied and
+the same edit made; it was never committed. The witnesses the amended brief names are graph
+`runtime::tests::a_resident_fold_is_the_staged_scatter_and_cohort_fold_bit_for_bit` ("the resident
+witness") and chain_shape `the_folded_master_is_the_reductions_own_bits`.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 945-1 | the tile's rows from the wrong offset, `rows[(row + 1) % W]` (the brief's "`rows[i + 1]` wrapped"), at both widths | `graph/src/runtime.rs` `tile_rows` | `cargo test -p graph --lib`; chain_shape; digests | RED. graph 4 of 113: the resident witness (`Four, 4 frames, 1 cohort(s), store true: left master`), `a_banked_source_gathers_the_played_block_bit_for_bit_with_the_copy`, `a_folded_metered_plan_is_the_unfolded_plans_master_and_meters_bit_for_bit`, `a_redirect_after_a_retired_route_lands_on_its_own_chain`. chain_shape 1 of 24: `the_folded_master_is_the_reductions_own_bits` (`nine_track_baseline: the folded master is not the reduction's bits`). Digests: 13 of 16 rows move (`nine_track_baseline` `e7c6ef01` -> `f39cdeaa`, `sixty_four_track_gain_pan_only` `01e465a7` -> `26fcd980`, and the ragged strip, console, stretch, eq, compressor, builtins, dispatch, console_legacy, eq_comp_simd1, console_mono and console_mono_dual rows). The three that stay are the rows that take no resident fold: `sixty_four_track_idle`, `sixty_four_track_plumbing_only` (`BASE_DIGEST`, which has no bank) and `sixty_four_track_console_half_mono`. |
+| 945-1b | the same offset at `W = 4` only: `rows[if W == 4 { (row + 1) % W } else { row }]` | `graph/src/runtime.rs` `tile_rows` | `cargo test -p graph --lib`; chain_shape; digests | RED on graph 4 of 113, the same four as 945-1, the resident witness at `Four, 4 frames, 1 cohort(s), store true: left master`. **GREEN on chain_shape (24 of 24) and on all 16 digests**: a native x86-64-v3 bank is eight lanes wide, so no console workload reaches the `W = 4` instantiation on this host. `W = 4` is what the browser build ships, and the resident witness, which runs `BankWidth::Four` explicitly, is the gate that sees it. |
+| 945-1c | the same offset at `W = 8` only | `graph/src/runtime.rs` `tile_rows` | `cargo test -p graph --lib`; chain_shape; digests | RED. graph 3 of 113: the resident witness at `Eight, 8 frames, 1 cohort(s), store true: left master`, `a_banked_source_gathers_the_played_block_bit_for_bit_with_the_copy`, `a_folded_metered_plan_is_the_unfolded_plans_master_and_meters_bit_for_bit` (`a_redirect_after_a_retired_route_lands_on_its_own_chain` stays green, so it folds a four-lane bank). chain_shape as 945-1. Digests: the same 13 rows move to the same values as 945-1. |
+
+Disclosed equivalent mutants:
+
+* **Restoring the copy** (the pre-#945 zeroed tile and per-row `copy_from_slice`) moves no bit:
+  that is the class-A claim itself. It is a codegen property, witnessed by the release `objdump`
+  of `fold_resident` in the #945 spec's evidence (4 `memcpy` calls against 0), not by a test.
+* **Dropping the `[..W * W]` slice** (the brief's prototype, `block.as_chunks::<W>()`) moves no bit
+  either, because the caller hands exactly `W * W` words. The length of `rows` is then not a
+  constant, so the release `W = 8` tile loop keeps a chain of five row-bounds compares, where the
+  slice leaves one (`cmp $0x40`) per tile. Also a codegen property, not a test.
+
+## Issue #937 — Output inputs resolved in groups of eight, and the tighter pair kernel
+
+**Retired (issue #957).** The grouped Output kernel, `GraphSourcePlanes::played_planes_group` and
+their tests were deleted with issue #926's fold. None of these mutations can be expressed any more.
+
+Each row was applied alone to `40c62101` as an exact-text replacement (match count one, checked
+before writing), the suites were run with `--no-fail-fast`, and the file was restored with
+`git checkout` before the next row. Host: `x86_64` (`.cargo/config.toml` pin
+`-C target-feature=+avx2,+fma`), debug profile. The tests these rows name:
+
+- "Gate 1" is `runtime::tests::a_route_reduction_is_the_route_ops_and_the_reduction_bit_for_bit`
+  (#926's kernel oracle, whose sweep this issue extends to fan-in 257). It visits `f32`, then
+  `Simd4`, then `Simd8`, each over frames {1, 3, 7, 8, 13, 16, 33, 64} and fan-in 2..=19, 64, 257,
+  so its first failure names the narrowest width and the smallest case a row reaches.
+- "The lent test" is `runtime::tests::a_route_reduction_reads_each_lent_input_as_the_copys_words`,
+  and "the group test" is this issue's `runtime::tests::a_source_sets_group_call_is_its_per_claim_call`.
+- "#927's gates 1 and 2" are `a_plain_strip_source_is_read_in_place_by_the_fused_output_with_the_copy_bits`
+  and `a_claim_with_another_reader_keeps_the_copy_and_the_copy_bits`; "#936's gates" are
+  `an_unobserved_source_input_is_not_dispatched_and_moves_no_bit`,
+  `an_observed_source_input_stays_dispatched_and_meters_the_base_values` and
+  `a_delayed_claim_stays_dispatched_and_renders_the_base_bits`.
+- "The console counter gate" is console-workload `tests::the_driver_fed_gain_pan_row_renders_the_bound_rows_bits`
+  (then `the_driver_fed_plumbing_row_renders_the_bound_rows_bits`, re-homed by issue #956)
+  (`[0, claims * BLOCKS, 0]`); "the console digests" are chain_shape
+  `the_plumbing_row_is_input_route_output_and_renders_the_base_bits` (`BASE_DIGEST`) and
+  `the_plumbing_rows_output_fold_is_the_route_ops_own_bits`, both deleted with the plumbing rows by
+  issue #956 (retired).
+- "Rule 3" is `scripts/check-web-audioworklet-callgraph.py --kernel-shape --kernel-pattern
+  '4wide6f32x[48]' --kernel-min 11` over `wasm-objdump -d` of the simd128 AudioWorklet module,
+  built with `scripts/build-web-audioworklet.sh`'s own cargo line and flags.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 937-1 | reassociate a later pair as `load + (m_2k + m_(2k+1))` (both planes of `route_pair_vectors`' accumulate loop) | `graph/src/runtime.rs` `route_pair_vectors` | `cargo test -p graph --lib --features test-support`; `cargo test -p console-workload` | RED. graph 7 of 114: gate 1 `width 1, 1 frames, fan-in 7, -0.0 false: right` (`1118879272` against `1118879273`; fan-ins 4 to 6 are the first with a later pair, and their one-frame sums happen to round alike), #926's `an_output_route_fold_is_the_route_ops_and_the_reduction_bit_for_bit` (`Plain, fan-in 64, 13 frames, block 0: the host planes`), #927's gates 1 and 2 (`the declined arm is the pre-change executor`) and #936's three gates (`every host word and meter frame is the pre-change executor's`). Console: both console digests (`9b7337c3...` against `BASE_DIGEST` `57535244...`). GREEN: the lent test and the console counter gate, which compare the kernel with itself. |
+| 937-2 | drop the played-read counter call (`Some(played) => played,` in the provided body) | `graph/src/lib.rs` `GraphSourcePlanes::played_planes_group` | `cargo test -p graph --features test-support`; console-workload `--lib`; host-core `--test source_in_place` | RED. graph 4 of 114: the group test (`[0, 0, 3]` against `[0, 2, 3]`), the lent test (`width 1, 1 frames, fan-in 2`, `[0, 0, 0]` against `[0, 1, 0]`), #927's gate 1 (`Plain, 1 frames, block 0: in place`, `[0, 0, 0]` against `[0, 64, 0]`) and gate 2 (`SendTap`, `[1, 0, 0]` against `[1, 63, 0]`). Console counter gate RED (`[0, 0, 0]` against `[0, 4096, 0]`). **GREEN on host-core `source_in_place`**: it pins #918's bank gathers, which count at `ArenaMembers::plane`, the other counter site, and which this issue does not touch; it is listed in gate 2 as a must-stay-green test, not as this row's witness. rt10, rt1 and rt9 green (no bit moves). |
+| 937-2b | drop the silent-read counter call (`None => silence,`) | `graph/src/lib.rs` `GraphSourcePlanes::played_planes_group` | `cargo test -p graph --features test-support`; console-workload `--lib` | RED. graph 4 of 114: the lent test (`width 1, 1 frames, fan-in 9`, the first fan-in with a silent input: `[0, 5, 0]` against `[0, 5, 1]`), the group test (`[0, 2, 0]` against `[0, 2, 3]`), #927's gates 1 and 2 at the block-3 underrun (`[0, 63, 0]` against `[0, 63, 1]`). GREEN on the console counter gate: the ring row never underruns. |
+| 937-3 | resolve a group of eight but reduce only its first seven (`&planes[..7]`, `&table[..7]` when the group is full) | `graph/src/runtime.rs` `route_reduce` | `cargo test -p graph --features test-support`; `cargo test -p console-workload` | RED. graph 7 of 114: gate 1 at `width 1, 1 frames, fan-in 8, -0.0 false: left` (`1254604654` against `1254604426`), the first fan-in with a full group; #926's fold gate, #927's gates 1 and 2 and #936's three gates as in 937-1. Console: both console digests (`133d291a...`). GREEN: the lent test and the console counter gate (kernel against itself; every lent claim is still resolved and counted). |
+| 937-4 | inline the tail into the vector kernel (`route_tail` marked `#[inline(always)]`), #920's failure shape | `graph/src/runtime.rs` `route_tail` | rule 3 | RED: `FAIL kernel ...route_group...4wide6f32x4...: vector=38 scalar=122`. The committed tree reads `vector=38 scalar=0`, so rule 3 does inspect `route_group<f32x4>`. |
+
+## Issue #943 — the banked sample-peak pass
+
+The witnesses are graph-compiler gate G3,
+`tests::post_matrix_peak_meters_merge_one_bank_pass_per_cohort_and_publish_the_scalar_frames`
+(64-track intended fixture, a `SAMPLE_PEAK` `PostMatrix` meter per track, both selected deliveries,
+periods 512 and 300, the pass on against `test_only_set_bank_sample_peak_declined(true)`; its
+controls are ALL-metric meters and a plan bound with an observation activation), and this crate's
+source scan `runtime::tests::resident_meter_entry_has_one_final_output_dispatch_and_admission_control`,
+whose own control rows now include the pass forced on (`let peaks = if true {`), the peak withheld
+from the member call, the lane index shifted, the planes swapped, and the whole-block borrow
+replaced. Each row below was applied alone to `1975fc44` as an exact-text replacement (match count
+one), run in dev, and restored.
+
+| # | mutation | G3 | source scan |
+| --- | --- | --- | --- |
+| G-1 | `row.sample_peak = unit.accepts_sample_peak();` becomes `row.sample_peak = true;` (attempt 2's form: `UnitObservation::of(unit.has_observers(), true)`, same result) | RED at the ALL control: `ALL meters must not make a bank run the pass` (`192` against `0`). PCM and every frame stay equal: the counter is the only witness | GREEN (the flag's derivation is not pinned there) |
+| G-2 | the final lane's hand-off reads lane `lane ^ 1` of both planes | RED: `between_render_calls false period 512: meter 1 window 0` (left and right peaks are lane 1's) | RED: `valid(source)` |
+| G-3 | the right plane's pass reads the left plane (`meter_sample_peak_block::<L>(left, ..)` into `peaks[1]`) | RED: `meter 1 window 0`, right `sample_peak` bits `543241058` against `994846919` (needs the L-differs-from-R window) | GREEN (`bank_sample_peak`'s body is not pinned there) |
+
+### Attempt 2: the packed identity byte and the four-lane dispatch
+
+Attempt 1's `sample_peak: bool` was a fifth one-byte field in `UnitIdentity`, which fits the
+padding on a 64-bit target but grew the row from 20 to 24 bytes on wasm32 (Sol, attempt 1). The
+flag now shares `observed`'s byte as `UnitObservation { Unobserved, Observed, ObservedWithPeak }`,
+and the layout pin is a `const` assertion in production code (`size_of` and `align_of` of
+`UnitIdentity` equal those of `UnitIdentityWithoutFlags`), so every target build checks it. G3 now
+also runs at `Backend::Simd4`, the browser's and NEON's bank width. Rows applied alone to the
+attempt 2 tree and restored:
+
+| # | mutation | result |
+| --- | --- | --- |
+| S-7 | `BankWidth::Four => planes::<lane::Simd8>(left, right)` (Sol's row) | RED on G3's `Simd4` arm: `Simd4 between_render_calls false period 512: meter 6 window 0` (left peak bits `992536920` against `994476435`). GREEN on G4 (host width) and the source scan, as before; it was GREEN on every committed gate in attempt 1 |
+| O-1 | `UnitObservation::of`'s `(true, true)` arm returns `Observed` (the peak bit lost in the packing) | RED: G3 `Simd8 ... period 512: one pass per cohort` (`0` against `192`); G4 (`0` against `8000`) |
+| O-2 | `UnitObservation::observed` becomes `matches!(self, Self::Observed)` (a peak unit's observers skipped) | RED: G3 `every meter publishes every whole window` (`0` against `384`). GREEN on `-p graph --features test-support`: no graph test binds a peak-accepting observer, so G3 is the witness |
+| L-A | the attempt 1 layout restored: a separate `sample_peak_flag: bool` after `source_lanes` | `cargo check -p graph` GREEN natively (32 bytes either way); `cargo check --target wasm32-unknown-unknown -p graph` RED: `evaluation panicked: a UnitIdentity flag no longer fits the row's padding` |
+| L-B | `#[repr(u16)]` on `UnitObservation` | the same: native check GREEN, wasm32 check RED with the same message |
+
+## Issue #950 — the banked full meter pass
+
+The witnesses are graph-compiler gate M3,
+`tests::post_matrix_all_meters_run_one_full_bank_pass_per_cohort_and_publish_the_scalar_frames`
+(64-track intended fixture, an `ALL` `PostMatrix` meter per track, both selected deliveries,
+`Simd8` and `Simd4`, periods 512 and 300, plus the `console_meters` path through
+`compile_console_model_with_builtins`, each against `test_only_set_bank_meter_declined(true)`); its
+controls `tests::the_full_meter_pass_stays_off_where_no_meter_can_commit_it` (mixed `SAMPLE_PEAK`
+and `ALL`, issue #943's `SAMPLE_PEAK` fixture, an eight-frame hold, an activation-bound plan); the
+failure boundary `tests::an_observer_failing_mid_bank_leaves_every_later_meter_as_the_declined_arm_does`;
+and this crate's source scan
+`runtime::tests::resident_meter_entry_has_one_final_output_dispatch_and_admission_control`, whose
+control rows now include the full pass forced on, #943's pass run beside it, the meter lane withheld
+or shifted, the seeds not read, and the pass handed one plane twice. Each row was applied alone to
+`326607ce` as an exact-text replacement (match count one), run in dev, and restored with `git
+checkout`; G-5 was rerun on `9696f74d`.
+
+| # | mutation | result |
+| --- | --- | --- |
+| G-1 | the final lane's hand-off reads lane `lane ^ 1` (`meters.lane(lane ^ 1, seeds)`) | RED: M3 `Simd8 between_render_calls false period 512: meter 1 window 0` (lane 1's energies and peaks); the source scan |
+| G-2 | the right plane's pass reads the left plane (`plane::<L>(left, frames, right_seeds)`) | RED: M3 `meter 1 window 0`, the right channel's words are the left's (needs the L-differs-from-R window). GREEN on the source scan (`bank_meter_pass`'s body is not pinned there) |
+| G-3 | issue #943's pass also runs where the full pass ran (`let peaks = if sample_peak && eligible {`) | RED: the mixed control, `mixed: no sample-peak pass beside it` (`192` against `0`) |
+| G-4 | `MeterObserver::accepts_banked_meter` also accepts `SAMPLE_PEAK`-only meters | RED: the mixed control, `mixed: the peak meters merge its peak` (`0` against `768`): the peak meters commit through the banked path instead. GREEN on #943's `SAMPLE_PEAK` fixture control (checked with the mixed control skipped): such a meter has no energy, so it answers no seed and no pass runs (amendment 2). The brief's "M3 P1-fixture control" witness predates that amendment; the mixed control is the witness |
+| G-5 | the member loop keeps observing after an observer fails and returns the first error at the end | RED: the failure boundary, `ch00 and ch01 commit the failing block and no later meter does` (`8` against `2`: `ch02` to `ch07` observed the failing block) |
+| A-5 | the pass runs when no lane answered a seed (amendment 5: the `bank_meter_seeds` result ignored) | RED: M3 `Simd8 between_render_calls false period 300: one pass per cohort per block a window holds` (`192` against `112`); the source scan |
+| K-1 | the kernel's energy is a zero-seeded partial plus the seed (`crates/lane`) | RED: M3 `Simd8 between_render_calls false period 512: meter 1 window 1`, the energy and `rms` a few ulps off |
+
+K-6 (`c > 1.0` for the clipped count) is GREEN on M3: no post-matrix word of the fixture is exactly
+`1.0`. M1 and M2 are its witnesses.
+
+The failure boundary also pins the realtime claim #714's clause rests on: the pass only reads the
+later meters (their seeds, through `&self`), so when `ch01`'s second observer fails on block 5,
+`ch02`'s meter has neither observed nor committed that block and opens its next window at a
+discontinuity, exactly as in the declined arm; both arms' frames are equal by bits.
+
+### Issue #950 attempt 2: the `2^24` decline and a schedule-independent failure boundary
+
+Two gates changed, with no production change. `runtime::tests::the_full_meter_pass_declines_a_block_whose_counts_would_not_be_exact`
+hands `bank_meter_pass` `2^24 + 1` lazily zero-mapped frames at `Four` and `Eight` (5.6 MB peak RSS:
+the pass refuses on the slice length before it reads a word) and checks a three-frame block is
+computed. The failure boundary now reads the tracks' observation order from a probe plan with an
+order recorder on every post-matrix node, and requires exactly the meters up to `ch01` in that
+order to see and commit the failing block, at the host width and `Simd4`, instead of assuming bank
+0 is observed first. Rows applied alone to `958c7066` and restored:
+
+| # | mutation | result |
+| --- | --- | --- |
+| D-1 | the `frames > BANK_METER_MAX_FRAMES` term deleted from `bank_meter_pass` | RED: `Four: 2^24 + 1 frames decline the pass` (the kernel then reads the zero pages: 17.8 s in dev, 6 MB RSS) |
+| G-5 | the member loop keeps observing after a failure and returns the first error at the end | RED on the rewritten gate: `Simd8 failure boundary: exactly the meters observed before the failing observer saw block 5`, handles `[1, 2, 3, 4, 5, 6, 7, 8]` against `[1, 2]` |
+| S-2 | `commit_banked`'s window check deleted (`crates/builtins`) | RED on the new mixed-bank gate (`crates/builtins/tests/MUTATIONS.md`) |
+
+## Issue #957 — #936's gates on #918's banked fixture, and the ported dead claim
+
+Issue #957 deleted the bankless ring fixture of #927 and #936 and ported #936's gates onto #918's
+banked source fixture (`W4 x 6`, track `K = 5`, frames `{10, 13, 16, 128}`, sixteen blocks). Each
+row was applied alone to `bf3bacab` as exact-text replacements whose match counts (one) were
+checked before writing, `cargo test --locked -p graph --lib --no-fail-fast` was run (108 tests),
+and `crates/graph/src` was restored with `git checkout` before the next row. Host: `x86_64`
+(`.cargo/config.toml` pin `-C target-feature=+avx2,+fma`), debug profile. The tests these rows name:
+
+- "Gate 1" is `runtime::tests::an_unobserved_source_input_is_not_dispatched_and_moves_no_bit`,
+  "gate 2" `…::an_observed_source_input_stays_dispatched_and_meters_the_base_values` (shapes
+  `ObservedInput`, then `ObservedAlias`), "gate 3" `…::a_delayed_claim_stays_dispatched_and_renders_the_base_bits`,
+  "gate 5" `…::the_metadata_charge_covers_the_banked_source_plans_executor_tables`, and "the dead
+  claim test" `…::a_claim_nothing_reads_is_bound_in_place_and_its_recoloured_slot_moves_no_bit`.
+  Gates 1-3 pin digests recorded on `64b155d0` (`INERT_PRE_CHANGE`); the dead claim test pins
+  `DEAD_CLAIM_PRE_CHANGE`, recorded there too.
+- "Bits-only" means the row was run a second time with the ported gates' structural assertions
+  made vacuous in the same edit -- `render_inert_blocks`'s skipped-unit check, `assert_inert_shape`'s
+  table equality, per-block dispatch count and meter count, gate 2's `K`-meter count and gate 3's
+  dispatched-input check -- so that only a pinned digest can go red. For 957-4 it is the dead
+  claim test's mode table and in-place counters instead.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 957-1 | dispatch every `SourceInput` unit: the inert predicate never names one (`… && op.observers.is_empty() && false`) | `graph/src/runtime.rs` `Runtime::unit_inert` | `cargo test -p graph --lib`; bits-only | RED, 4 of 108: gates 1, 2, 3 at their tables (`Plain, 10 frames: the dispatched-unit table`, all 15 units against the 9 non-input units; `ObservedInput` and `TrackDelayed` against 10) and gate 5 (`declined false`, 15 against 9). Bits-only: gates 1-3 GREEN, their digests unmoved (class A: a dispatched inert unit writes nothing), and only gate 5's table count is RED. The count is the only thing that can tell a skipped unit from a dispatched one. |
+| 957-1b | 936-4 re-run: the loop dispatches every unit again (`let _ = &active_units; for unit in 0..runtime.units.len() {`) | `graph/src/lib.rs` `GraphExecutor::render` | `cargo test -p graph --lib` | RED, 4 of 108: gates 1-3 at `units dispatched per block` (`[15; 16]` against `[9; 16]`, and `[10; 16]` for `ObservedInput` and `TrackDelayed`), and the rt9 source pin (`sole resident call must remain behind graph admission`). |
+| 957-2 | skip an observed `Input` unit: both observation clauses dropped (936-1's form) | `graph/src/runtime.rs` `Runtime::unit_inert` | `cargo test -p graph --lib`; bits-only | RED, 4 of 108: gate 2 (`observed: Some(5), 10 frames: skipped unit 5 is a plain unobserved source input`), #918's gate 1 (`the copy arm is the pre-change executor`: its observed claim's meter goes silent), `controlled_legacy_bind_refusal_preserves_callers_for_plain_and_source_retry` and `route_fold_preflight_returns_original_owners_and_sources_for_retry`. Bits-only: RED `ObservedInput: every host word and meter frame is the pre-change executor's` (`0x3adf_c3ee_a1b4_75ab`, the `Plain` digest, because `K`'s input meter never publishes, against `0x51c6_c3cf_4cdc_5509`). |
+| 957-2c | 957-2 bits-only, with gate 2 visiting `ObservedAlias` alone (the `PostSimd1` alias meter, amendment 1) | `graph/src/runtime.rs` `Runtime::unit_inert` | `cargo test -p graph --lib` | RED `ObservedAlias: every host word and meter frame is the pre-change executor's` (`0x3adf_c3ee_a1b4_75ab` against `0x51c6_c3cf_4cdc_5509`): the alias's meter binds to `K`'s input op, and skipping that unit silences it. The other three failures are 957-2's. |
+| 957-3 | skip a `TrackDelay` unit (`NodeKind::SourceInput \| NodeKind::TrackDelay { .. }`, 936-2's form) | `graph/src/runtime.rs` `Runtime::unit_inert` | `cargo test -p graph --lib`; bits-only | RED, 2 of 108: gate 3 (`delayed: Some(5), 10 frames: skipped unit 5 is a plain unobserved source input`) and #918's gate 1 (`the copy arm is the pre-change executor`). Bits-only: RED `TrackDelayed: every host word and meter frame is the pre-change executor's` (`0x3adf_c3ee_a1b4_75ab`, the undelayed `Plain` digest: the copied words reach the gather without their delay line, against `0xd1eb_c3d4_2404_cb33`). |
+| 957-4 | clause (b) refuses a claim with no reader (`… && !readers[op].is_empty()`) | `graph/src/runtime.rs` `source_plane_table` | `cargo test -p graph --lib`; bits-only | RED, 1 of 108: the dead claim test (`dead: true, 10 frames: the mode table`, `[…, false]` against `[…, true]`). Bits-only: **GREEN** (108 of 108), as expected: the copy writes the dead claim's words into a slot nothing reads before a later value overwrites it, so copied or not, the bits are the same; the mode table and the counters are what see the zero-reader arm. (Corrected: this row first said no bank on the fixture gathers the recoloured slot. That was wrong; the follow-up below builds that gather and proves it red at the bits, 957-5.) |
+
+### Follow-up: Sol's finding 1 (the dead claim's gather) and finding 2 (the one- and seven-frame quanta)
+
+Sol's verdict found that the ported dead claim test could not see its own hazard: with one bank
+stage nothing gathers the dead claim's recoloured slot, so a gather that ignores the lane marking
+stayed green on it. The test now runs `W4 x 6` with two bank stages (`PostInputBuiltins` then
+`PostMatrix`) and checks on the bound runtime, in both redirect arms, that a bank after the dead
+input gathers the dead slot on an unmarked lane. The fixture also caps `PLAYED_SCRIPT`'s short block
+one frame below the quantum and keeps a one-frame block's noise word, so the ported gates render
+#936's own quanta `{1, 7, 16, 128}` again (#918's gate 1 renders 13 and 16, where neither change
+moves a word). Every pin was re-recorded on `64b155d0`. Rows applied alone to the tree of the
+commit that adds this section, as above, `crates/graph/src` restored after each; bits-only as above, and
+for 957-5 and 957-5b the dead claim test's mode table and in-place counters made vacuous:
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 957-1 | as above | `graph/src/runtime.rs` `Runtime::unit_inert` | `cargo test -p graph --lib` | RED, 4 of 108: gates 1, 2, 3 and 5 at their tables (`TrackDelayed, 1 frames: the dispatched-unit table`, all 15 units against 10). |
+| 957-2 | as above, bits-only | `graph/src/runtime.rs` `Runtime::unit_inert` | `cargo test -p graph --lib` | RED: gate 2 at `ObservedInput: every host word and meter frame is the pre-change executor's` (`0x59ac_7ce2_0913_f0e1`, the `Plain` digest, against `0x57be_32ec_07e5_88cd`), #918's gate 1 and the two bind-retry tests. |
+| 957-3 | as above, bits-only | `graph/src/runtime.rs` `Runtime::unit_inert` | `cargo test -p graph --lib` | RED: gate 3 at `TrackDelayed: every host word and meter frame is the pre-change executor's` (`0x59ac_7ce2_0913_f0e1` against `0x5669_2e20_31f4_30b1`), and #918's gate 1. |
+| 957-4 | as above | `graph/src/runtime.rs` `source_plane_table` | `cargo test -p graph --lib`; bits-only | RED, 1 of 108: the dead claim test (`dead: true, 1 frames: the mode table`). Bits-only: GREEN (108 of 108), for 957-4's corrected reason. |
+| 957-5 | the gather ignores `source_lanes`: `SourceGather::claim` serves any lane the table's claim (`if lane >= 8 {`, 918-5's form) | `graph/src/runtime.rs` `SourceGather::claim` | `cargo test -p graph --lib`; bits-only | RED, 2 of 108: the dead claim test at the bits (`dead: true, 1 frames, redirects bound, block 0 (Full): the master is the copy arm's`), and #918's gate 1 (918-5's failure). Bits-only: the same two, the same block. Attempt 1's one-stage dead claim test stayed GREEN under this row (Sol's verdict). |
+| 957-5b | the leak limited to the dead claim: an unmarked lane is served the table's claim only when that claim is 6, the dead claim's index | `graph/src/runtime.rs` `SourceGather::claim` | `cargo test -p graph --lib`; bits-only | RED, 2 of 108: the dead claim test at the bits (`1 frames, block 0 (Full)`), and #918's gate 1 at its `W8 x 8` scalar-fader shape, whose claim 6 is live. Bits-only: the same. |

@@ -329,12 +329,3 @@ pub(crate) fn diag(code: &'static str, path: &str) -> GraphDiagnostic {
         cycle_edge_paths: Vec::new(),
     }
 }
-pub(crate) fn failure(
-    effects: EffectPreparedSession,
-    diagnostics: Vec<GraphDiagnostic>,
-) -> GraphCompileFailure {
-    GraphCompileFailure {
-        effects,
-        diagnostics: GraphDiagnosticSet::sorted(diagnostics),
-    }
-}

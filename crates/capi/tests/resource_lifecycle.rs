@@ -476,6 +476,10 @@ fn frozen_scratch_report(capi_retained_bytes: u64) -> PlanResourceReport {
     let response_owner_metadata_bytes =
         response_binding_table_bytes + response_binding_string_bytes;
     let observation_runtime_state_bytes = observation_runtime_owner_bytes();
+    let executor_table_bytes = {
+        let (dispatched_units, copied_claims) = executor_table_rows();
+        dispatched_units + copied_claims
+    };
     assert_eq!(
         (effect_bank_descriptor_delta, response_owner_metadata_bytes),
         (24, 1_908),
@@ -552,24 +556,31 @@ fn frozen_scratch_report(capi_retained_bytes: u64) -> PlanResourceReport {
         // #808: two banks each retain 3 x 4 x 6 x 32 coefficient bytes + 128 countdown bytes.
         // #816 charges the inline observation endpoint, cursor and failure flag in the graph
         // owner. Its independent primitive mirror is appended to `graph_owners` below.
+        // #936 adds 1,640 bytes to each single-plan graph total: the executor's dispatched-unit
+        // table (82 emitted ops x 4 bytes = 328) and its copied-claim table (82 x 16 = 1,312), each
+        // charged at one entry per emitted op (`executor_table_rows`, mirrored in `graph_owners`).
+        // The largest allocation does not move: 1,312 is far below the 49,167 graph metadata row.
         graph_session_plus_plan_bytes: 231_060
             + slot_coexistence
             + 1_328
             + response_owner_metadata_bytes
             + effect_bank_descriptor_delta
-            + observation_runtime_state_bytes,
+            + observation_runtime_state_bytes
+            + executor_table_bytes,
         graph_incremental_plan_bytes: 231_060
             + slot_coexistence
             + 1_328
             + response_owner_metadata_bytes
             + effect_bank_descriptor_delta
-            + observation_runtime_state_bytes,
+            + observation_runtime_state_bytes
+            + executor_table_bytes,
         graph_metadata_bytes: 50_295
             + slot_coexistence
             + 1_328
             + response_owner_metadata_bytes
             + effect_bank_descriptor_delta
-            + observation_runtime_state_bytes,
+            + observation_runtime_state_bytes
+            + executor_table_bytes,
         graph_delay_bytes: 0,
         effect_bank_scratch_bytes: 8_192,
         effect_bank_runtime_buffer_bytes: 8_192,
@@ -1298,6 +1309,21 @@ fn observation_runtime_owner_bytes() -> u64 {
     runtime_bytes
 }
 
+/// #936's two graph-executor tables, each charged at one entry per emitted runtime op: the
+/// dispatched-unit table (`Box<[u32]>`) and the copied-claim table (`Box<[(usize, u32)]>`). Their
+/// lengths are decided at bind, after the compile admits the estimate, so the estimate charges
+/// each at its bound -- the same 82 emitted ops #470's reservation counts -- whatever the bind
+/// then retains. Restated from the entry types, not read back from `graph`.
+fn executor_table_rows() -> (u64, u64) {
+    let emitted_ops = 82_usize;
+    let rows = (
+        bytes::<u32>(emitted_ops),
+        bytes::<(usize, u32)>(emitted_ops),
+    );
+    assert_eq!(rows, (328, 1_312), "#936 executor table reservations");
+    rows
+}
+
 fn response_owner_metadata_rows() -> (u64, u64) {
     let tracks = 9_u64;
     let effects = 9_u64;
@@ -1878,6 +1904,7 @@ fn graph_owners() -> Vec<PrimitiveOwner> {
     let (response_binding_table_bytes, response_binding_string_bytes) =
         response_owner_metadata_rows();
     let observation_runtime_state_bytes = observation_runtime_owner_bytes();
+    let (dispatched_unit_table, copied_claim_table) = executor_table_rows();
     assert_eq!(
         (split_owner_table_field, split_runtime_op_unit_reservation),
         (16, 1_312),
@@ -2022,6 +2049,15 @@ fn graph_owners() -> Vec<PrimitiveOwner> {
         PrimitiveOwner {
             name: "observation runtime owner state",
             bytes: observation_runtime_state_bytes,
+        },
+        // #936: two independent rows, so the double-live oracle charges each table once per plan.
+        PrimitiveOwner {
+            name: "executor dispatched-unit table reservation",
+            bytes: dispatched_unit_table,
+        },
+        PrimitiveOwner {
+            name: "executor copied-claim table reservation",
+            bytes: copied_claim_table,
         },
     ]
 }
@@ -2218,6 +2254,8 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
         + response_owner_metadata_rows().0
         + response_owner_metadata_rows().1;
     let observation_runtime_state_bytes = observation_runtime_owner_bytes();
+    // #936: the executor's two bind-sized tables, 328 + 1,312 = 1,640 per live plan.
+    let executor_table_bytes = executor_table_rows().0 + executor_table_rows().1;
     assert_eq!(
         response_owner_graph_delta, 1_932,
         "#779 graph response delta"
@@ -2228,7 +2266,8 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
             + 2 * scratch_slot_reservation().0
             + 2_656
             + 2 * response_owner_graph_delta
-            + 2 * observation_runtime_state_bytes,
+            + 2 * observation_runtime_state_bytes
+            + 2 * executor_table_bytes,
         "double-live graph/model",
     );
 
@@ -2639,7 +2678,10 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
     // 2,656 bytes to the double-live graph peak: the runtime owner-table field and the accepted
     // 82 emitted-op/unit reservation are both live for each of the two plans. #779 adds the
     // independently mirrored response-owner graph delta to each live plan. #816 adds the
-    // independently mirrored observation runtime owner state to each live plan.
+    // independently mirrored observation runtime owner state to each live plan. #936 adds the
+    // executor's two bind-sized tables to each live plan: 2 x (82 x 4 + 82 x 16) = 3,280.
+    let executor_table_bytes = executor_table_rows().0 + executor_table_rows().1;
+    assert_eq!(executor_table_bytes, 1_640, "#936 per-plan executor tables");
     assert_eq!(
         oracle.graph,
         511_956
@@ -2647,6 +2689,7 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
             + 2_656
             + 2 * response_owner_graph_delta
             + 2 * observation_runtime_owner_bytes()
+            + 2 * executor_table_bytes
     );
     assert_eq!(oracle.source_total, 24_284);
     assert_eq!(oracle.source_overhead, 7_900);

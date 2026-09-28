@@ -1,0 +1,2664 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 36c4c272..ca9f5e3d 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -337,13 +337,16 @@ dependencies = [
+  "bench-support",
+  "builtins",
+  "builtins-compiler",
++ "compressor",
+  "effect-compiler",
+  "effect-contract",
+  "engine",
+  "graph",
+  "graph-compiler",
+  "lane",
++ "parametric-eq",
+  "session",
++ "true-peak-limiter",
+ ]
+ 
+ [[package]]
+diff --git a/crates/compressor/src/kernel.rs b/crates/compressor/src/kernel.rs
+index bebb9902..0b10324d 100644
+--- a/crates/compressor/src/kernel.rs
++++ b/crates/compressor/src/kernel.rs
+@@ -490,7 +490,29 @@ pub(crate) fn process_block<L: Lane>(
+         .max_remaining()
+         .max(channel_right.max_remaining()) as usize;
+     let ramping = remaining.min(frames);
+-    if ramping > 0 {
++    let mode = crate::diag::mode();
++    if ramping > 0 && mode & 1 != 0 && matches!(detector, Detector::Main) {
++        ramping_main::<L>(
++            left,
++            right,
++            ramping,
++            link,
++            bypass,
++            channel_left,
++            channel_right,
++        );
++    } else if ramping > 0 && mode & 3 != 0 {
++        ramping_loop::<L>(
++            left,
++            right,
++            detector,
++            ramping,
++            link,
++            bypass,
++            channel_left,
++            channel_right,
++        );
++    } else if ramping > 0 {
+         frames_loop::<L, true>(
+             left,
+             right,
+@@ -882,6 +904,452 @@ fn frames_loop_mono<L: Lane, const RAMPING: bool>(
+     }
+ }
+ 
++
++// ---------------------------------------------------------------------------------------------
++// Automation diagnosis (2026-09-27) prototypes C1 and C2: the ramping prefix with lane-wide
++// ramps. Diagnosis patch only; never merged.
++// ---------------------------------------------------------------------------------------------
++
++/// One parameter's (or one rate coefficient's) `LinearRamp`s across the lanes, as vectors.
++#[derive(Clone, Copy)]
++struct RampVec<L: Lane> {
++    current: L,
++    target: L,
++    step: L,
++    /// `remaining` as an exact small integer in `f32` (at most `SMOOTHING_SAMPLES`).
++    remaining: L,
++}
++
++impl<L: Lane> RampVec<L> {
++    #[inline(always)]
++    fn gather(ramps: &[LinearRamp; MAX_WIDTH]) -> Self {
++        let mut current = [0.0_f32; MAX_WIDTH];
++        let mut target = [0.0_f32; MAX_WIDTH];
++        let mut step = [0.0_f32; MAX_WIDTH];
++        let mut remaining = [0.0_f32; MAX_WIDTH];
++        for lane in 0..L::WIDTH {
++            current[lane] = ramps[lane].current;
++            target[lane] = ramps[lane].target;
++            step[lane] = ramps[lane].step;
++            remaining[lane] = ramps[lane].remaining as f32;
++        }
++        Self {
++            current: L::load(&current[..L::WIDTH]),
++            target: L::load(&target[..L::WIDTH]),
++            step: L::load(&step[..L::WIDTH]),
++            remaining: L::load(&remaining[..L::WIDTH]),
++        }
++    }
++
++    #[inline(always)]
++    fn scatter(self, ramps: &mut [LinearRamp; MAX_WIDTH]) {
++        let mut current = [0.0_f32; MAX_WIDTH];
++        let mut step = [0.0_f32; MAX_WIDTH];
++        let mut remaining = [0.0_f32; MAX_WIDTH];
++        self.current.store(&mut current[..L::WIDTH]);
++        self.step.store(&mut step[..L::WIDTH]);
++        self.remaining.store(&mut remaining[..L::WIDTH]);
++        for lane in 0..L::WIDTH {
++            ramps[lane].current = current[lane];
++            ramps[lane].step = step[lane];
++            ramps[lane].remaining = remaining[lane] as u32;
++        }
++    }
++
++    /// `LinearRamp::next_value` on every lane of `gate` whose ramp is in flight, and nothing on
++    /// any other lane: `remaining == 1` assigns the target and clears the step, `remaining > 1`
++    /// adds the step, `remaining == 0` leaves every word as it is. Returns the lanes that moved.
++    #[inline(always)]
++    fn advance_where(&mut self, gate: L::Mask) -> L::Mask {
++        let zero = L::zero();
++        let one = L::splat(1.0);
++        let moving = L::mask_and(gate, self.remaining.gt(zero));
++        let last = L::mask_and(moving, self.remaining.eq(one));
++        let next = L::select(last, self.target, self.current.add(self.step));
++        self.current = L::select(moving, next, self.current);
++        self.step = L::select(last, zero, self.step);
++        self.remaining = L::select(moving, self.remaining.sub(one), self.remaining);
++        moving
++    }
++}
++
++/// The lane-wide state of one channel's ramps for one ramping prefix.
++struct ChannelRamps<L: Lane> {
++    /// Parameters with a ramp in flight on some lane at the start of the prefix.
++    active: u8,
++    ramps: [RampVec<L>; RAMP_COUNT],
++    rates: [RampVec<L>; 2],
++    /// The eight coefficient words, as vectors.
++    words: [L; crate::design::COEF_COUNT],
++}
++
++const CURVE_BITS: u8 = 0b0000_0111;
++const RATE_PARAMETER: [usize; 2] = [3, 4];
++const RATE_WORD: [usize; 2] = [COEF_ATTACK, COEF_RELEASE];
++
++impl<L: Lane> ChannelRamps<L> {
++    #[inline(always)]
++    fn gather(channel: &Channel<L>) -> Self {
++        let mut active = 0_u8;
++        for (parameter, ramps) in channel.ramps.iter().enumerate() {
++            if ramps.iter().take(L::WIDTH).any(LinearRamp::is_ramping) {
++                active |= 1 << parameter;
++            }
++        }
++        // Lean gather (bit 2): only the ramps this prefix reads. A curve parameter's `current`
++        // is read by the redesign whenever any curve parameter moves.
++        let lean = crate::diag::mode() & 4 != 0;
++        let needed = |parameter: usize| {
++            !lean
++                || active & (1 << parameter) != 0
++                || (parameter < 3 && active & CURVE_BITS != 0)
++        };
++        let idle = RampVec {
++            current: L::zero(),
++            target: L::zero(),
++            step: L::zero(),
++            remaining: L::zero(),
++        };
++        Self {
++            active,
++            ramps: core::array::from_fn(|parameter| {
++                if needed(parameter) {
++                    RampVec::gather(&channel.ramps[parameter])
++                } else {
++                    idle
++                }
++            }),
++            rates: core::array::from_fn(|slot| {
++                if !lean || active & (1 << RATE_PARAMETER[slot]) != 0 {
++                    RampVec::gather(&channel.rate_ramps[slot])
++                } else {
++                    idle
++                }
++            }),
++            words: core::array::from_fn(|word| L::load(&channel.words[word][..L::WIDTH])),
++        }
++    }
++
++    #[inline(always)]
++    fn scatter(&self, channel: &mut Channel<L>) {
++        for parameter in 0..RAMP_COUNT {
++            if self.active & (1 << parameter) != 0 {
++                self.ramps[parameter].scatter(&mut channel.ramps[parameter]);
++            }
++        }
++        for slot in 0..2 {
++            if self.active & (1 << RATE_PARAMETER[slot]) != 0 {
++                self.rates[slot].scatter(&mut channel.rate_ramps[slot]);
++            }
++        }
++        for (word, value) in self.words.iter().enumerate() {
++            value.store(&mut channel.words[word][..L::WIDTH]);
++        }
++    }
++
++    /// One frame of `advance_ramps` for the curve parameters: advance, then redesign the static
++    /// curve on every lane where threshold, ratio or knee moved.
++    #[inline(always)]
++    fn advance_curve(&mut self) {
++        if self.active & CURVE_BITS == 0 {
++            return;
++        }
++        let all = L::zero().eq(L::zero());
++        if crate::diag::mode() & 8 != 0 {
++            // Per-word design (bit 3): each curve word depends on one parameter, and the words
++            // of an unmoved parameter already hold its design (the words are always the design
++            // of the ramps' `current` values).
++            if self.active & 1 != 0 {
++                let moved = self.ramps[0].advance_where(all);
++                self.words[COEF_THRESHOLD] =
++                    L::select(moved, self.ramps[0].current, self.words[COEF_THRESHOLD]);
++            }
++            if self.active & 2 != 0 {
++                let moved = self.ramps[1].advance_where(all);
++                let inv = L::splat(1.0).div(self.ramps[1].current).sub(L::splat(1.0));
++                self.words[COEF_INV_RATIO_MINUS_ONE] =
++                    L::select(moved, inv, self.words[COEF_INV_RATIO_MINUS_ONE]);
++            }
++            if self.active & 4 != 0 {
++                let moved = self.ramps[2].advance_where(all);
++                let curve = design_curve::<L>(
++                    self.ramps[0].current,
++                    self.ramps[1].current,
++                    self.ramps[2].current,
++                );
++                self.words[COEF_HALF_KNEE] =
++                    L::select(moved, curve.half_knee_db, self.words[COEF_HALF_KNEE]);
++                self.words[COEF_INV_TWO_KNEE] =
++                    L::select(moved, curve.inv_two_knee, self.words[COEF_INV_TWO_KNEE]);
++            }
++            return;
++        }
++        let mut moved = L::mask_not(all);
++        for parameter in 0..3 {
++            if self.active & (1 << parameter) != 0 {
++                moved = L::mask_or(moved, self.ramps[parameter].advance_where(all));
++            }
++        }
++        let curve = design_curve::<L>(
++            self.ramps[0].current,
++            self.ramps[1].current,
++            self.ramps[2].current,
++        );
++        self.words[COEF_THRESHOLD] = L::select(moved, curve.threshold_db, self.words[COEF_THRESHOLD]);
++        self.words[COEF_INV_RATIO_MINUS_ONE] = L::select(
++            moved,
++            curve.inv_ratio_minus_one,
++            self.words[COEF_INV_RATIO_MINUS_ONE],
++        );
++        self.words[COEF_HALF_KNEE] = L::select(moved, curve.half_knee_db, self.words[COEF_HALF_KNEE]);
++        self.words[COEF_INV_TWO_KNEE] =
++            L::select(moved, curve.inv_two_knee, self.words[COEF_INV_TWO_KNEE]);
++    }
++
++    /// One frame of `advance_ramps` for attack, release, makeup and mix.
++    #[inline(always)]
++    fn advance_output(&mut self) {
++        let all = L::zero().eq(L::zero());
++        for slot in 0..2 {
++            let parameter = RATE_PARAMETER[slot];
++            if self.active & (1 << parameter) != 0 {
++                let moved = self.ramps[parameter].advance_where(all);
++                self.rates[slot].advance_where(moved);
++                self.words[RATE_WORD[slot]] =
++                    L::select(moved, self.rates[slot].current, self.words[RATE_WORD[slot]]);
++            }
++        }
++        for (parameter, word) in [(5, COEF_MAKEUP), (6, COEF_MIX)] {
++            if self.active & (1 << parameter) != 0 {
++                let moved = self.ramps[parameter].advance_where(all);
++                self.words[word] = L::select(moved, self.ramps[parameter].current, self.words[word]);
++            }
++        }
++    }
++
++    #[inline(always)]
++    fn curve(&self) -> GainComputerCoef<L> {
++        GainComputerCoef {
++            threshold_db: self.words[COEF_THRESHOLD],
++            inv_ratio_minus_one: self.words[COEF_INV_RATIO_MINUS_ONE],
++            half_knee_db: self.words[COEF_HALF_KNEE],
++            inv_two_knee: self.words[COEF_INV_TWO_KNEE],
++        }
++    }
++
++    /// `Coef::load` from the word vectors.
++    #[inline(always)]
++    fn coef(&self) -> Coef<L> {
++        let makeup = self.words[COEF_MAKEUP];
++        let mix = self.words[COEF_MIX];
++        Coef {
++            curve: self.curve(),
++            attack: self.words[COEF_ATTACK],
++            release: self.words[COEF_RELEASE],
++            makeup,
++            mix,
++            wet_identity: mix.eq(L::splat(1.0)),
++            dry_mix_zero: mix.eq(L::zero()),
++            makeup_zero: makeup.eq(L::zero()),
++        }
++    }
++}
++
++/// `GainComputerCoef::new` on every lane: the same `f32` operations, the knee's finiteness branch
++/// as a select.
++#[inline(always)]
++fn design_curve<L: Lane>(threshold: L, ratio: L, knee: L) -> GainComputerCoef<L> {
++    let zero = L::zero();
++    let inv_ratio_minus_one = L::splat(1.0).div(ratio).sub(L::splat(1.0));
++    let inv = L::splat(1.0).div(L::splat(2.0).mul(knee));
++    let soft = L::mask_and(knee.gt(zero), inv.lt(L::splat(f32::INFINITY)));
++    GainComputerCoef {
++        threshold_db: threshold,
++        inv_ratio_minus_one,
++        half_knee_db: L::select(soft, L::splat(0.5).mul(knee), zero),
++        inv_two_knee: L::select(soft, inv, zero),
++    }
++}
++
++/// C1: `frames_loop::<L, true>` with lane-wide ramps kept in registers for the prefix.
++#[allow(clippy::too_many_arguments)]
++#[inline(always)]
++fn ramping_loop<L: Lane>(
++    left: &mut [f32],
++    right: &mut [f32],
++    detector: Detector<'_>,
++    end: usize,
++    link: LinkMode,
++    bypass: bool,
++    channel_left: &mut Channel<L>,
++    channel_right: &mut Channel<L>,
++) {
++    let width = L::WIDTH;
++    let invariants = Invariants::<L>::new(link, bypass);
++    let mut ramps_left = ChannelRamps::gather(channel_left);
++    let mut ramps_right = ChannelRamps::gather(channel_right);
++    let mut gain_left = channel_left.gain_reduction_db;
++    let mut gain_right = channel_right.gain_reduction_db;
++    for frame in 0..end {
++        ramps_left.advance_curve();
++        ramps_left.advance_output();
++        ramps_right.advance_curve();
++        ramps_right.advance_output();
++        let coef_left = ramps_left.coef();
++        let coef_right = ramps_right.coef();
++        let slot = frame * width;
++        let main_left = L::load(&left[slot..]);
++        let main_right = L::load(&right[slot..]);
++        let (detected_left, detected_right) =
++            link_frame(detector, slot, main_left, main_right, &invariants);
++        one_frame(main_left, detected_left, &coef_left, &mut gain_left, &invariants)
++            .store(&mut left[slot..]);
++        one_frame(main_right, detected_right, &coef_right, &mut gain_right, &invariants)
++            .store(&mut right[slot..]);
++    }
++    channel_left.gain_reduction_db = gain_left;
++    channel_right.gain_reduction_db = gain_right;
++    ramps_left.scatter(channel_left);
++    ramps_right.scatter(channel_right);
++}
++
++/// C2: the ramping prefix of a `Detector::Main` block as the settled body's two passes. Pass 1
++/// advances the curve ramps and computes every target of the chunk; pass 2 advances attack,
++/// release, makeup and mix and runs the recurrence and the output. Each ramp advances exactly
++/// once per frame, in the pass that reads it.
++#[allow(clippy::too_many_arguments)]
++#[inline(always)]
++fn ramping_main<L: Lane>(
++    left: &mut [f32],
++    right: &mut [f32],
++    end: usize,
++    link: LinkMode,
++    bypass: bool,
++    channel_left: &mut Channel<L>,
++    channel_right: &mut Channel<L>,
++) {
++    let width = L::WIDTH;
++    let invariants = Invariants::<L>::new(link, bypass);
++    let mut ramps_left = ChannelRamps::gather(channel_left);
++    let mut ramps_right = ChannelRamps::gather(channel_right);
++    let dual_mono = matches!(link, LinkMode::DualMono);
++    let mix_moves = (ramps_left.active | ramps_right.active) & (1 << 6) != 0;
++    let wet = !bypass
++        && !mix_moves
++        && every_lane::<L>(ramps_left.words[COEF_MIX].eq(L::splat(1.0)))
++        && every_lane::<L>(ramps_right.words[COEF_MIX].eq(L::splat(1.0)));
++    let mut gains = (
++        channel_left.gain_reduction_db,
++        channel_right.gain_reduction_db,
++    );
++    let left = &mut left[..end * width];
++    let right = &mut right[..end * width];
++    match (dual_mono, wet) {
++        (true, true) => ramping_frames::<L, true, true>(
++            left, right, &mut ramps_left, &mut ramps_right, &mut gains, &invariants,
++        ),
++        (true, false) => ramping_frames::<L, true, false>(
++            left, right, &mut ramps_left, &mut ramps_right, &mut gains, &invariants,
++        ),
++        (false, true) => ramping_frames::<L, false, true>(
++            left, right, &mut ramps_left, &mut ramps_right, &mut gains, &invariants,
++        ),
++        (false, false) => ramping_frames::<L, false, false>(
++            left, right, &mut ramps_left, &mut ramps_right, &mut gains, &invariants,
++        ),
++    }
++    channel_left.gain_reduction_db = gains.0;
++    channel_right.gain_reduction_db = gains.1;
++    ramps_left.scatter(channel_left);
++    ramps_right.scatter(channel_right);
++}
++
++#[inline(always)]
++fn ramping_frames<L: Lane, const DUAL_MONO: bool, const WET: bool>(
++    left: &mut [f32],
++    right: &mut [f32],
++    ramps_left: &mut ChannelRamps<L>,
++    ramps_right: &mut ChannelRamps<L>,
++    gains: &mut (L, L),
++    invariants: &Invariants<L>,
++) {
++    let width = L::WIDTH;
++    let (mut gain_left, mut gain_right) = *gains;
++    let mut targets = [(L::zero(), L::zero()); SETTLED_CHUNK];
++    for (chunk_left, chunk_right) in left
++        .chunks_mut(SETTLED_CHUNK * width)
++        .zip(right.chunks_mut(SETTLED_CHUNK * width))
++    {
++        for ((frame_left, frame_right), target) in chunk_left
++            .chunks_exact(width)
++            .zip(chunk_right.chunks_exact(width))
++            .zip(targets.iter_mut())
++        {
++            ramps_left.advance_curve();
++            ramps_right.advance_curve();
++            let (detected_left, detected_right) = settled_detect::<L, DUAL_MONO>(
++                L::load(frame_left),
++                L::load(frame_right),
++                invariants,
++            );
++            let coef_left = Coef {
++                curve: ramps_left.curve(),
++                ..DUMMY_COEF_FIELDS::<L>()
++            };
++            let coef_right = Coef {
++                curve: ramps_right.curve(),
++                ..DUMMY_COEF_FIELDS::<L>()
++            };
++            *target = (
++                curve_target(detected_left, &coef_left, invariants),
++                curve_target(detected_right, &coef_right, invariants),
++            );
++        }
++        for ((frame_left, frame_right), target) in chunk_left
++            .chunks_exact_mut(width)
++            .zip(chunk_right.chunks_exact_mut(width))
++            .zip(targets.iter())
++        {
++            ramps_left.advance_output();
++            ramps_right.advance_output();
++            let coef_left = ramps_left.coef();
++            let coef_right = ramps_right.coef();
++            let main_left = L::load(frame_left);
++            let main_right = L::load(frame_right);
++            let smoothed_left = ballistic(target.0, &mut gain_left, &coef_left);
++            let smoothed_right = ballistic(target.1, &mut gain_right, &coef_right);
++            settled_output::<L, WET>(main_left, smoothed_left, &coef_left, invariants)
++                .store(frame_left);
++            settled_output::<L, WET>(main_right, smoothed_right, &coef_right, invariants)
++                .store(frame_right);
++        }
++    }
++    *gains = (gain_left, gain_right);
++}
++
++/// The fields of `Coef` pass 1 does not read.
++#[allow(non_snake_case)]
++#[inline(always)]
++fn DUMMY_COEF_FIELDS<L: Lane>() -> Coef<L> {
++    let zero = L::zero();
++    let none = L::mask_not(zero.eq(zero));
++    Coef {
++        curve: GainComputerCoef {
++            threshold_db: zero,
++            inv_ratio_minus_one: zero,
++            half_knee_db: zero,
++            inv_two_knee: zero,
++        },
++        attack: zero,
++        release: zero,
++        makeup: zero,
++        mix: zero,
++        wet_identity: none,
++        dry_mix_zero: none,
++        makeup_zero: none,
++    }
++}
++
+ /// Applies the block-boundary nonfinite policy and clears the envelope on a rejected channel.
+ pub(crate) fn finish_channel<L: Lane>(io: &mut [f32], channel: &mut Channel<L>) -> u32 {
+     bank::finish_channel::<L>(io, || channel.clear_state())
+@@ -1767,6 +2235,12 @@ mod settled_body_tests {
+                 (&mut self.candidate.0, &mut self.candidate.1),
+             );
+             let wet_arm = wet_arm_blocks() - wet_before;
++            // Diagnosis patch: the C2 ramping prefix may take the all-wet arm too.
++            let wet_arm_relaxed = wet_arm == 1
++                || (crate::diag::mode() & 1 != 0
++                    && ramping > 0
++                    && source == Source::Main
++                    && !bypass);
+             let settled = ramping < frames;
+             let all_wet_settled = settled
+                 && source == Source::Main
+@@ -1784,13 +2258,13 @@ mod settled_body_tests {
+                 &format!("{} left kernel", context()),
+                 &oracle_left,
+                 &candidate_left,
+-                wet_arm == 1,
++                wet_arm_relaxed,
+             );
+             let relaxed_right = assert_words_relaxed(
+                 &format!("{} right kernel", context()),
+                 &oracle_right,
+                 &candidate_right,
+-                wet_arm == 1,
++                wet_arm_relaxed,
+             );
+             assert_state(
+                 &format!("{} left", context()),
+@@ -2375,6 +2849,19 @@ mod settled_body_tests {
+         );
+     }
+ 
++    /// Diagnosis patch: the C1 and C2 ramping prefixes against the reference kernel.
++    #[test]
++    #[ignore = "diagnosis: sets the global prototype switch; run alone"]
++    fn diag_ramping_prefix_randomized() {
++        for mode in [1_u32, 2, 1 | 4 | 8] {
++            crate::diag::MODE.store(mode, core::sync::atomic::Ordering::Relaxed);
++            randomized_width::<f32>();
++            randomized_width::<Simd4>();
++            randomized_width::<Simd8>();
++        }
++        crate::diag::MODE.store(0, core::sync::atomic::Ordering::Relaxed);
++    }
++
+     #[test]
+     fn randomized_differential_f32() {
+         randomized_width::<f32>();
+diff --git a/crates/compressor/src/lib.rs b/crates/compressor/src/lib.rs
+index ddcd9140..ba993719 100644
+--- a/crates/compressor/src/lib.rs
++++ b/crates/compressor/src/lib.rs
+@@ -297,6 +297,20 @@ pub const COMPRESSOR_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
+ };
+ 
+ /// Factory entry point for the V1 compressor implementation.
++/// Automation diagnosis (2026-09-27) prototype switches, read once per block. Diagnosis patch
++/// only; never merged.
++#[doc(hidden)]
++pub mod diag {
++    use core::sync::atomic::AtomicU32;
++    /// The prototype bits.
++    pub static MODE: AtomicU32 = AtomicU32::new(0);
++    #[inline(always)]
++    #[allow(dead_code)]
++    pub(crate) fn mode() -> u32 {
++        MODE.load(core::sync::atomic::Ordering::Relaxed)
++    }
++}
++
+ #[derive(Clone, Copy, Debug, Default)]
+ pub struct CompressorFactory;
+ 
+@@ -797,9 +811,21 @@ impl NativeEffectFactory for CompressorFactory {
+         // D4, revision 4: there is no runtime SIMD dispatch. This build has exactly one lane
+         // width, decided at compile time and attested at boot, so a bank of any other width is a
+         // backend that is not available here — the `Ok(None)` scalar fallback, never an error.
+-        if Backend::current().width() != lanes {
++        let diag_w4 =
++            lanes == 4 && lane::diag::NATIVE_W4.load(core::sync::atomic::Ordering::Relaxed);
++        if Backend::current().width() != lanes && !diag_w4 {
+             return Ok(None);
+         }
++        if diag_w4 {
++            let bank_metadata = PreparedBankMetadata {
++                width: request.width,
++                program_key: metadata.program_key(),
++            };
++            return Ok(Some(Box::new(PreparedCompressorBank::<Simd4> {
++                metadata: bank_metadata,
++                instance: Instance::new(metadata, &left_defaults, &right_defaults),
++            }) as Box<dyn PreparedNativeEffectBank>));
++        }
+         let bank_metadata = PreparedBankMetadata {
+             width: request.width,
+             program_key: metadata.program_key(),
+diff --git a/crates/effect-contract/src/lib.rs b/crates/effect-contract/src/lib.rs
+index a7251020..713c6d5e 100644
+--- a/crates/effect-contract/src/lib.rs
++++ b/crates/effect-contract/src/lib.rs
+@@ -5,6 +5,16 @@
+ #![allow(missing_docs)]
+ 
+ mod live;
++
++/// Automation diagnosis (2026-09-27) prototype P1: pair one-channel writes at the drain. Diagnosis
++/// patch only; never merged.
++#[doc(hidden)]
++pub mod live_diag {
++    use core::sync::atomic::AtomicBool;
++    /// When set, a drain whose one-channel writes all pair up (same parameter or target slot,
++    /// both channels, bit-equal final values) preserves the `LIVE` term.
++    pub static PAIRED: AtomicBool = AtomicBool::new(false);
++}
+ mod prepared_target;
+ mod response;
+ mod step;
+diff --git a/crates/effect-contract/src/live.rs b/crates/effect-contract/src/live.rs
+index 8076eacd..0ea62029 100644
+--- a/crates/effect-contract/src/live.rs
++++ b/crates/effect-contract/src/live.rs
+@@ -271,6 +271,8 @@ impl EffectControlLane {
+         let mut unbound = 0_u32;
+         let mut observation = observation;
+         let mut remaining = available;
++        let paired = crate::live_diag::PAIRED.load(core::sync::atomic::Ordering::Relaxed);
++        let mut deferred = false;
+         while remaining != 0 {
+             remaining -= 1;
+             let Ok(record) = self.control.try_pop() else {
+@@ -281,7 +283,16 @@ impl EffectControlLane {
+             // The one hook. `admit` takes the record by trait, not by kind, so a record type
+             // added to this queue later cannot reach the render state without declaring what it
+             // does to the witness (`symmetry::LiveConsoleRecord`).
+-            self.symmetry.admit(&record);
++            let one_channel = match record {
++                EffectControlRecord::Parameter { channel, .. } => channel.writes_one_channel(),
++                EffectControlRecord::PreparedTarget(target) => target.channel.writes_one_channel(),
++                _ => false,
++            };
++            if paired && one_channel {
++                deferred = true;
++            } else {
++                self.symmetry.admit(&record);
++            }
+             let (parameter_index, channel, value) = match record {
+                 EffectControlRecord::PreparedTarget(target) => {
+                     let Some(targets) = self.targets.as_mut() else {
+@@ -366,6 +377,9 @@ impl EffectControlLane {
+             staging[position] = span;
+             staged += 1;
+         }
++        if deferred && !writes_pair(&staging[..staged], self.prepared_targets()) {
++            self.symmetry.clear(ChannelSymmetryWitness::LIVE);
++        }
+         Staged {
+             staged,
+             staged_targets: self.staged_targets,
+@@ -377,6 +391,44 @@ impl EffectControlLane {
+ }
+ // REALTIME_POLICY_END
+ 
++/// Prototype P1: `true` when every one-channel write of one drain has its other-channel twin.
++///
++/// Spans are already last-wins per `(parameter, channel)`, so a staged `Left` span pairs with the
++/// staged `Right` span of its parameter when their values are bit-equal. Targets are a FIFO; the
++/// state they leave is the last target per `(slot, channel)`, so those last targets must pair.
++fn writes_pair(spans: &[PreparedAutomationSpan], targets: &[PreparedEffectTarget]) -> bool {
++    let spans_pair = spans.iter().all(|span| {
++        let other = match span.channel {
++            ParameterChannel::Left => ParameterChannel::Right,
++            ParameterChannel::Right => ParameterChannel::Left,
++            ParameterChannel::Both => return true,
++        };
++        spans.iter().any(|twin| {
++            twin.parameter_index == span.parameter_index
++                && twin.channel == other
++                && twin.start_value.to_bits() == span.start_value.to_bits()
++        })
++    });
++    let last = |slot: u32, channel: ParameterChannel| {
++        targets
++            .iter()
++            .rev()
++            .find(|target| target.slot == slot && target.channel == channel)
++    };
++    let targets_pair = targets.iter().all(|target| {
++        let other = match target.channel {
++            ParameterChannel::Left => ParameterChannel::Right,
++            ParameterChannel::Right => ParameterChannel::Left,
++            ParameterChannel::Both => return true,
++        };
++        match (last(target.slot, target.channel), last(target.slot, other)) {
++            (Some(mine), Some(twin)) => mine.words == twin.words,
++            _ => false,
++        }
++    });
++    spans_pair && targets_pair
++}
++
+ /// What one [`EffectControlLane::stage`] call produced.
+ #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+ pub struct Staged {
+diff --git a/crates/lane/src/lib.rs b/crates/lane/src/lib.rs
+index 6006b363..0c633c65 100644
+--- a/crates/lane/src/lib.rs
++++ b/crates/lane/src/lib.rs
+@@ -89,6 +89,14 @@ mod scalar;
+ mod simd4;
+ mod simd8;
+ pub mod softfma;
++
++/// Automation diagnosis (2026-09-27) switches. Diagnosis patch only; never merged.
++#[doc(hidden)]
++pub mod diag {
++    use core::sync::atomic::AtomicBool;
++    /// Let a native x86 build bind four-lane effect banks (the browser's width), bind time only.
++    pub static NATIVE_W4: AtomicBool = AtomicBool::new(false);
++}
+ mod wide_impl;
+ 
+ pub use backend::{Backend, HostAttestation, attest_host};
+diff --git a/crates/parametric-eq/src/lib.rs b/crates/parametric-eq/src/lib.rs
+index 04d81894..fbea8e58 100644
+--- a/crates/parametric-eq/src/lib.rs
++++ b/crates/parametric-eq/src/lib.rs
+@@ -112,6 +112,32 @@ const STATE_LAYOUT: payload::StateLayout = payload::StateLayout {
+ /// Byte lengths the descriptor advertises, derived from the layout rather than written out.
+ const STATE_SIZES: payload::StatePayloadSizes = payload::expected_sizes(&STATE_LAYOUT);
+ 
++/// Automation diagnosis (2026-09-27) prototype switches, read once per block. Diagnosis patch
++/// only; never merged.
++///
++/// * bit 0 (`E1`): a ramping block runs only the sections that are live or ramping, with the
++///   stationary elision gate (see `ramping_sections`).
++/// * bit 1 (`E2`): vector lane writes on the control path (`start_ramp`, `settle`, `snap`).
++/// * bit 2 (`E3`): the E1 list runs both channels' sections interleaved (ramped kernel pairs).
++#[doc(hidden)]
++pub mod diag {
++    use core::sync::atomic::AtomicU32;
++    /// The prototype bits.
++    pub static MODE: AtomicU32 = AtomicU32::new(0);
++    /// Ramping blocks (per channel pair) that E1 ran with at least one section elided.
++    pub static E1_ELIDED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
++    #[inline(always)]
++    pub(crate) fn mode() -> u32 {
++        MODE.load(core::sync::atomic::Ordering::Relaxed)
++    }
++    #[inline(always)]
++    pub(crate) fn elided(length: usize) {
++        if length < super::EQ_SECTION_COUNT {
++            E1_ELIDED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
++        }
++    }
++}
++
+ /// Samples a prepared target takes to reach its destination (`SmoothingRule::Linear`, D11).
+ const RAMP_SAMPLES: u32 = 64;
+ /// `1 / RAMP_SAMPLES` as an exact power of two: the ramp multiplies, it never divides.
+@@ -936,6 +962,30 @@ fn lane_set<L: Lane>(value: &mut L, lane: usize, sample: f32) {
+     *value = L::load(&words[..L::WIDTH]);
+ }
+ 
++/// Automation diagnosis prototype E2: one-hot lane rows, loaded from static memory so a lane
++/// write is one `select` with no store-to-load round trip through the stack.
++static ONE_HOT: [[f32; MAX_LANES]; MAX_LANES] = {
++    let mut rows = [[0.0_f32; MAX_LANES]; MAX_LANES];
++    let mut lane = 0;
++    while lane < MAX_LANES {
++        rows[lane][lane] = 1.0;
++        lane += 1;
++    }
++    rows
++};
++
++/// The mask with only lane `lane` set.
++#[inline(always)]
++fn lane_mask<L: Lane>(lane: usize) -> L::Mask {
++    L::load(&ONE_HOT[lane][..L::WIDTH]).eq(L::splat(1.0))
++}
++
++/// Writes `word` into the lanes of `mask`: bitwise, so the stored bits are exactly `word`'s.
++#[inline(always)]
++fn lane_put<L: Lane>(value: &mut L, mask: L::Mask, word: f32) {
++    *value = L::select(mask, L::splat(word), *value);
++}
++
+ /// The `-0.0` bit pattern.
+ ///
+ /// It is the one input value an *elided* identity section would not reproduce, and the one state
+@@ -1155,6 +1205,18 @@ impl<L: Lane, const W: usize> Channel<L, W> {
+ 
+     /// Places lane `track` of `section` at `words` with no ramp in flight.
+     fn settle(&mut self, section: usize, track: usize, words: EqSvfWords) {
++        if diag::mode() & 2 != 0 {
++            let mask = lane_mask::<L>(track);
++            let slot = &mut self.sections[section];
++            for (index, word) in words.to_array().into_iter().enumerate() {
++                lane_put(coef_word_mut(&mut slot.coef, index), mask, word);
++                lane_put(coef_word_mut(&mut slot.target, index), mask, word);
++                lane_put(step_word_mut(&mut slot.step, index), mask, 0.0);
++            }
++            self.remaining[section][track] = 0;
++            self.refresh_identity(section);
++            return;
++        }
+         let slot = &mut self.sections[section];
+         for (index, word) in words.to_array().into_iter().enumerate() {
+             lane_set(coef_word_mut(&mut slot.coef, index), track, word);
+@@ -1249,6 +1311,22 @@ impl<L: Lane, const W: usize> Channel<L, W> {
+             self.settle(section, track, words);
+             return;
+         }
++        if diag::mode() & 2 != 0 {
++            let mask = lane_mask::<L>(track);
++            let slot = &mut self.sections[section];
++            for (index, word) in words.to_array().into_iter().enumerate() {
++                let current = lane_get(coef_word(&slot.coef, index), track);
++                lane_put(coef_word_mut(&mut slot.target, index), mask, word);
++                lane_put(
++                    step_word_mut(&mut slot.step, index),
++                    mask,
++                    (word - current) * RAMP_SCALE,
++                );
++            }
++            self.remaining[section][track] = RAMP_SAMPLES;
++            self.refresh_identity(section);
++            return;
++        }
+         let slot = &mut self.sections[section];
+         for (index, word) in words.to_array().into_iter().enumerate() {
+             let current = lane_get(coef_word(&slot.coef, index), track);
+@@ -1434,6 +1512,30 @@ impl<L: Lane, const W: usize> Channel<L, W> {
+             }
+             // The kernel processes current coefficients, then advances them. Snap after a segment
+             // consumes the final sample so the exact target is first used by sample A+64.
++            if diag::mode() & 2 != 0 {
++                let mut ended = L::mask_not(L::zero().eq(L::zero()));
++                let mut any = false;
++                for (track, &was_ramping) in was_ramping.iter().enumerate() {
++                    if was_ramping && self.remaining[section][track] == 0 {
++                        ended = L::mask_or(ended, lane_mask::<L>(track));
++                        any = true;
++                    }
++                }
++                if any {
++                    let slot = &mut self.sections[section];
++                    let target = slot.target;
++                    for index in 0..6 {
++                        let word = coef_word(&target, index);
++                        let coef = coef_word_mut(&mut slot.coef, index);
++                        *coef = L::select(ended, word, *coef);
++                        let step = step_word_mut(&mut slot.step, index);
++                        *step = L::select(ended, L::zero(), *step);
++                    }
++                    snapped = true;
++                }
++                position += length;
++                continue;
++            }
+             for (track, &was_ramping) in was_ramping.iter().enumerate() {
+                 if was_ramping && self.remaining[section][track] == 0 {
+                     self.snap(section, track);
+@@ -1525,6 +1627,16 @@ fn process_channels<L: Lane, const W: usize>(
+     stationary: bool,
+ ) {
+     if !stationary {
++        if diag::mode() & 1 != 0 {
++            let (list, length) =
++                ramping_sections::<L, W>(channels.0, channels.1, left, right, frames);
++            diag::elided(length);
++            for &section in &list[..length] {
++                channels.0.process_section(section, left, frames);
++                channels.1.process_section(section, right, frames);
++            }
++            return;
++        }
+         channels.0.process_block(left, frames);
+         channels.1.process_block(right, frames);
+         return;
+@@ -1562,6 +1674,14 @@ fn process_channels_mono<L: Lane, const W: usize>(
+     stationary: bool,
+ ) {
+     if !stationary {
++        if diag::mode() & 1 != 0 {
++            let (list, length) = ramping_sections_mono::<L, W>(channel, io, frames);
++            diag::elided(length);
++            for &section in &list[..length] {
++                channel.process_section(section, io, frames);
++            }
++            return;
++        }
+         channel.process_block(io, frames);
+         return;
+     }
+@@ -1677,6 +1797,121 @@ fn interleave_mono<L: Lane, const W: usize, const DEPTH: usize>(
+     }
+ }
+ 
++/// Automation diagnosis prototype E1: the sections a **ramping** block runs, in cascade order.
++///
++/// All six unless the stationary elision gate admits the block; then a section is dropped when it
++/// is dead -- the exact identity on every lane of both channels **and** ramping on no lane of
++/// either -- and no *unsafe* ramping section precedes it. A ramping section is safe when its `m0`
++/// word is exactly `1.0` with a `+0.0` increment on every lane of both channels: then `m0 * v0` is
++/// `v0` on every frame of the ramp and the proof's `m0 = 1.0` case applies whatever the other
++/// words do, so the section emits no `-0.0` from an input that carries none. A dead section after
++/// an unsafe ramping section is kept, so the proof never needs the ramping words of any other
++/// shape.
++#[inline(always)]
++fn ramping_sections<L: Lane, const W: usize>(
++    left_channel: &Channel<L, W>,
++    right_channel: &Channel<L, W>,
++    left: &[f32],
++    right: &[f32],
++    frames: usize,
++) -> ([usize; EQ_SECTION_COUNT], usize) {
++    let all = (core::array::from_fn(|section| section), EQ_SECTION_COUNT);
++    let ramping = |section: usize| {
++        left_channel.remaining[section].iter().any(|r| *r != 0)
++            || right_channel.remaining[section].iter().any(|r| *r != 0)
++    };
++    let dead = |section: usize| {
++        !ramping(section) && left_channel.identity[section] && right_channel.identity[section]
++    };
++    let words = frames * W;
++    if !(0..EQ_SECTION_COUNT).any(dead) {
++        return all;
++    }
++    if !block_admits_elision(&left[..words]) || !block_admits_elision(&right[..words]) {
++        return all;
++    }
++    for section in 0..EQ_SECTION_COUNT {
++        let admissible = if dead(section) {
++            section_state_is_positive_zero(&left_channel.sections[section])
++                && section_state_is_positive_zero(&right_channel.sections[section])
++        } else {
++            section_state_has_no_negative_zero(&left_channel.sections[section])
++                && section_state_has_no_negative_zero(&right_channel.sections[section])
++        };
++        if !admissible {
++            return all;
++        }
++    }
++    let unit_m0 = |section: usize| {
++        [left_channel, right_channel].iter().all(|channel| {
++            let slot = &channel.sections[section];
++            lane_bits_all::<L>(slot.coef.m0, 1.0_f32.to_bits())
++                && lane_bits_all::<L>(slot.step.m0, 0)
++        })
++    };
++    let mut list = [0_usize; EQ_SECTION_COUNT];
++    let mut length = 0;
++    let mut unsafe_before = false;
++    for section in 0..EQ_SECTION_COUNT {
++        if dead(section) && !unsafe_before {
++            continue;
++        }
++        if ramping(section) && !unit_m0(section) {
++            unsafe_before = true;
++        }
++        list[length] = section;
++        length += 1;
++    }
++    (list, length)
++}
++
++/// [`ramping_sections`] over one channel (the collapsed body).
++#[inline(always)]
++fn ramping_sections_mono<L: Lane, const W: usize>(
++    channel: &Channel<L, W>,
++    io: &[f32],
++    frames: usize,
++) -> ([usize; EQ_SECTION_COUNT], usize) {
++    let all = (core::array::from_fn(|section| section), EQ_SECTION_COUNT);
++    let ramping = |section: usize| channel.remaining[section].iter().any(|r| *r != 0);
++    let dead = |section: usize| !ramping(section) && channel.identity[section];
++    let words = frames * W;
++    if !(0..EQ_SECTION_COUNT).any(dead) {
++        return all;
++    }
++    if !block_admits_elision(&io[..words]) {
++        return all;
++    }
++    for section in 0..EQ_SECTION_COUNT {
++        let admissible = if dead(section) {
++            section_state_is_positive_zero(&channel.sections[section])
++        } else {
++            section_state_has_no_negative_zero(&channel.sections[section])
++        };
++        if !admissible {
++            return all;
++        }
++    }
++    let unit_m0 = |section: usize| {
++        let slot = &channel.sections[section];
++        lane_bits_all::<L>(slot.coef.m0, 1.0_f32.to_bits()) && lane_bits_all::<L>(slot.step.m0, 0)
++    };
++    let mut list = [0_usize; EQ_SECTION_COUNT];
++    let mut length = 0;
++    let mut unsafe_before = false;
++    for section in 0..EQ_SECTION_COUNT {
++        if dead(section) && !unsafe_before {
++            continue;
++        }
++        if ramping(section) && !unit_m0(section) {
++            unsafe_before = true;
++        }
++        list[length] = section;
++        length += 1;
++    }
++    (list, length)
++}
++
+ /// The cascade positions this stationary block will actually run, in cascade order.
+ ///
+ /// All six, unless identity-section elision is admissible — in which case the sections that are
+@@ -2517,7 +2752,9 @@ impl NativeEffectFactory for ParametricEqFactory {
+         // divergence (`NativeEffectFactory::bind_homogeneous_bank` states the frozen rule).
+         request.validate_shape()?;
+         let lanes = request.width.lanes() as usize;
+-        if lanes != Backend::current().width() {
++        if lanes != Backend::current().width()
++            && !(lanes == 4 && lane::diag::NATIVE_W4.load(core::sync::atomic::Ordering::Relaxed))
++        {
+             return Ok(None);
+         }
+         let first = request
+diff --git a/crates/true-peak-limiter/src/lib.rs b/crates/true-peak-limiter/src/lib.rs
+index 99a15b00..ca4ef441 100644
+--- a/crates/true-peak-limiter/src/lib.rs
++++ b/crates/true-peak-limiter/src/lib.rs
+@@ -71,6 +71,20 @@ use effect_runtime::state_payload::{
+ };
+ use lane::{Backend, Lane, Simd4, Simd8, flush};
+ 
++/// Automation diagnosis (2026-09-27) prototype switches, read once per block. Diagnosis patch
++/// only; never merged.
++#[doc(hidden)]
++pub mod diag {
++    use core::sync::atomic::AtomicU32;
++    /// The prototype bits.
++    pub static MODE: AtomicU32 = AtomicU32::new(0);
++    #[inline(always)]
++    #[allow(dead_code)]
++    pub(crate) fn mode() -> u32 {
++        MODE.load(core::sync::atomic::Ordering::Relaxed)
++    }
++}
++
+ /// Parameters in the frozen descriptor.
+ const PARAMETER_COUNT: usize = 3;
+ /// Ramped parameters: ceiling and release. Lookahead is preparation-only.
+diff --git a/docs/handoffs/effects-2026-09-27/automation-diag-tools/README.md b/docs/handoffs/effects-2026-09-27/automation-diag-tools/README.md
+new file mode 100644
+index 00000000..823139a2
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/automation-diag-tools/README.md
+@@ -0,0 +1,17 @@
++# Automation diagnosis tooling (scratch; diagnosis patch only)
++
++These are the scripts `AUTOMATION-DIAGNOSIS.md` was measured with. Each one hard-codes the
++diagnosis's scratch root (`.../scratchpad/automation-diag`) and worktree path, so edit both
++before reuse.
++
++* `gen_docs.py REPO OUT`: the V8 harness's session documents.
++* `build_web.sh NAME`: builds `src-NAME` (a `git archive` of the tree plus a prototype, its switch
++  compiled as a constant) into `t-web-NAME` with the delivery recipe.
++* `build_check.sh NAME...`: the same, then the `KERNEL_ROSTER` gate on the result.
++* `run_web.sh SUBJECTS ARMS A.wasm [B.wasm ...]`: the timed V8 run, under the lock, on cpu 31.
++* `web_auto.mjs`: the harness itself. `DIGEST=N` makes it an output-identity check instead of a
++  timer.
++* `build_native.sh` and `run_native.sh BINARY rows`: the native console harness
++  (`tools/console-workload/tests/automation_diag.rs`).
++* `crate_test.sh PKG release FILTER` and `run_identity_eq.sh`: the prototype differentials, which
++  are untimed.
+diff --git a/docs/handoffs/effects-2026-09-27/automation-diag-tools/build_check.sh b/docs/handoffs/effects-2026-09-27/automation-diag-tools/build_check.sh
+new file mode 100644
+index 00000000..6b319610
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/automation-diag-tools/build_check.sh
+@@ -0,0 +1,12 @@
++#!/usr/bin/env bash
++# usage: build_check.sh NAME... : build each src-NAME web artifact and run the kernel roster gate.
++set -uo pipefail
++S=/tmp/claude-1002/-home-bl-misofm-engine/43895396-e183-427f-b08f-a0b72f15ae5f/scratchpad/automation-diag
++for n in "$@"; do
++  bash "$S/build_web.sh" "$n" | tail -1
++  wasm-objdump -d "$S/t-web-$n/wasm32-unknown-unknown/release/host_web.wasm" > "$S/logs/$n.dis" 2>&1
++  echo "== $n"
++  python3 -B /home/bl/misofm/engine/.claude/worktrees/agent-ae53afa6e6b89a559/scripts/check-web-audioworklet-callgraph.py \
++    --kernel-shape --kernel-pattern '4wide6f32x[48]' --kernel-min 11 < "$S/logs/$n.dis" 2>&1 \
++    | grep -E "kernel shape|compressor|parametric|limiter|FAIL"
++done
+diff --git a/docs/handoffs/effects-2026-09-27/automation-diag-tools/build_native.sh b/docs/handoffs/effects-2026-09-27/automation-diag-tools/build_native.sh
+new file mode 100644
+index 00000000..d2ca1121
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/automation-diag-tools/build_native.sh
+@@ -0,0 +1,10 @@
++#!/usr/bin/env bash
++# Builds the native automation harness from the worktree into the scratch target dir.
++set -uo pipefail
++S=/tmp/claude-1002/-home-bl-misofm-engine/43895396-e183-427f-b08f-a0b72f15ae5f/scratchpad/automation-diag
++cd /home/bl/misofm/engine/.claude/worktrees/agent-ae53afa6e6b89a559 || exit 2
++export CARGO_INCREMENTAL=0
++CARGO_TARGET_DIR="$S/target" timeout 3000 cargo test --release -p console-workload --test automation_diag --no-run -j 12 > "$S/logs/build-native.log" 2>&1
++rc=$?
++echo "rc=$rc"
++grep -E "^(error|warning)|Executable|-->" "$S/logs/build-native.log" | head -30
+diff --git a/docs/handoffs/effects-2026-09-27/automation-diag-tools/build_web.sh b/docs/handoffs/effects-2026-09-27/automation-diag-tools/build_web.sh
+new file mode 100644
+index 00000000..01e75d73
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/automation-diag-tools/build_web.sh
+@@ -0,0 +1,14 @@
++#!/usr/bin/env bash
++# usage: build_web.sh NAME   (builds src-NAME into t-web-NAME with the shipped web recipe)
++set -uo pipefail
++S=/tmp/claude-1002/-home-bl-misofm-engine/43895396-e183-427f-b08f-a0b72f15ae5f/scratchpad/automation-diag
++NAME=$1
++export CARGO_INCREMENTAL=0
++cargo_home=${CARGO_HOME:-$HOME/.cargo}
++cd "$S/src-$NAME" || exit 2
++CARGO_TARGET_DIR="$S/t-web-$NAME" RUSTFLAGS="-C target-feature=+simd128 -C strip=debuginfo --remap-path-prefix=$cargo_home=/cargo --remap-path-prefix=$S/src-$NAME=/repo" \
++  timeout 3000 cargo build --locked --release --target wasm32-unknown-unknown -p host-web -j 12 > "$S/logs/web-$NAME.log" 2>&1
++rc=$?
++echo "web $NAME rc=$rc"
++tail -3 "$S/logs/web-$NAME.log"
++sha256sum "$S/t-web-$NAME/wasm32-unknown-unknown/release/host_web.wasm"
+diff --git a/docs/handoffs/effects-2026-09-27/automation-diag-tools/crate_test.sh b/docs/handoffs/effects-2026-09-27/automation-diag-tools/crate_test.sh
+new file mode 100644
+index 00000000..7d8fd897
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/automation-diag-tools/crate_test.sh
+@@ -0,0 +1,9 @@
++#!/usr/bin/env bash
++# usage: crate_test.sh PACKAGE PROFILE(dev|release) TESTFILTER [extra test args...]
++set -uo pipefail
++S=/tmp/claude-1002/-home-bl-misofm-engine/43895396-e183-427f-b08f-a0b72f15ae5f/scratchpad/automation-diag
++cd /home/bl/misofm/engine/.claude/worktrees/agent-ae53afa6e6b89a559 || exit 2
++export CARGO_INCREMENTAL=0
++PKG=$1; PROFILE=$2; FILTER=$3; shift 3
++if [ "$PROFILE" = release ]; then REL=--release; else REL=; fi
++CARGO_TARGET_DIR="$S/target-crate" timeout 3000 cargo test $REL -p "$PKG" --lib -j 12 -- --ignored --nocapture --test-threads 1 "$FILTER" "$@" 2>&1 | tail -40
+diff --git a/docs/handoffs/effects-2026-09-27/automation-diag-tools/gen_docs.py b/docs/handoffs/effects-2026-09-27/automation-diag-tools/gen_docs.py
+new file mode 100644
+index 00000000..88f37fc6
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/automation-diag-tools/gen_docs.py
+@@ -0,0 +1,42 @@
++#!/usr/bin/env python3
++"""Automation diagnosis: derive the V8 harness's session documents from the 64-track fixtures.
++
++usage: gen_docs.py REPO_ROOT OUT_DIR
++
++Writes web-{builtins,eq,comp,lim,console,mono}.json: the standing fixture with racks emptied as
++the console-workload decomposition rows do, the source stretched to 1,000 s so the harness never
++runs out, and automation cleared. `web-mono.json` is the mono fixture as written.
++"""
++import copy
++import json
++import sys
++
++root, out = sys.argv[1], sys.argv[2]
++stereo = json.load(open(f"{root}/fixtures/session/v1/console-sixty-four-track-intended.json"))
++mono = json.load(open(f"{root}/fixtures/session/v1/console-sixty-four-track-mono.json"))
++for doc in (stereo, mono):
++    doc["sources"][0]["frames"] = "48000000"
++    doc["automation"] = []
++
++
++def make(name, keep1, keep2, base=stereo):
++    doc = copy.deepcopy(base)
++    for track in doc["tracks"]:
++        track["simd1"]["effects"] = [
++            e for e in track["simd1"]["effects"] if e["identity"]["effect_id"] in keep1
++        ]
++        track["dynamic"]["effects"] = []
++        track["simd2"]["effects"] = [
++            e for e in track["simd2"]["effects"] if e["identity"]["effect_id"] in keep2
++        ]
++    with open(f"{out}/web-{name}.json", "w") as handle:
++        handle.write(json.dumps(doc, separators=(",", ":")))
++
++
++EQ, COMP, LIM = "miso.parametric-eq", "miso.compressor", "miso.true-peak-limiter"
++make("builtins", [], [])
++make("eq", [EQ], [])
++make("comp", [COMP], [])
++make("lim", [], [LIM])
++make("console", [EQ, COMP], [LIM])
++make("mono", [EQ, COMP], [LIM], base=mono)
+diff --git a/docs/handoffs/effects-2026-09-27/automation-diag-tools/run_identity_eq.sh b/docs/handoffs/effects-2026-09-27/automation-diag-tools/run_identity_eq.sh
+new file mode 100644
+index 00000000..8fa85fb2
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/automation-diag-tools/run_identity_eq.sh
+@@ -0,0 +1,9 @@
++#!/usr/bin/env bash
++# Builds and runs the EQ prototype differential (dev or release). Not timed.
++set -uo pipefail
++S=/tmp/claude-1002/-home-bl-misofm-engine/43895396-e183-427f-b08f-a0b72f15ae5f/scratchpad/automation-diag
++cd /home/bl/misofm/engine/.claude/worktrees/agent-ae53afa6e6b89a559 || exit 2
++export CARGO_INCREMENTAL=0
++PROFILE=${1:-release}
++if [ "$PROFILE" = release ]; then REL=--release; else REL=; fi
++CARGO_TARGET_DIR="$S/target" timeout 3000 cargo test $REL -p console-workload --test automation_diag_identity -j 12 -- --ignored --nocapture --test-threads 1 2>&1 | grep -E "^(error|warning)|-->|mode |panicked|test result|FAILED" | head -40
+diff --git a/docs/handoffs/effects-2026-09-27/automation-diag-tools/run_native.sh b/docs/handoffs/effects-2026-09-27/automation-diag-tools/run_native.sh
+new file mode 100644
+index 00000000..52b3fd5c
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/automation-diag-tools/run_native.sh
+@@ -0,0 +1,9 @@
++#!/usr/bin/env bash
++# usage: run_native.sh BINARY TESTNAME [env assignments are inherited]
++# Runs one timed test binary pinned to cpu 31 under the shared timing lock.
++set -uo pipefail
++LOCK=/tmp/claude-1002/-home-bl-misofm-engine/43895396-e183-427f-b08f-a0b72f15ae5f/scratchpad/timing.lock
++BIN=$1
++shift
++echo "request $(date +%T) loadavg $(cat /proc/loadavg)"
++flock -w 7200 "$LOCK" bash -c 'echo "hold start $(date +%T) loadavg $(cat /proc/loadavg)"; timeout 1150 taskset -c 31 "$0" --ignored --nocapture --test-threads 1 "$@"; echo "hold end $(date +%T) loadavg $(cat /proc/loadavg)"' "$BIN" "$@"
+diff --git a/docs/handoffs/effects-2026-09-27/automation-diag-tools/run_web.sh b/docs/handoffs/effects-2026-09-27/automation-diag-tools/run_web.sh
+new file mode 100644
+index 00000000..2447d6b9
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/automation-diag-tools/run_web.sh
+@@ -0,0 +1,7 @@
++#!/usr/bin/env bash
++# usage: run_web.sh SUBJECTS ARMS wasm... (ROUNDS/BLOCKS/WARM inherited)
++set -uo pipefail
++LOCK=/tmp/claude-1002/-home-bl-misofm-engine/43895396-e183-427f-b08f-a0b72f15ae5f/scratchpad/timing.lock
++W=/tmp/claude-1002/-home-bl-misofm-engine/43895396-e183-427f-b08f-a0b72f15ae5f/scratchpad/automation-diag/web
++echo "request $(date +%T) loadavg $(cat /proc/loadavg)"
++flock -w 7200 "$LOCK" bash -c 'echo "hold start $(date +%T) loadavg $(cat /proc/loadavg)"; timeout 1150 taskset -c 31 node --no-liftoff --max-old-space-size=16000 "$0/web_auto.mjs" "$@"; echo "hold end $(date +%T) loadavg $(cat /proc/loadavg)"' "$W" "$@"
+diff --git a/docs/handoffs/effects-2026-09-27/automation-diag-tools/web_auto.mjs b/docs/handoffs/effects-2026-09-27/automation-diag-tools/web_auto.mjs
+new file mode 100644
+index 00000000..5932c097
+--- /dev/null
++++ b/docs/handoffs/effects-2026-09-27/automation-diag-tools/web_auto.mjs
+@@ -0,0 +1,302 @@
++// Automation cost diagnosis (2026-09-27): time the shipped host_web.wasm render export while the
++// live console automates one effect parameter. Scratch harness, recorded in the diagnosis patch.
++//
++// usage: node --no-liftoff web_auto.mjs SUBJECTS ARMS base.wasm [proto.wasm ...]
++//   SUBJECTS: comma list of eq_gain,eq_freq,comp_threshold,comp_attack,lim_ceiling,lim_release
++//   ARMS: comma list of settled,one_point,one_segment,one_left_only,eight_of_64,all_64 (or "all")
++// env: ROUNDS (6), BLOCKS (600), WARM (64)
++import { readFileSync } from "node:fs";
++import { createHash } from "node:crypto";
++import { createPreparedControl } from "/home/bl/misofm/engine/.claude/worktrees/agent-ae53afa6e6b89a559/hosts/host-web/web/prepared-control.js";
++
++const ROOT = "/tmp/claude-1002/-home-bl-misofm-engine/43895396-e183-427f-b08f-a0b72f15ae5f/scratchpad/automation-diag/web";
++const ABI_LAYOUT = JSON.parse(readFileSync(
++  "/home/bl/misofm/engine/.claude/worktrees/agent-ae53afa6e6b89a559/sdk/assets/miso-engine-v1-abi-layout.json"));
++const ABI_VERSION = ABI_LAYOUT.abiVersion;
++const BOOT_OPTIONS_BYTES = 64, BUFFER_SOURCE_ID = 2, BUFFER_SOURCE_PCM = 3, BUFFER_COMMAND = 6;
++const Q = 128, RATE = 48000;
++const COMMAND_RECORD_BYTES = ABI_LAYOUT.commandRecord.bytes;
++const COMMAND_EFFECT_PARAM = 5;
++const commandField = (name) => ABI_LAYOUT.commandRecord.fields.find((f) => f.name === name).offset;
++const structureField = (s, name) => ABI_LAYOUT.structures[s].fields.find((f) => f.name === name).offset;
++const resultCode = (name) => ABI_LAYOUT.constants.resultCodes.find((r) => r.name === name).value;
++const commandReason = (name) => ABI_LAYOUT.constants.commandReasons.find((r) => r.name === name).value;
++
++const SUBJECTS = {
++  eq_gain: { doc: "eq", rack: 0, parameterId: 4, base: 3.0, step: 0.25, lo: -3, hi: 9, rate: 0.02 },
++  eq_freq: { doc: "eq", rack: 0, parameterId: 3, base: 200, step: 5, lo: 100, hi: 400, rate: 0.5 },
++  comp_threshold: { doc: "comp", rack: 0, parameterId: 1, base: -24, step: 0.5, lo: -30, hi: -18, rate: 0.05 },
++  comp_attack: { doc: "comp", rack: 0, parameterId: 4, base: 10, step: 1, lo: 5, hi: 20, rate: 0.05 },
++  comp_ratio: { doc: "comp", rack: 0, parameterId: 2, base: 4, step: 0.5, lo: 2, hi: 8, rate: 0.02 },
++  comp_knee: { doc: "comp", rack: 0, parameterId: 3, base: 6, step: 1, lo: 0, hi: 12, rate: 0.05 },
++  comp_release: { doc: "comp", rack: 0, parameterId: 5, base: 80, step: 5, lo: 40, hi: 200, rate: 0.5 },
++  comp_makeup: { doc: "comp", rack: 0, parameterId: 6, base: 2, step: 0.5, lo: 0, hi: 6, rate: 0.02 },
++  comp_mix: { doc: "comp", rack: 0, parameterId: 7, base: 0.5, step: 0.1, lo: 0, hi: 1, rate: 0.004 },
++  lim_ceiling: { doc: "lim", rack: 2, parameterId: 1, base: -3, step: 0.25, lo: -6, hi: -1, rate: 0.01 },
++  lim_release: { doc: "lim", rack: 2, parameterId: 2, base: 60, step: 5, lo: 40, hi: 120, rate: 0.2 },
++};
++SUBJECTS.console_mix = { doc: "console", mix: true };
++SUBJECTS.mono_mix = { doc: "mono", mix: true };
++const MIX_PARTS = [
++  { ...SUBJECTS.eq_gain, effectIndex: 0 },
++  { ...SUBJECTS.comp_threshold, effectIndex: 1 },
++  { ...SUBJECTS.lim_ceiling, effectIndex: 0 },
++];
++const ARMS = {
++  untouched: { tracks: [], channel: 2, untouched: true },
++  settled: { tracks: [], channel: 2 },
++  one_point: { tracks: [0], channel: 2 },
++  one_segment: { tracks: [0], channel: 2, segment: true },
++  one_left_only: { tracks: [0], channel: 0 },
++  eight_of_64: { tracks: [0, 8, 16, 24, 32, 40, 48, 56], channel: 2 },
++  all_64: { tracks: [...Array(64).keys()], channel: 2 },
++};
++
++function value(subject, arm, block) {
++  if (arm.segment) {
++    const span = subject.hi - subject.lo;
++    const travelled = (block * subject.rate) % (2 * span);
++    return Math.fround(travelled <= span ? subject.lo + travelled : subject.hi - (travelled - span));
++  }
++  return Math.fround(block % 2 === 0 ? subject.base + subject.step : subject.base - subject.step);
++}
++
++function encode(records) {
++  const bytes = new Uint8Array(records.length * COMMAND_RECORD_BYTES);
++  const view = new DataView(bytes.buffer);
++  records.forEach((r, i) => {
++    const o = i * COMMAND_RECORD_BYTES;
++    view.setUint8(o + commandField("kind"), COMMAND_EFFECT_PARAM);
++    view.setUint8(o + commandField("rack"), r.rack);
++    view.setUint8(o + commandField("channel"), r.channel);
++    view.setUint32(o + commandField("trackIndex"), r.track, true);
++    view.setUint32(o + commandField("effectIndex"), r.effectIndex ?? 0, true);
++    view.setUint32(o + commandField("parameterId"), r.parameterId, true);
++    view.setUint32(o + commandField("smoothingSamples"), 0, true);
++    view.setFloat32(o + commandField("values"), r.value, true);
++  });
++  return bytes;
++}
++
++function commandAck(e, handle, result, records) {
++  const report = new DataView(e.memory.buffer, e.miso_engine_web_v1_command_report_ptr(handle),
++    ABI_LAYOUT.structures.commandReport.bytes);
++  return {
++    result,
++    reason: report.getUint32(structureField("commandReport", "reason"), true),
++    rejectedIndex: report.getUint32(structureField("commandReport", "rejectedIndex"), true),
++    admitted: report.getUint32(structureField("commandReport", "admitted"), true),
++    appliedAtSample: report.getBigUint64(structureField("commandReport", "appliedAtSample"), true),
++    records: records.slice(),
++  };
++}
++
++function preparedControl(e, handle) {
++  const configBytes = ABI_LAYOUT.structures.eqTargetConfig.bytes;
++  const configCopySync = (address) => {
++    const result = e.miso_engine_web_v1_eq_target_config_copy(handle, address.trackIndex, address.rack, address.effectIndex);
++    if (result === resultCode("ok")) {
++      const pointer = e.miso_engine_web_v1_eq_target_config_ptr(handle);
++      return { result, reason: commandReason("none"), config: new Uint8Array(e.memory.buffer, pointer, configBytes).slice() };
++    }
++    return { result, reason: commandReason("none"), config: new Uint8Array(0) };
++  };
++  const stage = (records) => {
++    const pointer = e.miso_engine_web_v1_buffer_ptr(handle, BUFFER_COMMAND);
++    new Uint8Array(e.memory.buffer, pointer, records.byteLength).set(records);
++  };
++  const ordinarySubmitSync = (records, count) => {
++    stage(records);
++    return commandAck(e, handle, e.miso_engine_web_v1_command_submit(handle, count), records);
++  };
++  const preparedSubmitSync = (records, companion, count) => {
++    stage(records);
++    const pointer = e.miso_engine_web_v1_prepared_companion_ptr(handle);
++    new Uint8Array(e.memory.buffer, pointer, companion.byteLength).set(companion);
++    return commandAck(e, handle, e.miso_engine_web_v1_prepared_command_submit(handle, count, companion.byteLength), records);
++  };
++  const refusal = (records, _count, reason, rejectedIndex, result) => ({
++    result, reason, rejectedIndex: rejectedIndex ?? 0, admitted: 0, appliedAtSample: 0n, records: records.slice(),
++  });
++  return createPreparedControl({
++    instance: e, abiLayout: ABI_LAYOUT, sampleRateHz: RATE,
++    configCopySync, ordinarySubmitSync, preparedSubmitSync, preparedRefusalSync: refusal,
++  });
++}
++
++const docs = {};
++for (const name of ["builtins", "eq", "comp", "lim", "console", "mono"]) docs[name] = readFileSync(`${ROOT}/web-${name}.json`);
++
++function boot(module, docName) {
++  const e = new WebAssembly.Instance(module, {}).exports;
++  const doc = docs[docName];
++  const opt = e.miso_engine_web_v1_boot_options_ptr();
++  const view = new DataView(e.memory.buffer, opt, BOOT_OPTIONS_BYTES);
++  view.setUint32(0, BOOT_OPTIONS_BYTES, true); view.setUint32(4, ABI_VERSION, true);
++  view.setUint32(8, RATE, true); view.setUint32(12, Q, true); view.setUint32(16, 8192, true);
++  view.setUint32(20, 0, true); view.setBigUint64(24, 0n, true);
++  // console words: command queue 64 records per track, no meters, no observation, no master.
++  view.setBigUint64(32, 64n, true);
++  for (let i = 1; i < 4; i++) view.setBigUint64(32 + i * 8, 0n, true);
++  const p = e.miso_engine_web_v1_document_ptr(doc.byteLength);
++  new Uint8Array(e.memory.buffer, p, doc.byteLength).set(doc);
++  const handle = e.miso_engine_web_v1_boot(doc.byteLength);
++  if (handle === 0) {
++    const n = e.miso_engine_web_v1_boot_diagnostic_bytes();
++    throw new Error(`boot ${e.miso_engine_web_v1_boot_result()}: ${new TextDecoder().decode(new Uint8Array(e.memory.buffer, p, n))}`);
++  }
++  const arm = {
++    e, handle, frame: 0n, n: 0, left: new Float32Array(Q), right: new Float32Array(Q),
++    idPtr: e.miso_engine_web_v1_buffer_ptr(handle, BUFFER_SOURCE_ID),
++    pcmPtr: e.miso_engine_web_v1_buffer_ptr(handle, BUFFER_SOURCE_PCM),
++    id: new TextEncoder().encode("fixture-source"), control: null, block: 0, refused: 0,
++  };
++  arm.control = preparedControl(e, handle);
++  return arm;
++}
++
++function feed(a) {
++  for (let i = 0; i < Q; i++) { const t = (a.n * Q + i) * 0.017; a.left[i] = Math.sin(t) * 0.6; a.right[i] = -Math.sin(t) * 0.45; }
++  const mem = a.e.memory.buffer;
++  new Uint8Array(mem, a.idPtr, a.id.length).set(a.id);
++  const pcm = new Float32Array(mem, a.pcmPtr, 2 * Q);
++  pcm.set(a.left, 0); pcm.set(a.right, Q);
++  const r = a.e.miso_engine_web_v1_source_submit(a.handle, a.id.length, 1n, a.frame, 2, Q, 0);
++  if (r !== 0) throw new Error(`submit ${r}`);
++  a.frame += BigInt(Q); a.n++;
++}
++
++function submit(a, records) {
++  for (let start = 0; start < records.length; start += 128) {
++    const chunk = records.slice(start, start + 128);
++    const reply = a.control.submitSync(encode(chunk), chunk.length);
++    if (reply.result !== 0) { a.refused++; if (a.refused < 4) console.log(`refused ${reply.result} reason ${reply.reason} idx ${reply.rejectedIndex}`); }
++  }
++}
++
++function render(a) {
++  const r = a.e.miso_engine_web_v1_render(a.handle, Q);
++  if (r !== 0) throw new Error(`render ${r}`);
++}
++
++function parts(subject, arm, track) {
++  if (!subject.mix) return subject;
++  return MIX_PARTS[arm === ARMS.all_64 ? track % 3 : Math.floor(track / 8) % 3];
++}
++
++function records(subject, arm, block) {
++  const out = [];
++  for (const track of arm.tracks) {
++    const part = parts(subject, arm, track);
++    const v = block === null ? Math.fround(part.base) : value(part, arm, block);
++    out.push({ rack: part.rack, effectIndex: part.effectIndex ?? 0, channel: arm.channel, track, parameterId: part.parameterId, value: v });
++  }
++  return out;
++}
++
++function settleRecords(subject) {
++  const out = [];
++  for (const part of subject.mix ? MIX_PARTS : [subject]) {
++    for (let track = 0; track < 64; track++) {
++      out.push({ rack: part.rack, effectIndex: part.effectIndex ?? 0, channel: 2, track, parameterId: part.parameterId, value: Math.fround(part.base) });
++    }
++  }
++  return out;
++}
++
++function makeArm(module, subject, armName) {
++  const a = boot(module, subject.doc);
++  a.subject = subject; a.arm = ARMS[armName]; a.armName = armName;
++  for (let i = 0; i < 4; i++) feed(a);
++  // settle every track at the base value before timing
++  if (!ARMS[armName].untouched) submit(a, settleRecords(subject));
++  for (let i = 0; i < 64; i++) { feed(a); render(a); }
++  return a;
++}
++
++function measure(a, blocks) {
++  const s = new Float64Array(blocks);
++  for (let i = 0; i < blocks; i++) {
++    feed(a);
++    if (a.arm.tracks.length > 0) submit(a, records(a.subject, a.arm, a.block));
++    a.block++;
++    const t0 = process.hrtime.bigint();
++    render(a);
++    s[i] = Number(process.hrtime.bigint() - t0);
++  }
++  s.sort();
++  return s[blocks >> 1] / 1000;
++}
++
++function digestRun(module, subjectName, armName, blocks) {
++  const a = makeArm(module, SUBJECTS[subjectName], armName);
++  const hash = createHash("sha256");
++  const outPtr = a.e.miso_engine_web_v1_buffer_ptr(a.handle, 5);
++  for (let i = 0; i < blocks; i++) {
++    feed(a);
++    if (a.arm.tracks.length > 0) submit(a, records(a.subject, a.arm, a.block));
++    a.block++;
++    render(a);
++    hash.update(new Uint8Array(a.e.memory.buffer, outPtr, 2 * Q * 4));
++  }
++  return hash.digest("hex").slice(0, 16) + (a.refused ? ` refused=${a.refused}` : "");
++}
++
++const [subjectList, armList, ...files] = process.argv.slice(2);
++if (process.env.DIGEST) {
++  const mods = files.map((f) => [f.split("/").slice(-4, -3)[0].replace("t-web-", ""), new WebAssembly.Module(readFileSync(f))]);
++  const armsD = armList === "all" ? Object.keys(ARMS) : armList.split(",");
++  let bad = 0;
++  for (const s of subjectList.split(",")) for (const armName of armsD) {
++    const d = mods.map(([n, m]) => digestRun(m, s, armName, Number(process.env.DIGEST)));
++    const same = d.every((x) => x === d[0]);
++    if (!same) bad++;
++    console.log(`${s.padEnd(15)} ${armName.padEnd(14)} ${same ? "SAME" : "DIFFERENT"} ${d.join(" ")}`);
++  }
++  console.log(bad ? `MISMATCHES ${bad}` : "all identical");
++  process.exit(0);
++}
++const subjects = subjectList.split(",");
++const armNames = armList === "all" ? Object.keys(ARMS) : armList.split(",");
++const ROUNDS = Number(process.env.ROUNDS ?? 6), BLOCKS = Number(process.env.BLOCKS ?? 600), WARM = Number(process.env.WARM ?? 64);
++const modules = files.map((f) => [f.split("/").slice(-4, -3)[0].replace("t-web-", ""), new WebAssembly.Module(readFileSync(f))]);
++const med = (v) => { const x = [...v].sort((p, q) => p - q); return (x[(x.length - 1) >> 1] + x[x.length >> 1]) / 2; };
++console.log(`node ${process.version} loadavg ${readFileSync("/proc/loadavg", "utf8").trim()}`);
++const all = [];
++const baselines = [];
++for (const [modName, module] of modules) {
++  const baseline = boot(module, "builtins");
++  baseline.arm = ARMS.settled; baseline.subject = SUBJECTS.eq_gain; baseline.modName = modName; baseline.rounds = [];
++  for (let i = 0; i < 4; i++) feed(baseline);
++  for (let i = 0; i < 64; i++) { feed(baseline); render(baseline); }
++  baselines.push(baseline);
++  for (const s of subjects) for (const armName of armNames) {
++    const a = makeArm(module, SUBJECTS[s], armName);
++    a.subjectName = s; a.modName = modName; a.rounds = [];
++    all.push(a);
++  }
++}
++const everyone = [...baselines, ...all];
++for (const a of everyone) measure(a, 1000);
++for (let round = 0; round < ROUNDS; round++) {
++  for (let k = 0; k < everyone.length; k++) {
++    const a = everyone[(k + round) % everyone.length];
++    measure(a, WARM); a.rounds.push(measure(a, BLOCKS));
++  }
++}
++console.log(`end loadavg ${readFileSync("/proc/loadavg", "utf8").trim()}`);
++for (const [modName] of modules) {
++  const baseline = baselines.find((b) => b.modName === modName);
++  const base = med(baseline.rounds);
++  console.log(`module ${modName} builtins ${base.toFixed(2)} us`);
++  for (const s of subjects) {
++    const arms = all.filter((x) => x.modName === modName && x.subjectName === s);
++    const settled = arms.find((a) => a.armName === "settled");
++    const settledIso = settled ? med(settled.rounds.map((v, i) => v - baseline.rounds[i])) : NaN;
++    for (const a of arms) {
++      const iso = med(a.rounds.map((v, i) => v - baseline.rounds[i]));
++      const row = med(a.rounds);
++      console.log(`  ${modName} ${s.padEnd(15)} ${a.armName.padEnd(14)} row ${row.toFixed(2).padStart(8)} us  isolate ${iso.toFixed(2).padStart(8)} us  ${(iso * 1000 * 3.7 / 16384).toFixed(2).padStart(6)} cyc/ls@3.7  vs settled ${(iso - settledIso >= 0 ? "+" : "") + (iso - settledIso).toFixed(2)} us (${(100 * (iso - settledIso) / settledIso).toFixed(1)} %)  rounds [${Math.min(...a.rounds).toFixed(2)}..${Math.max(...a.rounds).toFixed(2)}] refused ${a.refused}`);
++    }
++  }
++}
+diff --git a/tools/console-workload/Cargo.toml b/tools/console-workload/Cargo.toml
+index 1b327e59..16029d88 100644
+--- a/tools/console-workload/Cargo.toml
++++ b/tools/console-workload/Cargo.toml
+@@ -32,6 +32,10 @@ session.workspace = true
+ # tests build, so the bench and the wasm guest that link it as a normal dependency are unaffected.
+ [dev-dependencies]
+ graph = { workspace = true, features = ["test-support"] }
++# Automation diagnosis patch: the prototype switches.
++parametric-eq.workspace = true
++compressor.workspace = true
++true-peak-limiter.workspace = true
+ 
+ [lints]
+ workspace = true
+diff --git a/tools/console-workload/src/lib.rs b/tools/console-workload/src/lib.rs
+index 76876388..5ba1c317 100644
+--- a/tools/console-workload/src/lib.rs
++++ b/tools/console-workload/src/lib.rs
+@@ -357,6 +357,8 @@ pub enum Workload {
+     ///
+     /// Not in [`WORKLOADS`]: see [`METERED_WORKLOADS`].
+     SixtyFourTrackConsoleMetered,
++    /// Automation diagnosis (patch only): builtins plus the `simd2` limiter.
++    SixtyFourTrackLimiterOnly,
+ }
+ 
+ impl Workload {
+@@ -507,6 +509,8 @@ enum Strip {
+     LimiterRemoved,
+     /// Every rack is emptied; the builtins, fader and matrix are left as written.
+     BuiltinsOnly,
++    /// Automation diagnosis: `simd1` and `dynamic` emptied, the `simd2` limiter kept.
++    LimiterOnly,
+     /// Every rack is emptied and every builtin, fader and matrix is set to its identity.
+     Identity,
+     /// Every rack is emptied and every *input* builtin is set to its identity; the fader and the
+@@ -566,6 +570,7 @@ impl Workload {
+             Self::SixtyFourTrackConsoleMonoDual => "sixty_four_track_console_mono_dual",
+             Self::SixtyFourTrackConsoleHalfMono => "sixty_four_track_console_half_mono",
+             Self::SixtyFourTrackConsoleMetered => "sixty_four_track_console_metered",
++            Self::SixtyFourTrackLimiterOnly => "sixty_four_track_limiter_only",
+         }
+     }
+     /// How many console tracks this workload renders.
+@@ -621,6 +626,7 @@ impl Workload {
+             Self::SixtyFourTrackBuiltinsOnly => Strip::BuiltinsOnly,
+             Self::SixtyFourTrackDispatchOnly => Strip::Identity,
+             Self::SixtyFourTrackEqCompSimd1 => Strip::LimiterRemoved,
++            Self::SixtyFourTrackLimiterOnly => Strip::LimiterOnly,
+             // The driver-fed twin takes the same strip edit and the same compile with builtins;
+             // only how `build_full` binds its track inputs differs (`Workload::source_feed`).
+             Self::SixtyFourTrackGainPanOnly | Self::SixtyFourTrackGainPanRing => Strip::GainPan,
+@@ -715,6 +721,11 @@ fn apply_strip(model: &mut SessionModel, strip: Strip) {
+                 track.simd1.effects.clear();
+                 track.dynamic.effects.clear();
+             }
++            Strip::LimiterOnly => {
++                track.simd1.effects.clear();
++                track.dynamic.effects.clear();
++                continue;
++            }
+             Strip::Identity | Strip::GainPan => {
+                 track.simd1.effects.clear();
+                 track.dynamic.effects.clear();
+@@ -1207,6 +1218,14 @@ impl SessionRuntime {
+     /// Returns `None` when the arm attached no control channels (a `control: false` plan) or when
+     /// no prepared effect carries that id.
+     #[must_use]
++    pub fn control_channel(&self, track_id: &str, effect_id: &str) -> Option<usize> {
++        self.controls.iter().position(|producer| {
++            producer.descriptor.id.as_str() == effect_id && &*producer.track_id == track_id
++        })
++    }
++
++    /// Automation diagnosis (patch only): the prepared control channel of `(track, effect)`.
++    #[must_use]
+     pub fn first_track_control_channel(&self, effect_id: &str) -> Option<usize> {
+         self.controls
+             .iter()
+diff --git a/tools/console-workload/tests/automation_diag.rs b/tools/console-workload/tests/automation_diag.rs
+new file mode 100644
+index 00000000..56d10726
+--- /dev/null
++++ b/tools/console-workload/tests/automation_diag.rs
+@@ -0,0 +1,640 @@
++//! Automation cost diagnosis (2026-09-27). Diagnosis patch only; never merged.
++//!
++//! Console-level isolates of the EQ, the compressor and the limiter under parameter automation,
++//! through the production live-console control path (`SessionRuntime::push_parameter`, one Point
++//! per block, drained at the top of the next block). Every push is outside the clock.
++//!
++//! `cargo test --release -p console-workload --test automation_diag -- --ignored --nocapture
++//! --test-threads 1 rows` with `AUTO_DIAG_WIDTHS=8,4` `AUTO_DIAG_SUBJECTS=eq_gain,...`
++//! `AUTO_DIAG_ROUNDS=6` `AUTO_DIAG_BLOCKS=800`.
++
++use std::time::Instant;
++
++use bench_support::digest::Sha256Sink;
++use console_workload::{ObservationArm, PlanConfig, SessionRuntime, Workload};
++use effect_contract::ParameterChannel;
++use lane::Backend;
++
++const CONFIG: PlanConfig = PlanConfig {
++    meters: false,
++    control: true,
++    observation: ObservationArm::Absent,
++};
++
++/// Lane-samples per 64-track block: 64 tracks x 2 channels x 128 frames.
++const LANE_SAMPLES: f64 = 64.0 * 2.0 * 128.0;
++
++#[derive(Clone, Copy)]
++struct Subject {
++    name: &'static str,
++    workload: Workload,
++    effect_id: &'static str,
++    parameter: u32,
++    base: f32,
++    step: f32,
++    sweep_low: f32,
++    sweep_high: f32,
++    sweep_rate: f32,
++}
++
++const SUBJECTS: [Subject; 13] = [
++    Subject {
++        name: "eq_gain",
++        workload: Workload::SixtyFourTrackEqOnly,
++        effect_id: "miso.parametric-eq",
++        parameter: 3,
++        base: 3.0,
++        step: 0.25,
++        sweep_low: -3.0,
++        sweep_high: 9.0,
++        sweep_rate: 0.02,
++    },
++    Subject {
++        name: "eq_freq",
++        workload: Workload::SixtyFourTrackEqOnly,
++        effect_id: "miso.parametric-eq",
++        parameter: 2,
++        base: 200.0,
++        step: 5.0,
++        sweep_low: 100.0,
++        sweep_high: 400.0,
++        sweep_rate: 0.5,
++    },
++    Subject {
++        name: "comp_threshold",
++        workload: Workload::SixtyFourTrackCompressorOnly,
++        effect_id: "miso.compressor",
++        parameter: 0,
++        base: -24.0,
++        step: 0.5,
++        sweep_low: -30.0,
++        sweep_high: -18.0,
++        sweep_rate: 0.05,
++    },
++    Subject {
++        name: "comp_attack",
++        workload: Workload::SixtyFourTrackCompressorOnly,
++        effect_id: "miso.compressor",
++        parameter: 3,
++        base: 10.0,
++        step: 1.0,
++        sweep_low: 5.0,
++        sweep_high: 20.0,
++        sweep_rate: 0.05,
++    },
++    Subject {
++        name: "comp_ratio",
++        workload: Workload::SixtyFourTrackCompressorOnly,
++        effect_id: "miso.compressor",
++        parameter: 1,
++        base: 4.0,
++        step: 0.5,
++        sweep_low: 2.0,
++        sweep_high: 8.0,
++        sweep_rate: 0.02,
++    },
++    Subject {
++        name: "comp_knee",
++        workload: Workload::SixtyFourTrackCompressorOnly,
++        effect_id: "miso.compressor",
++        parameter: 2,
++        base: 6.0,
++        step: 1.0,
++        sweep_low: 0.0,
++        sweep_high: 12.0,
++        sweep_rate: 0.05,
++    },
++    Subject {
++        name: "comp_release",
++        workload: Workload::SixtyFourTrackCompressorOnly,
++        effect_id: "miso.compressor",
++        parameter: 4,
++        base: 80.0,
++        step: 5.0,
++        sweep_low: 40.0,
++        sweep_high: 200.0,
++        sweep_rate: 0.5,
++    },
++    Subject {
++        name: "comp_makeup",
++        workload: Workload::SixtyFourTrackCompressorOnly,
++        effect_id: "miso.compressor",
++        parameter: 5,
++        base: 2.0,
++        step: 0.5,
++        sweep_low: 0.0,
++        sweep_high: 6.0,
++        sweep_rate: 0.02,
++    },
++    Subject {
++        name: "comp_mix",
++        workload: Workload::SixtyFourTrackCompressorOnly,
++        effect_id: "miso.compressor",
++        parameter: 6,
++        base: 0.5,
++        step: 0.1,
++        sweep_low: 0.0,
++        sweep_high: 1.0,
++        sweep_rate: 0.004,
++    },
++    Subject {
++        name: "console_mix",
++        workload: Workload::SixtyFourTrackConsole,
++        effect_id: "",
++        parameter: 0,
++        base: 0.0,
++        step: 0.0,
++        sweep_low: 0.0,
++        sweep_high: 0.0,
++        sweep_rate: 0.0,
++    },
++    Subject {
++        name: "mono_mix",
++        workload: Workload::SixtyFourTrackConsoleMono,
++        effect_id: "",
++        parameter: 0,
++        base: 0.0,
++        step: 0.0,
++        sweep_low: 0.0,
++        sweep_high: 0.0,
++        sweep_rate: 0.0,
++    },
++    Subject {
++        name: "lim_ceiling",
++        workload: Workload::SixtyFourTrackLimiterOnly,
++        effect_id: "miso.true-peak-limiter",
++        parameter: 0,
++        base: -3.0,
++        step: 0.25,
++        sweep_low: -6.0,
++        sweep_high: -1.0,
++        sweep_rate: 0.01,
++    },
++    Subject {
++        name: "lim_release",
++        workload: Workload::SixtyFourTrackLimiterOnly,
++        effect_id: "miso.true-peak-limiter",
++        parameter: 1,
++        base: 60.0,
++        step: 5.0,
++        sweep_low: 40.0,
++        sweep_high: 120.0,
++        sweep_rate: 0.2,
++    },
++];
++
++/// The realistic mixing subject's three controls, cycled over the automated tracks.
++fn mix_components() -> [Subject; 3] {
++    let find = |name: &str| *SUBJECTS.iter().find(|s| s.name == name).expect("subject");
++    [find("eq_gain"), find("comp_threshold"), find("lim_ceiling")]
++}
++
++/// The `(track, control)` pairs an arm automates.
++fn automations(subject: &Subject, arm: Arm) -> Vec<(usize, Subject)> {
++    let tracks = arm.tracks();
++    if subject.name == "console_mix" || subject.name == "mono_mix" {
++        let parts = mix_components();
++        tracks
++            .into_iter()
++            .map(|track| {
++                let part = if arm == Arm::All { track % 3 } else { (track / 8) % 3 };
++                (track, parts[part])
++            })
++            .collect()
++    } else {
++        tracks.into_iter().map(|track| (track, *subject)).collect()
++    }
++}
++
++#[derive(Clone, Copy, PartialEq, Eq, Debug)]
++enum Arm {
++    Untouched,
++    Quiet,
++    One,
++    OneSegment,
++    OneLeft,
++    Eight,
++    All,
++}
++
++const ARMS: [Arm; 7] = [
++    Arm::Untouched,
++    Arm::Quiet,
++    Arm::One,
++    Arm::OneSegment,
++    Arm::OneLeft,
++    Arm::Eight,
++    Arm::All,
++];
++
++impl Arm {
++    fn name(self) -> &'static str {
++        match self {
++            Self::Untouched => "untouched",
++            Self::Quiet => "settled",
++            Self::One => "one_point",
++            Self::OneSegment => "one_segment",
++            Self::OneLeft => "one_left_only",
++            Self::Eight => "eight_of_64",
++            Self::All => "all_64",
++        }
++    }
++    fn tracks(self) -> Vec<usize> {
++        match self {
++            Self::Quiet | Self::Untouched => vec![],
++            Self::One | Self::OneSegment | Self::OneLeft => vec![0],
++            Self::Eight => (0..8).map(|k| k * 8).collect(),
++            Self::All => (0..64).collect(),
++        }
++    }
++    fn channels(self) -> &'static [ParameterChannel] {
++        match self {
++            Self::OneLeft => &[ParameterChannel::Left],
++            _ => &[ParameterChannel::Left, ParameterChannel::Right],
++        }
++    }
++}
++
++impl Subject {
++    fn value(&self, arm: Arm, block: u64) -> f32 {
++        match arm {
++            Arm::OneSegment => {
++                let span = self.sweep_high - self.sweep_low;
++                let travelled = (block as f32 * self.sweep_rate) % (2.0 * span);
++                if travelled <= span {
++                    self.sweep_low + travelled
++                } else {
++                    self.sweep_high - (travelled - span)
++                }
++            }
++            _ => {
++                if block.is_multiple_of(2) {
++                    self.base + self.step
++                } else {
++                    self.base - self.step
++                }
++            }
++        }
++    }
++}
++
++struct ArmRuntime {
++    arm: Arm,
++    mode: u32,
++    runtime: SessionRuntime,
++    channels: Vec<(usize, Subject)>,
++    block: u64,
++    refused: u64,
++    digest: Sha256Sink,
++}
++
++fn track_id(track: usize) -> String {
++    format!("ch{track:02}")
++}
++
++/// Stores one prototype mode: bits 0-7 EQ, 8-15 compressor, 16-23 limiter.
++fn set_mode(mode: u32) {
++    use core::sync::atomic::Ordering::Relaxed;
++    parametric_eq::diag::MODE.store(mode & 0xff, Relaxed);
++    compressor::diag::MODE.store((mode >> 8) & 0xff, Relaxed);
++    true_peak_limiter::diag::MODE.store((mode >> 16) & 0xff, Relaxed);
++    effect_contract::live_diag::PAIRED.store(mode & 0x100_0000 != 0, Relaxed);
++}
++
++fn build(subject: &Subject, arm: Arm, mode: u32, dispatch: Backend) -> ArmRuntime {
++    set_mode(mode);
++    let mut runtime = SessionRuntime::build_with_dispatch(subject.workload, CONFIG, dispatch);
++    let parts: Vec<Subject> = if subject.name == "console_mix" || subject.name == "mono_mix" {
++        mix_components().to_vec()
++    } else {
++        vec![*subject]
++    };
++    // Every arm is settled at the same base on every track before anything is timed.
++    for part in parts.iter().filter(|_| arm != Arm::Untouched) {
++        for track in 0..64 {
++            let channel = runtime
++                .control_channel(&track_id(track), part.effect_id)
++                .expect("a control channel per track");
++            for side in [ParameterChannel::Left, ParameterChannel::Right] {
++                assert!(runtime.push_parameter(channel, part.parameter, side, part.base));
++            }
++        }
++        for block in 0..8 {
++            runtime.render(block).expect("pre-roll");
++        }
++    }
++    for block in 8..64 {
++        runtime.render(block).expect("pre-roll");
++    }
++    let channels = automations(subject, arm)
++        .into_iter()
++        .map(|(track, part)| {
++            (
++                runtime
++                    .control_channel(&track_id(track), part.effect_id)
++                    .expect("a control channel per track"),
++                part,
++            )
++        })
++        .collect();
++    ArmRuntime {
++        arm,
++        mode,
++        runtime,
++        channels,
++        block: 64,
++        refused: 0,
++        digest: Sha256Sink::new(),
++    }
++}
++
++fn run_blocks(subject: &Subject, arm: &mut ArmRuntime, blocks: usize, samples: &mut Vec<u64>) {
++    set_mode(arm.mode);
++    samples.clear();
++    let _ = subject;
++    for _ in 0..blocks {
++        for &(channel, part) in &arm.channels {
++            let value = part.value(arm.arm, arm.block);
++            for &side in arm.arm.channels() {
++                if !arm.runtime.push_parameter(channel, part.parameter, side, value) {
++                    arm.refused += 1;
++                }
++            }
++        }
++        let start = Instant::now();
++        let result = arm.runtime.render(arm.block);
++        let elapsed = start.elapsed().as_nanos() as u64;
++        result.expect("render");
++        samples.push(elapsed);
++        arm.block += 1;
++    }
++    arm.runtime.hash_output(&mut arm.digest);
++}
++
++fn p50(samples: &mut [u64]) -> f64 {
++    samples.sort_unstable();
++    samples[samples.len() / 2] as f64
++}
++
++fn median(values: &[f64]) -> f64 {
++    let mut sorted = values.to_vec();
++    sorted.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
++    let n = sorted.len();
++    if n % 2 == 1 {
++        sorted[n / 2]
++    } else {
++        0.5 * (sorted[n / 2 - 1] + sorted[n / 2])
++    }
++}
++
++/// Core clock from a dependent scalar add chain (3 cycles per `vaddss` on Zen 3), in GHz.
++fn calibrate() -> f64 {
++    let mut best = f64::MAX;
++    for _ in 0..5 {
++        let mut acc = std::hint::black_box(1.0_f32);
++        let step = std::hint::black_box(1.0e-7_f32);
++        let n = 20_000_000_u64;
++        let start = Instant::now();
++        for _ in 0..n {
++            acc += step;
++        }
++        std::hint::black_box(acc);
++        let ns = start.elapsed().as_nanos() as f64;
++        best = best.min(ns / n as f64);
++    }
++    3.0 / best
++}
++
++fn loadavg() -> String {
++    std::fs::read_to_string("/proc/loadavg")
++        .unwrap_or_default()
++        .trim()
++        .to_owned()
++}
++
++fn env_list(name: &str, default: &str) -> Vec<String> {
++    std::env::var(name)
++        .unwrap_or_else(|_| default.to_owned())
++        .split(',')
++        .map(str::to_owned)
++        .filter(|item| !item.is_empty())
++        .collect()
++}
++
++fn env_usize(name: &str, default: usize) -> usize {
++    std::env::var(name)
++        .ok()
++        .and_then(|value| value.parse().ok())
++        .unwrap_or(default)
++}
++
++#[test]
++#[ignore = "timing harness; run by hand under the timing lock"]
++fn rows() {
++    let widths = env_list("AUTO_DIAG_WIDTHS", "8,4");
++    let names = env_list(
++        "AUTO_DIAG_SUBJECTS",
++        "eq_gain,comp_threshold,lim_ceiling",
++    );
++    let arm_names = env_list("AUTO_DIAG_ARMS", "");
++    let rounds = env_usize("AUTO_DIAG_ROUNDS", 6);
++    let modes: Vec<u32> = env_list("AUTO_DIAG_MODES", "0")
++        .iter()
++        .map(|mode| u32::from_str_radix(mode.trim_start_matches("0x"), 16).expect("hex mode"))
++        .collect();
++    let blocks = env_usize("AUTO_DIAG_BLOCKS", 800);
++    let ghz = calibrate();
++    println!("clock {ghz:.3} GHz loadavg {}", loadavg());
++    for width in &widths {
++        let dispatch = match width.as_str() {
++            "8" => Backend::Simd8,
++            "4" => {
++                lane::diag::NATIVE_W4.store(true, core::sync::atomic::Ordering::Relaxed);
++                Backend::Simd4
++            }
++            _ => panic!("width"),
++        };
++        let subjects: Vec<Subject> = SUBJECTS
++            .iter()
++            .copied()
++            .filter(|subject| names.iter().any(|name| name == subject.name))
++            .collect();
++        let arms: Vec<Arm> = ARMS
++            .iter()
++            .copied()
++            .filter(|arm| arm_names.is_empty() || arm_names.iter().any(|name| name == arm.name()))
++            .collect();
++        set_mode(0);
++        let mut baseline = SessionRuntime::build_with_dispatch(
++            Workload::SixtyFourTrackBuiltinsOnly,
++            CONFIG,
++            dispatch,
++        );
++        for block in 0..64 {
++            baseline.render(block).expect("pre-roll");
++        }
++        let mut baseline_block = 64_u64;
++        let mut runtimes: Vec<(Subject, Vec<ArmRuntime>)> = subjects
++            .iter()
++            .map(|subject| {
++                (
++                    *subject,
++                    arms.iter()
++                        .flat_map(|arm| modes.iter().map(move |mode| (*arm, *mode)))
++                        .map(|(arm, mode)| build(subject, arm, mode, dispatch))
++                        .collect(),
++                )
++            })
++            .collect();
++        let mut per_round: Vec<Vec<Vec<f64>>> = runtimes
++            .iter()
++            .map(|(_, arms)| arms.iter().map(|_| Vec::new()).collect())
++            .collect();
++        let mut base_rounds = Vec::new();
++        let mut samples = Vec::with_capacity(blocks);
++        let start_load = loadavg();
++        for round in 0..rounds {
++            // Baseline once per round, interleaved with the subjects.
++            set_mode(0);
++            samples.clear();
++            for _ in 0..blocks {
++                let start = Instant::now();
++                baseline.render(baseline_block).expect("render");
++                samples.push(start.elapsed().as_nanos() as u64);
++                baseline_block += 1;
++            }
++            base_rounds.push(p50(&mut samples));
++            for (index, (subject, arms)) in runtimes.iter_mut().enumerate() {
++                let count = arms.len();
++                for offset in 0..count {
++                    let arm_index = (offset + round) % count;
++                    let arm = &mut arms[arm_index];
++                    run_blocks(subject, arm, 64, &mut samples);
++                    run_blocks(subject, arm, blocks, &mut samples);
++                    per_round[index][arm_index].push(p50(&mut samples));
++                }
++            }
++        }
++        let end_load = loadavg();
++        let base = median(&base_rounds) / 1000.0;
++        println!(
++            "width {width} rounds {rounds} blocks {blocks} load start [{start_load}] end [{end_load}]"
++        );
++        println!("  builtins_only p50 {base:.2} us");
++        for (index, (subject, arms)) in runtimes.iter().enumerate() {
++            for (arm_index, arm) in arms.iter().enumerate() {
++                let settled_index = arms
++                    .iter()
++                    .position(|other| other.arm == Arm::Quiet && other.mode == arm.mode)
++                    .unwrap_or(0);
++                let settled = median(&per_round[index][settled_index]) / 1000.0;
++                let rounds_us: Vec<f64> = per_round[index][arm_index]
++                    .iter()
++                    .map(|ns| ns / 1000.0)
++                    .collect();
++                let row = median(&rounds_us);
++                // Isolate per round against the same round's baseline, then the median.
++                let isolates: Vec<f64> = rounds_us
++                    .iter()
++                    .zip(base_rounds.iter())
++                    .map(|(row, base)| row - base / 1000.0)
++                    .collect();
++                let isolate = median(&isolates);
++                let cyc = isolate * 1000.0 * ghz / LANE_SAMPLES;
++                let spread = rounds_us
++                    .iter()
++                    .fold((f64::MAX, f64::MIN), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
++                let collapse = arm.runtime.bank_collapse_counters();
++                if subject.name == "mono_mix" {
++                    println!(
++                        "    collapse [{} block-cohorts, {} cohorts] over {} blocks",
++                        collapse[0], collapse[1], arm.block
++                    );
++                }
++                println!(
++                    "  w{width} m{:06x} {:<15} {:<14} row {row:8.2} us  isolate {isolate:8.2} us  {cyc:6.2} cyc/ls  vs settled {:+7.2} us ({:+6.1} %)  rounds [{:.2}..{:.2}] refused {}",
++                    arm.mode,
++                    subject.name,
++                    arm.arm.name(),
++                    row - settled,
++                    100.0 * (row - settled) / (settled - base),
++                    spread.0,
++                    spread.1,
++                    arm.refused,
++                );
++            }
++        }
++    }
++}
++
++/// Prototype identity: every arm renders the same bits under each prototype mode as under mode 0.
++#[test]
++#[ignore = "diagnosis identity check; run by hand"]
++fn identity() {
++    let widths = env_list("AUTO_DIAG_WIDTHS", "8,4");
++    let names = env_list(
++        "AUTO_DIAG_SUBJECTS",
++        "eq_gain,eq_freq,comp_threshold,comp_attack,lim_ceiling,lim_release",
++    );
++    let modes: Vec<u32> = env_list("AUTO_DIAG_MODES", "0")
++        .iter()
++        .map(|mode| u32::from_str_radix(mode.trim_start_matches("0x"), 16).expect("hex mode"))
++        .collect();
++    let blocks = env_usize("AUTO_DIAG_BLOCKS", 200);
++    let mut mismatches = 0;
++    for width in &widths {
++        let dispatch = match width.as_str() {
++            "8" => Backend::Simd8,
++            "4" => {
++                lane::diag::NATIVE_W4.store(true, core::sync::atomic::Ordering::Relaxed);
++                Backend::Simd4
++            }
++            _ => panic!("width"),
++        };
++        for subject in SUBJECTS
++            .iter()
++            .filter(|subject| names.iter().any(|name| name == subject.name))
++        {
++            for arm in ARMS {
++                let digests: Vec<String> = modes
++                    .iter()
++                    .map(|mode| {
++                        let mut runtime = build(subject, arm, *mode, dispatch);
++                        let mut hash = Sha256Sink::new();
++                        for _ in 0..blocks {
++                            set_mode(runtime.mode);
++                            for &(channel, part) in &runtime.channels {
++                                let value = part.value(runtime.arm, runtime.block);
++                                for &side in runtime.arm.channels() {
++                                    assert!(runtime.runtime.push_parameter(
++                                        channel,
++                                        part.parameter,
++                                        side,
++                                        value
++                                    ));
++                                }
++                            }
++                            runtime.runtime.render(runtime.block).expect("render");
++                            runtime.runtime.hash_output(&mut hash);
++                            runtime.block += 1;
++                        }
++                        hash.finish_hex()
++                    })
++                    .collect();
++                let same = digests.iter().all(|digest| *digest == digests[0]);
++                if !same {
++                    mismatches += 1;
++                }
++                println!(
++                    "w{width} {:<15} {:<14} {} {}",
++                    subject.name,
++                    arm.name(),
++                    if same { "SAME" } else { "DIFFERENT" },
++                    &digests[0][..16]
++                );
++            }
++        }
++    }
++    set_mode(0);
++    assert_eq!(mismatches, 0, "a prototype mode moved rendered bits");
++}
+diff --git a/tools/console-workload/tests/automation_diag_identity.rs b/tools/console-workload/tests/automation_diag_identity.rs
+new file mode 100644
+index 00000000..031dba57
+--- /dev/null
++++ b/tools/console-workload/tests/automation_diag_identity.rs
+@@ -0,0 +1,378 @@
++//! Automation diagnosis (2026-09-27): randomized bank-level differentials of the EQ prototypes
++//! E1 (ramping-block elision) and E2 (vector lane writes) against the unmodified path, with
++//! hostile input. Diagnosis patch only; never merged.
++//!
++//! `cargo test --release -p console-workload --test automation_diag_identity -- --ignored
++//! --nocapture --test-threads 1`
++
++use core::sync::atomic::Ordering::Relaxed;
++
++use effect_compiler::launch_native_effect_registry;
++use effect_contract::{
++    BankWidth, EffectBankProcessBlock, EffectQuality, EffectTargetRequest, InitialParameterValue,
++    LinkMode, ParameterChannel, PrepareEffectBankRequest, PrepareEffectLimits,
++    PrepareEffectRequest, PreparedEffectTarget, PreparedNativeEffectBank, PreparedPorts,
++    PreparedSidechainPort, StatePayloadOutput,
++};
++use lane::Backend;
++
++const QUANTUM: usize = 128;
++const RATE: u32 = 48_000;
++
++struct Rng(u64);
++
++impl Rng {
++    fn next(&mut self) -> u64 {
++        let mut x = self.0;
++        x ^= x >> 12;
++        x ^= x << 25;
++        x ^= x >> 27;
++        self.0 = x;
++        x.wrapping_mul(0x2545_f491_4f6c_dd1d)
++    }
++    fn unit(&mut self) -> f32 {
++        (self.next() >> 40) as f32 / (1u64 << 24) as f32
++    }
++    fn below(&mut self, n: usize) -> usize {
++        (self.next() % n as u64) as usize
++    }
++    fn chance(&mut self, p: f32) -> bool {
++        self.unit() < p
++    }
++    fn log(&mut self, low: f32, high: f32) -> f32 {
++        (low.ln() + self.unit() * (high.ln() - low.ln())).exp().clamp(low, high)
++    }
++}
++
++/// One lane's value for descriptor index `index`, drawn from the EQ's domains.
++fn draw(rng: &mut Rng, index: usize) -> f32 {
++    if index < 24 {
++        match index % 6 {
++            0 => f32::from(u8::from(rng.chance(0.6))),
++            1 => (1 + rng.below(6)) as f32,
++            2 => rng.log(20.0, 18_000.0),
++            3 => -24.0 + 48.0 * rng.unit(),
++            4 => rng.log(0.2, 12.0),
++            _ => 0.1 + 0.9 * rng.unit(),
++        }
++    } else {
++        match index - 24 {
++            0 | 3 => f32::from(u8::from(rng.chance(0.4))),
++            1 | 4 => rng.log(20.0, 18_000.0),
++            _ => rng.log(0.2, 12.0),
++        }
++    }
++}
++
++/// Automatable descriptor indices: band frequency, gain, Q, slope, and every cut parameter.
++fn automatable(index: usize) -> bool {
++    index >= 24 || index % 6 >= 2
++}
++
++fn request(values: &[InitialParameterValue]) -> PrepareEffectRequest<'_> {
++    PrepareEffectRequest {
++        sample_rate: RATE,
++        quantum: QUANTUM as u32,
++        quality: EffectQuality::Normal,
++        bypass: false,
++        link_mode: LinkMode::DualMono,
++        ports: PreparedPorts {
++            sidechain: PreparedSidechainPort::None,
++        },
++        initial_values: values,
++        limits: PrepareEffectLimits {
++            maximum_total_state_bytes: 1 << 16,
++            maximum_scratch_bytes: 1 << 16,
++            maximum_automation_spans_per_block: 48,
++        },
++    }
++}
++
++fn hostile(rng: &mut Rng, profile: usize) -> f32 {
++    match profile {
++        0 => 2.0 * rng.unit() - 1.0,
++        1 => 0.0,
++        2 => {
++            if rng.chance(0.3) {
++                -0.0
++            } else {
++                2.0 * rng.unit() - 1.0
++            }
++        }
++        3 => f32::from_bits((rng.next() as u32) & 0x807f_ffff),
++        4 => {
++            if rng.chance(0.05) {
++                [f32::INFINITY, f32::NEG_INFINITY, f32::NAN, 1.0e31, -3.0e38][rng.below(5)]
++            } else {
++                2.0 * rng.unit() - 1.0
++            }
++        }
++        _ => {
++            if rng.chance(0.02) {
++                -0.0
++            } else {
++                1.0e-3 * (2.0 * rng.unit() - 1.0)
++            }
++        }
++    }
++}
++
++fn snapshot(bank: &dyn PreparedNativeEffectBank, lanes: usize, sizes: [usize; 3]) -> Vec<u8> {
++    let mut out = Vec::new();
++    for lane in 0..lanes {
++        let mut common = vec![0_u8; sizes[0]];
++        let mut left = vec![0_u8; sizes[1]];
++        let mut right = vec![0_u8; sizes[2]];
++        bank.snapshot_track_state_payload(
++            lane as u32,
++            StatePayloadOutput {
++                common: &mut common,
++                left: &mut left,
++                right: &mut right,
++            },
++        )
++        .expect("snapshot");
++        out.extend_from_slice(&common);
++        out.extend_from_slice(&left);
++        out.extend_from_slice(&right);
++    }
++    out
++}
++
++fn same_words(a: &[f32], b: &[f32]) -> bool {
++    a.iter()
++        .zip(b)
++        .all(|(x, y)| x.to_bits() == y.to_bits())
++}
++
++#[allow(clippy::too_many_lines)]
++fn scenario(seed: u64, width: BankWidth, mode: u32, mono: bool) -> (u64, u64) {
++    let registry = launch_native_effect_registry().expect("registry");
++    let eq = registry
++        .get_shared_ascii("miso.parametric-eq")
++        .expect("eq");
++    let preparation = eq.target_preparation().expect("targets");
++    let sizes = eq.descriptor().qualities[0].maximum_state;
++    let sizes = [
++        sizes.common_bytes as usize,
++        sizes.left_bytes as usize,
++        sizes.right_bytes as usize,
++    ];
++    let lanes = width.lanes() as usize;
++    let backend = if lanes == 4 {
++        Backend::Simd4
++    } else {
++        Backend::Simd8
++    };
++    let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
++    let parameters = eq.descriptor().parameters.len();
++    // Per-scenario shape: some bands off on every lane (so E1 has dead sections to drop), a
++    // shared kind per band most of the time, and cuts usually off.
++    let band_off: [bool; 4] = core::array::from_fn(|_| rng.chance(0.55));
++    let band_kind: [f32; 4] = core::array::from_fn(|_| (1 + rng.below(6)) as f32);
++    let shared_kind = rng.chance(0.7);
++    let cut_on: [bool; 2] = core::array::from_fn(|_| rng.chance(0.3));
++    let shape = |rng: &mut Rng, index: usize| -> f32 {
++        if index < 24 {
++            let band = index / 6;
++            match index % 6 {
++                0 => f32::from(u8::from(!band_off[band] && rng.chance(0.85))),
++                1 if shared_kind => band_kind[band],
++                _ => draw(rng, index),
++            }
++        } else {
++            match index - 24 {
++                0 => f32::from(u8::from(cut_on[0] && rng.chance(0.8))),
++                3 => f32::from(u8::from(cut_on[1] && rng.chance(0.8))),
++                _ => draw(rng, index),
++            }
++        }
++    };
++    // Per lane: descriptor-major, left then right.
++    let mut values: Vec<Vec<InitialParameterValue>> = (0..lanes)
++        .map(|_| {
++            let symmetric = mono || rng.chance(0.5);
++            let mut lane = Vec::with_capacity(parameters * 2);
++            for index in 0..parameters {
++                let left = shape(&mut rng, index);
++                let right = if symmetric || index % 6 < 2 && index < 24 {
++                    left
++                } else {
++                    shape(&mut rng, index)
++                };
++                for (channel, value) in [(ParameterChannel::Left, left), (ParameterChannel::Right, right)]
++                {
++                    lane.push(InitialParameterValue {
++                        parameter_index: index as u32,
++                        channel,
++                        value,
++                    });
++                }
++            }
++            lane
++        })
++        .collect();
++    let requests: Vec<PrepareEffectRequest<'_>> = values.iter().map(|v| request(v)).collect();
++    let bind = || {
++        eq.bind_homogeneous_bank(PrepareEffectBankRequest {
++            backend,
++            width,
++            requests: &requests,
++        })
++    };
++    let (Ok(Some(mut oracle)), Ok(Some(mut candidate))) = (bind(), bind()) else {
++        return (0, 0);
++    };
++    drop(requests);
++    let offsets = vec![0_u32; lanes + 1];
++    let mut compared = 0_u64;
++    let mut ramping_blocks = 0_u64;
++    for block in 0..96_u64 {
++        // Events: a batch of retargets through the production target preparation.
++        if rng.chance(0.55) {
++            ramping_blocks += 1;
++            for _ in 0..1 + rng.below(3) {
++                let lane = rng.below(lanes);
++                let mut index = rng.below(parameters);
++                while !automatable(index) {
++                    index = rng.below(parameters);
++                }
++                let value = draw(&mut rng, index);
++                let both = mono || rng.chance(0.5);
++                let sides: &[usize] = if both {
++                    &[0, 1]
++                } else if rng.chance(0.5) {
++                    &[0]
++                } else {
++                    &[1]
++                };
++                for &side in sides {
++                    let slot = index * 2 + side;
++                    let previous = values[lane][slot].value;
++                    values[lane][slot].value = value;
++                    let mut changed = vec![false; parameters * 2];
++                    changed[slot] = true;
++                    let mut targets = [PreparedEffectTarget {
++                        slot: 0,
++                        channel: ParameterChannel::Left,
++                        words: [0; 12],
++                    }; 12];
++                    match preparation.prepare_targets(
++                        EffectTargetRequest {
++                            sample_rate: RATE,
++                            values: &values[lane],
++                            changed: &changed,
++                        },
++                        &mut targets,
++                    ) {
++                        Ok(count) => {
++                            for target in &targets[..count] {
++                                let a = oracle.apply_prepared_target_lane(lane, target);
++                                let b = candidate.apply_prepared_target_lane(lane, target);
++                                assert_eq!(a, b, "seed {seed} block {block}: target application");
++                            }
++                        }
++                        Err(_) => values[lane][slot].value = previous,
++                    }
++                }
++            }
++        }
++        let frames = if rng.chance(0.6) {
++            QUANTUM
++        } else {
++            1 + rng.below(QUANTUM)
++        };
++        let words = frames * lanes;
++        let profile = if rng.chance(0.65) {
++            [0, 1, 5][rng.below(3)]
++        } else {
++            [2, 3, 4][rng.below(3)]
++        };
++        let mut left = vec![0.0_f32; words];
++        let mut right = vec![0.0_f32; words];
++        for sample in &mut left {
++            *sample = hostile(&mut rng, profile);
++        }
++        if mono {
++            right.copy_from_slice(&left);
++        } else {
++            for sample in &mut right {
++                *sample = hostile(&mut rng, profile);
++            }
++        }
++        let (mut oracle_left, mut oracle_right) = (left.clone(), right.clone());
++        let (mut candidate_left, mut candidate_right) = (left, right);
++        let run = |bank: &mut Box<dyn PreparedNativeEffectBank>, l: &mut [f32], r: &mut [f32]| {
++            let block_io = EffectBankProcessBlock::new(
++                l,
++                r,
++                None,
++                frames as u32,
++                width,
++                block * QUANTUM as u64,
++                &[],
++                &offsets,
++                QUANTUM as u32,
++            )
++            .expect("block");
++            if mono {
++                bank.process_bank_mono(block_io)
++            } else {
++                bank.process_bank(block_io)
++            }
++        };
++        parametric_eq::diag::MODE.store(0, Relaxed);
++        let oracle_report = run(&mut oracle, &mut oracle_left, &mut oracle_right);
++        parametric_eq::diag::MODE.store(mode, Relaxed);
++        let candidate_report = run(&mut candidate, &mut candidate_left, &mut candidate_right);
++        parametric_eq::diag::MODE.store(0, Relaxed);
++        assert_eq!(oracle_report, candidate_report, "seed {seed} block {block}: report");
++        assert!(
++            same_words(&oracle_left, &candidate_left),
++            "seed {seed} block {block} W{lanes} mode {mode} mono {mono}: left output"
++        );
++        if !mono {
++            assert!(
++                same_words(&oracle_right, &candidate_right),
++                "seed {seed} block {block} W{lanes} mode {mode}: right output"
++            );
++        }
++        assert!(
++            snapshot(&*oracle, lanes, sizes) == snapshot(&*candidate, lanes, sizes),
++            "seed {seed} block {block} W{lanes} mode {mode} mono {mono}: state"
++        );
++        compared += 1;
++    }
++    (compared, ramping_blocks)
++}
++
++#[test]
++#[ignore = "diagnosis differential; run by hand"]
++fn eq_prototypes_render_the_unmodified_bits() {
++    lane::diag::NATIVE_W4.store(true, Relaxed);
++    let scenarios: u64 = std::env::var("AUTO_DIAG_SCENARIOS")
++        .ok()
++        .and_then(|value| value.parse().ok())
++        .unwrap_or(200);
++    for mode in [1_u32, 2, 3] {
++        for width in [BankWidth::Four, BankWidth::Eight] {
++            let mut blocks = 0;
++            let mut bound = 0;
++            let mut event_blocks = 0;
++            for seed in 0..scenarios {
++                let mono = seed % 4 == 3;
++                let (compared, events) = scenario(seed, width, mode, mono);
++                event_blocks += events;
++                if compared > 0 {
++                    bound += 1;
++                }
++                blocks += compared;
++            }
++            println!(
++                "mode {mode} W{}: {bound}/{scenarios} scenarios bound, {blocks} blocks bit-identical ({event_blocks} with retargets, {} E1-elided ramping blocks so far)",
++                width.lanes(),
++                parametric_eq::diag::E1_ELIDED.load(Relaxed)
++            );
++        }
++    }
++}

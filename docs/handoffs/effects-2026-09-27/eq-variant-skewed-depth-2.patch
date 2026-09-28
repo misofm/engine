@@ -1,0 +1,92 @@
+diff --git a/crates/parametric-eq/src/lib.rs b/crates/parametric-eq/src/lib.rs
+index bb160ecf..7e4c269d 100644
+--- a/crates/parametric-eq/src/lib.rs
++++ b/crates/parametric-eq/src/lib.rs
+@@ -1778,7 +1778,7 @@ fn interleave<L: Lane, const W: usize, const DEPTH: usize>(
+             core::array::from_fn(|k| channels.0.dry_mask(at[k])),
+             core::array::from_fn(|k| channels.1.dry_mask(at[k])),
+         ];
+-        svf_cascade_interleaved_with_dry_masks::<L, 2, DEPTH>(
++        skewed_cascade::<L, 2, DEPTH>(
+             [&mut *left, &mut *right],
+             frames,
+             &coefficients,
+@@ -1795,6 +1795,78 @@ fn interleave<L: Lane, const W: usize, const DEPTH: usize>(
+     }
+ }
+ 
++
++/// Variant kernel: section `k` of every stream runs frame `i - k` in iteration `i`.
++#[inline(always)]
++fn skewed_cascade<L: Lane, const S: usize, const D: usize>(
++    io: [&mut [f32]; S],
++    frames: usize,
++    c: &[[SvfCoef<L>; D]; S],
++    s: &mut [[SvfState<L>; D]; S],
++    masks: &[[L::Mask; D]; S],
++) {
++    if frames < D {
++        svf_cascade_interleaved_with_dry_masks::<L, S, D>(io, frames, c, s, masks);
++        return;
++    }
++    let w = L::WIDTH;
++    let span = frames * w;
++    let mut io = io.map(|block| &mut block[..span]);
++    let mut state = *s;
++    let nc1: [[L; D]; S] = core::array::from_fn(|t| core::array::from_fn(|k| c[t][k].c1.neg()));
++    let mut carry: [[L; D]; S] = [[L::zero(); D]; S];
++    macro_rules! step {
++        ($i:expr, $t:expr, $k:expr) => {{
++            let (i, t, k) = ($i, $t, $k);
++            let f = i - k;
++            let x = if k == 0 {
++                L::load(&io[t][f * w..f * w + w])
++            } else {
++                carry[t][k - 1]
++            };
++            let coefficients = &c[t][k];
++            let (v1, v2) = lane::kernels::svf_step(
++                x,
++                nc1[t][k],
++                coefficients.a2,
++                coefficients.a3,
++                &mut state[t][k],
++            );
++            let wet = coefficients
++                .m2
++                .fma(v2, coefficients.m1.fma(v1, coefficients.m0.mul(x)));
++            let y = L::select(masks[t][k], x, wet);
++            if k == D - 1 {
++                y.store(&mut io[t][f * w..f * w + w]);
++            } else {
++                carry[t][k] = y;
++            }
++        }};
++    }
++    for i in 0..D - 1 {
++        for t in 0..S {
++            for k in (0..=i).rev() {
++                step!(i, t, k);
++            }
++        }
++    }
++    for i in D - 1..frames {
++        for t in 0..S {
++            for k in (0..D).rev() {
++                step!(i, t, k);
++            }
++        }
++    }
++    for i in frames..frames + D - 1 {
++        for t in 0..S {
++            for k in (i + 1 - frames..D).rev() {
++                step!(i, t, k);
++            }
++        }
++    }
++    *s = state;
++}
++
+ /// Reads increment `index` of a step set in the pinned order.
+ fn step_word<L: Lane>(step: &SvfCoefStep<L>, index: usize) -> L {
+     match index {

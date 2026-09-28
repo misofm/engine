@@ -19,7 +19,7 @@
 //! statement that the subject could not target wasm. So the port needed no crate change at all:
 //! it needed the subject to live somewhere both a native binary and a wasm guest can link it.
 //!
-//! That is this crate. It holds the sixteen console workloads, the model derivation, and the
+//! That is this crate. It holds the console workloads, the model derivation, and the
 //! prepared-plan runtime that renders them -- lifted verbatim out of `console.rs`, which now links
 //! it. Nothing was reimplemented for wasm and nothing is conditional on the target, so the wasm
 //! guest and the native bench execute **the same subject**: the same fixtures, the same strip
@@ -43,8 +43,8 @@ use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::collections::BTreeSet;
 
 use bench_support::digest::Sha256Sink;
-use builtins::{MeterConfig, MeterHandle, MeterTap};
-use builtins_compiler::{MeterConsumer, MeterRequest};
+use builtins::{MeterConfig, MeterHandle, MeterMetricSet, MeterSnapshot, MeterTap};
+use builtins_compiler::{MeterConsumer, MeterRequest, SelectedMeterRequest};
 use effect_compiler::{
     EffectCompileCaps, EffectControlProducer, EffectObservationHandle, attach_effect_console,
     attach_effect_observation, launch_native_effect_registry, prepare_native_session_effects,
@@ -60,12 +60,14 @@ use graph::{
     GraphPreparedSourceSetDriver, GraphRuntimeBindings, GraphRuntimeProcessor,
     GraphSourceInputClaim, GraphSourceSetResourceReport, TrackStage,
 };
-use graph_compiler::{GraphBuiltinsCompileRequest, GraphCompileRequest, GraphCompiler};
+use graph_compiler::{GraphBuiltinsCompileRequest, GraphCompiler};
 use lane::Backend;
 use session::{
     CompileCaps, DualMonoFader, MatrixOrPan, SessionModel, StableId, compile_session,
     parse_session_json,
 };
+
+pub mod mixing_automation;
 
 /// Sample rate every console workload is prepared and rendered at.
 pub const SAMPLE_RATE_HZ: u32 = 48_000;
@@ -85,6 +87,16 @@ pub const CONTROL_QUEUE_DEPTH: usize = 8;
 pub const MAXIMUM_OBSERVATION_TAPS: u32 = 8;
 /// Bounded depth of each meter stream. Drained outside the clock after every observation.
 pub const METER_QUEUE_DEPTH: usize = 8;
+/// Blocks per meter window on the metered console row (issue #881): the default web boot's.
+///
+/// `WebBootOptions::console_defaults` sets `console_meter_blocks` to the web host's
+/// `DEFAULT_METER_BLOCKS`, twelve, and its `console_request` turns that into a period of
+/// `12 * quantum_frames`. Mirrored here rather than imported: the browser host is not a
+/// dependency of this subject, and this crate names the number it renders with.
+pub const WEB_METER_BLOCKS: u32 = 12;
+/// Bounded depth of each meter stream on the metered console row: the depth the web host's
+/// `console_request` asks for (one window per post, plus headroom for a stalled control side).
+pub const WEB_METER_QUEUE_DEPTH: usize = 8;
 
 const NINE_TRACK: &str = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
 /// The retired 64-track fixture: EQ on `simd1`, compressor in the `dynamic` rack, no limiter.
@@ -147,17 +159,23 @@ pub enum Workload {
     SixtyFourTrackCompressorOnly,
     /// Decomposition: every rack emptied. Input trim/HPF/LPF, fader and pan matrix only.
     SixtyFourTrackBuiltinsOnly,
-    /// Decomposition: every rack emptied **and** every builtin asked for its identity.
+    /// Decomposition: every rack emptied, **and** every input builtin and the fader asked for their
+    /// identity.
     ///
-    /// Polarity off, trim 0 dB, HPF and LPF at 0 Hz, fader 0 dB unmuted, pan hard identity with no
-    /// smoothing.
+    /// Polarity off, trim 0 dB, HPF and LPF at 0 Hz, fader 0 dB unmuted, and a pan of
+    /// `left = right = 1.0` with no smoothing. That pan is **not** the identity matrix: it routes
+    /// both inputs hard right (`ll = lr = cos(pi / 2)`, which is `6.1e-17` in `f32`, and
+    /// `rl = rr = 1`). The pan law cannot produce the identity, so no standing row exercises an
+    /// identity matrix; ruling 4 of issue #944 corrected this doc and kept the row's content, and
+    /// with it the row's digest.
     ///
     /// What this row is **not**: it is not the cost of dispatch alone, and the record says
     /// `identity` rather than `dispatch` for that reason. A builtin filter at 0 Hz is *disabled*,
     /// and `SvfSection::design` implements disabled by designing an identity section -- `m0 = 1`,
     /// `m1 = m2 = 0`, `k = 0` (`builtins`, the version-1 cutoff contract). A 0 dB fader
-    /// is still a multiply and a mask clear, and a settled identity pan matrix still evaluates both
-    /// arms of its per-lane select; both of those run over the same lanes every block.
+    /// is still a multiply and a mask clear, and the hard-right pan is a real 2x2 matrix: with no
+    /// identity lane in any bank, it runs the settled matrix's select-free arm (issue #944), the
+    /// same arm `sixty_four_track_gain_pan_only` runs. Both run over the same lanes every block.
     ///
     /// The two SVF sections no longer do. A prepared section that is the exact identity in every
     /// lane and every word is the map `v |-> v + 0.0`, so a run of them is one `add(+0.0)`, and
@@ -167,7 +185,8 @@ pub enum Workload {
     ///
     /// So this row measures: source fill, per-node graph dispatch, buffer plumbing, route
     /// summation, the sanitisation and boundary-scan passes the D7 policy requires of every block,
-    /// and the fader and matrix kernels running their identity coefficients.
+    /// the fader kernel running its identity coefficients, and the matrix kernel running a
+    /// hard-right pan.
     ///
     /// **The near-equality reading is retired.** Before the elision, the two rack-free rows ran the
     /// same instructions over the same lanes with different constants, and their near-equality was
@@ -218,68 +237,51 @@ pub enum Workload {
     /// `sixty_four_track_console_legacy - sixty_four_track_eq_comp_simd1` is the chain-shape
     /// delta -- one AoSoA round-trip per bank per block, and no arithmetic at all.
     SixtyFourTrackEqCompSimd1,
-    /// The overhead floor: every rack emptied **and no builtin bindings prepared at all**.
-    ///
-    /// The row below `sixty_four_track_dispatch_only`, and the reason it exists is that
-    /// `dispatch_only` is not a floor. An identity strip still pays the D7 input sanitisation and
-    /// output boundary scan, a 0 dB fader's multiply and mask clear, and a settled identity pan
-    /// matrix's per-lane select -- 22 lane-ops of real arithmetic on every lane of every block.
-    /// This row pays none of it: `prepare_session_builtins` is never called, so the strip's input
-    /// stage, fader and matrix do not exist as bindings, every `TrackStage` lowers to an elided
-    /// alias, and what remains between a track's source and the master bus is the route's
-    /// `mix2x2` and the master reduction.
-    ///
-    /// So `sixty_four_track_gain_pan_only - sixty_four_track_plumbing_only` is the builtins
-    /// scaffolding *without* its filters -- sanitise, boundary scan, fader and pan -- isolated
-    /// from the graph plumbing underneath it for the first time. The row is the denominator every
-    /// overhead claim in this stream was previously missing: before it, "overhead" meant
-    /// `dispatch_only`, which is 22 lane-ops of spec-required arithmetic wearing the name of a
-    /// floor.
-    ///
-    /// It is also the one row in [`WORKLOADS`] that binds **no bank chain at all**, which is why
-    /// the chain-shape gates name it explicitly instead of iterating over it: with no builtin banks
-    /// there is nothing for a route to fold into, and a fold count of zero here is the correct
-    /// answer rather than a regression. Its driver-fed twin, [`Self::SixtyFourTrackPlumbingRing`],
-    /// binds none either.
-    SixtyFourTrackPlumbingOnly,
-    /// The overhead floor row fed the way a host feeds a session: through a prepared source set
-    /// instead of a bound processor (issue #928).
-    ///
-    /// The same builtins-less session as [`Self::SixtyFourTrackPlumbingOnly`], compiled through
-    /// the same path, with the same frozen tone. The difference is how its sixty-four
-    /// `TrackStage::Input` nodes are fed. Every other row binds each of them to
-    /// `FrozenGraphSource`, a host processor the executor dispatches once per track per block to
-    /// copy a frozen block into the arena. A host that plays stems binds a prepared source set
-    /// instead: the executor asks its driver for every claim's block before the unit loop
-    /// (`copy_track_input`), or reads a claim's played planes in place where the graph binds it so
-    /// (`played_planes`, issue #918). This row is fed through such a driver, `FrozenSourceDriver`,
-    /// so it is the row a change to that feed can move -- reading plain-strip sources in place
-    /// (issue #927) -- and the bound-feed row cannot.
-    ///
-    /// It sits beside the plumbing row rather than refeeding it: the plumbing row is the floor of
-    /// the whole table (`tools/bench/src/floor.rs`) and the paired benchmark arms compare it across
-    /// commits, so changing its feed would move a sealed number for a reason that is not an engine
-    /// change. Both rows copy the same frozen words, honouring the same channel mapping, so they
-    /// render the same bits; a digest difference between them is a harness defect, never a
-    /// finding.
-    ///
-    /// Not in [`WORKLOADS`]: see [`DRIVER_FED_WORKLOADS`].
-    SixtyFourTrackPlumbingRing,
     /// Decomposition: every rack emptied and every input builtin asked for its identity, with the
     /// fixture's **real** fader and pan values left as written.
     ///
     /// The controlled partner of `sixty_four_track_dispatch_only`. The two rows execute the same
     /// instructions over the same lanes -- both elide their prepared-identity input sections, both
-    /// run `gain_mute_block` and `matrix2x2_block` unconditionally -- and differ only in the
-    /// *constants* those two kernels carry: 0 dB and hard identity there, the fixture's declared
-    /// per-channel fader trims and pan positions here.
+    /// run `gain_mute_block` and the settled matrix's select-free arm on every bank -- and differ
+    /// only in the *constants* those two kernels carry: 0 dB and a hard-right pan there, the
+    /// fixture's declared per-channel fader trims and pan positions here.
     ///
-    /// That makes the pair a direct measurement of a claim the floor table asserts and nothing had
-    /// yet tested: a 0 dB fader and a settled identity matrix cost exactly what a real one costs,
-    /// because neither kernel has an identity arm. The two rows share a floor (22 lane-ops) for
-    /// precisely that reason, and a material gap between them would mean one of the two kernels
-    /// had acquired a data-dependent path.
+    /// That makes the pair a direct measurement of a claim the floor table asserts: a 0 dB fader
+    /// costs exactly what a real one costs, because `gain_mute_block` has no identity arm, and a
+    /// hard-right pan costs what a real pan costs, because neither is the identity matrix. The
+    /// settled matrix does have one data-dependent path since issue #944 -- a bank with any
+    /// identity lane keeps the per-lane identity select, and a bank with none skips it -- and
+    /// neither row has an identity lane, so both take the same arm. The two rows share a floor
+    /// (22 lane-ops) for precisely that reason, and a material gap between them would mean one of
+    /// the two kernels had acquired another data-dependent path.
+    ///
+    /// It is the bound-feed twin of [`Self::SixtyFourTrackGainPanRing`], and it is **not** the
+    /// native pure-path target: every one of its track inputs is a `FrozenGraphSource` processor,
+    /// one dispatched unit per track per block that copies a frozen block into the arena, and no
+    /// host feeds a session that way. The ring row is the same session fed the way a host feeds it.
     SixtyFourTrackGainPanOnly,
+    /// The native pure-audio-path target: [`Self::SixtyFourTrackGainPanOnly`]'s session fed the way
+    /// a host feeds a session, through a prepared source set instead of a bound processor per track
+    /// input (issue #956, re-basing the driver-fed row of issue #928).
+    ///
+    /// The same strip edit, the same compile with builtins and the same frozen tone as
+    /// `gain_pan_only`; the difference is how its sixty-four `TrackStage::Input` nodes are fed.
+    /// The builtins artifact is bound through `into_bound_with_source_set`, the entry `host-core`
+    /// binds a session through (`crates/host-core/src/prepare.rs`), and the set's driver,
+    /// `FrozenSourceDriver`, serves each claim the frozen block the bound feed's processor copies.
+    /// Every claim's only reader is its cohort's `PostInputBuiltins` bank, whose gather reads the
+    /// played block in place (issue #918, `source_plane_table` clause (b)), so no claim is copied
+    /// into the arena and the input units are left out of the dispatched-unit table (issue #936).
+    /// That is the production feed, the one `crates/host-core/tests/source_in_place.rs` pins, and
+    /// it is why this row -- not the bound-feed `gain_pan_only` -- is the native pure-path target.
+    ///
+    /// Both feeds deliver the same frozen words, honouring the same channel mapping, so the two
+    /// rows render the same bits; a digest difference between them is a harness defect, never a
+    /// finding. The row replaced the builtins-less `sixty_four_track_plumbing_ring`, which fed the
+    /// same driver into a plan no host compiles (issue #956).
+    ///
+    /// Not in [`WORKLOADS`]: see [`DRIVER_FED_WORKLOADS`].
+    SixtyFourTrackGainPanRing,
     /// The mono qualification session: sixty-four collapse-eligible strips, rendered as written.
     ///
     /// The same strip, the same coefficients and the same input as `sixty_four_track_console`,
@@ -321,9 +323,54 @@ pub enum Workload {
     /// wasm host reports no shape, which is why that gate lives beside the fixtures rather than in
     /// the record.
     SixtyFourTrackConsoleHalfMono,
+    /// The standing console session with the meter every browser track carries (issue #881).
+    ///
+    /// [`Self::SixtyFourTrackConsole`]'s session exactly as written -- the same fixture, strip,
+    /// compile and sources -- prepared with one `SAMPLE_PEAK` meter at `PostMatrix` on every track.
+    /// That is the meter set the default web boot binds: a window of [`WEB_METER_BLOCKS`] blocks
+    /// (12 x 128 frames), no peak hold, peak decay off, a queue [`WEB_METER_QUEUE_DEPTH`] snapshots
+    /// deep, and handles `index + 1` in the compiled session's normalized track order. The meters
+    /// are bound as **permanent** observers through
+    /// `builtins_compiler::prepare_selected_session_builtins_between_render_calls`, which is the
+    /// entry `host_core::prepare_host_runtime_with_selected_meters_between_render_calls` calls for
+    /// that boot. No live-console control channel is attached.
+    ///
+    /// **The meters are not the only difference from the standing row.** That entry also selects
+    /// `BuiltinControlDelivery::BetweenRenderCalls`, as the default web boot does, and under that
+    /// delivery the builtins pair each cohort's fader bank and matrix bank into one fused stage
+    /// (`FaderMatrixBankProcessor`, rendering through `fader_matrix_block`). The standing row is
+    /// prepared with `Concurrent` delivery, so it keeps the fader and the matrix as two stages and
+    /// its matrix renders through `MatrixStage::process`. Both plans bank the same 48 memberships
+    /// in eight chains, but the standing row runs 48 bank-chain stages per block and this row 40;
+    /// this crate's pair test pins both counts. So this row minus the standing row is the meters'
+    /// cost **plus** the fused-versus-split fader and matrix, and a change to either fader/matrix
+    /// path can move one row of the pair and not the other.
+    ///
+    /// It is the row the observer path can move. Every other session row renders with no
+    /// observer, and the `console_meters` arm binds all-metric meters at a four-block window
+    /// through the concurrent entry, which is not what a browser binds. This is the configuration
+    /// issue #943 (one sample-peak pass per bank, at the resident final lane) moves.
+    ///
+    /// Meters observe and never change signal flow, and the fused fader and matrix render the
+    /// split pair's bits, so this row renders the standing console row's bits: the run asserts it
+    /// before it emits either record, and the aggregate validator pins it. Its snapshots are
+    /// consumed after every block, outside the clock, as a host holding the meter lease consumes
+    /// them.
+    ///
+    /// Not in [`WORKLOADS`]: see [`METERED_WORKLOADS`].
+    SixtyFourTrackConsoleMetered,
 }
 
 impl Workload {
+    /// Whether this row is prepared with the default web boot's meter set (issue #881).
+    ///
+    /// True for exactly one row, [`Self::SixtyFourTrackConsoleMetered`]. Every other row's meters
+    /// come from [`PlanConfig::meters`], which is false on every session row.
+    #[must_use]
+    pub const fn web_meters(self) -> bool {
+        matches!(self, Self::SixtyFourTrackConsoleMetered)
+    }
+
     /// Whether this row renders with the mono collapse **forced off**.
     ///
     /// True for exactly one row. `sixty_four_track_console_mono_dual` compiles the same
@@ -342,12 +389,12 @@ impl Workload {
 
     /// How this row's track inputs reach the graph, named in the record as `source_feed`.
     ///
-    /// [`SourceFeed::PlayedPlanes`] for exactly one row, the driver-fed plumbing row; every other
+    /// [`SourceFeed::PlayedPlanes`] for exactly one row, the driver-fed gain/pan row; every other
     /// row binds a `FrozenGraphSource` processor per track input.
     #[must_use]
     pub const fn source_feed(self) -> SourceFeed {
         match self {
-            Self::SixtyFourTrackPlumbingRing => SourceFeed::PlayedPlanes,
+            Self::SixtyFourTrackGainPanRing => SourceFeed::PlayedPlanes,
             _ => SourceFeed::Bound,
         }
     }
@@ -381,7 +428,11 @@ impl SourceFeed {
 /// **Append-only.** The wasm console guest is addressed by *index* into this array
 /// (`miso_console_prepare(index)`), so reordering it silently re-labels every wasm record. New
 /// rows go on the end.
-pub const WORKLOADS: [Workload; 16] = [
+///
+/// One row has left it, deliberately and once: `sixty_four_track_plumbing_only`, index 11, a plan
+/// compiled without builtins, which no host builds (issue #956). Every row after it moved down one
+/// index, and the wasm arm's validator and its mutation suite were re-indexed in the same change.
+pub const WORKLOADS: [Workload; 15] = [
     Workload::NineTrackBaseline,
     Workload::NineTrackRaggedStrip,
     Workload::SixtyFourTrackConsole,
@@ -393,7 +444,6 @@ pub const WORKLOADS: [Workload; 16] = [
     Workload::SixtyFourTrackIdle,
     Workload::SixtyFourTrackConsoleLegacy,
     Workload::SixtyFourTrackEqCompSimd1,
-    Workload::SixtyFourTrackPlumbingOnly,
     Workload::SixtyFourTrackGainPanOnly,
     Workload::SixtyFourTrackConsoleMono,
     Workload::SixtyFourTrackConsoleMonoDual,
@@ -405,14 +455,37 @@ pub const WORKLOADS: [Workload; 16] = [
 ///
 /// Kept out of [`WORKLOADS`] on purpose. That array is the wasm console arm's address space --
 /// the guest prepares a row by its index (`miso_console_prepare(index)`), the wasm host iterates
-/// it, and the wasm arm's validator pins its sixteen kinds -- so a row appended there would change
+/// it, and the wasm arm's validator pins its fifteen kinds -- so a row appended there would change
 /// what that arm measures and break its next capture. This row exists to measure the native
 /// source feed, and carrying it into the wasm arm is that arm's own change.
 ///
-/// The census and shape tests under `tests/` iterate [`WORKLOADS`] only. What they state of every
-/// row -- no bank collapse, no transition, and for a bankless row no bank, no transpose and no
-/// fold -- is asserted of this row beside its bound twin by this crate's own test of the pair.
-pub const DRIVER_FED_WORKLOADS: [Workload; 1] = [Workload::SixtyFourTrackPlumbingRing];
+/// The row is banked, so the shape tests under `tests/` that state a law of every banked row --
+/// one folded route per track, and the folded master's bits -- iterate it beside [`WORKLOADS`].
+/// What is its own -- its bits against its bound twin's, its bank shape, its source-plane counts
+/// and its dispatched units -- is asserted beside that twin by this crate's own test of the pair.
+pub const DRIVER_FED_WORKLOADS: [Workload; 1] = [Workload::SixtyFourTrackGainPanRing];
+
+/// The session rows the native bench emits after [`DRIVER_FED_WORKLOADS`]: the rows prepared with
+/// the default web boot's meter set (issue #881).
+///
+/// Kept out of [`WORKLOADS`] for the reason [`DRIVER_FED_WORKLOADS`] is: that array is the wasm
+/// console arm's address space, and a row appended there would change what that arm measures.
+/// Carrying the metered row into the wasm arm is that arm's own change.
+///
+/// The census and shape tests under `tests/` iterate [`WORKLOADS`] only. What this row shares with
+/// the standing console row -- its bits, its bank memberships and its folds -- and where it
+/// differs -- its fused fader and matrix -- are asserted beside it by this crate's own test of the
+/// pair.
+pub const METERED_WORKLOADS: [Workload; 1] = [Workload::SixtyFourTrackConsoleMetered];
+
+/// Every session row the native bench emits, in emission order: [`WORKLOADS`], then
+/// [`DRIVER_FED_WORKLOADS`], then [`METERED_WORKLOADS`].
+pub fn native_session_rows() -> impl Iterator<Item = Workload> {
+    WORKLOADS
+        .into_iter()
+        .chain(DRIVER_FED_WORKLOADS)
+        .chain(METERED_WORKLOADS)
+}
 
 /// What a decomposition row does to the fixture's channel strip before it is compiled.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -445,16 +518,6 @@ enum Strip {
     /// from each other, and a second transcription of the neutralisation would be a second thing
     /// that could drift.
     GainPan,
-    /// Every rack is emptied **and no builtins are prepared at all**.
-    ///
-    /// The one strip edit that is not only a model edit. Clearing the racks is what this arm does
-    /// to the *session*; the rest of it is what [`SessionRuntime::build_full`] does with the
-    /// result, which is to take the builtins-less compile path
-    /// (`GraphCompiler::compile`) instead of `compile_with_builtins`. The track's declared
-    /// builtins, fader and pan are left exactly as the fixture wrote them and are simply never
-    /// prepared, so nothing here neutralises a coefficient that a later reader might mistake for a
-    /// measured identity.
-    PlumbingOnly,
     /// The mono fixture with the odd tracks' stereo source mapping put back.
     ///
     /// The one edit in this enum that *widens* a row rather than narrowing it, and it is called
@@ -499,12 +562,12 @@ impl Workload {
             Self::SixtyFourTrackIdle => "sixty_four_track_idle",
             Self::SixtyFourTrackConsoleLegacy => "sixty_four_track_console_legacy",
             Self::SixtyFourTrackEqCompSimd1 => "sixty_four_track_eq_comp_simd1",
-            Self::SixtyFourTrackPlumbingOnly => "sixty_four_track_plumbing_only",
-            Self::SixtyFourTrackPlumbingRing => "sixty_four_track_plumbing_ring",
             Self::SixtyFourTrackGainPanOnly => "sixty_four_track_gain_pan_only",
+            Self::SixtyFourTrackGainPanRing => "sixty_four_track_gain_pan_ring",
             Self::SixtyFourTrackConsoleMono => "sixty_four_track_console_mono",
             Self::SixtyFourTrackConsoleMonoDual => "sixty_four_track_console_mono_dual",
             Self::SixtyFourTrackConsoleHalfMono => "sixty_four_track_console_half_mono",
+            Self::SixtyFourTrackConsoleMetered => "sixty_four_track_console_metered",
         }
     }
     /// How many console tracks this workload renders.
@@ -547,6 +610,9 @@ impl Workload {
                 // digest equality will rest on once the collapse exists.
                 | Self::SixtyFourTrackConsoleMono
                 | Self::SixtyFourTrackConsoleMonoDual
+                // The metered row renders the standing fixture as written. Its meters are a
+                // preparation facility, not an edit to the session.
+                | Self::SixtyFourTrackConsoleMetered
         )
     }
     /// The edit this row makes to the fixture's channel strip.
@@ -557,12 +623,9 @@ impl Workload {
             Self::SixtyFourTrackBuiltinsOnly => Strip::BuiltinsOnly,
             Self::SixtyFourTrackDispatchOnly => Strip::Identity,
             Self::SixtyFourTrackEqCompSimd1 => Strip::LimiterRemoved,
-            // The driver-fed twin takes the same strip edit and the same builtins-less compile;
+            // The driver-fed twin takes the same strip edit and the same compile with builtins;
             // only how `build_full` binds its track inputs differs (`Workload::source_feed`).
-            Self::SixtyFourTrackPlumbingOnly | Self::SixtyFourTrackPlumbingRing => {
-                Strip::PlumbingOnly
-            }
-            Self::SixtyFourTrackGainPanOnly => Strip::GainPan,
+            Self::SixtyFourTrackGainPanOnly | Self::SixtyFourTrackGainPanRing => Strip::GainPan,
             Self::SixtyFourTrackConsoleHalfMono => Strip::HalfMono,
             _ => Strip::AsWritten,
         }
@@ -578,11 +641,8 @@ impl Workload {
             Self::SixtyFourTrackBuiltinsOnly => "builtins",
             Self::SixtyFourTrackDispatchOnly => "identity",
             Self::SixtyFourTrackConsoleLegacy | Self::SixtyFourTrackEqCompSimd1 => "eq+compressor",
-            // Nothing of the strip is prepared on this row -- not even the input stage -- so the
-            // vocabulary needs a word that is not "builtins" and not an effect list. The feed is
-            // not strip content; the record names it separately, as `source_feed`.
-            Self::SixtyFourTrackPlumbingOnly | Self::SixtyFourTrackPlumbingRing => "plumbing",
-            Self::SixtyFourTrackGainPanOnly => "gain+pan",
+            // The feed is not strip content; the record names it separately, as `source_feed`.
+            Self::SixtyFourTrackGainPanOnly | Self::SixtyFourTrackGainPanRing => "gain+pan",
             _ => "eq+compressor+limiter",
         }
     }
@@ -605,12 +665,8 @@ impl Workload {
             Self::SixtyFourTrackCompressorOnly => "simd1:compressor",
             Self::SixtyFourTrackBuiltinsOnly
             | Self::SixtyFourTrackDispatchOnly
-            | Self::SixtyFourTrackGainPanOnly => "builtins",
-            // The third word of the layout vocabulary, beside `rack:slot` and `builtins`: a plan
-            // with no rack effect *and* no builtin binding. It is a distinct layout rather than an
-            // empty `builtins` one, because the difference between it and the `builtins` rows is
-            // exactly what the row measures.
-            Self::SixtyFourTrackPlumbingOnly | Self::SixtyFourTrackPlumbingRing => "plumbing",
+            | Self::SixtyFourTrackGainPanOnly
+            | Self::SixtyFourTrackGainPanRing => "builtins",
             // The retired layout: two one-slot chains, one per rack.
             Self::SixtyFourTrackConsoleLegacy => "simd1:eq,dynamic:compressor",
             // The chain-shape row: one two-slot chain, no limiter.
@@ -656,12 +712,8 @@ fn apply_strip(model: &mut SessionModel, strip: Strip) {
             // `simd2` is cleared for every derived row below, so this arm's whole edit is that
             // clearing: the `simd1` chain is deliberately left exactly as the fixture wrote it.
             Strip::LimiterRemoved => {}
-            // The racks go and nothing else does. What separates this row from `BuiltinsOnly` is
-            // not an edit to the session at all: it is that `build_full` never prepares builtins
-            // for it. Neutralising the declared trims and cutoffs here would be worse than
-            // pointless -- nothing reads them, and a later reader would take the zeros as a
-            // measured identity rather than as an unprepared declaration.
-            Strip::PlumbingOnly | Strip::BuiltinsOnly => {
+            // The racks go and nothing else does.
+            Strip::BuiltinsOnly => {
                 track.simd1.effects.clear();
                 track.dynamic.effects.clear();
             }
@@ -677,8 +729,12 @@ fn apply_strip(model: &mut SessionModel, strip: Strip) {
                     channel.lpf_hz = 0.0;
                 }
                 // The one field that separates the two rows. `GainPan` keeps the fixture's
-                // declared fader trims and pan positions; `Identity` asks both kernels for the
-                // value that would let them do nothing, which neither of them has an arm for.
+                // declared fader trims and pan positions; `Identity` asks the fader for 0 dB and
+                // the pan for `left = right = 1.0`. That pan is not the identity matrix: it routes
+                // both inputs hard right (`ll = lr = 6.1e-17`, `rl = rr = 1`), so this row's
+                // matrix banks have no identity lane and run the same select-free arm as
+                // `GainPan`'s (issue #944). The doc is corrected; the content, and so the digest,
+                // is kept (ruling 4).
                 if strip == Strip::Identity {
                     track.fader = DualMonoFader {
                         left_db: 0.0,
@@ -809,6 +865,40 @@ fn meter_requests(model: &SessionModel) -> Vec<MeterRequest> {
         .collect()
 }
 
+/// The meter set the default web boot binds, one per track (issue #881).
+///
+/// The request `host_core` builds when a browser boots with its console defaults: one
+/// [`MeterMetricSet::SAMPLE_PEAK`] meter at [`MeterTap::PostMatrix`] per track of the compiled
+/// session's normalized model, handles `index + 1` in that order, a window of
+/// [`WEB_METER_BLOCKS`] blocks, no peak hold, peak decay off, a [`WEB_METER_QUEUE_DEPTH`]-deep
+/// queue and reset generation zero. Transcribed field for field from
+/// `prepare_host_runtime_with_console_policy_and_spectrum_with_hop` and the web host's
+/// `console_request`, because this subject does not link either host.
+fn web_meter_requests(session: &session::CompiledSession) -> Vec<SelectedMeterRequest> {
+    let config = MeterConfig {
+        period_frames: NonZeroU32::new(WEB_METER_BLOCKS * QUANTUM as u32).expect("nonzero period"),
+        peak_hold_frames: 0,
+        peak_decay_db_per_second: 0.0,
+        queue_capacity: NonZeroUsize::new(WEB_METER_QUEUE_DEPTH).expect("nonzero depth"),
+        reset_generation: 0,
+    };
+    session
+        .normalized_model()
+        .tracks
+        .iter()
+        .enumerate()
+        .map(|(index, track)| SelectedMeterRequest {
+            request: MeterRequest {
+                handle: MeterHandle(NonZeroU64::new(index as u64 + 1).expect("nonzero handle")),
+                track_id: track.id.as_str().to_owned(),
+                tap: MeterTap::PostMatrix,
+                config,
+            },
+            metrics: MeterMetricSet::SAMPLE_PEAK,
+        })
+        .collect()
+}
+
 /// A block the plan refused, or an output buffer it could not be given.
 ///
 /// Deliberately opaque, and deliberately not a `Result<_, ()>`: a driver counts these into a
@@ -816,6 +906,21 @@ fn meter_requests(model: &SessionModel) -> Vec<MeterRequest> {
 /// taxonomy is not something a benchmark record reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RenderFailed;
+
+/// The session's output: the left plane then the right plane, `QUANTUM` words each, on a 64-byte
+/// boundary (issue #935).
+///
+/// It was a `Vec<f32>`, which lands on whatever 16-byte boundary the allocator returns. At 16 or
+/// 48 mod 64 half of the 32-byte loads and stores of the output split a cache line, so the same
+/// binary measured a different amount of work depending on where the heap put this buffer. A
+/// `QUANTUM`-word plane is a whole number of cache lines (asserted below), so aligning the buffer
+/// aligns both planes. Every reader still sees the `&[f32]` / `&mut [f32]` the `Vec` lent it.
+#[repr(C, align(64))]
+struct OutputPlanes([f32; QUANTUM * 2]);
+
+// `QUANTUM * 4` bytes is a multiple of 64, so a plane that starts a 64-byte line ends one: the
+// right plane of `OutputPlanes` and of `FrozenGraphSource` is aligned because the left one is.
+const _: () = assert!((QUANTUM * core::mem::size_of::<f32>()).is_multiple_of(64));
 
 /// One prepared console arm: a real [`PreparedRenderPlan`] and the buffer it renders into.
 ///
@@ -825,7 +930,8 @@ pub struct RenderFailed;
 /// evidence collection and belongs outside it.
 pub struct SessionRuntime {
     plan: PreparedRenderPlan,
-    output: Vec<f32>,
+    /// Boxed so the render loop reads its planes through one stable, 64-byte-aligned pointer.
+    output: Box<OutputPlanes>,
     /// Control-side halves, held for the arms that attached them. Never touched inside the clock.
     meter_consumers: Vec<MeterConsumer>,
     controls: Vec<EffectControlProducer>,
@@ -906,19 +1012,21 @@ impl SessionRuntime {
     ) -> Self {
         let model = console_model(workload);
         let session = compile_session(&model, compile_caps()).expect("compiled console session");
-        // The overhead floor row prepares no builtins at all, so it can carry no console facility
-        // either: a meter stream is leased from the prepared builtins session and the record would
-        // otherwise claim a facility that was silently dropped. Every arm that asks for one is
-        // taken on `SixtyFourTrackConsole`, so this refusal is unreachable rather than limiting,
-        // and it fails loudly instead of measuring something other than what it says.
-        let plumbing_only = workload.strip() == Strip::PlumbingOnly;
-        assert!(
-            !plumbing_only || config == PlanConfig::BASELINE,
-            "{}: the builtins-less row cannot carry a console facility",
-            workload.kind()
-        );
         let meters = if config.meters {
             meter_requests(&model)
+        } else {
+            Vec::new()
+        };
+        // Issue #881: the metered row carries the default web boot's meter set and delivery and no
+        // other console facility, so a facility arm on top of it would meter every track twice and
+        // measure a shape no host prepares.
+        assert!(
+            !workload.web_meters() || config == PlanConfig::BASELINE,
+            "{}: the metered row carries its own meters and no other console facility",
+            workload.kind()
+        );
+        let web_meters = if workload.web_meters() {
+            web_meter_requests(&session)
         } else {
             Vec::new()
         };
@@ -945,133 +1053,98 @@ impl SessionRuntime {
         };
         let silent = workload.input_signal() == "silence";
         let mappings = channel_mappings(&model);
-        let (plan, meter_consumers) = if plumbing_only {
-            // The builtins-less compile path. `GraphCompiler::compile` is the same entry point
-            // every non-console graph is built through and is not a benchmark-only shape: what it
-            // produces here is the session's own dataflow with nothing attached to the track
-            // stages, so each `TrackStage` lowers to an elided alias and the route and the master
-            // reduction are all that stand between a track's source and the output.
-            //
-            // Correction, 2026-09-26 (issue #925): that was false until #925. The compile listed
-            // the three builtin stages as required bindings, `source_binding` acknowledged them
-            // with the identity, and each lowered to an identity op (two copies and a dispatch
-            // per track). Since #925 `required_bindings` here is the inputs and the output only,
-            // the stages are aliases, and the sentence above holds.
-            let compiled = GraphCompiler::compile(GraphCompileRequest {
-                dispatch,
-                plan_id: PLAN_ID,
-                effects,
-                caps: graph_caps(),
-            })
-            .unwrap_or_else(|_| panic!("{}: builtins-less console graph", workload.kind()));
-            let graph = compiled.graph;
-            let envelope = graph.envelope;
-            let plan = match workload.source_feed() {
-                SourceFeed::Bound => {
-                    let nodes = graph
-                        .required_bindings
-                        .iter()
-                        .map(|node| source_binding(node, silent, &source, &mappings))
-                        .collect();
-                    graph
-                        .bind(GraphRuntimeBindings {
+        // Issue #881: the metered row is prepared through the builtins entry the default web boot's
+        // host preparation reaches, which binds its selected meters as permanent observers. It
+        // attaches no control channel, but its between-render-calls delivery is not inert: under
+        // it each cohort's fader and matrix banks fuse into one stage, as they do in the browser,
+        // where the `Concurrent` rows keep two (`Workload::SixtyFourTrackConsoleMetered` says what
+        // that means for the pair). Every other row keeps the entry it has always been prepared
+        // through.
+        let builtins = if workload.web_meters() {
+            builtins_compiler::prepare_selected_session_builtins_between_render_calls(
+                &session,
+                &web_meters,
+                &[],
+                builtin_caps(),
+            )
+        } else {
+            builtins_compiler::prepare_session_builtins(&session, &meters, builtin_caps())
+        }
+        .expect("prepared console builtins");
+        let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            dispatch,
+            plan_id: PLAN_ID,
+            effects,
+            builtins,
+            caps: graph_caps(),
+        })
+        .unwrap_or_else(|_| panic!("{}: production console graph", workload.kind()));
+
+        let envelope = artifact.envelope();
+        // `observers` stays empty on purpose in both feeds: it is the *external* observer slot. A
+        // meter observer is compiler-owned and is appended to this vector by the sealed builtins
+        // artifact inside `into_bound` (or `into_bound_with_source_set`), which is why
+        // `meters: true` is expressed as a meter *request* and not as a hand-built observer.
+        // Driving the real path is the whole point of the arm.
+        let bound = match workload.source_feed() {
+            SourceFeed::Bound => {
+                let nodes = artifact
+                    .external_binding_nodes()
+                    .map(|node| source_binding(node, silent, &source, &mappings))
+                    .collect();
+                artifact
+                    .into_bound(GraphRuntimeBindings {
+                        envelope,
+                        nodes,
+                        observers: Vec::new(),
+                    })
+                    .unwrap_or_else(|_| panic!("{}: console graph bindings", workload.kind()))
+            }
+            // Issue #928, re-based by #956: the same artifact, its track inputs claimed by a
+            // prepared source set instead of bound to processors -- the shape `host-core` binds a
+            // session in (`crates/host-core/src/prepare.rs`, `into_bound_with_source_set`). Every
+            // external node that is not a track input is acknowledged by the same `source_binding`
+            // the bound feed uses, so the feed is the only thing the two rows bind differently.
+            SourceFeed::PlayedPlanes => {
+                let mut claims: Vec<GraphSourceInputClaim> = artifact
+                    .external_binding_nodes()
+                    .filter(|node| is_track_input(node))
+                    .map(|node| GraphSourceInputClaim { node: node.clone() })
+                    .collect();
+                // The set requires its claims strictly ascending, and the driver serves claim `i`
+                // as the `i`-th of them.
+                claims.sort_unstable();
+                let driver = FrozenSourceDriver::new(&claims, silent, &source, &mappings);
+                let resources = driver.resource_report();
+                let source_set =
+                    GraphPreparedSourceSet::new(envelope, claims, resources, Box::new(driver));
+                let nodes = artifact
+                    .external_binding_nodes()
+                    .filter(|node| !is_track_input(node))
+                    .map(|node| source_binding(node, silent, &source, &mappings))
+                    .collect();
+                artifact
+                    .into_bound_with_source_set(
+                        GraphRuntimeBindings {
                             envelope,
                             nodes,
                             observers: Vec::new(),
-                        })
-                        .unwrap_or_else(|_| panic!("{}: console graph bindings", workload.kind()))
-                }
-                // Issue #928: the same plan, its track inputs claimed by a prepared source set
-                // instead of bound to processors -- the shape `host-core` binds a session in
-                // (`crates/host-core/src/prepare.rs`, `into_bound_with_source_set`). That entry
-                // belongs to the builtins artifact, and this path prepares no builtins, so the
-                // plan's own `bind_with_source_set` is called: it is what
-                // `into_bound_with_source_set` delegates to once the artifact has appended its
-                // private builtin bindings, and here there are none to append. Every node that is
-                // not a track input is acknowledged by the same `source_binding` the bound feed
-                // uses, so the feed is the only thing the two rows bind differently.
-                SourceFeed::PlayedPlanes => {
-                    let mut claims: Vec<GraphSourceInputClaim> = graph
-                        .required_bindings
-                        .iter()
-                        .filter(|node| is_track_input(node))
-                        .map(|node| GraphSourceInputClaim { node: node.clone() })
-                        .collect();
-                    // The set requires its claims strictly ascending, and the driver serves claim
-                    // `i` as the `i`-th of them.
-                    claims.sort_unstable();
-                    let driver = FrozenSourceDriver::new(&claims, silent, &source, &mappings);
-                    let resources = driver.resource_report();
-                    let source_set =
-                        GraphPreparedSourceSet::new(envelope, claims, resources, Box::new(driver));
-                    let nodes = graph
-                        .required_bindings
-                        .iter()
-                        .filter(|node| !is_track_input(node))
-                        .map(|node| source_binding(node, silent, &source, &mappings))
-                        .collect();
-                    graph
-                        .bind_with_source_set(
-                            GraphRuntimeBindings {
-                                envelope,
-                                nodes,
-                                observers: Vec::new(),
-                            },
-                            source_set,
+                        },
+                        source_set,
+                    )
+                    .unwrap_or_else(|failure| {
+                        panic!(
+                            "{}: driver-fed console graph bindings: {}",
+                            workload.kind(),
+                            failure.code
                         )
-                        .unwrap_or_else(|failure| {
-                            panic!(
-                                "{}: driver-fed console graph bindings: {}",
-                                workload.kind(),
-                                failure.code
-                            )
-                        })
-                }
-            };
-            (plan, Vec::new())
-        } else {
-            // Only the builtins-less path binds a source set. A driver-fed row that reached this
-            // branch would silently render the bound feed under the other feed's name.
-            assert_eq!(
-                workload.source_feed(),
-                SourceFeed::Bound,
-                "{}: a driver-fed row must take the builtins-less path",
-                workload.kind()
-            );
-            let builtins =
-                builtins_compiler::prepare_session_builtins(&session, &meters, builtin_caps())
-                    .expect("prepared console builtins");
-            let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
-                dispatch,
-                plan_id: PLAN_ID,
-                effects,
-                builtins,
-                caps: graph_caps(),
-            })
-            .unwrap_or_else(|_| panic!("{}: production console graph", workload.kind()));
-
-            let envelope = artifact.envelope();
-            let nodes = artifact
-                .external_binding_nodes()
-                .map(|node| source_binding(node, silent, &source, &mappings))
-                .collect();
-            // `observers` stays empty on purpose: it is the *external* observer slot. A meter
-            // observer is compiler-owned and is appended to this vector by the sealed builtins
-            // artifact inside `into_bound`, which is why `meters: true` is expressed as a meter
-            // *request* and not as a hand-built observer. Driving the real path is the whole point
-            // of the arm.
-            let bound = artifact
-                .into_bound(GraphRuntimeBindings {
-                    envelope,
-                    nodes,
-                    observers: Vec::new(),
-                })
-                .unwrap_or_else(|_| panic!("{}: console graph bindings", workload.kind()));
-            (bound.plan, bound.meter_consumers)
+                    })
+            }
         };
+        let (plan, meter_consumers) = (bound.plan, bound.meter_consumers);
         assert_eq!(
             meter_consumers.len(),
-            meters.len(),
+            meters.len() + web_meters.len(),
             "{}: every requested meter stream must reach the plan",
             workload.kind()
         );
@@ -1094,7 +1167,7 @@ impl SessionRuntime {
         plan.force_mono_collapse_off(workload.collapse_forced_off());
         let mut runtime = Self {
             plan,
-            output: vec![0.0; QUANTUM * 2],
+            output: Box::new(OutputPlanes([0.0; QUANTUM * 2])),
             meter_consumers,
             controls,
             observations,
@@ -1143,6 +1216,19 @@ impl SessionRuntime {
             .filter(|(_, producer)| producer.descriptor.id.as_str() == effect_id)
             .min_by(|(_, left), (_, right)| left.track_id.cmp(&right.track_id))
             .map(|(index, _)| index)
+    }
+
+    /// The live-console control channel of `track_id`'s `effect_id` (a contract id), by stable
+    /// identity rather than by position (issue #1003).
+    ///
+    /// `attach_effect_console` returns channels in prepared-entry order, which moves when the
+    /// entry set does, so a row that automates named tracks resolves each one by its session id.
+    /// Returns `None` for a `control: false` plan or when the track carries no such effect.
+    #[must_use]
+    pub fn control_channel(&self, track_id: &str, effect_id: &str) -> Option<usize> {
+        self.controls.iter().position(|producer| {
+            &*producer.track_id == track_id && producer.descriptor.id.as_str() == effect_id
+        })
     }
 
     /// Session-stable `(track_id, effect_id)` identity of one prepared control channel.
@@ -1484,13 +1570,33 @@ impl SessionRuntime {
 
     /// Meter frames drained from every stream. Outside the clock, like every evidence step.
     pub fn drain_meters(&mut self) -> u64 {
-        let mut frames = 0;
+        self.drain_meter_snapshots(|_| {})
+    }
+
+    /// Meter streams bound into this plan: one per track on a metered arm, none on any other.
+    #[must_use]
+    pub fn meter_streams(&self) -> usize {
+        self.meter_consumers.len()
+    }
+
+    /// The tap each bound meter stream observes, in stream order.
+    pub fn meter_taps(&self) -> impl Iterator<Item = MeterTap> + '_ {
+        self.meter_consumers.iter().map(|stream| stream.tap)
+    }
+
+    /// Pops every published meter snapshot, stream by stream, hands each to `visit`, and returns
+    /// how many there were. Outside the clock, like every evidence step, and allocation-free, so a
+    /// driver can consume every snapshot after every block the way a host holding the meter lease
+    /// does.
+    pub fn drain_meter_snapshots(&mut self, mut visit: impl FnMut(&MeterSnapshot)) -> u64 {
+        let mut snapshots = 0;
         for stream in &mut self.meter_consumers {
-            while stream.consumer.try_pop().is_ok() {
-                frames += 1;
+            while let Ok(snapshot) = stream.consumer.try_pop() {
+                visit(&snapshot);
+                snapshots += 1;
             }
         }
-        frames
+        snapshots
     }
 
     /// Renders exactly one block. This is the whole of what a driver may time.
@@ -1506,7 +1612,7 @@ impl SessionRuntime {
             .render(
                 RenderIo {
                     input: None,
-                    output: PlanarBufferMut::try_new(&mut self.output, 2, QUANTUM, QUANTUM)
+                    output: PlanarBufferMut::try_new(&mut self.output.0, 2, QUANTUM, QUANTUM)
                         .map_err(|_| RenderFailed)?,
                 },
                 RenderTime {
@@ -1519,7 +1625,7 @@ impl SessionRuntime {
 
     /// Folds this block's rendered output into a digest. Outside the clock, always.
     pub fn hash_output(&self, hash: &mut Sha256Sink) {
-        for value in &self.output {
+        for value in &self.output.0 {
             hash.update(value.to_bits().to_le_bytes());
         }
     }
@@ -1601,6 +1707,17 @@ fn graph_caps() -> graph::GraphCompileCaps {
 /// Values in one track's frozen input block: `QUANTUM` left samples then `QUANTUM` right.
 pub const SOURCE_BLOCK_VALUES: usize = QUANTUM * 2;
 
+/// The tone's phase advance per frame, in radians (about 130 Hz at 48 kHz).
+///
+/// Named (issue #1011) so the browser arm of `console_mixing_automation`, which streams a tone of
+/// its own through the web host, can state its tone against this one from the constants rather
+/// than from a transcription. [`source_block`] computes exactly what it always did.
+pub const TONE_RADIANS_PER_FRAME: f32 = 0.017;
+/// The tone's per-track phase offset, in radians: track `t` starts its block at `t` times this.
+pub const TONE_TRACK_PHASE_RADIANS: f32 = 0.31;
+/// The tone's left-channel peak amplitude. The right channel is the left scaled by `-0.75`.
+pub const TONE_AMPLITUDE: f32 = 0.6;
+
 /// One track's frozen input block, left channel followed by right.
 ///
 /// # Why this is public
@@ -1620,7 +1737,10 @@ pub fn source_block(track: usize, silent: bool) -> Vec<f32> {
     let mut values = vec![0.0; SOURCE_BLOCK_VALUES];
     if !silent {
         for frame in 0..QUANTUM {
-            let value = ((frame as f32) * 0.017 + track as f32 * 0.31).sin() * 0.6;
+            let value = ((frame as f32) * TONE_RADIANS_PER_FRAME
+                + track as f32 * TONE_TRACK_PHASE_RADIANS)
+                .sin()
+                * TONE_AMPLITUDE;
             values[frame] = value;
             values[QUANTUM + frame] = -value * 0.75;
         }
@@ -1654,6 +1774,14 @@ impl SourceSignal {
 }
 
 /// Every track input is a frozen block per observation; nothing is decoded on the render path.
+///
+/// Aligned to 64 bytes (issue #935) so both planes start a cache line wherever the struct is
+/// boxed: the bound feed boxes one per track input ([`bound_track_source`]) and the driver-fed row
+/// one slice of them ([`FrozenSourceDriver`]). Unaligned, the allocator's 16-byte placement split
+/// half the 32-byte loads that copy or read these words, and moved the ring row's time between
+/// builds for no reason in the engine. `repr(C)` keeps `left` at offset 0 and `right` at
+/// `QUANTUM * 4`, a line multiple, and the size stays exactly the two planes: no padding.
+#[repr(C, align(64))]
 struct FrozenGraphSource {
     left: [f32; QUANTUM],
     right: [f32; QUANTUM],
@@ -1770,6 +1898,17 @@ fn is_track_input(node: &GraphNodeId) -> bool {
     )
 }
 
+/// The bound feed's processor for one track input: its frozen block, boxed at the 64-byte
+/// alignment [`FrozenGraphSource`] carries.
+fn bound_track_source(
+    track_id: &str,
+    silent: bool,
+    source: &SourceSignal,
+    mappings: &[(usize, usize)],
+) -> Box<FrozenGraphSource> {
+    Box::new(frozen_track_source(track_id, silent, source, mappings))
+}
+
 fn source_binding(
     node: &GraphNodeId,
     silent: bool,
@@ -1783,12 +1922,7 @@ fn source_binding(
     {
         GraphNodeBinding::new(
             node.clone(),
-            Box::new(frozen_track_source(
-                track_id.as_str(),
-                silent,
-                source,
-                mappings,
-            )),
+            bound_track_source(track_id.as_str(), silent, source, mappings),
         )
     } else {
         GraphNodeBinding::identity(node.clone())
@@ -1907,7 +2041,7 @@ mod tests {
     use super::*;
     use engine::realtime::audit;
 
-    /// The row facts a record states, less the feed: what the two plumbing rows must share.
+    /// The row facts a record states, less the feed: what the two gain/pan rows must share.
     fn stated_facts(workload: Workload) -> (u32, &'static str, bool, &'static str, &'static str) {
         (
             workload.tracks(),
@@ -1918,18 +2052,24 @@ mod tests {
         )
     }
 
-    /// Issue #928: the driver-fed row is the plumbing row in every stated fact but its feed, and
-    /// it is the only driver-fed row.
+    /// The gain/pan row's standing 64-block digest: the pin `tests/chain_shape.rs` takes in
+    /// `the_select_free_matrix_arm_renders_the_base_bits`.
+    const GAIN_PAN_DIGEST: &str =
+        "01e465a797036fb4267e895d9319a911bc108d554705d268d9a84a2e2e2dfdb4";
+
+    /// Issues #928 and #956: the driver-fed row is the gain/pan row in every stated fact but its
+    /// feed, and it is the only driver-fed row.
     #[test]
-    fn the_driver_fed_row_states_the_plumbing_rows_facts_and_its_own_feed() {
-        let bound = Workload::SixtyFourTrackPlumbingOnly;
-        let ring = Workload::SixtyFourTrackPlumbingRing;
-        assert_eq!(ring.kind(), "sixty_four_track_plumbing_ring");
+    fn the_driver_fed_row_states_the_gain_pan_rows_facts_and_its_own_feed() {
+        let bound = Workload::SixtyFourTrackGainPanOnly;
+        let ring = Workload::SixtyFourTrackGainPanRing;
+        assert_eq!(ring.kind(), "sixty_four_track_gain_pan_ring");
         assert_eq!(stated_facts(ring), stated_facts(bound));
         assert_eq!(ring.input_signal(), bound.input_signal());
         assert_eq!(ring.warmup_blocks(), bound.warmup_blocks());
-        assert!(ring.strip() == Strip::PlumbingOnly && bound.strip() == Strip::PlumbingOnly);
+        assert!(ring.strip() == Strip::GainPan && bound.strip() == Strip::GainPan);
         assert!(!ring.collapse_forced_off());
+        assert!(!ring.web_meters());
         assert_eq!(ring.source_feed().name(), "played_planes");
         assert_eq!(bound.source_feed().name(), "bound");
         for workload in WORKLOADS {
@@ -1954,27 +2094,28 @@ mod tests {
         assert_eq!(kinds.len(), WORKLOADS.len() + DRIVER_FED_WORKLOADS.len());
     }
 
-    /// Issue #928 gate 1: the driver-fed plumbing row renders the bound-feed row's bits.
+    /// Issue #956 gate 1 (#928 gate 1, re-based): the driver-fed gain/pan row renders the
+    /// bound-feed row's bits, and every claim is read in place by its bank's gather.
     ///
-    /// Sixty-four blocks of both rows, digested by `hash_output`, must agree to the byte: the two
-    /// rows are one session and one frozen tone, and the feed is the only thing bound differently.
-    /// Beside the digest, the facts the `tests/` census states of every row in `WORKLOADS`, which
-    /// the driver-fed row is not in: a bankless plan binds no bank chain, transposes nothing,
-    /// folds no route, never collapses and never transitions.
+    /// Sixty-four blocks of both rows, digested by `hash_output`, must agree to the byte and equal
+    /// the gain/pan row's standing pin: the two rows are one session and one frozen tone, and the
+    /// feed is the only thing bound differently. Beside the digest, the plan facts the feed must
+    /// not move: the same bank chains and slots, the same transposes, every route folded, and no
+    /// collapse or transition.
     ///
     /// The source-plane counts (`graph::test_only_source_plane_counts`, `[claims copied into the
     /// arena, gathers served from a played block, gathers served silence]`) are the statement of
     /// which feed ran. The bound row has no source set and counts nothing. The driver-fed row's
-    /// sixty-four claims are all on the copy today, because only a bank's gather reads a played
-    /// block in place (issue #918) and this plan has no bank: sixty-four copies per block and no
-    /// in-place read. **This pin is the pre-#927 value.** Reading plain-strip sources in place
-    /// moves it to `[0, 64 * BLOCKS, 0]`, and that brief moves the pin.
+    /// sixty-four claims are each read by one reader, their cohort's `PostInputBuiltins` bank, whose
+    /// gather reads the played block in place (issue #918, `source_plane_table` clause (b)): no
+    /// claim is copied, sixty-four gathers per block are served from played blocks, and none
+    /// silence.
     ///
     /// Every render runs under the realtime audit, and the audited allocator aborts the process on
     /// an allocation inside a render scope, so zero forbidden operations is the driver's five
     /// methods and the source-set loop around them staying allocation-, lock- and syscall-free.
     #[test]
-    fn the_driver_fed_plumbing_row_renders_the_bound_rows_bits() {
+    fn the_driver_fed_gain_pan_row_renders_the_bound_rows_bits() {
         const BLOCKS: u64 = 64;
         let run = |workload: Workload| {
             let mut runtime = SessionRuntime::new(workload);
@@ -1986,38 +2127,52 @@ mod tests {
             for block in 0..BLOCKS {
                 runtime.render(block).expect("console render");
                 runtime.hash_output(&mut digest);
-                audible |= runtime.output.iter().any(|word| *word != 0.0);
+                audible |= runtime.output.0.iter().any(|word| *word != 0.0);
             }
             let forbidden = audit::snapshot().total();
             let planes = graph::test_only_source_plane_counts();
             (runtime, digest.finish_hex(), audible, forbidden, planes)
         };
         let (bound, bound_digest, bound_audible, bound_forbidden, bound_planes) =
-            run(Workload::SixtyFourTrackPlumbingOnly);
+            run(Workload::SixtyFourTrackGainPanOnly);
         let (ring, ring_digest, ring_audible, ring_forbidden, ring_planes) =
-            run(Workload::SixtyFourTrackPlumbingRing);
+            run(Workload::SixtyFourTrackGainPanRing);
 
         assert!(
             bound_audible && ring_audible,
             "both rows must render the tone, or their equality says nothing"
         );
         assert_eq!(
+            bound_digest, GAIN_PAN_DIGEST,
+            "the gain/pan row moved: this is not the row the pin was taken on"
+        );
+        assert_eq!(
             ring_digest, bound_digest,
             "the driver-fed row must render the bound-feed row's bits: a difference is a harness \
              defect, never a finding"
         );
+        let tracks = u64::from(Workload::SixtyFourTrackGainPanRing.tracks());
+        assert_ne!(
+            bound.bank_shape(),
+            [0, 0],
+            "the gain/pan row binds bank chains"
+        );
+        assert_eq!(
+            ring.bank_shape(),
+            bound.bank_shape(),
+            "the feed moves no bank chain or slot"
+        );
+        assert_eq!(ring.bank_transposes(), bound.bank_transposes());
         for (name, runtime) in [("bound", &bound), ("driver-fed", &ring)] {
-            assert_eq!(runtime.bank_shape(), [0, 0], "{name}: no bank chain");
-            assert_eq!(runtime.bank_transposes(), 0, "{name}: no transpose");
             assert_eq!(
                 runtime.bank_route_folds(),
-                0,
-                "{name}: no epilogue to fold into"
+                tracks,
+                "{name}: every route folds into its cohort's epilogue"
             );
             assert_eq!(
-                runtime.bank_collapse_counters(),
-                [0, 0],
-                "{name}: no collapse"
+                runtime.bank_collapse_counters()[0],
+                0,
+                "{name}: no collapsed block"
             );
             assert_eq!(
                 runtime.bank_collapse_transitions(),
@@ -2030,12 +2185,10 @@ mod tests {
             [0, 0, 0],
             "the bound feed binds no source set"
         );
-        let claims = u64::from(Workload::SixtyFourTrackPlumbingRing.tracks());
         assert_eq!(
             ring_planes,
-            [0, claims * BLOCKS, 0],
-            "#927: every claim is read in place by the fused Output every block, none copied \
-             (the pre-#927 pin was every claim copied, none in place)"
+            [0, tracks * BLOCKS, 0],
+            "every claim is read in place by its bank's gather every block, none copied"
         );
         assert_eq!(
             (bound_forbidden, ring_forbidden),
@@ -2044,13 +2197,174 @@ mod tests {
         );
     }
 
+    /// Issue #956 gate 2 (#936 gate 1, re-homed): at the native width the executor dispatches
+    /// only the units that do work.
+    ///
+    /// Both gain/pan rows bind the same units: sixty-four track inputs, the cohorts' bank chains
+    /// and the Output op. On the bound-feed row every input is a host processor
+    /// (`NodeKind::Bound`) that writes its buffer, so every unit is dispatched every block. On the
+    /// driver-fed row every input is a claim its bank's gather reads in place (issue #918): a
+    /// plain, unobserved `SourceInput` op whose dispatch would return at once, which bind leaves
+    /// out of the dispatched-unit table. So the loop dispatches every unit but the sixty-four
+    /// inputs, once per block (`graph::test_only_unit_dispatches`, reset before every block), and
+    /// the row still renders the bound row's bits
+    /// (`the_driver_fed_gain_pan_row_renders_the_bound_rows_bits`).
+    #[test]
+    fn the_driver_fed_gain_pan_row_dispatches_every_unit_but_its_inputs() {
+        const BLOCKS: u64 = 64;
+        let tracks = u64::from(Workload::SixtyFourTrackGainPanRing.tracks());
+        let mut censuses = Vec::new();
+        for (workload, skipped) in [
+            (Workload::SixtyFourTrackGainPanRing, tracks),
+            (Workload::SixtyFourTrackGainPanOnly, 0),
+        ] {
+            let mut runtime = SessionRuntime::new(workload);
+            let units = runtime.unit_eligibility().len() as u64;
+            assert!(
+                units > tracks,
+                "{}: the inputs, the bank chains and the Output",
+                workload.kind()
+            );
+            censuses.push(units);
+            for block in 0..BLOCKS {
+                graph::test_only_unit_dispatch_reset();
+                runtime.render(block).expect("console render");
+                assert_eq!(
+                    graph::test_only_unit_dispatches(),
+                    units - skipped,
+                    "{}, block {block}: units dispatched",
+                    workload.kind()
+                );
+            }
+        }
+        assert_eq!(
+            censuses[0], censuses[1],
+            "the census keeps every unit: the feed changes what is dispatched, not what is bound"
+        );
+    }
+
+    /// Issue #956 gate 3 (#936 gate 5, re-homed): on the driver-fed gain/pan row, the runtime
+    /// metadata the compile with builtins charges grows by exactly the byte lengths it charges for
+    /// the executor's two bind-sized tables, and the tables the row binds fit in them.
+    ///
+    /// The row's graph is the one `build_full` compiles: `prepare_session_builtins` with no meter,
+    /// then `compile_with_builtins` at the native width. Past the semantic estimate its graph
+    /// metadata carries two charges. The runtime metadata is recomputed here from the compile's own
+    /// inputs: one emitted op per scheduled node and one response owner per track (its id,
+    /// `input-filters` and `miso.builtin.input-filters`) -- the row prepares no effect. The bank
+    /// slot reservation is recomputed from the builtin banks the artifact retains: one slot per
+    /// bank, masked at its width. Nothing else is charged there: the strip is banked whole at a
+    /// vector width, so no scalar owner is retained, and with no effect there is no effect control
+    /// or effect bank. The runtime metadata is the terms it carried before issue #936 -- the
+    /// split-table field, the per-op layout delta, the observation state and the response owners,
+    /// none of which the issue moved (`graph`'s
+    /// `runtime_metadata_charge_covers_mixed_ops_once_and_refuses_overflow` pins that the executor's
+    /// layout witnesses carry the new table) -- plus the two tables, each at one entry per emitted
+    /// op. The row binds every unit but its sixty-four inputs as dispatched units (4 bytes each)
+    /// and copies no claim.
+    #[test]
+    fn the_driver_fed_rows_metadata_charge_grows_by_exactly_the_executor_tables() {
+        let workload = Workload::SixtyFourTrackGainPanRing;
+        let model = console_model(workload);
+        let session = compile_session(&model, compile_caps()).expect("compiled console session");
+        let registry = launch_native_effect_registry().expect("launch effect registry");
+        let effects = prepare_native_session_effects(&session, &registry, effect_caps())
+            .expect("prepared console effects");
+        let builtins = builtins_compiler::prepare_session_builtins(&session, &[], builtin_caps())
+            .expect("prepared console builtins");
+        let Ok(artifact) = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            dispatch: Backend::current(),
+            plan_id: PLAN_ID,
+            effects,
+            builtins,
+            caps: graph_caps(),
+        }) else {
+            panic!("gain/pan console graph");
+        };
+        let emitted = artifact
+            .graph()
+            .dependency_levels
+            .iter()
+            .map(|level| level.nodes.len() as u64)
+            .sum::<u64>();
+        let fixed = ["input-filters".len(), "miso.builtin.input-filters".len()];
+        let (strings, largest) =
+            model
+                .tracks
+                .iter()
+                .fold((0_u64, 0_u64), |(total, largest), track| {
+                    let id = track.id.as_str().len() as u64;
+                    (
+                        total + id + (fixed[0] + fixed[1]) as u64,
+                        largest.max(id).max(fixed[0] as u64).max(fixed[1] as u64),
+                    )
+                });
+        let resource =
+            graph::GraphRuntimeMetadataResourceEstimate::checked_for_with_response_bindings(
+                emitted,
+                model.tracks.len() as u64,
+                strings,
+                largest,
+            )
+            .expect("runtime metadata");
+        let banks: Vec<_> = artifact.prepared_builtin_banks().collect();
+        assert!(!banks.is_empty(), "the gain/pan strip is banked");
+        let mask_bytes = banks
+            .iter()
+            .map(|bank| u64::from(bank.width.lanes()))
+            .max()
+            .expect("one bank at least")
+            * core::mem::size_of::<bool>() as u64;
+        let slots =
+            graph::GraphBankSlotResourceEstimate::checked_for_mask(banks.len() as u64, mask_bytes)
+                .expect("bank slot reservation");
+        let report = artifact.report();
+        assert_eq!(
+            report.estimate.graph_metadata_bytes - report.semantic_estimate.graph_metadata_bytes,
+            resource.total_bytes + slots.total_bytes,
+            "the runtime metadata and the bank slot reservation are the row's only charges past \
+             the semantic estimate"
+        );
+        let tables = [
+            emitted * core::mem::size_of::<u32>() as u64,
+            emitted * core::mem::size_of::<(usize, u32)>() as u64,
+        ];
+        assert_eq!(
+            [
+                resource.active_unit_table_bytes,
+                resource.source_input_table_bytes
+            ],
+            tables,
+            "each table at one entry per emitted op"
+        );
+        let before = resource.runtime_field_bytes
+            + resource.emitted_op_layout_delta_bytes * emitted
+            + resource.observation_runtime_state_bytes
+            + resource.response_binding_table_bytes
+            + resource.response_binding_string_bytes;
+        assert_eq!(
+            resource.total_bytes,
+            before + tables[0] + tables[1],
+            "the charge grows by exactly the two tables"
+        );
+        let ring = SessionRuntime::new(workload);
+        let bound = graph::test_only_executor_table_bytes();
+        let dispatched = ring.unit_eligibility().len() as u64 - u64::from(workload.tracks());
+        assert_eq!(
+            bound,
+            [dispatched * core::mem::size_of::<u32>() as u64, 0],
+            "the row dispatches every unit but its inputs and copies no claim"
+        );
+        assert!(bound[0] <= tables[0] && bound[1] <= tables[1]);
+    }
+
     /// The driver's five methods, called directly under the realtime audit: `played_planes` lends
     /// exactly the words `copy_track_input` copies, claim by claim, and both are the claimed
     /// track's frozen block through that track's declared channel mapping.
     ///
     /// Run over the half-mono model, whose even tracks map `(0, 0)` and odd tracks `(0, 1)`, so a
     /// driver that ignored the mapping, or served one claim another track's block, fails here even
-    /// though the stereo plumbing fixture could not show it. The expectation is computed from the
+    /// though the stereo gain/pan fixture could not show it. The expectation is computed from the
     /// model's track *position* and `source_block`, not through `frozen_track_source`, so it is not
     /// the driver checked against itself.
     #[test]
@@ -2180,5 +2494,310 @@ mod tests {
             count / 2,
             "the half-mono model maps half its tracks mono"
         );
+    }
+
+    /// Issue #935 gate 2 (re-homed onto the gain/pan pair by #956): every frozen block the harness
+    /// serves, and both output planes, start a 64-byte line.
+    ///
+    /// The ring row's claims are built by `FrozenSourceDriver::new`, the constructor `build_full`
+    /// calls, over that row's own track inputs, and each is read back through `played_planes`,
+    /// the accessor the graph reads a claim in place through. The bound row's blocks are built by
+    /// `bound_track_source`, the function `source_binding` boxes them with, and all sixty-four are
+    /// held at once so each is its own allocation rather than one reused slot. The output planes
+    /// are the two runtimes' own. Alignment follows from the types' layout, but every claim and
+    /// every track is checked anyway: at the allocator's 16-byte granularity one allocation in
+    /// four lands on a 64-byte boundary by luck.
+    #[test]
+    fn the_frozen_blocks_and_the_output_planes_start_a_cache_line() {
+        let aligned = |plane: &[f32]| (plane.as_ptr() as usize).is_multiple_of(64);
+        let plane_bytes = QUANTUM * core::mem::size_of::<f32>();
+        assert_eq!(core::mem::align_of::<FrozenGraphSource>(), 64);
+        assert_eq!(core::mem::offset_of!(FrozenGraphSource, right), plane_bytes);
+        assert_eq!(
+            core::mem::size_of::<FrozenGraphSource>(),
+            2 * plane_bytes,
+            "no padding: the driver's resource report is exactly the planes"
+        );
+        assert_eq!(core::mem::align_of::<OutputPlanes>(), 64);
+
+        let ring = Workload::SixtyFourTrackGainPanRing;
+        let model = console_model(ring);
+        let mappings = channel_mappings(&model);
+        let mut claims: Vec<GraphSourceInputClaim> = model
+            .tracks
+            .iter()
+            .map(|track| GraphSourceInputClaim {
+                node: GraphNodeId::TrackStage {
+                    track_id: graph::StableGraphId::parse(track.id.as_str()).expect("track id"),
+                    stage: TrackStage::Input,
+                },
+            })
+            .collect();
+        claims.sort_unstable();
+        let driver = FrozenSourceDriver::new(&claims, false, &SourceSignal::Local, &mappings);
+        assert_eq!(driver.claim_count(), ring.tracks() as usize);
+        for claim in 0..driver.claim_count() {
+            let (left, right) = driver.played_planes(claim).expect("every claim lends");
+            assert!(
+                aligned(left) && aligned(right),
+                "ring claim {claim}: left {:p}, right {:p}",
+                left.as_ptr(),
+                right.as_ptr()
+            );
+        }
+
+        let bound = Workload::SixtyFourTrackGainPanOnly;
+        let model = console_model(bound);
+        let mappings = channel_mappings(&model);
+        let blocks: Vec<Box<FrozenGraphSource>> = model
+            .tracks
+            .iter()
+            .map(|track| {
+                bound_track_source(track.id.as_str(), false, &SourceSignal::Local, &mappings)
+            })
+            .collect();
+        assert_eq!(blocks.len(), bound.tracks() as usize);
+        for (track, block) in model.tracks.iter().zip(&blocks) {
+            assert!(
+                aligned(&block.left) && aligned(&block.right),
+                "bound {}: left {:p}, right {:p}",
+                track.id.as_str(),
+                block.left.as_ptr(),
+                block.right.as_ptr()
+            );
+        }
+
+        for workload in [bound, ring] {
+            let runtime = SessionRuntime::new(workload);
+            let (left, right) = runtime.output.0.split_at(QUANTUM);
+            assert!(
+                aligned(left) && aligned(right),
+                "{} output: left {:p}, right {:p}",
+                workload.kind(),
+                left.as_ptr(),
+                right.as_ptr()
+            );
+        }
+    }
+
+    /// Issue #881: the metered row states every fact the standing console row states -- it is that
+    /// session as written -- and it is the only row prepared with the web boot's meter set.
+    #[test]
+    fn the_metered_row_states_the_console_rows_facts_and_is_the_only_web_metered_row() {
+        let console = Workload::SixtyFourTrackConsole;
+        let metered = Workload::SixtyFourTrackConsoleMetered;
+        assert_eq!(metered.kind(), "sixty_four_track_console_metered");
+        assert_eq!(stated_facts(metered), stated_facts(console));
+        assert_eq!(metered.input_signal(), console.input_signal());
+        assert_eq!(metered.warmup_blocks(), console.warmup_blocks());
+        assert!(metered.strip() == Strip::AsWritten && console.strip() == Strip::AsWritten);
+        assert_eq!(metered.source_feed(), SourceFeed::Bound);
+        assert!(!metered.collapse_forced_off());
+        assert!(metered.web_meters());
+        assert!(
+            METERED_WORKLOADS == [metered],
+            "the metered row is the only one"
+        );
+        for workload in WORKLOADS.into_iter().chain(DRIVER_FED_WORKLOADS) {
+            assert!(!workload.web_meters(), "{}", workload.kind());
+        }
+        let rows: Vec<Workload> = native_session_rows().collect();
+        assert_eq!(
+            rows.len(),
+            WORKLOADS.len() + DRIVER_FED_WORKLOADS.len() + METERED_WORKLOADS.len()
+        );
+        assert!(
+            rows.last() == Some(&metered),
+            "the metered row is emitted last, after the driver-fed row"
+        );
+        let mut kinds: Vec<&str> = rows.iter().map(|workload| workload.kind()).collect();
+        kinds.sort_unstable();
+        kinds.dedup();
+        assert_eq!(kinds.len(), rows.len(), "every emitted kind is distinct");
+    }
+
+    /// Issue #881 gate 3: the metered row renders the standing console row's bits, differs from it
+    /// in plan shape exactly by its fused fader and matrix, and every track publishes one
+    /// sample-peak snapshot per twelve-block window, on time, with none dropped.
+    ///
+    /// Sixty-four blocks of both rows, digested by `hash_output`. The pin is the standing console
+    /// row's 64-block digest (`tests/chain_shape.rs`,
+    /// `the_select_free_matrix_arm_renders_the_base_bits`), and the metered row reproduces it,
+    /// because a meter observes and never changes signal flow and the fused fader and matrix render
+    /// the split pair's bits.
+    ///
+    /// The plan shape is **not** the standing row's, and this test pins how it differs. The
+    /// metered row is prepared with between-render-calls delivery, the default web boot's, which
+    /// fuses each cohort's fader and matrix banks into one stage; the standing row's `Concurrent`
+    /// delivery keeps two. Both bank the same `[chains, slots]` (eight chains, 48 memberships) and
+    /// transpose the same number of times, and both fold every route of the console (the #885
+    /// contract). What moves is the stage count their chains run each block
+    /// (`graph::test_only_bank_chain_construction_facts`, read across each bind): 48 on the
+    /// standing row, one per membership, and 40 on the metered row, one fewer per cohort. Each
+    /// plan's scatter redirect count is pinned on its own (0 on both today), because the two plans
+    /// are two deliveries and neither is the other's baseline.
+    ///
+    /// The snapshots are drained after every block, which is what the bench does outside its
+    /// clock. Sixty-four blocks close five twelve-block windows per track, so the row publishes
+    /// `5 * 64` snapshots, and each window is published by the block that closes it: sixty-four
+    /// snapshots after blocks 11, 23, 35, 47 and 59 and none after any other. Each track's five
+    /// carry its own handle, consecutive window sequences, contiguous 1536-frame sample spans from
+    /// sample zero, the `SAMPLE_PEAK` presence mask the selected entry prepares, zero dropped
+    /// snapshots and zero discontinuities, and a positive peak on both channels (the tone is
+    /// audible and no fader is muted). The unmetered row binds no stream and publishes nothing.
+    ///
+    /// Red mutations (run): select `MeterMetricSet::ALL` in `web_meter_requests` -- the presence
+    /// assertion fails; set `WEB_METER_BLOCKS` to 4 -- the window count fails.
+    #[test]
+    fn the_metered_console_row_renders_the_console_bits_and_publishes_every_window() {
+        const BLOCKS: u64 = 64;
+        const CONSOLE_DIGEST: &str =
+            "fe5bed9becdbc101d7ad4b77e7e1969ca3888cae34857333f79531b03a4868de";
+        // The browser's window, written out rather than read back from `WEB_METER_BLOCKS`: the
+        // web host's `DEFAULT_METER_BLOCKS` (12) blocks of the 128-frame quantum. A mirror that
+        // drifted from the host would otherwise move this test with it.
+        let window = 12;
+        let window_frames = window * 128;
+        assert_eq!(QUANTUM, 128);
+        let run = |workload: Workload| {
+            graph::test_only_reset_bank_chain_construction_facts();
+            let mut runtime = SessionRuntime::new(workload);
+            let chains = graph::test_only_bank_chain_construction_facts();
+            let mut digest = Sha256Sink::new();
+            let mut published: Vec<(u64, MeterSnapshot)> = Vec::new();
+            audit::warm_up();
+            audit::reset();
+            for block in 0..BLOCKS {
+                runtime.render(block).expect("console render");
+                runtime.hash_output(&mut digest);
+                runtime.drain_meter_snapshots(|snapshot| published.push((block, *snapshot)));
+            }
+            let forbidden = audit::snapshot().total();
+            (runtime, chains, digest.finish_hex(), published, forbidden)
+        };
+        let (console, console_chains, console_digest, console_published, console_forbidden) =
+            run(Workload::SixtyFourTrackConsole);
+        let (metered, metered_chains, metered_digest, metered_published, metered_forbidden) =
+            run(Workload::SixtyFourTrackConsoleMetered);
+
+        assert_eq!(
+            console_digest, CONSOLE_DIGEST,
+            "the standing console row moved: this is not the row the pin was taken on"
+        );
+        assert_eq!(
+            metered_digest, console_digest,
+            "the metered row must render the standing console row's bits: a meter observes and \
+             never changes signal flow"
+        );
+        assert_eq!(
+            (console_forbidden, metered_forbidden),
+            (0, 0),
+            "no forbidden operation on either render path"
+        );
+        assert_eq!(
+            [console.bank_shape(), metered.bank_shape()],
+            [[8, 48], [8, 48]],
+            "both plans bank the same memberships in the same eight chains"
+        );
+        assert_eq!(metered.bank_transposes(), console.bank_transposes());
+        // The delivery difference, pinned rather than described: the same 48 memberships run as 48
+        // chain stages on the standing row and as 40 on the metered row, whose between-render-
+        // calls delivery fuses each of the eight cohorts' fader and matrix into one stage.
+        assert_eq!(
+            [
+                console_chains.run_memberships,
+                console_chains.runtime_slots,
+                metered_chains.run_memberships,
+                metered_chains.runtime_slots,
+            ],
+            [48, 48, 48, 40],
+            "[standing memberships, standing stages, metered memberships, metered stages]"
+        );
+        let tracks = u64::from(Workload::SixtyFourTrackConsoleMetered.tracks());
+        assert_eq!(
+            [console.bank_route_folds(), metered.bank_route_folds()],
+            [tracks, tracks],
+            "every route of the console folds, under either delivery and metered or not (#885)"
+        );
+        assert_eq!(
+            [
+                console.bank_scatter_redirects(),
+                metered.bank_scatter_redirects()
+            ],
+            [0, 0],
+            "each plan's own redirect count: two deliveries, so two pins and not one comparison"
+        );
+
+        assert_eq!(console.meter_streams(), 0);
+        assert!(
+            console_published.is_empty(),
+            "the unmetered row publishes nothing"
+        );
+        assert_eq!(
+            metered.meter_streams() as u64,
+            tracks,
+            "one stream per track"
+        );
+        assert!(
+            metered.meter_taps().all(|tap| tap == MeterTap::PostMatrix),
+            "every stream observes the post-matrix tap"
+        );
+        let windows = BLOCKS / window;
+        assert_eq!(
+            metered_published.len() as u64,
+            tracks * windows,
+            "five windows per track, none dropped and none extra"
+        );
+        for block in 0..BLOCKS {
+            let drained = metered_published
+                .iter()
+                .filter(|(after, _)| *after == block)
+                .count() as u64;
+            let closes = (block + 1) % window == 0;
+            assert_eq!(
+                drained,
+                if closes { tracks } else { 0 },
+                "block {block}: every track publishes on the block that closes its window"
+            );
+        }
+        for handle in 1..=tracks {
+            let stream: Vec<&(u64, MeterSnapshot)> = metered_published
+                .iter()
+                .filter(|(_, snapshot)| snapshot.handle.0.get() == handle)
+                .collect();
+            assert_eq!(
+                stream.len() as u64,
+                windows,
+                "handle {handle}: every window"
+            );
+            for (sequence, (after, snapshot)) in stream.into_iter().enumerate() {
+                let sequence = sequence as u64;
+                assert_eq!(snapshot.window_sequence, sequence, "handle {handle}");
+                assert_eq!(*after, (sequence + 1) * window - 1, "handle {handle}");
+                assert_eq!(snapshot.start_sample, sequence * window_frames);
+                assert_eq!(snapshot.end_sample, (sequence + 1) * window_frames);
+                assert_eq!(u64::from(snapshot.frames), window_frames);
+                assert!(
+                    snapshot.present_metrics == MeterMetricSet::SAMPLE_PEAK,
+                    "handle {handle}: the selected entry computes the sample peak only"
+                );
+                assert_eq!(
+                    (snapshot.reset_generation, snapshot.observation_generation),
+                    (0, 0),
+                    "handle {handle}: a permanent observer is never re-armed"
+                );
+                assert_eq!(
+                    snapshot.cumulative_dropped_snapshots, 0,
+                    "handle {handle}: dropped a snapshot"
+                );
+                assert_eq!(snapshot.cumulative_discontinuities, 0, "handle {handle}");
+                for peak in [snapshot.left.sample_peak, snapshot.right.sample_peak] {
+                    assert!(
+                        peak.is_finite() && peak > 0.0,
+                        "handle {handle}: the meter read the audible tone ({peak})"
+                    );
+                }
+            }
+        }
     }
 }

@@ -199,3 +199,18 @@ helper must not paper over.
   through `abs`, so `-0.0` cannot reach the compare. The strict form is kept anyway because it is
   the trait's `max` and because a caller that skipped the `abs` would then be wrong for one reason
   instead of two.
+
+## Issue #994 — the bands' knee words come from the shared design
+
+The product knee is a fixed 6 dB, so no session, control message or automation reaches an
+overflowing width here. The band curve now takes its words from
+`effect_runtime::dynamics::knee_coefficients` at compile time (`BAND_KNEE`), and `band_target`
+(step 2 of `band_amplitude`) is exercised at the widths the compressor's parameter admits. Debug
+profile, `CARGO_INCREMENTAL=0 cargo test --locked -p multiband-compressor --lib knee_tests`; each
+mutated file was restored byte for byte from a saved copy.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 994-M1 | `knee_coefficients` without its `is_finite` test (the pre-#994 design) | `effect-runtime/src/dynamics.rs` | `knee_tests::a_band_level_at_the_threshold_never_takes_a_nan_target` | RED: `W 0x00000002 T 0e0 R 1 x 0e0: -100 is a duck at the threshold` — at ratio 1, which compresses nothing, the NaN target still became a -100 dB target |
+| 994-M2 | `BAND_KNEE = knee_coefficients(2.0 * KNEE_DB)` | `src/lib.rs` | `knee_tests::the_fixed_knee_words_are_unchanged` | RED |
+| 994-M3 | the rule as a constant bound one ulp too low: `knee_db >= f32::from_bits(0x0010_0000)` | `effect-runtime/src/dynamics.rs` | `knee_tests::a_band_level_at_the_threshold_never_takes_a_nan_target` | RED |

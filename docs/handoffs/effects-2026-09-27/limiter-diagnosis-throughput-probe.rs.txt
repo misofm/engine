@@ -1,0 +1,74 @@
+// The effect-floor-accounting throughput probe, timed with a calibrated clock (perf counters are
+// not available to this user: perf_event_paranoid = 4).
+// rustc -O -C target-feature=+avx2,+fma -C opt-level=3 throughput.rs -o throughput
+#![allow(unsafe_code)]
+use std::arch::x86_64::*;
+use std::hint::black_box;
+use std::time::Instant;
+
+const UNROLL: usize = 12;
+const REPEAT: usize = 8;
+
+#[target_feature(enable = "avx2,fma")]
+unsafe fn run(variant: &str, iters: u64) -> f32 {
+    let one = _mm256_set1_ps(1.000_000_1);
+    let two = _mm256_set1_ps(0.999_999_9);
+    let mut a: [__m256; UNROLL] = core::array::from_fn(|i| _mm256_set1_ps(1.0 + i as f32 * 0.01));
+    for _ in 0..iters {
+        for _ in 0..REPEAT {
+            for slot in a.iter_mut() {
+                *slot = match variant {
+                    "add" => _mm256_add_ps(*slot, one),
+                    "mul" => _mm256_mul_ps(*slot, two),
+                    "muladd" => _mm256_add_ps(_mm256_mul_ps(*slot, two), one),
+                    "select" => {
+                        let mask = _mm256_cmp_ps(*slot, one, _CMP_GT_OQ);
+                        _mm256_blendv_ps(*slot, two, mask)
+                    }
+                    "max" => _mm256_max_ps(_mm256_mul_ps(*slot, two), one),
+                    "div" => _mm256_div_ps(*slot, two),
+                    _ => unreachable!(),
+                };
+            }
+        }
+    }
+    let mut out = [0.0_f32; 8];
+    let mut total = _mm256_setzero_ps();
+    for slot in a {
+        total = _mm256_add_ps(total, slot);
+    }
+    _mm256_storeu_ps(out.as_mut_ptr(), total);
+    out.iter().sum()
+}
+
+fn core_hz() -> f64 {
+    const ADDS: u64 = 200_000_000;
+    let mut best = f64::MAX;
+    for _ in 0..3 {
+        let mut x = black_box(0.0_f32);
+        let d = black_box(1.0e-3_f32);
+        let start = Instant::now();
+        for _ in 0..ADDS {
+            x += d;
+        }
+        best = best.min(start.elapsed().as_secs_f64());
+        black_box(x);
+    }
+    3.0 * ADDS as f64 / best
+}
+
+fn main() {
+    let hz = core_hz();
+    println!("core clock {:.3} GHz", hz / 1e9);
+    for (variant, ops_per_slot) in [("add", 1.0), ("mul", 1.0), ("muladd", 2.0), ("select", 2.0), ("max", 2.0), ("div", 1.0)] {
+        let iters: u64 = if variant == "div" { 200_000 } else { 2_000_000 };
+        let mut best = f64::MAX;
+        for _ in 0..3 {
+            let start = Instant::now();
+            black_box(unsafe { run(black_box(variant), black_box(iters)) });
+            best = best.min(start.elapsed().as_secs_f64());
+        }
+        let ops = iters as f64 * (UNROLL * REPEAT) as f64 * ops_per_slot;
+        println!("  {variant:<7} {:.3} vector ops/cycle", ops / (best * hz));
+    }
+}

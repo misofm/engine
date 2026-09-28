@@ -1,4 +1,10 @@
-//! One-million-block allocation and forbidden-operation audit for a bound scalar graph.
+//! One-million-block allocation and forbidden-operation audit of the plan exchange lifecycle.
+//!
+//! The plans are compiled the way every host compiles one (#963): a one-track session through
+//! [`GraphCompiler::compile_with_builtins`] at the build's own [`Backend::current`], with the
+//! track's input and the session output bound to host processors and the track's builtin strip
+//! attached as banks. Each block is one frame, so the million renders are a million block
+//! boundaries at which a swap may land.
 
 use bench_support::alloc as bench_alloc;
 use core::num::NonZeroUsize;
@@ -7,19 +13,22 @@ use std::{
     thread::ThreadId,
 };
 
-use effect_contract::{LatencySamples, TailSamples};
+use builtins_compiler::{BuiltinCompileCaps, prepare_session_builtins};
+use effect_compiler::EffectPreparedSession;
 use engine::realtime::audit;
 use engine::realtime::{
     PlanExchangeConfig, PlanarBufferMut, PublishError, RealtimePlanOwner, RealtimeRenderReport,
-    RenderEnvelope, RenderError, RenderIo, RenderTime, SwapOutcome, plan_exchange,
+    RenderError, RenderIo, RenderTime, SwapOutcome, plan_exchange,
 };
-use engine::{QuantumFrames, SampleRateHz};
 use graph::{
-    GraphBindFailure, GraphBindingBlock, GraphEdge, GraphEdgeId, GraphNode, GraphNodeBinding,
-    GraphNodeId, GraphPortId, GraphPortKind, GraphResourceEstimate, GraphRuntimeBindings,
-    GraphRuntimeProcessor, GraphSpec, PreparedGraphPlan, PreparedGraphPlanParts, StableGraphId,
-    TrackStage,
+    GraphBindingBlock, GraphCompileCaps, GraphNodeBinding, GraphNodeId, GraphRuntimeBindings,
+    GraphRuntimeProcessor, TrackStage,
 };
+use graph_compiler::{Backend, GraphBuiltinsCompileRequest, GraphCompiler};
+use session::{CompileCaps, compile_session, parse_session_json};
+
+/// Frames per block: the audit's block boundaries are its subject, so each block is one frame.
+const QUANTUM: u32 = 1;
 
 type DropRecords = Arc<Mutex<Vec<(u64, ThreadId)>>>;
 
@@ -87,7 +96,7 @@ pub(crate) fn main() {
         }
     });
 
-    let mut output = [1.0_f32; 2];
+    let mut output = [1.0_f32; 2 * QUANTUM as usize];
     let output_address = output.as_ptr() as usize;
     let mut swaps_accepted = 0_u64;
     let mut swaps_deferred = 0_u64;
@@ -154,13 +163,13 @@ pub(crate) fn main() {
     assert_eq!(drop_records[1], (7, retirement_thread_id));
     assert_eq!(swaps_accepted, 2);
     assert_eq!(swaps_deferred, 1);
-    assert_eq!(output, [0.0, 0.0]);
+    assert_eq!(output, [0.0; 2 * QUANTUM as usize]);
     assert_eq!(output.as_ptr() as usize, output_address);
     assert_eq!(snapshot.total(), 0);
     println!(
         concat!(
             "{{\"schema_version\":1,\"kind\":\"graph_realtime_audit\",",
-            "\"blocks\":{},\"quantum_frames\":1,",
+            "\"blocks\":{},\"quantum_frames\":{},",
             "\"swaps_accepted\":{},\"swaps_deferred\":{},",
             "\"displaced_plans_destroyed_off_render\":{},\"output_address\":{},",
             "\"allocations\":{},\"deallocations\":{},\"locks\":{},",
@@ -168,6 +177,7 @@ pub(crate) fn main() {
             "\"syscalls\":{},\"total_violations\":{}}}"
         ),
         blocks,
+        QUANTUM,
         swaps_accepted,
         swaps_deferred,
         drop_records.len(),
@@ -185,10 +195,11 @@ pub(crate) fn main() {
 
 fn render_graph_block(
     owner: &mut RealtimePlanOwner,
-    output: &mut [f32; 2],
+    output: &mut [f32; 2 * QUANTUM as usize],
     block: u64,
 ) -> RealtimeRenderReport {
-    let output_view = PlanarBufferMut::try_new(output, 2, 1, 1).expect("fixed output");
+    let frames = QUANTUM as usize;
+    let output_view = PlanarBufferMut::try_new(output, 2, frames, frames).expect("fixed output");
     owner
         .render(
             RenderIo {
@@ -196,7 +207,7 @@ fn render_graph_block(
                 output: output_view,
             },
             RenderTime {
-                absolute_sample: block,
+                absolute_sample: block * u64::from(QUANTUM),
             },
         )
         .expect("graph render")
@@ -219,118 +230,102 @@ fn prepared_graph(
     plan_id: u64,
     drop_records: Option<DropRecords>,
 ) -> engine::realtime::PreparedRenderPlan {
-    let input = GraphNodeId::TrackStage {
-        track_id: StableGraphId::parse("audit").expect("ID"),
-        stage: TrackStage::Input,
-    };
-    let output = GraphNodeId::Output {
-        output_id: StableGraphId::parse("main").expect("ID"),
-    };
-    let edge = GraphEdge {
-        id: GraphEdgeId::TrackMain {
-            target: output.clone(),
+    let mut model = parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
+        .expect("canonical session");
+    model.quantum_frames = QUANTUM;
+    model.tracks[0].dynamic.effects.clear();
+    model.automation.clear();
+    let session = compile_session(
+        &model,
+        CompileCaps {
+            max_compiled_model_bytes: u64::MAX,
+            max_requested_runtime_bytes: u64::MAX,
+            max_single_allocation_bytes: u64::MAX,
+            max_queue_items: u64::MAX,
+            max_source_ring_frames: u64::MAX,
+            max_source_ring_bytes: u64::MAX,
         },
-        source: GraphPortId {
-            node: input.clone(),
-            kind: GraphPortKind::MainOutput,
-            effect_port: None,
+    )
+    .expect("compiled session");
+    let builtins = prepare_session_builtins(
+        &session,
+        &[],
+        BuiltinCompileCaps {
+            maximum_total_state_bytes: u64::MAX,
+            maximum_total_retained_payload_bytes: u64::MAX,
+            maximum_total_meter_items: u64::MAX,
+            maximum_total_meter_bytes: u64::MAX,
+            maximum_single_allocation_bytes: u64::MAX,
+            maximum_meter_streams: u64::MAX,
+            maximum_period_frames: u32::MAX,
+            maximum_peak_hold_frames: u32::MAX,
+            maximum_smoothing_samples: u32::MAX,
         },
-        destination: GraphPortId {
-            node: output.clone(),
-            kind: GraphPortKind::MainInput,
-            effect_port: None,
-        },
-        path: "$.audit".to_owned(),
-    };
-    let envelope = RenderEnvelope {
-        sample_rate: SampleRateHz(48_000),
-        quantum: QuantumFrames(1),
-        input_channels: None,
-        output_channels: NonZeroUsize::new(2).expect("two"),
-    };
-    let node = |id| GraphNode {
-        id,
-        latency: LatencySamples(0),
-        tail: TailSamples::Finite(0),
-    };
-    let graph = PreparedGraphPlan::new(PreparedGraphPlanParts {
+    )
+    .expect("sealed builtins");
+    let dispatch = Backend::current();
+    let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        dispatch,
         plan_id,
-        spec: GraphSpec {
-            nodes: vec![node(input.clone()), node(output.clone())],
-            ports: Vec::new(),
-            edges: vec![edge],
+        effects: EffectPreparedSession {
+            session,
+            entries: Vec::new(),
         },
-        sequential_schedule: vec![input.clone(), output.clone()],
-        dependency_levels: vec![
-            graph::DependencyLevel {
-                level: 0,
-                nodes: vec![input.clone()],
-            },
-            graph::DependencyLevel {
-                level: 1,
-                nodes: vec![output.clone()],
-            },
-        ],
-        route_timings: Vec::new(),
-        inserted_delays: Vec::new(),
-        buffer_assignments: Vec::new(),
-        estimate: GraphResourceEstimate {
-            logical_nodes: 2,
-            materialized_nodes: 2,
-            edges: 1,
-            schedule_items: 2,
-            dependency_levels: 2,
-            reductions: 0,
-            routes: 0,
-            effects: 0,
-            audio_buffer_samples: 6,
-            total_delay_samples: 0,
-            delay_bytes: 0,
-            graph_metadata_bytes: 0,
-            declared_effect_bytes: 0,
-            effect_bank_count: 0,
-            effect_bank_scratch_bytes: 0,
-            effect_bank_runtime_buffer_bytes: 0,
-            effect_bank_metadata_bytes: 0,
-            builtin_bank_bytes: 0,
-            builtin_bank_scratch_bytes: 0,
-            builtin_bank_count: 0,
-            largest_allocation_bytes: 4,
-            incremental_plan_bytes: 24,
-            session_plus_plan_bytes: 24,
+        builtins,
+        caps: GraphCompileCaps {
+            maximum_nodes: 10_000,
+            maximum_edges: 10_000,
+            maximum_schedule_items: 10_000,
+            maximum_dependency_levels: 10_000,
+            maximum_audio_buffer_samples: 10_000_000,
+            maximum_delay_samples_per_edge: 1_000_000,
+            maximum_total_delay_samples: 10_000_000,
+            maximum_graph_bytes: 10_000_000,
+            maximum_plan_bytes: 100_000_000,
+            maximum_single_allocation_bytes: 10_000_000,
+            maximum_finite_tail_samples: 10_000_000,
         },
-        envelope,
-        required_bindings: vec![input.clone(), output.clone()],
-        routes: Vec::new(),
-        track_delays: Vec::new(),
-        effects: Vec::new(),
-        effect_controls: Vec::new(),
-        banks: Vec::new(),
-        builtin_banks: Vec::new(),
-        observers: Vec::new(),
-        effect_observations: Vec::new(),
-    });
-    match graph.bind(GraphRuntimeBindings {
-        envelope,
-        nodes: vec![
-            GraphNodeBinding::new(
-                input,
+    })
+    .unwrap_or_else(|failure| panic!("graph compile: {:?}", failure.diagnostics));
+    // The strip renders in banks at a SIMD width, as on every host; at scalar width no bank
+    // attaches.
+    let banks = if dispatch.width() > 1 { 3 } else { 0 };
+    assert_eq!(artifact.prepared_builtin_bank_count(), banks);
+    let envelope = artifact.envelope();
+    assert_eq!(envelope.quantum.0, QUANTUM);
+    let mut drop_records = drop_records;
+    let nodes: Vec<_> = artifact
+        .external_binding_nodes()
+        .cloned()
+        .map(|node| match node {
+            // The displaced plans' destruction is witnessed by the input processor's drop.
+            GraphNodeId::TrackStage {
+                stage: TrackStage::Input,
+                ..
+            } => GraphNodeBinding::new(
+                node,
                 Box::new(Silence {
                     plan_id,
-                    drops: drop_records,
-                }),
+                    drops: drop_records.take(),
+                }) as Box<dyn GraphRuntimeProcessor>,
             ),
-            GraphNodeBinding::new(
-                output,
+            GraphNodeId::Output { .. } => GraphNodeBinding::new(
+                node,
                 Box::new(Silence {
                     plan_id,
                     drops: None,
-                }),
+                }) as Box<dyn GraphRuntimeProcessor>,
             ),
-        ],
-        observers: Vec::new(),
-    }) {
-        Ok(plan) => plan,
-        Err(GraphBindFailure { code, .. }) => panic!("graph bind: {code}"),
-    }
+            _ => panic!("only the track input and the session output are external"),
+        })
+        .collect();
+    assert_eq!(nodes.len(), 2, "one track input and the session output");
+    artifact
+        .into_bound(GraphRuntimeBindings {
+            envelope,
+            nodes,
+            observers: Vec::new(),
+        })
+        .unwrap_or_else(|failure| panic!("graph bind: {}", failure.code))
+        .plan
 }

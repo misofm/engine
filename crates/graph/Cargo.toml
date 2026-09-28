@@ -10,7 +10,7 @@ publish.workspace = true
 name = "graph"
 
 [features]
-test-support = []
+test-support = ["rack/test-support"]
 
 [dependencies]
 engine.workspace = true

@@ -1,0 +1,291 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 4271e1f0..ce96d574 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -45,6 +45,7 @@ members = [
+     "tools/parameter-metadata",
+     "tools/session-validator",
+     "tools/wasm-gates",
++    "tools/wasm-pins-966-guest",
+ ]
+ resolver = "3"
+ 
+diff --git a/tools/wasm-gates/tests/wasm_pins_966.rs b/tools/wasm-gates/tests/wasm_pins_966.rs
+new file mode 100644
+index 00000000..6d81d8da
+--- /dev/null
++++ b/tools/wasm-gates/tests/wasm_pins_966.rs
+@@ -0,0 +1,116 @@
++//! Issue #966 evidence harness (never merged): run `wasm-pins-966-guest` under the pinned wasmtime
++//! and check the `Simd4` pins `crates/graph-compiler/tests/bank_levels.rs` asserts on four-lane
++//! builds, which an `x86-64-v3` host never runs.
++//!
++//! `WASM_PINS_966_GUEST` names the built guest; without it the test does nothing. The reproducers
++//! always run. `WASM_PINS_966_COUNT` seeds of the probe run from `WASM_PINS_966_START`, rendered
++//! for `WASM_PINS_966_BLOCKS` blocks (default 16), every seed when `WASM_PINS_966_RENDER_ALL=1`.
++#![allow(missing_docs, clippy::all)]
++
++use wasmtime::{Config, Engine, Instance, Module, Store};
++
++const STAT_NAMES: [&str; 16] = [
++    "compile_refused",
++    "bind_refused",
++    "cross_level",
++    "misaligned",
++    "effect_banks",
++    "moved_unarmed",
++    "moved_armed",
++    "silent",
++    "armed_collapsed_blocks",
++    "armed_collapsible",
++    "samples",
++    "seeds",
++    "misaligned_seeds",
++    "rendered",
++    "collapse_fired_seeds",
++    "seeds_bind_refused",
++];
++
++/// `(name, Simd4 effect banks, Simd4 misaligned planned slots)`, in the guest's `model` order.
++/// The bank counts are the `simd4` arguments of `bank_levels.rs`'s `native_bank_count` calls.
++const PINS: [(&str, u32, u32); 8] = [
++    ("64-track console less ch00's EQ", 45, 1),
++    ("64-track console less ch60's EQ", 45, 1),
++    ("64-track console less ch63's EQ", 45, 1),
++    ("64-track mono console less ch00's EQ", 45, 1),
++    ("seed-412 shape", 6, 1),
++    ("reduced mono console from the #970 probe", 1, 1),
++    ("64-track console less nine EQs", 43, 1),
++    ("sixteen tracks realigning after a misaligned compressor", 18, 2),
++];
++
++fn env_u32(name: &str, default: u32) -> u32 {
++    std::env::var(name).map_or(default, |value| value.parse().expect(name))
++}
++
++#[test]
++fn wasm_simd4_pins_966() {
++    let Ok(path) = std::env::var("WASM_PINS_966_GUEST") else {
++        return;
++    };
++    let blocks = env_u32("WASM_PINS_966_BLOCKS", 16);
++    let start = env_u32("WASM_PINS_966_START", 0);
++    let count = env_u32("WASM_PINS_966_COUNT", 0);
++    let render_all = env_u32("WASM_PINS_966_RENDER_ALL", 0);
++    let mut config = Config::new();
++    config.wasm_simd(true);
++    config.wasm_relaxed_simd(false);
++    let engine = Engine::new(&config).unwrap();
++    let module = Module::from_file(&engine, &path).unwrap();
++    let mut store = Store::new(&engine, ());
++    let instance = Instance::new(&mut store, &module, &[]).unwrap();
++    let backend = instance
++        .get_typed_func::<(), u32>(&mut store, "pins_966_backend")
++        .unwrap();
++    let stat = instance
++        .get_typed_func::<u32, u32>(&mut store, "pins_966_stat")
++        .unwrap();
++    let reproducer = instance
++        .get_typed_func::<(u32, u32), u32>(&mut store, "pins_966_reproducer")
++        .unwrap();
++    let probe = instance
++        .get_typed_func::<(u32, u32, u32, u32), u32>(&mut store, "pins_966_probe")
++        .unwrap();
++    let lanes = backend.call(&mut store, ()).unwrap();
++    println!("guest {path}: backend lanes {lanes}");
++    assert_eq!(lanes, 4, "the guest is a four-lane build");
++    let read = |store: &mut Store<()>| -> [u32; 16] {
++        std::array::from_fn(|index| stat.call(&mut *store, index as u32).unwrap())
++    };
++    let describe = |stats: &[u32; 16], upto: usize| -> String {
++        (0..upto)
++            .map(|index| format!("{}={}", STAT_NAMES[index], stats[index]))
++            .collect::<Vec<_>>()
++            .join(" ")
++    };
++
++    let mut failures = Vec::new();
++    for (which, (name, banks, misaligned)) in PINS.iter().enumerate() {
++        reproducer.call(&mut store, (which as u32, blocks)).unwrap();
++        let stats = read(&mut store);
++        println!("{name}, {blocks} blocks: {}", describe(&stats, 11));
++        let clean = stats[0] == 0 && stats[1] == 0 && stats[2] == 0 && stats[5..8] == [0, 0, 0];
++        if !clean || stats[4] != *banks || stats[3] != *misaligned {
++            failures.push(format!(
++                "{name}: expected {banks} banks and {misaligned} misaligned slots, clean"
++            ));
++        }
++    }
++    if count > 0 {
++        probe
++            .call(&mut store, (start, count, blocks, render_all))
++            .unwrap();
++        let stats = read(&mut store);
++        println!(
++            "probe seeds {start}..{} blocks {blocks} render_all {render_all}: {}",
++            start + count,
++            describe(&stats, 16)
++        );
++        if stats[0] != 0 || stats[1] != 0 || stats[15] != 0 || stats[5] != 0 || stats[6] != 0 {
++            failures.push(format!("probe seeds {start}..{}", start + count));
++        }
++    }
++    assert!(failures.is_empty(), "{failures:#?}");
++}
+diff --git a/tools/wasm-pins-966-guest/Cargo.toml b/tools/wasm-pins-966-guest/Cargo.toml
+new file mode 100644
+index 00000000..7a8ebb88
+--- /dev/null
++++ b/tools/wasm-pins-966-guest/Cargo.toml
+@@ -0,0 +1,25 @@
++[package]
++name = "wasm-pins-966-guest"
++version.workspace = true
++license.workspace = true
++edition.workspace = true
++rust-version.workspace = true
++publish.workspace = true
++
++# Issue #966 evidence harness, applied from `docs/handoffs/bug-966-2026-09-27/wasm-pins-harness.patch`
++# and never merged: `crates/graph-compiler/tests/bank_levels.rs`, compiled for
++# `wasm32-unknown-unknown` + `simd128`, where `Backend::current()` is `Simd4` and every launch
++# factory in the reproducers binds four-lane banks. An `x86-64-v3` build cannot show them (D4).
++[lib]
++name = "wasm_pins_966_guest"
++crate-type = ["cdylib"]
++
++[dependencies]
++builtins-compiler.workspace = true
++effect-compiler.workspace = true
++engine.workspace = true
++graph.workspace = true
++graph-compiler.workspace = true
++lane.workspace = true
++math.workspace = true
++session.workspace = true
+diff --git a/tools/wasm-pins-966-guest/src/lib.rs b/tools/wasm-pins-966-guest/src/lib.rs
+new file mode 100644
+index 00000000..65526be4
+--- /dev/null
++++ b/tools/wasm-pins-966-guest/src/lib.rs
+@@ -0,0 +1,120 @@
++//! Issue #966 evidence harness (never merged): the committed `bank_levels.rs` in a `Simd4` guest.
++//!
++//! Every export returns plain `u32`s so the host needs no memory contract. A reproducer or probe
++//! call stores its tallies, and `pins_966_stat` reads them back one index at a time.
++#![allow(unsafe_code, dead_code, unused, missing_docs, unreachable_pub, clippy::all)]
++
++#[path = "../../../crates/graph-compiler/tests/bank_levels.rs"]
++mod probe;
++
++use lane::Backend;
++use probe::{Collapse, compile_bind_render};
++use std::sync::Mutex;
++
++/// Tallies, indexed as `STAT_NAMES` in the host test lists them.
++static STATS: Mutex<[u32; 16]> = Mutex::new([0; 16]);
++
++/// The guest's own lane count: 4 under `simd128`.
++#[unsafe(no_mangle)]
++pub extern "C" fn pins_966_backend() -> u32 {
++    match Backend::current() {
++        Backend::Scalar => 1,
++        Backend::Simd4 => 4,
++        Backend::Simd8 => 8,
++    }
++}
++
++#[unsafe(no_mangle)]
++pub extern "C" fn pins_966_stat(index: u32) -> u32 {
++    STATS.lock().unwrap()[index as usize]
++}
++
++/// The reproducers, in the order the host's pin table lists them.
++fn model(which: u32) -> Option<session::SessionModel> {
++    Some(match which {
++        0 => probe::sixty_four_track_console_less_eqs(&[0]),
++        1 => probe::sixty_four_track_console_less_eqs(&[60]),
++        2 => probe::sixty_four_track_console_less_eqs(&[63]),
++        3 => probe::mono_console_less_eqs(&[0]),
++        4 => probe::ragged_dynamic_soft_clip(),
++        5 => probe::reduced_mono_console(),
++        6 => probe::sixty_four_track_console_less_eqs(&[0, 56, 57, 58, 59, 60, 61, 62, 63]),
++        7 => probe::realigning_simd1_strips(),
++        _ => return None,
++    })
++}
++
++/// Adds one session's tallies: 0 compile refused, 1 bind refused (either leg), 2 cross-level
++/// banks, 3 misaligned slots, 4 effect banks, 5 unarmed renders that moved, 6 armed renders that
++/// moved, 7 silent scalar renders, 8 armed collapsed blocks, 9 armed collapsible cohorts,
++/// 10 samples compared. Everything but the scalar reference is at `Simd4`.
++fn account(model: &session::SessionModel, blocks: u64, stats: &mut [u32; 16]) {
++    let scalar = compile_bind_render(model, Backend::Scalar, blocks, Collapse::Unarmed);
++    let unarmed = compile_bind_render(model, Backend::Simd4, blocks, Collapse::Unarmed);
++    let armed = compile_bind_render(model, Backend::Simd4, blocks, Collapse::Armed);
++    if scalar.compile.is_some() || unarmed.compile.is_some() {
++        stats[0] += 1;
++        return;
++    }
++    stats[1] += u32::from(unarmed.bind.is_some() || armed.bind.is_some());
++    stats[2] += unarmed.cross_level_banks as u32;
++    stats[3] += unarmed.misaligned_slots as u32;
++    stats[4] += unarmed.effect_banks as u32;
++    stats[5] += u32::from(unarmed.bind.is_none() && unarmed.pcm != scalar.pcm);
++    stats[6] += u32::from(armed.bind.is_none() && armed.pcm != scalar.pcm);
++    stats[7] += u32::from(
++        !scalar
++            .pcm
++            .as_ref()
++            .is_some_and(|pcm| pcm.iter().any(|bits| f32::from_bits(*bits) != 0.0)),
++    );
++    stats[8] += armed.collapse[0] as u32;
++    stats[9] += armed.collapse[1] as u32;
++    stats[10] += scalar.pcm.as_ref().map_or(0, |pcm| pcm.len() as u32);
++}
++
++/// Reproducer `which` at `Simd4` against `Scalar`, `blocks` blocks. `u32::MAX` past the end,
++/// otherwise the bind refusals.
++#[unsafe(no_mangle)]
++pub extern "C" fn pins_966_reproducer(which: u32, blocks: u32) -> u32 {
++    let Some(model) = model(which) else {
++        return u32::MAX;
++    };
++    let mut stats = [0; 16];
++    account(&model, u64::from(blocks), &mut stats);
++    *STATS.lock().unwrap() = stats;
++    stats[1]
++}
++
++/// Generator seeds `start..start + count`: bind every one at `Simd4`, and render (unarmed and
++/// armed) the ones with a misaligned planned slot, or every one when `render_all` is nonzero.
++/// Adds 11 seeds, 12 misaligned seeds, 13 rendered seeds, 14 seeds whose armed collapse fired and
++/// 15 seeds bind refused at `Simd4` to `account`'s sums over the rendered seeds. Returns tally 15.
++#[unsafe(no_mangle)]
++pub extern "C" fn pins_966_probe(start: u32, count: u32, blocks: u32, render_all: u32) -> u32 {
++    let mut stats = [0; 16];
++    for seed in start..start + count {
++        let (model, _) = probe::generate(u64::from(seed));
++        let bound = compile_bind_render(&model, Backend::Simd4, 0, Collapse::Unarmed);
++        stats[11] += 1;
++        if bound.compile.is_some() {
++            stats[0] += 1;
++            continue;
++        }
++        stats[15] += u32::from(bound.bind.is_some());
++        let misaligned = bound.misaligned_slots > 0;
++        stats[12] += u32::from(misaligned);
++        if !(misaligned || render_all != 0) {
++            continue;
++        }
++        stats[13] += 1;
++        let mut seed_stats = [0; 16];
++        account(&model, u64::from(blocks), &mut seed_stats);
++        for index in 0..11 {
++            stats[index] += seed_stats[index];
++        }
++        stats[14] += u32::from(seed_stats[8] > 0);
++    }
++    *STATS.lock().unwrap() = stats;
++    stats[15]
++}

@@ -1,0 +1,138 @@
+// Limiter diagnosis: wasm simd128 console rows under Node (V8). Run pinned, under the timing lock.
+import { readFileSync } from 'node:fs';
+const bytes = readFileSync(process.argv[2]);
+const { instance } = await WebAssembly.instantiate(bytes, {});
+const x = instance.exports;
+const QUANTUM = 128, TRACKS = 64;
+const CONSOLE = 2, LEGACY = 9, EQ_COMP = 10;
+const f32 = new Float32Array(1), u32 = new Uint32Array(f32.buffer);
+function stage() {
+  x.miso_console_reset_source();
+  for (let track = 0; track < TRACKS; track++) {
+    const left = [], right = [];
+    for (let frame = 0; frame < QUANTUM; frame++) {
+      const v = Math.fround(Math.sin(Math.fround(Math.fround(frame * 0.017) + Math.fround(track * 0.31))) * 0.6);
+      left.push(v); right.push(Math.fround(-v * 0.75));
+    }
+    for (const v of left.concat(right)) { f32[0] = v; x.miso_console_push_source_word(u32[0]); }
+  }
+}
+function prepare(index) { stage(); if (!x.miso_console_prepare(index)) throw new Error('prepare ' + index); }
+function digest(index, variant, blocks) {
+  x.miso_diag_set_limiter_variant(variant);
+  prepare(index);
+  for (let b = 0; b < blocks; b++) { if (!x.miso_console_render(b)) throw new Error('render'); x.miso_console_hash_output(); }
+  x.miso_console_finish_digest();
+  let d = ''; for (let i = 0; i < 8; i++) d += (x.miso_console_digest_word(i) >>> 0).toString(16).padStart(8, '0');
+  x.miso_diag_set_limiter_variant(0);
+  return d;
+}
+const V = { LINKED: 1, HOIST: 2, NOZERO: 4, FUSED: 8, MAXDIV: 32, SPLIT: 64, NOSCATTER: 128, DET2: 256, ASSERT: 512, TREE: 2048, LEAN: 8192, FISSION: 16384, NOOP: 1 << 16, STATE: 1 << 17, DET: 1 << 18, NOFINISH: 1 << 19, GAIN: 1 << 22 };
+const SMALL_A = V.HOIST | V.NOZERO | V.MAXDIV | V.NOSCATTER;
+const LEAN_BEST = V.LEAN | V.LINKED | V.HOIST | V.NOZERO | V.MAXDIV | V.NOSCATTER;
+const SMALL = V.HOIST | V.NOZERO | V.MAXDIV | V.NOSCATTER;
+const SCREEN = 1 << 15;
+const UNITY = 1 << 25;
+const arms = process.argv[4] === 'unity' ? [
+  ['console', 0],
+  ['console UNITY', UNITY],
+  ['console SCREEN', SCREEN],
+  ['console LINKED+SMALL+LEAN+SCREEN+UNITY', LEAN_BEST | SCREEN | UNITY],
+] : process.argv[4] === 'screen' ? [
+  ['console', 0],
+  ['console LINKED', V.LINKED],
+  ['console SCREEN', SCREEN],
+  ['console LINKED+SMALL+LEAN', LEAN_BEST],
+  ['console LINKED+SMALL+LEAN+SCREEN', LEAN_BEST | SCREEN],
+] : process.argv[4] === 'final' ? [
+  ['console', 0],
+  ['console, limiter NOOP', V.NOOP],
+  ['console LINKED', V.LINKED],
+  ['console SMALL', SMALL],
+  ['console LEANSTATE+NOSCATTER', V.LEAN | V.NOSCATTER],
+  ['console LINKED+SMALL+LEAN', LEAN_BEST],
+  ['console LINKED+SMALL+LEAN+FISSION', LEAN_BEST | V.FISSION],
+  ['console LINKED+SMALL+LEAN+FISSION+DET2', LEAN_BEST | V.FISSION | V.DET2],
+] : process.argv[4] === 'singles' ? [
+  ['console', 0],
+  ['console HOIST', V.HOIST],
+  ['console MAXDIV', V.MAXDIV],
+  ['console NOZERO', V.NOZERO],
+  ['console NOSCATTER', V.NOSCATTER],
+  ['console LEANSTATE+NOSCATTER', V.LEAN | V.NOSCATTER],
+  ['console FUSEDCHECK', V.FUSED],
+  ['console ASSERT', V.ASSERT],
+  ['console SPLIT', V.SPLIT],
+  ['console DET2', V.DET2],
+  ['console FISSION', V.FISSION],
+  ['console LINKED+FISSION', V.LINKED | V.FISSION],
+  ['console LEAN_BEST', LEAN_BEST],
+  ['console LEAN_BEST+FISSION', LEAN_BEST | V.FISSION],
+  ['console LEAN_BEST+FISSION+DET2', LEAN_BEST | V.FISSION | V.DET2],
+] : process.argv[4] === 'breakdown' ? [
+  ['console', 0],
+  ['console, limiter NOOP', V.NOOP],
+  ['x:STATE (state+finish only)', V.STATE],
+  ['x:DET (state+detector+finish)', V.DET],
+  ['x:GAIN (state+gain loop+finish)', V.GAIN],
+  ['x:NOFINISH', V.NOFINISH],
+  ['x:STATE+LEANSTATE+NOSCATTER', V.STATE | V.LEAN | V.NOSCATTER],
+] : [
+  ['console', 0],
+  ['console, limiter NOOP', V.NOOP],
+  ['console LINKED', V.LINKED],
+  ['console SMALL_A', SMALL_A],
+  ['console LINKED+SMALL_A+LEANSTATE', SMALL_A | V.LINKED | V.LEAN],
+  ['console LINKED+SMALL_A+LEANSTATE+DET2', SMALL_A | V.LINKED | V.LEAN | V.DET2],
+  ['console TREE (class B)', V.TREE],
+];
+if (process.argv[3] === 'digests') {
+  const base = digest(CONSOLE, 0, 200);
+  for (const [label, v] of arms.slice(2)) console.log(`digest ${label}: ${digest(CONSOLE, v, 200) === base ? 'SAME' : 'DIFFERENT'}`);
+  process.exit(0);
+}
+const ROUNDS = 6, BLOCKS = 600;
+let block = 0;
+function timeArm(variant) {
+  x.miso_diag_set_limiter_variant(variant);
+  for (let i = 0; i < 40; i++) x.miso_console_render(block++);
+  const t = new Array(BLOCKS);
+  for (let i = 0; i < BLOCKS; i++) {
+    const t0 = process.hrtime.bigint();
+    x.miso_console_render(block++);
+    t[i] = Number(process.hrtime.bigint() - t0);
+  }
+  t.sort((a, b) => a - b);
+  return t[BLOCKS >> 1];
+}
+const med = a => [...a].sort((p, q) => p - q)[a.length >> 1];
+console.log(`loadavg ${readFileSync('/proc/loadavg', 'utf8').trim()}`);
+const eq1 = [];
+prepare(EQ_COMP);
+for (let i = 0; i < 600; i++) x.miso_console_render(block++);
+for (let r = 0; r < ROUNDS; r++) eq1.push(timeArm(0));
+const legacy = [];
+prepare(LEGACY);
+for (let i = 0; i < 600; i++) x.miso_console_render(block++);
+for (let r = 0; r < ROUNDS; r++) legacy.push(timeArm(0));
+prepare(CONSOLE);
+for (let i = 0; i < 600; i++) x.miso_console_render(block++);
+const res = arms.map(() => []);
+for (let r = 0; r < ROUNDS; r++) {
+  const order = r % 2 ? [...arms.keys()].reverse() : [...arms.keys()];
+  for (const i of order) res[i].push(timeArm(arms[i][1]));
+}
+x.miso_diag_set_limiter_variant(0);
+const eq2 = [];
+prepare(EQ_COMP);
+for (let i = 0; i < 600; i++) x.miso_console_render(block++);
+for (let r = 0; r < ROUNDS; r++) eq2.push(timeArm(0));
+const eq = med(eq1.concat(eq2));
+const hz = Number(process.argv[3] || 3.7e9);
+const ls = 64 * 128 * 2;
+const line = (label, a) => console.log(`  ${label.padEnd(42)} p50 ${String(med(a)).padStart(8)} ns  ${(med(a) * hz / 1e9 / ls).toFixed(3).padStart(8)} cyc/lane-sample  minus eq_comp ${((med(a) - eq) * hz / 1e9 / ls).toFixed(3).padStart(7)}   rounds ${a}`);
+line('eq_comp_simd1 (before)', eq1);
+line('eq_comp_simd1 (after)', eq2);
+line('console_legacy', legacy);
+arms.forEach(([label], i) => line(label, res[i]));
+console.log(`loadavg ${readFileSync('/proc/loadavg', 'utf8').trim()}`);

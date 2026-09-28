@@ -863,3 +863,357 @@ fn prepared_filters_design_only_before_runtime_application() {
     input.reset_with_kind(BuiltinResetKind::FullToPrepared);
     assert_eq!(FILTER_DESIGN_CALLS.with(Cell::get), 0);
 }
+
+/// Issue #944 gate 2: a settled matrix block takes the select-free arm exactly when no lane of the
+/// stage -- padding lanes included -- is the identity, once per settled segment.
+///
+/// `MATRIX_SELECT_FREE_BLOCKS` counts the arm, so this is the one gate that sees a
+/// performance-only regression: never taking the arm (issue #944 M2) renders the same bits.
+#[test]
+fn settled_matrix_takes_the_select_free_arm_only_without_an_identity_lane() {
+    use super::{BuiltinMatrixBank, MATRIX_SELECT_FREE_BLOCKS};
+    use effect_contract::BankWidth;
+    use lane::Backend;
+
+    const FRAMES: usize = 64;
+    /// Ends 24 frames into a 64-frame block, so the block has a settled tail.
+    const WINDOW: u32 = 24;
+
+    fn non_identity(lane: usize) -> Matrix2x2 {
+        let k = lane as f32 * 0.0625;
+        Matrix2x2 {
+            ll: 0.75 - k,
+            lr: -0.25 + k,
+            rl: 0.5 - k,
+            rr: 0.875 - k,
+        }
+    }
+
+    fn counted(render: impl FnOnce()) -> usize {
+        MATRIX_SELECT_FREE_BLOCKS.with(|blocks| blocks.set(0));
+        render();
+        MATRIX_SELECT_FREE_BLOCKS.with(Cell::get)
+    }
+
+    for (backend, width) in [
+        (Backend::Simd8, BankWidth::Eight),
+        (Backend::Simd4, BankWidth::Four),
+    ] {
+        let lanes = width.lanes() as usize;
+        let bank = |members: usize, identity_member: Option<usize>| {
+            let prepared = (0..members)
+                .map(|lane| {
+                    let matrix = if identity_member == Some(lane) {
+                        Matrix2x2::IDENTITY
+                    } else {
+                        non_identity(lane)
+                    };
+                    (matrix, 0)
+                })
+                .collect();
+            BuiltinMatrixBank::new(backend, width, prepared).unwrap()
+        };
+        let mut left = vec![0.25; FRAMES * lanes];
+        let mut right = vec![-0.5; FRAMES * lanes];
+        let mut render = |bank: &mut BuiltinMatrixBank, blocks: usize| {
+            counted(|| {
+                for _ in 0..blocks {
+                    bank.process(&mut left, &mut right, FRAMES as u32);
+                }
+            })
+        };
+
+        // A full bank with no identity lane: once per settled block, never per frame.
+        let mut full = bank(lanes, None);
+        assert_eq!(
+            render(&mut full, 3),
+            3,
+            "width={lanes}: full non-identity bank"
+        );
+
+        // One identity member keeps the select form.
+        let mut one_identity = bank(lanes, Some(lanes / 2));
+        assert_eq!(
+            render(&mut one_identity, 3),
+            0,
+            "width={lanes}: identity member"
+        );
+
+        // A partial bank carries identity padding lanes, so it keeps the select form too.
+        let mut partial = bank(lanes - 1, None);
+        assert_eq!(
+            render(&mut partial, 3),
+            0,
+            "width={lanes}: identity padding lane"
+        );
+        let mut single = bank(1, None);
+        assert_eq!(render(&mut single, 3), 0, "width={lanes}: one member");
+
+        // A ramp that ends mid-block toward a non-identity target: its settled tail is one
+        // select-free segment, and the next block is another.
+        let mut retarget = bank(lanes, None);
+        retarget
+            .set_target_smoothed(0, non_identity(lanes), WINDOW)
+            .unwrap();
+        assert_eq!(render(&mut retarget, 1), 1, "width={lanes}: settled tail");
+        assert_eq!(render(&mut retarget, 1), 1, "width={lanes}: after the ramp");
+
+        // A ramp that covers the whole block has no settled segment at all.
+        retarget
+            .set_target_smoothed(1, non_identity(lanes + 1), FRAMES as u32 + WINDOW)
+            .unwrap();
+        assert_eq!(
+            render(&mut retarget, 1),
+            0,
+            "width={lanes}: ramp covers block"
+        );
+        assert_eq!(
+            render(&mut retarget, 1),
+            1,
+            "width={lanes}: ramp ends mid-block"
+        );
+
+        // A ramp that ends mid-block on the identity: its tail and every block after keep the
+        // select, because `sync_settled` has set that lane's mask before the tail runs.
+        let mut to_identity = bank(lanes, None);
+        to_identity
+            .set_target_smoothed(0, Matrix2x2::IDENTITY, WINDOW)
+            .unwrap();
+        assert_eq!(
+            render(&mut to_identity, 1),
+            0,
+            "width={lanes}: identity tail"
+        );
+        assert_eq!(
+            render(&mut to_identity, 2),
+            0,
+            "width={lanes}: identity settled"
+        );
+    }
+
+    // The scalar per-track stage takes the same method; its mask is the lane's own flag.
+    let chain = |matrix: Matrix2x2| {
+        BuiltinChain::new(
+            48_000,
+            BuiltinParameters {
+                matrix,
+                ..BuiltinParameters::default()
+            },
+        )
+        .unwrap()
+    };
+    let render = |chain: &mut BuiltinChain, blocks: usize| {
+        counted(|| {
+            for _ in 0..blocks {
+                let mut left = [0.25; FRAMES];
+                let mut right = [-0.5; FRAMES];
+                chain
+                    .matrix
+                    .process(DualMonoBlock::new(&mut left, &mut right, 0).unwrap());
+            }
+        })
+    };
+    let mut scalar = chain(non_identity(3));
+    assert_eq!(render(&mut scalar, 2), 2, "scalar non-identity");
+    let mut identity = chain(Matrix2x2::IDENTITY);
+    assert_eq!(render(&mut identity, 2), 0, "scalar identity");
+    scalar
+        .matrix
+        .set_target_smoothed(Matrix2x2::IDENTITY, WINDOW)
+        .unwrap();
+    assert_eq!(render(&mut scalar, 1), 0, "scalar identity tail");
+    identity
+        .matrix
+        .set_target_smoothed(non_identity(5), WINDOW)
+        .unwrap();
+    assert_eq!(render(&mut identity, 1), 1, "scalar settled tail");
+}
+
+/// Issue #954 dispatch witness: a settled fused fader/matrix block takes the select-free arm
+/// exactly when no lane of the matrix -- padding lanes included -- is the identity, once per call,
+/// at all four call sites of the fused kernel.
+///
+/// `FUSED_SELECT_FREE_BLOCKS` counts the arm, so this is the one gate that sees a
+/// performance-only regression: never taking the arm (issue #954 M2) renders the same bits.
+#[test]
+fn fused_fader_matrix_takes_the_select_free_arm_only_without_an_identity_lane() {
+    use super::{
+        BuiltinFaderBank, BuiltinMatrixBank, FUSED_SELECT_FREE_BLOCKS, FaderMuteRampBuiltins,
+    };
+    use effect_contract::BankWidth;
+    use lane::Backend;
+
+    const FRAMES: usize = 64;
+    const WINDOW: u32 = 24;
+
+    fn non_identity(lane: usize) -> Matrix2x2 {
+        let k = lane as f32 * 0.0625;
+        Matrix2x2 {
+            ll: 0.75 - k,
+            lr: -0.25 + k,
+            rl: 0.5 - k,
+            rr: 0.875 - k,
+        }
+    }
+
+    fn counted(render: impl FnOnce()) -> usize {
+        FUSED_SELECT_FREE_BLOCKS.with(|blocks| blocks.set(0));
+        render();
+        FUSED_SELECT_FREE_BLOCKS.with(Cell::get)
+    }
+
+    for (backend, width) in [
+        (Backend::Simd8, BankWidth::Eight),
+        (Backend::Simd4, BankWidth::Four),
+    ] {
+        let lanes = width.lanes() as usize;
+        let banks = |members: usize, identity_member: Option<usize>| {
+            let matrices = (0..members)
+                .map(|lane| {
+                    let matrix = if identity_member == Some(lane) {
+                        Matrix2x2::IDENTITY
+                    } else {
+                        non_identity(lane)
+                    };
+                    (matrix, 0)
+                })
+                .collect();
+            let faders = (0..members)
+                .map(|lane| BuiltinParameters {
+                    left: ChannelParameters {
+                        fader_db: -3.0,
+                        muted: lane == 1,
+                        ..ChannelParameters::default()
+                    },
+                    ..BuiltinParameters::default()
+                })
+                .collect();
+            (
+                BuiltinFaderBank::new(backend, width, faders).unwrap(),
+                BuiltinMatrixBank::new(backend, width, matrices).unwrap(),
+            )
+        };
+        // One fused call over fresh planes; whether it was accepted, and whether it took the arm.
+        let call = |(fader, matrix): &mut (BuiltinFaderBank, BuiltinMatrixBank)| {
+            let mut left = vec![0.25; FRAMES * lanes];
+            let mut right = vec![-0.5; FRAMES * lanes];
+            let mut fused = false;
+            let arm = counted(|| {
+                fused = fader.try_process_settled_with_matrix(
+                    matrix,
+                    &mut left,
+                    &mut right,
+                    FRAMES as u32,
+                );
+            });
+            if !fused {
+                fader.process(&mut left, &mut right, FRAMES as u32);
+                matrix.process(&mut left, &mut right, FRAMES as u32);
+            }
+            (fused, arm)
+        };
+        // Counts the arm over `blocks` calls; every call must be accepted as fused.
+        let render = |banks: &mut (BuiltinFaderBank, BuiltinMatrixBank), blocks: usize| {
+            (0..blocks)
+                .map(|_| {
+                    let (fused, arm) = call(banks);
+                    assert!(fused, "width={lanes}: a settled pair is fused");
+                    arm
+                })
+                .sum::<usize>()
+        };
+
+        // A full bank with no identity lane: once per fused call, never per frame.
+        let mut full = banks(lanes, None);
+        assert_eq!(render(&mut full, 3), 3, "width={lanes}: full non-identity");
+
+        // One identity member keeps the select form.
+        let mut one_identity = banks(lanes, Some(lanes / 2));
+        assert_eq!(
+            render(&mut one_identity, 3),
+            0,
+            "width={lanes}: identity member"
+        );
+
+        // A partial bank carries identity padding lanes, so it keeps the select form too.
+        let mut partial = banks(lanes - 1, None);
+        assert_eq!(render(&mut partial, 3), 0, "width={lanes}: padding lane");
+        let mut single = banks(1, None);
+        assert_eq!(render(&mut single, 3), 0, "width={lanes}: one member");
+
+        // An instant retarget to the identity is seen by the very next call, and so is the
+        // instant retarget back: the mask is read per call and never cached.
+        full.1
+            .set_target_smoothed(0, Matrix2x2::IDENTITY, 0)
+            .unwrap();
+        assert_eq!(render(&mut full, 2), 0, "width={lanes}: instant identity");
+        full.1.set_target_smoothed(0, non_identity(7), 0).unwrap();
+        assert_eq!(render(&mut full, 2), 2, "width={lanes}: instant pan");
+
+        // A ramp in flight on either stage declines the fused call, so nothing is counted.
+        full.1
+            .set_target_smoothed(1, non_identity(6), WINDOW)
+            .unwrap();
+        assert_eq!(call(&mut full), (false, 0), "width={lanes}: matrix ramp");
+        full.0
+            .set_fader_db(0, BuiltinLaneSelector::Both, -6.0, WINDOW)
+            .unwrap();
+        assert_eq!(call(&mut full), (false, 0), "width={lanes}: fader ramp");
+        assert_eq!(render(&mut full, 1), 1, "width={lanes}: settled again");
+    }
+
+    // The two scalar call sites take the same method; a track's mask is its own flag.
+    let parameters = |matrix: Matrix2x2| BuiltinParameters {
+        matrix,
+        ..BuiltinParameters::default()
+    };
+    let chain_blocks = |chain: &mut BuiltinChain, blocks: usize| {
+        counted(|| {
+            for _ in 0..blocks {
+                let mut left = [0.25; FRAMES];
+                let mut right = [-0.5; FRAMES];
+                chain.process_dual_mono(DualMonoBlock::new(&mut left, &mut right, 0).unwrap());
+            }
+        })
+    };
+    let mut pan = BuiltinChain::new(48_000, parameters(non_identity(3))).unwrap();
+    assert_eq!(chain_blocks(&mut pan, 2), 2, "chain pan");
+    let mut identity = BuiltinChain::new(48_000, parameters(Matrix2x2::IDENTITY)).unwrap();
+    assert_eq!(chain_blocks(&mut identity, 2), 0, "chain identity");
+    pan.set_matrix_target(Matrix2x2::IDENTITY).unwrap();
+    assert_eq!(chain_blocks(&mut pan, 1), 0, "chain instant identity");
+
+    let ramp_blocks =
+        |fader: &mut FaderMuteRampBuiltins, matrix: &mut super::MatrixBuiltins, blocks: usize| {
+            counted(|| {
+                for _ in 0..blocks {
+                    let mut left = [0.25; FRAMES];
+                    let mut right = [-0.5; FRAMES];
+                    let mut block = DualMonoBlock::new(&mut left, &mut right, 0).unwrap();
+                    assert!(fader.process_fader_matrix(matrix, &mut block));
+                }
+            })
+        };
+    let (_, _, mut pan_matrix) = prepare_sections(48_000, parameters(non_identity(5))).unwrap();
+    let (_, _, mut identity_matrix) =
+        prepare_sections(48_000, parameters(Matrix2x2::IDENTITY)).unwrap();
+    let mut fader = FaderMuteRampBuiltins::new(BuiltinParameters::default()).unwrap();
+    assert_eq!(
+        ramp_blocks(&mut fader, &mut pan_matrix, 2),
+        2,
+        "per-track pan"
+    );
+    assert_eq!(
+        ramp_blocks(&mut fader, &mut identity_matrix, 2),
+        0,
+        "per-track identity"
+    );
+    pan_matrix
+        .set_target_smoothed(Matrix2x2::IDENTITY, 0)
+        .unwrap();
+    assert_eq!(
+        ramp_blocks(&mut fader, &mut pan_matrix, 1),
+        0,
+        "per-track instant identity"
+    );
+}

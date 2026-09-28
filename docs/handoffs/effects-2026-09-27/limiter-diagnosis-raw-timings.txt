@@ -1,0 +1,653 @@
+Raw outputs of every timed run behind LIMITER-DIAGNOSIS.md, in the order they were taken.
+Each run held the shared timing lock and was pinned to cpu 31; each header line carries the core
+clock and /proc/loadavg at that moment. Variant names are the DIAG_VARIANT bits in
+limiter-diagnosis-prototypes.patch.
+
+Known invalid rows, kept as taken:
+* rows_w8_1.txt, "x:DET": the detector-only truncation was dead-code eliminated (its peaks were
+  never read). Fixed with core::hint::black_box from rows_w8_2.txt on.
+* rows2_2.txt, "x:DET+DET3": the same elimination for the whole-block scratch. Fixed in rows2_3.txt.
+* rows2_3.txt and later: DET3 and TREE numbers come from builds with many instantiated variants;
+  final_rows_1.txt, console_rows_final.txt and wasm_console_final_*.txt come from a build that
+  instantiated only the final candidates (see section 6 of the diagnosis).
+* The "mean" column exists only in unity_rows_1.txt. The bursty and sparse signals give bimodal
+  block times, so read their means, not their p50s.
+
+===== rows_w8_1.txt
+running 1 test
+test rows_w8 ... == W8, 8 banks (64 tracks), console signal: core clock 3.700 GHz, loadavg [3.63 4.30 4.20 2/1879 1287210]
+  base                                                       p50/block   51017 ns     188742 cyc/block   23593 cyc/bank-block  11.520 cyc/lane-sample  delta +0.000   rounds [50967, 50997, 51017, 51037]
+  x:NOOP                                                     p50/block     501 ns       1853 cyc/block     232 cyc/bank-block   0.113 cyc/lane-sample  delta -11.407   rounds [501, 501, 501, 501]
+  x:STATE                                                    p50/block    3296 ns      12194 cyc/block    1524 cyc/bank-block   0.744 cyc/lane-sample  delta -10.776   rounds [3286, 3287, 3296, 3296]
+  x:DET                                                      p50/block    5501 ns      20351 cyc/block    2544 cyc/bank-block   1.242 cyc/lane-sample  delta -10.278   rounds [5490, 5491, 5501, 5510]
+  x:NOFINISH                                                 p50/block   50336 ns     186222 cyc/block   23278 cyc/bank-block  11.366 cyc/lane-sample  delta -0.154   rounds [50326, 50326, 50336, 50346]
+  x:RECIP32                                                  p50/block   51679 ns     191191 cyc/block   23899 cyc/bank-block  11.669 cyc/lane-sample  delta +0.149   rounds [51598, 51678, 51679, 51689]
+  x:NODIV1                                                   p50/block   52229 ns     193226 cyc/block   24153 cyc/bank-block  11.794 cyc/lane-sample  delta +0.274   rounds [52199, 52220, 52229, 52269]
+  x:RECIP32+x:NODIV1                                         p50/block   50987 ns     188631 cyc/block   23579 cyc/bank-block  11.513 cyc/lane-sample  delta -0.007   rounds [50947, 50987, 50987, 51007]
+== W8, 8 banks, console signal, class-A prototypes: core clock 3.702 GHz, loadavg [3.50 4.26 4.18 4/1900 1287276]
+  base                                                       p50/block   51017 ns     188841 cyc/block   23605 cyc/bank-block  11.526 cyc/lane-sample  delta +0.000   rounds [50987, 51007, 51017, 51027]
+  LINKED                                                     p50/block   44625 ns     165180 cyc/block   20648 cyc/bank-block  10.082 cyc/lane-sample  delta -1.444   rounds [44545, 44545, 44625, 44775]
+  HOIST                                                      p50/block   50506 ns     186949 cyc/block   23369 cyc/bank-block  11.410 cyc/lane-sample  delta -0.115   rounds [50446, 50466, 50506, 50676]
+  NOZERO                                                     p50/block   51458 ns     190473 cyc/block   23809 cyc/bank-block  11.626 cyc/lane-sample  delta +0.100   rounds [51297, 51368, 51458, 51468]
+  FUSEDCHECK                                                 p50/block   52450 ns     194145 cyc/block   24268 cyc/bank-block  11.850 cyc/lane-sample  delta +0.324   rounds [52340, 52430, 52450, 52470]
+  F64DIV                                                     p50/block   52239 ns     193364 cyc/block   24170 cyc/bank-block  11.802 cyc/lane-sample  delta +0.276   rounds [52199, 52230, 52239, 52380]
+  MAXDIV                                                     p50/block   51148 ns     189325 cyc/block   23666 cyc/bank-block  11.556 cyc/lane-sample  delta +0.030   rounds [51087, 51117, 51148, 51197]
+  SPLIT                                                      p50/block   51668 ns     191250 cyc/block   23906 cyc/bank-block  11.673 cyc/lane-sample  delta +0.147   rounds [51628, 51648, 51668, 51999]
+  NOSCATTER                                                  p50/block   50386 ns     186505 cyc/block   23313 cyc/bank-block  11.383 cyc/lane-sample  delta -0.143   rounds [50286, 50326, 50386, 50406]
+  HOIST+NOZERO+FUSEDCHECK+MAXDIV+NOSCATTER                   p50/block   48723 ns     180349 cyc/block   22544 cyc/bank-block  11.008 cyc/lane-sample  delta -0.518   rounds [48653, 48713, 48723, 48743]
+  LINKED+HOIST+NOZERO+FUSEDCHECK+MAXDIV+NOSCATTER            p50/block   42220 ns     156278 cyc/block   19535 cyc/bank-block   9.538 cyc/lane-sample  delta -1.987   rounds [42181, 42190, 42220, 42281]
+  HOIST+NOZERO+FUSEDCHECK+MAXDIV+SPLIT+NOSCATTER             p50/block   49645 ns     183762 cyc/block   22970 cyc/bank-block  11.216 cyc/lane-sample  delta -0.310   rounds [49564, 49605, 49645, 49665]
+  LINKED+HOIST+NOZERO+FUSEDCHECK+F64DIV+MAXDIV+NOSCATTER     p50/block   43944 ns     162660 cyc/block   20332 cyc/bank-block   9.928 cyc/lane-sample  delta -1.598   rounds [43884, 43904, 43944, 43974]
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 6.72s
+===== rows_w8_2.txt
+running 2 tests
+test rows_w8 ... == W8, 8 banks (64 tracks), console signal: core clock 3.698 GHz, loadavg [4.11 4.16 4.15 1/1897 1290803]
+  base                                                       p50/block   51699 ns     191165 cyc/block   23896 cyc/bank-block  11.668 cyc/lane-sample  delta +0.000   rounds [51668, 51698, 51699, 51758]
+  x:NOOP                                                     p50/block     531 ns       1963 cyc/block     245 cyc/bank-block   0.120 cyc/lane-sample  delta -11.548   rounds [531, 531, 531, 531]
+  x:STATE                                                    p50/block    3296 ns      12187 cyc/block    1523 cyc/bank-block   0.744 cyc/lane-sample  delta -10.924   rounds [3286, 3287, 3296, 3296]
+  x:DET                                                      p50/block   29696 ns     109805 cyc/block   13726 cyc/bank-block   6.702 cyc/lane-sample  delta -4.966   rounds [29687, 29687, 29696, 29726]
+  x:GAIN                                                     p50/block   25539 ns      94434 cyc/block   11804 cyc/bank-block   5.764 cyc/lane-sample  delta -5.904   rounds [25408, 25438, 25539, 25598]
+  x:NOFINISH                                                 p50/block   51248 ns     189497 cyc/block   23687 cyc/bank-block  11.566 cyc/lane-sample  delta -0.102   rounds [51107, 51108, 51248, 51408]
+  x:RECIP32+x:NODIV1                                         p50/block   51758 ns     191383 cyc/block   23923 cyc/bank-block  11.681 cyc/lane-sample  delta +0.013   rounds [51679, 51758, 51758, 51999]
+== W8, 8 banks, console signal, class-A prototypes: core clock 3.700 GHz, loadavg [3.87 4.10 4.13 2/1896 1290834]
+  base                                                       p50/block   52920 ns     195819 cyc/block   24477 cyc/bank-block  11.952 cyc/lane-sample  delta +0.000   rounds [51478, 52821, 52920, 53041]
+  LINKED                                                     p50/block   46438 ns     171833 cyc/block   21479 cyc/bank-block  10.488 cyc/lane-sample  delta -1.464   rounds [44835, 46408, 46438, 46439]
+  HOIST                                                      p50/block   52159 ns     193003 cyc/block   24125 cyc/bank-block  11.780 cyc/lane-sample  delta -0.172   rounds [50596, 52110, 52159, 52159]
+  NOZERO                                                     p50/block   51177 ns     189369 cyc/block   23671 cyc/bank-block  11.558 cyc/lane-sample  delta -0.394   rounds [49284, 51077, 51177, 51217]
+  FUSEDCHECK                                                 p50/block   51859 ns     191893 cyc/block   23987 cyc/bank-block  11.712 cyc/lane-sample  delta -0.240   rounds [50456, 51638, 51859, 51939]
+  F64DIV                                                     p50/block   55306 ns     204647 cyc/block   25581 cyc/bank-block  12.491 cyc/lane-sample  delta +0.539   rounds [53652, 55305, 55306, 55315]
+  MAXDIV                                                     p50/block   52310 ns     193561 cyc/block   24195 cyc/bank-block  11.814 cyc/lane-sample  delta -0.138   rounds [50827, 50977, 52310, 52319]
+  SPLIT                                                      p50/block   53822 ns     199156 cyc/block   24895 cyc/bank-block  12.156 cyc/lane-sample  delta +0.204   rounds [51859, 51868, 53822, 53893]
+  NOSCATTER                                                  p50/block   51969 ns     192300 cyc/block   24037 cyc/bank-block  11.737 cyc/lane-sample  delta -0.215   rounds [50085, 50115, 51969, 52099]
+  HOIST+NOZERO+FUSEDCHECK+MAXDIV+NOSCATTER                   p50/block   49374 ns     182697 cyc/block   22837 cyc/bank-block  11.151 cyc/lane-sample  delta -0.801   rounds [47851, 47881, 49374, 49404]
+  LINKED+HOIST+NOZERO+FUSEDCHECK+MAXDIV+NOSCATTER            p50/block   43973 ns     162712 cyc/block   20339 cyc/bank-block   9.931 cyc/lane-sample  delta -2.021   rounds [42761, 42762, 43973, 43984]
+  HOIST+NOZERO+FUSEDCHECK+MAXDIV+SPLIT+NOSCATTER             p50/block   52710 ns     195041 cyc/block   24380 cyc/bank-block  11.904 cyc/lane-sample  delta -0.047   rounds [51218, 51278, 52710, 52810]
+  LINKED+HOIST+NOZERO+FUSEDCHECK+F64DIV+MAXDIV+NOSCATTER     p50/block   45447 ns     168166 cyc/block   21021 cyc/bank-block  10.264 cyc/lane-sample  delta -1.688   rounds [44074, 44084, 45447, 45477]
+ok
+test signals_and_shapes ... == W8: hot (limiting) signal, 8 banks: core clock 3.699 GHz, loadavg [3.80 4.09 4.12 1/1887 1291037]
+  base                                                       p50/block   50917 ns     188343 cyc/block   23543 cyc/bank-block  11.496 cyc/lane-sample  delta +0.000   rounds [50847, 50887, 50917, 50967]
+  LINKED                                                     p50/block   44204 ns     163511 cyc/block   20439 cyc/bank-block   9.980 cyc/lane-sample  delta -1.516   rounds [44144, 44184, 44204, 44374]
+  LINKED+HOIST+NOZERO+FUSEDCHECK+MAXDIV+NOSCATTER            p50/block   42441 ns     156990 cyc/block   19624 cyc/bank-block   9.582 cyc/lane-sample  delta -1.914   rounds [42410, 42420, 42441, 42521]
+== W8: silent input, 8 banks: core clock 3.698 GHz, loadavg [3.80 4.09 4.12 1/1885 1291075]
+  base                                                       p50/block    1693 ns       6261 cyc/block     783 cyc/bank-block   0.382 cyc/lane-sample  delta +0.000   rounds [1683, 1683, 1693, 1723]
+== W8: ragged cohort (per-lane path), 8 banks: core clock 3.699 GHz, loadavg [3.80 4.09 4.12 1/1886 1291076]
+  base                                                       p50/block  134386 ns     497039 cyc/block   62130 cyc/bank-block  30.337 cyc/lane-sample  delta +0.000   rounds [134296, 134386, 134386, 134396]
+== W8: dual-mono link, 8 banks: core clock 3.699 GHz, loadavg [3.80 4.09 4.12 2/1892 1291112]
+  base                                                       p50/block   50927 ns     188365 cyc/block   23546 cyc/bank-block  11.497 cyc/lane-sample  delta +0.000   rounds [50907, 50907, 50927, 51057]
+  HOIST+NOZERO+FUSEDCHECK+MAXDIV+NOSCATTER                   p50/block   47561 ns     175915 cyc/block   21989 cyc/bank-block  10.737 cyc/lane-sample  delta -0.760   rounds [47531, 47541, 47561, 47640]
+== W8: working set, 1 bank(s): core clock 3.699 GHz, loadavg [3.73 4.07 4.12 2/1892 1291139]
+  base                                                       p50/block    6161 ns      22790 cyc/block   22790 cyc/bank-block  11.128 cyc/lane-sample  delta +0.000   rounds [6161, 6161, 6161, 6162]
+== W8: working set, 2 bank(s): core clock 3.700 GHz, loadavg [3.73 4.07 4.12 1/1892 1291139]
+  base                                                       p50/block   12413 ns      45924 cyc/block   22962 cyc/bank-block  11.212 cyc/lane-sample  delta +0.000   rounds [12394, 12394, 12413, 12413]
+== W8: working set, 4 bank(s): core clock 3.698 GHz, loadavg [3.73 4.07 4.12 1/1899 1291146]
+  base                                                       p50/block   25419 ns      94008 cyc/block   23502 cyc/bank-block  11.476 cyc/lane-sample  delta +0.000   rounds [25368, 25419, 25419, 25458]
+== W4: hot (limiting) signal, 16 banks: core clock 3.698 GHz, loadavg [3.73 4.07 4.12 2/1902 1291209]
+  base                                                       p50/block   92566 ns     342300 cyc/block   21394 cyc/bank-block  20.892 cyc/lane-sample  delta +0.000   rounds [92406, 92486, 92566, 92646]
+  LINKED                                                     p50/block   81636 ns     301882 cyc/block   18868 cyc/bank-block  18.425 cyc/lane-sample  delta -2.467   rounds [81586, 81615, 81636, 81646]
+  LINKED+HOIST+NOZERO+FUSEDCHECK+MAXDIV+NOSCATTER            p50/block   75815 ns     280357 cyc/block   17522 cyc/bank-block  17.112 cyc/lane-sample  delta -3.781   rounds [75784, 75804, 75815, 75825]
+== W4: silent input, 16 banks: core clock 3.698 GHz, loadavg [3.73 4.07 4.12 1/1900 1291269]
+  base                                                       p50/block    1844 ns       6820 cyc/block     426 cyc/bank-block   0.416 cyc/lane-sample  delta +0.000   rounds [1844, 1844, 1844, 1844]
+== W4: ragged cohort (per-lane path), 16 banks: core clock 3.699 GHz, loadavg [3.73 4.07 4.12 1/1900 1291269]
+  base                                                       p50/block  187888 ns     695042 cyc/block   43440 cyc/bank-block  42.422 cyc/lane-sample  delta +0.000   rounds [187858, 187878, 187888, 187998]
+== W4: dual-mono link, 16 banks: core clock 3.700 GHz, loadavg [3.59 4.03 4.11 1/1893 1291314]
+  base                                                       p50/block   92186 ns     341074 cyc/block   21317 cyc/bank-block  20.818 cyc/lane-sample  delta +0.000   rounds [92126, 92145, 92186, 92205]
+  HOIST+NOZERO+FUSEDCHECK+MAXDIV+NOSCATTER                   p50/block   86154 ns     318757 cyc/block   19922 cyc/bank-block  19.455 cyc/lane-sample  delta -1.362   rounds [86124, 86144, 86154, 86154]
+== W4: working set, 1 bank(s): core clock 3.698 GHz, loadavg [3.59 4.03 4.11 1/1893 1291361]
+  base                                                       p50/block    5651 ns      20895 cyc/block   20895 cyc/bank-block  20.406 cyc/lane-sample  delta +0.000   rounds [5650, 5650, 5651, 5661]
+== W4: working set, 2 bank(s): core clock 3.698 GHz, loadavg [3.59 4.03 4.11 1/1881 1291361]
+  base                                                       p50/block   11322 ns      41872 cyc/block   20936 cyc/bank-block  20.445 cyc/lane-sample  delta +0.000   rounds [11311, 11321, 11322, 11331]
+== W4: working set, 4 bank(s): core clock 3.698 GHz, loadavg [3.59 4.03 4.11 1/1881 1291361]
+  base                                                       p50/block   22833 ns      84447 cyc/block   21112 cyc/bank-block  20.617 cyc/lane-sample  delta +0.000   rounds [22813, 22813, 22833, 22834]
+ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 20.27s
+===== rows2_1.txt
+running 2 tests
+test rows2_w4 ... == W4, 16 banks, console signal, round 2 prototypes: core clock 3.701 GHz, loadavg [4.23 3.41 3.78 8/1903 1298761]
+  base                                                       p50/block   92155 ns     341064 cyc/block   21316 cyc/bank-block  20.817 cyc/lane-sample  delta +0.000   rounds [92106, 92126, 92155, 92396]
+  x:STATE                                                    p50/block    3687 ns      13646 cyc/block     853 cyc/bank-block   0.833 cyc/lane-sample  delta -19.984   rounds [3687, 3687, 3687, 3707]
+  x:DET                                                      p50/block   56347 ns     208539 cyc/block   13034 cyc/bank-block  12.728 cyc/lane-sample  delta -8.089   rounds [56327, 56347, 56347, 56528]
+  x:DET+DET2                                                 p50/block   51539 ns     190745 cyc/block   11922 cyc/bank-block  11.642 cyc/lane-sample  delta -9.175   rounds [51528, 51528, 51539, 51689]
+  NOZERO+x:DET+DET2                                          p50/block   50796 ns     187995 cyc/block   11750 cyc/bank-block  11.474 cyc/lane-sample  delta -9.343   rounds [50786, 50787, 50796, 51247]
+  x:GAIN                                                     p50/block   39315 ns     145504 cyc/block    9094 cyc/bank-block   8.881 cyc/lane-sample  delta -11.936   rounds [39295, 39315, 39315, 39335]
+  DET2                                                       p50/block   88819 ns     328717 cyc/block   20545 cyc/bank-block  20.063 cyc/lane-sample  delta -0.754   rounds [88789, 88809, 88819, 88820]
+  NOZERO+DET2                                                p50/block   86655 ns     320708 cyc/block   20044 cyc/bank-block  19.574 cyc/lane-sample  delta -1.242   rounds [86495, 86515, 86655, 86946]
+  ASSERT                                                     p50/block   89781 ns     332278 cyc/block   20767 cyc/bank-block  20.281 cyc/lane-sample  delta -0.536   rounds [89731, 89731, 89781, 90142]
+  HOIST+NOZERO+MAXDIV+NOSCATTER+DET2                         p50/block   85423 ns     316149 cyc/block   19759 cyc/bank-block  19.296 cyc/lane-sample  delta -1.521   rounds [85353, 85362, 85423, 85423]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+DET2                  p50/block   75053 ns     277770 cyc/block   17361 cyc/bank-block  16.954 cyc/lane-sample  delta -3.863   rounds [74983, 75053, 75053, 75063]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+DET2+ASSERT           p50/block   73881 ns     273432 cyc/block   17090 cyc/bank-block  16.689 cyc/lane-sample  delta -4.128   rounds [73851, 73880, 73881, 73891]
+ok
+test rows2_w8 ... == W8, 8 banks, console signal, round 2 prototypes: core clock 3.701 GHz, loadavg [4.29 3.43 3.79 5/1901 1298804]
+  base                                                       p50/block   51849 ns     191897 cyc/block   23987 cyc/bank-block  11.712 cyc/lane-sample  delta +0.000   rounds [51809, 51839, 51849, 51859]
+  x:STATE                                                    p50/block    3356 ns      12421 cyc/block    1553 cyc/bank-block   0.758 cyc/lane-sample  delta -10.954   rounds [3336, 3356, 3356, 3366]
+  x:DET                                                      p50/block   31340 ns     115992 cyc/block   14499 cyc/bank-block   7.080 cyc/lane-sample  delta -4.633   rounds [31339, 31339, 31340, 31370]
+  x:DET+DET2                                                 p50/block   26991 ns      99896 cyc/block   12487 cyc/bank-block   6.097 cyc/lane-sample  delta -5.615   rounds [26991, 26991, 26991, 27001]
+  NOZERO+x:DET+DET2                                          p50/block   26501 ns      98082 cyc/block   12260 cyc/bank-block   5.986 cyc/lane-sample  delta -5.726   rounds [26500, 26501, 26501, 26501]
+  x:GAIN                                                     p50/block   24877 ns      92072 cyc/block   11509 cyc/bank-block   5.620 cyc/lane-sample  delta -6.093   rounds [24838, 24857, 24877, 24888]
+  DET2                                                       p50/block   49875 ns     184591 cyc/block   23074 cyc/bank-block  11.267 cyc/lane-sample  delta -0.446   rounds [49845, 49865, 49875, 49885]
+  NOZERO+DET2                                                p50/block   49274 ns     182367 cyc/block   22796 cyc/bank-block  11.131 cyc/lane-sample  delta -0.582   rounds [49254, 49274, 49274, 49293]
+  ASSERT                                                     p50/block   51007 ns     188781 cyc/block   23598 cyc/bank-block  11.522 cyc/lane-sample  delta -0.190   rounds [50987, 51007, 51007, 51027]
+  HOIST+NOZERO+MAXDIV+NOSCATTER+DET2                         p50/block   47361 ns     175287 cyc/block   21911 cyc/bank-block  10.699 cyc/lane-sample  delta -1.014   rounds [47330, 47360, 47361, 47390]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+DET2                  p50/block   41919 ns     155145 cyc/block   19393 cyc/bank-block   9.469 cyc/lane-sample  delta -2.243   rounds [41910, 41919, 41919, 41960]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+DET2+ASSERT           p50/block   42050 ns     155630 cyc/block   19454 cyc/bank-block   9.499 cyc/lane-sample  delta -2.214   rounds [41970, 42020, 42050, 42070]
+ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 8.81s
+===== rows2_2.txt
+running 2 tests
+test rows2_w4 ... == W4, 16 banks, console signal, round 2 prototypes: core clock 3.700 GHz, loadavg [5.88 4.13 3.92 3/1892 1307736]
+  base                                                       p50/block   92576 ns     342565 cyc/block   21410 cyc/bank-block  20.909 cyc/lane-sample  delta +0.000   rounds [92546, 92546, 92576, 92586]
+  x:STATE                                                    p50/block    3777 ns      13976 cyc/block     874 cyc/bank-block   0.853 cyc/lane-sample  delta -20.055   rounds [3777, 3777, 3777, 3777]
+  x:DET                                                      p50/block   55675 ns     206018 cyc/block   12876 cyc/bank-block  12.574 cyc/lane-sample  delta -8.334   rounds [55235, 55235, 55675, 55696]
+  x:DET+DET2                                                 p50/block   51898 ns     192042 cyc/block   12003 cyc/bank-block  11.721 cyc/lane-sample  delta -9.187   rounds [51888, 51889, 51898, 52049]
+  x:DET+DET3                                                 p50/block    7364 ns      27250 cyc/block    1703 cyc/bank-block   1.663 cyc/lane-sample  delta -19.245   rounds [7354, 7354, 7364, 7374]
+  NOZERO+x:DET+DET3                                          p50/block    7465 ns      27623 cyc/block    1726 cyc/bank-block   1.686 cyc/lane-sample  delta -19.223   rounds [7464, 7464, 7465, 7474]
+  x:GAIN                                                     p50/block   39866 ns     147519 cyc/block    9220 cyc/bank-block   9.004 cyc/lane-sample  delta -11.905   rounds [39846, 39856, 39866, 39866]
+  DET2                                                       p50/block   90833 ns     336115 cyc/block   21007 cyc/bank-block  20.515 cyc/lane-sample  delta -0.394   rounds [90823, 90823, 90833, 90853]
+  DET3                                                       p50/block   96814 ns     358247 cyc/block   22390 cyc/bank-block  21.866 cyc/lane-sample  delta +0.957   rounds [96434, 96794, 96814, 96844]
+  NOZERO+DET3                                                p50/block   95161 ns     352131 cyc/block   22008 cyc/bank-block  21.492 cyc/lane-sample  delta +0.584   rounds [95011, 95131, 95161, 95171]
+  HOIST+NOZERO+MAXDIV+NOSCATTER+DET3                         p50/block   94059 ns     348053 cyc/block   21753 cyc/bank-block  21.243 cyc/lane-sample  delta +0.335   rounds [93979, 94009, 94059, 94159]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+DET3                  p50/block   83469 ns     308866 cyc/block   19304 cyc/bank-block  18.852 cyc/lane-sample  delta -2.057   rounds [83339, 83349, 83469, 83479]
+ok
+test rows2_w8 ... == W8, 8 banks, console signal, round 2 prototypes: core clock 3.699 GHz, loadavg [5.49 4.08 3.90 2/1889 1307815]
+  base                                                       p50/block   51869 ns     191844 cyc/block   23981 cyc/bank-block  11.709 cyc/lane-sample  delta +0.000   rounds [51378, 51438, 51869, 51939]
+  x:STATE                                                    p50/block    3256 ns      12043 cyc/block    1505 cyc/bank-block   0.735 cyc/lane-sample  delta -10.974   rounds [3246, 3256, 3256, 3297]
+  x:DET                                                      p50/block   31059 ns     114876 cyc/block   14359 cyc/bank-block   7.011 cyc/lane-sample  delta -4.698   rounds [31059, 31059, 31059, 31079]
+  x:DET+DET2                                                 p50/block   27102 ns     100240 cyc/block   12530 cyc/bank-block   6.118 cyc/lane-sample  delta -5.591   rounds [27101, 27102, 27102, 27111]
+  x:DET+DET3                                                 p50/block    5160 ns      19085 cyc/block    2386 cyc/bank-block   1.165 cyc/lane-sample  delta -10.544   rounds [5160, 5160, 5160, 5189]
+  NOZERO+x:DET+DET3                                          p50/block    5140 ns      19011 cyc/block    2376 cyc/bank-block   1.160 cyc/lane-sample  delta -10.549   rounds [5130, 5140, 5140, 5170]
+  x:GAIN                                                     p50/block   23786 ns      87976 cyc/block   10997 cyc/bank-block   5.370 cyc/lane-sample  delta -6.340   rounds [23765, 23765, 23786, 24336]
+  DET2                                                       p50/block   50085 ns     185246 cyc/block   23156 cyc/bank-block  11.307 cyc/lane-sample  delta -0.403   rounds [49414, 49474, 50085, 50116]
+  DET3                                                       p50/block   52991 ns     195994 cyc/block   24499 cyc/bank-block  11.963 cyc/lane-sample  delta +0.253   rounds [52950, 52961, 52991, 53021]
+  NOZERO+DET3                                                p50/block   51928 ns     192063 cyc/block   24008 cyc/bank-block  11.723 cyc/lane-sample  delta +0.013   rounds [51758, 51769, 51928, 52009]
+  HOIST+NOZERO+MAXDIV+NOSCATTER+DET3                         p50/block   50206 ns     185693 cyc/block   23212 cyc/bank-block  11.334 cyc/lane-sample  delta -0.375   rounds [49935, 49946, 50206, 50216]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+DET3                  p50/block   46729 ns     172833 cyc/block   21604 cyc/bank-block  10.549 cyc/lane-sample  delta -1.160   rounds [46709, 46719, 46729, 46749]
+ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 8.03s
+===== rows2_3.txt
+running 2 tests
+test rows2_w4 ... == W4, 16 banks, console signal, round 2 prototypes: core clock 3.698 GHz, loadavg [2.38 3.20 3.59 2/1898 1311507]
+  base                                                       p50/block   93067 ns     344199 cyc/block   21512 cyc/bank-block  21.008 cyc/lane-sample  delta +0.000   rounds [93017, 93047, 93067, 93097]
+  x:STATE                                                    p50/block    3707 ns      13710 cyc/block     857 cyc/bank-block   0.837 cyc/lane-sample  delta -20.171   rounds [3707, 3707, 3707, 3707]
+  x:DET                                                      p50/block   56748 ns     209877 cyc/block   13117 cyc/bank-block  12.810 cyc/lane-sample  delta -8.198   rounds [56678, 56688, 56748, 57119]
+  x:DET+DET2                                                 p50/block   51919 ns     192017 cyc/block   12001 cyc/bank-block  11.720 cyc/lane-sample  delta -9.288   rounds [51919, 51919, 51919, 52019]
+  x:DET+DET3                                                 p50/block  104248 ns     385551 cyc/block   24097 cyc/bank-block  23.532 cyc/lane-sample  delta +2.524   rounds [104178, 104188, 104248, 104549]
+  x:DET+TREE(classB)                                         p50/block   48613 ns     179790 cyc/block   11237 cyc/bank-block  10.974 cyc/lane-sample  delta -10.035   rounds [48542, 48562, 48613, 48763]
+  x:GAIN                                                     p50/block   39476 ns     145998 cyc/block    9125 cyc/bank-block   8.911 cyc/lane-sample  delta -12.097   rounds [39455, 39465, 39476, 39495]
+  DET2                                                       p50/block   88870 ns     328677 cyc/block   20542 cyc/bank-block  20.061 cyc/lane-sample  delta -0.947   rounds [88779, 88789, 88870, 89280]
+  DET3                                                       p50/block  140678 ns     520284 cyc/block   32518 cyc/bank-block  31.756 cyc/lane-sample  delta +10.747   rounds [140657, 140658, 140678, 140698]
+  TREE(classB)                                               p50/block   81535 ns     301549 cyc/block   18847 cyc/bank-block  18.405 cyc/lane-sample  delta -2.603   rounds [81435, 81465, 81535, 81616]
+  HOIST+NOZERO+MAXDIV+NOSCATTER+DET3                         p50/block  136179 ns     503645 cyc/block   31478 cyc/bank-block  30.740 cyc/lane-sample  delta +9.732   rounds [136109, 136120, 136179, 136189]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+DET3                  p50/block  127382 ns     471110 cyc/block   29444 cyc/bank-block  28.754 cyc/lane-sample  delta +7.746   rounds [127263, 127313, 127382, 127433]
+  LINKED+HOIST+MAXDIV+NOSCATTER+TREE(classB)                 p50/block   70624 ns     261196 cyc/block   16325 cyc/bank-block  15.942 cyc/lane-sample  delta -5.066   rounds [70574, 70615, 70624, 70655]
+ok
+test rows2_w8 ... == W8, 8 banks, console signal, round 2 prototypes: core clock 3.697 GHz, loadavg [2.41 3.18 3.57 2/1888 1311712]
+  base                                                       p50/block   52460 ns     193955 cyc/block   24244 cyc/bank-block  11.838 cyc/lane-sample  delta +0.000   rounds [52119, 52460, 52460, 52520]
+  x:STATE                                                    p50/block    3437 ns      12707 cyc/block    1588 cyc/bank-block   0.776 cyc/lane-sample  delta -11.062   rounds [3427, 3436, 3437, 3437]
+  x:DET                                                      p50/block   32091 ns     118647 cyc/block   14831 cyc/bank-block   7.242 cyc/lane-sample  delta -4.596   rounds [32081, 32091, 32091, 32111]
+  x:DET+DET2                                                 p50/block   27813 ns     102830 cyc/block   12854 cyc/bank-block   6.276 cyc/lane-sample  delta -5.562   rounds [27813, 27813, 27813, 27813]
+  x:DET+DET3                                                 p50/block   54334 ns     200883 cyc/block   25110 cyc/bank-block  12.261 cyc/lane-sample  delta +0.423   rounds [54324, 54333, 54334, 54334]
+  x:DET+TREE(classB)                                         p50/block   27433 ns     101425 cyc/block   12678 cyc/bank-block   6.190 cyc/lane-sample  delta -5.648   rounds [27422, 27422, 27433, 27483]
+  x:GAIN                                                     p50/block   24677 ns      91236 cyc/block   11404 cyc/bank-block   5.569 cyc/lane-sample  delta -6.269   rounds [23976, 24076, 24677, 24737]
+  DET2                                                       p50/block   50116 ns     185289 cyc/block   23161 cyc/bank-block  11.309 cyc/lane-sample  delta -0.529   rounds [50066, 50096, 50116, 50336]
+  DET3                                                       p50/block   75834 ns     280373 cyc/block   35047 cyc/bank-block  17.113 cyc/lane-sample  delta +5.275   rounds [75684, 75735, 75834, 75875]
+  TREE(classB)                                               p50/block   47180 ns     174434 cyc/block   21804 cyc/bank-block  10.647 cyc/lane-sample  delta -1.191   rounds [47110, 47120, 47180, 47180]
+  HOIST+NOZERO+MAXDIV+NOSCATTER+DET3                         p50/block   73520 ns     271818 cyc/block   33977 cyc/bank-block  16.590 cyc/lane-sample  delta +4.752   rounds [73390, 73499, 73520, 73550]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+DET3                  p50/block   69101 ns     255480 cyc/block   31935 cyc/bank-block  15.593 cyc/lane-sample  delta +3.755   rounds [69062, 69091, 69101, 69152]
+  LINKED+HOIST+MAXDIV+NOSCATTER+TREE(classB)                 p50/block   43302 ns     160096 cyc/block   20012 cyc/bank-block   9.771 cyc/lane-sample  delta -2.067   rounds [43252, 43282, 43302, 43313]
+ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 11.26s
+===== rows2_4.txt
+running 2 tests
+test rows2_w4 ... == W4, 16 banks, console signal, round 2 prototypes: core clock 3.702 GHz, loadavg [6.97 5.38 4.28 4/1895 1332003]
+  base                                                       p50/block   93779 ns     347180 cyc/block   21699 cyc/bank-block  21.190 cyc/lane-sample  delta +0.000   rounds [93778, 93778, 93779, 93809]
+  x:STATE                                                    p50/block    3727 ns      13798 cyc/block     862 cyc/bank-block   0.842 cyc/lane-sample  delta -20.348   rounds [3717, 3727, 3727, 3737]
+  x:DET                                                      p50/block   57620 ns     213315 cyc/block   13332 cyc/bank-block  13.020 cyc/lane-sample  delta -8.170   rounds [57610, 57619, 57620, 57640]
+  x:DET+HEAPPEAKS                                            p50/block   56086 ns     207636 cyc/block   12977 cyc/bank-block  12.673 cyc/lane-sample  delta -8.517   rounds [55575, 55586, 56086, 56147]
+  x:DET+DET2                                                 p50/block   62438 ns     231152 cyc/block   14447 cyc/bank-block  14.108 cyc/lane-sample  delta -7.082   rounds [62128, 62128, 62438, 62439]
+  x:DET+TREE(classB)                                         p50/block   49314 ns     182566 cyc/block   11410 cyc/bank-block  11.143 cyc/lane-sample  delta -10.047   rounds [49304, 49314, 49314, 49324]
+  x:GAIN                                                     p50/block   39986 ns     148032 cyc/block    9252 cyc/bank-block   9.035 cyc/lane-sample  delta -12.155   rounds [39846, 39966, 39986, 40588]
+  HEAPPEAKS                                                  p50/block   92736 ns     343319 cyc/block   21457 cyc/bank-block  20.955 cyc/lane-sample  delta -0.236   rounds [92526, 92586, 92736, 92957]
+  DET2                                                       p50/block   90572 ns     335307 cyc/block   20957 cyc/bank-block  20.466 cyc/lane-sample  delta -0.725   rounds [90513, 90553, 90572, 90582]
+  TREE(classB)                                               p50/block   81164 ns     300478 cyc/block   18780 cyc/bank-block  18.340 cyc/lane-sample  delta -2.850   rounds [81074, 81084, 81164, 81205]
+  HOIST+NOZERO+MAXDIV+NOSCATTER+DET2                         p50/block   87396 ns     323549 cyc/block   20222 cyc/bank-block  19.748 cyc/lane-sample  delta -1.442   rounds [87336, 87366, 87396, 87506]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+DET2                  p50/block   75634 ns     280005 cyc/block   17500 cyc/bank-block  17.090 cyc/lane-sample  delta -4.100   rounds [75584, 75624, 75634, 75654]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+DET2+HEAPPEAKS        p50/block   85102 ns     315057 cyc/block   19691 cyc/bank-block  19.230 cyc/lane-sample  delta -1.961   rounds [84801, 84842, 85102, 85132]
+  LINKED+HOIST+MAXDIV+NOSCATTER+TREE(classB)                 p50/block   71125 ns     263312 cyc/block   16457 cyc/bank-block  16.071 cyc/lane-sample  delta -5.119   rounds [70935, 70945, 71125, 71135]
+ok
+test rows2_w8 ... == W8, 8 banks, console signal, round 2 prototypes: core clock 3.700 GHz, loadavg [6.73 5.36 4.28 5/1912 1332155]
+  base                                                       p50/block   51197 ns     189414 cyc/block   23677 cyc/bank-block  11.561 cyc/lane-sample  delta +0.000   rounds [51167, 51187, 51197, 51217]
+  x:STATE                                                    p50/block    3387 ns      12531 cyc/block    1566 cyc/bank-block   0.765 cyc/lane-sample  delta -10.796   rounds [3367, 3387, 3387, 3397]
+  x:DET                                                      p50/block   31029 ns     114798 cyc/block   14350 cyc/bank-block   7.007 cyc/lane-sample  delta -4.554   rounds [30868, 30869, 31029, 31069]
+  x:DET+HEAPPEAKS                                            p50/block   30639 ns     113355 cyc/block   14169 cyc/bank-block   6.919 cyc/lane-sample  delta -4.642   rounds [30629, 30638, 30639, 30758]
+  x:DET+DET2                                                 p50/block   32682 ns     120914 cyc/block   15114 cyc/bank-block   7.380 cyc/lane-sample  delta -4.181   rounds [32663, 32682, 32682, 32883]
+  x:DET+TREE(classB)                                         p50/block   26891 ns      99489 cyc/block   12436 cyc/bank-block   6.072 cyc/lane-sample  delta -5.489   rounds [26881, 26891, 26891, 26972]
+  x:GAIN                                                     p50/block   23004 ns      85108 cyc/block   10638 cyc/bank-block   5.195 cyc/lane-sample  delta -6.366   rounds [22954, 22973, 23004, 23024]
+  HEAPPEAKS                                                  p50/block   51719 ns     191345 cyc/block   23918 cyc/bank-block  11.679 cyc/lane-sample  delta +0.118   rounds [51649, 51679, 51719, 52099]
+  DET2                                                       p50/block   48813 ns     180594 cyc/block   22574 cyc/bank-block  11.023 cyc/lane-sample  delta -0.538   rounds [48733, 48733, 48813, 49624]
+  TREE(classB)                                               p50/block   47220 ns     174700 cyc/block   21837 cyc/bank-block  10.663 cyc/lane-sample  delta -0.898   rounds [47019, 47120, 47220, 47270]
+  HOIST+NOZERO+MAXDIV+NOSCATTER+DET2                         p50/block   47590 ns     176069 cyc/block   22009 cyc/bank-block  10.746 cyc/lane-sample  delta -0.815   rounds [47450, 47451, 47590, 48442]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+DET2                  p50/block   41830 ns     154759 cyc/block   19345 cyc/bank-block   9.446 cyc/lane-sample  delta -2.115   rounds [41820, 41830, 41830, 41970]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+DET2+HEAPPEAKS        p50/block   46930 ns     173627 cyc/block   21703 cyc/bank-block  10.597 cyc/lane-sample  delta -0.964   rounds [46910, 46929, 46930, 46949]
+  LINKED+HOIST+MAXDIV+NOSCATTER+TREE(classB)                 p50/block   40938 ns     151458 cyc/block   18932 cyc/bank-block   9.244 cyc/lane-sample  delta -2.317   rounds [40868, 40928, 40938, 41018]
+ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 10.26s
+===== rows3_1.txt
+running 1 test
+test rows3 ... == W8, 8 banks, console signal, round 3 prototypes: core clock 3.702 GHz, loadavg [4.76 4.90 4.41 5/1888 1344280]
+  base                                                       p50/block   52961 ns     196056 cyc/block   24507 cyc/bank-block  11.966 cyc/lane-sample  delta +0.000   rounds [52921, 52931, 52961, 52971]
+  x:STATE                                                    p50/block    3417 ns      12649 cyc/block    1581 cyc/bank-block   0.772 cyc/lane-sample  delta -11.194   rounds [3417, 3417, 3417, 3417]
+  NOSCATTER+x:STATE+LEANSTATE                                p50/block    2184 ns       8085 cyc/block    1011 cyc/bank-block   0.493 cyc/lane-sample  delta -11.473   rounds [2174, 2174, 2184, 2184]
+  NOSCATTER+LEANSTATE                                        p50/block   50807 ns     188082 cyc/block   23510 cyc/bank-block  11.480 cyc/lane-sample  delta -0.487   rounds [50787, 50787, 50807, 50847]
+  LINKED                                                     p50/block   46538 ns     172279 cyc/block   21535 cyc/bank-block  10.515 cyc/lane-sample  delta -1.451   rounds [46488, 46498, 46538, 46589]
+  LINKED+HOIST+NOZERO+FUSEDCHECK+MAXDIV+NOSCATTER            p50/block   44023 ns     162969 cyc/block   20371 cyc/bank-block   9.947 cyc/lane-sample  delta -2.020   rounds [44004, 44014, 44023, 44024]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE             p50/block   43332 ns     160411 cyc/block   20051 cyc/bank-block   9.791 cyc/lane-sample  delta -2.176   rounds [43052, 43122, 43332, 43463]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+DET2+LEANSTATE        p50/block   42260 ns     156442 cyc/block   19555 cyc/bank-block   9.548 cyc/lane-sample  delta -2.418   rounds [42000, 42100, 42260, 42321]
+== W8, 8 banks, silent signal: core clock 3.703 GHz, loadavg [4.70 4.88 4.40 4/1881 1344350]
+  base                                                       p50/block    1724 ns       6383 cyc/block     798 cyc/bank-block   0.390 cyc/lane-sample  delta +0.000   rounds [1723, 1724, 1724, 1724]
+  SILENTFAST                                                 p50/block    1573 ns       5824 cyc/block     728 cyc/bank-block   0.355 cyc/lane-sample  delta -0.034   rounds [1563, 1563, 1573, 1573]
+== W4, 16 banks, console signal, round 3 prototypes: core clock 3.703 GHz, loadavg [4.70 4.88 4.40 4/1881 1344350]
+  base                                                       p50/block   90683 ns     335770 cyc/block   20986 cyc/bank-block  20.494 cyc/lane-sample  delta +0.000   rounds [90593, 90603, 90683, 90923]
+  x:STATE                                                    p50/block    4248 ns      15729 cyc/block     983 cyc/bank-block   0.960 cyc/lane-sample  delta -19.534   rounds [4198, 4208, 4248, 4258]
+  NOSCATTER+x:STATE+LEANSTATE                                p50/block    3116 ns      11538 cyc/block     721 cyc/bank-block   0.704 cyc/lane-sample  delta -19.790   rounds [3105, 3106, 3116, 3116]
+  NOSCATTER+LEANSTATE                                        p50/block   92847 ns     343783 cyc/block   21486 cyc/bank-block  20.983 cyc/lane-sample  delta +0.489   rounds [92606, 92647, 92847, 92887]
+  LINKED                                                     p50/block   80804 ns     299191 cyc/block   18699 cyc/bank-block  18.261 cyc/lane-sample  delta -2.233   rounds [80564, 80593, 80804, 80844]
+  LINKED+HOIST+NOZERO+FUSEDCHECK+MAXDIV+NOSCATTER            p50/block   78159 ns     289398 cyc/block   18087 cyc/bank-block  17.663 cyc/lane-sample  delta -2.830   rounds [78008, 78129, 78159, 78440]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE             p50/block   77597 ns     287317 cyc/block   17957 cyc/bank-block  17.536 cyc/lane-sample  delta -2.957   rounds [77548, 77587, 77597, 78019]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+DET2+LEANSTATE        p50/block   77167 ns     285725 cyc/block   17858 cyc/bank-block  17.439 cyc/lane-sample  delta -3.055   rounds [77067, 77147, 77167, 77197]
+== W4, 16 banks, silent signal: core clock 3.703 GHz, loadavg [4.70 4.88 4.40 3/1878 1344490]
+  base                                                       p50/block    1934 ns       7162 cyc/block     448 cyc/bank-block   0.437 cyc/lane-sample  delta +0.000   rounds [1934, 1934, 1934, 1944]
+  SILENTFAST                                                 p50/block    1763 ns       6528 cyc/block     408 cyc/bank-block   0.398 cyc/lane-sample  delta -0.039   rounds [1763, 1763, 1763, 1763]
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 7.04s
+===== rows4_1.txt
+running 1 test
+test rows4 ... == W8, 8 banks, console signal, round 4 (fission): core clock 3.699 GHz, loadavg [2.47 3.05 3.56 2/1888 1375406]
+  base                                                       p50/block   52510 ns     194252 cyc/block   24281 cyc/bank-block  11.856 cyc/lane-sample  delta +0.000   rounds [52480, 52490, 52510, 53181]
+  FISSION                                                    p50/block   51418 ns     190212 cyc/block   23777 cyc/bank-block  11.610 cyc/lane-sample  delta -0.247   rounds [51307, 51398, 51418, 51428]
+  LINKED                                                     p50/block   47300 ns     174978 cyc/block   21872 cyc/bank-block  10.680 cyc/lane-sample  delta -1.176   rounds [47230, 47270, 47300, 47390]
+  LINKED+FISSION                                             p50/block   44765 ns     165601 cyc/block   20700 cyc/bank-block  10.107 cyc/lane-sample  delta -1.749   rounds [44695, 44735, 44765, 44785]
+  HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE+FISSION            p50/block   49123 ns     181722 cyc/block   22715 cyc/bank-block  11.091 cyc/lane-sample  delta -0.765   rounds [49103, 49113, 49123, 49134]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE             p50/block   43232 ns     159929 cyc/block   19991 cyc/bank-block   9.761 cyc/lane-sample  delta -2.095   rounds [43143, 43213, 43232, 43242]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE+FISSION     p50/block   43072 ns     159338 cyc/block   19917 cyc/bank-block   9.725 cyc/lane-sample  delta -2.131   rounds [43032, 43032, 43072, 43072]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+DET2+LEANSTATE+FISSION p50/block   41118 ns     152109 cyc/block   19014 cyc/bank-block   9.284 cyc/lane-sample  delta -2.572   rounds [41058, 41069, 41118, 41198]
+== W8, 8 banks, dual-mono link, round 4 (fission): core clock 3.699 GHz, loadavg [2.47 3.05 3.56 2/1899 1375456]
+  base                                                       p50/block   52199 ns     193101 cyc/block   24138 cyc/bank-block  11.786 cyc/lane-sample  delta +0.000   rounds [52149, 52199, 52199, 52229]
+  FISSION                                                    p50/block   51368 ns     190026 cyc/block   23753 cyc/bank-block  11.598 cyc/lane-sample  delta -0.188   rounds [51338, 51348, 51368, 51398]
+  HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE+FISSION            p50/block   49134 ns     181762 cyc/block   22720 cyc/bank-block  11.094 cyc/lane-sample  delta -0.692   rounds [49103, 49104, 49134, 49214]
+== W4, 16 banks, console signal, round 4 (fission): core clock 3.699 GHz, loadavg [2.47 3.05 3.56 2/1893 1375458]
+  base                                                       p50/block   91013 ns     336692 cyc/block   21043 cyc/bank-block  20.550 cyc/lane-sample  delta +0.000   rounds [90913, 91004, 91013, 91063]
+  FISSION                                                    p50/block   93147 ns     344587 cyc/block   21537 cyc/bank-block  21.032 cyc/lane-sample  delta +0.482   rounds [93057, 93138, 93147, 93157]
+  LINKED                                                     p50/block   80523 ns     297886 cyc/block   18618 cyc/bank-block  18.181 cyc/lane-sample  delta -2.369   rounds [80444, 80494, 80523, 80523]
+  LINKED+FISSION                                             p50/block   80083 ns     296258 cyc/block   18516 cyc/bank-block  18.082 cyc/lane-sample  delta -2.468   rounds [80032, 80072, 80083, 80193]
+  HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE+FISSION            p50/block   87336 ns     323089 cyc/block   20193 cyc/bank-block  19.720 cyc/lane-sample  delta -0.830   rounds [87146, 87196, 87336, 87386]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE             p50/block   80614 ns     298222 cyc/block   18639 cyc/bank-block  18.202 cyc/lane-sample  delta -2.348   rounds [80573, 80573, 80614, 81145]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE+FISSION     p50/block   75263 ns     278427 cyc/block   17402 cyc/bank-block  16.994 cyc/lane-sample  delta -3.556   rounds [75173, 75223, 75263, 75804]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+DET2+LEANSTATE+FISSION p50/block   74892 ns     277054 cyc/block   17316 cyc/bank-block  16.910 cyc/lane-sample  delta -3.640   rounds [74843, 74863, 74892, 74943]
+== W4, 16 banks, dual-mono link, round 4 (fission): core clock 3.700 GHz, loadavg [2.43 3.03 3.55 2/1900 1375497]
+  base                                                       p50/block   90833 ns     336055 cyc/block   21003 cyc/bank-block  20.511 cyc/lane-sample  delta +0.000   rounds [90753, 90773, 90833, 90863]
+  FISSION                                                    p50/block   92967 ns     343950 cyc/block   21497 cyc/bank-block  20.993 cyc/lane-sample  delta +0.482   rounds [92937, 92947, 92967, 93057]
+  HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE+FISSION            p50/block   87036 ns     322007 cyc/block   20125 cyc/bank-block  19.654 cyc/lane-sample  delta -0.857   rounds [87015, 87025, 87036, 87066]
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 11.17s
+===== final_rows_1.txt
+running 1 test
+test final_rows ... == W8, 8 banks, console signal, final candidates: core clock 3.698 GHz, loadavg [3.31 2.94 3.36 2/1872 1381525]
+  base                                                       p50/block   52099 ns     192658 cyc/block   24082 cyc/bank-block  11.759 cyc/lane-sample  delta +0.000   rounds [52059, 52069, 52099, 52410]
+  LINKED                                                     p50/block   46368 ns     171465 cyc/block   21433 cyc/bank-block  10.465 cyc/lane-sample  delta -1.294   rounds [46288, 46328, 46368, 46479]
+  HOIST+NOZERO+MAXDIV+NOSCATTER                              p50/block   51368 ns     189955 cyc/block   23744 cyc/bank-block  11.594 cyc/lane-sample  delta -0.165   rounds [51327, 51348, 51368, 51488]
+  NOSCATTER+LEANSTATE                                        p50/block   50466 ns     186619 cyc/block   23327 cyc/bank-block  11.390 cyc/lane-sample  delta -0.369   rounds [50456, 50456, 50466, 50466]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE             p50/block   44064 ns     162945 cyc/block   20368 cyc/bank-block   9.945 cyc/lane-sample  delta -1.814   rounds [44004, 44044, 44064, 45266]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE+FISSION     p50/block   43323 ns     160205 cyc/block   20026 cyc/bank-block   9.778 cyc/lane-sample  delta -1.981   rounds [43283, 43303, 43323, 43383]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+DET2+LEANSTATE+FISSION p50/block   40617 ns     150198 cyc/block   18775 cyc/bank-block   9.167 cyc/lane-sample  delta -2.592   rounds [40607, 40608, 40617, 40707]
+== W8, 8 banks, dual-mono link, final candidates: core clock 3.698 GHz, loadavg [3.31 2.94 3.36 6/1895 1381560]
+  base                                                       p50/block   52240 ns     193190 cyc/block   24149 cyc/bank-block  11.791 cyc/lane-sample  delta +0.000   rounds [51809, 52219, 52240, 52510]
+  HOIST+NOZERO+MAXDIV+NOSCATTER                              p50/block   51859 ns     191781 cyc/block   23973 cyc/bank-block  11.705 cyc/lane-sample  delta -0.086   rounds [51388, 51859, 51859, 51879]
+  NOSCATTER+LEANSTATE                                        p50/block   50977 ns     188519 cyc/block   23565 cyc/bank-block  11.506 cyc/lane-sample  delta -0.285   rounds [50917, 50927, 50977, 51117]
+== W4, 16 banks, console signal, final candidates: core clock 3.698 GHz, loadavg [3.29 2.94 3.35 5/1904 1381609]
+  base                                                       p50/block   93017 ns     343973 cyc/block   21498 cyc/bank-block  20.994 cyc/lane-sample  delta +0.000   rounds [92887, 93017, 93017, 93257]
+  LINKED                                                     p50/block   81786 ns     302441 cyc/block   18903 cyc/bank-block  18.460 cyc/lane-sample  delta -2.535   rounds [81726, 81746, 81786, 82057]
+  HOIST+NOZERO+MAXDIV+NOSCATTER                              p50/block   89501 ns     330971 cyc/block   20686 cyc/bank-block  20.201 cyc/lane-sample  delta -0.794   rounds [89461, 89461, 89501, 89951]
+  NOSCATTER+LEANSTATE                                        p50/block   91444 ns     338156 cyc/block   21135 cyc/bank-block  20.639 cyc/lane-sample  delta -0.355   rounds [91424, 91434, 91444, 91474]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE             p50/block   77357 ns     286063 cyc/block   17879 cyc/bank-block  17.460 cyc/lane-sample  delta -3.535   rounds [77277, 77297, 77357, 77447]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE+FISSION     p50/block   75754 ns     280135 cyc/block   17508 cyc/bank-block  17.098 cyc/lane-sample  delta -3.896   rounds [75704, 75724, 75754, 75785]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+DET2+LEANSTATE+FISSION p50/block   75774 ns     280209 cyc/block   17513 cyc/bank-block  17.103 cyc/lane-sample  delta -3.892   rounds [75694, 75734, 75774, 75814]
+== W4, 16 banks, dual-mono link, final candidates: core clock 3.697 GHz, loadavg [3.59 3.01 3.37 6/1956 1381842]
+  base                                                       p50/block   92977 ns     343698 cyc/block   21481 cyc/bank-block  20.978 cyc/lane-sample  delta +0.000   rounds [92747, 92787, 92977, 93298]
+  HOIST+NOZERO+MAXDIV+NOSCATTER                              p50/block   89581 ns     331144 cyc/block   20697 cyc/bank-block  20.211 cyc/lane-sample  delta -0.766   rounds [89500, 89541, 89581, 89881]
+  NOSCATTER+LEANSTATE                                        p50/block   91645 ns     338774 cyc/block   21173 cyc/bank-block  20.677 cyc/lane-sample  delta -0.301   rounds [91584, 91615, 91645, 91765]
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 10.44s
+===== screen_rows_1.txt
+running 1 test
+test screen_rows ... == W8, 8 banks, console signal, screen: core clock 3.701 GHz, loadavg [2.34 3.39 3.85 2/1896 1430396]
+  base                                                       p50/block   53502 ns     197994 cyc/block   24749 cyc/bank-block  12.085 cyc/lane-sample  delta +0.000   rounds [53472, 53482, 53502, 53512]
+  SCREEN                                                     p50/block   28184 ns     104300 cyc/block   13037 cyc/bank-block   6.366 cyc/lane-sample  delta -5.719   rounds [28134, 28154, 28184, 28184]
+  LINKED+SCREEN                                              p50/block   20479 ns      75786 cyc/block    9473 cyc/bank-block   4.626 cyc/lane-sample  delta -7.459   rounds [20459, 20469, 20479, 20489]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE             p50/block   43462 ns     160839 cyc/block   20105 cyc/bank-block   9.817 cyc/lane-sample  delta -2.268   rounds [43432, 43443, 43462, 43493]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE+SCREEN      p50/block   19296 ns      71408 cyc/block    8926 cyc/bank-block   4.358 cyc/lane-sample  delta -7.726   rounds [19276, 19277, 19296, 19297]
+== W8, 8 banks, bursty signal, screen: core clock 3.701 GHz, loadavg [2.34 3.39 3.85 5/1889 1430397]
+  base                                                       p50/block   53452 ns     197841 cyc/block   24730 cyc/bank-block  12.075 cyc/lane-sample  delta +0.000   rounds [53412, 53432, 53452, 53462]
+  SCREEN                                                     p50/block   51829 ns     191834 cyc/block   23979 cyc/bank-block  11.709 cyc/lane-sample  delta -0.367   rounds [51588, 51718, 51829, 51829]
+  LINKED+SCREEN                                              p50/block   45246 ns     167468 cyc/block   20934 cyc/bank-block  10.221 cyc/lane-sample  delta -1.854   rounds [45176, 45196, 45246, 45417]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE             p50/block   43373 ns     160536 cyc/block   20067 cyc/bank-block   9.798 cyc/lane-sample  delta -2.277   rounds [43332, 43333, 43373, 43373]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE+SCREEN      p50/block   42150 ns     156009 cyc/block   19501 cyc/bank-block   9.522 cyc/lane-sample  delta -2.553   rounds [41960, 42060, 42150, 42161]
+== W8, 8 banks, hot signal, screen: core clock 3.701 GHz, loadavg [2.34 3.39 3.85 4/1890 1430428]
+  base                                                       p50/block   53612 ns     198397 cyc/block   24800 cyc/bank-block  12.109 cyc/lane-sample  delta +0.000   rounds [53522, 53562, 53612, 53912]
+  SCREEN                                                     p50/block   56417 ns     208777 cyc/block   26097 cyc/bank-block  12.743 cyc/lane-sample  delta +0.634   rounds [56357, 56388, 56417, 56457]
+  LINKED+SCREEN                                              p50/block   48182 ns     178303 cyc/block   22288 cyc/bank-block  10.883 cyc/lane-sample  delta -1.226   rounds [48132, 48141, 48182, 48201]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE             p50/block   43443 ns     160766 cyc/block   20096 cyc/bank-block   9.812 cyc/lane-sample  delta -2.297   rounds [43412, 43433, 43443, 43463]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE+SCREEN      p50/block   45125 ns     166990 cyc/block   20874 cyc/bank-block  10.192 cyc/lane-sample  delta -1.917   rounds [45095, 45116, 45125, 45186]
+== W4, 16 banks, console signal, screen: core clock 3.701 GHz, loadavg [2.40 3.39 3.85 2/1892 1430432]
+  base                                                       p50/block   90743 ns     335843 cyc/block   20990 cyc/bank-block  20.498 cyc/lane-sample  delta +0.000   rounds [90712, 90712, 90743, 90773]
+  SCREEN                                                     p50/block   44315 ns     164011 cyc/block   10251 cyc/bank-block  10.010 cyc/lane-sample  delta -10.488   rounds [44295, 44314, 44315, 45256]
+  LINKED+SCREEN                                              p50/block   32542 ns     120439 cyc/block    7527 cyc/bank-block   7.351 cyc/lane-sample  delta -13.147   rounds [32382, 32492, 32542, 33083]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE             p50/block   77668 ns     287452 cyc/block   17966 cyc/bank-block  17.545 cyc/lane-sample  delta -2.954   rounds [77638, 77648, 77668, 77768]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE+SCREEN      p50/block   31701 ns     117327 cyc/block    7333 cyc/bank-block   7.161 cyc/lane-sample  delta -13.337   rounds [31650, 31660, 31701, 31761]
+== W4, 16 banks, bursty signal, screen: core clock 3.697 GHz, loadavg [2.40 3.39 3.85 8/1901 1430517]
+  base                                                       p50/block   90813 ns     335741 cyc/block   20984 cyc/bank-block  20.492 cyc/lane-sample  delta +0.000   rounds [90793, 90793, 90813, 90813]
+  SCREEN                                                     p50/block   88899 ns     328664 cyc/block   20542 cyc/bank-block  20.060 cyc/lane-sample  delta -0.432   rounds [88789, 88839, 88899, 88919]
+  LINKED+SCREEN                                              p50/block   80573 ns     297883 cyc/block   18618 cyc/bank-block  18.181 cyc/lane-sample  delta -2.311   rounds [80513, 80573, 80573, 81014]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE             p50/block   77808 ns     287660 cyc/block   17979 cyc/bank-block  17.557 cyc/lane-sample  delta -2.935   rounds [77778, 77789, 77808, 77918]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE+SCREEN      p50/block   77678 ns     287180 cyc/block   17949 cyc/bank-block  17.528 cyc/lane-sample  delta -2.964   rounds [77488, 77517, 77678, 77678]
+== W4, 16 banks, hot signal, screen: core clock 3.699 GHz, loadavg [2.36 3.36 3.84 3/1872 1430620]
+  base                                                       p50/block   90693 ns     335514 cyc/block   20970 cyc/bank-block  20.478 cyc/lane-sample  delta +0.000   rounds [90603, 90612, 90693, 90873]
+  SCREEN                                                     p50/block   97396 ns     360312 cyc/block   22519 cyc/bank-block  21.992 cyc/lane-sample  delta +1.514   rounds [97345, 97355, 97396, 97495]
+  LINKED+SCREEN                                              p50/block   86104 ns     318538 cyc/block   19909 cyc/bank-block  19.442 cyc/lane-sample  delta -1.036   rounds [86024, 86064, 86104, 86355]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE             p50/block   77818 ns     287884 cyc/block   17993 cyc/bank-block  17.571 cyc/lane-sample  delta -2.907   rounds [77788, 77788, 77818, 78720]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE+SCREEN      p50/block   83098 ns     307417 cyc/block   19214 cyc/bank-block  18.763 cyc/lane-sample  delta -1.715   rounds [83018, 83088, 83098, 83159]
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 13.70s
+===== screen_rows_2.txt
+running 1 test
+test screen_rows ... == W8, 8 banks, console signal, screen: core clock 3.698 GHz, loadavg [3.83 5.35 5.25 3/1901 1479772]
+  base                                                       p50/block   52330 ns     193510 cyc/block   24189 cyc/bank-block  11.811 cyc/lane-sample  delta +0.000   rounds [52299, 52320, 52330, 52409]
+  SCREEN                                                     p50/block   27232 ns     100701 cyc/block   12588 cyc/bank-block   6.146 cyc/lane-sample  delta -5.665   rounds [27192, 27222, 27232, 27262]
+  LINKED+SCREEN                                              p50/block   21781 ns      80544 cyc/block   10068 cyc/bank-block   4.916 cyc/lane-sample  delta -6.895   rounds [21771, 21781, 21781, 21801]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE             p50/block   43583 ns     161165 cyc/block   20146 cyc/bank-block   9.837 cyc/lane-sample  delta -1.974   rounds [43323, 43503, 43583, 43743]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE+SCREEN      p50/block   18966 ns      70134 cyc/block    8767 cyc/bank-block   4.281 cyc/lane-sample  delta -7.530   rounds [18896, 18956, 18966, 18976]
+== W8, 8 banks, bursty signal, screen: core clock 3.699 GHz, loadavg [3.83 5.35 5.25 4/1894 1479773]
+  base                                                       p50/block   51879 ns     191913 cyc/block   23989 cyc/bank-block  11.713 cyc/lane-sample  delta +0.000   rounds [51808, 51879, 51879, 51969]
+  SCREEN                                                     p50/block   49354 ns     182573 cyc/block   22822 cyc/bank-block  11.143 cyc/lane-sample  delta -0.570   rounds [49154, 49344, 49354, 49895]
+  LINKED+SCREEN                                              p50/block   45046 ns     166636 cyc/block   20830 cyc/bank-block  10.171 cyc/lane-sample  delta -1.543   rounds [44866, 44886, 45046, 45617]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE             p50/block   43363 ns     160410 cyc/block   20051 cyc/bank-block   9.791 cyc/lane-sample  delta -1.923   rounds [43222, 43252, 43363, 43573]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE+SCREEN      p50/block   41909 ns     155032 cyc/block   19379 cyc/bank-block   9.462 cyc/lane-sample  delta -2.251   rounds [41770, 41779, 41909, 42190]
+== W8, 8 banks, hot signal, screen: core clock 3.699 GHz, loadavg [3.84 5.32 5.24 20/1904 1479840]
+  base                                                       p50/block   52049 ns     192542 cyc/block   24068 cyc/bank-block  11.752 cyc/lane-sample  delta +0.000   rounds [51969, 52039, 52049, 52099]
+  SCREEN                                                     p50/block   54474 ns     201513 cyc/block   25189 cyc/bank-block  12.299 cyc/lane-sample  delta +0.548   rounds [54464, 54474, 54474, 54504]
+  LINKED+SCREEN                                              p50/block   48322 ns     178755 cyc/block   22344 cyc/bank-block  10.910 cyc/lane-sample  delta -0.841   rounds [48282, 48291, 48322, 48322]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE             p50/block   43362 ns     160407 cyc/block   20051 cyc/bank-block   9.790 cyc/lane-sample  delta -1.961   rounds [43292, 43353, 43362, 43382]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE+SCREEN      p50/block   45236 ns     167339 cyc/block   20917 cyc/bank-block  10.214 cyc/lane-sample  delta -1.538   rounds [44925, 44976, 45236, 45296]
+== W4, 16 banks, console signal, screen: core clock 3.699 GHz, loadavg [3.84 5.32 5.24 4/1895 1479849]
+  base                                                       p50/block   91965 ns     340184 cyc/block   21262 cyc/bank-block  20.763 cyc/lane-sample  delta +0.000   rounds [91835, 91935, 91965, 91975]
+  SCREEN                                                     p50/block   43112 ns     159474 cyc/block    9967 cyc/bank-block   9.734 cyc/lane-sample  delta -11.030   rounds [43102, 43102, 43112, 43143]
+  LINKED+SCREEN                                              p50/block   33013 ns     122117 cyc/block    7632 cyc/bank-block   7.453 cyc/lane-sample  delta -13.310   rounds [32893, 32973, 33013, 33032]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE             p50/block   77618 ns     287114 cyc/block   17945 cyc/bank-block  17.524 cyc/lane-sample  delta -3.239   rounds [77567, 77567, 77618, 77808]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE+SCREEN      p50/block   33183 ns     122746 cyc/block    7672 cyc/bank-block   7.492 cyc/lane-sample  delta -13.271   rounds [33163, 33173, 33183, 33234]
+== W4, 16 banks, bursty signal, screen: core clock 3.700 GHz, loadavg [3.78 5.29 5.23 3/1895 1479851]
+  base                                                       p50/block   91975 ns     340336 cyc/block   21271 cyc/bank-block  20.772 cyc/lane-sample  delta +0.000   rounds [91695, 91905, 91975, 92406]
+  SCREEN                                                     p50/block   85914 ns     317909 cyc/block   19869 cyc/bank-block  19.404 cyc/lane-sample  delta -1.369   rounds [85753, 85874, 85914, 86104]
+  LINKED+SCREEN                                              p50/block   79953 ns     295851 cyc/block   18491 cyc/bank-block  18.057 cyc/lane-sample  delta -2.715   rounds [79771, 79822, 79953, 79992]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE             p50/block   77668 ns     287396 cyc/block   17962 cyc/bank-block  17.541 cyc/lane-sample  delta -3.231   rounds [77447, 77497, 77668, 77738]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE+SCREEN      p50/block   76867 ns     284432 cyc/block   17777 cyc/bank-block  17.360 cyc/lane-sample  delta -3.412   rounds [76806, 76806, 76867, 76906]
+== W4, 16 banks, hot signal, screen: core clock 3.695 GHz, loadavg [3.78 5.29 5.23 15/1948 1480436]
+  base                                                       p50/block   91925 ns     339678 cyc/block   21230 cyc/bank-block  20.732 cyc/lane-sample  delta +0.000   rounds [91875, 91885, 91925, 91995]
+  SCREEN                                                     p50/block   94400 ns     348824 cyc/block   21801 cyc/bank-block  21.291 cyc/lane-sample  delta +0.558   rounds [94129, 94129, 94400, 94420]
+  LINKED+SCREEN                                              p50/block   84842 ns     313505 cyc/block   19594 cyc/bank-block  19.135 cyc/lane-sample  delta -1.597   rounds [84751, 84811, 84842, 85002]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE             p50/block   77698 ns     287107 cyc/block   17944 cyc/bank-block  17.524 cyc/lane-sample  delta -3.209   rounds [77518, 77628, 77698, 78169]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE+SCREEN      p50/block   82947 ns     306503 cyc/block   19156 cyc/bank-block  18.707 cyc/lane-sample  delta -2.025   rounds [82447, 82567, 82947, 83068]
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 13.62s
+===== unity_rows_1.txt
+running 1 test
+test unity_rows ... == W8, 8 banks, console signal, unity: core clock 3.698 GHz, loadavg [5.74 7.04 6.57 20/1906 1524240]
+  base                                                       p50/block   51618 ns     190873 cyc/block   23859 cyc/bank-block  11.650 cyc/lane-sample  delta +0.000  mean 11.603 cyc/lane-sample  rounds [51588, 51618, 51618, 51738]
+  UNITY                                                      p50/block    6132 ns      22675 cyc/block    2834 cyc/bank-block   1.384 cyc/lane-sample  delta -10.266  mean  1.398 cyc/lane-sample  rounds [6131, 6132, 6132, 6132]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE+UNITY       p50/block    6132 ns      22675 cyc/block    2834 cyc/bank-block   1.384 cyc/lane-sample  delta -10.266  mean  1.397 cyc/lane-sample  rounds [6131, 6131, 6132, 6132]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE+SCREEN+UNITY p50/block    6132 ns      22675 cyc/block    2834 cyc/bank-block   1.384 cyc/lane-sample  delta -10.266  mean  1.397 cyc/lane-sample  rounds [6131, 6132, 6132, 6141]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE             p50/block   43323 ns     160200 cyc/block   20025 cyc/bank-block   9.778 cyc/lane-sample  delta -1.872  mean  9.724 cyc/lane-sample  rounds [43202, 43222, 43323, 43403]
+== W8, 8 banks, sparse signal, unity: core clock 3.699 GHz, loadavg [6.72 7.22 6.63 18/1933 1524328]
+  base                                                       p50/block   51348 ns     189914 cyc/block   23739 cyc/bank-block  11.591 cyc/lane-sample  delta +0.000  mean 11.551 cyc/lane-sample  rounds [51318, 51338, 51348, 51438]
+  UNITY                                                      p50/block   52941 ns     195805 cyc/block   24476 cyc/bank-block  11.951 cyc/lane-sample  delta +0.360  mean 12.665 cyc/lane-sample  rounds [52831, 52851, 52941, 73259]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE+UNITY       p50/block   44655 ns     165159 cyc/block   20645 cyc/bank-block  10.081 cyc/lane-sample  delta -1.511  mean 10.212 cyc/lane-sample  rounds [44475, 44505, 44655, 45096]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE+SCREEN+UNITY p50/block   20920 ns      77374 cyc/block    9672 cyc/bank-block   4.723 cyc/lane-sample  delta -6.869  mean  4.908 cyc/lane-sample  rounds [20900, 20910, 20920, 20929]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE             p50/block   42952 ns     158861 cyc/block   19858 cyc/bank-block   9.696 cyc/lane-sample  delta -1.895  mean  9.820 cyc/lane-sample  rounds [42851, 42922, 42952, 43032]
+== W8, 8 banks, hot signal, unity: core clock 3.700 GHz, loadavg [6.72 7.22 6.63 10/1916 1524459]
+  base                                                       p50/block   52039 ns     192522 cyc/block   24065 cyc/bank-block  11.751 cyc/lane-sample  delta +0.000  mean 11.705 cyc/lane-sample  rounds [51438, 51448, 52039, 56127]
+  UNITY                                                      p50/block   52540 ns     194376 cyc/block   24297 cyc/bank-block  11.864 cyc/lane-sample  delta +0.113  mean 11.826 cyc/lane-sample  rounds [52219, 52249, 52540, 52560]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE+UNITY       p50/block   43934 ns     162537 cyc/block   20317 cyc/bank-block   9.920 cyc/lane-sample  delta -1.830  mean  9.844 cyc/lane-sample  rounds [43834, 43874, 43934, 44134]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE+SCREEN+UNITY p50/block   45898 ns     169803 cyc/block   21225 cyc/bank-block  10.364 cyc/lane-sample  delta -1.387  mean 10.496 cyc/lane-sample  rounds [45848, 45857, 45898, 46448]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE             p50/block   43082 ns     159385 cyc/block   19923 cyc/bank-block   9.728 cyc/lane-sample  delta -2.023  mean  9.748 cyc/lane-sample  rounds [43052, 43082, 43082, 43212]
+== W4, 16 banks, console signal, unity: core clock 3.699 GHz, loadavg [6.72 7.22 6.63 7/1919 1524564]
+  base                                                       p50/block   92125 ns     340789 cyc/block   21299 cyc/bank-block  20.800 cyc/lane-sample  delta +0.000  mean 20.249 cyc/lane-sample  rounds [92095, 92115, 92125, 92125]
+  UNITY                                                      p50/block    8746 ns      32353 cyc/block    2022 cyc/bank-block   1.975 cyc/lane-sample  delta -18.825  mean  1.989 cyc/lane-sample  rounds [8707, 8707, 8746, 8746]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE+UNITY       p50/block    8746 ns      32353 cyc/block    2022 cyc/bank-block   1.975 cyc/lane-sample  delta -18.825  mean  1.992 cyc/lane-sample  rounds [8716, 8717, 8746, 8746]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE+SCREEN+UNITY p50/block    8727 ns      32283 cyc/block    2018 cyc/bank-block   1.970 cyc/lane-sample  delta -18.830  mean  1.988 cyc/lane-sample  rounds [8706, 8717, 8727, 8736]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE             p50/block   77006 ns     284860 cyc/block   17804 cyc/bank-block  17.387 cyc/lane-sample  delta -3.414  mean 17.203 cyc/lane-sample  rounds [76897, 76997, 77006, 77056]
+== W4, 16 banks, sparse signal, unity: core clock 3.699 GHz, loadavg [6.75 7.21 6.63 7/1919 1524608]
+  base                                                       p50/block   92205 ns     341081 cyc/block   21318 cyc/bank-block  20.818 cyc/lane-sample  delta +0.000  mean 20.263 cyc/lane-sample  rounds [92116, 92196, 92205, 92255]
+  UNITY                                                      p50/block   94610 ns     349978 cyc/block   21874 cyc/bank-block  21.361 cyc/lane-sample  delta +0.543  mean 20.846 cyc/lane-sample  rounds [94560, 94600, 94610, 94620]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE+UNITY       p50/block   79732 ns     294942 cyc/block   18434 cyc/bank-block  18.002 cyc/lane-sample  delta -2.816  mean 17.871 cyc/lane-sample  rounds [79592, 79732, 79732, 79832]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE+SCREEN+UNITY p50/block   35187 ns     130162 cyc/block    8135 cyc/bank-block   7.944 cyc/lane-sample  delta -12.873  mean  8.280 cyc/lane-sample  rounds [34996, 35047, 35187, 35207]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE             p50/block   77257 ns     285786 cyc/block   17862 cyc/bank-block  17.443 cyc/lane-sample  delta -3.375  mean 17.292 cyc/lane-sample  rounds [77037, 77217, 77257, 77338]
+== W4, 16 banks, hot signal, unity: core clock 3.701 GHz, loadavg [6.75 7.21 6.63 7/1909 1524657]
+  base                                                       p50/block   92095 ns     340809 cyc/block   21301 cyc/bank-block  20.801 cyc/lane-sample  delta +0.000  mean 20.250 cyc/lane-sample  rounds [91925, 92075, 92095, 92155]
+  UNITY                                                      p50/block   93107 ns     344554 cyc/block   21535 cyc/bank-block  21.030 cyc/lane-sample  delta +0.229  mean 20.503 cyc/lane-sample  rounds [93067, 93097, 93107, 93137]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE+UNITY       p50/block   78460 ns     290351 cyc/block   18147 cyc/bank-block  17.722 cyc/lane-sample  delta -3.080  mean 17.528 cyc/lane-sample  rounds [78379, 78429, 78460, 78480]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE+SCREEN+UNITY p50/block   81686 ns     302289 cyc/block   18893 cyc/bank-block  18.450 cyc/lane-sample  delta -2.351  mean 18.215 cyc/lane-sample  rounds [81515, 81635, 81686, 81725]
+  LINKED+HOIST+NOZERO+MAXDIV+NOSCATTER+LEANSTATE             p50/block   77227 ns     285788 cyc/block   17862 cyc/bank-block  17.443 cyc/lane-sample  delta -3.358  mean 17.430 cyc/lane-sample  rounds [77167, 77197, 77227, 77277]
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 13.01s
+===== detector_micro_1.txt
+running 1 test
+test detector_micro ... == detector micro-benchmark (L1-resident input, one channel): core clock 3.699 GHz, loadavg [3.26 3.14 3.48 4/1901 1316852]
+  base           chunk    32: W8   35.4 cyc/channel-frame (4.420 cyc/lane-sample)   W4   40.3 cyc/channel-frame (10.081 cyc/lane-sample)
+  base           chunk  1024: W8   35.9 cyc/channel-frame (4.491 cyc/lane-sample)   W4   40.1 cyc/channel-frame (10.033 cyc/lane-sample)
+  NOZERO         chunk    32: W8   33.7 cyc/channel-frame (4.207 cyc/lane-sample)   W4   40.3 cyc/channel-frame (10.065 cyc/lane-sample)
+  NOZERO         chunk  1024: W8   34.3 cyc/channel-frame (4.282 cyc/lane-sample)   W4   39.7 cyc/channel-frame (9.937 cyc/lane-sample)
+  TREE(classB)   chunk    32: W8   31.7 cyc/channel-frame (3.960 cyc/lane-sample)   W4   39.4 cyc/channel-frame (9.856 cyc/lane-sample)
+  TREE(classB)   chunk  1024: W8   31.5 cyc/channel-frame (3.940 cyc/lane-sample)   W4   39.1 cyc/channel-frame (9.785 cyc/lane-sample)
+  DET2           chunk    32: W8   44.5 cyc/channel-frame (5.560 cyc/lane-sample)   W4   47.6 cyc/channel-frame (11.893 cyc/lane-sample)
+  DET2           chunk  1024: W8   43.7 cyc/channel-frame (5.463 cyc/lane-sample)   W4   47.1 cyc/channel-frame (11.782 cyc/lane-sample)
+  DET2+NOZERO    chunk    32: W8   42.2 cyc/channel-frame (5.276 cyc/lane-sample)   W4   44.8 cyc/channel-frame (11.192 cyc/lane-sample)
+  DET2+NOZERO    chunk  1024: W8   40.9 cyc/channel-frame (5.113 cyc/lane-sample)   W4   44.5 cyc/channel-frame (11.119 cyc/lane-sample)
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 1.03s
+===== detector_micro_2.txt
+running 1 test
+test detector_micro ... == detector micro-benchmark (L1-resident input, one channel): core clock 3.704 GHz, loadavg [4.44 3.59 3.58 6/1901 1321790]
+  base           chunk    32: W8   35.8 cyc/channel-frame (4.474 cyc/lane-sample)   W4   39.8 cyc/channel-frame (9.954 cyc/lane-sample)
+  base           chunk  1024: W8   36.1 cyc/channel-frame (4.516 cyc/lane-sample)   W4   39.6 cyc/channel-frame (9.888 cyc/lane-sample)
+  NOZERO         chunk    32: W8   34.2 cyc/channel-frame (4.276 cyc/lane-sample)   W4   39.8 cyc/channel-frame (9.945 cyc/lane-sample)
+  NOZERO         chunk  1024: W8   34.1 cyc/channel-frame (4.259 cyc/lane-sample)   W4   39.3 cyc/channel-frame (9.832 cyc/lane-sample)
+  TREE(classB)   chunk    32: W8   33.2 cyc/channel-frame (4.150 cyc/lane-sample)   W4   39.6 cyc/channel-frame (9.893 cyc/lane-sample)
+  TREE(classB)   chunk  1024: W8   32.8 cyc/channel-frame (4.094 cyc/lane-sample)   W4   38.8 cyc/channel-frame (9.697 cyc/lane-sample)
+  DET2           chunk    32: W8   43.7 cyc/channel-frame (5.461 cyc/lane-sample)   W4   47.8 cyc/channel-frame (11.939 cyc/lane-sample)
+  DET2           chunk  1024: W8   42.9 cyc/channel-frame (5.359 cyc/lane-sample)   W4   47.6 cyc/channel-frame (11.900 cyc/lane-sample)
+  DET2+NOZERO    chunk    32: W8   44.8 cyc/channel-frame (5.606 cyc/lane-sample)   W4   45.4 cyc/channel-frame (11.344 cyc/lane-sample)
+  DET2+NOZERO    chunk  1024: W8   43.0 cyc/channel-frame (5.378 cyc/lane-sample)   W4   45.3 cyc/channel-frame (11.336 cyc/lane-sample)
+  DET3(mem taps) chunk    32: W8   51.4 cyc/channel-frame (6.430 cyc/lane-sample)   W4   55.5 cyc/channel-frame (13.872 cyc/lane-sample)
+  DET3(mem taps) chunk  1024: W8   51.2 cyc/channel-frame (6.398 cyc/lane-sample)   W4   52.2 cyc/channel-frame (13.056 cyc/lane-sample)
+  DET3+NOZERO    chunk    32: W8   47.8 cyc/channel-frame (5.979 cyc/lane-sample)   W4   51.7 cyc/channel-frame (12.922 cyc/lane-sample)
+  DET3+NOZERO    chunk  1024: W8   46.7 cyc/channel-frame (5.836 cyc/lane-sample)   W4   47.5 cyc/channel-frame (11.864 cyc/lane-sample)
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 1.30s
+===== console_rows_1.txt
+running 1 test
+test console_rows ... == Simd8: core clock 3.701 GHz, loadavg [2.95 3.86 4.12 2/1891 1355285]
+  eq_comp_simd1                            p50    80393 ns  18.161 cyc/lane-sample  minus eq_comp  0.000 cyc/lane-sample   rounds [80703, 80253, 80393, 80263]
+  console_legacy (two chains)              p50    80093 ns  18.093 cyc/lane-sample  minus eq_comp -0.068 cyc/lane-sample   rounds [80463, 80012, 80093, 79982]
+  console                                  p50   135118 ns  30.523 cyc/lane-sample  minus eq_comp 12.362 cyc/lane-sample   rounds [135388, 134987, 134967, 135118]
+  console, limiter NOOP                    p50    81195 ns  18.342 cyc/lane-sample  minus eq_comp  0.181 cyc/lane-sample   rounds [82046, 81195, 81175, 81185]
+  console LINKED                           p50   129636 ns  29.284 cyc/lane-sample  minus eq_comp 11.124 cyc/lane-sample   rounds [129666, 129347, 129527, 129636]
+  console SMALL_A                          p50   133534 ns  30.165 cyc/lane-sample  minus eq_comp 12.004 cyc/lane-sample   rounds [133864, 133494, 133534, 133454]
+  console LINKED+SMALL_A+LEANSTATE         p50   125990 ns  28.461 cyc/lane-sample  minus eq_comp 10.300 cyc/lane-sample   rounds [126150, 125990, 125900, 125920]
+  console LINKED+SMALL_A+LEANSTATE+DET2    p50   124738 ns  28.178 cyc/lane-sample  minus eq_comp 10.017 cyc/lane-sample   rounds [124738, 124687, 124778, 124598]
+  console TREE (class B)                   p50   131219 ns  29.642 cyc/lane-sample  minus eq_comp 11.481 cyc/lane-sample   rounds [131219, 131370, 131110, 131159]
+== Simd4: core clock 3.701 GHz, loadavg [2.96 3.85 4.11 2/1874 1355352]
+  eq_comp_simd1                            p50   461749 ns  104.308 cyc/lane-sample  minus eq_comp  0.000 cyc/lane-sample   rounds [461819, 461539, 461749, 459435]
+  console_legacy (two chains)              p50   461979 ns  104.360 cyc/lane-sample  minus eq_comp  0.052 cyc/lane-sample   rounds [462130, 461979, 461068, 460687]
+  console                                  p50   552482 ns  124.804 cyc/lane-sample  minus eq_comp 20.496 cyc/lane-sample   rounds [552833, 552121, 552121, 552482]
+  console, limiter NOOP                    p50   462741 ns  104.532 cyc/lane-sample  minus eq_comp  0.224 cyc/lane-sample   rounds [463102, 462721, 462701, 462741]
+  console LINKED                           p50   542723 ns  122.600 cyc/lane-sample  minus eq_comp 18.292 cyc/lane-sample   rounds [542924, 542723, 542072, 541962]
+  console SMALL_A                          p50   551791 ns  124.648 cyc/lane-sample  minus eq_comp 20.340 cyc/lane-sample   rounds [551791, 551750, 551951, 551140]
+  console LINKED+SMALL_A+LEANSTATE         p50   540779 ns  122.161 cyc/lane-sample  minus eq_comp 17.853 cyc/lane-sample   rounds [541110, 540640, 540779, 540719]
+  console LINKED+SMALL_A+LEANSTATE+DET2    p50   538395 ns  121.622 cyc/lane-sample  minus eq_comp 17.314 cyc/lane-sample   rounds [538395, 538485, 537774, 537344]
+  console TREE (class B)                   p50   543866 ns  122.858 cyc/lane-sample  minus eq_comp 18.550 cyc/lane-sample   rounds [544577, 543866, 543785, 543515]
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 36.39s
+===== console_rows_final.txt
+running 1 test
+test console_rows ... == Simd8: core clock 3.699 GHz, loadavg [3.54 3.01 3.37 5/1946 1382297]
+  eq_comp_simd1                            p50    80613 ns  18.199 cyc/lane-sample  minus eq_comp  0.000 cyc/lane-sample   rounds [82016, 80613, 80593, 80613]
+  console_legacy (two chains)              p50    79962 ns  18.052 cyc/lane-sample  minus eq_comp -0.147 cyc/lane-sample   rounds [80053, 79902, 79902, 79962]
+  console                                  p50   134757 ns  30.423 cyc/lane-sample  minus eq_comp 12.224 cyc/lane-sample   rounds [134707, 134757, 134866, 134746]
+  console, limiter NOOP                    p50    81475 ns  18.394 cyc/lane-sample  minus eq_comp  0.195 cyc/lane-sample   rounds [81685, 81415, 81435, 81475]
+  console LINKED                           p50   130008 ns  29.351 cyc/lane-sample  minus eq_comp 11.151 cyc/lane-sample   rounds [130378, 130008, 129978, 129968]
+  console SMALL_A                          p50   134756 ns  30.423 cyc/lane-sample  minus eq_comp 12.223 cyc/lane-sample   rounds [134847, 134547, 134507, 134756]
+  console LINKED+SMALL_A+LEANSTATE         p50   127373 ns  28.756 cyc/lane-sample  minus eq_comp 10.557 cyc/lane-sample   rounds [127723, 127272, 127342, 127373]
+  console LEANSTATE+NOSCATTER              p50   133865 ns  30.221 cyc/lane-sample  minus eq_comp 12.022 cyc/lane-sample   rounds [133915, 133825, 133855, 133865]
+  console LINKED+SMALL_A+LEANSTATE+FISSION p50   127673 ns  28.824 cyc/lane-sample  minus eq_comp 10.624 cyc/lane-sample   rounds [127673, 127633, 127693, 127613]
+  console LINKED+SMALL_A+LEANSTATE+FISSION+DET2 p50   125880 ns  28.419 cyc/lane-sample  minus eq_comp 10.220 cyc/lane-sample   rounds [125859, 125859, 125970, 125880]
+== Simd4: core clock 3.699 GHz, loadavg [3.76 3.07 3.39 5/1929 1382556]
+  eq_comp_simd1                            p50   461368 ns  104.159 cyc/lane-sample  minus eq_comp  0.000 cyc/lane-sample   rounds [461809, 458884, 458564, 461368]
+  console_legacy (two chains)              p50   460818 ns  104.035 cyc/lane-sample  minus eq_comp -0.124 cyc/lane-sample   rounds [462851, 460367, 460527, 460818]
+  console                                  p50   554576 ns  125.202 cyc/lane-sample  minus eq_comp 21.043 cyc/lane-sample   rounds [554887, 554576, 553574, 554496]
+  console, limiter NOOP                    p50   464124 ns  104.781 cyc/lane-sample  minus eq_comp  0.622 cyc/lane-sample   rounds [462541, 461900, 464124, 471839]
+  console LINKED                           p50   546411 ns  123.358 cyc/lane-sample  minus eq_comp 19.199 cyc/lane-sample   rounds [544618, 544427, 546411, 548434]
+  console SMALL_A                          p50   551781 ns  124.571 cyc/lane-sample  minus eq_comp 20.412 cyc/lane-sample   rounds [551800, 551781, 551640, 551050]
+  console LINKED+SMALL_A+LEANSTATE         p50   539086 ns  121.705 cyc/lane-sample  minus eq_comp 17.546 cyc/lane-sample   rounds [539086, 539087, 538716, 538416]
+  console LEANSTATE+NOSCATTER              p50   553704 ns  125.005 cyc/lane-sample  minus eq_comp 20.846 cyc/lane-sample   rounds [553704, 553644, 552993, 554516]
+  console LINKED+SMALL_A+LEANSTATE+FISSION p50   539237 ns  121.739 cyc/lane-sample  minus eq_comp 17.580 cyc/lane-sample   rounds [539166, 539237, 538986, 539658]
+  console LINKED+SMALL_A+LEANSTATE+FISSION+DET2 p50   539618 ns  121.825 cyc/lane-sample  minus eq_comp 17.666 cyc/lane-sample   rounds [539618, 539337, 538796, 540089]
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 40.92s
+===== console_rows_screen.txt
+running 1 test
+test console_rows ... == Simd8: core clock 3.698 GHz, loadavg [10.50 6.62 4.98 5/1898 1454916]
+  eq_comp_simd1                            p50    80894 ns  18.257 cyc/lane-sample  minus eq_comp  0.000 cyc/lane-sample   rounds [81315, 80894, 80864, 80854]
+  console_legacy (two chains)              p50    80163 ns  18.092 cyc/lane-sample  minus eq_comp -0.165 cyc/lane-sample   rounds [80353, 80082, 80163, 80053]
+  console                                  p50   135167 ns  30.505 cyc/lane-sample  minus eq_comp 12.249 cyc/lane-sample   rounds [136039, 135167, 135147, 135038]
+  console, limiter NOOP                    p50    81125 ns  18.309 cyc/lane-sample  minus eq_comp  0.052 cyc/lane-sample   rounds [81395, 81125, 81054, 81044]
+  console LINKED                           p50   130960 ns  29.556 cyc/lane-sample  minus eq_comp 11.299 cyc/lane-sample   rounds [130980, 130047, 130960, 130068]
+  console SMALL_A                          p50   131641 ns  29.710 cyc/lane-sample  minus eq_comp 11.453 cyc/lane-sample   rounds [132051, 131280, 131641, 131150]
+  console LINKED+SMALL_A+LEANSTATE         p50   126190 ns  28.479 cyc/lane-sample  minus eq_comp 10.223 cyc/lane-sample   rounds [126190, 126210, 126160, 126140]
+  console LEANSTATE+NOSCATTER              p50   133845 ns  30.207 cyc/lane-sample  minus eq_comp 11.950 cyc/lane-sample   rounds [133915, 133845, 133794, 133845]
+  console SCREEN                           p50   138564 ns  31.272 cyc/lane-sample  minus eq_comp 13.015 cyc/lane-sample   rounds [138544, 138574, 138564, 138533]
+  console LINKED+SMALL_A+LEANSTATE+SCREEN  p50   127583 ns  28.794 cyc/lane-sample  minus eq_comp 10.537 cyc/lane-sample   rounds [127583, 127583, 127513, 127483]
+== Simd4: core clock 3.698 GHz, loadavg [9.72 6.59 4.99 5/1916 1455098]
+  eq_comp_simd1                            p50   464314 ns  104.789 cyc/lane-sample  minus eq_comp  0.000 cyc/lane-sample   rounds [462340, 463052, 467049, 464314]
+  console_legacy (two chains)              p50   463723 ns  104.656 cyc/lane-sample  minus eq_comp -0.133 cyc/lane-sample   rounds [462050, 463723, 464204, 462631]
+  console                                  p50   553284 ns  124.869 cyc/lane-sample  minus eq_comp 20.079 cyc/lane-sample   rounds [552923, 553634, 553284, 553003]
+  console, limiter NOOP                    p50   464555 ns  104.844 cyc/lane-sample  minus eq_comp  0.054 cyc/lane-sample   rounds [463362, 464555, 463713, 466368]
+  console LINKED                           p50   544677 ns  122.926 cyc/lane-sample  minus eq_comp 18.137 cyc/lane-sample   rounds [543626, 544677, 543976, 546731]
+  console SMALL_A                          p50   554587 ns  125.163 cyc/lane-sample  minus eq_comp 20.373 cyc/lane-sample   rounds [551861, 556310, 552482, 554587]
+  console LINKED+SMALL_A+LEANSTATE         p50   541852 ns  122.289 cyc/lane-sample  minus eq_comp 17.499 cyc/lane-sample   rounds [540249, 541852, 541571, 543866]
+  console LEANSTATE+NOSCATTER              p50   554426 ns  125.126 cyc/lane-sample  minus eq_comp 20.337 cyc/lane-sample   rounds [552993, 553584, 554426, 556400]
+  console SCREEN                           p50   541631 ns  122.239 cyc/lane-sample  minus eq_comp 17.449 cyc/lane-sample   rounds [538877, 539428, 541631, 542644]
+  console LINKED+SMALL_A+LEANSTATE+SCREEN  p50   529468 ns  119.494 cyc/lane-sample  minus eq_comp 14.704 cyc/lane-sample   rounds [526222, 526763, 529468, 531111]
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 40.91s
+===== wasm_console_1.txt
+loadavg 3.18 3.34 3.86 7/1924 1361340
+  eq_comp_simd1 (before)                     p50   177267 ns    40.032 cyc/lane-sample  minus eq_comp   0.045   rounds 177418,177427,177267,177088,177107,177067
+  eq_comp_simd1 (after)                      p50   174823 ns    39.480 cyc/lane-sample  minus eq_comp  -0.507   rounds 174823,174753,174913,175274,174673,174783
+  console_legacy                             p50   176446 ns    39.847 cyc/lane-sample  minus eq_comp  -0.140   rounds 176456,176446,176456,176376,176385,175504
+  console                                    p50   302556 ns    68.326 cyc/lane-sample  minus eq_comp  28.339   rounds 364043,302556,302065,302176,302416,302927
+  console, limiter NOOP                      p50   177197 ns    40.016 cyc/lane-sample  minus eq_comp   0.029   rounds 177047,177167,177217,177579,177197,177167
+  console LINKED                             p50   278440 ns    62.880 cyc/lane-sample  minus eq_comp  22.893   rounds 278440,278250,278811,278711,278119,278270
+  console SMALL_A                            p50   295082 ns    66.638 cyc/lane-sample  minus eq_comp  26.651   rounds 295072,294881,295082,296965,295111,295082
+  console LINKED+SMALL_A+LEANSTATE           p50   277919 ns    62.762 cyc/lane-sample  minus eq_comp  22.775   rounds 278901,277198,277538,279262,277919,277729
+  console LINKED+SMALL_A+LEANSTATE+DET2      p50   276857 ns    62.523 cyc/lane-sample  minus eq_comp  22.536   rounds 277208,276215,276857,276817,276767,277849
+  console TREE (class B)                     p50   366027 ns    82.660 cyc/lane-sample  minus eq_comp  42.673   rounds 365757,365737,366047,365747,366027,366327
+loadavg 3.30 3.36 3.86 2/1902 1361714
+===== wasm_console_breakdown_1.txt
+loadavg 3.18 3.32 3.83 6/1911 1362302
+  eq_comp_simd1 (before)                     p50   176657 ns    39.894 cyc/lane-sample  minus eq_comp   0.041   rounds 177057,176747,176657,176476,176476,176657
+  eq_comp_simd1 (after)                      p50   175274 ns    39.582 cyc/lane-sample  minus eq_comp  -0.271   rounds 175124,175093,175274,175284,175273,175324
+  console_legacy                             p50   177608 ns    40.109 cyc/lane-sample  minus eq_comp   0.256   rounds 178199,177608,177749,176316,176206,175233
+  console                                    p50   293378 ns    66.254 cyc/lane-sample  minus eq_comp  26.400   rounds 363853,293139,293349,293228,293419,293378
+  console, limiter NOOP                      p50   177187 ns    40.014 cyc/lane-sample  minus eq_comp   0.161   rounds 177799,177187,177177,177177,177117,177368
+  x:STATE (state+finish only)                p50   184812 ns    41.736 cyc/lane-sample  minus eq_comp   1.883   rounds 184812,184872,185453,184742,184541,184692
+  x:DET (state+detector+finish)              p50   247231 ns    55.832 cyc/lane-sample  minus eq_comp  15.979   rounds 247792,247611,247121,247231,247231,247210
+  x:GAIN (state+gain loop+finish)            p50   234867 ns    53.040 cyc/lane-sample  minus eq_comp  13.186   rounds 234636,235208,234868,234867,234798,234717
+  x:NOFINISH                                 p50   291385 ns    65.803 cyc/lane-sample  minus eq_comp  25.950   rounds 291385,292086,291294,291345,291455,291365
+  x:STATE+LEANSTATE+NOSCATTER                p50   182999 ns    41.327 cyc/lane-sample  minus eq_comp   1.473   rounds 183689,182999,182959,182998,182918,183048
+loadavg 3.30 3.34 3.83 3/1909 1362467
+===== wasm_console_singles_1.txt
+loadavg 2.80 2.98 3.48 5/1907 1377583
+  eq_comp_simd1 (before)                     p50   196033 ns    44.270 cyc/lane-sample  minus eq_comp   2.004   rounds 176156,180164,196254,196534,195903,196033
+  eq_comp_simd1 (after)                      p50   187056 ns    42.243 cyc/lane-sample  minus eq_comp  -0.023   rounds 186886,186885,186885,187157,187196,187056
+  console_legacy                             p50   196114 ns    44.288 cyc/lane-sample  minus eq_comp   2.023   rounds 195161,196114,196134,196274,196054,188128
+  console                                    p50   301014 ns    67.978 cyc/lane-sample  minus eq_comp  25.712   rounds 378220,300863,301014,300903,300843,301023
+  console HOIST                              p50   301664 ns    68.125 cyc/lane-sample  minus eq_comp  25.859   rounds 302025,301585,301574,301664,301794,301644
+  console MAXDIV                             p50   300883 ns    67.948 cyc/lane-sample  minus eq_comp  25.683   rounds 300682,300883,301604,300873,300953,300783
+  console NOZERO                             p50   300643 ns    67.894 cyc/lane-sample  minus eq_comp  25.629   rounds 301074,300432,300522,300402,300643,300843
+  console NOSCATTER                          p50   300612 ns    67.887 cyc/lane-sample  minus eq_comp  25.622   rounds 301544,300262,300612,300382,301163,300473
+  console LEANSTATE+NOSCATTER                p50   301214 ns    68.023 cyc/lane-sample  minus eq_comp  25.758   rounds 301995,301474,301154,301203,301214,301144
+  console FUSEDCHECK                         p50   301494 ns    68.086 cyc/lane-sample  minus eq_comp  25.821   rounds 301374,302105,301494,301444,301304,301545
+  console ASSERT                             p50   300953 ns    67.964 cyc/lane-sample  minus eq_comp  25.699   rounds 300843,300463,301103,301103,300953,300582
+  console SPLIT                              p50   301354 ns    68.055 cyc/lane-sample  minus eq_comp  25.789   rounds 300733,301574,301023,301955,301354,300862
+  console DET2                               p50   298529 ns    67.417 cyc/lane-sample  minus eq_comp  25.151   rounds 298529,299210,298559,298499,298379,298408
+  console FISSION                            p50   297287 ns    67.136 cyc/lane-sample  minus eq_comp  24.871   rounds 297426,297436,297287,297096,296986,297135
+  console LINKED+FISSION                     p50   285874 ns    64.559 cyc/lane-sample  minus eq_comp  22.293   rounds 286215,284903,285543,285885,285874,285343
+  console LEAN_BEST                          p50   285855 ns    64.555 cyc/lane-sample  minus eq_comp  22.289   rounds 286155,286986,284863,284983,285855,285143
+  console LEAN_BEST+FISSION                  p50   284642 ns    64.281 cyc/lane-sample  minus eq_comp  22.015   rounds 285113,284983,284642,283900,283490,284051
+  console LEAN_BEST+FISSION+DET2             p50   281766 ns    63.631 cyc/lane-sample  minus eq_comp  21.366   rounds 281866,281766,281085,281737,281225,281997
+loadavg 2.61 2.93 3.45 1/1877 1377938
+===== wasm_console_final_1.txt
+loadavg 6.82 3.91 3.66 10/1902 1384187
+  eq_comp_simd1 (before)                     p50   177077 ns    39.989 cyc/lane-sample  minus eq_comp   0.039   rounds 177618,177027,177077,176906,176927,177188
+  eq_comp_simd1 (after)                      p50   176396 ns    39.836 cyc/lane-sample  minus eq_comp  -0.115   rounds 176186,176206,176406,176396,176406,176386
+  console_legacy                             p50   176877 ns    39.944 cyc/lane-sample  minus eq_comp  -0.007   rounds 176877,177308,176666,176736,176746,177609
+  console                                    p50   298498 ns    67.410 cyc/lane-sample  minus eq_comp  27.459   rounds 298969,299039,298498,297717,297757,297897
+  console, limiter NOOP                      p50   178711 ns    40.358 cyc/lane-sample  minus eq_comp   0.408   rounds 179361,179642,178711,178400,178641,178400
+  console LINKED                             p50   281366 ns    63.541 cyc/lane-sample  minus eq_comp  23.590   rounds 281496,280975,281606,281045,281366,281205
+  console SMALL                              p50   297476 ns    67.179 cyc/lane-sample  minus eq_comp  27.228   rounds 297557,297476,297337,297366,297897,297457
+  console LEANSTATE+NOSCATTER                p50   296405 ns    66.937 cyc/lane-sample  minus eq_comp  26.986   rounds 296285,296405,296395,296415,296284,296605
+  console LINKED+SMALL+LEAN                  p50   279632 ns    63.149 cyc/lane-sample  minus eq_comp  23.199   rounds 279973,279533,279432,279632,279513,279783
+  console LINKED+SMALL+LEAN+FISSION          p50   278941 ns    62.993 cyc/lane-sample  minus eq_comp  23.043   rounds 278941,278961,278701,278921,279272,278811
+  console LINKED+SMALL+LEAN+FISSION+DET2     p50   276807 ns    62.511 cyc/lane-sample  minus eq_comp  22.561   rounds 276116,276848,276326,276346,276837,276807
+loadavg 6.46 3.93 3.67 4/1907 1384462
+===== wasm_console_final_2.txt
+loadavg 6.46 3.93 3.67 7/1914 1384479
+  eq_comp_simd1 (before)                     p50   175424 ns    39.616 cyc/lane-sample  minus eq_comp   0.054   rounds 176536,175804,175424,175304,175184,175254
+  eq_comp_simd1 (after)                      p50   174863 ns    39.489 cyc/lane-sample  minus eq_comp  -0.072   rounds 174863,174813,174893,174853,174913,174833
+  console_legacy                             p50   177388 ns    40.060 cyc/lane-sample  minus eq_comp   0.498   rounds 175024,177397,177388,177417,174903,175114
+  console                                    p50   295072 ns    66.636 cyc/lane-sample  minus eq_comp  27.074   rounds 295072,294961,294892,294992,295102,295213
+  console, limiter NOOP                      p50   177107 ns    39.996 cyc/lane-sample  minus eq_comp   0.434   rounds 177017,177107,177779,177048,177068,177117
+  console LINKED                             p50   278871 ns    62.977 cyc/lane-sample  minus eq_comp  23.416   rounds 278901,278810,278811,278831,278871,278921
+  console SMALL                              p50   294431 ns    66.491 cyc/lane-sample  minus eq_comp  26.930   rounds 294060,294871,293799,294431,294520,294180
+  console LEANSTATE+NOSCATTER                p50   294792 ns    66.573 cyc/lane-sample  minus eq_comp  27.011   rounds 294782,294792,295182,294731,294792,294601
+  console LINKED+SMALL+LEAN                  p50   276396 ns    62.419 cyc/lane-sample  minus eq_comp  22.857   rounds 276647,276387,276416,276396,276306,276346
+  console LINKED+SMALL+LEAN+FISSION          p50   277889 ns    62.756 cyc/lane-sample  minus eq_comp  23.194   rounds 278430,277889,277609,277719,277900,277769
+  console LINKED+SMALL+LEAN+FISSION+DET2     p50   274372 ns    61.961 cyc/lane-sample  minus eq_comp  22.400   rounds 274283,274563,274182,274071,274372,274553
+loadavg 6.00 3.91 3.66 6/1959 1384803
+===== wasm_console_screen_1.txt
+loadavg 5.52 5.50 5.31 6/1905 1484019
+  eq_comp_simd1 (before)                     p50   177548 ns    40.096 cyc/lane-sample  minus eq_comp   0.068   rounds 177548,177248,177698,177388,176857,177578
+  eq_comp_simd1 (after)                      p50   175014 ns    39.523 cyc/lane-sample  minus eq_comp  -0.505   rounds 177458,175705,174993,175014,175014,174994
+  console_legacy                             p50   176657 ns    39.894 cyc/lane-sample  minus eq_comp  -0.133   rounds 176657,176646,176786,176626,176686,175625
+  console                                    p50   288640 ns    65.184 cyc/lane-sample  minus eq_comp  25.156   rounds 363362,288640,288729,287748,288249,287808
+  console LINKED                             p50   273581 ns    61.783 cyc/lane-sample  minus eq_comp  21.755   rounds 317475,273401,273781,272900,273581,273580
+  console SCREEN                             p50   269463 ns    60.853 cyc/lane-sample  minus eq_comp  20.825   rounds 269053,269663,269463,269113,269453,269574
+  console LINKED+SMALL+LEAN                  p50   273170 ns    61.690 cyc/lane-sample  minus eq_comp  21.662   rounds 273140,273150,273170,272849,273190,273721
+  console LINKED+SMALL+LEAN+SCREEN           p50   254505 ns    57.475 cyc/lane-sample  minus eq_comp  17.447   rounds 254214,254365,255105,255937,254505,254344
+loadavg 5.52 5.50 5.31 5/1914 1484614
+===== wasm_console_unity_1.txt
+loadavg 8.64 7.43 6.76 15/1913 1528658
+  eq_comp_simd1 (before)                     p50   177237 ns    40.025 cyc/lane-sample  minus eq_comp   0.222   rounds 177508,177237,176276,177408,177118,176256
+  eq_comp_simd1 (after)                      p50   175585 ns    39.652 cyc/lane-sample  minus eq_comp  -0.152   rounds 175354,175414,176085,175444,175724,175585
+  console_legacy                             p50   176897 ns    39.949 cyc/lane-sample  minus eq_comp   0.145   rounds 175635,176897,177077,176957,175594,175234
+  console                                    p50   296755 ns    67.016 cyc/lane-sample  minus eq_comp  27.212   rounds 364664,296755,296194,296275,296294,297046
+  console UNITY                              p50   259434 ns    58.588 cyc/lane-sample  minus eq_comp  18.784   rounds 304309,259234,259253,259514,259434,259133
+  console SCREEN                             p50   274964 ns    62.095 cyc/lane-sample  minus eq_comp  22.291   rounds 274854,274864,275053,274964,274893,274974
+  console LINKED+SMALL+LEAN+SCREEN+UNITY     p50   249154 ns    56.266 cyc/lane-sample  minus eq_comp  16.463   rounds 249495,249205,249094,248985,248924,249154
+loadavg 8.92 7.54 6.80 17/1984 1528854
+===== throughput.txt
+core clock 3.698 GHz
+  add     2.001 vector ops/cycle
+  mul     2.001 vector ops/cycle
+  muladd  3.878 vector ops/cycle
+  select  4.001 vector ops/cycle
+  max     3.997 vector ops/cycle
+  div     0.287 vector ops/cycle

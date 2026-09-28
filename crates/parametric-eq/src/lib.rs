@@ -48,9 +48,7 @@ use effect_contract::{
     StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
     expected_prepared_metadata,
 };
-use effect_runtime::bank::{
-    BLOCK_LIMIT, block_is_positive_zero, check_block, lane_is_positive_zero, nonfinite_lane_mask,
-};
+use effect_runtime::bank::{BLOCK_LIMIT, block_is_positive_zero, check_block, nonfinite_lane_mask};
 use effect_runtime::params::{
     ParameterSpec, normalize_zero, parameter_value_valid as domain_valid,
 };
@@ -59,7 +57,8 @@ use effect_runtime::state_payload as payload;
 use engine::{SampleRateHz, is_launch_sample_rate};
 use lane::kernels::{
     SvfCoef, SvfCoefStep, SvfState, svf_block, svf_block_ramped, svf_block_ramped_with_dry_mask,
-    svf_cascade_interleaved_with_dry_masks,
+    svf_cascade_interleaved_bounded, svf_cascade_interleaved_with_dry_masks_bounded,
+    svf_cascade_skewed, svf_cascade_skewed_with_dry_masks,
 };
 use lane::{Backend, Lane, Simd4, Simd8};
 
@@ -122,6 +121,10 @@ const MAX_LANES: usize = 8;
 #[cfg(any(test, feature = "test-support"))]
 std::thread_local! {
     static DESIGN_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Stationary depth-one tail passes that ran without a dry select (issue #976).
+    static SELECT_FREE_TAIL_PASSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Stationary depth-two passes that ran the masked kernel (issue #977).
+    static MASKED_PAIR_PASSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -145,6 +148,151 @@ pub fn test_only_reset_design_calls() {
 #[must_use]
 pub fn test_only_design_call_count() -> usize {
     design_call_count()
+}
+
+/// Counts one select-free depth-one tail pass of the stationary cascade.
+///
+/// Test builds only: the one gate that sees a performance-only regression (issue #976 M3) needs to
+/// know which kernel arm the odd last section took, and no rendered bit says so.
+#[cfg(any(test, feature = "test-support"))]
+fn count_select_free_tail_pass() {
+    SELECT_FREE_TAIL_PASSES.with(|passes| passes.set(passes.get().saturating_add(1)));
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn reset_select_free_tail_passes() {
+    SELECT_FREE_TAIL_PASSES.with(|passes| passes.set(0));
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn select_free_tail_pass_count() -> usize {
+    SELECT_FREE_TAIL_PASSES.with(std::cell::Cell::get)
+}
+
+/// Resets this thread's count of select-free depth-one tail passes (issue #976).
+#[cfg(feature = "test-support")]
+pub fn test_only_reset_select_free_tail_passes() {
+    reset_select_free_tail_passes();
+}
+
+/// This thread's count of stationary depth-one tail passes that ran without a dry select: the odd
+/// last live section of an admitted block whose dry masks were empty on both channels.
+#[cfg(feature = "test-support")]
+#[must_use]
+pub fn test_only_select_free_tail_passes() -> usize {
+    select_free_tail_pass_count()
+}
+
+/// Counts one stationary depth-two pass that ran the masked kernel.
+///
+/// Test builds only: issue #977 runs every pair of an admitted plan select-free, which no rendered
+/// bit can show -- a select whose every lane returns the wet word is invisible -- so this is the
+/// gate on the schedule half of the change. The depth-one tail keeps its own counter
+/// ([`count_select_free_tail_pass`]) and #976's rule.
+#[cfg(any(test, feature = "test-support"))]
+fn count_masked_pair_pass() {
+    MASKED_PAIR_PASSES.with(|passes| passes.set(passes.get().saturating_add(1)));
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn reset_masked_pair_passes() {
+    MASKED_PAIR_PASSES.with(|passes| passes.set(0));
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn masked_pair_pass_count() -> usize {
+    MASKED_PAIR_PASSES.with(std::cell::Cell::get)
+}
+
+/// Resets this thread's count of masked stationary depth-two passes (issue #977).
+#[cfg(feature = "test-support")]
+pub fn test_only_reset_masked_pair_passes() {
+    reset_masked_pair_passes();
+}
+
+/// This thread's count of stationary depth-two passes that ran the masked kernel: every pair of a
+/// refused or all-live (six-section) plan, and none of an admitted one.
+#[cfg(feature = "test-support")]
+#[must_use]
+pub fn test_only_masked_pair_passes() -> usize {
+    masked_pair_pass_count()
+}
+
+#[cfg(any(test, feature = "test-support"))]
+std::thread_local! {
+    /// Ramping blocks whose section list dropped at least one section (issue #1005).
+    static RAMPING_ELIDED_BLOCKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Counts one ramping block that ran a shorter list than the full cascade.
+///
+/// Test builds only: issue #1005's differential has to show that the ramping list engaged, and no
+/// rendered bit says so -- an elided identity section renders what the executed one renders.
+#[cfg(any(test, feature = "test-support"))]
+fn count_ramping_plan(length: usize) {
+    if length < EQ_SECTION_COUNT {
+        RAMPING_ELIDED_BLOCKS.with(|blocks| blocks.set(blocks.get().saturating_add(1)));
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn reset_ramping_elided_blocks() {
+    RAMPING_ELIDED_BLOCKS.with(|blocks| blocks.set(0));
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn ramping_elided_block_count() -> usize {
+    RAMPING_ELIDED_BLOCKS.with(std::cell::Cell::get)
+}
+
+/// Resets this thread's count of ramping blocks that dropped a section (issue #1005).
+#[cfg(feature = "test-support")]
+pub fn test_only_reset_ramping_elided_blocks() {
+    reset_ramping_elided_blocks();
+}
+
+/// This thread's count of ramping blocks (per channel pair, or per collapsed channel) whose
+/// `ramping_sections` list was shorter than the full cascade.
+#[cfg(feature = "test-support")]
+#[must_use]
+pub fn test_only_ramping_elided_blocks() -> usize {
+    ramping_elided_block_count()
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// Unit tests only: whether a non-stationary block takes issue #1005's section list.
+    ///
+    /// `false`, the default, keeps it on the batch-head path, every section of each channel
+    /// through [`Channel::process_block`]. The unit tests written before #1005 call
+    /// `process_channels(.., false)` as their *full per-section* oracle for the stationary
+    /// elision, and a list that elides too would turn "elided == full" into "elided == elided";
+    /// so they keep testing exactly what they tested. Issue #1005's gates set it: the bank
+    /// differential renders its candidate arm with it and its oracle arm without it. No feature
+    /// build carries the switch, so every other binary -- the shipped module, the bench, the
+    /// integration tests -- always takes the list.
+    static RAMPING_LIST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// `false` while this thread's unit tests render non-stationary blocks the batch-head way; see
+/// [`RAMPING_LIST`].
+#[cfg(test)]
+fn ramping_list_enabled() -> bool {
+    RAMPING_LIST.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// Unit tests only: when set, `settle`, `start_ramp` and a segment's snap write lanes the
+    /// #1005 way, one [`lane_set`] round trip per word per lane (issue #1007's differential
+    /// oracle). `false`, the default, is the shipped path, so every unit test exercises it.
+    static LANE_SET_WRITES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// `true` while this thread's unit tests write lanes the #1005 way; see [`LANE_SET_WRITES`].
+#[cfg(test)]
+fn lane_set_writes() -> bool {
+    LANE_SET_WRITES.with(std::cell::Cell::get)
 }
 
 /// Frozen V1 section filter families.
@@ -894,11 +1042,54 @@ fn lane_get<L: Lane>(value: L, lane: usize) -> f32 {
 }
 
 /// Writes lane `lane` of a vector. Control plane only.
+///
+/// A full-width store, a four-byte write and a full-width reload that the store buffer cannot
+/// forward. `restore_track` and the tests still use it; `settle`, `start_ramp` and a segment's
+/// snap write through [`lane_put`] instead (issue #1007).
 fn lane_set<L: Lane>(value: &mut L, lane: usize, sample: f32) {
     let mut words = [0.0_f32; MAX_LANES];
     value.store(&mut words[..L::WIDTH]);
     words[lane] = sample;
     *value = L::load(&words[..L::WIDTH]);
+}
+
+/// One-hot lane rows (issue #1007): row `lane` is `1.0` in column `lane` and `+0.0` elsewhere.
+static ONE_HOT: [[f32; MAX_LANES]; MAX_LANES] = {
+    let mut rows = [[0.0_f32; MAX_LANES]; MAX_LANES];
+    let mut lane = 0;
+    while lane < MAX_LANES {
+        rows[lane][lane] = 1.0;
+        lane += 1;
+    }
+    rows
+};
+
+/// The mask that selects lane `lane` alone: a load of the static one-hot row, compared with
+/// `1.0`, so the mask is the backend's canonical form and never leaves the vector domain.
+///
+/// Every caller's lane is below `W`. A lane past the table cannot panic: it declines to the empty
+/// mask, and a write through that changes nothing.
+#[inline(always)]
+fn lane_mask<L: Lane>(lane: usize) -> L::Mask {
+    debug_assert!(lane < L::WIDTH);
+    match ONE_HOT.get(lane) {
+        Some(row) => L::load(&row[..L::WIDTH]).eq(L::splat(1.0)),
+        None => empty_mask::<L>(),
+    }
+}
+
+/// The mask that selects no lane.
+#[inline(always)]
+fn empty_mask<L: Lane>() -> L::Mask {
+    L::zero().eq(L::splat(1.0))
+}
+
+/// Writes `word` into the lanes `mask` selects, bitwise: each selected lane holds exactly `word`'s
+/// bits afterwards (`+0.0`, `-0.0`, subnormals and NaN payloads included), and every other lane
+/// keeps its own. One `select`, with no round trip through memory.
+#[inline(always)]
+fn lane_put<L: Lane>(value: &mut L, mask: L::Mask, word: f32) {
+    *value = L::select(mask, L::splat(word), *value);
 }
 
 /// The `-0.0` bit pattern.
@@ -961,33 +1152,64 @@ fn lane_bits_all<L: Lane>(value: L, bits: u32) -> bool {
     words[..L::WIDTH].iter().all(|word| *word == bits)
 }
 
-/// `true` when no lane of `value` is `-0.0`.
-fn lane_has_no_negative_zero<L: Lane>(value: L) -> bool {
+/// Magnitude bits of `f32::INFINITY`: every word whose magnitude bits reach this is an infinity or a
+/// NaN.
+const NON_FINITE_MAGNITUDE: u32 = 0x7f80_0000;
+
+/// Magnitude bits of [`lane::FLUSH_EPS`], the smallest magnitude `flush` keeps.
+const INERT_MAGNITUDE_FLOOR: u32 = lane::FLUSH_EPS.to_bits();
+
+/// `true` when every lane of `value` is *inert*: exactly `+0.0`, or finite with magnitude bits in
+/// `[INERT_MAGNITUDE_FLOOR, ELISION_MAGNITUDE_CEILING]` (issue #979).
+///
+/// Bits, not float compares: `-0.0` (magnitude bits `0`) and every magnitude below `FLUSH_EPS`
+/// fall under the floor, and every infinity and NaN above the ceiling, so all three refuse. The
+/// lanes are folded with non-short-circuiting `&`/`|` into one branch-free reduction, like the
+/// `+0.0` test it replaced, because it runs for every dead section on every stationary block.
+fn lane_is_inert<L: Lane>(value: L) -> bool {
     debug_assert!(L::WIDTH <= MAX_LANES);
     let mut words = [0_u32; MAX_LANES];
     value.store_bits(&mut words[..L::WIDTH]);
-    words[..L::WIDTH]
-        .iter()
-        .all(|word| *word != NEGATIVE_ZERO_BITS)
+    let mut inert = true;
+    for word in &words[..L::WIDTH] {
+        // `FLOOR <= m <= CEILING` as one unsigned compare: below the floor the subtraction wraps
+        // above `CEILING - FLOOR`.
+        let offset = (*word & MAGNITUDE_MASK).wrapping_sub(INERT_MAGNITUDE_FLOOR);
+        inert &= (*word == 0) | (offset <= ELISION_MAGNITUDE_CEILING - INERT_MAGNITUDE_FLOOR);
+    }
+    inert
 }
 
-/// `true` when both integrator words of `section` are exactly `+0.0` on every lane.
-fn section_state_is_positive_zero<L: Lane>(section: &Section<L>) -> bool {
-    lane_is_positive_zero::<L>(section.state.ic1) && lane_is_positive_zero::<L>(section.state.ic2)
-}
-
-/// `true` when no integrator word of `section` is `-0.0` on any lane.
-fn section_state_has_no_negative_zero<L: Lane>(section: &Section<L>) -> bool {
-    lane_has_no_negative_zero::<L>(section.state.ic1)
-        && lane_has_no_negative_zero::<L>(section.state.ic2)
+/// `true` when both integrator words of `section` are inert on every lane: an identity section
+/// holding them leaves them exactly where they are and passes its input through (issue #979; the
+/// argument is on [`cascade_sections`]).
+fn section_state_is_inert<L: Lane>(section: &Section<L>) -> bool {
+    lane_is_inert::<L>(section.state.ic1) && lane_is_inert::<L>(section.state.ic2)
 }
 
 /// `true` when no word of `io` is `-0.0` and every word is finite and inside [`BLOCK_LIMIT`].
 ///
-/// One branchless integer scan of the block, in the same shape as
-/// [`effect_runtime::bank::check_block`]: two compares and two `or`s per word, folded
-/// into one accumulator that is inspected once at the end, so the loop vectorises and nothing
-/// leaves the integer domain until the block is finished.
+/// One branchless integer scan of the block that carries two witnesses and decides once, at the
+/// end (issue #980). Per word it does one `xor`, one unsigned `min`, one `and` and one unsigned
+/// `max` -- four integer vector operations per vector of words, which LLVM emits as
+/// `vpminud`/`vpmaxud` on x86 and `i32x4.min_u`/`i32x4.max_u` in `simd128` -- and nothing leaves
+/// the integer domain until the block is finished. There is no float compare anywhere: a float
+/// compare would call `-0.0` equal to `+0.0` and order a NaN away.
+///
+/// * `nearest` starts at `u32::MAX` and keeps the minimum of `bits ^ NEGATIVE_ZERO_BITS`. For any
+///   `x` and `c`, `x ^ c == 0` exactly when `x == c`, so a word contributes `0` exactly when it is
+///   the `-0.0` bit pattern, and every other word contributes something non-zero. The minimum is
+///   therefore `0` exactly when some word is `-0.0`. (`+0.0` contributes `0x8000_0000`, so it is
+///   an ordinary sample here, as it must be.)
+/// * `largest` starts at `0` and keeps the maximum of `bits & MAGNITUDE_MASK`, the magnitude bits.
+///   They are monotone in magnitude, and every infinity and every NaN has magnitude bits at or
+///   above `0x7f80_0000`, above [`ELISION_MAGNITUDE_CEILING`] (see that constant). So
+///   `largest <= ELISION_MAGNITUDE_CEILING` is exactly "every word is finite and
+///   `|x| <= BLOCK_LIMIT`".
+///
+/// The block is admitted iff `nearest != 0 && largest <= ELISION_MAGNITUDE_CEILING`: the same
+/// predicate, word for word, as the rejection accumulator it replaced (two compares and two `or`s
+/// per word, seven vector operations per vector), and an empty block is admitted by both.
 ///
 /// It is deliberately **not** chunked and short-circuiting the way
 /// [`block_is_positive_zero`] is. That predicate's common answer is "no" on the first chunk; this
@@ -995,6 +1217,20 @@ fn section_state_has_no_negative_zero<L: Lane>(section: &Section<L>) -> bool {
 #[inline]
 #[must_use]
 fn block_admits_elision(io: &[f32]) -> bool {
+    let mut nearest = u32::MAX;
+    let mut largest = 0_u32;
+    for value in io {
+        let bits = value.to_bits();
+        nearest = nearest.min(bits ^ NEGATIVE_ZERO_BITS);
+        largest = largest.max(bits & MAGNITUDE_MASK);
+    }
+    nearest != 0 && largest <= ELISION_MAGNITUDE_CEILING
+}
+
+/// The elision gate in the rejection-accumulator form it had before issue #980: the oracle the
+/// min/max form is proven equal to.
+#[cfg(test)]
+fn block_admits_elision_oracle(io: &[f32]) -> bool {
     let mut rejected = 0_u32;
     for value in io {
         let bits = value.to_bits();
@@ -1019,12 +1255,13 @@ struct Channel<L: Lane, const W: usize> {
     /// **every** lane of this channel.
     ///
     /// Maintained only where coefficients change -- [`settle`](Self::settle),
-    /// [`start_ramp`](Self::start_ramp), [`snap`](Self::snap),
-    /// [`restore_track`](Self::restore_track) -- so a rendered block pays nothing to keep it. A
+    /// [`start_ramp`](Self::start_ramp), the snap at a ramp's end in
+    /// [`process_section`](Self::process_section), [`restore_track`](Self::restore_track) -- so a
+    /// rendered block pays nothing to keep it. A
     /// ramp moves `coef` per segment through the ramp kernel without passing through any of those,
     /// which would leave the flag stale; it cannot be read while that is true, because a lane with
     /// a ramp in flight makes the whole bank non-stationary and the elision this feeds is on the
-    /// stationary path only. Every ramp ends in [`snap`](Self::snap), which refreshes it.
+    /// stationary path only. Every ramp ends in that snap, which refreshes it.
     ///
     /// [`identity_flags_agree`](Self::identity_flags_agree) re-derives the whole array from the
     /// words and is asserted in debug builds on every stationary block, so a coefficient-change
@@ -1088,7 +1325,29 @@ impl<L: Lane, const W: usize> Channel<L, W> {
     }
 
     /// Places lane `track` of `section` at `words` with no ramp in flight.
+    ///
+    /// Each word is written with [`lane_put`] through one lane mask (issue #1007): eighteen
+    /// `select`s where eighteen `lane_set` round trips used to be.
     fn settle(&mut self, section: usize, track: usize, words: EqSvfWords) {
+        #[cfg(test)]
+        if lane_set_writes() {
+            self.settle_by_lane_set(section, track, words);
+            return;
+        }
+        let mask = lane_mask::<L>(track);
+        let slot = &mut self.sections[section];
+        for (index, word) in words.to_array().into_iter().enumerate() {
+            lane_put(coef_word_mut(&mut slot.coef, index), mask, word);
+            lane_put(coef_word_mut(&mut slot.target, index), mask, word);
+            lane_put(step_word_mut(&mut slot.step, index), mask, 0.0);
+        }
+        self.remaining[section][track] = 0;
+        self.refresh_identity(section);
+    }
+
+    /// [`settle`](Self::settle) as #1005 wrote it: issue #1007's differential oracle.
+    #[cfg(test)]
+    fn settle_by_lane_set(&mut self, section: usize, track: usize, words: EqSvfWords) {
         let slot = &mut self.sections[section];
         for (index, word) in words.to_array().into_iter().enumerate() {
             lane_set(coef_word_mut(&mut slot.coef, index), track, word);
@@ -1177,12 +1436,42 @@ impl<L: Lane, const W: usize> Channel<L, W> {
     /// (`check-web-audioworklet.sh`, `KERNEL_ROSTER`). Before #163 phase 3 the inliner kept it out
     /// of `process_bank` on its own; phase 3 made that function small enough that it stopped, so
     /// the shape is pinned here rather than left to a heuristic.
+    ///
+    /// The target and increment words are written with [`lane_put`] (issue #1007). `lane_get`
+    /// stays: a narrow load from a wide store forwards.
     #[inline(never)]
     fn start_ramp(&mut self, section: usize, track: usize, words: EqSvfWords) {
         if self.stationary_at(section, track, words) {
             self.settle(section, track, words);
             return;
         }
+        #[cfg(test)]
+        if lane_set_writes() {
+            self.start_ramp_by_lane_set(section, track, words);
+            return;
+        }
+        let mask = lane_mask::<L>(track);
+        let slot = &mut self.sections[section];
+        for (index, word) in words.to_array().into_iter().enumerate() {
+            let current = lane_get(coef_word(&slot.coef, index), track);
+            lane_put(coef_word_mut(&mut slot.target, index), mask, word);
+            lane_put(
+                step_word_mut(&mut slot.step, index),
+                mask,
+                (word - current) * RAMP_SCALE,
+            );
+        }
+        self.remaining[section][track] = RAMP_SAMPLES;
+        // `coef` did not move here, so this cannot change the flag. It is refreshed anyway because
+        // "every coefficient-change site refreshes" is a rule that is cheap to keep total and
+        // expensive to keep partial.
+        self.refresh_identity(section);
+    }
+
+    /// The ramp start of [`start_ramp`](Self::start_ramp) as #1005 wrote it, after the hoist:
+    /// issue #1007's differential oracle.
+    #[cfg(test)]
+    fn start_ramp_by_lane_set(&mut self, section: usize, track: usize, words: EqSvfWords) {
         let slot = &mut self.sections[section];
         for (index, word) in words.to_array().into_iter().enumerate() {
             let current = lane_get(coef_word(&slot.coef, index), track);
@@ -1194,9 +1483,6 @@ impl<L: Lane, const W: usize> Channel<L, W> {
             );
         }
         self.remaining[section][track] = RAMP_SAMPLES;
-        // `coef` did not move here, so this cannot change the flag. It is refreshed anyway because
-        // "every coefficient-change site refreshes" is a rule that is cheap to keep total and
-        // expensive to keep partial.
         self.refresh_identity(section);
     }
 
@@ -1251,7 +1537,10 @@ impl<L: Lane, const W: usize> Channel<L, W> {
             })
     }
 
-    /// Assigns the target exactly and stops lane `track`'s ramp — the D11 snap.
+    /// Assigns the target exactly and stops lane `track`'s ramp — the D11 snap, one lane at a
+    /// time. Unit tests only since issue #1007: a segment's ended lanes snap together by mask in
+    /// [`process_section`](Self::process_section), and nothing else snapped one lane. This is that
+    /// path's differential oracle.
     ///
     /// **The caller refreshes** `identity[section]`. Every call site is a loop over the lanes of
     /// one section, and [`refresh_identity`](Self::refresh_identity) re-derives the whole section
@@ -1260,6 +1549,7 @@ impl<L: Lane, const W: usize> Channel<L, W> {
     /// cheaper: the flag is read only on a *stationary* block ([`cascade_sections`]), no lane's
     /// ramp can start mid-block, and a section's last snap is the one whose value survives either
     /// way. `identity_flags_agree` is the standing oracle that no refresh site was lost.
+    #[cfg(test)]
     fn snap(&mut self, section: usize, track: usize) {
         let slot = &mut self.sections[section];
         for index in 0..6 {
@@ -1272,13 +1562,14 @@ impl<L: Lane, const W: usize> Channel<L, W> {
 
     /// Snaps **every** lane of `section` at once: six vector copies and one zeroed step set.
     ///
-    /// Bit-identical to `for track in 0..W { self.snap(section, track) }`, and it is the shape a
+    /// Bit-identical to snapping every lane one at a time, and it is the shape a
     /// bank-wide ramp end actually has -- the console moves a band on all `W` lanes of a bank
     /// together. The per-lane form pays a `lane_get`/`lane_set` pair per word per lane, and each of
     /// those is a full `store`/`load` round trip out of and back into the vector domain: `12 * W`
     /// of them per section, to write words the target already holds in exactly the right lanes.
     ///
-    /// The caller refreshes `identity[section]`, as with [`snap`](Self::snap).
+    /// The caller refreshes `identity[section]`, as with the segment snap in
+    /// [`process_section`](Self::process_section).
     fn snap_section(&mut self, section: usize) {
         let slot = &mut self.sections[section];
         slot.coef = slot.target;
@@ -1368,19 +1659,62 @@ impl<L: Lane, const W: usize> Channel<L, W> {
             }
             // The kernel processes current coefficients, then advances them. Snap after a segment
             // consumes the final sample so the exact target is first used by sample A+64.
-            for (track, &was_ramping) in was_ramping.iter().enumerate() {
-                if was_ramping && self.remaining[section][track] == 0 {
-                    self.snap(section, track);
-                    snapped = true;
+            #[cfg(test)]
+            if lane_set_writes() {
+                for (track, &was_ramping) in was_ramping.iter().enumerate() {
+                    if was_ramping && self.remaining[section][track] == 0 {
+                        self.snap(section, track);
+                        snapped = true;
+                    }
                 }
+                position += length;
+                continue;
+            }
+            // Every lane that ended in this segment snaps at once (issue #1007): one mask, then
+            // one `select` per coefficient word and one per increment word. `select` is bitwise,
+            // so each ended lane holds exactly its target's bits and a `+0.0` increment, as the
+            // per-lane snap wrote them, and every other lane keeps its own.
+            if was_ramping
+                .iter()
+                .enumerate()
+                .any(|(track, &was)| was && self.remaining[section][track] == 0)
+            {
+                self.snap_ended(section, &was_ramping);
+                snapped = true;
             }
             position += length;
         }
-        // Once for the section, not once per snapped lane per segment. Nothing between the snaps
+        // Once for the section, not once per segment that snapped. Nothing between the snaps
         // above and here reads `identity`, and the value this leaves is the value the last snap
-        // would have left: see the note on `snap`.
+        // would have left: the flag is read only on a stationary block, no ramp starts mid-block,
+        // and the last snap's words are the ones that survive.
         if snapped {
             self.refresh_identity(section);
+        }
+    }
+
+    /// Snaps every lane of `section` that was ramping in the segment just rendered and has reached
+    /// its target: one mask, then one `select` per coefficient word and one per increment word
+    /// (issue #1007).
+    ///
+    /// `#[inline(never)]` for the same reason as [`start_ramp`](Self::start_ramp): it runs once
+    /// per ramp end, not per frame, and inlined into `process_section` it changed V8's register
+    /// allocation of the ramped kernel's loop in the shipped module.
+    #[inline(never)]
+    fn snap_ended(&mut self, section: usize, was_ramping: &[bool; W]) {
+        let mut ended = empty_mask::<L>();
+        for (track, &was) in was_ramping.iter().enumerate() {
+            if was && self.remaining[section][track] == 0 {
+                ended = L::mask_or(ended, lane_mask::<L>(track));
+            }
+        }
+        let slot = &mut self.sections[section];
+        for index in 0..EQ_COEFFICIENT_WORDS {
+            let target = coef_word(&slot.target, index);
+            let coef = coef_word_mut(&mut slot.coef, index);
+            *coef = L::select(ended, target, *coef);
+            let step = step_word_mut(&mut slot.step, index);
+            *step = L::select(ended, L::zero(), *step);
         }
     }
 
@@ -1450,6 +1784,18 @@ impl<L: Lane, const W: usize> Channel<L, W> {
 /// A ramping block falls back to the per-section path, which owns the block-splitting rule
 /// that a moving coefficient needs. Ramps run for at most a smoothing window after a
 /// parameter change; a console rendering audio is stationary on essentially every block.
+///
+/// It runs only the sections [`ramping_sections`] lists (issue #1005): every section that is live
+/// or ramping, and a dead one only where the elision gate refuses or an unsafe ramp precedes it.
+/// Each listed section runs [`Channel::process_section`] on the left channel and then on the
+/// right, exactly as [`Channel::process_block`] runs it; the two channels share no state, so
+/// taking them section by section rather than channel by channel moves no bit.
+///
+/// Returns the §4.4 verdict per channel when the cascade's last pass judged it as it stored
+/// (issue #999; see [`interleave`]), and `None` when the caller must scan the planes: a ramped
+/// block, a refused or all-live plan, and a plan with no live section.
+///
+/// [`svf_cascade_interleaved`]: lane::kernels::svf_cascade_interleaved
 #[inline(always)]
 fn process_channels<L: Lane, const W: usize>(
     channels: (&mut Channel<L, W>, &mut Channel<L, W>),
@@ -1457,18 +1803,30 @@ fn process_channels<L: Lane, const W: usize>(
     right: &mut [f32],
     frames: usize,
     stationary: bool,
-) {
+) -> Option<[bool; 2]> {
     if !stationary {
-        channels.0.process_block(left, frames);
-        channels.1.process_block(right, frames);
-        return;
+        #[cfg(test)]
+        if !ramping_list_enabled() {
+            channels.0.process_block(left, frames);
+            channels.1.process_block(right, frames);
+            return None;
+        }
+        let (list, length) = ramping_sections::<L, W>(channels.0, channels.1, left, right, frames);
+        #[cfg(any(test, feature = "test-support"))]
+        count_ramping_plan(length);
+        for &section in &list[..length] {
+            channels.0.process_section(section, left, frames);
+            channels.1.process_section(section, right, frames);
+        }
+        return None;
     }
     debug_assert!(channels.0.identity_flags_agree());
     debug_assert!(channels.1.identity_flags_agree());
     let sections = cascade_sections::<L, W>(channels.0, channels.1, left, right, frames);
-    // Six physical sections use the effective stationary depth of two on every backend. This
-    // keeps the final LPF in a complete pass while retaining one fixed interleaved kernel shape.
-    interleave::<L, W, EFFECTIVE_CASCADE_DEPTH>(channels, left, right, frames, sections);
+    // The kept (live) sections run in passes of the effective stationary depth of two on every
+    // backend, and an odd count ends in one depth-one pass: #976 removed the identity padding
+    // section that used to make the count even.
+    interleave::<L, W, EFFECTIVE_CASCADE_DEPTH>(channels, left, right, frames, sections)
 }
 
 /// [`process_channels`] over one plane: the collapsed track's live channel.
@@ -1484,23 +1842,40 @@ fn process_channels<L: Lane, const W: usize>(
 ///   conjunction's;
 /// * `cascade_sections`' `dead` is `identity` on both channels, and the identity flag is derived
 ///   from the coefficient words the `DESIGNED` term compares bit for bit. Same array, same answer.
+/// * [`ramping_sections`]' `ramping` and safe-ramp terms read `remaining`, `coef.m0` and `step.m0`
+///   on both channels (issue #1005). A `Both` retarget writes the same words and the same
+///   countdown into both, the ramp advances both by the same steps, and the dual run's right
+///   channel is the left channel bit for bit -- which is what the collapse renders on. Same words,
+///   same answer.
 ///
 /// What is **not** restated is the `-0.0` gate on the input planes: it is evaluated on the one
 /// plane the chain gathered, which is the only plane the collapsed cascade reads.
+///
+/// The folded §4.4 verdict is [`process_channels`]', one plane of it.
 #[inline(always)]
 fn process_channels_mono<L: Lane, const W: usize>(
     channel: &mut Channel<L, W>,
     io: &mut [f32],
     frames: usize,
     stationary: bool,
-) {
+) -> Option<bool> {
     if !stationary {
-        channel.process_block(io, frames);
-        return;
+        #[cfg(test)]
+        if !ramping_list_enabled() {
+            channel.process_block(io, frames);
+            return None;
+        }
+        let (list, length) = ramping_sections_mono::<L, W>(channel, io, frames);
+        #[cfg(any(test, feature = "test-support"))]
+        count_ramping_plan(length);
+        for &section in &list[..length] {
+            channel.process_section(section, io, frames);
+        }
+        return None;
     }
     debug_assert!(channel.identity_flags_agree());
     let sections = cascade_sections_mono::<L, W>(channel, io, frames);
-    interleave_mono::<L, W, EFFECTIVE_CASCADE_DEPTH>(channel, io, frames, sections);
+    interleave_mono::<L, W, EFFECTIVE_CASCADE_DEPTH>(channel, io, frames, sections)
 }
 
 /// [`cascade_sections`] over one channel. Every leg is [`cascade_sections`]'s, gated on the one
@@ -1513,12 +1888,10 @@ fn cascade_sections_mono<L: Lane, const W: usize>(
 ) -> ([usize; EQ_SECTION_COUNT], usize) {
     let all = (core::array::from_fn(|section| section), EQ_SECTION_COUNT);
     let dead = |section: usize| channel.identity[section];
-    let depth = EFFECTIVE_CASCADE_DEPTH;
     let live = (0..EQ_SECTION_COUNT)
         .filter(|section| !dead(*section))
         .count();
-    let kept = live.div_ceil(depth) * depth;
-    if kept >= EQ_SECTION_COUNT {
+    if live >= EQ_SECTION_COUNT {
         return all;
     }
     let words = frames * W;
@@ -1527,35 +1900,29 @@ fn cascade_sections_mono<L: Lane, const W: usize>(
     }
     for section in 0..EQ_SECTION_COUNT {
         let admissible = if dead(section) {
-            section_state_is_positive_zero(&channel.sections[section])
+            section_state_is_inert(&channel.sections[section])
         } else {
-            section_state_has_no_negative_zero(&channel.sections[section])
+            section_state_is_flush_shaped(&channel.sections[section])
         };
         if !admissible {
             return all;
         }
     }
-    let mut padding = kept - live;
     let mut list = [0_usize; EQ_SECTION_COUNT];
     let mut length = 0;
     for section in 0..EQ_SECTION_COUNT {
-        let keep = if dead(section) {
-            let take = padding > 0;
-            padding -= usize::from(take);
-            take
-        } else {
-            true
-        };
-        if keep {
+        if !dead(section) {
             list[length] = section;
             length += 1;
         }
     }
-    debug_assert_eq!(length, kept);
+    debug_assert_eq!(length, live);
     (list, length)
 }
 
-/// [`interleave`] over one stream. Same kernel, same list, one channel of it.
+/// [`interleave`] over one stream. Same kernels (the skewed pair, issue #978), same list, same
+/// tail rule, same select-free pairs on an admitted plan (issue #977), same §4.4 verdict folded
+/// into the depth-one pass (issue #999), one channel of it.
 ///
 /// This is a second instantiation of [`svf_cascade_interleaved`] -- at `CHANNELS = 1` where the
 /// dual path uses `2` -- and [`cascade_sections`] warns that a second arithmetic-carrying EQ kernel
@@ -1563,37 +1930,257 @@ fn cascade_sections_mono<L: Lane, const W: usize>(
 /// rather than assumed: at mono-collapse M2 the artifact carries one EQ symbol, because both
 /// cascades inline into `process_bank_inner`. The compressor and the limiter did grow a second
 /// symbol each, and the roster names them. If a later change splits this one out, the fix is a
-/// roster row, not a looser pattern.
+/// roster row, not a looser pattern. The depth-one tail (issue #976) is two more instantiations,
+/// `<L, 1, 1>` with and without the dry select (their bounded twins since issue #999), and the
+/// pairs run [`svf_cascade_skewed`] and its dry-mask twin (issue #978), all inlined the same way.
+///
+/// [`svf_cascade_interleaved`]: lane::kernels::svf_cascade_interleaved
 #[inline(always)]
 fn interleave_mono<L: Lane, const W: usize, const DEPTH: usize>(
     channel: &mut Channel<L, W>,
     io: &mut [f32],
     frames: usize,
     sections: ([usize; EQ_SECTION_COUNT], usize),
-) {
+) -> Option<bool> {
     debug_assert_eq!(EQ_SECTION_COUNT % DEPTH, 0);
     let (list, length) = sections;
-    debug_assert_eq!(length % DEPTH, 0);
-    for pass in 0..length / DEPTH {
+    debug_assert!(
+        length % DEPTH <= 1,
+        "the tail rule is one section at depth one"
+    );
+    let admitted = length < EQ_SECTION_COUNT;
+    let pairs = length / DEPTH;
+    let tail = length % DEPTH == 1;
+    let mut within = None;
+    for pass in 0..pairs {
         let base = pass * DEPTH;
         let at: [usize; DEPTH] = core::array::from_fn(|k| list[base + k]);
         let coefficients: [[SvfCoef<L>; DEPTH]; 1] =
             [core::array::from_fn(|k| channel.sections[at[k]].coef)];
         let mut state: [[SvfState<L>; DEPTH]; 1] =
             [core::array::from_fn(|k| channel.sections[at[k]].state)];
-        let dry_masks: [[L::Mask; DEPTH]; 1] = [core::array::from_fn(|k| channel.dry_mask(at[k]))];
-        svf_cascade_interleaved_with_dry_masks::<L, 1, DEPTH>(
-            [&mut *io],
-            frames,
-            &coefficients,
-            &mut state,
-            &dry_masks,
-        );
+        if admitted {
+            svf_cascade_skewed::<L, 1, DEPTH>([&mut *io], frames, &coefficients, &mut state);
+        } else {
+            #[cfg(any(test, feature = "test-support"))]
+            count_masked_pair_pass();
+            let dry_masks: [[L::Mask; DEPTH]; 1] =
+                [core::array::from_fn(|k| channel.dry_mask(at[k]))];
+            svf_cascade_skewed_with_dry_masks::<L, 1, DEPTH>(
+                [&mut *io],
+                frames,
+                &coefficients,
+                &mut state,
+                &dry_masks,
+            );
+        }
         let [only] = state;
         for (k, word) in only.into_iter().enumerate() {
             channel.sections[at[k]].state = word;
         }
     }
+    if tail {
+        let at = list[length - 1];
+        let coefficients: [[SvfCoef<L>; 1]; 1] = [[channel.sections[at].coef]];
+        let mut state: [[SvfState<L>; 1]; 1] = [[channel.sections[at].state]];
+        // #976's rule, unchanged by #977: see `interleave`.
+        let dry_masks: [[L::Mask; 1]; 1] = [[channel.dry_mask(at)]];
+        let [verdict] = if L::mask_any(dry_masks[0][0]) {
+            svf_cascade_interleaved_with_dry_masks_bounded::<L, 1, 1>(
+                [&mut *io],
+                frames,
+                &coefficients,
+                &mut state,
+                &dry_masks,
+                BLOCK_LIMIT,
+            )
+        } else {
+            #[cfg(any(test, feature = "test-support"))]
+            count_select_free_tail_pass();
+            svf_cascade_interleaved_bounded::<L, 1, 1>(
+                [&mut *io],
+                frames,
+                &coefficients,
+                &mut state,
+                BLOCK_LIMIT,
+            )
+        };
+        channel.sections[at].state = state[0][0];
+        within = Some(verdict);
+    }
+    within
+}
+
+/// The cascade positions a **ramping** block will run, in cascade order (issue #1005).
+///
+/// All six, unless the stationary elision gate admits the block. Then a section is dropped when it
+/// is *dead* -- the exact identity on every lane of both channels **and** ramping on no lane of
+/// either -- and no *unsafe* ramping section precedes it. A ramping section is safe when its `m0`
+/// word is exactly `1.0` with a `+0.0` increment on every lane of both channels
+/// ([`ramp_keeps_unit_m0`]); any other ramping section keeps every dead section after it. The
+/// argument is the ramping paragraph of [`cascade_sections`]' proof.
+///
+/// * **The gate is [`cascade_sections`]', leg for leg**: (a) neither input plane carries `-0.0`, a
+///   non-finite word or a magnitude above the ceiling; (b) every dead section's state is inert on
+///   both channels; (c) every other section's state is a word `flush` can leave -- `+0.0`, or
+///   finite with a magnitude of at least `FLUSH_EPS` ([`section_state_is_flush_shaped`]). Any
+///   refusal returns all six, and the block renders as it did before this function existed.
+/// * **Freshness.** `identity[s]` is only read for a section with no lane in flight on either
+///   channel, and that flag is fresh: every ramp ends in a snap followed by `refresh_identity`, and
+///   `settle`, `start_ramp`, the resets and a restore refresh too. A ramping section's flag can be
+///   stale -- its words move through the ramp kernel -- and the `ramping` term is what stops it
+///   being read.
+/// * **Conservative in time.** `remaining` is read at block start, so a lane that snaps mid-block
+///   counts as ramping for the whole block, and no ramp can start mid-block.
+#[inline(always)]
+fn ramping_sections<L: Lane, const W: usize>(
+    left_channel: &Channel<L, W>,
+    right_channel: &Channel<L, W>,
+    left: &[f32],
+    right: &[f32],
+    frames: usize,
+) -> ([usize; EQ_SECTION_COUNT], usize) {
+    let all = (core::array::from_fn(|section| section), EQ_SECTION_COUNT);
+    let ramping = |section: usize| {
+        section_is_ramping(&left_channel.remaining[section])
+            || section_is_ramping(&right_channel.remaining[section])
+    };
+    let dead = |section: usize| {
+        !ramping(section) && left_channel.identity[section] && right_channel.identity[section]
+    };
+    if !(0..EQ_SECTION_COUNT).any(dead) {
+        return all;
+    }
+    // (a), as in `cascade_sections`.
+    let words = frames * W;
+    if !block_admits_elision(&left[..words]) || !block_admits_elision(&right[..words]) {
+        return all;
+    }
+    for section in 0..EQ_SECTION_COUNT {
+        let admissible = if dead(section) {
+            // (b)
+            section_state_is_inert(&left_channel.sections[section])
+                && section_state_is_inert(&right_channel.sections[section])
+        } else {
+            // (c)
+            section_state_is_flush_shaped(&left_channel.sections[section])
+                && section_state_is_flush_shaped(&right_channel.sections[section])
+        };
+        if !admissible {
+            return all;
+        }
+    }
+    let mut list = [0_usize; EQ_SECTION_COUNT];
+    let mut length = 0;
+    let mut unsafe_before = false;
+    for section in 0..EQ_SECTION_COUNT {
+        if dead(section) && !unsafe_before {
+            continue;
+        }
+        if ramping(section)
+            && !(ramp_keeps_unit_m0(&left_channel.sections[section])
+                && ramp_keeps_unit_m0(&right_channel.sections[section]))
+        {
+            unsafe_before = true;
+        }
+        list[length] = section;
+        length += 1;
+    }
+    (list, length)
+}
+
+/// [`ramping_sections`] over one channel: the collapsed body's list. Every term is
+/// [`ramping_sections`]', with the right channel's dropped as [`cascade_sections_mono`] drops it;
+/// [`process_channels_mono`] says why each restatement is an equality on a collapse-eligible bank.
+#[inline(always)]
+fn ramping_sections_mono<L: Lane, const W: usize>(
+    channel: &Channel<L, W>,
+    io: &[f32],
+    frames: usize,
+) -> ([usize; EQ_SECTION_COUNT], usize) {
+    let all = (core::array::from_fn(|section| section), EQ_SECTION_COUNT);
+    let ramping = |section: usize| section_is_ramping(&channel.remaining[section]);
+    let dead = |section: usize| !ramping(section) && channel.identity[section];
+    if !(0..EQ_SECTION_COUNT).any(dead) {
+        return all;
+    }
+    let words = frames * W;
+    if !block_admits_elision(&io[..words]) {
+        return all;
+    }
+    for section in 0..EQ_SECTION_COUNT {
+        let admissible = if dead(section) {
+            section_state_is_inert(&channel.sections[section])
+        } else {
+            section_state_is_flush_shaped(&channel.sections[section])
+        };
+        if !admissible {
+            return all;
+        }
+    }
+    let mut list = [0_usize; EQ_SECTION_COUNT];
+    let mut length = 0;
+    let mut unsafe_before = false;
+    for section in 0..EQ_SECTION_COUNT {
+        if dead(section) && !unsafe_before {
+            continue;
+        }
+        if ramping(section) && !ramp_keeps_unit_m0(&channel.sections[section]) {
+            unsafe_before = true;
+        }
+        list[length] = section;
+        length += 1;
+    }
+    (list, length)
+}
+
+/// `true` when some lane of a section has a ramp in flight.
+#[inline(always)]
+fn section_is_ramping<const W: usize>(remaining: &[u32; W]) -> bool {
+    remaining.iter().any(|samples| *samples != 0)
+}
+
+/// `true` when `section`'s `m0` word is exactly `1.0` with a `+0.0` increment on every lane: the
+/// section multiplies its input by exactly one on every frame of a ramp, whatever its other words
+/// do, which is the case of [`cascade_sections`]' proof that needs no designed word.
+///
+/// Both words are read by bit pattern: a `-0.0` increment would keep `m0` at `1.0` too, but the
+/// claim is kept to the one pattern the ramp law writes for a word that does not move.
+#[inline(always)]
+fn ramp_keeps_unit_m0<L: Lane>(section: &Section<L>) -> bool {
+    lane_bits_all::<L>(section.coef.m0, 1.0_f32.to_bits()) && lane_bits_all::<L>(section.step.m0, 0)
+}
+
+/// `true` when every lane of `value` is a word `flush` can leave behind: exactly `+0.0`, or finite
+/// with a magnitude of at least [`lane::FLUSH_EPS`]. No `-0.0`, no subnormal, no tiny normal.
+#[inline(always)]
+fn lane_is_flush_shaped<L: Lane>(value: L) -> bool {
+    debug_assert!(L::WIDTH <= MAX_LANES);
+    let mut words = [0_u32; MAX_LANES];
+    value.store_bits(&mut words[..L::WIDTH]);
+    words[..L::WIDTH].iter().all(|word| {
+        *word == 0
+            || (INERT_MAGNITUDE_FLOOR..NON_FINITE_MAGNITUDE).contains(&(*word & MAGNITUDE_MASK))
+    })
+}
+
+/// Leg (c) of [`cascade_sections`] and [`ramping_sections`]: both integrator words of a kept
+/// section are words the kernel can have written ([`lane_is_flush_shaped`]) on every lane.
+///
+/// That is finite and free of `-0.0`, which is what the leg asked before issue #1015, and also
+/// free of the tiny words only a restore can put there. The `-0.0` induction on
+/// [`cascade_sections`] argues its high-shelf case from kernel-written states (`v1 = ic1 + d1` is
+/// `+0.0` or at least `FLUSH_EPS * 2^-24`), and a restored payload was the one way around that: a
+/// live high shelf whose `m0` and `m2` are both exactly `0.5` (gain `-6.0206` dB as an `f32`, the
+/// one gain that designs them), holding `ic1 = ic2 = -2^-149`, turns an input of `-2^-149` into
+/// `y = (-0.0) + ((-0.0) + (-0.0)) = -0.0` on its first frame, and an elided identity section after
+/// it passed that `-0.0` on where the executed one writes `+0.0`. Refusing costs one block: the
+/// refused block runs every section, the kernel flushes the words, and the next block engages.
+/// Kernel-written states always pass, so a session that restores nothing tiny elides exactly as it
+/// did.
+#[inline(always)]
+fn section_state_is_flush_shaped<L: Lane>(section: &Section<L>) -> bool {
+    lane_is_flush_shaped::<L>(section.state.ic1) && lane_is_flush_shaped::<L>(section.state.ic2)
 }
 
 /// The cascade positions this stationary block will actually run, in cascade order.
@@ -1608,8 +2195,9 @@ fn interleave_mono<L: Lane, const W: usize, const DEPTH: usize>(
 /// parameter, so a disabled band is not "nearly" a pass-through, it is `c1 = a2 = a3 = m1 = m2 =
 /// +0.0, m0 = 1.0`. A console that ships six sections and uses two spends most of the cascade
 /// there.
-/// The bank runs both channels through [`svf_cascade_interleaved`] at a fixed effective depth of
-/// two, so dropping sections buys whole passes.
+/// The list is exactly the live sections, in cascade order. [`interleave`] runs both channels
+/// through [`svf_cascade_interleaved`] two sections per pass and an odd last section alone at depth
+/// one, so every dropped section is one section's arithmetic that no longer runs.
 ///
 /// The flag is per section **across both channels** because that is the granularity the kernel
 /// has: one pass carries section `k` of the left channel and section `k` of the right, and a
@@ -1619,23 +2207,48 @@ fn interleave_mono<L: Lane, const W: usize, const DEPTH: usize>(
 ///
 /// The claim is exact bit identity of the rendered audio **and** of every section's integrator
 /// words, elided sections included — not approximate agreement. Take an identity section whose
-/// two integrator words are exactly `+0.0`, and one input word `v0`.
+/// integrator words are each *inert* -- exactly `+0.0`, or finite with a magnitude in
+/// `[FLUSH_EPS, BLOCK_LIMIT]` (issue #979) -- and one finite input word `v0`.
 ///
-/// * `v3 = v0 - ic2 = v0 - (+0.0) = v0`, bit for bit, including `v0 = -0.0` (IEEE-754 gives
-///   `(-0) - (+0) = -0` under round-to-nearest).
-/// * `d1 = nc1 * ic1 + a2 * v3`. `nc1 = -c1 = -0.0`, so `nc1 * ic1 = -0.0`; `a2 * v3 = +0.0 * v0`,
-///   which is `+0.0` for `v0 >= +0.0` and `-0.0` for `v0 < 0` or `v0 = -0.0`. Either way `d1` is a
-///   zero, and `v1 = ic1 + d1 = (+0.0) + (±0.0) = +0.0`.
-/// * `d2 = a3 * v3 + a2 * ic1 = (±0.0) + (+0.0) = +0.0`, and `v2 = ic2 + d2 = +0.0`.
-/// * `ic1' = flush(ic1 + (d1 + d1)) = flush(+0.0) = +0.0` and likewise `ic2' = +0.0`. **The state
-///   stays exactly `+0.0`, by induction over the block.** (`flush` maps every zero to `+0.0`.)
-/// * `y = m2 * v2 + (m1 * v1 + m0 * v0) = (+0.0) + ((+0.0) + v0)`. `m0 = 1.0`, so `m0 * v0 = v0`
-///   exactly; `(+0.0) + v0` is `v0` for every `v0` **except** `v0 = -0.0`, where it is `+0.0`.
+/// * `v3 = v0 - ic2`. For `ic2 = +0.0` that is `v0` bit for bit, including `v0 = -0.0` (IEEE-754
+///   gives `(-0) - (+0) = -0` under round-to-nearest). Otherwise `|ic2| <= 1e30`, below `2^103`,
+///   half an ulp of `f32::MAX`, so the exact difference is under `f32::MAX + 2^103` in magnitude
+///   and rounds to a finite `v3` for every finite `v0`, whatever section feeds it.
+/// * `d1 = nc1 * ic1 + a2 * v3`. `nc1 = -c1 = -0.0` and `a2 = +0.0`, and `ic1` and `v3` are
+///   finite, so both products are zeros of some sign and `d1` is a zero. `v1 = ic1 + d1` is `ic1`
+///   for a non-zero `ic1`, and `+0.0` for `ic1 = +0.0` (`(+0.0) + (±0.0) = +0.0`).
+/// * `d2 = a3 * v3 + a2 * ic1` is a zero the same way, and `v2 = ic2 + d2` is `ic2` or `+0.0`.
+/// * `ic1' = flush(ic1 + (d1 + d1)) = flush(ic1) = ic1`: a zero addend leaves a non-zero `ic1`
+///   exactly, `flush` keeps every magnitude of at least `FLUSH_EPS`, and it maps a zero to `+0.0`.
+///   Likewise `ic2' = ic2`. **The state does not move, by induction over the block.** That is what
+///   happens to every identity section, whatever it held when it became the identity -- a
+///   dedicated cut switched on and off again through prepared targets freezes a non-zero state
+///   exactly this way (#807) -- provided the state was inert to begin with.
+/// * `y = m2 * v2 + (m1 * v1 + m0 * v0) = (+0.0 * v2) + ((+0.0 * v1) + v0)`. `v1` and `v2` are
+///   finite, so both products are zeros; `m0 = 1.0`, so `m0 * v0 = v0` exactly; and a zero plus
+///   `v0` is `v0` for every `v0` **except** `v0 = -0.0`, where `(±0.0) + (-0.0)` can be `+0.0`.
 ///
-/// So an identity section at `+0.0` state is the exact identity on a finite input, with exactly
+/// So an identity section at an inert state is the exact identity on a finite input, with exactly
 /// one exception: it rewrites `-0.0` to `+0.0`. Eliding it is therefore bit-exact **iff no `-0.0`
-/// ever reaches it**, and the state it keeps is `+0.0` either way — which is what gate (b) below
+/// ever reaches it**, and the state it keeps is unchanged either way — which is what gate (b) below
 /// asserts it already holds.
+///
+/// Each bound of "inert" is load-bearing. A magnitude below `FLUSH_EPS` (a restored subnormal, say)
+/// is flushed to `+0.0` by the executed section and kept by the elided one, and a `-0.0` is flushed
+/// to `+0.0` the same way. A magnitude above [`BLOCK_LIMIT`] can overflow `v3`: a disabled band
+/// restored with `ic2 = -f32::MAX` behind a live +24 dB bell that turns an admitted `9e29` into
+/// `1.4e31` computes `v3 = inf`, then `d1 = 0.0 * inf = NaN`, and the executed section writes `NaN`
+/// where the elided one passes `v0` on (VERIFY-EQ, finding 1). `flush` keeps every state the kernel
+/// writes at `+0.0` or at least `FLUSH_EPS` in magnitude, so the floor refuses only restored
+/// payloads (admitted on finiteness alone); the cap refuses those too, and the rare huge state a
+/// section can be left with when it is switched off after a spike.
+///
+/// The argument is per dead section and never counted how many were dropped, so it covers dropping
+/// every one of them. Until issue #976 the list was padded back up to a whole number of depth-two
+/// passes with dead sections, which the proof licensed to drop anyway; the padding only kept one
+/// kernel instantiation. Pairing is not arithmetic: each `(stream, section)` chain runs the same
+/// operations in the same order whichever pass carries it, and a value handed between passes goes
+/// through an exact `f32` store and load.
 ///
 /// That leaves: can a `-0.0` reach an elided section? Its input is either the block input or a
 /// live section's output, so both have to be closed.
@@ -1654,12 +2267,19 @@ fn interleave_mono<L: Lane, const W: usize, const DEPTH: usize>(
 ///     `v0 = ±0.0` and contradicts. The one remaining `m0` is the high shelf's `A^2`, with
 ///     `A = 10^(gain/40)` and `gain` domain-limited to `[-24, 24]`, so `A^2 >= 0.063`; underflow
 ///     then needs `|v0| <= 2^-150 / A^2` **and** `A^2 <= 0.5`, hence `m2 = 1 - A^2 >= 0.5`, hence
-///     `m2 * v2 = -0.0` needs `v2 = -2^-149` exactly. `v2 = ic2 + d2` and `v1 = ic1 + d1`; every
+///     `m2 * v2 = -0.0` needs `v2 = -2^-149` exactly. `v2 = ic2 + d2` and `v1 = ic1 + d1`. That
+///     `v2` needs `ic2 = +0.0`: gate (c) leaves `ic2` either `+0.0` or at least `FLUSH_EPS` in
+///     magnitude, and in the second case `ic2 + d2` rounds to a multiple of at least `2^-91` (or
+///     stays above `FLUSH_EPS / 2` in magnitude), never to `-2^-149`. So `v3 = v0 - ic2 = v0`, of
+///     magnitude `2^-149` (issue #1015: `ic2`'s bound is load-bearing too). Every
 ///     `a2` this design produces is `g / (1 + g * (g + k)) <= 1 / (2 + k) < 0.5` because `k > 0`
 ///     on every kind, so `a2 * v3` at `|v3| = 2^-149` underflows to a zero, `d1` is a zero, and
 ///     `v1 = ic1 + d1` is either `+0.0` (giving `m1 * v1 = +0.0`, since a cut high shelf has
 ///     `m1 = shelf_k * (1 - A) * A > 0`) or has `|v1| >= FLUSH_EPS * 2^-24`, far too large to
-///     underflow. Either way `m1 * v1 != -0.0` and the conjunction fails.
+///     underflow. Either way `m1 * v1 != -0.0` and the conjunction fails. That last step needs
+///     `ic1` to be `+0.0` or at least `FLUSH_EPS` in magnitude: every word the kernel writes is,
+///     and gate (c) refuses a restored one that is not (issue #1015; a restored `-2^-149` there is
+///     a counterexample, see [`section_state_is_flush_shaped`]).
 ///   - `m0 = +0.0`, i.e. a low pass, whose other words are `m1 = +0.0` and `m2 = 1.0`. Then
 ///     `m2 * v2 = v2`, so `y = -0.0` needs `v2 = -0.0`, which by the addition rule needs
 ///     `ic2 = -0.0`. `flush` maps every zero to `+0.0`, so no integrator word the kernel writes is
@@ -1674,11 +2294,83 @@ fn interleave_mono<L: Lane, const W: usize, const DEPTH: usize>(
 /// mix is bounded by `|m0| + |m1| + |m2| < 2^6` — it also leaves the cascade unable to reach an
 /// infinity from a block it admitted.
 ///
+/// # A ramping block (issue #1005)
+///
+/// [`ramping_sections`] drops dead sections from a block on which some lane ramps, under the same
+/// three legs. Everything above is per dead section,
+/// and a dead section of a ramping block is an identity section with no lane in flight on either
+/// channel, so it applies unchanged once one more input is closed: a dead section may now sit
+/// downstream of a **ramping** live section, whose words are interpolated, not designed, and the
+/// `-0.0` induction above was argued for designed words.
+///
+/// * **A safe ramping section.** Its `m0` word is exactly `1.0` with a `+0.0` increment on every
+///   lane of both channels, so `m0` stays `1.0` on every frame the ramp runs (`1.0 + 0.0 = 1.0`),
+///   and a snap that ends the ramp mid-block leaves the target's `m0`: `1.0` again, since the
+///   increment was `(target - current) * 2^-6 = +0.0`. After a restore whose target disagrees,
+///   the rest of the block runs the target's designed words at a kernel-written state, which is
+///   the stationary case above. So on every ramping frame `m0 * v0 = v0` exactly, and
+///   `y = m2 * v2 + (m1 * v1 + v0)` is `-0.0` only if `v0` is, whatever `m1` and `m2` are:
+///   the addition rule above, with no designed word needed. This covers bell, low-shelf, notch
+///   and high-pass rides, and every high-pass cut toggle (the identity and a high pass both have
+///   `m0 = 1`).
+/// * **Any other ramping section** -- a high shelf's gain, a low pass, a low-pass cut toggle, or a
+///   section whose lanes mix families -- keeps every dead section after it in the list, where it
+///   runs exactly as before, so nothing new has to be argued about its output. A dead section
+///   ahead of it sees only the block input and the outputs of stationary live, safe ramping or
+///   dead sections, which the induction covers.
+/// * **Finiteness.** Interpolated words carry no gain bound of their own. It is not needed: an
+///   inert identity section is the exact identity on *every* finite `v0` other than `-0.0` (see
+///   above), so the elided and executed arms can differ on a lane only after a non-finite word
+///   reaches a dead section. From there that lane's output is non-finite in both arms -- the
+///   executed section writes `NaN` (`+0.0 * inf`), the elided one passes the word on, and no
+///   later section turns a non-finite input into a finite output -- so the §4.4 check rejects the
+///   channel in both, flags the same lanes, zeroes the plane and clears every integrator. Neither
+///   arm touches a dead section's coefficients, so the two leave the block identical.
+///
+/// The kept sections run [`Channel::process_section`] as before, in cascade order, left then right
+/// per section. The two channels share nothing, so interleaving them by section moves no bit.
+///
+/// # Why an admitted plan runs select-free (issue #977)
+///
+/// A dry lane is a lane of a dedicated cut that holds the exact identity words (`c1 = a2 = a3 =
+/// m1 = m2 = +0.0`, `m0 = 1.0`) with no ramp in flight. The masked kernel returns the section input
+/// `x` there and the wet output everywhere else. On an admitted plan that select is a no-op on
+/// every lane, so [`interleave`] runs its depth-two passes without it (the depth-one tail keeps
+/// #976's rule for a code-generation reason given there; the argument below covers it as well):
+///
+/// * The dry lane's input carries no `-0.0`. A dry lane exists only in a dedicated cut; the HPF is
+///   physical section 0, so its input is the block input, which leg (a) clears of `-0.0` and bounds
+///   by [`BLOCK_LIMIT`]; the LPF is the last section, so its input is a live or elided section's
+///   output, which carries no `-0.0` by the induction above.
+/// * Its state is finite. A section with a dry lane is live on some other lane, and leg (c) refuses
+///   a live section with a non-finite integrator word on any lane.
+/// * So, for the HPF, `v3 = x - ic2` is finite (`|x| <= 1e30`, below `2^103`, half an ulp of
+///   `f32::MAX`, so no finite `ic2` can carry it past `f32::MAX`); `d1 = (-0.0 * ic1) + (+0.0 * v3)`
+///   and `d2 = (+0.0 * v3) + (+0.0 * ic1)` are zeros of some sign; `v1 = ic1 + d1` and
+///   `v2 = ic2 + d2` are finite; and the wet output `(+0.0 * v2) + ((+0.0 * v1) + 1.0 * x)` is `x`
+///   bit for bit: a non-zero `x` absorbs the signed zeros, and `x = +0.0` gives `+0.0` whatever
+///   their signs.
+/// * The LPF's input is not bounded by leg (a). The same argument holds unless `x - ic2`
+///   overflows, which needs `|x| >= 2^103`, or `x` is non-finite. Then the wet output is non-finite
+///   where the select would return `x`, and `x` is itself non-finite or above [`BLOCK_LIMIT`]. The
+///   LPF is the last section, so that word is the block output: both kernels fail the §4.4 check
+///   on the same lane, and the plane is zeroed and its state reset the same way.
+/// * The state update never reads the mask, so both kernels leave the same integrators.
+///
+/// Leg (c)'s finiteness term is load-bearing. The dry lane still runs the recurrence, and on a
+/// *refused* block (which keeps the masks) a word of at least `2^103` against a restored
+/// `ic2 = -f32::MAX` overflows `v3` and leaves the dry lane's state `NaN` while the select passes
+/// the input on; a downstream LPF can keep that block inside the §4.4 bound, so nothing resets the
+/// lane. A later admitted block would then turn the `NaN` into output (VERIFY-EQ, finding 2).
+/// Refusing it keeps that bank on the masked kernel until a reset clears the state.
+///
 /// # Correctness never depends on the gate
 ///
 /// Every leg is a refusal: any doubt returns all six sections and the block renders exactly as it
 /// did before this function existed. The gate is a performance predicate, and the only thing a
 /// wrong *engagement* rule could cost is speed.
+///
+/// [`svf_cascade_interleaved`]: lane::kernels::svf_cascade_interleaved
 #[inline(always)]
 fn cascade_sections<L: Lane, const W: usize>(
     left_channel: &Channel<L, W>,
@@ -1689,17 +2381,15 @@ fn cascade_sections<L: Lane, const W: usize>(
 ) -> ([usize; EQ_SECTION_COUNT], usize) {
     let all = (core::array::from_fn(|section| section), EQ_SECTION_COUNT);
     let dead = |section: usize| left_channel.identity[section] && right_channel.identity[section];
-    let depth = EFFECTIVE_CASCADE_DEPTH;
     let live = (0..EQ_SECTION_COUNT)
         .filter(|section| !dead(*section))
         .count();
-    // The kernel runs whole passes of `DEPTH` sections, so the list has to divide by the depth.
-    // Rounding the live count up and paying for the difference in identity sections keeps the
-    // *one* instantiation of `svf_cascade_interleaved` this backend already ships: a shorter final
-    // pass would need a second `DEPTH`, and a second arithmetic-carrying EQ kernel in the wasm
-    // artifact reads to `KERNEL_ROSTER` as a kernel that moved.
-    let kept = live.div_ceil(depth) * depth;
-    if kept >= EQ_SECTION_COUNT {
+    // The list is the live sections and nothing else: `interleave` runs an odd last one at depth
+    // one rather than padding it with a dead section. The depth-one passes are further
+    // instantiations of the interleaved kernel, `#[inline(always)]` into the one arithmetic-carrying
+    // `process_bank` symbol per width that `KERNEL_ROSTER` counts, so they add no EQ symbol to the
+    // wasm artifact. A cascade with nothing to drop never pays the scan below.
+    if live >= EQ_SECTION_COUNT {
         return all;
     }
     // (a) Neither input plane carries `-0.0`, an infinity, a NaN, or a magnitude above the §4.4
@@ -1710,48 +2400,101 @@ fn cascade_sections<L: Lane, const W: usize>(
     }
     for section in 0..EQ_SECTION_COUNT {
         let admissible = if dead(section) {
-            // (b) An elided section must already be at the `+0.0` state the proof's induction
-            // starts from -- otherwise its state would move in the full cascade and not here.
-            section_state_is_positive_zero(&left_channel.sections[section])
-                && section_state_is_positive_zero(&right_channel.sections[section])
+            // (b) An elided section's state must be inert (issue #979): `+0.0`, or finite with a
+            // magnitude between `FLUSH_EPS` and the ceiling -- the states the proof's induction
+            // starts from. Any other state would move in the full cascade and not here, and a
+            // magnitude above the ceiling could overflow the executed section's `v3`.
+            section_state_is_inert(&left_channel.sections[section])
+                && section_state_is_inert(&right_channel.sections[section])
         } else {
-            // (c) A live section must carry no `-0.0` integrator word. Nothing the kernel writes
-            // is ever `-0.0`, but a restored state payload is admitted on finiteness alone, and a
-            // low pass with `ic2 = -0.0` is the one shape that can emit `-0.0` into a later
-            // elided section.
-            section_state_has_no_negative_zero(&left_channel.sections[section])
-                && section_state_has_no_negative_zero(&right_channel.sections[section])
+            // (c) A live section's integrators must be words the kernel can write: `+0.0`, or
+            // finite with a magnitude of at least `FLUSH_EPS` (issue #1015). Nothing the kernel
+            // writes is ever `-0.0` or tiny, but a restored state payload is admitted on
+            // finiteness alone: a low pass with `ic2 = -0.0` can emit `-0.0` into a later elided
+            // section, and so can a high shelf at `m0 = m2 = 0.5` holding a restored subnormal
+            // (`section_state_is_flush_shaped`). A non-finite word can be written: a dry lane
+            // of a dedicated cut still runs the recurrence, and a refused block can overflow a
+            // large restored integrator there to `NaN` while the select passes the dry input on
+            // (issue #977). The admitted plan's pairs run select-free, so they need every dry
+            // lane's state finite; see "Why an admitted plan runs select-free" above.
+            section_state_is_flush_shaped(&left_channel.sections[section])
+                && section_state_is_flush_shaped(&right_channel.sections[section])
         };
         if !admissible {
             return all;
         }
     }
-    let mut padding = kept - live;
     let mut list = [0_usize; EQ_SECTION_COUNT];
     let mut length = 0;
     for section in 0..EQ_SECTION_COUNT {
-        let keep = if dead(section) {
-            let take = padding > 0;
-            padding -= usize::from(take);
-            take
-        } else {
-            true
-        };
-        if keep {
+        if !dead(section) {
             list[length] = section;
             length += 1;
         }
     }
-    debug_assert_eq!(length, kept);
+    debug_assert_eq!(length, live);
     (list, length)
 }
 
 /// One stationary block, both channels, `DEPTH` cascade sections fused per pass.
 ///
-/// `sections` is the list [`cascade_sections`] chose and its length, which is a whole number of
-/// passes by construction. Positions are read out of it rather than counted from a base, so an
-/// elided cascade runs the same kernel over a shorter list — the operation order per surviving
-/// chain is untouched, which is what keeps this a schedule change.
+/// `sections` is the list [`cascade_sections`] chose and its length. Positions are read out of it
+/// rather than counted from a base, so an elided cascade runs the same kernel over a shorter list —
+/// the operation order per surviving chain is untouched, which is what keeps this a schedule
+/// change.
+///
+/// The list runs as `length / DEPTH` whole passes and then, when the length is odd, one depth-one
+/// pass over its last entry, which is the last live section in cascade order.
+///
+/// Each whole pass runs [`svf_cascade_skewed`] (or its dry-mask twin), the interleaved kernel
+/// scheduled as a software pipeline: in iteration `i` section `k` runs frame `i - k`, so the two
+/// sections of an iteration no longer wait on each other within the frame (issue #978). Every
+/// `(stream, section)` chain runs the same operations on the same inputs in the same order as in
+/// [`svf_cascade_interleaved`], so this is a schedule change and moves no bit. The depth-one tail
+/// has nothing to pipeline and keeps [`svf_cascade_interleaved`], in its bounded twin (below).
+///
+/// # Select-free pairs on an admitted plan (issue #977)
+///
+/// A list shorter than [`EQ_SECTION_COUNT`] is exactly an *admitted* plan: [`cascade_sections`]
+/// returns the full six both when it refuses and when every section is live, and a shorter list
+/// only after all three of its legs passed. On an admitted plan every dry select is a no-op -- see
+/// "Why an admitted plan runs select-free" on [`cascade_sections`] -- so every depth-two pass runs
+/// [`svf_cascade_skewed`] and builds no [`Channel::dry_mask`]. A six-entry list keeps the
+/// masked kernel: a refused block may carry `-0.0` or a non-finite word, and an all-live block was
+/// never scanned for either, and there the select is not a no-op.
+///
+/// # The tail keeps #976's rule
+///
+/// The depth-one tail selects dry lanes when a lane of either channel is dry there, and runs
+/// select-free otherwise, exactly as before #977, although the select is a no-op on an admitted
+/// plan there too. That is a code-generation constraint, not an arithmetic one. The tail with no
+/// dry lane is the standing console fixture's whole cascade (one live bell), and in the shipped
+/// `simd128` artifact V8's register allocator keeps its four integrators in registers only when the
+/// tail is written as it is here: with the tail made select-free on every admitted block -- one arm,
+/// or the masked arm laid out first -- TurboFan kept one integrator in a stack slot across
+/// iterations, and the one-band EQ rendered about 20 % slower through the render export (issue
+/// #977, attempt 2). A tail with a dry lane (a dedicated cut that is the last live section and off
+/// on some lanes) keeps the masked depth-one pass it had.
+///
+/// # The tail judges the §4.4 bound as it stores (issue #999)
+///
+/// When the list ends in the depth-one pass, that pass writes every output word of the block, so
+/// it runs the bounded twin of its kernel ([`svf_cascade_interleaved_bounded`], or the dry-mask
+/// one), which folds `|y| < BLOCK_LIMIT` per channel as it stores `y` -- `check_block`'s
+/// conjunction over the same words -- and the verdict is returned for
+/// [`PreparedParametricEq::render`] to use instead of re-reading both planes. The tail only runs
+/// on an odd list, which is always admitted. Every other list returns `None` and `render` scans:
+/// no live section (nothing is stored, and the block's own words meet the limit), a refused or
+/// all-live list, and an even list, whose last pass is a pair. The pair keeps its kernel because
+/// a bounded pair measured worse, not better: in the shipped `simd128` artifact V8 carried four
+/// values of the bounded two-stream pair through stack slots across iterations, and natively the
+/// per-node (`f32`) two-band row was about 5 % slower (#999, attempt 1). The bounded tail's fold
+/// reduces each stored vector to a per-channel `bool` at once (attempt 2): folded into a vector mask
+/// instead, the two accumulators went through stack slots across the loop's back edge in V8, which
+/// the spill gate (issue #1000) refuses; as `bool`s they stay in general-purpose registers, and the
+/// tail's integrators stay in vector registers (no carried stack slot).
+///
+/// [`svf_cascade_interleaved`]: lane::kernels::svf_cascade_interleaved
 #[inline(always)]
 fn interleave<L: Lane, const W: usize, const DEPTH: usize>(
     channels: (&mut Channel<L, W>, &mut Channel<L, W>),
@@ -1759,11 +2502,18 @@ fn interleave<L: Lane, const W: usize, const DEPTH: usize>(
     right: &mut [f32],
     frames: usize,
     sections: ([usize; EQ_SECTION_COUNT], usize),
-) {
+) -> Option<[bool; 2]> {
     debug_assert_eq!(EQ_SECTION_COUNT % DEPTH, 0);
     let (list, length) = sections;
-    debug_assert_eq!(length % DEPTH, 0);
-    for pass in 0..length / DEPTH {
+    debug_assert!(
+        length % DEPTH <= 1,
+        "the tail rule is one section at depth one"
+    );
+    let admitted = length < EQ_SECTION_COUNT;
+    let pairs = length / DEPTH;
+    let tail = length % DEPTH == 1;
+    let mut within = None;
+    for pass in 0..pairs {
         let base = pass * DEPTH;
         let at: [usize; DEPTH] = core::array::from_fn(|k| list[base + k]);
         let coefficients: [[SvfCoef<L>; DEPTH]; 2] = [
@@ -1774,17 +2524,28 @@ fn interleave<L: Lane, const W: usize, const DEPTH: usize>(
             core::array::from_fn(|k| channels.0.sections[at[k]].state),
             core::array::from_fn(|k| channels.1.sections[at[k]].state),
         ];
-        let dry_masks: [[L::Mask; DEPTH]; 2] = [
-            core::array::from_fn(|k| channels.0.dry_mask(at[k])),
-            core::array::from_fn(|k| channels.1.dry_mask(at[k])),
-        ];
-        svf_cascade_interleaved_with_dry_masks::<L, 2, DEPTH>(
-            [&mut *left, &mut *right],
-            frames,
-            &coefficients,
-            &mut state,
-            &dry_masks,
-        );
+        if admitted {
+            svf_cascade_skewed::<L, 2, DEPTH>(
+                [&mut *left, &mut *right],
+                frames,
+                &coefficients,
+                &mut state,
+            );
+        } else {
+            #[cfg(any(test, feature = "test-support"))]
+            count_masked_pair_pass();
+            let dry_masks: [[L::Mask; DEPTH]; 2] = [
+                core::array::from_fn(|k| channels.0.dry_mask(at[k])),
+                core::array::from_fn(|k| channels.1.dry_mask(at[k])),
+            ];
+            svf_cascade_skewed_with_dry_masks::<L, 2, DEPTH>(
+                [&mut *left, &mut *right],
+                frames,
+                &coefficients,
+                &mut state,
+                &dry_masks,
+            );
+        }
         let [left_state, right_state] = state;
         for (k, word) in left_state.into_iter().enumerate() {
             channels.0.sections[at[k]].state = word;
@@ -1793,6 +2554,46 @@ fn interleave<L: Lane, const W: usize, const DEPTH: usize>(
             channels.1.sections[at[k]].state = word;
         }
     }
+    if tail {
+        let at = list[length - 1];
+        let coefficients: [[SvfCoef<L>; 1]; 2] = [
+            [channels.0.sections[at].coef],
+            [channels.1.sections[at].coef],
+        ];
+        let mut state: [[SvfState<L>; 1]; 2] = [
+            [channels.0.sections[at].state],
+            [channels.1.sections[at].state],
+        ];
+        // #976's rule, unchanged by #977: the tail selects dry lanes only when a lane of either
+        // channel is dry there. See "The tail keeps #976's rule" above for why the admitted plan's
+        // tail is not made select-free as well.
+        let dry_masks: [[L::Mask; 1]; 2] = [[channels.0.dry_mask(at)], [channels.1.dry_mask(at)]];
+        let verdict = if L::mask_any(dry_masks[0][0]) || L::mask_any(dry_masks[1][0]) {
+            svf_cascade_interleaved_with_dry_masks_bounded::<L, 2, 1>(
+                [&mut *left, &mut *right],
+                frames,
+                &coefficients,
+                &mut state,
+                &dry_masks,
+                BLOCK_LIMIT,
+            )
+        } else {
+            #[cfg(any(test, feature = "test-support"))]
+            count_select_free_tail_pass();
+            svf_cascade_interleaved_bounded::<L, 2, 1>(
+                [&mut *left, &mut *right],
+                frames,
+                &coefficients,
+                &mut state,
+                BLOCK_LIMIT,
+            )
+        };
+        let [[left_state], [right_state]] = state;
+        channels.0.sections[at].state = left_state;
+        channels.1.sections[at].state = right_state;
+        within = Some(verdict);
+    }
+    within
 }
 
 /// Reads increment `index` of a step set in the pinned order.
@@ -2063,11 +2864,25 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
 
     /// Runs both channels over one block and applies the master plan §4.4 boundary check.
     ///
-    /// The check is one vector scan per channel per block, from `effect-runtime`. A
-    /// rejected block is zeroed and the channel's integrators are cleared; coefficients and ramps
+    /// The check is `check_block`'s, one verdict per channel per block. When the stationary
+    /// cascade ends in its depth-one pass on an admitted plan, that pass has already judged every
+    /// word as it stored it, and its verdict is used (issue #999; see [`interleave`]); every other
+    /// block -- ramped, refused, all-live, an even live count, nothing live -- scans the plane
+    /// after the cascade. The verdict is the same either way, so the zeroing and the reset are too.
+    /// A rejected block is zeroed and the channel's integrators are cleared; coefficients and ramps
     /// survive, because a non-finite block is a fault report, not an automation event. The two
     /// channels are judged independently: they carry independent state and independent counters,
     /// which is what dual-mono means here.
+    ///
+    /// `#[inline(always)]`, and [`render_mono`](Self::render_mono) with it: the stationary cascade
+    /// is the EQ's arithmetic, and the shipped wasm artifact is gated on it living in the one
+    /// `process_bank` (or `process_bank_mono`) symbol per width (`KERNEL_ROSTER` rule 1). The
+    /// inliner decided that on its own until issue #978's skewed pairs -- a prologue, a steady
+    /// state, an epilogue and a short-block fallback per pass kind -- made `render` large enough
+    /// that it outlined it in the `simd128` build, which left `process_bank` carrying no
+    /// arithmetic. Each width calls it from one place (the bank body, or the scalar `process`), so
+    /// pinning the shape here duplicates nothing.
+    #[inline(always)]
     fn render(
         &mut self,
         left: &mut [f32],
@@ -2101,7 +2916,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
             self.left.state_bits(&mut before_left);
             self.right.state_bits(&mut before_right);
         }
-        process_channels(
+        let within = process_channels(
             (&mut self.left, &mut self.right),
             left,
             right,
@@ -2113,7 +2928,13 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
                 .into_iter()
                 .enumerate()
         {
-            if check_block::<L>(block) {
+            // Issue #999: an admitted stationary block's last pass judged every word as it stored
+            // it; every other block scans the plane.
+            let passed = match within {
+                Some(verdict) => verdict[index],
+                None => check_block::<L>(block),
+            };
+            if passed {
                 continue;
             }
             let mask = nonfinite_lane_mask::<L>(block);
@@ -2147,6 +2968,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
     /// two channels' `remaining` arrays and identity flags agree. `failures[1]` is copied from
     /// `failures[0]`, because the right plane the seam is about to write is this left plane and a
     /// dual run would have rejected it on the same words.
+    #[inline(always)]
     fn render_mono(&mut self, left: &mut [f32], frames: usize) -> [[bool; MAX_LANES]; 2] {
         let mut failures = [[false; MAX_LANES]; 2];
         let words = frames * W;
@@ -2159,8 +2981,8 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         if quiet {
             self.left.state_bits(&mut before_left);
         }
-        process_channels_mono(&mut self.left, left, frames, stationary);
-        if !check_block::<L>(left) {
+        let within = process_channels_mono(&mut self.left, left, frames, stationary);
+        if !within.unwrap_or_else(|| check_block::<L>(left)) {
             let mask = nonfinite_lane_mask::<L>(left);
             left.fill(0.0);
             self.left.reset_states();
@@ -2827,6 +3649,12 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
     /// shipped before the collapse existed and the collapsed one is its own function. "Adding a
     /// path must not move the path already there" is the same rule `ConsoleEffectBankStage` exists
     /// for, applied inside a kernel.
+    ///
+    /// `#[inline(always)]` for the reason on [`render`](Self::render): each instantiation has one
+    /// caller, `process_bank` or `process_bank_mono`, and the roster finds the EQ's arithmetic in
+    /// those two symbols. Issue #978's larger render body made the inliner outline the dual
+    /// instantiation in the `simd128` build; the pin keeps the shape the roster was measured on.
+    #[inline(always)]
     fn process_bank_inner<const MONO: bool>(
         &mut self,
         block: EffectBankProcessBlock<'_>,
@@ -2921,10 +3749,19 @@ mod interleave_identity {
         BAND_SECTION_OFFSET, BandTarget, Channel, EFFECTIVE_CASCADE_DEPTH, EQ_BAND_COUNT,
         EQ_SECTION_COUNT, EqBandKind, HPF_SECTION, LPF_SECTION, MAX_LANES, PreparedParametricEq,
         RAMP_SAMPLES, STATE_SIZES, SampleRateHz, Section, cascade_sections, cascade_sections_mono,
-        corpus, process_channels, process_channels_mono, section_state_is_positive_zero,
+        corpus, process_channels, process_channels_mono,
     };
     use lane::kernels::svf_block;
     use lane::{Lane, Simd4, Simd8};
+
+    /// `true` when both integrator words of `section` are exactly `+0.0` on every lane.
+    ///
+    /// Before issue #979 this was elision leg (b). The leg now accepts any inert state, so the
+    /// exact "this section holds no state" question lives here, with the one test that asks it.
+    fn section_state_is_positive_zero<L: Lane>(section: &Section<L>) -> bool {
+        effect_runtime::bank::lane_is_positive_zero::<L>(section.state.ic1)
+            && effect_runtime::bank::lane_is_positive_zero::<L>(section.state.ic2)
+    }
 
     /// Frames per case: the corpus length, several blocks' worth of settling.
     const FRAMES: usize = corpus::FRAMES;
@@ -3814,15 +4651,23 @@ mod interleave_identity {
 /// re-transcription of it -- and no runtime knob is added to reach either arm.
 ///
 /// What is covered: every live/dead subset of the six sections, both channels agreeing and
-/// disagreeing, at all three widths, cold and with seeded subnormal-adjacent state; the three
-/// refusal legs of the gate (`-0.0` input, a non-`+0.0` state in an elided section, a `-0.0`
-/// integrator in a live one) and the magnitude ceiling; per-lane disagreement inside one section;
-/// and enable/disable transitions arriving mid-session through the ramp path.
+/// disagreeing, at all three widths, cold and with a seeded non-zero live state (words just above
+/// `FLUSH_EPS`, which the kernel can write); the three refusal legs of the gate (`-0.0`, a
+/// non-finite word or a word above the ceiling in the input; a non-inert state in an elided
+/// section, issue #979; a live integrator that is not a word `flush` can leave -- `-0.0`,
+/// non-finite, or a non-zero magnitude below `FLUSH_EPS`, issues #977 and #1015) and the
+/// magnitude ceiling; per-lane disagreement inside one section; and enable/disable transitions
+/// arriving mid-session through the ramp path. Leg (c)'s `FLUSH_EPS` boundary and the
+/// re-engagement after a refusal are pinned in `stationary_subnormal`.
 #[cfg(test)]
 mod elision {
     use super::{
-        BandTarget, Channel, EFFECTIVE_CASCADE_DEPTH, EQ_SECTION_COUNT, EqSvfWords, MAX_LANES,
-        RAMP_SAMPLES, cascade_sections, corpus, process_channels,
+        BandTarget, Channel, ELISION_MAGNITUDE_CEILING, EQ_SECTION_COUNT, EqBandKind, EqSvfWords,
+        HPF_SECTION, INERT_MAGNITUDE_FLOOR, LPF_SECTION, MAX_LANES, RAMP_SAMPLES, STATE_LANE_WORDS,
+        STATE_WORDS_PER_BAND, block_admits_elision, block_admits_elision_oracle, cascade_sections,
+        cascade_sections_mono, corpus, masked_pair_pass_count, process_channels,
+        process_channels_mono, reset_masked_pair_passes, reset_select_free_tail_passes,
+        select_free_tail_pass_count,
     };
     use lane::{Lane, Simd4, Simd8};
 
@@ -3907,12 +4752,14 @@ mod elision {
             let mut right_channel = channel::<L, W>(3, right_live);
             if seed_state {
                 for section in 0..EQ_SECTION_COUNT {
-                    // Only *live* sections are seeded: a non-`+0.0` state in a dead section is a
+                    // Only *live* sections are seeded: a non-inert state in a dead section is a
                     // refusal leg with its own test, and seeding it here would silently disable
-                    // the very engagement this function is asserting.
+                    // the very engagement this function is asserting. The seeds are words the
+                    // kernel can write, just above `FLUSH_EPS`: since issue #1015 a restored
+                    // subnormal in a live section refuses too (`stationary_subnormal`).
                     if left_live & (1 << section) != 0 {
-                        left_channel.sections[section].state.ic1 = L::splat(1.0e-40);
-                        left_channel.sections[section].state.ic2 = L::splat(-1.0e-41);
+                        left_channel.sections[section].state.ic1 = L::splat(1.5e-20);
+                        left_channel.sections[section].state.ic2 = L::splat(-1.25e-20);
                     }
                     if right_live & (1 << section) != 0 {
                         right_channel.sections[section].state.ic1 = L::splat(-3.5e-7);
@@ -3963,18 +4810,127 @@ mod elision {
         ran
     }
 
-    /// Every live/dead subset, both channels, all three widths, cold and seeded.
+    /// [`compare`] for the collapsed body: one channel through [`process_channels_mono`], against
+    /// the same channel's per-section path.
+    fn compare_mono<L: Lane, const W: usize>(
+        width: &str,
+        case: usize,
+        live: u8,
+        seed_state: bool,
+    ) -> usize {
+        let mut arms = Vec::new();
+        let mut ran = EQ_SECTION_COUNT;
+        for stationary in [true, false] {
+            let mut channel = channel::<L, W>(0, live);
+            if seed_state {
+                for section in 0..EQ_SECTION_COUNT {
+                    if live & (1 << section) != 0 {
+                        channel.sections[section].state.ic1 = L::splat(1.5e-20);
+                        channel.sections[section].state.ic2 = L::splat(-1.25e-20);
+                    }
+                }
+            }
+            let mut io = block::<W>(case, 0);
+            if stationary {
+                ran = cascade_sections_mono::<L, W>(&channel, &io, FRAMES).1;
+            }
+            process_channels_mono(&mut channel, &mut io, FRAMES, stationary);
+            let mut words = [0_u32; EQ_SECTION_COUNT * 2 * MAX_LANES];
+            channel.state_bits(&mut words);
+            arms.push((io, words));
+        }
+        let (elided, full) = (&arms[0], &arms[1]);
+        let label = format!("{width} mono, case {case}, live {live:06b}, seeded={seed_state}");
+        assert_eq!(
+            bits(&elided.0),
+            bits(&full.0),
+            "elided mono output differs from the full cascade at {label}"
+        );
+        assert_eq!(
+            elided.1, full.1,
+            "elided mono integrators differ from the full cascade at {label}"
+        );
+        assert!(
+            elided.0.iter().all(|s| s.is_finite()),
+            "an elided mono case must stay finite at {label}"
+        );
+        ran
+    }
+
+    /// Every live/dead subset, both channels, all three widths, cold and seeded; dual and
+    /// collapsed mono.
+    ///
+    /// Issue #976: the elided list is exactly the live sections -- no identity section is kept as
+    /// padding -- so an odd live count runs its last section in a depth-one pass. Both corpus
+    /// cases are admissible (no `-0.0`, nothing above the ceiling), so every mask elides down to
+    /// its live count.
     #[test]
     fn an_elided_cascade_is_the_full_cascade_bit_for_bit() {
         for case in [0_usize, 2] {
             for seeded in [false, true] {
                 for live in MASKS {
-                    compare::<f32, 1>("Scalar", case, live, live, seeded);
-                    compare::<Simd4, 4>("Simd4", case, live, live, seeded);
-                    compare::<Simd8, 8>("Simd8", case, live, live, seeded);
+                    let count = live.count_ones() as usize;
+                    let ran = [
+                        compare::<f32, 1>("Scalar", case, live, live, seeded),
+                        compare::<Simd4, 4>("Simd4", case, live, live, seeded),
+                        compare::<Simd8, 8>("Simd8", case, live, live, seeded),
+                    ];
+                    assert_eq!(
+                        ran, [count; 3],
+                        "the dual cascade keeps exactly the live sections ({live:06b})"
+                    );
+                    let ran = [
+                        compare_mono::<f32, 1>("Scalar", case, live, seeded),
+                        compare_mono::<Simd4, 4>("Simd4", case, live, seeded),
+                        compare_mono::<Simd8, 8>("Simd8", case, live, seeded),
+                    ];
+                    assert_eq!(
+                        ran, [count; 3],
+                        "the mono cascade keeps exactly the live sections ({live:06b})"
+                    );
                 }
             }
         }
+    }
+
+    /// An odd last live section with no dry lane runs the depth-one pass without the dry select.
+    ///
+    /// Issue #976 M3: rendered bits cannot see which arm the tail took -- a select whose mask is
+    /// empty returns the wet word -- so this counter is the only gate on the performance half of
+    /// the tail rule. A general band is never dry, so one live band is an odd tail with empty masks.
+    #[test]
+    fn an_odd_tail_without_dry_lanes_skips_the_select() {
+        fn run<L: Lane, const W: usize>(width: &str) {
+            // One live general band (physical section 2), and three: sections 1, 2 and 4.
+            for (live, pairs) in [(0b00_0100_u8, 0_usize), (0b01_0110, 1)] {
+                reset_select_free_tail_passes();
+                let mut left_channel = channel::<L, W>(0, live);
+                let mut right_channel = channel::<L, W>(3, live);
+                let mut left = block::<W>(0, 0);
+                let mut right = block::<W>(0, 3);
+                process_channels(
+                    (&mut left_channel, &mut right_channel),
+                    &mut left,
+                    &mut right,
+                    FRAMES,
+                    true,
+                );
+                assert_eq!(
+                    select_free_tail_pass_count(),
+                    1,
+                    "{width} dual {live:06b}: {pairs} pair(s), then one select-free tail pass"
+                );
+                process_channels_mono(&mut left_channel, &mut left, FRAMES, true);
+                assert_eq!(
+                    select_free_tail_pass_count(),
+                    2,
+                    "{width} mono {live:06b}: {pairs} pair(s), then one select-free tail pass"
+                );
+            }
+        }
+        run::<f32, 1>("Scalar");
+        run::<Simd4, 4>("Simd4");
+        run::<Simd8, 8>("Simd8");
     }
 
     /// The two channels are allowed to disagree about which sections are live, and a section is
@@ -3985,11 +4941,8 @@ mod elision {
             for right_live in MASKS {
                 let ran = compare::<Simd4, 4>("Simd4", 0, left_live, right_live, false);
                 let live = (left_live | right_live).count_ones() as usize;
-                let depth = EFFECTIVE_CASCADE_DEPTH;
-                let expected = live.div_ceil(depth) * depth;
                 assert_eq!(
-                    ran,
-                    expected.min(EQ_SECTION_COUNT),
+                    ran, live,
                     "a section is elidable only when it is identity on both channels \
                      ({left_live:04b}/{right_live:04b})"
                 );
@@ -4003,7 +4956,7 @@ mod elision {
     /// sixty-four-track session), and it is the row the standing measurement moves.
     #[test]
     fn the_shipped_shape_actually_elides() {
-        for (live, expected) in [(0b0001_u8, 2_usize), (0b0011, 2), (0b0000, 0)] {
+        for (live, expected) in [(0b0001_u8, 1_usize), (0b0011, 2), (0b0000, 0)] {
             let left_channel = channel::<Simd8, 8>(0, live);
             let right_channel = channel::<Simd8, 8>(3, live);
             let left = block::<8>(0, 0);
@@ -4015,8 +4968,8 @@ mod elision {
                  {EQ_SECTION_COUNT} sections"
             );
         }
-        // Three live sections round up to four at depth two: the list has to divide by the depth,
-        // and paying one identity section keeps a single kernel instantiation.
+        // Three live sections run three: one depth-two pass and a depth-one tail, with no identity
+        // section kept as padding (issue #976).
         let left_channel = channel::<Simd8, 8>(0, 0b0111);
         let right_channel = channel::<Simd8, 8>(3, 0b0111);
         assert_eq!(
@@ -4026,8 +4979,8 @@ mod elision {
                 &block::<8>(0, 0),
                 &block::<8>(0, 3)
             ),
-            4,
-            "three live sections round up to four at depth two"
+            3,
+            "three live sections run three, not four"
         );
     }
 
@@ -4050,12 +5003,12 @@ mod elision {
         let right = block::<8>(0, 3);
         assert_eq!(
             kept(&left_channel, &right_channel, &left, &right),
-            2,
-            "one live lane keeps its whole section, and the depth rounds one live section to two"
+            1,
+            "one live lane keeps its whole section, and only that section"
         );
         // And it renders the same bits as the full cascade.
         let ran = compare::<Simd8, 8>("Simd8", 0, 0b0100, 0b0000, false);
-        assert_eq!(ran, 2, "the mixed-lane case must still engage");
+        assert_eq!(ran, 1, "the mixed-lane case must still engage");
     }
 
     /// A `-0.0` anywhere in either input plane refuses the elision.
@@ -4090,7 +5043,7 @@ mod elision {
                 }
                 assert_eq!(
                     kept(&left_channel, &right_channel, &left, &right),
-                    2,
+                    1,
                     "a +0.0 at word {position} of plane {plane} is an ordinary sample"
                 );
             }
@@ -4127,29 +5080,197 @@ mod elision {
         left[17] = 1.0e29;
         assert_eq!(
             kept(&left_channel, &right_channel, &left, &right),
-            2,
+            1,
             "a large but admissible sample does not refuse elision"
         );
     }
 
-    /// A restored, non-`+0.0` state in a section that *would* be elided refuses the elision.
+    /// Issue #979 gate 3: a restored state in a section that *would* be elided refuses the
+    /// elision unless it is inert, and either way the stationary path renders the per-section
+    /// path's bits and integrators.
     ///
-    /// The full cascade would move that state; eliding the section would not, and the state words
-    /// are part of the bit-identity claim.
+    /// The words go in through [`Channel::restore_track`], on one lane of dead section 3, in either
+    /// integrator. Refused: `-0.0`, magnitudes below `FLUSH_EPS` (`1e-30`, the word under the floor),
+    /// magnitudes above the ceiling (the word over it, `f32::MAX`). Admitted: `+-1.0`,
+    /// `+-FLUSH_EPS` and `+-1e30`, the two ends of the inert band. Before issue #979 this test was
+    /// `a_non_zero_state_in_a_dead_section_refuses_elision` and refused `1.0` too.
     #[test]
-    fn a_non_zero_state_in_a_dead_section_refuses_elision() {
-        for word in [1.0e-30_f32, -1.0e-30, 1.0, -0.0] {
-            let mut left_channel = channel::<Simd8, 8>(0, 0b0001);
-            let right_channel = channel::<Simd8, 8>(3, 0b0001);
-            left_channel.sections[3].state.ic2 = Simd8::splat(word);
-            let left = block::<8>(0, 0);
-            let right = block::<8>(0, 3);
-            assert_eq!(
-                kept(&left_channel, &right_channel, &left, &right),
-                EQ_SECTION_COUNT,
-                "a dead section holding {word} must refuse elision"
-            );
+    fn a_non_inert_state_in_a_dead_section_refuses_elision() {
+        let floor = f32::from_bits(INERT_MAGNITUDE_FLOOR);
+        let ceiling = f32::from_bits(ELISION_MAGNITUDE_CEILING);
+        let refused = [
+            -0.0_f32,
+            1.0e-30,
+            -1.0e-30,
+            f32::from_bits(INERT_MAGNITUDE_FLOOR - 1),
+            f32::from_bits(ELISION_MAGNITUDE_CEILING + 1),
+            -f32::from_bits(ELISION_MAGNITUDE_CEILING + 1),
+            f32::MAX,
+            -f32::MAX,
+        ];
+        let admitted = [1.0_f32, -1.0, floor, -floor, ceiling, -ceiling];
+        for (word, admit) in refused
+            .into_iter()
+            .map(|word| (word, false))
+            .chain(admitted.into_iter().map(|word| (word, true)))
+        {
+            for integrator in [0_usize, 1] {
+                let label = format!("dead section 3 holding {word:e} in integrator {integrator}");
+                let mut arms = Vec::new();
+                let mut ran = EQ_SECTION_COUNT;
+                for stationary in [true, false] {
+                    let mut left_channel = channel::<Simd8, 8>(0, 0b0000_0010);
+                    let mut right_channel = channel::<Simd8, 8>(3, 0b0000_0010);
+                    let mut words = [0_u32; STATE_LANE_WORDS];
+                    left_channel.snapshot_track(5, &mut words);
+                    words[3 * STATE_WORDS_PER_BAND + integrator] = word.to_bits();
+                    let configuration = left_channel.targets[5];
+                    left_channel
+                        .restore_track(5, &words, &configuration, corpus::CORPUS_RATE)
+                        .expect("a finite integrator restores");
+                    let mut left = block::<8>(0, 0);
+                    let mut right = block::<8>(0, 3);
+                    if stationary {
+                        ran = kept(&left_channel, &right_channel, &left, &right);
+                    }
+                    process_channels(
+                        (&mut left_channel, &mut right_channel),
+                        &mut left,
+                        &mut right,
+                        FRAMES,
+                        stationary,
+                    );
+                    arms.push((
+                        bits(&left),
+                        bits(&right),
+                        integrators(&left_channel, &right_channel),
+                    ));
+                }
+                // The bits first: under a mutation that admits a word the executed section would
+                // move, the integrators are what differ.
+                assert!(
+                    arms[0] == arms[1],
+                    "{label}: the stationary path must render the per-section path's bits and integrators"
+                );
+                if admit {
+                    assert_eq!(ran, 1, "{label}: an inert state is admitted");
+                } else {
+                    assert_eq!(ran, EQ_SECTION_COUNT, "{label}: must refuse elision");
+                }
+            }
         }
+    }
+
+    /// Issue #979 gate 2: a band switched on and off again on every lane of both channels leaves
+    /// its section at the identity with a frozen, non-zero state, and the bank keeps eliding.
+    ///
+    /// The transition goes through [`Channel::start_ramp`], the automation route: on at step 2,
+    /// off at step 5, sixteen blocks, beside one live general band. Before issue #979 leg (b)
+    /// refused every block after the disable (0 of the 9 counted below elided, VERIFY-EQ); the
+    /// inert rule elides every stationary block from the first one after the ramp. Every block
+    /// renders the per-section path's bits and integrators. Once for a general band (section 3)
+    /// and once for the HPF (section 0), at every width.
+    #[test]
+    fn a_band_switched_off_keeps_the_bank_eliding() {
+        fn run<L: Lane, const W: usize>(width: &str) {
+            const BLOCKS: usize = 16;
+            const ON: usize = 2;
+            const OFF: usize = 5;
+            for section in [3_usize, HPF_SECTION] {
+                let words = |lane: usize, offset: usize| {
+                    let track = (lane + offset) % corpus::LANES;
+                    let target = if section == HPF_SECTION {
+                        BandTarget {
+                            enabled: true,
+                            kind: EqBandKind::HighPass,
+                            frequency: 40.0 + track as f32 * 23.0,
+                            gain: 0.0,
+                            q: 0.5 + track as f32 * 0.1,
+                            slope: 1.0,
+                        }
+                    } else {
+                        let mut band = corpus::sections(track)[section];
+                        band.enabled = true;
+                        band
+                    };
+                    target.words(corpus::CORPUS_RATE).expect("legal design")
+                };
+                let mut arms = Vec::new();
+                let mut eliding_after = 0_usize;
+                let mut first_after_elided = false;
+                for elide in [true, false] {
+                    let mut left_channel = channel::<L, W>(0, 0b0000_0010);
+                    let mut right_channel = channel::<L, W>(3, 0b0000_0010);
+                    let mut rendered: Vec<u32> = Vec::new();
+                    for step in 0..BLOCKS {
+                        for lane in 0..W {
+                            if step == ON {
+                                left_channel.start_ramp(section, lane, words(lane, 0));
+                                right_channel.start_ramp(section, lane, words(lane, 3));
+                            }
+                            if step == OFF {
+                                left_channel.start_ramp(section, lane, EqSvfWords::IDENTITY);
+                                right_channel.start_ramp(section, lane, EqSvfWords::IDENTITY);
+                            }
+                        }
+                        let mut left = block::<W>(0, step % corpus::LANES);
+                        let mut right = block::<W>(0, (step + 3) % corpus::LANES);
+                        let stationary =
+                            left_channel.no_ramp_in_flight() && right_channel.no_ramp_in_flight();
+                        if elide && step > OFF {
+                            assert!(stationary, "{width} section {section}: the ramp has ended");
+                            let elided = kept(&left_channel, &right_channel, &left, &right)
+                                < EQ_SECTION_COUNT;
+                            first_after_elided |= elided && step == OFF + 1;
+                            eliding_after += usize::from(elided && step > OFF + 1);
+                        }
+                        process_channels(
+                            (&mut left_channel, &mut right_channel),
+                            &mut left,
+                            &mut right,
+                            FRAMES,
+                            stationary && elide,
+                        );
+                        rendered.extend(bits(&left));
+                        rendered.extend(bits(&right));
+                    }
+                    if elide {
+                        assert!(
+                            (0..EQ_SECTION_COUNT).all(|index| index == 1
+                                || (left_channel.identity[index] && right_channel.identity[index])),
+                            "{width} section {section}: switched off, it is the identity again"
+                        );
+                        let frozen = left_channel.sections[section].state;
+                        assert!(
+                            !(effect_runtime::bank::lane_is_positive_zero::<L>(frozen.ic1)
+                                && effect_runtime::bank::lane_is_positive_zero::<L>(frozen.ic2)),
+                            "{width} section {section}: non-vacuity, the section holds a frozen \
+                             non-zero state"
+                        );
+                    }
+                    rendered.extend(integrators(&left_channel, &right_channel));
+                    arms.push(rendered);
+                }
+                println!(
+                    "#979 cliff {width} section {section}: {eliding_after} of {} later blocks elide \
+                     (first stationary block after the ramp: {first_after_elided})",
+                    BLOCKS - OFF - 2
+                );
+                assert_eq!(
+                    (eliding_after, first_after_elided),
+                    (BLOCKS - OFF - 2, true),
+                    "{width} section {section}: every stationary block after the switch-off elides"
+                );
+                assert!(
+                    arms[0] == arms[1],
+                    "{width} section {section}: the eliding arm must render the per-section path's \
+                     bits and integrators"
+                );
+            }
+        }
+        run::<f32, 1>("Scalar");
+        run::<Simd4, 4>("Simd4");
+        run::<Simd8, 8>("Simd8");
     }
 
     /// A `-0.0` integrator in a *live* section refuses the elision.
@@ -4181,6 +5302,321 @@ mod elision {
                 "a live section holding -0.0 in integrator {word} must refuse elision"
             );
         }
+    }
+
+    /// The word patterns of issue #980 gate 1: both zeros, the smallest subnormals, the ceiling and
+    /// the word above it at either sign, both infinities, a quiet and a payload NaN, `+-1.0`, the
+    /// largest magnitude pattern and the all-ones word.
+    const GATE_EDGES: [u32; 16] = [
+        0,
+        0x8000_0000,
+        1,
+        0x8000_0001,
+        ELISION_MAGNITUDE_CEILING,
+        ELISION_MAGNITUDE_CEILING + 1,
+        0x7f80_0000,
+        0xff80_0000,
+        0x7fc0_0000,
+        0xffc0_1234,
+        0x3f80_0000,
+        0xbf80_0000,
+        ELISION_MAGNITUDE_CEILING | 0x8000_0000,
+        (ELISION_MAGNITUDE_CEILING + 1) | 0x8000_0000,
+        0x7fff_ffff,
+        0xffff_ffff,
+    ];
+
+    /// An ordinary admissible word of either sign for position `index`: finite, non-zero, well
+    /// inside the ceiling, never `-0.0`.
+    fn ordinary_word(index: usize) -> f32 {
+        let magnitude = 0.001 + (index % 97) as f32 * 0.37;
+        if index % 3 == 1 {
+            -magnitude
+        } else {
+            magnitude
+        }
+    }
+
+    /// Issue #980 gate 1: the min/max gate gives the rejection accumulator's verdict on every
+    /// ordered pair of edge patterns, planted at two positions of a block of ordinary words, at
+    /// every block length that exercises an empty block, a lone word, the scalar remainder and the
+    /// vector body of both widths.
+    #[test]
+    fn the_min_max_gate_equals_the_rejection_oracle() {
+        let mut verdicts = [0_usize; 2];
+        for length in [0_usize, 1, 7, 8, 9, 1024] {
+            let placements: &[(usize, usize)] = if length == 0 {
+                &[(0, 0)]
+            } else {
+                &[(length / 3, length - 1), (0, length / 2)]
+            };
+            for &first in &GATE_EDGES {
+                for &second in &GATE_EDGES {
+                    for &(at_first, at_second) in placements {
+                        let mut block: Vec<f32> = (0..length).map(ordinary_word).collect();
+                        if length > 0 {
+                            block[at_first] = f32::from_bits(first);
+                            block[at_second] = f32::from_bits(second);
+                        }
+                        let oracle = block_admits_elision_oracle(&block);
+                        assert_eq!(
+                            block_admits_elision(&block),
+                            oracle,
+                            "length {length}: {first:#010x} at {at_first}, {second:#010x} at \
+                             {at_second}"
+                        );
+                        verdicts[usize::from(oracle)] += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            verdicts[0] > 0 && verdicts[1] > 0,
+            "the edge set must reach both verdicts: {verdicts:?}"
+        );
+    }
+
+    /// Issue #980: the min/max gate and the rejection accumulator agree on every one of the
+    /// `2^32` words, alone and in every run of 64 consecutive words.
+    ///
+    /// Both predicates are a conjunction of the same per-word test, so the lone-word verdict is the
+    /// whole claim; the 64-word runs put every word through the vectorised loop body as well.
+    /// Ignored by default (about a minute in release, several in a dev build): run it with
+    /// `cargo test -p parametric-eq --release --lib every_word -- --ignored`.
+    #[test]
+    #[ignore = "exhaustive over 2^32 words; run explicitly"]
+    fn every_word_gets_the_rejection_oracles_verdict() {
+        use std::hint::black_box;
+        const RUN: u64 = 64;
+        let threads = std::thread::available_parallelism()
+            .map_or(1, core::num::NonZeroUsize::get)
+            .clamp(1, 8) as u64;
+        let per_thread = (1_u64 << 32) / threads / RUN * RUN;
+        let admitted: u64 = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..threads)
+                .map(|thread| {
+                    scope.spawn(move || {
+                        let start = thread * per_thread;
+                        let end = if thread + 1 == threads {
+                            1_u64 << 32
+                        } else {
+                            start + per_thread
+                        };
+                        let mut admitted = 0_u64;
+                        let mut run = [0.0_f32; RUN as usize];
+                        let mut first = start;
+                        while first < end {
+                            for (offset, word) in run.iter_mut().enumerate() {
+                                let bits = first + offset as u64;
+                                *word = f32::from_bits(bits as u32);
+                                // `black_box` keeps the optimiser from proving the two
+                                // bodies equal on a known word and deleting the comparison:
+                                // both run, on a word they cannot see through.
+                                let lone = [*word];
+                                let verdict = block_admits_elision(black_box(&lone));
+                                assert_eq!(
+                                    verdict,
+                                    block_admits_elision_oracle(black_box(&lone)),
+                                    "word {bits:#010x}"
+                                );
+                                admitted += u64::from(verdict);
+                            }
+                            assert_eq!(
+                                block_admits_elision(black_box(&run)),
+                                block_admits_elision_oracle(black_box(&run)),
+                                "the run of {RUN} words from {first:#010x}"
+                            );
+                            first += RUN;
+                        }
+                        admitted
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().expect("worker"))
+                .sum()
+        });
+        // Every magnitude pattern from `0` to the ceiling is admitted at either sign, except the
+        // one `-0.0` pattern.
+        let expected = 2 * (u64::from(ELISION_MAGNITUDE_CEILING) + 1) - 1;
+        assert_eq!(admitted, expected, "admitted words");
+    }
+
+    /// A channel with the two general bands at sections 1 and 3 live on every lane, and each
+    /// dedicated cut live only on the lanes whose bit is set in its mask: dry on the others.
+    fn dry_cut_channel<L: Lane, const W: usize>(
+        offset: usize,
+        hpf_lanes: u8,
+        lpf_lanes: u8,
+    ) -> Channel<L, W> {
+        let targets: [[BandTarget; EQ_SECTION_COUNT]; W] = core::array::from_fn(|lane| {
+            let track = (offset + lane) % corpus::LANES;
+            let mut sections = corpus::sections(track);
+            for (section, band) in sections.iter_mut().enumerate() {
+                band.enabled = section == 1 || section == 3;
+            }
+            sections[HPF_SECTION] = BandTarget {
+                enabled: hpf_lanes >> lane & 1 != 0,
+                kind: EqBandKind::HighPass,
+                frequency: 40.0 + track as f32 * 23.0,
+                gain: 0.0,
+                q: 0.5 + track as f32 * 0.1,
+                slope: 1.0,
+            };
+            sections[LPF_SECTION] = BandTarget {
+                enabled: lpf_lanes >> lane & 1 != 0,
+                kind: EqBandKind::LowPass,
+                frequency: 7_000.0 + track as f32 * 900.0,
+                gain: 0.0,
+                q: 0.6 + track as f32 * 0.07,
+                slope: 1.0,
+            };
+            sections
+        });
+        Channel::new(targets, corpus::CORPUS_RATE).expect("dry cut design")
+    }
+
+    /// Issue #977: an admitted plan runs every depth-two pass select-free, dry lanes included, and
+    /// renders what the per-section path renders; the depth-one tail keeps #976's rule
+    /// (select-free unless a lane of either channel is dry there); a refused block keeps the masks
+    /// on all six sections.
+    ///
+    /// The cut masks put the dry lanes in two pairs (both cuts live on some lanes), in the
+    /// depth-one tail (the LPF after the pair of general bands: a masked tail), in a pair (the HPF
+    /// with band 1, ahead of a general-band tail: a select-free tail), and nowhere (both cuts live
+    /// everywhere); the widths run them at one, four and eight lanes, dual and mono. At one lane
+    /// the masks reduce to lane 0, so the LPF-tail case has no LPF and no tail there.
+    #[test]
+    fn an_admitted_plan_runs_every_pair_select_free() {
+        fn run<L: Lane, const W: usize>(width: &str) {
+            for (hpf_lanes, lpf_lanes, select_free_tails) in [
+                (0b0101_0101_u8, 0b0000_1001_u8, 0_usize),
+                (0b0000_0000, 0b0110_0110, 0),
+                (0b0011_0011, 0b0000_0000, 1),
+                (0b1111_1111, 0b1111_1111, 0),
+            ] {
+                let label = format!("{width} hpf {hpf_lanes:08b} lpf {lpf_lanes:08b}");
+                let mut arms = Vec::new();
+                for stationary in [true, false] {
+                    let mut left_channel = dry_cut_channel::<L, W>(0, hpf_lanes, lpf_lanes);
+                    let mut right_channel = dry_cut_channel::<L, W>(3, hpf_lanes, lpf_lanes);
+                    let mut left = block::<W>(0, 0);
+                    let mut right = block::<W>(0, 3);
+                    let kept = kept(&left_channel, &right_channel, &left, &right);
+                    reset_masked_pair_passes();
+                    reset_select_free_tail_passes();
+                    process_channels(
+                        (&mut left_channel, &mut right_channel),
+                        &mut left,
+                        &mut right,
+                        FRAMES,
+                        stationary,
+                    );
+                    if stationary {
+                        assert!(kept < EQ_SECTION_COUNT, "{label}: the block is admitted");
+                        assert_eq!(masked_pair_pass_count(), 0, "{label}: no masked pair");
+                        assert_eq!(
+                            select_free_tail_pass_count(),
+                            select_free_tails,
+                            "{label}: the tail keeps #976's rule"
+                        );
+                    }
+                    let mut mono = block::<W>(0, 5);
+                    process_channels_mono(&mut left_channel, &mut mono, FRAMES, stationary);
+                    if stationary {
+                        assert_eq!(masked_pair_pass_count(), 0, "{label}: no masked mono pair");
+                        assert_eq!(
+                            select_free_tail_pass_count(),
+                            2 * select_free_tails,
+                            "{label}: the mono tail keeps #976's rule"
+                        );
+                    }
+                    arms.push((
+                        bits(&left),
+                        bits(&right),
+                        bits(&mono),
+                        integrators(&left_channel, &right_channel),
+                    ));
+                }
+                assert!(
+                    arms[0] == arms[1],
+                    "{label}: the select-free plan must render the per-section path's bits"
+                );
+                // A `-0.0` refuses the block: all six sections, three masked passes, both bodies.
+                let mut left_channel = dry_cut_channel::<L, W>(0, hpf_lanes, lpf_lanes);
+                let mut right_channel = dry_cut_channel::<L, W>(3, hpf_lanes, lpf_lanes);
+                let mut left = block::<W>(0, 0);
+                let mut right = block::<W>(0, 3);
+                left[W] = -0.0;
+                reset_masked_pair_passes();
+                process_channels(
+                    (&mut left_channel, &mut right_channel),
+                    &mut left,
+                    &mut right,
+                    FRAMES,
+                    true,
+                );
+                assert_eq!(
+                    masked_pair_pass_count(),
+                    3,
+                    "{label}: a refused block is masked"
+                );
+                let mut mono = block::<W>(0, 5);
+                mono[W] = -0.0;
+                process_channels_mono(&mut left_channel, &mut mono, FRAMES, true);
+                assert_eq!(
+                    masked_pair_pass_count(),
+                    6,
+                    "{label}: and so is its mono body"
+                );
+            }
+        }
+        run::<f32, 1>("Scalar");
+        run::<Simd4, 4>("Simd4");
+        run::<Simd8, 8>("Simd8");
+    }
+
+    /// A non-finite integrator in a *live* section refuses the elision (issue #977, leg (c)).
+    ///
+    /// The kernel can write one: a dry lane still runs the recurrence, and a refused block can
+    /// overflow a large restored integrator there to `NaN` behind the dry select. An admitted plan
+    /// runs select-free, which would turn that state into output, so leg (c) keeps the bank on the
+    /// masked kernel instead.
+    #[test]
+    fn a_non_finite_state_in_a_live_section_refuses_elision() {
+        for word in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -f32::NAN] {
+            for integrator in [0_usize, 1] {
+                // The HPF is live on lane 0 only, so lane 6 is a dry lane of a live section.
+                let mut left_channel = dry_cut_channel::<Simd8, 8>(0, 0b0000_0001, 0);
+                let right_channel = dry_cut_channel::<Simd8, 8>(3, 0, 0);
+                let mut lanes = [0.25_f32; 8];
+                lanes[6] = word;
+                let seeded = Simd8::load(&lanes);
+                if integrator == 0 {
+                    left_channel.sections[HPF_SECTION].state.ic1 = seeded;
+                } else {
+                    left_channel.sections[HPF_SECTION].state.ic2 = seeded;
+                }
+                let (left, right) = (block::<8>(0, 0), block::<8>(0, 3));
+                assert_eq!(
+                    kept(&left_channel, &right_channel, &left, &right),
+                    EQ_SECTION_COUNT,
+                    "a live section holding {word} in integrator {integrator} must refuse elision"
+                );
+                assert_eq!(
+                    cascade_sections_mono::<Simd8, 8>(&left_channel, &left, FRAMES).1,
+                    EQ_SECTION_COUNT,
+                    "and so must its mono body"
+                );
+            }
+        }
+        // A finite state there is admitted: the term refuses non-finite words, not large ones.
+        let mut left_channel = dry_cut_channel::<Simd8, 8>(0, 0b0000_0001, 0);
+        let right_channel = dry_cut_channel::<Simd8, 8>(3, 0, 0);
+        left_channel.sections[HPF_SECTION].state.ic2 = Simd8::splat(-f32::MAX);
+        let (left, right) = (block::<8>(0, 0), block::<8>(0, 3));
+        assert_eq!(kept(&left_channel, &right_channel, &left, &right), 3);
     }
 
     /// The `-0.0` refusal is load-bearing: forced past it, the bits really do move.
@@ -4432,6 +5868,393 @@ mod elision {
     }
 }
 
+/// Issue #999 gate 1: the §4.4 verdict the stationary cascade folds into its depth-one pass is
+/// [`check_block`] of the planes that pass wrote, and only a block that runs that pass on an
+/// admitted plan takes it.
+///
+/// [`interleave`] returns the tail's verdict for an admitted list of odd length (1, 3 or 5
+/// sections) and `None` for everything else -- an even list (0, 2 or 4), a refused or all-live list
+/// (6), and a ramped block -- where [`PreparedParametricEq::render`] keeps the scan. Each block
+/// below is rendered through [`process_channels`] and [`process_channels_mono`] exactly as `render`
+/// calls them, and the returned verdict is compared with `check_block` of the rendered planes.
+///
+/// The words that reach the tail's store are steered to the limit with *scale* sections -- live
+/// sections holding `c1 = a2 = a3 = m1 = m2 = +0.0` and a chosen `m0`, whose output is `m0 * x`
+/// rounded once for every finite state and every `x != -0.0` -- so the stored words include the
+/// limit itself (`m0 = 1.0` on an admitted `1e30`), its neighbours, both infinities and `NaN` (a
+/// *clash* section, whose `m2 * v2` is `-inf` against a restored `ic2 = 1e30`). Every input word
+/// is admitted: finite, at most `1e30` in magnitude, never `-0.0`. A second family renders the
+/// corpus bands over admitted input scaled to `1e30` with huge restored integrators, the states
+/// elision leg (c) admits in a live section. At `f32`, `Simd4` and `Simd8`, dual and collapsed
+/// mono; every category of stored word and every combination of the two channels' verdicts
+/// occurs at every width.
+#[cfg(test)]
+mod boundary_fold {
+    use super::{
+        BLOCK_LIMIT, Channel, EQ_SECTION_COUNT, EqSvfWords, cascade_sections,
+        cascade_sections_mono, check_block, corpus, lane_set, process_channels,
+        process_channels_mono,
+    };
+    use lane::{Lane, Simd4, Simd8};
+
+    /// `2^104`: times `1e30` it overflows, times `1.0` it does not.
+    const HUGE: f32 = f32::from_bits(0x7380_0000);
+    /// The largest `f32` below the limit, and the smallest above it.
+    const BELOW: f32 = f32::from_bits(BLOCK_LIMIT.to_bits() - 1);
+    const ABOVE: f32 = f32::from_bits(BLOCK_LIMIT.to_bits() + 1);
+
+    /// A live section whose output is `m0 * x` (see the module comment). `m0 = 1.0` is the
+    /// identity words: that lane stores its input unchanged, and is dry in a dedicated cut.
+    fn scale(m0: f32) -> EqSvfWords {
+        EqSvfWords {
+            c1: 0.0,
+            a2: 0.0,
+            a3: 0.0,
+            m0,
+            m1: 0.0,
+            m2: 0.0,
+        }
+    }
+
+    /// A live section whose mix meets itself at infinity once `ic2 = 1e30`: `m2 * v2 = -inf`, so
+    /// `x = 1e30` gives `-inf + inf = NaN` and a small `x` gives `-inf`.
+    fn clash() -> EqSvfWords {
+        EqSvfWords {
+            c1: 0.0,
+            a2: 0.0,
+            a3: 0.0,
+            m0: HUGE,
+            m1: 0.0,
+            m2: -HUGE,
+        }
+    }
+
+    /// Words that never amplify: ahead of the tail, and on a channel meant to pass.
+    fn tame(index: usize) -> EqSvfWords {
+        [
+            scale(1.0),
+            scale(0.5),
+            scale(f32::from_bits(0x3f7f_ffff)),
+            scale(1.0),
+        ][index % 4]
+    }
+
+    /// Words that push the stored word past the limit, to infinity, or to `NaN`.
+    fn hot(index: usize) -> EqSvfWords {
+        [
+            scale(1.0),
+            scale(f32::from_bits(0x3f80_0001)),
+            scale(HUGE),
+            clash(),
+            scale(1.0),
+            scale(0.5),
+        ][index % 6]
+    }
+
+    /// Admitted input words at the limit and around it.
+    const LOUD: [f32; 10] = [
+        1.0e30, BELOW, 1.0, -1.0e30, 5.0e29, 0.0, 1.0e-39, -BELOW, 7.0, -3.0e-5,
+    ];
+    /// Admitted input words that no tame section carries past the limit.
+    const QUIET: [f32; 5] = [1.0, 0.5, 0.0, 2.0, -1.0];
+
+    /// What the folded blocks stored, and how their verdicts fell.
+    #[derive(Default, Debug)]
+    struct Seen {
+        folded: usize,
+        scanned: usize,
+        /// Dual verdicts `(left, right)`: pass-pass, fail-pass, pass-fail, fail-fail.
+        dual: [usize; 4],
+        /// Mono verdicts: pass, fail.
+        mono: [usize; 2],
+        at: usize,
+        below: usize,
+        above: usize,
+        positive_infinity: usize,
+        negative_infinity: usize,
+        nan: usize,
+        /// Folded dual blocks of the corpus family where a channel failed, and where both passed.
+        designed: [usize; 2],
+    }
+
+    impl Seen {
+        fn stored(&mut self, words: &[f32]) {
+            for &word in words {
+                match word {
+                    _ if word.is_nan() => self.nan += 1,
+                    f32::INFINITY => self.positive_infinity += 1,
+                    f32::NEG_INFINITY => self.negative_infinity += 1,
+                    _ if word.abs() == BLOCK_LIMIT => self.at += 1,
+                    _ if word.abs() == BELOW => self.below += 1,
+                    _ if word.abs() == ABOVE => self.above += 1,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// One AoSoA plane of `frames` frames from `word(frame, lane)`.
+    fn plane<const W: usize>(frames: usize, word: impl Fn(usize, usize) -> f32) -> Vec<f32> {
+        (0..frames * W)
+            .map(|cell| word(cell / W, cell % W))
+            .collect()
+    }
+
+    /// Renders one block both ways `render` can: the dual body over `(left, right)` and the
+    /// collapsed body over `left`; asserts the verdict rule and records what was stored.
+    #[allow(clippy::too_many_arguments)]
+    fn judge<L: Lane, const W: usize>(
+        label: &str,
+        build: &dyn Fn(usize) -> Channel<L, W>,
+        left: &[f32],
+        right: &[f32],
+        frames: usize,
+        stationary: bool,
+        designed: bool,
+        seen: &mut Seen,
+    ) {
+        let (mut left_channel, mut right_channel) = (build(0), build(1));
+        let (mut left_plane, mut right_plane) = (left.to_vec(), right.to_vec());
+        let kept = cascade_sections::<L, W>(
+            &left_channel,
+            &right_channel,
+            &left_plane,
+            &right_plane,
+            frames,
+        )
+        .1;
+        let within = process_channels(
+            (&mut left_channel, &mut right_channel),
+            &mut left_plane,
+            &mut right_plane,
+            frames,
+            stationary,
+        );
+        let scan = [
+            check_block::<L>(&left_plane),
+            check_block::<L>(&right_plane),
+        ];
+        assert_eq!(
+            within.is_some(),
+            stationary && kept % 2 == 1,
+            "{label} dual: kept {kept}, stationary {stationary}: only an admitted list ending in \
+             the depth-one pass folds the verdict"
+        );
+        if let Some(verdict) = within {
+            assert_eq!(
+                verdict, scan,
+                "{label} dual: kept {kept}: the folded verdict is not the scan"
+            );
+            seen.folded += 1;
+            seen.dual[usize::from(!verdict[0]) + 2 * usize::from(!verdict[1])] += 1;
+            seen.stored(&left_plane);
+            seen.stored(&right_plane);
+            if designed {
+                seen.designed[usize::from(verdict == [true; 2])] += 1;
+            }
+        } else {
+            seen.scanned += 1;
+        }
+
+        let mut channel = build(0);
+        let mut io = left.to_vec();
+        let kept = cascade_sections_mono::<L, W>(&channel, &io, frames).1;
+        let within = process_channels_mono(&mut channel, &mut io, frames, stationary);
+        let scan = check_block::<L>(&io);
+        assert_eq!(
+            within.is_some(),
+            stationary && kept % 2 == 1,
+            "{label} mono: kept {kept}, stationary {stationary}: only an admitted list ending in \
+             the depth-one pass folds the verdict"
+        );
+        if let Some(verdict) = within {
+            assert_eq!(
+                verdict, scan,
+                "{label} mono: kept {kept}: the folded verdict is not the scan"
+            );
+            seen.folded += 1;
+            seen.mono[usize::from(!verdict)] += 1;
+            seen.stored(&io);
+        } else {
+            seen.scanned += 1;
+        }
+    }
+
+    /// A channel whose sections in `live` are scale or clash sections and the rest the identity.
+    /// The last live section takes its words from `tail`, the others from [`tame`]; a lane holding
+    /// [`clash`] starts from `ic2 = 1e30`.
+    fn steered<L: Lane, const W: usize>(
+        live: u8,
+        tail: fn(usize) -> EqSvfWords,
+        variant: usize,
+        side: usize,
+    ) -> Channel<L, W> {
+        let mut disabled = corpus::sections(0);
+        for band in &mut disabled {
+            band.enabled = false;
+        }
+        let mut channel = Channel::<L, W>::new([disabled; W], corpus::CORPUS_RATE)
+            .expect("a disabled band is a legal design");
+        let last = (0..EQ_SECTION_COUNT).rev().find(|s| live & (1 << s) != 0);
+        for section in (0..EQ_SECTION_COUNT).filter(|s| live & (1 << s) != 0) {
+            for lane in 0..W {
+                let index = lane + 2 * section + side + variant;
+                let words = if Some(section) == last {
+                    tail(index)
+                } else {
+                    tame(index)
+                };
+                channel.settle(section, lane, words);
+                if words.m2 != 0.0 {
+                    lane_set(&mut channel.sections[section].state.ic2, lane, 1.0e30);
+                }
+            }
+        }
+        channel
+    }
+
+    /// Masks of live sections: nothing, one (a cut, a band, the other cut), two, three, four, five
+    /// (the LPF last, and the HPF first), all six.
+    const LIVE: [u8; 11] = [
+        0b00_0000, 0b00_0001, 0b00_0100, 0b10_0000, 0b10_0001, 0b01_0110, 0b10_0110, 0b01_1110,
+        0b11_1101, 0b01_1111, 0b11_1111,
+    ];
+
+    fn sweep<L: Lane, const W: usize>(width: &str) -> Seen {
+        let mut seen = Seen::default();
+        type Table = fn(usize) -> EqSvfWords;
+        let pairs: [(Table, Table, bool); 5] = [
+            (tame, tame, true),
+            (tame, tame, false),
+            (tame, hot, true),
+            (hot, tame, true),
+            (hot, hot, true),
+        ];
+        for live in LIVE {
+            for (pair, &(left_tail, right_tail, loud)) in pairs.iter().enumerate() {
+                for variant in 0..3 {
+                    for frames in [1_usize, 16] {
+                        let tails = [left_tail, right_tail];
+                        let build = |side: usize| steered::<L, W>(live, tails[side], variant, side);
+                        let word = |side: usize| {
+                            move |frame: usize, lane: usize| {
+                                let index = frame + 3 * lane + 5 * side + variant;
+                                if loud {
+                                    LOUD[index % LOUD.len()]
+                                } else {
+                                    QUIET[index % QUIET.len()]
+                                }
+                            }
+                        };
+                        let left = plane::<W>(frames, word(0));
+                        let right = plane::<W>(frames, word(1));
+                        let label = format!(
+                            "{width} live {live:06b} pair {pair} variant {variant} frames {frames}"
+                        );
+                        for stationary in [true, false] {
+                            judge::<L, W>(
+                                &label, &build, &left, &right, frames, stationary, false, &mut seen,
+                            );
+                        }
+                        // Refused: one `-0.0`, then one `NaN`, on the right plane.
+                        for poison in [-0.0_f32, f32::NAN] {
+                            let mut refused = right.clone();
+                            refused[frames * W - 1] = poison;
+                            judge::<L, W>(
+                                &format!("{label} poisoned {poison}"),
+                                &build,
+                                &left,
+                                &refused,
+                                frames,
+                                true,
+                                false,
+                                &mut seen,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // The corpus bands (odd live counts of general bands) over admitted input scaled to the
+        // limit, some lanes holding huge restored integrators in a live band; and, quiet, over the
+        // same input scaled to `1e20` with no restored state.
+        for live in [0b00_0100_u8, 0b01_0110, 0b01_1110 | 0b00_0001] {
+            for seed in 0..6 {
+                let loud = seed < 4;
+                let build = |side: usize| {
+                    let targets = core::array::from_fn(|lane| {
+                        let mut bands = corpus::sections((lane + 3 * side) % corpus::LANES);
+                        for (section, band) in bands.iter_mut().enumerate() {
+                            band.enabled = live & (1 << section) != 0 && section != 0;
+                        }
+                        bands
+                    });
+                    let mut channel = Channel::<L, W>::new(targets, corpus::CORPUS_RATE)
+                        .expect("every corpus row is a legal design");
+                    for lane in (0..W).filter(|lane| loud && (lane + side + seed).is_multiple_of(3))
+                    {
+                        let section = 2 + (lane + seed) % 2;
+                        if live & (1 << section) != 0 {
+                            let state = &mut channel.sections[section].state;
+                            lane_set(&mut state.ic1, lane, f32::MAX);
+                            lane_set(&mut state.ic2, lane, -f32::MAX);
+                        }
+                    }
+                    channel
+                };
+                let frames = 64;
+                let word = |side: usize| {
+                    move |frame: usize, lane: usize| {
+                        let mut samples = [0.0_f32; corpus::FRAMES];
+                        corpus::fill(0, (lane + side + seed) % corpus::LANES, &mut samples);
+                        samples[frame] * if loud { 1.0e30 } else { 1.0e20 }
+                    }
+                };
+                let left = plane::<W>(frames, word(0));
+                let right = plane::<W>(frames, word(1));
+                let label = format!("{width} corpus live {live:06b} seed {seed}");
+                judge::<L, W>(&label, &build, &left, &right, frames, true, true, &mut seen);
+            }
+        }
+        seen
+    }
+
+    fn check<L: Lane, const W: usize>(width: &str) {
+        let seen = sweep::<L, W>(width);
+        println!("boundary fold {width}: {seen:?}");
+        assert!(seen.folded > 0 && seen.scanned > 0, "{width}: {seen:?}");
+        assert!(
+            seen.dual.iter().all(|&count| count > 0) && seen.mono.iter().all(|&count| count > 0),
+            "{width}: every combination of verdicts must occur: {seen:?}"
+        );
+        assert!(
+            [
+                seen.at,
+                seen.below,
+                seen.above,
+                seen.positive_infinity,
+                seen.negative_infinity,
+                seen.nan,
+            ]
+            .iter()
+            .all(|&count| count > 0),
+            "{width}: the folded blocks must store words at, just below and just above the limit, \
+             both infinities and NaN: {seen:?}"
+        );
+        assert!(
+            seen.designed.iter().all(|&count| count > 0),
+            "{width}: the corpus family must fold failing and passing blocks: {seen:?}"
+        );
+    }
+
+    #[test]
+    fn the_folded_verdict_is_the_boundary_scan() {
+        check::<f32, 1>("Scalar");
+        check::<Simd4, 4>("Simd4");
+        check::<Simd8, 8>("Simd8");
+    }
+}
+
 #[cfg(test)]
 mod target_application {
     use super::*;
@@ -4536,5 +6359,1783 @@ mod target_application {
         );
         assert_eq!(report.invalid_spans, 1);
         assert_eq!(design_call_count(), 0);
+    }
+}
+
+/// Issue #1005: a ramping block runs only live or ramping sections, under the elision gate.
+///
+/// Two gates, at every width (`f32`, `Simd4`, `Simd8`), dual and collapsed:
+///
+/// * **The list, structurally** (gate 2). The unsafe-ramp rule cannot be seen by a random
+///   differential -- its counterexample needs a constructed subnormal underflow -- so the list
+///   [`ramping_sections`] returns is asserted directly for the shapes the rule decides.
+/// * **The bank differential** (gate 1). Two prepared EQs per scenario, one rendering ramping
+///   blocks the batch-head way ([`Channel::process_block`], the unit-test default of the
+///   [`RAMPING_LIST`] switch) and one through the list, driven through the contract calls
+///   with production target preparation, resets, restores and hostile input. Every output word,
+///   every report, every lane payload and every internal word is compared by bits after every
+///   block.
+#[cfg(test)]
+mod ramping_elision {
+    use super::*;
+    use effect_contract::{
+        EffectBankProcessBlock, EffectTargetRequest, NativeEffectTargetPreparation,
+    };
+
+    const RATE: SampleRateHz = SampleRateHz(48_000);
+    const QUANTUM: usize = 128;
+    const BAND: usize = BAND_SECTION_OFFSET;
+
+    // ---------------------------------------------------------------------------------------
+    // Gate 2: the list, structurally.
+    // ---------------------------------------------------------------------------------------
+
+    fn target(enabled: bool, kind: EqBandKind, frequency: f32, gain: f32, q: f32) -> BandTarget {
+        BandTarget {
+            enabled,
+            kind,
+            frequency,
+            gain,
+            q,
+            slope: 1.0,
+        }
+    }
+
+    fn off() -> BandTarget {
+        target(false, EqBandKind::Bell, 1_000.0, 0.0, 1.0)
+    }
+
+    fn design(kind: EqBandKind, frequency: f32, gain: f32, q: f32) -> EqSvfWords {
+        design_svf(kind, frequency, gain, q, 1.0, RATE).expect("a legal design")
+    }
+
+    /// The physical layout the gate-2 shapes share: HPF off, band 1 a live bell, bands 2-4 as
+    /// given, LPF off.
+    fn layout(band2: BandTarget) -> [BandTarget; EQ_SECTION_COUNT] {
+        let mut sections = [off(); EQ_SECTION_COUNT];
+        sections[HPF_SECTION] = target(false, EqBandKind::HighPass, 80.0, 0.0, 0.7);
+        sections[BAND] = target(true, EqBandKind::Bell, 400.0, -3.0, 1.0);
+        sections[BAND + 1] = band2;
+        sections[LPF_SECTION] = target(false, EqBandKind::LowPass, 12_000.0, 0.0, 0.7);
+        sections
+    }
+
+    fn channel<L: Lane, const W: usize>(sections: [BandTarget; EQ_SECTION_COUNT]) -> Channel<L, W> {
+        Channel::new([sections; W], RATE).expect("a legal channel")
+    }
+
+    fn admitted<const W: usize>() -> Vec<f32> {
+        (0..QUANTUM * W)
+            .map(|index| 0.25 - 0.001 * (index % 97) as f32)
+            .collect()
+    }
+
+    /// The list at this width, dual (the pair) and collapsed (the left channel alone).
+    fn lists<L: Lane, const W: usize>(
+        left: &Channel<L, W>,
+        right: &Channel<L, W>,
+        io: &[f32],
+    ) -> (Vec<usize>, Vec<usize>) {
+        let (dual, dual_length) = ramping_sections::<L, W>(left, right, io, io, QUANTUM);
+        let (mono, mono_length) = ramping_sections_mono::<L, W>(left, io, QUANTUM);
+        (dual[..dual_length].to_vec(), mono[..mono_length].to_vec())
+    }
+
+    /// Both channels built from `sections`, then `ramp` applied to each.
+    fn pair<L: Lane, const W: usize>(
+        sections: [BandTarget; EQ_SECTION_COUNT],
+        ramp: impl Fn(&mut Channel<L, W>),
+    ) -> (Channel<L, W>, Channel<L, W>) {
+        let mut left = channel::<L, W>(sections);
+        let mut right = channel::<L, W>(sections);
+        ramp(&mut left);
+        ramp(&mut right);
+        (left, right)
+    }
+
+    fn expect_list<L: Lane, const W: usize>(
+        width: &str,
+        shape: &str,
+        channels: &(Channel<L, W>, Channel<L, W>),
+        expected: &[usize],
+    ) {
+        let io = admitted::<W>();
+        let (dual, mono) = lists::<L, W>(&channels.0, &channels.1, &io);
+        assert_eq!(dual, expected, "{width}: {shape}: the dual list");
+        assert_eq!(mono, expected, "{width}: {shape}: the collapsed list");
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn unsafe_ramp_rule<L: Lane, const W: usize>(width: &str) {
+        let shelf = target(true, EqBandKind::HighShelf, 3_000.0, 6.0, 0.7);
+        let bell = target(true, EqBandKind::Bell, 2_000.0, 4.0, 1.2);
+        let shelf_ride = design(EqBandKind::HighShelf, 3_000.0, 7.5, 0.7);
+        let bell_ride = design(EqBandKind::Bell, 2_000.0, 5.5, 1.2);
+
+        // A ramping high shelf in band 2, bands 3 and 4 dead: they are kept, and so is the LPF,
+        // because the shelf's `m0` word moves. The HPF ahead of it still goes.
+        let shape = pair::<L, W>(layout(shelf), |c| c.start_ramp(BAND + 1, 0, shelf_ride));
+        expect_list(width, "ramping high shelf", &shape, &[1, 2, 3, 4, 5]);
+
+        // The same with a ramping bell: `m0` stays exactly one, so they go.
+        let shape = pair::<L, W>(layout(bell), |c| c.start_ramp(BAND + 1, 0, bell_ride));
+        expect_list(width, "ramping bell", &shape, &[1, 2]);
+
+        // An LPF-cut toggle: an unsafe ramp (its `m0` falls from one to zero), and nothing
+        // follows it, so the list keeps nothing extra.
+        let mut sections = layout(off());
+        sections[LPF_SECTION].enabled = true;
+        let lpf = design(EqBandKind::LowPass, 12_000.0, 0.0, 0.7);
+        let shape = pair::<L, W>(layout(off()), |c| {
+            c.targets[0][LPF_SECTION] = sections[LPF_SECTION];
+            c.start_ramp(LPF_SECTION, 0, lpf);
+        });
+        expect_list(width, "LPF toggle", &shape, &[1, 5]);
+
+        // An HPF-cut toggle: the identity and a high pass both have `m0 = 1`, so the dead bands
+        // after it go. The HPF itself is ramping from the identity and runs.
+        let hpf = design(EqBandKind::HighPass, 80.0, 0.0, 0.7);
+        let shape = pair::<L, W>(layout(off()), |c| c.start_ramp(HPF_SECTION, 0, hpf));
+        expect_list(width, "HPF toggle", &shape, &[0, 1]);
+
+        // VERIFY-AUTOMATION A2: an identity -> high-shelf ramp in band 2. `coef.m0` starts at
+        // exactly one, but its increment does not, so bands 3 and 4 are kept (mutation M7).
+        let shape = pair::<L, W>(layout(off()), |c| c.start_ramp(BAND + 1, 0, shelf_ride));
+        assert!(
+            lane_bits_all::<L>(shape.0.sections[BAND + 1].coef.m0, 1.0_f32.to_bits()),
+            "{width}: the enable ramp starts at m0 = 1"
+        );
+        expect_list(width, "identity to high shelf", &shape, &[1, 2, 3, 4, 5]);
+
+        // The production twin of that shape: a high shelf at 0 dB designs `m0 = A^2 = 1` exactly,
+        // and a ride to +6 dB moves it.
+        let flat = target(true, EqBandKind::HighShelf, 3_000.0, 0.0, 0.7);
+        let shape = pair::<L, W>(layout(flat), |c| {
+            c.start_ramp(
+                BAND + 1,
+                0,
+                design(EqBandKind::HighShelf, 3_000.0, 6.0, 0.7),
+            );
+        });
+        assert!(
+            lane_bits_all::<L>(shape.0.sections[BAND + 1].coef.m0, 1.0_f32.to_bits()),
+            "{width}: a 0 dB high shelf has m0 = 1"
+        );
+        expect_list(width, "0 dB shelf ride", &shape, &[1, 2, 3, 4, 5]);
+
+        // A lane-mixed section: a bell ramping on the left channel, a high shelf ramping on the
+        // right. The dual list keeps the dead sections after it; each channel's own list is the
+        // shape it carries.
+        let left = {
+            let mut c = channel::<L, W>(layout(bell));
+            c.start_ramp(BAND + 1, 0, bell_ride);
+            c
+        };
+        let right = {
+            let mut c = channel::<L, W>(layout(shelf));
+            c.start_ramp(BAND + 1, 0, shelf_ride);
+            c
+        };
+        let io = admitted::<W>();
+        let (dual, _) = lists::<L, W>(&left, &right, &io);
+        assert_eq!(dual, [1, 2, 3, 4, 5], "{width}: channel-mixed section");
+
+        // Mixed across lanes within one channel: a bell on lane 0 and a high shelf on the last
+        // lane, both ramping.
+        if W > 1 {
+            let mut per_lane = [layout(bell); W];
+            per_lane[W - 1] = layout(shelf);
+            let build = || {
+                let mut c = Channel::<L, W>::new(per_lane, RATE).expect("a legal channel");
+                c.start_ramp(BAND + 1, 0, bell_ride);
+                c.start_ramp(BAND + 1, W - 1, shelf_ride);
+                c
+            };
+            let shape = (build(), build());
+            expect_list(width, "lane-mixed section", &shape, &[1, 2, 3, 4, 5]);
+            // Only the bell lane ramps: the settled shelf lane's `m0` is still not one.
+            let build = || {
+                let mut c = Channel::<L, W>::new(per_lane, RATE).expect("a legal channel");
+                c.start_ramp(BAND + 1, 0, bell_ride);
+                c
+            };
+            let shape = (build(), build());
+            expect_list(
+                width,
+                "bell ramp beside a shelf lane",
+                &shape,
+                &[1, 2, 3, 4, 5],
+            );
+        }
+
+        // The gate refuses into all six, as the stationary gate does.
+        let shape = pair::<L, W>(layout(bell), |c| c.start_ramp(BAND + 1, 0, bell_ride));
+        let mut io = admitted::<W>();
+        io[3] = -0.0;
+        let (dual, mono) = lists::<L, W>(&shape.0, &shape.1, &io);
+        assert_eq!(
+            (dual.len(), mono.len()),
+            (6, 6),
+            "{width}: a -0.0 input refuses"
+        );
+        let mut refused = pair::<L, W>(layout(bell), |c| c.start_ramp(BAND + 1, 0, bell_ride));
+        lane_set(&mut refused.0.sections[BAND + 2].state.ic2, 0, -0.0);
+        lane_set(&mut refused.1.sections[BAND + 2].state.ic2, 0, -0.0);
+        let io = admitted::<W>();
+        let (dual, mono) = lists::<L, W>(&refused.0, &refused.1, &io);
+        assert_eq!(
+            (dual.len(), mono.len()),
+            (6, 6),
+            "{width}: a -0.0 dead state refuses"
+        );
+        let mut refused = pair::<L, W>(layout(bell), |c| c.start_ramp(BAND + 1, 0, bell_ride));
+        lane_set(&mut refused.0.sections[BAND].state.ic1, 0, -0.0);
+        lane_set(&mut refused.1.sections[BAND].state.ic1, 0, -0.0);
+        let (dual, mono) = lists::<L, W>(&refused.0, &refused.1, &io);
+        assert_eq!(
+            (dual.len(), mono.len()),
+            (6, 6),
+            "{width}: a -0.0 live state refuses"
+        );
+
+        // Nothing dead: all six, unscanned.
+        let mut every = [target(true, EqBandKind::Bell, 900.0, 2.0, 1.0); EQ_SECTION_COUNT];
+        every[HPF_SECTION] = target(true, EqBandKind::HighPass, 40.0, 0.0, 0.7);
+        every[LPF_SECTION] = target(true, EqBandKind::LowPass, 15_000.0, 0.0, 0.7);
+        let shape = pair::<L, W>(every, |c| c.start_ramp(BAND + 1, 0, bell_ride));
+        expect_list(width, "all live", &shape, &[0, 1, 2, 3, 4, 5]);
+    }
+
+    /// Gate 2 at every width, dual and collapsed.
+    #[test]
+    fn the_unsafe_ramp_rule_keeps_every_dead_section_after_it() {
+        unsafe_ramp_rule::<f32, 1>("Scalar");
+        unsafe_ramp_rule::<Simd4, 4>("Simd4");
+        unsafe_ramp_rule::<Simd8, 8>("Simd8");
+    }
+
+    /// A ramping identity section is not dead, on either list: the identity flag of a section
+    /// in flight is stale by design, and `ramping` is what keeps it from being read (M2, M4, M6).
+    fn ramping_identity_runs<L: Lane, const W: usize>(width: &str) {
+        let hpf = design(EqBandKind::HighPass, 80.0, 0.0, 0.7);
+        // One channel only: the other is dead there, so the section is ramping on one side.
+        let mut left = channel::<L, W>(layout(off()));
+        let right = channel::<L, W>(layout(off()));
+        left.start_ramp(HPF_SECTION, W - 1, hpf);
+        assert!(
+            left.identity[HPF_SECTION],
+            "{width}: the flag still says identity"
+        );
+        let io = admitted::<W>();
+        let (dual, _) = ramping_sections::<L, W>(&left, &right, &io, &io, QUANTUM);
+        assert_eq!(
+            dual[..2],
+            [0, 1],
+            "{width}: the left ramp keeps the HPF (dual)"
+        );
+        let (dual, _) = ramping_sections::<L, W>(&right, &left, &io, &io, QUANTUM);
+        assert_eq!(
+            dual[..2],
+            [0, 1],
+            "{width}: the right ramp keeps the HPF (dual)"
+        );
+        let (mono, length) = ramping_sections_mono::<L, W>(&left, &io, QUANTUM);
+        assert_eq!(
+            mono[..length],
+            [0, 1],
+            "{width}: the ramp keeps the HPF (collapsed)"
+        );
+    }
+
+    #[test]
+    fn a_ramping_identity_section_is_never_dead() {
+        ramping_identity_runs::<f32, 1>("Scalar");
+        ramping_identity_runs::<Simd4, 4>("Simd4");
+        ramping_identity_runs::<Simd8, 8>("Simd8");
+    }
+
+    /// The one restored state leg (c) as the stationary gate writes it lets past: a live high shelf
+    /// at `m0 = m2 = 0.5` holding `ic1 = ic2 = -2^-149`, fed `-2^-149`, emits `-0.0` on its first
+    /// frame (see [`section_state_is_flush_shaped`]). Behind a ramping HPF toggle, with every
+    /// section after the shelf dead, the tightened leg refuses the list, and the block renders
+    /// the batch-head bits. Red with leg (c) as the stationary gate has it (M8): the dead band
+    /// after the shelf is elided and passes the `-0.0` the executed one rewrites to `+0.0`.
+    fn restored_subnormal_live_state<L: Lane, const W: usize>(width: &str) {
+        let magic = target(true, EqBandKind::HighShelf, 3_000.0, -6.020_6, 0.7);
+        let words = magic.words(RATE).expect("a legal shelf");
+        assert_eq!(
+            (words.m0.to_bits(), words.m2.to_bits()),
+            (0.5_f32.to_bits(), 0.5_f32.to_bits()),
+            "{width}: the shelf designs m0 = m2 = 0.5"
+        );
+        let mut sections = layout(off());
+        sections[BAND] = magic;
+        let hpf = design(EqBandKind::HighPass, 80.0, 0.0, 0.7);
+        let tiny = f32::from_bits(0x8000_0001);
+        let build = || {
+            let mut c = channel::<L, W>(sections);
+            c.start_ramp(HPF_SECTION, 0, hpf);
+            lane_set(&mut c.sections[BAND].state.ic1, 0, tiny);
+            lane_set(&mut c.sections[BAND].state.ic2, 0, tiny);
+            c
+        };
+        let mut io = admitted::<W>();
+        io[0] = tiny;
+        for mono in [false, true] {
+            let mut rendered = Vec::new();
+            for list in [false, true] {
+                let (mut left, mut right) = (build(), build());
+                let (mut l, mut r) = (io.clone(), io.clone());
+                RAMPING_LIST.with(|switch| switch.set(list));
+                if mono {
+                    process_channels_mono::<L, W>(&mut left, &mut l, QUANTUM, false);
+                } else {
+                    process_channels::<L, W>(
+                        (&mut left, &mut right),
+                        &mut l,
+                        &mut r,
+                        QUANTUM,
+                        false,
+                    );
+                }
+                RAMPING_LIST.with(|switch| switch.set(false));
+                let mut state = [0_u32; EQ_SECTION_COUNT * 2 * MAX_LANES];
+                left.state_bits(&mut state);
+                let bits: Vec<u32> = l.iter().chain(&r).map(|word| word.to_bits()).collect();
+                rendered.push((bits, state));
+            }
+            assert!(
+                rendered[0] == rendered[1],
+                "{width} mono {mono}: the list moved a bit behind a restored subnormal"
+            );
+        }
+        let (dual, mono) = lists::<L, W>(&build(), &build(), &io);
+        assert_eq!(
+            (dual.len(), mono.len()),
+            (6, 6),
+            "{width}: a restored subnormal in a live section refuses the list"
+        );
+        // Once the kernel has flushed the words, the list engages again.
+        let mut flushed = (build(), build());
+        for channel in [&mut flushed.0, &mut flushed.1] {
+            lane_set(&mut channel.sections[BAND].state.ic1, 0, 0.0);
+            lane_set(&mut channel.sections[BAND].state.ic2, 0, 0.0);
+        }
+        expect_list(width, "flushed shelf state", &flushed, &[0, 1]);
+    }
+
+    #[test]
+    fn a_restored_subnormal_live_state_refuses_the_list() {
+        restored_subnormal_live_state::<f32, 1>("Scalar");
+        restored_subnormal_live_state::<Simd4, 4>("Simd4");
+        restored_subnormal_live_state::<Simd8, 8>("Simd8");
+    }
+
+    /// Every word a channel holds, as bits: coefficients, increments, targets, integrators, the
+    /// countdowns and the identity flags.
+    fn channel_bits<L: Lane, const W: usize>(channel: &Channel<L, W>) -> Vec<u32> {
+        let mut out = Vec::new();
+        let mut lanes = [0_u32; MAX_LANES];
+        let mut push = |value: L, out: &mut Vec<u32>| {
+            value.store_bits(&mut lanes[..L::WIDTH]);
+            out.extend_from_slice(&lanes[..L::WIDTH]);
+        };
+        for section in &channel.sections {
+            for index in 0..EQ_COEFFICIENT_WORDS {
+                push(coef_word(&section.coef, index), &mut out);
+                push(step_word(&section.step, index), &mut out);
+                push(coef_word(&section.target, index), &mut out);
+            }
+            push(section.state.ic1, &mut out);
+            push(section.state.ic2, &mut out);
+        }
+        for section in &channel.remaining {
+            out.extend_from_slice(section);
+        }
+        out.extend(channel.identity.iter().map(|flag| u32::from(*flag)));
+        out
+    }
+
+    /// Issue #1007 gate 1 (with VERIFY-AUTOMATION A1): `settle`, `start_ramp`, the stationary
+    /// hoist and a segment snap, on every lane including the last, with words that include `+0.0`,
+    /// `-0.0`, subnormals and `+-f32::MAX`, compared word by word against the `lane_set` path after
+    /// every step. Two lanes end their ramps in different segments of one block, and a bank-wide
+    /// ramp ends in one.
+    fn select_writes_match_lane_set<L: Lane, const W: usize>(width: &str) {
+        let odd = EqSvfWords::from_array([0.0, 1.0e-40, f32::MAX, 1.0, -f32::MAX, 0.25]);
+        let signed = EqSvfWords::from_array([0.5, f32::from_bits(1), 3.0, -0.0, 2.0, f32::MAX]);
+        let bell = design(EqBandKind::Bell, 1_500.0, 4.0, 1.3);
+        for lane in 0..W {
+            let other = (lane + 1) % W;
+            let mut traces = Vec::new();
+            for lane_set in [true, false] {
+                let path = Path {
+                    list: false,
+                    lane_set,
+                };
+                let trace = on_path(path, || {
+                    let mut trace = Vec::new();
+                    let mut c =
+                        channel::<L, W>(layout(target(true, EqBandKind::Bell, 2_000.0, 4.0, 1.2)));
+                    trace.push(channel_bits(&c));
+                    c.settle(BAND, lane, odd);
+                    trace.push(channel_bits(&c));
+                    c.start_ramp(BAND, lane, signed);
+                    trace.push(channel_bits(&c));
+                    let mut io = admitted::<W>();
+                    c.process_section(BAND, &mut io[..20 * W], 20);
+                    trace.push(channel_bits(&c));
+                    c.start_ramp(BAND, other, bell);
+                    trace.push(channel_bits(&c));
+                    c.process_section(BAND, &mut io, QUANTUM);
+                    trace.push(channel_bits(&c));
+                    // The hoist: a restatement of the words a lane holds settles it.
+                    c.start_ramp(BAND, other, bell);
+                    trace.push(channel_bits(&c));
+                    for track in 0..W {
+                        c.start_ramp(BAND + 1, track, bell);
+                    }
+                    trace.push(channel_bits(&c));
+                    c.process_section(BAND + 1, &mut io, QUANTUM);
+                    trace.push(channel_bits(&c));
+                    trace
+                });
+                traces.push(trace);
+            }
+            for (step, (old, new)) in traces[0].iter().zip(&traces[1]).enumerate() {
+                assert!(old == new, "{width} lane {lane} step {step}: a word moved");
+            }
+        }
+        // A `Both` target, the SDK's shape for a symmetric edit, on the first and last lanes.
+        let mut values: Vec<InitialParameterValue> =
+            effect_contract::default_initial_values(&PARAMETRIC_EQ_DESCRIPTOR).collect();
+        for (field, value) in [(0, 1.0), (1, 1.0), (2, 900.0), (3, -2.0), (4, 0.8)] {
+            for side in 0..2 {
+                values[field * 2 + side].value = value;
+            }
+        }
+        let requests: Vec<PrepareEffectRequest<'_>> =
+            (0..W).map(|_| request(&values, 48_000)).collect();
+        let mut target_values = values.clone();
+        let mut changed = vec![false; values.len()];
+        for side in 0..2 {
+            target_values[3 * 2 + side].value = 5.5;
+            changed[3 * 2 + side] = true;
+        }
+        let mut targets = [PreparedEffectTarget {
+            slot: 0,
+            channel: ParameterChannel::Left,
+            words: [0; effect_contract::PREPARED_EFFECT_TARGET_WORDS],
+        }; EQ_SECTION_COUNT * 2];
+        let count = ParametricEqFactory
+            .prepare_targets(
+                EffectTargetRequest {
+                    sample_rate: 48_000,
+                    values: &target_values,
+                    changed: &changed,
+                },
+                &mut targets,
+            )
+            .expect("target preparation");
+        assert_eq!(count, 1, "{width}: one target");
+        assert_eq!(
+            targets[0].channel,
+            ParameterChannel::Both,
+            "{width}: a Both target"
+        );
+        let mut arms: Vec<Arm<L, W>> = [true, false]
+            .into_iter()
+            .map(|lane_set| {
+                Arm::prepare(
+                    &requests,
+                    Path {
+                        list: true,
+                        lane_set,
+                    },
+                )
+            })
+            .collect();
+        for lane in [0, W - 1] {
+            for arm in &mut arms {
+                arm.apply(lane, &targets[0]).expect("a permitted target");
+            }
+            assert!(
+                fingerprint(&arms[0].eq) == fingerprint(&arms[1].eq),
+                "{width} lane {lane}: the Both target moved a word"
+            );
+            for block in 0..3 {
+                let mut outputs = Vec::new();
+                for arm in &mut arms {
+                    let (mut l, mut r) = (admitted::<W>(), admitted::<W>());
+                    let frames = 40 * W;
+                    arm.render(&mut l[..frames], &mut r[..frames], false, block * 40);
+                    let bits: Vec<u32> = l.iter().chain(&r).map(|word| word.to_bits()).collect();
+                    outputs.push(bits);
+                }
+                assert!(
+                    outputs[0] == outputs[1]
+                        && fingerprint(&arms[0].eq) == fingerprint(&arms[1].eq),
+                    "{width} lane {lane} block {block}: the Both ramp moved a word"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn select_lane_writes_match_lane_set_word_for_word() {
+        select_writes_match_lane_set::<f32, 1>("Scalar");
+        select_writes_match_lane_set::<Simd4, 4>("Simd4");
+        select_writes_match_lane_set::<Simd8, 8>("Simd8");
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Gate 1: the bank differential.
+    // ---------------------------------------------------------------------------------------
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        }
+        fn unit(&mut self) -> f32 {
+            (self.next() >> 40) as f32 / (1_u64 << 24) as f32
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+        fn chance(&mut self, p: f32) -> bool {
+            self.unit() < p
+        }
+        fn log(&mut self, low: f32, high: f32) -> f32 {
+            math::expf(math::logf(low) + self.unit() * (math::logf(high) - math::logf(low)))
+                .clamp(low, high)
+        }
+    }
+
+    /// One lane's value for descriptor index `index`, from the EQ's domains, with the domain ends
+    /// (VERIFY-AUTOMATION A1's boundary targets) drawn often.
+    fn draw(rng: &mut Rng, index: usize) -> f32 {
+        let edge = rng.chance(0.2);
+        if index < 24 {
+            match index % 6 {
+                0 => f32::from(u8::from(rng.chance(0.6))),
+                1 => (1 + rng.below(6)) as f32,
+                2 if edge => [10.0, 20.0, 20_000.0][rng.below(3)],
+                2 => rng.log(20.0, 18_000.0),
+                3 if edge => [-24.0, 24.0, 0.0][rng.below(3)],
+                3 => -24.0 + 48.0 * rng.unit(),
+                4 if edge => [0.1, 18.0][rng.below(2)],
+                4 => rng.log(0.2, 12.0),
+                _ if edge => [0.1, 1.0][rng.below(2)],
+                _ => 0.1 + 0.9 * rng.unit(),
+            }
+        } else {
+            match index - 24 {
+                0 | 3 => f32::from(u8::from(rng.chance(0.5))),
+                1 | 4 if edge => [10.0, 20.0, 20_000.0][rng.below(3)],
+                1 | 4 => rng.log(20.0, 18_000.0),
+                _ if edge => [0.1, 18.0][rng.below(2)],
+                _ => rng.log(0.2, 12.0),
+            }
+        }
+    }
+
+    /// Automatable descriptor indices: band frequency, gain, Q and slope, and every cut parameter.
+    fn automatable(index: usize) -> bool {
+        index >= 24 || index % 6 >= 2
+    }
+
+    fn request(values: &[InitialParameterValue], rate: u32) -> PrepareEffectRequest<'_> {
+        PrepareEffectRequest {
+            sample_rate: rate,
+            quantum: QUANTUM as u32,
+            quality: Quality::Normal,
+            bypass: false,
+            link_mode: effect_contract::LinkMode::DualMono,
+            ports: effect_contract::PreparedPorts {
+                sidechain: effect_contract::PreparedSidechainPort::None,
+            },
+            initial_values: values,
+            limits: effect_contract::PrepareEffectLimits {
+                maximum_total_state_bytes: 1 << 16,
+                maximum_scratch_bytes: 1 << 16,
+                maximum_automation_spans_per_block: 48,
+            },
+        }
+    }
+
+    fn hostile(rng: &mut Rng, profile: usize) -> f32 {
+        match profile {
+            0 => 2.0 * rng.unit() - 1.0,
+            1 => 0.0,
+            2 => {
+                if rng.chance(0.3) {
+                    -0.0
+                } else {
+                    2.0 * rng.unit() - 1.0
+                }
+            }
+            3 => f32::from_bits((rng.next() as u32) & 0x807f_ffff),
+            4 => {
+                if rng.chance(0.05) {
+                    [f32::INFINITY, f32::NEG_INFINITY, f32::NAN, 1.0e31, -3.0e38][rng.below(5)]
+                } else {
+                    2.0 * rng.unit() - 1.0
+                }
+            }
+            5 => {
+                if rng.chance(0.02) {
+                    -0.0
+                } else {
+                    1.0e-3 * (2.0 * rng.unit() - 1.0)
+                }
+            }
+            _ => {
+                // Near the ceiling, inside and just outside it.
+                if rng.chance(0.1) {
+                    [9.0e29, -1.0e30, 1.0e-39, -1.0e-45][rng.below(4)]
+                } else {
+                    2.0 * rng.unit() - 1.0
+                }
+            }
+        }
+    }
+
+    /// Every word the EQ holds, as bits: coefficients, increments, targets, integrators, the
+    /// countdowns, the identity flags, the semantic targets and the fixed-point witness.
+    fn fingerprint<L: Lane, const W: usize>(eq: &PreparedParametricEq<L, W>) -> Vec<u32> {
+        let mut out = Vec::new();
+        let mut lanes = [0_u32; MAX_LANES];
+        let mut push = |value: L, out: &mut Vec<u32>| {
+            value.store_bits(&mut lanes[..L::WIDTH]);
+            out.extend_from_slice(&lanes[..L::WIDTH]);
+        };
+        for channel in [&eq.left, &eq.right] {
+            for section in &channel.sections {
+                for index in 0..6 {
+                    push(coef_word(&section.coef, index), &mut out);
+                    push(step_word(&section.step, index), &mut out);
+                    push(coef_word(&section.target, index), &mut out);
+                }
+                push(section.state.ic1, &mut out);
+                push(section.state.ic2, &mut out);
+            }
+            for section in &channel.remaining {
+                out.extend_from_slice(section);
+            }
+            out.extend(channel.identity.iter().map(|flag| u32::from(*flag)));
+            for track in &channel.targets {
+                for band in track {
+                    out.push(u32::from(band.enabled));
+                    out.push(band.kind as u32);
+                    out.extend(band.numeric().iter().map(|value| value.to_bits()));
+                    out.push(band.slope.to_bits());
+                }
+            }
+        }
+        out.push(u32::from(eq.silent_fixed_point));
+        out
+    }
+
+    /// The contract payload of every lane.
+    fn payloads<L: Lane, const W: usize>(eq: &PreparedParametricEq<L, W>) -> Vec<u8> {
+        let mut out = Vec::new();
+        for lane in 0..W {
+            let mut common = vec![0_u8; STATE_SIZES.common];
+            let mut left = vec![0_u8; STATE_SIZES.left];
+            let mut right = vec![0_u8; STATE_SIZES.right];
+            eq.snapshot_track(
+                lane,
+                StatePayloadOutput {
+                    common: &mut common,
+                    left: &mut left,
+                    right: &mut right,
+                },
+            )
+            .expect("snapshot");
+            out.extend_from_slice(&common);
+            out.extend_from_slice(&left);
+            out.extend_from_slice(&right);
+        }
+        out
+    }
+
+    /// Which kernel an arm runs: the section list on ramping blocks (issue #1005) or the
+    /// batch-head `process_block`, and #1005's `lane_set` writes or #1007's `select` writes.
+    #[derive(Clone, Copy, Debug)]
+    struct Path {
+        list: bool,
+        lane_set: bool,
+    }
+
+    /// Runs `body` with this thread's unit-test switches set to `path`, and restores the defaults.
+    fn on_path<R>(path: Path, body: impl FnOnce() -> R) -> R {
+        RAMPING_LIST.with(|switch| switch.set(path.list));
+        LANE_SET_WRITES.with(|switch| switch.set(path.lane_set));
+        let result = body();
+        RAMPING_LIST.with(|switch| switch.set(false));
+        LANE_SET_WRITES.with(|switch| switch.set(false));
+        result
+    }
+
+    /// One arm of the differential: a prepared EQ of this width driven through the contract, on
+    /// its own kernel path. Every call that can write a lane or render runs on that path.
+    struct Arm<L: Lane, const W: usize> {
+        eq: PreparedParametricEq<L, W>,
+        path: Path,
+    }
+
+    impl<L: Lane, const W: usize> Arm<L, W> {
+        fn prepare(requests: &[PrepareEffectRequest<'_>], path: Path) -> Self {
+            let metadata = expected_prepared_metadata(&PARAMETRIC_EQ_DESCRIPTOR, requests[0])
+                .expect("metadata");
+            let width = if W == 8 {
+                BankWidth::Eight
+            } else {
+                BankWidth::Four
+            };
+            Self {
+                eq: on_path(path, || {
+                    prepare_width::<L, W>(metadata, width, requests).expect("preparation")
+                }),
+                path,
+            }
+        }
+
+        /// Renders one block through the entry point this width ships, and returns the report
+        /// as words. A bank goes through `process_bank` or `process_bank_mono`; the scalar
+        /// instance's `process` is its bypass check, [`PreparedParametricEq::render`] and the
+        /// report, so the one-lane arm calls the body it wraps (and `render_mono`, which only
+        /// banks reach through the contract).
+        fn render(
+            &mut self,
+            left: &mut [f32],
+            right: &mut [f32],
+            mono: bool,
+            first: u64,
+        ) -> Vec<u64> {
+            let path = self.path;
+            on_path(path, || self.render_on_path(left, right, mono, first))
+        }
+
+        fn render_on_path(
+            &mut self,
+            left: &mut [f32],
+            right: &mut [f32],
+            mono: bool,
+            first: u64,
+        ) -> Vec<u64> {
+            let frames = left.len() / W;
+            if W == 1 {
+                let failures = if mono {
+                    self.eq.render_mono(left, frames)
+                } else {
+                    self.eq.render(left, right, frames)
+                };
+                return vec![u64::from(failures[0][0]), u64::from(failures[1][0])];
+            }
+            let offsets = [0_u32; MAX_LANES + 1];
+            let block = EffectBankProcessBlock::new(
+                left,
+                right,
+                None,
+                frames as u32,
+                self.eq.bank.width,
+                first,
+                &[],
+                &offsets[..=W],
+                QUANTUM as u32,
+            )
+            .expect("bank block");
+            let report = if mono {
+                PreparedNativeEffectBank::process_bank_mono(&mut self.eq, block)
+            } else {
+                PreparedNativeEffectBank::process_bank(&mut self.eq, block)
+            };
+            report
+                .reports
+                .iter()
+                .take(W)
+                .flat_map(|entry| {
+                    [
+                        entry.invalid_spans,
+                        entry.nonfinite_left_blocks,
+                        entry.nonfinite_right_blocks,
+                    ]
+                })
+                .collect()
+        }
+
+        fn apply(
+            &mut self,
+            lane: usize,
+            target: &PreparedEffectTarget,
+        ) -> Result<(), EffectTargetError> {
+            let path = self.path;
+            on_path(path, || {
+                PreparedNativeEffectBank::apply_prepared_target_lane(&mut self.eq, lane, target)
+            })
+        }
+
+        fn reset(&mut self, kind: ResetKind) {
+            let path = self.path;
+            on_path(path, || PreparedNativeEffectBank::reset(&mut self.eq, kind));
+        }
+
+        fn restore(
+            &mut self,
+            lane: usize,
+            payload: &[Vec<u8>; 3],
+        ) -> Result<(), StatePayloadError> {
+            let path = self.path;
+            on_path(path, || {
+                PreparedNativeEffectBank::restore_track_state_payload(
+                    &mut self.eq,
+                    lane as u32,
+                    STATE_LAYOUT_VERSION,
+                    StatePayloadInput {
+                        common: &payload[0],
+                        left: &payload[1],
+                        right: &payload[2],
+                    },
+                )
+            })
+        }
+
+        /// Whether this block is a ramping block: on either channel dual, on the one channel
+        /// the collapsed body renders (its right channel is not advanced until a disengage copies
+        /// the left over it).
+        fn ramping(&self, mono: bool) -> bool {
+            !(self.eq.left.no_ramp_in_flight() && (mono || self.eq.right.no_ramp_in_flight()))
+        }
+    }
+
+    /// Encodes lane words into a contract payload.
+    fn encode(left: &[u32; STATE_LANE_WORDS], right: &[u32; STATE_LANE_WORDS]) -> [Vec<u8>; 3] {
+        let mut common = vec![0_u8; STATE_SIZES.common];
+        let mut left_bytes = vec![0_u8; STATE_SIZES.left];
+        let mut right_bytes = vec![0_u8; STATE_SIZES.right];
+        write_payload(
+            StatePayloadOutput {
+                common: &mut common,
+                left: &mut left_bytes,
+                right: &mut right_bytes,
+            },
+            left,
+            right,
+        )
+        .expect("encode");
+        [common, left_bytes, right_bytes]
+    }
+
+    /// A restore payload for lane `lane`: the oracle's own words with one hostile edit per
+    /// channel (VERIFY-AUTOMATION A1: `-0.0`, a large finite `ic2`, `NaN`, in a dead section and in
+    /// a live one; and ramps into and out of the identity, which a prepared target cannot start on
+    /// a general band because its enable is not automatable).
+    fn hostile_payload<L: Lane, const W: usize>(
+        rng: &mut Rng,
+        eq: &PreparedParametricEq<L, W>,
+        lane: usize,
+        mono: bool,
+        rate: SampleRateHz,
+    ) -> ([Vec<u8>; 3], usize) {
+        let mut words = [[0_u32; STATE_LANE_WORDS]; 2];
+        eq.left.snapshot_track(lane, &mut words[0]);
+        eq.right.snapshot_track(lane, &mut words[1]);
+        let section = rng.below(EQ_SECTION_COUNT);
+        let base = section * STATE_WORDS_PER_BAND;
+        let edit = rng.below(10);
+        let integrator = [
+            -0.0_f32,
+            1.0e31,
+            -3.0e38,
+            f32::NAN,
+            1.0e-40,
+            2.0e-20,
+            -1.0e-20,
+            f32::INFINITY,
+        ][rng.below(8)];
+        let which = rng.below(2);
+        for (side, lane_words) in words.iter_mut().enumerate() {
+            if mono && side == 1 {
+                break;
+            }
+            match edit {
+                0..=4 => lane_words[base + which] = integrator.to_bits(),
+                5..=7 => {
+                    // A ramp into or out of the identity: from the identity to the section's
+                    // designed words when its target is live, from a high shelf to the identity
+                    // when it is not.
+                    let channel = if side == 0 { &eq.left } else { &eq.right };
+                    let designed = channel.target_words(section, lane);
+                    let (from, to) = if words_are_identity(designed) {
+                        let band = channel.targets[lane][section];
+                        let shelf = design_svf(
+                            EqBandKind::HighShelf,
+                            band.frequency.clamp(20.0, 18_000.0),
+                            [24.0, -24.0, 6.0][rng.below(3)],
+                            band.q.clamp(0.1, 18.0),
+                            1.0,
+                            rate,
+                        )
+                        .unwrap_or(EqSvfWords::IDENTITY);
+                        (shelf, EqSvfWords::IDENTITY)
+                    } else {
+                        (EqSvfWords::IDENTITY, designed)
+                    };
+                    let samples = 1 + rng.below(RAMP_SAMPLES as usize) as u32;
+                    for index in 0..6 {
+                        let start = from.to_array()[index];
+                        let step = (to.to_array()[index] - start) * RAMP_SCALE;
+                        lane_words[base + 2 + index] = start.to_bits();
+                        lane_words[base + 8 + index] = step.to_bits();
+                    }
+                    lane_words[base + 14] = samples;
+                }
+                _ => {
+                    // A cut toggled through the payload: its enable word flipped, and a ramp from
+                    // the words it holds to the words the flipped enable designs.
+                    let (cut, kind, word) = if rng.chance(0.5) {
+                        (HPF_SECTION, EqBandKind::HighPass, STATE_HPF_ENABLE_WORD)
+                    } else {
+                        (LPF_SECTION, EqBandKind::LowPass, STATE_HPF_ENABLE_WORD + 1)
+                    };
+                    let channel = if side == 0 { &eq.left } else { &eq.right };
+                    let band = channel.targets[lane][cut];
+                    let to = if band.enabled {
+                        EqSvfWords::IDENTITY
+                    } else {
+                        design_svf(kind, band.frequency, 0.0, band.q, 1.0, rate)
+                            .unwrap_or(EqSvfWords::IDENTITY)
+                    };
+                    lane_words[word] ^= 1;
+                    let cut_base = cut * STATE_WORDS_PER_BAND;
+                    let samples = 1 + rng.below(RAMP_SAMPLES as usize) as u32;
+                    for index in 0..6 {
+                        let start = f32::from_bits(lane_words[cut_base + 2 + index]);
+                        let step = (to.to_array()[index] - start) * RAMP_SCALE;
+                        lane_words[cut_base + 8 + index] = step.to_bits();
+                    }
+                    lane_words[cut_base + 14] = samples;
+                }
+            }
+        }
+        if mono {
+            words[1] = words[0];
+        }
+        let kind = match edit {
+            0..=4 => 0,
+            5..=7 => 1,
+            _ => 2,
+        };
+        (encode(&words[0], &words[1]), kind)
+    }
+
+    /// Totals over a width's scenarios.
+    #[derive(Default)]
+    struct Tally {
+        scenarios: u64,
+        blocks: u64,
+        ramping: u64,
+        elided: u64,
+        retargets: u64,
+        both_targets: u64,
+        refused_targets: u64,
+        restores: u64,
+        refused_restores: u64,
+        /// Accepted restores by edit: hostile integrator, identity ramp, cut toggle.
+        restored: [u64; 3],
+        resets: u64,
+        rejected_blocks: u64,
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn scenario<L: Lane, const W: usize>(
+        seed: u64,
+        mono: bool,
+        paths: [Path; 2],
+        tally: &mut Tally,
+    ) {
+        let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+        let rate = [44_100_u32, 48_000, 48_000, 96_000, 88_200][rng.below(5)];
+        let parameters = PARAMETRIC_EQ_DESCRIPTOR.parameters.len();
+        // Per-scenario shape: some bands off on every lane (so the list has dead sections to
+        // drop), a shared kind per band most of the time, and cuts usually off.
+        let band_off: [bool; EQ_BAND_COUNT] = core::array::from_fn(|_| rng.chance(0.55));
+        let band_kind: [f32; EQ_BAND_COUNT] = core::array::from_fn(|_| (1 + rng.below(6)) as f32);
+        let shared_kind = rng.chance(0.7);
+        let cut_on: [bool; 2] = core::array::from_fn(|_| rng.chance(0.3));
+        let shape = |rng: &mut Rng, index: usize| -> f32 {
+            if index < 24 {
+                let band = index / 6;
+                match index % 6 {
+                    0 => f32::from(u8::from(!band_off[band] && rng.chance(0.85))),
+                    1 if shared_kind => band_kind[band],
+                    _ => draw(rng, index),
+                }
+            } else {
+                match index - 24 {
+                    0 => f32::from(u8::from(cut_on[0] && rng.chance(0.8))),
+                    3 => f32::from(u8::from(cut_on[1] && rng.chance(0.8))),
+                    _ => draw(rng, index),
+                }
+            }
+        };
+        // Per lane: descriptor-major, left then right.
+        let initial: Vec<Vec<InitialParameterValue>> = (0..W)
+            .map(|_| {
+                let symmetric = mono || rng.chance(0.5);
+                let mut lane = Vec::with_capacity(parameters * 2);
+                for index in 0..parameters {
+                    let left = shape(&mut rng, index);
+                    let right = if symmetric || (index < 24 && index % 6 < 2) {
+                        left
+                    } else {
+                        shape(&mut rng, index)
+                    };
+                    for (channel, value) in [
+                        (ParameterChannel::Left, left),
+                        (ParameterChannel::Right, right),
+                    ] {
+                        lane.push(InitialParameterValue {
+                            parameter_index: index as u32,
+                            channel,
+                            value,
+                        });
+                    }
+                }
+                lane
+            })
+            .collect();
+        let requests: Vec<PrepareEffectRequest<'_>> =
+            initial.iter().map(|values| request(values, rate)).collect();
+        // A shape whose designs are not all legal (a frequency past the rate's range) is not a
+        // scenario; the draw moves on.
+        let metadata = expected_prepared_metadata(&PARAMETRIC_EQ_DESCRIPTOR, requests[0]);
+        let width = if W == 8 {
+            BankWidth::Eight
+        } else {
+            BankWidth::Four
+        };
+        if metadata.is_err()
+            || prepare_width::<L, W>(metadata.expect("checked"), width, &requests).is_err()
+        {
+            return;
+        }
+        let mut oracle = Arm::<L, W>::prepare(&requests, paths[0]);
+        let mut candidate = Arm::<L, W>::prepare(&requests, paths[1]);
+        drop(requests);
+        let mut values = initial.clone();
+        tally.scenarios += 1;
+        let factory = ParametricEqFactory;
+        let mut riders: Vec<usize> = Vec::new();
+        for block in 0..BLOCKS_PER_SCENARIO {
+            let context = format!("W{W} seed {seed} block {block} mono {mono}");
+            // A band ridden on every lane at once, now and then: bank-wide and lane-mixed ramps.
+            if rng.chance(0.08) {
+                riders = (0..W).collect();
+            } else if rng.chance(0.2) {
+                riders.clear();
+            }
+            if rng.chance(0.55) || !riders.is_empty() {
+                let count = 1 + rng.below(3);
+                let mut edits: Vec<(usize, usize)> = (0..count)
+                    .map(|_| {
+                        let mut index = rng.below(parameters);
+                        while !automatable(index) {
+                            index = rng.below(parameters);
+                        }
+                        (rng.below(W), index)
+                    })
+                    .collect();
+                if !riders.is_empty() {
+                    let index = 6 * rng.below(EQ_BAND_COUNT) + 3;
+                    edits.extend(riders.iter().map(|&lane| (lane, index)));
+                }
+                for (lane, index) in edits {
+                    let value = draw(&mut rng, index);
+                    // Both rows in one preparation (a `Both` target when the sections agree, the
+                    // SDK's shape), or one row.
+                    let sides: &[usize] = if mono || rng.chance(0.5) {
+                        &[0, 1]
+                    } else if rng.chance(0.5) {
+                        &[0]
+                    } else {
+                        &[1]
+                    };
+                    let mut changed = vec![false; parameters * 2];
+                    let previous: Vec<f32> = sides
+                        .iter()
+                        .map(|&side| values[lane][index * 2 + side].value)
+                        .collect();
+                    for &side in sides {
+                        values[lane][index * 2 + side].value = value;
+                        changed[index * 2 + side] = true;
+                    }
+                    let mut targets = [PreparedEffectTarget {
+                        slot: 0,
+                        channel: ParameterChannel::Left,
+                        words: [0; effect_contract::PREPARED_EFFECT_TARGET_WORDS],
+                    }; EQ_SECTION_COUNT * 2];
+                    match factory.prepare_targets(
+                        EffectTargetRequest {
+                            sample_rate: rate,
+                            values: &values[lane],
+                            changed: &changed,
+                        },
+                        &mut targets,
+                    ) {
+                        Ok(count) => {
+                            for target in &targets[..count] {
+                                let a = oracle.apply(lane, target);
+                                let b = candidate.apply(lane, target);
+                                assert_eq!(a, b, "{context}: target application");
+                                tally.retargets += 1;
+                                tally.both_targets +=
+                                    u64::from(target.channel == ParameterChannel::Both);
+                            }
+                        }
+                        Err(_) => {
+                            for (&side, value) in sides.iter().zip(previous) {
+                                values[lane][index * 2 + side].value = value;
+                            }
+                        }
+                    }
+                }
+                // A refusal word: a target whose band family is not the prepared one.
+                if rng.chance(0.05) {
+                    let lane = rng.below(W);
+                    let band = rng.below(EQ_BAND_COUNT);
+                    let mut refused = values[lane].clone();
+                    let mut changed = vec![false; parameters * 2];
+                    for side in 0..2 {
+                        let slot = (band * 6 + 1) * 2 + side;
+                        refused[slot].value = if refused[slot].value == 3.0 { 1.0 } else { 3.0 };
+                        changed[slot] = true;
+                    }
+                    let mut targets = [PreparedEffectTarget {
+                        slot: 0,
+                        channel: ParameterChannel::Left,
+                        words: [0; effect_contract::PREPARED_EFFECT_TARGET_WORDS],
+                    }; EQ_SECTION_COUNT * 2];
+                    if let Ok(count) = factory.prepare_targets(
+                        EffectTargetRequest {
+                            sample_rate: rate,
+                            values: &refused,
+                            changed: &changed,
+                        },
+                        &mut targets,
+                    ) {
+                        for target in &targets[..count] {
+                            let a = oracle.apply(lane, target);
+                            let b = candidate.apply(lane, target);
+                            assert_eq!(a, b, "{context}: refused target");
+                            tally.refused_targets += u64::from(a.is_err());
+                        }
+                    }
+                }
+            }
+            // Resets mid-ramp (VERIFY-AUTOMATION A1), about 2 % of blocks.
+            if rng.chance(0.02) {
+                let kind = if rng.chance(0.5) {
+                    ResetKind::DiscontinuityKeepParameters
+                } else {
+                    values = initial.clone();
+                    ResetKind::FullToDefaults
+                };
+                oracle.reset(kind);
+                candidate.reset(kind);
+                tally.resets += 1;
+            }
+            // Restores of hostile integrators and forged identity ramps.
+            if rng.chance(0.05) {
+                let lane = rng.below(W);
+                let (payload, kind) =
+                    hostile_payload(&mut rng, &oracle.eq, lane, mono, SampleRateHz(rate));
+                let a = oracle.restore(lane, &payload);
+                let b = candidate.restore(lane, &payload);
+                assert_eq!(a, b, "{context}: restore");
+                tally.restores += 1;
+                tally.refused_restores += u64::from(a.is_err());
+                tally.restored[kind] += u64::from(a.is_ok());
+            }
+            let frames = if rng.chance(0.6) {
+                QUANTUM
+            } else {
+                1 + rng.below(QUANTUM)
+            };
+            let words = frames * W;
+            let profile = if rng.chance(0.6) {
+                [0, 1, 5][rng.below(3)]
+            } else {
+                [2, 3, 4, 6][rng.below(4)]
+            };
+            let mut left = vec![0.0_f32; words];
+            let mut right = vec![0.0_f32; words];
+            for sample in &mut left {
+                *sample = hostile(&mut rng, profile);
+            }
+            if mono {
+                right.copy_from_slice(&left);
+            } else {
+                for sample in &mut right {
+                    *sample = hostile(&mut rng, profile);
+                }
+            }
+            assert_eq!(
+                oracle.ramping(mono),
+                candidate.ramping(mono),
+                "{context}: ramping"
+            );
+            let ramping = candidate.ramping(mono);
+            let (mut oracle_left, mut oracle_right) = (left.clone(), right.clone());
+            let (mut candidate_left, mut candidate_right) = (left, right);
+            let first = block * QUANTUM as u64;
+            let oracle_report = oracle.render(&mut oracle_left, &mut oracle_right, mono, first);
+            let elided_before = ramping_elided_block_count();
+            let candidate_report =
+                candidate.render(&mut candidate_left, &mut candidate_right, mono, first);
+            let elided = ramping_elided_block_count() - elided_before;
+            assert_eq!(oracle_report, candidate_report, "{context}: report");
+            let same =
+                |a: &[f32], b: &[f32]| a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits());
+            assert!(
+                same(&oracle_left, &candidate_left),
+                "{context}: left output"
+            );
+            if !mono {
+                assert!(
+                    same(&oracle_right, &candidate_right),
+                    "{context}: right output"
+                );
+            }
+            assert!(
+                fingerprint(&oracle.eq) == fingerprint(&candidate.eq),
+                "{context}: state"
+            );
+            assert!(
+                payloads(&oracle.eq) == payloads(&candidate.eq),
+                "{context}: payload"
+            );
+            tally.blocks += 1;
+            tally.ramping += u64::from(ramping);
+            tally.elided += elided as u64;
+            tally.rejected_blocks += u64::from(oracle_report.iter().any(|word| *word != 0));
+        }
+    }
+
+    const BLOCKS_PER_SCENARIO: u64 = 96;
+
+    /// Scenarios per width and body: 300 in release, 40 in a dev build (gate 1's minimums).
+    fn scenarios() -> u64 {
+        if cfg!(debug_assertions) { 40 } else { 300 }
+    }
+
+    /// #1005's gate: the list against the batch-head `process_block`, both on the shipped writes.
+    const LIST: [Path; 2] = [
+        Path {
+            list: false,
+            lane_set: false,
+        },
+        Path {
+            list: true,
+            lane_set: false,
+        },
+    ];
+    /// #1007's gate against the #1005 kernel: the list on both arms, `lane_set` writes against
+    /// `select` writes.
+    const WRITES_ON_1005: [Path; 2] = [
+        Path {
+            list: true,
+            lane_set: true,
+        },
+        Path {
+            list: true,
+            lane_set: false,
+        },
+    ];
+    /// #1007's writes alone, on the batch-head ramping path.
+    const WRITES_ALONE: [Path; 2] = [
+        Path {
+            list: false,
+            lane_set: true,
+        },
+        Path {
+            list: false,
+            lane_set: false,
+        },
+    ];
+
+    fn differential<L: Lane, const W: usize>(width: &str, label: &str, paths: [Path; 2]) {
+        for mono in [false, true] {
+            reset_ramping_elided_blocks();
+            let mut tally = Tally::default();
+            let mut seed = 0;
+            while tally.scenarios < scenarios() {
+                scenario::<L, W>(
+                    seed + if mono { 1 << 32 } else { 0 },
+                    mono,
+                    paths,
+                    &mut tally,
+                );
+                seed += 1;
+            }
+            println!(
+                "{label} differential {width} {}: {} scenarios, {} blocks bit-identical, {} ramping, \
+                 {} ramping blocks elided a section; {} targets ({} Both, {} refused), {} restores \
+                 ({} refused; accepted: {} hostile integrators, {} identity ramps, {} cut toggles), \
+                 {} resets, {} blocks with a rejected lane",
+                if mono { "collapsed" } else { "dual" },
+                tally.scenarios,
+                tally.blocks,
+                tally.ramping,
+                tally.elided,
+                tally.retargets,
+                tally.both_targets,
+                tally.refused_targets,
+                tally.restores,
+                tally.refused_restores,
+                tally.restored[0],
+                tally.restored[1],
+                tally.restored[2],
+                tally.resets,
+                tally.rejected_blocks,
+            );
+            assert!(tally.ramping > 0, "{width}: no block ramped");
+            assert!(
+                !paths[1].list || tally.elided > 0,
+                "{width}: the list never engaged"
+            );
+            assert!(
+                tally.both_targets > 0,
+                "{width}: no Both target was applied"
+            );
+            assert!(
+                tally.refused_restores > 0,
+                "{width}: no restore was refused"
+            );
+            assert!(
+                tally.restored.iter().all(|accepted| *accepted > 0),
+                "{width}: a restore edit was never accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn a_ramping_block_renders_the_batch_head_bits_scalar() {
+        differential::<f32, 1>("Scalar", "#1005", LIST);
+    }
+
+    #[test]
+    fn a_ramping_block_renders_the_batch_head_bits_simd4() {
+        differential::<Simd4, 4>("Simd4", "#1005", LIST);
+    }
+
+    #[test]
+    fn a_ramping_block_renders_the_batch_head_bits_simd8() {
+        differential::<Simd8, 8>("Simd8", "#1005", LIST);
+    }
+
+    /// Issue #1007 gate 1: `select` lane writes and the masked segment snap against the #1005
+    /// kernel's `lane_set` writes, with the list on both arms.
+    #[test]
+    fn select_lane_writes_render_the_1005_bits_scalar() {
+        differential::<f32, 1>("Scalar", "#1007", WRITES_ON_1005);
+    }
+
+    #[test]
+    fn select_lane_writes_render_the_1005_bits_simd4() {
+        differential::<Simd4, 4>("Simd4", "#1007", WRITES_ON_1005);
+    }
+
+    #[test]
+    fn select_lane_writes_render_the_1005_bits_simd8() {
+        differential::<Simd8, 8>("Simd8", "#1007", WRITES_ON_1005);
+    }
+
+    /// Issue #1007's writes alone, on the batch-head ramping path (VERIFY-AUTOMATION A2).
+    #[test]
+    fn select_lane_writes_alone_render_the_lane_set_bits_scalar() {
+        differential::<f32, 1>("Scalar", "#1007 alone", WRITES_ALONE);
+    }
+
+    #[test]
+    fn select_lane_writes_alone_render_the_lane_set_bits_simd4() {
+        differential::<Simd4, 4>("Simd4", "#1007 alone", WRITES_ALONE);
+    }
+
+    #[test]
+    fn select_lane_writes_alone_render_the_lane_set_bits_simd8() {
+        differential::<Simd8, 8>("Simd8", "#1007 alone", WRITES_ALONE);
+    }
+}
+
+/// Issue #1015: a restored subnormal integrator in a live section refuses the stationary elision.
+///
+/// The shape: one live high shelf at `m0 = m2 = 0.5` (gain `-6.0206` dB as an `f32`), every other
+/// section dead, a restored `ic1 = ic2 = -2^-149` on the last lane, and an input word of `-2^-149`
+/// there. The shelf emits `-0.0` on its first frame; an elided identity after it passes that `-0.0`
+/// on, and the executed one writes `+0.0`. Before the fix the stationary cascade rendered
+/// `0x80000000` where the full per-section cascade rendered `0x00000000`.
+#[cfg(test)]
+mod stationary_subnormal {
+    use super::*;
+
+    const RATE: SampleRateHz = SampleRateHz(48_000);
+    const FRAMES: usize = 16;
+    const TINY: u32 = 0x8000_0001;
+
+    fn sections() -> [BandTarget; EQ_SECTION_COUNT] {
+        let off = BandTarget {
+            enabled: false,
+            kind: EqBandKind::Bell,
+            frequency: 1_000.0,
+            gain: 0.0,
+            q: 1.0,
+            slope: 1.0,
+        };
+        let mut sections = [off; EQ_SECTION_COUNT];
+        sections[BAND_SECTION_OFFSET] = BandTarget {
+            enabled: true,
+            kind: EqBandKind::HighShelf,
+            frequency: 3_000.0,
+            gain: -6.020_6,
+            q: 0.7,
+            slope: 1.0,
+        };
+        sections
+    }
+
+    /// The input: ordinary words, and `-2^-149` on the last lane's first frame.
+    fn input<const W: usize>() -> Vec<f32> {
+        let mut io = vec![0.25_f32; FRAMES * W];
+        io[W - 1] = f32::from_bits(TINY);
+        io
+    }
+
+    fn bits(words: &[f32]) -> Vec<u32> {
+        words.iter().map(|word| word.to_bits()).collect()
+    }
+
+    fn state<L: Lane, const W: usize>(channel: &Channel<L, W>) -> Vec<u32> {
+        let mut words = [0_u32; EQ_SECTION_COUNT * 2 * MAX_LANES];
+        channel.state_bits(&mut words);
+        words.to_vec()
+    }
+
+    /// The channel level: the stationary cascade against the full per-section one (the
+    /// unit-test default of `process_channels(.., false)`), dual and collapsed.
+    fn channel_level<L: Lane, const W: usize>(width: &str, mismatches: &mut Vec<String>) {
+        let words = sections()[BAND_SECTION_OFFSET]
+            .words(RATE)
+            .expect("a legal shelf");
+        assert_eq!(
+            (words.m0.to_bits(), words.m2.to_bits()),
+            (0.5_f32.to_bits(), 0.5_f32.to_bits()),
+            "{width}: the shelf designs m0 = m2 = 0.5"
+        );
+        let build = || {
+            let mut channel = Channel::<L, W>::new([sections(); W], RATE).expect("legal");
+            let slot = &mut channel.sections[BAND_SECTION_OFFSET];
+            lane_set(&mut slot.state.ic1, W - 1, f32::from_bits(TINY));
+            lane_set(&mut slot.state.ic2, W - 1, f32::from_bits(TINY));
+            channel
+        };
+        for mono in [false, true] {
+            let mut arms = Vec::new();
+            for stationary in [true, false] {
+                let (mut left, mut right) = (build(), build());
+                let (mut l, mut r) = (input::<W>(), input::<W>());
+                if mono {
+                    process_channels_mono::<L, W>(&mut left, &mut l, FRAMES, stationary);
+                } else {
+                    process_channels::<L, W>(
+                        (&mut left, &mut right),
+                        &mut l,
+                        &mut r,
+                        FRAMES,
+                        stationary,
+                    );
+                }
+                arms.push((bits(&l), bits(&r), state(&left), state(&right)));
+            }
+            let (elided, full) = (&arms[0], &arms[1]);
+            if elided != full {
+                mismatches.push(format!(
+                    "{width} mono {mono}: the stationary cascade rendered {:08x} where the full \
+                     cascade rendered {:08x}",
+                    elided.0[W - 1],
+                    full.0[W - 1]
+                ));
+            }
+        }
+    }
+
+    /// The contract level: the payload restores (the shape is reachable), and the bank renders
+    /// the full cascade's bits through `process_bank` / `process_bank_mono` (or, for the scalar
+    /// instance, the `render` that `process` wraps).
+    fn contract_level<L: Lane, const W: usize>(width: &str, mismatches: &mut Vec<String>) {
+        let mut values: Vec<InitialParameterValue> =
+            effect_contract::default_initial_values(&PARAMETRIC_EQ_DESCRIPTOR).collect();
+        for (field, value) in [(0, 1.0), (1, 3.0), (2, 3_000.0), (3, -6.020_6), (4, 0.7)] {
+            for side in 0..2 {
+                values[field * 2 + side].value = value;
+            }
+        }
+        let request = PrepareEffectRequest {
+            sample_rate: RATE.0,
+            quantum: 128,
+            quality: Quality::Normal,
+            bypass: false,
+            link_mode: effect_contract::LinkMode::DualMono,
+            ports: effect_contract::PreparedPorts {
+                sidechain: effect_contract::PreparedSidechainPort::None,
+            },
+            initial_values: &values,
+            limits: effect_contract::PrepareEffectLimits {
+                maximum_total_state_bytes: 1 << 16,
+                maximum_scratch_bytes: 1 << 16,
+                maximum_automation_spans_per_block: 48,
+            },
+        };
+        let requests = vec![request; W];
+        let metadata =
+            expected_prepared_metadata(&PARAMETRIC_EQ_DESCRIPTOR, request).expect("metadata");
+        let width_tag = if W == 8 {
+            BankWidth::Eight
+        } else {
+            BankWidth::Four
+        };
+        let prepare = || prepare_width::<L, W>(metadata, width_tag, &requests).expect("prepared");
+        let lane = W - 1;
+        let payload = {
+            let eq = prepare();
+            let mut words = [[0_u32; STATE_LANE_WORDS]; 2];
+            eq.left.snapshot_track(lane, &mut words[0]);
+            eq.right.snapshot_track(lane, &mut words[1]);
+            for channel in &mut words {
+                let base = BAND_SECTION_OFFSET * STATE_WORDS_PER_BAND;
+                channel[base] = TINY;
+                channel[base + 1] = TINY;
+            }
+            let mut common = vec![0_u8; STATE_SIZES.common];
+            let mut left = vec![0_u8; STATE_SIZES.left];
+            let mut right = vec![0_u8; STATE_SIZES.right];
+            write_payload(
+                StatePayloadOutput {
+                    common: &mut common,
+                    left: &mut left,
+                    right: &mut right,
+                },
+                &words[0],
+                &words[1],
+            )
+            .expect("encode");
+            [common, left, right]
+        };
+        let restored = || {
+            let mut eq = prepare();
+            PreparedNativeEffectBank::restore_track_state_payload(
+                &mut eq,
+                lane as u32,
+                STATE_LAYOUT_VERSION,
+                StatePayloadInput {
+                    common: &payload[0],
+                    left: &payload[1],
+                    right: &payload[2],
+                },
+            )
+            .expect("a finite subnormal integrator restores");
+            eq
+        };
+        for mono in [false, true] {
+            let mut shipped = restored();
+            let mut full = restored();
+            let (mut l, mut r) = (input::<W>(), input::<W>());
+            if W == 1 {
+                if mono {
+                    shipped.render_mono(&mut l, FRAMES);
+                } else {
+                    shipped.render(&mut l, &mut r, FRAMES);
+                }
+            } else {
+                let offsets = [0_u32; MAX_LANES + 1];
+                let block = EffectBankProcessBlock::new(
+                    &mut l,
+                    &mut r,
+                    None,
+                    FRAMES as u32,
+                    width_tag,
+                    0,
+                    &[],
+                    &offsets[..=W],
+                    128,
+                )
+                .expect("block");
+                if mono {
+                    PreparedNativeEffectBank::process_bank_mono(&mut shipped, block);
+                } else {
+                    PreparedNativeEffectBank::process_bank(&mut shipped, block);
+                }
+            }
+            let (mut fl, mut fr) = (input::<W>(), input::<W>());
+            if mono {
+                process_channels_mono::<L, W>(&mut full.left, &mut fl, FRAMES, false);
+            } else {
+                process_channels::<L, W>(
+                    (&mut full.left, &mut full.right),
+                    &mut fl,
+                    &mut fr,
+                    FRAMES,
+                    false,
+                );
+            }
+            if !(bits(&l) == bits(&fl)
+                && (mono || bits(&r) == bits(&fr))
+                && state(&shipped.left) == state(&full.left)
+                && (mono || state(&shipped.right) == state(&full.right)))
+            {
+                mismatches.push(format!(
+                    "{width} mono {mono}: the bank rendered {:08x} where the full cascade \
+                     rendered {:08x}",
+                    l[W - 1].to_bits(),
+                    fl[W - 1].to_bits()
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn a_restored_subnormal_live_state_renders_the_full_cascade_bits() {
+        let mut mismatches = Vec::new();
+        channel_level::<f32, 1>("Scalar", &mut mismatches);
+        channel_level::<Simd4, 4>("Simd4", &mut mismatches);
+        channel_level::<Simd8, 8>("Simd8", &mut mismatches);
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    #[test]
+    fn a_restored_subnormal_live_state_renders_the_full_cascade_bits_through_the_contract() {
+        let mut mismatches = Vec::new();
+        contract_level::<f32, 1>("Scalar", &mut mismatches);
+        contract_level::<Simd4, 4>("Simd4", &mut mismatches);
+        contract_level::<Simd8, 8>("Simd8", &mut mismatches);
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    /// Leg (c)'s `FLUSH_EPS` boundary, structurally (#1015 follow-up, Sol's LOW finding 1).
+    ///
+    /// One word goes into one integrator of the live shelf on the last lane through
+    /// [`Channel::restore_track`] (dual: the left channel; collapsed: the one channel), every other
+    /// section dead. Refused: every non-zero magnitude below `FLUSH_EPS` -- `+-1e-30`, the word
+    /// just under the floor at either sign, `+-2^-149`, and the elision test's old seeds `1e-40`
+    /// and `-1e-41` -- and `-0.0`. Admitted: `+-FLUSH_EPS` exactly, `+0.0`, `+-1.0`, and the seeds
+    /// that replaced the old ones. A refused block runs every section, which flushes the word, so
+    /// the next block elides again. Every block renders the full cascade's bits and integrators.
+    fn flush_eps_boundary<L: Lane, const W: usize>(width: &str) {
+        let floor = f32::from_bits(INERT_MAGNITUDE_FLOOR);
+        let under = f32::from_bits(INERT_MAGNITUDE_FLOOR - 1);
+        let refused = [
+            1.0e-30_f32,
+            -1.0e-30,
+            under,
+            -under,
+            f32::from_bits(1),
+            f32::from_bits(TINY),
+            1.0e-40,
+            -1.0e-41,
+            -0.0,
+        ];
+        let admitted = [floor, -floor, 0.0_f32, 1.0, -1.0, 1.5e-20, -1.25e-20];
+        let lane = W - 1;
+        let base = BAND_SECTION_OFFSET * STATE_WORDS_PER_BAND;
+        let input = |block: usize| -> Vec<f32> {
+            (0..FRAMES * W)
+                .map(|index| 0.25 - 0.013 * ((index + 7 * block) % 31) as f32)
+                .collect()
+        };
+        for (word, admit) in refused
+            .into_iter()
+            .map(|word| (word, false))
+            .chain(admitted.into_iter().map(|word| (word, true)))
+        {
+            for integrator in [0_usize, 1] {
+                for mono in [false, true] {
+                    let label = format!(
+                        "{width} mono {mono}: live integrator {integrator} holding {word:e} \
+                         ({:08x})",
+                        word.to_bits()
+                    );
+                    let build = || {
+                        let mut channel =
+                            Channel::<L, W>::new([sections(); W], RATE).expect("legal");
+                        let mut words = [0_u32; STATE_LANE_WORDS];
+                        channel.snapshot_track(lane, &mut words);
+                        words[base + integrator] = word.to_bits();
+                        let configuration = channel.targets[lane];
+                        channel
+                            .restore_track(lane, &words, &configuration, RATE)
+                            .expect("a finite integrator restores");
+                        channel
+                    };
+                    let clean = || Channel::<L, W>::new([sections(); W], RATE).expect("legal");
+                    // Arm 0 renders the stationary path, arm 1 the full per-section cascade.
+                    let mut arms = [(build(), clean()), (build(), clean())];
+                    for block in 0..2 {
+                        let io = input(block);
+                        let kept = if mono {
+                            cascade_sections_mono::<L, W>(&arms[0].0, &io, FRAMES).1
+                        } else {
+                            cascade_sections::<L, W>(&arms[0].0, &arms[0].1, &io, &io, FRAMES).1
+                        };
+                        let expected = if block == 0 && !admit {
+                            EQ_SECTION_COUNT
+                        } else {
+                            1
+                        };
+                        assert_eq!(
+                            kept,
+                            expected,
+                            "{label}: block {block} must {}",
+                            if expected == 1 { "elide" } else { "refuse" }
+                        );
+                        let mut rendered = Vec::new();
+                        for (stationary, (left, right)) in [true, false].into_iter().zip(&mut arms)
+                        {
+                            let (mut l, mut r) = (io.clone(), io.clone());
+                            if mono {
+                                process_channels_mono::<L, W>(left, &mut l, FRAMES, stationary);
+                            } else {
+                                process_channels::<L, W>(
+                                    (left, right),
+                                    &mut l,
+                                    &mut r,
+                                    FRAMES,
+                                    stationary,
+                                );
+                            }
+                            rendered.push((bits(&l), bits(&r), state(left), state(right)));
+                        }
+                        assert!(
+                            rendered[0] == rendered[1],
+                            "{label}: block {block} must render the full cascade's bits"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn leg_c_refuses_below_flush_eps_admits_it_and_re_engages() {
+        flush_eps_boundary::<f32, 1>("Scalar");
+        flush_eps_boundary::<Simd4, 4>("Simd4");
+        flush_eps_boundary::<Simd8, 8>("Simd8");
     }
 }

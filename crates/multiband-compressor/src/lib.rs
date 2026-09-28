@@ -50,7 +50,7 @@ use effect_contract::{
     expected_prepared_metadata,
 };
 use effect_runtime::bank::{self, NonFiniteReport};
-use effect_runtime::dynamics::{GainComputerCoef, gain_delta_db};
+use effect_runtime::dynamics::{GainComputerCoef, gain_delta_db, knee_coefficients};
 use effect_runtime::envelope::retention_coefficient;
 use effect_runtime::params::{ParameterSpec, normalize_zero, parameter_value_valid};
 use effect_runtime::ramp::LinearRamp;
@@ -92,6 +92,13 @@ const HIGH_BAND: usize = 1;
 
 /// Knee width of both bands, in dB. Fixed by the product (spec 018).
 const KNEE_DB: f32 = 6.0;
+
+/// The bands' knee words `(W/2, 1/(2 W))`, designed at compile time by the workspace's one knee
+/// design, `effect_runtime::dynamics::knee_coefficients`, so this crate and the compressor's knee
+/// parameter share its overflow rule (issue #994: a width whose `1/(2 W)` overflows is a hard
+/// knee). For 6 dB they are the words this crate wrote inline before: `3.0` and `1/12` rounded
+/// once, pinned by `knee_tests::the_fixed_knee_words_are_unchanged`.
+const BAND_KNEE: (f32, f32) = knee_coefficients(KNEE_DB);
 
 /// Samples a ramped parameter takes to reach its target (`SmoothingRule::Linear`, 64).
 const SMOOTHING_SAMPLES: u32 = 64;
@@ -806,15 +813,12 @@ fn band_amplitude<L: Lane>(
     let level = fast_level_db(detector.max(L::splat(DETECTOR_FLOOR)))
         .max(L::splat(-160.0))
         .min(L::splat(24.0));
-    let curve = GainComputerCoef {
-        threshold_db: threshold,
-        inv_ratio_minus_one: coefficients.inv_ratio_minus_one,
-        half_knee_db: L::splat(0.5 * KNEE_DB),
-        inv_two_knee: L::splat(1.0 / (2.0 * KNEE_DB)),
-    };
-    let target = gain_delta_db(level, &curve)
-        .max(L::splat(-100.0))
-        .min(L::zero());
+    let target = band_target(
+        level,
+        threshold,
+        coefficients.inv_ratio_minus_one,
+        BAND_KNEE,
+    );
     let smoothed = flush(branching_smooth(
         *state,
         target,
@@ -824,6 +828,23 @@ fn band_amplitude<L: Lane>(
     *state = smoothed;
     // FAST-DB-CROSSING X6: one band's applied gain. Same law as the wideband compressor's X2.
     fast_gain_from_db(smoothed.add(makeup))
+}
+
+/// Step 2 of [`band_amplitude`]: one band's target, `clamp(gain_delta_db(level), -100, 0)`.
+///
+/// The knee words are an argument so that the knee rule of issue #994 can be exercised at widths
+/// the product does not ship; the render path passes [`BAND_KNEE`], a constant.
+#[inline(always)]
+fn band_target<L: Lane>(level: L, threshold: L, inv_ratio_minus_one: L, knee: (f32, f32)) -> L {
+    let curve = GainComputerCoef {
+        threshold_db: threshold,
+        inv_ratio_minus_one,
+        half_knee_db: L::splat(knee.0),
+        inv_two_knee: L::splat(knee.1),
+    };
+    gain_delta_db(level, &curve)
+        .max(L::splat(-100.0))
+        .min(L::zero())
 }
 
 /// One segment: `frames` frames over which no ramp arrives at its target.
@@ -1839,5 +1860,114 @@ mod reset_tests {
             snapshot(&fresh, sizes),
             "full reset state payload"
         );
+    }
+}
+
+#[cfg(test)]
+mod knee_tests {
+    //! Issue #994: the bands' static curve under the workspace's one knee design.
+    //!
+    //! The product knee is a fixed 6 dB, so no session, control message or automation can give a
+    //! band the overflowing widths the compressor's knee parameter admitted. What these tests pin
+    //! is that the band curve takes its knee words from `knee_coefficients` — so the fixed knee is
+    //! unchanged and a future knee parameter inherits the overflow rule — and that the band's own
+    //! target computation, `band_target`, gives a finite, hard-knee target at exactly the
+    //! threshold for the verification's 2.8e-45 and for every width around the bound.
+
+    use super::*;
+    use effect_runtime::dynamics::MIN_SOFT_KNEE_DB;
+
+    /// The compile-time knee words are the ones this crate wrote inline before #994, bit for bit.
+    ///
+    /// Red mutation (MUTATIONS.md row 994-M2): `BAND_KNEE = knee_coefficients(2.0 * KNEE_DB)`.
+    #[test]
+    fn the_fixed_knee_words_are_unchanged() {
+        let knee = core::hint::black_box(KNEE_DB);
+        assert_eq!(BAND_KNEE.0.to_bits(), (0.5 * knee).to_bits());
+        assert_eq!(BAND_KNEE.1.to_bits(), (1.0 / (2.0 * knee)).to_bits());
+        const {
+            assert!(
+                KNEE_DB >= MIN_SOFT_KNEE_DB,
+                "the product knee is a soft knee"
+            );
+        }
+    }
+
+    fn target_bits<L: Lane>(level: f32, threshold: f32, ratio: f32, knee: (f32, f32)) -> u32 {
+        let mut words = [0_u32; 8];
+        band_target::<L>(
+            L::splat(level),
+            L::splat(threshold),
+            L::splat(1.0 / ratio - 1.0),
+            knee,
+        )
+        .store_bits(&mut words[..L::WIDTH]);
+        for word in &words[1..L::WIDTH] {
+            assert_eq!(*word, words[0], "lanes of a splatted input disagree");
+        }
+        words[0]
+    }
+
+    /// At the old failing knee (2.8e-45) and at every width around the overflow bound, a band
+    /// level exactly at the threshold — and a few subnormal steps and ulps either side of it —
+    /// gets a finite target in `[-100, 0]`, identical at every lane width, and never the
+    /// `-100 dB` the reduction clamp made of the NaN. An overflowing width gets the hard knee's
+    /// target bit for bit; at exactly the threshold every one of these widths changes nothing.
+    ///
+    /// Red mutation (MUTATIONS.md row 994-M1): drop the `is_finite` test in
+    /// `effect_runtime::dynamics::knee_coefficients`.
+    #[test]
+    fn a_band_level_at_the_threshold_never_takes_a_nan_target() {
+        let widest_overflowing = f32::from_bits(0x0010_0000);
+        for knee_bits in [
+            0x0000_0001_u32,
+            0x0000_0002,
+            0x000F_FFFF,
+            0x0010_0000,
+            0x0010_0001,
+            0x0010_0002,
+        ] {
+            let knee = f32::from_bits(knee_bits);
+            let words = knee_coefficients(knee);
+            for threshold in [0.0_f32, -0.0, -1.0e-45, -18.0, -80.0] {
+                for ratio in [1.0_f32, 1.5, 4.0, 20.0] {
+                    let mut levels = vec![threshold];
+                    for step in 1..=3_u32 {
+                        levels.push(threshold + f32::from_bits(step));
+                        levels.push(threshold - f32::from_bits(step));
+                    }
+                    levels.push(threshold.next_up());
+                    levels.push(threshold.next_down());
+                    for level in levels {
+                        let scalar = target_bits::<f32>(level, threshold, ratio, words);
+                        let target = f32::from_bits(scalar);
+                        assert!(
+                            target.is_finite() && (-100.0..=0.0).contains(&target),
+                            "W {knee_bits:#010x} T {threshold:e} R {ratio} x {level:e}: {target}"
+                        );
+                        assert!(
+                            target > -1.0e-3,
+                            "W {knee_bits:#010x} T {threshold:e} R {ratio} x {level:e}: {target} \
+                             is a duck at the threshold"
+                        );
+                        assert_eq!(scalar, target_bits::<Simd4>(level, threshold, ratio, words));
+                        assert_eq!(scalar, target_bits::<Simd8>(level, threshold, ratio, words));
+                        if knee <= widest_overflowing {
+                            assert_eq!(
+                                scalar,
+                                target_bits::<f32>(level, threshold, ratio, (0.0, 0.0)),
+                                "W {knee_bits:#010x} T {threshold:e} R {ratio} x {level:e}: \
+                                 an overflowing width is the hard knee"
+                            );
+                        }
+                    }
+                    let at = f32::from_bits(target_bits::<f32>(threshold, threshold, ratio, words));
+                    assert!(
+                        at == 0.0,
+                        "W {knee_bits:#010x} T {threshold:e} R {ratio}: {at} at the threshold"
+                    );
+                }
+            }
+        }
     }
 }

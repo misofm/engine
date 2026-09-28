@@ -16,12 +16,183 @@ use effect_contract::{
 };
 use engine::realtime::RenderError;
 
+/// Sub-phase timing inside [`BankChain::run`] for the gain/pan phase profile (issue #960).
+///
+/// The graph crate's phase profile charges a whole bank unit to one `BANK` phase, which hides
+/// everything that matters on a row whose every track renders on a bank chain. This module splits
+/// that time at the chain's own boundaries: the prologue (slot queue drains and the mono-collapse
+/// decision), the gather, each slot by its position in the chain, the collapse seam, the scatter,
+/// the route/master fold the members perform, and the auxiliary epilogue.
+///
+/// Test builds only. It exists under the `test-support` feature and nowhere else, so a production
+/// build carries neither the module nor a single probe statement. A `test-support` build that never
+/// calls [`enable`](test_only_bank_phase_profile::enable) pays one thread-local read per probe site
+/// a chain reaches, and nothing else.
+///
+/// The clock is `std::time::Instant`, as in the graph crate's profile, because this crate may not
+/// carry the block a cycle-counter intrinsic needs. Each probe is one clock read and a few
+/// thread-local updates, and its cost lands in the sub-phases on either side of it, about one probe
+/// per entry; the harness derives that cost in situ and reports the sub-phases net of it. Only the
+/// thread that renders is profiled.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub mod test_only_bank_phase_profile {
+    use core::cell::Cell;
+    use std::time::Instant;
+
+    /// Chain entry to the gather: every slot's `begin_block` drain, the channel-symmetry witness
+    /// and the mono-collapse decision.
+    pub const PROLOGUE: usize = 0;
+    /// Planar to AoSoA: the gather, the collapsed gather, or the resident-input copy.
+    pub const GATHER: usize = 1;
+    /// The first slot position. Slot `i` of a chain is charged to `SLOT + min(i, SLOTS - 1)`.
+    pub const SLOT: usize = 2;
+    /// Slot positions profiled separately; a deeper slot shares the last one.
+    pub const SLOTS: usize = 8;
+    /// The mono-collapse seam: the one copy of the resident left plane into the right.
+    pub const SEAM: usize = SLOT + SLOTS;
+    /// AoSoA to planar: the scatter's transposes and copies, excluding the fold calls.
+    pub const SCATTER: usize = SEAM + 1;
+    /// The members' route and master accumulation (`fold_resident`, `fold_cohort`, `fold_plane`),
+    /// including the resident-block offer's shape checks.
+    pub const FOLD: usize = SCATTER + 1;
+    /// The auxiliary-destination epilogue (`accumulate_aux`).
+    pub const AUX: usize = FOLD + 1;
+    /// Sub-phase count.
+    pub const COUNT: usize = AUX + 1;
+
+    /// One profile's totals since the last [`reset`].
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub struct Snapshot {
+        /// Nanoseconds charged to each sub-phase.
+        pub nanos: [u64; COUNT],
+        /// Times each sub-phase was entered; [`PROLOGUE`] once per profiled chain run.
+        pub entries: [u64; COUNT],
+        /// Chain runs that completed a profiled run.
+        pub chain_runs: u64,
+        /// Clock reads taken, the unit of probe overhead.
+        pub probes: u64,
+    }
+
+    thread_local! {
+        static ENABLED: Cell<bool> = const { Cell::new(false) };
+        /// The running chain's clock and current sub-phase; `None` outside a profiled run.
+        static CURRENT: Cell<Option<(Instant, usize)>> = const { Cell::new(None) };
+        static NANOS: [Cell<u64>; COUNT] = const { [const { Cell::new(0) }; COUNT] };
+        static ENTRIES: [Cell<u64>; COUNT] = const { [const { Cell::new(0) }; COUNT] };
+        static CHAIN_RUNS: Cell<u64> = const { Cell::new(0) };
+        static PROBES: Cell<u64> = const { Cell::new(0) };
+        static SLOT_NAMES: [Cell<&'static str>; SLOTS] = const { [const { Cell::new("") }; SLOTS] };
+    }
+
+    /// The label a slot position shows when two chains put different stage types there.
+    pub const MIXED: &str = "(mixed)";
+
+    /// Switch the probes on or off for this thread.
+    pub fn enable(enabled: bool) {
+        ENABLED.set(enabled);
+        if !enabled {
+            CURRENT.set(None);
+        }
+    }
+
+    /// Zero the accumulators and forget the slot names.
+    pub fn reset() {
+        CURRENT.set(None);
+        NANOS.with(|cells| cells.iter().for_each(|cell| cell.set(0)));
+        ENTRIES.with(|cells| cells.iter().for_each(|cell| cell.set(0)));
+        CHAIN_RUNS.set(0);
+        PROBES.set(0);
+        SLOT_NAMES.with(|cells| cells.iter().for_each(|cell| cell.set("")));
+    }
+
+    /// Totals since the last [`reset`].
+    #[must_use]
+    pub fn snapshot() -> Snapshot {
+        Snapshot {
+            nanos: NANOS.with(|cells| cells.each_ref().map(Cell::get)),
+            entries: ENTRIES.with(|cells| cells.each_ref().map(Cell::get)),
+            chain_runs: CHAIN_RUNS.get(),
+            probes: PROBES.get(),
+        }
+    }
+
+    /// The stage type each slot position ran since the last [`reset`]: `""` for a position no
+    /// profiled chain reached, [`MIXED`] for one whose chains disagreed.
+    #[must_use]
+    pub fn slot_names() -> [&'static str; SLOTS] {
+        SLOT_NAMES.with(|cells| cells.each_ref().map(Cell::get))
+    }
+
+    /// Open a chain run's profile in [`PROLOGUE`] when the probes are on.
+    #[inline]
+    pub(crate) fn start() {
+        if ENABLED.get() {
+            CURRENT.set(Some((Instant::now(), PROLOGUE)));
+            PROBES.set(PROBES.get() + 1);
+            ENTRIES.with(|cells| cells[PROLOGUE].set(cells[PROLOGUE].get() + 1));
+        }
+    }
+
+    /// Charge the time since the last probe to the current sub-phase and make `next` current.
+    /// Outside a profiled run this is one thread-local read.
+    #[inline]
+    pub(crate) fn enter(next: usize) {
+        let Some((last, phase)) = CURRENT.get() else {
+            return;
+        };
+        let now = Instant::now();
+        charge(phase, now, last);
+        CURRENT.set(Some((now, next)));
+        ENTRIES.with(|cells| cells[next].set(cells[next].get() + 1));
+    }
+
+    /// [`enter`] the slot at chain position `position`, and remember the stage type it runs.
+    #[inline]
+    pub(crate) fn enter_slot(position: usize, stage: &dyn super::BankStage) {
+        if CURRENT.get().is_none() {
+            return;
+        }
+        let position = position.min(SLOTS - 1);
+        enter(SLOT + position);
+        let name = stage.test_only_stage_name();
+        SLOT_NAMES.with(|cells| {
+            let cell = &cells[position];
+            if cell.get().is_empty() {
+                cell.set(name);
+            } else if cell.get() != name {
+                cell.set(MIXED);
+            }
+        });
+    }
+
+    /// Close a chain run's profile: charge the rest to the current sub-phase.
+    #[inline]
+    pub(crate) fn finish() {
+        let Some((last, phase)) = CURRENT.get() else {
+            return;
+        };
+        charge(phase, Instant::now(), last);
+        CURRENT.set(None);
+        CHAIN_RUNS.set(CHAIN_RUNS.get() + 1);
+    }
+
+    fn charge(phase: usize, now: Instant, last: Instant) {
+        let elapsed = u64::try_from(now.duration_since(last).as_nanos()).unwrap_or(u64::MAX);
+        NANOS.with(|cells| cells[phase].set(cells[phase].get().saturating_add(elapsed)));
+        PROBES.set(PROBES.get() + 1);
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RackError {
     ZeroQuantum,
     Overflow,
     Shape,
     WidthMismatch,
+    /// A console slot's live-control staging window is not exactly the bank's
+    /// `automation_capacity` spans (`EffectBankProcessBlock::check_automation_window`, issue #1012).
+    AutomationWindow,
 }
 
 /// Where in a track's chain a bank cohort sits.
@@ -390,6 +561,13 @@ impl<'a> BankPlaneViews<'a> {
 /// validated once at prepare - so `Err` is the stage's own render failure.
 pub trait BankStage: Send {
     fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError>;
+    /// The stage's type name: the slot label of the bank sub-phase profile (issue #960). Test
+    /// builds only, and never called unless the profile is on.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    fn test_only_stage_name(&self) -> &'static str {
+        core::any::type_name::<Self>()
+    }
     /// Copy one prepared lane's response sections without advancing render state.
     fn copy_response_snapshot_lane(
         &self,
@@ -799,7 +977,10 @@ impl ConsoleEffectBankStage {
     /// # Errors
     ///
     /// [`RackError::WidthMismatch`] if the processor is not this width or the lane count disagrees,
-    /// and [`RackError::ZeroQuantum`] for a zero quantum.
+    /// [`RackError::ZeroQuantum`] for a zero quantum, and [`RackError::AutomationWindow`] if the
+    /// staging window is not exactly the bank's automation capacity -- the precondition of the
+    /// live drain's pairing rule, refused here, at bind, rather than discovered on the render
+    /// thread.
     pub fn new(
         processor: Box<dyn PreparedNativeEffectBank>,
         width: BankWidth,
@@ -842,6 +1023,12 @@ impl ConsoleEffectBankStage {
         let designed = (0..lane_count)
             .map(|lane| processor.lane_channel_symmetry(lane))
             .collect();
+        let staging: Box<[PreparedAutomationSpan]> = vec![IDLE_SPAN; capacity].into_boxed_slice();
+        // One window serves every lane, and each lane's staged prefix meets the effect's per-lane
+        // `span_index < automation_capacity` cut-off; a window of any other size would let a
+        // staged twin pair straddle it (issue #1012).
+        EffectBankProcessBlock::check_automation_window(&staging, &processor.metadata())
+            .map_err(|_| RackError::AutomationWindow)?;
         Ok(Self {
             processor,
             designed,
@@ -849,7 +1036,7 @@ impl ConsoleEffectBankStage {
             quantum,
             offsets: vec![0_u32; lane_count + 1].into_boxed_slice(),
             lanes: lanes.into_boxed_slice(),
-            staging: vec![IDLE_SPAN; capacity].into_boxed_slice(),
+            staging,
             packed: vec![IDLE_SPAN; total].into_boxed_slice(),
             shunt,
             observations: observed.then(|| observations.into_boxed_slice()),
@@ -1650,7 +1837,8 @@ impl<'a> ResidentOutputLane<'a> {
 ///
 /// # The mono collapse
 ///
-/// A chain whose every active lane renders a track doing bit-identical work on both channels runs
+/// A chain that gathers its tracks' inputs (issue #970) and whose every active lane renders a track
+/// doing bit-identical work on both channels runs
 /// its **upstream** slots over one plane and duplicates that plane into its seam-side slots. The
 /// whole mechanism is four decisions and one copy:
 ///
@@ -2175,6 +2363,30 @@ impl BankChain {
         })
     }
 
+    /// Borrow the actual final scratch planes of the whole bank: `frames * width` words each, every
+    /// lane interleaved, inactive lanes included (issue #943).
+    ///
+    /// [`Self::final_output_lane`]'s shape checks without its per-lane activity test, and under the
+    /// same terms: this validates dimensions only, and the caller must establish successful
+    /// execution in the current block before reading it. An inactive lane's words are scratch, so
+    /// whatever the caller derives from them must never reach an observer.
+    #[must_use]
+    pub fn final_output_block(&self, frames: u32) -> Option<(&[f32], &[f32])> {
+        let lanes = self.scratch.width.lanes() as usize;
+        if frames == 0
+            || frames > self.scratch.quantum
+            || self.lanes != lanes
+            || self.active.len() != lanes
+        {
+            return None;
+        }
+        let words = usize::try_from(frames).ok()?.checked_mul(lanes)?;
+        Some((
+            self.scratch.left.get(..words)?,
+            self.scratch.right.get(..words)?,
+        ))
+    }
+
     /// Gather every active lane, run every non-identity slot over the resident block, scatter every
     /// active lane back. No allocation, no shape `Result`, one transpose round-trip.
     pub fn run<M: BankMembers + ?Sized>(
@@ -2238,6 +2450,8 @@ impl BankChain {
         first_sample: u64,
         predecessor: Option<&BankChain>,
     ) -> Result<(), RenderError> {
+        #[cfg(feature = "test-support")]
+        test_only_bank_phase_profile::start();
         debug_assert!(frames >= 1 && frames <= self.scratch.quantum);
         let len = frames as usize * self.lanes;
         // Validate stored shape before any successor drain or destination write. Graph owns
@@ -2337,6 +2551,8 @@ impl BankChain {
         if collapse {
             self.collapses = self.collapses.saturating_add(1);
         }
+        #[cfg(feature = "test-support")]
+        test_only_bank_phase_profile::enter(test_only_bank_phase_profile::GATHER);
         if let Some(source) = predecessor {
             self.acquire_resident_input(source, frames, collapse);
         } else if collapse {
@@ -2350,8 +2566,14 @@ impl BankChain {
         } else {
             self.slots.len()
         };
+        #[cfg(feature = "test-support")]
+        let mut position = 0_usize;
+        // The probe's slot position is the only counter here, and it exists only with the feature.
+        #[cfg_attr(feature = "test-support", allow(clippy::explicit_counter_loop))]
         for slot in &mut self.slots[..prefix] {
             if slot.has_active_lanes() {
+                #[cfg(feature = "test-support")]
+                test_only_bank_phase_profile::enter_slot(position, &*slot.stage);
                 let block = BankBlock {
                     left: &mut self.scratch.left[..len],
                     right: &mut self.scratch.right[..len],
@@ -2365,6 +2587,10 @@ impl BankChain {
                     slot.stage.process(block)?;
                 }
             }
+            #[cfg(feature = "test-support")]
+            {
+                position += 1;
+            }
         }
         if collapse {
             // The seam. One extra copy of the resident block per collapsed chain per block, and it
@@ -2373,10 +2599,17 @@ impl BankChain {
             // exactly the arithmetic it runs on a dual block, in exactly its operation order. The
             // fold's `ll*l + lr*r` is *not* rewritten as `(ll + lr) * l` on the strength of
             // `l == r`: the two round differently, and the second is not what a dual run computes.
+            #[cfg(feature = "test-support")]
+            test_only_bank_phase_profile::enter(test_only_bank_phase_profile::SEAM);
             let AoSoaScratch { left, right, .. } = &mut self.scratch;
             right[..len].copy_from_slice(&left[..len]);
+            #[cfg(feature = "test-support")]
+            let mut position = self.collapse_prefix;
+            #[cfg_attr(feature = "test-support", allow(clippy::explicit_counter_loop))]
             for slot in &mut self.slots[self.collapse_prefix..] {
                 if slot.has_active_lanes() {
+                    #[cfg(feature = "test-support")]
+                    test_only_bank_phase_profile::enter_slot(position, &*slot.stage);
                     slot.stage.process(BankBlock {
                         left: &mut self.scratch.left[..len],
                         right: &mut self.scratch.right[..len],
@@ -2385,14 +2618,24 @@ impl BankChain {
                         lanes: self.lanes,
                     })?;
                 }
+                #[cfg(feature = "test-support")]
+                {
+                    position += 1;
+                }
             }
         }
+        #[cfg(feature = "test-support")]
+        test_only_bank_phase_profile::enter(test_only_bank_phase_profile::SCATTER);
         self.scatter(members, frames);
         // The epilogue. Empty on every chain the engine builds today, so this is one branch and
         // no auxiliary state; see `BankMembers::aux_plane_mut` for what arming it is for.
         if !self.aux.is_empty() {
+            #[cfg(feature = "test-support")]
+            test_only_bank_phase_profile::enter(test_only_bank_phase_profile::AUX);
             self.accumulate_aux(members, frames);
         }
+        #[cfg(feature = "test-support")]
+        test_only_bank_phase_profile::finish();
         Ok(())
     }
     // REALTIME_POLICY_END
@@ -2516,7 +2759,9 @@ impl BankChain {
     /// Record the structural half of this cohort's witness: the `SOURCE` term, joined at bind.
     ///
     /// `structural` is "every active lane of this chain renders a track whose two channels read
-    /// one source channel". Passing `false`, or never calling this at all, makes the chain decline
+    /// one source channel **and this chain gathers that track's input**" (issue #970: a later chain
+    /// of a split strip reads planes an earlier stage produced, which the source mapping says
+    /// nothing about). Passing `false`, or never calling this at all, makes the chain decline
     /// forever. See the `collapse_source` field for why the chain cannot derive this itself.
     ///
     /// # The obligation, which M3's invariant rests on
@@ -2737,7 +2982,11 @@ impl BankChain {
                     folded_lanes[folded_count] = lane;
                     folded_count += 1;
                 } else {
+                    #[cfg(feature = "test-support")]
+                    test_only_bank_phase_profile::enter(test_only_bank_phase_profile::FOLD);
                     members.fold_plane(lane, left, right);
+                    #[cfg(feature = "test-support")]
+                    test_only_bank_phase_profile::enter(test_only_bank_phase_profile::SCATTER);
                 }
             } else {
                 let (left, right) = members.plane_mut(lane);
@@ -2753,6 +3002,8 @@ impl BankChain {
                 used,
             )
         {
+            #[cfg(feature = "test-support")]
+            test_only_bank_phase_profile::enter(test_only_bank_phase_profile::FOLD);
             members.fold_cohort(cohort);
         }
     }
@@ -2819,6 +3070,10 @@ impl BankChain {
         // would name -- and that no lane is left needing a `plane_mut` copy. An accepted offer
         // finishes the fold; the staging block and every plane stay unwritten. A declined one
         // wrote nothing, and the staged path below runs as it always has.
+        #[cfg(feature = "test-support")]
+        if !self.fold.is_empty() {
+            test_only_bank_phase_profile::enter(test_only_bank_phase_profile::FOLD);
+        }
         if self.fold.len() == W
             && self.fold.iter().all(|folded| *folded)
             && let Ok(cohort) = ResidentFoldCohort::new(
@@ -2830,6 +3085,10 @@ impl BankChain {
             && members.fold_resident(cohort)
         {
             return;
+        }
+        #[cfg(feature = "test-support")]
+        if !self.fold.is_empty() {
+            test_only_bank_phase_profile::enter(test_only_bank_phase_profile::SCATTER);
         }
         let tiled = (frames_used / W) * W;
         tile_scatter(
@@ -2883,7 +3142,11 @@ impl BankChain {
                     folded_lanes[folded_count] = lane;
                     folded_count += 1;
                 } else {
+                    #[cfg(feature = "test-support")]
+                    test_only_bank_phase_profile::enter(test_only_bank_phase_profile::FOLD);
                     members.fold_plane(lane, left, right);
+                    #[cfg(feature = "test-support")]
+                    test_only_bank_phase_profile::enter(test_only_bank_phase_profile::SCATTER);
                 }
             } else {
                 let (plane_left, plane_right) = members.plane_mut(lane);
@@ -2901,6 +3164,8 @@ impl BankChain {
                 frames_used,
             )
         {
+            #[cfg(feature = "test-support")]
+            test_only_bank_phase_profile::enter(test_only_bank_phase_profile::FOLD);
             members.fold_cohort(cohort);
         }
     }
@@ -6776,5 +7041,159 @@ mod tests {
             chain.collapse_channels_agree(),
             "the disengage copy re-establishes agreement; a witness that still holds keeps it"
         );
+    }
+
+    /// Issue #960: members with a fold, an auxiliary destination and direct planes, so one type
+    /// reaches every scatter path the bank sub-phase probes split.
+    #[cfg(feature = "test-support")]
+    struct ProbedMembers {
+        planes: Planes,
+        bus_left: Vec<f32>,
+        bus_right: Vec<f32>,
+        aux: Vec<bool>,
+        aux_left: Vec<f32>,
+        aux_right: Vec<f32>,
+    }
+    #[cfg(feature = "test-support")]
+    impl ProbedMembers {
+        fn words(&self) -> Vec<u32> {
+            let planes = self
+                .planes
+                .left
+                .iter()
+                .chain(self.planes.right.iter())
+                .flatten();
+            planes
+                .chain(&self.bus_left)
+                .chain(&self.bus_right)
+                .chain(&self.aux_left)
+                .chain(&self.aux_right)
+                .map(|word| word.to_bits())
+                .collect()
+        }
+    }
+    #[cfg(feature = "test-support")]
+    impl BankMembers for ProbedMembers {
+        fn plane(&self, lane: usize) -> (&[f32], &[f32]) {
+            self.planes.plane(lane)
+        }
+        fn plane_mut(&mut self, lane: usize) -> (&mut [f32], &mut [f32]) {
+            self.planes.plane_mut(lane)
+        }
+        fn distinct_planes_mut(
+            &mut self,
+            lanes: usize,
+            frames: usize,
+        ) -> Option<BankPlaneViews<'_>> {
+            self.planes.distinct_planes_mut(lanes, frames)
+        }
+        fn fold_plane(&mut self, lane: usize, left: &mut [f32], right: &mut [f32]) {
+            let gain = 0.5 + lane as f32;
+            for (bus, sample) in self.bus_left.iter_mut().zip(left.iter()) {
+                *bus += *sample * gain;
+            }
+            for (bus, sample) in self.bus_right.iter_mut().zip(right.iter()) {
+                *bus += *sample * gain;
+            }
+        }
+        fn aux_plane_mut(&mut self, lane: usize) -> Option<(&mut [f32], &mut [f32])> {
+            self.aux[lane].then_some((&mut self.aux_left[..], &mut self.aux_right[..]))
+        }
+    }
+
+    /// Issue #960: the bank sub-phase probes enter each sub-phase where they claim to, on every
+    /// scatter path -- direct, a declined resident offer then one staged cohort, per-lane folds,
+    /// the partial bank's per-lane scatter, and the auxiliary epilogue -- name each slot by its
+    /// stage type, and leave every word a run writes exactly as an unprofiled run writes it.
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn bank_phase_probes_split_every_scatter_path_and_move_no_bit() {
+        use test_only_bank_phase_profile as profile;
+        const FRAMES: u32 = 16;
+        let mut state = 0x5eed_0960_0000_0001_u64;
+        for width in [BankWidth::Four, BankWidth::Eight] {
+            let lanes = width.lanes() as usize;
+            let all = vec![true; lanes];
+            let mut partial = all.clone();
+            partial[lanes - 1] = false;
+            let mut some = vec![false; lanes];
+            some[0] = true;
+            some[2] = true;
+            // (active lanes, fold mask, aux mask, expected [SCATTER, FOLD, AUX] entries)
+            type Case<'a> = (&'a [bool], Option<&'a [bool]>, Option<&'a [bool]>, [u64; 3]);
+            let cases: [Case<'_>; 5] = [
+                (&all, None, None, [1, 0, 0]),
+                (&all, Some(&all), None, [2, 2, 0]),
+                (&all, Some(&some), None, [4, 3, 0]),
+                (&partial, Some(&partial), None, [1, 1, 0]),
+                (&all, None, Some(&some), [1, 0, 1]),
+            ];
+            for (case, (active, fold, aux, expected)) in cases.into_iter().enumerate() {
+                let what = format!("{lanes} lanes, case {case}");
+                let source = hostile_planes(lanes, FRAMES, &mut state);
+                let run = |profiled: bool| {
+                    let mut chain = BankChain::new(
+                        AoSoaScratch::new(width, 128).expect("scratch"),
+                        active.to_vec().into_boxed_slice(),
+                        vec![
+                            slot(active.to_vec(), Box::new(ScaleByLane)),
+                            slot(active.to_vec(), Box::new(PassThrough)),
+                        ],
+                    )
+                    .expect("chain");
+                    if let Some(fold) = fold {
+                        chain
+                            .arm_fold(fold.to_vec().into_boxed_slice())
+                            .expect("fold");
+                    }
+                    if let Some(aux) = aux {
+                        chain.arm_aux(aux.to_vec().into_boxed_slice()).expect("aux");
+                    }
+                    let mut members = ProbedMembers {
+                        planes: source.clone(),
+                        bus_left: vec![0.0; FRAMES as usize],
+                        bus_right: vec![0.0; FRAMES as usize],
+                        aux: aux.map_or_else(|| vec![false; lanes], <[bool]>::to_vec),
+                        aux_left: vec![0.0; FRAMES as usize],
+                        aux_right: vec![0.0; FRAMES as usize],
+                    };
+                    profile::reset();
+                    profile::enable(profiled);
+                    chain.run(&mut members, FRAMES, 0).expect("run");
+                    profile::enable(false);
+                    (members.words(), profile::snapshot(), profile::slot_names())
+                };
+                let (plain, unprofiled, _) = run(false);
+                let (words, snapshot, names) = run(true);
+                assert_eq!(words, plain, "{what}: the probes moved a bit");
+                assert_eq!(unprofiled.chain_runs, 0, "{what}: off, nothing is profiled");
+                assert_eq!(snapshot.chain_runs, 1, "{what}");
+                assert!(snapshot.nanos.iter().sum::<u64>() > 0, "{what}");
+                let entries = snapshot.entries;
+                assert_eq!(
+                    [
+                        entries[profile::PROLOGUE],
+                        entries[profile::GATHER],
+                        entries[profile::SLOT],
+                        entries[profile::SLOT + 1],
+                        entries[profile::SEAM],
+                    ],
+                    [1, 1, 1, 1, 0],
+                    "{what}"
+                );
+                assert_eq!(
+                    [
+                        entries[profile::SCATTER],
+                        entries[profile::FOLD],
+                        entries[profile::AUX],
+                    ],
+                    expected,
+                    "{what}: scatter, fold, aux"
+                );
+                assert!(names[0].ends_with("ScaleByLane"), "{what}: {}", names[0]);
+                assert!(names[1].ends_with("PassThrough"), "{what}: {}", names[1]);
+                assert!(names[2..].iter().all(|name| name.is_empty()), "{what}");
+            }
+        }
     }
 }

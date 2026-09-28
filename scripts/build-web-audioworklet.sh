@@ -1,8 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# `--module-only` (issue #1009) writes the module alone,
+# `miso-engine-v1-audio-worklet.simd128.wasm`, built by exactly the cargo line below, and does not
+# hold it to the pin: a batch repins once, at its boundary, so a gate that reads the module
+# mid-batch (`run-wasm-gates.sh`'s V8 spill gate) must still get this commit's bytes. The build has
+# one home, here, whichever mode asks for it.
+module_only=0
+if [[ ${1-} == --module-only ]]; then
+  module_only=1
+  shift
+fi
 if (($# != 1)); then
-  echo "usage: $0 EMPTY_OUTPUT_DIRECTORY" >&2
+  echo "usage: $0 [--module-only] EMPTY_OUTPUT_DIRECTORY" >&2
   exit 2
 fi
 
@@ -65,6 +75,18 @@ artifact="$simd_target/wasm32-unknown-unknown/release/host_web.wasm"
 observed=$(sha256sum "$artifact" | awk '{print $1}')
 pin_file="$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256"
 expected=$(tr -d '\n' <"$pin_file")
+
+if ((module_only)); then
+  cp "$artifact" "$output_dir/miso-engine-v1-audio-worklet.simd128.wasm"
+  if [[ "$observed" == "$expected" ]]; then
+    printf 'AudioWorklet module %s (matches the pin; --module-only does not check it)\n' \
+      "$observed"
+  else
+    printf 'AudioWorklet module %s (pin %s; --module-only does not check it)\n' \
+      "$observed" "$expected"
+  fi
+  exit 0
+fi
 
 if [[ "${MISO_ENGINE_WEB_AUDIOWORKLET_REPIN:-0}" == 1 ]]; then
   printf '%s\n' "$observed"

@@ -146,3 +146,126 @@ matched their pins under the mutation, on every leg.** The swapped lowering diff
 ties and unordered pairs, and rule 2 of the corpus is that no NaN reaches a digest, so the frozen
 corpus cannot see this defect. That is the whole reason the count exists beside the digests rather
 than as another case in them.
+
+## `f64` lanes (issue #949): the exactness count and the lowering pin
+
+`crates/lane/src/f64_lane.rs` adds `LaneF64`/`Widen`. The guest gained
+`miso_gate_f64_lane_mismatches(width)`, which runs `wasm_gate_corpus::f64_lane_mismatches` (widen
+over every 65,537th `f32` pattern and a directed pool; `add`/`mul` over every ordered pair of a
+directed binary64 pool and 4,096 random pairs; 64 energy chains of 256 steps) and returns the lanes
+that disagree with scalar `f64`. Every leg requires zero and carries the count in its evidence line
+as `f64_lane_mismatches`. It also gained `miso_gate_f64_lane_probe`, whose simd128 body
+`check_f64_lane_lowering` in `scripts/run-wasm-gates.sh` censuses.
+
+**Red mutations, applied and reverted on the delivery host** (the full table, with the native gates,
+is rows F-1 to F-4 in `crates/lane/tests/MUTATIONS.md`). `Widen for f32x8` with its halves swapped
+(F-1):
+
+```
+{"schema_version":1,"kind":"wasm_gates","leg":"native",…,"minmax_lowering_mismatches":0,"f64_lane_mismatches":81676,"mismatches":[]}
+native f64 lanes: 81676 lanes disagree with the scalar f64 oracle; the widen, add or mul in crates/lane/src/f64_lane.rs is not exact IEEE binary64 on this target
+{"schema_version":1,"kind":"wasm_gates","leg":"wasm",…,"backend":0,…,"f64_lane_mismatches":81676,"mismatches":[]}
+{"schema_version":1,"kind":"wasm_gates","leg":"wasm",…,"backend":1,…,"f64_lane_mismatches":81676,"mismatches":[]}
+```
+
+Subnormal widen inputs flushed to `+0.0` (F-2) give `518` on every leg, and a vector `add` of
+`(self + b) + 0.0` (F-3) gives `2`, which is the `-0.0 + -0.0` pair at the two vector widths. All
+358 digest comparisons stay green under each of them. The probe widening through a `black_box`ed
+scalar loop (F-4) leaves every count at zero and fails the lowering pin instead:
+
+```
+wasm gates: the f64 lane probe is not vectorised on the simd128 leg: f64x2.promote_low_f32x4=0 f64x2.mul=2 f64x2.add=2 f64.promote_f32=4 f64.mul=0 f64.add=0
+```
+
+## The full meter pass (issue #950): the kernel count and its lowering pin
+
+The guest gained `miso_gate_meter_block_mismatches(width)`, which runs
+`wasm_gate_corpus::meter_block_mismatches` (`lane::kernels::builtins::meter_block` against an
+independent scalar `ALL` loop over hostile and tone streams of 16 carried blocks at five frame
+counts, peak, counts and energy by bits) and returns the lane fields that disagree. Every leg
+requires zero and carries the count in its evidence line as `meter_block_mismatches`. It also gained
+`miso_gate_meter_block_probe`, which calls the real `meter_block::<Simd4>`; `check_f64_lane_lowering`
+censuses it beside the #949 probe and additionally refuses scalar `f32.add`, `f32.gt` and `f32.abs`
+in it.
+
+**Red mutations, applied and reverted on the delivery host** (the full table is in
+`crates/lane/tests/MUTATIONS.md`, rows K-1, K-5, K-6 and M-W). The clipped count on `c > 1.0`
+(K-6), on all three legs:
+
+```
+{"schema_version":1,"kind":"wasm_gates","leg":"native",…,"f64_lane_mismatches":0,"meter_block_mismatches":662,"mismatches":[]}
+native meter block: 662 lane fields disagree with the meter's scalar loop; meter_block in crates/lane/src/kernels/builtins.rs is not the builtin meter's ALL loop on this target
+{"schema_version":1,"kind":"wasm_gates","leg":"wasm",…,"backend":0,…,"meter_block_mismatches":662,"mismatches":[]}
+{"schema_version":1,"kind":"wasm_gates","leg":"wasm",…,"backend":1,…,"meter_block_mismatches":662,"mismatches":[]}
+```
+
+The zero-seeded partial plus seed (K-1) gives `686` and the sanitized count that also counts zeros
+(K-5) `1315` on the native leg; all 358 digest comparisons stay green under each. The kernel
+widening through a `black_box`ed scalar loop (M-W) leaves every count at zero and fails the pin on
+the new probe while the #949 probe stays green:
+
+```
+wasm gates: miso_gate_f64_lane_probe census (simd128): f64x2.promote_low_f32x4=2 f64x2.mul=2 f64x2.add=2 f64.promote_f32=0 ...
+wasm gates: miso_gate_meter_block_probe is not vectorised on the simd128 leg: f64x2.promote_low_f32x4=0 f64x2.mul=2 f64x2.add=2 f64.promote_f32=4 f64.mul=0 f64.add=0 f32.{add,gt,abs}=0 f32x4.abs=1 f32x4.add=2
+```
+
+## The EQ's stationary cascade loops under V8 (issues #1000, #1009)
+
+`scripts/check-web-audioworklet-v8-spill.py` reads the shipped AudioWorklet module. It gets it from
+one build. CI runs it in `artifact-gates` on the downloaded artifact after that job's pin check.
+Locally `scripts/run-wasm-gates.sh` runs it last, on `build-web-audioworklet.sh --module-only`'s
+output: the delivery build's cargo line, without the pin check, since a batch repins only at its
+boundary. `wasm-guests` passes `--without-v8-spill`, and `check-ci-path-routing.py` refuses that
+flag unless `artifact-gates` runs the gate after its pin check.
+
+The pinned Node (`v22.23.2`, V8 `12.4.254.21-node.56`, Linux x64, an x86-64-v3 host) compiles the
+parametric EQ's `f32x4` `process_bank` and `process_bank_mono` with TurboFan (`--no-liftoff
+--no-wasm-lazy-compilation`). The gate fails when an innermost loop of the stationary, select-free
+cascade carries a value from one iteration to the next through a stack slot. There are two rules:
+
+- **Live across the back edge.** The slot is read from the header before it is written.
+- **On a recurrence.** A value loaded from the slot reaches a store to it along a path that crosses
+  the header. A path inside one iteration is slot reuse, which V8 does freely, and is allowed
+  (#1009).
+
+It holds the dual depth-one tail and the mono pair and tail, and reports the dual pair without
+holding it. The functions are found by symbol. The loops are found by what they compute: SVF steps
+per iteration, streams, select-free, and for a tail, reachable from a pair loop. They are never
+found by offset. A held row that matches no loop, or more than one, fails closed.
+
+**Re-pinning Node.** Build the red arms below and the current head, run the gate on the new V8, and
+record what each gives. Keep the rule whatever they show: if a red arm turns green on the new V8,
+say so, rather than changing a row to match. The first run on a CI runner is its own observation,
+so every verdict line names the CPU model.
+
+**What it proves.** That the reference V8 runs none of the held loops' values through memory from
+one iteration to the next: the mechanism that made #977 attempt 1's standing one-band browser EQ
+about 20 % slower while every other gate stayed green. **What it does not.** It times nothing and
+says nothing else about speed. Node's V8 is not a given browser's, and eager TurboFan is not a
+page's tier-up, so green is not "the browser EQ is as fast as before"; red is "this build brings
+back the #977 mechanism".
+
+**Red mutations, applied and reverted on the delivery host.** The one-token edit #977's attempt-2
+verifier recorded, in `interleave`'s depth-one tail, `if !admitted && (L::mask_any(…) ||
+L::mask_any(…))`, and #977 attempt 1 itself (`codex/977-eq-elision-and-passes-attempt1`), each
+red on the dual tail row, ten runs in ten with the same output; with the tail edit applied in the
+tree, `run-wasm-gates.sh` exits 1 there. The tail edit:
+
+```
+FAIL dual depth-1 tail, select-free: V8 carries [rbp-0xc0] from one iteration to the next (84 instructions in 4 blocks, 2 SVF steps, 2 streams, select-free, vmulps=14 vaddps=18 vsubps=4). Listing, carried slots marked:
+  …
+  *   817e  vmovups xmm0,[rbp-0xc0]
+  …
+  *   8238  vmovups [rbp-0xc0],xmm10
+      82e9  addl rdi,0xff
+      82ec  jnz <+0x8140>
+```
+
+**The dual pair is reported, not held.** It carries ten values across its back edge (eight
+integrators, two skew carries) beside 24 loop-invariant coefficients in sixteen vector registers,
+and at #977-#979 TurboFan routes ten stack slots through its recurrences. Among them are `ic2`
+(`v3 = x - ic2`) and `ic1` of one chain, stored by the back edge's gap moves and reloaded in the
+body. #977's scans reported the loop clean because it is entered in the middle: read in a straight
+line from the back edge's target, the rotated body stores each slot before it loads it. Whether
+this costs time is not measured, and in a loop that starved the count moves with any allocation
+change, so a count would be a byte pin by another name.

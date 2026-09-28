@@ -190,7 +190,7 @@ pub fn svf_cascade_interleaved<L: Lane, const S: usize, const D: usize>(
     c: &[[SvfCoef<L>; D]; S],
     s: &mut [[SvfState<L>; D]; S],
 ) {
-    svf_cascade_interleaved_impl(io, frames, c, s, UnmaskedOutput);
+    svf_cascade_interleaved_impl(io, frames, c, s, UnmaskedOutput, &mut Unobserved);
 }
 
 /// [`svf_cascade_interleaved`] with a bitwise per-lane dry-output selection for each section.
@@ -213,7 +213,234 @@ pub fn svf_cascade_interleaved_with_dry_masks<L: Lane, const S: usize, const D: 
     s: &mut [[SvfState<L>; D]; S],
     dry_masks: &[[L::Mask; D]; S],
 ) {
-    svf_cascade_interleaved_impl(io, frames, c, s, MaskedCascadeOutput { masks: dry_masks });
+    svf_cascade_interleaved_impl(
+        io,
+        frames,
+        c,
+        s,
+        MaskedCascadeOutput { masks: dry_masks },
+        &mut Unobserved,
+    );
+}
+
+/// [`svf_cascade_interleaved`] scheduled as a software pipeline: in iteration `i`, section `k` of
+/// every stream runs frame `i - k`. Same chains, same order per chain, same bits.
+///
+/// # Why this exists (issue #978)
+///
+/// [`svf_cascade_interleaved`] runs section `0` then section `1` of each stream within one frame,
+/// and section `1` consumes section `0`'s output of that same frame. Each frame's work is
+/// therefore a dependency chain `D` sections long, and the out-of-order window does not overlap
+/// enough of it across frames: at `D = 2` the frame body waits on two recurrence latencies back
+/// to back. Skewing the pass by one frame per section breaks that chain. In iteration `i`,
+/// section `k` takes its input from section `k - 1`'s output of the *previous* iteration (frame
+/// `i - k`, held in a register), so the sections of one iteration are independent of each other
+/// and only the recurrences themselves remain loop-carried.
+///
+/// # What it does not change
+///
+/// Every `(stream, section)` chain runs [`svf_step`] and the output mix
+/// `m2.fma(v2, m1.fma(v1, m0.mul(x)))` on exactly the inputs, and in exactly the frame order, that
+/// [`svf_cascade_interleaved`] gives it: section `k` of frame `f` still reads section `k - 1`'s
+/// output of frame `f` (now from the carry rather than from a register of the same iteration) and
+/// its own state after frame `f - 1`. Only the interleaving of independent chains moves, so the
+/// output words and the state words are identical, `-0.0`, subnormals and NaN payloads included.
+/// Gate G2 pins it against [`svf_cascade_interleaved`] (`tests/g2_kernel_identity.rs`).
+///
+/// # Schedule
+///
+/// * **Prologue**, iterations `0..D - 1`: section `k` runs only once frame `i - k` exists
+///   (`k <= i`).
+/// * **Steady state**, iterations `D - 1..frames`, branch-free: every section runs, visited from
+///   `D - 1` down to `0` so that each consumes the previous iteration's carry before the section
+///   ahead of it overwrites that carry.
+/// * **Epilogue**, iterations `frames..frames + D - 1`: section `k` runs only while frame `i - k`
+///   exists (`i - k < frames`), draining the pipeline.
+///
+/// Section `0` reads frame `i` from `io`, and section `D - 1` writes frame `i - (D - 1)` back, so
+/// every frame is read before any section writes it (the frame written in iteration `i` was read
+/// `D - 1` iterations earlier). With `frames < D` there is no steady state, and the call falls back
+/// to [`svf_cascade_interleaved`] itself.
+///
+/// # Contract
+///
+/// As [`svf_cascade_interleaved`]: `S` distinct blocks of `frames * L::WIDTH` samples, `c[t][k]`
+/// and `s[t][k]` the coefficients and integrators of section `k` of stream `t` in cascade order.
+/// No allocation, no scratch beyond `S * D` carried vectors, no `unsafe`.
+#[inline(always)]
+pub fn svf_cascade_skewed<L: Lane, const S: usize, const D: usize>(
+    io: [&mut [f32]; S],
+    frames: usize,
+    c: &[[SvfCoef<L>; D]; S],
+    s: &mut [[SvfState<L>; D]; S],
+) {
+    svf_cascade_skewed_impl(io, frames, c, s, UnmaskedOutput);
+}
+
+/// [`svf_cascade_skewed`] with [`svf_cascade_interleaved_with_dry_masks`]'s per-section dry
+/// selection.
+///
+/// `dry_masks[stream][section]` selects the section input `x` where set and the wet output where
+/// clear, at the same section boundary and on the same `x` as
+/// [`svf_cascade_interleaved_with_dry_masks`]; the recurrence and its state updates are the
+/// unmasked kernel's, so a dry lane keeps its state evolution. Same bits as that kernel.
+#[inline(always)]
+pub fn svf_cascade_skewed_with_dry_masks<L: Lane, const S: usize, const D: usize>(
+    io: [&mut [f32]; S],
+    frames: usize,
+    c: &[[SvfCoef<L>; D]; S],
+    s: &mut [[SvfState<L>; D]; S],
+    dry_masks: &[[L::Mask; D]; S],
+) {
+    svf_cascade_skewed_impl(io, frames, c, s, MaskedCascadeOutput { masks: dry_masks });
+}
+
+/// [`svf_cascade_interleaved`] that also judges, per stream, every word it stores against
+/// `limit` (issue #999).
+///
+/// Returns `verdict[t] = true` exactly when every word the kernel stored into `io[t]` has
+/// `|y| < limit`. The compare is ordered, so a NaN word fails it, as does an infinity for any
+/// finite `limit`. The rendered words and the state words are [`svf_cascade_interleaved`]'s, bit
+/// for bit: the fold reads the output word and writes nothing but its own accumulator.
+///
+/// # Why it exists
+///
+/// A caller that applies a block-limit rule to the kernel's output -- the effects' master plan
+/// §4.4 check, `effect_runtime::bank::check_block` -- would otherwise re-read both planes after
+/// the cascade has written them. The cascade already holds every output word in a register when
+/// it stores it, and its frame loop is latency-bound (see [`svf_cascade_interleaved`]), so the
+/// fold's few independent operations per stored vector (an `abs`, a compare, a mask reduction and
+/// an `or`) ride in the recurrence's shadow, where the separate scan costs a load, the same
+/// predicate and a loop of its own.
+///
+/// # Frozen operation order
+///
+/// Per stream, before the first frame: `failed = false`. Per stored vector `y`, after the kernel
+/// computes it and before it is stored: `failed = failed OR mask_any(NOT (|y| < limit))`. Once,
+/// after the last frame: `verdict = NOT failed`. `check_block` folds the same per-word predicate
+/// into a vector mask and reduces once; a disjunction of per-word failures does not depend on
+/// where the reduction happens or in what order, so the verdict is the scan's on every block, NaN
+/// payloads and signed zeros included.
+///
+/// # Contract
+///
+/// As [`svf_cascade_interleaved`]. With `frames = 0` nothing is stored and every verdict is
+/// `true`, which is the scan's answer on an empty block.
+#[inline(always)]
+#[must_use]
+pub fn svf_cascade_interleaved_bounded<L: Lane, const S: usize, const D: usize>(
+    io: [&mut [f32]; S],
+    frames: usize,
+    c: &[[SvfCoef<L>; D]; S],
+    s: &mut [[SvfState<L>; D]; S],
+    limit: f32,
+) -> [bool; S] {
+    let mut bound = StoreBound::<L, S>::new(limit);
+    svf_cascade_interleaved_impl(io, frames, c, s, UnmaskedOutput, &mut bound);
+    bound.verdict()
+}
+
+/// [`svf_cascade_interleaved_with_dry_masks`] with [`svf_cascade_interleaved_bounded`]'s verdict.
+///
+/// The judged word is the one stored: after the last section's dry selection.
+#[inline(always)]
+#[must_use]
+pub fn svf_cascade_interleaved_with_dry_masks_bounded<L: Lane, const S: usize, const D: usize>(
+    io: [&mut [f32]; S],
+    frames: usize,
+    c: &[[SvfCoef<L>; D]; S],
+    s: &mut [[SvfState<L>; D]; S],
+    dry_masks: &[[L::Mask; D]; S],
+    limit: f32,
+) -> [bool; S] {
+    let mut bound = StoreBound::<L, S>::new(limit);
+    svf_cascade_interleaved_impl(
+        io,
+        frames,
+        c,
+        s,
+        MaskedCascadeOutput { masks: dry_masks },
+        &mut bound,
+    );
+    bound.verdict()
+}
+
+/// Shared skewed body. `M` is monomorphized exactly as in [`svf_cascade_interleaved_impl`].
+#[inline(always)]
+fn svf_cascade_skewed_impl<L: Lane, const S: usize, const D: usize, M: SvfOutput<L>>(
+    io: [&mut [f32]; S],
+    frames: usize,
+    c: &[[SvfCoef<L>; D]; S],
+    s: &mut [[SvfState<L>; D]; S],
+    output: M,
+) {
+    if frames < D {
+        svf_cascade_interleaved_impl(io, frames, c, s, output, &mut Unobserved);
+        return;
+    }
+    let width = L::WIDTH;
+    let span = frames * width;
+    debug_assert!(io.iter().all(|block| block.len() == span));
+    // Truncating once, outside the loops, as the interleaved body does.
+    let io = io.map(|block| &mut block[..span]);
+    let mut state = *s;
+    let nc1: [[L; D]; S] =
+        core::array::from_fn(|stream| core::array::from_fn(|section| c[stream][section].c1.neg()));
+    // `carry[t][k]`: section `k`'s output of the previous iteration, section `k + 1`'s input of
+    // this one. The last section's slot is never read.
+    let mut carry: [[L; D]; S] = [[L::zero(); D]; S];
+    // One `(stream, section)` step of iteration `i`, on frame `i - section`: the interleaved
+    // body's operations, in its order, on the input the skew hands it.
+    macro_rules! step {
+        ($i:expr, $stream:expr, $section:expr) => {{
+            let (stream, section) = ($stream, $section);
+            let base = ($i - section) * width;
+            let x = if section == 0 {
+                L::load(&io[stream][base..base + width])
+            } else {
+                carry[stream][section - 1]
+            };
+            let coefficients = &c[stream][section];
+            let (v1, v2) = svf_step(
+                x,
+                nc1[stream][section],
+                coefficients.a2,
+                coefficients.a3,
+                &mut state[stream][section],
+            );
+            let wet = coefficients
+                .m2
+                .fma(v2, coefficients.m1.fma(v1, coefficients.m0.mul(x)));
+            let y = output.choose(x, wet, stream, section);
+            if section == D - 1 {
+                y.store(&mut io[stream][base..base + width]);
+            } else {
+                carry[stream][section] = y;
+            }
+        }};
+    }
+    for i in 0..D - 1 {
+        for stream in 0..S {
+            for section in (0..=i).rev() {
+                step!(i, stream, section);
+            }
+        }
+    }
+    for i in D - 1..frames {
+        for stream in 0..S {
+            for section in (0..D).rev() {
+                step!(i, stream, section);
+            }
+        }
+    }
+    for i in frames..frames + D - 1 {
+        for stream in 0..S {
+            for section in (i + 1 - frames..D).rev() {
+                step!(i, stream, section);
+            }
+        }
+    }
+    *s = state;
 }
 
 /// The output policy is a zero-cost static choice: `UnmaskedOutput` is the original arithmetic,
@@ -253,15 +480,80 @@ impl<L: Lane> SvfOutput<L> for MaskedBlockOutput<L> {
     }
 }
 
+/// What a cascade kernel does with each output word besides storing it (issue #999).
+///
+/// A zero-cost static choice, like [`SvfOutput`]: [`Unobserved`] does nothing, so the entry points
+/// that return no verdict keep their arithmetic and their loop, and [`StoreBound`] adds only its
+/// fold.
+trait StoreObserver<L: Lane> {
+    fn observe(&mut self, stream: usize, y: L);
+}
+
+struct Unobserved;
+
+impl<L: Lane> StoreObserver<L> for Unobserved {
+    #[inline(always)]
+    fn observe(&mut self, _stream: usize, _y: L) {}
+}
+
+/// The block-limit fold of [`svf_cascade_interleaved_bounded`]: one `bool` per stream.
+///
+/// # Why a `bool`, not a vector mask (issue #999, attempt 2)
+///
+/// The first form kept one vector mask per stream and folded `ok = ok AND (|y| < limit)` into it.
+/// In the shipped `simd128` artifact V8 carried both masks through stack slots across the one-band
+/// dual tail's back edge (stored at the loop top, reloaded before the `and`), a loop-carried value
+/// through memory that the V8 spill gate (issue #1000) rightly refuses. Reducing each stored
+/// vector's verdict to a scalar at once -- `failed |= mask_any(NOT (|y| < limit))` -- leaves the
+/// carried value in a general-purpose register, of which the kernel has plenty, and takes no vector
+/// register from the recurrence. It is the same predicate on the same words, and a disjunction of
+/// per-vector verdicts is the scan's per-block one.
+struct StoreBound<L: Lane, const S: usize> {
+    limit: L,
+    failed: [bool; S],
+}
+
+impl<L: Lane, const S: usize> StoreBound<L, S> {
+    #[inline(always)]
+    fn new(limit: f32) -> Self {
+        Self {
+            limit: L::splat(limit),
+            failed: [false; S],
+        }
+    }
+
+    #[inline(always)]
+    fn verdict(&self) -> [bool; S] {
+        core::array::from_fn(|stream| !self.failed[stream])
+    }
+}
+
+impl<L: Lane, const S: usize> StoreObserver<L> for StoreBound<L, S> {
+    #[inline(always)]
+    fn observe(&mut self, stream: usize, y: L) {
+        // Non-short-circuiting `|`: the reduction runs on every stored vector, branch-free.
+        self.failed[stream] |= L::mask_any(L::mask_not(y.abs().lt(self.limit)));
+    }
+}
+
 /// Shared cascade body. `M` is monomorphized, so old callers retain the original arithmetic
-/// without a select and the additive entrypoint gets one boundary select per section.
+/// without a select and the additive entrypoint gets one boundary select per section. `O` is
+/// monomorphized the same way: [`Unobserved`] adds nothing, and [`StoreBound`] folds each stored
+/// word into its stream's verdict (issue #999).
 #[inline(always)]
-fn svf_cascade_interleaved_impl<L: Lane, const S: usize, const D: usize, M: SvfOutput<L>>(
+fn svf_cascade_interleaved_impl<
+    L: Lane,
+    const S: usize,
+    const D: usize,
+    M: SvfOutput<L>,
+    O: StoreObserver<L>,
+>(
     io: [&mut [f32]; S],
     frames: usize,
     c: &[[SvfCoef<L>; D]; S],
     s: &mut [[SvfState<L>; D]; S],
     output: M,
+    observer: &mut O,
 ) {
     let width = L::WIDTH;
     let span = frames * width;
@@ -293,6 +585,7 @@ fn svf_cascade_interleaved_impl<L: Lane, const S: usize, const D: usize, M: SvfO
                 // the recurrence, even for a dry lane, to retain its state updates.
                 x = output.choose(x, wet, stream, section);
             }
+            observer.observe(stream, x);
             x.store(slot);
         }
     }

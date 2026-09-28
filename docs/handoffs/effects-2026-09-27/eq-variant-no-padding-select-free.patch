@@ -1,0 +1,94 @@
+diff --git a/crates/parametric-eq/src/lib.rs b/crates/parametric-eq/src/lib.rs
+index bb160ecf..d390654d 100644
+--- a/crates/parametric-eq/src/lib.rs
++++ b/crates/parametric-eq/src/lib.rs
+@@ -1689,7 +1689,7 @@ fn cascade_sections<L: Lane, const W: usize>(
+ ) -> ([usize; EQ_SECTION_COUNT], usize) {
+     let all = (core::array::from_fn(|section| section), EQ_SECTION_COUNT);
+     let dead = |section: usize| left_channel.identity[section] && right_channel.identity[section];
+-    let depth = EFFECTIVE_CASCADE_DEPTH;
++    let depth = 1;
+     let live = (0..EQ_SECTION_COUNT)
+         .filter(|section| !dead(*section))
+         .count();
+@@ -1762,7 +1762,7 @@ fn interleave<L: Lane, const W: usize, const DEPTH: usize>(
+ ) {
+     debug_assert_eq!(EQ_SECTION_COUNT % DEPTH, 0);
+     let (list, length) = sections;
+-    debug_assert_eq!(length % DEPTH, 0);
++    let admitted = length < EQ_SECTION_COUNT;
+     for pass in 0..length / DEPTH {
+         let base = pass * DEPTH;
+         let at: [usize; DEPTH] = core::array::from_fn(|k| list[base + k]);
+@@ -1774,17 +1774,26 @@ fn interleave<L: Lane, const W: usize, const DEPTH: usize>(
+             core::array::from_fn(|k| channels.0.sections[at[k]].state),
+             core::array::from_fn(|k| channels.1.sections[at[k]].state),
+         ];
+-        let dry_masks: [[L::Mask; DEPTH]; 2] = [
+-            core::array::from_fn(|k| channels.0.dry_mask(at[k])),
+-            core::array::from_fn(|k| channels.1.dry_mask(at[k])),
+-        ];
+-        svf_cascade_interleaved_with_dry_masks::<L, 2, DEPTH>(
+-            [&mut *left, &mut *right],
+-            frames,
+-            &coefficients,
+-            &mut state,
+-            &dry_masks,
+-        );
++        if admitted {
++            lane::kernels::svf_cascade_interleaved::<L, 2, DEPTH>(
++                [&mut *left, &mut *right],
++                frames,
++                &coefficients,
++                &mut state,
++            );
++        } else {
++            let dry_masks: [[L::Mask; DEPTH]; 2] = [
++                core::array::from_fn(|k| channels.0.dry_mask(at[k])),
++                core::array::from_fn(|k| channels.1.dry_mask(at[k])),
++            ];
++            svf_cascade_interleaved_with_dry_masks::<L, 2, DEPTH>(
++                [&mut *left, &mut *right],
++                frames,
++                &coefficients,
++                &mut state,
++                &dry_masks,
++            );
++        }
+         let [left_state, right_state] = state;
+         for (k, word) in left_state.into_iter().enumerate() {
+             channels.0.sections[at[k]].state = word;
+@@ -1793,6 +1802,33 @@ fn interleave<L: Lane, const W: usize, const DEPTH: usize>(
+             channels.1.sections[at[k]].state = word;
+         }
+     }
++    if length % DEPTH == 1 {
++        let at = list[length - 1];
++        let coefficients: [[SvfCoef<L>; 1]; 2] =
++            [[channels.0.sections[at].coef], [channels.1.sections[at].coef]];
++        let mut state: [[SvfState<L>; 1]; 2] =
++            [[channels.0.sections[at].state], [channels.1.sections[at].state]];
++        if !admitted {
++            let dry_masks: [[L::Mask; 1]; 2] =
++                [[channels.0.dry_mask(at)], [channels.1.dry_mask(at)]];
++            svf_cascade_interleaved_with_dry_masks::<L, 2, 1>(
++                [&mut *left, &mut *right],
++                frames,
++                &coefficients,
++                &mut state,
++                &dry_masks,
++            );
++        } else {
++            lane::kernels::svf_cascade_interleaved::<L, 2, 1>(
++                [&mut *left, &mut *right],
++                frames,
++                &coefficients,
++                &mut state,
++            );
++        }
++        channels.0.sections[at].state = state[0][0];
++        channels.1.sections[at].state = state[1][0];
++    }
+ }
+ 
+ /// Reads increment `index` of a step set in the pinned order.

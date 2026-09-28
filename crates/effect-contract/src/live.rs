@@ -257,6 +257,37 @@ impl EffectControlLane {
     /// the returned overflow. Preparation makes that unreachable by refusing a queue deeper than
     /// the effect's automation capacity; the count exists so a violated invariant is observable
     /// rather than silent.
+    ///
+    /// `staging` must be exactly the effect's `automation_capacity` spans long. A caller that
+    /// allocates it checks that once, at preparation, with
+    /// [`EffectProcessBlock::check_automation_window`](crate::EffectProcessBlock::check_automation_window)
+    /// or
+    /// [`EffectBankProcessBlock::check_automation_window`](crate::EffectBankProcessBlock::check_automation_window);
+    /// the pairing rule below depends on it.
+    ///
+    /// # The witness, and the one record kind it is folded late for (issue #1004)
+    ///
+    /// Every drained record is folded into this lane's channel-symmetry witness through
+    /// [`ChannelSymmetryWitness::admit`], in FIFO order, with one exception: a one-channel
+    /// [`EffectControlRecord::Parameter`] is **deferred** to the end of the drain. It is folded
+    /// then (clearing `LIVE`, as it always did) unless the drain's staged spans *pair*: every
+    /// `Left` span is immediately followed by its `Right` twin -- same parameter, same kind, same
+    /// samples, `start_value` and `end_value` equal by bits -- and every `Right` span is
+    /// immediately preceded by its `Left` twin (`spans_pair`). That is the shape the web host's
+    /// both-channel command on a `PerLane` parameter lowers to, and without the deferral the first
+    /// knob touch on a mono stem retires its bank's mono collapse for the rest of the plan.
+    ///
+    /// Why a pair leaves the two channels in bit-equal state, which is the only premise the
+    /// collapse rests on: the staging below is last-wins per `(parameter_index, channel)`, so the
+    /// staged pair *is* the final value of each channel; an effect validates `pending[0][p]` and
+    /// `pending[1][p]` by the same checks from the same value (kind, samples, value, parameter,
+    /// order and capacity -- and the window is the capacity, so a twin is never cut off), and
+    /// applies them by the same code onto channels the witness already holds equal. Every other
+    /// record folds in FIFO order exactly as before. In particular a one-channel
+    /// [`EffectControlRecord::PreparedTarget`] is **not** deferred: a target FIFO has no last-wins
+    /// staging, and a `[Left A, Both C, Right A]` drain leaves the channels at `C` and `A` although
+    /// its last one-channel targets agree. The rule never sets `LIVE`; it only declines to clear
+    /// it, and a pair split across two drains is two lone writes, which clear it as before.
     pub fn stage(
         &mut self,
         staging: &mut [PreparedAutomationSpan],
@@ -271,6 +302,10 @@ impl EffectControlLane {
         let mut unbound = 0_u32;
         let mut observation = observation;
         let mut remaining = available;
+        // The first one-channel parameter record of this drain, held back from the witness until
+        // the drain's staged spans can say whether it was paired (issue #1004). It is folded
+        // through the same `admit` as every other record, so the hook stays the one path.
+        let mut deferred: Option<EffectControlRecord> = None;
         while remaining != 0 {
             remaining -= 1;
             let Ok(record) = self.control.try_pop() else {
@@ -280,8 +315,17 @@ impl EffectControlLane {
             };
             // The one hook. `admit` takes the record by trait, not by kind, so a record type
             // added to this queue later cannot reach the render state without declaring what it
-            // does to the witness (`symmetry::LiveConsoleRecord`).
-            self.symmetry.admit(&record);
+            // does to the witness (`symmetry::LiveConsoleRecord`). The deferral beside it is the
+            // one exception, and it is by record *shape*, not a second path: a one-channel
+            // `Parameter` is admitted at the end of the drain unless its span pairs.
+            if matches!(
+                record,
+                EffectControlRecord::Parameter { channel, .. } if channel.writes_one_channel()
+            ) {
+                deferred = deferred.or(Some(record));
+            } else {
+                self.symmetry.admit(&record);
+            }
             let (parameter_index, channel, value) = match record {
                 EffectControlRecord::PreparedTarget(target) => {
                     let Some(targets) = self.targets.as_mut() else {
@@ -322,6 +366,14 @@ impl EffectControlLane {
                         // A prepared-target owner must never silently fall back to render-time
                         // semantic design. Its checked admission path supplies a companion target
                         // for every EQ edit; a missing one is an invariant failure.
+                        //
+                        // A one-channel record refused here was deferred above and is never
+                        // staged, so when nothing else in the drain is staged the empty window
+                        // pairs and `LIVE` survives it; before #1004 it cleared `LIVE`. That is
+                        // not the pairing rule firing, and it is sound: the record reaches neither
+                        // channel, and `target_error` fails this block's render
+                        // (`RenderError::InvalidEnvelope` in both racks) before any sample moves
+                        // (issue #1004 finding 4).
                         target_error = true;
                         continue;
                     }
@@ -366,6 +418,19 @@ impl EffectControlLane {
             staging[position] = span;
             staged += 1;
         }
+        // `staged <= staging.len()` by construction, and the window is exactly the effect's
+        // `automation_capacity`: every caller that allocates one refuses any other size at
+        // preparation (`EffectProcessBlock::check_automation_window`,
+        // `EffectBankProcessBlock::check_automation_window`; issue #1012). So every staged span
+        // sits below the effect's `span_index < automation_capacity` cut-off, and that cut-off
+        // cannot separate a twin that `spans_pair` counts as paired. (The assertion that stood here
+        // restated the loop bound and could not fire; the bound it meant is enforced where both
+        // numbers are known.)
+        if let Some(record) = deferred
+            && !spans_pair(&staging[..staged])
+        {
+            self.symmetry.admit(&record);
+        }
         Staged {
             staged,
             staged_targets: self.staged_targets,
@@ -374,6 +439,45 @@ impl EffectControlLane {
             unbound,
         }
     }
+}
+
+/// Whether every one-channel span of one drain's staged window has its other-channel twin.
+///
+/// The window is strictly increasing in `(parameter_index, channel)` with `Left < Right < Both`
+/// ([`order_key`]), so a parameter's `Left` and `Right` spans, when both are present, are
+/// **adjacent**, `Left` first. The rule is therefore local: a `Left` span must be immediately
+/// followed by its twin `Right` span, and a `Right` span immediately preceded by its twin `Left`
+/// span. `Both` spans need no twin. One pass over adjacent pairs, no indexing, no allocation:
+/// O(n) in a window the effect's automation capacity bounds.
+fn spans_pair(spans: &[PreparedAutomationSpan]) -> bool {
+    let unpaired_end = spans
+        .first()
+        .is_some_and(|span| span.channel == ParameterChannel::Right)
+        || spans
+            .last()
+            .is_some_and(|span| span.channel == ParameterChannel::Left);
+    !unpaired_end
+        && spans
+            .iter()
+            .zip(spans.iter().skip(1))
+            .all(|(earlier, later)| {
+                let twins = twin_spans(earlier, later);
+                (earlier.channel != ParameterChannel::Left || twins)
+                    && (later.channel != ParameterChannel::Right || twins)
+            })
+}
+
+/// Whether `left` and `right` are one write's two halves: the same parameter, kind and samples,
+/// and values equal by bits (so `-0.0` does not twin `+0.0`, and NaN payloads must match).
+fn twin_spans(left: &PreparedAutomationSpan, right: &PreparedAutomationSpan) -> bool {
+    left.channel == ParameterChannel::Left
+        && right.channel == ParameterChannel::Right
+        && left.parameter_index == right.parameter_index
+        && left.kind == right.kind
+        && left.start_sample == right.start_sample
+        && left.end_sample == right.end_sample
+        && left.start_value.to_bits() == right.start_value.to_bits()
+        && left.end_value.to_bits() == right.end_value.to_bits()
 }
 // REALTIME_POLICY_END
 

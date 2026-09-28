@@ -1,0 +1,523 @@
+diff --git a/crates/true-peak-limiter/src/lib.rs b/crates/true-peak-limiter/src/lib.rs
+--- a/crates/true-peak-limiter/src/lib.rs
++++ b/crates/true-peak-limiter/src/lib.rs
+@@ -1143,10 +1143,12 @@
+ /// values rather than an array a backend might decide to spill.
+ #[inline(always)]
+ fn annex2_phases<L: Lane>(history: &History<L>, fir: &[[L; 4]; HISTORY_WORDS]) -> [L; 4] {
+-    let mut phase0 = L::zero();
+-    let mut phase1 = L::zero();
+-    let mut phase2 = L::zero();
+-    let mut phase3 = L::zero();
++    let row = &fir[0];
++    let sample = history.t0;
++    let mut phase0 = row[0].mul(sample);
++    let mut phase1 = row[1].mul(sample);
++    let mut phase2 = row[2].mul(sample);
++    let mut phase3 = row[3].mul(sample);
+     macro_rules! tap {
+         ($index:literal, $sample:expr) => {{
+             let row = &fir[$index];
+@@ -1157,7 +1159,6 @@
+             phase3 = phase3.add(row[3].mul(sample));
+         }};
+     }
+-    tap!(0, history.t0);
+     tap!(1, history.t1);
+     tap!(2, history.t2);
+     tap!(3, history.t3);
+@@ -1880,6 +1881,282 @@
+     L::select(bypass, delayed, delayed.mul(gain)).store(right_frame);
+ }
+ 
++/// Change 2: [`channel_frame_uniform`]'s steps 1-5 and the release target `1 - s`.
++#[inline(always)]
++fn channel_target_uniform<L: Lane>(
++    peak: L,
++    limit: L,
++    hot: &mut HotChannel<L>,
++    uniform: &mut UniformHot<'_, L>,
++    ring: usize,
++    slots: FrameSlots,
++) -> L {
++    let one = L::splat(1.0);
++    let required = L::select(peak.gt(limit), limit.div(peak), one);
++    store_ring_lane::<L>(uniform.required_ring, slots.ring_cursor, required);
++    let minimum = sliding_minimum_uniform::<L>(
++        uniform.required_ring,
++        uniform.offsets.window,
++        ring,
++        slots.end,
++        slots.start,
++        &mut uniform.prefix,
++        &mut uniform.phase,
++    );
++    let quantised = minimum
++        .mul(L::splat(BOX_GRID))
++        .floor()
++        .mul(L::splat(1.0 / BOX_GRID));
++    let expired = ring_lane::<L>(uniform.box_ring, slots.expiring);
++    hot.box_sum = hot.box_sum.add(quantised).sub(expired);
++    store_ring_lane::<L>(uniform.box_ring, slots.ring_cursor, quantised);
++    let smoothed = hot.box_sum.div(hot.window);
++    one.sub(smoothed)
++}
++
++/// Change 2: [`linked_frame_uniform`]'s steps 1-5 with its mirrored ring stores.
++#[inline(always)]
++fn linked_target_uniform<L: Lane>(
++    peak: L,
++    limit: L,
++    hot: &mut HotChannel<L>,
++    left: &mut UniformHot<'_, L>,
++    right: &mut UniformHot<'_, L>,
++    ring: usize,
++    slots: FrameSlots,
++) -> L {
++    let one = L::splat(1.0);
++    let required = L::select(peak.gt(limit), limit.div(peak), one);
++    store_ring_lane::<L>(left.required_ring, slots.ring_cursor, required);
++    store_ring_lane::<L>(right.required_ring, slots.ring_cursor, required);
++    let minimum = sliding_minimum_uniform_mirrored::<L>(
++        left.required_ring,
++        right.required_ring,
++        left.offsets.window,
++        ring,
++        slots.end,
++        slots.start,
++        &mut left.prefix,
++        &mut left.phase,
++    );
++    let quantised = minimum
++        .mul(L::splat(BOX_GRID))
++        .floor()
++        .mul(L::splat(1.0 / BOX_GRID));
++    let expired = ring_lane::<L>(left.box_ring, slots.expiring);
++    hot.box_sum = hot.box_sum.add(quantised).sub(expired);
++    store_ring_lane::<L>(left.box_ring, slots.ring_cursor, quantised);
++    store_ring_lane::<L>(right.box_ring, slots.ring_cursor, quantised);
++    let smoothed = hot.box_sum.div(hot.window);
++    one.sub(smoothed)
++}
++
++/// Change 2: [`channel_target_uniform`] for a frame that cannot complete its van Herk block.
++#[inline(always)]
++fn channel_target_steady<L: Lane>(
++    peak: L,
++    limit: L,
++    hot: &mut HotChannel<L>,
++    uniform: &mut UniformHot<'_, L>,
++    slots: FrameSlots,
++) -> L {
++    let one = L::splat(1.0);
++    let required = L::select(peak.gt(limit), limit.div(peak), one);
++    store_ring_lane::<L>(uniform.required_ring, slots.ring_cursor, required);
++    let newest = ring_lane::<L>(uniform.required_ring, slots.end);
++    let running = uniform.prefix.min(newest);
++    uniform.prefix = running;
++    let minimum = ring_lane::<L>(uniform.required_ring, slots.start).min(running);
++    let quantised = minimum
++        .mul(L::splat(BOX_GRID))
++        .floor()
++        .mul(L::splat(1.0 / BOX_GRID));
++    let expired = ring_lane::<L>(uniform.box_ring, slots.expiring);
++    hot.box_sum = hot.box_sum.add(quantised).sub(expired);
++    store_ring_lane::<L>(uniform.box_ring, slots.ring_cursor, quantised);
++    let smoothed = hot.box_sum.div(hot.window);
++    one.sub(smoothed)
++}
++
++/// Change 2: [`linked_target_uniform`] for a frame that cannot complete its van Herk block.
++#[inline(always)]
++fn linked_target_steady<L: Lane>(
++    peak: L,
++    limit: L,
++    hot: &mut HotChannel<L>,
++    left: &mut UniformHot<'_, L>,
++    right: &mut UniformHot<'_, L>,
++    slots: FrameSlots,
++) -> L {
++    let one = L::splat(1.0);
++    let required = L::select(peak.gt(limit), limit.div(peak), one);
++    store_ring_lane::<L>(left.required_ring, slots.ring_cursor, required);
++    store_ring_lane::<L>(right.required_ring, slots.ring_cursor, required);
++    let newest = ring_lane::<L>(left.required_ring, slots.end);
++    let running = left.prefix.min(newest);
++    left.prefix = running;
++    let minimum = ring_lane::<L>(left.required_ring, slots.start).min(running);
++    let quantised = minimum
++        .mul(L::splat(BOX_GRID))
++        .floor()
++        .mul(L::splat(1.0 / BOX_GRID));
++    let expired = ring_lane::<L>(left.box_ring, slots.expiring);
++    hot.box_sum = hot.box_sum.add(quantised).sub(expired);
++    store_ring_lane::<L>(left.box_ring, slots.ring_cursor, quantised);
++    store_ring_lane::<L>(right.box_ring, slots.ring_cursor, quantised);
++    let smoothed = hot.box_sum.div(hot.window);
++    one.sub(smoothed)
++}
++
++/// Change 2 pass 2: step 6's recursion from a stored target, returning the gain.
++#[inline(always)]
++fn release_step<L: Lane>(target: L, release: L, reduction: &mut L) -> L {
++    let one = L::splat(1.0);
++    let released = release.fma(target.sub(*reduction), *reduction);
++    *reduction = flush(target.max(released));
++    one.sub(*reduction)
++}
++
++/// Change 2 pass 2: step 7, the delay line and the output, for one channel-frame.
++#[inline(always)]
++fn output_step<L: Lane>(
++    io_frame: &mut [f32],
++    main_ring: &mut [f32],
++    main_cursor: usize,
++    gain: L,
++    bypass: <L as Lane>::Mask,
++) {
++    let x = L::load(io_frame);
++    let delayed = ring_lane::<L>(main_ring, main_cursor);
++    store_ring_lane::<L>(main_ring, main_cursor, x);
++    L::select(bypass, delayed, delayed.mul(gain)).store(io_frame);
++}
++
++/// Pass 2 over a delay-line stream: step 7 with the slot as a view (read before write).
++#[inline(always)]
++fn delay_step<L: Lane>(io_frame: &mut [f32], slot: &mut [f32], gain: L, bypass: <L as Lane>::Mask) {
++    let x = L::load(io_frame);
++    let delayed = L::load(slot);
++    x.store(slot);
++    L::select(bypass, delayed, delayed.mul(gain)).store(io_frame);
++}
++
++/// One ramp's value for this frame: [`ramp_values`] for a single ramp.
++#[inline(always)]
++fn ramp_value<const DISPATCH: u8, L: Lane>(stationary: bool, ramp: &mut RampLanes<L>) -> L {
++    match DISPATCH {
++        DISPATCH_RUNTIME => {
++            if stationary {
++                ramp.resting_value()
++            } else {
++                ramp.advance()
++            }
++        }
++        DISPATCH_STATIONARY => ramp.resting_value(),
++        DISPATCH_RAMPING => ramp.advance(),
++        _ => unreachable!("invalid limiter dispatch"),
++    }
++}
++
++/// Change 3 prototype (no copies, no `unsafe`): the linked steady pass 1 over split borrows.
++///
++/// Preconditions, checked by the caller: `window < ring`, `2 <= steady <= ring - window`, and the
++/// `steady + 1` frames from `slots` are wrap-free and completion-free except the last. The walk is
++/// skewed: iteration `j` finishes frame `j - 1` (whose oldest slot is the *old* word of cursor slot
++/// `j`) before starting frame `j` (which overwrites that slot).
++#[inline(always)]
++#[allow(clippy::too_many_arguments)]
++fn linked_steady_streams<const DISPATCH: u8, L: Lane>(
++    left_peaks: &[f32],
++    right_peaks: &[f32],
++    targets: &mut [f32],
++    stationary: bool,
++    hot: &mut HotChannel<L>,
++    left: &mut UniformHot<'_, L>,
++    right: &mut UniformHot<'_, L>,
++    slots: FrameSlots,
++    steady: usize,
++) {
++    let width = L::WIDTH;
++    let one = L::splat(1.0);
++    let grid = L::splat(BOX_GRID);
++    let step = L::splat(1.0 / BOX_GRID);
++    let c = slots.ring_cursor;
++    let e = slots.end;
++    let x = slots.expiring;
++    let (cursor_block, newest): (&mut [f32], &[f32]) = if e > c {
++        let (lo, hi) = left.required_ring.split_at_mut(e * width);
++        (&mut lo[c * width..(c + steady + 1) * width], &hi[..steady * width])
++    } else {
++        let (lo, hi) = left.required_ring.split_at_mut(c * width);
++        (&mut hi[..(steady + 1) * width], &lo[e * width..(e + steady) * width])
++    };
++    let (box_block, expiring): (&mut [f32], &[f32]) = if x > c {
++        let (lo, hi) = left.box_ring.split_at_mut(x * width);
++        (&mut lo[c * width..(c + steady) * width], &hi[..steady * width])
++    } else {
++        let (lo, hi) = left.box_ring.split_at_mut(c * width);
++        (&mut hi[..steady * width], &lo[x * width..(x + steady) * width])
++    };
++    let mirror_required = &mut right.required_ring[c * width..(c + steady) * width];
++    let mirror_box = &mut right.box_ring[c * width..(c + steady) * width];
++    let targets = &mut targets[..steady * width];
++    let left_peaks = &left_peaks[..steady * width];
++    let right_peaks = &right_peaks[..steady * width];
++    let window = hot.window;
++    let mut prefix = left.prefix;
++    let mut box_sum = hot.box_sum;
++
++    // Prologue: start frame 0.
++    let limit = ramp_value::<DISPATCH, L>(stationary, &mut hot.limit);
++    let peak = L::load(&right_peaks[..width]).max(L::load(&left_peaks[..width]));
++    let required = L::select(peak.gt(limit), limit.div(peak), one);
++    required.store(&mut cursor_block[..width]);
++    required.store(&mut mirror_required[..width]);
++    let mut running = prefix.min(L::load(&newest[..width]));
++    prefix = running;
++
++    let last = steady - 1;
++    for ((((((((cursor, newest), left_peak), right_peak), mirror_r), expired), box_slot), mirror_b), target) in
++        cursor_block[width..steady * width]
++            .chunks_exact_mut(width)
++            .zip(newest[width..].chunks_exact(width))
++            .zip(left_peaks[width..].chunks_exact(width))
++            .zip(right_peaks[width..].chunks_exact(width))
++            .zip(mirror_required[width..].chunks_exact_mut(width))
++            .zip(expiring[..last * width].chunks_exact(width))
++            .zip(box_block[..last * width].chunks_exact_mut(width))
++            .zip(mirror_box[..last * width].chunks_exact_mut(width))
++            .zip(targets[..last * width].chunks_exact_mut(width))
++    {
++        // Finish frame j - 1: its oldest slot is this cursor slot's old word.
++        let minimum = L::load(cursor).min(running);
++        let quantised = minimum.mul(grid).floor().mul(step);
++        box_sum = box_sum.add(quantised).sub(L::load(expired));
++        quantised.store(box_slot);
++        quantised.store(mirror_b);
++        one.sub(box_sum.div(window)).store(target);
++        // Start frame j.
++        let limit = ramp_value::<DISPATCH, L>(stationary, &mut hot.limit);
++        let peak = L::load(right_peak).max(L::load(left_peak));
++        let required = L::select(peak.gt(limit), limit.div(peak), one);
++        required.store(cursor);
++        required.store(mirror_r);
++        running = prefix.min(L::load(newest));
++        prefix = running;
++    }
++    // Epilogue: finish frame steady - 1.
++    let minimum = L::load(&cursor_block[steady * width..(steady + 1) * width]).min(running);
++    let quantised = minimum.mul(grid).floor().mul(step);
++    box_sum = box_sum.add(quantised).sub(L::load(&expiring[last * width..steady * width]));
++    quantised.store(&mut box_block[last * width..steady * width]);
++    quantised.store(&mut mirror_box[last * width..steady * width]);
++    one.sub(box_sum.div(window))
++        .store(&mut targets[last * width..steady * width]);
++    left.prefix = prefix;
++    hot.box_sum = box_sum;
++}
++
+ /// The one block kernel: `frames` frames of `L::WIDTH` tracks, both channels, one pass.
+ ///
+ /// Decision D10. The frame loop lives here and nothing per-sample crosses a call boundary: the
+@@ -2227,6 +2504,8 @@
+     let mut ring_cursor = cursors.ring as usize;
+     let mut peaks_left = [0.0_f32; DETECTOR_CHUNK * MAXIMUM_WIDTH];
+     let mut peaks_right = [0.0_f32; DETECTOR_CHUNK * MAXIMUM_WIDTH];
++    let mut targets_left = [0.0_f32; DETECTOR_CHUNK * MAXIMUM_WIDTH];
++    let mut targets_right = [0.0_f32; DETECTOR_CHUNK * MAXIMUM_WIDTH];
+ 
+     // The ring views borrow the two channels for the whole walk, so the two van Herk words come
+     // back out of the scope and are written to the arena below, once.
+@@ -2263,6 +2542,7 @@
+                     uniform_left.offsets,
+                     uniform_right.offsets,
+                 );
++                let run = if DISPATCH == DISPATCH_RAMPING {
+                 let run = walk.run;
+ 
+                 let base = (chunk + frame) * width;
+@@ -2369,6 +2649,194 @@
+                     );
+                 }
+ 
++                run
++                } else {
++                // Change 2: also cut the segment where the van Herk block completes.
++                let mut run = walk
++                    .run
++                    .min(uniform_left.offsets.window - uniform_left.phase as usize);
++                if !linked {
++                    run = run.min(uniform_right.offsets.window - uniform_right.phase as usize);
++                }
++                let steady = run - 1;
++
++                let base = (chunk + frame) * width;
++                let words = run * width;
++                let left_segment = &mut left_io[base..base + words];
++                let right_segment = &mut right_io[base..base + words];
++                let left_peaks = &peaks_left[frame * width..(frame + run) * width];
++                let right_peaks = &peaks_right[frame * width..(frame + run) * width];
++                let main_base = walk.left.main_cursor;
++
++                if linked {
++                    let targets = &mut targets_left[..words];
++                    if uniform_left.phase == 0 {
++                        uniform_left.prefix = L::splat(f32::INFINITY);
++                    }
++                    let streams = uniform_left.offsets.window < ring
++                        && steady >= 2
++                        && steady <= ring - uniform_left.offsets.window;
++                    if streams {
++                        linked_steady_streams::<DISPATCH, L>(
++                            left_peaks,
++                            right_peaks,
++                            targets,
++                            stationary,
++                            &mut hot_left,
++                            &mut uniform_left,
++                            &mut uniform_right,
++                            walk.left,
++                            steady,
++                        );
++                    } else {
++                        for (step, ((left_peak, right_peak), target)) in left_peaks
++                            .chunks_exact(width)
++                            .zip(right_peaks.chunks_exact(width))
++                            .zip(targets.chunks_exact_mut(width))
++                            .take(steady)
++                            .enumerate()
++                        {
++                            let limit =
++                                ramp_value::<DISPATCH, L>(stationary, &mut hot_left.limit);
++                            let peak = L::load(right_peak).max(L::load(left_peak));
++                            linked_target_steady::<L>(
++                                peak,
++                                limit,
++                                &mut hot_left,
++                                &mut uniform_left,
++                                &mut uniform_right,
++                                walk.left.advanced(step),
++                            )
++                            .store(target);
++                        }
++                    }
++                    uniform_left.phase += steady as u32;
++                    let limit = ramp_value::<DISPATCH, L>(stationary, &mut hot_left.limit);
++                    let peak = L::load(&right_peaks[steady * width..])
++                        .max(L::load(&left_peaks[steady * width..]));
++                    linked_target_uniform::<L>(
++                        peak,
++                        limit,
++                        &mut hot_left,
++                        &mut uniform_left,
++                        &mut uniform_right,
++                        ring,
++                        walk.left.advanced(steady),
++                    )
++                    .store(&mut targets[steady * width..]);
++                    let main_words = main_base * width;
++                    let delay_left = &mut uniform_left.main_ring[main_words..main_words + words];
++                    let delay_right = &mut uniform_right.main_ring[main_words..main_words + words];
++                    for ((((left_frame, right_frame), target), slot_left), slot_right) in left_segment
++                        .chunks_exact_mut(width)
++                        .zip(right_segment.chunks_exact_mut(width))
++                        .zip(targets.chunks_exact(width))
++                        .zip(delay_left.chunks_exact_mut(width))
++                        .zip(delay_right.chunks_exact_mut(width))
++                    {
++                        let release = ramp_value::<DISPATCH, L>(stationary, &mut hot_left.release);
++                        let gain = release_step(L::load(target), release, &mut hot_left.reduction);
++                        delay_step::<L>(left_frame, slot_left, gain, bypass);
++                        delay_step::<L>(right_frame, slot_right, gain, bypass);
++                    }
++                    frame += run;
++                    ring_cursor = wrapped(ring_cursor + run, ring);
++                    main_cursor = wrapped(main_cursor + run, main);
++                    continue;
++                }
++
++                let targets_l = &mut targets_left[..words];
++                let targets_r = &mut targets_right[..words];
++                if uniform_left.phase == 0 {
++                    uniform_left.prefix = L::splat(f32::INFINITY);
++                }
++                if uniform_right.phase == 0 {
++                    uniform_right.prefix = L::splat(f32::INFINITY);
++                }
++                for (step, (((left_peak, right_peak), target_l), target_r)) in left_peaks
++                    .chunks_exact(width)
++                    .zip(right_peaks.chunks_exact(width))
++                    .zip(targets_l.chunks_exact_mut(width))
++                    .zip(targets_r.chunks_exact_mut(width))
++                    .take(steady)
++                    .enumerate()
++                {
++                    let limit_left = ramp_value::<DISPATCH, L>(stationary, &mut hot_left.limit);
++                    let limit_right = ramp_value::<DISPATCH, L>(stationary, &mut hot_right.limit);
++                    let peak_left = L::load(left_peak);
++                    let peak_right = L::load(right_peak);
++                    let linked_peak = peak_right.max(peak_left);
++                    let peak_left = L::select(link, linked_peak, peak_left);
++                    let peak_right = L::select(link, linked_peak, peak_right);
++                    channel_target_steady::<L>(
++                        peak_left,
++                        limit_left,
++                        &mut hot_left,
++                        &mut uniform_left,
++                        walk.left.advanced(step),
++                    )
++                    .store(target_l);
++                    channel_target_steady::<L>(
++                        peak_right,
++                        limit_right,
++                        &mut hot_right,
++                        &mut uniform_right,
++                        walk.right.advanced(step),
++                    )
++                    .store(target_r);
++                }
++                uniform_left.phase += steady as u32;
++                uniform_right.phase += steady as u32;
++                let limit_left = ramp_value::<DISPATCH, L>(stationary, &mut hot_left.limit);
++                let limit_right = ramp_value::<DISPATCH, L>(stationary, &mut hot_right.limit);
++                let peak_left = L::load(&left_peaks[steady * width..]);
++                let peak_right = L::load(&right_peaks[steady * width..]);
++                let linked_peak = peak_right.max(peak_left);
++                let peak_left = L::select(link, linked_peak, peak_left);
++                let peak_right = L::select(link, linked_peak, peak_right);
++                channel_target_uniform::<L>(
++                    peak_left,
++                    limit_left,
++                    &mut hot_left,
++                    &mut uniform_left,
++                    ring,
++                    walk.left.advanced(steady),
++                )
++                .store(&mut targets_l[steady * width..]);
++                channel_target_uniform::<L>(
++                    peak_right,
++                    limit_right,
++                    &mut hot_right,
++                    &mut uniform_right,
++                    ring,
++                    walk.right.advanced(steady),
++                )
++                .store(&mut targets_r[steady * width..]);
++                let main_words = main_base * width;
++                let delay_left = &mut uniform_left.main_ring[main_words..main_words + words];
++                let delay_right = &mut uniform_right.main_ring[main_words..main_words + words];
++                for (((((left_frame, right_frame), target_l), target_r), slot_left), slot_right) in
++                    left_segment
++                        .chunks_exact_mut(width)
++                        .zip(right_segment.chunks_exact_mut(width))
++                        .zip(targets_l.chunks_exact(width))
++                        .zip(targets_r.chunks_exact(width))
++                        .zip(delay_left.chunks_exact_mut(width))
++                        .zip(delay_right.chunks_exact_mut(width))
++                {
++                    let release_left = ramp_value::<DISPATCH, L>(stationary, &mut hot_left.release);
++                    let release_right =
++                        ramp_value::<DISPATCH, L>(stationary, &mut hot_right.release);
++                    let gain_left =
++                        release_step(L::load(target_l), release_left, &mut hot_left.reduction);
++                    let gain_right =
++                        release_step(L::load(target_r), release_right, &mut hot_right.reduction);
++                    delay_step::<L>(left_frame, slot_left, gain_left, bypass);
++                    delay_step::<L>(right_frame, slot_right, gain_right, bypass);
++                }
++
++                run
++                };
+                 frame += run;
+                 ring_cursor = wrapped(ring_cursor + run, ring);
+                 main_cursor = wrapped(main_cursor + run, main);

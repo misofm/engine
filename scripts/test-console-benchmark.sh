@@ -2,12 +2,17 @@
 # Console validator mutation suite. Hermetic: no workload, no timing, no binary.
 #
 # A validator that has never been shown to reject anything is decoration. Every rule below is
-# mutated in turn and asserted red, so the aggregate's guarantees -- forty-eight records, both
-# rounds, one host, one admissibility state, the decomposition rows' pinned strip contents, every
-# session row's pinned source feed, the class-A statements that neither the stationary smoother
-# nor a meter nor an armed observation tap nor a restated parameter nor the mono collapse nor the
-# driver-fed source feed changes a rendered bit, and the meters pair's equal fold and redirect
-# counters -- are properties the suite can actually lose.
+# mutated in turn and asserted red, so the aggregate's guarantees -- fifty records, both rounds,
+# one host, one admissibility state, the decomposition rows' pinned strip contents, every session
+# row's pinned source feed, the class-A statements that neither the stationary smoother nor a
+# meter nor an armed observation tap nor a restated parameter nor the mono collapse nor the
+# driver-fed source feed nor the metered row's web meters and fused fader and matrix changes a
+# rendered bit, the meters pair's equal fold and redirect counters, the metered row's pinned
+# meter group, and the mixing-automation row's pinned controls, host lowerings, collapse counters
+# and per-effect bit movement -- are properties the suite can actually lose. The same holds for the
+# mixing-automation row's browser arm (`web-mixing-automation-validator.jq`, #1011): its input
+# feed, its provenance, and its two measured rounds' agreement -- and for its runner: a refused run
+# keeps its rounds, no artifact is overwritten, and the provenance is checked after the rounds.
 set -euo pipefail
 [[ "$#" -le 1 ]] || { printf 'usage: %s\n' "$0" >&2; exit 2; }
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -202,6 +207,53 @@ mono=$(jq -cn --arg a "$digest_a" --argjson m "$metadata" '$m + {
   statistical_method: "two arms alternated per observation; nearest-rank percentiles over per-block nanoseconds; paired delta is collapse_forced_off minus collapse_eligible per observation; descriptive only; no threshold"
 }')
 
+# The mixing-automation row (#1003). The mono console riding eight controls, pushed in the
+# shapes a real host pushes them; its digests, its preflight and its collapse counters are the
+# claims, and the numbers are the diagnosis's order of magnitude.
+mixing_controls='[
+  {track_id: "ch00", slot_id: "eq", effect: "miso.parametric-eq", parameter: "band-1-gain", parameter_index: 3, lowering: "owner_both", base: -7.5, step: 0.25, even_value: -7.25, odd_value: -7.75},
+  {track_id: "ch08", slot_id: "comp", effect: "miso.compressor", parameter: "threshold", parameter_index: 0, lowering: "left_then_right", base: -18, step: 0.5, even_value: -17.5, odd_value: -18.5},
+  {track_id: "ch16", slot_id: "limiter", effect: "miso.true-peak-limiter", parameter: "ceiling", parameter_index: 0, lowering: "left_then_right", base: -1, step: 8, even_value: 0, odd_value: -9},
+  {track_id: "ch24", slot_id: "eq", effect: "miso.parametric-eq", parameter: "band-1-gain", parameter_index: 3, lowering: "owner_both", base: 1.5, step: 0.25, even_value: 1.75, odd_value: 1.25},
+  {track_id: "ch32", slot_id: "comp", effect: "miso.compressor", parameter: "threshold", parameter_index: 0, lowering: "left_then_right", base: -27, step: 0.5, even_value: -26.5, odd_value: -27.5},
+  {track_id: "ch40", slot_id: "limiter", effect: "miso.true-peak-limiter", parameter: "ceiling", parameter_index: 0, lowering: "left_then_right", base: -1.75, step: 8, even_value: 0, odd_value: -9.75},
+  {track_id: "ch48", slot_id: "eq", effect: "miso.parametric-eq", parameter: "band-1-gain", parameter_index: 3, lowering: "owner_both", base: -4.5, step: 0.25, even_value: -4.25, odd_value: -4.75},
+  {track_id: "ch56", slot_id: "comp", effect: "miso.compressor", parameter: "threshold", parameter_index: 0, lowering: "left_then_right", base: -9, step: 0.5, even_value: -8.5, odd_value: -9.5}
+]'
+mixing=$(jq -cn --arg a "$digest_a" --arg b "$digest_b" --arg c "$digest_c" --argjson m "$metadata" \
+    "$mixing_controls"' as $controls | $m + {
+  schema_version: 1, issue: 149, record: "console_mixing_automation",
+  workload_kind: "sixty_four_track_console_mono_mixing_automation", tracks: 64,
+  synthetic_fixture: false, strip_content: "eq+compressor+limiter",
+  strip_layout: "simd1:eq+compressor,simd2:limiter", input_signal: "tone",
+  fixture_id: "fixtures/session/v1/console-sixty-four-track-mono.json",
+  round: 1, backend: "Simd8", sample_rate_hz: 48000, quantum_frames: 128,
+  observations: 1000, preroll_blocks: 64, pairing: "alternating_per_observation",
+  arms: ["quiet","restated","automated"],
+  automated_controls: $controls,
+  owner_edits_per_block: 3, parameter_records_per_block: 10, smoothing_samples: 64,
+  restated_pushes_accepted: 13000, automated_pushes_accepted: 13000,
+  units: "ns_per_block", percentile_method: "nearest_rank",
+  quiet_p50_ns: 69800, quiet_p95_ns: 71000, quiet_p99_ns: 73000,
+  restated_p50_ns: 108300, restated_p95_ns: 110000, restated_p99_ns: 112000,
+  automated_p50_ns: 148800, automated_p95_ns: 151000, automated_p99_ns: 154000,
+  paired_ramp_delta_median_ns: 40400, paired_collapse_delta_median_ns: 38500,
+  quiet_bank_collapse_counters: [8512, 8], restated_bank_collapse_counters: [3192, 8],
+  automated_bank_collapse_counters: [3192, 8],
+  quiet_output_sha256: $a, restated_output_sha256: $a, automated_output_sha256: $b,
+  bit_identity: "quiet == restated, asserted in-run",
+  preflight_blocks: 128,
+  preflight_output_sha256: {quiet: $c, restated: $c, automated: $b, automated_eq_only: ($a[0:63] + "1"),
+    automated_compressor_only: ($a[0:63] + "2"), automated_limiter_only: ($a[0:63] + "3"),
+    restated_eq_only: $c},
+  preflight_bank_collapse_counters: {quiet: [1024, 8], restated: [384, 8], automated: [384, 8],
+    automated_eq_only: [1024, 8], automated_compressor_only: [640, 8],
+    automated_limiter_only: [768, 8], restated_eq_only: [1024, 8]},
+  render_errors: 0, render_total_forbidden_operations: 0,
+  descriptive_only: true,
+  statistical_method: "three arms alternated per observation; nearest-rank percentiles over per-block nanoseconds; ramp delta is automated minus restated and collapse delta is restated minus quiet, per observation; descriptive only; no threshold"
+}')
+
 # ---------------------------------------------------------------------------------------------
 # The #184 floor group. A session record either carries all eleven columns or none of them.
 # ---------------------------------------------------------------------------------------------
@@ -254,6 +306,7 @@ expect_accept "$observation" 'the base observation record'
 expect_accept "$placement" 'the base placement record'
 expect_accept "$automation" 'the base automation record'
 expect_accept "$mono" 'the base mono row-pair record'
+expect_accept "$mixing" 'the base mixing-automation record'
 # The identity row's own inventory. Since the prepared-identity elision the two rack-free rows do
 # not share a floor -- `dispatch_only` elides both SVF sections rather than executing them -- so
 # this row is the one that proves the split is enforced rather than merely written down.
@@ -262,40 +315,50 @@ session_floor_dispatch=$(printf '%s' "$session" | jq -c -L "$scripts_dir" --arg 
       | .strip_content = "identity" | .strip_layout = "builtins"
       | with_floor(5480000000; $s)')
 
-# The two overhead rows. `plumbing_only` is the floor of the table -- the route and the master
-# reduction and nothing else -- and `gain_pan_only` is the identity inventory again, isolated
-# against it. Both are built through the library's own pins rather than by writing the numbers a
-# second time.
-session_floor_plumbing=$(printf '%s' "$session" | jq -c -L "$scripts_dir" --arg s "$core_clock_source" \
-    "$add_floor"' .workload_kind = "sixty_four_track_plumbing_only" | .synthetic_fixture = true
-      | .strip_content = "plumbing" | .strip_layout = "plumbing"
-      | with_floor(5480000000; $s)')
+# The gain-and-pan row: the identity inventory again, the floor of the table since #956 retired
+# the builtins-less plumbing row. Built through the library's own pins rather than by writing the
+# numbers a second time.
 session_floor_gain_pan=$(printf '%s' "$session" | jq -c -L "$scripts_dir" --arg s "$core_clock_source" \
     "$add_floor"' .workload_kind = "sixty_four_track_gain_pan_only" | .synthetic_fixture = true
       | .strip_content = "gain+pan" | .strip_layout = "builtins"
       | with_floor(5480000000; $s)')
-# #928: the driver-fed plumbing row. The plumbing row's six facts and its inventory, and the one
-# fact that separates the two: its track inputs are claimed by a prepared source set whose driver
-# lends its played planes, instead of being bound to processors.
-session_ring=$(printf '%s' "$session" | jq -c '.workload_kind = "sixty_four_track_plumbing_ring"
-      | .synthetic_fixture = true | .strip_content = "plumbing" | .strip_layout = "plumbing"
+# #928, re-based by #956: the driver-fed gain-and-pan row, the native pure-path target. The
+# gain-and-pan row's six facts and its inventory, and the one fact that separates the two: its
+# track inputs are claimed by a prepared source set whose driver lends its played planes, instead
+# of being bound to processors.
+session_ring=$(printf '%s' "$session" | jq -c '.workload_kind = "sixty_four_track_gain_pan_ring"
+      | .synthetic_fixture = true | .strip_content = "gain+pan" | .strip_layout = "builtins"
       | .source_feed = "played_planes"')
 session_floor_ring=$(printf '%s' "$session_ring" | jq -c -L "$scripts_dir" --arg s "$core_clock_source" \
     "$add_floor"' with_floor(5480000000; $s)')
 
 expect_accept "$session_floor" 'the base session record carrying the floor columns'
-expect_accept "$session_floor_plumbing" 'the overhead floor row'
 expect_accept "$session_floor_gain_pan" 'the gain-and-pan row, which names no control'
 expect_accept "$session_floor_not_derived" 'a row whose fixture was never inventoried'
 expect_accept "$session_floor_dispatch" 'the identity row carrying the identity inventory'
-expect_accept "$session_ring" 'the driver-fed plumbing row'
-expect_accept "$session_floor_ring" 'the driver-fed plumbing row carrying the plumbing inventory'
+expect_accept "$session_ring" 'the driver-fed gain-and-pan row'
+expect_accept "$session_floor_ring" 'the driver-fed gain-and-pan row carrying the identity inventory'
+
+# #881: the metered console row. The standing console row's six facts, plus the meter group that
+# row alone carries: the default web boot's meter set (one sample-peak meter at the post-matrix tap
+# per track, a twelve-block window), every snapshot it published over the thousand timed blocks
+# (64 x floor(1000 / 12)), none dropped, and the plan's #914 counters. No inventory exists for a
+# metered strip, so its floor group states none and names no control.
+session_metered=$(printf '%s' "$session" | jq -c '.workload_kind = "sixty_four_track_console_metered"
+      | . + {meter_streams: 64, meter_tap: "post_matrix", meter_metrics: "sample_peak",
+             meter_window_blocks: 12, meter_snapshots: 5312, meter_dropped_snapshots: 0,
+             bank_route_folds: 64, bank_scatter_redirects: 0}')
+session_floor_metered=$(printf '%s' "$session_metered" | jq -c -L "$scripts_dir" --arg s "$core_clock_source" \
+    "$add_floor"' with_floor(5480000000; $s)')
+
+expect_accept "$session_metered" 'the metered console row'
+expect_accept "$session_floor_metered" 'the metered console row carrying an underived floor'
 
 # ---------------------------------------------------------------------------------------------
 # Per-key structural mutations: every key is load-bearing in both directions.
 # ---------------------------------------------------------------------------------------------
-for base in "$session" "$session_floor" "$session_ring" "$hoist" "$meters" \
-    "$observation" "$placement" "$automation" "$mono"; do
+for base in "$session" "$session_floor" "$session_ring" "$session_metered" "$hoist" "$meters" \
+    "$observation" "$placement" "$automation" "$mono" "$mixing"; do
     kind=$(printf '%s' "$base" | jq -r '.record')
     while read -r field; do
         expect_reject "$(printf '%s' "$base" | jq -c "del(.\"$field\")")" "$kind without $field"
@@ -321,6 +384,15 @@ while read -r field; do
 done < <(printf '%s' "$session_floor_not_derived" | jq -r 'keys[]')
 expect_reject "$(printf '%s' "$session_floor_not_derived" | jq -c '.unexpected_key = 1')" \
     'the uninventoried row with an extra key'
+# The metered row's floor group is underived too, so it takes the same half-sweep.
+while read -r field; do
+    expect_reject "$(printf '%s' "$session_floor_metered" | jq -c "del(.\"$field\")")" \
+        "the floor-accounted metered row without $field"
+    if [[ "$(printf '%s' "$session_floor_metered" | jq -c ".\"$field\"")" != null ]]; then
+        expect_reject "$(printf '%s' "$session_floor_metered" | jq -c ".\"$field\" = null")" \
+            "the floor-accounted metered row with $field nulled"
+    fi
+done < <(printf '%s' "$session_floor_metered" | jq -r 'keys[]')
 
 # ---------------------------------------------------------------------------------------------
 # Semantic mutations: each names the property it destroys.
@@ -398,33 +470,28 @@ expect_reject "$(printf '%s' "$session_floor_dispatch" | jq -c \
 expect_reject "$(printf '%s' "$session_floor" | jq -c \
     '.floor_basis = "docs/rulings/effect-floor-accounting.md: builtins, identity"')" \
     'a row citing the identity inventory it does not qualify for'
-# The overhead pair. `plumbing_only` is the floor of the whole table, so a row costed at the
-# identity inventory it is the floor *of* is the same defect as the identity row costed at 69 --
-# self-consistent, floor and percentage together, and wrong about which arithmetic it executes.
-expect_reject "$(printf '%s' "$session_floor_plumbing" | jq -c \
-    '.floor_cycles_per_lane_sample = (22 / (8 * 3.7))
-     | .percent_of_floor = (100 * (22 / (8 * 3.7)) / .cycles_per_lane_sample)')" \
-    'a plumbing row costed as if it prepared a strip'
-expect_reject "$(printf '%s' "$session_floor_plumbing" | jq -c \
-    '.floor_basis = "docs/rulings/effect-floor-accounting.md: builtins, identity"')" \
-    'a plumbing row citing the identity inventory'
+# The gain-and-pan row is costed at the identity inventory, the floor of the whole table (#956).
+# Costed at the retired four-lane-op routing inventory, or citing it, is the same defect as the
+# identity row costed at 69 -- self-consistent, floor and percentage together, and wrong about which
+# arithmetic it executes.
+expect_reject "$(printf '%s' "$session_floor_gain_pan" | jq -c \
+    '.floor_cycles_per_lane_sample = (4 / (8 * 3.7))
+     | .percent_of_floor = (100 * (4 / (8 * 3.7)) / .cycles_per_lane_sample)')" \
+    'a gain-and-pan row costed at the retired routing-only inventory'
 expect_reject "$(printf '%s' "$session_floor_gain_pan" | jq -c \
     '.floor_basis = "docs/rulings/effect-floor-accounting.md: plumbing"')" \
-    'a gain-and-pan row citing the plumbing inventory'
-# Neither overhead row may claim an isolate. The inventories subtract -- 22 - 4 is the scaffolding
-# -- but the rows do not, because a banked row folds its route and reduction into its chain's
-# epilogue and an unbanked one dispatches them per track. A record that named the plumbing row as
-# its control would be publishing a subtraction that removes the fold's saving along with the
-# plumbing's arithmetic, and it comes in below the floor it claims to be measured against.
+    'a gain-and-pan row citing the retired plumbing inventory'
 expect_reject "$(printf '%s' "$session_floor_gain_pan" | jq -c \
-    '.floor_control_row = "sixty_four_track_plumbing_only" | .isolated_cycles_per_lane_sample = 0.5 | .isolated_percent_of_floor = 121.9')" \
-    'a gain-and-pan row isolated against the unbanked plumbing row'
+    '.floor_basis = "docs/rulings/effect-floor-accounting.md: builtins"')" \
+    'a gain-and-pan row citing the executed-filter inventory'
+# It claims no isolate. `builtins_only` against it would subtract cleanly (69 - 22 = 47) but is not
+# declared, so a record claiming it is claiming a control the table does not name.
 expect_reject "$(printf '%s' "$session_floor_gain_pan" | jq -c \
     '.floor_control_row = "sixty_four_track_builtins_only" | .isolated_cycles_per_lane_sample = 0.5 | .isolated_percent_of_floor = 20.0')" \
     'a gain-and-pan row isolated against a row it is not a subset of'
-expect_reject "$(printf '%s' "$session_floor_plumbing" | jq -c \
-    '.floor_control_row = "sixty_four_track_gain_pan_only" | .isolated_cycles_per_lane_sample = 1.0 | .isolated_percent_of_floor = 1.0')" \
-    'the floor row subtracting a row above it'
+expect_reject "$(printf '%s' "$session_floor_gain_pan" | jq -c \
+    '.floor_control_row = "sixty_four_track_dispatch_only" | .isolated_cycles_per_lane_sample = 0.1 | .isolated_percent_of_floor = 1.0')" \
+    'a gain-and-pan row isolated against the row that shares its inventory'
 # The not-derived row is the other half of the same rule: it must not invent a floor either.
 expect_reject "$(printf '%s' "$session_floor_not_derived" | jq -c '.floor_cycles_per_lane_sample = 11.892 | .percent_of_floor = 12.5')" 'an uninventoried fixture given a floor anyway'
 expect_reject "$(printf '%s' "$session_floor_not_derived" | jq -c '.floor_basis = "docs/rulings/effect-floor-accounting.md: builtins+eq"')" 'an uninventoried fixture citing an inventory'
@@ -461,16 +528,14 @@ session_mutation '.workload_kind = "sixty_four_track_gain_pan_only" | .strip_con
     'a gain-and-pan row claiming the identity fader and pan'
 session_mutation '.workload_kind = "sixty_four_track_dispatch_only" | .strip_content = "gain+pan" | .strip_layout = "builtins" | .synthetic_fixture = true' \
     'an identity row claiming the fixture fader and pan'
-# `plumbing` is a layout word of its own. A row that prepares no builtin binding at all reported as
-# a `builtins` row would put the overhead floor and the thing it is the floor *of* under one name.
-session_mutation '.workload_kind = "sixty_four_track_plumbing_only" | .strip_content = "plumbing" | .strip_layout = "builtins" | .synthetic_fixture = true' \
-    'a plumbing row claiming the builtins layout'
+# #956 retired the builtins-less rows: a plan no host compiles is not a row, however honestly it
+# states its facts, and neither is the `plumbing` word its content and layout were stated in.
+session_mutation '.workload_kind = "sixty_four_track_plumbing_only" | .strip_content = "plumbing" | .strip_layout = "plumbing" | .synthetic_fixture = true' \
+    'the retired builtins-less plumbing row'
+session_mutation '.workload_kind = "sixty_four_track_plumbing_ring" | .strip_content = "plumbing" | .strip_layout = "plumbing" | .synthetic_fixture = true | .source_feed = "played_planes"' \
+    'the retired builtins-less driver-fed plumbing row'
 session_mutation '.workload_kind = "sixty_four_track_builtins_only" | .strip_content = "plumbing" | .strip_layout = "plumbing" | .synthetic_fixture = true' \
     'a builtins row claiming it prepared no builtin'
-session_mutation '.workload_kind = "sixty_four_track_plumbing_only" | .strip_content = "plumbing" | .strip_layout = "plumbing" | .synthetic_fixture = false' \
-    'a derived plumbing row reported as a checked-in fixture'
-expect_accept "$(printf '%s' "$session" | jq -c '.workload_kind = "sixty_four_track_plumbing_only" | .strip_content = "plumbing" | .strip_layout = "plumbing" | .synthetic_fixture = true')" \
-    'an honest plumbing row'
 expect_accept "$(printf '%s' "$session" | jq -c '.workload_kind = "sixty_four_track_gain_pan_only" | .strip_content = "gain+pan" | .strip_layout = "builtins" | .synthetic_fixture = true')" \
     'an honest gain-and-pan row'
 
@@ -482,13 +547,13 @@ expect_reject "$(printf '%s' "$session_floor" | jq -c 'del(.source_feed)')" \
     'a floor-accounted session record missing source_feed'
 session_mutation '.source_feed = "played_planes"' 'the standing console row claiming the driver-fed feed'
 session_mutation '.source_feed = "ring"' 'a feed no workload declares'
-session_mutation '.workload_kind = "sixty_four_track_plumbing_only" | .strip_content = "plumbing" | .strip_layout = "plumbing" | .synthetic_fixture = true | .source_feed = "played_planes"' \
-    'the bound plumbing row claiming the driver-fed feed'
+session_mutation '.workload_kind = "sixty_four_track_gain_pan_only" | .strip_content = "gain+pan" | .strip_layout = "builtins" | .synthetic_fixture = true | .source_feed = "played_planes"' \
+    'the bound gain-and-pan row claiming the driver-fed feed'
 ring_mutation() { expect_reject "$(printf '%s' "$session_ring" | jq -c "$1")" "$2"; }
 ring_mutation '.source_feed = "bound"' 'the driver-fed row claiming the bound feed'
 ring_mutation 'del(.source_feed)' 'the driver-fed row missing source_feed'
-ring_mutation '.strip_layout = "builtins"' 'a driver-fed row claiming the builtins layout'
-ring_mutation '.strip_content = "builtins"' 'a driver-fed row claiming it prepared builtins'
+ring_mutation '.strip_layout = "plumbing"' 'a driver-fed row claiming the retired plumbing layout'
+ring_mutation '.strip_content = "identity"' 'a driver-fed row claiming the identity fader and pan'
 ring_mutation '.synthetic_fixture = false' 'a derived driver-fed row reported as a checked-in fixture'
 ring_mutation '.tracks = 9' 'a driver-fed row that is not eight full banks'
 ring_mutation '.fixture_id = "fixtures/session/v1/console-sixty-four-track-mono.json"' \
@@ -496,22 +561,83 @@ ring_mutation '.fixture_id = "fixtures/session/v1/console-sixty-four-track-mono.
 ring_mutation '.input_signal = "silence"' 'a driver-fed row claiming silence'
 expect_reject "$(printf '%s' "$session_floor_ring" | jq -c '.source_feed = "bound"')" \
     'a floor-accounted driver-fed row claiming the bound feed'
-# Its floor is the plumbing row's, and like the plumbing row it isolates nothing. A feed change is
-# not an arithmetic change, so a subtraction between the two feeds would publish a copy's cost as
-# an isolate against a floor with no copy in it.
+# Its floor is the gain-and-pan row's, and like that row it isolates nothing. A feed change is not
+# an arithmetic change, so a subtraction between the two feeds would publish a copy's cost as an
+# isolate against a floor with no copy in it.
 expect_reject "$(printf '%s' "$session_floor_ring" | jq -c \
-    '.floor_cycles_per_lane_sample = (22 / (8 * 3.7))
-     | .percent_of_floor = (100 * (22 / (8 * 3.7)) / .cycles_per_lane_sample)')" \
-    'a driver-fed plumbing row costed as if it prepared a strip'
+    '.floor_cycles_per_lane_sample = (4 / (8 * 3.7))
+     | .percent_of_floor = (100 * (4 / (8 * 3.7)) / .cycles_per_lane_sample)')" \
+    'a driver-fed gain-and-pan row costed at the retired routing-only inventory'
 expect_reject "$(printf '%s' "$session_floor_ring" | jq -c \
-    '.floor_basis = "docs/rulings/effect-floor-accounting.md: builtins, identity"')" \
-    'a driver-fed plumbing row citing the identity inventory'
+    '.floor_basis = "docs/rulings/effect-floor-accounting.md: plumbing"')" \
+    'a driver-fed gain-and-pan row citing the retired plumbing inventory'
 expect_reject "$(printf '%s' "$session_floor_ring" | jq -c \
-    '.floor_control_row = "sixty_four_track_plumbing_only" | .isolated_cycles_per_lane_sample = 0.1 | .isolated_percent_of_floor = 1.0')" \
+    '.floor_control_row = "sixty_four_track_gain_pan_only" | .isolated_cycles_per_lane_sample = 0.1 | .isolated_percent_of_floor = 1.0')" \
     'the driver-fed row isolating its feed against the bound row'
-expect_reject "$(printf '%s' "$session_floor_plumbing" | jq -c \
-    '.floor_control_row = "sixty_four_track_plumbing_ring" | .isolated_cycles_per_lane_sample = 0.1 | .isolated_percent_of_floor = 1.0')" \
-    'the bound plumbing row isolated against the driver-fed row'
+expect_reject "$(printf '%s' "$session_floor_gain_pan" | jq -c \
+    '.floor_control_row = "sixty_four_track_gain_pan_ring" | .isolated_cycles_per_lane_sample = 0.1 | .isolated_percent_of_floor = 1.0')" \
+    'the bound gain-and-pan row isolated against the driver-fed row'
+
+# #881: the metered console row. The meter group is carried by that row alone and is pinned field
+# by field: a row that metered another tap, another metric set or another window would publish a
+# cost the browser does not pay, and a row that consumed fewer snapshots than its windows closed,
+# or dropped one, did not exercise the observer path it claims to time.
+metered_mutation() { expect_reject "$(printf '%s' "$session_metered" | jq -c "$1")" "$2"; }
+metered_group='. + {meter_streams: 64, meter_tap: "post_matrix", meter_metrics: "sample_peak",
+  meter_window_blocks: 12, meter_snapshots: 5312, meter_dropped_snapshots: 0,
+  bank_route_folds: 64, bank_scatter_redirects: 0}'
+session_mutation "$metered_group" 'the standing console row carrying the meter group'
+session_mutation '.workload_kind = "sixty_four_track_console_metered"' \
+    'a metered row without its meter group'
+expect_reject "$(printf '%s' "$session_floor" | jq -c "$metered_group")" \
+    'a floor-accounted standing row carrying the meter group'
+metered_mutation '.workload_kind = "sixty_four_track_console"' 'the meter group on the standing row'
+metered_mutation '.workload_kind = "sixty_four_track_gain_pan_only" | .strip_content = "gain+pan" | .strip_layout = "builtins" | .synthetic_fixture = true' \
+    'the meter group on another row'
+metered_mutation '.meter_streams = 32' 'a metered row that metered half its tracks'
+metered_mutation '.meter_tap = "post_fader"' 'a metered row at a tap the browser does not meter'
+metered_mutation '.meter_metrics = "all"' 'a metered row computing every statistic'
+# The window mutation carries the snapshot count its window implies, so the window pin alone
+# refuses it; the count rule refuses the inconsistent pairs below.
+metered_mutation '.meter_window_blocks = 4 | .meter_snapshots = 16000' 'a metered row at the facility arm window'
+metered_mutation '.meter_window_blocks = 0' 'a meter window of no blocks'
+metered_mutation '.meter_metrics = "other"' 'a metered row whose snapshots disagreed about their metric set'
+metered_mutation '.meter_tap = "other"' 'a metered row whose streams observe more than one tap'
+metered_mutation '.meter_snapshots = 0' 'a metered row that consumed no snapshot'
+metered_mutation '.meter_snapshots = 5311' 'a metered row that lost a snapshot'
+metered_mutation '.meter_snapshots = 5313' 'a metered row that consumed a snapshot no window closed'
+metered_mutation '.meter_snapshots = 16000' 'a metered row counting four-block windows'
+metered_mutation '.meter_dropped_snapshots = 1' 'a metered row whose stream dropped a snapshot'
+metered_mutation '.meter_dropped_snapshots = -1' 'a negative drop count'
+metered_mutation '.bank_route_folds = 0' 'a metered plan whose route fold declined'
+metered_mutation '.bank_route_folds = 65' 'a metered plan folding more routes than it has tracks'
+metered_mutation '.bank_scatter_redirects = -1' 'a negative redirect count'
+metered_mutation '.bank_scatter_redirects = 0.5' 'a fractional redirect count'
+metered_mutation '.bank_scatter_redirects = "0"' 'a redirect count carried as a string'
+metered_mutation '.synthetic_fixture = true' 'a metered row reported as a derived session'
+metered_mutation '.strip_content = "eq+compressor+limiter+meter"' 'a metered row counting its meters as strip content'
+metered_mutation '.strip_layout = "builtins"' 'a metered row claiming the builtins layout'
+metered_mutation '.input_signal = "silence"' 'a metered row claiming silence'
+metered_mutation '.fixture_id = "fixtures/session/v1/console-sixty-four-track-mono.json"' \
+    'a metered row rendered from the mono fixture'
+metered_mutation '.source_feed = "played_planes"' 'a metered row claiming the driver-fed feed'
+metered_mutation '.tracks = 9' 'a metered row that is not eight full banks'
+metered_mutation '.observations = 100' 'a shortened metered run'
+# The redirect count is the metered plan's own, whatever it is: any non-negative integer.
+expect_accept "$(printf '%s' "$session_metered" | jq -c '.bank_scatter_redirects = 8')" \
+    'a metered row redirecting lanes'
+# Its floor group states none: no ruling has inventoried a metered strip, and the standing strip's
+# inventory would publish the meters' cost as a gap in the strip's.
+expect_reject "$(printf '%s' "$session_floor_metered" | jq -c \
+    '.floor_cycles_per_lane_sample = (307 / (8 * 3.7))
+     | .percent_of_floor = (100 * (307 / (8 * 3.7)) / .cycles_per_lane_sample)')" \
+    'a metered row costed at the unmetered strip inventory'
+expect_reject "$(printf '%s' "$session_floor_metered" | jq -c \
+    '.floor_basis = "docs/rulings/effect-floor-accounting.md: builtins+eq+compressor+limiter"')" \
+    'a metered row citing the unmetered strip inventory'
+expect_reject "$(printf '%s' "$session_floor_metered" | jq -c \
+    '.floor_control_row = "sixty_four_track_console" | .isolated_cycles_per_lane_sample = 0.1 | .isolated_percent_of_floor = 1.0')" \
+    'a metered row isolating its meters against the standing row'
 
 # The mono session rows. Both arms render the mono fixture as written, so both are checked-in
 # rather than derived; the half-mono row is the one that is derived, and it is derived from the
@@ -818,10 +944,120 @@ mono_mutation '.render_total_forbidden_operations = 1' 'a mono pair that allocat
 expect_accept "$(printf '%s' "$mono" | jq -c '.collapse_forced_off_p50_ns = 160000 | .collapse_forced_off_p95_ns = 162000 | .collapse_forced_off_p99_ns = 164000 | .paired_delta_median_ns = 38000 | .paired_delta_median_ns_per_track = 593.75')" \
     'a mono pair that did measure a saving'
 
+# ---------------------------------------------------------------------------------------------
+# The mixing-automation row (#1003). Every claim it makes is mutated: the controls and the host
+# lowering each one is pushed in, the push counts, the collapse counters, and the digests of the
+# run and of the preflight.
+# ---------------------------------------------------------------------------------------------
+mixing_mutation() { expect_reject "$(printf '%s' "$mixing" | jq -c "$1")" "$2"; }
+
+mixing_mutation '.arms = ["quiet","automated","restated"]' 'mixing arms in the wrong order'
+mixing_mutation '.arms = ["quiet","restated"]' 'a mixing row missing its automated arm'
+mixing_mutation '.pairing = "sequential"' 'a mixing row that was not alternated'
+mixing_mutation '.record = "console_automation"' 'a mixing record claiming the one-track automation shape'
+mixing_mutation '.workload_kind = "sixty_four_track_console_mono"' 'a mixing row claiming the quiet session kind'
+mixing_mutation '.fixture_id = "fixtures/session/v1/console-sixty-four-track-intended.json"' \
+    'a mixing row measured on the stereo console, which cannot collapse'
+mixing_mutation '.synthetic_fixture = true' 'a mixing row claiming a derived fixture'
+mixing_mutation '.strip_content = "compressor"' 'a mixing row claiming a decomposition strip'
+mixing_mutation '.tracks = 9' 'a mixing row that is not eight full banks'
+mixing_mutation '.units = "us_per_block"' 'the wrong mixing unit'
+mixing_mutation '.statistical_method = "three arms alternated per observation"' \
+    'a mixing method sentence that drifted'
+mixing_mutation '.preroll_blocks = 0' 'a mixing row with no pre-roll'
+# The controls. VERIFY-AUTOMATION F2: the EQ pushed as two one-channel edits retires a collapse the
+# product keeps, and F3: the drafted row automated values nobody held.
+mixing_mutation '.automated_controls[0].lowering = "left_then_right"' \
+    'an EQ pushed as two one-channel edits, a shape the SDK never sends'
+# The same record with every count made consistent with the drifted lowering, so only the pin on
+# the lowering itself can refuse it.
+mixing_mutation '.automated_controls[0].lowering = "left_then_right" | .owner_edits_per_block = 2 | .parameter_records_per_block = 12 | .restated_pushes_accepted = 14000 | .automated_pushes_accepted = 14000' \
+    'an EQ pushed as two one-channel edits, its counts made consistent'
+mixing_mutation '.automated_controls[1].lowering = "owner_both"' \
+    'a compressor pushed as a Both record the web host does not send'
+mixing_mutation '.automated_controls[2].step = 0.25' 'a limiter step that never engages (F6)'
+mixing_mutation '.automated_controls[0].track_id = "ch01"' 'two automated tracks in one bank'
+mixing_mutation '.automated_controls[3].parameter_index = 2' 'an EQ control naming another parameter'
+mixing_mutation '.automated_controls[4].effect = "miso.true-peak-limiter"' 'a control on the wrong effect'
+mixing_mutation '.automated_controls |= .[0:7]' 'seven automated controls'
+mixing_mutation '.automated_controls |= reverse' 'the controls out of track order'
+mixing_mutation '.automated_controls[5].even_value = -1.75' 'a ride whose even value is the base: no window'
+mixing_mutation '.automated_controls[6].odd_value = -4.25' 'a ride that does not straddle its base'
+mixing_mutation '.automated_controls[7].base = "held"' 'a base that is not a number'
+mixing_mutation '.owner_edits_per_block = 8' 'owner edits that are not the EQ controls'
+mixing_mutation '.parameter_records_per_block = 5' 'one record per compressor and limiter control'
+mixing_mutation '.smoothing_samples = 32' 'a window that is not the descriptors'"'"''
+mixing_mutation '.restated_pushes_accepted = 12999 | .automated_pushes_accepted = 12999' \
+    'both pushing arms short of one accepted push'
+mixing_mutation '.restated_pushes_accepted = 12999' 'a restated arm whose queue refused a push'
+mixing_mutation '.automated_pushes_accepted = 8000' 'an automated arm counting pushes as sixteen spans'
+# The collapse counters: read, not pinned, for the restated and automated arms -- but the quiet arm
+# must collapse every cohort on every block, and no arm more than quiet.
+mixing_mutation '.quiet_bank_collapse_counters = [8504, 8]' 'a quiet arm that lost a cohort-block'
+mixing_mutation '.restated_bank_collapse_counters = [9000, 8]' 'a restated arm collapsing more than quiet'
+mixing_mutation '.automated_bank_collapse_counters = [3192, 16]' 'an arm counting another cohort set'
+mixing_mutation '.quiet_bank_collapse_counters = [0, 0]' 'a mono console with no cohort'
+mixing_mutation 'del(.restated_bank_collapse_counters)' 'a record missing its collapse counters'
+# The digests, in-run and in the preflight.
+mixing_mutation '.restated_output_sha256 = "'"$digest_c"'"' 'restating the held values moved a bit'
+mixing_mutation '.automated_output_sha256 = "'"$digest_a"'"' 'an automated arm that rendered the restated bits'
+mixing_mutation '.bit_identity = "quiet != restated, asserted in-run"' 'a mixing row that inverted its class-A sentence'
+mixing_mutation '.preflight_output_sha256.automated_limiter_only = "'"$digest_c"'"' \
+    'a limiter ride that moved no bit (F6)'
+mixing_mutation '.preflight_output_sha256.automated_eq_only = "'"$digest_c"'"' 'an EQ ride that moved no bit'
+mixing_mutation '.preflight_output_sha256.automated_compressor_only = "'"$digest_c"'"' \
+    'a compressor ride that moved no bit'
+mixing_mutation '.preflight_output_sha256.quiet = "'"$digest_a"'"' 'a preflight restatement that moved a bit'
+mixing_mutation '.preflight_output_sha256.restated_eq_only = "'"$digest_a"'"' \
+    'a preflight EQ restatement that moved a bit'
+mixing_mutation 'del(.preflight_output_sha256.restated_eq_only)' 'a preflight missing an arm'
+mixing_mutation '.preflight_bank_collapse_counters.restated_eq_only = [640, 8]' \
+    'an EQ restatement that retired a collapse: the harness drifted off the SDK shape (A6)'
+mixing_mutation '.preflight_bank_collapse_counters.quiet = [1016, 8]' 'a preflight quiet arm that lost a cohort-block'
+mixing_mutation '.preflight_blocks = 64' 'a preflight that compared no block after its pre-roll'
+mixing_mutation '.quiet_p99_ns = 1' 'mixing percentiles out of order'
+mixing_mutation '.render_errors = 1' 'a mixing row that produced render errors'
+mixing_mutation '.render_total_forbidden_operations = 1' 'a mixing row that allocated on the render path'
+# #1011: one mutation per rule that no mutation above isolates. Each changes the field its rule
+# guards and keeps every other rule satisfied, so each one is refused by that rule alone and the
+# rule cannot be deleted with the suite staying green. The mutations above that touch these
+# fields are refused first by a neighbouring rule: a preflight quiet arm that lost a cohort-block
+# by A6's equality, a preflight of 64 blocks by the quiet-counter rule.
+mixing_mutation '.preflight_blocks = 64 | .preflight_bank_collapse_counters.quiet = [512, 8] | .preflight_bank_collapse_counters.restated_eq_only = [512, 8]' \
+    'a preflight that compared no block after its pre-roll, its counters made consistent'
+mixing_mutation '.preflight_bank_collapse_counters.quiet = [1016, 8] | .preflight_bank_collapse_counters.restated_eq_only = [1016, 8]' \
+    'a preflight quiet arm that lost a cohort-block, the EQ-only arm losing it too'
+mixing_mutation '.preroll_blocks = 32 | .quiet_bank_collapse_counters = [8256, 8] | .preflight_blocks = 96 | .preflight_bank_collapse_counters.quiet = [768, 8] | .preflight_bank_collapse_counters.restated_eq_only = [768, 8]' \
+    'a shorter pre-roll than the row freezes, every count made consistent'
+mixing_mutation '.owner_edits_per_block = 4 | .restated_pushes_accepted = 14000 | .automated_pushes_accepted = 14000' \
+    'an owner edit per block the controls do not make, the push counts made consistent'
+mixing_mutation '.parameter_records_per_block = 11 | .restated_pushes_accepted = 14000 | .automated_pushes_accepted = 14000' \
+    'a parameter record per block the controls do not make, the push counts made consistent'
+mixing_mutation '.automated_controls |= (to_entries | map({key: (.key | tostring), value}) | from_entries)' \
+    'the controls as an object in control order'
+mixing_mutation '.automated_controls[0] |= (.even_value = "b" | .base = "a")' \
+    'a base and a ride value that are not numbers, in jq'"'"'s order'
+mixing_mutation '.quiet_p50_ns = 0' 'a zero-cost quiet arm'
+mixing_mutation '.restated_p99_ns = 1' 'restated percentiles out of order'
+mixing_mutation '.automated_p99_ns = 1' 'automated percentiles out of order'
+mixing_mutation '.restated_bank_collapse_counters = [3192, 8, 0]' 'a collapse counter that is not a pair'
+mixing_mutation '.automated_bank_collapse_counters = [9000, 8]' 'an automated arm collapsing more than quiet'
+mixing_mutation '.preflight_output_sha256.extra = "'"$digest_a"'"' 'a preflight arm the row does not run'
+mixing_mutation '.preflight_output_sha256.automated_eq_only = "not-a-digest"' 'a preflight digest that is not a digest'
+mixing_mutation '.preflight_output_sha256.automated = .preflight_output_sha256.restated' \
+    'a preflight automated arm that rendered the restated bits'
+mixing_mutation '.preflight_bank_collapse_counters.extra = [1024, 8]' 'preflight counters for an arm the row does not run'
+mixing_mutation '.preflight_bank_collapse_counters.automated_eq_only = [1024, 8, 0]' \
+    'a preflight collapse counter that is not a pair'
+# The future the row exists to measure: with the collapse kept through restating records, the
+# restated arm collapses what quiet does and the collapse delta is noise. Still a valid record.
+expect_accept "$(printf '%s' "$mixing" | jq -c '.restated_bank_collapse_counters = [8512, 8] | .automated_bank_collapse_counters = [8512, 8] | .paired_collapse_delta_median_ns = -40 | .restated_p50_ns = 69700')" \
+    'a mixing row whose restatements keep the collapse'
+
 records=$(jq -cn --argjson session "$session" --argjson hoist "$hoist" \
     --argjson meters "$meters" --argjson observation "$observation" \
     --argjson placement "$placement" --argjson automation "$automation" \
-    --argjson mono "$mono" \
+    --argjson mono "$mono" --argjson mixing "$mixing" \
     --arg a "$digest_a" --arg b "$digest_b" '
   def console_fixture: "fixtures/session/v1/console-sixty-four-track-intended.json";
   def legacy_fixture: "fixtures/session/v1/console-sixty-four-track.json";
@@ -851,8 +1087,6 @@ records=$(jq -cn --argjson session "$session" --argjson hoist "$hoist" \
      layout: "simd1:eq,dynamic:compressor", signal: "tone", fixture: legacy_fixture, digest: "e"},
     {kind: "sixty_four_track_eq_comp_simd1", tracks: 64, synthetic: true, strip: "eq+compressor",
      layout: "simd1:eq+compressor", signal: "tone", fixture: console_fixture, digest: "f"},
-    {kind: "sixty_four_track_plumbing_only", tracks: 64, synthetic: true, strip: "plumbing",
-     layout: "plumbing", signal: "tone", fixture: console_fixture, digest: "0"},
     {kind: "sixty_four_track_gain_pan_only", tracks: 64, synthetic: true, strip: "gain+pan",
      layout: "builtins", signal: "tone", fixture: console_fixture, digest: "a"},
     {kind: "sixty_four_track_console_mono", tracks: 64, synthetic: false,
@@ -864,10 +1098,19 @@ records=$(jq -cn --argjson session "$session" --argjson hoist "$hoist" \
     {kind: "sixty_four_track_console_half_mono", tracks: 64, synthetic: true,
      strip: "eq+compressor+limiter", layout: intended_layout, signal: "tone",
      fixture: mono_fixture, digest: "d"},
-    # #928: emitted after the sixteen, and rendering the bits of the bound plumbing row.
-    {kind: "sixty_four_track_plumbing_ring", tracks: 64, synthetic: true, strip: "plumbing",
-     layout: "plumbing", signal: "tone", fixture: console_fixture, digest: "0",
-     feed: "played_planes"}
+    # #928 and #956: emitted after the fifteen, and rendering the bits of the bound gain-and-pan
+    # row.
+    {kind: "sixty_four_track_gain_pan_ring", tracks: 64, synthetic: true, strip: "gain+pan",
+     layout: "builtins", signal: "tone", fixture: console_fixture, digest: "a",
+     feed: "played_planes"},
+    # #881: emitted last, rendering the bits of the standing console row, and carrying the meter
+    # group and the counters of its own plan.
+    {kind: "sixty_four_track_console_metered", tracks: 64, synthetic: false,
+     strip: "eq+compressor+limiter", layout: intended_layout, signal: "tone",
+     fixture: console_fixture, digest: "3",
+     extra: {meter_streams: 64, meter_tap: "post_matrix", meter_metrics: "sample_peak",
+             meter_window_blocks: 12, meter_snapshots: 5312, meter_dropped_snapshots: 0,
+             bank_route_folds: 64, bank_scatter_redirects: 0}}
   ];
   def hoists: [
     {kind: "nine_track_ragged_strip", tracks: 9, digest: "a"},
@@ -880,7 +1123,8 @@ records=$(jq -cn --argjson session "$session" --argjson hoist "$hoist" \
         | .strip_content = $s.strip | .strip_layout = $s.layout | .input_signal = $s.signal
         | .source_feed = ($s.feed // "bound")
         | .fixture_id = $s.fixture | .round = $round
-        | .output_sha256 = ($a[0:63] + $s.digest)),
+        | .output_sha256 = ($a[0:63] + $s.digest)
+        | . + ($s.extra // {})),
       (hoists[] | . as $h | $hoist
         | .workload_kind = $h.kind | .tracks = $h.tracks | .round = $round
         | .quiet_output_sha256 = ($a[0:63] + $h.digest)
@@ -890,33 +1134,36 @@ records=$(jq -cn --argjson session "$session" --argjson hoist "$hoist" \
       ($observation | .round = $round),
       ($placement | .round = $round),
       ($automation | .round = $round),
-      ($mono | .round = $round)
+      ($mono | .round = $round),
+      ($mixing | .round = $round)
   ) ]')
 
-expect_aggregate_accept "$(printf '%s' "$records" | jq -c '.[]')" 'the forty-eight-record set'
+expect_aggregate_accept "$(printf '%s' "$records" | jq -c '.[]')" 'the fifty-record set'
 
-# Index map of the frozen emission order: 0-16 are round one's seventeen session rows (16 is the
-# driver-fed plumbing row), 17-18 its two hoist rows, 19 its meters row, 20 its observation row,
-# 21 its placement row-pair, 22 its automation-active row and 23 its mono row-pair; 24-47 repeat
-# for round two.
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c 'del(.[0]) | .[]')" 'forty-seven records'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c '. as $r | ($r + [$r[22]]) | .[]')" 'forty-nine records'
+# Index map of the frozen emission order: 0-16 are round one's seventeen session rows (15 is the
+# driver-fed gain-and-pan row and 16 the metered console row), 17-18 its two hoist rows, 19 its
+# meters row, 20 its observation row, 21 its placement row-pair, 22 its automation-active row, 23
+# its mono row-pair and 24 its mixing-automation row; 25-49 repeat for round two. #956 took two
+# records out of the fifty before it (the plumbing row, both rounds) and #1003 added two back at
+# the end of each round.
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c 'del(.[0]) | .[]')" 'forty-nine records'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '. as $r | ($r + [$r[22]]) | .[]')" 'fifty-one records'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '. as $r | ($r + [$r[0]]) | .[]')" 'a duplicated record'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[24].round = 1 | .[]')" 'a workload measured twice in one round'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[25].round = 1 | .[]')" 'a workload measured twice in one round'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[0].cpu_model = "Another CPU" | .[]')" 'records from two hosts'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[0].candidate_commit = "ffffffffffffffffffffffffffffffffffffffff" | .[]')" 'records from two commits'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[0].backend = "Scalar" | .[]')" 'records from two backends'
 # Round one and round two must render the same bytes: they are two measurements of one workload.
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[24].output_sha256 = $c | .[]')" 'a workload whose rounds rendered different output'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[25].output_sha256 = $c | .[]')" 'a workload whose rounds rendered different output'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record == "console_session")] | .[]')" 'a set with no hoist rows'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record != "console_meters")] | .[]')" 'a set with no meters arm'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record != "console_observation")] | .[]')" 'a set with no observation arm'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[43].meters_off_output_sha256 = $c | .[43].meters_on_output_sha256 = $c | .[]')" 'a meters arm whose rounds rendered different output'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[44].absent_output_sha256 = $c | .[44].unarmed_output_sha256 = $c | .[44].armed_output_sha256 = $c | .[]')" 'an observation arm whose rounds rendered different output'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[45].split_chains_output_sha256 = $c | .[45].merged_chain_output_sha256 = $c | .[]')" 'a placement pair whose rounds rendered different output'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[44].meters_off_output_sha256 = $c | .[44].meters_on_output_sha256 = $c | .[]')" 'a meters arm whose rounds rendered different output'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[45].absent_output_sha256 = $c | .[45].unarmed_output_sha256 = $c | .[45].armed_output_sha256 = $c | .[]')" 'an observation arm whose rounds rendered different output'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[46].split_chains_output_sha256 = $c | .[46].merged_chain_output_sha256 = $c | .[]')" 'a placement pair whose rounds rendered different output'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record != "console_placement")] | .[]')" 'a set with no placement row-pair'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record != "console_automation")] | .[]')" 'a set with no automation-active row'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[46].quiet_output_sha256 = $c | .[46].restated_output_sha256 = $c | .[]')" 'an automation row whose rounds rendered different output'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[47].quiet_output_sha256 = $c | .[47].restated_output_sha256 = $c | .[]')" 'an automation row whose rounds rendered different output'
 # #144 item 13: two admissibility states in one accepted run is the comparison the control field
 # exists to prevent, and a run that never stated one at all is not an accepted run.
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[0].measurement_control = "uncontrolled" | .[0].cpu_affinity = "uncontrolled" | .[0].background_load_note = "uncontrolled; MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1; waived affinity_unavailable" | .[]')" 'a run mixing controlled and uncontrolled records'
@@ -928,18 +1175,42 @@ expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.worklo
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_eq_comp_simd1")] | .[]')" 'a set missing the chain-shape row'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_compressor_automation")] | .[]')" 'a set missing the automation-active row'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record != "console_mono")] | .[]')" 'a set with no mono row-pair'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[47].collapse_eligible_output_sha256 = $c | .[47].collapse_forced_off_output_sha256 = $c | .[]')" 'a mono pair whose rounds rendered different output'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_plumbing_only")] | .[]')" 'a set missing the overhead floor row'
+# #1003: the mixing-automation row is a row of the set, and both of its rounds are one frozen
+# workload: the quiet and restated digests, the moving arm, the preflight and the collapse
+# counters all agree across them.
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record != "console_mixing_automation")] | .[]')" 'a set with no mixing-automation row'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[49].quiet_output_sha256 = $c | .[49].restated_output_sha256 = $c | .[]')" 'a mixing row whose rounds rendered different output'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[49].automated_output_sha256 = $c | .[]')" 'a mixing row whose rounds rode different traffic'
+# #1011: a fresh digest. `$digest_c` is the base record's preflight `restated` digest, so that
+# edit is refused by the per-record A3 rule before the rounds are compared.
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg a "$digest_a" '.[49].preflight_output_sha256.automated_limiter_only = ($a[0:63] + "4") | .[]')" 'a mixing preflight whose rounds disagree'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[49].preflight_bank_collapse_counters.automated_compressor_only = [512, 8] | .[]')" 'a mixing preflight whose rounds collapsed differently'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[49].restated_bank_collapse_counters = [2128, 8] | .[]')" 'a mixing row whose rounds collapsed differently'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[49].automated_bank_collapse_counters = [2128, 8] | .[]')" 'a mixing automated arm whose rounds collapsed differently'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[49].quiet_bank_collapse_counters = [17024, 16] | .[49].restated_bank_collapse_counters = [6384, 16] | .[49].automated_bank_collapse_counters = [6384, 16] | .[]')" 'a mixing row whose rounds formed different cohorts'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[48].collapse_eligible_output_sha256 = $c | .[48].collapse_forced_off_output_sha256 = $c | .[]')" 'a mono pair whose rounds rendered different output'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '(.[] | select(.workload_kind == "sixty_four_track_gain_pan_ring")) |= (.workload_kind = "sixty_four_track_plumbing_ring" | .strip_content = "plumbing" | .strip_layout = "plumbing") | .[]')" 'a set carrying the retired plumbing ring row in place of the gain-and-pan ring row'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_gain_pan_only")] | .[]')" 'a set missing the gain-and-pan row'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_console_mono")] | .[]')" 'a set missing the mono session row'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_console_mono_dual")] | .[]')" 'a set missing the mono control row'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_console_half_mono")] | .[]')" 'a set missing the mixed-cohort row'
-# #928: the driver-fed row is a row of the set, and its digest is the bound plumbing row's. Both
+# #928 and #956: the driver-fed row is a row of the set, and its digest is the bound gain-and-pan
+# row's. Both
 # rounds are moved together so the rounds rule is satisfied and only the pair pin can refuse it.
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_plumbing_ring")] | .[]')" 'a set missing the driver-fed plumbing row'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '(.[] | select(.workload_kind == "sixty_four_track_plumbing_ring")).output_sha256 = $c | .[]')" 'a driver-fed row that rendered other bits than the bound row'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '(.[] | select(.workload_kind == "sixty_four_track_plumbing_only")).output_sha256 = $c | .[]')" 'a bound plumbing row that rendered other bits than the driver-fed row'
-expect_aggregate_accept "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '(.[] | select(.workload_kind == "sixty_four_track_plumbing_only" or .workload_kind == "sixty_four_track_plumbing_ring")).output_sha256 = $c | .[]')" 'the plumbing pair moving together'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_gain_pan_ring")] | .[]')" 'a set missing the driver-fed gain-and-pan row'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '(.[] | select(.workload_kind == "sixty_four_track_gain_pan_ring")).output_sha256 = $c | .[]')" 'a driver-fed row that rendered other bits than the bound row'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '(.[] | select(.workload_kind == "sixty_four_track_gain_pan_only")).output_sha256 = $c | .[]')" 'a bound gain-and-pan row that rendered other bits than the driver-fed row'
+expect_aggregate_accept "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '(.[] | select(.workload_kind == "sixty_four_track_gain_pan_only" or .workload_kind == "sixty_four_track_gain_pan_ring")).output_sha256 = $c | .[]')" 'the gain-and-pan pair moving together'
+# #881: the metered console row is a row of the set and its digest is the standing console row's.
+# Both rounds are moved together so the rounds rule is satisfied and only the pair pin can refuse
+# it. Its counters are compared with no other record: every other plan in the run is a
+# `Concurrent` one, so a redirect count that differs from theirs is a truthful record.
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_console_metered")] | .[]')" 'a set missing the metered console row'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '(.[] | select(.workload_kind == "sixty_four_track_console_metered")).output_sha256 = $c | .[]')" 'a metered row that rendered other bits than the standing row'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '(.[] | select(.record == "console_session" and .workload_kind == "sixty_four_track_console")).output_sha256 = $c | .[]')" 'a standing row that rendered other bits than the metered row'
+expect_aggregate_accept "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '(.[] | select(.record == "console_session" and (.workload_kind == "sixty_four_track_console" or .workload_kind == "sixty_four_track_console_metered"))).output_sha256 = $c | .[]')" 'the console pair moving together'
+expect_aggregate_accept "$(printf '%s' "$records" | jq -c '(.[] | select(.workload_kind == "sixty_four_track_console_metered")).bank_scatter_redirects = 8 | .[]')" 'a metered row redirecting lanes the Concurrent meters arm does not'
+expect_aggregate_accept "$(printf '%s' "$records" | jq -c '(.[] | select(.record == "console_meters")) |= (.meters_off_bank_scatter_redirects = 8 | .meters_on_bank_scatter_redirects = 8) | .[]')" 'a Concurrent meters arm redirecting lanes the metered row does not'
 
 # ---------------------------------------------------------------------------------------------
 # #184 at the aggregate: the isolate is a subtraction between two rows, so only a whole run has
@@ -955,8 +1226,8 @@ floor_records=$(printf '%s' "$records" | jq -c -L "$scripts_dir" --arg s "$core_
     "sixty_four_track_compressor_only": 2.60, "sixty_four_track_eq_comp_simd1": 3.20,
     "sixty_four_track_console_legacy": 3.30, "sixty_four_track_console": 4.40,
     "one_twenty_eight_track_stretch": 8.60,
-    "sixty_four_track_plumbing_only": 0.42, "sixty_four_track_gain_pan_only": 1.01,
-    "sixty_four_track_plumbing_ring": 0.40,
+    "sixty_four_track_gain_pan_only": 1.01, "sixty_four_track_gain_pan_ring": 0.98,
+    "sixty_four_track_console_metered": 4.80,
     "sixty_four_track_console_mono": 4.38, "sixty_four_track_console_mono_dual": 4.38,
     "sixty_four_track_console_half_mono": 4.39
   }[.workload_kind];
@@ -980,7 +1251,7 @@ floor_records=$(printf '%s' "$records" | jq -c -L "$scripts_dir" --arg s "$core_
                  / .isolated_cycles_per_lane_sample)
         else . end ]')
 
-expect_aggregate_accept "$(printf '%s' "$floor_records" | jq -c '.[]')" 'the forty-eight-record set with floor accounting'
+expect_aggregate_accept "$(printf '%s' "$floor_records" | jq -c '.[]')" 'the fifty-record set with floor accounting'
 expect_aggregate_reject "$(printf '%s' "$floor_records" | jq -c '(.[] | select(.workload_kind == "sixty_four_track_compressor_only")).isolated_cycles_per_lane_sample = 3.0 | .[]')" 'an isolate that is not the subtraction it names'
 expect_aggregate_reject "$(printf '%s' "$floor_records" | jq -c '(.[] | select(.workload_kind == "sixty_four_track_compressor_only")).isolated_percent_of_floor = 88.0 | .[]')" 'an isolate percentage that does not follow from the two rows floors'
 # The control row moving is the same defect seen from the other side: the subtraction stops being
@@ -994,8 +1265,287 @@ expect_aggregate_reject "$(printf '%s' "$floor_records" | jq -c -L "$scripts_dir
 expect_aggregate_reject "$(printf '%s' "$floor_records" | jq -c -L "$scripts_dir" --arg s "$core_clock_source" "$add_floor"'[.[] | if .workload_kind == "sixty_four_track_idle" then with_floor(4100000000; $s) else . end] | .[]')" 'a run measured under two core clocks'
 expect_aggregate_reject "$(printf '%s' "$floor_records" | jq -c '[.[] | if .record == "console_session" then .core_clock_source = (.core_clock_source + .workload_kind) else . end] | .[]')" 'a run whose rows disagree about where their clock came from'
 
+# ---------------------------------------------------------------------------------------------
+# #1011: the browser arm of the mixing-automation row (`scripts/web-mixing-automation-validator.jq`).
+# Two measured rounds of one prepared module, slurped. The base pair states what the runner writes:
+# the row's controls in the host's lowerings, the arm's streamed input beside the native row's
+# frozen blocks, the provenance, and digests that agree across the rounds.
+# ---------------------------------------------------------------------------------------------
+web_valid() { printf '%s\n' "$1" | jq -s -e -L "$scripts_dir" -f "$scripts_dir/web-mixing-automation-validator.jq" >/dev/null 2>&1; }
+expect_web_accept() {
+    if ! web_valid "$1"; then printf 'expected web accept: %s\n' "$2" >&2; failures=$((failures + 1)); fi
+}
+expect_web_reject() {
+    if web_valid "$1"; then printf 'expected web reject: %s\n' "$2" >&2; failures=$((failures + 1)); fi
+}
+commit_a=$(printf '1%.0s' {1..40})
+commit_b=$(printf '2%.0s' {1..40})
+web_round=$(jq -cn --arg a "$digest_a" --arg b "$digest_b" --arg c "$digest_c" --arg commit "$commit_a" \
+    "$mixing_controls"' as $controls | {
+  schema_version: 1, issue: 1003, record: "web_mixing_automation", round: 1,
+  workload_kind: "sixty_four_track_console_mono_mixing_automation",
+  fixture_id: "fixtures/session/v1/console-sixty-four-track-mono.json", source_frames: "48000000",
+  tracks: 64, input_signal: "tone",
+  input_feed: {waveform: "sine", radians_per_frame: 0.017, amplitude: 0.6, track_phase_radians: 0,
+    delivery: "streamed_source", block_frames: 128, continuous_across_blocks: true},
+  native_input_feed: {waveform: "sine", radians_per_frame: 0.017, amplitude: 0.6,
+    track_phase_radians: 0.31, delivery: "frozen_block_per_track", block_frames: 128,
+    continuous_across_blocks: false},
+  sample_rate_hz: 48000, quantum_frames: 128,
+  module_sha256: $b, module_matches_pin: false, pinned_sha256: $c,
+  node_version: "v22.23.2", v8_version: "12.4.254.21-node.56", node_flags: ["--no-liftoff"],
+  console_command_queue_records: 64, source_ring_frames: 5120,
+  observations: 1000, preroll_blocks: 64, pairing: "alternating_per_observation",
+  arms: ["quiet","restated","automated"],
+  controls: [$controls[] | . + {parameter_id: (if .effect == "miso.parametric-eq" then 4 else 1 end)}],
+  command_records_per_block: 8, records_admitted: {quiet: 0, restated: 8000, automated: 8000},
+  units: "ns_per_block", percentile_method: "nearest_rank",
+  quiet_p50_ns: 154304, quiet_p95_ns: 225630, quiet_p99_ns: 233174,
+  restated_p50_ns: 189220, restated_p95_ns: 277649, restated_p99_ns: 285344,
+  automated_p50_ns: 216622, automated_p95_ns: 318577, automated_p99_ns: 325940,
+  paired_ramp_delta_median_ns: 27603, paired_collapse_delta_median_ns: 34897,
+  quiet_output_sha256: $a, restated_output_sha256: $a, automated_output_sha256: $b,
+  preflight_output_sha256: {quiet: $c, restated: $c, automated: $b, automated_eq_only: ($a[0:63] + "1"),
+    automated_compressor_only: ($a[0:63] + "2"), automated_limiter_only: ($a[0:63] + "3"),
+    restated_eq_only: $c},
+  bit_identity: "quiet == restated, asserted in-run", bank_collapse_counters_exported: false,
+  loadavg_start: "9.52 7.22 7.64 8/1930 3836898", loadavg_end: "9.48 7.25 7.65 6/1921 3837039",
+  descriptive_only: true,
+  statistical_method: "three arms alternated per observation; one warmup launch and two measured launches; descriptive only; no threshold",
+  candidate_commit: $commit, prepared_commit: $commit,
+  measurement_control: "uncontrolled; MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1; waived loadavg_above_ceiling; loadavg 9.52 7.22 7.64 21/1947 3836866; affinity cpu 31",
+  cpu_affinity: "31"
+}')
+web_pair=$(printf '%s' "$web_round" | jq -c '., (.round = 2 | .quiet_p50_ns = 150000 | .paired_ramp_delta_median_ns = 27011)')
+# One edit applied to both rounds, so the rounds still agree and only a per-record rule can refuse it.
+web_mutation() { expect_web_reject "$(printf '%s\n' "$web_pair" | jq -c -s "map($1) | .[]")" "$2"; }
+# One edit applied to round two only, which only the cross-round rule can refuse.
+web_round_mutation() { expect_web_reject "$(printf '%s\n' "$web_pair" | jq -c -s ".[1] |= ($1) | .[]")" "$2"; }
+
+expect_web_accept "$web_pair" 'the two measured browser rounds'
+while read -r field; do
+    web_mutation "del(.\"$field\")" "a browser round without $field"
+    web_mutation ".\"$field\" = null" "a browser round with $field nulled"
+done < <(printf '%s' "$web_round" | jq -r 'keys[]')
+web_mutation '.unexpected_key = 1' 'a browser round with an extra key'
+web_mutation '.round = 0' 'the warmup launch published as a measured round'
+web_mutation '.quantum_frames = 256 | .input_feed.block_frames = 256 | .native_input_feed.block_frames = 256' \
+    'a browser round in another quantum, its feeds made consistent'
+web_mutation '.observations = 500 | .records_admitted.restated = 4000 | .records_admitted.automated = 4000' \
+    'a shortened browser round, its admitted records made consistent'
+web_mutation '.command_records_per_block = 13 | .records_admitted.restated = 13000 | .records_admitted.automated = 13000' \
+    'the native push count on the web wire, its admitted records made consistent'
+web_mutation '.source_ring_frames = 0' 'a browser round with no source ring'
+web_mutation '.input_feed.waveform = "square"' 'a streamed input that is not a sine'
+web_mutation '.native_input_feed.waveform = "square"' 'a native input that is not a sine'
+web_mutation '.native_input_feed.block_frames = 256' 'a native feed in another quantum'
+web_mutation '.quiet_p99_ns = 1' 'browser quiet percentiles out of order'
+web_mutation '.restated_p99_ns = 1' 'browser restated percentiles out of order'
+web_mutation '.quiet_output_sha256 = "x" | .restated_output_sha256 = "x"' 'browser digests that are not digests'
+web_mutation '.preflight_output_sha256.automated_eq_only = "not-a-digest"' 'a browser preflight digest that is not a digest'
+web_mutation '.candidate_commit = "HEAD" | .prepared_commit = "HEAD"' 'a run and a prepare naming no commit'
+web_mutation '.record = "console_mixing_automation"' 'a browser round claiming the native shape'
+web_mutation '.fixture_id = "fixtures/session/v1/console-sixty-four-track-intended.json"' \
+    'a browser round on the stereo console'
+# The input: the claim #1011 added, and what separates the two feeds.
+web_mutation '.input_feed.continuous_across_blocks = false' 'a streamed tone claiming frozen blocks'
+web_mutation '.input_feed.delivery = "frozen_block_per_track"' 'the browser arm claiming the native feed'
+web_mutation '.input_feed.track_phase_radians = 0.31' 'a browser tone phase-offset by track'
+web_mutation '.native_input_feed.continuous_across_blocks = true' 'the native feed claiming a continuous tone'
+web_mutation '.native_input_feed.track_phase_radians = 0' 'the native feed claiming tracks in phase'
+web_mutation '.native_input_feed.delivery = "streamed_source"' 'the native feed claiming a streamed source'
+web_mutation '.input_feed.radians_per_frame = 0.02' 'a browser tone at another rate than the native'"'"'s'
+web_mutation '.input_feed.amplitude = 0.3' 'a browser tone at another level than the native'"'"'s'
+web_mutation '.input_feed.block_frames = 256' 'a browser feed in another quantum'
+web_mutation '.input_feed.extra = 1' 'a feed with a fact the validator does not know'
+web_mutation '.input_signal = "silence"' 'a browser round claiming silence'
+# The module and the protocol.
+web_mutation '.module_matches_pin = true' 'a module claiming the pin it does not match'
+web_mutation '.node_flags = []' 'a browser round with Liftoff enabled'
+web_mutation '.console_command_queue_records = 8' 'a queue the SDK does not boot'
+web_mutation '.source_ring_frames = 100' 'a source ring that is not whole quanta'
+web_mutation '.prepared_commit = "'"$commit_b"'"' 'a module prepared at another commit than the run'"'"'s'
+web_mutation '.candidate_commit = "HEAD"' 'a commit that is not a commit id'
+web_mutation '.measurement_control = "uncontrolled"' 'an uncontrolled round that does not name its waiver'
+web_mutation '.cpu_affinity = "any"' 'a round pinned to no CPU'
+web_mutation '.bank_collapse_counters_exported = true' 'a browser round claiming collapse counters it cannot read'
+# The row, as the native pin states it.
+web_mutation '.controls[0].lowering = "left_then_right"' 'an EQ pushed as two one-channel edits'
+web_mutation '.controls[2].step = 0.25' 'a limiter step that never engages'
+web_mutation '.controls[5].even_value = -1.75' 'a ride whose even value is the base'
+web_mutation '.controls[6].odd_value = -4.25' 'a ride that does not straddle its base'
+web_mutation '.controls[1].parameter_id = 0' 'a control with no wire parameter id'
+web_mutation '.command_records_per_block = 13' 'the native push count on the web wire'
+web_mutation '.records_admitted.restated = 7999' 'a restated record the host did not admit'
+web_mutation '.records_admitted.quiet = 8' 'a quiet arm that submitted'
+web_mutation '.quiet_p50_ns = 0' 'a zero-cost browser arm'
+web_mutation '.automated_p99_ns = 1' 'browser percentiles out of order'
+web_mutation '.paired_ramp_delta_median_ns = 0.5' 'a fractional paired delta'
+web_mutation '.restated_output_sha256 = "'"$digest_c"'"' 'restating the held values moved a bit in V8'
+web_mutation '.automated_output_sha256 = .restated_output_sha256' 'an automated arm that rendered the restated bits'
+web_mutation '.bit_identity = "asserted"' 'a browser bit-identity sentence that drifted'
+web_mutation '.preflight_output_sha256.automated_limiter_only = .preflight_output_sha256.restated' \
+    'a browser limiter ride that moved no bit'
+web_mutation '.preflight_output_sha256.automated_eq_only = .preflight_output_sha256.restated' \
+    'a browser EQ ride that moved no bit'
+web_mutation '.preflight_output_sha256.automated_compressor_only = .preflight_output_sha256.restated' \
+    'a browser compressor ride that moved no bit'
+web_mutation '.preflight_output_sha256.automated = .preflight_output_sha256.restated' \
+    'a browser preflight automated arm that rendered the restated bits'
+web_mutation '.preflight_output_sha256.restated_eq_only = "'"$digest_a"'"' 'a browser EQ restatement that moved a bit'
+web_mutation '.preflight_output_sha256.quiet = "'"$digest_a"'"' 'a browser preflight restatement that moved a bit'
+web_mutation '.preflight_output_sha256.extra = "'"$digest_a"'"' 'a browser preflight arm the row does not run'
+# The protocol across the rounds: two of them, measured, of one module at one commit, rendering the
+# same bits. Each edit below leaves both records valid on their own.
+expect_web_reject "$(printf '%s\n' "$web_pair" | jq -c -s '.[0] | .')" 'one measured browser round'
+expect_web_reject "$(printf '%s\n' "$web_pair" | jq -c -s '.[0].round = 0 | .[]')" 'a warmup record beside a measured round'
+expect_web_reject "$(printf '%s\n' "$web_pair" | jq -c -s '.[1].round = 1 | .[]')" 'two browser records of round one'
+expect_web_reject "$(printf '%s\n' "$web_pair" | jq -c -s '. + [.[1]] | .[]')" 'three browser rounds'
+web_round_mutation '.quiet_output_sha256 = "'"$digest_c"'" | .restated_output_sha256 = "'"$digest_c"'"' \
+    'browser rounds that rendered different bits'
+web_round_mutation '.automated_output_sha256 = "'"$digest_c"'"' 'browser rounds that rode different traffic'
+web_round_mutation '.preflight_output_sha256.automated_limiter_only = "'"${digest_a:0:63}4"'"' \
+    'browser rounds whose preflights disagree'
+web_round_mutation '.module_sha256 = "'"$digest_a"'"' 'browser rounds of two modules'
+web_round_mutation '.candidate_commit = "'"$commit_b"'" | .prepared_commit = "'"$commit_b"'"' \
+    'browser rounds at two commits'
+web_round_mutation '.controls[0].base = -7.25 | .controls[0].even_value = -7.0' 'browser rounds with two control tables'
+web_round_mutation '.input_feed.amplitude = 0.5 | .native_input_feed.amplitude = 0.5' 'browser rounds on two tones'
+web_round_mutation '.native_input_feed.track_phase_radians = 0.5' 'browser rounds stating two native feeds'
+web_round_mutation '.node_version = "v24.0.0"' 'browser rounds under two Node versions'
+web_round_mutation '.v8_version = "13.0"' 'browser rounds under two V8 versions'
+web_round_mutation '.node_flags = ["--no-liftoff","--jitless"]' 'browser rounds under two flag sets'
+web_round_mutation '.source_frames = "96000000"' 'browser rounds on two documents'
+web_round_mutation '.source_ring_frames = 6144' 'browser rounds with two source rings'
+web_round_mutation '.measurement_control = "controlled; loadavg 0.01; ceiling 0.50; affinity cpu 31"' \
+    'browser rounds under two admissibility states'
+web_round_mutation '.cpu_affinity = "30"' 'browser rounds on two CPUs'
+
+# ---------------------------------------------------------------------------------------------
+# The browser arm's runner (`run-web-mixing-automation-benchmark.sh run`, #1011 follow-up): what it
+# keeps, what it refuses to overwrite, and what it checks again after the rounds. Nothing is timed.
+# Each case runs the real runner in a throwaway git repository whose harness is a stub: it prints
+# the base round above for each launch, after doing to the run the one thing the case is about.
+# ---------------------------------------------------------------------------------------------
+runner_tmp=$(mktemp -d)
+trap 'rm -rf -- "$runner_tmp"' EXIT
+web_template=$(printf '%s' "$web_round" | jq -c 'del(.candidate_commit, .prepared_commit, .measurement_control, .cpu_affinity)')
+runner_git() { git -C "$1" -c user.name=runner-test -c user.email=runner-test@invalid "${@:2}" >/dev/null 2>&1; }
+# A repository carrying the runner and its validators, committed, and a prepared work directory
+# whose provenance names that commit.
+runner_fixture() {
+    local case_dir="$runner_tmp/$1" repo work
+    repo="$case_dir/repo"
+    work="$case_dir/work"
+    mkdir -p "$repo/scripts" "$work"
+    cp -- "$scripts_dir/run-web-mixing-automation-benchmark.sh" "$scripts_dir/check-bench-preconditions.sh" \
+        "$scripts_dir/web-mixing-automation-lib.jq" "$scripts_dir/web-mixing-automation-validator.jq" \
+        "$scripts_dir/console-benchmark-record-lib.jq" "$repo/scripts/"
+    printf '%s\n' "$web_template" >"$repo/round.json"
+    printf 'tracked\n' >"$repo/tracked.txt"
+    cat >"$repo/scripts/web-mixing-automation-benchmark.mjs" <<'STUB'
+// Stub harness: prints the template round, after the one disturbance its case names.
+import { appendFileSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+const repo = new URL("../", import.meta.url).pathname;
+const [, , mode, module, controls, round] = process.argv;
+const plan = JSON.parse(readFileSync(`${repo}case.json`, "utf8"));
+appendFileSync(`${repo}launches`, `${round}\n`);
+const record = JSON.parse(readFileSync(`${repo}round.json`, "utf8"));
+record.round = round === "warmup" ? 0 : Number(round);
+if (round === "2") {
+  const git = (...args) => execFileSync("git", ["-C", repo, "-c", "user.name=stub", "-c", "user.email=stub@invalid", ...args]);
+  if (plan.disturb === "disagree") record.automated_output_sha256 = "c".repeat(64);
+  if (plan.disturb === "race") {
+    mkdirSync(`${repo}artifacts/steps/${plan.step}`, { recursive: true });
+    writeFileSync(`${repo}artifacts/steps/${plan.step}/web-mixing-automation.jsonl`, "concurrent\n");
+  }
+  if (plan.disturb === "head") git("commit", "--allow-empty", "-q", "-m", "moved");
+  if (plan.disturb === "tracked") appendFileSync(`${repo}tracked.txt`, "edited\n");
+  if (plan.disturb === "module") appendFileSync(module, "x");
+  if (plan.disturb === "provenance") {
+    const provenance = `${module.slice(0, module.lastIndexOf("/"))}/provenance.json`;
+    writeFileSync(provenance, readFileSync(provenance, "utf8").replace(/"module_sha256": "[0-9a-f]{64}"/, `"module_sha256": "${"0".repeat(64)}"`));
+  }
+}
+if (mode !== "run") process.exit(2);
+process.stdout.write(`${JSON.stringify(record)}\n`);
+STUB
+    runner_git "$repo" init -q
+    runner_git "$repo" add -A
+    runner_git "$repo" commit -q -m fixture
+    printf 'module bytes\n' >"$work/host_web.wasm"
+    printf '{"controls":[]}\n' >"$work/controls.json"
+    jq -n --arg commit "$(git -C "$repo" rev-parse HEAD)" \
+        --arg module "$(sha256sum "$work/host_web.wasm" | awk '{print $1}')" \
+        --arg controls "$(sha256sum "$work/controls.json" | awk '{print $1}')" \
+        '{commit: $commit, module_sha256: $module, controls_sha256: $controls}' >"$work/provenance.json"
+    jq -n --arg disturb "$2" --arg step "$1" '{disturb: $disturb, step: $step}' >"$repo/case.json"
+    printf '%s' "$case_dir"
+}
+# Runs the fixture's runner; its combined output goes to `$case_dir/output`, its status is returned.
+runner_run() {
+    local case_dir=$1
+    MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1 bash "$case_dir/repo/scripts/run-web-mixing-automation-benchmark.sh" \
+        run "$case_dir/work" --step "$(basename "$case_dir")" >"$case_dir/output" 2>&1
+}
+runner_expect() {
+    if ! eval "$2"; then printf 'expected runner behaviour: %s\n' "$1" >&2; failures=$((failures + 1)); fi
+}
+lines() { if [[ -f "$1" ]]; then wc -l <"$1"; else printf 0; fi; }
+
+# The control: undisturbed, the runner writes the two measured records and nothing else.
+case_dir=$(runner_fixture valid none)
+artifacts="$case_dir/repo/artifacts/steps/valid"
+runner_run "$case_dir" && status=0 || status=$?
+runner_expect 'an undisturbed run succeeds' '[[ $status == 0 ]]'
+runner_expect 'an undisturbed run launches warmup, 1 and 2' '[[ "$(tr "\n" " " <"$case_dir/repo/launches")" == "warmup 1 2 " ]]'
+runner_expect 'an undisturbed run writes two records' '[[ $(lines "$artifacts/web-mixing-automation.jsonl") == 2 ]]'
+runner_expect 'an undisturbed run keeps no refused records' '[[ ! -e "$artifacts/web-mixing-automation.refused.jsonl" ]]'
+
+# Finding 1: a refusal after the rounds keeps what was measured, and says why.
+case_dir=$(runner_fixture disagree disagree)
+artifacts="$case_dir/repo/artifacts/steps/disagree"
+runner_run "$case_dir" && status=0 || status=$?
+runner_expect 'rounds that disagree are refused' '[[ $status != 0 ]]'
+runner_expect 'refused rounds publish no record' '[[ ! -e "$artifacts/web-mixing-automation.jsonl" ]]'
+runner_expect 'refused rounds are kept' '[[ $(lines "$artifacts/web-mixing-automation.refused.jsonl") == 2 ]]'
+runner_expect 'a refusal names the disagreeing field' 'grep -q "the rounds disagree on automated_output_sha256" "$case_dir/output"'
+runner_expect 'a refusal is logged' 'grep -q "the rounds disagree on automated_output_sha256" "$artifacts/web-mixing-automation.stderr.log"'
+
+# Finding 2: no artifact is overwritten. An existing one is refused before anything is launched,
+# and one that appears while the rounds run is refused at the write and left as it was.
+for existing in web-mixing-automation.jsonl web-mixing-automation.refused.jsonl web-mixing-automation.stderr.log; do
+    case_dir=$(runner_fixture "existing-${existing//./-}" none)
+    artifacts="$case_dir/repo/artifacts/steps/existing-${existing//./-}"
+    mkdir -p "$artifacts"
+    printf 'earlier\n' >"$artifacts/$existing"
+    runner_run "$case_dir" && status=0 || status=$?
+    runner_expect "an existing $existing is refused" '[[ $status != 0 ]]'
+    runner_expect "an existing $existing is refused before any launch" '[[ ! -e "$case_dir/repo/launches" ]]'
+    runner_expect "an existing $existing is left as it was" '[[ "$(cat "$artifacts/$existing")" == earlier ]]'
+done
+case_dir=$(runner_fixture race race)
+artifacts="$case_dir/repo/artifacts/steps/race"
+runner_run "$case_dir" && status=0 || status=$?
+runner_expect 'a record that appears during the rounds is refused' '[[ $status != 0 ]]'
+runner_expect 'a record that appears during the rounds is not overwritten' '[[ "$(cat "$artifacts/web-mixing-automation.jsonl")" == concurrent ]]'
+runner_expect 'the rounds of a raced run are kept' '[[ $(lines "$artifacts/web-mixing-automation.refused.jsonl") == 2 ]]'
+
+# Finding 3: the provenance is checked again after the rounds, before the record is written.
+for disturb in head tracked module provenance; do
+    case_dir=$(runner_fixture "moved-$disturb" "$disturb")
+    artifacts="$case_dir/repo/artifacts/steps/moved-$disturb"
+    runner_run "$case_dir" && status=0 || status=$?
+    runner_expect "a run whose $disturb changed during the rounds is refused" '[[ $status != 0 ]]'
+    runner_expect "a run whose $disturb changed during the rounds publishes no record" '[[ ! -e "$artifacts/web-mixing-automation.jsonl" ]]'
+    runner_expect "a run whose $disturb changed during the rounds keeps them" '[[ $(lines "$artifacts/web-mixing-automation.refused.jsonl") == 2 ]]'
+done
+rm -rf -- "$runner_tmp"
+trap - EXIT
+
 if [[ "$failures" != 0 ]]; then
     printf 'console benchmark validator suite: %s FAILED case(s)\n' "$failures" >&2
     exit 1
 fi
-printf 'console benchmark validators: PASS (real runner/workload/timing invocations: 0/0/0)\n'
+printf 'console benchmark validators: PASS (real runner/workload/timing invocations: 0/0/0; browser runner on a stub harness, untimed)\n'

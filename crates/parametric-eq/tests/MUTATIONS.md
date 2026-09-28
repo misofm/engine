@@ -207,3 +207,221 @@ worth stating: both are read only to choose a *schedule* — the interleaved cas
 per-section one, and the elided cascade over the full one — and this crate's own gates prove all
 three schedules render the same bits. A stale copy of either leaves the two channels taking
 different schedules to the same words, which is the invariant the whole-state rule protects.
+
+## Issue #976 — no identity padding in the stationary cascade
+
+Driver: one mutation at a time applied to `src/lib.rs`, then
+`cargo test --release -p parametric-eq --features test-support --lib --test bank --no-fail-fast`,
+tree restored between rows. Host: AMD EPYC 7313P (Zen 3), `rustc 1.97.1`, `x86-64-v3`, release
+profile (fat LTO). Gate 1 is `odd_live_counts_render_the_base_bits` (`tests/bank.rs`); its counter
+assertion needs `--features test-support`, because a `cfg(test)` counter in `lib.rs` is not compiled
+for an integration test. The in-crate rows are in `src/lib.rs`'s `elision` module.
+
+| # | mutation | gate that goes red | result |
+|---|---|---|---|
+| 976-M1 | `cascade_sections` (dual only) rounds the live count up again: `kept = live.div_ceil(2) * 2` with the old padding loop | `an_elided_cascade_is_the_full_cascade_bit_for_bit` (dual `kept == live`, first at live `000001`: `[2, 2, 2]` against `[1, 1, 1]`), `the_two_channels_are_judged_together`, `the_shipped_shape_actually_elides`, `a_section_live_on_one_lane_is_not_elided`, `a_negative_zero_input_refuses_elision`, `a_non_finite_or_oversized_input_refuses_elision`, `an_odd_tail_without_dry_lanes_skips_the_select`; gate 1's counter (scalar leg) | RED |
+| 976-M1m | the same in `cascade_sections_mono` only | `an_elided_cascade_is_the_full_cascade_bit_for_bit` (mono `kept == live`), `an_odd_tail_without_dry_lanes_skips_the_select` (mono count 1, want 2); gate 1's counter (bank-mono leg) | RED |
+| 976-M2 | `interleave` runs the depth-one tail before the pairs | gate 1 digests: scalar `757d054f…`, bank `5d2fa266…` against the pinned base; `an_elided_cascade_is_the_full_cascade_bit_for_bit`, `the_two_channels_are_judged_together` (bits) | RED |
+| 976-M2m | the same in `interleave_mono` | gate 1 bank-mono digest `7760302e…` against the pinned base; `an_elided_cascade_is_the_full_cascade_bit_for_bit` (mono bits) | RED |
+| 976-M3 | `interleave` always takes the masked depth-one arm (`if true \|\| …`) | gate 1's counter (scalar leg first: HPF-everywhere ran 0 select-free tails); `an_odd_tail_without_dry_lanes_skips_the_select` | RED |
+| 976-M3m | the same in `interleave_mono` | gate 1's counter (bank-mono leg); `an_odd_tail_without_dry_lanes_skips_the_select` (mono) | RED |
+
+M1 and M3 move no rendered bit, and that is expected rather than a gap: the padding section is an
+exact identity (the elision proof covers dropping it), and a select whose mask is empty returns the
+wet word. Gate 1's three digests therefore stay at their pins under both (measured in release),
+and without `test-support` gate 1 is green for them. They are caught by the two counts that describe the
+schedule rather than the audio -- `kept == live` and the select-free tail counter -- which is why
+both exist. M2 is caught only by a shape with a pair ahead of the tail: one live section has no
+pairs, so the three- and five-section shapes carry that row.
+
+## Issue #980 — the elision gate in its min/max form
+
+Driver: one mutation at a time applied to `block_admits_elision` in `src/lib.rs`, then
+`cargo test --release -p parametric-eq --lib elision -- --include-ignored`, tree restored byte for
+byte between rows. Gate 1 is `the_min_max_gate_equals_the_rejection_oracle` (every ordered pair of
+the sixteen edge patterns, planted at two positions, block lengths 0, 1, 7, 8, 9 and 1,024, against
+the `#[cfg(test)]` rejection-accumulator oracle `block_admits_elision_oracle`);
+`every_word_gets_the_rejection_oracles_verdict` is the ignored exhaustive run over all `2^32` words.
+
+| # | mutation | gate that goes red | result |
+|---|---|---|---|
+| 980-M1 | `nearest.min(bits)` (the `^ NEGATIVE_ZERO_BITS` dropped) | gate 1 first at length 1, word `0x00000000`: `+0.0` refused (`false`, oracle `true`); the exhaustive run (word `0x00000000`); also `a_negative_zero_input_refuses_elision`, `the_negative_zero_refusal_is_load_bearing`, `an_elided_cascade_is_the_full_cascade_bit_for_bit` | RED |
+| 980-M2 | `largest < ELISION_MAGNITUDE_CEILING` | gate 1 first at length 1, word `0x7149f2ca` (the ceiling itself, `1e30`): refused, oracle admits; the exhaustive run (`0xf149f2ca`) | RED |
+| 980-M3 | `largest.max(bits)` (the `& MAGNITUDE_MASK` dropped) | gate 1 first at length 1, word `0x80000001` (a negative subnormal): refused, oracle admits; the exhaustive run; and eight other `elision` tests, because every negative sample now refuses | RED |
+
+M2 is invisible to every test that predates the gate: the ceiling is `BLOCK_LIMIT` itself, and no
+earlier fixture places a word of exactly `1e30`. Only the edge set (and the exhaustive run) does.
+
+## Issue #977 — every depth-two pass of an admitted plan runs select-free
+
+Driver: one mutation at a time applied to `src/lib.rs`, then
+`cargo test --release -p parametric-eq --features test-support --lib --test bank --no-fail-fast`,
+tree restored byte for byte between rows. Gate 1 is `admitted_blocks_render_the_base_bits_without_selects`
+(`tests/bank.rs`; digests pinned on the unmodified base: scalar `9316456b…`, bank `d4a1dc9d…`,
+bank-mono `f442a0d3…`). Gate 2 is its masked depth-two pass counter (`test_only_masked_pair_passes`,
+so `--features test-support`): zero on the admitted stationary blocks and non-zero on the refused
+ones of the two switching shapes. The in-crate rows are
+`elision::an_admitted_plan_runs_every_pair_select_free` (which also pins the tail's #976 rule
+through the select-free tail counter) and `elision::a_non_finite_state_in_a_live_section_refuses_elision`.
+Rows re-run for attempt 2 (the tail keeps #976's rule; see the issue's attempt 2 evidence).
+
+| # | mutation | gate that goes red | result |
+|---|---|---|---|
+| 977-M1 | `interleave`: `admitted = true` | gate 1 scalar `cbbb3c83…` and bank `5f519f25…` (the poisoned dry lane's `NaN` state reaches the output on its refused blocks and the plane faults); gate 2 (refused blocks ran 0 masked pairs); in-crate (a refused block ran 0) | RED |
+| 977-M1m | `interleave_mono`: `admitted = true` | gate 1 bank-mono `ded71138…`; gate 2 (mono refused 0); in-crate; and `interleave_identity::disabled_cuts_preserve_all_high_pass_signed_zero_against_four_section_oracle` (`+0.0` where the oracle keeps `-0.0`) | RED |
+| 977-M2 | `interleave`: `admitted = false` | gate 2 (scalar DryHpfInPair: 228 masked pairs on admitted blocks); in-crate (2 masked pairs on an admitted block); no digest moves | RED |
+| 977-M2m | `interleave_mono`: `admitted = false` | gate 2 (bank-mono: 26); in-crate (mono); no digest moves | RED |
+| 977-M3 | `interleave`: the tail made select-free on admitted blocks too (`if !admitted && (…dry…)`), attempt 1's rule | in-crate: `Simd4 hpf 00000000 lpf 01100110: the tail keeps #976's rule` (1 select-free tail, want 0); no digest moves | RED |
+| 977-M3m | the same in `interleave_mono` | in-crate: `the mono tail keeps #976's rule` | RED |
+| 977-M4 | leg (c) without the finiteness term (`-0.0` only, as briefed before the amendment) | gate 1 scalar `f14e7956…` and bank `c79e11df…`; `a_non_finite_state_in_a_live_section_refuses_elision` | RED |
+
+M2, M2m, M3 and M3m move no rendered bit: a select whose every lane returns the wet word is
+invisible, so the counters are their only gates. M3 is attempt 1's tail rule: exact, and in the
+shipped `simd128` artifact the change that let V8 keep an integrator of the one-band tail loop in a
+stack slot, so its gate is the counter that pins the rule rather than a bit. (Attempt 1's M3 row,
+"the tail skips its `admitted` arm", has no subject in attempt 2: the tail has no such arm.) M1 and
+M4 are the correctness rows. The brief expected M1 to show as a `-0.0` rendered `+0.0` on a dry lane
+of a refused block; in gate 1 that `-0.0` is rewritten to `+0.0` downstream by the dead general
+bands a refused block executes, so M1 shows instead through the poisoned dry lane (and, in mono,
+through the older all-high-pass signed-zero oracle, whose general bands are all live). In mono the
+poisoned HPF is a dead section, refused by leg (b), so M4 moves only the dual legs.
+
+## Issue #979 — an identity section with a frozen, inert state stays elidable
+
+Driver: one mutation at a time applied to `lane_is_inert` in `src/lib.rs`, then
+`cargo test --release -p parametric-eq --features test-support --lib --test bank --no-fail-fast`,
+tree restored byte for byte between rows. Gate 1 is `a_cut_switched_off_keeps_the_bank_eliding`
+(`tests/bank.rs`; pinned on the unmodified base: scalar `a34ce034…`, bank `2e0845c6…`, bank-mono
+`26a755c1…`, and the restored-overflow leg faults its first block once per leg). Gate 2 is
+`elision::a_band_switched_off_keeps_the_bank_eliding`, gate 3
+`elision::a_non_inert_state_in_a_dead_section_refuses_elision` (formerly
+`a_non_zero_state_in_a_dead_section_refuses_elision`). Re-run after the rebase onto #977's attempt 2,
+on the branch-free body (`offset = magnitude.wrapping_sub(FLOOR)`, `inert &= (word == 0) | (offset
+<= CEILING - FLOOR)`), which agrees with the range form on all `2^32` words: the same rows go red
+with the same messages and digests.
+
+| # | mutation | gate that goes red | result |
+|---|---|---|---|
+| 979-M1 | back to the exact `+0.0` test (`*word == 0` only) | gate 2: `Scalar section 3: 0 of 9 later blocks elide` (the shipped rule's cliff); gate 3: `1.0` refused | RED |
+| 979-M2 | accept magnitudes below `FLUSH_EPS` (the floor set to `1`) | gate 3: `1e-30` elided, integrators differ (the executed section flushes it to `+0.0`); also `a_tiny_restored_disabled_cut_state_refuses_elision_but_preserves_old_bands` and `the_interleaved_cascade_renders_the_per_section_path_bit_for_bit` (seeded subnormal states) | RED |
+| 979-M3 | accept `-0.0` (`word & MAGNITUDE_MASK == 0` for the zero term) | gate 3: `-0.0` elided, integrators differ (the executed section flushes it to `+0.0`) | RED |
+| 979-M4 | accept above the cap (`[FLOOR, 0x7f80_0000)`, the rule as briefed before the amendment) | gate 3: the word above the ceiling (`1.0000001e30`) admitted; gate 1: scalar `c060ba98…`, bank `b0063058…`, bank-mono `7698bb8b…`, and the restored-overflow leg reports no fault (the band restored with `ic2 = -f32::MAX` is elided and the block renders audio) | RED |
+
+Gate 2 is green under M2, M3 and M4 (a switched-off band's frozen state is always inert), and gate 1
+under M1-M3 (the fixtures never restore a sub-`FLUSH_EPS` or `-0.0` word); each row is caught by the
+gate built for it. On the unmodified base gate 2 reports 0 of 9 at every width and section, in dev
+and release; after the change, 9 of 9.
+
+## Issue #999 — the §4.4 verdict folded into the depth-one pass
+
+`interleave` and `interleave_mono` run the depth-one tail through the bounded twins of its kernels
+and return its per-channel verdict; `render` and `render_mono` use it instead of `check_block`, and
+every other block (ramped, refused, all-live, an even live count, nothing live) still scans. Gate 1
+is `boundary_fold::the_folded_verdict_is_the_boundary_scan` (in-crate: the verdict equals
+`check_block` of the rendered planes on every folded block, and only an admitted odd list folds, at
+`f32`, `Simd4` and `Simd8`, dual and mono). Gate 2 is
+`admitted_blocks_over_the_block_limit_render_the_base_bits` (`tests/bank.rs`; pinned on the
+unmodified base `fc43c97d`: scalar `69929ee0…`, bank `033bb41c…`, bank-mono `0da773b7…`, identical in
+dev and release), beside the #976-#979 scenarios. Driver: one mutation at a time as an exact-text
+replacement in a scratch copy of the change, then, release,
+`cargo test -p lane --test g2_kernel_identity g2_bounded`, `cargo test -p parametric-eq --lib
+boundary_fold` and `cargo test -p parametric-eq --test bank`, restored between rows. Host AMD EPYC
+7313P, rustc 1.97.1, `x86-64-v3`.
+
+| # | mutation | gate that goes red | result |
+|---|---|---|---|
+| 999-M1 | `lane`: the fold ignores the second stream | lane gate; gate 1 `Scalar live 000001 pair 0 variant 2 frames 16 dual: kept 1: the folded verdict is not the scan` (`[true, true]` against `[true, false]`); gate 2 non-vacuity (no right-only fault), digests scalar `914a4db8…`, bank `e301d357…` | RED |
+| 999-M2 | `lane`: the fold compares with `<=` | lane gate; gate 1 `Scalar live 000001 pair 0 variant 0 frames 1 dual: kept 1` (`[true, true]` against `[false, true]`) | RED |
+| 999-M3 | `interleave`: a refused or all-live block (the masked pairs) takes a verdict of `[true, true]` | gate 1 `Scalar live 000000 pair 0 variant 0 frames 1 poisoned -0 dual: kept 6, stationary true: only an admitted list ending in the depth-one pass folds the verdict`; gate 2 scalar `8cde7a90…`, bank `c81dfdae…`; and the #976 (`956e94ab…`), #977, #978 (`17748e17…`) and #979 (`e47ca081…`) scenarios | RED |
+| 999-M3m | the same in `interleave_mono` (`Some(true)`) | gate 1 `Simd4 live 111111 pair 0 variant 0 frames 1 mono: kept 6`; the bank-mono leg of all five scenarios (gate 2 `7ba20ee8…`) | RED |
+| 999-M4 | `interleave`: a plan with no live section takes a verdict of `[true, true]` | gate 1 `Scalar live 000000 pair 0 variant 0 frames 1 dual: kept 0`; gate 2 scalar `99dc6ad1…`, bank `edf60b47…` (the nothing-live shape's `1e30` words are no longer zeroed) | RED |
+| 999-M5 | `interleave`: the dry-lane tail judges against `f32::INFINITY` instead of `BLOCK_LIMIT` | gate 1 `Scalar live 000001 pair 0 variant 0 frames 1 dual: kept 1` (`[true, true]` against `[false, true]`); gate 2 non-vacuity (the dry-LPF shape faults no plane alone), digests scalar `2f36e7b8…`, bank `bd32c51c…` | RED |
+
+M1-M3 are the brief's three rows; M3m, M4 and M5 are added. M2 moves no public-API digest: no
+scenario stores a word exactly at `1e30` on a folded block (the nothing-live shape's `1e30` words are
+scanned, not folded), so gate 1's scale sections are its gate. The lane gate is green under M3-M5,
+which are EQ-side rows.
+
+Re-run on attempt 2 (the verdict folded into a per-stream `bool`, merged onto the batch head
+`07e0f45f`), each alone in a scratch copy, release: M1-M5 and M3m red on the same gates and first
+messages as above (M1: lane gate, gate 1, gate 2 non-vacuity; M2: lane gate and gate 1; M3/M3m:
+gate 1 and all five pinned scenarios; M4: gate 1 and gate 2; M5: gate 1 and gate 2 non-vacuity).
+
+## Issue #1005 — a ramping block runs only live or ramping sections
+
+Driver: one mutation at a time applied to `ramping_sections`, `ramping_sections_mono` or
+`ramp_keeps_unit_m0` in `src/lib.rs`, then `cargo test -p parametric-eq --lib ramping_elision`
+(dev: 40 scenarios × 96 blocks per width and body), tree restored byte for byte between rows. M3,
+M5-dual and M7 were re-run in release (300 scenarios). Gate 1 is the bank differential
+`ramping_elision::a_ramping_block_renders_the_batch_head_bits_{scalar,simd4,simd8}` (dual and
+collapsed; the oracle arm renders ramping blocks through `Channel::process_block`, the batch-head
+path and the unit-test default of the `RAMPING_LIST` switch, which only the candidate arm sets).
+Gate 2 is the list itself,
+`ramping_elision::the_unsafe_ramp_rule_keeps_every_dead_section_after_it` and
+`ramping_elision::a_ramping_identity_section_is_never_dead`, at `f32`, `Simd4` and `Simd8`. Gate
+2b is `ramping_elision::a_restored_subnormal_live_state_refuses_the_list`: a live high shelf at
+`m0 = m2 = 0.5` holding restored integrators of `-2^-149`, behind a ramping HPF toggle, rendered
+through the list and through the batch-head path.
+
+| # | mutation | gate that goes red | result |
+|---|---|---|---|
+| 1005-M1 | leg (a) dropped from both lists (`if false`) | gate 1 at every width (`W8 seed 2 block 10 mono false: left output`, W4 seed 2, W1 seed 23); gate 2 (`a -0.0 input refuses`) | RED |
+| 1005-M1d | leg (a) dropped from the dual list only | the same as M1 | RED |
+| 1005-M1m | leg (a) dropped from the collapsed list only | gate 1 collapsed at every width (`W1 seed 4294967305 block 47 mono true: left output`); gate 2 | RED |
+| 1005-M2 | both lists: `dead` without the "not ramping" term (a ramping identity section treated as dead) | gate 1 at every width (`W8 seed 0 block 13: state`, `W1 …: right output`, `W4 …: report`); gate 2 (`LPF toggle`, `the left ramp keeps the HPF`) | RED |
+| 1005-M3 | the unsafe-ramp rule dropped (`unsafe_before` never set) | gate 2 only (`ramping high shelf: the dual list`); gate 1 stays green in dev and in release | RED |
+| 1005-M4 | the collapsed list's `dead` without the "not ramping" term | gate 1 collapsed at every width (`W1 seed 4294967296 block 15 mono true: state`); gate 2 (`the ramp keeps the HPF (collapsed)`, `LPF toggle: the collapsed list`) | RED |
+| 1005-M5 | leg (b) skipped for dead sections in both lists | gate 1 at every width (`… : state`: the executed dead section flushes a restored `-0.0` or sub-`FLUSH_EPS` integrator, the elided one keeps it); gate 2 (`a -0.0 dead state refuses`) | RED |
+| 1005-M5d | leg (b) skipped in the dual list only | gate 2; gate 1 at W8 in dev (`W8 seed 26 block 26 mono false: state`), and at every width in release | RED |
+| 1005-M5m | leg (b) skipped in the collapsed list only | gate 1 collapsed at every width; gate 2 | RED |
+| 1005-M6 | the dual list's `dead` without the "not ramping" term | as M2, dual rows | RED |
+| 1005-M7 | `ramp_keeps_unit_m0` checks `coef.m0` only, not `step.m0` | gate 2 only (`identity to high shelf: the dual list`); gate 1 stays green in dev and in release | RED |
+| 1005-M8 | leg (c) back to the stationary gate's form (`section_state_is_finite_without_negative_zero`) in both lists | gate 2b only: `Scalar mono false: the list moved a bit behind a restored subnormal` (the elided dead band passes `-0.0`, the executed one writes `+0.0`) | RED |
+| 1005-M8d | the same, dual list only | gate 2b (`mono false`) | RED |
+| 1005-M8m | the same, collapsed list only | gate 2b (`mono true`) | RED |
+
+M3 and M7 are the rows the random differential cannot see, as the automation diagnosis found for M3:
+dropping a dead section after an unsafe ramp is wrong only when that ramp emits `-0.0`, which needs a
+constructed underflow the scenarios never produce. Gate 2 exists for them. M7's shape is reachable in
+production -- a high shelf at 0 dB designs `m0 = A^2 = 1` exactly, and a ride away from 0 dB moves it
+-- and gate 2 asserts that shape as well as the identity-to-shelf ramp. M8 is the same kind of row:
+its counterexample is one `f32` gain and a restored payload, which no random draw reaches.
+
+## Issue #1007 — lanes written with a `select`, ended lanes snapped by mask
+
+Driver: one mutation at a time applied to `src/lib.rs`, then `cargo test -p parametric-eq --lib`
+(dev), tree restored byte for byte between rows. Gate 1 is the bank differential against the #1005
+kernel, `ramping_elision::select_lane_writes_render_the_1005_bits_{scalar,simd4,simd8}` (the list
+on both arms; the oracle writes lanes with `lane_set` and snaps one lane at a time, the unit-test
+`LANE_SET_WRITES` switch), and the same against the batch-head ramping path,
+`select_lane_writes_alone_render_the_lane_set_bits_*`. Gate 1b is
+`ramping_elision::select_lane_writes_match_lane_set_word_for_word`: `settle`, `start_ramp`, the
+hoist and segment snaps on every lane including the last, with `+0.0`, `-0.0`, subnormals and
+`+-f32::MAX`, plus a `Both` target on the first and last lanes, compared word by word.
+
+| # | mutation | gate that goes red | result |
+|---|---|---|---|
+| 1007-M1 | one-hot row off by one lane (`rows[lane][(lane + 1) % MAX_LANES]`) | 21 unit tests, gates 1 and 1b among them (`W1 seed 0 …: state`; preparation's `settle` writes the wrong lane, so most EQ unit tests fail) | RED |
+| 1007-M2 | the snap mask built from `was_ramping` alone, without `remaining == 0` | gate 1b (`Scalar lane 0 step 3: a word moved`); gate 1 at Simd4 and Simd8 | RED |
+| 1007-M3 | the snap's increment set to the target instead of `+0.0` | gate 1 at every width, both forms (`W1 seed 0 block 0: state`); gate 1b (`step 5`) | RED |
+| 1007-M4 | `settle` without the target word | gate 1 at every width, both forms (`… block 0: state`); gate 1b (`step 0`) | RED |
+
+## Issue #1015 — the stationary leg (c) refuses a restored subnormal
+
+Driver: the old leg (c) (finite, not `-0.0`) put back into `cascade_sections`, `cascade_sections_mono`
+or both, then `cargo test -p parametric-eq --lib`, dev and release, tree restored byte for byte
+between rows. The gate is `stationary_subnormal`: one live high shelf at `m0 = m2 = 0.5` holding
+restored `ic1 = ic2 = -2^-149`, fed `-2^-149`, every other section dead, rendered by the stationary
+cascade against the full per-section cascade (channel level) and through a contract restore and
+`process_bank` / `process_bank_mono` (contract level), at `f32`, `Simd4` and `Simd8`. On the
+unmodified batch head both tests fail at every width, dual and collapsed, with the stationary
+cascade rendering `80000000` where the full one renders `00000000`.
+
+| # | mutation | gate that goes red | result |
+|---|---|---|---|
+| 1015-M1 | both stationary lists back to the old leg (c) | both `stationary_subnormal` tests at every width, dual and collapsed (`… rendered 80000000 where the full cascade rendered 00000000`), dev and release | RED |
+| 1015-M1d | the dual list only | both tests, `mono false` rows only | RED |
+| 1015-M1m | the collapsed list only | both tests, `mono true` rows only | RED |
+| 1015-B1 | follow-up: `>` instead of `>=` on `FLUSH_EPS` in `lane_is_flush_shaped` (the range starts one word above the floor) | `leg_c_refuses_below_flush_eps_admits_it_and_re_engages` (`live integrator 0 holding 1e-20 …: block 0 must elide`), dev and release | RED |
+| 1015-B2 | follow-up: the old leg (c) in both stationary lists | the boundary test (`holding 1e-30 …: block 0 must refuse`) and both reproduction tests, dev and release | RED |
+| 1015-B3 | follow-up: refuse subnormals only (the range starts at the smallest normal) | the boundary test (`holding 1e-30 …: block 0 must refuse`), dev and release | RED |

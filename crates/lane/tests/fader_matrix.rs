@@ -3,7 +3,8 @@
 use lane::{
     CanonicalFpEnv, Lane, Simd4, Simd8,
     kernels::builtins::{
-        Matrix2x2Coef, fader_matrix_block, gain_mute_block, mask_from_flags, matrix2x2_block,
+        Matrix2x2Coef, fader_matrix_block, fader_matrix_block_without_identity, gain_mute_block,
+        mask_from_flags, matrix2x2_block, matrix2x2_block_without_identity, no_lanes,
     },
 };
 
@@ -13,8 +14,9 @@ fn bits(values: &[f32]) -> Vec<u32> {
     values.iter().map(|value| value.to_bits()).collect()
 }
 
-fn compare_case<L: Lane>(frames: usize, identity: [f32; WIDTH], family: usize) {
-    let samples = frames * L::WIDTH;
+/// The four hostile input families: finite, signed zero, subnormal, and non-finite with a NaN
+/// payload.
+fn family_source(family: usize) -> [f32; WIDTH] {
     let finite = [-3.5, 2.25, -0.0, 0.0, 1.0, -1.0, 0.375, -0.625];
     let signed_zero = [-0.0, 0.0, -0.0, 0.0, -0.0, 0.0, -0.0, 0.0];
     let subnormal = [
@@ -37,13 +39,35 @@ fn compare_case<L: Lane>(frames: usize, identity: [f32; WIDTH], family: usize) {
         -0.0,
         f32::from_bits(0x7fc0_1234),
     ];
-    let source = [finite, signed_zero, subnormal, nonfinite][family];
+    [finite, signed_zero, subnormal, nonfinite][family]
+}
+
+/// Both planes of `samples` words from one family, with one guard word at each end.
+fn hostile_planes(samples: usize, family: usize) -> (Vec<f32>, Vec<f32>) {
+    let source = family_source(family);
     let mut left = vec![f32::from_bits(0x42f6_e979); samples + 2];
     let mut right = vec![f32::from_bits(0xc2f6_e979); samples + 2];
     for index in 0..samples {
         left[index + 1] = source[index % WIDTH];
         right[index + 1] = source[(index * 3 + 1) % WIDTH];
     }
+    (left, right)
+}
+
+/// Signed, asymmetric per-lane coefficients (`lr != rl` on every lane that is not zero in both).
+fn hostile_matrix<L: Lane>(identity: [f32; WIDTH]) -> Matrix2x2Coef<L> {
+    Matrix2x2Coef {
+        ll: L::load(&[0.75, 1.0, -0.5, 0.25, 1.0, -0.75, 0.5, 1.0][..L::WIDTH]),
+        lr: L::load(&[-0.25, 0.0, 0.75, -0.5, 0.0, 0.125, -1.0, 0.0][..L::WIDTH]),
+        rl: L::load(&[0.5, 0.0, -0.25, 1.0, 0.0, 0.625, 0.25, 0.0][..L::WIDTH]),
+        rr: L::load(&[0.25, 1.0, 1.0, -0.75, 1.0, 0.5, 0.875, 1.0][..L::WIDTH]),
+        identity: mask_from_flags::<L>(&identity[..L::WIDTH]),
+    }
+}
+
+fn compare_case<L: Lane>(frames: usize, identity: [f32; WIDTH], family: usize) {
+    let samples = frames * L::WIDTH;
+    let (mut left, mut right) = hostile_planes(samples, family);
     let mut old_left = left.clone();
     let mut old_right = right.clone();
     let gains_l = [1.25, 0.75, 1.0, 0.5, 1.1, 0.9, 0.8, 1.2];
@@ -54,13 +78,7 @@ fn compare_case<L: Lane>(frames: usize, identity: [f32; WIDTH], family: usize) {
     let gain_right = L::load(&gains_r[..L::WIDTH]);
     let ml = mask_from_flags::<L>(&mute_l[..L::WIDTH]);
     let mr = mask_from_flags::<L>(&mute_r[..L::WIDTH]);
-    let matrix = Matrix2x2Coef {
-        ll: L::load(&[0.75, 1.0, -0.5, 0.25, 1.0, -0.75, 0.5, 1.0][..L::WIDTH]),
-        lr: L::load(&[-0.25, 0.0, 0.75, -0.5, 0.0, 0.125, -1.0, 0.0][..L::WIDTH]),
-        rl: L::load(&[0.5, 0.0, -0.25, 1.0, 0.0, 0.625, 0.25, 0.0][..L::WIDTH]),
-        rr: L::load(&[0.25, 1.0, 1.0, -0.75, 1.0, 0.5, 0.875, 1.0][..L::WIDTH]),
-        identity: mask_from_flags::<L>(&identity[..L::WIDTH]),
-    };
+    let matrix = hostile_matrix::<L>(identity);
     gain_mute_block(&mut old_left[1..=samples], frames, gain_left, ml);
     gain_mute_block(&mut old_right[1..=samples], frames, gain_right, mr);
     matrix2x2_block(
@@ -109,6 +127,312 @@ fn settled_fader_matrix_matches_the_two_primitive_oracle() {
     compare_width::<f32>();
     compare_width::<Simd4>();
     compare_width::<Simd8>();
+}
+
+/// Class A as issue #944 states it: equal bits, except that a NaN word only has to stay a NaN.
+///
+/// The release build CI runs commutes the commutative `fadd` differently in the two kernels
+/// (`rr * r + rl * l` against `rl * l + rr * r`), and x86 keeps the first operand's payload when both
+/// are NaN. Every other word, signed zeros and subnormals included, must match bit for bit.
+fn same_word(new: f32, old: f32) -> bool {
+    if new.is_nan() || old.is_nan() {
+        new.is_nan() && old.is_nan()
+    } else {
+        new.to_bits() == old.to_bits()
+    }
+}
+
+/// Runs both settled kernels over one family and returns the first differing word, if any.
+///
+/// `matrix2x2_block` sees `identity`; the select-free kernel sees the same coefficients with no
+/// identity lane, which is its precondition. Guard words at both ends are compared too.
+fn select_free_mismatch<L: Lane>(
+    frames: usize,
+    identity: [f32; WIDTH],
+    family: usize,
+) -> Option<String> {
+    let samples = frames * L::WIDTH;
+    let (mut left, mut right) = hostile_planes(samples, family);
+    let mut old_left = left.clone();
+    let mut old_right = right.clone();
+    let select_form = hostile_matrix::<L>(identity);
+    let select_free = Matrix2x2Coef {
+        identity: no_lanes::<L>(),
+        ..select_form
+    };
+    matrix2x2_block(
+        &mut old_left[1..=samples],
+        &mut old_right[1..=samples],
+        frames,
+        &select_form,
+    );
+    matrix2x2_block_without_identity(
+        &mut left[1..=samples],
+        &mut right[1..=samples],
+        frames,
+        &select_free,
+    );
+    for (plane, new, old) in [("L", &left, &old_left), ("R", &right, &old_right)] {
+        for (index, (new, old)) in new.iter().zip(old.iter()).enumerate() {
+            if !same_word(*new, *old) {
+                return Some(format!(
+                    "{plane}[{index}] new={:08x} old={:08x}",
+                    new.to_bits(),
+                    old.to_bits()
+                ));
+            }
+        }
+    }
+    None
+}
+
+fn select_free_width<L: Lane>() {
+    const FRAMES: [usize; 5] = [1, 3, 8, 9, 128];
+    for frames in FRAMES {
+        for family in 0..4 {
+            if let Some(word) = select_free_mismatch::<L>(frames, [0.0; WIDTH], family) {
+                panic!("width={} frames={frames} family={family}: {word}", L::WIDTH);
+            }
+        }
+    }
+    // Negative control: with identity lanes the two kernels are different functions, which is why
+    // the arm is keyed on the mask. Signed zeros show it: an identity lane passes `-0.0` through,
+    // while `ll * -0.0 + lr * -0.0` is `+0.0`. Asserted over the union of frame counts, because at
+    // `f32` with one frame the mixed mask is "all identity" on an input the arithmetic reproduces.
+    let mixed = [1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0];
+    assert!(
+        FRAMES
+            .iter()
+            .any(|&frames| select_free_mismatch::<L>(frames, mixed, 1).is_some()),
+        "width={}: the select-free kernel must differ from the select form on identity lanes",
+        L::WIDTH
+    );
+}
+
+/// Issue #944 gate 1: with no identity lane, the select-free kernel is `matrix2x2_block`.
+///
+/// Every family, every frame count, every width, guard words included; NaN words compare as "both
+/// NaN" (see [`same_word`]). Runs in dev and in release, which is the build CI tests `lane` in.
+///
+/// Red mutation (issue #944 M3, `crates/lane/tests/MUTATIONS.md`): swap `c.lr` and `c.rl` in
+/// `matrix2x2_block_without_identity`; the finite family differs on the first frame.
+#[test]
+fn select_free_matrix_matches_the_select_form_when_no_lane_is_identity() {
+    let _canonical = CanonicalFpEnv::enter();
+    select_free_width::<f32>();
+    select_free_width::<Simd4>();
+    select_free_width::<Simd8>();
+}
+
+/// The fused gate's input families: the four hostile families, then overflow.
+///
+/// Family 4 is finite, but its words times a gain above one overflow to an infinity, so the
+/// matrix then meets `inf * 0.0` and `inf - inf` and produces NaNs of its own.
+fn fused_family_source(family: usize) -> [f32; WIDTH] {
+    if family < 4 {
+        family_source(family)
+    } else {
+        [
+            f32::MAX,
+            -f32::MAX,
+            3.0e38,
+            -2.5e38,
+            1.0,
+            -0.0,
+            f32::MAX * 0.5,
+            1.0e38,
+        ]
+    }
+}
+
+/// The fused gate's fader gains, `[set][channel][lane]`: mixed, unity and zero, and large (up to
+/// the `+24 dB` ceiling `15.85`, which overflows family 4).
+const FUSED_GAINS: [[[f32; WIDTH]; 2]; 3] = [
+    [
+        [1.25, 0.75, 1.0, 0.5, 1.1, 0.9, 0.8, 1.2],
+        [0.625, 1.5, 0.25, 1.0, 0.7, 1.3, 0.5, 0.875],
+    ],
+    [
+        [1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0],
+        [0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0],
+    ],
+    [
+        [3.98, 15.85, 1.0, 0.0, 3.98, 0.5, 15.85, 2.0],
+        [15.85, 3.98, 0.0, 1.0, 2.0, 15.85, 0.25, 3.98],
+    ],
+];
+
+/// The fused gate's mute flags, `[set][channel][lane]`: none, mixed, and all.
+const FUSED_MUTES: [[[f32; WIDTH]; 2]; 3] = [
+    [[0.0; WIDTH], [0.0; WIDTH]],
+    [
+        [0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0],
+        [1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0],
+    ],
+    [[1.0; WIDTH], [1.0; WIDTH]],
+];
+
+/// Words the select-free fused kernel changed against one oracle over one case.
+#[derive(Default)]
+struct FusedDifferences {
+    /// The first word that fails [`same_word`], if any.
+    first: Option<String>,
+    /// Words that are NaN in both runs with different payloads (allowed by the class statement),
+    /// against oracle A and oracle B.
+    nan_payloads: [usize; 2],
+}
+
+impl FusedDifferences {
+    fn record(&mut self, oracle: usize, planes: [(&str, &[f32], &[f32]); 2]) {
+        for (plane, new, old) in planes {
+            for (index, (new, old)) in new.iter().zip(old.iter()).enumerate() {
+                if !same_word(*new, *old) {
+                    self.first.get_or_insert_with(|| {
+                        format!(
+                            "oracle {} {plane}[{index}] new={:08x} old={:08x}",
+                            ["A", "B"][oracle],
+                            new.to_bits(),
+                            old.to_bits()
+                        )
+                    });
+                } else if new.to_bits() != old.to_bits() {
+                    self.nan_payloads[oracle] += 1;
+                }
+            }
+        }
+    }
+}
+
+/// Runs the select-free fused kernel over one case against both oracles.
+///
+/// Oracle A is [`fader_matrix_block`] over `identity`; oracle B is [`gain_mute_block`] on each
+/// plane followed by [`matrix2x2_block_without_identity`]. The select-free kernel sees the same
+/// coefficients with no identity lane, which is its precondition. Guard words at both ends are
+/// compared too.
+fn fused_select_free_differences<L: Lane>(
+    frames: usize,
+    identity: [f32; WIDTH],
+    family: usize,
+    gains: usize,
+    mutes: usize,
+) -> FusedDifferences {
+    let samples = frames * L::WIDTH;
+    let source = fused_family_source(family);
+    let mut left = vec![f32::from_bits(0x42f6_e979); samples + 2];
+    let mut right = vec![f32::from_bits(0xc2f6_e979); samples + 2];
+    for index in 0..samples {
+        left[index + 1] = source[index % WIDTH];
+        right[index + 1] = source[(index * 3 + 1) % WIDTH];
+    }
+    let gain_left = L::load(&FUSED_GAINS[gains][0][..L::WIDTH]);
+    let gain_right = L::load(&FUSED_GAINS[gains][1][..L::WIDTH]);
+    let mute_left = mask_from_flags::<L>(&FUSED_MUTES[mutes][0][..L::WIDTH]);
+    let mute_right = mask_from_flags::<L>(&FUSED_MUTES[mutes][1][..L::WIDTH]);
+    let select_form = hostile_matrix::<L>(identity);
+    let select_free = Matrix2x2Coef {
+        identity: no_lanes::<L>(),
+        ..select_form
+    };
+    let (mut a_left, mut a_right) = (left.clone(), right.clone());
+    fader_matrix_block(
+        &mut a_left[1..=samples],
+        &mut a_right[1..=samples],
+        frames,
+        gain_left,
+        mute_left,
+        gain_right,
+        mute_right,
+        &select_form,
+    );
+    let (mut b_left, mut b_right) = (left.clone(), right.clone());
+    gain_mute_block(&mut b_left[1..=samples], frames, gain_left, mute_left);
+    gain_mute_block(&mut b_right[1..=samples], frames, gain_right, mute_right);
+    matrix2x2_block_without_identity(
+        &mut b_left[1..=samples],
+        &mut b_right[1..=samples],
+        frames,
+        &select_free,
+    );
+    fader_matrix_block_without_identity(
+        &mut left[1..=samples],
+        &mut right[1..=samples],
+        frames,
+        gain_left,
+        mute_left,
+        gain_right,
+        mute_right,
+        &select_free,
+    );
+    let mut differences = FusedDifferences::default();
+    differences.record(0, [("L", &left, &a_left), ("R", &right, &a_right)]);
+    differences.record(1, [("L", &left, &b_left), ("R", &right, &b_right)]);
+    differences
+}
+
+const FUSED_FRAMES: [usize; 5] = [1, 3, 8, 9, 128];
+
+fn fused_select_free_width<L: Lane>() -> [usize; 2] {
+    let mut nan_payloads = [0; 2];
+    for frames in FUSED_FRAMES {
+        for family in 0..5 {
+            for gains in 0..FUSED_GAINS.len() {
+                for mutes in 0..FUSED_MUTES.len() {
+                    let differences = fused_select_free_differences::<L>(
+                        frames,
+                        [0.0; WIDTH],
+                        family,
+                        gains,
+                        mutes,
+                    );
+                    if let Some(word) = differences.first {
+                        panic!(
+                            "width={} frames={frames} family={family} gains={gains} \
+                             mutes={mutes}: {word}",
+                            L::WIDTH
+                        );
+                    }
+                    nan_payloads[0] += differences.nan_payloads[0];
+                    nan_payloads[1] += differences.nan_payloads[1];
+                }
+            }
+        }
+    }
+    // Negative control: with identity lanes the select form is a different function, which is why
+    // the arm is keyed on the mask. Unmuted identity lanes pass their scaled inputs through, while
+    // the select-free arm mixes them. Asserted over the union of frame counts and families.
+    let mixed = [1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0];
+    assert!(
+        FUSED_FRAMES.iter().any(|&frames| (0..5).any(|family| {
+            fused_select_free_differences::<L>(frames, mixed, family, 0, 0)
+                .first
+                .is_some()
+        })),
+        "width={}: the select-free fused kernel must differ from the select form on identity lanes",
+        L::WIDTH
+    );
+    nan_payloads
+}
+
+/// Issue #954 gate 1: with no identity lane, the select-free fused kernel is `fader_matrix_block`,
+/// and it is `gain_mute_block` on each plane followed by `matrix2x2_block_without_identity`.
+///
+/// Five input families (the four hostile ones and overflow), three gain sets (mixed, unity and
+/// zero, large), three mute sets (none, mixed, all), frame counts `[1, 3, 8, 9, 128]`, guard words
+/// included, at `f32`, `Simd4` and `Simd8`. NaN words compare as "both NaN" (see [`same_word`]);
+/// the count of NaN-payload differences, which the class statement allows, is printed. Runs in
+/// dev and in release, which is the build CI tests `lane` in.
+///
+/// Red mutation (issue #954 M3, `crates/lane/tests/MUTATIONS.md`): swap `matrix.lr` and
+/// `matrix.rl` in `fader_matrix_block_without_identity`.
+#[test]
+fn select_free_fused_fader_matrix_matches_both_oracles_when_no_lane_is_identity() {
+    let _canonical = CanonicalFpEnv::enter();
+    let counts = [
+        fused_select_free_width::<f32>(),
+        fused_select_free_width::<Simd4>(),
+        fused_select_free_width::<Simd8>(),
+    ];
+    println!("NaN-payload differences [oracle A, oracle B] at [f32, Simd4, Simd8]: {counts:?}");
 }
 
 fn compare_holey_population<L: Lane>() {

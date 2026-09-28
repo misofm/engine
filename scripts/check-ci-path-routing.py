@@ -327,6 +327,32 @@ def check_qualification_closures(text: str) -> None:
             "qualification.yml: lint job must run the canonical check-workspace-policy.sh step")
 
 
+V8_SPILL_ARTIFACT_LINE = (
+    "python3 -B scripts/check-web-audioworklet-v8-spill.py "
+    "target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm"
+)
+ARTIFACT_PIN_STEP = "      - name: Verify the downloaded artifact against its source pin\n"
+
+
+def check_qualification_v8_spill(text: str) -> None:
+    """Issue #1009: `wasm-guests` may leave `run-wasm-gates.sh`'s V8 spill leg out only because
+    `artifact-gates` runs the same gate on the downloaded artifact, after verifying it against its
+    pin. Without this rule, deleting that step would take the gate out of CI with every job
+    green."""
+    wasm = job(text, "wasm-guests")
+    require("bash scripts/run-wasm-gates.sh" in wasm,
+            "qualification.yml: wasm-guests must run scripts/run-wasm-gates.sh")
+    if "run-wasm-gates.sh --without-v8-spill" not in wasm:
+        return
+    gates = job(text, "artifact-gates")
+    require(V8_SPILL_ARTIFACT_LINE in gates and ARTIFACT_PIN_STEP in gates,
+            "qualification.yml: wasm-guests runs run-wasm-gates.sh --without-v8-spill, so "
+            "artifact-gates must run the V8 spill gate on the pin-verified artifact")
+    require(gates.index(ARTIFACT_PIN_STEP) < gates.index(V8_SPILL_ARTIFACT_LINE),
+            "qualification.yml: artifact-gates must verify the artifact's pin before the V8 "
+            "spill gate reads it")
+
+
 def check_qualification_workflow(root: pathlib.Path) -> None:
     text = (root / ".github/workflows/qualification.yml").read_text(encoding="utf-8")
     check_qualification_no_path_filter(text)
@@ -341,6 +367,7 @@ def check_qualification_workflow(root: pathlib.Path) -> None:
     check_qualification_release_shape_guard(text)
     check_qualification_route_job(text)
     check_qualification_closures(text)
+    check_qualification_v8_spill(text)
 
 
 RETIRED_WORKFLOWS = ("ci.yml", "sdk.yml", "browser-qualification.yml", "release-build.yml")

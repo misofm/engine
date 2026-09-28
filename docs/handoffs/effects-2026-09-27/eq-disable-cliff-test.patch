@@ -1,0 +1,107 @@
+diff --git a/crates/parametric-eq/src/lib.rs b/crates/parametric-eq/src/lib.rs
+index bb160ecf..18ebd460 100644
+--- a/crates/parametric-eq/src/lib.rs
++++ b/crates/parametric-eq/src/lib.rs
+@@ -973,9 +973,33 @@ fn lane_has_no_negative_zero<L: Lane>(value: L) -> bool {
+ 
+ /// `true` when both integrator words of `section` are exactly `+0.0` on every lane.
+ fn section_state_is_positive_zero<L: Lane>(section: &Section<L>) -> bool {
++    #[cfg(test)]
++    if RELAXED_B.with(core::cell::Cell::get) {
++        return section_state_is_frozen::<L>(section);
++    }
+     lane_is_positive_zero::<L>(section.state.ic1) && lane_is_positive_zero::<L>(section.state.ic2)
+ }
+ 
++#[cfg(test)]
++thread_local! {
++    static RELAXED_B: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
++}
++
++/// Diagnosis: every state word is `+0.0` or finite with magnitude at least `FLUSH_EPS`, so an
++/// identity section's recurrence leaves it exactly where it is.
++#[cfg(test)]
++fn section_state_is_frozen<L: Lane>(section: &Section<L>) -> bool {
++    let ok = |value: L| {
++        let mut words = [0_u32; MAX_LANES];
++        value.store_bits(&mut words[..L::WIDTH]);
++        words[..L::WIDTH].iter().all(|word| {
++            let x = f32::from_bits(*word);
++            *word == 0 || (x.is_finite() && x.abs() >= lane::FLUSH_EPS)
++        })
++    };
++    ok(section.state.ic1) && ok(section.state.ic2)
++}
++
+ /// `true` when no integrator word of `section` is `-0.0` on any lane.
+ fn section_state_has_no_negative_zero<L: Lane>(section: &Section<L>) -> bool {
+     lane_has_no_negative_zero::<L>(section.state.ic1)
+@@ -4304,6 +4328,68 @@ mod elision {
+         );
+     }
+ 
++    /// Diagnosis: a band switched on and then off again on every lane leaves a frozen, non-zero
++    /// integrator state in an identity section. Count the blocks that elide afterwards, under the
++    /// shipped leg (b) and under the relaxed leg, and check the relaxed arm's bits.
++    #[test]
++    fn diag_disable_cliff() {
++        const BLOCKS: usize = 16;
++        let mut report = Vec::new();
++        let mut arms = Vec::new();
++        for (relaxed, elide) in [(false, true), (true, true), (false, false)] {
++            super::RELAXED_B.with(|cell| cell.set(relaxed));
++            let mut left_channel = channel::<Simd8, 8>(0, 0b0001);
++            let mut right_channel = channel::<Simd8, 8>(3, 0b0001);
++            let mut rendered: Vec<u32> = Vec::new();
++            let mut engaged_after = 0;
++            for step in 0..BLOCKS {
++                if step == 2 {
++                    for lane in 0..8 {
++                        let mut band = corpus::bands(lane % corpus::LANES)[2];
++                        band.enabled = true;
++                        let words = band.words(corpus::CORPUS_RATE).expect("legal design");
++                        left_channel.start_ramp(2, lane, words);
++                        right_channel.start_ramp(2, lane, words);
++                    }
++                }
++                if step == 5 {
++                    for lane in 0..8 {
++                        left_channel.start_ramp(2, lane, EqSvfWords::IDENTITY);
++                        right_channel.start_ramp(2, lane, EqSvfWords::IDENTITY);
++                    }
++                }
++                let mut left = block::<8>(0, step % corpus::LANES);
++                let mut right = block::<8>(0, (step + 3) % corpus::LANES);
++                let stationary = left_channel.no_ramp_in_flight()
++                    && right_channel.no_ramp_in_flight()
++                    && elide;
++                if stationary
++                    && step > 6
++                    && kept(&left_channel, &right_channel, &left, &right) < EQ_SECTION_COUNT
++                {
++                    engaged_after += 1;
++                }
++                process_channels(
++                    (&mut left_channel, &mut right_channel),
++                    &mut left,
++                    &mut right,
++                    FRAMES,
++                    stationary,
++                );
++                rendered.extend(bits(&left));
++                rendered.extend(bits(&right));
++            }
++            rendered.extend(integrators(&left_channel, &right_channel));
++            report.push((relaxed, elide, engaged_after));
++            arms.push(rendered);
++        }
++        super::RELAXED_B.with(|cell| cell.set(false));
++        println!("DIAG cliff (relaxed, elide, blocks eliding after the disable of 9): {report:?}");
++        println!("DIAG cliff relaxed arm equals full cascade: {}", arms[1] == arms[2]);
++        println!("DIAG cliff shipped arm equals full cascade: {}", arms[0] == arms[2]);
++        assert_eq!(arms[1], arms[2]);
++    }
++
+     /// A `DiscontinuityKeepParameters` reset taken mid-ramp must refresh `identity`.
+     ///
+     /// This is the one coefficient-change site the rest of the suite never reaches.

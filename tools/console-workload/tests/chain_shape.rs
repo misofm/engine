@@ -19,7 +19,9 @@
 use std::collections::BTreeMap;
 
 use bench_support::digest::Sha256Sink;
-use console_workload::{ObservationArm, PlanConfig, SessionRuntime, WORKLOADS, Workload};
+use console_workload::{
+    DRIVER_FED_WORKLOADS, ObservationArm, PlanConfig, SessionRuntime, WORKLOADS, Workload,
+};
 use effect_contract::ChannelSymmetryWitness;
 use engine::realtime::PlanUnitEligibility;
 
@@ -325,37 +327,19 @@ fn the_ragged_tail_banks_like_any_other_cohort_and_pays_one_chain_for_it() {
 /// One retired route per *track*, accumulated by each cohort's ordered epilogue. The 128-track stretch row
 /// therefore folds twice what the 64-track console row does, which is where the doubled absolute
 /// saving on that row comes from.
+///
+/// Every standing row binds builtin banks, and so does the driver-fed gain/pan row (issue #956),
+/// which is why it is iterated here beside [`WORKLOADS`]: how a track's input is fed does not
+/// decide where its route folds. The builtins-less plumbing row that was this test's one
+/// bankless exception was retired by the same issue, because no host compiles such a plan.
 #[test]
 fn every_standing_workload_folds_one_route_per_track() {
-    for workload in WORKLOADS {
+    for workload in WORKLOADS.into_iter().chain(DRIVER_FED_WORKLOADS) {
         let mut runtime = SessionRuntime::build(workload, PlanConfig::BASELINE);
         for block in 0..4 {
             runtime.render(block).expect("console render");
         }
-        // The overhead floor row is the one exception, and it is an exception by construction
-        // rather than by exemption: it prepares no builtins, so it binds no bank chain, so there
-        // is no epilogue for a route to fold into. Zero is the right answer here and a nonzero
-        // count would mean the row had acquired a bank it is defined by not having -- which is why
-        // the arm asserts the shape as well as the fold, instead of skipping the row.
-        if workload == Workload::SixtyFourTrackPlumbingOnly {
-            assert_eq!(
-                runtime.bank_shape(),
-                [0, 0],
-                "the plumbing row must bind no bank chain at all"
-            );
-            assert_eq!(
-                runtime.bank_transposes(),
-                0,
-                "a plan with no bank transposes nothing"
-            );
-            assert_eq!(
-                runtime.bank_route_folds(),
-                0,
-                "a plan with no chain has no epilogue to fold a route into"
-            );
-            continue;
-        }
-        // The half-mono row is the second exception, and mono-collapse M1 made it one
+        // The half-mono row is the one exception, and mono-collapse M1 made it one
         // deliberately. Issue #218's fold is admissible only when the folded chains' lanes, taken
         // in render order, are **exactly** the master reduction's contributor order -- a
         // floating-point sum is not associative, so the same summands in a different order are
@@ -823,20 +807,18 @@ fn the_mono_row_pairs_unit_rows_are_pinned() {
     }
 }
 
-/// The overhead floor row prepares nothing, and what it renders is the plumbing alone.
+/// The identity pair banks alike and renders apart.
 ///
-/// Three claims, and the third is the one that makes the row a *floor* rather than another
-/// decomposition row: `plumbing_only` binds no bank, so it pays neither the D7 sanitise and
-/// boundary passes nor the fader and matrix kernels that `gain_pan_only` and `dispatch_only` both
-/// pay -- and it therefore renders different bits from both, which is how a reader knows the two
-/// rows are not measuring the same plan under two names.
+/// `gain_pan_only` and `dispatch_only` bank the same slots and pay the same round-trips -- the
+/// floor table costs them at one inventory for that reason -- and render different bits, because
+/// their fader and matrix carry different constants. The driver-fed gain/pan row (issue #956)
+/// banks exactly as its bound twin does: the feed decides how a claim reaches its bank's gather,
+/// never which bank gathers it.
+///
+/// This was the second half of the builtins-less plumbing row's test, which issue #956 retired
+/// with the row; the half that states the identity pair is kept.
 #[test]
-fn the_plumbing_row_binds_no_strip_at_all() {
-    let plumbing = render(
-        Workload::SixtyFourTrackPlumbingOnly,
-        PlanConfig::BASELINE,
-        BLOCKS,
-    );
+fn the_identity_pair_banks_alike_and_renders_apart() {
     let identity = render(
         Workload::SixtyFourTrackDispatchOnly,
         PlanConfig::BASELINE,
@@ -847,21 +829,11 @@ fn the_plumbing_row_binds_no_strip_at_all() {
         PlanConfig::BASELINE,
         BLOCKS,
     );
-    assert_eq!(
-        plumbing.1,
-        [0, 0],
-        "the plumbing row must bind no bank slot"
+    let ring = render(
+        Workload::SixtyFourTrackGainPanRing,
+        PlanConfig::BASELINE,
+        BLOCKS,
     );
-    assert_eq!(plumbing.2, 0, "and therefore no planar/AoSoA round-trip");
-    assert_ne!(
-        plumbing.0, identity.0,
-        "the plumbing row must render different bits from the identity row, or the strip it \
-         claims not to prepare is being prepared"
-    );
-    // The identity pair, from the other side: `gain_pan_only` and `dispatch_only` bank the same
-    // slots and pay the same round-trips -- the floor table costs them at one inventory for that
-    // reason -- and render different bits, because their fader and matrix carry different
-    // constants.
     assert_eq!(
         gain_pan.1, identity.1,
         "the two identity-section rows must realise the same bank shape"
@@ -871,42 +843,66 @@ fn the_plumbing_row_binds_no_strip_at_all() {
         gain_pan.0, identity.0,
         "a real fader and pan must not render what a 0 dB fader and a hard-identity pan render"
     );
+    assert_eq!(
+        (ring.1, ring.2),
+        (gain_pan.1, gain_pan.2),
+        "the driver-fed row must bank and transpose as its bound twin does"
+    );
+    assert_eq!(ring.0, gain_pan.0, "and render its bits");
 }
 
-/// The plumbing row is `Input -> Route -> Output` per track, and renders the bits it rendered
-/// when every track also ran three identity stages (issue #925).
+/// Issue #944: the settled pan matrix takes a select-free arm when no lane of its bank is the
+/// identity, and every row that renders a banked matrix renders the bits it rendered before.
 ///
-/// `GraphCompiler::compile` lists no builtin stage as bindable, so a builtins-less plan's
-/// `PostInputBuiltins`, `PostFader` and `PostMatrix` lower as aliases of the input's buffer
-/// instead of two identity copies and a dispatch that computed nothing. The row's units fall from
-/// 321 (`64 bound, 128 identity-copy, 64 identity-alias, 64 route, 1 output`) to 129 (`64 bound,
-/// 64 route, 1 output`), and the census from `[257, 321]` to `[65, 129]`: the 192 identity units
-/// it loses were all eligible, vacuously. With #926 merged the 64 route units are retired into
-/// the Output op's reduction too, so the row is `64 bound, 1 output`: 65 units, census
-/// `[1, 65]` (the bound host processors decline the symmetry witness; only the Output op is
-/// eligible). Class A: the digest over 64 blocks is pinned at the value the base commit of #925
-/// (`3c93469d`) renders, before any of this existed.
+/// Every banked row in `WORKLOADS` prepares builtins through `Concurrent` delivery, so its fader
+/// and matrix are never paired and each bank's matrix renders through `MatrixStage::process`. The
+/// one banked session row outside `WORKLOADS`, the metered console row (#881), is prepared with
+/// between-render-calls delivery, as the default web boot is, and pairs them: each cohort's fader
+/// and matrix run as one fused stage (`fader_matrix_block`), so these pins say nothing about its
+/// matrix. Its bits are pinned equal to `sixty_four_track_console`'s in `console-workload`'s own
+/// pair test. No standing row has
+/// an identity lane in a full bank -- the pan law's `cos(pi / 2)` is `6.1e-17`, not `0.0`, and
+/// `dispatch_only`'s pan is hard right on both inputs -- so all of these rows take the new arm on
+/// every bank. Class A: `select(no lane, a, b)` is `b`, bit for bit. The four pins are the 64-block
+/// digests of `14f2917b`, unchanged by #936 and #945 on the base of this issue.
+///
+/// Red mutation (issue #944 M3, `crates/builtins/tests/MUTATIONS.md`): swap `lr` and `rl` in
+/// `matrix2x2_block_without_identity`; every pin below moves.
 #[test]
-fn the_plumbing_row_is_input_route_output_and_renders_the_base_bits() {
-    const BASE_DIGEST: &str = "57535244ba953d82f6c9c19428dc83a8ac412018c66acc167818e1917283f800";
-    let (digest, shape, transposes) = render(
-        Workload::SixtyFourTrackPlumbingOnly,
-        PlanConfig::BASELINE,
-        BLOCKS,
-    );
-    assert_eq!(digest, BASE_DIGEST, "eliding identity stages moved a bit");
-    assert_eq!(shape, [0, 0], "the plumbing row binds no bank");
-    assert_eq!(transposes, 0);
-    let runtime = SessionRuntime::build(Workload::SixtyFourTrackPlumbingOnly, PlanConfig::BASELINE);
-    let rows = runtime.unit_eligibility();
-    assert_eq!(
-        rows.len(),
-        65,
-        "64 bound inputs and the output: no identity-stage unit is left (#925) and every route \
-         is retired into the Output reduction (#926)"
-    );
-    assert!(rows.iter().all(|row| !row.banked && row.lanes() == 1));
-    assert_eq!(runtime.symmetry_counters(), [1, 65]);
+fn the_select_free_matrix_arm_renders_the_base_bits() {
+    const BASE_DIGESTS: [(Workload, &str); 4] = [
+        (
+            Workload::SixtyFourTrackGainPanOnly,
+            "01e465a797036fb4267e895d9319a911bc108d554705d268d9a84a2e2e2dfdb4",
+        ),
+        (
+            Workload::SixtyFourTrackDispatchOnly,
+            "15688888612d161e507bc400b9eed356fc1776797c8c66ca52d1e7c9114d3a2d",
+        ),
+        (
+            Workload::SixtyFourTrackBuiltinsOnly,
+            "b63eccd09c19eb7a6e0608144024ac5b14c7d5f7d1c56012cbbd49d6aad8f7f0",
+        ),
+        (
+            Workload::SixtyFourTrackConsole,
+            "fe5bed9becdbc101d7ad4b77e7e1969ca3888cae34857333f79531b03a4868de",
+        ),
+    ];
+    for (workload, base) in BASE_DIGESTS {
+        let (digest, shape, _) = render(workload, PlanConfig::BASELINE, BLOCKS);
+        assert_ne!(
+            shape,
+            [0, 0],
+            "{}: the row binds bank chains",
+            workload.kind()
+        );
+        assert_eq!(
+            digest,
+            base,
+            "{}: the select-free matrix arm moved a bit",
+            workload.kind()
+        );
+    }
 }
 
 /// The folded master carries the reduction's own bits, and the declined arm is the oracle that says
@@ -950,15 +946,9 @@ fn the_folded_master_is_the_reductions_own_bits() {
         }
         sink.finish_hex()
     };
-    for workload in WORKLOADS {
-        // A meter stream is leased from the prepared builtins session that the overhead floor row
-        // deliberately does not have, so the metered candidate cannot be built there. There is
-        // nothing to check on that row anyway: it folds no route, so the fold's association order
-        // is not a property it has. `every_standing_workload_folds_one_route_per_track` pins what it
-        // does have.
-        if workload == Workload::SixtyFourTrackPlumbingOnly {
-            continue;
-        }
+    // The driver-fed gain/pan row folds like every banked row (issue #956), so its folded master
+    // is checked against the same oracle.
+    for workload in WORKLOADS.into_iter().chain(DRIVER_FED_WORKLOADS) {
         let mut folded_runtime = SessionRuntime::build(workload, PlanConfig::BASELINE);
         let folded = digest(&mut folded_runtime);
         graph::test_only_set_route_fold_declined(true);
@@ -996,74 +986,6 @@ fn the_folded_master_is_the_reductions_own_bits() {
             folded,
             "{}: a metered, folded master is not the reduction's bits",
             workload.kind()
-        );
-    }
-}
-
-/// Issue #926: the plumbing row's routes fuse into the Output op's reduction, and the fused
-/// reduction renders the route ops' and the reduction's own bits; no other row takes the fold.
-///
-/// The plumbing row binds no bank, so issue #218's chain fold has no epilogue to fold into, and
-/// each track's route op was a dispatched `mix2x2_block` store pass over its in-place buffer, which
-/// the Output's reduction then loaded back. Issue #926 retires those sixty-four route ops and
-/// applies each route's 2x2 inside the reduction, a pair of tracks at a time, as it loads the
-/// buffers (the eligibility is issue #920's, which never landed).
-///
-/// The oracle is the same row bound with that fold declined
-/// (`graph::test_only_set_output_route_fold_declined`, read once at bind). Its route ops run and
-/// its Output reduces their outputs, which is the plan this row rendered before the issue, so the
-/// two arms differ in exactly the thing under test.
-///
-/// A count first, because the fold renders the same bits by construction and a digest cannot see
-/// whether it fired: the plan has one unit fewer per route, sixty-four, read off the per-unit
-/// census. Then the bank shape, which the fold must not move (`the_plumbing_row_binds_no_strip_at_all`
-/// pins `[0, 0]`), and the chain-fold count, which stays zero
-/// (`every_standing_workload_folds_one_route_per_track`). Then the digests over `BLOCKS` blocks.
-///
-/// Last, the fold's reach: every other standing workload binds a bank, so the fold declines on
-/// its no-bank clause and must read zero there. The engine's plan trait carries no Output-fold
-/// count, so zero is read the same way sixty-four is, off the unit census: declining the fold
-/// must leave every other row's census exactly as it is.
-#[test]
-fn the_plumbing_rows_output_fold_is_the_route_ops_own_bits() {
-    let digest = |runtime: &mut SessionRuntime| {
-        let mut sink = Sha256Sink::new();
-        for block in 0..BLOCKS {
-            runtime.render(block).expect("console render");
-            runtime.hash_output(&mut sink);
-        }
-        sink.finish_hex()
-    };
-    let workload = Workload::SixtyFourTrackPlumbingOnly;
-    let mut folded_runtime = SessionRuntime::build(workload, PlanConfig::BASELINE);
-    graph::test_only_set_output_route_fold_declined(true);
-    let mut declined_runtime = SessionRuntime::build(workload, PlanConfig::BASELINE);
-    graph::test_only_set_output_route_fold_declined(false);
-    assert_eq!(
-        declined_runtime.unit_eligibility().len() - folded_runtime.unit_eligibility().len(),
-        usize::try_from(workload.tracks()).expect("track count"),
-        "the plumbing row must retire one route op per track into the Output's reduction"
-    );
-    for runtime in [&folded_runtime, &declined_runtime] {
-        assert_eq!(runtime.bank_shape(), [0, 0], "the fold binds no bank");
-        assert_eq!(runtime.bank_route_folds(), 0, "and is not the chain fold");
-    }
-    let folded = digest(&mut folded_runtime);
-    let declined = digest(&mut declined_runtime);
-    assert_eq!(
-        folded, declined,
-        "the fused Output reduction is not the route ops' and the reduction's bits"
-    );
-    for other in WORKLOADS.into_iter().filter(|other| *other != workload) {
-        let as_bound = SessionRuntime::build(other, PlanConfig::BASELINE).unit_eligibility();
-        graph::test_only_set_output_route_fold_declined(true);
-        let declined = SessionRuntime::build(other, PlanConfig::BASELINE).unit_eligibility();
-        graph::test_only_set_output_route_fold_declined(false);
-        assert_eq!(
-            as_bound,
-            declined,
-            "{} must not take the Output route fold: it binds a bank",
-            other.kind()
         );
     }
 }

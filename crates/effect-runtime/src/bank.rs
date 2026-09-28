@@ -122,22 +122,39 @@ pub fn check_block<L: Lane>(io: &[f32]) -> bool {
 /// carries the same regression shape, but its sign-masked mutation is green and does not
 /// independently gate the predicate.
 ///
-/// Chunked so the **active** path stays cheap. A block carrying signal returns on its first
-/// chunk, so a rendering console pays 32 words rather than a whole extra pass over
-/// `frames * lanes`. The reduction is a plain `|` fold, which vectorises.
-#[inline]
+/// Chunked so the **active** path stays cheap. A block carrying signal in its first 32 words
+/// returns there, so a rendering console pays 32 words rather than a whole extra pass over
+/// `frames * lanes`. Past that head the fold widens to 128-word chunks, because on a silent block
+/// the horizontal reduction and branch each chunk ends with were most of the cost (#942). The
+/// wide loop stays `chunks`: the `chunks_exact(64)` shape first proposed in #942 compiled to a
+/// scalar `i32.or` chain on wasm32 `simd128`. The reduction is a plain `|` fold, which vectorises.
+///
+/// `inline(always)` keeps the predicate inlined at every call site, as the one-loop form was. With
+/// two loops, plain `#[inline]` let LLVM outline it at the effects' call sites in the wasm
+/// artifact, and that call alone made a live block about 1.9 ns slower than today (#942).
+#[inline(always)]
 #[must_use]
 pub fn block_is_positive_zero(io: &[f32]) -> bool {
-    for chunk in io.chunks(32) {
-        let mut bits = 0_u32;
-        for value in chunk {
-            bits |= value.to_bits();
-        }
-        if bits != 0 {
+    let (head, rest) = io.split_at(io.len().min(32));
+    if or_bits(head) != 0 {
+        return false;
+    }
+    for chunk in rest.chunks(128) {
+        if or_bits(chunk) != 0 {
             return false;
         }
     }
     true
+}
+
+/// The `|` of every word's bit pattern: zero exactly when every word is `+0.0`.
+#[inline]
+fn or_bits(words: &[f32]) -> u32 {
+    let mut bits = 0_u32;
+    for value in words {
+        bits |= value.to_bits();
+    }
+    bits
 }
 
 /// `true` when every lane of `value` is **exactly** `+0.0`, by the same bit rule as
@@ -367,5 +384,109 @@ impl<L: Lane, K: BankKernel<L>> HomogeneousBank<L, K> {
                 *state = K::State::default();
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::block_is_positive_zero;
+    use alloc::vec::Vec;
+
+    /// The naive reference [`block_is_positive_zero`] must agree with on every input.
+    fn reference(io: &[f32]) -> bool {
+        io.iter().all(|v| v.to_bits() == 0)
+    }
+
+    /// Issue #942 gate 1: the 32-word head followed by 128-word chunks has the same truth value as
+    /// the naive reference on every length from 0 to 2,100 and with one nonzero word at every
+    /// position class of that shape. The classes are the first word, the last word, the last
+    /// word of the head, and the first and last word of every 128-word chunk after it. The last
+    /// chunk is the remainder whenever it is short. A seeded word per length is added as well.
+    ///
+    /// The patterns are the ones a sloppy fold gets wrong: `-0.0` (only the sign bit), the
+    /// smallest subnormal (only the lowest bit), a quiet NaN, an all-ones NaN, and `1.0`.
+    ///
+    /// Red mutations, recorded in the #942 spec: masking the sign bit out of the fold (the `-0.0`
+    /// rows), `chunks_exact(128)` for the wide loop (the remainder rows), returning after the head
+    /// (every word past 32), and dropping the head's early exit (the head rows).
+    #[test]
+    fn the_widened_chunk_agrees_with_the_naive_reference() {
+        const MAX_LEN: usize = 2_100;
+        const PATTERNS: [u32; 5] = [
+            0x8000_0000,
+            0x0000_0001,
+            0x7fc0_0000,
+            0xffff_ffff,
+            0x3f80_0000,
+        ];
+        let mut buf = [0.0_f32; MAX_LEN];
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut positions = Vec::new();
+        let mut blocks = 0_usize;
+        for len in 0..=MAX_LEN {
+            assert!(reference(&buf[..len]));
+            assert!(block_is_positive_zero(&buf[..len]), "all +0.0, len {len}");
+            blocks += 1;
+            if len == 0 {
+                continue;
+            }
+            let head = len.min(32);
+            positions.clear();
+            positions.extend([0, len - 1, head - 1]);
+            let mut start = head;
+            while start < len {
+                let end = (start + 128).min(len);
+                positions.extend([start, end - 1]);
+                start = end;
+            }
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            positions.push((seed % len as u64) as usize);
+            for &at in &positions {
+                for bits in PATTERNS {
+                    buf[at] = f32::from_bits(bits);
+                    let io = &buf[..len];
+                    assert_eq!(
+                        block_is_positive_zero(io),
+                        reference(io),
+                        "len {len}, word {at}, bits {bits:#010x}"
+                    );
+                    blocks += 1;
+                    buf[at] = 0.0;
+                }
+            }
+        }
+        assert!(blocks >= 10_000, "only {blocks} blocks");
+    }
+
+    /// Two set words in one chunk, which the single-word test above cannot see: equal patterns
+    /// cancel under `^`, and `0xffff_ffff + 1` wraps to zero under `wrapping_add`, so a fold that
+    /// is not a plain `|` would call these blocks silent. Pairs sit inside the head, straddle the
+    /// head's end, and sit inside and across a wide chunk.
+    #[test]
+    fn two_set_words_in_one_chunk_are_never_silent() {
+        const LEN: usize = 32 + 128 + 40;
+        const PAIRS: [(u32, u32); 4] = [
+            (0x8000_0000, 0x8000_0000),
+            (0x3f80_0000, 0x3f80_0000),
+            (0xffff_ffff, 0x0000_0001),
+            (0x0000_0001, 0xffff_ffff),
+        ];
+        const PLACES: [(usize, usize); 5] = [(0, 1), (30, 31), (31, 32), (32, 33), (100, 159)];
+        let mut buf = [0.0_f32; LEN];
+        for (first, second) in PAIRS {
+            for (at, then) in PLACES {
+                buf[at] = f32::from_bits(first);
+                buf[then] = f32::from_bits(second);
+                assert!(!reference(&buf), "reference, words {at} and {then}");
+                assert!(
+                    !block_is_positive_zero(&buf),
+                    "words {at} and {then}, bits {first:#010x} and {second:#010x}"
+                );
+                buf[at] = 0.0;
+                buf[then] = 0.0;
+            }
+        }
     }
 }

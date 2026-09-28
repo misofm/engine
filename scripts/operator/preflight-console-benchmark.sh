@@ -42,7 +42,14 @@
 # readings they carry, and why phase 3 gets no directory of its own.
 set -euo pipefail
 phase_directory=issue149
-if [[ "$#" == 1 ]]; then
+# `--step NAME` is the per-issue arm of a sequential optimisation batch: one record per merged
+# issue, written to `artifacts/steps/NAME`, so each issue's motion is read against the step
+# before it rather than against one paired baseline. NAME is lowercase kebab-case, at most 64
+# characters, and like every arm it refuses to overwrite an existing record.
+if [[ "$#" == 2 && "$1" == --step ]]; then
+    [[ "$2" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]] || { printf 'invalid --step name: %s\n' "$2" >&2; exit 2; }
+    phase_directory="steps/$2"
+elif [[ "$#" == 1 ]]; then
     case "$1" in
         --phase2) phase_directory=issue149-phase2 ;;
         --phase3) phase_directory=issue149-phase3 ;;
@@ -131,6 +138,9 @@ fi
 if "$binary" console extra-argument >/dev/null 2>&1; then
     fail 'the console subject accepted an argument'
 fi
+# Issue #1003: the mixing-automation row's premises, untimed -- every control resolves by id, every
+# automated effect moves bits, restating is bit-exact and the EQ's restatement keeps the collapse.
+"$binary" console --preflight >/dev/null || fail 'the mixing-automation preflight refused'
 
 candidate_commit=$(git rev-parse --verify HEAD)
 jq -n -S \
@@ -150,7 +160,7 @@ jq -n -S \
     --arg library_sha256 "$(sha256sum scripts/console-benchmark-record-lib.jq | awk '{print $1}')" \
     --arg preconditions_sha256 "$(sha256sum scripts/check-bench-preconditions.sh | awk '{print $1}')" \
     '{schema_version: 1, issue: 149, kind: "console_benchmark_preflight",
-      workload_launches: 0, warmup_rounds: 1, measured_rounds: 2, records_required: 48,
+      workload_launches: 0, warmup_rounds: 1, measured_rounds: 2, records_required: 50,
       candidate_commit: $commit, candidate_commit_sha256: $commit_sha256,
       binary_sha256: $binary_sha256, benchmark_source_sha256: $subject_sha256,
       floor_table_sha256: $floor_table_sha256,

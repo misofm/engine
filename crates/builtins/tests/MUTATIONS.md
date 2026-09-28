@@ -205,3 +205,150 @@ what the rows below record.
 ### Row count
 
 Three rows: two red, one argued-equivalent with its premise asserted in code (C-3).
+
+## Issue #944 — the settled matrix's select-free arm
+
+`MatrixStage::settled_block` takes `matrix2x2_block_without_identity` when
+`L::mask_any(coef.identity)` is false over all `L::WIDTH` lanes, padding included, and
+`matrix2x2_block` otherwise; both settled call sites (the `maximum == 0` block and the post-ramp
+tail) go through it. The gates:
+
+- gate 2, `tests::settled_matrix_takes_the_select_free_arm_only_without_an_identity_lane`
+  (`src/tests.rs`): the `#[cfg(test)]` witness `MATRIX_SELECT_FREE_BLOCKS` counts the arm per
+  settled segment, at W8, W4 and the scalar stage;
+- gate 3, `settled_matrix_shapes_render_the_base_bits` (`tests/matrix.rs`): one SHA-256 over every
+  output word and every block's retained lane words, pinned on the unmodified base;
+- gate 4, `the_select_free_matrix_arm_renders_the_base_bits`
+  (`tools/console-workload/tests/chain_shape.rs`): the four banked rows' 64-block digests.
+
+Each mutation was applied alone, run in dev and release (gate 4 in dev), and reverted.
+
+| # | mutation | red | green (expected) |
+| --- | --- | --- | --- |
+| M1 | `settled_block` always takes the select-free arm (`if false {`) | gate 2, gate 3 and `settled_identity_matrix_preserves_signed_zero`. Dev: the kernel's `debug_assert!` fires in all three (`lane/src/kernels/builtins.rs:316`). Release, by the counter and by bits: gate 2 `width=8: identity member` `left: 3 right: 0`; gate 3 digest `b76c1305...` against `0e1c5af8...`; the signed-zero test `left: 0 right: 2147483648` | gate 1; gate 4 (no standing row has an identity lane, so the arm is already taken everywhere) |
+| M2 | `settled_block` never takes it (`if true {`) | gate 2, dev and release: `width=8: full non-identity bank` `left: 0 right: 3` | gates 1, 3 and 4 -- the performance-only regression the counter exists to see |
+| M3 | swap `c.lr` and `c.rl` in `matrix2x2_block_without_identity` | gate 1 (dev and release, `crates/lane/tests/MUTATIONS.md`); gate 3 (dev and release) digest `b4d1d647...`; gate 4 `sixty_four_track_gain_pan_only` digest `b8332f35...` against `01e465a7...` | gate 2 |
+| M4 | the post-ramp tail keeps calling `matrix2x2_block` unconditionally | gate 2, dev and release: `width=8: settled tail` `left: 0 right: 1` | gates 1, 3 and 4 (class A: the tail's bits do not depend on the arm) |
+
+### Row count
+
+Four rows, all red; none argued equivalent. M2 and M4 render the base bits by construction, so
+only the witness sees them, which is the reason gate 2 exists.
+
+## Issue #943 — the block-peak merge
+
+Gate G2 is `a_block_peak_merge_publishes_the_scalar_meters_snapshots` (`tests/meter.rs`, run with
+`--features test-support`): eight meters per arm over a strided 8-lane block, arm A through
+`observe_input`, arm B through `observe_input_with_block_peak` with the lane kernel's seeded-zero
+peaks, at periods 512, 300, 128 and 64, hostile and tone input, 64 blocks, plain and with a skip, a
+restart, a zero-frame block and all three; `ALL` and `SAMPLE_PEAK | COUNTS` must decline. Every
+snapshot is compared on every field by bits (56,208 per run), and the merge count is pinned
+(512 at periods 512 and 128, 0 at 64, 296 at 300). Each row was applied alone as an exact-text
+replacement (match count one) to `1975fc44` plus the final G2 of the evidence commit (the
+invalid-only lanes below), run in dev, and restored.
+
+| # | mutation | file | G2 result |
+| --- | --- | --- | --- |
+| B-1 | the fast-path window test `len <= (period - self.frames) as usize` becomes `true` | `src/lib.rs` | RED: `metrics 1 period 300 event 2 lane 0: publication count differs` (512 is green: every block fits) |
+| B-2 | the fast path taken when `self.metrics.contains(SAMPLE_PEAK)` | `src/lib.rs` | RED on the `ALL` arm: `present_metrics: 15`, `rms`, `energy`, `held_peak` and the counts are `0` in the merge arm |
+| B-3 | the fast path does not `emit()` at `frames == period` | `src/lib.rs` | RED: `metrics 1 period 512 event 3 lane 0: publication count differs` |
+| L-1 | the lane kernel's `a.ge(low)` becomes `a.ge(L::zero())` | `lane/src/kernels/builtins.rs` | RED: handle 2 (lane 1) window 0 publishes `sample_peak 1.1754942e-38` against `0.0` |
+| L-2 | the lane kernel's `a.lt(high)` term dropped | `lane/src/kernels/builtins.rs` | RED: handle 1 window 0 publishes `inf` against `3.4028235e38` |
+
+L-1 was **green** on the first form of G2, whose hostile lanes each carried normal words: a window's
+peak was then always a normal value, which hides an admitted subnormal. G2 now gives lanes 1 and 5
+only words the meter sanitizes to `+0.0` (NaN, both infinities, both zeros, extreme subnormals),
+asserts their published peaks are `+0.0`, and the row is red. The lane rows are also in
+`crates/lane/tests/MUTATIONS.md`.
+
+## Issue #954 — the fused fader/matrix's select-free arm
+
+`MatrixStage::fused_settled_block` takes `fader_matrix_block_without_identity` when
+`L::mask_any(coef.identity)` is false over all `L::WIDTH` lanes, padding included, and
+`fader_matrix_block` otherwise. All four call sites of the fused kernel go through it, each after
+its own settled check: `BuiltinFaderBank::try_process_settled_with_matrix` at `Simd4` and `Simd8`,
+`FaderMuteRampBuiltins::process_fader_matrix` and `BuiltinChain::process_dual_mono`. The gates:
+
+- gate 1 (lane), in `crates/lane/tests/MUTATIONS.md`;
+- the dispatch witness, `tests::fused_fader_matrix_takes_the_select_free_arm_only_without_an_identity_lane`
+  (`src/tests.rs`): the `#[cfg(test)]` counter `FUSED_SELECT_FREE_BLOCKS` counts the arm per fused
+  call at W8, W4 and both scalar sites, over identity members, partial banks, instant retargets to
+  and from the identity, and ramps that decline the fused call;
+- the scenario gates (amendment 5), `fused_fader_matrix_shapes_render_the_base_bits` (banked,
+  `46cc0096...`) and `scalar_fused_fader_matrix_renders_the_base_bits` (`c5131019...`) in
+  `tests/matrix.rs`, pinned on the unmodified base `e0f25bb6` in dev and release;
+- the row gates (amendment 6): `builtins-compiler`'s
+  `composite_live_sequence_matches_original_owners_and_discriminates_both_branches` and
+  `console-workload`'s `the_metered_console_row_renders_the_console_bits_and_publishes_every_window`.
+
+Each mutation was applied alone as an exact-text replacement (match count one) to `ab9bdbd9`, run
+through all five gates in dev and in release, and restored with `git checkout`.
+
+| # | mutation | red | green (expected) |
+| --- | --- | --- | --- |
+| M1 | `fused_settled_block` always takes the select-free arm (`if false {`) | Dev: the kernel's `debug_assert!` (`lane/src/kernels/builtins.rs:416`) fires in the witness, both scenario gates and `composite_live_sequence_…`. Release, by the counter and by bits: the witness `width=8: identity member` `left: 3 right: 0`; the banked scenario digest `0f5a0f59...` against `46cc0096...`; the scalar scenario digest `28e62077...` against `c5131019...` | gate 1; the metered row in dev and release (every bank is full with no identity lane, so the arm is already the right one there); `composite_live_sequence_…` in release (it compares no identity-lane word on which the two arms disagree) |
+| M2 | `fused_settled_block` never takes it (`if true {`) | the witness, dev and release: `width=8: full non-identity` `left: 0 right: 3` | gate 1, both scenario gates and both row gates -- the performance-only regression the counter exists to see |
+| M3 | swap `matrix.lr` and `matrix.rl` in `fader_matrix_block_without_identity` | gate 1 (dev and release); the banked scenario digest `c3e895f6...` and the scalar `4c06dd6d...` (dev and release); `composite_live_sequence_…` `post-matrix left PCM words` (dev and release); the metered row digest `d3bc88bd...` against `fe5bed9b...` (dev and release) | the witness |
+| M5 | `FaderMuteRampBuiltins::process_fader_matrix` calls `fader_matrix_block::<f32>` directly, bypassing the dispatch | the witness, dev and release: `per-track pan` `left: 0 right: 2` | gate 1, both scenario gates and both row gates (class A) |
+
+### Row count
+
+Four rows, all red; none argued equivalent. There is no M4: the fused path has no ramp tail (a
+ramping block declines the fused call and runs the split stages, whose tail is #944's
+`settled_block`), so there is no tail site to mutate. M2 and M5 render the base bits by
+construction, so only the witness sees them.
+
+## Issue #950 — the banked meter commit
+
+Gate M2 is `a_banked_block_commit_publishes_the_scalar_meters_snapshots` and its two-meter row
+`a_peak_meter_bound_first_leaves_the_seed_to_the_all_meter_behind_it` (`tests/meter.rs`, run with
+`--features test-support`). Arm A calls `observe_input`; arm B is the graph and `MeterObserver`
+protocol: per lane the first `banked_seed` in binding order, `meter_block` at `Simd8` (8 meters) or
+`Simd4` (4 meters) only if some lane answered, then `observe_input_banked` for a meter that banks
+and is not exactly `SAMPLE_PEAK`, and issue #943's call otherwise. The sweep is 9 periods x 9 metric
+sets x 4 hold/decay settings x hostile and tone input x a fixed 48-block stream and a random
+150-event stream x both widths (19,127,808 snapshots, every field by bits, 187,908 commits), then
+the commit counters on a plain 64-block stream, the skip, the withheld block and the moved-seed
+safety net. Each row was applied alone as an exact-text replacement (match count one) to
+`326607ce` (the two-meter row to `9696f74d`), run in dev, and restored with `git checkout`.
+
+| # | mutation | file | M2 result |
+| --- | --- | --- | --- |
+| K-1 | the kernel's energy is a zero-seeded partial plus the seed | `lane/src/kernels/builtins.rs` | RED: `metrics 15 period 1536 hold 0 decay 0 hostile ... width 8 event 11 (Block(128)) lane 0 binding 0: window 0 differs` |
+| K-2 | `banked_seed` ignores the discontinuity (`let discontinuous = false;`) | `src/lib.rs` | RED on the witness the brief names: `the block after the skip commits`, `[8, 8, 8]` against `[8, 8, 16]`. The snapshots stay equal: the seed check declines the block |
+| K-3 | the commit drops the seed-bit check (`!(seeded \|\| true)`) | `src/lib.rs` | RED on the safety net: `mode: MovedSeed ... event 3 (Block(128)) lane 0 binding 0: window 0 differs` |
+| K-4 | `banked_eligible` ignores the decay (`peak_hold_frames == 0` alone) | `src/lib.rs` | RED: `metrics 15 period 129 hold 0 decay 12.0 hostile ... window 0 differs` |
+| K-5 | the kernel's sanitized count also counts zeros | `lane/src/kernels/builtins.rs` | RED: `metrics 15 period 128 ... event 0 lane 0: window 0 differs` |
+| K-6 | the kernel's clipped count uses `c > 1.0` | `lane/src/kernels/builtins.rs` | RED: the same row and window |
+| A-2 | `banked_seed` answers without `ENERGY_RMS` (amendment 2's seed pollution) | `src/lib.rs` | RED on the sweep's `no energy, no seed, no pass` (`8` against `0` for `COUNTS` at period 129), and on the two-meter row alone: `the ALL meter commits every block`, `128` against `512` |
+| E-1 | the held merge uses `q > held` for `q >= held` | `src/lib.rs` | GREEN (expected) |
+| E-2 | the two channels committed right first | `src/lib.rs` | GREEN (expected) |
+
+E-1 and E-2 are the brief's expected-green rows, the domain argument witnessed: on the sanitized
+domain equal magnitudes have equal bits, so `>` and `>=` select the same word; and saturating
+unsigned addition is associative and commutative, so the order of the lifetime-count adds is free.
+
+The existing probes of the scalar path -- `test_only_peak_samples`, the `cfg(test)`
+`meter_work_probe` -- are green unchanged: their tests call `observe_input`, which never commits a
+banked block.
+
+### Issue #950 attempt 2: the lane-level fallback and each half of the seed check
+
+Sol's attempt 1 verdict found two commit guards no gate saw alone. Two gates were added, with no
+production change: the end-to-end mixed bank
+`a_bank_of_mixed_periods_and_metric_sets_publishes_the_declined_arms_frames` (graph-compiler: one
+bank holds eight meters of different periods and metric sets, with and without `ENERGY_RMS`, at
+`Simd8` and `Simd4` through both deliveries, every frame against the declined arm by bits, with the
+passes, merges and commits pinned, the non-energy meters' commits included), and M2's safety net
+moving the left seed alone and the right seed alone as well as both, at both widths. Each row was
+applied alone to `958c7066` as an exact-text replacement (match count one), run in dev, and
+restored.
+
+| # | mutation | result |
+| --- | --- | --- |
+| S-2 | `commit_banked`'s window check `len > period - frames` deleted | RED on the mixed bank: a `COUNTS` meter at period 300 (no seed to fail) commits a block that crosses its window, its window overruns its period and never emits, and the next block's scalar split underflows (`attempt to subtract with overflow` at `src/lib.rs:4881`, dev). GREEN on M2, M3 and the M3 controls, whose banks run every lane in lockstep: this row is why the mixed bank exists |
+| S-1L | the left half of the seed check dropped (`true && right == right`) | RED on M2's `MovedLeftSeed` row: `period: 512 ... mode: MovedLeftSeed ... event 3 (Block(128)) lane 1 binding 0: window 0 differs` |
+| S-1R | the right half dropped | RED on M2's `MovedRightSeed` row: `... mode: MovedRightSeed ... event 3 (Block(128)) lane 0 binding 0: window 0 differs` |
+
+Before attempt 2 both S-1 rows were green, because the safety net moved both seeds at once and
+either half refused the commit.

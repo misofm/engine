@@ -223,3 +223,27 @@ switched two-coefficient one-pole that `peak_follow` is not. Three mutations, al
   form's deadband, so the mutated step returns `e` unchanged.
 * **18** — no flush: `ar_one_pole_step_flushes_the_recurrence` FAILED, the envelope word decaying
   into the subnormal range instead of reaching `+0.0`.
+
+## Issue #994 — a knee whose `1 / (2 W)` overflows is a hard knee
+
+`dynamics::knee_coefficients` designs every positive knee width whose `f32` reciprocal overflows —
+exactly `(0, 2^-129]` — as the hard knee. Each mutation below was applied to that function, the
+named test binary was run (`CARGO_INCREMENTAL=0 cargo test --locked -p effect-runtime --test
+dynamics`, debug profile, `x86_64` Zen 5 class, `rustc 1.97.1`), and the file was restored byte for
+byte from a saved copy in the same session.
+
+| # | mutation | test binary | result |
+|---|---|---|---|
+| 994-R1 | the `is_finite` test dropped (`if true`), which is the pre-#994 design | `dynamics` | RED, 3 of 13: `the_overflow_bound_is_exact_and_only_it_moves`, `a_knee_whose_reciprocal_overflows_is_a_hard_knee`, `a_randomized_sweep_never_leaves_the_finite_curve` |
+| 994-R2 | the test replaced by a constant bound one ulp too high: `knee_db >= f32::from_bits(0x0010_0002)` | `dynamics` | RED, 2 of 13: `the_overflow_bound_is_exact_and_only_it_moves`, `the_narrowest_soft_knees_are_finite_at_the_threshold` |
+| 994-R3 | the test replaced by a constant bound one ulp too low: `knee_db >= f32::from_bits(0x0010_0000)` | `dynamics` | RED, 3 of 13: the three tests of 994-R1 |
+
+Under 994-R1 the whole of `effect-runtime`, `compressor` and `multiband-compressor` was also run
+with `--no-fail-fast`: 229 tests passed and exactly the eight #994 tests failed (the three above,
+four in `compressor/tests/knee_overflow.rs` and one in `multiband-compressor`'s `knee_tests`). No
+gate that existed before #994 saw the overflow.
+
+The smallest width, `0x0000_0001`, is not by itself a witness: `0.5 * 2^-149` rounds to `+0.0`, so
+its half-width is zero and the knee interval `(-W/2, W/2]` is empty even without the rule. Every
+list of overflowing widths in these tests therefore also carries `0x0000_0002` (the verification's
+2.8e-45), `0x000F_FFFF` and `0x0010_0000`, where the half-width is positive.

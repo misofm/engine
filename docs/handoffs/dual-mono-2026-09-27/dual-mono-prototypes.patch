@@ -1,0 +1,879 @@
+diff --git a/crates/builtins-compiler/src/lib.rs b/crates/builtins-compiler/src/lib.rs
+index 84a6f1eb..33ad0c15 100644
+--- a/crates/builtins-compiler/src/lib.rs
++++ b/crates/builtins-compiler/src/lib.rs
+@@ -3998,6 +3998,30 @@ pub struct SessionPoolClasses {
+ }
+ 
+ impl SessionPoolClasses {
++    /// RESEARCH PROTOTYPE (dual-mono 2026-09-27, reverted): remainder-aware pooling.
++    ///
++    /// Keeps the mono pool a whole number of `lanes`-wide cohorts and moves its remainder into the
++    /// stereo pool, where those tracks render dual. Global rather than per (level, rack, program):
++    /// correct only for sessions whose tracks share one strip program, which is what the research
++    /// driver renders. Regrouping only; no lane's arithmetic changes.
++    pub fn research_demote_mono_remainder(&mut self, lanes: usize) {
++        let mono: Vec<Box<str>> = self
++            .by_track
++            .iter()
++            .filter(|(_, witness)| {
++                CohortPoolClass::of_prepare_witness(**witness)
++                    == CohortPoolClass::MonoSymmetricAtPrepare
++            })
++            .map(|(track, _)| track.clone())
++            .collect();
++        let keep = (mono.len() / lanes.max(1)) * lanes.max(1);
++        for track in &mono[keep..] {
++            if let Some(witness) = self.by_track.get_mut(track) {
++                witness.clear(ChannelSymmetryWitness::SOURCE);
++            }
++        }
++    }
++
+     /// Seeds every track's witness with its structural (`SOURCE`) term.
+     #[must_use]
+     pub fn from_session(session: &CompiledSession) -> Self {
+diff --git a/crates/graph-compiler/src/compile.rs b/crates/graph-compiler/src/compile.rs
+index f6253816..591aca69 100644
+--- a/crates/graph-compiler/src/compile.rs
++++ b/crates/graph-compiler/src/compile.rs
+@@ -442,6 +442,13 @@ impl GraphCompiler {
+         for (track, witness) in builtins.input_channel_symmetry() {
+             pool_classes.conjoin(track, witness);
+         }
++        // RESEARCH PROTOTYPE (dual-mono 2026-09-27, reverted): remainder-aware pooling, read at
++        // compile time (control plane) so the driver can build both arms in one process.
++        if std::env::var_os("MISO_ENGINE_RESEARCH_MONO_REMAINDER").is_some()
++            && let Some(width) = BankWidth::for_backend(dispatch)
++        {
++            pool_classes.research_demote_mono_remainder(width.lanes() as usize);
++        }
+         let (banks, rack_cohorts) = match bind_rack_banks_indexed(
+             &effects,
+             &prepared,
+diff --git a/crates/graph/src/runtime.rs b/crates/graph/src/runtime.rs
+index 89e659ea..8256b7cf 100644
+--- a/crates/graph/src/runtime.rs
++++ b/crates/graph/src/runtime.rs
+@@ -1974,6 +1974,12 @@ pub(crate) struct UnitIdentity {
+     /// Set by [`source_plane_table`] at bind; zero for a plain unit. A bank has at most eight lanes,
+     /// and the byte fits the existing identity padding.
+     source_lanes: u8,
++    /// RESEARCH PROTOTYPE (dual-mono 2026-09-27, reverted): every lane's first slot is its track's
++    /// input builtins stage, so this unit's gathered planes are the track input itself. Only such
++    /// a unit may take the collapse on the session's structural (`SOURCE`) witness: any later unit
++    /// reads planes that an upstream stage outside its own witness may have made differ.
++    /// (Native-only prototype: a fifth flag byte does not fit the wasm32 identity padding.)
++    reads_track_input: bool,
+     pub(crate) stages: u32,
+     pub(crate) upstream_of_seam_stages: u32,
+     pub(crate) lane_tracks: Box<[Box<str>]>,
+@@ -2307,7 +2313,12 @@ impl Runtime {
+                 continue;
+             };
+             let tracks = &identity.lane_tracks;
+-            let armed = !tracks.is_empty()
++            // RESEARCH PROTOTYPE (dual-mono 2026-09-27, reverted): the structural witness speaks
++            // for the track *input*, so only a chain that gathers the track input may be armed on
++            // it. `MISO_ENGINE_RESEARCH_ARM_ANY_CHAIN` restores the shipped behaviour for comparison.
++            let input_only = std::env::var_os("MISO_ENGINE_RESEARCH_ARM_ANY_CHAIN").is_none();
++            let armed = (!input_only || identity.reads_track_input)
++                && !tracks.is_empty()
+                 && tracks
+                     .iter()
+                     .all(|track| !track.is_empty() && eligible(track));
+@@ -5684,6 +5695,16 @@ pub(crate) fn build_sequential(
+                 // Derived from the finished unit by the runtime constructor.
+                 observation: UnitObservation::Unobserved,
+                 source_lanes: 0,
++                reads_track_input: lanes > 0
++                    && (0..lanes).all(|lane| {
++                        matches!(
++                            node_of(ops[lane]),
++                            GraphNodeId::TrackStage {
++                                stage: crate::TrackStage::PostInputBuiltins,
++                                ..
++                            }
++                        )
++                    }),
+                 stages: u32::try_from(stages).unwrap_or(u32::MAX),
+                 upstream_of_seam_stages: u32::try_from(
+                     (0..stages)
+@@ -7440,6 +7461,7 @@ mod tests {
+                 resident_input: false,
+                 observation: UnitObservation::Unobserved,
+                 source_lanes: 0,
++                reads_track_input: false,
+                 stages: 1,
+                 upstream_of_seam_stages: 1,
+                 lane_tracks: Box::new([Box::from("track")]),
+@@ -7531,6 +7553,7 @@ mod tests {
+                 resident_input: false,
+                 observation: UnitObservation::Unobserved,
+                 source_lanes: 0,
++                reads_track_input: false,
+                 stages: 1,
+                 upstream_of_seam_stages: 1,
+                 lane_tracks: Box::new([Box::from("track")]),
+@@ -8019,6 +8042,7 @@ mod tests {
+             resident_input: false,
+             observation: UnitObservation::Unobserved,
+             source_lanes: 0,
++            reads_track_input: false,
+             stages: 1,
+             upstream_of_seam_stages: 1,
+             lane_tracks: (0..population)
+@@ -8222,6 +8246,7 @@ mod tests {
+             resident_input: false,
+             observation: UnitObservation::of(observed, false, false),
+             source_lanes: 0,
++            reads_track_input: false,
+             stages: 1,
+             upstream_of_seam_stages: 0,
+             lane_tracks: Box::new([]),
+@@ -8474,6 +8499,7 @@ mod tests {
+                 resident_input: false,
+                 observation: UnitObservation::Unobserved,
+                 source_lanes: 0,
++                reads_track_input: false,
+                 stages: 1,
+                 upstream_of_seam_stages: 0,
+                 lane_tracks: Box::new([]),
+diff --git a/crates/host-core/tests/dualmono_probe.rs b/crates/host-core/tests/dualmono_probe.rs
+new file mode 100644
+index 00000000..b1daf347
+--- /dev/null
++++ b/crates/host-core/tests/dualmono_probe.rs
+@@ -0,0 +1,283 @@
++//! Dual-mono research probe (2026-09-27): does a bank chain that sits **after** a per-node
++//! upstream effect collapse on the session's structural witness alone?
++//!
++//! The collapse is armed per chain from `session_structural_symmetry` (SOURCE + input delay) and
++//! the chain's own slots' witnesses. A per-node effect between two bank chains of one track is in
++//! neither. If that per-node effect makes L and R differ (asymmetric parameters), the later chain
++//! still collapses and duplicates the left plane into the right one.
++//!
++//! Oracle: the same document with the collapse forced off. Any bit difference is wrong audio.
++
++use core::num::{NonZeroU32, NonZeroUsize};
++
++use builtins::MeterTap;
++use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
++use host_core::{
++    HostConsoleRequest, HostPrepareCaps, HostShapePolicy, SourceSubmission,
++    prepare_host_session_with_console,
++};
++use session::{
++    EffectIdentity, EffectParam, ParameterChannel, ParameterUnit, StableId,
++    canonical_session_json, parse_session_json,
++};
++
++const BANK: &str = include_str!("../../../fixtures/session/v1/parametric-eq-bank-console.json");
++const QUANTUM: usize = 128;
++const RATE: u32 = 48_000;
++
++fn caps() -> HostPrepareCaps {
++    HostPrepareCaps {
++        shape: HostShapePolicy::AnyLaunchRate,
++        source_ring_frames: 4_096,
++        maximum_source_channels: None,
++        maximum_automation_spans_per_block: 128,
++        maximum_tracks: 100,
++        maximum_sources: 100,
++        maximum_routes: 100,
++        maximum_effects: 100,
++        maximum_graph_session_plus_plan_bytes: 100_000_000,
++        maximum_source_total_bytes: 10_000_000,
++        maximum_source_overhead_bytes: 10_000_000,
++        maximum_effect_state_bytes: 100_000_000,
++        maximum_effect_scratch_bytes: 100_000_000,
++        maximum_builtin_retained_bytes: 100_000_000,
++        maximum_named_allocation_bytes: 100_000_000,
++        maximum_meter_streams: 64,
++        maximum_meter_items: 1 << 16,
++        maximum_meter_bytes: 1 << 24,
++    }
++}
++
++fn console() -> HostConsoleRequest {
++    HostConsoleRequest {
++        control_queue_depth: Some(NonZeroUsize::new(8).expect("depth")),
++        meter_period_frames: Some(NonZeroU32::new(QUANTUM as u32).expect("period")),
++        meter_queue_depth: NonZeroUsize::new(16).expect("meter depth"),
++        meter_tap: MeterTap::PostMatrix,
++        observation_taps: 0,
++        master_track: None,
++    }
++}
++
++fn signal(index: usize) -> f32 {
++    let mut state = (index as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ 0x1234_5678;
++    state ^= state >> 33;
++    state = state.wrapping_mul(0xff51_afd7_ed55_8ccd);
++    state ^= state >> 29;
++    (((state >> 40) as f32) / 16_777_216.0) - 0.5
++}
++
++/// The eight-track EQ bank fixture, every track mono-mapped, with a per-node `miso.delay` in the
++/// dynamic rack (`left_ms`, `right_ms`) and a second, banked EQ in `simd2`.
++fn document(left_ms: f32, right_ms: f32) -> String {
++    let mut model = parse_session_json(BANK).expect("bank fixture parses");
++    model.automation.clear();
++    for track in &mut model.tracks {
++        track.right_source_channel = track.left_source_channel;
++        let eq = track.simd1.effects[0].clone();
++        let mut second = eq.clone();
++        second.id = StableId::parse("eq2").expect("id");
++        track.simd2.effects = vec![second];
++        let mut delay = eq;
++        delay.id = StableId::parse("dly").expect("id");
++        delay.identity = EffectIdentity::Native {
++            effect_id: StableId::parse("miso.delay").expect("delay id"),
++        };
++        delay.params = vec![
++            EffectParam {
++                parameter_id: 1,
++                channel: ParameterChannel::Left,
++                unit: ParameterUnit::Milliseconds,
++                value: left_ms,
++            },
++            EffectParam {
++                parameter_id: 1,
++                channel: ParameterChannel::Right,
++                unit: ParameterUnit::Milliseconds,
++                value: right_ms,
++            },
++        ];
++        track.dynamic.effects = vec![delay];
++    }
++    canonical_session_json(&model).expect("probe canonicalizes")
++}
++
++fn render(document: &str, blocks: usize, forced_off: bool) -> ([Vec<f32>; 2], [u64; 2]) {
++    let (_, mut prepared, mut handles) =
++        prepare_host_session_with_console(document, &caps(), &console()).unwrap_or_else(
++            |failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())),
++        );
++    prepared.plan.force_mono_collapse_off(forced_off);
++    let mut out = [Vec::new(), Vec::new()];
++    for block in 0..blocks {
++        let base = block * QUANTUM;
++        let plane: Vec<f32> = (0..QUANTUM).map(|frame| signal(base + frame)).collect();
++        prepared
++            .sources
++            .submit(
++                b"fixture-source",
++                SourceSubmission {
++                    generation: 1,
++                    start_frame: base as u64,
++                    sample_rate_hz: RATE,
++                    planes: &[&plane, &plane],
++                    frames: QUANTUM as u32,
++                    end_of_region: false,
++                },
++            )
++            .expect("source block");
++        let mut samples = [0.0_f32; QUANTUM * 2];
++        let buffer =
++            PlanarBufferMut::try_new(&mut samples, 2, QUANTUM, QUANTUM).expect("output planes");
++        prepared
++            .plan
++            .render(
++                RenderIo {
++                    input: None,
++                    output: buffer,
++                },
++                RenderTime {
++                    absolute_sample: base as u64,
++                },
++            )
++            .expect("render");
++        out[0].extend_from_slice(&samples[..QUANTUM]);
++        out[1].extend_from_slice(&samples[QUANTUM..]);
++        for meter in handles.meters.iter_mut() {
++            let _ = meter.consumer.try_pop();
++        }
++    }
++    (out, prepared.plan.bank_collapse_counters())
++}
++
++fn first_difference(a: &[Vec<f32>; 2], b: &[Vec<f32>; 2]) -> Option<(usize, usize, f32, f32)> {
++    for plane in 0..2 {
++        for (index, (x, y)) in a[plane].iter().zip(b[plane].iter()).enumerate() {
++            if x.to_bits() != y.to_bits() {
++                return Some((plane, index, *x, *y));
++            }
++        }
++    }
++    None
++}
++
++#[test]
++fn probe_symmetric_per_node_delay_between_chains() {
++    let document = document(5.0, 5.0);
++    let (armed, armed_counters) = render(&document, 16, false);
++    let (dual, dual_counters) = render(&document, 16, true);
++    eprintln!("symmetric: armed counters {armed_counters:?}, dual counters {dual_counters:?}");
++    assert_eq!(first_difference(&armed, &dual), None, "symmetric delay");
++}
++
++#[test]
++fn probe_asymmetric_per_node_delay_between_chains() {
++    let document = document(5.0, 7.0);
++    let (armed, armed_counters) = render(&document, 16, false);
++    let (dual, dual_counters) = render(&document, 16, true);
++    let diff = first_difference(&armed, &dual);
++    eprintln!(
++        "asymmetric: armed counters {armed_counters:?}, dual counters {dual_counters:?}, \
++         first difference {diff:?}"
++    );
++    assert_eq!(diff, None, "asymmetric per-node delay: collapsed render differs from dual");
++}
++
++/// No per-node effect at all: an asymmetric EQ in `simd1`, a symmetric EQ in `simd2`, and the
++/// console meter leased at `tap`. A stage meter at `PostSimd1` splits the cohort's strip into two
++/// chains (it declines the #208 merge); at `PostMatrix` the strip is one chain.
++fn eq_document(left_db: f32, right_db: f32) -> String {
++    let mut model = parse_session_json(BANK).expect("bank fixture parses");
++    model.automation.clear();
++    for track in &mut model.tracks {
++        track.right_source_channel = track.left_source_channel;
++        let eq = track.simd1.effects[0].clone();
++        let mut second = eq.clone();
++        second.id = StableId::parse("eq2").expect("id");
++        track.simd2.effects = vec![second];
++        let first = &mut track.simd1.effects[0];
++        first.params.retain(|param| param.parameter_id != 4);
++        for (channel, value) in [
++            (ParameterChannel::Left, left_db),
++            (ParameterChannel::Right, right_db),
++        ] {
++            first.params.push(EffectParam {
++                parameter_id: 4,
++                channel,
++                unit: ParameterUnit::Db,
++                value,
++            });
++        }
++    }
++    canonical_session_json(&model).expect("probe canonicalizes")
++}
++
++fn render_tap(document: &str, blocks: usize, forced_off: bool, tap: MeterTap) -> ([Vec<f32>; 2], [u64; 2]) {
++    let mut request = console();
++    request.meter_tap = tap;
++    let (_, mut prepared, mut handles) =
++        prepare_host_session_with_console(document, &caps(), &request).unwrap_or_else(
++            |failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())),
++        );
++    prepared.plan.force_mono_collapse_off(forced_off);
++    let mut out = [Vec::new(), Vec::new()];
++    for block in 0..blocks {
++        let base = block * QUANTUM;
++        let plane: Vec<f32> = (0..QUANTUM).map(|frame| signal(base + frame)).collect();
++        prepared
++            .sources
++            .submit(
++                b"fixture-source",
++                SourceSubmission {
++                    generation: 1,
++                    start_frame: base as u64,
++                    sample_rate_hz: RATE,
++                    planes: &[&plane, &plane],
++                    frames: QUANTUM as u32,
++                    end_of_region: false,
++                },
++            )
++            .expect("source block");
++        let mut samples = [0.0_f32; QUANTUM * 2];
++        let buffer =
++            PlanarBufferMut::try_new(&mut samples, 2, QUANTUM, QUANTUM).expect("output planes");
++        prepared
++            .plan
++            .render(
++                RenderIo {
++                    input: None,
++                    output: buffer,
++                },
++                RenderTime {
++                    absolute_sample: base as u64,
++                },
++            )
++            .expect("render");
++        out[0].extend_from_slice(&samples[..QUANTUM]);
++        out[1].extend_from_slice(&samples[QUANTUM..]);
++        for meter in handles.meters.iter_mut() {
++            while meter.consumer.try_pop().is_ok() {}
++        }
++    }
++    (out, prepared.plan.bank_collapse_counters())
++}
++
++#[test]
++fn probe_asymmetric_eq_one_chain() {
++    let document = eq_document(6.0, -6.0);
++    let (armed, armed_counters) = render_tap(&document, 16, false, MeterTap::PostMatrix);
++    let (dual, dual_counters) = render_tap(&document, 16, true, MeterTap::PostMatrix);
++    let diff = first_difference(&armed, &dual);
++    eprintln!("one chain: armed {armed_counters:?}, dual {dual_counters:?}, diff {diff:?}");
++    assert_eq!(diff, None);
++}
++
++#[test]
++fn probe_asymmetric_eq_split_by_post_simd1_meter() {
++    let document = eq_document(6.0, -6.0);
++    let (armed, armed_counters) = render_tap(&document, 16, false, MeterTap::PostSimd1);
++    let (dual, dual_counters) = render_tap(&document, 16, true, MeterTap::PostSimd1);
++    let diff = first_difference(&armed, &dual);
++    eprintln!("split chains: armed {armed_counters:?}, dual {dual_counters:?}, diff {diff:?}");
++    assert_eq!(diff, None, "asymmetric simd1 EQ + PostSimd1 meter: collapsed differs from dual");
++}
+diff --git a/crates/lane/src/backend.rs b/crates/lane/src/backend.rs
+index 9c842ab5..22ba8f94 100644
+--- a/crates/lane/src/backend.rs
++++ b/crates/lane/src/backend.rs
+@@ -29,10 +29,17 @@ impl Backend {
+     /// The backend this build uses, decided entirely at compile time.
+     #[must_use]
+     pub const fn current() -> Self {
+-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
++        #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), not(miso_native_simd4)))]
+         {
+             Self::Simd8
+         }
++        // RESEARCH PROTOTYPE (dual-mono 2026-09-27, reverted): a native four-lane build, so the
++        // effect banks' `Backend::current().width() == lanes` check admits four-lane banks on x86
++        // and a native run can stand in for the browser's lane width.
++        #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), miso_native_simd4))]
++        {
++            Self::Simd4
++        }
+         #[cfg(target_arch = "aarch64")]
+         {
+             Self::Simd4
+diff --git a/crates/rack/src/lib.rs b/crates/rack/src/lib.rs
+index 9960a550..a2ce0ac0 100644
+--- a/crates/rack/src/lib.rs
++++ b/crates/rack/src/lib.rs
+@@ -1773,6 +1773,9 @@ pub struct BankChain {
+     /// [`collapse_transitions`](Self::collapse_transitions) for what each one counts and why a
+     /// block count alone cannot say it.
+     transitions: [u64; 3],
++    /// RESEARCH PROTOTYPE (dual-mono 2026-09-27, reverted): read once at bind from
++    /// `MISO_ENGINE_RESEARCH_SKIP_SEAM_COPY`; a timing-only upper bound on the seam copy.
++    research_skip_seam_copy: bool,
+ }
+ 
+ /// Owned chain masks validated before graph bindings transfer their processors. The constructor
+@@ -1876,6 +1879,7 @@ impl BankChain {
+             collapse_source: false,
+             collapses: 0,
+             transitions: [0; 3],
++            research_skip_seam_copy: std::env::var_os("MISO_ENGINE_RESEARCH_SKIP_SEAM_COPY").is_some(),
+         })
+     }
+ 
+@@ -2398,7 +2402,12 @@ impl BankChain {
+             // fold's `ll*l + lr*r` is *not* rewritten as `(ll + lr) * l` on the strength of
+             // `l == r`: the two round differently, and the second is not what a dual run computes.
+             let AoSoaScratch { left, right, .. } = &mut self.scratch;
+-            right[..len].copy_from_slice(&left[..len]);
++            // RESEARCH PROTOTYPE (dual-mono 2026-09-27, reverted): a timing-only upper bound on the
++            // seam copy's cost. Skipping it renders a stale right plane, so the bits are wrong by
++            // construction; only the clock is read on that arm.
++            if !self.research_skip_seam_copy {
++                right[..len].copy_from_slice(&left[..len]);
++            }
+             for slot in &mut self.slots[self.collapse_prefix..] {
+                 if slot.has_active_lanes() {
+                     slot.stage.process(BankBlock {
+diff --git a/tools/console-workload/examples/dualmono_research.rs b/tools/console-workload/examples/dualmono_research.rs
+new file mode 100644
+index 00000000..ceeeb74a
+--- /dev/null
++++ b/tools/console-workload/examples/dualmono_research.rs
+@@ -0,0 +1,283 @@
++//! RESEARCH PROTOTYPE (dual-mono, 2026-09-27; reverted, recorded as a patch). Not a gate.
++//!
++//! Paired, in-process timing of the mono collapse on the standing fixtures and on the dogfood
++//! first-listen session (81 stems, 18 of them bit-identical dual mono), at the native eight-lane
++//! width and at the four-lane width the browser runs. One invocation, one warmup, two measured
++//! rounds; arms alternate observation by observation, rotating their order.
++//!
++//! Every group first renders `CHECK_BLOCKS` fresh blocks per arm and prints a digest, so an arm
++//! that is claimed to be the same audio can be seen to be the same bits. The `noseam` arms skip
++//! the collapse's seam copy (timing-only upper bound, bits intentionally wrong).
++
++#![allow(unsafe_code)]
++
++use std::time::Instant;
++
++use console_workload::{PlanConfig, SessionRuntime, Workload};
++use lane::Backend;
++use session::{SessionModel, parse_session_json};
++
++const MONO_FIXTURE: &str =
++    include_str!("../../../fixtures/session/v1/console-sixty-four-track-mono.json");
++const DOGFOOD: &str =
++    "/home/bl/misofm/agents/stems/mixes/first-listen-v1/render-001/session.json";
++const CHECK_BLOCKS: u64 = 64;
++const WARMUP_BLOCKS: u64 = 500;
++const OBSERVATIONS: usize = 3000;
++const ROUNDS: u32 = 2;
++
++struct Arm {
++    name: String,
++    runtime: SessionRuntime,
++    digest: u64,
++    next_block: u64,
++}
++
++fn fnv(hash: &mut u64, data: &[f32]) {
++    for value in data {
++        for byte in value.to_bits().to_le_bytes() {
++            *hash ^= u64::from(byte);
++            *hash = hash.wrapping_mul(0x0100_0000_01b3);
++        }
++    }
++}
++
++fn arm(name: &str, runtime: SessionRuntime) -> Arm {
++    Arm {
++        name: name.to_owned(),
++        runtime,
++        digest: 0xcbf2_9ce4_8422_2325,
++        next_block: 0,
++    }
++}
++
++fn percentile(sorted: &[u64], p: f64) -> u64 {
++    let index = ((sorted.len() as f64 - 1.0) * p).round() as usize;
++    sorted[index]
++}
++
++fn measure(group: &str, backend: &str, arms: &mut [Arm]) {
++    for arm in arms.iter_mut() {
++        for _ in 0..CHECK_BLOCKS {
++            arm.runtime.render(arm.next_block).expect("render");
++            arm.next_block += 1;
++            fnv(&mut arm.digest, arm.runtime.research_output());
++        }
++    }
++    let preflight = std::env::var_os("DUALMONO_PREFLIGHT").is_some();
++    let (warmup, observations) = if preflight { (4, 8) } else { (WARMUP_BLOCKS, OBSERVATIONS) };
++    for _ in 0..warmup {
++        for arm in arms.iter_mut() {
++            arm.runtime.render(arm.next_block).expect("render");
++            arm.next_block += 1;
++        }
++    }
++    let count = arms.len();
++    for round in 1..=ROUNDS {
++        let mut samples: Vec<Vec<u64>> = vec![Vec::with_capacity(observations); count];
++        for observation in 0..observations {
++            for offset in 0..count {
++                let index = (observation + offset) % count;
++                let arm = &mut arms[index];
++                let start = Instant::now();
++                arm.runtime.render(arm.next_block).expect("render");
++                let elapsed = start.elapsed().as_nanos() as u64;
++                arm.next_block += 1;
++                samples[index].push(elapsed);
++            }
++        }
++        for (arm, mut times) in arms.iter().zip(samples) {
++            times.sort_unstable();
++            let mean = times.iter().sum::<u64>() as f64 / times.len() as f64;
++            println!(
++                "{group}\t{backend}\t{}\tround={round}\tp50_ns={}\tp10_ns={}\tp90_ns={}\tmean_ns={:.0}\tdigest={:016x}\tshape={:?}\tcollapse={:?}",
++                arm.name,
++                percentile(&times, 0.5),
++                percentile(&times, 0.1),
++                percentile(&times, 0.9),
++                mean,
++                arm.digest,
++                arm.runtime.bank_shape(),
++                arm.runtime.bank_collapse_counters(),
++            );
++        }
++    }
++}
++
++fn skip_seam(on: bool) {
++    // SAFETY: single-threaded research driver; the variable is read once per chain at bind.
++    unsafe {
++        if on {
++            std::env::set_var("MISO_ENGINE_RESEARCH_SKIP_SEAM_COPY", "1");
++        } else {
++            std::env::remove_var("MISO_ENGINE_RESEARCH_SKIP_SEAM_COPY");
++        }
++    }
++}
++
++fn set(name: &str, on: bool) {
++    // SAFETY: single-threaded research driver; read off render.
++    unsafe {
++        if on {
++            std::env::set_var(name, "1");
++        } else {
++            std::env::remove_var(name);
++        }
++    }
++}
++
++fn remainder(on: bool) {
++    // SAFETY: single-threaded research driver; read once per compile, off render.
++    unsafe {
++        if on {
++            std::env::set_var("MISO_ENGINE_RESEARCH_MONO_REMAINDER", "1");
++        } else {
++            std::env::remove_var("MISO_ENGINE_RESEARCH_MONO_REMAINDER");
++        }
++    }
++}
++
++fn fixture_group(backend: Backend, name: &str) {
++    let build = |workload| SessionRuntime::build_with_dispatch(workload, PlanConfig::BASELINE, backend);
++    let mut arms = vec![
++        arm("console", build(Workload::SixtyFourTrackConsole)),
++        arm("mono", build(Workload::SixtyFourTrackConsoleMono)),
++        arm("mono_dual", build(Workload::SixtyFourTrackConsoleMonoDual)),
++        arm("half_mono", build(Workload::SixtyFourTrackConsoleHalfMono)),
++    ];
++    skip_seam(true);
++    arms.push(arm("mono_noseam", build(Workload::SixtyFourTrackConsoleMono)));
++    skip_seam(false);
++    measure("fixture64", name, &mut arms);
++}
++
++/// The dogfood model, and which of its tracks read a bit-identical dual-mono stem.
++fn dogfood(identical: &[String]) -> (SessionModel, Vec<bool>) {
++    let text = std::fs::read_to_string(DOGFOOD).expect("dogfood session (read-only)");
++    // The first-listen session predates the BLAKE3 stem identity; the digest is only a label here.
++    let text = text.replace("\"sha256:", "\"blake3:");
++    let model = parse_session_json(&text).expect("dogfood session parses");
++    let dual_mono = model
++        .tracks
++        .iter()
++        .map(|track| {
++            let source = model
++                .sources
++                .iter()
++                .find(|source| source.id == track.source_id)
++                .expect("track source");
++            identical.iter().any(|content| *content == source.content)
++        })
++        .collect();
++    (model, dual_mono)
++}
++
++/// Give every dogfood track the standing strip (EQ + compressor on `simd1`, limiter on `simd2`)
++/// with the mono fixture's channel-symmetric parameters, cycling its 64 strips.
++fn with_standing_strip(mut model: SessionModel) -> SessionModel {
++    let strips = parse_session_json(MONO_FIXTURE).expect("mono fixture");
++    for (index, track) in model.tracks.iter_mut().enumerate() {
++        let strip = &strips.tracks[index % strips.tracks.len()];
++        track.simd1 = strip.simd1.clone();
++        track.dynamic = strip.dynamic.clone();
++        track.simd2 = strip.simd2.clone();
++    }
++    model
++}
++
++fn dogfood_group(group: &str, backend: Backend, name: &str, model: &SessionModel, dual_mono: &[bool]) {
++    let stereo_feed: Vec<(usize, usize)> = dual_mono
++        .iter()
++        .map(|mono| if *mono { (0, 0) } else { (0, 1) })
++        .collect();
++    let mut folded = model.clone();
++    for (track, mono) in folded.tracks.iter_mut().zip(dual_mono) {
++        if *mono {
++            track.right_source_channel = track.left_source_channel;
++        }
++    }
++    let mut arms = vec![
++        arm(
++            "as_is_dual_mono_declared_stereo",
++            SessionRuntime::research_build(model, backend, false, &stereo_feed),
++        ),
++        arm(
++            "folded_collapse",
++            SessionRuntime::research_build(&folded, backend, false, &stereo_feed),
++        ),
++        arm(
++            "folded_forced_off",
++            SessionRuntime::research_build(&folded, backend, true, &stereo_feed),
++        ),
++    ];
++    skip_seam(true);
++    arms.push(arm(
++        "folded_noseam",
++        SessionRuntime::research_build(&folded, backend, false, &stereo_feed),
++    ));
++    skip_seam(false);
++    remainder(true);
++    arms.push(arm(
++        "folded_remainder_collapse",
++        SessionRuntime::research_build(&folded, backend, false, &stereo_feed),
++    ));
++    arms.push(arm(
++        "folded_remainder_forced_off",
++        SessionRuntime::research_build(&folded, backend, true, &stereo_feed),
++    ));
++    if std::env::var_os("DUALMONO_UNARMED").is_some() {
++        set("MISO_ENGINE_RESEARCH_NO_ARM", true);
++        arms.push(arm(
++            "folded_remainder_unarmed",
++            SessionRuntime::research_build(&folded, backend, false, &stereo_feed),
++        ));
++        remainder(false);
++        arms.push(arm(
++            "folded_unarmed",
++            SessionRuntime::research_build(&folded, backend, false, &stereo_feed),
++        ));
++        set("MISO_ENGINE_RESEARCH_NO_ARM", false);
++        // Keep only the arms this diagnosis compares.
++        arms.retain(|arm| {
++            matches!(
++                arm.name.as_str(),
++                "as_is_dual_mono_declared_stereo"
++                    | "folded_collapse"
++                    | "folded_unarmed"
++                    | "folded_remainder_collapse"
++                    | "folded_remainder_unarmed"
++            )
++        });
++    }
++    remainder(false);
++    measure(group, name, &mut arms);
++}
++
++fn main() {
++    let identical: Vec<String> = std::fs::read_to_string(
++        std::env::args().nth(1).expect("path to the identical-sha list"),
++    )
++    .expect("identical list")
++    .lines()
++    .map(|line| line.replace("sha256:", "blake3:"))
++    .collect();
++    let (model, dual_mono) = dogfood(&identical);
++    eprintln!(
++        "dogfood tracks {}, bit-identical dual mono {}",
++        model.tracks.len(),
++        dual_mono.iter().filter(|mono| **mono).count()
++    );
++    let strip = with_standing_strip(model.clone());
++    // Only the width this build banks every effect at: a native Simd4 *dispatch* in an eight-lane
++    // build renders every effect per node (the factories refuse a width other than
++    // `Backend::current()`), so the four-lane leg is a separate `--cfg miso_native_simd4` build.
++    let backend = Backend::current();
++    let name = if backend == Backend::Simd4 { "Simd4" } else { "Simd8" };
++    {
++        if std::env::var_os("DUALMONO_UNARMED").is_none() {
++            fixture_group(backend, name);
++        }
++        dogfood_group("dogfood81_builtins", backend, name, &model, &dual_mono);
++        dogfood_group("dogfood81_strip", backend, name, &strip, &dual_mono);
++    }
++}
+diff --git a/tools/console-workload/src/lib.rs b/tools/console-workload/src/lib.rs
+index 76876388..0eab0eb9 100644
+--- a/tools/console-workload/src/lib.rs
++++ b/tools/console-workload/src/lib.rs
+@@ -951,6 +951,96 @@ pub struct SessionRuntime {
+ }
+ 
+ impl SessionRuntime {
++    /// RESEARCH PROTOTYPE (dual-mono, 2026-09-27; reverted, recorded as a patch). Compiles,
++    /// prepares and binds an arbitrary model on the bound feed, with an explicit per-track feed
++    /// mapping (`feed[i]` is which frozen tone channel each plane of model track `i` receives) and
++    /// the collapse joined exactly as `build_full` joins it.
++    ///
++    /// The feed is separate from the declaration so that a stereo-declared track `(0, 1)` can be
++    /// fed two bit-identical planes -- a dual-mono file -- and compared against the same track
++    /// folded to `(0, 0)`.
++    #[doc(hidden)]
++    pub fn research_build(
++        model: &SessionModel,
++        dispatch: Backend,
++        forced_off: bool,
++        feed: &[(usize, usize)],
++    ) -> Self {
++        assert_eq!(feed.len(), model.tracks.len(), "one feed mapping per track");
++        let session = compile_session(model, compile_caps()).expect("compiled research session");
++        let registry = launch_native_effect_registry().expect("launch effect registry");
++        let effects = prepare_native_session_effects(&session, &registry, effect_caps())
++            .expect("prepared research effects");
++        let builtins = builtins_compiler::prepare_session_builtins(&session, &[], builtin_caps())
++            .expect("prepared research builtins");
++        let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
++            dispatch,
++            plan_id: PLAN_ID,
++            effects,
++            builtins,
++            caps: graph_caps(),
++        })
++        .unwrap_or_else(|_| panic!("research graph"));
++        let envelope = artifact.envelope();
++        let index = |track_id: &str| {
++            model
++                .tracks
++                .iter()
++                .position(|track| track.id.as_str() == track_id)
++                .expect("research track id")
++        };
++        let nodes = artifact
++            .external_binding_nodes()
++            .map(|node| match node {
++                GraphNodeId::TrackStage {
++                    track_id,
++                    stage: TrackStage::Input,
++                } => {
++                    let track = index(track_id.as_str());
++                    let block = source_block(track, false);
++                    GraphNodeBinding::new(
++                        node.clone(),
++                        Box::new(FrozenGraphSource::from_block(&block, feed[track])),
++                    )
++                }
++                _ => GraphNodeBinding::identity(node.clone()),
++            })
++            .collect();
++        let bound = artifact
++            .into_bound(GraphRuntimeBindings {
++                envelope,
++                nodes,
++                observers: Vec::new(),
++            })
++            .unwrap_or_else(|_| panic!("research graph bindings"));
++        let mut plan = bound.plan;
++        let structural = builtins_compiler::session_structural_symmetry(&session);
++        let eligible: BTreeSet<&str> = structural
++            .iter()
++            .filter(|(_, witness)| witness.eligible())
++            .map(|(track, _)| track.as_ref())
++            .collect();
++        if std::env::var_os("MISO_ENGINE_RESEARCH_NO_ARM").is_none() {
++            plan.arm_mono_collapse(&|track: &str| eligible.contains(track));
++        }
++        plan.force_mono_collapse_off(forced_off);
++        Self {
++            plan,
++            output: Box::new(OutputPlanes([0.0; QUANTUM * 2])),
++            meter_consumers: bound.meter_consumers,
++            controls: Vec::new(),
++            observations: Vec::new(),
++            structural_symmetry: builtins_compiler::session_structural_symmetry(&session),
++        }
++    }
++
++    /// RESEARCH PROTOTYPE: the last rendered block's planes, for bit comparisons.
++    #[doc(hidden)]
++    #[must_use]
++    pub fn research_output(&self) -> &[f32] {
++        &self.output.0
++    }
++
+     /// The arm every `console_session` row renders: [`PlanConfig::BASELINE`] at the backend this
+     /// build detected.
+     pub fn new(workload: Workload) -> Self {

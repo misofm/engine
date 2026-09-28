@@ -3985,16 +3985,34 @@ pub fn session_structural_symmetry(
 ///
 /// * `SOURCE` from [`track_mono_source`], through [`session_structural_symmetry`]. This is
 ///   the term the M0 phase built and the only one the compiled session can answer alone.
-/// * `DESIGNED` from each prepared upstream-of-seam stage the compile actually prepared: the
-///   track's input builtins ([`InputBuiltins::channel_symmetry`]) and each of its prepared native
-///   effects. A compile that prepared no builtins (`GraphCompiler::compile`) simply has one fewer
-///   contributor -- honest, because there is no input stage in that plan to be asymmetric.
+/// * `DESIGNED` from each prepared upstream-of-seam stage the compile prepared: the track's
+///   input builtins ([`InputBuiltins::channel_symmetry`]) and each of its prepared native effects.
+///   Every compile prepares the input builtins, so that term is always present; the builtins-less
+///   compile entry, which had no input stage to contribute it, was deleted by issue #959.
 ///
 /// Absent terms are never assumed: an unknown track answers [`CohortPoolClass::Stereo`], which
 /// is the class that cannot over-claim.
+///
+/// # The one class that is not the witness's: the stranded mono remainder (issue #971)
+///
+/// An effect bank binds only a **full** group (#96 F7), so a mono pool whose size is not a
+/// multiple of the lane width strands its tail: those tracks' effects render per node. The rack
+/// planner therefore runs a trial plan and, where every effect group a mono track sits in is a
+/// partial mono group, moves the track to the stereo pool with
+/// [`SessionPoolClasses::pool_as_stereo`], where it renders dual inside a bank. It binds both
+/// plans and keeps the move only when the factories bound more effect banks for the new plan
+/// than for the trial: a planned full group is not a bank, because a factory may decline it (the
+/// delay never banks). The move is all or nothing, one decision for every stranded track. That is a
+/// **pooling** decision, not a symmetry fact, so it is kept beside the witness rather than
+/// written into it: the track's witness still says its source is mono, and the host's
+/// structural arming join (which never reads this map) is untouched. It happens before either
+/// planner forms the plan it keeps, and both read it through [`SessionPoolClasses::class_of`],
+/// so the two planners' lane sets still agree track for track.
 #[derive(Clone, Debug, Default)]
 pub struct SessionPoolClasses {
     by_track: BTreeMap<Box<str>, ChannelSymmetryWitness>,
+    /// Mono-class tracks pooled as stereo because their mono groups would strand (issue #971).
+    pooled_as_stereo: BTreeSet<Box<str>>,
 }
 
 impl SessionPoolClasses {
@@ -4003,6 +4021,7 @@ impl SessionPoolClasses {
     pub fn from_session(session: &CompiledSession) -> Self {
         Self {
             by_track: session_structural_symmetry(session).into_iter().collect(),
+            pooled_as_stereo: BTreeSet::new(),
         }
     }
 
@@ -4018,9 +4037,28 @@ impl SessionPoolClasses {
         }
     }
 
-    /// This track's pool class. An unknown track is [`CohortPoolClass::Stereo`].
+    /// Moves one mono-class track into the stereo pool (issue #971).
+    ///
+    /// Pooling only: the track's witness is left as it is, because its source is still mono and
+    /// nothing but the pool it competes in changes. The caller is the rack planner, which moves a
+    /// track only when every effect group it sits in is a partial mono group; see the type's
+    /// documentation. A track the session does not have is ignored rather than inserted, as in
+    /// [`SessionPoolClasses::conjoin`], and a stereo-class track stays where it is.
+    pub fn pool_as_stereo(&mut self, track_id: &str) {
+        if self.class_of(track_id) == CohortPoolClass::MonoSymmetricAtPrepare
+            && let Some((track, _)) = self.by_track.get_key_value(track_id)
+        {
+            self.pooled_as_stereo.insert(track.clone());
+        }
+    }
+
+    /// This track's pool class. An unknown track is [`CohortPoolClass::Stereo`], and so is a
+    /// track [`SessionPoolClasses::pool_as_stereo`] moved.
     #[must_use]
     pub fn class_of(&self, track_id: &str) -> CohortPoolClass {
+        if self.pooled_as_stereo.contains(track_id) {
+            return CohortPoolClass::Stereo;
+        }
         self.by_track
             .get(track_id)
             .copied()
@@ -4031,12 +4069,9 @@ impl SessionPoolClasses {
 
     /// Every track's class, in normalized track order. Evidence and diagnosis only.
     pub fn classes(&self) -> impl Iterator<Item = (&str, CohortPoolClass)> {
-        self.by_track.iter().map(|(track, witness)| {
-            (
-                track.as_ref(),
-                CohortPoolClass::of_prepare_witness(*witness),
-            )
-        })
+        self.by_track
+            .keys()
+            .map(|track| (track.as_ref(), self.class_of(track)))
     }
 
     /// How many tracks fall in [`CohortPoolClass::MonoSymmetricAtPrepare`].
@@ -4672,6 +4707,27 @@ fn make_scalar_split_pair(
 }
 struct MeterObserver(MeterAccumulator);
 impl GraphRuntimeObserver for MeterObserver {
+    /// Issue #943: a meter that selects exactly `SAMPLE_PEAK` merges the bank's block peak instead
+    /// of reading its samples, so it asks the bank to compute one. Any other selection still needs
+    /// the samples and never makes a bank run the pass.
+    fn accepts_sample_peak(&self) -> bool {
+        self.0.metrics() == builtins::MeterMetricSet::SAMPLE_PEAK
+    }
+
+    /// Issue #950: a meter that can commit a banked block -- no held peak with a hold or a decay
+    /// -- asks the bank for its full meter pass, unless it selects exactly `SAMPLE_PEAK`, which
+    /// issue #943's cheaper peak pass already serves.
+    fn accepts_banked_meter(&self) -> bool {
+        self.0.banked_eligible() && self.0.metrics() != builtins::MeterMetricSet::SAMPLE_PEAK
+    }
+
+    /// Issue #950: the energy this meter's own loop would start the block from, read without
+    /// changing anything.
+    fn banked_meter_seed(&self, first_sample: u64, frames: u32) -> Option<[f64; 2]> {
+        self.0
+            .banked_seed(first_sample, usize::try_from(frames).ok()?)
+    }
+
     fn activation_changed(&mut self, active: bool, generation: u64, _first_sample: u64) {
         if active {
             self.0.restart_observation(generation);
@@ -4691,6 +4747,18 @@ impl GraphRuntimeObserver for MeterObserver {
         &mut self,
         block: graph::GraphResidentObservationBlock<'_>,
     ) -> Option<Result<(), RenderError>> {
+        // Issue #950: the full pass is this meter's only if it accepted it. A `SAMPLE_PEAK` meter
+        // on a unit whose full pass ran merges that pass's peak through issue #943's call.
+        let banked = block
+            .meter
+            .filter(|_| self.accepts_banked_meter())
+            .map(|meter| builtins::MeterBankedBlock {
+                sample_peak: meter.sample_peak,
+                clipped: meter.clipped.map(u64::from),
+                sanitized: meter.sanitized.map(u64::from),
+                energy_seed: meter.energy_seed,
+                energy: meter.energy,
+            });
         Some(
             builtins::MeterInput::strided(
                 block.lane.left(),
@@ -4699,7 +4767,17 @@ impl GraphRuntimeObserver for MeterObserver {
                 block.lane.width().lanes() as usize,
                 block.lane.lane(),
             )
-            .and_then(|input| self.0.observe_input(input, block.first_sample))
+            .and_then(|input| match banked {
+                Some(banked) => {
+                    self.0
+                        .observe_input_banked(input, block.first_sample, Some(banked))
+                }
+                None => self.0.observe_input_with_block_peak(
+                    input,
+                    block.first_sample,
+                    block.sample_peak,
+                ),
+            })
             .map_err(|error| match error {
                 builtins::MeterObservationError::SampleTimeOverflow => RenderError::TimeOverflow,
                 builtins::MeterObservationError::LaneLength => RenderError::InvalidEnvelope,

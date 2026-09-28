@@ -125,6 +125,18 @@ mod x86 {
             "the pins do not describe this host with FTZ clear, so G6 has no baseline:\n{}",
             describe(&canonical)
         );
+        // The counts beside the digests (issues #949 and #950): the `f64` lanes and the full meter
+        // pass are exact on this host with FTZ and DAZ clear. Only the canonical arm is held to
+        // it; under DAZ a subnormal widen input reads as zero, which is the environment every
+        // render entry clears.
+        assert_eq!(
+            canonical.f64_lane_mismatches, 0,
+            "the f64 lanes disagree with scalar f64 with FTZ clear"
+        );
+        assert_eq!(
+            canonical.meter_block_mismatches, 0,
+            "the full meter pass disagrees with the meter's scalar loop with FTZ clear"
+        );
 
         let control = unguarded_report(hostile);
         assert!(

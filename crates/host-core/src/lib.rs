@@ -111,6 +111,11 @@ pub mod shape;
 pub mod solo;
 pub mod source;
 pub mod spectrum;
+// Issues #996 and #997: the true-peak limiter's linked-pair session test. A unit test rather than
+// a `tests/` file because it prepares at every bank width through the `#[cfg(test)]` backend seam
+// in `prepare`, which `tests/` cannot see.
+#[cfg(test)]
+mod limiter_linked_session;
 
 #[cfg(feature = "control-provider")]
 pub use control_provider::{
@@ -211,8 +216,9 @@ pub use spectrum::{
 /// The conjunction is [`ChannelSymmetryWitness::and`], and since mono-collapse M2 it is what the
 /// bank chains dispatch on: a cohort whose every active lane holds both halves renders one plane
 /// and duplicates it at the fader/matrix seam. The two halves are joined once, off the render
-/// thread, by `PreparedRenderPlan::arm_mono_collapse`; a plan nobody joins never collapses, which
-/// is the safe default and the reason the join is an explicit call rather than an inference.
+/// thread, by `PreparedRenderPlan::arm_mono_collapse`, which since issue #970 arms only the chains
+/// that gather their tracks' inputs; a plan nobody joins never collapses, which is the safe default
+/// and the reason the join is an explicit call rather than an inference.
 pub use builtins_compiler::{session_structural_symmetry, track_mono_source};
 pub use effect_contract::{ChannelSymmetryWitness, LiveConsoleRecord, SeamSide, SymmetryEvent};
 

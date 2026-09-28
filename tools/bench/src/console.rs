@@ -98,6 +98,25 @@
 //! once per arm after the warm-up, and the validator requires the two arms to agree and every
 //! route of the console to fold.
 //!
+//! # The metered console row (issue #881)
+//!
+//! `console_meters` meters the console the way no browser does: all-metric meters at a four-block
+//! window, prepared through the concurrent entry. `sixty_four_track_console_metered` is a session
+//! row that meters it the way the default web boot does -- one `SAMPLE_PEAK` meter at `PostMatrix`
+//! per track, a twelve-block window, no hold, no decay, bound as permanent observers through
+//! `prepare_selected_session_builtins_between_render_calls` -- so the observer path the browser
+//! pays for has a row that can move. That entry also brings the browser's between-render-calls
+//! control delivery, which fuses each cohort's fader and matrix into one chain stage where the
+//! standing row's `Concurrent` delivery keeps two (48 chain stages against 40, pinned in
+//! `console-workload`'s pair test). So the row minus `sixty_four_track_console` is the meters plus
+//! the fused fader and matrix, and must be read that way. It is timed exactly like every other
+//! session row: the clock holds the render call alone, and the row's meter streams are drained of
+//! every snapshot after each block, outside the clock, where the output identity is also taken.
+//! Its record adds a meter group (streams, tap, metric set, window, snapshots consumed, snapshots
+//! dropped) and the plan's `bank_route_folds` and `bank_scatter_redirects`, read once at bind; the
+//! rows' digests are asserted equal to `sixty_four_track_console`'s in-run, because a meter
+//! observes and the fused fader and matrix render the split pair's bits.
+//!
 //! # The automation-active row (`console_automation`)
 //!
 //! Every session row above renders with automation **cleared**: `console_model` empties the
@@ -115,6 +134,28 @@
 //! ramp delta is `automated - restated`: the same queue drain, the same span count, and a
 //! smoothing window open in one arm and not the other. `quiet == restated` is the class-A
 //! statement, asserted in-run.
+//!
+//! # The mixing-automation row (`console_mixing_automation`, issue #1003)
+//!
+//! `console_automation` rides one compressor threshold on one track of the compressor-only row.
+//! A mixing session rides EQ gains, compressor thresholds and limiter ceilings across the console,
+//! and on the mono console -- the product's common case -- that traffic is where three costs no
+//! other row sees live: the EQ's whole-bank ramping path, the mono collapse a one-channel record
+//! retires for the life of the plan, and the fact that tracks spread across banks each take a
+//! bank down.
+//!
+//! This row is the mono fixture as written, with the live-console control channel, riding eight
+//! controls on eight tracks, one per eight-lane bank (`console_workload::mixing_automation` is the
+//! table). Each control is pushed in the shape a real host pushes it: the EQ as one owner edit on
+//! `Both`, which designs one `Both` target, and the compressor and the limiter as a Left then a
+//! Right record. Its three arms alternate per observation, and their deltas are named for what
+//! they measure: `restated - quiet` is the collapse the restating records retire, and `automated -
+//! restated` is the ramping. Every base is the held value, so `quiet == restated` is the collapse's
+//! own class-A statement, asserted in-run. An untimed preflight asserts, before any number is
+//! taken, that every automated effect moves bits on its own, and that the EQ's restatement keeps
+//! every cohort collapsed (`bench console --preflight` runs it alone). The row states each arm's
+//! `bank_collapse_counters`, because a collapse renders the bits a dual bank renders and nothing
+//! else can say whether it held.
 
 use crate::floor::{self, CoreClock};
 use bench_support::alloc as bench_alloc;
@@ -123,9 +164,13 @@ use bench_support::json::escape as json_escape;
 use bench_support::metadata::Metadata;
 use bench_support::stats::{Percentiles, format_f64, microseconds};
 use bench_support::timing;
+use builtins::{MeterMetricSet, MeterSnapshot, MeterTap};
+use console_workload::mixing_automation::{
+    self, Lowering, MixingArm, Preflight, PushTally, ResolvedControl,
+};
 use console_workload::{
-    DRIVER_FED_WORKLOADS, ObservationArm, PlanConfig, QUANTUM, SAMPLE_RATE_HZ, SessionRuntime,
-    WINDOW_BLOCKS, WORKLOADS, Workload,
+    ObservationArm, PlanConfig, QUANTUM, SAMPLE_RATE_HZ, SessionRuntime, WINDOW_BLOCKS, Workload,
+    native_session_rows,
 };
 use effect_compiler::launch_native_effect_registry;
 use effect_contract::{
@@ -140,11 +185,23 @@ use lane::Backend;
 const OBSERVATIONS: usize = 1_000;
 const ISSUE: u32 = 149;
 
-/// The bound-feed plumbing row and its driver-fed twin (issue #928): one session, one frozen tone,
-/// two feeds. Their digests must agree, and the run asserts it before it emits either record.
-const PLUMBING_FEED_PAIR: [Workload; 2] = [
-    Workload::SixtyFourTrackPlumbingOnly,
-    Workload::SixtyFourTrackPlumbingRing,
+/// The bound-feed gain/pan row and its driver-fed twin (issue #928, re-based onto the gain/pan
+/// session by #956): one session, one frozen tone, two feeds. Their digests must agree, and the run
+/// asserts it before it emits either record. The driver-fed row is the native pure-path target.
+const GAIN_PAN_FEED_PAIR: [Workload; 2] = [
+    Workload::SixtyFourTrackGainPanOnly,
+    Workload::SixtyFourTrackGainPanRing,
+];
+
+/// The standing console row and its metered twin (issue #881): one session, prepared once through
+/// the `Concurrent` entry with no meter and once as the default web boot prepares it, with its
+/// meter set and its between-render-calls delivery, which fuses each cohort's fader and matrix
+/// into one stage. A meter observes and never changes signal flow, and the fused stage renders the
+/// split pair's bits, so their digests must agree, and the run asserts it before it emits either
+/// record. Their timings differ by the meters and the fusion together.
+const METERED_PAIR: [Workload; 2] = [
+    Workload::SixtyFourTrackConsole,
+    Workload::SixtyFourTrackConsoleMetered,
 ];
 
 pub(crate) fn main() {
@@ -152,11 +209,17 @@ pub(crate) fn main() {
     // allocator registered by a dependency that is never named may not be linked at all, and a
     // silently absent audit reports success for every gate below it.
     bench_alloc::assert_installed();
-    assert_eq!(
-        std::env::args_os().count(),
-        1,
-        "benchmark accepts no arguments"
-    );
+    let arguments: Vec<_> = std::env::args_os().skip(1).collect();
+    match arguments.as_slice() {
+        [] => {}
+        // Issue #1003: the mixing-automation row's untimed preflight, alone. It takes no round
+        // marker because it produces no record.
+        [flag] if flag == "--preflight" => {
+            mixing_preflight(Backend::current());
+            return;
+        }
+        _ => panic!("benchmark accepts no arguments but --preflight"),
+    }
     let round = round_from_runner();
     // Feature detection ends here, before every timed observation.
     let backend = Backend::current();
@@ -168,24 +231,32 @@ pub(crate) fn main() {
     // the rule #163 item 0c already states for the decomposition itself. Emission is untimed, and
     // its order is unchanged.
     let clock = CoreClock::from_runner(metadata);
-    // The standing rows, then the driver-fed rows (issue #928), which `WORKLOADS` does not carry
-    // because the wasm arm addresses it by index. One list, so the floor subtraction below finds a
-    // control wherever it sits.
-    let rows: Vec<Workload> = WORKLOADS.into_iter().chain(DRIVER_FED_WORKLOADS).collect();
+    // The standing rows, then the driver-fed rows (issue #928) and the metered row (issue #881),
+    // which `WORKLOADS` does not carry because the wasm arm addresses it by index. One list, so the
+    // floor subtraction below finds a control wherever it sits.
+    let rows: Vec<Workload> = native_session_rows().collect();
     let sessions: Vec<SessionMeasurement> =
         rows.iter().copied().map(SessionMeasurement::run).collect();
-    // The class-A statement of the driver-fed row, asserted in-run like the facility arms' before
-    // a number is published: the two feeds deliver the same frozen words, so the two plumbing
-    // rows render the same bits. A difference is a harness defect, never a finding.
-    let [bound, driver_fed] = PLUMBING_FEED_PAIR.map(|workload| {
+    let digest_of = |workload: Workload| {
         rows.iter()
             .position(|row| *row == workload)
             .map(|index| &sessions[index].output_sha256)
-            .expect("both plumbing rows are measured")
-    });
+            .expect("both rows of the pair are measured")
+    };
+    // The class-A statement of the driver-fed row, asserted in-run like the facility arms' before
+    // a number is published: the two feeds deliver the same frozen words, so the two gain/pan
+    // rows render the same bits. A difference is a harness defect, never a finding.
+    let [bound, driver_fed] = GAIN_PAN_FEED_PAIR.map(digest_of);
     assert_eq!(
         driver_fed, bound,
-        "the driver-fed plumbing row rendered different output from the bound-feed row"
+        "the driver-fed gain/pan row rendered different output from the bound-feed row"
+    );
+    // And the metered row's (issue #881): a meter observes, so the metered console renders the
+    // standing console's bits.
+    let [unmetered, metered] = METERED_PAIR.map(digest_of);
+    assert_eq!(
+        metered, unmetered,
+        "the metered console row rendered different output: a meter changed the signal"
     );
     for (workload, session) in rows.iter().zip(&sessions) {
         let control = floor::floor_row(*workload)
@@ -217,6 +288,42 @@ pub(crate) fn main() {
     println!("{}", automation.record(round, backend, metadata));
     let mono = MonoMeasurement::run();
     println!("{}", mono.record(round, backend, metadata));
+    let mixing = MixingAutomationMeasurement::run(backend);
+    println!("{}", mixing.record(round, backend, metadata));
+}
+
+/// `bench console --preflight`: the mixing-automation row's premises, untimed, with what they
+/// resolved. Panics on the first premise that fails, so a nonzero exit is the refusal.
+fn mixing_preflight(backend: Backend) {
+    let preflight = mixing_automation::preflight(backend);
+    for control in &preflight.controls {
+        println!(
+            "control {} {} {} channel {} base {} values {:?} lowering {}",
+            control.control.track_id,
+            control.slot_id,
+            control.control.parameter,
+            control.channel,
+            control.base,
+            control.values,
+            control.control.effect.lowering().name()
+        );
+    }
+    for (index, (arm, effects)) in mixing_automation::PREFLIGHT_ARMS.iter().enumerate() {
+        println!(
+            "arm {} digest {} bank_collapse_counters {:?} pushes {}/{}",
+            mixing_automation::preflight_arm_name(*arm, *effects),
+            preflight.digests[index],
+            preflight.collapse[index],
+            preflight.tallies[index].accepted,
+            preflight.tallies[index].attempted
+        );
+    }
+    preflight.assert_premises();
+    println!(
+        "console_mixing_automation preflight: PASS ({} controls resolved, backend {})",
+        preflight.controls.len(),
+        backend_name(backend)
+    );
 }
 
 fn round_from_runner() -> u32 {
@@ -240,6 +347,35 @@ struct SessionMeasurement {
     output_sha256: String,
     audit: audit::AuditSnapshot,
     render_errors: u64,
+    /// The metered row's meter evidence (issue #881), and `None` on every other row, whose record
+    /// is unchanged.
+    meters: Option<MeteredEvidence>,
+}
+
+/// What the metered console row states beside its timing (issue #881).
+///
+/// Every field is observed rather than restated, all of it outside the clock: the streams and
+/// their taps and the two plan-shape counters are read once, at bind, where they are fixed, and
+/// the rest is folded in from every snapshot the timed blocks publish, drained after each block.
+struct MeteredEvidence {
+    /// Meter streams bound into the plan: one per track.
+    streams: u64,
+    /// Whether every bound stream observes the post-matrix tap.
+    post_matrix: bool,
+    /// The presence mask and window length, in frames, of the first consumed snapshot.
+    shape: Option<(MeterMetricSet, u32)>,
+    /// Whether every later snapshot carried the first one's presence mask and window length.
+    uniform: bool,
+    /// Snapshots consumed over the timed blocks. With every stream drained after every block, this
+    /// is exactly `streams * floor(observations / WEB_METER_BLOCKS)`: one per closed window.
+    snapshots: u64,
+    /// Per stream, in handle order, the cumulative drop counter its last consumed snapshot
+    /// carried. Sized at bind, so consuming a snapshot allocates nothing.
+    stream_dropped: Vec<u64>,
+    /// Bank-chain lanes whose route this plan folded into its chain's epilogue (issue #914).
+    bank_route_folds: u64,
+    /// Bank-chain lanes whose scatter this plan pointed straight at its consumer (issue #914).
+    bank_scatter_redirects: u64,
 }
 
 impl SessionMeasurement {
@@ -255,6 +391,11 @@ impl SessionMeasurement {
         let mut durations = Vec::with_capacity(observations);
         let mut output_hash = Sha256Sink::new();
         let mut render_errors = 0_u64;
+        // Issue #881: the metered row's evidence, bound here, before the clock starts. `None` on
+        // every other row, whose loop below is unchanged.
+        let mut meters = workload
+            .web_meters()
+            .then(|| MeteredEvidence::bind(&runtime));
         // Untimed settling. Only the idle row asks for any, and it asks for a lot: see
         // `Workload::warmup_blocks`.
         for observation in 0..workload.warmup_blocks() {
@@ -270,6 +411,13 @@ impl SessionMeasurement {
                 render_errors += 1;
             }
             runtime.hash_output(&mut output_hash);
+            // Issue #881: the metered row holds its meter streams and consumes every snapshot
+            // published by the block just rendered, here -- after the clock stopped and after the
+            // output identity was taken, so the timed region is the render call alone, exactly as
+            // on every other row.
+            if let Some(evidence) = meters.as_mut() {
+                runtime.drain_meter_snapshots(|snapshot| evidence.consume(snapshot));
+            }
             durations.push(elapsed_ns);
         }
         Self {
@@ -278,6 +426,7 @@ impl SessionMeasurement {
             output_sha256: output_hash.finish_hex(),
             audit: audit::snapshot(),
             render_errors,
+            meters,
         }
     }
 
@@ -313,7 +462,7 @@ impl SessionMeasurement {
                 "\"p95_ns_per_block\":{p95_ns},\"p99_ns_per_block\":{p99_ns},",
                 "\"max_ns_per_block\":{max_ns},\"output_sha256\":\"{digest}\",",
                 "\"render_errors\":{errors},\"render_total_forbidden_operations\":{forbidden},",
-                "{floor}{metadata}",
+                "{meters}{floor}{metadata}",
                 "\"descriptive_only\":true,",
                 "\"statistical_method\":\"nearest-rank percentiles over per-block nanoseconds; ",
                 "one warmup pass and two measured rounds; descriptive only; no threshold\"}}"
@@ -346,6 +495,12 @@ impl SessionMeasurement {
             digest = self.output_sha256,
             errors = self.render_errors,
             forbidden = self.audit.total(),
+            // Issue #881: the metered row's meter group. Empty on every other row, whose record
+            // is byte-for-byte the shape it always had.
+            meters = self
+                .meters
+                .as_ref()
+                .map_or_else(String::new, MeteredEvidence::record_fields),
             // Issue #184's floor accounting. The whole group is absent when the runner had no
             // performance counter to measure the pinned core's clock with, which is the shape
             // every sealed record already has and is what makes the columns additive.
@@ -353,6 +508,89 @@ impl SessionMeasurement {
                 floor::record_fields(workload, percentiles.p50, clock, control_p50_ns)
             }),
             metadata = metadata.record_fields(),
+        )
+    }
+}
+
+impl MeteredEvidence {
+    /// Reads what the plan fixed at bind: its streams, their taps and its #914 counters.
+    fn bind(runtime: &SessionRuntime) -> Self {
+        Self {
+            streams: runtime.meter_streams() as u64,
+            post_matrix: runtime.meter_taps().all(|tap| tap == MeterTap::PostMatrix),
+            shape: None,
+            uniform: true,
+            snapshots: 0,
+            stream_dropped: vec![0; runtime.meter_streams()],
+            bank_route_folds: runtime.bank_route_folds(),
+            bank_scatter_redirects: runtime.bank_scatter_redirects(),
+        }
+    }
+
+    /// Folds one consumed snapshot in. A handle is `index + 1` in stream order.
+    fn consume(&mut self, snapshot: &MeterSnapshot) {
+        self.snapshots += 1;
+        let observed = (snapshot.present_metrics, snapshot.frames);
+        match self.shape {
+            None => self.shape = Some(observed),
+            Some(first) => self.uniform &= first == observed,
+        }
+        let stream = usize::try_from(snapshot.handle.0.get() - 1)
+            .ok()
+            .and_then(|index| self.stream_dropped.get_mut(index))
+            .expect("a meter handle of a bound stream");
+        *stream = snapshot.cumulative_dropped_snapshots;
+    }
+
+    /// Snapshots the streams dropped: each stream's cumulative drop counter as its last consumed
+    /// snapshot carried it, summed.
+    fn dropped(&self) -> u64 {
+        self.stream_dropped.iter().sum()
+    }
+
+    /// The metered row's meter group, with the trailing comma a splice needs.
+    ///
+    /// The meter shape is stated as observed, not as configured: the tap from the bound streams,
+    /// and the metric set and the window from the snapshots themselves. The validator pins each to
+    /// the default web boot's, so a row whose meters drifted to another tap, metric set or window
+    /// states that it did (`other`, or a window of zero when the snapshots disagree) and is refused
+    /// rather than publishing another meter set's cost under this row's name.
+    fn record_fields(&self) -> String {
+        // The row has to have metered. A silently empty meter set would report the cost of
+        // nothing as the cost of the browser's meters.
+        assert!(
+            self.streams > 0 && self.snapshots > 0,
+            "the metered row consumed no meter snapshot: it is not measuring meters"
+        );
+        let shape = self.shape.filter(|_| self.uniform);
+        let metrics = match shape {
+            Some((metrics, _)) if metrics == MeterMetricSet::SAMPLE_PEAK => "sample_peak",
+            Some((metrics, _)) if metrics == MeterMetricSet::ALL => "all",
+            _ => "other",
+        };
+        let window_blocks = shape
+            .map(|(_, frames)| frames as usize)
+            .filter(|frames| frames % QUANTUM == 0)
+            .map_or(0, |frames| frames / QUANTUM);
+        format!(
+            concat!(
+                "\"meter_streams\":{streams},\"meter_tap\":\"{tap}\",",
+                "\"meter_metrics\":\"{metrics}\",\"meter_window_blocks\":{window},",
+                "\"meter_snapshots\":{snapshots},\"meter_dropped_snapshots\":{dropped},",
+                "\"bank_route_folds\":{folds},\"bank_scatter_redirects\":{redirects},"
+            ),
+            streams = self.streams,
+            tap = if self.post_matrix {
+                "post_matrix"
+            } else {
+                "other"
+            },
+            metrics = metrics,
+            window = window_blocks,
+            snapshots = self.snapshots,
+            dropped = self.dropped(),
+            folds = self.bank_route_folds,
+            redirects = self.bank_scatter_redirects,
         )
     }
 }
@@ -1775,6 +2013,287 @@ const AUTOMATION_STATISTICAL_METHOD: &str = "three arms alternated per observati
 percentiles over per-block nanoseconds; ramp delta is automated minus restated and control delta \
 is restated minus quiet, per observation; descriptive only; no threshold";
 
+// ---------------------------------------------------------------------------------------------
+// The mixing-automation measurement (issue #1003): the mono console riding eight controls.
+// ---------------------------------------------------------------------------------------------
+
+/// The record kind of the mixing-automation row.
+const MIXING_WORKLOAD_KIND: &str = "sixty_four_track_console_mono_mixing_automation";
+
+/// Pinned verbatim in the validator, for the reason every method sentence in this stream is.
+const MIXING_STATISTICAL_METHOD: &str = "three arms alternated per observation; nearest-rank \
+percentiles over per-block nanoseconds; ramp delta is automated minus restated and collapse delta \
+is restated minus quiet, per observation; descriptive only; no threshold";
+
+/// The mixing-automation row: the mono console, eight tracks each riding one control, pushed in
+/// the shapes a real host pushes them.
+///
+/// Structurally a sibling of [`AutomationMeasurement`]: three arms that carry the same control
+/// channel, alternated observation by observation, with the push outside the clock and the render
+/// call alone inside it. What it adds is the collapse. On the mono console a restating record can
+/// retire a cohort's collapse for the life of the plan, so `restated` is not only the ramping
+/// arm's control but a measurement of its own, and each arm states its `bank_collapse_counters`
+/// read once after the run.
+struct MixingAutomationMeasurement {
+    /// Timed observations. [`OBSERVATIONS`] in every run the runner launches; the record states
+    /// this rather than the constant, so a shortened run cannot pass for the frozen one.
+    observations: usize,
+    ns_per_block: [Vec<u64>; 3],
+    digests: [String; 3],
+    /// Pushes after the settling write, per arm.
+    tallies: [PushTally; 3],
+    /// `bank_collapse_counters` per arm, read once after the run.
+    collapse: [[u64; 2]; 3],
+    /// The eight controls as the `quiet` arm resolved them.
+    controls: Vec<ResolvedControl>,
+    /// The untimed preflight the run asserted before it took a number.
+    preflight: Preflight,
+    audit: audit::AuditSnapshot,
+    render_errors: u64,
+}
+
+impl MixingAutomationMeasurement {
+    fn run(backend: Backend) -> Self {
+        Self::run_for(backend, OBSERVATIONS)
+    }
+
+    /// [`MixingAutomationMeasurement::run`] over `observations` timed rounds. Only the unit test
+    /// below passes anything but [`OBSERVATIONS`], and the record says so.
+    fn run_for(backend: Backend, observations: usize) -> Self {
+        // The premises first, untimed and before any arm the clock sees is built: every automated
+        // effect moves bits on its own, restating is bit-exact, and the EQ's restatement keeps the
+        // collapse. A row whose premises fail reports nothing.
+        let preflight = mixing_automation::preflight(backend);
+        preflight.assert_premises();
+
+        let mut arms: Vec<MixingArm> = mixing_automation::ARMS
+            .iter()
+            .map(|arm| MixingArm::prepare(*arm, None, backend))
+            .collect();
+        let mut hashes: Vec<Sha256Sink> = arms.iter().map(|_| Sha256Sink::new()).collect();
+        let mut samples: Vec<Vec<u64>> = arms
+            .iter()
+            .map(|_| Vec::with_capacity(observations))
+            .collect();
+        let mut render_errors = 0_u64;
+        audit::warm_up();
+        audit::reset();
+        for _ in 0..observations {
+            for (index, arm) in arms.iter_mut().enumerate() {
+                // Control-plane work, outside the clock, exactly where a host does it: the EQ's
+                // owner designs its target here, and the queue drain, the staging and the window
+                // the traffic opens are what the timed region pays for.
+                arm.drive();
+                let (elapsed_ns, result) = timing::timed(|| arm.render());
+                if result.is_err() {
+                    render_errors += 1;
+                }
+                samples[index].push(elapsed_ns);
+            }
+            for (index, arm) in arms.iter().enumerate() {
+                arm.runtime.hash_output(&mut hashes[index]);
+            }
+        }
+        let snapshot = audit::snapshot();
+        let digests: Vec<String> = hashes.into_iter().map(Sha256Sink::finish_hex).collect();
+
+        // The class-A statement, asserted in-run: every base is the held value, so restating it
+        // is a no-op, and a collapse that a restating record retires renders the bits it rendered
+        // collapsed.
+        assert_eq!(
+            digests[0], digests[1],
+            "console_mixing_automation: restating the held values changed rendered output"
+        );
+        // The honesty half: an automated arm that renders the restated arm's bits opened no
+        // window.
+        assert_ne!(
+            digests[1], digests[2],
+            "console_mixing_automation: the automated arm rendered the restated arm's output"
+        );
+        let tallies = [arms[0].tally, arms[1].tally, arms[2].tally];
+        assert_eq!(tallies[0].attempted, 0, "the quiet arm pushed a record");
+        let per_block = arms[0].automation.pushes_per_block(None);
+        for index in [1, 2] {
+            assert_eq!(
+                (tallies[index].attempted, tallies[index].accepted),
+                (
+                    per_block * observations as u64,
+                    per_block * observations as u64
+                ),
+                "console_mixing_automation {}: a push was refused",
+                mixing_automation::ARMS[index].name()
+            );
+        }
+        let collapse = [
+            arms[0].runtime.bank_collapse_counters(),
+            arms[1].runtime.bank_collapse_counters(),
+            arms[2].runtime.bank_collapse_counters(),
+        ];
+        Self {
+            observations,
+            ns_per_block: [samples[0].clone(), samples[1].clone(), samples[2].clone()],
+            digests: [digests[0].clone(), digests[1].clone(), digests[2].clone()],
+            tallies,
+            collapse,
+            controls: arms[0].automation.controls().to_vec(),
+            preflight,
+            audit: snapshot,
+            render_errors,
+        }
+    }
+
+    /// The record-side JSON of the resolved controls, in track order.
+    fn controls_json(&self) -> String {
+        let rows: Vec<String> = self
+            .controls
+            .iter()
+            .map(|control| {
+                format!(
+                    concat!(
+                        "{{\"track_id\":\"{track}\",\"slot_id\":\"{slot}\",",
+                        "\"effect\":\"{effect}\",\"parameter\":\"{parameter}\",",
+                        "\"parameter_index\":{index},\"lowering\":\"{lowering}\",",
+                        "\"base\":{base},\"step\":{step},",
+                        "\"even_value\":{even},\"odd_value\":{odd}}}"
+                    ),
+                    track = json_escape(control.control.track_id),
+                    slot = json_escape(&control.slot_id),
+                    effect = control.control.effect.contract_id(),
+                    parameter = control.control.parameter,
+                    index = control.control.parameter_index,
+                    lowering = control.control.effect.lowering().name(),
+                    base = control.base,
+                    step = control.control.step,
+                    even = control.values[0],
+                    odd = control.values[1],
+                )
+            })
+            .collect();
+        format!("[{}]", rows.join(","))
+    }
+
+    /// One `{"arm": value}` object over the preflight arms, in their order.
+    fn preflight_json(&self, value: impl Fn(usize) -> String) -> String {
+        let fields: Vec<String> = mixing_automation::PREFLIGHT_ARMS
+            .iter()
+            .enumerate()
+            .map(|(index, (arm, effects))| {
+                format!(
+                    "\"{}\":{}",
+                    mixing_automation::preflight_arm_name(*arm, *effects),
+                    value(index)
+                )
+            })
+            .collect();
+        format!("{{{}}}", fields.join(","))
+    }
+
+    fn record(&self, round: u32, backend: Backend, metadata: &Metadata) -> String {
+        let quiet = Percentiles::from_samples(&self.ns_per_block[0]);
+        let restated = Percentiles::from_samples(&self.ns_per_block[1]);
+        let automated = Percentiles::from_samples(&self.ns_per_block[2]);
+        let workload = mixing_automation::WORKLOAD;
+        let owner_edits = self
+            .controls
+            .iter()
+            .filter(|control| control.control.effect.lowering() == Lowering::OwnerBoth)
+            .count();
+        let parameter_records = 2 * self
+            .controls
+            .iter()
+            .filter(|control| control.control.effect.lowering() == Lowering::LeftThenRight)
+            .count();
+        let counters = |[collapsed, cohorts]: [u64; 2]| format!("[{collapsed},{cohorts}]");
+        format!(
+            concat!(
+                "{{\"schema_version\":1,\"issue\":{issue},\"record\":\"console_mixing_automation\",",
+                "\"workload_kind\":\"{kind}\",\"tracks\":{tracks},",
+                "\"synthetic_fixture\":{synthetic},\"strip_content\":\"{strip}\",",
+                "\"strip_layout\":\"{layout}\",\"input_signal\":\"{signal}\",",
+                "\"fixture_id\":\"{fixture}\",\"round\":{round},\"backend\":\"{backend}\",",
+                "\"sample_rate_hz\":{rate},\"quantum_frames\":{quantum},",
+                "\"observations\":{obs},\"preroll_blocks\":{preroll},",
+                "\"pairing\":\"alternating_per_observation\",",
+                "\"arms\":[\"{arm0}\",\"{arm1}\",\"{arm2}\"],",
+                "\"automated_controls\":{controls},",
+                "\"owner_edits_per_block\":{owner_edits},",
+                "\"parameter_records_per_block\":{parameter_records},",
+                "\"smoothing_samples\":{smoothing},",
+                "\"restated_pushes_accepted\":{restated_pushes},",
+                "\"automated_pushes_accepted\":{automated_pushes},",
+                "\"units\":\"ns_per_block\",\"percentile_method\":\"nearest_rank\",",
+                "\"quiet_p50_ns\":{q50},\"quiet_p95_ns\":{q95},\"quiet_p99_ns\":{q99},",
+                "\"restated_p50_ns\":{r50},\"restated_p95_ns\":{r95},\"restated_p99_ns\":{r99},",
+                "\"automated_p50_ns\":{a50},\"automated_p95_ns\":{a95},\"automated_p99_ns\":{a99},",
+                "\"paired_ramp_delta_median_ns\":{ramp},",
+                "\"paired_collapse_delta_median_ns\":{collapse_delta},",
+                "\"quiet_bank_collapse_counters\":{quiet_collapse},",
+                "\"restated_bank_collapse_counters\":{restated_collapse},",
+                "\"automated_bank_collapse_counters\":{automated_collapse},",
+                "\"quiet_output_sha256\":\"{qd}\",\"restated_output_sha256\":\"{rd}\",",
+                "\"automated_output_sha256\":\"{ad}\",",
+                "\"bit_identity\":\"quiet == restated, asserted in-run\",",
+                "\"preflight_blocks\":{preflight_blocks},",
+                "\"preflight_output_sha256\":{preflight_digests},",
+                "\"preflight_bank_collapse_counters\":{preflight_collapse},",
+                "\"render_errors\":{errors},\"render_total_forbidden_operations\":{forbidden},",
+                "{metadata}",
+                "\"descriptive_only\":true,",
+                "\"statistical_method\":\"{method}\"}}"
+            ),
+            issue = ISSUE,
+            kind = MIXING_WORKLOAD_KIND,
+            tracks = workload.tracks(),
+            synthetic = workload.synthetic(),
+            strip = workload.strip_content(),
+            layout = workload.strip_layout(),
+            signal = workload.input_signal(),
+            fixture = json_escape(workload.fixture_id()),
+            round = round,
+            backend = backend_name(backend),
+            rate = SAMPLE_RATE_HZ,
+            quantum = QUANTUM,
+            obs = self.observations,
+            preroll = mixing_automation::PREROLL_BLOCKS,
+            arm0 = mixing_automation::ARMS[0].name(),
+            arm1 = mixing_automation::ARMS[1].name(),
+            arm2 = mixing_automation::ARMS[2].name(),
+            controls = self.controls_json(),
+            owner_edits = owner_edits,
+            parameter_records = parameter_records,
+            smoothing = mixing_automation::SMOOTHING_SAMPLES,
+            restated_pushes = self.tallies[1].accepted,
+            automated_pushes = self.tallies[2].accepted,
+            q50 = quiet.p50,
+            q95 = quiet.p95,
+            q99 = quiet.p99,
+            r50 = restated.p50,
+            r95 = restated.p95,
+            r99 = restated.p99,
+            a50 = automated.p50,
+            a95 = automated.p95,
+            a99 = automated.p99,
+            ramp = paired_median(&self.ns_per_block[2], &self.ns_per_block[1]),
+            collapse_delta = paired_median(&self.ns_per_block[1], &self.ns_per_block[0]),
+            quiet_collapse = counters(self.collapse[0]),
+            restated_collapse = counters(self.collapse[1]),
+            automated_collapse = counters(self.collapse[2]),
+            qd = self.digests[0],
+            rd = self.digests[1],
+            ad = self.digests[2],
+            preflight_blocks = self.preflight.blocks,
+            preflight_digests =
+                self.preflight_json(|index| format!("\"{}\"", self.preflight.digests[index])),
+            preflight_collapse =
+                self.preflight_json(|index| counters(self.preflight.collapse[index])),
+            errors = self.render_errors,
+            forbidden = self.audit.total(),
+            metadata = metadata.record_fields(),
+            method = MIXING_STATISTICAL_METHOD,
+        )
+    }
+}
+
 /// The median of the per-observation differences `left[i] - right[i]`.
 ///
 /// Pairs taken microseconds apart, then summarised -- never a difference of two summaries taken
@@ -1804,6 +2323,7 @@ fn backend_name(backend: Backend) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use console_workload::WEB_METER_BLOCKS;
 
     /// Timed observations in the short run: two meter windows, so the meters-on arm publishes.
     const SHORT_RUN_OBSERVATIONS: usize = 8;
@@ -1913,12 +2433,101 @@ mod tests {
         }
     }
 
-    /// Issue #928: the driver-fed plumbing row, run short through the real subject, renders the
-    /// bound-feed row's bits with no forbidden operation, prints its record with its feed, and the
-    /// record validator pins that feed.
+    /// Issue #1003: the mixing-automation row, run short through the real subject, prints its
+    /// controls, its host lowerings, its preflight and its collapse counters, and the record
+    /// validator pins them.
+    ///
+    /// The same `MixingAutomationMeasurement` the runner's run takes -- the preflight asserted,
+    /// then the three arms alternated -- over eight timed blocks instead of a thousand (`cargo
+    /// test -p bench the_mixing_automation_row -- --nocapture` prints the record). Its timings are
+    /// not to be read. Its `observations`, its push counts and its quiet arm's collapse counter say
+    /// it was shortened, so the validator is asked about it with those set to what the frozen run
+    /// produces, and then with each claim the row makes taken away.
+    ///
+    /// Red mutations (run): push the EQ as `LeftThenRight` -- the preflight's collapse premise
+    /// fails; ride the limiter at 0.25 dB -- its bit-movement premise fails; restate a value that
+    /// is not held -- the in-run digest equality fails.
+    #[test]
+    fn the_mixing_automation_row_prints_its_controls_and_the_validator_pins_them() {
+        let measured =
+            MixingAutomationMeasurement::run_for(Backend::current(), SHORT_RUN_OBSERVATIONS);
+        assert_eq!(measured.render_errors, 0);
+        assert_eq!(
+            measured.audit.total(),
+            0,
+            "a forbidden operation on the render path"
+        );
+        let record = measured.record(1, Backend::current(), Metadata::gather());
+        println!("{record}");
+        for key in [
+            "quiet_bank_collapse_counters",
+            "restated_bank_collapse_counters",
+            "automated_bank_collapse_counters",
+            "preflight_bank_collapse_counters",
+            "preflight_output_sha256",
+            "automated_controls",
+        ] {
+            assert_eq!(
+                record.matches(&format!("\"{key}\":")).count(),
+                1,
+                "{key} appears exactly once"
+            );
+        }
+        let frozen = concat!(
+            ".observations = 1000 | .restated_pushes_accepted = 13000 | ",
+            ".automated_pushes_accepted = 13000 | ",
+            ".quiet_bank_collapse_counters[0] = .quiet_bank_collapse_counters[1] * 1064"
+        );
+        assert!(
+            !record_validator_accepts(&record, "."),
+            "a shortened run must not pass for the frozen one"
+        );
+        assert!(
+            record_validator_accepts(&record, frozen),
+            "the mixing-automation record at the frozen counts"
+        );
+        for (edit, why) in [
+            (
+                "del(.quiet_bank_collapse_counters)",
+                "a record missing its collapse counters",
+            ),
+            (
+                "del(.preflight_bank_collapse_counters)",
+                "a record missing its preflight collapse counters",
+            ),
+            (
+                ".automated_controls[0].lowering = \"left_then_right\"",
+                "an EQ pushed as two one-channel edits",
+            ),
+            (
+                concat!(
+                    ".preflight_output_sha256.automated_limiter_only = ",
+                    ".preflight_output_sha256.restated"
+                ),
+                "a limiter ride that moved no bit",
+            ),
+            (
+                ".preflight_bank_collapse_counters.restated_eq_only = [0, 8]",
+                "an EQ restatement that retired the collapse",
+            ),
+            (
+                ".automated_output_sha256 = .restated_output_sha256",
+                "an automated arm that rendered the restated bits",
+            ),
+        ] {
+            assert!(
+                !record_validator_accepts(&record, &format!("{frozen} | {edit}")),
+                "{why}"
+            );
+        }
+    }
+
+    /// Issue #928, re-based onto the gain/pan session by #956: the driver-fed gain/pan row, run
+    /// short through the real subject, renders the bound-feed row's bits with no forbidden
+    /// operation, prints its record with its feed, and the record validator pins that feed.
     ///
     /// The same `SessionMeasurement` the runner's run takes, over eight timed blocks instead of a
-    /// thousand (`cargo test -p bench the_driver_fed_plumbing_row -- --nocapture` prints the
+    /// thousand (`cargo test -p bench the_driver_fed_gain_pan_row -- --nocapture` prints the
     /// record). Its timings are not to be read, and its `observations` field says eight, which the
     /// validator refuses as a frozen measurement -- so the validator is asked about the two
     /// records with that one field set to the frozen count, and then with the feed removed or
@@ -1931,14 +2540,14 @@ mod tests {
     /// library -- the removed-feed cases are accepted; unpin the per-kind feed -- the swapped-feed
     /// cases are accepted.
     #[test]
-    fn the_driver_fed_plumbing_row_prints_its_feed_and_the_validator_pins_it() {
-        let measured = PLUMBING_FEED_PAIR
+    fn the_driver_fed_gain_pan_row_prints_its_feed_and_the_validator_pins_it() {
+        let measured = GAIN_PAN_FEED_PAIR
             .map(|workload| SessionMeasurement::run_for(workload, SHORT_RUN_OBSERVATIONS));
         assert_eq!(
             measured[1].output_sha256, measured[0].output_sha256,
             "the driver-fed row must render the bound-feed row's bits"
         );
-        for (workload, measurement) in PLUMBING_FEED_PAIR.iter().zip(&measured) {
+        for (workload, measurement) in GAIN_PAN_FEED_PAIR.iter().zip(&measured) {
             assert_eq!(measurement.render_errors, 0, "{}", workload.kind());
             assert_eq!(
                 measurement.audit.total(),
@@ -1949,7 +2558,7 @@ mod tests {
         }
         let [bound, ring] = [0, 1].map(|index| {
             measured[index].record(
-                PLUMBING_FEED_PAIR[index],
+                GAIN_PAN_FEED_PAIR[index],
                 1,
                 Backend::current(),
                 Metadata::gather(),
@@ -1974,7 +2583,7 @@ mod tests {
             );
         }
         assert!(
-            ring.contains("\"workload_kind\":\"sixty_four_track_plumbing_ring\","),
+            ring.contains("\"workload_kind\":\"sixty_four_track_gain_pan_ring\","),
             "the driver-fed row names itself"
         );
 
@@ -2004,5 +2613,171 @@ mod tests {
             ),
             "the bound-feed row claiming the driver's feed"
         );
+    }
+
+    /// Issue #881: the metered console row, run short through the real subject, renders the
+    /// standing console row's bits with no forbidden operation, consumes every window it
+    /// publishes, prints its meter group, and the record validator pins that group.
+    ///
+    /// The same `SessionMeasurement` the runner's run takes, over three twelve-block windows of
+    /// timed blocks instead of a thousand blocks (`cargo test -p bench the_metered_console_row --
+    /// --nocapture` prints the record). Its timings are not to be read. Its `observations` and its
+    /// `meter_snapshots` say it was shortened, and the validator refuses it as a frozen
+    /// measurement, so the validator is asked about it with those two fields set to what the frozen
+    /// run consumes, and then with each field of the meter group removed, the group grafted onto
+    /// the standing row, or a meter fact changed.
+    ///
+    /// Red mutations (run): select `MeterMetricSet::ALL` for the web meters, or stop draining the
+    /// metered row in `run_for` -- the observed-shape assertion fails.
+    #[test]
+    fn the_metered_console_row_prints_its_meters_and_the_validator_pins_them() {
+        const WINDOWS: usize = 3;
+        let observations = WINDOWS * WEB_METER_BLOCKS as usize;
+        let measured =
+            METERED_PAIR.map(|workload| SessionMeasurement::run_for(workload, observations));
+        assert_eq!(
+            measured[1].output_sha256, measured[0].output_sha256,
+            "the metered row must render the standing console row's bits"
+        );
+        for (workload, measurement) in METERED_PAIR.iter().zip(&measured) {
+            assert_eq!(measurement.render_errors, 0, "{}", workload.kind());
+            assert_eq!(
+                measurement.audit.total(),
+                0,
+                "{}: a forbidden operation on the render path",
+                workload.kind()
+            );
+        }
+        assert!(
+            measured[0].meters.is_none(),
+            "the standing row carries no meter"
+        );
+        let evidence = measured[1]
+            .meters
+            .as_ref()
+            .expect("the metered row carries its meter evidence");
+        let tracks = u64::from(Workload::SixtyFourTrackConsoleMetered.tracks());
+        // The metered plan's own counter, read from a fresh bind of the same row: the standing
+        // row is prepared with the other delivery and is not this plan's baseline.
+        let plan = SessionRuntime::new(Workload::SixtyFourTrackConsoleMetered);
+        assert!(evidence.post_matrix && evidence.uniform);
+        assert!(
+            evidence.shape
+                == Some((
+                    MeterMetricSet::SAMPLE_PEAK,
+                    WEB_METER_BLOCKS * QUANTUM as u32
+                )),
+            "every snapshot is a sample peak over a twelve-block window"
+        );
+        assert_eq!(
+            [
+                evidence.streams,
+                evidence.snapshots,
+                evidence.dropped(),
+                evidence.bank_route_folds,
+                evidence.bank_scatter_redirects,
+            ],
+            [
+                tracks,
+                tracks * WINDOWS as u64,
+                0,
+                tracks,
+                plan.bank_scatter_redirects(),
+            ],
+            "[streams, snapshots, dropped, folds, redirects]: one stream per track, one snapshot \
+             per track per window with none dropped, every route folded (#885) and the metered \
+             plan's own redirects"
+        );
+
+        let [standing, metered] = [0, 1].map(|index| {
+            measured[index].record(
+                METERED_PAIR[index],
+                1,
+                Backend::current(),
+                Metadata::gather(),
+                None,
+                None,
+            )
+        });
+        println!("{metered}");
+        let group = [
+            ("meter_streams", tracks.to_string()),
+            ("meter_tap", "\"post_matrix\"".to_string()),
+            ("meter_metrics", "\"sample_peak\"".to_string()),
+            ("meter_window_blocks", WEB_METER_BLOCKS.to_string()),
+            ("meter_snapshots", (tracks * WINDOWS as u64).to_string()),
+            ("meter_dropped_snapshots", "0".to_string()),
+            ("bank_route_folds", tracks.to_string()),
+            (
+                "bank_scatter_redirects",
+                plan.bank_scatter_redirects().to_string(),
+            ),
+        ];
+        for (key, value) in &group {
+            assert_eq!(
+                metered.matches(&format!("\"{key}\":")).count(),
+                1,
+                "{key} appears exactly once on the metered row"
+            );
+            assert!(
+                metered.contains(&format!("\"{key}\":{value},")),
+                "{key} must carry {value}"
+            );
+            assert!(
+                !standing.contains(&format!("\"{key}\":")),
+                "the standing row's record is unchanged: no {key}"
+            );
+        }
+        assert!(
+            metered.contains("\"workload_kind\":\"sixty_four_track_console_metered\","),
+            "the metered row names itself"
+        );
+
+        let frozen_snapshots = tracks * (OBSERVATIONS as u64 / u64::from(WEB_METER_BLOCKS));
+        let frozen = format!(".observations = 1000 | .meter_snapshots = {frozen_snapshots}");
+        assert!(
+            !record_validator_accepts(&metered, ".observations = 1000"),
+            "a shortened run's snapshot count must not pass for the frozen one"
+        );
+        assert!(
+            record_validator_accepts(&metered, &frozen),
+            "the metered record at the frozen counts"
+        );
+        assert!(
+            record_validator_accepts(&standing, ".observations = 1000"),
+            "the standing record at the frozen count"
+        );
+        for (key, _) in &group {
+            assert!(
+                !record_validator_accepts(&metered, &format!("{frozen} | del(.{key})")),
+                "a metered record missing {key}"
+            );
+        }
+        assert!(
+            !record_validator_accepts(
+                &metered,
+                &format!("{frozen} | .workload_kind = \"sixty_four_track_console\"")
+            ),
+            "the standing row carrying the meter group"
+        );
+        for (edit, why) in [
+            (".meter_window_blocks = 4", "the facility arm's window"),
+            (".meter_metrics = \"all\"", "all-metric meters"),
+            (
+                ".meter_tap = \"post_fader\"",
+                "a tap the browser does not meter",
+            ),
+            (".meter_snapshots -= 1", "a snapshot lost"),
+            (".meter_dropped_snapshots = 1", "a dropped snapshot"),
+            (
+                ".bank_route_folds = 0",
+                "a metered plan whose fold declined",
+            ),
+        ] {
+            assert!(
+                !record_validator_accepts(&metered, &format!("{frozen} | {edit}")),
+                "{why}"
+            );
+        }
     }
 }

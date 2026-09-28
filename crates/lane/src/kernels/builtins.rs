@@ -276,6 +276,60 @@ pub fn matrix2x2_block<L: Lane>(
     }
 }
 
+/// [`matrix2x2_block`] for a coefficient set with **no** identity lane: its second arm alone.
+///
+/// Why it exists: on `x86-64-v3`, LLVM folds [`matrix2x2_block`]'s left output -- a store of a
+/// select whose first arm is the word just loaded from the same address -- into one `vmaskmovps`
+/// masked store under `!identity`. On Zen 2 to Zen 4 that store is about 42 uops with a 12-cycle
+/// reciprocal throughput, so a settled pan matrix costs several times its arithmetic (issue #944).
+/// No standing session has an identity lane in a full bank: the equal-power pan law never yields
+/// one, because `cos(pi / 2)` rounds to `6.1e-17` in `f32`.
+///
+/// Frozen operation order, per frame -- [`matrix2x2_block`]'s second arm verbatim:
+/// 1. `l = load(left)`, `r = load(right)`
+/// 2. `yl = ll * l + lr * r` -- multiply, multiply, add; no fusion
+/// 3. `yr = rl * l + rr * r`
+/// 4. `store(left, yl)`, `store(right, yr)`
+///
+/// There is no `L::select` anywhere in the body, not even one on a constant mask: a select is
+/// exactly what LLVM rebuilds the masked store from.
+///
+/// Precondition: `!L::mask_any(c.identity)` over all `L::WIDTH` lanes, padding lanes included,
+/// checked by a `debug_assert!`. The caller tests it once per call, never per frame.
+///
+/// Class A: with no identity lane, [`matrix2x2_block`]'s per-lane select returns its second arm,
+/// so the two kernels compute the same products and sums on every lane of every word, padding
+/// included. Every non-NaN word is bit-identical. A NaN word stays a NaN: LLVM may commute the
+/// commutative `fadd` differently in the two bodies, and when both products are NaN with different
+/// payloads x86 keeps the first operand's. Rendered plans never reach that case -- the input stage
+/// sanitises every non-finite sample before the matrix -- and the payload is not part of the
+/// class-A statement.
+#[inline(always)]
+pub fn matrix2x2_block_without_identity<L: Lane>(
+    left: &mut [f32],
+    right: &mut [f32],
+    frames: usize,
+    c: &Matrix2x2Coef<L>,
+) {
+    debug_assert_eq!(left.len(), frames * L::WIDTH);
+    debug_assert_eq!(right.len(), frames * L::WIDTH);
+    debug_assert!(
+        !L::mask_any(c.identity),
+        "the select-free matrix arm requires a coefficient set with no identity lane"
+    );
+    for (left_frame, right_frame) in left
+        .chunks_exact_mut(L::WIDTH)
+        .zip(right.chunks_exact_mut(L::WIDTH))
+    {
+        let l = L::load(left_frame);
+        let r = L::load(right_frame);
+        let yl = c.ll.mul(l).add(c.lr.mul(r));
+        let yr = c.rl.mul(l).add(c.rr.mul(r));
+        yl.store(left_frame);
+        yr.store(right_frame);
+    }
+}
+
 /// Applies the settled fader/mute and 2x2 matrix in one frame traversal.
 ///
 /// Frozen operation order, per frame:
@@ -311,6 +365,68 @@ pub fn fader_matrix_block<L: Lane>(
         let r = right_input.mul(gain_right).andnot(mute_right);
         let yl = L::select(matrix.identity, l, matrix.ll.mul(l).add(matrix.lr.mul(r)));
         let yr = L::select(matrix.identity, r, matrix.rl.mul(l).add(matrix.rr.mul(r)));
+        yl.store(left_frame);
+        yr.store(right_frame);
+    }
+}
+
+/// [`fader_matrix_block`] for a coefficient set with **no** identity lane: its second arm alone.
+///
+/// Why it exists: [`fader_matrix_block`] evaluates the per-lane identity select on both outputs of
+/// every frame. With no identity lane both selects return their second arm, so the select is pure
+/// cost: on `x86-64-v3` two `vblendvps` per frame that compete with the six multiplies for the same
+/// ports, and on wasm `simd128` two `v128.bitselect` per frame, about 1.1 us of a 64-track
+/// gain/pan block under V8 (issue #954). No standing session has an identity lane in a full bank:
+/// the equal-power pan law never yields one, because `cos(pi / 2)` rounds to `6.1e-17` in `f32`.
+///
+/// Frozen operation order, per frame -- [`fader_matrix_block`]'s second arm verbatim:
+/// 1. `l = load(left) * gain_left`, `r = load(right) * gain_right`, then clear each muted lane
+/// 2. `yl = ll * l + lr * r` and `yr = rl * l + rr * r` -- multiply, multiply, add; no fusion
+/// 3. store both planes
+///
+/// Both input planes are loaded before either is written; the operand orders are
+/// [`fader_matrix_block`]'s. There is no `L::select` anywhere in the body, not even one on a
+/// constant mask: a select is what brings the blend back.
+///
+/// Precondition: `!L::mask_any(matrix.identity)` over all `L::WIDTH` lanes, padding lanes included,
+/// checked by a `debug_assert!`. The caller tests it once per call, never per frame.
+///
+/// Class A: with no identity lane, [`fader_matrix_block`]'s per-lane select returns its second arm,
+/// so the two kernels compute the same products and sums on every lane of every word, padding
+/// included, and so does [`gain_mute_block`] on each plane followed by
+/// [`matrix2x2_block_without_identity`]. Every non-NaN word is bit-identical. A NaN word stays a
+/// NaN: LLVM may commute the commutative `fadd` differently in the two bodies, and when both
+/// products are NaN with different payloads x86 keeps the first operand's. Rendered plans never
+/// reach that case -- the input stage sanitises every non-finite sample before the fader -- and the
+/// payload is not part of the class-A statement.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+pub fn fader_matrix_block_without_identity<L: Lane>(
+    left: &mut [f32],
+    right: &mut [f32],
+    frames: usize,
+    gain_left: L,
+    mute_left: L::Mask,
+    gain_right: L,
+    mute_right: L::Mask,
+    matrix: &Matrix2x2Coef<L>,
+) {
+    debug_assert_eq!(left.len(), frames * L::WIDTH);
+    debug_assert_eq!(right.len(), frames * L::WIDTH);
+    debug_assert!(
+        !L::mask_any(matrix.identity),
+        "the select-free fused arm requires a coefficient set with no identity lane"
+    );
+    for (left_frame, right_frame) in left
+        .chunks_exact_mut(L::WIDTH)
+        .zip(right.chunks_exact_mut(L::WIDTH))
+    {
+        let left_input = L::load(left_frame);
+        let right_input = L::load(right_frame);
+        let l = left_input.mul(gain_left).andnot(mute_left);
+        let r = right_input.mul(gain_right).andnot(mute_right);
+        let yl = matrix.ll.mul(l).add(matrix.lr.mul(r));
+        let yr = matrix.rl.mul(l).add(matrix.rr.mul(r));
         yl.store(left_frame);
         yr.store(right_frame);
     }
@@ -1463,6 +1579,124 @@ pub fn input_chain_block_mono_elided<L: Lane>(
 #[must_use]
 pub const fn plan_is_channel_symmetric(plan: &InputChainPlan) -> bool {
     plan.elided[0][0] == plan.elided[1][0] && plan.elided[0][1] == plan.elided[1][1]
+}
+
+/// The sample-peak meter's partial over one resident AoSoA block (issue #943).
+///
+/// Returns, per lane, the maximum of `peak` and every **sanitized magnitude** in the block's
+/// `frames` frames. A meter that seeds `peak` with `L::zero()` gets the block's partial peak and
+/// merges it into its window with the same D8 select form; that merge is an exact reassociation of
+/// the scalar meter's sample-serial `if a > p { a } else { p }` (`builtins::MeterAccumulator`),
+/// because every operand lies in `{+0.0} ∪ [f32::MIN_POSITIVE, f32::MAX]`, where the select form
+/// is commutative and associative, has one bit pattern per value and has `+0.0` as its identity.
+///
+/// The validity test is the meter's own `normal_or_zero` -- a finite, non-subnormal sample is
+/// kept and anything else becomes `+0.0` -- and deliberately **not** [`NONFINITE_LIMIT`], the D7
+/// input rule, which admits subnormals and rejects `[1e30, inf)`. Tested on the magnitude, it is
+/// the two ordered compares below: NaN fails both, so it becomes `+0.0` before the `max` and D8's
+/// asymmetric NaN rule is never exercised.
+///
+/// Frozen operation order, per frame:
+/// 1. `a = |load(frame)|`
+/// 2. `c = select(a >= MIN_POSITIVE & a < INFINITY, a, +0.0)`
+/// 3. `peak = max(c, peak)`, the D8 `select(c > peak, c, peak)`
+///
+/// Branch free per frame: one load, two compares, one mask `and`, one select and one `max`.
+#[inline(always)]
+pub fn meter_sample_peak_block<L: Lane>(words: &[f32], frames: usize, peak: L) -> L {
+    debug_assert!(words.len() >= frames * L::WIDTH);
+    let low = L::splat(f32::MIN_POSITIVE);
+    let high = L::splat(f32::INFINITY);
+    let mut peak = peak;
+    for frame in words[..frames * L::WIDTH].chunks_exact(L::WIDTH) {
+        let a = L::load(frame).abs();
+        let c = L::select(L::mask_and(a.ge(low), a.lt(high)), a, L::zero());
+        peak = L::max(c, peak);
+    }
+    peak
+}
+
+/// The full meter's partials over one resident AoSoA block, per lane (issue #950): what
+/// [`meter_block`] returns.
+///
+/// `peak`, `clipped` and `sanitized` are order-free block partials that the meter merges into its
+/// window. `energy` is not a partial: it is the meter's own running sum carried through this block
+/// sample by sample, from the seed the caller passed in.
+#[derive(Clone, Copy, Debug)]
+pub struct MeterBlock<L: crate::Widen> {
+    /// Per lane, the maximum of `+0.0` and every sanitized magnitude of the block: bit for bit
+    /// [`meter_sample_peak_block`] seeded with `L::zero()`.
+    pub peak: L,
+    /// Per lane, how many sanitized magnitudes are `>= 1.0`, as an exact `f32` integer.
+    pub clipped: L,
+    /// Per lane, how many words the sanitization replaced (NaN, `±inf` and nonzero subnormals), as
+    /// an exact `f32` integer.
+    pub sanitized: L,
+    /// Per lane, the seed plus the square of every sanitized sample, added one sample at a time in
+    /// frame order.
+    pub energy: L::F64,
+}
+
+/// The full meter's block pass over one resident AoSoA block (issue #950): the sample peak, the
+/// clipped and sanitized counts, and the energy sum, for every lane at once.
+///
+/// This is the builtin meter's scalar per-sample loop (`builtins::MeterAccumulator`, the `ALL`
+/// selection) run across lanes: each lane reads its own words, in frame order, and nothing moves
+/// between lanes. Four facts make every result bit-identical to that loop:
+///
+/// * `peak` equals [`meter_sample_peak_block`]`(words, frames, L::zero())` bit for bit: steps 1 to
+///   3 below are that kernel's, in its order.
+/// * The counts are exact integers in `f32`: each adds `+0.0` or `1.0` per frame, and a block never
+///   has more than `2^24` frames (as [`sanitize_gain_block`] states), so no sum rounds.
+/// * `w * w` is exact in binary64 for every widened `f32` `w`: its significand has at most 24 bits,
+///   so the square has at most 48, and its exponent stays inside binary64's normal range. The
+///   scalar loop's `f64::from(s) * f64::from(s)` is the same exact value, because the sanitized
+///   sample `s` and its magnitude `c` have the same square.
+/// * The energy's only rounding is therefore its add, and each lane performs the scalar loop's adds
+///   in the scalar loop's order from the scalar loop's seed. No partial sum, pairwise sum or
+///   reassociation exists here: that form moves the published `energy`/`rms` bits (issue #950,
+///   R3), and is refused.
+///
+/// The validity test is the meter's `normal_or_zero` on the magnitude, as in
+/// [`meter_sample_peak_block`]. `sanitized` counts a word exactly when its magnitude was replaced:
+/// `a != c` holds for NaN, `±inf` and a nonzero subnormal, and fails for `±0.0` and every normal.
+///
+/// Frozen operation order, per frame:
+/// 1. `a = |load(frame)|`
+/// 2. `c = select(a >= MIN_POSITIVE & a < INFINITY, a, +0.0)`
+/// 3. `peak = max(c, peak)`, the D8 `select(c > peak, c, peak)`
+/// 4. `sanitized = sanitized + (1.0 & !(a == c))`
+/// 5. `clipped = clipped + (1.0 & (c >= 1.0))`
+/// 6. `w = widen(c)`, then `energy = energy + w * w`: two roundings' worth of operations, never
+///    fused, of which only the add rounds
+///
+/// Branch free per frame. The caller must keep `frames <= 2^24`.
+#[inline(always)]
+pub fn meter_block<L: crate::Widen>(words: &[f32], frames: usize, energy: L::F64) -> MeterBlock<L> {
+    use crate::LaneF64;
+    debug_assert!(words.len() >= frames * L::WIDTH);
+    let low = L::splat(f32::MIN_POSITIVE);
+    let high = L::splat(f32::INFINITY);
+    let one = L::splat(1.0);
+    let mut peak = L::zero();
+    let mut clipped = L::zero();
+    let mut sanitized = L::zero();
+    let mut energy = energy;
+    for frame in words[..frames * L::WIDTH].chunks_exact(L::WIDTH) {
+        let a = L::load(frame).abs();
+        let c = L::select(L::mask_and(a.ge(low), a.lt(high)), a, L::zero());
+        peak = L::max(c, peak);
+        sanitized = sanitized.add(one.andnot(a.eq(c)));
+        clipped = clipped.add(one.andnot(L::mask_not(c.ge(one))));
+        let w = c.widen();
+        energy = energy.add(w.mul(w));
+    }
+    MeterBlock {
+        peak,
+        clipped,
+        sanitized,
+        energy,
+    }
 }
 
 #[cfg(test)]

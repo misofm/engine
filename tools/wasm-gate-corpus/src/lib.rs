@@ -31,7 +31,10 @@
 //!
 //! An effect crate's cases are appended, never inserted: [`LANE_DIGESTS`] is indexed by case
 //! number, so a new block of cases has to go on the end for the existing pins to keep describing
-//! the same computations. The original layout ends with the compressor family of issue #88.
+//! the same computations. Issue #943 appended one lane case, the banked sample-peak meter kernel,
+//! after the element-wise block: it extends [`LANE_DIGESTS`] at its end, so every existing lane
+//! pin keeps its index, while the delegated blocks after it -- whose pins live in their own crates
+//! and are indexed there -- move up by one. The original layout ends with the compressor family of issue #88.
 //! Issue #213 appends two builtin cases after that family, preserving the original eight-case
 //! builtin block and every later index. `tests/g5_native_corpus.rs` checks both the preserved
 //! layout and the two appended cases.
@@ -41,12 +44,12 @@ use compressor::corpus as compressor_corpus;
 use delay::corpus as delay_corpus;
 use effect_runtime::corpus as runtime_corpus;
 use gate_expander::corpus as gate_expander_corpus;
-use lane::Lane;
 use lane::kernels::{
     OnePoleCoef, OnePoleState, RampSegment, SvfCoef, SvfCoefStep, SvfState, gain_block,
     gain_mix_block, mix2x2_block, one_pole_block, ramp_block, sum_into_block, sum2_block,
     svf_block, svf_block_ramped,
 };
+use lane::{Lane, LaneF64, Widen};
 use math::corpus as math_corpus;
 use math::{exp2_lane, log2_lane};
 use multiband_compressor::corpus as multiband_corpus;
@@ -69,7 +72,17 @@ pub const FRAMES: usize = 1024;
 pub const WIDTHS: usize = 3;
 
 /// Cases built from the `Lane` trait and the block kernels.
-pub const LANE_CASE_COUNT: usize = KERNELS.len() * SIGNALS.len() + ELEMENTWISE.len();
+pub const LANE_CASE_COUNT: usize =
+    KERNELS.len() * SIGNALS.len() + ELEMENTWISE.len() + METER_PEAK_CASE_COUNT;
+
+/// The banked sample-peak meter cases (issue #943), after the element-wise ones.
+///
+/// One case: `lane::kernels::builtins::meter_sample_peak_block` over hostile words. On wasm the
+/// kernel's validity test lowers to an integer range test on the magnitude bits and its D8 `max`
+/// to an operand-swapped `f32x4.pmax`, neither of which any native gate executes, so this is the
+/// case that would move if either lowering stopped being the meter's `normal_or_zero` and select
+/// form.
+pub const METER_PEAK_CASE_COUNT: usize = 1;
 
 /// Cases delegated to [`math::corpus`] (gate M3, replayed under wasm).
 pub const MATH_CASE_COUNT: usize = math_corpus::CASE_COUNT;
@@ -373,6 +386,8 @@ enum Case {
     Kernel(Kernel, Signal),
     /// An element-wise lane operation.
     Elementwise(Elementwise),
+    /// The banked sample-peak meter kernel (issue #943).
+    MeterPeak,
     /// One case of the `math` M3 corpus.
     Math(usize),
     /// One case of the `effect-runtime` D1 corpus.
@@ -416,6 +431,10 @@ fn case_of(index: usize) -> Case {
         return Case::Elementwise(ELEMENTWISE[index]);
     }
     let index = index - ELEMENTWISE.len();
+    if index < METER_PEAK_CASE_COUNT {
+        return Case::MeterPeak;
+    }
+    let index = index - METER_PEAK_CASE_COUNT;
     if index < MATH_CASE_COUNT {
         return Case::Math(index);
     }
@@ -491,7 +510,10 @@ pub fn is_width_dependent(index: usize) -> bool {
 /// Panics if `index >= CASE_COUNT`.
 #[must_use]
 pub fn has_lane_values(index: usize) -> bool {
-    matches!(case_of(index), Case::Kernel(..) | Case::Elementwise(_))
+    matches!(
+        case_of(index),
+        Case::Kernel(..) | Case::Elementwise(_) | Case::MeterPeak
+    )
 }
 
 /// Human-readable name of a case, used in the failure reports of both legs.
@@ -504,6 +526,7 @@ pub fn case_name(index: usize) -> String {
     match case_of(index) {
         Case::Kernel(kernel, signal) => format!("{}/{}", kernel.name(), signal.name()),
         Case::Elementwise(operation) => operation.name().to_string(),
+        Case::MeterPeak => "meter_sample_peak_block/hostile".to_string(),
         Case::Math(case) => format!("math/{}", math_corpus::CASE_NAMES[case]),
         Case::Runtime(case) => format!("runtime/{}", runtime_corpus::CASE_NAMES[case]),
         Case::TransientShaper(case) => transient_shaper_corpus::CASE_NAMES[case].to_string(),
@@ -612,6 +635,399 @@ fn minmax_lowering_mismatches_at<L: Lane>() -> u32 {
     mismatches
 }
 
+/// The directed `f32` inputs of [`f64_lane_mismatches`]' widen set (issue #949): both zeros, the
+/// smallest and largest subnormal and `MIN_POSITIVE` of both signs, `±1.0` and its neighbours,
+/// `±MAX`, both infinities, and three NaN payloads (quiet, negative quiet with a payload, and
+/// signalling).
+const F64_LANE_WIDEN_POOL: [u32; 21] = [
+    0x0000_0000,
+    0x8000_0000,
+    0x0000_0001,
+    0x8000_0001,
+    0x007F_FFFF,
+    0x807F_FFFF,
+    0x0080_0000,
+    0x8080_0000,
+    0x3F80_0000,
+    0xBF80_0000,
+    0x3F80_0001,
+    0x3F7F_FFFF,
+    0xBF80_0001,
+    0xBF7F_FFFF,
+    0x7F7F_FFFF,
+    0xFF7F_FFFF,
+    0x7F80_0000,
+    0xFF80_0000,
+    0x7FC0_0000,
+    0xFFC0_0001,
+    0x7F80_0001,
+];
+
+/// The directed binary64 operands of [`f64_lane_mismatches`]' `add`/`mul` set: both zeros, the
+/// smallest and largest subnormal and `MIN_POSITIVE` of both signs, `±1.0`, `1 + 2^-52`, `±MAX`,
+/// both infinities, two NaN payloads, and the tie-rounding members `2^-53`, `1.5` and `2^53`:
+/// `1 + 2^-53`, `(1 + 2^-52) + 2^-53`, `2^53 + 1` and `1.5 * (1 + 2^-52)` are exact ties, so a
+/// lowering that rounded a tie other than to even would disagree.
+const F64_LANE_BINOP_POOL: [u64; 20] = [
+    0x0000_0000_0000_0000,
+    0x8000_0000_0000_0000,
+    0x0000_0000_0000_0001,
+    0x8000_0000_0000_0001,
+    0x000F_FFFF_FFFF_FFFF,
+    0x800F_FFFF_FFFF_FFFF,
+    0x0010_0000_0000_0000,
+    0x8010_0000_0000_0000,
+    0x3FF0_0000_0000_0000,
+    0xBFF0_0000_0000_0000,
+    0x3FF0_0000_0000_0001,
+    0x7FEF_FFFF_FFFF_FFFF,
+    0xFFEF_FFFF_FFFF_FFFF,
+    0x7FF0_0000_0000_0000,
+    0xFFF0_0000_0000_0000,
+    0x7FF8_0000_0000_0000,
+    0xFFF8_0000_0000_0001,
+    0x3CA0_0000_0000_0000,
+    0x3FF8_0000_0000_0000,
+    0x4340_0000_0000_0000,
+];
+
+/// Chains and steps of [`f64_lane_mismatches`]' energy-shape set.
+const F64_LANE_CHAINS: usize = 64;
+
+/// Steps per chain of the energy-shape set.
+const F64_LANE_STEPS: usize = 256;
+
+/// Lanes on which this target's `f64` lanes (`lane::LaneF64`, `lane::Widen`) disagree with the
+/// scalar `f64` oracle at `width`. Zero is the only admissible answer.
+///
+/// Modeled on [`minmax_lowering_mismatches`], and for the same reason: `crates/lane`'s `f64`
+/// vocabulary (issue #949) is exact IEEE binary64 by contract, its lowering is a codegen outcome
+/// (`f64x2.promote_low_f32x4`, `f64x2.mul` and `f64x2.add` under `simd128`, a per-lane array
+/// without it), and no native gate executes either wasm lowering. A count, with no pin and no
+/// case index: the pools are full of NaNs, which rule 2 of this corpus keeps out of a digest. Three
+/// sets are counted:
+///
+/// * **widen**: every 65,537th `f32` bit pattern plus a directed pool. A non-NaN input must match
+///   an independent integer construction of its binary64 bits; a NaN input must give a NaN.
+/// * **`add` and `mul`**: every ordered pair of a directed binary64 pool plus 4,096 seeded random
+///   pairs, against scalar `+` and `*`. A non-NaN result must match bit for bit; a NaN result must
+///   be a NaN.
+/// * **the energy shape**: 64 chains of 256 steps of `e = e.add(w.mul(w))` with `w = widen(x)`,
+///   on random finite `f32` of any magnitude from random positive seeds, compared at every step
+///   against the scalar `e + f64::from(x) * f64::from(x)`.
+///
+/// Every vector result passes through `core::hint::black_box` before it is compared: `widen` is
+/// the same `fpext` as `f64::from`, and without the barrier LLVM may prove a native comparison
+/// true and delete it.
+///
+/// # Panics
+///
+/// Panics if `width >= WIDTHS`.
+#[must_use]
+pub fn f64_lane_mismatches(width: usize) -> u32 {
+    assert!(width < WIDTHS, "width index out of range");
+    match width {
+        0 => f64_lane_mismatches_at::<f32>(),
+        1 => f64_lane_mismatches_at::<lane::Simd4>(),
+        _ => f64_lane_mismatches_at::<lane::Simd8>(),
+    }
+}
+
+/// [`f64_lane_mismatches`] at one width.
+fn f64_lane_mismatches_at<L: Widen>() -> u32 {
+    f64_lane_widen_mismatches::<L>()
+        + f64_lane_binop_mismatches::<L::F64>()
+        + f64_lane_energy_mismatches::<L>()
+}
+
+/// The binary64 bits of `x`, built from its fields with integer arithmetic; `None` for a NaN.
+///
+/// This is `crates/lane/tests/f64_lane.rs`' gate 1 oracle, deliberately independent of
+/// `f64::from`: the subnormal row normalises the significand, so `m * 2^-149` with `k` leading
+/// zeros in the 23-bit field has biased exponent `896 - k`.
+fn f64_lane_widen_oracle(x: f32) -> Option<u64> {
+    let bits = x.to_bits();
+    let sign = u64::from(bits >> 31) << 63;
+    let exponent = u64::from((bits >> 23) & 0xFF);
+    let mantissa = bits & 0x7F_FFFF;
+    match (exponent, mantissa) {
+        (0, 0) => Some(sign),
+        (0, _) => {
+            let k = mantissa.leading_zeros() - 9;
+            let fraction = u64::from((mantissa << (k + 1)) & 0x7F_FFFF) << 29;
+            Some(sign | (896 - u64::from(k)) << 52 | fraction)
+        }
+        (255, 0) => Some(sign | 0x7FF << 52),
+        (255, _) => None,
+        _ => Some(sign | (exponent + 896) << 52 | u64::from(mantissa) << 29),
+    }
+}
+
+/// The widen set: every 65,537th pattern (`k * 0x1_0001` for every `k`) and the directed pool,
+/// read consecutively `L::WIDTH` at a time.
+fn f64_lane_widen_mismatches<L: Widen>() -> u32 {
+    let mut patterns: Vec<u32> = (0..=0xFFFF_u32).map(|k| k * 0x1_0001).collect();
+    patterns.extend_from_slice(&F64_LANE_WIDEN_POOL);
+    while !patterns.len().is_multiple_of(LANES) {
+        patterns.push(0);
+    }
+
+    let mut mismatches = 0;
+    let mut src = [0.0_f32; LANES];
+    let mut out = [0.0_f64; LANES];
+    for group in patterns.chunks_exact(L::WIDTH) {
+        for (value, &pattern) in src.iter_mut().zip(group) {
+            *value = f32::from_bits(pattern);
+        }
+        core::hint::black_box(L::load(&src).widen()).store(&mut out);
+        let out = core::hint::black_box(out);
+        for lane in 0..L::WIDTH {
+            let agrees = match f64_lane_widen_oracle(src[lane]) {
+                Some(bits) => out[lane].to_bits() == bits,
+                None => out[lane].is_nan(),
+            };
+            mismatches += u32::from(!agrees);
+        }
+    }
+    mismatches
+}
+
+/// The `add`/`mul` set: every ordered pair of the directed pool, then 4,096 seeded random pairs of
+/// arbitrary bit patterns.
+fn f64_lane_binop_mismatches<F: LaneF64>() -> u32 {
+    let mut left = Vec::new();
+    let mut right = Vec::new();
+    for a in F64_LANE_BINOP_POOL {
+        for b in F64_LANE_BINOP_POOL {
+            left.push(f64::from_bits(a));
+            right.push(f64::from_bits(b));
+        }
+    }
+    let mut random = Xorshift64Star::new(0x0949_F64B_1A0B_0001);
+    for _ in 0..4096 {
+        left.push(f64::from_bits(random.next_u64()));
+        right.push(f64::from_bits(random.next_u64()));
+    }
+    while left.len() % LANES != 0 {
+        left.push(0.0);
+        right.push(0.0);
+    }
+
+    let mut mismatches = 0;
+    let mut out = [0.0_f64; LANES];
+    let mut index = 0;
+    while index < left.len() {
+        let a = F::load(&left[index..]);
+        let b = F::load(&right[index..]);
+        for (is_add, value) in [(true, a.add(b)), (false, a.mul(b))] {
+            core::hint::black_box(value).store(&mut out);
+            let out = core::hint::black_box(out);
+            for lane in 0..F::WIDTH {
+                let (x, y) = (left[index + lane], right[index + lane]);
+                let oracle = if is_add { x + y } else { x * y };
+                let agrees = if oracle.is_nan() {
+                    out[lane].is_nan()
+                } else {
+                    out[lane].to_bits() == oracle.to_bits()
+                };
+                mismatches += u32::from(!agrees);
+            }
+        }
+        index += F::WIDTH;
+    }
+    mismatches
+}
+
+/// The energy-shape set: [`F64_LANE_CHAINS`] independent chains of [`F64_LANE_STEPS`] steps, one
+/// chain per lane, compared with the scalar chain at every step.
+fn f64_lane_energy_mismatches<L: Widen>() -> u32 {
+    let mut random = Xorshift64Star::new(0x0949_E4E2_6700_0001);
+    // Random positive seeds between 2^-64 and 2^64, and random finite `f32` of any magnitude,
+    // subnormals included: the exponent field is redrawn from 0..=254, never 255.
+    let seeds: Vec<f64> = (0..F64_LANE_CHAINS)
+        .map(|_| {
+            let exponent = 1023 - 64 + random.next_u64() % 129;
+            f64::from_bits((exponent << 52) | (random.next_u64() & 0x000F_FFFF_FFFF_FFFF))
+        })
+        .collect();
+    let inputs: Vec<f32> = (0..F64_LANE_CHAINS * F64_LANE_STEPS)
+        .map(|_| {
+            let bits = random.next_u32();
+            let exponent = ((bits >> 23) & 0xFF) % 255;
+            f32::from_bits((bits & 0x807F_FFFF) | (exponent << 23))
+        })
+        .collect();
+
+    let mut mismatches = 0;
+    let mut src = [0.0_f32; LANES];
+    let mut out = [0.0_f64; LANES];
+    for first in (0..F64_LANE_CHAINS).step_by(L::WIDTH) {
+        let mut oracle = [0.0_f64; LANES];
+        oracle[..L::WIDTH].copy_from_slice(&seeds[first..first + L::WIDTH]);
+        let mut energy = <L::F64 as LaneF64>::load(&oracle);
+        for step in 0..F64_LANE_STEPS {
+            for (lane, value) in src.iter_mut().enumerate().take(L::WIDTH) {
+                *value = inputs[(first + lane) * F64_LANE_STEPS + step];
+            }
+            let w = L::load(&src).widen();
+            energy = core::hint::black_box(energy.add(w.mul(w)));
+            energy.store(&mut out);
+            let out = core::hint::black_box(out);
+            for lane in 0..L::WIDTH {
+                let x = f64::from(src[lane]);
+                oracle[lane] += x * x;
+                mismatches += u32::from(out[lane].to_bits() != oracle[lane].to_bits());
+            }
+        }
+    }
+    mismatches
+}
+
+/// The hostile words of [`meter_block_mismatches`]: NaN payloads, both infinities, both zeros, the
+/// extreme subnormals of both signs, `±MIN_POSITIVE`, the clip boundary `±1.0` and its neighbours,
+/// `±1e30`, `1e38` and `±MAX`. Mixed at random with small normal values.
+const METER_BLOCK_HOSTILE_POOL: [u32; 23] = [
+    0x7FC0_0000,
+    0xFFC0_0714,
+    0x7F80_0001,
+    0x7F80_0000,
+    0xFF80_0000,
+    0x0000_0000,
+    0x8000_0000,
+    0x0000_0001,
+    0x8000_0001,
+    0x007F_FFFF,
+    0x807F_FFFF,
+    0x0080_0000,
+    0x8080_0000,
+    0x3F80_0000,
+    0xBF80_0000,
+    0x3F80_0001,
+    0x3F7F_FFFF,
+    0xBF80_0001,
+    0x7149_F2CA,
+    0xF149_F2CA,
+    0x7E96_7699,
+    0x7F7F_FFFF,
+    0xFF7F_FFFF,
+];
+
+/// Blocks per stream of [`meter_block_mismatches`], each seeded with the previous block's energy.
+const METER_BLOCK_BLOCKS: usize = 16;
+
+/// Frames per block of [`meter_block_mismatches`]' streams, one stream each.
+const METER_BLOCK_FRAMES: [usize; 5] = [1, 3, 64, 128, 129];
+
+/// Lane fields on which this target's full meter block pass (`lane::kernels::builtins::meter_block`,
+/// issue #950) disagrees with the builtin meter's own `ALL` loop at `width`. Zero is the only
+/// admissible answer.
+///
+/// Modeled on [`f64_lane_mismatches`]: the pass is exact by contract -- its peak and counts are
+/// order-free and exact, and its energy is each lane's sample-serial sum in `f64` from the seed it
+/// was given -- its lowering is a codegen outcome (`f64x2.promote_low_f32x4`, `f64x2.mul` and
+/// `f64x2.add` under `simd128`, a per-lane array without it), and no native gate executes either
+/// wasm lowering. A count, with no pin: the inputs are full of NaNs.
+///
+/// Per width, hostile and tone input, one stream per frame count (1, 3, 64, 128 and 129) of 16
+/// blocks, each block's energy carried into the next as its seed from
+/// random positive seeds. Per lane and block, the peak, the two counts and the energy are compared
+/// with an independent scalar loop written here -- sanitize with `is_finite() &&
+/// !is_subnormal()`, take the magnitude, `if a > p`, `e += f64(s) * f64(s)` -- by bits (the
+/// counts as integers), and each field that differs counts one.
+///
+/// Every vector result passes through `core::hint::black_box` before it is compared.
+///
+/// # Panics
+///
+/// Panics if `width >= WIDTHS`.
+#[must_use]
+pub fn meter_block_mismatches(width: usize) -> u32 {
+    assert!(width < WIDTHS, "width index out of range");
+    match width {
+        0 => meter_block_mismatches_at::<f32>(),
+        1 => meter_block_mismatches_at::<lane::Simd4>(),
+        _ => meter_block_mismatches_at::<lane::Simd8>(),
+    }
+}
+
+/// [`meter_block_mismatches`] at one width.
+fn meter_block_mismatches_at<L: Widen>() -> u32 {
+    use lane::kernels::builtins::meter_block;
+    let mut random = Xorshift64Star::new(0x0950_3E7E_B10C_0001);
+    let mut mismatches = 0;
+    let mut words = Vec::new();
+    let mut peak = [0.0_f32; LANES];
+    let mut clipped = [0.0_f32; LANES];
+    let mut sanitized = [0.0_f32; LANES];
+    let mut energy = [0.0_f64; LANES];
+    for hostile in [true, false] {
+        for frames in METER_BLOCK_FRAMES {
+            // Random positive seeds between 2^-64 and 2^64: a running energy of any size.
+            let mut carried = [0.0_f64; LANES];
+            for seed in &mut carried {
+                let exponent = 1023 - 64 + random.next_u64() % 129;
+                *seed =
+                    f64::from_bits((exponent << 52) | (random.next_u64() & 0x000F_FFFF_FFFF_FFFF));
+            }
+            let mut oracle_energy = carried;
+            for block in 0..METER_BLOCK_BLOCKS {
+                words.clear();
+                for index in 0..frames * L::WIDTH {
+                    let lane = index % L::WIDTH;
+                    let word = if hostile && !random.next_u32().is_multiple_of(3) {
+                        f32::from_bits(
+                            METER_BLOCK_HOSTILE_POOL
+                                [random.next_u32() as usize % METER_BLOCK_HOSTILE_POOL.len()],
+                        )
+                    } else {
+                        // A triangle tone whose amplitude cycles through 0.375 to 1.5 by lane and
+                        // block, so some lanes clip.
+                        let step = ((index / L::WIDTH + block * 131) * (3 + lane)) % 256;
+                        let triangle = (step as f32 / 64.0 - 2.0).abs() - 1.0;
+                        0.375 * (1 + (lane + block) % 4) as f32 * triangle
+                    };
+                    words.push(word);
+                }
+                let result = core::hint::black_box(meter_block::<L>(
+                    &words,
+                    frames,
+                    <L::F64 as LaneF64>::load(&carried),
+                ));
+                result.peak.store(&mut peak);
+                result.clipped.store(&mut clipped);
+                result.sanitized.store(&mut sanitized);
+                result.energy.store(&mut energy);
+                let (peak, clipped, sanitized, energy) =
+                    core::hint::black_box((peak, clipped, sanitized, energy));
+                for lane in 0..L::WIDTH {
+                    let mut oracle_peak = 0.0_f32;
+                    let mut oracle_clipped = 0_u32;
+                    let mut oracle_sanitized = 0_u32;
+                    for frame in 0..frames {
+                        let x = words[frame * L::WIDTH + lane];
+                        let valid = x.is_finite() && !x.is_subnormal();
+                        let s = if valid { x } else { 0.0 };
+                        let a = s.abs();
+                        if a > oracle_peak {
+                            oracle_peak = a;
+                        }
+                        oracle_energy[lane] += f64::from(s) * f64::from(s);
+                        oracle_sanitized += u32::from(!valid);
+                        oracle_clipped += u32::from(a >= 1.0);
+                    }
+                    mismatches += u32::from(peak[lane].to_bits() != oracle_peak.to_bits());
+                    mismatches += u32::from(clipped[lane] != oracle_clipped as f32);
+                    mismatches += u32::from(sanitized[lane] != oracle_sanitized as f32);
+                    mismatches +=
+                        u32::from(energy[lane].to_bits() != oracle_energy[lane].to_bits());
+                    carried[lane] = energy[lane];
+                }
+            }
+        }
+    }
+    mismatches
+}
+
 /// Name of a width index, as the widths appear in [`digest_case`].
 ///
 /// # Panics
@@ -640,7 +1056,7 @@ pub fn width_name(width: usize) -> &'static str {
 #[must_use]
 pub fn expected_digest(index: usize) -> [u8; 32] {
     match case_of(index) {
-        Case::Kernel(..) | Case::Elementwise(_) => LANE_DIGESTS[index],
+        Case::Kernel(..) | Case::Elementwise(_) | Case::MeterPeak => LANE_DIGESTS[index],
         Case::Math(case) => math_corpus::M3_DIGESTS[case],
         Case::Runtime(case) => runtime_corpus::D1_DIGESTS[case],
         Case::TransientShaper(case) => transient_shaper_corpus::CROSS_TARGET_DIGESTS[case],
@@ -666,7 +1082,9 @@ pub fn expected_digest(index: usize) -> [u8; 32] {
 pub fn digest_case(index: usize, width: usize) -> [u8; 32] {
     assert!(width < WIDTHS, "width index out of range");
     match case_of(index) {
-        Case::Kernel(..) | Case::Elementwise(_) => digest_lanes(&lane_values(index, width, true)),
+        Case::Kernel(..) | Case::Elementwise(_) | Case::MeterPeak => {
+            digest_lanes(&lane_values(index, width, true))
+        }
         Case::Math(case) => digest_math(case),
         Case::Runtime(case) => match width {
             0 => digest_runtime::<f32>(case),
@@ -791,6 +1209,11 @@ fn lane_values(index: usize, width: usize, fused: bool) -> [[f32; FRAMES]; LANES
             0 => elementwise_values::<f32>(operation, fused),
             1 => elementwise_values::<lane::Simd4>(operation, fused),
             _ => elementwise_values::<lane::Simd8>(operation, fused),
+        },
+        Case::MeterPeak => match width {
+            0 => meter_peak_values::<f32>(),
+            1 => meter_peak_values::<lane::Simd4>(),
+            _ => meter_peak_values::<lane::Simd8>(),
         },
         Case::Math(_)
         | Case::Runtime(_)
@@ -1142,6 +1565,114 @@ fn elementwise_values<L: Lane>(operation: Elementwise, fused: bool) -> [[f32; FR
         }
     }
 
+    lanes
+}
+
+/// The meter blocks of the sample-peak case: lengths straddling one and two vector widths and the
+/// 128-frame quantum, repeated until [`FRAMES`] is covered.
+const METER_PEAK_BLOCKS: [usize; 10] = [1, 2, 3, 5, 16, 31, 64, 127, 128, 129];
+
+/// Blocks per meter window: the window's peak restarts from `+0.0` every third block.
+const METER_PEAK_WINDOW_BLOCKS: usize = 3;
+
+/// `(first frame, frames, window)` of every block of the sample-peak case, in order.
+fn meter_peak_blocks() -> Vec<(usize, usize, usize)> {
+    let mut blocks = Vec::new();
+    let mut start = 0;
+    while start < FRAMES {
+        let frames = METER_PEAK_BLOCKS[blocks.len() % METER_PEAK_BLOCKS.len()].min(FRAMES - start);
+        blocks.push((start, frames, blocks.len() / METER_PEAK_WINDOW_BLOCKS));
+        start += frames;
+    }
+    blocks
+}
+
+/// One lane's words for the sample-peak case.
+///
+/// Every window whose index is `1 mod 4` carries only words the meter must sanitize to `+0.0` --
+/// NaN with two payloads, both infinities, both zeros, and subnormals of both signs -- so a
+/// lowering that admitted any of them would publish a non-zero peak where the oracle's is `+0.0`.
+/// The other windows mix those with the magnitude boundaries (`MIN_POSITIVE`, `f32::MAX`, `1e30`)
+/// and moderate audio-shaped values, which is where the D8 `max` has something to choose between.
+/// The words are inputs only: what is digested is the sanitized peak, which is always finite.
+fn meter_peak_words(lane: usize) -> [f32; FRAMES] {
+    const INVALID: [u32; 8] = [
+        0x7FC0_0000,
+        0xFFC0_0943,
+        0x7F80_0000,
+        0xFF80_0000,
+        0x0000_0000,
+        0x8000_0000,
+        0x0000_0001,
+        0x807F_FFFF,
+    ];
+    const BOUNDARY: [u32; 8] = [
+        0x0080_0000,
+        0x8080_0000,
+        0x7F7F_FFFF,
+        0xFF7F_FFFF,
+        0x7149_F2CA,
+        0x3F80_0000,
+        0xBF80_0000,
+        0x007F_FFFF,
+    ];
+    let mut random = Xorshift64Star::new(lane_seed(lane) ^ 0x0943_0943_0943_0943);
+    let mut words = [0.0_f32; FRAMES];
+    for (start, frames, window) in meter_peak_blocks() {
+        for word in &mut words[start..start + frames] {
+            let bits = random.next_u32();
+            *word = if window % 4 == 1 {
+                f32::from_bits(INVALID[(bits % 8) as usize])
+            } else {
+                match bits % 8 {
+                    0 => f32::from_bits(INVALID[((bits >> 3) % 8) as usize]),
+                    1 => f32::from_bits(BOUNDARY[((bits >> 3) % 8) as usize]),
+                    _ => moderate(random.next_u32()),
+                }
+            };
+        }
+    }
+    words
+}
+
+/// Runs the sample-peak case at width `L::WIDTH`: every frame's value is the running window peak
+/// after that frame, computed by one kernel call over the block's prefix up to it, seeded with the
+/// window's peak after the previous block (`+0.0` at a window's first block, which is the seed a
+/// bank's pass uses).
+fn meter_peak_values<L: Lane>() -> [[f32; FRAMES]; LANES] {
+    use lane::kernels::builtins::meter_sample_peak_block;
+    let mut words = [[0.0_f32; FRAMES]; LANES];
+    for (lane, slot) in words.iter_mut().enumerate() {
+        *slot = meter_peak_words(lane);
+    }
+    let width = L::WIDTH;
+    let blocks = meter_peak_blocks();
+    let mut block = vec![0.0_f32; METER_PEAK_BLOCKS.iter().max().copied().unwrap_or(0) * width];
+    let mut out = vec![0.0_f32; width];
+    let mut lanes = [[0.0_f32; FRAMES]; LANES];
+    for group in 0..LANES / width {
+        let mut peak = L::zero();
+        let mut window = usize::MAX;
+        for &(start, frames, block_window) in &blocks {
+            if block_window != window {
+                window = block_window;
+                peak = L::zero();
+            }
+            for frame in 0..frames {
+                for offset in 0..width {
+                    block[frame * width + offset] = words[group * width + offset][start + frame];
+                }
+            }
+            for prefix in 1..=frames {
+                meter_sample_peak_block::<L>(&block[..prefix * width], prefix, peak)
+                    .store(&mut out);
+                for offset in 0..width {
+                    lanes[group * width + offset][start + prefix - 1] = out[offset];
+                }
+            }
+            peak = meter_sample_peak_block::<L>(&block[..frames * width], frames, peak);
+        }
+    }
     lanes
 }
 
