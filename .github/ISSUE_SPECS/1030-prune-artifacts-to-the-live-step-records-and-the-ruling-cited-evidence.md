@@ -270,3 +270,125 @@ plus `check-command-kind-vocabulary.py`, `check-command-reason-vocabulary.py` (e
 `test-wasm-realtime-atomics.sh`. Not run: the gates that need a built artifact directory or a
 browser (`check-web-audioworklet.sh`, `check-browser-expected-resources.py --artifacts`, the
 Playwright matrix); their inputs are unchanged (gate 3).
+
+## Sol verdict, attempt 1
+
+**PASS.**
+
+Verified on a scratch merge of `103091eb` into `codex/batch-slim-2` at `6709552c`. Base for every
+comparison is `6709552c`.
+
+### Merge
+
+- **#1030 onto the batch:** clean.
+- **#1031 (`d1d86303`) on top:** clean. #1031 adds no line that names `artifacts/`, and every doc
+  this attempt kept a folder for survives it. All `docs/issue880-*` notes are gone in the combined
+  tree, so the deferred `issue880-mq2` links disappear with them.
+- **#1033 (`git merge-tree`) on top of both:** clean.
+- **CI routing:** `ci-path-router.py --flags` gives `route=full, math_closure=false` for #1030
+  alone. With #1031 added, `math_closure=true`, which is #1031's own edits.
+
+### Findings, by severity
+
+No defect. Nothing that reads or cites a removed record is left without a working reference. Every
+writer still works, and every gate passes.
+
+1. **Medium (follow-up, not a branch defect): Amendment 2 is complete only when root posts the #560
+   comment at the batch push.**
+   - #560's body calls the removed folders "durable raw evidence". The count reproduces: 33
+     entries, 847 files, 1,408,515 bytes.
+   - The prepared permalink resolves today: `a9414c0c` is on `origin/main` and holds all 33.
+   - Do not close #1030 before the comment exists.
+2. **Low: the re-points depend on `df8cebb3` staying reachable.**
+   - `docs/C_ABI_V1_QUALIFICATION.md:134-144` gives `git show df8cebb3^:...`. Both paths resolve
+     locally.
+   - Neither `df8cebb3` nor its parent `c69736c1` is upstream yet. They survive the batch's merge
+     or fast-forward, but a squash would orphan them.
+   - `a9414c0c` (on `origin/main`, holding both folders) would be squash-proof, and it matches the
+     spec's permalink form. Optional.
+3. **Low: the retention rule's literal wording keeps too much.**
+   - "A handoff note that an open issue cites" and "an open issue spec" also match folders named
+     only in deletion lists or descriptions: `docs/handoffs/dead-code-2026-09-28/VERIFY-DEAD-CODE.md:256`,
+     `issues/07-...`, open #1027:311 and this spec itself. The attempt rightly treated those as
+     history, but the rule does not say so. Suggested wording: "cites it as evidence (not in a
+     deletion list or a description)".
+   - The rule also does not say who prunes `artifacts/steps/` when a batch closes. The folder
+     holds records from past batches.
+   - Otherwise the rule matches steps 1 and 5 and Amendments 2 and 4.
+4. **Low (sequencing): land #1030 and #1031 in the same push.** #1030 alone leaves 13 dangling
+   links in `docs/issue880-mc1.md:39`, `mc2.md:56-57` and `mq2.md:43-54`. Those notes are
+   unreferenced, and their validator procedure has been dead since #1027. With both landed there
+   are none.
+5. **Info: `docs/handoffs/plumbing-floor-2026-09-26/PLAN.md:19,149` (raised by the #1031
+   verifier) is a harmless historical mention, and no re-point is needed.**
+   - It names the removed `copy-removal-*` and `copy-removal-without-920` records while arguing
+     the disposition of closed #923 and the arms added by merged PR #924.
+   - #1031 keeps the folder whole for open #938. #938 relies on `DIAGNOSIS-2.md` and
+     `DIAGNOSIS-2-VERIFY.md` section 5 (the live producer), and neither uses those records.
+     DIAGNOSIS-2's rows come from the kept `artifacts/plumbing-floor/`.
+   - No open issue cites PLAN.md; only closed #926, #927 and #944 do. Step 3 excludes
+     `docs/handoffs/`.
+   - All three records resolve at `df8cebb3^`. A one-line re-point would be optional polish.
+6. **Info:** open #559:1042 ("retains all 37 `artifacts/**/*.s` files") is a dated delivery log
+   for #625, not a claim of reliance. This attempt removes all 37.
+
+### What was checked
+
+1. **Counts reproduce exactly.** 227 entries removed: 10,132 files and 47,769,797 bytes. 42 kept:
+   350 files and 13,414,484 bytes. Every category row matches. No kept folder was partially
+   pruned, and `artifacts/steps/` is byte-untouched.
+2. **Citations.** A scanner expanded brace and glob forms of every `artifacts/<name>` in every
+   tracked file outside `artifacts/`, in both merged trees. A second pass matched bare deleted
+   names. Every hit is one of:
+   - a kept folder;
+   - the two re-points;
+   - a closed issue spec;
+   - an open spec's own deletion or scope note (#1027, #1030);
+   - a dead-code audit draft;
+   - PLAN.md (history, finding 5);
+   - `artifacts/**` wildcards (`.gitignore`, the inventory rulings, `test-workspace-policy.sh`);
+   - build-output routes, fuzz `target/` prefixes or synthetic repos;
+   - `pure-path` used as prose.
+
+   Nothing else matched. Names absent at base (`issue038`, `issue431-full-chain`, `issue880/`,
+   `issue-60{2,3,6}-...`, `issue455-...`) predate #1030. The following turned up nothing:
+   `include_str!`/`include_bytes!`, `build.rs`, quoted `"artifacts"` joins, `*.rs`, AGENTS.md and
+   the rulings. All 30 ruling citations name kept folders. Every file-level path into a kept
+   folder resolves, apart from `steps/` placeholders.
+3. **Open issues.** Of the 107 open issues, local specs cite only kept folders or their own
+   deletion notes. Among GitHub bodies, only #560 cites removed folders (finding 1); #1038 and
+   #1039 name kept ones.
+4. **Writers.** Probes ran in a shared clone with `artifacts/steps/` removed:
+   - `scripts/operator/run-console-benchmark.sh --step` creates the missing parent (`mkdir -p`),
+     reaches the build (with a stub `cargo`), writes a FAIL disposition and refuses a rerun.
+   - The native preflight passes its overwrite gate without the parent and creates nothing.
+   - The wasm runner and its preflight refuse to overwrite on all 30 arms.
+   - The V8 runner's missing-parent case is covered by `test-console-benchmark.sh`'s synthetic
+     repo.
+5. **Gates:** 79 commands, all green on the #1030 merge and on the #1030 + #1031 merge. Python
+   ones ran with `python3 -B`.
+   - The docs-gates job (`check-dsp-research`, `test-dsp-research`, `check-builtins-listening`)
+     and the route job's routing check and suite.
+   - The lint job's whole hermetic list, including:
+     - the session, step-vocabulary, bench (with its suite), script-reachability,
+       artifact-evidence-leak and bench-preconditions gates;
+     - `test-console-benchmark.sh` and `test-wasm-console-benchmark.sh`.
+   - Plus `check-capi-abi.sh` (with `--self-test`), `test-realtime-audit-probes.sh` (all three
+     modes), `test-native-vectorization-report.sh`, and the command-kind, command-reason,
+     parameter-metadata, session-map, callgraph, SDK-deletion, stem-store, gate-lib,
+     protocol-benchmark and atomics checks.
+   - Three of them first failed only because my `CARGO_TARGET_DIR` or a missing argument broke
+     the harness. Invoked exactly as CI does, they pass.
+   - No failure, so none is pre-existing on base.
+6. **Build and tests.**
+   - `cargo check --locked --workspace --all-targets --all-features` passes.
+   - No test reads `artifacts/`; the only test file that mentions it is
+     `lane --test b2_interleave`, which passes.
+   - The `gain_pan_profile digests` output has 17 rows, byte-identical on the merge and on base.
+     The base run recompiled nothing.
+   - No file changed under `crates`, `hosts`, `tools`, `sdk`, `fuzz`, `fixtures`, the Cargo
+     manifests, the workflows or `scripts/` (other than the README). So the shipped artifact's
+     inputs are unchanged, and it was not rebuilt.
+
+Not run: the browser and Playwright gates, `check-web-audioworklet.sh`, `check-cross-targets.sh`
+and the full `cargo test --workspace`. None of their inputs changed.
