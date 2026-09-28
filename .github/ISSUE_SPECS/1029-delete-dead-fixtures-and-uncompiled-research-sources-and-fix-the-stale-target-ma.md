@@ -91,3 +91,121 @@ See `../VERIFY-DEAD-CODE.md`, finding F3.
    The fixture is still unread by any code, so deleting it is safe, but step 1 must re-point #26's
    spec text to a commit permalink in the same change (and #26 is now mobile-relevant, since it
    qualifies the native C ABI and runner target matrix).
+
+## Attempt 1 evidence
+
+Terra, on `codex/1029-dead-fixtures-research-sources` from the batch-2 head `52016391` (PR #1067:
+#1017, #1035, #1037, #1063, #1034, #1036). Implementation commit `a1a96d3f`.
+
+### Recount on this base
+
+Nothing in scope had moved since the audit. #1035, #1037 and #1017 left both folders untouched, and
+#1033 (in review) deletes `fixtures/sources/v1` and `fixtures/native-pcm-runner`, not this one.
+
+| deleted | files | lines | bytes |
+|---|---:|---:|---:|
+| `fixtures/capi-qualification/v1/` | 13 | 478 | 30,007 |
+| `dsp-research/archive/issue-0{31,42,44,45}/*.rs` | 4 | 5,134 | 168,431 |
+| `dsp-research/archive/README.md` | 1 | 23 | 1,459 |
+| **total** | **18** | **5,635** | **199,897** |
+
+`git diff --stat 52016391 HEAD`: 22 files, +31 −5,655. The only paths outside `fixtures/` and
+`dsp-research/` are three docs, #26's spec and one comment:
+
+| file | +/− | change |
+|---|---|---|
+| `crates/dsp-reference/src/svf.rs` | +4 −2 | the comment inside `#[cfg(test)] mod tests` points to issues #031/#042/#044/#045 and to git (`dsp-research/archive/` at `5379e46c`) |
+| `docs/C_ABI_V1_QUALIFICATION.md` | +6 −3 | the two fixture mentions are now past tense, with a permalink to the folder at `5379e46c` (origin/main, where it is byte-identical), and the live C-ABI gates are named |
+| `.github/ISSUE_SPECS/026-…md` | +7 −4 | amendment 4: the same permalink. It records that #319 (`f0509c3f`) deleted the runner and checkers and that #1029 deleted the ledger. #26's obligation sentence is unchanged |
+| `docs/TARGET_MATRIX.md` | +14 −11 | see below |
+
+`dsp-reference` is a dev-dependency (`cargo tree -i dsp-reference -e normal`: only `audit`,
+`conformance` and `bench`), and it is absent from `host-web`'s wasm closure and from `capi`'s. The
+edited comment is also inside a test module.
+
+### Target matrix
+
+Changed only what is stale after #1017, #1041 and the rulings:
+
+- The three x86 rows (scalar baseline; AVX2 "entered after runtime detection"; FMA "independently
+  detected") are now one row: native x86-64 for tooling and tests, not a shipped product target.
+  It is pinned x86-64-v3 (#83 D4, `.cargo/config.toml`) with `Simd8` as a compile-time constant,
+  refused without AVX2 and FMA at compile time (`lane`) and at boot (`lane::attest_host()`). Its CI
+  evidence is the `lint` job's three probes, which exist as described in `qualification.yml`
+  (`-avx2,-fma` and `+avx2,-fma` must fail with `requires x86-64-v3`, and `+avx2,+fma` compiles).
+- The wasm row said "baseline and `+simd128` are distinct artifacts" and cited "two release
+  artifact directories". It now says there is one `simd128` AudioWorklet artifact (W4-D1), built by
+  `build-web-audioworklet.sh`, with `Simd4`, multiply plus add, and no relaxed SIMD or FMA
+  (`docs/audits/issue-triage-2026-09-14.md` cites that fact). It also names the typed
+  `miso.unsupported.v1` refusal and the `artifact`/`artifact-gates`/`browser` jobs. It does not
+  mention the sha256 pin, because #1061 changes where the pin is checked.
+- Other fixes:
+  - The intro line ("Issue 001 establishes … not … browser runtime") and the "CI evidence in issue
+    001" column header.
+  - "Probe flags are evidence that separate artifacts compile". The probes now prove the sub-v3
+    refusal.
+  - "Browser execution … deferred to the platform adapter issues". The browser job qualifies it
+    now.
+  - The reproducible checks add the artifact build line and label the scalar build as the CI
+    exception. Both cargo lines are kept verbatim, including `-p target-smoke`, which the R1 shells
+    still use.
+- Not touched:
+  - the AArch64 and Refused rows (#1017, #1041);
+  - "64-bit only" and the scalar-wasm exception;
+  - the dispatch contract, including the `KernelBackendV1` tombstone that
+    `de-versioning-inventory.md:108` requires;
+  - "Native AArch64";
+  - "Render threading";
+  - the "Known AArch64 defects (#1017)" register.
+- Amendment 1 is satisfied by #1017's rows, which follow the owner's ruling. Amendment 2 is moot:
+  #1017 (`401fc362`) already replaced the "When native AArch64 is revived" recipe, and no
+  `-p host-mobile` recipe remains.
+
+### Kept, and why
+
+- `docs/ENGINE_ENV_VOCABULARY.md:129` and `docs/derivations/243-sdk-boot.md:42,173` match
+  `capi-qualification` only because they name the checker scripts #319 deleted
+  (`check-capi-qualification-v1.sh`, `check-capi-qualification-evidence-v1.py`). They do not name
+  the fixture, and both stay true: one is a live env var's history, the other a dated script count.
+  #1033 and #1061 also edit the vocabulary file.
+- The dated rulings (`prefix-strip-inventory.md`, `de-versioning-inventory.md`), the 2026-09-04
+  audit, the closed specs (045, 097, 104) and #1033's in-review spec record past states. They are
+  left for #1040 (R10) and git.
+
+### Gates (all on `a1a96d3f`)
+
+| gate | result |
+|---|---|
+| `cargo check --locked --workspace --all-targets --all-features` | pass, 0 warnings |
+| `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`; `cargo fmt --all -- --check` | pass |
+| `RUSTFLAGS='-C target-feature=+simd128' cargo check --locked --target wasm32-unknown-unknown -p host-web` | pass |
+| `cargo check --locked --manifest-path fuzz/Cargo.toml --bins` | pass |
+| `bash scripts/check-cross-targets.sh`: aarch64 iOS and Android check and clippy, iOS memset ceilings (#1018, unchanged counts), wasm scalar/simd128, armv7 refusal | PASS |
+| docs-gates job: `check-dsp-research.sh`, `test-dsp-research.sh`, `check-builtins-listening.sh` | ok |
+| `check-dsp-research.sh` on a base-tree copy with `dsp-research/archive` made unreadable (mode 000) | ok, so it never reads the archive |
+| `check-ci-path-routing.py`, `test-ci-path-routing.py` | pass; `ci-path-router.py --base 52016391 --head a1a96d3f` gives `route=full` (the `.rs` archive files, `fixtures/` and `svf.rs` route full) |
+| script reachability (`check-` and `test-script-reachability.py`) | ok (136 reached, 8 operator exempt; 18 mutations) |
+| every lint-job script (54 policy, fixture and self-test commands, Python with `python3 -B`), plus the docs gates, routing and three vocabulary/shape checks: 63 commands | 63/63 exit 0 |
+| spec gate 5: `rg 'capi-qualification\|archive/issue-0' crates hosts tools scripts sdk fuzz .github/workflows` | no match (exit 1) |
+| tests of every crate that reads `fixtures/` (debug, `--all-features`: builtins, builtins-compiler, capi, compressor, conformance, effect-compiler, graph, graph-compiler, host-core, protocol, session, host-web, native-pcm-runner, parameter-metadata, session-validator) | 1,281 passed, 0 failed, 8 ignored |
+| release `cargo test -p audit -p bench -p console-workload` | 130 passed, 0 failed, 2 ignored |
+| `conformance_fixtures --check`; `check-builtins-fixtures.sh` and `check-console-fixtures.sh` against release binaries | pass |
+| `check-capi-abi.sh` and `--self-test`; `audit capi` | ok (shared and static linkage); 100,000 calls, every violation counter 0 |
+| console digests: `gain_pan_profile digests` on a base-tree build and on the change | 17 rows, byte-identical |
+
+The `check-capi-abi.sh` self-test hardcodes `<workspace>/target/release`. It was run through a
+temporary `target` symlink to the scratch build, which was then removed.
+
+### `cargo test -- --list`
+
+`cargo test --locked --workspace --all-features -- --list` on `52016391` and on `a1a96d3f`:
+2,273 tests in 287 test binaries and doc-test groups on both. The list output is byte-identical,
+and the binary names are identical once hashes are stripped. No test was added or removed, as
+expected: nothing compiled or read the deleted files.
+
+### Parallel branches
+
+`git merge-tree` of this branch with #1033, #1039, #1049 and #1059 is clean. #1059 edits
+`TARGET_MATRIX.md` in the dispatch section, in different hunks from this change. #1061 conflicts
+only in `scripts/test-web-audioworklet.mjs`, and it conflicts there with the base `52016391` too,
+so this change is not the cause.
