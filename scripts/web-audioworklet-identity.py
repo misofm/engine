@@ -198,6 +198,11 @@ def self_test() -> None:
         shutil.rmtree(scratch)
 
 
+# The fixture's commits must not depend on the caller's git configuration (identity, signing).
+AUTHOR = ("-c", "user.name=identity-self-test", "-c", "user.email=identity-self-test@invalid",
+          "-c", "commit.gpgsign=false")
+
+
 def run_self_test(scratch: pathlib.Path) -> None:
     repo = scratch / "repo"
     repo.mkdir()
@@ -227,9 +232,7 @@ def run_self_test(scratch: pathlib.Path) -> None:
         if extra is not None:
             (repo / "notes.txt").write_text(extra)
         must(git(repo, "add", "-A"))
-        must(git(repo, "-c", "user.name=identity-self-test", "-c",
-                 "user.email=identity-self-test@invalid", "commit", "-q", "--allow-empty",
-                 "-m", message))
+        must(git(repo, *AUTHOR, "commit", "-q", "--allow-empty", "-m", message))
         return must(git(repo, "rev-parse", "HEAD"))
 
     must(git(repo, "init", "-q"))
@@ -295,9 +298,7 @@ def run_self_test(scratch: pathlib.Path) -> None:
     # the previous tip, and nothing else has a base.
     at(base)
     side = must(git(repo, "rev-parse", ordinary))
-    must(git(repo, "-c", "user.name=identity-self-test", "-c",
-             "user.email=identity-self-test@invalid", "merge", "-q", "--no-ff", "-m", "merge",
-             side))
+    must(git(repo, *AUTHOR, "merge", "-q", "--no-ff", "-m", "merge", side))
     merge_parent = must(git(repo, "rev-parse", "HEAD^1"))
     expectations = (
         ("pull_request", "", merge_parent),
