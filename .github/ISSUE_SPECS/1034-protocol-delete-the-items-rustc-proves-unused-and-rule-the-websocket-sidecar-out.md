@@ -257,3 +257,149 @@ normal` has no `protocol`.
   unused helpers (#1017's territory).
 - An aarch64 `--workspace` check needs cross C compilers for `blake3` (native-pcm-runner,
   stem-hasher) and `wasmtime` build scripts; those tools are not product crates.
+
+## Sol verdict, attempt 1
+
+**PASS.** Sol verified a scratch merge of this branch (`0a444436`) into the batch head
+`codex/batch-slim-2` (`8b3c0794`, which carries #1035), producing `859c667f`. Every build ran
+with `CARGO_INCREMENTAL=0` under `nice`. There is no defect. The findings below are ranked by
+severity, and none of them blocks.
+
+### Findings
+
+1. **Low, pre-existing, not #1034: the AudioWorklet pin does not reproduce on this machine.**
+   The pin is `f7bd75ca…`. On this machine `build-web-audioworklet.sh` builds `f58b55e9…` at
+   `eca8779d`, and `e34073a2…` at both `8b3c0794` and the merge. The merge is therefore
+   byte-identical to its base: `protocol` is not in host-web's wasm closure. Three gates stop at
+   that pin on base and merge alike: `check-web-audioworklet.sh`,
+   `check-browser-expected-resources.py --artifacts` and `check-sdk-headless.sh`. Sol pinned the
+   observed hash in the scratch tree only, and all three then passed on the merge. The batch
+   boundary still has to repin.
+2. **Low, docs: `docs/C_ABI_V1_QUALIFICATION.md:112` still names `MockProviderConfig`.** It is a
+   historical qualification record whose byte figures are already stale, so no live claim is
+   lost. A later doc pass can touch it.
+3. **Low, scope bookkeeping.** `docs/CONTROL_PROVIDER_BOUNDARY.md:7` still lists a local IPC
+   sidecar and WebSocket as possible BTLV adapters. The ruling limits this edit to AGENTS.md
+   text, so this is not a defect. When #25 closes, the delivery-control rules require
+   `.github/ISSUE_SPECS/025-optional-binary-websocket-sidecar.md` to record the descoping.
+4. **Info: the control queue.** The queue keeps its slots, its `control_command_bytes`
+   configuration and its capability field (`controller.rs:3292`). Nothing enqueues onto it and
+   nothing enforces a byte budget. That was already true at base: `try_enqueue_control` had no
+   caller in any build. If #140 ever wires this queue, the budget has to be rebuilt with it.
+
+### Merge
+
+- The merge was clean. `AGENTS.md` and `crates/capi/tests/resource_lifecycle.rs` auto-merged
+  with #1035's hunks, which are disjoint from this branch's.
+- There is no semantic conflict: #1035 moved the `source_*` report rows, and this branch moves
+  only the CAPI-retained rows. `resource_lifecycle` passes on the merge.
+
+### The deletions are unused
+
+**Grep.** `git grep` over the merged tree covered capi and its tests, host-web, host-core,
+tools/audit, tools/bench, conformance, fuzz, scripts and docs. It searched for 15 of the 25
+items: `control_used_bytes`, `try_enqueue_control`, `try_dequeue_control`,
+`try_dequeue_response`, `encode_session_committed_event`, `encode_automation_canceled_event`,
+the public `TLV_PREFIX_BYTES`, `B2B_BASE`, `B3A_BASE`, `encoded_diagnostic_message_len`,
+`decode_diagnostic_message`, `applied_operations()`, `MockProviderConfig`,
+`try_with_retained_capacity` and `MockProvider::new`. It found no use:
+
+- only comments name `control_used_bytes`;
+- the only `TLV_PREFIX_BYTES` hits are `btlv.rs`'s private copy;
+- capi's `retained_capacities` calls resolve to host-core's `SessionControlProvider`, not to
+  `MockProvider`.
+
+The other items (`len`, `is_empty`, `kind` and `used`) have names too generic to grep. The
+compile matrix below proves them.
+
+Beyond the matrix:
+
+- No script compiles a Rust snippet that names a deleted item.
+- The protocol crate has no doctests.
+- No code sits behind `cfg(fuzzing)`.
+- bench's wasm32-only branch calls only `corpus_checksum`.
+- The diff adds and removes no `#[test]`, so the implementer's unchanged `--list` count of 2,331
+  is consistent with the diff.
+
+**Compile matrix on the merge.** Every build passed. None of the no-features, iOS or Android
+builds produced a warning, except the `fp_environment` warnings noted in the table.
+
+| build | result |
+|---|---|
+| `cargo check --locked --workspace --all-targets --all-features` | pass, 0 warnings |
+| the same without `--all-features` | pass, 0 warnings |
+| `cargo clippy … --all-features -- -D warnings` | pass |
+| `cargo fmt --all -- --check` | pass |
+| `cargo check --locked --manifest-path fuzz/Cargo.toml --bins` | pass (this is CI's `fuzz.yml` compile step on stable 1.97.1; cargo-fuzz runs use nightly-2026-08-20) |
+| `aarch64-apple-ios` and `aarch64-linux-android`, `-p capi -p protocol -p host-core -p conformance --all-targets --all-features` | pass (only the pre-existing `host-core/tests/fp_environment.rs` warnings, #1017) |
+| wasm32 `+simd128` `-p host-web -p conformance -p protocol` | pass |
+| wasm32 scalar `-p protocol -p conformance -p host-core` | pass |
+| CI's 18-package scalar wasm release build, and the SIMD128 probe | pass |
+| `RUSTDOCFLAGS=-D warnings cargo doc -p protocol --all-features` | pass |
+
+### `control_used_bytes`
+
+**It was bookkeeping only.** At `eca8779d` it was read in two places, `queue.rs:783` and
+`queue.rs:799-800`. The first is the byte-budget check inside `try_enqueue_control`, and the
+second is inside `try_dequeue_control`. Neither method had a caller in any build. The field fed
+no report, capability, telemetry counter or capi path.
+
+**Can an ack precede a drop? No.** capi's submit path decodes and answers each frame
+synchronously through the controller and never touched this queue. The removed enqueue returned
+`Err(value)` rather than dropping. No admission or backpressure path changed.
+
+**The −8 bytes are exactly this field.**
+
+- It is the only field removed from any struct.
+- `ProtocolController<MockProvider>` shrinks by 8, from 6,040 to 6,032.
+- capi derives its retained bytes from `checked_layout::<crate::Session>(1)`
+  (`runtime/compile.rs`), so the reported `capi_retained_bytes` value follows `size_of`
+  automatically.
+
+**No C ABI change.**
+
+- `crates/capi/include/miso_engine_v1.h` is unchanged, and the session is opaque
+  (`typedef struct miso_engine_v1_session`).
+- No capi source file changed.
+- `bash scripts/check-capi-abi.sh` and its `--self-test` pass.
+- `audit capi` passes CI's #544 validator, and its record is byte-identical on base and merge:
+  0 violations, `pcm_digest` `ff6cdcb96cdcdad5`.
+
+### AGENTS.md
+
+**The edit is faithful and minimal.** Exactly one sentence of "Interfaces and transports"
+changed. It rules out the local IPC sidecar and the WebSocket transport until a new issue
+reopens them, and cites R3 and #25. It keeps the rule that a transport never sits in a render
+path. No other rule moved, and the acked-batch question is intact.
+
+**The protocol description still matches the code:**
+
+- versioned: `PROTOCOL_MAJOR_V1`;
+- binary: BTLV;
+- request-id and revision aware: `CommandHeader.request_id` and `expected_revision`;
+- absolute sample-time events: `SampleTime`;
+- never transports PCM: `PcmForbidden`.
+
+**Info.** The reopened-transport clause drops the old "only at cloud/browser network
+boundaries" qualifier. That is harmless while the transport is out of scope. RFC 6455 stays in
+the research list as a citation, not as scope.
+
+### Gates on the merge
+
+| gate | result |
+|---|---|
+| `cargo test --no-fail-fast --all-targets -p protocol -p capi -p host-web -p host-core`, with CI's `test-support` features | 567 passed, 0 failed, 4 ignored |
+| `cargo test --all-targets -p conformance` | 27 passed, 0 failed |
+| `check-protocol-wasm-parity.sh` | ok (scalar + simd128) |
+| `run-protocol-allocation-audit.sh target/release/audit` | ok |
+| `gain_pan_profile digests` | 17 rows, byte-identical to base (console-workload's closure has no `protocol`, and cargo recompiled nothing on base) |
+| all 35 `scripts/check-*.sh`, with CI's arguments where CI passes them | 32 pass. The 2 blocked by the pre-existing pin (finding 1), `check-web-audioworklet.sh` and `check-sdk-headless.sh`, pass with a scratch pin. `check-sdk-types.sh` did not run (`sdk/node_modules` is absent and `npm ci` needs the network) |
+| every argument-free `scripts/check-*.py` under `python3 -B`, plus every `--self-test` | pass; `check-abi-layout-v1.py` also passes on `sdk/assets/miso-engine-v1-abi-layout.json` |
+| routing: `check-ci-path-routing.py` and `test-ci-path-routing.py` | pass |
+| `test-protocol-control-policy`, `test-conformance-boundaries`, `test-protocol-benchmark`, `test-host-core-policy`, `test-realtime-policy`, `test-bench-policy`, `test-workspace-policy` | pass |
+
+`run-wasm-gates.sh` was not run, because none of the wasm gate crates has `protocol` in its
+closure.
+
+**Pre-existing on base:** the AudioWorklet pin (finding 1), and the aarch64 `fp_environment`
+warnings.
