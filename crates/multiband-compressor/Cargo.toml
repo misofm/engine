@@ -24,7 +24,6 @@ bench-support.workspace = true
 conformance = { workspace = true, features = ["realtime-audit"] }
 # Test-only independent f64 crossover oracle; production never links or calls it.
 dsp-reference.workspace = true
-sha2.workspace = true
 
 [lints]
 workspace = true

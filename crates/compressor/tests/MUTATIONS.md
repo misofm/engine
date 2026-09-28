@@ -77,7 +77,7 @@ to `origin/main` on this branch.
 | `oracle` | E5: two configurations against the independent `f64` `ReferencePeakCompressor` — worst **4.694e-7** and **1.192e-7**, gate 2e-5 |
 | `lane_identity` | E2: a bound bank against `W` scalar instances with per-track parameters — output bits, per-track payload bytes; plus the corpus at `W = 1`, 4 and 8 word for word |
 | `partition` | E3: 4,096 frames in blocks of {1, 7, 63, 64, 65, 127, 128, 129, 512}, scalar and bank, output bits and payload bytes identical, with a Point on all seven smoothed parameters of both channels |
-| `cross_target` | E4: pinned SHA-256 over the four-case corpus at all three widths, plus finiteness and non-vacuity; the same corpus is replayed under wasmtime by `tools/wasm-gates` |
+| `cross_target` | E4's corpus is finite, busy and has four distinct cases. Its pinned SHA-256 at all three widths is compared by gate G5 alone since issue #1048 (`tools/wasm-gates/tests/g5_native_corpus.rs`, and the wasm guests of `scripts/run-wasm-gates.sh`); the rows above that name `cross_target` for a digest predate that move |
 | `identity` | E8: bypass, `mix == 0`, `mix == 1`, `G == 0 && makeup == +0`, the `Average` link's exact level, and that every identity keeps the state warm |
 | `ramps` | E6, D11: one division at the event, iterated additions, the exact snap on update 64, a restart from the value reached, automation validation, and that a finished ramp equals a fresh preparation |
 | `payload` | E7: idle restore bit-exact against an uninterrupted render, transactional rejection across both channels, the class-B mid-ramp restore, subnormal round trip, both resets |

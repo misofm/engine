@@ -13,6 +13,7 @@ import argparse
 import ast
 import pathlib
 import re
+import shlex
 import sys
 
 SDK_FILES = [
@@ -350,7 +351,7 @@ def check_qualification_v8_spill(text: str) -> None:
     wasm = job(text, "wasm-guests")
     require("bash scripts/run-wasm-gates.sh" in wasm,
             "qualification.yml: wasm-guests must run scripts/run-wasm-gates.sh")
-    if "run-wasm-gates.sh --without-v8-spill" not in wasm:
+    if "--without-v8-spill" not in run_wasm_gates_flags(wasm):
         return
     gates = job(text, "artifact-gates")
     require(V8_SPILL_ARTIFACT_LINE in gates and ARTIFACT_PIN_STEP in gates,
@@ -359,6 +360,121 @@ def check_qualification_v8_spill(text: str) -> None:
     require(gates.index(ARTIFACT_PIN_STEP) < gates.index(V8_SPILL_ARTIFACT_LINE),
             "qualification.yml: artifact-gates must verify the artifact's pin before the V8 "
             "spill gate reads it")
+
+
+# Cargo target selectors that would leave `wasm-gates`' integration tests, and with them
+# `g5_native_digests_match_pins`, out of a `cargo test` invocation.
+NON_INTEGRATION_TARGET_SELECTORS = (
+    "--lib", "--bin", "--bins", "--example", "--examples", "--bench", "--benches", "--doc",
+    "--no-run",
+)
+
+
+def job_if(job_text: str) -> str | None:
+    match = re.search(r"^    if: (.*)$", job_text, re.MULTILINE)
+    return match.group(1).strip() if match else None
+
+
+def step_commands(job_text: str, conditional: bool = True) -> list[str]:
+    """Every shell command line of the job's steps, with `\\` continuations joined; with
+    `conditional=False`, only the steps that carry no step-level `if:`. Enough YAML for this
+    workflow's fixed shape, as the rest of the checker is."""
+    commands: list[str] = []
+    for step in re.split(r"^      - ", job_text, flags=re.MULTILINE)[1:]:
+        lines = step.splitlines()
+        if not conditional and any(line.strip().startswith("if:") for line in lines):
+            continue
+        for index, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped in ("run: |", "run: >"):
+                body: list[str] = []
+                for following in lines[index + 1:]:
+                    if following.startswith("          "):
+                        body.append(following.strip())
+                    elif following.strip():
+                        break
+                commands.extend("\n".join(body).replace("\\\n", " ").splitlines())
+            elif stripped.startswith("run: "):
+                commands.append(stripped[len("run: "):])
+    return commands
+
+
+def unconditional_step_commands(job_text: str) -> list[str]:
+    return step_commands(job_text, conditional=False)
+
+
+def run_wasm_gates_flags(job_text: str) -> set[str]:
+    """The options any invocation of `run-wasm-gates.sh` in the job passes, as tokens, so a leg the
+    job leaves out is found whatever the flag order (#1009's and #1048's pairings)."""
+    flags: set[str] = set()
+    for command in step_commands(job_text):
+        try:
+            words = shlex.split(command)
+        except ValueError:
+            words = command.split()
+        for index, word in enumerate(words):
+            if word.endswith("run-wasm-gates.sh"):
+                flags.update(following for following in words[index + 1:]
+                             if following.startswith("--"))
+    return flags
+
+
+def runs_g5_native_test(command: str) -> bool:
+    """`command` is a release-profile `cargo test` that runs `wasm-gates`' integration tests
+    unfiltered, so it runs `g5_native_digests_match_pins`."""
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return False
+    while words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0]):
+        words.pop(0)
+    if words[:2] != ["cargo", "test"] or "--release" not in words or "--" in words:
+        return False
+    packages = {words[i + 1] for i, word in enumerate(words[:-1]) if word in ("-p", "--package")}
+    tests = {words[i + 1] for i, word in enumerate(words[:-1]) if word == "--test"}
+    return ("wasm-gates" in packages
+            and (not tests or "g5_native_corpus" in tests)
+            and not any(word in NON_INTEGRATION_TARGET_SELECTORS for word in words))
+
+
+def check_qualification_native_g5(text: str) -> None:
+    """Issue #1048: `wasm-guests` may leave `run-wasm-gates.sh`'s native leg out only because
+    `test-release` runs the same comparison as the Rust test `g5_native_digests_match_pins`, in the
+    shipping profile, on the same route. Without this rule, dropping `-p wasm-gates` from
+    `test-release`, filtering its tests or making the step conditional would take the native digest
+    comparison of every cross-target corpus out of CI with every job green."""
+    wasm = job(text, "wasm-guests")
+    if "--without-native" not in run_wasm_gates_flags(wasm):
+        return
+    release = job(text, "test-release")
+    require(any(runs_g5_native_test(command) for command in unconditional_step_commands(release)),
+            "qualification.yml: wasm-guests runs run-wasm-gates.sh --without-native, so "
+            "test-release must run an unconditional, unfiltered `cargo test --release -p "
+            "wasm-gates` (g5_native_digests_match_pins)")
+    require(job_if(release) == job_if(wasm),
+            "qualification.yml: test-release must run on exactly the route wasm-guests runs on, "
+            "because it owns the native leg wasm-guests leaves out")
+
+
+# GitHub-hosted AArch64 runner labels: the `-arm` Ubuntu images and the Apple-silicon macOS images
+# (macOS 14 onward, except the Intel `-large` sizes).
+AARCH64_RUNNER = re.compile(r"\b(?:ubuntu-[0-9.]+-arm|macos-(?:1[4-9]|[2-9][0-9]|latest)(?!-large))\b")
+
+
+def check_qualification_aarch64_g5(text: str, names: list[str]) -> None:
+    """Issue #1048, amendment 2: once a required job runs on AArch64 hardware (#1017), one of those
+    jobs must run the single native owner of the cross-target digest corpora,
+    `g5_native_digests_match_pins`, in the shipping profile. It is the only native test left that
+    compares the effect families' pins, so an AArch64 leg without it would prove nothing about
+    phones rendering the same bits as x86 and the browser."""
+    aarch64 = [name for name in names if AARCH64_RUNNER.search(job(text, name))]
+    if not aarch64:
+        return
+    require(any(runs_g5_native_test(command)
+                for name in aarch64 for command in unconditional_step_commands(job(text, name))),
+            "qualification.yml: an AArch64 job (" + ", ".join(aarch64) + ") must run an "
+            "unconditional, unfiltered `cargo test --release -p wasm-gates` "
+            "(g5_native_digests_match_pins)")
 
 
 def check_qualification_workflow(root: pathlib.Path) -> None:
@@ -376,6 +492,8 @@ def check_qualification_workflow(root: pathlib.Path) -> None:
     check_qualification_route_job(text)
     check_qualification_closures(text)
     check_qualification_v8_spill(text)
+    check_qualification_native_g5(text)
+    check_qualification_aarch64_g5(text, names)
 
 
 RETIRED_WORKFLOWS = ("ci.yml", "sdk.yml", "browser-qualification.yml", "release-build.yml")

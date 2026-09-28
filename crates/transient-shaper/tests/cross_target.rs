@@ -1,15 +1,16 @@
-//! Width identity and the cross-target digest pins (master plan D5, §10 G2/G5).
+//! Width identity for the transient shaper's cross-target corpus (master plan D5, §10 G2).
 //!
 //! `corpus::run_case` renders [`LANES`](transient_shaper::corpus::LANES) independent
 //! tracks at widths 1, 4 and 8 and reads the result back lane-major, so the word stream describes
-//! the arithmetic and not the layout. This gate asserts the three widths agree and that they match
-//! the pins; `tools/wasm-gates` replays the identical corpus under wasmtime against the
-//! same pins, which is the other half of the claim.
+//! the arithmetic and not the layout. This gate asserts the three widths agree word for word in
+//! this crate's own debug run. The corpus's cross-target claim -- one pinned digest per case, at
+//! every width, natively and under wasmtime (§10 G5) -- has one owner, gate G5 (issue #1048):
+//! `g5_native_digests_match_pins` in `tools/wasm-gates/tests/g5_native_corpus.rs` compares every
+//! case at every width against `CROSS_TARGET_DIGESTS` in the shipping profile, and the wasm guests
+//! of `scripts/run-wasm-gates.sh` compare the same cases against the same pins.
 
 use sha2::{Digest, Sha256};
-use transient_shaper::corpus::{
-    CASE_COUNT, CASE_NAMES, CROSS_TARGET_DIGESTS, WIDTHS, WORDS, run_case,
-};
+use transient_shaper::corpus::{CASE_NAMES, WIDTHS, WORDS, run_case};
 
 fn digest(case: usize, width: usize) -> ([u8; 32], Vec<u32>) {
     let mut words = vec![0_u32; WORDS];
@@ -51,49 +52,6 @@ fn every_width_produces_the_same_words() {
             );
             assert_eq!(candidate, scalar_digest, "{name} at width {width}: digest");
         }
-    }
-}
-
-/// The pinned digests. Regenerate only from the scalar `Lane` instantiation (master plan §8).
-///
-/// Set `MISO_ENGINE_REPIN_TRANSIENT_SHAPER_CORPUS=1` to print the scalar pins in
-/// `CROSS_TARGET_DIGESTS` form.
-///
-/// Per master plan §8.3 the pins come from the width-1 instantiation and from nowhere else; the
-/// vector widths and the wasm legs *confirm* them. `every_width_produces_the_same_words` above
-/// still runs in re-pin mode, so a corpus that stopped being width independent cannot be laundered
-/// into a fresh pin.
-///
-/// Red mutation: perturb `DB_PER_OCTAVE` by one ulp.
-#[test]
-fn the_pinned_digests_hold() {
-    let repinning = std::env::var_os("MISO_ENGINE_REPIN_TRANSIENT_SHAPER_CORPUS").is_some();
-    let mut repin = String::new();
-    let mut failures = Vec::new();
-    for case in 0..CASE_COUNT {
-        let (candidate, _) = digest(case, 1);
-        let bytes: Vec<String> = candidate
-            .iter()
-            .map(|byte| format!("0x{byte:02x}"))
-            .collect();
-        repin.push_str(&format!("    // {}\n", CASE_NAMES[case]));
-        repin.push_str(&format!("    [{}],\n", bytes.join(", ")));
-        if !repinning && candidate != CROSS_TARGET_DIGESTS[case] {
-            failures.push(format!(
-                "{}: expected {}, got {}",
-                CASE_NAMES[case],
-                hex(&CROSS_TARGET_DIGESTS[case]),
-                hex(&candidate)
-            ));
-        }
-    }
-    if !failures.is_empty() {
-        println!("{repin}");
-        panic!("{}", failures.join("\n"));
-    }
-    if repinning {
-        println!("{repin}");
-        panic!("re-pin mode: copy the block above into CROSS_TARGET_DIGESTS in src/corpus.rs");
     }
 }
 

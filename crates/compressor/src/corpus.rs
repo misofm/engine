@@ -1,7 +1,7 @@
 //! The frozen cross-target corpus for this crate (gate E4).
 //!
-//! One definition, run three ways: by `tests/cross_target.rs` against [`C1_DIGESTS`] at all three
-//! lane widths, by `tools/wasm-gates` natively, and by the same code compiled to
+//! One definition, compared against [`C1_DIGESTS`] at all three lane widths by gate G5: natively by
+//! `tools/wasm-gates/tests/g5_native_corpus.rs`, and by the same code compiled to
 //! `wasm32-unknown-unknown` and executed under wasmtime — with and without `simd128`. Master plan
 //! #83 D5 claims a rendered block is bit-identical across `Scalar`/`Simd4`/`Simd8` **and** across
 //! `x86_64`/`aarch64`/`wasm32`; for this crate, this file is that claim.

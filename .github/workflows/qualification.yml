@@ -535,6 +535,8 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal
+      # wasm-gates' G5 test `g5_native_digests_match_pins` is the one native owner of every
+      # cross-target digest corpus (#1048); wasm-guests leaves the script's native leg to it.
       - name: Lane and math gates (G1-G4, G6, P1, M1-M3) and wasm-gates G5/G6 in release
         run: cargo test --locked --release -p lane -p math -p wasm-gates --features math/lane
       # Own CARGO_TARGET_DIR per distinct RUSTFLAGS (design §8): a per-crate override must not
@@ -787,14 +789,15 @@ jobs:
           CARGO_TARGET_DIR=target/ci/wasm-simd RUSTFLAGS='-C target-feature=+simd128' cargo check --locked --target wasm32-unknown-unknown -p dsp-reference -p conformance
       - name: Issue-005 scalar and SIMD protocol golden parity
         run: bash scripts/check-protocol-wasm-parity.sh
-      # Gate G5 (native corpus, every scalar/SIMD4/SIMD8 target) and the wasm replay of gates M3
-      # and D1 under wasmtime, plus G6's detector-residency pin. Kept as one atomic invocation:
-      # run-wasm-gates.sh is not in this work package's edit scope, so its native and guest legs
-      # cannot be split the way design §6.4 describes without a script change owned elsewhere.
-      # `--without-v8-spill` (#1009): the script's V8 spill leg runs in `artifact-gates`, on the
-      # downloaded, pin-verified artifact, rather than on a second fat-LTO build of it here.
-      - name: Native and WebAssembly cross-target digest gates
-        run: bash scripts/run-wasm-gates.sh --without-v8-spill
+      # Gate G5's wasm legs: the frozen corpus (lane cases and every delegated family's pins)
+      # replayed under wasmtime with and without simd128, plus the detector-residency and f64-lane
+      # lowering pins. `--without-native` (#1048): the native leg is the Rust test
+      # `g5_native_digests_match_pins` in `test-release`, in the shipping profile, so it is not run a
+      # second time here. `--without-v8-spill` (#1009): the script's V8 spill leg runs in
+      # `artifact-gates`, on the downloaded, pin-verified artifact, rather than on a second fat-LTO
+      # build of it here. check-ci-path-routing.py refuses either flag without its pairing.
+      - name: WebAssembly cross-target digest gates
+        run: bash scripts/run-wasm-gates.sh --without-v8-spill --without-native
       - name: Upload cross-target gate evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

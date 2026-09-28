@@ -1,11 +1,11 @@
 //! The native half of gate G5, and the assertions that make the wasm half mean something.
 //!
 //! The wasm leg needs a built `wasm32-unknown-unknown` artifact and therefore lives in
-//! `scripts/run-wasm-gates.sh` and the `wasm-gates` CI job. What runs here is everything that can
-//! be checked in-process: that the pins still describe the corpus at every width, that the corpus
-//! carries no NaN into a digest (master plan D5 excludes NaN payloads because wasm canonicalises
-//! them), that no two cases are the same computation, and that the `lane_fma` case actually
-//! separates a fused evaluation from an unfused one.
+//! `scripts/run-wasm-gates.sh` and the `wasm-guests` CI job. What runs here, in `test-release`, is
+//! everything that can be checked in-process: that the pins still describe the corpus at every
+//! width, that the corpus carries no NaN into a digest (master plan D5 excludes NaN payloads
+//! because wasm canonicalises them), that no two cases are the same computation, and that the
+//! `lane_fma` case actually separates a fused evaluation from an unfused one.
 //!
 //! Without the last of those, a green wasm run would only prove that both targets computed
 //! *something* the same way.
@@ -15,8 +15,20 @@ use wasm_gates::{hex, native_report};
 
 /// The native leg: every case, at every width, equals its pin.
 ///
-/// Red mutation: change one byte of `src/lane_digests.in`, or reorder `KERNELS` — both make this
-/// fail immediately and name the case.
+/// Claim: a change to any case's rendered bits, at `f32`, `Simd4` or `Simd8`, turns this red on the
+/// target it runs on, and the message names the case and the width. It is the one native owner of
+/// the lane corpus's and every delegated effect family's cross-target digest claim (issue #1048):
+/// those families' pins live in their own crates (`g5_delegated_cases_use_the_owning_crates_pins`),
+/// but no test in those crates compares them. The math M3 pins keep their own test as well,
+/// `crates/math/tests/m3_determinism.rs`, which CI also runs on an FMA-enabled build. It also holds
+/// the three truth-table counts `wasm_gates --native` reports to zero, so CI's `--without-native`
+/// run of `scripts/run-wasm-gates.sh` loses nothing (`scripts/check-ci-path-routing.py` pairs it
+/// with this test in `test-release`).
+///
+/// Red mutation: change one byte of `src/lane_digests.in`, reorder `KERNELS`, or change one
+/// arithmetic operation of an effect at one width only -- each fails and names the case and the
+/// width. A deliberate corpus change is re-pinned from the scalar oracle this failure prints, never
+/// from a vector width or a wasm run (master plan §8).
 #[test]
 fn g5_native_digests_match_pins() {
     let report = native_report();
@@ -32,14 +44,51 @@ fn g5_native_digests_match_pins() {
     );
     assert!(
         report.mismatches.is_empty(),
-        "native corpus digests differ from the pins:\n{}",
+        "native corpus digests differ from the pins:\n{}\n\n{}",
         report
             .mismatches
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>()
-            .join("\n")
+            .join("\n"),
+        scalar_oracle_pins(&report.mismatches)
     );
+    assert_eq!(
+        report.minmax_lowering_mismatches, 0,
+        "Lane::max/Lane::min disagree with the scalar oracle over the lowering pool"
+    );
+    assert_eq!(
+        report.f64_lane_mismatches, 0,
+        "the f64 lanes disagree with the scalar f64 oracle"
+    );
+    assert_eq!(
+        report.meter_block_mismatches, 0,
+        "the full meter pass disagrees with the builtin meter's scalar loop"
+    );
+}
+
+/// The scalar oracle's digest of every case that moved at `f32`, in the byte-array form the
+/// owning crate's pin table holds. A case that moved only at a vector width is a width divergence,
+/// which is a defect and is never re-pinned, so it is not printed.
+fn scalar_oracle_pins(mismatches: &[wasm_gates::Mismatch]) -> String {
+    let mut text = String::from(
+        "scalar-oracle digests of the cases that moved at f32 (re-pin only for a deliberate \
+         corpus or operation-order change, in the owning crate's table):\n",
+    );
+    for mismatch in mismatches.iter().filter(|mismatch| mismatch.width == 0) {
+        let bytes: Vec<String> = mismatch
+            .actual
+            .iter()
+            .map(|byte| format!("0x{byte:02x}"))
+            .collect();
+        text.push_str(&format!(
+            "    // {} (case {})\n    [{}],\n",
+            mismatch.name,
+            mismatch.case,
+            bytes.join(", ")
+        ));
+    }
+    text
 }
 
 /// D5: nothing NaN or infinite is ever digested, so the wasm comparison is not comparing

@@ -1,11 +1,11 @@
 //! The delay's cross-target determinism corpus (gate G5).
 //!
 //! Two cases render a fixed input through the real prepared effect and yield one `u32` result word
-//! per output sample. `tests/determinism.rs`-style assertions live in this crate's own test module
-//! and compare each case against [`G5_DIGESTS`]; `tools/wasm-gate-corpus` replays the
-//! identical cases under wasmtime, at the wasm scalar and simd128 backends, against these same
-//! pins. Together they are the cross-target half of decision D5 for this effect: the delay renders
-//! the same bits in a browser as on a native host.
+//! per output sample. Gate G5 (`tools/wasm-gates/tests/g5_native_corpus.rs`) compares each case
+//! against [`G5_DIGESTS`] natively, and `tools/wasm-gate-corpus` replays the identical cases under
+//! wasmtime, at the wasm scalar and simd128 backends, against these same pins. Together they are
+//! the cross-target half of decision D5 for this effect: the delay renders the same bits in a
+//! browser as on a native host.
 //!
 //! # Why the input is built from integers
 //!

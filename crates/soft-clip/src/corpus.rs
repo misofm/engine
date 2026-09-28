@@ -1,9 +1,10 @@
 //! The cross-target determinism corpus for the soft-clip kernel.
 //!
-//! One definition, run three ways: by `tests/determinism.rs` at all three widths on this host, by
-//! `tests/lane_identity.rs` as the width-independence proof, and by `tools/wasm-gates`
-//! inside a WebAssembly module against the same pins. A digest difference between the legs is a
-//! difference in the *target*, which is what master plan #83 D5 says cannot happen.
+//! One definition, run two ways against the same pins at all three widths: by gate G5
+//! (`tools/wasm-gates/tests/g5_native_corpus.rs`) on this host, and by `tools/wasm-gates` inside a
+//! WebAssembly module. `tests/lane_identity.rs` proves the driver around the kernel. A digest
+//! difference between the legs is a difference in the *target*, which is what master plan #83 D5
+//! says cannot happen.
 //!
 //! # Why the results are read back lane-major
 //!

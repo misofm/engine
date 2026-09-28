@@ -677,6 +677,77 @@ def main() -> int:
         "target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm\n",
     )
 
+    # #1048 review finding 2: the V8 pairing is found by token, so reordering the flags cannot
+    # slip the spill leg out of CI once artifact-gates stops running it.
+    root = workspace()
+    try:
+        workflow = root / ".github/workflows/qualification.yml"
+        mutate(workflow, "bash scripts/run-wasm-gates.sh --without-v8-spill --without-native\n",
+               "bash scripts/run-wasm-gates.sh --without-native --without-v8-spill\n")
+        mutate(workflow,
+               "          python3 -B scripts/check-web-audioworklet-v8-spill.py "
+               "target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm\n",
+               "")
+        checker_fails(root)
+    finally:
+        shutil.rmtree(root)
+
+    # Issue #1048: wasm-guests leaves run-wasm-gates.sh's native leg to test-release's G5 Rust
+    # test, so test-release must run wasm-gates' tests in release, unfiltered, unconditionally and
+    # on the same route.
+    g5_step = ("        run: cargo test --locked --release -p lane -p math -p wasm-gates "
+               "--features math/lane\n")
+    workflow_mutation_fails(
+        "qualification.yml", g5_step,
+        "        run: cargo test --locked --release -p lane -p math --features math/lane\n",
+    )  # the owner dropped from test-release
+    workflow_mutation_fails(
+        "qualification.yml", g5_step,
+        "        run: cargo test --locked -p lane -p math -p wasm-gates --features math/lane\n",
+    )  # the owner demoted to the debug profile
+    workflow_mutation_fails(
+        "qualification.yml", g5_step,
+        g5_step.replace("--features math/lane\n",
+                        "--features math/lane -- --skip g5_native_digests_match_pins\n"),
+    )  # the owner filtered out by name
+    workflow_mutation_fails(
+        "qualification.yml", g5_step,
+        g5_step.replace("-p wasm-gates", "-p wasm-gates --lib"),
+    )  # the owner's integration tests deselected
+    workflow_mutation_fails(
+        "qualification.yml", g5_step,
+        "        if: needs.route.outputs.math_closure == 'true'\n" + g5_step,
+    )  # the owner made conditional on a narrower step condition
+    workflow_mutation_fails(
+        "qualification.yml",
+        "    name: release-mode lane, math, and wasm-gates digest gates\n"
+        "    needs: route\n"
+        "    if: needs.route.outputs.route == 'full'\n",
+        "    name: release-mode lane, math, and wasm-gates digest gates\n"
+        "    needs: route\n"
+        "    if: needs.route.outputs.math_closure == 'true'\n",
+    )  # the owner's job on a narrower route than wasm-guests
+
+    # Issue #1048 amendment 2: an AArch64 job (#1017) must carry the G5 owner in release. A job
+    # moved onto an arm64 runner without it fails; the owner's own job moved there passes.
+    workflow_mutation_fails(
+        "qualification.yml",
+        "    name: DSP crates debug tests\n    needs: route\n"
+        "    if: needs.route.outputs.route == 'full'\n    runs-on: ubuntu-24.04\n",
+        "    name: DSP crates debug tests\n    needs: route\n"
+        "    if: needs.route.outputs.route == 'full'\n    runs-on: ubuntu-24.04-arm\n",
+    )
+    root = workspace()
+    try:
+        mutate(root / ".github/workflows/qualification.yml",
+               "    name: release-mode lane, math, and wasm-gates digest gates\n    needs: route\n"
+               "    if: needs.route.outputs.route == 'full'\n    runs-on: ubuntu-24.04\n",
+               "    name: release-mode lane, math, and wasm-gates digest gates\n    needs: route\n"
+               "    if: needs.route.outputs.route == 'full'\n    runs-on: macos-15\n")
+        run(sys.executable, str(CHECKER), "--root", str(root))
+    finally:
+        shutil.rmtree(root)
+
     # Baseline: the unmutated workspace() -- qualification.yml plus the router/checker/test
     # scripts, with none of the four retired workflows present -- must pass the checker outright.
     # Every workflow_mutation_fails/checker_fails call above depends on this holding; if it ever
