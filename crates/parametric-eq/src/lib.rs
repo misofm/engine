@@ -3718,7 +3718,7 @@ pub mod corpus;
 
 /// Issue #163 phase 3: the interleaved cascade is the per-section path, bit for bit.
 ///
-/// The frozen E9 corpus (`corpus.rs`, `tests/determinism.rs`) drives [`Channel::process_block`]
+/// The frozen E9 corpus (`corpus.rs`, pinned by gate G5) drives [`Channel::process_block`]
 /// directly, because its whole job is to describe *arithmetic* independently of layout -- so it
 /// runs one channel at a time and never reaches [`process_channels`]. That leaves the phase-3 fast
 /// path outside the pinned digests, which is exactly where a schedule change could hide. This

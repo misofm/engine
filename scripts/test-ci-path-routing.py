@@ -677,6 +677,42 @@ def main() -> int:
         "target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm\n",
     )
 
+    # Issue #1048: wasm-guests leaves run-wasm-gates.sh's native leg to test-release's G5 Rust
+    # test, so test-release must run wasm-gates' tests in release, unfiltered, unconditionally and
+    # on the same route.
+    g5_step = ("        run: cargo test --locked --release -p lane -p math -p wasm-gates "
+               "--features math/lane\n")
+    workflow_mutation_fails(
+        "qualification.yml", g5_step,
+        "        run: cargo test --locked --release -p lane -p math --features math/lane\n",
+    )  # the owner dropped from test-release
+    workflow_mutation_fails(
+        "qualification.yml", g5_step,
+        "        run: cargo test --locked -p lane -p math -p wasm-gates --features math/lane\n",
+    )  # the owner demoted to the debug profile
+    workflow_mutation_fails(
+        "qualification.yml", g5_step,
+        g5_step.replace("--features math/lane\n",
+                        "--features math/lane -- --skip g5_native_digests_match_pins\n"),
+    )  # the owner filtered out by name
+    workflow_mutation_fails(
+        "qualification.yml", g5_step,
+        g5_step.replace("-p wasm-gates", "-p wasm-gates --lib"),
+    )  # the owner's integration tests deselected
+    workflow_mutation_fails(
+        "qualification.yml", g5_step,
+        "        if: needs.route.outputs.math_closure == 'true'\n" + g5_step,
+    )  # the owner made conditional on a narrower step condition
+    workflow_mutation_fails(
+        "qualification.yml",
+        "    name: release-mode lane, math, and wasm-gates digest gates\n"
+        "    needs: route\n"
+        "    if: needs.route.outputs.route == 'full'\n",
+        "    name: release-mode lane, math, and wasm-gates digest gates\n"
+        "    needs: route\n"
+        "    if: needs.route.outputs.math_closure == 'true'\n",
+    )  # the owner's job on a narrower route than wasm-guests
+
     # Baseline: the unmutated workspace() -- qualification.yml plus the router/checker/test
     # scripts, with none of the four retired workflows present -- must pass the checker outright.
     # Every workflow_mutation_fails/checker_fails call above depends on this holding; if it ever

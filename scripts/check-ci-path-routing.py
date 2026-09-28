@@ -13,6 +13,7 @@ import argparse
 import ast
 import pathlib
 import re
+import shlex
 import sys
 
 SDK_FILES = [
@@ -361,6 +362,80 @@ def check_qualification_v8_spill(text: str) -> None:
             "spill gate reads it")
 
 
+# Cargo target selectors that would leave `wasm-gates`' integration tests, and with them
+# `g5_native_digests_match_pins`, out of a `cargo test` invocation.
+NON_INTEGRATION_TARGET_SELECTORS = (
+    "--lib", "--bin", "--bins", "--example", "--examples", "--bench", "--benches", "--doc",
+    "--no-run",
+)
+
+
+def job_if(job_text: str) -> str | None:
+    match = re.search(r"^    if: (.*)$", job_text, re.MULTILINE)
+    return match.group(1).strip() if match else None
+
+
+def unconditional_step_commands(job_text: str) -> list[str]:
+    """Every shell command line of the job's steps that carry no step-level `if:`, with `\\`
+    continuations joined. Enough YAML for this workflow's fixed shape, as the rest of the checker
+    is."""
+    commands: list[str] = []
+    for step in re.split(r"^      - ", job_text, flags=re.MULTILINE)[1:]:
+        lines = step.splitlines()
+        if any(line.strip().startswith("if:") for line in lines):
+            continue
+        for index, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped in ("run: |", "run: >"):
+                body: list[str] = []
+                for following in lines[index + 1:]:
+                    if following.startswith("          "):
+                        body.append(following.strip())
+                    elif following.strip():
+                        break
+                commands.extend("\n".join(body).replace("\\\n", " ").splitlines())
+            elif stripped.startswith("run: "):
+                commands.append(stripped[len("run: "):])
+    return commands
+
+
+def runs_g5_native_test(command: str) -> bool:
+    """`command` is a release-profile `cargo test` that runs `wasm-gates`' integration tests
+    unfiltered, so it runs `g5_native_digests_match_pins`."""
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return False
+    while words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0]):
+        words.pop(0)
+    if words[:2] != ["cargo", "test"] or "--release" not in words or "--" in words:
+        return False
+    packages = {words[i + 1] for i, word in enumerate(words[:-1]) if word in ("-p", "--package")}
+    tests = {words[i + 1] for i, word in enumerate(words[:-1]) if word == "--test"}
+    return ("wasm-gates" in packages
+            and (not tests or "g5_native_corpus" in tests)
+            and not any(word in NON_INTEGRATION_TARGET_SELECTORS for word in words))
+
+
+def check_qualification_native_g5(text: str) -> None:
+    """Issue #1048: `wasm-guests` may leave `run-wasm-gates.sh`'s native leg out only because
+    `test-release` runs the same comparison as the Rust test `g5_native_digests_match_pins`, in the
+    shipping profile, on the same route. Without this rule, dropping `-p wasm-gates` from
+    `test-release`, filtering its tests or making the step conditional would take the native digest
+    comparison of every cross-target corpus out of CI with every job green."""
+    wasm = job(text, "wasm-guests")
+    if "run-wasm-gates.sh" not in wasm or "--without-native" not in wasm:
+        return
+    release = job(text, "test-release")
+    require(any(runs_g5_native_test(command) for command in unconditional_step_commands(release)),
+            "qualification.yml: wasm-guests runs run-wasm-gates.sh --without-native, so "
+            "test-release must run an unconditional, unfiltered `cargo test --release -p "
+            "wasm-gates` (g5_native_digests_match_pins)")
+    require(job_if(release) == job_if(wasm),
+            "qualification.yml: test-release must run on exactly the route wasm-guests runs on, "
+            "because it owns the native leg wasm-guests leaves out")
+
+
 def check_qualification_workflow(root: pathlib.Path) -> None:
     text = (root / ".github/workflows/qualification.yml").read_text(encoding="utf-8")
     check_qualification_no_path_filter(text)
@@ -376,6 +451,7 @@ def check_qualification_workflow(root: pathlib.Path) -> None:
     check_qualification_route_job(text)
     check_qualification_closures(text)
     check_qualification_v8_spill(text)
+    check_qualification_native_g5(text)
 
 
 RETIRED_WORKFLOWS = ("ci.yml", "sdk.yml", "browser-qualification.yml", "release-build.yml")

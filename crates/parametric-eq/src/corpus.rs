@@ -1,10 +1,11 @@
 //! The frozen cross-target corpus of this crate (gate E9).
 //!
-//! One definition, run three ways: natively at `WIDTH` 1, 4 and 8 by `tests/determinism.rs`, and
-//! again inside a WebAssembly module by `tools/wasm-gate-corpus`, which references
-//! [`E9_DIGESTS`] rather than copying it. Master plan #83 D5 claims a rendered block is
-//! bit-identical across backends and across targets; this is the parametric EQ's half of that
-//! claim, and the pins come from the scalar `Lane` oracle (master plan §8).
+//! One definition, run natively at `WIDTH` 1, 4 and 8 by gate G5
+//! (`tools/wasm-gates/tests/g5_native_corpus.rs`), and again inside a WebAssembly module by
+//! `tools/wasm-gate-corpus`; both reference [`E9_DIGESTS`] rather than copying it. Master plan #83
+//! D5 claims a rendered block is bit-identical across backends and across targets; this is the
+//! parametric EQ's half of that claim, and the pins come from the scalar `Lane` oracle (master plan
+//! §8).
 //!
 //! # Why the byte stream is width independent
 //!
