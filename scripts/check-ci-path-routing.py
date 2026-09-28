@@ -291,6 +291,11 @@ ROUTE_VALIDATION_STEP = """      - name: Validate path-routing policy and mutati
           python3 -B scripts/test-ci-path-routing.py
 """
 
+TEST_SUPPORT_CI_LINES = (
+    "python3 -B scripts/check-test-support-ci.py\n",
+    "python3 -B scripts/test-test-support-ci.py\n",
+)
+
 SDK_CLOSURE_LINES = (
     "bash scripts/check-sdk-generated.sh",
     "python3 -B scripts/check-sdk-deletions.py",
@@ -325,6 +330,9 @@ def check_qualification_closures(text: str) -> None:
     require("run: bash scripts/check-workspace-policy.sh\n" in lint or
             "bash scripts/check-workspace-policy.sh\n" in lint,
             "qualification.yml: lint job must run the canonical check-workspace-policy.sh step")
+    # Issue #1021: the guard that every workspace test-support feature reaches a CI test step.
+    for line in TEST_SUPPORT_CI_LINES:
+        require(line in lint, f"qualification.yml: lint job is missing {line!r}")
 
 
 V8_SPILL_ARTIFACT_LINE = (

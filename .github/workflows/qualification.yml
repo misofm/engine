@@ -338,6 +338,10 @@ jobs:
         run: |
           bash scripts/check-bench-policy.sh
           bash scripts/test-bench-policy.sh
+      - name: test-support CI coverage policy and mutation tests
+        run: |
+          python3 -B scripts/check-test-support-ci.py
+          python3 -B scripts/test-test-support-ci.py
       - name: Console and rack benchmark fixture integrity
         run: |
           bash scripts/check-console-benchmark-fixture.sh
@@ -478,10 +482,12 @@ jobs:
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal
       # Every DSP crate moves to test-debug-b; audit/bench/console-workload/wasm-* move to
-      # audit-native and wasm-guests in release. Explicit --features (design §10 finding 1): under
-      # --workspace these features are unified in regardless, so naming them here keeps this
-      # invocation's compiled program identical to what the failure message's local reproduction
-      # command must also name explicitly.
+      # audit-native and wasm-guests in release. Explicit --features (design §10 finding 1): a
+      # local reproduction must name the same features to compile the same program. Dev-dependency
+      # unification would turn on builtins-compiler and graph test-support anyway; nothing turns on
+      # source, host-web, host-core, effect-compiler or protocol test-support, whose gated tests
+      # never ran before #1021. scripts/check-test-support-ci.py (lint job) fails when a workspace
+      # test-support feature is left out of every whole-package cargo test step.
       - name: Workspace debug tests (excluding DSP crates, audit, and wasm evidence tools)
         run: |
           cargo test --locked --workspace --all-targets \
@@ -492,7 +498,7 @@ jobs:
             --exclude conformance --exclude audit --exclude bench --exclude console-workload \
             --exclude wasm-gates --exclude wasm-console --exclude wasm-gate-guest \
             --exclude wasm-console-guest --exclude wasm-gate-corpus \
-            --features builtins-compiler/test-support,source/test-support,graph/test-support,engine/realtime-audit
+            --features builtins-compiler/test-support,source/test-support,graph/test-support,host-web/test-support,host-core/test-support,effect-compiler/test-support,protocol/test-support,engine/realtime-audit
       - name: Native host smoke
         run: cargo run --locked -p host-native
 
@@ -510,12 +516,16 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal
+      # Explicit --features, as in test-debug-a: a local reproduction names the same features.
+      # parametric-eq and builtins test-support turn on gated pass-count and peak-merge assertions
+      # inside tests that run either way; nothing in this package set forwards them (#1021).
       - name: DSP crates debug tests (lane feature unification pinned explicitly)
         run: |
           cargo test --locked --all-targets \
             -p lane -p math -p effect-runtime -p delay -p compressor -p multiband-compressor \
             -p gate-expander -p true-peak-limiter -p transient-shaper -p soft-clip \
-            -p parametric-eq -p builtins -p dsp-reference -p conformance --features math/lane
+            -p parametric-eq -p builtins -p dsp-reference -p conformance \
+            --features math/lane,parametric-eq/test-support,builtins/test-support
       - name: Conformance research-fixture completeness
         run: cargo run --locked -p conformance --example conformance_fixtures -- --check
 
