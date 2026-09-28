@@ -1,265 +1,29 @@
 #!/usr/bin/env bash
-# Sole exactly-once Issue-149 console qualification timing entrypoint. Do not invoke its binary
-# directly: the runner is what supplies the round marker and the host metadata, and a direct
-# invocation produces a record whose provenance is a guess.
+# The native console benchmark's sole timing entrypoint. Do not invoke its binary directly: the
+# runner is what supplies the round marker and the host metadata, and a direct invocation produces
+# a record whose provenance is a guess.
 #
-# One optional argument, `--phase2`, `--phase3` or `--issue163-phase0`, moves the artifact
-# directory and changes nothing else. Phase 1's
-# record is a consumed one-shot authority: it describes the tree that produced it, and the sealed
-# fast dB tier (#144 item 5) deliberately moves the rendered bits it measured, so a phase-2 number
-# belongs beside it rather than on top of it. Phase 3 gets its own directory for the opposite
-# reason -- the multiband ramping split is class A and moves no rendered bit at all, so its console
-# numbers are a *re-measurement* of the phase-2 tree and have to be readable as one rather than
-# blended into it. `--issue163-phase0` writes to `artifacts/issue163-phase0` for the same reason
-# again, and one further one: phase 0 changes what the subject *measures* -- five decomposition
-# rows, a meters arm and an observation arm join the stream, and the run is admissible under
-# preconditions the earlier records were never held to -- so its numbers are a new authority
-# beside the issue-149 ones and not a continuation of them. Every directory keeps the same
-# refusal-to-overwrite discipline, so none of them can be quietly re-run. `--issue163-phase3`
-# writes to `artifacts/issue163-phase3` on the same terms as `--issue163-phase4` below: phase 3
-# (bank interleave) is class A throughout, so every workload's output digest is the phase-1 digest
-# to the bit, and the arm exists so that the interleaved tree's numbers describe the interleaved
-# tree. `--issue163-phase4`
-# writes to `artifacts/issue163-phase4` and is a *re-measurement* of the phase-1 subject: phase 4
-# is class A throughout, so every workload's output digest is the phase-1 digest to the bit and
-# the two records are directly comparable row by row. It gets its own directory anyway, for the
-# reason every phase does -- a consumed one-shot describes the tree that produced it, and phase 4
-# changes what the idle row costs without changing what any row computes.
+# Usage: run-console-benchmark.sh --step NAME
 #
-# `--issue163-phase2` writes to `artifacts/issue163-phase2` and is the one arm in this list whose
-# subject is **class B**. Phases 1, 3 and 4 are class A: every workload's output digest is the
-# phase-1 digest to the bit, which is what lets their records be read row against row. Phase 2
-# changes the numeric contract itself (fused multiply-add to unfused, owner ruling 2026-08-26), so
-# every `output_sha256` in its record differs from every earlier record's by construction. That is
-# not drift and it is not a defect: it is the change being measured, and
-# `docs/rulings/unfused-multiply-add-audit.md` is the evidence that the new bits are the intended
-# ones. The timing rows remain comparable -- the workloads, fixture, quantum and observation count
-# are unchanged -- but the digest columns must not be compared, and a reader who diffs them will
-# find every row different.
+# `--step NAME` is the per-issue arm of a sequential optimisation batch: one record per merged
+# issue, written to `artifacts/steps/NAME`, so each issue's motion is read against the step before
+# it rather than against one paired baseline. NAME is lowercase kebab-case, at most 64 characters.
+# Any other invocation, including none, is a usage error (exit 2).
 #
-# `--round2-lim` and `--round2-lim-baseline` are the paired arms of the limiter's round-2
-# effect-optimisation pass: the same rows with and without two class-A kernel changes (the uniform
-# gain frame loop de-bookkeeped, and the detector history moved out of linear memory on the wasm
-# target). Both are class A, so the two records must reproduce each other's `output_sha256`
-# exactly on every row and every leg and differ only in time. The baseline arm is the base commit
-# with this arm registration and nothing else.
+# Before anything is timed the run refuses (exit 1), in this order: when a record already exists
+# in that directory (a record is never overwritten), when the host is not x86_64 with AVX2, when
+# the tree is not clean and committed, and when the console fixture check fails. It then builds
+# `bench` in release and refuses again when an admissibility precondition below is unmet. An
+# admitted run takes one untimed warmup and exactly two measured rounds, validates the 50 records
+# with `console-benchmark-validator.jq`, and promotes them to the accepted file beside a
+# disposition.
+# `operator/preflight-console-benchmark.sh --step NAME` checks everything that can fail without
+# launching the workload; run it first.
 #
-# `--audit-chain-merge` and `--audit-chain-merge-baseline` are the paired arms of issue #202
-# recommendation 2: the cross-rack cohort chain merge. `runtime::cohort_runs` took its merge
-# candidates from the cohort planner's groups, which are pooled per `RackLocation` and do not
-# exist at all for a builtin bank, so the 64-track intended strip ran three bank chains per cohort
-# -- `{builtins, simd1, simd2}` -- and paid one planar/AoSoA round-trip for each. Candidacy is now
-# taken from the lowered program's dataflow and proved lane by lane on it, so the whole strip fuses
-# into one chain per cohort: 24 round-trips a block become 8. Class **A** -- every `output_sha256`
-# must reproduce the baseline arm's exactly, on every row and every leg, and the two records differ
-# only in time. The baseline arm is the base commit with this arm registration and nothing else.
-# The one record expected to move a non-timing field is `console_placement`, whose two arms now
-# report the *same* transposes per block: the retired layout's cross-rack pair fuses too, so which
-# rack a slot was placed in no longer changes how many round-trips its cohort pays.
-#
-# `--strip2` and `--strip2-baseline` are the paired arms of the strip/overhead round's job 2: the
-# fader and the pan matrix become strip-intrinsic banked chain slots. They were 128 individually
-# dispatched per-track `Bound` ops at `L = f32` sitting *between* the cohorts' chains; they are now
-# builtin banks at the cohort's lane order, so issue #202 rec 2's dataflow candidacy fuses
-# `builtins -> EQ -> compressor -> limiter -> fader -> matrix` into ONE chain per cohort. The
-# counters say so without ambiguity: the 64-track fixture goes from 32 bank slots to 48 with
-# `chains` and `transposes` staying at one per cohort per block. Class **A** -- every
-# `output_sha256` must reproduce the baseline arm's exactly, on every row and every leg, and the
-# two records differ only in time.
-#
-# What is removed: 128 per-op passes, their buffers and most of the `execute_op` scaffolding for
-# them, and the 64 `reduce_plane` stereo block copies out of the limiter's dedicated buffer -- the
-# fader is now a chain *slot*, and a later slot's op is never executed at all. What is added:
-# 63 arena buffers on this fixture, because a chain that spans two more stages holds its bank
-# window over a longer op range. `dispatch_only` is the row that should move most; `console` is the
-# row the round is for. The nine-track ragged row is expected to move the *other* way by a little:
-# its one-track tail now banks its fader and matrix like any other cohort and pays one extra
-# planar/AoSoA round-trip per block for them, which is reported rather than hidden.
-#
-# The baseline arm is the base commit with this arm registration and nothing else.
-#
-#
-# `--strip3` and `--strip3-baseline` are the paired arms of the strip/overhead round's job 3: the
-# route application and the master-bus accumulation fold into the cohort chain's own epilogue. The
-# 64-track fixture paid, per block, 64 route ops -- a whole `mix2x2_block` pass over a buffer the
-# chain had just scattered -- and then a 63-pass `sum_into_block` reduction over those 64 buffers.
-# It now pays one pass: each lane's tile is routed where the transpose left it and goes straight
-# into the master, the first contributor storing and the rest accumulating. The dead fan-in-zero
-# fill under a bound source goes with it: a host source writes every word it is handed, so the
-# `fill(0.0)` in front of it was two stereo blocks of dead stores per track per block.
-#
-# Class **A** -- every `output_sha256` must reproduce the baseline arm's exactly, on every row and
-# every leg, and the two records differ only in time. That the epilogues sum in the reduction's own
-# order is proved at bind on the lowered program, not assumed; a plan that cannot prove it renders
-# the job-2 shape unchanged.
-#
-# The counter that says the fold fired is `bank_route_folds`, and it is a count for the same reason
-# `bank_scatter_redirects` is: the optimisation is a thing *not done*, so it moves no rendered bit
-# and no gate may rest on a timing difference. The 64-track fixture folds 64 lanes, the 128-track
-# stretch folds 128, and the nine-track fixtures fold 9. `chains`, `slots` and `transposes` are
-# unmoved throughout. `dispatch_only` is the row that should move most; the stretch row should move
-# about twice the console row's absolute.
-#
-# The baseline arm is the base commit with this arm registration and nothing else.
-#
-# `--strip1` and `--strip1-baseline` are the paired arms of the strip/overhead round's job 1: the
-# prepared-identity builtin-section elision. A builtin filter at a 0 Hz cutoff is *designed* as the
-# arithmetic identity rather than branched around, so the two disabled SVF sections of a rack-free
-# strip were executed as identities every block. A section whose six coefficient words and two
-# retained state words are bit-pattern-equal to that identity in every lane of the bank is now
-# decided elidable at bank construction, and a run of them is emitted as the single `add(+0.0)` the
-# run composes to, at the run's position in the chain. Class **A** -- every `output_sha256` must
-# reproduce the baseline arm's exactly, on every row and every leg, and the two records differ only
-# in time. `sixty_four_track_dispatch_only` is the row that moves most; every other row's builtins
-# carry a real design and elide nothing.
-#
-# The arm carries a second, smaller class-A change (candidate A1): the D7 sanitisation counter
-# accumulates `1.0 & bad` rather than `select(bad, 1.0, 0.0)` at all four copies of the sanitise
-# prologue. On a canonical mask those are the same bits, so this moves no digest either; it is
-# worth about -0.10 to -0.14 us/block and it applies to *every* row, because every block is
-# sanitised. So the expected motion of this pair is: `dispatch_only` to roughly 10.6 us, and
-# `builtins_only`, `console` and `idle` each down by about 0.12 us -- a real, expected motion
-# rather than noise. A row that does not move at all is as much a finding as one that moves too
-# far. The baseline arm is the base commit with this arm registration and nothing else.
-#
-#
-# `--plumbing-floor` and `--plumbing-floor-baseline` are the paired arms of the plumbing-floor
-# cycle (#925-#928): the identity-bound builtin stages of a builtins-less plan lowered as aliases
-# (#925), the in-place routes fused into the Output reduction in pairs with the scalar tail
-# outlined (#926), plain-strip sources read in place from the played transfer block (#927), and
-# the driver-fed `sixty_four_track_plumbing_ring` row beside the sealed plumbing row (#928).
-# Every change is class **A** -- every `output_sha256` shared by the two arms must reproduce
-# exactly, and the two records differ only in time. The rows this cycle can move are
-# `sixty_four_track_plumbing_only` (#925 and #926) and the new ring row (#927, on the candidate
-# arm only: the baseline predates the row, so the ring row has no baseline partner and is read
-# against the bound-feed plumbing row of the same record). Banked rows should not move. The
-# baseline arm is the base commit with this arm registration and nothing else, so it emits 46
-# records under the runner it carries; the candidate emits 48 (#928). Both arms are captured
-# under `MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1` on a host whose background services hold the
-# load average above the ceiling; the records say so.
-#
-# `--copy-removal-without-920` is the attribution arm of the copy-removal pair: the candidate tree
-# with the #920 merge reverted and nothing else, taken because the candidate moved
-# `sixty_four_track_plumbing_only` the wrong way and two batch changes touch that row's master
-# reduction (#916's host-plane write and #920's fused route fold). Class A against both other
-# arms: every `output_sha256` must match.
-#
-# `--copy-removal` and `--copy-removal-baseline` are the paired arms of the copy-removal batch
-# (#914-#920): the fold epilogue fused from the resident block (#915), the master written straight
-# into the host planes (#916), the played transfer block retained and gathered in place
-# (#917/#918), the native decode writing into the recycled block (#919), and in-place routes
-# folded into the Output node's reduction (#920). Every change is class **A** -- every
-# `output_sha256` must reproduce the baseline arm's exactly, on every row and every leg, and the
-# two records differ only in time. Rows that can move: every banked row by #915 and #916, every
-# row by #916's removed end-of-block copy, and `sixty_four_track_plumbing_only` by #920; #917,
-# #918 and #919 cannot show on any console row, because the workloads bind frozen sources rather
-# than the ring. `console_meters` now carries `bank_route_folds` and `bank_scatter_redirects`
-# per arm (#914), so the metered pair states whether the fold fired. The baseline arm is the
-# base commit with #914 (the record keys the validator requires) and this arm registration, and
-# nothing else. Both arms are captured under `MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1` on a host
-# whose background services hold the load average above the ceiling; the records say so.
-#
-# `--pure-path` and `--pure-path-baseline` are the paired arms of the pure-path batch (#885, #886,
-# #898, #900; PR #910): the route fold and the direct scatter stay armed under post-matrix and
-# final-tap observation, the master reduction derives its arena slices once per group of eight,
-# and the permanent observer walk is skipped for units without observers. Every change is class
-# **A** -- every `output_sha256` must reproduce the baseline arm's exactly, on every row and every
-# leg, and the two records differ only in time. The rows this batch can move are the unmetered
-# plumbing rows (`sixty_four_track_plumbing_only` through #898's reduction and #900's skipped
-# walk) and the `console_meters` pair, whose `meters_on` arm binds a `PostMatrix` meter on every
-# track -- the shape #885 keeps folded. That pair carries no fold or redirect counter, so a run
-# cannot show whether the fold fired on the metered arm; the metered console row of #881 is
-# where that counter belongs. The baseline arm is the base commit with this arm registration
-# and the #911 benchmark repair (tooling only; the runner cannot complete without it), and
-# nothing else. Both arms were captured under `MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1` on a
-# host whose background services hold the load average above the ceiling; the records say so.
-#
-# `--strip4` is the strip/overhead round's job 4, and it is the one arm in this list that has **no
-# baseline partner**. Job 4 adds no engine change at all: it is the measurement plane -- two
-# overhead decomposition rows (`sixty_four_track_plumbing_only`, the route and the master reduction
-# with no builtin prepared at all, and `sixty_four_track_gain_pan_only`, the identity sections with
-# the fixture's real fader and pan) and three mono rows on a new checked-in fixture. Every existing
-# row's `output_sha256` is unchanged from `strip3`, which is the arm this one is read against; the
-# five new rows have no earlier number to be read against, and that is the point of capturing them.
-# This capture is the post-strip-round baseline the sprint scoreboard quotes.
-#
-# `--mono2` is mono-collapse M2: the collapsed execution. Like `--strip4` it has **no baseline
-# partner**, and for a stronger reason than "nothing changed" -- the baseline is *inside the run*.
-# The `console_mono` record is a paired measurement whose two arms are the same fixture with the
-# collapse taken and forced off, alternated observation by observation, so its delta is the
-# mechanism's cost measured against itself on one machine at one moment. What the arm is read
-# against externally is `strip4`: every non-mono row's `output_sha256` must be unchanged from it,
-# because a session with no mono-source track never collapses and a change to its bits would mean
-# the dispatch fired where it must not.
-# `--issue-loop-eq-r1` writes to `artifacts/issue-loop-eq-r1` and is the effect-optimization loop's
-# EQ round 1: parametric-EQ identity-section elision and the two-slot cohort chain (#181). Both are
-# **class A** -- every workload's output digest is the #175 digest to the bit, on every row and every
-# leg -- so its rows are read directly against `artifacts/issue175`, which is the standing authority
-# for the intended strip. It gets its own directory for the reason every arm does: a consumed
-# one-shot describes the tree that produced it, and this tree renders the same bits for less time.
-# The one record that is *expected* to move a non-timing field is `console_placement`, whose
-# `merged_chain_transposes_per_block` falls from 24 to 16; that count is derived from the realised
-# bank count, and #175 wrote its equality specifically so that the day the graph layer took the
-# saving, the equality would go red and say so.
-#
-# `--issue388-lane4-evidence` is the evidence-only, unconsumed arm for #388's fix-forward of
-# LANE-4. The original `compressor-round1` arm is a tracked one-shot authority and cannot be
-# overwritten from a clean checkout. This arm measures the merged class-A implementation once,
-# preserves its disposition beside the raw and accepted records, and makes no performance claim.
-#
-# `--round2-lane` and `--round2-lane-baseline` are the paired arms of round 2's lane lowerings:
-# `Lane::select` emitted as `blendv` instead of the three-instruction `bitselect`, and
-# `Lane::max`/`Lane::min` emitted as the one instruction x86 and wasm each have with the D8 rule
-# (`crates/lane/src/wide_impl.rs`). Both are **class A** and both are class A for a
-# stronger reason than usual: they change emitted instructions only, so every workload's
-# `output_sha256` must equal the baseline arm's on every row and every leg, and a single digit of
-# difference is a defect rather than a re-pin. The two arms are one tree apart -- the baseline arm
-# is captured with `wide_impl.rs` reverted to the base commit and nothing else changed -- so the
-# rows are read against each other directly, and against `artifacts/issue175`, which remains the
-# standing authority for the intended strip.
-# `--round2-eqrack` and `--round2-eqrack-baseline` are the paired arms of rack/EQ round 2, and they
-# are read against each other rather than against a standing directory: the baseline is captured at
-# the merge base and the candidate on the same tree plus three changes -- the vectorised
-# planar/AoSoA whole-bank transpose, the skipped bank-member dedication copy, and the EQ identity
-# refresh batched out of the per-lane snap loop. All three are **class A**, so every `output_sha256`
-# must be byte-identical between the two arms on every row, `console_automation` and the nine-track
-# ragged row included; the ragged row matters twice over, because it is the fixture that exercises
-# the partial-bank scalar transpose the tiled path deliberately does not replace. Unlike the EQ
-# round-1 arm, `console_placement`'s `merged_chain_transposes_per_block` must *not* move: this round
-# makes each transpose cheaper and does not remove one.
-#
-# `--mono3` and `--mono3-baseline` are the paired arms of mono re-engage M3 (PR #230) and, on the
-# same two captures, of #210 phase 3's class-A OFF claim (PR #231). Two arms, two trees, four
-# readings -- and the reason one pair carries all four is that a sealed capture describes *a tree*,
-# so a third directory measuring a tree one of these two already measured would be a second
-# authority for one tree and an invitation to quote whichever read better.
-#
-# `--mono3-baseline` is `e4691f2b^1` (`3cc44de7`, the merge of #230) with this arm registration and
-# nothing else: M3 present, phase 3 absent. `--mono3` is the current `main` (`565349a6`): M3
-# present, phase 3 present, plus #232's de-versioning renames.
-#
-# What the four readings are:
-#
-# 1. **M3's cost.** `mono3-baseline` read against the sealed `mono2` capture. Between `mono2`'s
-#    tree and this one lie exactly two merges, #229 (track delay) and #230 (M3), so the pair is
-#    nearly clean; #229's contribution is separately established as null. This is the reading M3
-#    shipped without and the reason this arm exists.
-# 2. **Phase 3's cost (C3).** `mono3` against `mono3-baseline`, one tree apart but for #232.
-#    Phase 3 claims class A with the feature OFF: an uncommanded console dispatches the untouched
-#    settled kernel, one bool per bank per block. Every row here is uncommanded, so every row is
-#    the OFF path.
-# 3. **The standing mono pair, re-measured.** The `console_mono` record's two arms are the same
-#    fixture with the collapse taken and forced off, alternated observation by observation, so its
-#    delta is the mechanism's cost measured against itself on one machine at one moment. Both arms
-#    carry it, so the pair is measured twice on two trees.
-# 4. **Class A, twice over.** Every `output_sha256` on both arms must reproduce the sealed `mono2`
-#    values on every row and every leg. M3 and phase 3 are both class A; a single digit of
-#    difference is a defect, not a re-pin.
-#
-# #232 rides on the `mono3` arm and not on `mono3-baseline`, so the C3 delta is `#231 + #232`
-# rather than `#231` alone. That is stated rather than hidden: #232 is a rename-only refactor
-# (146 files, no control flow touched, and the console subject's own diff across it is nine
-# identifier renames), and its class-A obligation is discharged by the digest equality above.
+# #1025 retired the 48 historical one-shot arms (`--phase2` ... `--plumbing-floor-baseline`) and
+# the no-argument default (`artifacts/issue149`): each had its record and could only refuse. Their
+# invocations and histories are in the runner as it stood before the retirement:
+# https://github.com/misofm/engine/blob/d3349b72dd9e48674d087d14722368b23c4bfc1b/scripts/run-console-benchmark.sh
 #
 # # Admissibility (#144 item 13, #163 phase 0a)
 #
@@ -270,76 +34,18 @@
 # carries `measurement_control: "uncontrolled"` and the validator refuses to let that record claim
 # otherwise.
 set -euo pipefail
-phase_directory=issue149
-# `--step NAME` is the per-issue arm of a sequential optimisation batch: one record per merged
-# issue, written to `artifacts/steps/NAME`, so each issue's motion is read against the step
-# before it rather than against one paired baseline. NAME is lowercase kebab-case, at most 64
-# characters, and like every arm it refuses to overwrite an existing record.
-if [[ "$#" == 2 && "$1" == --step ]]; then
-    [[ "$2" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]] || { printf 'invalid --step name: %s\n' "$2" >&2; exit 2; }
-    phase_directory="steps/$2"
-elif [[ "$#" == 1 ]]; then
-    case "$1" in
-        --phase2) phase_directory=issue149-phase2 ;;
-        --phase3) phase_directory=issue149-phase3 ;;
-        --issue163-phase0) phase_directory=issue163-phase0 ;;
-        --issue163-phase1) phase_directory=issue163-phase1 ;;
-        --issue163-phase2) phase_directory=issue163-phase2 ;;
-        --issue163-phase3) phase_directory=issue163-phase3 ;;
-        --issue163-phase4) phase_directory=issue163-phase4 ;;
-        --issue175) phase_directory=issue175 ;;
-        --issue182) phase_directory=issue182 ;;
-        --issue-loop-eq-r1) phase_directory=issue-loop-eq-r1 ;;
-        --issue388-lane4-evidence) phase_directory=issue388-lane4-evidence ;;
-        --compressor-round1) phase_directory=compressor-round1 ;;
-        --compressor-round1-baseline) phase_directory=compressor-round1-baseline ;;
-        --round1-composed) phase_directory=round1-composed ;;
-        --issue184) phase_directory=issue184 ;;
-        --round2-lane) phase_directory=round2-lane ;;
-        --round2-lane-baseline) phase_directory=round2-lane-baseline ;;
-        --round2-eqrack) phase_directory=round2-eqrack ;;
-        --round2-eqrack-baseline) phase_directory=round2-eqrack-baseline ;;
-        --round2-comp) phase_directory=round2-comp ;;
-        --round2-comp-baseline) phase_directory=round2-comp-baseline ;;
-        --round2-lim) phase_directory=round2-lim ;;
-        --round2-lim-baseline) phase_directory=round2-lim-baseline ;;
-        --round2-composed) phase_directory=round2-composed ;;
-        --audit-chain-merge) phase_directory=audit-chain-merge ;;
-        --audit-chain-merge-baseline) phase_directory=audit-chain-merge-baseline ;;
-        --strip1) phase_directory=strip1 ;;
-        --strip1-baseline) phase_directory=strip1-baseline ;;
-        --strip2) phase_directory=strip2 ;;
-        --strip2-baseline) phase_directory=strip2-baseline ;;
-        --strip3) phase_directory=strip3 ;;
-        --strip3-baseline) phase_directory=strip3-baseline ;;
-        --strip4) phase_directory=strip4 ;;
-        --mono2) phase_directory=mono2 ;;
-        --mono3) phase_directory=mono3 ;;
-        --mono3-baseline) phase_directory=mono3-baseline ;;
-        --issue368-floor-recount) phase_directory=issue368-floor-recount ;;
-        --issue399-rt1) phase_directory=issue399-rt1 ;;
-        --issue415-rt1-measurement) phase_directory=issue415-rt1-measurement ;;
-        --issue419-rt2) phase_directory=issue419-rt2 ;;
-        --issue420-rt3) phase_directory=issue420-rt3 ;;
-        --pure-path) phase_directory=pure-path ;;
-        --pure-path-baseline) phase_directory=pure-path-baseline ;;
-        --copy-removal) phase_directory=copy-removal ;;
-        --copy-removal-baseline) phase_directory=copy-removal-baseline ;;
-        --copy-removal-without-920) phase_directory=copy-removal-without-920 ;;
-        --plumbing-floor) phase_directory=plumbing-floor ;;
-        --plumbing-floor-baseline) phase_directory=plumbing-floor-baseline ;;
-        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--issue388-lane4-evidence|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline|--strip4|--mono2|--mono3|--mono3-baseline|--issue368-floor-recount|--issue399-rt1|--issue415-rt1-measurement|--issue419-rt2|--issue420-rt3|--pure-path|--pure-path-baseline|--copy-removal|--copy-removal-baseline|--copy-removal-without-920|--plumbing-floor|--plumbing-floor-baseline|--step NAME]\n' "$0" >&2; exit 2 ;;
-    esac
-elif [[ "$#" != 0 ]]; then
-    printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--issue388-lane4-evidence|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline|--strip4|--mono2|--mono3|--mono3-baseline|--issue368-floor-recount|--issue399-rt1|--issue415-rt1-measurement|--issue419-rt2|--issue420-rt3|--pure-path|--pure-path-baseline|--copy-removal|--copy-removal-baseline|--copy-removal-without-920|--plumbing-floor|--plumbing-floor-baseline|--step NAME]\n' "$0" >&2
+if [[ "$#" != 2 || "$1" != --step ]]; then
+    printf 'usage: %s --step NAME\n' "$0" >&2
     exit 2
 fi
+[[ "$2" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]] || { printf 'invalid --step name: %s\n' "$2" >&2; exit 2; }
+step_directory="steps/$2"
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
 # shellcheck source=scripts/check-bench-preconditions.sh
 source "$root/scripts/check-bench-preconditions.sh"
 
-artifact_dir="$root/artifacts/$phase_directory"
+artifact_dir="$root/artifacts/$step_directory"
 raw="$artifact_dir/console-benchmark.raw.jsonl"
 accepted="$artifact_dir/console-benchmark.accepted.jsonl"
 stderr_log="$artifact_dir/console-benchmark.stderr.log"
@@ -351,10 +57,10 @@ core_clock_log="$artifact_dir/console-benchmark.core-clock.csv"
 for path in "$raw" "$accepted" "$stderr_log" "$disposition" "$core_clock_log"; do
     [[ ! -e "$path" ]] || { printf 'refusing to overwrite console artifact: %s\n' "$path" >&2; exit 1; }
 done
-[[ "$(uname -m)" == "x86_64" ]] || { printf 'Issue-149 qualification requires x86_64\n' >&2; exit 1; }
-grep -qm1 -w avx2 /proc/cpuinfo || { printf 'Issue-149 qualification requires AVX2\n' >&2; exit 1; }
+[[ "$(uname -m)" == "x86_64" ]] || { printf 'the console benchmark requires x86_64\n' >&2; exit 1; }
+grep -qm1 -w avx2 /proc/cpuinfo || { printf 'the console benchmark requires AVX2\n' >&2; exit 1; }
 [[ -z "$(git status --porcelain=v1 --untracked-files=normal)" ]] || {
-    printf 'Issue-149 qualification requires a clean committed candidate\n' >&2
+    printf 'the console benchmark requires a clean committed candidate\n' >&2
     exit 1
 }
 
