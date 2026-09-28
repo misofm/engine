@@ -18,19 +18,8 @@ std::thread_local! {
     static TYPED_COMMAND_DECODES: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
 }
 
-#[cfg(test)]
-pub(crate) fn reset_typed_command_decodes() {
-    TYPED_COMMAND_DECODES.with(|decodes| decodes.set(0));
-}
-
-#[cfg(test)]
-pub(crate) fn typed_command_decodes() -> usize {
-    TYPED_COMMAND_DECODES.with(core::cell::Cell::get)
-}
-
 #[cfg(any(test, feature = "test-support"))]
 use crate::TransportState;
-use crate::delivery::{DeliveryContext, PreparedDeliveryCapabilities};
 use crate::{
     AutomationBatchError, AutomationBatchSlot, AutomationCanceled, AutomationCancellationReason,
     AutomationEnqueueError, AutomationEnqueued, Backpressure, BackpressureQueueKind, Capabilities,
@@ -39,7 +28,7 @@ use crate::{
     DiagnosticEvent, DiagnosticsPage, DiagnosticsRequest, EncodeError, EventPayload,
     ExpectedRevision, MessageId, MeterBatch, MeterRecord, NonOkResponse, ParameterAutomationRate,
     ParameterDescriptor, ParameterDomain, ParameterHandle, ParameterMetadataPage,
-    ParameterMetadataRequest, ParameterStatePage, ParameterStateRecord, ParameterStateRequest,
+    ParameterMetadataRequest, ParameterStatePage, ParameterStateRequest,
     PreparedSessionTransaction, ProtocolCodec, ProtocolQueues, QueueReport, ReliablePayload,
     ReliableSlot, RequestId, SampleTime, SessionCommitted, SessionEdit, SessionRevision,
     SessionSnapshot, SessionStore, SessionStoreError, StatusCode, SuccessResponsePayload,
@@ -613,59 +602,6 @@ pub trait ControlProvider {
         &mut self,
         configuration: TelemetryConfiguration,
     ) -> TelemetryConfiguration;
-}
-
-/// One allocation-free, delivery-owned scalar state publication slot.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct ScalarStateSlot {
-    handles: [ParameterHandle; 2],
-    published: Option<(SampleTime, [ParameterStateRecord; 2])>,
-}
-
-impl ScalarStateSlot {
-    pub(crate) const fn new(handles: [ParameterHandle; 2]) -> Self {
-        Self {
-            handles,
-            published: None,
-        }
-    }
-
-    pub(crate) fn publish(
-        &mut self,
-        observed_sample: SampleTime,
-        records: [ParameterStateRecord; 2],
-    ) -> Result<(), ()> {
-        if records[0].handle != self.handles[0].0 || records[1].handle != self.handles[1].0 {
-            return Err(());
-        }
-        if records.iter().any(|record| {
-            record.handle == 0
-                || record.flags & !3 != 0
-                || record.flags & 1 == 0
-                || !record.value.is_finite()
-        }) {
-            return Err(());
-        }
-        self.published = Some((observed_sample, records));
-        Ok(())
-    }
-
-    fn page(&self, request: &ParameterStateRequest) -> Result<ParameterStatePage, StatusCode> {
-        let Some((observed_sample, records)) = self.published else {
-            return Err(StatusCode::Unavailable);
-        };
-        let mut result = Vec::with_capacity(request.handles.len());
-        for handle in &request.handles {
-            let Some(record) = records.iter().find(|record| record.handle == *handle) else {
-                return Err(StatusCode::NotFound);
-            };
-            result.push(*record);
-        }
-        Ok(ParameterStatePage {
-            observed_sample: observed_sample.0,
-            records: result,
-        })
-    }
 }
 
 /// Typed bounded provider fixture failure; providers never return raw BTLV payload bytes.
@@ -1609,23 +1545,6 @@ impl<P: ControlProvider> ProtocolController<P> {
 
     /// Process one logical request with exact-byte replay and no renderer call.
     pub fn process(&mut self, request: ControllerRequest<'_>) -> ControllerResponse {
-        self.process_with_delivery_context(request, None)
-    }
-
-    pub(crate) fn process_with_delivery_context(
-        &mut self,
-        request: ControllerRequest<'_>,
-        context: Option<&mut DeliveryContext<'_>>,
-    ) -> ControllerResponse {
-        self.process_with_delivery_context_and_scalar_state(request, context, None)
-    }
-
-    pub(crate) fn process_with_delivery_context_and_scalar_state(
-        &mut self,
-        request: ControllerRequest<'_>,
-        context: Option<&mut DeliveryContext<'_>>,
-        scalar_state: Option<&ScalarStateSlot>,
-    ) -> ControllerResponse {
         let message_id = request.command.message_id();
         if self.structural_generation.load(Ordering::Acquire) & 1 != 0 {
             return self.compatibility_response(
@@ -1664,7 +1583,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             }
             ReplayDecision::Execute => {}
         }
-        let outcome = self.execute_with_delivery_context(&request, context, scalar_state);
+        let outcome = self.execute(&request);
         let response = self.compatibility_response(message_id, request.request_id, outcome);
         match self.replay.complete(
             request.request_id,
@@ -1714,25 +1633,6 @@ impl<P: ControlProvider> ProtocolController<P> {
         input: &[u8],
         scratch: &mut DecodeScratch<'_>,
     ) -> Result<ControllerResponse, DecodeError> {
-        self.process_b1b_btlv_with_delivery_context(input, scratch, None)
-    }
-
-    pub(crate) fn process_b1b_btlv_with_delivery_context(
-        &mut self,
-        input: &[u8],
-        scratch: &mut DecodeScratch<'_>,
-        context: Option<&mut DeliveryContext<'_>>,
-    ) -> Result<ControllerResponse, DecodeError> {
-        self.process_b1b_btlv_with_delivery_context_and_scalar_state(input, scratch, context, None)
-    }
-
-    pub(crate) fn process_b1b_btlv_with_delivery_context_and_scalar_state(
-        &mut self,
-        input: &[u8],
-        scratch: &mut DecodeScratch<'_>,
-        context: Option<&mut DeliveryContext<'_>>,
-        scalar_state: Option<&ScalarStateSlot>,
-    ) -> Result<ControllerResponse, DecodeError> {
         let codec = self.codec;
         let decoded = codec.decode_typed_command_limited(
             input,
@@ -1749,16 +1649,12 @@ impl<P: ControlProvider> ProtocolController<P> {
                 }
             }
             DecodedCommandPayload::SessionTransactionApply(edits) => {
-                return Ok(self.process_with_delivery_context_and_scalar_state(
-                    ControllerRequest {
-                        request_id: header.request_id,
-                        expected_revision: header.expected_revision,
-                        canonical_bytes: input,
-                        command: ControlCommand::SessionTransactionApply { edits: &edits },
-                    },
-                    context,
-                    scalar_state,
-                ));
+                return Ok(self.process(ControllerRequest {
+                    request_id: header.request_id,
+                    expected_revision: header.expected_revision,
+                    canonical_bytes: input,
+                    command: ControlCommand::SessionTransactionApply { edits: &edits },
+                }));
             }
             DecodedCommandPayload::ParameterMetadataGet(request) => {
                 ControlCommand::ParameterMetadataGet { request }
@@ -1787,16 +1683,12 @@ impl<P: ControlProvider> ProtocolController<P> {
                 ControlCommand::DiagnosticsGet { request }
             }
         };
-        Ok(self.process_with_delivery_context_and_scalar_state(
-            ControllerRequest {
-                request_id: header.request_id,
-                expected_revision: header.expected_revision,
-                canonical_bytes: input,
-                command,
-            },
-            context,
-            scalar_state,
-        ))
+        Ok(self.process(ControllerRequest {
+            request_id: header.request_id,
+            expected_revision: header.expected_revision,
+            canonical_bytes: input,
+            command,
+        }))
     }
 
     /// Process one complete schema-closed command and copy its canonical full response into the
@@ -1814,29 +1706,6 @@ impl<P: ControlProvider> ProtocolController<P> {
         scratch: &mut DecodeScratch<'_>,
         output: &mut [u8],
     ) -> Result<usize, CommandFrameProcessError> {
-        self.process_command_frame_into_with_delivery_context(input, scratch, output, None)
-    }
-
-    pub(crate) fn process_command_frame_into_with_delivery_context(
-        &mut self,
-        input: &[u8],
-        scratch: &mut DecodeScratch<'_>,
-        output: &mut [u8],
-        context: Option<&mut DeliveryContext<'_>>,
-    ) -> Result<usize, CommandFrameProcessError> {
-        self.process_command_frame_into_with_delivery_context_and_scalar_state(
-            input, scratch, output, context, None,
-        )
-    }
-
-    pub(crate) fn process_command_frame_into_with_delivery_context_and_scalar_state(
-        &mut self,
-        input: &[u8],
-        scratch: &mut DecodeScratch<'_>,
-        output: &mut [u8],
-        context: Option<&mut DeliveryContext<'_>>,
-        scalar_state: Option<&ScalarStateSlot>,
-    ) -> Result<usize, CommandFrameProcessError> {
         if self.structural_generation.load(Ordering::Acquire) & 1 != 0 {
             return Err(CommandFrameProcessError::PreparedCommandOutstanding);
         }
@@ -1844,23 +1713,10 @@ impl<P: ControlProvider> ProtocolController<P> {
             .codec
             .decode_command_header(input)
             .map_err(CommandFrameProcessError::Uncorrelatable)?;
-        if context.is_some() && header.message_id == MessageId::SessionTransactionApply {
-            return self.process_command_frame_into_legacy(
-                input,
-                scratch,
-                output,
-                context,
-                scalar_state,
-            );
-        }
         match self.plan_structural_command(input, scratch, output.len(), header)? {
-            StructuralCommandDisposition::Legacy => self.process_command_frame_into_legacy(
-                input,
-                scratch,
-                output,
-                context,
-                scalar_state,
-            ),
+            StructuralCommandDisposition::Legacy => {
+                self.process_command_frame_into_legacy(input, scratch, output)
+            }
             StructuralCommandDisposition::Immediate {
                 replay_plan,
                 outcome,
@@ -2242,8 +2098,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         PREPARED_IMMEDIATE_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
         let capacity = output_capacity.min(self.replay.config().max_response_bytes);
         let mut bytes = vec![0_u8; capacity];
-        let written =
-            self.process_command_frame_into_legacy(input, scratch, &mut bytes, None, None)?;
+        let written = self.process_command_frame_into_legacy(input, scratch, &mut bytes)?;
         bytes.truncate(written);
         Ok(PreparedCommandFrame::Immediate(
             PreparedImmediateCommandFrame { bytes },
@@ -2318,8 +2173,6 @@ impl<P: ControlProvider> ProtocolController<P> {
         input: &[u8],
         scratch: &mut DecodeScratch<'_>,
         output: &mut [u8],
-        context: Option<&mut DeliveryContext<'_>>,
-        scalar_state: Option<&ScalarStateSlot>,
     ) -> Result<usize, CommandFrameProcessError> {
         let header = self
             .codec
@@ -2361,9 +2214,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         #[cfg(test)]
         TYPED_COMMAND_DECODES.with(|decodes| decodes.set(decodes.get().saturating_add(1)));
         let outcome = match self.codec.decode_typed_command(input, scratch) {
-            Ok(decoded) => {
-                self.execute_decoded_command(header, decoded.payload, context, scalar_state)
-            }
+            Ok(decoded) => self.execute_decoded_command(header, decoded.payload),
             Err(error) => self.non_ok(error.status(), None),
         };
         let (written, _, _) = self
@@ -2411,8 +2262,6 @@ impl<P: ControlProvider> ProtocolController<P> {
         &mut self,
         header: CommandHeader,
         payload: DecodedCommandPayload<'_>,
-        context: Option<&mut DeliveryContext<'_>>,
-        scalar_state: Option<&ScalarStateSlot>,
     ) -> Outcome {
         let command = match payload {
             DecodedCommandPayload::CapabilitiesGet => ControlCommand::CapabilitiesGet,
@@ -2423,16 +2272,12 @@ impl<P: ControlProvider> ProtocolController<P> {
                 }
             }
             DecodedCommandPayload::SessionTransactionApply(edits) => {
-                return self.execute_with_delivery_context(
-                    &ControllerRequest {
-                        request_id: header.request_id,
-                        expected_revision: header.expected_revision,
-                        canonical_bytes: &[],
-                        command: ControlCommand::SessionTransactionApply { edits: &edits },
-                    },
-                    context,
-                    scalar_state,
-                );
+                return self.execute(&ControllerRequest {
+                    request_id: header.request_id,
+                    expected_revision: header.expected_revision,
+                    canonical_bytes: &[],
+                    command: ControlCommand::SessionTransactionApply { edits: &edits },
+                });
             }
             DecodedCommandPayload::ParameterMetadataGet(request) => {
                 ControlCommand::ParameterMetadataGet { request }
@@ -2464,16 +2309,12 @@ impl<P: ControlProvider> ProtocolController<P> {
                 ControlCommand::DiagnosticsGet { request }
             }
         };
-        self.execute_with_delivery_context(
-            &ControllerRequest {
-                request_id: header.request_id,
-                expected_revision: header.expected_revision,
-                canonical_bytes: &[],
-                command,
-            },
-            context,
-            scalar_state,
-        )
+        self.execute(&ControllerRequest {
+            request_id: header.request_id,
+            expected_revision: header.expected_revision,
+            canonical_bytes: &[],
+            command,
+        })
     }
 
     fn encode_outcome_into(
@@ -2732,66 +2573,6 @@ impl<P: ControlProvider> ProtocolController<P> {
     #[must_use]
     pub const fn telemetry_configuration(&self) -> &TelemetryConfiguration {
         &self.telemetry_configuration
-    }
-
-    pub(crate) fn delivery_try_handoff_next(
-        &mut self,
-        state: &mut crate::delivery::AutomationDeliveryState,
-        capabilities: &PreparedDeliveryCapabilities,
-    ) -> Result<crate::HandoffResult, crate::DeliveryError> {
-        state.try_handoff_next(&mut self.queues, capabilities)
-    }
-
-    pub(crate) fn delivery_collect_terminal(
-        &mut self,
-        state: &mut crate::delivery::AutomationDeliveryState,
-        ticket: crate::DeliveryTicket,
-    ) -> Result<crate::TerminalAutomation, crate::DeliveryError> {
-        state.collect_terminal(&mut self.queues, ticket)
-    }
-
-    pub(crate) fn delivery_begin_cancel(
-        &mut self,
-        state: &mut crate::delivery::AutomationDeliveryState,
-        reason: AutomationCancellationReason,
-    ) -> Result<crate::CancelToken, crate::DeliveryError> {
-        state.begin_cancel(
-            &mut self.queues,
-            self.next_reliable_event_sequence,
-            reason,
-            self.session.revision(),
-        )
-    }
-
-    pub(crate) fn delivery_poll_cancel_boundary(
-        &mut self,
-        state: &mut crate::delivery::AutomationDeliveryState,
-        token: crate::CancelToken,
-    ) -> Result<Option<crate::CancelComplete>, crate::DeliveryError> {
-        let complete = state.poll_cancel_boundary(
-            &mut self.queues,
-            &mut self.next_reliable_event_sequence,
-            token,
-        )?;
-        if let Some(complete) = complete {
-            self.provider
-                .record_canceled_automation(complete.canceled_records);
-        }
-        Ok(complete)
-    }
-
-    pub(crate) fn delivery_outstanding(
-        &self,
-        state: &crate::delivery::AutomationDeliveryState,
-    ) -> usize {
-        state.outstanding(&self.queues)
-    }
-
-    pub(crate) fn delivery_resident_automation(
-        &self,
-        state: &crate::delivery::AutomationDeliveryState,
-    ) -> u64 {
-        state.resident_automation(&self.queues)
     }
 
     /// Stage one mock/control-only meter batch for explicitly configured lossy event egress.
@@ -3182,12 +2963,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         }
     }
 
-    fn execute_with_delivery_context(
-        &mut self,
-        request: &ControllerRequest<'_>,
-        mut delivery: Option<&mut DeliveryContext<'_>>,
-        scalar_state: Option<&ScalarStateSlot>,
-    ) -> Outcome {
+    fn execute(&mut self, request: &ControllerRequest<'_>) -> Outcome {
         let features = self.config.provider_features;
         let enabled = match request.command {
             ControlCommand::SessionTransactionApply { .. } => {
@@ -3213,26 +2989,6 @@ impl<P: ControlProvider> ProtocolController<P> {
             && expected != self.session.revision()
         {
             return self.non_ok(StatusCode::RevisionConflict, None);
-        }
-        if let Some(context) = delivery.as_ref() {
-            match request.command {
-                ControlCommand::SessionTransactionApply { .. } => {
-                    return self.non_ok(StatusCode::Unavailable, None);
-                }
-                ControlCommand::ParameterStateGet { .. } if scalar_state.is_none() => {
-                    return self.non_ok(StatusCode::Unavailable, None);
-                }
-                ControlCommand::TransportSet {
-                    request:
-                        TransportSetRequest {
-                            position: Some(_), ..
-                        },
-                } => return self.non_ok(StatusCode::Unavailable, None),
-                ControlCommand::TransportSet { .. } if context.cancellation_pending() => {
-                    return self.non_ok(StatusCode::Unavailable, None);
-                }
-                _ => {}
-            }
         }
         match &request.command {
             ControlCommand::CapabilitiesGet => {
@@ -3344,25 +3100,11 @@ impl<P: ControlProvider> ProtocolController<P> {
             },
             ControlCommand::ParameterStateGet {
                 request: parameter_request,
-            } => {
-                if let Some(slot) = scalar_state {
-                    match slot.page(parameter_request) {
-                        Ok(page) => self.ok(Body::ParameterState(page)),
-                        Err(status) => self.non_ok(status, None),
-                    }
-                } else {
-                    match self.provider.parameter_state(parameter_request) {
-                        Ok(page) => self.ok(Body::ParameterState(page)),
-                        Err(error) => self.non_ok(status_for_parameter(error), None),
-                    }
-                }
-            }
+            } => match self.provider.parameter_state(parameter_request) {
+                Ok(page) => self.ok(Body::ParameterState(page)),
+                Err(error) => self.non_ok(status_for_parameter(error), None),
+            },
             ControlCommand::AutomationEnqueue { batch } => {
-                if delivery.is_some()
-                    && let Err(error) = batch.validate_records()
-                {
-                    return self.non_ok(status_for_automation(error), None);
-                }
                 if batch.revision != self.session.revision() {
                     return self.non_ok(StatusCode::RevisionConflict, None);
                 }
@@ -3370,14 +3112,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                     return self.non_ok(error, None);
                 }
                 let current_sample = self.provider.current_sample();
-                let result = if let Some(context) = delivery.as_mut() {
-                    context
-                        .state
-                        .try_admit(&mut self.queues, current_sample, *batch)
-                } else {
-                    self.queues.try_enqueue_automation(current_sample, *batch)
-                };
-                match result {
+                match self.queues.try_enqueue_automation(current_sample, *batch) {
                     Ok(()) => {
                         let report = self.queues.report(crate::QueueKind::Automation);
                         self.ok(Body::AutomationEnqueued(AutomationEnqueued {

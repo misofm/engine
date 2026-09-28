@@ -9,17 +9,16 @@
 # only). The armv7-linux-androideabi row below is a refusal row: it passes only while `lane`
 # fails to compile for that target with its 64-bit-only message.
 #
-# Replaces the cargo/wasm-objdump halves of scripts/check-parametric-eq-targets.sh and
-# scripts/check-builtins-targets.sh with one script that runs each distinct package/target/feature
-# combination exactly once, under one cached target dir per target triple
-# (`target/ci/cross-target/<triple>`, or under `$CARGO_TARGET_DIR` if the caller has set it). The
-# two original scripts are now thin wrappers that call this one, so any remaining caller by the old
-# name keeps working; scripts/check-parametric-eq-targets.sh's hermetic render-contract half moved
-# to scripts/check-parametric-eq-render-contract.sh instead.
-#
-# #1037 (owner ruling R6) removed the effect-package crate, and with it the third original script
-# (check-effect-interchange-targets.sh), its qualification precondition and the effect-package
-# cdylib object row. effect-compiler keeps its wasm `check --all-targets` row below.
+# Replaces the cargo/wasm-objdump halves of scripts/check-parametric-eq-targets.sh,
+# scripts/check-builtins-targets.sh and scripts/check-effect-interchange-targets.sh with one script
+# that runs each distinct package/target/feature combination exactly once, under one cached target
+# dir per target triple (`target/ci/cross-target/<triple>`, or under `$CARGO_TARGET_DIR` if the
+# caller has set it). The original scripts became thin wrappers that call this one, so any
+# remaining caller by the old name keeps working; #1026 deleted the builtins wrapper, which had no
+# caller left, and #1037 the interchange one. scripts/check-parametric-eq-targets.sh's hermetic
+# render-contract half moved to scripts/check-parametric-eq-render-contract.sh instead.
+# #1037 (owner ruling R6) also removed the interchange qualification precondition and the
+# effect-package cdylib object row; effect-compiler keeps its wasm `check --all-targets` row below.
 set -euo pipefail
 
 [[ $# -eq 0 ]] || { printf 'usage: check-cross-targets.sh\n' >&2; exit 2; }

@@ -141,7 +141,6 @@ dependencies = [
  "graph-compiler",
  "lane",
  "protocol",
- "rack",
  "session",
  "sha2 0.11.0",
 ]

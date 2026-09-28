@@ -30,7 +30,6 @@ effect-contract.workspace = true
 graph.workspace = true
 graph-compiler.workspace = true
 lane.workspace = true
-rack.workspace = true
 sha2.workspace = true
 
 [features]

@@ -38,7 +38,6 @@ graph="1"
 graph-compiler="1"
 lane="1"
 protocol="1"
-rack="1"
 session="1"
 [target.'cfg(unix)'.dependencies]
 sha2="1"

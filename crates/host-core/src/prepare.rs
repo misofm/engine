@@ -621,12 +621,12 @@ pub fn prepare_host_runtime_between_render_calls(
     )
 }
 
-/// Prepare the serialized builtin lowering for an internal endpoint owner.
+/// Prepare the serialized builtin lowering on an explicit backend.
 ///
-/// The endpoint already owns the complete batch claim and injects it only at a render boundary, so
-/// it can select the existing [`BuiltinControlDelivery::BetweenRenderCalls`] lowering without
-/// widening the public concurrent preparation APIs. Production passes [`Backend::current`]; the
-/// test-only endpoint seam passes the scalar backend to compare the same lowering.
+/// The only caller is [`prepare_host_runtime_between_render_calls`], with [`Backend::current`].
+/// Its other caller, #587's builtin batch endpoint, was deleted as unused with the rest of #140's
+/// unwired delivery stack (#1056). Folding this back into its caller is left for a change that
+/// may move the shipped artifact: panic locations below this line would shift.
 pub(crate) fn prepare_host_runtime_between_render_calls_with_backend(
     compiled: &CompiledSession,
     caps: &HostPrepareCaps,

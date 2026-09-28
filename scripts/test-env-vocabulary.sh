@@ -31,19 +31,19 @@ check "$case_root" >/dev/null
 retired_prefix=MISO_
 family=MISO_ENGINE_BENCH_
 new_case stray-prefix
-printf '\n# %sRACK_BENCH_ROUND\n' "$retired_prefix" >>"$case_root/scripts/run-rack-benchmark.sh"
+printf '\n# %sRACK_BENCH_ROUND\n' "$retired_prefix" >>"$case_root/scripts/run-console-benchmark.sh"
 expect_failure stray-prefix
 
 new_case stray-prefix-in-tool
 printf '\n// %sINTERCHANGE_CANDIDATE_COMMIT\n' "$retired_prefix" \
-    >>"$case_root/tools/bench/src/rack.rs"
+    >>"$case_root/tools/bench/src/console.rs"
 expect_failure stray-prefix-in-tool
 
 # Rule 2, forward: a name used but not documented. This is finding F2 -- the runner and the binary
 # agreeing on a name nobody wrote down is exactly how they stopped agreeing.
 new_case undocumented-name
 printf '\nexport %sUNDECLARED=1\n' "$family" \
-    >>"$case_root/scripts/run-rack-benchmark.sh"
+    >>"$case_root/scripts/run-console-benchmark.sh"
 expect_failure undocumented-name
 
 # Rule 2, backward: a documented name nothing uses, and a documented name deleted from the table.
@@ -91,7 +91,7 @@ expect_failure malformed-row
 # collapsed.
 new_case reintroduced-synonym
 printf '\nexport %sGOVERNOR=performance\n' "$family" \
-    >>"$case_root/scripts/run-rack-benchmark.sh"
+    >>"$case_root/scripts/run-console-benchmark.sh"
 expect_failure reintroduced-synonym
 
 # Git discovery and listing are separate checked callsites.  A real initialized fixture is a
@@ -144,7 +144,7 @@ exec "$real_git" "\$@"
 EOF
 cat >"$scratch/source-fail/grep" <<EOF
 #!/usr/bin/env bash
-if [[ "\$*" == *'scripts/run-rack-benchmark.sh'* ]]; then [[ "\${ENV_MODE:-full}" == full ]] && "$real_grep" "\$@" || true; exit 7; fi
+if [[ "\$*" == *'scripts/run-console-benchmark.sh'* ]]; then [[ "\${ENV_MODE:-full}" == full ]] && "$real_grep" "\$@" || true; exit 7; fi
 exec "$real_grep" "\$@"
 EOF
 cat >"$scratch/vocabulary-fail/grep" <<EOF
@@ -160,7 +160,7 @@ EOF
 chmod +x "$scratch"/{classification-fail/git,source-fail/grep,vocabulary-fail/grep,late-comm-fail/comm}
 for mode in error full; do
     ENV_MODE=$mode assert_fault "$case_root/scripts/check-env-vocabulary.sh" "$scratch/classification-fail" 'Git classification failed (status 7)' "$([[ $mode == full ]] && printf true)"
-    ENV_MODE=$mode assert_fault "$case_root/scripts/check-env-vocabulary.sh" "$scratch/source-fail" 'source scan failed for scripts/run-rack-benchmark.sh (grep status 7)' "$([[ $mode == full ]] && printf '%sCPU_MODEL' "$family")"
+    ENV_MODE=$mode assert_fault "$case_root/scripts/check-env-vocabulary.sh" "$scratch/source-fail" 'source scan failed for scripts/run-console-benchmark.sh (grep status 7)' "$([[ $mode == full ]] && printf '%sCPU_MODEL' "$family")"
     ENV_MODE=$mode assert_fault "$case_root/scripts/check-env-vocabulary.sh" "$scratch/vocabulary-fail" 'vocabulary scan failed (grep status 7)' "$([[ $mode == full ]] && printf '%sCPU_MODEL' "$family")"
 done
 assert_fault "$case_root/scripts/check-env-vocabulary.sh" "$scratch/late-comm-fail" 'unused-name comparison failed'
@@ -219,8 +219,8 @@ VOCAB_TR|vocabulary delimiter removal failed (tr status 7)|${family}CPU_MODEL
 DOCUMENTED_SORT|documented-name sort failed (sort status 7)|${family}CPU_MODEL
 COMM23|undocumented-name comparison failed (comm status 7)|
 COMM13|unused-name comparison failed (comm status 7)|
-COUNT|documented-name count failed (wc status 7)|112
-COUNT_TR|documented-name count formatting failed (tr status 7)|112
+COUNT|documented-name count failed (wc status 7)|95
+COUNT_TR|documented-name count formatting failed (tr status 7)|95
 EOF
 
 saved_case_root="$case_root"; case_root="$scratch/non-git-operation"; cp -R "$saved_case_root" "$case_root"; rm -rf "$case_root/.git"

@@ -342,10 +342,8 @@ jobs:
         run: |
           python3 -B scripts/check-test-support-ci.py
           python3 -B scripts/test-test-support-ci.py
-      - name: Console and rack benchmark fixture integrity
-        run: |
-          bash scripts/check-console-benchmark-fixture.sh
-          bash scripts/check-rack-benchmark-fixture.sh
+      - name: Console benchmark fixture integrity
+        run: bash scripts/check-console-benchmark-fixture.sh
       # check-console-fixtures.sh and check-builtins-fixtures.sh (S1/S2): neither script has a
       # hermetic no-binary mode -- with no binary argument, check-console-fixtures.sh's
       # derive-intended-console-fixture.py falls back to `cargo run -q -p session-validator`
@@ -356,19 +354,13 @@ jobs:
       # binaries; only the hermetic mutation-test suite stays here.
       - name: Standing builtins fixture manifest mutation tests
         run: bash scripts/test-builtins-fixtures.sh
-      - name: Builtins benchmark real-tree manifest consumers
-        run: bash scripts/test-builtins-benchmark.sh --check-manifest-consumers
       - name: Wasm console benchmark validator mutation tests
         run: bash scripts/test-wasm-console-benchmark.sh
-      # test-builtins-benchmark.sh and test-graph-benchmark.sh moved to nightly's
-      # moved-mutation-suites job (design §6.2/deliverable C); everything else in this bundle is
-      # a hermetic validator self-test.
+      # Everything in this bundle is a hermetic validator self-test.
       - name: Benchmark preconditions and validator mutation tests
         run: |
           bash scripts/check-bench-preconditions.sh
           bash scripts/test-console-benchmark.sh
-          bash scripts/test-rack-benchmark.sh
-          env -u CARGO_INCREMENTAL bash scripts/test-builtins-current-benchmark.sh
           bash scripts/test-wasm-kernel-timing.sh
       - name: Shared host facade policy and mutation tests
         run: |

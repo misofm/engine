@@ -342,7 +342,8 @@ about 28 s.
   bench, builtins, effect-runtime, graph, host-core, lane, protocol-control, rack, realtime and
   session `check-*-policy.sh` scripts.
 - **FAIL, and not introduced here:** `check-step-vocabulary.py` refuses
-  `.github/ISSUE_SPECS/1025-retire-the-used-up-console-benchmark-arms.md:238` (the word "nudge").
+  `.github/ISSUE_SPECS/1025-retire-the-used-up-console-benchmark-arms.md:238` (a retired parameter-step
+  spelling); root fixed that line in `c12be3f7`.
   It fails identically on a `git archive` of `codex/batch-slim-1`. That spec is outside this issue's
   paths, so root should fix it on the batch.
 

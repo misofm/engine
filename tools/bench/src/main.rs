@@ -8,8 +8,6 @@ use std::ffi::OsString;
 use std::process::Command;
 
 #[cfg(not(target_arch = "wasm32"))]
-mod builtins;
-#[cfg(not(target_arch = "wasm32"))]
 mod conformance;
 #[cfg(not(target_arch = "wasm32"))]
 mod console;
@@ -20,8 +18,6 @@ mod floor;
 #[cfg(not(target_arch = "wasm32"))]
 mod gate_active;
 #[cfg(not(target_arch = "wasm32"))]
-mod graph;
-#[cfg(not(target_arch = "wasm32"))]
 mod input_symmetry;
 #[cfg(not(target_arch = "wasm32"))]
 mod input_symmetry_capture;
@@ -29,42 +25,34 @@ mod input_symmetry_capture;
 mod multiband_active;
 mod protocol;
 #[cfg(not(target_arch = "wasm32"))]
-mod rack;
-#[cfg(not(target_arch = "wasm32"))]
 mod session;
 
 #[cfg(not(target_arch = "wasm32"))]
 const INTERNAL_SUBJECT: &str = "ENGINE_V1_INTERNAL_BENCH_SUBJECT";
 #[cfg(not(target_arch = "wasm32"))]
 const SUBJECTS: &[&str] = &[
-    "builtins",
     "conformance",
     "console",
     "effect-contract",
     "gate-active",
     "multiband-active",
-    "graph",
     "input-symmetry",
     "input-symmetry-capture",
     "protocol",
-    "rack",
     "session",
 ];
 
 #[cfg(not(target_arch = "wasm32"))]
 fn run_subject(subject: &str) {
     match subject {
-        "builtins" => builtins::main(),
         "conformance" => conformance::main(),
         "console" => console::main(),
         "effect-contract" => effect_contract::main(),
         "gate-active" => gate_active::main(),
         "multiband-active" => multiband_active::main(),
-        "graph" => graph::main(),
         "input-symmetry" => input_symmetry::main(),
         "input-symmetry-capture" => input_symmetry_capture::main(),
         "protocol" => protocol::main(),
-        "rack" => rack::main(),
         "session" => session::main(),
         _ => unreachable!("dispatcher validates internal subjects"),
     }

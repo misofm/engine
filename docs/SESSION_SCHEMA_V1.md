@@ -96,8 +96,10 @@ only `both`.
 
 **The automation table is consumed by nothing today.** No lowering reads it, for the strip or for
 any of the three effect racks: a valid target is valid-and-inert syntax that authors, round-trips
-and renders nothing. Extending the vocabulary unblocks authoring and the SDK's builder; builtin
-automation *rendering* is gated on issue #140's span feed.
+and renders nothing. Extending the vocabulary unblocks authoring and the SDK's builder. Rendering
+the stored automation table, builtin targets included, identically on every platform is owned by
+issue #1058 (research first); #140, which once gated it, was descoped
+(`rulings/engine-footprint-2026-09-28.md`).
 Builtin cutoffs are finite nonnegative hertz values, but their DSP/Nyquist relationships are not
 issue-004 validation.
 
