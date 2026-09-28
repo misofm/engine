@@ -83,7 +83,6 @@ fn prepared_plan(folded: bool) -> engine::realtime::PreparedRenderPlan {
     let envelope = RenderEnvelope {
         sample_rate: engine::SampleRateHz(48_000),
         quantum: QuantumFrames(FRAMES),
-        input_channels: None,
         output_channels: core::num::NonZeroUsize::new(2).expect("stereo"),
     };
     let inputs: Vec<_> = (0..4)
@@ -311,10 +310,7 @@ fn direct_bank_graph_render_is_allocation_free_and_bit_exact() {
     for block in 0..16 {
         let output = PlanarBufferMut::try_new(&mut pcm, 2, FRAMES, FRAMES).expect("output");
         plan.render(
-            realtime::RenderIo {
-                input: None,
-                output,
-            },
+            realtime::RenderIo { output },
             realtime::RenderTime {
                 absolute_sample: (block * FRAMES) as u64,
             },
@@ -346,10 +342,7 @@ fn direct_bank_graph_render_is_allocation_free_and_bit_exact() {
         let output = PlanarBufferMut::try_new(&mut pcm, 2, FRAMES, FRAMES).expect("output");
         folded
             .render(
-                realtime::RenderIo {
-                    input: None,
-                    output,
-                },
+                realtime::RenderIo { output },
                 realtime::RenderTime {
                     absolute_sample: (block * FRAMES) as u64,
                 },

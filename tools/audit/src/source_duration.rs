@@ -138,7 +138,6 @@ fn capture(path: &Path, frames: u64) -> Result<Capture, String> {
     let envelope = RenderEnvelope {
         sample_rate: SampleRateHz(RATE),
         quantum: QuantumFrames(QUANTUM),
-        input_channels: None,
         output_channels: NonZeroUsize::new(2).expect("stereo"),
     };
     let source_set = prepare_graph_source_set(

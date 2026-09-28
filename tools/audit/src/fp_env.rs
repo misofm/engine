@@ -34,7 +34,6 @@ fn prepared_plan() -> PreparedRenderPlan {
         envelope: RenderEnvelope {
             sample_rate: SampleRateHz(48_000),
             quantum: QuantumFrames(QUANTUM as u32),
-            input_channels: None,
             output_channels: NonZeroUsize::new(2).expect("two output channels"),
         },
         scratch: &[],
@@ -47,7 +46,6 @@ fn render_guarded(plan: &mut PreparedRenderPlan, output: &mut [f32], blocks: u64
     for block in 0..blocks {
         let _fp_env = CanonicalFpEnv::enter();
         let io = RenderIo {
-            input: None,
             output: PlanarBufferMut::try_new(output, 2, QUANTUM, QUANTUM).expect("output view"),
         };
         plan.render(
@@ -64,7 +62,6 @@ fn render_guarded(plan: &mut PreparedRenderPlan, output: &mut [f32], blocks: u64
 fn render_bare(plan: &mut PreparedRenderPlan, output: &mut [f32], blocks: u64) {
     for block in 0..blocks {
         let io = RenderIo {
-            input: None,
             output: PlanarBufferMut::try_new(output, 2, QUANTUM, QUANTUM).expect("output view"),
         };
         plan.render(

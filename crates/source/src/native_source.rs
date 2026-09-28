@@ -1313,7 +1313,6 @@ pub fn prepare_native_session_sources<S: NativeSourceResolver>(
         engine::realtime::RenderEnvelope {
             sample_rate: session.sample_rate(),
             quantum: session.quantum(),
-            input_channels: None,
             output_channels: core::num::NonZeroUsize::new(2).expect("dual mono output"),
         },
         graph_sources,
@@ -3189,7 +3188,6 @@ mod tests {
         let envelope = RenderEnvelope {
             sample_rate: session.sample_rate(),
             quantum: session.quantum(),
-            input_channels: None,
             output_channels: NonZeroUsize::new(2).expect("two outputs"),
         };
         let model = session.normalized_model();
@@ -3330,7 +3328,6 @@ mod tests {
         let mut render = |block: u64| {
             plan.render(
                 RenderIo {
-                    input: None,
                     output: PlanarBufferMut::try_new(
                         &mut output_pcm,
                         2,
@@ -3419,7 +3416,6 @@ mod tests {
         let envelope = RenderEnvelope {
             sample_rate: SampleRateHz(48_000),
             quantum: QuantumFrames(4),
-            input_channels: None,
             output_channels: NonZeroUsize::new(2).expect("two"),
         };
         let node = GraphNodeId::TrackStage {
@@ -3495,7 +3491,6 @@ mod tests {
             RenderEnvelope {
                 sample_rate: SampleRateHz(48_000),
                 quantum: QuantumFrames(4),
-                input_channels: None,
                 output_channels: NonZeroUsize::new(2).expect("two outputs"),
             },
             sources,
@@ -3556,7 +3551,6 @@ mod tests {
             RenderEnvelope {
                 sample_rate: SampleRateHz(48_000),
                 quantum: QuantumFrames(4),
-                input_channels: None,
                 output_channels: NonZeroUsize::new(2).expect("two outputs"),
             },
             vec![source],
@@ -3613,7 +3607,6 @@ mod tests {
         let envelope = RenderEnvelope {
             sample_rate: SampleRateHz(48_000),
             quantum: QuantumFrames(4),
-            input_channels: None,
             output_channels: NonZeroUsize::new(2).expect("two"),
         };
         let input = GraphNodeId::TrackStage {
@@ -3768,7 +3761,6 @@ mod tests {
             owner
                 .render(
                     RenderIo {
-                        input: None,
                         output: PlanarBufferMut::try_new(&mut output_pcm, 2, 4, 4).expect("output"),
                     },
                     RenderTime { absolute_sample: 0 },

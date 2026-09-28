@@ -931,7 +931,6 @@ mod tests {
                 let mut pcm = vec![0.0_f32; frames * 2];
                 plan.render(
                     RenderIo {
-                        input: None,
                         output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames)
                             .expect("output"),
                     },
@@ -1021,7 +1020,6 @@ mod tests {
                 let mut pcm = vec![0.0_f32; frames * 2];
                 plan.render(
                     RenderIo {
-                        input: None,
                         output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames)
                             .expect("cross-index output"),
                     },
@@ -2257,7 +2255,6 @@ mod tests {
         let mut pcm = vec![0.0_f32; frames * 2];
         plan.render(
             RenderIo {
-                input: None,
                 output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames).expect("output"),
             },
             RenderTime { absolute_sample: 0 },
@@ -3904,7 +3901,6 @@ mod tests {
                         .plan
                         .render(
                             RenderIo {
-                                input: None,
                                 output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames)
                                     .expect("output"),
                             },
@@ -4732,7 +4728,6 @@ mod tests {
         let mut pcm = vec![0.0_f32; frames * 2];
         plan.render(
             RenderIo {
-                input: None,
                 output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames).expect("output"),
             },
             RenderTime { absolute_sample: 0 },
@@ -4788,7 +4783,6 @@ mod tests {
         scalar_plan
             .render(
                 RenderIo {
-                    input: None,
                     output: PlanarBufferMut::try_new(&mut scalar_pcm, 2, frames, frames)
                         .expect("scalar output"),
                 },
@@ -5217,7 +5211,6 @@ mod tests {
                     oracle_plan
                         .render(
                             RenderIo {
-                                input: None,
                                 output: PlanarBufferMut::try_new(
                                     &mut oracle_pcm,
                                     2,
@@ -5301,7 +5294,6 @@ mod tests {
                 audit_plan
                     .render(
                         RenderIo {
-                            input: None,
                             output: PlanarBufferMut::try_new(&mut audit_pcm, 2, frames, frames)
                                 .expect("audit output"),
                         },
@@ -5397,7 +5389,6 @@ mod tests {
         for block in 0..BLOCKS {
             plan.render(
                 RenderIo {
-                    input: None,
                     output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames).expect("output"),
                 },
                 RenderTime {
@@ -5469,7 +5460,6 @@ mod tests {
         for block in 0..BLOCKS {
             plan.render(
                 RenderIo {
-                    input: None,
                     output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames).expect("output"),
                 },
                 RenderTime {
@@ -5586,7 +5576,6 @@ mod tests {
             for block in 0..BLOCKS {
                 plan.render(
                     RenderIo {
-                        input: None,
                         output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames)
                             .expect("cohort-boundary output"),
                     },
@@ -5838,7 +5827,6 @@ mod tests {
             bank_plan
                 .render(
                     RenderIo {
-                        input: None,
                         output: PlanarBufferMut::try_new(&mut bank_pcm, 2, frames, frames)
                             .expect("bank output"),
                     },
@@ -5850,7 +5838,6 @@ mod tests {
             scalar_plan
                 .render(
                     RenderIo {
-                        input: None,
                         output: PlanarBufferMut::try_new(&mut scalar_pcm, 2, frames, frames)
                             .expect("scalar output"),
                     },
@@ -5920,7 +5907,6 @@ mod tests {
         bypass_plan
             .render(
                 RenderIo {
-                    input: None,
                     output: PlanarBufferMut::try_new(&mut bypass_pcm, 2, frames, frames)
                         .expect("bypass output"),
                 },
@@ -6219,7 +6205,6 @@ mod tests {
         plan.plan
             .render(
                 RenderIo {
-                    input: None,
                     output: PlanarBufferMut::try_new(&mut pcm, 2, 32, 32)
                         .expect("queued-EQ output"),
                 },
@@ -6633,7 +6618,6 @@ mod tests {
             bank_plan
                 .render(
                     RenderIo {
-                        input: None,
                         output: PlanarBufferMut::try_new(&mut bank_pcm, 2, frames, frames)
                             .expect("bank output"),
                     },
@@ -6645,7 +6629,6 @@ mod tests {
             scalar_plan
                 .render(
                     RenderIo {
-                        input: None,
                         output: PlanarBufferMut::try_new(&mut scalar_pcm, 2, frames, frames)
                             .expect("scalar output"),
                     },
@@ -8501,7 +8484,6 @@ mod tests {
                 let mut pcm = vec![0.0_f32; frames * 2];
                 plan.render(
                     RenderIo {
-                        input: None,
                         output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames)
                             .expect("output"),
                     },
@@ -11201,7 +11183,6 @@ mod tests {
                     let mut output = vec![0.0_f32; frames * 2];
                     let rendered = plan.render(
                         RenderIo {
-                            input: None,
                             output: PlanarBufferMut::try_new(&mut output, 2, frames, frames)
                                 .expect("output"),
                         },
@@ -11577,7 +11558,6 @@ mod tests {
             let mut pcm = vec![0.0_f32; frames * 2];
             plan.render(
                 RenderIo {
-                    input: None,
                     output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames).expect("output"),
                 },
                 RenderTime {
@@ -11796,7 +11776,6 @@ mod tests {
                 let mut pcm = vec![0.0_f32; frames * 2];
                 plan.render(
                     RenderIo {
-                        input: None,
                         output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames)
                             .expect("output"),
                     },
@@ -12141,7 +12120,6 @@ mod tests {
                 let mut pcm = vec![0.0_f32; frames * 2];
                 plan.render(
                     RenderIo {
-                        input: None,
                         output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames)
                             .expect("output"),
                     },
@@ -12315,7 +12293,6 @@ mod tests {
                 let mut pcm = vec![0.0_f32; frames * 2];
                 plan.render(
                     RenderIo {
-                        input: None,
                         output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames)
                             .expect("output"),
                     },
@@ -12472,7 +12449,6 @@ mod tests {
             bank_plan
                 .render(
                     RenderIo {
-                        input: None,
                         output: PlanarBufferMut::try_new(&mut bank_pcm, 2, frames, frames)
                             .expect("bank output"),
                     },
@@ -12484,7 +12460,6 @@ mod tests {
             scalar_plan
                 .render(
                     RenderIo {
-                        input: None,
                         output: PlanarBufferMut::try_new(&mut scalar_pcm, 2, frames, frames)
                             .expect("scalar output"),
                     },
@@ -12809,7 +12784,6 @@ mod tests {
             bank_plan
                 .render(
                     RenderIo {
-                        input: None,
                         output: PlanarBufferMut::try_new(&mut bank_pcm, 2, frames, frames)
                             .expect("bank output"),
                     },
@@ -12821,7 +12795,6 @@ mod tests {
             scalar_plan
                 .render(
                     RenderIo {
-                        input: None,
                         output: PlanarBufferMut::try_new(&mut scalar_pcm, 2, frames, frames)
                             .expect("scalar output"),
                     },
@@ -13183,7 +13156,6 @@ mod tests {
             bank_plan
                 .render(
                     RenderIo {
-                        input: None,
                         output: PlanarBufferMut::try_new(&mut bank_pcm, 2, frames, frames)
                             .expect("bank output"),
                     },
@@ -13195,7 +13167,6 @@ mod tests {
             scalar_plan
                 .render(
                     RenderIo {
-                        input: None,
                         output: PlanarBufferMut::try_new(&mut scalar_pcm, 2, frames, frames)
                             .expect("scalar output"),
                     },
@@ -13536,7 +13507,6 @@ mod tests {
             bank_plan
                 .render(
                     RenderIo {
-                        input: None,
                         output: PlanarBufferMut::try_new(&mut bank_pcm, 2, frames, frames)
                             .expect("bank output"),
                     },
@@ -13548,7 +13518,6 @@ mod tests {
             scalar_plan
                 .render(
                     RenderIo {
-                        input: None,
                         output: PlanarBufferMut::try_new(&mut scalar_pcm, 2, frames, frames)
                             .expect("scalar output"),
                     },
@@ -13899,7 +13868,6 @@ mod tests {
             bank_plan
                 .render(
                     RenderIo {
-                        input: None,
                         output: PlanarBufferMut::try_new(&mut bank_pcm, 2, frames, frames)
                             .expect("bank output"),
                     },
@@ -13911,7 +13879,6 @@ mod tests {
             scalar_plan
                 .render(
                     RenderIo {
-                        input: None,
                         output: PlanarBufferMut::try_new(&mut scalar_pcm, 2, frames, frames)
                             .expect("scalar output"),
                     },
@@ -14185,7 +14152,6 @@ mod tests {
             let mut graph_pcm = vec![0.0_f32; frames * 2];
             plan.render(
                 RenderIo {
-                    input: None,
                     output: PlanarBufferMut::try_new(&mut graph_pcm, 2, frames, frames)
                         .expect("delay graph output"),
                 },
@@ -14642,7 +14608,6 @@ mod tests {
             let range = block * frames * 2..(block + 1) * frames * 2;
             plan.render(
                 RenderIo {
-                    input: None,
                     output: PlanarBufferMut::try_new(&mut pcm[range], 2, frames, frames)
                         .expect("output"),
                 },
@@ -15017,7 +14982,6 @@ mod tests {
             let mut pcm = vec![0.0; frames * 2];
             plan.render(
                 RenderIo {
-                    input: None,
                     output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames)
                         .expect("seeded output"),
                 },
@@ -15663,14 +15627,8 @@ mod tests {
         let frames = envelope.quantum.0 as usize;
         let mut pcm = vec![0.0_f32; frames * 2];
         let output = PlanarBufferMut::try_new(&mut pcm, 2, frames, frames).expect("output");
-        plan.render(
-            RenderIo {
-                input: None,
-                output,
-            },
-            RenderTime { absolute_sample: 0 },
-        )
-        .expect("render");
+        plan.render(RenderIo { output }, RenderTime { absolute_sample: 0 })
+            .expect("render");
         assert_eq!(pcm[0], 1.0);
         assert_eq!(pcm[frames], -1.0);
         assert!(pcm[1..frames].iter().all(|sample| *sample == 0.0));

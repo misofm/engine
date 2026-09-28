@@ -825,7 +825,6 @@ impl GraphCompiler {
             envelope: RenderEnvelope {
                 sample_rate: session.sample_rate(),
                 quantum: session.quantum(),
-                input_channels: None,
                 output_channels: core::num::NonZeroUsize::new(2).expect("constant"),
             },
             required_bindings,

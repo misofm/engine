@@ -203,7 +203,6 @@ fn render_graph_block(
     owner
         .render(
             RenderIo {
-                input: None,
                 output: output_view,
             },
             RenderTime {

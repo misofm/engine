@@ -3226,7 +3226,6 @@ mod tests {
         let envelope = RenderEnvelope {
             sample_rate: RATE,
             quantum: QuantumFrames(2),
-            input_channels: None,
             output_channels: NonZeroUsize::new(2).expect("two"),
         };
         let track = |id| graph::GraphNodeId::TrackStage {
@@ -3438,7 +3437,6 @@ mod tests {
         sequential
             .render(
                 RenderIo {
-                    input: None,
                     output: PlanarBufferMut::try_new(&mut sequential_pcm, 2, 2, 2).expect("output"),
                 },
                 RenderTime { absolute_sample: 0 },
