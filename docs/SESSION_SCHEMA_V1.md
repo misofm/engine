@@ -53,15 +53,13 @@ The minimal and full exact-byte examples are
 [`canonical.json`](../fixtures/session/v1/canonical.json). They freeze indentation, key order,
 numeric/string spelling, and the final newline.
 
-`render_profile.mode` is a launch engine setting. Both V1 tokens still parse -- `single_thread`
-and `dependency_waves` -- because the closed token set, the protocol wire encoding and the
-canonical writer are all lossless by doctrine, and canonical round-trip forbids normalizing one
-token into another. Only `single_thread` launches. `dependency_waves` rejects with
-`render_mode.unsupported_at_launch` at `$.render_profile.mode` from parsing, typed compilation and
-canonical serialization alike, so no caller reaches a prepared plan through an entry point that
-skipped the check. The token named a native dependency-wave executor that was removed as
-production-unreachable; a rejection is the honest answer, where silently rendering single-threaded
-would let a session claim parallelism it never had.
+`render_profile.mode` has exactly one V1 token, `single_thread`. Every other spelling, including
+the retired `dependency_waves`, is an unknown value and rejects with `schema.invalid_enum` at
+`$.render_profile.mode`. `dependency_waves` named a native dependency-wave executor that was
+removed as production-unreachable, and issue #1063 then removed the token itself from the model,
+the parser, the canonical writer and the protocol encoding. Its protocol wire code `2` is retired,
+not reallocated: a peer that spells it is refused, as the registry requires. Parallel render, if it
+returns, needs a new issue that re-earns it.
 
 `sample_rate_hz` is a launch engine setting and is exactly one of 44100, 48000, 88200, or
 96000 Hz. Other values, including extended compatibility corpus rates, reject with
