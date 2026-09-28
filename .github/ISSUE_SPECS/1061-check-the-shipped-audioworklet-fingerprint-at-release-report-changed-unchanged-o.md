@@ -719,3 +719,148 @@ On the re-pin merge, all of these pass:
 - actionlint 1.7.7 on `qualification.yml` and `npm-publish.yml`, on the branch and on the merge.
   With shellcheck 0.10.0 the warnings are the same four (SC2034 once, SC2251 three times) as on
   `c69736c1`, and none come from the #1061 blocks.
+
+## Attempt 3 evidence
+
+Terra, 2026-09-28, same branch.
+- Commits: `c7331f34` (the redesign) and `646758ba` (the job-level `env` rationale and its mutant).
+- Attempt 3: 7 files, +609/-384, most of it the rewritten `web-audioworklet-identity.py`.
+- Against the batch head `c69736c1`, excluding specs, the branch is 19 files, +1304/-952, with no
+  Rust file.
+
+**The redesign (root's direction on Sol's attempt 2 HIGH).** A change's run no longer rebuilds its
+base. Any base rebuilt in the change's own workflow is built in the environment the change sets:
+its toolchain, a cargo variable such as T5's `CARGO_PROFILE_RELEASE_OPT_LEVEL`, a `GITHUB_PATH`
+line. The comparison is now with what the base's own CI run built and recorded.
+- **The record, on `main`.** The `artifact` job's build step also outputs the rustc release it built
+  with (`rustc -vV`, the same environment as the build). On a push to `main` only, a last step
+  (`web-audioworklet-identity.py record`) posts the commit status `audioworklet-sha256` on the
+  pushed commit:
+  - its description is `<sha256> rustc <release>`, and its target URL is the run;
+  - job permissions are `contents: read, statuses: write`;
+  - a commit status does not expire, and the context is not `qualification`, so it cannot satisfy
+    the required check.
+- **The compare, on every change.** `artifact-identity` is four steps: checkout (full history),
+  toolchain install, the unchanged twin build, and one report step. That step runs the self-test,
+  then `report`.
+  - `report` finds the base: the merge commit's first parent for a PR, `--before` for a push.
+  - It reads the base's combined status (`gh api repos/R/commits/BASE/status`, permissions
+    `contents: read, statuses: read`).
+  - It prints `ARTIFACT CHANGED`, `ARTIFACT UNCHANGED`, or `ARTIFACT CANNOT TELL` with the reason:
+    no base; the base's run has not recorded yet (rerun the job); it never built the module; or it
+    predates records.
+  - A base with no record uses its nearest recorded first-parent ancestor, up to 20 back, when
+    everything between them is in the router's evidence class, so documentation-only pushes do
+    not break the chain. CANNOT TELL never fails the job.
+  - A refused or malformed API response fails it (exit 2): a lookup that can never succeed is
+    misconfiguration, not a missing record.
+- **What was removed.** The base rebuild step, the `base` and `toolchain` subcommands, and the base
+  toolchain logic.
+- **The release side is unchanged.** Pin, `EXPECTED_WORKLET_SHA256`, and `results.json` lineage
+  are still required to describe the built bytes, as before.
+
+**LOWs.**
+- **npm-publish's toolchain.** A release change must now have `npm-publish.yml`'s
+  `RUSTUP_TOOLCHAIN` equal to the rustc release the `artifact` job built with. Sol's T1, a
+  toolchain bump in `qualification.yml` alone, now fails the release PR instead of `qualify`.
+  `docs/RELEASE.md` step 4 says so. Any other build-environment difference between the two
+  workflows can only fail `qualify`, which rebuilds and refuses any bytes but
+  `EXPECTED_WORKLET_SHA256`, so it never publishes unreviewed bytes.
+- **Stale hashes.** `docs/RELEASE.md` and `hosts/host-web/DEPLOYMENT.md` no longer name a digest.
+  Until the first release PR under #1061 they say the pin holds the last batch-boundary re-pin
+  (`git log -1 -- <pin>` names it), not 0.4.3's module, which is `npm-publish.yml`'s
+  `EXPECTED_WORKLET_SHA256`.
+
+**What the checker pins now.** Only what the comparison rests on:
+- the record step, exactly, including its push-to-`main` `if:`, as the `artifact` job's last step;
+- the build step's `sha256=` and `rustc=` output lines, and both job outputs;
+- both jobs' permission blocks;
+- `artifact-identity`'s route (the same as `artifact`'s), its `needs`, full history, and its twin
+  and report steps, exactly. The report step carries no `if:`;
+- neither job may carry a job-level `continue-on-error`, `defaults` (`shell: bash {0}` masks a
+  failed self-test) or `env` (a job `PATH` could put a forged `gh` first).
+
+The build environment is deliberately not pinned. The checker stays green on T5, and T5 now reads
+CHANGED, as the dry run below shows.
+
+`test-ci-path-routing.py` passes with these mutants, each red:
+- *Record side:* the record step deleted; its `if:` made `pull_request`; `statuses: write` dropped;
+  the `sha256=` line and the `rustc=` line each dropped; the `rustc` output dropped; a job-level
+  `env: PATH` on `artifact`.
+- *Compare side:*
+  - the report and twin steps each deleted;
+  - the report skipped by `if: github.event_name == 'push'`;
+  - `--event none`; `BEFORE: ""`; `GH_TOKEN` dropped; the self-test dropped;
+  - `statuses: read` dropped;
+  - a job-level `continue-on-error: true`, `defaults: run: shell: bash {0}` and `env` on
+    `artifact-identity`;
+  - a step inserted before the report; full history dropped;
+  - the twin symlinked to the workspace; the twin sharing `CARGO_HOME`.
+
+I checked the failure message of eight of them by hand.
+
+**Tests.**
+- **The compare script's self-test.** A scratch repository and a fake `gh` on `PATH` that answers
+  from canned combined-status JSON and logs its arguments. It covers:
+  - a matching record (UNCHANGED), a different one (CHANGED), and a toolchain-only change
+    (CHANGED, flagged);
+  - a missing record, and a malformed one (CANNOT TELL, not failing);
+  - a refused lookup (exit 2, `HTTP 403` passed through);
+  - the documentation-only walk-back, and a source change between base and record (CANNOT TELL);
+  - push and manual-run bases;
+  - release checks: the npm-publish toolchain, the pin, `EXPECTED_WORKLET_SHA256`, lineage and the
+    candidate commit, and the no-base wording;
+  - `record` posting exactly `POST repos/R/statuses/SHA` with the context, description and
+    target URL;
+  - `report` making exactly one lookup of the base.
+
+  Fifteen hand mutations of the script each turn the self-test red: the compare ignoring the
+  record; any ancestor counting; no walk-back; any context counting; a refused lookup swallowed;
+  the record's context or commit changed; the npm toolchain unchecked; the toolchain flag dropped;
+  the base taken from the PR head; the no-base wording reverted; the twin, pin or lineage
+  unchecked; and a malformed record accepted.
+- **Read-only against the real API** (`gh api repos/misofm/engine/commits/5379e46c.../status`,
+  `origin/main`). The response has `statuses: []` (keys `commit_url, repository, sha, state,
+  statuses, total_count, url`), and `report --event push --before 5379e46c...` prints
+  `ARTIFACT CANNOT TELL: ... 5379e46c... has no audioworklet-sha256 status ...`, exit 0. Nothing
+  was written to GitHub.
+- **A dry run of the fetch against fake API responses.** That real response, with one status added
+  in GitHub's documented shape, is served by a fake `gh`. A matching record reads
+  `ARTIFACT UNCHANGED ... is the digest base 5379e46c...'s own CI run recorded`, and a different one
+  reads `ARTIFACT CHANGED: 0000... -> a6446aa5...`. Each makes one lookup of the base.
+- **End to end through the workflow's own `run:` blocks**, with a fake `gh` that stores POSTs and
+  answers GETs, in a scratch clone:
+  - `main`'s push at `c7331f34`: the build step output `sha256=6c952a2c... rustc=1.97.1`, and the
+    record step posted exactly that status.
+  - Sol's T5 on top (`CARGO_PROFILE_RELEASE_OPT_LEVEL: s` at the workflow level;
+    `check-ci-path-routing.py` green): `artifact` built `6d9e8945...`, and the twin reproduced it.
+  - The report read `ARTIFACT CHANGED: 6c952a2c... -> 6d9e8945... at 73965948..., against the
+    digest base c7331f34...'s own CI run recorded`. Attempt 2 printed UNCHANGED on the same case.
+- **actionlint 1.7.7** (the official release binary, checksum-verified, in scratch): all workflows
+  pass with shellcheck off. With shellcheck 0.10.0 on `qualification.yml` and `npm-publish.yml`,
+  the five findings are the same as on `c69736c1` (SC2034 at 347 and in `npm-publish.yml`, SC2251
+  at 514 twice and at 520), none in #1061's blocks.
+- **Other gates.** `check-ci-path-routing.py`, `test-ci-path-routing.py`,
+  `check-script-reachability.py` (137), `test-script-reachability.py` (18),
+  `test-npm-publish-modes.py` and `test-sdk-artifact-builder-output-contract.sh` pass. No Rust
+  changed.
+
+**Only the first real CI runs can verify:**
+1. **The post.** A `main` push's `GITHUB_TOKEN`, with job-level `statuses: write`, posts the status
+   (the first push after #1061 merges).
+2. **The lookup.** `statuses: read` is enough for the combined-status GET in a PR run, fork PRs
+   included.
+3. **The runner.** `gh` behaves on the runner as it does here.
+4. **Timing.** A PR opened while its base's run is still before `artifact` reads CANNOT TELL until
+   rerun.
+
+Also expected: the first PR based on a pre-#1061 `main` commit, such as batch 3's PR to `main`,
+reads CANNOT TELL, because no record exists yet. The #1061 merge push writes the first record.
+
+**Residual, stated plainly.**
+- A deliberate edit of the unpinned toolchain install step, for example a `GITHUB_PATH` line with a
+  forged `gh`, can still forge the lookup, as any hand-written change to a PR-controlled workflow
+  can. The pins guard against losing the comparison by accident, and review guards against
+  forgery.
+- Sol's attempt 2 finding 4, the job-level masking classes for every other job, remains the
+  follow-up issue he proposed. This attempt closes it only for the two #1061 jobs.
