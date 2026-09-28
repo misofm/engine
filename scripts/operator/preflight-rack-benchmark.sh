@@ -2,7 +2,7 @@
 # Builds, seals and validates Issue-038 inputs without launching a timed workload.
 set -euo pipefail
 [[ "$#" == 0 ]] || { printf 'usage: %s\n' "$0" >&2; exit 2; }
-root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$root"
 [[ -z "$(git status --porcelain=v1 --untracked-files=normal)" ]] || {
     printf 'Issue-038 preflight requires a clean committed candidate\n' >&2

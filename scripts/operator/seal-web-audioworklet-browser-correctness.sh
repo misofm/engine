@@ -6,7 +6,7 @@ if (($# != 1)); then
   exit 2
 fi
 
-repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)
 seal=$1
 if [[ -e "$seal" || -L "$seal" ]]; then
   echo "refusing to overwrite browser seal" >&2

@@ -17,6 +17,9 @@ new_case() {
     printf '[package]\nname = "later-fixture"\nversion = "0.1.0"\nedition = "2021"\n' \
         >"$case_root/hosts/fixture/Cargo.toml"
     cp "$root/scripts/check-bench-policy.sh" "$case_root/scripts/"
+    mkdir -p "$case_root/scripts/operator"
+    cp "$root/Cargo.toml" "$case_root/"
+    cp "$root"/scripts/operator/*.sh "$case_root/scripts/operator/"
 }
 
 check() { bash "$case_root/scripts/check-bench-policy.sh" "$case_root"; }
@@ -107,6 +110,77 @@ mkdir -p "$case_root/shim"
 printf '#!/usr/bin/env bash\nif [[ " $* " == *"file=hosts/fixture/Cargo.toml"* ]]; then printf "manifest-awk-error\\n" >&2; exit 2; fi\nexec /usr/bin/awk "$@"\n' >"$case_root/shim/awk"
 chmod +x "$case_root/shim/awk"
 expect_failure_with_path manifest-awk-error "$case_root/shim" 'dependency parser failed for hosts/fixture/Cargo.toml with status 2; output: <empty>; stderr: manifest-awk-error'
+
+# #1022: an operator shell script's repository root. Every mutation must change the file it
+# names, or the case would pass for the wrong reason.
+expect_diagnostic() {
+    local label=$1 expected=$2 output status
+    if output="$(check 2>&1)"; then status=0; else status=$?; fi
+    ((status != 0)) || { printf 'bench policy mutation escaped: %s\n' "$label" >&2; exit 1; }
+    [[ "$output" == *"$expected"* ]] || {
+        printf 'bench policy wrong diagnostic: %s\n%s\n' "$label" "$output" >&2
+        exit 1
+    }
+}
+mutate_operator_root() {
+    local script=$1 replacement=$2
+    cp "$case_root/scripts/operator/$script" "$scratch/operator-before"
+    sed -i "s|$replacement|" "$case_root/scripts/operator/$script"
+    ! cmp -s "$scratch/operator-before" "$case_root/scripts/operator/$script" ||
+        { printf 'bench policy operator mutation did not apply: %s\n' "$script" >&2; exit 1; }
+}
+
+# The #319 defect itself, reintroduced into each operator script in turn, so no script is exempt.
+operator_script_count=0
+for operator_script in "$root"/scripts/operator/*.sh; do
+    operator_script=${operator_script##*/}
+    new_case "operator-root-one-level-$operator_script"
+    mutate_operator_root "$operator_script" '")/\.\./\.\." \&\& pwd|")/.." \&\& pwd'
+    expect_diagnostic "operator-root-one-level-$operator_script" \
+        "operator script does not resolve the repository root: scripts/operator/$operator_script:"
+    operator_script_count=$((operator_script_count + 1))
+done
+((operator_script_count >= 7)) ||
+    { printf 'bench policy operator mutations covered only %s scripts\n' "$operator_script_count" >&2; exit 1; }
+
+new_case operator-root-past-the-repository
+mutate_operator_root run-wasm-console-benchmark.sh '")/\.\./\.\." \&\& pwd|")/../../.." \&\& pwd'
+expect_diagnostic operator-root-past-the-repository \
+    'operator script does not resolve the repository root: scripts/operator/run-wasm-console-benchmark.sh:'
+
+new_case operator-root-own-directory
+mutate_operator_root preflight-rack-benchmark.sh '")/\.\./\.\." \&\& pwd|")" \&\& pwd'
+expect_diagnostic operator-root-own-directory \
+    'operator script does not resolve the repository root: scripts/operator/preflight-rack-benchmark.sh:'
+
+new_case operator-root-unresolvable
+mutate_operator_root run-wasm-kernel-timing.sh '")/\.\./\.\." \&\& pwd|")/../../no-such-directory" \&\& pwd'
+expect_diagnostic operator-root-unresolvable 'which is <unresolvable>'
+
+# A re-spelling is refused, not skipped: a check that skipped what it cannot parse could be escaped
+# by any new spelling of the same defect.
+new_case operator-root-unrecognised-spelling
+mutate_operator_root prepare-builtins-listening.sh '^root=.*$|root="$(dirname "$0")/.."'
+expect_diagnostic operator-root-unrecognised-spelling \
+    'operator script root expression is unrecognised at scripts/operator/prepare-builtins-listening.sh:'
+
+new_case operator-root-removed
+mutate_operator_root seal-web-audioworklet-browser-correctness.sh '^repo_root=.*$|repo_root=.'
+expect_diagnostic operator-root-removed \
+    'operator script computes no repository root from its own location: scripts/operator/seal-web-audioworklet-browser-correctness.sh'
+
+new_case operator-root-missing-manifest
+rm "$case_root/Cargo.toml"
+expect_diagnostic operator-root-missing-manifest 'operator scripts: the repository root holds no Cargo.toml'
+
+new_case operator-root-member-manifest
+printf '[package]\nname = "not-the-workspace"\n' >"$case_root/Cargo.toml"
+expect_diagnostic operator-root-member-manifest \
+    'operator scripts: the repository root Cargo.toml is not the workspace manifest'
+
+new_case operator-scripts-absent
+rm "$case_root"/scripts/operator/*.sh
+expect_diagnostic operator-scripts-absent 'no operator shell scripts under scripts/operator/'
 
 new_case second-allocator
 printf '\nunsafe impl GlobalAlloc for Second {}\n' \
