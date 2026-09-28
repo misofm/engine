@@ -359,3 +359,174 @@ Each isolate is below base, inside the +2 % bound. As A2 says, the slice is neut
   (gate 5 row).
 * The code commit was made in the scratch worktree first and timed from there. The branch was
   fast-forwarded to it only after gate 7 passed, so the timed change arm is `03a5afe3` itself.
+
+## Sol attempt 1 verdict: PASS
+
+Sol, 2026-09-28. I judged `8bb0a651` (code `03a5afe3`) merged onto the current batch head
+`a1fcab3d`, which adds #1006 and #1011 after the branch point `52ad1460`. The limiter crate tree
+(`99fed5cb`) is the same on both. The merge is clean and was made in scratch only. Host AMD EPYC
+7313P, cpu 31 under the timing lock, `CARGO_INCREMENTAL=0`. Every timed arm was built from an empty
+target directory at one scratch worktree path. Nothing was pushed, and all scratch worktrees and
+target directories were deleted.
+
+### The questions
+
+1. **Exactness: the change is class A, and the doc comment's proof is correct.**
+   * **Tap 0, checked exhaustively.** I checked all 2^32 `f32` patterns on scalar `addss` and on
+     `vaddps`.
+     * `+0.0 + a` differs from `a` only for `a = -0.0` and for the 8,388,606 signalling NaNs,
+       which come out quieted.
+     * `-0.0 + a` differs only for the signalling NaNs.
+     * A first product is never a signalling NaN, because a multiply quiets:
+       `0x7FA05A5A * 0.5 = 0x7FE05A5A`.
+     * Infinities and subnormals pass through `+0.0 +` exactly.
+     * `lane::fpenv` attests DAZ and FTZ clear and round to nearest before render, so the proof's
+       arithmetic is the arithmetic that runs.
+   * **The induction and the reader, fuzzed.** I compared `annex2_phases` with
+     `annex2_phases_seeded` in scratch at `f32`, `Simd4` and `Simd8`, over 3.6M lane-frames per
+     width.
+     * The inputs were signed zeros, subnormals, small and ordinary normals, ±inf, NaNs of random
+       sign and payload (quiet and signalling), ±3e38, and the designed all-`-0.0`-product
+       histories.
+     * Every phase was equal, a flipped zero (about 4,500 per width) or both NaN (about 780,000
+       per width).
+     * Every peak was equal by bits or both NaN (about 195,000 per width).
+     * `select(p > l, l / p, 1)` was equal by bits for four limits down to `1e-30`, NaN peaks
+       included.
+     * `lane`'s D8 `max` is `select(a > b, a, b)` on every target (`maxps`, the swapped `pmax`,
+       and the portable select on NEON). So a NaN payload never steers a choice.
+   * **End to end.** I ran a second scratch scenario on gate 4's harness.
+     * Inputs: all-`-0.0`-product histories, a `+inf`/`-inf` pair inside one window, two NaN
+       payloads, `±3e38` taps that overflow the chains, and `+0.0` and `-0.0` silence.
+     * Coverage: W8, W4 and eight scalar instances, under Maximum, DualMono and collapsed, folding
+       outputs, reports, payloads and observations.
+     * It gives the same three digests on `52ad1460`'s and on `03a5afe3`'s `lib.rs`, in dev and in
+       release.
+     * The #990 differential (150 seeds, 96 blocks) reproduces the evidence's digests exactly: W8
+       `c8a711d8…`, W4 `ff492b1b…`, W1 `36f79d5a…`.
+     * So do the V8 digests: `lim` `dea70183`, `limdm` `3ff478a2`, `bi` `b42bcd42`, `console`
+       `a2594b72`, `nolim` `3c42efe0`. They also match on the merge, and the tone rows match too.
+   * **Why the `-0.0` seed is green.** It is the same computation, not an unobserved difference.
+     * `-0.0` is the additive identity for every input that is not a signalling NaN (above).
+     * The fuzz found 0 differing words between the `-0.0`-seeded and the seedless phases, NaN
+       payloads included.
+     * LLVM folds `fadd x, -0.0` to `x`. The wasm module built with the `-0.0` seed is
+       byte-identical to the change's (`4fdcc82a…`). The native rig keeps the change's 392
+       `vaddps` per `process_block` and differs only in layout.
+     * The `+0.0` seed, by contrast, differs in exactly the zero signs that E1b counts and `abs`
+       erases.
+   * **Why class A.** No reader of a phase sees a zero's sign, because of the `abs`. No reader of a
+     peak sees a NaN payload, because only ordered compares read it. Peaks live only in stack
+     scratch, and nothing else changed.
+2. **Timings (A1, A3): gate 7 passes.**
+   * **The arms.**
+     * Rig: `3022f6c3…` (base) and `3644cdd5…` (change).
+     * `host_web.wasm`: `a383a188…` and `4fdcc82a…`, the evidence's bytes.
+   * **Native.** Each run is 4 passes of 4 rounds of 800 blocks, forward then reverse. The
+     statistic is the minimum over 16 rounds, in cycles per lane-sample:
+
+     | row | run 1 (load 6.5-7.7) | run 2 (load 6.5-7.1) | merge vs `a1fcab3d` (load 7.7-9.1) |
+     |---|---:|---:|---:|
+     | `Simd8` `HotDualMono` | 9.945 → 9.623 (-3.2 %) | 9.890 → 9.699 (-1.9 %) | 9.962 → 9.684 (-2.8 %) |
+     | `Simd8` `HotLinked` | 8.640 → 8.290 (-4.1 %) | 8.602 → 8.280 (-3.7 %) | 8.644 → 8.481 (-1.9 %) |
+     | `Simd8` `QuietLinked` | 8.592 → 8.294 (-3.5 %) | 8.584 → 8.286 (-3.5 %) | 8.666 → 8.428 (-2.7 %) |
+     | `Simd8` `RampLinked` | 8.931 → 8.787 (-1.6 %) | 8.887 → 8.661 (-2.5 %) | 9.058 → 8.716 (-3.8 %) |
+     | `Simd4` `HotDualMono` | 18.240 → 17.605 (-3.5 %) | 18.296 → 17.562 (-4.0 %) | 18.227 → 17.607 (-3.4 %) |
+     | `Simd4` `HotLinked` | 15.313 → 14.793 (-3.4 %) | 15.381 → 14.768 (-4.0 %) | 15.267 → 14.897 (-2.4 %) |
+     | `Simd4` `QuietLinked` | 15.318 → 14.718 (-3.9 %) | 15.388 → 14.776 (-4.0 %) | 15.325 → 14.911 (-2.7 %) |
+     | `Simd4` `RampLinked` | 16.070 → 15.531 (-3.4 %) | 16.036 → 15.488 (-3.4 %) | 16.119 → 15.585 (-3.3 %) |
+
+   * **V8.** Each run is three separate Node processes of 10 rounds. The statistic is the mean of
+     the per-process median isolates:
+
+     | isolate | run 1 (load 5.1-5.5) | run 2 (load 4.8-5.9) | merge vs `a1fcab3d` (load 6.5-8.9) |
+     |---|---:|---:|---:|
+     | `lim - bi` | 22.11 → 21.96 (-0.7 %) | 22.22 → 21.89 (-1.5 %) | 22.14 → 21.90 (-1.1 %) |
+     | `limdm - bi` | 24.35 → 24.09 (-1.1 %) | 24.40 → 24.14 (-1.1 %) | 24.39 → 24.16 (-0.9 %) |
+     | `console - nolim` | 22.23 → 21.95 (-1.2 %) | 22.41 → 22.11 (-1.4 %) | 22.36 → 22.25 (-0.5 %) |
+
+     * **The merge column** is the second clean merged run.
+       * The first read +1.8, +1.8 and +1.7 %. One process drove it: there the whole merge
+         instance ran about 6 % slower than the batch head's (`lim - bi` 23.73 against 22.34),
+         while in the other two it was faster or level (21.90 against 22.09, 22.15 against
+         22.17). That is F10's placement effect.
+       * A third run, at load 12-19, is not evidence under A3.
+       * The limiter's three wasm function bodies are instruction-identical on `03a5afe3` and on
+         the merge.
+   * **Are the V8 gains real?** In sign, yes. In size, they are negligible.
+     * In the two base-to-change runs, all 18 paired per-process comparisons favour the change.
+     * The size, 0.5-1.5 %, fits the 4 of 48 vector adds removed from a detector that is about
+       half the limiter.
+     * But it is below V8's per-process spread: one placement outlier moved a whole run by +1.8 %.
+       So A2's "neutral in the browser" stands (finding 3).
+3. **Tests.**
+   * **E1b discriminates.**
+     * I reproduced M3, the one-ulp reorder, red on E1b, `linked.rs` and gate 4.
+     * M3 is also red on E1b's peak leg alone, with the phase leg disabled, at frame 2 of E1's
+       noise.
+     * R0, the `+0.0` seed restored, is red on E1b alone, on its flip count.
+     * Finding 2 is E1b's one gap.
+   * **Gate 4's pin is the base's.** `seedless.rs` passes with `52ad1460`'s `lib.rs` (`5ca9ba88…`,
+     tree `99fed5cb`), in dev and in release. It also passes on the merge.
+   * **The reset witness is exact for this scenario, and only for this scenario** (finding 1).
+     * The committed schedule has no `+0.0`-only input after the line fill.
+     * A missed reset would leave the NaN in block 60.
+     * So `zeroed == [60, 61, 62, 63]` cannot pass falsely.
+     * It does fire on legitimately silent output, which I demonstrated.
+4. **Wasm gates, on the merge.**
+   * **`run-wasm-gates.sh`: ok.**
+     * G5 ran 142 cases with 0 mismatches on the native, wasm and wasm+simd128 legs.
+     * The detector history stays in locals on both guest legs.
+     * The V8 spill gate is ok.
+   * **`check-web-audioworklet.sh`: ok.** As the evidence did, I replaced the batch's stale pin with
+     the merge module's digest (`0fc45359…`) in scratch, then restored it.
+     * "true-peak-limiter f32x4 dual" matches one function: 878 vector / 0 scalar, against
+       910 / 0 at the batch head.
+     * The collapsed kernel is 424 / 0, against 440 / 0.
+     * The kernel count is 15 on both, against a minimum of 11.
+     * The render callgraph is identical: closure 8, traps 5, owner `render_inner`.
+   * **The drop removes ops; it does not scalarise them.** Per function, base against change, only
+     the three limiter kernels move:
+     * `LimiterCore<f32x4>::process_block`: 910 → 878 vector, 0 → 0 scalar.
+     * `process_block_mono`: 440 → 424 vector, 0 → 0 scalar.
+     * `LimiterCore<f32>::process_block`: 768 → 736 vector, 910 → 878 scalar.
+     * The module's scalar `f32` arithmetic falls from 5603 to 5571, and no function gains a scalar
+       op.
+     * 32 and 16 are exactly 4 adds times the 8 and 4 detector instantiations of the two bodies.
+   * **Also green on the merge:**
+     * the limiter crate (52 passed, 1 ignored), in dev and in release;
+     * `host-core` `limiter_linked_session` at all three widths, in dev and in release;
+     * `console-workload` (58 passed, 2 ignored), in dev and in release;
+     * `check-realtime-policy.sh` (57 regions), `check-lane-policy.sh` and
+       `check-env-vocabulary.sh`;
+     * `cargo fmt --check`, clippy on the crate (all targets, `-D warnings`), and `cargo doc` with
+       no warnings.
+
+### Findings
+
+1. **Low: gate 4's §4.4 witness cannot tell a reset from silence.**
+   * **The mechanism.** `Witness::block` takes any post-fill block whose every output word is
+     `+0.0` to be the reset.
+   * **Reproduced.** My scratch scenario on the same harness has `+0.0`-only input in blocks
+     70-74. On base and on change alike it reports blocks 74-77 as "zeroed", with no reset. They
+     look exactly like that scenario's real resets (blocks 40-43 and 51-54).
+   * **Failure scenario.** Someone extends gate 4's schedule with a `+0.0` rest, the natural way to
+     cover #182 S2's silent path. The gate then fails with "blocks zeroed by the §4.4 reset",
+     although no reset happened. The message misleads. It is never a false pass.
+   * **Fix, if wanted.** Read the reset count once #95 wires it into `ProcessReport`. Or restrict
+     the witness to blocks whose input window carried a nonzero word. This slice needs no change.
+2. **Info: E1b's seed check is an aggregate.**
+   * **The mechanism.** It requires at least 4 flipped zeros summed over all phases, not at least
+     one per phase.
+   * **Reproduced.** With phase 3, or phases 2 and 3, put back on the `+0.0` seed
+     (`L::zero().add(..)`), E1b stays green. So does every output gate, because that form is also
+     class A.
+   * **Failure scenario.** A later edit re-seeds one phase. The slice's four-add saving shrinks to
+     three, and only the roster count (878 → 886) and the timing notice.
+   * **Fix, if wanted.** Count the flips per phase, and require at least one in each.
+3. **Info: one V8 figure in the evidence overstates.**
+   * **The figure.** The bold run-1 `console - nolim` of -3.2 % comes from a base whose three
+     processes span 2.5 % (22.28-22.84).
+   * **The other runs.** The evidence's own run 2 reads -0.8 %; mine read -1.2 % and -1.4 %.
+   * **Failure scenario.** A later report quotes -3.2 % as this slice's browser effect.
+   * **The conclusion stands.** The evidence's "neutral in the browser" is right.
