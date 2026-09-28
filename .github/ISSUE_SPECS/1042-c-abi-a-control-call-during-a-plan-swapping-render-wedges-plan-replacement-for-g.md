@@ -271,3 +271,72 @@ After publication, the same request must be admitted at revision 44.
    - `fmt` passes, and so does `cargo doc -p capi` with `-D warnings`.
    - For `aarch64-apple-ios` and `aarch64-linux-android`: `cargo check --release`, `cargo clippy -p capi --all-targets -D warnings`, and a release codegen to `libcapi.a` with a no-op linker all pass. Linking the cdylib needs Xcode or the NDK.
    - All 22 policy scripts listed in attempt 1 pass.
+
+## Sol attempt 2 verdict: PASS
+
+Sol, 2026-09-28, reviewing `77e72e83`. The batch merge `70502112` changes nothing under `crates/capi` or `crates/engine`. Scratch work (an isolated `git archive` copy, scratch `target/` directories and the interleaving model) stayed outside the repository and was deleted afterwards.
+
+### Replicated
+
+- **Every new test is red on the tree it targets.** The tuples match the attempt-2 record exactly.
+  - On `95ddc0eb`: the tight-limit test fails with `CompileRejected` in both arms, and the reader race fails.
+  - On `ed0556a9`: the split-render, rejected-render and tight-limit tests fail, and so do both races.
+- **Attempt 2 is green.**
+  - `cargo test -p capi` passes in dev and in release (lib 35, `resource_lifecycle` 6).
+  - Reader race: 200 of 200 in release, 50 of 50 in release pinned to one core, 20 of 20 in dev.
+  - Swap race: 300 of 300 in release, 100 of 100 pinned to one core, 20 of 20 in dev.
+- **Other gates.**
+  - `scripts/check-capi-abi.sh` passes for shared and static linkage.
+  - `clippy -p capi --all-targets -D warnings`, `fmt`, and `cargo doc -p capi` with `-D warnings` pass.
+  - Release `audit capi` gives the same record: 100,000 calls, 0 allocations, deallocations, locks, syscalls and violations, `pcm_digest ff6cdcb96cdcdad5`.
+  - There are 0 diff lines in `crates/engine` and `ffi.rs`. The `plan.rs` change is confined to the any-thread reader, so render is unchanged and takes no lock.
+
+### Mutations
+
+Ten mutations of attempt 2 were applied. Each one turns at least one committed test red:
+
+- **The attempt-2 changes:**
+  - remove the lag check;
+  - make the lag check `<=`;
+  - base row ignores the pending candidate;
+  - base row is the atomic's;
+  - revert the reader reorder. This one fails the reader race in 20 of 20 release runs.
+- **The attempt-1 logic:** `!=`, no lagging row, no reclaim promotion, no current row, no pending row.
+
+### Interleaving model
+
+The model was extended in three ways:
+- plan sizes checked against a limit that admits 9 + 8 and refuses 9 + 9;
+- the lag check as its own step, so render can act between it and the commit;
+- the peak check's base row.
+
+Scripts ran up to 14 control operations, 10 render calls (4 rejected) and 3 reads: 45,316 states. The model found none of the following:
+- an `Internal`;
+- a missing row;
+- a wedge after quiescing;
+- an ack whose epoch is never activated;
+- live plans exceeding the limit;
+- a `CompileRejected` that a quiescent retry would admit.
+
+Its detectors are live:
+- it reproduces attempt 1's misreport;
+- it catches the base-row, reader and attempt-1 mutations;
+- it reports a slip when the peak check is removed.
+
+**Finding (not blocking).** The lag check is not load-bearing for correctness. With the newest-row base, the window's peak check is already exact, and the full table then gives `Backpressure`. What the lag check buys is skipping a wasted compile, and the tight-limit test pins that through the owner counter.
+
+### Rulings
+
+- **The extension (newest-row base) is in scope and correct.**
+  - It is the same defect class as attempt 1's finding 2, in the same function, with no new surface.
+- **No valid edit is misreported.**
+  - *While a candidate is pending*, the command always ends in `Backpressure` unless the peak check fails first.
+  - That check now uses the pending plan's row. That plan becomes the current plan before any retry, and no other structural change can commit in between. So a `CompileRejected` here is final: the retry would get the same answer.
+- **No invalid edit slips through.**
+  - Admission requires nothing pending and the atomic caught up. The base row is then the rendering plan's, exactly as before.
+  - After synchronization the retirement queue is empty. So at most two plans are ever live: the rendering plan and the candidate.
+- **No ack precedes a drop.**
+  - The window refusal returns before the compile, the replay entry and the protocol commit. The same request id is admitted afterwards.
+  - An ack follows only a secured publication slot, a secured retirement credit and room in both the report table and the pending-provider list.
+  - A reserved candidate is never deferred at render. Every acked epoch is activated, both in the model and in the races.
+- **Known, by design.** If a host stops rendering after a rejected render call that swapped plans, structural edits return `BACKPRESSURE` until its next good render. Nothing is acked and nothing is lost.
