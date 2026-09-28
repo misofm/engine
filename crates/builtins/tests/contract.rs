@@ -5,7 +5,6 @@
 //! *contract*: they do not move when a kernel changes, and #85 changed none of them.
 
 use builtins::*;
-use engine::EXTENDED_COMPATIBILITY_SAMPLE_RATES;
 
 fn parameters_with_cutoff(cutoff: f32, high_pass: bool) -> BuiltinParameters {
     let mut parameters = BuiltinParameters::default();
@@ -293,21 +292,11 @@ fn descriptor_domains_are_exhaustive_at_launch_rates() {
     // both without this one taking a session dependency it has no other reason to have.
 }
 
+/// Owner ruling R5 (#1036): the former extended research rates (176.4-384 kHz) have no cutoff
+/// domain and no fallback; they refuse exactly like any other non-launch rate.
 #[test]
-fn compatibility_fallback_is_limited_to_the_exact_extended_rate_tier() {
-    for rate in EXTENDED_COMPATIBILITY_SAMPLE_RATES.map(|rate| rate.0) {
-        assert_eq!(builtin_filter_cutoff_maximum_hz(rate), None);
-        for descriptor in [
-            BUILTIN_PARAMETER_DESCRIPTORS[2],
-            BUILTIN_PARAMETER_DESCRIPTORS[3],
-        ] {
-            assert!(descriptor.domain.contains(0.0, rate));
-            assert!(descriptor.domain.contains(10.0, rate));
-            assert!(descriptor.domain.contains(0.45 * rate as f32, rate));
-        }
-        assert!(BuiltinChain::new(rate, BuiltinParameters::default()).is_ok());
-    }
-    for rate in [0, 32_000, 192_001] {
+fn extended_and_unrelated_rates_have_no_cutoff_domain_and_refuse_preparation() {
+    for rate in [176_400, 192_000, 352_800, 384_000, 0, 32_000, 192_001] {
         assert_eq!(builtin_filter_cutoff_maximum_hz(rate), None);
         for descriptor in [
             BUILTIN_PARAMETER_DESCRIPTORS[2],

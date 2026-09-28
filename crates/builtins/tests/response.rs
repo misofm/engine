@@ -17,7 +17,7 @@ use effect_contract::{
     BankWidth, ResponseAnalysisError, ResponseSnapshotKind, ResponseSnapshotRequest,
     ResponseSnapshotSection,
 };
-use engine::{EXTENDED_COMPATIBILITY_SAMPLE_RATES, LAUNCH_SAMPLE_RATES};
+use engine::LAUNCH_SAMPLE_RATES;
 use lane::Backend;
 
 fn snapshot_sentinel() -> ResponseSnapshotSection {
@@ -121,13 +121,10 @@ fn state_space(rate: u32, cutoff: f64, high_pass: bool) -> ReferenceSvfStateSpac
     )
 }
 
-// Issue 032: the first tier is launch-gated; the second remains informational compatibility
-// evidence from issue 007 and is not an engine session or host support claim.
+// Owner ruling R5 (#1036): only the launch rates are accepted, so they are the only rates these
+// gates cover. (The helper's and the tests' names predate the ruling.)
 fn launch_and_extended_compatibility_rates() -> impl Iterator<Item = u32> {
-    LAUNCH_SAMPLE_RATES
-        .into_iter()
-        .chain(EXTENDED_COMPATIBILITY_SAMPLE_RATES)
-        .map(|rate| rate.0)
+    LAUNCH_SAMPLE_RATES.into_iter().map(|rate| rate.0)
 }
 
 #[test]

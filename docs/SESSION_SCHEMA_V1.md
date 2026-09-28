@@ -62,7 +62,7 @@ not reallocated: a peer that spells it is refused, as the registry requires. Par
 returns, needs a new issue that re-earns it.
 
 `sample_rate_hz` is a launch engine setting and is exactly one of 44100, 48000, 88200, or
-96000 Hz. Other values, including extended compatibility corpus rates, reject with
+96000 Hz. Other values, including 176400, 192000, 352800 and 384000 Hz, reject with
 `sample_rate.unsupported_at_launch` at `$.sample_rate_hz`; parsing, typed compilation, and
 canonical serialization never turn such a model into an engine session. It is the only sample
 rate in a document; V1 has no per-source rate and no implicit sample-rate conversion.

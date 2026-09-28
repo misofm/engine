@@ -8,7 +8,7 @@ use std::{
 };
 
 use conformance::{PcmFixture, SplitMix64, parse_manifest};
-use engine::{EXTENDED_COMPATIBILITY_SAMPLE_RATES, LAUNCH_SAMPLE_RATES, SampleRateHz};
+use engine::{LAUNCH_SAMPLE_RATES, SampleRateHz};
 
 fn main() {
     let write = match env::args().nth(1).as_deref() {
@@ -30,11 +30,7 @@ fn main() {
 
 fn generated() -> Vec<(String, Vec<u8>)> {
     let mut result = Vec::new();
-    for rate in LAUNCH_SAMPLE_RATES
-        .into_iter()
-        .chain(EXTENDED_COMPATIBILITY_SAMPLE_RATES)
-        .map(|rate| rate.0)
-    {
+    for rate in LAUNCH_SAMPLE_RATES.into_iter().map(|rate| rate.0) {
         let mut samples = vec![0.0_f32; 2 * 128];
         samples[7] = 1.0;
         samples[128 + 19] = -0.625;
