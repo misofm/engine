@@ -79,3 +79,29 @@ Authorized paths: the test files in the table, `scripts/check-lane-policy.sh`,
 - **Saving:** ≈ 0 s of runtime. The saving is that no future `rustfmt`, rename or doc edit turns a
   test red, and the common form of the pattern cannot return.
 - **Risk:** low. Three rows are rewrites rather than deletions (`source/src/lib.rs:2882`, `capi/src/ffi.rs:2516`, `skill.rs`), because nothing else guards them.
+
+## Amendments (Sol verification, 2026-09-28)
+
+See [`../VERIFY-TEST-VALUE.md`](../VERIFY-TEST-VALUE.md). **These amendments supersede the body wherever they conflict.**
+
+1. **Drop rows in code the filed issues delete:**
+   - `source/src/native_source.rs:1806`, `:2623`, `:2688`, `:4015` and `native_wave.rs:1071`
+     (#1035);
+   - `effect-compiler/tests/migration.rs:1053`, `migration_terminal.rs:1833` and
+     `effect-package/tests/state_vectors.rs:1351` (#1037).
+
+   Land after #1035 and #1037, or skip those rows.
+2. **The lint pattern must exclude literal paths that contain `/fixtures/`, not files under
+   `fixtures/`.** `tools/bench/src/builtins.rs:279` and `:283` legitimately `include_bytes!` fixture
+   `.toml` files. A pathspec exclusion still flags them.
+3. **`lane/tests/input_chain_elision.rs:939`: state what is lost.**
+   - The named replacement (`kernels/builtins.rs:1749`) counts plan selections per channel. It does
+     not see a runtime branch inside `mixed_channel_block`'s frame loop, which the scrape does.
+   - Either accept that loss in the PR, or leave the "no per-frame branch" claim to a codegen check.
+4. **Confirmed.**
+   - `graph` G-2, A-5, 936-4 and 957-1b are red on behavioural tests
+     (`crates/graph/tests/MUTATIONS.md:458`, `:549`, `:590`, `:594`, `:646`). G-2 is green on the
+     scrape itself.
+   - No workflow runs Miri, so `capi/src/ffi.rs:2516` is correctly a rewrite.
+5. **Size.** If the pruned list still exceeds half a day, split it: (a) the deletions plus the lint;
+   (b) the three rewrites.

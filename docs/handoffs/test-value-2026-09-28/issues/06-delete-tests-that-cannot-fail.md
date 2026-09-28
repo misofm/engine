@@ -126,3 +126,30 @@ listed there (none is), and this issue's spec. No product code.
   tests to read and re-pin.
 - **Risk:** nil for parts A and B, whose surviving guards are named per row. For part C it is the
   owner's rulings.
+
+## Amendments (Sol verification, 2026-09-28)
+
+See [`../VERIFY-TEST-VALUE.md`](../VERIFY-TEST-VALUE.md). **These amendments supersede the body wherever they conflict.**
+
+1. **Part C is settled by filed work. Drop it.**
+   - R6 is decided by footprint R9. #1025-#1028 delete the MQ-1/MQ-2, `gate_active` and
+     `multiband_active` code and tests. The ignored ns-per-frame printouts (D4) fall under the same
+     ruling: delete them in part A.
+   - R7's extended-rate rows are deleted by #1036 (footprint R5).
+   - H55 and `effect-package/tests/package_v1_qualification.rs:371` are deleted with the crate by
+     #1037.
+2. **Drop rows in code the filed issues delete:**
+   - `source/src/native_source.rs:3949`, `:4435` (#1035);
+   - any `effect-package` row (#1037);
+   - `tools/bench/src/floor.rs:608`, only if #1039 or #1025 deletes it.
+
+   Re-list the remaining rows against the tree at implementation time.
+3. **Spot check: every row sampled holds.** I read D8, D11, D14 and D16, and ran D16 empirically.
+   - D16 `rack/tests/console_bank.rs:405`: with the shunt allocated unconditionally
+     (`rack/src/lib.rs:1011-1014`), **every** rack, capi, graph-compiler and host-core test stays
+     green.
+   - So D16 cannot fail on its claim, and its named guard (`:557`, an observation test) does not
+     guard it either. Delete it, and correct the row: the claim has no guard. That is harmless,
+     because console-free banks use `EffectBankStage`.
+4. **Gate 2.** Mutation equivalence applies only in crates the audit measured. For every other row,
+   gate 1's cannot-fail demonstration is the gate, and the PR records it per row.

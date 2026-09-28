@@ -89,3 +89,17 @@ Authorized paths:
 - **Saving:** none; this closes a gap. It should also end the class of false red on `main`.
 - **Risk:** enabling features can surface currently-hidden failures. That is the point: fix them or
   record them.
+
+## Amendments (Sol verification, 2026-09-28)
+
+See [`../VERIFY-TEST-VALUE.md`](../VERIFY-TEST-VALUE.md). **These amendments supersede the body wherever they conflict.**
+
+1. **Do not file.**
+   - **Part 1 is done by #1021**, merged in `codex/batch-slim-1` at `4a0d60bd`:
+     - `test-debug-a` adds `host-web`, `host-core`, `effect-compiler` and `protocol` test-support;
+     - `test-debug-b` adds `parametric-eq` and **`builtins`** test-support;
+     - `scripts/check-test-support-ci.py`, with a mutation test, guards recurrence.
+   - **Part 2 (thread-scoped counters) is dropped.** No counter false red has happened since
+     2026-09-10, and the per-test fixes landed. If the class recurs, file it then.
+2. **Issue 16 gets one sentence instead.** Its review question asks that a new allocation-count test
+   measure with `bench_support::alloc`'s thread-scoped counters.

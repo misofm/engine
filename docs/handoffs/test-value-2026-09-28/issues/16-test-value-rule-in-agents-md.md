@@ -90,3 +90,33 @@ Authorized paths: `AGENTS.md` (the sentence) and this issue's spec. The lint lan
 - **Saving:** none directly. It prevents regrowth, which the 2026-09-04 audit shows is the real cost.
 - **Risk:** reviewer fatigue. It is one question per test, with the answer already known to whoever
   wrote the test.
+
+## Amendments (Sol verification, 2026-09-28)
+
+See [`../VERIFY-TEST-VALUE.md`](../VERIFY-TEST-VALUE.md). **These amendments supersede the body wherever they conflict.**
+
+1. **As drafted, the rule would have prevented about 5 of the 10 counter-examples (finding F6).**
+
+   | counter-example | prevented by the rule as drafted? |
+   |---|---|
+   | the four scrapes and `f1_fast_db_bounds.rs:1168` | **yes**, by the lint: each is a literal `include_str!` of a `.rs` file |
+   | `track_delay.rs:253` | **no, and rightly.** It holds 2 unique product mutant catches, so it is not a counter-example |
+   | `paired_spans.rs` gate 3 | **no.** It is a digest of rendered output, outside the pin clause |
+   | the `knee_overflow.rs` quartet | **no.** They are exempt as #994 reproducers, although `:185` no longer goes red on its revert (re-confirmed) |
+
+2. **Amend the AGENTS.md sentence:**
+   - the pin clause reads "an exact resource byte count, **or a digest of fixture bytes, rendered
+     output or a compiled artifact**, is used only for a wire, ABI or on-disk format or for the single
+     owner of a cross-target corpus. A one-time 'no bit moved' comparison against a pre-change base
+     is PR evidence, not a committed test";
+   - the reproducer exemption reads "a regression reproducer is exempt while its PR records it red on
+     the bug's revert; one found green on its revert is repaired or deleted".
+3. **Gate 2 covers tests *added or rewritten* in issues 01-15, not "kept" ones.** Recording an answer
+   for every kept test is a ledger.
+4. **The lint** (issue 07) excludes literal paths containing `/fixtures/`. See issue 07's amendment 2.
+5. **Allocation tests.** Add to the review question: a new allocation-count test measures with
+   `bench_support::alloc`'s thread-scoped counters and warms process statics first. This replaces
+   issue 13's part 2.
+6. **Cost.** One question per new test, and a lint of about 1 s. It is cheap. The lint discriminates
+   mechanically; the question discriminates only as far as Sol's verdict enforces "no PASS without
+   an answer".

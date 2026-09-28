@@ -85,3 +85,31 @@ Authorized paths:
   artifact build of about 100 s of runner time, off the critical path if it runs as its own job.
 - **Risk:** a non-reproducible build is found in the same run instead of by pin drift, which is an
   improvement. The app's provenance file still receives the pin at release.
+
+## Amendments (Sol verification, 2026-09-28)
+
+See [`../VERIFY-TEST-VALUE.md`](../VERIFY-TEST-VALUE.md). **These amendments supersede the body wherever they conflict.**
+
+1. **Adopt R3 only with a replacement for what the per-PR pin enforces (finding F3).**
+   - **What the pin enforces today.** At least 16 filed specs (#1017-#1041) carry a
+     "Shipped artifact" gate, "unchanged" or "re-pin with the reason". The pin makes those gates
+     mechanical.
+   - **Its other role.** It is also the only link between the bytes `qualification.yml` gates and
+     the bytes `npm-publish.yml` publishes. `npm-publish.yml` runs none of the callgraph ratchet, the
+     V8 spill gate, the atomics check or the browser legs.
+   - **Replacement 1.** Every PR prints `ARTIFACT CHANGED|UNCHANGED` against the merge base's digest
+     in the `artifact` job summary. Issue gates cite that line.
+   - **Replacement 2.** The committed-pin comparison still runs on any PR that edits the pin file,
+     which is the release PR. So the published bytes are the bytes that passed the gates.
+2. **Scope additions:**
+   - `scripts/check-ci-path-routing.py` pins the step name "Verify the downloaded artifact against
+     its source pin" and its order before the V8 spill gate (`ARTIFACT_PIN_STEP`, `:334-353`);
+   - `scripts/test-ci-path-routing.py`;
+   - `scripts/test-sdk-artifact-builder-output-contract.sh`;
+   - the V8 benchmark's `module_matches_pin` provenance (`scripts/web-mixing-automation-benchmark.mjs`,
+     `run-web-mixing-automation-benchmark.sh:92`). Footprint R9 keeps that benchmark as the
+     benchmark.
+3. **New gate.** In a scratch branch, a change that alters the shipped bytes while claiming
+   "no artifact change" prints `CHANGED` in its run. A release-PR pin that differs from the built
+   bytes fails that PR, not only `npm-publish`.
+4. **Confirmed.** 98 distinct pin values and 97 pin commits on `main` since 2026-09-01.

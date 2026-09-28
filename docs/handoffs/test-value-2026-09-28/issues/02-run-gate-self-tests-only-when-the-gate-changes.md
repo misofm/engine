@@ -74,3 +74,31 @@ No gate's pass/fail rule changes.
 - **Saving:** about 165 s of runner time per full PR, from lint and the SDK job.
 - **Risk:** a gate script broken by an edit that the router misses would be found at the next
   nightly. Gate 3 bounds this.
+
+## Amendments (Sol verification, 2026-09-28)
+
+See [`../VERIFY-TEST-VALUE.md`](../VERIFY-TEST-VALUE.md). **These amendments supersede the body wherever they conflict.**
+
+1. **Drop four suites from the move list.** Filed issues delete them outright:
+   - `test-rack-benchmark.sh` and `test-builtins-current-benchmark.sh` (#1026);
+   - `test-wasm-kernel-timing.sh` (#1027);
+   - `test-wasm-console-benchmark.sh` (#1039).
+
+   Land this draft after #1026, which also re-points `test-env-vocabulary.sh`'s mutation target and
+   would conflict with the one-pass rewrite.
+2. **Measured saving.**
+   - Across 8 full-route runs the lint self-test parts take a median 142.5 s, and the SDK
+     `--self-test` 16.4 s: about 159 s in all.
+   - After the deletions above, about **137 s** is attributable to this draft.
+   - Gate 5's 90 s bound must be re-derived after #1026.
+3. **Where `test-dsp-research.sh` runs.** It runs in the "docs and research evidence gates" job
+   (median 17 s), not in lint. Keep it in the list, with the right job named.
+4. **The router key is every file a suite reads, not only its gate script.** That includes the jq
+   libraries (for example `console-benchmark-record-lib.jq`), the validators, `lib/gate.sh` and any
+   fixture the suite copies.
+   - Gate 3 adds one case: a change to a jq library only must turn on its suite.
+   - `conformance-boundaries` builds a synthetic tree, so it depends on the gate alone. The env
+     suite read live docs only through the row-count pin this draft deletes.
+5. **The router pins this job.** `scripts/check-ci-path-routing.py` pins `SDK_CLOSURE_LINES`,
+   including `check-sdk-deletions.py --self-test` in the `sdk` job. Update it and its mutation test
+   in the same change. Both are already in scope.

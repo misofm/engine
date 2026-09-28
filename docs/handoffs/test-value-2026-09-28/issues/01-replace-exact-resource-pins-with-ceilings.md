@@ -103,3 +103,40 @@ Authorized paths:
 - **Saving:** about 60 s of runner time per full PR. About 50 re-pin edits a month go, and about
   1,850 lines of hand-mirrored layout.
 - **Risk:** growth of up to the ceiling's headroom goes unseen per PR. The owner sets the headroom.
+
+## Amendments (Sol verification, 2026-09-28)
+
+See [`../VERIFY-TEST-VALUE.md`](../VERIFY-TEST-VALUE.md). **These amendments supersede the body wherever they conflict.**
+
+1. **The outcome contradicts gate 2 (finding F2), so rewrite it.**
+   - **What I did.** In a scratch tree I dropped `checked_layout::<crate::Plan>(1)` from
+     `fixed_allocation_rows` (`crates/capi/src/runtime/compile.rs`). That under-reports 416 bytes.
+   - **What caught it today.** `:2651` went red twice over:
+     - on the frozen literal report at `:2732`;
+     - with that literal removed, on the mirror-driven "capi one-below" admission.
+   - **What the draft's form missed.** `:2785`, rewritten as this draft proposes (its total taken from
+     the live report), stayed **green**.
+   - **Why.** A total taken from the live report shrinks together with the dropped row. After the
+     outcome as written, nothing catches an under-count.
+2. **Keep one independent completeness oracle.** Drop only the literal totals.
+   - Preferred: an allocator-observed oracle. This file already installs a counting global
+     allocator (`record_allocation`, `:41`). After compile, the bytes allocated and still live for
+     the plan and the session must equal the reported `capi_retained_bytes`, or be bounded by it if
+     exactness proves infeasible.
+   - Otherwise keep the mirror and delete only the literals.
+   - `:2785` also compares against the independent oracle, never against the report it tests.
+3. **Ceilings do not replace completeness.** Ceilings guard growth budgets only. A ceiling never sees
+   a decrease: an owner row dropped, or a `size_of` change the accounting forgot. Such an
+   under-count lets admission accept a session above the host's configured memory cap, which is an
+   OOM on a phone.
+4. **Gate 2 is kept verbatim, and made concrete.**
+   - The mutation above turns the new oracle test red.
+   - So does adding a new boxed owner to `crate::Plan` that the accounting does not count.
+5. **Item 2 is out of scope.** #1035 deletes the Issue-544 validator and `source_duration.rs`'s
+   source-duration subject. Drop item 2 and those paths.
+6. **Sequence.** #1024, #1033 and #1035 all edit the capi layout mirror. Land this draft after them.
+7. **Gate 4.** Before the mutant runs, run the `--test-package` set (capi, host-web) once unmutated,
+   with the same environment, and require it green. `cargo mutants` 27.1 baselines only the mutated
+   package (F4).
+8. **R2, as the verification recommends.** Budgets are ceilings; accounting completeness stays exact
+   against an independent live oracle. Neither is a literal pin.

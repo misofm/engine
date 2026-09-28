@@ -100,3 +100,24 @@ a reproducer.
   one-off verification fuzzers into lasting coverage.
 - **Risk:** flaky seeds. Seeds are fixed per PR, so a red is always a real divergence or a generator
   bug.
+
+## Amendments (Sol verification, 2026-09-28)
+
+See [`../VERIFY-TEST-VALUE.md`](../VERIFY-TEST-VALUE.md). **These amendments supersede the body wherever they conflict.**
+
+1. **The dependency on issue 13 is satisfied.** #1021 is merged; `host-core/test-support` runs in
+   `test-debug-a`.
+2. **Re-aim the compressor slice (finding F5).**
+   - I ran the 18 in-crate `designed_channel_symmetry` survivors against compressor, effect-compiler,
+     host-core and graph-compiler.
+   - **12 are caught** by tests CI runs (`symmetry_designed_words.rs`, the graph-compiler mono-pool
+     tests, host-core `twin_parameter_spans_keep_the_lane_and_a_lone_half_declines_it`).
+   - **6 survive everything:** the `|| -> &&` mutants in the ramp and rate-ramp comparisons,
+     `lib.rs:704-706` and `:714-716`.
+   - So the generator must draw **partial-field asymmetric in-flight ramps**: exactly one of
+     `current`, `target`, `step` or `remaining` differing between the channels, mid-ramp.
+   - The slice's gate: those 6 mutants go red.
+3. **A second eligibility gap, found here.** gate-expander has 8 surviving `bind_homogeneous_bank`
+   mutants (bank eligibility). Add it to slice 5's gate.
+4. **Gate 2.** Baseline the test set unmutated with the same environment first (F4). At opt-level 1
+   two `effect-compiler` tests fail without any mutant; they "catch" every mutant otherwise.

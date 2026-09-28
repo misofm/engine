@@ -66,3 +66,17 @@ Authorized paths: `.github/workflows/qualification.yml` (one step split in two),
 - **Saving:** unmeasured. The whole step compiles for 210 s, and the `audit`/`bench` share is
   probably 1-2 minutes. Gate 1 decides.
 - **Risk:** none for class-T tooling claims. The codegen-sensitive tests keep the shipping profile.
+
+## Amendments (Sol verification, 2026-09-28)
+
+See [`../VERIFY-TEST-VALUE.md`](../VERIFY-TEST-VALUE.md). **These amendments supersede the body wherever they conflict.**
+
+1. **Defer measuring until the filed deletions land.**
+   - #1025-#1028, #1033, #1035 and #1039 delete most of the `bench` and `audit` subjects and their
+     unit tests: the benchmark arms, the `session`/`graph`/`rack`/`builtins` subjects, the source and
+     source-duration audits, and the native PCM runner.
+   - The step's compile time, and therefore the ruling's value, changes substantially after them.
+   - Gate 1 runs on that tree.
+2. **Keep the gate-1 threshold** (adopt only if at least 60 s is saved). The audit's "about 850 s with
+   rulings" counts this item without a measurement. The verification withdraws that total until
+   gate 1 runs.

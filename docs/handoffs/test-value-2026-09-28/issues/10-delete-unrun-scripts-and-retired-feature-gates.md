@@ -104,3 +104,23 @@ Authorized paths:
 - **Saving:** ≈ 0 s of CI. Removes about 4,000 lines of scripts, about 1,000 lines of benchmark code
   under R6, and 4 false reds a month from the SDK word bans.
 - **Risk:** nil. The records are sealed, and nothing live calls these files.
+
+## Amendments (Sol verification, 2026-09-28)
+
+See [`../VERIFY-TEST-VALUE.md`](../VERIFY-TEST-VALUE.md). **These amendments supersede the body wherever they conflict.**
+
+1. **Shrink this draft to its unique remainder.** Filed issues own the rest:
+   - the 17 one-shot files, the R6 benchmark code (`input_symmetry*.rs`, `gate_active.rs`,
+     `multiband_active.rs`) and the env rows → #1027;
+   - `run-console-benchmark.sh`'s move and arms → #1025 and #1027;
+   - the reachability rule → #1022 (merged) and #1027 amendment 3;
+   - the builtins-less console rows in the validators → #1025 and #1039.
+2. **What stays here:**
+   - the retired-feature gate rules: session-TOML spellings, softfma definitions, delta-bank EQ
+     kernel names, the pre-boot-v1 SDK word bans, and the `nudge` ban;
+   - the superseded raw-WebDriver harness `scripts/web-audioworklet-browser-correctness.py` and
+     `test-web-audioworklet.sh:146-157`. #1027 deletes only its operator seal script.
+   - Re-title it "Retire gate rules that guard retired features".
+3. **Gate 2 keeps the live-rule seeds.** Drop the ones owned elsewhere: the reachability seed goes to
+   #1022/#1027, and the tracked `.ll` seed stays.
+4. **The dependency on issue 02 stands.** The env row-count pin goes there.
