@@ -95,6 +95,8 @@ jobs:
     if: needs.route.outputs.route == 'sdk' || needs.route.outputs.route == 'full'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    outputs:
+      sha256: ${{ steps.build.outputs.sha256 }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -105,16 +107,22 @@ jobs:
         run: |
           rustup toolchain install 1.97.1 --profile minimal
           rustup target add --toolchain 1.97.1 wasm32-unknown-unknown
-      # build-web-audioworklet.sh already pin-checks its own sha256 against
-      # hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256 and refuses to write on a
-      # mismatch. Built exactly once here; every consumer downloads it and re-hashes.
+      # Built exactly once here; every consumer downloads it and checks it against this job's
+      # `sha256` output, so every artifact gate in the run reads exactly these bytes. Issue #1061
+      # (owner decision 5): no comparison with the committed pin here. The pin is the release
+      # fingerprint; `artifact-identity` reports whether these bytes changed and holds a release
+      # change to the pin (docs/RELEASE.md).
       - name: Build the exact shipped artifact
+        id: build
         run: |
           # The build script refuses a non-empty output directory; never rely on the cache
           # action having pruned a previous run's loose files.
           rm -rf target/ci/qualification-artifacts
           mkdir -p target/ci/qualification-artifacts
           bash scripts/build-web-audioworklet.sh target/ci/qualification-artifacts
+          sha256="$(sha256sum target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm | awk '{print $1}')"
+          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
+          echo "Shipped AudioWorklet module at \`$GITHUB_SHA\`: \`$sha256\` (the \`artifact-identity\` summary says whether it changed)" >> "$GITHUB_STEP_SUMMARY"
       - name: Upload shipped artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -122,6 +130,56 @@ jobs:
           path: target/ci/qualification-artifacts/
           if-no-files-found: error
           overwrite: true
+
+  # Issue #1061 (owner decision 5): every PR says whether the shipped module changed against its
+  # base, proves the build reproducible, and holds only a release change to the committed pin
+  # (docs/RELEASE.md). Its own job, so the two extra builds stay off the path of `sdk`,
+  # `artifact-gates` and the browser legs, which start once `artifact` has uploaded.
+  # scripts/web-audioworklet-identity.py has the rules.
+  artifact-identity:
+    name: shipped AudioWorklet artifact identity (changed or unchanged, reproducible, release pin)
+    needs: [route, artifact]
+    if: needs.route.outputs.route == 'sdk' || needs.route.outputs.route == 'full'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Install pinned Rust toolchain and Wasm standard library
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup target add --toolchain 1.97.1 wasm32-unknown-unknown
+      # The twin: this commit again, from another checkout path and with another CARGO_HOME, the
+      # two roots rustc could embed. `artifact` built from $GITHUB_WORKSPACE with the runner's.
+      - name: Rebuild the module from another checkout path and CARGO_HOME
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/twin" HEAD
+          mkdir "$RUNNER_TEMP/twin-module"
+          CARGO_HOME="$RUNNER_TEMP/twin-cargo-home" bash "$RUNNER_TEMP/twin/scripts/build-web-audioworklet.sh" --module-only "$RUNNER_TEMP/twin-module"
+      - name: Build the base's module with the base's own build script
+        id: base
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          base="$(python3 -B scripts/web-audioworklet-identity.py base --event "$EVENT" --before "$BEFORE")"
+          echo "commit=$base" >> "$GITHUB_OUTPUT"
+          [[ -n "$base" ]] || exit 0
+          git worktree add --detach "$RUNNER_TEMP/base" "$base"
+          mkdir "$RUNNER_TEMP/base-module"
+          bash "$RUNNER_TEMP/base/scripts/build-web-audioworklet.sh" --module-only "$RUNNER_TEMP/base-module"
+      - name: Report ARTIFACT CHANGED or UNCHANGED, and hold a release change to its pin
+        env:
+          BUILT: ${{ needs.artifact.outputs.sha256 }}
+          BASE: ${{ steps.base.outputs.commit }}
+        run: |
+          set -o pipefail
+          python3 -B scripts/web-audioworklet-identity.py --self-test
+          module=miso-engine-v1-audio-worklet.simd128.wasm
+          base_args=()
+          [[ -z "$BASE" ]] || base_args=(--base "$BASE" --base-module "$RUNNER_TEMP/base-module/$module")
+          python3 -B scripts/web-audioworklet-identity.py report --built "$BUILT" --twin "$RUNNER_TEMP/twin-module/$module" "${base_args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
 
   sdk:
     name: SDK package and generated-surface qualification
@@ -157,11 +215,12 @@ jobs:
         with:
           name: audioworklet-${{ github.sha }}
           path: target/ci/qualification-artifacts
-      - name: Verify the downloaded artifact against its source pin
+      - name: Verify the downloaded artifact against the artifact job's digest
+        env:
+          BUILT: ${{ needs.artifact.outputs.sha256 }}
         run: |
-          expected="$(cat hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256)"
           actual="$(sha256sum target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm | awk '{print $1}')"
-          [[ "$actual" == "$expected" ]] || { echo "downloaded artifact sha256 mismatch: expected $expected, got $actual" >&2; exit 1; }
+          [[ "$BUILT" =~ ^[0-9a-f]{64}$ && "$actual" == "$BUILT" ]] || { echo "downloaded artifact sha256 mismatch: the artifact job built $BUILT, got $actual" >&2; exit 1; }
       # S7: check-sdk-deletions.py's 37-mutation --self-test (design §6.6) was never wired in --
       # only the bare gate ran. test-sdk-artifact-builder-output-contract.sh (also design §6.6) is
       # not added separately: sdk-package.sh check already runs it as its own first step (see
@@ -198,11 +257,12 @@ jobs:
         with:
           name: audioworklet-${{ github.sha }}
           path: target/ci/qualification-artifacts
-      - name: Verify the downloaded artifact against its source pin
+      - name: Verify the downloaded artifact against the artifact job's digest
+        env:
+          BUILT: ${{ needs.artifact.outputs.sha256 }}
         run: |
-          expected="$(cat hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256)"
           actual="$(sha256sum target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm | awk '{print $1}')"
-          [[ "$actual" == "$expected" ]] || { echo "downloaded artifact sha256 mismatch: expected $expected, got $actual" >&2; exit 1; }
+          [[ "$BUILT" =~ ^[0-9a-f]{64}$ && "$actual" == "$BUILT" ]] || { echo "downloaded artifact sha256 mismatch: the artifact job built $BUILT, got $actual" >&2; exit 1; }
       # #106 E1/E2/E5/E7 and the F4 native<->simd128 session parity, over the artifact that ships.
       # check-web-audioworklet.sh asserts the frozen export set, no imports, no shared memory, no
       # atomics or relaxed SIMD, the render export's allocation-free/trap-free closure, and the
@@ -217,7 +277,7 @@ jobs:
       - name: Hermetic browser host and worklet tests
         run: bash scripts/test-web-audioworklet.sh
       # Issues #1000/#1009: V8's register allocation of the EQ's stationary cascade loops, read from
-      # the downloaded, pin-verified artifact itself (run-wasm-gates.sh --without-v8-spill leaves it
+      # the downloaded, digest-verified artifact itself (run-wasm-gates.sh --without-v8-spill leaves it
       # to this job). Register allocation belongs to one V8, so the Node version is exact and the
       # gate refuses any other. Last, so the steps above keep the runner's own Node.
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -253,11 +313,12 @@ jobs:
       - name: Install SDK dependencies for the response Worker bundle
         working-directory: sdk
         run: npm ci --no-audit --no-fund --prefer-offline
-      - name: Verify the downloaded artifact against its source pin
+      - name: Verify the downloaded artifact against the artifact job's digest
+        env:
+          BUILT: ${{ needs.artifact.outputs.sha256 }}
         run: |
-          expected="$(cat hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256)"
           actual="$(sha256sum target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm | awk '{print $1}')"
-          [[ "$actual" == "$expected" ]] || { echo "downloaded artifact sha256 mismatch: expected $expected, got $actual" >&2; exit 1; }
+          [[ "$BUILT" =~ ^[0-9a-f]{64}$ && "$actual" == "$BUILT" ]] || { echo "downloaded artifact sha256 mismatch: the artifact job built $BUILT, got $actual" >&2; exit 1; }
       - name: Cache Playwright browser binaries
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
@@ -798,7 +859,7 @@ jobs:
       # lowering pins. `--without-native` (#1048): the native leg is the Rust test
       # `g5_native_digests_match_pins` in `test-release`, in the shipping profile, so it is not run a
       # second time here. `--without-v8-spill` (#1009): the script's V8 spill leg runs in
-      # `artifact-gates`, on the downloaded, pin-verified artifact, rather than on a second fat-LTO
+      # `artifact-gates`, on the downloaded, digest-verified artifact, rather than on a second fat-LTO
       # build of it here. check-ci-path-routing.py refuses either flag without its pairing.
       - name: WebAssembly cross-target digest gates
         run: bash scripts/run-wasm-gates.sh --without-v8-spill --without-native
@@ -871,7 +932,7 @@ jobs:
   verdict:
     name: qualification
     if: always()
-    needs: [route, docs-gates, artifact, sdk, artifact-gates, browser, lint, test-debug-a, test-debug-b, test-release, audit-native, wasm-guests, cross-target, release-shape]
+    needs: [route, docs-gates, artifact, artifact-identity, sdk, artifact-gates, browser, lint, test-debug-a, test-debug-b, test-release, audit-native, wasm-guests, cross-target, release-shape]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -883,6 +944,7 @@ jobs:
       RELEASE_INPUTS: ${{ needs.route.outputs.release_inputs }}
       DOCS_GATES_RESULT: ${{ needs.docs-gates.result }}
       ARTIFACT_RESULT: ${{ needs.artifact.result }}
+      ARTIFACT_IDENTITY_RESULT: ${{ needs.artifact-identity.result }}
       SDK_RESULT: ${{ needs.sdk.result }}
       ARTIFACT_GATES_RESULT: ${{ needs.artifact-gates.result }}
       BROWSER_RESULT: ${{ needs.browser.result }}
@@ -932,6 +994,7 @@ jobs:
           }
           check docs-gates "$DOCS_GATES_RESULT" "$docs_expected"
           check artifact "$ARTIFACT_RESULT" "$artifact_expected"
+          check artifact-identity "$ARTIFACT_IDENTITY_RESULT" "$artifact_expected"
           check sdk "$SDK_RESULT" "$artifact_expected"
           check artifact-gates "$ARTIFACT_GATES_RESULT" "$full_expected"
           check browser "$BROWSER_RESULT" "$full_expected"
@@ -944,6 +1007,13 @@ jobs:
           check cross-target "$CROSS_TARGET_RESULT" "$full_expected"
           check release-shape "$RELEASE_SHAPE_RESULT" "$release_shape_expected"
           [[ "$failed" == 0 ]] || exit 1
+      # Issue #1061: every PR says whether the shipped module changed. The artifact routes say it in
+      # `artifact-identity`'s summary; the evidence route builds no module, because every path it
+      # admits is documentation that no build reads.
+      - name: Report the shipped artifact on the evidence route
+        if: needs.route.outputs.route == 'evidence'
+        run: |
+          echo "ARTIFACT UNCHANGED: not built; the evidence route admits documentation only, which no build reads" >> "$GITHUB_STEP_SUMMARY"
       # Best-effort observability (design §11): never masks the verdict above, which has already
       # exited by the time this runs on a failing route.
       - name: Publish per-job CI telemetry

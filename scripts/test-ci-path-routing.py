@@ -571,12 +571,12 @@ def main() -> int:
     root = workspace()
     try:
         mutate(root / ".github/workflows/qualification.yml",
-               "    needs: [route, docs-gates, artifact, sdk, artifact-gates, browser, lint, "
-               "test-debug-a, test-debug-b, test-release, audit-native, wasm-guests, "
-               "cross-target, release-shape]",
-               "    needs: [route, docs-gates, artifact, sdk, artifact-gates, browser, lint, "
-               "test-debug-a, test-debug-b, test-release, audit-native, wasm-guests, "
-               "cross-target]")
+               "    needs: [route, docs-gates, artifact, artifact-identity, sdk, artifact-gates, "
+               "browser, lint, test-debug-a, test-debug-b, test-release, audit-native, "
+               "wasm-guests, cross-target, release-shape]",
+               "    needs: [route, docs-gates, artifact, artifact-identity, sdk, artifact-gates, "
+               "browser, lint, test-debug-a, test-debug-b, test-release, audit-native, "
+               "wasm-guests, cross-target]")
         checker_fails(root)  # a job dropped from verdict's needs: escapes the aggregate entirely
     finally:
         shutil.rmtree(root)
@@ -661,7 +661,7 @@ def main() -> int:
     for line in checker.TEST_SUPPORT_CI_LINES:
         workflow_mutation_fails("qualification.yml", "          " + line, "")
     # Issue #1009: wasm-guests leaves the V8 spill leg to artifact-gates, so artifact-gates must run
-    # it on the downloaded artifact, after the pin check.
+    # it on the downloaded artifact, after the digest check.
     workflow_mutation_fails(
         "qualification.yml",
         "          python3 -B scripts/check-web-audioworklet-v8-spill.py "
@@ -672,10 +672,71 @@ def main() -> int:
         "qualification.yml",
         "          shared-key: artifact-gates\n",
         "          shared-key: artifact-gates\n"
-        "      - name: V8 spill gate before the pin check\n"
+        "      - name: V8 spill gate before the digest check\n"
         "        run: python3 -B scripts/check-web-audioworklet-v8-spill.py "
         "target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm\n",
     )
+
+    # Issue #1061: every reader of the shipped module checks its download against the digest the
+    # artifact job published, and the identity job reports ARTIFACT CHANGED or UNCHANGED, proves
+    # the build reproducible and holds a release change to its pin, on the artifact job's routes.
+    digest_step = checker.ARTIFACT_DIGEST_STEP
+    workflow_mutation_fails("qualification.yml", checker.ARTIFACT_DIGEST_OUTPUT, "")
+    for reader in checker.ARTIFACT_READERS:
+        root = workspace()
+        try:
+            workflow = root / ".github/workflows/qualification.yml"
+            text = workflow.read_text(encoding="utf-8")
+            start = text.index(f"\n  {reader}:\n")
+            step = text.index(digest_step, start)
+            end = text.index("      - ", step + len(digest_step))
+            workflow.write_text(text[:step] + text[end:], encoding="utf-8")
+            checker_fails(root)  # a reader that stops verifying its download
+        finally:
+            shutil.rmtree(root)
+    root = workspace()
+    try:
+        # The pre-#1061 step: the download held to the committed pin instead of the built digest.
+        workflow = root / ".github/workflows/qualification.yml"
+        text = workflow.read_text(encoding="utf-8")
+        start = text.index("\n  browser:\n")
+        step = text.index(digest_step, start)
+        workflow.write_text(text[:step] + text[step:].replace(
+            digest_step,
+            "      - name: Verify the downloaded artifact against its source pin\n"
+            "        env:\n"
+            "          BUILT: hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256\n",
+            1), encoding="utf-8")
+        checker_fails(root)
+    finally:
+        shutil.rmtree(root)
+    for line in checker.IDENTITY_LINES:
+        workflow_mutation_fails("qualification.yml", line.lstrip(" "), "true\n")
+    workflow_mutation_fails(
+        "qualification.yml",
+        'CARGO_HOME="$RUNNER_TEMP/twin-cargo-home" bash "$RUNNER_TEMP/twin/',
+        'bash "$RUNNER_TEMP/twin/',
+    )  # a twin sharing the artifact job's CARGO_HOME proves nothing about it
+    workflow_mutation_fails(
+        "qualification.yml",
+        "    name: shipped AudioWorklet artifact identity (changed or unchanged, reproducible, "
+        "release pin)\n    needs: [route, artifact]\n"
+        "    if: needs.route.outputs.route == 'sdk' || needs.route.outputs.route == 'full'\n",
+        "    name: shipped AudioWorklet artifact identity (changed or unchanged, reproducible, "
+        "release pin)\n    needs: [route, artifact]\n"
+        "    if: needs.route.outputs.route == 'full'\n",
+    )  # an sdk-route PR would build the module and say nothing about it
+    workflow_mutation_fails(
+        "qualification.yml",
+        "    name: shipped AudioWorklet artifact identity (changed or unchanged, reproducible, "
+        "release pin)\n    needs: [route, artifact]\n",
+        "    name: shipped AudioWorklet artifact identity (changed or unchanged, reproducible, "
+        "release pin)\n    needs: [route]\n",
+    )
+    workflow_mutation_fails(
+        "qualification.yml",
+        '          check artifact-identity "$ARTIFACT_IDENTITY_RESULT" "$artifact_expected"\n', "",
+    )  # the identity job dropped from the expectation table
 
     # #1048 review finding 2: the V8 pairing is found by token, so reordering the flags cannot
     # slip the spill leg out of CI once artifact-gates stops running it.

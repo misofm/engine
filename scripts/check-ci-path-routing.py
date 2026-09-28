@@ -340,25 +340,81 @@ V8_SPILL_ARTIFACT_LINE = (
     "python3 -B scripts/check-web-audioworklet-v8-spill.py "
     "target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm"
 )
-ARTIFACT_PIN_STEP = "      - name: Verify the downloaded artifact against its source pin\n"
+# Issue #1061: every job that reads the shipped module checks its download against the digest of
+# the bytes the `artifact` job built -- not against the committed pin, which is the release
+# fingerprint -- so every artifact gate in a run reads exactly those bytes.
+ARTIFACT_DIGEST_STEP = (
+    "      - name: Verify the downloaded artifact against the artifact job's digest\n"
+    "        env:\n"
+    "          BUILT: ${{ needs.artifact.outputs.sha256 }}\n"
+)
+ARTIFACT_DIGEST_OUTPUT = "    outputs:\n      sha256: ${{ steps.build.outputs.sha256 }}\n"
+ARTIFACT_READERS = ("sdk", "artifact-gates", "browser")
+# Issue #1061: the identity job's twin build (another checkout path and CARGO_HOME), its self-test
+# and its report, which says ARTIFACT CHANGED or UNCHANGED and holds a release change to its pin.
+IDENTITY_LINES = (
+    'CARGO_HOME="$RUNNER_TEMP/twin-cargo-home" bash '
+    '"$RUNNER_TEMP/twin/scripts/build-web-audioworklet.sh" --module-only "$RUNNER_TEMP/twin-module"\n',
+    "          BUILT: ${{ needs.artifact.outputs.sha256 }}\n",
+    "python3 -B scripts/web-audioworklet-identity.py --self-test\n",
+    'python3 -B scripts/web-audioworklet-identity.py report --built "$BUILT" '
+    '--twin "$RUNNER_TEMP/twin-module/$module" "${base_args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"\n',
+)
+
+
+def check_qualification_artifact_digest(text: str) -> None:
+    """Issue #1061: the `artifact` job publishes its module's digest, and every job that reads the
+    module verifies its download against that digest before anything reads it."""
+    artifact = job(text, "artifact")
+    require(ARTIFACT_DIGEST_OUTPUT in artifact,
+            "qualification.yml: the artifact job must publish its module's sha256 as an output")
+    for name in ARTIFACT_READERS:
+        reader = job(text, name)
+        require(re.search(r"^    needs: \[route, artifact\]$", reader, re.MULTILINE) is not None,
+                f"qualification.yml: {name} must need exactly [route, artifact]")
+        require(ARTIFACT_DIGEST_STEP in reader,
+                f"qualification.yml: {name} must verify its download against the artifact job's "
+                "digest")
+        download = reader.index("path: target/ci/qualification-artifacts")
+        verify = reader.index(ARTIFACT_DIGEST_STEP)
+        require(download < verify, f"qualification.yml: {name} verifies before it downloads")
+        later = [reader.index(line) for line in ("bash scripts/", "python3 -B scripts/",
+                                                 "npm run qualify") if line in reader]
+        require(all(verify < index for index in later),
+                f"qualification.yml: {name} reads the artifact before verifying its digest")
+
+
+def check_qualification_artifact_identity(text: str) -> None:
+    """Issue #1061 (owner decision 5): every PR that builds the module reports whether it changed,
+    proves it reproducible, and holds a release change to the pin. The identity job must run
+    exactly where `artifact` runs, after it, and keep its twin build, self-test and report."""
+    identity = job(text, "artifact-identity")
+    require(job_if(identity) == job_if(job(text, "artifact")),
+            "qualification.yml: artifact-identity must run on exactly the artifact job's routes")
+    require(re.search(r"^    needs: \[route, artifact\]$", identity, re.MULTILINE) is not None,
+            "qualification.yml: artifact-identity must need exactly [route, artifact]")
+    for line in IDENTITY_LINES:
+        require(line in identity, f"qualification.yml: artifact-identity is missing {line.strip()!r}")
+    require(identity.index(IDENTITY_LINES[2]) < identity.index(IDENTITY_LINES[3]),
+            "qualification.yml: artifact-identity must self-test the report before trusting it")
 
 
 def check_qualification_v8_spill(text: str) -> None:
     """Issue #1009: `wasm-guests` may leave `run-wasm-gates.sh`'s V8 spill leg out only because
-    `artifact-gates` runs the same gate on the downloaded artifact, after verifying it against its
-    pin. Without this rule, deleting that step would take the gate out of CI with every job
-    green."""
+    `artifact-gates` runs the same gate on the downloaded artifact, after verifying it against the
+    artifact job's digest. Without this rule, deleting that step would take the gate out of CI with
+    every job green."""
     wasm = job(text, "wasm-guests")
     require("bash scripts/run-wasm-gates.sh" in wasm,
             "qualification.yml: wasm-guests must run scripts/run-wasm-gates.sh")
     if "--without-v8-spill" not in run_wasm_gates_flags(wasm):
         return
     gates = job(text, "artifact-gates")
-    require(V8_SPILL_ARTIFACT_LINE in gates and ARTIFACT_PIN_STEP in gates,
+    require(V8_SPILL_ARTIFACT_LINE in gates and ARTIFACT_DIGEST_STEP in gates,
             "qualification.yml: wasm-guests runs run-wasm-gates.sh --without-v8-spill, so "
-            "artifact-gates must run the V8 spill gate on the pin-verified artifact")
-    require(gates.index(ARTIFACT_PIN_STEP) < gates.index(V8_SPILL_ARTIFACT_LINE),
-            "qualification.yml: artifact-gates must verify the artifact's pin before the V8 "
+            "artifact-gates must run the V8 spill gate on the digest-verified artifact")
+    require(gates.index(ARTIFACT_DIGEST_STEP) < gates.index(V8_SPILL_ARTIFACT_LINE),
+            "qualification.yml: artifact-gates must verify the artifact's digest before the V8 "
             "spill gate reads it")
 
 
@@ -491,6 +547,8 @@ def check_qualification_workflow(root: pathlib.Path) -> None:
     check_qualification_release_shape_guard(text)
     check_qualification_route_job(text)
     check_qualification_closures(text)
+    check_qualification_artifact_digest(text)
+    check_qualification_artifact_identity(text)
     check_qualification_v8_spill(text)
     check_qualification_native_g5(text)
     check_qualification_aarch64_g5(text, names)

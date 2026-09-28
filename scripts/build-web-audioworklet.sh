@@ -1,18 +1,30 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# `--module-only` (issue #1009) writes the module alone,
-# `miso-engine-v1-audio-worklet.simd128.wasm`, built by exactly the cargo line below, and does not
-# hold it to the pin: a batch repins once, at its boundary, so a gate that reads the module
-# mid-batch (`run-wasm-gates.sh`'s V8 spill gate) must still get this commit's bytes. The build has
-# one home, here, whichever mode asks for it.
-module_only=0
-if [[ ${1-} == --module-only ]]; then
-  module_only=1
-  shift
-fi
+# Builds the shipped AudioWorklet module and prints `AudioWorklet module <sha256>` on stdout.
+#
+# Issue #1061 (owner decision 5, docs/rulings/engine-footprint-2026-09-28.md): the module's digest
+# is not held to a committed pin on every change. Every PR builds the module here, every artifact
+# gate reads those exact bytes, and the `artifact-identity` job reports whether they differ from the
+# base's. The committed pin (`hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256`) is
+# the release fingerprint: a release change re-pins it, and `npm-publish.yml` publishes only bytes
+# equal to it. docs/RELEASE.md is the procedure.
+#
+# Modes (one at most):
+#   (none)         the delivery closure: module, host and worklet JavaScript, declaration,
+#                  parameter metadata and ABI layout.
+#   --module-only  the module alone (issue #1009), built by exactly the cargo line below, for a gate
+#                  that reads only the module (`run-wasm-gates.sh`'s V8 spill gate, the identity
+#                  job's twin and base builds). The build has one home, here.
+#   --check-pin    the delivery closure, refused (exit 1, nothing written) unless the module's digest
+#                  equals the committed pin: the release fingerprint check, runnable locally.
+mode=delivery
+case ${1-} in
+  --module-only) mode=module; shift ;;
+  --check-pin) mode=pinned; shift ;;
+esac
 if (($# != 1)); then
-  echo "usage: $0 [--module-only] EMPTY_OUTPUT_DIRECTORY" >&2
+  echo "usage: $0 [--module-only | --check-pin] EMPTY_OUTPUT_DIRECTORY" >&2
   exit 2
 fi
 
@@ -73,30 +85,22 @@ remap="--remap-path-prefix=$cargo_home=/cargo --remap-path-prefix=$repo_root=/re
 
 artifact="$simd_target/wasm32-unknown-unknown/release/host_web.wasm"
 observed=$(sha256sum "$artifact" | awk '{print $1}')
-pin_file="$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256"
-expected=$(tr -d '\n' <"$pin_file")
 
-if ((module_only)); then
+if [[ $mode == pinned ]]; then
+  pin_file="$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256"
+  expected=$(tr -d '\n' <"$pin_file")
+  [[ "$observed" == "$expected" ]] || {
+    printf 'AudioWorklet artifact pin mismatch: expected=%s observed=%s (docs/RELEASE.md)\n' \
+      "$expected" "$observed" >&2
+    exit 1
+  }
+fi
+
+printf 'AudioWorklet module %s\n' "$observed"
+if [[ $mode == module ]]; then
   cp "$artifact" "$output_dir/miso-engine-v1-audio-worklet.simd128.wasm"
-  if [[ "$observed" == "$expected" ]]; then
-    printf 'AudioWorklet module %s (matches the pin; --module-only does not check it)\n' \
-      "$observed"
-  else
-    printf 'AudioWorklet module %s (pin %s; --module-only does not check it)\n' \
-      "$observed" "$expected"
-  fi
   exit 0
 fi
-
-if [[ "${MISO_ENGINE_WEB_AUDIOWORKLET_REPIN:-0}" == 1 ]]; then
-  printf '%s\n' "$observed"
-  exit 0
-fi
-[[ "$observed" == "$expected" ]] || {
-  printf 'AudioWorklet artifact pin mismatch: expected=%s observed=%s\n' \
-    "$expected" "$observed" >&2
-  exit 1
-}
 
 cp "$artifact" "$output_dir/miso-engine-v1-audio-worklet.simd128.wasm"
 cp "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet.js" "$output_dir/"

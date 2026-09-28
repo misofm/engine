@@ -49,7 +49,7 @@ def web_mixing_record_claims: [
     .native_input_feed.delivery == "frozen_block_per_track" and
     .native_input_feed.continuous_across_blocks == false and
     (.native_input_feed.track_phase_radians | type == "number" and . > 0)),
-  # The module: its digest, and whether it is the committed pin.
+  # The module: its digest, and whether it is the release pin (the last release's module, #1061).
   claim("module"; ([.module_sha256, .pinned_sha256] | all(sha256)) and
     .module_matches_pin == (.module_sha256 == .pinned_sha256)),
   claim("host"; (.node_version | type == "string" and startswith("v")) and

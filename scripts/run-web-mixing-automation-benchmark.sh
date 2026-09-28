@@ -11,8 +11,8 @@
 # Three subcommands, so that nothing is built while anything is timed:
 #
 #   prepare WORKDIR        Untimed. WORKDIR must be an empty directory, and the tracked files
-#                          unmodified. Builds host_web.wasm with the flags of
-#                          `scripts/build-web-audioworklet.sh` into WORKDIR, writes the native
+#                          unmodified. Builds host_web.wasm with
+#                          `scripts/build-web-audioworklet.sh --module-only` into WORKDIR, writes the native
 #                          row's resolved control table beside it (`cargo run --example
 #                          mixing_automation_controls`), and records the commit both were built at,
 #                          with their digests, in `provenance.json` (#1011).
@@ -34,10 +34,10 @@
 #                          `MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1`, in which case the records say
 #                          `uncontrolled`, as the console runner's do.
 #
-# The module is built here rather than taken from `build-web-audioworklet.sh` because that script
-# refuses to hand over an artifact whose digest is not the committed pin, and a batch branch repins
-# only at its boundary. The record states the digest and whether it matches the pin, so a record
-# taken on a repinned tree proves the recipe is the delivery one.
+# The module comes from `build-web-audioworklet.sh --module-only`, the delivery build's own cargo
+# line (#1061: no build mode but `--check-pin` holds it to the committed pin any more, so the copy
+# of that recipe this runner used to carry is gone). The record states the digest and whether it is
+# the release pin, the module the last release shipped.
 set -euo pipefail
 
 usage() {
@@ -70,13 +70,10 @@ case "$command" in
         # The commit is what `run` holds the module to, so it has to describe what is built.
         require_clean_tree prepare
         commit=$(git rev-parse --verify HEAD)
-        cargo_home=${CARGO_HOME:-$HOME/.cargo}
-        # The delivery recipe, flag for flag: `simd128`, stripped debug information, and the two
-        # path remaps that make the digest a function of the source alone.
-        CARGO_TARGET_DIR="$workdir/target" \
-        RUSTFLAGS="-C target-feature=+simd128 -C strip=debuginfo --remap-path-prefix=$cargo_home=/cargo --remap-path-prefix=$root=/repo" \
-            cargo build --locked --release --target wasm32-unknown-unknown -p host-web
-        cp -- "$workdir/target/wasm32-unknown-unknown/release/host_web.wasm" "$workdir/host_web.wasm"
+        mkdir -- "$workdir/module"
+        bash "$root/scripts/build-web-audioworklet.sh" --module-only "$workdir/module" >/dev/null
+        mv -- "$workdir/module/miso-engine-v1-audio-worklet.simd128.wasm" "$workdir/host_web.wasm"
+        rmdir -- "$workdir/module"
         cargo run --locked --release --quiet -p console-workload \
             --example mixing_automation_controls >"$workdir/controls.json"
         jq -e '.controls | length == 8' "$workdir/controls.json" >/dev/null
@@ -90,8 +87,8 @@ case "$command" in
             >"$workdir/provenance.json"
         observed=$(digest "$workdir/host_web.wasm")
         pinned=$(tr -d '\n' <hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256)
-        printf 'host_web.wasm %s at %s (pin %s: %s)\n' "$observed" "$commit" "$pinned" \
-            "$([[ "$observed" == "$pinned" ]] && printf match || printf 'differs; this tree is not repinned')"
+        printf 'host_web.wasm %s at %s (release pin %s: %s)\n' "$observed" "$commit" "$pinned" \
+            "$([[ "$observed" == "$pinned" ]] && printf 'the released module' || printf 'not the released module')"
         ;;
     preflight)
         [[ "$#" == 2 ]] || usage

@@ -117,26 +117,6 @@ async function buildSdkBundle(sdkRoot) {
   }
 }
 
-function validateLineage(checked, artifactDigest) {
-  gate("matrix", "candidate-lineage", CANONICAL_COMMIT.test(checked.candidateCommit),
-    "checked candidateCommit is not canonical lowercase 40-hex");
-  gate("matrix", "artifact-lineage", checked.wasmSha256 === artifactDigest,
-    "checked wasmSha256 differs from the artifact under qualification");
-}
-
-function lineageMutationProofs(checked, artifactDigest) {
-  assert.throws(
-    () => validateLineage({ ...checked, candidateCommit: "0".repeat(39) }, artifactDigest),
-    /matrix: candidate-lineage:/,
-    "matrix: malformed candidate lineage escaped its gate",
-  );
-  assert.throws(
-    () => validateLineage({ ...checked, wasmSha256: "0".repeat(64) }, artifactDigest),
-    /matrix: artifact-lineage:/,
-    "matrix: mismatched artifact lineage escaped its gate",
-  );
-}
-
 function validate(browserName, result) {
   gate(browserName, "result-schema", result?.schema === "miso.web.qualification.result.v1",
     "unexpected browser result");
@@ -863,13 +843,14 @@ async function main() {
     process.stdout.write(`artifact set: the exact ${served}-file shipped set is pinned\n`);
   }
 
+  // Issue #1061: `--check-matrix` holds each browser's floor and outcome, the Playwright version
+  // and the generated document to `results.json` -- all independent of the module. Its lineage
+  // (`wasmSha256`, `candidateCommit`) describes the last recorded qualification; only a release
+  // change must record one of the bytes it ships, and `scripts/web-audioworklet-identity.py`
+  // checks that (docs/RELEASE.md).
   const checked = checkMatrix
     ? JSON.parse(await readFile(RESULTS_PATH, "utf8"))
     : null;
-  if (checked !== null) {
-    validateLineage(checked, artifactDigest);
-    lineageMutationProofs(checked, artifactDigest);
-  }
   const server = await startQualificationServer({ artifacts, sdkBundle });
   try {
     const rows = [];

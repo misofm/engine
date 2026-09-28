@@ -178,9 +178,12 @@ Read by a test in order to print an oracle-derived pin instead of asserting it. 
 against the pin is the only thing suppressed: every cross-width and cross-target assertion still
 runs, so re-pin mode cannot turn a backend disagreement into a new pin (master plan §8.3).
 
+Issue #1061 retired `MISO_ENGINE_WEB_AUDIOWORKLET_REPIN`: `build-web-audioworklet.sh` prints the
+module's digest in every mode and compares it with the committed pin only under `--check-pin`, the
+release fingerprint check (`docs/RELEASE.md`).
+
 | name | meaning |
 |---|---|
-| `MISO_ENGINE_WEB_AUDIOWORKLET_REPIN` | `build-web-audioworklet.sh`: print the reproducibly built AudioWorklet artifact digest instead of comparing it to the committed pin. |
 | `MISO_ENGINE_REPIN_NATIVE_PCM_RUNNER` | print the five native PCM runner output digests instead of asserting them. |
 
 ## Interchange policy test shims
