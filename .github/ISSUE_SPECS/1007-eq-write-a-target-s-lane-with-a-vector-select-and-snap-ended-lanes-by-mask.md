@@ -139,3 +139,135 @@ The slice stands.
 * **No regression.** The `settled` isolate must not be more than 2 % slower on either subject.
 * **Descriptive.** Record `all_64`.
 * **Identity.** `DIGEST=150` must print "all identical".
+
+## Attempt 1 evidence
+
+Terra, 2026-09-28, branch `codex/1007-eq-vector-lane-writes`, code `6ce112c1` on `d5b7dc6a` (the
+#1005 branch with the batch head merged). "Base" below is `d5b7dc6a`, the #1005 kernel. Host: AMD
+EPYC 7313P, rustc 1.97.1, Node 22.23.2 (V8 12.4). Every timed command held the shared lock, was
+pinned with `taskset -c 31`, and printed its load average. Every arm is a clean build.
+
+### What changed
+
+* **Contracts 1-3.** `static ONE_HOT`, `lane_mask` (a load of the static row, `eq(1.0)`),
+  `empty_mask` and `lane_put` (`select(mask, splat(word), value)`). `settle` and `start_ramp`
+  write every coefficient, target and step word through `lane_put`; `start_ramp` stays
+  `#[inline(never)]` and keeps `lane_get`. A segment's ended lanes snap in `snap_ended`: the
+  `mask_or` of `lane_mask(track)` over the lanes that were ramping and reached `remaining == 0`,
+  then `coef = select(ended, target, coef)` and `step = select(ended, 0, step)` per word, at the
+  same point as before, with `refresh_identity` once per section as before.
+* **A1.** `lane_mask` reads `ONE_HOT.get(lane)` behind a `debug_assert!` and declines to the empty
+  mask, so a write through it changes nothing and nothing can panic.
+* **Deviation: `snap_ended` is `#[inline(never)]`.** Inlined into `process_section`, as in the
+  prototype, it gave V8's ramped masked kernel loop (`svf_block_ramped_with_dry_mask`, dual and
+  mono) a second carried stack slot in the shipped module (1 -> 2). Out of line, every EQ loop
+  carries exactly what it did at base, and the dual masked depth-2 pair carries one fewer (12 ->
+  11). It runs once per ramp end, not per frame, and it is not an arithmetic kernel (no `f32x4`
+  add, sub, mul or div), so the roster does not see it.
+* **Deviation: the per-lane `snap` is unit-test only.** Contract 4 keeps it "for `restore_track`
+  and any other caller", but `restore_track` writes with `lane_set` directly and nothing else
+  snapped one lane, so a production `snap` would be dead code. It is the oracle's snap.
+* **The oracle.** A unit-test-only `LANE_SET_WRITES` switch (default: the shipped `select` path,
+  so every unit test exercises it) puts `settle`, `start_ramp` and the segment snap back on the
+  #1005 code, kept verbatim as `settle_by_lane_set`, `start_ramp_by_lane_set` and `snap`. The
+  differential's arms now carry a kernel path (`RAMPING_LIST`, `LANE_SET_WRITES`) that every
+  preparation, target, reset, restore and render runs on.
+
+### Gate 1: identity
+
+* **Against the #1005 kernel** (`select_lane_writes_render_the_1005_bits_*`: the list on both
+  arms, `lane_set` against `select`) and **alone** on the batch-head ramping path
+  (`select_lane_writes_alone_render_the_lane_set_bits_*`), at `f32`, `Simd4` and `Simd8`, dual and
+  collapsed, 300 x 96 blocks per width and body in release and 40 x 96 in dev. It is #1005's
+  amended differential: `Both` targets (5,552-107,343 per width and body), resets mid-ramp,
+  boundary targets, hostile restores, hostile input. Every output word, report, payload and
+  internal word is compared strictly by bits after every block. All pass, with the same ramping
+  and elided counts as #1005's own gate (for example `Simd8` dual: 11,316 ramping blocks, 5,584
+  elided).
+* **Word for word** (`select_lane_writes_match_lane_set_word_for_word`, `f32`, `Simd4`, `Simd8`):
+  `settle`, `start_ramp`, a second lane's ramp starting 20 frames later so the two end in different
+  segments, the stationary hoist, and a bank-wide ramp ending in one segment, on every lane
+  including `W - 1`, with words that include `+0.0`, `-0.0`, `1e-40`, the smallest subnormal and
+  `+-f32::MAX`. Every word of the channel is compared after every step. Then a `Both` target (checked
+  to be `Both`) is applied to lanes 0 and `W - 1` and rendered across its ramp end, compared by
+  bits.
+
+### Gates 2 and 3: pinned scenario and existing gates
+
+`tools/console-workload/tests/eq_ramping_scenario.rs` (pinned on `a1fcab3d`) is unchanged and
+green, dev and release. `cargo test -p parametric-eq` dev and release, each with and without
+`test-support`: 12 binaries ok, `stationary_hoist` included. `cargo test --release -p
+console-workload`: all ok, every digest unchanged. `console_hoist`'s in-run `restated == quiet`
+assertion runs only inside the console benchmark, which this attempt does not run; the same premise
+is `stationary_hoist.rs`, the hoist step of the word-for-word test, and the mixing preflight's
+`restated_eq_only == quiet` under V8 (below). `cargo clippy --workspace --all-targets -- -D
+warnings`, `--all-features` on the two crates, `cargo fmt --check`, `RUSTDOCFLAGS=-D warnings cargo
+doc -p parametric-eq --features test-support`, and the realtime, lane, env-vocabulary,
+EQ-render-contract and workspace policy scripts: clean.
+
+### Gate 4: mutations
+
+All four red (`tests/MUTATIONS.md`): the one-hot row off by one lane, the snap mask from
+`was_ramping` alone, the snap increment set to the target, `settle` without the target word.
+
+### Gate 5: realtime and wasm
+
+The module built with the delivery recipe (`7a86a2c4…`, 3,498,302 bytes, 2,772 smaller than base's
+3,501,074; the same bytes as the timed module):
+
+* `KERNEL_ROSTER`: `parametric-eq f32x4 dual` 672 / 0 and `collapsed` 336 / 0, each one function;
+  kernels 15; `f32x4` arithmetic 14,139 (base 14,137). No scalar `f32` arithmetic in either EQ
+  `process_bank`. Render callgraph as base, no new trap owner. `check-web-audioworklet.sh` on the
+  assembled seven-file directory: passes.
+* `run-wasm-gates.sh`: ok, V8 spill gate ok (dual tail 109, mono pair 78, mono tail 53, none
+  carried).
+* **Every EQ loop, masked included** (the spill gate's own analysis over both `process_bank`
+  functions): identical instruction counts and carried slots to base, except the dual masked
+  depth-2 pair, 12 -> 11. No new carried slot.
+* V8 output identity (`DIGEST=150`, `eq_gain`, `mono_eq` and the all-six-live stereo and mono
+  subjects, all seven arms): all identical. Mixing preflight: all seven digests equal base's.
+
+### Gate 6 and the timing table
+
+µs per 64-track block; Δ against settled in the same run.
+
+**V8** (`web_auto.mjs` as in #1005's evidence, 6 rounds x 500 blocks, load 4.5 -> 3.7):
+
+| arm | `eq_gain` base | change | `mono_eq` base | change | all-six stereo base | change | all-six mono base | change |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| settled isolate | 22.07 | 21.79 | 98.77 | 99.11 | 91.89 | 92.50 | 133.21 | 132.98 |
+| one lane | +2.99 | +2.85 | +0.82 | +1.15 | +5.19 | +4.53 | +1.76 | +2.20 |
+| 8 of 64 | +11.41 | **+9.97** | +3.99 | **+3.07** | +29.83 | **+27.61** | +13.89 | **+12.94** |
+| all 64 | +38.31 | **+24.47** | +19.83 | **+10.36** | +75.49 | **+60.26** | +39.52 | **+29.05** |
+
+Settled is within 2 % on both gate subjects (-1.3 %, +0.3 %). One lane is one target per block,
+inside the run-to-run spread either way.
+
+**Browser `console_mixing_automation` arm** (one warmup and two measured launches per module,
+alternated; load 3.5 -> 4.5), p50 µs, rounds 1/2. The row rides three EQ tracks, so E2's share is
+small:
+
+| module | quiet | restated | automated | paired ramp Δ |
+|---|---|---|---|---|
+| base | 161.09 / 155.11 | 159.90 / 158.22 | 164.39 / 161.95 | 4.05 / 3.57 |
+| change | 155.18 / 153.29 | 159.88 / 156.10 | 163.63 / 159.69 | 3.64 / 3.49 |
+
+**Native** (the #1005 scratch harness, base, change, change, base, 6 rounds x 800 blocks each; load
+8.0 -> 8.4; `Simd4` binds four-lane EQ and compressor banks through a scratch-only switch in both
+builds). Rows and Δ are the mean of the two invocations:
+
+| arm | stereo `Simd8` base / change | stereo `Simd4` | collapsed `Simd8` | collapsed `Simd4` |
+|---|---|---|---|---|
+| settled row | 35.22 / 35.17 | 60.23 / 60.06 | 70.17 / 68.74 | 92.88 / 92.40 |
+| one lane | +0.94 / +1.30 | +1.29 / +0.96 | +0.12 / +0.36 | +0.28 / +0.66 |
+| 8 of 64 | +8.03 / **+7.51** | +9.47 / **+8.00** | +1.93 / +2.04 | +2.57 / **+1.86** |
+| all 64 | +30.62 / **+18.32** | +35.58 / **+22.16** | +17.44 / **+10.66** | +17.69 / **+7.61** |
+
+No settled row is slower. The saving is per target: all 64 saves 12-14 µs (stereo) and 7-10 µs
+(collapsed) at every width and under V8, and one lane is within the spread.
+
+### For the verifier
+
+* The `snap_ended` placement is the one choice here that the brief did not make; the loop scan
+  above is why.
+* M1 breaks most EQ unit tests, because preparation settles every lane through `lane_put`.
