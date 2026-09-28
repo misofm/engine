@@ -19,7 +19,8 @@ hoist's ruling records the equivalent fact for its own arms; this one is starker
 effect under optimisation is simply absent from the workload.
 
 Measured anyway, because a null result is worth more written down than assumed — the run is
-`scripts/run-console-benchmark.sh --phase3`, record
+`scripts/run-console-benchmark.sh --phase3` (a one-shot arm #1025 retired; the runner's header
+links a version that still carries it), record
 `artifacts/issue149-phase3/console-benchmark.accepted.jsonl`:
 
 | workload | phase 1 | phase 2 | phase 3 | phase 3 vs phase 2 |

@@ -111,7 +111,8 @@ with no range-reduction fold, replacing Cephes degree 6 and 9 with folds.
 **Measurement boundary.** Fixtures `fixtures/session/v1/parametric-eq-nine-track.toml` and
 `fixtures/session/v1/console-sixty-four-track.toml`, 48 kHz, 128-frame quantum, 1000 observations,
 one warmup pass and two measured rounds, descriptive only, no threshold. Runner
-`scripts/run-console-benchmark.sh --phase2`; records
+`scripts/run-console-benchmark.sh --phase2` (a one-shot arm #1025 retired; the runner's header
+links a version that still carries it); records
 `artifacts/issue149/console-benchmark.accepted.jsonl` (exact) and
 `artifacts/issue149-phase2/console-benchmark.accepted.jsonl` (fast). These are two single-arm runs,
 not a paired alternation — the exact tier is no longer in the tree by phase 2. The paired arm was
