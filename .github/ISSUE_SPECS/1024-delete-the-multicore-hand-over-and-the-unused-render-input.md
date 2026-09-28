@@ -133,3 +133,12 @@ has no input planes), but the gates must prove it:
    `-p engine -p graph -p capi -p host-core` (a toolchain with the aarch64 std; CI has none).
 3. Keep `reserve_replacement`, `epoch`, `commit`, `next_absolute_sample` and `render_contiguous`:
    they are capi's, not multicore remnants.
+
+## Carried from #1023 (root, 2026-09-28)
+
+#1023 deferred engine `PlanarBufferRef`'s `try_new`, `plane`, `plane_range` and its fields
+`storage`/`stride` (`crates/engine/src/realtime/buffer.rs:133-288`) to this issue. Deleting the
+fields removes the struct's null-pointer niche, so `Option<PlanarBufferRef>` in `RenderIo` grows a
+tag and `PreparedRenderPlan::render_inner` changes in the shipped module. Remove them together with
+the render input this issue deletes, and account for the artifact change in the same place. See
+the #1023 spec, "Kept".
