@@ -375,3 +375,120 @@ base, and the boundary re-pin must carry this reason.
    the artifact, so it is its own issue.
 2. `fixtures/capi-qualification/v1` still names the runner's files; #1029 deletes it.
 3. Open #895 (native runner I/O) closes as descoped.
+
+## Sol verdict, attempt 1
+
+**PASS.** Sol, 2026-09-28. Verified on a scratch merge of `7d72a325` into `codex/batch-slim-2`
+(`6709552c`): the merge is textually clean. The merged tree's Rust, manifests and lockfile are
+byte-identical to this branch; the batch head adds only its AudioWorklet re-pin. Nothing live was
+deleted, no claim was lost, no ABI or wire code moved, and every gate I ran passes on the merge.
+Findings, most severe first:
+
+1. **Merge note, not a defect of this change: the batch's AudioWorklet pin must move again.** The
+   batch head already re-pinned at its boundary (`cbfaf9de`, `6c952a2c…`). This change moves the
+   module to `01dd58be…`. I built both modules on this machine: both are 3,485,631 bytes;
+   `wasm-objdump -d` output is identical; and 8 data bytes differ, the seven `crates/source/src/lib.rs`
+   panic line fields, each −9. So on the merge, the artifact job's pinned build fails with
+   "AudioWorklet artifact pin mismatch" until someone re-pins. The re-pin touches
+   `miso-engine-v1-audio-worklet-artifact.sha256`, `qualification/results.json`,
+   `BROWSER_DEPLOYMENT_MATRIX.md` and `scripts/test-web-audioworklet.mjs`, and needs the browser
+   qualification re-run, with this reason recorded. Without the pin check, the merged module passes
+   `check-web-audioworklet.sh`, `check-browser-expected-resources.py --artifacts` and the V8 spill
+   gate.
+2. **Low: the moved seek model covers less than its new module doc and this spec's evidence
+   claim.** The model's ring plant reproduces: deleting `lib.rs:1311` fails at schedule 0 step 3.
+   So does my own plant, `underrun_events` `+0`. However, all 512 short end-of-region submissions
+   in the 256 frozen schedules are expected `Invalid`, so none is ever admitted. All 3,456 renders
+   copy 0 frames, so "every rendered sample" is underrun silence. A plant that rejects every short
+   end-of-region block (`lib.rs:942`, dropping `&& !end_of_region`) leaves the model green. The
+   claim is still held: host-core's
+   `prepare_reports_the_session_shape_and_feeds_sources_independently` goes red on it. So does
+   capi's parity test when the C side drops `end_of_region`. Correct the module doc
+   ("complete and short end-of-region chunks", "every rendered sample") and the Gate 5
+   attribution. The weakness predates this change: the code moved unchanged, and every item is
+   identical to `source_fixture.rs` at base.
+3. **Low: `SourceDiagnosticCode` is internal and dead, not a host-visible code table.** It is a
+   `#[non_exhaustive]` Rust enum with no `repr` or numeric value. None of its strings appear in the
+   C header, the SDK, the protocol or the docs. The C ABI's `source.channels.mismatch` and
+   `source.rate.mismatch` come from host-core's own table (`host-core/src/source.rs:77-88`), not
+   from this enum. The registry's 9 unique strings are absent from both the base and the merged
+   module, so it does not ship, contrary to follow-up 1. The whole registry (`SourceDiagnostic`,
+   `SourceDiagnosticPath`, `SourceDiagnosticCode`, `PcmSourceRingError::diagnostic_code`) has no
+   caller outside `source`'s own `registry_and_host_shape_errors_are_stable` unit test. Even
+   `RateMismatch` is constructed only there. The follow-up should delete the registry rather than
+   freeze its numbering. Deleting it shifts `source` panic lines, so it re-pins the module.
+4. **Information.**
+   - `blake3` has no Rust user left. Capi's full normal and build closure is identical on base and
+     merge (91 packages, all targets), and so are the 25 derived product crates and host-web's wasm
+     closure.
+   - Three gates guard the `blake3:` identity:
+     - `scripts/check-stem-store-v1.mjs` runs `stem-store-hash-v1.mjs`, which checks official and
+       `hash-wasm` BLAKE3-256 known answers against `incremental-blake3.js` across hostile chunk
+       sizes;
+     - the session validator's grammar tests;
+     - the new lint step.
+   - The lint step discriminates. A flipped `.pcm` byte, a flipped `.wav` byte, a changed
+     `VECTORS.tsv` identity and a corrupted generator permutation each exit 1. It routes `full`.
+   - All ten `misofm/cli` corpus copies (`3c89436`) are byte-identical.
+
+**Removed claims against their named guards (planted, then reverted).**
+
+| removed test | mutation | guard | result |
+|---|---|---|---|
+| `real_c_abi_riff_and_rf64_render_exact_block_planar_outputs`, C ABI half | C submit reverses its planes (`ffi.rs:480`) | capi `direct_and_c_render_match_one_and_ten_tracks_across_launch_rates` | red at 44.1 kHz, block 0 |
+| `shared_runner_orders_short_final_submission_and_terminal_failures` | C submit drops `end_of_region` (`ffi.rs:493`) | the same capi parity test | red |
+| the same test | host path rejects short final blocks (`source/src/lib.rs:942`) | host-core `tests/prepare.rs`, and the seek model | host-core red, **seek model green** (finding 2) |
+| `source_fixture::tests::shared_sha256_alias_matches_published_literals` | `sha256_hex` drops the first digest byte | `bench_support` `matches_the_published_vectors` and the four `audit` alias tests | all 5 red |
+
+**Nothing live deleted.** Outside history, `git grep` on the merge finds each removed crate,
+module, item, script, fixture, doc and dependency only in:
+- comments;
+- `docs/derivations/241-schema-repins.md` (history);
+- `fixtures/capi-qualification/v1`, which is dead and which #1029 deletes.
+
+It finds none in any workflow, `Cargo.toml`, `scripts/lib/product-crates.sh`, the SDK or
+`hosts/`. No crate under `crates/capi`, `host-core`, `engine`, `lane`, `protocol`, `session`,
+`hosts/` or `sdk/` changed. Nor did `bench`, `bench-support` or `console-workload`. The
+`qualification.yml` job set and `verdict` table are unchanged.
+
+**Gates on the merge.** All pass, and I found no failure on base to attribute.
+
+- **Build and lint:**
+  - `cargo check --workspace --all-targets --all-features` (0 warnings);
+  - `clippy -D warnings`, with and without `--all-features`;
+  - `fmt --check`;
+  - `RUSTFLAGS=+simd128` wasm check of `host-web`, `host-core` and `source`;
+  - `CARGO_PROFILE_RELEASE_PANIC=unwind` release workspace check.
+- **AArch64:**
+  - `aarch64-apple-ios` and `aarch64-linux-android`: `--workspace --lib --all-features`,
+    excluding only `wasm-console` and `wasm-gates`;
+  - `--all-targets` for `source`, `capi` and `host-core` (0 warnings).
+- **Cross-targets:** `check-cross-targets.sh` passes. The same 10 iOS memset rows; no `source` or
+  runner row; the product list is identical to base.
+- **Tests:**
+  - dev tests of `source` and its reverse dependencies, plus `bench-support` (547 passed), and
+    `audit` (40);
+  - release tests of `source`, `capi`, `host-core` and `host-web` (465), and `audit`, `bench` and
+    `console-workload` (128);
+  - all 0 failed.
+- **Console digests:** `gain_pan_profile digests` is byte-identical to the batch head (17 rows).
+- **audit-native replayed** (steps 1 and 3–20):
+  - `audit capi`: 100,000 calls, 0 violations, and the Issue-544 validator passes;
+  - `check-capi-abi.sh` and `--self-test` pass (shared and static linkage);
+  - the trace, probe and determinism steps pass.
+- **Scripts:**
+  - `run-wasm-gates.sh`;
+  - `test-env-vocabulary.sh` (67 names);
+  - 58 lint-job policy invocations: every check/test pair, `check-ci-path-routing.py`,
+    `test-ci-path-routing.py`, `check-script-reachability.py` (133 reached, 8 operator),
+    `check-release-shape.py` with `--self-test`, `check-test-support-ci.py`, `generate.py --check`
+    and `check-stem-store-v1.mjs`;
+  - `check-sdk-generated.sh`, `check-protocol-wasm-parity.sh`, and the benchmark validators (untimed).
+
+**Not verified here:**
+- `run-aarch64-tests.sh`: no arm64 runner. The seek model now also runs in the AArch64 legs, using
+  plain integer and IEEE `f32` arithmetic.
+- `check-sdk-types.sh`, `sdk-package.sh` and `check-sdk-headless.sh`: these need `npm ci`.
+- The Playwright browser job.
+
+The SDK and browser sources are untouched, and the module's code section is identical.
