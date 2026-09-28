@@ -39,9 +39,11 @@
 //!
 //! L3's f32 coefficients were derived by an LP minimax fit on that residual, rounded and refit in
 //! sequential f32 arithmetic, then coordinate-searched by the full two-rounding evaluator. The
-//! committed words and fit method are recorded in `docs/issue880-mb1.md`; the fit is provenance,
-//! while the exhaustive M1 sweep is the accuracy proof. Its reduced `t` interval is
-//! `[-0.292893…, 0.414214…]`, keeping `s` bounded away from the `atanh` singularity at ±1.
+//! committed words and fit method are recorded in the #880 MB-1 note, removed by #1031 and kept
+//! at [`docs/issue880-mb1.md`](https://github.com/misofm/engine/blob/5379e46ca3b349b9d277d642c008bb7a9643fb76/docs/issue880-mb1.md);
+//! the fit is provenance, while the exhaustive M1 sweep is the accuracy proof. Its reduced `t`
+//! interval is `[-0.292893…, 0.414214…]`, keeping `s` bounded away from the `atanh` singularity at
+//! ±1.
 //!
 //! **Division audit.** L3 adds one `Lane::div` per `log2_lane` call for `t / (t + 2)`; the
 //! denominator lies in `[1.7071…, 2.4143…]`. A source census of production lane divisions at
@@ -81,8 +83,9 @@ const EXP2_P: [f32; 6] = [
 /// L3's f32 minimax fit for the atanh residual, highest order first.
 ///
 /// `log2_lane`'s fold and transform are derived in the module documentation. These exact f32
-/// words are the committed LP-minimax/refit/coordinate-search result recorded in
-/// `docs/issue880-mb1.md`.
+/// words are the committed LP-minimax/refit/coordinate-search result recorded in the #880 MB-1
+/// note ([`docs/issue880-mb1.md`](https://github.com/misofm/engine/blob/5379e46ca3b349b9d277d642c008bb7a9643fb76/docs/issue880-mb1.md),
+/// removed by #1031).
 const LOG2_L3_P: [f32; 3] = [
     f32::from_bits(0x3e99_004a),
     f32::from_bits(0x3ecc_aefc),

@@ -25,7 +25,8 @@ that fans open sessions in iOS and Android apps that embed the engine natively.
 exercises it only in part.**
 - The x86-64-v3 CI host is `Simd8`, and its effect factories decline most 4-lane banks.
 - So the `Simd4` bank-count pins in `crates/graph-compiler/tests/bank_levels.rs` never run
-  (`docs/handoffs/bug-966-2026-09-27/README.md:13-19`).
+  ([#966 handoff `README.md:13-19`](https://github.com/misofm/engine/blob/5379e46ca3b349b9d277d642c008bb7a9643fb76/docs/handoffs/bug-966-2026-09-27/README.md#L13-L19),
+  removed by #1031).
 - `crates/gate-expander/tests/identity.rs:223` returns unless `Simd4`.
 - The only tests written *for* non-x86 are stubs that assert almost nothing:
   `crates/lane/tests/g6_ftz_inert.rs:123` and `tools/wasm-gates/tests/g6_full_corpus_ftz.rs:214`.
@@ -62,7 +63,9 @@ message.
   `tools/wasm-gates/tests/g6_full_corpus_ftz.rs:214`) gain real assertions for AArch64.
 
 **The bug-966 `Simd4` pins get a home.** They run on this job, where `Backend::current()` is
-`Simd4`. Alternatively, commit `wasm-pins-harness.patch` as a `wasm-guests` step.
+`Simd4`. Alternatively, commit
+[`wasm-pins-harness.patch`](https://github.com/misofm/engine/blob/5379e46ca3b349b9d277d642c008bb7a9643fb76/docs/handoffs/bug-966-2026-09-27/wasm-pins-harness.patch)
+(removed by #1031) as a `wasm-guests` step.
 
 **`cargo check` rows** for `aarch64-linux-android` and `aarch64-apple-ios` return to
 `check-cross-targets.sh` (`docs/TARGET_MATRIX.md:59-66`). Darwin realtime, the per-frame `memset`,
