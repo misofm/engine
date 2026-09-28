@@ -59,6 +59,10 @@ ALLOWED = {
     ("crates/parametric-eq/tests/stationary_hoist.rs", "let nudged ="),
     ("crates/parametric-eq/tests/stationary_hoist.rs", "quiet, nudged,"),
     ("tools/bench/src/console.rs", "restate or nudge"),
+    # The 2026-09-28 test-value audit quotes this gate while assessing it.
+    ("docs/handoffs/test-value-2026-09-28/TEST-VALUE-AUDIT.md", "\"nudge\" is already refused as a wire key"),
+    ("docs/handoffs/test-value-2026-09-28/data/script-gates-verify.md", "It bans `nudge` as a name"),
+    ("docs/handoffs/test-value-2026-09-28/data/script-gates-verify.md", "`NudgeX`, `.nudge`"),
     # The derivation record for the rename itself has to name what it renamed.
     ("docs/derivations/242-parameter-lattice.md", "slot became a populated"),
 }
