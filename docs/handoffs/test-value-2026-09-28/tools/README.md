@@ -12,6 +12,7 @@ tools/run-mutants.sh compressor 5 10
 tools/run-mutants.sh graph-compiler 5 10
 tools/run-mutants.sh host-core 5 10 --features control-provider,test-support --shard 0/4 --sharding round-robin
 tools/run-mutants.sh parametric-eq 6 12 --shard 0/4 --sharding round-robin
+# the three positional arguments are: package, parallel jobs, jobserver tasks
 python3 tools/parse_mutants.py "$TVA_DIR/mut/out-compressor" compressor
 python3 tools/analyze_matrix.py compressor "$TVA_DIR/mut/out-compressor/matrix.json" --exclude-file src/corpus.rs
 python3 tools/dominance.py compressor "$TVA_DIR/mut/out-compressor/matrix.json" --exclude-file src/corpus.rs
@@ -47,3 +48,10 @@ What each bug turned red at `a9414c0c`:
 
 `revert.py` edits code by exact text match, so if a later refactor moves the lines it fails loudly
 rather than silently injecting nothing. The recorded reverts are in each crate's `MUTATIONS.md`.
+
+## Script reachability (issue 10's gate)
+
+`reach.py <repo root> strict <tracked-files.txt> <out.json>` lists the files under `scripts/` that
+no workflow or `package.json` script reaches, following non-comment mentions transitively. Make the
+file list with `git ls-files > tracked-files.txt`. The audit found 26 such files at `a9414c0c`.
+

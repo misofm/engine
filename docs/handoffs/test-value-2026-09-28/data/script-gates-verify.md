@@ -1,5 +1,20 @@
 <!-- Produced for the 2026-09-28 test-value audit (base a9414c0c) by a helper agent, then spot-checked by the auditor. Paths such as `ci/`, `tva/` or `method/` refer to the auditor's scratch directory, which was deleted after the audit; CI run and job IDs are enough to re-fetch the logs with `gh api`. -->
 
+> **Auditor's corrections (2026-09-28), which supersede this file where they conflict.**
+> 1. §2's "a cached capi-only target dir is the honest fix" does not hold. `rust-cache` does not
+>    keep workspace crates, so every run recompiles them anyway. No cheap fix was found for the
+>    36 s rebuild.
+> 2. §7's list of "every other target" arms is too wide:
+>    - `lane/src/wide_impl.rs:291-298` and `:315-322` are the portable `max`/`min` that AArch64
+>      (NEON) also compiles;
+>    - `hosts/host-web/src/lib.rs:7260-7265` is the native branch every x86 build takes;
+>    - `soft-clip/src/lib.rs:903-911` is a width predicate.
+>
+>    Only `lane/src/backend.rs:60-68`, `graph/src/runtime.rs:328-334` and
+>    `target-smoke/src/lib.rs:75-85` are compiled by scalar Wasm alone. See issue 05.
+> 3. The unrun one-shot files are 17, not 18 (two are under `scripts/fixtures/`): 8 + 1 + 17 = 26.
+
+
 # Verification of fork-scripts.md headlines (script gates in CI)
 
 Tree: `.claude/worktrees/agent-af4b42f777572dd67` at `a9414c0c` (= origin/main). CI figures come from PR #1016's
@@ -200,7 +215,7 @@ Two more pins of the same construction show up in the same logs (outside this he
 other helper):
 - **expected.json resource rows** (`FAIL browser expected resources: expected.json's resource rows are stale …`):
   5 runs. Two of them are new: 34922385988 and 34875764291.
-- **`graph audit record hash differs`** (scripts/trace-builtins-graph-audit.sh:62): 4 runs, 34923128333,
+- **`graph audit record hash differs`** (scripts/trace-builtins-graph-audit.sh:65-69): 4 runs, 34923128333,
   34877814180, 34758939108 and 34566763819. The four form a chain of successive pins. The sha256 covers an audit
   record whose only variable fields are three compile-time constants printed by tools/audit/src/builtins_graph.rs:48-53
   plus counters that jq already asserts at :47-60. There were 6 repin commits since 2026-08-28. This **corrects
@@ -366,7 +381,7 @@ History sources:
 | check-web-audioworklet.sh + children | render/meter/command closure allocation-free; atomics/exports; kernel vector ratchet; cross-language vocabulary | **caught**: kernel roster ratchet `route_reduce … vector=560 scalar=1680` (36171020566, 36170326170); command-reason vocabulary drift `observe() no longer accepts exactly requestId/subscriptions` (33932900368) | KEEP; drop the tautological `parameter-metadata --check` in CI (75 s) |
 | check-browser-expected-resources.py (fork: SHRINK) | native vs simd128 digest; exact resource bytes | 5 reds in the 40, all stale rows | agree: keep the digest half |
 | test-web-audioworklet.sh / .mjs | JS host behaviour | 2 reds on one branch (`1 !== 0`, 33936364417/33935625430) | KEEP once; drop the lint copy |
-| audits + trace scripts (fork: "no pins") | zero alloc/lock/syscall over 1e5-1e6 blocks | all **4** "Builtins realtime audit" reds were `graph audit record hash differs`, a stale pin (trace-builtins-graph-audit.sh:62) | **CORRECTED**: KEEP the audits, drop `expected_audit_hash` |
+| audits + trace scripts (fork: "no pins") | zero alloc/lock/syscall over 1e5-1e6 blocks | all **4** "Builtins realtime audit" reds were `graph audit record hash differs`, a stale pin (trace-builtins-graph-audit.sh:65-69) | **CORRECTED**: KEEP the audits, drop `expected_audit_hash` |
 | audit capi / source-duration + Issue-544 validator | realtime; memory independent of stem duration | 2 reds, both the 6472 dict | KEEP the claims; drop `layout_entries`/`layout_total_bytes` |
 | check-capi-abi.sh | frozen C header, symbol set, C/C++ consumers | 0 reds | KEEP; see §2 for the build cost |
 | check-graph-determinism.sh | HashMap order nondeterminism | 0 | KEEP |

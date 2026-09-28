@@ -1,12 +1,15 @@
-# Delete tests that cannot fail on a product change, test only test tooling, or cover removed surface
+# Delete tests that do not test their named claim, test only test tooling, or cover removed surface
 
 Draft, not a GitHub issue. From the 2026-09-28 test-value audit
-([`../TEST-VALUE-AUDIT.md`](../TEST-VALUE-AUDIT.md) §5 item 6). Base `a9414c0c`. The rows in part C
+([`../TEST-VALUE-AUDIT.md`](../TEST-VALUE-AUDIT.md) §5 item 6). Base `a9414c0c`. Paths starting `../`
+are relative to the audit's handoff folder. The rows in part C
 need owner rulings R6 and R7. Parts A and B need none.
 
 ## Problem
 
-About 150 tests do not test the claim in their name. Some can still fail when the product breaks
+The audit counts about 150 tests that do not test the claim in their name. This issue lists the
+about 80 whose rows were checked one by one. The source-text scrapes are issue 07, and the dominated
+slow tests are issue 09. Some can still fail when the product breaks
 badly, as a side effect of running it, but where the audit measured, nothing they catch is uniquely
 theirs. They fall into four kinds:
 - a tautology, such as `QuantumFrames(128).0 == 128`, `render() == render()` of a pure function, or
@@ -27,13 +30,13 @@ the reason and the guard for every row.
 
 ## Outcome: delete these
 
-**A. Cannot fail on a product change (no ruling).**
+**A. The named claim holds by construction, or nothing is asserted (no ruling).**
 - **D2:** `crates/parametric-eq/src/lib.rs:4471` (seven `println!`, runs in CI, asserts nothing).
 - **D3:** `crates/gate-expander/tests/identity.rs:223` (returns unless `Simd4`; asserts nothing even
   then).
 - **D6:** the `print_pins`/`print_digests` regeneration printers in parametric-eq, effect-runtime and
   delay.
-- **D8-D16, D18-D21:**
+- **D8-D16, D17 except the `g6_ftz_inert.rs:123` stub, D18-D21:**
   - the evidence-only reduction helper tests in `graph/src/lib.rs:4532`, `:4545`;
   - the repeat of a compile-time `const` assert (`graph/src/runtime.rs:8238`);
   - constant restatements (`parametric-eq/src/lib.rs:4639`, `effect-runtime/tests/state_payload.rs:25`,
@@ -43,8 +46,9 @@ the reason and the guard for every row.
   - equivalence-blind `compressor/tests/ramps.rs:587`;
   - `rack/tests/console_bank.rs:405`;
   - the Annex-2 one-hot tautology in `dsp-reference`;
-  - three tests of test instrumentation (`builtins-compiler/src/lib.rs:9759`,
-    `transient-shaper/tests/allocation.rs:112,117`);
+  - a test of test instrumentation, `builtins-compiler/src/lib.rs:9759`;
+  - `transient-shaper/tests/allocation.rs:112,117`, **only after** that file's zero-allocation gate
+    (`:202`) moves to `bench_support::alloc`. Until then they are its positive controls;
   - four copies of `shared_hex_adapter_matches_literal_bytes`.
 - **H1-H17:**
   - std-only (`protocol/tests/delivery_ownership.rs:435`, `host-core/tests/builtin_batch_endpoint.rs:862`);
@@ -77,12 +81,16 @@ the reason and the guard for every row.
   - the `tools/bench/src/gate_active.rs` and `multiband_active.rs` test modules;
   - done together with issue 10's runner scripts.
 - **R7:**
-  - `session/tests/render_mode_tiers.rs:59`, `:72` (the retired `dependency_waves` token);
   - `builtins/tests/contract.rs:297`, `conformance/tests/effect_contract.rs:240` and
     `conformance/tests/fixtures.rs:34` (extended research-rate tiers);
-  - H55 (retired pre-causal descriptors, `effect-package/tests/descriptor_v1_qualification.rs:876,967,1043`);
-  - H56 (`engine/src/realtime/disjoint.rs:1016`, concurrent multi-lease execution of the removed
-    dependency-wave scheduler).
+  - H55 (retired pre-causal descriptors,
+    `effect-package/tests/descriptor_v1_qualification.rs:876,967,1043`).
+- **Not here, because they guard live product code:**
+  - `session/tests/render_mode_tiers.rs:59`, `:72` guard the refusal of a token the grammar still
+    knows (`session/src/model.rs:97`). They go with the token, in a product issue, if R7 says so.
+  - H56, `engine/src/realtime/disjoint.rs:1016`, is the data-race probe for
+    `unsafe impl Sync for DisjointArena` (`:86`). It goes only with the multi-lease code and that
+    impl.
 
 **Keep, and do not delete** the `cfg(not(x86))` stubs (`lane/tests/g6_ftz_inert.rs:123`,
 `tools/wasm-gates/tests/g6_full_corpus_ftz.rs:214`) and `target-smoke`'s per-target half. With
@@ -99,9 +107,11 @@ listed there (none is), and this issue's spec. No product code.
    Before deleting, the implementer applies a mutation the row's name claims to guard, in a scratch
    branch, and the row stays green. For example: reorder the reduction for D8; change
    `EFFECTIVE_CASCADE_DEPTH`'s *use* rather than its value for D11.
-2. **Mutation equivalence** in the audited crates the rows touch, using `../tools/run-mutants.sh`
-   with the audit's settings (compressor all; graph-compiler all; host-core and parametric-eq
-   `--shard 0/4 --sharding round-robin`). The caught set is identical before and after. In the
+2. **Mutation equivalence** in the audited crates the rows touch, before and after, same arguments:
+   - `../tools/run-mutants.sh compressor 5 10`;
+   - `graph-compiler 5 10`;
+   - `host-core 5 10 --features control-provider,test-support --shard 0/4 --sharding round-robin`;
+   - `parametric-eq 6 12 --shard 0/4 --sharding round-robin`. The caught set is identical before and after. In the
    audit's baseline:
    - D14, D20 and the MQ-2 marker and spike tests catch nothing;
    - D5's preflight (108 mutants), D13 (54) and D15 (36) catch mutants, but none uniquely: every

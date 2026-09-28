@@ -24,12 +24,16 @@ How to read the results:
 
 ## Summary
 
-| crate | mutants (product) | caught | survived | timeout | score | tests | tests with a unique catch | greedy cover | caught by ≥1 randomized test |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| compressor (all) | 525 | 390 | 93 | 0 | 80.7 % | 100 | 11 | 16 | 290 (74 %) |
-| graph-compiler (all) | 335 | 217 | 49 | 3 | 81.8 % | 113 | 9 | 17 | 104 (48 %) |
-| host-core (1 in 4) | 434 | 284 | 84 | 5 | 77.5 % | 229 | 34 | 54 | 0; no randomized test exists |
-| parametric-eq (1 in 4) | 323 | 246 | 31 | 12 | 89.3 % | 129 | 14 | 21 | 167 (68 %) |
+| crate | mutants (product) | caught | survived | timeout | score | tests | tests with a unique catch | greedy cover | caught by the crate's randomized differentials | caught by any test flagged `randomized` |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| compressor (all) | 525 | 390 | 93 | 0 | 80.7 % | 100 | 11 | 16 | 191 (49 %), the three `randomized_differential_*` | 290 (74 %) |
+| graph-compiler (all) | 335 | 217 | 49 | 3 | 81.8 % | 113 | 9 | 17 | 77 (35 %), the `bank_levels` probe | 104 (48 %) |
+| host-core (1 in 4) | 434 | 284 | 84 | 5 | 77.5 % | 229 | 34 | 54 | 0: none exists | 0 |
+| parametric-eq (1 in 4) | 323 | 246 | 31 | 12 | 89.3 % | 129 | 14 | 21 | 87 (35 %), the nine ramping-elision `*_bits_*` differentials | 167 (68 %) |
+
+The classifier's `randomized` flag also covers fixed tests that feed one seeded noise signal, so the
+last column overstates what randomized *differentials* catch. The "caught by at least one randomized
+test" lines below use that broader flag.
 
 ## Extra passes
 
@@ -39,8 +43,11 @@ How to read the results:
 - **graph meter pass (targeted).** This pass mutated `crates/graph/src/runtime.rs` with
   `-F meter`, against the graph and graph-compiler tests, with `graph/test-support`.
   - 29 mutants: 22 caught, 4 survived, 3 unviable.
-  - graph's own tests catch only 1 of the 22. The graph-compiler meter tests are the real guards.
-  - Among them, `an_observer_failing_mid_bank_leaves_every_later_meter_as_the_declined_arm_does`
+  - graph's own tests (its lib unit tests and `rt9_resident_bank_input_alloc`) catch 15 of the 22.
+    The graph-compiler meter tests are the only catchers of the other 7. Four of those 7 are product
+    code: `accepts_banked_meter -> false`, `banked_meter -> false`, and `bank_meter_seeds -> true`
+    and `-> false`.
+  - Among the graph-compiler tests, `an_observer_failing_mid_bank_leaves_every_later_meter_as_the_declined_arm_does`
     (2.6 s) catches every mutant that these do:
     - `the_full_meter_pass_renders_without_an_audited_event` (22.6 s);
     - `post_matrix_all_meters_run_one_full_bank_pass_per_cohort_and_publish_the_scalar_frames`

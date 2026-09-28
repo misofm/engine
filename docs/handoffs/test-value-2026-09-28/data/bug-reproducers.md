@@ -1,5 +1,14 @@
 <!-- Produced for the 2026-09-28 test-value audit (base a9414c0c) by a helper agent, then spot-checked by the auditor. Paths such as `ci/`, `tva/` or `method/` refer to the auditor's scratch directory, which was deleted after the audit; CI run and job IDs are enough to re-fetch the logs with `gh api`. -->
 
+> **Auditor's note (2026-09-28).** This file covers the DSP and graph group only. Also keep the
+> seven #970 reproducers in `crates/host-core/tests/collapse_arming.rs`, which re-injecting #970
+> at HEAD turns red. When #994 was re-injected at HEAD (the `if true` revert of
+> `knee_coefficients`), `knee_overflow.rs:185`
+> `an_automated_knee_ramp_through_the_overflow_band_does_not_duck` stayed **green**. It no longer
+> reproduces its bug on its own and should be repaired or replaced; see `../TEST-VALUE-AUDIT.md`
+> §4.2.
+
+
 # Regression reproducers for #966, #970, #994 and #1015 in the DSP/graph group
 
 Source of truth: the revert rows in each crate's `tests/MUTATIONS.md`. A test is listed as a

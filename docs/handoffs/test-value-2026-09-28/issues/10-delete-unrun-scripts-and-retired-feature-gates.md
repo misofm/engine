@@ -1,17 +1,21 @@
 # Delete unrun one-shot scripts and the gate rules that guard retired features
 
 Draft, not a GitHub issue. From the 2026-09-28 test-value audit
-([`../TEST-VALUE-AUDIT.md`](../TEST-VALUE-AUDIT.md) §5 item 10 and §7). Base `a9414c0c`. The
-isolated-benchmark rows need owner ruling R6; the rest need none.
+([`../TEST-VALUE-AUDIT.md`](../TEST-VALUE-AUDIT.md) §5 item 10 and §7). Base `a9414c0c`. Paths starting
+`../` are relative to the audit's handoff folder. The isolated-benchmark rows need owner
+confirmation R6; the rest need none. **Land after issue 02**, which deletes the env-vocabulary
+row-count pin (`test-env-vocabulary.sh:222-223`, `134`) that removing 20 rows would otherwise turn
+red.
 
 ## Problem
 
 **Scripts no workflow reaches.** 26 files under `scripts/` are not reached from any workflow or
-`package.json`, even transitively. The derivation is `reach.py` in the audit's evidence; the list is
-in `../data/script-gates-verify.md` §6.
+`package.json`, even transitively. The derivation is [`../tools/reach.py`](../tools/reach.py); the
+list is in `../data/script-gates-verify.md` §6.
 - 8 are operator tools in `scripts/operator/`, by design.
 - `scripts/run-console-benchmark.sh` (682 lines) is a live operator runner outside `operator/`.
-- **18 are one-shot issue tooling, 3,958 lines**, whose records are already sealed:
+- **17 are one-shot issue tooling, 3,958 lines** (two of them under `scripts/fixtures/`), whose
+  records are already sealed:
   - issue 880 MQ-1/MQ-2, 9 files, 1,409 lines;
   - issue 606 input-symmetry capture, 4 files, 897 lines;
   - issue 746 `run-gate-active-benchmark.py` and its test, 1,394 lines;
@@ -28,8 +32,6 @@ Nothing checks it.
   compile into `bench`.
 
 **Gate rules for retired features**, with file:line in `../data/script-gates-verify.md` §4:
-- the FLAC and delivery-codec package names (`check-workspace-policy.sh:162-163`, `:218-272`, and 17
-  cases in `test-workspace-policy.sh`);
 - retired session-TOML spellings (`check-session-policy.sh:46-63`, `check-sdk-deletions.py:120-121`,
   `:409`);
 - retired softfma definitions (`check-unfused-seal.sh:723-732`, plus self-test cases);
@@ -57,7 +59,11 @@ Nothing checks it.
 - **Remove each retired-feature rule** above, and its self-test cases.
 - **Keep `check-sdk-deletions.py`'s live rule:** no numeric ABI byte offset outside `src/generated/`.
   It has a real defect history, #207 N-13(d).
-- **Keep the naming rule for the retired `miso-engine-` prefix.** It is live policy in AGENTS.md.
+- **Keep these live rules in `check-workspace-policy.sh`:**
+  - the naming rule for the retired `miso-engine-` prefix;
+  - the delivery-codec identity ban (`:162-163`, `:218-272`; AGENTS.md: "delivery codecs live
+    outside this repository");
+  - the tracked-LLVM-IR ban (`:244-249`).
 
 ## Scope
 
@@ -77,15 +83,17 @@ Authorized paths:
 
 ## Gates
 
-1. **Reachability.** The audit's `reach.py` procedure, re-run on the result: every file at the top
-   level of `scripts/` is reached from a workflow or `package.json`, and everything else is in
-   `scripts/operator/`. Add the check as one line to `check-workspace-policy.sh` only if it is one
+1. **Reachability.** `python3 ../tools/reach.py <repo> strict <tracked-files.txt> <out.json>` on the
+   result, with `git ls-files > tracked-files.txt`: every file at the top level of `scripts/` is
+   reached from a workflow or `package.json`, and everything else is in `scripts/operator/`. Add the check as one line to `check-workspace-policy.sh` only if it is one
    line.
 2. **Live rules still fail.** In a scratch branch, each of these fails its gate:
    - a numeric ABI offset in `sdk/src/` outside `generated/`;
    - a `mul_add` call outside `lane`;
    - a `MAX_TRACKS` constant;
-   - a `core`-named package.
+   - a `core`-named package;
+   - a package named `flacenc`;
+   - a tracked `.ll` file under `artifacts/`.
 3. **The env gate is consistent.** `check-env-vocabulary.sh` passes, with no documented name unused
    and no used name undocumented.
 4. **Historical bugs.** Unaffected, since no Rust test is touched unless R6 applies. With R6, run

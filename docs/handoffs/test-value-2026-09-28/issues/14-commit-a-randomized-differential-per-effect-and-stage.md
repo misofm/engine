@@ -3,6 +3,7 @@
 Draft, not a GitHub issue. **Target shape** for the suite. From the 2026-09-28 test-value audit
 ([`../TEST-VALUE-AUDIT.md`](../TEST-VALUE-AUDIT.md) §4.4). Base `a9414c0c`. No ruling needed. Split
 per crate before implementation: this body is the template, and the first slice is **one crate**.
+Paths starting `../` are relative to the audit's handoff folder.
 
 ## Problem
 
@@ -17,13 +18,18 @@ per crate before implementation: this body is the template, and the first slice 
   - the compressor's `randomized_differential_{f32,simd4,simd8}` catch #994. Their generator "keeps
     the subnormal knee widths" (`crates/compressor/src/kernel.rs:2137-2160`).
 - **They carry many mutant catches.** In the mutation pass:
-  - the compressor's seeded-generator tests catch 74 % of all caught product mutants, and the three
-    differentials alone take 3.9 s;
-  - the graph-compiler probe catches 35 % in 14.9 s.
+  - the compressor's three `randomized_differential_*` tests catch 49 % of all caught product mutants
+    in 3.9 s;
+  - the graph-compiler probe catches 35 % in 14.9 s;
+  - parametric-eq's nine ramping-elision differentials catch 35 %.
 - **Several crates have no such test.**
   - host-core has **no randomized test at all**.
   - parametric-eq has differentials but no randomized restore path. #1015 needed a restored
-    subnormal.
+    subnormal, and at HEAD only its reproducers catch it.
+  - The compressor's `designed_channel_symmetry` (`crates/compressor/src/lib.rs:691-716`), which
+    decides mono-collapse eligibility, survives 18 planted bugs. No generator draws
+    channel-asymmetric parameter or state words, which is what would expose a wrong answer, the
+    #970 class.
   - builtins, source/stem and protocol rely on fixed inputs.
   - Verification scratch fuzzers keep being written and then thrown away: the #962 probe, the
     VERIFY-COMPRESSOR harness, and the dual-mono prototypes in
@@ -37,7 +43,8 @@ One committed test module per crate, `tests/randomized.rs`, with:
   subnormals, `f32::from_bits(1..3)`), exact thresholds and identities, and the interior. It draws
   input from clean signal, hostile words (±0, subnormals, ±inf, NaN payloads, ±MAX, just below and
   above the block limit), silence and tiny levels. It also draws random automation, random block
-  partitions, random restores mid-stream, bypass toggles and link modes.
+  partitions, **random restores mid-stream, including subnormal and signed-zero state words**,
+  **channel-asymmetric parameter and state words**, bypass toggles and link modes.
 - **Oracles.**
   - Scalar against `Simd4` against `Simd8`.
   - Collapsed against forced dual.
@@ -54,7 +61,7 @@ One committed test module per crate, `tests/randomized.rs`, with:
 
 Order of slices, where the evidence says the gap is widest:
 1. host-core console render;
-2. parametric-eq with restores;
+2. parametric-eq with restores, and the compressor's collapse-eligibility inputs;
 3. builtins;
 4. source/stem;
 5. the remaining effects without one (gate-expander, delay, soft-clip, transient-shaper,
@@ -74,13 +81,16 @@ a reproducer.
 
 ## Gates
 
-1. **Catches the historical bugs.** `../tools/revert.py 970` turns the host-core randomized test red
-   within the per-PR seed set. `970` is the host-core-reachable one; for the parametric-eq slice it
-   is `1015`.
-2. **Mutation yield.** `../tools/run-mutants.sh host-core --features control-provider,test-support
-   --shard 0/4 --sharding round-robin`, with and without the new test. It catches at least 10 % of the
-   baseline's 84 surviving mutants, or the PR explains why they are equivalent.
-3. **Budget.** At most 5 s in the debug job per PR, measured with `--report-time`. The nightly run
+1. **Catches the historical bugs.** Re-injecting #970 with `../tools/revert.py` turns the host-core
+   randomized test red within the per-PR seed set. For the parametric-eq slice the bug is #1015, and
+   for the compressor slice a `designed_channel_symmetry -> true` mutation.
+2. **Mutation yield.** `../tools/run-mutants.sh host-core 5 10 --features
+   control-provider,test-support --shard 0/4 --sharding round-robin`, with and without the new test.
+   It catches at least 10 % of the baseline's 84 surviving mutants, or the PR explains why they are
+   equivalent. **Depends on issue 13**, so that the `host-core/test-support` feature this uses is
+   also enabled in CI.
+3. **Budget.** At most about 5 s in the debug job per PR, measured with `--report-time`. The
+   graph-compiler probe's 15 s is today's one exception. The nightly run
    covers 100× the seeds.
 4. **Replayable.** A failing seed printed by nightly reproduces locally with one command.
 

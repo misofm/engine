@@ -2,7 +2,9 @@
 
 Draft, not a GitHub issue. From the 2026-09-28 test-value audit
 ([`../TEST-VALUE-AUDIT.md`](../TEST-VALUE-AUDIT.md) §4.1 and §5 item 9;
-[`../data/mutation-summary.md`](../data/mutation-summary.md)). Base `a9414c0c`. No ruling needed.
+[`../data/mutation-summary.md`](../data/mutation-summary.md)). Base `a9414c0c`. Paths starting `../`
+are relative to the audit's handoff folder. No ruling needed, except that trimming extended research
+rates out of builtins `response.rs` follows R7.
 Every claim stays; only its size or its per-PR share changes.
 
 ## Problem
@@ -21,7 +23,7 @@ test catches every mutant this test catches.
 | compressor scenario pins 981/982/983/995/985 (`src/kernel.rs:3352`, `:3411`, `:3461`, `:3503`, `:3578`) | ≈ 1 | frozen "no bit moved versus the pre-slice base" digests whose slices have landed. Every recorded red is also red on gate 1 (`../data/candidates-dsp-graph.md` item 50) |
 | builtins `tests/response.rs:356`, `:422`; `:880` | ≈ 32 | the same cascade measured six ways, no mutation separates them; extended research rates included; `:880` designs about 9.4M cutoffs (items 55-56) |
 | graph-compiler `src/lib.rs:15681` `canonical_artifacts_are_complete_and_repeatable_100_times` | small | 100 in-process repeats cannot see what `check-graph-determinism.sh` (100 fresh processes) sees (item 59) |
-| conformance `tests/mutation_million.rs:10` | ≈ 2 | 1M decodes; asserts only `first == second` (item 58) |
+| conformance `tests/mutation_million.rs:10` | ≈ 2 | 1M decodes; asserts `first == second` and the corpus size (`:18-26`) (item 58) |
 | true-peak-limiter `tests/gain_law.rs:110` | 6.8 | 1,152 configurations; the rate is not a branch of the ceiling law (item 60) |
 
 ## Outcome
@@ -31,7 +33,9 @@ test catches every mutant this test catches.
   compressor scenario pins.
 - **Shrink** `the_two_channels_are_judged_together` to the channel pairs that separate a judgement,
   and each graph-compiler meter test to the smallest console that still reaches its arm, for
-  example 8 tracks instead of 64. Each keeps its claim.
+  example 8 tracks instead of 64. Each keeps its claim. One full-size (64-track) run of
+  `the_full_meter_pass_renders_without_an_audited_event` moves to nightly, because an allocation
+  that appears only at size cannot be seen at 8 tracks.
 - **Per-PR seeds ÷ 4** for the six ramping-elision differentials. `nightly.yml` runs the full seed
   count.
 - **Move to nightly:** the 48 × 1M sequences, keeping a 4-row debug representative, and
@@ -61,14 +65,16 @@ No product code.
 
 1. **Mutation equivalence** with `../tools/run-mutants.sh`, before and after, same arguments. The
    caught sets must be identical:
-   - compressor, all mutants;
-   - parametric-eq `--shard 0/4` **and** `--shard 1/4`, round-robin;
-   - graph with `--file crates/graph/src/runtime.rs -F meter --test-package graph --test-package
-     graph-compiler --features graph/test-support` (the audit's targeted pass: 22 caught);
-   - graph-compiler, all mutants.
-2. **Recorded single-width catches still red.** Re-apply 1005-M5d (W8 only) and 1006-M1 (red only at
-   `Simd4`/`Simd8`) from the crates' `MUTATIONS.md`. The shrunk tests still turn them red *per PR*,
-   not only nightly.
+   - `compressor 5 10`, all mutants;
+   - `parametric-eq 6 12`, with `--shard 0/4` **and** `--shard 1/4`, round-robin;
+   - `graph 3 8 --file crates/graph/src/runtime.rs -F meter --test-package graph --test-package
+     graph-compiler --features graph/test-support`, the audit's targeted pass (22 caught);
+   - `graph-compiler 5 10`, all mutants.
+2. **Recorded catches still red per PR.** Re-apply these from the crates' `MUTATIONS.md`; the shrunk
+   tests still turn them red *per PR*, not only nightly:
+   - 1005-M5d (W8 only) and 1006-M1 (red only at `Simd4`/`Simd8`);
+   - graph G-2, A-5, 936-4 and 957-1b, which are red on the `post_matrix_*` tests and are the
+     evidence issue 07 relies on to delete the graph source scrapes.
 3. **The realtime claim holds.** The shrunk `…_renders_without_an_audited_event` tests still fail on
    one allocation injected into the bank meter pass.
 4. **Historical bugs.** `../tools/revert.py 994` and `1015`. The red set is unchanged, including the

@@ -1,7 +1,8 @@
 # Ruling: enforce the AudioWorklet artifact pin at publish, not on every PR
 
 Draft, not a GitHub issue. From the 2026-09-28 test-value audit
-([`../TEST-VALUE-AUDIT.md`](../TEST-VALUE-AUDIT.md) §4.3 and §12 R3). Base `a9414c0c`. **Needs owner
+([`../TEST-VALUE-AUDIT.md`](../TEST-VALUE-AUDIT.md) §4.3 and §12 R3). Base `a9414c0c`. Paths starting
+`../` are relative to the audit's handoff folder. **Needs owner
 ruling R3.** The app repository's provenance file consumes the pin, so its purpose is release
 integrity, and that is the owner's call.
 
@@ -15,7 +16,7 @@ difference.
 
 Three more records follow the pin:
 - `hosts/host-web/qualification/results.json`'s `wasmSha256` and `candidateCommit`, which
-  `--check-matrix` requires to match (`hosts/host-web/qualification/run.mjs:121-124`);
+  `--check-matrix` requires to match (`hosts/host-web/qualification/run.mjs:123-124`);
 - the generated `BROWSER_DEPLOYMENT_MATRIX.md`;
 - a literal copy, `REAL_WASM_SHA256`, in `scripts/test-web-audioworklet.mjs:153`. It is read only
   under `--real-wasm-receiver`, which no workflow or script runs, yet it moved in 11 commits.
@@ -35,11 +36,16 @@ publishes exactly the reviewed bytes (`npm-publish.yml:69-76`, `:160`).
 
 - **PR runs** build the artifact, record its digest in the job summary, and upload it. They do not
   compare it to a committed pin.
-- **Reproducibility becomes a same-run check.** The `artifact` job builds twice, under two different
-  `CARGO_HOME`s and checkout paths, and requires identical bytes. This is a stronger claim than the
-  pin, and it needs no commit.
+- **Reproducibility becomes a same-run check.** A second job builds the artifact again, in parallel,
+  under a different `CARGO_HOME` and checkout path, and `artifact-gates` requires identical bytes.
+  This proves checkout-independence on every PR with no commit. It does not prove agreement with a
+  build made on another machine or toolchain image; the committed pin, checked at publish, still
+  covers that.
 - **`npm-publish.yml` keeps its pin assertions unchanged.** The committed pin file is updated in the
   release PR only.
+- **The downstream "Verify the downloaded artifact against its source pin" steps**
+  (`qualification.yml:162`, `:203`, `:258`) compare against the digest the `artifact` job publishes
+  as a job output, instead of the committed file.
 - **The browser jobs keep their digest-parity gates** (native digest = browser digest). They drop the
   `results.json` lineage check. `BROWSER_DEPLOYMENT_MATRIX.md` is regenerated when Playwright or the
   browsers are bumped, not per artifact.
@@ -75,6 +81,7 @@ Authorized paths:
 
 ## Saving and risk
 
-- **Saving:** ≈ 0 s of CI. It removes about 41 red jobs a month and 50-125 pin-only commits.
+- **Saving:** about 41 red jobs a month and 50-125 pin-only commits. CI time rises by one parallel
+  artifact build of about 100 s of runner time, off the critical path if it runs as its own job.
 - **Risk:** a non-reproducible build is found in the same run instead of by pin drift, which is an
   improvement. The app's provenance file still receives the pin at release.

@@ -1,7 +1,8 @@
 # Run script-gate self-tests only when the gate changes; make env-vocabulary one pass
 
 Draft, not a GitHub issue. From the 2026-09-28 test-value audit
-([`../TEST-VALUE-AUDIT.md`](../TEST-VALUE-AUDIT.md) §5 item 2, §7). Base `a9414c0c`. No ruling needed.
+([`../TEST-VALUE-AUDIT.md`](../TEST-VALUE-AUDIT.md) §5 item 2, §7). Base `a9414c0c`. Paths starting
+`../` are relative to the audit's handoff folder. No ruling needed.
 
 ## Problem
 
@@ -17,8 +18,8 @@ in each step the gate itself is cheap while its **self-test suite** is the cost.
 | SDK job | `check-sdk-deletions.py` 0.7 s | `--self-test`, 20 s (37 in-memory mutations) | the gate's regexes |
 
 A self-test can only fail when its gate script changes. Running it on every PR costs about 165 s of
-runner time and never discriminates a product change. The 9 env-vocabulary reds in September were
-hygiene (`../data/ci-red-jobs.tsv`).
+runner time and never discriminates a product change. Of the 9 env-vocabulary reds in September, 8 were
+hygiene and the ninth was the self-test's own row-count pin (`../data/ci-red-jobs.tsv`).
 
 ## Outcome
 

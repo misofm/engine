@@ -1,7 +1,8 @@
 # Replace source-text and prose scrapes in tests, then lint the pattern
 
 Draft, not a GitHub issue. From the 2026-09-28 test-value audit
-([`../TEST-VALUE-AUDIT.md`](../TEST-VALUE-AUDIT.md) §5 item 7 and §9). Base `a9414c0c`. No ruling
+([`../TEST-VALUE-AUDIT.md`](../TEST-VALUE-AUDIT.md) §5 item 7 and §9). Base `a9414c0c`. Paths starting
+`../` are relative to the audit's handoff folder. No ruling
 needed.
 
 ## Problem
@@ -34,17 +35,21 @@ The full list, with the classifier's note per test, is the rows flagged `scrape`
 | `crates/source/src/lib.rs:2606`, `native_source.rs:4015`, `native_wave.rs:1071` | drop only the scraping assertions; the behavioural halves stay |
 | `tools/audit/src/capi.rs:328`, `builtins_graph.rs:845`, `builtins_fixture_check.rs:543` | delete (H47) |
 | `tools/audit/src/fixture_builtins.rs:5218`; `tools/bench/src/protocol.rs:1530`, `:1545` | drop only the text greps |
-| `tools/parameter-metadata/tests/abi_layout.rs:1379` (scrapes a shell heredoc) | **rewrite**: `check-web-audioworklet.sh` reads the export list from the generated metadata instead of a second copy |
+| `tools/parameter-metadata/tests/abi_layout.rs:1379` (scrapes a shell heredoc) | delete: `check-web-audioworklet.sh` owns the frozen export list and checks it against the shipped module. Keeping the list independent of the generated metadata is the point, so it is not derived |
 | `tools/session-validator/tests/skill.rs:19` | **rewrite**: run the argv in `SKILL.md`'s fenced blocks through the CLI parser |
 | `crates/session/tests/json_contract_artifacts.rs:35`, `:47` | **keep**: they read the shipped JSON schema, a product artifact, not source text |
 
 ## Outcome
 
-- No test reads `.rs`, `.toml`, `.md`, `.sh`, `.yml` or `.py` text.
+- No test reads Rust source or a Cargo manifest as text. The prose pins in the table are gone. The
+  one test that still reads a `.md` (`skill.rs`, rewritten) reads it in order to execute its
+  commands.
 - `scripts/check-workspace-policy.sh` gains one rule: `git grep` fails on `include_str!`,
-  `include_bytes!` or `read_to_string` of a path ending in one of those extensions under `crates/`,
-  `hosts/` or `tools/`, excluding `fixtures/`.
-- It gets no self-test suite: the rule is one line (AGENTS.md "The ceremony boundary").
+  `include_bytes!` or `read_to_string` of a literal `.rs` or `.toml` path under `crates/`, `hosts/` or
+  `tools/`, excluding `fixtures/`. It adds no new mutation cases: the rule is one line (AGENTS.md "The
+  ceremony boundary").
+- The lint cannot see scrapes whose path is built at run time (`read_dir`, joined paths), as in
+  `m3_determinism.rs:101`. Those are left to the review question in issue 16.
 
 ## Scope
 
@@ -59,7 +64,6 @@ Authorized paths: the test files in the table, `scripts/check-lane-policy.sh`,
      `commit_block`, and the rewritten test goes red.
    - `capi/src/ffi.rs:2516`: forming `&*plan` in an FFI function goes red.
    - `skill.rs`: renaming a CLI flag goes red.
-   - `abi_layout.rs:1379`: dropping an export from the Rust list goes red.
 2. **The moved policy scans still fail on seeded violations.** Add
    `#[cfg(target_feature = "fma")]` to a vendored math file; add `core::arch` to one.
 3. **Mutation equivalence.** Every deleted test is in a crate the audit measured, or has a recorded
@@ -67,10 +71,11 @@ Authorized paths: the test files in the table, `scripts/check-lane-policy.sh`,
    `crates/graph/tests/MUTATIONS.md` and show each is still red after the deletions.
 4. **Historical bugs.** `../tools/revert.py` for all four bugs; the red set is unchanged.
 5. **The lint works.** It passes on the result, and fails on a scratch branch that adds
-   `include_str!("../src/lib.rs")` to any test.
+   `include_str!("../src/lib.rs")` to any test. Today's tree has 32 such literal-path hits outside
+   `fixtures/`, so the lint lands in the same PR as the last deletion.
 
 ## Saving and risk
 
 - **Saving:** ≈ 0 s of runtime. The saving is that no future `rustfmt`, rename or doc edit turns a
-  test red, and the pattern cannot return.
-- **Risk:** low. Four rows are rewrites rather than deletions, because nothing else guards them.
+  test red, and the common form of the pattern cannot return.
+- **Risk:** low. Three rows are rewrites rather than deletions (`source/src/lib.rs:2882`, `capi/src/ffi.rs:2516`, `skill.rs`), because nothing else guards them.
