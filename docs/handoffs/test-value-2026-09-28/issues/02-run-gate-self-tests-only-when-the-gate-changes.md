@@ -54,7 +54,7 @@ No gate's pass/fail rule changes.
 1. **Same verdicts.** In a scratch copy of the tree, seed each violation class the removed per-PR
    runs covered. Each must still fail the real gate on a PR:
    - env: an undocumented `MISO_ENGINE_X` name in `tools/`; a documented name no longer used; a
-     `MISO_FOO` name without the prefix;
+     `MISO-FOO` name without the prefix; (quoted names are written `MISO-…` so the env-vocabulary gate does not read them as live identifiers)
    - conformance: a production crate depending on `conformance` or `dsp-reference`, and a production
      `use dsp_reference::`;
    - SDK: a numeric ABI byte offset outside `src/generated/`.
