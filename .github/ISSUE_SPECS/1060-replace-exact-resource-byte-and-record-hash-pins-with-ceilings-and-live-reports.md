@@ -142,3 +142,158 @@ See [`../VERIFY-TEST-VALUE.md`](../VERIFY-TEST-VALUE.md). **These amendments sup
    package (F4).
 8. **R2, as the verification recommends.** Budgets are ceilings; accounting completeness stays exact
    against an independent live oracle. Neither is a literal pin.
+
+## Attempt 1 evidence
+
+Terra, attempt 1, branch `codex/1060-ceilings-not-byte-pins` from `a509b681`. Code diff outside this
+spec: **+1,134 / −2,541 lines** (capi `resource_lifecycle.rs` +641 / −2,098; the native witness
+example −93).
+
+### What changed
+
+- **capi completeness oracle (amendments 1–4, 8).**
+  `capi_retained_bytes_charge_every_byte_the_compile_retains` uses the file's counting allocator. It
+  observes a C ABI compile, then a replay of its host-core half (`parse_host_session` →
+  `SessionStore` → `prepare_host_runtime`, the same calls capi makes before it allocates anything
+  of its own). The rule: compile-live − host-live == `capi_retained_bytes` − capi's charges for
+  host-allocated storage. Those charges are the canonical JSON, `control_retained_bytes` and the
+  provider's catalog charge, each read from its owning crate's resource report. The rule holds to the
+  byte on the EQ and soft-clip nine-track fixtures, at x86-64 and AArch64, in dev and release, and
+  20/20 runs under the parallel harness in each profile. The one derived difference is the
+  decode-field `u16` rounding of an odd frame: an over-charge of 1 byte, computed from the limits.
+  - The source control table is exact: freed bytes == `control_retained_bytes`.
+  - The engine rows are a bound: plan live ≤ engine rows, and store live ≤ model estimate +
+    canonical JSON. They are not exact, because the graph estimate over-states the bound plan by
+    about 128 KB by design.
+- **The mirror is gone.** That is every `*Mirror` struct, the owner-row functions,
+  `frozen_scratch_report`, `primitive_replacement_oracle` and every literal total. The
+  double-live test, renamed `double_live_oracle_drives_exact_and_one_below_c_caps`, takes its
+  requirements from live values:
+  - two live reports: the current plan before the swap and the prospective plan after it;
+  - both `CompiledSession` estimates;
+  - the prospective epoch plus the prepared-protocol owner, from `ReplayCache` and
+    `SessionControlProvider` resource reports.
+
+  On x86 these reproduce the old mirror exactly: graph 524,172, source 24,252 / 7,868, effect
+  15,120 / 432, builtin 34,902, capi 204,311, largest 58,804. On AArch64 (qemu) graph is 510,900.
+  The `#[ignore]` off x86 is removed.
+- **The tiny-frame test** now checks its charge against the allocator oracle, not a literal.
+- **Budgets.**
+  - `reference_session_retained_rows_stay_within_their_budgets` checks 19 rows plus the model
+    estimate of the EQ fixture. Each cap is admitted at its budget and refused one byte below the
+    requirement.
+  - `hosts/host-web/tests/retained_ceilings.rs` checks 12 rows of the browser fixture natively,
+    and the `maximum_memory_bytes` admission at the budget and at exact − 1.
+  - `expected.json` has `resourceCeilings` for the 8 wasm32 layout rows; its exact rows stay.
+- **Browser gate.** `check-browser-expected-resources.py` checks exact rows for equality and
+  budgeted rows for 0 < v ≤ ceiling, and prints each row's headroom. The native witness and its
+  classification are gone (`examples/browser_fixture_resources.rs` is deleted; nothing else used
+  it). The self-test is green at every ceiling and has 32 red mutations, including one byte over
+  each ceiling, a zeroed row and each of the 3 PCM digests.
+- **Graph audit.** `expected_audit_hash` is removed. The hash is still printed in the PASS line;
+  the audit's own PCM and meter comparison and the jq claims are unchanged.
+
+**Headroom rule.** Every budget is the row's value on 2026-09-28 at that lane width, plus 10 %,
+rounded up to 64 bytes. For the two bridge rows the 10 % applies above the fixed 1 MiB
+live-response capture. A zero budget is a claim: this fixture has no delay, no scalar-scratch effect
+and no meter.
+
+**Pins replaced.**
+
+| pin (old) | now |
+|---|---|
+| capi `frozen_scratch_report` (graph 231,060+…, bank rows, source 3,934/12,126, builtin 17,451, largest 49,167, capi 160,893) | live report equality under each exact cap; EQ-fixture budgets: graph 261,248 / 253,952 (x86 / A64), metadata 61,696 / 62,528, bank 15,680 / 21,056, bank scratch 54,080 / 40,576, effect-bank 9,024 / 9,024 / 704 / 832, source 9,024 / 4,352 / 13,376, effect state 9,280, builtin 19,200 ×2, capi 300,800, largest 99,840, model 25,344, zero rows 0 |
+| double-live 511,956+…, 24,252, 7,868, 15,120, 432, 34,902, 204,311, 58,804 | live-derived requirements (above) |
+| mirror totals 160,893 / 18,706 / 24,712, EQ catalog 108 / 18,144 / 1,296 / 1,908, executor 328 / 1,312, response owner 24 / 1,908, observation 240 / 256, slot 952 / 224, canonical 18,453 / 18,444 | the allocator oracle; the canonical lengths become the rename relation |
+| tiny-frame 178,426 + EQ growth | allocator oracle |
+| `expected.json` bridgeMetadata 1,149,255, bridgeRetained 1,169,764, sourceTotal 3,286, sourceOverhead 2,262, builtinRetained 1,817, graph ×2 32,402, graphMetadata 4,131 | ceilings 1,159,360, 1,181,888, 3,648, 2,496, 2,048, 35,648, 4,608 |
+| native witness rows | `retained_ceilings.rs`: bridge 1 MiB + 111,808 / + 134,400, source 3,840 / 2,688, builtin 2,176, graph 52,864 / 38,784, metadata 7,424 / 7,360 |
+| graph audit `dbac3f3d…` | live report (the record is still `dbac3f3d…`) |
+
+### Gates
+
+1. **Ceilings discriminate.** The plant is `StripPreparation` (per track) gaining `[u64; N]`.
+   - N = 1 (within the ceiling): green in capi, the native browser test and the wasm32 gate
+     (builtinRetained 1,825 of 2,048).
+   - N = 256 (past it): red in capi (builtin processor/retained 35,883 > 19,200), native browser
+     (4,005 > 2,176) and wasm32 (3,865 > 2,048).
+2. **Dropped row.** Removing `checked_layout::<crate::Plan>(1)` turns the oracle red (131,378 vs
+   130,978) and so does tiny-frame. An uncharged `Box<[u64; 32]>` added to `Plan` is red too
+   (131,642 vs 131,386). As amendment 1 predicted, the live-report double-live test stays green.
+3. **Real claims.**
+   - The self-test's three PCM-digest mutations are red.
+   - `test-realtime-audit-probes.sh builtins-graph` passes (9 operations). This harness injects
+     allocations and other probes into the audit and requires the audit to fail on each one.
+   - The graph trace passes.
+   - The Issue-544 item is N/A (amendment 5).
+4. **Mutation equivalence.** The unmutated capi+host-web set is green at opt-level 1 in both trees.
+   - As written, `--features control-provider,test-support` makes all 359 host-core mutants
+     unviable in both trees. cargo-mutants 27.1 tests only the `--test-package` packages, and
+     neither declares the feature. Rerun as `host-core/control-provider,host-core/test-support`:
+     137 → 138 caught. None is lost; `prepare.rs:1279 > → ==` is newly caught by the budget test.
+   - `estimate.rs` (15 mutants): 6 → 4 caught by capi+host-web. The two lost are
+     `graph_metadata_bytes → Some(0) / Some(1)`, whose sole capi catcher was the literal report.
+     graph-compiler's own tests still catch both (3 tests each), so the overall caught set is
+     unchanged. They are graph-estimate under-counts that capi's engine bound is too loose to see.
+5. **Historical bugs.** revert.py for #966, #970, #994 and #1015. `resource_lifecycle` (base and
+   after) and `retained_ceilings` (after) stay green under each one, so no touched test is a
+   reproducer, and no other test differs between the trees.
+6. **Cost.** The step builds nothing native now. `check-browser-expected-resources.py
+   --artifacts` took 85.6 s before on a cold target (0.55 s warm; load average 70) and takes 0.36 s
+   after.
+
+Also green:
+- `cargo check --workspace --all-targets --all-features`, workspace clippy `-D warnings`, fmt;
+- capi and host-web tests in dev, dev with `host-web/test-support`, and release (252 passed, 0
+  failed, 3 ignored);
+- `console-workload` release (the console digests);
+- `check-web-audioworklet.sh`, `test-web-audioworklet.sh`;
+- `check-capi-abi.sh` and its `--self-test`;
+- the routing check and test;
+- every lint-job policy pair, run with `python3 -B`.
+
+On AArch64:
+- the `run-aarch64-tests.sh debug` package and feature set resolves with `cargo test --no-run` on
+  x86;
+- `resource_lifecycle` (8 passed, 1 ignored) and `retained_ceilings` pass under qemu-user, using a
+  scratch rust-std sysroot and not rustup.
+
+Real arm64 CI verifies the rest.
+
+The shipped module is unchanged: `01dd58be…` both at base and after.
+
+`--list` diff:
+- `resource_lifecycle`:
+  - removed `external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps`;
+  - added `double_live_oracle_drives_exact_and_one_below_c_caps`,
+    `capi_retained_bytes_charge_every_byte_the_compile_retains`,
+    `reference_session_retained_rows_stay_within_their_budgets` and
+    `prepared_parameter_catalog_charge_covers_its_allocations` (ignored);
+  - 6 → 9 tests.
+- host-web: added `browser_identity_fixture_retained_rows_stay_within_their_budgets`.
+
+### Findings for follow-up (the oracle found two under-counts; production code is outside this issue's paths)
+
+1. **The catalog under-counts its enum choices.** `build_parameter_catalog` collects the choices
+   through `Result<Vec<_>>`, so the vector keeps capacity 8 for the EQ's 6 kinds.
+   `resource_report` charges by length. On the EQ fixture that is 72 × 2 × 32 = 4,608 retained bytes
+   `capi_retained_bytes` does not charge. `prepared_parameter_catalog_charge_covers_its_allocations`
+   reproduces it; it is ignored with that reason.
+2. **The compiled-model estimate under-states `CompiledSession`'s live bytes.**
+   - On the EQ fixture the session is 38,069 live against an estimate of 23,039. capi's total
+     charge (estimate + canonical JSON, counted twice) still covers it.
+   - host-web charges the estimate once. It under-counts by 127 bytes on the identity fixture, and
+     about 15 KB on the EQ fixture.
+
+### Deviations and notes
+
+- **Placement.** The capi budgets live in `resource_lifecycle.rs`, not in a new file. That file is
+  already on the `unsafe` allowlist and owns the allocator and C helpers.
+- **Files outside the authorized list.** The example is deleted (scope item 1). One line each is
+  synced in `docs/TARGET_MATRIX.md`, `docs/C_ABI_V1_QUALIFICATION.md` and
+  `hosts/host-web/MUTATIONS.md`.
+- **Manual modes that now fail.** The superseded WebDriver harness's run and `--check` modes, and
+  `direct-oracle.mjs`'s non-print `deepEqual`, compare the old whole resource block, so they no
+  longer match. CI runs neither; #1050 retires the harness.
+- **Pins still in place.** The `memoryBytes` status pins (1,376,256 / 1,441,792) are outside the
+  21 rows and unchanged.
