@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Exact Issue 081 three-row native/compile/object target matrix. Do not use as a smoke test.
-# Native AArch64 (android/ios) rows are unsupported, no claim (#378, owner ruling 2026-09-04); see
-# the deferred-defect register in docs/TARGET_MATRIX.md.
+# Its native AArch64 (android/ios) rows were retired under #378; native AArch64 is a product target
+# again (#1017), and scripts/check-cross-targets.sh's AArch64 rows check and lint the product
+# crates, effect-package among them. See docs/TARGET_MATRIX.md.
 #
 # The cargo/wasm-objdump matrix itself, the qualification-policy call, and the literal
 # target-triple/Wasm-feature-flag strings scripts/check-effect-interchange-qualification.sh

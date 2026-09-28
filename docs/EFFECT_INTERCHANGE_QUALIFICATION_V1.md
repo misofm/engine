@@ -78,9 +78,11 @@ are HOLD, never skip. Both Wasm objects expose only the descriptor inspector und
 cross-CPU byte identity.
 
 Native AArch64 (`aarch64-linux-android` compile only, `aarch64-apple-ios` compile only) was a
-fourth and fifth row through #378: owner ruling 2026-09-04 downgrades native AArch64 to
-unsupported, no claim, until a native iOS/Android effort is scheduled, so those two rows are
-retired rather than held. See the deferred-defect register in `docs/TARGET_MATRIX.md`.
+fourth and fifth row until #378 retired them (owner ruling 2026-09-04). Native AArch64 is a
+product target again (#1017, owner ruling 2026-09-28): `effect-package` and `effect-compiler` are
+product crates, so `scripts/check-cross-targets.sh`'s AArch64 rows check and lint them for both
+targets and the AArch64 CI legs run their tests on arm64 hardware. This matrix keeps its three
+rows. See `docs/TARGET_MATRIX.md`.
 
 Static checks freeze the accepted manifest and dependency direction, forbid new unsafe production
 surface and migration serialization, keep qualification dependencies out of production crates, and
