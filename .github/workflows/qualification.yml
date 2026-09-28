@@ -96,8 +96,13 @@ jobs:
     if: needs.route.outputs.route == 'sdk' || needs.route.outputs.route == 'full'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    # statuses: write is for the record step alone, which runs only on a push to main.
+    permissions:
+      contents: read
+      statuses: write
     outputs:
       sha256: ${{ steps.build.outputs.sha256 }}
+      rustc: ${{ steps.build.outputs.rustc }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -123,6 +128,7 @@ jobs:
           bash scripts/build-web-audioworklet.sh target/ci/qualification-artifacts
           sha256="$(sha256sum target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm | awk '{print $1}')"
           echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
+          echo "rustc=$(rustc -vV | sed -n 's/^release: //p')" >> "$GITHUB_OUTPUT"
           echo "Shipped AudioWorklet module at \`$GITHUB_SHA\`: \`$sha256\` (the \`artifact-identity\` summary says whether it changed)" >> "$GITHUB_STEP_SUMMARY"
       - name: Upload shipped artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -131,11 +137,21 @@ jobs:
           path: target/ci/qualification-artifacts/
           if-no-files-found: error
           overwrite: true
+      # Issue #1061: main's own record of the module this commit's run built, as the commit status
+      # `audioworklet-sha256`. Later changes compare with it (`artifact-identity`), so no change
+      # ever rebuilds its base inside its own, possibly edited, workflow.
+      - name: Record this commit's module for later changes to compare against
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA256: ${{ steps.build.outputs.sha256 }}
+          RUSTC: ${{ steps.build.outputs.rustc }}
+        run: python3 -B scripts/web-audioworklet-identity.py record --repository "$GITHUB_REPOSITORY" --commit "$GITHUB_SHA" --sha256 "$SHA256" --rustc "$RUSTC" --url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 
-  # Issue #1061 (owner decision 5): every PR says whether the shipped module changed against its
-  # base, proves the build reproducible, and holds only a release change to the committed pin
-  # (docs/RELEASE.md). Its own job, so the two extra builds stay off the path of `sdk`,
-  # `artifact-gates` and the browser legs, which start once `artifact` has uploaded.
+  # Issue #1061 (owner decision 5): every PR says whether the shipped module changed against the
+  # digest its base's own CI run recorded, proves the build reproducible, and holds only a release
+  # change to the committed pin (docs/RELEASE.md). Its own job, so the twin build stays off the
+  # path of `sdk`, `artifact-gates` and the browser legs, which start once `artifact` has uploaded.
   # scripts/web-audioworklet-identity.py has the rules.
   artifact-identity:
     name: shipped AudioWorklet artifact identity (changed or unchanged, reproducible, release pin)
@@ -143,6 +159,9 @@ jobs:
     if: needs.route.outputs.route == 'sdk' || needs.route.outputs.route == 'full'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    permissions:
+      contents: read
+      statuses: read
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -158,38 +177,20 @@ jobs:
           git worktree add --detach "$RUNNER_TEMP/twin" HEAD
           mkdir "$RUNNER_TEMP/twin-module"
           CARGO_HOME="$RUNNER_TEMP/twin-cargo-home" bash "$RUNNER_TEMP/twin/scripts/build-web-audioworklet.sh" --module-only "$RUNNER_TEMP/twin-module"
-      # The base's module as the base's own CI built it: the base's build script, run with the
-      # toolchain the base pinned (its workflow's RUSTUP_TOOLCHAIN, else its rust-toolchain.toml).
-      # A toolchain change moves the module with no source change, so the base is never rebuilt
-      # with this run's toolchain (#1061 attempt 1, finding 1).
-      - name: Build the base's module with the base's own build script and toolchain
-        id: base
+      # The base is never rebuilt here: this run's workflow is the change's, and a base built in it
+      # is built in the change's environment (#1061 attempts 1 and 2). The report reads the digest
+      # the base's own run recorded instead, and says CANNOT TELL when there is none.
+      - name: Report ARTIFACT CHANGED or UNCHANGED against the base's recorded digest, and hold a release change to its pin
         env:
+          GH_TOKEN: ${{ github.token }}
           EVENT: ${{ github.event_name }}
           BEFORE: ${{ github.event.before }}
-        run: |
-          base="$(python3 -B scripts/web-audioworklet-identity.py base --event "$EVENT" --before "$BEFORE")"
-          echo "commit=$base" >> "$GITHUB_OUTPUT"
-          [[ -n "$base" ]] || exit 0
-          toolchain="$(python3 -B scripts/web-audioworklet-identity.py toolchain --commit "$base")"
-          echo "toolchain=$toolchain" >> "$GITHUB_OUTPUT"
-          rustup toolchain install "$toolchain" --profile minimal
-          rustup target add --toolchain "$toolchain" wasm32-unknown-unknown
-          git worktree add --detach "$RUNNER_TEMP/base" "$base"
-          mkdir "$RUNNER_TEMP/base-module"
-          RUSTUP_TOOLCHAIN="$toolchain" bash "$RUNNER_TEMP/base/scripts/build-web-audioworklet.sh" --module-only "$RUNNER_TEMP/base-module"
-      - name: Report ARTIFACT CHANGED or UNCHANGED, and hold a release change to its pin
-        env:
           BUILT: ${{ needs.artifact.outputs.sha256 }}
-          BASE: ${{ steps.base.outputs.commit }}
-          BASE_TOOLCHAIN: ${{ steps.base.outputs.toolchain }}
+          RUSTC: ${{ needs.artifact.outputs.rustc }}
         run: |
           set -o pipefail
           python3 -B scripts/web-audioworklet-identity.py --self-test
-          module=miso-engine-v1-audio-worklet.simd128.wasm
-          base_args=()
-          [[ -z "$BASE" ]] || base_args=(--base "$BASE" --base-toolchain "$BASE_TOOLCHAIN" --base-module "$RUNNER_TEMP/base-module/$module")
-          python3 -B scripts/web-audioworklet-identity.py report --built "$BUILT" --toolchain "$RUSTUP_TOOLCHAIN" --twin "$RUNNER_TEMP/twin-module/$module" "${base_args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 -B scripts/web-audioworklet-identity.py report --event "$EVENT" --before "$BEFORE" --repository "$GITHUB_REPOSITORY" --built "$BUILT" --rustc "$RUSTC" --twin "$RUNNER_TEMP/twin-module/miso-engine-v1-audio-worklet.simd128.wasm" | tee -a "$GITHUB_STEP_SUMMARY"
 
   sdk:
     name: SDK package and generated-surface qualification

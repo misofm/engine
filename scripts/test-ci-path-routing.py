@@ -722,14 +722,58 @@ def main() -> int:
         shutil.rmtree(root)
     for step in checker.IDENTITY_STEPS:
         workflow_mutation_fails("qualification.yml", step, "")  # a pinned step deleted
-    # Attempt 1 finding 2: each of these left every run without a base, and so without release
-    # checks, while the checker stayed green.
-    base_args = ('[[ -z "$BASE" ]] || base_args=(--base "$BASE" --base-toolchain '
-                 '"$BASE_TOOLCHAIN" --base-module "$RUNNER_TEMP/base-module/$module")\n')
-    workflow_mutation_fails("qualification.yml", "          " + base_args, "")
-    workflow_mutation_fails("qualification.yml", 'base --event "$EVENT"', "base --event none")
+    # Issue #1061 attempt 3: the record on main and the fetch-and-compare on every change. Each
+    # mutant would leave the comparison without a record, skipped, or masked, with CI green.
+    record_step = checker.ARTIFACT_RECORD_STEP
+    workflow_mutation_fails("qualification.yml", record_step, "")  # main records nothing
+    workflow_mutation_fails(
+        "qualification.yml",
+        "        if: github.event_name == 'push' && github.ref == 'refs/heads/main'\n",
+        "        if: github.event_name == 'pull_request'\n",
+    )  # records posted by PR runs, never by main's own
+    workflow_mutation_fails(
+        "qualification.yml", checker.ARTIFACT_PERMISSIONS,
+        "    permissions:\n      contents: read\n",
+    )  # the post is refused on main
+    for line in checker.ARTIFACT_BUILD_LINES:
+        workflow_mutation_fails("qualification.yml", line, "")
+    workflow_mutation_fails("qualification.yml", "      rustc: ${{ steps.build.outputs.rustc }}\n", "")
+    workflow_mutation_fails(
+        "qualification.yml", checker.IDENTITY_PERMISSIONS,
+        "    permissions:\n      contents: read\n",
+    )  # the lookup is refused on every change
+    identity_head = ("    runs-on: ubuntu-24.04\n    timeout-minutes: 20\n"
+                     + checker.IDENTITY_PERMISSIONS)
+    for label, extra in (
+        ("continue-on-error", "    continue-on-error: true\n"),
+        ("defaults", "    defaults:\n      run:\n        shell: bash {0}\n"),
+        ("env", "    env:\n      GH_TOKEN: ''\n"),
+    ):
+        workflow_mutation_fails("qualification.yml", identity_head, identity_head + extra)
+    workflow_mutation_fails(
+        "qualification.yml", checker.ARTIFACT_PERMISSIONS,
+        checker.ARTIFACT_PERMISSIONS + "    env:\n      CARGO_PROFILE_RELEASE_OPT_LEVEL: s\n",
+    )  # a job-level build variable on the job that builds the shipped bytes
+    report_step = checker.IDENTITY_REPORT_STEP
+    workflow_mutation_fails(
+        "qualification.yml", report_step,
+        report_step.replace("        env:\n", "        if: github.event_name == 'push'\n        env:\n", 1),
+    )  # the comparison skipped on pull requests
+    workflow_mutation_fails("qualification.yml", 'report --event "$EVENT"', "report --event none")
     workflow_mutation_fails("qualification.yml", "          BEFORE: ${{ github.event.before }}\n",
                             '          BEFORE: ""\n')
+    workflow_mutation_fails(
+        "qualification.yml", "          GH_TOKEN: ${{ github.token }}\n          EVENT:",
+        "          EVENT:",
+    )  # gh unauthenticated
+    workflow_mutation_fails(
+        "qualification.yml", 'python3 -B scripts/web-audioworklet-identity.py --self-test\n', "",
+    )
+    workflow_mutation_fails(
+        "qualification.yml", report_step,
+        "      - name: Remove the twin module\n        run: rm -rf \"$RUNNER_TEMP/twin-module\"\n"
+        + report_step,
+    )  # a step slipped in before the report
     workflow_mutation_fails(
         "qualification.yml",
         "        with:\n          fetch-depth: 0\n"
@@ -740,25 +784,6 @@ def main() -> int:
         "qualification.yml", 'git worktree add --detach "$RUNNER_TEMP/twin" HEAD\n',
         'ln -s "$GITHUB_WORKSPACE" "$RUNNER_TEMP/twin"\n',
     )  # a twin symlinked to the workspace rebuilds from the artifact job's own path
-    # Attempt 1 finding 1: the base rebuilt with this run's toolchain reports a toolchain change
-    # as ARTIFACT UNCHANGED.
-    workflow_mutation_fails(
-        "qualification.yml",
-        'RUSTUP_TOOLCHAIN="$toolchain" bash "$RUNNER_TEMP/base/',
-        'bash "$RUNNER_TEMP/base/',
-    )
-    workflow_mutation_fails("qualification.yml", 'toolchain --commit "$base"',
-                            "toolchain --commit HEAD")
-    workflow_mutation_fails(
-        "qualification.yml",
-        "          BASE_TOOLCHAIN: ${{ steps.base.outputs.toolchain }}\n",
-        '          BASE_TOOLCHAIN: ${{ env.RUSTUP_TOOLCHAIN }}\n',
-    )
-    workflow_mutation_fails(
-        "qualification.yml", checker.IDENTITY_REPORT_STEP,
-        "      - name: Remove the base module\n        run: rm -rf \"$RUNNER_TEMP/base-module\"\n"
-        + checker.IDENTITY_REPORT_STEP,
-    )  # a step slipped in between
     workflow_mutation_fails(
         "qualification.yml",
         'CARGO_HOME="$RUNNER_TEMP/twin-cargo-home" bash "$RUNNER_TEMP/twin/',

@@ -21,7 +21,7 @@ squash merge does not retroactively change the source candidate named by an exis
 Record the source candidate and any later evidence or merge commit together when publishing a matrix.
 Since issue #1061 only a release PR re-records the matrix, `results.json` and the artifact pin, for
 the bytes it ships; nothing re-pins them in between. Until the first such release they still describe
-the last per-change pin (`f7bd75ca...`), not release 0.4.3's module
+the last per-change pin made at a batch boundary, not the module release 0.4.3 shipped
 ([release procedure](../../docs/RELEASE.md)).
 
 For a local run:

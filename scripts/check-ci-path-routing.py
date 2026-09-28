@@ -348,16 +348,35 @@ ARTIFACT_DIGEST_STEP = (
     "        env:\n"
     "          BUILT: ${{ needs.artifact.outputs.sha256 }}\n"
 )
-ARTIFACT_DIGEST_OUTPUT = "    outputs:\n      sha256: ${{ steps.build.outputs.sha256 }}\n"
+ARTIFACT_DIGEST_OUTPUT = (
+    "    outputs:\n"
+    "      sha256: ${{ steps.build.outputs.sha256 }}\n"
+    "      rustc: ${{ steps.build.outputs.rustc }}\n"
+)
 ARTIFACT_READERS = ("sdk", "artifact-gates", "browser")
-# Issue #1061: the identity job, step by step. Its checkout carries full history (the base must be
-# reachable), its toolchain step is free (a toolchain bump edits it), and its last three steps are
-# pinned exactly: the twin build from another checkout path and CARGO_HOME; the base, found from the
-# event and built with the base's own script and pinned toolchain; and the self-tested report, which
-# says ARTIFACT CHANGED or UNCHANGED and holds a release change to its pin. Attempt 1 pinned lines
-# of the twin and the report only, and five mutants of the base wiring (the base arguments dropped,
-# `--event none`, an empty `BEFORE`, no full history, a twin symlinked to the workspace) each left
-# every run without a base, and so without release checks, with this checker green.
+# Issue #1061, attempt 3: a change's report compares its module with the digest its base's own CI
+# run recorded, never with a base rebuilt inside the change's workflow. Attempts 1 and 2 rebuilt the
+# base there, and a toolchain bump, one workflow-level cargo variable or one `GITHUB_PATH` line
+# steered that rebuild and read UNCHANGED. What is pinned is what the comparison rests on:
+# - on `main`, `artifact` posts the record, on pushes only, with the one permission it needs;
+# - the build step writes the digest and the rustc release the record and the report carry;
+# - `artifact-identity` fetches and compares in one step with no `if:`, keeps its twin build, and
+#   has the one read permission; neither job may carry `continue-on-error`, `defaults` or `env`,
+#   which could skip or mask the comparison.
+ARTIFACT_PERMISSIONS = "    permissions:\n      contents: read\n      statuses: write\n"
+ARTIFACT_BUILD_LINES = (
+    '          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"\n',
+    '          echo "rustc=$(rustc -vV | sed -n \'s/^release: //p\')" >> "$GITHUB_OUTPUT"\n',
+)
+ARTIFACT_RECORD_STEP = """      - name: Record this commit's module for later changes to compare against
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA256: ${{ steps.build.outputs.sha256 }}
+          RUSTC: ${{ steps.build.outputs.rustc }}
+        run: python3 -B scripts/web-audioworklet-identity.py record --repository "$GITHUB_REPOSITORY" --commit "$GITHUB_SHA" --sha256 "$SHA256" --rustc "$RUSTC" --url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+"""
+IDENTITY_PERMISSIONS = "    permissions:\n      contents: read\n      statuses: read\n"
 IDENTITY_CHECKOUT = re.compile(
     r"      - uses: actions/checkout@[0-9a-f]{40} # v\S+\n        with:\n          fetch-depth: 0\n\Z")
 IDENTITY_INSTALL = "      - name: Install pinned Rust toolchain and Wasm standard library\n"
@@ -367,37 +386,20 @@ IDENTITY_TWIN_STEP = """      - name: Rebuild the module from another checkout p
           mkdir "$RUNNER_TEMP/twin-module"
           CARGO_HOME="$RUNNER_TEMP/twin-cargo-home" bash "$RUNNER_TEMP/twin/scripts/build-web-audioworklet.sh" --module-only "$RUNNER_TEMP/twin-module"
 """
-IDENTITY_BASE_STEP = """      - name: Build the base's module with the base's own build script and toolchain
-        id: base
+IDENTITY_REPORT_STEP = """      - name: Report ARTIFACT CHANGED or UNCHANGED against the base's recorded digest, and hold a release change to its pin
         env:
+          GH_TOKEN: ${{ github.token }}
           EVENT: ${{ github.event_name }}
           BEFORE: ${{ github.event.before }}
-        run: |
-          base="$(python3 -B scripts/web-audioworklet-identity.py base --event "$EVENT" --before "$BEFORE")"
-          echo "commit=$base" >> "$GITHUB_OUTPUT"
-          [[ -n "$base" ]] || exit 0
-          toolchain="$(python3 -B scripts/web-audioworklet-identity.py toolchain --commit "$base")"
-          echo "toolchain=$toolchain" >> "$GITHUB_OUTPUT"
-          rustup toolchain install "$toolchain" --profile minimal
-          rustup target add --toolchain "$toolchain" wasm32-unknown-unknown
-          git worktree add --detach "$RUNNER_TEMP/base" "$base"
-          mkdir "$RUNNER_TEMP/base-module"
-          RUSTUP_TOOLCHAIN="$toolchain" bash "$RUNNER_TEMP/base/scripts/build-web-audioworklet.sh" --module-only "$RUNNER_TEMP/base-module"
-"""
-IDENTITY_REPORT_STEP = """      - name: Report ARTIFACT CHANGED or UNCHANGED, and hold a release change to its pin
-        env:
           BUILT: ${{ needs.artifact.outputs.sha256 }}
-          BASE: ${{ steps.base.outputs.commit }}
-          BASE_TOOLCHAIN: ${{ steps.base.outputs.toolchain }}
+          RUSTC: ${{ needs.artifact.outputs.rustc }}
         run: |
           set -o pipefail
           python3 -B scripts/web-audioworklet-identity.py --self-test
-          module=miso-engine-v1-audio-worklet.simd128.wasm
-          base_args=()
-          [[ -z "$BASE" ]] || base_args=(--base "$BASE" --base-toolchain "$BASE_TOOLCHAIN" --base-module "$RUNNER_TEMP/base-module/$module")
-          python3 -B scripts/web-audioworklet-identity.py report --built "$BUILT" --toolchain "$RUSTUP_TOOLCHAIN" --twin "$RUNNER_TEMP/twin-module/$module" "${base_args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 -B scripts/web-audioworklet-identity.py report --event "$EVENT" --before "$BEFORE" --repository "$GITHUB_REPOSITORY" --built "$BUILT" --rustc "$RUSTC" --twin "$RUNNER_TEMP/twin-module/miso-engine-v1-audio-worklet.simd128.wasm" | tee -a "$GITHUB_STEP_SUMMARY"
 """
-IDENTITY_STEPS = (IDENTITY_TWIN_STEP, IDENTITY_BASE_STEP, IDENTITY_REPORT_STEP)
+IDENTITY_STEPS = (IDENTITY_TWIN_STEP, IDENTITY_REPORT_STEP)
+UNMASKABLE = re.compile(r"^    (continue-on-error|defaults|env):", re.MULTILINE)
 
 
 def job_steps(job_text: str) -> list[str]:
@@ -417,11 +419,29 @@ def job_steps(job_text: str) -> list[str]:
     return steps
 
 def check_qualification_artifact_digest(text: str) -> None:
-    """Issue #1061: the `artifact` job publishes its module's digest, and every job that reads the
-    module verifies its download against that digest before anything reads it."""
+    """Issue #1061: the `artifact` job publishes its module's digest and rustc release, posts
+    main's record on pushes, and every job that reads the module verifies its download against
+    that digest before anything reads it."""
     artifact = job(text, "artifact")
     require(ARTIFACT_DIGEST_OUTPUT in artifact,
-            "qualification.yml: the artifact job must publish its module's sha256 as an output")
+            "qualification.yml: the artifact job must publish its module's sha256 and rustc "
+            "release as outputs")
+    require(ARTIFACT_PERMISSIONS in artifact,
+            "qualification.yml: the artifact job's permissions must be exactly contents: read and "
+            "statuses: write (the record)")
+    require(UNMASKABLE.search(artifact) is None,
+            "qualification.yml: the artifact job must carry no job-level continue-on-error, "
+            "defaults or env")
+    steps = job_steps(artifact)
+    build = [index for index, step in enumerate(steps)
+             if step.startswith("      - name: Build the exact shipped artifact\n")]
+    require(len(build) == 1, "qualification.yml: the artifact job must have one build step")
+    for line in ARTIFACT_BUILD_LINES:
+        require(line in steps[build[0]],
+                f"qualification.yml: the artifact build step is missing {line.strip()!r}")
+    require(steps[-1] == ARTIFACT_RECORD_STEP,
+            "qualification.yml: the artifact job's last step must post main's record exactly as "
+            "pinned (scripts/check-ci-path-routing.py ARTIFACT_RECORD_STEP)")
     for name in ARTIFACT_READERS:
         reader = job(text, name)
         require(re.search(r"^    needs: \[route, artifact\]$", reader, re.MULTILINE) is not None,
@@ -439,19 +459,26 @@ def check_qualification_artifact_digest(text: str) -> None:
 
 
 def check_qualification_artifact_identity(text: str) -> None:
-    """Issue #1061 (owner decision 5): every PR that builds the module reports whether it changed,
-    proves it reproducible, and holds a release change to the pin. The identity job must run
-    exactly where `artifact` runs, after it, with full history, and with its twin, base and report
-    steps exactly as pinned."""
+    """Issue #1061 (owner decision 5): every PR that builds the module reports whether it changed
+    against its base's recorded digest, proves it reproducible, and holds a release change to the
+    pin. The identity job must run exactly where `artifact` runs, after it, with full history, the
+    one read permission, nothing that could skip or mask a step, and its twin and report steps
+    exactly as pinned."""
     identity = job(text, "artifact-identity")
     require(job_if(identity) == job_if(job(text, "artifact")),
             "qualification.yml: artifact-identity must run on exactly the artifact job's routes")
     require(re.search(r"^    needs: \[route, artifact\]$", identity, re.MULTILINE) is not None,
             "qualification.yml: artifact-identity must need exactly [route, artifact]")
+    require(IDENTITY_PERMISSIONS in identity,
+            "qualification.yml: artifact-identity's permissions must be exactly contents: read and "
+            "statuses: read")
+    require(UNMASKABLE.search(identity) is None,
+            "qualification.yml: artifact-identity must carry no job-level continue-on-error, "
+            "defaults or env")
     steps = job_steps(identity)
-    require(len(steps) == 5,
-            "qualification.yml: artifact-identity must be exactly checkout, toolchain, twin, base "
-            "and report steps")
+    require(len(steps) == 4,
+            "qualification.yml: artifact-identity must be exactly checkout, toolchain, twin and "
+            "report steps")
     require(IDENTITY_CHECKOUT.fullmatch(steps[0]) is not None,
             "qualification.yml: artifact-identity must check out full history (fetch-depth: 0), "
             "or no run finds its base")

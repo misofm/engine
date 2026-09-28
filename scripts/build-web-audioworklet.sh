@@ -6,7 +6,7 @@ set -euo pipefail
 # Issue #1061 (owner decision 5, docs/rulings/engine-footprint-2026-09-28.md): the module's digest
 # is not held to a committed pin on every change. Every PR builds the module here, every artifact
 # gate reads those exact bytes, and the `artifact-identity` job reports whether they differ from the
-# base's. The committed pin (`hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256`) is
+# digest the base commit's own CI run recorded. The committed pin (`hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256`) is
 # the release fingerprint: a release change re-pins it, and `npm-publish.yml` publishes only bytes
 # equal to it. docs/RELEASE.md is the procedure.
 #
@@ -15,7 +15,7 @@ set -euo pipefail
 #                  parameter metadata and ABI layout.
 #   --module-only  the module alone (issue #1009), built by exactly the cargo line below, for a gate
 #                  that reads only the module (`run-wasm-gates.sh`'s V8 spill gate, the identity
-#                  job's twin and base builds). The build has one home, here.
+#                  job's twin build). The build has one home, here.
 #   --check-pin    the delivery closure, refused (exit 1, nothing written) unless the module's digest
 #                  equals the committed pin: the release fingerprint check, runnable locally.
 mode=delivery
