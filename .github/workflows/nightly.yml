@@ -281,10 +281,31 @@ jobs:
           cargo test --locked --release -p host-core --test prepare -- --ignored --exact dense_refusal_diagnostics_finish_under_one_second_in_release
           cargo test --locked --release -p effect-package --test package_allocation -- --ignored --exact encode_at_the_frozen_artifact_cap_finishes_in_ten_milliseconds_in_release
 
+  # Issue #1049 shrank these tests per PR -- a quarter of the Simd4/Simd8 ramping-elision
+  # scenarios, four of the 48 million-sample EQ sequences, 10,000 of the million mutated protocol
+  # frames, and the bank meter pass on an 8-track console -- and moved their full size here. Each
+  # is an `#[ignore]`d test selected by its exact name, in a dev build (the per-PR debug jobs'
+  # profile, overflow checks and debug assertions on), with the per-PR features its package uses.
+  full-size-tests:
+    name: full-size debug test sweeps (a share of each runs per PR)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - name: Full-size debug test sweeps
+        run: |
+          set -euo pipefail
+          cargo test --locked -p parametric-eq --lib --features math/lane,parametric-eq/test-support -- --ignored --exact ramping_elision::the_vector_differentials_render_their_bits_at_the_full_scenario_count
+          cargo test --locked -p parametric-eq --test time_domain --features math/lane,parametric-eq/test-support -- --ignored --exact forty_eight_frozen_million_sample_sequences_remain_valid_without_recovery
+          cargo test --locked -p conformance --test mutation_million -- --ignored --exact one_million_deterministic_mutations_cover_complete_schema_closed_dispatch
+          cargo test --locked -p graph-compiler --lib --features builtins-compiler/test-support,graph/test-support,effect-compiler/test-support,engine/realtime-audit -- --ignored --exact tests::the_full_meter_pass_renders_without_an_audited_event_on_sixty_four_tracks
+
   failure-notice:
     name: report nightly failure as an issue
     needs: [native-vectorization-report, benchmark, deep-fuzz, release-link-proof, math-sweeps,
-            moved-mutation-suites, release-budgets]
+            moved-mutation-suites, release-budgets, full-size-tests]
     if: ${{ always() && contains(needs.*.result, 'failure') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -315,12 +336,14 @@ jobs:
           MATH_SWEEPS_RESULT: ${{ needs.math-sweeps.result }}
           MOVED_MUTATION_SUITES_RESULT: ${{ needs.moved-mutation-suites.result }}
           RELEASE_BUDGETS_RESULT: ${{ needs.release-budgets.result }}
+          FULL_SIZE_TESTS_RESULT: ${{ needs.full-size-tests.result }}
         run: |
           set -euo pipefail
           title='nightly workflow is failing'
-          body=$(printf 'The scheduled nightly workflow failed.\n\n| job | result |\n| --- | --- |\n| native production-kernel release-probe report | %s |\n| bounded descriptive benchmarks | %s |\n| deep fuzzing over every target | %s |\n| workspace release link proof | %s |\n| math exhaustive sweeps and wasm-console guest check | %s |\n| stem-store mutation ledger | %s |\n| release-mode wall-clock budgets | %s |\n\nRun: %s\n\nClose this issue once the failure is dealt with. The next failing night after that opens a fresh one; while it is open, further failures are added as comments.\n' \
+          body=$(printf 'The scheduled nightly workflow failed.\n\n| job | result |\n| --- | --- |\n| native production-kernel release-probe report | %s |\n| bounded descriptive benchmarks | %s |\n| deep fuzzing over every target | %s |\n| workspace release link proof | %s |\n| math exhaustive sweeps and wasm-console guest check | %s |\n| stem-store mutation ledger | %s |\n| release-mode wall-clock budgets | %s |\n| full-size debug test sweeps | %s |\n\nRun: %s\n\nClose this issue once the failure is dealt with. The next failing night after that opens a fresh one; while it is open, further failures are added as comments.\n' \
             "$REPORT_RESULT" "$BENCHMARK_RESULT" "$DEEP_FUZZ_RESULT" "$RELEASE_LINK_PROOF_RESULT" \
-            "$MATH_SWEEPS_RESULT" "$MOVED_MUTATION_SUITES_RESULT" "$RELEASE_BUDGETS_RESULT" "$RUN_URL")
+            "$MATH_SWEEPS_RESULT" "$MOVED_MUTATION_SUITES_RESULT" "$RELEASE_BUDGETS_RESULT" \
+            "$FULL_SIZE_TESTS_RESULT" "$RUN_URL")
           existing=$(gh issue list --state open --search "$title in:title" --json number,title \
             --jq "[.[] | select(.title == \"$title\") | .number] | first // empty")
           if [ -n "$existing" ]; then

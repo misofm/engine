@@ -370,47 +370,52 @@ fn one_second_impulse_dfts_match_rbj_at_launch_and_extended_compatibility_rates(
             (false, ReferenceFilterKind::LowPass),
         ] {
             for cutoff in &cutoffs {
-                let mut partition_reference: Option<Vec<f32>> = None;
-                for quantum in [1, 127, 128, 255, 1_024] {
-                    let impulse = impulse_through(
-                        rate,
-                        one_section(*cutoff, high_pass),
-                        rate as usize,
-                        quantum,
+                // Every quantum must render the first quantum's bits (master plan D5), so the
+                // impulse is measured once per rate, cutoff and kind, and every other partition is
+                // held to its bits (issue #1049: one DFT per rate, cutoff and kind).
+                let [quantum, partitions @ ..] = [1, 127, 128, 255, 1_024];
+                let impulse = impulse_through(
+                    rate,
+                    one_section(*cutoff, high_pass),
+                    rate as usize,
+                    quantum,
+                );
+                for partition in partitions {
+                    assert_eq!(
+                        impulse_through(
+                            rate,
+                            one_section(*cutoff, high_pass),
+                            rate as usize,
+                            partition,
+                        ),
+                        impulse,
+                        "block partition changed bits: rate={rate}, cutoff={cutoff}, quantum={partition}"
                     );
-                    assert!(impulse.iter().all(|sample| sample.is_finite()));
-                    let tail_energy = impulse[impulse.len().saturating_sub(4_096)..]
-                        .iter()
-                        .map(|sample| f64::from(*sample) * f64::from(*sample))
-                        .sum::<f64>();
-                    assert!(
-                        tail_energy.is_finite() && tail_energy <= 1e-8,
-                        "rate={rate}, cutoff={cutoff}, quantum={quantum}, tail_energy={tail_energy}"
-                    );
-                    if let Some(reference) = &partition_reference {
-                        assert_eq!(
-                            &impulse, reference,
-                            "block partition changed bits: rate={rate}, cutoff={cutoff}, quantum={quantum}"
+                }
+                assert!(impulse.iter().all(|sample| sample.is_finite()));
+                let tail_energy = impulse[impulse.len().saturating_sub(4_096)..]
+                    .iter()
+                    .map(|sample| f64::from(*sample) * f64::from(*sample))
+                    .sum::<f64>();
+                assert!(
+                    tail_energy.is_finite() && tail_energy <= 1e-8,
+                    "rate={rate}, cutoff={cutoff}, quantum={quantum}, tail_energy={tail_energy}"
+                );
+                for frequency in coherent_probes(rate, *cutoff) {
+                    let reference =
+                        rbj_butterworth_magnitude_db(f64::from(rate), *cutoff, kind, frequency)
+                            .expect("reference");
+                    let actual = impulse_dft_magnitude_db(&impulse, f64::from(rate), frequency);
+                    if reference >= -120.0 {
+                        assert!(
+                            (actual - reference).abs() <= 0.05,
+                            "rate={rate}, cutoff={cutoff}, quantum={quantum}, frequency={frequency}, actual={actual}, reference={reference}"
                         );
                     } else {
-                        partition_reference = Some(impulse.clone());
-                    }
-                    for frequency in coherent_probes(rate, *cutoff) {
-                        let reference =
-                            rbj_butterworth_magnitude_db(f64::from(rate), *cutoff, kind, frequency)
-                                .expect("reference");
-                        let actual = impulse_dft_magnitude_db(&impulse, f64::from(rate), frequency);
-                        if reference >= -120.0 {
-                            assert!(
-                                (actual - reference).abs() <= 0.05,
-                                "rate={rate}, cutoff={cutoff}, quantum={quantum}, frequency={frequency}, actual={actual}, reference={reference}"
-                            );
-                        } else {
-                            assert!(
-                                actual <= -115.0,
-                                "rate={rate}, cutoff={cutoff}, quantum={quantum}, frequency={frequency}, actual={actual}"
-                            );
-                        }
+                        assert!(
+                            actual <= -115.0,
+                            "rate={rate}, cutoff={cutoff}, quantum={quantum}, frequency={frequency}, actual={actual}"
+                        );
                     }
                 }
             }
@@ -873,9 +878,11 @@ fn impulse_dft_magnitude_db(samples: &[f32], rate: f64, frequency: f64) -> f64 {
 /// widened, no new maximum is computed, and no stability gate is re-added to recreate the old
 /// failure. What the domain rejects, it rejects because the table says so.
 ///
-/// What replaces the derivation is the measurement: every representable cutoff from `0.45 * fs`
-/// through the table maximum designs a section whose cast state-space transfer is `-3.0103 dB` at
-/// its own cutoff, to the frozen 0.005 dB tolerance.
+/// What replaces the derivation is the measurement: representable cutoffs from `0.45 * fs`
+/// through the table maximum design a section whose cast state-space transfer is `-3.0103 dB` at
+/// its own cutoff, to the frozen 0.005 dB tolerance. The domain and design sweep takes every
+/// 4,096th representable cutoff plus both endpoints and the word below the maximum, the old seam;
+/// issue #1049 trimmed it from every representable cutoff, about 9.4 million designs.
 #[test]
 fn representable_cutoff_domain_prepares_everywhere_and_rejects_successor() {
     for (rate, maximum_bits) in [
@@ -886,7 +893,10 @@ fn representable_cutoff_domain_prepares_everywhere_and_rejects_successor() {
     ] {
         let start_bits = (0.45_f32 * rate as f32).to_bits();
         for high_pass in [true, false] {
-            for bits in start_bits..=maximum_bits {
+            let sweep = (start_bits..=maximum_bits)
+                .step_by(4_096)
+                .chain([maximum_bits - 1, maximum_bits]);
+            for bits in sweep {
                 let cutoff = f32::from_bits(bits);
                 assert!(
                     validate_builtin_filter_cutoff(cutoff, rate, 0.0, 10.0).is_ok(),
