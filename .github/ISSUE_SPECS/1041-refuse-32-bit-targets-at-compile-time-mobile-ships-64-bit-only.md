@@ -116,3 +116,82 @@ These all pass:
   artifact.
 - The refusal proof is in the cross-target script, not in #1017's AArch64 leg, because that leg
   does not exist yet.
+
+## Sol attempt 1 verdict: PASS
+
+Sol, 2026-09-28, reviewing `4ef7c986` and `c56c94f8` against base `4a0d60bd`. Everything ran on
+rustc 1.97.1 with `CARGO_INCREMENTAL=0` and scratch target directories.
+
+### Gate 1: reproduced
+
+- **Refused.** `cargo check -p lane` fails for `armv7-linux-androideabi`,
+  `thumbv7neon-linux-androideabi` and `x86_64-unknown-linux-gnux32` with only the new message.
+  `i686-linux-android` fails under both guards.
+- **Still builds.** `lane` checks on `aarch64-apple-darwin` (the macOS host), `aarch64-apple-ios`
+  and `aarch64-linux-android`. So does `--workspace --all-targets` on all three, minus four
+  tools. `native-pcm-runner` and `stem-hasher` pull in blake3, and `wasm-console` and
+  `wasm-gates` pull in wasmtime. Their C build scripts need a target sysroot this box lacks, and
+  that failure has nothing to do with `lane`.
+- **wasm32 and x86-64.** CI's 18-package scalar-wasm release build passes. The simd128 and
+  scalar evidence-crate checks pass. CI's two sub-v3 x86 probes still fail with
+  "requires x86-64-v3" only, and the AVX2+FMA probe builds.
+
+### Gate 2: reproduced
+
+- The AudioWorklet module is `476e58ad…` at both head and base. It is `cmp`-identical, and the
+  head build passed the script's own pin check.
+- `run-wasm-gates.sh --without-v8-spill` passes on all three legs (native backend 2, wasm 0 and
+  wasm 1): 142 cases, 358 comparisons and 0 mismatches each.
+- **New evidence.** A remapped, debuginfo-stripped x86-64 release `libcapi.so` is byte-identical
+  at head and base (`d1bffffe…`). AArch64 binary identity was not measured, because this box has
+  no NDK linker. On AArch64 the change is only a false `cfg` plus comments.
+
+### Gate 3: reproduced
+
+`check-cross-targets.sh` prints PASS. Two mutations, each run on the whole script, turn it red
+with the matching diagnostic:
+
+- base `lib.rs` gives "guard ... is gone";
+- a reworded message gives "failed without lane's 64-bit-only message".
+
+### Bypass analysis
+
+No crate outside `lane` names `core::arch`, `std::arch` or `wide`, and `check-lane-policy.sh`
+enforces that. Five workspace crates do not depend on `lane`: `engine`, `session`, `protocol`,
+`dsp-reference` and `bench-support`. They carry no SIMD and no render kernels. `capi`, every
+host, `graph` and every effect reach `lane` unconditionally.
+
+`lane` has no Cargo features. `--cfg miso_wasm_simd8` and `+neon`/`+simd128` flags on armv7 still
+hit the guard. Forging `--cfg target_arch="aarch64"` breaks the build rather than bypassing it.
+
+### Scalar-wasm exception
+
+The exception is bounded to `target_arch = "wasm32"` and cannot admit a native target. It is named
+in the code and documented.
+
+One gap in the documented inventory: `scripts/operator/preflight-wasm-console-benchmark.sh:201`
+builds `wasm-console-guest` without `simd128`. It is an operator script, not a CI leg. Deleting the
+marked arm must handle it too (issue #1039 may retire it first).
+
+### CI, lint and policy
+
+- **CI.** The `qualification.yml` change adds one target to `rustup target add` and a comment. No
+  `if:`, job or verdict row changes. `check-ci-path-routing.py` and `test-ci-path-routing.py`
+  pass, and the router classifies this diff `full`, so `cross-target` runs.
+- **Lint.** fmt, workspace clippy with `-D warnings`, and rustdoc with `-D warnings` pass.
+- **Policy.** These pass: the workspace, lane, realtime, host-core, artifact-evidence-leak,
+  realtime-audit-leak and test-support checks and their tests; the unfused seal and
+  `--self-test`; and effect-interchange qualification and its policy test. The worktree was
+  clean afterwards.
+
+### Non-blocking notes
+
+- The `target_arch = "x86"` arms are now dead. They are in `Backend::current()` and in the copies
+  in `target-smoke` and `soft-clip`.
+- `aarch64_be` passes the guard, and there is no endianness guard anywhere. This is outside the
+  brief.
+- **Pre-existing on AArch64.** Two test-only warnings appear: `lane` `fp_env` has an unused
+  import, and `host-core` `fp_environment` has dead code. These belong to #1017's leg.
+- **Batch-level, not #1041.** `scripts/check-env-vocabulary.sh` already fails at base `4a0d60bd`.
+  The cause is `docs/handoffs/test-value-2026-09-28/`, merged in `73e50f7d`. It will turn the
+  batch's lint job red.
