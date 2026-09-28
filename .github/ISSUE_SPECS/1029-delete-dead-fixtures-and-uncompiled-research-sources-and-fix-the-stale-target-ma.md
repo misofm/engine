@@ -185,7 +185,7 @@ Changed only what is stale after #1017, #1041 and the rulings:
 | `check-dsp-research.sh` on a base-tree copy with `dsp-research/archive` made unreadable (mode 000) | ok, so it never reads the archive |
 | `check-ci-path-routing.py`, `test-ci-path-routing.py` | pass; `ci-path-router.py --base 52016391 --head a1a96d3f` gives `route=full` (the `.rs` archive files, `fixtures/` and `svf.rs` route full) |
 | script reachability (`check-` and `test-script-reachability.py`) | ok (136 reached, 8 operator exempt; 18 mutations) |
-| every lint-job script (54 policy, fixture and self-test commands, Python with `python3 -B`), plus the docs gates, routing and three vocabulary/shape checks: 63 commands | 63/63 exit 0 |
+| every lint-job script (54 policy, fixture and self-test commands, Python with `python3 -B`), plus the docs gates, routing and three vocabulary/shape checks: 62 commands | 62/62 exit 0 |
 | spec gate 5: `rg 'capi-qualification\|archive/issue-0' crates hosts tools scripts sdk fuzz .github/workflows` | no match (exit 1) |
 | tests of every crate that reads `fixtures/` (debug, `--all-features`: builtins, builtins-compiler, capi, compressor, conformance, effect-compiler, graph, graph-compiler, host-core, protocol, session, host-web, native-pcm-runner, parameter-metadata, session-validator) | 1,281 passed, 0 failed, 8 ignored |
 | release `cargo test -p audit -p bench -p console-workload` | 130 passed, 0 failed, 2 ignored |
