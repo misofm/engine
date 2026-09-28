@@ -248,22 +248,15 @@ jobs:
         run: |
           CARGO_TARGET_DIR=target/ci/wasm-console RUSTFLAGS='-C target-feature=+simd128' cargo check --locked --release --target wasm32-unknown-unknown -p wasm-console-guest -p console-workload
 
+  # design §6.2 moved these ledgers off the per-PR lint job. #1026 retired the builtins and graph
+  # benchmark-lifecycle suites with their benchmarks, and with them this job's only ripgrep user;
+  # the stem-store ledger is node alone.
   moved-mutation-suites:
-    name: benchmark-lifecycle and stem-store mutation ledgers
+    name: stem-store mutation ledger
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - name: Install ripgrep
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ripgrep
-      # design §6.2: these validator mutation suites moved off the per-PR lint job. Each is
-      # hermetic (no cargo, no clock) and never launches the real workload it guards.
-      - name: Benchmark-lifecycle mutation suites
-        run: |
-          bash scripts/test-builtins-benchmark.sh
-          bash scripts/test-graph-benchmark.sh
       - name: Stem store V1 mutation ledger
         run: node scripts/check-stem-store-v1.mjs --self-test --budgets
 
@@ -325,7 +318,7 @@ jobs:
         run: |
           set -euo pipefail
           title='nightly workflow is failing'
-          body=$(printf 'The scheduled nightly workflow failed.\n\n| job | result |\n| --- | --- |\n| native production-kernel release-probe report | %s |\n| bounded descriptive benchmarks | %s |\n| deep fuzzing over every target | %s |\n| workspace release link proof | %s |\n| math exhaustive sweeps and wasm-console guest check | %s |\n| benchmark-lifecycle and stem-store mutation ledgers | %s |\n| release-mode wall-clock budgets | %s |\n\nRun: %s\n\nClose this issue once the failure is dealt with. The next failing night after that opens a fresh one; while it is open, further failures are added as comments.\n' \
+          body=$(printf 'The scheduled nightly workflow failed.\n\n| job | result |\n| --- | --- |\n| native production-kernel release-probe report | %s |\n| bounded descriptive benchmarks | %s |\n| deep fuzzing over every target | %s |\n| workspace release link proof | %s |\n| math exhaustive sweeps and wasm-console guest check | %s |\n| stem-store mutation ledger | %s |\n| release-mode wall-clock budgets | %s |\n\nRun: %s\n\nClose this issue once the failure is dealt with. The next failing night after that opens a fresh one; while it is open, further failures are added as comments.\n' \
             "$REPORT_RESULT" "$BENCHMARK_RESULT" "$DEEP_FUZZ_RESULT" "$RELEASE_LINK_PROOF_RESULT" \
             "$MATH_SWEEPS_RESULT" "$MOVED_MUTATION_SUITES_RESULT" "$RELEASE_BUDGETS_RESULT" "$RUN_URL")
           existing=$(gh issue list --state open --search "$title in:title" --json number,title \
