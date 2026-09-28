@@ -145,8 +145,8 @@ def main() -> int:
 
     # The step must test the package, whole and unconditionally.
     fails("host-web excluded from test-debug-a", {"host-web"},
-          (WORKFLOW, "--exclude wasm-console-guest --exclude wasm-gate-corpus \\\n",
-           "--exclude wasm-console-guest --exclude wasm-gate-corpus --exclude host-web \\\n"))
+          (WORKFLOW, "--exclude wasm-gate-corpus \\\n",
+           "--exclude wasm-gate-corpus --exclude host-web \\\n"))
     step_b = "      - name: DSP crates debug tests (lane feature unification pinned explicitly)\n"
     fails("test-debug-b behind a step-level if:", {"builtins", "lane", "parametric-eq"},
           (WORKFLOW, step_b, step_b + "        if: needs.route.outputs.math_closure == 'true'\n"))
