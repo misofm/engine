@@ -109,3 +109,66 @@ After publication, the same structural request must be admitted.
 Release builds use `panic = "abort"`, so a mobile app that polls resources while it edits during playback would abort. The window is a few instructions wide, and the base has the same exposure, because its reclaim also removed the old row once the atomic had moved on.
 
 The fix is to load the atomic while holding the lock. This attempt already does that on the control side, so the reader side needs only a two-line reorder. It is outside this slice and needs Sol's ruling: amend this issue, or open a bounded successor.
+
+## Sol attempt 1 verdict: FAIL
+
+Sol, 2026-09-28, reviewing `95ddc0eb`. Scratch work (an isolated `git archive` copy of the commit, a scratch `target/` and a Python interleaving model) stayed outside the repository and was deleted afterwards.
+
+### What holds
+
+- **Replicated.**
+  - The split-render test is red on the base, with the same tuple as reported, and green with the fix.
+  - The race test fails 5 of 5 runs on the base (255 from a dequeue after 1 swap).
+  - With the fix, it passes 20 of 20 in dev and 300 of 300 in release.
+  - Pinned to one core (`taskset`), it passes 200 of 200 in release and 40 of 40 in dev.
+- **The promotion rule is correct.** An exhaustive model at the code's step granularity was used:
+  - Synchronization is modeled in three steps: load and promote; one step per `try_reclaim`; retain under the lock.
+  - Render is modeled as `enter_block`, then publish or reject.
+  - The model uses capi's capacities: rows 2, pending 1, retired 1, publication 1, retirement 1.
+  - Scripts ran up to 14 control operations, 10 render calls (4 of them rejected) and 3 reads: 39,252 states.
+  - The fix never returns `Internal` and never wedges after quiescing, and every acked epoch is activated.
+  - The model catches each of the three reported mutations.
+- **Cases.**
+  - *Before the swap:* the pending candidate gives `Backpressure`.
+  - *During the swap:* the reclaim promotes.
+  - *After the swap:* the atomic promotes.
+  - *Back to back:* no candidate can commit while the atomic lags, because both rows are in use. So the lag is at most one epoch.
+  - *Superseded candidate:* unreachable. `command` refuses while a candidate is pending, and the publication capacity is 1.
+  - *Empty retirement queue:* only the atomic path runs.
+  - *Full retirement queue:* unreachable for reserved candidates. The credit is taken at reservation, so the command gets `Backpressure` and acks nothing. `DeferredRetirementFull` applies only to the legacy `publish`.
+  - *No ack precedes a drop.* An ack comes only after the publication slot, the retirement credit and the room checks are all secured.
+- **F1 needs no second thread.** `enter_block` swaps before `render_contiguous` checks time and shape. So a *rejected* render call, such as one with a wrong `absolute_sample`, swaps plans and never publishes the atomic.
+  - I tested this through the C ABI on one thread only.
+  - Base: the next dequeue returns `INTERNAL`, then every structural command returns `BACKPRESSURE`.
+  - Fix: the next control calls succeed, and the same request is admitted after the next good render, in 4 of 4 rounds.
+- **Mutations.** I ran seven mutations (`!=`, `>=`, no lagging row, no reclaim promotion, no current row, no pending row, no `retain`). Each one turns both committed tests red: the split-render test fails and the race test passes 0 of 5. `>=` also hangs an existing lib test.
+- **Realtime.**
+  - The diff has 0 lines in `crates/engine`, `plan.rs` or `ffi.rs`, and render takes no lock.
+  - Release `audit capi` reproduces the implementer's record: 100,000 calls, 0 allocations, deallocations, locks, syscalls and violations, `pcm_digest ff6cdcb96cdcdad5`.
+  - The audit driver never swaps plans. Swap-path evidence is the race test's render-thread counter (0 allocations, 0 frees).
+- **Other checks.** The capi dev and release suites pass (33 + 5). `clippy -p capi --all-targets -D warnings` and `fmt` pass. host-web has no path to capi.
+
+### Why it fails
+
+1. **The `plan_resources` reader race belongs in this slice, and attempt 2 must fix it.**
+   - *Test.* A third thread polled `miso_engine_v1_plan_resources` during the committed race, extended to 200 swaps, in release.
+   - *With the fix:* 19 of 100 runs panicked at `plan.rs:43`. The `MutexGuard` temporary is still live when that panic fires, so it poisons `reports`:
+     - every later query panics at `plan.rs:40`;
+     - every synchronization returns `Internal`, which is the permanent wedge this issue exists to close;
+     - under `panic = "abort"` the process aborts.
+   - *On the base:* 0 of 100 runs hit it, but only because the control thread wedges at the first swap in 100 of 100 runs. The fix is what exposes the race.
+   - *With the two-line reorder* (take the lock, then load the atomic): 300 of 300 runs pass, and the model finds no violation.
+   - *Why it belongs here:* without the reorder, the new `retain` comment ("the rows a reader can still ask for") is false for the any-thread reader.
+2. **The peak check misclassifies a structural command inside the window.**
+   - *Mechanism.* `command` checks the candidate against the lagging atomic's row, which is the plan being reclaimed, not the plan that is rendering.
+   - *Test.* I set `maximum_effect_state_bytes = 8,424 + 7,488`, so both pairs of plans that really coexist fit. The test removes eq0's EQ, swaps, and puts the EQ back inside the window.
+   - *Result.* The window call returns `RESULT_COMPILE_REJECTED` (`effect.resource.limit`). After publication, the same request is admitted.
+   - *Why the committed test misses it.* It checks for transient `Backpressure` in the window only under loose limits.
+
+### Attempt 2 must
+
+1. Reorder `active_resources` in `crates/capi/src/runtime/plan.rs`. Add a reader-thread race that fails on `95ddc0eb` at a stated rate and passes 1,000 or more release runs with the fix.
+2. In the structural arm, return `Backpressure` before `prepare_runtime` whenever the atomic still lags `providers.epoch` after synchronization. The table is full in that state anyway, and this also skips a wasted compile. Commit the tight-limit window test, which fails on `95ddc0eb`.
+3. Recommended, not blocking: commit the single-thread rejected-render C-ABI test, and correct the Problem text, since F1 does not need a second thread.
+
+Note: `promote_pending_provider` could fail inside the reclaim loop after the plan was already popped. That is unreachable at capi's capacities, and the model never hits it, so leave it.
