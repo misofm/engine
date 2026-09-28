@@ -509,11 +509,11 @@ pub const BUILTIN_AUTOMATION_TARGETS: [(u32, bool); 11] = [
 /// It extends the target **vocabulary** and nothing else. No lowering reads the session's
 /// automation table -- for this rack or for any of the other three -- so a valid `builtins` target
 /// is valid-and-inert syntax today: it authors, it round-trips, it survives the canonical writer,
-/// and it renders nothing. Builtin automation *rendering* is gated on issue #140's span feed,
-/// whose natural destination is the very drains #210 phases 1 and 3 built
-/// (`TrackInputRecord`, `TrackFaderRecord`, `TrackControlRecord`), because a span's
-/// block-first-sample semantics already match the drain contract. Nothing here builds that feed
-/// and nothing here should be read as having built it.
+/// and it renders nothing. Rendering stored session automation, builtin targets included, is
+/// owned by #1058 (research first); #140, which once gated it, was descoped by the 2026-09-28
+/// owner ruling. The natural destination is still the drains #210 phases 1 and 3 built
+/// (`TrackInputRecord`, `TrackFaderRecord`, `TrackControlRecord`), whose block-first-sample
+/// semantics match a span. Nothing here builds that feed or should be read as having built it.
 fn validate_builtin_automation_target(
     target: &AutomationTarget,
     path: &PathRef<'_>,
