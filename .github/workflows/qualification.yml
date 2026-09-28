@@ -294,6 +294,10 @@ jobs:
         run: |
           bash scripts/check-web-audioworklet.sh target/ci/qualification-artifacts
           python3 -B scripts/check-browser-expected-resources.py --artifacts target/ci/qualification-artifacts
+      # #1059: the whole-plan scalar renderer is a test-only oracle; the shipped module must not
+      # contain it (owner ruling 2026-09-28, decision 3).
+      - name: Shipped AudioWorklet module contains no whole-plan scalar path
+        run: python3 -B scripts/check-scalar-oracle-absent.py --wasm target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm
       - name: Hermetic browser host and worklet tests
         run: bash scripts/test-web-audioworklet.sh
       # Issues #1000/#1009: V8's register allocation of the EQ's stationary cascade loops, read from
@@ -423,6 +427,10 @@ jobs:
         run: |
           python3 -B scripts/check-test-support-ci.py
           python3 -B scripts/test-test-support-ci.py
+      # #1059: the reader and matcher of the shipped-artifact scalar-oracle gate, hermetically.
+      # artifact-gates and audit-native run the gate itself on the built module and library.
+      - name: Scalar-oracle-absent gate self-test
+        run: python3 -B scripts/check-scalar-oracle-absent.py --self-test
       # #1027: every file under scripts/ outside scripts/operator/ is reached from a workflow.
       - name: Script reachability policy and mutation tests
         run: |
@@ -588,13 +596,15 @@ jobs:
       # Explicit --features, as in test-debug-a: a local reproduction names the same features.
       # parametric-eq and builtins test-support turn on gated pass-count and peak-merge assertions
       # inside tests that run either way; nothing in this package set forwards them (#1021).
+      # lane/test-support compiles the test-only `Backend::Scalar` oracle (#1059); the builtins
+      # and compressor dev-dependencies unify it in anyway, and naming it keeps that explicit.
       - name: DSP crates debug tests (lane feature unification pinned explicitly)
         run: |
           cargo test --locked --all-targets \
             -p lane -p math -p effect-runtime -p delay -p compressor -p multiband-compressor \
             -p gate-expander -p true-peak-limiter -p transient-shaper -p soft-clip \
             -p parametric-eq -p builtins -p dsp-reference -p conformance \
-            --features math/lane,parametric-eq/test-support,builtins/test-support
+            --features math/lane,parametric-eq/test-support,builtins/test-support,lane/test-support
       - name: Conformance research-fixture completeness
         run: cargo run --locked -p conformance --example conformance_fixtures -- --check
 
@@ -760,6 +770,11 @@ jobs:
         run: |
           bash scripts/check-capi-abi.sh
           bash scripts/check-capi-abi.sh --self-test
+      # #1059: check-capi-abi.sh just built `-p capi` alone, which is the shipped feature set (the
+      # shard's four-package build unifies audit's graph/test-support in, so it is not). That
+      # library must contain no whole-plan scalar path.
+      - name: Shipped C ABI library contains no whole-plan scalar path
+        run: python3 -B scripts/check-scalar-oracle-absent.py --native target/release/libcapi.so
       # G2: HashMap iteration order is per-process, so this runs `graph_fixture` fresh 100 times.
       - name: Graph fresh-process determinism (100 fresh processes)
         run: bash scripts/check-graph-determinism.sh

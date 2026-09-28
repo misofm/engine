@@ -87,10 +87,12 @@ pub extern "C" fn miso_console_workload_count() -> u32 {
 /// cannot silently pass as the `simd128` one and be reported as a SIMD number.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_console_backend() -> u32 {
-    match Backend::current() {
-        Backend::Scalar => 0,
-        Backend::Simd4 => 1,
-        Backend::Simd8 => 2,
+    // By width, not by variant: `Backend::Scalar` exists only in `lane/test-support` builds and on
+    // the scalar-wasm CI exception (#1059), so a match on the variants compiles in only one of them.
+    match Backend::current().width() {
+        4 => 1,
+        8 => 2,
+        _ => 0,
     }
 }
 

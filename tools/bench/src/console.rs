@@ -2313,10 +2313,12 @@ fn paired_median(left: &[u64], right: &[u64]) -> i64 {
 // ---------------------------------------------------------------------------------------------
 
 fn backend_name(backend: Backend) -> &'static str {
-    match backend {
-        Backend::Scalar => "Scalar",
-        Backend::Simd4 => "Simd4",
-        Backend::Simd8 => "Simd8",
+    // By width, not by variant: `Backend::Scalar` exists only in `lane/test-support` builds and on
+    // the scalar-wasm CI exception (#1059), so a match on the variants compiles in only one of them.
+    match backend.width() {
+        4 => "Simd4",
+        8 => "Simd8",
+        _ => "Scalar",
     }
 }
 

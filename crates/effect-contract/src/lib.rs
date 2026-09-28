@@ -245,10 +245,13 @@ impl BankWidth {
     /// the width of a [`Backend`] calls this rather than re-deriving a table of its own.
     #[must_use]
     pub const fn for_backend(backend: Backend) -> Option<Self> {
-        match backend {
-            Backend::Scalar => None,
-            Backend::Simd4 => Some(Self::Four),
-            Backend::Simd8 => Some(Self::Eight),
+        // Asked of the width, not of the variants: `Backend::Scalar`, the test-only whole-plan
+        // oracle, exists only where `lane/test-support` is enabled (issue #1059), and Cargo
+        // unifies that feature across a build, so no match on the variants compiles in both.
+        match backend.width() {
+            4 => Some(Self::Four),
+            8 => Some(Self::Eight),
+            _ => None,
         }
     }
 
