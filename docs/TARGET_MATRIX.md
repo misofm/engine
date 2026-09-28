@@ -191,9 +191,10 @@ AArch64 legs. Each open entry is an expected failure, by name:
   `docs/audits/test-usefulness-2026-09-04/03-compilers-hosts-tools.md:227,240,297`, plus what the
   legs found in `console-workload`, `host-core`, `graph-compiler`, `true-peak-limiter`,
   `parametric-eq`, `effect-compiler`, `gate-expander` and `compressor`) are width-agnostic, or
-  ignore the other width by name. Three stay eight-lane-only with their reason: the gate-expander W8
-  bank tests, the exact eight-lane byte totals in `capi`'s `resource_lifecycle` (#1060 replaces
-  them), and the per-node console-effect fixture in `host-core`'s `symmetry_witness`. The W4 gate
+  ignore the other width by name. Two stay eight-lane-only with their reason: the gate-expander W8
+  bank tests and the per-node console-effect fixture in `host-core`'s `symmetry_witness`. #1060
+  replaced the exact eight-lane byte totals in `capi`'s `resource_lifecycle` with per-width budgets,
+  live-report requirements and an allocator oracle, which run at both widths. The W4 gate
   binding test runs only on AArch64. The gate-expander tests' W8-only claims (payload interchange,
   restore isolation, malformed-word rejection) are not yet checked at W4; making them width-generic
   is a successor issue.
