@@ -216,3 +216,72 @@ The other lint steps, by script family:
   `docs/rulings/` (3 files). So there are no Rust, workload, validator, fixture or workflow
   changes; the console digests and the shipped artifact's closure are unchanged by construction.
 - **Mobile.** No effect.
+
+## Sol attempt 1 verdict: PASS
+
+Reviewer: Sol, 2026-09-28, on `d1b1b844` (work `03101cea`), and on a scratch merge of it onto the
+`codex/batch-slim-1` head `b8bea8e1` (clean, no conflicts). No timed workload was launched.
+
+**Nothing still used was removed.**
+- After argument parsing, both scripts are byte-identical to `ed0556a9`, apart from the variable
+  rename and the four refusal messages. The old runner never read the arm again after it chose the
+  directory, so no arm had behaviour of its own that the `--step` path lost.
+- All 49 target folders hold a record, so each of them could only refuse.
+- Apart from the `--phase2` and `--phase3` rulings the evidence already lists, no live file names
+  a retired arm or the no-argument default as a recipe. The search covered the rulings, `docs/`,
+  `scripts/operator/README.md`, `docs/ENGINE_ENV_VOCABULARY.md`, `tools/`, `crates/` and both
+  workflows. The other hits are the wasm runner's own arms (R9) and history in
+  `crates/rack/tests/MUTATIONS.md`.
+- `floor.rs` names no arm and no folder. The floor-accounting clause needs "a record produced by
+  `scripts/run-console-benchmark.sh`", and the `--step` path still produces one.
+- `test-console-benchmark.sh` and the policy scripts do not run either script.
+  `check-step-vocabulary.py` is about the word "nudge". The only other reader of `artifacts/steps`
+  is the web mixing-automation runner, which is untouched and uses the same NAME regex.
+- The permalink is right: `d3349b72` is an ancestor of `origin/main` (`a9414c0c`), and its two
+  scripts equal the base's and carry all 48 arms.
+
+**Exit code 1 to 2.** No workflow, script or test runs either script. None of them matches the
+changed messages or checks an exit status from them. The only records of the old exit 1 are
+history: #1022's evidence and closed specs.
+
+**Argument paths**, run from the scratchpad as the working directory. These exit 2 with the usage:
+- no argument, `--strip4`, `--phase2`, `--issue163-phase0`, `--plumbing-floor-baseline`;
+- `--step`, `--step=base`, `--STEP base`, `base --step`, `--step base extra`.
+
+These exit 2 as an invalid name: `Bad_Name`, `""`, `-base`, and a 65-character name.
+
+`--step base` and `--step after-1003` exit 1 at the overwrite refusal. `bash -x` shows that
+neither script runs cargo, the binary, `mkdir` or any check before refusing.
+
+**End to end, untimed, on the merge:**
+- `preflight-console-benchmark.sh --step verify-1025-preflight` passed, with 0 workload launches,
+  in 202 s. It wrote 22 provenance fields, none empty, and `runner_sha256` equals the merged
+  runner's hash.
+- The runner with a new NAME in a dirty tree reached "requires a clean committed candidate" and
+  exited 1, before `mkdir`.
+
+**Disclosure.** By mistake I also ran the runner with a valid 64-character NAME on the
+implementer's clean worktree. It built `bench`, then refused at `precondition_loadavg_above_ceiling`
+with `workload_process_launches: 0`. That incidentally exercised the full `--step` path through
+the build to the admissibility refusal. I removed the `artifacts/steps/aaa…/` folder it created,
+and that tree is clean again.
+
+**Gates on the merge.** Every gate below exits 0:
+- `cargo fmt --all -- --check`;
+- `cargo check --locked --workspace --all-targets`, with and without `--all-features`;
+- `cargo clippy --locked --workspace --all-targets -- -D warnings`, with and without
+  `--all-features`;
+- the wasm32 `host-web` check;
+- `cargo test --locked -p bench -p console-workload -p bench-support`: 172 passed;
+- `check-bench-policy.sh`, which reports "7 operator scripts rooted";
+- `test-bench-policy.sh`, `check-bench-preconditions.sh`, `check-console-benchmark-fixture.sh` and
+  `check-console-fixtures.sh`;
+- `test-console-benchmark.sh`, which made 0/0/0 real invocations;
+- `check-`/`test-env-vocabulary.sh`, `check-step-vocabulary.py`, and `check-`/`test-ci-path-routing.py`.
+
+The router gives `route=full`. The test list is 2,556 tests in 274 targets, the same as the
+implementer's count. The line counts and the net -370 match. `bash -n` is clean.
+
+**Findings.** None blocks the verdict.
+1. Merge order: #1027 moves `run-console-benchmark.sh` into `scripts/operator/`. It must move
+   this version of the file, not re-add the old one. No sibling branch touches these files today.
