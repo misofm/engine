@@ -617,26 +617,6 @@ pub enum ParameterProviderError {
     LimitExceeded,
 }
 
-/// Bounded typed fixture input accepted by [`MockProvider::new`].
-#[cfg(any(test, feature = "test-support"))]
-#[derive(Clone, Debug)]
-pub struct MockProviderConfig {
-    /// Endpoint current sample.
-    pub current_sample: SampleTime,
-    /// Typed bounded parameter descriptor catalog.
-    pub parameter_metadata: Vec<crate::ParameterDescriptor>,
-    /// Typed bounded parameter-state snapshot.
-    pub parameter_state: ParameterStatePage,
-    /// Typed sorted counter snapshot.
-    pub counter_snapshot: CounterSnapshot,
-    /// Typed ascending retained diagnostics.
-    pub diagnostics: Vec<crate::Diagnostic>,
-    /// Typed absolute transport state and position.
-    pub transport_state: TransportState,
-    /// Absolute transport position paired with `transport_state`.
-    pub transport_position: SampleTime,
-}
-
 /// Small deterministic provider suitable for protocol conformance fixtures.
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Debug)]
@@ -689,127 +669,6 @@ impl Default for MockProvider {
                 minimum_diagnostic_severity: crate::DiagnosticSeverity::Info,
             },
         }
-    }
-}
-
-#[cfg(any(test, feature = "test-support"))]
-impl MockProvider {
-    /// Construct an empty provider with eager retained mutable collection capacities.
-    pub fn try_with_retained_capacity(
-        capacity: ControllerRetainedCapacity,
-    ) -> Result<Self, ControllerResourceAllocationError> {
-        let mut provider = Self {
-            telemetry_configuration: retained_telemetry_configuration(capacity)?,
-            ..Self::default()
-        };
-        provider
-            .counter_snapshot
-            .values
-            .try_reserve_exact(capacity.counter_ids)
-            .map_err(|_| ControllerResourceAllocationError)?;
-        Ok(provider)
-    }
-
-    /// Inspect eager mutable retained capacities without exposing provider state mutation.
-    #[must_use]
-    pub fn retained_capacities(&self) -> (ControllerRetainedCapacity, usize) {
-        (
-            ControllerRetainedCapacity {
-                meter_handles: self.telemetry_configuration.meter_handles.capacity(),
-                counter_ids: self.telemetry_configuration.counter_ids.capacity(),
-            },
-            self.counter_snapshot.values.capacity(),
-        )
-    }
-
-    /// Construct an empty enumerable provider with one eager automation-only descriptor.
-    pub fn try_with_retained_capacity_and_automation(
-        capacity: ControllerRetainedCapacity,
-        descriptor: crate::ParameterDescriptor,
-    ) -> Result<Self, ControllerResourceAllocationError> {
-        let codec = ProtocolCodec::default();
-        codec
-            .encoded_parameter_metadata_page_len(&ParameterMetadataPage {
-                last_handle: descriptor.handle,
-                eof: true,
-                descriptors: vec![descriptor.clone()],
-            })
-            .map_err(|_| ControllerResourceAllocationError)?;
-        let mut provider = Self::try_with_retained_capacity(capacity)?;
-        provider.automation_parameter = Some(descriptor);
-        Ok(provider)
-    }
-
-    /// Construct deterministic typed fixtures only after every configured collection is bounded.
-    pub fn new(config: MockProviderConfig) -> Result<Self, ParameterProviderError> {
-        let validation_codec = ProtocolCodec::default();
-        if config.parameter_metadata.len() > 256
-            || config.parameter_state.records.len() > 256
-            || config.counter_snapshot.values.len() > crate::CounterId::ValidationFailures as usize
-            || config.diagnostics.len() > 256
-            || config
-                .parameter_metadata
-                .windows(2)
-                .any(|pair| pair[0].handle >= pair[1].handle)
-            || config
-                .diagnostics
-                .windows(2)
-                .any(|pair| pair[0].provider_sequence >= pair[1].provider_sequence)
-            || config
-                .diagnostics
-                .iter()
-                .any(|item| item.provider_sequence.is_none())
-        {
-            return Err(ParameterProviderError::LimitExceeded);
-        }
-        // Metadata and diagnostics are paginated. Validate each independently encodable item
-        // instead of requiring an otherwise valid 256-item catalog/history to fit one frame.
-        if config.parameter_metadata.iter().any(|descriptor| {
-            validation_codec
-                .encoded_parameter_metadata_page_len(&ParameterMetadataPage {
-                    last_handle: descriptor.handle,
-                    eof: true,
-                    descriptors: vec![descriptor.clone()],
-                })
-                .is_err()
-        }) || validation_codec
-            .encoded_parameter_state_page_len(&config.parameter_state)
-            .is_err()
-            || validation_codec
-                .encoded_counter_snapshot_len(&config.counter_snapshot)
-                .is_err()
-            || config.diagnostics.iter().any(|diagnostic| {
-                validation_codec
-                    .encoded_diagnostics_page_len(&DiagnosticsPage {
-                        last_sequence: diagnostic
-                            .provider_sequence
-                            .expect("presence was checked above"),
-                        eof: true,
-                        diagnostics: vec![diagnostic.clone()],
-                    })
-                    .is_err()
-            })
-        {
-            return Err(ParameterProviderError::LimitExceeded);
-        }
-        Ok(Self {
-            current_sample: config.current_sample,
-            parameter_metadata: config.parameter_metadata,
-            automation_parameter: None,
-            parameter_state: config.parameter_state,
-            counter_snapshot: config.counter_snapshot,
-            diagnostics: config.diagnostics,
-            transport_state: config.transport_state,
-            transport_position: config.transport_position,
-            telemetry_configuration: TelemetryConfiguration {
-                meter_handles: Vec::new(),
-                meter_period_blocks: 0,
-                counter_ids: Vec::new(),
-                counter_period_blocks: 0,
-                diagnostics_enabled: false,
-                minimum_diagnostic_severity: crate::DiagnosticSeverity::Info,
-            },
-        })
     }
 }
 
@@ -1224,18 +1083,6 @@ pub struct PreparedImmediateCommandFrame {
 }
 
 impl PreparedImmediateCommandFrame {
-    /// Exact response bytes already accepted by the controller.
-    #[must_use]
-    pub const fn len(&self) -> usize {
-        self.bytes.len()
-    }
-
-    /// Whether the exact response is empty.
-    #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.bytes.is_empty()
-    }
-
     /// Atomically copy the complete canonical response to caller output.
     pub fn write_into(&self, output: &mut [u8]) -> Result<usize, EncodeError> {
         copy_complete_frame(&self.bytes, output)
@@ -1325,18 +1172,6 @@ pub struct CommittedCommandFrame {
 }
 
 impl CommittedCommandFrame {
-    /// Exact committed response length.
-    #[must_use]
-    pub const fn len(&self) -> usize {
-        self.bytes.len()
-    }
-
-    /// Whether the response is empty.
-    #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.bytes.is_empty()
-    }
-
     /// Atomically copy the complete committed response to caller output.
     pub fn write_into(&self, output: &mut [u8]) -> Result<usize, EncodeError> {
         copy_complete_frame(&self.bytes, output)
@@ -3539,35 +3374,6 @@ impl<P: ControlProvider> ProtocolController<P> {
         Ok(())
     }
 
-    /// Encode a queued typed `SESSION_COMMITTED` event payload without an arbitrary byte variant.
-    pub fn encode_session_committed_event(
-        &self,
-        slot: ReliableSlot,
-        output: &mut [u8],
-    ) -> Result<usize, crate::EncodeError> {
-        let ReliablePayload::SessionCommitted {
-            event_sequence,
-            origin_request_id,
-            previous_revision,
-            applied_operations,
-        } = slot.payload
-        else {
-            return Err(crate::EncodeError::MessageKindMismatch);
-        };
-        if slot.message_id != MessageId::SessionCommitted {
-            return Err(crate::EncodeError::MessageKindMismatch);
-        }
-        self.codec.encode_session_committed(
-            SessionCommitted {
-                event_sequence,
-                origin_request_id,
-                previous_revision,
-                applied_operations,
-            },
-            output,
-        )
-    }
-
     /// Encode a queued typed `TRANSPORT_STATE` event payload without arbitrary byte payloads.
     pub fn encode_transport_state_event(
         &self,
@@ -3594,39 +3400,6 @@ impl<P: ControlProvider> ProtocolController<P> {
                 position,
                 effective_sample,
                 origin_request_id,
-            },
-            output,
-        )
-    }
-
-    /// Encode a queued typed `AUTOMATION_CANCELED` payload without arbitrary byte payloads.
-    pub fn encode_automation_canceled_event(
-        &self,
-        slot: ReliableSlot,
-        output: &mut [u8],
-    ) -> Result<usize, crate::EncodeError> {
-        let ReliablePayload::AutomationCanceled {
-            event_sequence,
-            origin_request_id,
-            canceled_records,
-            reason,
-            queue_generation,
-            effective_sample,
-        } = slot.payload
-        else {
-            return Err(crate::EncodeError::MessageKindMismatch);
-        };
-        if slot.message_id != MessageId::AutomationCanceled {
-            return Err(crate::EncodeError::MessageKindMismatch);
-        }
-        self.codec.encode_automation_canceled(
-            AutomationCanceled {
-                event_sequence,
-                origin_request_id,
-                canceled_records,
-                reason,
-                queue_generation,
-                effective_sample,
             },
             output,
         )

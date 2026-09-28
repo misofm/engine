@@ -41,7 +41,7 @@ Third-party effects are out of scope until a new issue reopens them (owner rulin
 
 ## Interfaces and transports
 
-Expose a broad semantic control model and a narrow C ABI.  The control protocol is versioned, binary, transport-neutral, request-id/revision aware, uses absolute sample-time parameter events, and never transports PCM.  High-rate automation may use bounded point batches or step/linear/exponential segments.  Queue saturation returns typed backpressure; commands are never silently lost, while explicitly noncritical telemetry may be coalesced or dropped with counters.  In-process calls and shared/ring interfaces serve embedded hosts; a local sidecar may use local IPC; binary WebSocket is optional only at cloud/browser network boundaries, never in a render path.
+Expose a broad semantic control model and a narrow C ABI.  The control protocol is versioned, binary, transport-neutral, request-id/revision aware, uses absolute sample-time parameter events, and never transports PCM.  High-rate automation may use bounded point batches or step/linear/exponential segments.  Queue saturation returns typed backpressure; commands are never silently lost, while explicitly noncritical telemetry may be coalesced or dropped with counters.  In-process calls and shared/ring interfaces serve embedded hosts.  A local sidecar over local IPC and a binary WebSocket transport are out of scope until a new issue reopens them (owner ruling R3, `docs/rulings/engine-footprint-2026-09-28.md`; #25 closes as descoped); a reopened transport never sits in a render path.
 
 ## Realtime, quality, and research evidence
 

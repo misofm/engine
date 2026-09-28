@@ -722,12 +722,6 @@ impl PreparedSessionTransaction {
     pub fn revision(&self) -> SessionRevision {
         SessionRevision(self.compiled.normalized_model().revision)
     }
-
-    /// Number of edits resolved in wire order.
-    #[must_use]
-    pub const fn applied_operations(&self) -> usize {
-        self.applied_operations
-    }
 }
 
 /// Atomic transaction rejection with a precise resolving operation index when one exists.

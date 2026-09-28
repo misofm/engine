@@ -1625,7 +1625,9 @@ fn complete_capi_owners(
     // `Option<NonZeroUsize>`), so every retained `PreparedRenderPlan` is 8 bytes smaller: the
     // publication and retirement queues' two slots each (-32), the plan handle's active plan and
     // pending candidate (-16), and the session handle's `PlanPublisher` envelope (-8).
-    assert_effective_owner_mutations(&active, 160_901, "active CAPI");
+    // #1034 re-pin (-8): the session handle's controller holds `ProtocolQueues` inline, and the
+    // queues drop their unread `control_used_bytes` counter (a `usize`).
+    assert_effective_owner_mutations(&active, 160_893, "active CAPI");
 
     let candidate_epoch_rows = [
         PrimitiveOwner {
@@ -2371,7 +2373,9 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
     // #1023 re-pin (-48): the current and the prepared `CompiledSession` each lose the unread
     // 24-byte `graph_entity_indexes` map.
     // #1024 re-pin (-56): the current CAPI owners' envelope rows (see `complete_capi_owners`).
-    assert_effective_owner_mutations(&capi_rows, 204_319, "double-live CAPI");
+    // #1034 re-pin (-8): the current session handle's `ProtocolQueues` counter (see
+    // `complete_capi_owners`).
+    assert_effective_owner_mutations(&capi_rows, 204_311, "double-live CAPI");
 
     let graph_rows = graph_owners();
     // The eight graph-metadata rows begin after the five audio/effect rows. #241 removed the
@@ -2707,7 +2711,8 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
     assert_eq!(oracle.builtin, 34_902);
     // #1023: -48, the two `CompiledSession`s' unread `graph_entity_indexes` maps.
     // #1024: -56, the current CAPI owners' `RenderEnvelope` rows.
-    assert_eq!(oracle.capi, 204_319);
+    // #1034: -8, the current session handle's unread `ProtocolQueues` counter.
+    assert_eq!(oracle.capi, 204_311);
     // #241: 58_694 - (29 x 10 locator) + (40 x 10 content identity) = 58_804.
     assert_eq!(oracle.largest, 58_804);
 
@@ -2739,7 +2744,7 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
         // SAFETY: These handles are uniquely owned until their matching destroy calls.
         unsafe {
             let (session, plan) = compile_c(&session_document, &exact_limits);
-            assert_eq!(resources_c(plan), frozen_scratch_report(160_901));
+            assert_eq!(resources_c(plan), frozen_scratch_report(160_893));
             let request = command(1, 42, "double-live-cap");
             let mut response = [0xa5_u8; 4_096];
             assert_eq!(submit(session, &request, &mut response), RESULT_OK, "{row}");
@@ -2758,7 +2763,7 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
                 RESULT_OK
             );
             // The prospective session ID is nine bytes shorter than the current one.
-            assert_eq!(resources_c(plan), frozen_scratch_report(160_901 - 9));
+            assert_eq!(resources_c(plan), frozen_scratch_report(160_893 - 9));
             miso_engine_v1_session_destroy(session);
             miso_engine_v1_plan_destroy(plan);
         }
@@ -2810,11 +2815,12 @@ fn tiny_control_frame_still_accounts_three_provider_counters_exactly() {
     // budget assertion rather than an observed-value pin. #1023 then removes 24 bytes: the
     // session handle's compiled session no longer carries the unread `graph_entity_indexes` map.
     // #1024 removes 56 more: `RenderEnvelope`'s unused `input_channels`, once in each of the
-    // seven retained envelopes (see `complete_capi_owners`).
+    // seven retained envelopes (see `complete_capi_owners`). #1034 removes 8 more: the session
+    // handle's `ProtocolQueues` no longer carries the unread `control_used_bytes` counter.
     let (eq_descriptor_bytes, eq_state_bytes, eq_string_bytes) = prepared_eq_catalog_growth();
     assert_eq!(
         required,
-        178_434 + eq_descriptor_bytes + eq_state_bytes + eq_string_bytes,
+        178_426 + eq_descriptor_bytes + eq_state_bytes + eq_string_bytes,
         "tiny-frame retained authority"
     );
     let mut exact = roomy;
