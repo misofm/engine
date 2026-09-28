@@ -78,8 +78,8 @@ pin `-C target-feature=+avx2,+fma`, debug profile. Sweep driver: one mutation at
 | E6 resident means resident | `compressor/tests/MUTATIONS.md` (143-E6-a/b), `true-peak-limiter/tests/MUTATIONS.md` (143-E6-c) |
 | E7 cost classes bench-backed | `graph-compiler/tests/MUTATIONS.md` (143-E7) |
 | E8 flood and misuse | `host-web/MUTATIONS.md` |
-| E9 metadata round-trip | `effect-package/tests/MUTATIONS.md` (143-E9-a), `host-web/MUTATIONS.md` |
-| E10 wire and identity accounting | `effect-package/tests/MUTATIONS.md` (143-E10-a/b) |
+| E9 metadata round-trip | `host-web/MUTATIONS.md` (the descriptor-wire half, 143-E9-a, was removed with `effect-package` by #1037) |
+| E10 wire and identity accounting | removed with `effect-package` by #1037 (owner ruling R6); the tap menu itself is `effect-compiler/tests/observation_identity.rs` |
 | E11 transport never tears | `core/tests/MUTATIONS.md` (143-E11-a..d) |
 | E12 three-browser qualification | `host-web/MUTATIONS.md` |
 | E13 plan replacement | `graph-compiler/tests/MUTATIONS.md` (143-E13) |

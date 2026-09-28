@@ -406,13 +406,6 @@ jobs:
           bash scripts/test-effect-runtime-policy.sh
           bash scripts/check-effect-runtime-fixtures.sh
           bash scripts/test-effect-runtime-fixtures.sh
-      # Effect-interchange qualification boundary and its own policy-test mutation suite (design
-      # §5 lint content: "effect-interchange qualification + policy test"); the cross-target job
-      # re-runs the qualification check as check-cross-targets.sh's own precondition.
-      - name: Effect interchange qualification and policy mutation tests
-        run: |
-          bash scripts/check-effect-interchange-qualification.sh
-          bash scripts/test-effect-interchange-policy.sh
       # check-effect-contract.sh has no hermetic no-binary mode either (S1): with no bench binary
       # argument it falls back to `cargo run --locked --release -q -p bench`, a full release build
       # inside the lint shard, and it re-runs the effect-runtime-policy/fixtures checks the
@@ -824,21 +817,17 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # armv7-linux-androideabi is installed only so check-cross-targets.sh can prove lane refuses
       # it (#1041: mobile ships 64-bit only); nothing is built for it.
-      - name: Install pinned Rust toolchain, cross targets, and wabt
+      - name: Install pinned Rust toolchain, cross targets, and ripgrep
         run: |
           rustup toolchain install 1.97.1 --profile minimal
           rustup target add --toolchain 1.97.1 wasm32-unknown-unknown armv7-linux-androideabi
           sudo apt-get update
-          sudo apt-get install -y ripgrep wabt
-      # Replaces check-parametric-eq-targets.sh, check-builtins-targets.sh, and
-      # check-effect-interchange-targets.sh's cargo halves with one script, one cached target dir
-      # per triple (WP-3 contract). The render-contract rg half moved to lint.
-      - name: Cross-target cargo checks (parametric-eq, builtins, effect-interchange)
+          sudo apt-get install -y ripgrep
+      # Replaces check-parametric-eq-targets.sh's and check-builtins-targets.sh's cargo halves with
+      # one script, one cached target dir per triple (WP-3 contract). The render-contract rg half
+      # moved to lint.
+      - name: Cross-target cargo checks (parametric-eq, builtins, effect-compiler)
         run: bash scripts/check-cross-targets.sh
-      - name: Effect package V1 corpus and inspection surface
-        run: bash scripts/check-effect-package-v1.sh
-      - name: Effect descriptor V1 corpus and inspection surface
-        run: bash scripts/check-effect-descriptor-v1.sh
 
   release-shape:
     name: release shape and panic-clobber policy
@@ -858,8 +847,8 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal
-      # cargo-metadata asserts the cdylib/staticlib set is exactly {capi, effect-package,
-      # host-web, wasm-gate-guest, wasm-console-guest} and [profile.release].panic == "abort".
+      # cargo-metadata asserts the cdylib/staticlib set is exactly {capi, host-web,
+      # wasm-gate-guest, wasm-console-guest} and [profile.release].panic == "abort".
       - name: Release shape policy
         run: python3 -B scripts/check-release-shape.py
       # The panic-variant filename clobber (docs/REALTIME_DEPENDENCY_POLICY.md) is prevented by

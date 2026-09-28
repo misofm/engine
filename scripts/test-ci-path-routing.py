@@ -280,19 +280,19 @@ def test_nightly_budget_selection() -> None:
             "sys.exit(37 if len(rows) + 1 == int(os.environ['FAIL_CALL']) else 0)\n"
         )
         cargo.chmod(0o755)
-        for fail_call in range(5):
+        for fail_call in range(4):
             log = scratch / f"calls-{fail_call}.jsonl"
             env = dict(os.environ, PATH=f"{scratch}:{os.environ['PATH']}",
                        BUDGET_CALL_LOG=str(log), FAIL_CALL=str(fail_call))
             result = subprocess.run(["bash", "-c", body], env=env, check=False)
             calls = [json.loads(line) for line in log.read_text().splitlines()]
             assert result.returncode == (37 if fail_call else 0)
-            assert calls == expected[:fail_call or 4]
+            assert calls == expected[:fail_call or 3]
     for command in checker.NIGHTLY_BUDGET_COMMANDS:
         workflow_mutation_fails("nightly.yml", command, "true")
     workflow_mutation_fails("nightly.yml", "--ignored --exact", "--ignored")
     workflow_mutation_fails("nightly.yml", checker.NIGHTLY_BUDGET_COMMANDS[0],
-                            "cargo test --locked --release -p host-web -p host-core -p effect-package -- --ignored")
+                            "cargo test --locked --release -p host-web -p host-core -- --ignored")
     workflow_mutation_fails("nightly.yml", "          set -euo pipefail\n" +
                             "          " + checker.NIGHTLY_BUDGET_COMMANDS[0],
                             "          " + checker.NIGHTLY_BUDGET_COMMANDS[0])

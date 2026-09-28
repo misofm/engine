@@ -300,14 +300,6 @@ scan_forbidden "AudioWorklet processor implementation classes must be unversione
 # allowance cannot be spent again. #1047 deletes the last row.
 source_scrape_allowlist='
 1 crates/capi/src/ffi.rs ffi.rs #1047
-1 crates/effect-compiler/tests/migration.rs ../../effect-package/Cargo.toml #1037
-1 crates/effect-compiler/tests/migration.rs ../../engine/src/realtime/mod.rs #1037
-1 crates/effect-compiler/tests/migration.rs ../../engine/src/realtime/plan.rs #1037
-1 crates/effect-compiler/tests/migration.rs ../Cargo.toml #1037
-1 crates/effect-compiler/tests/migration.rs ../src/migration.rs #1037
-1 crates/effect-compiler/tests/migration_terminal.rs ../src/migration.rs #1037
-1 crates/effect-package/tests/state_vectors.rs ../src/state.rs #1037
-1 crates/effect-package/tests/state_vectors.rs ../src/wire.rs #1037
 1 crates/graph/src/runtime.rs ../../rack/src/lib.rs #1047
 1 crates/graph/src/runtime.rs lib.rs #1047
 2 crates/graph/src/runtime.rs runtime.rs #1047

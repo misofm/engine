@@ -131,10 +131,9 @@ audit/benchmark exceptions; no sibling source file in either tool is permitted t
 That sentence has fallen behind `scripts/check-realtime-policy.sh`, whose exemption list has grown
 with each approved issue and is the authority; the script, not this paragraph, is what CI runs.
 Reconciling the two belongs to the #104 evidence triage. Two categories have been added since:
-the C-ABI boundary files (`crates/capi/src/ffi.rs`,
-`crates/effect-package/src/ffi.rs`, `hosts/host-web/src/ffi.rs` and their
-tests), and **test-only counting global allocators** — `builtins-compiler`,
-`effect-package`, from audit #92 `transient-shaper`, and from issue #240
+the C-ABI boundary files (`crates/capi/src/ffi.rs`, `hosts/host-web/src/ffi.rs` and their
+tests), and **test-only counting global allocators** — `builtins-compiler`, from audit #92
+`transient-shaper`, and from issue #240
 `hosts/host-web/tests/boot_transient_budget.rs`. The last category is
 `unsafe impl GlobalAlloc` that forwards every request to `System` unchanged and adds only audit
 counters, in a `tests/` file that no production target links. The earlier fixtures prove render
@@ -211,12 +210,12 @@ workspace-wide invocation builds **both** panic variants of every crate: the abo
 shipped units, the unwind variant for the harnesses and everything they depend on. Cargo normally
 keeps the two apart by hashing the variant into the output filename. It cannot do that for a lib
 unit that also carries a `cdylib` or `staticlib` crate-type, because those emit un-hashed filenames
-(`libfoo.so`, `libfoo.a`). Three packages are in that shape:
+(`libfoo.so`, `libfoo.a`). Two native packages are in that shape (`effect-package` was a third
+until #1037 removed it):
 
 | package | crate-types |
 |---|---|
 | `crates/capi` | `rlib`, `staticlib`, `cdylib` |
-| `crates/effect-package` | `rlib`, `cdylib` |
 | `hosts/host-web` | `rlib`, `cdylib` |
 
 The two variants write to the same paths, the second clobbers the first, and a downstream unit
@@ -377,18 +376,14 @@ its dependencies. `scripts/check-host-core-policy.sh` enforces this exact edge a
 mandatory or default-enabled protocol dependency, with mutation coverage in
 `scripts/test-host-core-policy.sh`.
 
-## Issue 011 runtime boundary and issue 029 package hashing dependency
+## Issue 011 runtime boundary
 
 `effect-contract` is render-reachable and depends only on `engine`; it has no
 parser, hashing, package, filesystem, network, logging, or synchronization dependency.
-`effect-package` is control-plane-only and uses `sha2 = 0.11.0` with default features
-disabled for deterministic SHA-256 package/artifact/state identity. `sha2` is dual MIT/Apache-2.0,
-pure Rust for these targets, and failure yields typed package/state rejection before any prepared
-processor can be published. The package crate and hashing evidence are provisional issue-029 work,
-not issue-011 acceptance evidence. Issue 011's new `effect-compiler` is control-plane
-only and depends on core, session and the render-reachable contract; neither compiler nor package
-crate is reachable from process. The resolved `sha2` feature tree and archive-size delta must be
-re-reviewed by issue 029; no package claim applies to the render dependency graph.
+Issue 011's `effect-compiler` is control-plane only and depends on core, session and the
+render-reachable contract; it is not reachable from process. Issue 029's `effect-package` crate,
+the control-plane `sha2` package/artifact/state hashing it carried, and its state migration were
+removed by #1037 (owner rulings R6a and R6b); nothing in the shipped closure hashes packages.
 
 ## Audit #84 phase D / #105 phase 2: the render-audit instrumentation never ships
 

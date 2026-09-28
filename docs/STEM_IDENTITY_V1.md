@@ -126,6 +126,7 @@ what makes a future complete render-cache key well-defined.
 ## Artifact namespaces
 
 The ingest gate is phrased over every referenced content-addressed artifact, not only stems. The
-identity scheme-prefix rule covers both `blake3:` stems and the CID scheme used by third-party
-effect packages. Store layout must reserve a namespace for non-stem artifacts; package fetching
-and execution remain deferred to the effect-package workstream.
+identity scheme-prefix rule covers `blake3:` stems and keeps other schemes out of the stem
+namespace. Third-party effect packages, whose identity was a CID, are out of scope until a new
+issue reopens them (owner ruling R6a; #1037 removed the `effect-package` crate); a reopening issue
+must give non-stem artifacts their own store namespace.

@@ -125,7 +125,11 @@ updates after off-render preparation; trim retains its existing smoothing law.
 is `docs/rulings/builtins-input-liveness-d2.md`; these commands do not add a session
 automation render feed. Effect identity is tagged `native` with a stable `effect_id`, or `cid` with
 opaque nonempty text. Native availability/descriptor domains/latency/tail are downstream issue-011
-work; CID/package validity is downstream issue-029 work.
+work. A `cid` identity parses and validates here and is refused at effect preparation with
+`effect.third_party.unavailable_at_launch`: third-party effects are out of scope until a new issue
+reopens them (owner ruling R6a, #1037, which removed the issue-029 package crate). Removing the
+`cid` arm from this grammar would move that refusal to parse time; it is a Session V1 grammar
+change that needs its own approval.
 
 A `native` `effect_id` is therefore a *stable ID*, not a registry lookup: this schema checks its
 syntax and never its membership. `fixtures/session/v1/canonical.json` exercises exactly that
@@ -178,7 +182,7 @@ follows:
 | SIMD-bank/cohort compatibility | 008 |
 | Source asset resolution and declared-shape matching | 010 |
 | Native descriptor/effect validity | 011 |
-| Third-party CID/package validity | 029 |
+| Third-party CID/package validity | none: out of scope until reopened (R6a, #1037) |
 
 Issue 010 must resolve content and reject any decoded rate/channels/depth/frames mismatch before
 plan publication. Issue 004 does not claim cycle freedom, valid downstream ports, effect

@@ -13,10 +13,7 @@ create_fixture() {
         "$root/crates/lane/src" \
         "$root/crates/capi/src" \
         "$root/crates/capi/tests" \
-        "$root/crates/effect-compiler/tests" \
         "$root/crates/effect-contract/src" \
-        "$root/crates/effect-package/src" \
-        "$root/crates/effect-package/tests" \
         "$root/crates/graph/src" \
         "$root/crates/rack/src" \
         "$root/crates/builtins/src" \
@@ -228,20 +225,6 @@ create_fixture() {
         >"$root/crates/capi/tests/resource_lifecycle.rs"
     printf '%s\n' \
         '#![allow(unsafe_code)]' \
-        'unsafe fn descriptor_capi_boundary() {}' \
-        >"$root/crates/effect-package/src/ffi.rs"
-    printf '%s\n' \
-        '#![allow(unsafe_code)]' \
-        'unsafe impl Send for PackageAllocationAudit {}' \
-        'struct PackageAllocationAudit;' \
-        >"$root/crates/effect-package/tests/package_allocation.rs"
-    printf '%s\n' \
-        '#![allow(unsafe_code)]' \
-        'unsafe impl Send for MigrationAllocationAudit {}' \
-        'struct MigrationAllocationAudit;' \
-        >"$root/crates/effect-compiler/tests/migration_terminal.rs"
-    printf '%s\n' \
-        '#![allow(unsafe_code)]' \
         'unsafe impl GlobalAlloc for CountingAllocator {}' \
         'struct CountingAllocator;' \
         >"$root/crates/session/tests/allocation_budget.rs"
@@ -367,14 +350,6 @@ expect_failure unsafe-in-second-capi-ffi-path "$unsafe_class" \
     'mkdir -p "$root/crates/capi/src/ffi"; printf "%s\n" "unsafe fn bad() {}" >"$root/crates/capi/src/ffi/other.rs"'
 expect_failure unsafe-outside-capi-lifecycle-audit "$unsafe_class" \
     'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/capi/tests/other.rs"'
-expect_failure unsafe-outside-effect-package-ffi "$unsafe_class" \
-    'printf "%s\n" "pub unsafe extern \"C\" fn bad() {}" >"$root/crates/effect-package/src/lib.rs"'
-expect_failure unsafe-in-second-effect-package-ffi-path "$unsafe_class" \
-    'mkdir -p "$root/crates/effect-package/src/ffi"; printf "%s\n" "unsafe fn bad() {}" >"$root/crates/effect-package/src/ffi/other.rs"'
-expect_failure unsafe-outside-package-allocation-audit "$unsafe_class" \
-    'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/effect-package/tests/other.rs"'
-expect_failure unsafe-outside-migration-allocation-audit "$unsafe_class" \
-    'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/effect-compiler/tests/other.rs"'
 expect_failure unsafe-outside-session-allocation-budget "$unsafe_class" \
     'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/session/tests/other.rs"'
 expect_failure unsafe-outside-web-ffi "$unsafe_class" \
