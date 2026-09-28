@@ -1,1 +1,0 @@
-/tmp/issue575-path-census.sh

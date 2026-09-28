@@ -16,3 +16,40 @@ Change the constant's construction (for example, hoist the splat out of the loop
 2. Every console digest and the EQ differentials are unchanged on x86, wasm and AArch64.
 3. The shipped AudioWorklet artifact's performance does not regress (V8 one-band and two-band isolates through the render export, under the timing lock); `scripts/run-wasm-gates.sh` (including the V8 spill gate) passes.
 4. Remove the entry from the deferred-defect register.
+
+## Scope found by #1017
+
+#1017 scanned every product crate's `aarch64-apple-ios` release assembly (Rust 1.97.1; attempt 2,
+after Sol's attempt 1 verdict). The problem is not the SVF flush alone. It is the shape "a stored
+`f32x4` splat constant". LLVM lowers any such constant to `bl _memset_pattern16` on Apple
+targets: `lane::FLUSH_EPS` (`0x1e3ce508`), and also `1.0`, `0.5`, `2.0`, `1e-8`,
+`f32::MIN_POSITIVE` and others.
+
+There are 3,494 calls in ten crates, almost all of them inside render:
+
+| crate | calls | render functions |
+|---|---|---|
+| `multiband-compressor` | 1,132 | `PreparedMultibandCompressorBank::process_bank` |
+| `compressor` | 970 | `kernel::process_block`, `ramping_main_scalar`, `process_block_mono`, `settled_sidechain` (`f32x4`) |
+| `transient-shaper` | 534 | `Shaper::process_block` |
+| `builtins` | 376 | `BuiltinInputBank::process`/`process_mono`, `InputStage::process` |
+| `gate-expander` | 181 | `PreparedGate::process_bank` |
+| `parametric-eq` | 151 | `PreparedParametricEq::process_bank`/`process_bank_mono`, `Channel::snap_ended` |
+| `true-peak-limiter` | 104 | `LimiterCore::process_block`, `process_bank_inner` |
+| `soft-clip` | 22 | `Channel::process`, `PreparedSoftClipBank::process_bank` |
+| `graph` | 20 | `runtime::bank_meter_pass`, `runtime::bank_sample_peak` |
+| `host-core` | 4 | `spectrum::SpectrumAnalyzer::analyze`/`analyze_continuous` (observation) |
+
+The other fifteen product crates have none. `capi`, scanned as an rlib, has none.
+
+**What this changes for this issue.** Gate 1's "every crate that uses `svf_step`" leaves out six
+of the ten crates. The standing check is `ios-asm-memset-pattern16` in
+`scripts/check-cross-targets.sh`, which runs in every PR's `cross-target` job. It keeps one row per
+crate, with the count above as a ceiling, in `scripts/lib/aarch64-known-defects.py`.
+- A crate that reaches zero fails until its row is deleted.
+- A count that rises fails.
+- A crate with calls and no row fails.
+
+So the defect reads fixed only when every row is gone. **Root to rule:** either widen this issue
+to the stored-splat shape in every kernel, or split the remaining crates into a successor issue.
+The rows name #1018 until then.

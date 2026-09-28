@@ -27,7 +27,9 @@
 //! raises only this row's limit to `2.5e-5`; the complete row maximum is `2.098083496e-5`. Under
 //! the owner's explicit delegation, root judged the measured MQ-1 null likely inaudible in normal
 //! playback, while recording that this is neither a universal inaudibility claim nor a completed
-//! blinded listening test. See `docs/issue880-mb2.md`. The impulse, step and decay rows retain
+//! blinded listening test. See the #880 MB-2 note
+//! ([`docs/issue880-mb2.md`](https://github.com/misofm/engine/blob/5379e46ca3b349b9d277d642c008bb7a9643fb76/docs/issue880-mb2.md),
+//! removed by #1031). The impulse, step and decay rows retain
 //! their `0.01` dB gates.
 
 mod common;

@@ -12,8 +12,6 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 session = { path = "../crates/session" }
 protocol = { path = "../crates/protocol" }
-effect-contract = { path = "../crates/effect-contract" }
-effect-package = { path = "../crates/effect-package" }
 
 [[bin]]
 name = "session_parse"
@@ -53,20 +51,6 @@ bench = false
 [[bin]]
 name = "protocol_response"
 path = "fuzz_targets/protocol_response.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "effect_package"
-path = "fuzz_targets/effect_package.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "effect_state"
-path = "fuzz_targets/effect_state.rs"
 test = false
 doc = false
 bench = false

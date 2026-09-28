@@ -152,8 +152,8 @@ Two rules of the admission path are load-bearing rather than incidental:
 ### Ruling D1 — solo is not persisted in Session V1
 
 **Solo is monitoring state, not mix state, and no session key carries it.** A session reloads with
-every solo bit clear, and an offline or stem render of a session can never come out soloed — the
-reference PCM runner renders a session with no command stream at all, so a persisted solo bit would
+every solo bit clear, and an offline or stem render of a session can never come out soloed — an
+offline render takes the session with no command stream at all, so a persisted solo bit would
 silence stems that the session, read as a document, says are audible.
 
 This does not violate the standing "protocol mutations update the typed session model and must be

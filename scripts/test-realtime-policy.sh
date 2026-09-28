@@ -13,10 +13,7 @@ create_fixture() {
         "$root/crates/lane/src" \
         "$root/crates/capi/src" \
         "$root/crates/capi/tests" \
-        "$root/crates/effect-compiler/tests" \
         "$root/crates/effect-contract/src" \
-        "$root/crates/effect-package/src" \
-        "$root/crates/effect-package/tests" \
         "$root/crates/graph/src" \
         "$root/crates/rack/src" \
         "$root/crates/builtins/src" \
@@ -25,7 +22,6 @@ create_fixture() {
         "$root/hosts/host-web/tests" \
         "$root/tools/bench-support/src" \
         "$root/tools/audit/src" \
-        "$root/tools/native-pcm-runner/src" \
         "$root/tools/bench/src"
     # The marked file set mirrors the real tree after #371 (RT-16/IO-14) and #664's complete
     # LocalRing removal: twelve files and forty-one regions across crates/ and hosts/, so the floors in the gate and the discovery
@@ -228,20 +224,6 @@ create_fixture() {
         >"$root/crates/capi/tests/resource_lifecycle.rs"
     printf '%s\n' \
         '#![allow(unsafe_code)]' \
-        'unsafe fn descriptor_capi_boundary() {}' \
-        >"$root/crates/effect-package/src/ffi.rs"
-    printf '%s\n' \
-        '#![allow(unsafe_code)]' \
-        'unsafe impl Send for PackageAllocationAudit {}' \
-        'struct PackageAllocationAudit;' \
-        >"$root/crates/effect-package/tests/package_allocation.rs"
-    printf '%s\n' \
-        '#![allow(unsafe_code)]' \
-        'unsafe impl Send for MigrationAllocationAudit {}' \
-        'struct MigrationAllocationAudit;' \
-        >"$root/crates/effect-compiler/tests/migration_terminal.rs"
-    printf '%s\n' \
-        '#![allow(unsafe_code)]' \
         'unsafe impl GlobalAlloc for CountingAllocator {}' \
         'struct CountingAllocator;' \
         >"$root/crates/session/tests/allocation_budget.rs"
@@ -260,10 +242,6 @@ create_fixture() {
         'unsafe impl Send for CapiAudit {}' \
         'struct CapiAudit;' \
         >"$root/tools/audit/src/capi.rs"
-    printf '%s\n' \
-        '#![allow(unsafe_code)]' \
-        'unsafe fn frozen_c_abi_adapter() {}' \
-        >"$root/tools/native-pcm-runner/src/lib.rs"
     # #104 phase B: the fourteen audited `GlobalAlloc` copies became one. `bench-support/src/alloc.rs`
     # is the only file under `tools/` that owns the allocator wrapper, and eleven tool paths left
     # this list because they no longer contain `unsafe` at all.
@@ -353,8 +331,10 @@ expect_failure unsafe-outside-exact-allowlist "$unsafe_class" \
     'printf "%s\n" "unsafe fn bad() {}" >"$root/tools/bench/src/other.rs"'
 expect_failure unsafe-outside-capi-audit-main "$unsafe_class" \
     'printf "%s\n" "unsafe fn bad() {}" >"$root/tools/audit/src/other.rs"'
-expect_failure unsafe-outside-native-pcm-runner-lib "$unsafe_class" \
-    'printf "%s\n" "unsafe fn bad() {}" >"$root/tools/native-pcm-runner/src/other.rs"'
+# #1033 deleted `tools/native-pcm-runner`; its unsafe exemption went with it, so unsafe code
+# re-appearing at its old library path is rejected like any other unlisted file.
+expect_failure unsafe-in-deleted-native-pcm-runner-lib "$unsafe_class" \
+    'mkdir -p "$root/tools/native-pcm-runner/src"; printf "%s\n" "unsafe fn bad() {}" >"$root/tools/native-pcm-runner/src/lib.rs"'
 # #84 phase A deleted `crates/engine/src/arch/`; its unsafe exemption went with it, so
 # unsafe code re-appearing under that path is now rejected like any other unlisted file.
 expect_failure unsafe-in-deleted-core-arch "$unsafe_class" \
@@ -367,14 +347,6 @@ expect_failure unsafe-in-second-capi-ffi-path "$unsafe_class" \
     'mkdir -p "$root/crates/capi/src/ffi"; printf "%s\n" "unsafe fn bad() {}" >"$root/crates/capi/src/ffi/other.rs"'
 expect_failure unsafe-outside-capi-lifecycle-audit "$unsafe_class" \
     'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/capi/tests/other.rs"'
-expect_failure unsafe-outside-effect-package-ffi "$unsafe_class" \
-    'printf "%s\n" "pub unsafe extern \"C\" fn bad() {}" >"$root/crates/effect-package/src/lib.rs"'
-expect_failure unsafe-in-second-effect-package-ffi-path "$unsafe_class" \
-    'mkdir -p "$root/crates/effect-package/src/ffi"; printf "%s\n" "unsafe fn bad() {}" >"$root/crates/effect-package/src/ffi/other.rs"'
-expect_failure unsafe-outside-package-allocation-audit "$unsafe_class" \
-    'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/effect-package/tests/other.rs"'
-expect_failure unsafe-outside-migration-allocation-audit "$unsafe_class" \
-    'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/effect-compiler/tests/other.rs"'
 expect_failure unsafe-outside-session-allocation-budget "$unsafe_class" \
     'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/session/tests/other.rs"'
 expect_failure unsafe-outside-web-ffi "$unsafe_class" \

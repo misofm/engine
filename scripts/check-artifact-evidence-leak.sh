@@ -46,10 +46,11 @@ cross_targets_script=scripts/check-cross-targets.sh
 # The evidence crates: test scaffolding and the f64 oracle. Nothing that ships may resolve with
 # them, because whatever features they turn on are unified into the artifact.
 evidence=(conformance dsp-reference)
-# The packages whose cross-target build IS the deliverable. effect-package ships a cdylib
-# (design §6.7, scripts/check-release-shape.py's pinned cdylib/staticlib set) alongside host-web,
-# host-mobile, host-core and capi.
-shipped=(host-web host-mobile host-core capi effect-package)
+# The packages whose cross-target build IS the deliverable: host-web, host-mobile, host-core and
+# capi, plus effect-compiler, the shipped effect preparation library every host links, whose only
+# cross-target compile is scripts/check-cross-targets.sh's wasm row -- conformance's features must
+# not unify into it there. (effect-package held that row, and this slot, until #1037 removed it.)
+shipped=(host-web host-mobile host-core capi effect-compiler)
 
 fail() { printf 'artifact evidence gate failure: %s\n' "$1" >&2; exit 1; }
 

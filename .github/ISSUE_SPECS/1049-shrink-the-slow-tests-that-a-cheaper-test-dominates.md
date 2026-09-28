@@ -233,28 +233,40 @@ draws every fourth seed from seed 2, the residue class of 26, and M5d is red per
 936-4 and 957-1b are red on graph's own dispatch tests, not on the `post_matrix_*` tests, before
 and after; the spec's "red on the `post_matrix_*` tests" holds for G-2 and A-5.
 
-### Gate 3: not met as written, and not on the base either
+### Gate 3: cannot pass as written, on the base either; what guards the realtime claim
 
-`std::hint::black_box(Box::new(0_u64))` injected at the top of `bank_meter_pass`, and separately
-of `bank_sample_peak`:
+**Finding.** Gate 3 asks that the shrunk `…_renders_without_an_audited_event` tests fail on one
+allocation injected into the bank meter pass. They cannot, and they could not before this change:
+`std::hint::black_box(Box::new(0_u64))` at the top of `bank_meter_pass`, and separately of
+`bank_sample_peak` (`crates/graph/src/runtime.rs`), leaves both green on the 64-track base and on
+the 8-track change, and so does the new nightly 64-track run.
 
-| test | base (64 tracks) | change (8 tracks) |
+The cause: `audit::snapshot()` (`crates/engine/src/realtime/audit.rs`) counts only what is
+reported to it. Allocations are reported only by `bench-support`'s counting `#[global_allocator]`
+(`tools/bench-support/src/alloc.rs:173-200`), and the graph-compiler lib test binary does not link
+`bench-support`. Its "allocation audit" therefore sees the render path's own hooks (locks, logs,
+syscalls and so on) and never an allocation. graph's `rt1_direct_bank_alloc`,
+`rt9_resident_bank_input_alloc` and `rt10_source_in_place_alloc` do link the allocator, but they
+stay green under both injections: none of them reaches either pass.
+
+**What guards it.** Two `bench` console tests, which run under the audited allocator in abort mode:
+
+| injected into | test that aborts (`SIGABRT`) | green |
 |---|---|---|
-| gc `the_full_meter_pass_renders_without_an_audited_event` | green | green |
-| gc `the_banked_sample_peak_pass_renders_without_an_audited_event` | green | green |
-| graph `rt1_direct_bank_alloc`, `rt9_resident_bank_input_alloc`, `rt10_source_in_place_alloc` | green | green |
-| bench `console::tests::the_meters_record_carries_each_arms_fold_and_redirect_counters` (full pass) | — | **aborts** (audited allocator) |
-| bench `console::tests::the_metered_console_row_prints_its_meters_and_the_validator_pins_them` (sample-peak pass) | — | **aborts** |
+| `bank_meter_pass` (#950's full pass) | `console::tests::the_meters_record_carries_each_arms_fold_and_redirect_counters` | the other one |
+| `bank_sample_peak` (#943's pass) | `console::tests::the_metered_console_row_prints_its_meters_and_the_validator_pins_them` | the other one |
 
-Unmutated, `cargo test -p bench` passes (45 tests). The cause: `audit::snapshot()` counts what is
-reported to it, and only `bench-support`'s counting `#[global_allocator]` reports allocations
-(`tools/bench-support/src/alloc.rs:173-200`). The graph-compiler lib test binary does not link
-it, so its "allocation audit" sees the render path's hooks and never an allocation, on the
-64-track base as on the 8-track change. So neither the shrink nor the nightly 64-track run can
-meet gate 3 as written; the allocation claim of both passes is held by the two bench console tests
-(audit-native, release), which this issue does not touch. `2069e445` says so in the two test docs.
-Making the graph-compiler tests see allocations needs `bench-support` as a dev-dependency, a
-`Cargo.toml` change outside this scope: a follow-up for root.
+Each was run alone with `--exact`, in dev and in release (`cargo test --locked --release -p bench
+--bin bench`), injection by injection. Both pass unmutated. In required CI they run in
+`qualification.yml`'s `audit-native` job ("release audit, trace, and fixture gates"), step "Audit
+and console-workload unit tests in release": `cargo test --locked --release -p audit -p bench -p
+console-workload`. `audit-native` runs on every full-route PR, and the `qualification` verdict
+requires its result. This issue does not touch either test or the job.
+
+`2069e445` says this in the two graph-compiler tests' docs. For the graph-compiler tests to see
+allocations themselves, graph-compiler needs `bench-support` as a dev-dependency, a `Cargo.toml`
+change outside this issue's paths. That is a possible follow-up, not a gap: the claim is already
+guarded per PR.
 
 ### Gate 4: historical bugs
 
@@ -330,18 +342,36 @@ exact commands were run locally from the YAML and pass.
   --package=graph-compiler --features graph/test-support`, `run-mutants.sh`'s environment,
   opt-level 1), unmutated: 239 passed, 0 failed, on the base and on the change.
 
+### Integration commit (merge of `codex/batch-slim-3`, `a509b681`)
+
+The merge was clean (`nightly.yml`, `response.rs`, `graph-compiler/src/lib.rs` and
+`parametric-eq/src/lib.rs` auto-merged). On the merged tree:
+- `bash -n scripts/run-aarch64-tests.sh`; `aarch64-known-defects.py --self-test`; `rows debug`
+  lists the two survivors.
+- The debug leg's exact package and feature set (from `scripts/lib/product-crates.sh`, as the
+  script builds it), on x86: `cargo test --locked --all-targets … --no-run` resolves and builds
+  (218 executables); its `-- --list` (1,792 tests) passes `judge-skips debug`, so each remaining
+  row names exactly one test.
+- `cargo check --locked --workspace --all-targets --all-features`: pass, no warning.
+- compressor, parametric-eq, builtins, conformance, true-peak-limiter and graph-compiler tests,
+  dev, CI features: pass.
+- `check-ci-path-routing.py` and `test-ci-path-routing.py`; every argument-free `check-*.py`; and
+  all 34 `check-*.sh` but `check-sdk-types.sh` (needs `npm ci`): pass, with `python3 -B`.
+
 ### For root
 
-- **#1017's AArch64 runner** (`scripts/run-aarch64-tests.sh` on `codex/1017-aarch64-ci`, not
-  edited here): these expected-failure rows name deleted tests and should go when the two merge:
-  `compressor|lib|kernel::settled_body_tests::scenario_981_heterogeneous_hostile_render_is_pinned`,
-  `…::scenario_983_chunk_straddling_render_is_pinned`, `…::scenario_985_collapsed_render_is_pinned`
-  and `…::scenario_995_sidechain_render_is_pinned`. `…::scenario_1006_ramping_prefix_is_pinned`
-  stays, and so does its row. `scenario_982_all_wet_render_is_pinned` is deleted too; it has no row.
-- **#1036** owns the builtins rate list; `response.rs` still iterates
-  `launch_and_extended_compatibility_rates()`.
-- **Gate 3** cannot pass as written (see above). A follow-up could give graph-compiler's lib tests
-  `bench-support`'s audited allocator, so the audited meter tests see allocations.
+- **#1017's AArch64 rows.** Done in the integration commit, after merging `codex/batch-slim-3`
+  (`a509b681`, which carries #1017): the rows for
+  `kernel::settled_body_tests::scenario_{981,983,985,995}_*_is_pinned` are gone from
+  `scripts/lib/aarch64-known-defects.py`, the table `scripts/run-aarch64-tests.sh` reads. The
+  runner fails on a row whose test no longer exists. `scenario_1006_ramping_prefix_is_pinned` and
+  the EQ `bank` row stay. `docs/TARGET_MATRIX.md`'s "AArch64 NaN encodings (#1065)" entry and
+  #1065's spec now name only those two. `scenario_982_all_wet_render_is_pinned` was deleted too; it
+  never had a row.
+- **#1036** landed in the batch and trimmed `response.rs` to the launch rates; it merged cleanly
+  with this change's DFT and stride trims.
+- **Gate 3** cannot pass as written; the bench console tests in `audit-native` guard the claim
+  (see above).
 - **Gate 5** needs the full-route CI run; the local figures clear all three thresholds.
 - **Reproducing these gates.** `cargo-mutants` 27.1.0 was installed into scratch. Cargo's
   fingerprints do not include the source path, and `git archive` stamps files with the commit

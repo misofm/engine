@@ -9,10 +9,10 @@
 //! different lanes — which is what makes the segmented ramp driver's per-lane minimum load-bearing.
 //!
 //! A bank binds only at the width this artifact executes, so only one of the two widths below runs
-//! on a given host. The *kernel* is compared at all three widths on every host by
-//! `tests/determinism.rs`, which runs the frozen corpus at `f32`, `Simd4` and `Simd8` and asserts
-//! one digest for the three; what this file adds is the driver around it — ramps, automation,
-//! bank binding and the snapshot.
+//! on a given host. The *kernel* is compared at all three widths on every host by gate G5
+//! (`tools/wasm-gates/tests/g5_native_corpus.rs`), which runs the frozen corpus at `f32`, `Simd4`
+//! and `Simd8` against one pinned digest for the three; what this file adds is the driver around
+//! it — ramps, automation, bank binding and the snapshot.
 
 mod support;
 

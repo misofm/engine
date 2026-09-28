@@ -59,12 +59,12 @@ pub const PROTOCOL_MAJOR_V1: u16 = 1;
 pub const PROTOCOL_MINOR_V1: u16 = 0;
 /// Exact bytes in every BTLV outer header.
 pub const OUTER_HEADER_BYTES: usize = 48;
-/// Exact bytes in every BTLV TLV prefix.
-pub const TLV_PREFIX_BYTES: usize = 8;
 /// The maximum number of records in one automation batch slot.
 pub const AUTOMATION_BATCH_RECORDS: usize = 256;
 /// Exact byte width of a transient automation record.
 pub const AUTOMATION_RECORD_BYTES: usize = 32;
+#[cfg(any(test, feature = "test-support"))]
+pub use controller::MockProvider;
 pub use controller::{
     CommandFrameProcessError, CommittedCommandFrame, ControlCommand, ControlProvider,
     ControllerRequest, ControllerResourceAllocationError, ControllerResponse,
@@ -74,5 +74,3 @@ pub use controller::{
     ReplayCache, ReplayCacheConfig, ReplayCacheError, ReplayCacheResourceReport, ReplayDecision,
     ReplayHit,
 };
-#[cfg(any(test, feature = "test-support"))]
-pub use controller::{MockProvider, MockProviderConfig};

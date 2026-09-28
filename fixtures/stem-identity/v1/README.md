@@ -11,13 +11,12 @@ Each row names a committed headerless `.pcm` preimage. The stereo row at each de
 committed `.wav` wrapper with the same samples. The WAVE files use 48 kHz only to make their
 headers well-formed; sample rate and every other container byte are outside stem identity.
 
-`generate.py` is an independent Python-standard-library generator. The Rust reference oracle is
-tested against the frozen bytes and pinned identities, not used to generate its own expected
-answers.
+`generate.py` is an independent Python-standard-library generator. Implementations of the
+contract (see `docs/STEM_IDENTITY_V1.md`) are tested against the frozen bytes and pinned
+identities, never used to generate their own expected answers.
 
 Run:
 
 ```sh
 python3 fixtures/stem-identity/v1/generate.py --check
-cargo test --locked -p stem-hasher
 ```

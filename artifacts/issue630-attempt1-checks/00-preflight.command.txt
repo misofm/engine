@@ -1,1 +1,0 @@
-python3 artifacts/issue630-attempt1-checks/00-preflight.py > artifacts/issue630-attempt1-checks/00-preflight.stdout 2> artifacts/issue630-attempt1-checks/00-preflight.stderr

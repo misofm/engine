@@ -9,11 +9,6 @@ publish.workspace = true
 [lib]
 name = "source"
 
-[features]
-# Qualification-only deterministic native worker hold/release support. It is not enabled by
-# ordinary source consumers or target builds.
-test-support = []
-
 [dependencies]
 engine.workspace = true
 graph.workspace = true
@@ -21,6 +16,7 @@ session.workspace = true
 
 [dev-dependencies]
 effect-contract.workspace = true
+sha2.workspace = true
 
 [lints]
 workspace = true

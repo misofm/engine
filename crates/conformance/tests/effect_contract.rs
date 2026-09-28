@@ -18,13 +18,13 @@ use conformance::{
     run_effect_conformance,
 };
 use effect_contract::{
-    AutomationSpanKind, BankWidth, EffectDescriptor, EffectQuality, InitialParameterValue,
-    LinkMode, NativeEffectFactory, ParameterChannel, ParameterId, ParameterMapping,
-    ParameterSmoother, PrepareEffectBankRequest, PrepareEffectLimits, PrepareEffectRequest,
-    PreparedAutomationSpan, PreparedPorts, PreparedSidechainPort, QualityDescriptor, SmoothingRule,
-    automation_segment_value, expected_prepared_metadata, inverse_map_normalized,
-    inverse_map_stepped_normalized, map_normalized, map_stepped_normalized,
-    validate_automation_block, validate_descriptor,
+    AutomationSpanKind, BankWidth, DescriptorDiagnosticCode, DescriptorError, EffectDescriptor,
+    EffectQuality, InitialParameterValue, LinkMode, NativeEffectFactory, ParameterChannel,
+    ParameterId, ParameterMapping, ParameterSmoother, PrepareEffectBankRequest,
+    PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan, PreparedPorts,
+    PreparedSidechainPort, QualityDescriptor, SmoothingRule, automation_segment_value,
+    expected_prepared_metadata, inverse_map_normalized, inverse_map_stepped_normalized,
+    map_normalized, map_stepped_normalized, validate_automation_block, validate_descriptor,
 };
 
 #[test]
@@ -173,14 +173,8 @@ fn correct_mock_passes_every_enabled_conformance_gate() {
         },
     );
     assert!(report.passed(), "{:?}", report.launch_gates.failures);
-    assert!(report.extended_compatibility_probes.failures.is_empty());
     assert_eq!(report.launch_gates.prepared_configurations, 8);
-    assert_eq!(
-        report.extended_compatibility_probes.prepared_configurations,
-        8
-    );
     assert!(report.launch_gates.process_calls >= 800);
-    assert!(report.extended_compatibility_probes.process_calls >= 800);
 }
 
 #[test]
@@ -234,29 +228,6 @@ fn every_faulty_mock_is_detected() {
             );
         }
     }
-}
-
-#[test]
-fn extended_rate_failures_are_reported_but_do_not_fail_launch_gates() {
-    armed();
-    let report = run_effect_conformance(
-        &DualAccumulatorDelayFactory::faulty(FaultKind::ExtendedRatePreparation),
-        ConformanceConfig {
-            quantum: 128,
-            blocks: 1,
-        },
-    );
-    assert!(report.passed(), "{:?}", report.launch_gates.failures);
-    assert!(report.launch_gates.failures.is_empty());
-    assert_eq!(report.launch_gates.prepared_configurations, 8);
-    assert_eq!(
-        report.extended_compatibility_probes.failures,
-        ["prepare.factory"]
-    );
-    assert_eq!(
-        report.extended_compatibility_probes.prepared_configurations,
-        0
-    );
 }
 
 #[test]
@@ -339,9 +310,16 @@ fn ten_thousand_descriptor_and_span_mutations_reject_without_panic() {
     }
 }
 
+/// Owner ruling R5 (#1036): every quality needs its four launch rows, and a row at any other rate
+/// refuses the descriptor -- the former extended research rates (176.4-384 kHz) included.
 #[test]
-fn descriptor_requires_launch_rows_and_accepts_optional_extended_rows() {
+fn descriptor_requires_launch_rows_and_refuses_extended_rows() {
     let original = DUAL_ACCUMULATOR_DELAY_DESCRIPTOR;
+    assert_eq!(
+        original.qualities.len(),
+        4,
+        "the mock declares launch rows only"
+    );
     let launch = Box::leak(original.qualities[..4].to_vec().into_boxed_slice());
     let launch_only = Box::leak(Box::new(EffectDescriptor {
         qualities: launch,
@@ -362,12 +340,16 @@ fn descriptor_requires_launch_rows_and_accepts_optional_extended_rows() {
         assert!(validate_descriptor(descriptor).is_err());
     }
 
-    for subset in 0_u8..16 {
+    let extended = [176_400, 192_000, 352_800, 384_000].map(|sample_rate| QualityDescriptor {
+        sample_rate,
+        ..original.qualities[3]
+    });
+    for subset in 1_u8..16 {
         let rows = original.qualities[..4]
             .iter()
             .copied()
             .chain(
-                original.qualities[4..]
+                extended
                     .iter()
                     .enumerate()
                     .filter_map(|(index, row)| (subset & (1 << index) != 0).then_some(*row)),
@@ -377,7 +359,16 @@ fn descriptor_requires_launch_rows_and_accepts_optional_extended_rows() {
             qualities: Box::leak(rows.into_boxed_slice()),
             ..original
         }));
-        assert!(validate_descriptor(descriptor).is_ok());
+        assert_eq!(
+            validate_descriptor(descriptor)
+                .expect_err("an extended-rate row refuses the descriptor")
+                .errors(),
+            [DescriptorError {
+                path: "qualities",
+                code: DescriptorDiagnosticCode::Quality,
+            }],
+            "subset {subset:#06b}"
+        );
     }
 
     let draft_launch = original.qualities[..4].iter().map(|row| QualityDescriptor {
@@ -415,11 +406,13 @@ fn descriptor_requires_launch_rows_and_accepts_optional_extended_rows() {
     }));
     assert!(validate_descriptor(descriptor).is_err());
 
-    let unordered = original.qualities[..4]
-        .iter()
-        .copied()
-        .chain([original.qualities[5], original.qualities[4]])
-        .collect::<Vec<_>>();
+    let unordered = [
+        original.qualities[0],
+        original.qualities[1],
+        original.qualities[3],
+        original.qualities[2],
+    ]
+    .to_vec();
     let descriptor = Box::leak(Box::new(EffectDescriptor {
         qualities: Box::leak(unordered.into_boxed_slice()),
         ..original

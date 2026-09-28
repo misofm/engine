@@ -8,8 +8,8 @@ The session model and its semantics do not vary by Cargo feature or target capab
 | Native baseline | `x86_64-unknown-linux-gnu` | Scalar baseline. It must not receive a global AVX2 or FMA flag. | Host check/test plus a `-avx2,-fma` compile probe. |
 | Native AVX2 | `x86_64-unknown-linux-gnu` | A future internal AVX2 kernel is entered only after runtime AVX2 detection. | Separate `+avx2,-fma` compile directory and injected capability-assembly test. |
 | Native AVX2/FMA | `x86_64-unknown-linux-gnu` | A future FMA kernel requires both independently detected AVX2 and FMA. | Separate `+avx2,+fma` compile directory and cfg assertion. |
-| ARM64 Android | `aarch64-linux-android` | Unsupported; no claim. | Deferred, see #366 and #378. |
-| ARM64 iOS | `aarch64-apple-ios` | Unsupported; no claim. | Deferred, see #366 and #378. |
+| ARM64 Android | `aarch64-linux-android` (arm64-v8a) | Product target (#1017). NEON `Simd4`, a compile-time constant; FPCR pinned per render block. | `cross-target`: the product crates checked with `--all-targets --all-features` and linted with clippy `-D warnings`. `aarch64-debug`/`aarch64-release`: tests on `ubuntu-24.04-arm`. |
+| ARM64 iOS | `aarch64-apple-ios` | Product target (#1017). As Android. | `cross-target`: the same check and clippy rows, and the release-assembly scan `ios-asm-memset-pattern16` over every product crate (expected failures per crate until #1018). Tests run on the Linux arm64 legs; see "Native AArch64" below. |
 | Refused | `armv7-linux-androideabi` (armeabi-v7a), `i686-*`, ILP32 ABIs and every other unlisted target | Refused at compile time by `lane` (#1041). | `scripts/check-cross-targets.sh` refusal row on `armv7-linux-androideabi`. |
 | Browser Wasm | `wasm32-unknown-unknown` | Baseline and `+simd128` are distinct artifacts. Four-lane processing uses multiply plus add; relaxed SIMD and FMA assumptions are forbidden. | Two distinct release artifact directories. |
 
@@ -38,8 +38,9 @@ target: the one shipped artifact is `simd128` (W4-D1). It stays allowed only bec
   `scripts/check-wasm-realtime-atomics.sh`, the scalar variant of
   `scripts/check-protocol-wasm-parity.sh`, and the scalar guest of `scripts/run-wasm-gates.sh`
   (gate G5's scalar-width leg);
-- `qualification.yml` `cross-target`: the scalar rows of `scripts/check-cross-targets.sh`, plus
-  `scripts/check-effect-package-v1.sh` and `scripts/check-effect-descriptor-v1.sh`.
+- `qualification.yml` `cross-target`: the scalar rows of `scripts/check-cross-targets.sh`. (Its
+  `check-effect-package-v1.sh` and `check-effect-descriptor-v1.sh` legs went with the
+  `effect-package` crate in #1037.)
 
 When the legs go, delete the one marked arm of the guard. The scalar arm of
 `lane::Backend::current()` will then be unreachable.
@@ -82,23 +83,46 @@ CARGO_TARGET_DIR=target/ci/wasm-simd RUSTFLAGS="-C target-feature=+simd128" \
 `cargo check` verifies Rust compilation only. Browser execution needs a browser test harness,
 explicitly deferred to the platform adapter issues.
 
-### When native AArch64 is revived
+### Native AArch64 (#1017)
 
-Native AArch64 (`aarch64-linux-android`, `aarch64-apple-ios`) is unsupported per the owner ruling
-recorded in the deferred-defect register below (#378). A future revival must reopen the register
-entries first, then restore this compile-checked evidence:
+Owner ruling 2026-09-28 (`docs/rulings/engine-footprint-2026-09-28.md`): "Yes ARM64 will be an
+official target." Fans open and play sessions in iOS and Android apps, which embed the engine
+through the C ABI. This reverses #378. What qualifies the target:
 
-```bash
-cargo check --locked --target aarch64-linux-android \
-  -p engine -p session -p protocol \
-  -p capi -p target-smoke -p host-mobile
-cargo check --locked --target aarch64-apple-ios \
-  -p engine -p session -p protocol \
-  -p capi -p target-smoke -p host-mobile
-```
+* **Compile and lint rows** (`scripts/check-cross-targets.sh`, `qualification.yml` `cross-target`).
+  For `aarch64-apple-ios` and `aarch64-linux-android`, the product crates are checked with
+  `--all-targets --all-features` and linted with clippy `-D warnings`. The product crates are every
+  workspace crate in `capi`'s normal-dependency closure (`scripts/lib/product-crates.sh`), derived
+  rather than listed. `cargo check` links nothing, so neither Xcode nor the NDK is needed; linking
+  and device or simulator execution remain unexercised.
+* **Tests on arm64 hardware** (`scripts/run-aarch64-tests.sh`, `qualification.yml` `aarch64-debug`
+  and `aarch64-release`, both on `ubuntu-24.04-arm`, both in the verdict's full-route table).
+  `aarch64-debug` runs the product crates' tests, plus `dsp-reference`, `conformance` and
+  `target-smoke`, in the debug profile: the four-lane banks bind natively and `lane::fpenv`'s FPCR
+  path runs. `aarch64-release` runs, in the shipping release profile, the G5 class-A corpus
+  (`wasm-gates`, #1048's native owner, as its own unfiltered step) and `lane` and `math` (G1-G4, G6
+  under `FPCR.FZ`, P1, M1-M3). It also runs `console-workload`'s console digests and the realtime
+  audits (`audit capi` and the delay, compressor, EQ and gate audits).
+* **No silent skips.** Both legs refuse a test that returns early on a SIMD backend width. A test
+  that only one width can run says so with `#[ignore = "…"]` on the other width.
+* **Known defects fail by name and by reason.** The rows live in
+  `scripts/lib/aarch64-known-defects.py`. Each test row names exactly one test in its leg, which
+  is skipped by exact name in the main run and then run alone. There it must fail as that one test,
+  with the row's reason in its panic: the AArch64 digest or assertion text the defect produces. A
+  pass, another panic or another reason fails the leg. The iOS memset rows are per-crate ceilings:
+  a crate at zero, a crate above its ceiling, and a crate with calls but no row each fail. See the
+  register below.
 
-iOS linking/device execution needs Xcode and an iOS SDK; Android linking/device execution needs a
-suitable NDK. Neither was ever exercised even when these rows were compile-checked.
+**Why Linux arm64 and not also macOS arm64.** The Linux runner exercises the AArch64 code that
+differs from x86 (NEON, FPCR, the fold behind LANE-3), and a public repository pays nothing for
+it. The Darwin-only defect is a codegen fact of the Apple targets, so it is checked where it lives,
+in the iOS release assembly, on the x86 `cross-target` job. A macOS arm64
+runner would run `aarch64-apple-darwin` (an Apple M1 baseline) rather than the iOS target, and
+none of the realtime audits sees a libc call that is not an allocation, lock or syscall. So it
+would add runner minutes without covering the iOS defect.
+
+Not covered: x86-64 Android emulators and iOS simulators, which inherit the workspace's
+AVX2/FMA pin (`.cargo/config.toml`), and NEON performance.
 
 ## Render threading (issue 100, removed)
 
@@ -116,22 +140,60 @@ render-threading evidence that other targets lack.
 Platform thread priority, affinity and workgroup adoption remain with the host issues, unchanged:
 they were never part of the scheduler and are not affected by its removal.
 
-## Deferred-defect register (native AArch64, #378)
+## Known AArch64 defects (#1017)
 
-Owner ruling, 2026-09-04: native AArch64 (`aarch64-linux-android`, `aarch64-apple-ios`, and by
-extension `aarch64-apple-darwin`) is downgraded from "compile-checked" to "unsupported, no claim"
-until a native iOS/Android effort is scheduled (#378). This is a support-level downgrade, not a
-code removal: the workspace's `cfg(target_arch = "aarch64")` lines stay as they are. Browsers on
-Apple Silicon and iPhones run the `wasm32` build, so this does not affect any launch user. A future
-revival of native AArch64 must reopen each entry below before claiming the target again.
+#378 kept this register while native AArch64 was unsupported. #1017 reopened each entry on the
+AArch64 legs. Each open entry is an expected failure, by name:
 
-- **LANE-3 (#366)**: on AArch64 release builds the D8 `max`/`min` fold into `fmaxnm`/`fminnm`,
-  moving bits away from the pinned oracle; gate G1 is red there today. High severity when native
-  AArch64 is a target.
-- **SVF `flush()` emits `bl _memset_pattern16` on Darwin**: `svf_step`'s `L::splat(FLUSH_EPS)`
-  (`crates/lane/src/kernels.rs:280-281`) compiles on Apple targets to two libc calls per frame
-  inside the kernel loop (found while verifying #373; present on `main`). Realtime-policy violation
-  on Darwin; no effect on `x86_64` or `wasm32`.
-- The September 2026 test-usefulness audit
-  (`docs/audits/test-usefulness-2026-09-04/03-compilers-hosts-tools.md:227,240,297`) lists tests
-  that assert `Backend::current() == Simd8` and therefore fail on aarch64.
+- **LANE-3 (#1019).** On AArch64 release builds the D8 `max`/`min` fold into `fmaxnm`/`fminnm`,
+  which answer differently on NaN and signed-zero inputs. Gate G1's op-level pool passes on AArch64
+  (1.97.1). The fold shows in `math`'s M2 inside `exp2_lane` and `log2_lane`, scalar and vector
+  alike. Expected failures in `aarch64-release`: `math` `m2_lane_identity`
+  `m2_exp2_lane_identity` and `m2_log2_lane_identity`. Both pass in the debug leg.
+- **AArch64 NaN encodings (#1065).** Found by #1017. Not LANE-3: no code shape changes a CPU's NaN
+  rule, and the wasm spec leaves the same bits unspecified in the browser. An arithmetic
+  NaN on AArch64 is `0x7FC00000`, where x86 answers `0xFFC00000`, and a signalling operand wins NaN
+  propagation. So a pin that folds raw NaN words from hostile input moves on AArch64 in every
+  profile. With every NaN folded as one word, these pins are identical on both architectures.
+  #1065 asks the owner to rule whether class-A identity treats every NaN as one value. Expected
+  failures in `aarch64-debug`: `compressor`
+  `kernel::settled_body_tests::scenario_1006_ramping_prefix_is_pinned` and `parametric-eq` `bank`
+  `admitted_blocks_render_the_base_bits_without_selects`. (#1049 deleted the compressor's
+  `scenario_{981,983,985,995}` pins, and their rows, as dominated.) Every other test in the two
+  legs passes on AArch64, the console digests and the G5 corpus included.
+- **Darwin `memset_pattern16` in render (#1018).** On Apple targets LLVM lowers a stored `f32x4`
+  splat constant to `bl _memset_pattern16`, a libc call. The constants are `lane::FLUSH_EPS` (the
+  SVF flush), `1.0`, `0.5`, `2.0`, `1e-8`, `f32::MIN_POSITIVE` and others. So this is not the SVF
+  flush alone. There are 3,494 calls across ten product crates, counted in each crate's
+  `aarch64-apple-ios` release assembly on Rust 1.97.1:
+
+  | crate | calls | where |
+  |---|---|---|
+  | `multiband-compressor` | 1,132 | `PreparedMultibandCompressorBank::process_bank` |
+  | `compressor` | 970 | `kernel::process_block`, `ramping_main_scalar`, `process_block_mono`, `settled_sidechain` |
+  | `transient-shaper` | 534 | `Shaper::process_block` |
+  | `builtins` | 376 | `BuiltinInputBank::process`/`process_mono`, `InputStage::process` |
+  | `gate-expander` | 181 | `PreparedGate::process_bank` |
+  | `parametric-eq` | 151 | `PreparedParametricEq::process_bank`/`process_bank_mono`, `Channel::snap_ended` |
+  | `true-peak-limiter` | 104 | `LimiterCore::process_block`, `process_bank_inner` |
+  | `soft-clip` | 22 | `Channel::process`, `PreparedSoftClipBank::process_bank` |
+  | `graph` | 20 | `runtime::bank_meter_pass`, `runtime::bank_sample_peak` |
+  | `host-core` | 4 | `spectrum::SpectrumAnalyzer::analyze`/`analyze_continuous` |
+
+  Nearly every call sits in a render function, which is a realtime-policy violation on every
+  iPhone. There is no effect on `x86_64`, Linux AArch64 or `wasm32`. The expected failures are
+  `ios-asm-memset-pattern16`, one row per crate with its count as a ceiling, in
+  `scripts/lib/aarch64-known-defects.py`, scanned by `scripts/check-cross-targets.sh`. `capi` is
+  scanned as an rlib and has none.
+- **Resolved by #1017: tests that assumed eight lanes.** The seven test-only warnings
+  (`host-core/tests/fp_environment.rs`, `lane/tests/fp_env.rs`) and the tests that asserted or
+  returned on `Backend::current() == Simd8` (listed in
+  `docs/audits/test-usefulness-2026-09-04/03-compilers-hosts-tools.md:227,240,297`, plus what the
+  legs found in `console-workload`, `host-core`, `graph-compiler`, `true-peak-limiter`,
+  `parametric-eq`, `effect-compiler`, `gate-expander` and `compressor`) are width-agnostic, or
+  ignore the other width by name. Three stay eight-lane-only with their reason: the gate-expander W8
+  bank tests, the exact eight-lane byte totals in `capi`'s `resource_lifecycle` (#1060 replaces
+  them), and the per-node console-effect fixture in `host-core`'s `symmetry_witness`. The W4 gate
+  binding test runs only on AArch64. The gate-expander tests' W8-only claims (payload interchange,
+  restore isolation, malformed-word rejection) are not yet checked at W4; making them width-generic
+  is a successor issue.

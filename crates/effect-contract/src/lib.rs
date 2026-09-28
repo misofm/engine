@@ -40,9 +40,7 @@ pub use symmetry::{
 };
 
 use core::{fmt, hash::Hash};
-use engine::{
-    LAUNCH_SAMPLE_RATES, SampleRateHz, is_extended_compatibility_sample_rate, is_launch_sample_rate,
-};
+use engine::{LAUNCH_SAMPLE_RATES, SampleRateHz, is_launch_sample_rate};
 use lane::{Backend, Simd4, Simd8};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -729,8 +727,7 @@ pub fn validate_descriptor(d: &'static EffectDescriptor) -> Result<(), Descripto
             })
         }
         qprior = Some(key);
-        let rate = SampleRateHz(q.sample_rate);
-        if !(is_launch_sample_rate(rate) || is_extended_compatibility_sample_rate(rate)) {
+        if !is_launch_sample_rate(SampleRateHz(q.sample_rate)) {
             e.push(DescriptorError {
                 path: "qualities",
                 code: DescriptorDiagnosticCode::Quality,
@@ -1849,11 +1846,11 @@ pub trait PreparedNativeEffectBank: Send {
     /// A bank whose chain is currently collapsed holds a right channel frozen at the moment the
     /// collapse engaged, so a payload taken from it would carry a right section no dual run ever
     /// produced. [`desymmetrize_channels`](Self::desymmetrize_channels) documents the obligation
-    /// and why nothing in this tree owes it yet -- the only snapshot entry point in the engine is
-    /// `snapshot_unpublished_effect_bank_track_state`, which names its subject, and a bank bound
-    /// into a chain is not unpublished. The note is repeated from here because this is the method a
-    /// caller reaches for, and a caller that finds a way to a bound bank must call
-    /// `desymmetrize_channels` first.
+    /// and why nothing in this tree owes it yet -- no engine path snapshots a bank at all since
+    /// #1037 removed the persisted state envelope, whose only entry point snapshotted unpublished
+    /// banks, and a bank bound into a chain is not unpublished. The note is repeated from here
+    /// because this is the method a caller reaches for, and a caller that finds a way to a bound
+    /// bank must call `desymmetrize_channels` first.
     fn snapshot_track_state_payload(
         &self,
         track_index: u32,
@@ -1958,10 +1955,10 @@ pub trait PreparedNativeEffectBank: Send {
     /// A state payload taken while a bank is collapsed would carry a right section that is whatever
     /// the right channel held when the collapse engaged. Calling this first makes the payload the
     /// one a dual run would have written, and calling it is always sound -- it is the counterfactual
-    /// state, not an approximation of it. Nothing in this tree needs to:
-    /// `snapshot_unpublished_effect_bank_track_state` names its subject, and a bank that has been
-    /// bound into a chain is not unpublished. The obligation is written here so that the first
-    /// caller that *does* reach a bound bank finds it stated rather than has to derive it.
+    /// state, not an approximation of it. Nothing in this tree needs to: no engine path snapshots a
+    /// bank since #1037 removed the persisted state envelope, whose snapshot took only unpublished
+    /// banks. The obligation is written here so that the first caller that *does* reach a bound
+    /// bank finds it stated rather than has to derive it.
     fn desymmetrize_channels(&mut self) {}
 
     /// Whether this bank can **prove**, right now, that its two channels' state is bit-equal.

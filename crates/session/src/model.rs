@@ -91,10 +91,9 @@ closed_tokens! {
     /// V1 render profile tokens.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum RenderMode {
-        /// Deterministic single-control-thread preparation.
+        /// Deterministic single-control-thread preparation, the only V1 render mode. Wire code
+        /// `2` was the retired `dependency_waves` token (#1063) and is never reallocated.
         SingleThread => "single_thread",
-        /// Later worker availability is declarative only in this issue.
-        DependencyWaves => "dependency_waves",
     }
 }
 

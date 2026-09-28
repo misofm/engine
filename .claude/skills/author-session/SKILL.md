@@ -49,7 +49,7 @@ strings: no sign, whitespace, leading zero except `"0"`, or value above `1844674
 
 Closed tokens:
 
-- render mode: `single_thread` (`dependency_waves` parses but is unsupported at launch)
+- render mode: `single_thread` (the only token; anything else is `schema.invalid_enum`)
 - sample format: `f32_planar`
 - quality: `draft`, `normal`, `high`
 - link mode: `dual_mono`, `maximum`, `average`

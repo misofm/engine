@@ -329,9 +329,13 @@ mod mixing {
         let preflight = mixing_automation::preflight(Backend::current());
         preflight.assert_premises();
         let quiet = preflight.collapse(Arm::Quiet, None);
+        // One cohort per lane-width of tracks: eight at the eight-lane launch width, sixteen on a
+        // four-lane (AArch64 NEON) build (#1017).
+        let width = Backend::current().width() as u64;
+        let cohorts = u64::from(mixing_automation::WORKLOAD.tracks()) / width;
         assert_eq!(
-            quiet[1], 8,
-            "the mono console forms eight cohorts at this width"
+            quiet[1], cohorts,
+            "the mono console forms {cohorts} cohorts at width {width}"
         );
         // Today, restating the compressor and the limiter retires the five cohorts they sit in;
         // the automation fixes move this, so it is stated, not asserted, by the bench.

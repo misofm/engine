@@ -3583,6 +3583,16 @@ mod tests {
         slots: usize,
         depth_of: impl Fn(usize) -> usize,
     ) -> (NativeEffectRegistry, EffectPreparedSession) {
+        rack_chain_fixture_edited(tracks, slots, depth_of, |_, _| {})
+    }
+
+    /// [`rack_chain_fixture`], with `edit` applied to each track after its SIMD-1 chain is built.
+    fn rack_chain_fixture_edited(
+        tracks: usize,
+        slots: usize,
+        depth_of: impl Fn(usize) -> usize,
+        edit: impl Fn(usize, &mut session::Track),
+    ) -> (NativeEffectRegistry, EffectPreparedSession) {
         let mut model = parse_session_json(SESSION_FIXTURE).expect("fixture");
         let base_track = model.tracks[0].clone();
         let base_route = model.routes[0].clone();
@@ -3614,6 +3624,7 @@ mod tests {
                         effect
                     })
                     .collect();
+                edit(index, &mut track);
                 track
             })
             .collect();
@@ -4111,6 +4122,115 @@ mod tests {
         }
         assert_eq!(artifact.graph().prepared_bank_count(), 2);
         assert!(report.scalar_in(RackLocation::Simd1).is_empty());
+    }
+
+    /// A slot bypassed at preparation takes its chain out of the cohort, exactly as a slot of a
+    /// different effect would: `bypass` is part of the `EffectProgramKey`, so a bypassed and an
+    /// active instance of one effect never share a bank. And one slot id used in two racks of one
+    /// track prepares as two entries, whose program keys differ when only one is bypassed.
+    ///
+    /// Two groups' worth of two-slot chains, with the last track's slot 1 bypassed: the first group
+    /// fills and binds both its slots, and the second, one track short of full once the bypassed
+    /// chain leaves it, falls back per node, the bypassed track's two nodes with it. Track 0 also
+    /// carries a bypassed dynamic copy of its SIMD-1 slot 1, under the same id.
+    ///
+    /// Ported by #1027 from the #650 allocation-record audit subject
+    /// (`tools/audit/src/prepared_effect_allocations.rs`:
+    /// `banks64_proves_current_backend_cohort_and_heterogeneous_fallback` and
+    /// `crossed_small_proves_reversed_distinct_prepared_programs`), retired with its record
+    /// validator. Every surviving heterogeneity test varies the effect id, never only the bypass.
+    ///
+    /// Red mutation: `PreparedEffectMetadata::program_key` copies `bypass: false` rather than
+    /// `self.bypass` -> red at the program-key assertions; with those removed, the cohort half is
+    /// red on its own: the bypassed chain rejoins its group, both groups fill, and four slots bind.
+    #[test]
+    fn a_prepare_time_bypassed_slot_takes_its_chain_out_of_the_cohort() {
+        let Some(width) = BankWidth::for_backend(host_dispatch()) else {
+            panic!("delivery host must offer a bank width; evidence is vacuous otherwise");
+        };
+        let lanes = width.lanes() as usize;
+        let tracks = 2 * lanes;
+        let last = format!("bank{:02}", tracks - 1);
+        let (_registry, effects) = rack_chain_fixture_edited(
+            tracks,
+            2,
+            |_| 2,
+            |index, track| {
+                if index == tracks - 1 {
+                    track.simd1.effects[1].bypass = true;
+                }
+                if index == 0 {
+                    let mut shadow = track.simd1.effects[1].clone();
+                    shadow.bypass = true;
+                    track.dynamic.effects.push(shadow);
+                }
+            },
+        );
+
+        let key = |track: &str, rack: EffectRack| {
+            let matching: Vec<_> = effects
+                .entries
+                .iter()
+                .filter(|entry| {
+                    entry.track_id.as_str() == track
+                        && entry.rack == rack
+                        && entry.effect_id.as_str() == "chain0"
+                })
+                .collect();
+            assert_eq!(matching.len(), 1, "{track} {rack:?} prepares chain0 once");
+            matching[0].metadata.program_key()
+        };
+        let active = key("bank01", EffectRack::Simd1);
+        let bypassed = key(&last, EffectRack::Simd1);
+        assert!(bypassed.bypass && !active.bypass);
+        assert_ne!(bypassed, active, "bypass alone separates the two programs");
+        assert_eq!(
+            effect_contract::EffectProgramKey {
+                bypass: false,
+                ..bypassed
+            },
+            active,
+            "and nothing else does"
+        );
+        let shadow = key("bank00", EffectRack::Dynamic);
+        let original = key("bank00", EffectRack::Simd1);
+        assert!(shadow.bypass && !original.bypass);
+        assert_ne!(
+            shadow, original,
+            "one slot id in two racks: two distinct programs"
+        );
+
+        let artifact = compile_chain_fixture(effects);
+        let report = &artifact.report().rack_cohorts;
+        let bound: Vec<_> = report.bound_slots_in(RackLocation::Simd1).collect();
+        assert_eq!(
+            bound.len(),
+            2,
+            "only the first group fills, and it binds both slots"
+        );
+        let second_group = format!("bank{lanes:02}");
+        assert!(
+            bound.iter().all(|slot| slot.members.len() == lanes
+                && slot
+                    .members
+                    .iter()
+                    .all(|member| member.track_id.as_str() < second_group.as_str())),
+            "the bound banks hold the first group's tracks"
+        );
+        let scalar = report.scalar_in(RackLocation::Simd1);
+        assert_eq!(
+            scalar.len(),
+            2 * lanes,
+            "the second group's chains fall back per node"
+        );
+        assert_eq!(
+            scalar
+                .iter()
+                .filter(|node| node.track_id.as_str() == last)
+                .count(),
+            2,
+            "both of the bypassed track's nodes render per node"
+        );
     }
 
     /// #99 F3: bank membership does not depend on `EffectPreparedSession::entries` order.
@@ -9656,14 +9776,17 @@ mod tests {
             chains > cohorts,
             "a misaligned session must realise more than the aligned one chain per cohort"
         );
-        // Four lanes take the redirect here, and the number matters less than the fact that it is
-        // neither 0 nor 64. It is what makes the intended fixture's *zero* a statement about that
-        // fixture rather than about dead code: on a session whose stages line up, every chain ends
-        // in a buffer its consumer already reads in place and no lane needs redirecting; on this
-        // one, where they deliberately do not, the per-lane decision still fires. Both readings
-        // come from the same `scatter_target` clauses over the same lowered program.
+        // Half a bank's lanes take the redirect here -- four at the eight-lane launch width, two on
+        // a four-lane (AArch64 NEON) build (#1017), one per bare track -- and the number matters
+        // less than the fact that it is neither 0 nor 64. It is what makes the intended fixture's
+        // *zero* a statement about that fixture rather than about dead code: on a session whose
+        // stages line up, every chain ends in a buffer its consumer already reads in place and no
+        // lane needs redirecting; on this one, where they deliberately do not, the per-lane
+        // decision still fires. Both readings come from the same `scatter_target` clauses over the
+        // same lowered program.
         assert_eq!(
-            redirects, 4,
+            redirects,
+            lanes / 2,
             "the scatter redirect is decided per lane on the lowered program, so a session whose \
              lane sets never line up still takes the lanes that qualify"
         );
@@ -15131,9 +15254,22 @@ mod tests {
         // right in the plan's own stable edge order -- through `softfma::unfused_multiply_add_via_f64`,
         // an `f64` restatement independent of the `f32` vector body -- for all 100 layouts, before
         // this literal is compared.
+        //
+        // The four-lane plan (AArch64 NEON, #1017) has its own transcript, because
+        // `expected_banks` and the counters are counts at the build's width: `0x8a04_4e52_b88e_4e5f`.
+        // Its render half is not a second pin: all 100 layouts' `pcm_hash` values were captured on
+        // the x86-64-v3 build and on an AArch64 build (qemu-user; the AArch64 CI leg re-checks
+        // the transcript on hardware) and every one of the 100 is identical, so the two
+        // transcripts differ only in the structural fields.
+        let frozen = match Backend::current() {
+            Backend::Simd4 => 0x8a04_4e52_b88e_4e5f,
+            _ => 0xe095_f3ad_a9cc_cf46,
+        };
         assert_eq!(
-            transcript, 0xe095_f3ad_a9cc_cf46,
-            "frozen Issue-037 seeded layout transcript"
+            transcript,
+            frozen,
+            "frozen Issue-037 seeded layout transcript at {:?}",
+            Backend::current()
         );
     }
 

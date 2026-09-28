@@ -77,7 +77,7 @@ to `origin/main` on this branch.
 | `oracle` | E5: two configurations against the independent `f64` `ReferencePeakCompressor` — worst **4.694e-7** and **1.192e-7**, gate 2e-5 |
 | `lane_identity` | E2: a bound bank against `W` scalar instances with per-track parameters — output bits, per-track payload bytes; plus the corpus at `W = 1`, 4 and 8 word for word |
 | `partition` | E3: 4,096 frames in blocks of {1, 7, 63, 64, 65, 127, 128, 129, 512}, scalar and bank, output bits and payload bytes identical, with a Point on all seven smoothed parameters of both channels |
-| `cross_target` | E4: pinned SHA-256 over the four-case corpus at all three widths, plus finiteness and non-vacuity; the same corpus is replayed under wasmtime by `tools/wasm-gates` |
+| `cross_target` | E4's corpus is finite, busy and has four distinct cases. Its pinned SHA-256 at all three widths is compared by gate G5 alone since issue #1048 (`tools/wasm-gates/tests/g5_native_corpus.rs`, and the wasm guests of `scripts/run-wasm-gates.sh`); the rows above that name `cross_target` for a digest predate that move |
 | `identity` | E8: bypass, `mix == 0`, `mix == 1`, `G == 0 && makeup == +0`, the `Average` link's exact level, and that every identity keeps the state warm |
 | `ramps` | E6, D11: one division at the event, iterated additions, the exact snap on update 64, a restart from the value reached, automation validation, and that a finished ramp equals a fresh preparation |
 | `payload` | E7: idle restore bit-exact against an uninterrupted render, transactional rejection across both channels, the class-B mid-ramp restore, subnormal round trip, both resets |
@@ -324,7 +324,7 @@ Driver as for #981-#985, dev profile, one mutation at a time on a scratch copy.
 | # | mutation | red |
 |---|---|---|
 | 1006-M1 | the `remaining == 0` hold dropped: a ramp at rest takes its target, as on its last sample | `randomized_differential_simd4`/`_simd8` (their payload restores at `remaining = 0`), both #1006 scenarios (4 red) |
-| 1006-M3 | the output ramps (attack, release, makeup, mix) advanced in pass 1 as well, the brief's "attack in pass 1" | gate 1, both #1006 scenarios, `partition::block_partitions_are_invariant`, `payload::an_active_attack_restore_*`, `ramps::an_attack_cancel_to_current_*`, `native_points`, `cross_target`, two `mono_collapse` tests and `bench_ramp`'s preflight (16 red) |
+| 1006-M3 | the output ramps (attack, release, makeup, mix) advanced in pass 1 as well, the brief's "attack in pass 1" | gate 1, both #1006 scenarios, `partition::block_partitions_are_invariant`, `payload::an_active_attack_restore_*`, `ramps::an_attack_cancel_to_current_*`, `native_points`, `cross_target`, two `mono_collapse` tests and `ramps::a_both_channel_point_on_every_bank_lane_*` (`bench_ramp`'s preflight until #1027 ported it) (16 red) |
 | 1006-M5 | the wet arm taken while a mix ramp is open (both bodies) | gate 1 (its witness and its bits), both #1006 scenarios, `partition`, `lane_identity::every_width_produces_the_same_words`, `cross_target` (9 red) |
 | 1006-M6 | the words scattered from before the prefix (the dual prefix's word write-back dropped) | gate 1, `scenario_981`, `982`, `983` and `1006`, the bank scenario, #982's witness gate, `cross_target`, two `ramps` tests, `mono_collapse` (16 red) |
 | 1006-M7 | the collapsed prefix skips the curve redesign on a moved lane | gate 1, `scenario_985`, `scenario_1006`, the bank scenario, two `mono_collapse` tests (11 red) |

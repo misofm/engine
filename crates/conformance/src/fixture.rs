@@ -1,6 +1,6 @@
 //! Strict bounded `.mepcm` v1 parser and local CRC-32C implementation.
 
-use engine::{SampleRateHz, is_extended_compatibility_sample_rate, is_launch_sample_rate};
+use engine::{SampleRateHz, is_launch_sample_rate};
 
 const HEADER_LEN: usize = 48;
 const MAGIC: &[u8; 8] = b"MISOEPCM";
@@ -67,7 +67,7 @@ impl PcmFixture {
             return Err(FixtureError::InvalidField);
         }
         let rate = SampleRateHz(read_u32(bytes, 16));
-        if !(is_launch_sample_rate(rate) || is_extended_compatibility_sample_rate(rate)) {
+        if !is_launch_sample_rate(rate) {
             return Err(FixtureError::InvalidField);
         }
         let channels = read_u16(bytes, 20);
@@ -120,7 +120,7 @@ impl PcmFixture {
         frames: u64,
         samples: &[f32],
     ) -> Result<Vec<u8>, FixtureError> {
-        if !(is_launch_sample_rate(rate) || is_extended_compatibility_sample_rate(rate)) {
+        if !is_launch_sample_rate(rate) {
             return Err(FixtureError::InvalidField);
         }
         let payload_len = u64::from(channels)

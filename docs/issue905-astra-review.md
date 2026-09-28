@@ -4,7 +4,8 @@ Reviewed 2026-09-25 by Astra xhigh. **Attempt 1: PASS. No blocking findings.**
 The reviewed checkpoint is `04f70e5845d12211aa036da812d3892c0a1df64c` on
 `codex/batch-880-class-b`. The accepted implementation source remains
 `bb9efd095bd8d70be8b8503cba6c3617fd51b74e`, as confirmed in
-[`issue880-class-b-astra-review.md`](issue880-class-b-astra-review.md).
+[`issue880-class-b-astra-review.md`](https://github.com/misofm/engine/blob/5379e46ca3b349b9d277d642c008bb7a9643fb76/docs/issue880-class-b-astra-review.md)
+(removed by #1031).
 This verdict covers the bounded artifact qualification; it does not reopen the
 accepted DSP or claim completed delivery.
 

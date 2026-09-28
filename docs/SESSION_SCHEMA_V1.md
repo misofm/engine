@@ -53,18 +53,16 @@ The minimal and full exact-byte examples are
 [`canonical.json`](../fixtures/session/v1/canonical.json). They freeze indentation, key order,
 numeric/string spelling, and the final newline.
 
-`render_profile.mode` is a launch engine setting. Both V1 tokens still parse -- `single_thread`
-and `dependency_waves` -- because the closed token set, the protocol wire encoding and the
-canonical writer are all lossless by doctrine, and canonical round-trip forbids normalizing one
-token into another. Only `single_thread` launches. `dependency_waves` rejects with
-`render_mode.unsupported_at_launch` at `$.render_profile.mode` from parsing, typed compilation and
-canonical serialization alike, so no caller reaches a prepared plan through an entry point that
-skipped the check. The token named a native dependency-wave executor that was removed as
-production-unreachable; a rejection is the honest answer, where silently rendering single-threaded
-would let a session claim parallelism it never had.
+`render_profile.mode` has exactly one V1 token, `single_thread`. Every other spelling, including
+the retired `dependency_waves`, is an unknown value and rejects with `schema.invalid_enum` at
+`$.render_profile.mode`. `dependency_waves` named a native dependency-wave executor that was
+removed as production-unreachable, and issue #1063 then removed the token itself from the model,
+the parser, the canonical writer and the protocol encoding. Its protocol wire code `2` is retired,
+not reallocated: a peer that spells it is refused, as the registry requires. Parallel render, if it
+returns, needs a new issue that re-earns it.
 
 `sample_rate_hz` is a launch engine setting and is exactly one of 44100, 48000, 88200, or
-96000 Hz. Other values, including extended compatibility corpus rates, reject with
+96000 Hz. Other values, including 176400, 192000, 352800 and 384000 Hz, reject with
 `sample_rate.unsupported_at_launch` at `$.sample_rate_hz`; parsing, typed compilation, and
 canonical serialization never turn such a model into an engine session. It is the only sample
 rate in a document; V1 has no per-source rate and no implicit sample-rate conversion.
@@ -125,7 +123,11 @@ updates after off-render preparation; trim retains its existing smoothing law.
 is `docs/rulings/builtins-input-liveness-d2.md`; these commands do not add a session
 automation render feed. Effect identity is tagged `native` with a stable `effect_id`, or `cid` with
 opaque nonempty text. Native availability/descriptor domains/latency/tail are downstream issue-011
-work; CID/package validity is downstream issue-029 work.
+work. A `cid` identity parses and validates here and is refused at effect preparation with
+`effect.third_party.unavailable_at_launch`: third-party effects are out of scope until a new issue
+reopens them (owner ruling R6a, #1037, which removed the issue-029 package crate). Removing the
+`cid` arm from this grammar would move that refusal to parse time; it is a Session V1 grammar
+change that needs its own approval.
 
 A `native` `effect_id` is therefore a *stable ID*, not a registry lookup: this schema checks its
 syntax and never its membership. `fixtures/session/v1/canonical.json` exercises exactly that
@@ -178,7 +180,7 @@ follows:
 | SIMD-bank/cohort compatibility | 008 |
 | Source asset resolution and declared-shape matching | 010 |
 | Native descriptor/effect validity | 011 |
-| Third-party CID/package validity | 029 |
+| Third-party CID/package validity | none: out of scope until reopened (R6a, #1037) |
 
 Issue 010 must resolve content and reject any decoded rate/channels/depth/frames mismatch before
 plan publication. Issue 004 does not claim cycle freedom, valid downstream ports, effect

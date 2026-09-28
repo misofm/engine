@@ -26,7 +26,8 @@ VECTORS = {
 
 # The frozen corpus inputs all fit within one 1024-byte BLAKE3 chunk. Keeping the small,
 # one-chunk reference here makes the generated pins independently checkable without a Python
-# package while the streaming Rust implementation is qualified separately by its official vectors.
+# package; the streaming implementations (the release CLI's, the browser stem store's) are
+# qualified separately against known-answer vectors.
 IV = (0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A, 0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19)
 MESSAGE_PERMUTATION = (2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8)
 CHUNK_START = 1

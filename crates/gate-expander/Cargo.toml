@@ -25,7 +25,6 @@ conformance = { workspace = true, features = ["realtime-audit"] }
 # The independent f64 oracle is test-only and never reachable from production code.
 engine.workspace = true
 dsp-reference.workspace = true
-sha2.workspace = true
 
 [lints]
 workspace = true

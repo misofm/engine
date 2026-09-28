@@ -1676,8 +1676,8 @@ fn meter_peak_values<L: Lane>() -> [[f32; FRAMES]; LANES] {
     lanes
 }
 
-/// Digests one `effect-runtime` D1 case at width `L::WIDTH`, exactly as that crate's
-/// `tests/determinism.rs` does natively.
+/// Digests one `effect-runtime` D1 case at width `L::WIDTH`: SHA-256 over the little-endian result
+/// words of that crate's `corpus::run_case`, the form its `D1_DIGESTS` pins take.
 fn digest_runtime<L: Lane>(case: usize) -> [u8; 32] {
     let mut out = vec![0_u32; runtime_corpus::POINTS];
     runtime_corpus::run_case::<L>(case, &mut out);
@@ -1688,8 +1688,8 @@ fn digest_runtime<L: Lane>(case: usize) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// Digests one `multiband-compressor` case, exactly as that crate's
-/// `tests/cross_target_digest.rs` does natively.
+/// Digests one `multiband-compressor` case: SHA-256 over the little-endian result words of that
+/// crate's `corpus::run_case`, the form its `DIGESTS` pins take.
 fn digest_multiband<L: Lane>(case: usize) -> [u8; 32] {
     let mut out = vec![0_u32; multiband_corpus::POINTS];
     multiband_corpus::run_case::<L>(case, &mut out);
@@ -1700,8 +1700,8 @@ fn digest_multiband<L: Lane>(case: usize) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// Digests one `transient-shaper` case, exactly as that crate's `tests/cross_target.rs`
-/// does natively.
+/// Digests one `transient-shaper` case: SHA-256 over the little-endian result words of that
+/// crate's `corpus::run_case`, the form its `CROSS_TARGET_DIGESTS` pins take.
 fn digest_transient_shaper(case: usize, width: usize) -> [u8; 32] {
     let mut out = vec![0_u32; transient_shaper_corpus::WORDS];
     transient_shaper_corpus::run_case(case, transient_shaper_corpus::WIDTHS[width], &mut out);
@@ -1712,8 +1712,8 @@ fn digest_transient_shaper(case: usize, width: usize) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// Digests one `delay` G5 case, exactly as that crate's `tests/determinism.rs` does
-/// natively.
+/// Digests one `delay` G5 case: SHA-256 over the little-endian result words of that crate's
+/// `corpus::run_case`, the form its `G5_DIGESTS` pins take.
 fn digest_delay(case: usize) -> [u8; 32] {
     let mut out = vec![0_u32; delay_corpus::POINTS];
     delay_corpus::run_case(case, &mut out);
@@ -1724,7 +1724,8 @@ fn digest_delay(case: usize) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// Digests one `soft-clip` case, exactly as that crate's `tests/determinism.rs` does.
+/// Digests one `soft-clip` case: SHA-256 over the little-endian result words of that crate's
+/// `corpus::run_case`, the form its `SOFT_CLIP_DIGESTS` pins take.
 fn digest_soft_clip<L: Lane>(case: usize) -> [u8; 32] {
     let mut out = vec![0_u32; soft_clip_corpus::POINTS];
     soft_clip_corpus::run_case::<L>(case, &mut out);
@@ -1735,9 +1736,8 @@ fn digest_soft_clip<L: Lane>(case: usize) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// Digests one `parametric-eq` E9 case, exactly as that crate's `tests/determinism.rs`
-/// Digests one `gate-expander` case at width `L::WIDTH`, exactly as that crate's
-/// `tests/determinism.rs` does natively.
+/// Digests one `gate-expander` case at width `L::WIDTH`: SHA-256 over the little-endian result
+/// words of that crate's `corpus::run_case`, the form its `GATE_DIGESTS` pins take.
 fn digest_gate_expander<L: Lane>(case: usize) -> [u8; 32] {
     let mut out = vec![0_u32; gate_expander_corpus::POINTS];
     gate_expander_corpus::run_case::<L>(case, &mut out);
@@ -1748,7 +1748,8 @@ fn digest_gate_expander<L: Lane>(case: usize) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// does natively.
+/// Digests one `parametric-eq` E9 case: SHA-256 over the little-endian result words of that crate's
+/// `corpus::run_case`, the form its `E9_DIGESTS` pins take.
 fn digest_parametric_eq<L: Lane>(case: usize) -> [u8; 32] {
     let mut out = vec![0_u32; parametric_eq_corpus::POINTS];
     parametric_eq_corpus::run_case::<L>(case, &mut out);
@@ -1759,7 +1760,8 @@ fn digest_parametric_eq<L: Lane>(case: usize) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// Digests one `builtins` case, exactly as that crate's `tests/determinism.rs` does.
+/// Digests one `builtins` case: SHA-256 over the little-endian bits of that crate's
+/// `corpus::case_values`, the form its `BUILTINS_DIGESTS` pins take.
 fn digest_builtins<L: Lane>(case: usize) -> [u8; 32] {
     let mut hasher = Sha256::new();
     for value in builtins_corpus::case_values::<L>(case) {
@@ -1768,8 +1770,8 @@ fn digest_builtins<L: Lane>(case: usize) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// Digests one `true-peak-limiter` E12 case at width `L::WIDTH`, exactly as that
-/// crate's `tests/determinism.rs` does natively.
+/// Digests one `true-peak-limiter` E12 case at width `L::WIDTH`: SHA-256 over the little-endian
+/// result words of that crate's `corpus::run_case`, the form its `D90_DIGESTS` pins take.
 fn digest_limiter<L: Lane>(case: usize) -> [u8; 32] {
     let mut out = vec![0_u32; limiter_corpus::POINTS];
     limiter_corpus::run_case::<L>(case, &mut out);
@@ -1780,8 +1782,8 @@ fn digest_limiter<L: Lane>(case: usize) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// Digests one `compressor` E4 case, exactly as that crate's `tests/cross_target.rs`
-/// does natively.
+/// Digests one `compressor` E4 case: SHA-256 over the little-endian result words of that crate's
+/// `corpus::run_case`, the form its `C1_DIGESTS` pins take.
 fn digest_compressor<L: Lane>(case: usize) -> [u8; 32] {
     let mut out = vec![0_u32; compressor_corpus::POINTS];
     compressor_corpus::run_case::<L>(case, &mut out);

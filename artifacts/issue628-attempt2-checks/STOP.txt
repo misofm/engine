@@ -1,2 +1,0 @@
-FAIL: before-hash capture used repository-relative SDK paths from inside sdk/.
-The single npm ci ran once afterward and passed; no later check ran.

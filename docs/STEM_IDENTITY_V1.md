@@ -47,9 +47,9 @@ stay integer-valued through this boundary; an implementation may not make identi
 floating-point decoder's rounding behavior.
 
 BLAKE3-256 is the canonical PCM identity vocabulary. No whole-stem residency is permitted, so a
-shipped incremental implementation is mandatory where one-shot WebCrypto cannot cover the input.
-The Rust reference oracle uses the pinned workspace `blake3` implementation. Artifact, package,
-effect, and render hashes retain their own schemes and are outside this contract.
+shipped incremental implementation is mandatory where one-shot WebCrypto cannot cover the input:
+the browser stem store's is `hosts/host-web/web/stem-store/incremental-blake3.js`. Artifact,
+package, effect, and render hashes retain their own schemes and are outside this contract.
 
 ## Frozen conformance vectors
 
@@ -71,45 +71,36 @@ The `32f` sample text is exact hexadecimal IEEE-754 bits. Those rows cover NaN p
 positive subnormal, and negative zero without relying on host-language float formatting.
 
 All six rows have committed headerless `.pcm` files. The stereo row at each depth also has a
-committed `.wav` fixture. The reference WAVE path MUST strip the two different wrappers and
-produce bytes and identity equal to the corresponding `.pcm` row.
+committed `.wav` fixture. Every WAVE path (today only the release CLI's, below) MUST strip the two
+different wrappers and produce bytes and identity equal to the corresponding `.pcm` row.
 
-## Reference oracle
+## Implementations and the corpus gate
 
-`stem-hasher` is the publishing and migration oracle. It streams raw PCM or parses
-RIFF/WAVE and RF64/WAVE through the engine's own `source` parser, serializes each
-sample through the rules above, optionally emits the canonical preimage, and prints the identity.
-It never retains a complete stem.
+The engine carries no reference hashing tool and no container parser. Hosts decode stems
+themselves and submit planar PCM: #1035 removed the native decode workers and the Rust
+`stem-hasher` oracle, and #1033 removed the native WAV/RF64 parser that was left. The contract has
+two owners, and they own different halves of it:
 
-Raw input is little-endian canonical PCM at the explicitly supplied shape: signed two's-complement
-for depths 16/24, or raw IEEE-754 bit patterns for `32f`:
+* **Serialization and WAVE stripping: the release CLI** (`misofm/cli`, `src/stem-identity.ts`).
+  It is the only implementation that reads a WAVE (RIFF or RF64) container, serializes its samples
+  canonically and hashes them into a `blake3:` identity. Its `tests/stem-identity.test.ts` runs
+  against byte-identical copies of the ten corpus files (`VECTORS.tsv`, six `.pcm`, three `.wav`).
+* **Identity grammar and the hash of given canonical bytes: the browser stem store.**
+  `hosts/host-web/web/stem-store/identity.js` only parses the `blake3:` spelling, and
+  `opfs-store.js` streams the canonical bytes a resolver hands it through `incremental-blake3.js`,
+  checks the declared byte length and re-verifies on open. It has no container decoder and never
+  serializes decoded PCM. `hosts/host-web/tests/stem-store-hash-v1.mjs` and
+  `stem-store-core-v1.mjs` test it, through `scripts/check-stem-store-v1.mjs`.
 
-```sh
-cargo run --locked -p stem-hasher -- raw \
-  --input stem.pcm --channels 2 --bit-depth 24 --frames 10617984
-```
-
-WAVE supplies its shape through the engine parser and is accepted only for signed PCM16, packed
-PCM24, or IEEE float32:
-
-```sh
-cargo run --locked -p stem-hasher -- wave --input stem.wav
-```
-
-With no `--output`, stdout is the identity. `--output PATH` creates a new canonical-PCM file and
-still prints the identity to stdout; it refuses to replace an existing path. `--output -` writes
-canonical bytes to stdout and writes the identity to stderr, keeping the binary stream pure.
-
-The corpus gate is:
+Any other implementation that serializes samples or strips a container, a mobile app's included,
+MUST reproduce every row of the corpus. The corpus gate is the independent
+Python-standard-library generator, which re-derives every `.pcm` preimage, `.wav` wrapper and
+identity and fails on any drift. The required workflow's lint job runs it on every full-route pull
+request (#1033), so the frozen bytes the CLI copies cannot drift here unnoticed:
 
 ```sh
 python3 fixtures/stem-identity/v1/generate.py --check
-cargo test --locked -p stem-hasher
 ```
-
-It exercises every row through the raw library and CLI paths and both WAVE fixtures through the
-engine parser and CLI. Reversing sample endianness makes every pinned vector fail; changing stereo
-channel order makes both stereo vectors fail.
 
 ## Render identity and future backends
 
@@ -126,6 +117,7 @@ what makes a future complete render-cache key well-defined.
 ## Artifact namespaces
 
 The ingest gate is phrased over every referenced content-addressed artifact, not only stems. The
-identity scheme-prefix rule covers both `blake3:` stems and the CID scheme used by third-party
-effect packages. Store layout must reserve a namespace for non-stem artifacts; package fetching
-and execution remain deferred to the effect-package workstream.
+identity scheme-prefix rule covers `blake3:` stems and keeps other schemes out of the stem
+namespace. Third-party effect packages, whose identity was a CID, are out of scope until a new
+issue reopens them (owner ruling R6a; #1037 removed the `effect-package` crate); a reopening issue
+must give non-stem artifacts their own store namespace.

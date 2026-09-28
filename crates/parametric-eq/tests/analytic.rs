@@ -460,7 +460,8 @@ fn word_ramps_are_contractive_on_every_grid_row() {
     eprintln!("issue-087 E5 combinations={combinations} worst_norm={worst:.12}");
 }
 
-/// The exact rows the `native-pcm-runner` session fixtures configure, bounded against the oracle.
+/// The exact rows the `native-pcm-runner` session fixtures configured (#1033 removed the runner),
+/// bounded against the oracle.
 ///
 /// Those five PCM digests are re-pinned by issue #87 (master plan §8): the render changed because
 /// this crate's realization changed, and nothing else in the plan moved. This gate is the oracle

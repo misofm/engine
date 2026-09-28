@@ -38,9 +38,11 @@ fn replay_layout_stays_within_the_capi_resource_oracle() {
     // prepared-command enum by 24 bytes; all twelve queue endpoints are otherwise unchanged.
     // #1023 re-pin (-24 each): `CompiledSession`, held inline by both, drops its unread
     // `graph_entity_indexes` map, a 24-byte `BTreeMap` header.
+    // #1034 re-pin (-8): the embedded `ProtocolQueues` drops its unread `control_used_bytes`
+    // counter.
     assert_eq!(
         core::mem::size_of::<ProtocolController<MockProvider>>(),
-        6_040
+        6_032
     );
     assert_eq!(core::mem::size_of::<PreparedStructuralCommand>(), 728);
 }

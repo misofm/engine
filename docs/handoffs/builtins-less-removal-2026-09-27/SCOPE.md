@@ -379,7 +379,8 @@ Full bodies are in the Appendix.
   `:623`).
 - Measured in process on one uncontrolled host: 14.6 µs/block before #944 and #945, and 10.6 after
   both. The plumbing row measured 3.2 µs/block
-  (`docs/handoffs/gain-pan-2026-09-26/GAIN-PAN-VERIFY.md`, section 2).
+  ([`GAIN-PAN-VERIFY.md`](https://github.com/misofm/engine/blob/5379e46ca3b349b9d277d642c008bb7a9643fb76/docs/handoffs/gain-pan-2026-09-26/GAIN-PAN-VERIFY.md), section 2;
+  removed by #1031).
 - The gap between 10.6 µs and the plumbing row's 3.2 µs is the builtins, and the bank chains they
   run in, that the plumbing row never had. That is the gap the owner's "pure path at its floor"
   goal has to close.

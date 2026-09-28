@@ -27,7 +27,8 @@
 //! the length of one block and hands it back exactly as it found it.
 //!
 //! This is the *pinned* half of the rule the legacy predecessor wrote as attestation
-//! (`docs/research/legacy-v2old/02-numerics-determinism.md`: "At every native render-thread
+//! ([`docs/research/legacy-v2old/02-numerics-determinism.md`](https://github.com/misofm/engine/blob/5379e46ca3b349b9d277d642c008bb7a9643fb76/docs/research/legacy-v2old/02-numerics-determinism.md),
+//! removed by #1031: "At every native render-thread
 //! entry/start, require and attest round-to-nearest-even with FTZ/DAZ disabled ... refuse before
 //! audio with stable `fp_environment_invalid`"). Refusing a DAW's callback thread is not available
 //! to an embedded engine, so the current engine pins per block and keeps the attestation as a start-of-session

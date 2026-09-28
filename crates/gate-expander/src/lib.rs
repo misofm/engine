@@ -1194,13 +1194,27 @@ mod tests {
         }
     }
 
+    /// A NaN injected into one lane's gain recovers that lane alone, at this build's native bank
+    /// width: eight lanes on x86-64-v3, four on AArch64 NEON (#1017). The bank is compared with a
+    /// per-lane scalar peer and with an uninjected control bank of the same width.
     #[test]
-    fn injected_nonfinite_gain_has_scalar_w8_parity() {
+    fn injected_nonfinite_gain_has_scalar_parity_at_the_native_width() {
+        match Backend::current() {
+            Backend::Simd8 => injected_nonfinite_gain_parity::<Simd8>(BankWidth::Eight),
+            Backend::Simd4 => injected_nonfinite_gain_parity::<Simd4>(BankWidth::Four),
+            Backend::Scalar => panic!("no product target renders scalar banks"),
+        }
+    }
+
+    fn injected_nonfinite_gain_parity<L: Lane>(width: BankWidth) {
         const FRAMES: usize = 128;
         const WARM: usize = 5;
-        if Backend::current() != Backend::Simd8 {
-            return;
-        }
+        let lanes = L::WIDTH;
+        assert_eq!(
+            lanes,
+            width.lanes() as usize,
+            "{width:?} is not {lanes} lanes"
+        );
         let track_values: [_; MAX_WIDTH] =
             core::array::from_fn(|track| values(-20.0 - track as f32));
         let mut defaults = [[[0.0; PARAMETER_COUNT]; 2]; MAX_WIDTH];
@@ -1208,12 +1222,10 @@ mod tests {
             defaults[track] = initial_defaults(set).expect("initial values");
         }
         let shared = metadata(&track_values[0]);
-        let mut bank = PreparedGate::<Simd8, false>::new(shared, Some(BankWidth::Eight), defaults)
-            .expect("bank");
+        let mut bank = PreparedGate::<L, false>::new(shared, Some(width), defaults).expect("bank");
         let mut control =
-            PreparedGate::<Simd8, false>::new(shared, Some(BankWidth::Eight), defaults)
-                .expect("control bank");
-        let mut peers: Vec<PreparedGate<f32, false>> = (0..MAX_WIDTH)
+            PreparedGate::<L, false>::new(shared, Some(width), defaults).expect("control bank");
+        let mut peers: Vec<PreparedGate<f32, false>> = (0..lanes)
             .map(|track| {
                 let mut lane_defaults = [[[0.0; PARAMETER_COUNT]; 2]; MAX_WIDTH];
                 lane_defaults[0] = defaults[track];
@@ -1221,30 +1233,30 @@ mod tests {
             })
             .collect();
 
-        let sources: Vec<Vec<f32>> = (0..MAX_WIDTH)
+        let sources: Vec<Vec<f32>> = (0..lanes)
             .map(|track| noise(17 + track as u64, FRAMES * (WARM + 1)))
             .collect();
         let mut bank_reports = [ProcessReport::default(); MAX_WIDTH];
         let mut peer_reports = [ProcessReport::default(); MAX_WIDTH];
-        let mut bank_left = vec![0.0_f32; FRAMES * MAX_WIDTH];
-        let mut bank_right = vec![0.0_f32; FRAMES * MAX_WIDTH];
+        let mut bank_left = vec![0.0_f32; FRAMES * lanes];
+        let mut bank_right = vec![0.0_f32; FRAMES * lanes];
         let mut control_left = bank_left.clone();
         let mut control_right = bank_right.clone();
-        let mut peer_left = vec![vec![0.0_f32; FRAMES]; MAX_WIDTH];
-        let mut peer_right = vec![vec![0.0_f32; FRAMES]; MAX_WIDTH];
+        let mut peer_left = vec![vec![0.0_f32; FRAMES]; lanes];
+        let mut peer_right = vec![vec![0.0_f32; FRAMES]; lanes];
 
         for block in 0..=WARM {
             if block == WARM {
                 bank.inject_nonfinite_gain(3, 0);
                 peers[3].inject_nonfinite_gain(0, 0);
             }
-            for track in 0..MAX_WIDTH {
+            for track in 0..lanes {
                 for frame in 0..FRAMES {
                     let sample = sources[track][block * FRAMES + frame];
-                    bank_left[frame * MAX_WIDTH + track] = sample;
-                    bank_right[frame * MAX_WIDTH + track] = sample;
-                    control_left[frame * MAX_WIDTH + track] = sample;
-                    control_right[frame * MAX_WIDTH + track] = sample;
+                    bank_left[frame * lanes + track] = sample;
+                    bank_right[frame * lanes + track] = sample;
+                    control_left[frame * lanes + track] = sample;
+                    control_right[frame * lanes + track] = sample;
                     peer_left[track][frame] = sample;
                     peer_right[track][frame] = sample;
                 }
@@ -1265,7 +1277,7 @@ mod tests {
                 FRAMES,
                 &mut [ProcessReport::default(); MAX_WIDTH],
             );
-            for track in 0..MAX_WIDTH {
+            for track in 0..lanes {
                 let mut single = [ProcessReport::default(); MAX_WIDTH];
                 peers[track].run_block(
                     &mut peer_left[track],
@@ -1280,25 +1292,28 @@ mod tests {
 
         // The NaN never reaches the output: `exp2_lane`'s D8 clamp swallows it, so `A` is finite
         // and `z * A` is finite. Only the block-end scan of the gain words sees it.
-        for track in 0..MAX_WIDTH {
+        for track in 0..lanes {
             for frame in 0..FRAMES {
                 assert_eq!(
-                    bank_left[frame * MAX_WIDTH + track].to_bits(),
+                    bank_left[frame * lanes + track].to_bits(),
                     peer_left[track][frame].to_bits(),
-                    "left track {track} frame {frame}"
+                    "W{lanes} left track {track} frame {frame}"
                 );
                 assert_eq!(
-                    bank_right[frame * MAX_WIDTH + track].to_bits(),
+                    bank_right[frame * lanes + track].to_bits(),
                     peer_right[track][frame].to_bits(),
-                    "right track {track} frame {frame}"
+                    "W{lanes} right track {track} frame {frame}"
                 );
             }
-            assert_eq!(bank_reports[track], peer_reports[track], "report {track}");
+            assert_eq!(
+                bank_reports[track], peer_reports[track],
+                "W{lanes} report {track}"
+            );
             if track == 3 {
                 assert_eq!(bank_reports[track].nonfinite_left_blocks, FRAMES as u64);
                 assert_eq!(bank_reports[track].nonfinite_right_blocks, 0);
                 for frame in 0..FRAMES {
-                    assert_eq!(bank_left[frame * MAX_WIDTH + track].to_bits(), 0);
+                    assert_eq!(bank_left[frame * lanes + track].to_bits(), 0);
                 }
                 assert_eq!(lane_get(bank.state[0].gain_db, 3).to_bits(), 0, "G is +0");
                 assert_eq!(lane_get(bank.state[0].hysteresis.open, 3), OPEN_WORD);
@@ -1310,9 +1325,9 @@ mod tests {
                 assert_eq!(bank_reports[track], ProcessReport::default());
                 for frame in 0..FRAMES {
                     assert_eq!(
-                        bank_left[frame * MAX_WIDTH + track].to_bits(),
-                        control_left[frame * MAX_WIDTH + track].to_bits(),
-                        "track {track} is untouched by track 3's recovery"
+                        bank_left[frame * lanes + track].to_bits(),
+                        control_left[frame * lanes + track].to_bits(),
+                        "W{lanes} track {track} is untouched by track 3's recovery"
                     );
                 }
             }

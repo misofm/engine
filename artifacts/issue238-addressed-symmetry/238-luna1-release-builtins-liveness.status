@@ -1,2 +1,0 @@
-command=/home/bl/.cargo/bin/cargo test --locked --release -p builtins --test input_liveness --test input_liveness_mono
-status=pass

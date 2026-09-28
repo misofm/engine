@@ -181,19 +181,14 @@ carry two different identities. Sharing one would be the #241 defect again in a 
 ## Reproduction — all five distinct identities
 
 `hosts/host-web/qualification/session-identities.mjs` derives the console, observation, and stall
-rows from the harness's own exported PCM generators with the browser's BLAKE3 implementation. The
-repository's native reference oracle agrees when given those canonical preimages:
+rows from the harness's own exported PCM generators with the browser's BLAKE3 implementation.
 
-```sh
-cargo run --locked -p stem-hasher -- raw \
-  --input console.pcm --channels 2 --bit-depth 32f --frames 16640   # 965bddf2…
-cargo run --locked -p stem-hasher -- raw \
-  --input stall.pcm --channels 2 --bit-depth 32f --frames 5120      # cdd57923…
-cargo run --locked -p stem-hasher -- raw \
-  --input observation.pcm --channels 2 --bit-depth 32f --frames 2048 # 0b3c2abe…
-```
-
-The browser check and the Rust oracle agree on all three.
+When this derivation was written, the repository's native reference oracle (`stem-hasher`, in
+`raw` mode over each canonical preimage) agreed on all three: `965bddf2…` (console, 16,640
+frames), `cdd57923…` (stall, 5,120 frames) and `0b3c2abe…` (observation, 2,048 frames), each
+stereo `32f`. #1035 removed `stem-hasher` and the engine now carries no hashing tool
+(`docs/STEM_IDENTITY_V1.md`, "Implementations and the corpus gate"); any BLAKE3-256 implementation
+over the same preimages reproduces those identities.
 
 ## The qualification gate (#272)
 

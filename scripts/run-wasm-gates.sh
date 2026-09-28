@@ -9,10 +9,16 @@
 #   wasm+simd128 -- and with it (backend simd4), which is the only place the v128 software FMA of
 #                   master plan §3.5 is actually executed.
 #
+# `--without-native` leaves the native leg out (issue #1048). CI passes it in `wasm-guests`,
+# because `test-release` runs the same comparison as the Rust test `g5_native_digests_match_pins`
+# (tools/wasm-gates/tests/g5_native_corpus.rs), in the shipping profile, where mutation testing
+# can see it; `scripts/check-ci-path-routing.py` refuses the flag without that pairing. A local
+# run keeps the leg by default, so "run-wasm-gates.sh passes" still compares the native digests.
+#
 # After the legs, `check_v8_spill` (issues #1000, #1009) holds the shipped AudioWorklet module's EQ
 # cascade loops to V8's register allocation under the pinned Node; it needs that Node on PATH, and
 # only it does. `--without-v8-spill` leaves it out. CI passes that flag in `wasm-guests`, because
-# `artifact-gates` runs the same gate on the downloaded, pin-verified artifact: the bytes that ship,
+# `artifact-gates` runs the same gate on the downloaded, digest-verified artifact: the bytes that ship,
 # with no second fat-LTO build.
 #
 # Every leg compares against pins generated from the scalar `Lane` oracle. A mismatch is never
@@ -28,10 +34,18 @@ readonly GUEST="wasm_gate_guest.wasm"
 cd "$repository_root"
 
 v8_spill=1
-if [[ ${1-} == --without-v8-spill ]]; then
-    v8_spill=0
+native=1
+while [[ ${1-} == --without-* ]]; do
+    case "$1" in
+        --without-v8-spill) v8_spill=0 ;;
+        --without-native) native=0 ;;
+        *)
+            printf 'wasm gates: unknown option %s\n' "$1" >&2
+            exit 2
+            ;;
+    esac
     shift
-fi
+done
 output_dir="${1:-target/ci/wasm-gates}"
 mkdir -p "$output_dir"
 evidence="$output_dir/wasm-gates.jsonl"
@@ -39,7 +53,9 @@ evidence="$output_dir/wasm-gates.jsonl"
 
 # The host runner and the native leg. `--locked` everywhere: the pinned wasmtime is part of the
 # gate, and a resolver that quietly moved it would change which modules validate.
-cargo run --locked --release -q -p wasm-gates -- --native | tee -a "$evidence"
+if ((native)); then
+    cargo run --locked --release -q -p wasm-gates -- --native | tee -a "$evidence"
+fi
 
 run_guest() {
     local name="$1"
@@ -175,9 +191,9 @@ check_f64_lane_lowering() {
 # in the shipped AudioWorklet module. `check-web-audioworklet-v8-spill.py` has the rule and what it
 # does and does not prove; it times nothing. The module comes from `build-web-audioworklet.sh
 # --module-only`, so the cargo line has one home and these are the bytes that ship at this commit.
-# That mode does not hold the module to the digest pin: a batch repins once, at its boundary, and
-# the loops are a property of the source whether or not the pin has caught up. The pins are checked
-# first, so a Node other than the pinned one fails before the build.
+# It does not hold the module to the release pin (#1061): the loops are a property of the source,
+# not of a release. The toolchain pins are checked first, so a Node other than the pinned one fails
+# before the build.
 check_v8_spill() {
     local module_dir="target/ci/wasm-gates-web" started finished
     python3 -B scripts/check-web-audioworklet-v8-spill.py --check-toolchain
@@ -206,7 +222,11 @@ for leg in scalar simd128; do
 done
 printf 'wasm gates: detector history resident in locals on both guest legs\n'
 check_f64_lane_lowering "target/ci/wasm-gates-simd128/$TARGET/release/$GUEST"
-legs="native + wasm scalar + wasm simd128"
+if ((native)); then
+    legs="native + wasm scalar + wasm simd128"
+else
+    legs="wasm scalar + wasm simd128; native left out (--without-native)"
+fi
 if ((v8_spill)); then
     check_v8_spill
     legs+=" + V8 EQ loops"
