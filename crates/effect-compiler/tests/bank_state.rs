@@ -907,12 +907,14 @@ fn production_replay(descriptor: &'static EffectDescriptor) -> EffectBankPrepara
     }
 }
 
+/// A production soft-clip bank at this build's native width -- eight lanes on x86-64-v3, four on
+/// AArch64 NEON (#1017) -- restores one member's state and leaves its siblings' untouched.
 #[test]
-fn production_soft_clip_w8_member_restores_and_isolates_siblings() {
+fn production_soft_clip_native_width_member_restores_and_isolates_siblings() {
     let backend = Backend::current();
-    if backend != Backend::Simd8 {
-        return;
-    }
+    let bank_width = BankWidth::for_backend(backend)
+        .unwrap_or_else(|| panic!("{backend:?} has no bank width: every product target is SIMD"));
+    let width = backend.width();
     let descriptor = &soft_clip::SOFT_CLIP_DESCRIPTOR;
     let descriptor_wire = wire(descriptor);
     let factory: Arc<dyn NativeEffectFactory> = Arc::new(soft_clip::SoftClipFactory);
@@ -922,14 +924,13 @@ fn production_soft_clip_w8_member_restores_and_isolates_siblings() {
             bind_native_effect_factory_state(Arc::clone(&factory), &descriptor_wire, 1 << 20)
                 .unwrap(),
             backend,
-            BankWidth::Eight,
-            vec![replay.clone(); 8].into_boxed_slice(),
+            bank_width,
+            vec![replay.clone(); width].into_boxed_slice(),
             admission(&replay),
         )
         .unwrap()
     };
     let mut source = prepare_bank();
-    let width = 8;
     let frames = 37;
     let mut left: Vec<_> = (0..frames * width)
         .map(|index| index as f32 * 0.001 - 0.1)
@@ -937,14 +938,14 @@ fn production_soft_clip_w8_member_restores_and_isolates_siblings() {
     let mut right: Vec<_> = (0..frames * width)
         .map(|index| index as f32 * -0.001 + 0.1)
         .collect();
-    let offsets = [0; 9];
+    let offsets = vec![0; width + 1];
     source.bank_mut().process_bank(
         EffectBankProcessBlock::new(
             &mut left,
             &mut right,
             None,
             frames as u32,
-            BankWidth::Eight,
+            bank_width,
             0,
             &[],
             &offsets,
@@ -963,8 +964,16 @@ fn production_soft_clip_w8_member_restores_and_isolates_siblings() {
         admission(&replay),
     )
     .unwrap();
-    assert_eq!(bank_snapshot(&destination, 2), sibling_before);
-    assert_eq!(bank_snapshot(&destination, 3), envelope);
+    assert_eq!(
+        bank_snapshot(&destination, 2),
+        sibling_before,
+        "{backend:?} (width {width}): restoring member 3 moved sibling 2"
+    );
+    assert_eq!(
+        bank_snapshot(&destination, 3),
+        envelope,
+        "{backend:?} (width {width}): member 3 did not restore its envelope"
+    );
 
     let continuation_frames = 19;
     let continuation_size = continuation_frames * width;
@@ -984,7 +993,7 @@ fn production_soft_clip_w8_member_restores_and_isolates_siblings() {
             &mut expected_right,
             None,
             continuation_frames as u32,
-            BankWidth::Eight,
+            bank_width,
             frames as u64,
             &[],
             &offsets,
@@ -998,7 +1007,7 @@ fn production_soft_clip_w8_member_restores_and_isolates_siblings() {
             &mut actual_right,
             None,
             continuation_frames as u32,
-            BankWidth::Eight,
+            bank_width,
             frames as u64,
             &[],
             &offsets,
@@ -1018,7 +1027,8 @@ fn production_soft_clip_w8_member_restores_and_isolates_siblings() {
             .skip(3)
             .step_by(width)
             .map(|value| value.to_bits())
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>(),
+        "{backend:?} (width {width}): the restored member's left continuation moved"
     );
     assert_eq!(
         expected_right
@@ -1032,7 +1042,12 @@ fn production_soft_clip_w8_member_restores_and_isolates_siblings() {
             .skip(3)
             .step_by(width)
             .map(|value| value.to_bits())
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>(),
+        "{backend:?} (width {width}): the restored member's right continuation moved"
     );
-    assert_eq!(bank_snapshot(&destination, 3), bank_snapshot(&source, 3));
+    assert_eq!(
+        bank_snapshot(&destination, 3),
+        bank_snapshot(&source, 3),
+        "{backend:?} (width {width}): the restored member's state diverged from its source"
+    );
 }

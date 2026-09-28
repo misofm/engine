@@ -399,7 +399,7 @@ fn declining_tracks(console: &Console) -> std::collections::BTreeSet<String> {
 /// its cohort; `invert` flips one channel's polarity, which clears that track's `DESIGNED` term and
 /// so its **pool class** (mono-collapse M1). Two independent two-valued splits give four cohorts
 /// over eight tracks, which is how [`the_scalar_console_effect_arm_maintains_its_own_live_terms`]
-/// reaches a plan with no effect bank at any launch lane width.
+/// reaches a plan with no effect bank at the eight-lane launch width.
 fn edited(bypass: &[usize], invert: &[usize]) -> String {
     let mut model = parse_session_json(&mono_session()).expect("mono fixture parses");
     for (index, track) in model.tracks.iter_mut().enumerate() {
@@ -453,24 +453,34 @@ fn a_prepare_time_bypass_seeds_the_unbypassed_term_before_any_render() {
 /// noticed if `NodeKind::ConsoleEffect`'s `.and(console.control.symmetry())` had been dropped
 /// outright.
 ///
-/// # How the arm is made bank-free at every launch width
+/// # How the arm is made bank-free at the eight-lane launch width
 ///
 /// Two independent splits over the eight tracks: a prepare-time bypass (which changes the
 /// `EffectProgramKey`, so bypassed and unbypassed tracks can never share a bank) crossed with a
 /// polarity inversion (which clears `DESIGNED`, so mono-collapse M1's pool class separates them).
-/// Four cohorts of two, and the narrowest launch bank is four lanes, so **no** effect bank binds
-/// and every EQ is a per-node `ConsoleEffect`. The assertion on `effect_bank_scratch_bytes` is
-/// what makes that a fact rather than an intention.
+/// Four cohorts of two do not fill an eight-lane bank, so **no** effect bank binds and every EQ is
+/// a per-node `ConsoleEffect`. The assertion on `effect_bank_scratch_bytes` is what makes that a
+/// fact rather than an intention.
+///
+/// A four-lane build (AArch64 NEON, #1017) does bank a cohort of two, so there this fixture never
+/// reaches the per-node arm and the test is ignored, by name and with its reason, rather than run
+/// against banked EQs it does not describe. The arm itself is width-independent scalar code, and
+/// the x86-64-v3 legs run it.
 ///
 /// Red mutation: drop `.and(console.control.symmetry())` from `NodeKind::channel_symmetry`'s
 /// `ConsoleEffect` arm -> the parameter half of this test fails and every banked test stays green.
 #[test]
+#[cfg_attr(
+    not(any(target_arch = "x86", target_arch = "x86_64")),
+    ignore = "a four-lane bank takes a cohort of two, so this fixture reaches the per-node arm only \
+              at the eight-lane launch width (#1017)"
+)]
 fn the_scalar_console_effect_arm_maintains_its_own_live_terms() {
     let document = edited(&[4, 5, 6, 7], &[2, 3, 6, 7]);
     let (_session, mut console) = prepare_unbanked(&document);
     assert_eq!(
         console.prepared.report.effect_bank_scratch_bytes, 0,
-        "four cohorts of two cannot fill a bank at any launch width, so every EQ is per-node"
+        "four cohorts of two cannot fill an eight-lane bank, so every EQ is per-node"
     );
     // The starting picture, entirely from preparation: the inverted tracks lost `DESIGNED` at
     // their input stage and the bypassed ones lost `UNBYPASSED` at their EQ.

@@ -9646,14 +9646,17 @@ mod tests {
             chains > cohorts,
             "a misaligned session must realise more than the aligned one chain per cohort"
         );
-        // Four lanes take the redirect here, and the number matters less than the fact that it is
-        // neither 0 nor 64. It is what makes the intended fixture's *zero* a statement about that
-        // fixture rather than about dead code: on a session whose stages line up, every chain ends
-        // in a buffer its consumer already reads in place and no lane needs redirecting; on this
-        // one, where they deliberately do not, the per-lane decision still fires. Both readings
-        // come from the same `scatter_target` clauses over the same lowered program.
+        // Half a bank's lanes take the redirect here -- four at the eight-lane launch width, two on
+        // a four-lane (AArch64 NEON) build (#1017), one per bare track -- and the number matters
+        // less than the fact that it is neither 0 nor 64. It is what makes the intended fixture's
+        // *zero* a statement about that fixture rather than about dead code: on a session whose
+        // stages line up, every chain ends in a buffer its consumer already reads in place and no
+        // lane needs redirecting; on this one, where they deliberately do not, the per-lane
+        // decision still fires. Both readings come from the same `scatter_target` clauses over the
+        // same lowered program.
         assert_eq!(
-            redirects, 4,
+            redirects,
+            lanes / 2,
             "the scatter redirect is decided per lane on the lowered program, so a session whose \
              lane sets never line up still takes the lanes that qualify"
         );
@@ -15095,9 +15098,22 @@ mod tests {
         // right in the plan's own stable edge order -- through `softfma::unfused_multiply_add_via_f64`,
         // an `f64` restatement independent of the `f32` vector body -- for all 100 layouts, before
         // this literal is compared.
+        //
+        // The four-lane plan (AArch64 NEON, #1017) has its own transcript, because
+        // `expected_banks` and the counters are counts at the build's width: `0x8a04_4e52_b88e_4e5f`.
+        // Its render half is not a second pin: all 100 layouts' `pcm_hash` values were captured on
+        // the x86-64-v3 build and on an AArch64 build (qemu-user; the AArch64 CI leg re-checks
+        // the transcript on hardware) and every one of the 100 is identical, so the two
+        // transcripts differ only in the structural fields.
+        let frozen = match Backend::current() {
+            Backend::Simd4 => 0x8a04_4e52_b88e_4e5f,
+            _ => 0xe095_f3ad_a9cc_cf46,
+        };
         assert_eq!(
-            transcript, 0xe095_f3ad_a9cc_cf46,
-            "frozen Issue-037 seeded layout transcript"
+            transcript,
+            frozen,
+            "frozen Issue-037 seeded layout transcript at {:?}",
+            Backend::current()
         );
     }
 

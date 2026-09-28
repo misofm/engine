@@ -11,6 +11,9 @@
 //! * **unguarded control** -- the caller sets FTZ+DAZ and renders the plan directly, bypassing the
 //!   entry. It must *differ*, or the guarded arm proves nothing and the test is vacuous.
 //!
+//! On AArch64 (iOS and Android arm64, issue #1017) the caller's flush is FPCR's `FZ`, which flushes
+//! subnormal inputs and results alike, so "FTZ+DAZ" below reads "FZ" there.
+//!
 //! Red mutation (recorded in `tests/MUTATIONS.md`): delete the `CanonicalFpEnv::enter()` line from
 //! `StartedRenderSession::render_planar`. The guarded arm then equals the unguarded control
 //! arm and differs from the canonical pin.
@@ -129,37 +132,83 @@ fn a_started_session_hands_the_plan_back_when_it_stops() {
     assert_eq!(plan.next_absolute_sample(), 0);
 }
 
+/// The caller words each arm installs, for the two targets with a control word to pin: MXCSR on
+/// `x86_64` and FPCR on AArch64 (issue #1017: iOS and Android arm64 run the FPCR path).
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-mod x86 {
+mod word {
+    use lane::softfma::{MXCSR_DAZ, MXCSR_FTZ};
+
+    /// A caller that flushes: FTZ and DAZ set, round-to-nearest.
+    pub(super) fn flushing(saved: u32) -> u32 {
+        (saved | MXCSR_FTZ | MXCSR_DAZ) & !0x6000
+    }
+
+    /// A caller that does not: FTZ and DAZ clear.
+    pub(super) fn clear(saved: u32) -> u32 {
+        saved & !(MXCSR_FTZ | MXCSR_DAZ)
+    }
+
+    /// A word no engine would choose: flush-to-zero, denormals-are-zero, round-toward-zero, and a
+    /// sticky precision flag that must survive every block.
+    pub(super) fn hostile(saved: u32) -> u32 {
+        (saved & !0x6000) | MXCSR_FTZ | MXCSR_DAZ | 0x6000 | 0x0020
+    }
+}
+
+/// FPCR has no DAZ (`FZ` flushes inputs and results alike) and no sticky status bits (those live in
+/// FPSR), so the AArch64 words are `FZ` and the rounding-mode field.
+#[cfg(target_arch = "aarch64")]
+mod word {
+    use lane::fpenv::FPCR_FZ;
+
+    /// `FPCR.RMode`; `11` is round towards zero.
+    const RMODE: u64 = 0b11 << 22;
+
+    /// A caller that flushes: FZ set, round-to-nearest.
+    pub(super) fn flushing(saved: u64) -> u64 {
+        (saved | FPCR_FZ) & !RMODE
+    }
+
+    /// A caller that does not: FZ clear.
+    pub(super) fn clear(saved: u64) -> u64 {
+        saved & !FPCR_FZ
+    }
+
+    /// A word no engine would choose: flush-to-zero and round-toward-zero.
+    pub(super) fn hostile(saved: u64) -> u64 {
+        saved | FPCR_FZ | RMODE
+    }
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64"))]
+mod pinned {
     use super::{
         BLOCKS, PreparedRenderPlan, QUANTUM, SourceControlSet, StartedRenderSession, prepare,
-        render_guarded, render_unguarded,
+        render_guarded, render_unguarded, word,
     };
-    use lane::softfma::{MXCSR_DAZ, MXCSR_FTZ, read_mxcsr, write_mxcsr};
+    use lane::fpenv::{
+        FpControlWord, fp_control_bits, read_fp_control_word as read_word,
+        write_fp_control_word as write_word,
+    };
 
-    struct Restore(u32);
+    struct Restore(FpControlWord);
 
     impl Drop for Restore {
         fn drop(&mut self) {
-            write_mxcsr(self.0);
+            write_word(self.0);
         }
     }
 
-    /// The MXCSR control bits: DAZ, the six exception masks, the rounding-control field and FTZ.
-    /// The low six bits are sticky *status* flags that any arithmetic sets, so an arm that renders
-    /// without a guard legitimately returns with more of them set than it started with.
-    const MXCSR_CONTROL_BITS: u32 = 0xFFC0;
-
-    fn arm(ftz: bool, guarded: bool) -> (Vec<u32>, u32, u32) {
-        let saved = read_mxcsr();
+    fn arm(ftz: bool, guarded: bool) -> (Vec<u32>, FpControlWord, FpControlWord) {
+        let saved = read_word();
         let _restore = Restore(saved);
         let caller = if ftz {
-            (saved | MXCSR_FTZ | MXCSR_DAZ) & !0x6000
+            word::flushing(saved)
         } else {
-            saved & !(MXCSR_FTZ | MXCSR_DAZ)
+            word::clear(saved)
         };
-        write_mxcsr(caller);
-        assert_eq!(read_mxcsr(), caller, "the arm's caller word must install");
+        write_word(caller);
+        assert_eq!(read_word(), caller, "the arm's caller word must install");
 
         let (plan, mut sources) = prepare();
         let rendered = if guarded {
@@ -174,7 +223,7 @@ mod x86 {
             let mut plan = plan;
             render_unguarded(&mut plan, &mut sources)
         };
-        let observed = read_mxcsr();
+        let observed = read_word();
         drop(sources);
         (rendered, observed, caller)
     }
@@ -185,23 +234,24 @@ mod x86 {
         let (guarded, guarded_word, guarded_caller) = arm(true, true);
         let (unguarded, unguarded_word, unguarded_caller) = arm(true, false);
 
-        // Each arm prepares, submits and drops around its renders, and that work sets sticky status
-        // flags of its own, so this comparison is over the control bits. The bit-exact claim --
-        // status flags included -- is `the_callers_word_is_restored_bit_exactly_after_every_block`,
-        // which reads MXCSR the instant each render returns.
+        // Each arm prepares, submits and drops around its renders, and on x86 that work sets
+        // MXCSR's sticky status flags of its own, so this comparison is over the control bits
+        // (`fp_control_bits`; FPCR is all control). The bit-exact claim -- status flags included --
+        // is `the_callers_word_is_restored_bit_exactly_after_every_block`, which reads the word the
+        // instant each render returns.
         assert_eq!(
-            guarded_word & MXCSR_CONTROL_BITS,
-            guarded_caller & MXCSR_CONTROL_BITS,
+            fp_control_bits(guarded_word),
+            fp_control_bits(guarded_caller),
             "the guarded arm must return the caller's control bits"
         );
         assert_eq!(
-            canonical_word & MXCSR_CONTROL_BITS,
-            canonical_caller & MXCSR_CONTROL_BITS,
+            fp_control_bits(canonical_word),
+            fp_control_bits(canonical_caller),
             "no arm may change a control bit"
         );
         assert_eq!(
-            unguarded_word & MXCSR_CONTROL_BITS,
-            unguarded_caller & MXCSR_CONTROL_BITS,
+            fp_control_bits(unguarded_word),
+            fp_control_bits(unguarded_caller),
             "no arm may change a control bit"
         );
 
@@ -226,18 +276,16 @@ mod x86 {
 
     #[test]
     fn the_callers_word_is_restored_bit_exactly_after_every_block() {
-        let saved = read_mxcsr();
+        let saved = read_word();
         let _restore = Restore(saved);
-        // A word no engine would choose: flush-to-zero, denormals-are-zero, round-toward-zero, and
-        // a sticky precision flag that must survive every block.
-        let caller = (saved & !0x6000) | MXCSR_FTZ | MXCSR_DAZ | 0x6000 | 0x0020;
-        write_mxcsr(caller);
+        let caller = word::hostile(saved);
+        write_word(caller);
 
         let (plan, mut sources) = prepare();
         let mut session = StartedRenderSession::start(plan)
             .unwrap_or_else(|(_plan, rejection)| panic!("attestation: {rejection}"));
         assert_eq!(
-            read_mxcsr(),
+            read_word(),
             caller,
             "the start-of-session attestation must leave the caller's word alone"
         );
@@ -248,7 +296,7 @@ mod x86 {
                 .render_planar(&mut samples, 2, QUANTUM, QUANTUM, (block * QUANTUM) as u64)
                 .expect("render");
             assert_eq!(
-                read_mxcsr(),
+                read_word(),
                 caller,
                 "block {block} did not restore the caller's exact control word"
             );
@@ -259,7 +307,7 @@ mod x86 {
         let rejected = session.render_planar(&mut samples, 2, QUANTUM, QUANTUM, 7);
         assert!(rejected.is_err(), "a discontinuous block must be rejected");
         assert_eq!(
-            read_mxcsr(),
+            read_word(),
             caller,
             "a rejected render must restore the caller's exact control word"
         );
@@ -269,7 +317,7 @@ mod x86 {
         let refused = session.render_planar(&mut short, 2, QUANTUM, QUANTUM, 0);
         assert!(refused.is_err(), "a short output must be refused");
         assert_eq!(
-            read_mxcsr(),
+            read_word(),
             caller,
             "a refused output layout must restore the caller's exact control word"
         );

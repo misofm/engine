@@ -185,9 +185,17 @@ fn digest(masters: &[Vec<u32>]) -> u64 {
 fn a_ring_fed_banked_session_gathers_in_place_with_the_copy_bits() {
     const PLAYED: u64 = 9;
     let mono = mono_bank();
+    // The eight-track bank is one cohort at the eight-lane launch width and two on a four-lane
+    // (AArch64 NEON) build (#1017); the collapse counter counts every cohort's collapsed blocks.
+    let cohorts = 8 / lane::Backend::current().width() as u64;
     for (name, document, claims, collapsed) in [
         ("bank console", BANK, 8_u64, 0),
-        ("mono bank console", mono.as_str(), 8, BLOCKS as u64),
+        (
+            "mono bank console",
+            mono.as_str(),
+            8,
+            cohorts * BLOCKS as u64,
+        ),
         ("nine-track", NINE, 9, 0),
     ] {
         let in_place = render(document, false);

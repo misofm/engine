@@ -2275,16 +2275,26 @@ fn cliff_bank_digest(width: BankWidth, backend: Backend, mono: bool) -> (String,
     let mut faults = 0;
     let values = overflow_configuration();
     let mut banks = bind(&vec![values; CLIFF_TRACKS]);
-    for bank in &mut banks {
-        let mut payload = snapshot_bank(bank.as_ref(), 0);
-        plant_left_ic2(&mut payload, 2, -f32::MAX);
-        let sizes = bank.metadata().program_key.state_sizes;
-        bank.restore_track_state_payload(
-            0,
-            PARAMETRIC_EQ_DESCRIPTOR.state_layout_version,
-            StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes).expect("state input"),
-        )
-        .expect("a finite integrator restores");
+    // Tracks 0 and 4 carry the planted integrator: one of them lands in every four-lane bank, and
+    // a fault zeroes and resets a whole bank plane, so a four-lane (AArch64 NEON) plan faults and
+    // resets exactly the tracks the one eight-lane bank does and the digest does not depend on the
+    // bank width (#1017).
+    for (group, bank) in banks.iter_mut().enumerate() {
+        for lane in 0..lanes {
+            if !(group * lanes + lane).is_multiple_of(4) {
+                continue;
+            }
+            let mut payload = snapshot_bank(bank.as_ref(), lane as u32);
+            plant_left_ic2(&mut payload, 2, -f32::MAX);
+            let sizes = bank.metadata().program_key.state_sizes;
+            bank.restore_track_state_payload(
+                lane as u32,
+                PARAMETRIC_EQ_DESCRIPTOR.state_layout_version,
+                StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes)
+                    .expect("state input"),
+            )
+            .expect("a finite integrator restores");
+        }
     }
     for block in 0..8 {
         for bank in &mut banks {
@@ -2297,6 +2307,13 @@ fn cliff_bank_digest(width: BankWidth, backend: Backend, mono: bool) -> (String,
 
 /// The digests [`a_cut_switched_off_keeps_the_bank_eliding`] pins, recorded on the unmodified base
 /// of issue #979 (an elided section's state had to be exactly `+0.0`).
+///
+/// The two bank rows were re-recorded by #1017, whose only change to the scenario is that the
+/// overflow leg plants track 4 as well as track 0. Before it planted lane 0 of every bank, which is
+/// one track on the eight-lane launch plan and two on a four-lane (AArch64 NEON) plan, so the bank
+/// digest depended on the width; with tracks 0 and 4 planted the x86-64-v3 and AArch64 legs pin the
+/// same digest. No render changed: the eight-lane leg with the old planting still renders the old
+/// rows (`2e0845c6…`, `26a755c1…`), and the scalar row is untouched.
 const CLIFF_DIGESTS: [(&str, &str); 3] = [
     (
         "scalar",
@@ -2304,11 +2321,11 @@ const CLIFF_DIGESTS: [(&str, &str); 3] = [
     ),
     (
         "bank",
-        "2e0845c6619db72d76cfd1d96b6ab89414a923fed6dabbb65dab4ccadcad1214",
+        "9e6886cfbab5d3a7a95fa50323ec074c060560d6f44ba2134a88ebf9ce7f63cd",
     ),
     (
         "bank-mono",
-        "26a755c16fc0efd143ff5ac79115aa835149a0336a6cc94c01cea91947e30cd2",
+        "171406a7198ccc9dc1d1288a9c2eb5519fc3d8d336907b982ab035169d1bdde6",
     ),
 ];
 
@@ -2319,8 +2336,8 @@ const CLIFF_DIGESTS: [(&str, &str); 3] = [
 /// Through the public API only: the HPF on every lane of both channels at block 0, four blocks,
 /// then a target with `enabled = 0`, twelve more blocks of hostile input (subnormals, `+0.0`,
 /// magnitudes `2^-24..2^26`; blocks 7 and 12 carry a `-0.0`), alone and beside a live bell. Then
-/// VERIFY-EQ finding 1: a +24 dB bell ahead of a disabled band restored with `ic2 = -f32::MAX` and a
-/// 10 Hz LPF behind it, on a `9e29` sine. The executed band overflows `v3`, the block is zeroed,
+/// VERIFY-EQ finding 1: a +24 dB bell ahead of a disabled band restored with `ic2 = -f32::MAX` (on
+/// tracks 0 and 4 of the bank legs) and a 10 Hz LPF behind it, on a `9e29` sine. The executed band overflows `v3`, the block is zeroed,
 /// reset and reported; the capped rule keeps refusing that band, so this leg stays on its pin. Every
 /// output word, every report and every lane's state payload after every block, one SHA-256 per leg.
 #[test]

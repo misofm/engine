@@ -2654,7 +2654,15 @@ fn render_diagnostic_egress_reuses_eager_capi_storage_without_allocation() {
     }
 }
 
+/// The totals below are the eight-lane launch plan's exact bytes: a four-lane (AArch64 NEON) plan
+/// banks at a different width and retains different, equally valid, byte counts. So the test is
+/// ignored there, by name and with its reason, until #1060 replaces the exact totals with budgets
+/// that hold at every width (#1017).
 #[test]
+#[cfg_attr(
+    not(any(target_arch = "x86", target_arch = "x86_64")),
+    ignore = "exact eight-lane plan byte totals; #1060 replaces them with budgets (#1017)"
+)]
 fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
     let session_document = scratch_session();
     let prospective_document = session_document.replacen(

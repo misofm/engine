@@ -372,11 +372,17 @@ fn assert_lane_ramp_state(
 }
 
 /// Non-timed gate: verify both-channel lane events restart and complete the fixed 64-sample ramps.
+///
+/// The MQ-2 fixture is eight-lane banks, which bind only on the eight-lane launch build, so a
+/// four-lane (AArch64 NEON) build ignores it by name rather than returning early (#1017); #1027
+/// ports the claim to a width-independent test.
 #[test]
+#[cfg_attr(
+    not(any(target_arch = "x86", target_arch = "x86_64")),
+    ignore = "an eight-lane MQ-2 bench fixture; #1027 ports the claim (#1017)"
+)]
 fn mq2_preflight_payloads_prove_ramps_restart_on_each_block() {
-    if Backend::current() != Backend::Simd8 {
-        return;
-    }
+    assert_eq!(Backend::current(), Backend::Simd8, "an eight-lane build");
     assert_eq!(rate_coefficient_call_counts(), [128, 256, 0]);
     assert_eq!(EXP_CALLS_PER_BANK_PER_PARAMETER, 16);
 

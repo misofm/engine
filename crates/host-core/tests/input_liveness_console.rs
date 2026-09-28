@@ -726,8 +726,15 @@ fn re_equalising_after_a_disengaging_drain_holds_the_never_collapsed_bits() {
     let mut stereo = prepare_with_console(SESSION);
     let _ = render(&mut mono, 2);
     let _ = render(&mut stereo, 2);
+    // One cohort at the eight-lane launch width, two on a four-lane (AArch64 NEON) build (#1017):
+    // every cohort collapses on both blocks.
+    let cohorts = (TRACKS / lane::Backend::current().width()) as u64;
     let engaged = collapses(&mono)[0];
-    assert!(engaged > 0);
+    assert_eq!(
+        engaged,
+        2 * cohorts,
+        "every cohort collapses before the ride"
+    );
 
     for host in [&mut mono, &mut stereo] {
         push(
@@ -763,9 +770,10 @@ fn re_equalising_after_a_disengaging_drain_holds_the_never_collapsed_bits() {
         "the re-equalised episode diverged"
     );
     assert_eq!(peaks(&mono), peaks(&stereo), "per-track meters diverged");
+    // Only the cohorts track 2 is not in keep collapsing, on each of the eight blocks since.
     assert_eq!(
         collapses(&mono)[0],
-        engaged,
+        engaged + (cohorts - 1) * 8,
         "the ridden chain must not have collapsed again: `LIVE` is a latch, and re-equal words \
          alone do not re-arm it"
     );
