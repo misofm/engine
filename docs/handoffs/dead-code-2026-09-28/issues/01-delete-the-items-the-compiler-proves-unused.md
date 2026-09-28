@@ -14,9 +14,17 @@ below only when rustc reported it unused in **both** the non-test and the test b
 integration test, tool or other crate failed to compile after the demotion (which would have meant
 a real user). Items reachable only from other dead items (the "cascade") are marked.
 
-That is 129 items, about 910 lines including their doc comments, in 19 crates. It is small: the
-Rust tree is otherwise very clean at the item level, because `unreachable_pub`, `missing_docs` and
-clippy `-D warnings` already keep private dead code out.
+The audit found 129 such items (about 910 lines including doc comments).
+
+- The table below holds the 104 that this draft deletes: about 720 lines in 18 crates.
+- The other 25 belong to other drafts and are listed under "Out of scope":
+  - `protocol` has 20;
+  - `host-core`'s endpoint files have 4 (`record_count`, the `report` field and method, and
+    `fault`);
+  - `host-mobile` has 1.
+
+It is small because the Rust tree is otherwise very clean at the item level. `unreachable_pub`,
+`missing_docs` and clippy `-D warnings` already keep private dead code out.
 
 | crate | items | items (file:line at `a9414c0c`) |
 |---|---|---|
@@ -29,7 +37,7 @@ clippy `-D warnings` already keep private dead code out.
 | `effect-package` | 4 | `cid.rs:60` `verify_raw_bytes`; `state.rs:847` `as_bytes`, `:884` `latency_samples`, `:887` `tail` |
 | `engine` | 23 | `realtime/buffer.rs:73` `count`, `:78` `total_samples`, `:125` `clear`, `:133`/`:136` fields `storage`/`stride`, `:148` `try_new`, `:173` `plane`, `:271` `plane_range`; `realtime/disjoint.rs:104` `planes`, `:116` `frames`, `:519` `reserved`, `:535` `total_bytes`; `realtime/plan_exchange.rs:436` `copy_response_snapshot`, `:497` `copy_worker_audit_snapshots`, `:504` `dispatch_counters`; `realtime/plan.rs:466`/`:864` `copy_worker_audit_snapshots` and `:490`/`:656` `dispatch_counters` (cascade: auxiliary-worker remnants of the removed dependency-wave renderer); `realtime/spsc.rs:323` `overflow_count`, `:416` `generation`, `:431` `underrun_count`, `:456` `is_empty` |
 | `graph` | 1 | `lib.rs:2905` `quantum_samples` |
-| `host-core` | 5 | `control_preparation.rs:457` `factory`; `render_session.rs:104` `render_contiguous`, `:121` `render`, `:181` `copy_response_snapshot`; `source.rs:228` `is_empty`; `spectrum.rs:2953` `DEFAULT_SMOOTHING_MS` |
+| `host-core` | 6 | `control_preparation.rs:457` `factory`; `render_session.rs:104` `render_contiguous`, `:121` `render`, `:181` `copy_response_snapshot`; `source.rs:228` `is_empty`; `spectrum.rs:2953` `DEFAULT_SMOOTHING_MS` |
 | `host-web` | 4 | `lib.rs:224` `SPECTRUM_WINDOW_BYTES` (cascade), `:226` `SPECTRUM_RESULT_BYTES`, `:232` `SPECTRUM_MAXIMUM_RESULT_BYTES`, `:495` `OBSERVATION_STATUS_BYTES` |
 | `lane` | 2 | `kernels/builtins.rs:35` `all_lanes`, `:130` `nonfinite_lanes_block` |
 | `parametric-eq` | 4 | `lib.rs:239` `reset_ramping_elided_blocks`, `:244` `ramping_elided_block_count`, `:250` `test_only_reset_ramping_elided_blocks`, `:258` `test_only_ramping_elided_blocks` (a `test-support` hook no test calls) |
@@ -91,7 +99,7 @@ Out of scope (each belongs to another draft, so it is not deleted twice):
    `cargo test --locked --release -p console-workload --test gain_pan_profile -- --ignored --exact digests --nocapture`
    is byte-identical on the base commit and on the change (all standing 64-block console digests),
    and `bash scripts/run-wasm-gates.sh` passes.
-4. **Shipped artifact:** build it with `bash scripts/build-web-audioworklet.sh --module-only DIR`
+4. **Shipped artifact:** build it with `bash scripts/build-web-audioworklet.sh --module-only EMPTY_DIR`
    on base and change, **on the same machine**. The digest depends on whether the toolchain's
    `rust-src` component is installed (audit section 9), so do not compare a local build against
    the committed pin.

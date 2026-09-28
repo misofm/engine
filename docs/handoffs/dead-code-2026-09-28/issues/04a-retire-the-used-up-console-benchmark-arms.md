@@ -14,13 +14,19 @@ usable mode is `--step NAME`, which writes `artifacts/steps/NAME`.
   `--issue163-phase0` … `--plumbing-floor-baseline`. It also has a no-argument default that
   writes `artifacts/issue149`.
 - All 49 target folders exist. The audit checked all 48 named arms and `artifacts/issue149`.
-- The runner refuses to overwrite a record (`:344-346`), so every one of those modes can only
+- The runner refuses to overwrite a record (`:351-353`), so every one of those modes can only
   fail.
 - Lines `:1-271` are header comments, mostly each arm's history.
 
 **The preflight is out of sync.** `scripts/operator/preflight-console-benchmark.sh` (177 lines)
-mirrors 43 of the arms, but not `--pure-path`, `--copy-removal` or `--plumbing-floor`. That shows
-the lists are not maintained. Yet they are still edited: #956 re-indexed arms that cannot run.
+mirrors 40 of the 48 arms. It lacks these eight:
+
+- `--copy-removal`, `--copy-removal-baseline`, `--copy-removal-without-920`;
+- `--issue388-lane4-evidence`;
+- `--plumbing-floor`, `--plumbing-floor-baseline`;
+- `--pure-path`, `--pure-path-baseline`.
+
+So the lists are not maintained. Yet they are still edited: #956 re-indexed arms that cannot run.
 
 **Tests do not name arms.** `scripts/test-console-benchmark.sh`, `check-bench-policy.sh`,
 `test-bench-policy.sh` and the console jq validators reference no historical arm by name (audit
@@ -52,8 +58,9 @@ its preflight have 29 more arms of the same kind, but they belong to ruling `R9-
      exit 2 with the new usage.
    - `bash scripts/run-console-benchmark.sh --step base` refuses to overwrite the existing record
      and launches no workload.
-2. **Native and wasm build:** unaffected; no Rust changes. `cargo check --locked --workspace
-   --all-targets` still passes.
+2. **Native and wasm build:** unaffected, because no Rust changes. Both still pass:
+   - `cargo check --locked --workspace --all-targets`;
+   - `RUSTFLAGS='-C target-feature=+simd128' cargo check --locked --target wasm32-unknown-unknown -p host-web`.
 3. **Console digests:** unaffected; no engine or workload source changes. State this in the
    evidence with `git diff --stat` showing only `scripts/` and `docs/`.
 4. **Shipped artifact:** unaffected; no crate in its closure changes.

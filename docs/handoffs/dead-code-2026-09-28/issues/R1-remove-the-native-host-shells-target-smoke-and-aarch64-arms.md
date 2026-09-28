@@ -7,11 +7,11 @@ mobile and native host shells are removed."
 
 ## Context
 
-- **`hosts/host-native` (31 lines).** A binary that attests the CPU and the FP environment, then
+- **`hosts/host-native` (30 lines).** A binary that attests the CPU and the FP environment, then
   prints `target_smoke()`. Its audio callback is "deferred to issue 023".
-- **`hosts/host-mobile` (27 lines).** A library whose only function, `mobile_target_smoke`, has
+- **`hosts/host-mobile` (26 lines).** A library whose only function, `mobile_target_smoke`, has
   zero references.
-- **`crates/target-smoke` (88 lines).** Used only by the two shells, and as a compile subject in
+- **`crates/target-smoke` (87 lines).** Used only by the two shells, and as a compile subject in
   CI:
   - `qualification.yml:450`, `:456`, `:462`: the three x86 lint probes, `-p engine -p target-smoke -p math`;
   - `:768`: the scalar wasm build;
@@ -80,7 +80,7 @@ mobile and native host shells are removed."
 2. **Console digests:** the `gain_pan_profile digests` output is byte-identical on base and
    change. `bash scripts/run-wasm-gates.sh` passes.
 3. **Shipped artifact: byte-identical.** Build base and change with
-   `scripts/build-web-audioworklet.sh --module-only` on one machine. No file in the module's
+   `scripts/build-web-audioworklet.sh --module-only EMPTY_DIR` on one machine. No file in the module's
    closure changes, except `lane` and `graph`, whose AArch64 arms are not compiled for `wasm32`. If
    the hash moves, prove with `wasm-objdump -d` that only panic line numbers changed, and re-pin
    with that reason.
@@ -92,7 +92,8 @@ mobile and native host shells are removed."
      `check-artifact-evidence-leak.sh` and `test-artifact-evidence-leak.sh` pass.
    - The `verdict` table is unchanged: no job is removed, only one step.
 5. **No live claim lost.** The only tests removed are `target-smoke`'s one test and the AArch64
-   `cfg` assertions. No shipped target is affected; list them.
+   `cfg` assertions. No shipped target is affected. List them from the `-- --list` diff (audit
+   section 11).
 
 ## Dependencies
 

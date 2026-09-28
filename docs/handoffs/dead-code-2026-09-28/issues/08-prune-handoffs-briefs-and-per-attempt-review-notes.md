@@ -27,14 +27,15 @@ is needed. These are history that git keeps. One light call is yours: whether `B
 - `.github/ISSUE_SPECS/BRIEFS/`: 77 files, 622 KB of old design briefs. The only reader is one line
   of `scripts/session-policy-historical-allowlist.txt`. `ISSUE_SPECS/README.md` is still titled
   "Engine V2".
-- `docs/issue880-*.md`: 14 notes, 70 KB, for closed #880. They hold 17 of the 23 live-doc links
+- `docs/issue880-*.md`: 12 notes, 61 KB, for closed #880. They hold 19 of the 23 live-doc links
   into `artifacts/`.
-- `docs/audits/`: 44 per-attempt review and evidence notes for #539-#822, 117 KB. Many cover the
+- `docs/audits/`: 44 per-attempt review and evidence notes for #539-#822, 109 KB. Many cover the
   endpoints that `02-…` deletes and the capture that `04c-…` deletes.
+  `docs/audits/issue-triage-2026-09-14.md` is a separate note; it stays unless you say otherwise.
   - `docs/audits/test-usefulness-2026-09-04/` (228 KB) is a separate ledger that is still a live
     proposal. It stays.
-- `docs/research/legacy-v2old/`: 7 files, 32 KB, copied from the legacy engine's research docs for
-  #144. AGENTS.md: "never … inherit an architecture from a legacy engine source".
+- `docs/research/legacy-v2old/`: 13 files (11 numbered notes, `PROVENANCE.md` and `sources.json`),
+  32 KB, copied from the legacy engine's research docs for #144. AGENTS.md: "never … inherit an architecture from a legacy engine source".
 
 **Links that must be re-pointed:** three test notes link into `docs/handoffs/`
 (`crates/graph/tests/MUTATIONS.md`, `crates/graph-compiler/tests/MUTATIONS.md` and

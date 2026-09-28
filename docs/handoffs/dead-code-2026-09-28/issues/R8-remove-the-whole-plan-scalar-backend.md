@@ -39,19 +39,34 @@ and the scalar (`-simd128`) wasm build are removed. Scalar *tails* inside banked
     - the `…WithoutSplitPair…` layout mirrors (`runtime.rs:987-1045`, `:2261-2320`,
       `lib.rs:2458`);
     - `scalar_split_op_layout` and `scalar_split_runtime_layout`;
-    - `scalar_pair_is_in_place` (`:4864`) and `scalar_split_interval_is_clear` (`:4887`);
+    - `scalar_pair_is_in_place` (`runtime.rs:4864`) and `scalar_split_interval_is_clear`
+      (`runtime.rs:4887`);
     - the pair-selection passes (`runtime.rs` around `:5530-5750`) and split-pair completion.
-- **Tests:** 2,000-3,000 lines. `Backend::Scalar` appears at 48 sites in builtins-compiler and 19
-  in graph-compiler, plus host-core's forced-Scalar tests and
-  `true-peak-limiter`/`limiter_linked_session.rs:403`, `:602`.
-- **The catch: the scalar path is the oracle for "banking never moves a bit".** Several tests
-  render the same session at `Scalar` (per node) and at a banked width, and compare bits. Examples:
-  - graph-compiler `lib.rs:11352`, `:11680`;
-  - the limiter linked-pair session tests;
-  - host-core's `forced_scalar_and_native_bank_match_with_state_and_post_fader_witnesses` in
-    `builtin_batch_endpoint.rs`, which `02-…` deletes with its file.
+- **Tests:** 2,000-3,000 lines. `Backend::Scalar` appears at 48 sites in builtins-compiler and 28
+  in graph-compiler (19 in `src/lib.rs`, the rest in `tests/`), plus host-core's forced-Scalar
+  tests.
+- **The catch: the scalar path is the oracle for "banking never moves a bit".** These tests render
+  the same session at `Scalar` (per node) and at a banked width, and compare bits:
+  - `crates/graph-compiler/tests/bank_levels.rs`, the largest. It has
+    `WIDTHS: [Backend; 3] = [Scalar, Simd4, Simd8]` (`:61`) and the helper
+    `assert_binds_and_renders_the_scalar_bits` (`:797-826`, "banking moved a rendered bit"),
+    which nine tests use. It also has `randomized_consoles_compile_bind_and_render_the_scalar_bits`
+    (`:1088`).
+  - graph-compiler `src/lib.rs:11352`, `:11680`, and `scalar_dispatch_compiles_without_banks_on_any_host`
+    (`:2543`), with the Scalar resource baselines (`:3306-3311`, `:3388-3394`).
+  - `crates/host-core/src/limiter_linked_session.rs:403`, `:602` (three tests). These use the
+    `#[cfg(test)]` seam `prepare_host_runtime_with_console_backend` (`prepare.rs:596`).
 
   Replace that oracle **before** deleting the path.
+
+  Not an oracle: `forced_scalar_and_native_bank_match_with_state_and_post_fader_witnesses`
+  (host-core `builtin_batch_endpoint.rs:1497`). It compares each backend's endpoint with its own
+  reference (`:1729-1743`), not Scalar with banked. `02-…` deletes it with no banking claim lost.
+- **Pins that go with the enum variant.** If `Scalar` leaves `Backend`, the "Scalar has no bank
+  width" pins go too, each listed with that reason:
+  - `builtins/tests/stage.rs:633`, `:642`;
+  - `effect-contract/src/lib.rs:2395`, `:2406`;
+  - `compressor/tests/contract.rs:396`.
 - **Scalar wasm in CI.**
   - wasm-guests "Scalar Wasm build (lane's scalar wasm path)" (`qualification.yml:766-769`): 18
     packages built with `-simd128`, 0.6 min.
@@ -98,7 +113,7 @@ and the scalar (`-simd128`) wasm build are removed. Scalar *tails* inside banked
 2. **Console digests:** the `gain_pan_profile digests` output is byte-identical on base and
    change. `bash scripts/run-wasm-gates.sh` passes without its scalar guest leg, and its native and
    `simd128` digests are unchanged.
-3. **Shipped artifact.** Build base and change on one machine.
+3. **Shipped artifact.** Build base and change on one machine, as audit section 11 describes.
    - Code is removed, so functions disappear.
    - The evidence lists every removed or changed function from `wasm-objdump -d`, and shows that
      every function reachable from the render export is unchanged apart from panic line numbers.

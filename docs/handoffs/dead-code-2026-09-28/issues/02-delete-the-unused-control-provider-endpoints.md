@@ -59,17 +59,26 @@ even `capi`.
    (`cargo test --locked --release -p console-workload --test gain_pan_profile -- --ignored --exact digests --nocapture`)
    is byte-identical on base and change.
 3. **Shipped artifact: byte-identical.**
-   - Build base and change with `scripts/build-web-audioworklet.sh --module-only` on one machine.
+   - Build base and change with `scripts/build-web-audioworklet.sh --module-only EMPTY_DIR` on one machine.
    - `host-web` does not compile these modules, and `lib.rs` changes only inside `cfg`'d lines.
    - If the hash moves, stop and explain.
 4. **Tests (no live claim lost).** `cargo test` over the CI feature sets (after `00-…`) passes.
    The `-- --list` diff against base contains only tests defined in the four deleted files. List
    them in the evidence.
    - Their subject is the deleted endpoints themselves.
-   - One of them, `forced_scalar_and_native_bank_match_with_state_and_post_fader_witnesses`, also
-     compares a forced-`Scalar` render with a banked one. Name the surviving test that keeps that
-     "banking moves no bit" claim for the builtin strip (for example the graph-compiler or
-     limiter-session scalar-versus-bank tests), or port it first.
+   - `forced_scalar_and_native_bank_match_with_state_and_post_fader_witnesses`
+     (`builtin_batch_endpoint.rs:1497`) compares each backend's endpoint with its own reference
+     (`:1729-1743`), not Scalar with banked. So no "banking moves no bit" claim is lost. That claim
+     lives in `graph-compiler/tests/bank_levels.rs`.
+   - Some deleted tests also assert allocation-free render and off-render reclamation for the
+     endpoints (`tests/builtin_batch_endpoint.rs:202`, `:374`; `src/builtin_batch_endpoint.rs:2138`;
+     `tests/scalar_point_endpoint.rs:1469`, `:2736`). Name the surviving equivalents for the live
+     paths in the evidence:
+     - host-core `tests/spectrum.rs:439`, `:649` and `tests/observation_demand.rs:2007`;
+     - `scripts/check-web-audioworklet.sh:349-449`;
+     - host-web `src/tests.rs:3537`.
+   - After this change, the `#[cfg(test)]` seam `prepare_host_runtime_with_console_backend`
+     (`prepare.rs:596`) keeps one user (`limiter_linked_session.rs:333`). Keep it.
 5. **CI routing.** No workflow references these files. `check-ci-path-routing.py` and
    `test-ci-path-routing.py` pass. `check-host-core-policy.sh` and its mutation test pass.
 

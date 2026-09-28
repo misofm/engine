@@ -14,8 +14,8 @@ R6a alone removes the package, CID and C-header surface. R6a and R6b together re
 
 **What exists.**
 
-- `crates/effect-package`: 13,389 lines (5,354 production, 2,961 in-source tests, 5,088 in
-  `tests/`). It contains `cid.rs`, `package.rs`, `state.rs`, `wire.rs`, `ffi.rs` (707 lines,
+- `crates/effect-package`: about 13,400 lines (about 5,350 production, 2,960 in-source tests and
+  5,090 in `tests/`). It contains `cid.rs`, `package.rs`, `state.rs`, `wire.rs`, `ffi.rs` (707 lines,
   `c-abi` feature) and `diagnostic.rs`. It also ships `include/miso_engine_effect_descriptor_v1.h`
   (392 lines), a 917-line C smoke test in `tests/c/`, a `MUTATIONS.md`, and the `cdylib` crate
   type.
@@ -94,8 +94,13 @@ in `effect-contract`, `tools/parameter-metadata`, and control and observation.
      above.
    - Delete the state scripts, the interchange qualification, the `effect_state` fuzz target, and
      the state and interchange fixtures.
-   - `observation_identity.rs` (131 lines) may guard a live observation-identity claim: port what
-     it needs onto `effect-contract` descriptors instead of deleting it.
+   - `observation_identity.rs` (131 lines) has three tests. Port the two with live claims onto
+     `effect-contract` descriptors:
+     - test 2 (`:85`): the four dynamics effects each declare one "Gain Reduction" tap in dB,
+       Resident;
+     - test 3 (`:119`): `state_layout_version == 1`.
+
+     Test 1 (`:46`) accounts for wire bytes, so it goes with the wire.
 3. **CI and policies.**
    - `check-release-shape.py` drops `effect-package`.
    - Remove the interchange rows from `check-cross-targets.sh`.
@@ -108,9 +113,13 @@ in `effect-contract`, `tools/parameter-metadata`, and control and observation.
 4. **Optional: remove the session `cid` identity.** It is a grammar change, so it needs its own
    explicit approval.
 5. **Later:** remove the per-effect `snapshot_state_payload`/`restore_state_payload` hooks and the
-   bank variants in `effect-contract` and the 8 effects, and the dual-mono witness's `RESTORED`
-   term. Each is left with only test callers. Put this in a separate issue with its own digest
-   evidence.
+   bank variants in `effect-contract` and the 8 effects. Each is left with only test callers. Put
+   this in a separate issue with its own digest evidence.
+   - `ChannelSymmetryWitness::RESTORED` (`effect-contract/src/symmetry.rs:172`) is set only in
+     the deleted state span (`prepare.rs:292`, `:832`), but `rack-compiler/src/lib.rs:925` still
+     reads it.
+   - After R6b that pool-class row can never be reached. Say so in this issue, and remove it in
+     the follow-up with its own digest evidence.
 6. **Docs.** Update the five `EFFECT_*_V1.md` docs, mentions in `EFFECT_CONTRACT_V1.md`,
    `SESSION_SCHEMA_V1.md` and `IMPLEMENTATION_PLAN.md`, and AGENTS.md's "Third-party effects are
    designed now…" paragraph and scope line.
@@ -125,7 +134,7 @@ in `effect-contract`, `tools/parameter-metadata`, and control and observation.
    - `cargo check --locked --manifest-path fuzz/Cargo.toml --bins` passes.
 2. **Console digests:** the `gain_pan_profile digests` output is byte-identical on base and
    change. `bash scripts/run-wasm-gates.sh` passes.
-3. **Shipped artifact.** Build base and change on one machine. Show that the function set, body
+3. **Shipped artifact.** Build base and change on one machine, as audit section 11 describes. Show that the function set, body
    sizes, code bytes and data size are identical. That is what the audit's scratch build found:
    only symbol order and string placement move. Then re-pin with that reason.
 4. **CI routing.**

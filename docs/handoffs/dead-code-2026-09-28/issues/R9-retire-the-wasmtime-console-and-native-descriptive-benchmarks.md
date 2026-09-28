@@ -79,7 +79,8 @@ benchmarks are {kept | retired}."
      passes.
 2. **Console digests:** the `gain_pan_profile digests` output is byte-identical on base and
    change. `console-workload`, which the native benchmark and `bench` still use, is unchanged.
-3. **Shipped artifact: unchanged.** No crate in its closure changes.
+3. **Shipped artifact: unchanged.** No crate in its closure changes. Show
+   `git diff --stat -- crates hosts`, which should be empty (audit section 11).
 4. **CI routing.**
    - `check-release-shape.py` and its `--self-test` pass, as do `check-bench-policy.sh`,
      `test-bench-policy.sh`, `check-ci-path-routing.py` and `test-ci-path-routing.py`.
@@ -87,7 +88,8 @@ benchmarks are {kept | retired}."
    - The `verdict` table is unchanged.
 5. **No live claim lost.**
    - `check-effect-contract.sh`'s conformance record still runs in audit-native.
-   - Every deleted test belongs to a deleted tool or runner; list them.
+   - Every deleted test belongs to a deleted tool or runner. List them from the `-- --list` diff
+     (audit section 11).
 
 ## Dependencies
 

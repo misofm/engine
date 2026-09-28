@@ -57,7 +57,9 @@ Where CI reaches them:
    - `cargo test --locked --release -p bench` passes.
 2. **Console digests:** the `gain_pan_profile digests` output is byte-identical on base and
    change.
-3. **Shipped artifact: unchanged.** No crate in its closure changes.
+3. **Shipped artifact: unchanged.** No crate in its closure changes. Show
+   `git diff --stat -- crates hosts`, which should be empty; `tools/bench` is outside the closure
+   (audit section 11).
 4. **CI routing.**
    - `check-effect-interchange-qualification.sh`, `test-effect-interchange-policy.sh`,
      `check-cross-targets.sh`, `check-env-vocabulary.sh` and `test-env-vocabulary.sh` pass.
@@ -67,10 +69,14 @@ Where CI reaches them:
    - `exact_four_rate_migration_envelope_without_timing`;
    - `digest_hex_matches_known_abc_digest`.
 
-   Either port them into `effect-compiler`'s migration tests, or show that
-   `crates/effect-compiler/tests/migration.rs` or `migration_terminal.rs` already covers the
-   four-rate envelope. The
-   `-- --list` diff contains nothing else.
+   `exact_four_rate_migration_envelope_without_timing` is the only test that asserts the four-rate
+   migration envelope digest:
+   - `migration_terminal.rs:2155` covers four rates, but it is `#[ignore]` and only prints;
+   - the non-ignored smoke test at `:2148` uses 48 kHz only.
+
+   So either port it into `crates/effect-compiler/tests/migration.rs`, or, if `R6-…` (R6b) is
+   ruled first, record it as lost with the removed feature. The digest-helper test goes with the
+   helper. The `-- --list` diff contains nothing else (audit section 11).
 
 ## Dependencies
 

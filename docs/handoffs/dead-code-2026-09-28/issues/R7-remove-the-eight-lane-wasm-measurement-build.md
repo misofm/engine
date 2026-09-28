@@ -58,13 +58,14 @@ its arms are removed. A future re-measurement re-adds a cfg in its own issue."
      now warns about an unexpected cfg and still selects `Simd4`. Record the output.
 2. **Console digests:** the `gain_pan_profile digests` output is byte-identical on base and
    change. `bash scripts/run-wasm-gates.sh` passes.
-3. **Shipped artifact.** Build base and change on one machine.
+3. **Shipped artifact.** Build base and change on one machine, as audit section 11 describes.
    - `lane/src/backend.rs` loses lines, so panic line numbers in `lane` may shift. Prove with
      `wasm-objdump -d` that nothing else changes, and re-pin with that reason.
    - Or keep the line count by leaving a one-line comment where the arm was.
 4. **CI routing.** `bash scripts/test-wasm-console-benchmark.sh` passes, if the tool still exists.
    `check-ci-path-routing.py` and `test-ci-path-routing.py` pass. The `verdict` table is unchanged.
-5. **No live claim lost.** The only tests removed are the W8-measurement ones; list them.
+5. **No live claim lost.** The only tests removed are the W8-measurement ones. List them from the
+   `-- --list` diff (audit section 11).
    `wasm-gate-corpus`'s three-width determinism digests stay.
 
 ## Dependencies

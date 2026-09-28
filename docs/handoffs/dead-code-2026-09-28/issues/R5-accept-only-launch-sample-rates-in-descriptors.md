@@ -11,9 +11,9 @@ extended research rates (176.4, 192, 352.8 and 384 kHz) are removed from every a
   and capi all compile through `session`. No native effect declares an extended quality row: see,
   for example, `crates/delay/src/lib.rs:265-270`.
 - **They survive only as descriptor metadata:**
-  - `crates/engine/src/lib.rs:55-84`: `EXTENDED_COMPATIBILITY_SAMPLE_RATES`, the predicate
-    `is_extended_compatibility_sample_rate`, and the unit test
-    `sample_rate_tiers_are_exact_sorted_disjoint_and_classified`;
+  - `crates/engine/src/lib.rs:55-84`: `EXTENDED_COMPATIBILITY_SAMPLE_RATES` and the predicate
+    `is_extended_compatibility_sample_rate`. The unit test
+    `sample_rate_tiers_are_exact_sorted_disjoint_and_classified` is at `:111`.
   - `crates/effect-contract/src/lib.rs:44` and `:761`: `validate_descriptor` accepts a quality row
     at a launch **or** extended rate, while still requiring all four launch rates (`:781-788`);
   - `crates/effect-package/src/wire.rs:13-14`: the descriptor-wire decoder uses the same predicate.
@@ -47,14 +47,15 @@ extended research rates (176.4, 192, 352.8 and 384 kHz) are removed from every a
 2. **Console digests:** the `gain_pan_profile digests` output is byte-identical on base and
    change. `bash scripts/run-wasm-gates.sh` passes. Rates are not part of any console row's
    render.
-3. **Shipped artifact.** Build base and change on one machine. The expected change is the removed
+3. **Shipped artifact.** Build base and change on one machine, as audit section 11 describes. The expected change is the removed
    extended-rate branch of `validate_descriptor`. Explain every changed function from
    `wasm-objdump -d`, and re-pin.
 4. **CI routing.** `cargo run --locked -p conformance --example conformance_fixtures -- --check`
    passes with the updated corpus. `check-ci-path-routing.py` and `test-ci-path-routing.py` pass.
    `check-effect-descriptor-v1.sh` passes, if it still exists.
 5. **No live claim lost.** Launch-rate descriptor acceptance and session rate refusal keep their
-   tests. The only tests removed or flipped are the extended-rate ones; list them.
+   tests. The only tests removed or flipped are the extended-rate ones. List them from the
+   `-- --list` diff and the test diff (audit section 11).
 
 ## Dependencies
 

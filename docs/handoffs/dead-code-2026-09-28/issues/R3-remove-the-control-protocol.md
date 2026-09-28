@@ -7,7 +7,7 @@ transport-neutral binary protocol, the local sidecar and the WebSocket transport
 
 ## Context
 
-- **`crates/protocol`: 29,975 lines.** 18,049 production, 11,094 in-source tests and 832 in
+- **`crates/protocol`: 29,957 lines.** 18,049 production, 11,094 in-source tests and 829 in
   `tests/`; 175 tests, about 10 s. It contains BTLV, queues, the controller, delivery and the
   session and message wire formats.
 - **Around it:**
@@ -31,9 +31,10 @@ transport-neutral binary protocol, the local sidecar and the WebSocket transport
     them before deleting.
 - **Browser dependency: none.**
   - `protocol` is not in host-web's wasm closure.
-  - host-web's command ABI has its own vocabularies (`hosts/host-web/src/lib.rs:1415-1500`).
+  - host-web's command ABI has its own vocabularies (`hosts/host-web/src/lib.rs:1391-1491`).
   - The "acked-batch" admission AGENTS.md cites (#139/#140) is host-web's `admit_commands`
-    (`:1497-1523`), not the protocol's.
+    (`lib.rs:6246`, with `admit_commands_staged` at `:6287`; the `WebCommandReport` it fills is at
+    `:1497-1523`), not the protocol's.
   - No constant, golden file or wire format is shared.
 - **Sidecar and WebSocket:** no code. `Cargo.lock` has no WebSocket or socket crate. The only
   WebSocket mentions are scans that check the worklet and stem store do *not* use it
@@ -85,7 +86,7 @@ transport-neutral binary protocol, the local sidecar and the WebSocket transport
    - `cargo check --locked --manifest-path fuzz/Cargo.toml --bins` passes.
 2. **Console digests:** the `gain_pan_profile digests` output is byte-identical on base and
    change. `bash scripts/run-wasm-gates.sh` passes.
-3. **Shipped artifact.** Build base and change on one machine. It is byte-identical, unless step 4
+3. **Shipped artifact.** Build base and change on one machine, as audit section 11 describes. It is byte-identical, unless step 4
    touches `session` or `engine` lines in the module's closure; then prove with `wasm-objdump -d`
    that only panic line numbers moved, and re-pin with that reason.
 4. **CI routing.**
@@ -102,7 +103,7 @@ transport-neutral binary protocol, the local sidecar and the WebSocket transport
 
 ## Dependencies
 
-The owner ruling, then `R2-…` (capi carries protocol frames: 170 `protocol::` uses).
+The owner ruling, then `R2-…` (capi carries protocol frames: 179 `protocol::` uses).
 
 ## Standing rules for the implementer
 

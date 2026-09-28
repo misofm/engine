@@ -8,14 +8,14 @@ issue that re-earns them." If the ruling keeps native embedding, close this draf
 
 ## Context
 
-- **`crates/capi`: 9,812 Rust lines.** That is 3,645 production, 3,346 in-source tests and 2,821
+- **`crates/capi`: 9,802 Rust lines.** That is 3,645 production, 3,346 in-source tests and 2,820
   in `tests/resource_lifecycle.rs`. It also has `include/miso_engine_v1.h` (255 lines) and C/C++
   smoke tests in `tests/c/` (145 lines).
   - Its dependencies are `host-core[control-provider]`, `protocol`, `source`, `session`, `engine`
     and `lane`.
   - It is linked by `tools/audit` (the `capi` subject, `src/capi.rs`, 342 lines) and
     `tools/native-pcm-runner`.
-- **`tools/native-pcm-runner`: 2,692 lines.** It decodes WAV/RF64 and renders through the C ABI
+- **`tools/native-pcm-runner`: 2,689 lines.** It decodes WAV/RF64 and renders through the C ABI
   (`docs/NATIVE_PCM_REFERENCE_RUNNER_V1.md`). `fixtures/native-pcm-runner/v1` holds 12 files and
   127,545 bytes, including 5 WAVs.
 - **Code in product crates that exists only for capi** (SCIP cross-reference; re-prove by
@@ -95,7 +95,7 @@ issue that re-earns them." If the ruling keeps native embedding, close this draf
      passes.
 2. **Console digests:** the `gain_pan_profile digests` output is byte-identical on base and
    change. `bash scripts/run-wasm-gates.sh` passes.
-3. **Shipped artifact.** Build base and change on one machine.
+3. **Shipped artifact.** Build base and change on one machine, as audit section 11 describes.
    - Step 4 removes `cfg(feature = "control-provider")` lines from `host-core` files that are in
      the module's closure (`prepare.rs:407`, `:1035`, `:1653`; `render_session.rs:235`, `:245`).
    - Those lines are not compiled for the browser, but deleting them shifts panic line numbers.

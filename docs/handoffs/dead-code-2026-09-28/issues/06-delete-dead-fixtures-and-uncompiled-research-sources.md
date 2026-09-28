@@ -41,9 +41,10 @@ A8. No ruling is needed. Nothing reads or compiles any of these files. Git keeps
 
 ## Objective gates
 
-1. **Build:** `cargo check --locked --workspace --all-targets --all-features` passes, and
-   `cargo check --locked --manifest-path fuzz/Cargo.toml --bins` passes. Neither references the
-   deleted files.
+1. **Build.** All three pass, and none of them references the deleted files:
+   - `cargo check --locked --workspace --all-targets --all-features`;
+   - `RUSTFLAGS='-C target-feature=+simd128' cargo check --locked --target wasm32-unknown-unknown -p host-web`;
+   - `cargo check --locked --manifest-path fuzz/Cargo.toml --bins`.
 2. **Research and docs gates:** `bash scripts/check-dsp-research.sh`,
    `bash scripts/test-dsp-research.sh` and `bash scripts/check-builtins-listening.sh` pass.
 3. **Console digests and artifact:** unaffected. The only crate edit is a comment in

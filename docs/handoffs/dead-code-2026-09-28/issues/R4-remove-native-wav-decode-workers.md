@@ -76,7 +76,7 @@ worker threads." Part B depends on the C-ABI ruling (`R2-…`).
 2. **Console digests:** the `gain_pan_profile digests` output is byte-identical on base and
    change. No console row uses native decode.
 3. **Shipped artifact.** The removed code is `cfg`'d out of `wasm32`, but deleting lines in
-   `source/src/lib.rs` shifts panic line numbers. Build base and change on one machine, prove with
+   `source/src/lib.rs` shifts panic line numbers. Build base and change on one machine (audit section 11), prove with
    `wasm-objdump -d` that only panic line numbers changed, and re-pin with that reason.
 4. **CI routing.**
    - `check-ci-path-routing.py` and `test-ci-path-routing.py` pass.

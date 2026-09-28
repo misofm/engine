@@ -6,7 +6,7 @@ you can accept or change: step 1 below.
 
 ## Context
 
-- **Size.** `artifacts/` holds 276 folders: 62.4 MB and 10,685 files. That is 84% of the
+- **Size.** `artifacts/` holds 275 folders and one loose file: 62.4 MB and 10,685 files. That is 84% of the
   repository's tracked files and 61% of its bytes.
   - The largest folders are `issue537-candidate-lowering` (11.2 MB), `steps` (4.0 MB),
     `issue539-candidate-lowering` (3.6 MB) and `issue534-production-wasm` (2.4 MB).
@@ -25,7 +25,7 @@ you can accept or change: step 1 below.
     `compressor-round1{,-baseline}`, `issue149{,-phase2,-phase3}`,
     `issue163-phase{0,1,2,4}`, `issue163-phase2-wasm-baseline`, `issue175`,
     `issue183{,-post-round2}`, `issue184`, `issue-loop-eq-r1`, `round1-composed`, `strip4`.
-  - 23 links in 9 live docs. 17 of them are in `docs/issue880-*.md`, which `08-…` removes.
+  - 23 links in 9 live docs. 19 of them are in `docs/issue880-*.md`, which `08-…` removes.
   - `docs/C_ABI_V1_QUALIFICATION.md` has 2, which go with `R2-…`.
 - **CI routing.** Any change under `artifacts/` routes CI to `full`, because
   `scripts/ci-path-router.py:17` treats only `docs/` and `.github/ISSUE_SPECS/` as evidence.
@@ -40,7 +40,10 @@ you can accept or change: step 1 below.
 
    Delete everything else. If you prefer, re-point the ruling links to commit permalinks
    (`https://github.com/misofm/engine/tree/a9414c0c/artifacts/…`) and delete those folders too.
-2. **Delete the other 258 folders and the loose file** `artifacts/issue470-wasm-resource-derivation.md`.
+2. **Delete the other 257 folders and the loose file** `artifacts/issue470-wasm-resource-derivation.md`.
+   - Some names look alike but are unrelated, so leave them alone: the `/artifacts/…` URL routes
+     in host-web's qualification JavaScript (a served build-output directory), and
+     `check-workspace-policy.sh:247`, which scans the tracked-path list for `artifacts/*.ll`.
 3. **Re-point or drop** every remaining link from a live doc (outside `docs/handoffs/`, and not
    removed by `08-…`) that names a deleted folder. Use a commit permalink, because the target no
    longer exists in the tree.
@@ -57,7 +60,7 @@ you can accept or change: step 1 below.
 2. **Console digests:** the `gain_pan_profile digests` output is byte-identical on base and
    change.
 3. **Shipped artifact:** build base and change on one machine with
-   `scripts/build-web-audioworklet.sh --module-only`.
+   `scripts/build-web-audioworklet.sh --module-only EMPTY_DIR`.
    - The comment edits in `crates/lane` can shift panic line numbers. Prove with a
      function-by-function `wasm-objdump -d` comparison that nothing else changes, and re-pin with
      that reason.

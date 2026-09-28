@@ -72,7 +72,7 @@ Live-claim tests in the never-run set include:
    - If step 1 changes product code, `bash scripts/run-wasm-gates.sh` passes.
 4. **Shipped artifact.** Unchanged if step 1 only edits a test.
    - If step 1 fixes product code, build base and change on the same machine with
-     `scripts/build-web-audioworklet.sh --module-only`.
+     `scripts/build-web-audioworklet.sh --module-only EMPTY_DIR`.
    - Explain every function whose disassembly differs, and re-pin with that reason.
 5. **CI routing.** `python3 -B scripts/check-ci-path-routing.py` and
    `python3 -B scripts/test-ci-path-routing.py` pass. The job names and the `verdict` expectation

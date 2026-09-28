@@ -6,8 +6,8 @@ created or edited. The issue drafts are in `issues/` beside this file.
 
 ## 1. The verdict, in plain words
 
-**The Rust code itself is clean. Very little of it is dead in the strict sense.** Across 411,103
-lines of Rust, the compiler proves only about 130 items (about 900 lines) unused by anything. One
+**The Rust code itself is clean. Very little of it is dead in the strict sense.** Across about
+411,000 lines of Rust, the compiler proves only 129 items (about 900 lines) unused by anything. One
 more block of about 8,200 lines runs only from its own tests.
 
 **Most of the weight is elsewhere, in four places:**
@@ -70,7 +70,9 @@ were deleted afterwards.
   without it proved it. `cargo udeps` found only `engine`'s `loom` dev-dependency, a false positive:
   it is used under `cfg(loom)` in CI.
 - **Scripts.** A reachability graph was built from workflow `run:` lines through every script that
-  names another (comment lines ignored).
+  names another (comment lines ignored). The first pass matched file names only, so it missed jq's
+  extension-less `include "name"`. The verifier caught this, and the graph was re-run with jq
+  includes counted.
 - **Tests never run.** `cargo tree -e features` with CI's exact `test-debug-a` feature list showed
   which `test-support` features CI turns on. Then
   `cargo test -p host-web -p host-core -p effect-compiler -p parametric-eq --features <their test-support>`
@@ -85,15 +87,15 @@ were deleted afterwards.
 
 | # | what | size | evidence | removal risk | draft |
 |---|---|---|---|---|---|
-| A1 | 129 items the compiler proves unused, in 19 crates (list in draft 01): builtins (8), dsp-reference (23), engine (23), effect-contract (7), host-core (5), host-web (4 constants), rack (5), source (5), others | about 910 lines | demotion + two-build rustc proof (section 2) | very low; artifact hash may move by panic line numbers only | 01 |
+| A1 | 129 items the compiler proves unused. Draft 01 deletes 104 of them in 18 crates: builtins (8), dsp-reference (23), engine (23), effect-contract (7), host-core (6), host-web (4 constants), rack (5), source (5), and others. The other 25 are in protocol, the endpoint files and host-mobile, and go with drafts 02, R1 and R3 | about 910 lines (about 720 in draft 01) | demotion + two-build rustc proof (section 2) | very low; artifact hash may move by panic line numbers only | 01 |
 | A2 | `rack-compiler` depends on `engine` but never names it | 1 line | `cargo machete`; builds without it | none | 01 |
-| A3 | 47 `#[allow(dead_code)]` attributes that suppress nothing (17 in `host-web/src/observation_ingress.rs`, 16 in `host-web/src/lib.rs`, others) | 47 lines | stripping all 59 non-test ones left 12 warnings, so these 47 hide nothing. The 12 that remain are layout mirrors or test-only members | very low | 01 |
+| A3 | 47 `#[allow(dead_code)]` attributes that suppress nothing (17 in `host-web/src/observation_ingress.rs`, 16 of the 17 in `host-web/src/lib.rs`, others) | 47 lines | stripping every non-test one (59 by the research pass's count, which excludes test modules and `tests/`) left 12 warnings, so these 47 hide nothing. The 12 that remain are layout mirrors or test-only members | very low | 01 |
 | A4 | `host-core` `builtin_batch_endpoint.rs` and `scalar_point_endpoint.rs` with their tests: native control endpoints behind `control-provider`, called by nothing, not even the C ABI | **8,244 lines** (3,589 in the two source files, including their unit tests; 4,655 in their integration tests) | rg and SCIP: no caller outside the two files and their tests; the full workspace builds without them | low. They were steps toward open #140 (protocol automation delivery), so tell #140 | 02 |
 | A5 | Leftovers of the removed multicore renderer: the auxiliary-worker hand-over (`take_handover`, `accept_handover`, `ExecutorHandover`, `copy_worker_audit_snapshots`, `dispatch_counters`) in `engine/src/realtime/plan.rs` and `plan_exchange.rs` | about 190 lines | only engine's own test executor implements hand-over; `graph` does not; nothing calls the wrappers | low | 03 |
-| A6 | The unused external render input: `RenderIo::input`, `RenderEnvelope::input_channels`, `RenderError::InputShape`, and the `input` argument of `PreparedPlanExecutor::render` | about 110 call sites, mostly tests | the only executor (`graph/src/lib.rs:2678`) ignores `_input`; every host passes `input: None`; the C ABI render entry has no input planes | low; compiled into the artifact (one shape check per render), so the pin moves | 03 |
+| A6 | The unused external render input: `RenderIo::input`, `RenderEnvelope::input_channels`, `RenderError::InputShape`, and the `input` argument of `PreparedPlanExecutor::render` | about 130 call sites (95 `input: None`, 38 `input_channels: None`), mostly tests | the only executor (`graph/src/lib.rs:2678`) ignores `_input`; every host passes `input: None`; the C ABI render entry has no input planes | low; compiled into the artifact (one shape check per render), so the pin moves | 03 |
 | A7 | `fixtures/capi-qualification/v1`: a stale ledger naming two scripts that no longer exist | 13 files, 30 KB | nothing reads it | none | 06 |
 | A8 | `dsp-research/archive/issue-0{31,42,44,45}/*.rs`: research sources that no crate compiles | 5,134 lines | not in any workspace or fuzz manifest | none (git keeps them) | 06 |
-| A9 | Two "thin wrapper" scripts kept "so any caller keeps working", with no callers: `check-parametric-eq-targets.sh`, and `check-builtins-targets.sh` (whose only caller goes in B) | 2 files | reachability graph | none | 04b, 04c |
+| A9 | Two "thin wrapper" scripts kept "so any caller keeps working", with no callers: `check-parametric-eq-targets.sh` and `check-builtins-targets.sh` (the latter is mentioned only in comments and a scratch stub inside a test going in B3) | 2 files | reachability graph | none | 04b, 04c |
 
 **Also found (hygiene, not removal):** 86 `test_only_*` functions and several counters
 (`bank_route_folds`, `bank_scatter_redirects`, `force_mono_collapse_off`) exist only for tests and
@@ -107,9 +109,9 @@ overwrite its record. So each issue grew its own runner, preflight, validator, f
 test. Once the record existed, the runner could never run again, but CI kept testing it.
 
 `scripts/operator/README.md` states: "Every script under `scripts/` is reachable from a GitHub
-workflow." That is no longer true: 19 files under `scripts/`, outside `operator/`, are reached by
-no workflow. Eighteen are the dead one-shots below. The nineteenth is the live
-`run-console-benchmark.sh`, which a person runs; by the README's own rule it belongs in
+workflow." That is no longer true: 18 files under `scripts/`, outside `operator/`, are reached by
+no workflow (jq `include`s counted). Seventeen are the dead one-shots below. The eighteenth is the
+live `run-console-benchmark.sh`, which a person runs; by the README's own rule it belongs in
 `scripts/operator/`.
 
 | # | what | size | why it is dead | CI it costs now | draft |
@@ -123,7 +125,7 @@ no workflow. Eighteen are the dead one-shots below. The nineteenth is the live
 | B7 | #650 allocation-record validator (`check-prepared-effect-allocation-records.py`) and the `audit prepared-effect-allocations` subject | 890 lines (645 Rust) | the validator is reached by nothing; the subject is one-shot | audit unit tests | 04c |
 | B8 | #600-#606 "input symmetry" capture: three scripts, validator, `bench` `input_symmetry` and `input_symmetry_capture`, `artifacts/issue-60{2,3,6}-*`. Despite the name this is the input-trim capture, **not** dual-mono content detection | 1,720 lines (823 Rust) | no workflow reaches them | bench compile | 04c |
 | B9 | #163 phase-0 wasm kernel timing: `operator/run-wasm-kernel-timing.sh`, validator, test; `wasm-gates` `--native-timing`/`--wasm-timing` modes | 373 script lines + timing modes | its folder exists; the operator script cannot run (section 5) | lint `test-wasm-kernel-timing.sh` | 04c |
-| B10 | Unreached or broken misc: `protocol-benchmark-record-validator.jq` (referenced by nothing), `operator/probe-opfs-move-v1.cjs`, `operator/seal-web-audioworklet-browser-correctness.sh` (superseded by the CI browser job) | 352 lines | reachability graph; section 5 | none | 04c |
+| B10 | Unreached or broken misc: `operator/probe-opfs-move-v1.cjs`, `operator/seal-web-audioworklet-browser-correctness.sh` (superseded by the CI browser job). (`protocol-benchmark-record-validator.jq` looked unreferenced but is pulled in by a jq `include` and runs in CI; it stays until R3) | about 290 lines | reachability graph; section 5 | none | 04c |
 | B11 | #081/#108 effect-interchange **benchmark**: 7 benchmark scripts and validators, and the `bench` `effect_interchange` arm | 2,819 lines (1,092 Rust) | issues closed; benchmarks no host path. The interchange *qualification* scripts (1,107 lines) go with ruling R6 | part of lint's 20 s | 05 |
 
 B1 to B11 total about 9,000 Rust lines and about 10,700 script, fixture and validator lines.
@@ -176,12 +178,12 @@ batch these deletions.
 
 | what | size | read at test/CI time? | before deleting | ruling? | draft |
 |---|---|---|---|---|---|
-| `artifacts/`, 276 folders | 62.4 MB, 10,685 files (84% of tracked files) | **nothing reads any of it.** 39 folders are *named* by the used-up runner arms (B1-B3, B8, B9); five doc comments mention three folders | re-point 28 links in 12 rulings and 23 links in 9 live docs, or keep the 17 ruling-cited folders (2.93 MB) | no (history) | 07 |
+| `artifacts/`, 275 folders and one loose file | 62.4 MB, 10,685 files (84% of tracked files) | **nothing reads any of it.** 39 folders are *named* by the used-up runner arms (B1-B3, B8, B9); five doc comments mention three folders | re-point 28 links in 12 rulings and 23 links in 9 live docs, or keep the 17 ruling-cited folders (2.93 MB) | no (history) | 07 |
 | `artifacts/steps/` | 3.98 MB, 68 files | written by the live `--step` arms; old records are history | keep the folder; decide how long step records live | light | 07 |
 | `.github/ISSUE_SPECS/`, closed | 509 specs, 10.19 MB | spec 068 is read by the B3 runner and its nightly test; 5 allowlist lines | amend the AGENTS.md rule that compares this folder with `gh issue list --state all` | **yes (policy)** | R10 |
 | `.github/ISSUE_SPECS/BRIEFS/` | 77 files, 622 KB | one allowlist line | none | light | 08 |
-| `docs/handoffs/` (other than the unfiled `silence-2026-09-27` drafts and the builtins-less `SCOPE.md` cited by #956-#964) | about 2.5 MB, mostly `.patch` and raw timing files | 3 `MUTATIONS.md` links | re-point 3 links | no | 08 |
-| `docs/issue880-*.md` (14 notes, 70 KB); `docs/audits/5xx-8xx-*.md` (44 per-attempt reviews and evidence notes, 117 KB, many for the endpoints of A4 and the capture of B8); `docs/research/legacy-v2old/` (legacy-engine research copies, 32 KB) | about 0.2 MB | 17 of the 23 live-doc links into `artifacts/` are in the issue880 notes | none | no | 08 |
+| `docs/handoffs/` (other than the unfiled `silence-2026-09-27` drafts and the builtins-less `SCOPE.md` cited by #956-#964) | about 2.7 MB of the folder's 3.1 MB, mostly `.patch` and raw timing files | 3 `MUTATIONS.md` links | re-point 3 links | no | 08 |
+| `docs/issue880-*.md` (12 notes, 61 KB); `docs/audits/5xx-8xx-*.md` (44 per-attempt reviews and evidence notes, 109 KB, many for the endpoints of A4 and the capture of B8); `docs/research/legacy-v2old/` (13 legacy-engine research copies, 32 KB) | about 0.2 MB | 19 of the 23 live-doc links into `artifacts/` are in the issue880 notes | none | no | 08 |
 | `dsp-research/archive/*.rs` | 5,134 lines | no | none | no | 06 |
 | `fixtures/` | 2.17 MB, 160 files | all are read, except `capi-qualification/v1` (A7) and `rack/issue038-v1` (B2) | — | the native-WAV, C-ABI, extended-rate and effect-package sets follow rulings R2, R4, R5 and R6 | — |
 
@@ -212,9 +214,9 @@ independent, except that R3 (protocol) needs R2 (C ABI) first.
 
 ### R1. Native host shells, `target-smoke`, AArch64 arms
 
-- **What.** `hosts/host-native` (31 lines) and `hosts/host-mobile` (27) are stubs: they attest the
+- **What.** `hosts/host-native` (30 lines) and `hosts/host-mobile` (26) are stubs: they attest the
   CPU and print `target-smoke` values. Their audio callbacks are "deferred to issue 023".
-  `host_mobile::mobile_target_smoke` has zero references. `crates/target-smoke` is 88 lines.
+  `host_mobile::mobile_target_smoke` has zero references. `crates/target-smoke` is 87 lines.
 - **AArch64.** About 45 `cfg(target_arch = "aarch64")` arms exist:
   - lane `fpenv.rs` (27), `backend.rs`;
   - `soft-clip`, `graph/runtime.rs`, `audit/vectorization.rs`, two tests.
@@ -232,8 +234,8 @@ independent, except that R3 (protocol) needs R2 (C ABI) first.
 ### R2. The C ABI and native PCM runner
 
 - **What.**
-  - `crates/capi`: 9,812 lines, plus a 255-line header and C/C++ smoke tests.
-  - `tools/native-pcm-runner`: 2,692 lines, plus `fixtures/native-pcm-runner/v1` (5 WAVs, 127 KB).
+  - `crates/capi`: 9,802 lines, plus a 255-line header and C/C++ smoke tests.
+  - `tools/native-pcm-runner`: 2,689 lines, plus `fixtures/native-pcm-runner/v1` (5 WAVs, 127 KB).
   - `audit capi`: 342 lines.
   - `host-core` `control_provider.rs`: 874 lines behind `control-provider`.
   - The engine plan-replacement API (`reserve_replacement`, `epoch`, `commit`,
@@ -265,7 +267,7 @@ independent, except that R3 (protocol) needs R2 (C ABI) first.
 ### R3. The binary control protocol (and sidecar/WebSocket)
 
 - **What.**
-  - `crates/protocol`: 29,975 lines (18,049 production, 11,094 in-source tests), 175 tests.
+  - `crates/protocol`: 29,957 lines (18,049 production, 11,094 in-source tests), 175 tests.
   - About 950 lines of `conformance` (protocol corpus and wasm golden runner).
   - `bench protocol` (1,667 lines, and the only reason for the `flatbuffers` dependency).
   - `audit protocol` (512 lines).
@@ -273,8 +275,8 @@ independent, except that R3 (protocol) needs R2 (C ABI) first.
 - **Browser dependency: none.**
   - host-web's command ABI (`miso.command.v1`) is its own, with its own vocabularies.
   - The "acked-batch" lesson in AGENTS.md (#139/#140 admission) is implemented in host-web
-    (`admit_commands`, `hosts/host-web/src/lib.rs:1497-1523`), not in `protocol`.
-- **Coupling.** capi carries protocol frames (170 `protocol::` uses), so R3 requires R2.
+    (`admit_commands`, `hosts/host-web/src/lib.rs:6246`), not in `protocol`.
+- **Coupling.** capi carries protocol frames (179 `protocol::` uses), so R3 requires R2.
 - **Sidecar and WebSocket:** no code exists, only AGENTS.md text and
   `docs/CONTROL_PROVIDER_BOUNDARY.md`. Open #25 ("Optional binary WebSocket sidecar") would close
   as descoped.
@@ -393,8 +395,10 @@ independent, except that R3 (protocol) needs R2 (C ABI) first.
     `check-web-audioworklet.sh:69`, which already checks the shipped module for atomics.
   - The W4-D1 note in `build-web-audioworklet.sh` kept "the scalar cargo check" on purpose, so
     this is yours to reverse.
-- **The catch.** Scalar per-node rendering is the oracle for "banking never moves a bit", in
-  host-core, graph-compiler and the limiter session tests.
+- **The catch.** Scalar per-node rendering is the oracle for "banking never moves a bit". The
+  largest user is `crates/graph-compiler/tests/bank_levels.rs`: ten tests render every session at
+  Scalar, Simd4 and Simd8 and compare bits. graph-compiler's `src/lib.rs` and host-core's
+  `limiter_linked_session.rs` do the same.
 - **Recommendation: remove, but first replace the oracle** (draft R8). Compare Simd4 with Simd8,
   or the lane scalar kernel with `dsp-reference`.
 - **Keep:** lane's one-lane `Scalar`/`FrameLane`. Every width uses it for scalar tails, and it is
@@ -487,7 +491,11 @@ architectural lane width, not target-specific code. Rule only on the native *pro
     is a separate issue, not drafted here.
 - **Line shifts move the pin.** Deleting lines in any file compiled into the module shifts panic
   line numbers, so the pin can move even when no code changes. Every draft asks for a
-  function-by-function `wasm-objdump -d` comparison to prove that.
+  function-by-function `wasm-objdump -d` comparison to prove that (section 11).
+- **Line counts are approximate.** The per-crate production/test splits come from a script that
+  counts one extra line per file (a trailing newline), so they run about 0.1% high. Per-crate
+  totals quoted in section 7 and the R drafts were re-measured with `wc -l`. No conclusion depends
+  on the difference.
 - **Cross-reference lists need a compile proof.** rust-analyzer can miss references made inside
   macro expansions. So every "used only by X" list here is a lead, and each draft re-proves it by
   compile. The dead items in section 3 were already proved by rustc.
@@ -521,6 +529,28 @@ Steps 1-7 need no ruling. They cover about 18,500 Rust lines, about 11,000 scrip
 about 60 MB of history. R10 would add another 10 MB.
 
 Step 8 is your call. It covers about 83,000 Rust lines, and the product is unaffected either way.
+
+## 11. Gate conventions every draft uses
+
+- **Shipped artifact.** Run `bash scripts/build-web-audioworklet.sh --module-only EMPTY_DIR` on
+  the base commit and on the change, on the same machine and toolchain. The script refuses a
+  directory that is not empty (exit 2).
+  - Compare the two modules. They must be byte-identical, or `wasm-objdump -d` (wabt) must show
+    every changed function and explain why it changed.
+  - Do not compare a local build against the committed pin: the pin depends on the toolchain's
+    installed components (section 9). The CI `artifact` job is the authority for the pin.
+- **Wasm gates.** `bash scripts/run-wasm-gates.sh` needs `wasm-objdump` (wabt) and the pinned
+  Node version, unless it is run with `--without-v8-spill` as the wasm-guests CI job does.
+- **Console digests.** Run
+  `cargo test --locked --release -p console-workload --test gain_pan_profile -- --ignored --exact digests --nocapture`
+  on base and change. The two outputs must be byte-identical.
+- **Tests (no live claim lost).** Compare `cargo test … -- --list` on base and change, with CI's
+  feature sets plus the `test-support` features draft 00 adds. Every test missing on the change
+  side is listed in the evidence, either with the surviving test that holds its claim or with the
+  reason its claim was removed.
+- **Artifact unchanged by construction.** When a draft says no crate in the module's closure
+  changes, show `git diff --stat -- crates hosts`. Alternatively, show that every changed crate is
+  outside `cargo tree -p host-web --target wasm32-unknown-unknown -e normal`.
 
 ## Issue drafts
 

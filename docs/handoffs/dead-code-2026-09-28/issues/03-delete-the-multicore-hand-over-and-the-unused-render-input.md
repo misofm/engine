@@ -52,8 +52,9 @@ executor.
   - `rg 'input: Some\(' crates/engine` finds nothing.
   - The C ABI render entry has no input planes (`crates/capi/include/miso_engine_v1.h:242-244`),
     so no exported surface changes.
-- **Cost of removal:** about 95 `input: None` and 16 `input_channels: None` call sites, mostly in
-  tests.
+- **Cost of removal:** `rg` counts 95 `input: None` and 38 `input_channels: None` lines across
+  `crates`, `hosts` and `tools`, mostly in tests. A few may belong to unrelated structs; the
+  compiler decides.
 - **Effect on the shipped module:** it is compiled in (one shape check per render), so the pin
   moves. No console digest can move.
 
@@ -85,7 +86,7 @@ executor.
    (`cargo test --locked --release -p console-workload --test gain_pan_profile -- --ignored --exact digests --nocapture`)
    is byte-identical on base and change, and `bash scripts/run-wasm-gates.sh` passes.
 3. **Shipped artifact.** Build base and change on one machine with
-   `scripts/build-web-audioworklet.sh --module-only`.
+   `scripts/build-web-audioworklet.sh --module-only EMPTY_DIR`.
    - Explain every changed function in `wasm-objdump -d`. Expected: the render entry loses the
      input-shape branch; everything else changes only by panic-location line numbers.
    - Re-pin with that explanation. `bash scripts/check-web-audioworklet.sh` passes on the new
