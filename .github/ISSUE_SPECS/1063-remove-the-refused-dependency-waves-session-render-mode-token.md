@@ -86,3 +86,127 @@ Not re-pinned. The pin (`476e58ad…`) was already stale at the branch base: `c8
 `f7bd75ca…` (3,486,194 bytes). This commit builds `065528b3…` (3,485,448 bytes, 746 smaller): the
 module no longer carries the `dependency_waves` token, the `render_mode.unsupported_at_launch`
 code and its message, or the validation branch. The batch boundary re-pins.
+
+## Sol verdict, attempt 1
+
+**PASS.** Verified on a scratch merge of `codex/1063-remove-dependency-waves-token` (`376c0280`)
+into the batch head `codex/batch-slim-1` (`92ef396f`), merge `5c376f1a`, no conflicts.
+Scratch worktrees, one target dir, `CARGO_INCREMENTAL=0`.
+
+### Findings, by severity
+
+No defects. Four low-severity notes:
+
+1. **Evidence correction: CI does run doctests.** Two CI steps run `cargo test` without
+   `--all-targets`, so they also run doctests:
+   - `test-release`: `cargo test --locked --release -p lane -p math -p wasm-gates --features math/lane`.
+   - `audit-native`: `cargo test --locked --release -p audit -p bench -p console-workload`.
+
+   Six packages are covered this way, including `console-workload`, which is one of the eight
+   packages reported as failing. The reported workspace doctest failure did not reproduce:
+   - On the merge, the full `cargo test --locked --workspace --no-fail-fast` exits 0. All 39
+     doctest harnesses run (14 doctests), with no `E0463`.
+   - `cargo test --workspace --doc` passes on both base `92ef396f` and the merge.
+   - The `audit-native` command passes on the merge, and its `console_workload` doctest harness
+     runs.
+
+   So the failure was an artifact of that environment, most likely a contended or shared target
+   dir. It is not a property of either tree.
+2. **Retirement of code `2` is enforced in the protocol only.** The protocol codec maps the
+   mode with an explicit match. `render_profile_mode_decodes_only_single_thread` refuses `2`, so
+   re-allocating that code in the codec turns the test red. On the session side,
+   `closed_tokens!` still derives `RenderMode::wire()` from declaration order, and the
+   `visit.rs` BTLV token stream uses it. A future second variant would silently get
+   session-side wire code `2`. The "never reallocated" note on the model is documentation, not
+   a gate. This is informational and needs no change now.
+3. **Test counts.** `cargo test --workspace -- --list` gives 2,466 on the merge, which matches.
+   My dev run passed 2,413 non-doc tests and ignored 40. The evidence reports 2,417 non-doc
+   passes. I did not reconcile the difference of 4. Nothing failed.
+4. **Historical mentions remain, as they should.** The token still appears in the
+   `.github/ISSUE_SPECS/009`, `122` and `BRIEFS` specs, `docs/audits`, `docs/handoffs`,
+   `docs/rulings` and `artifacts/` logs. These are historical records.
+
+### Checks
+
+- **Nothing else knows the token.** I grepped every spelling in text and binary files:
+  `dependency_waves`, `DependencyWaves`, `dependencyWaves`, `dependency-waves`,
+  `unsupported_at_launch` (only the live `sample_rate.*` code remains) and
+  `RenderModeUnsupportedAtLaunch`. There are no live hits in:
+  - `sdk/src`, including `generated/abi.ts`, `catalog.ts` and `provenance.ts`
+  - `hosts/`, `crates/capi`, including `include/miso_engine_v1.h`
+  - fixtures, the conformance corpora, fuzz seeds and targets, and `scripts/`
+  - `SESSION_SCHEMA_V1.md`
+
+  Diagnostic codes are string-only. No numeric or registry mapping of diagnostic codes exists,
+  and no gate governs how a code is retired. The code was the last `#[non_exhaustive]` variant,
+  so no other discriminant moves.
+- **Wire.**
+  - `single_thread` stays `1`. No other render-mode code ever existed.
+  - `parse_render_profile` is the single decode path, and it refuses `2` as `InvalidTlv`.
+  - `CONTROL_PROTOCOL_REGISTRY.md` records `2` as retired and never reallocated, as #241 did
+    for its opcodes.
+  - No golden vector changed.
+- **Error surface.** A session spelling `dependency_waves` fails with exactly
+  `schema.invalid_enum	$.render_profile.mode`. I checked this at each public entry point:
+  - The branch's parse test covers the parse path.
+  - `session-validator validate` fails at stage 2 with `expected one of: single_thread`.
+  - A temporary probe, not committed, went through `miso_engine_v1_compile_session`. It
+    returned `RESULT_COMPILE_REJECTED` with that diagnostic.
+  - A second temporary probe went through `AudioWorkletEngineHost::boot` and the raw
+    `miso_engine_web_v1_boot`. Both returned `RESULT_REFUSED_DOCUMENT` with that diagnostic.
+  - `wave_farm` behaves identically.
+  - The JSON Schema `const` rejects the token, and every valid fixture still validates.
+- **AudioWorklet module.**
+
+  | tree | sha256 | size |
+  |---|---|---|
+  | base `92ef396f` | `f7bd75ca…` (matches its pin) | 3,486,194 bytes |
+  | merge | `065528b3…` | 3,485,448 bytes |
+
+  The merge is 746 bytes smaller: Code is 610 bytes smaller and Data is 136 bytes smaller. The
+  function count (2,733), exports and name section are identical. Exactly five functions
+  shrink:
+  - `session::validate::validate_session`, by 323 bytes
+  - `parse_root`, by 247 bytes
+  - `write_canonical`, by 26 bytes
+  - `compile_session`, by 7 bytes
+  - `effect_compiler::prepare_native_session_effects`, by 7 bytes
+
+  The only strings removed are `dependency_waves`, `render_mode.unsupported_at_launch` and its
+  message. The batch boundary must re-pin to `065528b3…`, unless another batch change moves it.
+- **Gates on the merge, all green.** Nothing failed on the merge, so base re-runs were limited to
+  the doctest reproduction and the module build above.
+  - Build, lint and target checks:
+    - `cargo check --workspace --all-targets --all-features`
+    - wasm `simd128` check of `host-web protocol session target-smoke`
+    - `aarch64-apple-ios` and `aarch64-linux-android` checks of
+      `capi session protocol host-core engine source graph lane`
+    - clippy `--workspace --all-targets --all-features -D warnings`, and `cargo fmt --check`
+  - Tests:
+    - session, protocol and host-web tests with test-support: 398 passed
+    - the full dev workspace test run
+    - release `-p audit -p bench -p console-workload`, with `CONSOLE_DIGEST` and
+      `GAIN_PAN_DIGEST` unchanged
+    - `scripts/run-wasm-gates.sh`: native, wasm scalar, `simd128` and the V8 spill gate
+  - SDK, against a CI-shaped artifact dir of the merge's module:
+    - `npm ci`
+    - `check-sdk-generated.sh`
+    - `check-sdk-deletions.py` and its `--self-test`
+    - `check-sdk-types.sh`
+    - `check-sdk-headless.sh`: 284 of 284 pass
+    - `sdk-package.sh check`
+  - Scripts: every `scripts/check-*.sh` and every argument-free `check-*.py` passed. That
+    includes `check-session-policy.sh`, `check-step-vocabulary.py` and
+    `check-workspace-policy.sh`, and also:
+    - `check-cross-targets.sh` and `check-capi-abi.sh`, with its `--self-test`
+    - `check-graph-determinism.sh`: 100 of 100
+    - `check-web-audioworklet.sh` and `check-browser-expected-resources.py --artifacts`
+    - `check-web-boot-budget.mjs`
+    - the `--self-test` of each argument-requiring Python checker
+  - Harness-only first failures, not tree failures:
+    - My own `scripts/__pycache__` and `sdk/dist` staging tripped the generated-artifact
+      policy.
+    - `check-capi-abi.sh` and `check-graph-determinism.sh` hard-code `target/`.
+
+    With those cleaned up or pointed at the shared target dir, all of them passed. Base
+    reproduction was therefore not needed.
