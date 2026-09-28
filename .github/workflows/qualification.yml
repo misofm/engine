@@ -1,8 +1,8 @@
 name: qualification
 
 # Design #359 WP-4: one PR workflow, one required status context (the `verdict` job, whose own
-# `name:` is `qualification`), sixteen leaf jobs behind one router, one aggregate (#1017 added the
-# two AArch64 jobs, #1061 `artifact-identity`). Stage 3 (§12)
+# `name:` is `qualification`), seventeen leaf jobs behind one router, one aggregate (#1017 added the
+# two AArch64 jobs, #1061 `artifact-identity` and `artifact-record`). Stage 3 (§12)
 # retired the four workflows this one replaced -- ci.yml, sdk.yml, browser-qualification.yml and
 # release-build.yml -- once this workflow had reported on >= 10 PRs and agreed with them; this is
 # now the sole required PR workflow. See design §4/§5/§7/§12.
@@ -96,10 +96,6 @@ jobs:
     if: needs.route.outputs.route == 'sdk' || needs.route.outputs.route == 'full'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    # statuses: write is for the record step alone, which runs only on a push to main.
-    permissions:
-      contents: read
-      statuses: write
     outputs:
       sha256: ${{ steps.build.outputs.sha256 }}
       rustc: ${{ steps.build.outputs.rustc }}
@@ -137,16 +133,6 @@ jobs:
           path: target/ci/qualification-artifacts/
           if-no-files-found: error
           overwrite: true
-      # Issue #1061: main's own record of the module this commit's run built, as the commit status
-      # `audioworklet-sha256`. Later changes compare with it (`artifact-identity`), so no change
-      # ever rebuilds its base inside its own, possibly edited, workflow.
-      - name: Record this commit's module for later changes to compare against
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SHA256: ${{ steps.build.outputs.sha256 }}
-          RUSTC: ${{ steps.build.outputs.rustc }}
-        run: python3 -B scripts/web-audioworklet-identity.py record --repository "$GITHUB_REPOSITORY" --commit "$GITHUB_SHA" --sha256 "$SHA256" --rustc "$RUSTC" --url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 
   # Issue #1061 (owner decision 5): every PR says whether the shipped module changed against the
   # digest its base's own CI run recorded, proves the build reproducible, and holds only a release
@@ -191,6 +177,29 @@ jobs:
           set -o pipefail
           python3 -B scripts/web-audioworklet-identity.py --self-test
           python3 -B scripts/web-audioworklet-identity.py report --event "$EVENT" --before "$BEFORE" --repository "$GITHUB_REPOSITORY" --built "$BUILT" --rustc "$RUSTC" --twin "$RUNNER_TEMP/twin-module/miso-engine-v1-audio-worklet.simd128.wasm" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # Issue #1061: main's own record of the module this commit's run built, as the commit status
+  # `audioworklet-sha256` (`<sha256> rustc <release>`, linking the run). Later changes compare
+  # with it (`artifact-identity`), so no change ever rebuilds its base inside its own, possibly
+  # edited, workflow. Its own job, run only on a push to main, checking out nothing and running no
+  # repository code: it is the only job holding a write token, and no pull request reaches it.
+  artifact-record:
+    name: record the shipped AudioWorklet module's digest on main
+    needs: [route, artifact]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && (needs.route.outputs.route == 'sdk' || needs.route.outputs.route == 'full')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      statuses: write
+    steps:
+      - name: Record this commit's module for later changes to compare against
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA256: ${{ needs.artifact.outputs.sha256 }}
+          RUSTC: ${{ needs.artifact.outputs.rustc }}
+        run: |
+          [[ "$SHA256" =~ ^[0-9a-f]{64}$ && "$RUSTC" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]] || { echo "malformed record: '$SHA256' rustc '$RUSTC'" >&2; exit 1; }
+          gh api -X POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" -f state=success -f context=audioworklet-sha256 -f "description=$SHA256 rustc $RUSTC" -f "target_url=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 
   sdk:
     name: SDK package and generated-surface qualification
@@ -956,7 +965,7 @@ jobs:
   verdict:
     name: qualification
     if: always()
-    needs: [route, docs-gates, artifact, artifact-identity, sdk, artifact-gates, browser, lint, test-debug-a, test-debug-b, test-release, audit-native, wasm-guests, cross-target, aarch64-debug, aarch64-release, release-shape]
+    needs: [route, docs-gates, artifact, artifact-identity, artifact-record, sdk, artifact-gates, browser, lint, test-debug-a, test-debug-b, test-release, audit-native, wasm-guests, cross-target, aarch64-debug, aarch64-release, release-shape]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -969,6 +978,7 @@ jobs:
       DOCS_GATES_RESULT: ${{ needs.docs-gates.result }}
       ARTIFACT_RESULT: ${{ needs.artifact.result }}
       ARTIFACT_IDENTITY_RESULT: ${{ needs.artifact-identity.result }}
+      ARTIFACT_RECORD_RESULT: ${{ needs.artifact-record.result }}
       SDK_RESULT: ${{ needs.sdk.result }}
       ARTIFACT_GATES_RESULT: ${{ needs.artifact-gates.result }}
       BROWSER_RESULT: ${{ needs.browser.result }}
@@ -999,6 +1009,7 @@ jobs:
           artifact_expected=skipped
           full_expected=skipped
           release_shape_expected=skipped
+          record_expected=skipped
           case "$ROUTE" in
             evidence)
               docs_expected=success
@@ -1013,6 +1024,8 @@ jobs:
               [[ "$RELEASE_INPUTS" == "true" ]] && release_shape_expected=success
               ;;
           esac
+          # Issue #1061: main's record is posted on a push to main that built the module, only.
+          [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/main && "$artifact_expected" == success ]] && record_expected=success
           failed=0
           check() {
             local name=$1 actual=$2 expected=$3
@@ -1021,6 +1034,7 @@ jobs:
           check docs-gates "$DOCS_GATES_RESULT" "$docs_expected"
           check artifact "$ARTIFACT_RESULT" "$artifact_expected"
           check artifact-identity "$ARTIFACT_IDENTITY_RESULT" "$artifact_expected"
+          check artifact-record "$ARTIFACT_RECORD_RESULT" "$record_expected"
           check sdk "$SDK_RESULT" "$artifact_expected"
           check artifact-gates "$ARTIFACT_GATES_RESULT" "$full_expected"
           check browser "$BROWSER_RESULT" "$full_expected"

@@ -978,3 +978,40 @@ Reviewer: Sol, 2026-09-28, on `d9054cac`.
      - `check-env-vocabulary.sh` passes (67);
      - every `check-*.py` and `test-*.py` passes under `python3 -B`. The six that need arguments
        exit with their usage.
+
+## Attempt 3 follow-up (verdict LOWs 1 and 2)
+
+- **Record forgery.**
+  - *The new job.* The status post moved out of `artifact` into a new job, `artifact-record`:
+    `needs: [route, artifact]`, with
+    `if: github.event_name == 'push' && github.ref == 'refs/heads/main' && (route sdk or full)`
+    and `permissions: statuses: write`. It has one inline step: validate the digest and rustc
+    release, then `gh api -X POST .../statuses/$GITHUB_SHA`. It checks out nothing and runs no
+    repository code. `artifact` no longer declares any permission, so it inherits
+    `contents: read`.
+  - *The verdict* needs the job and expects `success` only for a push to `main` on a route that
+    builds the module, otherwise `skipped`. The header now counts seventeen leaf jobs.
+  - *The script's `record` subcommand is gone.*
+  - *The checker.* `check_qualification_artifact_record` pins the job's `needs`/`if:`, its
+    permissions and its one step exactly, bans job-level `continue-on-error`/`defaults`/`env`, and
+    refuses a write permission (`<scope>: write` or `write-all`) on any other job.
+  - *New mutants in `test-ci-path-routing.py`*, each red:
+    - `statuses: write` granted to `artifact`, to `artifact-identity`, and `write-all` to
+      `artifact-identity`;
+    - the record job reachable by pull requests, or by any push;
+    - its permission dropped, or a checkout added;
+    - its expectation-table row dropped.
+
+    Spot-checked by hand: a `contents: write` on `lint` is red too.
+  - *Dry run.* The step's `run:` block, run with a fake `gh`, posts the exact arguments and refuses
+    a malformed digest or rustc release.
+- **Non-`success` records.** `recorded` now reports a record in any other state as "in state
+  `<state>`, not `success`, so it is not trusted" (CANNOT TELL). The self-test serves `failure`,
+  `error` and `pending` records whose digest equals the built one, and requires CANNOT TELL. Deleting
+  the state check, or the malformed-description check, turns the self-test red.
+- **Gates.**
+  - `check-ci-path-routing.py` and `test-ci-path-routing.py` pass.
+  - `check-script-reachability.py` (137) and `test-script-reachability.py` (18) pass.
+  - The identity self-test passes.
+  - actionlint 1.7.7 passes on all workflows. With shellcheck 0.10.0, `qualification.yml` shows
+    only its four pre-existing findings (shifted by nine lines), none in `artifact-record`.

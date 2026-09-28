@@ -358,7 +358,9 @@ ARTIFACT_READERS = ("sdk", "artifact-gates", "browser")
 # run recorded, never with a base rebuilt inside the change's workflow. Attempts 1 and 2 rebuilt the
 # base there, and a toolchain bump, one workflow-level cargo variable or one `GITHUB_PATH` line
 # steered that rebuild and read UNCHANGED. What is pinned is what the comparison rests on:
-# - on `main`, `artifact` posts the record, on pushes only, with the one permission it needs;
+# - on `main`, `artifact-record` posts the record: a job run only on a push to `main`, checking out
+#   nothing, and the only job in the workflow holding a write permission, so no job a pull request
+#   reaches can forge its base's record (#1061 attempt 3 verdict, finding 1);
 # - the build step writes the digest and the rustc release the record and the report carry;
 # - `artifact-identity` fetches and compares in one step with no `if:`, keeps its twin build, and
 #   has the one read permission;
@@ -367,19 +369,28 @@ ARTIFACT_READERS = ("sdk", "artifact-gates", "browser")
 #   `PATH` could put another `gh` first and forge the record or the lookup).
 # The build environment itself is deliberately not pinned: the record is what the base's own run
 # built in its own environment, so a change to that environment reads CHANGED, as it should.
-ARTIFACT_PERMISSIONS = "    permissions:\n      contents: read\n      statuses: write\n"
 ARTIFACT_BUILD_LINES = (
     '          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"\n',
     '          echo "rustc=$(rustc -vV | sed -n \'s/^release: //p\')" >> "$GITHUB_OUTPUT"\n',
 )
+RECORD_JOB = "artifact-record"
+RECORD_HEAD = (
+    "    needs: [route, artifact]\n"
+    "    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && "
+    "(needs.route.outputs.route == 'sdk' || needs.route.outputs.route == 'full')\n"
+)
+RECORD_PERMISSIONS = "    permissions:\n      statuses: write\n"
 ARTIFACT_RECORD_STEP = """      - name: Record this commit's module for later changes to compare against
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
-          SHA256: ${{ steps.build.outputs.sha256 }}
-          RUSTC: ${{ steps.build.outputs.rustc }}
-        run: python3 -B scripts/web-audioworklet-identity.py record --repository "$GITHUB_REPOSITORY" --commit "$GITHUB_SHA" --sha256 "$SHA256" --rustc "$RUSTC" --url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          SHA256: ${{ needs.artifact.outputs.sha256 }}
+          RUSTC: ${{ needs.artifact.outputs.rustc }}
+        run: |
+          [[ "$SHA256" =~ ^[0-9a-f]{64}$ && "$RUSTC" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+(-[A-Za-z0-9.]+)?$ ]] || { echo "malformed record: '$SHA256' rustc '$RUSTC'" >&2; exit 1; }
+          gh api -X POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" -f state=success -f context=audioworklet-sha256 -f "description=$SHA256 rustc $RUSTC" -f "target_url=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 """
+WRITE_PERMISSION = re.compile(r"^\s+[a-z-]+: write\s*$|^\s*permissions: write-all\s*$",
+                              re.MULTILINE)
 IDENTITY_PERMISSIONS = "    permissions:\n      contents: read\n      statuses: read\n"
 IDENTITY_CHECKOUT = re.compile(
     r"      - uses: actions/checkout@[0-9a-f]{40} # v\S+\n        with:\n          fetch-depth: 0\n\Z")
@@ -430,9 +441,6 @@ def check_qualification_artifact_digest(text: str) -> None:
     require(ARTIFACT_DIGEST_OUTPUT in artifact,
             "qualification.yml: the artifact job must publish its module's sha256 and rustc "
             "release as outputs")
-    require(ARTIFACT_PERMISSIONS in artifact,
-            "qualification.yml: the artifact job's permissions must be exactly contents: read and "
-            "statuses: write (the record)")
     require(UNMASKABLE.search(artifact) is None,
             "qualification.yml: the artifact job must carry no job-level continue-on-error, "
             "defaults or env")
@@ -443,9 +451,6 @@ def check_qualification_artifact_digest(text: str) -> None:
     for line in ARTIFACT_BUILD_LINES:
         require(line in steps[build[0]],
                 f"qualification.yml: the artifact build step is missing {line.strip()!r}")
-    require(steps[-1] == ARTIFACT_RECORD_STEP,
-            "qualification.yml: the artifact job's last step must post main's record exactly as "
-            "pinned (scripts/check-ci-path-routing.py ARTIFACT_RECORD_STEP)")
     for name in ARTIFACT_READERS:
         reader = job(text, name)
         require(re.search(r"^    needs: \[route, artifact\]$", reader, re.MULTILINE) is not None,
@@ -460,6 +465,30 @@ def check_qualification_artifact_digest(text: str) -> None:
                                                  "npm run qualify") if line in reader]
         require(all(verify < index for index in later),
                 f"qualification.yml: {name} reads the artifact before verifying its digest")
+
+
+def check_qualification_artifact_record(text: str, names: list[str]) -> None:
+    """Issue #1061: main's record is posted by one job, on a push to `main` only, which checks out
+    nothing and runs no repository code; it holds the workflow's only write permission, so no job a
+    pull request reaches holds a write token (the top level is already exactly contents: read)."""
+    record = job(text, RECORD_JOB)
+    require(RECORD_HEAD in record,
+            f"qualification.yml: {RECORD_JOB} must need [route, artifact] and run only on a push to "
+            "main that built the module")
+    require(RECORD_PERMISSIONS in record,
+            f"qualification.yml: {RECORD_JOB}'s permissions must be exactly statuses: write")
+    require(UNMASKABLE.search(record) is None,
+            f"qualification.yml: {RECORD_JOB} must carry no job-level continue-on-error, defaults "
+            "or env")
+    require(job_steps(record) == [ARTIFACT_RECORD_STEP],
+            f"qualification.yml: {RECORD_JOB} must be exactly its one pinned step, checking out "
+            "nothing (scripts/check-ci-path-routing.py ARTIFACT_RECORD_STEP)")
+    for name in names:
+        if name == RECORD_JOB:
+            continue
+        require(WRITE_PERMISSION.search(job(text, name)) is None,
+                f"qualification.yml: job {name!r} holds a write permission; only {RECORD_JOB}, "
+                "which no pull request reaches, may")
 
 
 def check_qualification_artifact_identity(text: str) -> None:
@@ -711,6 +740,7 @@ def check_qualification_workflow(root: pathlib.Path) -> None:
     check_qualification_route_job(text)
     check_qualification_closures(text)
     check_qualification_artifact_digest(text)
+    check_qualification_artifact_record(text, names)
     check_qualification_artifact_identity(text)
     check_qualification_v8_spill(text)
     check_qualification_aarch64(text)

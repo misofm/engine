@@ -581,12 +581,13 @@ def main() -> int:
     root = workspace()
     try:
         mutate(root / ".github/workflows/qualification.yml",
-               "    needs: [route, docs-gates, artifact, artifact-identity, sdk, artifact-gates, "
-               "browser, lint, test-debug-a, test-debug-b, test-release, audit-native, "
-               "wasm-guests, cross-target, aarch64-debug, aarch64-release, release-shape]",
-               "    needs: [route, docs-gates, artifact, artifact-identity, sdk, artifact-gates, "
-               "browser, lint, test-debug-a, test-debug-b, test-release, audit-native, "
-               "wasm-guests, cross-target, aarch64-debug, aarch64-release]")
+               "    needs: [route, docs-gates, artifact, artifact-identity, artifact-record, sdk, "
+               "artifact-gates, browser, lint, test-debug-a, test-debug-b, test-release, "
+               "audit-native, wasm-guests, cross-target, aarch64-debug, aarch64-release, "
+               "release-shape]",
+               "    needs: [route, docs-gates, artifact, artifact-identity, artifact-record, sdk, "
+               "artifact-gates, browser, lint, test-debug-a, test-debug-b, test-release, "
+               "audit-native, wasm-guests, cross-target, aarch64-debug, aarch64-release]")
         checker_fails(root)  # a job dropped from verdict's needs: escapes the aggregate entirely
     finally:
         shutil.rmtree(root)
@@ -727,14 +728,33 @@ def main() -> int:
     record_step = checker.ARTIFACT_RECORD_STEP
     workflow_mutation_fails("qualification.yml", record_step, "")  # main records nothing
     workflow_mutation_fails(
-        "qualification.yml",
-        "        if: github.event_name == 'push' && github.ref == 'refs/heads/main'\n",
-        "        if: github.event_name == 'pull_request'\n",
-    )  # records posted by PR runs, never by main's own
+        "qualification.yml", checker.RECORD_HEAD,
+        checker.RECORD_HEAD.replace("github.event_name == 'push' && ", ""),
+    )  # the record job reachable by pull requests
     workflow_mutation_fails(
-        "qualification.yml", checker.ARTIFACT_PERMISSIONS,
-        "    permissions:\n      contents: read\n",
+        "qualification.yml", checker.RECORD_HEAD,
+        checker.RECORD_HEAD.replace(" && github.ref == 'refs/heads/main'", ""),
+    )  # the record job run on any push
+    workflow_mutation_fails(
+        "qualification.yml", checker.RECORD_PERMISSIONS, "    permissions:\n      contents: read\n",
     )  # the post is refused on main
+    workflow_mutation_fails(
+        "qualification.yml", checker.RECORD_PERMISSIONS + "    steps:\n",
+        checker.RECORD_PERMISSIONS + "    steps:\n      - uses: actions/checkout@"
+        "11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2\n",
+    )  # the write-token job checks out, and so runs, repository code
+    # #1061 attempt 3 verdict, finding 1: a write token on any job a pull request reaches lets a
+    # same-repository change forge its base's record. Each grant is red.
+    for anchor, grant in (
+        ("    timeout-minutes: 15\n    outputs:\n      sha256:",
+         "    timeout-minutes: 15\n    permissions:\n      contents: read\n      statuses: write\n"
+         "    outputs:\n      sha256:"),  # artifact, which runs on every pull request
+        (checker.IDENTITY_PERMISSIONS,
+         "    permissions:\n      contents: read\n      statuses: write\n"),  # artifact-identity
+        ("    timeout-minutes: 20\n    permissions:\n      contents: read\n      statuses: read\n",
+         "    timeout-minutes: 20\n    permissions: write-all\n"),
+    ):
+        workflow_mutation_fails("qualification.yml", anchor, grant)
     for line in checker.ARTIFACT_BUILD_LINES:
         workflow_mutation_fails("qualification.yml", line, "")
     workflow_mutation_fails("qualification.yml", "      rustc: ${{ steps.build.outputs.rustc }}\n", "")
@@ -751,8 +771,8 @@ def main() -> int:
     ):
         workflow_mutation_fails("qualification.yml", identity_head, identity_head + extra)
     workflow_mutation_fails(
-        "qualification.yml", checker.ARTIFACT_PERMISSIONS,
-        checker.ARTIFACT_PERMISSIONS + "    env:\n      PATH: /tmp/forged-gh:/usr/bin:/bin\n",
+        "qualification.yml", checker.RECORD_PERMISSIONS,
+        checker.RECORD_PERMISSIONS + "    env:\n      PATH: /tmp/forged-gh:/usr/bin:/bin\n",
     )  # a job PATH that puts another gh first could forge main's record
     report_step = checker.IDENTITY_REPORT_STEP
     workflow_mutation_fails(
@@ -809,6 +829,10 @@ def main() -> int:
         "qualification.yml",
         '          check artifact-identity "$ARTIFACT_IDENTITY_RESULT" "$artifact_expected"\n', "",
     )  # the identity job dropped from the expectation table
+    workflow_mutation_fails(
+        "qualification.yml",
+        '          check artifact-record "$ARTIFACT_RECORD_RESULT" "$record_expected"\n', "",
+    )  # the record job dropped from the expectation table
 
     # Issue #1017: the AArch64 compile rows and test jobs. Deleting a row, either half of the
     # row, a job's arm64 runner, its script, its full-route gating or its success expectation, or a

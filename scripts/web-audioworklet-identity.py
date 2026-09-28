@@ -4,12 +4,14 @@
 Owner decision 5 (`docs/rulings/engine-footprint-2026-09-28.md`): every PR builds the shipped
 module and runs every artifact gate against those bytes, and reports whether the module changed;
 only a release change must match the recorded fingerprint and carry a fresh three-browser
-qualification. `qualification.yml` runs this script in two places:
+qualification.
 
-* ``record --repository R --commit SHA --sha256 D --rustc V --url U`` (the `artifact` job, on a
-  push to `main` only) posts the module that commit's own CI run built as the commit status
-  ``audioworklet-sha256`` on that commit, described ``<sha256> rustc <release>``. It is the record
-  later changes compare against, and it does not expire.
+The record: on a push to `main`, `qualification.yml`'s `artifact-record` job (a push-only job that
+checks out nothing and is the only one holding a write token) posts the module that commit's own
+CI run built as the commit status ``audioworklet-sha256`` on that commit, described
+``<sha256> rustc <release>``. It is what later changes compare against, and it does not expire.
+This script reads it:
+
 * ``report --event E [--before SHA] --repository R --built D --rustc V --twin MODULE`` (the
   `artifact-identity` job) prints the Markdown report for the job summary. Its headline compares
   this run's module with **the digest its base's own CI run recorded**, never with a rebuild of the
@@ -42,6 +44,8 @@ qualification. `qualification.yml` runs this script in two places:
   the job is misconfigured, and a CANNOT TELL that never ends would hide that.
 * ``--self-test`` proves every rule above in a scratch repository, with a fake ``gh`` on ``PATH``
   that answers from canned API responses and logs its arguments.
+
+A record whose state is not ``success`` is not trusted: the report says CANNOT TELL.
 
 The script builds nothing: it reads git objects, the module it is handed, and commit statuses.
 """
@@ -117,7 +121,8 @@ def base_commit(root: pathlib.Path, event: str, before: str) -> tuple[str | None
 
 
 # ---------------------------------------------------------------------------------------------
-# The record: a commit status on `main`'s commits, posted by that commit's own CI run.
+# The record: a commit status on `main`'s commits, posted by that commit's own CI run
+# (`qualification.yml`'s `artifact-record` job).
 
 
 def gh_api(*args: str) -> str:
@@ -130,18 +135,6 @@ def gh_api(*args: str) -> str:
         raise LookupFailed(f"gh api {' '.join(args)} exited {result.returncode}: "
                            f"{result.stderr.strip()}")
     return result.stdout
-
-
-def post_record(repository: str, commit: str, sha256: str, rustc: str, url: str) -> None:
-    if REPOSITORY.fullmatch(repository) is None:
-        raise Usage(f"not an owner/name repository: {repository!r}")
-    if COMMIT.fullmatch(commit) is None or SHA256.fullmatch(sha256) is None:
-        raise Usage("record needs a 40-hex commit and a 64-hex sha256")
-    if RUSTC_RELEASE.fullmatch(rustc) is None:
-        raise Usage(f"not a rustc release: {rustc!r}")
-    gh_api("-X", "POST", f"repos/{repository}/statuses/{commit}", "-f", "state=success",
-           "-f", f"context={CONTEXT}", "-f", f"description={sha256} rustc {rustc}",
-           "-f", f"target_url={url}")
 
 
 def recorded(repository: str, commit: str) -> tuple[dict | None, str]:
@@ -159,8 +152,11 @@ def recorded(repository: str, commit: str) -> tuple[dict | None, str]:
         return None, f"`{commit}` has no `{CONTEXT}` status"
     # The combined status holds the latest status per context; a rerun re-posts the same bytes.
     row = ours[0]
+    if row.get("state") != "success":
+        return None, (f"`{commit}`'s `{CONTEXT}` status is in state `{row.get('state')}`, not "
+                      "`success`, so it is not trusted")
     match = RECORD.fullmatch(str(row.get("description", "")))
-    if row.get("state") != "success" or match is None:
+    if match is None:
         return None, f"`{commit}`'s `{CONTEXT}` status is malformed: {row.get('description')!r}"
     return {"commit": commit, "sha256": match.group(1), "rustc": match.group(2),
             "url": row.get("target_url") or ""}, ""
@@ -365,7 +361,7 @@ if sys.argv[1:2] != ["api"]:
     sys.exit(2)
 args = sys.argv[2:]
 if args[:2] == ["-X", "POST"]:
-    sys.exit(0)
+    sys.exit(3)
 answer = table.get(args[0])
 if answer is None:
     sys.stderr.write("HTTP 403: Resource not accessible by integration\n")
@@ -442,13 +438,13 @@ def run_self_test(scratch: pathlib.Path) -> None:
         must(git(repo, *AUTHOR, "merge", "-q", "--no-ff", "-m", "merge", change))
         return must(git(repo, "rev-parse", "HEAD"))
 
-    def statuses(records: dict[str, str | None]) -> None:
+    def statuses(records: dict[str, str | None], state: str = "success") -> None:
         """Serve each commit's combined status: our record's description, or none at all."""
         table = {}
         for commit_id, description in records.items():
             rows = [{"context": "ci/other", "state": "success", "description": "not ours"}]
             if description is not None:
-                rows.append({"context": CONTEXT, "state": "success", "description": description,
+                rows.append({"context": CONTEXT, "state": state, "description": description,
                              "target_url": f"https://example.invalid/runs/{commit_id[:7]}"})
             table[f"repos/{REPO_NAME}/commits/{commit_id}/status"] = {"statuses": rows}
         table_path.write_text(json.dumps(table))
@@ -494,6 +490,12 @@ def run_self_test(scratch: pathlib.Path) -> None:
                                   "rerun this job"), absent=("UNCHANGED", "ARTIFACT CHANGED"))
     statuses({base: "deadbeef rustc 1.97.1"})
     case("malformed record", True, ("ARTIFACT CANNOT TELL", "is malformed"))
+    # A well-formed record in any state but success (a forged `failure`, a `pending`) is not
+    # trusted, even when its digest is the built one.
+    for state in ("failure", "error", "pending"):
+        statuses({base: f"{b} rustc 1.97.1"}, state=state)
+        case(f"{state} record", True, ("ARTIFACT CANNOT TELL", f"in state `{state}`", "not trusted"),
+             absent=("UNCHANGED", "ARTIFACT CHANGED"))
     table_path.write_text("{}")
     try:
         report(repo, "pull_request", "", REPO_NAME, b, "1.97.1", modules["b"][0])
@@ -569,8 +571,8 @@ def run_self_test(scratch: pathlib.Path) -> None:
             failures.append(f"base {event} {before!r} at {head_ref[:7]}: expected {expected}, "
                             f"got {observed} ({reason})")
 
-    # The command line, through the fake gh: `record` posts exactly one status; `report` exits 0,
-    # 1 on a failed rule, 2 on a usage error or a refused lookup, and looks up only the base.
+    # The command line, through the fake gh: `report` exits 0, 1 on a failed rule, 2 on a usage
+    # error or a refused lookup, and looks up only the base.
     at(pr)
     statuses({base: record_a})
     script = str(pathlib.Path(__file__).resolve())
@@ -583,10 +585,6 @@ def run_self_test(scratch: pathlib.Path) -> None:
                               check=False)
 
     for args, status in (
-        (["record", "--repository", REPO_NAME, "--commit", base, "--sha256", a, "--rustc",
-          "1.97.1", "--url", "https://example.invalid/run"], 0),
-        (["record", "--repository", REPO_NAME, "--commit", base, "--sha256", "a" * 63,
-          "--rustc", "1.97.1", "--url", "u"], 2),
         (["report", *common, "--built", a, "--twin", str(modules["a"][0])], 0),
         (["report", *common, "--built", b, "--twin", str(modules["a"][0])], 1),
         (["report", *common, "--built", b, "--twin", str(scratch / "missing.wasm")], 2),
@@ -596,12 +594,9 @@ def run_self_test(scratch: pathlib.Path) -> None:
             failures.append(f"CLI {args[:2]}: expected exit {status}, got {result.returncode}: "
                             f"{result.stderr}")
     calls = [json.loads(line) for line in log_path.read_text().splitlines()]
-    post = ["api", "-X", "POST", f"repos/{REPO_NAME}/statuses/{base}", "-f", "state=success",
-            "-f", f"context={CONTEXT}", "-f", f"description={a} rustc 1.97.1",
-            "-f", "target_url=https://example.invalid/run"]
     lookup = ["api", f"repos/{REPO_NAME}/commits/{base}/status"]
-    if calls != [post, lookup, lookup]:
-        failures.append(f"gh calls were {calls}, not one post and two lookups of the base")
+    if calls != [lookup, lookup]:
+        failures.append(f"gh calls were {calls}, not two lookups of the base")
     table_path.write_text("{}")
     result = cli(["report", *common, "--built", a, "--twin", str(modules["a"][0])])
     if result.returncode != 2 or "HTTP 403" not in result.stderr:
@@ -615,12 +610,6 @@ def main() -> int:
     parser.add_argument("--root", type=pathlib.Path, default=ROOT)
     parser.add_argument("--self-test", action="store_true")
     commands = parser.add_subparsers(dest="command")
-    record = commands.add_parser("record")
-    record.add_argument("--repository", required=True)
-    record.add_argument("--commit", required=True)
-    record.add_argument("--sha256", required=True)
-    record.add_argument("--rustc", required=True)
-    record.add_argument("--url", required=True)
     check = commands.add_parser("report")
     check.add_argument("--event", required=True)
     check.add_argument("--before", default="")
@@ -635,14 +624,10 @@ def main() -> int:
             parser.error("--self-test takes no command")
         self_test()
         print("web AudioWorklet identity self-test passed: the base's recorded digest (matching, "
-              "different, missing, malformed, refused, across documentation), reproducibility, "
-              "a toolchain change, the record post, and seven release mutations")
+              "different, missing, malformed, not success, refused, across documentation), "
+              "reproducibility, a toolchain change, and seven release mutations")
         return 0
     try:
-        if args.command == "record":
-            post_record(args.repository, args.commit, args.sha256, args.rustc, args.url)
-            print(f"recorded {CONTEXT} {args.sha256} rustc {args.rustc} on {args.commit}")
-            return 0
         if args.command == "report":
             lines, ok = report(args.root, args.event, args.before, args.repository, args.built,
                                args.rustc, args.twin)
@@ -653,7 +638,7 @@ def main() -> int:
     except (Usage, LookupFailed) as error:
         print(f"web-audioworklet-identity: {error}", file=sys.stderr)
         return 2
-    parser.error("a command (record, report) or --self-test is required")
+    parser.error("a command (report) or --self-test is required")
     return 2
 
 
