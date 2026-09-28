@@ -1,0 +1,27 @@
+# Research harness for issue #1055 (default `controlSmoothing` ramp lengths).
+#
+# Deliberately NOT a workspace member: the empty `[workspace]` table below makes this package its
+# own workspace root, so it adds nothing to `cargo test --workspace`, no gate and no product code.
+# It links the engine's own `builtins` crate by path and drives the shipped fader/mute ramp
+# (`FaderMuteRampBuiltins`) and 2x2 matrix/pan ramp (`MatrixBuiltins::set_target_smoothed`).
+#
+# See ../README.md for the exact commands.
+[package]
+name = "control-smoothing-measure"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.97.1"
+publish = false
+license = "Apache-2.0"
+
+[[bin]]
+name = "control_smoothing_measure"
+path = "src/main.rs"
+
+[dependencies]
+builtins = { path = "../../../../crates/builtins" }
+
+[profile.release]
+debug = false
+
+[workspace]
