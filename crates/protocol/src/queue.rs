@@ -281,8 +281,9 @@ impl AutomationBatchSlot {
     }
 }
 
-/// One fixed lightweight control-command reservation; byte payload copying belongs to the later
-/// decoded-command schema but its bounded byte accounting is prepared here.
+/// One fixed lightweight control-command reservation. The control queue is prepared and reported
+/// with these slots, but nothing enqueues one: its never-called enqueue/dequeue methods and their
+/// byte accounting were removed as unused (#1034).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ControlCommandSlot {
     /// Request whose fully copied command bytes occupy this reservation.
