@@ -305,10 +305,12 @@ use crate::observation_activation::{
     GraphObservationAdmissionError, GraphObservationController, RealtimeObservationActivation,
     prepare_activation,
 };
+// Read only by the scalar pairing passes, which are test-only (issue #1059).
+#[cfg(any(test, feature = "test-support"))]
+use crate::GraphEdgeId;
 use crate::{
-    GraphBindingBlock, GraphEdgeId, GraphNodeObserverBinding, GraphObservationBlock,
-    GraphObservationValidity, GraphPreparedEffect, GraphRuntimeProcessor,
-    GraphRuntimeSplitPairProcessor,
+    GraphBindingBlock, GraphNodeObserverBinding, GraphObservationBlock, GraphObservationValidity,
+    GraphPreparedEffect, GraphRuntimeProcessor, GraphRuntimeSplitPairProcessor,
 };
 
 /// Lane type the block kernels are instantiated at to vectorise **over frames**.
@@ -841,7 +843,20 @@ pub(crate) enum NodeKind {
     BankMember,
 }
 
+/// Which half of a split scalar pair an op runs.
+///
+/// Only the test-only scalar pairing passes build a [`SplitPairSlot`] (issue #1059). The slot, the
+/// runtime's split-pair table and their never-taken dispatch stay in every build because
+/// `scalar_split_op_layout` and `scalar_split_runtime_layout` charge them to every plan's
+/// resource estimate, and a feature must not move an estimate.
 #[derive(Clone, Copy)]
+#[cfg_attr(
+    not(any(test, feature = "test-support")),
+    allow(
+        dead_code,
+        reason = "constructed only by the test-only scalar pairing passes (#1059)"
+    )
+)]
 pub(crate) enum SplitPairRole {
     Fader,
     Matrix,
@@ -4861,6 +4876,7 @@ fn observation_activation_error_code(error: GraphObservationAdmissionError) -> &
 /// The composite receives one in-place block at the fader slot. It can preserve the later matrix
 /// op only when that op's reduction was already a self-copy: one undelayed input, the same input
 /// and output buffer as the fader, and the lowering's own `in_place` witness.
+#[cfg(any(test, feature = "test-support"))]
 fn scalar_pair_is_in_place(program: &ExecutionProgram, fader: usize, matrix: usize) -> bool {
     let fader = &program.ops[fader];
     let matrix = &program.ops[matrix];
@@ -4883,6 +4899,7 @@ fn scalar_pair_is_in_place(program: &ExecutionProgram, fader: usize, matrix: usi
 /// `crossing_sources` and `naming` are [`crossing_sources`] and [`ops_naming_buffers`] of this
 /// program, built once by the caller: this is asked once per scalar fader, and scanning every edge
 /// and every op between the pair for each one made bind quadratic in the track count (issue #962).
+#[cfg(any(test, feature = "test-support"))]
 #[allow(clippy::too_many_arguments)]
 fn scalar_split_interval_is_clear(
     program: &ExecutionProgram,
@@ -4921,6 +4938,7 @@ fn scalar_split_interval_is_clear(
 
 /// The nodes a route or a sidechain reads out of, from anywhere in the graph: a node in this set
 /// has a reader the lowered program's scalar pairing cannot see.
+#[cfg(any(test, feature = "test-support"))]
 fn crossing_sources(spec: &GraphSpec) -> std::collections::BTreeSet<&GraphNodeId> {
     spec.edges
         .iter()
@@ -4935,6 +4953,7 @@ fn crossing_sources(spec: &GraphSpec) -> std::collections::BTreeSet<&GraphNodeId
 }
 
 /// Every op that names each physical buffer, in op order: [`op_names_buffer`], inverted once.
+#[cfg(any(test, feature = "test-support"))]
 fn ops_naming_buffers(
     program: &ExecutionProgram,
 ) -> BTreeMap<crate::program::BufferRef, Vec<usize>> {
@@ -5445,84 +5464,29 @@ fn validate_fold_installation(
     })
 }
 
-/// Builds the sequential executor's runtime: one coloured arena, producers read in place.
+/// The serialized scalar fader/matrix pairing passes, over the bindings of one sequential bind.
 ///
-/// `source_claims` are the source set's claim nodes in claim order when its driver lends its played
-/// planes (issue #918), and empty otherwise; [`source_plane_table`] decides which of them a bank
-/// gathers in place.
-pub(crate) fn build_sequential(
+/// Serialized scalar fader/matrix pairing is decided while both original owners and the lowered
+/// graph are still available.  The schedule is intentionally left untouched: the matrix binding
+/// becomes an identity at its original slot, while the composite runs from the fader slot and the
+/// existing reduction/observer boundaries remain in place.
+///
+/// Only the whole-plan scalar oracle binds a per-node fader and matrix that offer a pair factory,
+/// so these passes compile only for tests and `test-support` (issue #1059).
+#[cfg(any(test, feature = "test-support"))]
+#[allow(clippy::too_many_arguments)]
+fn select_scalar_pairs(
     program: &ExecutionProgram,
     spec: &GraphSpec,
-    parts: RuntimeParts,
-    frames: usize,
-    planning: SequentialPlan,
-    observation_activation: Option<RealtimeObservationActivation>,
-    source_claims: &[GraphNodeId],
-) -> Runtime {
-    #[cfg(any(test, feature = "test-support"))]
-    test_only_reset_selected_split_fader();
-    let mut parts = parts;
-    // The arena reserves buffer 0 as the always-zero silence slot, so a coloured buffer `b` is
-    // arena buffer `b + ARENA_BASE`.
-    let arena = |buffer: u32| buffer + ARENA_BASE;
-    let taps = taps_by_op(program, spec);
-    let delays = program
-        .delays
-        .iter()
-        .map(|line| CompensationDelay::new(line.samples as usize))
-        .collect();
-    let SequentialPlan {
-        run_units,
-        fold,
-        unit_of_run,
-        op_slot,
-        installations,
-        output_op,
-    } = planning;
-    let folded_runs: std::collections::BTreeSet<usize> = fold
-        .as_ref()
-        .map(|fold| fold.runs.iter().map(|(run, _)| *run).collect())
-        .unwrap_or_default();
-    // The chain fold's retired routes (issue #218). A retired route emits no unit, and every pass
-    // below that pairs or redirects ops skips it.
-    let retired: std::collections::BTreeSet<usize> = fold
-        .as_ref()
-        .map_or_else(Default::default, |fold| fold.retired.clone());
-    // Issue #202 rec 3: decided here, before the scalar pairing passes below, which leave every
-    // redirect consumer alone. Since issue #886 no clause asks about observers: an observer of the
-    // last slot reads the redirected buffer (see `scatter_target`).
-    //
-    // A folded chain is excluded: the redirect points a lane's scatter at its consumer's buffer,
-    // and a folded lane has no scatter to point anywhere -- its tile goes to the epilogue and its
-    // consumer no longer runs. Excluding it keeps the two counters honest as well as the code:
-    // `bank_scatter_redirects` reports the lanes that still relocate a scatter, not the lanes the
-    // fold made the question moot for.
-    //
-    // A redirect whose consumer is the session Output op is excluded too (issue #916). The redirect
-    // would scatter into the Output's arena buffer and turn its reduction into the no-op
-    // `[own output]` read, but the Output's storage is the host's planes, so the lane would never
-    // reach them. Declined, the chain scatters into its own last slot and the Output op copies that
-    // into the host's planes. That is one block copy, the one the end-of-block copy used to make on
-    // the redirected path. No compiled session reaches this shape: a strip's last slot feeds its
-    // fader, and a route stands between every track and the output.
-    let redirects: Vec<ScatterRedirect> = scatter_redirects(program, &parts.membership, &run_units)
-        .into_iter()
-        .filter(|(run, _, _)| !folded_runs.contains(run))
-        .filter(|(_, _, consumer)| Some(*consumer) != output_op)
-        .collect();
-    #[cfg(any(test, feature = "test-support"))]
-    let redirects = if SCATTER_REDIRECT_DECLINED.with(std::cell::Cell::get) {
-        Vec::new()
-    } else {
-        redirects
-    };
+    parts: &mut RuntimeParts,
+    run_units: &[(Vec<Membership>, Vec<usize>)],
+    retired: &std::collections::BTreeSet<usize>,
+    redirects: &[ScatterRedirect],
+    readers: &[Vec<usize>],
+    first_producer: &[Option<usize>],
+    taps: &BTreeMap<u32, Vec<GraphNodeId>>,
+) -> Vec<Box<dyn GraphRuntimeSplitPairProcessor>> {
     let mut split_pairs: Vec<Box<dyn GraphRuntimeSplitPairProcessor>> = Vec::new();
-
-    // Serialized scalar fader/matrix pairing is decided while both original owners and the
-    // lowered graph are still available.  The schedule is intentionally left untouched: the
-    // matrix binding becomes an identity at its original slot, while the composite runs from the
-    // fader slot and the existing reduction/observer boundaries remain in place.
-    let (readers, first_producer) = op_dataflow(program);
     let crossing_sources = crossing_sources(spec);
     let naming = ops_naming_buffers(program);
     for pair in run_units.windows(2) {
@@ -5565,10 +5529,10 @@ pub(crate) fn build_sequential(
             || !chains_into(
                 program,
                 spec,
-                &parts,
-                &readers,
-                &first_producer,
-                &taps,
+                parts,
+                readers,
+                first_producer,
+                taps,
                 &[first],
                 &[second],
             )
@@ -5644,18 +5608,18 @@ pub(crate) fn build_sequential(
                 || !chains_into(
                     program,
                     spec,
-                    &parts,
-                    &readers,
-                    &first_producer,
-                    &taps,
+                    parts,
+                    readers,
+                    first_producer,
+                    taps,
                     &[fader],
                     &[matrix],
                 )
                 || !scalar_split_interval_is_clear(
                     program,
                     spec,
-                    &parts,
-                    &taps,
+                    parts,
+                    taps,
                     &crossing_sources,
                     &naming,
                     fader,
@@ -5730,6 +5694,98 @@ pub(crate) fn build_sequential(
             }
         }
     }
+    split_pairs
+}
+
+/// Builds the sequential executor's runtime: one coloured arena, producers read in place.
+///
+/// `source_claims` are the source set's claim nodes in claim order when its driver lends its played
+/// planes (issue #918), and empty otherwise; [`source_plane_table`] decides which of them a bank
+/// gathers in place.
+pub(crate) fn build_sequential(
+    program: &ExecutionProgram,
+    spec: &GraphSpec,
+    parts: RuntimeParts,
+    frames: usize,
+    planning: SequentialPlan,
+    observation_activation: Option<RealtimeObservationActivation>,
+    source_claims: &[GraphNodeId],
+) -> Runtime {
+    #[cfg(any(test, feature = "test-support"))]
+    test_only_reset_selected_split_fader();
+    let mut parts = parts;
+    // The arena reserves buffer 0 as the always-zero silence slot, so a coloured buffer `b` is
+    // arena buffer `b + ARENA_BASE`.
+    let arena = |buffer: u32| buffer + ARENA_BASE;
+    let taps = taps_by_op(program, spec);
+    let delays = program
+        .delays
+        .iter()
+        .map(|line| CompensationDelay::new(line.samples as usize))
+        .collect();
+    let SequentialPlan {
+        run_units,
+        fold,
+        unit_of_run,
+        op_slot,
+        installations,
+        output_op,
+    } = planning;
+    let folded_runs: std::collections::BTreeSet<usize> = fold
+        .as_ref()
+        .map(|fold| fold.runs.iter().map(|(run, _)| *run).collect())
+        .unwrap_or_default();
+    // The chain fold's retired routes (issue #218). A retired route emits no unit, and every pass
+    // below that pairs or redirects ops skips it.
+    let retired: std::collections::BTreeSet<usize> = fold
+        .as_ref()
+        .map_or_else(Default::default, |fold| fold.retired.clone());
+    // Issue #202 rec 3: decided here, before the scalar pairing passes below, which leave every
+    // redirect consumer alone. Since issue #886 no clause asks about observers: an observer of the
+    // last slot reads the redirected buffer (see `scatter_target`).
+    //
+    // A folded chain is excluded: the redirect points a lane's scatter at its consumer's buffer,
+    // and a folded lane has no scatter to point anywhere -- its tile goes to the epilogue and its
+    // consumer no longer runs. Excluding it keeps the two counters honest as well as the code:
+    // `bank_scatter_redirects` reports the lanes that still relocate a scatter, not the lanes the
+    // fold made the question moot for.
+    //
+    // A redirect whose consumer is the session Output op is excluded too (issue #916). The redirect
+    // would scatter into the Output's arena buffer and turn its reduction into the no-op
+    // `[own output]` read, but the Output's storage is the host's planes, so the lane would never
+    // reach them. Declined, the chain scatters into its own last slot and the Output op copies that
+    // into the host's planes. That is one block copy, the one the end-of-block copy used to make on
+    // the redirected path. No compiled session reaches this shape: a strip's last slot feeds its
+    // fader, and a route stands between every track and the output.
+    let redirects: Vec<ScatterRedirect> = scatter_redirects(program, &parts.membership, &run_units)
+        .into_iter()
+        .filter(|(run, _, _)| !folded_runs.contains(run))
+        .filter(|(_, _, consumer)| Some(*consumer) != output_op)
+        .collect();
+    #[cfg(any(test, feature = "test-support"))]
+    let redirects = if SCATTER_REDIRECT_DECLINED.with(std::cell::Cell::get) {
+        Vec::new()
+    } else {
+        redirects
+    };
+    let (readers, first_producer) = op_dataflow(program);
+    // The scalar fader/matrix pairing passes (issue #1059): only the whole-plan scalar oracle binds
+    // the per-node strip owners they pair, so they compile only for tests and `test-support`. A
+    // shipped build binds every strip into a bank and has no pair to select.
+    #[cfg(any(test, feature = "test-support"))]
+    let split_pairs = select_scalar_pairs(
+        program,
+        spec,
+        &mut parts,
+        &run_units,
+        &retired,
+        &redirects,
+        &readers,
+        &first_producer,
+        &taps,
+    );
+    #[cfg(not(any(test, feature = "test-support")))]
+    let split_pairs: Vec<Box<dyn GraphRuntimeSplitPairProcessor>> = Vec::new();
     let mut units = Vec::with_capacity(run_units.len());
     // The bind-time half of the collapse-eligibility query, one row per emitted unit. Built here
     // rather than by a later walk because this is the only place the unit's ops and the spec's

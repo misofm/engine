@@ -15,12 +15,20 @@ use std::sync::Mutex;
 
 use sha2::{Digest, Sha256};
 
+// The whole-plan scalar oracle's per-node strip owners (issue #1059) are the only users of these.
+#[cfg(any(test, feature = "test-support"))]
+use builtins::DualMonoBlock;
+#[cfg(any(test, feature = "test-support"))]
+use graph::{GraphBindingBlock, GraphRuntimeProcessor, GraphRuntimeSplitPairProcessor};
+#[cfg(any(test, feature = "test-support"))]
+use std::any::Any;
+
 use builtins::{
     BuiltinChain, BuiltinFaderBank, BuiltinInputBank, BuiltinLaneSelector, BuiltinMatrixBank,
-    BuiltinParameterError, BuiltinParameters, BuiltinTail, ChannelParameters, DualMonoBlock,
-    FaderMuteBuiltins, FaderMuteRampBuiltins, InputBuiltins, Matrix2x2, MatrixBuiltins,
-    MeterAccumulator, MeterConfig, MeterConfigError, MeterHandle, MeterMetricSet, MeterSnapshot,
-    MeterTap, PreparedInputFilterTarget, PreparedMeter, pan_matrix, validate_builtin_filter_cutoff,
+    BuiltinParameterError, BuiltinParameters, BuiltinTail, ChannelParameters, FaderMuteBuiltins,
+    FaderMuteRampBuiltins, InputBuiltins, Matrix2x2, MatrixBuiltins, MeterAccumulator, MeterConfig,
+    MeterConfigError, MeterHandle, MeterMetricSet, MeterSnapshot, MeterTap,
+    PreparedInputFilterTarget, PreparedMeter, pan_matrix, validate_builtin_filter_cutoff,
 };
 use effect_contract::{
     BankWidth, ChannelSymmetryWitness, LiveConsoleRecord, ResponseAnalysisError,
@@ -32,17 +40,16 @@ use engine::realtime::{
 };
 use graph::{
     BuiltinControlDelivery, BuiltinPairFactory, BuiltinProcessor, DependencyLevel,
-    GraphBindingBlock, GraphBuiltinBankResourceEstimate, GraphNodeId, GraphNodeObserverBinding,
+    GraphBuiltinBankResourceEstimate, GraphNodeId, GraphNodeObserverBinding,
     GraphObservationActivationConfig, GraphObservationBlock, GraphObservationController,
     GraphPreparedBuiltinBank, GraphPreparedBuiltinBankInfo, GraphPreparedBuiltinBankProcessor,
-    GraphPreparedSourceSet, GraphRuntimeBindings, GraphRuntimeObserver, GraphRuntimeProcessor,
-    GraphRuntimeSplitPairProcessor, PreparedGraphPlan, StableGraphId, TrackStage,
+    GraphPreparedSourceSet, GraphRuntimeBindings, GraphRuntimeObserver, PreparedGraphPlan,
+    StableGraphId, TrackStage,
 };
 use lane::Backend;
 use rack::{AoSoaScratch, BankSlotKey, RackLocation, RackProgram};
 use rack_compiler::{CohortCandidate, CohortLevel, CohortPoolClass, plan_bank_groups};
 use session::{CompiledSession, MatrixOrPan, Track};
-use std::any::Any;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BuiltinCompileCaps {
@@ -301,8 +308,19 @@ struct StripControlConsumers {
 /// prepared `fader`/`matrix` sections are the scalar fallback and `parameters` is what a bank
 /// lane is built from -- prepared independently, exactly as `bank_inputs` is prepared beside the
 /// scalar `InputBuiltins`, so selecting one never mutates the other.
+///
+/// Only the scalar oracle's `strip_bindings` reads `graph_id` and the three scalar sections, and
+/// it is compiled only for tests and `test-support` (issue #1059). The fields stay in every build
+/// anyway: this struct's size is charged by `resource_plan` (`builtinRetainedBytes`), and a
+/// feature that moved an estimate would make a test build and the shipped module report
+/// different resources for the same session. Shedding the dead storage is a layout change with its
+/// own re-pins, not part of gating the oracle.
 struct StripPreparation {
     track_id: Box<str>,
+    #[cfg_attr(
+        not(any(test, feature = "test-support")),
+        allow(dead_code, reason = "read only by the scalar oracle (#1059)")
+    )]
     graph_id: StableGraphId,
     parameters: BuiltinParameters,
     /// The scalar input section, held here rather than bound eagerly since #210 phase 3, for the
@@ -310,8 +328,20 @@ struct StripPreparation {
     /// or one lane of a strip bank is a *lowering* decision, and the console consumer has to move
     /// to whichever owner wins. A track the input bank claims keeps this value as dead storage the
     /// bank never renders, exactly as a partly claimed fader does.
+    #[cfg_attr(
+        not(any(test, feature = "test-support")),
+        allow(dead_code, reason = "read only by the scalar oracle (#1059)")
+    )]
     input: InputBuiltins,
+    #[cfg_attr(
+        not(any(test, feature = "test-support")),
+        allow(dead_code, reason = "read only by the scalar oracle (#1059)")
+    )]
     fader: FaderMuteBuiltins,
+    #[cfg_attr(
+        not(any(test, feature = "test-support")),
+        allow(dead_code, reason = "read only by the scalar oracle (#1059)")
+    )]
     matrix: MatrixBuiltins,
     control: Option<StripControlConsumers>,
 }
@@ -2115,6 +2145,11 @@ impl PreparedBuiltinsSession {
     ///
     /// This is deliberately a one-way conversion: callers may carry and bind the resulting
     /// artifact, but cannot extract, replace, or clone its provenance-bearing parts.
+    ///
+    /// Every track is bound per node here, so this is the scalar oracle's lowering and exists only
+    /// for tests and `test-support` (issue #1059); [`Self::into_graph_artifact_with_banks`] is the
+    /// lowering every shipped build takes.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn into_graph_artifact<R>(
         mut self,
         graph: PreparedGraphPlan,
@@ -2143,6 +2178,10 @@ impl PreparedBuiltinsSession {
     /// [`StripPreparation::input`] gives: once the input section has a live console channel, which
     /// owner drains it is a lowering decision, and a binding built at preparation could not hand
     /// its consumer to a bank.
+    ///
+    /// The scalar oracle's half of lowering (issue #1059): a vector dispatch leaves no strip
+    /// behind, so shipped builds bind through [`Self::unbanked_strip_bindings`] instead.
+    #[cfg(any(test, feature = "test-support"))]
     fn strip_bindings(&mut self) -> Vec<graph::GraphNodeBinding> {
         let mut bindings = Vec::with_capacity(self.strips.len() * 3);
         let control_delivery = self.control_delivery;
@@ -2264,6 +2303,7 @@ impl PreparedBuiltinsSession {
 
     /// Exact pre-bind charge for live scalar owners. Vector backends consume every strip into
     /// banks, so only the scalar backend retains these concrete per-node boxes.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn graph_scalar_owner_resource(
         &self,
         dispatch: Backend,
@@ -2337,11 +2377,50 @@ impl PreparedBuiltinsSession {
         })
     }
 
+    /// The pre-bind charge for live scalar owners in a build without the scalar oracle: none.
+    ///
+    /// The per-node strip owners exist only for tests and `test-support` (issue #1059). Every
+    /// dispatch a shipped build can name has a bank width, and at a bank width the planner banks
+    /// every strip, so the oracle form above would count zero owners and no split table.
+    #[cfg(not(any(test, feature = "test-support")))]
+    pub fn graph_scalar_owner_resource(
+        &self,
+        dispatch: Backend,
+        levels: &[DependencyLevel],
+        classes: &SessionPoolClasses,
+    ) -> Option<graph::GraphScalarOwnerResourceEstimate> {
+        let _ = (dispatch, levels, classes);
+        Some(graph::GraphScalarOwnerResourceEstimate::default())
+    }
+
+    /// The per-node bindings of every strip no bank claimed.
+    ///
+    /// With the scalar oracle compiled in (tests and `test-support`) these are
+    /// [`Self::strip_bindings`]. Without it there are none to make: every dispatch a shipped build
+    /// can name has a bank width, and the planner banks every strip at a bank width, so a strip
+    /// left over here would be a planner defect, and it is refused rather than dropped (#1059).
+    fn unbanked_strip_bindings(&mut self) -> Vec<graph::GraphNodeBinding> {
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            self.strip_bindings()
+        }
+        #[cfg(not(any(test, feature = "test-support")))]
+        {
+            assert!(
+                self.strips.is_empty(),
+                "a bank-width dispatch banks every strip; the per-node strip owners are compiled \
+                 only with builtins-compiler/test-support (#1059)"
+            );
+            Vec::new()
+        }
+    }
+
     /// Materialize post-input builtin banks using the already-selected host dispatch.
     ///
     /// Every post-input node in a level with a vector backend is banked; the last bank of a
     /// level is padded with identity lanes.  Scalar `InputProcessor` bindings remain only when
-    /// `BankWidth::for_backend(dispatch)` is `None`.
+    /// `BankWidth::for_backend(dispatch)` is `None`, which only the test-only `Backend::Scalar`
+    /// gives (issue #1059).
     ///
     /// Lowering is infallible after `graph_builtin_bank_resource`: `with_builtin_banks` consumes
     /// the plan on error, so the read-only preflight is what makes the attach transactional and
@@ -2355,11 +2434,26 @@ impl PreparedBuiltinsSession {
         classes: &SessionPoolClasses,
     ) -> PreparedBuiltinsGraphArtifact<R> {
         let Some(width) = BankWidth::for_backend(dispatch) else {
+            #[cfg(any(test, feature = "test-support"))]
             return self.into_graph_artifact(graph, report);
+            #[cfg(not(any(test, feature = "test-support")))]
+            panic!(
+                "the whole-plan scalar lowering is compiled only with builtins-compiler/test-support \
+                 (#1059)"
+            );
         };
         let plan = planned_strip_banks(&self.seal.tracks, dispatch, levels, classes);
         if plan.iter().all(|(_, groups)| groups.is_empty()) {
-            return self.into_graph_artifact(graph, report);
+            let mut processors = core::mem::take(&mut self.processors);
+            processors.append(&mut self.unbanked_strip_bindings());
+            return PreparedBuiltinsGraphArtifact {
+                graph,
+                builtin_processors: processors,
+                builtin_observers: self.observers,
+                report,
+                track_controls: self.track_controls,
+                meter_consumers: self.meter_consumers,
+            };
         }
         let mut resource = GraphBuiltinBankResourceEstimate::default();
         for (stage, groups) in &plan {
@@ -2515,7 +2609,7 @@ impl PreparedBuiltinsSession {
         self.strips = strips.into_values().collect();
         let mut processors = core::mem::take(&mut self.processors);
         processors.retain(|binding| !selected.contains(&binding.node));
-        processors.append(&mut self.strip_bindings());
+        processors.append(&mut self.unbanked_strip_bindings());
 
         let graph = graph
             .with_builtin_banks(graph_banks, resource)
@@ -4068,7 +4162,16 @@ impl SessionPoolClasses {
     }
 }
 
+// The whole-plan scalar path (issue #1059). A track's strip renders through the per-node owners
+// below only when its plan was compiled at `Backend::Scalar`, which binds no strip bank; at every
+// vector width the planner banks every strip (`planned_builtin_bank_members`). The scalar backend
+// is the test-only oracle vector banking is compared against (owner ruling 2026-09-28, decision 3),
+// so these owners, their pair factories and `strip_bindings` compile only for tests and this
+// crate's `test-support` feature, and no shipped artifact contains them
+// (`scripts/check-scalar-oracle-absent.py`).
+#[cfg(any(test, feature = "test-support"))]
 struct InputProcessor(InputBuiltins);
+#[cfg(any(test, feature = "test-support"))]
 impl GraphRuntimeProcessor for InputProcessor {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         let block = DualMonoBlock::new(block.left, block.right, block.first_sample)
@@ -4093,7 +4196,9 @@ impl GraphRuntimeProcessor for InputProcessor {
         Some("miso.builtin.input-filters")
     }
 }
+#[cfg(any(test, feature = "test-support"))]
 struct FaderProcessor(FaderMuteBuiltins);
+#[cfg(any(test, feature = "test-support"))]
 impl GraphRuntimeProcessor for FaderProcessor {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         let block = DualMonoBlock::new(block.left, block.right, block.first_sample)
@@ -4105,7 +4210,9 @@ impl GraphRuntimeProcessor for FaderProcessor {
         SEAM_SIDE_WITNESS
     }
 }
+#[cfg(any(test, feature = "test-support"))]
 struct MatrixProcessor(MatrixBuiltins);
+#[cfg(any(test, feature = "test-support"))]
 impl GraphRuntimeProcessor for MatrixProcessor {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         let block = DualMonoBlock::new(block.left, block.right, block.first_sample)
@@ -4134,6 +4241,7 @@ impl GraphRuntimeProcessor for MatrixProcessor {
 /// the prepare-time pool classification -- but the term is folded anyway, by the same
 /// `admit` call the banked drain makes, so the two shapes cannot disagree about what a record
 /// meant. If a later phase gives the scalar tail a collapse, the answer is already correct here.
+#[cfg(any(test, feature = "test-support"))]
 struct ConsoleInputProcessor {
     input: InputBuiltins,
     control: Consumer<TrackInputRecord>,
@@ -4141,6 +4249,7 @@ struct ConsoleInputProcessor {
     /// `EffectControlLane::symmetry` is and for the same reason.
     live: ChannelSymmetryWitness,
 }
+#[cfg(any(test, feature = "test-support"))]
 impl GraphRuntimeProcessor for ConsoleInputProcessor {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         let available = self.control.available_at_entry();
@@ -4206,6 +4315,7 @@ impl GraphRuntimeProcessor for ConsoleInputProcessor {
 /// the block starting at `block.first_sample` is rendered by the post-command ramp. `try_pop`
 /// moves one `Copy` record and `set_target_smoothed` performs four divisions; neither allocates,
 /// locks, nor drops, which is what keeps the shipped artifact's render call-graph gate green.
+#[cfg(any(test, feature = "test-support"))]
 struct ConsoleMatrixProcessor {
     matrix: MatrixBuiltins,
     control: Consumer<TrackControlRecord>,
@@ -4223,6 +4333,7 @@ impl Drop for ConsoleMatrixProcessor {
         });
     }
 }
+#[cfg(any(test, feature = "test-support"))]
 impl GraphRuntimeProcessor for ConsoleMatrixProcessor {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         self.drain_controls().inspect_err(|_| {
@@ -4237,6 +4348,7 @@ impl GraphRuntimeProcessor for ConsoleMatrixProcessor {
         Ok(())
     }
 }
+#[cfg(any(test, feature = "test-support"))]
 impl ConsoleMatrixProcessor {
     fn drain_controls(&mut self) -> Result<(), RenderError> {
         while let Ok(record) = self.control.try_pop() {
@@ -4260,6 +4372,7 @@ impl ConsoleMatrixProcessor {
 /// rendered bits. The drain runs at the top of the block, before any audio is touched, so an
 /// admitted fader move or mute takes effect at exactly the block boundary the control side was
 /// acknowledged with.
+#[cfg(any(test, feature = "test-support"))]
 struct ConsoleFaderProcessor {
     fader: FaderMuteRampBuiltins,
     control: Consumer<TrackFaderRecord>,
@@ -4277,6 +4390,7 @@ impl Drop for ConsoleFaderProcessor {
         });
     }
 }
+#[cfg(any(test, feature = "test-support"))]
 impl GraphRuntimeProcessor for ConsoleFaderProcessor {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         self.drain_controls().inspect_err(|_| {
@@ -4300,6 +4414,7 @@ impl GraphRuntimeProcessor for ConsoleFaderProcessor {
             .then_some(make_scalar_split_pair)
     }
 }
+#[cfg(any(test, feature = "test-support"))]
 impl ConsoleFaderProcessor {
     fn drain_controls(&mut self) -> Result<(), RenderError> {
         while let Ok(record) = self.control.try_pop() {
@@ -4331,6 +4446,7 @@ impl ConsoleFaderProcessor {
 
 /// The live scalar pair owns the two original processors and their consumers. The graph keeps the
 /// original matrix op as an identity, so this owner is invoked exactly at the fader boundary.
+#[cfg(any(test, feature = "test-support"))]
 struct ScalarPairProcessor {
     fader: Box<ConsoleFaderProcessor>,
     matrix: Box<ConsoleMatrixProcessor>,
@@ -4352,6 +4468,7 @@ impl Drop for ScalarPairProcessor {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl GraphRuntimeProcessor for ScalarPairProcessor {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         #[cfg(any(test, feature = "test-support"))]
@@ -4447,6 +4564,7 @@ impl GraphRuntimeProcessor for ScalarPairProcessor {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 type ScalarPairOwners = (
     Box<dyn GraphRuntimeProcessor>,
     Box<dyn GraphRuntimeProcessor>,
@@ -4454,6 +4572,7 @@ type ScalarPairOwners = (
 
 /// The split scalar owner keeps the original fader and matrix consumers together while exposing
 /// their two scheduled execution boundaries to the graph runtime.
+#[cfg(any(test, feature = "test-support"))]
 struct ScalarSplitPairProcessor {
     fader: Box<ConsoleFaderProcessor>,
     matrix: Box<ConsoleMatrixProcessor>,
@@ -4477,6 +4596,7 @@ impl Drop for ScalarSplitPairProcessor {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl GraphRuntimeSplitPairProcessor for ScalarSplitPairProcessor {
     fn begin_fader(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         #[cfg(any(test, feature = "test-support"))]
@@ -4606,6 +4726,7 @@ impl GraphRuntimeSplitPairProcessor for ScalarSplitPairProcessor {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn make_scalar_pair(
     fader: Box<dyn GraphRuntimeProcessor>,
     matrix: Box<dyn GraphRuntimeProcessor>,
@@ -4648,6 +4769,7 @@ fn make_scalar_pair(
     Ok(pair)
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn make_scalar_split_pair(
     fader: Box<dyn GraphRuntimeProcessor>,
     matrix: Box<dyn GraphRuntimeProcessor>,

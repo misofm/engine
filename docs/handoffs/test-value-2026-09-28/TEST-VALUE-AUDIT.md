@@ -425,10 +425,12 @@ web and mobile apps, and the mobile apps embed the engine natively on AArch64 wi
    - Browsers (`simd128`) and phones (NEON) both run 4-lane banks. The x86-64-v3 CI host is `Simd8`,
      and its effect factories decline most 4-lane banks.
    - As a result, the `Simd4` bank-count pins in `graph-compiler/tests/bank_levels.rs` never run
-     (`docs/handoffs/bug-966-2026-09-27/README.md:13-19`). `gate-expander/tests/identity.rs:223`
+     ([#966 handoff `README.md:13-19`](https://github.com/misofm/engine/blob/5379e46ca3b349b9d277d642c008bb7a9643fb76/docs/handoffs/bug-966-2026-09-27/README.md#L13-L19),
+     removed by #1031). `gate-expander/tests/identity.rs:223`
      returns unless `Simd4`; it asserts nothing even then, so issue 06 deletes it. The gap is the
      4-lane bank execution itself, not that test.
-   - The `wasm-pins-harness.patch` from #966 shows how to run them under wasmtime. Folded into
+   - The [`wasm-pins-harness.patch`](https://github.com/misofm/engine/blob/5379e46ca3b349b9d277d642c008bb7a9643fb76/docs/handoffs/bug-966-2026-09-27/wasm-pins-harness.patch)
+     from #966 (removed by #1031) shows how to run them under wasmtime. Folded into
      issue 12.
 3. **Tests that never execute in CI because a feature is off.**
    - `builtins/test-support` and `parametric-eq/test-support` are not enabled in test-debug-b. The

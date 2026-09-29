@@ -190,3 +190,305 @@ Also close #1035's verifier's Low findings (see `1035-*.md`, "Sol verdict, attem
   commands), `docs/DELIVERY_CODEC_BOUNDARY.md:12` (native WAVE/RF64 control-worker path),
   `crates/source/src/lib.rs:1407` ("native worker/decoder bytes"), and the `qualification.yml`
   test-debug-a comment that still lists `source`.
+
+## Attempt 1 evidence
+
+Terra, 2026-09-28. Base `c69736c1` (`codex/batch-slim-2`); change `5e15bc96` and `fbda196d` on
+`codex/1033-remove-native-pcm-runner`. 49 files, **+100 / -9,505 lines** as git counts them (it
+pairs the moved seek model with its old file; counted as a delete plus an add, +669 / -10,074),
+plus five binary WAVs. No timed benchmark was run.
+
+The owner ruling and the Amendments govern: the C ABI, `audit capi`, `check-capi-abi.sh`,
+`control-provider`, plan replacement and `lane::fpenv` all stay. Removed: the native PCM runner
+(Amendment 7's narrower draft), #1035's Part B step 4 and #1035's Low findings 3 and 4 (root's
+amendment).
+
+### Deleted, and what each covered
+
+| item | size | what it covered |
+|---|---:|---|
+| `tools/native-pcm-runner` (`lib.rs`, `main.rs`, `tests/process_boundary.rs`, `Cargo.toml`, `MUTATIONS.md`) | 2,724 lines | the desktop reference tool: resolve WAV/RF64 files for a session, decode them with `native_wave`, compile, submit and render through the C ABI, publish planar `f32` files no-clobber; 20 tests |
+| `fixtures/native-pcm-runner/v1` (5 WAV, 5 session JSON, `MANIFEST.tsv`, `generate.py`) | 12 files, 127,545 bytes | its corpus: the four RIFF launch rates and one RF64, with output digests |
+| `scripts/check-native-pcm-runner.sh`, `test-native-pcm-runner-v1-policy.sh`, `test-native-pcm-runner-portability-v1-policy.sh`; the lint step "Native PCM runner static seal and mutation tests" | 495 lines | the runner's static seal (fixture identity, no graph bypass, no reverse dependency, portability contract) and its mutations |
+| `docs/NATIVE_PCM_REFERENCE_RUNNER_V1.md` | 107 lines | the runner's contract |
+| `crates/source/src/native_wave.rs` and the nine-line `NativeWave*`/`parse_native_wave` re-export block | 1,415 lines | the native RIFF/WAVE and RF64 parser and decoder. It was compiled into every native `source` build, mobile included, and called only by the runner and `audit fixture-source`; 8 tests |
+| `audit fixture-source`: its dispatcher entries and the decoder half of `tools/audit/src/source_fixture.rs` (generated WAV fixtures, independent decode oracle, frozen diagnostic matrix); `fixtures/sources/v1` (README, manifest of 10 checksums) | 626 + 21 lines (the other 558 moved, below) | the native decoder's corpus; 2 tests |
+| `blake3` workspace dependency; lockfile entries `blake3`, `arrayref`, `arrayvec`, `constant_time_eq`, `native-pcm-runner` | 47 lines (lockfile 46, manifest 1) | the runner was `blake3`'s only user. An AArch64 `--workspace --lib` check now needs only `wasm-console` and `wasm-gates` excluded |
+| `audit`'s `source` dependency | 1 line | only `source_fixture.rs` used it |
+| `MISO_ENGINE_REPIN_NATIVE_PCM_RUNNER` vocabulary row | 1 line | the runner's re-pin hook |
+| allow-list rows naming the runner: `check-realtime-policy.sh` and `check-bench-policy.sh` unsafe owners, `check-session-policy.sh`'s `fixtures/native-pcm-runner` scan root | 3 rows | the runner's `unsafe` C calls and its TOML scan |
+
+Proof of non-use before deletion: `git grep` for `native_wave`, `NativeWave`, `parse_native_wave`,
+`source_fixture`, `fixtures/sources` and `native-pcm-runner` found users only in the runner,
+`audit`'s `source_fixture.rs` and the policies listed above; after deletion
+`cargo check --workspace --all-targets --all-features` passes with no warning.
+
+### Kept although the runner called it
+
+- Every `capi` item the runner used (8 exported calls, 20 ABI types and constants): the frozen C
+  ABI, used by capi's own tests, `audit capi`, `check-capi-abi.sh`'s C11/C++17 consumer and mobile
+  apps.
+- `session::{parse_session_json, SessionModel, Source, SourceBitDepth}` and `source::SourceFrame`:
+  used by host-core and capi.
+- `fixtures/stem-identity/v1`, whose `pcm16-stereo-boundaries.wav` the runner's tests read: it is
+  the contract corpus the release CLI copies byte for byte, now checked by the lint job.
+- **The seek-schedule half of `source_fixture.rs`**, which never read `fixtures/sources/v1` and is
+  a live browser and C ABI claim: 256 frozen schedules (queues of 1, 2, 3 and 8 quanta) drive the
+  production `PcmSourceRing` through `HostChunkProvider`, the host path both adapters feed, and
+  every submit result, sample, read-report field and the stale-discard counter must match an
+  independent model; the schedule transcript is pinned. It moved unchanged (model, generator,
+  pinned transcript `ec3b7fef…`, production exercise) to
+  `crates/source/tests/seek_schedule_model.rs` as
+  `frozen_seek_schedules_match_the_independent_ring_model`, with `sha2` as a `source`
+  dev-dependency in place of `bench_support::digest`. Mutation: deleting the ring's
+  stale-discard increment (`lib.rs:1311`) turns it red at schedule 0 step 3; reverted. It now runs
+  in test-debug-a (debug) instead of audit-native (release), in 0.01 s.
+
+### Policies, CI and docs
+
+- CI: the runner lint step is deleted; the lint job gains "Stem identity corpus drift check"
+  (`generate.py --check`), the corpus's only consumer here; test-debug-a's comment no longer lists
+  `source`. No job is added or removed, so the `verdict` table is unchanged.
+- `test-realtime-policy.sh`: `unsafe-outside-native-pcm-runner-lib` becomes
+  `unsafe-in-deleted-native-pcm-runner-lib` (unsafe code at the old path is now rejected).
+  `check-bench-policy.sh`: five unsafe owners, and `test-bench-policy.sh`'s count diagnostics pin 5.
+  `test-session-policy.sh`: the scan root leaves its four loops.
+- `docs/ENGINE_ENV_VOCABULARY.md`: the runner row goes, and `MISO_ENGINE_PRINT_HELPER_MANIFEST`'s
+  row now names its real user, `check-effect-runtime-policy.sh` (it said "native PCM runner
+  portability gate"). `test-env-vocabulary.sh`'s count: 68 -> 67.
+- AGENTS.md: "Build for native/cloud embedding, iOS, Android, and browser WebAssembly" becomes the
+  browser plus iOS and Android apps through the C ABI, with desktop and cloud not live scope
+  (ruling R2); "PCM runner" leaves the deliverables and joins "Do not deliver". "a narrow C ABI"
+  stays.
+- #1035 Low finding 3: `docs/STEM_IDENTITY_V1.md` names the release CLI (`misofm/cli`,
+  `src/stem-identity.ts`) as the only serializer and WAVE (RIFF and RF64) stripper, and the browser
+  stem store as the owner of the `blake3:` grammar and of hashing the canonical bytes a resolver
+  hands it (no container decoder). "The reference WAVE path" becomes "every WAVE path (today only
+  the release CLI's)". Verified against a local `misofm/cli` checkout (`3c89436`): all ten corpus
+  copies in `tests/fixtures/stem-identity` are byte-identical to this repository's.
+- #1035 Low finding 4: `docs/derivations/241-browser-source-identities.md` records the
+  `stem-hasher` agreement as history; `docs/DELIVERY_CODEC_BOUNDARY.md` says there is no
+  in-repository file reader; `SourceGraphSource`'s two field docs (`source/src/lib.rs`, was
+  `:1407`) no longer say "native worker/decoder"; the test-debug-a comment is fixed. Also fixed:
+  `generate.py`'s comment naming "the streaming Rust implementation".
+- Historical mentions: `docs/C_ABI_V1_QUALIFICATION.md` and `docs/IMPLEMENTATION_PLAN.md` get a
+  one-line removal note; `BUILTINS_AND_METERING_V1.md` ruling D1 and a `parametric-eq` test comment
+  no longer lean on the runner. The rulings inventories and `241-schema-repins.md` are left as
+  history.
+
+### Removed tests and the claim each held (`cargo test --locked --workspace --all-targets --all-features -- --list`, binary-qualified)
+
+Base 2,260 -> change 2,231: **30 removed, 1 added**, nothing else moved.
+
+- **`native_pcm_runner` (19) and `process_boundary` (1)**, the runner's own claims:
+  `cli_is_closed_and_exact`, `identity_grammar_is_closed`,
+  `encoder_preserves_signed_zero_and_publication_is_no_clobber`,
+  `final_collisions_inserted_immediately_before_publication_are_preserved`,
+  `injected_create_write_and_publish_failures_are_terminal`,
+  `missing_mismatched_and_truncated_riff_sources_are_exact_precompile_failures`,
+  `portable_publication_state_machine_freezes_every_race_and_failure`,
+  `post_create_partial_replacements_are_preserved_and_never_published`,
+  `preflight_and_resolution_fail_before_compile_or_output`,
+  `publication_refuses_every_preexisting_final_and_partial_kind`,
+  `real_c_abi_riff_and_rf64_render_exact_block_planar_outputs`,
+  `real_output_faults_remove_only_the_owned_partial`,
+  `resolver_rejects_identity_shape_file_shape_and_declaration_mismatches_precompile`,
+  `resolver_rejects_integer_and_float_depth_mismatches_both_directions_precompile`,
+  `reversed_source_declarations_submit_in_canonical_id_order`,
+  `scalar_caps_precede_resolution_and_cover_overflow_and_unsupported_rate`,
+  `shared_runner_orders_short_final_submission_and_terminal_failures`,
+  `source_symlink_is_rejected_and_sentinel_preserved`,
+  `unsupported_platform_stops_before_output_source_engine_or_publication`, and
+  `executable_boundary_accepts_fixture_and_rejects_zero_frames`. CLI, file resolution, WAV
+  decoding and file publication are desktop-tool claims with no live user. The C ABI half of the
+  render test (compile, host-fed submission, render at the launch rates) stays guarded by capi's
+  `direct_and_c_render_match_one_and_ten_tracks_across_launch_rates`,
+  `compile_publishes_both_children_and_source_control_is_region_checked`,
+  `source_rejections_reach_the_c_host_as_their_own_diagnostic`, `resource_lifecycle.rs`, and
+  `check-capi-abi.sh`'s C11/C++17 consumer (generation 1 submit, generation 2 seek and submit, two
+  renders); a short end-of-region submission by the seek model and host-core's `prepare.rs`
+  source tests.
+- **`source` `native_wave::tests` (8)**: `buffered_decodes_share_one_fill_and_a_straddled_refill_keeps_the_reader_position`,
+  `classic_formats_decode_with_exact_pcm_scaling_and_float_sanitation`,
+  `every_encoding_decodes_the_same_bits_however_the_region_is_partitioned`,
+  `extensible_and_rf64_metadata_are_accepted_with_checked_sizes`,
+  `failed_io_forgets_reader_position_and_retry_reseeks`,
+  `invalid_native_containers_and_regions_have_frozen_diagnostics`,
+  `malformed_ds64_byte_rate_duplicate_data_and_metadata_cap_reject_without_payload_retention`,
+  `mask_sanitizers_freeze_float_boundary_bits_and_counts`: the deleted parser and decoder.
+- **`audit` (2)**: `source_fixture::tests::generated_fixtures_match_manifest_oracles_and_mutation_policy`
+  (its decoder half is deleted with the decoder; its ring half is the added test above) and
+  `source_fixture::tests::shared_sha256_alias_matches_published_literals` (the shared
+  `sha256_hex` known answers, still held by `bench_support` `digest::tests::matches_the_published_vectors`
+  and four identical `audit` alias tests).
+- **Added (1)**: `seek_schedule_model::frozen_seek_schedules_match_the_independent_ring_model`.
+
+**Gate 5, the live claims.** No allocation, lock or syscall at the native public render entry:
+`audit capi` (100,000 calls, all counters 0, through the Issue-544 validator). Browser render
+closure: `check-web-audioworklet.sh`'s call-graph gates on this change's module. Realtime traces:
+`trace-graph-audit.sh` and `trace-builtins-audit.sh` (1,000,000 blocks). Resource lifecycle:
+`resource_lifecycle.rs` and `boot_transient_budget.rs` (test-debug-a). Ring seeks, admission and
+underrun: the moved model plus the shared-ring tests #1035's verdict lists.
+
+### Gates
+
+| gate | result |
+|---|---|
+| `cargo check --locked --workspace --all-targets --all-features` | pass, 0 warnings |
+| `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`, and without `--all-features` | pass |
+| `cargo fmt --all --check` | pass |
+| `RUSTFLAGS='-C target-feature=+simd128' cargo check --locked --target wasm32-unknown-unknown -p host-web -p host-core -p source` | pass |
+| `CARGO_PROFILE_RELEASE_PANIC=unwind cargo check --locked --release --workspace --all-targets` | pass |
+| `cargo check --locked --all-targets --all-features --target <aarch64-apple-ios, aarch64-linux-android> -p source -p capi -p host-core` | pass, 0 warnings |
+| `cargo check --locked --workspace --lib --all-features --target <aarch64-apple-ios, aarch64-linux-android> --exclude wasm-console --exclude wasm-gates` | pass (no `native-pcm-runner` exclusion needed now) |
+| `scripts/check-cross-targets.sh` (product crates checked and clippy-linted on both AArch64 targets, #1018 memset ceilings, armv7 refusal, wasm rows) | PASS; 11 expected memset rows unchanged, `source` has no calls before or after |
+| test-debug-a's exact command | 1,263 passed, 0 failed, 7 ignored |
+| `cargo test --locked --release -p source -p capi -p host-core --features host-core/test-support` | 255 passed, 0 failed, 2 ignored |
+| `cargo test --locked --release -p audit -p bench -p console-workload` (audit-native) | 128 passed, 0 failed, 2 ignored |
+| `cargo test --locked -p audit` (dev) and `-p parametric-eq --test analytic` (dev and release) | 40 passed; 7 and 7 passed |
+| console digests (`gain_pan_profile digests`) on base and change | 17 rows, byte-identical |
+| `bash scripts/run-wasm-gates.sh` | pass (native, wasm scalar, wasm simd128, V8 spill) |
+| `audit capi` through the workflow's inline Issue-544 validator | pass, `total_violations` 0 |
+| `check-capi-abi.sh` and `--self-test` | pass (shared and static linkage; mutations ok) |
+| `check-ci-path-routing.py`, `test-ci-path-routing.py`, `check-script-reachability.py`, `test-script-reachability.py` | pass (133 reached, 8 operator) |
+| `check-env-vocabulary.sh`, `test-env-vocabulary.sh` | pass, 67 names |
+| every `scripts/check-*`/`test-*` the workflow runs, with its CI arguments where it takes one (85 invocations: every lint policy pair, `check-release-shape.py` and `--self-test`, `check-test-support-ci.py`, `check-workspace-policy.sh`, `check-host-core-policy.sh`, `check-conformance-boundaries.sh`, `check-artifact-evidence-leak.sh`, `check-session-policy.sh`, `check-realtime-policy.sh`, the audit-native trace, fixture, console and effect-contract steps, `check-protocol-wasm-parity.sh`, `check-sdk-generated.sh`, `check-stem-store-v1.mjs`, `generate.py --check`) | all pass after `fbda196d` (the first run caught `test-bench-policy.sh`'s count pin) |
+| `check-web-audioworklet.sh`, `check-browser-expected-resources.py --artifacts`, `check-web-audioworklet-v8-spill.py`, `check-sdk-headless.sh` over an artifact directory assembled from this change's module (the build script's copy steps, no pin) | pass (SDK 285/285) |
+| not run | `check-sdk-types.sh` (needs `npm ci`), `run-aarch64-tests.sh` (needs the arm64 runner), `check-graph-determinism.sh` (untouched crates) |
+
+### Shipped artifact
+
+`bash scripts/build-web-audioworklet.sh --module-only` on base and change, same machine and
+toolchain: base `6c952a2c…`, change `01dd58be…`, **both 3,485,631 bytes: size change 0**. 8 bytes
+differ, all data: seven `core::panic::Location` line fields for `crates/source/src/lib.rs`, each
+moved by -9 (the deleted `native_wave` block above them): 835 -> 826 twice, 834 -> 825,
+518 -> 509, 1165 -> 1156 twice, 1164 -> 1155; columns unchanged. `wasm-objdump -d` of the two
+modules is identical. The pin is not moved here; the batch's pin (`f7bd75ca…`) is already stale on
+base, and the boundary re-pin must carry this reason.
+
+### Follow-ups (not done here)
+
+1. `SourceDiagnosticCode` (shipped in the module) now has 8 of 11 variants that nothing
+   constructs: `ChannelsMismatch`, `RegionOutOfBounds`, `ContainerInvalid` and `FormatUnsupported`
+   lost their only constructor with `native_wave`; `AssetUnresolved`, `ContentIdentityMismatch`,
+   `GenerationNonMonotonic` and `GraphBindingMismatch` had none on base. Pruning the registry moves
+   the artifact, so it is its own issue.
+2. `fixtures/capi-qualification/v1` still names the runner's files; #1029 deletes it.
+3. Open #895 (native runner I/O) closes as descoped.
+
+## Sol verdict, attempt 1
+
+**PASS.** Sol, 2026-09-28. Verified on a scratch merge of `7d72a325` into `codex/batch-slim-2`
+(`6709552c`): the merge is textually clean. The merged tree's Rust, manifests and lockfile are
+byte-identical to this branch; the batch head adds only its AudioWorklet re-pin. Nothing live was
+deleted, no claim was lost, no ABI or wire code moved, and every gate I ran passes on the merge.
+Findings, most severe first:
+
+1. **Merge note, not a defect of this change: the batch's AudioWorklet pin must move again.** The
+   batch head already re-pinned at its boundary (`cbfaf9de`, `6c952a2c…`). This change moves the
+   module to `01dd58be…`. I built both modules on this machine: both are 3,485,631 bytes;
+   `wasm-objdump -d` output is identical; and 8 data bytes differ, the seven `crates/source/src/lib.rs`
+   panic line fields, each −9. So on the merge, the artifact job's pinned build fails with
+   "AudioWorklet artifact pin mismatch" until someone re-pins. The re-pin touches
+   `miso-engine-v1-audio-worklet-artifact.sha256`, `qualification/results.json`,
+   `BROWSER_DEPLOYMENT_MATRIX.md` and `scripts/test-web-audioworklet.mjs`, and needs the browser
+   qualification re-run, with this reason recorded. Without the pin check, the merged module passes
+   `check-web-audioworklet.sh`, `check-browser-expected-resources.py --artifacts` and the V8 spill
+   gate.
+2. **Low: the moved seek model covers less than its new module doc and this spec's evidence
+   claim.** The model's ring plant reproduces: deleting `lib.rs:1311` fails at schedule 0 step 3.
+   So does my own plant, `underrun_events` `+0`. However, all 512 short end-of-region submissions
+   in the 256 frozen schedules are expected `Invalid`, so none is ever admitted. All 3,456 renders
+   copy 0 frames, so "every rendered sample" is underrun silence. A plant that rejects every short
+   end-of-region block (`lib.rs:942`, dropping `&& !end_of_region`) leaves the model green. The
+   claim is still held: host-core's
+   `prepare_reports_the_session_shape_and_feeds_sources_independently` goes red on it. So does
+   capi's parity test when the C side drops `end_of_region`. Correct the module doc
+   ("complete and short end-of-region chunks", "every rendered sample") and the Gate 5
+   attribution. The weakness predates this change: the code moved unchanged, and every item is
+   identical to `source_fixture.rs` at base.
+3. **Low: `SourceDiagnosticCode` is internal and dead, not a host-visible code table.** It is a
+   `#[non_exhaustive]` Rust enum with no `repr` or numeric value. None of its strings appear in the
+   C header, the SDK, the protocol or the docs. The C ABI's `source.channels.mismatch` and
+   `source.rate.mismatch` come from host-core's own table (`host-core/src/source.rs:77-88`), not
+   from this enum. The registry's 9 unique strings are absent from both the base and the merged
+   module, so it does not ship, contrary to follow-up 1. The whole registry (`SourceDiagnostic`,
+   `SourceDiagnosticPath`, `SourceDiagnosticCode`, `PcmSourceRingError::diagnostic_code`) has no
+   caller outside `source`'s own `registry_and_host_shape_errors_are_stable` unit test. Even
+   `RateMismatch` is constructed only there. The follow-up should delete the registry rather than
+   freeze its numbering. Deleting it shifts `source` panic lines, so it re-pins the module.
+4. **Information.**
+   - `blake3` has no Rust user left. Capi's full normal and build closure is identical on base and
+     merge (91 packages, all targets), and so are the 25 derived product crates and host-web's wasm
+     closure.
+   - Three gates guard the `blake3:` identity:
+     - `scripts/check-stem-store-v1.mjs` runs `stem-store-hash-v1.mjs`, which checks official and
+       `hash-wasm` BLAKE3-256 known answers against `incremental-blake3.js` across hostile chunk
+       sizes;
+     - the session validator's grammar tests;
+     - the new lint step.
+   - The lint step discriminates. A flipped `.pcm` byte, a flipped `.wav` byte, a changed
+     `VECTORS.tsv` identity and a corrupted generator permutation each exit 1. It routes `full`.
+   - All ten `misofm/cli` corpus copies (`3c89436`) are byte-identical.
+
+**Removed claims against their named guards (planted, then reverted).**
+
+| removed test | mutation | guard | result |
+|---|---|---|---|
+| `real_c_abi_riff_and_rf64_render_exact_block_planar_outputs`, C ABI half | C submit reverses its planes (`ffi.rs:480`) | capi `direct_and_c_render_match_one_and_ten_tracks_across_launch_rates` | red at 44.1 kHz, block 0 |
+| `shared_runner_orders_short_final_submission_and_terminal_failures` | C submit drops `end_of_region` (`ffi.rs:493`) | the same capi parity test | red |
+| the same test | host path rejects short final blocks (`source/src/lib.rs:942`) | host-core `tests/prepare.rs`, and the seek model | host-core red, **seek model green** (finding 2) |
+| `source_fixture::tests::shared_sha256_alias_matches_published_literals` | `sha256_hex` drops the first digest byte | `bench_support` `matches_the_published_vectors` and the four `audit` alias tests | all 5 red |
+
+**Nothing live deleted.** Outside history, `git grep` on the merge finds each removed crate,
+module, item, script, fixture, doc and dependency only in:
+- comments;
+- `docs/derivations/241-schema-repins.md` (history);
+- `fixtures/capi-qualification/v1`, which is dead and which #1029 deletes.
+
+It finds none in any workflow, `Cargo.toml`, `scripts/lib/product-crates.sh`, the SDK or
+`hosts/`. No crate under `crates/capi`, `host-core`, `engine`, `lane`, `protocol`, `session`,
+`hosts/` or `sdk/` changed. Nor did `bench`, `bench-support` or `console-workload`. The
+`qualification.yml` job set and `verdict` table are unchanged.
+
+**Gates on the merge.** All pass, and I found no failure on base to attribute.
+
+- **Build and lint:**
+  - `cargo check --workspace --all-targets --all-features` (0 warnings);
+  - `clippy -D warnings`, with and without `--all-features`;
+  - `fmt --check`;
+  - `RUSTFLAGS=+simd128` wasm check of `host-web`, `host-core` and `source`;
+  - `CARGO_PROFILE_RELEASE_PANIC=unwind` release workspace check.
+- **AArch64:**
+  - `aarch64-apple-ios` and `aarch64-linux-android`: `--workspace --lib --all-features`,
+    excluding only `wasm-console` and `wasm-gates`;
+  - `--all-targets` for `source`, `capi` and `host-core` (0 warnings).
+- **Cross-targets:** `check-cross-targets.sh` passes. The same 10 iOS memset rows; no `source` or
+  runner row; the product list is identical to base.
+- **Tests:**
+  - dev tests of `source` and its reverse dependencies, plus `bench-support` (547 passed), and
+    `audit` (40);
+  - release tests of `source`, `capi`, `host-core` and `host-web` (465), and `audit`, `bench` and
+    `console-workload` (128);
+  - all 0 failed.
+- **Console digests:** `gain_pan_profile digests` is byte-identical to the batch head (17 rows).
+- **audit-native replayed** (steps 1 and 3–20):
+  - `audit capi`: 100,000 calls, 0 violations, and the Issue-544 validator passes;
+  - `check-capi-abi.sh` and `--self-test` pass (shared and static linkage);
+  - the trace, probe and determinism steps pass.
+- **Scripts:**
+  - `run-wasm-gates.sh`;
+  - `test-env-vocabulary.sh` (67 names);
+  - 58 lint-job policy invocations: every check/test pair, `check-ci-path-routing.py`,
+    `test-ci-path-routing.py`, `check-script-reachability.py` (133 reached, 8 operator),
+    `check-release-shape.py` with `--self-test`, `check-test-support-ci.py`, `generate.py --check`
+    and `check-stem-store-v1.mjs`;
+  - `check-sdk-generated.sh`, `check-protocol-wasm-parity.sh`, and the benchmark validators (untimed).
+
+**Not verified here:**
+- `run-aarch64-tests.sh`: no arm64 runner. The seek model now also runs in the AArch64 legs, using
+  plain integer and IEEE `f32` arithmetic.
+- `check-sdk-types.sh`, `sdk-package.sh` and `check-sdk-headless.sh`: these need `npm ci`.
+- The Playwright browser job.
+
+The SDK and browser sources are untouched, and the module's code section is identical.

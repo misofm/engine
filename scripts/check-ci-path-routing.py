@@ -11,6 +11,9 @@ from __future__ import annotations
 
 import argparse
 import ast
+import functools
+import importlib.util
+import os
 import pathlib
 import re
 import shlex
@@ -42,6 +45,26 @@ RELEASE_INPUT_FILES = {
     ".cargo/config.toml",
     "scripts/check-release-shape.py",
 }
+# Issue #1043: the script-gate self-test suites. On a pull request each runs in qualification.yml's
+# `gate-self-tests` job only when a changed path hits its key (ci-path-router.py SELF_TEST_INPUTS,
+# in this order), and every night in nightly.yml's `moved-mutation-suites`; its gate runs on every
+# change. Per suite: the job that runs its gate, the gate command, and the self-test commands.
+SELF_TEST_SUITES = {
+    "env-vocabulary": ("lint", "bash scripts/check-env-vocabulary.sh",
+                       ("bash scripts/test-env-vocabulary.sh",)),
+    "conformance-boundaries": ("lint", "bash scripts/check-conformance-boundaries.sh",
+                               ("bash scripts/test-conformance-boundaries.sh",)),
+    "console-benchmark": ("lint", "bash scripts/check-bench-preconditions.sh",
+                          ("bash scripts/test-console-benchmark.sh",)),
+    "sdk-deletions": ("sdk", "python3 -B scripts/check-sdk-deletions.py",
+                      ("python3 -B scripts/check-sdk-deletions.py --self-test",)),
+    "dsp-research": ("docs-gates", "bash scripts/check-dsp-research.sh",
+                     ("bash scripts/test-dsp-research.sh",)),
+}
+SELF_TEST_SHARED_INPUTS = {".github/workflows/qualification.yml"}
+# The mention rule scripts/check-script-reachability.py (#1027) applies to every workflow-reached
+# script: a basename on a line that is not a comment, and a jq `include`/`import` module.
+REACHABILITY_CHECKER = "scripts/check-script-reachability.py"
 
 
 class Invalid(RuntimeError):
@@ -65,6 +88,7 @@ def section(text: str, header: str, next_headers: tuple[str, ...]) -> str:
     return tail[:end]
 
 
+@functools.lru_cache(maxsize=None)
 def job(text: str, name: str) -> str:
     jobs = section(text, "jobs:", ())
     match = re.search(rf"^  {re.escape(name)}:\n", jobs, re.MULTILINE)
@@ -174,6 +198,108 @@ def check_classifier_contract(root: pathlib.Path) -> None:
             and isinstance(command.elts[3].value, ast.Name)
             and command.elts[3].value.id == "revisions",
             "ci-path-router.py: production Git diff must consume the pinned option tuple exactly")
+    check_self_test_inputs(root, tree)
+
+
+def literal_strings(node: ast.expr | None) -> list[str] | None:
+    """The elements of a literal set, tuple or list of string constants, or None."""
+    if not isinstance(node, (ast.Set, ast.Tuple, ast.List)):
+        return None
+    values = [element.value for element in node.elts
+              if isinstance(element, ast.Constant) and isinstance(element.value, str)]
+    return values if len(values) == len(node.elts) else None
+
+
+def suite_scripts(commands: tuple[str, ...]) -> list[str]:
+    """The repository scripts a suite's commands run."""
+    return sorted({word for command in commands for word in shlex.split(command)
+                   if word.startswith("scripts/")})
+
+
+def key_covers(key: set[str], path: str) -> bool:
+    return any(path == entry or (entry.endswith("/") and path.startswith(entry)) for entry in key)
+
+
+def reachability_rule(root: pathlib.Path):
+    source = root / REACHABILITY_CHECKER
+    require(source.is_file(), f"{REACHABILITY_CHECKER} is missing: the self-test keys are checked "
+            "with its mention rule")
+    spec = importlib.util.spec_from_file_location("script_reachability", source)
+    require(spec is not None and spec.loader is not None, f"cannot load {REACHABILITY_CHECKER}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# The mentions of each (script, text) already scanned: a pure function of the text, kept so the
+# mutation tests' in-process runs do not rescan unchanged scripts.
+MENTIONS: dict[tuple[str, str], set[str]] = {}
+
+
+def mention_closure(root: pathlib.Path, reachability):
+    """A function from seed scripts to every file under scripts/ they mention, transitively through
+    the scripts they mention, by the reachability rule's own definition of a mention (#1027)."""
+    by_name: dict[str, list[str]] = {}
+    for directory, subdirectories, files in os.walk(root / "scripts"):
+        subdirectories[:] = sorted(name for name in subdirectories if name != "__pycache__")
+        relative = pathlib.Path(directory).relative_to(root).as_posix()
+        for name in sorted(files):
+            by_name.setdefault(name, []).append(f"{relative}/{name}")
+
+    def mentioned(current: str) -> set[str]:
+        path = root / current
+        if not current.endswith(reachability.CARRIER_SUFFIXES) or not path.is_file():
+            return set()
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if (current, text) not in MENTIONS:
+            MENTIONS[(current, text)] = reachability.mentioned(current, text)
+        return MENTIONS[(current, text)]
+
+    def closure(seeds: list[str]) -> set[str]:
+        reached = set(seeds)
+        frontier = sorted(reached)
+        while frontier:
+            current = frontier.pop()
+            for name in mentioned(current):
+                for target in by_name.get(name, ()):
+                    if target not in reached:
+                        reached.add(target)
+                        frontier.append(target)
+        return reached
+
+    return closure
+
+
+def check_self_test_inputs(root: pathlib.Path, tree: ast.Module) -> None:
+    """Issue #1043: each self-test suite's router key is every file the suite reads, not only its
+    gate (amendment 4). Every script the suite runs, and every script under scripts/ those mention
+    -- the gate, `lib/gate.sh`, jq libraries, validators, runners -- must be in its key, so an edit
+    to any of them runs the suite. A tree read wholesale (the SDK self-test reads `sdk/`) is a
+    prefix entry the rule cannot derive; the evidence in the spec records it."""
+    table = router_assign(tree, "SELF_TEST_INPUTS")
+    require(isinstance(table, ast.Dict),
+            "ci-path-router.py: SELF_TEST_INPUTS must be a literal dict")
+    suites = [key.value if isinstance(key, ast.Constant) else None for key in table.keys]
+    require(suites == list(SELF_TEST_SUITES),
+            "ci-path-router.py: SELF_TEST_INPUTS must name exactly the self-test suites "
+            f"{list(SELF_TEST_SUITES)}, in that order")
+    shared = literal_strings(router_assign(tree, "SELF_TEST_SHARED_INPUTS"))
+    require(isinstance(router_assign(tree, "SELF_TEST_SHARED_INPUTS"), ast.Set)
+            and shared is not None and set(shared) == SELF_TEST_SHARED_INPUTS,
+            "ci-path-router.py: SELF_TEST_SHARED_INPUTS must be exactly the workflow hosting the "
+            "self-test job")
+    closure = mention_closure(root, reachability_rule(root))
+    for suite, value in zip(suites, table.values):
+        entries = literal_strings(value)
+        require(isinstance(value, ast.Set) and entries is not None and entries
+                and len(set(entries)) == len(entries),
+                f"ci-path-router.py: SELF_TEST_INPUTS[{suite!r}] must be a literal set of paths")
+        key = set(entries)
+        missing = sorted(path for path in closure(suite_scripts(SELF_TEST_SUITES[suite][2]))
+                         if not key_covers(key, path))
+        require(not missing,
+                f"ci-path-router.py: SELF_TEST_INPUTS[{suite!r}] misses files its suite reads: "
+                + ", ".join(missing))
 
 
 def check_qualification_no_path_filter(text: str) -> None:
@@ -297,10 +423,10 @@ TEST_SUPPORT_CI_LINES = (
     "python3 -B scripts/test-test-support-ci.py\n",
 )
 
+# check-sdk-deletions.py's --self-test moved to `gate-self-tests` (#1043); SELF_TEST_SUITES pins it.
 SDK_CLOSURE_LINES = (
     "bash scripts/check-sdk-generated.sh",
     "python3 -B scripts/check-sdk-deletions.py",
-    "python3 -B scripts/check-sdk-deletions.py --self-test",
     "bash scripts/check-sdk-types.sh",
     "bash scripts/check-sdk-headless.sh target/ci/qualification-artifacts",
     "bash scripts/sdk-package.sh check target/ci/qualification-artifacts",
@@ -340,25 +466,206 @@ V8_SPILL_ARTIFACT_LINE = (
     "python3 -B scripts/check-web-audioworklet-v8-spill.py "
     "target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm"
 )
-ARTIFACT_PIN_STEP = "      - name: Verify the downloaded artifact against its source pin\n"
+# Issue #1061: every job that reads the shipped module checks its download against the digest of
+# the bytes the `artifact` job built -- not against the committed pin, which is the release
+# fingerprint -- so every artifact gate in a run reads exactly those bytes.
+ARTIFACT_DIGEST_STEP = (
+    "      - name: Verify the downloaded artifact against the artifact job's digest\n"
+    "        env:\n"
+    "          BUILT: ${{ needs.artifact.outputs.sha256 }}\n"
+)
+ARTIFACT_DIGEST_OUTPUT = (
+    "    outputs:\n"
+    "      sha256: ${{ steps.build.outputs.sha256 }}\n"
+    "      rustc: ${{ steps.build.outputs.rustc }}\n"
+)
+ARTIFACT_READERS = ("sdk", "artifact-gates", "browser")
+# Issue #1061, attempt 3: a change's report compares its module with the digest its base's own CI
+# run recorded, never with a base rebuilt inside the change's workflow. Attempts 1 and 2 rebuilt the
+# base there, and a toolchain bump, one workflow-level cargo variable or one `GITHUB_PATH` line
+# steered that rebuild and read UNCHANGED. What is pinned is what the comparison rests on:
+# - on `main`, `artifact-record` posts the record: a job run only on a push to `main`, checking out
+#   nothing, and the only job in the workflow holding a write permission, so no job a pull request
+#   reaches can forge its base's record (#1061 attempt 3 verdict, finding 1);
+# - the build step writes the digest and the rustc release the record and the report carry;
+# - `artifact-identity` fetches and compares in one step with no `if:`, keeps its twin build, and
+#   has the one read permission;
+# - neither job carries a job-level `continue-on-error` (a failed record or comparison would still
+#   pass), `defaults` (`shell: bash {0}` drops `-e` and masks a failed self-test) or `env` (a job
+#   `PATH` could put another `gh` first and forge the record or the lookup).
+# The build environment itself is deliberately not pinned: the record is what the base's own run
+# built in its own environment, so a change to that environment reads CHANGED, as it should.
+ARTIFACT_BUILD_LINES = (
+    '          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"\n',
+    '          echo "rustc=$(rustc -vV | sed -n \'s/^release: //p\')" >> "$GITHUB_OUTPUT"\n',
+)
+RECORD_JOB = "artifact-record"
+RECORD_HEAD = (
+    "    needs: [route, artifact]\n"
+    "    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && "
+    "(needs.route.outputs.route == 'sdk' || needs.route.outputs.route == 'full')\n"
+)
+RECORD_PERMISSIONS = "    permissions:\n      statuses: write\n"
+ARTIFACT_RECORD_STEP = """      - name: Record this commit's module for later changes to compare against
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA256: ${{ needs.artifact.outputs.sha256 }}
+          RUSTC: ${{ needs.artifact.outputs.rustc }}
+        run: |
+          [[ "$SHA256" =~ ^[0-9a-f]{64}$ && "$RUSTC" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+(-[A-Za-z0-9.]+)?$ ]] || { echo "malformed record: '$SHA256' rustc '$RUSTC'" >&2; exit 1; }
+          gh api -X POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" -f state=success -f context=audioworklet-sha256 -f "description=$SHA256 rustc $RUSTC" -f "target_url=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+"""
+WRITE_PERMISSION = re.compile(r"^\s+[a-z-]+: write\s*$|^\s*permissions: write-all\s*$",
+                              re.MULTILINE)
+IDENTITY_PERMISSIONS = "    permissions:\n      contents: read\n      statuses: read\n"
+IDENTITY_CHECKOUT = re.compile(
+    r"      - uses: actions/checkout@[0-9a-f]{40} # v\S+\n        with:\n          fetch-depth: 0\n\Z")
+IDENTITY_INSTALL = "      - name: Install pinned Rust toolchain and Wasm standard library\n"
+IDENTITY_TWIN_STEP = """      - name: Rebuild the module from another checkout path and CARGO_HOME
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/twin" HEAD
+          mkdir "$RUNNER_TEMP/twin-module"
+          CARGO_HOME="$RUNNER_TEMP/twin-cargo-home" bash "$RUNNER_TEMP/twin/scripts/build-web-audioworklet.sh" --module-only "$RUNNER_TEMP/twin-module"
+"""
+IDENTITY_REPORT_STEP = """      - name: Report ARTIFACT CHANGED or UNCHANGED against the base's recorded digest, and hold a release change to its pin
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          BUILT: ${{ needs.artifact.outputs.sha256 }}
+          RUSTC: ${{ needs.artifact.outputs.rustc }}
+        run: |
+          set -o pipefail
+          python3 -B scripts/web-audioworklet-identity.py --self-test
+          python3 -B scripts/web-audioworklet-identity.py report --event "$EVENT" --before "$BEFORE" --repository "$GITHUB_REPOSITORY" --built "$BUILT" --rustc "$RUSTC" --twin "$RUNNER_TEMP/twin-module/miso-engine-v1-audio-worklet.simd128.wasm" | tee -a "$GITHUB_STEP_SUMMARY"
+"""
+IDENTITY_STEPS = (IDENTITY_TWIN_STEP, IDENTITY_REPORT_STEP)
+UNMASKABLE = re.compile(r"^    (continue-on-error|defaults|env):", re.MULTILINE)
+
+
+def job_steps(job_text: str) -> list[str]:
+    """A job's steps, each from its `      - ` line to the next, with comment-only lines and blank
+    lines removed (comments document a step; they never change what it runs)."""
+    body = job_text.split("    steps:\n", 1)
+    require(len(body) == 2, "qualification.yml: job has no steps")
+    lines = [line for line in body[1].splitlines(keepends=True)
+             if line.strip() and not line.lstrip().startswith("#")]
+    steps: list[str] = []
+    for line in lines:
+        if line.startswith("      - "):
+            steps.append(line)
+        else:
+            require(bool(steps), "qualification.yml: text before the first step")
+            steps[-1] += line
+    return steps
+
+def check_qualification_artifact_digest(text: str) -> None:
+    """Issue #1061: the `artifact` job publishes its module's digest and rustc release, posts
+    main's record on pushes, and every job that reads the module verifies its download against
+    that digest before anything reads it."""
+    artifact = job(text, "artifact")
+    require(ARTIFACT_DIGEST_OUTPUT in artifact,
+            "qualification.yml: the artifact job must publish its module's sha256 and rustc "
+            "release as outputs")
+    require(UNMASKABLE.search(artifact) is None,
+            "qualification.yml: the artifact job must carry no job-level continue-on-error, "
+            "defaults or env")
+    steps = job_steps(artifact)
+    build = [index for index, step in enumerate(steps)
+             if step.startswith("      - name: Build the exact shipped artifact\n")]
+    require(len(build) == 1, "qualification.yml: the artifact job must have one build step")
+    for line in ARTIFACT_BUILD_LINES:
+        require(line in steps[build[0]],
+                f"qualification.yml: the artifact build step is missing {line.strip()!r}")
+    for name in ARTIFACT_READERS:
+        reader = job(text, name)
+        require(re.search(r"^    needs: \[route, artifact\]$", reader, re.MULTILINE) is not None,
+                f"qualification.yml: {name} must need exactly [route, artifact]")
+        require(ARTIFACT_DIGEST_STEP in reader,
+                f"qualification.yml: {name} must verify its download against the artifact job's "
+                "digest")
+        download = reader.index("path: target/ci/qualification-artifacts")
+        verify = reader.index(ARTIFACT_DIGEST_STEP)
+        require(download < verify, f"qualification.yml: {name} verifies before it downloads")
+        later = [reader.index(line) for line in ("bash scripts/", "python3 -B scripts/",
+                                                 "npm run qualify") if line in reader]
+        require(all(verify < index for index in later),
+                f"qualification.yml: {name} reads the artifact before verifying its digest")
+
+
+def check_qualification_artifact_record(text: str, names: list[str]) -> None:
+    """Issue #1061: main's record is posted by one job, on a push to `main` only, which checks out
+    nothing and runs no repository code; it holds the workflow's only write permission, so no job a
+    pull request reaches holds a write token (the top level is already exactly contents: read)."""
+    record = job(text, RECORD_JOB)
+    require(RECORD_HEAD in record,
+            f"qualification.yml: {RECORD_JOB} must need [route, artifact] and run only on a push to "
+            "main that built the module")
+    require(RECORD_PERMISSIONS in record,
+            f"qualification.yml: {RECORD_JOB}'s permissions must be exactly statuses: write")
+    require(UNMASKABLE.search(record) is None,
+            f"qualification.yml: {RECORD_JOB} must carry no job-level continue-on-error, defaults "
+            "or env")
+    require(job_steps(record) == [ARTIFACT_RECORD_STEP],
+            f"qualification.yml: {RECORD_JOB} must be exactly its one pinned step, checking out "
+            "nothing (scripts/check-ci-path-routing.py ARTIFACT_RECORD_STEP)")
+    for name in names:
+        if name == RECORD_JOB:
+            continue
+        require(WRITE_PERMISSION.search(job(text, name)) is None,
+                f"qualification.yml: job {name!r} holds a write permission; only {RECORD_JOB}, "
+                "which no pull request reaches, may")
+
+
+def check_qualification_artifact_identity(text: str) -> None:
+    """Issue #1061 (owner decision 5): every PR that builds the module reports whether it changed
+    against its base's recorded digest, proves it reproducible, and holds a release change to the
+    pin. The identity job must run exactly where `artifact` runs, after it, with full history, the
+    one read permission, nothing that could skip or mask a step, and its twin and report steps
+    exactly as pinned."""
+    identity = job(text, "artifact-identity")
+    require(job_if(identity) == job_if(job(text, "artifact")),
+            "qualification.yml: artifact-identity must run on exactly the artifact job's routes")
+    require(re.search(r"^    needs: \[route, artifact\]$", identity, re.MULTILINE) is not None,
+            "qualification.yml: artifact-identity must need exactly [route, artifact]")
+    require(IDENTITY_PERMISSIONS in identity,
+            "qualification.yml: artifact-identity's permissions must be exactly contents: read and "
+            "statuses: read")
+    require(UNMASKABLE.search(identity) is None,
+            "qualification.yml: artifact-identity must carry no job-level continue-on-error, "
+            "defaults or env")
+    steps = job_steps(identity)
+    require(len(steps) == 4,
+            "qualification.yml: artifact-identity must be exactly checkout, toolchain, twin and "
+            "report steps")
+    require(IDENTITY_CHECKOUT.fullmatch(steps[0]) is not None,
+            "qualification.yml: artifact-identity must check out full history (fetch-depth: 0), "
+            "or no run finds its base")
+    require(steps[1].startswith(IDENTITY_INSTALL),
+            "qualification.yml: artifact-identity's second step must install the toolchain")
+    for step, pinned in zip(steps[2:], IDENTITY_STEPS):
+        require(step == pinned,
+                "qualification.yml: artifact-identity step differs from its pin: "
+                f"{pinned.splitlines()[0].strip()!r} (scripts/check-ci-path-routing.py "
+                "IDENTITY_STEPS)")
 
 
 def check_qualification_v8_spill(text: str) -> None:
     """Issue #1009: `wasm-guests` may leave `run-wasm-gates.sh`'s V8 spill leg out only because
-    `artifact-gates` runs the same gate on the downloaded artifact, after verifying it against its
-    pin. Without this rule, deleting that step would take the gate out of CI with every job
-    green."""
+    `artifact-gates` runs the same gate on the downloaded artifact, after verifying it against the
+    artifact job's digest. Without this rule, deleting that step would take the gate out of CI with
+    every job green."""
     wasm = job(text, "wasm-guests")
     require("bash scripts/run-wasm-gates.sh" in wasm,
             "qualification.yml: wasm-guests must run scripts/run-wasm-gates.sh")
     if "--without-v8-spill" not in run_wasm_gates_flags(wasm):
         return
     gates = job(text, "artifact-gates")
-    require(V8_SPILL_ARTIFACT_LINE in gates and ARTIFACT_PIN_STEP in gates,
+    require(V8_SPILL_ARTIFACT_LINE in gates and ARTIFACT_DIGEST_STEP in gates,
             "qualification.yml: wasm-guests runs run-wasm-gates.sh --without-v8-spill, so "
-            "artifact-gates must run the V8 spill gate on the pin-verified artifact")
-    require(gates.index(ARTIFACT_PIN_STEP) < gates.index(V8_SPILL_ARTIFACT_LINE),
-            "qualification.yml: artifact-gates must verify the artifact's pin before the V8 "
+            "artifact-gates must run the V8 spill gate on the digest-verified artifact")
+    require(gates.index(ARTIFACT_DIGEST_STEP) < gates.index(V8_SPILL_ARTIFACT_LINE),
+            "qualification.yml: artifact-gates must verify the artifact's digest before the V8 "
             "spill gate reads it")
 
 
@@ -544,6 +851,94 @@ def check_qualification_aarch64_g5(text: str, names: list[str]) -> None:
             "(g5_native_digests_match_pins)")
 
 
+SELF_TEST_JOB = "gate-self-tests"
+SELF_TEST_JOB_HEAD = "    needs: route\n    if: needs.route.outputs.self_tests != '[]'\n"
+SELF_TEST_STEP_IF = "contains(fromJSON(needs.route.outputs.self_tests), '{suite}')"
+SELF_TEST_ROUTE_LINES = (
+    "      self_tests: ${{ steps.classify.outputs.self_tests }}\n",
+    '            | tail -n 4 >> "$GITHUB_OUTPUT"\n',
+)
+SELF_TEST_VERDICT_LINES = (
+    "      SELF_TESTS: ${{ needs.route.outputs.self_tests }}\n",
+    '          [[ "$SELF_TESTS" =~ ^\\[(\\"[a-z-]+\\"(,\\"[a-z-]+\\")*)?\\]$ ]] || '
+    '{ echo "malformed self_tests: $SELF_TESTS" >&2; exit 1; }\n',
+    "          self_tests_expected=skipped\n",
+    "          [[ \"$SELF_TESTS\" != '[]' ]] && self_tests_expected=success\n",
+    '          check gate-self-tests "$GATE_SELF_TESTS_RESULT" "$self_tests_expected"\n',
+)
+NIGHTLY_SELF_TEST_JOB = "moved-mutation-suites"
+NIGHTLY_STEP_IF = "${{ !cancelled() }}"
+STEP_IF = re.compile(r"^        if: (.*)$", re.MULTILINE)
+
+
+def step_if(step: str) -> str | None:
+    match = STEP_IF.search(step)
+    return match.group(1).strip() if match else None
+
+
+def check_qualification_self_tests(text: str) -> None:
+    """Issue #1043: each self-test suite runs in `gate-self-tests` exactly when the router selects
+    it, the job runs exactly when the router selects any, the verdict expects success then and
+    `skipped` otherwise, and every suite's gate still runs in an unconditional step of its per-PR
+    job. Dropping a suite's step, widening or narrowing its condition, masking it, or dropping a
+    gate from its per-PR job would each take a discrimination out of CI with every job green."""
+    route = job(text, "route")
+    for line in SELF_TEST_ROUTE_LINES:
+        require(line in route, f"qualification.yml: route job is missing {line.strip()!r}")
+    block = job(text, SELF_TEST_JOB)
+    require(SELF_TEST_JOB_HEAD in block,
+            f"qualification.yml: {SELF_TEST_JOB} must need route and run exactly when the router "
+            "selects a suite")
+    require(UNMASKABLE.search(block) is None,
+            f"qualification.yml: {SELF_TEST_JOB} must carry no job-level continue-on-error, "
+            "defaults or env")
+    steps = job_steps(block)
+    conditions = {SELF_TEST_STEP_IF.format(suite=suite): suite for suite in SELF_TEST_SUITES}
+    for step in steps:
+        condition = step_if(step)
+        require(condition is None or condition in conditions,
+                f"qualification.yml: {SELF_TEST_JOB} step has an unexpected condition "
+                f"{condition!r}")
+        require("continue-on-error:" not in step,
+                f"qualification.yml: {SELF_TEST_JOB} steps must not continue on error")
+    for suite, (host, gate, commands) in SELF_TEST_SUITES.items():
+        selected = [step for step in steps
+                    if step_if(step) == SELF_TEST_STEP_IF.format(suite=suite)]
+        require(len(selected) == 1,
+                f"qualification.yml: {SELF_TEST_JOB} must run suite {suite!r} in exactly one step "
+                "conditioned on the router selecting it")
+        require(step_commands(selected[0]) == list(commands),
+                f"qualification.yml: {SELF_TEST_JOB}'s {suite!r} step must run exactly {commands}")
+        require(gate in unconditional_step_commands(job(text, host)),
+                f"qualification.yml: {host} must still run the {suite!r} gate `{gate}` "
+                "unconditionally")
+    verdict = job(text, "verdict")
+    for line in SELF_TEST_VERDICT_LINES:
+        require(line in verdict, f"qualification.yml: verdict is missing {line.strip()!r}")
+
+
+def check_nightly_self_tests(root: pathlib.Path) -> None:
+    """Issue #1043: every self-test suite runs every night, in a job the failure notice reports,
+    each step running even after another failed, none masked."""
+    text = (root / ".github/workflows/nightly.yml").read_text(encoding="utf-8")
+    block = job(text, NIGHTLY_SELF_TEST_JOB)
+    require(job_if(block) is None and UNMASKABLE.search(block) is None,
+            f"nightly: {NIGHTLY_SELF_TEST_JOB} must run every night, unmasked")
+    steps = job_steps(block)
+    for suite, (_, _, commands) in SELF_TEST_SUITES.items():
+        for command in commands:
+            require(any(command in step_commands(step)
+                        and step_if(step) in (None, NIGHTLY_STEP_IF)
+                        and "continue-on-error:" not in step for step in steps),
+                    f"nightly: {NIGHTLY_SELF_TEST_JOB} must run `{command}` ({suite}) every night, "
+                    f"unmasked, unconditionally or under {NIGHTLY_STEP_IF}")
+    notice = job(text, "failure-notice")
+    needs = re.search(r"^    needs: \[(.*?)\]", notice, re.MULTILINE | re.DOTALL)
+    require(needs is not None and NIGHTLY_SELF_TEST_JOB in
+            [name.strip() for name in needs.group(1).replace("\n", " ").split(",")],
+            f"nightly: failure-notice must report {NIGHTLY_SELF_TEST_JOB}")
+
+
 def check_qualification_workflow(root: pathlib.Path) -> None:
     text = (root / ".github/workflows/qualification.yml").read_text(encoding="utf-8")
     check_qualification_no_path_filter(text)
@@ -558,10 +953,14 @@ def check_qualification_workflow(root: pathlib.Path) -> None:
     check_qualification_release_shape_guard(text)
     check_qualification_route_job(text)
     check_qualification_closures(text)
+    check_qualification_artifact_digest(text)
+    check_qualification_artifact_record(text, names)
+    check_qualification_artifact_identity(text)
     check_qualification_v8_spill(text)
     check_qualification_aarch64(text)
     check_qualification_native_g5(text)
     check_qualification_aarch64_g5(text, names)
+    check_qualification_self_tests(text)
 
 
 RETIRED_WORKFLOWS = ("ci.yml", "sdk.yml", "browser-qualification.yml", "release-build.yml")
@@ -609,6 +1008,7 @@ def check(root: pathlib.Path) -> None:
     check_qualification_workflow(root)
     check_cross_target_aarch64_rows(root)
     check_nightly_budgets(root)
+    check_nightly_self_tests(root)
 
 
 def main() -> int:

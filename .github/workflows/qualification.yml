@@ -1,11 +1,11 @@
 name: qualification
 
 # Design #359 WP-4: one PR workflow, one required status context (the `verdict` job, whose own
-# `name:` is `qualification`), fifteen leaf jobs behind one router, one aggregate (#1017 added the
-# two AArch64 jobs). Stage 3 (§12)
-# retired the four workflows this one replaced -- ci.yml, sdk.yml, browser-qualification.yml and
-# release-build.yml -- once this workflow had reported on >= 10 PRs and agreed with them; this is
-# now the sole required PR workflow. See design §4/§5/§7/§12.
+# `name:` is `qualification`), eighteen leaf jobs behind one router, one aggregate (#1017 added the
+# two AArch64 jobs, #1061 `artifact-identity` and `artifact-record`, #1043 `gate-self-tests`).
+# Stage 3 (§12) retired the four workflows this one replaced -- ci.yml, sdk.yml,
+# browser-qualification.yml and release-build.yml -- once this workflow had reported on >= 10 PRs
+# and agreed with them; this is now the sole required PR workflow. See design §4/§5/§7/§12.
 #
 # No `paths:`/`paths-ignore:` anywhere in this file, by design and by policy check: a required
 # workflow that can be skipped by a path filter leaves a PR pending forever. Every job below is
@@ -48,6 +48,7 @@ jobs:
       route: ${{ steps.classify.outputs.route }}
       math_closure: ${{ steps.classify.outputs.math_closure }}
       release_inputs: ${{ steps.classify.outputs.release_inputs }}
+      self_tests: ${{ steps.classify.outputs.self_tests }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -66,7 +67,7 @@ jobs:
             --event "${{ github.event_name }}" \
             --base "${{ github.event.pull_request.base.sha || github.event.before }}" \
             --head "${{ github.event.pull_request.head.sha || github.sha }}" \
-            | tail -n 3 >> "$GITHUB_OUTPUT"
+            | tail -n 4 >> "$GITHUB_OUTPUT"
 
   docs-gates:
     name: docs and research evidence gates
@@ -83,11 +84,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ripgrep
       # dsp-research/**/*.md joined the evidence family (design §2); its own validators move here
-      # so a research-note edit does not ride the full route. Hermetic: no cargo, no clock.
+      # so a research-note edit does not ride the full route. Hermetic: no cargo, no clock. The
+      # research gate's mutation tests run in gate-self-tests when a file they read changes (#1043).
       - name: DSP research corpus and listening-evidence packet validators
         run: |
           bash scripts/check-dsp-research.sh
-          bash scripts/test-dsp-research.sh
           bash scripts/check-builtins-listening.sh
 
   artifact:
@@ -96,6 +97,9 @@ jobs:
     if: needs.route.outputs.route == 'sdk' || needs.route.outputs.route == 'full'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    outputs:
+      sha256: ${{ steps.build.outputs.sha256 }}
+      rustc: ${{ steps.build.outputs.rustc }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -106,16 +110,23 @@ jobs:
         run: |
           rustup toolchain install 1.97.1 --profile minimal
           rustup target add --toolchain 1.97.1 wasm32-unknown-unknown
-      # build-web-audioworklet.sh already pin-checks its own sha256 against
-      # hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256 and refuses to write on a
-      # mismatch. Built exactly once here; every consumer downloads it and re-hashes.
+      # Built exactly once here; every consumer downloads it and checks it against this job's
+      # `sha256` output, so every artifact gate in the run reads exactly these bytes. Issue #1061
+      # (owner decision 5): no comparison with the committed pin here. The pin is the release
+      # fingerprint; `artifact-identity` reports whether these bytes changed and holds a release
+      # change to the pin (docs/RELEASE.md).
       - name: Build the exact shipped artifact
+        id: build
         run: |
           # The build script refuses a non-empty output directory; never rely on the cache
           # action having pruned a previous run's loose files.
           rm -rf target/ci/qualification-artifacts
           mkdir -p target/ci/qualification-artifacts
           bash scripts/build-web-audioworklet.sh target/ci/qualification-artifacts
+          sha256="$(sha256sum target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm | awk '{print $1}')"
+          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
+          echo "rustc=$(rustc -vV | sed -n 's/^release: //p')" >> "$GITHUB_OUTPUT"
+          echo "Shipped AudioWorklet module at \`$GITHUB_SHA\`: \`$sha256\` (the \`artifact-identity\` summary says whether it changed)" >> "$GITHUB_STEP_SUMMARY"
       - name: Upload shipped artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -123,6 +134,73 @@ jobs:
           path: target/ci/qualification-artifacts/
           if-no-files-found: error
           overwrite: true
+
+  # Issue #1061 (owner decision 5): every PR says whether the shipped module changed against the
+  # digest its base's own CI run recorded, proves the build reproducible, and holds only a release
+  # change to the committed pin (docs/RELEASE.md). Its own job, so the twin build stays off the
+  # path of `sdk`, `artifact-gates` and the browser legs, which start once `artifact` has uploaded.
+  # scripts/web-audioworklet-identity.py has the rules.
+  artifact-identity:
+    name: shipped AudioWorklet artifact identity (changed or unchanged, reproducible, release pin)
+    needs: [route, artifact]
+    if: needs.route.outputs.route == 'sdk' || needs.route.outputs.route == 'full'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      statuses: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Install pinned Rust toolchain and Wasm standard library
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup target add --toolchain 1.97.1 wasm32-unknown-unknown
+      # The twin: this commit again, from another checkout path and with another CARGO_HOME, the
+      # two roots rustc could embed. `artifact` built from $GITHUB_WORKSPACE with the runner's.
+      - name: Rebuild the module from another checkout path and CARGO_HOME
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/twin" HEAD
+          mkdir "$RUNNER_TEMP/twin-module"
+          CARGO_HOME="$RUNNER_TEMP/twin-cargo-home" bash "$RUNNER_TEMP/twin/scripts/build-web-audioworklet.sh" --module-only "$RUNNER_TEMP/twin-module"
+      # The base is never rebuilt here: this run's workflow is the change's, and a base built in it
+      # is built in the change's environment (#1061 attempts 1 and 2). The report reads the digest
+      # the base's own run recorded instead, and says CANNOT TELL when there is none.
+      - name: Report ARTIFACT CHANGED or UNCHANGED against the base's recorded digest, and hold a release change to its pin
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          BUILT: ${{ needs.artifact.outputs.sha256 }}
+          RUSTC: ${{ needs.artifact.outputs.rustc }}
+        run: |
+          set -o pipefail
+          python3 -B scripts/web-audioworklet-identity.py --self-test
+          python3 -B scripts/web-audioworklet-identity.py report --event "$EVENT" --before "$BEFORE" --repository "$GITHUB_REPOSITORY" --built "$BUILT" --rustc "$RUSTC" --twin "$RUNNER_TEMP/twin-module/miso-engine-v1-audio-worklet.simd128.wasm" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # Issue #1061: main's own record of the module this commit's run built, as the commit status
+  # `audioworklet-sha256` (`<sha256> rustc <release>`, linking the run). Later changes compare
+  # with it (`artifact-identity`), so no change ever rebuilds its base inside its own, possibly
+  # edited, workflow. Its own job, run only on a push to main, checking out nothing and running no
+  # repository code: it is the only job holding a write token, and no pull request reaches it.
+  artifact-record:
+    name: record the shipped AudioWorklet module's digest on main
+    needs: [route, artifact]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && (needs.route.outputs.route == 'sdk' || needs.route.outputs.route == 'full')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      statuses: write
+    steps:
+      - name: Record this commit's module for later changes to compare against
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA256: ${{ needs.artifact.outputs.sha256 }}
+          RUSTC: ${{ needs.artifact.outputs.rustc }}
+        run: |
+          [[ "$SHA256" =~ ^[0-9a-f]{64}$ && "$RUSTC" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]] || { echo "malformed record: '$SHA256' rustc '$RUSTC'" >&2; exit 1; }
+          gh api -X POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" -f state=success -f context=audioworklet-sha256 -f "description=$SHA256 rustc $RUSTC" -f "target_url=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 
   sdk:
     name: SDK package and generated-surface qualification
@@ -158,21 +236,22 @@ jobs:
         with:
           name: audioworklet-${{ github.sha }}
           path: target/ci/qualification-artifacts
-      - name: Verify the downloaded artifact against its source pin
+      - name: Verify the downloaded artifact against the artifact job's digest
+        env:
+          BUILT: ${{ needs.artifact.outputs.sha256 }}
         run: |
-          expected="$(cat hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256)"
           actual="$(sha256sum target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm | awk '{print $1}')"
-          [[ "$actual" == "$expected" ]] || { echo "downloaded artifact sha256 mismatch: expected $expected, got $actual" >&2; exit 1; }
-      # S7: check-sdk-deletions.py's 37-mutation --self-test (design §6.6) was never wired in --
-      # only the bare gate ran. test-sdk-artifact-builder-output-contract.sh (also design §6.6) is
-      # not added separately: sdk-package.sh check already runs it as its own first step (see
-      # scripts/sdk-package.sh:29-30) before the `sdk-package.sh check` call below, so adding it
-      # here again would be a duplicate invocation, not a new gate.
+          [[ "$BUILT" =~ ^[0-9a-f]{64}$ && "$actual" == "$BUILT" ]] || { echo "downloaded artifact sha256 mismatch: the artifact job built $BUILT, got $actual" >&2; exit 1; }
+      # check-sdk-deletions.py's 37-mutation --self-test (design §6.6, S7) runs in gate-self-tests
+      # when the gate or the SDK tree it reads changes (#1043); the gate itself runs here.
+      # test-sdk-artifact-builder-output-contract.sh (also design §6.6) is not added separately:
+      # sdk-package.sh check already runs it as its own first step (see scripts/sdk-package.sh:29-30)
+      # before the `sdk-package.sh check` call below, so adding it here again would be a duplicate
+      # invocation, not a new gate.
       - name: Qualify the SDK package against the shared artifact
         run: |
           bash scripts/check-sdk-generated.sh
           python3 -B scripts/check-sdk-deletions.py
-          python3 -B scripts/check-sdk-deletions.py --self-test
           bash scripts/check-sdk-types.sh
           bash scripts/check-sdk-headless.sh target/ci/qualification-artifacts
           bash scripts/sdk-package.sh check target/ci/qualification-artifacts
@@ -199,11 +278,12 @@ jobs:
         with:
           name: audioworklet-${{ github.sha }}
           path: target/ci/qualification-artifacts
-      - name: Verify the downloaded artifact against its source pin
+      - name: Verify the downloaded artifact against the artifact job's digest
+        env:
+          BUILT: ${{ needs.artifact.outputs.sha256 }}
         run: |
-          expected="$(cat hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256)"
           actual="$(sha256sum target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm | awk '{print $1}')"
-          [[ "$actual" == "$expected" ]] || { echo "downloaded artifact sha256 mismatch: expected $expected, got $actual" >&2; exit 1; }
+          [[ "$BUILT" =~ ^[0-9a-f]{64}$ && "$actual" == "$BUILT" ]] || { echo "downloaded artifact sha256 mismatch: the artifact job built $BUILT, got $actual" >&2; exit 1; }
       # #106 E1/E2/E5/E7 and the F4 native<->simd128 session parity, over the artifact that ships.
       # check-web-audioworklet.sh asserts the frozen export set, no imports, no shared memory, no
       # atomics or relaxed SIMD, the render export's allocation-free/trap-free closure, and the
@@ -215,10 +295,14 @@ jobs:
         run: |
           bash scripts/check-web-audioworklet.sh target/ci/qualification-artifacts
           python3 -B scripts/check-browser-expected-resources.py --artifacts target/ci/qualification-artifacts
+      # #1059: the whole-plan scalar renderer is a test-only oracle; the shipped module must not
+      # contain it (owner ruling 2026-09-28, decision 3).
+      - name: Shipped AudioWorklet module contains no whole-plan scalar path
+        run: python3 -B scripts/check-scalar-oracle-absent.py --wasm target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm
       - name: Hermetic browser host and worklet tests
         run: bash scripts/test-web-audioworklet.sh
       # Issues #1000/#1009: V8's register allocation of the EQ's stationary cascade loops, read from
-      # the downloaded, pin-verified artifact itself (run-wasm-gates.sh --without-v8-spill leaves it
+      # the downloaded, digest-verified artifact itself (run-wasm-gates.sh --without-v8-spill leaves it
       # to this job). Register allocation belongs to one V8, so the Node version is exact and the
       # gate refuses any other. Last, so the steps above keep the runner's own Node.
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -254,11 +338,12 @@ jobs:
       - name: Install SDK dependencies for the response Worker bundle
         working-directory: sdk
         run: npm ci --no-audit --no-fund --prefer-offline
-      - name: Verify the downloaded artifact against its source pin
+      - name: Verify the downloaded artifact against the artifact job's digest
+        env:
+          BUILT: ${{ needs.artifact.outputs.sha256 }}
         run: |
-          expected="$(cat hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256)"
           actual="$(sha256sum target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm | awk '{print $1}')"
-          [[ "$actual" == "$expected" ]] || { echo "downloaded artifact sha256 mismatch: expected $expected, got $actual" >&2; exit 1; }
+          [[ "$BUILT" =~ ^[0-9a-f]{64}$ && "$actual" == "$BUILT" ]] || { echo "downloaded artifact sha256 mismatch: the artifact job built $BUILT, got $actual" >&2; exit 1; }
       - name: Cache Playwright browser binaries
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
@@ -331,10 +416,10 @@ jobs:
         run: |
           bash scripts/check-session-policy.sh
           bash scripts/test-session-policy.sh
-      - name: Environment and marker vocabulary policy and mutation tests
-        run: |
-          bash scripts/check-env-vocabulary.sh
-          bash scripts/test-env-vocabulary.sh
+      # #1043: this gate's mutation tests, and those of the benchmark-validator and conformance
+      # gates below, run in gate-self-tests when a file they read changes; each gate runs here.
+      - name: Environment and marker vocabulary policy
+        run: bash scripts/check-env-vocabulary.sh
       - name: Bench harness duplication policy and mutation tests
         run: |
           bash scripts/check-bench-policy.sh
@@ -343,6 +428,10 @@ jobs:
         run: |
           python3 -B scripts/check-test-support-ci.py
           python3 -B scripts/test-test-support-ci.py
+      # #1059: the reader and matcher of the shipped-artifact scalar-oracle gate, hermetically.
+      # artifact-gates and audit-native run the gate itself on the built module and library.
+      - name: Scalar-oracle-absent gate self-test
+        run: python3 -B scripts/check-scalar-oracle-absent.py --self-test
       # #1027: every file under scripts/ outside scripts/operator/ is reached from a workflow.
       - name: Script reachability policy and mutation tests
         run: |
@@ -360,13 +449,8 @@ jobs:
       # binaries; only the hermetic mutation-test suite stays here.
       - name: Standing builtins fixture manifest mutation tests
         run: bash scripts/test-builtins-fixtures.sh
-      - name: Wasm console benchmark validator mutation tests
-        run: bash scripts/test-wasm-console-benchmark.sh
-      # Everything in this bundle is a hermetic validator self-test.
-      - name: Benchmark preconditions and validator mutation tests
-        run: |
-          bash scripts/check-bench-preconditions.sh
-          bash scripts/test-console-benchmark.sh
+      - name: Benchmark preconditions
+        run: bash scripts/check-bench-preconditions.sh
       - name: Shared host facade policy and mutation tests
         run: |
           bash scripts/check-host-core-policy.sh
@@ -414,15 +498,8 @@ jobs:
       # already ran. audit-native runs the whole script (preconditions, factory-count grep, and
       # the bench conformance record) once, with the prebuilt release bench binary; nothing here
       # is lost by removing the bare call.
-      - name: Native PCM runner static seal and mutation tests
-        run: |
-          bash scripts/check-native-pcm-runner.sh
-          bash scripts/test-native-pcm-runner-v1-policy.sh
-          bash scripts/test-native-pcm-runner-portability-v1-policy.sh
       - name: Conformance boundaries
-        run: |
-          bash scripts/check-conformance-boundaries.sh
-          bash scripts/test-conformance-boundaries.sh
+        run: bash scripts/check-conformance-boundaries.sh
       - name: Step vocabulary uniformity and self-test
         run: |
           python3 -B scripts/check-step-vocabulary.py
@@ -437,6 +514,10 @@ jobs:
         run: python3 -B scripts/test-npm-publish-modes.py
       - name: Stem store V1 gate (mutation ledger moved to nightly)
         run: node scripts/check-stem-store-v1.mjs
+      # The stem-identity corpus's only consumer in this repository (#1033): the release CLI copies
+      # these frozen bytes, and the Rust oracle that used to read them is gone (#1035).
+      - name: Stem identity corpus drift check
+        run: python3 -B fixtures/stem-identity/v1/generate.py --check
       # x86-probes job folded in (design §6.2): three distinct sub-v3-refusal claims, dominated by
       # toolchain install, which lint already paid for.
       - name: Sub-v3 builds are refused by the lane guard (scalar)
@@ -475,8 +556,8 @@ jobs:
       # audit-native and wasm-guests in release. Explicit --features (design §10 finding 1): a
       # local reproduction must name the same features to compile the same program. Dev-dependency
       # unification would turn on builtins-compiler and graph test-support anyway; nothing turns on
-      # source, host-web, host-core, effect-compiler or protocol test-support, whose gated tests
-      # never ran before #1021. scripts/check-test-support-ci.py (lint job) fails when a workspace
+      # host-web, host-core, effect-compiler or protocol test-support, whose gated tests never ran
+      # before #1021. scripts/check-test-support-ci.py (lint job) fails when a workspace
       # test-support feature is left out of every whole-package cargo test step.
       - name: Workspace debug tests (excluding DSP crates, audit, and wasm evidence tools)
         run: |
@@ -486,8 +567,8 @@ jobs:
             --exclude true-peak-limiter --exclude transient-shaper --exclude soft-clip \
             --exclude parametric-eq --exclude builtins --exclude dsp-reference \
             --exclude conformance --exclude audit --exclude bench --exclude console-workload \
-            --exclude wasm-gates --exclude wasm-console --exclude wasm-gate-guest \
-            --exclude wasm-console-guest --exclude wasm-gate-corpus \
+            --exclude wasm-gates --exclude wasm-gate-guest \
+            --exclude wasm-gate-corpus \
             --features builtins-compiler/test-support,graph/test-support,host-web/test-support,host-core/test-support,effect-compiler/test-support,protocol/test-support,engine/realtime-audit
       - name: Native host smoke
         run: cargo run --locked -p host-native
@@ -509,13 +590,15 @@ jobs:
       # Explicit --features, as in test-debug-a: a local reproduction names the same features.
       # parametric-eq and builtins test-support turn on gated pass-count and peak-merge assertions
       # inside tests that run either way; nothing in this package set forwards them (#1021).
+      # lane/test-support compiles the test-only `Backend::Scalar` oracle (#1059); the builtins
+      # and compressor dev-dependencies unify it in anyway, and naming it keeps that explicit.
       - name: DSP crates debug tests (lane feature unification pinned explicitly)
         run: |
           cargo test --locked --all-targets \
             -p lane -p math -p effect-runtime -p delay -p compressor -p multiband-compressor \
             -p gate-expander -p true-peak-limiter -p transient-shaper -p soft-clip \
             -p parametric-eq -p builtins -p dsp-reference -p conformance \
-            --features math/lane,parametric-eq/test-support,builtins/test-support
+            --features math/lane,parametric-eq/test-support,builtins/test-support,lane/test-support
       - name: Conformance research-fixture completeness
         run: cargo run --locked -p conformance --example conformance_fixtures -- --check
 
@@ -681,6 +764,11 @@ jobs:
         run: |
           bash scripts/check-capi-abi.sh
           bash scripts/check-capi-abi.sh --self-test
+      # #1059: check-capi-abi.sh just built `-p capi` alone, which is the shipped feature set (the
+      # shard's four-package build unifies audit's graph/test-support in, so it is not). That
+      # library must contain no whole-plan scalar path.
+      - name: Shipped C ABI library contains no whole-plan scalar path
+        run: python3 -B scripts/check-scalar-oracle-absent.py --native target/release/libcapi.so
       # G2: HashMap iteration order is per-process, so this runs `graph_fixture` fresh 100 times.
       - name: Graph fresh-process determinism (100 fresh processes)
         run: bash scripts/check-graph-determinism.sh
@@ -748,7 +836,7 @@ jobs:
       # lowering pins. `--without-native` (#1048): the native leg is the Rust test
       # `g5_native_digests_match_pins` in `test-release`, in the shipping profile, so it is not run a
       # second time here. `--without-v8-spill` (#1009): the script's V8 spill leg runs in
-      # `artifact-gates`, on the downloaded, pin-verified artifact, rather than on a second fat-LTO
+      # `artifact-gates`, on the downloaded, digest-verified artifact, rather than on a second fat-LTO
       # build of it here. check-ci-path-routing.py refuses either flag without its pairing.
       - name: WebAssembly cross-target digest gates
         run: bash scripts/run-wasm-gates.sh --without-v8-spill --without-native
@@ -873,7 +961,7 @@ jobs:
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal
       # cargo-metadata asserts the cdylib/staticlib set is exactly {capi, host-web,
-      # wasm-gate-guest, wasm-console-guest} and [profile.release].panic == "abort".
+      # wasm-gate-guest} and [profile.release].panic == "abort".
       - name: Release shape policy
         run: python3 -B scripts/check-release-shape.py
       # The panic-variant filename clobber (docs/REALTIME_DEPENDENCY_POLICY.md) is prevented by
@@ -882,10 +970,43 @@ jobs:
       - name: Workspace release check under the unwind override
         run: CARGO_PROFILE_RELEASE_PANIC=unwind cargo check --locked --release --workspace --all-targets
 
+  # Issue #1043: a script gate's self-test suite can change its verdict only when a file it reads
+  # changes, so each suite runs here only then -- its gate still runs on every change, in lint, sdk
+  # or docs-gates -- and every night in nightly.yml. `self_tests` is the router's JSON list of the
+  # suites whose key (scripts/ci-path-router.py SELF_TEST_INPUTS) a changed path hits; the verdict
+  # expects this job to succeed exactly when that list is not empty.
+  gate-self-tests:
+    name: script-gate self-tests (a gate or a file its suite reads changed)
+    needs: route
+    if: needs.route.outputs.self_tests != '[]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install ripgrep (not on the runner image; the conformance and research gates grep with rg)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
+      - name: Environment and marker vocabulary mutation tests
+        if: contains(fromJSON(needs.route.outputs.self_tests), 'env-vocabulary')
+        run: bash scripts/test-env-vocabulary.sh
+      - name: Conformance boundary mutation tests
+        if: contains(fromJSON(needs.route.outputs.self_tests), 'conformance-boundaries')
+        run: bash scripts/test-conformance-boundaries.sh
+      - name: Console benchmark validator and runner mutation tests
+        if: contains(fromJSON(needs.route.outputs.self_tests), 'console-benchmark')
+        run: bash scripts/test-console-benchmark.sh
+      - name: SDK deletion gate self-test
+        if: contains(fromJSON(needs.route.outputs.self_tests), 'sdk-deletions')
+        run: python3 -B scripts/check-sdk-deletions.py --self-test
+      - name: DSP research gate mutation tests
+        if: contains(fromJSON(needs.route.outputs.self_tests), 'dsp-research')
+        run: bash scripts/test-dsp-research.sh
+
   verdict:
     name: qualification
     if: always()
-    needs: [route, docs-gates, artifact, sdk, artifact-gates, browser, lint, test-debug-a, test-debug-b, test-release, audit-native, wasm-guests, cross-target, aarch64-debug, aarch64-release, release-shape]
+    needs: [route, docs-gates, artifact, artifact-identity, artifact-record, sdk, artifact-gates, browser, lint, test-debug-a, test-debug-b, test-release, audit-native, wasm-guests, cross-target, aarch64-debug, aarch64-release, release-shape, gate-self-tests]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -895,8 +1016,11 @@ jobs:
       ROUTE_RESULT: ${{ needs.route.result }}
       ROUTE: ${{ needs.route.outputs.route }}
       RELEASE_INPUTS: ${{ needs.route.outputs.release_inputs }}
+      SELF_TESTS: ${{ needs.route.outputs.self_tests }}
       DOCS_GATES_RESULT: ${{ needs.docs-gates.result }}
       ARTIFACT_RESULT: ${{ needs.artifact.result }}
+      ARTIFACT_IDENTITY_RESULT: ${{ needs.artifact-identity.result }}
+      ARTIFACT_RECORD_RESULT: ${{ needs.artifact-record.result }}
       SDK_RESULT: ${{ needs.sdk.result }}
       ARTIFACT_GATES_RESULT: ${{ needs.artifact-gates.result }}
       BROWSER_RESULT: ${{ needs.browser.result }}
@@ -910,6 +1034,7 @@ jobs:
       AARCH64_DEBUG_RESULT: ${{ needs.aarch64-debug.result }}
       AARCH64_RELEASE_RESULT: ${{ needs.aarch64-release.result }}
       RELEASE_SHAPE_RESULT: ${{ needs.release-shape.result }}
+      GATE_SELF_TESTS_RESULT: ${{ needs.gate-self-tests.result }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       # A static expectation table, not a leaf `if:` echoed back at itself: a leaf whose `if:`
@@ -923,10 +1048,14 @@ jobs:
             evidence|sdk|full) ;;
             *) echo "unknown route: $ROUTE" >&2; exit 1 ;;
           esac
+          # Issue #1043: the router's compact JSON list of selected self-test suites; `[]` is none.
+          [[ "$SELF_TESTS" =~ ^\[(\"[a-z-]+\"(,\"[a-z-]+\")*)?\]$ ]] || { echo "malformed self_tests: $SELF_TESTS" >&2; exit 1; }
           docs_expected=skipped
           artifact_expected=skipped
           full_expected=skipped
           release_shape_expected=skipped
+          record_expected=skipped
+          self_tests_expected=skipped
           case "$ROUTE" in
             evidence)
               docs_expected=success
@@ -941,6 +1070,10 @@ jobs:
               [[ "$RELEASE_INPUTS" == "true" ]] && release_shape_expected=success
               ;;
           esac
+          # Issue #1061: main's record is posted on a push to main that built the module, only.
+          [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/main && "$artifact_expected" == success ]] && record_expected=success
+          # Issue #1043: the self-test suites run, on any route, exactly when the router selected one.
+          [[ "$SELF_TESTS" != '[]' ]] && self_tests_expected=success
           failed=0
           check() {
             local name=$1 actual=$2 expected=$3
@@ -948,6 +1081,8 @@ jobs:
           }
           check docs-gates "$DOCS_GATES_RESULT" "$docs_expected"
           check artifact "$ARTIFACT_RESULT" "$artifact_expected"
+          check artifact-identity "$ARTIFACT_IDENTITY_RESULT" "$artifact_expected"
+          check artifact-record "$ARTIFACT_RECORD_RESULT" "$record_expected"
           check sdk "$SDK_RESULT" "$artifact_expected"
           check artifact-gates "$ARTIFACT_GATES_RESULT" "$full_expected"
           check browser "$BROWSER_RESULT" "$full_expected"
@@ -961,7 +1096,15 @@ jobs:
           check aarch64-debug "$AARCH64_DEBUG_RESULT" "$full_expected"
           check aarch64-release "$AARCH64_RELEASE_RESULT" "$full_expected"
           check release-shape "$RELEASE_SHAPE_RESULT" "$release_shape_expected"
+          check gate-self-tests "$GATE_SELF_TESTS_RESULT" "$self_tests_expected"
           [[ "$failed" == 0 ]] || exit 1
+      # Issue #1061: every PR says whether the shipped module changed. The artifact routes say it in
+      # `artifact-identity`'s summary; the evidence route builds no module, because every path it
+      # admits is documentation that no build reads.
+      - name: Report the shipped artifact on the evidence route
+        if: needs.route.outputs.route == 'evidence'
+        run: |
+          echo "ARTIFACT UNCHANGED: not built; the evidence route admits documentation only, which no build reads" >> "$GITHUB_STEP_SUMMARY"
       # Best-effort observability (design §11): never masks the verdict above, which has already
       # exited by the time this runs on a failing route.
       - name: Publish per-job CI telemetry

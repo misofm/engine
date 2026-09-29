@@ -53,11 +53,14 @@ def route(*paths: str) -> str:
     return route_with(ROUTER, *paths)
 
 
-def route_flags_with(router: pathlib.Path, *args: str) -> tuple[str, str, str]:
-    """Run the router in `--flags` mode and return (route, math_closure, release_inputs).
+FLAG_KEYS = ("route", "math_closure", "release_inputs", "self_tests")
+
+
+def flag_values_with(router: pathlib.Path, *args: str) -> dict[str, str]:
+    """Run the router in `--flags` mode and return its four `key=value` lines as a dict.
 
     `--flags` mode prints only `key=value` lines -- no bare route line first -- so its whole
-    stdout can be appended straight to `$GITHUB_OUTPUT`.
+    stdout can be appended straight to `$GITHUB_OUTPUT` (qualification.yml keeps its last four).
     """
     result = subprocess.run([sys.executable, str(router), "--flags", *args],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
@@ -66,14 +69,20 @@ def route_flags_with(router: pathlib.Path, *args: str) -> tuple[str, str, str]:
     lines = result.stdout.split("\n")
     if lines and lines[-1] == "":
         lines.pop()
-    if len(lines) != 3:
-        raise AssertionError(f"--flags must print exactly 3 lines, got {lines!r}")
-    route_line, math_line, release_line = lines
-    if not (route_line.startswith("route=") and math_line.startswith("math_closure=")
-            and release_line.startswith("release_inputs=")):
-        raise AssertionError(f"--flags lines have the wrong shape: {lines!r}")
-    return (route_line[len("route="):], math_line[len("math_closure="):],
-            release_line[len("release_inputs="):])
+    if len(lines) != len(FLAG_KEYS):
+        raise AssertionError(f"--flags must print exactly {len(FLAG_KEYS)} lines, got {lines!r}")
+    values = {}
+    for key, line in zip(FLAG_KEYS, lines):
+        if not line.startswith(f"{key}="):
+            raise AssertionError(f"--flags lines have the wrong shape: {lines!r}")
+        values[key] = line[len(key) + 1:]
+    return values
+
+
+def route_flags_with(router: pathlib.Path, *args: str) -> tuple[str, str, str]:
+    """(route, math_closure, release_inputs) from `--flags` mode."""
+    values = flag_values_with(router, *args)
+    return values["route"], values["math_closure"], values["release_inputs"]
 
 
 def route_flags(*paths: str) -> tuple[str, str, str]:
@@ -145,7 +154,9 @@ def test_new_router_behaviours() -> None:
     dispatch = subprocess.run([sys.executable, str(ROUTER), "--event", "workflow_dispatch", "--flags"],
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
     assert dispatch.returncode == 0
-    assert dispatch.stdout == "route=full\nmath_closure=true\nrelease_inputs=true\n"
+    assert dispatch.stdout == ("route=full\nmath_closure=true\nrelease_inputs=true\n"
+                               'self_tests=["env-vocabulary","conformance-boundaries",'
+                               '"console-benchmark","sdk-deletions","dsp-research"]\n')
 
     assert route_flags_with(ROUTER, "--event", "pull_request") == ("full", "true", "true")  # missing base
     assert route_flags_with(
@@ -195,6 +206,201 @@ def test_new_router_behaviours() -> None:
     assert bare_result.stdout == "sdk\n"
 
 
+SUITES = ("env-vocabulary", "conformance-boundaries", "console-benchmark", "sdk-deletions",
+          "dsp-research")
+
+
+def load_module(name: str, path: pathlib.Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def assert_self_test_selection(router) -> None:
+    """Issue #1043: a change to a gate, or to any file its self-test suite reads, selects that
+    suite; an unrelated change selects none and keeps the full route, so every gate still runs; a
+    docs-only change keeps today's evidence route. `router` is ci-path-router.py loaded as a
+    module, so a mutated copy is judged by the same assertions."""
+    def select(*paths: str) -> list[str]:
+        return router.select_self_tests(list(paths))
+
+    def routed(*paths: str) -> tuple[str, list[str]]:
+        return router.classify_paths(list(paths)), select(*paths)
+
+    # Named here, independently of the router's own table, so a key that loses one of them is red.
+    for path, suites in (
+        ("scripts/check-env-vocabulary.sh", ["env-vocabulary"]),
+        ("scripts/test-env-vocabulary.sh", ["env-vocabulary"]),
+        ("scripts/check-conformance-boundaries.sh", ["conformance-boundaries"]),
+        ("scripts/test-conformance-boundaries.sh", ["conformance-boundaries"]),
+        ("scripts/lib/gate.sh", ["conformance-boundaries", "dsp-research"]),
+        ("scripts/check-bench-preconditions.sh", ["console-benchmark"]),
+        ("scripts/test-console-benchmark.sh", ["console-benchmark"]),
+        # Amendment 4: a jq library, or a validator, alone selects the suite that loads it.
+        ("scripts/console-benchmark-record-lib.jq", ["console-benchmark"]),
+        ("scripts/web-mixing-automation-lib.jq", ["console-benchmark"]),
+        ("scripts/console-benchmark-record-validator.jq", ["console-benchmark"]),
+        ("scripts/web-mixing-automation-validator.jq", ["console-benchmark"]),
+        ("scripts/check-sdk-deletions.py", ["sdk-deletions"]),
+        ("sdk/src/core/session.ts", ["sdk-deletions"]),
+        ("sdk/test/boot-evals.mjs", ["sdk-deletions"]),
+        ("scripts/check-dsp-research.sh", ["dsp-research"]),
+        ("scripts/test-dsp-research.sh", ["dsp-research"]),
+        (".github/workflows/qualification.yml", list(SUITES)),
+    ):
+        assert select(path) == suites, (path, select(path))
+    # Every entry of the router's own table selects its suite (a prefix entry by a path below it).
+    for suite, key in router.SELF_TEST_INPUTS.items():
+        for entry in key:
+            assert suite in select(entry + "src/index.ts" if entry.endswith("/") else entry), entry
+    # Product code, an unrelated gate and the routing files select no suite and route full, so
+    # every gate still runs (check-ci-path-routing.py pins each gate to an unconditional step).
+    for path in ("crates/engine/src/lib.rs", "hosts/host-web/src/lib.rs", "Cargo.lock",
+                 "scripts/check-lane-policy.sh", "scripts/ci-path-router.py",
+                 ".github/workflows/nightly.yml", "LICENSE"):
+        assert routed(path) == ("full", []), path
+    # A docs-only or research-note change keeps the evidence route and selects nothing; an SDK-only
+    # change keeps the sdk route and selects the SDK suite alone.
+    for path in ("docs/routing.md", "README.md", ".github/ISSUE_SPECS/1043-x.md",
+                 "dsp-research/filters.md"):
+        assert routed(path) == ("evidence", []), path
+    assert routed("sdk/src/index.ts") == ("sdk", ["sdk-deletions"])
+    # A mixed change selects the union, in table order; a rename lists both sides, so moving a key
+    # file away still selects its suite.
+    assert select("crates/engine/src/lib.rs", "scripts/check-dsp-research.sh",
+                  "scripts/check-env-vocabulary.sh") == ["env-vocabulary", "dsp-research"]
+    assert select("scripts/retired/env.sh", "scripts/check-env-vocabulary.sh") == ["env-vocabulary"]
+    # Fail-safe: whenever the path list is unavailable, empty or untrusted, every suite runs.
+    assert router.select_self_tests(None) == list(SUITES)
+    assert router.select_self_tests([]) == list(SUITES)
+    for untrusted in ("/crates/engine/src/lib.rs", "docs/../crates/engine/src/lib.rs",
+                      "crates\\engine\\src\\lib.rs"):
+        assert select("docs/routing.md", untrusted) == list(SUITES), untrusted
+
+
+def test_self_test_routing() -> None:
+    assert_self_test_selection(load_module("ci_router", ROUTER))
+    # End to end through `--flags`: the compact JSON line the workflow reads.
+    everything = json.dumps(list(SUITES), separators=(",", ":"))
+    for args, expected in (
+        (("--path", "scripts/console-benchmark-record-lib.jq"), '["console-benchmark"]'),
+        (("--path", "crates/engine/src/lib.rs"), "[]"),
+        (("--path", "docs/routing.md"), "[]"),
+        ((), everything),  # missing base
+        (("--base", "definitely-not-a-revision", "--head", "HEAD"), everything),  # malformed diff
+    ):
+        assert flag_values_with(ROUTER, "--event", "pull_request", *args)["self_tests"] == expected
+    assert flag_values_with(ROUTER, "--event", "workflow_dispatch")["self_tests"] == everything
+    for record, expected in ((b"R100\0scripts/check-env-vocabulary.sh\0scripts/retired/env.sh\0",
+                              '["env-vocabulary"]'),
+                             (b"", everything),
+                             (b"U\0scripts/check-env-vocabulary.sh\0", everything)):
+        with tempfile.NamedTemporaryFile() as status:
+            status.write(record)
+            status.flush()
+            assert flag_values_with(ROUTER, "--event", "pull_request", "--name-status-file",
+                                    status.name)["self_tests"] == expected, record
+
+
+def router_selection_mutation_fails(old: str, new: str) -> None:
+    """A mutated router the selection assertions must reject, judged in-process."""
+    with tempfile.TemporaryDirectory(prefix="ci-router-selection-") as directory:
+        mutant = pathlib.Path(directory) / "ci-path-router.py"
+        text = ROUTER.read_text(encoding="utf-8")
+        if old not in text:
+            raise AssertionError(f"mutation anchor absent: {old!r}")
+        mutant.write_text(text.replace(old, new, 1), encoding="utf-8")
+        try:
+            assert_self_test_selection(load_module("ci_router_mutant", mutant))
+        except AssertionError:
+            return
+        raise AssertionError(f"router selection mutation survived: {old!r} -> {new!r}")
+
+
+VERDICT_RESULTS = ("DOCS_GATES", "ARTIFACT", "ARTIFACT_IDENTITY", "ARTIFACT_RECORD", "SDK",
+                   "ARTIFACT_GATES", "BROWSER", "LINT", "TEST_DEBUG_A", "TEST_DEBUG_B",
+                   "TEST_RELEASE", "AUDIT_NATIVE", "WASM_GUESTS", "CROSS_TARGET", "AARCH64_DEBUG",
+                   "AARCH64_RELEASE", "RELEASE_SHAPE", "GATE_SELF_TESTS")
+
+
+def verdict_script(text: str) -> str:
+    """The bash the verdict's expectation-table step runs."""
+    marker = "      - name: Enforce the qualification expectation table\n        run: |\n"
+    assert text.count(marker) == 1, "verdict expectation step not found"
+    lines = []
+    for line in text.split(marker, 1)[1].splitlines():
+        if line.strip() and not line.startswith("          "):
+            break
+        lines.append(line[10:])
+    return "\n".join(lines) + "\n"
+
+
+def verdict_passes(script: str, route: str, selected: str, self_test_result: str) -> bool:
+    """Run the verdict for a pull request on `route` with every other job as its table expects."""
+    results = dict.fromkeys(VERDICT_RESULTS, "skipped")
+    if route in ("evidence", "full"):
+        results["DOCS_GATES"] = "success"
+    if route in ("sdk", "full"):
+        results.update(ARTIFACT="success", ARTIFACT_IDENTITY="success", SDK="success")
+    if route == "full":
+        results.update(dict.fromkeys(VERDICT_RESULTS[5:16], "success"))
+    results["GATE_SELF_TESTS"] = self_test_result
+    env = dict(os.environ, ROUTE_RESULT="success", ROUTE=route, RELEASE_INPUTS="false",
+               SELF_TESTS=selected, GITHUB_EVENT_NAME="pull_request",
+               GITHUB_REF="refs/pull/1/merge",
+               **{f"{name}_RESULT": value for name, value in results.items()})
+    return subprocess.run(["bash", "-c", script], env=env, stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL, check=False).returncode == 0
+
+
+def test_verdict_self_test_expectation() -> None:
+    """Issue #1043: the verdict still enforces the expected result. It fails when the self-test job
+    ran red, when it was skipped although the router selected a suite, when it ran although the
+    router selected none, and when the router's list is malformed; and, end to end, a routed change
+    passes it with the job and step conditions check-ci-path-routing.py pins."""
+    workflow = ROOT / ".github/workflows/qualification.yml"
+    script = verdict_script(workflow.read_text(encoding="utf-8"))
+    one = '["env-vocabulary"]'
+    assert verdict_passes(script, "full", "[]", "skipped")
+    assert verdict_passes(script, "full", one, "success")
+    for result in ("failure", "skipped", "cancelled"):
+        assert not verdict_passes(script, "full", one, result), result
+    for result in ("success", "failure"):
+        assert not verdict_passes(script, "full", "[]", result), result
+    for malformed in ("", "true", '["env-vocabulary", "dsp-research"]', "[env-vocabulary]"):
+        for result in ("success", "skipped"):
+            assert not verdict_passes(script, "full", malformed, result), (malformed, result)
+    assert verdict_passes(script, "evidence", "[]", "skipped")
+    assert not verdict_passes(script, "evidence", "[]", "success")
+    assert verdict_passes(script, "sdk", '["sdk-deletions"]', "success")
+    assert not verdict_passes(script, "sdk", '["sdk-deletions"]', "skipped")
+    # The conditions below are the ones the checker pins, evaluated as Actions evaluates them.
+    checker = load_module("ci_checker", CHECKER)
+    assert checker.SELF_TEST_JOB_HEAD.endswith("    if: needs.route.outputs.self_tests != '[]'\n")
+    assert (checker.SELF_TEST_STEP_IF
+            == "contains(fromJSON(needs.route.outputs.self_tests), '{suite}')")
+    for paths, suites in (
+        (["scripts/check-env-vocabulary.sh"], ["env-vocabulary"]),
+        (["scripts/console-benchmark-record-lib.jq"], ["console-benchmark"]),
+        (["scripts/lib/gate.sh"], ["conformance-boundaries", "dsp-research"]),
+        (["sdk/src/core/abi.ts"], ["sdk-deletions"]),
+        (["crates/engine/src/lib.rs"], []),
+        (["docs/routing.md"], []),
+    ):
+        args = ["--event", "pull_request"]
+        for path in paths:
+            args += ["--path", path]
+        values = flag_values_with(ROUTER, *args)
+        job_runs = values["self_tests"] != "[]"
+        steps_run = [suite for suite in SUITES if suite in json.loads(values["self_tests"])]
+        assert job_runs == bool(suites) and steps_run == suites, (paths, values)
+        assert verdict_passes(script, values["route"], values["self_tests"],
+                              "success" if job_runs else "skipped"), paths
+        assert not verdict_passes(script, values["route"], values["self_tests"],
+                                  "skipped" if job_runs else "success"), paths
+
+
 def checker_fails(root: pathlib.Path) -> None:
     result = subprocess.run([sys.executable, str(CHECKER), "--root", str(root)],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
@@ -202,7 +408,7 @@ def checker_fails(root: pathlib.Path) -> None:
         raise AssertionError("workflow mutation was accepted")
 
 
-def workspace() -> pathlib.Path:
+def workspace(self_test_inputs: bool = False) -> pathlib.Path:
     """A scratch root carrying only the surviving qualification.yml -- design #359 §12 stage 3
     retired ci.yml, sdk.yml, browser-qualification.yml and release-build.yml, and
     check_retired_workflows_absent fails if any of the four exists here, so this workspace must
@@ -218,6 +424,17 @@ def workspace() -> pathlib.Path:
     shutil.copy2(CHECKER, root / "scripts/check-ci-path-routing.py")
     shutil.copy2(TEST, root / "scripts/test-ci-path-routing.py")
     shutil.copy2(ROOT / "scripts/check-cross-targets.sh", root / "scripts/check-cross-targets.sh")
+    # The self-test key rule (#1043) scans each suite's scripts with the reachability rule's mention
+    # scanner. Only the key mutations need the scripts themselves: without them the rule has
+    # nothing to scan, which keeps every other mutant's checker run cheap.
+    shutil.copy2(ROOT / "scripts/check-script-reachability.py",
+                 root / "scripts/check-script-reachability.py")
+    if self_test_inputs:
+        for key in load_module("ci_router", ROUTER).SELF_TEST_INPUTS.values():
+            for path in key:
+                if not path.endswith("/") and (ROOT / path).is_file():
+                    (root / path).parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(ROOT / path, root / path)
     return root
 
 
@@ -247,7 +464,9 @@ def script_mutation_fails(script: str, old: str, new: str) -> None:
 
 
 def router_mutation_fails(old: str, new: str) -> None:
-    root = workspace()
+    # The whole regression suite runs in the scratch root, so it carries the self-test scripts too:
+    # their key mutants must fail there for the right reason, never for a missing file.
+    root = workspace(self_test_inputs=True)
     try:
         mutate(root / "scripts/ci-path-router.py", old, new)
         result = subprocess.run([sys.executable, str(root / "scripts/test-ci-path-routing.py")],
@@ -306,6 +525,143 @@ def test_nightly_budget_selection() -> None:
     workflow_mutation_fails("nightly.yml", "          set -euo pipefail\n" +
                             "          " + checker.NIGHTLY_BUDGET_COMMANDS[0],
                             "          " + checker.NIGHTLY_BUDGET_COMMANDS[0])
+
+
+# Issue #1043: where each suite's gate runs on every change, as the workflow spells the line.
+GATE_LINES = {
+    "env-vocabulary": "        run: bash scripts/check-env-vocabulary.sh\n",
+    "conformance-boundaries": "        run: bash scripts/check-conformance-boundaries.sh\n",
+    "console-benchmark": "        run: bash scripts/check-bench-preconditions.sh\n",
+    "sdk-deletions": "          python3 -B scripts/check-sdk-deletions.py\n",
+    "dsp-research": "          bash scripts/check-dsp-research.sh\n",
+}
+
+
+def test_self_test_contract_mutations(checker) -> None:
+    """Issue #1043: every way of losing a self-test suite's discrimination is refused -- a key that
+    misses a file the suite reads, a suite step dropped, unconditioned, retargeted or masked, the
+    job's own condition changed, the router output or the verdict's expectation dropped, a gate
+    dropped from or conditioned in its per-PR job, and the nightly run dropped or conditioned.
+    The checker runs in-process over one scratch root, restored after each mutant."""
+    root = workspace(self_test_inputs=True)
+
+    def refused(relative: str, old: str, new: str) -> None:
+        path = root / relative
+        original = path.read_text(encoding="utf-8")
+        if old not in original:
+            raise AssertionError(f"mutation anchor absent: {old!r}")
+        path.write_text(original.replace(old, new, 1), encoding="utf-8")
+        try:
+            checker.check(root)
+        except checker.Invalid:
+            return
+        finally:
+            path.write_text(original, encoding="utf-8")
+        raise AssertionError(f"self-test contract mutation was accepted: {relative}: {old!r}")
+
+    def script_mutation_fails(script: str, old: str, new: str) -> None:
+        refused(f"scripts/{script}", old, new)
+
+    def workflow_mutation_fails(workflow: str, old: str, new: str) -> None:
+        refused(f".github/workflows/{workflow}", old, new)
+
+    try:
+        checker.check(root)  # the unmutated scratch root passes
+        # Router keys (the checker's mention rule) and the suite table.
+        for old, new in (
+            ('        "scripts/lib/gate.sh",\n        "scripts/test-conformance-boundaries.sh",\n',
+             '        "scripts/test-conformance-boundaries.sh",\n'),  # the gate's library
+            ('        "scripts/console-benchmark-record-lib.jq",\n', ""),  # a jq library, included
+            ('        "scripts/web-mixing-automation-validator.jq",\n', ""),  # a validator, loaded
+            ('        "scripts/run-web-mixing-automation-benchmark.sh",\n', ""),  # a runner, copied
+            ('        "scripts/test-env-vocabulary.sh",\n', ""),  # the suite itself
+            ('        "scripts/check-dsp-research.sh",\n', ""),  # the gate
+            ('    "dsp-research": {', '    "dsp-notes": {'),  # a suite the workflow does not run
+            ('SELF_TEST_SHARED_INPUTS = {".github/workflows/qualification.yml"}',
+             "SELF_TEST_SHARED_INPUTS = set()"),
+        ):
+            script_mutation_fails("ci-path-router.py", old, new)
+            # Router behaviour the checker cannot derive: the selection assertions catch it.
+        for old, new in (
+            ("    if not paths or any(is_untrusted_path(path) for path in paths):\n"
+             "        return list(SELF_TEST_INPUTS)\n",
+             "    if not paths:\n        return []\n"),  # fail-safe dropped
+            ("    if any(path in SELF_TEST_SHARED_INPUTS for path in paths):\n"
+             "        return list(SELF_TEST_INPUTS)\n", ""),  # a workflow edit selects nothing
+            ('        "sdk/",\n', ""),  # the SDK tree the SDK self-test reads
+            ('(entry.endswith("/") and path.startswith(entry))', "False"),  # prefix entries ignored
+        ):
+            router_selection_mutation_fails(old, new)
+        # The self-test job and its steps.
+        for suite, (_, _, commands) in checker.SELF_TEST_SUITES.items():
+            condition = "        if: " + checker.SELF_TEST_STEP_IF.format(suite=suite) + "\n"
+            step = condition + f"        run: {commands[0]}\n"
+            workflow_mutation_fails("qualification.yml", step, "")  # the suite's step emptied
+            workflow_mutation_fails("qualification.yml", step,
+                                    f"        run: {commands[0]}\n")  # run on every change
+            workflow_mutation_fails("qualification.yml", step, condition + "        run: true\n")
+            workflow_mutation_fails("qualification.yml", step,
+                                    condition + "        continue-on-error: true\n"
+                                    + f"        run: {commands[0]}\n")  # a red suite masked
+            other = "sdk-deletions" if suite != "sdk-deletions" else "env-vocabulary"
+            workflow_mutation_fails("qualification.yml", step,
+                                    condition.replace(f"'{suite}'", f"'{other}'")
+                                    + f"        run: {commands[0]}\n")  # another suite's key
+            # Its gate dropped from, or made conditional in, the job that runs it on every change.
+            workflow_mutation_fails("qualification.yml", GATE_LINES[suite], "")
+            if GATE_LINES[suite].startswith("        run: "):
+                workflow_mutation_fails("qualification.yml", GATE_LINES[suite],
+                                        "        if: needs.route.outputs.math_closure == 'true'\n"
+                                        + GATE_LINES[suite])
+        for head in ("    needs: route\n    if: needs.route.outputs.route == 'full'\n",
+                     "    needs: route\n    if: always()\n",
+                     "    needs: route\n"):
+            workflow_mutation_fails("qualification.yml", checker.SELF_TEST_JOB_HEAD, head)
+        workflow_mutation_fails(
+            "qualification.yml",
+            "    if: needs.route.outputs.self_tests != '[]'\n    runs-on: ubuntu-24.04\n",
+            "    if: needs.route.outputs.self_tests != '[]'\n    continue-on-error: true\n"
+            "    runs-on: ubuntu-24.04\n",
+        )  # the whole job masked
+        for line in checker.SELF_TEST_ROUTE_LINES:
+            workflow_mutation_fails("qualification.yml", line, "")
+        workflow_mutation_fails("qualification.yml", checker.SELF_TEST_ROUTE_LINES[1],
+                                checker.SELF_TEST_ROUTE_LINES[1].replace("tail -n 4", "tail -n 3"))
+        # The verdict's expectation: each line of it dropped, or the job held to the full route.
+        for line in checker.SELF_TEST_VERDICT_LINES:
+            workflow_mutation_fails("qualification.yml", line, "")
+        workflow_mutation_fails(
+            "qualification.yml",
+            'check gate-self-tests "$GATE_SELF_TESTS_RESULT" "$self_tests_expected"',
+            'check gate-self-tests "$GATE_SELF_TESTS_RESULT" "$full_expected"',
+        )
+        workflow_mutation_fails(
+            "qualification.yml",
+            "          [[ \"$SELF_TESTS\" != '[]' ]] && self_tests_expected=success\n",
+            "          self_tests_expected=success\n",
+        )  # expected to run on every change
+        # The nightly run of every suite.
+        for suite, (_, _, commands) in checker.SELF_TEST_SUITES.items():
+            workflow_mutation_fails("nightly.yml", f"        run: {commands[0]}\n",
+                                    "        run: true\n")
+            workflow_mutation_fails("nightly.yml",
+                                    f"        if: ${{{{ !cancelled() }}}}\n"
+                                    f"        run: {commands[0]}\n",
+                                    "        if: github.event_name == 'workflow_dispatch'\n"
+                                    f"        run: {commands[0]}\n")
+            workflow_mutation_fails("nightly.yml", f"        run: {commands[0]}\n",
+                                    "        continue-on-error: true\n"
+                                    f"        run: {commands[0]}\n")
+        workflow_mutation_fails("nightly.yml",
+                                "            moved-mutation-suites, release-budgets, full-size-tests]",
+                                "            release-budgets, full-size-tests]")  # the notice stops reporting it
+        workflow_mutation_fails(
+            "nightly.yml", "    name: stem-store mutation ledger and script-gate self-tests\n",
+            "    name: stem-store mutation ledger and script-gate self-tests\n"
+            "    if: github.event_name == 'workflow_dispatch'\n",
+        )  # the job no longer runs on the schedule
+    finally:
+        shutil.rmtree(root)
 
 
 def main() -> int:
@@ -581,12 +937,14 @@ def main() -> int:
     root = workspace()
     try:
         mutate(root / ".github/workflows/qualification.yml",
-               "    needs: [route, docs-gates, artifact, sdk, artifact-gates, browser, lint, "
-               "test-debug-a, test-debug-b, test-release, audit-native, wasm-guests, "
-               "cross-target, aarch64-debug, aarch64-release, release-shape]",
-               "    needs: [route, docs-gates, artifact, sdk, artifact-gates, browser, lint, "
-               "test-debug-a, test-debug-b, test-release, audit-native, wasm-guests, "
-               "cross-target, aarch64-debug, aarch64-release]")
+               "    needs: [route, docs-gates, artifact, artifact-identity, artifact-record, sdk, "
+               "artifact-gates, browser, lint, test-debug-a, test-debug-b, test-release, "
+               "audit-native, wasm-guests, cross-target, aarch64-debug, aarch64-release, "
+               "release-shape, gate-self-tests]",
+               "    needs: [route, docs-gates, artifact, artifact-identity, artifact-record, sdk, "
+               "artifact-gates, browser, lint, test-debug-a, test-debug-b, test-release, "
+               "audit-native, wasm-guests, cross-target, aarch64-debug, aarch64-release, "
+               "release-shape]")
         checker_fails(root)  # a job dropped from verdict's needs: escapes the aggregate entirely
     finally:
         shutil.rmtree(root)
@@ -671,7 +1029,7 @@ def main() -> int:
     for line in checker.TEST_SUPPORT_CI_LINES:
         workflow_mutation_fails("qualification.yml", "          " + line, "")
     # Issue #1009: wasm-guests leaves the V8 spill leg to artifact-gates, so artifact-gates must run
-    # it on the downloaded artifact, after the pin check.
+    # it on the downloaded artifact, after the digest check.
     workflow_mutation_fails(
         "qualification.yml",
         "          python3 -B scripts/check-web-audioworklet-v8-spill.py "
@@ -682,10 +1040,156 @@ def main() -> int:
         "qualification.yml",
         "          shared-key: artifact-gates\n",
         "          shared-key: artifact-gates\n"
-        "      - name: V8 spill gate before the pin check\n"
+        "      - name: V8 spill gate before the digest check\n"
         "        run: python3 -B scripts/check-web-audioworklet-v8-spill.py "
         "target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm\n",
     )
+
+    # Issue #1061: every reader of the shipped module checks its download against the digest the
+    # artifact job published, and the identity job reports ARTIFACT CHANGED or UNCHANGED, proves
+    # the build reproducible and holds a release change to its pin, on the artifact job's routes.
+    digest_step = checker.ARTIFACT_DIGEST_STEP
+    workflow_mutation_fails("qualification.yml", checker.ARTIFACT_DIGEST_OUTPUT, "")
+    for reader in checker.ARTIFACT_READERS:
+        root = workspace()
+        try:
+            workflow = root / ".github/workflows/qualification.yml"
+            text = workflow.read_text(encoding="utf-8")
+            start = text.index(f"\n  {reader}:\n")
+            step = text.index(digest_step, start)
+            end = text.index("      - ", step + len(digest_step))
+            workflow.write_text(text[:step] + text[end:], encoding="utf-8")
+            checker_fails(root)  # a reader that stops verifying its download
+        finally:
+            shutil.rmtree(root)
+    root = workspace()
+    try:
+        # The pre-#1061 step: the download held to the committed pin instead of the built digest.
+        workflow = root / ".github/workflows/qualification.yml"
+        text = workflow.read_text(encoding="utf-8")
+        start = text.index("\n  browser:\n")
+        step = text.index(digest_step, start)
+        workflow.write_text(text[:step] + text[step:].replace(
+            digest_step,
+            "      - name: Verify the downloaded artifact against its source pin\n"
+            "        env:\n"
+            "          BUILT: hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256\n",
+            1), encoding="utf-8")
+        checker_fails(root)
+    finally:
+        shutil.rmtree(root)
+    for step in checker.IDENTITY_STEPS:
+        workflow_mutation_fails("qualification.yml", step, "")  # a pinned step deleted
+    # Issue #1061 attempt 3: the record on main and the fetch-and-compare on every change. Each
+    # mutant would leave the comparison without a record, skipped, or masked, with CI green.
+    record_step = checker.ARTIFACT_RECORD_STEP
+    workflow_mutation_fails("qualification.yml", record_step, "")  # main records nothing
+    workflow_mutation_fails(
+        "qualification.yml", checker.RECORD_HEAD,
+        checker.RECORD_HEAD.replace("github.event_name == 'push' && ", ""),
+    )  # the record job reachable by pull requests
+    workflow_mutation_fails(
+        "qualification.yml", checker.RECORD_HEAD,
+        checker.RECORD_HEAD.replace(" && github.ref == 'refs/heads/main'", ""),
+    )  # the record job run on any push
+    workflow_mutation_fails(
+        "qualification.yml", checker.RECORD_PERMISSIONS, "    permissions:\n      contents: read\n",
+    )  # the post is refused on main
+    workflow_mutation_fails(
+        "qualification.yml", checker.RECORD_PERMISSIONS + "    steps:\n",
+        checker.RECORD_PERMISSIONS + "    steps:\n      - uses: actions/checkout@"
+        "11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2\n",
+    )  # the write-token job checks out, and so runs, repository code
+    # #1061 attempt 3 verdict, finding 1: a write token on any job a pull request reaches lets a
+    # same-repository change forge its base's record. Each grant is red.
+    for anchor, grant in (
+        ("    timeout-minutes: 15\n    outputs:\n      sha256:",
+         "    timeout-minutes: 15\n    permissions:\n      contents: read\n      statuses: write\n"
+         "    outputs:\n      sha256:"),  # artifact, which runs on every pull request
+        (checker.IDENTITY_PERMISSIONS,
+         "    permissions:\n      contents: read\n      statuses: write\n"),  # artifact-identity
+        ("    timeout-minutes: 20\n    permissions:\n      contents: read\n      statuses: read\n",
+         "    timeout-minutes: 20\n    permissions: write-all\n"),
+    ):
+        workflow_mutation_fails("qualification.yml", anchor, grant)
+    for line in checker.ARTIFACT_BUILD_LINES:
+        workflow_mutation_fails("qualification.yml", line, "")
+    workflow_mutation_fails("qualification.yml", "      rustc: ${{ steps.build.outputs.rustc }}\n", "")
+    workflow_mutation_fails(
+        "qualification.yml", checker.IDENTITY_PERMISSIONS,
+        "    permissions:\n      contents: read\n",
+    )  # the lookup is refused on every change
+    identity_head = ("    runs-on: ubuntu-24.04\n    timeout-minutes: 20\n"
+                     + checker.IDENTITY_PERMISSIONS)
+    for label, extra in (
+        ("continue-on-error", "    continue-on-error: true\n"),
+        ("defaults", "    defaults:\n      run:\n        shell: bash {0}\n"),
+        ("env", "    env:\n      GH_TOKEN: ''\n"),
+    ):
+        workflow_mutation_fails("qualification.yml", identity_head, identity_head + extra)
+    workflow_mutation_fails(
+        "qualification.yml", checker.RECORD_PERMISSIONS,
+        checker.RECORD_PERMISSIONS + "    env:\n      PATH: /tmp/forged-gh:/usr/bin:/bin\n",
+    )  # a job PATH that puts another gh first could forge main's record
+    report_step = checker.IDENTITY_REPORT_STEP
+    workflow_mutation_fails(
+        "qualification.yml", report_step,
+        report_step.replace("        env:\n", "        if: github.event_name == 'push'\n        env:\n", 1),
+    )  # the comparison skipped on pull requests
+    workflow_mutation_fails("qualification.yml", 'report --event "$EVENT"', "report --event none")
+    workflow_mutation_fails("qualification.yml", "          BEFORE: ${{ github.event.before }}\n",
+                            '          BEFORE: ""\n')
+    workflow_mutation_fails(
+        "qualification.yml", "          GH_TOKEN: ${{ github.token }}\n          EVENT:",
+        "          EVENT:",
+    )  # gh unauthenticated
+    workflow_mutation_fails(
+        "qualification.yml", 'python3 -B scripts/web-audioworklet-identity.py --self-test\n', "",
+    )
+    workflow_mutation_fails(
+        "qualification.yml", report_step,
+        "      - name: Remove the twin module\n        run: rm -rf \"$RUNNER_TEMP/twin-module\"\n"
+        + report_step,
+    )  # a step slipped in before the report
+    workflow_mutation_fails(
+        "qualification.yml",
+        "        with:\n          fetch-depth: 0\n"
+        "      - name: Install pinned Rust toolchain and Wasm standard library\n",
+        "      - name: Install pinned Rust toolchain and Wasm standard library\n",
+    )  # the identity job's full history dropped: no base is reachable
+    workflow_mutation_fails(
+        "qualification.yml", 'git worktree add --detach "$RUNNER_TEMP/twin" HEAD\n',
+        'ln -s "$GITHUB_WORKSPACE" "$RUNNER_TEMP/twin"\n',
+    )  # a twin symlinked to the workspace rebuilds from the artifact job's own path
+    workflow_mutation_fails(
+        "qualification.yml",
+        'CARGO_HOME="$RUNNER_TEMP/twin-cargo-home" bash "$RUNNER_TEMP/twin/',
+        'bash "$RUNNER_TEMP/twin/',
+    )  # a twin sharing the artifact job's CARGO_HOME proves nothing about it
+    workflow_mutation_fails(
+        "qualification.yml",
+        "    name: shipped AudioWorklet artifact identity (changed or unchanged, reproducible, "
+        "release pin)\n    needs: [route, artifact]\n"
+        "    if: needs.route.outputs.route == 'sdk' || needs.route.outputs.route == 'full'\n",
+        "    name: shipped AudioWorklet artifact identity (changed or unchanged, reproducible, "
+        "release pin)\n    needs: [route, artifact]\n"
+        "    if: needs.route.outputs.route == 'full'\n",
+    )  # an sdk-route PR would build the module and say nothing about it
+    workflow_mutation_fails(
+        "qualification.yml",
+        "    name: shipped AudioWorklet artifact identity (changed or unchanged, reproducible, "
+        "release pin)\n    needs: [route, artifact]\n",
+        "    name: shipped AudioWorklet artifact identity (changed or unchanged, reproducible, "
+        "release pin)\n    needs: [route]\n",
+    )
+    workflow_mutation_fails(
+        "qualification.yml",
+        '          check artifact-identity "$ARTIFACT_IDENTITY_RESULT" "$artifact_expected"\n', "",
+    )  # the identity job dropped from the expectation table
+    workflow_mutation_fails(
+        "qualification.yml",
+        '          check artifact-record "$ARTIFACT_RECORD_RESULT" "$record_expected"\n', "",
+    )  # the record job dropped from the expectation table
 
     # Issue #1017: the AArch64 compile rows and test jobs. Deleting a row, either half of the
     # row, a job's arm64 runner, its script, its full-route gating or its success expectation, or a
@@ -826,6 +1330,12 @@ def main() -> int:
         run(sys.executable, str(CHECKER), "--root", str(root))
     finally:
         shutil.rmtree(root)
+
+    # Issue #1043, after the classifier cases so a nested run for a classifier mutant stops first.
+    test_self_test_routing()
+    test_verdict_self_test_expectation()
+    test_self_test_contract_mutations(checker)
+    print("self-test routing, verdict expectation and contract mutation cases passed")
 
     # Baseline: the unmutated workspace() -- qualification.yml plus the router/checker/test
     # scripts, with none of the four retired workflows present -- must pass the checker outright.

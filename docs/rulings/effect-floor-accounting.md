@@ -849,6 +849,15 @@ from is not a floor. Wasm numbers are wasmtime numbers, not browser numbers, on 
 Cranelift compiles ahead of time and does not tier, and every wasm record says
 `browser_field_measurement: false`.
 
+**History (2026-09-28, #1039).** The tool that produced these residuals, the wasmtime console
+benchmark (`tools/wasm-console`, run by `scripts/operator/run-wasm-console-benchmark.sh`), is
+retired by owner ruling R9 (`docs/rulings/engine-footprint-2026-09-28.md`); git history keeps its
+source. The record the table cites stays in `artifacts/compressor-round1/`. Nothing produces a
+wasmtime row any more, so this rule has no new inputs: a future wasm floor is derived from V8 rows
+on the shipped module (`scripts/run-web-mixing-automation-benchmark.sh run WORKDIR --step N`, or a
+later V8 harness of the same `--step` shape), or it is not stated. The residuals above are
+Cranelift residuals and are not applied to a V8 row.
+
 ---
 
 ## The record columns

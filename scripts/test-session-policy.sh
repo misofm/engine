@@ -4,7 +4,7 @@ root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 make_base() {
   local d=$1
-  mkdir -p "$d/scripts/lib" "$d/crates/engine" "$d/crates/session/src" "$d/fixtures/session" "$d/fixtures/native-pcm-runner" "$d/hosts/host-web/qualification" "$d/hosts/host-web/tests/browser-v1" "$d/sdk" "$d/fuzz" "$d/foreign"
+  mkdir -p "$d/scripts/lib" "$d/crates/engine" "$d/crates/session/src" "$d/fixtures/session" "$d/hosts/host-web/qualification" "$d/hosts/host-web/tests/browser-v1" "$d/sdk" "$d/fuzz" "$d/foreign"
   cp "$root/scripts/check-session-policy.sh" "$d/scripts/"; cp "$root/scripts/lib/gate.sh" "$d/scripts/lib/"
   printf '# comments only\n' >"$d/scripts/session-policy-historical-allowlist.txt"
   printf '[package]\nname = "engine"\n' >"$d/crates/engine/Cargo.toml"
@@ -45,7 +45,7 @@ EOF
 check "$d"
 d="$tmp/toml-find"; cp -a "$base" "$d"; printf x >"$d/fixtures/session/a.toml"; red find "$d"
 d="$tmp/retired"; cp -a "$base" "$d"; printf 'Session''Toml\n' >"$d/retired.txt"; red retired "$d"
-for root_path in fixtures/session fixtures/native-pcm-runner hosts/host-web/qualification hosts/host-web/tests/browser-v1 sdk fuzz; do d="$tmp/root-$RANDOM"; cp -a "$base" "$d"; rm -rf "$d/$root_path"; red "missing root $root_path" "$d"; done
+for root_path in fixtures/session hosts/host-web/qualification hosts/host-web/tests/browser-v1 sdk fuzz; do d="$tmp/root-$RANDOM"; cp -a "$base" "$d"; rm -rf "$d/$root_path"; red "missing root $root_path" "$d"; done
 allow="$tmp/allow"; cp -a "$base" "$allow"; printf 'fixtures/session/a.toml\n' >"$allow/scripts/session-policy-historical-allowlist.txt"; printf x >"$allow/fixtures/session/a.toml"; check "$allow"
 make_find_shim() { local d=$1 token=$2; mkdir -p "$d/bin"; cat >"$d/bin/find" <<EOF
 #!/usr/bin/env bash
@@ -53,7 +53,7 @@ if [[ "\$*" == *"$token"* ]]; then printf 'fixtures/session/partial.toml\n'; exi
 exec /usr/bin/find "\$@"
 EOF
 chmod +x "$d/bin/find"; }
-for token in fixtures/session fixtures/native-pcm-runner hosts/host-web/qualification sdk; do d="$tmp/find-shim-$RANDOM"; cp -a "$base" "$d"; make_find_shim "$d" "$token"; if PATH="$d/bin:$PATH" check "$d"; then echo "find shim unexpectedly passed: $token" >&2; exit 1; fi; done
+for token in fixtures/session hosts/host-web/qualification sdk; do d="$tmp/find-shim-$RANDOM"; cp -a "$base" "$d"; make_find_shim "$d" "$token"; if PATH="$d/bin:$PATH" check "$d"; then echo "find shim unexpectedly passed: $token" >&2; exit 1; fi; done
 make_sed_shim() { local d=$1; mkdir -p "$d/bin"; cat >"$d/bin/sed" <<'EOF'
 #!/usr/bin/env bash
 printf 'fixtures/session/allowlisted.toml\n'; exit 9
@@ -103,8 +103,8 @@ d="$tmp/early-clone"; cp -a "$base" "$d"; sed -i '2i let mut normalized = sessio
 # Allowlist missing, error-only, and useful partial error.
 d="$tmp/no-allow"; cp -a "$base" "$d"; rm "$d/scripts/session-policy-historical-allowlist.txt"; red no-allow "$d" 'missing explicit historical allowlist'
 for out in '' fixtures/session/allowed.toml; do d="$tmp/se-$RANDOM"; cp -a "$base" "$d"; sedshim "$d" "$out"; red sed "$d" 'historical allowlist read failed (sed status 9)' env PATH="$d/bin:$PATH"; done
-# Four distinct find calls: error-only and an actually allowlisted partial result.
-for first in fixtures/session fixtures/native-pcm-runner hosts/host-web/qualification sdk; do for out in '' fixtures/session/allowed.toml; do d="$tmp/fe-$RANDOM"; cp -a "$base" "$d"; printf 'fixtures/session/allowed.toml\n' >"$d/scripts/session-policy-historical-allowlist.txt"; findshim "$d" "$first" "$out"; red find "$d" 'traversal errored (find status 9)' env PATH="$d/bin:$PATH"; done; done
+# Three distinct find calls: error-only and an actually allowlisted partial result.
+for first in fixtures/session hosts/host-web/qualification sdk; do for out in '' fixtures/session/allowed.toml; do d="$tmp/fe-$RANDOM"; cp -a "$base" "$d"; printf 'fixtures/session/allowed.toml\n' >"$d/scripts/session-policy-historical-allowlist.txt"; findshim "$d" "$first" "$out"; red find "$d" 'traversal errored (find status 9)' env PATH="$d/bin:$PATH"; done; done
 for path in sdk/a.session.toml fuzz/session_case/a.toml; do d="$tmp/shape-$RANDOM"; cp -a "$base" "$d"; mkdir -p "$d/$(dirname "$path")"; : >"$d/$path"; red shape "$d" "live session TOML remains: $path"; done
 d="$tmp/sorted"; cp -a "$base" "$d"; : >"$d/fixtures/session/z.toml"; : >"$d/fixtures/session/a.toml"; red sorted "$d" 'live session TOML remains: fixtures/session/a.toml'
 d="$tmp/sorterr"; cp -a "$base" "$d"; printf 'fixtures/session/a.toml\nfixtures/session/b.toml\n' >"$d/scripts/session-policy-historical-allowlist.txt"; sortshim "$d"; red sort "$d" 'session TOML discovery sort errored (sort status 9)' env PATH="$d/bin:$PATH"

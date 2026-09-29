@@ -3,11 +3,22 @@
 use conformance::{ConformanceDecoder, complete_schema_corpus};
 use protocol::{DecodeError, DecodeScratch, ProtocolCodec, ProtocolLimits};
 
-const MUTATION_RUNS: usize = 1_000_000;
 const MAX_FRAME_BYTES: usize = 65_536;
 
+/// Per PR: the first 10,000 of the million mutations below (issue #1049).
 #[test]
+fn ten_thousand_deterministic_mutations_cover_complete_schema_closed_dispatch() {
+    deterministic_mutations_cover_complete_schema_closed_dispatch(10_000);
+}
+
+/// The full million. `nightly.yml` runs it, in a dev build; its first 10,000 run per PR, above.
+#[test]
+#[ignore = "nightly: 1,000,000 mutated frames (#1049); 10,000 run per PR"]
 fn one_million_deterministic_mutations_cover_complete_schema_closed_dispatch() {
+    deterministic_mutations_cover_complete_schema_closed_dispatch(1_000_000);
+}
+
+fn deterministic_mutations_cover_complete_schema_closed_dispatch(mutation_runs: usize) {
     let codec = ProtocolCodec::new(ProtocolLimits {
         max_frame_bytes: MAX_FRAME_BYTES,
         max_tlv_count: 1024,
@@ -26,7 +37,7 @@ fn one_million_deterministic_mutations_cover_complete_schema_closed_dispatch() {
     }));
     let mut state = 0x4d49_534f_4354_4c05_u64;
     let mut frame = vec![0_u8; MAX_FRAME_BYTES + 32];
-    for index in 0..MUTATION_RUNS {
+    for index in 0..mutation_runs {
         let seed = &seeds[index % seeds.len()];
         frame[..seed.bytes.len()].copy_from_slice(&seed.bytes);
         state = next(state);

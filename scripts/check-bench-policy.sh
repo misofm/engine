@@ -184,9 +184,10 @@ forbidden_under_tools 'a private SHA-256 initial hash word (H0) or round-constan
 # benchmark itself is retired, and its slot then goes to a surviving subject that already uses the
 # shared timer: #1026 retired the one-shot rack benchmark (`tools/bench/src/rack.rs`), and
 # `tools/bench/src/console.rs`, the native console benchmark, took its place, so the list kept its
-# length.
-timed_subjects=(tools/bench/src/console.rs tools/audit/src/fp_env.rs
-    tools/wasm-console/src/main.rs)
+# length. When no surviving subject is left to take a slot, the list shrinks: #1039 retired the
+# wasmtime console benchmark (`tools/wasm-console/src/main.rs`) and the nightly FP-environment
+# benchmark (`tools/audit/src/fp_env.rs`), and no other file under `tools/` calls `timing::timed`.
+timed_subjects=(tools/bench/src/console.rs)
 for subject in "${timed_subjects[@]}"; do
     [[ -f "$subject" ]] || fail "converted subject is missing: $subject"
     if grep -n 'timing::timed' "$subject" >"$scratch/subject-timer" 2>"$scratch/subject-timer.err"; then
@@ -202,25 +203,21 @@ for subject in "${timed_subjects[@]}"; do
     fi
 done
 
-# `allow(unsafe_code)` is denied workspace-wide; these six files are the approved exceptions under
+# `allow(unsafe_code)` is denied workspace-wide; these four files are the approved exceptions under
 # `tools/`, and `scripts/check-realtime-policy.sh` holds the matching list for `crates/` and
-# `hosts/`. A seventh file is a new unsafe ownership boundary and needs a decision, not a grep.
+# `hosts/`. A fifth file is a new unsafe ownership boundary and needs a decision, not a grep.
+# (#1033 removed `tools/native-pcm-runner` and its row.)
 #
-# The decision for the sixth, `wasm-console-guest` (#163 phase 2 step 1): it is the
-# *same* boundary this list already grants `wasm-gate-guest`, for the same reason and
-# with the same shape. Exporting a function from a `cdylib` requires `#[unsafe(no_mangle)]` under
-# edition 2024 and there is no safe spelling of it. Both guests are `u32`-in/`u32`-out, neither
-# dereferences a pointer, neither declares a memory contract with its host, and no engine crate
-# links either. This is not a new *kind* of exception; it is a second instance of the one already
-# approved, and it is named here rather than absorbed by a pattern so that a genuinely new
-# boundary still has to come back for a decision.
+# #1039 removed `wasm-console-guest` (#163 phase 2 step 1) with the wasmtime console benchmark. It
+# had been granted the same boundary `wasm-gate-guest` holds: exporting a function from a `cdylib`
+# requires `#[unsafe(no_mangle)]` under edition 2024 and there is no safe spelling of it. A second
+# guest of that shape would again be named here rather than absorbed by a pattern, so that a
+# genuinely new boundary still has to come back for a decision.
 if printf '%s\n' \
     tools/bench-support/src/alloc.rs \
     tools/audit/src/capi.rs \
-    tools/native-pcm-runner/src/lib.rs \
     tools/bench/src/protocol.rs \
-    tools/wasm-gate-guest/src/lib.rs \
-    tools/wasm-console-guest/src/lib.rs | LC_ALL=C sort >"$scratch/expected-unsafe" 2>"$scratch/sort.err"; then sort_status=0; else sort_status=$?; fi
+    tools/wasm-gate-guest/src/lib.rs | LC_ALL=C sort >"$scratch/expected-unsafe" 2>"$scratch/sort.err"; then sort_status=0; else sort_status=$?; fi
 ((sort_status == 0)) || fail "unsafe expected-owner sort failed with status $sort_status; output: $(captured "$scratch/expected-unsafe"); stderr: $(captured "$scratch/sort.err")"
 expected_unsafe="$(<"$scratch/expected-unsafe")"
 if grep -rlE --include='*.rs' '^#!\[allow\(unsafe_code\)\]' tools >"$scratch/grep" 2>"$scratch/grep.err"; then grep_status=0; else grep_status=$?; fi
@@ -250,37 +247,6 @@ actual_environment_readers="$(<"$scratch/actual-environment")"
         <(printf '%s\n' "$actual_environment_readers") >&2 || true
     fail 'a subject bypassed the shared in-process metadata snapshot'
 }
-
-# #557's common host/toolchain acquisition boundary: the two subjects retain their local metadata
-# records and projections, but one shared collector owns every common source probe.
-for subject in tools/bench/src/session.rs tools/bench/src/conformance.rs; do
-    if grep -nF 'HostToolchainFacts::gather()' "$subject" >"$scratch/shared-delegate" 2>"$scratch/shared-delegate.err"; then
-        delegate_status=0
-    else
-        delegate_status=$?
-    fi
-    ((delegate_status == 0)) || fail "shared host/toolchain delegation missing or scan failed for $subject; status $delegate_status; output: $(captured "$scratch/shared-delegate"); stderr: $(captured "$scratch/shared-delegate.err")"
-    for common_pattern in \
-        '/proc/cpuinfo' \
-        '/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor' \
-        'lscpu|CORE,SOCKET' \
-        'available_parallelism' \
-        '\["rustc", "-V' \
-        'Command::new\("rustc"\)' \
-        '\["uname"' \
-        'Command::new\("uname"\)' \
-        'Command::new\("lscpu"\)' \
-        'LLVM version: |host: ' \
-        'MISO_ENGINE_BENCH_(POWER_SOURCE|OPT_LEVEL|LTO|CODEGEN_UNITS|TARGET_CPU|TARGET_FEATURES|BACKGROUND_LOAD_NOTE)'; do
-        if grep -nE "$common_pattern" "$subject" >"$scratch/shared-forbidden" 2>"$scratch/shared-forbidden.err"; then
-            forbidden_status=0
-        else
-            forbidden_status=$?
-        fi
-        ((forbidden_status <= 1)) || fail "shared acquisition scan failed for $subject; pattern $common_pattern; status $forbidden_status; output: $(captured "$scratch/shared-forbidden"); stderr: $(captured "$scratch/shared-forbidden.err")"
-        ((forbidden_status == 0)) && fail "subject retains a common host/toolchain acquisition spelling: $subject (pattern $common_pattern)"
-    done
-done
 
 # The shared harness is test scaffolding. A production package depending on it would put a
 # `#[global_allocator]` and an abort-on-allocation policy into a shipped artifact.

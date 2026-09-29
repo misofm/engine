@@ -2042,6 +2042,11 @@ pub struct GraphBindingBlock<'a> {
     pub right: &'a mut [f32],
     pub first_sample: u64,
 }
+/// Preparation-only constructor of a serialized scalar fader/matrix pair.
+///
+/// Only the whole-plan scalar oracle's per-node strip owners offer one, so the pairing surface
+/// exists only for tests and `test-support` (issue #1059).
+#[cfg(any(test, feature = "test-support"))]
 pub type ScalarPairFactory = fn(
     Box<dyn GraphRuntimeProcessor>,
     Box<dyn GraphRuntimeProcessor>,
@@ -2074,6 +2079,9 @@ pub trait GraphRuntimeSplitPairProcessor: Send + Any {
     fn complete_pending(&mut self, block: GraphBindingBlock<'_>);
 }
 
+/// Preparation-only constructor of a split scalar fader/matrix owner; test-only like
+/// [`ScalarPairFactory`] (issue #1059).
+#[cfg(any(test, feature = "test-support"))]
 pub type ScalarSplitPairFactory = fn(
     Box<dyn GraphRuntimeProcessor>,
     Box<dyn GraphRuntimeProcessor>,
@@ -2129,13 +2137,15 @@ pub trait GraphRuntimeProcessor: Send + Any {
     }
 
     /// Preparation-only hook for the serialized scalar fader/matrix pair.
-    /// Render never queries this metadata.
+    /// Render never queries this metadata. Test-only with the scalar oracle it pairs (#1059).
+    #[cfg(any(test, feature = "test-support"))]
     fn scalar_pair_factory(&self) -> Option<ScalarPairFactory> {
         None
     }
 
     /// Preparation-only factory for a split-owner serialized fader/matrix interval.
-    /// Render never queries this metadata.
+    /// Render never queries this metadata. Test-only with the scalar oracle it pairs (#1059).
+    #[cfg(any(test, feature = "test-support"))]
     fn scalar_split_pair_factory(&self) -> Option<ScalarSplitPairFactory> {
         None
     }

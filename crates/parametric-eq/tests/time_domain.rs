@@ -150,83 +150,108 @@ fn flush_keeps_decaying_state_out_of_the_subnormal_range() {
     assert_eq!(blocks, rate.div_ceil(128));
 }
 
-/// E4: forty-eight frozen million-sample sequences stay bounded, with no recovery and no flush hole.
-#[test]
-fn forty_eight_frozen_million_sample_sequences_remain_valid_without_recovery() {
+/// E4: one frozen million-sample sequence stays bounded, with no recovery and no flush hole.
+fn frozen_million_sample_sequence_remains_valid_without_recovery(
+    rate: u32,
+    kind: parametric_eq::EqBandKind,
+    (frequency, gain, q, slope): (f32, f32, f32, f32),
+) {
     const STABILITY_SAMPLES: usize = 1_000_000;
     const SEED: u64 = 0x0000_0000_0012_e911;
+    let configured = single_section_values(kind, frequency, gain, q, slope);
+    let mut effect = ParametricEqFactory
+        .prepare(request_at_rate(&configured, false, rate))
+        .expect("frozen stability design must prepare");
+    let mut noise_state =
+        SEED ^ u64::from(rate) ^ (u64::from(kind as u32) << 32) ^ u64::from(frequency.to_bits());
+    let mut left = [0.0_f32; 128];
+    let mut right = [0.0_f32; 128];
+    let mut first_sample = 0_usize;
+    let mut recovered = 0_u64;
+    let mut sanitized = 0_u64;
+    while first_sample < STABILITY_SAMPLES {
+        let frames = (STABILITY_SAMPLES - first_sample).min(left.len());
+        for index in 0..frames {
+            if first_sample + index == 0 {
+                left[index] = 0.99;
+                right[index] = -0.99;
+            } else {
+                left[index] = support::deterministic_noise(&mut noise_state);
+                right[index] = support::deterministic_noise(&mut noise_state);
+            }
+        }
+        let report = effect.process(
+            EffectProcessBlock::new(
+                &mut left[..frames],
+                &mut right[..frames],
+                None,
+                first_sample as u64,
+                &[],
+                128,
+            )
+            .expect("million-sample block"),
+        );
+        recovered += report.nonfinite_left_blocks + report.nonfinite_right_blocks;
+        sanitized += report.sanitized_main_samples;
+        assert!(
+            left[..frames].iter().copied().all(f32::is_finite)
+                && right[..frames].iter().copied().all(f32::is_finite),
+            "finite output Fs={rate} {kind:?} f={frequency}"
+        );
+        first_sample += frames;
+    }
+    assert_eq!(recovered, 0, "recovery Fs={rate} {kind:?} f={frequency}");
+    assert_eq!(sanitized, 0, "the EQ no longer sanitises its input");
+    let (_, left_state, right_state) = snapshot(effect.as_ref());
+    for payload in [&left_state[..], &right_state[..]] {
+        for band in 0..SECTIONS {
+            for word in 0..WORDS_PER_BAND {
+                let value = f32::from_bits(band_word(payload, band, word));
+                if word == 14 {
+                    continue;
+                }
+                assert!(
+                    value.is_finite(),
+                    "finite retained state Fs={rate} {kind:?} band={band} word={word}"
+                );
+                if word < 2 {
+                    assert!(
+                        value.to_bits() == 0.0_f32.to_bits() || value.abs() >= FLUSH_EPS,
+                        "subnormal retained state Fs={rate} {kind:?} band={band}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// E4, per PR: four of the forty-eight frozen million-sample sequences below (issue #1049), one
+/// per launch rate, both frozen edges, four families, including the 44.1 kHz / 20 kHz / +24 dB /
+/// Q = 18 bell that used to "recover".
+#[test]
+fn four_frozen_million_sample_sequences_remain_valid_without_recovery() {
+    use parametric_eq::EqBandKind;
+    let [low_edge, high_edge] = FROZEN_EDGES;
+    for (rate, kind, edge) in [
+        (44_100, EqBandKind::Bell, high_edge),
+        (48_000, EqBandKind::LowShelf, low_edge),
+        (88_200, EqBandKind::HighShelf, high_edge),
+        (96_000, EqBandKind::HighPass, low_edge),
+    ] {
+        frozen_million_sample_sequence_remains_valid_without_recovery(rate, kind, edge);
+    }
+}
+
+/// E4: forty-eight frozen million-sample sequences stay bounded, with no recovery and no flush
+/// hole. `nightly.yml` runs it, in a dev build; four of its rows run per PR, above.
+#[test]
+#[ignore = "nightly: 48 x 1,000,000 frames (#1049); four rows run per PR"]
+fn forty_eight_frozen_million_sample_sequences_remain_valid_without_recovery() {
     let mut sequences = 0_u32;
     for rate in LAUNCH_RATES {
         for kind in FROZEN_KINDS {
-            for (frequency, gain, q, slope) in FROZEN_EDGES {
-                let configured = single_section_values(kind, frequency, gain, q, slope);
-                let mut effect = ParametricEqFactory
-                    .prepare(request_at_rate(&configured, false, rate))
-                    .expect("frozen stability design must prepare");
-                let mut noise_state = SEED
-                    ^ u64::from(rate)
-                    ^ (u64::from(kind as u32) << 32)
-                    ^ u64::from(frequency.to_bits());
-                let mut left = [0.0_f32; 128];
-                let mut right = [0.0_f32; 128];
-                let mut first_sample = 0_usize;
-                let mut recovered = 0_u64;
-                let mut sanitized = 0_u64;
-                while first_sample < STABILITY_SAMPLES {
-                    let frames = (STABILITY_SAMPLES - first_sample).min(left.len());
-                    for index in 0..frames {
-                        if first_sample + index == 0 {
-                            left[index] = 0.99;
-                            right[index] = -0.99;
-                        } else {
-                            left[index] = support::deterministic_noise(&mut noise_state);
-                            right[index] = support::deterministic_noise(&mut noise_state);
-                        }
-                    }
-                    let report = effect.process(
-                        EffectProcessBlock::new(
-                            &mut left[..frames],
-                            &mut right[..frames],
-                            None,
-                            first_sample as u64,
-                            &[],
-                            128,
-                        )
-                        .expect("million-sample block"),
-                    );
-                    recovered += report.nonfinite_left_blocks + report.nonfinite_right_blocks;
-                    sanitized += report.sanitized_main_samples;
-                    assert!(
-                        left[..frames].iter().copied().all(f32::is_finite)
-                            && right[..frames].iter().copied().all(f32::is_finite),
-                        "finite output Fs={rate} {kind:?} f={frequency}"
-                    );
-                    first_sample += frames;
-                }
-                assert_eq!(recovered, 0, "recovery Fs={rate} {kind:?} f={frequency}");
-                assert_eq!(sanitized, 0, "the EQ no longer sanitises its input");
-                let (_, left_state, right_state) = snapshot(effect.as_ref());
-                for payload in [&left_state[..], &right_state[..]] {
-                    for band in 0..SECTIONS {
-                        for word in 0..WORDS_PER_BAND {
-                            let value = f32::from_bits(band_word(payload, band, word));
-                            if word == 14 {
-                                continue;
-                            }
-                            assert!(
-                                value.is_finite(),
-                                "finite retained state Fs={rate} {kind:?} band={band} word={word}"
-                            );
-                            if word < 2 {
-                                assert!(
-                                    value.to_bits() == 0.0_f32.to_bits()
-                                        || value.abs() >= FLUSH_EPS,
-                                    "subnormal retained state Fs={rate} {kind:?} band={band}"
-                                );
-                            }
-                        }
-                    }
-                }
+            for edge in FROZEN_EDGES {
+                frozen_million_sample_sequence_remains_valid_without_recovery(rate, kind, edge);
                 sequences += 1;
             }
         }

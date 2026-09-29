@@ -1,1 +1,0 @@
-cargo test --locked --release -p protocol --features test-support

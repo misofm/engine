@@ -470,7 +470,8 @@ Each row was applied alone to `b8df5b52` as an exact-text replacement of
 the suites were run with `--no-fail-fast`, and the file was restored before the next row. Host:
 `x86_64` (`.cargo/config.toml` pin `-C target-feature=+avx2,+fma`). The graph and chain_shape runs
 are the debug profile in this worktree. "Digests" is the `digests` harness of
-`docs/handoffs/gain-pan-2026-09-26/gain-pan-diagnosis-harnesses.patch` (every standing console
+[`gain-pan-diagnosis-harnesses.patch`](https://github.com/misofm/engine/blob/5379e46ca3b349b9d277d642c008bb7a9643fb76/docs/handoffs/gain-pan-2026-09-26/gain-pan-diagnosis-harnesses.patch)
+(removed by #1031; every standing console
 workload's 64-block output digest), built `--release` in a scratch copy with the patch applied and
 the same edit made; it was never committed. The witnesses the amended brief names are graph
 `runtime::tests::a_resident_fold_is_the_staged_scatter_and_cohort_fold_bit_for_bit` ("the resident

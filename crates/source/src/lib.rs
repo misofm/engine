@@ -22,15 +22,6 @@ use graph::{
     GraphSourceInputClaim, GraphSourceSetResourceReport,
 };
 
-#[cfg(not(target_arch = "wasm32"))]
-mod native_wave;
-
-#[cfg(not(target_arch = "wasm32"))]
-pub use native_wave::{
-    NativeDecodeReport, NativeWaveContainer, NativeWaveDecoder, NativeWaveEncoding,
-    NativeWaveError, NativeWaveMetadata, NativeWaveParseCaps, NativeWaveRegion, parse_native_wave,
-};
-
 /// A nonzero source-stream generation selected by an off-render controller.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -1404,9 +1395,9 @@ const fn map_spsc_error(error: SpscError) -> PcmSourceRingError {
 pub struct SourceGraphSource {
     consumer: PcmSourceConsumer,
     resources: SourceResourceReport,
-    /// Fixed native worker/decoder bytes not represented by the ring report.
+    /// Fixed caller-owned bytes not represented by the ring report (every host passes zero).
     additional_overhead_bytes: u64,
-    /// Largest fixed worker/decoder allocation, if larger than the ring allocation.
+    /// Largest such fixed allocation, if larger than the ring allocation (zero from every host).
     additional_largest_allocation_bytes: u64,
 }
 

@@ -22,7 +22,6 @@ create_fixture() {
         "$root/hosts/host-web/tests" \
         "$root/tools/bench-support/src" \
         "$root/tools/audit/src" \
-        "$root/tools/native-pcm-runner/src" \
         "$root/tools/bench/src"
     # The marked file set mirrors the real tree after #371 (RT-16/IO-14) and #664's complete
     # LocalRing removal: twelve files and forty-one regions across crates/ and hosts/, so the floors in the gate and the discovery
@@ -243,10 +242,6 @@ create_fixture() {
         'unsafe impl Send for CapiAudit {}' \
         'struct CapiAudit;' \
         >"$root/tools/audit/src/capi.rs"
-    printf '%s\n' \
-        '#![allow(unsafe_code)]' \
-        'unsafe fn frozen_c_abi_adapter() {}' \
-        >"$root/tools/native-pcm-runner/src/lib.rs"
     # #104 phase B: the fourteen audited `GlobalAlloc` copies became one. `bench-support/src/alloc.rs`
     # is the only file under `tools/` that owns the allocator wrapper, and eleven tool paths left
     # this list because they no longer contain `unsafe` at all.
@@ -336,8 +331,10 @@ expect_failure unsafe-outside-exact-allowlist "$unsafe_class" \
     'printf "%s\n" "unsafe fn bad() {}" >"$root/tools/bench/src/other.rs"'
 expect_failure unsafe-outside-capi-audit-main "$unsafe_class" \
     'printf "%s\n" "unsafe fn bad() {}" >"$root/tools/audit/src/other.rs"'
-expect_failure unsafe-outside-native-pcm-runner-lib "$unsafe_class" \
-    'printf "%s\n" "unsafe fn bad() {}" >"$root/tools/native-pcm-runner/src/other.rs"'
+# #1033 deleted `tools/native-pcm-runner`; its unsafe exemption went with it, so unsafe code
+# re-appearing at its old library path is rejected like any other unlisted file.
+expect_failure unsafe-in-deleted-native-pcm-runner-lib "$unsafe_class" \
+    'mkdir -p "$root/tools/native-pcm-runner/src"; printf "%s\n" "unsafe fn bad() {}" >"$root/tools/native-pcm-runner/src/lib.rs"'
 # #84 phase A deleted `crates/engine/src/arch/`; its unsafe exemption went with it, so
 # unsafe code re-appearing under that path is now rejected like any other unlisted file.
 expect_failure unsafe-in-deleted-core-arch "$unsafe_class" \
