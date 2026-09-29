@@ -110,45 +110,14 @@ Candidate catalogs allocate before structural commit and are included in double-
 admission. Host-core's default feature graph remains protocol-free; only capi enables the optional
 `control-provider` edge.
 
-`resource_lifecycle` checks these charges against the allocator (#1060): everything a C ABI
-compile leaves live beyond its replayed host-core half must equal `capi_retained_bytes` less capi's
-charges for the host-allocated canonical JSON, source control table and parameter catalog, and the
-double-live admission is derived from the two live reports and the owning crates' resource
-reports rather than from a hand-maintained layout mirror. The C response vectors now pin session-derived metadata/state and registered telemetry
-counter rows. `MockProvider` and `MockProviderConfig` are absent from a normal protocol library
-build and available only to unit tests or consumers explicitly selecting `protocol/test-support`.
-The exact AudioWorklet rebuild remains protocol-free but changes crate identity because host-core's
-declared feature surface changed. The subsequent #371 marker-only integration was rebuilt
-and reproducibly qualified as `a89c9606bfa72d69ced42b606cc4b7000d1b53f2b419b12ec63649a385b3eaf1`.
-The RT-1 (#399) artifact from source candidate
-`e46bc0d1a7917de8c65204cdee931877aea671d8` has SHA-256
-`60c23ee23e7f16c1f71c503baa07a462a8ce94c5287bec4580060e27a4651503`; its reproducibility and browser evidence are recorded in #399.
-The RT-2 (#419/#422) artifact from source candidate
-`0a0e39e42e4ae2585d5f5ee507a4cb9aaf7b741a` has SHA-256
-`518b5aa864c0a825cd324112b24270a7e0714fc63db6bd1029779f21066ea9de`.
-The independent rebuild, static/resource checks and three-browser matrix passed;
-retained workspace and descriptive measurement delivery are recorded in #419.
-The RT-3 (#420) artifact from source candidate
-`51e2aed211b30523076e0e8dd07973b13b57dc11` has SHA-256
-`24f81af304e541ba0e734de5c7a3dc5221e71fa4de73f2545edea3c2960761fe`.
-Independent builds, static/resource/mutation checks and all three browser engines passed;
-workspace evidence belongs to #420; its uninvoked descriptive measurement is tracked by #436.
-The RT-4 public full-chain (#429) artifact from source candidate
-`e4bcaa2feae13c9f016bb7b2e1eaff8bd7314547` has SHA-256
-`10b0581f72d921b520e4066b82dc32cb7bea90b757c20ccca3dfc52cf7b9e098`.
-Independent builds, static/resource/mutation checks and all three browser engines passed;
-workspace and supported-Wasm evidence were retained in `artifacts/issue429-qualification`,
-which #1030 removed in `df8cebb3`; git keeps it
-(`git show df8cebb3^:artifacts/issue429-qualification/<file>`).
-Live integration and descriptive full-chain measurement remain in #430 and #431.
-The current RT-14 lease cleanup (#435) artifact from source candidate
-`69fd0bfb0504075db4d302df08ff480faab4102e` has SHA-256
-`766848a4688b2ec34c96e81c243286216a7d7e647b6b42f842c0f85a654fc326`.
-Independent builds, static/resource/hermetic checks and all three browser engines passed;
-workspace and supported-Wasm evidence were retained in `artifacts/issue435-qualification`,
-which #1030 removed in `df8cebb3`; git keeps it
-(`git show df8cebb3^:artifacts/issue435-qualification/<file>`).
-This is an intentional public Rust lease API retirement; wire/C ABI identities are unchanged.
+`resource_lifecycle` checks these charges against the allocator (#1060). Its counting allocator
+observes a C ABI compile and a replay of its host-core half owner by owner, and nothing is taken
+from the accounting it checks. What capi allocates itself, plus the observed source producers and
+parameter catalog, must equal `capi_retained_bytes` to the byte. The session store must fit its
+compiled-model estimate, and the prepared plan its engine rows (a bound; see the test). The
+canonical JSON is charged once, with the compiled model in the graph cap: capi's epoch row no
+longer charges it a second time. The double-live admission is derived from the two live reports
+and the owning crates' resource reports rather than from a hand-maintained layout mirror.
 
 Refresh gates: `cargo test -p capi`; `cargo test -p capi --test resource_lifecycle`;
 `scripts/check-capi-abi.sh`; `scripts/check-abi-layout-v1.py`; and `cargo test --workspace` against

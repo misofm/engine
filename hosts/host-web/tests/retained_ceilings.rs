@@ -30,10 +30,6 @@ fn options() -> WebBootOptions {
     }
 }
 
-/// The native lane width is a compile-time function of the target (`lane::Backend::current`):
-/// eight lanes on x86-64-v3, four on AArch64 NEON.
-const EIGHT_LANES: bool = cfg!(any(target_arch = "x86", target_arch = "x86_64"));
-
 /// One retained-memory budget: a report row and its ceiling at each native lane width.
 struct Budget {
     row: &'static str,
@@ -43,11 +39,14 @@ struct Budget {
 }
 
 impl Budget {
-    const fn ceiling(&self) -> u64 {
-        if EIGHT_LANES {
-            self.eight_lanes
-        } else {
-            self.four_lanes
+    /// The native lane width is a compile-time function of the target: eight lanes on
+    /// x86-64-v3, four on AArch64 NEON. Matched by width, not by variant: the scalar variant
+    /// exists only under `lane/test-support` (#1059), and no native product build selects it.
+    fn ceiling(&self) -> u64 {
+        match lane::Backend::current().width() {
+            8 => self.eight_lanes,
+            4 => self.four_lanes,
+            width => panic!("no retained budget is declared for a {width}-lane native build"),
         }
     }
 }
@@ -58,9 +57,10 @@ const CAPTURE: u64 = LIVE_RESPONSE_CAPTURE_BYTES as u64;
 
 /// **Headroom.** Each ceiling is the row's value on 2026-09-28 (`a509b681`) at that width, plus
 /// 10 %, rounded up to a 64-byte multiple; for the two bridge rows the 10 % applies to the part
-/// beyond the fixed 1 MiB capture. 10 % is the example headroom #1060's brief gives: a change that
-/// adds up to a tenth to this fixture's retained row passes unseen, and a larger one is red here and
-/// raises the budget with its reason in the same commit. A zero ceiling is a claim: this identity
+/// beyond the fixed 1 MiB capture. 10 % is where the history puts the line: #1060's review sampled
+/// four past moves of these retained rows, +1.2 %, +2.3 %, +11 % and +48 %, and a 10 % budget lets
+/// the two routine moves through unseen and stops the two structural ones, which then raise the
+/// budget with their reason in the same commit. A zero ceiling is a claim: this identity
 /// fixture declares no delay, no scalar effect and no observation capacity. The measured baselines,
 /// x86-64 / AArch64 (AArch64 under qemu-user): bridge metadata 1,150,215 and bridge retained
 /// 1,170,724 at both; source total 3,442 and overhead 2,418 at both; builtin retained 1,957 at both;

@@ -975,6 +975,7 @@ dependencies = [
  "engine",
  "graph",
  "host-core",
+ "lane",
  "math",
  "serde_json",
  "session",
