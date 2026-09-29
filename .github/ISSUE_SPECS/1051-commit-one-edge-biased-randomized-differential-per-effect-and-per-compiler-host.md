@@ -657,3 +657,139 @@ The local NaN folds (`same_word` and `first_difference`) stay until root reconci
 - Attempt 2's own change (`65fdd92b`): `conformance/src/randomized.rs` +45/-14 and
   `builtins/tests/randomized.rs` +76/-29.
 - The branch against the batch head: 5,853 code lines added and 11 removed, plus this spec.
+
+## Sol verdict, attempt 2
+
+**PASS.** All three attempt 1 findings are closed on the current batch. Every plant I could design
+goes red. Seeds are fixed and printed, and runs are deterministic. Every gate I could run here
+passes on the merge.
+
+**What was verified.** `4fa677a2` was merged into `codex/batch-slim-4` at `adddb4e5` (the batch
+plus #1038 and #1075). The textual merge is clean, and nothing in #1051 references anything
+#1038 or #1075 removed.
+
+### Attempt 1 findings
+
+**F1, the build break: closed.** Each command below exited 0 on the merge:
+
+- `cargo check --workspace`, and the same with `--all-targets --all-features`;
+- lint's `RUSTDOCFLAGS=-Dwarnings cargo doc --workspace --no-deps`;
+- audit-native's `cargo build --release -p audit -p bench -p capi -p session-validator`;
+- audit-native's `cargo test --release -p audit -p bench -p console-workload`: 107 passed, which
+  covers the console digests;
+- the aarch64-release set on x86, `--no-run`:
+  - `-p lane -p math --features math/lane`: 114 tests listed, and `judge-skips release` passes;
+  - `-p console-workload`;
+  - `-p wasm-gates --features math/lane`;
+  - `cargo build --release -p audit`;
+- test-release's `--no-run`;
+- `cargo check` of every printed replay command's package and target, taken one at a time.
+
+**F2, the hidden D7 trip: closed.** Two planted defects, both inserting a NaN on legal input:
+
+| Plant | Differential mode | Result |
+|---|---|---|
+| NaN in the compressor's dual `render` output | bank mode (`run_width`) | red at seed 24: "D7 recovered on a block whose input and state are legal" |
+| NaN in the delay's output, planted in `recover_lane` | scalar-twin mode (`run_scalar`) | red at seed 0 |
+
+At 100x the seeds in release, the nightly scale, every differential passes in 59 s, so the new
+assertion does not false-trip.
+
+**F3, the allowances: closed.**
+
+| Plant | Result |
+|---|---|
+| The fader bank flips `-0.0` to `+0.0` | red at seed 0, "the fader stage" |
+| The matrix bank flips `-0.0` whenever no ramp is in flight | red at seed 0, "the matrix stage" |
+| EQ declines an invalid member at the native width before it validates (the check sits before `expected_prepared_metadata`) | red at seed 0, "Eight: bind declined" |
+| Soft clip refuses its history under another code | red at seed 0 |
+
+One of my first plants was unreachable, so its green result says nothing about the allowance: a
+check placed after `expected_prepared_metadata` never runs for the invalid values the probe
+draws, because that call rejects them first. Moving the check before the call gave the red in
+the table.
+
+### Findings, by severity (none blocking)
+
+1. **LOW: #1071's allowance matches on the error code, not on the cause.**
+   - It forgives an own-snapshot refusal with `effect.state.parameter` or `effect.state.history`
+     without checking that the payload holds a subnormal word.
+   - A same-code refusal for another reason would pass.
+   - In attempt 1, all five per-PR refusals I instrumented carried a subnormal word, so the
+     allowance hides nothing today.
+   - Checking for the word would make it exactly as narrow as the defect.
+2. **LOW: the other allowances.**
+   - **#1070 and #1072** are as narrow as their defects.
+     - #1070 is forgiven only at a non-native width, with `effect.parameter.initial`.
+     - #1072 is forgiven only at the matrix stage, on a settled identity lane, on frames where
+       another lane's ramp is in flight, and only for exactly `0x80000000` becoming `0x0`.
+       A reset clears the ramp ends, and `MatrixStage::reset` does snap every lane to its target.
+       It forgave 57 words per PR.
+   - **#1069**'s narrowing is unchanged. It is broad: in multiband, a scenario may not have both
+     cross-lane automation and chunked blocks. That is the only practical way to avoid the
+     defect's shape, and it goes when #1069 lands.
+   - **`run_scalar`'s F2 check** exempts every lane on the terminal block. Only lane 0 receives
+     the hostile words there, and the lanes are independent instances. This is cosmetic.
+3. **Not verified:** execution on AArch64. There is no arm64 hardware or emulator here, so the
+   #1019 and #1065 risk is unmeasured, as before.
+
+### NaN folds for root to reconcile with #1065 (left unchanged)
+
+- **Where the fold is defined:** `crates/dsp-reference/src/randomized.rs`.
+  - `same_word` at `:97`: equal bits, or both NaN.
+  - `first_difference` at `:103`, built on `same_word`.
+  - Unit tests at `:373-379`.
+- **`crates/conformance/src/randomized.rs`:**
+  - `:533`: scalar oracle against twin, both planes;
+  - `:560`: witness L against R;
+  - `:1075`: bank against scalar, per lane;
+  - `:1150`: arm left against dual left;
+  - `:1161`: dual right against left under collapse;
+  - `:1170`: twin arm right.
+- **`crates/builtins/tests/randomized.rs`:**
+  - `:390` and `:393`: collapsed input bank;
+  - `:406-407`: twin input bank;
+  - `:461`: stage-by-stage bank against scalar;
+  - `:486`: the forgiven count.
+- **`crates/host-core/tests/randomized.rs:729`:** the armed, dual and serialized outputs.
+
+**Compared by raw bits, with no NaN fold:**
+
+- state snapshots (`compare_state`, `disengage`);
+- `same_payload`, which folds signed zeros only, for the restore round trip;
+- the source ring;
+- the EQ `randomized_restores`;
+- the compressor `witness_tests`.
+
+### Determinism and gates on the merge
+
+- **Determinism.** Three runs of every new per-PR test gave byte-identical output. Seeds are fixed
+  from 0 to the per-PR count. A failure prints the seed and a replay command, and that command
+  reproduces the failure.
+- **Reproducers.** They fail as filed:
+  - #1069 at seed 1;
+  - #1070 at seed 0;
+  - #1071 at seed 0;
+  - #1072 at seed 7, now "the matrix stage";
+  - all five #1073 probes.
+- **Build and lint.** clippy `-D warnings` (workspace, all features) and fmt pass.
+- **Dev tests.**
+  - `test-debug-b`: 788 passed, 0 failed.
+  - `test-debug-a`: 1,252 passed, 0 failed.
+- **Release tests.**
+  - The DSP set: 788 passed.
+  - host-core and source: 209 passed.
+- **AArch64 debug leg on x86.** Its `--no-run` exits 0 and lists 1,779 tests. `judge-skips debug`
+  and the known-defects self-test pass, and the silent-skip scan is clean.
+- **Policy scripts.** Every script that can run here passes, the Python ones under `python3 -B`:
+  - every script that does not call cargo;
+  - the cargo-backed ones, including `check-workspace-policy.sh` with #1052's lint;
+  - the routing checks;
+  - `test-native-vectorization-report.sh`, which reads `target/release/audit`, so I ran it with the
+    default target directory;
+  - for the four Python scripts that need an argument, their `--self-test`.
+
+  Not run, because they need npm, a browser or a prebuilt binary: the SDK, web, cross-target,
+  `check-capi-abi` and `check-graph-determinism` scripts.
+- **Budget.** Timed single-threaded at load about 19: about 4.4 s in `test-debug-b` and about
+  2.8 s in `test-debug-a`.
