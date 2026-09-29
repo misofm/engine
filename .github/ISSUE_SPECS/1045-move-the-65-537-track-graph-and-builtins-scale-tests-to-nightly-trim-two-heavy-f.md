@@ -130,3 +130,184 @@ See [`../VERIFY-TEST-VALUE.md`](../VERIFY-TEST-VALUE.md). **These amendments sup
    otherwise keep `scale.rs:160` per PR and move only the rest.
 6. **The saving, measured.** The four binaries take a median 114 s over 8 full-route runs, and 149 s
    on PR #1016's run. Minus the kept constrained compile that is about 95-125 s.
+
+## Attempt 1 evidence
+
+Terra, 2026-09-29, branch `codex/1045-scale-tests-nightly` from `a509b681` (main plus #1031,
+#1030, #1033 and #1061). Host: `x86_64` (`x86-64-v3`), rustc 1.97.1, `CARGO_INCREMENTAL=0`,
+`nice`, on a shared 32-core host at load 20-100 (other agents' mutation passes). Timed runs held
+the shared timing lock; the load is recorded with each number, and before and after ran back to
+back.
+
+### The base, recounted
+
+- `crates/graph-compiler/tests/scale.rs:91` and `:160`, `crates/builtins-compiler/tests/scale.rs:34`,
+  `crates/session/src/value.rs:86` and `:169`, `crates/session/tests/scale_transaction.rs:22`,
+  `compile.rs:389` (the node cap refuses before banks or bind) and `MUTATIONS.md:257` (964-11) are
+  where the spec says.
+- The phase-two allocation test moved to `allocation_tracker.rs:1225`, its loop to `:1237`.
+- `tools/bench/src/graph.rs` is gone (#1026). `tools/audit/src/fixture_builtins.rs:1369` still
+  prepares 65,537 tracks, in the release `audit-native` job, and only prepares (amendment 2).
+- `scripts/check-workspace-policy.sh:275` still bans `MAX_TRACKS`, `MAX_TRACK_COUNT`,
+  `DEFAULT_MAX_TRACKS` and `TRACK_LIMIT`.
+- graph-compiler has 408 mutants here, not 412.
+- The four binaries, debug with test-debug-a's features, inside one whole-suite run (load 20-26):
+  graph-compiler `scale` 68.2 s, `allocation_tracker` 38.5 s, session unit tests 36.4 s,
+  builtins-compiler `scale` 6.7 s: 149.8 s. Alone, `:91` took 85 s and `:160` 84 s of CPU (load 50).
+
+### What changed
+
+- **`graph-compiler/tests/scale.rs`.** `:91` keeps only its constrained compile, per PR. Its node
+  cap is now `NODES - 1`, one below the graph the session lowers to (`7 x 65,537 + 2`), not `1`.
+  The refusal is then also a count of that graph: a truncated track index fits under the cap and
+  is accepted, so it goes red (1045-3; its control at `maximum_nodes = 1` stays green). It also
+  asserts the refused compile's 3 x 65,537 builtin processors, which it already prepares. `:160` is
+  `#[ignore]`d, carries `:91`'s old report assertions (nodes, edges, routes, effects), and asserts
+  that the whole path from session compile to the rendered block takes under 60 s.
+- **`builtins-compiler/tests/scale.rs`.** `#[ignore]`d, nightly.
+- **`builtins-compiler/tests/allocation_tracker.rs`.** The loop body is a helper over track
+  counts. `phase_two_allocator_layouts_match_the_checked_resource_report` keeps its name and runs
+  `[1, 4]` per PR; `..._at_65_537_tracks` is `#[ignore]`d and runs `[65_537]` nightly, with its
+  first-touch warm-up at that size so the warm-up comparison still holds.
+- **`session/src/value.rs`.** `one_million_deterministic_f32_patterns_round_trip` (renamed) runs
+  1,000,000 patterns: 996,076 finite, 0 fallbacks, maximum length 48 (recomputed by a standalone
+  copy of the loop, which reproduces the old 9,960,907 / 1 / 48 at ten million). The ten-million
+  sample's only fallback, `0x15ae_43fd`, is already a directed case. The exhaustive test's ignore
+  reason now says where it runs.
+- **`nightly.yml`.** `release-budgets` runs the three 65,537-track gates in its exact-selector
+  budget step, each with `--config profile.release.overflow-checks=true`; timeout 15 -> 30 min.
+  `math-sweeps` runs the exhaustive f32 sweep in release; timeout 15 -> 25 min.
+- **`scripts/check-ci-path-routing.py`, `scripts/test-ci-path-routing.py`.** The checker pins
+  `release-budgets`' step to its exact command list, so the three commands join the list; the
+  self-test's hard-coded 3 becomes the list's length. See the deviations.
+- **`graph-compiler/tests/MUTATIONS.md`.** Rows 1045-1 to 1045-7.
+
+`cargo test -- --list` over the three crates: nothing lost. One test added (the nightly 65,537
+row), one renamed (ten million -> one million), three more `#[ignore]`d (`:160`, builtins `scale`,
+the 65,537 row).
+
+### The no-ceiling claim, per PR and nightly (the brief's proof)
+
+Planted in a scratch copy of the change, run, restored. "Per PR" is the debug test with test-debug-a's
+features; "nightly" is the `release-budgets` command.
+
+| # | planted defect | per PR | nightly |
+|---|---|---|---|
+| 1045-1 | 964-11's ceiling, `graph.track.limit` above 65,536 tracks, in `compile_graph` | RED, `:91` (the refusal's diagnostics) | RED |
+| 1045-2 | a `u16` track counter in `compile_graph`'s node loop | RED, `:91`: `attempt to add with overflow` | RED, the same panic. Release without overflow checks: GREEN (it wraps) |
+| 1045-3 | a truncating `u16` track index: a track that does not fit gets no nodes | RED, `:91` (accepted under the one-below cap). The draft's `maximum_nodes = 1`: GREEN | RED, wrong node count |
+| 1045-4 | a ceiling in bind (`into_bound`, more than 65,537 external nodes) | GREEN: nothing per PR binds at this size | RED |
+| 1045-5 | #962 fix 1 reverted (linear `contains` per bank member) | GREEN | RED by the bound: 451 s against 60 s (unmutated 28.6 s, same load) |
+| 1045-6 | a `u16` track counter in builtin preparation's preflight | RED, `:91`: overflow panic | RED, builtins `scale` |
+| 1045-7 | a builtin ceiling above 65,536 tracks, disguised as `builtin.resource.limit` | RED, `:91` | RED, builtins `scale` |
+
+So per PR a compiled ceiling or a narrowed track index is red wherever the session compile
+(`scale_transaction.rs`), builtin preparation or the graph compile's front end would impose it.
+A ceiling in bank attachment, bind or render (1045-4) and a quadratic compile or bind (1045-5) are
+red nightly only, at most a day late: amendment 5's accepted risk, now with its bound.
+
+The trimmed loops, per PR:
+
+| # | planted defect | result |
+|---|---|---|
+| A1 | the report charges 8 retained copies of each track ID, not 9 | RED, `[1, 4]`: `tracks=1, meters=0` |
+| A2 | the report counts the strip vector through a `u16` (exact below 65,536 tracks) | GREEN per PR; RED nightly in the 65,537 row. The one catch the trim moves |
+| V1 | no `.0` suffix | RED, the 1M loop (and the directed and corpus tests) |
+| V2 | every value takes the f64 fallback | RED, the 1M loop's fallback count |
+| V3 | no value takes the fallback | GREEN in the 1M loop; RED in the directed test at `0x15ae_43fd`, the value the 10M loop caught it with |
+| V4 | subnormals spelled `0.0` | RED, the 1M loop (3,930 fallbacks), and the directed test |
+| V8 | one binade (`2^73`) spelled one ULP off; the fallback rescues the round trip | RED in the 1M loop **only**: the directed and corpus values never reach that binade |
+
+### Gates
+
+1. **Mutation equivalence, graph-compiler.** `run-mutants.sh graph-compiler 5 10`, every mutant, on
+   the base and on the change: **identical.** 408 mutants each; 261 caught, 77 missed, 67 unviable,
+   3 timeouts (`schedule.rs:132`, `:187`, `:200`, `+= -> *=`, on both). Mutant by mutant: none
+   lost, none gained, no outcome changed. The pass took 85 min on the base and 50 min on the change.
+2. **Mutation equivalence, builtins-compiler, shard 0/4.** `run-mutants.sh builtins-compiler 5 10 --features test-support
+   --shard 0/4 --sharding round-robin`, on the base and on the change: **identical.** 207 mutants
+   each; 111 caught, 50 missed, 45 unviable, 1 timeout; none lost, none gained. Both runs skip one
+   pre-existing baseline failure (deviation 5), so the nightly 65,537 row has no lost mutant to
+   answer for.
+3. **The claim still fails, per PR and nightly.** Rows 1045-1 (964-11's ceiling, per PR) and
+   1045-2/1045-3 (a `u16` track index: an overflow panic with overflow checks, a wrong count when
+   it truncates) above. Amendment 3's gate: 1045-5 is red by the bound, not the timeout.
+4. **Historical bugs.** `revert.py` on a scratch copy of the change, test-debug-a's command:
+   - #966: exactly the 9 `bank_levels.rs` tests (1,252 passed, 9 failed, 10 ignored);
+   - #970: the 7 `collapse_arming.rs` reproducers and the `bank_levels.rs` probe (8 failed).
+   - On a copy of the base, graph-compiler, builtins-compiler and session (the only binaries this
+     change touches) fail the same `bank_levels.rs` tests and nothing else: the base's scale tests,
+     65,537 row and ten-million loop stay green under both bugs. test-debug-b's crates depend on
+     neither `graph` nor `graph-compiler`.
+5. **Cost.** Not measurable from CI job timings before the batch push (this attempt pushes
+   nothing). Locally, the four binaries go from 149.8 s to about 20 s in the whole-suite debug run
+   (graph-compiler `scale` 16.6 s, session unit tests 3.0 s, the other two under 0.5 s): **about
+   130 s saved**. PR #1016's CI times for the same binaries (67.9 + 40.3 + about 34 + 6.5 s) less
+   the kept remnant predict the same order. Record the real `test-debug-a` delta at the batch push.
+
+### Other gates
+
+- `cargo check --workspace --all-targets --all-features`, `cargo clippy --workspace --all-targets
+  --all-features -- -D warnings`, `cargo fmt --all --check`: pass.
+- The three crates' whole suites (graph-compiler, builtins-compiler, session; test-debug-a's
+  features), back to back under the lock:
+
+  | profile | base | change |
+  |---|---:|---:|
+  | dev, wall (CPU) | 205.9 s (474 s), load 26 | 72.0 s (252 s), load 20 |
+  | release, wall (CPU) | 25.9 s (44.5 s) | 6.6 s (12.5 s) |
+
+  264 passed / 3 ignored before; 262 passed / 6 ignored after.
+- Nightly, measured here (release, overflow checks): `:160` 21.6 s (load 35) and 28.6 s (load 60+)
+  against its 60 s bound; builtins `scale` 0.7 s; the 65,537 row 3.2 s. The exhaustive f32 sweep
+  passes: 343 s wall, 1,325 s CPU on four cores (with overflow checks; the nightly step runs
+  without). The release builds took 56 s (graph-compiler), 76 s (builtins-compiler) and 58 s
+  (session) on 32 loaded cores; on a 4-vCPU runner expect several minutes each, hence the timeouts.
+  **Nightly time added: about 7-10 min in `release-budgets` and 7-9 min in `math-sweeps`, two
+  jobs that run in parallel**, estimated from these numbers.
+- `graph-compiler`'s release test build no longer needs `panic="unwind"`: with `effect_package`
+  gone (#1037) it builds under the shipped `panic = "abort"`, base and change alike.
+- `check-ci-path-routing.py` and `test-ci-path-routing.py` (`python3 -B`): pass. actionlint 1.7.7:
+  clean, before and after.
+- Every `scripts/check-*` with no arguments: pass, except the ones that require an argument
+  (`--self-test` run instead where they have one: abi-layout, parameter-metadata, listening-033,
+  listening-111, AudioWorklet call graph; the V8 spill check's `--check-toolchain`: all pass;
+  `check-web-boot-budget.mjs` needs a built module and was not run) and `check-sdk-types.sh`
+  (`sdk/node_modules` is not installed here). `check-workspace-policy.sh`
+  (#1052's source-scrape lint) and `test-workspace-policy.sh`: pass.
+
+### Deviations
+
+1. **Scripts outside the authorized paths.** Amendment 3 puts `:160` in `release-budgets`, whose
+   budget step `check-ci-path-routing.py` pins to an exact command list, and whose self-test
+   assumes that step holds the file's first `--ignored --exact`. A separate step placed before it
+   failed the self-test ("workflow mutation was accepted"); one placed after it fails the checker.
+   So the three commands join the pinned list (which also means no PR can drop the only guard of
+   #962 without a red), and the self-test's count follows the list. 9 lines.
+2. **The exhaustive sweep runs in `math-sweeps`, not `release-budgets`,** with the job's own
+   `-- --ignored <filter>` form: it is an exhaustive sweep, it takes about six minutes, and an
+   `--ignored --exact` line ahead of `release-budgets` would take the self-test's anchor.
+3. **The per-PR cap is one below the graph, not `1`,** and `:91` counts the builtin processors: a
+   strengthening, shown by 1045-3's control.
+4. **The bound covers the whole path** (session compile, builtins, graph compile, bind, one block),
+   not only compile and bind: a quadratic in session compile or preparation is caught too.
+5. **builtins-compiler's mutation passes skip one test on both trees.**
+   `actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservation` fails the
+   unmutated baseline under `run-mutants.sh`'s `opt-level = 1` on the base as well (a controlled
+   `realloc` is not observed: `LARGEST_REALLOC_BYTES` 0 against 64), so cargo-mutants refuses to
+   start. It passes at opt-level 0, as CI runs it. Not this issue's; worth its own look.
+
+### Test value (AGENTS.md)
+
+- `:91` per PR: a track ceiling or narrowed track index in builtin preparation or the graph
+  compile's front end at 65,537 tracks (1045-1, -2, -3, -6, -7); nothing else per PR compiles a
+  graph above 65,536 tracks.
+- `:160` nightly: a ceiling or narrowed index in bank attachment, bind or render, or a quadratic
+  compile or bind (1045-4, -5).
+- The 65,537 row nightly: an accounting count that is exact only below 65,536 tracks (A2).
+- The 1M loop: a spelling defect in a binade no directed or corpus value reaches (V8).
+
+### Remaining risk
+
+- 1045-4, 1045-5 and A2 are caught a day late, not per PR.
+- #1002's memory claim stays unguarded (amendment 4); its nightly RSS budget is its own issue.

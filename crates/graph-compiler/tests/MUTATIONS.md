@@ -291,3 +291,27 @@ passes 9 of 9.
 | 966-M10 | compare only the members whose lane ran every earlier slot (`active[..slot]` all true), so a ragged lane is never compared | as M1 | RED, 9 of 9, each with `graph.scheduler.layout`: every reproducer's ragged lane is exactly the one this skips. (Sol's attempt-1 review reported its own M10 red on 4 of 9; its exact code is not recorded, so this row is this formulation only) |
 | 966-M9 | the test's own source feeds a mono-mapped track's right side from the next source channel, so the collapse's premise is false | `graph-compiler/tests/bank_levels.rs` (`TrackSource`) | RED, 2 of 9, armed legs only: `the_mono_console_less_one_eq_binds_and_collapses_at_every_width` (`Simd4`, armed) and the probe (11 lines over 6 seeds, every one `Armed`). The armed comparisons can see a wrong collapse; every unarmed comparison stays green |
 | 966-M970 | revert #970's arming check: `Runtime::arm_mono_collapse` arms a chain without `identity.banking.gathers_track_input()`, so a later chain of a split strip is armed again | `graph/src/runtime.rs` | RED, 1 of 9: the probe, 5 armed lines over 4 seeds (12, 48, 50, 54), all on even-seed all-mono desks with the intended fixture's asymmetric strip. Attempt 1 drew every all-mono desk from the symmetric mono fixture, and under this mutation all 9 stayed green (Sol, attempt-1 verdict): wrongly arming a later chain is bit-exact when nothing upstream of it is asymmetric. That is why the generator keeps both strips |
+
+---
+
+## Issue #1045 — the 65,537-track gates, split between per PR and nightly
+
+Per PR, `scale.rs` keeps only the constrained compile of
+`compiles_65_537_tracks_or_rejects_only_a_configured_resource`, in the debug job, with its node cap
+one below the graph the session lowers to (`7 × 65,537 + 2`).
+`compiles_and_binds_65_537_tracks_with_builtins` runs nightly in `release-budgets`, in release with
+overflow checks and a 60 s bound. Each row was applied to a scratch copy of the change, the named
+command run and the tree restored. Host: `x86_64` (`x86-64-v3`, eight-lane banks), rustc 1.97.1,
+`CARGO_INCREMENTAL=0`, on a shared host at load 40-100. "Per PR" is
+`cargo test -p graph-compiler --test scale` in debug with test-debug-a's features; "nightly" is the
+`release-budgets` command.
+
+| # | mutation | file | per PR | nightly |
+|---|---|---|---|---|
+| 1045-1 | 964-11's ceiling: `graph.track.limit` above 65,536 tracks | `graph-compiler/src/compile.rs` (`compile_graph`) | RED: the refusal's diagnostics are no longer all `graph.resource.limit` | RED: `with-builtins scale diagnostics: graph.track.limit` |
+| 1045-2 | a `u16` track counter (`track_index += 1`) in the per-track node loop | as 1045-1 | RED: `attempt to add with overflow` | RED, the same panic. A release build without overflow checks stays GREEN: the counter wraps silently, which is why the nightly command turns them on |
+| 1045-3 | a truncating `u16` track index: a track whose index does not fit gets no nodes | as 1045-1 | RED: the truncated graph fits under the cap, so the compile is accepted (`a node cap one below the session's graph rejects`). **Control:** with the constrained cap at `maximum_nodes = 1`, as the issue's draft kept it, this stays GREEN | RED: `logical_nodes`, wrong count |
+| 1045-4 | a ceiling in bind: `into_bound` refuses more than 65,537 external nodes | `builtins-compiler/src/lib.rs` | GREEN. No per-PR test binds at this size: this is the one-day gap the issue accepts | RED: `with-builtins scale bind: graph.bind.track_limit` |
+| 1045-5 | #962 fix 1 reverted: a linear `required_bindings.contains` per bank member in `with_builtin_banks` | `graph/src/lib.rs` | GREEN: the constrained compile refuses before any bank attaches | RED by the bound: 451 s against 60 s (the unmutated run took 28.6 s on the same loaded host) |
+| 1045-6 | a `u16` track counter in builtin preparation's preflight loop | `builtins-compiler/src/lib.rs` | RED: `attempt to add with overflow`, in this test's 65,537-track preparation | RED (builtins-compiler's nightly `scale.rs`), the same panic |
+| 1045-7 | a builtin track ceiling above 65,536 tracks, disguised as `builtin.resource.limit` | as 1045-6 | RED: `constrained scale builtins` refused | RED (builtins-compiler's nightly `scale.rs`) |
