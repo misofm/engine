@@ -83,3 +83,129 @@ See [`../VERIFY-TEST-VALUE.md`](../VERIFY-TEST-VALUE.md). **These amendments sup
    `scripts/test-ci-path-routing.py` to the authorized paths if any pinned line changes.
 4. **Keep the local check.** Local no-argument `check-web-audioworklet.sh` keeps `--check`: it is the
    one check that catches a stale committed metadata file before a push.
+
+## Attempt 1 evidence
+
+Terra, 2026-09-29, branch `codex/1044-dedupe-ci-work` from `codex/batch-slim-4` (`93105e18`).
+Implementation commit `d49e602d`: 8 files, +380/-53, no Rust file. Paths: the body's list plus
+`check-ci-path-routing.py` and `test-ci-path-routing.py` (amendment 3). CI cannot run here; every
+result below is a local run, and the savings are estimates from recent CI logs.
+
+**Re-derived at `93105e18`.** All four duplicates still hold. #1017, #1043, #1048 and #1061 added
+no new copy of any of them: `artifact-identity`'s twin is `--module-only` (no generator), and the
+AArch64, `gate-self-tests` and `nightly.yml` jobs run none of these commands.
+
+| duplicate | ran in | the one run left (job, step, routes) |
+|---|---|---|
+| fat-LTO `parameter-metadata` generator | `artifact` (`--write`); `artifact-gates` (`--check` in `check-web-audioworklet.sh`); `sdk` (`assets.mjs --check`, twice: `check-sdk-generated.sh`, then `sdk-package.sh`) | `artifact`, "Build the exact shipped artifact", sdk and full routes |
+| `node scripts/test-web-audioworklet.mjs` | `lint`; `artifact-gates` (`test-web-audioworklet.sh:6`, plus two variant runs) | `artifact-gates`, "Hermetic browser host and worklet tests", full route, the same runner Node (both run before any `setup-node`) |
+| effect-runtime policy, its mutation suite, and the fixture pair | `lint`; `audit-native` via `check-effect-contract.sh:30-33` | `lint`, "Effect runtime dependency-boundary and fixture policy and mutation tests", full route |
+| M3 with FMA | `test-release` main leg (`.cargo/config.toml` `+avx2,+fma`); the "+fma only" step | `test-release`, "Lane and math gates ...", full route |
+
+**Changed.**
+- **Closure hand-off (new).** The `artifact` build step publishes `closure_sha256`: one sha256
+  over `sha256sum` of every file in the directory, sorted by name in byte order. `sdk`,
+  `artifact-gates` and each `browser` leg recompute it in their existing verify step, with the
+  same line, before any script reads the download. So the metadata the consumers read is
+  provably the generator's output from this run.
+- **`artifact-gates`.** It now runs `check-web-audioworklet.sh --without-metadata-regeneration
+  target/ci/qualification-artifacts`, which leaves out only `parameter-metadata --check` and says
+  so in the log. The schema and vocabulary gates still read the documents. Any other form keeps
+  the check: no argument (amendment 4), a directory alone, or the flag without a directory (exit 2).
+- **`sdk`.**
+  - `check-sdk-generated.sh DIR` runs `assets.mjs --check DIR`, which compares `sdk/assets/*.json`
+    byte for byte (`Buffer.equals`) with the directory's copies and runs no cargo. With no
+    argument it still runs the generator.
+  - `sdk-package.sh` no longer calls `check-sdk-generated.sh`. Both workflows that package run it
+    first: this job, and `npm-publish.yml`'s qualify step. Locally, `npm run build` no longer runs
+    it; `npm run check:assets` does.
+- **`lint`** drops its `test-web-audioworklet.mjs` step.
+- **`check-effect-contract.sh`** drops all four effect-runtime scripts. The fixture pair was a
+  duplicate too, since `lint` runs it on the same route.
+- **`test-release`** drops the "+fma only" M3 step. In its place is
+  `cargo rustc --locked --release -p math --lib -- --print cfg | grep -x 'target_feature="fma"'`,
+  which prints the cfg cargo gives that leg's `math` (gate 2):
+  - `math` has no dependency without `lane`, so it builds nothing. It takes 0.2-0.4 s and emits
+    nothing, so it recompiles every time; a warm target dir cannot turn it into a silent skip.
+  - An `RUSTFLAGS='-C target-feature=+avx2'` override turns it red.
+- **`check-ci-path-routing.py`** pins these rules:
+  - the closure output and build lines (including the delivery-mode `build-web-audioworklet.sh`);
+  - the closure env, digest and compare lines in each reader's verify step;
+  - `--without-metadata-regeneration` only in a closure-verified reader, only for
+    `target/ci/qualification-artifacts`, and in no other workflow;
+  - the SDK drift line with the directory;
+  - each owner above, unconditional on the full route;
+  - a release `cargo test -p math` in `test-release` that does not deselect `m3_determinism` and
+    has no `RUSTFLAGS=` in front of it.
+- **`test-ci-path-routing.py`** adds 34 mutants, run in-process. Each is refused for its own reason
+  (I printed each rejection message and checked it).
+
+**Deviation: the `sdk` job keeps its Rust toolchain and cache.** The body drops them "if nothing
+else in it needs them", and something does. `check-sdk-headless.sh`'s evals run native debug
+oracles:
+- `cargo run -p parameter-metadata --bin parameter_metadata_lattice_oracle`;
+- `cargo run -p host-web --example sdk_render_oracle`, three times.
+
+With cargo off `PATH`, 4 of its 285 evals fail. The workflow's old comment blamed
+`check-sdk-generated.sh` for this need; the comment now names the evals. The sdk saving is
+therefore the generator only.
+
+**Gates (local).**
+1. **The SDK drift claim discriminates.** I ran the real delivery build
+   (`build-web-audioworklet.sh`, 3 min 15 s) and then the `sdk` job's step line by line, with
+   every cargo call logged:
+   - `check-sdk-generated.sh target/ci/qualification-artifacts` passes in 0 s with **no** cargo
+     call. `sdk/assets` is byte-identical to the closure's two documents.
+   - The whole step passes: deletions, types, headless 285/285, and the package tarball (11/11).
+     The only cargo calls are the headless oracles.
+   - A one-byte edit to `sdk/assets/miso-engine-v1-parameter-metadata.json` is red: "differs from
+     .../miso-engine-v1-parameter-metadata.json". The same holds for the ABI layout.
+   - A Rust change, `"pan"` -> `"panorama"` in `tools/parameter-metadata/src/lib.rs`, then the
+     artifact job's `--write` into a fresh directory with `sdk/assets` not refreshed, is red.
+2. **M3 runs with FMA.** The cfg line prints `target_feature="fma"`. `cargo test --locked
+   --release -p math --features lane --test m3_determinism` on the config's flags passes 5/5,
+   `m3_corpus_digests_match_pins` included.
+3. **Nothing else lost.** The table above names each owner, and the checker pins it.
+   - The effect-runtime policy fails on a seeded `serde = "1"` in `crates/effect-contract`'s
+     dependencies ("effect-contract dependency boundary changed", exit 1), on a scratch copy.
+   - `check-effect-contract.sh`, with a stub bench printing the conformance record, passes. It
+     calls no effect-runtime script (`bash -x` trace).
+   - `test-web-audioworklet.sh`, the mjs owner, passes.
+   - `check-web-audioworklet.sh` over the built closure:
+     - with the flag, it passes and makes one cargo call (`host-web --example
+       worst_boot_document`);
+     - without the flag, it also runs `parameter-metadata --release -- --check`.
+   - **Hand-off.** A tar round trip of the closure verifies with the workflow's own lines. A
+     one-byte change to the downloaded metadata, or an extra file, is red: "downloaded artifact
+     closure mismatch".
+4. **Cost (estimated, CI not run).** From the medians of 8 full-route runs (36382065641 ...
+   36507292157, 4 PR and 4 main-push), job step timings and log-timestamp brackets:
+
+| job | removed | median | range | target (amendment 1) |
+|---|---|---:|---:|---:|
+| `artifact-gates` | `parameter-metadata --check` | −74.4 s | 45.8-78.2 | ≈ −55 s |
+| `sdk` | first generator run, plus the warm second (0.3 s) | −73.8 s | 62.6-79.3 | ≈ −50 s, plus toolchain (kept, see deviation) |
+| `test-release` | "+fma only" M3 step (9 s), less the cfg line (≈0.3 s) | −8.7 s | 6-10 | −9 s |
+| `audit-native` | four effect-runtime scripts | −4.1 s | 2.7-5.1 | — |
+| `lint` | mjs step | −0.5 s | 0.4-1.1 | — |
+
+   - **Added cost:** the closure digest, one sha256 pass over about 2 MB in each of the 6 jobs
+     that compute it. That is well under 0.1 s each.
+   - **Total:** about **161 s (2.7 runner-minutes) per full-route PR**, and about 74 s per
+     sdk-route PR.
+   - **Wall time:** unchanged. The longest jobs (`audit-native` 444 s and `test-release` 436 s
+     median) do not shrink by much. The `artifact` -> `artifact-gates` chain drops from about
+     391 s to about 317 s.
+
+**Other gates run.**
+- `check-ci-path-routing.py` and `test-ci-path-routing.py` pass (102 s).
+- actionlint 1.7.7 is clean, on this workflow and on the base's.
+- The script-reachability check and its mutation tests pass.
+- All 55 hermetic commands of `lint`, `docs-gates` and `gate-self-tests` pass (`python3 -B`).
+- `check-sdk-deletions.py`, `check-web-audioworklet.sh --self-test-opcodes`, the V8 spill
+  self-test and `test-sdk-artifact-builder-output-contract.sh` pass.
+- `bash -n` and `node --check` pass on the changed scripts.
+
+**Not done.** `npm-publish.yml` still runs the cargo form of `check-sdk-generated.sh`, before
+`sdk-package.sh build "$worklet"`. Passing `"$worklet"` there would drop one more fat-LTO run per
+publish, but that file is outside this issue's paths.
