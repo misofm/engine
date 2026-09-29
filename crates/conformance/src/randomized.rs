@@ -73,15 +73,17 @@ pub enum Known {
     /// `bind_homogeneous_bank` declines (`Ok(None)`) at a width this build does not execute, or on
     /// a heterogeneous member, before it has validated every member -- where the three-outcome
     /// rule says an invalid member refuses first. Narrowing: the illegal-member probe accepts the
-    /// decline.
+    /// decline only at a width this build does not execute, and only when `prepare` refuses the
+    /// member with `effect.parameter.initial`.
     ///
     /// Owned by #1070.
     BindDeclinesBeforeValidating,
     /// The effect holds subnormal words it was legally given -- a subnormal parameter value
     /// inside the declared domain, a subnormal input sample in its history -- and its own restore
     /// then refuses the snapshot that carries them, so a snapshot does not survive its own
-    /// restore. Narrowing: a refused own snapshot is accepted, so long as the scalar instance and
-    /// every bank lane refuse it alike.
+    /// restore. Narrowing: a refused own snapshot is accepted only with `effect.state.parameter`
+    /// or `effect.state.history`, and so long as the scalar instance and every bank lane refuse it
+    /// alike.
     ///
     /// Owned by #1071.
     SubnormalStateRefusedOnRestore,
@@ -403,7 +405,8 @@ fn run_scalar(
                 for effect in [&mut *oracle, &mut *twin] {
                     if let Err(error) = effect.restore_state_payload(version, input()) {
                         assert!(
-                            spec.known.contains(&Known::SubnormalStateRefusedOnRestore),
+                            spec.known.contains(&Known::SubnormalStateRefusedOnRestore)
+                                && SUBNORMAL_REFUSAL_CODES.contains(&error.code),
                             "{context}: lane {lane}'s own snapshot refused ({})",
                             error.code
                         );
@@ -543,6 +546,15 @@ fn run_scalar(
                     "{context}: lane {lane} wrote a word outside the D7 bound"
                 );
             }
+            // Before the hostile block every word is legal, so a recovery there is a divergence
+            // the zeroed block would hide (see `run_width`).
+            assert!(
+                terminal
+                    || oracle_report.nonfinite_left_blocks + oracle_report.nonfinite_right_blocks
+                        == 0,
+                "{context}: lane {lane}: D7 recovered on a block whose input and state are legal \
+                 ({oracle_report:?})"
+            );
             if spec.witness && shape.mono {
                 // The witness held and both planes carried one signal: one channel's work.
                 if let Some(frame) = first_difference(&left, &right) {
@@ -1021,15 +1033,23 @@ fn run_width(
             audited(audited_calls, "process_bank", || bank.process_bank(block))
         };
         coverage.blocks += 1;
-        if hostile_block.is_some_and(|(at, _)| at == block)
-            || recovered(&bank_report, &scalar_reports, lanes)
-        {
+        // Every word before the hostile block is finite and legal -- input, sidechain, spans,
+        // restored state -- so a D7 recovery there is an effect that diverged on legal input, and
+        // the zeroed block would pass the bound check vacuously: red, not a quiet end.
+        let hostile_now = hostile_block.is_some_and(|(at, _)| at == block);
+        assert!(
+            hostile_now || !recovered(&bank_report, &scalar_reports, lanes),
+            "{context}: D7 recovered on a block whose input and state are legal (bank {:?}, \
+             scalar {:?})",
+            report_lanes(&bank_report, lanes),
+            scalar_reports,
+        );
+        if hostile_now {
             // D7 (docs/EFFECT_CONTRACT_V1.md): output finiteness is checked once per block *per
             // bank*, and a failing block zeroes that bank's output and resets its state -- every
             // lane's, not only the failing one's, in most launch effects. So on the block the
-            // hostile words arrive in, and on any block that trips the bound, the bank and its
-            // scalar instances may part by design: both must keep every word inside the bound,
-            // and the scenario ends there.
+            // hostile words arrive in, the bank and its scalar instances may part by design: both
+            // must keep every word inside the bound, and the scenario ends there.
             if !shape.bypass {
                 for (who, planes) in [
                     ("bank", [&bank_left, &bank_right]),
@@ -1489,6 +1509,9 @@ fn compare_state(
     }
 }
 
+/// The refusals #1071 forgives: a restore that wants a word zero or normal and finds it subnormal.
+const SUBNORMAL_REFUSAL_CODES: [&str; 2] = ["effect.state.parameter", "effect.state.history"];
+
 /// Edge words for a payload rewrite at any block: both zeros, subnormals, the smallest normal,
 /// `+-1`, and small counts. Every one is a finite `f32`.
 const PAYLOAD_WORDS: [u32; 13] = [
@@ -1625,7 +1648,9 @@ fn restore(
         Ok(()) => coverage.restores += 1,
         Err(_) => coverage.refused_restores += 1,
     }
-    let tolerated = spec.known.contains(&Known::SubnormalStateRefusedOnRestore);
+    // #1071's allowance: only its own two refusal codes, the words the restore wants zero or normal.
+    let tolerated = spec.known.contains(&Known::SubnormalStateRefusedOnRestore)
+        && scalar.is_err_and(|code| SUBNORMAL_REFUSAL_CODES.contains(&code));
     if !rewritten && (scalar.is_ok() || (source == lane && !tolerated)) {
         // An untouched snapshot restores and writes itself back word for word, from the scalar
         // instance and from the bank lane. The lane's own always restores; another lane's may be
@@ -1677,7 +1702,9 @@ fn bind_eligibility(
     let base: Vec<PrepareEffectRequest<'_>> =
         values.iter().map(|lane| request(shape, lane)).collect();
 
-    // A malformed shape: the wrong member count, or a backend of another width.
+    // A malformed shape: the wrong member count, or a backend of another width. (`Backend::Scalar`
+    // exists only under `lane/test-support` since #1059, so a shipped build cannot form that
+    // request; the probe does not name it.)
     let short = &base[..lanes - 1];
     let mut long = base.clone();
     long.push(base[0]);
@@ -1689,7 +1716,6 @@ fn bind_eligibility(
         ("one member short", short, backend),
         ("one member long", &long[..], backend),
         ("another width's backend", &base[..], other_backend),
-        ("the scalar backend", &base[..], Backend::Scalar),
     ] {
         match factory.bind_homogeneous_bank(PrepareEffectBankRequest {
             backend,
@@ -1768,7 +1794,12 @@ fn bind_eligibility(
             bank_error.code, member_error.code,
             "{width:?}: bind refused an illegal member with another code than prepare"
         ),
-        (Err(_), Ok(None)) if known.contains(&Known::BindDeclinesBeforeValidating) => {}
+        // #1070's allowance: the decline at a width this build does not execute, which answers
+        // before any member is validated, and only for the illegal initial value this probe plants.
+        (Err(member_error), Ok(None))
+            if known.contains(&Known::BindDeclinesBeforeValidating)
+                && width.lanes() as usize != Backend::current().width()
+                && member_error.code == "effect.parameter.initial" => {}
         (Err(member_error), Ok(bank)) => panic!(
             "{width:?}: bind {} a cohort with a member prepare refuses ({}), where the \
              three-outcome rule refuses it first",

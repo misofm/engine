@@ -146,6 +146,8 @@ struct Reach {
     collapsed: u64,
     retargets: u64,
     sanitized: u64,
+    /// Matrix words #1072's allowance forgave.
+    forgiven: u64,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -199,8 +201,10 @@ fn scenario(seed: u64, backend: Backend, width: BankWidth, strict: bool, reach: 
     .expect("matrix bank");
     let mut collapsed = false;
     let mut agree = true;
-    // The last sample a matrix ramp retargeted so far can still be in flight at.
-    let mut matrix_ramp_end = 0_u64;
+    // Per member: the sample its matrix ramp ends at (at or before `first` when settled), and the
+    // matrix it settles on. #1072's allowance is scoped by both.
+    let mut ramp_end = vec![0_u64; members];
+    let mut settled_on: Vec<Matrix2x2> = params.iter().map(|p| p.matrix).collect();
     let mut first = draw.pick(&[0_u64, 1 << 20, (1 << 40) + 3]);
 
     for block in 0..BLOCKS {
@@ -262,10 +266,13 @@ fn scenario(seed: u64, backend: Backend, width: BankWidth, strict: bool, reach: 
                     scalar.fader.set_mute(lanes, muted, window);
                 }
                 Retarget::Matrix(target, window) => {
-                    matrix_ramp_end = matrix_ramp_end.max(first + u64::from(window));
                     let banked = matrix_bank.set_target_smoothed(lane, target, window);
                     let single = scalar.matrix.set_target_smoothed(target, window);
                     assert_eq!(banked, single, "{context}: the matrix retarget's verdicts");
+                    if banked.is_ok() {
+                        ramp_end[lane] = first + u64::from(window);
+                        settled_on[lane] = target;
+                    }
                 }
             }
             reach.retargets += 1;
@@ -279,6 +286,8 @@ fn scenario(seed: u64, backend: Backend, width: BankWidth, strict: bool, reach: 
             twin.reset();
             fader_bank.reset();
             matrix_bank.reset();
+            // A reset snaps every matrix ramp to its target.
+            ramp_end.fill(0);
             for scalar in &mut scalars {
                 scalar.input.reset();
                 scalar.fader.reset();
@@ -333,8 +342,8 @@ fn scenario(seed: u64, backend: Backend, width: BankWidth, strict: bool, reach: 
         // --- Scalar strips --------------------------------------------------------------------------
         let chunk =
             (frames > 1 && !hostile && draw.chance(1, 3)).then(|| 1 + draw.below(frames - 1));
-        let mut scalar_left = vec![0.0_f32; words];
-        let mut scalar_right = vec![0.0_f32; words];
+        // Each stage's output, input section, fader and matrix, compared stage by stage.
+        let mut scalar_stages = [(); 3].map(|()| (vec![0.0_f32; words], vec![0.0_f32; words]));
         let mut scalar_reports = Vec::with_capacity(members);
         for (lane, scalar) in scalars.iter_mut().enumerate() {
             let mut l: Vec<f32> = (0..frames)
@@ -350,7 +359,7 @@ fn scenario(seed: u64, backend: Backend, width: BankWidth, strict: bool, reach: 
                     continue;
                 }
                 let at = first + start as u64;
-                for stage in 0..3 {
+                for (stage, (stage_left, stage_right)) in scalar_stages.iter_mut().enumerate() {
                     let block = DualMonoBlock::new(&mut l[start..end], &mut r[start..end], at)
                         .expect("a block");
                     add(
@@ -361,11 +370,11 @@ fn scenario(seed: u64, backend: Backend, width: BankWidth, strict: bool, reach: 
                             _ => scalar.matrix.process(block),
                         },
                     );
+                    for frame in start..end {
+                        stage_left[frame * lanes + lane] = l[frame];
+                        stage_right[frame * lanes + lane] = r[frame];
+                    }
                 }
-            }
-            for frame in 0..frames {
-                scalar_left[frame * lanes + lane] = l[frame];
-                scalar_right[frame * lanes + lane] = r[frame];
             }
             scalar_reports.push(report);
         }
@@ -399,14 +408,18 @@ fn scenario(seed: u64, backend: Backend, width: BankWidth, strict: bool, reach: 
                 "{context}: the twin input bank rendered other words"
             );
         }
+        let mut bank_stages = Vec::with_capacity(3);
+        bank_stages.push((bank_left.clone(), bank_right.clone()));
         add(
             &mut bank_report,
             fader_bank.process(&mut bank_left, &mut bank_right, frames as u32),
         );
+        bank_stages.push((bank_left.clone(), bank_right.clone()));
         add(
             &mut bank_report,
             matrix_bank.process(&mut bank_left, &mut bank_right, frames as u32),
         );
+        bank_stages.push((bank_left, bank_right));
         reach.blocks += 1;
         let sanitized: u64 = scalar_reports
             .iter()
@@ -419,29 +432,63 @@ fn scenario(seed: u64, backend: Backend, width: BankWidth, strict: bool, reach: 
                 "{context}: the banks sanitised another count than their scalar strips"
             );
         }
-        let zeros_as_one = !strict && first < matrix_ramp_end;
-        let same = |a: f32, b: f32| {
-            dsp_reference::randomized::same_word(a, b) || (zeros_as_one && a == 0.0 && b == 0.0)
+        // #1072, and nowhere else: the matrix bank's output on a settled identity lane, on the
+        // frames another lane's matrix ramp is still in flight, may be `+0.0` where the lane's own
+        // section passes `-0.0` through. Every other stage, lane, frame and word is compared by
+        // bits (NaN as one class, #1065).
+        let forgiven = |stage: usize, lane: usize, frame: usize, scalar: f32, banked: f32| {
+            let others_in_flight = (0..members)
+                .filter(|other| *other != lane)
+                .map(|other| ramp_end[other])
+                .max()
+                .unwrap_or(0);
+            !strict
+                && stage == 2
+                && settled_on[lane] == Matrix2x2::IDENTITY
+                && ramp_end[lane] <= first
+                && first + (frame as u64) < others_in_flight
+                && scalar.to_bits() == 0x8000_0000
+                && banked.to_bits() == 0
         };
-        for lane in 0..members {
-            for (plane, scalar, banked) in [
-                ("left", &scalar_left, &bank_left),
-                ("right", &scalar_right, &bank_right),
-            ] {
-                if let Some(frame) = (0..frames).find(|frame| {
-                    let word = frame * lanes + lane;
-                    !same(scalar[word], banked[word])
-                }) {
-                    let word = frame * lanes + lane;
-                    panic!(
-                        "{context}: lane {lane} {plane} frame {frame}: the banks rendered \
-                         {:#010x} where the scalar strip rendered {:#010x} (chunk {chunk:?})",
-                        banked[word].to_bits(),
-                        scalar[word].to_bits()
-                    );
+        for (stage, name) in ["input section", "fader", "matrix"].into_iter().enumerate() {
+            for lane in 0..members {
+                for (plane, scalar, banked) in [
+                    ("left", &scalar_stages[stage].0, &bank_stages[stage].0),
+                    ("right", &scalar_stages[stage].1, &bank_stages[stage].1),
+                ] {
+                    if let Some(frame) = (0..frames).find(|frame| {
+                        let word = frame * lanes + lane;
+                        !dsp_reference::randomized::same_word(scalar[word], banked[word])
+                            && !forgiven(stage, lane, *frame, scalar[word], banked[word])
+                    }) {
+                        let word = frame * lanes + lane;
+                        panic!(
+                            "{context}: the {name} stage, lane {lane} {plane} frame {frame}: the \
+                             banks rendered {:#010x} where the scalar strip rendered {:#010x} \
+                             (chunk {chunk:?})",
+                            banked[word].to_bits(),
+                            scalar[word].to_bits()
+                        );
+                    }
                 }
             }
         }
+        reach.forgiven += (0..members)
+            .flat_map(|lane| (0..frames).map(move |frame| (lane, frame)))
+            .map(|(lane, frame)| {
+                let word = frame * lanes + lane;
+                [
+                    (scalar_stages[2].0[word], bank_stages[2].0[word]),
+                    (scalar_stages[2].1[word], bank_stages[2].1[word]),
+                ]
+                .into_iter()
+                .filter(|(scalar, banked)| {
+                    !dsp_reference::randomized::same_word(*scalar, *banked)
+                        && forgiven(2, lane, frame, *scalar, *banked)
+                })
+                .count() as u64
+            })
+            .sum::<u64>();
         first += frames as u64;
     }
 }
