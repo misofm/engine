@@ -949,37 +949,44 @@ pub struct PreparedEffectMetadata {
 }
 /// The semantic cohort identity: two prepared effects may share one bank iff these fields agree.
 ///
-/// # `bypass` is still here, and why (issue #95 finding F4)
+/// # A session's `bypass` is not in the grouping identity (issue #1087)
 ///
-/// It should not be. `bypass` is a per-instance *configuration*, not a program: a bypassed track
-/// and an identical enabled track run the same kernel with the same coefficients, and keeping the
-/// flag in the key means they can never share a bank — toggling bypass on one track of an
-/// eight-track cohort splits it and forces a structural rebuild. The target design, which is
-/// exact and preserves every current guarantee:
+/// `bypass` is a per-instance *configuration*, not a program: a bypassed track and an identical
+/// enabled track run the same kernel with the same coefficients. Keeping a session's bypass in the
+/// grouping identity meant they could never share a bank, so toggling bypass on one track of an
+/// eight-track cohort split it and cost the bypassed track its bank.
 ///
-/// * **Identity coefficients.** The wet path still runs for a bypassed lane. Its state stays
-///   continuous, so un-bypassing does not click, and the cohort does not split.
-/// * **A per-lane bitwise select, never an arithmetic identity.** `out = select(bypass_mask,
-///   dry_delayed, wet)` with `bypass_mask = [u32::from(b).wrapping_neg(); W]` built once at bind.
-///   `fma(0, wet, dry)` is **not** equivalent: `-0.0 + 0.0` is `+0.0`, which would break
-///   `executed_w8_bypass_preserves_lane_local_signed_zero_at_fixed_latency`.
-/// * **Latency preserved exactly.** `dry_delayed` is the lane's input delayed by exactly
-///   `PreparedEffectMetadata.latency` — the same integer the enabled path reports — so a bypassed
+/// So preparation never hands a session's bypass to the effect. `effect-compiler` lowers it to a
+/// prepared `bypass = false` plus the initial state of that lane's [`BypassShunt`], carried by an
+/// [`EffectControlLane`] (`EffectControlLane::without_channel` when no live console is attached):
+///
+/// * **The wet path still runs.** A bypassed lane's state stays continuous, so un-bypassing does
+///   not click, and the cohort does not split. That cost is accepted (decision 12).
+/// * **A per-lane bitwise select, never an arithmetic identity.** The rack's shunt copies the
+///   delayed dry words into exactly the bypassed lanes. `fma(0, wet, dry)` is **not** equivalent:
+///   `-0.0 + 0.0` is `+0.0`.
+/// * **Latency preserved exactly.** The dry signal is delayed by exactly
+///   `PreparedEffectMetadata.latency`, the same integer the enabled path reports, so a bypassed
 ///   lane's impulse lands on the same sample as an enabled lane's.
 /// * **PDC exact by construction.** `graph-compiler` derives route timings solely from
-///   `PreparedEffectMetadata.latency`, and `bypass` stays in `PrepareEffectRequest` and
-///   `PreparedEffectMetadata` (it is also byte 108 of the persisted state envelope, a contract
-///   fixture). Removing it from the *key* therefore changes no timing at all: the existing
-///   `bypass leaves route_timings unchanged` test stays green untouched.
+///   `PreparedEffectMetadata.latency`, which depends on the quality row and never on bypass.
 ///
-/// What blocks it is not the contract. Every effect's bank today reads one `metadata.bypass` for
-/// the whole bank and builds an all-or-nothing `L::Mask` from it — `parametric-eq` does not even
-/// run the wet path when bypassed — so removing the field from the key would silently apply lane
-/// 0's bypass to all eight lanes. Making it per lane is a DSP change inside all nine effect
-/// crates plus the rack's bank driver, which is the seam #96 owns and which this contract
-/// cleanup may not touch. It is handed over with the design above rather than half-taken: a
-/// key that no longer separates bypassed lanes, on kernels that cannot separate them, is a
-/// correctness bug, not a cleanup.
+/// Every session effect that can bank is therefore prepared with `bypass = false`, and every key
+/// the cohort planner compares for it carries `bypass: false`: mixed-bypass cohorts share one key
+/// and bind one bank. An effect whose factory never binds a bank (`effect_compiler`'s
+/// `NEVER_BANKED_EFFECTS`, the delay) has no bank to keep, and keeps its prepared bypass.
+///
+/// # Why the prepared field stays in the key
+///
+/// A prepared `bypass = true` is still a legal request (it is byte 108 of the persisted state
+/// envelope, a contract fixture, and a direct caller may prepare one). Every effect's bank reads
+/// one `metadata.bypass` for the whole bank and builds an all-or-nothing mask from it --
+/// `parametric-eq` does not even run the wet path when bypassed -- and every
+/// `bind_homogeneous_bank` refuses a cohort whose members' keys differ. Removing the field from
+/// the key would let a direct caller bind a mixed prepared-bypass cohort and silently apply lane
+/// 0's flag to every lane. While it stays, such a cohort is declined (`Ok(None)`), and the
+/// session path, which prepares `bypass = true` only for an effect that never banks, is
+/// unaffected by it.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct EffectProgramKey {
     pub effect_id: EffectId,

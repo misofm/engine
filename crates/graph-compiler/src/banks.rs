@@ -57,9 +57,16 @@ pub(crate) fn banks_are_permitted(identity: &session::EffectIdentity) -> bool {
 /// form single-slot banks.
 ///
 /// A slot is bound when the group is full and **every** lane runs that slot. A slot some lane
-/// skips would need a per-lane bypass mask in the effect contract, which does not exist (#96 F7);
-/// those members render on the per-node scalar path exactly as before.
+/// skips would need a per-lane identity (absent-member) mask in the effect contract, which does
+/// not exist (#96 F7, P2a); those members render on the per-node scalar path exactly as before.
 /// Padded (non-full) groups are likewise unbound, unchanged from #96.
+///
+/// A *bypassed* slot is not a skipped one (issue #1087). It has its node and its latency, and a
+/// session bypass never reaches the program key this planner compares: preparation lowers it to
+/// a prepared `bypass = false` plus a bypassed lane on the rack's latency-preserving shunt
+/// (`EffectControlLane::without_channel`), so a cohort's tracks group, and its slots bind, whatever
+/// mix of them is bypassed. The runtime builds the bank's `rack::ConsoleEffectBankStage` from those
+/// lanes, and it restores each bypassed lane's delayed dry signal after the bank runs.
 ///
 /// Level bucketing: slot `k` of every chain in a bucket sits at `level + k`, because a rack chain
 /// is a path and a sidechain source never raises a chain member's level. A bank may not cross a
@@ -125,6 +132,8 @@ pub(crate) fn bind_rack_banks_indexed(
                     return Err(diag("graph.internal.invariant", "$.effects"));
                 };
                 nodes.push(node.clone());
+                // Issue #1087: a session bypass is not in this key -- preparation lowered it to
+                // shunt state -- so a bypassed track keeps its cohort.
                 slots.push(entry.metadata.program_key());
             }
             programs.insert(chain.clone(), RackProgram::new(location, slots));
@@ -486,8 +495,9 @@ fn bindable_slot_members(
     if !group.is_full() || group.slot_is_identity_everywhere(slot) {
         return Ok(None);
     }
-    // Every lane must run this slot: the effect contract has no per-lane bypass mask
-    // (#96 F7), so a bank whose lanes disagree cannot be expressed.
+    // Every lane must run this slot: the effect contract has no per-lane identity mask
+    // (#96 F7), so a bank some of whose lanes skip the slot cannot be expressed. (Lanes that
+    // disagree only about bypass all run it: issue #1087 carries bypass on the rack's shunt.)
     if !group.active_slots.iter().all(|lane| lane[slot]) {
         return Ok(None);
     }
