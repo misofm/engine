@@ -262,3 +262,186 @@ pushed until S1d passes them.
 - Every new test names the plausible defect that turns it red (AGENTS.md "Test value"). A
   one-time "no bit moved" comparison against the pre-change base is PR evidence, not a committed
   test.
+
+## Attempt 1 evidence
+
+Terra, attempt 1, on `codex/1093-session-console-inserts` (rebased onto `11ea359b`, R0 attempt 2;
+the pre-change base for every comparison is `6fdf5db2`, whose code is identical to `11ea359b`'s).
+The migration follows the amended rule at `11ea359b`: uniform `simd1`/`simd2` become console
+sections; a uniform `dynamic` joins the console only with two or more tracks and outside the two
+placement witnesses, so it moves no committed document.
+
+### What landed
+
+- **Session crate.** `Console { pre_insert, post_insert }` of `ConsoleSlot { slot, identity,
+  quality, link_mode }` at the root between `sources` and `tracks`; `Track { .., builtins,
+  console: Vec<ConsoleEntry { slot, bypass, params }>, inserts: Rack, fader, pan|matrix }`.
+  Parser, validator, canonical writer and visitor follow the schema order. `SendTap` takes the new
+  spellings with codes 1-7 unchanged. `RackName` moves to explicit wire codes (a second
+  `closed_tokens!` arm): `inserts` 2, `builtins` 4, `console` 5; 1 and 3 decode to nothing.
+  Visitor fields: root `console` 15, track `inserts` 7, track `console` 11, fields 6 and 8 retired;
+  the slot and entry messages have registries of their own. `SessionModel::lower_track` is the
+  one lowering (`pre_insert` -> first rack, inserts -> second, `post_insert` -> third).
+- **Refusals** (each tested with code and path, `crates/session/tests/console_schema.rs`,
+  `diagnostic_parity.rs`, `strict_unknowns.rs`, `visit_model.rs`): effect fields in an entry and
+  `sidechain`/`bypass`/`params` on a slot (`schema.unknown_field` at the key); unknown
+  (`reference.missing_entity`), duplicate (`id.duplicate`), misordered (`console.entry_order`) and
+  missing (`console.entry_missing`) entries; a slot ID repeated across sections (`id.duplicate`); a
+  `cid` slot (`console.slot_not_native`); retired `simd1`/`dynamic`/`simd2` track keys, tap spellings
+  and rack tokens; rack codes 1 and 3 (session and protocol tables); BTLV track fields 6 and 8
+  (`UnknownRequiredField`). Ineligible slots are refused where native identities resolve:
+  `effect_compiler::CONSOLE_ELIGIBLE_EFFECTS` and `console.slot.ineligible_effect` at
+  `$.console.<section>[slot=<id>].identity` (delay, multiband, unknown identity; the delay as an
+  insert still prepares).
+- **Protocol model encoding.** Track message: field 7 inserts, 11 repeated `ConsoleEntry` (slot 1,
+  bypass 2, param 3); `ParameterRack` explicit codes; the mapping test also holds
+  `RackName::wire()` to the table (an index-derived code turns it red). `rack_mut` answers
+  `NotFound` for `console` until S1b.
+- **Lowering call sites.** effect-compiler, graph-compiler (compile passes, bank planner),
+  host-core, host-web's effect index, console-workload. Graph stage names, graph diagnostic paths
+  and the `MISO-GRAPH-V1` text are unchanged; `graph_fixture --check` passes on the unchanged
+  manifest.
+- **Migration.** `docs/handoffs/console-strip-2026-09-29/migrate-console-inserts.py` (the PR
+  attachment, since the batch opens no per-slice PR; no gate runs it) reproduces all 19 migrated
+  documents byte for byte from `6fdf5db2`. Shapes: `pre_insert` from a uniform `simd1` in
+  compressor-bank-observation (`comp`), console-sixty-four-track (`eq`), -intended and -mono (`eq`,
+  `comp`), parametric-eq-bank-console and -nine-track (`eq`) and qualification/observation-session
+  (`eq-simd1`); `post_insert` in -intended/-mono (`limiter`) and qualification/observation-session
+  (`eq-simd2`); `dynamic` -> inserts everywhere; reduced-nobus folds all three racks into inserts.
+  The derive scripts emit the console shape and regenerate both console fixtures byte for byte.
+- **Tests restated.** Builders whose per-track chains differ now build inserts, and their rack
+  assertions read `Dynamic`; uniform strips stay console slots and keep `Simd1`/`Simd2`. Randomized
+  generators (host-core, `bank_levels`, graph-compiler) place their chains by the migration rule.
+  The placement witness compares a keyless compressor strip as a `pre_insert` slot against the
+  same compressors as inserts, and checks each is planned in its own rack.
+  `cross_index_effect_session` keeps its premise (one program in SIMD-1 on one track and in the
+  dynamic rack on another) with six owners instead of four. No graph-compiler numeric pin moved.
+
+### Class A (PR evidence, not committed)
+
+A scratch harness compiled each document through the launch pipeline at `Backend::Simd8` for the
+canonical graph text, and rendered 48 quanta of a deterministic per-source signal through
+host-core's prepare path (NaNs folded). Base = old documents at `6fdf5db2`; candidate = migrated
+documents here. Compared with `cmp`; digests are SHA-256 prefixes of the candidate bytes.
+
+| Document | Graph text | Render |
+|---|---|---|
+| `builtins-automation` | identical `6b05f0a198d8` | identical `de82a43a1812` |
+| `canonical` | identical `977d39a69c6b` | identical `61c35ef8db84` |
+| `canonical-minimal` | identical `b573214358d3` | identical `35e54ac3342b` |
+| `compressor-bank-observation` | identical `2423f3bdf300` | identical `1a330c619014` |
+| `compressor-dynamic-bank-observation` | identical `cb926c5212ff` | identical `1a330c619014` |
+| `compressor-dynamic-observation` | identical `7a9980baa753` | identical `d82243d18d59` |
+| `console-sixty-four-track` | identical `81470da0a39f` | identical `31a68e1cef05` |
+| `console-sixty-four-track-intended` | identical `beefd603ef4d` | identical `27fdee3ad6da` |
+| `console-sixty-four-track-mono` | identical `beefd603ef4d` | identical `46f8400598e2` |
+| `observation-frame-shape` | identical `3a0a475de6df` | identical `e6339fa93f72` |
+| `parametric-eq-bank-console` | identical `71d450ae757c` | identical `1e1e42533b07` |
+| `parametric-eq-nine-track` | identical `957e97ca86f8` | identical `03e6e94589c7` |
+| `qual-console` | identical `c9fa0104db70` | identical `d82243d18d59` |
+| `qual-observation` | identical `2367f1246bf6` | identical `d717de9efbaa` |
+| `qual-stall` | identical `c9fa0104db70` | identical `7930d2b61e37` |
+| `browser-command` | identical `b585c4a492d4` | identical `363adc8df203` |
+| `browser-observation` | identical `4bc9d01929f3` | identical `0f06fdc4fa04` |
+| `browser-session` | identical `c9fa0104db70` | identical `b16b4d3ab3f9` |
+| `reduced-nobus` | moved `26b904b44b59` | identical `f69c09c30897` |
+
+`canonical` refuses at effect preparation (its unprefixed `parametric-eq`) and `canonical-minimal`
+at source preparation, identically on both sides. `reduced-nobus` is the one document whose racks
+move (all three fold into inserts; graph text `6b571db317ac` -> `26b904b44b59`); its bits are
+identical.
+
+**App shape (placement change).** The intended fixture with EQ -> compressor moved to `dynamic`
+on all 64 tracks and both bypassed on tracks 2 mod 3, rendered at the base; its migration
+(`dynamic` -> two `pre_insert` slots, bypass kept per entry) rendered here: identical PCM
+(`3f7523f1714a`), graph text differs by design (Dynamic -> Simd1). B0's app-shape builder and V8
+document are not on this branch (B0 has not landed); porting them is a rebase item (below).
+
+### Repinned digests and why
+
+- `fixtures/session/v1/canonical.json` SHA-256 `1ed6ca31...b58ff4fd` -> `5f887676...a13c07`
+  (root console, inserts, `post_pan`, rack `inserts`), carried by
+  `benchmark/prepare_256_tracks-{48000,96000}.toml` (also `route_source_tap` `post_matrix` ->
+  `post_pan`) and the audit's field table.
+- `fixtures/builtins/v1/MANIFEST.tsv`: only those two rows (963 -> 960 bytes); regenerated by
+  `audit fixture-builtins --write`, every PCM, meter, response and resource payload unchanged
+  (the audit's graph-tap fixture keeps a delay in each lowered rack).
+- `ACCEPTED_MANIFEST_SHA256` (and the audit test's copy) `9161d2ca...5b4ff9d3` ->
+  `fced289f...b1e2f9`.
+- `fixtures/graph/MANIFEST.tsv`: unchanged.
+- `canonical-writer-corpus.json`: regenerated (the full-surface document now carries console
+  slots, entries and a keyed third-party insert; `canonical-minimal` gains the empty console).
+- Console fixtures: regenerated by the derive scripts; `check-console-fixtures.sh` passes.
+- Browser `sessionDocumentBytes` 1919 -> 1905 (`browser-v1/session.json` migrated); the
+  browser-correctness digests in `expected.json` still match the built module.
+- `COMPLETE_SCHEMA_HASH` `e4dec003302d891a` -> `af1b9b71a0a31727` (track encoding, `inserts` rack
+  code, a console entry in the corpus track), with the parity self-test literal, the conformance
+  doc and the fuzz manifest.
+- `parametric-eq-nine-track.json` FNV pin 16,712 bytes / `0x95f30d0f2c185ce0` -> 13,729 /
+  `0x6af0899538c903b6`.
+- capi pinned response vectors: snapshot length `0x4148` -> `0x35a1`; the first metadata row's rack
+  1 -> 5 (`console`).
+- `ProtocolController` 6,032 -> 6,080 and `PreparedStructuralCommand` 728 -> 776 bytes
+  (`SessionModel` gains the root console).
+- `PARSE_TRANSIENT_MULTIPLIER` 17 -> 20: the minimal document is now 511 bytes with an 8,944-byte
+  parse/model/compile peak (17.503 per byte; base 447 / 6,780 / 15.168); dense documents stay below
+  13.1. Gate: host-web `boot_transient_budget`.
+- `bank_levels` reduced #970 reproducer: misaligned slots `[1, 1]` -> `[0, 0]` (the soft-clip that
+  was a later chain now extends `t11`/`t13`'s insert chain); the four-lane compressor-bank pin stays
+  1, derived from the four-lane plan (factories decline four lanes on x86). The #966 case stays in
+  the four `console_less_eqs` tests (now inserts) and #970's later-chain case in host-core's
+  `collapse_arming.rs`.
+
+### Minimal changes outside S1a, for the later slices
+
+- S1b (#1094): console session edits (`rack_mut` refuses `console`; capi's catalog test removes a
+  track instead of an EQ, and the swap-window test edits an insert); an explicit refusal of the
+  retired track fields 6 and 8 when a peer flags them optional (today only the mandatory form is
+  refused); `CONTROL_PROTOCOL_REGISTRY.md`'s session-edit registry beyond the one rack-code line.
+- S1c (#1096): host-core's parameter metadata names a lowered console effect
+  `ParameterRack::Console` and an insert `Inserts`; the web host's rack bytes, console-workload's
+  `mixing_automation.rs` and the V8 harness keep addressing the lowered racks `0/1/2`.
+- S1d (#1097): the SDK writer, types and tests, the browser qualification scripts and the shipped
+  AudioWorklet artifact pin (every Rust change here moves the module).
+- Rebase onto B0: port B0's app-shape builder and V8 document to `console.pre_insert` (the rule's
+  one moving case), and reconcile `tools/console-workload`.
+- `prepare_native_session_effects_with_console_eligibility` lets test and audit registries admit
+  the conformance test double as a console slot; every host prepares through the fixed list.
+
+### Gates
+
+All on the final tree (`0c71b280`), x86-64-v3:
+- `cargo check --workspace --all-targets --all-features` (through clippy), `cargo clippy --locked
+  --workspace --all-targets --all-features -- -D warnings`, `cargo fmt --all --check`: pass.
+- `cargo test --locked --workspace --all-features --no-fail-fast`: 284 test binaries green; the two
+  that failed (the audit's second manifest pin, session-validator's fixture edit) were fixed in
+  `0c71b280` and rerun green (`-p audit -p session-validator`).
+- The session, protocol, conformance, effect-compiler, graph-compiler (lib and every integration
+  suite), builtins-compiler, host-core, capi, host-web, console-workload, parameter-metadata and
+  session-validator suites pass within that run.
+- `check-console-fixtures.sh` (both fixtures regenerate byte for byte), `check-console-benchmark-fixture.sh`,
+  `test-console-benchmark.sh`, `check-builtins-fixtures.sh`, `graph_fixture --check`,
+  `check-protocol-wasm-parity.sh` and its `--self-test`, `check-browser-expected-resources.py`
+  (built module; digests unchanged, one exact row repinned).
+- Policy scripts: session, workspace, graph, host-core, rack, realtime, builtins,
+  protocol-control, lane, env-vocabulary, effect-runtime, unfused-seal, artifact-evidence-leak,
+  conformance-boundaries, bench, dsp-research; and with `python3 -B`: command-kind and
+  command-reason vocabulary, session-map-shape, script-reachability, ci-path-routing,
+  test-support-ci, release-shape, sdk-deletions. The argument-taking Python checks
+  (parameter-metadata, abi-layout, scalar-oracle) run inside the web-artifact gates, which are the
+  batch boundary's.
+- AArch64 legs on x86 with `--no-run`: the debug leg (capi's product closure plus dsp-reference,
+  conformance, target-smoke, `builtins-compiler/test-support,graph/test-support`), the release
+  gates (`lane`, `math` with `math/lane`) and `console-workload` release all compile; the
+  known-defect rows judge their listings (`judge-skips debug` and `release` pass); the no-silent-skip
+  scan finds nothing.
+- Gate 6, untimed on the committed clean tree: `operator/preflight-console-benchmark.sh --step
+  s1a-scratch-preflight` passes (workload launches 0); `run-web-mixing-automation-benchmark.sh
+  prepare` then `preflight` in an empty scratch directory pass (the module is not the released
+  pin, as expected before the batch's artifact rebuild).
+- Not run: the SDK suites, `check-sdk-generated.sh` and the SDK-driven browser qualification, which
+  are knowingly out of step until S1d; the shipped AudioWorklet artifact pin, which the batch
+  boundary rebuilds.
+- B0's app-shape row: not on this branch, so its compiled-plan gate (EQ and compressor as
+  `pre_insert` slots with the 2-mod-3 bypass) is shown above on an equivalent probe and must be
+  rerun on B0's row after the rebase.
