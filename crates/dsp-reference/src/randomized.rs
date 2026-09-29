@@ -90,12 +90,13 @@ pub fn run_seeds(test: &str, replay: &str, per_pr: u64, mut case: impl FnMut(u64
 
 /// Whether two words are the same value for a class-A comparison: the same bits, or both NaN.
 ///
-/// Issue #1065: the payload and sign of a NaN that an operation *generates* are the CPU's choice
-/// (x86 and AArch64 differ), so a differential that must pass on both compares every NaN as one
-/// class. Everything else, `-0.0` against `+0.0` included, is compared by bits.
+/// Issue #1065 (owner decision 10): the payload and sign of a NaN that an operation *generates* are
+/// the CPU's choice (x86 and AArch64 differ), so a differential that must pass on both compares
+/// every NaN as one class. Everything else, `-0.0` against `+0.0` included, is compared by bits.
+/// This is the shared rule, [`crate::class_a::same`].
 #[must_use]
 pub fn same_word(a: f32, b: f32) -> bool {
-    a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan())
+    crate::class_a::same(a, b)
 }
 
 /// The first index at which two equally long planes differ under [`same_word`].
