@@ -36,7 +36,7 @@ Authorized paths: the bank binding, D7 path and lane bookkeeping of `crates/gate
 
 ## Dependencies
 
-- *Let an effect bank bind a partial group with inactive lanes* (P2a), #1088).
+- *Let an effect bank bind a partial group with inactive lanes* (P2a, #1088).
 
 This is batch C2. P2b-P2e edit disjoint effect crates, so after P2a merges they may land in
 any order, one merge each.

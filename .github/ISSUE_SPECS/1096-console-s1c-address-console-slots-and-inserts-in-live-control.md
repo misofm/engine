@@ -46,7 +46,8 @@ After S1a, the session addresses `console` slots and `inserts`, and none of thes
 5. Update the host's `.d.ts` and refresh its SDK mirror (`sdk/src/browser/shipped-host.d.ts`,
    compared by `scripts/check-sdk-generated.sh`). Regenerate the ABI layout JSON and bindings.
 6. **The V8 benchmark harness.** It writes the record's rack byte from the controls table
-   (`scripts/web-mixing-automation-benchmark.mjs:279`). The table's codes come from
+   (`scripts/web-mixing-automation-benchmark.mjs:279`), and it resolves rack names in its lookup at
+   `:136-140`; this slice owns both. The table's codes come from
    `tools/console-workload/src/mixing_automation.rs`, through
    `examples/mixing_automation_controls.rs`, and today they are `0`/`1`/`2` with an index within
    the section (S1a's interim). This slice moves them to `3` plus the slot index for console slots

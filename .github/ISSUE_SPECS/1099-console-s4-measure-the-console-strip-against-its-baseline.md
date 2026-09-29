@@ -69,4 +69,7 @@ This is batch C4, after S2.
    alignment, or #892. It changes no code.
 5. Each row's `output_sha256` equals S0's. The design is class A end to end (P1, P2a-P2e, S1a and
    S2 each keep every bit), so a difference is a class-A defect. Report the row and the difference
-   instead of explaining it away.
+   instead of explaining it away. This covers the native records' `output_sha256` and the V8
+   records' output digest fields (name them from the V8 record schema). The one allowance: a
+   difference traced to an unrelated merged change between C1 and C4 is re-baselined by rerunning
+   S0's command on that change's commit, and the evidence names the commit.
