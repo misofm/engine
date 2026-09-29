@@ -247,3 +247,184 @@ paths.
   vocabulary.
 - The allocation and digest probes are PR evidence, not committed tests. B0's app-shape row will
   exercise this path under the audited allocator.
+
+## Sol verdict, attempt 1
+
+Sol, 2026-09-29. Verified `b0c6f11f` (`1482a0c9`..`b0c6f11f` on `6fdf5db2`) against this body,
+decision 12 and the design verification (H1, M2, amendments 1 and 7).
+
+**PASS.** Every objective gate holds on independent evidence. The class-A proof holds against the
+real base code, not only against a reconstruction of it, and three mutations of Sol's own go red.
+Two medium findings fall outside this slice's paths. Root must give each an owner before batch C2
+is pushed (conditions at the end). They are root actions, not a second attempt.
+
+### Evidence
+
+Sol wrote a scratch probe (not committed) and compiled it unchanged at `6fdf5db2` and at the
+branch, so "today" below is the base engine itself.
+
+**Gate 1, the goal.** 8 tracks of EQ -> compressor at Simd8, in SIMD rack 1 and, for the app
+shape, in the dynamic rack. Both racks give the same plan:
+
+| Bypass masks (EQ / comp) | Base | Branch |
+|---|---|---|
+| none | eq[8], comp[8] | eq[8], comp[8] |
+| `11010110` / `11010110` (app subset) | no bank, 16 nodes per node | eq[8], comp[8] |
+| `01001010` / `10010010` | no bank, 16 nodes per node | eq[8], comp[8] |
+| `00000001` / `00000001` | no bank, 16 nodes per node | eq[8], comp[8] |
+| all | eq[8], comp[8] | eq[8], comp[8] |
+
+- **The 64-track consoles.** The standing intended and mono consoles bind 24 banks under every
+  bypass variant. Base binds 21-23 for the mixed variants.
+- **W = 4.** On this host `Backend::Simd4` binds banks for the limiter and the multiband only.
+  With mask `10100101`, base binds {1,3,4,6} and {0,2,5,7}, and the branch binds {0-3} and {4-7}.
+  NEON itself is unverified, because there is no AArch64 toolchain or qemu here. CI's
+  `aarch64-debug` leg runs gate 1 when C2 is pushed.
+- **The bank key.** Every session bypass on an effect that can bank reaches the planner as
+  prepared `bypass = false`, so keeping the field in `EffectProgramKey` does not defeat the
+  purpose; the table is the proof. The field only keeps a direct caller's mixed prepared-bypass
+  cohort declined. That is right while every kernel reads one flag per bank.
+
+**Gate 2, class A.** Every word at `PostInputBuiltins`, `PostSimd1`, `PostDynamic`,
+`PostSimd2PreFader` and the output, base against branch, with NaN folded:
+
+- **Effects.** 8 effects x their link modes x 3 feeds x 5 masks. The feeds are random, runs of
+  `-0.0` and subnormals through identity builtins, and music. The branch rendered each at Simd8,
+  Simd4 and Scalar: 792 renders, 0 differ. Only `normal` quality is declared at 48 kHz. The
+  limiter's bypassed lanes are `+0.0` for exactly 486 samples, then the input from sample 0.
+- **`-0.0` through a session.** The evidence says no session carries `-0.0` to a slot. One does:
+  an enabled compressor at -12 dB makeup turns the smallest negative subnormals into `-0.0` ahead
+  of a bypassed slot, which puts 1,392 to 16,315 `-0.0` words on the bypassed tracks per render.
+  24 renders x 3 widths: 0 differ.
+- **Other inputs, all identical:**
+  - non-finite sources, 16 renders: NaN with two payloads, both infinities, `1e30`, `-3e38` and
+    `+-9.99e29`;
+  - `+0.0` gaps around a latent limiter, whole-session and odd tracks only, 24 renders;
+  - keyed compressors (sidechain from the next track's `PostSimd1`) before the limiter, 3 renders;
+  - both 64-track consoles, 6 bypass variants each.
+- **Live toggles.** Branch: lanes 0, 3 and 7 session-bypassed on all three strip slots, lifted at
+  block 5 and re-bypassed at 10. Base: the same lanes session-enabled, live-bypassed before
+  block 0, then toggled at the same blocks. The two are identical. A plain live toggle on enabled
+  lanes is identical on both sides too.
+- **Sol's mutations**, each reverted:
+  - The rack shunt's line one frame short (`latency - 1`): red in `bypass_cohorts` (2 tests),
+    `bypass_shunt_identity` (2) and 52 probe renders.
+  - The restore loop skips the last lane: red in `a_session_bypass_renders_todays_bits`, the
+    banked identity leg and 106 renders. `console_bank` stays green, because its bypassed lane is
+    lane 0.
+  - Whole-bank shunt selection, restoring every lane when any is bypassed: red in 6 committed
+    tests and 102 renders.
+  - The named `fma(0, wet, dry)` restore is also red at session level, in 9 of the 24 `-0.0`
+    renders (EQ, multiband, soft clip). `bypass_cohorts` cannot see it.
+
+**Gate 5, render.** A counting global allocator watched 15 plans: 1, 3, 8, 13 and 16 tracks with
+mixed bypass on all three strip slots, at Simd8, Simd4 and Scalar. After 16 warm-up blocks, 2,000
+blocks made 0 allocator calls. The policies pass, and so do the audits:
+- capi, delay, compressor, EQ and gate, 100,000 blocks each;
+- the builtins, graph, realtime and effect-contract traces;
+- the callgraph gate and the V8 spill gate. The module is `0f5c0ee7...`, as reported.
+
+**The other gates**, all exit 0:
+- cargo check, clippy `-D warnings`, fmt and rustdoc.
+- Debug: CI's debug-a set, 1,097 passed and 10 ignored. The debug-b DSP set, which the
+  implementer did not run: 790 passed, 28 ignored.
+- Release: the affected crates with audit, bench and console-workload, 754 passed.
+- Every lint-job script, the audit-native job, artifact and artifact-gates (including the SDK's
+  generated, types, headless and package checks), wasm-guests, cross-target, release-shape with
+  `panic=unwind`, and the docs and gate self-tests.
+- The AArch64 legs resolved on x86. Debug `--no-run` and `--list` find 1,727 tests. Release builds
+  too. `judge-skips` accepts both listings, and the silent-skip scan is clean.
+
+**Merges.**
+- Onto `c4906414`: clean.
+- B0, then P1: clean. The workspace check, the console-workload and bench release tests and
+  `test-console-benchmark.sh` pass.
+- S1a on top: two textual conflicts, both additive (`NEVER_BANKED_EFFECTS` beside
+  `CONSOLE_ELIGIBLE_EFFECTS` in `prepare.rs`, and new tests in `native_session.rs`). Three P1 test
+  changes then fail to compile against S1a's model, because they name `simd1`, `dynamic` and
+  `simd2`: `bypass_cohorts.rs`, the new `native_session.rs` test and the `symmetry_witness.rs`
+  edit. `bypass_shunt_identity.rs` and the inverted `graph-compiler` unit test merge and compile.
+  C2 lands before C3, so S1a's rebase ports these. `console-workload` also breaks under S1a, but
+  that is B0 x S1a, not P1.
+
+### Findings, ranked
+
+**M1. A per-node session bypass now holds a live-console staging window. The memory is not
+charged, and it can abort bind.**
+- Before #1087 a console-free plan held no `ConsoleEffect`. Now every session-bypassed instance
+  that renders per node is one, and `graph::runtime::ConsoleEffect::new` sizes its staging window
+  by `automation_capacity` whatever the lane. `baa03f09` fixed the rack twin; the graph twin is
+  unchanged.
+- One track with a bypassed EQ and `maximum_automation_spans_per_block: u32::MAX` binds at base.
+  At the branch it aborts: `memory allocation of 171798691800 bytes failed`, which is `u32::MAX`
+  x 40 B.
+- At 128 spans, measured:
+
+  | Plan | Retained bytes added | Estimate added |
+  |---|---|---|
+  | One per-node bypassed EQ | 6,186 B | 72 B |
+  | One 8-lane bypassed EQ slot | 7,808 B | 576 B |
+
+  `effect_control_resource` charges neither the staging window nor any `BypassShunt` (its dry
+  blocks, plus a limiter slot's 31 KiB line at W = 8). Live consoles already had this gap. P1
+  extends it to console-free hosts such as the C ABI.
+- No test covers the graph twin. It needs a bounded successor in C2 that:
+  - gives a channel-less per-node lane no window, as `baa03f09` did for the rack;
+  - charges shunts and windows in the estimate;
+  - tests a per-node bypass at `u32::MAX` spans.
+
+**M2. The D7 residual is accepted for four effects and has no owner for the multiband.**
+- **The coupling, on the base engine.** One bypassed lane of an 8-lane bank is fed a legal,
+  constant-magnitude signal. It silences all seven enabled bank-mates for as long as it stays hot:
+  43,008 of 43,008 words at their rack taps. Base moves none. The bypassed lane's own bits never
+  move.
+- **Trigger levels at the bank input:**
+  - compressor at +24 dB makeup: 1e29;
+  - EQ with one band at +24 dB: 6e29;
+  - multiband at its defaults: 6e29;
+  - gate and limiter: never, because their gain is at most 1 or capped by the ceiling.
+- **Reachable?** Yes with legal input: after the input stage, any finite sample below `1e30` is
+  legal. Not with real audio. From 0 dBFS it needs about +500 dB of stacked legal gain before the
+  slot, when trim, each EQ band and makeup each give at most +24 dB.
+- **Why not a FAIL.** This is a new instance of the coupling decision 12 forbids, reached through
+  the whole-bank D7 exception that already existed. P1 cannot mask D7 per lane without changing
+  kernels, which is a non-goal. P2b (#1089), P2c (#1090) and P2e (#1092) make recovery per lane,
+  and their gate 4 closes this, provided a bypassed lane counts as an active one. It is an accepted
+  residual with those owners.
+- **The multiband has no owner.** The evidence record says #1069 covers it, but #1069 is the
+  ramp-cut defect and does not mention D7.
+
+**L1.** P1 x S1a needs the test ports listed under Merges.
+
+**L2.** No committed test or audit renders a session bypass under the audited allocator or strace.
+The implementer's allocation probe and Sol's are both scratch. B0's app-shape row covers it once C2
+lands. Name that, or add an audit subject.
+
+**L3.** The `bypass_cohorts` doc is true for sources but not for sessions: `-0.0` reaches a
+bypassed slot from an enabled upstream stage (see the evidence). A session-level `-0.0` case would
+let this gate see the `fma` restore. Optional.
+
+**L4.** A live console can now lift the session bypass of every effect except the delay, which is
+seeded bypassed and keeps its prepared bypass. Record this for S1c.
+
+**L5.** The two path deviations are accepted.
+- `host-core/tests/symmetry_witness.rs` keeps its assertions and reaches the per-node arm through
+  `edited_apart`.
+- The `EFFECT_CONTRACT_V1.md` sentence was false both before and after this change.
+
+**L6.** What allocated the 687 GB was `ConsoleEffectBankStage::new`'s `packed` window: `u32::MAX` x
+4 lanes x 40 B, in `compile_shapes`' Simd4 leg. It comes after a 172 GB one-lane `staging` window.
+Reproduced under a 16 GB address-space cap, the first failure is 171,798,691,800 B at
+`rack/src/lib.rs:1026`. The rack fix is complete. If it regresses,
+`console_bank::a_channel_less_bypassed_lane_is_shunted_without_a_staging_window` and
+`compile_shapes` abort.
+
+### Conditions on pushing C2 (root)
+
+1. M1: open the successor above and land it in C2.
+2. M2: give the multiband an owner. Either amend #1069 or open an issue, or add
+   `miso.multiband-compressor` to the effects that keep a prepared bypass. It is not
+   console-eligible until #1069 closes anyway.
+3. Add a bypassed tripping lane to gate 4 of P2b, P2c and P2e.
+4. Do not push P1 unless P2b, P2c and P2e have closed. Otherwise withhold the lowering for each
+   effect whose P2 slice did not close.
