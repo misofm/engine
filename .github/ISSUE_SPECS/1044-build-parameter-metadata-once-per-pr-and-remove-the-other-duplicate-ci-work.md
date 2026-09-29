@@ -209,3 +209,109 @@ therefore the generator only.
 **Not done.** `npm-publish.yml` still runs the cargo form of `check-sdk-generated.sh`, before
 `sdk-package.sh build "$worklet"`. Passing `"$worklet"` there would drop one more fat-LTO run per
 publish, but that file is outside this issue's paths.
+
+## Sol verdict, attempt 1
+
+**PASS.** Sol, 2026-09-29. Verified on a scratch merge of `4946b0d1` into `codex/batch-slim-4`
+(`124968b7`: main plus #1060, #1062 and #1050). Every result below is a local run; CI was not run.
+
+**Merge into the batch.** There is one textual conflict. It is in `qualification.yml`, in the
+`sdk` job's verify step: #1050 reworded the comment line after it, and #1044 added two closure lines
+before it. **Root applies:** keep #1044's `closure=...` and `[[ "$CLOSURE" ... ]]` lines, followed
+by #1050's comment `# check-sdk-deletions.py's --self-test (design §6.6, S7) runs in gate-self-tests`
+without "37-mutation". `check-web-audioworklet.sh` auto-merges: #1062's comment and #1044's flag
+touch different hunks. There is no semantic conflict:
+- #1062 and #1050 change neither routing script;
+- no #1044 pin names a step or script that #1062 or #1050 removed;
+- every gate below passes on the merge.
+
+**Findings, by severity.**
+
+1. **Low: the closure digest misses an extra file with whitespace in its name.**
+   - The cause: `xargs` splits the name, `sha256sum` fails on both halves, and without `pipefail`
+     the digest covers the other files only.
+   - A planted `a b.json` in the download leaves all three readers green.
+   - No reader reads such a file. `artifact-gates` refuses anything but "the exact seven frozen
+     outputs" (`check-web-audioworklet.sh`). `sdk` refuses any file-set change in
+     `stage-package.mjs`.
+   - Every byte of every built file is covered.
+   - Fix, for a successor or this batch: `find . -type f -print0 | LC_ALL=C sort -z | xargs -0
+     sha256sum --` under `set -o pipefail`, on both sides.
+2. **Low: the checker pins only the literal flag and the literal verify lines.**
+   The checker accepts three deliberate evasions:
+   - the flag passed through a shell variable, even in `lint` over another directory;
+   - the flag passed by a script, since scripts are not scanned;
+   - a step that rewrites the download after the verify step. This limit already applied to the
+     module under #1061.
+
+   An accidental edit is still refused. The plants: the verify step given `if: false` or
+   `continue-on-error: true` in each reader, and the build closure pointed at another directory.
+3. **Info: the M3 replacement loses no behavioural claim on a shipping target.**
+   The plants flip one bit of `math::exp2`'s result. The flip sits in `lib.rs`, outside
+   `src/vendored`, so only the digest half of M3 can see it.
+   - **FMA-conditional flip:** red under the retired step (`RUSTFLAGS=+fma`, no `lane`) and red
+     under the surviving main-leg command.
+   - **No-AVX2-conditional flip:** red under the retired step and green on the x86 main leg.
+     The retired step's only unique coverage was an x86 build without AVX2, which ships nowhere.
+     Two jobs on the same full route build without AVX2 and replay the same pins:
+     - `aarch64-release` runs `-p lane -p math --features math/lane` in release, and M3 is not
+       among its known-defect rows;
+     - `wasm-guests` replays `M3_DIGESTS` in G5.
+   - **The cfg line** prints `target_feature="fma"` on the config's flags and goes red under
+     `RUSTFLAGS='-C target-feature=+avx2'`.
+4. **Info: a local-only loss.** `npm run build`, and a local `npm pack` through `prepack`, no longer
+   run `check-sdk-generated.sh`. The body authorizes this and the evidence discloses it. Both CI
+   packagers run the gate first: `sdk` against the closure, and `npm-publish.yml` in its cargo form.
+5. **Info: gate 4 is estimated, not measured.** Confirm the savings on the batch's first full-route
+   CI run.
+
+**Checked (on the merge).**
+- **Routes.** Each removed step and its owner run on identical routes:
+  - `lint`, `artifact-gates`, `audit-native` and `test-release` are all `route == 'full'`;
+  - `artifact` and `sdk` are `sdk || full`;
+  - no removed step lived in `gate-self-tests`, and no owner depends on `self_tests`.
+
+  The owners are:
+  - the mjs suite: `artifact-gates` (`test-web-audioworklet.sh`, line 6, on the runner's own
+    Node);
+  - the four effect-runtime scripts: `lint`. A seeded `serde = "1"` in `effect-contract` turns
+    `check-effect-runtime-policy.sh` red, while `check-effect-contract.sh` now stays green;
+  - M3 with FMA: `test-release`'s main leg;
+  - the metadata generator: `artifact`.
+- **Hand-off.** I ran the workflow's own build and verify steps under `bash -e`, with a tar round
+  trip standing in for upload and download.
+  - The closure digest is computed in `artifact`'s build step, over the directory it uploads.
+  - The results for each of the three readers:
+    - a flipped byte in any one of the 7 built files is red;
+    - an extra plainly named file, a missing file, a renamed file, and the metadata and ABI-layout
+      contents swapped are all red.
+  - In each reader the verify step precedes every script. The checker refuses the step made
+    conditional or non-fatal.
+  - `artifact-identity` and `artifact-record` read only `sha256` and `rustc`, which are unchanged.
+    Their checker pins pass.
+- **SDK drift (gate 1).** `check-sdk-generated.sh DIR` makes zero cargo calls. The following are
+  red:
+  - a one-byte edit to `sdk/assets`'s parameter metadata;
+  - a one-byte edit to its ABI layout;
+  - a `"pan"` -> `"panorama"` generator change written to a fresh directory without refreshing
+    `sdk/assets`;
+  - an artifact directory missing a document.
+
+  A symlinked directory and two arguments each exit 2.
+- **The skip flag** is used once, and it gates only the `parameter-metadata --check` block. The
+  flag alone, the flag twice, the flag after the directory, the flag with a second directory, and
+  the flag with `--self-test-opcodes` or `--source-policy=` each exit 2.
+- **Gates.**
+  - `check-ci-path-routing.py` and `test-ci-path-routing.py` pass (1 min 42 s).
+  - actionlint 1.7.7 is clean on all four workflows.
+  - All 52 hermetic commands of `docs-gates`, `lint` and `gate-self-tests` pass under
+    `python3 -B`, including `check-script-reachability.py` and its tests.
+  - `check-effect-contract.sh` passes with a real release `bench`. Its `bash -x` trace shows no
+    effect-runtime script.
+  - `check-web-audioworklet.sh` passes over the built closure in both forms:
+    - with the flag, it makes one cargo call (`worst_boot_document`);
+    - without the flag, it also runs `parameter-metadata --check`.
+  - `test-web-audioworklet.sh` passes.
+  - The `sdk` job's step passes: headless 285/285 and tarball 11/11. Its only cargo calls are the 4
+    native oracles, which bears out the kept toolchain.
+  - The local `sdk-package.sh check`, with no directory, passes.
