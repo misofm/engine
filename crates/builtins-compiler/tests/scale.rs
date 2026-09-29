@@ -30,7 +30,12 @@ fn builtin_caps() -> BuiltinCompileCaps {
     }
 }
 
+/// Issue #1045: nightly, in release with overflow checks on (`nightly.yml`, `release-budgets`).
+/// Per PR, graph-compiler's `scale.rs` prepares the same 65,537-track session in the debug job and
+/// counts its tails and processors, and `allocation_tracker.rs` holds the one-below refusals at 1
+/// and 4 tracks.
 #[test]
+#[ignore = "65,537-track scale gate; runs nightly"]
 fn prepares_65_537_tracks_or_rejects_only_the_configured_resource() {
     let mut model = parse_session_json(SESSION).expect("fixture");
     let mut template = model.tracks[0].clone();

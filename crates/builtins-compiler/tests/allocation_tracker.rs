@@ -1221,8 +1221,22 @@ fn assert_first_touch_delta_is_bounded(
     );
 }
 
+/// Layout-class equality does not depend on the track count, and one and four tracks reach every
+/// linear container (issue #1045), so the 65,537-track row runs nightly, in
+/// [`phase_two_allocator_layouts_match_the_checked_resource_report_at_65_537_tracks`].
 #[test]
 fn phase_two_allocator_layouts_match_the_checked_resource_report() {
+    assert_phase_two_allocator_layouts_match_the_checked_resource_report(&[1, 4]);
+}
+
+/// Issue #1045: nightly, in release with overflow checks on (`nightly.yml`, `release-budgets`).
+#[test]
+#[ignore = "65,537-track scale gate; runs nightly"]
+fn phase_two_allocator_layouts_match_the_checked_resource_report_at_65_537_tracks() {
+    assert_phase_two_allocator_layouts_match_the_checked_resource_report(&[65_537]);
+}
+
+fn assert_phase_two_allocator_layouts_match_the_checked_resource_report(track_counts: &[u32]) {
     // Excludes every other test in this binary from the process-global tracker for the whole
     // measurement session (reset through snapshot); see `SESSION`.
     let _session_guard = SESSION
@@ -1232,9 +1246,10 @@ fn phase_two_allocator_layouts_match_the_checked_resource_report() {
     // process/thread state once so no measured window ever observes it. Its snapshot is not
     // thrown away: the very first measured combination below repeats the same
     // session/requests/caps, and the two are compared by `assert_first_touch_delta_is_bounded`.
-    let warmup_snapshot = settle_phase_two_first_touch(&session(1), &requests(0), caps());
+    let warmup_snapshot =
+        settle_phase_two_first_touch(&session(track_counts[0]), &requests(0), caps());
     let mut first_touch_delta_checked = false;
-    for track_count in [1, 4, 65_537] {
+    for &track_count in track_counts {
         let session = session(track_count);
         for meter_count in [0, 1, 7] {
             let requests = requests(meter_count);

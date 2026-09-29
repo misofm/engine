@@ -1113,6 +1113,9 @@ NIGHTLY_BUDGET_COMMANDS = [
     'cargo test --locked --release -p host-web --lib -- --ignored --exact tests::maximum_document_dense_invalid_boot_finishes_under_one_second_in_release',
     'cargo test --locked --release -p host-core --test effect_observation -- --ignored --exact observation_cost_classes_are_separated_from_a_computed_scan_in_release',
     'cargo test --locked --release -p host-core --test prepare -- --ignored --exact dense_refusal_diagnostics_finish_under_one_second_in_release',
+    'cargo test --locked --release --config profile.release.overflow-checks=true -p graph-compiler --test scale -- --ignored --exact compiles_and_binds_65_537_tracks_with_builtins',
+    'cargo test --locked --release --config profile.release.overflow-checks=true -p builtins-compiler --features test-support --test scale -- --ignored --exact prepares_65_537_tracks_or_rejects_only_the_configured_resource',
+    'cargo test --locked --release --config profile.release.overflow-checks=true -p builtins-compiler --features test-support --test allocation_tracker -- --ignored --exact phase_two_allocator_layouts_match_the_checked_resource_report_at_65_537_tracks',
 ]
 
 
@@ -1130,7 +1133,7 @@ def nightly_budget_script(root: pathlib.Path) -> str:
 def check_nightly_budgets(root: pathlib.Path) -> None:
     expected = "set -euo pipefail\n" + "\n".join(NIGHTLY_BUDGET_COMMANDS) + "\n"
     require(nightly_budget_script(root) == expected,
-            "nightly: run each of the three exact release budgets once with failure propagation")
+            "nightly: run each exact release budget once with failure propagation")
 
 
 def check(root: pathlib.Path) -> None:
