@@ -320,6 +320,27 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_track_response_track_id_capacity \
   miso_engine_web_v1_track_response_track_id_ptr | sort)
 
+# Issue #1047: the shipped ABI layout document publishes exactly these exports, every one but
+# `memory` (linear memory, not a call). It is read from the artifact, not from the generator's
+# source, and the list above stays independent of the generator, so an export added to one of the
+# module, this list or the generator without the others fails here or at the module check below.
+layout_json="$artifact_dir/miso-engine-v1-abi-layout.json"
+layout_exports=$(python3 -B -c '
+import json, sys
+exports = json.load(open(sys.argv[1], encoding="utf-8"))["exports"]
+assert isinstance(exports, list) and all(isinstance(name, str) for name in exports)
+print("\n".join(exports))
+' "$layout_json" | sort) || {
+  echo "cannot read the published export list from $layout_json" >&2
+  exit 1
+}
+expected_functions=$(grep -vx memory <<<"$expected_exports")
+[[ "$layout_exports" == "$expected_functions" ]] || {
+  echo "the ABI layout document's published exports are not the frozen export set" >&2
+  diff -u <(printf '%s\n' "$expected_functions") <(printf '%s\n' "$layout_exports") >&2 || true
+  exit 1
+}
+
 for module in "$simd"; do
   metadata=$(wasm-objdump -x "$module")
   exports=$(awk '

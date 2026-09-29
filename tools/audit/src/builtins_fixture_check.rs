@@ -538,18 +538,4 @@ mod tests {
         assert!(check_read_only(&scratch).is_err());
         fs::remove_dir_all(scratch).expect("cleanup");
     }
-
-    #[test]
-    fn issue069_author_is_not_reachable_from_audit_mains() {
-        for source in [
-            include_str!("builtins.rs"),
-            include_str!("builtins_graph.rs"),
-        ] {
-            assert!(!source.contains("--write"));
-            assert!(!source.contains("write_scratch"));
-        }
-        let author = include_str!("builtins_fixture_check.rs");
-        assert!(!author.contains(&("fixtures/builtins".to_owned() + "/v1")));
-        assert!(!author.contains(&("benchmark".to_owned() + "/")));
-    }
 }

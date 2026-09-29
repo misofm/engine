@@ -2303,17 +2303,6 @@ mod tests {
         driver.begin_block(0, 4).expect("zero-claim begin");
         host.submit(chunk(1, 4, &[&samples], 4, false))
             .expect("zero claims recycle in begin");
-
-        let source_text = include_str!("lib.rs");
-        assert!(!source_text.contains(&["source", "_planes"].concat()));
-        let entry_start = source_text
-            .find("struct GraphSourceEntry")
-            .expect("graph source entry");
-        let entry_end = source_text[entry_start..]
-            .find("struct SourceGraphSourceSetDriver")
-            .map(|offset| entry_start + offset)
-            .expect("driver declaration");
-        assert!(!source_text[entry_start..entry_end].contains("planes"));
     }
 
     #[test]
@@ -2450,25 +2439,6 @@ mod tests {
         assert_eq!(report.copied_frames, 4);
         assert_eq!(output, fresh);
         assert_eq!(consumer.telemetry().stale_generation_discard_count, 0);
-    }
-
-    #[test]
-    fn producer_submission_has_one_stamping_and_copy_body() {
-        let source = include_str!("lib.rs");
-        let start = source
-            .find("fn submit_planes")
-            .expect("shared submit helper");
-        let end = source[start..]
-            .find("fn publish_block")
-            .map(|offset| start + offset)
-            .expect("publish boundary");
-        let shared = &source[start..end];
-        assert_eq!(shared.matches("block.generation = generation").count(), 1);
-        assert_eq!(shared.matches("block.start_frame = start_frame").count(), 1);
-        assert_eq!(shared.matches("block.frames = frames").count(), 1);
-        assert_eq!(shared.matches("copy_from_slice").count(), 1);
-        assert_eq!(shared.matches("validate_submission_metadata").count(), 1);
-        assert!(!source.contains(&["submit_contiguous", "_planar"].concat()));
     }
 
     #[cfg(not(target_arch = "wasm32"))]

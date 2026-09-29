@@ -79,4 +79,29 @@ gate_scan_forbidden 'marked realtime forbidden-body predicate' \
 # {crates,hosts,tools} tree, of which the realtime module is a part, rather than one of five copies
 # of the same regex over five different root lists.
 
+# Issue #1047 moved this scan here from capi's `ffi_never_forms_a_whole_plan_reference` test. No
+# workflow runs Miri, so it is the only guard of the C ABI's control/render split: the render
+# thread holds `&mut PlanState` while any thread may query the same handle, so the production
+# code of `crates/capi/src/ffi.rs` never forms a reference to the whole `Plan`. It projects the
+# fields it needs with `&raw const`/`&raw mut` (`plan_state`, `plan_error_slot`, `plan_queries`).
+# `&*plan.cast::<HandleHeader>()` borrows only the shared header, `&*plan_state(..)` names another
+# item, and `&(*plan).field` borrows one field, so a projection after the dereference is not a
+# hit. Comment lines and the test module are not production code. The render entry point must be
+# in the scanned region, so a renamed file or a moved test-module marker cannot pass as clean.
+capi_ffi='crates/capi/src/ffi.rs'
+[[ -f "$capi_ffi" ]] || fail "missing $capi_ffi"
+if capi_production="$(awk '
+    previous == "#[cfg(test)]" && $0 == "mod tests {" { exit }
+    { previous = $0 }
+    /^[[:space:]]*\/\// { next }
+    { print FILENAME ":" FNR ":" $0 }
+' "$capi_ffi" 2>&1)"; then :; else rc=$?; printf '%s\n' "$capi_production" >&2; fail "capi production-region extraction failed (awk status $rc)"; fi
+[[ "$capi_production" == *miso_engine_v1_render_f32_planar* ]] ||
+    fail "$capi_ffi has no production render entry point to scan"
+whole_plan="$(gate_scan_text_collect 'whole-plan reference' '&(mut[[:space:]]+)?(\*plan|\(\*plan\))([^[:alnum:]_.]|$)' "$capi_production")" || exit $?
+[[ -z "$whole_plan" ]] || {
+    printf '%s\n' "$whole_plan" >&2
+    fail "the C ABI forms a reference to a whole Plan; project the field with &raw const or &raw mut"
+}
+
 printf 'realtime policy: ok (%s marked regions in %s files)\n' "$marker_count" "$marked_file_count"

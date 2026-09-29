@@ -71,7 +71,7 @@ master plan §5.1 lists. The rest are what those implementations transitively ne
 
 After the edits, `src/vendored/` contains no occurrence of `target_feature`, `core::arch`,
 `std::arch`, `mul_add`, `cfg(`, `unsafe`, `force_eval!` or `select_implementation!`.
-`tests/m3_determinism.rs::m3_no_target_conditional_source` is the gate that keeps it that way.
+Gate M3's structural half in `scripts/check-lane-policy.sh` is the gate that keeps it that way.
 
 ## Re-vendoring
 

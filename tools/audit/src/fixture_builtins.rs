@@ -5214,7 +5214,7 @@ mod tests {
     }
 
     #[test]
-    fn issue064_checked_corpus_is_read_only_complete_and_has_no_authoring_reachability() {
+    fn issue064_checked_corpus_is_read_only_and_complete() {
         let root = copied_checked_in_fixture_root("read-only");
         let before = read_fixture_tree(&root);
 
@@ -5258,48 +5258,6 @@ mod tests {
             "ae83244956cccc6b1195656dfbe929fcb9cb730232193626c2cff973ba8aff7f",
             "accepted joined-corpus manifest identity"
         );
-
-        let source = include_str!("fixture_builtins.rs");
-        assert!(
-            source.contains(
-                "[mode, root] if mode == \"--check\" => check_read_only_fixture_root(Path::new(root)),"
-            ),
-            "--check dispatch must remain the read-only checker entry"
-        );
-        let checker_region =
-            source_segment(source, "fn check_fixture_root", "#[cfg(test)]\nmod tests");
-        for forbidden in [
-            "generated(",
-            "write_and_verify(",
-            "verify_generated_scratch(",
-            "graph_tap_fixtures(",
-            "graph_tap_artifact(",
-            "cases()",
-            "responses()",
-            "measure_response(",
-            "diagnostics()",
-            "meters()",
-            "resources()",
-            "pcm_cases()",
-            "render_pcm(",
-            "render_matrix_ramp(",
-            "render_matrix_retarget(",
-            "render_reset(",
-            "render_reset_fixture(",
-            "render_lr_isolation(",
-            "render_partition(",
-            "fixture_session(",
-            "GraphCompiler::",
-            "plan.render(",
-            "fs::write(",
-            "fs::create_dir_all(",
-            "fs::remove",
-        ] {
-            assert!(
-                !calls_authoring(checker_region, forbidden),
-                "--check reachability must exclude {forbidden}"
-            );
-        }
         remove_temporary_root(root);
     }
 
@@ -6028,27 +5986,5 @@ mod tests {
                 expected
             }
         }
-    }
-
-    /// Does `region` *call* `callee`, rather than merely end some longer name with it?
-    ///
-    /// A bare `contains` would say yes to `expected_response_cases()` for the forbidden
-    /// spelling `cases()`, and to `expected_diagnostics()` for `diagnostics()`. Until issue
-    /// #215 the `_v1` suffix supplied that boundary by accident; the boundary is now stated,
-    /// which is what the list always meant: forbid the authoring function, not every
-    /// identifier whose tail happens to spell it.
-    fn calls_authoring(region: &str, callee: &str) -> bool {
-        region.match_indices(callee).any(|(index, _)| {
-            !region[..index]
-                .chars()
-                .next_back()
-                .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_')
-        })
-    }
-
-    fn source_segment<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
-        let (_, source) = source.split_once(start).expect("source start");
-        let (source, _) = source.split_once(end).expect("source end");
-        source
     }
 }

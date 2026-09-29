@@ -198,4 +198,32 @@ while IFS= read -r dependency; do
     esac
 done <<<"$wide_dependencies"
 
+# Gate M3's structural half (issue #1047 moved it here from crates/math/tests/m3_determinism.rs,
+# because a source scan is repository policy rather than a test): nothing in the vendored libm
+# sources may make one target compute different bits. A target cfg, an architecture intrinsic
+# module, runtime feature detection or the fused multiply-add method is refused on every line; on
+# code lines, so is `unsafe` and the libm macros the vendoring edits removed (`force_eval!`,
+# `select_implementation!`, `read_volatile`), which each provenance header names in a comment.
+# The file floor keeps a moved or emptied directory from passing as a clean scan.
+vendored_root='crates/math/src/vendored'
+vendored_sources_raw="$(gate_find_collect 'vendored math source discovery' "$vendored_root" -maxdepth 1 -name '*.rs' -type f)" || exit $?
+vendored_count="$(gate_count_lines 'vendored math source discovery' "$vendored_sources_raw")" || exit $?
+(( vendored_count >= 30 )) || fail "expected the full vendored math file set under $vendored_root, found $vendored_count files"
+mapfile -t vendored_sources <<<"$vendored_sources_raw"
+if vendored_hits="$(awk '
+    BEGIN {
+        every = split("target_feature|target_arch|core::arch|std::arch|mul_add|is_x86_feature", on_every_line, "|")
+        code = split("unsafe|force_eval!|select_implementation!|read_volatile", on_code_lines, "|")
+    }
+    {
+        for (i = 1; i <= every; i++) if (index($0, on_every_line[i])) print FILENAME ":" FNR ": " on_every_line[i] ": " $0
+        if ($0 ~ /^[[:space:]]*\/\//) next
+        for (i = 1; i <= code; i++) if (index($0, on_code_lines[i])) print FILENAME ":" FNR ": " on_code_lines[i] ": " $0
+    }
+' "${vendored_sources[@]}" 2>&1)"; then :; else rc=$?; printf '%s\n' "$vendored_hits" >&2; fail "vendored math source scan failed (awk status $rc)"; fi
+[[ -z "$vendored_hits" ]] || {
+    printf '%s\n' "$vendored_hits" >&2
+    fail "the vendored math sources must contain no target-conditional, fused or unsafe construct (gate M3)"
+}
+
 printf 'lane policy: ok\n'

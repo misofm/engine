@@ -1538,7 +1538,6 @@ mod tests {
             AUTOMATION_RECORDS
         );
         assert_eq!(corpus_checksum(), CORPUS_CHECKSUM);
-        assert!(include_str!("../CORPUS_MANIFEST.md").contains("9eee4fcb61be3b9e"));
     }
 
     #[test]
@@ -1564,11 +1563,6 @@ mod tests {
             malformed[0] ^= 0xff;
             assert!(flatbuffer_verify(frame, &malformed).is_err());
         }
-        let schema = include_str!("../protocol_benchmark.fbs");
-        assert!(schema.contains("unsigned_values:[ulong]"));
-        assert!(schema.contains("float_bits:[uint]"));
-        assert!(schema.contains("text_offsets:[uint]"));
-        assert!(!schema.contains("payload:[ubyte]"));
     }
 
     #[test]

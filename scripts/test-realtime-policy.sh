@@ -213,9 +213,23 @@ create_fixture() {
         '#![allow(unsafe_code)]' \
         'unsafe fn write_fpcr() {}' \
         >"$root/crates/lane/src/fpenv.rs"
+    # #1047: the C ABI's production code projects plan fields and never borrows the whole plan.
+    # Each allowed shape is here: a header or helper after the dereference, a field projection, a
+    # comment, and the test module, which is not production code.
     printf '%s\n' \
         '#![allow(unsafe_code)]' \
         'unsafe fn capi_boundary() {}' \
+        'pub unsafe extern "C" fn miso_engine_v1_render_f32_planar(plan: *mut Plan) -> u32 {' \
+        '    let _ = unsafe { &*plan.cast::<HandleHeader>() };' \
+        '    let _ = unsafe { &mut *plan_state(plan) };' \
+        '    let _ = unsafe { &(*plan).queries };' \
+        '    // Never `&*plan` or `&mut *plan`: a query may run while render holds the state.' \
+        '    0' \
+        '}' \
+        '#[cfg(test)]' \
+        'mod tests {' \
+        '    fn fixture(plan: *mut Plan) { let _ = unsafe { &*plan }; }' \
+        '}' \
         >"$root/crates/capi/src/ffi.rs"
     printf '%s\n' \
         '#![allow(unsafe_code)]' \
@@ -293,6 +307,7 @@ drop_first_marked_region() {
 }
 
 alloc_class='marked realtime forbidden-body predicate'
+whole_plan_class='the C ABI forms a reference to a whole Plan'
 unsafe_class='unsafe code exists outside the issue-approved ownership/audit files'
 
 valid="$scratch_root/valid"
@@ -391,6 +406,21 @@ expect_failure marked-region-count-floor 'expected at least forty-one marked rea
 expect_failure unmatched-markers-outside-root 'unmatched realtime policy markers' \
     'sed -i "/REALTIME_POLICY_END/d" "$root/hosts/host-web/src/lib.rs"'
 
+# #1047 (moved from capi's `ffi_never_forms_a_whole_plan_reference`): each whole-plan borrow form
+# in a production FFI function is refused, and the scan cannot pass by losing its region.
+for form in '\&*plan' '\&mut *plan' '\&(*plan)' '\&mut (*plan)' '\&mut  *plan'; do
+    expect_failure "whole-plan-${form//[^a-z]/_}" "$whole_plan_class" \
+        "sed -i 's|^    0\$|    let _ = unsafe { $form };\n    0|' \"\$root/crates/capi/src/ffi.rs\""
+done
+expect_failure whole-plan-at-line-end "$whole_plan_class" \
+    'sed -i "s|^    0\$|    let whole = unsafe {\n        \&*plan\n    };\n    0|" "$root/crates/capi/src/ffi.rs"'
+expect_failure whole-plan-after-a-comment-line "$whole_plan_class" \
+    'sed -i "s|^    0\$|    // a comment line above is not an exemption\n    let _ = unsafe { \&*plan };\n    0|" "$root/crates/capi/src/ffi.rs"'
+expect_failure capi-ffi-missing 'missing crates/capi/src/ffi.rs' \
+    'rm -f "$root/crates/capi/src/ffi.rs"'
+expect_failure capi-render-entry-only-in-tests 'has no production render entry point to scan' \
+    'sed -i "s/^pub unsafe extern \"C\" fn miso_engine_v1_render_f32_planar/fn moved_render/; s/^mod tests {$/mod tests {\n    fn miso_engine_v1_render_f32_planar() {}/" "$root/crates/capi/src/ffi.rs"'
+
 # Selective executable-tool failures prove late statuses are observed after useful output. Each
 # shim delegates every unrelated invocation to the physical tool.
 expect_tool_error() {
@@ -412,6 +442,8 @@ case "$INJECT_MODE:$TOOL_NAME" in
   final-predicate:rg) [[ "$joined" == *'Vec::'* ]] && hit=1 ;;
   marker-sort:sort) hit=1 ;;
   body-read:awk) [[ "$joined" == *runtime.rs* ]] && hit=1 ;;
+  capi-region:awk) [[ "$joined" == *capi/src/ffi.rs* ]] && hit=1 ;;
+  whole-plan-scan:rg) [[ "$joined" == *'plan|'* ]] && hit=1 ;;
 esac
 if (( hit )); then
     if [[ "$PARTIAL" == 1 ]]; then "$REAL_TOOL" "$@" || true; fi
@@ -437,6 +469,8 @@ for partial in 0 1; do
     expect_tool_error "end-count-$partial" rg end-count 'END marker count failed' "$partial"
     expect_tool_error "body-read-$partial" awk body-read 'realtime body extraction failed' "$partial"
     expect_tool_error "final-predicate-$partial" rg final-predicate 'marked realtime forbidden-body predicate' "$partial"
+    expect_tool_error "capi-region-$partial" awk capi-region 'capi production-region extraction failed' "$partial"
+    expect_tool_error "whole-plan-scan-$partial" rg whole-plan-scan 'whole-plan reference scan errored' "$partial"
 done
 
 # Counter-mutants must fail at this suite's unexpected-success assertion. These disposable
