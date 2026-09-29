@@ -196,7 +196,7 @@ features; "nightly" is the `release-budgets` command.
 | 1045-1 | 964-11's ceiling, `graph.track.limit` above 65,536 tracks, in `compile_graph` | RED, `:91` (the refusal's diagnostics) | RED |
 | 1045-2 | a `u16` track counter in `compile_graph`'s node loop | RED, `:91`: `attempt to add with overflow` | RED, the same panic. Release without overflow checks: GREEN (it wraps) |
 | 1045-3 | a truncating `u16` track index: a track that does not fit gets no nodes | RED, `:91` (accepted under the one-below cap). The draft's `maximum_nodes = 1`: GREEN | RED, wrong node count |
-| 1045-4 | a ceiling in bind (`into_bound`, more than 65,537 external nodes) | GREEN: nothing per PR binds at this size | RED |
+| 1045-4 | a ceiling in bind (`into_bound`, more than 65,537 external nodes) | GREEN: nothing per PR binds through `into_bound` at this size. (Corrected in attempt 2: a ceiling in graph bind or render is now caught per PR by a hand-built plan; this wrapper's is not.) | RED |
 | 1045-5 | #962 fix 1 reverted (linear `contains` per bank member) | GREEN | RED by the bound: 451 s against 60 s (unmutated 28.6 s, same load) |
 | 1045-6 | a `u16` track counter in builtin preparation's preflight | RED, `:91`: overflow panic | RED, builtins `scale` |
 | 1045-7 | a builtin ceiling above 65,536 tracks, disguised as `builtin.resource.limit` | RED, `:91` | RED, builtins `scale` |
@@ -426,3 +426,126 @@ condition. The fix is small and stays inside the authorized paths.
   (V8).
 - **The recommended synthetic test:** a ceiling in bind or render above 65,535 track inputs, which
   nothing else per PR binds.
+
+## Attempt 2 evidence
+
+Terra, 2026-09-29, on `codex/1045-scale-tests-nightly` after merging `main` at `a8955ad4`
+(batch 3). Same host and hygiene as attempt 1; the load was 45-60 throughout.
+
+### The merge
+
+`main` merged cleanly except for `nightly.yml`'s `math-sweeps` job, as Sol predicted. I kept
+main's job, which has no wasm guest step, and added #1045's session sweep step after F1 with
+the 25-minute timeout. `release-budgets`, `failure-notice` and the routing scripts merged
+without conflicts. I left the job's name, `math exhaustive sweeps`, as main has it (Sol's
+finding 4, cosmetic).
+
+### What changed
+
+- **`a_hand_built_65_537_input_plan_binds_and_renders_every_track`**, a new per-PR test in
+  `graph-compiler/tests/scale.rs`, as Sol asked:
+  - It builds a plan through the public `PreparedGraphPlan::new`. The plan has 65,537
+    `TrackStage::Input` nodes, each routed through its own unity route to one output.
+  - It binds the plan with `PreparedGraphPlan::bind` and renders one 16-frame block.
+  - Each input's processor writes 1.0 on the left and 2.0 on the right. The test asserts that
+    every output word is exactly 65,537 and 131,074, so the output counts the tracks that
+    reached it. Every partial sum is an integer below 2^24, so the order of summation cannot
+    change the result.
+  - A ceiling in bind or render therefore refuses, and a narrowed index that drops tracks
+    changes the sum.
+- **`:91`** now asserts that the refusal is exactly one diagnostic,
+  `[("graph.resource.limit", "$.graph_compile_caps")]`.
+- **`MUTATIONS.md`**:
+  - rows 1045-8 to 1045-11 are new;
+  - 1045-4 is corrected: a ceiling in the builtins wrapper's `into_bound` stays nightly-only,
+    and a ceiling in graph bind is now caught per PR;
+  - 1045-1 and 1045-3 were re-run against the exact assertion.
+- **This spec:** the attempt-1 evidence's 1045-4 row is corrected the same way.
+
+### Plants (the brief's proof)
+
+I applied each plant to a scratch copy of this tree and ran
+`cargo test -p graph-compiler --test scale`. That is the per-PR binary, built in debug with
+test-debug-a's features. I restored the tree between plants, and the unmutated tree was run
+before P5, before P6 and at the end. All three unmutated runs were GREEN. The plant code for
+P3a, P5, P5b and P6 is Sol's.
+
+| # | planted defect | per PR |
+|---|---|---|
+| P5 (1045-9) | graph bind refuses more than 65,536 bindings | **RED**, new test: `65,537-input bind: graph.plan.binding`. GREEN once reverted |
+| P6 (1045-10) | render refuses more than 65,535 runtime units | **RED**, new test: `the 65,537-input plan renders: InvalidEnvelope`. GREEN once reverted |
+| P3a (1045-8) | `graph.resource.limit` at `$.tracks` above 65,535 tracks, i.e. the node cap's code at another path | **RED**, `:91`: it expects the one pair and gets `[..., ("graph.resource.limit", "$.tracks")]` |
+| 1045-11 | render walks its active units through a `u16` index | **RED**, new test: the output is `[NaN, NaN]`, never written |
+| 1045-1 | 964-11's `graph.track.limit` | RED, `:91`: it gets `[("graph.track.limit", "$.tracks")]` |
+| 1045-3 | a truncating `u16` track index in graph compile | RED, `:91`: the compile is accepted under the one-below cap |
+| P5b (1045-4) | the builtins wrapper `into_bound` refuses more than 65,536 bindings | GREEN, as expected: it is in the residual set below |
+
+### Gates re-run on the merge
+
+- **Build checks.** `cargo fmt --all --check`, `cargo check --workspace --all-targets
+  --all-features` and `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+  all pass with no warnings.
+- **The three crates** (graph-compiler, builtins-compiler and session, with test-debug-a's
+  features), run under the timing lock at load 50-57:
+
+  | profile | wall | CPU | tests |
+  |---|---:|---:|---|
+  | dev | 120.3 s | 252.9 s | 263 passed, 7 ignored |
+  | release | 15.0 s | 17.7 s | 263 passed, 7 ignored |
+
+  - Against attempt 1 there is one more passing test (the new one) and one more ignored test.
+    The extra ignored test is #1049's `the_full_meter_pass_...`, which arrived with `main`.
+  - Wall times are higher than attempt 1's (72.0 s dev) because the host load was 50-57, not 20.
+- **The new test's time.** Debug, alone: 5.6 s and 5.3 s (5.0-5.3 s CPU, 240 MB) at load 46-53.
+  In release it is under a second.
+  - It adds no wall time to the `scale` binary, because it runs in parallel with `:91`. At the
+    same load, the whole binary took 24.75 s and `:91` alone took 24.94 s.
+  - Sol measured 2.3 s for his version. Mine carries a route per track, so its plan has twice
+    the nodes, but the cost is CPU in parallel with `:91`, not wall time.
+- **Routing.** `check-ci-path-routing.py` and `test-ci-path-routing.py` (`python3 -B`) pass.
+  actionlint 1.7.7 is clean on `nightly.yml` and `qualification.yml`.
+- **Policy scripts.** 52 pass, each `scripts/check-*` run with `python3 -B` for the Python ones,
+  plus `test-workspace-policy.sh`:
+  - the scripts that need an argument ran with `--self-test`: abi-layout, parameter-metadata,
+    listening-033, listening-111, the AudioWorklet call graph and #1059's new
+    `check-scalar-oracle-absent.py`;
+  - the V8 spill check ran with `--check-toolchain`;
+  - `check-workspace-policy.sh`, which includes #1052's source-scrape lint, passes;
+  - `check-sdk-types.sh` was not run, because `sdk/node_modules` is not installed here;
+  - `check-web-boot-budget.mjs` was not run, because it needs a built module.
+- **Nightly tests.** I did not re-run `:160`, builtins `scale` or the 65,537-track allocation
+  row: attempt 2 does not change them. Sol ran all three on the merged tree, and `:160` took
+  19.5 s against its 60 s bound.
+- **Mutation passes and the #966/#970 reverts** were not re-run. `bank_levels.rs`,
+  `collapse_arming.rs` and the product code are unchanged, and the new test only adds catches.
+
+### Test value
+
+- **The new test** catches a ceiling, or a narrowed index, in graph bind or render above
+  65,535 track inputs (P5, P6, 1045-11). Nothing else per PR binds at this size.
+- **`:91`'s exact refusal** catches a ceiling that reuses the node cap's code at another path
+  (P3a).
+
+### Remaining risk (replaces attempt 1's list)
+
+These are caught nightly only, at most a day late, under amendment 5. Each needs the
+unconstrained compile, which takes 28-40 s in debug, plus 13-17 s for bind:
+
+- a ceiling that copies the node cap's code **and** path (P3b);
+- a ceiling in the builtins wrapper `into_bound` (P5b, 1045-4);
+- a ceiling in bank attachment;
+- #962's quadratic compile and bind (1045-5, caught by the 60 s bound);
+- an accounting count that is exact only below 65,536 tracks (A2, caught in the nightly
+  65,537-track allocation row).
+
+Two gaps sit outside this issue:
+
+- **Low, pre-existing (Sol's finding 3):** no test parses a document above 65,535 tracks
+  (P1). `descriptive_scale.rs` is ignored and nothing schedules it. It needs its own issue.
+- **#1002's memory claim** is still unguarded (amendment 4).
+
+### Lines
+
+Attempt 2 against the merge commit: `graph-compiler/tests/scale.rs` +210/−12,
+`MUTATIONS.md` +16/−5, and this spec. The whole branch against `a8955ad4`: code, workflow and
+scripts +301/−54; with `MUTATIONS.md` and this spec, +632/−54 before this section.

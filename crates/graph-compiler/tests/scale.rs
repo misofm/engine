@@ -2,8 +2,14 @@
 
 use builtins_compiler::{BuiltinCompileCaps, prepare_session_builtins};
 use effect_compiler::EffectPreparedSession;
-use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
-use graph::{GraphCompileCaps, GraphNodeBinding, GraphRuntimeBindings};
+use effect_contract::{LatencySamples, TailSamples};
+use engine::realtime::{PlanarBufferMut, RenderEnvelope, RenderError, RenderIo, RenderTime};
+use graph::{
+    DependencyLevel, GraphBindingBlock, GraphCompileCaps, GraphEdge, GraphEdgeId, GraphNode,
+    GraphNodeBinding, GraphNodeId, GraphPortId, GraphPortKind, GraphResourceEstimate,
+    GraphRuntimeBindings, GraphRuntimeProcessor, GraphSpec, PreparedGraphPlan,
+    PreparedGraphPlanParts, PreparedRoute, RouteTransform, StableGraphId, TrackStage,
+};
 use graph_compiler::Backend;
 use graph_compiler::{GraphBuiltinsCompileRequest, GraphCompiler};
 use session::{
@@ -92,10 +98,11 @@ fn builtin_caps() -> BuiltinCompileCaps {
 ///
 /// Issue #1045: this is the per-PR half, in the debug job with overflow checks on. The node cap
 /// sits one below the graph this session lowers to, so the refusal is also a count of that graph
-/// at 65,537 tracks: a compiled track ceiling adds a diagnostic other than
-/// `graph.resource.limit`, and a narrowed track index that drops any track's nodes fits under the
-/// cap and is no longer refused. The unconstrained compile, the bind and the render run nightly,
-/// in release under a wall-clock bound, in [`compiles_and_binds_65_537_tracks_with_builtins`].
+/// at 65,537 tracks: a compiled track ceiling adds a second diagnostic, whatever its code, and a
+/// narrowed track index that drops any track's nodes fits under the cap and is no longer refused.
+/// Bind and render at this size are [`a_hand_built_65_537_input_plan_binds_and_renders_every_track`]'s;
+/// the unconstrained compile runs nightly, in release under a wall-clock bound, in
+/// [`compiles_and_binds_65_537_tracks_with_builtins`].
 #[test]
 fn compiles_65_537_tracks_or_rejects_only_a_configured_resource() {
     let session = scale_session();
@@ -116,12 +123,16 @@ fn compiles_65_537_tracks_or_rejects_only_a_configured_resource() {
     })
     .err()
     .expect("a node cap one below the session's graph rejects");
-    assert!(
-        failure
-            .diagnostics
-            .diagnostics()
-            .iter()
-            .all(|diagnostic| diagnostic.code == "graph.resource.limit")
+    let diagnostics: Vec<_> = failure
+        .diagnostics
+        .diagnostics()
+        .iter()
+        .map(|diagnostic| (diagnostic.code, diagnostic.path.as_str()))
+        .collect();
+    assert_eq!(
+        diagnostics,
+        [("graph.resource.limit", "$.graph_compile_caps")],
+        "the node cap is the only refusal"
     );
     assert_eq!(
         failure.builtins.tails().count(),
@@ -132,6 +143,193 @@ fn compiles_65_537_tracks_or_rejects_only_a_configured_resource() {
         failure.builtins.processor_count(),
         3 * TRACKS as usize,
         "every track's three builtin processors were prepared"
+    );
+}
+
+/// A track input that writes a constant block: every word of it, as a node the graph feeds nothing
+/// must (`GraphRuntimeProcessor::process`).
+struct Constant;
+
+impl GraphRuntimeProcessor for Constant {
+    fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+        block.left.fill(1.0);
+        block.right.fill(2.0);
+        Ok(())
+    }
+}
+
+/// Issue #1045: bind and render above 65,536 track inputs, per PR.
+///
+/// The session compile above refuses before anything binds, and the full compile and bind run
+/// nightly, so this plan is built by hand, through the public [`PreparedGraphPlan::new`]:
+/// [`TRACKS`] track inputs, each routed through its own unity route to one output. Every input
+/// writes 1.0 left and 2.0 right, so the output is the exact count of the tracks that reached it
+/// (every partial sum is an integer below 2^24). A ceiling in bind or render refuses, and a
+/// narrowed track or unit index drops tracks from the sum. It builds, binds and renders in a few
+/// seconds in debug, beside the compile above.
+#[test]
+fn a_hand_built_65_537_input_plan_binds_and_renders_every_track() {
+    const FRAMES: u32 = 16;
+    let envelope = RenderEnvelope {
+        sample_rate: engine::SampleRateHz(48_000),
+        quantum: engine::QuantumFrames(FRAMES),
+        output_channels: core::num::NonZeroUsize::new(2).expect("stereo"),
+    };
+    let id = |text: String| StableGraphId::parse(&text).expect("generated ID");
+    let mut inputs: Vec<_> = (0..TRACKS)
+        .map(|index| GraphNodeId::TrackStage {
+            track_id: id(format!("track-{index}")),
+            stage: TrackStage::Input,
+        })
+        .collect();
+    let route_ids: Vec<_> = (0..TRACKS)
+        .map(|index| id(format!("route-{index}")))
+        .collect();
+    let mut routes: Vec<_> = route_ids
+        .iter()
+        .map(|route_id| GraphNodeId::Route {
+            route_id: route_id.clone(),
+        })
+        .collect();
+    let output = GraphNodeId::Output {
+        output_id: id("main".to_owned()),
+    };
+    let port = |node: &GraphNodeId, kind| GraphPortId {
+        node: node.clone(),
+        kind,
+        effect_port: None,
+    };
+    let mut edges = Vec::with_capacity(2 * TRACKS as usize);
+    for ((input, route), route_id) in inputs.iter().zip(&routes).zip(&route_ids) {
+        edges.push(GraphEdge {
+            id: GraphEdgeId::RouteSource {
+                route_id: route_id.clone(),
+            },
+            source: port(input, GraphPortKind::MainOutput),
+            destination: port(route, GraphPortKind::MainInput),
+            path: "$.scale".to_owned(),
+        });
+        edges.push(GraphEdge {
+            id: GraphEdgeId::RouteDestination {
+                route_id: route_id.clone(),
+            },
+            source: port(route, GraphPortKind::MainOutput),
+            destination: port(&output, GraphPortKind::MainInput),
+            path: "$.scale".to_owned(),
+        });
+    }
+    edges.sort_by(|left, right| left.id.cmp(&right.id));
+    inputs.sort();
+    routes.sort();
+    let levels = [inputs.clone(), routes.clone(), vec![output.clone()]];
+    let schedule: Vec<_> = levels.iter().flatten().cloned().collect();
+    let mut nodes: Vec<_> = schedule
+        .iter()
+        .map(|node| GraphNode {
+            id: node.clone(),
+            latency: LatencySamples(0),
+            tail: TailSamples::Finite(0),
+        })
+        .collect();
+    nodes.sort_by(|left, right| left.id.cmp(&right.id));
+    let mut required = inputs.clone();
+    required.push(output.clone());
+    let plan = PreparedGraphPlan::new(PreparedGraphPlanParts {
+        plan_id: 1045,
+        spec: GraphSpec {
+            nodes,
+            ports: Vec::new(),
+            edges,
+        },
+        sequential_schedule: schedule,
+        dependency_levels: levels
+            .into_iter()
+            .enumerate()
+            .map(|(level, nodes)| DependencyLevel {
+                level: level as u64,
+                nodes,
+            })
+            .collect(),
+        route_timings: Vec::new(),
+        inserted_delays: Vec::new(),
+        buffer_assignments: Vec::new(),
+        estimate: GraphResourceEstimate {
+            logical_nodes: 0,
+            materialized_nodes: 0,
+            edges: 0,
+            schedule_items: 0,
+            dependency_levels: 0,
+            reductions: 0,
+            routes: 0,
+            effects: 0,
+            audio_buffer_samples: 0,
+            total_delay_samples: 0,
+            delay_bytes: 0,
+            graph_metadata_bytes: 0,
+            declared_effect_bytes: 0,
+            effect_bank_count: 0,
+            effect_bank_scratch_bytes: 0,
+            effect_bank_runtime_buffer_bytes: 0,
+            effect_bank_metadata_bytes: 0,
+            builtin_bank_bytes: 0,
+            builtin_bank_scratch_bytes: 0,
+            builtin_bank_count: 0,
+            largest_allocation_bytes: 0,
+            incremental_plan_bytes: 0,
+            session_plus_plan_bytes: 0,
+        },
+        envelope,
+        required_bindings: required,
+        routes: routes
+            .iter()
+            .map(|node| PreparedRoute {
+                node: node.clone(),
+                transform: RouteTransform {
+                    gain: 1.0,
+                    ll: 1.0,
+                    lr: 0.0,
+                    rl: 0.0,
+                    rr: 1.0,
+                },
+            })
+            .collect(),
+        track_delays: Vec::new(),
+        effects: Vec::new(),
+        effect_controls: Vec::new(),
+        effect_observations: Vec::new(),
+        banks: Vec::new(),
+        builtin_banks: Vec::new(),
+        observers: Vec::new(),
+    });
+    let mut bindings: Vec<_> = inputs
+        .into_iter()
+        .map(|node| GraphNodeBinding::new(node, Box::new(Constant)))
+        .collect();
+    bindings.push(GraphNodeBinding::identity(output));
+    assert_eq!(bindings.len(), TRACKS as usize + 1);
+    let mut bound = plan
+        .bind(GraphRuntimeBindings {
+            envelope,
+            nodes: bindings,
+            observers: Vec::new(),
+        })
+        .unwrap_or_else(|failure| panic!("65,537-input bind: {}", failure.code));
+    let frames = FRAMES as usize;
+    let mut pcm = vec![f32::NAN; frames * 2];
+    bound
+        .render(
+            RenderIo {
+                output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames).expect("output"),
+            },
+            RenderTime { absolute_sample: 0 },
+        )
+        .expect("the 65,537-input plan renders");
+    let tracks = TRACKS as f32;
+    assert!(
+        pcm[..frames].iter().all(|word| *word == tracks)
+            && pcm[frames..].iter().all(|word| *word == 2.0 * tracks),
+        "every track reaches the output: {:?}",
+        &pcm[..2]
     );
 }
 
