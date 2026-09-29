@@ -18,7 +18,8 @@ Canonical output is defined by the schema walk, not generic map order, RFC 8785/
 serializer. It is UTF-8 without BOM, uses LF and two-space indentation, has no tabs or trailing
 whitespace, and ends in exactly one LF. Object fields use `": "` and schema-declared order.
 Order-insensitive entity arrays sort by stable ID and effect parameters by `(parameter_id,
-channel)`; rack effects and automation segments retain declared order. Strings emit `\"`, `\\`,
+channel)`; console slots, a track's console entries, rack effects and automation segments retain
+declared order. Strings emit `\"`, `\\`,
 `\b`, `\t`, `\n`, `\f`, and `\r`; other C0/C1 controls use uppercase four-digit `\uXXXX`.
 Solidus and all other Unicode scalars, including U+2028, U+2029 and non-BMP scalars, emit directly.
 
@@ -33,14 +34,15 @@ refuse.
 
 The schema requires the root keys, in canonical order,
 `schema_version`, `session_id`, `revision`, `sample_rate_hz`, `quantum_frames`, `render_profile`,
-`output_profile`, `sources`, `tracks`, `submixes`, `outputs`, `routes`, and `automation`. Every
+`output_profile`, `sources`, `console`, `tracks`, `submixes`, `outputs`, `routes`, and `automation`. Every
 object rejects unknown keys and every field is explicit, including empty arrays and
 `"sidechain": { "kind": "none" }`. `quantum_frames` must be nonzero. Queue depth, source-ring size,
 and memory budget are host policy and are not session-document fields.
 
 Stable IDs use `[a-z][a-z0-9._-]{0,126}`. Sources have their own unique ID namespace. Tracks,
-submixes, and outputs share the graph-entity namespace; routes, automations, rack-local effects,
-and `(parameter_id, channel)` pairs are unique in their corresponding scopes. Canonical entity
+submixes, and outputs share the graph-entity namespace; routes, automations, console slots (across
+both sections), a track's inserts, and `(parameter_id, channel)` pairs are unique in their
+corresponding scopes. Canonical entity
 sets sort by ID, effect parameters sort by `(parameter_id, channel)`, and rack effects plus
 automation segments preserve declared order. Canonical text uses LF, exactly one final newline,
 canonical string escapes, and finite `f32` spellings that preserve exact bits through both direct
@@ -76,11 +78,66 @@ must prove rate/channels/depth/frames against the declaration before publication
 PCM preimage and content identity contract is [STEM_IDENTITY_V1.md](STEM_IDENTITY_V1.md).
 
 V1 output is exactly two planar `f32` channels, matching its explicit 2x2 matrices. A track maps
-independent left and right source channels and declares independent builtins, fader/mute values,
-ordered `simd1`/`dynamic`/`simd2` racks, and either a smoothed pan pair or smoothed 2x2 matrix.
+independent left and right source channels and declares, in canonical order, independent
+`builtins`, its `console` entries, its ordered `inserts`, fader/mute values, and either a smoothed
+pan pair or smoothed 2x2 matrix.
 
-An automation target's `rack` is one of four tokens: the three effect racks `simd1`, `dynamic`,
-`simd2`, and -- since issue #178, ruled by #210's D2 -- `builtins`, the strip's own fixed section.
+## Session console and inserts (owner decision 12)
+
+The session declares its console once, at the root, between `sources` and `tracks`:
+`"console": { "pre_insert": [...], "post_insert": [...] }`. Each slot is exactly
+`{ slot, identity, quality, link_mode }`: a stable `slot` ID unique across **both** sections
+(a console address names the slot, not its section), a native `identity`, and the quality and
+link mode every track runs it at. A console slot takes no sidechain -- a keyed effect is an insert
+-- and carries no per-track `bypass` or `params`; either key refuses there as
+`schema.unknown_field`. A third-party (`cid`) identity refuses as `console.slot_not_native` at the
+slot's `identity`. Either section may be empty, and an empty section costs nothing.
+
+Every track carries every slot: its `console` array holds exactly one `{ slot, bypass, params }`
+entry per slot, in the session's slot order (`pre_insert`, then `post_insert`). The entry carries
+only that track's knobs; `id`, `identity`, `quality`, `link_mode` and `sidechain` refuse there as
+`schema.unknown_field`. An entry naming an undeclared slot refuses as `reference.missing_entity`,
+a repeated one as `id.duplicate`, one out of slot order as `console.entry_order` (each at the
+entry's `slot`), and a track without an entry for a declared slot as `console.entry_missing` (at
+the track's `console`). Entry `params` follow the effect-parameter rules and canonicalize by
+`(parameter_id, channel)`.
+
+A track's `inserts` is `{ "effects": [...] }`, the ordered per-track effects between the two
+console sections, with exactly the retired `dynamic` rack's semantics: full effect declarations,
+sidechains included. It may be empty.
+
+The chain is `input -> input section -> console.pre_insert -> inserts -> console.post_insert ->
+fader/mute -> pan/matrix -> routes`.
+
+**Eligibility.** A console slot must be one of the six effects that always bank:
+`miso.parametric-eq`, `miso.compressor`, `miso.gate-expander`, `miso.soft-clip`,
+`miso.transient-shaper` and `miso.true-peak-limiter`. The delay never banks, and the multiband
+compressor is excluded until #1069 closes. The schema checks the identity's syntax only; the list
+is enforced where native identities resolve, by effect preparation, which refuses any other slot
+with `console.slot.ineligible_effect` at `$.console.<section>[slot=<id>].identity`.
+
+**Class A by lowering.** Internally, `pre_insert` lowers to the graph's first rack
+(`RackId::Simd1`), a track's `inserts` to the second (`Dynamic`) and `post_insert` to the third
+(`Simd2`). Each console entry lowers to an ordinary effect whose ID is the slot, whose identity,
+quality and link mode are the slot's, whose bypass and params are the track's, and whose sidechain
+is `none` (`SessionModel::lower_track`). A session equivalent to a pre-decision-12 one therefore
+compiles to the identical graph, including the sealed `MISO-GRAPH-V1` canonical text, and renders
+the identical bits. The internal names `RackId`, `TrackStage`, `MeterTap` and `RackLocation` are
+unchanged.
+
+**Retired, on the #1063 precedent.** The per-track `simd1`, `dynamic` and `simd2` keys are gone:
+each refuses as `schema.unknown_field` at the track, never read as its successor. The session
+model's field registry keeps every ID: track field 7 is now `inserts` (was `dynamic`), fields 6
+(`simd1`) and 8 (`simd2`) are retired and never reallocated, and `console` is appended as root
+field 15 and track field 11, with registries of its own for the slot declaration (`slot` 1,
+`identity` 2, `quality` 3, `link_mode` 4) and the track entry (`slot` 1, `bypass` 2, `params` 3).
+
+An automation target's `rack` is one of three tokens, with explicit wire codes: `inserts` (2,
+the retired `dynamic` rack's code), `builtins` (4) and `console` (5). Codes 1 (`simd1`) and 3
+(`simd2`) are retired and refused, never reallocated, and the retired spellings are unknown
+tokens. `console` addresses a slot by `effect_id: <slot>` in either section; `inserts` addresses a
+track's insert by its ID. `builtins`, since issue #178 (ruled by #210's D2), is the strip's own
+fixed section.
 The strip is a chassis rather than a rack of instances, so it has no `effect_id` to identify; the
 key is required all the same (V1 has no optional fields) and carries the fixed validated literal
 `"strip"`. Its `parameter_id` is a builtin parameter ABI id, restricted to the rows that declare
@@ -92,8 +149,8 @@ rows. The prepared-only `delay_samples` (11) remains refused. The seven per-lane
 rows accept `left`, `right` or `both`; the four shared matrix coefficients accept
 only `both`.
 
-**The automation table is consumed by nothing today.** No lowering reads it, for the strip or for
-any of the three effect racks: a valid target is valid-and-inert syntax that authors, round-trips
+**The automation table is consumed by nothing today.** No lowering reads it, for the strip, a
+console slot or an insert: a valid target is valid-and-inert syntax that authors, round-trips
 and renders nothing. Extending the vocabulary unblocks authoring and the SDK's builder. Rendering
 the stored automation table, builtin targets included, identically on every platform is owned by
 issue #1058 (research first); #140, which once gated it, was descoped
@@ -165,8 +222,11 @@ exactly `miso.compressor` and `miso.gate-expander` declare an optional `sidechai
 now resolves `portId` against that table and refuses a misspelling, a non-sidechain port and a
 sidechain on an effect that declares none, each naming the legal ports, while the boot-time
 refusal remains what a hand-written document meets. The only track taps are `input`,
-`post_input_builtins`, `post_simd1`, `post_dynamic`, `post_simd2_pre_fader`, `post_fader`, and
-`post_matrix`.
+`post_input`, `insert_send` (after `console.pre_insert`), `insert_return` (after the inserts),
+`pre_fader` (after `console.post_insert`), `post_fader`, and `post_pan`, with wire codes 1-7 in
+that order. Decision 12 renamed them in place and moved no position or code; the retired spellings
+`post_input_builtins`, `post_simd1`, `post_dynamic`, `post_simd2_pre_fader` and `post_matrix` are
+unknown tokens and refuse with `schema.invalid_enum`.
 
 Issue 004 owns structural validity, ID syntax/uniqueness, references whose declaration role is
 already represented by this schema, finite/`f32`/unit-local ranges, source identity/shape bounds,

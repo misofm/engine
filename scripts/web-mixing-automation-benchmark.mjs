@@ -133,13 +133,29 @@ const documentBytes = new TextEncoder().encode(
 const sourceId = new TextEncoder().encode(fixture.sources[0].id);
 
 // Each base is the value the booted document holds, as the native row reads it from the model.
-const RACKS = ["simd1", "dynamic", "simd2"];
+// Decision 12: the control table addresses the lowered racks -- `0` the console's `pre_insert`
+// slots, `1` the track's inserts, `2` the `post_insert` slots -- each indexed within its section,
+// until #1096 (S1c) gives the record a console rack byte. A console slot's effect is declared once
+// on the session and its knobs are the track's entry, in slot order.
+function loweredSlot(document, track, rack, index) {
+  if (rack === 1) {
+    const effect = track.inserts.effects[index];
+    return { id: effect.id, effect_id: effect.identity.effect_id, params: effect.params };
+  }
+  const section = rack === 0 ? document.console.pre_insert : document.console.post_insert;
+  const offset = rack === 0 ? 0 : document.console.pre_insert.length;
+  const slot = section[index];
+  const entry = track.console[offset + index];
+  assert.equal(entry.slot, slot.slot, `${track.id}: console entries follow the slot order`);
+  return { id: slot.slot, effect_id: slot.identity.effect_id, params: entry.params };
+}
 for (const control of table.controls) {
   const track = fixture.tracks[control.track_index];
   assert.equal(track.id, control.track_id, `${control.track_id}: track index`);
-  const slot = track[RACKS[control.rack]].effects[control.effect_index];
+  assert.ok([0, 1, 2].includes(control.rack), `${control.track_id}: a lowered rack`);
+  const slot = loweredSlot(fixture, track, control.rack, control.effect_index);
   assert.equal(slot.id, control.slot_id, `${control.track_id}: slot`);
-  assert.equal(slot.identity.effect_id, control.effect, `${control.track_id}: effect`);
+  assert.equal(slot.effect_id, control.effect, `${control.track_id}: effect`);
   const held = slot.params.filter((param) => param.parameter_id === control.parameter_id);
   assert.ok(held.length > 0, `${control.track_id}: the document holds the parameter`);
   for (const param of held) {

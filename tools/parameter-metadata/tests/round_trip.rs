@@ -269,7 +269,7 @@ fn parametric_eq_catalog_preserves_old_rows_and_appends_prepared_cuts() {
     }
 }
 
-/// A one-track session whose dynamic rack holds every launch effect at its declared defaults.
+/// A one-track session whose inserts hold every launch effect at its declared defaults.
 fn session_with_every_effect(effects: &[&str]) -> String {
     let mut rack = String::from("[");
     for (index, id) in effects.iter().enumerate() {
@@ -285,11 +285,12 @@ fn session_with_every_effect(effects: &[&str]) -> String {
         r#"{{"schema_version":1,"session_id":"metadata-round-trip","revision":"1","sample_rate_hz":48000,"quantum_frames":128,
 "render_profile":{{"id":"native","mode":"single_thread"}},"output_profile":{{"id":"main","channels":2,"sample_format":"f32_planar"}},
 "sources":[{{"id":"s","content":"blake3:0000000000000000000000000000000000000000000000000000000000000000","channels":2,"bit_depth":"32f","frames":"256"}}],
+"console":{{"pre_insert":[],"post_insert":[]}},
 "tracks":[{{"id":"t","source_id":"s","left_source_channel":0,"right_source_channel":1,
 "builtins":{{"left":{{"polarity_invert":false,"trim_db":0.0,"hpf_hz":0.0,"lpf_hz":0.0,"delay_samples":0}},"right":{{"polarity_invert":false,"trim_db":0.0,"hpf_hz":0.0,"lpf_hz":0.0,"delay_samples":0}}}},
-"simd1":{{"effects":[]}},"dynamic":{{"effects":{rack}}},"simd2":{{"effects":[]}},
+"console":[],"inserts":{{"effects":{rack}}},
 "fader":{{"left_db":0.0,"right_db":0.0,"left_mute":false,"right_mute":false}},"pan":{{"left":-1.0,"right":1.0,"smoothing_samples":0}}}}],
-"submixes":[],"outputs":[{{"id":"out"}}],"routes":[{{"id":"r","source":{{"kind":"track","track_id":"t","tap":"post_matrix"}},"destination":{{"kind":"output_input","output_id":"out"}},"channel_matrix":{{"ll":1.0,"lr":0.0,"rl":0.0,"rr":1.0}},"gain_db":0.0}}],"automation":[]}}"#
+"submixes":[],"outputs":[{{"id":"out"}}],"routes":[{{"id":"r","source":{{"kind":"track","track_id":"t","tap":"post_pan"}},"destination":{{"kind":"output_input","output_id":"out"}},"channel_matrix":{{"ll":1.0,"lr":0.0,"rl":0.0,"rr":1.0}},"gain_db":0.0}}],"automation":[]}}"#
     )
 }
 
@@ -690,10 +691,11 @@ fn prepares(effect_id: &str, port_id: &str) -> bool {
         r#"{{"schema_version":1,"session_id":"port-table-round-trip","revision":"1","sample_rate_hz":48000,"quantum_frames":128,
 "render_profile":{{"id":"native","mode":"single_thread"}},"output_profile":{{"id":"main","channels":2,"sample_format":"f32_planar"}},
 "sources":[{{"id":"s","content":"blake3:0000000000000000000000000000000000000000000000000000000000000000","channels":2,"bit_depth":"32f","frames":"256"}}],
+"console":{{"pre_insert":[],"post_insert":[]}},
 "tracks":[
-{{"id":"a","source_id":"s","left_source_channel":0,"right_source_channel":1,"builtins":{{"left":{{"polarity_invert":false,"trim_db":0.0,"hpf_hz":0.0,"lpf_hz":0.0,"delay_samples":0}},"right":{{"polarity_invert":false,"trim_db":0.0,"hpf_hz":0.0,"lpf_hz":0.0,"delay_samples":0}}}},"simd1":{{"effects":[]}},"dynamic":{{"effects":[]}},"simd2":{{"effects":[]}},"fader":{{"left_db":0.0,"right_db":0.0,"left_mute":false,"right_mute":false}},"pan":{{"left":-1.0,"right":1.0,"smoothing_samples":0}}}},
-{{"id":"b","source_id":"s","left_source_channel":0,"right_source_channel":1,"builtins":{{"left":{{"polarity_invert":false,"trim_db":0.0,"hpf_hz":0.0,"lpf_hz":0.0,"delay_samples":0}},"right":{{"polarity_invert":false,"trim_db":0.0,"hpf_hz":0.0,"lpf_hz":0.0,"delay_samples":0}}}},"simd1":{{"effects":[]}},"dynamic":{{"effects":[{{"id":"e0","identity":{{"kind":"native","effect_id":"{effect_id}"}},"quality":"normal","bypass":false,"link_mode":"dual_mono","params":[],"sidechain":{{"kind":"routed","source":{{"kind":"track","track_id":"a","tap":"post_fader"}},"port_id":"{port_id}"}}}}]}},"simd2":{{"effects":[]}},"fader":{{"left_db":0.0,"right_db":0.0,"left_mute":false,"right_mute":false}},"pan":{{"left":-1.0,"right":1.0,"smoothing_samples":0}}}}],
-"submixes":[],"outputs":[{{"id":"out"}}],"routes":[{{"id":"r","source":{{"kind":"track","track_id":"b","tap":"post_matrix"}},"destination":{{"kind":"output_input","output_id":"out"}},"channel_matrix":{{"ll":1.0,"lr":0.0,"rl":0.0,"rr":1.0}},"gain_db":0.0}}],"automation":[]}}"#
+{{"id":"a","source_id":"s","left_source_channel":0,"right_source_channel":1,"builtins":{{"left":{{"polarity_invert":false,"trim_db":0.0,"hpf_hz":0.0,"lpf_hz":0.0,"delay_samples":0}},"right":{{"polarity_invert":false,"trim_db":0.0,"hpf_hz":0.0,"lpf_hz":0.0,"delay_samples":0}}}},"console":[],"inserts":{{"effects":[]}},"fader":{{"left_db":0.0,"right_db":0.0,"left_mute":false,"right_mute":false}},"pan":{{"left":-1.0,"right":1.0,"smoothing_samples":0}}}},
+{{"id":"b","source_id":"s","left_source_channel":0,"right_source_channel":1,"builtins":{{"left":{{"polarity_invert":false,"trim_db":0.0,"hpf_hz":0.0,"lpf_hz":0.0,"delay_samples":0}},"right":{{"polarity_invert":false,"trim_db":0.0,"hpf_hz":0.0,"lpf_hz":0.0,"delay_samples":0}}}},"console":[],"inserts":{{"effects":[{{"id":"e0","identity":{{"kind":"native","effect_id":"{effect_id}"}},"quality":"normal","bypass":false,"link_mode":"dual_mono","params":[],"sidechain":{{"kind":"routed","source":{{"kind":"track","track_id":"a","tap":"post_fader"}},"port_id":"{port_id}"}}}}]}},"fader":{{"left_db":0.0,"right_db":0.0,"left_mute":false,"right_mute":false}},"pan":{{"left":-1.0,"right":1.0,"smoothing_samples":0}}}}],
+"submixes":[],"outputs":[{{"id":"out"}}],"routes":[{{"id":"r","source":{{"kind":"track","track_id":"b","tap":"post_pan"}},"destination":{{"kind":"output_input","output_id":"out"}},"channel_matrix":{{"ll":1.0,"lr":0.0,"rl":0.0,"rr":1.0}},"gain_db":0.0}}],"automation":[]}}"#
     );
     let options = WebBootOptions {
         require_sample_rate_hz: 48_000,

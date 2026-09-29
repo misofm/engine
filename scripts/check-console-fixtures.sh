@@ -48,23 +48,29 @@ assert intended["sample_rate_hz"] == mono["sample_rate_hz"] == 48000
 assert intended["quantum_frames"] == mono["quantum_frames"] == 128
 assert intended["sources"] == mono["sources"]
 assert len(intended["tracks"]) == len(mono["tracks"]) == 64
-for track in intended["tracks"]:
-    ids = [e["identity"]["effect_id"] for e in track["simd1"]["effects"]]
+# Decision 12: EQ -> compressor are the session's `pre_insert` slots and the limiter its
+# `post_insert` slot (with the `maximum` link); every track carries all three, in slot order, and
+# no inserts.
+for document in (intended, mono):
+    console = document["console"]
+    ids = [s["identity"]["effect_id"] for s in console["pre_insert"]]
     assert ids == ["miso.parametric-eq", "miso.compressor"]
-    assert track["dynamic"]["effects"] == []
-    limiter = track["simd2"]["effects"]
+    limiter = console["post_insert"]
     assert len(limiter) == 1 and limiter[0]["identity"]["effect_id"] == "miso.true-peak-limiter"
     assert limiter[0]["link_mode"] == "maximum"
-assert len({t["simd2"]["effects"][0]["params"][0]["value"] for t in intended["tracks"]}) == 64
+    slots = [s["slot"] for s in console["pre_insert"] + console["post_insert"]]
+    for track in document["tracks"]:
+        assert [entry["slot"] for entry in track["console"]] == slots
+        assert track["inserts"]["effects"] == []
+assert len({t["console"][2]["params"][0]["value"] for t in intended["tracks"]}) == 64
 for track in mono["tracks"]:
     assert track["left_source_channel"] == track["right_source_channel"] == 0
     assert track["builtins"]["left"] == track["builtins"]["right"]
-    for rack in ("simd1", "dynamic", "simd2"):
-        for effect in track[rack]["effects"]:
-            values = {(p["parameter_id"], p["channel"], p["unit"]): p["value"] for p in effect["params"]}
-            for (parameter_id, channel, unit), value in values.items():
-                if channel == "left":
-                    assert values[(parameter_id, "right", unit)] == value
+    for entry in track["console"]:
+        values = {(p["parameter_id"], p["channel"], p["unit"]): p["value"] for p in entry["params"]}
+        for (parameter_id, channel, unit), value in values.items():
+            if channel == "left":
+                assert values[(parameter_id, "right", unit)] == value
 assert sum(t["fader"]["left_db"] != t["fader"]["right_db"] for t in mono["tracks"]) == 49
 assert sum(t["pan"]["left"] != t["pan"]["right"] for t in mono["tracks"]) == 50
 PY

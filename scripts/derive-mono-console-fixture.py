@@ -52,20 +52,21 @@ def main() -> int:
     for track in tracks:
         track["right_source_channel"] = 0
         track["builtins"]["right"] = copy.deepcopy(track["builtins"]["left"])
-        for rack_name in ("simd1", "dynamic", "simd2"):
-            for effect in track[rack_name]["effects"]:
-                left = {(p["parameter_id"], p["unit"]): p for p in effect["params"] if p["channel"] == "left"}
-                for parameter in effect["params"]:
-                    if parameter["channel"] == "right":
-                        sibling = left.get((parameter["parameter_id"], parameter["unit"]))
-                        if sibling is not None:
-                            parameter["value"] = sibling["value"]
-                            pairs += 1
+        for effect in track["console"] + track["inserts"]["effects"]:
+            left = {(p["parameter_id"], p["unit"]): p for p in effect["params"] if p["channel"] == "left"}
+            for parameter in effect["params"]:
+                if parameter["channel"] == "right":
+                    sibling = left.get((parameter["parameter_id"], parameter["unit"]))
+                    if sibling is not None:
+                        parameter["value"] = sibling["value"]
+                        pairs += 1
     assert pairs == 2 * TRACKS, f"expected {2 * TRACKS} left/right pairs, saw {pairs}"
     assert seam_faders == 49 and seam_pans == 50
     assert all(t["right_source_channel"] == 0 for t in tracks)
     assert all(t["builtins"]["left"] == t["builtins"]["right"] for t in tracks)
-    assert sum(e["link_mode"] == "maximum" for t in tracks for e in t["simd2"]["effects"]) == TRACKS
+    # The limiter's `maximum` link is one session-level console slot every track carries.
+    assert [s["link_mode"] for s in document["console"]["post_insert"]] == ["maximum"]
+    assert all(t["console"][-1]["slot"] == "limiter" for t in tracks)
     sys.stdout.write(canonicalise(document, validator))
     return 0
 
