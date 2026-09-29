@@ -549,3 +549,126 @@ Two gaps sit outside this issue:
 Attempt 2 against the merge commit: `graph-compiler/tests/scale.rs` +210/−12,
 `MUTATIONS.md` +16/−5, and this spec. The whole branch against `a8955ad4`: code, workflow and
 scripts +301/−54; with `MUTATIONS.md` and this spec, +632/−54 before this section.
+
+## Sol verdict, attempt 2
+
+Sol, 2026-09-29, head `5794f81b`, checked in a scratch worktree. Host: `x86_64` (`x86-64-v3`),
+rustc 1.97.1, `CARGO_INCREMENTAL=0`, `nice`, load 18-40. `main` (`a8955ad4`) has the same tree as
+the batch head I merged in attempt 1.
+
+**FAIL.** Attempt 1's blocking finding is closed: bind and render caps are now red per PR. But a
+cap in bank attachment is still green per PR, and a cheap per-PR test catches it. That is the FAIL
+condition.
+
+That case is my miss. Attempt 1's verdict listed bank attachment as needing the real compile, and
+attempt 2 followed that list. It does not need the real compile: `PreparedGraphPlan::with_builtin_banks`
+is public, like `PreparedGraphPlan::new`.
+
+### Findings, by severity
+
+1. **High, blocking: a track cap in bank attachment is green per PR, and a 7 s test catches it.**
+   - **The plant, PBANK.** `with_builtin_banks` refuses when the banks hold more than 65,535
+     members in all.
+     - Every per-PR test stays GREEN, including `scale.rs`'s two per-PR tests.
+     - Nightly's `:160` goes RED: `validated fixed builtin member shape: InvalidMembers`.
+   - **The probe that catches it.** I built it by hand, like attempt 2's test.
+     - The plan has 65,537 `Input` nodes and one `PostInputBuiltins` node per track.
+     - Each `PostInputBuiltins` node sums straight into the output.
+     - Banks hold `Backend::current()`'s lane count, with an identity processor, and attach
+       through `with_builtin_banks`.
+     - It binds, renders one block, and asserts that the output equals the track count.
+   - **Result.** The probe is GREEN unmutated and RED on PBANK (`attach: InvalidMembers`). Alone in
+     debug it takes 7.2 s: 1.0 s to build, 1.3 s to attach, 4.6 s to bind and 0.3 s to render. It
+     runs beside `:91`, which takes 16 s.
+   - **What else it covers per PR.** It also runs the runtime's bank gather and scatter across
+     65,537 lanes. No per-PR test reaches that today.
+   - **Keep the probe free of per-track routes.** Banks plus one route per track bind
+     super-linearly:
+     - debug: 0.2 s, 1.1 s and 3.3 s at 1,024, 2,048 and 4,096 tracks;
+     - release: 0.8 s, 3.3 s, 6.7 s and 23 s at 8,192, 16,384, 32,768 and 65,537 tracks;
+     - declining the route fold changes little: 0.7 s, 2.6 s and 10 s in debug at 2,048, 4,096
+       and 8,192 tracks.
+
+     Without banks (attempt 2's test), or without routes (the probe), bind stays linear. This is
+     #967's territory (one route per track); see finding 3.
+   - **Attempt 3 must:**
+     - add the probe per PR, in `graph-compiler/tests/scale.rs`, at `Backend::current()`'s bank
+       width;
+     - record PBANK red on it and green reverted;
+     - move bank attachment out of the residual list.
+2. **The residual list, case by case.** Each needs the unconstrained 65,537-track compile. That
+   compile takes 28 s in debug at `Backend::Scalar` and 40 s at `Backend::current()`, against the
+   constrained compile's 12 s that it would replace.
+   - **P3b, a cap copying the node cap's code *and* path: acceptable nightly.**
+     - Only a successful compile tells it apart from the configured refusal. That costs at least
+       16 s more on the per-PR job.
+     - It is the least plausible form. A named cap is caught by the identifier lint, a distinct
+       code by `:91`, and another path by `:91`'s exact pair.
+     - The bank plan the compiler forms before `with_builtin_banks` falls under this case too.
+   - **P5b, a cap in `into_bound`: acceptable nightly.**
+     - `PreparedBuiltinsGraphArtifact` is sealed, so only a compile makes one.
+     - The wrapper's bind prevalidation is set-based and has no count in it.
+   - **#962's quadratic compile and bind (1045-5): acceptable nightly, under amendment 5.**
+     - A debug per-PR wall-clock bound is not reliable, for #962's own reason.
+     - The nightly 60 s bound catches it: RED at 231 s in attempt 1's check.
+   - **A2, the accounting count through a `u16`: acceptable nightly.**
+     - It needs a 65,537-track preparation with the allocation tracker.
+     - It is caught in the nightly row.
+   - **With finding 1 fixed**, the engine rule is protected per PR at every layer a cap can hide
+     without a full compile:
+     - session compile (`scale_transaction.rs`);
+     - builtin preparation and the graph compile's front end (`:91`);
+     - bank attachment (the probe);
+     - bind and render (attempt 2's test).
+
+     Parse (P1) is still unguarded anywhere; that gap predates this issue.
+3. **Low, for #967, not #1045.** The super-linear bind in finding 1 is new evidence for #967,
+   which is open ("one route per track"):
+   - 65,537 banked tracks with a route each take 23 s to bind in release;
+   - the same probe without routes takes 4.6 s to bind, in debug.
+
+   Record it there.
+
+### Confirmed
+
+- **Attempt 1's finding is closed.** I re-planted each defect on the head and ran
+  `cargo test -p graph-compiler --test scale` with test-debug-a's features.
+
+  | plant | result per PR | failure |
+  |---|---|---|
+  | P5 | RED | `65,537-input bind: graph.plan.binding` |
+  | P6 | RED | `the 65,537-input plan renders: InvalidEnvelope` |
+  | P3a | RED, `:91` | extra `("graph.resource.limit", "$.tracks")` |
+
+  - The unmutated head is GREEN.
+  - The test runs in `test-debug-a`, a required job (via `qualification`'s verdict). The router
+    sends every edit to `graph`, `graph-compiler`, `builtins-compiler` or `session` down the `full`
+    route that job needs.
+- **The new test's cost.** Alone in debug it finishes in 3.4 s. The whole `scale` binary takes
+  16.9 s wall, the same as `:91` alone. In release it is under a second.
+- **`nightly.yml`.**
+  - `math-sweeps` keeps `main`'s job, adds the session sweep after F1, and has a 25-minute
+    timeout.
+  - `failure-notice` needs `math-sweeps` and `release-budgets`, and reports both.
+  - The routing checker and its self-test pass under `python3 -B`, and actionlint 1.7.7 is clean.
+- **Nightly commands on the head.** All three `release-budgets` 65,537-track commands pass. `:160`
+  takes 19.6 s against its 60 s bound.
+- **Gates on the head.**
+  - fmt, `cargo check --workspace --all-targets --all-features` and clippy `-D warnings` pass.
+  - The three crates pass in dev and in release: 257 passed, 7 ignored.
+- **Policy scripts, 73 run, all pass.** That is every `scripts/check-*` and `scripts/test-*`,
+  Python ones under `python3 -B`, plus `check-stem-store-v1.mjs`.
+  - It includes `check-workspace-policy.sh`, which carries #1052's source-scrape lint, and
+    `check-graph-determinism.sh` (100 of 100).
+  - Scripts that need an argument ran with `--self-test`, or with their CI arguments.
+  - Seven were not run because they need external toolchains or built artifacts: capi-abi,
+    cross-targets, protocol-wasm-parity, sdk-headless, sdk-types, wasm-realtime-atomics and
+    web-audioworklet.
+
+### Test value
+
+- **Attempt 2's hand-built test** catches a cap or a narrowed index in graph bind or render
+  above 65,535 track inputs: P5, P6 and 1045-11.
+- **`:91`'s exact pair** catches a cap that reuses the node cap's code at another path: P3a.
+- **The probe attempt 3 adds** would catch a cap in bank attachment, or in the runtime's bank
+  tables, above 65,535 lanes.
