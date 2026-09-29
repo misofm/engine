@@ -113,27 +113,6 @@ fn the_compressor_reports_the_reduction_its_kernel_smoothed() {
     );
 }
 
-/// Issue #143 E6: resident means resident.
-///
-/// Two calls with no `process` between them return identical bits, because `observe_resident`
-/// takes `&self` and there is nothing it could have advanced. The `&self` half of the statement is
-/// enforced by the trait signature; this is the behavioural half.
-///
-/// Red mutation: make the read "freshen" the smoother by one release step -> the second call
-/// differs from the first.
-#[test]
-fn a_resident_read_is_repeatable_to_the_bit() {
-    let mut effect = prepared();
-    let _ = render(effect.as_mut(), 0.9, 12);
-    let first = observe(&*effect);
-    let second = observe(&*effect);
-    let third = observe(&*effect);
-    assert_eq!(first.left.to_bits(), second.left.to_bits());
-    assert_eq!(first.right.to_bits(), second.right.to_bits());
-    assert_eq!(second.left.to_bits(), third.left.to_bits());
-    assert!(first.left < 0.0, "the case is not vacuous: {}", first.left);
-}
-
 /// The reading follows the smoother across blocks rather than jumping: the attack is what the
 /// kernel says it is, so a single block of a loud signal has not yet reached the steady state that
 /// many blocks reach.

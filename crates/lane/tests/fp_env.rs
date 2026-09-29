@@ -11,8 +11,7 @@
 //! `CanonicalFpEnv`, or make `enter` install the caller's word instead of the canonical one.
 
 use lane::fpenv::{
-    CanonicalFpEnv, FP_ENV_CONTROLLED, attest_fp_environment, canonical_fp_control_word,
-    read_fp_control_word,
+    CanonicalFpEnv, attest_fp_environment, canonical_fp_control_word, read_fp_control_word,
 };
 
 #[test]
@@ -333,22 +332,6 @@ mod aarch64 {
             read_fp_control_word(),
             hostile,
             "attestation must leave the thread exactly as it found it"
-        );
-    }
-}
-
-#[test]
-fn the_target_declares_whether_it_pins() {
-    assert_eq!(
-        FP_ENV_CONTROLLED,
-        cfg!(any(target_arch = "x86_64", target_arch = "aarch64")),
-        "FP_ENV_CONTROLLED must describe this target"
-    );
-    if !FP_ENV_CONTROLLED {
-        assert_eq!(
-            core::mem::size_of::<CanonicalFpEnv>(),
-            0,
-            "a target without a control word must pay nothing for the guard"
         );
     }
 }

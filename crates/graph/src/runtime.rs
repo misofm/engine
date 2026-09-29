@@ -7984,22 +7984,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn rt9_identity_metadata_has_no_retained_or_peak_layout_delta() {
-        // The every-target form of this pin is the `const` assertion after
-        // `UnitIdentityWithoutFlags`, which a wasm32 build checks too; this is its native echo.
-        assert_eq!(
-            core::mem::size_of::<UnitIdentity>(),
-            core::mem::size_of::<UnitIdentityWithoutFlags>()
-        );
-        assert_eq!(
-            core::mem::align_of::<UnitIdentity>(),
-            core::mem::align_of::<UnitIdentityWithoutFlags>()
-        );
-        // build_sequential retains the same vector capacity and boxes it once; no separate
-        // resident table, per-block allocation, or transient acquisition buffer is introduced.
-    }
-
     /// Issue #900: the constructor derives every unit's observed flag from the observer slices
     /// the unit actually holds, whatever the caller wrote -- each placeholder below is the wrong
     /// answer -- and `observe_unit` then walks exactly the units that hold one, including a bank

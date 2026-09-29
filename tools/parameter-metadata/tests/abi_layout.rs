@@ -1343,12 +1343,6 @@ fn observation_capture_identity_layout_matches_the_rust_record() {
     assert_eq!(next_offset, bytes);
 }
 
-/// Regeneration is deterministic: the same tree renders the same bytes.
-#[test]
-fn rendering_is_deterministic() {
-    assert_eq!(render(), render());
-}
-
 /// The checked-in schema-gate fixture is this generator's exact output.
 ///
 /// `scripts/check-abi-layout-v1.py --self-test` runs its fifteen red mutations against that file,

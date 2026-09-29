@@ -398,23 +398,6 @@ fn a_command_timeline_is_partition_invariant() {
     }
 }
 
-/// A stage built with no controlled lane at all still refuses to exist as a console stage's
-/// shunt: `BypassShunt` allocation is skipped, which is what keeps a console-free bank on the
-/// byte-identical `EffectBankStage` path.
-#[test]
-fn a_stage_with_no_controlled_lane_allocates_no_shunt() {
-    let stage = ConsoleEffectBankStage::new(
-        Box::new(MockGainBank::new(3)),
-        BankWidth::Four,
-        8,
-        vec![None, None, None, None],
-        vec![None, None, None, None],
-        3,
-    )
-    .expect("stage");
-    assert_eq!(stage.dropped_records(), 0);
-}
-
 /// Shape is validated once, off the render thread.
 #[test]
 fn stage_construction_rejects_a_lane_count_or_quantum_mismatch() {

@@ -104,4 +104,3 @@ mutation and the defect are the same edit. Both reset kinds are now inside the m
 
 * The wasm leg of the corpus (`tools/wasm-gates`) is exercised by
   `scripts/run-wasm-gates.sh`; its own mutations live in that crate's `MUTATIONS.md`.
-* `tests/descriptive_bench.rs` is descriptive, not a gate, and has no mutation.
