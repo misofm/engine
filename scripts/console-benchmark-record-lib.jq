@@ -26,6 +26,10 @@ def session_keys: ["backend","background_load_note","candidate_commit","cpu_affi
 # metered row without it, matches neither shape.
 def metered_session_keys: ["bank_route_folds","bank_scatter_redirects","meter_dropped_snapshots","meter_metrics","meter_snapshots","meter_streams","meter_tap","meter_window_blocks"];
 
+# #1085: the app shape's bypass group, carried by that row alone, on the same terms as the metered
+# group: a standing row that grew it, or the app shape without it, matches no key set.
+def bypass_session_keys: ["bypass_pattern","bypassed_tracks"];
+
 def hoist_keys: ["arms","backend","background_load_note","bank_boundary","bit_identity","candidate_commit","cpu_affinity","cpu_model","descriptive_only","governor_or_power_mode","issue","llvm_version","measurement_control","missing_metadata","moving_output_sha256","moving_p50_ns","moving_p95_ns","moving_p99_ns","observations","os","paired_delta_median_ns","pairing","percentile_method","profile","quiet_output_sha256","quiet_p50_ns","quiet_p99_ns","record","restated_output_sha256","restated_p50_ns","restated_p95_ns","restated_p99_ns","round","rust_version","schema_version","statistical_method","target_features","target_triple","tracks","units","workload_kind"];
 
 def meters_keys: ["arms","backend","background_load_note","bit_identity","candidate_commit","cpu_affinity","cpu_model","descriptive_only","governor_or_power_mode","issue","llvm_version","measurement_control","meter_frames_drained","meter_streams","meter_tap","meter_window_blocks","meters_off_bank_route_folds","meters_off_bank_scatter_redirects","meters_off_output_sha256","meters_off_p50_ns","meters_off_p95_ns","meters_off_p99_ns","meters_on_bank_route_folds","meters_on_bank_scatter_redirects","meters_on_output_sha256","meters_on_p50_ns","meters_on_p95_ns","meters_on_p99_ns","missing_metadata","observations","os","paired_delta_median_ns","pairing","percentile_method","profile","record","render_errors","render_total_forbidden_operations","round","rust_version","schema_version","statistical_method","target_features","target_triple","tracks","units","workload_kind"];
@@ -145,6 +149,22 @@ def floor_pins:
     # arithmetic no ruling has inventoried, so it states no floor rather than the unmetered strip's,
     # and names no control rather than isolating the meters against a floor nobody derived.
     "sixty_four_track_console_metered":
+      [null, 1, "none", "not_derived"],
+    # The five console-strip rows (#1085). A remainder's width factor depends on whether it renders
+    # per node or as a padded bank, which is what the console strip changes (the nine-track factor
+    # holds for a remainder of one only, where the two cost the same); the app shape's bypassed
+    # lanes and the sparse row's silent ones are arithmetic no inventory counts; and the sixteen-
+    # track row is read with its set. H5's figures stay arithmetic until S4 reports, so none of
+    # the five states a floor or names a control.
+    "ten_track_ragged_strip":
+      [null, 1, "none", "not_derived"],
+    "thirteen_track_ragged_strip":
+      [null, 1, "none", "not_derived"],
+    "sixteen_track_strip":
+      [null, 1, "none", "not_derived"],
+    "sixty_four_track_app_shape":
+      [null, 1, "none", "not_derived"],
+    "sixty_four_track_console_sparse":
       [null, 1, "none", "not_derived"]
   };
 
@@ -185,10 +205,11 @@ def floor_shape:
    end);
 
 
-# The seventeen session workloads, sorted: `WORKLOADS`'s fifteen (append-only, in emission order),
-# the driver-fed gain/pan row the bench emits after them (#928 and #956, `DRIVER_FED_WORKLOADS`)
-# and the metered console row it emits last (#881, `METERED_WORKLOADS`).
-def session_kinds: ["nine_track_baseline","nine_track_ragged_strip","one_twenty_eight_track_stretch","sixty_four_track_builtins_only","sixty_four_track_compressor_only","sixty_four_track_console","sixty_four_track_console_half_mono","sixty_four_track_console_legacy","sixty_four_track_console_metered","sixty_four_track_console_mono","sixty_four_track_console_mono_dual","sixty_four_track_dispatch_only","sixty_four_track_eq_comp_simd1","sixty_four_track_eq_only","sixty_four_track_gain_pan_only","sixty_four_track_gain_pan_ring","sixty_four_track_idle"];
+# The twenty-two session workloads, sorted: `WORKLOADS`'s fifteen (append-only, in emission order),
+# the driver-fed gain/pan row the bench emits after them (#928 and #956, `DRIVER_FED_WORKLOADS`),
+# the metered console row (#881, `METERED_WORKLOADS`), and the five console-strip rows it emits
+# last (#1085, `CONSOLE_STRIP_WORKLOADS`).
+def session_kinds: ["nine_track_baseline","nine_track_ragged_strip","one_twenty_eight_track_stretch","sixteen_track_strip","sixty_four_track_app_shape","sixty_four_track_builtins_only","sixty_four_track_compressor_only","sixty_four_track_console","sixty_four_track_console_half_mono","sixty_four_track_console_legacy","sixty_four_track_console_metered","sixty_four_track_console_mono","sixty_four_track_console_mono_dual","sixty_four_track_console_sparse","sixty_four_track_dispatch_only","sixty_four_track_eq_comp_simd1","sixty_four_track_eq_only","sixty_four_track_gain_pan_only","sixty_four_track_gain_pan_ring","sixty_four_track_idle","ten_track_ragged_strip","thirteen_track_ragged_strip"];
 
 # #928: how a session row's track inputs reach the graph. `bound` is a `FrozenGraphSource`
 # processor per track input, dispatched once per track per block; `played_planes` is a prepared
@@ -208,7 +229,13 @@ def session_source_feed:
 # session record of each kind must carry exactly.
 def metered_kinds: ["sixty_four_track_console_metered"];
 def session_metered: .workload_kind as $kind | any(metered_kinds[]; . == $kind);
-def session_row_keys: if session_metered then (session_keys + metered_session_keys) | sort else session_keys end;
+# #1085: the rows whose record states the bypass their compiled session carries.
+def bypass_kinds: ["sixty_four_track_app_shape"];
+def session_bypass: .workload_kind as $kind | any(bypass_kinds[]; . == $kind);
+def session_row_keys:
+  if session_metered then (session_keys + metered_session_keys) | sort
+  elif session_bypass then (session_keys + bypass_session_keys) | sort
+  else session_keys end;
 def session_row_floor_keys: (session_row_keys + floor_keys) | sort;
 
 # The metered row's meter group. The meter set is pinned field by field, because a row that metered
@@ -228,9 +255,25 @@ def metered_session_shape:
   ([.bank_route_folds,.bank_scatter_redirects] | all(nonnegative_integer)) and
   .bank_route_folds == .tracks;
 
+# #1085: the app shape's bypass. The subject reads it off the compiled session and names the
+# pattern only when every rack effect of exactly the tracks whose index is 2 mod 3 is bypassed and
+# no other effect is; anything else is `other` and refused, and so is a count that is not that
+# pattern's. A row that bypassed another set of tracks, or bypassed the EQ alone, measured another
+# app than the one it names.
+def bypass_session_shape:
+  .bypass_pattern == "index_mod_3_is_2" and
+  (.bypassed_tracks | nonnegative_integer) and
+  .bypassed_tracks == ([range(.tracks) | select(. % 3 == 2)] | length);
+
 # The standing qualification fixture (#175): the intended production layout, EQ and compressor as
 # one two-slot chain on `simd1` and a true-peak limiter on `simd2`.
 def console_fixture: "fixtures/session/v1/console-sixty-four-track-intended.json";
+# #1085: the app shape, derived from the standing fixture by `scripts/derive-app-console-fixture.py`.
+def app_console_fixture: "fixtures/session/v1/console-sixty-four-track-app.json";
+# #1085: `strip_layout` names the chain in decision 12's console vocabulary, through its lowering
+# (`simd1` -> `pre_insert`, `dynamic` -> `inserts`, `simd2` -> `post_insert`), so one spelling pins
+# a row on today's per-track racks and on the console model. This is the intended strip's.
+def intended_layout: "pre_insert:eq+compressor,post_insert:limiter";
 # The retired fixture, rendered by exactly one row for exactly one transition record.
 def legacy_console_fixture: "fixtures/session/v1/console-sixty-four-track.json";
 # The mono qualification fixture: the standing strip with its source mapping and every upstream
@@ -253,17 +296,17 @@ def mono_console_fixture: "fixtures/session/v1/console-sixty-four-track-mono.jso
 def session_kind_shape:
   if .workload_kind == "nine_track_baseline" then
     .tracks == 9 and .synthetic_fixture == false and
-    .strip_content == "eq" and .strip_layout == "simd1:eq" and .input_signal == "tone" and
+    .strip_content == "eq" and .strip_layout == "pre_insert:eq" and .input_signal == "tone" and
     .fixture_id == "fixtures/session/v1/parametric-eq-nine-track.json"
   elif .workload_kind == "nine_track_ragged_strip" then
     .tracks == 9 and .synthetic_fixture == true and
     .strip_content == "eq+compressor+limiter" and
-    .strip_layout == "simd1:eq+compressor,simd2:limiter" and .input_signal == "tone" and
+    .strip_layout == "pre_insert:eq+compressor,post_insert:limiter" and .input_signal == "tone" and
     .fixture_id == console_fixture
   elif .workload_kind == "sixty_four_track_console" then
     .tracks == 64 and .synthetic_fixture == false and
     .strip_content == "eq+compressor+limiter" and
-    .strip_layout == "simd1:eq+compressor,simd2:limiter" and .input_signal == "tone" and
+    .strip_layout == "pre_insert:eq+compressor,post_insert:limiter" and .input_signal == "tone" and
     .fixture_id == console_fixture
   # The metered console row (#881) is that session as written, prepared as the default web boot
   # prepares it: meters, and the between-render-calls delivery that fuses each cohort's fader and
@@ -273,12 +316,12 @@ def session_kind_shape:
   elif .workload_kind == "sixty_four_track_console_metered" then
     .tracks == 64 and .synthetic_fixture == false and
     .strip_content == "eq+compressor+limiter" and
-    .strip_layout == "simd1:eq+compressor,simd2:limiter" and .input_signal == "tone" and
+    .strip_layout == "pre_insert:eq+compressor,post_insert:limiter" and .input_signal == "tone" and
     .fixture_id == console_fixture
   elif .workload_kind == "one_twenty_eight_track_stretch" then
     .tracks == 128 and .synthetic_fixture == true and
     .strip_content == "eq+compressor+limiter" and
-    .strip_layout == "simd1:eq+compressor,simd2:limiter" and .input_signal == "tone" and
+    .strip_layout == "pre_insert:eq+compressor,post_insert:limiter" and .input_signal == "tone" and
     .fixture_id == console_fixture
   # The transition row (#175). The one row still rendered from the retired fixture, and the only
   # row in the stream whose `dynamic` rack carries anything. It exists so the standing authority's
@@ -287,7 +330,7 @@ def session_kind_shape:
   elif .workload_kind == "sixty_four_track_console_legacy" then
     .tracks == 64 and .synthetic_fixture == false and
     .strip_content == "eq+compressor" and
-    .strip_layout == "simd1:eq,dynamic:compressor" and .input_signal == "tone" and
+    .strip_layout == "pre_insert:eq,inserts:compressor" and .input_signal == "tone" and
     .fixture_id == legacy_console_fixture
   # The chain-shape row: the standing fixture's two-slot chain carrying the retired fixture's
   # arithmetic. Identical `strip_content` to the row above and a different `strip_layout`, which is
@@ -296,15 +339,15 @@ def session_kind_shape:
   elif .workload_kind == "sixty_four_track_eq_comp_simd1" then
     .tracks == 64 and .synthetic_fixture == true and
     .strip_content == "eq+compressor" and
-    .strip_layout == "simd1:eq+compressor" and .input_signal == "tone" and
+    .strip_layout == "pre_insert:eq+compressor" and .input_signal == "tone" and
     .fixture_id == console_fixture
   elif .workload_kind == "sixty_four_track_eq_only" then
     .tracks == 64 and .synthetic_fixture == true and
-    .strip_content == "eq" and .strip_layout == "simd1:eq" and .input_signal == "tone" and
+    .strip_content == "eq" and .strip_layout == "pre_insert:eq" and .input_signal == "tone" and
     .fixture_id == console_fixture
   elif .workload_kind == "sixty_four_track_compressor_only" then
     .tracks == 64 and .synthetic_fixture == true and
-    .strip_content == "compressor" and .strip_layout == "simd1:compressor" and
+    .strip_content == "compressor" and .strip_layout == "pre_insert:compressor" and
     .input_signal == "tone" and .fixture_id == console_fixture
   elif .workload_kind == "sixty_four_track_builtins_only" then
     .tracks == 64 and .synthetic_fixture == true and
@@ -336,14 +379,14 @@ def session_kind_shape:
        or .workload_kind == "sixty_four_track_console_mono_dual" then
     .tracks == 64 and .synthetic_fixture == false and
     .strip_content == "eq+compressor+limiter" and
-    .strip_layout == "simd1:eq+compressor,simd2:limiter" and .input_signal == "tone" and
+    .strip_layout == "pre_insert:eq+compressor,post_insert:limiter" and .input_signal == "tone" and
     .fixture_id == mono_console_fixture
   # The mixed-cohort row, derived in code from the mono fixture by putting the standing fixture's
   # stereo source mapping back on the odd tracks.
   elif .workload_kind == "sixty_four_track_console_half_mono" then
     .tracks == 64 and .synthetic_fixture == true and
     .strip_content == "eq+compressor+limiter" and
-    .strip_layout == "simd1:eq+compressor,simd2:limiter" and .input_signal == "tone" and
+    .strip_layout == "pre_insert:eq+compressor,post_insert:limiter" and .input_signal == "tone" and
     .fixture_id == mono_console_fixture
   elif .workload_kind == "sixty_four_track_idle" then
     # The one row whose whole meaning is its input. The strip is the unmodified standing console
@@ -351,7 +394,39 @@ def session_kind_shape:
     # rendering anything.
     .tracks == 64 and .synthetic_fixture == true and
     .strip_content == "eq+compressor+limiter" and
-    .strip_layout == "simd1:eq+compressor,simd2:limiter" and .input_signal == "silence" and
+    .strip_layout == "pre_insert:eq+compressor,post_insert:limiter" and .input_signal == "silence" and
+    .fixture_id == console_fixture
+  # #1085: the strip at N. The standing fixture's first N tracks, derived in code as the ragged
+  # nine-track row is, so every one is synthetic and states the standing strip. Together with the
+  # nine- and sixty-four-track rows they are the remainders the console strip's padding moves: two,
+  # five, and none (two full banks).
+  elif .workload_kind == "ten_track_ragged_strip" or
+       .workload_kind == "thirteen_track_ragged_strip" or
+       .workload_kind == "sixteen_track_strip" then
+    .tracks == ({"ten_track_ragged_strip": 10, "thirteen_track_ragged_strip": 13,
+                 "sixteen_track_strip": 16}[.workload_kind]) and
+    .synthetic_fixture == true and
+    .strip_content == "eq+compressor+limiter" and
+    .strip_layout == intended_layout and .input_signal == "tone" and
+    .fixture_id == console_fixture
+  # The app shape: EQ -> compressor on every track, no limiter, a third of the tracks bypassed
+  # (pinned by `bypass_session_shape`). Rendered from its committed fixture as written. It is the
+  # one row whose layout the console migration moves: today its effects sit in `dynamic`, which
+  # reads `inserts`, and once the app puts them in the session console they read `pre_insert`.
+  # Both spellings are accepted for this row alone, so the row is pinned before and after.
+  elif .workload_kind == "sixty_four_track_app_shape" then
+    .tracks == 64 and .synthetic_fixture == false and
+    .strip_content == "eq+compressor" and
+    (.strip_layout == "inserts:eq+compressor" or .strip_layout == "pre_insert:eq+compressor") and
+    .input_signal == "tone" and .fixture_id == app_console_fixture
+  # Sparse activity: the standing strip as written, with every odd track fed exact zeros, so no
+  # bank is wholly silent. Reported as derived for the reason the idle row is: its session is the
+  # standing one, and what it renders is fed in code. Its digest is held apart from the all-active
+  # and idle rows' by the aggregate.
+  elif .workload_kind == "sixty_four_track_console_sparse" then
+    .tracks == 64 and .synthetic_fixture == true and
+    .strip_content == "eq+compressor+limiter" and
+    .strip_layout == intended_layout and .input_signal == "odd_tracks_silent" and
     .fixture_id == console_fixture
   else false end;
 
@@ -442,6 +517,7 @@ def session_record_valid:
   (.output_sha256 | sha256) and
   .render_errors == 0 and .render_total_forbidden_operations == 0 and
   (if session_metered then metered_session_shape else true end) and
+  (if session_bypass then bypass_session_shape else true end) and
   (if (keys | sort) == session_row_floor_keys then floor_shape else true end);
 
 def hoist_record_valid:
@@ -566,8 +642,8 @@ def placement_record_valid:
   .arms == ["split_chains","merged_chain"] and
   .workload_kind == "sixty_four_track_placement" and .tracks == 64 and
   # The two arms are named by their layouts, and the layouts are the point of the comparison.
-  .split_chains_layout == "simd1:eq,dynamic:compressor" and
-  .merged_chain_layout == "simd1:eq+compressor" and
+  .split_chains_layout == "pre_insert:eq,inserts:compressor" and
+  .merged_chain_layout == "pre_insert:eq+compressor" and
   ([.split_chains_p50_ns,.split_chains_p95_ns,.split_chains_p99_ns,.merged_chain_p50_ns,.merged_chain_p95_ns,.merged_chain_p99_ns] | all(positive_integer)) and
   (.split_chains_p50_ns <= .split_chains_p95_ns and .split_chains_p95_ns <= .split_chains_p99_ns) and
   (.merged_chain_p50_ns <= .merged_chain_p95_ns and .merged_chain_p95_ns <= .merged_chain_p99_ns) and
@@ -602,7 +678,7 @@ def automation_record_valid:
   .workload_kind == "sixty_four_track_compressor_automation" and
   # The subject row's six pinned facts, verbatim from `session_kind_shape`.
   .tracks == 64 and .synthetic_fixture == true and
-  .strip_content == "compressor" and .strip_layout == "simd1:compressor" and
+  .strip_content == "compressor" and .strip_layout == "pre_insert:compressor" and
   .input_signal == "tone" and .fixture_id == console_fixture and
   .sample_rate_hz == 48000 and .quantum_frames == 128 and
   .pairing == "alternating_per_observation" and
@@ -732,7 +808,7 @@ def mixing_automation_record_valid:
   # The mono session row's six pinned facts, verbatim from `session_kind_shape`.
   .tracks == 64 and .synthetic_fixture == false and
   .strip_content == "eq+compressor+limiter" and
-  .strip_layout == "simd1:eq+compressor,simd2:limiter" and .input_signal == "tone" and
+  .strip_layout == "pre_insert:eq+compressor,post_insert:limiter" and .input_signal == "tone" and
   .fixture_id == mono_console_fixture and
   .sample_rate_hz == 48000 and .quantum_frames == 128 and
   .pairing == "alternating_per_observation" and
