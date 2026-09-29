@@ -318,3 +318,154 @@ is refused: `read as text: crates/graph/src/runtime.rs:…`.
 - `crates/builtins/tests/MUTATIONS.md:17` names `issue064_checked_corpus_is_read_only_complete_and_has_no_authoring_reachability`,
   now `issue064_checked_corpus_is_read_only_and_complete`; the record is dated evidence and was
   left as written.
+
+## Sol verdict, attempt 1
+
+**PASS.** Sol, 2026-09-29. The change (`67fa22aa`, evidence `7e7b250d`) was merged into the batch head
+`codex/batch-slim-4` at `93105e18` (main plus #1060 and the #1069-#1074 specs) in a scratch detached
+worktree. All checks below ran on that merge unless noted. Every mutation was applied to a scratch
+copy and reverted.
+
+### The merge
+
+- **No textual conflicts.** #1060 and #1047 change disjoint files.
+- **No semantic conflicts.**
+  - #1060 added no literal-path source read. `check-workspace-policy.sh` passes with the allow-list
+    empty.
+  - #1060 did not touch `ffi.rs`, and the capi scan is green on the merged file.
+  - capi's resource tests pass in dev and release.
+  - `check-browser-expected-resources.py --artifacts` passes on an artifact built from the merge.
+
+### Each replacement discriminates (re-applied by Sol)
+
+- **capi whole-plan borrow.** Sol bound six forms in `miso_engine_v1_render_f32_planar`: `&*plan`,
+  `&mut *plan`, `&(*plan)`, `&mut (*plan)`, a double-spaced `&mut  *plan`, and `&*plan` inside a
+  call. Each turns `check-realtime-policy.sh` RED, naming `ffi.rs:745`. Restored, it is green.
+- **M3.**
+  - `#[cfg(target_feature = "fma")]` above a helper in `vendored/exp2.rs`: RED with the M3
+    diagnostic.
+  - `use core::arch;` in `log2.rs`: RED.
+  - `unsafe` and `cfg!(target_arch = …)`: each RED.
+  - `mul_add`: RED, caught first by the existing D3 rule.
+  - Restored: `lane policy: ok`.
+  - The needles are the deleted tests' own: the same six on every line, the same four on code
+    lines, the same comment rule and the same 30-file floor.
+- **skill.rs.** Validator `"--canonical"` → `"--canon"`: RED. `Some("validate")` →
+  `Some("check")`: RED. Restored, it is green.
+- **Export set.** Sol added `miso_engine_web_v1_source_rewind` to the generator's `EXPORTS` itself,
+  not only to the JSON. Sol then regenerated the layout document with `parameter-metadata --write`
+  into a copy of the built artifact. `check-web-audioworklet.sh` is RED at the new check, its first
+  output line, with a diff naming the export. The unmutated artifact passes the whole script.
+- **Scrape lint.** Two planted scrapes are each refused (`read as text: …`), and the lint is green
+  once they are removed:
+  - `include_str!("../src/kernels/builtins.rs")` in a lane test;
+  - `read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))` in source's test module.
+
+  `test-workspace-policy.sh` passes, including `source-reads`.
+- **Graph.** Sol ran all 18 controls of the two deleted scans on the merge (`-p graph -p
+  graph-compiler --lib --tests`, `--features graph/test-support,builtins-compiler/test-support`):
+  15 resident-scan controls and rt9's three `lib.rs` controls.
+  - 17 are RED on behavioural tests, from 1 to 102 tests each.
+  - Among them: `Some(index)`, which drops the final-lane offset; the one-frame view; an inverted
+    fold flag; the swallowed resident write; the forced sample-peak and meter passes; ignored meter
+    peaks; a withheld meter or peak; unread seeds; `left, left`; swapped L/R peaks; the per-lane
+    block borrow; a skipped observer; a continued error; the `unit + 1` observer.
+  - The only green one is `let resident = if true` (finding 1).
+
+### Moved scans are structural policy, not relabelled tests
+
+AGENTS.md refuses tests that grep source or prose. The `check-*-policy.sh` gates are the repo's home
+for structural source rules, such as unsafe owners, the `arch` modules and `MAX_TRACKS`.
+
+- **M3** is a structural determinism rule: no target-conditional, fused or unsafe construct in
+  vendored libm. Its behavioural half, the digests, stays a test.
+- **The capi rule** is aliasing soundness: no `&Plan` while render holds `&mut PlanState`.
+  - No test can observe it without Miri, and no workflow runs Miri.
+  - The spec named this home explicitly.
+- **The export check** is not a source scan at all. It reads the shipped artifact.
+
+### Test value (rewritten test)
+
+`the_shipped_skill_validator_commands_run_verbatim` goes red when the validator's `validate`
+subcommand or `--canonical` flag is renamed, or when `--canonical` stops printing canonical bytes,
+without SKILL.md following. No other test catches that. The old scrape was green on both renames.
+
+### Test list
+
+`cargo test --workspace --all-features -- --list` on the base and on the merge: 2,238 → 2,225.
+
+- Exactly the 15 removed and 2 added names in the evidence table; nothing else moved.
+- Each removal has its named replacement or catch above. `f1`'s self-count and session's prose pin
+  could fail on no product change.
+- The audit-tool scans guarded tool text, as the spec's H47 ruling says.
+
+### Gates on the merge
+
+- **Build and lint.**
+  - `cargo check --workspace --all-targets --all-features`: pass.
+  - clippy `-D warnings`: pass, 0 warnings.
+  - `cargo fmt --check`: pass.
+- **The ten changed packages' tests** (`--all-targets`, `graph/test-support,math/lane,lane/test-support`):
+  - dev: 433 passed, 0 failed, 19 ignored;
+  - release: the same.
+- **Console digests** (`gain_pan_profile digests`, release): the 17 rows are byte-identical on
+  `93105e18` and the merge. `console-workload`'s release tests: 62 passed.
+- **The four gates and their self-tests.** Workspace, realtime, lane and web-audioworklet
+  (`test-*.sh`) all pass. `test-lane-policy.sh` passed five times; Terra's one-off
+  `vendored-scan-0` flake did not reproduce.
+- **Every policy script.**
+  - 63 invocations pass. They cover:
+    - every `check-*.sh`, with CI's arguments, against release binaries, a wasm-scalar build and
+      the built artifact;
+    - every `check-*.py` under `python3 -B`, run with CI's arguments or with `--self-test`;
+    - `test-ci-path-routing.py` and `test-script-reachability.py`.
+  - Among them: `check-cross-targets.sh`, `check-capi-abi.sh` (and its `--self-test`) and
+    `check-graph-determinism.sh`.
+  - `check-sdk-types.sh` exits 2: `sdk/node_modules` is missing, it needs `npm ci`, and the SDK is
+    untouched.
+- **AArch64 legs resolved on x86.**
+  - debug, 25 product crates plus `dsp-reference`, `conformance` and `target-smoke`, with its
+    feature set: `--no-run` builds, and `-- --list` passes `aarch64-known-defects.py judge-skips
+    debug`;
+  - release, `lane` and `math`: builds and passes `judge-skips release`;
+  - `console-workload`, release: `--no-run` builds.
+
+### Findings, by severity
+
+1. **Low: `let resident = if true` is an equivalent mutation. It is not an unguarded claim.**
+   - **What the guard does.** `eligible` withholds the resident view from a bank that fails any of
+     four conditions:
+     - a population within the width;
+     - a member count that is a multiple of the population;
+     - a trailing-prefix active mask;
+     - no armed aux lane.
+   - **Why every plan the engine can build passes it:**
+     - `arm_aux` has no caller outside rack's own tests (rack's own comment: the epilogue is empty
+       on every chain the engine builds);
+     - rack-compiler pushes every `Some` member before `None` padding, and `trailing_active_mask`
+       derives the graph's masks the same way;
+     - `finish_unit` sets `lanes = members / run.len()`;
+     - `accumulate_aux` only reads scratch, so even an armed chain's resident words equal the
+       scattered plane.
+   - **Probe.** A panic on any observed ineligible bank, at both eligibility sites, fired zero
+     times over 875 tests in nine packages under `--all-features`: graph, graph-compiler,
+     builtins-compiler, host-core, capi, host-web, source, console-workload and conformance.
+   - **Consequence.** No behavioural test can see the mutation. A synthetic-shape test would pin a
+     defensive guard whose alternative is harmless, so Sol recommends none. An issue that
+     introduces aux arming or a non-prefix mask owns a metering test for that shape.
+2. **Low: the new layout-export check has no red case in `test-web-audioworklet.sh`.** Its
+   discrimination rests on the seeded runs above. `test-web-audioworklet.sh` is outside the spec's
+   authorized paths, so a red case is a follow-up candidate, not a defect here.
+3. **Low: `skill.rs` runs only fenced lines that name `-p session-validator`.**
+   - A single misspelled package line would be skipped silently. `ran > 0` catches only the loss of
+     all three.
+   - SKILL.md's unfenced `parameter-metadata -- --print` (line 24) runs in
+     `test-web-audioworklet.sh:219`.
+4. **Info: `VENDORED.md` overclaims, as before this change.** It says `src/vendored/` has no
+   `cfg(` and names the lane policy as its keeper. Neither the deleted tests nor the moved scan bans
+   a bare `cfg(feature = …)`, and Sol's seeded one passes the gate. The overclaim predates this
+   change; #1047 only repointed the sentence.
+5. **Info: the out-of-scope edits are necessary.**
+   - `test-lane-policy.sh` and `test-realtime-policy.sh` must carry the moved rules' fixtures, or
+     every existing case goes red. They also gain the moved rules' red cases.
+   - `VENDORED.md:74` named a deleted test.
