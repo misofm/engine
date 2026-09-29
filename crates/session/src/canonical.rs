@@ -200,7 +200,8 @@ mod tests {
 
     use super::{write_f32, write_quoted};
     use crate::{
-        ChannelMatrix, Effect, EffectIdentity, EffectQuality, LinkMode, MatrixOrPan, Rack, Route,
+        ChannelMatrix, Console, ConsoleEntry, ConsoleSlot, Effect, EffectIdentity, EffectParam,
+        EffectQuality, LinkMode, MatrixOrPan, ParameterChannel, ParameterUnit, Route,
         RouteDestination, RouteSource, SendTap, Sidechain, SidechainDeclaration, StableId,
         canonical_session_json, parse_session_json,
     };
@@ -253,8 +254,46 @@ mod tests {
             rr: 0.75,
             smoothing_samples: 32,
         };
-        model.tracks[0].simd1 = Rack {
-            effects: vec![Effect {
+        // Decision 12's surface: a slot in each console section, the track's entries for them,
+        // and a keyed third-party insert ahead of the fixture's own.
+        model.console = Console {
+            pre_insert: vec![ConsoleSlot {
+                slot: id("desk-eq"),
+                identity: EffectIdentity::Native {
+                    effect_id: id("miso.parametric-eq"),
+                },
+                quality: EffectQuality::High,
+                link_mode: LinkMode::DualMono,
+            }],
+            post_insert: vec![ConsoleSlot {
+                slot: id("desk-limit"),
+                identity: EffectIdentity::Native {
+                    effect_id: id("miso.true-peak-limiter"),
+                },
+                quality: EffectQuality::Normal,
+                link_mode: LinkMode::Maximum,
+            }],
+        };
+        model.tracks[0].console = vec![
+            ConsoleEntry {
+                slot: id("desk-eq"),
+                bypass: true,
+                params: vec![EffectParam {
+                    parameter_id: 2,
+                    channel: ParameterChannel::Left,
+                    unit: ParameterUnit::Db,
+                    value: -1.5,
+                }],
+            },
+            ConsoleEntry {
+                slot: id("desk-limit"),
+                bypass: false,
+                params: Vec::new(),
+            },
+        ];
+        model.tracks[0].inserts.effects.insert(
+            0,
+            Effect {
                 id: id("external"),
                 identity: EffectIdentity::ThirdPartyCid {
                     cid: "bafyopaque-v1-text".to_owned(),
@@ -270,8 +309,8 @@ mod tests {
                     },
                     port_id: id("detector-in"),
                 }),
-            }],
-        };
+            },
+        );
         model.routes[0].destination = RouteDestination::SubmixInput {
             submix_id: id("mix"),
         };

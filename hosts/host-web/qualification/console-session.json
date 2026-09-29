@@ -22,6 +22,10 @@
       "frames": "16640"
     }
   ],
+  "console": {
+    "pre_insert": [],
+    "post_insert": []
+  },
   "submixes": [],
   "outputs": [
     {
@@ -34,7 +38,7 @@
       "source": {
         "kind": "track",
         "track_id": "track",
-        "tap": "post_matrix"
+        "tap": "post_pan"
       },
       "destination": {
         "kind": "output_input",
@@ -72,13 +76,8 @@
           "delay_samples": 0
         }
       },
-      "simd1": {
-        "effects": []
-      },
-      "dynamic": {
-        "effects": []
-      },
-      "simd2": {
+      "console": [],
+      "inserts": {
         "effects": []
       },
       "fader": {

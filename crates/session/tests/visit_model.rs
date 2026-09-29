@@ -76,7 +76,7 @@ fn visitor_counts_keys_tags_and_conditional_canonical_order_are_exact() {
     let mut second = model.sources[0].clone();
     second.id = session::StableId::parse("alpha-source").expect("id");
     model.sources.insert(0, second);
-    let expected_root = 7
+    let expected_root = 8
         + model.sources.len()
         + model.tracks.len()
         + model.submixes.len()
@@ -88,8 +88,8 @@ fn visitor_counts_keys_tags_and_conditional_canonical_order_are_exact() {
     model.visit(WalkOrder::Declared, &mut declared).unwrap();
     assert_eq!(declared.records[0], (None, expected_root as u32));
     assert!(
-        declared.records.contains(&(None, 10)),
-        "track has ten wire fields"
+        declared.records.contains(&(None, 8)),
+        "a track with no console entries has eight wire fields"
     );
     // Issue #210 phase 2 moved this from four to five. The count is the BTLV field count the
     // visitor declares for `ChannelBuiltins`; a model field added without it stays out of the wire
@@ -177,4 +177,108 @@ fn visitor_counts_keys_tags_and_conditional_canonical_order_are_exact() {
     );
     assert_eq!([keys::track::ID.id, keys::track::MATRIX.id], [1, 10]);
     assert_eq!([keys::effect::ID.id, keys::effect::SIDECHAIN.id], [1, 7]);
+}
+
+/// Decision 12's field registry: `inserts` keeps the retired `dynamic` rack's track field 7, the
+/// retired `simd1`/`simd2` fields 6 and 8 are never reallocated, `console` is appended as the next
+/// unallocated ID at the root (15) and on a track (11), and the nested console messages have
+/// registries of their own. The visitor walks the root console before the tracks, and a track's
+/// console entries between its builtins and its inserts, each entry counted as a repeated field.
+#[test]
+fn console_fields_are_appended_and_walked_in_schema_order() {
+    assert_eq!(keys::session::CONSOLE.id, 15);
+    assert_eq!([keys::track::CONSOLE.id, keys::track::INSERTS.id], [11, 7]);
+    assert_eq!(
+        [keys::console::PRE_INSERT.id, keys::console::POST_INSERT.id],
+        [1, 2]
+    );
+    assert_eq!(
+        [
+            keys::console_slot::SLOT.id,
+            keys::console_slot::IDENTITY.id,
+            keys::console_slot::QUALITY.id,
+            keys::console_slot::LINK_MODE.id
+        ],
+        [1, 2, 3, 4]
+    );
+    assert_eq!(
+        [
+            keys::console_entry::SLOT.id,
+            keys::console_entry::BYPASS.id,
+            keys::console_entry::PARAMS.id
+        ],
+        [1, 2, 3]
+    );
+
+    let mut model = parse_session_json(EXAMPLE).expect("fixture");
+    let slot = |name: &str| session::ConsoleSlot {
+        slot: StableId::parse(name).expect("id"),
+        identity: session::EffectIdentity::Native {
+            effect_id: StableId::parse("miso.compressor").expect("id"),
+        },
+        quality: session::EffectQuality::Normal,
+        link_mode: session::LinkMode::DualMono,
+    };
+    model.console.pre_insert = vec![slot("desk-a")];
+    model.console.post_insert = vec![slot("desk-b")];
+    let params = model.tracks[0].inserts.effects[0].params.clone();
+    model.tracks[0].console = vec![
+        session::ConsoleEntry {
+            slot: StableId::parse("desk-a").expect("id"),
+            bypass: false,
+            params: params.clone(),
+        },
+        session::ConsoleEntry {
+            slot: StableId::parse("desk-b").expect("id"),
+            bypass: true,
+            params: Vec::new(),
+        },
+    ];
+    let mut trace = Trace::default();
+    model.visit(WalkOrder::Declared, &mut trace).unwrap();
+    assert!(
+        trace.records.contains(&(Some(keys::session::CONSOLE), 2)),
+        "the root console counts one repeated field per slot"
+    );
+    assert!(
+        trace.records.contains(&(None, 10)),
+        "a track with two console entries has 8 + 2 wire fields"
+    );
+    assert!(
+        trace.records.contains(&(None, 2 + params.len() as u32)),
+        "a console entry counts its params as repeated fields"
+    );
+    assert!(trace.arrays.contains(&(keys::console::PRE_INSERT, 1)));
+    assert!(trace.arrays.contains(&(keys::console::POST_INSERT, 1)));
+    assert!(trace.arrays.contains(&(keys::track::CONSOLE, 2)));
+    let console_array = trace
+        .arrays
+        .iter()
+        .position(|(key, _)| *key == keys::track::CONSOLE)
+        .expect("track console array");
+    let tracks_array = trace
+        .arrays
+        .iter()
+        .position(|(key, _)| *key == keys::session::TRACKS)
+        .expect("tracks array");
+    let pre_insert_array = trace
+        .arrays
+        .iter()
+        .position(|(key, _)| *key == keys::console::PRE_INSERT)
+        .expect("pre_insert array");
+    assert!(
+        pre_insert_array < tracks_array && tracks_array < console_array,
+        "root console, then tracks, then each track's console entries"
+    );
+    assert!(
+        trace
+            .records
+            .iter()
+            .any(|(key, _)| *key == Some(keys::track::INSERTS)),
+        "the inserts rack is walked"
+    );
+    let ids: Vec<&str> = trace.ids.iter().map(|(_, id)| id.as_str()).collect();
+    let desk_a = ids.iter().position(|id| *id == "desk-a").expect("slot id");
+    let vocal = ids.iter().position(|id| *id == "vocal").expect("track id");
+    assert!(desk_a < vocal, "slots are walked before tracks");
 }

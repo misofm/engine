@@ -21,22 +21,34 @@ fn every_nested_object_family_rejects_an_exact_unknown_leaf() {
             "/tracks/0/builtins/right",
             "$.tracks[0].builtins.right.unknown",
         ),
-        ("/tracks/0/simd1", "$.tracks[0].simd1.unknown"),
+        ("/console", "$.console.unknown"),
+        ("/console/pre_insert/0", "$.console.pre_insert[0].unknown"),
         (
-            "/tracks/0/dynamic/effects/0",
-            "$.tracks[0].dynamic.effects[0].unknown",
+            "/console/pre_insert/0/identity",
+            "$.console.pre_insert[0].identity.unknown",
+        ),
+        ("/console/post_insert/0", "$.console.post_insert[0].unknown"),
+        ("/tracks/0/console/0", "$.tracks[0].console[0].unknown"),
+        (
+            "/tracks/0/console/1/params/0",
+            "$.tracks[0].console[1].params[0].unknown",
+        ),
+        ("/tracks/0/inserts", "$.tracks[0].inserts.unknown"),
+        (
+            "/tracks/0/inserts/effects/0",
+            "$.tracks[0].inserts.effects[0].unknown",
         ),
         (
-            "/tracks/0/dynamic/effects/0/identity",
-            "$.tracks[0].dynamic.effects[0].identity.unknown",
+            "/tracks/0/inserts/effects/0/identity",
+            "$.tracks[0].inserts.effects[0].identity.unknown",
         ),
         (
-            "/tracks/0/dynamic/effects/0/params/0",
-            "$.tracks[0].dynamic.effects[0].params[0].unknown",
+            "/tracks/0/inserts/effects/0/params/0",
+            "$.tracks[0].inserts.effects[0].params[0].unknown",
         ),
         (
-            "/tracks/0/dynamic/effects/0/sidechain",
-            "$.tracks[0].dynamic.effects[0].sidechain.unknown",
+            "/tracks/0/inserts/effects/0/sidechain",
+            "$.tracks[0].inserts.effects[0].sidechain.unknown",
         ),
         ("/tracks/0/fader", "$.tracks[0].fader.unknown"),
         ("/tracks/0/pan", "$.tracks[0].pan.unknown"),
@@ -57,6 +69,27 @@ fn every_nested_object_family_rejects_an_exact_unknown_leaf() {
     ];
     for (pointer, expected_path) in cases {
         let mut value: serde_json::Value = serde_json::from_str(EXAMPLE).expect("fixture JSON");
+        // A console with a slot in each section, so its object families exist to be mutated.
+        value["console"] = serde_json::json!({
+            "pre_insert": [{
+                "slot": "desk-eq",
+                "identity": { "kind": "native", "effect_id": "miso.parametric-eq" },
+                "quality": "normal",
+                "link_mode": "dual_mono"
+            }],
+            "post_insert": [{
+                "slot": "desk-limit",
+                "identity": { "kind": "native", "effect_id": "miso.true-peak-limiter" },
+                "quality": "normal",
+                "link_mode": "maximum"
+            }]
+        });
+        value["tracks"][0]["console"] = serde_json::json!([
+            { "slot": "desk-eq", "bypass": false, "params": [] },
+            { "slot": "desk-limit", "bypass": false, "params": [
+                { "parameter_id": 1, "channel": "both", "unit": "db", "value": -1.0 }
+            ] }
+        ]);
         value
             .pointer_mut(pointer)
             .expect("pointer")

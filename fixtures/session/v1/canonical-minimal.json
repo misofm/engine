@@ -14,6 +14,10 @@
     "sample_format": "f32_planar"
   },
   "sources": [],
+  "console": {
+    "pre_insert": [],
+    "post_insert": []
+  },
   "tracks": [],
   "submixes": [],
   "outputs": [

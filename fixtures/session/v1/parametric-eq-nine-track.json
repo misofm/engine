@@ -22,6 +22,20 @@
       "frames": "48000"
     }
   ],
+  "console": {
+    "pre_insert": [
+      {
+        "slot": "eq",
+        "identity": {
+          "kind": "native",
+          "effect_id": "miso.parametric-eq"
+        },
+        "quality": "normal",
+        "link_mode": "dual_mono"
+      }
+    ],
+    "post_insert": []
+  },
   "submixes": [],
   "outputs": [
     {
@@ -34,7 +48,7 @@
       "source": {
         "kind": "track",
         "track_id": "eq0",
-        "tap": "post_matrix"
+        "tap": "post_pan"
       },
       "destination": {
         "kind": "output_input",
@@ -53,7 +67,7 @@
       "source": {
         "kind": "track",
         "track_id": "eq1",
-        "tap": "post_matrix"
+        "tap": "post_pan"
       },
       "destination": {
         "kind": "output_input",
@@ -72,7 +86,7 @@
       "source": {
         "kind": "track",
         "track_id": "eq2",
-        "tap": "post_matrix"
+        "tap": "post_pan"
       },
       "destination": {
         "kind": "output_input",
@@ -91,7 +105,7 @@
       "source": {
         "kind": "track",
         "track_id": "eq3",
-        "tap": "post_matrix"
+        "tap": "post_pan"
       },
       "destination": {
         "kind": "output_input",
@@ -110,7 +124,7 @@
       "source": {
         "kind": "track",
         "track_id": "eq4",
-        "tap": "post_matrix"
+        "tap": "post_pan"
       },
       "destination": {
         "kind": "output_input",
@@ -129,7 +143,7 @@
       "source": {
         "kind": "track",
         "track_id": "eq5",
-        "tap": "post_matrix"
+        "tap": "post_pan"
       },
       "destination": {
         "kind": "output_input",
@@ -148,7 +162,7 @@
       "source": {
         "kind": "track",
         "track_id": "eq6",
-        "tap": "post_matrix"
+        "tap": "post_pan"
       },
       "destination": {
         "kind": "output_input",
@@ -167,7 +181,7 @@
       "source": {
         "kind": "track",
         "track_id": "eq7",
-        "tap": "post_matrix"
+        "tap": "post_pan"
       },
       "destination": {
         "kind": "output_input",
@@ -186,7 +200,7 @@
       "source": {
         "kind": "track",
         "track_id": "eq8",
-        "tap": "post_matrix"
+        "tap": "post_pan"
       },
       "destination": {
         "kind": "output_input",
@@ -224,77 +238,63 @@
           "delay_samples": 0
         }
       },
-      "simd1": {
-        "effects": [
-          {
-            "id": "eq",
-            "identity": {
-              "kind": "native",
-              "effect_id": "miso.parametric-eq"
+      "console": [
+        {
+          "slot": "eq",
+          "bypass": false,
+          "params": [
+            {
+              "parameter_id": 1,
+              "channel": "both",
+              "unit": "linear",
+              "value": 1.0
             },
-            "quality": "normal",
-            "bypass": false,
-            "link_mode": "dual_mono",
-            "params": [
-              {
-                "parameter_id": 1,
-                "channel": "both",
-                "unit": "linear",
-                "value": 1.0
-              },
-              {
-                "parameter_id": 2,
-                "channel": "both",
-                "unit": "linear",
-                "value": 1.0
-              },
-              {
-                "parameter_id": 3,
-                "channel": "left",
-                "unit": "hz",
-                "value": 120.0
-              },
-              {
-                "parameter_id": 3,
-                "channel": "right",
-                "unit": "hz",
-                "value": 2400.0
-              },
-              {
-                "parameter_id": 4,
-                "channel": "left",
-                "unit": "db",
-                "value": 6.0
-              },
-              {
-                "parameter_id": 4,
-                "channel": "right",
-                "unit": "db",
-                "value": -9.0
-              },
-              {
-                "parameter_id": 5,
-                "channel": "both",
-                "unit": "ratio",
-                "value": 0.70710677
-              },
-              {
-                "parameter_id": 6,
-                "channel": "both",
-                "unit": "ratio",
-                "value": 1.0
-              }
-            ],
-            "sidechain": {
-              "kind": "none"
+            {
+              "parameter_id": 2,
+              "channel": "both",
+              "unit": "linear",
+              "value": 1.0
+            },
+            {
+              "parameter_id": 3,
+              "channel": "left",
+              "unit": "hz",
+              "value": 120.0
+            },
+            {
+              "parameter_id": 3,
+              "channel": "right",
+              "unit": "hz",
+              "value": 2400.0
+            },
+            {
+              "parameter_id": 4,
+              "channel": "left",
+              "unit": "db",
+              "value": 6.0
+            },
+            {
+              "parameter_id": 4,
+              "channel": "right",
+              "unit": "db",
+              "value": -9.0
+            },
+            {
+              "parameter_id": 5,
+              "channel": "both",
+              "unit": "ratio",
+              "value": 0.70710677
+            },
+            {
+              "parameter_id": 6,
+              "channel": "both",
+              "unit": "ratio",
+              "value": 1.0
             }
-          }
-        ]
-      },
-      "dynamic": {
-        "effects": []
-      },
-      "simd2": {
+          ]
+        }
+      ],
+      "inserts": {
         "effects": []
       },
       "fader": {
@@ -330,28 +330,14 @@
           "delay_samples": 0
         }
       },
-      "simd1": {
-        "effects": [
-          {
-            "id": "eq",
-            "identity": {
-              "kind": "native",
-              "effect_id": "miso.parametric-eq"
-            },
-            "quality": "normal",
-            "bypass": false,
-            "link_mode": "dual_mono",
-            "params": [],
-            "sidechain": {
-              "kind": "none"
-            }
-          }
-        ]
-      },
-      "dynamic": {
-        "effects": []
-      },
-      "simd2": {
+      "console": [
+        {
+          "slot": "eq",
+          "bypass": false,
+          "params": []
+        }
+      ],
+      "inserts": {
         "effects": []
       },
       "fader": {
@@ -387,28 +373,14 @@
           "delay_samples": 0
         }
       },
-      "simd1": {
-        "effects": [
-          {
-            "id": "eq",
-            "identity": {
-              "kind": "native",
-              "effect_id": "miso.parametric-eq"
-            },
-            "quality": "normal",
-            "bypass": false,
-            "link_mode": "dual_mono",
-            "params": [],
-            "sidechain": {
-              "kind": "none"
-            }
-          }
-        ]
-      },
-      "dynamic": {
-        "effects": []
-      },
-      "simd2": {
+      "console": [
+        {
+          "slot": "eq",
+          "bypass": false,
+          "params": []
+        }
+      ],
+      "inserts": {
         "effects": []
       },
       "fader": {
@@ -444,28 +416,14 @@
           "delay_samples": 0
         }
       },
-      "simd1": {
-        "effects": [
-          {
-            "id": "eq",
-            "identity": {
-              "kind": "native",
-              "effect_id": "miso.parametric-eq"
-            },
-            "quality": "normal",
-            "bypass": false,
-            "link_mode": "dual_mono",
-            "params": [],
-            "sidechain": {
-              "kind": "none"
-            }
-          }
-        ]
-      },
-      "dynamic": {
-        "effects": []
-      },
-      "simd2": {
+      "console": [
+        {
+          "slot": "eq",
+          "bypass": false,
+          "params": []
+        }
+      ],
+      "inserts": {
         "effects": []
       },
       "fader": {
@@ -501,28 +459,14 @@
           "delay_samples": 0
         }
       },
-      "simd1": {
-        "effects": [
-          {
-            "id": "eq",
-            "identity": {
-              "kind": "native",
-              "effect_id": "miso.parametric-eq"
-            },
-            "quality": "normal",
-            "bypass": false,
-            "link_mode": "dual_mono",
-            "params": [],
-            "sidechain": {
-              "kind": "none"
-            }
-          }
-        ]
-      },
-      "dynamic": {
-        "effects": []
-      },
-      "simd2": {
+      "console": [
+        {
+          "slot": "eq",
+          "bypass": false,
+          "params": []
+        }
+      ],
+      "inserts": {
         "effects": []
       },
       "fader": {
@@ -558,28 +502,14 @@
           "delay_samples": 0
         }
       },
-      "simd1": {
-        "effects": [
-          {
-            "id": "eq",
-            "identity": {
-              "kind": "native",
-              "effect_id": "miso.parametric-eq"
-            },
-            "quality": "normal",
-            "bypass": false,
-            "link_mode": "dual_mono",
-            "params": [],
-            "sidechain": {
-              "kind": "none"
-            }
-          }
-        ]
-      },
-      "dynamic": {
-        "effects": []
-      },
-      "simd2": {
+      "console": [
+        {
+          "slot": "eq",
+          "bypass": false,
+          "params": []
+        }
+      ],
+      "inserts": {
         "effects": []
       },
       "fader": {
@@ -615,28 +545,14 @@
           "delay_samples": 0
         }
       },
-      "simd1": {
-        "effects": [
-          {
-            "id": "eq",
-            "identity": {
-              "kind": "native",
-              "effect_id": "miso.parametric-eq"
-            },
-            "quality": "normal",
-            "bypass": false,
-            "link_mode": "dual_mono",
-            "params": [],
-            "sidechain": {
-              "kind": "none"
-            }
-          }
-        ]
-      },
-      "dynamic": {
-        "effects": []
-      },
-      "simd2": {
+      "console": [
+        {
+          "slot": "eq",
+          "bypass": false,
+          "params": []
+        }
+      ],
+      "inserts": {
         "effects": []
       },
       "fader": {
@@ -672,28 +588,14 @@
           "delay_samples": 0
         }
       },
-      "simd1": {
-        "effects": [
-          {
-            "id": "eq",
-            "identity": {
-              "kind": "native",
-              "effect_id": "miso.parametric-eq"
-            },
-            "quality": "normal",
-            "bypass": false,
-            "link_mode": "dual_mono",
-            "params": [],
-            "sidechain": {
-              "kind": "none"
-            }
-          }
-        ]
-      },
-      "dynamic": {
-        "effects": []
-      },
-      "simd2": {
+      "console": [
+        {
+          "slot": "eq",
+          "bypass": false,
+          "params": []
+        }
+      ],
+      "inserts": {
         "effects": []
       },
       "fader": {
@@ -729,28 +631,14 @@
           "delay_samples": 0
         }
       },
-      "simd1": {
-        "effects": [
-          {
-            "id": "eq",
-            "identity": {
-              "kind": "native",
-              "effect_id": "miso.parametric-eq"
-            },
-            "quality": "normal",
-            "bypass": false,
-            "link_mode": "dual_mono",
-            "params": [],
-            "sidechain": {
-              "kind": "none"
-            }
-          }
-        ]
-      },
-      "dynamic": {
-        "effects": []
-      },
-      "simd2": {
+      "console": [
+        {
+          "slot": "eq",
+          "bypass": false,
+          "params": []
+        }
+      ],
+      "inserts": {
         "effects": []
       },
       "fader": {

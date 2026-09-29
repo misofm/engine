@@ -22,6 +22,10 @@
       "frames": "48000"
     }
   ],
+  "console": {
+    "pre_insert": [],
+    "post_insert": []
+  },
   "tracks": [
     {
       "id": "vocal",
@@ -44,10 +48,8 @@
           "delay_samples": 0
         }
       },
-      "simd1": {
-        "effects": []
-      },
-      "dynamic": {
+      "console": [],
+      "inserts": {
         "effects": [
           {
             "id": "eq",
@@ -71,9 +73,6 @@
             }
           }
         ]
-      },
-      "simd2": {
-        "effects": []
       },
       "fader": {
         "left_db": 0.0,
@@ -100,7 +99,7 @@
       "source": {
         "kind": "track",
         "track_id": "vocal",
-        "tap": "post_matrix"
+        "tap": "post_pan"
       },
       "destination": {
         "kind": "output_input",
@@ -120,7 +119,7 @@
       "id": "eq-gain",
       "target": {
         "entity_id": "vocal",
-        "rack": "dynamic",
+        "rack": "inserts",
         "effect_id": "eq",
         "parameter_id": 1,
         "channel": "both"

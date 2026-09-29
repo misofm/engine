@@ -4,7 +4,7 @@
   "title": "MisoFM Session V1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "session_id", "revision", "sample_rate_hz", "quantum_frames", "render_profile", "output_profile", "sources", "tracks", "submixes", "outputs", "routes", "automation"],
+  "required": ["schema_version", "session_id", "revision", "sample_rate_hz", "quantum_frames", "render_profile", "output_profile", "sources", "console", "tracks", "submixes", "outputs", "routes", "automation"],
   "properties": {
     "schema_version": { "const": 1 },
     "session_id": { "$ref": "#/$defs/id" },
@@ -14,6 +14,7 @@
     "render_profile": { "$ref": "#/$defs/render_profile" },
     "output_profile": { "$ref": "#/$defs/output_profile" },
     "sources": { "type": "array", "items": { "$ref": "#/$defs/source" } },
+    "console": { "$ref": "#/$defs/console" },
     "tracks": { "type": "array", "items": { "$ref": "#/$defs/track" } },
     "submixes": { "type": "array", "items": { "$ref": "#/$defs/id_record" } },
     "outputs": { "type": "array", "items": { "$ref": "#/$defs/id_record" } },
@@ -60,6 +61,22 @@
       "type": "object", "additionalProperties": false, "required": ["left", "right"],
       "properties": { "left": { "$ref": "#/$defs/channel_builtins" }, "right": { "$ref": "#/$defs/channel_builtins" } }
     },
+    "console_slot": {
+      "type": "object", "additionalProperties": false, "required": ["slot", "identity", "quality", "link_mode"],
+      "properties": {
+        "slot": { "$ref": "#/$defs/id" },
+        "identity": { "type": "object", "additionalProperties": false, "required": ["kind", "effect_id"], "properties": { "kind": { "const": "native" }, "effect_id": { "$ref": "#/$defs/id" } } },
+        "quality": { "enum": ["draft", "normal", "high"] }, "link_mode": { "enum": ["dual_mono", "maximum", "average"] }
+      }
+    },
+    "console": {
+      "type": "object", "additionalProperties": false, "required": ["pre_insert", "post_insert"],
+      "properties": { "pre_insert": { "type": "array", "items": { "$ref": "#/$defs/console_slot" } }, "post_insert": { "type": "array", "items": { "$ref": "#/$defs/console_slot" } } }
+    },
+    "console_entry": {
+      "type": "object", "additionalProperties": false, "required": ["slot", "bypass", "params"],
+      "properties": { "slot": { "$ref": "#/$defs/id" }, "bypass": { "type": "boolean" }, "params": { "type": "array", "items": { "$ref": "#/$defs/effect_param" } } }
+    },
     "rack": {
       "type": "object", "additionalProperties": false, "required": ["effects"],
       "properties": { "effects": { "type": "array", "items": { "$ref": "#/$defs/effect" } } }
@@ -76,7 +93,7 @@
     },
     "route_source": {
       "oneOf": [
-        { "type": "object", "additionalProperties": false, "required": ["kind", "track_id", "tap"], "properties": { "kind": { "const": "track" }, "track_id": { "$ref": "#/$defs/id" }, "tap": { "enum": ["input", "post_input_builtins", "post_simd1", "post_dynamic", "post_simd2_pre_fader", "post_fader", "post_matrix"] } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "track_id", "tap"], "properties": { "kind": { "const": "track" }, "track_id": { "$ref": "#/$defs/id" }, "tap": { "enum": ["input", "post_input", "insert_send", "insert_return", "pre_fader", "post_fader", "post_pan"] } } },
         { "type": "object", "additionalProperties": false, "required": ["kind", "submix_id"], "properties": { "kind": { "const": "submix_output" }, "submix_id": { "$ref": "#/$defs/id" } } }
       ]
     },
@@ -109,13 +126,13 @@
     "track_base": {
       "type": "object", "additionalProperties": false, "properties": {
         "id": { "$ref": "#/$defs/id" }, "source_id": { "$ref": "#/$defs/id" }, "left_source_channel": { "$ref": "#/$defs/u8" }, "right_source_channel": { "$ref": "#/$defs/u8" },
-        "builtins": { "$ref": "#/$defs/builtins" }, "simd1": { "$ref": "#/$defs/rack" }, "dynamic": { "$ref": "#/$defs/rack" }, "simd2": { "$ref": "#/$defs/rack" }, "fader": { "$ref": "#/$defs/fader" }
+        "builtins": { "$ref": "#/$defs/builtins" }, "console": { "type": "array", "items": { "$ref": "#/$defs/console_entry" } }, "inserts": { "$ref": "#/$defs/rack" }, "fader": { "$ref": "#/$defs/fader" }
       }
     },
     "track": {
       "oneOf": [
-        { "type": "object", "additionalProperties": false, "required": ["id", "source_id", "left_source_channel", "right_source_channel", "builtins", "simd1", "dynamic", "simd2", "fader", "pan"], "properties": { "id": { "$ref": "#/$defs/id" }, "source_id": { "$ref": "#/$defs/id" }, "left_source_channel": { "$ref": "#/$defs/u8" }, "right_source_channel": { "$ref": "#/$defs/u8" }, "builtins": { "$ref": "#/$defs/builtins" }, "simd1": { "$ref": "#/$defs/rack" }, "dynamic": { "$ref": "#/$defs/rack" }, "simd2": { "$ref": "#/$defs/rack" }, "fader": { "$ref": "#/$defs/fader" }, "pan": { "$ref": "#/$defs/pan" } } },
-        { "type": "object", "additionalProperties": false, "required": ["id", "source_id", "left_source_channel", "right_source_channel", "builtins", "simd1", "dynamic", "simd2", "fader", "matrix"], "properties": { "id": { "$ref": "#/$defs/id" }, "source_id": { "$ref": "#/$defs/id" }, "left_source_channel": { "$ref": "#/$defs/u8" }, "right_source_channel": { "$ref": "#/$defs/u8" }, "builtins": { "$ref": "#/$defs/builtins" }, "simd1": { "$ref": "#/$defs/rack" }, "dynamic": { "$ref": "#/$defs/rack" }, "simd2": { "$ref": "#/$defs/rack" }, "fader": { "$ref": "#/$defs/fader" }, "matrix": { "$ref": "#/$defs/matrix" } } }
+        { "type": "object", "additionalProperties": false, "required": ["id", "source_id", "left_source_channel", "right_source_channel", "builtins", "console", "inserts", "fader", "pan"], "properties": { "id": { "$ref": "#/$defs/id" }, "source_id": { "$ref": "#/$defs/id" }, "left_source_channel": { "$ref": "#/$defs/u8" }, "right_source_channel": { "$ref": "#/$defs/u8" }, "builtins": { "$ref": "#/$defs/builtins" }, "console": { "type": "array", "items": { "$ref": "#/$defs/console_entry" } }, "inserts": { "$ref": "#/$defs/rack" }, "fader": { "$ref": "#/$defs/fader" }, "pan": { "$ref": "#/$defs/pan" } } },
+        { "type": "object", "additionalProperties": false, "required": ["id", "source_id", "left_source_channel", "right_source_channel", "builtins", "console", "inserts", "fader", "matrix"], "properties": { "id": { "$ref": "#/$defs/id" }, "source_id": { "$ref": "#/$defs/id" }, "left_source_channel": { "$ref": "#/$defs/u8" }, "right_source_channel": { "$ref": "#/$defs/u8" }, "builtins": { "$ref": "#/$defs/builtins" }, "console": { "type": "array", "items": { "$ref": "#/$defs/console_entry" } }, "inserts": { "$ref": "#/$defs/rack" }, "fader": { "$ref": "#/$defs/fader" }, "matrix": { "$ref": "#/$defs/matrix" } } }
       ]
     },
     "route_destination": {
@@ -134,7 +151,7 @@
     },
     "automation_target": {
       "type": "object", "additionalProperties": false, "required": ["entity_id", "rack", "effect_id", "parameter_id", "channel"],
-      "properties": { "entity_id": { "$ref": "#/$defs/id" }, "rack": { "enum": ["simd1", "dynamic", "simd2", "builtins"] }, "effect_id": { "$ref": "#/$defs/id" }, "parameter_id": { "$ref": "#/$defs/u32" }, "channel": { "$ref": "#/$defs/channel" } }
+      "properties": { "entity_id": { "$ref": "#/$defs/id" }, "rack": { "enum": ["inserts", "builtins", "console"] }, "effect_id": { "$ref": "#/$defs/id" }, "parameter_id": { "$ref": "#/$defs/u32" }, "channel": { "$ref": "#/$defs/channel" } }
     },
     "automation_segment": {
       "type": "object", "additionalProperties": false, "required": ["shape", "start_sample", "end_sample", "start_value", "end_value", "unit"],
