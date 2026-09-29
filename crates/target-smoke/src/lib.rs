@@ -1,4 +1,4 @@
-//! Portable target-smoke values used by bootstrap hosts and CI.
+//! Portable target-smoke values: the per-target lane-width pin CI compiles and tests.
 
 use engine::{EngineVersion, QuantumFrames, SampleRateHz};
 use lane::Backend;

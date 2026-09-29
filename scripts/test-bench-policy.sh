@@ -404,9 +404,9 @@ printf '[dependencies]\nbench-support.workspace = true\n' \
 expect_failure production-dependency
 
 new_case host-dependency
-mkdir -p "$case_root/hosts/host-native"
+mkdir -p "$case_root/hosts/host-web"
 printf '[dev-dependencies]\nbench-support.workspace = true\n' \
-    >"$case_root/hosts/host-native/Cargo.toml"
+    >"$case_root/hosts/host-web/Cargo.toml"
 expect_failure host-dependency
 
 # #105 phase 2 amended the rule to be section-aware. These two cases pin both halves of it: the

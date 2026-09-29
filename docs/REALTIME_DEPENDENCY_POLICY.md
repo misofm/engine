@@ -296,9 +296,11 @@ render state exists, and refuses to start on an error:
 
 | entry point | on failure |
 |---|---|
-| `hosts/host-native` `main` | diagnostic on stderr, `ExitCode::FAILURE` |
-| `hosts/host-mobile` `mobile_target_smoke` | `Err(HostAttestation)` |
 | `crates/capi` `miso_engine_v1_engine_create` | `MISO_ENGINE_V1_UNSUPPORTED` (7) |
+
+The native and mobile bootstrap shells (`hosts/host-native`, `hosts/host-mobile`) also called it
+until #1032 removed them: nothing linked them, and a native iOS or Android app embeds the engine
+through the C ABI, so `engine_create` is the one native entry point.
 
 The C header previously said `MISO_ENGINE_V1_UNSUPPORTED` was reserved and never returned; it is
 now returned by that one entry point and the header says so. An embedder that receives it must not
