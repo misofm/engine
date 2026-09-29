@@ -391,3 +391,162 @@ removed. Nearly all of it is test code:
 - **CI and docs**, 20 added and 2 removed: `nightly.yml` 16, `ENGINE_ENV_VOCABULARY.md` +4/-2.
 
 Plus this evidence section.
+
+## Sol verdict, attempt 1
+
+**FAIL.** The differentials are real, deterministic and replayable. The five defects reproduce as
+filed, and the claimed catches I re-ran hold. But merged into the batch, #1051 no longer compiles
+wherever nothing turns on `lane/test-support`, and that breaks three required CI jobs and every
+effect crate's printed replay command. A second finding is an early return that can hide a D7
+trip on legal input.
+
+Verified on a scratch merge of `cf3861bb` into `codex/batch-slim-4` at `124968b7` (main plus
+#1060, #1062 and #1050). The textual merge is clean. The semantic conflict is F1.
+
+### Findings, by severity
+
+1. **Blocking: a broken gate on the merge (semantic conflict with #1059).**
+   - #1059, which came in with the batch, compiles `lane::Backend::Scalar` only under
+     `lane/test-support`.
+   - `crates/conformance/src/randomized.rs:1692` names `Backend::Scalar` in `bind_eligibility`'s
+     malformed-shape rows. That row is `("the scalar backend", &base[..], Backend::Scalar)`.
+   - Conformance's lib now compiles only where a dev-dependency unifies that feature in. The
+     compressor, builtins and graph test-support paths do; `audit` and `bench` depend on
+     `conformance` as a normal dependency, and nothing turns it on for them.
+   - Reproduced on the merge, each with `error[E0599] ... Backend::Scalar`:
+     - `cargo check --workspace` fails.
+     - The lint job's `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps` fails
+       (exit 101).
+     - audit-native's `cargo build --release -p audit -p bench -p capi -p session-validator` fails,
+       and so does its `cargo test --release -p audit -p bench -p console-workload`. The scripts
+       that build those binaries also fail: `check-effect-contract.sh` and
+       `check-builtins-fixtures.sh`.
+     - aarch64-release's `cargo build --release -p audit` fails.
+     - Nightly's `test-native-vectorization-report.sh` fails.
+   - **Gate 4 is broken as well.** These commands no longer compile:
+     - the printed replay command of seven effect crates, `cargo test -p <crate> --test randomized
+       ...` for every effect except the compressor;
+     - the EQ `--lib` replay;
+     - every #1069, #1070, #1071 and #1073 reproducer command in the evidence.
+
+     The compressor, builtins, host-core and source replays still compile.
+   - **Fix.** Drop that row. A shipped build cannot form a `Backend::Scalar` request, and the other
+     three malformed-shape rows keep the probe. Then re-run `cargo doc`, `cargo check --workspace`,
+     the audit-native build step and each printed replay command exactly as printed.
+2. **Should fix: the D7 early return hides a D7 trip on legal input.**
+   - `run_width` ends a scenario silently whenever `recovered()` sees any lane report a D7 block
+     (`conformance/src/randomized.rs:1024-1047`). That includes a block with finite, legal input
+     and no terminal restore.
+   - D7 zeroes that block, so the "D7 bound" check passes vacuously there. The spec's "finite
+     output for finite legal input" invariant is therefore never enforced.
+   - **Planted defect.** I inserted a NaN into the compressor's dual `render` output whenever a word
+     matches `bits & 0xffff == 0x1234`, on legal input. The compressor differential stayed green
+     with the defect in place: two scenarios recovered on non-hostile, finite blocks and ended
+     early.
+   - **Per-PR data, instrumented and then reverted.** All 46 recoveries across the per-PR effect
+     set fall on the drawn hostile block. None falls on a legal block.
+   - So asserting "recovery only on the hostile block" costs nothing and closes the gap.
+3. **Low: the #1072 allowance is narrow in value but not in scope.**
+   - **What it forgives.** Only `+0.0` against `-0.0`. It never forgives a NaN or any other word.
+   - **Where it applies.** It covers every lane, and the output composed from all three stages. It
+     is on for every block that starts before the latest matrix ramp's end.
+   - **Per PR.** That is 542 of 1,152 builtins blocks (47 %), and 57 words were actually forgiven.
+   - **It outlives the ramp.** The reset branch does not clear `matrix_ramp_end`.
+   - **Consequence.** A signed-zero defect in the input or fader bank is hidden on those blocks. It
+     stays visible on the strict 53 %.
+   - **Fix.** Compare the matrix stage on its own and forgive only there, and clear the end on
+     reset.
+4. **Low: the other two allowances check less than they could.**
+   - `Known::SubnormalStateRefusedOnRestore` (#1071) accepts an own-snapshot refusal with any
+     code. Per PR, all five tolerated refusals were `effect.state.history` with a subnormal word in
+     the payload, so today it forgives only the defect, but nothing checks that.
+   - `Known::BindDeclinesBeforeValidating` (#1070) accepts the decline at every width, the native
+     one included.
+5. **Budget: consistent with the claim, on a loaded box.**
+   - Measured single-threaded with `--report-time` at load 35-50:
+     - `test-debug-b`: about 7.8 s (EQ restores 1.56 s, compressor 1.04 s, soft clip 1.02 s, EQ
+       0.95 s, builtins 0.82 s, transient shaper 0.81 s, multiband 0.64 s, delay 0.48 s,
+       gate 0.46 s, witness 0.04 s);
+     - `test-debug-a`: about 3.2 s (consoles 2.95 s, response 0.24 s, source 0.04 s).
+   - That is about 11 s against the claimed 8.6 s at load 18-27. Over the spec's 5 s per debug job
+     at this load, and neither of us measured on a quiet box or timed the link of the 11 new
+     test binaries.
+   - **Where they run.** `test-debug-a`, `test-debug-b` and `aarch64-debug` per PR, and nightly at
+     100x. They do not run in `test-release` or `aarch64-release`.
+6. **Not verified: AArch64 execution.**
+   - Resolved on x86 instead. The `aarch64-debug` package and feature set compiles and lists 1,821
+     tests. Every new test is in that list.
+   - `aarch64-known-defects.py judge-skips debug` passes: both rows name an existing test. The
+     known-defects self-test and the silent-skip scan are clean.
+   - Width handling is sound. Each harness binds both widths, `banks_natively` requires the native
+     bind, and NaN is one class only in output comparisons.
+   - No arm64 hardware or emulation exists here, so the #1019 and #1065 risk on the new tests
+     stands unmeasured.
+
+### Graph and rack (host-core's console differential): keep it
+
+AGENTS.md judges a differential by what its generator reaches, not by unique catches. This is the
+only generator that drives live-console records through an armed collapse, and the only
+differential over `prepare_host_runtime_between_render_calls`. The records are one-channel
+parameter points, live bypass, and trim, fader, mute and matrix retargets. The #966 probe uses
+neither.
+
+It is also the largest per-PR share, about 3 s. If budget matters, halve its seeds per PR; the
+nightly run still covers 100x.
+
+### Verified
+
+- **Unique catches.** I re-ran four mutants by hand; cargo-mutants is not installed here. Each is
+  red on the new test and green on every other suite. "Every other suite" means the full
+  `test-debug-b` and `test-debug-a` commands, plus `audit`, `bench` and `console-workload` in dev.
+  - compressor `lib.rs:704` `|| -> &&` (amendment 2): red on both `tests/randomized.rs` and
+    `witness_tests`.
+  - compressor `lib.rs:536:29` `== -> !=` (silent path): red, from the bank state against its
+    scalar instance.
+  - gate-expander `lib.rs:546` `&& -> ||` (`apply_automation` validity): red, by an
+    out-of-bounds span index.
+  - host-core `index_of_parameter -> 0`: red, `DuplicateParameter`.
+
+  A fifth, host-core `generate_response_grid` `> -> >=` at Nyquist, is also caught by an existing
+  lib test. It was my pick, not one of the claimed nine.
+- **Reproducers.**
+  - The four seeded ones fail at their seeds for the stated reasons:
+    - #1069 at seed 1: `0x3f5e220a` against `0x3f5e24e0`, lane 0, frame 54;
+    - #1070 at seed 0: `effect.parameter.initial` declined;
+    - #1071 at seed 0: `effect.state.history`;
+    - #1072 at seed 7: `0x00000000` against `0x80000000`.
+  - The five #1073 D7 probes fail as described.
+  - All nine `#[ignore]`s name their issue, and #1069-#1073 are open on GitHub.
+- **Determinism.** Three runs of every effect binary are byte-identical. Seeds are fixed, from 0
+  to the per-PR count, and a replay by seed reproduces the failure.
+- **No source scrapes.** `check-workspace-policy.sh`, including #1052's lint, passes. The only
+  `include_str!` reads a session fixture, which is data.
+- **Gates on the merge.**
+  - `cargo check --workspace --all-targets --all-features`, clippy `-D warnings` and fmt pass.
+  - `test-debug-b` passes in dev (807 passed, 0 failed) and in release with the same counts.
+  - `test-debug-a` passes in dev (1,270 passed). host-core and source also pass in release
+    (210 passed).
+  - Console-workload's digests pass in dev.
+  - The routing checks pass: `check-ci-path-routing.py` and `test-ci-path-routing.py`.
+  - Every other policy script passes, except the three F1 casualties, and except those that need a
+    prebuilt binary, a browser or npm (`check-capi-abi`, `check-graph-determinism`, `sdk`, `web`
+    and `cross-targets`). No product code changed.
+
+### Test value
+
+- **compressor `tests/randomized.rs` and `witness_tests`:** a witness that folds one field with
+  `&&`, or a silent fast path that earns its claim from the wrong word (#970 class).
+- **gate-expander, transient-shaper:** an automation-span validity check that admits an off-start
+  or out-of-range span.
+- **delay:** a bind that banks an ineligible cohort.
+- **soft-clip:** a bank reset or state field that diverges from the scalar instance.
+- **multiband:** ramp segmentation that depends on a neighbouring lane (the planted `plan_segment`
+  mutant, #1069).
+- **EQ bank differential:** the three-outcome bind order (#1070).
+- **EQ `randomized_restores`:** a restored subnormal that flips a signed zero through the
+  stationary elision (#1015).
+- **builtins:** bank-against-scalar sign and sanitised counts under live retargets (#1072).
+- **source:** the ring's generation, stale and end-of-region verdicts against the documented model.
+- **host-core response:** the override-list and grid-law edges (`index_of_parameter`).
+- **host-core consoles:** the armed and the serialized lowering against dual under live records.
+- **D7 probes:** red on #1073 by construction.
