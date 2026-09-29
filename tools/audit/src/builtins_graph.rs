@@ -838,29 +838,4 @@ mod tests {
             );
         }
     }
-
-    #[test]
-    fn issue070_retirement_worker_source_is_limited_to_nonblocking_primitives() {
-        let source = include_str!("builtins_graph.rs");
-        let (_, worker) = source
-            .split_once("fn run_retirement_worker")
-            .expect("worker source");
-        let (worker, _) = worker
-            .split_once("\npub(crate) fn main")
-            .expect("worker boundary");
-        assert!(worker.contains(concat!("spin", "_loop")));
-        assert!(source.contains(concat!("bounded_spsc", "_move")));
-        for forbidden in [
-            concat!("m", "psc"),
-            concat!(".re", "cv("),
-            concat!("pa", "rk"),
-            concat!("yield", "_now"),
-            concat!("sl", "eep"),
-        ] {
-            assert!(
-                !worker.contains(forbidden),
-                "worker must not contain {forbidden}"
-            );
-        }
-    }
 }

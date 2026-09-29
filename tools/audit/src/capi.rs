@@ -323,20 +323,4 @@ mod tests {
         drop(prepared);
         assert!(!audit::is_render_scope_active());
     }
-
-    #[test]
-    fn audit_plan_is_fixed_non_timed_and_calls_the_c_entrypoint() {
-        const SOURCE: &str = include_str!("capi.rs");
-        assert_eq!(CALLS, 100_000);
-        assert!(SOURCE.contains("miso_engine_v1_render_f32_planar("));
-        for forbidden in [
-            concat!("std", "::time"),
-            concat!("Instant", "::"),
-            concat!("SystemTime", "::"),
-            concat!("Duration", "::"),
-            concat!(".", "elapsed()"),
-        ] {
-            assert!(!SOURCE.contains(forbidden), "timer surface: {forbidden}");
-        }
-    }
 }

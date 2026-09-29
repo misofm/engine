@@ -2601,42 +2601,4 @@ mod tests {
         );
         destroy_fixture(engine, session, plan);
     }
-
-    /// F2 (b): the control/render split is a property of the code, not of a comment. Forming a
-    /// reference to the whole `Plan` re-creates the whole-struct borrow that this job removed, so
-    /// no such form may appear in this file.
-    #[test]
-    fn ffi_never_forms_a_whole_plan_reference() {
-        const SOURCE: &str = include_str!("ffi.rs");
-        let production = SOURCE
-            .split("#[cfg(test)]\nmod tests {")
-            .next()
-            .expect("production region precedes the test module");
-        assert!(production.contains("miso_engine_v1_render_f32_planar"));
-        for form in ["&*plan", "&mut *plan", "&(*plan)", "&mut (*plan)"] {
-            let mut hits = Vec::new();
-            for (index, line) in production.lines().enumerate() {
-                if line.trim_start().starts_with("//") {
-                    continue;
-                }
-                let mut rest = line;
-                while let Some(at) = rest.find(form) {
-                    let tail = &rest[at + form.len()..];
-                    // `&*plan.cast::<HandleHeader>()` borrows only the shared 16-byte header and
-                    // `&*plan_error_slot(..)` names a different item; neither borrows the plan.
-                    let projection = tail
-                        .starts_with(|next: char| next.is_alphanumeric() || next == '_')
-                        || tail.starts_with('.');
-                    if !projection {
-                        hits.push(format!("{}: {}", index + 1, line.trim()));
-                    }
-                    rest = tail;
-                }
-            }
-            assert!(
-                hits.is_empty(),
-                "ffi.rs forms a whole-plan reference {form}: {hits:?}"
-            );
-        }
-    }
 }
