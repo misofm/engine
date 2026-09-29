@@ -660,12 +660,15 @@ impl CompileObservation {
     /// * The prepared plan is bounded by its engine rows. Those rows are the graph compiler's
     ///   admission estimate, which charges the preparation, not only what the bound plan keeps:
     ///   the compile-time graph metadata, bank scratch per slot where a merged chain keeps one
-    ///   slot's, and #511's and #936's reservations at their bound. The slack is 128,317 bytes on
-    ///   the EQ fixture at eight lanes, 128,405 at four, and 12,233 on the browser identity
-    ///   fixture, so an uncharged plan allocation smaller than that is not seen here. Seeing it
-    ///   needs per-owner attribution inside the prepared plan, which no public API exposes; #1060
-    ///   attempt 2 records that as a successor for root to file. Builtins have their own
-    ///   allocator oracle (`builtins-compiler/tests/allocation_tracker.rs`).
+    ///   slot's, and #511's and #936's reservations at their bound. The slack, eight lanes / four,
+    ///   is 128,317 / 128,405 bytes on the EQ fixture and 12,233 / 8,109 on the browser identity
+    ///   fixture, so an uncharged plan allocation smaller than that is not seen here: an uncharged
+    ///   16-word-per-unit table in the graph runtime (1,808 bytes on the EQ fixture) stays green,
+    ///   and the same table at 2,048 words per unit is red. Seeing the small one needs per-owner
+    ///   attribution inside the prepared plan -- a retained-bytes walk over the bound runtime, as
+    ///   `observation_retained_bytes` already is for its lanes -- which no public API exposes.
+    ///   That is a successor to #1060 (root files it; the spec's attempt-2 evidence names it).
+    ///   Builtins have their own allocator oracle (`builtins-compiler/tests/allocation_tracker.rs`).
     fn assert_host_owners_are_charged(&self, label: &str) {
         let owners = &self.owners;
         assert_eq!(

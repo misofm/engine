@@ -119,12 +119,7 @@ pub fn compile_session(
     let estimate = estimate_session(session)?;
     check_caps(session, estimate, caps)?;
     validate_session(session)?;
-    let mut canonical_json = write_canonical(session);
-    // The writer grows its `String` by doubling, so it ends with up to half its allocation spare
-    // (16,056 of 32,768 bytes on the nine-track EQ fixture). The estimate charges the snapshot's
-    // length, and this artifact keeps it for its whole life, so give the spare back now, on the
-    // control plane, with the one reallocation it costs (#1060).
-    canonical_json.shrink_to_fit();
+    let canonical_json = write_canonical(session);
     let estimate = with_canonical_bytes(estimate, canonical_json.len())?;
     debug_assert!(estimate.compiled_model_bytes <= caps.max_compiled_model_bytes);
     let mut normalized = session.clone();
