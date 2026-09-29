@@ -350,7 +350,8 @@ const INPUT_PROCESSOR_BYTES: u64 = 688;
 const STRIP_PREPARATION_BYTES: u64 = 1072;
 const FADER_PROCESSOR_BYTES: u64 = 16;
 const MATRIX_PROCESSOR_BYTES: u64 = 136;
-const GRAPH_OBSERVER_BINDING_BYTES: u64 = 88;
+// #1080 removed the controlled-activation flag #816 added, so the binding is 80 bytes again.
+const GRAPH_OBSERVER_BINDING_BYTES: u64 = 80;
 const METER_CONSUMER_BYTES: u64 = 72;
 // A2's private `MeterRequestSeal` binding policy fits the existing alignment padding, so its
 // native size remains 56 bytes after controlled-meter provenance was added.
@@ -5243,7 +5244,10 @@ mod tests {
             // Re-pinned by issue #818 A1: `MeterSnapshot` and `MeterAccumulator` grow to their
             // actual Rust layouts (168 and 240 bytes); A2's request seal remains 56 bytes. Only
             // the resource rows and this joined manifest identity move.
-            "ae83244956cccc6b1195656dfbe929fcb9cb730232193626c2cff973ba8aff7f",
+            // Re-pinned by issue #1080: the controlled-activation flag goes again, so
+            // `GraphNodeObserverBinding` is 80 bytes and each meter row loses eight bytes per
+            // meter; only the resource rows and this joined manifest identity move.
+            "f25f5d103966eae2aca8ec9103cc6c76fc4f0720164292e1c54ef4fe29037fb7",
             "accepted joined-corpus manifest identity"
         );
         remove_temporary_root(root);
