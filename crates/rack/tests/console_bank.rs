@@ -801,9 +801,9 @@ fn a_channel_less_bypassed_lane_is_shunted_without_a_staging_window() {
             *bypassed, delayed,
             "sample {index}: lane 0 is dry at the latency"
         );
-        for lane in 1..LANES {
+        for (lane, wet) in seen.iter().enumerate().skip(1) {
             assert_eq!(
-                seen[lane][index],
+                wet[index],
                 delayed * 0.5,
                 "sample {index}: lane {lane} keeps the wet signal"
             );
