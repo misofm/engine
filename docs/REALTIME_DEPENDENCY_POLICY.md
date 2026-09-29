@@ -119,12 +119,10 @@ benchmark, to locally allow unsafe code, and gave `tools/bench` its tool-only `f
 dependency. #1075 retired that benchmark under owner ruling R9 (only real host paths are
 benchmarked); the file, its unsafe exemption and the `flatbuffers` dependency are gone.
 
-The source-policy checker currently accepts unsafe syntax in exactly four source files:
-`crates/engine/src/realtime/spsc.rs`,
-`tools/audit/src/realtime.rs`, and
-`tools/audit/src/protocol.rs`, and
-`tools/bench/src/protocol.rs` (retired by #1075). The latter two are the only Issue-005
-audit/benchmark exceptions; no sibling source file in either tool is permitted to use unsafe code.
+The source-policy checker originally accepted unsafe syntax in exactly four source files:
+`crates/engine/src/realtime/spsc.rs`, `tools/audit/src/realtime.rs`, `tools/audit/src/protocol.rs`
+and `tools/bench/src/protocol.rs`. #1075 retired the last of these, so `tools/audit/src/protocol.rs`
+is now the only Issue-005 audit exception; no sibling source file in the tool may use unsafe code.
 
 That sentence has fallen behind `scripts/check-realtime-policy.sh`, whose exemption list has grown
 with each approved issue and is the authority; the script, not this paragraph, is what CI runs.
