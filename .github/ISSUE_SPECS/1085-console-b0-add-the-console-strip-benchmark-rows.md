@@ -244,3 +244,155 @@ round.
   `simd1`/`dynamic`/`simd2`.
 - S4 expects the app document's EQ and compressor in `console.pre_insert` after the migration. The
   validators already accept that spelling.
+
+## Sol verdict, attempt 1
+
+**PASS.** Sol verified `e1b0fed3` and `bb6000c0` from `6fdf5db2`. No timed run was made. The rows
+measure what S0 and S4 need, the benchmark rules hold, the pins are deterministic, and every gate
+passes. The S0 command block needs correcting before S0 runs (M1). That is an evidence defect, not
+a code defect.
+
+### Findings, by severity
+
+**M1. The S0 command block cannot be run as written.**
+- The lock is a placeholder (`/path/to/operator/timing.lock`). The operator's lock is
+  `/tmp/claude-1002/-home-bl-misofm-engine/43895396-e183-427f-b08f-a0b72f15ae5f/scratchpad/timing.lock`.
+- The conditional waiver traps the step name. The native runner creates
+  `artifacts/steps/console-strip-base/` and its stderr log before admissibility. On a precondition
+  refusal it writes a FAIL `console-benchmark.disposition.json` (`run-console-benchmark.sh`, the
+  `mkdir`/`: >"$stderr_log"` lines and `on_exit`). A second invocation with
+  `MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1` then refuses to overwrite, and it refuses the untracked
+  disposition as a dirty tree. With this host's load (1-minute loadavg about 9, against a 0.50
+  ceiling), the first run would be refused.
+- Setting the waiver up front costs nothing. Both runners record `controlled` when no precondition
+  fails, and they write `uncontrolled` only when one does.
+- The block does not copy the records from the detached worktree back to the batch branch.
+- V8 `prepare`/`preflight` run after the native timed run. A V8 infrastructure failure would then
+  leave half a baseline. Preflight both arms before timing either.
+
+Corrected block, for S0 (#1086):
+
+```bash
+LOCK=/tmp/claude-1002/-home-bl-misofm-engine/43895396-e183-427f-b08f-a0b72f15ae5f/scratchpad/timing.lock
+B0=<B0 merge commit on codex/batch-console-1>
+BATCH=/home/bl/misofm/worktrees/engine-console
+WT=<an unused scratch path>
+git -C /home/bl/misofm/engine worktree add --detach "$WT" "$B0" && cd "$WT"
+W=$(mktemp -d)
+bash scripts/run-web-mixing-automation-benchmark.sh prepare "$W"
+bash scripts/run-web-mixing-automation-benchmark.sh preflight "$W"
+bash scripts/operator/preflight-console-benchmark.sh --step console-strip-base
+flock -w 7200 "$LOCK" env MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1 \
+    bash scripts/operator/run-console-benchmark.sh --step console-strip-base
+flock -w 7200 "$LOCK" env MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1 \
+    bash scripts/run-web-mixing-automation-benchmark.sh run "$W" --step console-strip-base
+cp -r artifacts/steps/console-strip-base "$BATCH/artifacts/steps/"
+```
+
+Each runner makes one invocation, with one warmup and two measured rounds. Both runners enforce
+this.
+
+**L1. Gate 4 says "not by a new pinned digest".** B0 adds five 64-block pins
+(`the_console_strip_rows_render_their_pinned_bits`).
+- They are deterministic: two release runs and one debug run passed.
+- They give P1 through S2 a per-slice class-A check, so keep them.
+- The evidence should state the deviation. It should also say that an unrelated change which moves
+  bits must repin them, under S4 gate 5's re-baseline allowance.
+
+**L2. The S1a hand-off note misses some rack readers.** Besides the three derive scripts and
+`console_model`, S1a must port:
+- `BypassCensus::of` in `tools/console-workload/src/lib.rs`;
+- the harness's new `SECTIONS`, `trackLayout` and `bypassCensus` in
+  `scripts/web-mixing-automation-benchmark.mjs`;
+- the app arm of `Workload::strip_layout`, which must flip to `pre_insert:eq+compressor`.
+
+The native validator accepts both spellings for the app row, so it will not catch a missed flip.
+Only the V8 harness's per-track check catches it, once ported.
+
+**L3. The native preflight's provenance JSON omits the app fixture.** It hashes the standing and
+mono fixtures and their generators, but not `console-sixty-four-track-app.json` or
+`derive-app-console-fixture.py`. `candidate_commit` pins both files, so no provenance is lost.
+Adding them is optional.
+
+**L4. The V8 schema check ran the timing loop.** It used a modified copy of the harness in `run`
+mode (`OBSERVATIONS = 8`, timings discarded).
+- No number was kept, so gate 5 holds in substance.
+- The stub-harness path in `scripts/test-console-benchmark.sh` is the untimed route for such checks.
+
+**Info.**
+- The W=4 remainders (1, 2, 1, 0, 0) are arithmetic only. The native rows run at Simd8, and by the
+  spec's design V8 has no per-N rows.
+- `check-step-vocabulary.py` was retired by #1050 (`dbf4875e`). Step names are governed by the
+  runners' pattern, `^[a-z0-9][a-z0-9-]{0,63}$`, which `console-strip-base` and
+  `console-strip-after` satisfy.
+- The sealed records under `artifacts/steps/` keep the rack-token spellings, and the new validator
+  refuses them. Nothing revalidates sealed records, so this is by design.
+
+### What was verified
+
+**The rows.** A temporary probe example, since deleted, read each row's compiled plan.
+- The strip at 9, 10, 13, 16 and 64 tracks renders remainders of 1, 2, 5, 0 and 0 at W=8. The
+  remainder tracks run each of the three effects per node: 3, 6, 15, 0 and 0 per-node effect ops.
+- The app shape: every track carries EQ and compressor in `dynamic`, 21 of 64 are bypassed, and the
+  census is `index_mod_3_is_2`. The plan has 23 bank chains, against 8 for the standing console,
+  and 16 per-node effect ops. The 43 active tracks (5 banks of 8, plus 3) and the 21 bypassed tracks
+  (2 banks of 8, plus 5) bank apart, which is today's split that P1 removes.
+- The sparse row compiles the standing plan, and every bank holds both parities.
+
+**For S4.**
+- `strip_layout` is layout-neutral. The native and V8 validators pin only the console vocabulary,
+  and they accept both app spellings. No session-record field names a bank shape. S4 therefore needs
+  no validator rewrite, provided S1a ports the builders (L2).
+
+**The rules.**
+- `timed_subjects` still holds one subject, `tools/bench/src/console.rs`.
+- Only the native host-core path and the shipped `host_web.wasm` path are timed.
+- The workloads and validators are frozen in B0.
+- The native preflight probes for existing step artifacts. V8 `prepare` refuses a non-empty
+  WORKDIR, and V8 `run` refuses before launching when any of its three artifacts exists.
+
+**The preflights.**
+- `preflight-console-benchmark.sh --step console-strip-base`: PASS, `workload_launches` 0,
+  `records_required` 60, candidate `bb6000c0`. It left no artifacts.
+- V8 `prepare` built `host_web.wasm` `885aa117...`, which is not the release pin.
+- V8 `preflight` ran twice and produced byte-identical output. The console document's digest is
+  `d913ad96...` and the app shape's is `3dd8b2ff...`.
+
+**The digests.**
+- The diff removes or changes no 64-hex pin and touches nothing under `crates/` or `hosts/`.
+- `cargo test --locked --release -p console-workload` passed twice (lib 14, chain_shape 23 and the
+  other test files), with the five new pins.
+- The pinned-bits test also passed in debug.
+- `cargo test --locked --release -p bench` passed: 13 tests, including the console-strip record test.
+
+**Mutations, each restored afterwards.** Each of these turned its check red:
+- dropping `bypass_session_shape`;
+- dropping the sparse aggregate rule (two named cases);
+- `OddTracksSilent` becoming `track >= 32` (the sparse test and the pins).
+
+**The gates.** Each passed:
+- `cargo fmt --all --check`;
+- `cargo check --locked --workspace --all-targets`;
+- `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`;
+- `scripts/test-console-benchmark.sh`;
+- `check-bench-policy.sh` (1 subject) and `test-bench-policy.sh`;
+- `check-console-fixtures.sh` (intended, mono and app) and `check-console-benchmark-fixture.sh`;
+- `check-env-vocabulary.sh` and `test-env-vocabulary.sh`;
+- with `python3 -B`, the reachability lint and its self-test (118 reached, 6 exempt);
+- with `python3 -B`, the CI-routing check and its self-test. Every new path routes to `full`.
+
+**The policy scripts.** Every `check-*-policy.sh` and `test-*-policy.sh` passed, as did
+`check-artifact-evidence-leak.sh` and `check-bench-preconditions.sh`. With `python3 -B`, these also
+passed:
+- `check-test-support-ci.py`, `check-release-shape.py`, `check-sdk-deletions.py`;
+- `check-command-kind-vocabulary.py`, `check-command-reason-vocabulary.py`;
+- `check-session-map-shape.py`, `check-browser-expected-resources.py`;
+- the self-tests of `check-scalar-oracle-absent.py` and `check-abi-layout-v1.py`.
+
+**Trial merge onto `c4906414`.** The merge is clean, with no conflicts (`git merge-tree`, tree
+`b2899df4`). Since `6fdf5db2` the batch has changed only specs and docs. On a scratch worktree of
+the merged tree, since removed, these passed:
+- the session, workspace, env-vocabulary and bench policies;
+- the reachability lint and CI routing;
+- the artifact evidence gate;
+- `test-console-benchmark.sh`.
