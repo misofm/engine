@@ -26,9 +26,9 @@
 //!
 //! The first run of this differential found that `BuiltinMatrixBank` renders a settled identity
 //! lane's `-0.0` as `+0.0` while another lane's matrix ramps, where that lane's own
-//! `MatrixBuiltins` passes the `-0.0` through (seed 1 at the time of writing, eight lanes, block
-//! 9): with any lane ramping, the bank runs the ramp arithmetic on every lane, and `1 * -0.0 +
-//! 0 * x` is `+0.0`. The fixed-input gate beside it
+//! `MatrixBuiltins` passes the `-0.0` through (first found at eight lanes): with any lane
+//! ramping, the bank runs the ramp arithmetic on every lane, and `1 * -0.0 + 0 * x` is `+0.0`.
+//! The fixed-input gate beside it
 //! (`stage.rs::banked_fader_and_matrix_are_bit_identical_to_the_per_track_sections`) never feeds
 //! a signed zero. Until its issue lands, the per-PR test compares the two zeros as one value on a
 //! block where a matrix ramp may be in flight; the ignored test below is the reproducer.

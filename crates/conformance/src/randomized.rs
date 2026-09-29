@@ -145,6 +145,8 @@ pub struct DifferentialCoverage {
     pub mono_capable: bool,
     /// Automation spans delivered, valid or not.
     pub spans: u64,
+    /// Resets applied to every side at a block boundary.
+    pub resets: u64,
     /// Restores both sides accepted.
     pub restores: u64,
     /// Restores both sides refused with one code.
@@ -182,6 +184,7 @@ impl DifferentialCoverage {
         self.native_banks += other.native_banks;
         self.banks_natively |= other.banks_natively;
         self.spans += other.spans;
+        self.resets += other.resets;
         self.restores += other.restores;
         self.refused_restores += other.refused_restores;
         self.crafted_restores += other.crafted_restores;
@@ -366,6 +369,7 @@ fn run_scalar(
                 ]);
                 oracle.reset(kind);
                 twin.reset(kind);
+                coverage.resets += 1;
             }
             if draw.chance(1, if small { 5 } else { 40 }) {
                 // The oracle's own snapshot, into both: it must restore, write itself back word
@@ -760,10 +764,14 @@ fn run_width(
         let half = spec.blocks / 2;
         (half + draw.below(spec.blocks - half), draw.below(lanes))
     });
+    // One planned reset per scenario, whatever the draws: a cheap effect's many seeds reach
+    // resets by chance, an expensive effect's few seeds need not.
+    let reset_at = draw.below(spec.blocks);
     for block in 0..spec.blocks {
         let context = format!("{width:?} block {block} at sample {first} ({shape:?})");
         // --- Block-boundary operations -------------------------------------------------------
-        if draw.chance(1, 24) {
+        if block == reset_at || draw.chance(1, 24) {
+            coverage.resets += 1;
             let kind = draw.pick(&[
                 ResetKind::FullToDefaults,
                 ResetKind::DiscontinuityKeepParameters,
@@ -1735,7 +1743,10 @@ pub fn assert_reached(coverage: &DifferentialCoverage) {
         coverage.blocks > 0 && coverage.chunked_blocks > 0 && coverage.bounded_blocks > 0,
         "blocks were not compared whole, chunked and bounded: {coverage:?}"
     );
-    assert!(coverage.restores > 0, "nothing was restored: {coverage:?}");
+    assert!(
+        coverage.restores > 0 && coverage.resets > 0,
+        "nothing was restored or reset: {coverage:?}"
+    );
     assert!(
         coverage.malformed_refusals > 0 && coverage.heterogeneous_declines > 0,
         "the bind-eligibility probes were not answered: {coverage:?}"
