@@ -297,9 +297,15 @@ fn scenario(seed: u64, backend: Backend, width: BankWidth, strict: bool, reach: 
         let words = frames * lanes;
         let mut left = vec![0.0_f32; words];
         let mut right = vec![0.0_f32; words];
+        // A sixth of the blocks are `+0.0` on every lane: the settled and silent paths.
+        let silent = draw.chance(1, 6);
         for lane in 0..members {
             let profile = loop {
-                let profile = draw.profile();
+                let profile = if silent {
+                    dsp_reference::randomized::Profile::Silence
+                } else {
+                    draw.profile()
+                };
                 if hostile || profile.is_finite_legal() {
                     break profile;
                 }
