@@ -6,7 +6,7 @@
 one Terra implementation/review and one bounded Sol correction/review. A second failure stops and
 rescopes. Issue 055 owns broad qualification. No benchmark is authorized here and V1 is forbidden.
 
-This brief and `.github/ISSUE_SPECS/021-dual-mono-stereo-delay.md` are authoritative. Reuse the
+This brief and [issue 021's spec](https://github.com/misofm/engine/blob/80c4119b9e6814cb450e87568243d6df9b6be7bc/.github/ISSUE_SPECS/021-dual-mono-stereo-delay.md) are authoritative. Reuse the
 accepted effect contract, dynamic rack, caller-owned registry/effect compiler, scalar-tail graph
 and checked plan accounting. Do not change the builtin matrix API or add a core SIMD framework.
 

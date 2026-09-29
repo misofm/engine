@@ -665,7 +665,7 @@ are not mixed here; the strip round's sealed records carry the new pair.
 
 The compressor's 16.691 is 3.059 nanoseconds per lane-sample, which is 15.0 cycles at 4.92 GHz —
 the directive's measured figure, reproduced — and agrees to three digits with the 3.043
-ns/lane-sample recorded for the W8 bank in `.github/ISSUE_SPECS/013-compressor.md` on this same
+ns/lane-sample recorded for the W8 bank in [#13's spec](https://github.com/misofm/engine/blob/80c4119b9e6814cb450e87568243d6df9b6be7bc/.github/ISSUE_SPECS/013-compressor.md) on this same
 machine.
 
 **How to read the two percentages.** A row's `percent_of_floor` compares the row's *whole* cost —
@@ -683,7 +683,7 @@ The directive's figure is *"compressor ~15.0 measured vs ~13.2 derived cycles/la
 floor)"*. The measured half reproduces: this document measures the compressor isolate at 3.059
 nanoseconds per lane-sample, which is 15.0 cycles at 4.92 GHz and 16.691 at the 5.456 GHz this host
 actually clocked at, and which agrees to three digits with the 3.043 ns/lane-sample recorded for
-the W8 bank in `.github/ISSUE_SPECS/013-compressor.md` on this same machine.
+the W8 bank in [#13's spec](https://github.com/misofm/engine/blob/80c4119b9e6814cb450e87568243d6df9b6be7bc/.github/ISSUE_SPECS/013-compressor.md) on this same machine.
 
 The derived half does not. The historical 94 lane-ops ÷ 13.2 cycles is 7.1 operations per cycle. No 256-bit
 machine retires 7.1 *vector* operations per cycle — this host retires 3.7 — and 7.1 is instead

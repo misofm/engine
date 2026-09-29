@@ -62,7 +62,7 @@ Use objective gates: allocation counters, deterministic fixtures, SIMD/scalar to
 
 ## Issue-first execution and review workflow
 
-Work only from a stateless issue body in `.github/ISSUE_SPECS/`; update its evidence/decision record as implementation learns facts.  Do not make cross-cutting architecture changes without a new or amended issue.
+Work only from a stateless issue body in `.github/ISSUE_SPECS/`; update its evidence/decision record as implementation learns facts.  A closed issue's spec leaves `.github/ISSUE_SPECS/` at the batch after it closes, and git history keeps it.  Do not make cross-cutting architecture changes without a new or amended issue.
 
 Create local Git checkpoint commits frequently at coherent, compiling or otherwise explicitly documented milestones so work is recoverable.  Push those checkpoints promptly when the current delivery mode calls for checkpoint pushes.  When the user requests CI-conscious batching, checkpoint locally on one dedicated feature branch and defer upstream pushes until the coherent batch boundary; batching changes push frequency, never local commit frequency.  A failed attempt may be committed when its evidence is candid and the tree is a useful checkpoint.  Never commit `target/`, fuzz artifacts, secrets, or unrelated generated output; do not rewrite or discard another agent's/user's history.
 
@@ -90,7 +90,7 @@ GitHub issue must stay synchronized:
 - As soon as Sol records PASS and the evidence commit is upstream, close the GitHub issue in that
   same workflow.  Verify the remote state after closing it.  A task does not count as complete in
   progress reporting until GitHub is synchronized.
-- At every issue boundary, compare `.github/ISSUE_SPECS/` with `gh issue list --state all` and fix
+- At every issue boundary, compare `.github/ISSUE_SPECS/` with `gh issue list --state open` and fix
   missing, stale, or incorrectly closed entries before starting the next issue.
 - After merged delivery, required evidence, and GitHub synchronization, remove each completed local worktree with `git worktree remove` once it is clean, all checkpoints are pushed, and required evidence is preserved outside it, including work integrated through another PR and completed detached baselines; retain active worktrees, the primary checkout, branches, and history, preserve unique uncommitted/unpushed work or evidence, and report a concrete blocker instead of discarding it.
 

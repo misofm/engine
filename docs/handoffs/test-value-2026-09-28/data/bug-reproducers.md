@@ -44,7 +44,7 @@ scalar host, so CI (Simd8) runs it.
 
 The fix is in `crates/graph/src/runtime.rs` (commit 954790d1). Its reproducers (six plus a count gate; the fix's commit message says "seven", and the Sol review
 nit at spec line 256 corrects it) live in `crates/host-core/tests/collapse_arming.rs`, which is outside this group. The #970
-spec (`.github/ISSUE_SPECS/970-…md:157-167`) also records `console-workload --test chain_shape` as red
+spec ([#970's spec, lines 157-167](https://github.com/misofm/engine/blob/80c4119b9e6814cb450e87568243d6df9b6be7bc/.github/ISSUE_SPECS/970-arm-the-mono-collapse-only-on-chains-that-gather-the-track-input.md#L157-L167)) also records `console-workload --test chain_shape` as red
 under the over-disarm mutation M2. That file is outside this group too.
 
 Inside this group the only recorded catcher of the #970 revert is

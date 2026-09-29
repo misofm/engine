@@ -100,7 +100,7 @@ and browser WebAssembly") already names mobile; the audit's framing, not AGENTS.
 
 - No CI job builds, lints or tests any AArch64 target. `scripts/check-cross-targets.sh:4-5`
   records that the Android and iOS rows were removed under #378 ("native AArch64 unsupported, no
-  claim", closed); #023 (iOS/Android embedding examples) was closed 2026-08-22, and spec 001 still says "Mobile support is browser-based; native iOS and Android embedding targets are deferred" (`.github/ISSUE_SPECS/001-…md:43`).
+  claim", closed); #023 (iOS/Android embedding examples) was closed 2026-08-22, and spec 001 still says "Mobile support is browser-based; native iOS and Android embedding targets are deferred" ([#1's spec, line 43](https://github.com/misofm/engine/blob/80c4119b9e6814cb450e87568243d6df9b6be7bc/.github/ISSUE_SPECS/001-bootstrap-rust-workspace-and-target-matrix.md#L43)).
 - The two register defects in `docs/TARGET_MATRIX.md:95-101` are still present:
   - `parametric-eq`'s iOS release assembly holds **151 `memset_pattern16` calls** (reproduced), a
     realtime-rule breach inside render on Apple targets;
@@ -125,7 +125,7 @@ and browser WebAssembly") already names mobile; the audit's framing, not AGENTS.
 - Compile facts hold: deleting both endpoint modules and their tests passes native, wasm, iOS and
   Android builds, `-p capi` included, with no new warning.
 - But the open #140 spec requires admitted automation to reach PCM "through the actual C ABI command
-  and render calls" (`140-automation-span-feed.md:75`), and says the only production consumer of
+  and render calls" ([#140's spec, line 75](https://github.com/misofm/engine/blob/80c4119b9e6814cb450e87568243d6df9b6be7bc/.github/ISSUE_SPECS/140-automation-span-feed.md#L75)), and says the only production consumer of
   that queue today cancels it (`:13`). These endpoints (#528-#608) and protocol's `delivery.rs` and
   `controller_delivery.rs` are the partial implementation. So today a fan's live fader or mute
   change through the C ABI reaches PCM only by structural plan replacement, which resets source

@@ -89,7 +89,7 @@ Allowed implementation/evidence surface:
 
 - one new Issue-031 module/test and its declaration under
   `crates/miso-engine-dsp-reference/src/`;
-- `.github/ISSUE_SPECS/031-portable-higher-precision-builtin-filter-quality-mode.md`; and
+- [issue 031's spec](https://github.com/misofm/engine/blob/80c4119b9e6814cb450e87568243d6df9b6be7bc/.github/ISSUE_SPECS/031-portable-higher-precision-builtin-filter-quality-mode.md); and
 - one result line in `dsp-research/filters.md` after the decision.
 
 Order:

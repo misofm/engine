@@ -6,7 +6,7 @@
 attempts: one Terra implementation/review and one bounded Sol correction/review. A second failure
 stops. Issue 051 owns broad qualification. Issue 018 invokes no benchmark and never inspects V1.
 
-This brief and `.github/ISSUE_SPECS/018-multiband-compressor.md` are authoritative. Reuse the
+This brief and [issue 018's spec](https://github.com/misofm/engine/blob/80c4119b9e6814cb450e87568243d6df9b6be7bc/.github/ISSUE_SPECS/018-multiband-compressor.md) are authoritative. Reuse the
 accepted effect runtime, Issue 013 compressor conventions, conditioned builtin TPT recurrence,
 prepared core kernels, bank and graph/PDC seams. Do not create a general crossover/band framework
 or depend on Issue 045.

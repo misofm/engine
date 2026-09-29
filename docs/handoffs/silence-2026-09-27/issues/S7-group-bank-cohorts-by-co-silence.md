@@ -54,7 +54,7 @@ tests, this spec.
 2. No hint, no change: every existing digest and graph-resource fixture is unchanged.
 3. Class-B record: for a hinted plan, the output differs from the unhinted plan only by summation
    order (an independent `f64` reference of the master agrees with both within the documented bound),
-   and the fold is admitted (count). Per the class-B ruling (`.github/ISSUE_SPECS/944-...md`, "wanted
+   and the fold is admitted (count). Per the class-B ruling ([#944's spec](https://github.com/misofm/engine/blob/80c4119b9e6814cb450e87568243d6df9b6be7bc/.github/ISSUE_SPECS/944-drop-the-per-frame-identity-select-from-settled-2x2-matrices-that-have-no-identity-lane.md), "wanted
    when it measurably improves performance, with digests re-baselined and the new arithmetic
    pinned"): the hinted rows' digests are pinned, the re-baseline is recorded, and the new
    accumulation order is pinned by a test.
