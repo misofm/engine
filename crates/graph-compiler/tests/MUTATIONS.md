@@ -291,3 +291,52 @@ passes 9 of 9.
 | 966-M10 | compare only the members whose lane ran every earlier slot (`active[..slot]` all true), so a ragged lane is never compared | as M1 | RED, 9 of 9, each with `graph.scheduler.layout`: every reproducer's ragged lane is exactly the one this skips. (Sol's attempt-1 review reported its own M10 red on 4 of 9; its exact code is not recorded, so this row is this formulation only) |
 | 966-M9 | the test's own source feeds a mono-mapped track's right side from the next source channel, so the collapse's premise is false | `graph-compiler/tests/bank_levels.rs` (`TrackSource`) | RED, 2 of 9, armed legs only: `the_mono_console_less_one_eq_binds_and_collapses_at_every_width` (`Simd4`, armed) and the probe (11 lines over 6 seeds, every one `Armed`). The armed comparisons can see a wrong collapse; every unarmed comparison stays green |
 | 966-M970 | revert #970's arming check: `Runtime::arm_mono_collapse` arms a chain without `identity.banking.gathers_track_input()`, so a later chain of a split strip is armed again | `graph/src/runtime.rs` | RED, 1 of 9: the probe, 5 armed lines over 4 seeds (12, 48, 50, 54), all on even-seed all-mono desks with the intended fixture's asymmetric strip. Attempt 1 drew every all-mono desk from the symmetric mono fixture, and under this mutation all 9 stayed green (Sol, attempt-1 verdict): wrongly arming a later chain is bit-exact when nothing upstream of it is asymmetric. That is why the generator keeps both strips |
+
+---
+
+## Issue #1045 — the 65,537-track gates, split between per PR and nightly
+
+Per PR, `scale.rs` keeps the constrained compile of
+`compiles_65_537_tracks_or_rejects_only_a_configured_resource`, in the debug job, with its node cap
+one below the graph the session lowers to (`7 × 65,537 + 2`) and its one expected diagnostic, plans
+the compiler's builtin banks for its prepared builtins (attempt 4), and adds `a_hand_built_65_537_input_plan_binds_and_renders_every_track`, which binds and renders a
+hand-built plan of 65,537 routed track inputs (attempt 2), and
+`a_hand_built_65_537_track_plan_attaches_builtin_banks_binds_and_renders`, which attaches 65,537
+post-input stages as builtin banks through `with_builtin_banks` at `Backend::current()`'s width,
+then binds and renders (attempt 3), and `lowers_65_537_tracks_of_builtin_banks`, which lowers the
+scale session's prepared builtins onto a hand-built strip plan through
+`into_graph_artifact_with_banks` (attempt 5).
+`compiles_and_binds_65_537_tracks_with_builtins` runs nightly in `release-budgets`, in release with
+overflow checks and a 60 s bound. Each row was applied to a scratch copy of the change, the named
+command run and the tree restored. Host: `x86_64` (`x86-64-v3`, eight-lane banks), rustc 1.97.1,
+`CARGO_INCREMENTAL=0`, on a shared host at load 40-100. "Per PR" is
+`cargo test -p graph-compiler --test scale` in debug with test-debug-a's features; "nightly" is the
+`release-budgets` command.
+
+| # | mutation | file | per PR | nightly |
+|---|---|---|---|---|
+| 1045-1 | 964-11's ceiling: `graph.track.limit` above 65,536 tracks | `graph-compiler/src/compile.rs` (`compile_graph`) | RED: the refusal is `[("graph.track.limit", "$.tracks")]`, not the node cap's one pair (re-run in attempt 2) | RED: `with-builtins scale diagnostics: graph.track.limit` |
+| 1045-2 | a `u16` track counter (`track_index += 1`) in the per-track node loop | as 1045-1 | RED: `attempt to add with overflow` | RED, the same panic. A release build without overflow checks stays GREEN: the counter wraps silently, which is why the nightly command turns them on |
+| 1045-3 | a truncating `u16` track index: a track whose index does not fit gets no nodes | as 1045-1 | RED: the truncated graph fits under the cap, so the compile is accepted (`a node cap one below the session's graph rejects`; re-run in attempt 2). **Control:** with the constrained cap at `maximum_nodes = 1`, as the issue's draft kept it, this stays GREEN | RED: `logical_nodes`, wrong count |
+| 1045-4 | a ceiling in the builtins wrapper's bind: `into_bound` refuses more than 65,537 external nodes | `builtins-compiler/src/lib.rs` | GREEN: the hand-built plan binds through `PreparedGraphPlan::bind`, not this wrapper. Only a compiled plan reaches it, so it is nightly's (Sol's P5b is the same) | RED: `with-builtins scale bind: graph.bind.track_limit` |
+| 1045-5 | #962 fix 1 reverted: a linear `required_bindings.contains` per bank member in `with_builtin_banks` | `graph/src/lib.rs` | GREEN: the constrained compile refuses before any bank attaches | RED by the bound: 451 s against 60 s (the unmutated run took 28.6 s on the same loaded host) |
+| 1045-6 | a `u16` track counter in builtin preparation's preflight loop | `builtins-compiler/src/lib.rs` | RED: `attempt to add with overflow`, in this test's 65,537-track preparation | RED (builtins-compiler's nightly `scale.rs`), the same panic |
+| 1045-7 | a builtin track ceiling above 65,536 tracks, disguised as `builtin.resource.limit` | as 1045-6 | RED: `constrained scale builtins` refused | RED (builtins-compiler's nightly `scale.rs`) |
+| 1045-8 (Sol's P3a) | the node cap's own code at another path: `graph.resource.limit` at `$.tracks` above 65,535 tracks | as 1045-1 | RED: `:91` expects exactly `[("graph.resource.limit", "$.graph_compile_caps")]` and gets the second pair too. Attempt 1's "all `graph.resource.limit`" stayed GREEN | not run |
+| 1045-9 (Sol's P5) | graph bind refuses more than 65,536 bindings (`bind_optional_source_set`) | `graph/src/lib.rs` | RED: the hand-built plan's bind, `graph.plan.binding`. GREEN on the unmutated tree before and after | RED (Sol) |
+| 1045-10 (Sol's P6) | render refuses more than 65,535 runtime units | as 1045-9 | RED: the hand-built plan's render, `InvalidEnvelope`. GREEN unmutated | RED (Sol) |
+| 1045-11 | render walks its active units through a `u16` index (`unit as u16 as usize`) | as 1045-9 | RED: the hand-built plan's output is not the track count (`[NaN, NaN]`: the units above 65,535 alias lower ones and the output is never written) | not run |
+| 1045-12 (Sol's PBANK) | `with_builtin_banks` refuses more than 65,535 bank members in all | `graph/src/lib.rs` | RED: the banked hand-built plan, `65,537-track bank attachment: InvalidMembers`. GREEN unmutated, before and after. 1045-9, 1045-10 and 1045-11 turn it red too | RED (Sol): `validated fixed builtin member shape: InvalidMembers` |
+| 1045-13 | `with_builtin_banks` keeps only the banks a `u16` bank index reaches | as 1045-12 | GREEN, and not a ceiling at this size: 65,537 tracks make 8,193 banks at `Simd8`. Discarded, like Sol's P6b | not run |
+| 1045-14 (Sol's PPLAN) | the cohort planner `plan_bank_groups` refuses more than 65,535 candidates | `rack-compiler/src/lib.rs` | RED: `:91`'s bank plan, `one node per track per stage, so ids are unique: DuplicateId`. GREEN unmutated, before and after | RED (Sol) |
+| 1045-15 (Sol's PRES) | `builtin_bank_resource` refuses more than 65,536 lanes | `builtins-compiler/src/lib.rs` | RED: `:91`, `the builtin bank plan at 65,537 tracks`. GREEN unmutated | RED (Sol) |
+| 1045-16 | `builtin_bank_resource` counts its banks through a `u16` | as 1045-15 | GREEN, and not a ceiling at this size: 3 × 8,193 banks fit in 16 bits. Discarded | not run |
+| 1045-17 (Sol's LOWER_PANIC) | builtin bank lowering asserts at most 65,535 tracks (`into_graph_artifact_with_banks`) | `builtins-compiler/src/lib.rs` | RED: the lowering test, `builtin bank lowering track limit`. GREEN unmutated, before and after | RED (Sol) |
+| 1045-18 (Sol's LOWER_SILENT) | above 65,535 tracks, lowering silently plans no banks | as 1045-17 | RED: the lowering test's bank count. GREEN unmutated | RED (Sol): bank member count 0 |
+
+Still nightly only, at most a day late (the issue's accepted residual): the graph compile's back
+end and a ceiling that copies the node cap's code *and* path (Sol's P3b), `into_bound`
+prevalidation (1045-4, Sol's P5b), the real builtin bank kernels rendering at this size, and #962's
+quadratic compile and bind (1045-5). Bank attachment left this list in attempt 3 (1045-12), the
+compiler's builtin bank plan in attempt 4 (1045-14, 1045-15), builtin bank lowering in attempt 5
+(1045-17, 1045-18). The spec's attempt-5 evidence carries the complete layer map.

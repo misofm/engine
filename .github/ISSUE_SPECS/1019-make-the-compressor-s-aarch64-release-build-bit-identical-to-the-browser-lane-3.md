@@ -12,7 +12,7 @@ Express the compressor's min/max (and any other kernel the AArch64 leg shows wit
 
 ## Objective gates
 
-1. On AArch64 hardware (the #1017 leg), the compressor differentials and every console digest equal the x86 and wasm digests, including NaN-payload and signed-zero cases; gate G1 is green there.
+1. On AArch64 hardware (the #1017 leg), the compressor differentials and every console digest equal the x86 and wasm digests, including signed-zero cases and NaN cases under class-A identity's NaN rule (#1065: every NaN compares as one value, so NaN payloads are not compared); gate G1 is green there.
 2. A committed assembly check fails if `fmaxnm`/`fminnm` reappear in the affected render kernels on AArch64.
 3. No regression on x86 (native console `compressor_only` isolate) or in the shipped browser artifact (V8 compressor isolates), measured under the timing lock; the V8 spill gate passes.
 4. Remove LANE-3 from the deferred-defect register.

@@ -19,5 +19,10 @@ test-support = []
 [dependencies]
 wide.workspace = true
 
+# Test-only: class-A identity's one NaN fold (`dsp_reference::class_a`, #1065). `dsp-reference`
+# has no dependencies, and production code never reaches it.
+[dev-dependencies]
+dsp-reference.workspace = true
+
 [lints]
 workspace = true

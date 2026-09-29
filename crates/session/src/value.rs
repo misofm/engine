@@ -82,9 +82,12 @@ mod tests {
         assert_eq!(results[6].0, "1.0");
     }
 
+    /// Issue #1045: one million patterns per PR, down from ten million. The ten-million sample's
+    /// only fallback, `0x15ae_43fd` (its pattern 3,644,705), is a directed case above, and
+    /// [`exhaustive_f32_round_trip`] runs every pattern nightly, in release.
     #[test]
-    fn ten_million_deterministic_f32_patterns_round_trip() {
-        const GENERATED: u64 = 10_000_000;
+    fn one_million_deterministic_f32_patterns_round_trip() {
+        const GENERATED: u64 = 1_000_000;
         let mut state = 0x004d_4953_4f31_3037_u64;
         let mut spelling = String::with_capacity(64);
         let mut finite = 0_u64;
@@ -119,8 +122,8 @@ mod tests {
                 "f64-then-f32 parse mismatch for {bits:#010x}: {spelling}"
             );
         }
-        assert_eq!(finite, 9_960_907);
-        assert_eq!(fallbacks, 1);
+        assert_eq!(finite, 996_076);
+        assert_eq!(fallbacks, 0);
         assert_eq!(maximum_length, 48);
     }
 
@@ -165,7 +168,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "authorized one-shot exhaustive release qualification"]
+    #[ignore = "exhaustive 2^32 sweep; runs nightly in release"]
     fn exhaustive_f32_round_trip() {
         const PATTERNS: u64 = 1_u64 << 32;
         let workers = std::thread::available_parallelism()

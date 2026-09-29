@@ -11,7 +11,7 @@ Only these paths may change:
 
 - `.github/workflows/ci.yml`;
 - `fuzz/Cargo.lock`;
-- `.github/ISSUE_SPECS/071-repair-locked-fuzz-builds-and-benchmark-artifact-capture.md`; and
+- [issue 071's spec](https://github.com/misofm/engine/blob/80c4119b9e6814cb450e87568243d6df9b6be7bc/.github/ISSUE_SPECS/071-repair-locked-fuzz-builds-and-benchmark-artifact-capture.md); and
 - this brief.
 
 Do not change README or the implementation plan: Issue 071 is not a product dependency and its

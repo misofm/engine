@@ -6,7 +6,7 @@
 attempts: one Terra implementation/review and one bounded Sol correction/review. A second failure
 stops. Issue 054 owns broad qualification. Issue 020 invokes no benchmark and never inspects V1.
 
-This brief and `.github/ISSUE_SPECS/020-transient-shaper.md` are authoritative. Reuse the accepted
+This brief and [issue 020's spec](https://github.com/misofm/engine/blob/80c4119b9e6814cb450e87568243d6df9b6be7bc/.github/ISSUE_SPECS/020-transient-shaper.md) are authoritative. Reuse the accepted
 effect runtime, Issue-013 dynamics conventions, `PreparedCompressorGainMixKernelV1`, bank ownership,
 launch registry/effect compiler and graph/PDC seams. Do not create a new core SIMD framework.
 

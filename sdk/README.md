@@ -222,12 +222,6 @@ zero can also mean unobserved, while master `null` means unavailable. For hypoth
 edits, `createResponsePreview()` evaluates an explicit configuration without a live session or
 live-session timestamp.
 
-The release also carries an additive **protected-observation native/Wasm ABI** for explicitly
-prepared hosts, with bounded observation work, admission, and receipts. “Protected” describes
-resource/ownership guarantees, not DRM or encrypted PCM. Ordinary SDK creation does not activate
-that profile. Combined ordinary/protected preparation and protected EQ coexistence are not part
-of this release; see the [coexistence policy](https://github.com/misofm/engine/issues/835).
-
 ## Ownership and artifact integrity
 
 The realtime engine owns a preallocated render plan and executes on one render thread. Render

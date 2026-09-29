@@ -116,6 +116,10 @@ through the C ABI. This reverses #378. What qualifies the target:
   audits (`audit capi` and the delay, compressor, EQ and gate audits).
 * **No silent skips.** Both legs refuse a test that returns early on a SIMD backend width. A test
   that only one width can run says so with `#[ignore = "…"]` on the other width.
+* **Class-A identity treats every NaN as one value** (owner decision 10, #1065): the same bits on
+  every width and target except a NaN's sign and payload, which the CPU chooses, so every class-A
+  comparison, digest and differential folds each NaN to `0x7FC00000` through
+  `dsp_reference::class_a`, while the engine does not canonicalize NaNs at render.
 * **Known defects fail by name and by reason.** The rows live in
   `scripts/lib/aarch64-known-defects.py`. Each test row names exactly one test in its leg, which
   is skipped by exact name in the main run and then run alone. There it must fail as that one test,
@@ -161,17 +165,16 @@ AArch64 legs. Each open entry is an expected failure, by name:
   (1.97.1). The fold shows in `math`'s M2 inside `exp2_lane` and `log2_lane`, scalar and vector
   alike. Expected failures in `aarch64-release`: `math` `m2_lane_identity`
   `m2_exp2_lane_identity` and `m2_log2_lane_identity`. Both pass in the debug leg.
-- **AArch64 NaN encodings (#1065).** Found by #1017. Not LANE-3: no code shape changes a CPU's NaN
-  rule, and the wasm spec leaves the same bits unspecified in the browser. An arithmetic
-  NaN on AArch64 is `0x7FC00000`, where x86 answers `0xFFC00000`, and a signalling operand wins NaN
-  propagation. So a pin that folds raw NaN words from hostile input moves on AArch64 in every
-  profile. With every NaN folded as one word, these pins are identical on both architectures.
-  #1065 asks the owner to rule whether class-A identity treats every NaN as one value. Expected
-  failures in `aarch64-debug`: `compressor`
+- **Resolved by #1065: AArch64 NaN encodings.** Found by #1017. Not LANE-3: no code shape changes
+  a CPU's NaN rule, and the wasm spec leaves the same bits unspecified in the browser. An
+  arithmetic NaN on AArch64 is `0x7FC00000`, where x86 answers `0xFFC00000`, and a signalling
+  operand wins NaN propagation, so a pin that hashed raw NaN words from hostile input moved on
+  AArch64 in every profile. The owner ruled that class-A identity treats every NaN as one value
+  (decision 10), and the pins now fold every NaN word through `dsp_reference::class_a`. `compressor`
   `kernel::settled_body_tests::scenario_1006_ramping_prefix_is_pinned` and `parametric-eq` `bank`
-  `admitted_blocks_render_the_base_bits_without_selects`. (#1049 deleted the compressor's
-  `scenario_{981,983,985,995}` pins, and their rows, as dominated.) Every other test in the two
-  legs passes on AArch64, the console digests and the G5 corpus included.
+  `admitted_blocks_render_the_base_bits_without_selects` are ordinary passing tests in
+  `aarch64-debug`, with no expected-failure rows. (#1049 had deleted the compressor's
+  `scenario_{981,983,985,995}` pins, and their rows, as dominated.)
 - **Darwin `memset_pattern16` in render (#1018).** On Apple targets LLVM lowers a stored `f32x4`
   splat constant to `bl _memset_pattern16`, a libc call. The constants are `lane::FLUSH_EPS` (the
   SVF flush), `1.0`, `0.5`, `2.0`, `1e-8`, `f32::MIN_POSITIVE` and others. So this is not the SVF

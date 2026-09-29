@@ -7,7 +7,7 @@ total attempts: one Terra implementation/review attempt and, if needed, one boun
 correction/review. A second failed verdict stops; preserve the evidence and create a stateless
 rebrief instead of changing a domain, tolerance, algorithm, or target gate. Never inspect V1.
 
-This brief and `.github/ISSUE_SPECS/013-compressor.md` are authoritative. Issues 011, 006, 037 and
+This brief and [issue 013's spec](https://github.com/misofm/engine/blob/80c4119b9e6814cb450e87568243d6df9b6be7bc/.github/ISSUE_SPECS/013-compressor.md) are authoritative. Issues 011, 006, 037 and
 the current effect/rack/graph compiler APIs are accepted dependencies. Issue 008 is not an overall
 PASS; checkpoint `87783c5` is technical architecture input only. Do not redesign session syntax,
 effect metadata, program keys, graph topology/PDC, AoSoA layout, target detection, or state-envelope

@@ -1,6 +1,6 @@
 # Release test builds of four packages fail from a panic-variant output collision
 
-Found by the #1001 implementer and reproduced by its Sol verification (`.github/ISSUE_SPECS/1001-*.md`, "Release-test clobber"). Tooling only; no engine behaviour changes.
+Found by the #1001 implementer and reproduced by its Sol verification ([#1001's spec](https://github.com/misofm/engine/blob/80c4119b9e6814cb450e87568243d6df9b6be7bc/.github/ISSUE_SPECS/1001-keep-the-unmoved-plan-when-the-whole-mono-cohort-re-plan-fails-to-bind.md), "Release-test clobber"). Tooling only; no engine behaviour changes.
 
 
 ## Problem

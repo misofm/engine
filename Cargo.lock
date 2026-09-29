@@ -944,7 +944,6 @@ dependencies = [
  "builtins-compiler",
  "effect-contract",
  "engine",
- "graph",
  "host-core",
  "lane",
  "math",
@@ -1171,6 +1170,7 @@ dependencies = [
 name = "lane"
 version = "0.1.0"
 dependencies = [
+ "dsp-reference",
  "wide",
 ]
 
@@ -1967,6 +1967,7 @@ dependencies = [
 name = "source"
 version = "0.1.0"
 dependencies = [
+ "dsp-reference",
  "effect-contract",
  "engine",
  "graph",

@@ -14,3 +14,12 @@
 
 - Every compiled and bound result byte-identical before and after (the #962 fingerprint and randomized probes).
 - A timing table at 8,192 and 65,537 tracks for each shape.
+
+## Amendment (root, 2026-09-29): scope extension from #1045
+
+Exercise every per-track session feature at 65,537 tracks. That covers effects and effect
+controls, one route per track, sources and source-set bind, per-track observers and meters, and
+sidechains, plus console controls, sends and submixes, and automation on every track. Record
+Sol's measurement from #1045 attempt 2: banks plus one route per track bind super-linearly, at 23 s
+in release at 65,537 tracks (the curve is in #1045's attempt-3 evidence). Related: #1078 (host-core
+preparation per PR) and #1079 (parse, protocol store, capi prepare and host-web boot, nightly).

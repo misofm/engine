@@ -872,7 +872,7 @@ fn meter_requests(model: &SessionModel) -> Vec<MeterRequest> {
 /// session's normalized model, handles `index + 1` in that order, a window of
 /// [`WEB_METER_BLOCKS`] blocks, no peak hold, peak decay off, a [`WEB_METER_QUEUE_DEPTH`]-deep
 /// queue and reset generation zero. Transcribed field for field from
-/// `prepare_host_runtime_with_console_policy_and_spectrum_with_hop` and the web host's
+/// `prepare_host_runtime_with_console_policy_and_spectrum` and the web host's
 /// `console_request`, because this subject does not link either host.
 fn web_meter_requests(session: &session::CompiledSession) -> Vec<SelectedMeterRequest> {
     let config = MeterConfig {

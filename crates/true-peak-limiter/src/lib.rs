@@ -5116,8 +5116,8 @@ mod tests {
                 detector_peak(&mut candidate, x, &fir).store(&mut produced);
                 detector_peak_seeded(&mut oracle, x, &fir).store(&mut expected);
 
-                // The proof's induction, checked phase by phase: the same word, zeros of opposite
-                // sign, or both NaN.
+                // The proof's induction, checked phase by phase: the same class-A word (every NaN
+                // one value, #1065), or zeros of opposite sign.
                 let seedless = annex2_phases(&candidate, &fir);
                 let seeded = annex2_phases_seeded(&candidate, &fir);
                 for (phase, (seedless, seeded)) in seedless.iter().zip(seeded.iter()).enumerate() {
@@ -5127,7 +5127,7 @@ mod tests {
                     seeded.store(&mut old);
                     for lane in 0..bank.len() {
                         let (new, old) = (new[lane], old[lane]);
-                        if new.to_bits() == old.to_bits() || (new.is_nan() && old.is_nan()) {
+                        if dsp_reference::class_a::same(new, old) {
                             continue;
                         }
                         assert!(
@@ -8109,13 +8109,14 @@ mod tests {
         )
     }
 
-    /// Bit identity, with a NaN compared as "both NaN" (the §4.4 check zeroes a non-finite block
-    /// before a host sees it, so this is the harness being general rather than a case it expects).
+    /// Class-A identity: the same bits, with every NaN one value (#1065; the §4.4 check zeroes a
+    /// non-finite block before a host sees it, so this is the harness being general rather than a
+    /// case it expects).
     fn assert_same_words(shipped: &[f32], oracle: &[f32], what: &str) {
         assert_eq!(shipped.len(), oracle.len(), "{what}: length");
         for (index, (a, b)) in shipped.iter().zip(oracle.iter()).enumerate() {
             assert!(
-                a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan()),
+                dsp_reference::class_a::same(*a, *b),
                 "{what}: word {index}: shipped {:#010x}, reference {:#010x}",
                 a.to_bits(),
                 b.to_bits()
@@ -8530,7 +8531,13 @@ mod tests {
     /// the matrix. The linked body must actually have run.
     #[test]
     fn randomized_scenarios_render_exactly_the_unmodified_kernel() {
-        let scenarios = if cfg!(debug_assertions) { 24 } else { 1000 };
+        // Issue #1051's seed discipline: `MISO_ENGINE_RANDOMIZED_SCALE` multiplies the debug share
+        // (the nightly job), `MISO_ENGINE_RANDOMIZED_SEED` replays one scenario.
+        let scenarios = if cfg!(debug_assertions) || dsp_reference::randomized::overridden() {
+            24
+        } else {
+            1000
+        };
         for (label, run) in [
             (
                 "scalar",
@@ -8541,12 +8548,21 @@ mod tests {
         ] {
             let mut engaged = 0;
             let mut rendered = 0;
-            for scenario in 0..scenarios {
-                let (linked, blocks) = run(0x0990_5EED_0000 + scenario as u64, label);
-                engaged += linked;
-                rendered += blocks;
+            dsp_reference::randomized::run_seeds(
+                &format!("randomized_scenarios_render_exactly_the_unmodified_kernel {label}"),
+                "cargo test -p true-peak-limiter --lib -- --exact \
+                 tests::randomized_scenarios_render_exactly_the_unmodified_kernel",
+                scenarios,
+                |scenario| {
+                    let (linked, blocks) = run(0x0990_5EED_0000 + scenario, label);
+                    engaged += linked;
+                    rendered += blocks;
+                },
+            );
+            println!("{label}: {engaged} of {rendered} dual blocks linked");
+            if dsp_reference::randomized::replaying() {
+                continue;
             }
-            println!("{label}: {scenarios} scenarios, {engaged} of {rendered} dual blocks linked");
             assert!(
                 engaged > rendered / 8,
                 "{label}: the linked body ran on {engaged} of {rendered} blocks"

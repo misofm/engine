@@ -12,7 +12,6 @@ use std::sync::{
     atomic::{AtomicU8, AtomicU64, Ordering},
 };
 
-use crate::observation_demand::HostSpectrumMode;
 use engine::realtime::{
     Consumer, Producer, QueueGeneration, RenderError, bounded_spsc, bounded_spsc_retained_payload,
 };
@@ -327,45 +326,6 @@ pub fn spectrum_capture_collection_resources(
     })
 }
 
-/// Return the exact storage cost of a host-controlled paired capture collection.
-///
-/// Controlled preparation retains two complete singular captures for every public entry. The
-/// boxed entry array is the only additional collection allocation; it already contains both
-/// control-side [`SpectrumCapture`] values and their fixed lifecycle metadata.
-pub(crate) fn controlled_spectrum_capture_collection_resources(
-    entries: &[SpectrumCaptureCollectionEntry],
-) -> Result<SpectrumCaptureResources, SpectrumPrepareError> {
-    let mut retained_bytes = 0_u64;
-    let mut largest_allocation_bytes = 0_u64;
-    for (index, entry) in entries.iter().enumerate() {
-        if entries[..index].iter().any(|previous| previous == entry) {
-            return Err(SpectrumPrepareError::DuplicateEntry);
-        }
-        let resources = spectrum_capture_resources_for(&entry.target);
-        retained_bytes = retained_bytes
-            .checked_add(
-                resources
-                    .retained_bytes
-                    .checked_mul(CONTROLLED_SLOTS_PER_ENTRY as u64)
-                    .ok_or(SpectrumPrepareError::CollectionCapacity)?,
-            )
-            .ok_or(SpectrumPrepareError::CollectionCapacity)?;
-        largest_allocation_bytes = largest_allocation_bytes.max(resources.largest_allocation_bytes);
-    }
-    let entry_bytes = entries
-        .len()
-        .checked_mul(core::mem::size_of::<ControlledSpectrumCaptureEntry>())
-        .ok_or(SpectrumPrepareError::CollectionCapacity)?;
-    let entry_bytes =
-        u64::try_from(entry_bytes).map_err(|_| SpectrumPrepareError::CollectionCapacity)?;
-    Ok(SpectrumCaptureResources {
-        retained_bytes: retained_bytes
-            .checked_add(entry_bytes)
-            .ok_or(SpectrumPrepareError::CollectionCapacity)?,
-        largest_allocation_bytes: largest_allocation_bytes.max(entry_bytes),
-    })
-}
-
 fn spectrum_capture_resources_for_id_bytes(id_bytes: usize) -> SpectrumCaptureResources {
     let queue = bounded_spsc_retained_payload::<SpectrumCapturedRecord>(
         NonZeroUsize::new(1).expect("one queue slot"),
@@ -538,71 +498,6 @@ impl SpectrumCapture {
         }
     }
 
-    /// Reset a known-free controlled slot before its next graph publication.
-    ///
-    /// This path intentionally does not use the public arm/start/cancel methods. The controlled
-    /// owner has already consumed the removal receipt that made the slot free, and staging must
-    /// leave the observer inactive until the graph publishes its new activation snapshot.
-    fn reset_for_controlled_stage(&mut self, mode: HostSpectrumMode, cadence: SpectrumCadence) {
-        // The queue is bounded to one record. A free slot normally has no record, but the single
-        // bounded pop makes the ownership invariant explicit without a render-side drain loop.
-        let _ = self.consumer.try_pop();
-        self.state.store(IDLE, Ordering::Release);
-        self.seen_failures = 0;
-        self.seen_drops = 0;
-        self.recovery_pending = false;
-        self.shared.active.store(0, Ordering::Release);
-        self.shared
-            .phase
-            .store(CONTINUOUS_WAITING, Ordering::Release);
-        self.shared.epoch.store(0, Ordering::Release);
-        self.shared.failures.store(0, Ordering::Release);
-        self.shared.failure_epoch.store(0, Ordering::Release);
-        self.shared.drops.store(0, Ordering::Release);
-        self.shared.drop_epoch.store(0, Ordering::Release);
-        self.shared.invalidated.store(0, Ordering::Release);
-        self.shared.invalidated_epoch.store(0, Ordering::Release);
-        match mode {
-            HostSpectrumMode::OneShot => {
-                self.mode.store(ONE_SHOT_MODE, Ordering::Release);
-                self.shared.sample_rate_hz.store(0, Ordering::Release);
-                self.shared.quantum_frames.store(0, Ordering::Release);
-                self.shared.hop_frames.store(0, Ordering::Release);
-            }
-            HostSpectrumMode::Continuous => {
-                self.mode.store(CONTINUOUS_MODE, Ordering::Release);
-                self.shared.epoch.store(1, Ordering::Release);
-                self.shared.failure_epoch.store(1, Ordering::Release);
-                self.shared.drop_epoch.store(1, Ordering::Release);
-                self.shared.invalidated_epoch.store(1, Ordering::Release);
-                self.shared
-                    .sample_rate_hz
-                    .store(u64::from(cadence.sample_rate_hz()), Ordering::Release);
-                self.shared
-                    .quantum_frames
-                    .store(u64::from(cadence.quantum_frames()), Ordering::Release);
-                self.shared
-                    .hop_frames
-                    .store(u64::from(cadence.hop_frames()), Ordering::Release);
-            }
-        }
-    }
-
-    /// Clean one retired controlled slot after its graph removal receipt.
-    fn retire_controlled_after_receipt(&mut self) {
-        // The prepared queue has one item, so retirement is bounded to one off-render pop.
-        let _ = self.consumer.try_pop();
-        self.state.store(IDLE, Ordering::Release);
-        self.mode.store(ONE_SHOT_MODE, Ordering::Release);
-        self.shared.active.store(0, Ordering::Release);
-        self.shared
-            .phase
-            .store(CONTINUOUS_WAITING, Ordering::Release);
-        self.seen_failures = 0;
-        self.seen_drops = 0;
-        self.recovery_pending = false;
-    }
-
     /// Arm the capture for the next complete graph window.
     ///
     /// Arming is a control-side operation.  The first successfully observed block establishes
@@ -639,8 +534,7 @@ impl SpectrumCapture {
     /// Try to take one-shot record identity without projecting it away.
     ///
     /// `None` preserves the legacy state machine. `Some(maximum_pops)` bounds this call to the
-    /// supplied number of queue pops, including zero; protected owners pass the queue availability
-    /// frozen at their read entry.
+    /// supplied number of queue pops, including zero.
     pub(crate) fn try_read_record(
         &mut self,
         maximum_pops: Option<usize>,
@@ -903,7 +797,7 @@ impl SpectrumCapture {
         }
     }
 
-    /// Freeze the number of queue records visible to a protected owner read.
+    /// Freeze the number of queue records visible at a continuous read's entry.
     pub(crate) fn continuous_available_at_entry(&self) -> usize {
         self.consumer.available_at_entry().min(1)
     }
@@ -1464,14 +1358,7 @@ pub(crate) fn prepare_capture(
         graph_nodes,
         maximum_named_allocation_bytes,
         SPECTRUM_OBSERVER_HANDLE,
-        CaptureBindingPolicy::Permanent,
     )
-}
-
-#[derive(Clone, Copy)]
-enum CaptureBindingPolicy {
-    Permanent,
-    Controlled,
 }
 
 fn prepare_capture_with_handle(
@@ -1479,7 +1366,6 @@ fn prepare_capture_with_handle(
     graph_nodes: &[GraphNodeId],
     maximum_named_allocation_bytes: u64,
     observer_handle: u64,
-    binding_policy: CaptureBindingPolicy,
 ) -> Result<(GraphNodeObserverBinding, SpectrumCapture), SpectrumPrepareError> {
     let (node, _resources) =
         validate_capture_request(request, graph_nodes, maximum_named_allocation_bytes)?;
@@ -1503,14 +1389,7 @@ fn prepare_capture_with_handle(
         channels: request.channels,
     };
     let observer = SpectrumCaptureObserver::new(producer, state, mode, shared, request.channels);
-    let binding = match binding_policy {
-        CaptureBindingPolicy::Permanent => {
-            GraphNodeObserverBinding::new(node, observer_handle, Box::new(observer))
-        }
-        CaptureBindingPolicy::Controlled => {
-            GraphNodeObserverBinding::controlled(node, observer_handle, Box::new(observer))
-        }
-    };
+    let binding = GraphNodeObserverBinding::new(node, observer_handle, Box::new(observer));
     Ok((binding, capture))
 }
 
@@ -1572,441 +1451,11 @@ pub(crate) fn prepare_capture_collection(
             graph_nodes,
             maximum_named_allocation_bytes,
             observer_handle,
-            CaptureBindingPolicy::Permanent,
         )?;
         observers.push(observer);
         captures.push(capture);
     }
     Ok((observers, SpectrumCaptureCollection::new(captures)))
-}
-
-pub(crate) const CONTROLLED_SLOTS_PER_ENTRY: usize = 2;
-
-/// One private paired slot for a host-controlled capture entry.
-struct ControlledSpectrumSlot {
-    capture: SpectrumCapture,
-    handle: u64,
-    staged: bool,
-    admitted_generation: Option<u64>,
-    applied_generation: Option<u64>,
-    retiring_at_revision: Option<u64>,
-}
-
-impl ControlledSpectrumSlot {
-    fn new(capture: SpectrumCapture, handle: u64) -> Self {
-        Self {
-            capture,
-            handle,
-            staged: false,
-            admitted_generation: None,
-            applied_generation: None,
-            retiring_at_revision: None,
-        }
-    }
-
-    fn is_free(&self) -> bool {
-        !self.staged
-            && self.admitted_generation.is_none()
-            && self.applied_generation.is_none()
-            && self.retiring_at_revision.is_none()
-    }
-}
-
-/// The paired storage and lifecycle state for one exact public target/channel entry.
-struct ControlledSpectrumCaptureEntry {
-    slots: [ControlledSpectrumSlot; CONTROLLED_SLOTS_PER_ENTRY],
-}
-
-/// Copyable scalar identity used by the host owner when it prepares a publication snapshot.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ControlledSpectrumDescriptor {
-    pub(crate) entry_index: usize,
-    pub(crate) slot_index: usize,
-    pub(crate) observer_handle: u64,
-    pub(crate) mode: HostSpectrumMode,
-}
-
-/// An affine staged controlled capture candidate. It owns no render resources.
-pub(crate) struct ControlledSpectrumCandidate {
-    entry_index: usize,
-    slot_index: usize,
-    observer_handle: u64,
-    mode: HostSpectrumMode,
-}
-
-impl ControlledSpectrumCandidate {
-    /// Return the internal controlled graph observer handle.
-    #[cfg(test)]
-    #[must_use]
-    pub(crate) const fn observer_handle(&self) -> u64 {
-        self.observer_handle
-    }
-
-    /// Return the fixed scalar identity selected by staging.
-    #[must_use]
-    pub(crate) const fn descriptor(&self) -> ControlledSpectrumDescriptor {
-        ControlledSpectrumDescriptor {
-            entry_index: self.entry_index,
-            slot_index: self.slot_index,
-            observer_handle: self.observer_handle,
-            mode: self.mode,
-        }
-    }
-}
-
-/// Host-controlled paired spectrum storage with at most one accepted active slot.
-pub(crate) struct ControlledSpectrumCaptureCollection {
-    entries: Box<[ControlledSpectrumCaptureEntry]>,
-    touched: [usize; CONTROLLED_SLOTS_PER_ENTRY],
-    touched_len: usize,
-    accepted_slot: Option<usize>,
-}
-
-impl ControlledSpectrumCaptureCollection {
-    fn new(entries: Vec<ControlledSpectrumCaptureEntry>) -> Self {
-        Self {
-            entries: entries.into_boxed_slice(),
-            touched: [0; CONTROLLED_SLOTS_PER_ENTRY],
-            touched_len: 0,
-            accepted_slot: None,
-        }
-    }
-
-    fn slot(&self, flat_slot: usize) -> &ControlledSpectrumSlot {
-        let entry_index = flat_slot / CONTROLLED_SLOTS_PER_ENTRY;
-        let slot_index = flat_slot % CONTROLLED_SLOTS_PER_ENTRY;
-        &self.entries[entry_index].slots[slot_index]
-    }
-
-    fn slot_mut(&mut self, flat_slot: usize) -> &mut ControlledSpectrumSlot {
-        let entry_index = flat_slot / CONTROLLED_SLOTS_PER_ENTRY;
-        let slot_index = flat_slot % CONTROLLED_SLOTS_PER_ENTRY;
-        &mut self.entries[entry_index].slots[slot_index]
-    }
-
-    fn flat_slot(entry_index: usize, slot_index: usize) -> Option<usize> {
-        entry_index
-            .checked_mul(CONTROLLED_SLOTS_PER_ENTRY)?
-            .checked_add(slot_index)
-    }
-
-    fn touch(&mut self, flat_slot: usize) -> bool {
-        if self.touched[..self.touched_len].contains(&flat_slot) {
-            return true;
-        }
-        if self.touched_len == self.touched.len() {
-            return false;
-        }
-        self.touched[self.touched_len] = flat_slot;
-        self.touched_len += 1;
-        true
-    }
-
-    fn target_entry(&self, target: &SpectrumTarget, channels: SpectrumChannels) -> Option<usize> {
-        self.entries.iter().position(|entry| {
-            let capture = &entry.slots[0].capture;
-            capture.target() == target && capture.channels() == channels
-        })
-    }
-
-    /// Resolve one exact prepared public entry without cloning its target identity.
-    pub(crate) fn prepared_entry_index(
-        &self,
-        target: &SpectrumTarget,
-        channels: SpectrumChannels,
-    ) -> Result<usize, SpectrumCaptureCollectionSelectionError> {
-        self.target_entry(target, channels)
-            .ok_or(SpectrumCaptureCollectionSelectionError::UnknownEntry)
-    }
-
-    /// Return the prepared channel mask for an entry selected by its stable preparation index.
-    pub(crate) fn entry_channels(&self, entry_index: usize) -> Option<SpectrumChannels> {
-        self.entries
-            .get(entry_index)
-            .map(|entry| entry.slots[0].capture.channels())
-    }
-
-    /// Return the bounded queue availability for one immutable controlled descriptor.
-    pub(crate) fn continuous_available_at_entry(
-        &self,
-        descriptor: ControlledSpectrumDescriptor,
-    ) -> Option<usize> {
-        if descriptor.mode != HostSpectrumMode::Continuous {
-            return None;
-        }
-        let flat_slot = Self::flat_slot(descriptor.entry_index, descriptor.slot_index)?;
-        let slot = self.slot(flat_slot);
-        (slot.handle == descriptor.observer_handle)
-            .then(|| slot.capture.continuous_available_at_entry())
-    }
-
-    /// Read one bounded continuous record from an immutable controlled descriptor.
-    pub(crate) fn try_read_continuous_record(
-        &mut self,
-        descriptor: ControlledSpectrumDescriptor,
-        maximum_pops: Option<usize>,
-    ) -> Result<SpectrumCapturedRecord, SpectrumContinuousReadError> {
-        if descriptor.mode != HostSpectrumMode::Continuous {
-            return Err(SpectrumContinuousReadError::NotActive);
-        }
-        let flat_slot = Self::flat_slot(descriptor.entry_index, descriptor.slot_index)
-            .ok_or(SpectrumContinuousReadError::NotActive)?;
-        let slot = self.slot_mut(flat_slot);
-        if slot.handle != descriptor.observer_handle {
-            return Err(SpectrumContinuousReadError::NotActive);
-        }
-        slot.capture.try_read_continuous_record(maximum_pops)
-    }
-
-    fn free_slot(&self, entry_index: usize) -> Option<usize> {
-        (0..CONTROLLED_SLOTS_PER_ENTRY).find_map(|slot_index| {
-            let flat_slot = Self::flat_slot(entry_index, slot_index)?;
-            self.slot(flat_slot).is_free().then_some(flat_slot)
-        })
-    }
-
-    /// Stage one exact prepared target on an inactive alternate slot.
-    #[cfg(test)]
-    pub(crate) fn stage(
-        &mut self,
-        target: &SpectrumTarget,
-        channels: SpectrumChannels,
-        mode: HostSpectrumMode,
-        cadence: SpectrumCadence,
-    ) -> Result<ControlledSpectrumCandidate, SpectrumCaptureCollectionSelectionError> {
-        let entry_index = self.prepared_entry_index(target, channels)?;
-        self.stage_prepared_entry(entry_index, mode, cadence)
-    }
-
-    /// Stage one exact prepared entry without cloning or comparing its target identity.
-    pub(crate) fn stage_prepared_entry(
-        &mut self,
-        entry_index: usize,
-        mode: HostSpectrumMode,
-        cadence: SpectrumCadence,
-    ) -> Result<ControlledSpectrumCandidate, SpectrumCaptureCollectionSelectionError> {
-        if entry_index >= self.entries.len() {
-            return Err(SpectrumCaptureCollectionSelectionError::UnknownEntry);
-        }
-        if self.touched[..self.touched_len]
-            .iter()
-            .copied()
-            .any(|flat_slot| self.slot(flat_slot).staged)
-        {
-            return Err(SpectrumCaptureCollectionSelectionError::Busy);
-        }
-        let flat_slot = self
-            .free_slot(entry_index)
-            .ok_or(SpectrumCaptureCollectionSelectionError::Busy)?;
-        if !self.touch(flat_slot) {
-            return Err(SpectrumCaptureCollectionSelectionError::Busy);
-        }
-        let slot_index = flat_slot % CONTROLLED_SLOTS_PER_ENTRY;
-        let observer_handle = self.slot(flat_slot).handle;
-        self.slot_mut(flat_slot)
-            .capture
-            .reset_for_controlled_stage(mode, cadence);
-        self.slot_mut(flat_slot).staged = true;
-        Ok(ControlledSpectrumCandidate {
-            entry_index,
-            slot_index,
-            observer_handle,
-            mode,
-        })
-    }
-
-    /// Publish a staged candidate's scalar admission metadata after graph publication succeeds.
-    pub(crate) fn commit_candidate(
-        &mut self,
-        candidate: ControlledSpectrumCandidate,
-        revision: u64,
-    ) {
-        let flat_slot = Self::flat_slot(candidate.entry_index, candidate.slot_index)
-            .expect("controlled candidate index");
-        assert!(
-            self.slot(flat_slot).staged,
-            "controlled candidate was not staged"
-        );
-        let previous = self.accepted_slot;
-        {
-            let slot = self.slot_mut(flat_slot);
-            slot.staged = false;
-            slot.admitted_generation = Some(revision);
-            slot.applied_generation = None;
-            slot.retiring_at_revision = None;
-        }
-        self.accepted_slot = Some(flat_slot);
-        if let Some(previous) = previous.filter(|previous| *previous != flat_slot) {
-            self.slot_mut(previous).retiring_at_revision = Some(revision);
-            debug_assert!(self.touched[..self.touched_len].contains(&previous));
-        }
-    }
-
-    /// Return a staged candidate to the free pool without changing accepted state.
-    pub(crate) fn cancel_candidate(&mut self, candidate: ControlledSpectrumCandidate) {
-        let flat_slot = Self::flat_slot(candidate.entry_index, candidate.slot_index)
-            .expect("controlled candidate index");
-        let slot = self.slot_mut(flat_slot);
-        assert!(slot.staged, "controlled candidate was not staged");
-        assert!(
-            slot.admitted_generation.is_none(),
-            "controlled candidate was already admitted"
-        );
-        slot.staged = false;
-        slot.capture.retire_controlled_after_receipt();
-        self.compact_touched();
-    }
-
-    /// Mark the last accepted slot for the reserved graph removal publication.
-    pub(crate) fn commit_removal(&mut self, revision: u64) {
-        let Some(accepted) = self.accepted_slot else {
-            return;
-        };
-        let slot = self.slot_mut(accepted);
-        if slot.retiring_at_revision.is_none() {
-            slot.retiring_at_revision = Some(revision);
-        }
-    }
-
-    /// Reconcile exactly one graph receipt and clean at most one item per retired slot.
-    pub(crate) fn reconcile_applied(&mut self, revision: u64) {
-        let mut index = 0;
-        while index < self.touched_len {
-            let flat_slot = self.touched[index];
-            let apply = self.slot(flat_slot).admitted_generation == Some(revision);
-            if apply {
-                let slot = self.slot_mut(flat_slot);
-                slot.admitted_generation = None;
-                slot.applied_generation = Some(revision);
-            }
-            let retire = self.slot(flat_slot).retiring_at_revision == Some(revision);
-            if retire {
-                let slot = self.slot_mut(flat_slot);
-                slot.capture.retire_controlled_after_receipt();
-                slot.staged = false;
-                slot.admitted_generation = None;
-                slot.applied_generation = None;
-                slot.retiring_at_revision = None;
-                if self.accepted_slot == Some(flat_slot) {
-                    self.accepted_slot = None;
-                }
-            }
-            index += 1;
-        }
-        self.compact_touched();
-    }
-
-    fn compact_touched(&mut self) {
-        let mut compacted = [0; CONTROLLED_SLOTS_PER_ENTRY];
-        let mut compacted_len = 0;
-        for &flat_slot in &self.touched[..self.touched_len] {
-            let keep = {
-                let slot = self.slot(flat_slot);
-                slot.staged
-                    || slot.admitted_generation.is_some()
-                    || slot.applied_generation.is_some()
-                    || slot.retiring_at_revision.is_some()
-            };
-            if keep {
-                compacted[compacted_len] = flat_slot;
-                compacted_len += 1;
-            }
-        }
-        self.touched = compacted;
-        self.touched_len = compacted_len;
-    }
-}
-
-/// Prepare two controlled observer slots for every exact public entry.
-pub(crate) fn prepare_controlled_capture_collection(
-    request: &SpectrumCaptureCollectionRequest,
-    graph_nodes: &[GraphNodeId],
-    maximum_named_allocation_bytes: u64,
-) -> Result<
-    (
-        Vec<GraphNodeObserverBinding>,
-        ControlledSpectrumCaptureCollection,
-    ),
-    SpectrumPrepareError,
-> {
-    let resources = controlled_spectrum_capture_collection_resources(&request.entries)?;
-    if !request.entries.is_empty() && request.maximum_capture_bytes < resources.retained_bytes {
-        return Err(SpectrumPrepareError::CaptureBudget);
-    }
-    if maximum_named_allocation_bytes < resources.largest_allocation_bytes {
-        return Err(SpectrumPrepareError::AllocationBudget);
-    }
-    let slot_count = request
-        .entries
-        .len()
-        .checked_mul(CONTROLLED_SLOTS_PER_ENTRY)
-        .ok_or(SpectrumPrepareError::CollectionCapacity)?;
-    let slot_count_u64 =
-        u64::try_from(slot_count).map_err(|_| SpectrumPrepareError::CollectionCapacity)?;
-    if slot_count_u64 != 0 {
-        let lowest_handle = SPECTRUM_OBSERVER_HANDLE
-            .checked_sub(slot_count_u64 - 1)
-            .ok_or(SpectrumPrepareError::CollectionCapacity)?;
-        // Meter handles occupy the rising nonzero range and are checked against this high range
-        // by combined host preparation. This helper can only prove its own handles are nonzero.
-        if lowest_handle == 0 {
-            return Err(SpectrumPrepareError::CollectionCapacity);
-        }
-    }
-
-    // Complete every fallible target/channel/handle check before creating a binding.
-    for entry in &request.entries {
-        validate_capture_request(
-            &SpectrumCaptureRequest {
-                target: entry.target.clone(),
-                channels: entry.channels,
-                maximum_capture_bytes: request.maximum_capture_bytes,
-            },
-            graph_nodes,
-            maximum_named_allocation_bytes,
-        )?;
-    }
-
-    let mut observers = Vec::new();
-    observers
-        .try_reserve_exact(slot_count)
-        .map_err(|_| SpectrumPrepareError::CollectionCapacity)?;
-    let mut entries = Vec::new();
-    entries
-        .try_reserve_exact(request.entries.len())
-        .map_err(|_| SpectrumPrepareError::CollectionCapacity)?;
-    for (entry_index, entry) in request.entries.iter().enumerate() {
-        let mut slots = Vec::with_capacity(CONTROLLED_SLOTS_PER_ENTRY);
-        for slot_index in 0..CONTROLLED_SLOTS_PER_ENTRY {
-            let flat_slot = entry_index
-                .checked_mul(CONTROLLED_SLOTS_PER_ENTRY)
-                .and_then(|value| value.checked_add(slot_index))
-                .ok_or(SpectrumPrepareError::CollectionCapacity)?;
-            let flat_slot_u64 =
-                u64::try_from(flat_slot).map_err(|_| SpectrumPrepareError::CollectionCapacity)?;
-            let observer_handle = SPECTRUM_OBSERVER_HANDLE
-                .checked_sub(flat_slot_u64)
-                .ok_or(SpectrumPrepareError::CollectionCapacity)?;
-            let (observer, capture) = prepare_capture_with_handle(
-                &SpectrumCaptureRequest {
-                    target: entry.target.clone(),
-                    channels: entry.channels,
-                    maximum_capture_bytes: request.maximum_capture_bytes,
-                },
-                graph_nodes,
-                maximum_named_allocation_bytes,
-                observer_handle,
-                CaptureBindingPolicy::Controlled,
-            )?;
-            observers.push(observer);
-            slots.push(ControlledSpectrumSlot::new(capture, observer_handle));
-        }
-        let slots: [ControlledSpectrumSlot; CONTROLLED_SLOTS_PER_ENTRY] = slots
-            .try_into()
-            .map_err(|_| SpectrumPrepareError::CollectionCapacity)?;
-        entries.push(ControlledSpectrumCaptureEntry { slots });
-    }
-    Ok((observers, ControlledSpectrumCaptureCollection::new(entries)))
 }
 
 struct SpectrumCaptureObserver {
@@ -3437,12 +2886,10 @@ mod tests {
         ARMED, CAPTURING, COMPLETE, INVALID, SPECTRUM_BIN_COUNT, SPECTRUM_FLOOR_DB,
         SPECTRUM_WINDOW_FRAMES, SpectrumAnalysisError, SpectrumAnalysisHistory, SpectrumAnalyzer,
         SpectrumCadence, SpectrumCadenceError, SpectrumCapture, SpectrumCaptureCollection,
-        SpectrumCaptureCollectionEntry, SpectrumCaptureCollectionRequest, SpectrumCaptureObserver,
-        SpectrumCaptureReadError, SpectrumChannels, SpectrumContinuousReadError,
-        SpectrumContinuousWindow, SpectrumHop, SpectrumSmoothingConfig,
-        SpectrumSmoothingConfigError, SpectrumTarget, SpectrumWindow,
+        SpectrumCaptureObserver, SpectrumCaptureReadError, SpectrumChannels,
+        SpectrumContinuousReadError, SpectrumContinuousWindow, SpectrumHop,
+        SpectrumSmoothingConfig, SpectrumSmoothingConfigError, SpectrumTarget, SpectrumWindow,
     };
-    use crate::observation_demand::HostSpectrumMode;
     use dsp_reference::{Complex64, direct_dft_bin, magnitude_db};
     use engine::realtime::{QueueGeneration, bounded_spsc};
     use graph::GraphRuntimeObserver;
@@ -3572,233 +3019,6 @@ mod tests {
             }
         }
         windows
-    }
-
-    fn controlled_entries() -> Vec<SpectrumCaptureCollectionEntry> {
-        vec![
-            SpectrumCaptureCollectionEntry {
-                target: SpectrumTarget::Output("main-out".into()),
-                channels: SpectrumChannels::Stereo,
-            },
-            SpectrumCaptureCollectionEntry {
-                target: SpectrumTarget::TrackPostMatrix("track-a".into()),
-                channels: SpectrumChannels::Left,
-            },
-            SpectrumCaptureCollectionEntry {
-                target: SpectrumTarget::TrackPostInputBuiltins("track-b".into()),
-                channels: SpectrumChannels::Right,
-            },
-        ]
-    }
-
-    fn controlled_graph_nodes(
-        entries: &[SpectrumCaptureCollectionEntry],
-    ) -> Vec<graph::GraphNodeId> {
-        entries
-            .iter()
-            .map(|entry| entry.target.graph_node().expect("valid graph target"))
-            .collect()
-    }
-
-    #[test]
-    fn controlled_preparation_charges_pairs_and_rejects_duplicates_and_one_below() {
-        let entries = controlled_entries();
-        let resources = super::controlled_spectrum_capture_collection_resources(&entries)
-            .expect("controlled resources");
-        assert!(resources.retained_bytes > 0);
-        assert!(resources.largest_allocation_bytes > 0);
-        assert_eq!(
-            super::controlled_spectrum_capture_collection_resources(&[
-                entries[0].clone(),
-                entries[0].clone()
-            ]),
-            Err(super::SpectrumPrepareError::DuplicateEntry)
-        );
-        let graph_nodes = controlled_graph_nodes(&entries);
-        let request = SpectrumCaptureCollectionRequest {
-            entries: entries.clone(),
-            maximum_capture_bytes: resources.retained_bytes,
-        };
-        let (bindings, collection) = super::prepare_controlled_capture_collection(
-            &request,
-            &graph_nodes,
-            resources.largest_allocation_bytes,
-        )
-        .expect("paired controlled preparation");
-        assert_eq!(bindings.len(), entries.len() * 2);
-        assert_eq!(collection.entries.len(), entries.len());
-        assert_eq!(
-            bindings
-                .iter()
-                .map(|binding| binding.handle)
-                .collect::<Vec<_>>(),
-            vec![
-                u64::MAX,
-                u64::MAX - 1,
-                u64::MAX - 2,
-                u64::MAX - 3,
-                u64::MAX - 4,
-                u64::MAX - 5
-            ]
-        );
-
-        let under_capture = SpectrumCaptureCollectionRequest {
-            entries: entries.clone(),
-            maximum_capture_bytes: resources.retained_bytes - 1,
-        };
-        assert_eq!(
-            super::prepare_controlled_capture_collection(
-                &under_capture,
-                &graph_nodes,
-                resources.largest_allocation_bytes,
-            )
-            .err()
-            .expect("one byte below capture cap"),
-            super::SpectrumPrepareError::CaptureBudget
-        );
-        let under_allocation = SpectrumCaptureCollectionRequest {
-            entries,
-            maximum_capture_bytes: resources.retained_bytes,
-        };
-        assert_eq!(
-            super::prepare_controlled_capture_collection(
-                &under_allocation,
-                &graph_nodes,
-                resources.largest_allocation_bytes - 1,
-            )
-            .err()
-            .expect("one byte below allocation cap"),
-            super::SpectrumPrepareError::AllocationBudget
-        );
-    }
-
-    #[test]
-    fn controlled_lifecycle_keeps_active_slots_untouched_and_reconciles_two_indices() {
-        let entries = controlled_entries();
-        let resources = super::controlled_spectrum_capture_collection_resources(&entries)
-            .expect("controlled resources");
-        let request = SpectrumCaptureCollectionRequest {
-            entries: entries.clone(),
-            maximum_capture_bytes: resources.retained_bytes,
-        };
-        let graph_nodes = controlled_graph_nodes(&entries);
-        let (_, mut collection) = super::prepare_controlled_capture_collection(
-            &request,
-            &graph_nodes,
-            resources.largest_allocation_bytes,
-        )
-        .expect("paired controlled preparation");
-        let cadence = SpectrumCadence::new(48_000, 128).expect("launch cadence");
-        let first = collection
-            .stage(
-                &entries[0].target,
-                entries[0].channels,
-                HostSpectrumMode::Continuous,
-                cadence,
-            )
-            .expect("first stage");
-        assert_eq!(first.observer_handle(), u64::MAX);
-        assert_eq!(first.descriptor().entry_index, 0);
-        collection.commit_candidate(first, 10);
-        collection.reconcile_applied(10);
-        let active = collection.accepted_slot.expect("active slot");
-        assert_eq!(active, 0);
-        let active_sample_rate = collection
-            .slot(active)
-            .capture
-            .shared
-            .sample_rate_hz
-            .load(std::sync::atomic::Ordering::Acquire);
-        collection
-            .slot_mut(active)
-            .capture
-            .shared
-            .active
-            .store(1, std::sync::atomic::Ordering::Release);
-
-        let alternate = collection
-            .stage(
-                &entries[0].target,
-                entries[0].channels,
-                HostSpectrumMode::OneShot,
-                cadence,
-            )
-            .expect("same-target alternate stage");
-        assert_eq!(alternate.observer_handle(), u64::MAX - 1);
-        assert_eq!(
-            collection
-                .slot(active)
-                .capture
-                .shared
-                .sample_rate_hz
-                .load(std::sync::atomic::Ordering::Acquire,),
-            active_sample_rate
-        );
-        assert_eq!(
-            collection
-                .slot(active)
-                .capture
-                .shared
-                .active
-                .load(std::sync::atomic::Ordering::Acquire,),
-            1
-        );
-        let accepted_before_cancel = collection.accepted_slot;
-        collection.cancel_candidate(alternate);
-        assert_eq!(collection.accepted_slot, accepted_before_cancel);
-        assert_eq!(collection.touched_len, 1);
-
-        let replacement = collection
-            .stage(
-                &entries[0].target,
-                entries[0].channels,
-                HostSpectrumMode::OneShot,
-                cadence,
-            )
-            .expect("replacement stage");
-        collection.commit_candidate(replacement, 11);
-        collection.commit_removal(12);
-        let replacement_slot = collection.accepted_slot.expect("replacement accepted");
-        assert_eq!(replacement_slot, 1);
-        assert_eq!(
-            collection.slot(replacement_slot).admitted_generation,
-            Some(11)
-        );
-        assert_eq!(
-            collection.slot(replacement_slot).retiring_at_revision,
-            Some(12)
-        );
-        assert_eq!(collection.touched_len, 2);
-
-        assert!(
-            collection
-                .stage(
-                    &entries[0].target,
-                    entries[0].channels,
-                    HostSpectrumMode::Continuous,
-                    cadence,
-                )
-                .is_err()
-        );
-        collection.reconcile_applied(11);
-        assert_eq!(collection.touched_len, 1);
-        assert!(collection.slot(0).is_free());
-        assert!(!collection.slot(1).is_free());
-        collection.reconcile_applied(12);
-        assert_eq!(collection.touched_len, 0);
-        assert!(collection.slot(1).is_free());
-        assert!(collection.accepted_slot.is_none());
-
-        let reused = collection
-            .stage(
-                &entries[0].target,
-                entries[0].channels,
-                HostSpectrumMode::Continuous,
-                cadence,
-            )
-            .expect("same-target slot reusable after receipt cleanup");
-        assert_eq!(reused.observer_handle(), u64::MAX);
-        assert_eq!(collection.touched_len, 1);
     }
 
     #[test]

@@ -73,8 +73,10 @@ binary_dir="${CARGO_TARGET_DIR:-$root/target}${CARGO_BUILD_TARGET:+/$CARGO_BUILD
 
 known_defects=(python3 -B "$root/scripts/lib/aarch64-known-defects.py")
 "${known_defects[@]}" --self-test >/dev/null || fail 'the known-defect judges failed their self-test'
-mapfile -t rows < <("${known_defects[@]}" rows "$mode")
-((${#rows[@]} > 0)) || fail "no $mode expected-failure rows could be read"
+# A leg may have no rows left: an empty table is read successfully and names nothing to skip.
+row_table="$("${known_defects[@]}" rows "$mode")" || fail "the $mode expected-failure rows could not be read"
+rows=()
+[[ -z "$row_table" ]] || mapfile -t rows <<<"$row_table"
 
 # --- no silent skip on a backend width ----------------------------------------------------------
 silent_skip='(?:Backend::current\(\)|\bbackend|\bdispatch)\s*!=\s*(?:\w+::)*Backend::Simd[48]\s*\{[^{}]*?\breturn\b'

@@ -2,6 +2,14 @@
 
 These Markdown files are source-of-truth bodies for later GitHub issue creation.  They are not GitHub templates and do not create issues by themselves.  Each body is intentionally stateless: it contains its mission, applicable invariants, interface contract, dependencies, deliverables, non-goals, hazards, gates, target matrix, and evidence requirements.  “Declared tolerance,” “configured budget,” or similar language is valid only when the issue requires the value and its research/measurement rationale to be frozen in the Sol-approved brief before production code starts.
 
+## What this folder holds
+
+The specs of open issues only (owner ruling, #1040). A closed issue's spec leaves this folder at
+the batch after the issue closes; its spec and evidence live on GitHub and in git history. `BRIEFS/`
+stays: some briefs are the normative source of frozen DSP constants. The history below names many
+closed issues; every spec #1040 removed can be read at
+[`80c4119b`](https://github.com/misofm/engine/tree/80c4119b9e6814cb450e87568243d6df9b6be7bc/.github/ISSUE_SPECS).
+
 ## Use
 
 1. Create the GitHub issue title from the body H1 after removing its three-digit ordering prefix, then copy the complete body without replacing substantive sections.

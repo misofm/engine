@@ -430,7 +430,8 @@ mod tests {
     // `parametric_eq_recurrence_proof.rs:17-21`. #1029 deleted that uncompiled harness with the
     // #031, #042 and #044 ones; issues #031, #042, #044 and #045 keep their history, and git keeps
     // the files (`dsp-research/archive/` at commit 5379e46c). It is the 1,488-row grid recorded in
-    // `.github/ISSUE_SPECS/045-*.md` (`rows=1488`).
+    // #045's spec (`rows=1488`), which git keeps at
+    // https://github.com/misofm/engine/blob/80c4119b9e6814cb450e87568243d6df9b6be7bc/.github/ISSUE_SPECS/045-launch-parametric-eq-recurrence-derivation-and-runtime-proof.md
     const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
     const FREQUENCIES: [f64; 6] = [10.0, 20.0, 100.0, 1_000.0, 10_000.0, 20_000.0];
     const QS: [f64; 4] = [0.1, FRAC_1_SQRT_2, 1.0, 18.0];

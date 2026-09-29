@@ -133,7 +133,7 @@ Nothing else builds a builtins-less plan:
 
 **Effects that do not bank.** This covers a slot without the bank-kernel contract, a sidechained
 slot, and future opaque third-party Wasm, which is dynamic-rack only and never banks (`AGENTS.md`;
-spec 028; `008-…md:35`).
+spec 028; [#8's spec, line 35](https://github.com/misofm/engine/blob/80c4119b9e6814cb450e87568243d6df9b6be7bc/.github/ISSUE_SPECS/008-aosoa-simd-rack-compiler-and-scalar-avx2-wasm-kernels.md#L35).
 
 - Such an effect renders per node.
 - The track's builtins still bank, so the plan still has banks.
@@ -162,12 +162,12 @@ No. No spec plans a builtins-less, plain-mixer, effects-only or mixer-only host.
 touch the question agree:
 
 - #925's verdict: "no host, C-ABI or web path compiles builtins-less"
-  (`.github/ISSUE_SPECS/925-…md:381-384`).
+  ([#925's spec, lines 381-384](https://github.com/misofm/engine/blob/80c4119b9e6814cb450e87568243d6df9b6be7bc/.github/ISSUE_SPECS/925-lower-identity-bound-track-stages-as-aliases.md#L381-L384)).
 - #927: host-core "always compiles with builtins", and a bind probe over
   `cargo test -p host-core --all-features` found no Output in-place read
-  (`927-…md:366-370`).
+  ([#927's spec, lines 366-370](https://github.com/misofm/engine/blob/80c4119b9e6814cb450e87568243d6df9b6be7bc/.github/ISSUE_SPECS/927-read-plain-strip-sources-in-place-from-the-played-transfer-block.md#L366-L370)).
 - #940's ruling 1: "It moves only bankless plans … no product host compiles a builtins-less plan
-  today. The production wins are S3-S5" (`M:.github/ISSUE_SPECS/940-…md:31-35`). #940 and #941
+  today. The production wins are S3-S5" ([#940's spec, lines 31-35](https://github.com/misofm/engine/blob/80c4119b9e6814cb450e87568243d6df9b6be7bc/.github/ISSUE_SPECS/940-skip-unplayed-source-claims-in-the-fused-output-reduction.md#L31-L35)). #940 and #941
   are already closed on GitHub.
 
 **Answer.** The premise is true for every shipped build. The one qualification is that the class
@@ -183,10 +183,10 @@ means a with-builtins plan at `Backend::Scalar`, which only tests produce.
 
 | # | code (`B:`) | issue | deciding predicate | shipped | Scalar (tests) | builtins-less |
 |---|---|---|---|---|---|---|
-| 1 | `output_route_fold` and `OutputRouteFold` (`crates/graph/src/runtime.rs:7287-7439`) | #920/#926 | **`parts.membership().is_empty()` (`:7367`)**. The membership holds every effect-bank *and* builtin-bank member (`bank_membership`, `:4439-4461`). The remaining clauses are Output identity, fan-in ≥ 2, and every producer a plain, in-place, unobserved route read only by the Output. | never | **yes**: #926 recorded the two scalar `builtin_batch_endpoint` tests taking it, at fan-in 3 and 9 (`926-…md:328`) | yes |
+| 1 | `output_route_fold` and `OutputRouteFold` (`crates/graph/src/runtime.rs:7287-7439`) | #920/#926 | **`parts.membership().is_empty()` (`:7367`)**. The membership holds every effect-bank *and* builtin-bank member (`bank_membership`, `:4439-4461`). The remaining clauses are Output identity, fan-in ≥ 2, and every producer a plain, in-place, unobserved route read only by the Output. | never | **yes**: #926 recorded the two scalar `builtin_batch_endpoint` tests taking it, at fan-in 3 and 9 ([#926's spec, line 328](https://github.com/misofm/engine/blob/80c4119b9e6814cb450e87568243d6df9b6be7bc/.github/ISSUE_SPECS/926-fuse-in-place-routes-into-the-output-reduction-in-pairs.md#L328)) | yes |
 | 2 | The fused kernels: `OUTPUT_GROUP`, `route_reduce`, `route_group`, `route_pair_vectors`, `route_lone_vectors`, `route_tail`, `route_run`, `mix_chunk`, `add_mixed_chunks` (`runtime.rs:688-1087`) | #926/#937 | Called only from `execute_op`'s third host arm (`:3676-3684`). That arm is taken only when `routes` is non-empty, which means row 1 admitted. | never | yes | yes |
 | 3 | `Runtime.output_routes` and its plumbing: the field (`:2569-2573`), both layout mirrors (`:2633`, `:2658`), the accessor (`:2754-2756`), the constructor parameter and assert (`:2806-2828`, `:2873`), the `execute` routing (`:3068`, `:3093`) and `execute_op`'s parameters and doc (`:3602-3624`) | #926 | same as row 2 | never. The table is empty, but every plain unit still pays the `output` selects (`:3091-3103`) and the Output unit one `is_empty` per block. | yes | yes |
-| 4 | `OutputSources` and `resolve_group` (`:622-686`); `Runtime.output_sources` (`:2574-2579`, `:2634`, `:2659`, `:2874`, `:3069`, `:3094-3103`, `:6103`); `SourcePlanes.output` (`:6126-6135`); `source_plane_table` clauses (b′) and (e) (doc `:6160-6187`, code `:6219`, `:6237`, `:6280-6290`) | #927/#937 | An Input claim whose **only reader is a route the Output fold retired** (`:6280-6284`). | never | **never**. With builtins the Input's reader is `PostInputBuiltins`, a bank member or a bound op, never a route. Structurally, `compile.rs:236-243` always adds the Input → `PostInputBuiltins` edge, and `compile_with_builtins` always lists `PostInputBuiltins` (`:816`, `:826-832`), so that stage keeps its op and is the Input's reader. #927's bind probe agrees (`927-…md:366-370`). | yes, driver-fed only (`sixty_four_track_plumbing_ring`) |
+| 4 | `OutputSources` and `resolve_group` (`:622-686`); `Runtime.output_sources` (`:2574-2579`, `:2634`, `:2659`, `:2874`, `:3069`, `:3094-3103`, `:6103`); `SourcePlanes.output` (`:6126-6135`); `source_plane_table` clauses (b′) and (e) (doc `:6160-6187`, code `:6219`, `:6237`, `:6280-6290`) | #927/#937 | An Input claim whose **only reader is a route the Output fold retired** (`:6280-6284`). | never | **never**. With builtins the Input's reader is `PostInputBuiltins`, a bank member or a bound op, never a route. Structurally, `compile.rs:236-243` always adds the Input → `PostInputBuiltins` edge, and `compile_with_builtins` always lists `PostInputBuiltins` (`:816`, `:826-832`), so that stage keeps its op and is the Input's reader. #927's bind probe agrees ([#927's spec, lines 366-370](https://github.com/misofm/engine/blob/80c4119b9e6814cb450e87568243d6df9b6be7bc/.github/ISSUE_SPECS/927-read-plain-strip-sources-in-place-from-the-played-transfer-block.md#L366-L370)). | yes, driver-fed only (`sixty_four_track_plumbing_ring`) |
 | 5 | `GraphSourcePlanes::played_planes_group` (`crates/graph/src/lib.rs:1863-1899`, a realtime-marked region) | #937 | Its only caller is `OutputSources::resolve_group` (`runtime.rs:684`). | never | never | yes (ring) |
 | 6 | The Output-fold arms of `validate_fold_installation` (`runtime.rs:5492-5500`, `:5507-5508`) and `build_sequential` (`:5730-5734`) | #926 | `output_fold.is_some()` | never | yes | yes |
 | 7 | Test seams: `test_only_set_output_route_fold_declined` (`runtime.rs:5273`, `:5285-5287`, `:5451-5452`; export `lib.rs:36`) and `GraphExecutor::output_route_folds` (`lib.rs:2572`) | #926 | test-support only | n/a | n/a | n/a |
@@ -196,7 +196,7 @@ means a with-builtins plan at `Backend::Scalar`, which only tests produce.
 **What the shipped browser module carries today.**
 
 - It contains `route_group<f32x4>` (38 vector operations) and `route_tail` (132 scalar
-  operations). Neither can run in a browser (`937-…md:236-245`).
+  operations). Neither can run in a browser ([#937's spec, lines 236-245](https://github.com/misofm/engine/blob/80c4119b9e6814cb450e87568243d6df9b6be7bc/.github/ISSUE_SPECS/937-resolve-output-inputs-in-groups-of-eight-and-tighten-the-pair-kernel.md#L236-L245)).
 - Removing them lowers the AudioWorklet gate's kernel census from 15 to 14. The ratchet minimum is
   11 (`scripts/check-web-audioworklet.sh:428`).
 
@@ -300,7 +300,7 @@ In each P test only the builtins-less arm is optimisation-specific.
 | jq validators | `scripts/console-benchmark-validator.jq:7` (`length == 50`), `:12` (36 session records), `:33-36` (the plumbing pair shares one digest). `scripts/console-benchmark-record-lib.jq:20`, `:71`, `:133-140`, `:198`, `:208-211`, `:336-345`, `:451`. `scripts/wasm-console-benchmark-validator.jq:70-71`, `:207` (`== 32`), `:212-213` (16 kinds). | The rows are **required**: a record without them is refused. |
 | scripts | `scripts/test-console-benchmark.sh` (about 125 lines), `scripts/test-wasm-console-benchmark.sh:61`, `:165-176` (index mutations `.[11]`–`.[15]`), `scripts/run-console-benchmark.sh:126-139`, `:329-330`, `scripts/operator/preflight-console-benchmark.sh:160` (`records_required: 50`) | Counts and pins. |
 | wasm console arm | `WORKLOADS` is append-only because the guest prepares a row by index (`tools/console-workload/src/lib.rs:446-450`; `tools/wasm-console-guest/src/lib.rs:140-160`) | Removing index 11 re-indexes rows 12–15. |
-| determinism gate | `scripts/check-graph-determinism.sh` runs `graph_fixture` (builtins-less, `Scalar`) 100 times and compares each run with the first. It stores nothing but `target/issue6/fresh-process-determinism.json`. | The gate is self-relative, so porting `graph_fixture` onto builtins keeps it meaningful. The checked-in `M:fixtures/graph/v1/*` and `M:fixtures/graph/MANIFEST.tsv` come from the same binary. Only #947's byte-for-byte test gates them (`947-…md:10`), and they are regenerated if the binary moves onto builtins. |
+| determinism gate | `scripts/check-graph-determinism.sh` runs `graph_fixture` (builtins-less, `Scalar`) 100 times and compares each run with the first. It stores nothing but `target/issue6/fresh-process-determinism.json`. | The gate is self-relative, so porting `graph_fixture` onto builtins keeps it meaningful. The checked-in `M:fixtures/graph/v1/*` and `M:fixtures/graph/MANIFEST.tsv` come from the same binary. Only #947's byte-for-byte test gates them ([#947's spec, line 10](https://github.com/misofm/engine/blob/80c4119b9e6814cb450e87568243d6df9b6be7bc/.github/ISSUE_SPECS/947-regenerate-and-gate-the-graph-resource-report-fixtures.md#L10)), and they are regenerated if the binary moves onto builtins. |
 | #650 audit | `tools/audit/src/prepared_effect_allocations.rs` | It measures a compile no host runs. It is run manually. |
 | #006 compile benchmark | `tools/bench/src/graph.rs:286` | Same. Its validators pin nothing absolute (`scripts/graph-benchmark-record-validator.jq:33`, `scripts/graph-benchmark-validator.jq:16`). |
 | floor ruling | `docs/rulings/effect-floor-accounting.md:499-584` (the "Plumbing inventory"), `:12`, `:621` | Rewrite (section 5). |

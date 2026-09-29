@@ -78,7 +78,7 @@ or remove/overwrite terminal artifacts. Issue 081 remains STOP with no overall P
 
 Open **108 Repair effect-interchange benchmark migration fixture and reauthorize one descriptive
 run** at
-`.github/ISSUE_SPECS/108-repair-effect-interchange-benchmark-migration-fixture-and-reauthorize-one-descriptive-run.md`.
+[issue 108's spec](https://github.com/misofm/engine/blob/80c4119b9e6814cb450e87568243d6df9b6be7bc/.github/ISSUE_SPECS/108-repair-effect-interchange-benchmark-migration-fixture-and-reauthorize-one-descriptive-run.md).
 Its exact dependencies are **Canonical effect interchange qualification, fuzzing, and benchmark**,
 **Prepared effect state envelope and transactional current-layout restore**, **Effect state
 migration registry and bounded chains**, and **Close canonical effect descriptor wire, identity,

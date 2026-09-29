@@ -4,9 +4,13 @@
 //!
 //! This crate intentionally has no dependency on engine production kernels. It is not realtime
 //! code and exists solely as an auditable numerical oracle.
+//!
+//! It also holds [`class_a`], the one NaN fold every class-A comparison, digest and differential
+//! shares (issue #1065).
 
 mod biquad;
 mod block;
+pub mod class_a;
 mod compressor;
 mod delay;
 mod gate_expander;
@@ -14,6 +18,7 @@ mod lr4;
 mod parametric_eq;
 mod processor;
 mod ramp;
+pub mod randomized;
 mod signals;
 mod soft_clip;
 mod spectrum;

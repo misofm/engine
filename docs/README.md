@@ -16,7 +16,7 @@ The issue bodies in [`.github/ISSUE_SPECS`](../.github/ISSUE_SPECS/README.md) re
 | Render lifetime and SPSC foundation | [Realtime memory](REALTIME_MEMORY.md) |
 | Fixed scalar track chain and transparent meters | [Builtins and metering V1](BUILTINS_AND_METERING_V1.md) |
 | Native effect factory and process boundary | [Effect contract V1](EFFECT_CONTRACT_V1.md) |
-| Launch feed-forward peak compressor authority | [Issue 013 spec](../.github/ISSUE_SPECS/013-compressor.md) and [Sol brief](../.github/ISSUE_SPECS/BRIEFS/013-compressor.md) |
+| Launch feed-forward peak compressor authority | [Issue 013 spec](https://github.com/misofm/engine/blob/80c4119b9e6814cb450e87568243d6df9b6be7bc/.github/ISSUE_SPECS/013-compressor.md) and [Sol brief](../.github/ISSUE_SPECS/BRIEFS/013-compressor.md) |
 | Releasing `@misofm/engine`: the shipped module's fingerprint, the release PR | [Release procedure](RELEASE.md) |
 
 `protocol` is control-plane-only. It has no renderer, `PreparedRenderPlan`, PCM payload, transport framing, or exported C ABI.

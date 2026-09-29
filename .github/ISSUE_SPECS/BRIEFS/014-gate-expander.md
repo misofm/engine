@@ -6,7 +6,7 @@
 There are two total attempts: one Terra implementation/review and one bounded Sol correction. A
 second failure stops. Issue 047 owns expanded qualification; Issue 014 invokes no benchmark.
 
-This brief and `.github/ISSUE_SPECS/014-gate-expander.md` are authoritative. Reuse the accepted
+This brief and [issue 014's spec](https://github.com/misofm/engine/blob/80c4119b9e6814cb450e87568243d6df9b6be7bc/.github/ISSUE_SPECS/014-gate-expander.md) are authoritative. Reuse the accepted
 runtime, compressor dynamics conventions, prepared core dispatch, bank and graph seams. Do not
 redesign session syntax, effect metadata, cohorts, graph/PDC or target detection.
 
