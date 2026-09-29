@@ -119,7 +119,8 @@ The checked evidence consists of:
 - capacity-one/non-power-of-two wraparound and ownership-return tests;
 - concurrent complete-plan publication with thread-ID destruction evidence;
 - one-million-block allocation and syscall audit with accepted and deferred swaps;
-- Wasm object inspection proving the browser-local fallback has no atomic opcode.
+- Wasm module inspection proving the shipped AudioWorklet module has no atomic opcode, import or
+  shared memory (`scripts/check-web-audioworklet.sh`; the scalar object inspection retired with #1062).
 
 The two-round timing harness is descriptive only. It records the issue-001 environment metadata and
 has no timing threshold, retry, or optimization loop.
