@@ -512,3 +512,61 @@ Terra, 2026-09-29, a spec-only revision answering Sol's R0 verdict above.
   - The design verification moved to `docs/handoffs/console-strip-2026-09-29/VERIFY.md`.
   - The GitHub bodies (#1084-#1099, and the #887-#889 amendments) are root's to sync after the C1
     push.
+
+## Sol verdict, R0 attempt 2
+
+**PASS.** Sol checked `11ea359b` against the attempt-1 verdict, the owner's decisions and the code
+at that commit.
+
+**Attempt-1 findings, each closed.**
+- **High (S4 had no owner).**
+  - S1a's `dynamic` clause moves B0's app-shape row, native and V8, into `console.pre_insert`.
+    Bypass is not part of the "uniform" test, so the row qualifies, and the 2-mod-3 pattern
+    survives.
+  - Chain order is preserved in every case of the append, prepend and stay rule.
+  - S1a owns the V8 fixture lookup and the builders. S1c owns the rack codes. Both gate on the
+    native console preflight and on the V8 harness's `prepare` and `preflight` steps.
+  - S4 maps every row to the slice that owns it.
+- **Medium, merge order.** S1r now merges before S1a.
+- **Medium, authorization.** S1a is authorized for, and gated on, `check-console-benchmark-fixture.sh`,
+  `check-console-fixtures.sh` and `test-console-benchmark.sh`.
+- **Medium, attribution.** The owner's decision and root's application are now separated, and
+  `_v1` stays. Sol cannot see the owner's question text in the repo, so this is accepted as root
+  attests it.
+- **Medium, batch plan.** C1-C4 works under CI-conscious delivery:
+  - each batch is pushed once and its issues close after the push;
+  - C1 is pushed before any engine slice lands;
+  - C3's single push is forced by the SDK lockstep;
+  - the file-based sequencing inside each batch is correct.
+- **Low.** Every low finding is closed.
+
+**The deviation is sound.** Sol reclassified all 18 documents with a script. The only multi-track
+documents with a uniform, non-empty `dynamic` rack are the two named witnesses. Neither blocks S4:
+- `console-sixty-four-track.json` feeds only `sixty_four_track_console_legacy` and its twin,
+  `sixty_four_track_eq_comp_simd1`.
+- The headline `sixty_four_track_console` row and B0's strip and sparse-activity rows use the
+  `-intended` fixture (`tools/console-workload/src/lib.rs:582-593`). That fixture becomes fully
+  console, so S4 measures the console model at N = 64.
+- Keeping the witnesses preserves the console-against-insert pairs that AGENTS.md's placement rule
+  needs.
+
+**Gates.** All exited 0 at `11ea359b`, on the `full` route:
+- `check-workspace-policy.sh` and `check-session-policy.sh`;
+- `check-script-reachability.py`;
+- `check-ci-path-routing.py` and `test-ci-path-routing.py`;
+- `check-env-vocabulary.sh`;
+- `check-dsp-research.sh` and `check-builtins-listening.sh`.
+
+**Low findings.** None blocks R0; fix them in passing.
+1. **S1c's harness authorization is too narrow.** It says "the rack byte only" (`:279`), but after
+   S1c's codes change, the lookup at `:136-140` also keys on `control.rack`. Authorize S1c for the
+   harness's rack-code handling, or have S1a key the lookup on `slot_id`.
+2. **S4's gate 5 names the wrong V8 fields.** The V8 records carry `quiet_output_sha256`,
+   `restated_output_sha256`, `automated_output_sha256` and `preflight_output_sha256`, not
+   `output_sha256`. Name them.
+3. **S4's gate 5 has no allowance for intervening bit changes.** Allow a difference that is
+   attributed to a named non-console commit that declared a bit change between C1 and C4.
+   Otherwise an unrelated class-B fix makes the gate unpassable.
+4. **Typo.** The P2b-P2e dependency lines read "(P2a), #1088)".
+5. **Optional.** S1r's gates pass on the old schema, so it could close C2 instead and shorten C3's
+   unpushed window.
