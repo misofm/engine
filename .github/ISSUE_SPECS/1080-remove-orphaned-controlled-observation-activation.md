@@ -212,10 +212,65 @@ identical.
    observer policy" selects `MeterBindingPolicy::Controlled` and drives graph activation from the
    meter lease, and its evidence cites `observe_active_unit`. After this change that mechanism is
    gone. #882 needs a ruling: close it, or rescope it onto the ordinary path.
-2. **Kept deliberately: builtins' meter observer half.**
-   - `MeterAccumulator::restart_observation`, `MeterAccumulator::observation_generation()` and
-     `MeterSnapshot::observation_generation` are orphaned in production. Their only caller was the
-     removed `MeterObserver::activation_changed`, and the proof above reports both dead.
-   - The slice names only host-core's observer half. Removing these shrinks `MeterSnapshot`
-     168 → 160 B (reversing #818 A1), moves every meter resource row, and rewrites builtins'
-     `restart`-event property streams. That belongs in a successor, or needs a ruling to keep them.
+2. **Builtins' meter observer half.** It was kept in the first commits and removed afterwards, by
+   owner ruling (decision 11). See the addendum.
+
+### Addendum: builtins' meter observer half (owner decision 11)
+
+The owner ruled to merge #1080, to rescope #882 to a simpler lease-driven skip (root handles that),
+and to remove the builtins meter's `restart_observation` and `observation_generation`, which this
+change left unused.
+
+**Proof of non-use.** `restart_observation`, `observation_generation()` and
+`MeterSnapshot::observation_generation` were made `pub(crate)`. The workspace (`--lib --bins
+--all-features`), host-web on wasm32 `simd128` and the 25 product crates on `aarch64-apple-ios` and
+`aarch64-linux-android` all compiled. On every target, the only warning was builtins' own "methods
+`restart_observation` and `observation_generation` are never used". The field's only other writer
+was the constant 0 at preparation.
+
+**What was removed.**
+- `MeterAccumulator::restart_observation` and `observation_generation()`, and the
+  `observation_generation` field of `MeterAccumulator` and `MeterSnapshot`. builtins `src` goes
+  5,559 → 5,538 lines. The ordinary meter path, including `reset`, the window logic, the snapshot's
+  other fields and the banked and resident commits, is untouched.
+- Tests:
+  - `meter_observation_restart_discards_partial_window_and_preserves_lifetime_state` is removed;
+  - the `Restart` event leaves the G2 peak streams and the M2 random stream, which now draws from 19
+    arms instead of 20;
+  - the generation word leaves the snapshot-bit helpers in builtins' meter tests and graph-compiler;
+  - console-workload's assertion keeps `reset_generation`.
+- Repins that move only by the removed bytes:
+  - `MeterSnapshot` is 168 → 160 B and `MeterAccumulator` 240 → 232 B, reversing #818 A1;
+  - the builtins-compiler mutation transcript moves only through those sizes, and adding one `u64`
+    back to each restores the previous hash;
+  - `resources.jsonl` loses 24 B per meter at queue depth 1 and 48 B at depth 4. The audit's two
+    layout constants, the joined-manifest identity and `builtins_graph.rs`'s consumer pin follow.
+- The commit is 9 files, +32 / −134. The branch total is now 21 files, +215 / −5,266.
+
+**Module.**
+- The module is 3,254,230 B, 30 B less than the earlier commits' module, with sha256 `885aa117…`.
+  Against base that is 3,299,125 → 3,254,230 (−44,895 B).
+- The whole −30 B is code. The meter's emit copies a smaller snapshot. `restart_observation` never
+  shipped.
+- Functions stay at 2,481, the 116 exports are unchanged, and memory stays at `initial=18`.
+- The `render` closure stays at 8/5, `meter_poll` at 9, `command_submit` at 36, and the kernel shape
+  at 15.
+- Browser resource rows are unchanged from the earlier commits, `builtinRetainedBytes` 1,817
+  included.
+
+**Gates.**
+
+| gate | result |
+|---|---|
+| fmt; `check` and `clippy -D warnings`, workspace, `--all-targets --all-features` | pass |
+| default-feature `check --all-targets` | pass, no warnings |
+| builtins, builtins-compiler, graph, host-core, host-web, graph-compiler and capi tests, dev, all features | 727 passed, 0 failed |
+| the builtins through host-web crates, release, all features | 558 passed |
+| the builtins through host-web crates, dev, default features | 553 passed |
+| audit, bench and console-workload release tests | 107 passed |
+| `check-builtins-fixtures.sh` | ok (50 files) |
+| `check-web-audioworklet.sh`, with and without metadata regeneration | pass |
+| `check-browser-expected-resources.py --artifacts` | pass |
+| console digests | all 17 rows identical to `fa48dbbb` |
+| `check-cross-targets.sh`, wasm `simd128` host-web `--all-targets`, `check-realtime-policy.sh` | pass |
+| `cargo test --workspace --all-features -- --list` | 2,045 → 2,044, the removed restart test |

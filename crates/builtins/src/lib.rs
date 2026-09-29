@@ -4398,7 +4398,6 @@ pub struct MeterSnapshot {
     pub handle: MeterHandle,
     pub present_metrics: MeterMetricSet,
     pub reset_generation: u64,
-    pub observation_generation: u64,
     pub window_sequence: u64,
     pub start_sample: u64,
     pub end_sample: u64,
@@ -4457,7 +4456,6 @@ pub struct MeterAccumulator {
     cumulative_sanitized: u64,
     discontinuities: u64,
     dropped: u64,
-    observation_generation: u64,
     producer: Producer<MeterSnapshot>,
 }
 
@@ -4583,7 +4581,6 @@ impl MeterAccumulator {
                 cumulative_sanitized: 0,
                 discontinuities: 0,
                 dropped: 0,
-                observation_generation: 0,
                 producer,
             },
             consumer,
@@ -4946,27 +4943,10 @@ impl MeterAccumulator {
         }
     }
 
-    /// Starts a fresh observation window for a controlled activation.
-    ///
-    /// The configured queue generation and all lifetime counters remain unchanged. This only
-    /// discards the partial scalar window so it cannot span an inactive interval.
-    pub fn restart_observation(&mut self, generation: u64) {
-        self.observation_generation = generation;
-        self.start = None;
-        self.frames = 0;
-        self.left = meter_lane();
-        self.right = meter_lane();
-    }
-
     /// The metric selection this meter was prepared with.
     #[must_use]
     pub const fn metrics(&self) -> MeterMetricSet {
         self.metrics
-    }
-
-    #[must_use]
-    pub const fn observation_generation(&self) -> u64 {
-        self.observation_generation
     }
 
     #[must_use]
@@ -4998,7 +4978,6 @@ impl MeterAccumulator {
             handle: self.handle,
             present_metrics: self.metrics,
             reset_generation: self.config.reset_generation,
-            observation_generation: self.observation_generation,
             window_sequence: self.sequence,
             start_sample: start,
             end_sample: end,

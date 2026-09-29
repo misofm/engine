@@ -12269,8 +12269,11 @@ mod tests {
         // back to 80 bytes, so classes 34-37's meter and retained caps each lose eight bytes per
         // request. Restoring an eight-byte field restores the previous hash exactly; no case or
         // expected outcome changed.
+        // Issue #1080 also removes #818 A1's observation generation: MeterSnapshot shrinks 168 ->
+        // 160 and MeterAccumulator 240 -> 232, so the same resource-derived descriptions lose 24
+        // bytes per requested meter. Restoring one u64 in each restores the previous hash exactly.
         assert_eq!(
-            transcript_hash, 18_185_660_815_322_931_811,
+            transcript_hash, 12_634_700_477_153_627_939,
             "updated only through a deliberate frozen-case change"
         );
     }

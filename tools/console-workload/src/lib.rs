@@ -2786,8 +2786,7 @@ mod tests {
                     "handle {handle}: the selected entry computes the sample peak only"
                 );
                 assert_eq!(
-                    (snapshot.reset_generation, snapshot.observation_generation),
-                    (0, 0),
+                    snapshot.reset_generation, 0,
                     "handle {handle}: a permanent observer is never re-armed"
                 );
                 assert_eq!(

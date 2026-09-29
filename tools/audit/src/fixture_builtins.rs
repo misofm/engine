@@ -359,11 +359,11 @@ const METER_REQUEST_SEAL_BYTES: u64 = 56;
 const OBSERVER_SEAL_BYTES: u64 = 32;
 const CONSUMER_SEAL_BYTES: u64 = 32;
 const METER_QUEUE_HEADER_BYTES: u64 = 256;
-// A1 appends observation generation to both Rust values. The snapshot grows 160 -> 168 and the
-// accumulator grows 232 -> 240 on the pinned 64-bit native target; these are Rust layout terms,
-// not exported C/JS records.
-const METER_OBSERVER_BYTES: u64 = 240;
-const METER_SNAPSHOT_BYTES: u64 = 168;
+// #1080 removed A1's observation generation from both Rust values again: the snapshot is 160 and
+// the accumulator 232 bytes on the pinned 64-bit native target. These are Rust layout terms, not
+// exported C/JS records.
+const METER_OBSERVER_BYTES: u64 = 232;
+const METER_SNAPSHOT_BYTES: u64 = 160;
 
 /// One parsed independent response row from the checked V1 CSV.
 #[derive(Clone, Debug)]
@@ -5247,7 +5247,10 @@ mod tests {
             // Re-pinned by issue #1080: the controlled-activation flag goes again, so
             // `GraphNodeObserverBinding` is 80 bytes and each meter row loses eight bytes per
             // meter; only the resource rows and this joined manifest identity move.
-            "f25f5d103966eae2aca8ec9103cc6c76fc4f0720164292e1c54ef4fe29037fb7",
+            // Re-pinned again by issue #1080: A1's observation generation goes too, so
+            // `MeterSnapshot` is 160 and `MeterAccumulator` 232 bytes; only the resource rows and
+            // this joined manifest identity move.
+            "9161d2ca028aeb171f7702f951774298c06d7ebeae434973386f1d465b4ff9d3",
             "accepted joined-corpus manifest identity"
         );
         remove_temporary_root(root);

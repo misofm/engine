@@ -12014,7 +12014,6 @@ mod tests {
             frame.handle.0.get(),
             u64::from(frame.present_metrics.bits()),
             frame.reset_generation,
-            frame.observation_generation,
             frame.window_sequence,
             frame.start_sample,
             frame.end_sample,
