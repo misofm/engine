@@ -672,3 +672,99 @@ is public, like `PreparedGraphPlan::new`.
 - **`:91`'s exact pair** catches a cap that reuses the node cap's code at another path: P3a.
 - **The probe attempt 3 adds** would catch a cap in bank attachment, or in the runtime's bank
   tables, above 65,535 lanes.
+
+## Attempt 3 evidence
+
+Terra, 2026-09-29, on `codex/1045-scale-tests-nightly` at `da4c48e6` (no new merge; `main` is
+still `a8955ad4`). Same host and hygiene as before, load 22-37.
+
+### What changed
+
+- **`a_hand_built_65_537_track_plan_attaches_builtin_banks_binds_and_renders`**, a new per-PR test
+  in `graph-compiler/tests/scale.rs`, Sol's probe (`verify-1045/probe_banks_1045.rs`) made a test:
+  - every track's input feeds its `PostInputBuiltins` stage, and every stage sums straight into
+    the output, with no per-track route;
+  - the stages attach as builtin banks at `Backend::current()`'s width
+    (`BankWidth::for_backend`, so Simd8 on x86-64-v3 and Simd4 on AArch64; no width returns
+    early), through the public `PreparedGraphPlan::with_builtin_banks`;
+  - it asserts 65,537 bank members, then binds, renders one block and asserts the exact track
+    count, like attempt 2's test.
+- **The two hand-built tests share their construction.** The helpers `track_stages`, `edge`,
+  `hand_built_plan` and `bind_and_render_every_track` replace attempt 2's inline code, so the
+  two tests differ only in their graph shape. They cannot share one built plan: a plan with both
+  banks and a route per track binds super-linearly (below), and the routed test's claim is the
+  route path. They run in parallel with each other and with `:91` in the same binary.
+- **`MUTATIONS.md`:** rows 1045-12 and 1045-13; bank attachment leaves the residual list.
+
+### Plants
+
+Each was applied to a scratch copy of this tree and run with `cargo test -p graph-compiler --test
+scale` (debug, test-debug-a's features). The tree was restored between plants. The unmutated
+tree was GREEN at the start, between PBANK and PBANK16, and at the end.
+
+| # | planted defect | per PR |
+|---|---|---|
+| PBANK (1045-12) | `with_builtin_banks` refuses more than 65,535 members in all | **RED**, the banked test: `65,537-track bank attachment: InvalidMembers`. **GREEN reverted** |
+| PBANK16 (1045-13) | `with_builtin_banks` keeps only the banks a `u16` bank index reaches | GREEN. Not a ceiling here: 65,537 tracks are 8,193 banks. Discarded |
+| P5 | graph bind refuses more than 65,536 bindings | RED, both hand-built tests (`graph.plan.binding`) |
+| P6 | render refuses more than 65,535 units | RED, both (`InvalidEnvelope`) |
+| 1045-11 | render walks its units through a `u16` index | RED, both (`[NaN, NaN]`) |
+| P3a | `graph.resource.limit` at `$.tracks` | RED, `:91` (the exact pair) |
+
+P5, P6 and 1045-11 were re-run because attempt 2's test was refactored onto the shared helpers.
+
+### Per-PR cost
+
+Debug, the per-PR `scale` binary, under the timing lock at load 25-37:
+
+| run | wall | CPU |
+|---|---:|---:|
+| the banked test, alone | 6.6 s; 8.0 s | 6.3 s; 7.8 s (280 MB) |
+| attempt 2's routed test, alone | 3.4 s | 3.3 s |
+| `:91`, alone | 17.1 s | 16.3 s |
+| the binary, default threads | 18.2 s | 28.3 s |
+| the binary, `--test-threads 4` (a 4-vCPU runner) | 16.3 s | 24.8 s |
+
+So the new test adds about 6-8 s of CPU and no wall time: the binary still finishes when `:91`
+does. The whole three-crate suite: dev 52.3 s wall (190 s CPU), release 6.9 s, 264 passed and 7
+ignored (one more passing test than attempt 2). In release the `scale` binary takes 3.3 s.
+
+### For #967 (a pointer, not a fix)
+
+Sol's attempt-2 verdict measured that a plan with builtin banks **and** one route per track binds
+super-linearly: 0.2 / 1.1 / 3.3 s in debug at 1,024 / 2,048 / 4,096 tracks, and 0.8 / 3.3 / 6.7 /
+23 s in release at 8,192 / 16,384 / 32,768 / 65,537 tracks. Declining the route fold changes
+little. Without banks (attempt 2's test) or without routes (this test) bind stays linear. That is
+#967's shape ("one route per track"); record it there. #1045's tests keep the two apart.
+
+### Gates re-run
+
+- `cargo fmt --all --check`, `cargo check --workspace --all-targets --all-features` and `cargo
+  clippy --workspace --all-targets --all-features -- -D warnings`: pass, no warnings.
+- The three crates in dev and release: pass (above).
+- Policy scripts: 54 pass. That is every `scripts/check-*` (Python under `python3 -B`; the ones
+  that need an argument with `--self-test`, the V8 spill check with `--check-toolchain`), plus
+  `test-workspace-policy.sh`, `test-ci-path-routing.py` and `test-graph-policy.sh`. It includes
+  `check-workspace-policy.sh` (#1052's source-scrape lint) and `check-graph-determinism.sh`.
+  `check-sdk-types.sh` (no `sdk/node_modules`) and `check-web-boot-budget.mjs` (needs a built
+  module) were not run.
+- Not re-run: the nightly commands, the mutation passes and the #966/#970 reverts. Product code,
+  `nightly.yml` and the nightly tests are unchanged since attempt 2, which Sol checked.
+
+### Test value
+
+- **The banked test:** a ceiling in bank attachment above 65,535 bankable stages, which nothing
+  else per PR attaches (PBANK), and the runtime's bank gather and scatter across 65,537 lanes.
+- **Attempt 2's routed test:** a ceiling or narrowed index in bind or render with 65,537 routes.
+
+### Remaining risk (replaces attempt 2's list)
+
+Nightly only, at most a day late (amendment 5): a ceiling copying the node cap's code and path
+(P3b), a ceiling in `into_bound` (P5b), #962's quadratic compile and bind (the 60 s bound), and
+an accounting count exact only below 65,536 tracks (A2). Outside this issue: parse above 65,535
+tracks (P1, no test anywhere), #1002's memory claim, and #967's banked-and-routed bind above.
+
+### Lines
+
+Attempt 3: `scale.rs` +212/−76, `MUTATIONS.md` +9/−4, this spec. The branch against `main`
+(`a8955ad4`), code, workflow and scripts: +436/−53.

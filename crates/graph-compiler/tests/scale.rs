@@ -2,11 +2,12 @@
 
 use builtins_compiler::{BuiltinCompileCaps, prepare_session_builtins};
 use effect_compiler::EffectPreparedSession;
-use effect_contract::{LatencySamples, TailSamples};
+use effect_contract::{BankWidth, LatencySamples, TailSamples};
 use engine::realtime::{PlanarBufferMut, RenderEnvelope, RenderError, RenderIo, RenderTime};
 use graph::{
-    DependencyLevel, GraphBindingBlock, GraphCompileCaps, GraphEdge, GraphEdgeId, GraphNode,
-    GraphNodeBinding, GraphNodeId, GraphPortId, GraphPortKind, GraphResourceEstimate,
+    DependencyLevel, GraphBindingBlock, GraphBuiltinBankResourceEstimate, GraphCompileCaps,
+    GraphEdge, GraphEdgeId, GraphNode, GraphNodeBinding, GraphNodeId, GraphPortId, GraphPortKind,
+    GraphPreparedBuiltinBank, GraphPreparedBuiltinBankProcessor, GraphResourceEstimate,
     GraphRuntimeBindings, GraphRuntimeProcessor, GraphSpec, PreparedGraphPlan,
     PreparedGraphPlanParts, PreparedRoute, RouteTransform, StableGraphId, TrackStage,
 };
@@ -158,70 +159,77 @@ impl GraphRuntimeProcessor for Constant {
     }
 }
 
-/// Issue #1045: bind and render above 65,536 track inputs, per PR.
-///
-/// The session compile above refuses before anything binds, and the full compile and bind run
-/// nightly, so this plan is built by hand, through the public [`PreparedGraphPlan::new`]:
-/// [`TRACKS`] track inputs, each routed through its own unity route to one output. Every input
-/// writes 1.0 left and 2.0 right, so the output is the exact count of the tracks that reached it
-/// (every partial sum is an integer below 2^24). A ceiling in bind or render refuses, and a
-/// narrowed track or unit index drops tracks from the sum. It builds, binds and renders in a few
-/// seconds in debug, beside the compile above.
-#[test]
-fn a_hand_built_65_537_input_plan_binds_and_renders_every_track() {
-    const FRAMES: u32 = 16;
-    let envelope = RenderEnvelope {
+/// A builtin bank that leaves its lanes as they are.
+struct IdentityBank;
+
+impl GraphPreparedBuiltinBankProcessor for IdentityBank {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
+        self
+    }
+    fn process(
+        &mut self,
+        _left: &mut [f32],
+        _right: &mut [f32],
+        _frames: u32,
+        _first_sample: u64,
+    ) -> Result<(), RenderError> {
+        Ok(())
+    }
+}
+
+/// The hand-built plans' block length.
+const HAND_BUILT_FRAMES: u32 = 16;
+
+fn hand_built_envelope() -> RenderEnvelope {
+    RenderEnvelope {
         sample_rate: engine::SampleRateHz(48_000),
-        quantum: engine::QuantumFrames(FRAMES),
+        quantum: engine::QuantumFrames(HAND_BUILT_FRAMES),
         output_channels: core::num::NonZeroUsize::new(2).expect("stereo"),
-    };
-    let id = |text: String| StableGraphId::parse(&text).expect("generated ID");
-    let mut inputs: Vec<_> = (0..TRACKS)
+    }
+}
+
+fn stable(text: String) -> StableGraphId {
+    StableGraphId::parse(&text).expect("generated ID")
+}
+
+/// Every track's `stage` node, sorted as a dependency level must be.
+fn track_stages(stage: TrackStage) -> Vec<GraphNodeId> {
+    let mut nodes: Vec<_> = (0..TRACKS)
         .map(|index| GraphNodeId::TrackStage {
-            track_id: id(format!("track-{index}")),
-            stage: TrackStage::Input,
+            track_id: stable(format!("track-{index}")),
+            stage,
         })
         .collect();
-    let route_ids: Vec<_> = (0..TRACKS)
-        .map(|index| id(format!("route-{index}")))
-        .collect();
-    let mut routes: Vec<_> = route_ids
-        .iter()
-        .map(|route_id| GraphNodeId::Route {
-            route_id: route_id.clone(),
-        })
-        .collect();
-    let output = GraphNodeId::Output {
-        output_id: id("main".to_owned()),
-    };
+    nodes.sort();
+    nodes
+}
+
+fn edge(id: GraphEdgeId, source: &GraphNodeId, destination: &GraphNodeId) -> GraphEdge {
     let port = |node: &GraphNodeId, kind| GraphPortId {
         node: node.clone(),
         kind,
         effect_port: None,
     };
-    let mut edges = Vec::with_capacity(2 * TRACKS as usize);
-    for ((input, route), route_id) in inputs.iter().zip(&routes).zip(&route_ids) {
-        edges.push(GraphEdge {
-            id: GraphEdgeId::RouteSource {
-                route_id: route_id.clone(),
-            },
-            source: port(input, GraphPortKind::MainOutput),
-            destination: port(route, GraphPortKind::MainInput),
-            path: "$.scale".to_owned(),
-        });
-        edges.push(GraphEdge {
-            id: GraphEdgeId::RouteDestination {
-                route_id: route_id.clone(),
-            },
-            source: port(route, GraphPortKind::MainOutput),
-            destination: port(&output, GraphPortKind::MainInput),
-            path: "$.scale".to_owned(),
-        });
+    GraphEdge {
+        id,
+        source: port(source, GraphPortKind::MainOutput),
+        destination: port(destination, GraphPortKind::MainInput),
+        path: "$.scale".to_owned(),
     }
+}
+
+/// A plan through the public [`PreparedGraphPlan::new`], one dependency level per entry of
+/// `levels` (each already sorted), with no effects, delays or observers.
+fn hand_built_plan(
+    levels: Vec<Vec<GraphNodeId>>,
+    mut edges: Vec<GraphEdge>,
+    required_bindings: Vec<GraphNodeId>,
+    routes: Vec<PreparedRoute>,
+) -> PreparedGraphPlan {
     edges.sort_by(|left, right| left.id.cmp(&right.id));
-    inputs.sort();
-    routes.sort();
-    let levels = [inputs.clone(), routes.clone(), vec![output.clone()]];
     let schedule: Vec<_> = levels.iter().flatten().cloned().collect();
     let mut nodes: Vec<_> = schedule
         .iter()
@@ -232,9 +240,7 @@ fn a_hand_built_65_537_input_plan_binds_and_renders_every_track() {
         })
         .collect();
     nodes.sort_by(|left, right| left.id.cmp(&right.id));
-    let mut required = inputs.clone();
-    required.push(output.clone());
-    let plan = PreparedGraphPlan::new(PreparedGraphPlanParts {
+    PreparedGraphPlan::new(PreparedGraphPlanParts {
         plan_id: 1045,
         spec: GraphSpec {
             nodes,
@@ -278,21 +284,9 @@ fn a_hand_built_65_537_input_plan_binds_and_renders_every_track() {
             incremental_plan_bytes: 0,
             session_plus_plan_bytes: 0,
         },
-        envelope,
-        required_bindings: required,
-        routes: routes
-            .iter()
-            .map(|node| PreparedRoute {
-                node: node.clone(),
-                transform: RouteTransform {
-                    gain: 1.0,
-                    ll: 1.0,
-                    lr: 0.0,
-                    rl: 0.0,
-                    rr: 1.0,
-                },
-            })
-            .collect(),
+        envelope: hand_built_envelope(),
+        required_bindings,
+        routes,
         track_delays: Vec::new(),
         effects: Vec::new(),
         effect_controls: Vec::new(),
@@ -300,12 +294,22 @@ fn a_hand_built_65_537_input_plan_binds_and_renders_every_track() {
         banks: Vec::new(),
         builtin_banks: Vec::new(),
         observers: Vec::new(),
-    });
+    })
+}
+
+/// Binds every track input to [`Constant`] and the output to identity, renders one block, and
+/// asserts the output is the exact count of the tracks that reached it: every input writes 1.0
+/// left and 2.0 right, and every partial sum is an integer below 2^24, so no summation order can
+/// round it.
+fn bind_and_render_every_track(plan: PreparedGraphPlan, inputs: Vec<GraphNodeId>) {
+    let envelope = hand_built_envelope();
     let mut bindings: Vec<_> = inputs
         .into_iter()
         .map(|node| GraphNodeBinding::new(node, Box::new(Constant)))
         .collect();
-    bindings.push(GraphNodeBinding::identity(output));
+    bindings.push(GraphNodeBinding::identity(GraphNodeId::Output {
+        output_id: stable("main".to_owned()),
+    }));
     assert_eq!(bindings.len(), TRACKS as usize + 1);
     let mut bound = plan
         .bind(GraphRuntimeBindings {
@@ -314,7 +318,7 @@ fn a_hand_built_65_537_input_plan_binds_and_renders_every_track() {
             observers: Vec::new(),
         })
         .unwrap_or_else(|failure| panic!("65,537-input bind: {}", failure.code));
-    let frames = FRAMES as usize;
+    let frames = HAND_BUILT_FRAMES as usize;
     let mut pcm = vec![f32::NAN; frames * 2];
     bound
         .render(
@@ -331,6 +335,138 @@ fn a_hand_built_65_537_input_plan_binds_and_renders_every_track() {
         "every track reaches the output: {:?}",
         &pcm[..2]
     );
+}
+
+/// Issue #1045: bind and render above 65,536 track inputs, per PR.
+///
+/// The session compile above refuses before anything binds, and the full compile and bind run
+/// nightly, so this plan is built by hand: [`TRACKS`] track inputs, each routed through its own
+/// unity route to one output. A ceiling in bind or render refuses, and a narrowed track or unit
+/// index drops tracks from [`bind_and_render_every_track`]'s count. It runs beside the compile
+/// above, in a few seconds of debug CPU.
+#[test]
+fn a_hand_built_65_537_input_plan_binds_and_renders_every_track() {
+    let inputs = track_stages(TrackStage::Input);
+    let output = GraphNodeId::Output {
+        output_id: stable("main".to_owned()),
+    };
+    let mut routes = Vec::with_capacity(TRACKS as usize);
+    let mut edges = Vec::with_capacity(2 * TRACKS as usize);
+    for input in &inputs {
+        let GraphNodeId::TrackStage { track_id, .. } = input else {
+            unreachable!("track stages")
+        };
+        let route_id = stable(format!("route-{}", track_id.as_str()));
+        let route = GraphNodeId::Route {
+            route_id: route_id.clone(),
+        };
+        edges.push(edge(
+            GraphEdgeId::RouteSource {
+                route_id: route_id.clone(),
+            },
+            input,
+            &route,
+        ));
+        edges.push(edge(
+            GraphEdgeId::RouteDestination { route_id },
+            &route,
+            &output,
+        ));
+        routes.push(route);
+    }
+    routes.sort();
+    let mut required = inputs.clone();
+    required.push(output.clone());
+    let transforms = routes
+        .iter()
+        .map(|node| PreparedRoute {
+            node: node.clone(),
+            transform: RouteTransform {
+                gain: 1.0,
+                ll: 1.0,
+                lr: 0.0,
+                rl: 0.0,
+                rr: 1.0,
+            },
+        })
+        .collect();
+    let plan = hand_built_plan(
+        vec![inputs.clone(), routes, vec![output]],
+        edges,
+        required,
+        transforms,
+    );
+    bind_and_render_every_track(plan, inputs);
+}
+
+/// Issue #1045: builtin bank attachment above 65,536 tracks, per PR, at the bank width this build
+/// renders at.
+///
+/// Every track's input feeds its post-input builtin stage, and every stage sums straight into the
+/// output. The stages are attached as builtin banks through the public
+/// [`PreparedGraphPlan::with_builtin_banks`], in lane order of the sorted tracks, then the plan
+/// binds and renders through [`bind_and_render_every_track`]. A ceiling in bank attachment
+/// refuses, and one in the runtime's bank gather or scatter drops lanes from the count. No
+/// per-track route: banks and one route per track bind super-linearly (#967), and that is not
+/// this test's claim.
+#[test]
+fn a_hand_built_65_537_track_plan_attaches_builtin_banks_binds_and_renders() {
+    let backend = Backend::current();
+    let width = BankWidth::for_backend(backend).expect("native builds render in banks");
+    let inputs = track_stages(TrackStage::Input);
+    let members = track_stages(TrackStage::PostInputBuiltins);
+    let output = GraphNodeId::Output {
+        output_id: stable("main".to_owned()),
+    };
+    let mut edges = Vec::with_capacity(2 * TRACKS as usize);
+    for (input, member) in inputs.iter().zip(&members) {
+        let GraphNodeId::TrackStage { track_id, .. } = member else {
+            unreachable!("track stages")
+        };
+        edges.push(edge(
+            GraphEdgeId::TrackMain {
+                target: member.clone(),
+            },
+            input,
+            member,
+        ));
+        edges.push(edge(
+            GraphEdgeId::RouteSource {
+                route_id: stable(format!("route-{}", track_id.as_str())),
+            },
+            member,
+            &output,
+        ));
+    }
+    let mut required = inputs.clone();
+    required.extend(members.iter().cloned());
+    required.push(output.clone());
+    let banks: Vec<_> = members
+        .chunks(width.lanes() as usize)
+        .map(|lanes| GraphPreparedBuiltinBank {
+            backend,
+            members: lanes.to_vec().into_boxed_slice(),
+            processor: Box::new(IdentityBank),
+            scratch: rack::AoSoaScratch::new(width, HAND_BUILT_FRAMES).expect("bank scratch"),
+        })
+        .collect();
+    let bank_count = banks.len() as u64;
+    let plan = hand_built_plan(
+        vec![inputs.clone(), members, vec![output]],
+        edges,
+        required,
+        Vec::new(),
+    )
+    .with_builtin_banks(
+        banks,
+        GraphBuiltinBankResourceEstimate {
+            bank_count,
+            ..GraphBuiltinBankResourceEstimate::default()
+        },
+    )
+    .unwrap_or_else(|error| panic!("65,537-track bank attachment: {error:?}"));
+    assert_eq!(plan.builtin_bank_members().count(), TRACKS as usize);
+    bind_and_render_every_track(plan, inputs);
 }
 
 /// Issue #962: the same session through the production entry, at the width this build renders at,
