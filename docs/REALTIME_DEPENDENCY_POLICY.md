@@ -114,19 +114,15 @@ and counts only allocations while the audit thread is armed; its prepared corpus
 output/scratch buffers exist before arming. It is not linked into a production crate and does not
 change protocol allocation behavior.
 
-Issue 005 also permits `tools/bench/src/protocol.rs` to locally allow unsafe
-code for its comparison-only allocation counter. It forwards original allocator contracts to
-`System` and records requested allocation count/bytes only while a native host-harness interval is
-armed. The preallocated BTLV output, decode scratch, and official FlatBuffers builder are prepared
-before that interval. `flatbuffers = 25.12.19` is an Apache-2.0, tool-only dependency with no
-engine, protocol, browser-host, or render-reachable target impact.
+Issue 005 also permitted `tools/bench/src/protocol.rs`, the BTLV-versus-FlatBuffers comparison
+benchmark, to locally allow unsafe code, and gave `tools/bench` its tool-only `flatbuffers`
+dependency. #1075 retired that benchmark under owner ruling R9 (only real host paths are
+benchmarked); the file, its unsafe exemption and the `flatbuffers` dependency are gone.
 
-The source-policy checker currently accepts unsafe syntax in exactly four source files:
-`crates/engine/src/realtime/spsc.rs`,
-`tools/audit/src/realtime.rs`, and
-`tools/audit/src/protocol.rs`, and
-`tools/bench/src/protocol.rs`. The latter two are the only Issue-005
-audit/benchmark exceptions; no sibling source file in either tool is permitted to use unsafe code.
+The source-policy checker originally accepted unsafe syntax in exactly four source files:
+`crates/engine/src/realtime/spsc.rs`, `tools/audit/src/realtime.rs`, `tools/audit/src/protocol.rs`
+and `tools/bench/src/protocol.rs`. #1075 retired the last of these, so `tools/audit/src/protocol.rs`
+is now the only Issue-005 audit exception; no sibling source file in the tool may use unsafe code.
 
 That sentence has fallen behind `scripts/check-realtime-policy.sh`, whose exemption list has grown
 with each approved issue and is the authority; the script, not this paragraph, is what CI runs.
@@ -165,8 +161,10 @@ cross-target equality is `to_bits` identity, not a tolerance (D5).
 Issue 003 concurrent queues use only pointer-width atomic loads/stores. Rust guarantees every
 available standard atomic type is lock-free, and the supported native/mobile targets expose
 `target_has_atomic="ptr"`. Counters are endpoint-local plain integers, so render performs no atomic
-read-modify-write retry. Browser launch uses `LocalRing` on its single render agent; the inspected
-baseline Wasm object contains no atomic opcode and makes no cross-agent shared-memory claim.
+read-modify-write retry. Browser launch uses `LocalRing` on its single render agent; the shipped
+`simd128` module contains no atomic opcode, no import and no shared memory
+(`scripts/check-web-audioworklet.sh`, which took over the scalar object inspection #1062 retired),
+and makes no cross-agent shared-memory claim.
 
 ## Panic behaviour by profile
 
@@ -296,9 +294,11 @@ render state exists, and refuses to start on an error:
 
 | entry point | on failure |
 |---|---|
-| `hosts/host-native` `main` | diagnostic on stderr, `ExitCode::FAILURE` |
-| `hosts/host-mobile` `mobile_target_smoke` | `Err(HostAttestation)` |
 | `crates/capi` `miso_engine_v1_engine_create` | `MISO_ENGINE_V1_UNSUPPORTED` (7) |
+
+The native and mobile bootstrap shells (`hosts/host-native`, `hosts/host-mobile`) also called it
+until #1032 removed them: nothing linked them, and a native iOS or Android app embeds the engine
+through the C ABI, so `engine_create` is the one native entry point.
 
 The C header previously said `MISO_ENGINE_V1_UNSUPPORTED` was reserved and never returned; it is
 now returned by that one entry point and the header says so. An embedder that receives it must not

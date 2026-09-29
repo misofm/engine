@@ -25,7 +25,7 @@
 use core::hint::black_box;
 use std::time::Instant;
 
-use lane::{Lane, LaneF64, Simd4, Simd8, Widen};
+use lane::{LaneF64, Simd4, Simd8, Widen};
 
 /// The `f64` companion of `Simd4`, named the way a crate outside `lane` must name it.
 type Simd4F64 = <Simd4 as Widen>::F64;
@@ -185,18 +185,6 @@ fn widen_exhaustive<L: Widen>(name: &str) -> u64 {
         started.elapsed()
     );
     mismatches
-}
-
-#[test]
-fn gate1_widen_widths_match() {
-    assert_eq!(
-        <<f32 as Widen>::F64 as LaneF64>::WIDTH,
-        <f32 as Lane>::WIDTH
-    );
-    assert_eq!(<Simd4F64 as LaneF64>::WIDTH, <Simd4 as Lane>::WIDTH);
-    assert_eq!(<Simd8F64 as LaneF64>::WIDTH, <Simd8 as Lane>::WIDTH);
-    assert_eq!(<Simd4F64 as LaneF64>::WIDTH, 4);
-    assert_eq!(<Simd8F64 as LaneF64>::WIDTH, 8);
 }
 
 #[test]

@@ -411,3 +411,10 @@ That expectation no longer exists in the tree; the other bullets stand as writte
 its record stay citable: the record is `artifacts/issue163-phase0/wasm-kernel-timing.accepted.jsonl`,
 and the runner remains in git history (last present at `ed0556a9`). See
 `docs/rulings/wasm-kernel-timing-interim.md`.
+
+## Note: the measurement build removed (2026-09-29, #1038)
+
+The `miso_wasm_simd8` override that "The measurement build" section describes no longer exists:
+owner ruling R7 removed it with #1038, and #1039 had already retired the runner and preflight that
+set it. The record and its rows stand. See the supersession note in
+`docs/rulings/wasm-simd8-null.md`.

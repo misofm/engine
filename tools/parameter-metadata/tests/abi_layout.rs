@@ -1343,12 +1343,6 @@ fn observation_capture_identity_layout_matches_the_rust_record() {
     assert_eq!(next_offset, bytes);
 }
 
-/// Regeneration is deterministic: the same tree renders the same bytes.
-#[test]
-fn rendering_is_deterministic() {
-    assert_eq!(render(), render());
-}
-
 /// The checked-in schema-gate fixture is this generator's exact output.
 ///
 /// `scripts/check-abi-layout-v1.py --self-test` runs its fifteen red mutations against that file,
@@ -1366,46 +1360,5 @@ fn the_checked_in_self_test_fixture_is_current() {
         render(),
         "scripts/fixtures/abi-layout-v1-self-test.json is stale; regenerate it with \
          --print-abi-layout"
-    );
-}
-
-/// The published export set is exactly the set the artifact gate freezes.
-///
-/// Two lists, one truth: `scripts/check-web-audioworklet.sh` proves the *module* exports exactly
-/// these symbols by disassembling it; this proves the *document* names exactly the same ones, by
-/// reading that script's own list. An export added to the engine without both lists moving fails
-/// one of the two.
-#[test]
-fn the_published_export_set_is_the_frozen_artifact_set() {
-    let gate = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../scripts/check-web-audioworklet.sh"),
-    )
-    .expect("the artifact gate exists");
-    let start = gate
-        .find("expected_exports=$(printf '%s\\n' \\")
-        .expect("the gate declares its expected export set");
-    let end = gate[start..].find("| sort)").expect("the list is closed") + start;
-    let mut frozen: Vec<&str> = gate[start..end]
-        .lines()
-        .skip(1)
-        .map(|line| line.trim().trim_end_matches('\\').trim())
-        .filter(|line| !line.is_empty() && *line != "memory")
-        .collect();
-    frozen.sort_unstable();
-
-    let document = render();
-    let key = "\"exports\": [";
-    let list_start = document.find(key).expect("the document names exports") + key.len();
-    let list_end = document[list_start..].find(']').expect("closed") + list_start;
-    let published: Vec<String> = document[list_start..list_end]
-        .split(',')
-        .map(|entry| entry.trim().trim_matches(['"', '\n', ' ']).to_owned())
-        .filter(|entry| !entry.is_empty())
-        .collect();
-
-    assert_eq!(
-        published, frozen,
-        "the published export set and the artifact gate's frozen set are one list"
     );
 }

@@ -33,12 +33,9 @@ console-workload="1"
 effect-compiler="1"
 effect-contract="1"
 engine="1"
-flatbuffers="1"
 graph="1"
 graph-compiler="1"
 lane="1"
-protocol="1"
-session="1"
 [target.'cfg(unix)'.dependencies]
 sha2="1"
 EOF

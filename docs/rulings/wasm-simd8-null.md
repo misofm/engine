@@ -45,3 +45,27 @@ three places.
   the `--issue183` arm (owner ruling R9, `engine-footprint-2026-09-28.md`), and
   R7 (#1038) removes the eight-lane wasm measurement build. Re-measuring now
   means restoring both from git history.
+
+## Supersession note (2026-09-29, #1038): the measurement hooks are removed
+
+Owner ruling R7 (2026-09-28, `docs/rulings/engine-footprint-2026-09-28.md`) reverses the
+"not foreclosed" bullet above, and #1038 carries it out. **The wasm build has one width, `Simd4`.
+The eight-lane measurement cfg (`miso_wasm_simd8`) and its arms are removed. A future
+re-measurement re-adds a cfg in its own issue.**
+
+- **Removed:** the `miso_wasm_simd8` arm of `Backend::current()` (`crates/lane/src/backend.rs`),
+  `target-smoke`'s eight-lane wasm assertion, the workspace `check-cfg` entry, and `wasm-gates`'
+  `--expect-backend simd8`, which no wasm guest can report any more. #1039 had already retired the
+  console benchmark and its `--issue183` arm.
+- **Why:** the owner's 2026-09-28 rule that modes production never needs are removed entirely,
+  including test-only entry points. The hooks kept nothing that worked: the paired capture could
+  not re-run, because `artifacts/issue183/` exists and the runner refused to overwrite it, and the
+  operator script's repository root was wrong.
+- **Lost:** an ad-hoc `--cfg miso_wasm_simd8` leg, such as #976's bit-exact differential. A harness
+  can still run `Simd8` on wasm through `lane::Simd8` directly, as `tools/wasm-gate-corpus` does at
+  all three widths.
+- **A stale flag is inert.** `RUSTFLAGS='-C target-feature=+simd128 --cfg miso_wasm_simd8'` now
+  compiles without a warning, because no source names the cfg, and it selects `Simd4`: the gate
+  guest built with it is byte-identical to the one built without it.
+- **Kept:** the null result and its evidence above. Reopening now needs the cfg and a console
+  harness restored as well as a fresh paired record.

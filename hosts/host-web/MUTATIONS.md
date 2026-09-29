@@ -225,7 +225,7 @@ gate also runs its own copied-fixture mutation suite, so those self-tests never 
 | `exact_retained_total_is_checked_as_one_budget_not_independent_caps` | spell the post-prepare veto's `exact_bytes` field as `projected_bytes` | the byte-for-byte diagnostic assertion rejects the mislabeled measured value |
 | `check-web-audioworklet.sh` frozen export set | delete `miso_engine_web_v1_boot_result` from the expected list | the artifact reports it as an unexpected wasm export and the exact diff is printed |
 | `check-session-map-shape.py --self-test` via `check-web-audioworklet.sh` | add an unused `handle: u32` parameter to `miso_engine_web_v1_boot_options_ptr`; the same derived probe covers all five S2 boot signatures | RED before any JS/runtime assertion: `miso_engine_web_v1_boot_options_ptr has ABI signature ('handle: u32',) -> u32; expected () -> u32 (the boot family takes no handle)` |
-| `check-browser-expected-resources.py --self-test` plus direct/browser oracle | copied-fixture mutations perturb every resource row and each of the three frozen PCM digests | all 26 mutations are refused; identity, command, and observation PCM digest movement is never admitted as a re-pin |
+| `check-browser-expected-resources.py --self-test` plus direct/browser oracle | copied-fixture mutations: each budgeted row one byte over its ceiling, a zeroed or unclassified row, each exact row class, each of the three frozen PCM digests, the render transcript and the boot vocabulary (#1060) | all 32 mutations are refused from a document printed at every ceiling; identity, command, and observation PCM digest movement is never admitted as a re-pin |
 
 ## Issue #272 — the qualification session identities
 

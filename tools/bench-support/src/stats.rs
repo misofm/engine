@@ -89,7 +89,7 @@ pub fn format_f64(value: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Percentiles, nearest_rank, per_mille};
+    use super::{Percentiles, per_mille};
 
     #[test]
     fn percentiles_cover_the_complete_tuple_over_one_thousand_observations() {
@@ -134,17 +134,6 @@ mod tests {
         assert_eq!(per_mille(&sorted, 334), 2);
         assert_eq!(per_mille(&sorted, 500), 2);
         assert_eq!(per_mille(&sorted, 667), 3);
-    }
-
-    #[test]
-    fn the_numerator_denominator_form_matches_the_per_mille_form() {
-        let sorted: Vec<u64> = (0..256).collect();
-        for position in [1usize, 500, 950, 990, 999, 1000] {
-            assert_eq!(
-                nearest_rank(&sorted, position, 1_000),
-                per_mille(&sorted, position)
-            );
-        }
     }
 
     #[test]

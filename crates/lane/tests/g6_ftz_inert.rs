@@ -87,14 +87,14 @@ fn all_arms() -> (Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>) {
 
 /// The control-word bits that make hardware flush: MXCSR's FTZ and DAZ on x86, FPCR's `FZ` on
 /// AArch64 (which flushes subnormal inputs and results alike; issue #1017).
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 const FLUSH_BITS: lane::fpenv::FpControlWord = lane::softfma::MXCSR_FTZ | lane::softfma::MXCSR_DAZ;
 
 /// See the x86 definition.
 #[cfg(target_arch = "aarch64")]
 const FLUSH_BITS: lane::fpenv::FpControlWord = lane::fpenv::FPCR_FZ;
 
-#[cfg(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[test]
 fn g6_flush_makes_hardware_ftz_inert() {
     use lane::fpenv::{read_fp_control_word, write_fp_control_word};
@@ -131,7 +131,7 @@ fn g6_flush_makes_hardware_ftz_inert() {
     );
 }
 
-#[cfg(not(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")))]
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 #[test]
 fn g6_flush_makes_hardware_ftz_inert() {
     // wasm has no flush-to-zero mode to set (the core specification forbids one); the wasm leg of

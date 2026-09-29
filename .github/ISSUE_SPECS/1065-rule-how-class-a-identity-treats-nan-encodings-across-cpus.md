@@ -1,5 +1,7 @@
 # Rule how class-A identity treats NaN encodings across CPUs
 
+**Owner ruling (2026-09-29, decision 10 in `docs/rulings/engine-footprint-2026-09-29.md`):** option A. Class-A identity treats every NaN as one value; the engine does not canonicalize NaNs at render.
+
 Found by the AArch64 CI leg (#1017). Owner ruling needed before implementation.
 
 ## Problem

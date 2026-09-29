@@ -1,4 +1,7 @@
-# Remove the browser adapter's legacy observation and spectrum path
+# Remove the browser adapter's unadopted protected observation path
+
+**Owner ruling (2026-09-29, decision 9 in `docs/rulings/engine-footprint-2026-09-29.md`):** keep the ordinary ("legacy") observation path, which production uses, and remove the protected path, which only tests use. This supersedes the original direction below, whose premise step 1 disproved. #824 closes as not planned.
+
 
 Owner ruling (2026-09-28, `docs/rulings/engine-footprint-2026-09-28.md`, decision 8): remove it, provided nothing still uses it. `hosts/host-web` keeps a "legacy" and a "protected" observation and spectrum path (`hosts/host-web/src/ffi.rs:646-690`, `protected_observation_prepared` in `lib.rs`), which doubles the refusal tests. Source: the test-value audit, ruling R8, and its verification. This is browser-adapter code, not core.
 

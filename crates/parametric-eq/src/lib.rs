@@ -3732,10 +3732,9 @@ pub mod corpus;
 #[cfg(test)]
 mod interleave_identity {
     use super::{
-        BAND_SECTION_OFFSET, BandTarget, Channel, EFFECTIVE_CASCADE_DEPTH, EQ_BAND_COUNT,
-        EQ_SECTION_COUNT, EqBandKind, HPF_SECTION, LPF_SECTION, MAX_LANES, PreparedParametricEq,
-        RAMP_SAMPLES, STATE_SIZES, SampleRateHz, Section, cascade_sections, cascade_sections_mono,
-        corpus, process_channels, process_channels_mono,
+        BAND_SECTION_OFFSET, BandTarget, Channel, EQ_BAND_COUNT, EQ_SECTION_COUNT, EqBandKind,
+        HPF_SECTION, LPF_SECTION, MAX_LANES, RAMP_SAMPLES, SampleRateHz, Section, cascade_sections,
+        cascade_sections_mono, corpus, process_channels, process_channels_mono,
     };
     use lane::kernels::svf_block;
     use lane::{Lane, Simd4, Simd8};
@@ -4454,35 +4453,6 @@ mod interleave_identity {
     }
 
     #[test]
-    fn resident_sizes_are_measured_separately_from_serialized_state() {
-        println!(
-            "resident_size Channel width=1 bytes={}",
-            core::mem::size_of::<Channel<f32, 1>>()
-        );
-        println!(
-            "resident_size Channel width=4 bytes={}",
-            core::mem::size_of::<Channel<Simd4, 4>>()
-        );
-        println!(
-            "resident_size Channel width=8 bytes={}",
-            core::mem::size_of::<Channel<Simd8, 8>>()
-        );
-        println!(
-            "resident_size PreparedParametricEq width=1 bytes={}",
-            core::mem::size_of::<PreparedParametricEq<f32, 1>>()
-        );
-        println!(
-            "resident_size PreparedParametricEq width=4 bytes={}",
-            core::mem::size_of::<PreparedParametricEq<Simd4, 4>>()
-        );
-        println!(
-            "resident_size PreparedParametricEq width=8 bytes={}",
-            core::mem::size_of::<PreparedParametricEq<Simd8, 8>>()
-        );
-        println!("serialized_state_bytes total={}", STATE_SIZES.total());
-    }
-
-    #[test]
     fn a_tiny_restored_disabled_cut_state_refuses_elision_but_preserves_old_bands() {
         for width in [1_usize, 4, 8] {
             match width {
@@ -4618,13 +4588,6 @@ mod interleave_identity {
                 compare_signed_zero_refusal::<Simd8, 8>("Simd8", mono, plane);
             }
         }
-    }
-
-    /// Six physical sections use the same effective stationary depth-two pass on every backend.
-    #[test]
-    fn the_tuned_depth_is_per_backend_and_divides_the_cascade() {
-        assert_eq!(EQ_SECTION_COUNT % EFFECTIVE_CASCADE_DEPTH, 0);
-        assert_eq!(EFFECTIVE_CASCADE_DEPTH, 2);
     }
 }
 

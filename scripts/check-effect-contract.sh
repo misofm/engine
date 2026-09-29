@@ -27,10 +27,9 @@ if [[ -n "$bench_binary" ]]; then
 fi
 
 cd "$root"
-bash scripts/check-effect-runtime-policy.sh .
-bash scripts/test-effect-runtime-policy.sh .
-bash scripts/check-effect-runtime-fixtures.sh .
-bash scripts/test-effect-runtime-fixtures.sh .
+# Issue #1044: the effect-runtime dependency-boundary and fixture policies and their mutation suites
+# are not re-run here. qualification.yml's `lint` job runs all four scripts on every route this
+# script's `audit-native` caller runs on, so running them here too ran each twice per change.
 
 # #105 phase 2 F1: the conformance harness runs against EVERY production `NativeEffectFactory`,
 # not just against its own reference mock. This loop is what stops the ninth effect from shipping

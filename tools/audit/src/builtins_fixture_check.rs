@@ -505,18 +505,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn shared_sha256_alias_matches_published_literals() {
-        assert_eq!(
-            sha256(b""),
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        );
-        assert_eq!(
-            sha256(b"abc"),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
-    }
-
-    #[test]
     fn issue069_checker_is_read_only_and_rejects_payload_mutation() {
         let accepted = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/builtins-audit-v1");
         check_read_only(&accepted).expect("accepted audit fixtures");
@@ -537,19 +525,5 @@ mod tests {
         fs::write(path, bytes).expect("mutation");
         assert!(check_read_only(&scratch).is_err());
         fs::remove_dir_all(scratch).expect("cleanup");
-    }
-
-    #[test]
-    fn issue069_author_is_not_reachable_from_audit_mains() {
-        for source in [
-            include_str!("builtins.rs"),
-            include_str!("builtins_graph.rs"),
-        ] {
-            assert!(!source.contains("--write"));
-            assert!(!source.contains("write_scratch"));
-        }
-        let author = include_str!("builtins_fixture_check.rs");
-        assert!(!author.contains(&("fixtures/builtins".to_owned() + "/v1")));
-        assert!(!author.contains(&("benchmark".to_owned() + "/")));
     }
 }

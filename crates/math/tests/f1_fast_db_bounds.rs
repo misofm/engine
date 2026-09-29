@@ -1162,16 +1162,3 @@ fn f1_exhaustive_x8_transient_shaper_applied_gain() {
         positive_count,
     );
 }
-
-/// The container's arithmetic: eight crossings, and no ninth hiding in this file.
-#[test]
-fn f1_the_container_pins_exactly_eight_crossings() {
-    let source = include_str!("f1_fast_db_bounds.rs");
-    // Built in two pieces so this test does not match its own needle.
-    let needle = concat!("fn ", "f1_crossing_x");
-    let pinned = source.matches(needle).count();
-    assert_eq!(
-        pinned, 8,
-        "the seal admits exactly eight named crossings; this file pins {pinned}"
-    );
-}

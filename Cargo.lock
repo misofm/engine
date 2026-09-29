@@ -123,12 +123,9 @@ dependencies = [
  "effect-compiler",
  "effect-contract",
  "engine",
- "flatbuffers",
  "graph",
  "graph-compiler",
  "lane",
- "protocol",
- "session",
  "sha2 0.11.0",
 ]
 
@@ -682,16 +679,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d45db016d36b838f563236e9193d0ee6ce38f3f68b6c94e914b4929c96bbb890"
 
 [[package]]
-name = "flatbuffers"
-version = "25.12.19"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35f6839d7b3b98adde531effaf34f0c2badc6f4735d26fe74709d8e513a96ef3"
-dependencies = [
- "bitflags",
- "rustc_version",
-]
-
-[[package]]
 name = "fluent-uri"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -950,22 +937,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "host-mobile"
-version = "0.1.0"
-dependencies = [
- "lane",
- "target-smoke",
-]
-
-[[package]]
-name = "host-native"
-version = "0.1.0"
-dependencies = [
- "lane",
- "target-smoke",
-]
-
-[[package]]
 name = "host-web"
 version = "0.1.0"
 dependencies = [
@@ -975,6 +946,7 @@ dependencies = [
  "engine",
  "graph",
  "host-core",
+ "lane",
  "math",
  "serde_json",
  "session",
@@ -1802,15 +1774,6 @@ name = "rustc-hash"
 version = "2.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d"
-
-[[package]]
-name = "rustc_version"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92"
-dependencies = [
- "semver",
-]
 
 [[package]]
 name = "rustix"

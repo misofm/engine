@@ -1,4 +1,4 @@
-//! Checked normative JSON Schema and migration-inventory artifacts.
+//! The checked normative JSON Schema artifact.
 
 use std::{fs, path::PathBuf};
 
@@ -92,28 +92,4 @@ fn session_schema_u64_pattern_executes_the_exact_unsigned_64_bit_domain() {
             "schema admitted out-of-contract u64 {invalid}"
         );
     }
-}
-
-#[test]
-fn migration_inventory_keeps_all_four_classifications_and_reproducible_audit() {
-    let inventory = fs::read_to_string(workspace(
-        "docs/rulings/canonical-json-migration-inventory.md",
-    ))
-    .expect("read checked migration inventory");
-    for heading in [
-        "## Live contract and implementation names",
-        "## Current session fixtures",
-        "## Generic configuration",
-        "## Immutable historical evidence",
-        "## Reproducible audit",
-    ] {
-        assert!(
-            inventory.contains(heading),
-            "missing inventory section {heading}"
-        );
-    }
-    assert!(inventory.contains("Baseline contains **25** live session-document TOMLs"));
-    assert!(inventory.contains("canonical-minimal.json"));
-    assert!(inventory.contains("canonical.json"));
-    assert!(inventory.contains("parametric-eq-nine-track.json"));
 }

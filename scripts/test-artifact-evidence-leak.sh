@@ -13,6 +13,7 @@ new_case() {
     cp "$root/.github/workflows/qualification.yml" "$case_root/.github/workflows/"
     cp "$root/scripts/check-artifact-evidence-leak.sh" "$case_root/scripts/"
     cp "$root/scripts/check-cross-targets.sh" "$case_root/scripts/"
+    cp "$root/scripts/build-web-audioworklet.sh" "$case_root/scripts/"
 }
 
 check() { bash "$case_root/scripts/check-artifact-evidence-leak.sh" "$case_root"; }
@@ -36,10 +37,18 @@ rm "$case_root/.github/workflows/qualification.yml"
 expect_failure missing-qualification
 
 # 1. The exact regression this gate exists for: conformance back in the shipped wasm invocation.
-new_case conformance-back-in-the-scalar-wasm-artifact
-sed -i 's|-p host-web -p lane|-p host-web -p conformance -p lane|' \
-    "$case_root/.github/workflows/qualification.yml"
-expect_failure conformance-back-in-the-scalar-wasm-artifact
+#    Since #1062 retired the workflow's scalar wasm build, that invocation is the delivery script's.
+new_case conformance-back-in-the-shipped-wasm-artifact
+sed -i 's|--target wasm32-unknown-unknown -p host-web$|--target wasm32-unknown-unknown -p host-web -p conformance|' \
+    "$case_root/scripts/build-web-audioworklet.sh"
+expect_failure conformance-back-in-the-shipped-wasm-artifact
+
+# 1b. The delivery script is what makes wasm32 an artifact target at all (#1062): with its cargo
+#     invocation gone, the gate has no wasm32 artifact invocation to gate and must say so rather
+#     than pass vacuously.
+new_case shipped-wasm-artifact-invocation-gone
+sed -i '/--target wasm32-unknown-unknown -p host-web$/d' "$case_root/scripts/build-web-audioworklet.sh"
+expect_failure shipped-wasm-artifact-invocation-gone
 
 # 2. RETIRED by #66, which removed the android and ios compile-only jobs. The mutation this case
 #    applied — the f64 oracle back in the mobile check — has no surface left to land on: its `sed`
@@ -52,7 +61,7 @@ expect_failure conformance-back-in-the-scalar-wasm-artifact
 #    coverage is the other way to break this: the gate would go green while the wasm32 build of the
 #    oracle stopped being checked at all.
 new_case wasm-compile-coverage-deleted
-sed -i '/Evidence crates compile for Wasm/,+3d' "$case_root/.github/workflows/qualification.yml"
+sed -i '/Evidence crates compile for Wasm/,+2d' "$case_root/.github/workflows/qualification.yml"
 expect_failure wasm-compile-coverage-deleted
 
 # (The iOS counterpart of case 3 retired with #66 for the same reason; the Wasm case above is what
@@ -71,16 +80,17 @@ expect_failure wasm-compile-coverage-deleted
 #    crate conformance in one invocation (the exact regression the split under N1 fixed; the row
 #    named effect-package too until #1037).
 new_case cross-targets-script-mixes-effect-compiler-with-conformance
-sed -i 's|^        -p effect-compiler$|        -p effect-compiler -p conformance|' \
+sed -i 's|^\( *\)-p effect-compiler$|\1-p effect-compiler -p conformance|' \
     "$case_root/scripts/check-cross-targets.sh"
 expect_failure cross-targets-script-mixes-effect-compiler-with-conformance
 
 # 7. The same regression, but in a workflow YAML cargo line rather than check-cross-targets.sh --
 #    proves effect-compiler's membership in `shipped` is enforced wherever a cross-target
 #    invocation names it, not only inside the script this gate was extended to scan: the mutated
-#    line no longer names host-web, so only effect-compiler makes it an artifact invocation.
+#    line names no host, so only effect-compiler makes it an artifact invocation. (#1062: the
+#    evidence-crate line is the workflow's wasm32 line left to mutate.)
 new_case workflow-mixes-effect-compiler-with-conformance
-sed -i 's|-p host-core -p host-web -p lane|-p conformance -p lane|' \
+sed -i 's|--target wasm32-unknown-unknown -p dsp-reference -p conformance|--target wasm32-unknown-unknown -p effect-compiler -p dsp-reference -p conformance|' \
     "$case_root/.github/workflows/qualification.yml"
 expect_failure workflow-mixes-effect-compiler-with-conformance
 

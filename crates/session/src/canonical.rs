@@ -21,6 +21,12 @@ pub(crate) fn write_canonical(session: &SessionModel) -> String {
     match session.visit(WalkOrder::Canonical, &mut writer) {
         Ok(()) => {
             writer.output.push('\n');
+            // The writer grows its `String` by doubling, so it ends with up to half its allocation
+            // spare (16,056 of 32,768 bytes on the nine-track EQ fixture). A compiled session
+            // keeps this snapshot for its whole life and the model estimate charges its length,
+            // so give the spare back here, on the control plane, with the one reallocation it
+            // costs (#1060).
+            writer.output.shrink_to_fit();
             writer.output
         }
         Err(error) => match error {},

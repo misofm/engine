@@ -110,11 +110,15 @@ Candidate catalogs allocate before structural commit and are included in double-
 admission. Host-core's default feature graph remains protocol-free; only capi enables the optional
 `control-provider` edge.
 
-The `resource_lifecycle` primitive oracle re-derives the soft-clip fixture's provider as 9,072
-bytes of descriptor rows, 864 bytes of state rows, 864 bytes of descriptor text, and 282 bytes of
-fixed diagnostic projection storage. Active CAPI retained bytes are 160,933; double-live CAPI
-admission is 204,375; the 58,804-byte canonical writer remains that fixture's largest named
-allocation. The C response vectors now pin session-derived metadata/state and registered telemetry
+`resource_lifecycle` checks these charges against the allocator (#1060). Its counting allocator
+observes a C ABI compile and a replay of its host-core half owner by owner, and nothing is taken
+from the accounting it checks. What capi allocates itself, plus the observed source producers and
+parameter catalog, must equal `capi_retained_bytes` to the byte. The session store must fit its
+compiled-model estimate, and the prepared plan its engine rows (a bound; see the test). The
+canonical JSON is charged once, with the compiled model in the graph cap: capi's epoch row no
+longer charges it a second time. The double-live admission is derived from the two live reports
+and the owning crates' resource reports rather than from a hand-maintained layout mirror.
+The C response vectors now pin session-derived metadata/state and registered telemetry
 counter rows. `MockProvider` and `MockProviderConfig` are absent from a normal protocol library
 build and available only to unit tests or consumers explicitly selecting `protocol/test-support`.
 The exact AudioWorklet rebuild remains protocol-free but changes crate identity because host-core's

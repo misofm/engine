@@ -135,7 +135,7 @@ pub const STATE_FAILED: u32 = 3;
 /// Ownership has been explicitly disposed.
 pub const STATE_DISPOSED: u32 = 4;
 
-/// Scalar Wasm backend.
+/// Scalar backend: what a native (non-wasm) build reports; no wasm build is scalar (#1062).
 pub const BACKEND_SCALAR: u32 = 0;
 /// Base Wasm `simd128` backend.
 pub const BACKEND_SIMD128: u32 = 1;

@@ -15,7 +15,8 @@ create_valid_fixture() {
         "$root/crates/engine/src" \
         "$root/crates/compressor/src" \
         "$root/hosts/host-web/src" \
-        "$root/tools/audit/src"
+        "$root/tools/audit/src" \
+        "$root/crates/math/src/vendored"
 
     printf '%s\n' \
         'pub use wide::f32x8 as Simd8;' \
@@ -51,6 +52,15 @@ create_valid_fixture() {
     printf 'pub fn process() {}\n' >"$root/crates/compressor/src/lib.rs"
     printf 'pub fn render() {}\n' >"$root/hosts/host-web/src/lib.rs"
     printf 'fn main() {}\n' >"$root/tools/audit/src/realtime.rs"
+    # Gate M3's structural half (#1047): the file floor is thirty vendored sources, and a
+    # provenance comment may name the macros the vendoring removed.
+    local vendored
+    for vendored in $(seq 1 30); do
+        printf '%s\n' \
+            '// Vendored from rust-lang/libm (MIT); `force_eval!` statements are removed.' \
+            "pub(crate) fn f$vendored(x: f64) -> f64 { x * 2.0 + 1.0 }" \
+            >"$root/crates/math/src/vendored/f$vendored.rs"
+    done
     printf '%s\n' '[package]' 'name = "lane"' >"$root/crates/lane/Cargo.toml"
     printf '%s\n' '[package]' 'name = "engine"' >"$root/crates/engine/Cargo.toml"
 
@@ -323,6 +333,32 @@ expect_failure_with_diagnostic detection-diagnostic \
     'runtime SIMD detection is forbidden outside the enumerated legacy sites (D4)' \
     'printf "%s\n" "let _ = is_x86_feature_detected!(\"avx2\");" >>"$root/crates/compressor/src/lib.rs"'
 
+# Gate M3's structural half (#1047, moved from crates/math/tests/m3_determinism.rs): the vendored
+# math sources carry no target cfg, architecture module, fused method or unsafe code. Each needle
+# below is one no earlier rule catches, so the diagnostic is this rule's own.
+m3_class='the vendored math sources must contain no target-conditional, fused or unsafe construct (gate M3)'
+expect_failure_with_diagnostic vendored-fma-target-feature "$m3_class" \
+    'sed -i "1i #[cfg(target_feature = \"fma\")]" "$root/crates/math/src/vendored/f7.rs"'
+expect_failure_with_diagnostic vendored-target-arch "$m3_class" \
+    'sed -i "1i #[cfg(target_arch = \"x86_64\")]" "$root/crates/math/src/vendored/f8.rs"'
+expect_failure_with_diagnostic vendored-core-arch "$m3_class" \
+    'printf "%s\n" "use core::arch;" >>"$root/crates/math/src/vendored/f9.rs"'
+expect_failure_with_diagnostic vendored-std-arch-in-a-comment "$m3_class" \
+    'printf "%s\n" "// a std::arch fast path" >>"$root/crates/math/src/vendored/f9.rs"'
+expect_failure_with_diagnostic vendored-unsafe "$m3_class" \
+    'printf "%s\n" "fn g(p: *const f64) -> f64 { unsafe { *p } }" >>"$root/crates/math/src/vendored/f10.rs"'
+expect_failure_with_diagnostic vendored-force-eval "$m3_class" \
+    'printf "%s\n" "fn g(x: f64) { force_eval!(x); }" >>"$root/crates/math/src/vendored/f11.rs"'
+expect_failure_with_diagnostic vendored-select-implementation "$m3_class" \
+    'printf "%s\n" "select_implementation! { use_intrinsic: x }" >>"$root/crates/math/src/vendored/f12.rs"'
+expect_failure_with_diagnostic vendored-read-volatile "$m3_class" \
+    'printf "%s\n" "fn g(p: *const f64) -> f64 { p.read_volatile() }" >>"$root/crates/math/src/vendored/f13.rs"'
+expect_failure_with_diagnostic vendored-file-floor \
+    'expected the full vendored math file set under crates/math/src/vendored, found 29 files' \
+    'rm -f "$root/crates/math/src/vendored/f30.rs"'
+expect_failure_with_diagnostic vendored-root-missing 'vendored math source discovery traversal errored' \
+    'rm -rf "$root/crates/math/src/vendored"'
+
 ordered_relaxed_root="$scratch_root/diagnostic-relaxed-before-architecture"
 create_valid_fixture "$ordered_relaxed_root"
 printf '%s\n' 'let y = f32x4_relaxed_madd(a, b, c);' >>"$ordered_relaxed_root/crates/compressor/src/lib.rs"
@@ -390,6 +426,8 @@ case "$INJECT_MODE:$TOOL_NAME" in
  package-name:awk) [[ "$joined" == *in_package*engine/Cargo.toml* ]] && hit=1 ;;
  deps-lane:awk) [[ "$joined" == *package=lane*dependencies* ]] && hit=1 ;;
  deps-wide:awk) [[ "$joined" == *package=wide*dependencies* ]] && hit=1 ;;
+ vendored-find:find) [[ "$joined" == 'crates/math/src/vendored '* ]] && hit=1 ;;
+ vendored-scan:awk) [[ "$joined" == *force_eval*vendored* ]] && hit=1 ;;
 esac
 if (( hit )); then
   if [[ "$PARTIAL" == 1 ]]; then "$REAL_TOOL" "$@" || true; fi
@@ -423,6 +461,8 @@ for partial in 0 1; do
   expect_tool_error "deps-lane-$partial" awk deps-lane 'lane locked dependency extraction failed' "$partial"
   expect_tool_error "deps-wide-$partial" awk deps-wide 'wide locked dependency extraction failed' "$partial"
   expect_tool_error "membership-$partial" rg membership 'workspace dependency membership search failed' "$partial"
+  expect_tool_error "vendored-find-$partial" find vendored-find 'vendored math source discovery traversal errored' "$partial"
+  expect_tool_error "vendored-scan-$partial" awk vendored-scan 'vendored math source scan failed' "$partial"
 done
 
 prove_lane_mutant_rejected() {

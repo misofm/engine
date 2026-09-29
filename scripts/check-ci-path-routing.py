@@ -424,8 +424,10 @@ TEST_SUPPORT_CI_LINES = (
 )
 
 # check-sdk-deletions.py's --self-test moved to `gate-self-tests` (#1043); SELF_TEST_SUITES pins it.
+# #1044: the SDK drift gate compares sdk/assets with the artifact job's generated documents, so it
+# names the downloaded, closure-verified directory; without it the gate would run the generator.
 SDK_CLOSURE_LINES = (
-    "bash scripts/check-sdk-generated.sh",
+    "bash scripts/check-sdk-generated.sh target/ci/qualification-artifacts",
     "python3 -B scripts/check-sdk-deletions.py",
     "bash scripts/check-sdk-types.sh",
     "bash scripts/check-sdk-headless.sh target/ci/qualification-artifacts",
@@ -478,8 +480,28 @@ ARTIFACT_DIGEST_OUTPUT = (
     "    outputs:\n"
     "      sha256: ${{ steps.build.outputs.sha256 }}\n"
     "      rustc: ${{ steps.build.outputs.rustc }}\n"
+    "      closure_sha256: ${{ steps.build.outputs.closure_sha256 }}\n"
 )
 ARTIFACT_READERS = ("sdk", "artifact-gates", "browser")
+# Issue #1044: the parameter metadata and ABI layout are generated once per run, by the `artifact`
+# job's delivery build (`parameter-metadata --write`), and every reader checks the whole downloaded
+# directory against the digest of what that job built -- one sha256 over each file's sha256, in
+# byte order of name, computed by exactly this line on both sides -- so the documents a reader
+# consumes are the generator's output at this commit without the reader running it again.
+ARTIFACT_CLOSURE_DIGEST = (
+    "closure=\"$(set -o pipefail; cd target/ci/qualification-artifacts && find . -type f "
+    "-printf '%P\\0' | LC_ALL=C sort -z | xargs -0 sha256sum -- | sha256sum | awk '{print $1}')\"\n"
+)
+ARTIFACT_CLOSURE_VERIFY = (
+    "          CLOSURE: ${{ needs.artifact.outputs.closure_sha256 }}\n",
+    "          " + ARTIFACT_CLOSURE_DIGEST,
+    '          [[ "$CLOSURE" =~ ^[0-9a-f]{64}$ && "$closure" == "$CLOSURE" ]] || { echo "downloaded '
+    'artifact closure mismatch: the artifact job built $CLOSURE, got $closure" >&2; exit 1; }\n',
+)
+# The one flag that lets check-web-audioworklet.sh leave the generator out (#1044), and the only
+# directory it may name: a reader's download, verified against ARTIFACT_CLOSURE_VERIFY first.
+METADATA_SKIP_FLAG = "--without-metadata-regeneration"
+ARTIFACT_DIRECTORY = "target/ci/qualification-artifacts"
 # Issue #1061, attempt 3: a change's report compares its module with the digest its base's own CI
 # run recorded, never with a base rebuilt inside the change's workflow. Attempts 1 and 2 rebuilt the
 # base there, and a toolchain bump, one workflow-level cargo variable or one `GITHUB_PATH` line
@@ -496,8 +518,11 @@ ARTIFACT_READERS = ("sdk", "artifact-gates", "browser")
 # The build environment itself is deliberately not pinned: the record is what the base's own run
 # built in its own environment, so a change to that environment reads CHANGED, as it should.
 ARTIFACT_BUILD_LINES = (
+    "          bash scripts/build-web-audioworklet.sh target/ci/qualification-artifacts\n",
     '          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"\n',
     '          echo "rustc=$(rustc -vV | sed -n \'s/^release: //p\')" >> "$GITHUB_OUTPUT"\n',
+    "          " + ARTIFACT_CLOSURE_DIGEST,
+    '          echo "closure_sha256=$closure" >> "$GITHUB_OUTPUT"\n',
 )
 RECORD_JOB = "artifact-record"
 RECORD_HEAD = (
@@ -562,11 +587,12 @@ def job_steps(job_text: str) -> list[str]:
 def check_qualification_artifact_digest(text: str) -> None:
     """Issue #1061: the `artifact` job publishes its module's digest and rustc release, posts
     main's record on pushes, and every job that reads the module verifies its download against
-    that digest before anything reads it."""
+    that digest before anything reads it. Issue #1044: the same holds for the whole directory,
+    generated documents included, against the job's closure digest."""
     artifact = job(text, "artifact")
     require(ARTIFACT_DIGEST_OUTPUT in artifact,
-            "qualification.yml: the artifact job must publish its module's sha256 and rustc "
-            "release as outputs")
+            "qualification.yml: the artifact job must publish its module's sha256, rustc "
+            "release and closure digest (#1044) as outputs")
     require(UNMASKABLE.search(artifact) is None,
             "qualification.yml: the artifact job must carry no job-level continue-on-error, "
             "defaults or env")
@@ -587,6 +613,13 @@ def check_qualification_artifact_digest(text: str) -> None:
         download = reader.index("path: target/ci/qualification-artifacts")
         verify = reader.index(ARTIFACT_DIGEST_STEP)
         require(download < verify, f"qualification.yml: {name} verifies before it downloads")
+        verify_step = next((step for step in job_steps(reader)
+                            if step.startswith(ARTIFACT_DIGEST_STEP.splitlines(keepends=True)[0])),
+                           "")
+        for line in ARTIFACT_CLOSURE_VERIFY:
+            require(line in verify_step,
+                    f"qualification.yml: {name} must verify its whole download against the artifact "
+                    f"job's closure digest (#1044): missing {line.strip()!r}")
         later = [reader.index(line) for line in ("bash scripts/", "python3 -B scripts/",
                                                  "npm run qualify") if line in reader]
         require(all(verify < index for index in later),
@@ -648,6 +681,102 @@ def check_qualification_artifact_identity(text: str) -> None:
                 "qualification.yml: artifact-identity step differs from its pin: "
                 f"{pinned.splitlines()[0].strip()!r} (scripts/check-ci-path-routing.py "
                 "IDENTITY_STEPS)")
+
+
+def check_qualification_metadata_generated_once(text: str, names: list[str]) -> None:
+    """Issue #1044: `check-web-audioworklet.sh` may leave its `parameter-metadata --check` out only
+    in a job that reads the `artifact` job's download and verifies the whole directory against that
+    job's closure digest first (check_qualification_artifact_digest), and only for that directory:
+    there the check compared the generator with itself. Anywhere else the flag would drop the only
+    regeneration of a directory nothing proves the generator wrote."""
+    for name in names:
+        for command in step_commands(job(text, name)):
+            try:
+                words = shlex.split(command)
+            except ValueError:
+                words = command.split()
+            for index, word in enumerate(words):
+                if not word.endswith("check-web-audioworklet.sh"):
+                    continue
+                arguments = words[index + 1:]
+                if METADATA_SKIP_FLAG not in arguments:
+                    continue
+                require(name in ARTIFACT_READERS,
+                        f"qualification.yml: {name} passes {METADATA_SKIP_FLAG} but does not read "
+                        "the artifact job's closure-verified download")
+                require(arguments == [METADATA_SKIP_FLAG, ARTIFACT_DIRECTORY],
+                        f"qualification.yml: {name} may pass {METADATA_SKIP_FLAG} only for "
+                        f"{ARTIFACT_DIRECTORY}")
+
+
+def check_metadata_skip_elsewhere(root: pathlib.Path) -> None:
+    """Issue #1044: no other workflow may pass the flag; none of them verifies a closure digest."""
+    for workflow in sorted((root / ".github/workflows").glob("*.y*ml")):
+        if workflow.name == "qualification.yml":
+            continue
+        require(METADATA_SKIP_FLAG not in workflow.read_text(encoding="utf-8"),
+                f"{workflow.name}: only qualification.yml's closure-verified artifact readers may "
+                f"pass {METADATA_SKIP_FLAG} (#1044)")
+
+
+# Issue #1044: each duplicate this issue removed names the one job that still runs the claim, on
+# the full route, in a step no condition can skip. Dropping or conditioning any of these lines
+# would take the claim out of CI with every job green.
+# - artifact-gates: scripts/test-web-audioworklet.sh runs scripts/test-web-audioworklet.mjs, the
+#   hermetic host/worklet/boot suite `lint` also ran;
+# - lint: the effect-runtime policy and fixture scripts check-effect-contract.sh also ran;
+# - test-release: a release `cargo test` runs `m3_determinism` on the x86-64-v3 build
+#   (`.cargo/config.toml`, no RUSTFLAGS override on the command; see runs_m3_on_config_flags), and
+#   the cfg line shows cargo builds `math` with FMA there, the claim of the retired
+#   "Math M3 digests on an FMA-enabled build" step.
+DEDUPLICATED_OWNERS = {
+    "artifact-gates": ("bash scripts/test-web-audioworklet.sh",),
+    "lint": (
+        "bash scripts/check-effect-runtime-policy.sh",
+        "bash scripts/test-effect-runtime-policy.sh",
+        "bash scripts/check-effect-runtime-fixtures.sh",
+        "bash scripts/test-effect-runtime-fixtures.sh",
+    ),
+    "test-release": (
+        "cargo rustc --locked --release -p math --lib -- --print cfg | "
+        "grep -x 'target_feature=\"fma\"'",
+    ),
+}
+FULL_ROUTE_IF = "needs.route.outputs.route == 'full'"
+M3_TEST = "m3_determinism"
+
+
+def runs_m3_on_config_flags(command: str) -> bool:
+    """`command` is a release-profile `cargo test` of `math` that runs `m3_determinism`, with no
+    variable assignment in front of it that could replace `.cargo/config.toml`'s rustflags."""
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return False
+    if words[:2] != ["cargo", "test"] or "--release" not in words or "--" in words:
+        return False
+    packages = {words[i + 1] for i, word in enumerate(words[:-1]) if word in ("-p", "--package")}
+    tests = {words[i + 1] for i, word in enumerate(words[:-1]) if word == "--test"}
+    return ("math" in packages
+            and (not tests or M3_TEST in tests)
+            and not any(word in NON_INTEGRATION_TARGET_SELECTORS for word in words))
+
+
+def check_qualification_deduplicated_owners(text: str) -> None:
+    for name, commands in DEDUPLICATED_OWNERS.items():
+        block = job(text, name)
+        require(job_if(block) == FULL_ROUTE_IF,
+                f"qualification.yml: {name} must run on exactly the full route (#1044 owner)")
+        unconditional = unconditional_step_commands(block)
+        for command in commands:
+            require(command in unconditional,
+                    f"qualification.yml: {name} must run `{command}` unconditionally; it is the "
+                    "one run left of a claim #1044 deduplicated")
+    require(any(runs_m3_on_config_flags(command)
+                for command in unconditional_step_commands(job(text, "test-release"))),
+            "qualification.yml: test-release must run M3 (`cargo test --release -p math`, "
+            f"`{M3_TEST}` not deselected) unconditionally with no RUSTFLAGS in front of it, on "
+            "the x86-64-v3 flags .cargo/config.toml pins (#1044)")
 
 
 def check_qualification_v8_spill(text: str) -> None:
@@ -956,6 +1085,8 @@ def check_qualification_workflow(root: pathlib.Path) -> None:
     check_qualification_artifact_digest(text)
     check_qualification_artifact_record(text, names)
     check_qualification_artifact_identity(text)
+    check_qualification_metadata_generated_once(text, names)
+    check_qualification_deduplicated_owners(text)
     check_qualification_v8_spill(text)
     check_qualification_aarch64(text)
     check_qualification_native_g5(text)
@@ -1006,6 +1137,7 @@ def check(root: pathlib.Path) -> None:
     check_retired_workflows_absent(root)
     check_classifier_contract(root)
     check_qualification_workflow(root)
+    check_metadata_skip_elsewhere(root)
     check_cross_target_aarch64_rows(root)
     check_nightly_budgets(root)
     check_nightly_self_tests(root)

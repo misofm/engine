@@ -40,7 +40,9 @@ fi
   exit 2
 }
 
-bash "$repo_root/scripts/check-sdk-generated.sh"
+# Issue #1044: the generated-surface gate (scripts/check-sdk-generated.sh) is not run here. Both
+# workflows that package run it themselves first -- qualification.yml's `sdk` job against the same
+# artifact directory, and npm-publish.yml's qualify step -- so a call here ran it twice in each.
 rm -rf -- "$sdk_root/dist"
 "$sdk_root/node_modules/.bin/tsc" --project "$sdk_root/tsconfig.build.json"
 chmod +x "$sdk_root/dist/enginectl.js"

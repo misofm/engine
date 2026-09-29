@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
-# Execute the same BTLV golden assertions in scalar and simd128 Wasm conformance binaries.
+# Execute the BTLV golden assertions in the simd128 Wasm conformance binary.
 # The temporary `main` export is a wasm-interp entry point only; the conformance crate exports no C ABI.
+#
+# #1062 (owner ruling 2026-09-28, decision 7): the scalar (non-`simd128`) variant is retired, and
+# `lane` refuses that build at compile time. The golden corpus is target code, not lane code, and
+# the simd128 guest executes the same corpus under wasm32 that the scalar one did.
 #
 # #274 -- why this gate reads a RETURNED VALUE and never trusts an exit status.
 #
@@ -108,7 +112,7 @@ self_test_run() {
 
     build_scratch() {
         CARGO_TARGET_DIR="$selftest_target" \
-            RUSTFLAGS="-C target-feature=-simd128 -C link-arg=--export=main" \
+            RUSTFLAGS="-C target-feature=+simd128 -C link-arg=--export=main" \
             cargo build --locked --release --target "$TARGET" \
                 --manifest-path "$scratch/Cargo.toml" -p conformance --bin "$BINARY" \
                 >/dev/null
@@ -198,9 +202,8 @@ PY
     printf 'issue-005 Wasm golden parity self-test passed (1 inert-invocation row, 3 red rebuilds)\n'
 }
 
-run_variant scalar -simd128
 run_variant simd128 +simd128
-printf 'issue-005 Wasm golden parity: ok (scalar + simd128)\n'
+printf 'issue-005 Wasm golden parity: ok (simd128)\n'
 
 if [[ "$self_test" == 1 ]]; then
     self_test_run

@@ -72,14 +72,15 @@ pub extern "C" fn miso_gate_widths() -> u32 {
     corpus::WIDTHS as u32
 }
 
-/// The production backend this module was compiled for: `0` scalar, `1` `Simd4`, `2` `Simd8`.
+/// The production backend this module was compiled for: `1` `Simd4`, the one wasm width (`2` is
+/// `Simd8` and `0` the scalar backend, which no wasm build selects since #1038 and #1062).
 ///
-/// The host asserts this matches what it asked for, so a wasm artifact built without `simd128`
-/// cannot silently pass as the `simd128` one (or the reverse).
+/// The host asserts this matches what it asked for, so a guest built for another width cannot
+/// silently pass as the `simd128` one.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_gate_backend() -> u32 {
-    // By width, not by variant: `Backend::Scalar` exists only in `lane/test-support` builds and on
-    // the scalar-wasm CI exception (#1059), so a match on the variants compiles in only one of them.
+    // By width, not by variant: `Backend::Scalar` exists only in `lane/test-support` builds
+    // (#1059), so a match on the variants compiles in only one of them.
     match lane::Backend::current().width() {
         4 => 1,
         8 => 2,

@@ -1,200 +1,21 @@
 //! The render path allocates nothing (master plan §10 A1, `AGENTS.md` render rules).
 //!
-//! A counting global allocator is armed only around the render loop, so preparation — which does
-//! allocate, once, for the boxed product — is outside the measurement. Automation is applied on
-//! every block, so the ramp retarget path is inside it too.
-
-#![allow(unsafe_code)]
+//! The workspace's audited global allocator (`bench_support::alloc`) counts every allocation and
+//! free per thread. The render loop is bracketed by a snapshot of this thread's counters, so
+//! preparation -- which does allocate, once, for the boxed product -- is outside the measurement,
+//! and no other test thread can enter it. Automation is applied on every block, so the ramp
+//! retarget path is inside it too. The counters' own positive controls (same-thread allocation
+//! and free are counted; a foreign thread's are not) are `bench-support`'s tests.
 
 mod common;
 
-use core::alloc::Layout;
-use core::cell::Cell;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::alloc::{GlobalAlloc, System};
-
+use bench_support::alloc as bench_alloc;
 use common::*;
 use effect_contract::{EffectBankProcessBlock, EffectProcessBlock, LinkMode, ParameterChannel};
 
-thread_local! {
-    static ARMED: Cell<bool> = const { Cell::new(false) };
-    static ALLOCATIONS: Cell<u64> = const { Cell::new(0) };
-    static DEALLOCATIONS: Cell<u64> = const { Cell::new(0) };
-}
-
 /// A zero-filled offset table for the blocks that carry no automation, allocated as a `const` so
-/// slicing it inside the armed region cannot allocate.
+/// slicing it inside the measured region cannot allocate.
 const ZERO_OFFSETS: [u32; 9] = [0; 9];
-
-struct CountingAllocator;
-
-#[global_allocator]
-static GLOBAL_ALLOCATOR: CountingAllocator = CountingAllocator;
-
-fn record(counter: &'static std::thread::LocalKey<Cell<u64>>) {
-    // Allocations can occur while a thread-local is being destroyed. `try_with` makes the
-    // allocator observational even during teardown instead of panicking recursively.
-    if ARMED.try_with(Cell::get).unwrap_or(false) {
-        let _ = counter.try_with(|count| count.set(count.get() + 1));
-    }
-}
-
-// SAFETY: every request is forwarded to `System` with its original pointer, layout and size; the
-// thread-local counters are observational and armed only on the thread running `measure`.
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        // SAFETY: forwards the allocator-provided layout unchanged.
-        let pointer = unsafe { System.alloc(layout) };
-        if !pointer.is_null() {
-            record(&ALLOCATIONS);
-        }
-        pointer
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        // SAFETY: forwards the allocator-provided layout unchanged.
-        let pointer = unsafe { System.alloc_zeroed(layout) };
-        if !pointer.is_null() {
-            record(&ALLOCATIONS);
-        }
-        pointer
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        record(&DEALLOCATIONS);
-        // SAFETY: forwards the original pointer and layout unchanged.
-        unsafe { System.dealloc(pointer, layout) }
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        // SAFETY: forwards the original allocation arguments unchanged.
-        let replacement = unsafe { System.realloc(pointer, layout, size) };
-        if !replacement.is_null() {
-            record(&ALLOCATIONS);
-            record(&DEALLOCATIONS);
-        }
-        replacement
-    }
-}
-
-fn measure(body: impl FnOnce()) -> (u64, u64) {
-    struct Disarm;
-
-    impl Drop for Disarm {
-        fn drop(&mut self) {
-            let _ = ARMED.try_with(|armed| armed.set(false));
-        }
-    }
-
-    ALLOCATIONS.set(0);
-    DEALLOCATIONS.set(0);
-    ARMED.set(true);
-    let disarm = Disarm;
-    body();
-    drop(disarm);
-    (ALLOCATIONS.get(), DEALLOCATIONS.get())
-}
-
-fn allocate_and_free_once() {
-    let layout = Layout::new::<[u8; 32]>();
-    // SAFETY: the non-zero layout is used for exactly one allocation, the returned pointer is
-    // checked before use, and the same pointer and layout are passed once to `dealloc`.
-    unsafe {
-        let pointer = std::alloc::alloc(layout);
-        assert!(!pointer.is_null(), "positive-control allocation failed");
-        pointer.write(0x5a);
-        std::hint::black_box(pointer);
-        std::alloc::dealloc(pointer, layout);
-    }
-}
-
-#[test]
-fn the_counter_observes_same_thread_allocation_and_free() {
-    assert_eq!(measure(allocate_and_free_once), (1, 1));
-}
-
-#[test]
-fn foreign_thread_allocations_do_not_enter_the_callers_counts() {
-    struct PublishCompletion<'a>(&'a AtomicBool);
-
-    impl Drop for PublishCompletion<'_> {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::Release);
-        }
-    }
-
-    let ready = AtomicBool::new(false);
-    let start = AtomicBool::new(false);
-    let caller_is_measuring = AtomicBool::new(false);
-    let finished = AtomicBool::new(false);
-    let foreign_started_during_measurement = AtomicBool::new(false);
-    let foreign_finished_during_measurement = AtomicBool::new(false);
-    let foreign_allocations = AtomicU64::new(0);
-    let foreign_deallocations = AtomicU64::new(0);
-
-    std::thread::scope(|scope| {
-        let worker = scope.spawn(|| {
-            let completion = PublishCompletion(&finished);
-            ready.store(true, Ordering::Release);
-            while !start.load(Ordering::Acquire) {
-                core::hint::spin_loop();
-            }
-            foreign_started_during_measurement.store(
-                caller_is_measuring.load(Ordering::Acquire),
-                Ordering::Release,
-            );
-            let (allocations, deallocations) = measure(allocate_and_free_once);
-            foreign_finished_during_measurement.store(
-                caller_is_measuring.load(Ordering::Acquire),
-                Ordering::Release,
-            );
-            foreign_allocations.store(allocations, Ordering::Release);
-            foreign_deallocations.store(deallocations, Ordering::Release);
-            drop(completion);
-        });
-
-        while !ready.load(Ordering::Acquire) {
-            if finished.load(Ordering::Acquire) {
-                worker.join().expect("foreign allocation worker");
-                panic!("foreign allocation worker finished before readiness");
-            }
-            core::hint::spin_loop();
-        }
-        let caller_counts = measure(|| {
-            caller_is_measuring.store(true, Ordering::Release);
-            start.store(true, Ordering::Release);
-            while !finished.load(Ordering::Acquire) {
-                core::hint::spin_loop();
-            }
-            caller_is_measuring.store(false, Ordering::Release);
-        });
-        worker.join().expect("foreign allocation worker");
-
-        assert!(
-            foreign_started_during_measurement.load(Ordering::Acquire),
-            "foreign allocation did not begin during the caller's measurement"
-        );
-        assert!(
-            foreign_finished_during_measurement.load(Ordering::Acquire),
-            "foreign allocation did not finish during the caller's measurement"
-        );
-        assert_eq!(
-            foreign_allocations.load(Ordering::Acquire),
-            1,
-            "foreign positive control must allocate once"
-        );
-        assert_eq!(
-            foreign_deallocations.load(Ordering::Acquire),
-            1,
-            "foreign positive control must free once"
-        );
-        assert_eq!(
-            caller_counts,
-            (0, 0),
-            "foreign allocation contaminated the caller's counters"
-        );
-    });
-}
 
 /// Red mutation: `std::hint::black_box(Vec::<u8>::with_capacity(1));` inside
 /// `Shaper::process_block`.
@@ -204,7 +25,7 @@ fn the_render_path_allocates_nothing() {
     let frames = 128;
     let values = values_of(0.5, -0.25, 0.75);
 
-    // Everything the loop touches is allocated before the counters are armed.
+    // Everything the loop touches is allocated before the counters are read.
     let mut effect = prepare(&values);
     let mut left = vec![0.25_f32; frames];
     let mut right = vec![-0.125_f32; frames];
@@ -225,38 +46,39 @@ fn the_render_path_allocates_nothing() {
     let offsets: Vec<u32> = (0..=lanes as u32).collect();
     let width = native_bank().map_or(effect_contract::BankWidth::Four, |(_, w)| w);
 
-    let (allocations, deallocations) = measure(|| {
-        for block in 0..blocks {
-            let first = (block * frames) as u64;
-            let spans: &[_] = if block % 4 == 0 { &spans } else { &[] };
-            effect.process(
-                EffectProcessBlock::new(&mut left, &mut right, None, first, spans, frames as u32)
-                    .expect("scalar block"),
+    bench_alloc::assert_installed();
+    let mark = bench_alloc::current_thread_counters();
+    for block in 0..blocks {
+        let first = (block * frames) as u64;
+        let spans: &[_] = if block % 4 == 0 { &spans } else { &[] };
+        effect.process(
+            EffectProcessBlock::new(&mut left, &mut right, None, first, spans, frames as u32)
+                .expect("scalar block"),
+        );
+        if let Some(bank) = bank.as_mut() {
+            let (spans, offsets): (&[_], &[u32]) = if block % 4 == 0 {
+                (&bank_spans, &offsets)
+            } else {
+                (&[], &ZERO_OFFSETS[..lanes + 1])
+            };
+            bank.process_bank(
+                EffectBankProcessBlock::new(
+                    &mut bank_left,
+                    &mut bank_right,
+                    None,
+                    frames as u32,
+                    width,
+                    first,
+                    spans,
+                    offsets,
+                    frames as u32,
+                )
+                .expect("bank block"),
             );
-            if let Some(bank) = bank.as_mut() {
-                let (spans, offsets): (&[_], &[u32]) = if block % 4 == 0 {
-                    (&bank_spans, &offsets)
-                } else {
-                    (&[], &ZERO_OFFSETS[..lanes + 1])
-                };
-                bank.process_bank(
-                    EffectBankProcessBlock::new(
-                        &mut bank_left,
-                        &mut bank_right,
-                        None,
-                        frames as u32,
-                        width,
-                        first,
-                        spans,
-                        offsets,
-                        frames as u32,
-                    )
-                    .expect("bank block"),
-                );
-            }
         }
-    });
+    }
+    let counted = bench_alloc::current_thread_delta_since(mark);
 
-    assert_eq!(allocations, 0, "the render path must not allocate");
-    assert_eq!(deallocations, 0, "the render path must not free");
+    assert_eq!(counted.allocations, 0, "the render path must not allocate");
+    assert_eq!(counted.deallocations, 0, "the render path must not free");
 }

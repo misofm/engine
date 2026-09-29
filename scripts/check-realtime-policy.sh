@@ -26,7 +26,7 @@ realtime_root="crates/engine/src/realtime"
 # is the only non-FFI web-host file admitted here.
 # `docs/REALTIME_DEPENDENCY_POLICY.md`, "Unsafe-code ownership", carries the full justification.
 unsafe_raw="$(gate_scan_collect 'unsafe source scan' 'unsafe[[:space:]]+(impl|fn|extern)|unsafe[[:space:]]*\{' '*.rs' crates hosts tools)" || exit $?
-unsafe_matches="$(gate_filter_exclude 'unsafe source exclusions' '^crates/engine/src/realtime/spsc.rs:|^crates/engine/src/realtime/disjoint.rs:|^crates/lane/src/softfma.rs:|^crates/lane/src/fpenv.rs:|^crates/builtins-compiler/tests/allocation_tracker.rs:|^crates/session/tests/allocation_budget.rs:|^crates/soft-clip/tests/allocation.rs:|^crates/transient-shaper/tests/allocation.rs:|^crates/capi/src/ffi.rs:|^crates/capi/tests/resource_lifecycle.rs:|^crates/true-peak-limiter/tests/allocation.rs:|^crates/multiband-compressor/tests/no_alloc_render.rs:|^hosts/host-web/src/ffi.rs:|^hosts/host-web/tests/boot_transient_budget.rs:|^tools/bench-support/src/alloc.rs:|^tools/audit/src/capi.rs:|^tools/bench/src/protocol.rs:|^tools/wasm-gate-guest/src/lib.rs:' "$unsafe_raw")" || exit $?
+unsafe_matches="$(gate_filter_exclude 'unsafe source exclusions' '^crates/engine/src/realtime/spsc.rs:|^crates/engine/src/realtime/disjoint.rs:|^crates/lane/src/softfma.rs:|^crates/lane/src/fpenv.rs:|^crates/builtins-compiler/tests/allocation_tracker.rs:|^crates/session/tests/allocation_budget.rs:|^crates/soft-clip/tests/allocation.rs:|^crates/transient-shaper/tests/allocation.rs:|^crates/capi/src/ffi.rs:|^crates/capi/tests/resource_lifecycle.rs:|^crates/true-peak-limiter/tests/allocation.rs:|^crates/multiband-compressor/tests/no_alloc_render.rs:|^hosts/host-web/src/ffi.rs:|^hosts/host-web/tests/boot_transient_budget.rs:|^tools/bench-support/src/alloc.rs:|^tools/audit/src/capi.rs:|^tools/wasm-gate-guest/src/lib.rs:' "$unsafe_raw")" || exit $?
 [[ -z "$unsafe_matches" ]] || {
     printf '%s\n' "$unsafe_matches" >&2
     fail "unsafe code exists outside the issue-approved ownership/audit files"
@@ -78,5 +78,30 @@ gate_scan_forbidden 'marked realtime forbidden-body predicate' \
 # The MAX_TRACKS ban lives once, in scripts/check-workspace-policy.sh (P12): it scans the whole
 # {crates,hosts,tools} tree, of which the realtime module is a part, rather than one of five copies
 # of the same regex over five different root lists.
+
+# Issue #1047 moved this scan here from capi's `ffi_never_forms_a_whole_plan_reference` test. No
+# workflow runs Miri, so it is the only guard of the C ABI's control/render split: the render
+# thread holds `&mut PlanState` while any thread may query the same handle, so the production
+# code of `crates/capi/src/ffi.rs` never forms a reference to the whole `Plan`. It projects the
+# fields it needs with `&raw const`/`&raw mut` (`plan_state`, `plan_error_slot`, `plan_queries`).
+# `&*plan.cast::<HandleHeader>()` borrows only the shared header, `&*plan_state(..)` names another
+# item, and `&(*plan).field` borrows one field, so a projection after the dereference is not a
+# hit. Comment lines and the test module are not production code. The render entry point must be
+# in the scanned region, so a renamed file or a moved test-module marker cannot pass as clean.
+capi_ffi='crates/capi/src/ffi.rs'
+[[ -f "$capi_ffi" ]] || fail "missing $capi_ffi"
+if capi_production="$(awk '
+    previous == "#[cfg(test)]" && $0 == "mod tests {" { exit }
+    { previous = $0 }
+    /^[[:space:]]*\/\// { next }
+    { print FILENAME ":" FNR ":" $0 }
+' "$capi_ffi" 2>&1)"; then :; else rc=$?; printf '%s\n' "$capi_production" >&2; fail "capi production-region extraction failed (awk status $rc)"; fi
+[[ "$capi_production" == *miso_engine_v1_render_f32_planar* ]] ||
+    fail "$capi_ffi has no production render entry point to scan"
+whole_plan="$(gate_scan_text_collect 'whole-plan reference' '&(mut[[:space:]]+)?(\*plan|\(\*plan\))([^[:alnum:]_.]|$)' "$capi_production")" || exit $?
+[[ -z "$whole_plan" ]] || {
+    printf '%s\n' "$whole_plan" >&2
+    fail "the C ABI forms a reference to a whole Plan; project the field with &raw const or &raw mut"
+}
 
 printf 'realtime policy: ok (%s marked regions in %s files)\n' "$marker_count" "$marked_file_count"

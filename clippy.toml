@@ -29,21 +29,20 @@ disallowed-methods = [
     # place at each call). Mutation-proven: see the git history of this file.
     #
     # `scripts/check-unfused-seal.sh` was evaluated for the same migration and KEPT as a script --
-    # its full rule set is not expressible here. Four of its six rules are not call-site bans at
+    # its full rule set is not expressible here. Three of its five rules are not call-site bans at
     # all: a *positive presence* check that both `Lane::fma` dispatch points literally contain
     # `(self * b) + c`; a ban on `cfg` inside that function body (so the contract cannot be split
-    # per target); an exact global count of exactly 8 fused calls in the whole tree, counted two
-    # independent ways; and a refusal of the retired software-FMA *definitions* in
-    # `crates/lane/src/softfma.rs`, not calls to them. `#[expect]` only ever answers "is this
-    # specific site still needed", never "does this file's body still say X" or "how many total
-    # occurrences exist tree-wide" -- so `check-unfused-seal.sh` stays wired into CI
-    # (`qualification.yml`'s `lint` job).
+    # per target); and an exact global count of exactly 8 fused calls in the whole tree, counted
+    # two independent ways. (#1050 retired a sixth, the ban on the deleted software-FMA
+    # definitions.) `#[expect]` only ever answers "is this specific site still needed", never
+    # "does this file's body still say X" or "how many total occurrences exist tree-wide" -- so
+    # `check-unfused-seal.sh` stays wired into CI (`qualification.yml`'s `lint` job).
     #
     # `check-fast-db-seal.sh` also carried one rule with no clippy equivalent --
     # `fast_exp2`/`fast_log2` must stay private to their module, a definition-visibility rule, not
     # a call-site rule -- which this migration does not reproduce. It is a minor encapsulation
     # property (nothing downstream depends on those two names staying unexported) rather than a
-    # safety-critical one, unlike the four `check-unfused-seal.sh` keeps a script for.
+    # safety-critical one, unlike the three `check-unfused-seal.sh` keeps a script for.
     { path = "f32::exp", reason = "not cross-target deterministic (D6); call math::exp" },
     { path = "f64::exp", reason = "not cross-target deterministic (D6); call math::exp" },
     { path = "f32::exp2", reason = "not cross-target deterministic (D6); call math::exp2" },

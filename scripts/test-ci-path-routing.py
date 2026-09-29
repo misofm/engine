@@ -664,6 +664,116 @@ def test_self_test_contract_mutations(checker) -> None:
         shutil.rmtree(root)
 
 
+def test_generated_once_mutations(checker) -> None:
+    """Issue #1044: the parameter metadata is generated once per run, by the `artifact` job, and
+    every reader checks the whole download against that job's closure digest before reading it. Each
+    mutant would let a reader consume documents nothing proves the generator wrote at this commit,
+    or drop the one remaining run of a claim a removed duplicate also made, with every job green.
+    The checker runs in-process over one scratch root, restored after each mutant."""
+    root = workspace()
+
+    def workflow_mutation_fails(workflow: str, old: str, new: str) -> None:
+        path = root / ".github/workflows" / workflow
+        original = path.read_text(encoding="utf-8")
+        if old not in original:
+            raise AssertionError(f"mutation anchor absent: {old!r}")
+        path.write_text(original.replace(old, new, 1), encoding="utf-8")
+        try:
+            checker.check(root)
+        except checker.Invalid:
+            return
+        finally:
+            path.write_text(original, encoding="utf-8")
+        raise AssertionError(f"#1044 mutation was accepted: {workflow}: {old!r}")
+
+    def reader_mutation_fails(reader: str, old: str, new: str) -> None:
+        """`old` replaced inside one reader job only (the verify step is the same in all three)."""
+        path = root / ".github/workflows/qualification.yml"
+        original = path.read_text(encoding="utf-8")
+        start = original.index(f"\n  {reader}:\n")
+        at = original.index(old, start)
+        path.write_text(original[:at] + new + original[at + len(old):], encoding="utf-8")
+        try:
+            checker.check(root)
+        except checker.Invalid:
+            return
+        finally:
+            path.write_text(original, encoding="utf-8")
+        raise AssertionError(f"#1044 mutation was accepted in {reader}: {old!r}")
+
+    skip = ("bash scripts/check-web-audioworklet.sh --without-metadata-regeneration "
+            "target/ci/qualification-artifacts\n")
+    try:
+        checker.check(root)  # the unmutated scratch root passes
+        # The producer: the delivery build (the generator's --write) and the published digest.
+        workflow_mutation_fails(
+            "qualification.yml",
+            "      closure_sha256: ${{ steps.build.outputs.closure_sha256 }}\n", "")
+        workflow_mutation_fails(
+            "qualification.yml",
+            "          bash scripts/build-web-audioworklet.sh target/ci/qualification-artifacts\n",
+            "          bash scripts/build-web-audioworklet.sh --module-only "
+            "target/ci/qualification-artifacts\n")  # no metadata in the closure
+        workflow_mutation_fails(
+            "qualification.yml", "          " + checker.ARTIFACT_CLOSURE_DIGEST,
+            "          " + checker.ARTIFACT_CLOSURE_DIGEST.replace("find . -type f",
+                                                                  "find . -name '*.wasm'"))
+        # Each reader verifies the whole closure: dropping its digest, its comparison, or hashing
+        # only the module leaves the metadata it reads unproved.
+        for reader in checker.ARTIFACT_READERS:
+            for line in checker.ARTIFACT_CLOSURE_VERIFY:
+                reader_mutation_fails(reader, line, "")
+            reader_mutation_fails(
+                reader, "          " + checker.ARTIFACT_CLOSURE_DIGEST,
+                "          " + checker.ARTIFACT_CLOSURE_DIGEST.replace(
+                    "find . -type f", "find . -name '*.wasm'"))
+            reader_mutation_fails(reader, '          [[ "$CLOSURE" =~',
+                                  '          true || [[ "$CLOSURE" =~')  # the comparison masked
+        # The flag: only in a closure-verified reader, only for the downloaded directory, and in no
+        # other workflow.
+        workflow_mutation_fails(
+            "qualification.yml", skip,
+            skip.replace("target/ci/qualification-artifacts", "target/ci/other-artifacts"))
+        workflow_mutation_fails(
+            "qualification.yml",
+            "      - name: Format\n",
+            "      - name: Web gate over an unverified directory\n"
+            "        run: " + skip + "      - name: Format\n")  # lint reads no verified download
+        workflow_mutation_fails(
+            "nightly.yml", "    steps:\n", "    steps:\n      - run: " + skip)
+        # The SDK drift gate reads the artifact's closure-verified documents; without the directory
+        # it would run the fat-LTO generator a second time in the run.
+        workflow_mutation_fails(
+            "qualification.yml",
+            "          bash scripts/check-sdk-generated.sh target/ci/qualification-artifacts\n",
+            "          bash scripts/check-sdk-generated.sh\n")
+        # The owners that still run each deduplicated claim.
+        for name, commands in checker.DEDUPLICATED_OWNERS.items():
+            for command in commands:
+                workflow_mutation_fails("qualification.yml", command + "\n", "true\n")
+        workflow_mutation_fails(
+            "qualification.yml",
+            "        run: bash scripts/test-web-audioworklet.sh\n",
+            "        if: needs.route.outputs.math_closure == 'true'\n"
+            "        run: bash scripts/test-web-audioworklet.sh\n")  # the owner made conditional
+        m3 = "        run: cargo test --locked --release -p lane -p math -p wasm-gates --features math/lane\n"
+        for new in (
+            m3.replace("run: cargo", "run: RUSTFLAGS='-C target-feature=+fma' cargo"),  # config replaced
+            m3.replace("-p math ", ""),  # math's tests not run
+            m3.replace("--features math/lane", "--features math/lane --test m1_exhaustive"),
+            m3.replace("--features math/lane", "--features math/lane -- --skip m3"),
+        ):
+            workflow_mutation_fails("qualification.yml", m3, new)
+        workflow_mutation_fails(
+            "qualification.yml",
+            "    name: release-mode lane, math, and wasm-gates digest gates\n"
+            "    needs: route\n    if: needs.route.outputs.route == 'full'\n",
+            "    name: release-mode lane, math, and wasm-gates digest gates\n"
+            "    needs: route\n    if: needs.route.outputs.math_closure == 'true'\n")
+    finally:
+        shutil.rmtree(root)
+
+
 def main() -> int:
     test_nightly_budget_selection()
     test_new_router_behaviours()
@@ -1336,6 +1446,8 @@ def main() -> int:
     test_verdict_self_test_expectation()
     test_self_test_contract_mutations(checker)
     print("self-test routing, verdict expectation and contract mutation cases passed")
+    test_generated_once_mutations(checker)
+    print("#1044 generated-once hand-off and deduplicated-owner mutation cases passed")
 
     # Baseline: the unmutated workspace() -- qualification.yml plus the router/checker/test
     # scripts, with none of the four retired workflows present -- must pass the checker outright.

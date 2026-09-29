@@ -11,12 +11,7 @@ name = "bench"
 path = "src/main.rs"
 
 [dependencies]
-flatbuffers = "=25.12.19" # Comparison tool only; no engine/runtime target dependency.
 bench-support.workspace = true
-protocol.workspace = true
-session.workspace = true
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 builtins.workspace = true
 builtins-compiler.workspace = true
 conformance.workspace = true

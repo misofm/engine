@@ -34,6 +34,8 @@ math.workspace = true
 
 [dev-dependencies]
 graph.workspace = true
+# Dev-only: `tests/retained_ceilings.rs` picks each budget by the native lane width (#1060).
+lane.workspace = true
 # Dev-only: the native leg of the #106 F4 native<->simd128 session parity gate digests its rendered
 # PCM the same way the raw-Wasm oracle does. Never linked into the browser artifact.
 sha2.workspace = true

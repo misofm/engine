@@ -216,7 +216,8 @@ gate_scan_forbidden 'protocol production fixture definition' \
 gate_scan_forbidden 'protocol inline extracted tests' \
     '^[[:space:]]*mod[[:space:]]+tests[[:space:]]*\{' '' \
     crates/protocol/src/controller.rs crates/protocol/src/message_wire.rs crates/protocol/src/session_wire.rs || exit $?
-expected_conformance_bench=$'bench-support\nbuiltins\nbuiltins-compiler\nconformance\nconsole-workload\neffect-compiler\neffect-contract\nengine\nflatbuffers\ngraph\ngraph-compiler\nlane\nprotocol\nsession\nsha2'
+# #1075 retired the protocol benchmark, the only user of `flatbuffers`, `protocol` and `session`.
+expected_conformance_bench=$'bench-support\nbuiltins\nbuiltins-compiler\nconformance\nconsole-workload\neffect-compiler\neffect-contract\nengine\ngraph\ngraph-compiler\nlane\nsha2'
 [[ "$(dependency_names tools/bench/Cargo.toml)" == "$expected_conformance_bench" ]] || {
     printf 'conformance boundary failure: consolidated benchmark dependency union changed\n' >&2
     exit 1

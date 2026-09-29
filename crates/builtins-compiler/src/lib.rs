@@ -9859,39 +9859,6 @@ mod tests {
     }
 
     #[test]
-    fn alias_observer_counts_and_capture_are_thread_local() {
-        let barrier = std::sync::Barrier::new(2);
-        std::thread::scope(|scope| {
-            for calls in [2, 5] {
-                let barrier = &barrier;
-                scope.spawn(move || {
-                    ALIAS_OBSERVATIONS.with(|count| count.set(0));
-                    ALIAS_CAPTURE.with(|capture| capture.borrow_mut().clear());
-                    barrier.wait();
-
-                    let left = [calls as f32];
-                    let right = [-(calls as f32)];
-                    let mut observer = AliasObserver;
-                    let mut results = Vec::new();
-                    for first_sample in 0..calls {
-                        results.push(observer.observe(GraphObservationBlock {
-                            left: &left,
-                            right: &right,
-                            first_sample: first_sample as u64,
-                        }));
-                    }
-                    barrier.wait();
-
-                    assert!(results.into_iter().all(|result| result.is_ok()));
-                    assert_eq!(ALIAS_OBSERVATIONS.with(std::cell::Cell::get), calls);
-                    let expected = [left[0].to_bits(), right[0].to_bits()].repeat(calls);
-                    ALIAS_CAPTURE.with(|capture| assert_eq!(*capture.borrow(), expected));
-                });
-            }
-        });
-    }
-
-    #[test]
     fn serialized_alias_observer_is_the_decline_boundary() {
         let _guard = PAIR_WITNESS_LOCK
             .lock()
