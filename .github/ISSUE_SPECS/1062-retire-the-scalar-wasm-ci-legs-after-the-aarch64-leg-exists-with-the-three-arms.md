@@ -308,3 +308,120 @@ compiled only on scalar wasm, where no test ever ran.
   (`MISO_ENGINE_BENCH_WASM_SCALAR_BYTES`), so it belongs in its own issue.
 - `builtins-compiler`'s named panic for a scalar dispatch without `test-support` (#1059) can no
   longer be reached on any target. Removing it is #1059's layout follow-up.
+
+## Sol verdict, attempt 1
+
+**PASS.** Sol verified a scratch merge of this branch (`7e555c59`) into the batch head
+`codex/batch-slim-4` (`351ca593`), producing `35ee9945`. The merge is clean, with no conflicts.
+Every build ran with `CARGO_INCREMENTAL=0` under `nice`. There is no defect. The findings below are
+ranked by severity, and none of them blocks.
+
+### No lost coverage
+
+For each retired leg: what it compared, and what compares it now.
+
+- **The scalar 18-package build.** It showed that those crates compile for wasm32 without
+  `simd128`. That subject is now refused. All 18 still build at `simd128`: `cargo tree` puts 16 of
+  them in `host-web`'s wasm closure (the `artifact` job), and the `wasm-guests` probe covers
+  `target-smoke` and `protocol`. That probe also keeps wasm32's 32-bit `usize` compiled.
+- **The atomics inspection.** `check-web-audioworklet.sh` now covers it, on the module that
+  ships. `engine::realtime::observe` is linked into that module (6 functions in its name
+  section), and the module has 0 atomic opcodes, no import and unshared memory. Sol planted an
+  `i32.atomic.load` in a copy of the real module, and the gate failed with "atomics found".
+- **The scalar evidence-crate check and the cross-target rows.** The same lines and rows at
+  `simd128` cover them.
+- **The scalar protocol parity.** The `simd128` variant runs the same guest and corpus on the
+  same wasm32 pointer width. `--self-test` passes.
+- **G5's scalar guest.** The `simd128` guest digests every case at `f32`, `Simd4` and `Simd8`.
+  - The `f32` width executes wasm's scalar `f32` instructions.
+  - The runner rejects relaxed SIMD, so nothing can fuse a multiply and an add on wasm.
+  - Wasm subnormals are IEEE for scalar and `v128` alike, and the corpus's subnormal and flush
+    cases run in this guest.
+  - The max/min truth table at widths 4 and 8 checks `pmax`/`pmin` against the `f32` lowering
+    on wasm.
+- **What AArch64 stands in for.** It covers one claim only: the portable max/min source (LANE-3).
+  `aarch64-release` now runs that source natively in the shipping profile, in G5's unfiltered
+  step and in `lane`'s G1. That substitution is sound. AArch64 is not the survivor for wasm
+  codegen, for unfused `f32` or for wasm subnormals: it pins FPCR and has `fmla`. The `simd128`
+  guest holds those claims.
+- **Routing.** `wasm-guests` and both AArch64 jobs run on the same `full` route, and the verdict
+  expects all three to succeed, so no route loses coverage.
+- **What is lost.** Only `wide`'s scalar-array lowering, which no accepted target compiles. No
+  wasm-specific claim is left without a required check.
+
+### No target-specific code
+
+The refusal is #1041's own `compile_error!`: its exception arm is deleted, so wasm32 without
+`simd128` falls into the refused complement and gets the same message, as armv7 does. #1059's two
+`Backend::Scalar` cfgs are gone, and `current()` has no `Scalar` arm. The refusal row goes red both
+ways: with the guard arm restored it fails without the message, and with base's `lane` it compiles.
+
+### Gates run on `35ee9945`
+
+- **Workspace.**
+  - `cargo check --workspace --all-targets`, with `--all-features` and with default features.
+  - clippy `-D warnings`, on all 40 members.
+  - fmt.
+  - `cargo doc -D warnings`.
+  - `lane`'s wasm32 doc with `+simd128`.
+- **Cross-targets.** `check-cross-targets.sh` PASS: aarch64 iOS and Android checked and linted,
+  armv7 and scalar wasm refused, the wasm rows at `simd128`.
+- **Digests.**
+  - Console: 62 passed, 2 ignored.
+  - G5 native: 9 passed.
+  - `lane` and `math` release gates: 106 passed, 16 ignored.
+  - `run-wasm-gates.sh` passes in the CI form and the default form: 142 cases, 358 comparisons,
+    0 mismatches, every count 0.
+- **Shipped module.**
+  - Base `351ca593` builds `a4a2383f…` and the merge builds `fd6b034f…`.
+  - The code sections disassemble identically.
+  - All 129 differing bytes fall in 127 panic `Location` line fields for one 27-byte path, each
+    moved by −7. That matches `graph/src/runtime.rs`'s net −7 lines.
+  - `check-web-audioworklet.sh`, `check-browser-expected-resources.py --artifacts`,
+    `check-scalar-oracle-absent.py --wasm`, the V8 spill gate and `test-web-audioworklet.sh` pass.
+- **Lint scripts.** 61 lint-job scripts pass, every policy script among them, with `python3 -B`
+  for Python.
+  - Script reachability: 126 scripts reached, 18 mutation cases.
+  - The routing contract and its tests.
+  - actionlint 1.7.7 is clean.
+- **AArch64 sets on x86.** The debug set resolves with `--all-targets --no-run`: 25 product
+  crates plus 3, and 218 executables. The release set resolves with `--no-run`. The
+  expected-failure judges accept both listings, and `audit` builds.
+- **`--list`.** `lane` (all features and default), `target-smoke`, `wasm-gates` and `graph` list
+  271 entries, identical at base and at the merge.
+- **Gate 1.** CI runs `36507292157` (main `a8955ad4`) and `36506233220`: `aarch64-debug` and
+  `aarch64-release` both succeed.
+
+### Findings
+
+1. **Low, doc: a stale comment in `crates/engine/src/realtime/observe.rs:20-22`.** It still names
+   the deleted `check-wasm-realtime-atomics.sh`, and calls the no-`atomics` build the
+   "browser-local fallback". The claim itself is now `check-web-audioworklet.sh`'s, and the gate
+   above holds it.
+2. **Low, and not a #1062 defect: `run-protocol-benchmark.sh` is dead.**
+   - Required CI reaches it only through `test-protocol-benchmark.sh` in `audit-native`. That
+     test gives it four invalid argument sets, and each exits 2 before any artifact check.
+   - Its `--rounds 2` workload is operator-only. It needs two `bench.wasm` files under
+     `target/ci/issue005-protocol-bench-wasm-*`, and no script builds them, already at base
+     `a8955ad4`.
+   - #1034 kept the protocol by ruling, so it will not remove the script.
+   - Recommendation: delete it in #1050, with its negative test and step, the two jq
+     validators, the fixture, `bench protocol`'s `wasm_*_bytes` fields and the two
+     `MISO_ENGINE_BENCH_WASM_*_BYTES` vocabulary rows.
+3. **Low: "`lane` names a target list only in the guard and in `current()`" overstates.**
+   - `attest_host`, `fpenv.rs`, `softfma.rs` and `wide_impl.rs`'s max/min keep per-ISA cfgs.
+     Each lowers one contract that G1 and G5 hold bit-identical, and all of them predate #1062.
+   - Every `target_arch = "x86"` spelling has been dead since #1041 refused 32-bit x86: in
+     `lane`, graph's `FrameLane` and `target-smoke`. A later pass can delete them.
+4. **Low: the detector-residency pin's sensitivity witness narrowed.** Deleting the exclusion
+   now turns the guest red only on the 384-byte `Simd8` copy. The 44/48/176/192 sizes are still
+   scanned in the `simd128` guest, but no remaining build shows that the gate can see them.
+5. **Info: every refused target now also gets E0308 from `current()` after `lane`'s message.**
+   armv7 did not get it at base. The message comes first, and both refusal rows match on it.
+   Adding an arm would bring back a target list.
+6. **Info: `test-artifact-evidence-leak.sh` judges only the exit status.**
+   - Sol confirmed that each of its six mutations fails for its own reason.
+   - The new scan target is the right one: it is the invocation that ships, which base never
+     scanned.
+   - Sol planted three leaks and all were caught: on the delivery line, on a continuation line of
+     it, and in a new workflow line.
