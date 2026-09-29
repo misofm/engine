@@ -312,3 +312,11 @@ No defect.
      8 `structures` and 9 `constants` entries.
    - The public types `AbiLayout`, `ExportName`, `AbiStructureName` and `AbiConstantName` narrow.
    - No kept entry changed, and no known consumer reads a removed one.
+
+## Root correction (2026-09-29)
+
+Sol's finding 1 stands: the one-page drop in the fixture's memory pins is not a saving. Both modules
+declare 18 initial pages; boot no longer borrows `OBSERVATION_STAGING`, so that thread-local's lazy
+heap allocation moves from boot to its first use, and shipped memory after initialization is
+unchanged. `760a577e`'s message overstates it; the real savings are the module's −92,355 B and the
+bridge rows' −2,996 B. Finding 2 (host-core's orphaned observation-demand API) is #1076.
