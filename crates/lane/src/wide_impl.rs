@@ -83,9 +83,11 @@
 //! * **AArch64 NEON**: `vmaxq_f32` propagates NaN and answers `+0.0` for `max(+0.0, -0.0)`, and
 //!   `vmaxnmq_f32` is IEEE `maxNum`, which swallows a right-hand NaN. Neither is D8, so NEON keeps
 //!   the trait's portable form. This is a measured null, not an oversight.
-//! * **Every other target**, wasm without `simd128` included, keeps the portable form too:
-//!   `wide`'s scalar-array fallback for `fast_max` is `a < b ? b : a`, which answers `a` on a tie
-//!   where D8 answers `b`.
+//! * **Every other target** is refused at compile time (`lib.rs`; issues #1041 and #1062), wasm
+//!   without `simd128` included. The portable arm's `cfg` stays the complement of the two above
+//!   rather than naming AArch64, so an admitted target keeps the portable form by default: `wide`'s
+//!   scalar-array fallback for `fast_max` is `a < b ? b : a`, which answers `a` on a tie where D8
+//!   answers `b`.
 //!
 //! The pairs that separate these lowerings, with `N1 = 0x7FC0_0000` and `N2 = 0xFFC0_0001` two
 //! distinct NaN bit patterns:

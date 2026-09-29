@@ -93,20 +93,20 @@ compile_error!(
 // also require 64-bit pointers, which keeps out the ILP32 ABIs that share an architecture name
 // (`x86_64-unknown-linux-gnux32`, `arm64_32-apple-watchos`).
 //
-// The scalar-wasm CI exception: wasm32 *without* `simd128` still builds. It is not a product
-// target -- the one shipped wasm artifact is `simd128` (owner decision W4-D1) -- but CI builds
-// `lane` that way today, gate G5's scalar wasm guest (`scripts/run-wasm-gates.sh`) among others;
-// `docs/TARGET_MATRIX.md` lists them. Whether to remove those legs is a separate, pending
-// decision. When it is taken, delete the marked arm and nothing else.
+// wasm32 *without* `simd128` is refused too (owner ruling 2026-09-28, decision 7; issue #1062):
+// the one shipped wasm artifact is `simd128` (owner decision W4-D1), and the scalar-wasm CI legs
+// that once kept a scalar build compiling are retired. `docs/TARGET_MATRIX.md` names the checks
+// that took over each of their claims.
 //
-// Unlike the guard above this one needs no `not(doc)` escape: with the exception its outcome
-// depends only on `target_arch` and `target_pointer_width`, which rustdoc sees correctly.
+// Unlike the guard above this one needs no `not(doc)` escape. Its outcome depends on
+// `target_arch`, `target_pointer_width` and, on wasm32, `simd128`; the first two rustdoc sees
+// correctly, and a wasm32 documentation pass passes `-C target-feature=+simd128` in `RUSTDOCFLAGS`
+// exactly as a wasm32 build passes it in `RUSTFLAGS`, because neither comes from
+// `.cargo/config.toml`.
 #[cfg(not(any(
     all(target_arch = "x86_64", target_pointer_width = "64"),
     all(target_arch = "aarch64", target_pointer_width = "64"),
-    all(target_arch = "wasm32", target_feature = "simd128"),
-    // The scalar-wasm CI exception (above). Not a product target.
-    all(target_arch = "wasm32", not(target_feature = "simd128"))
+    all(target_arch = "wasm32", target_feature = "simd128")
 )))]
 compile_error!(
     "lane supports 64-bit targets only: x86-64 (with AVX2 and FMA), AArch64 (iOS arm64, Android \

@@ -317,7 +317,8 @@ use crate::{
 ///
 /// Frames are independent, so this is purely a width choice: master plan #83 §4.2 pins every one
 /// of these kernels to a width-independent result, and gate G2 proves it, so the rendered bits do
-/// not depend on which arm of this `cfg` a target takes.
+/// not depend on which arm of this `cfg` a target takes. There is no third arm: `lane` refuses to
+/// compile for every other target (issues #1041 and #1062).
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 pub(crate) type FrameLane = lane::Simd8;
 /// See [`FrameLane`].
@@ -326,14 +327,6 @@ pub(crate) type FrameLane = lane::Simd8;
     all(target_arch = "wasm32", target_feature = "simd128")
 ))]
 pub(crate) type FrameLane = lane::Simd4;
-/// See [`FrameLane`].
-#[cfg(not(any(
-    target_arch = "x86",
-    target_arch = "x86_64",
-    target_arch = "aarch64",
-    all(target_arch = "wasm32", target_feature = "simd128")
-)))]
-pub(crate) type FrameLane = f32;
 
 // REALTIME_POLICY_BEGIN
 

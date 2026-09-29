@@ -8,8 +8,8 @@ The session model and its semantics do not vary by Cargo feature or target capab
 | Native x86-64 (tooling and tests) | `x86_64-unknown-linux-gnu` | Not a shipped product target. Pinned x86-64-v3 (#83 D4): `.cargo/config.toml` gives every `x86_64` build AVX2 and FMA, so `lane::Backend::current()` is `Simd8`, a compile-time constant. No runtime detection or dispatch. `lane` refuses to compile without both features, and `lane::attest_host()` refuses at boot on a CPU that lacks them. | `lint`: the `-avx2,-fma` and `+avx2,-fma` probes must fail with `requires x86-64-v3`; the `+avx2,+fma` probe compiles, with a cfg assertion. `lint`, `test-debug-a`, `test-debug-b`, `test-release` and `audit-native` run on this target. |
 | ARM64 Android | `aarch64-linux-android` (arm64-v8a) | Product target (#1017). NEON `Simd4`, a compile-time constant; FPCR pinned per render block. | `cross-target`: the product crates checked with `--all-targets --all-features` and linted with clippy `-D warnings`. `aarch64-debug`/`aarch64-release`: tests on `ubuntu-24.04-arm`. |
 | ARM64 iOS | `aarch64-apple-ios` | Product target (#1017). As Android. | `cross-target`: the same check and clippy rows, and the release-assembly scan `ios-asm-memset-pattern16` over every product crate (expected failures per crate until #1018). Tests run on the Linux arm64 legs; see "Native AArch64" below. |
-| Refused | `armv7-linux-androideabi` (armeabi-v7a), `i686-*`, ILP32 ABIs and every other unlisted target | Refused at compile time by `lane` (#1041). | `scripts/check-cross-targets.sh` refusal row on `armv7-linux-androideabi`. |
-| Browser Wasm | `wasm32-unknown-unknown` with `+simd128` | One shipped AudioWorklet artifact, `miso-engine-v1-audio-worklet.simd128.wasm` (W4-D1), built by `scripts/build-web-audioworklet.sh`. `Simd4`, a compile-time constant. Four-lane processing uses multiply plus add; relaxed SIMD and FMA assumptions are forbidden. The host refuses a browser without `simd128` with a typed `miso.unsupported.v1` error. A scalar build is not an artifact (see the scalar-wasm CI exception below). | `artifact` builds the module once; `artifact-gates` (`check-web-audioworklet.sh`) and `browser` (Chromium, Firefox, WebKit) qualify that module. |
+| Refused | `armv7-linux-androideabi` (armeabi-v7a), `i686-*`, ILP32 ABIs, `wasm32-unknown-unknown` without `simd128`, and every other unlisted target | Refused at compile time by `lane` (#1041, #1062). | `scripts/check-cross-targets.sh` refusal rows on `armv7-linux-androideabi` and on `wasm32-unknown-unknown` with `-simd128`. |
+| Browser Wasm | `wasm32-unknown-unknown` with `+simd128` | One shipped AudioWorklet artifact, `miso-engine-v1-audio-worklet.simd128.wasm` (W4-D1), built by `scripts/build-web-audioworklet.sh`. `Simd4`, a compile-time constant. Four-lane processing uses multiply plus add; relaxed SIMD and FMA assumptions are forbidden. The host refuses a browser without `simd128` with a typed `miso.unsupported.v1` error. `lane` refuses a wasm32 build without `simd128` at compile time (#1062). | `artifact` builds the module once; `artifact-gates` (`check-web-audioworklet.sh`) and `browser` (Chromium, Firefox, WebKit) qualify that module. |
 
 ## 64-bit only (issue #1041)
 
@@ -28,25 +28,24 @@ share an architecture name (`x86_64-unknown-linux-gnux32`, `arm64_32-apple-watch
 `scripts/check-cross-targets.sh` proves the refusal on `armv7-linux-androideabi` in CI's
 `cross-target` job, and fails if that target ever compiles.
 
-**The scalar-wasm CI exception.** `wasm32` *without* `simd128` still compiles. It is not a product
-target: the one shipped artifact is `simd128` (W4-D1). It stays allowed only because CI builds
-`lane` that way today, and removing those legs is a separate, pending decision. The legs are:
+**Scalar wasm is refused too (#1062).** Owner ruling 2026-09-28, decision 7: the scalar
+(non-`simd128`) wasm builds and CI legs retired once #1017's AArch64 legs ran, and #1041's
+scalar-wasm exception in the guard went with them. The one shipped wasm artifact is `simd128`
+(W4-D1), so `wasm32` without `simd128` gets the same 64-bit-only error, and
+`scripts/check-cross-targets.sh` has a refusal row for it beside the armv7 one. `lane` names its
+target list in the guard and in `Backend::current()` only; `Backend::Scalar` exists only with
+`lane/test-support`, on every target.
 
-- `qualification.yml` `wasm-guests`: the scalar Wasm build, the scalar evidence-crate check,
-  `scripts/check-wasm-realtime-atomics.sh`, the scalar variant of
-  `scripts/check-protocol-wasm-parity.sh`, and the scalar guest of `scripts/run-wasm-gates.sh`
-  (gate G5's scalar-width leg);
-- `qualification.yml` `cross-target`: the scalar rows of `scripts/check-cross-targets.sh`. (Its
-  `check-effect-package-v1.sh` and `check-effect-descriptor-v1.sh` legs went with the
-  `effect-package` crate in #1037.)
+What each retired leg checked, and what checks it now:
 
-When the legs go, delete the one marked arm of the guard. The scalar arm of
-`lane::Backend::current()` will then be unreachable.
-
-The exception is also why `lane::Backend::Scalar` exists without `lane/test-support` on those
-builds (#1059). A scalar-wasm build names the variant but compiles none of the whole-plan scalar
-lowering, which is test-only: nothing on those legs compiles a plan, and one that tried would stop
-at a named panic in `builtins-compiler`.
+| Retired leg | What it checked | What checks it now |
+| --- | --- | --- |
+| `wasm-guests`: the scalar 18-package release build and its cfg assertion | those crates compile and link for `wasm32` without `simd128` | The subject is gone: `lane` refuses the build, and the refusal row fails if it ever compiles again. All 18 still compile for `wasm32` with `simd128`: `host-web`'s closure (16 of them) in `artifact`, and `target-smoke` and `protocol` in the `wasm-guests` probe. |
+| `wasm-guests`: `check-wasm-realtime-atomics.sh` and its test | no `atomic.` opcode in the scalar non-LTO `engine`, `source` and `target-smoke` objects, and no `atomics` target feature | `check-web-audioworklet.sh` in `artifact-gates`, on the shipped module, which links `engine` and `source`: no atomic opcode, no import, no shared memory. `--self-test-opcodes` seeds an `i32.atomic.load` and a `memory.atomic.notify`, and both fail. `target-smoke` ships in no artifact. |
+| `wasm-guests`: the scalar evidence-crate check | `dsp-reference` and `conformance` compile for `wasm32` | The same step's `simd128` line, unchanged. |
+| `wasm-guests`: the scalar variant of `check-protocol-wasm-parity.sh` | the conformance guest computes `COMPLETE_SCHEMA_HASH` under `wasm32` | The `simd128` variant: the same guest and the same corpus. Natively, the `conformance_corpus` test runs on x86 and in `aarch64-debug`. The script's `--self-test` now rebuilds at `simd128`. |
+| `wasm-guests`: G5's scalar guest in `run-wasm-gates.sh` | the corpus at `f32`, `Simd4` and `Simd8` under `wasm32` with `wide`'s scalar-array lowering; the max/min, `f64`-lane and meter-block counts; detector residency | The `simd128` guest digests every case at all three widths, holds every count to zero and checks detector residency, the `f32`-width limiter included. `g5_native_digests_match_pins` runs on x86 (`test-release`) and on arm64 (`aarch64-release`). The portable max/min arm, the LANE-3 source phones run, runs natively on arm64 in that test and in `lane`'s G1. `wide`'s scalar-array fallback is no longer compiled for any accepted target. |
+| `cross-target`: the scalar rows of `check-cross-targets.sh` | `parametric-eq`, `builtins`, `builtins-compiler`, `effect-compiler` and `conformance` compile for `wasm32` without `simd128` | The same rows at `simd128`, unchanged. |
 
 ## Dispatch contract
 
@@ -54,15 +53,15 @@ at a named panic in `builtins-compiler`.
 capability struct: `engine::target_capabilities()`, `TargetCapabilities` and
 `KernelBackendV1` were deleted together with `crates/engine/src/arch`.
 `lane::Backend::current()` is a compile-time constant (`Simd8` on `x86-64-v3`, `Simd4`
-on AArch64 and on a wasm artifact built with `simd128`, and `Scalar` only under the scalar-wasm
-CI exception above, since every other target fails to compile), and
+on AArch64 and on a wasm artifact built with `simd128`; no target selects `Scalar`, since every
+other target fails to compile), and
 `lane::attest_host()` refuses at boot on an x86 CPU that lacks the pinned AVX2/FMA
 rather than degrading silently. `effect_contract::BankWidth::for_backend` is the
 workspace's single backend-to-width law.
 
 **The whole-plan scalar backend is a test-only oracle** (owner ruling 2026-09-28, decision 3;
-#1059). `lane::Backend::Scalar` exists only with `lane/test-support` (and on the scalar-wasm
-exception), and the per-node strip lowering, its scalar pair owners and the graph's scalar
+#1059). `lane::Backend::Scalar` exists only with `lane/test-support`, and the per-node strip
+lowering, its scalar pair owners and the graph's scalar
 pairing passes compile only for tests and the `test-support` features. Tests compile a plan at
 `Scalar` to prove that banking never moves a rendered bit. `scripts/check-scalar-oracle-absent.py`
 fails if the shipped AudioWorklet module or a release `capi` library contains any of it. The
@@ -84,11 +83,7 @@ cargo check --locked --workspace --all-targets
 # The shipped browser artifact (W4-D1), into an existing empty directory.
 bash scripts/build-web-audioworklet.sh <output-dir>
 
-# Compile checks for the browser crates: the scalar-wasm CI exception, then simd128.
-CARGO_TARGET_DIR=target/ci/wasm-scalar RUSTFLAGS="-C target-feature=-simd128" \
-  cargo build --locked --release --target wasm32-unknown-unknown \
-  -p engine -p session -p protocol \
-  -p target-smoke -p host-web
+# Compile check for the browser crates, at simd128 (a build without it is refused, #1062).
 CARGO_TARGET_DIR=target/ci/wasm-simd RUSTFLAGS="-C target-feature=+simd128" \
   cargo build --locked --release --target wasm32-unknown-unknown \
   -p engine -p session -p protocol \

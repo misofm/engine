@@ -1,4 +1,4 @@
-//! Scalar/SIMD Wasm executable conformance runner; it exports no control or C ABI.
+//! `simd128` Wasm executable conformance runner; it exports no control or C ABI.
 //!
 //! `main` is a wasm-interp entry point only, and it reports its verdict as a **returned value**
 //! rather than as a panic. `wasm-interp` exits 0 even when the guest traps, so a gate that only

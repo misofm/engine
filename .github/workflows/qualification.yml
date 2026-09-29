@@ -807,16 +807,9 @@ jobs:
       # serializes between the two jobs (design deliverable B).
       - name: Build the wasmtime runner
         run: cargo build --locked --release -p wasm-gates
-      - name: Scalar Wasm build (lane's scalar wasm path)
-        run: |
-          CARGO_TARGET_DIR=target/ci/wasm-scalar RUSTFLAGS='-C target-feature=-simd128' cargo build --locked --release --target wasm32-unknown-unknown -p engine -p session -p effect-contract -p effect-compiler -p protocol -p target-smoke -p host-core -p host-web -p lane -p math -p builtins -p builtins-compiler -p effect-runtime -p gate-expander -p delay -p multiband-compressor -p parametric-eq -p soft-clip
-          ! rustc --print cfg --target wasm32-unknown-unknown -C target-feature=-simd128 | grep -qx 'target_feature="simd128"'
-      # The checker owns a fresh scalar NON-LTO child beneath this caller cache, so stale
-      # fat-LTO/SIMD objects from the eighteen-package build cannot enter its population.
-      - name: Browser-local realtime path has no atomic opcodes
-        run: |
-          bash scripts/test-wasm-realtime-atomics.sh
-          bash scripts/check-wasm-realtime-atomics.sh target/ci/wasm-scalar
+      # #1062 (owner ruling 2026-09-28, decision 7): the scalar (non-simd128) wasm build, its
+      # atomics inspection and its evidence-crate, protocol-parity and G5 legs are retired; lane
+      # refuses that build. docs/TARGET_MATRIX.md names the check that took over each claim.
       # SIMD128 18-package build deleted (design §6.3: host-web's simd128 closure is already built
       # by the artifact job); only the compile-probe claim over target-smoke/protocol survives.
       - name: SIMD128 compile probe (target-smoke and protocol)
@@ -825,12 +818,11 @@ jobs:
           rustc --print cfg --target wasm32-unknown-unknown -C target-feature=+simd128 | grep -qx 'target_feature="simd128"'
       - name: Evidence crates compile for Wasm (not an artifact)
         run: |
-          CARGO_TARGET_DIR=target/ci/wasm-scalar RUSTFLAGS='-C target-feature=-simd128' cargo check --locked --target wasm32-unknown-unknown -p dsp-reference -p conformance
           CARGO_TARGET_DIR=target/ci/wasm-simd RUSTFLAGS='-C target-feature=+simd128' cargo check --locked --target wasm32-unknown-unknown -p dsp-reference -p conformance
-      - name: Issue-005 scalar and SIMD protocol golden parity
+      - name: Issue-005 simd128 protocol golden parity
         run: bash scripts/check-protocol-wasm-parity.sh
-      # Gate G5's wasm legs: the frozen corpus (lane cases and every delegated family's pins)
-      # replayed under wasmtime with and without simd128, plus the detector-residency and f64-lane
+      # Gate G5's wasm leg: the frozen corpus (lane cases and every delegated family's pins)
+      # replayed under wasmtime with simd128, plus the detector-residency and f64-lane
       # lowering pins. `--without-native` (#1048): the native leg is the Rust test
       # `g5_native_digests_match_pins` in `test-release`, in the shipping profile, so it is not run a
       # second time here. `--without-v8-spill` (#1009): the script's V8 spill leg runs in

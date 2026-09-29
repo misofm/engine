@@ -58,8 +58,9 @@ check_clock_policy() {
 
 # Owner decision W4-D1 (#83): exactly one artifact ships and it is built with `+simd128`. The
 # scalar artifact and the dual-artifact selection are gone, so this file no longer has a
-# "scalar must contain no vector opcode" leg; the wasm-scalar *cargo check* stays in CI because
-# `lane`'s scalar wasm path is still gated, it is just not shipped.
+# "scalar must contain no vector opcode" leg. No scalar wasm build is left at all: `lane` refuses
+# wasm32 without `simd128` at compile time (issue #1062), and this file's atomics, import and
+# shared-memory checks on the shipped module took over the retired scalar atomics inspection.
 check_opcode_policy() {
   local simd_text=$1
   grep -q 'f32x4.mul' <<<"$simd_text" || return 1

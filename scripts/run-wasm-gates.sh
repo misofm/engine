@@ -3,11 +3,14 @@
 # host and inside a WebAssembly module, and the `math` M3 and `effect-runtime` D1 pins replay
 # under wasm.
 #
-# Three legs, one corpus (tools/wasm-gate-corpus):
+# Two legs, one corpus (tools/wasm-gate-corpus):
 #   native   -- run in this process at Scalar, Simd4 and Simd8.
-#   wasm     -- the same crate built for wasm32-unknown-unknown without simd128 (backend scalar).
-#   wasm+simd128 -- and with it (backend simd4), which is the only place the v128 software FMA of
-#                   master plan §3.5 is actually executed.
+#   wasm+simd128 -- the same crate built for wasm32-unknown-unknown with simd128 (backend simd4),
+#                   the one wasm build that ships (W4-D1), at every width too.
+#
+# There is no scalar (non-`simd128`) wasm leg: owner ruling 2026-09-28, decision 7, retired it
+# with #1062 once #1017's AArch64 legs ran G5 natively on arm64, and `lane` now refuses that
+# build at compile time. What it used to check is covered as `docs/TARGET_MATRIX.md` says.
 #
 # `--without-native` leaves the native leg out (issue #1048). CI passes it in `wasm-guests`,
 # because `test-release` runs the same comparison as the Rust test `g5_native_digests_match_pins`
@@ -81,13 +84,16 @@ run_guest() {
 # are the signature of the regression and of nothing else: the other copies a limiter block makes
 # -- the `BankProcessReport` at `process_bank`'s exit, a state payload buffer -- are other sizes.
 # The sizes are derived, not guessed: one lane is 4 bytes at `Lane = f32`, 16 at `Simd4` and 32 at
-# the wasm `Simd8` (two v128 halves), and `HISTORY_WORDS` is 12.
+# the wasm `Simd8` (two v128 halves), and `HISTORY_WORDS` is 12. The guest digests every case at
+# all three widths, so its one build holds the limiter at each of those lane types.
 #
 # `HotChannel::load` and `History::load`/`store` are excluded by name, and only they. Those are
 # the once-per-block gather and scatter of the whole hot state; moving twelve words as a unit
 # there is the intended shape, and whether the backend emits it as a block move is a decision
 # about one copy per block rather than one per frame. Deleting the exclusion is how you check the
-# pin is still wired to something: with it gone, the scalar and Simd8 legs go red on those.
+# pin is still wired to something: with it gone, the `simd128` guest goes red on its `Simd8`
+# `HotChannel::load` (a 384-byte copy; measured at #1062, where the retired scalar guest went red on
+# its `f32` one as well).
 readonly HISTORY_SHIFT_SIZES="44 48 176 192 352 384"
 
 check_detector_residency() {
@@ -115,7 +121,7 @@ check_detector_residency() {
 # confined to two files -- so the packed `f64x2.promote_low_f32x4` is a codegen outcome of the
 # release profile's fat LTO, not a spelling. Correctness never depends on it (a scalarised widen is
 # the same conversion per lane, with the same bits, and the f64_lane_mismatches count above holds
-# both guest legs to that), but the reason the vocabulary exists is to stop doing this arithmetic
+# every leg to that), but the reason the vocabulary exists is to stop doing this arithmetic
 # one lane at a time. So the census is taken over the body of each exported probe, and each must
 # contain `f64x2.promote_low_f32x4`, `f64x2.mul` and `f64x2.add`, and none of the scalar
 # `f64.promote_f32`, `f64.mul` or `f64.add`:
@@ -128,9 +134,7 @@ check_detector_residency() {
 #                                peak and counts stay `f32x4` too.
 #
 # The graph's own pass is reached through `call_indirect` in the AudioWorklet artifact, so no other
-# required gate reads its instructions; the second probe is the pin on the kernel it runs. The
-# simd128 leg only: without simd128, `wide`'s `f64x2` is an array and scalar code is the correct
-# lowering.
+# required gate reads its instructions; the second probe is the pin on the kernel it runs.
 census_f64_probe() {
     local module="$1" probe="$2"
     wasm-objdump -d "$module" | awk -v probe="<$probe>:" '
@@ -214,18 +218,15 @@ command -v wasm-objdump >/dev/null 2>&1 || {
     exit 1
 }
 
-run_guest scalar -simd128 scalar
 run_guest simd128 +simd128 simd4
 
-for leg in scalar simd128; do
-    check_detector_residency "target/ci/wasm-gates-$leg/$TARGET/release/$GUEST" "$leg"
-done
-printf 'wasm gates: detector history resident in locals on both guest legs\n'
+check_detector_residency "target/ci/wasm-gates-simd128/$TARGET/release/$GUEST" simd128
+printf 'wasm gates: detector history resident in locals on the simd128 guest\n'
 check_f64_lane_lowering "target/ci/wasm-gates-simd128/$TARGET/release/$GUEST"
 if ((native)); then
-    legs="native + wasm scalar + wasm simd128"
+    legs="native + wasm simd128"
 else
-    legs="wasm scalar + wasm simd128; native left out (--without-native)"
+    legs="wasm simd128; native left out (--without-native)"
 fi
 if ((v8_spill)); then
     check_v8_spill

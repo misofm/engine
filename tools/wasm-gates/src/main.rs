@@ -2,12 +2,12 @@
 //!
 //! ```text
 //! wasm_gates --native
-//! wasm_gates <guest.wasm> --expect-backend scalar|simd4|simd8
+//! wasm_gates <guest.wasm> --expect-backend simd4|simd8
 //! wasm_gates --print-pins
 //! ```
 //!
 //! Each run prints one JSON evidence line and exits non-zero on the first mismatch.
-//! `scripts/run-wasm-gates.sh` builds both guest artifacts and runs all three legs.
+//! `scripts/run-wasm-gates.sh` builds the `simd128` guest and runs both legs.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -20,7 +20,7 @@ use wasm_gates::{
 /// Usage text, printed on an argument error.
 const USAGE: &str = "usage:\n  \
      wasm_gates --native\n  \
-     wasm_gates <guest.wasm> --expect-backend scalar|simd4|simd8\n  \
+     wasm_gates <guest.wasm> --expect-backend simd4|simd8\n  \
      wasm_gates --print-pins";
 
 fn main() -> ExitCode {
