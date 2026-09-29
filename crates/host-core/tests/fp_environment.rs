@@ -128,7 +128,7 @@ fn a_started_session_hands_the_plan_back_when_it_stops() {
 
 /// The caller words each arm installs, for the two targets with a control word to pin: MXCSR on
 /// `x86_64` and FPCR on AArch64 (issue #1017: iOS and Android arm64 run the FPCR path).
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 mod word {
     use lane::softfma::{MXCSR_DAZ, MXCSR_FTZ};
 
@@ -174,7 +174,7 @@ mod word {
     }
 }
 
-#[cfg(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 mod pinned {
     use super::{
         BLOCKS, PreparedRenderPlan, QUANTUM, SourceControlSet, StartedRenderSession, prepare,

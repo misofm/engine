@@ -70,23 +70,20 @@ pub fn unfused_multiply_add_via_f64(a: f32, b: f32, c: f32) -> f32 {
 }
 
 /// MXCSR flush-to-zero bit (`FTZ`): denormal results become zero.
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 pub const MXCSR_FTZ: u32 = 0x8000;
 
 /// MXCSR denormals-are-zero bit (`DAZ`): denormal operands are treated as zero.
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 pub const MXCSR_DAZ: u32 = 0x0040;
 
 /// Reads the current thread's MXCSR control word.
 ///
 /// Gate G6 support, never called from a render path.
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 #[allow(deprecated)]
 #[must_use]
 pub fn read_mxcsr() -> u32 {
-    #[cfg(target_arch = "x86")]
-    use core::arch::x86::_mm_getcsr;
-    #[cfg(target_arch = "x86_64")]
     use core::arch::x86_64::_mm_getcsr;
     // SAFETY: `_mm_getcsr` reads a control register and is sound on any SSE host; SSE2 is baseline
     // on x86_64 and required by the crate's x86-64-v3 compile guard.
@@ -98,12 +95,9 @@ pub fn read_mxcsr() -> u32 {
 /// Gate G6 support, never called from a render path: FTZ and DAZ are *observed*, never relied on
 /// (D7). The write affects only the calling thread, so a test must restore the previous value
 /// before it returns.
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 #[allow(deprecated)]
 pub fn write_mxcsr(value: u32) {
-    #[cfg(target_arch = "x86")]
-    use core::arch::x86::_mm_setcsr;
-    #[cfg(target_arch = "x86_64")]
     use core::arch::x86_64::_mm_setcsr;
     // SAFETY: `_mm_setcsr` writes a control register and is sound on any SSE host. The value is a
     // control word previously read by `read_mxcsr` with at most the FTZ and DAZ bits changed, so no

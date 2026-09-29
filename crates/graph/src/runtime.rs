@@ -319,7 +319,7 @@ use crate::{
 /// of these kernels to a width-independent result, and gate G2 proves it, so the rendered bits do
 /// not depend on which arm of this `cfg` a target takes. There is no third arm: `lane` refuses to
 /// compile for every other target (issues #1041 and #1062).
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 pub(crate) type FrameLane = lane::Simd8;
 /// See [`FrameLane`].
 #[cfg(any(

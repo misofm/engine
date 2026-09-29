@@ -236,7 +236,7 @@ fn oracle_pcm_within_derived_tolerance_scalar() {
 
 #[test]
 #[cfg_attr(
-    not(any(target_arch = "x86", target_arch = "x86_64")),
+    not(target_arch = "x86_64"),
     ignore = "an eight-lane bank binds only on the eight-lane launch build (#1017)"
 )]
 fn oracle_pcm_within_derived_tolerance_w8() {

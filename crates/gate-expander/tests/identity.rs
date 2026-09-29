@@ -68,7 +68,7 @@ fn render_bank8(
 
 #[test]
 #[cfg_attr(
-    not(any(target_arch = "x86", target_arch = "x86_64")),
+    not(target_arch = "x86_64"),
     ignore = "an eight-lane bank binds only on the eight-lane launch build (#1017)"
 )]
 fn scalar_and_w8_are_bit_exact_for_all_link_modes_and_ramps() {
@@ -223,7 +223,7 @@ fn equal_input_is_dual_mono_and_zero_input_has_no_tail() {
 
 #[test]
 #[cfg_attr(
-    any(target_arch = "x86", target_arch = "x86_64"),
+    target_arch = "x86_64",
     ignore = "a four-lane bank binds only on a four-lane build; the AArch64 legs run it (#1017)"
 )]
 fn w4_binding_is_internal_lane_evidence_without_factory_width_claim() {

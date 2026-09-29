@@ -275,7 +275,7 @@ macro_rules! impl_lane_for_wide {
                 // x86: `maxps`/`vmaxps` is `SRC1 > SRC2 ? SRC1 : SRC2`, which is D8 exactly.
                 // The crate refuses to compile on x86 without `+avx2,+fma`, so both widths reach
                 // a single-instruction arm of `wide`'s `fast_max`.
-                #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+                #[cfg(target_arch = "x86_64")]
                 {
                     // LANE-OP-OK(fast_max): the unfixed-up `maxps`, equal to the D8 form for
                     // every ordered pair (module documentation); DAZ is pinned clear by `fpenv`.
@@ -291,7 +291,6 @@ macro_rules! impl_lane_for_wide {
                 // NEON has no instruction with this rule, and `wide`'s scalar-array fallback
                 // answers `a` on a tie where D8 answers `b`. Both keep the portable form.
                 #[cfg(not(any(
-                    target_arch = "x86",
                     target_arch = "x86_64",
                     all(target_arch = "wasm32", target_feature = "simd128")
                 )))]
@@ -303,7 +302,7 @@ macro_rules! impl_lane_for_wide {
             #[inline(always)]
             fn min(self, b: Self) -> Self {
                 // x86: `minps`/`vminps` is `SRC1 < SRC2 ? SRC1 : SRC2`, the mirror of `maxps`.
-                #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+                #[cfg(target_arch = "x86_64")]
                 {
                     // LANE-OP-OK(fast_min): the unfixed-up `minps`; see `max` above.
                     self.fast_min(b)
@@ -315,7 +314,6 @@ macro_rules! impl_lane_for_wide {
                     b.fast_min(self)
                 }
                 #[cfg(not(any(
-                    target_arch = "x86",
                     target_arch = "x86_64",
                     all(target_arch = "wasm32", target_feature = "simd128")
                 )))]

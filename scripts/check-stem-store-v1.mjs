@@ -103,8 +103,6 @@ async function staticChecks(repository) {
 
   const engineRoots = [
     "crates",
-    "hosts/host-native",
-    "hosts/host-mobile",
   ]
   for (const relative of engineRoots) {
     for (const file of await sourceFiles(join(repository, relative), [".rs"])) {

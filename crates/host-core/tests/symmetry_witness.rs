@@ -468,7 +468,7 @@ fn a_prepare_time_bypass_seeds_the_unbypassed_term_before_any_render() {
 /// `ConsoleEffect` arm -> the parameter half of this test fails and every banked test stays green.
 #[test]
 #[cfg_attr(
-    not(any(target_arch = "x86", target_arch = "x86_64")),
+    not(target_arch = "x86_64"),
     ignore = "a four-lane bank takes a cohort of two, so this fixture reaches the per-node arm only \
               at the eight-lane launch width (#1017)"
 )]

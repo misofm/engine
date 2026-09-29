@@ -314,7 +314,7 @@ fn causal_processing_starts_at_sample_zero() {
 fn bank_fallback_never_hides_malformed_or_incompatible_requests() {
     let factory = CompressorFactory;
     // A width this build cannot run, chosen so the fallback path is the one under test.
-    let (backend, width) = if cfg!(any(target_arch = "x86", target_arch = "x86_64")) {
+    let (backend, width) = if cfg!(target_arch = "x86_64") {
         (Backend::Simd4, BankWidth::Four)
     } else {
         (Backend::Simd8, BankWidth::Eight)

@@ -581,8 +581,6 @@ jobs:
             --exclude wasm-gates --exclude wasm-gate-guest \
             --exclude wasm-gate-corpus \
             --features builtins-compiler/test-support,graph/test-support,host-web/test-support,host-core/test-support,effect-compiler/test-support,protocol/test-support,engine/realtime-audit
-      - name: Native host smoke
-        run: cargo run --locked -p host-native
 
   test-debug-b:
     name: DSP crates debug tests

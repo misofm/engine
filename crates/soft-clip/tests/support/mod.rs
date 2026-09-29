@@ -106,7 +106,7 @@ pub fn bank_available(width: BankWidth) -> bool {
             target_arch = "aarch64",
             all(target_arch = "wasm32", target_feature = "simd128")
         )),
-        BankWidth::Eight => cfg!(any(target_arch = "x86", target_arch = "x86_64")),
+        BankWidth::Eight => cfg!(target_arch = "x86_64"),
     }
 }
 

@@ -74,7 +74,7 @@ extern crate std;
 // `.cargo/config.toml`, and `RUSTDOCFLAGS` on the command line replaces any `rustdocflags` set
 // there. Documentation is not a build artefact, so the guard has nothing to protect in that pass.
 #[cfg(all(
-    any(target_arch = "x86", target_arch = "x86_64"),
+    target_arch = "x86_64",
     not(all(target_feature = "avx2", target_feature = "fma")),
     not(doc)
 ))]
