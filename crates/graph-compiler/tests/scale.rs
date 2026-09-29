@@ -505,6 +505,88 @@ fn a_hand_built_65_537_track_plan_attaches_builtin_banks_binds_and_renders() {
     bind_and_render_every_track(plan, inputs);
 }
 
+/// Issue #1045: builtin bank lowering above 65,536 tracks, per PR, at the bank width this build
+/// renders at (Sol's attempt-4 check).
+///
+/// `compile_with_builtins` hands its graph to the public
+/// [`builtins_compiler::PreparedBuiltinsSession::into_graph_artifact_with_banks`], which builds
+/// every input, fader and matrix bank and attaches them. The constrained compile above refuses
+/// before that, and the hand-built tests attach banks of their own, so this lowers the scale
+/// session's prepared builtins onto a hand-built strip plan (input, post-input, fader, matrix,
+/// output per track) and counts what it banked. A ceiling in lowering refuses or panics, and a
+/// silent fallback that banks nothing, or fewer tracks, changes the counts. It runs beside the
+/// compile above; bind and render at this size are the other hand-built tests'.
+#[test]
+fn lowers_65_537_tracks_of_builtin_banks() {
+    let session = scale_session();
+    let builtins = prepare_session_builtins(&session, &[], builtin_caps()).expect("scale builtins");
+    let classes = builtins_compiler::SessionPoolClasses::from_session(&session);
+    let backend = Backend::current();
+    let lanes = BankWidth::for_backend(backend)
+        .expect("native builds render in banks")
+        .lanes() as usize;
+    let inputs = track_stages(TrackStage::Input);
+    let strip: Vec<Vec<GraphNodeId>> = [
+        TrackStage::PostInputBuiltins,
+        TrackStage::PostFader,
+        TrackStage::PostMatrix,
+    ]
+    .into_iter()
+    .map(track_stages)
+    .collect();
+    let output = GraphNodeId::Output {
+        output_id: stable("main".to_owned()),
+    };
+    let mut edges = Vec::with_capacity(4 * TRACKS as usize);
+    for (index, input) in inputs.iter().enumerate() {
+        let mut previous = input;
+        for level in &strip {
+            edges.push(edge(
+                GraphEdgeId::TrackMain {
+                    target: level[index].clone(),
+                },
+                previous,
+                &level[index],
+            ));
+            previous = &level[index];
+        }
+        let GraphNodeId::TrackStage { track_id, .. } = previous else {
+            unreachable!("track stages")
+        };
+        edges.push(edge(
+            GraphEdgeId::RouteSource {
+                route_id: stable(format!("route-{}", track_id.as_str())),
+            },
+            previous,
+            &output,
+        ));
+    }
+    let mut levels = vec![inputs];
+    levels.extend(strip);
+    levels.push(vec![output]);
+    let mut required: Vec<GraphNodeId> = levels.iter().flatten().cloned().collect();
+    required.sort();
+    let dependency_levels: Vec<DependencyLevel> = levels
+        .iter()
+        .cloned()
+        .zip(0..)
+        .map(|(nodes, level)| DependencyLevel { level, nodes })
+        .collect();
+    let plan = hand_built_plan(levels, edges, required, Vec::new());
+    let artifact =
+        builtins.into_graph_artifact_with_banks(plan, (), backend, &dependency_levels, &classes);
+    assert_eq!(
+        artifact.prepared_builtin_bank_count(),
+        3 * (TRACKS as usize).div_ceil(lanes),
+        "every track's input, fader and matrix stages are lowered into banks"
+    );
+    assert_eq!(
+        artifact.graph().builtin_bank_members().count(),
+        3 * TRACKS as usize,
+        "every bankable stage of every track is a bank member"
+    );
+}
+
 /// Issue #962: the same session through the production entry, at the width this build renders at,
 /// then bound and rendered for one block.
 ///

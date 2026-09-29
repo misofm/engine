@@ -1189,3 +1189,158 @@ To make attempt 5 mechanical:
 - **The lowering test finding 1 asks for** would catch a cap, or a silent fallback that skips
   banking, in builtin bank lowering above 65,535 tracks (LOWER_PANIC, LOWER_SILENT). Nothing else
   per PR lowers banks at this size.
+
+## Attempt 5 evidence
+
+Terra, 2026-09-29, on `codex/1045-scale-tests-nightly` at `f1a5a06d`. No new merge: Sol's
+attempt-4 check merged batch 4 (with #1075) cleanly. Same host and hygiene as before; load
+12-29.
+
+### What changed
+
+- **`lowers_65_537_tracks_of_builtin_banks`**, a new per-PR test in
+  `graph-compiler/tests/scale.rs`. It is Sol's probe from `verify-1045/a4/lowering-probe.diff`,
+  made a test: the `eprintln!` timing lines are dropped, and it gets a doc comment and assertion
+  messages.
+  - It prepares the scale session's builtins, as `:91` does.
+  - It builds a hand-built strip plan with the shared helpers. Each track is input → post-input →
+    fader → matrix, and each matrix sums into the output.
+  - It lowers the plan through the public
+    `into_graph_artifact_with_banks(plan, (), Backend::current(), levels, classes)`.
+  - It asserts `prepared_builtin_bank_count() == 3 × ceil(65,537 / lanes)`, and that
+    `graph().builtin_bank_members().count() == 3 × 65,537`.
+- **`MUTATIONS.md`:** rows 1045-17 and 1045-18. Lowering leaves the residual list, which now
+  points here for the full map.
+
+### Plants
+
+Each plant went into a scratch copy of this tree. I ran `cargo test -p graph-compiler --test scale`
+in debug, with test-debug-a's features, and restored the tree between plants. The unmutated tree
+was GREEN at the start, between every pair of plants, and at the end. LOWER_PANIC and LOWER_SILENT
+are Sol's plants, re-typed into my script.
+
+| # | planted defect | per PR |
+|---|---|---|
+| LOWER_PANIC (1045-17) | lowering asserts at most 65,535 tracks | **RED**, lowering test: `builtin bank lowering track limit`. **GREEN once reverted** |
+| LOWER_SILENT (1045-18) | above 65,535 tracks, lowering silently plans no banks | **RED**, lowering test: `every track's input, fader and matrix stages are lowered into banks`. **GREEN once reverted** |
+| PPLAN (re-check) | `plan_bank_groups` refuses more than 65,535 candidates | RED in `:91` and in the lowering test (`DuplicateId`) |
+| PRES (re-check) | `builtin_bank_resource` refuses more than 65,536 lanes | RED in `:91` and in the lowering test (`preflighted builtin-bank resource`) |
+
+### Cost, and whether it fits the runner
+
+All runs are debug, under the timing lock, at load 12-23. I discarded one earlier set of numbers
+(binary 25.1 s at 4 threads): my own plant builds were running at the time.
+
+| run | wall | CPU | peak RSS |
+|---|---:|---:|---:|
+| the lowering test, alone (three runs) | 13.5 s; 13.5 s; 14.2 s | 12.7-13.4 s | 0.82 GB |
+| `:91`, alone | 17.7 s | 16.8 s | 0.89 GB |
+| the banked test / the routed test, alone | 6.2 s / 3.5 s | 6.0 s / 3.3 s | 0.28 / 0.24 GB |
+| the binary, `--test-threads 4`, with the lowering test (twice) | 18.1 s; 18.2 s | 41.4 s; 39.7 s | **1.62 GB** |
+| the binary, `--test-threads 4`, without it (twice) | 17.6 s; 18.2 s | 26.3 s; 27.6 s | 0.91 GB |
+| the binary, default threads | 18.8 s | 40.0 s | 1.62 GB |
+
+- **Cost.** The lowering test adds about 13 s of CPU and 0-0.5 s of wall time to the `scale`
+  binary. The binary still finishes when `:91` does. That is within Sol's rule for "cheap".
+- **Memory: it fits.** The repository is public, so `test-debug-a` runs on GitHub's standard
+  4-vCPU / 16 GB `ubuntu-24.04` runner.
+  - The `scale` binary's 1.62 GB peak is its four tests running in parallel, measured at
+    `--test-threads 4`. That is the parallelism libtest uses on 4 vCPUs.
+  - `cargo test` runs one test binary at a time, so no other test binary shares that peak.
+  - The build finishes before any test binary runs.
+  - That leaves more than 14 GB of headroom.
+- **The three crates' suites** (graph-compiler, builtins-compiler and session, with test-debug-a's
+  features):
+
+  | profile | wall | CPU | tests |
+  |---|---:|---:|---|
+  | dev | 51.6 s | 194 s | 265 passed, 7 ignored |
+  | release | 11.3 s | 18.3 s | 265 passed, 7 ignored |
+
+  - In dev the `scale` binary took 17.1 s; in release, 4.1 s.
+  - This is one more passing test than attempt 4.
+
+### The final layer map (Sol's attempt-4 map, with lowering now held)
+
+**Terms.** "Per PR" means `test-debug-a`. That job is required through `qualification`'s verdict,
+and the router's `full` route covers every crate below.
+
+**"Cheap".** A test is cheap when it adds about a second or less to the `scale` binary's wall
+time, running beside `:91`, and costs at most about 15 s of debug CPU.
+
+| layer | status | by, or why |
+|---|---|---|
+| session parse (P1) | pre-existing gap | successor B |
+| session validate, estimate, canonical write, compile | per PR | `scale_transaction.rs`; `:91` (P2) |
+| builtin preparation | per PR | `:91` (P4, 1045-6, 1045-7) |
+| graph compile, front end (lowering to nodes and edges, node cap, cycle check) | per PR | `:91` (1045-1/-2/-3, P3a) |
+| graph compile, back end: `topo`, PDC `timings`, `buffer_assignments`, `ports_for`, rack cohorts, `resource_estimate`, `effect_control_resource`, `effect_bank_resource`, the graph's count-arithmetic helpers (`GraphRuntimeMetadataResourceEstimate`, `GraphBankSlotResourceEstimate`), the capped-estimate checks, `PreparedGraphPlan::new` on the real plan; P3b | nightly only (`:160`) | No public entry except the count helpers. Those take counts only this stage computes, so feeding them made-up counts tests arithmetic, not the pipeline. Running the stage costs the unconstrained compile, +11-23 s wall |
+| builtin bank plan (`graph_builtin_bank_resource` → `plan_bank_groups` → `builtin_bank_resource`) | per PR | `:91`'s check (PPLAN, PRES) |
+| **builtin bank lowering (`into_graph_artifact_with_banks`)** | **per PR (attempt 5)** | the lowering test (LOWER_PANIC, LOWER_SILENT; also PPLAN, PRES) |
+| bank attachment (`with_builtin_banks`) and the runtime's bank gather and scatter | per PR | the banked hand-built test (PBANK) |
+| `into_bound` prevalidation (P5b) | nightly only | Needs a lowered artifact and a real bind: +6 s wall beyond the lowering test. Its checks are set comparisons, with no count in them |
+| graph bind (`PreparedGraphPlan::bind`: lowering to the program, `preflight_sequential`, route fold, scatter redirects) and render | per PR | both hand-built tests (P5, P6, 1045-11) |
+| real builtin bank kernels rendering | nightly only | Each is bounded by the bank width; the runtime that iterates them is held per PR |
+| #962's quadratic compile and bind | nightly only | No reliable per-PR clock. `:160`'s 60 s bound was RED at 231 s and 451 s |
+| A2 (accounting through a `u16`) | nightly only | An under-count, not a cap. Needs the 65,537-track allocation tracker |
+| per-track session features: effects and effect controls, one route per track, sources and source-set bind, per-track observers and meters (observation-activation bind), sidechains | pre-existing gap | Never exercised at this size, even by the old `:160`. Successor: #967 |
+| console controls, sends and submixes, automation on every track | pre-existing gap | Not named anywhere. Add them to #967's shapes |
+| host-core preparation | pre-existing gap | successor A |
+| protocol session store edits, capi prepare, host-web boot (and the native and mobile shells over them) | pre-existing gap | successor B |
+
+### Successors (pre-existing gaps; root files or amends these)
+
+- **#967 (open), extended.** Exercise every per-track session feature at 65,537 tracks:
+  effects and effect controls, one route per track, sources and source-set bind, per-track
+  observers and meters, and sidechains, which #967 already names. Add console controls, sends
+  and submixes, and automation on every track.
+  - Also record there Sol's attempt-2 measurement: banks plus one route per track bind
+    super-linearly, 23 s in release at 65,537 tracks (attempt 3's evidence has the curve).
+- **A. Hold `host-core` preparation above 65,535 tracks per PR.**
+  - The test: prepare a compiled 65,537-track session through `prepare_host_runtime` with a
+    configured later refusal (`maximum_builtin_retained_bytes = 1`), and assert exactly
+    `builtin.resource.limit $.builtin_compile_caps`.
+  - Cost and place: 4.5 s in debug (`verify-1045/a3/probe_host_1045.rs`), in
+    `crates/host-core/tests/`.
+- **B. Hold document parse, the protocol session store, capi prepare and host-web boot above
+  65,535 tracks.** Nothing parses a document of this size at all. #1046 deleted
+  `session/tests/descriptive_scale.rs`, which was `#[ignore]`d and never scheduled anyway.
+  - A 65,537-track document is 93.7 MB and takes 19.3 s to parse in debug.
+  - So parse it once in a release-mode nightly gate, and drive each entry from that parse.
+- **Owner ruling, not a test gap.** The V1 protocol capability `maximum_telemetry_handles` is a
+  `u16` (`schema.rs` field 23).
+  - A V1 provider cannot advertise more than 65,535 meter handles, so one telemetry
+    configuration cannot meter more than 65,535 tracks.
+  - It is a sealed wire contract, and telemetry is noncritical, so this is a ruling rather than
+    a fix: the owner decides whether it is acceptable under the no-track-cap rule.
+
+### Gates re-run
+
+- **Build checks.** `cargo fmt --all --check`, `cargo check --workspace --all-targets
+  --all-features` and `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+  all pass, with no warnings.
+- **Tests.** The three crates pass in dev and in release (above).
+- **Policy scripts.** 54 runs, all pass.
+  - That is every `scripts/check-*`, with the Python ones under `python3 -B`. The ones that need
+    an argument ran with `--self-test`, and the V8 spill check with `--check-toolchain`.
+  - It also covers `test-workspace-policy.sh`, `test-ci-path-routing.py` and
+    `test-graph-policy.sh`.
+  - It includes `check-workspace-policy.sh`, with #1052's lint, and `check-graph-determinism.sh`.
+  - Not run: `check-sdk-types.sh` (there is no `sdk/node_modules` here) and
+    `check-web-boot-budget.mjs` (it needs a built module).
+- **Not re-run.** I did not re-run the nightly commands, the mutation passes or the #966/#970
+  reverts. Product code, `nightly.yml` and the nightly tests are unchanged since attempt 2.
+  Sol re-ran the nightly commands on the batch-4 merge: `:160` took 17.7 s against its 60 s
+  bound.
+
+### Test value
+
+The lowering test catches a ceiling in builtin bank lowering above 65,535 tracks, or a silent
+fallback that banks fewer tracks than that (LOWER_PANIC, LOWER_SILENT). Nothing else per PR
+lowers banks at this size.
+
+### Lines
+
+- Attempt 5: `scale.rs` +82, `MUTATIONS.md` +10/−5, and this spec.
+- The whole branch against `main` (`a8955ad4`), counting code, workflow and scripts only:
+  +554/−53. Of that, `graph-compiler/tests/scale.rs` is +502/−40.

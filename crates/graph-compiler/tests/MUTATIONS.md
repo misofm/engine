@@ -303,7 +303,9 @@ the compiler's builtin banks for its prepared builtins (attempt 4), and adds `a_
 hand-built plan of 65,537 routed track inputs (attempt 2), and
 `a_hand_built_65_537_track_plan_attaches_builtin_banks_binds_and_renders`, which attaches 65,537
 post-input stages as builtin banks through `with_builtin_banks` at `Backend::current()`'s width,
-then binds and renders (attempt 3).
+then binds and renders (attempt 3), and `lowers_65_537_tracks_of_builtin_banks`, which lowers the
+scale session's prepared builtins onto a hand-built strip plan through
+`into_graph_artifact_with_banks` (attempt 5).
 `compiles_and_binds_65_537_tracks_with_builtins` runs nightly in `release-budgets`, in release with
 overflow checks and a 60 s bound. Each row was applied to a scratch copy of the change, the named
 command run and the tree restored. Host: `x86_64` (`x86-64-v3`, eight-lane banks), rustc 1.97.1,
@@ -329,9 +331,12 @@ command run and the tree restored. Host: `x86_64` (`x86-64-v3`, eight-lane banks
 | 1045-14 (Sol's PPLAN) | the cohort planner `plan_bank_groups` refuses more than 65,535 candidates | `rack-compiler/src/lib.rs` | RED: `:91`'s bank plan, `one node per track per stage, so ids are unique: DuplicateId`. GREEN unmutated, before and after | RED (Sol) |
 | 1045-15 (Sol's PRES) | `builtin_bank_resource` refuses more than 65,536 lanes | `builtins-compiler/src/lib.rs` | RED: `:91`, `the builtin bank plan at 65,537 tracks`. GREEN unmutated | RED (Sol) |
 | 1045-16 | `builtin_bank_resource` counts its banks through a `u16` | as 1045-15 | GREEN, and not a ceiling at this size: 3 × 8,193 banks fit in 16 bits. Discarded | not run |
+| 1045-17 (Sol's LOWER_PANIC) | builtin bank lowering asserts at most 65,535 tracks (`into_graph_artifact_with_banks`) | `builtins-compiler/src/lib.rs` | RED: the lowering test, `builtin bank lowering track limit`. GREEN unmutated, before and after | RED (Sol) |
+| 1045-18 (Sol's LOWER_SILENT) | above 65,535 tracks, lowering silently plans no banks | as 1045-17 | RED: the lowering test's bank count. GREEN unmutated | RED (Sol): bank member count 0 |
 
 Still nightly only, at most a day late (the issue's accepted residual): the graph compile's back
-end and a ceiling that copies the node cap's code *and* path (Sol's P3b), builtin bank lowering and
-`into_bound` (1045-4, Sol's P5b), and #962's quadratic compile and bind (1045-5). Each needs the
-unconstrained compile, 28-40 s plus 13-17 s of bind in debug. Bank attachment left this list in
-attempt 3 (1045-12), the compiler's builtin bank plan in attempt 4 (1045-14, 1045-15).
+end and a ceiling that copies the node cap's code *and* path (Sol's P3b), `into_bound`
+prevalidation (1045-4, Sol's P5b), the real builtin bank kernels rendering at this size, and #962's
+quadratic compile and bind (1045-5). Bank attachment left this list in attempt 3 (1045-12), the
+compiler's builtin bank plan in attempt 4 (1045-14, 1045-15), builtin bank lowering in attempt 5
+(1045-17, 1045-18). The spec's attempt-5 evidence carries the complete layer map.
