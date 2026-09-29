@@ -215,3 +215,124 @@ Self-test wall time, base → candidate:
 - `hosts/host-web/tests/browser-v1/index.html` (4 lines) was served only by the deleted harness.
 - `browser-v1/browser-correctness.js` is now run by no browser. It is still read by `check-browser-expected-resources.py`.
 - `docs/rulings/de-versioning-inventory.md:108` still says the render contract keeps the delta-bank spellings. It is a dated inventory, left as history.
+
+## Sol verdict, attempt 1
+
+**PASS.** Every removed rule either guards a feature that no longer exists or is covered by a check
+that survives. No live script, trigger list or router entry was deleted. Every gate is green on the
+merged tree. The findings below are LOW or informational and none needs another attempt.
+
+Reviewer: Sol, 2026-09-29. I merged `9fca5c05` into a scratch detached checkout of batch head
+`codex/batch-slim-4` `93105e18` (main plus #1060 and the specs). The merge was clean and had no
+semantic conflict:
+- #1060 rewrote `check-browser-expected-resources.py`.
+- On the merge, `--artifacts` still runs `direct-oracle.mjs` and passes, and its self-test catches
+  32 red mutations. This spec's claim that the check subsumes the harness's `--check` still holds.
+
+No timed workload was run.
+
+### Findings, by severity
+
+1. **LOW: the `nudge` evidence overstates its cover.** The evidence says the metadata wire key is
+   "the one position" where `nudge` could come back as a name. It is not the only one. I planted
+   the word at each position the old gate policed:
+
+   | position | what refuses it now |
+   |---|---|
+   | parameter metadata: top level, effect, effect row, builtin row, step object, `step` renamed | `check-parameter-metadata-v1.py`. All 6 are red, because every object has a closed key set. |
+   | session document: root, track, fader, effect, effect param, automation row | The parser itself: `UnknownField $.….nudge` at all 6 (scratch test in `crates/session/tests/`) |
+   | SDK: `export function nudge(…)` in `core/lattice.ts`, re-exported from `src/index.ts` | **Nothing.** `check-sdk-deletions.py` and `tsc` are both green. Only the deleted gate catches it. |
+   | Rust identifier (`NudgeLadder`), prose, specs | Nothing. Only the deleted gate catches it. |
+
+   **Why this is not a FAIL.**
+   - The contract surfaces refuse the word by structure, not by spelling: the metadata document and
+     the session document above, and the control protocol, which carries numeric IDs.
+   - What is lost is naming discipline on SDK and Rust identifiers. That is #242's vocabulary
+     ruling, not a behavioural claim.
+   - Amendment 2 directs this removal explicitly.
+
+   If the owner wants the SDK identifier surface held, one identifier regex in the kept
+   `check-sdk-deletions.py` would do it. It runs with comments blanked.
+
+2. **LOW: pins that only the WebDriver harness held, and that no workflow ever ran.**
+   - The harness never ran in any workflow. Its runner needs a chromedriver that no workflow
+     provides.
+   - The only thing CI ran was `--self-test-webdriver-responses`, and `main()` returns from that
+     before `load_inputs`.
+
+   Where each claim the harness made now lives:
+
+   | claim | surviving check |
+   |---|---|
+   | exact artifact set | `check-web-audioworklet.sh:161-163` |
+   | raw-Wasm to native digest parity, all 3 legs; observation invariants | `check-browser-expected-resources.py --artifacts`, which runs `direct-oracle.mjs`; that script asserts the native digests and the invariants itself, at `:565-628` |
+   | browser PCM equals the native pin in two fresh contexts, simd128 boot | Playwright gates `native-corpus-digest` and `AudioWorklet-boot` (`run.mjs:137-141`), in 3 browsers |
+   | ack and backpressure transcript, ownership return | `test-web-audioworklet.mjs:1279-1290` and `:1628-1644` (hermetic, not a real browser) |
+   | positive-zero silence; `miso.error.v1` on failure | `test-web-audioworklet.mjs:2814-2835` and `:2890-2896` (hermetic) |
+   | resources, status, no memory growth | exact and ceiling rows in `check-browser-expected-resources.py`; `direct-oracle.mjs:443,526` |
+   | `content` BLAKE3 identities of the three `tests/browser-v1` session documents; hard-coded command application samples | **none** (none in CI before this change either) |
+
+   The last row loses its only reader. `docs/derivations/241-browser-source-identities.md:196` still
+   names the deleted script as that pin.
+
+   **Suggested successor:** extend `qualification/session-identities.mjs`, which already derives the
+   qualification documents' identities, to the three `browser-v1` documents.
+
+3. **INFO: softfma rule 6 was fully redundant.**
+   - I planted `pub fn fma_f32_via_f64(…)` in `crates/lane/src/softfma.rs`.
+   - Rule 3 refuses it: "fused multiply-add in crates/lane/src/softfma.rs". Its `call_pattern`
+     matches the definition's `name(` too.
+   - A `mul_add` seed in `crates/compressor` is still red.
+
+4. **INFO: the other retired features are gone.**
+   - **Delta-bank names.** They have 0 code occurrences. A planted `pub struct
+     PreparedDeltaBankKernelV1;` now passes, as intended.
+   - **TOML sessions.** The parser refuses a TOML session with `JsonSyntax`. No product crate or SDK
+     file has a TOML session entry point, and `check-session-policy.sh` still refuses `toml` and
+     `serde` in `crates/session`.
+   - **SDK spellings.** None of the sentenced spellings is in SDK code. The per-source fields and a
+     `limits` root key are refused by the strict parser. `ErrorPhase` types `phase`
+     (`errors.ts:73,89`), so `tsc` refuses a retired phase.
+   - **Kept numeric-offset rule.** It still fires on `view.getUint32(24, true)` in `abi.ts`.
+   - **Dropped `find`/`sort` counter-mutants.** `test-gate-lib.sh:278-286` still covers them.
+
+5. **INFO: two small out-of-scope edits and three stale references.**
+   - The `clippy.toml` edit and the `qualification.yml:245` comment edit are outside the authorized
+     paths. Both are comment corrections that follow from the removals, and I accept them.
+   - `crates/graph-compiler/Cargo.toml:31` was already stale before this change. It names
+     `softfma::fma_f32_via_f64` as the oracle; the oracle is now `unfused_multiply_add_via_f64`.
+   - `hosts/host-web/tests/browser-v1/index.html` is now dead, as the evidence says.
+
+### Deleted names in the merged tree
+
+- **Removed scripts and env rows.** `web-audioworklet-browser-correctness`, `run-…`,
+  `check-step-vocabulary`, `session-policy-historical-allowlist`, `MISO_ENGINE_CHROMIUM_BINARY`,
+  `MISO_ENGINE_CHROMEDRIVER_BINARY` and `--self-test-webdriver-responses` are gone from every
+  workflow, script, `package.json`, router table and #1043 `SELF_TEST_INPUTS` key.
+- **What still names them.** Only dated records: audits, derivations 241, 242 and 281, the
+  `qualification.yml:292` history comment, and specs.
+
+### Gates on the merge, all exit 0
+
+- **Routing.** `test-ci-path-routing.py` and `check-ci-path-routing.py`.
+- **actionlint.** 1.7.12 over every workflow.
+- **Script reachability.** `check-script-reachability.py` and `test-script-reachability.py`.
+- **Env vocabulary.** `check-env-vocabulary.sh` and `test-env-vocabulary.sh`.
+- **The `lint` job's hermetic policy commands, 58 in all:**
+  - workspace, session, bench, test-support, host-core, protocol-control, realtime, the two leak
+    checks, lane, rack, builtins, graph and effect-runtime, each with its self-test;
+  - the unfused seal and its self-test (57 cases);
+  - conformance boundaries, EQ render contract, release shape, npm publish modes and gate-lib;
+  - DSP research, parameter-metadata self-test, command kind and reason vocabularies;
+  - `test-web-audioworklet.mjs` and `test-web-audioworklet.sh`.
+- **Web artifact gates.** `check-web-audioworklet.sh` and `check-browser-expected-resources.py
+  --artifacts`, over a fresh `build-web-audioworklet.sh` build.
+- **SDK.** `npm ci`, then:
+  - `check-sdk-generated.sh`;
+  - `check-sdk-deletions.py` and its self-test (5 mutations, 1 comment admitted);
+  - `check-sdk-types.sh`;
+  - `check-sdk-headless.sh` (285 of 285);
+  - `sdk-package.sh check`.
+
+I did not re-run the four `check-workspace-policy.sh` seeds. That file is untouched, and its gate and
+mutation suite are green above.
