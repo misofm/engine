@@ -118,3 +118,76 @@ Both were added for the session, conformance and protocol subjects that #1039 an
 retired. They are candidates for a small follow-up. The provenance note in
 `tools/bench-support/src/alloc.rs:10` ("the protocol audit/bench thread-local counter") is
 historical and was left as it is.
+
+## Sol verdict, attempt 1
+
+**PASS.** Nothing live was retired, no product claim was lost, the ratchets shrank honestly, and
+every gate is green on the merge.
+
+**Merge.** `3c4f1827` merges cleanly into `codex/batch-slim-4` at `3a2782f1` (scratch merge
+`a08c6779`). #1050, #1047 and #1044 were already in this branch's base `e35318d7`. The only batch
+commit since then is #1046 (and a docs commit), and it touches nothing here. The one semantic
+difference is that `bench` has 12 unit tests on the merge, not 13, because #1046 removed one.
+
+**Gates on the merge, all green.**
+- `cargo check --locked --workspace --all-targets --all-features`, clippy with `-D warnings`, and
+  fmt.
+- `RUSTDOCFLAGS='-D warnings' cargo doc`, and the release check under
+  `CARGO_PROFILE_RELEASE_PANIC=unwind`.
+- `cargo test -p bench -p protocol`: bench 12, protocol 126 + 1 + 3.
+- The audit-native release tests for `audit`, `bench` and `console-workload`: 107 passed, 0 failed.
+- `check-cross-targets.sh`, including the AArch64 rows, the #1018 expected failures, and the wasm
+  simd128 and refusal rows.
+- `check-protocol-wasm-parity.sh`, `run-protocol-allocation-audit.sh` (64 edits and 10,000 records
+  in 40 batches) and `check-effect-contract.sh`, on release binaries.
+- 57 lint-job, self-test and suite commands, every Python one with `python3 -B`. They include the
+  bench, realtime, protocol-control and conformance-boundary gates with their suites, the
+  reachability lint (20 cases), CI routing and its suite, the env vocabulary and
+  `test-env-vocabulary.sh`, the release shape, and `test-gate-lib.sh`.
+- The 17 console `digests` are byte-identical to `3a2782f1`.
+- The full `cargo test --workspace --all-targets --all-features -- --list` goes from 2,171 to
+  2,166. Exactly the five `bench` `protocol::tests::*` are gone.
+- `flatbuffers` is absent from `cargo tree --target all`, and `Cargo.lock` drops only
+  `flatbuffers` and `rustc_version`.
+
+**Checked adversarially.**
+- **Nothing live was retired.** No file under `crates/`, `hosts/` or `fuzz/` changed. `fuzz.yml`
+  (`run-protocol-fuzz.sh`), the nightly deep fuzz, `check-protocol-wasm-parity.sh`, the allocation
+  audit and the protocol-control gate with its suite are all still wired.
+- **Every removed name was searched.** The removed script, subject, schema, validator and env
+  names were grepped across workflows, scripts, the router's `SELF_TEST_INPUTS`,
+  `check-bench-policy.sh`, the operator scripts and docs. Every remaining hit is a historical spec
+  or handoff, or a comment recording the retirement.
+- **Nothing still builds `bench` for wasm32**, so folding its dependency table is safe.
+- **The ratchets are honest.** The base `protocol.rs` timed with its own `Instant::now` and never
+  called `timing::timed`, so `timed_subjects` is rightly unchanged. It opened with
+  `#![allow(unsafe_code)]`, so the unsafe owners go from 4 to 3, and the suite's count cases go
+  from 4 to 3 to match.
+- **The new guards discriminate.** Reintroducing an unsafe `tools/bench/src/protocol.rs` fails
+  both `check-bench-policy.sh` and `check-realtime-policy.sh`. Restoring the old realtime
+  exclusion turns `unsafe-in-deleted-bench-protocol` red. Disabling the checker's jq `include`
+  handling, or limiting it to `.jq` files, turns the reachability suite red.
+- **The five removed tests guarded no surviving product claim.**
+  - The corpus checksum, the FlatBuffers builder/verifier and the JSONL record tests pinned only
+    the retired benchmark's own corpus and output.
+  - The BTLV encode/decode test survives as:
+    - `typed_frame.rs` `full_{command,success_response,non_ok,event}_frames_*`;
+    - the `message_wire/tests.rs` b2a/b2b/b3/b4 goldens;
+    - `queue.rs::ten_thousand_events_fit_as_exactly_forty_atomic_batches`;
+    - the CI-run allocation audit.
+  - The metadata-command test survives as
+    `bench-support::sysinfo::tests::command_output_distinguishes_success_and_unavailable_results`.
+
+**Findings, ranked (none blocks).**
+1. **Low: a false statement in `docs/CONTROL_PROTOCOL_CONFORMANCE.md`.** It now says the
+   comparison runner "never ran its descriptive comparison". Issue 005's record says the final
+   authorized workload did run: its raw JSONL, SHA-256 `630fab07…`, was accepted as the final
+   descriptive evidence. The earlier text had the same error ("has not run"). This change restated
+   it rather than fixing it.
+2. **Low: a contradiction in `docs/REALTIME_DEPENDENCY_POLICY.md`.** It still says the checker
+   "currently accepts unsafe syntax in exactly four source files", one of them now "(retired by
+   #1075)". It also still calls "the latter two" the Issue-005 exceptions. The next paragraph
+   already disowns that sentence.
+3. **Info: two orphaned helpers.** `Metadata::nonempty_or_unknown` and `sysinfo::parse_cpu_model`
+   are confirmed to have no caller outside their own tests. This is the follow-up the implementer
+   already named.
