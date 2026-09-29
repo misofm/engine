@@ -434,3 +434,148 @@ timed workload was run.
 - the oracle observes the catalog and canonical allocations;
 - each of the three gaps (catalog, canonical and graph runtime) is either fixed under a scope
   amendment or tracked by an issue number cited in the test and in this spec.
+
+## Attempt 2 evidence
+
+Terra, attempt 2. `codex/batch-slim-3` (`3ba8982a`: #1059, #1039, #1043, #1049) is merged first
+(`79564472`). Code diff against `3ba8982a`, outside this spec: **+1,268 / −2,555 lines**. Root
+extended the paths to host-core and session for finding 1.
+
+### Finding 1 (HIGH): the oracle observes every owner, and both hidden under-counts are fixed
+
+`resource_lifecycle`'s oracle now takes no charge from the accounting it checks. It replays the
+compile's host-core half and observes each owner by dropping it. The drop order is the attribution:
+the source producers go first, so a ring they share with the plan is counted with the plan. It
+also asserts that the four owners (producers, catalog, plan, store) hold every byte the half
+retains. Then:
+
+- `capi_retained_bytes` == capi's own allocations + observed producers + observed catalog (+ the
+  derived decode-field rounding), to the byte;
+- the source producers == `control_retained_bytes`, exactly;
+- the session store ≤ `compiled_model_bytes` (the graph cap's model row);
+- the plan ≤ its engine rows (a bound; see finding 3).
+
+The browser identity fixture joins the loop, beside the EQ and soft-clip fixtures.
+
+**Red before, green after** (x86, dev). Each defect is re-injected alone into the final tree.
+
+| defect | red on | observed vs charged |
+|---|---|---|
+| catalog enum capacity (the `Result<Vec>` collect) | oracle, tiny-frame, catalog test | 261,348 vs 256,740; 187,670 vs 183,062; 129,708 vs 125,100 |
+| canonical spare capacity (no shrink) | oracle's store check | store 38,069 > estimate 23,039 |
+| canonical double charge put back in capi's epoch row | oracle, tiny-frame, double-live | 256,740 vs 273,452; 183,062 vs 199,774 |
+| `checked_layout::<Plan>(1)` dropped | oracle, tiny-frame | 256,740 vs 256,340 |
+| uncharged `Box<[u64; 32]>` in `Plan` | oracle, tiny-frame | 257,004 vs 256,748 |
+
+With the fixes, all green at both widths: EQ store 22,013 ≤ 23,039, soft-clip 23,901 ≤ 24,927,
+identity 2,867 ≤ 2,869. The store's slack is the estimate's 128 bytes per entity for indexes; the
+compiled session builds one index, over its sources.
+
+**Fixes, and why each form.**
+- **Catalog.** host-core's `build_parameter_catalog` reserves each descriptor's enum-choice vector
+  exactly, then pushes, as every other catalog allocation already does. I chose that over charging
+  capacity: the growth `collect` picks is not a contract, and the spare memory is useless. The
+  catalog test is un-ignored and passes.
+- **Canonical JSON.** session's `write_canonical` calls `shrink_to_fit` before it returns: one
+  control-plane `realloc`. I chose that over charging capacity: the doubling writer leaves up to
+  half its allocation spare, and charging it would make phones reserve it. The shrink sits in the
+  writer rather than in `compile_session` because `check-session-policy.sh` anchors on the exact
+  line `let canonical_json = write_canonical(session)`.
+- **capi's double charge is removed.** The epoch row charged the canonical JSON, and the compiled
+  model's graph-cap charge already includes it.
+
+**Ceilings the fixes move.**
+- capi `capi_retained_bytes` on the EQ fixture: 273,452 → 256,740 at both widths (−16,712, the
+  canonical length). Its budget is re-derived at value + 10 %, rounded to 64: 300,800 → 282,432.
+- The double-live capi requirement: 204,311 → 167,414 (−18,453 current and −18,444 prospective
+  canonical). It is derived, not pinned.
+- No other row moves:
+  - host-web charges the length-based estimate, so the shrink changes only real memory;
+  - the native browser and all 8 wasm32 rows are unchanged, and `expected.json` is untouched.
+
+### Finding 2 (HIGH): the #1059 conflict
+
+`Budget::ceiling` matches on `Backend::current().width()`: 8 or 4, anything else panics. There is
+no scalar variant and no `cfg(target_arch)`. `retained_ceilings.rs` does the same, so `lane`
+joins host-web's dev-dependencies (one `Cargo.lock` line). `cargo test --locked -p capi` compiles
+on the merged tree.
+
+### Finding 3 (MEDIUM): the plan bound. It is justified, not tightened; it does not catch the table
+
+- **The store now joins the oracle and is observed.** The prepared plan stays a bound, because its
+  rows are the graph compiler's admission estimate of the preparation: the compile-time graph
+  metadata, bank scratch per slot where a merged chain keeps one slot's, and #511's and #936's
+  reservations at their bound.
+- **Measured slack** (eight lanes / four):
+
+  | fixture | slack (bytes) |
+  |---|---|
+  | EQ | 128,317 / 128,405 |
+  | soft-clip | 128,834 / 128,730 |
+  | browser identity | 12,233 / 8,109 |
+
+- **Sol's plant.** An uncharged `Box<[u64]>` in graph `Runtime`:
+  - at 16 words per unit (1,808 bytes on EQ), every test stays green. **The observing check does
+    not catch it.**
+  - at 2,048 words per unit it is red: 368,365 > 267,322.
+- **Why it cannot be caught here.** Nothing in the report or in a public API separates the plan's
+  retained bytes from its admission margin. The margin does not follow from report rows alone:
+  on the identity fixture it is smaller than the graph metadata plus bank scratch. A slack band
+  would be a pin that moves whenever an unretained compile-time layout moves.
+- **Proposed successor, for root to file.** Give the bound plan per-owner attribution: a
+  retained-bytes walk over the bound runtime, as `observation_retained_bytes` already does for the
+  observation lanes, checked by an allocator oracle in graph's own tests. The capi oracle can then
+  require plan-observed == walked. The oracle's doc comment names this gap. I have no issue number
+  to cite: I may not file one.
+
+### The LOW findings
+- **Finding 4.** `direct-oracle.mjs`'s check mode applies the two classes: exact rows equal, and
+  retained rows 0 < v ≤ `resourceCeilings`. It passes on the built module and goes red on a ceiling
+  one byte under (`builtinRetainedBytes 1817 is over its ceiling 1816`). The WebDriver harness's
+  run and `--check` modes still compare the old whole block; #1050 retires the harness.
+- **Finding 5.** Both budget docs cite the review's sampled history (+1.2 %, +2.3 %, +11 %,
+  +48 %): 10 % passes the routine moves and stops the structural ones.
+
+### Gates (final tree `3f9a111e` unless noted)
+
+- `cargo check --workspace --all-targets --all-features`, workspace clippy `-D warnings`, fmt.
+- `cargo test -p capi -p host-core -p host-web`: dev 443 passed and release 443 passed, 0 failed,
+  4 ignored.
+- With session, protocol and the test-support features: 636 passed. session in release: 59 passed.
+- `console-workload` in release (the console digests).
+- `check-browser-expected-resources.py --artifacts` and `--self-test` (32 mutations); the
+  direct-oracle check mode; `check-web-audioworklet.sh`; `test-web-audioworklet.sh`;
+  `check-scalar-oracle-absent.py --wasm` and `--native`.
+- `check-capi-abi.sh` and its `--self-test`.
+- The session, host-core, workspace, realtime and env-vocabulary policies, routing, and
+  test-support-ci.
+- All 49 lint-job commands plus routing and `test-env-vocabulary.sh`, run with `python3 -B`, on
+  `8bc6ac40`. Since then only the shrink moved from `compile.rs` to `canonical.rs` and one doc
+  comment changed; on the final tree `check-session-policy` is re-run green (it had caught the
+  first placement).
+
+**AArch64.**
+- The x86 `cargo test --no-run` of `run-aarch64-tests.sh debug`'s 25 product crates plus
+  dsp-reference, conformance and target-smoke, with the leg's features, resolves 218 test
+  executables.
+- Under qemu-user, `resource_lifecycle` has 9 passed and `retained_ceilings` 1 passed. Real arm64 CI
+  verifies the rest.
+
+**Shipped module:** CHANGED. It was `a4a2383f…` at `3ba8982a` and is `390fada9…` after, from the
+canonical shrink in `session`. The PCM digests, exact rows and `memoryBytes` are unchanged.
+
+**`--list` diff against `3ba8982a`:**
+- `resource_lifecycle`:
+  - removed `external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps`;
+  - added `double_live_oracle_drives_exact_and_one_below_c_caps`,
+    `capi_retained_bytes_charge_every_byte_the_compile_retains`,
+    `reference_session_retained_rows_stay_within_their_budgets` and
+    `prepared_parameter_catalog_charge_covers_its_allocations` (none ignored);
+  - 6 → 9 tests.
+- host-web: added `browser_identity_fixture_retained_rows_stay_within_their_budgets`.
+
+**Not rerun:** the gate-4 mutation runs and the gate-5 reverts from attempt 1.
+
+**My own error, fixed.** A paragraph edit in `docs/C_ABI_V1_QUALIFICATION.md` dropped that
+paragraph's later sentences (the C response vectors and the RT artifact history); `8bc6ac40`
+restores them word for word.
