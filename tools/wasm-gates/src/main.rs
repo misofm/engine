@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! wasm_gates --native
-//! wasm_gates <guest.wasm> --expect-backend simd4|simd8
+//! wasm_gates <guest.wasm> --expect-backend simd4
 //! wasm_gates --print-pins
 //! ```
 //!
@@ -20,7 +20,7 @@ use wasm_gates::{
 /// Usage text, printed on an argument error.
 const USAGE: &str = "usage:\n  \
      wasm_gates --native\n  \
-     wasm_gates <guest.wasm> --expect-backend simd4|simd8\n  \
+     wasm_gates <guest.wasm> --expect-backend simd4\n  \
      wasm_gates --print-pins";
 
 fn main() -> ExitCode {

@@ -42,9 +42,8 @@ mod tests {
         // which would compare the same compile-time constant against itself and could never fail.
         // A change to either `lane::Backend::current()`'s target selection or to this pin must fail
         // this test (AGENTS.md: `x86-64-v3` is pinned to AVX2/FMA, NEON is baseline on AArch64, and
-        // the shipped wasm width is four lanes unless issue #183 step 2's measurement cfg widens it).
-        // Every other target has no row because `lane` refuses to compile for it (issues #1041 and
-        // #1062), so this crate cannot be built there either.
+        // wasm `simd128` is four lanes). Every other target has no row because `lane` refuses to
+        // compile for it (issues #1041 and #1062), so this crate cannot be built there either.
         #[cfg(target_arch = "x86_64")]
         assert_eq!(
             report.backend,
@@ -57,21 +56,11 @@ mod tests {
             lane::Backend::Simd4,
             "AArch64 NEON is baseline, four f32 lanes"
         );
-        #[cfg(all(
-            target_arch = "wasm32",
-            target_feature = "simd128",
-            not(miso_wasm_simd8)
-        ))]
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
         assert_eq!(
             report.backend,
             lane::Backend::Simd4,
-            "the shipped wasm width is four lanes"
-        );
-        #[cfg(all(target_arch = "wasm32", target_feature = "simd128", miso_wasm_simd8))]
-        assert_eq!(
-            report.backend,
-            lane::Backend::Simd8,
-            "issue #183 step 2's eight-lane wasm measurement build"
+            "the wasm width is four lanes"
         );
     }
 }

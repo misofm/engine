@@ -36,16 +36,15 @@ pub const WASMTIME_VERSION: &str = "47.0.3";
 /// crate is dev/tooling and links nothing into a shipped artifact.
 pub const WASMTIME_LICENCE: &str = "Apache-2.0 WITH LLVM-exception";
 
-/// Which production backend a run is expected to have used.
+/// Which production backend a wasm guest is expected to have used.
 ///
 /// No `Scalar`: no target selects the whole-plan scalar backend, and the wasm build without
-/// `simd128` that once reported it is refused at compile time (#1062).
+/// `simd128` that once reported it is refused at compile time (#1062). No `Simd8`: the wasm build
+/// has one width, and the eight-lane measurement cfg that once reported it is gone (#1038).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExpectedBackend {
-    /// `Simd4`: wasm with `simd128`, or AArch64 NEON.
+    /// `Simd4`: wasm with `simd128`.
     Simd4,
-    /// `Simd8`: one `__m256` on `x86-64-v3`.
-    Simd8,
 }
 
 impl ExpectedBackend {
@@ -57,7 +56,6 @@ impl ExpectedBackend {
     pub fn parse(text: &str) -> Result<Self, String> {
         match text {
             "simd4" => Ok(Self::Simd4),
-            "simd8" => Ok(Self::Simd8),
             other => Err(other.to_string()),
         }
     }
@@ -67,7 +65,6 @@ impl ExpectedBackend {
     pub const fn code(self) -> u32 {
         match self {
             Self::Simd4 => 1,
-            Self::Simd8 => 2,
         }
     }
 
@@ -76,7 +73,6 @@ impl ExpectedBackend {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Simd4 => "simd4",
-            Self::Simd8 => "simd8",
         }
     }
 }
