@@ -768,3 +768,132 @@ tracks (P1, no test anywhere), #1002's memory claim, and #967's banked-and-route
 
 Attempt 3: `scale.rs` +212/−76, `MUTATIONS.md` +9/−4, this spec. The branch against `main`
 (`a8955ad4`), code, workflow and scripts: +436/−53.
+
+## Sol verdict, attempt 3
+
+Sol, 2026-09-29, head `e593a441`. I merged it into `codex/batch-slim-4` (`e53dc445`) in a scratch
+worktree and checked it there. Host: `x86_64` (`x86-64-v3`), rustc 1.97.1, `CARGO_INCREMENTAL=0`,
+`nice`, load 10-24.
+
+**FAIL.**
+
+- **Closed.** Attempt 2's blocker is fixed: a cap in bank attachment is red per PR.
+- **Still open.** The sweep found one more layer #1045 moved to nightly that a cheap test can
+  hold per PR: the compiler's builtin bank plan.
+- **My miss.** My attempt-2 verdict wrongly filed this layer under P3b ("the bank plan the compiler
+  forms"). It is reachable through a public entry, like `with_builtin_banks`.
+- **Complete list.** To end the rounds of discovery, the list below covers every layer the brief
+  named, with measurements.
+
+### The merge
+
+- **No conflicts.** Batch 4 does not touch `nightly.yml`. Its changes to
+  `check-ci-path-routing.py`, `test-ci-path-routing.py` and `qualification.yml` merge cleanly around
+  #1045's three `NIGHTLY_BUDGET_COMMANDS` rows.
+- **Root applies nothing by hand.**
+- **The merged workflow.**
+  - `failure-notice` still needs `math-sweeps` and `release-budgets`, and reports both.
+  - `math-sweeps` keeps `main`'s job, with the session sweep after F1 and a 25-minute timeout.
+- **No semantic conflict.**
+  - Batch 4 rewrote about 300 lines of `graph/src/runtime.rs`, so I re-ran all three
+    `release-budgets` 65,537-track commands on the merge. They pass, and `:160` takes 23.9 s
+    against its 60 s bound.
+  - The per-PR `scale` binary passes: 3 passed, 1 ignored.
+
+### Findings, by severity
+
+1. **High, blocking: a cap in the compiler's builtin bank plan is green per PR, and 1 s inside
+   `:91` catches it.**
+   - **What the layer is.** `compile_graph` calls `PreparedBuiltinsSession::graph_builtin_bank_resource`.
+     That runs `planned_strip_banks`, then `rack_compiler::plan_bank_groups` (the workspace's one
+     cohort planner, which effect banks use too), then `builtin_bank_resource`.
+   - **Why nothing per PR reaches it.** It runs after the node cap refuses `:91`, and the
+     hand-built tests skip it.
+   - **Before this change**, `:160` held it per PR at `Backend::current()`.
+
+   | plant | per PR (session, graph, graph-compiler, builtins-compiler, rack-compiler) | nightly `:160` | the proposed check in `:91` |
+   |---|---|---|---|
+   | PPLAN: `plan_bank_groups` refuses more than 65,535 candidates | GREEN | RED: `DuplicateId` panic in `planned_builtin_bank_members` | RED: the same panic |
+   | PRES: `builtin_bank_resource` refuses more than 65,536 lanes | GREEN | RED: `graph.resource.arithmetic_overflow` at `$.graph.builtin_banks` | RED: `the builtin bank plan at 65,537 tracks` |
+
+   - **The proposed check.** It is in `scratchpad/verify-1045/a3/scale-proposal.diff`: 23 lines in
+     `:91`, placed before the constrained compile consumes `builtins`.
+     - It calls `graph_builtin_bank_resource(Backend::current(), levels, SessionPoolClasses::from_session(&session))`.
+       The levels hold one dependency level per bankable stage, built with `track_stages`.
+     - It asserts `bank_count == 3 * ceil(65,537 / lanes)`.
+   - **Its cost.** The planning takes 0.9 s. The prepared builtins are the ones `:91` already
+     builds. `:91` took 17.5 s with the check and 16.2 s without it, at load 10-17.
+   - **Attempt 4 must:**
+     - add the check;
+     - record PPLAN and PRES red on it and green once reverted;
+     - take the compiler's bank plan off the residual list.
+2. **The sweep, layer by layer.** "Per PR" means a test in `test-debug-a`. That job is required
+   through `qualification`'s verdict, and the router sends every edit to these crates down its
+   `full` route.
+
+   | layer | per PR today | if not, is there a cheap test? |
+   |---|---|---|
+   | session parse (P1) | no | no: a 65,537-track document is 93.7 MB, and parsing it takes 19.3 s in debug. It predates #1045 and needs its own issue |
+   | session compile | yes: `scale_transaction.rs`, `:91` | - |
+   | builtin preparation | yes: `:91` (P4, 1045-6, 1045-7) | - |
+   | graph compile, front end | yes: `:91` (1045-1, -2, -3, P3a) | - |
+   | graph compile, back end (topo, timings, buffers, estimate) and P3b | no | no public entry. It needs the unconstrained compile, +16-28 s. Acceptable nightly |
+   | **builtin bank plan** | **no** | **yes, 1 s: finding 1** |
+   | builtin bank lowering (`into_graph_artifact_with_banks`) and `into_bound` (P5b) | no | moderate. My probe lowers a hand-built 65,537-track strip plan in 13.4 s of debug CPU, and 28.5 s with bind and render. Acceptable nightly. It is width-bounded per bank, and the bank and bind layers either side of it are held per PR |
+   | bank attachment | yes: attempt 3's test (PBANK re-planted: RED, `InvalidMembers`) | - |
+   | graph bind and render | yes: attempt 2's test (P5, P6) | - |
+   | #962 quadratics | no | no reliable per-PR clock. Nightly's bound, RED at 231 s |
+   | A2 (the accounting count through a `u16`) | no | needs the 65,537-track allocation tracker. Nightly row |
+   | host-core preparation, before the graph compile | no, and never was | **yes, 4.5 s** (below). Predates #1045 and is outside its paths: finding 3 |
+   | capi prepare, host-web boot | no, and never was | no: both parse the JSON document, 19.3 s at this size. Predates #1045 |
+
+3. **Medium, not blocking: host-core preparation has never been held above 65,535 tracks.**
+   - **The gap.** `prepare_host_runtime` runs per-track stages before the graph compile: the
+     count check, the track-to-source mapping, effects and builtins. A cap there is green per PR,
+     before and after #1045.
+   - **The probe.** It compiles 65,537 tracks and then prepares them with
+     `maximum_builtin_retained_bytes = 1`. It refuses with exactly
+     `builtin.resource.limit $.builtin_compile_caps` in 4.5 s of debug time. Any host cap placed
+     earlier would change that refusal.
+   - **Recommendation.** Open a successor issue for it. It is not #1045's regression, and
+     `host-core/tests` is outside #1045's authorized paths.
+4. **Low.** The hand-built plans have 131,075 and 196,612 nodes, and the real graph has 458,761. A
+   ceiling keyed on node count between those sizes is nightly-only. That is implausible, so I note
+   it without a request.
+
+### Confirmed
+
+- **PBANK closes.** I re-planted it on the merge and ran `cargo test -p graph-compiler --test
+  scale` with test-debug-a's features. It goes RED
+  (`65,537-track bank attachment: InvalidMembers`), and GREEN on the unmutated merge.
+- **Per-PR cost, alone in debug at load 11:**
+
+  | test | wall |
+  |---|---:|
+  | the banked test | 6.1 s |
+  | the routed test | 3.5 s |
+  | `:91` | 16.2 s |
+  | the whole binary | 16.0 s |
+
+  So the two hand-built tests add no wall time.
+- **Gates on the merge.**
+  - fmt, `cargo check --workspace --all-targets --all-features` and clippy `-D warnings` pass.
+  - session, graph, graph-compiler and builtins-compiler pass in dev (97 s wall) and in release:
+    372 passed, 7 ignored.
+  - `check-ci-path-routing.py` and `test-ci-path-routing.py` pass under `python3 -B`, and
+    actionlint 1.7.7 is clean.
+- **Policy scripts, 76 runs, all pass.** That is every `scripts/check-*` and `scripts/test-*`,
+  Python ones under `python3 -B`, and `check-stem-store-v1.mjs`.
+  - It includes `check-workspace-policy.sh` with #1052's source-scrape lint, and
+    `check-graph-determinism.sh` (100 of 100).
+  - `test-realtime-audit-probes.sh` ran in all three CI modes.
+  - Six were not run because they need external toolchains or built artifacts: capi-abi,
+    cross-targets, protocol-wasm-parity, sdk-headless, sdk-types and web-audioworklet.
+
+### Test value
+
+- **Attempt 3's banked test** catches a cap or a narrowed index in bank attachment, or in the
+  runtime's bank gather and scatter, above 65,535 lanes (PBANK).
+- **The check finding 1 asks for** would catch a cap in the compiler's builtin bank plan or its
+  resource accounting above 65,535 tracks (PPLAN, PRES). Nothing else per PR plans banks at this
+  size.
