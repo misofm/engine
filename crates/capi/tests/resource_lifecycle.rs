@@ -417,12 +417,16 @@ fn exported_c_candidates_replay_render_and_both_destroy_orders_balance_exactly()
 
 fn scratch_session() -> String {
     let mut model = session::parse_session_json(SESSION).expect("oracle fixture");
+    // The fixture's console slot becomes a soft-clip on every track (decision 12: the slot is
+    // declared once, and each track's entry carries its knobs).
+    let slot = &mut model.console.pre_insert[0];
+    slot.slot = StableId::parse("soft-clip").expect("effect slot");
+    slot.identity = session::EffectIdentity::Native {
+        effect_id: StableId::parse("miso.soft-clip").expect("effect ID"),
+    };
     for track in &mut model.tracks {
-        let effect = &mut track.simd1.effects[0];
-        effect.id = StableId::parse("soft-clip").expect("effect slot");
-        effect.identity = session::EffectIdentity::Native {
-            effect_id: StableId::parse("miso.soft-clip").expect("effect ID"),
-        };
+        let effect = &mut track.console[0];
+        effect.slot = StableId::parse("soft-clip").expect("effect slot");
         effect.params = vec![
             session::EffectParam {
                 parameter_id: 1,

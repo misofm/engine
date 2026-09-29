@@ -530,21 +530,40 @@ enum Strip {
     HalfMono,
 }
 
-/// Retains only the slots of `rack` whose native effect id is `effect_id`.
+/// Retains the `pre_insert` console slots `keep` accepts, and the `post_insert` slots only when
+/// `keep_post_insert` is set, in the session's declarations and in every track's entries together.
 ///
-/// Used instead of clearing a whole rack because the standing fixture's `simd1` is a *two-slot*
-/// chain: a decomposition row that wants the EQ alone has to drop one slot out of a chain rather
-/// than empty a rack. Matching on the contract's effect id rather than the session's local slot
-/// id means a fixture that renamed a slot cannot silently turn a decomposition row into a row
-/// that measures nothing.
-fn retain_effect(rack: &mut session::Rack, effect_id: &str) {
-    rack.effects.retain(|effect| {
-        matches!(
-            &effect.identity,
-            session::EffectIdentity::Native { effect_id: id }
-                if id.as_str() == effect_id
-        )
-    });
+/// Console slots are session-level (decision 12): a slot is declared once and every track carries
+/// an entry for it, so a decomposition row that narrows the strip edits both. The standing
+/// fixture's `pre_insert` is a *two-slot* chain (EQ, compressor), so a row that wants the EQ alone
+/// drops one slot out of a chain rather than emptying a section. Matching on the contract's effect
+/// id rather than the slot id means a fixture that renamed a slot cannot silently turn a
+/// decomposition row into a row that measures nothing.
+fn retain_console(
+    model: &mut SessionModel,
+    keep: impl Fn(&session::ConsoleSlot) -> bool,
+    keep_post_insert: bool,
+) {
+    model.console.pre_insert.retain(|slot| keep(slot));
+    if !keep_post_insert {
+        model.console.post_insert.clear();
+    }
+    let kept: Vec<session::StableId> = model
+        .console
+        .slots()
+        .map(|slot| slot.slot.clone())
+        .collect();
+    for track in &mut model.tracks {
+        track.console.retain(|entry| kept.contains(&entry.slot));
+    }
+}
+
+/// Whether a console slot is the native effect `effect_id`.
+fn is_native(slot: &session::ConsoleSlot, effect_id: &str) -> bool {
+    matches!(
+        &slot.identity,
+        session::EffectIdentity::Native { effect_id: id } if id.as_str() == effect_id
+    )
 }
 
 impl Workload {
@@ -701,25 +720,27 @@ impl Workload {
 /// subset of what `sixty_four_track_console` measures, which is what makes the differences between
 /// the rows subtractions rather than comparisons of two different sessions.
 fn apply_strip(model: &mut SessionModel, strip: Strip) {
-    if strip == Strip::AsWritten {
-        return;
+    // The console edits are session-level (decision 12). Every derived row but `HalfMono` drops
+    // the `post_insert` limiter; the `pre_insert` chain (EQ, compressor) is narrowed or emptied
+    // as the row says, and `LimiterRemoved` leaves it exactly as the fixture wrote it.
+    match strip {
+        Strip::AsWritten | Strip::HalfMono => {}
+        Strip::EqOnly => retain_console(model, |slot| is_native(slot, "miso.parametric-eq"), false),
+        Strip::CompressorOnly => {
+            retain_console(model, |slot| is_native(slot, "miso.compressor"), false)
+        }
+        Strip::LimiterRemoved => retain_console(model, |_| true, false),
+        Strip::BuiltinsOnly | Strip::Identity | Strip::GainPan => {
+            retain_console(model, |_| false, false);
+        }
     }
     for (index, track) in model.tracks.iter_mut().enumerate() {
         match strip {
-            Strip::AsWritten => unreachable!("returned above"),
-            Strip::EqOnly => retain_effect(&mut track.simd1, "miso.parametric-eq"),
-            Strip::CompressorOnly => retain_effect(&mut track.simd1, "miso.compressor"),
-            // `simd2` is cleared for every derived row below, so this arm's whole edit is that
-            // clearing: the `simd1` chain is deliberately left exactly as the fixture wrote it.
-            Strip::LimiterRemoved => {}
+            Strip::AsWritten | Strip::EqOnly | Strip::CompressorOnly | Strip::LimiterRemoved => {}
             // The racks go and nothing else does.
-            Strip::BuiltinsOnly => {
-                track.simd1.effects.clear();
-                track.dynamic.effects.clear();
-            }
+            Strip::BuiltinsOnly => track.inserts.effects.clear(),
             Strip::Identity | Strip::GainPan => {
-                track.simd1.effects.clear();
-                track.dynamic.effects.clear();
+                track.inserts.effects.clear();
                 for channel in [&mut track.builtins.left, &mut track.builtins.right] {
                     channel.polarity_invert = false;
                     channel.trim_db = 0.0;
@@ -756,10 +777,8 @@ fn apply_strip(model: &mut SessionModel, strip: Strip) {
                 if index % 2 == 1 {
                     track.right_source_channel = 1;
                 }
-                continue;
             }
         }
-        track.simd2.effects.clear();
     }
 }
 /// Which console-side facilities a prepared arm carries.
@@ -1648,7 +1667,7 @@ fn synthesise_tracks(model: &mut session::SessionModel, tracks: usize) {
         next.id = StableId::parse(&format!("ch{index:03}-main")).expect("synthetic route id");
         next.source = session::RouteSource::Track {
             track_id: track.id.clone(),
-            tap: session::SendTap::PostMatrix,
+            tap: session::SendTap::PostPan,
         };
         model.tracks.push(track);
         model.routes.push(next);

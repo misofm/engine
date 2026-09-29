@@ -1029,9 +1029,8 @@ fn session(track_count: u32) -> session::CompiledSession {
     let mut model = parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
         .expect("fixture parse");
     let mut template = model.tracks[0].clone();
-    template.simd1.effects.clear();
-    template.dynamic.effects.clear();
-    template.simd2.effects.clear();
+    template.console.clear();
+    template.inserts.effects.clear();
     model.automation.clear();
     model.tracks.clear();
     model
@@ -1044,7 +1043,7 @@ fn session(track_count: u32) -> session::CompiledSession {
     }
     model.routes[0].source = RouteSource::Track {
         track_id: StableId::parse("track-0").expect("route track"),
-        tap: SendTap::PostMatrix,
+        tap: SendTap::PostPan,
     };
     compile_session(
         &model,

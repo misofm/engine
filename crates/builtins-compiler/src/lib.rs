@@ -5585,9 +5585,8 @@ mod tests {
             parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
                 .expect("fixture parse");
         let mut template = model.tracks[0].clone();
-        template.simd1.effects.clear();
-        template.dynamic.effects.clear();
-        template.simd2.effects.clear();
+        template.console.clear();
+        template.inserts.effects.clear();
         model.automation.clear();
         model.tracks.clear();
         for index in 0..n {
@@ -5627,7 +5626,7 @@ mod tests {
         model.routes.truncate(1);
         model.routes[0].source = session::RouteSource::Track {
             track_id: session::StableId::parse(&track_name(0)).expect("route track"),
-            tap: session::SendTap::PostMatrix,
+            tap: session::SendTap::PostPan,
         };
         compile_session(
             &model,
@@ -11688,7 +11687,7 @@ mod tests {
         let mut base_model =
             parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
                 .expect("parse baseline mutation session");
-        base_model.tracks[0].dynamic.effects.clear();
+        base_model.tracks[0].inserts.effects.clear();
         base_model.automation.clear();
         let base_config = MeterConfig {
             period_frames: NonZeroU32::new(16).expect("constant"),

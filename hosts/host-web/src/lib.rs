@@ -5801,14 +5801,18 @@ fn compile_ready(
     prepared_mutes
         .try_reserve_exact(track_count)
         .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
-    for track in &session.normalized_model().tracks {
+    let model = session.normalized_model();
+    for track in &model.tracks {
         let count = |effects: usize| -> Result<u32, Vec<u8>> {
             u32::try_from(effects).map_err(|_| fixed_diagnostic("web.console.effects"))
         };
+        // The lowered racks (decision 12): every track carries every `pre_insert` and
+        // `post_insert` slot, so those counts are the session's; rack bytes `0`/`1`/`2` keep
+        // addressing them until #1096 (S1c) gives the browser record its console byte.
         rack_effects.push([
-            count(track.simd1.effects.len())?,
-            count(track.dynamic.effects.len())?,
-            count(track.simd2.effects.len())?,
+            count(model.console.pre_insert.len())?,
+            count(track.inserts.effects.len())?,
+            count(model.console.post_insert.len())?,
         ]);
         prepared_mutes.push([track.fader.left_mute, track.fader.right_mute]);
     }

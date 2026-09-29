@@ -83,7 +83,7 @@ fn compile_fixture() -> PreparedGraphBuiltinsArtifact {
     let mut model = parse_session_json(SESSION).unwrap_or_else(|diagnostics| {
         panic!("session parse diagnostics: {diagnostics:?}");
     });
-    model.tracks[0].dynamic.effects.clear();
+    model.tracks[0].inserts.effects.clear();
     model.automation.clear();
     let session = compile_session(
         &model,

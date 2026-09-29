@@ -1047,7 +1047,12 @@ fn retired_track_rack_fields_are_refused() {
     let message = |retired: Option<u16>| {
         let mut fields = vec![
             (1, WIRE_UTF8, true, track.id.as_str().as_bytes().to_vec()),
-            (2, WIRE_UTF8, true, track.source_id.as_str().as_bytes().to_vec()),
+            (
+                2,
+                WIRE_UTF8,
+                true,
+                track.source_id.as_str().as_bytes().to_vec(),
+            ),
             (3, WIRE_U8, true, vec![track.left_source_channel]),
             (4, WIRE_U8, true, vec![track.right_source_channel]),
             (5, WIRE_MESSAGE, true, builtins.clone()),

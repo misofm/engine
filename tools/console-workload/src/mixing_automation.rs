@@ -369,14 +369,18 @@ impl MixingAutomation {
                 .enumerate()
                 .find(|(_, track)| track.id.as_str() == control.track_id)
                 .ok_or_else(|| missing_slot.clone())?;
+            // The lowered racks (decision 12): `pre_insert` is wire rack `0`, the inserts `1` and
+            // `post_insert` `2`, each indexed within its section, until #1096 (S1c) gives the
+            // browser record its console rack byte.
+            let lowered = model.lower_track(track);
+            let [pre_insert, inserts, post_insert] = lowered.in_chain_order();
             let rack = match producer.rack {
-                EffectRack::Simd1 => (0, &track.simd1),
-                EffectRack::Dynamic => (1, &track.dynamic),
-                EffectRack::Simd2 => (2, &track.simd2),
+                EffectRack::Simd1 => (0, pre_insert),
+                EffectRack::Dynamic => (1, inserts),
+                EffectRack::Simd2 => (2, post_insert),
             };
             let slot = rack
                 .1
-                .effects
                 .get(producer.effect_index as usize)
                 .filter(|slot| slot.id.as_str() == &*producer.effect_id)
                 .ok_or(missing_slot)?;

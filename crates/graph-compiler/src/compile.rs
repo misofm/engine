@@ -168,13 +168,25 @@ impl GraphCompiler {
         for _ in 0..duplicate_prepared {
             diagnostics.push(diag("graph.effect.duplicate_prepared", "$.effects"));
         }
+        // Decision 12, class A by lowering: `console.pre_insert` is `RackId::Simd1`, the track's
+        // inserts `Dynamic` and `console.post_insert` `Simd2`, each console entry an ordinary
+        // effect. Lowered once here and borrowed by every pass below.
+        let lowered: Vec<_> = model
+            .tracks
+            .iter()
+            .map(|track| model.lower_track(track))
+            .collect();
+        let racks = |index: usize| {
+            let [pre_insert, inserts, post_insert] = lowered[index].in_chain_order();
+            [
+                (RackId::Simd1, pre_insert, TrackStage::PostSimd1),
+                (RackId::Dynamic, inserts, TrackStage::PostDynamic),
+                (RackId::Simd2, post_insert, TrackStage::PostSimd2PreFader),
+            ]
+        };
         let mut declared = BTreeSet::<(&str, RackId, &str)>::new();
-        for track in &model.tracks {
-            for (rack, values) in [
-                (RackId::Simd1, &track.simd1.effects),
-                (RackId::Dynamic, &track.dynamic.effects),
-                (RackId::Simd2, &track.simd2.effects),
-            ] {
+        for (index, track) in model.tracks.iter().enumerate() {
+            for (rack, values, _) in racks(index) {
                 for effect in values {
                     let key = (track.id.as_str(), rack, effect.id.as_str());
                     declared.insert(key);
@@ -209,7 +221,7 @@ impl GraphCompiler {
         let mut node_tail = BTreeMap::new();
         let mut effect_ids = vec![None; effects.entries.len()];
         let mut route_transforms = Vec::new();
-        for track in &model.tracks {
+        for (index, track) in model.tracks.iter().enumerate() {
             for stage in stages() {
                 let id = track_node(track.id.as_str(), stage);
                 let tail = if stage == TrackStage::PostInputBuiltins {
@@ -237,19 +249,7 @@ impl GraphCompiler {
                 "$.tracks".to_owned(),
             );
             preceding = builtins;
-            for (rack, values, boundary) in [
-                (RackId::Simd1, &track.simd1.effects, TrackStage::PostSimd1),
-                (
-                    RackId::Dynamic,
-                    &track.dynamic.effects,
-                    TrackStage::PostDynamic,
-                ),
-                (
-                    RackId::Simd2,
-                    &track.simd2.effects,
-                    TrackStage::PostSimd2PreFader,
-                ),
-            ] {
+            for (rack, values, boundary) in racks(index) {
                 for effect in values {
                     let id = EffectNodeId {
                         track_id: gid(track.id.as_str()),
@@ -349,12 +349,8 @@ impl GraphCompiler {
                 transform,
             });
         }
-        for track in &model.tracks {
-            for (rack, values) in [
-                (RackId::Simd1, &track.simd1.effects),
-                (RackId::Dynamic, &track.dynamic.effects),
-                (RackId::Simd2, &track.simd2.effects),
-            ] {
+        for (index, track) in model.tracks.iter().enumerate() {
+            for (rack, values, _) in racks(index) {
                 for effect in values {
                     let SidechainDeclaration::Routed(sidechain) = &effect.sidechain else {
                         continue;

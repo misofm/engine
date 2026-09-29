@@ -401,7 +401,7 @@ fn edited(bypass: &[usize], invert: &[usize]) -> String {
     let mut model = parse_session_json(&mono_session()).expect("mono fixture parses");
     for (index, track) in model.tracks.iter_mut().enumerate() {
         if bypass.contains(&index) {
-            track.simd1.effects[0].bypass = true;
+            track.console[0].bypass = true;
         }
         if invert.contains(&index) {
             track.builtins.right.polarity_invert = true;

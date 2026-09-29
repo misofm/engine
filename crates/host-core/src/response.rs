@@ -1033,7 +1033,7 @@ mod tests {
             "../../../fixtures/session/v1/compressor-dynamic-observation.json"
         ))
         .expect("compressor fixture");
-        model.tracks[0].dynamic = compressor.tracks[0].dynamic.clone();
+        model.tracks[0].inserts = compressor.tracks[0].inserts.clone();
         let compiled = compile_host_model(
             &model,
             caps.compile_caps(model.sources.len())
