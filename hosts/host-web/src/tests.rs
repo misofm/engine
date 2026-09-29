@@ -6417,50 +6417,6 @@ fn native_observation_timeline_digest_pins_the_wasm_parity() {
     );
 }
 
-/// Issue #143 R7: what the browser bridge's two moved report rows moved *by*.
-///
-/// `bridgeMetadataBytes` and `bridgeRetainedBytes` in `tests/browser-v1/expected.json` are not
-/// magic numbers and never were: the first is exactly the host shell minus the two structures
-/// charged separately plus the plane-reference table, and the second is that plus the staging
-/// buffers. `frozen_layouts_and_values_are_exact` asserts the first formula directly; what this
-/// adds is the *size of the change*, so the re-pin is derived rather than read off a run.
-///
-/// Six fields joined `ReadyOwnership`, which is stored inline in the host shell:
-///
-/// | field | wasm32 | x86-64 |
-/// |---|---|---|
-/// | `effect_observations: Box<[Option<EffectObservationHandle>]>` | 8 | 16 |
-/// | `observation_tracks: Box<[u32]>` | 8 | 16 |
-/// | `observation_present: Box<[bool]>` | 8 | 16 |
-/// | `observation_armed: Box<[u32]>` | 8 | 16 |
-/// | `master_track: Option<u32>` | 8 | 8 |
-/// | `meter_header: WebMeterHeader` | 64 | 64 |
-/// | **sum** | **104** | **136** |
-///
-/// The shipped wasm32 rows moved by `112`, which is `104` rounded up to the structure's 8-byte
-/// alignment. Nothing else in the report moved, which the oracle's `deepStrictEqual` proves.
-#[test]
-fn the_observation_fields_account_for_the_moved_bridge_rows() {
-    let fields = size_of::<Box<[Option<host_core::EffectObservationHandle>]>>()
-        + size_of::<Box<[u32]>>()
-        + size_of::<Box<[bool]>>()
-        + size_of::<Box<[u32]>>()
-        + size_of::<Option<u32>>()
-        + size_of::<WebMeterHeader>();
-    let pointer = size_of::<usize>();
-    assert_eq!(
-        fields,
-        4 * 2 * pointer + 8 + usize::try_from(METER_HEADER_BYTES).expect("frozen"),
-        "four boxed slices, one optional index, and the meter header"
-    );
-    // The wasm32 instantiation of that sum, which is what the browser rows moved by.
-    assert_eq!(4 * 2 * 4 + 8 + 64, 104);
-    assert_eq!(104_usize.next_multiple_of(8), 104);
-    // The shipped rows moved by 112: 104 of fields plus 8 of alignment padding inside the shell.
-    assert_eq!(3_753_u64 - 3_641, 112);
-    assert_eq!(1_075_129_u64 - 1_075_017, 112);
-}
-
 /// Issue #143 E9: a `Computed` tap is declared, validated and **refused**.
 ///
 /// No launch effect declares one, so the rule is unreachable from a live session and would

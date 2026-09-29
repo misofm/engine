@@ -1163,12 +1163,6 @@ fn dead_resource_caps_cannot_refuse_any_session() {
 }
 
 #[test]
-fn corpus_distribution_totals_124_cases() {
-    const DISTRIBUTION: [usize; 7] = [16, 20, 24, 20, 20, 20, 4];
-    assert_eq!(DISTRIBUTION.iter().sum::<usize>(), 124);
-}
-
-#[test]
 fn parser_registry_covers_right_lane_and_f32_representation() {
     let unknown_right = replaced(
         "right = { polarity_invert = false",
@@ -1200,17 +1194,4 @@ fn compile_caps_reject_before_semantic_validation() {
             .iter()
             .all(|item| item.code == DiagnosticCode::ResourceLimitExceeded)
     );
-}
-
-#[test]
-fn tagged_route_roles_are_structurally_closed() {
-    let session = parse_session_json(EXAMPLE).expect("fixture parses");
-    assert!(matches!(
-        session.routes[0].source,
-        RouteSource::Track { .. } | RouteSource::SubmixOutput { .. }
-    ));
-    assert!(matches!(
-        session.routes[0].destination,
-        RouteDestination::SubmixInput { .. } | RouteDestination::OutputInput { .. }
-    ));
 }

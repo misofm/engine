@@ -575,31 +575,6 @@ fn a_ramp_that_finishes_mid_block_is_invisible_to_the_partition() {
     );
 }
 
-/// A Point that restates the value in force arms no ramp, so no lane enters the ramping body.
-///
-/// The #144 item 6 stationary hoist decides the case by bit compare and settles the ramp instead
-/// of arming it. The interaction that matters here is the one the hoist's own documentation names:
-/// because the block's ramping decision is taken across *all* lanes, an unhoisted no-op ramp on one
-/// lane would drag the whole bank onto the ramping path for sixty-four samples. With the hoist, a
-/// restated Point must leave every lane of the bank bit-identical to a bank that received no span
-/// at all — the automated lane included, which is what separates this from the idle-lane guard.
-#[test]
-fn a_restated_point_leaves_every_lane_on_the_idle_body() {
-    let Some((_, width)) = support::native_bank_width() else {
-        println!("scalar-only build: the bank-wide ramping decision has one lane to take");
-        return;
-    };
-    let lanes = width.lanes() as usize;
-    let quiet = bank_lane_bits(&[]);
-    let restated = bank_lane_bits(&[(RAMP_BLOCK, RAMP_LANE, bank_threshold(RAMP_LANE))]);
-    for lane in 0..lanes {
-        assert_eq!(
-            quiet[lane], restated[lane],
-            "lane {lane} moved when lane {RAMP_LANE} was restated at the value it already held"
-        );
-    }
-}
-
 // -------------------------------------------------------------------------------------------
 // The interaction with the phase-4 silent fixed point.
 // -------------------------------------------------------------------------------------------

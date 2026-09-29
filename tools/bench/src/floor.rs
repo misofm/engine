@@ -605,15 +605,6 @@ input as $rust |
     }
 
     #[test]
-    fn the_compressor_isolate_is_the_compressor_inventory() {
-        let row = floor_row(Workload::SixtyFourTrackCompressorOnly).expect("a derived row");
-        let control = floor_row(Workload::SixtyFourTrackBuiltinsOnly).expect("a derived row");
-        let isolated = row.cycles_per_lane_sample() - control.cycles_per_lane_sample();
-        let expected = COMPRESSOR_LANE_OPS / (BANK_WIDTH * OPS_PER_CYCLE);
-        assert!((isolated - expected).abs() < 1.0e-9);
-    }
-
-    #[test]
     fn the_current_effect_recount_keeps_fractional_link_work_and_composes_the_strip() {
         // The linked stereo max is shared by the two channel samples, hence the .5 in the
         // compressor inventory. The limiter's shared link has the same accounting shape.

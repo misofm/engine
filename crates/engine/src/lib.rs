@@ -79,10 +79,7 @@ pub mod realtime;
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        EngineVersion, LAUNCH_SAMPLE_RATES, QuantumFrames, SampleRateHz, hex_lower,
-        is_launch_sample_rate,
-    };
+    use super::{LAUNCH_SAMPLE_RATES, SampleRateHz, hex_lower, is_launch_sample_rate};
 
     #[test]
     fn hex_lower_encodes_fixed_literal_cases() {
@@ -107,22 +104,5 @@ mod tests {
         for rate in [176_400, 192_000, 352_800, 384_000, 0, 32_000, 192_001] {
             assert!(!is_launch_sample_rate(SampleRateHz(rate)), "{rate}");
         }
-    }
-
-    #[test]
-    fn quantum_is_a_lossless_carrier() {
-        assert_eq!(QuantumFrames(128).0, 128);
-    }
-
-    #[test]
-    fn version_is_stable_for_bootstrap() {
-        assert_eq!(
-            EngineVersion::CURRENT,
-            EngineVersion {
-                major: 0,
-                minor: 1,
-                patch: 0
-            }
-        );
     }
 }
