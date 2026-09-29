@@ -297,3 +297,140 @@ The shipped module is unchanged: `01dd58be…` both at base and after.
   longer match. CI runs neither; #1050 retires the harness.
 - **Pins still in place.** The `memoryBytes` status pins (1,376,256 / 1,441,792) are outside the
   21 rows and unchanged.
+
+## Sol verdict, attempt 1
+
+**FAIL.** The capi-owned half of the completeness oracle is exact and strong, and the ceilings
+discriminate. But the oracle takes two of the charges it should check from the accounting under test,
+and both hide real under-counts that have no owner. The branch also does not compile `-p capi` on
+the batch head.
+
+Reviewer: Sol, 2026-09-29. I merged `a568b121` into a scratch detached checkout of
+`codex/batch-slim-3` at `1c3b0531` (main plus #1029, #1030, #1031, #1033, #1039, #1059, #1061). No
+timed workload was run.
+
+### Findings, by severity
+
+1. **HIGH: the oracle trusts two host-allocated charges, and both hide under-counts with no owner
+   (amendment 2: "never against the report it tests").** `HostHalf::capi_charges()` subtracts
+   two figures from the accounting instead of the bytes the owners hold:
+   - `catalog_charge()`, the provider's own `resource_report`, which is the number capi adds into
+     `capi_retained_bytes`;
+   - `canonical_bytes()`, the `len` capi charges.
+
+   Neither term is observed. The two under-counts:
+   - **Parameter catalog.** It holds 129,708 bytes and is charged 125,100: 4,608 bytes are uncharged in
+     capi's own row on the EQ fixture, on x86 and on AArch64 under qemu. The only test that sees this
+     is `#[ignore]`d, and its reason says "host-core follow-up to #1060". No issue number or
+     spec exists for it (`gh issue list` and `.github/ISSUE_SPECS/`).
+   - **Canonical JSON.** `session::canonical::write_canonical` grows a `String` and never
+     shrinks it. The EQ canonical is 16,712 bytes in a 32,768-byte allocation, so 16,056 bytes are
+     uncharged. Soft-clip leaves 14,315 uncharged and the browser identity fixture 129. This is the
+     evidence's "compiled-model estimate under-count", but the estimate itself is right. With
+     `shrink_to_fit()` added in `write_canonical`, the observed store fits its estimate: 22,013 ≤
+     23,039 (EQ) and 2,867 ≤ 2,869 (identity).
+     - capi stays covered only because it charges that one allocation twice: in the graph cap
+       through `compiled_model_bytes`, and in its epoch row.
+     - host-web charges it once, so the browser under-counts by up to about the canonical length.
+       For the 290 KB console fixture that is on the order of 200 KB.
+     - No test documents this, and no issue owns it.
+
+   **Fix:**
+   - The oracle observes the catalog and canonical allocations (`freed_by_drop`, as it already does
+     for the source control table) and compares them with their charges.
+   - Each under-count is then either fixed under a scope amendment, or carried as a named, derived
+     expected delta that cites its own issue number (like the decode-field rounding). The fixes are
+     small: in host-core, shrink the enum-choice vectors or charge their capacity; in session,
+     `shrink_to_fit` or `into_boxed_str`.
+   - Root files the issues.
+2. **HIGH (merge): semantic conflict with #1059.** `Budget::ceiling` matches `Backend::Scalar`
+   exhaustively, but #1059 gates that variant behind `lane/test-support` and forbids exhaustive
+   matches outside `lane`.
+   - On the merge, `cargo test --locked -p capi` fails with E0599. So does gate 4's corrected
+     command (`--test-package capi --test-package host-web` with the host-core features): its test
+     build has no `lane/test-support`.
+   - CI's `test-debug-a`, `aarch64-debug` and `--all-features` legs compile it anyway, because
+     feature unification enables the variant (`cargo tree -e features -i lane`).
+   - **Fix:** `match Backend::current().width() { 8 => …, 4 => …, _ => panic!(…) }`. Everything
+     below was run with that one-line change.
+3. **MEDIUM: the engine-plan half is a loose bound, and the graph runtime has no allocator
+   oracle.**
+   - **Slack** (engine rows minus the observed plan): 128,317 bytes on EQ (the plan holds 138,973
+     against 267,290 charged), 128,834 on soft-clip and 12,233 on the browser identity fixture.
+   - **Plant, uncharged table.** An uncharged `Box<[u64]>` of 16 words per unit in graph `Runtime`
+     (1,808 bytes) left every capi and host-web test green. At 2,048 words per unit (229,392 bytes)
+     the oracle went red.
+   - **Plant, dropped row.** `estimate.rs` `graph_metadata_bytes → Some(0)` drops a 56 KB row. After
+     #1060 no capi or host-web test sees it. Only graph-compiler's own fixture and digest pins do
+     (3 tests).
+   - **Builtins is covered.** A dropped builtin vector charge was caught only by builtins-compiler's
+     own allocator oracle (`tests/allocation_tracker.rs`).
+   - This is not a regression: base only re-pinned `size_of` moves, and amendment 2 allows a bound.
+     But decision 4's "every allocation is counted" does not hold for the prepared plan.
+   - **Needs:** a tracked successor (a graph-runtime allocator oracle, or per-owner attribution),
+     cited in the spec and in the oracle's doc. The browser identity fixture should join the oracle
+     loop now.
+4. **LOW:** `direct-oracle.mjs`'s non-print `deepEqual`, and the WebDriver harness's run and
+   `--check` modes, now always fail. This is disclosed. #1050 retires the harness, but
+   `direct-oracle.mjs` stays, so its non-print path needs removing or teaching the ceilings.
+5. **LOW:** the only stated reason for 10 % headroom is that the brief gives it as an example. The
+   history supports it: past moves were +1.2 %, +2.3 %, +11 % and +48 %. Cite that, or get an owner
+   figure.
+
+### What holds
+
+- **Merge.** It is textually clean: `docs/TARGET_MATRIX.md` auto-merged and reads correctly. The
+  only semantic conflict is finding 2. The retained rows on the merge equal the base values at every
+  width, so #1059 moved none.
+- **Completeness of capi-owned storage is exact.**
+  - Dropping the `crate::Plan` row is red: 131,378 against 130,978, and tiny-frame 57,700 against
+    57,300.
+  - An 8-byte over-charge is red: 131,378 against 131,386. This is the right result, because the
+    check is an equality between two measurements.
+  - The source control table is exact.
+  - The counting allocator is thread-local and armed only around the observed window. Compile
+    spawns no thread (every `spawn` in the path is test-only), so harness allocations can neither
+    mask nor add.
+- **The ceilings discriminate.**
+  - capi: doubling the telemetry tables (configuration items counted per byte instead of per
+    `u16`) is red, 338,988 > 300,800, while the oracle stays green, as it should for charged
+    growth.
+  - browser: `MAXIMUM_COMMAND_RECORDS` 256 → 512 is red, bridge metadata 1,238,279 > 1,160,384 and
+    bridge retained 1,258,788 > 1,182,976.
+  - The self-test catches all 32 of its mutations.
+- **Per-width rows.**
+  - Simd8 (x86): the values match the table.
+  - Simd4 (AArch64 under qemu-user, rust-std sysroot in scratch): capi 8 passed, host-web 1 passed,
+    and the values equal the table. The double-live graph requirement is 510,900.
+  - wasm32 `simd128`: all 8 rows are within their ceilings.
+- **Double-live.** The live requirements reproduce the old totals: 524,172, 24,252, 7,868, 15,120,
+  432, 34,902, 204,311 and 58,804.
+- **Gate 4, re-run with corrected arguments.**
+  - `estimate.rs`: 6 caught → 4. The two lost are `graph_metadata_bytes → Some(0)` and `Some(1)`,
+    both still caught by graph-compiler (finding 3).
+  - host-core, 36 accounting mutants (`resource_report`, `bytes`, the control table, the ID arena,
+    `retained_bytes`, the factory bytes): caught 12 → 12, the identical set.
+  - capi `runtime/compile.rs`, 78 mutants: 56 → 58. None is lost, and two are new.
+- **Audit hash.** It still prints `dbac3f3d…`. Nothing live asserts it; the only mentions are
+  historical specs. The fields of the record that jq does not check are constants, and the
+  `accepted_*_sha256` strings are never compared with the fixtures. The audit's own PCM and meter
+  comparison stays, and the probe mutations pass (9 operations). The ruling permits removing the
+  hash.
+- **Gates on the merge:**
+  - fmt; clippy `--workspace --all-targets --all-features -D warnings`; `cargo check` with all
+    features;
+  - capi and host-web tests in dev (with and without `host-web/test-support`), under
+    `test-debug-a`'s features and in release;
+  - `check-browser-expected-resources.py --artifacts` and its `--self-test`;
+    `check-web-audioworklet.sh`; `test-web-audioworklet.sh`; `check-scalar-oracle-absent.py --wasm`
+    (module `a4a2383f…`);
+  - `check-capi-abi.sh` and its `--self-test`;
+  - `console-workload` in release; `trace-builtins-graph-audit.sh`;
+  - all 54 lint and routing policy commands, run with `python3 -B`;
+  - the x86 `cargo test --no-run` of the `run-aarch64-tests.sh debug` package and feature set.
+
+**Attempt 2 passes when:**
+- finding 2 is fixed;
+- the oracle observes the catalog and canonical allocations;
+- each of the three gaps (catalog, canonical and graph runtime) is either fixed under a scope
+  amendment or tracked by an issue number cited in the test and in this spec.
