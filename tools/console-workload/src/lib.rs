@@ -2338,7 +2338,6 @@ mod tests {
         );
         let before = resource.runtime_field_bytes
             + resource.emitted_op_layout_delta_bytes * emitted
-            + resource.observation_runtime_state_bytes
             + resource.response_binding_table_bytes
             + resource.response_binding_string_bytes;
         assert_eq!(
@@ -2787,8 +2786,7 @@ mod tests {
                     "handle {handle}: the selected entry computes the sample peak only"
                 );
                 assert_eq!(
-                    (snapshot.reset_generation, snapshot.observation_generation),
-                    (0, 0),
+                    snapshot.reset_generation, 0,
                     "handle {handle}: a permanent observer is never re-armed"
                 );
                 assert_eq!(
