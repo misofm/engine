@@ -91,3 +91,156 @@ figures stay arithmetic until S4 reports.
   -D warnings` and the focused tests before every checkpoint. Commit on the batch branch in
   CI-conscious batch mode.
 - Every new test names the plausible defect that turns it red (AGENTS.md "Test value").
+
+## Attempt 1 evidence
+
+Terra, attempt 1, on `codex/1085-console-benchmark-rows` from `6fdf5db2`. Implementation commit
+`e1b0fed3`. No timed run was made.
+
+### What was added
+
+Five native session rows, `CONSOLE_STRIP_WORKLOADS` in `tools/console-workload/src/lib.rs`, emitted
+after the metered row (outside `WORKLOADS`, the wasm arm's address space):
+
+| Kind | Tracks | Fixture | Synthetic | `strip_layout` | `input_signal` |
+|---|---|---|---|---|---|
+| `ten_track_ragged_strip` | 10 | intended | yes | `pre_insert:eq+compressor,post_insert:limiter` | `tone` |
+| `thirteen_track_ragged_strip` | 13 | intended | yes | same | `tone` |
+| `sixteen_track_strip` | 16 | intended | yes | same | `tone` |
+| `sixty_four_track_app_shape` | 64 | app (new) | no | `inserts:eq+compressor` | `tone` |
+| `sixty_four_track_console_sparse` | 64 | intended | yes | intended | `odd_tracks_silent` |
+
+- The strip-at-N rows take the intended fixture's first N tracks through `synthesise_tracks`, as the
+  ragged nine-track row does. With `nine_track_ragged_strip` and `sixty_four_track_console` they are
+  N in {9, 10, 13, 16, 64}.
+- The app shape is a committed document, `fixtures/session/v1/console-sixty-four-track-app.json`.
+  It is derived by the new `scripts/derive-app-console-fixture.py` on the existing derive pattern:
+  each track's exact EQ and compressor objects move from `simd1` to `dynamic`, the limiter is
+  dropped, and both effects are bypassed on tracks with index 2 mod 3 (21 of 64).
+  `scripts/check-console-fixtures.sh` regenerates it, compares it byte for byte and checks its
+  witness. It is a document rather than a strip edit because the V8 arm must boot the bytes the
+  native row renders. Its record adds a bypass group, `bypass_pattern: "index_mod_3_is_2"` and
+  `bypassed_tracks: 21`. The group is read from the compiled session (`SessionRuntime::bypass_census`)
+  and is pinned by `bypass_session_shape`.
+- The sparse row feeds exact zeros to every odd track through a per-track `InputSignal`. A new test
+  reads the plan's lane table and shows that every bank holds active and silent lanes. The run
+  asserts, and the aggregate validator requires, that its digest differs from both the all-active
+  row and the idle row.
+- V8: the web mixing benchmark times two documents after its three arms, alternated per
+  observation: the intended console and the app shape. The record states them under `documents`,
+  with facts, percentiles and digest. Their facts come from the `mixing_automation_controls`
+  example (native `Workload` methods and the bypass census), not from a transcription. The harness
+  checks each fixture's per-track layout and bypass against those facts before it boots anything.
+  `web-mixing-automation-lib.jq` pins the documents and requires both rounds to agree on them,
+  timings aside. No per-N V8 rows.
+
+**`strip_layout` is layout-neutral.** Every row was rewritten by decision 12's lowering
+(`simd1` -> `pre_insert`, `dynamic` -> `inserts`, `simd2` -> `post_insert`). The placement,
+automation and mixing records follow, because they print `Workload::strip_layout`. The rack-token
+spellings are now refused. For the app-shape kind alone, native and V8 accept both
+`inserts:eq+compressor` and `pre_insert:eq+compressor`.
+
+**Floors.** The five rows are `not_derived`, with no control (`floor.rs`, `floor_pins`):
+- a remainder's width factor depends on whether it renders per node or padded, and the nine-track
+  factor holds only for a remainder of one;
+- bypassed and silent lanes have no inventory;
+- H5 stays arithmetic until S4.
+
+**Counts.** 60 records (44 session). Updated in the aggregate validator, the mutation suite's
+index map, `run-console-benchmark.sh` and the preflight's `records_required`. `timed_subjects` is
+unchanged (1).
+
+**Paths outside the brief's list, with reasons.**
+- `tools/bench/src/floor.rs`: its `floor_row` match is exhaustive, and the Rust/jq floor-parity
+  test iterates every row.
+- The app fixture, its derive script and `check-console-fixtures.sh`: root's instruction for new
+  fixtures.
+- `scripts/web-mixing-automation-lib.jq`: the V8 record's validator.
+
+### Digests
+
+Existing rows are unchanged. All console-workload pins pass, including `chain_shape.rs`'s four and
+the console row's `fe5bed9b...`. New 64-block pins are in
+`the_console_strip_rows_render_their_pinned_bits`. They hold in both release and debug:
+
+| Row | 64-block digest |
+|---|---|
+| `ten_track_ragged_strip` | `1eed6377a0b5c773fb35d979f76600d4ad2403796a4fdbc1ce481e11742a4fe3` |
+| `thirteen_track_ragged_strip` | `17b2451b59f71b6504cb905cafb11742edcecd5be10dd1f86759541bb201bb12` |
+| `sixteen_track_strip` | `5e1b97df9b46df231895344b4da03c02a8ff9e6cead10f356b001b9c2144c293` |
+| `sixty_four_track_app_shape` | `c740fa2dd904d26dfc104ff4b202b81454757b8428c54e83092d93fe441bd4c3` |
+| `sixty_four_track_console_sparse` | `1f18f156705313c098e2e8310a848f63eeb23085c971239991dffd2b4a8de334` |
+
+Every console slice is class A per lane, so these pins are the bits S4's rows must render again.
+
+### Gates
+
+- `scripts/operator/preflight-console-benchmark.sh --step console-strip-base`: PASS,
+  `workload_launches: 0`, `records_required: 60`. The two aborts it logs are its own
+  refusal probes.
+- `scripts/test-console-benchmark.sh`: PASS. Six validator mutations were each run and each turned
+  the suite red. The count after each is the number of failing cases:
+  - drop `bypass_session_shape`: 11;
+  - accept the old intended spelling: 20;
+  - drop the sparse aggregate rule: 1;
+  - drop the documents claim: 23;
+  - compare document timings across rounds: 2;
+  - accept any app layout: 3.
+- `bash scripts/check-bench-policy.sh` (1 timed subject) and `scripts/test-bench-policy.sh`: PASS.
+- `scripts/check-console-fixtures.sh` (intended, mono and app regenerated byte for byte) and
+  `check-console-benchmark-fixture.sh`: PASS.
+- `cargo test --locked --release -p console-workload`: all pass (lib 14, chain_shape 23 and the
+  rest). `cargo test --locked --release -p bench`: 13 pass, including
+  `the_console_strip_rows_print_their_facts_and_the_validator_pins_them`. `cargo test -p
+  session-validator`: pass, so the new fixture is canonical.
+- Each named red mutation in the new Rust tests was run and went red:
+  - silencing tracks 32 and above instead of odd tracks fails the sparse bank test and the sparse
+    pin;
+  - a census that ignores partial bypass fails the census test;
+  - taking the last N tracks fails the strip-at-N test and the pins.
+- V8, untimed:
+  - `run-web-mixing-automation-benchmark.sh prepare` built host_web.wasm `885aa117...` at
+    `e1b0fed3`, which is not the release pin;
+  - `preflight` passed: both documents booted, rendered audible bits, and gave distinct digests.
+  - A schema check ran a scratch copy of the harness with `OBSERVATIONS = 8`. Its timings were
+    discarded and the copy deleted. The record, with the counts restored to their frozen values,
+    passed `web-mixing-automation-validator.jq` with no refusal reason.
+- `cargo fmt --all --check`, `cargo clippy --locked --workspace --all-targets --all-features -- -D
+  warnings` and `cargo check --locked --workspace --all-targets`: clean.
+- Policy scripts, all ok:
+  - `check-session-policy`, `check-workspace-policy`, `check-env-vocabulary`,
+    `check-artifact-evidence-leak`, `check-realtime-policy` and `check-bench-preconditions`;
+  - with `python3 -B`: `check-script-reachability.py`, `check-ci-path-routing.py`,
+    `check-test-support-ci.py`, `check-release-shape.py` and `check-sdk-deletions.py`.
+
+### For S0 (#1086): the exact commands
+
+Run on a clean detached worktree of B0's merge commit. The native runner refuses untracked files,
+so run the native arm first. The V8 work directory must be outside the repository. Hold the
+operator's lock around both timed runs, and name it in the disposition.
+
+```bash
+git worktree add --detach /path/to/s0 <B0-merge-commit> && cd /path/to/s0
+LOCK=/path/to/operator/timing.lock   # name it in the disposition
+scripts/operator/preflight-console-benchmark.sh --step console-strip-base
+flock "$LOCK" scripts/operator/run-console-benchmark.sh --step console-strip-base
+W=$(mktemp -d)
+scripts/run-web-mixing-automation-benchmark.sh prepare "$W"
+scripts/run-web-mixing-automation-benchmark.sh preflight "$W"
+flock "$LOCK" scripts/run-web-mixing-automation-benchmark.sh run "$W" --step console-strip-base
+```
+
+Add `MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1` to a run only if its admissibility refuses the host,
+and report the resulting `uncontrolled` records as they are.
+
+The native records land in `artifacts/steps/console-strip-base/console-benchmark.*`. The V8 records
+land in `artifacts/steps/console-strip-base/web-mixing-automation.jsonl`, under `documents` in each
+round.
+
+### Notes for later slices
+
+- S1a has one more document to migrate (the app fixture). It must also port all three
+  `derive-*-console-fixture.py` scripts and `console_model`'s strip edits, which read
+  `simd1`/`dynamic`/`simd2`.
+- S4 expects the app document's EQ and compressor in `console.pre_insert` after the migration. The
+  validators already accept that spelling.
