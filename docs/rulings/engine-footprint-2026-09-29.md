@@ -31,3 +31,5 @@ production caller; #882 planned to reuse it to skip per-track meter work while n
 meter lease. Ruling: **remove it (#1080) and rescope #882** to a simpler lease-driven skip of
 per-track meter work, built on the ordinary path's existing lease flag, if measurement shows the
 saving is worth it. Removing the machinery also removes render's only path to the deallocator.
+#1080 also removed the builtins meter's matching half (`restart_observation`, `observation_generation`),
+which the removal left unused.
