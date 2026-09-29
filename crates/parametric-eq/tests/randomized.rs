@@ -23,6 +23,7 @@ conformance::randomized_effect_test!(
     craft: None,
     known: &[conformance::Known::BindDeclinesBeforeValidating],
     banks_natively: true,
+    witness: true,
 );
 
 /// The same differential without the narrowing: red until the known defect's issue lands.
@@ -41,6 +42,7 @@ fn the_bank_renders_its_scalar_instances_including_the_known_defect() {
         craft: None,
         known: &[],
         banks_natively: true,
+        witness: true,
     });
     conformance::assert_reached(&coverage);
 }

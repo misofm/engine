@@ -130,4 +130,5 @@ conformance::randomized_effect_test!(
     craft: Some(craft),
     known: &[],
     banks_natively: true,
+    witness: true,
 );

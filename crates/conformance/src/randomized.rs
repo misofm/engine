@@ -109,6 +109,12 @@ pub struct EffectDifferential<'a> {
     /// delay, which renders per node everywhere). A bank that stops binding natively is then red
     /// rather than a quiet fall back to scalar instances.
     pub banks_natively: bool,
+    /// Whether the effect derives the channel-symmetry witness (`channel_symmetry`,
+    /// `lane_channel_symmetry`) rather than taking the contract's declining default. On a mono
+    /// scenario, whose every parameter, automation span and restore is channel-symmetric, the
+    /// witness must then hold on every lane, and a scalar instance must render its two channels
+    /// alike.
+    pub witness: bool,
 }
 
 /// What the differential reached. A test asserts the parts it relies on, so a generator that
@@ -155,6 +161,10 @@ pub struct DifferentialCoverage {
     pub crafted_restores: u64,
     /// Witness answers checked against a crafting hook's claim.
     pub witness_checks: u64,
+    /// Blocks on a mono scenario whose every lane's witness was required to hold, and held.
+    pub witness_holds: u64,
+    /// Whether the effect under test derives the witness.
+    pub witness: bool,
     /// State snapshots compared between the bank and its scalar instances.
     pub state_comparisons: u64,
     /// Unbypassed output blocks checked against the D7 bound.
@@ -189,6 +199,8 @@ impl DifferentialCoverage {
         self.refused_restores += other.refused_restores;
         self.crafted_restores += other.crafted_restores;
         self.witness_checks += other.witness_checks;
+        self.witness_holds += other.witness_holds;
+        self.witness |= other.witness;
         self.state_comparisons += other.state_comparisons;
         self.bounded_blocks += other.bounded_blocks;
         self.recoveries += other.recoveries;
@@ -207,6 +219,7 @@ pub fn run_effect_differential(spec: &EffectDifferential<'_>) -> DifferentialCov
     let mut total = DifferentialCoverage {
         audited,
         banks_natively: spec.banks_natively,
+        witness: spec.witness,
         ..DifferentialCoverage::default()
     };
     run_seeds(spec.test, spec.replay, spec.seeds, |seed| {
@@ -420,6 +433,15 @@ fn run_scalar(
                 }
             }
         }
+        if spec.witness && shape.mono {
+            for (lane, (oracle, twin)) in pairs.iter().enumerate() {
+                assert!(
+                    oracle.channel_symmetry() && twin.channel_symmetry(),
+                    "{context}: lane {lane}'s witness declined on a channel-symmetric scenario"
+                );
+            }
+            coverage.witness_holds += 1;
+        }
         let frames = draw.frames(quantum);
         let invalid = !shape.mono && draw.chance(1, 16);
         let chunk = (frames > 1 && !shape.hostile && !invalid && draw.chance(1, 2))
@@ -507,6 +529,15 @@ fn run_scalar(
                     left.iter().chain(&right).all(|word| within_d7_bound(*word)),
                     "{context}: lane {lane} wrote a word outside the D7 bound"
                 );
+            }
+            if spec.witness && shape.mono {
+                // The witness held and both planes carried one signal: one channel's work.
+                if let Some(frame) = first_difference(&left, &right) {
+                    panic!(
+                        "{context}: lane {lane}'s witness held on one signal, yet its channels \
+                         part at frame {frame}"
+                    );
+                }
             }
             if (small && chunk.is_none()) || block + 1 == spec.blocks {
                 assert_eq!(
@@ -767,6 +798,8 @@ fn run_width(
     // One planned reset per scenario, whatever the draws: a cheap effect's many seeds reach
     // resets by chance, an expensive effect's few seeds need not.
     let reset_at = draw.below(spec.blocks);
+    // A mono scenario stays channel-symmetric until a restore writes the channels apart.
+    let mut symmetric = shape.mono;
     for block in 0..spec.blocks {
         let context = format!("{width:?} block {block} at sample {first} ({shape:?})");
         // --- Block-boundary operations -------------------------------------------------------
@@ -789,7 +822,7 @@ fn run_width(
         }
         let terminal = hostile_block.is_some_and(|(at, _)| at == block);
         if draw.chance(1, 6) || (terminal && draw.chance(1, 2)) {
-            restore(
+            symmetric &= !restore(
                 spec,
                 draw,
                 shape,
@@ -803,6 +836,19 @@ fn run_width(
                 &context,
                 coverage,
             );
+        }
+
+        if spec.witness && symmetric {
+            for (lane, scalar) in scalars.iter().enumerate() {
+                assert!(
+                    scalar.channel_symmetry() && bank.lane_channel_symmetry(lane),
+                    "{context}: lane {lane}'s witness declined on a channel-symmetric scenario \
+                     (scalar {}, bank {})",
+                    scalar.channel_symmetry(),
+                    bank.lane_channel_symmetry(lane)
+                );
+            }
+            coverage.witness_holds += 1;
         }
 
         // --- Input -----------------------------------------------------------------------------
@@ -1484,7 +1530,7 @@ fn restore(
     metadata: &PreparedEffectMetadata,
     context: &str,
     coverage: &mut DifferentialCoverage,
-) {
+) -> bool {
     let lanes = scalars.len();
     let lane = draw.below(lanes);
     // Under `RampCutsMoveBits` a restore may not start a ramp on a lane the scenario keeps free
@@ -1584,6 +1630,7 @@ fn restore(
             "{context}: lane {lane}'s bank witness after a crafted restore"
         );
     }
+    scalar.is_ok() && payload.left != payload.right
 }
 
 /// The three-outcome rule on `bind_homogeneous_bank`, on cohorts built to break it.
@@ -1740,6 +1787,10 @@ pub fn assert_reached(coverage: &DifferentialCoverage) {
         "the effect bound no bank at the width this build executes: {coverage:?}"
     );
     assert!(
+        !coverage.witness || coverage.witness_holds > 0,
+        "the witness was never required on a mono scenario: {coverage:?}"
+    );
+    assert!(
         coverage.blocks > 0 && coverage.chunked_blocks > 0 && coverage.bounded_blocks > 0,
         "blocks were not compared whole, chunked and bounded: {coverage:?}"
     );
@@ -1767,7 +1818,7 @@ pub fn assert_reached(coverage: &DifferentialCoverage) {
 #[macro_export]
 macro_rules! randomized_effect_test {
     ($name:ident, $factory:expr, seeds: $seeds:expr, blocks: $blocks:expr, craft: $craft:expr,
-     known: $known:expr, banks_natively: $banks:expr $(,)?) => {
+     known: $known:expr, banks_natively: $banks:expr, witness: $witness:expr $(,)?) => {
         #[test]
         fn $name() {
             ::bench_support::alloc::assert_installed();
@@ -1786,6 +1837,7 @@ macro_rules! randomized_effect_test {
                 craft: $craft,
                 known: $known,
                 banks_natively: $banks,
+                witness: $witness,
             });
             println!("{coverage:#?}");
             $crate::assert_reached(&coverage);
