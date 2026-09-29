@@ -88,12 +88,9 @@ type ExportTable = Record<ExportName, (...args: (number | bigint)[]) => number |
 
 const SPECTRUM_HOP_CAPABILITY = "miso_engine_web_v1_spectrum_hop_capability";
 const SPECTRUM_HOP_BOOT = "miso_engine_web_v1_boot_with_spectrum_hop";
-const OBSERVATION_SPECTRUM_HOP_BOOT =
-  "miso_engine_web_v1_boot_with_observation_demand_and_spectrum_hop";
 const OPTIONAL_ADDITIVE_EXPORTS: ReadonlySet<string> = new Set([
   SPECTRUM_HOP_CAPABILITY,
   SPECTRUM_HOP_BOOT,
-  OBSERVATION_SPECTRUM_HOP_BOOT,
 ]);
 type SpectrumHopFrames = 256 | 512 | 1024 | 2048;
 type ExportFunction = (...args: (number | bigint)[]) => number | bigint;
