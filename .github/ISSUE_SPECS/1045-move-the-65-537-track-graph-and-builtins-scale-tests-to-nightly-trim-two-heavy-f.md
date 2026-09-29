@@ -897,3 +897,141 @@ worktree and checked it there. Host: `x86_64` (`x86-64-v3`), rustc 1.97.1, `CARG
 - **The check finding 1 asks for** would catch a cap in the compiler's builtin bank plan or its
   resource accounting above 65,535 tracks (PPLAN, PRES). Nothing else per PR plans banks at this
   size.
+
+## Attempt 4 evidence
+
+Terra, 2026-09-29, on `codex/1045-scale-tests-nightly` at `18e133dc`. There was no new merge;
+Sol's attempt-3 check merged batch 4 cleanly. Same host and hygiene as before; the load was
+19-50.
+
+### What changed
+
+- **`:91` now plans the compiler's builtin banks.** This is Sol's check from
+  `verify-1045/a3/scale-proposal.diff`, as written, with only an assertion message added.
+  - It runs before the constrained compile consumes `:91`'s prepared builtins.
+  - It calls `graph_builtin_bank_resource(Backend::current(), levels, SessionPoolClasses::from_session(&session))`,
+    with one dependency level for each of the three bankable stages. That call goes through
+    `planned_strip_banks`, then `plan_bank_groups`, then `builtin_bank_resource`.
+  - It asserts `bank_count == 3 × ceil(65,537 / lanes)`.
+  - `:91`'s doc comment now says so.
+- **`MUTATIONS.md`:** rows 1045-14 to 1045-16 are new. The builtin bank plan leaves the
+  residual list.
+
+### Plants
+
+Each plant went into a scratch copy of this tree. I ran `cargo test -p graph-compiler --test scale`
+(debug, with test-debug-a's features) and restored the tree between plants. The unmutated tree was
+GREEN before and after every plant. PPLAN and PRES are Sol's plants, re-typed into my script.
+
+| # | planted defect | per PR |
+|---|---|---|
+| PPLAN (1045-14) | `plan_bank_groups` refuses more than 65,535 candidates | **RED**, `:91`: `one node per track per stage, so ids are unique: DuplicateId`. **GREEN once reverted** |
+| PRES (1045-15) | `builtin_bank_resource` refuses more than 65,536 lanes | **RED**, `:91`: `the builtin bank plan at 65,537 tracks`. **GREEN once reverted** |
+| 1045-16 | `builtin_bank_resource` counts banks through a `u16` | GREEN. This is not a ceiling at this size: 3 × 8,193 banks fit in 16 bits. Discarded |
+
+### Per-PR cost
+
+All times are debug, under the timing lock, at load 36-50.
+
+| run | wall | CPU |
+|---|---:|---:|
+| `:91` with the check, alone (twice) | 17.2 s; 17.4 s | 16.5 s; 16.7 s |
+| `:91` without the check (attempt 3, load 32) | 17.1 s | 16.3 s |
+| the banked test, alone | 6.4 s | 6.2 s |
+| the routed test, alone | 3.5 s | 3.3 s |
+| the binary, default threads | 17.6 s | 26.5 s |
+| the binary, `--test-threads 4` | 17.3 s | 25.8 s |
+
+- **The check's cost.** It adds about 1 s to `:91`. Sol measured 16.2 s → 17.5 s at load 10-17;
+  my two runs are too noisy to split out a smaller number.
+- **The three crates' suites** (graph-compiler, builtins-compiler, session, with test-debug-a's
+  features):
+
+  | profile | wall | CPU | tests |
+  |---|---:|---:|---|
+  | dev | 54.4 s | 207 s | 264 passed, 7 ignored |
+  | release | 9.9 s | 14.9 s | 264 passed, 7 ignored |
+
+  In dev, the `scale` binary took 17.0 s; in release, 3.9 s.
+
+### The final layer map
+
+This is Sol's attempt-3 sweep: every layer the brief named, with this attempt's result filled in.
+"Per PR" means a test in `test-debug-a`, which is required through `qualification`'s verdict and
+which the router runs for every edit to these crates.
+
+| layer | held per PR | by | otherwise |
+|---|---|---|---|
+| session parse (P1) | no | - | no cheap test: a 65,537-track document is 93.7 MB and takes 19.3 s to parse in debug. It predates #1045; successor B below |
+| session compile | yes | `scale_transaction.rs`, `:91` (P2) | - |
+| builtin preparation | yes | `:91` (P4, 1045-6, 1045-7) | - |
+| graph compile, front end | yes | `:91` (1045-1, -2, -3, P3a) | - |
+| graph compile, back end (topo, timings, buffers, estimate) and P3b | no | - | no public entry; it needs the unconstrained compile (+16-28 s). Nightly: `:160` |
+| builtin bank plan | **yes (attempt 4)** | `:91`'s check (PPLAN, PRES) | - |
+| builtin bank lowering (`into_graph_artifact_with_banks`) and `into_bound` (P5b) | no | - | moderate: 13.4 s of debug CPU to lower a hand-built plan, 28.5 s with bind and render. It is width-bounded per bank, and the layers on either side are held. Nightly: `:160` |
+| bank attachment | yes (attempt 3) | the banked hand-built test (PBANK) | - |
+| graph bind and render | yes (attempt 2) | both hand-built tests (P5, P6, 1045-11) | - |
+| #962 quadratics | no | - | no reliable per-PR clock. Nightly: `:160`'s 60 s bound (RED at 231 s and 451 s) |
+| A2, the accounting count through a `u16` | no | - | needs the 65,537-track allocation tracker. Nightly: the 65,537 row |
+| host-core preparation, before the graph compile | no, and never was | - | yes, 4.5 s, but outside #1045's paths: successor A below |
+| capi prepare, host-web boot | no, and never was | - | no cheap test: both parse the JSON document (19.3 s). Successor B below |
+
+### Proposed successors (root files these; not #1045's regressions)
+
+- **A. Hold host-core preparation above 65,535 tracks per PR.** `prepare_host_runtime` runs
+  per-track stages before the graph compile: the count check, track-to-source mapping, effects
+  and builtins. A ceiling there is green per PR, before and after #1045.
+  - Sol's probe, `verify-1045/a3/probe_host_1045.rs`, compiles 65,537 tracks and then prepares
+    them with `maximum_builtin_retained_bytes = 1`. It refuses with exactly
+    `builtin.resource.limit $.builtin_compile_caps` in 4.5 s of debug, so any host cap placed
+    earlier would change that refusal.
+  - Paths: `crates/host-core/tests/`.
+- **B. Parse, capi prepare and host-web boot above 65,535 tracks.** No test parses a document
+  this large, anywhere.
+  - A 65,537-track document is 93.7 MB, and `parse_session_json` takes 19.3 s of it in debug
+    (Sol's `probe_parse_1045.rs`). capi prepare and host-web boot pay that parse too.
+  - `session/tests/descriptive_scale.rs` parses 65,536 tracks, but it is `#[ignore]`d and nothing
+    schedules it.
+  - The likely shape is a nightly job, or one release-mode parse shared by the three entries.
+
+### Gates re-run
+
+- **Build checks:** `cargo fmt --all --check`, `cargo check --workspace --all-targets
+  --all-features` and `cargo clippy --workspace --all-targets --all-features -- -D warnings` all
+  pass with no warnings.
+- **The three crates in dev and release:** pass (above).
+- **Policy scripts:** 54 pass.
+  - That is every `scripts/check-*`, with the Python ones under `python3 -B`. The ones that
+    need an argument ran with `--self-test`; the V8 spill check ran with `--check-toolchain`.
+  - It also includes `test-workspace-policy.sh`, `test-ci-path-routing.py` and
+    `test-graph-policy.sh`, plus `check-workspace-policy.sh` (which carries #1052's
+    source-scrape lint) and `check-graph-determinism.sh`.
+  - Two were not run: `check-sdk-types.sh` (no `sdk/node_modules` here) and
+    `check-web-boot-budget.mjs` (it needs a built module).
+- **Not re-run:** the nightly commands, the mutation passes and the #966/#970 reverts. Product
+  code, `nightly.yml` and the nightly tests are unchanged since attempt 2, and Sol re-ran the
+  nightly commands on the batch-4 merge.
+
+### Test value
+
+`:91`'s bank-plan check catches a ceiling in the compiler's builtin bank plan or its resource
+accounting above 65,535 tracks (PPLAN, PRES). Nothing else plans banks at this size per PR.
+
+### Remaining risk (replaces attempt 3's list)
+
+These are caught nightly only, at most a day late (amendment 5):
+
+- the graph compile's back end and P3b;
+- builtin bank lowering and `into_bound` (P5b);
+- #962's quadratic compile and bind (the 60 s bound);
+- A2.
+
+These are outside #1045:
+
+- successors A and B;
+- #1002's memory claim;
+- #967's banked-and-routed bind.
+
+### Lines
+
+Attempt 4: `scale.rs` +38/−2, `MUTATIONS.md` +11/−7, and this spec.

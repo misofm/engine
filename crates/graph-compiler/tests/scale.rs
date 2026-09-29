@@ -101,14 +101,50 @@ fn builtin_caps() -> BuiltinCompileCaps {
 /// sits one below the graph this session lowers to, so the refusal is also a count of that graph
 /// at 65,537 tracks: a compiled track ceiling adds a second diagnostic, whatever its code, and a
 /// narrowed track index that drops any track's nodes fits under the cap and is no longer refused.
-/// Bind and render at this size are [`a_hand_built_65_537_input_plan_binds_and_renders_every_track`]'s;
-/// the unconstrained compile runs nightly, in release under a wall-clock bound, in
+/// It also plans the compiler's builtin banks for the same builtins, the step the refused compile
+/// never reaches, so a ceiling in that plan or its resource accounting refuses here. Bank
+/// attachment, bind and render at this size are the hand-built tests' below; the unconstrained
+/// compile runs nightly, in release under a wall-clock bound, in
 /// [`compiles_and_binds_65_537_tracks_with_builtins`].
 #[test]
 fn compiles_65_537_tracks_or_rejects_only_a_configured_resource() {
     let session = scale_session();
     let builtins = prepare_session_builtins(&session, &[], builtin_caps())
         .expect("constrained scale builtins");
+
+    // The compiler's builtin bank plan for these builtins, which the refused compile never
+    // reaches: every track's three bankable stages planned into full-width banks at the width
+    // this build renders at (issue #1045, Sol's attempt-3 check).
+    let backend = Backend::current();
+    let lanes = u64::from(
+        BankWidth::for_backend(backend)
+            .expect("native builds render in banks")
+            .lanes(),
+    );
+    let levels: Vec<DependencyLevel> = [
+        TrackStage::PostInputBuiltins,
+        TrackStage::PostFader,
+        TrackStage::PostMatrix,
+    ]
+    .into_iter()
+    .zip(1..)
+    .map(|(stage, level)| DependencyLevel {
+        level,
+        nodes: track_stages(stage),
+    })
+    .collect();
+    let bank_resource = builtins
+        .graph_builtin_bank_resource(
+            backend,
+            &levels,
+            &builtins_compiler::SessionPoolClasses::from_session(&session),
+        )
+        .expect("the builtin bank plan at 65,537 tracks");
+    assert_eq!(
+        bank_resource.bank_count,
+        3 * u64::from(TRACKS).div_ceil(lanes),
+        "every track's three bankable stages are planned into banks"
+    );
 
     let mut constrained = graph_caps();
     constrained.maximum_nodes = NODES - 1;

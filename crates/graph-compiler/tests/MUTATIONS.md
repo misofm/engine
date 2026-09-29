@@ -298,8 +298,8 @@ passes 9 of 9.
 
 Per PR, `scale.rs` keeps the constrained compile of
 `compiles_65_537_tracks_or_rejects_only_a_configured_resource`, in the debug job, with its node cap
-one below the graph the session lowers to (`7 × 65,537 + 2`) and its one expected diagnostic, and
-adds `a_hand_built_65_537_input_plan_binds_and_renders_every_track`, which binds and renders a
+one below the graph the session lowers to (`7 × 65,537 + 2`) and its one expected diagnostic, plans
+the compiler's builtin banks for its prepared builtins (attempt 4), and adds `a_hand_built_65_537_input_plan_binds_and_renders_every_track`, which binds and renders a
 hand-built plan of 65,537 routed track inputs (attempt 2), and
 `a_hand_built_65_537_track_plan_attaches_builtin_banks_binds_and_renders`, which attaches 65,537
 post-input stages as builtin banks through `with_builtin_banks` at `Backend::current()`'s width,
@@ -326,8 +326,12 @@ command run and the tree restored. Host: `x86_64` (`x86-64-v3`, eight-lane banks
 | 1045-11 | render walks its active units through a `u16` index (`unit as u16 as usize`) | as 1045-9 | RED: the hand-built plan's output is not the track count (`[NaN, NaN]`: the units above 65,535 alias lower ones and the output is never written) | not run |
 | 1045-12 (Sol's PBANK) | `with_builtin_banks` refuses more than 65,535 bank members in all | `graph/src/lib.rs` | RED: the banked hand-built plan, `65,537-track bank attachment: InvalidMembers`. GREEN unmutated, before and after. 1045-9, 1045-10 and 1045-11 turn it red too | RED (Sol): `validated fixed builtin member shape: InvalidMembers` |
 | 1045-13 | `with_builtin_banks` keeps only the banks a `u16` bank index reaches | as 1045-12 | GREEN, and not a ceiling at this size: 65,537 tracks make 8,193 banks at `Simd8`. Discarded, like Sol's P6b | not run |
+| 1045-14 (Sol's PPLAN) | the cohort planner `plan_bank_groups` refuses more than 65,535 candidates | `rack-compiler/src/lib.rs` | RED: `:91`'s bank plan, `one node per track per stage, so ids are unique: DuplicateId`. GREEN unmutated, before and after | RED (Sol) |
+| 1045-15 (Sol's PRES) | `builtin_bank_resource` refuses more than 65,536 lanes | `builtins-compiler/src/lib.rs` | RED: `:91`, `the builtin bank plan at 65,537 tracks`. GREEN unmutated | RED (Sol) |
+| 1045-16 | `builtin_bank_resource` counts its banks through a `u16` | as 1045-15 | GREEN, and not a ceiling at this size: 3 × 8,193 banks fit in 16 bits. Discarded | not run |
 
-Still nightly only, at most a day late (the issue's accepted residual): a ceiling that copies the
-node cap's code *and* path (Sol's P3b), a ceiling in `into_bound` (1045-4, Sol's P5b), and #962's
-quadratic compile and bind (1045-5). Each needs the unconstrained compile, 28-40 s plus 13-17 s of
-bind in debug. Bank attachment left this list in attempt 3 (1045-12).
+Still nightly only, at most a day late (the issue's accepted residual): the graph compile's back
+end and a ceiling that copies the node cap's code *and* path (Sol's P3b), builtin bank lowering and
+`into_bound` (1045-4, Sol's P5b), and #962's quadratic compile and bind (1045-5). Each needs the
+unconstrained compile, 28-40 s plus 13-17 s of bind in debug. Bank attachment left this list in
+attempt 3 (1045-12), the compiler's builtin bank plan in attempt 4 (1045-14, 1045-15).
