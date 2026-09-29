@@ -309,3 +309,137 @@ S1d's handoff notes carry the name maps.
 | S1d | #1097 |
 | S2 | #1098 |
 | S4 | #1099 |
+
+## Sol verdict, R0
+
+**FAIL.** Sol checked R0 (`5c58f280`..`6fdf5db2` on `5a1421a3`) against the owner's decisions of
+2026-09-29, `AGENTS.md`, and the code at `6fdf5db2`.
+
+The ruling and the AGENTS.md amendment are sound. The slice plan is not: the final slice cannot run
+the before/after measurement the owner asked for, and one allowed merge order leaves a slice with a
+gate it can never pass. Both need only small spec edits, so R0 attempt 2 is a spec-only revision.
+
+**What passed.**
+- **Decision 12** states every owner decision listed in the brief:
+  - the slot declaration and the per-track `console` array;
+  - `inserts`, with no console sidechain;
+  - always banked, padded, with no threshold;
+  - per-lane bypass through the shunt;
+  - the silence trade-off, accepted and measured;
+  - the session key and the rename;
+  - the in-place V1 amendment, with tap codes 1-7 renamed, `dynamic` -> `inserts` keeping code 2
+    and field 7, `simd1`/`simd2` retired and `console` appended;
+  - class A by lowering.
+- **AGENTS.md** reads consistently.
+  - The tap codes are unchanged, so "stable enum values" still holds.
+  - The #163 sentence is now scoped to inserts.
+  - The third-party paragraph says "insert only".
+  - The coupling clause restates the existing rule.
+  - Nothing claims a later generation.
+- **The dependency graph** has no cycle.
+  - B0 merging before P1, P2a and S1a, with S0 timed on B0's commit, measures the unchanged engine.
+  - The no-push window from S1a to S1d is sound. The SDK writes `simd1`/`dynamic`/`simd2`
+    (`sdk/src/internal/session-json.ts:113-117`) until S1d.
+- **The #887, #888 and #889 amendments** are correct and leave all three closable.
+- **S1r:** the two exports are sealed contract identity.
+  - They are class 2 in `docs/rulings/de-versioning-inventory.md:84`.
+  - They are pinned in `scripts/check-abi-layout-v1.py:116-117` and the layout JSON.
+  - Renaming the stem while keeping `_v1` is lawful under the version-suffix rule, which governs
+    only the suffix and forbids only a later generation. #1063 and #313 are the in-place
+    precedents.
+- **S1a's migration rule** was checked on all 18 sessions: only `reduced-nobus-from-970-verify.json`
+  folds. Sol read every bank factory the eligibility list names. Each declines only on a
+  program-key, width or sidechain mismatch, so S2's "unreachable for valid sessions" holds.
+- **Gates.** All exited 0 at `6fdf5db2`:
+  - `check-workspace-policy.sh` and `check-session-policy.sh`;
+  - `check-script-reachability.py`;
+  - `check-ci-path-routing.py` and `test-ci-path-routing.py`;
+  - `check-env-vocabulary.sh`;
+  - `check-dsp-research.sh` and `check-builtins-listening.sh`.
+
+  The route is `full`, because AGENTS.md changed.
+
+### Findings, ranked by severity
+
+**High: S4 has no owner for the owner-required after-measurement.** The owner's draft asks for
+native and V8 rows, rerun "on the new shape". Two changes that measurement needs belong to no
+slice.
+
+- **The app-shape row never moves into the console.**
+  - S1a's migration sends every `dynamic` rack to `inserts` (S1a, checkpoint 2).
+  - S4 changes no code, yet it says that the app shape "now puts EQ -> compressor in
+    `console.pre_insert`".
+- **The V8 harness breaks, and no gate would notice.**
+  - What reads the old shape: `scripts/web-mixing-automation-benchmark.mjs:136-140` reads
+    `track[["simd1","dynamic","simd2"][control.rack]]` from `console-sixty-four-track-mono.json`.
+  - What writes the old codes: `:279` writes `control.rack` (0, 1 or 2, from
+    `tools/console-workload/examples/mixing_automation_controls.rs`) into the record's rack byte.
+  - What breaks it: S1a migrates that fixture, and S1c retires rack bytes 0 and 2.
+  - Why it goes unnoticed: neither slice is authorized to touch these files, and no CI gate runs
+    the real harness (`scripts/test-console-benchmark.sh` stubs it).
+  - The consequence: S4's gate 1 fails at preflight.
+
+*Fix:*
+- S1a owns the app-shape builder's move into `console.pre_insert`, as a stated exception to the
+  mechanical rule that keeps the 2-mod-3 bypass pattern, and it owns the V8 harness's fixture
+  lookup.
+- S1c owns the harness's and the controls example's rack codes.
+- Both add these untimed gates:
+  - `bash scripts/run-web-mixing-automation-benchmark.sh preflight WORKDIR`;
+  - `bash scripts/operator/preflight-console-benchmark.sh --step <scratch>`.
+
+**Medium: S1r's gate 3 is impossible if S1a merges first.** The umbrella lets S1a precede S1r:
+"implemented in parallel", with "S1r merges before S1c and S1d". After S1a, the SDK suites,
+`check-sdk-generated.sh` and the SDK-driven browser qualification are red until S1d.
+
+*Fix:* state "S1r merges before S1a".
+
+**Medium: a required gate breaks and no slice is authorized to fix it.**
+- `scripts/check-console-benchmark-fixture.sh` is the required qualification step "Console
+  benchmark fixture integrity". It reads `simd1`/`dynamic`/`simd2` and `tap == "post_matrix"`
+  from `console-sixty-four-track.json`, which S1a migrates.
+- S1a neither authorizes nor gates it.
+- `scripts/check-console-fixtures.sh` is one of S1a's gates, but it is not an authorized path.
+
+*Fix:* add both scripts to S1a's authorized paths and gates.
+
+**Medium: attribution in decision 12's "Naming".** The ruling presents the rename of the sealed
+exports, the four boot words and the SDK's public live-console API as the owner's ruling. The owner's
+decision, as briefed, renames the *internal* live-console names.
+
+*Fix:* either cite the owner's words, or mark S1r checkpoint 2 as R0's reading pending owner
+confirmation, as the ruling already does for `builtins`/`"strip"`.
+
+**Medium: no batch plan.** "The batch is not pushed until S1d's gates pass" implies one batch from R0
+through S1d: twelve or more slices, over several days, with no closed issue. Name the boundaries:
+
+1. R0 and B0, with S0's records;
+2. P1 and P2a-P2e;
+3. S1r, S1a, S1b, S1c and S1d, pushed once;
+4. S2 and S4.
+
+**Low.**
+- **The parallelism note is wrong.** "P1, P2a, S1a and S1r touch different crates" is not true:
+  - P1 and P2a both edit `effect-contract/src/lib.rs` and `graph-compiler/src/banks.rs`;
+  - P1, S1a, S1r and S1c all edit `effect-compiler/src/prepare.rs`;
+  - P1 and S1r both edit `rack/src/lib.rs`.
+
+  Sequence them.
+- **S2's gates conflict.** Gate 2 renders console slots per node, but the guarantee and gate 3 forbid
+  a per-node console plan. Scope `console.slot.unbanked` to production backends and exempt the
+  test-only `Scalar` oracle (#1059).
+- **Unowned docs and specs.**
+  - `docs/BUILTINS_AND_METERING_V1.md:4, 171-174` spells the old taps. S1a should own it.
+  - The open specs #973 and #987 use the rack vocabulary.
+- **Stale text.**
+  - Decision 12 still says "until root numbers it".
+  - The umbrella's Slices section still says "Root renumbers the files once the GitHub issues exist".
+- **#887's dependency.** Its amendment says "Dependencies. Still none", but its new gate 4 reads B0's
+  N = 10 and 13 rows.
+- **S1c's gate 4 does not say how to run it.** Run the qualification without `--sdk-root`
+  (`hosts/host-web/qualification/run.mjs:837-858`) for the raw-export subset.
+- **GitHub bodies lag.** #1084 has the old `CONSOLE-*` filenames and no issue map, and #887-#889
+  have no amendments. Sync them after the batch push.
+- **The draft verification sits in the wrong folder.** `DRAFT-console-strip-VERIFY.md` is in
+  `.github/ISSUE_SPECS/`, which the README keeps for open-issue specs only (#1040). Move it when
+  convenient.
