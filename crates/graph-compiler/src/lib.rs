@@ -324,7 +324,7 @@ mod tests {
     use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
     use effect_compiler::{
         EffectCompileCaps, EffectPreparedSession, EffectRack, attach_effect_console,
-        launch_native_effect_registry, prepare_native_session_effects,
+        launch_native_effect_registry, prepare_native_session_effects_with_console_eligibility,
     };
     use effect_contract::{
         EffectControlLane, EffectControlRecord, EffectPrepareError, EffectProcessBlock,
@@ -352,6 +352,36 @@ mod tests {
         atomic::{AtomicBool, AtomicU64, Ordering},
     };
 
+    /// The console eligibility list these tests prepare with: the launch list, plus the
+    /// conformance crate's test double `conformance.delay`, which no production registry carries.
+    /// Many fixtures here put that double in a lowered SIMD rack, which decision 12 spells as a
+    /// console slot; every host still prepares through the launch list alone, and
+    /// `effect_compiler`'s own tests hold the refusal of anything else.
+    const TEST_CONSOLE_ELIGIBLE: [&str; 7] = [
+        effect_compiler::CONSOLE_ELIGIBLE_EFFECTS[0],
+        effect_compiler::CONSOLE_ELIGIBLE_EFFECTS[1],
+        effect_compiler::CONSOLE_ELIGIBLE_EFFECTS[2],
+        effect_compiler::CONSOLE_ELIGIBLE_EFFECTS[3],
+        effect_compiler::CONSOLE_ELIGIBLE_EFFECTS[4],
+        effect_compiler::CONSOLE_ELIGIBLE_EFFECTS[5],
+        "conformance.delay",
+    ];
+
+    /// `effect_compiler::prepare_native_session_effects` for these tests: the same preparation,
+    /// with [`TEST_CONSOLE_ELIGIBLE`] admitting the conformance test double as a console slot.
+    fn prepare_native_session_effects(
+        session: &session::CompiledSession,
+        registry: &NativeEffectRegistry,
+        caps: EffectCompileCaps,
+    ) -> Result<EffectPreparedSession, effect_compiler::EffectDiagnosticSet> {
+        prepare_native_session_effects_with_console_eligibility(
+            session,
+            registry,
+            caps,
+            &TEST_CONSOLE_ELIGIBLE,
+        )
+    }
+
     const SESSION_FIXTURE: &str = include_str!("../../../fixtures/session/v1/canonical.json");
     const CONSOLE_SIXTY_FOUR_TRACK_FIXTURE: &str =
         include_str!("../../../fixtures/session/v1/console-sixty-four-track.json");
@@ -369,12 +399,12 @@ mod tests {
         let track_id = StableId::parse(&format!("a{}", "a".repeat(126))).expect("127-byte ID");
         let expected_stages = [
             (SendTap::Input, TrackStage::Input),
-            (SendTap::PostInputBuiltins, TrackStage::PostInputBuiltins),
-            (SendTap::PostSimd1, TrackStage::PostSimd1),
-            (SendTap::PostDynamic, TrackStage::PostDynamic),
-            (SendTap::PostSimd2PreFader, TrackStage::PostSimd2PreFader),
+            (SendTap::PostInput, TrackStage::PostInputBuiltins),
+            (SendTap::InsertSend, TrackStage::PostSimd1),
+            (SendTap::InsertReturn, TrackStage::PostDynamic),
+            (SendTap::PreFader, TrackStage::PostSimd2PreFader),
             (SendTap::PostFader, TrackStage::PostFader),
-            (SendTap::PostMatrix, TrackStage::PostMatrix),
+            (SendTap::PostPan, TrackStage::PostMatrix),
         ];
         for (tap, expected_stage) in expected_stages {
             assert_eq!(
@@ -764,8 +794,193 @@ mod tests {
         })
     }
 
-    /// The nine-track EQ fixture, plus a tenth track, with a compressor in every `simd1` slot and a
-    /// routed sidechain on `eq8`.
+    /// Decision 12 for these tests: fold every console slot into each track's inserts --
+    /// `pre_insert` ahead of the track's own inserts, `post_insert` after them -- so a test can
+    /// edit one track's chain. The lowered chain, and so the render, is unchanged (#163's
+    /// placement invariance); only the internal rack moves, to `Dynamic`.
+    fn fold_console_into_inserts(model: &mut session::SessionModel) {
+        let lowered: Vec<_> = model
+            .tracks
+            .iter()
+            .map(|track| {
+                let racks = model.lower_track(track);
+                let mut chain = racks.pre_insert;
+                chain.extend_from_slice(racks.inserts);
+                chain.extend(racks.post_insert);
+                chain
+            })
+            .collect();
+        model.console.pre_insert.clear();
+        model.console.post_insert.clear();
+        for (track, chain) in model.tracks.iter_mut().zip(lowered) {
+            track.console.clear();
+            track.inserts.effects = chain;
+        }
+    }
+
+    /// The `console.pre_insert` slots each track's inserts would be if the chain is a legal
+    /// console strip: the same IDs, identities, qualities and link modes on every track, keyless,
+    /// and on [`TEST_CONSOLE_ELIGIBLE`]. `None` otherwise.
+    fn inserts_as_console_strip(
+        model: &session::SessionModel,
+    ) -> Option<Vec<session::ConsoleSlot>> {
+        let declaration = |effect: &session::Effect| {
+            (
+                effect.id.clone(),
+                effect.identity.clone(),
+                effect.quality,
+                effect.link_mode,
+            )
+        };
+        let first: Vec<_> = model
+            .tracks
+            .first()?
+            .inserts
+            .effects
+            .iter()
+            .map(declaration)
+            .collect();
+        let legal = model.tracks.iter().all(|track| {
+            track
+                .inserts
+                .effects
+                .iter()
+                .map(declaration)
+                .eq(first.iter().cloned())
+                && track.inserts.effects.iter().all(|effect| {
+                    effect.sidechain == SidechainDeclaration::None
+                        && matches!(&effect.identity, EffectIdentity::Native { effect_id }
+                            if TEST_CONSOLE_ELIGIBLE.contains(&effect_id.as_str()))
+                })
+        });
+        legal.then(|| {
+            first
+                .into_iter()
+                .map(
+                    |(slot, identity, quality, link_mode)| session::ConsoleSlot {
+                        slot,
+                        identity,
+                        quality,
+                        link_mode,
+                    },
+                )
+                .collect()
+        })
+    }
+
+    /// Move every track's inserts into `console.pre_insert` when they are a legal console strip
+    /// ([`inserts_as_console_strip`]), so the chain lowers to `RackId::Simd1`; otherwise leave them
+    /// as inserts (`RackId::Dynamic`). This is #1093's migration rule for a builder that makes one
+    /// chain per track: a chain every track shares is a console slot, and one that differs is an
+    /// insert. Returns whether the chain became console.
+    fn settle_uniform_inserts(model: &mut session::SessionModel) -> bool {
+        assert!(
+            model.console.slots().next().is_none(),
+            "the console is empty"
+        );
+        let Some(slots) = inserts_as_console_strip(model) else {
+            return false;
+        };
+        model.console.pre_insert = slots;
+        for track in &mut model.tracks {
+            track.console = core::mem::take(&mut track.inserts.effects)
+                .into_iter()
+                .map(|effect| session::ConsoleEntry {
+                    slot: effect.id,
+                    bypass: effect.bypass,
+                    params: effect.params,
+                })
+                .collect();
+        }
+        true
+    }
+
+    /// [`settle_uniform_inserts`] for a caller that claims its chain is a shared strip: panics
+    /// when it is not, since the claim about the fixture is then false.
+    fn settle_inserts_as_pre_insert(model: &mut session::SessionModel) {
+        assert!(
+            settle_uniform_inserts(model),
+            "the inserts are not a shared, keyless, eligible strip"
+        );
+    }
+
+    /// Place per-track chains -- the three lowered racks, in chain order -- in decision 12's
+    /// shape, by the rule #1093 migrated the checked-in documents with: a first or third chain
+    /// that every track declares identically (IDs, identity, quality, link mode), keyless and on
+    /// [`TEST_CONSOLE_ELIGIBLE`], becomes `console.pre_insert` or `console.post_insert` with each
+    /// track's bypass and params in its entries; every other chain folds into the track's inserts
+    /// in chain order. Chain order, and so the rendered bits, never change.
+    fn place(model: &mut session::SessionModel, chains: Vec<[Vec<session::Effect>; 3]>) {
+        let console =
+            |rack: usize| -> Option<Vec<session::ConsoleSlot>> {
+                let declaration = |effect: &session::Effect| {
+                    (
+                        effect.id.clone(),
+                        effect.identity.clone(),
+                        effect.quality,
+                        effect.link_mode,
+                    )
+                };
+                let first: Vec<_> = chains.first()?[rack].iter().map(declaration).collect();
+                let uniform =
+                    chains.iter().all(|track| {
+                        track[rack].iter().map(declaration).eq(first.iter().cloned())
+                    && track[rack].iter().all(|effect| {
+                        effect.sidechain == SidechainDeclaration::None
+                            && matches!(&effect.identity, EffectIdentity::Native { effect_id }
+                                if TEST_CONSOLE_ELIGIBLE.contains(&effect_id.as_str()))
+                    })
+                    });
+                uniform.then(|| {
+                    first
+                        .into_iter()
+                        .map(
+                            |(slot, identity, quality, link_mode)| session::ConsoleSlot {
+                                slot,
+                                identity,
+                                quality,
+                                link_mode,
+                            },
+                        )
+                        .collect()
+                })
+            };
+        let (pre, post) = (console(0), console(2));
+        model.console.pre_insert = pre.clone().unwrap_or_default();
+        model.console.post_insert = post.clone().unwrap_or_default();
+        let entry = |effect: session::Effect| session::ConsoleEntry {
+            slot: effect.id,
+            bypass: effect.bypass,
+            params: effect.params,
+        };
+        assert_eq!(
+            model.tracks.len(),
+            chains.len(),
+            "one chain triple per track"
+        );
+        for (track, [first, second, third]) in model.tracks.iter_mut().zip(chains) {
+            let mut entries = Vec::new();
+            let mut inserts = Vec::new();
+            if pre.is_some() {
+                entries.extend(first.into_iter().map(entry));
+            } else {
+                inserts.extend(first);
+            }
+            inserts.extend(second);
+            if post.is_some() {
+                entries.extend(third.into_iter().map(entry));
+            } else {
+                inserts.extend(third);
+            }
+            track.console = entries;
+            track.inserts.effects = inserts;
+        }
+    }
+
+    /// The nine-track EQ fixture, plus a tenth track, with a compressor as every track's insert
+    /// and a routed sidechain on `eq8`. The sidechain makes the strip per-track (a console slot
+    /// takes none, decision 12), so the compressors are inserts; the fixtures derived below that
+    /// drop it settle their strips back into `console.pre_insert`.
     ///
     /// #964: the builtins compile in as identities (`identity_builtins`). The base fixture's
     /// `pan: {left: 1, right: 1}` sums both lanes into the right output, where a bank that crossed
@@ -776,6 +991,7 @@ mod tests {
         let mut model =
             parse_session_json(PARAMETRIC_EQ_NINE_TRACK_FIXTURE).expect("accepted base fixture");
         identity_builtins(&mut model);
+        fold_console_into_inserts(&mut model);
         let mut tail = model.tracks[7].clone();
         tail.id = StableId::parse("eq9").expect("stable tail id");
         model.tracks.push(tail);
@@ -783,11 +999,11 @@ mod tests {
         tail_route.id = StableId::parse("eq9-main").expect("stable route id");
         tail_route.source = RouteSource::Track {
             track_id: StableId::parse("eq9").expect("stable tail id"),
-            tap: SendTap::PostMatrix,
+            tap: SendTap::PostPan,
         };
         model.routes.push(tail_route);
         for track in &mut model.tracks {
-            let effect = &mut track.simd1.effects[0];
+            let effect = &mut track.inserts.effects[0];
             effect.id = StableId::parse("compressor").expect("stable effect id");
             effect.identity = EffectIdentity::Native {
                 effect_id: StableId::parse("miso.compressor").expect("compressor id"),
@@ -796,34 +1012,37 @@ mod tests {
             effect.sidechain = SidechainDeclaration::None;
         }
         // `eq8` remains in the accepted graph but must never enter the homogeneous bank.
-        model.tracks[8].simd1.effects[0].sidechain = SidechainDeclaration::Routed(Sidechain {
+        model.tracks[8].inserts.effects[0].sidechain = SidechainDeclaration::Routed(Sidechain {
             source: RouteSource::Track {
                 track_id: StableId::parse("eq0").expect("stable source id"),
-                tap: SendTap::PostMatrix,
+                tap: SendTap::PostPan,
             },
             port_id: StableId::parse("sidechain-in").expect("stable sidechain port"),
         });
         model
     }
 
-    /// The compressor fixture with every compressor moved from SIMD-1 to the **dynamic** rack.
-    ///
-    /// Nothing else moves: same effect ids, same parameters, same routes, same routed sidechain on
-    /// `eq8`. The two racks a compressor is *not* in are empty on every track, so both placements
-    /// describe the same signal chain -- `input -> builtins -> simd1 -> dynamic -> simd2 -> fader`
-    /// with exactly one non-identity stage in it. That is what lets
-    /// `rack_placement_changes_the_bank_but_never_the_samples` be a bit test instead of a
-    /// tolerance.
+    /// The compressor fixture, whose compressors are already every track's insert (the
+    /// **dynamic** rack): kept as a name for the tests that are about that placement.
     fn accepted_dynamic_rack_compressor_fixture() -> session::SessionModel {
-        let mut model = accepted_compressor_graph_fixture();
-        for track in &mut model.tracks {
-            assert!(
-                track.dynamic.effects.is_empty() && track.simd2.effects.is_empty(),
-                "the compressor must be the only stage, or the placements are not comparable"
-            );
-            track.dynamic.effects = core::mem::take(&mut track.simd1.effects);
-        }
+        let model = accepted_compressor_graph_fixture();
+        assert!(model.console.slots().next().is_none());
         model
+    }
+
+    /// The same ten compressors, sidechain-free, once as the `console.pre_insert` slot (lowered to
+    /// SIMD-1) and once as every track's insert (the dynamic rack). Both lowered racks a
+    /// compressor is *not* in are empty on every track, so the two placements describe the same
+    /// signal chain -- `input -> builtins -> pre_insert -> inserts -> post_insert -> fader` with
+    /// exactly one non-identity stage in it. That is what lets
+    /// `rack_placement_changes_the_bank_but_never_the_samples` be a bit test instead of a
+    /// tolerance, and it is decision 12's console-versus-insert placement witness.
+    fn keyless_compressor_placements() -> (session::SessionModel, session::SessionModel) {
+        let mut inserts = accepted_compressor_graph_fixture();
+        inserts.tracks[8].inserts.effects[0].sidechain = SidechainDeclaration::None;
+        let mut console = inserts.clone();
+        settle_inserts_as_pre_insert(&mut console);
+        (console, inserts)
     }
 
     /// Compile one accepted model twice: once against the real registry (banks where it can) and
@@ -1100,7 +1319,7 @@ mod tests {
     fn accepted_gate_expander_graph_fixture() -> session::SessionModel {
         let mut model = accepted_compressor_graph_fixture();
         for track in &mut model.tracks {
-            let effect = &mut track.simd1.effects[0];
+            let effect = &mut track.inserts.effects[0];
             effect.id = StableId::parse("gate-expander").expect("stable effect id");
             effect.identity = EffectIdentity::Native {
                 effect_id: StableId::parse("miso.gate-expander").expect("gate/expander id"),
@@ -1112,7 +1331,7 @@ mod tests {
     fn accepted_true_peak_limiter_graph_fixture() -> session::SessionModel {
         let mut model = accepted_compressor_graph_fixture();
         for (index, track) in model.tracks.iter_mut().enumerate() {
-            let effect = &mut track.simd1.effects[0];
+            let effect = &mut track.inserts.effects[0];
             effect.id = StableId::parse("true-peak-limiter").expect("limiter effect id");
             effect.identity = EffectIdentity::Native {
                 effect_id: StableId::parse("miso.true-peak-limiter").expect("limiter id"),
@@ -1147,13 +1366,15 @@ mod tests {
                 },
             ];
         }
+        // Keyless and identical on every track: the strip is a console slot (decision 12).
+        settle_inserts_as_pre_insert(&mut model);
         model
     }
 
     fn accepted_multiband_compressor_graph_fixture() -> session::SessionModel {
         let mut model = accepted_compressor_graph_fixture();
         for track in &mut model.tracks {
-            let effect = &mut track.simd1.effects[0];
+            let effect = &mut track.inserts.effects[0];
             effect.id = StableId::parse("multiband-compressor").expect("stable effect id");
             effect.identity = EffectIdentity::Native {
                 effect_id: StableId::parse("miso.multiband-compressor")
@@ -1168,7 +1389,7 @@ mod tests {
     fn accepted_soft_clip_graph_fixture() -> session::SessionModel {
         let mut model = accepted_compressor_graph_fixture();
         for (index, track) in model.tracks.iter_mut().enumerate() {
-            let effect = &mut track.simd1.effects[0];
+            let effect = &mut track.inserts.effects[0];
             effect.id = StableId::parse("soft-clip").expect("stable effect id");
             effect.identity = EffectIdentity::Native {
                 effect_id: StableId::parse("miso.soft-clip").expect("soft-clip id"),
@@ -1191,13 +1412,15 @@ mod tests {
                 },
             ];
         }
+        // Keyless and identical on every track: the strip is a console slot (decision 12).
+        settle_inserts_as_pre_insert(&mut model);
         model
     }
 
     fn accepted_transient_shaper_graph_fixture() -> session::SessionModel {
         let mut model = accepted_compressor_graph_fixture();
         for (index, track) in model.tracks.iter_mut().enumerate() {
-            let effect = &mut track.simd1.effects[0];
+            let effect = &mut track.inserts.effects[0];
             effect.id = StableId::parse("transient-shaper").expect("stable effect id");
             effect.identity = EffectIdentity::Native {
                 effect_id: StableId::parse("miso.transient-shaper").expect("transient-shaper id"),
@@ -1225,13 +1448,15 @@ mod tests {
                 },
             ];
         }
+        // Keyless and identical on every track: the strip is a console slot (decision 12).
+        settle_inserts_as_pre_insert(&mut model);
         model
     }
 
     fn accepted_delay_graph_fixture() -> session::SessionModel {
         let mut model = accepted_compressor_graph_fixture();
         for (index, track) in model.tracks.iter_mut().enumerate() {
-            let mut effect = track.simd1.effects.remove(0);
+            let mut effect = track.inserts.effects.remove(0);
             effect.id = StableId::parse("delay").expect("stable effect id");
             effect.identity = EffectIdentity::Native {
                 effect_id: StableId::parse("miso.delay").expect("delay id"),
@@ -1295,8 +1520,8 @@ mod tests {
                     value: [0.0, 0.5, 1.0][index % 3],
                 },
             ];
-            assert!(track.dynamic.effects.is_empty());
-            track.dynamic.effects.push(effect);
+            assert!(track.inserts.effects.is_empty());
+            track.inserts.effects.push(effect);
         }
         model
     }
@@ -2012,7 +2237,7 @@ mod tests {
 
     fn compile_fixture(plan_id: u64) -> PreparedGraphBuiltinsArtifact {
         let mut model = parse_session_json(SESSION_FIXTURE).expect("session fixture");
-        model.tracks[0].dynamic.effects.clear();
+        model.tracks[0].inserts.effects.clear();
         model.automation.clear();
         identity_builtins(&mut model);
         let compiled = compile_session(
@@ -2041,7 +2266,7 @@ mod tests {
 
     fn compile_reverse_route_submix_fixture(plan_id: u64) -> PreparedGraphBuiltinsArtifact {
         let mut model = parse_session_json(SESSION_FIXTURE).expect("session fixture");
-        model.tracks[0].dynamic.effects.clear();
+        model.tracks[0].inserts.effects.clear();
         model.automation.clear();
         identity_builtins(&mut model);
         model.submixes = vec![
@@ -2629,9 +2854,8 @@ mod tests {
     fn live_scalar_owner_bytes_are_published_and_capped_before_binding() {
         let prepare = |caps: GraphCompileCaps, controlled: bool| {
             let mut model = parse_session_json(SESSION_FIXTURE).expect("session fixture");
-            model.tracks[0].simd1.effects.clear();
-            model.tracks[0].dynamic.effects.clear();
-            model.tracks[0].simd2.effects.clear();
+            model.tracks[0].console.clear();
+            model.tracks[0].inserts.effects.clear();
             model.automation.clear();
             let session = compile_session(
                 &model,
@@ -3265,9 +3489,8 @@ mod tests {
             .map(|index| {
                 let mut track = base_track.clone();
                 track.id = StableId::parse(&format!("bank{index}")).expect("track id");
-                track.simd1.effects.clear();
-                track.dynamic.effects.clear();
-                track.simd2.effects.clear();
+                track.console.clear();
+                track.inserts.effects.clear();
                 track
             })
             .collect();
@@ -3280,7 +3503,7 @@ mod tests {
                 route.id = StableId::parse(&format!("slot-route-{index}")).expect("route id");
                 route.source = RouteSource::Track {
                     track_id: track.id.clone(),
-                    tap: SendTap::PostMatrix,
+                    tap: SendTap::PostPan,
                 };
                 route
             })
@@ -3585,24 +3808,27 @@ mod tests {
         rack_chain_fixture_edited(tracks, slots, depth_of, |_, _| {})
     }
 
-    /// [`rack_chain_fixture`], with `edit` applied to each track after its SIMD-1 chain is built.
+    /// [`rack_chain_fixture`], with `edit` applied to each track's three lowered chains after its
+    /// first chain is built, before [`place`] turns a chain every track shares into a console
+    /// section and folds any other into the inserts.
     fn rack_chain_fixture_edited(
         tracks: usize,
         slots: usize,
         depth_of: impl Fn(usize) -> usize,
-        edit: impl Fn(usize, &mut session::Track),
+        edit: impl Fn(usize, &mut [Vec<session::Effect>; 3]),
     ) -> (NativeEffectRegistry, EffectPreparedSession) {
         let mut model = parse_session_json(SESSION_FIXTURE).expect("fixture");
         let base_track = model.tracks[0].clone();
         let base_route = model.routes[0].clone();
+        let template = base_track.inserts.effects[0].clone();
         model.automation.clear();
+        let mut chains = Vec::with_capacity(tracks);
         model.tracks = (0..tracks)
             .map(|index| {
                 let mut track = base_track.clone();
                 track.id = StableId::parse(&format!("bank{index:02}")).expect("id");
-                track.dynamic.effects.clear();
-                let template = base_track.dynamic.effects[0].clone();
-                track.simd1.effects = (0..depth_of(index).min(slots))
+                track.inserts.effects.clear();
+                let first = (0..depth_of(index).min(slots))
                     .map(|slot| {
                         let mut effect = template.clone();
                         // Reverse-alphabetical on purpose: `EffectPreparedSession::entries` is
@@ -3623,10 +3849,13 @@ mod tests {
                         effect
                     })
                     .collect();
-                edit(index, &mut track);
+                let mut chain = [first, Vec::new(), Vec::new()];
+                edit(index, &mut chain);
+                chains.push(chain);
                 track
             })
             .collect();
+        place(&mut model, chains);
         model.routes = model
             .tracks
             .iter()
@@ -3636,7 +3865,7 @@ mod tests {
                 route.id = StableId::parse(&format!("chain-route{index:02}")).expect("id");
                 route.source = RouteSource::Track {
                     track_id: track.id.clone(),
-                    tap: SendTap::PostMatrix,
+                    tap: SendTap::PostPan,
                 };
                 route
             })
@@ -3670,10 +3899,16 @@ mod tests {
         (registry, effects)
     }
 
-    /// Two independently named tracks deliberately put the same two-slot program in different
+    /// Two independently named tracks deliberately carry the same two-slot program in different
     /// racks. The effect ids are reverse-alphabetical relative to each rack's session order, so a
     /// prepared-entry permutation can only be resolved by the production `(track, rack, effect)`
     /// handoff. The fixture's expected metadata below is a separate ownership table.
+    ///
+    /// Decision 12 (#1093): a track cannot carry its own chain in the first lowered rack, so the
+    /// program is the `console.pre_insert` strip -- which every track carries, `cross0` and
+    /// `cross1` alike -- and `cross1` also carries it as its inserts. The same program therefore
+    /// still sits in SIMD-1 on one track and in the dynamic rack on the other, and `cross1` now
+    /// adds the same two ids in two racks of one track: six owners in all.
     fn cross_index_effect_fixture() -> EffectPreparedSession {
         cross_index_effect_session(|_| {})
     }
@@ -3693,37 +3928,46 @@ mod tests {
         let base_track = model.tracks[0].clone();
         let base_route = model.routes[0].clone();
         model.automation.clear();
+        let program = |index: usize, offset: f32| {
+            (0..2)
+                .map(|slot| {
+                    let mut effect = base_track.inserts.effects[0].clone();
+                    effect.id = StableId::parse(&format!("chain{}", 1 - slot)).expect("effect id");
+                    effect.identity = EffectIdentity::Native {
+                        effect_id: StableId::parse("conformance.delay").expect("effect id"),
+                    };
+                    effect.params = vec![EffectParam {
+                        parameter_id: 1,
+                        channel: ParameterChannel::Both,
+                        unit: ParameterUnit::Linear,
+                        value: 0.8 + index as f32 * 0.17 + slot as f32 * 0.11 + offset,
+                    }];
+                    effect
+                })
+                .collect::<Vec<_>>()
+        };
         model.tracks = (0..2)
             .map(|index| {
                 let mut track = base_track.clone();
                 track.id = StableId::parse(&format!("cross{index}")).expect("track id");
-                track.simd1.effects.clear();
-                track.dynamic.effects.clear();
-                let effects = (0..2)
-                    .map(|slot| {
-                        let mut effect = base_track.dynamic.effects[0].clone();
-                        effect.id =
-                            StableId::parse(&format!("chain{}", 1 - slot)).expect("effect id");
-                        effect.identity = EffectIdentity::Native {
-                            effect_id: StableId::parse("conformance.delay").expect("effect id"),
-                        };
-                        effect.params = vec![EffectParam {
-                            parameter_id: 1,
-                            channel: ParameterChannel::Both,
-                            unit: ParameterUnit::Linear,
-                            value: 0.8 + index as f32 * 0.17 + slot as f32 * 0.11,
-                        }];
-                        effect
-                    })
-                    .collect::<Vec<_>>();
-                if index == 0 {
-                    track.simd1.effects = effects;
-                } else {
-                    track.dynamic.effects = effects;
-                }
+                track.inserts.effects.clear();
                 track
             })
             .collect();
+        // `cross0` runs the program in SIMD-1 only; `cross1` runs its own knobs of it there and the
+        // program again as its inserts.
+        place(
+            &mut model,
+            vec![
+                [program(0, 0.0), Vec::new(), Vec::new()],
+                [program(1, 0.05), program(1, 0.0), Vec::new()],
+            ],
+        );
+        assert_eq!(
+            model.console.pre_insert.len(),
+            2,
+            "the program is a console strip"
+        );
         model.routes = model
             .tracks
             .iter()
@@ -3733,7 +3977,7 @@ mod tests {
                 route.id = StableId::parse(&format!("cross-route{index}")).expect("route id");
                 route.source = RouteSource::Track {
                     track_id: track.id.clone(),
-                    tap: SendTap::PostMatrix,
+                    tap: SendTap::PostPan,
                 };
                 route
             })
@@ -3938,6 +4182,8 @@ mod tests {
             ("cross0", EffectRack::Simd1, "chain1") => 17,
             ("cross1", EffectRack::Dynamic, "chain0") => 23,
             ("cross1", EffectRack::Dynamic, "chain1") => 29,
+            ("cross1", EffectRack::Simd1, "chain0") => 31,
+            ("cross1", EffectRack::Simd1, "chain1") => 37,
             _ => panic!("unexpected cross-index ownership"),
         }
     }
@@ -4154,14 +4400,14 @@ mod tests {
             tracks,
             2,
             |_| 2,
-            |index, track| {
+            |index, chains| {
                 if index == tracks - 1 {
-                    track.simd1.effects[1].bypass = true;
+                    chains[0][1].bypass = true;
                 }
                 if index == 0 {
-                    let mut shadow = track.simd1.effects[1].clone();
+                    let mut shadow = chains[0][1].clone();
                     shadow.bypass = true;
-                    track.dynamic.effects.push(shadow);
+                    chains[1].push(shadow);
                 }
             },
         );
@@ -4275,7 +4521,7 @@ mod tests {
         );
         // This is the causal wrong-result control: the expected ownership table is written from
         // the session declarations, then attached to each prepared entry before the candidate
-        // permutation. A zip-by-entry implementation swaps these four metadata rows and the
+        // permutation. A zip-by-entry implementation swaps these six metadata rows and the
         // live control lane below, while the indexed production handoff preserves both.
         let mut declared = identity_cross_index_effect_fixture();
         for entry in &mut declared.entries {
@@ -4344,6 +4590,8 @@ mod tests {
             ("cross0", "simd1", "chain1", 17),
             ("cross1", "dynamic", "chain0", 23),
             ("cross1", "dynamic", "chain1", 29),
+            ("cross1", "simd1", "chain0", 31),
+            ("cross1", "simd1", "chain1", 37),
         ] {
             let needle = format!(
                 "node\teffect:{track}:{rack}:{effect}\teffect\t{latency}\tfinite:{}",
@@ -4527,7 +4775,7 @@ mod tests {
             sidechain
                 .report()
                 .rack_cohorts
-                .scalar_in(RackLocation::Simd1)
+                .scalar_in(RackLocation::Dynamic)
                 .iter()
                 .any(|member| member.track_id.as_str() == "eq8")
         );
@@ -4535,7 +4783,7 @@ mod tests {
             sidechain
                 .report()
                 .rack_cohorts
-                .bound_slots_in(RackLocation::Simd1)
+                .bound_slots_in(RackLocation::Dynamic)
                 .all(|slot| slot
                     .members
                     .iter()
@@ -4543,7 +4791,7 @@ mod tests {
         );
         let sidechain_destination = GraphNodeId::Effect(EffectNodeId {
             track_id: gid("eq8"),
-            rack: RackId::Simd1,
+            rack: RackId::Dynamic,
             effect_id: gid("compressor"),
         });
         let sidechain_edge = sidechain
@@ -4556,7 +4804,7 @@ mod tests {
                     &edge.id,
                     GraphEdgeId::EffectSidechain { effect, port }
                         if effect.track_id.as_str() == "eq8"
-                            && effect.rack == RackId::Simd1
+                            && effect.rack == RackId::Dynamic
                             && effect.effect_id.as_str() == "compressor"
                             && port == "sidechain-in"
                 )
@@ -4598,13 +4846,14 @@ mod tests {
                         member.effect_id.as_str() == format!("chain{}", 1 - slot).as_str()
                     })
             }));
+            // Chains of two depths are per-track, so they are inserts (decision 12).
             let (_registry, heterogeneous) = rack_chain_fixture(lanes, 2, |index| 1 + index % 2);
             let heterogeneous = compile_chain_fixture(heterogeneous);
             assert_eq!(
                 heterogeneous
                     .report()
                     .rack_cohorts
-                    .bound_slots_in(RackLocation::Simd1)
+                    .bound_slots_in(RackLocation::Dynamic)
                     .count(),
                 1
             );
@@ -4612,14 +4861,14 @@ mod tests {
                 heterogeneous
                     .report()
                     .rack_cohorts
-                    .scalar_in(RackLocation::Simd1)
+                    .scalar_in(RackLocation::Dynamic)
                     .len(),
                 lanes / 2
             );
             let heterogeneous_bound: Vec<_> = heterogeneous
                 .report()
                 .rack_cohorts
-                .bound_slots_in(RackLocation::Simd1)
+                .bound_slots_in(RackLocation::Dynamic)
                 .collect();
             assert_eq!(heterogeneous_bound[0].slot, 0);
             assert!(
@@ -4635,7 +4884,7 @@ mod tests {
             let scalar_members: Vec<_> = heterogeneous
                 .report()
                 .rack_cohorts
-                .scalar_in(RackLocation::Simd1)
+                .scalar_in(RackLocation::Dynamic)
                 .into_iter()
                 .collect();
             assert!(scalar_members.iter().all(|member| {
@@ -4661,12 +4910,12 @@ mod tests {
             panic!("delivery host must offer a bank width");
         };
         let lanes = width.lanes() as usize;
-        // Half the tracks run both slots, half run only the first.
+        // Half the tracks run both slots, half run only the first: per-track chains, so inserts.
         let (_registry, effects) = rack_chain_fixture(lanes, 2, |index| 1 + index % 2);
         let artifact = compile_chain_fixture(effects);
         let report = &artifact.report().rack_cohorts;
 
-        let groups: Vec<_> = report.groups_in(RackLocation::Simd1).collect();
+        let groups: Vec<_> = report.groups_in(RackLocation::Dynamic).collect();
         assert_eq!(
             groups.len(),
             1,
@@ -4683,11 +4932,11 @@ mod tests {
 
         // Slot 0 binds; slot 1 cannot, because the effect contract has no per-lane bypass mask
         // yet (#96 F7 / #95), so its members stay on the per-node scalar path.
-        let bound: Vec<_> = report.bound_slots_in(RackLocation::Simd1).collect();
+        let bound: Vec<_> = report.bound_slots_in(RackLocation::Dynamic).collect();
         assert_eq!(bound.len(), 1);
         assert_eq!(bound[0].slot, 0);
         assert_eq!(bound[0].members.len(), lanes);
-        assert_eq!(report.scalar_in(RackLocation::Simd1).len(), lanes / 2);
+        assert_eq!(report.scalar_in(RackLocation::Dynamic).len(), lanes / 2);
     }
 
     /// Twelve tracks that each carry one bankable SIMD-1 effect, plus a route per track.
@@ -4707,9 +4956,8 @@ mod tests {
             .map(|index| {
                 let mut track = base_track.clone();
                 track.id = StableId::parse(&format!("bank{index}")).expect("id");
-                track.dynamic.effects.clear();
-                track.simd1.effects = base_track.dynamic.effects.clone();
-                let effect = &mut track.simd1.effects[0];
+                track.inserts.effects = base_track.inserts.effects.clone();
+                let effect = &mut track.inserts.effects[0];
                 effect.id = StableId::parse("bank-delay").expect("id");
                 effect.identity = EffectIdentity::Native {
                     effect_id: StableId::parse("conformance.delay").expect("id"),
@@ -4732,11 +4980,13 @@ mod tests {
                 route.id = StableId::parse(&format!("bank-route{index}")).expect("id");
                 route.source = RouteSource::Track {
                     track_id: track.id.clone(),
-                    tap: SendTap::PostMatrix,
+                    tap: SendTap::PostPan,
                 };
                 route
             })
             .collect();
+        // The one shared effect is the `console.pre_insert` slot, lowered to SIMD-1.
+        settle_inserts_as_pre_insert(&mut model);
         // #964: identity builtins, so the bank-and-scalar comparison below sees each lane of each
         // track at the output rather than their pan-law sum in the right channel.
         identity_builtins(&mut model);
@@ -5822,7 +6072,7 @@ mod tests {
         // make the second block differ from the first, and the only stage between the dry impulse
         // and the bypass pins below.
         identity_builtins(&mut model);
-        let first_effect = &model.tracks[0].simd1.effects[0];
+        let first_effect = &model.tracks[0].console[0];
         assert!(first_effect.params.iter().any(|parameter| {
             parameter.parameter_id == 3
                 && parameter.channel == ParameterChannel::Left
@@ -6014,7 +6264,7 @@ mod tests {
 
         let mut bypass_model = model.clone();
         for track in &mut bypass_model.tracks {
-            track.simd1.effects[0].bypass = true;
+            track.console[0].bypass = true;
         }
         let bypass_session = compile_session(
             &bypass_model,
@@ -6104,18 +6354,21 @@ mod tests {
             "the queued fixture has one full bank"
         );
         model.quantum_frames = 32;
+        assert_eq!(model.console.pre_insert.len(), 1);
+        assert!(model.console.post_insert.is_empty());
+        assert_eq!(
+            model.console.pre_insert[0].identity,
+            EffectIdentity::Native {
+                effect_id: StableId::parse("miso.parametric-eq").expect("EQ identity")
+            }
+        );
         for track in &mut model.tracks {
-            assert_eq!(track.simd1.effects.len(), 1);
-            assert_eq!(
-                track.simd1.effects[0].identity,
-                EffectIdentity::Native {
-                    effect_id: StableId::parse("miso.parametric-eq").expect("EQ identity")
-                }
-            );
+            assert_eq!(track.console.len(), 1);
+            assert!(track.inserts.effects.is_empty());
             // Session preparation supplies the accepted canonical sixty-value seed. Keeping the
             // session rows empty makes every target in this fixture start from the same symmetric
             // state and leaves the target preparation as the only semantic edit path.
-            track.simd1.effects[0].params.clear();
+            track.console[0].params.clear();
         }
         model
     }
@@ -6697,7 +6950,7 @@ mod tests {
                 artifact
                     .report()
                     .rack_cohorts
-                    .bound_groups_in(RackLocation::Simd1)
+                    .bound_groups_in(RackLocation::Dynamic)
                     .count(),
                 expected_banks
             );
@@ -6705,7 +6958,7 @@ mod tests {
                 artifact
                     .report()
                     .rack_cohorts
-                    .scalar_in(RackLocation::Simd1)
+                    .scalar_in(RackLocation::Dynamic)
                     .len(),
                 expected_scalar_tails
             );
@@ -6713,7 +6966,7 @@ mod tests {
                 artifact
                     .report()
                     .rack_cohorts
-                    .scalar_in(RackLocation::Simd1)
+                    .scalar_in(RackLocation::Dynamic)
                     .iter()
                     .any(|id| id.track_id.as_str() == "eq8")
             );
@@ -6721,7 +6974,7 @@ mod tests {
                 artifact
                     .report()
                     .rack_cohorts
-                    .scalar_in(RackLocation::Simd1)
+                    .scalar_in(RackLocation::Dynamic)
                     .iter()
                     .any(|id| id.track_id.as_str() == "eq9")
             );
@@ -6731,7 +6984,7 @@ mod tests {
                 artifact
                     .report()
                     .rack_cohorts
-                    .scalar_in(RackLocation::Simd1)
+                    .scalar_in(RackLocation::Dynamic)
                     .len(),
                 10
             );
@@ -6811,7 +7064,7 @@ mod tests {
 
         let mut bypass_model = model.clone();
         for track in &mut bypass_model.tracks {
-            track.simd1.effects[0].bypass = true;
+            track.inserts.effects[0].bypass = true;
         }
         let bypass_session = compile_session(
             &bypass_model,
@@ -6855,7 +7108,10 @@ mod tests {
     fn mixed_causal_compressor_and_fixed_latency_limiter_keep_parallel_pdc_aligned() {
         let mut model = accepted_compressor_graph_fixture();
         let limiter_fixture = accepted_true_peak_limiter_graph_fixture();
-        model.tracks[9].simd1.effects[0] = limiter_fixture.tracks[9].simd1.effects[0].clone();
+        model.tracks[9].inserts.effects[0] = limiter_fixture
+            .lower_track(&limiter_fixture.tracks[9])
+            .pre_insert[0]
+            .clone();
         let session = compile_session(
             &model,
             CompileCaps {
@@ -6940,7 +7196,7 @@ mod tests {
         // Bypass keeps the limiter's fixed latency shunt, so the same zero-latency compressor
         // paths remain aligned with the real delayed processor and the output latency is stable.
         let mut bypass_model = model;
-        bypass_model.tracks[9].simd1.effects[0].bypass = true;
+        bypass_model.tracks[9].inserts.effects[0].bypass = true;
         let bypass_session = compile_session(
             &bypass_model,
             CompileCaps {
@@ -6979,7 +7235,10 @@ mod tests {
     fn mixed_causal_multiband_and_fixed_latency_limiter_keep_parallel_pdc_aligned() {
         let mut model = accepted_multiband_compressor_graph_fixture();
         let limiter_fixture = accepted_true_peak_limiter_graph_fixture();
-        model.tracks[9].simd1.effects[0] = limiter_fixture.tracks[9].simd1.effects[0].clone();
+        model.tracks[9].inserts.effects[0] = limiter_fixture
+            .lower_track(&limiter_fixture.tracks[9])
+            .pre_insert[0]
+            .clone();
         let session = compile_session(
             &model,
             CompileCaps {
@@ -7061,7 +7320,7 @@ mod tests {
         }
 
         let mut bypass_model = model;
-        bypass_model.tracks[9].simd1.effects[0].bypass = true;
+        bypass_model.tracks[9].inserts.effects[0].bypass = true;
         let bypass_session = compile_session(
             &bypass_model,
             CompileCaps {
@@ -7100,7 +7359,10 @@ mod tests {
     fn mixed_causal_gate_and_fixed_latency_limiter_keep_parallel_pdc_aligned() {
         let mut model = accepted_gate_expander_graph_fixture();
         let limiter_fixture = accepted_true_peak_limiter_graph_fixture();
-        model.tracks[9].simd1.effects[0] = limiter_fixture.tracks[9].simd1.effects[0].clone();
+        model.tracks[9].inserts.effects[0] = limiter_fixture
+            .lower_track(&limiter_fixture.tracks[9])
+            .pre_insert[0]
+            .clone();
         let session = compile_session(
             &model,
             CompileCaps {
@@ -7183,7 +7445,7 @@ mod tests {
         // Bypass keeps the limiter's fixed latency shunt, so the same zero-latency gate
         // paths remain aligned with the real delayed processor and the output latency is stable.
         let mut bypass_model = model;
-        bypass_model.tracks[9].simd1.effects[0].bypass = true;
+        bypass_model.tracks[9].inserts.effects[0].bypass = true;
         let bypass_session = compile_session(
             &bypass_model,
             CompileCaps {
@@ -7235,11 +7497,13 @@ mod tests {
     fn dynamic_rack_compressors_bank_and_render_bit_identically_to_the_per_node_path() {
         let model = accepted_dynamic_rack_compressor_fixture();
         assert_eq!(model.tracks.len(), 10);
-        assert!(model.tracks.iter().all(|track| {
-            track.simd1.effects.is_empty()
-                && track.simd2.effects.is_empty()
-                && track.dynamic.effects.len() == 1
-        }));
+        assert!(model.console.slots().next().is_none());
+        assert!(
+            model
+                .tracks
+                .iter()
+                .all(|track| { track.console.is_empty() && track.inserts.effects.len() == 1 })
+        );
         let (bank, per_node) = compile_bank_and_per_node(&model, "miso.compressor", 1_610);
 
         // Structure: the dynamic rack is now a bank location, and it fills exactly as SIMD-1 does.
@@ -7308,16 +7572,27 @@ mod tests {
     /// the arithmetic produces -- and, after phase 1b, it no longer decides how wide that
     /// arithmetic is either.
     ///
-    /// The same ten compressors are compiled twice, once placed in SIMD-1 and once in the dynamic
-    /// rack. Both racks a compressor is not in are empty identity boundaries, so the two sessions
-    /// are the same chain; both now bank the same number of lanes, and every rendered bit agrees.
-    /// This is the gate that would catch a bank kernel that silently depended on rack identity.
+    /// The same ten compressors are compiled twice, once as the `console.pre_insert` slot
+    /// (lowered to SIMD-1) and once as every track's insert (the dynamic rack): decision 12's
+    /// console-versus-insert placement witness. Both racks a compressor is not in are empty
+    /// identity boundaries, so the two sessions are the same chain; both bank the same number of
+    /// lanes, and every rendered bit agrees. This is the gate that would catch a bank kernel, or a
+    /// console lowering, that silently depended on rack identity. The pair is keyless, since a
+    /// console slot takes no sidechain, so every compressor is bankable in both.
     #[test]
     fn rack_placement_changes_the_bank_but_never_the_samples() {
-        let simd1_model = accepted_compressor_graph_fixture();
-        let dynamic_model = accepted_dynamic_rack_compressor_fixture();
+        let (simd1_model, dynamic_model) = keyless_compressor_placements();
         let (simd1, _) = compile_bank_and_per_node(&simd1_model, "miso.compressor", 1_620);
         let (dynamic, _) = compile_bank_and_per_node(&dynamic_model, "miso.compressor", 1_630);
+        // The witness is not vacuous: each placement's compressors are planned in its own rack.
+        for (artifact, planned, empty) in [
+            (&simd1, RackLocation::Simd1, RackLocation::Dynamic),
+            (&dynamic, RackLocation::Dynamic, RackLocation::Simd1),
+        ] {
+            let cohorts = &artifact.report().rack_cohorts;
+            assert!(cohorts.groups_in(planned).count() > 0, "{planned:?}");
+            assert_eq!(cohorts.groups_in(empty).count(), 0, "{empty:?}");
+        }
 
         assert_eq!(
             simd1.graph().prepared_bank_count(),
@@ -7397,7 +7672,7 @@ mod tests {
     fn a_dynamic_slot_that_differs_from_its_bank_mates_falls_back_per_node() {
         let mut model = accepted_dynamic_rack_compressor_fixture();
         // `eq8` already falls back on its routed sidechain; make `eq7` fall back on its *program*.
-        let odd = &mut model.tracks[7].dynamic.effects[0];
+        let odd = &mut model.tracks[7].inserts.effects[0];
         odd.id = StableId::parse("gate-expander").expect("stable effect id");
         odd.identity = EffectIdentity::Native {
             effect_id: StableId::parse("miso.gate-expander").expect("gate/expander id"),
@@ -7469,17 +7744,17 @@ mod tests {
     fn a_sidechain_lifted_chain_slot_falls_back_instead_of_failing_the_compile() {
         let mut model = accepted_dynamic_rack_compressor_fixture();
         // `eq5` gets a second dynamic slot whose sidechain source is the deepest tap in the graph.
-        let base = model.tracks[5].dynamic.effects[0].clone();
+        let base = model.tracks[5].inserts.effects[0].clone();
         let mut lifted = base.clone();
         lifted.id = StableId::parse("compressor-sc").expect("stable effect id");
         lifted.sidechain = SidechainDeclaration::Routed(Sidechain {
             source: RouteSource::Track {
                 track_id: StableId::parse("eq0").expect("stable source id"),
-                tap: SendTap::PostMatrix,
+                tap: SendTap::PostPan,
             },
             port_id: StableId::parse("sidechain-in").expect("stable sidechain port"),
         });
-        model.tracks[5].dynamic.effects = vec![base, lifted];
+        model.tracks[5].inserts.effects = vec![base, lifted];
 
         // (a) The compile succeeds -- this is the assertion the guard exists for.
         let artifact = compile_bank_only(&model, 1_660);
@@ -7563,7 +7838,7 @@ mod tests {
         }));
 
         let mut model = accepted_dynamic_rack_compressor_fixture();
-        model.tracks[0].dynamic.effects[0].identity = EffectIdentity::ThirdPartyCid {
+        model.tracks[0].inserts.effects[0].identity = EffectIdentity::ThirdPartyCid {
             cid: "bafy2bzaceexampleexampleexampleexampleexampleexampleexample".to_owned(),
         };
         let session = compile_session(
@@ -7753,12 +8028,16 @@ mod tests {
         const BLOCKS: u64 = 12;
         let model = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_FIXTURE).expect("console fixture");
         assert_eq!(model.tracks.len(), 64);
+        // Decision 12: the EQ is the `pre_insert` console slot (SIMD-1) and the compressor every
+        // track's insert (the dynamic rack), this fixture being the console-versus-insert
+        // placement witness.
+        assert_eq!(model.console.pre_insert.len(), 1);
+        assert!(model.console.post_insert.is_empty());
         assert!(model.tracks.iter().all(|track| {
-            track.simd1.effects.len() == 1
-                && track.dynamic.effects.len() == 1
-                && track.simd2.effects.is_empty()
+            track.console.len() == 1
+                && track.inserts.effects.len() == 1
                 && matches!(
-                    track.dynamic.effects[0].sidechain,
+                    track.inserts.effects[0].sidechain,
                     SidechainDeclaration::None
                 )
         }));
@@ -7950,20 +8229,22 @@ mod tests {
             .expect("intended fixture");
         assert_eq!(intended.tracks.len(), 64);
         assert!(
-            intended.tracks.iter().all(|track| {
-                track.simd1.effects.len() == 2
-                    && track.dynamic.effects.is_empty()
-                    && track.simd2.effects.len() == 1
-            }),
-            "the intended fixture is a two-slot simd1 chain, an empty dynamic rack and a \
-             one-slot simd2 chain"
+            intended.console.pre_insert.len() == 2
+                && intended.console.post_insert.len() == 1
+                && intended
+                    .tracks
+                    .iter()
+                    .all(|track| { track.console.len() == 3 && track.inserts.effects.is_empty() }),
+            "the intended fixture is a two-slot pre_insert chain, no inserts and a one-slot \
+             post_insert chain"
         );
 
         // The limiter-free intended model: the merged chain shape carrying exactly the retired
         // layout's arithmetic. This is the honest counterpart to the retired fixture.
         let mut merged = intended.clone();
+        merged.console.post_insert.clear();
         for track in &mut merged.tracks {
-            track.simd2.effects.clear();
+            track.console.truncate(2);
         }
         let split = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_FIXTURE).expect("retired fixture");
 
@@ -8289,7 +8570,7 @@ mod tests {
         route.id = StableId::parse("ch00-simd1-send").expect("route id");
         route.source = RouteSource::Track {
             track_id: StableId::parse("ch00").expect("track id"),
-            tap: session::SendTap::PostSimd1,
+            tap: session::SendTap::InsertSend,
         };
         sent.routes.push(route);
         sent.routes.sort_by(|left, right| left.id.cmp(&right.id));
@@ -8558,6 +8839,19 @@ mod tests {
         model
     }
 
+    /// Each track's three lowered chains -- `pre_insert`, inserts, `post_insert` -- as owned
+    /// effects, for a test that edits one track's chain and then [`place`]s the result.
+    fn lowered_chains(model: &session::SessionModel) -> Vec<[Vec<session::Effect>; 3]> {
+        model
+            .tracks
+            .iter()
+            .map(|track| {
+                let racks = model.lower_track(track);
+                [racks.pre_insert, racks.inserts.to_vec(), racks.post_insert]
+            })
+            .collect()
+    }
+
     /// The tracks of every effect group of `artifact`'s rack plan, by pool: `[mono, stereo]`.
     fn pooled_tracks(artifact: &PreparedGraphBuiltinsArtifact) -> [BTreeSet<String>; 2] {
         let mut pooled = [BTreeSet::new(), BTreeSet::new()];
@@ -8782,10 +9076,11 @@ mod tests {
 
         // A builtins-only strip: no effect group, so nothing moves.
         let mut builtins_only = folded.clone();
+        builtins_only.console.pre_insert.clear();
+        builtins_only.console.post_insert.clear();
         for track in &mut builtins_only.tracks {
-            track.simd1.effects.clear();
-            track.dynamic.effects.clear();
-            track.simd2.effects.clear();
+            track.console.clear();
+            track.inserts.effects.clear();
         }
         let builtins_artifact =
             compile_console_model_with_builtins(&builtins_only, 2_081, &[], &registry);
@@ -8847,13 +9142,15 @@ mod tests {
         let lanes = width.lanes() as usize;
         let registry = launch_native_effect_registry().expect("launch registry");
         let mut model = mono_fixture_with_tracks(2 * lanes);
-        for (index, track) in model.tracks.iter_mut().enumerate() {
+        let mut chains = lowered_chains(&model);
+        for (index, (track, chain)) in model.tracks.iter_mut().zip(chains.iter_mut()).enumerate() {
             if !index.is_multiple_of(2) {
                 track.right_source_channel = 1;
             } else if index >= lanes {
-                track.simd2.effects.clear();
+                chain[2].clear();
             }
         }
+        place(&mut model, chains);
         let mono: BTreeSet<String> = (0..2 * lanes)
             .step_by(2)
             .map(|index| format!("ch{index:02}"))
@@ -8897,18 +9194,20 @@ mod tests {
         let registry = launch_native_effect_registry().expect("launch registry");
         let mono_count = lanes / 2;
         let mut model = mono_fixture_with_tracks(2 * lanes + mono_count);
-        for (index, track) in model.tracks.iter_mut().enumerate() {
-            track.simd2.effects.clear();
+        let mut chains = lowered_chains(&model);
+        for (index, (track, chain)) in model.tracks.iter_mut().zip(chains.iter_mut()).enumerate() {
+            chain[2].clear();
             if index < 2 * lanes {
                 track.right_source_channel = 1;
                 // EQ is slot 0 and the compressor slot 1 of the fixture's simd1 chain.
                 if index < lanes {
-                    track.simd1.effects.truncate(1);
+                    chain[0].truncate(1);
                 } else {
-                    track.simd1.effects.remove(0);
+                    chain[0].remove(0);
                 }
             }
         }
+        place(&mut model, chains);
         let mono: BTreeSet<String> = (2 * lanes..2 * lanes + mono_count)
             .map(|index| format!("ch{index:02}"))
             .collect();
@@ -8955,18 +9254,20 @@ mod tests {
         let (eq_only, comp_only, mono_count) = (lanes, lanes + lanes / 2, lanes / 2);
         let stereo = eq_only + comp_only;
         let mut model = mono_fixture_with_tracks(stereo + mono_count);
-        for (index, track) in model.tracks.iter_mut().enumerate() {
-            track.simd2.effects.clear();
+        let mut chains = lowered_chains(&model);
+        for (index, (track, chain)) in model.tracks.iter_mut().zip(chains.iter_mut()).enumerate() {
+            chain[2].clear();
             if index < stereo {
                 track.right_source_channel = 1;
                 // EQ is slot 0 and the compressor slot 1 of the fixture's simd1 chain.
                 if index < eq_only {
-                    track.simd1.effects.truncate(1);
+                    chain[0].truncate(1);
                 } else {
-                    track.simd1.effects.remove(0);
+                    chain[0].remove(0);
                 }
             }
         }
+        place(&mut model, chains);
         let mono: BTreeSet<String> = (stereo..stereo + mono_count)
             .map(|index| format!("ch{index:02}"))
             .collect();
@@ -8993,7 +9294,7 @@ mod tests {
     /// pools go red. (Sol's attempt-1 verdict gave this test.)
     ///
     /// * V (`ch00`): mono, no effect. The rule never moves it, so its builtin banks stay mono.
-    /// * P (`ch01..=ch{2W}`): `W + 1` mono and `W - 1` stereo tracks, with only `dynamic: [comp]`.
+    /// * P (`ch01..=ch{2W}`): `W + 1` mono and `W - 1` stereo tracks, with only `inserts: [comp]`.
     ///   The last mono one strands in the trial and completes the stereo cohort, for one more bank.
     /// * T (the next `2W`): the over-demotion session: even mono, odd stereo, `simd1: [eq, comp]`,
     ///   and the limiter on every stereo track and on the lower half's mono tracks. The rule moves
@@ -9013,28 +9314,30 @@ mod tests {
         let registry = launch_native_effect_registry().expect("launch registry");
         let (p, t) = (2 * lanes, 2 * lanes);
         let mut model = mono_fixture_with_tracks(1 + p + t);
-        let comp = model.tracks[1].simd1.effects[1].clone();
-        for (index, track) in model.tracks.iter_mut().enumerate() {
+        let comp = model.lower_track(&model.tracks[1]).pre_insert[1].clone();
+        let mut chains = lowered_chains(&model);
+        for (index, (track, chain)) in model.tracks.iter_mut().zip(chains.iter_mut()).enumerate() {
             if index == 0 {
-                track.simd1.effects.clear();
-                track.dynamic.effects.clear();
-                track.simd2.effects.clear();
+                chain[0].clear();
+                chain[1].clear();
+                chain[2].clear();
             } else if index <= p {
                 if index > lanes + 1 {
                     track.right_source_channel = 1;
                 }
-                track.simd1.effects.clear();
-                track.simd2.effects.clear();
-                track.dynamic.effects = vec![comp.clone()];
+                chain[0].clear();
+                chain[2].clear();
+                chain[1] = vec![comp.clone()];
             } else {
                 let local = index - 1 - p;
                 if !local.is_multiple_of(2) {
                     track.right_source_channel = 1;
                 } else if local >= lanes {
-                    track.simd2.effects.clear();
+                    chain[2].clear();
                 }
             }
         }
+        place(&mut model, chains);
         let name = |index: usize| format!("ch{index:02}");
         let mono: BTreeSet<String> = model
             .tracks
@@ -9101,7 +9404,7 @@ mod tests {
     /// binds a bank (`Ok(None)` at every width), so a full group of delays is planned but never
     /// bound.
     fn declining_delay_slot(model: &session::SessionModel, id: &str) -> session::Effect {
-        let mut delay = model.tracks[0].simd1.effects[1].clone();
+        let mut delay = model.lower_track(&model.tracks[0]).pre_insert[1].clone();
         delay.params.clear();
         delay.identity = EffectIdentity::Native {
             effect_id: StableId::parse("miso.delay").expect("delay id"),
@@ -9112,7 +9415,7 @@ mod tests {
 
     /// Issue #971: a move that makes a full group the factory declines is not a bank gain.
     ///
-    /// `ch00..=ch{W}` are mono and the rest stereo, each carrying only `dynamic: [delay]`. Moving
+    /// `ch00..=ch{W}` are mono and the rest stereo, each carrying only `inserts: [delay]`. Moving
     /// the stranded `ch{W}` completes the stereo delay group, but no plan of this session binds an
     /// effect bank, so the move would only cost `ch{W}` its collapse. The check counts banks the
     /// factories bound, not full groups the planner formed, so the move is not kept. (Sol's
@@ -9127,14 +9430,16 @@ mod tests {
         let registry = launch_native_effect_registry().expect("launch registry");
         let mut model = mono_fixture_with_tracks(2 * lanes);
         let delay = declining_delay_slot(&model, "delay");
-        for (index, track) in model.tracks.iter_mut().enumerate() {
+        let mut chains = lowered_chains(&model);
+        for (index, (track, chain)) in model.tracks.iter_mut().zip(chains.iter_mut()).enumerate() {
             if index > lanes {
                 track.right_source_channel = 1;
             }
-            track.simd1.effects.clear();
-            track.simd2.effects.clear();
-            track.dynamic.effects = vec![delay.clone()];
+            chain[0].clear();
+            chain[2].clear();
+            chain[1] = vec![delay.clone()];
         }
+        place(&mut model, chains);
         let name = |index: usize| format!("ch{index:02}");
         let mono: BTreeSet<String> = (0..=lanes).map(name).collect();
         let artifact = compile_console_model_with_builtins(&model, 2_088, &[], &registry);
@@ -9159,7 +9464,7 @@ mod tests {
     /// Issue #971: a move that plans more full groups but binds fewer banks is not kept.
     ///
     /// The guard session's `2W` stereo tracks (`simd1: [eq]` or `simd1: [comp]`) bind 2 banks.
-    /// Two mono tracks strand: one with `simd1: [eq, comp]`, and one with `dynamic: [delay]` and
+    /// Two mono tracks strand: one with `simd1: [eq, comp]`, and one with `inserts: [delay]` and
     /// `simd2: [delay]` beside `W - 1` stereo tracks carrying the same two delay chains. Moved
     /// together, the first re-leads the stereo `simd1` cohort and loses a real bank, while the
     /// second completes two delay groups that the factory declines. The planner's slots go from
@@ -9176,26 +9481,28 @@ mod tests {
         let mut model = mono_fixture_with_tracks(3 * lanes + 1);
         let delay = declining_delay_slot(&model, "delay");
         let delay_simd2 = declining_delay_slot(&model, "delay2");
-        for (index, track) in model.tracks.iter_mut().enumerate() {
-            track.simd2.effects.clear();
-            track.dynamic.effects.clear();
+        let mut chains = lowered_chains(&model);
+        for (index, (track, chain)) in model.tracks.iter_mut().zip(chains.iter_mut()).enumerate() {
+            chain[2].clear();
+            chain[1].clear();
             if index < 2 * lanes {
                 track.right_source_channel = 1;
                 // EQ is slot 0 and the compressor slot 1 of the fixture's simd1 chain.
                 if index < lanes {
-                    track.simd1.effects.truncate(1);
+                    chain[0].truncate(1);
                 } else {
-                    track.simd1.effects.remove(0);
+                    chain[0].remove(0);
                 }
             } else if index > 2 * lanes {
                 if index > 2 * lanes + 1 {
                     track.right_source_channel = 1;
                 }
-                track.simd1.effects.clear();
-                track.dynamic.effects = vec![delay.clone()];
-                track.simd2.effects = vec![delay_simd2.clone()];
+                chain[0].clear();
+                chain[1] = vec![delay.clone()];
+                chain[2] = vec![delay_simd2.clone()];
             }
         }
+        place(&mut model, chains);
         let name = |index: usize| format!("ch{index:02}");
         let mono: BTreeSet<String> = [name(2 * lanes), name(2 * lanes + 1)].into();
         let artifact = compile_console_model_with_builtins(&model, 2_090, &[], &registry);
@@ -9366,25 +9673,27 @@ mod tests {
         (registry, live, bound)
     }
 
-    /// `count` tracks of the mono fixture carrying only `dynamic: [comp]`, stereo except `mono`.
+    /// `count` tracks of the mono fixture carrying only `inserts: [comp]`, stereo except `mono`.
     fn dynamic_compressor_session(count: usize, mono: usize) -> session::SessionModel {
         let mut model = mono_fixture_with_tracks(count);
-        let comp = model.tracks[0].simd1.effects[1].clone();
-        for (index, track) in model.tracks.iter_mut().enumerate() {
+        let comp = model.lower_track(&model.tracks[0]).pre_insert[1].clone();
+        let mut chains = lowered_chains(&model);
+        for (index, (track, chain)) in model.tracks.iter_mut().zip(chains.iter_mut()).enumerate() {
             if index != mono {
                 track.right_source_channel = 1;
             }
-            track.simd1.effects.clear();
-            track.simd2.effects.clear();
-            track.dynamic.effects = vec![comp.clone()];
+            chain[0].clear();
+            chain[2].clear();
+            chain[1] = vec![comp.clone()];
         }
+        place(&mut model, chains);
         model
     }
 
     /// Issue #1001: a factory error while binding the re-plan keeps the unmoved plan.
     ///
     /// The session is `ch00` mono and `ch01..ch{W-1}` stereo, each carrying only
-    /// `dynamic: [comp]`, and the compressor's bank bind always errors (Sol's #971 attempt-2
+    /// `inserts: [comp]`, and the compressor's bank bind always errors (Sol's #971 attempt-2
     /// session). The trial plan has no full group, so it never calls the bind. Moving the
     /// stranded `ch00` completes the stereo group, so the re-plan does call it and gets the
     /// error. The re-plan is speculative, so the compile must go on with the unmoved plan: it
@@ -9467,7 +9776,7 @@ mod tests {
 
     /// Issue #1001: a re-plan that fails part way leaves nothing of itself behind.
     ///
-    /// `2W` tracks carry only `dynamic: [comp]`. `ch{W-1}` is mono and the rest stereo. The last
+    /// `2W` tracks carry only `inserts: [comp]`. `ch{W-1}` is mono and the rest stereo. The last
     /// track's compressor carries a marker threshold, and the bank bind errors only on a group
     /// holding the marker. The trial binds the stereo cohort `ch00..=ch{W}` without `ch{W-1}`,
     /// and the marked track sits in its partial remainder, which is never bound. Moving the mono
@@ -9489,7 +9798,7 @@ mod tests {
         let lanes = width.lanes() as usize;
         let mono_index = lanes - 1;
         let mut model = dynamic_compressor_session(2 * lanes, mono_index);
-        let threshold = model.tracks[2 * lanes - 1].dynamic.effects[0]
+        let threshold = model.tracks[2 * lanes - 1].inserts.effects[0]
             .params
             .iter_mut()
             .find(|param| param.parameter_id == 1)
@@ -9658,16 +9967,21 @@ mod tests {
         };
         let mut model = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
             .expect("intended fixture");
-        // The issue's edit, exactly: one track loses one slot of its `simd1` chain, so its program
+        // The issue's edit, exactly: one track loses one slot of its first chain, so its program
         // is a strict subsequence of every other track's and it joins their cohort with an
-        // identity slot rather than forming one of its own.
-        let leader_slots = model.tracks[1].simd1.effects.len();
+        // identity slot rather than forming one of its own. A console slot runs on every track
+        // (decision 12), so the edited chain is every track's inserts; the limiter stays the
+        // `post_insert` slot.
+        let mut chains = lowered_chains(&model);
+        let leader_slots = chains[1][0].len();
         assert!(
             leader_slots > 1,
-            "the fixture's simd1 must be a multi-slot chain for the subsequence to exist"
+            "the fixture's pre_insert must be a multi-slot chain for the subsequence to exist"
         );
-        model.tracks[0].simd1.effects.remove(leader_slots - 1);
-        assert_eq!(model.tracks[0].simd1.effects.len(), leader_slots - 1);
+        chains[0][0].remove(leader_slots - 1);
+        place(&mut model, chains);
+        assert!(model.console.pre_insert.is_empty() && model.console.post_insert.len() == 1);
+        assert_eq!(model.tracks[0].inserts.effects.len(), leader_slots - 1);
 
         let registry = launch_native_effect_registry().expect("launch registry");
         let artifact = compile_console_model_with_builtins(&model, 2_060, &[], &registry);
@@ -9724,11 +10038,16 @@ mod tests {
         let mut ragged = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
             .expect("intended fixture");
         // Half a bank's worth of tracks lose their whole effect strip, which is what slides every
-        // effect cohort out of step with the builtin banks.
-        for track in ragged.tracks.iter_mut().take((lanes / 2) as usize) {
-            track.simd1.effects.clear();
-            track.simd2.effects.clear();
+        // effect cohort out of step with the builtin banks. A console slot runs on every track
+        // (decision 12), so the strip every other track keeps is its inserts: `[eq, comp,
+        // limiter]`, one chain where the console fixture has two.
+        let mut chains = lowered_chains(&ragged);
+        for chain in chains.iter_mut().take((lanes / 2) as usize) {
+            chain[0].clear();
+            chain[2].clear();
         }
+        place(&mut ragged, chains);
+        assert!(ragged.console.slots().next().is_none());
         let registry = launch_native_effect_registry().expect("launch registry");
         let artifact = compile_console_model_with_builtins(&ragged, 2_050, &[], &registry);
         let effect_slots = artifact.graph().prepared_bank_count() as u64;
@@ -10071,7 +10390,7 @@ mod tests {
         route.id = StableId::parse("ch00-pre-fader-send").expect("route id");
         route.source = RouteSource::Track {
             track_id: StableId::parse("ch00").expect("track id"),
-            tap: session::SendTap::PostSimd2PreFader,
+            tap: session::SendTap::PreFader,
         };
         sent.routes.push(route);
         sent.routes.sort_by(|left, right| left.id.cmp(&right.id));
@@ -12411,7 +12730,7 @@ mod tests {
                 artifact
                     .report()
                     .rack_cohorts
-                    .bound_groups_in(RackLocation::Simd1)
+                    .bound_groups_in(RackLocation::Dynamic)
                     .count(),
                 expected_banks
             );
@@ -12419,14 +12738,14 @@ mod tests {
                 artifact
                     .report()
                     .rack_cohorts
-                    .bound_groups_in(RackLocation::Simd1)
+                    .bound_groups_in(RackLocation::Dynamic)
                     .all(|bank| bank.active_count() == lanes)
             );
             assert_eq!(
                 artifact
                     .report()
                     .rack_cohorts
-                    .scalar_in(RackLocation::Simd1)
+                    .scalar_in(RackLocation::Dynamic)
                     .len(),
                 expected_scalar_tails
             );
@@ -12434,7 +12753,7 @@ mod tests {
                 artifact
                     .report()
                     .rack_cohorts
-                    .scalar_in(RackLocation::Simd1)
+                    .scalar_in(RackLocation::Dynamic)
                     .iter()
                     .any(|id| id.track_id.as_str() == "eq8")
             );
@@ -12442,7 +12761,7 @@ mod tests {
                 artifact
                     .report()
                     .rack_cohorts
-                    .scalar_in(RackLocation::Simd1)
+                    .scalar_in(RackLocation::Dynamic)
                     .iter()
                     .any(|id| id.track_id.as_str() == "eq9")
             );
@@ -12452,7 +12771,7 @@ mod tests {
                 artifact
                     .report()
                     .rack_cohorts
-                    .scalar_in(RackLocation::Simd1)
+                    .scalar_in(RackLocation::Dynamic)
                     .len(),
                 10
             );
@@ -12528,7 +12847,7 @@ mod tests {
 
         let mut bypass_model = model.clone();
         for track in &mut bypass_model.tracks {
-            track.simd1.effects[0].bypass = true;
+            track.inserts.effects[0].bypass = true;
         }
         let bypass_session = compile_session(
             &bypass_model,
@@ -12870,7 +13189,7 @@ mod tests {
 
         let mut bypass_model = model.clone();
         for track in &mut bypass_model.tracks {
-            track.simd1.effects[0].bypass = true;
+            track.console[0].bypass = true;
         }
         let bypass_session = compile_session(
             &bypass_model,
@@ -12966,12 +13285,10 @@ mod tests {
     fn launch_multiband_compressor_fixture_closes_bank_graph_and_transactional_caps() {
         let model = accepted_multiband_compressor_graph_fixture();
         assert_eq!(model.tracks.len(), 10);
-        assert!(
-            model.tracks.iter().all(|track| matches!(
-                track.simd1.effects[0].sidechain,
-                SidechainDeclaration::None
-            ))
-        );
+        assert!(model.tracks.iter().all(|track| matches!(
+            track.inserts.effects[0].sidechain,
+            SidechainDeclaration::None
+        )));
         let session = compile_session(
             &model,
             CompileCaps {
@@ -13037,7 +13354,7 @@ mod tests {
             artifact
                 .report()
                 .rack_cohorts
-                .bound_groups_in(RackLocation::Simd1)
+                .bound_groups_in(RackLocation::Dynamic)
                 .count(),
             expected_banks
         );
@@ -13045,14 +13362,14 @@ mod tests {
             artifact
                 .report()
                 .rack_cohorts
-                .scalar_in(RackLocation::Simd1)
+                .scalar_in(RackLocation::Dynamic)
                 .len(),
             expected_scalar_tails
         );
         let actual_members: Vec<Vec<String>> = artifact
             .report()
             .rack_cohorts
-            .bound_groups_in(RackLocation::Simd1)
+            .bound_groups_in(RackLocation::Dynamic)
             .map(|bank| {
                 bank.members
                     .iter()
@@ -13080,7 +13397,7 @@ mod tests {
             artifact
                 .report()
                 .rack_cohorts
-                .scalar_in(RackLocation::Simd1)
+                .scalar_in(RackLocation::Dynamic)
                 .iter()
                 .map(|tail| tail.track_id.as_str().to_owned())
                 .collect::<Vec<_>>(),
@@ -13104,7 +13421,7 @@ mod tests {
             + artifact
                 .report()
                 .rack_cohorts
-                .bound_groups_in(RackLocation::Simd1)
+                .bound_groups_in(RackLocation::Dynamic)
                 .flat_map(|bank| bank.members.iter().flatten())
                 .map(|member| {
                     u64::try_from(core::mem::size_of::<EffectNodeId>())
@@ -13241,7 +13558,7 @@ mod tests {
 
         let mut bypass_model = model.clone();
         for track in &mut bypass_model.tracks {
-            track.simd1.effects[0].bypass = true;
+            track.inserts.effects[0].bypass = true;
         }
         let bypass_session = compile_session(
             &bypass_model,
@@ -13326,11 +13643,13 @@ mod tests {
     fn launch_soft_clip_fixture_closes_banks_tails_pdc_support_and_transactional_caps() {
         let model = accepted_soft_clip_graph_fixture();
         assert_eq!(model.tracks.len(), 10);
+        // The strip is the `console.pre_insert` slot: keyless by construction (decision 12).
+        assert_eq!(model.console.pre_insert.len(), 1);
         assert!(
-            model.tracks.iter().all(|track| matches!(
-                track.simd1.effects[0].sidechain,
-                SidechainDeclaration::None
-            ))
+            model
+                .tracks
+                .iter()
+                .all(|track| track.console.len() == 1 && track.inserts.effects.is_empty())
         );
         let session = compile_session(
             &model,
@@ -13601,7 +13920,7 @@ mod tests {
 
         let mut bypass_model = model.clone();
         for track in &mut bypass_model.tracks {
-            track.simd1.effects[0].bypass = true;
+            track.console[0].bypass = true;
         }
         let bypass_session = compile_session(
             &bypass_model,
@@ -13688,11 +14007,13 @@ mod tests {
     fn launch_transient_shaper_fixture_closes_banks_tails_pdc_and_transactional_caps() {
         let model = accepted_transient_shaper_graph_fixture();
         assert_eq!(model.tracks.len(), 10);
+        // The strip is the `console.pre_insert` slot: keyless by construction (decision 12).
+        assert_eq!(model.console.pre_insert.len(), 1);
         assert!(
-            model.tracks.iter().all(|track| matches!(
-                track.simd1.effects[0].sidechain,
-                SidechainDeclaration::None
-            ))
+            model
+                .tracks
+                .iter()
+                .all(|track| track.console.len() == 1 && track.inserts.effects.is_empty())
         );
         let session = compile_session(
             &model,
@@ -13939,7 +14260,7 @@ mod tests {
 
         let mut bypass_model = model.clone();
         for track in &mut bypass_model.tracks {
-            track.simd1.effects[0].bypass = true;
+            track.console[0].bypass = true;
         }
         let bypass_session = compile_session(
             &bypass_model,
@@ -14025,10 +14346,10 @@ mod tests {
         let model = accepted_delay_graph_fixture();
         assert_eq!(model.tracks.len(), 10);
         assert!(model.tracks.iter().all(|track| {
-            track.simd1.effects.is_empty()
-                && track.dynamic.effects.len() == 1
+            track.console.is_empty()
+                && track.inserts.effects.len() == 1
                 && matches!(
-                    track.dynamic.effects[0].sidechain,
+                    track.inserts.effects[0].sidechain,
                     SidechainDeclaration::None
                 )
         }));
@@ -14289,7 +14610,7 @@ mod tests {
 
         let mut bypass_model = model.clone();
         for track in &mut bypass_model.tracks {
-            track.dynamic.effects[0].bypass = true;
+            track.inserts.effects[0].bypass = true;
         }
         let bypass_session = compile_session(
             &bypass_model,
@@ -14347,7 +14668,7 @@ mod tests {
     #[test]
     fn builtins_replace_only_the_three_internal_track_bindings() {
         let mut model = parse_session_json(SESSION_FIXTURE).expect("session fixture");
-        model.tracks[0].dynamic.effects.clear();
+        model.tracks[0].inserts.effects.clear();
         model.automation.clear();
         let compiled = compile_session(
             &model,
@@ -14447,9 +14768,8 @@ mod tests {
             .map(|index| {
                 let mut track = base_track.clone();
                 track.id = StableId::parse(&format!("bank{index}")).expect("id");
-                track.simd1.effects.clear();
-                track.dynamic.effects.clear();
-                track.simd2.effects.clear();
+                track.console.clear();
+                track.inserts.effects.clear();
                 track
             })
             .collect();
@@ -14462,7 +14782,7 @@ mod tests {
                 route.id = StableId::parse(&format!("builtin-route-{index}")).expect("route id");
                 route.source = RouteSource::Track {
                     track_id: track.id.clone(),
-                    tap: SendTap::PostMatrix,
+                    tap: SendTap::PostPan,
                 };
                 route
             })
@@ -14666,9 +14986,8 @@ mod tests {
             .map(|index| {
                 let mut track = base_track.clone();
                 track.id = StableId::parse(&format!("bank{index}")).expect("id");
-                track.simd1.effects.clear();
-                track.dynamic.effects.clear();
-                track.simd2.effects.clear();
+                track.console.clear();
+                track.inserts.effects.clear();
                 track
             })
             .collect();
@@ -14681,7 +15000,7 @@ mod tests {
                 route.id = StableId::parse(&format!("cap-route-{index}")).expect("route id");
                 route.source = RouteSource::Track {
                     track_id: track.id.clone(),
-                    tap: SendTap::PostMatrix,
+                    tap: SendTap::PostPan,
                 };
                 route
             })
@@ -14802,9 +15121,8 @@ mod tests {
                 .map(|index| {
                     let mut track = base_track.clone();
                     track.id = StableId::parse(&format!("bank{index}")).expect("id");
-                    track.simd1.effects.clear();
-                    track.dynamic.effects.clear();
-                    track.simd2.effects.clear();
+                    track.console.clear();
+                    track.inserts.effects.clear();
                     // The seeded corpus includes identity filters, enabled filters, and
                     // intentionally asymmetric L/R coefficients without changing topology.
                     if ((value >> (index % 31)) & 1) != 0 {
@@ -14830,7 +15148,7 @@ mod tests {
                         StableId::parse(&format!("seed-route-{layout}-{index}")).expect("route id");
                     route.source = RouteSource::Track {
                         track_id: track.id.clone(),
-                        tap: SendTap::PostMatrix,
+                        tap: SendTap::PostPan,
                     };
                     route
                 })
@@ -15214,7 +15532,7 @@ mod tests {
         for (corruption, expected) in cases {
             categories.insert(corruption.category());
             let mut model = parse_session_json(SESSION_FIXTURE).expect("session fixture");
-            model.tracks[0].dynamic.effects.clear();
+            model.tracks[0].inserts.effects.clear();
             model.automation.clear();
             let compiled = compile_session(
                 &model,
@@ -15754,7 +16072,7 @@ mod tests {
     fn route_transform_bits_participate_in_semantic_hash() {
         let baseline = compile_fixture(1);
         let mut model = parse_session_json(SESSION_FIXTURE).expect("session fixture");
-        model.tracks[0].dynamic.effects.clear();
+        model.tracks[0].inserts.effects.clear();
         model.automation.clear();
         // #964: the same identity builtins as `compile_fixture`, so the route gain is the only
         // difference between the two plans. The fixture's own input filters would change the
@@ -15802,7 +16120,7 @@ mod tests {
     #[test]
     fn route_transform_uses_the_canonical_db_to_gain_conversion() {
         let mut model = parse_session_json(SESSION_FIXTURE).expect("session fixture");
-        model.tracks[0].dynamic.effects.clear();
+        model.tracks[0].inserts.effects.clear();
         model.automation.clear();
         model.routes[0].gain_db = -19.0;
         let session = compile_session(
