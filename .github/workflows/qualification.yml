@@ -130,7 +130,7 @@ jobs:
           sha256="$(sha256sum target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm | awk '{print $1}')"
           echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
           echo "rustc=$(rustc -vV | sed -n 's/^release: //p')" >> "$GITHUB_OUTPUT"
-          closure="$(cd target/ci/qualification-artifacts && find . -type f -printf '%P\n' | LC_ALL=C sort | xargs sha256sum -- | sha256sum | awk '{print $1}')"
+          closure="$(set -o pipefail; cd target/ci/qualification-artifacts && find . -type f -printf '%P\0' | LC_ALL=C sort -z | xargs -0 sha256sum -- | sha256sum | awk '{print $1}')"
           echo "closure_sha256=$closure" >> "$GITHUB_OUTPUT"
           echo "Shipped AudioWorklet module at \`$GITHUB_SHA\`: \`$sha256\` (the \`artifact-identity\` summary says whether it changed)" >> "$GITHUB_STEP_SUMMARY"
       - name: Upload shipped artifact
@@ -249,7 +249,7 @@ jobs:
         run: |
           actual="$(sha256sum target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm | awk '{print $1}')"
           [[ "$BUILT" =~ ^[0-9a-f]{64}$ && "$actual" == "$BUILT" ]] || { echo "downloaded artifact sha256 mismatch: the artifact job built $BUILT, got $actual" >&2; exit 1; }
-          closure="$(cd target/ci/qualification-artifacts && find . -type f -printf '%P\n' | LC_ALL=C sort | xargs sha256sum -- | sha256sum | awk '{print $1}')"
+          closure="$(set -o pipefail; cd target/ci/qualification-artifacts && find . -type f -printf '%P\0' | LC_ALL=C sort -z | xargs -0 sha256sum -- | sha256sum | awk '{print $1}')"
           [[ "$CLOSURE" =~ ^[0-9a-f]{64}$ && "$closure" == "$CLOSURE" ]] || { echo "downloaded artifact closure mismatch: the artifact job built $CLOSURE, got $closure" >&2; exit 1; }
       # check-sdk-deletions.py's --self-test (design §6.6, S7) runs in gate-self-tests
       # when the gate or the SDK tree it reads changes (#1043); the gate itself runs here.
@@ -294,7 +294,7 @@ jobs:
         run: |
           actual="$(sha256sum target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm | awk '{print $1}')"
           [[ "$BUILT" =~ ^[0-9a-f]{64}$ && "$actual" == "$BUILT" ]] || { echo "downloaded artifact sha256 mismatch: the artifact job built $BUILT, got $actual" >&2; exit 1; }
-          closure="$(cd target/ci/qualification-artifacts && find . -type f -printf '%P\n' | LC_ALL=C sort | xargs sha256sum -- | sha256sum | awk '{print $1}')"
+          closure="$(set -o pipefail; cd target/ci/qualification-artifacts && find . -type f -printf '%P\0' | LC_ALL=C sort -z | xargs -0 sha256sum -- | sha256sum | awk '{print $1}')"
           [[ "$CLOSURE" =~ ^[0-9a-f]{64}$ && "$closure" == "$CLOSURE" ]] || { echo "downloaded artifact closure mismatch: the artifact job built $CLOSURE, got $closure" >&2; exit 1; }
       # #106 E1/E2/E5/E7 and the F4 native<->simd128 session parity, over the artifact that ships.
       # check-web-audioworklet.sh asserts the frozen export set, no imports, no shared memory, no
@@ -359,7 +359,7 @@ jobs:
         run: |
           actual="$(sha256sum target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm | awk '{print $1}')"
           [[ "$BUILT" =~ ^[0-9a-f]{64}$ && "$actual" == "$BUILT" ]] || { echo "downloaded artifact sha256 mismatch: the artifact job built $BUILT, got $actual" >&2; exit 1; }
-          closure="$(cd target/ci/qualification-artifacts && find . -type f -printf '%P\n' | LC_ALL=C sort | xargs sha256sum -- | sha256sum | awk '{print $1}')"
+          closure="$(set -o pipefail; cd target/ci/qualification-artifacts && find . -type f -printf '%P\0' | LC_ALL=C sort -z | xargs -0 sha256sum -- | sha256sum | awk '{print $1}')"
           [[ "$CLOSURE" =~ ^[0-9a-f]{64}$ && "$closure" == "$CLOSURE" ]] || { echo "downloaded artifact closure mismatch: the artifact job built $CLOSURE, got $closure" >&2; exit 1; }
       - name: Cache Playwright browser binaries
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0

@@ -489,8 +489,8 @@ ARTIFACT_READERS = ("sdk", "artifact-gates", "browser")
 # byte order of name, computed by exactly this line on both sides -- so the documents a reader
 # consumes are the generator's output at this commit without the reader running it again.
 ARTIFACT_CLOSURE_DIGEST = (
-    "closure=\"$(cd target/ci/qualification-artifacts && find . -type f -printf '%P\\n' | "
-    "LC_ALL=C sort | xargs sha256sum -- | sha256sum | awk '{print $1}')\"\n"
+    "closure=\"$(set -o pipefail; cd target/ci/qualification-artifacts && find . -type f "
+    "-printf '%P\\0' | LC_ALL=C sort -z | xargs -0 sha256sum -- | sha256sum | awk '{print $1}')\"\n"
 )
 ARTIFACT_CLOSURE_VERIFY = (
     "          CLOSURE: ${{ needs.artifact.outputs.closure_sha256 }}\n",
