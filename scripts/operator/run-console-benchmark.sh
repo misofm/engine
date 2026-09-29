@@ -17,7 +17,7 @@
 # in that directory (a record is never overwritten), when the host is not x86_64 with AVX2, when
 # the tree is not clean and committed, and when the console fixture check fails. It then builds
 # `bench` in release and refuses again when an admissibility precondition below is unmet. An
-# admitted run takes one untimed warmup and exactly two measured rounds, validates the 50 records
+# admitted run takes one untimed warmup and exactly two measured rounds, validates the 60 records
 # with `console-benchmark-validator.jq`, and promotes them to the accepted file beside a
 # disposition.
 # `scripts/operator/preflight-console-benchmark.sh --step NAME` checks everything that can fail
@@ -378,7 +378,7 @@ if [[ -n "$counted" ]]; then
     }
 fi
 failure_reason=record_count
-[[ "$(wc -l <"$raw")" == 50 ]] || exit 1
+[[ "$(wc -l <"$raw")" == 60 ]] || exit 1
 failure_reason=validation_failed
 jq -s -e -L scripts -f scripts/console-benchmark-validator.jq "$raw" >/dev/null || exit 1
 failure_reason=accepted_promotion_failed

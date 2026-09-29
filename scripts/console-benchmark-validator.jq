@@ -1,17 +1,18 @@
-# Aggregate validator: seventeen session workloads (fifteen bound-feed rows, the driver-fed
-# gain/pan row, #928 and #956, and the metered console row, #881), two hoist workloads, one meters
-# arm, one observation arm, one placement row-pair, one automation-active row, one mono row-pair
-# and one mixing-automation row (#1003), each in rounds one and two -- fifty records. #956 retired
-# the builtins-less plumbing row and re-based the driver-fed row, two records fewer than the fifty
-# before it; #1003's row, emitted last, brought the count back to fifty.
+# Aggregate validator: twenty-two session workloads (fifteen bound-feed rows, the driver-fed
+# gain/pan row, #928 and #956, the metered console row, #881, and the five console-strip rows,
+# #1085), two hoist workloads, one meters arm, one observation arm, one placement row-pair, one
+# automation-active row, one mono row-pair and one mixing-automation row (#1003), each in rounds one
+# and two -- sixty records. #956 retired the builtins-less plumbing row and re-based the driver-fed
+# row, two records fewer than the fifty before it; #1003's row brought the count back to fifty, and
+# #1085's five rows, emitted after the metered row, took it to sixty.
 include "console-benchmark-record-lib";
 . as $records |
-(type == "array") and length == 50 and
+(type == "array") and length == 60 and
 all(.[]; console_benchmark_record_valid_lib) and
 ([.[] | select(.record == "console_session") | .workload_kind] | unique | sort) == session_kinds and
 ([.[] | select(.record == "console_hoist") | .workload_kind] | unique | sort)
   == ["nine_track_ragged_strip","sixty_four_track_console"] and
-([.[] | select(.record == "console_session")] | length) == 34 and
+([.[] | select(.record == "console_session")] | length) == 44 and
 ([.[] | select(.record == "console_hoist")] | length) == 4 and
 ([.[] | select(.record == "console_meters")] | length) == 2 and
 ([.[] | select(.record == "console_observation")] | length) == 2 and
@@ -26,7 +27,7 @@ all(.[]; console_benchmark_record_valid_lib) and
 ([.[] | select(.record == "console_mixing_automation") | .workload_kind] | unique)
   == ["sixty_four_track_console_mono_mixing_automation"] and
 ([.[] | .round] | unique | sort) == [1,2] and
-([.[] | [.record,.workload_kind,.round] | join(":")] | unique | length) == 50 and
+([.[] | [.record,.workload_kind,.round] | join(":")] | unique | length) == 60 and
 (group_by([.record,.workload_kind]) | all(map(.round) | sort == [1,2])) and
 # Round one and round two are two measurements of one frozen workload, so the rendered output must
 # be identical across them. A drifting digest means the rounds are not measuring the same thing.
@@ -61,6 +62,17 @@ all(.[]; console_benchmark_record_valid_lib) and
                (.workload_kind == "sixty_four_track_console" or
                 .workload_kind == "sixty_four_track_console_metered"))
       | .output_sha256] | length == 4 and (unique | length) == 1) and
+# #1085: the sparse-activity row is the standing console with every odd track fed silence, read
+# against the all-active row and the idle row. It renders neither one's bits: an equality with the
+# all-active row means the silence never reached the plan, and one with the idle row means the
+# tone never did, and either way the row would publish another row's cost under its own name.
+(([.[] | select(.record == "console_session" and
+                (.workload_kind == "sixty_four_track_console" or
+                 .workload_kind == "sixty_four_track_idle" or
+                 .workload_kind == "sixty_four_track_console_sparse"))
+       | {key: .workload_kind, value: .output_sha256}] | from_entries) as $triple |
+ $triple.sixty_four_track_console_sparse != $triple.sixty_four_track_console and
+ $triple.sixty_four_track_console_sparse != $triple.sixty_four_track_idle) and
 ([.[] | .backend] | unique | length) == 1 and
 # Ragged versus full, and every decomposition subtraction, are the whole point of the fixture set,
 # so the per-track costs must be comparable numbers taken on one host in one run: same binary,
