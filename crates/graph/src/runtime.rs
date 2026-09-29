@@ -300,11 +300,6 @@ use lane::Lane;
 use lane::kernels::{mix2x2_block, ordered_accumulate_block, pdc_delay_block, sum_into_block};
 use rack::{BankChain, BankMembers, BankPlaneViews, FoldCohort, ResidentFoldCohort};
 
-use crate::observation_activation::{
-    ActivationBinding, ActivationEntry, GraphObservationActivationConfig,
-    GraphObservationAdmissionError, GraphObservationController, RealtimeObservationActivation,
-    prepare_activation,
-};
 // Read only by the scalar pairing passes, which are test-only (issue #1059).
 #[cfg(any(test, feature = "test-support"))]
 use crate::GraphEdgeId;
@@ -342,8 +337,8 @@ pub(crate) type FrameLane = lane::Simd4;
 ///   ([`Runtime::output_unit`]) reduces and processes into these planes instead of its arena
 ///   buffer. A folded chain whose master op is the Output op ([`FoldTarget::Output`]) accumulates
 ///   its epilogue into them.
-/// * [`Runtime::observe_unit`] and [`Runtime::observe_active_unit`] take a shared borrow. The
-///   Output op's observers read these planes.
+/// * [`Runtime::observe_unit`] takes a shared borrow. The Output op's observers read these
+///   planes.
 ///
 /// Both writers are picked by **node**, at bind, and never by comparing a buffer index with the
 /// session output's. The colouring may give the Output op's physical slot to a buffer that
@@ -1980,7 +1975,7 @@ pub(crate) struct UnitIdentity {
     resident_input: bool,
     /// Whether any op of this unit holds an observer binding (issue #900), and whether this bank
     /// unit runs its sample-peak pass (issue #943) or its full meter pass (issue #950). Derived from the final units by
-    /// [`Runtime::new_with_observation_activation`], the one constructor every runtime passes
+    /// [`Runtime::new_with_output_unit`], the one constructor every runtime passes
     /// through, so a caller's value is a placeholder; nothing changes an op's observer slice after
     /// that. One byte for both facts, so it fits the existing identity padding on every target,
     /// which the `const` assertion after [`UnitIdentityWithoutFlags`] checks at compile time.
@@ -2197,14 +2192,6 @@ pub(crate) struct Runtime {
     /// the bytes and the program it had before this feature existed.
     pub(crate) track_delays: Box<[TrackDelayLine]>,
     pub(crate) units: Box<[RuntimeUnit]>,
-    /// Optional host-controlled observer dispatch state. Its snapshot contains only validated
-    /// copyable coordinates; observer resources remain in the immutable runtime units.
-    observation_activation: Option<RealtimeObservationActivation>,
-    /// Cursor through the sorted active snapshot for the current render block.
-    observation_cursor: usize,
-    /// Internal failure invalidation was already performed before the outer plan wrapper saw the
-    /// error. This prevents the wrapper's compatibility callback from invalidating twice.
-    observation_failure_invalidated: bool,
     split_pairs: Box<[Box<dyn GraphRuntimeSplitPairProcessor>]>,
     /// One row per unit, in `units` order: the bind-time half of the collapse-eligibility query.
     pub(crate) identity: Box<[UnitIdentity]>,
@@ -2271,9 +2258,6 @@ pub(crate) struct RuntimeWithoutSplitPairTable {
     delays: Box<[CompensationDelay]>,
     track_delays: Box<[TrackDelayLine]>,
     units: Box<[RuntimeUnit]>,
-    observation_activation: Option<RealtimeObservationActivation>,
-    observation_cursor: usize,
-    observation_failure_invalidated: bool,
     identity: Box<[UnitIdentity]>,
     response_bindings: Box<[ResponseOwnerBinding]>,
     bank_inputs: Box<[u32]>,
@@ -2282,37 +2266,6 @@ pub(crate) struct RuntimeWithoutSplitPairTable {
     folds: u64,
     output_unit: Option<usize>,
     source_plane_of_buffer: Box<[u32]>,
-}
-
-/// Layout witness for the retained [`Runtime`] owner without observation activation state.
-///
-/// This mirror intentionally keeps every current runtime field except the optional activation
-/// endpoint, its dispatch cursor, and its failure-invalidation flag. The containing executor
-/// witness in `lib.rs` uses the corresponding owner-level delta for the retained accounting term;
-/// this runtime-level witness remains available to independently prove the nested layout.
-#[allow(dead_code)]
-pub(crate) struct RuntimeWithoutObservationActivation {
-    pub(crate) lease: ArenaLease,
-    pub(crate) delays: Box<[CompensationDelay]>,
-    pub(crate) track_delays: Box<[TrackDelayLine]>,
-    pub(crate) units: Box<[RuntimeUnit]>,
-    pub(crate) split_pairs: Box<[Box<dyn GraphRuntimeSplitPairProcessor>]>,
-    pub(crate) identity: Box<[UnitIdentity]>,
-    pub(crate) response_bindings: Box<[ResponseOwnerBinding]>,
-    pub(crate) bank_inputs: Box<[u32]>,
-    pub(crate) bank_outputs: Box<[u32]>,
-    pub(crate) redirects: u64,
-    pub(crate) folds: u64,
-    pub(crate) output_unit: Option<usize>,
-    pub(crate) source_plane_of_buffer: Box<[u32]>,
-}
-
-pub(crate) fn observation_runtime_layout() -> Option<u64> {
-    u64::try_from(
-        core::mem::size_of::<Runtime>()
-            .checked_sub(core::mem::size_of::<RuntimeWithoutObservationActivation>())?,
-    )
-    .ok()
 }
 
 pub(crate) fn scalar_split_runtime_layout() -> (u64, u64) {
@@ -2423,7 +2376,7 @@ impl Runtime {
         redirects: u64,
         folds: u64,
     ) -> Self {
-        Self::new_with_observation_activation(
+        Self::new_with_output_unit(
             lease,
             delays,
             track_delays,
@@ -2434,7 +2387,6 @@ impl Runtime {
             redirects,
             folds,
             None,
-            None,
         )
     }
 
@@ -2442,7 +2394,7 @@ impl Runtime {
         clippy::too_many_arguments,
         reason = "the prepared runtime constructor keeps its fixed ownership partitions explicit"
     )]
-    pub(crate) fn new_with_observation_activation(
+    pub(crate) fn new_with_output_unit(
         lease: ArenaLease,
         delays: Vec<CompensationDelay>,
         track_delays: Vec<TrackDelayLine>,
@@ -2452,7 +2404,6 @@ impl Runtime {
         response_bindings: Vec<ResponseOwnerBinding>,
         redirects: u64,
         folds: u64,
-        observation_activation: Option<RealtimeObservationActivation>,
         output_unit: Option<usize>,
     ) -> Self {
         debug_assert_eq!(identity.len(), units.len());
@@ -2496,9 +2447,6 @@ impl Runtime {
             delays: delays.into_boxed_slice(),
             track_delays: track_delays.into_boxed_slice(),
             units: units.into_boxed_slice(),
-            observation_activation,
-            observation_cursor: 0,
-            observation_failure_invalidated: false,
             split_pairs: split_pairs.into_boxed_slice(),
             identity: identity.into_boxed_slice(),
             response_bindings: response_bindings.into_boxed_slice(),
@@ -2558,8 +2506,7 @@ impl Runtime {
     /// Such a unit is a claimed track input: the source set's copy loop already wrote its buffer,
     /// or a bank's gather reads its claim in place, or nothing reads it, so
     /// `execute_op` returns before it touches memory and `observe_unit` returns on `observed ==
-    /// false`. With no observer it has no activation entry either, so skipping it leaves the
-    /// selective-observation cursor in step. Everything else is active: a delayed claim
+    /// false`. Everything else is active: a delayed claim
     /// (`NodeKind::TrackDelay`, whose line runs in place over the input), every bank, split pair
     /// and other kind. Read once, at bind, by `GraphExecutor::new`; an index past the units is
     /// active.
@@ -2613,7 +2560,6 @@ impl Runtime {
         TEST_ONLY_FAILED_BUFFER.with(|value| value.set(capture));
     }
 
-    /// Apply admitted activation snapshots and reset the block-local dispatch cursor.
     /// The phase a unit's time is charged to by `crate::test_only_phase_profile`.
     #[cfg(any(test, feature = "test-support"))]
     #[inline]
@@ -2639,36 +2585,6 @@ impl Runtime {
             },
             RuntimeUnit::Bank { .. } => BANK,
         }
-    }
-
-    pub(crate) fn begin_observation_block(&mut self, first_sample: u64) {
-        self.observation_cursor = 0;
-        self.observation_failure_invalidated = false;
-        let Self {
-            observation_activation,
-            units,
-            ..
-        } = self;
-        let Some(activation) = observation_activation.as_mut() else {
-            return;
-        };
-        activation.apply_boundary(first_sample, |entry, active, revision, sample| {
-            if let Some(observer) = observer_at_entry(units, entry) {
-                observer
-                    .observer
-                    .activation_changed(active, revision, sample);
-            }
-        });
-    }
-
-    pub(crate) fn has_observation_activation(&self) -> bool {
-        self.observation_activation.is_some()
-    }
-
-    pub(crate) fn has_active_observation(&self) -> bool {
-        self.observation_activation
-            .as_ref()
-            .is_some_and(|activation| !activation.entries().is_empty())
     }
 
     /// Runs unit `index`. Every producer this unit reads precedes it in `units`, or was written
@@ -2793,57 +2709,6 @@ impl Runtime {
                 }
             }
         }
-    }
-
-    /// Dispatch only the active observer entries for one completed unit, preserving the catalog's
-    /// lowered direct/alias/member order while avoiding a walk over dormant prepared bindings.
-    ///
-    /// `host` is the block's [`HostMaster`], which the Output op's observers read (issue #916).
-    pub(crate) fn observe_active_unit(
-        &mut self,
-        index: usize,
-        first_sample: u64,
-        validity: GraphObservationValidity,
-        host: &HostMaster<'_>,
-    ) -> Result<(), RenderError> {
-        let output = self.output_unit == Some(index);
-        let Self {
-            lease,
-            units,
-            observation_activation,
-            observation_cursor,
-            ..
-        } = self;
-        let Some(activation) = observation_activation.as_ref() else {
-            return Ok(());
-        };
-        let entries = activation.entries();
-        let mut planar = false;
-        let mut planar_member = None;
-        while let Some(entry) = entries.get(*observation_cursor).copied() {
-            if entry.unit > index {
-                break;
-            }
-            *observation_cursor += 1;
-            if entry.unit < index {
-                continue;
-            }
-            if planar_member != Some(entry.member) {
-                planar = false;
-                planar_member = Some(entry.member);
-            }
-            let output = output.then(|| host.planes());
-            observe_active_entry(
-                units,
-                lease,
-                entry,
-                first_sample,
-                validity,
-                &mut planar,
-                output,
-            )?;
-        }
-        Ok(())
     }
 
     /// Materializes every pending split fader in original schedule order before a render error
@@ -3023,22 +2888,6 @@ impl Runtime {
     /// Invalidate every prepared observer after a render failure before the error leaves the
     /// executor. This preserves the one-shot capture boundary without touching audio state.
     pub(crate) fn invalidate_observers(&mut self) {
-        if self.observation_activation.is_some() {
-            if self.observation_failure_invalidated {
-                self.observation_failure_invalidated = false;
-                return;
-            }
-            let entries = self
-                .observation_activation
-                .as_ref()
-                .map_or(&[][..], RealtimeObservationActivation::entries);
-            for entry in entries.iter().copied() {
-                if let Some(observer) = observer_at_entry(&mut self.units, entry) {
-                    observer.observer.invalidate();
-                }
-            }
-            return;
-        }
         for unit in &mut self.units {
             match unit {
                 RuntimeUnit::Op(op) => {
@@ -3060,19 +2909,6 @@ impl Runtime {
     /// Invalidate observers after a failed block while distinguishing a window completed by
     /// that block from an older result that remains valid for the control-side reader.
     pub(crate) fn invalidate_observers_after_failure(&mut self, failed_sample: u64) {
-        if let Some(activation) = self.observation_activation.as_ref() {
-            // Every currently active observer may hold a partial capture for this block, even if
-            // its unit has not been reached yet. Dormant catalog rows are excluded by the active
-            // snapshot itself; each active row receives exactly one failure notification.
-            let entries = activation.entries();
-            for entry in entries.iter().copied() {
-                if let Some(observer) = observer_at_entry(&mut self.units, entry) {
-                    observer.observer.invalidate_after_failure(failed_sample);
-                }
-            }
-            self.observation_failure_invalidated = true;
-            return;
-        }
         for unit in &mut self.units {
             match unit {
                 RuntimeUnit::Op(op) => {
@@ -3130,116 +2966,6 @@ fn bank_gather_source(member: &RuntimeOp) -> Option<u32> {
     match &*member.inputs {
         [single] if *single != member.output => Some(*single),
         _ => None,
-    }
-}
-
-fn observer_at_entry(
-    units: &mut [RuntimeUnit],
-    entry: ActivationEntry,
-) -> Option<&mut GraphNodeObserverBinding> {
-    match units.get_mut(entry.unit)? {
-        RuntimeUnit::Op(op) if entry.member.is_none() => op.observers.get_mut(entry.observer),
-        RuntimeUnit::Bank { members, .. } => members
-            .get_mut(entry.member?)
-            .and_then(|member| member.observers.get_mut(entry.observer)),
-        RuntimeUnit::Op(_) => None,
-    }
-}
-
-/// One active observer entry. `output` is the host's planes when `entry.unit` runs the session
-/// Output op (issue #916), and `None` for every other unit.
-fn observe_active_entry(
-    units: &mut [RuntimeUnit],
-    lease: &mut ArenaLease,
-    entry: ActivationEntry,
-    first_sample: u64,
-    validity: GraphObservationValidity,
-    planar: &mut bool,
-    output: Option<(&[f32], &[f32])>,
-) -> Result<(), RenderError> {
-    match units.get_mut(entry.unit) {
-        Some(RuntimeUnit::Op(op)) if entry.member.is_none() => {
-            let buffer = op.output;
-            let observer = op
-                .observers
-                .get_mut(entry.observer)
-                .ok_or(RenderError::InvalidEnvelope)?;
-            #[cfg(any(test, feature = "test-support"))]
-            test_only_observation_dispatch_observer_access();
-            match output {
-                Some(planes) => {
-                    observe_output_one(observer, planes, first_sample, validity, planar)
-                }
-                None => observe_one(
-                    observer,
-                    lease,
-                    buffer,
-                    None,
-                    false,
-                    first_sample,
-                    validity,
-                    planar,
-                ),
-            }
-        }
-        Some(RuntimeUnit::Bank {
-            members,
-            lanes,
-            chain,
-            ..
-        }) => {
-            let member_index = entry.member.ok_or(RenderError::InvalidEnvelope)?;
-            let eligible = {
-                let population = *lanes;
-                let width = chain.width().lanes() as usize;
-                population > 0
-                    && population <= width
-                    && !members.is_empty()
-                    && members.len().is_multiple_of(population)
-                    && chain.active().len() == width
-                    && chain
-                        .active()
-                        .iter()
-                        .enumerate()
-                        .all(|(lane, active)| *active == (lane < population))
-                    && chain.aux_lanes().is_empty()
-            };
-            let frames = u32::try_from(lease.frames()).ok();
-            let final_lane = members
-                .len()
-                .checked_sub(*lanes)
-                .and_then(|start| member_index.checked_sub(start));
-            let resident = if eligible {
-                final_lane.and_then(|lane| BankChain::final_output_lane(chain, frames?, lane))
-            } else {
-                None
-            };
-            // The member buffer a folded lane's scatter skipped (issue #885).
-            let folded = final_lane.is_some_and(|lane| chain.fold_lanes().get(lane) == Some(&true));
-            let member = members
-                .get_mut(member_index)
-                .ok_or(RenderError::InvalidEnvelope)?;
-            #[cfg(any(test, feature = "test-support"))]
-            test_only_observation_dispatch_member_access();
-            let output = member.output;
-            let observer = member
-                .observers
-                .get_mut(entry.observer)
-                .ok_or(RenderError::InvalidEnvelope)?;
-            #[cfg(any(test, feature = "test-support"))]
-            test_only_observation_dispatch_observer_access();
-            observe_one(
-                observer,
-                lease,
-                output,
-                resident,
-                folded,
-                first_sample,
-                validity,
-                planar,
-            )
-        }
-        Some(RuntimeUnit::Op(_)) | None => Err(RenderError::InvalidEnvelope),
     }
 }
 
@@ -3766,79 +3492,6 @@ fn observe(
 // REALTIME_POLICY_END
 
 // REALTIME_POLICY_BEGIN
-/// One active observer entry: [`observe`]'s body for a single row, with `planar` recording whether
-/// this member's planar block was already acquired -- and, when `folded`, written -- this block.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "issue #885 adds the folded-lane flag to the existing seven-parameter dispatch"
-)]
-fn observe_one(
-    observer: &mut GraphNodeObserverBinding,
-    lease: &mut ArenaLease,
-    output: u32,
-    resident: Option<rack::ResidentOutputLane<'_>>,
-    folded: bool,
-    first_sample: u64,
-    validity: GraphObservationValidity,
-    planar: &mut bool,
-) -> Result<(), RenderError> {
-    let words = resident;
-    #[cfg(any(test, feature = "test-support"))]
-    let resident =
-        resident.filter(|_| !TEST_ONLY_METER_RESIDENT_DISABLED.with(std::cell::Cell::get));
-    if let Some(lane) = resident {
-        #[cfg(any(test, feature = "test-support"))]
-        TEST_ONLY_METER_INPUT_COUNTS.with(|value| {
-            let mut counts = value.get();
-            counts[1] += 1;
-            value.set(counts);
-        });
-        if let Some(result) =
-            observer
-                .observer
-                .observe_resident(crate::GraphResidentObservationBlock {
-                    lane,
-                    first_sample,
-                    validity,
-                    // Issues #943 and #950 bank the permanent path only; a controlled row's meter
-                    // reads its samples.
-                    sample_peak: None,
-                    meter: None,
-                })
-        {
-            #[cfg(any(test, feature = "test-support"))]
-            TEST_ONLY_METER_INPUT_COUNTS.with(|value| {
-                let mut counts = value.get();
-                counts[2] += 1;
-                value.set(counts);
-            });
-            result?;
-            return Ok(());
-        }
-    }
-    if !*planar {
-        #[cfg(any(test, feature = "test-support"))]
-        TEST_ONLY_METER_INPUT_COUNTS.with(|value| {
-            let mut counts = value.get();
-            counts[0] += 1;
-            value.set(counts);
-        });
-        if folded {
-            write_resident_lane(lease, output, words)?;
-        }
-        *planar = true;
-    }
-    let (left, right) = lease.read_stereo(output);
-    observer.observer.observe_with_validity(
-        GraphObservationBlock {
-            left,
-            right,
-            first_sample,
-        },
-        validity,
-    )
-}
-
 /// Run the session Output op's observers over the host's planes (issue #916).
 ///
 /// This is [`observe`] for the one op whose storage is not an arena buffer. The Output op is never
@@ -3864,7 +3517,7 @@ fn observe_output(
     Ok(())
 }
 
-/// One observer of the session Output op: [`observe_one`]'s planar path over the host's planes.
+/// One observer of the session Output op: [`observe`]'s planar path over the host's planes.
 fn observe_output_one(
     observer: &mut GraphNodeObserverBinding,
     (left, right): (&[f32], &[f32]),
@@ -4623,245 +4276,13 @@ fn taps_by_op(program: &ExecutionProgram, spec: &GraphSpec) -> BTreeMap<u32, Vec
 /// Enumerate the observer rows at one op in the same order as [`build_op`].
 ///
 /// A direct node's rows are followed by each elided alias's rows.  Each individual node is sorted
-/// by stable handle by [`take_observers`] and by [`preflight_observation_activation`] before this
-/// helper is used, so this function is only responsible for preserving the direct/alias layout.
+/// by stable handle by [`take_observers`] before this helper is used, so this function is only
+/// responsible for preserving the direct/alias layout.
 fn observer_nodes<'a>(
     node: GraphNodeId,
     aliases: &'a [GraphNodeId],
 ) -> impl Iterator<Item = GraphNodeId> + 'a {
     core::iter::once(node).chain(aliases.iter().cloned())
-}
-
-/// The two owners created by borrowed activation preflight.
-///
-/// Both pieces are prepared while the caller still owns every processor, observer and source.
-/// The controller remains on the control side; the realtime half is passed to the executor by the
-/// transactional bind tranche that follows this one.
-pub(crate) struct PreparedObservationActivation {
-    pub(crate) controller: GraphObservationController,
-    pub(crate) realtime: RealtimeObservationActivation,
-}
-
-/// Resolve the exact lowered observer coordinates before any caller-owned input is moved.
-///
-/// This is deliberately a borrowed walk over the immutable observer bindings and the already
-/// frozen sequential plan.  It must remain the sole fallible activation preparation step: once it
-/// succeeds, materialisation can consume the same plan without doing another lookup or allocation
-/// that could fail after ownership has started moving.
-pub(crate) fn preflight_observation_activation(
-    plan: &crate::PreparedGraphPlan,
-    program: &ExecutionProgram,
-    bindings: &crate::GraphRuntimeBindings,
-    planning: &SequentialPlan,
-    config: Option<GraphObservationActivationConfig>,
-) -> Result<Option<PreparedObservationActivation>, &'static str> {
-    let has_controlled = plan
-        .observers
-        .iter()
-        .chain(bindings.observers.iter())
-        .any(GraphNodeObserverBinding::is_controlled);
-
-    let Some(config) = config else {
-        return if has_controlled {
-            Err("graph.plan.observation_activation_required")
-        } else {
-            Ok(None)
-        };
-    };
-
-    // A configured endpoint with no controlled row cannot ever admit a replacement.  Refuse it
-    // before prepare_activation so a permanent-only graph does not acquire an unusable controller.
-    if !has_controlled {
-        return Err("graph.plan.observation_activation_capacity");
-    }
-
-    if planning.unit_of_run.len() != planning.run_units.len()
-        || planning.op_slot.len() != program.ops.len()
-    {
-        return Err("graph.plan.observer");
-    }
-    if program.ops.iter().any(|op| {
-        usize::try_from(op.node)
-            .ok()
-            .is_none_or(|node| node >= plan.spec.nodes.len())
-    }) || program.taps.iter().any(|tap| {
-        usize::try_from(tap.node)
-            .ok()
-            .is_none_or(|node| node >= plan.spec.nodes.len())
-            || usize::try_from(tap.after_op)
-                .ok()
-                .is_none_or(|op| op >= program.ops.len())
-    }) {
-        return Err("graph.plan.observer");
-    }
-
-    // Keep only borrowed rows in this temporary map.  Clearing one node after it is emitted is
-    // equivalent to take_observers' remove, while retaining the caller-owned bindings untouched.
-    let mut observers_by_node: BTreeMap<GraphNodeId, Vec<&GraphNodeObserverBinding>> =
-        BTreeMap::new();
-    for observer in plan.observers.iter().chain(bindings.observers.iter()) {
-        observers_by_node
-            .entry(observer.node.clone())
-            .or_default()
-            .push(observer);
-    }
-    for observers in observers_by_node.values_mut() {
-        observers.sort_by_key(|observer| observer.handle);
-    }
-
-    let taps = taps_by_op(program, &plan.spec);
-    let mut catalog = Vec::new();
-    let mut permanent = Vec::new();
-    let mut ordinal = 0_usize;
-    let mut expected_unit = 0_usize;
-    let mut seen_ops = vec![false; program.ops.len()];
-    let mut emitted_ops = vec![false; program.ops.len()];
-
-    for (run, (membership, ops)) in planning.run_units.iter().enumerate() {
-        let unit = planning
-            .unit_of_run
-            .get(run)
-            .copied()
-            .ok_or("graph.plan.observer")?;
-        let Some(unit) = unit else {
-            // A retired run has no RuntimeUnit and therefore no observer dispatch boundary.  Its
-            // observer rows remain in the map and make the final complete-consumption check fail.
-            for op in ops {
-                let Some(seen) = seen_ops.get_mut(*op) else {
-                    return Err("graph.plan.observer");
-                };
-                if *seen {
-                    return Err("graph.plan.observer");
-                }
-                *seen = true;
-                if planning
-                    .op_slot
-                    .get(*op)
-                    .ok_or("graph.plan.observer")?
-                    .is_some()
-                {
-                    return Err("graph.plan.observer");
-                }
-            }
-            continue;
-        };
-        if unit != expected_unit {
-            return Err("graph.plan.observer");
-        }
-        expected_unit = expected_unit.checked_add(1).ok_or("graph.plan.observer")?;
-        if membership.is_empty() && ops.len() != 1 {
-            return Err("graph.plan.observer");
-        }
-
-        for (member, op) in ops.iter().copied().enumerate() {
-            let Some(seen) = seen_ops.get_mut(op) else {
-                return Err("graph.plan.observer");
-            };
-            if *seen {
-                return Err("graph.plan.observer");
-            }
-            *seen = true;
-            emitted_ops[op] = true;
-
-            let Some((mapped_unit, mapped_member)) = planning.op_slot.get(op).copied().flatten()
-            else {
-                return Err("graph.plan.observer");
-            };
-            if mapped_unit != unit || mapped_member != member {
-                return Err("graph.plan.observer");
-            }
-            let runtime_member = (!membership.is_empty()).then_some(member);
-            let node = plan
-                .spec
-                .nodes
-                .get(program.ops[op].node as usize)
-                .ok_or("graph.plan.observer")?
-                .id
-                .clone();
-            let aliases = taps
-                .get(&u32::try_from(op).map_err(|_| "graph.plan.observer")?)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
-            let mut observer_index = 0_usize;
-            for observed_node in observer_nodes(node, aliases) {
-                let Some(observers) = observers_by_node.get_mut(&observed_node) else {
-                    continue;
-                };
-                for observer in observers.iter().copied() {
-                    let entry = ActivationEntry {
-                        unit,
-                        member: runtime_member,
-                        observer: observer_index,
-                        ordinal,
-                    };
-                    ordinal = ordinal.checked_add(1).ok_or("graph.plan.observer")?;
-                    observer_index = observer_index.checked_add(1).ok_or("graph.plan.observer")?;
-                    if observer.is_controlled() {
-                        catalog.push(ActivationBinding {
-                            handle: observer.handle,
-                            entry,
-                        });
-                    } else {
-                        permanent.push(entry);
-                    }
-                }
-                // A direct node or alias can appear only once in the lowered sequence.  Clearing
-                // here mirrors take_observers if malformed taps repeat the same node.
-                observers.clear();
-            }
-        }
-    }
-
-    if seen_ops.iter().any(|seen| !seen)
-        || planning
-            .op_slot
-            .iter()
-            .enumerate()
-            .any(|(op, slot)| slot.is_some() != emitted_ops[op])
-        || observers_by_node
-            .values()
-            .any(|observers| !observers.is_empty())
-    {
-        return Err("graph.plan.observer");
-    }
-
-    if catalog.is_empty() {
-        return Err("graph.plan.observation_activation_capacity");
-    }
-    let (controller, realtime) = prepare_activation(catalog.into_boxed_slice(), &permanent, config)
-        .map_err(observation_activation_error_code)?;
-    debug_assert_eq!(controller.resources(), realtime.resources());
-    Ok(Some(PreparedObservationActivation {
-        controller,
-        realtime,
-    }))
-}
-
-fn observation_activation_error_code(error: GraphObservationAdmissionError) -> &'static str {
-    match error {
-        GraphObservationAdmissionError::UnknownHandle => {
-            "graph.plan.observation_activation_unknown"
-        }
-        GraphObservationAdmissionError::DuplicateHandle => {
-            "graph.plan.observation_activation_duplicate"
-        }
-        GraphObservationAdmissionError::ActiveCapacity => {
-            "graph.plan.observation_activation_capacity"
-        }
-        GraphObservationAdmissionError::RetainedBytes => {
-            "graph.plan.observation_activation_retained"
-        }
-        GraphObservationAdmissionError::InvalidRemoval => {
-            "graph.plan.observation_activation_removal"
-        }
-        GraphObservationAdmissionError::Backpressure => {
-            "graph.plan.observation_activation_backpressure"
-        }
-        GraphObservationAdmissionError::RevisionExhausted => {
-            "graph.plan.observation_activation_revision"
-        }
-        GraphObservationAdmissionError::OwnerClosed => "graph.plan.observation_activation_owner",
-    }
 }
 
 /// The buffer-identity half of serialized scalar fader/matrix admission.
@@ -5701,7 +5122,6 @@ pub(crate) fn build_sequential(
     parts: RuntimeParts,
     frames: usize,
     planning: SequentialPlan,
-    observation_activation: Option<RealtimeObservationActivation>,
     source_claims: &[GraphNodeId],
 ) -> Runtime {
     #[cfg(any(test, feature = "test-support"))]
@@ -5921,7 +5341,7 @@ pub(crate) fn build_sequential(
         source_claims,
         &mut identity,
     );
-    let mut runtime = Runtime::new_with_observation_activation(
+    let mut runtime = Runtime::new_with_output_unit(
         leases.pop().expect("the sequential lease"),
         delays,
         // Allocated by `node_kind` as it lowered each delayed input node, so the line indices the
@@ -5933,7 +5353,6 @@ pub(crate) fn build_sequential(
         response_bindings,
         redirects.len() as u64,
         folds,
-        observation_activation,
         output_unit,
     );
     runtime.source_plane_of_buffer = source_plane_of_buffer;
@@ -6410,8 +5829,7 @@ fn scatter_redirects(
 /// on the reasoning that the last slot's own buffer goes unwritten after the redirect; but no
 /// observer reads that buffer. Every one of them reads the chain's final output, and is dispatched
 /// from the last slot's own `RuntimeOp`, whose `output` [`apply_scatter_redirects`] repoints at
-/// the consumer's buffer. Both dispatchers (`Runtime::observe_unit`, `observe_active_entry`) run
-/// them straight after the chain's unit: after its scatter wrote that buffer, and before the
+/// the consumer's buffer. `Runtime::observe_unit` runs them straight after the chain's unit: after its scatter wrote that buffer, and before the
 /// consumer's unit -- later by construction -- rewrites it in place. Each is first offered the
 /// chain's resident final lane (`BankChain::final_output_lane`, the words the scatter
 /// transposed), and one that declines it reads the member's output, which is the consumer's buffer
@@ -10656,8 +10074,6 @@ mod tests {
         /// Meters on every track, at the stages `meter_at` names.
         metered: bool,
         accepts_resident: bool,
-        /// Bind through the controlled-activation catalog and activate every meter.
-        controlled: bool,
         /// Bind with the route fold declined: the path this plan took before issue #885.
         fold_declined: bool,
         /// Issue #886: an elided `PostSimd1` boundary after each member -- a later tap on the
@@ -10689,7 +10105,6 @@ mod tests {
                 stage: TrackStage::PostMatrix,
                 metered: true,
                 accepts_resident: true,
-                controlled: false,
                 fold_declined: false,
                 alias: false,
                 fader: false,
@@ -10796,33 +10211,13 @@ mod tests {
     fn fold_fixture(
         fixture: FoldFixture,
         published: &Published,
-    ) -> (
-        engine::realtime::PreparedRenderPlan,
-        Option<crate::GraphObservationController>,
-    ) {
-        let (plan, bindings, observed) = fold_fixture_parts(fixture, published);
+    ) -> engine::realtime::PreparedRenderPlan {
+        let (plan, bindings, _) = fold_fixture_parts(fixture, published);
         test_only_set_route_fold_declined(fixture.fold_declined);
         test_only_set_scatter_redirect_declined(fixture.scatter_declined);
-        let bound = if fixture.controlled {
-            let (plan, mut controller) = plan
-                .bind_with_observation_activation(
-                    bindings,
-                    crate::GraphObservationActivationConfig {
-                        maximum_active_observers: observed.len(),
-                        maximum_retained_bytes: u64::MAX,
-                    },
-                )
-                .unwrap_or_else(|failure| panic!("controlled bind: {}", failure.code));
-            let handles: Vec<u64> = observed.iter().map(|(_, handle)| *handle).collect();
-            controller.replace(&handles).expect("activate every meter");
-            (plan, Some(controller))
-        } else {
-            (
-                plan.bind(bindings)
-                    .unwrap_or_else(|failure| panic!("bind: {}", failure.code)),
-                None,
-            )
-        };
+        let bound = plan
+            .bind(bindings)
+            .unwrap_or_else(|failure| panic!("bind: {}", failure.code));
         test_only_set_route_fold_declined(false);
         test_only_set_scatter_redirect_declined(false);
         bound
@@ -11086,11 +10481,7 @@ mod tests {
                     accepts_resident: fixture.accepts_resident,
                     published: Arc::clone(published),
                 });
-                if fixture.controlled {
-                    GraphNodeObserverBinding::controlled(node.clone(), *handle, meter)
-                } else {
-                    GraphNodeObserverBinding::new(node.clone(), *handle, meter)
-                }
+                GraphNodeObserverBinding::new(node.clone(), *handle, meter)
             })
             .collect();
         let bindings = crate::GraphRuntimeBindings {
@@ -11144,20 +10535,12 @@ mod tests {
     fn a_post_matrix_meter_on_every_track_of_a_full_bank_keeps_the_fold_armed() {
         for (width, tracks) in [(BankWidth::Four, 4), (BankWidth::Eight, 8)] {
             let published = Published::default();
-            let folds = |fixture| fold_fixture(fixture, &published).0.bank_route_folds();
+            let folds = |fixture| fold_fixture(fixture, &published).bank_route_folds();
             let metered = FoldFixture::metered(width, tracks, 13);
             assert_eq!(
                 folds(metered),
                 tracks as u64,
                 "{width:?}: a post-matrix meter on every track must keep every route folded"
-            );
-            assert_eq!(
-                folds(FoldFixture {
-                    controlled: true,
-                    ..metered
-                }),
-                tracks as u64,
-                "{width:?}: the controlled catalog binds the same fold"
             );
             assert_eq!(
                 folds(FoldFixture {
@@ -11210,15 +10593,14 @@ mod tests {
     ///   `write_resident_lane` fills -- the buffer the fold otherwise leaves holding last block's
     ///   words;
     /// * the test-only switch that withdraws the resident offer, the same fallback reached the
-    ///   way the builtins compiler's own resident-meter gate reaches it;
-    /// * both of the above through the controlled-activation dispatcher (`observe_one`).
+    ///   way the builtins compiler's own resident-meter gate reaches it.
     ///
     /// Shapes: a full W4 bank, a full W8 bank, two full W4 cohorts (so a continuation cohort
     /// accumulates rather than stores), and a W4 strip of six whose second cohort is partial and
     /// takes the per-lane scatter. Frame counts that are not a multiple of the lane width are
     /// included so the transposes' tails are exercised.
     ///
-    /// Red mutations: drop the `write_resident_lane` call from either dispatcher -- the declining
+    /// Red mutations: drop the `write_resident_lane` call from `observe` -- the declining
     /// arms publish the member buffer's stale words; offer no resident view to a folded lane
     /// (restore the `fold.is_empty()` eligibility clause) -- the resident arms read stale words.
     #[test]
@@ -11233,7 +10615,7 @@ mod tests {
             let metered = FoldFixture::metered(width, tracks, frames);
             let run = |fixture: FoldFixture, resident_disabled: bool| {
                 let published = Published::default();
-                let (mut plan, _controller) = fold_fixture(fixture, &published);
+                let mut plan = fold_fixture(fixture, &published);
                 let folds = plan.bank_route_folds();
                 test_only_meter_input_reset(resident_disabled);
                 let master = render_fold_fixture(&mut plan, frames as usize, BLOCKS);
@@ -11302,25 +10684,6 @@ mod tests {
                     metered,
                     true,
                     [observations, 0, 0],
-                ),
-                (
-                    "controlled resident meters",
-                    FoldFixture {
-                        controlled: true,
-                        ..metered
-                    },
-                    false,
-                    [0, observations, observations],
-                ),
-                (
-                    "controlled declining observers",
-                    FoldFixture {
-                        controlled: true,
-                        accepts_resident: false,
-                        ..metered
-                    },
-                    false,
-                    [observations, observations, 0],
                 ),
             ] {
                 let (folds, master, frames, counts) = run(fixture, resident_disabled);
@@ -11675,37 +11038,15 @@ mod tests {
 
     /// Bind `plan` straight into a [`crate::GraphExecutor`], the way `bind_optional_source_set`
     /// does, and hand back its lowered program. A test that reads the executor's arena after a
-    /// render cannot go through `PreparedRenderPlan`, which hides the executor. `controlled`
-    /// binds through the activation catalog and activates every observer, as `fold_fixture` does.
+    /// render cannot go through `PreparedRenderPlan`, which hides the executor.
     fn bind_executor(
         plan: crate::PreparedGraphPlan,
         bindings: crate::GraphRuntimeBindings,
-        controlled: bool,
         source_set: Option<crate::GraphPreparedSourceSet>,
-    ) -> (
-        crate::GraphExecutor,
-        ExecutionProgram,
-        Option<crate::GraphObservationController>,
-    ) {
+    ) -> (crate::GraphExecutor, ExecutionProgram) {
         let program = plan.lowered().expect("lowered");
         let planning = preflight_sequential(&plan, &program, &bindings, source_set.as_ref())
             .expect("preflight");
-        let handles: Vec<u64> = plan
-            .observers
-            .iter()
-            .chain(&bindings.observers)
-            .map(|observer| observer.handle)
-            .collect();
-        let config = controlled.then_some(crate::GraphObservationActivationConfig {
-            maximum_active_observers: handles.len(),
-            maximum_retained_bytes: u64::MAX,
-        });
-        let prepared =
-            preflight_observation_activation(&plan, &program, &bindings, &planning, config)
-                .expect("activation preflight");
-        let (controller, realtime) = prepared.map_or((None, None), |prepared| {
-            (Some(prepared.controller), Some(prepared.realtime))
-        });
         let mut plan = plan;
         let mut bindings = bindings;
         let mut observers = core::mem::take(&mut plan.observers);
@@ -11717,15 +11058,8 @@ mod tests {
             observers,
             source_set,
             planning,
-            realtime,
         );
-        let controller = controller.map(|mut controller| {
-            controller
-                .replace(&handles)
-                .expect("activate every observer");
-            controller
-        });
-        (executor, program, controller)
+        (executor, program)
     }
 
     /// `Input -> PostInputBuiltins (a one-lane W4 builtin bank) -> Output`, one track, no route
@@ -11975,9 +11309,6 @@ mod tests {
             }
             RuntimeUnit::Op(_) => false,
         };
-        runtime.begin_observation_block(first_sample);
-        let selective = runtime.has_observation_activation();
-        let active = runtime.has_active_observation();
         let validity = GraphObservationValidity::CLEAR;
         let mut before_master = None;
         for unit in 0..runtime.units.len() {
@@ -11989,15 +11320,9 @@ mod tests {
             runtime
                 .execute(unit, first_sample, host.reborrow(), None)
                 .expect("oracle unit");
-            if !selective {
-                runtime
-                    .observe_unit(unit, first_sample, validity, &host)
-                    .expect("oracle observer");
-            } else if active {
-                runtime
-                    .observe_active_unit(unit, first_sample, validity, &host)
-                    .expect("oracle observer");
-            }
+            runtime
+                .observe_unit(unit, first_sample, validity, &host)
+                .expect("oracle observer");
         }
         // The executor's end-of-block copy, exactly as it stood before issue #916.
         let (arena_left, arena_right) = runtime.buffer(slot);
@@ -12022,8 +11347,8 @@ mod tests {
     #[derive(Clone, Copy, Debug)]
     enum HostShape {
         /// 64 tracks in eight W8 cohorts, every route folded into the Output: the console shape.
-        /// `frames`, and whether the meters bind through the activation catalog.
-        Folded(u32, bool),
+        /// `frames`.
+        Folded(u32),
         /// The same plan with the fold declined: 64 route ops and a 64-input reduction.
         Unfolded,
         /// The bus plan with its three pads: the tracks fold into the bus, the bus redirects its
@@ -12042,10 +11367,9 @@ mod tests {
     }
 
     impl HostShape {
-        const ALL: [Self; 9] = [
-            Self::Folded(13, false),
-            Self::Folded(13, true),
-            Self::Folded(128, false),
+        const ALL: [Self; 8] = [
+            Self::Folded(13),
+            Self::Folded(128),
             Self::Unfolded,
             Self::Submix,
             Self::SubmixOnATrackSlot,
@@ -12056,7 +11380,7 @@ mod tests {
 
         const fn frames(self) -> u32 {
             match self {
-                Self::Folded(frames, _) => frames,
+                Self::Folded(frames) => frames,
                 _ => 13,
             }
         }
@@ -12078,45 +11402,29 @@ mod tests {
             oracle: bool,
             published: &Published,
         ) -> (crate::GraphExecutor, ExecutionProgram) {
-            let console = |tracks, width, frames, controlled| {
+            let console = |tracks, width, frames| {
                 let fixture = FoldFixture {
                     output_meters: true,
-                    controlled,
                     ..FoldFixture::metered(width, tracks, frames)
                 };
                 let (plan, bindings, _) = fold_fixture_parts(fixture, published);
-                (plan, bindings, controlled)
+                (plan, bindings)
             };
-            let (plan, bindings, controlled) = match self {
-                Self::Folded(frames, controlled) => {
-                    console(64, BankWidth::Eight, frames, controlled)
-                }
-                Self::Unfolded => console(64, BankWidth::Eight, 13, false),
-                Self::OneRouteFolded | Self::OneRouteUnfolded => {
-                    console(1, BankWidth::Four, 13, false)
-                }
-                Self::Submix => {
-                    let (plan, bindings) = folded_bus_parts(3, Some(published));
-                    (plan, bindings, false)
-                }
-                Self::SubmixOnATrackSlot => {
-                    let (plan, bindings) = folded_bus_parts(0, Some(published));
-                    (plan, bindings, false)
-                }
-                Self::BankIntoOutput => {
-                    let (plan, bindings) = direct_bank_parts(Some(published));
-                    (plan, bindings, false)
-                }
+            let (plan, bindings) = match self {
+                Self::Folded(frames) => console(64, BankWidth::Eight, frames),
+                Self::Unfolded => console(64, BankWidth::Eight, 13),
+                Self::OneRouteFolded | Self::OneRouteUnfolded => console(1, BankWidth::Four, 13),
+                Self::Submix => folded_bus_parts(3, Some(published)),
+                Self::SubmixOnATrackSlot => folded_bus_parts(0, Some(published)),
+                Self::BankIntoOutput => direct_bank_parts(Some(published)),
             };
             let declined = matches!(self, Self::Unfolded | Self::OneRouteUnfolded);
             test_only_set_route_fold_declined(declined);
             test_only_set_host_master_declined(oracle);
-            let (executor, program, controller) = bind_executor(plan, bindings, controlled, None);
+            let bound = bind_executor(plan, bindings, None);
             test_only_set_route_fold_declined(false);
             test_only_set_host_master_declined(false);
-            // The controller only publishes the activation snapshot; the runtime owns the rest.
-            drop(controller);
-            (executor, program)
+            bound
         }
     }
 
@@ -12485,9 +11793,8 @@ mod tests {
         /// Cohort 5 of 8 fails its bank processor, after five folded cohorts wrote the host's
         /// planes.
         Unit,
-        /// An Output observer fails after the Output op wrote the whole master; `true` binds it
-        /// through the activation catalog (`observe_active_unit`).
-        Observer(bool),
+        /// An Output observer fails after the Output op wrote the whole master.
+        Observer,
         /// The source set fails before any unit runs, in `begin_block` (`true`) or in
         /// `copy_track_input`, over planes still holding the previous block's master.
         Source(bool),
@@ -12537,8 +11844,7 @@ mod tests {
         };
         for failure in [
             HostFailure::Unit,
-            HostFailure::Observer(false),
-            HostFailure::Observer(true),
+            HostFailure::Observer,
             HostFailure::Source(true),
             HostFailure::Source(false),
         ] {
@@ -12550,20 +11856,20 @@ mod tests {
                         ..quiet(BankWidth::Eight, 64)
                     };
                     let (plan, bindings, _) = fold_fixture_parts(fixture, &published);
-                    (bind_executor(plan, bindings, false, None).0, 64)
+                    (bind_executor(plan, bindings, None).0, 64)
                 }
-                HostFailure::Observer(controlled) => {
+                HostFailure::Observer => {
                     let (plan, mut bindings, _) =
                         fold_fixture_parts(quiet(BankWidth::Eight, 64), &published);
                     let observer = Box::new(FailingObserver {
                         from_sample: u64::from(FRAMES),
                     });
-                    bindings.observers.push(if controlled {
-                        GraphNodeObserverBinding::controlled(output.clone(), 7, observer)
-                    } else {
-                        GraphNodeObserverBinding::new(output.clone(), 7, observer)
-                    });
-                    (bind_executor(plan, bindings, controlled, None).0, 64)
+                    bindings.observers.push(GraphNodeObserverBinding::new(
+                        output.clone(),
+                        7,
+                        observer,
+                    ));
+                    (bind_executor(plan, bindings, None).0, 64)
                 }
                 HostFailure::Source(in_begin) => {
                     let (plan, mut bindings, _) =
@@ -12591,7 +11897,7 @@ mod tests {
                             in_begin,
                         }),
                     );
-                    (bind_executor(plan, bindings, false, Some(source)).0, 1)
+                    (bind_executor(plan, bindings, Some(source)).0, 1)
                 }
             };
             let mut executor = executor;
@@ -12631,7 +11937,7 @@ mod tests {
         // check, its stereo check, and the plan's `OutputShape` check in front of both.
         let published = Published::default();
         let (plan, bindings, _) = fold_fixture_parts(quiet(BankWidth::Eight, 64), &published);
-        let (mut executor, _, _) = bind_executor(plan, bindings, false, None);
+        let (mut executor, _) = bind_executor(plan, bindings, None);
         let mut storage = vec![pad; 2 * stride];
         render_host(
             &mut executor,
@@ -12668,7 +11974,7 @@ mod tests {
                 "a rejection leaves the planes alone"
             );
         }
-        let (mut plan, _) = fold_fixture(quiet(BankWidth::Eight, 64), &published);
+        let mut plan = fold_fixture(quiet(BankWidth::Eight, 64), &published);
         let mut storage = vec![pad; 2 * stride];
         let time = |block: u64| engine::realtime::RenderTime {
             absolute_sample: block * u64::from(FRAMES),
@@ -12761,7 +12067,7 @@ mod tests {
     /// `[scatter redirects, route folds]` of `fixture`'s bound plan.
     fn scatter_shape(fixture: FoldFixture) -> [u64; 2] {
         let published = Published::default();
-        let (plan, _controller) = fold_fixture(fixture, &published);
+        let plan = fold_fixture(fixture, &published);
         assert!(
             published.lock().unwrap().is_empty(),
             "binding renders nothing"
@@ -12779,8 +12085,7 @@ mod tests {
     /// which are not dedicated either, so its sole reader already runs in place on its buffer and
     /// `scatter_target` has nothing to redirect, metered or not (the last arm below).
     ///
-    /// Arms: both meters, each alone, the controlled catalog, observers that decline the resident
-    /// view, and a meter on the consumer's own node (never a clause) all keep every lane
+    /// Arms: both meters, each alone, observers that decline the resident view, and a meter on the consumer's own node (never a clause) all keep every lane
     /// redirected; the test-only switch gate 2's oracle uses declines every lane. The last two
     /// arms are how the direct scatter composes with issue #885's fold on the route-consumer
     /// shape: unmetered, the fold takes every lane and leaves no scatter to redirect; metered at a
@@ -12816,13 +12121,6 @@ mod tests {
                     "the later tap alone",
                     FoldFixture {
                         meter_at: &[TrackStage::PostSimd1],
-                        ..metered
-                    },
-                ),
-                (
-                    "the controlled catalog",
-                    FoldFixture {
-                        controlled: true,
                         ..metered
                     },
                 ),
@@ -12899,8 +12197,7 @@ mod tests {
     /// * meters reading the resident view (the production shape; no planar acquisition at all);
     /// * observers that decline the resident view and read the member's output -- after the
     ///   redirect, the consumer's buffer, read after the chain's unit and before the fader's;
-    /// * the test-only switch that withdraws the resident offer;
-    /// * both of the above through the controlled-activation dispatcher (`observe_one`).
+    /// * the test-only switch that withdraws the resident offer.
     ///
     /// Each track carries two meters: one on the last slot's own node and one on its later tap
     /// (the elided `PostSimd1`), so both kinds of producer observer the two removed clauses
@@ -12957,7 +12254,7 @@ mod tests {
         let (tracks, frames) = (metered.tracks, metered.frames);
         let run = |fixture: FoldFixture, resident_disabled: bool| {
             let published = Published::default();
-            let (mut plan, _controller) = fold_fixture(fixture, &published);
+            let mut plan = fold_fixture(fixture, &published);
             let bound = [plan.bank_scatter_redirects(), plan.bank_route_folds()];
             let split = selected_split_fader();
             test_only_meter_input_reset(resident_disabled);
@@ -13031,25 +12328,6 @@ mod tests {
                 [planar, offers, 0],
             ),
             ("resident offer withdrawn", metered, true, [planar, 0, 0]),
-            (
-                "controlled resident meters",
-                FoldFixture {
-                    controlled: true,
-                    ..metered
-                },
-                false,
-                [0, offers, offers],
-            ),
-            (
-                "controlled declining observers",
-                FoldFixture {
-                    controlled: true,
-                    accepts_resident: false,
-                    ..metered
-                },
-                false,
-                [planar, offers, 0],
-            ),
         ] {
             let (bound, split, master, frames, counts) = run(fixture, resident_disabled);
             assert_eq!(
@@ -13730,7 +13008,7 @@ mod tests {
         let slots = source_slots(&plan, shape);
         test_only_set_source_in_place_declined(declined);
         test_only_set_scatter_redirect_declined(shape.redirect_declined);
-        let (mut executor, _, _) = bind_executor(plan, bindings, false, Some(source_set));
+        let (mut executor, _) = bind_executor(plan, bindings, Some(source_set));
         test_only_set_source_in_place_declined(false);
         test_only_set_scatter_redirect_declined(false);
         let in_place = slots
@@ -14055,7 +13333,7 @@ mod tests {
         let published = Published::default();
         let (plan, bindings, source_set) = source_fixture_parts(shape, &published);
         let slots = source_slots(&plan, shape);
-        let (mut executor, _, _) = bind_executor(plan, bindings, false, Some(source_set));
+        let (mut executor, _) = bind_executor(plan, bindings, Some(source_set));
         let runtime = &executor.runtime;
         let active: Vec<u32> = executor.active_units.to_vec();
         let units = runtime.units.len();
@@ -14278,7 +13556,7 @@ mod tests {
         let published = Published::default();
         let (plan, bindings, source_set) =
             source_fixture_parts(InertShape::TrackDelayed.source(16), &published);
-        let (executor, _, _) = bind_executor(plan, bindings, false, Some(source_set));
+        let (executor, _) = bind_executor(plan, bindings, Some(source_set));
         let delayed = executor
             .runtime
             .units
@@ -14307,7 +13585,7 @@ mod tests {
             let charge = crate::GraphRuntimeMetadataResourceEstimate::checked_for(emitted)
                 .expect("runtime metadata charge");
             test_only_set_source_in_place_declined(declined);
-            let (executor, _, _) = bind_executor(plan, bindings, false, Some(source_set));
+            let (executor, _) = bind_executor(plan, bindings, Some(source_set));
             test_only_set_source_in_place_declined(false);
             let active = (executor.active_units.len() * core::mem::size_of::<u32>()) as u64;
             let copied =
@@ -14387,7 +13665,7 @@ mod tests {
                     source_fixture_parts(shape, &Published::default());
                 let slot = source_slots(&plan, shape)[shape.tracks];
                 test_only_set_scatter_redirect_declined(redirect_declined);
-                let (executor, _, _) = bind_executor(plan, bindings, false, Some(source_set));
+                let (executor, _) = bind_executor(plan, bindings, Some(source_set));
                 test_only_set_scatter_redirect_declined(false);
                 let runtime = &executor.runtime;
                 let dead_unit = runtime

@@ -40,8 +40,7 @@ use engine::realtime::{
 };
 use graph::{
     BuiltinControlDelivery, BuiltinPairFactory, BuiltinProcessor, DependencyLevel,
-    GraphBuiltinBankResourceEstimate, GraphNodeId, GraphNodeObserverBinding,
-    GraphObservationActivationConfig, GraphObservationBlock, GraphObservationController,
+    GraphBuiltinBankResourceEstimate, GraphNodeId, GraphNodeObserverBinding, GraphObservationBlock,
     GraphPreparedBuiltinBank, GraphPreparedBuiltinBankInfo, GraphPreparedBuiltinBankProcessor,
     GraphPreparedSourceSet, GraphRuntimeBindings, GraphRuntimeObserver, PreparedGraphPlan,
     StableGraphId, TrackStage,
@@ -376,17 +375,6 @@ pub struct PreparedBuiltinsSession {
     tails: Vec<(Box<str>, BuiltinTail)>,
     requests: Vec<MeterRequestSeal>,
     resources: BuiltinResourceEstimate,
-}
-
-/// Whether a prepared meter is always eligible for observation or waits for a graph activation.
-///
-/// This is intentionally private to the compiler boundary. The graph binding carries the same
-/// choice in its sealed observer, while the request seal retains it so a prepared artifact cannot
-/// conflate a permanent meter request with a controlled one during validation.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-enum MeterBindingPolicy {
-    Permanent,
-    Controlled,
 }
 
 /// The witness of a stage that is **seam-side by design**: fader, mute, pan and matrix.
@@ -1489,7 +1477,6 @@ struct MeterRequestSeal {
     peak_decay_bits: u32,
     queue_capacity: usize,
     metrics: MeterMetricSet,
-    binding_policy: MeterBindingPolicy,
 }
 
 type ObserverSeal = (Box<str>, TrackStage, u64);
@@ -2748,7 +2735,6 @@ fn forged_request_seal() -> MeterRequestSeal {
         peak_decay_bits: 0,
         queue_capacity: 1,
         metrics: MeterMetricSet::ALL,
-        binding_policy: MeterBindingPolicy::Permanent,
     }
 }
 
@@ -3005,59 +2991,6 @@ impl<R> PreparedBuiltinsGraphArtifact<R> {
         }
     }
 
-    /// Consume the sealed wrapper and attach its private builtin bindings with a prepared
-    /// host-controlled observation activation endpoint.
-    #[allow(clippy::result_large_err)]
-    pub fn into_bound_with_observation_activation(
-        mut self,
-        mut bindings: GraphRuntimeBindings,
-        config: GraphObservationActivationConfig,
-    ) -> Result<
-        (PreparedBuiltinsGraphBound, GraphObservationController),
-        PreparedBuiltinsGraphBindFailure<R>,
-    > {
-        let validation = match self.prepare_binding_validation(&bindings, None) {
-            Ok(validation) => validation,
-            Err(code) => {
-                return Err(PreparedBuiltinsGraphBindFailure {
-                    artifact: self,
-                    bindings,
-                    code,
-                });
-            }
-        };
-        self.append_private_bindings(&mut bindings);
-        let PreparedBuiltinsGraphArtifact {
-            graph,
-            builtin_processors: _,
-            builtin_observers: _,
-            report,
-            track_controls,
-            meter_consumers,
-        } = self;
-        match graph.bind_with_observation_activation(bindings, config) {
-            Ok((plan, controller)) => Ok((
-                Self::bound_from_plan(plan, track_controls, meter_consumers),
-                controller,
-            )),
-            Err(failure) => {
-                let (artifact, bindings) = restore_graph_bind_failure(
-                    failure.plan,
-                    failure.bindings,
-                    &validation,
-                    report,
-                    track_controls,
-                    meter_consumers,
-                );
-                Err(PreparedBuiltinsGraphBindFailure {
-                    artifact,
-                    bindings,
-                    code: failure.code,
-                })
-            }
-        }
-    }
-
     /// Consume the sealed wrapper and bind one coordinator-owned source set.
     ///
     /// The wrapper first applies the same builtin-node and observer prevalidation as
@@ -3092,62 +3025,6 @@ impl<R> PreparedBuiltinsGraphArtifact<R> {
         } = self;
         match graph.bind_with_source_set(bindings, source_set) {
             Ok(plan) => Ok(Self::bound_from_plan(plan, track_controls, meter_consumers)),
-            Err(failure) => {
-                let (artifact, bindings) = restore_graph_bind_failure(
-                    failure.plan,
-                    failure.bindings,
-                    &validation,
-                    report,
-                    track_controls,
-                    meter_consumers,
-                );
-                Err(PreparedBuiltinsGraphSourceBindFailure {
-                    artifact,
-                    bindings,
-                    source_set: failure.source_set,
-                    code: failure.code,
-                })
-            }
-        }
-    }
-
-    /// Consume the sealed wrapper and bind one coordinator-owned source set with a prepared
-    /// host-controlled observation activation endpoint.
-    #[allow(clippy::result_large_err)]
-    pub fn into_bound_with_source_set_and_observation_activation(
-        mut self,
-        mut bindings: GraphRuntimeBindings,
-        source_set: GraphPreparedSourceSet,
-        config: GraphObservationActivationConfig,
-    ) -> Result<
-        (PreparedBuiltinsGraphBound, GraphObservationController),
-        PreparedBuiltinsGraphSourceBindFailure<R>,
-    > {
-        let validation = match self.prepare_binding_validation(&bindings, Some(&source_set)) {
-            Ok(validation) => validation,
-            Err(code) => {
-                return Err(PreparedBuiltinsGraphSourceBindFailure {
-                    artifact: self,
-                    bindings,
-                    source_set,
-                    code,
-                });
-            }
-        };
-        self.append_private_bindings(&mut bindings);
-        let PreparedBuiltinsGraphArtifact {
-            graph,
-            builtin_processors: _,
-            builtin_observers: _,
-            report,
-            track_controls,
-            meter_consumers,
-        } = self;
-        match graph.bind_with_source_set_and_observation_activation(bindings, source_set, config) {
-            Ok((plan, controller)) => Ok((
-                Self::bound_from_plan(plan, track_controls, meter_consumers),
-                controller,
-            )),
             Err(failure) => {
                 let (artifact, bindings) = restore_graph_bind_failure(
                     failure.plan,
@@ -3302,7 +3179,6 @@ pub fn prepare_session_builtins_with_console(
         controls,
         caps,
         BuiltinControlDelivery::Concurrent,
-        MeterBindingPolicy::Permanent,
     )
 }
 
@@ -3324,7 +3200,6 @@ pub fn prepare_session_builtins_between_render_calls(
         controls,
         caps,
         BuiltinControlDelivery::BetweenRenderCalls,
-        MeterBindingPolicy::Permanent,
     )
 }
 
@@ -3344,47 +3219,6 @@ pub fn prepare_selected_session_builtins_with_console(
         controls,
         caps,
         BuiltinControlDelivery::Concurrent,
-        MeterBindingPolicy::Permanent,
-    )
-}
-
-/// Prepare selected peak meters for activation-controlled observation with concurrent control
-/// delivery. Controlled requests are dormant until a graph activation admits them.
-pub fn prepare_controlled_session_builtins_with_console(
-    session: &CompiledSession,
-    requests: &[SelectedMeterRequest],
-    controls: &[TrackControlRequest],
-    caps: BuiltinCompileCaps,
-) -> Result<PreparedBuiltinsSession, BuiltinDiagnosticSet> {
-    let (plain, metrics) = split_selected_requests(requests);
-    prepare_session_builtins_with_console_and_policy(
-        session,
-        &plain,
-        Some(&metrics),
-        controls,
-        caps,
-        BuiltinControlDelivery::Concurrent,
-        MeterBindingPolicy::Controlled,
-    )
-}
-
-/// Prepare selected peak meters for activation-controlled observation when all control producers
-/// are admitted only between exclusive render calls.
-pub fn prepare_controlled_session_builtins_between_render_calls(
-    session: &CompiledSession,
-    requests: &[SelectedMeterRequest],
-    controls: &[TrackControlRequest],
-    caps: BuiltinCompileCaps,
-) -> Result<PreparedBuiltinsSession, BuiltinDiagnosticSet> {
-    let (plain, metrics) = split_selected_requests(requests);
-    prepare_session_builtins_with_console_and_policy(
-        session,
-        &plain,
-        Some(&metrics),
-        controls,
-        caps,
-        BuiltinControlDelivery::BetweenRenderCalls,
-        MeterBindingPolicy::Controlled,
     )
 }
 
@@ -3406,7 +3240,6 @@ pub fn prepare_selected_session_builtins_between_render_calls(
         controls,
         caps,
         BuiltinControlDelivery::BetweenRenderCalls,
-        MeterBindingPolicy::Permanent,
     )
 }
 
@@ -3429,7 +3262,6 @@ fn prepare_session_builtins_with_console_and_policy(
     controls: &[TrackControlRequest],
     caps: BuiltinCompileCaps,
     control_delivery: BuiltinControlDelivery,
-    meter_binding_policy: MeterBindingPolicy,
 ) -> Result<PreparedBuiltinsSession, BuiltinDiagnosticSet> {
     let mut diagnostics = Vec::new();
     if [
@@ -3478,33 +3310,6 @@ fn prepare_session_builtins_with_console_and_policy(
         let metrics = selected_metrics.map_or(MeterMetricSet::ALL, |selections| selections[index]);
         if !metrics.is_valid() {
             diagnostics.push(diag("builtin.meter.metrics", &meter_path(request)));
-        }
-        if meter_binding_policy == MeterBindingPolicy::Controlled {
-            if metrics != MeterMetricSet::SAMPLE_PEAK {
-                diagnostics.push(diag(
-                    "builtin.meter.controlled_metrics",
-                    &meter_path(request),
-                ));
-            }
-            if request.tap != MeterTap::PostMatrix {
-                diagnostics.push(diag("builtin.meter.controlled_tap", &meter_path(request)));
-            }
-            let period = request.config.period_frames.get();
-            let quantum = session.quantum().0;
-            if quantum == 0 || period < quantum || period % quantum != 0 {
-                diagnostics.push(diag(
-                    "builtin.meter.controlled_period",
-                    &meter_path(request),
-                ));
-            }
-            if request.config.peak_hold_frames != 0
-                || request.config.peak_decay_db_per_second != 0.0
-            {
-                diagnostics.push(diag(
-                    "builtin.meter.controlled_ballistics",
-                    &meter_path(request),
-                ));
-            }
         }
     }
     let known_tracks: BTreeSet<_> = session
@@ -3672,18 +3477,11 @@ fn prepare_session_builtins_with_console_and_policy(
         )
         .map_err(|error| BuiltinDiagnosticSet::sorted(vec![meter_diagnostic(request, error)]))?;
         let graph_id = StableGraphId::parse(&request.track_id).expect("known accepted session ID");
-        let observer = match meter_binding_policy {
-            MeterBindingPolicy::Permanent => GraphNodeObserverBinding::new(
-                stage_node(graph_id, stage(request.tap)),
-                handle.0.get(),
-                Box::new(MeterObserver(accumulator)),
-            ),
-            MeterBindingPolicy::Controlled => GraphNodeObserverBinding::controlled(
-                stage_node(graph_id, stage(request.tap)),
-                handle.0.get(),
-                Box::new(MeterObserver(accumulator)),
-            ),
-        };
+        let observer = GraphNodeObserverBinding::new(
+            stage_node(graph_id, stage(request.tap)),
+            handle.0.get(),
+            Box::new(MeterObserver(accumulator)),
+        );
         observers.push(observer);
         meter_consumers.push(MeterConsumer {
             handle,
@@ -3701,7 +3499,6 @@ fn prepare_session_builtins_with_console_and_policy(
             peak_decay_bits: request.config.peak_decay_db_per_second.to_bits(),
             queue_capacity: request.config.queue_capacity.get(),
             metrics,
-            binding_policy: meter_binding_policy,
         });
     }
     tails.sort_unstable_by(|left, right| left.0.cmp(&right.0));
@@ -4835,12 +4632,6 @@ impl GraphRuntimeObserver for MeterObserver {
             .banked_seed(first_sample, usize::try_from(frames).ok()?)
     }
 
-    fn activation_changed(&mut self, active: bool, generation: u64, _first_sample: u64) {
-        if active {
-            self.0.restart_observation(generation);
-        }
-    }
-
     fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
         self.0
             .observe(block.left, block.right, block.first_sample)
@@ -5268,14 +5059,6 @@ mod tests {
     }
 
     fn source_bind_fixture() -> SourceBindFixture {
-        source_bind_fixture_with_observer(false)
-    }
-
-    fn controlled_source_bind_fixture() -> SourceBindFixture {
-        source_bind_fixture_with_observer(true)
-    }
-
-    fn source_bind_fixture_with_observer(controlled: bool) -> SourceBindFixture {
         let envelope = RenderEnvelope {
             sample_rate: SampleRateHz(48_000),
             quantum: QuantumFrames(4),
@@ -5361,11 +5144,8 @@ mod tests {
         let builtin_drops = Arc::new(AtomicUsize::new(0));
         let external_drops = Arc::new(AtomicUsize::new(0));
         let source_drops = Arc::new(AtomicUsize::new(0));
-        let builtin_observer = if controlled {
-            GraphNodeObserverBinding::controlled(builtin.clone(), 0x22_73, Box::new(NoopObserver))
-        } else {
-            GraphNodeObserverBinding::new(builtin.clone(), 0x22_73, Box::new(NoopObserver))
-        };
+        let builtin_observer =
+            GraphNodeObserverBinding::new(builtin.clone(), 0x22_73, Box::new(NoopObserver));
         let artifact = PreparedBuiltinsGraphArtifact {
             graph,
             builtin_processors: vec![GraphNodeBinding::new(
@@ -5595,222 +5375,6 @@ mod tests {
         assert_eq!(failure.artifact.builtin_observers.len(), 1);
         assert_eq!(failure.artifact.builtin_observers[0].handle, 0x22_73);
         assert_source_bind_failure_ownership(&failure, &ownership, &expected);
-    }
-
-    #[test]
-    fn controlled_source_activation_refusal_restores_all_inputs_for_retry() {
-        let fixture = controlled_source_bind_fixture();
-        let ownership = fixture.ownership();
-        let expected = [fixture.output.clone()];
-        let failure = match fixture
-            .artifact
-            .into_bound_with_source_set_and_observation_activation(
-                fixture.bindings,
-                fixture.source_set,
-                GraphObservationActivationConfig {
-                    maximum_active_observers: 0,
-                    maximum_retained_bytes: u64::MAX,
-                },
-            ) {
-            Ok(_) => panic!("zero-capacity activation bind accepted"),
-            Err(failure) => failure,
-        };
-        assert_eq!(failure.code, "graph.plan.observation_activation_capacity");
-        assert_source_bind_failure_ownership(&failure, &ownership, &expected);
-
-        let PreparedBuiltinsGraphSourceBindFailure {
-            artifact,
-            bindings,
-            source_set,
-            ..
-        } = failure;
-        let (bound, controller) = artifact
-            .into_bound_with_source_set_and_observation_activation(
-                bindings,
-                source_set,
-                GraphObservationActivationConfig {
-                    maximum_active_observers: 1,
-                    maximum_retained_bytes: u64::MAX,
-                },
-            )
-            .unwrap_or_else(|failure| panic!("activation retry rejected: {}", failure.code));
-        assert_eq!(controller.resources().maximum_active_observers, 1);
-        drop(bound);
-        drop(controller);
-        assert_eq!(ownership.builtin_drops.load(Ordering::SeqCst), 1);
-        assert_eq!(ownership.external_drops.load(Ordering::SeqCst), 1);
-        assert_eq!(ownership.source_drops.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn legacy_bind_with_controlled_meter_refuses_and_retries_through_activation_wrapper() {
-        let mut fixture = controlled_source_bind_fixture();
-        fixture.bindings.nodes.push(GraphNodeBinding::new(
-            fixture.input.clone(),
-            Box::new(DropProcessor(Arc::clone(&fixture.external_drops))),
-        ));
-        let ownership = fixture.ownership();
-        let expected = [fixture.output.clone(), fixture.input.clone()];
-        let failure = match fixture.artifact.into_bound(fixture.bindings) {
-            Ok(_) => panic!("legacy bind accepted a controlled observer"),
-            Err(failure) => failure,
-        };
-        assert_eq!(failure.code, "graph.plan.observation_activation_required");
-        assert_eq!(
-            failure
-                .bindings
-                .nodes
-                .iter()
-                .map(|binding| binding.node.clone())
-                .collect::<Vec<_>>(),
-            expected
-        );
-        assert_eq!(failure.bindings.observers.len(), 0);
-        assert_eq!(ownership.builtin_drops.load(Ordering::SeqCst), 0);
-        assert_eq!(ownership.external_drops.load(Ordering::SeqCst), 0);
-
-        let PreparedBuiltinsGraphBindFailure {
-            artifact, bindings, ..
-        } = failure;
-        let (bound, _controller) = artifact
-            .into_bound_with_observation_activation(
-                bindings,
-                GraphObservationActivationConfig {
-                    maximum_active_observers: 1,
-                    maximum_retained_bytes: u64::MAX,
-                },
-            )
-            .unwrap_or_else(|failure| panic!("activation retry rejected: {}", failure.code));
-        drop(bound);
-        assert_eq!(ownership.builtin_drops.load(Ordering::SeqCst), 1);
-        assert_eq!(ownership.external_drops.load(Ordering::SeqCst), 2);
-    }
-
-    #[test]
-    fn no_source_activation_preflight_refusals_preserve_all_inputs() {
-        let mut duplicate = controlled_source_bind_fixture();
-        duplicate.bindings.nodes.push(GraphNodeBinding::new(
-            duplicate.input.clone(),
-            Box::new(DropProcessor(Arc::clone(&duplicate.external_drops))),
-        ));
-        duplicate
-            .bindings
-            .observers
-            .push(GraphNodeObserverBinding::controlled(
-                duplicate.output.clone(),
-                0x22_74,
-                Box::new(NoopObserver),
-            ));
-        duplicate
-            .bindings
-            .observers
-            .push(GraphNodeObserverBinding::controlled(
-                duplicate.input.clone(),
-                0x22_74,
-                Box::new(NoopObserver),
-            ));
-        let duplicate_ownership = duplicate.ownership();
-        let duplicate_failure = match duplicate.artifact.into_bound_with_observation_activation(
-            duplicate.bindings,
-            GraphObservationActivationConfig {
-                maximum_active_observers: 1,
-                maximum_retained_bytes: u64::MAX,
-            },
-        ) {
-            Ok(_) => panic!("duplicate external observer handle must reject"),
-            Err(failure) => failure,
-        };
-        assert_eq!(
-            duplicate_failure.code,
-            "graph.plan.observation_activation_duplicate"
-        );
-        assert_eq!(
-            duplicate_failure
-                .bindings
-                .nodes
-                .iter()
-                .map(|binding| binding.node.clone())
-                .collect::<Vec<_>>(),
-            [duplicate.output.clone(), duplicate.input.clone()]
-        );
-        assert_eq!(duplicate_failure.bindings.observers.len(), 2);
-        assert_eq!(duplicate_ownership.builtin_drops.load(Ordering::SeqCst), 0);
-        assert_eq!(duplicate_ownership.external_drops.load(Ordering::SeqCst), 0);
-        drop(duplicate_failure);
-        assert_eq!(duplicate_ownership.builtin_drops.load(Ordering::SeqCst), 1);
-        assert_eq!(duplicate_ownership.external_drops.load(Ordering::SeqCst), 2);
-
-        let mut capacity = controlled_source_bind_fixture();
-        capacity.bindings.nodes.push(GraphNodeBinding::new(
-            capacity.input.clone(),
-            Box::new(DropProcessor(Arc::clone(&capacity.external_drops))),
-        ));
-        let capacity_ownership = capacity.ownership();
-        let capacity_failure = match capacity.artifact.into_bound_with_observation_activation(
-            capacity.bindings,
-            GraphObservationActivationConfig {
-                maximum_active_observers: 0,
-                maximum_retained_bytes: u64::MAX,
-            },
-        ) {
-            Ok(_) => panic!("zero activation capacity must reject"),
-            Err(failure) => failure,
-        };
-        assert_eq!(
-            capacity_failure.code,
-            "graph.plan.observation_activation_capacity"
-        );
-        assert_eq!(
-            capacity_failure
-                .bindings
-                .nodes
-                .iter()
-                .map(|binding| binding.node.clone())
-                .collect::<Vec<_>>(),
-            [capacity.output.clone(), capacity.input.clone()]
-        );
-        assert_eq!(capacity_failure.bindings.observers.len(), 0);
-        assert_eq!(capacity_ownership.builtin_drops.load(Ordering::SeqCst), 0);
-        assert_eq!(capacity_ownership.external_drops.load(Ordering::SeqCst), 0);
-        drop(capacity_failure);
-        assert_eq!(capacity_ownership.builtin_drops.load(Ordering::SeqCst), 1);
-        assert_eq!(capacity_ownership.external_drops.load(Ordering::SeqCst), 2);
-
-        let mut bytes = controlled_source_bind_fixture();
-        bytes.bindings.nodes.push(GraphNodeBinding::new(
-            bytes.input.clone(),
-            Box::new(DropProcessor(Arc::clone(&bytes.external_drops))),
-        ));
-        let bytes_ownership = bytes.ownership();
-        let bytes_failure = match bytes.artifact.into_bound_with_observation_activation(
-            bytes.bindings,
-            GraphObservationActivationConfig {
-                maximum_active_observers: 1,
-                maximum_retained_bytes: 0,
-            },
-        ) {
-            Ok(_) => panic!("zero activation byte budget must reject"),
-            Err(failure) => failure,
-        };
-        assert_eq!(
-            bytes_failure.code,
-            "graph.plan.observation_activation_retained"
-        );
-        assert_eq!(
-            bytes_failure
-                .bindings
-                .nodes
-                .iter()
-                .map(|binding| binding.node.clone())
-                .collect::<Vec<_>>(),
-            [bytes.output.clone(), bytes.input.clone()]
-        );
-        assert_eq!(bytes_failure.bindings.observers.len(), 0);
-        assert_eq!(bytes_ownership.builtin_drops.load(Ordering::SeqCst), 0);
-        assert_eq!(bytes_ownership.external_drops.load(Ordering::SeqCst), 0);
-        drop(bytes_failure);
-        assert_eq!(bytes_ownership.builtin_drops.load(Ordering::SeqCst), 1);
-        assert_eq!(bytes_ownership.external_drops.load(Ordering::SeqCst), 2);
     }
 
     #[test]
@@ -11327,7 +10891,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_controlled_meter_preparation_keeps_policy_and_delivery_distinct() {
+    fn selected_meter_preparation_keeps_control_delivery_distinct() {
         let compiled = n_track_session(8);
         let period = compiled.quantum().0;
         let config = MeterConfig {
@@ -11368,11 +10932,7 @@ mod tests {
             &controls,
             caps(),
         )
-        .expect("selected permanent preparation");
-        assert_eq!(
-            selected.requests[0].binding_policy,
-            MeterBindingPolicy::Permanent
-        );
+        .expect("selected concurrent preparation");
         let selected_delivery = collect_delivery(selected);
         assert!(selected_delivery.iter().any(|(stage, members, delivery)| {
             *stage == TrackStage::PostMatrix
@@ -11380,39 +10940,13 @@ mod tests {
                 && *delivery == BuiltinControlDelivery::Concurrent
         }));
 
-        let controlled = prepare_controlled_session_builtins_with_console(
+        let serialized = prepare_selected_session_builtins_between_render_calls(
             &compiled,
             std::slice::from_ref(&request),
             &controls,
             caps(),
         )
-        .expect("controlled concurrent preparation");
-        assert_eq!(
-            controlled.requests[0].binding_policy,
-            MeterBindingPolicy::Controlled
-        );
-        let controlled_delivery = collect_delivery(controlled);
-        assert!(
-            controlled_delivery
-                .iter()
-                .any(|(stage, members, delivery)| {
-                    *stage == TrackStage::PostMatrix
-                        && *members > 1
-                        && *delivery == BuiltinControlDelivery::Concurrent
-                })
-        );
-
-        let serialized = prepare_controlled_session_builtins_between_render_calls(
-            &compiled,
-            std::slice::from_ref(&request),
-            &controls,
-            caps(),
-        )
-        .expect("controlled serialized preparation");
-        assert_eq!(
-            serialized.requests[0].binding_policy,
-            MeterBindingPolicy::Controlled
-        );
+        .expect("selected serialized preparation");
         let serialized_delivery = collect_delivery(serialized);
         assert!(
             serialized_delivery
@@ -11423,369 +10957,6 @@ mod tests {
                         && *delivery == BuiltinControlDelivery::BetweenRenderCalls
                 })
         );
-    }
-
-    #[test]
-    fn controlled_meter_preparation_rejects_non_peak_matrix_block_requests() {
-        let compiled = n_track_session(1);
-        let quantum = compiled.quantum().0;
-        let base = |metrics, tap, period, peak_hold_frames, peak_decay_db_per_second| {
-            SelectedMeterRequest {
-                request: MeterRequest {
-                    handle: handle(1),
-                    track_id: track_name(0),
-                    tap,
-                    config: MeterConfig {
-                        period_frames: NonZeroU32::new(period).expect("period"),
-                        peak_hold_frames,
-                        peak_decay_db_per_second,
-                        queue_capacity: NonZeroUsize::new(2).expect("meter queue"),
-                        reset_generation: 0,
-                    },
-                },
-                metrics,
-            }
-        };
-        let assert_code = |request: SelectedMeterRequest, code| {
-            let result = prepare_controlled_session_builtins_with_console(
-                &compiled,
-                std::slice::from_ref(&request),
-                &[],
-                caps(),
-            );
-            let Err(error) = result else {
-                panic!("invalid controlled request must be refused")
-            };
-            assert!(
-                error.0.iter().any(|diagnostic| diagnostic.code == code),
-                "expected {code} in {error:?}"
-            );
-        };
-
-        assert_code(
-            base(MeterMetricSet::ALL, MeterTap::PostMatrix, quantum, 0, 0.0),
-            "builtin.meter.controlled_metrics",
-        );
-        assert_code(
-            base(
-                MeterMetricSet::SAMPLE_PEAK,
-                MeterTap::Input,
-                quantum,
-                0,
-                0.0,
-            ),
-            "builtin.meter.controlled_tap",
-        );
-        assert_code(
-            base(
-                MeterMetricSet::SAMPLE_PEAK,
-                MeterTap::PostMatrix,
-                quantum.saturating_add(1),
-                0,
-                0.0,
-            ),
-            "builtin.meter.controlled_period",
-        );
-        assert_code(
-            base(
-                MeterMetricSet::SAMPLE_PEAK,
-                MeterTap::PostMatrix,
-                quantum,
-                1,
-                0.0,
-            ),
-            "builtin.meter.controlled_ballistics",
-        );
-        assert_code(
-            base(
-                MeterMetricSet::SAMPLE_PEAK,
-                MeterTap::PostMatrix,
-                quantum,
-                0,
-                1.0,
-            ),
-            "builtin.meter.controlled_ballistics",
-        );
-    }
-
-    #[test]
-    fn controlled_request_policy_is_part_of_prepared_request_validation() {
-        let compiled = n_track_session(1);
-        let request = SelectedMeterRequest {
-            request: MeterRequest {
-                handle: handle(1),
-                track_id: track_name(0),
-                tap: MeterTap::PostMatrix,
-                config: MeterConfig {
-                    period_frames: NonZeroU32::new(compiled.quantum().0).expect("compiled quantum"),
-                    peak_hold_frames: 0,
-                    peak_decay_db_per_second: 0.0,
-                    queue_capacity: NonZeroUsize::new(2).expect("meter queue"),
-                    reset_generation: 0,
-                },
-            },
-            metrics: MeterMetricSet::SAMPLE_PEAK,
-        };
-        let mut prepared = prepare_controlled_session_builtins_with_console(
-            &compiled,
-            std::slice::from_ref(&request),
-            &[],
-            caps(),
-        )
-        .expect("controlled preparation");
-        prepared.seal.requests[0].binding_policy = MeterBindingPolicy::Permanent;
-        let diagnostics = prepared.validate_for_session(&compiled);
-        assert!(
-            diagnostics
-                .0
-                .iter()
-                .any(|diagnostic| diagnostic.code == "builtin.prepared.request_set"),
-            "request binding policy mismatch must invalidate the prepared seal: {diagnostics:?}"
-        );
-    }
-
-    #[cfg(feature = "test-support")]
-    #[test]
-    fn controlled_meters_render_selected_work_without_pcm_or_generation_aliasing() {
-        let backend = host_dispatch();
-        let n = backend.width() + 1;
-        let compiled = n_track_session(n);
-        let render_quantum = HARNESS_QUANTUM;
-        // The canonical session fixture uses a 128-frame control quantum while this graph
-        // harness renders 64-frame blocks. A controlled request uses the compiled quantum, so
-        // each meter window spans exactly two actual render blocks.
-        let period = compiled.quantum().0;
-        assert_eq!(period, render_quantum.checked_mul(2).expect("test period"));
-        let config = MeterConfig {
-            period_frames: NonZeroU32::new(period).expect("period"),
-            peak_hold_frames: 0,
-            peak_decay_db_per_second: 0.0,
-            queue_capacity: NonZeroUsize::new(8).expect("meter queue"),
-            reset_generation: 0x818,
-        };
-        let requests = (0..n)
-            .map(|index| SelectedMeterRequest {
-                request: MeterRequest {
-                    handle: handle(0x8180 + index as u64),
-                    track_id: track_name(index),
-                    tap: MeterTap::PostMatrix,
-                    config,
-                },
-                metrics: MeterMetricSet::SAMPLE_PEAK,
-            })
-            .collect::<Vec<_>>();
-        let classes = SessionPoolClasses::from_session(&compiled);
-
-        let external_bindings = || {
-            let envelope = RenderEnvelope {
-                sample_rate: SampleRateHz(48_000),
-                quantum: QuantumFrames(HARNESS_QUANTUM),
-                output_channels: NonZeroUsize::new(2).expect("two output channels"),
-            };
-            let mut nodes = (0..n)
-                .map(|index| {
-                    GraphNodeBinding::new(
-                        GraphNodeId::TrackStage {
-                            track_id: StableGraphId::parse(&track_name(index)).expect("track"),
-                            stage: TrackStage::Input,
-                        },
-                        Box::new(SeededInput {
-                            seed: 0x8180_0000 ^ index as u64,
-                            symmetric: false,
-                            nonfinite: false,
-                        }) as Box<dyn GraphRuntimeProcessor>,
-                    )
-                })
-                .collect::<Vec<_>>();
-            nodes.push(GraphNodeBinding::new(
-                GraphNodeId::Output {
-                    output_id: StableGraphId::parse("main-out").expect("output"),
-                },
-                Box::new(HarnessSink) as Box<dyn GraphRuntimeProcessor>,
-            ));
-            GraphRuntimeBindings {
-                envelope,
-                nodes,
-                observers: Vec::new(),
-            }
-        };
-
-        let baseline_prepared = prepare_session_builtins(&compiled, &[], caps()).expect("baseline");
-        let (baseline_graph, baseline_levels) = track_graph(n);
-        let baseline_artifact = baseline_prepared.into_graph_artifact_with_banks(
-            baseline_graph,
-            (),
-            backend,
-            &baseline_levels,
-            &classes,
-        );
-        let mut baseline = baseline_artifact
-            .into_bound(external_bindings())
-            .unwrap_or_else(|failure| panic!("baseline bind: {}", failure.code));
-
-        let controlled_prepared =
-            prepare_controlled_session_builtins_with_console(&compiled, &requests, &[], caps())
-                .expect("controlled preparation");
-        let (controlled_graph, controlled_levels) = track_graph(n);
-        let controlled_artifact = controlled_prepared.into_graph_artifact_with_banks(
-            controlled_graph,
-            (),
-            backend,
-            &controlled_levels,
-            &classes,
-        );
-        if backend.width() > 1 {
-            assert!(
-                controlled_artifact.prepared_builtin_bank_count() > 0,
-                "the fixture must retain a banked builtin cohort"
-            );
-        }
-        let (mut candidate, mut controller) = controlled_artifact
-            .into_bound_with_observation_activation(
-                external_bindings(),
-                GraphObservationActivationConfig {
-                    maximum_active_observers: n,
-                    maximum_retained_bytes: u64::MAX,
-                },
-            )
-            .unwrap_or_else(|failure| panic!("controlled bind: {}", failure.code));
-
-        let handles = requests
-            .iter()
-            .map(|request| request.request.handle.0.get())
-            .collect::<Vec<_>>();
-        let tail = handles[n - 1];
-        let selections = [
-            Vec::new(),
-            vec![handles[0]],
-            handles.clone(),
-            Vec::new(),
-            vec![tail],
-            vec![handles[0], tail],
-            vec![tail],
-            vec![handles[0], tail],
-            vec![handles[0], tail],
-            vec![handles[0], tail],
-        ];
-        let pop_meter = |bound: &mut PreparedBuiltinsGraphBound, meter_handle| {
-            bound
-                .meter_consumers
-                .iter_mut()
-                .find(|meter| meter.handle.0.get() == meter_handle)
-                .expect("meter handle")
-                .consumer
-                .try_pop()
-                .ok()
-        };
-
-        for (block, selection) in selections.iter().enumerate() {
-            let accepted = match block {
-                0 | 8 | 9 => None,
-                3 | 6 => Some(
-                    controller
-                        .remove_to(selection)
-                        .unwrap_or_else(|error| panic!("controlled removal: {error:?}")),
-                ),
-                _ => Some(
-                    controller
-                        .replace(selection)
-                        .unwrap_or_else(|error| panic!("controlled replacement: {error:?}")),
-                ),
-            };
-            let sample = block as u64 * u64::from(render_quantum);
-            let baseline_pcm = render_bound(&mut baseline, sample);
-            builtins::test_only_reset_peak_samples();
-            let candidate_pcm = render_bound(&mut candidate, sample);
-            assert_eq!(
-                candidate_pcm, baseline_pcm,
-                "controlled observation changed PCM at block {block}"
-            );
-            assert_eq!(
-                builtins::test_only_peak_samples(),
-                selection.len() as u64 * u64::from(render_quantum) * 2,
-                "only selected left/right lane samples are visited at block {block}"
-            );
-            let applied = controller.try_applied();
-            match accepted {
-                Some(accepted) => {
-                    let applied = applied.expect("accepted activation applied");
-                    assert_eq!(applied.revision, accepted.revision);
-                    assert_eq!(applied.first_sample, sample);
-                }
-                None => assert!(
-                    applied.is_none(),
-                    "unexpected activation receipt at block {block}"
-                ),
-            }
-
-            if block == 5 {
-                let snapshot = pop_meter(&mut candidate, tail).expect("tail window");
-                assert_eq!(
-                    (
-                        snapshot.observation_generation,
-                        snapshot.start_sample,
-                        snapshot.end_sample
-                    ),
-                    (
-                        4,
-                        4 * u64::from(render_quantum),
-                        6 * u64::from(render_quantum)
-                    )
-                );
-                assert!(snapshot.left.sample_peak > 0.0);
-            }
-            if block == 7 {
-                let snapshot = pop_meter(&mut candidate, tail).expect("tail second window");
-                assert_eq!(
-                    (
-                        snapshot.observation_generation,
-                        snapshot.start_sample,
-                        snapshot.end_sample
-                    ),
-                    (
-                        4,
-                        6 * u64::from(render_quantum),
-                        8 * u64::from(render_quantum)
-                    )
-                );
-            }
-            if block == 9 {
-                let tail_snapshot = pop_meter(&mut candidate, tail).expect("tail third window");
-                assert_eq!(
-                    (
-                        tail_snapshot.observation_generation,
-                        tail_snapshot.start_sample
-                    ),
-                    (4, 8 * u64::from(render_quantum))
-                );
-                let stale = pop_meter(&mut candidate, handles[0]).expect("stale first window");
-                assert_eq!(
-                    (
-                        stale.observation_generation,
-                        stale.start_sample,
-                        stale.end_sample
-                    ),
-                    (1, u64::from(render_quantum), 3 * u64::from(render_quantum))
-                );
-                let fresh =
-                    pop_meter(&mut candidate, handles[0]).expect("fresh reactivation window");
-                assert_eq!(
-                    (
-                        fresh.observation_generation,
-                        fresh.start_sample,
-                        fresh.end_sample
-                    ),
-                    (
-                        7,
-                        7 * u64::from(render_quantum),
-                        9 * u64::from(render_quantum)
-                    )
-                );
-                assert!(fresh.left.sample_peak > 0.0);
-                assert!(pop_meter(&mut candidate, handles[0]).is_none());
-            }
-        }
-        builtins::test_only_reset_peak_samples();
     }
 
     #[test]
@@ -13094,8 +12265,12 @@ mod tests {
         // descriptions. A2's private MeterRequestSeal policy fits existing padding and remains
         // 56 bytes. No mutation case or expected outcome changed; only the derived resource
         // limits changed.
+        // Issue #1080 removes the controlled flag again: GraphNodeObserverBinding shrinks from 88
+        // back to 80 bytes, so classes 34-37's meter and retained caps each lose eight bytes per
+        // request. Restoring an eight-byte field restores the previous hash exactly; no case or
+        // expected outcome changed.
         assert_eq!(
-            transcript_hash, 9_657_103_559_552_463_871,
+            transcript_hash, 18_185_660_815_322_931_811,
             "updated only through a deliberate frozen-case change"
         );
     }

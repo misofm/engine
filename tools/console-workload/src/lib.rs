@@ -2338,7 +2338,6 @@ mod tests {
         );
         let before = resource.runtime_field_bytes
             + resource.emitted_op_layout_delta_bytes * emitted
-            + resource.observation_runtime_state_bytes
             + resource.response_binding_table_bytes
             + resource.response_binding_string_bytes;
         assert_eq!(
