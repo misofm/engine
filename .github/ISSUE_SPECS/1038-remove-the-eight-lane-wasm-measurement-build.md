@@ -181,3 +181,100 @@ It still selects `Simd4`, by two measurements:
 fails with 5 errors in `crates/lane/tests/fp_env.rs` (`let_unit_value`, `unit_cmp`). The failure
 is identical on `fcfb76b9`. CI does not lint `lane`'s tests for wasm; the `lane` lib and
 `target-smoke --all-targets` are clean there. That belongs in a small follow-up, not in this issue.
+
+## Sol verdict, attempt 1
+
+**PASS.** Sol, 2026-09-29. Verified on a scratch merge of `7a408c7f` into the batch head
+`codex/batch-slim-4` at `3a2782f1` (main plus #1032, #1044, #1046, #1047, #1050, #1060, #1062 and
+specs). Rust 1.97.1, Node 22.23.2.
+
+### The merge
+
+`git merge --no-ff` auto-merges with no conflicts; the batch commits after `fcfb76b9` (#1046 and
+specs) touch none of #1038's files. No semantic conflict: the router gives `route=full`,
+`self_tests=[]` over `3a2782f1..merge`, and no workflow changes, so the `verdict` table is unchanged.
+
+### Checks
+
+1. **Nothing live was removed.**
+   - `tools/wasm-gate-corpus` is untouched: `WIDTHS = 3`, and every lane, runtime and effect case
+     still digests at `f32`, `lane::Simd4` and `lane::Simd8` on every target. Both legs report 142
+     cases and 358 comparisons.
+   - `--expect-backend simd8` had no live caller. The only `--expect-backend` in any workflow or
+     script is `run-wasm-gates.sh:72`, fed by its one `run_guest simd128 +simd128 simd4` line.
+     `wasm_gates --native` uses `native_backend_code()`, not `ExpectedBackend`. On the merge,
+     `--expect-backend simd8` exits 2 with `unknown backend 'simd8'`.
+   - Planted defect: turning the wasm arm of `Backend::current()` into `Self::Simd8` makes the CI
+     form of `run-wasm-gates.sh` fail with "guest reports backend 2 but simd4 was expected". So the
+     one wasm width is still held by a required gate after the removal.
+2. **Shipped module.** `build-web-audioworklet.sh --module-only` on `3a2782f1` and on the merge:
+   `cmp`-identical, `9aca423b…b2ee`, the implementer's hash.
+3. **Test list.** `cargo test --all-targets --all-features -- --list` over `lane`, `target-smoke`,
+   `wasm-gates`, `wasm-gate-guest` and `wasm-gate-corpus`: identical on base and merge (75 entries).
+
+### Gates on the merge
+
+| Gate | Result |
+|---|---|
+| `cargo check --locked --workspace --all-targets --all-features` | exit 0, no warnings |
+| `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`; `cargo fmt --all -- --check`; `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` | pass |
+| wasm `simd128` `cargo check`: `-p host-web -p lane -p target-smoke -p protocol -p dsp-reference -p conformance`, and `--all-targets -p target-smoke -p wasm-gate-guest -p wasm-gate-corpus` | exit 0 |
+| wasm `simd128` clippy `-D warnings`: `lane`, `target-smoke` and `host-web` libs; `--all-targets` for `target-smoke`, `wasm-gate-guest` and `wasm-gate-corpus` | pass |
+| wasm `simd128` clippy `-p lane --all-targets` | 4 errors in `tests/fp_env.rs`, identical on main (finding 1) |
+| `scripts/check-cross-targets.sh` (aarch64 iOS and Android check and clippy, armv7 and scalar-wasm refusals, #1018 rows) | PASS |
+| `run-wasm-gates.sh`, default form (native, wasm, V8 spill) and CI form (`--without-v8-spill --without-native`) | ok. Wasm backend 1, native 2, 0 mismatches |
+| `gain_pan_profile digests`, release, base and merge | 17 rows byte-identical |
+| `check-lane-policy.sh`, `test-lane-policy.sh`, `check-ci-path-routing.py`, `test-ci-path-routing.py` | pass |
+| Every lint, docs-gates and gate-self-tests step, Python under `python3 -B` (59 commands), plus `check-capi-abi.sh` and its self-test, the sub-v3 refusal probes, `check-protocol-wasm-parity.sh`, `cargo test -p target-smoke`, and release `cargo test -p lane -p math -p wasm-gates --features math/lane` | all pass |
+
+A stale `--cfg miso_wasm_simd8` checks with no warning, and the release `wasm-gate-guest` built with
+it is byte-identical to the one built without it (`6734a6c1…`, both in this tree). The spec's
+"warns" expectation was wrong, as the implementer recorded.
+
+### Findings, by severity
+
+No defect. Everything below is information or a follow-up.
+
+1. **Info: the wasm clippy failure in `lane/tests/fp_env.rs` is old and not new on the batch.**
+   - It has 4 errors, not 5: three `unit_cmp` and one `let_unit_value`, at lines 24, 27, 32
+     and 38. They are all in `the_canonical_word_is_the_word_inside_the_guard`, where
+     `FpControlWord` is `()` on wasm.
+   - The same 4 errors appear on main `a9414c0c` and on every batch commit I checked:
+     `92b1def5`, #1046's `cb489843` and its parent, #1032's `86bca0f2`, and `3a2782f1`.
+   - The lines date from #146 (`27e8299c`). #1046 removed only `the_target_declares_whether_it_pins`
+     and an import.
+   - No CI job runs wasm clippy. `lint` lints native only, and `cross-target` lints only the
+     aarch64 product crates. So this is not a gate regression.
+   - The known `host-web` wasm test failure (`drop_non_drop`, `src/tests.rs:5333`) is still there
+     too.
+2. **Info: a stale cfg. Recommendation: change nothing.**
+   - rustc's check-cfg only checks cfg predicates that the source names. It cannot refuse a
+     command-line `--cfg`, so there is nothing for `check-cfg` to declare.
+   - The only refusal would be a tombstone: `#[cfg(miso_wasm_simd8)] compile_error!` in `lane`, plus
+     the check-cfg entry again. That keeps the removed name alive in the lane crate, which is the
+     measurement-hook residue R7 removes. It would also guard one stale name out of an unbounded
+     set.
+   - A future re-measurement cannot pass silently as W8. `miso_gate_backend` reports the width,
+     `wasm_gates` refuses `simd8`, and `target-smoke` pins `Simd4` on wasm.
+   - The supersession note already records that the flag is inert.
+3. **Info: the remaining ISA arms are all live.**
+   - `Backend::current()` has one arm per supported target: x86_64 `Simd8`, aarch64 `Simd4` and
+     wasm `Simd4`. These are the architectural lane widths.
+   - `attest_host`'s x86_64 AVX2/FMA check is required by AGENTS.md D4.
+   - `wide_impl` `max`/`min` has three arms. After #1041 and #1062 each supported target takes
+     exactly one: x86 `maxps`, wasm `pmax` with swapped operands, and the portable form, which is
+     now aarch64's.
+     - These are D8-equal instruction selections, not widths, and `wasm-gates`'
+       `minmax_lowering_mismatches` pins them.
+     - Whether they fit "beyond the architectural lane widths" is an owner question, not dead code.
+   - `fpenv` has three arms: x86_64 MXCSR, aarch64 FPCR, and the no-control-word arm, which is
+     now exactly wasm32 with `simd128`. All are live.
+   - `softfma`: `read_mxcsr` and `write_mxcsr` are live through `fpenv`. `MXCSR_FTZ` and
+     `MXCSR_DAZ` are used only by the G6 tests.
+   - **Dead:** `lane::fpenv::FPCR_FZ16`, which nothing has ever referenced, and
+     `lane::fpenv::FP_ENV_CONTROLLED`, whose last user #1046 deleted. Both are `pub`, so no
+     `dead_code` warning fires. They would fit in the small follow-up that fixes finding 1.
+   - Outside `lane`, `host-web`'s `selected_backend()` still has a `BACKEND_SCALAR` arm. It is
+     reachable only in native `host-web` builds. That is #1059/#1062 territory, not #1038.
+4. **Info.** `miso_gate_backend`'s `8 => 2` arm cannot be reached on wasm any more. It keeps the
+   numbering shared with `native_backend_code`, where `2` is live on x86_64. Keep it.
