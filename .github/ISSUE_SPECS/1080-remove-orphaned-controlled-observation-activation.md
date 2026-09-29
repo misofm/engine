@@ -245,7 +245,8 @@ was the constant 0 at preparation.
     back to each restores the previous hash;
   - `resources.jsonl` loses 24 B per meter at queue depth 1 and 48 B at depth 4. The audit's two
     layout constants, the joined-manifest identity and `builtins_graph.rs`'s consumer pin follow.
-- The commit is 9 files, +32 / −134. The branch total is now 21 files, +215 / −5,266.
+- The commit's code change is 9 files, +32 / −134. The branch's code total is now 16 files, +206 /
+  −5,257 (spec excluded).
 
 **Module.**
 - The module is 3,254,230 B, 30 B less than the earlier commits' module, with sha256 `885aa117…`.
