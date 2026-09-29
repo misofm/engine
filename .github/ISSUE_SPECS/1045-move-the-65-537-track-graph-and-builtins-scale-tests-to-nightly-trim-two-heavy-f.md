@@ -311,3 +311,118 @@ The trimmed loops, per PR:
 
 - 1045-4, 1045-5 and A2 are caught a day late, not per PR.
 - #1002's memory claim stays unguarded (amendment 4); its nightly RSS budget is its own issue.
+
+## Sol verdict, attempt 1
+
+Sol, 2026-09-29. I merged `6f244ce1` into `codex/batch-slim-3` (`3ba8982a`) in a scratch worktree and
+checked it there. Host: `x86_64` (`x86-64-v3`), rustc 1.97.1, `CARGO_INCREMENTAL=0`, `nice`, on a
+shared host at load 20-55.
+
+**FAIL.** The nightly wiring, the trimmed loops and every gate hold. But a track ceiling in bind or
+render is green on every PR, and a 2.3 s per-PR test catches both. That is the brief's FAIL
+condition. The fix is small and stays inside the authorized paths.
+
+### The merge
+
+- **One textual conflict:** `nightly.yml`, `math-sweeps`. #1039 removed the Wasm target and the
+  wasm-console guest step. #1045 added its session step just above that guest step.
+- **Resolution for root:**
+  - Keep the batch's job: the name `math exhaustive sweeps`, the one-line toolchain install, and no
+    guest step.
+  - Add #1045's `Session canonical f32 spelling, exhaustive round trip` step after F1.
+  - Take #1045's 25-minute timeout.
+- **Everything else merges cleanly.** That covers `release-budgets`, which sits beside #1049's
+  `full-size-tests`. It also covers `failure-notice`: #1049's needs list and table already carry
+  `math-sweeps` and `release-budgets`. The routing scripts merge cleanly too.
+- **No semantic conflict.** On the merge, the three crates pass in dev and in release. The three
+  `release-budgets` commands pass as well: `:160` took 19.5 s against its 60 s bound.
+
+### Findings, by severity
+
+1. **High, blocking: a track ceiling in bind or render is caught only nightly, though a cheap
+   per-PR test catches it.**
+   - **Method.** I planted each ceiling on the merge. Then I ran the per-PR suites of `session`,
+     `graph`, `graph-compiler` and `builtins-compiler` with test-debug-a's features, a synthetic
+     bind test (below), and the `release-budgets` command.
+
+   | # | planted ceiling | per PR | synthetic bind | nightly |
+   |---|---|---|---|---|
+   | P1 | `parse_session_json` refuses more than 65,535 tracks | GREEN | GREEN | nothing parses such a document |
+   | P2 | `compile_session` refuses more than 65,535 tracks | RED: `scale_transaction.rs`, `:91` | - | - |
+   | P3a | graph compile adds `graph.resource.limit` at `$.tracks` above 65,535 tracks | GREEN | GREEN | not run |
+   | P3b | graph compile refuses early, with the node cap's own code and path | GREEN | GREEN | RED |
+   | P4 | builtin preparation adds `builtin.resource.limit` above 65,535 tracks | RED: `:91` | - | - |
+   | P5 | `PreparedGraphPlan` bind refuses more than 65,536 bindings | GREEN | **RED** | RED |
+   | P5b | `into_bound` refuses more than 65,536 bindings | GREEN | GREEN | RED |
+   | P6 | graph render refuses more than 65,535 runtime units | GREEN | **RED** | RED |
+
+   - **Before this change**, `:160` ran per PR and caught P3a, P3b, P5, P5b and P6.
+   - **A discarded plant.** P6b, a render ceiling at 7 x 65,535 units, never fires at 65,537
+     tracks, because banking leaves fewer units than that. It is not a ceiling, so it is not in the
+     table.
+   - **The synthetic test.** It builds a `PreparedGraphPlan` through the public
+     `PreparedGraphPlan::new`: 65,537 `TrackStage::Input` nodes, each routed to one output. It
+     binds them with identity bindings and renders one block. In debug it takes 0.5 s to build and
+     2.3 s in all. In `scale.rs` it runs in parallel with `:91` (18.5 s), so the binary's wall time
+     does not grow. It is green on the clean merge.
+   - **Attempt 2 must:**
+     - add that test to `crates/graph-compiler/tests/scale.rs`, per PR;
+     - make `:91` assert the refusal exactly: one diagnostic,
+       `("graph.resource.limit", "$.graph_compile_caps")`. This costs nothing and turns P3a red
+       (verified; the extra `("graph.resource.limit", "$.tracks")` shows);
+     - record both as rows, and correct the evidence's 1045-4 row, "no per-PR test binds at this
+       size: this is the one-day gap the issue accepts".
+2. **Accepted residual, not blocking: what still needs a real 65,537-track compile.**
+   - **What.** P3b, a ceiling that copies the node cap's code and path. P5b, a ceiling in the
+     `into_bound` wrapper. A ceiling in bank attachment. #962's quadratics.
+   - **Why it stays nightly.** Each one needs the unconstrained compile. Timed phase by phase in
+     debug, that compile takes 28-40 s and bind another 13-17 s. That is not cheap next to the
+     saving.
+   - **Condition.** Nightly with the bound is acceptable under amendment 5, provided the spec's
+     remaining-risk list names exactly this set.
+3. **Low, pre-existing: no test parses a document above 65,535 tracks (P1).** Nothing does, per PR
+   or nightly. `descriptive_scale.rs` parses 65,536 tracks, but it is ignored and nothing schedules
+   it. This is not #1045's regression; it needs its own issue.
+4. **Low, cosmetic.** The `math-sweeps` job and its failure-notice row are both named
+   `math exhaustive sweeps`, but the job now runs the session sweep too.
+
+### Confirmed
+
+- **Nightly wiring.**
+  - `release-budgets` runs the three moved tests in release with
+    `--config profile.release.overflow-checks=true`.
+  - The 60 s bound discriminates. With #962 fix 1 re-injected (a linear `required_bindings.contains`
+    per bank member), the test goes RED by the bound at 231 s. Clean, it takes 19.5 s on the same
+    host.
+  - `failure-notice` needs both jobs and prints both.
+  - `check-ci-path-routing.py` and `test-ci-path-routing.py` pass under `python3 -B`, and
+    actionlint 1.7.7 is clean.
+- **The trimmed loops keep their catches per PR.**
+  - A1 (8 retained copies, not 9): RED in `[1, 4]`, at `tracks=1`.
+  - A2 (the strip vector counted through a `u16`): GREEN per PR, and RED in the nightly
+    65,537-track row.
+  - V8 (the 2^73 binade one ULP off): RED in the one-million loop, with 3,921 fallbacks against 0.
+- **Gates on the merge.**
+  - `cargo check --workspace --all-targets --all-features`, clippy `-D warnings` and fmt pass.
+  - The three crates pass in dev (79 s wall; graph-compiler `scale` 18.5 s) and in release.
+  - I ran 55 scripts under `python3 -B`, and all pass. They are the lint job's policy scripts and
+    their mutation companions, #1043's nightly self-test suites, and `check-workspace-policy.sh`,
+    which includes #1052's source-scrape lint.
+- **Method note.** One merge run first reused a mutated artifact from the scratch target directory
+  it shared with the mutation worktree. I re-ran it in a clean target directory, and the result
+  above is from that run.
+- **Not re-run.** I did not re-run the cargo-mutants passes or the #966/#970 reverts. This change
+  does not touch the tests they turn red.
+
+### Test value
+
+- **`:91` with its one-below cap:** a narrowed track index that drops a track's nodes in graph
+  compile, which nothing else per PR catches.
+- **`:160` under its bound:** a quadratic compile or bind, and a ceiling in `into_bound` or bank
+  attachment, a day late.
+- **The nightly 65,537-track allocation row:** an accounting count that is exact only below 65,536
+  tracks (A2).
+- **The one-million loop:** a spelling defect in a binade that no directed or corpus value reaches
+  (V8).
+- **The recommended synthetic test:** a ceiling in bind or render above 65,535 track inputs, which
+  nothing else per PR binds.
