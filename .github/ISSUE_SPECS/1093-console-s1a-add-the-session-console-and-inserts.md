@@ -445,3 +445,182 @@ All on the final tree (`0c71b280`), x86-64-v3:
 - B0's app-shape row: not on this branch, so its compiled-plan gate (EQ and compressor as
   `pre_insert` slots with the 2-mod-3 bypass) is shown above on an equivalent probe and must be
   rerun on B0's row after the rebase.
+
+## Sol verdict, attempt 1
+
+**PASS**, for `64f51417` (11 commits on `11ea359b`), with one binding rebase obligation (finding 1).
+Everything below was re-derived independently on x86-64-v3, not read from the evidence above.
+
+### What was verified
+
+- **Schema against decision 12.** Slots are exactly `{slot, identity, quality, link_mode}`, slot
+  IDs are unique across both sections, and there is no sidechain. The per-track `console` is
+  exactly `{slot, bypass, params}` in slot order. `inserts` replaces `dynamic`, and `simd1`/`simd2`
+  are gone. Taps are renamed with codes 1-7 unchanged. `RackName` and `ParameterRack` carry explicit
+  codes: `inserts` 2, `builtins` 4, `console` 5, with 1 and 3 refused. BTLV track fields are `inserts`
+  7 and `console` 11, and 6 and 8 are retired. Root `console` is field 15. Root field 8 was the
+  retired `limits`, so 15 is the next unallocated ID. There is no `ABI_VERSION` change. Planting an
+  index-derived `RackName::wire()` turns
+  `parameter_enum_wire_mappings_are_exhaustive_and_roundtrip` red, which is gate 3.
+- **Refusals** (gate 2). I ran 55 crafted documents through `session_validator`, and each refusal
+  carries its code at its path:
+  - each effect field in an entry;
+  - `sidechain`, `bypass`, `params` and `id` on a slot;
+  - unknown, missing, all-missing, duplicate and misordered entries;
+  - a slot repeated within a section and across sections;
+  - a `cid` slot;
+  - `miso.delay`, `miso.multiband-compressor` and an unknown native slot, refused with
+    `console.slot.ineligible_effect` at stage 5;
+  - a missing root `console`, a missing section and a missing track `console`;
+  - the retired `simd1`, `dynamic` and `simd2` keys;
+  - all five retired tap spellings;
+  - `simd1`, `dynamic` and `simd2` as automation racks.
+
+  These are accepted: all seven new taps; empty sections with empty inserts; a delay insert; an
+  insert ID equal to a slot ID; `rack: "console"` automation on a declared slot parameter; and
+  root keys out of order, which the base accepts too.
+- **Canonical round trip.** For all 18 documents that the validator can re-serialize, running the
+  migration script over the *base* canonical output gives exactly the branch's canonical output, and
+  that output is a fixed point. `canonical.json` is byte-canonical on both sides (checked through
+  `canonical_session_json`). Which documents are byte-canonical is unchanged from the base.
+- **Migration.** Rerun on the `6fdf5db2` documents, the committed script reproduces all 19
+  migrated documents byte for byte. My own rack classification of the base documents agrees with the
+  rule:
+  - the only multi-track uniform `dynamic` racks are the two named witnesses;
+  - `observation-frame-shape`'s `dynamic` diverges;
+  - `canonical`'s is ineligible;
+  - `reduced-nobus` is the one document whose `simd1` and `simd2` diverge.
+- **Class A** (gate 4), from my own harness. The harness compiles each document at `Backend::Simd8`
+  to get `MISO-GRAPH-V1` text, then renders 48 quanta through `prepare_host_session` from a
+  per-source deterministic signal, with NaNs folded. The renders are not silent.
+  - **Render bits.** Every document that renders has identical PCM bits: 17 documents, plus B0's
+    own app fixture against its migration. `canonical` refuses at effect preparation and
+    `canonical-minimal` at source preparation, with identical diagnostics on both sides.
+  - **Graph text.** Every document's graph text is identical except `reduced-nobus` and the app
+    shape. My graph digests match the table above, for example `reduced-nobus` `6b571db317ac` ->
+    `26b904b44b59`. The `reduced-nobus` move is legitimate: its per-track racks cannot be console
+    slots, because every track must carry every slot. The rule folds them into `inserts`, the
+    diff is placement (`simd1`/`simd2` -> `dynamic`), and the bits hold.
+  - **App shape.** The app shape moves Dynamic -> Simd1: 64 `simd1:eq` and 64 `simd1:comp` nodes,
+    with no Dynamic effect node left.
+- **Digest chain.**
+  - `canonical.json` SHA-256 `5f887676...` equals the `session_template_sha256` in both
+    `prepare_256_tracks` TOMLs.
+  - Those TOMLs' 960-byte sizes and SHA-256s equal their `MANIFEST.tsv` rows.
+  - `sha256(MANIFEST.tsv)` = `fced289f...` = `ACCEPTED_MANIFEST_SHA256`, and the audit test's copy
+    matches.
+  - The graph `MANIFEST.tsv` and the builtins graph PCM and meter digests are unchanged.
+  - The `console-workload` release digests pass unchanged.
+- **The escape hatch.** `prepare_native_session_effects_with_console_eligibility` is called only by
+  `graph-compiler`'s `#[cfg(test)]` module, `graph-compiler/tests/compile_shapes.rs` and
+  `tools/audit`. `host-core`'s prepare path (`prepare.rs:797`), and through it `capi` and
+  `host-web`, uses the fixed list.
+- **Edits outside S1a.** Each is compile-, gate- or spec-driven:
+  - `rack_mut`;
+  - `protocol_rack`;
+  - `count_effects`;
+  - `host-web`'s per-track rack counts;
+  - the size pins and the `COMPLETE_SCHEMA_HASH` repin, with its parity, conformance-doc and fuzz
+    copies;
+  - the registry's rack-code line;
+  - test adaptations;
+  - the #973 and #987 vocabulary maps.
+
+  The follow-ups listed above are covered by the #1094, #1096 and #1097 specs as written: #1094
+  gate 2 covers fields 6 and 8, and #1097 covers the SDK, the qualification entries and the
+  `author-session` skill.
+- **Gates.** All of the following pass:
+  - clippy `-D warnings` over the workspace (all targets, all features), and fmt;
+  - `cargo test --locked --workspace --all-features --no-fail-fast`: 286 result lines, 0 failed,
+    covering session, protocol, graph-compiler, builtins-compiler, effect-compiler, host-core and
+    capi;
+  - `console-workload` in release;
+  - `check-console-fixtures.sh`, `check-console-benchmark-fixture.sh`, `test-console-benchmark.sh`,
+    `check-builtins-fixtures.sh` and `graph_fixture --check`;
+  - `check-protocol-wasm-parity.sh` and its `--self-test`;
+  - `check-browser-expected-resources.py` against a freshly built module;
+  - `check-session-policy.sh` and 17 other bash policy and check scripts;
+  - 10 Python checks and 4 `--self-test`s, all run with `python3 -B`;
+  - both AArch64 legs on x86 with `--no-run`: the debug product closure with its features, and the
+    release `lane`/`math`, `console-workload` and `audit` builds, with both `judge-skips` green and
+    the no-silent-skip scan clean.
+
+  The benchmark preflights ran untimed in a clean scratch worktree:
+  - `operator/preflight-console-benchmark.sh --step sol-1093-scratch-preflight` PASS, with 0
+    workload launches;
+  - `run-web-mixing-automation-benchmark.sh prepare` then `preflight` PASS, with module
+    `bb33308b...` (not the release pin, as expected).
+
+  Not run: the SDK suites and the SDK-driven browser qualification, which belong to S1d, and the
+  AudioWorklet artifact pin, which belongs to the batch boundary.
+
+### Findings, by severity
+
+1. **Medium (carried; binds the rebase).** Gate 6's app-shape row cannot be checked on this branch.
+   B0 (#1085) has not landed, although the spec says it has.
+   - **Trial merges.** `c4906414` merges clean. B0 merges without a textual conflict but breaks:
+     - `cargo check --keep-going` fails in `tools/console-workload/src/lib.rs` only (18 errors:
+       `.simd1`, `.dynamic` and `.simd2`, and `SendTap::PostMatrix`);
+     - these fail at run time: `fixtures/session/v1/console-sixty-four-track-app.json`,
+       `scripts/derive-app-console-fixture.py`, B0's app block in
+       `scripts/check-console-fixtures.sh` (it reads `simd1`/`dynamic`, and its `outer(app) ==
+       outer(intended)` must now exclude `console`), and B0's `DOCUMENT_KINDS`/`SECTIONS` block in
+       `scripts/web-mixing-automation-benchmark.mjs`.
+   - **The rebase must:**
+     1. Migrate B0's fixture with the committed script. I ran it: `dynamic` is appended to
+        `pre_insert`, because `simd1` is empty. That gives `pre_insert` [`eq`, `comp`], an empty
+        `post_insert`, and 21 tracks with both entries bypassed (2 mod 3). The result validates
+        through stage 5 and renders bits identical to B0's fixture at the base.
+     2. Port the derive script to the migrated intended fixture: clear `post_insert` and each
+        limiter entry, and bypass both entries on 2-mod-3 tracks, so that `cmp` reproduces the
+        fixture.
+     3. Port the builder, its tests, the witness block and the V8 block.
+     4. Re-run gate 6 and the app-row class-A render on the real native and V8 rows before C3 is
+        pushed.
+   - **P1 (#1087).** P1 conflicts in `effect-compiler/src/prepare.rs` (adjacent constants: keep
+     both) and in `effect-compiler/tests/native_session.rs` (two tests appended in the same place;
+     port P1's `bypassed_console()`). Once those are resolved, P1 fails to compile only in its
+     `graph-compiler/tests/bypass_cohorts.rs` and `host-core/tests/symmetry_witness.rs`. P1 and B0
+     do not conflict with each other.
+2. **Low.** The escape hatch is an ungated `pub fn` in the production crate. Nothing shipped calls it
+   today, but the repo's convention is `#[cfg(any(test, feature = "test-support"))]` plus
+   `#[doc(hidden)]`. `effect-compiler/test-support` exists, and `tools/audit` already enables other
+   `test-support` features. Gating it would make "not reachable from production" structural.
+3. **Low.** `validate_console_entries` is O(tracks x slots^2), because it searches `slots().any` per
+   entry and `console.iter().any` per slot, while the validator is otherwise linear. One track with
+   6,000 slots takes 1.81 s in the debug `session_validator`, against 0.57 s for 6,000 inserts. The
+   cost is on the control plane and bounded by the document size. A slot -> position map built once
+   in `validate_console` makes it linear.
+4. **Low.** `PARSE_TRANSIENT_MULTIPLIER` 17 -> 20 is still a real, asserted bound: every case is at
+   most 17.503 bytes per input byte.
+   - **Where the growth is.** It is all in `json-syntax`'s parse: the raw parse peak goes from
+     6,780 to 8,944 bytes (+13 allocations for 64 input bytes), while model plus compile goes from
+     524 to 568 bytes. The 64-byte empty `console` object costs about 2 KiB. That comes from the
+     frontend's containers and code map, not from the model, and the parser cannot avoid it
+     without changing the frontend.
+   - **The cost.** Dense documents stay below 13.0, so the slack for them grew from 30% to 54%, and
+     a 1 MiB document's pre-parse projection grows from 17 to 20 MiB.
+   - **Suggested follow-up.** An affine bound (a fixed overhead plus k x bytes) would restore
+     discrimination.
+5. **Low.** The #970 pin `[1,1]` -> `[0,0]` is justified, and no guard was lost.
+   - **The #966 mutation** (966-M1: the base binder, which does not check levels) turns 9 of 9
+     `bank_levels` tests red at the base and 8 of 9 here. The reduced reproducer no longer
+     discriminates it, but seven deterministic reproducers still do, including the mono-collapse
+     one, and so does the probe.
+   - **The #970 mutation** (966-M970: arming without `gathers_track_input`) is red here in the
+     probe (8 armed lines over 6 seeds, against 5 over 4 at the base) and in 7 of 9
+     `collapse_arming` tests.
+   - **Stale mutation records.** `graph-compiler/tests/MUTATIONS.md`'s #966 rows (M1 "9 of 9" and
+     the probe's seed and line counts) and `protocol/tests/MUTATIONS.md` P3-M45 (`track.simd1`)
+     are now stale. Refresh them. A replacement reproducer is optional: the original shape cannot
+     be expressed, and the closest one (divergent inserts plus a uniform `post_insert` later chain)
+     is already `console_less_eqs`.
+6. **Info.**
+   - A retired track field 6 or 8 sent with the optional flag is skipped by the generic
+     unknown-field rule and not refused; #1094 gate 2 owns that.
+   - Inside the unpushed C3 batch, `host-core` and `capi` catalogs report lowered console slots as
+     rack `5` while the browser record still addresses `0`/`1`/`2`; #1096 owns that.
+   - The migration script lives under `docs/handoffs/` rather than as a PR attachment. That is
+     acceptable because batch mode opens no per-slice PR, the script sits outside
+     `check-script-reachability.py`'s `scripts/` scope, and the B0 rebase and #1097 need it.
+   - `docs/IMPLEMENTATION_PLAN.md:31` still spells the old chain.
