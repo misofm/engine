@@ -264,3 +264,102 @@ test was removed, and no live claim was lost.
 
 **Size.** 30 files, +72/-207 lines, before this evidence. The two shells account for -97,
 `Cargo.lock` -16, and the x86 spellings +54/-70 across 18 files.
+
+## Sol verdict, attempt 1
+
+**PASS.** Sol, 2026-09-29. Verified on a scratch merge of `52ebb1a6` into the batch head
+`codex/batch-slim-4` at `bea55149` (main plus #1060, #1062, #1050 and #1044). Rust 1.97.1.
+
+### The merge
+
+`git merge --no-ff codex/1032-remove-native-host-shells` auto-merges with no conflicts. The only file
+both sides touch is `qualification.yml`, in disjoint hunks: #1032 deletes test-debug-a's two-line
+"Native host smoke" step, and #1044 edits the artifact, sdk, artifact-gates, browser, lint and
+test-release jobs. No resolution is needed. There is no semantic conflict either:
+- #1050's four deleted files are not referenced by #1032;
+- `check-ci-path-routing.py` (with #1044's new closure-digest and deduplicated-owner rules),
+  `test-ci-path-routing.py`, `check-script-reachability.py` and `check-test-support-ci.py` all pass
+  on the merged tree.
+
+### Findings, by severity
+
+1. **Low (non-blocking): the host-core policy fixture no longer proves that every host is scanned.**
+   `test-host-core-policy.sh`'s fixture now has one host, `hosts/host-web`. So the three generic
+   `host-*` cases and the `host-web-*` cases mutate the same directory.
+   - I regressed the checker's loop from `"$root"/hosts/*/` to `"$root"/hosts/host-web/`. The merged
+     suite still passes. Base's suite fails at `host-recompiles-the-pipeline`, because its
+     `host-native` fixture caught the regression.
+   - No live claim is lost, because the real tree has one host. What is lost is a proof that a
+     future host would be scanned.
+   - Fix: the fixture is synthetic, so it can keep a second host that is not named `host-web`, for
+     example `hosts/host-fixture/src/main.rs`, as the target of the three generic cases. This can be
+     done here or as a follow-up.
+2. **Info.** On `i686-linux-android`, `lane` now fails with #1041's 64-bit error plus a follow-on
+   `E0308`, where base also printed the v3 error. The target is refused either way.
+3. **Info.** The remaining mentions of `host-native` and `host-mobile` are historical records:
+   `docs/audits/test-usefulness-2026-09-04/*`, `docs/rulings/prefix-strip-inventory.md`, the new
+   history sentence in `REALTIME_DEPENDENCY_POLICY.md`, the comment in
+   `check-artifact-evidence-leak.sh`, and specs and handoffs. Nothing else in the merged tree names
+   them: no workflow (qualification, nightly, fuzz, npm-publish), no script,
+   `scripts/lib/product-crates.sh` (derived from capi's closure, which never held them),
+   `run-aarch64-tests.sh`, the SDK or any `Cargo.toml`. No cross-target invocation ever named
+   `-p host-mobile`, so dropping it from `shipped` loses nothing.
+
+### Nothing live was deleted, and the smoke step's claims survive
+
+The step only checked `cargo run -p host-native`'s exit status. I planted three defects on the
+merged tree, one at a time:
+
+| planted defect | what the smoke step would have done | surviving required test that goes red |
+|---|---|---|
+| M1: a broken boot attestation (`attest_host` returns `Err` when the CPU has AVX2) | exit FAILURE | capi `resource_lifecycle` (8 tests: `engine_create` returns 7, `UNSUPPORTED`) and 13 capi `ffi` unit tests (test-debug-a); `check-capi-abi.sh`'s C11 consumer exits 2 at `engine_create != OK` (audit-native) |
+| M2: a broken FP-environment setup (`write_fp_control_word` also sets `MXCSR_FTZ`) | exit FAILURE | lane `fp_env` (6 tests, including `attestation_passes_on_this_thread`; test-debug-b); host-core `fp_environment` (3) and capi `runtime::tests::fp_environment` (1) (test-debug-a) |
+| M3: `target_smoke()` reports `Simd4` on x86-64 | **exit 0: the step would have missed it** | `target-smoke::tests::smoke_values_are_canonical` (test-debug-a) |
+
+Nothing the step proved is left unproved, and the surviving tests are stronger. With a default
+caller word, the step could not see a missing `enter()` write or a missing restore. The
+hostile-word tests can.
+
+### The 32-bit x86 removals
+
+Base had 58 `target_arch = "x86"` spellings in 18 files under `crates/`, `hosts/` and `tools/`,
+not counting `crates/math/VENDORED.md`'s prose. The merge has none. I read every hunk. Each one
+does one of three things:
+- drops an `x86` operand from `any(...)`, `not(any(...))` or `cfg!(any(...))`;
+- narrows `lib.rs`'s v3 guard from `all(any(x86, x86_64), …)` to `all(x86_64, …)`;
+- deletes softfma's `core::arch::x86` imports inside functions that are already x86_64-only.
+
+No `all(...)` operand was dropped. Every predicate therefore keeps its value for every
+`target_arch` other than `"x86"`, and #1041's guard (`lane/src/lib.rs`) refuses `"x86"`. The build
+results agree:
+- **Console digests:** the `gain_pan_profile digests` output is identical on base and merge
+  (17 digests).
+- **Shipped module:** `--module-only` gives `9aca423b3e36ce6ab1c6d0dd21123d6eab81111ad0b3f47bdf5c8e09c613b2ee`
+  on both.
+- **capi**, built at one path for each side so the `-C metadata` hashes match:
+  - x86-64 `libcapi.so` differs only in `.debug_info`, `.debug_line` and the build-id note, so
+    `.text` and `.rodata` are identical;
+  - every `libcapi.a` member is identical once debug info and embedded bitcode are stripped;
+  - the `aarch64-linux-android` and `aarch64-apple-ios` release staticlibs are identical once debug
+    info is stripped.
+
+### Mutation fixtures moved to host-web
+
+`check-host-core-policy.sh` scans `hosts/*/src` with no exemption list, and `check-bench-policy.sh`
+finds `hosts/*/Cargo.toml`. So each re-pointed case still exercises its own forbidden pattern. I
+re-ran both suites, and they pass on the unmutated checkers. The one lost property is finding 1.
+
+### Gates on the merge
+
+| gate | result |
+|---|---|
+| `cargo check --locked --workspace --all-targets --all-features`, clippy `-D warnings`, `cargo fmt --check`, `RUSTDOCFLAGS='-D warnings' cargo doc` | pass |
+| `scripts/check-cross-targets.sh` | PASS (aarch64 iOS and Android product crates checked and linted, `ios-asm-memset-pattern16` expected failures, armv7 and scalar wasm refused) |
+| x86 probes | `-avx2,-fma` and `+avx2,-fma` refused with `requires x86-64-v3`; `+avx2,+fma` passes; the wasm `simd128` check of `host-web lane target-smoke protocol` passes |
+| test-debug-a / test-debug-b / test-release | 1,267/0/8, 793/0/27 and 115/0/16 (passed/failed/ignored); conformance fixtures `--check` ok |
+| `-- --list` inventory, base against merge | 1,275, 819 and 131 tests on both. The only differences are the two empty `host_mobile` and `host_native` binaries, and two lane doctests renumbered from line 282/287 to 278/283 |
+| `check-capi-abi.sh` and `--self-test` | ok (shared and static); mutation tests ok |
+| evidence leak | check and self-test pass. Planted `-p conformance` in the delivery build and `-p capi -p dsp-reference` in a cross-target row: both go red and name the file |
+| routing, reachability and test-support | `check-`/`test-ci-path-routing.py`, `check-`/`test-script-reachability.py` (122 reached, 6 exempt) and `check-`/`test-test-support-ci.py` pass |
+| policy scripts (54, from the lint, gate-self-tests and docs-gates jobs; Python with `-B`) | 54/54 pass. `check-workspace-policy.sh` first failed while a concurrent cross-target build was writing temporary files under `target/`; it passes when re-run with the builds idle |
+| AArch64 legs resolved on x86 (`--no-run`) | the debug set (25 product crates plus `dsp-reference`, `conformance`, `target-smoke`, with the leg's features), the release gates `-p lane -p math`, `-p console-workload` and `build -p audit` all build |
