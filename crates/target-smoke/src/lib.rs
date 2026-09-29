@@ -45,7 +45,7 @@ mod tests {
         // the shipped wasm width is four lanes unless issue #183 step 2's measurement cfg widens it).
         // Every other target has no row because `lane` refuses to compile for it (issues #1041 and
         // #1062), so this crate cannot be built there either.
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        #[cfg(target_arch = "x86_64")]
         assert_eq!(
             report.backend,
             lane::Backend::Simd8,

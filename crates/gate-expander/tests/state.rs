@@ -284,7 +284,7 @@ fn old_lengths_and_one_byte_short_payloads_reject_scalar_and_bank() {
 
 #[test]
 #[cfg_attr(
-    not(any(target_arch = "x86", target_arch = "x86_64")),
+    not(target_arch = "x86_64"),
     ignore = "an eight-lane bank binds only on the eight-lane launch build (#1017)"
 )]
 fn malformed_final_right_word_leaves_both_channels_unchanged() {
@@ -391,7 +391,7 @@ fn malformed_final_right_word_leaves_both_channels_unchanged() {
 
 #[test]
 #[cfg_attr(
-    not(any(target_arch = "x86", target_arch = "x86_64")),
+    not(target_arch = "x86_64"),
     ignore = "an eight-lane bank binds only on the eight-lane launch build (#1017)"
 )]
 fn scalar_and_bank_recovery_is_channel_and_lane_local() {
@@ -603,7 +603,7 @@ fn scalar_and_bank_recovery_is_channel_and_lane_local() {
 
 #[test]
 #[cfg_attr(
-    not(any(target_arch = "x86", target_arch = "x86_64")),
+    not(target_arch = "x86_64"),
     ignore = "an eight-lane bank binds only on the eight-lane launch build (#1017)"
 )]
 fn scalar_and_bank_state_payloads_interchange_without_changing_audio() {
@@ -722,7 +722,7 @@ fn scalar_and_bank_state_payloads_interchange_without_changing_audio() {
 
 #[test]
 #[cfg_attr(
-    not(any(target_arch = "x86", target_arch = "x86_64")),
+    not(target_arch = "x86_64"),
     ignore = "an eight-lane bank binds only on the eight-lane launch build (#1017)"
 )]
 fn bank_restore_of_one_track_does_not_mutate_peers() {

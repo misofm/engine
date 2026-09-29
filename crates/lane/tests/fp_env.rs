@@ -43,7 +43,7 @@ fn the_canonical_word_is_the_word_inside_the_guard() {
     );
 }
 
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 mod x86 {
     use super::{CanonicalFpEnv, attest_fp_environment, read_fp_control_word};
     use lane::fpenv;
@@ -341,11 +341,7 @@ mod aarch64 {
 fn the_target_declares_whether_it_pins() {
     assert_eq!(
         FP_ENV_CONTROLLED,
-        cfg!(any(
-            target_arch = "x86",
-            target_arch = "x86_64",
-            target_arch = "aarch64"
-        )),
+        cfg!(any(target_arch = "x86_64", target_arch = "aarch64")),
         "FP_ENV_CONTROLLED must describe this target"
     );
     if !FP_ENV_CONTROLLED {
