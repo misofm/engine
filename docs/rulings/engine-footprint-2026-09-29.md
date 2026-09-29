@@ -37,7 +37,7 @@ which the removal left unused.
 ## Decision 12: the console strip (session-level console slots, per-track inserts)
 
 The owner's console-strip design (umbrella issue *Console strip: session-level console effects
-with per-track inserts*, `.github/ISSUE_SPECS/CONSOLE-00-console-strip.md` until root numbers it)
+with per-track inserts*, `.github/ISSUE_SPECS/1084-console-00-console-strip.md` until root numbers it)
 emulates a hardware console: every channel runs the same built-in processing and sets only its own
 knobs, and outboard gear is patched into a channel's insert point. Sol verified the design against
 `5a1421a3` and returned SOUND WITH AMENDMENTS (`.github/ISSUE_SPECS/DRAFT-console-strip-VERIFY.md`,

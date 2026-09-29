@@ -205,21 +205,21 @@ the behaviour. Root renumbers the files once the GitHub issues exist.
 | Slice | File (`.github/ISSUE_SPECS/`) | Scope | Depends on |
 |---|---|---|---|
 | R0 | this commit | Decision 12, the AGENTS.md amendment, this umbrella and the slice specs | none |
-| B0 | `CONSOLE-B0-add-the-console-strip-benchmark-rows.md` | Strip at N in {9, 10, 13, 16, 64}, app shape, sparse activity; layout-neutral `strip_layout`; two V8 documents | R0 |
-| S0 | `CONSOLE-S0-record-the-console-strip-baseline.md` | One native and one V8 run on B0's commit | B0 |
-| P1 | `CONSOLE-P1-keep-a-bypassed-lane-in-its-effect-bank.md` | Session bypass -> shunt state; mixed-bypass cohorts bind one bank | R0 |
-| P2a | `CONSOLE-P2a-let-an-effect-bank-bind-a-partial-group.md` | Active mask, padding contract, planner support; every factory still declines | R0 |
-| P2b | `CONSOLE-P2b-pad-parametric-eq-banks.md` | EQ opts in (supersedes #888's absent-member half) | P2a |
-| P2c | `CONSOLE-P2c-pad-compressor-banks.md` | Compressor opts in (supersedes #889's absent-member half) | P2a |
-| P2d | `CONSOLE-P2d-pad-true-peak-limiter-banks.md` | Limiter opts in; the clone keeps the fast body | P2a |
-| P2e | `CONSOLE-P2e-pad-gate-transient-shaper-and-soft-clip-banks.md` | Gate, transient shaper and soft-clip opt in; gate defaults fixed; soft-clip D7 masked | P2a |
-| S1a | `CONSOLE-S1a-add-the-session-console-and-inserts.md` | Grammar, model, validation, canonical writer, BTLV, lowering; migrate 18 documents; repin | R0 |
-| S1b | `CONSOLE-S1b-carry-the-console-and-inserts-in-the-control-protocol.md` | Console session edits, retired codes, registry docs, `COMPLETE_SCHEMA_HASH` | S1a |
-| S1r | `CONSOLE-S1r-rename-the-live-console-to-live-controls.md` | Rename the live-control attachment's names, exports, boot words and SDK API | R0 |
-| S1c | `CONSOLE-S1c-address-console-slots-and-inserts-in-live-control.md` | Live addressing, the browser record's rack byte, the observation, live-response and spectrum encodings | S1a, S1b, S1r |
-| S1d | `CONSOLE-S1d-ship-the-session-console-and-inserts-in-the-sdk.md` | SDK builder, types, writer, live controls, CLI, author-session skill, app handoff | S1a, S1c |
-| S2 | `CONSOLE-S2-bind-every-console-slot-banked.md` | Padding policy for console slots, the no-fallback diagnostic, #971 | P1, P2b-P2e, S1a |
-| S4 | `CONSOLE-S4-measure-the-console-strip-against-its-baseline.md` | Rerun B0's rows; before/after report | S2, S1d, S0 |
+| B0 | `1085-console-b0-add-the-console-strip-benchmark-rows.md` | Strip at N in {9, 10, 13, 16, 64}, app shape, sparse activity; layout-neutral `strip_layout`; two V8 documents | R0 |
+| S0 | `1086-console-s0-record-the-console-strip-baseline.md` | One native and one V8 run on B0's commit | B0 |
+| P1 | `1087-console-p1-keep-a-bypassed-lane-in-its-effect-bank.md` | Session bypass -> shunt state; mixed-bypass cohorts bind one bank | R0 |
+| P2a | `1088-console-p2a-let-an-effect-bank-bind-a-partial-group.md` | Active mask, padding contract, planner support; every factory still declines | R0 |
+| P2b | `1089-console-p2b-pad-parametric-eq-banks.md` | EQ opts in (supersedes #888's absent-member half) | P2a |
+| P2c | `1090-console-p2c-pad-compressor-banks.md` | Compressor opts in (supersedes #889's absent-member half) | P2a |
+| P2d | `1091-console-p2d-pad-true-peak-limiter-banks.md` | Limiter opts in; the clone keeps the fast body | P2a |
+| P2e | `1092-console-p2e-pad-gate-transient-shaper-and-soft-clip-banks.md` | Gate, transient shaper and soft-clip opt in; gate defaults fixed; soft-clip D7 masked | P2a |
+| S1a | `1093-console-s1a-add-the-session-console-and-inserts.md` | Grammar, model, validation, canonical writer, BTLV, lowering; migrate 18 documents; repin | R0 |
+| S1b | `1094-console-s1b-carry-the-console-and-inserts-in-the-control-protocol.md` | Console session edits, retired codes, registry docs, `COMPLETE_SCHEMA_HASH` | S1a |
+| S1r | `1095-console-s1r-rename-the-live-console-to-live-controls.md` | Rename the live-control attachment's names, exports, boot words and SDK API | R0 |
+| S1c | `1096-console-s1c-address-console-slots-and-inserts-in-live-control.md` | Live addressing, the browser record's rack byte, the observation, live-response and spectrum encodings | S1a, S1b, S1r |
+| S1d | `1097-console-s1d-ship-the-session-console-and-inserts-in-the-sdk.md` | SDK builder, types, writer, live controls, CLI, author-session skill, app handoff | S1a, S1c |
+| S2 | `1098-console-s2-bind-every-console-slot-banked.md` | Padding policy for console slots, the no-fallback diagnostic, #971 | P1, P2b-P2e, S1a |
+| S4 | `1099-console-s4-measure-the-console-strip-against-its-baseline.md` | Rerun B0's rows; before/after report | S2, S1d, S0 |
 
 The rename (S1r) is its own slice rather than part of S1c: it reaches about 80 code, script and SDK
 files, including sealed exports, and would triple S1c while mixing a class-A rename into a
@@ -288,3 +288,24 @@ S1d's handoff notes carry the name maps.
 | 12 | App statement | Corrected above; app shape in B0 |
 | 13 | Vocabulary | Owner: session key `console`; live-control names renamed (S1r); `builtins`/`"strip"` unchanged (R0's reading) |
 | 14 | Class A by lowering | Accepted (owner). S1a |
+
+## Issue map
+
+| Slice | Issue |
+|---|---|
+| 00 | #1084 |
+| B0 | #1085 |
+| S0 | #1086 |
+| P1 | #1087 |
+| P2a | #1088 |
+| P2b | #1089 |
+| P2c | #1090 |
+| P2d | #1091 |
+| P2e | #1092 |
+| S1a | #1093 |
+| S1b | #1094 |
+| S1r | #1095 |
+| S1c | #1096 |
+| S1d | #1097 |
+| S2 | #1098 |
+| S4 | #1099 |
