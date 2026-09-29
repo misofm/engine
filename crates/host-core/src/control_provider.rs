@@ -474,6 +474,20 @@ fn build_parameter_catalog(
                 let flags = u32::from(parameter.readable)
                     | (u32::from(parameter.automatable) << 1)
                     | (u32::from(parameter.channel_policy == ParameterChannelPolicy::PerLane) << 2);
+                // Reserved exactly, as every other catalog allocation is: `resource_report`
+                // charges these by length, and collecting through `Result<Vec<_>, _>` (which has
+                // no lower size bound) grew six choices to a capacity of eight, 64 retained bytes
+                // per EQ kind descriptor that no row charged (#1060).
+                let mut enum_choices = Vec::new();
+                enum_choices
+                    .try_reserve_exact(parameter.enum_choices.len())
+                    .map_err(|_| SessionControlProviderError)?;
+                for choice in parameter.enum_choices {
+                    enum_choices.push(EnumChoice {
+                        value: choice.value,
+                        label: try_string(choice.label)?,
+                    });
+                }
                 metadata.push(ParameterDescriptor {
                     handle,
                     track_id: try_string(&entry.track_id)?,
@@ -493,16 +507,7 @@ fn build_parameter_catalog(
                     flags,
                     display_name: Some(try_string(parameter.display_name)?),
                     display_unit: Some(try_string(parameter.display_unit)?),
-                    enum_choices: parameter
-                        .enum_choices
-                        .iter()
-                        .map(|choice| {
-                            Ok(EnumChoice {
-                                value: choice.value,
-                                label: try_string(choice.label)?,
-                            })
-                        })
-                        .collect::<Result<Vec<_>, SessionControlProviderError>>()?,
+                    enum_choices,
                 });
                 state.push(ParameterStateRecord {
                     handle,

@@ -450,7 +450,10 @@ fn scratch_session() -> String {
 // them alone, because a ceiling never sees a *decrease* -- an owner row dropped from the accounting
 // under-reports, admission then accepts a session above the host's configured cap, and on a phone
 // that is an OOM kill (#1060 amendment 3). So the completeness claim moved to the allocator: this
-// file's counting allocator sees every byte the C ABI compile leaves live, and that is the oracle.
+// file's counting allocator observes every byte a C ABI compile leaves live, owner by owner, and
+// compares each owner's observed bytes with its charge. No charge is taken on trust from the
+// accounting under test (#1060 amendment 2; attempt 1's oracle subtracted two charges it did not
+// observe, and both hid under-counts that attempt 2 fixes).
 
 /// The C limits as the host-core preparation caps capi derives from them (`runtime::prepare_caps`),
 /// field for field. Only the ring length and the automation span bound change what preparation
@@ -509,10 +512,6 @@ impl HostHalf {
         self.store.compiled().resource_estimate()
     }
 
-    fn canonical_bytes(&self) -> u64 {
-        self.store.compiled().canonical_json().len() as u64
-    }
-
     /// The parameter catalog's charge, from the provider's own resource report. The retained
     /// telemetry and diagnostic capacities are the provider's fixed rows, not the catalog's.
     fn catalog_charge(&self) -> u64 {
@@ -526,13 +525,6 @@ impl HostHalf {
         )
         .unwrap_or_else(|_| panic!("the catalog's resource report"))
         .catalog_retained_bytes
-    }
-
-    /// capi's charges, inside `capi_retained_bytes`, for storage this half allocated and capi then
-    /// owns: the canonical JSON the compiled session holds, the source control table and ID arena,
-    /// and the parameter catalog -- each read from its owning crate's resource report.
-    fn capi_charges(&self) -> u64 {
-        self.canonical_bytes() + self.prepared.report.control_retained_bytes + self.catalog_charge()
     }
 }
 
@@ -552,14 +544,28 @@ fn freed_by_drop<T>(value: T) -> u64 {
     window.deallocated_bytes
 }
 
+/// What each owner the host-core half hands capi retains, observed by dropping it.
+///
+/// The drop order is the attribution: the source producers go first, so a ring the producers
+/// share with the plan is freed -- and counted -- with the plan that renders from it, and the
+/// producers' own bytes are their control table and ID arena alone.
+struct HostOwners {
+    sources: u64,
+    catalog: u64,
+    plan: u64,
+    store: u64,
+}
+
 /// One C ABI compile and its replayed host-core half, each observed by this file's allocator.
 struct CompileObservation {
     report: PlanResourceReport,
+    host_report: host_core::HostPrepareReport,
+    model: session::ResourceEstimate,
     /// Bytes the compile left live in its session and plan handles.
     compile_live: u64,
-    /// Bytes the replayed host-core half leaves live.
+    /// Bytes the replayed host-core half left live, and the same bytes owner by owner.
     host_live: u64,
-    host: HostHalf,
+    owners: HostOwners,
 }
 
 fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObservation {
@@ -577,30 +583,52 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
     begin();
     let host = host_half(document, compile_limits);
     let host_live = live_bytes(finish());
+    let model = host.model_estimate();
+    let HostHalf { store, prepared } = host;
+    let host_core::PreparedHost {
+        plan,
+        sources,
+        report: host_report,
+        control_catalog,
+    } = prepared;
+    let owners = HostOwners {
+        sources: freed_by_drop(sources),
+        catalog: freed_by_drop(control_catalog),
+        plan: freed_by_drop(plan),
+        store: freed_by_drop(store),
+    };
+    assert_eq!(
+        owners.sources + owners.catalog + owners.plan + owners.store,
+        host_live,
+        "the four owners hold every byte the host-core half retains"
+    );
     CompileObservation {
         report,
+        host_report,
+        model,
         compile_live,
         host_live,
-        host,
+        owners,
     }
 }
 
 impl CompileObservation {
-    /// The completeness claim, to the byte: everything the compile left live that the host-core
-    /// half did not is what capi allocated itself, and `capi_retained_bytes` charges exactly that
-    /// plus capi's charges for the host-allocated storage it owns.
+    /// The completeness claim for capi's own row, to the byte, from observations only.
     ///
-    /// An owner row dropped from capi's accounting (the verifier's `checked_layout::<Plan>(1)`)
-    /// lowers the charge alone; a new owner capi allocates but does not charge raises the live side
-    /// alone. Either is red. Nothing here is a byte literal, so a layout change that is charged
-    /// moves both sides together and needs no edit.
+    /// `capi_retained_bytes` charges what capi allocates itself -- everything the compile left
+    /// live beyond its host-core half -- plus the two host-allocated owners capi keeps: the source
+    /// control table and ID arena, and the parameter catalog. Each of the three terms on the left
+    /// is observed. An owner row dropped from capi's accounting (the verifier's
+    /// `checked_layout::<Plan>(1)`) lowers the right side alone; a new owner capi allocates but
+    /// does not charge, or spare capacity in a charged one (the catalog's enum-choice vectors
+    /// before #1060 attempt 2), raises the left side alone. Either is red. Nothing is a byte
+    /// literal, so a charged layout change moves both sides together and needs no edit.
     ///
-    /// The one difference is known and derived, not pinned: capi charges its decode-field scratch
-    /// at the control frame's byte length but allocates whole `u16` fields, so an odd frame length
-    /// is charged one byte it does not allocate. That is the safe direction, and it is the only
-    /// over-charge: any other difference, either way, is red.
+    /// The one difference is derived, not pinned: capi charges its decode-field scratch at the
+    /// control frame's byte length but allocates whole `u16` fields, so an odd frame length is
+    /// charged one byte it does not allocate. That is the safe direction.
     fn assert_capi_retained_bytes_are_complete(&self, label: &str, compile_limits: &CompileLimits) {
-        let capi_owned_live = self
+        let capi_allocated = self
             .compile_live
             .checked_sub(self.host_live)
             .unwrap_or_else(|| {
@@ -609,85 +637,97 @@ impl CompileObservation {
                     self.compile_live, self.host_live
                 )
             });
-        let capi_owned_charge = self
-            .report
-            .capi_retained_bytes
-            .checked_sub(self.host.capi_charges())
-            .unwrap_or_else(|| panic!("{label}: capi charges less than its host-allocated rows"));
         let decode_field_rounding =
             compile_limits.maximum_control_frame_bytes % size_of::<u16>() as u64;
         assert_eq!(
-            capi_owned_live + decode_field_rounding,
-            capi_owned_charge,
-            "{label}: capi's own live allocations plus the decode-field rounding (left) against \
-             `capi_retained_bytes` less its charges for host-allocated storage (right)"
+            capi_allocated + self.owners.sources + self.owners.catalog + decode_field_rounding,
+            self.report.capi_retained_bytes,
+            "{label}: capi's own allocations + the source producers + the parameter catalog + the \
+             decode-field rounding, all observed (left), against `capi_retained_bytes` (right)"
+        );
+    }
+
+    /// The host-core owners against the rows that charge them.
+    ///
+    /// * The source producers are exact: `control_retained_bytes` is walked over the built set.
+    /// * The session store is bounded by its compiled-model estimate, the graph cap's model row.
+    ///   The estimate is exact for the model's vectors, its strings and its canonical JSON, and
+    ///   charges 128 bytes per entity for indexes, of which the compiled session builds one, over
+    ///   its sources: the slack is that allowance less the source index's nodes (1,026 bytes on
+    ///   the EQ fixture, 2 on the browser identity fixture). The canonical JSON's spare capacity
+    ///   (16,056 bytes on the EQ fixture before #1060 attempt 2 shrank it) was invisible to the
+    ///   charge and is red here.
+    /// * The prepared plan is bounded by its engine rows. Those rows are the graph compiler's
+    ///   admission estimate, which charges the preparation, not only what the bound plan keeps:
+    ///   the compile-time graph metadata, bank scratch per slot where a merged chain keeps one
+    ///   slot's, and #511's and #936's reservations at their bound. The slack is 128,317 bytes on
+    ///   the EQ fixture at eight lanes, 128,405 at four, and 12,233 on the browser identity
+    ///   fixture, so an uncharged plan allocation smaller than that is not seen here. Seeing it
+    ///   needs per-owner attribution inside the prepared plan, which no public API exposes; #1060
+    ///   attempt 2 records that as a successor for root to file. Builtins have their own
+    ///   allocator oracle (`builtins-compiler/tests/allocation_tracker.rs`).
+    fn assert_host_owners_are_charged(&self, label: &str) {
+        let owners = &self.owners;
+        assert_eq!(
+            owners.sources, self.host_report.control_retained_bytes,
+            "{label}: source control table and ID arena"
+        );
+        assert!(
+            owners.store <= self.model.compiled_model_bytes,
+            "{label}: the session store retains {} bytes, above its compiled-model estimate {}",
+            owners.store,
+            self.model.compiled_model_bytes
+        );
+        let report = &self.host_report;
+        let engine_rows = report.graph_session_plus_plan_bytes
+            + report.source_overhead_bytes
+            + report.effect_scalar_state_bytes
+            + report.effect_scalar_scratch_bytes
+            + report.builtin_retained_payload_bytes;
+        assert!(
+            owners.plan <= engine_rows,
+            "{label}: the prepared plan retains {} bytes, above its charged engine rows \
+             {engine_rows}",
+            owners.plan
+        );
+        println!(
+            "{label}: capi {} observed; store {} of {}; plan {} of {} (slack {})",
+            self.report.capi_retained_bytes,
+            owners.store,
+            self.model.compiled_model_bytes,
+            owners.plan,
+            engine_rows,
+            engine_rows - owners.plan
         );
     }
 }
+
+/// The browser identity fixture: one track, no effect. It joins the oracle so the smallest session
+/// the product boots is observed too.
+const BROWSER_IDENTITY: &str =
+    include_str!("../../../hosts/host-web/tests/browser-v1/session.json");
 
 #[test]
 fn capi_retained_bytes_charge_every_byte_the_compile_retains() {
     for (label, document) in [
         ("parametric-eq-nine-track", SESSION.to_owned()),
         ("soft-clip nine-track", scratch_session()),
+        ("browser identity", BROWSER_IDENTITY.to_owned()),
     ] {
         let observed = observe_compile(&document, &limits());
         observed.assert_capi_retained_bytes_are_complete(label, &limits());
-
-        let model = observed.host.model_estimate();
-        let canonical = observed.host.canonical_bytes();
-        let HostHalf { store, prepared } = observed.host;
-        let host_core::PreparedHost {
-            plan,
-            sources,
-            report,
-            control_catalog,
-        } = prepared;
-        // The source control table and ID arena are charged exactly: `control_retained_bytes` is
-        // walked over the built set, and capi charges the same two rows.
-        assert_eq!(
-            freed_by_drop(sources),
-            report.control_retained_bytes,
-            "{label}: source control table and ID arena"
-        );
-        // The catalog is `prepared_parameter_catalog_charge_covers_its_allocations`, below.
-        drop(control_catalog);
-        // The engine rows are admission estimates that deliberately over-state the bound plan
-        // (per-slot bank scratch whether or not a chain merges, #511's slot coexistence allowance,
-        // #936's executor tables at their bound), so they are bounds, not equalities. They still
-        // catch an uncharged engine allocation larger than that slack.
-        let engine_rows = report.graph_session_plus_plan_bytes
-            + report.source_overhead_bytes
-            + report.effect_scalar_state_bytes
-            + report.effect_scalar_scratch_bytes
-            + report.builtin_retained_payload_bytes;
-        let plan_live = freed_by_drop(plan);
-        assert!(
-            plan_live <= engine_rows,
-            "{label}: the prepared plan retains {plan_live} bytes, above its charged engine rows \
-             {engine_rows}"
-        );
-        let model_charge = model.compiled_model_bytes + canonical;
-        let model_live = freed_by_drop(store);
-        assert!(
-            model_live <= model_charge,
-            "{label}: the session store retains {model_live} bytes, above its compiled-model \
-             estimate plus canonical JSON {model_charge}"
-        );
+        observed.assert_host_owners_are_charged(label);
     }
 }
 
-/// The parameter catalog's charge against what it allocates.
+/// The parameter catalog's charge against what it allocates, on its own.
 ///
-/// Known under-count, found by this oracle (#1060): `SessionControlProvider::resource_report`
-/// charges each descriptor's enum choices by length, but `build_parameter_catalog` collects them
-/// through `Result<Vec<_>, _>`, whose unknown lower size bound grows the vector to capacity 8 for the
-/// EQ's six filter kinds. On this fixture that is 72 kind descriptors x 2 spare 32-byte choices =
-/// 4,608 retained bytes `capi_retained_bytes` does not charge. The fix is in `host-core`, outside
-/// #1060's paths; un-ignore this test with it.
+/// Before #1060 attempt 2 the catalog collected each descriptor's enum choices through
+/// `Result<Vec<_>, _>`, whose unknown lower size bound grew the vector to capacity 8 for the EQ's six
+/// filter kinds while `resource_report` charged by length: 72 kind descriptors x 2 spare 32-byte
+/// choices = 4,608 retained bytes `capi_retained_bytes` did not charge. The catalog now reserves
+/// each vector exactly.
 #[test]
-#[ignore = "known under-count: the parameter catalog's enum-choice vectors retain capacity the \
-            catalog charge omits (4,608 bytes on the EQ fixture); host-core follow-up to #1060"]
 fn prepared_parameter_catalog_charge_covers_its_allocations() {
     let host = host_half(SESSION, &limits());
     let charge = host.catalog_charge();
@@ -718,10 +758,12 @@ struct Budget {
 
 impl Budget {
     fn ceiling(&self) -> u64 {
-        match Backend::current() {
-            Backend::Simd8 => self.eight_lanes,
-            Backend::Simd4 => self.four_lanes,
-            Backend::Scalar => panic!("no retained budget is declared for a scalar native build"),
+        // By width, not by variant: the scalar variant exists only under `lane/test-support`
+        // (#1059), and no native product build selects it.
+        match Backend::current().width() {
+            8 => self.eight_lanes,
+            4 => self.four_lanes,
+            width => panic!("no retained budget is declared for a {width}-lane native build"),
         }
     }
 }
@@ -730,10 +772,11 @@ impl Budget {
 /// `limits()` (#1060, owner decision 4).
 ///
 /// **Headroom.** Each ceiling is the row's value on 2026-09-28 (`a509b681`) at that width, plus
-/// 10 %, rounded up to a 64-byte multiple. 10 % is the example headroom #1060's brief gives, and the
-/// owner ruled budgets are ceilings rather than exact counts: a change that adds up to a tenth to a
-/// reference session's retained row passes unseen; a larger one is red here and must raise the
-/// budget with its reason in the same commit. A zero ceiling is a claim, not a budget: this session
+/// 10 %, rounded up to a 64-byte multiple. The owner ruled budgets are ceilings rather than exact
+/// counts, and 10 % is where the history puts the line: #1060's review sampled four past moves of
+/// these retained rows, +1.2 %, +2.3 %, +11 % and +48 %. A 10 % budget lets the two routine moves
+/// through unseen and stops the two structural ones, which then raise the budget with their reason
+/// in the same commit. A zero ceiling is a claim, not a budget: this session
 /// declares no track delay, no scalar-scratch effect and no meter, so a nonzero row there is a new
 /// retained class, not growth. The measured baselines, x86-64 / AArch64 (AArch64 under qemu-user):
 ///
@@ -749,7 +792,11 @@ impl Budget {
 /// | source overhead / total | 3,934 / 12,126 | the same |
 /// | effect scalar state | 8,424 | the same |
 /// | builtin processor payload, builtin retained payload | 17,451 | the same |
-/// | capi retained | 273,452 | the same |
+/// | capi retained | 256,740 | the same |
+///
+/// capi retained is the one row #1060 attempt 2 moved: 273,452 -> 256,740, -16,712, the EQ
+/// session's canonical JSON, which capi's epoch row charged a second time beside the compiled
+/// model's graph-cap charge.
 /// | largest named allocation | 90,720 | the same |
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
@@ -857,8 +904,8 @@ const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "capi_retained_bytes",
         value: |report| report.capi_retained_bytes,
-        eight_lanes: 300_800,
-        four_lanes: 300_800,
+        eight_lanes: 282_432,
+        four_lanes: 282_432,
     },
     Budget {
         row: "largest_named_allocation_bytes",
@@ -1175,9 +1222,9 @@ fn render_diagnostic_egress_reuses_eager_capi_storage_without_allocation() {
 /// * the five payload rows are the sum of the two live reports, the current plan's before the
 ///   replacement and the prospective plan's after the render that swaps it in;
 /// * the graph row adds both compiled models, each from its own `CompiledSession` estimate;
-/// * the capi row adds the prospective epoch (its canonical JSON, source control table and ID
-///   arena) and the prepared protocol owner (its response buffer, affine token, replay cache and
-///   parameter catalog), each from its owning crate's resource report;
+/// * the capi row adds the prospective epoch (its source control table and ID arena) and the
+///   prepared protocol owner (its response buffer, affine token, replay cache and parameter
+///   catalog), each from its owning crate's resource report;
 /// * the largest row is the largest single allocation either plan or either model makes.
 ///
 /// That the reports themselves charge every allocation is the allocator oracle's claim,
@@ -1224,10 +1271,44 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
         miso_engine_v1_plan_destroy(plan);
         (current, prospective)
     };
-    assert_ne!(
-        current, prospective,
-        "the render swapped the prospective plan in"
-    );
+    // The two reports can be equal -- the replacement only renames the session, and the canonical
+    // JSON that the rename shortens is charged with the model, not in these rows -- so the swap is
+    // proved by admission instead: with one publication slot, a second replacement is admitted
+    // only once the render has swapped the first one in.
+    // SAFETY: These handles are uniquely owned until their matching destroy calls.
+    unsafe {
+        let (session, plan) = compile_c(&session_document, &limits());
+        let request = command(1, 42, "double-live-cap");
+        let mut response = [0xa5_u8; 4_096];
+        assert_eq!(submit(session, &request, &mut response), RESULT_OK);
+        let again = command(2, 43, "parametric-eq-nine-track");
+        assert_eq!(
+            submit(session, &again, &mut response),
+            RESULT_BACKPRESSURE,
+            "a second replacement waits for the render"
+        );
+        let mut pcm = [f32::NAN; 256];
+        let output = PlanarOutput {
+            struct_size: PLANAR_OUTPUT_SIZE,
+            channels: 2,
+            samples: pcm.as_mut_ptr(),
+            sample_capacity: pcm.len() as u64,
+            frames: 128,
+            plane_stride_samples: 128,
+            reserved: [0; 2],
+        };
+        assert_eq!(
+            miso_engine_v1_render_f32_planar(plan, 0, &output),
+            RESULT_OK
+        );
+        assert_eq!(
+            submit(session, &again, &mut response),
+            RESULT_OK,
+            "the render swapped the prospective plan in"
+        );
+        miso_engine_v1_session_destroy(session);
+        miso_engine_v1_plan_destroy(plan);
+    }
 
     let current_host = host_half(&session_document, &limits());
     let prospective_host = host_half(&prospective_document, &limits());
@@ -1241,8 +1322,9 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
         max_response_bytes: limits().maximum_control_frame_bytes as usize,
     })
     .unwrap_or_else(|_| panic!("replay resource report"));
-    let prospective_epoch = prospective_host.canonical_bytes()
-        + prospective_host.prepared.report.control_retained_bytes;
+    // The prospective session's canonical JSON is charged once, with its model in the graph row;
+    // capi's epoch row is the prospective source producers' control table and ID arena.
+    let prospective_epoch = prospective_host.prepared.report.control_retained_bytes;
     let prepared_protocol = limits().maximum_control_frame_bytes
         + size_of::<protocol::PreparedStructuralCommand>() as u64
         + replay.retained_payload_bytes
