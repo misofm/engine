@@ -232,7 +232,7 @@ fn prepared_graph(
     let mut model = parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
         .expect("canonical session");
     model.quantum_frames = QUANTUM;
-    model.tracks[0].dynamic.effects.clear();
+    model.tracks[0].inserts.effects.clear();
     model.automation.clear();
     let session = compile_session(
         &model,

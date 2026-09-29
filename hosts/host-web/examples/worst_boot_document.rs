@@ -13,12 +13,16 @@ fn main() -> io::Result<()> {
     ))
     .expect("seed fixture parses");
     let mut track = model.tracks[1].clone();
-    let effect = track.simd1.effects[0].clone();
-    track.simd1.effects.clear();
+    // Four full effect declarations per track, as inserts: the densest per-track declaration
+    // the schema accepts (a console entry is smaller than the effect it configures).
+    let effect = model.lower_track(&track).pre_insert[0].clone();
+    model.console.pre_insert.clear();
+    track.console.clear();
+    track.inserts.effects.clear();
     for index in 0..4 {
         let mut effect = effect.clone();
         effect.id = StableId::parse(&format!("effect-{index}")).expect("effect ID");
-        track.simd1.effects.push(effect);
+        track.inserts.effects.push(effect);
     }
     let route = model.routes[0].clone();
     model.tracks.clear();
@@ -36,7 +40,7 @@ fn main() -> io::Result<()> {
         next_route.id = StableId::parse(&format!("route-{index:03}")).expect("route ID");
         next_route.source = RouteSource::Track {
             track_id,
-            tap: SendTap::PostMatrix,
+            tap: SendTap::PostPan,
         };
         model.routes.push(next_route);
     }

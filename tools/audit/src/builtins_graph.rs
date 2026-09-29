@@ -21,7 +21,10 @@ use builtins_compiler::{
     BuiltinCompileCaps, MeterConsumer, MeterRequest, prepare_session_builtins,
 };
 use conformance::DualAccumulatorDelayFactory;
-use effect_compiler::{EffectCompileCaps, prepare_native_session_effects};
+use effect_compiler::{
+    CONSOLE_ELIGIBLE_EFFECTS, EffectCompileCaps,
+    prepare_native_session_effects_with_console_eligibility,
+};
 use effect_contract::{NativeEffectFactory, NativeEffectRegistry};
 use engine::realtime::audit::{self, ForbiddenOperation};
 use engine::realtime::{
@@ -46,7 +49,7 @@ const PLAN_A: u64 = 1;
 const PLAN_B: u64 = 2;
 const PLAN_C: u64 = 3;
 const ACCEPTED_MANIFEST_SHA256: &str =
-    "9161d2ca028aeb171f7702f951774298c06d7ebeae434973386f1d465b4ff9d3";
+    "fced289fb8d0891068ac824b6104266e33b69876e6014cf06afeed9eb6a1e2f9";
 const ACCEPTED_GRAPH_PCM_SHA256: &str =
     "508c8e94244b99ae1ee59e4863088ba69c6462127eb0256f85ec72e775a17a19";
 const ACCEPTED_GRAPH_METERS_SHA256: &str =
@@ -466,17 +469,29 @@ fn prepare_graph_plan(
 ) -> (engine::realtime::PreparedRenderPlan, Vec<MeterConsumer>) {
     let mut model = parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
         .expect("canonical session");
-    let mut fixture_effect = model.tracks[0].dynamic.effects[0].clone();
+    let mut fixture_effect = model.tracks[0].inserts.effects[0].clone();
     fixture_effect.identity = EffectIdentity::Native {
         effect_id: StableId::parse("conformance.delay").expect("fixture effect ID"),
     };
     fixture_effect.params.clear();
-    fixture_effect.id = StableId::parse("fixture-simd1").expect("fixture effect ID");
-    model.tracks[0].simd1.effects = vec![fixture_effect.clone()];
+    // Decision 12: one delay in each console section and one insert between them, so each of the
+    // three internal racks carries one delay exactly as before, and every tap sees its own stage.
+    let slot = |name: &str| session::ConsoleSlot {
+        slot: StableId::parse(name).expect("fixture effect ID"),
+        identity: fixture_effect.identity.clone(),
+        quality: fixture_effect.quality,
+        link_mode: fixture_effect.link_mode,
+    };
+    let entry = |name: &str| session::ConsoleEntry {
+        slot: StableId::parse(name).expect("fixture effect ID"),
+        bypass: fixture_effect.bypass,
+        params: Vec::new(),
+    };
+    model.console.pre_insert = vec![slot("fixture-simd1")];
+    model.console.post_insert = vec![slot("fixture-simd2")];
+    model.tracks[0].console = vec![entry("fixture-simd1"), entry("fixture-simd2")];
     fixture_effect.id = StableId::parse("fixture-dynamic").expect("fixture effect ID");
-    model.tracks[0].dynamic.effects = vec![fixture_effect.clone()];
-    fixture_effect.id = StableId::parse("fixture-simd2").expect("fixture effect ID");
-    model.tracks[0].simd2.effects = vec![fixture_effect];
+    model.tracks[0].inserts.effects = vec![fixture_effect];
     model.tracks[0].fader.left_db = -6.0;
     model.tracks[0].fader.right_db = 3.0;
     model.automation.clear();
@@ -484,7 +499,7 @@ fn prepare_graph_plan(
     early.id = StableId::parse("to-main-early").expect("fixture route ID");
     early.source = RouteSource::Track {
         track_id: model.tracks[0].id.clone(),
-        tap: SendTap::PostInputBuiltins,
+        tap: SendTap::PostInput,
     };
     early.channel_matrix = ChannelMatrix {
         ll: 0.25,
@@ -536,7 +551,11 @@ fn prepare_graph_plan(
         Box::new(DualAccumulatorDelayFactory::correct()) as Box<dyn NativeEffectFactory>
     ])
     .expect("fixture registry");
-    let effects = prepare_native_session_effects(
+    // The fixture's console slots are the conformance delay, a test double no production
+    // registry carries, so it is admitted beside the launch list for this registry only.
+    let mut console_eligible = CONSOLE_ELIGIBLE_EFFECTS.to_vec();
+    console_eligible.push("conformance.delay");
+    let effects = prepare_native_session_effects_with_console_eligibility(
         &session,
         &registry,
         EffectCompileCaps {
@@ -544,6 +563,7 @@ fn prepare_graph_plan(
             maximum_scratch_bytes: u64::MAX,
             maximum_automation_spans_per_block: u32::MAX,
         },
+        &console_eligible,
     )
     .expect("fixture effects");
     let builtins = prepare_session_builtins(

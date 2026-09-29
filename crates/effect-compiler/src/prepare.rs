@@ -133,6 +133,27 @@ pub fn prepare_native_session_effects(
     registry: &NativeEffectRegistry,
     caps: EffectCompileCaps,
 ) -> Result<EffectPreparedSession, EffectDiagnosticSet> {
+    prepare_native_session_effects_with_console_eligibility(
+        session,
+        registry,
+        caps,
+        &CONSOLE_ELIGIBLE_EFFECTS,
+    )
+}
+
+/// [`prepare_native_session_effects`] with the console eligibility list supplied by the caller.
+///
+/// Every host prepares through [`prepare_native_session_effects`], which admits exactly
+/// [`CONSOLE_ELIGIBLE_EFFECTS`]. This entry exists for test and audit registries whose test double
+/// (the conformance crate's `conformance.delay`, which no production registry carries) must occupy
+/// a lowered console rack to exercise the graph's internal stages. It changes the list for that
+/// caller and nothing else: identity resolution, parameters and every other refusal are the same.
+pub fn prepare_native_session_effects_with_console_eligibility(
+    session: &CompiledSession,
+    registry: &NativeEffectRegistry,
+    caps: EffectCompileCaps,
+    console_eligible: &[&str],
+) -> Result<EffectPreparedSession, EffectDiagnosticSet> {
     let mut diagnostics = Vec::new();
     let mut entries = Vec::new();
     if caps.maximum_total_state_bytes == 0
@@ -151,7 +172,7 @@ pub fn prepare_native_session_effects(
     ] {
         for slot in slots {
             if let EffectIdentity::Native { effect_id } = &slot.identity
-                && !CONSOLE_ELIGIBLE_EFFECTS.contains(&effect_id.as_str())
+                && !console_eligible.contains(&effect_id.as_str())
             {
                 diagnostics.push(EffectDiagnostic {
                     code: "console.slot.ineligible_effect",
