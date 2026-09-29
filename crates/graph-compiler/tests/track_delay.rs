@@ -66,8 +66,8 @@ fn model_with_delay(left: u32, right: u32) -> SessionModel {
     model
 }
 
-/// The same nine tracks, with a **latency-carrying** limiter added to track zero's `simd2` rack and
-/// to nothing else.
+/// The same nine tracks, with a **latency-carrying** limiter added to track zero's inserts and to
+/// nothing else.
 ///
 /// This is what makes P2-3 mean something. The fixture as checked in compiles to
 /// `output_latency = 0` with no inserted delays at all -- every path through it is the same length
@@ -80,7 +80,7 @@ fn latent_model_with_delay(left: u32, right: u32) -> SessionModel {
         ParameterUnit, SidechainDeclaration, StableId,
     };
     let mut model = model_with_delay(left, right);
-    model.tracks[0].simd2.effects.push(Effect {
+    model.tracks[0].inserts.effects.push(Effect {
         id: StableId::parse("limiter").expect("effect id"),
         identity: EffectIdentity::Native {
             effect_id: StableId::parse("miso.true-peak-limiter").expect("native id"),

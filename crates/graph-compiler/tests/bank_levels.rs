@@ -29,7 +29,8 @@ use builtins_compiler::{
     BuiltinCompileCaps, prepare_session_builtins, session_structural_symmetry,
 };
 use effect_compiler::{
-    EffectCompileCaps, launch_native_effect_registry, prepare_native_session_effects,
+    CONSOLE_ELIGIBLE_EFFECTS, EffectCompileCaps, launch_native_effect_registry,
+    prepare_native_session_effects,
 };
 use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use graph::{
@@ -38,9 +39,9 @@ use graph::{
 };
 use graph_compiler::{Backend, GraphBuiltinsCompileRequest, GraphCompiler};
 use session::{
-    ChannelMatrix, CompileCaps, Effect, EffectIdentity, Route, RouteDestination, RouteSource,
-    SendTap, SessionModel, Sidechain, SidechainDeclaration, StableId, Submix, compile_session,
-    parse_session_json,
+    ChannelMatrix, CompileCaps, ConsoleEntry, ConsoleSlot, Effect, EffectIdentity, Route,
+    RouteDestination, RouteSource, SendTap, SessionModel, Sidechain, SidechainDeclaration,
+    StableId, Submix, compile_session, parse_session_json,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -53,8 +54,9 @@ const INTENDED: &str =
 /// not gather the track input (#970); the probe keeps both desks for that reason.
 const MONO: &str = include_str!("../../../fixtures/session/v1/console-sixty-four-track-mono.json");
 
-/// The #970 verification probe's reduced reproducer, kept byte for byte: eight mono-mapped tracks,
-/// `t0` running `simd1: [eq, comp]` beside seven running `[comp]`.
+/// The #970 verification probe's reduced reproducer: eight mono-mapped tracks, `t0` running
+/// `[eq, comp]` beside seven running `[comp]`. Its per-track racks differ, so #1093's migration
+/// folded them into each track's inserts (placement invariance, #163, keeps the bits).
 const REDUCED_MONO: &str = include_str!("data/reduced-nobus-from-970-verify.json");
 
 /// Every width a host compiles for: the scalar oracle, the browser and mobile width, and native.
@@ -460,10 +462,11 @@ struct Templates {
 
 impl Templates {
     fn of(model: &SessionModel) -> Self {
+        let lowered = model.lower_track(&model.tracks[0]);
         Self {
-            eq: model.tracks[0].simd1.effects[0].clone(),
-            comp: model.tracks[0].simd1.effects[1].clone(),
-            limiter: model.tracks[0].simd2.effects[0].clone(),
+            eq: lowered.pre_insert[0].clone(),
+            comp: lowered.pre_insert[1].clone(),
+            limiter: lowered.post_insert[0].clone(),
         }
     }
     fn effect(&self, kind: Kind, id: &str) -> Effect {
@@ -516,13 +519,109 @@ const SIMD2: &[&[Kind]] = &[
 
 const TAPS: [SendTap; 7] = [
     SendTap::Input,
-    SendTap::PostInputBuiltins,
-    SendTap::PostSimd1,
-    SendTap::PostDynamic,
-    SendTap::PostSimd2PreFader,
+    SendTap::PostInput,
+    SendTap::InsertSend,
+    SendTap::InsertReturn,
+    SendTap::PreFader,
     SendTap::PostFader,
-    SendTap::PostMatrix,
+    SendTap::PostPan,
 ];
+
+/// Place generated per-track chains in decision 12's shape, by the rule #1093 migrated the
+/// checked-in documents with: a first or third chain that every track declares identically (IDs,
+/// identity, quality, link mode), keyless and console-eligible, becomes `console.pre_insert` or
+/// `console.post_insert`, each track's bypass and params in its entries; every other chain folds
+/// into the track's inserts in chain order. Chain order, and so the rendered bits, never change.
+fn place(model: &mut SessionModel, chains: Vec<[Vec<Effect>; 3]>) {
+    let console = |rack: usize| -> Option<Vec<ConsoleSlot>> {
+        let declaration = |effect: &Effect| {
+            (
+                effect.id.clone(),
+                effect.identity.clone(),
+                effect.quality,
+                effect.link_mode,
+            )
+        };
+        let first: Vec<_> = chains.first()?[rack].iter().map(declaration).collect();
+        let uniform = chains.iter().all(|track| {
+            track[rack]
+                .iter()
+                .map(declaration)
+                .eq(first.iter().cloned())
+                && track[rack].iter().all(|effect| {
+                    effect.sidechain == SidechainDeclaration::None
+                        && matches!(&effect.identity, EffectIdentity::Native { effect_id }
+                            if CONSOLE_ELIGIBLE_EFFECTS.contains(&effect_id.as_str()))
+                })
+        });
+        uniform.then(|| {
+            first
+                .into_iter()
+                .map(|(slot, identity, quality, link_mode)| ConsoleSlot {
+                    slot,
+                    identity,
+                    quality,
+                    link_mode,
+                })
+                .collect()
+        })
+    };
+    let (pre, post) = (console(0), console(2));
+    model.console.pre_insert = pre.clone().unwrap_or_default();
+    model.console.post_insert = post.clone().unwrap_or_default();
+    let entry = |effect: Effect| ConsoleEntry {
+        slot: effect.id,
+        bypass: effect.bypass,
+        params: effect.params,
+    };
+    for (track, [first, second, third]) in model.tracks.iter_mut().zip(chains) {
+        let mut entries = Vec::new();
+        let mut inserts = Vec::new();
+        if pre.is_some() {
+            entries.extend(first.into_iter().map(entry));
+        } else {
+            inserts.extend(first);
+        }
+        inserts.extend(second);
+        if post.is_some() {
+            entries.extend(third.into_iter().map(entry));
+        } else {
+            inserts.extend(third);
+        }
+        track.console = entries;
+        track.inserts.effects = inserts;
+    }
+}
+
+/// Fold `console.pre_insert` into every track's inserts, ahead of its own: the placement a
+/// per-track edit of that strip needs, since a console slot runs on every track (decision 12).
+fn fold_pre_insert(model: &mut SessionModel) {
+    let slots = core::mem::take(&mut model.console.pre_insert);
+    let lowered: Vec<Vec<Effect>> = model
+        .tracks
+        .iter()
+        .map(|track| {
+            slots
+                .iter()
+                .zip(&track.console)
+                .map(|(slot, entry)| Effect {
+                    id: slot.slot.clone(),
+                    identity: slot.identity.clone(),
+                    quality: slot.quality,
+                    bypass: entry.bypass,
+                    link_mode: slot.link_mode,
+                    params: entry.params.clone(),
+                    sidechain: SidechainDeclaration::None,
+                })
+                .collect()
+        })
+        .collect();
+    for (track, mut pre) in model.tracks.iter_mut().zip(lowered) {
+        track.console.drain(..slots.len());
+        pre.append(&mut track.inserts.effects);
+        track.inserts.effects = pre;
+    }
+}
 
 fn route(id: &str, source: RouteSource, destination: RouteDestination, gain_db: f32) -> Route {
     Route {
@@ -584,6 +683,7 @@ pub fn generate(seed: u64) -> (SessionModel, Shape) {
     let templates = Templates::of(&base);
     let strip = base.tracks[0].clone();
     let mut model = base;
+    let mut chains = Vec::new();
     model.tracks.clear();
     model.routes.clear();
     model.submixes.clear();
@@ -625,6 +725,7 @@ pub fn generate(seed: u64) -> (SessionModel, Shape) {
         if rng.chance(80) {
             track.builtins.right.delay_samples = 1 + rng.below(64) as u32;
         }
+        let mut track_chains: [Vec<Effect>; 3] = Default::default();
         for (rack, template) in racks.into_iter().enumerate() {
             let mut kinds: Vec<Kind> = match shape {
                 Shape::Free => (0..rng.below(4))
@@ -648,8 +749,10 @@ pub fn generate(seed: u64) -> (SessionModel, Shape) {
                 .iter()
                 .enumerate()
                 .map(|(slot, kind)| {
+                    // Rack-qualified, so a chain folded into the inserts beside another rack's
+                    // keeps unique effect IDs, and console slots stay unique across sections.
                     let mut effect =
-                        templates.effect(*kind, &format!("{}{slot}", kind.slot_name()));
+                        templates.effect(*kind, &format!("{}{rack}{slot}", kind.slot_name()));
                     effect.bypass = rng.chance(60);
                     if matches!(kind, Kind::Comp | Kind::Gate) && index > 0 && rng.chance(70) {
                         effect.sidechain = SidechainDeclaration::Routed(Sidechain {
@@ -663,12 +766,9 @@ pub fn generate(seed: u64) -> (SessionModel, Shape) {
                     effect
                 })
                 .collect();
-            match rack {
-                0 => track.simd1.effects = effects,
-                1 => track.dynamic.effects = effects,
-                _ => track.simd2.effects = effects,
-            }
+            track_chains[rack] = effects;
         }
+        chains.push(track_chains);
         model.tracks.push(track);
         let to_bus = submixes > 0 && rng.chance(250);
         let track_source = |tap| RouteSource::Track {
@@ -678,7 +778,7 @@ pub fn generate(seed: u64) -> (SessionModel, Shape) {
         if !to_bus || rng.chance(500) {
             model.routes.push(route(
                 &format!("{id}-main"),
-                track_source(SendTap::PostMatrix),
+                track_source(SendTap::PostPan),
                 main_out(),
                 0.0,
             ));
@@ -695,14 +795,16 @@ pub fn generate(seed: u64) -> (SessionModel, Shape) {
             ));
         }
     }
+    place(&mut model, chains);
     (model, shape)
 }
 
 // ---------------------------------------------------------------------------------------------
 // The reproducers and the over-reach guards.
 
-/// The standard 64-track console with the EQs of `tracks` removed: each runs `simd1: [comp]`
-/// beside tracks running `[eq, comp]`, so its compressor sits one level before theirs.
+/// The standard 64-track console with the EQs of `tracks` removed: each runs `[comp]` beside
+/// tracks running `[eq, comp]`, so its compressor sits one level before theirs. A track cannot drop
+/// a console slot (decision 12), so the strip is folded into every track's inserts first.
 pub fn sixty_four_track_console_less_eqs(tracks: &[usize]) -> SessionModel {
     console_less_eqs(INTENDED, tracks)
 }
@@ -714,12 +816,13 @@ pub fn mono_console_less_eqs(tracks: &[usize]) -> SessionModel {
 
 fn console_less_eqs(fixture: &str, tracks: &[usize]) -> SessionModel {
     let mut model = parse_session_json(fixture).expect("console fixture");
+    fold_pre_insert(&mut model);
     for index in tracks {
-        let removed = model.tracks[*index].simd1.effects.remove(0);
+        let removed = model.tracks[*index].inserts.effects.remove(0);
         assert_eq!(
             removed.id.as_str(),
             "eq",
-            "the fixture's first simd1 slot is its EQ"
+            "the fixture's first pre_insert slot is its EQ"
         );
     }
     model
@@ -737,13 +840,12 @@ fn intended_prefix(tracks: usize) -> SessionModel {
 }
 
 /// The #962 probe's seed-412 shape: nine tracks of the intended strip, seven carrying `soft-clip`
-/// at dynamic slot 0, one (`ch03`) carrying it at slot 1 behind an EQ, and one with an empty
-/// dynamic rack.
+/// at insert slot 0, one (`ch03`) carrying it at slot 1 behind an EQ, and one with no inserts.
 pub fn ragged_dynamic_soft_clip() -> SessionModel {
     let mut model = intended_prefix(9);
     let templates = Templates::of(&model);
     for (index, track) in model.tracks.iter_mut().enumerate() {
-        track.dynamic.effects = match index {
+        track.inserts.effects = match index {
             3 => vec![
                 templates.effect(Kind::Eq, "eq"),
                 templates.effect(Kind::SoftClip, "soft-clip"),
@@ -755,7 +857,8 @@ pub fn ragged_dynamic_soft_clip() -> SessionModel {
     model
 }
 
-/// Sixteen intended-strip tracks whose `simd1` programs realign after a misaligned slot.
+/// Sixteen intended-strip tracks whose first-rack programs realign after a misaligned slot. The
+/// programs differ per track, so they replace the `pre_insert` strip as inserts.
 ///
 /// `ch00..=ch07` run `[gate, eq, comp, transient, soft-clip]` and fill one eight-lane group (two
 /// four-lane groups) by themselves. `ch08..=ch15` alternate `A = [gate, comp, transient,
@@ -765,6 +868,7 @@ pub fn ragged_dynamic_soft_clip() -> SessionModel {
 pub fn realigning_simd1_strips() -> SessionModel {
     let mut model = intended_prefix(16);
     let templates = Templates::of(&model);
+    fold_pre_insert(&mut model);
     for (index, track) in model.tracks.iter_mut().enumerate() {
         let program: &[Kind] = match index {
             0..=7 => &[
@@ -777,7 +881,7 @@ pub fn realigning_simd1_strips() -> SessionModel {
             _ if index % 2 == 0 => &[Kind::Gate, Kind::Comp, Kind::Transient, Kind::SoftClip],
             _ => &[Kind::Gate, Kind::Eq, Kind::Comp, Kind::SoftClip],
         };
-        track.simd1.effects = program
+        track.inserts.effects = program
             .iter()
             .map(|kind| templates.effect(*kind, kind.slot_name()))
             .collect();
@@ -948,20 +1052,27 @@ fn the_mono_console_less_one_eq_binds_and_collapses_at_every_width() {
     );
 }
 
-/// Effect banks the reduced mono console binds in the `wasm32` + `simd128` guest: one compressor
-/// bank. At eight lanes the one group's compressor is misaligned and nothing banks.
+/// Effect banks the reduced mono console binds at four lanes: one compressor bank, for the full
+/// group `t13, t14, t18, t6`, whose compressor every lane runs at rank 0. #1093 derived it from
+/// the four-lane plan on `x86-64-v3` (where the factories decline four lanes); the AArch64 leg
+/// runs it. At eight lanes no group is full and nothing banks.
 const REDUCED_MONO_SIMD4_BANKS: usize = 1;
 
 /// The #970 verification probe's reduced mono console, refused on the base tree as well: `t0`
-/// runs `[eq, comp]` and the seven others `[comp]`, every track mono-mapped, so the armed leg
-/// performs the host's collapse join on a rescued plan.
+/// runs `[eq, comp]` and the seven others `[comp]`, `t11` and `t13` with a soft-clip after it,
+/// every track mono-mapped, so the armed leg performs the host's collapse join.
+///
+/// #1093 folded the document's divergent racks into each track's inserts, so `t11`'s and
+/// `t13`'s soft-clip now extends their compressor chain instead of forming a later one, and the
+/// plan shape moved: `t0` and `t11` each lead a cohort of their own and no planned slot is
+/// misaligned. The #966 misaligned-compressor case is the four `console_less_eqs` tests' and the
+/// #970 later-chain case `host-core`'s `collapse_arming.rs`'s; this one stays a bind-and-render
+/// regression over the reduced mono desk.
 #[test]
 fn the_reduced_mono_console_from_the_970_probe_binds_at_every_width() {
     let name = "reduced mono console from the #970 probe";
     let (outcomes, _) = assert_binds_and_renders_the_scalar_bits(name, &reduced_mono_console());
-    // Eight lanes: one group, its compressor slot misaligned. Four: `t0`'s group is misaligned,
-    // and the other group's lanes all skip the EQ, so its compressor still banks.
-    misaligned_slots(name, &outcomes, [1, 1]);
+    misaligned_slots(name, &outcomes, [0, 0]);
     native_bank_count(name, &outcomes, REDUCED_MONO_SIMD4_BANKS, 0);
 }
 
