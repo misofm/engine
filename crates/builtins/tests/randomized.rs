@@ -320,7 +320,8 @@ fn scenario(seed: u64, backend: Backend, width: BankWidth, strict: bool, reach: 
         // anything else asks it to): `desymmetrize` must then leave the right channel where a
         // never-collapsed run holds it, and the channels still agree afterwards.
         let holds = (0..members).all(|lane| input_bank.lane_symmetry(lane).eligible());
-        let eligible = mono && agree && twin.supports_mono_collapse() && holds && !draw.chance(1, 5);
+        let eligible =
+            mono && agree && twin.supports_mono_collapse() && holds && !draw.chance(1, 5);
         if !eligible {
             if collapsed {
                 twin.desymmetrize();
