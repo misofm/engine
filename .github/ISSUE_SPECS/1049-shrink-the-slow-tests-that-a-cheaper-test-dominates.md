@@ -379,3 +379,125 @@ The merge was clean (`nightly.yml`, `response.rs`, `graph-compiler/src/lib.rs` a
   first base run of gate 4 did exactly that, and was discarded. Touch the files of each copy, or
   give each tree its own target. The mutation passes were not affected: `cargo-mutants` builds in
   its own directories.
+
+## Sol verdict, attempt 1
+
+**PASS.** Sol, 2026-09-28. I verified head `78eb0631` against the merged base `a509b681` in
+scratch worktrees, one mutation pass at a time. No catch is lost. The recorded width-only catches
+are still red per PR, and every gate I ran passes. Gate 3 cannot pass as written, even on the base,
+but that is a defect in the spec: the realtime claim is guarded per PR elsewhere. Findings, most
+severe first:
+
+1. **Gate 3 is a spec defect, not a FAIL. The realtime claim holds.** I injected
+   `std::hint::black_box(Box::new(0_u64))` at the top of `bank_meter_pass`. Under it,
+   `the_full_meter_pass_renders_without_an_audited_event` stays green on the base (64 tracks) and
+   on the head (8 tracks), and so does its nightly 64-track twin. Injected into
+   `bank_sample_peak`, it leaves `the_banked_sample_peak_pass_…` green too. graph-compiler's test
+   binary links no `bench-support`, so `audit::snapshot()` never sees an allocation. Under the same
+   two injections, run in release on the 64-track console, each pass has one `bench` test that
+   aborts with `SIGABRT`: `the_meters_record_carries_each_arms_fold_and_redirect_counters` for
+   `bank_meter_pass`, and `the_metered_console_row_prints_its_meters_and_the_validator_pins_them`
+   for `bank_sample_peak`. Both are in `audit-native` (`cargo test --locked --release -p audit -p
+   bench -p console-workload`). `ci-path-router.py` routes `crates/graph/src/runtime.rs`,
+   `tools/bench/src/console.rs` and this diff `full`, and on `full` the verdict requires
+   `audit-native` to succeed. So the nightly 64-track run holds pass and commit counts at size, not
+   allocations, which is what its doc comment says. Follow-up, outside this issue's paths: give
+   graph-compiler `bench-support` as a dev-dependency, or stop calling these tests "audited" for
+   allocations.
+2. **Medium-low: the per-PR seed offset is tuned to 1005-M5d, and it is the only one that
+   works.** With M5d applied, I ran the #1005 `Simd4`/`Simd8` differentials once for each per-PR
+   start residue:
+   - 0 and 3: green, so M5d is lost at the differential.
+   - 1: red for the wrong reason. Its three `Simd8` differentials fail "no restore was refused"
+     with no mutant applied.
+   - 2: red on `W8 seed 26 block 26 mono false: state`.
+
+   So the choice is overfit to one recorded mutant. It is documented in the code, though, and it is
+   the only residue that keeps both the tests' own non-vacuity asserts and the recorded catch.
+
+   For other width-only defects:
+   - 1007-M2 (the snap mask without `remaining == 0`, red in gate 1 only at `Simd4`/`Simd8`) is red
+     per PR at both widths on seed 2, the first per-PR seed, and also on the deterministic gate 1b.
+   - 1005-M5d is also red per PR on the deterministic
+     `the_unsafe_ramp_rule_keeps_every_dead_section_after_it`, whatever the seeds.
+   - A defect as seed-rare as M5d (one catching seed in the dev range of 40) keeps about a quarter
+     of its former per-PR chance, and the nightly full count backs it up.
+
+   That is the trade the spec's "seeds ÷ 4" accepted, and I do not count it as a lost guard. The
+   non-vacuity margin at 10 scenarios is thin (2-9 refused restores per arm). A change to the
+   scenario generator may need a new offset, but it will fail loudly, not silently.
+3. **Low: the compressor module doc misattributes the pins' coverage.** `settled_body_tests` says
+   "the grid and the randomized differentials catch every mutant they caught". On the base matrix,
+   22 of each deleted pin's mutants are caught by no grid and no differential. `design.rs:131`
+   `rate_coefficient` is one: the reference and the production body share it, so no differential
+   can see it. `scenario_1006_ramping_prefix_is_pinned`, the bank pin in
+   `ramping_prefix_scenario.rs` and the `f64` oracle catch them. The evidence table above is right;
+   the comment should name those tests.
+4. **Low: paths outside the spec's scope.** The integration commit edits
+   `scripts/lib/aarch64-known-defects.py`, `docs/TARGET_MATRIX.md` and #1065's spec. The edits are
+   necessary: with the `scenario_981` row put back, `judge-skips debug` fails ("names 0 tests in the
+   leg"). Record them as an amendment. `crates/compressor/tests/MUTATIONS.md` still names the
+   deleted tests as current reds (981-M1, 982-M1, 982-M3, 995-M1, 1006-M6/M7/M9/M10 and others).
+   It needs a one-line note, as #1048 added for `cross_target`.
+5. **Low: nightly `--exact` passes silently on a rename.** With `--list`, each of the four
+   commands selects exactly one test today. After a rename, a command would run 0 tests and pass.
+   `release-budgets` has the same pattern. Hardening it is optional.
+
+What I verified:
+
+- **Gate 1, compressor.** I ran `run-mutants.sh compressor 5 10` (cargo-mutants 27.1.0) on
+  `a509b681` and on `78eb0631`. Both passes found 654 mutants, with 457 caught, 152 missed, 43
+  unviable and 2 timeouts. The keys are the same, and so is each key's outcome. Every surviving
+  test's own catch set is unchanged; only the six deleted tests' sets went to 0. My totals differ
+  from the attempt's 513/96 because this base carries #1048, which moved the compressor corpus
+  digest to wasm-gates G5. `corpus.rs` mutants are therefore missed by compressor's own tests on
+  both sides. The all-wet grid's catch set is exactly the collapsed-body test's 142. Each deleted
+  pin's catches (81, 76, 82, 72 and 67) are all held by surviving tests.
+- **Amendment 1: the shared inputs.** The pins are absolute digests, so they can see mutants in a
+  shared dependency that a differential cannot. I ran `run-mutants.sh effect-runtime 5 10 -p math`
+  over effect-runtime `dynamics.rs`, `envelope.rs`, `ramp.rs` and `bank.rs` and math `fast_db.rs`,
+  with `--test-package compressor`, before and after. Both passes: 143 mutants, 67 caught, 54
+  missed, 20 unviable, 2 timeouts, with the same outcome key by key. On the base, 59 of the 67 are
+  caught by a deleted test, and none only by deleted tests.
+- **Parametric-eq shard 0's gained mutant is real, not noise.** It is `lib.rs:2715:24` `delete !`
+  in `Channel::restore_track` (`if !words_are_identity(cursor)`). On the base, all 54 lib tests
+  pass under it. On the head, the three `Simd8` differentials fail deterministically on "a restore
+  edit was never accepted". The smaller sample's coverage assert catches it, not a bit comparison,
+  so the gain is incidental.
+- **Gate 2, per PR, dev profile, head.**
+  - 1005-M5d is red on `a_ramping_block_renders_the_batch_head_bits_simd8` (`W8 seed 26`) and on
+    `the_unsafe_ramp_rule_keeps_every_dead_section_after_it`.
+  - 1006-M1 is red on `randomized_differential_simd4`/`_simd8`,
+    `scenario_1006_ramping_prefix_is_pinned` and
+    `the_ramping_prefix_renders_the_pinned_bank_scenario`, as recorded.
+  - Graph A-5 is red on `post_matrix_all_meters_run_one_full_bank_pass_per_cohort_…` with 8 tracks.
+- **Nightly.**
+  - actionlint 1.7.7 is clean, and `check-ci-path-routing.py` and `test-ci-path-routing.py` pass.
+  - `failure-notice` needs `full-size-tests` and reports it.
+  - I ran the four commands as the job runs them. All pass: 113 s, 29 s, 1 s and 36 s of tests.
+- **AArch64.**
+  - `--self-test` passes, and `rows debug` lists the two remaining rows.
+  - I built the debug leg's package and feature set on x86, as the script derives it: the 25
+    product crates plus `dsp-reference`, `conformance` and `target-smoke`. It has 218 executables
+    and lists 1,792 tests. `judge-skips debug` passes, and no row names a deleted test.
+- **Test lists.** `cargo test --workspace --all-features -- --list` goes from 2,244 to 2,242: six
+  compressor tests deleted, one renamed (`…_repeatable`) and four added (two per PR, two
+  `#[ignore]`d). That is exactly the attempt's table.
+- **Other gates.**
+  - `cargo fmt --check` and `cargo check --workspace --all-targets --all-features` pass.
+  - The lint job's exact clippy command, `cargo clippy --locked --workspace --all-targets
+    --all-features -- -D warnings`, passes. The attempt's record omits `--all-features`.
+  - The affected crates' tests pass with CI's features in dev and in release: 418 passed and 7
+    ignored for test-debug-b's five crates, 117 passed and 1 ignored for graph-compiler.
+  - `cargo test --release -p console-workload` (the console digests) passes.
+  - `check-workspace-policy.sh` passes, #1052's source-scrape lint included.
+  - Every other `scripts/check-*.sh` passes except `check-sdk-types.sh`, which needs `npm ci`.
+    That includes `check-web-audioworklet.sh`, so the shipped module still matches its pin.
+  - Every argument-free `check-*.py` passes under `python3 -B`. The argument-taking ones pass
+    `--self-test`, and the listening validators pass through `check-builtins-listening.sh`.
+  - Of the lint job's `test-*` mutation companions, `test-workspace-policy.sh`,
+    `test-session-policy.sh` and `test-env-vocabulary.sh` pass. I stopped the rest for time: they
+    test scripts this change does not touch.
+- **No product line moved.** Every hunk under `crates/` is in `tests/` or inside a `#[cfg(test)]`
+  module that runs to the end of its file.
+- **Not verified.** I did not re-run gate 4. Gate 5's CI figures need a full-route run.
