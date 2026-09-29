@@ -1344,3 +1344,102 @@ lowers banks at this size.
 - Attempt 5: `scale.rs` +82, `MUTATIONS.md` +10/−5, and this spec.
 - The whole branch against `main` (`a8955ad4`), counting code, workflow and scripts only:
   +554/−53. Of that, `graph-compiler/tests/scale.rs` is +502/−40.
+
+## Sol verdict, attempt 5
+
+Sol, 2026-09-29, head `678d5eaa`. I merged it into `codex/batch-slim-4` (`adddb4e5`) in a scratch
+worktree and checked it there. Host: `x86_64` (`x86-64-v3`), rustc 1.97.1, `CARGO_INCREMENTAL=0`,
+`nice`, load 5-18.
+
+**PASS.** Attempt 4's blocker is closed. The layer map is the one I committed to in attempt 4, and
+no layer outside it is raised. Every gate passes on the merge.
+
+### Checks
+
+1. **LOWER_PANIC and LOWER_SILENT are closed.** I re-planted each on the merge and ran the per-PR
+   suites of session, graph, graph-compiler, builtins-compiler and rack-compiler with
+   test-debug-a's features.
+   - LOWER_PANIC: RED only in `lowers_65_537_tracks_of_builtin_banks`
+     (`builtin bank lowering track limit`).
+   - LOWER_SILENT: RED in the same test (`every track's input, fader and matrix stages are lowered
+     into banks`).
+   - Both are GREEN reverted.
+   - The test runs in two required jobs: `test-debug-a` (`ubuntu-24.04`, x86 Simd8) and
+     `aarch64-debug` (`ubuntu-24.04-arm`, Simd4). `run-aarch64-tests.sh` runs capi's workspace
+     closure, which includes graph-compiler. The bank-count assertions take their lane count from
+     `Backend::current()`, so they hold at both widths.
+2. **The memory claim is correct, and the new peak is below `main`'s.**
+   - **How the jobs run their tests.** Both run plain `cargo test`: no nextest, no
+     `RUST_TEST_THREADS`, no parallel test processes. `run-aarch64-tests.sh` runs its package
+     list with one `cargo test`, then the known-defect rows one at a time.
+   - **So one binary at a time.** Cargo builds first, then runs one test binary at a time, and the
+     `scale` binary's peak is the whole job's test-time peak.
+   - **The runners.** The repository is public, so both are the standard 4-vCPU, 16 GB runners
+     (`gh api` labels on run 36507292157: `ubuntu-24.04` and `ubuntu-24.04-arm`).
+   - **Measured on this host:**
+
+     | binary | threads | wall | peak memory |
+     |---|---:|---:|---:|
+     | this head's `scale` | 4 | 17.5 s | 1.62 GB |
+     | this head's `scale` | 2 | 20.8 s | 1.70 GB |
+     | `main`'s `scale` (`a8955ad4`: `:91` and `:160` together) | 4 | 59.8 s | **2.54 GB** |
+
+   - **In CI**, `main`'s `scale` binary ran per PR in 61.1 s (x86) and 90.4 s (arm64) on
+     2026-09-29. So this change lowers the per-PR peak by 0.9 GB and cuts the binary by about
+     42 s locally.
+3. **The map and successors match my attempt-4 verdict.**
+   - The evidence carries my map row for row, with bank lowering moved to per PR.
+   - The "cheap" rule, the #967 extension (console controls, sends and submixes, automation),
+     successors A and B and the `u16` `maximum_telemetry_handles` owner ruling are all there.
+   - B's stale `descriptive_scale.rs` line is fixed.
+   - One precision: "per PR" in the map means `test-debug-a` **and** `aarch64-debug`. Both are
+     required, and both run the `scale` binary.
+4. **The merge onto `adddb4e5` has no conflicts.**
+   - Batch 4's two later merges (#1075's doc fix and #1038) do not touch any file this branch
+     changes.
+   - `nightly.yml`: `failure-notice` needs and reports `math-sweeps` and `release-budgets`, and
+     `math-sweeps` has the session sweep after F1 and a 25-minute timeout.
+   - Root applies nothing by hand.
+5. **Gates on the merge.**
+   - fmt, `cargo check --workspace --all-targets --all-features` and clippy `-D warnings` pass.
+   - session, graph, graph-compiler, builtins-compiler and rack-compiler pass: 380 passed,
+     6 ignored.
+     - dev: 100 s wall, with the `scale` binary at 18.5 s (4 passed, 1 ignored);
+     - release: 131 s wall, including the build.
+   - The three `release-budgets` 65,537-track commands pass: `:160` in 18.3 s against its 60 s
+     bound, the builtins scale test in 0.4 s, and the allocation row in 2.1 s.
+   - `check-ci-path-routing.py` and `test-ci-path-routing.py` pass under `python3 -B`, and
+     actionlint 1.7.7 is clean.
+   - **Policy scripts, 75 runs, all pass.** That is every `scripts/check-*` and `scripts/test-*`,
+     Python ones under `python3 -B`, `test-realtime-audit-probes.sh` in its three CI modes, and
+     `check-stem-store-v1.mjs`.
+     - It includes `check-workspace-policy.sh` with #1052's lint, and
+       `check-graph-determinism.sh`.
+     - Six were not run because they need external toolchains or built artifacts: capi-abi,
+       cross-targets, protocol-wasm-parity, sdk-headless, sdk-types and web-audioworklet.
+
+### Findings, by severity
+
+None blocking.
+
+1. **For root, at the batch boundary:**
+   - file successors A and B;
+   - amend #967 with the extended shape list and the banked-and-routed bind curve;
+   - put the `maximum_telemetry_handles` ruling to the owner;
+   - record gate 5 (the `test-debug-a` time saved) from the batch push's job timings.
+2. **Accepted residual, nightly within a day under amendment 5:**
+   - the graph compile's back end and P3b;
+   - `into_bound` prevalidation (P5b);
+   - real builtin bank kernels at scale;
+   - #962's quadratics;
+   - A2.
+
+   Each row in the map gives its reason.
+
+### Test value
+
+- **`lowers_65_537_tracks_of_builtin_banks`** catches a cap in builtin bank lowering, or a silent
+  fallback that banks fewer tracks than the session has, above 65,535 tracks (LOWER_PANIC,
+  LOWER_SILENT). Nothing else per PR lowers banks at this size.
+- **The other per-PR tests** (`:91` with its exact refusal and bank-plan check, and the routed and
+  banked hand-built tests) hold the answers recorded in attempts 2-4.
