@@ -187,6 +187,9 @@ forbidden_under_tools 'a private SHA-256 initial hash word (H0) or round-constan
 # length. When no surviving subject is left to take a slot, the list shrinks: #1039 retired the
 # wasmtime console benchmark (`tools/wasm-console/src/main.rs`) and the nightly FP-environment
 # benchmark (`tools/audit/src/fp_env.rs`), and no other file under `tools/` calls `timing::timed`.
+# #1075 retired the protocol benchmark (`tools/bench/src/protocol.rs`, owner ruling R9). It timed
+# with its own `Instant::now` and had never joined the list, so the list is unchanged; with it gone,
+# `console.rs` is the only benchmark subject under `tools/bench` that times anything.
 timed_subjects=(tools/bench/src/console.rs)
 for subject in "${timed_subjects[@]}"; do
     [[ -f "$subject" ]] || fail "converted subject is missing: $subject"
@@ -203,10 +206,11 @@ for subject in "${timed_subjects[@]}"; do
     fi
 done
 
-# `allow(unsafe_code)` is denied workspace-wide; these four files are the approved exceptions under
+# `allow(unsafe_code)` is denied workspace-wide; these three files are the approved exceptions under
 # `tools/`, and `scripts/check-realtime-policy.sh` holds the matching list for `crates/` and
-# `hosts/`. A fifth file is a new unsafe ownership boundary and needs a decision, not a grep.
-# (#1033 removed `tools/native-pcm-runner` and its row.)
+# `hosts/`. A fourth file is a new unsafe ownership boundary and needs a decision, not a grep.
+# (#1033 removed `tools/native-pcm-runner` and its row; #1075 removed `tools/bench/src/protocol.rs`,
+# whose hand-written FlatBuffers table accessors were its only unsafe code, with that benchmark.)
 #
 # #1039 removed `wasm-console-guest` (#163 phase 2 step 1) with the wasmtime console benchmark. It
 # had been granted the same boundary `wasm-gate-guest` holds: exporting a function from a `cdylib`
@@ -216,7 +220,6 @@ done
 if printf '%s\n' \
     tools/bench-support/src/alloc.rs \
     tools/audit/src/capi.rs \
-    tools/bench/src/protocol.rs \
     tools/wasm-gate-guest/src/lib.rs | LC_ALL=C sort >"$scratch/expected-unsafe" 2>"$scratch/sort.err"; then sort_status=0; else sort_status=$?; fi
 ((sort_status == 0)) || fail "unsafe expected-owner sort failed with status $sort_status; output: $(captured "$scratch/expected-unsafe"); stderr: $(captured "$scratch/sort.err")"
 expected_unsafe="$(<"$scratch/expected-unsafe")"

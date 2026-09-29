@@ -23,7 +23,12 @@ NOT_COPIED = ("artifacts/", "docs/", ".github/ISSUE_SPECS/")
 # The lint step every case anchors a new workflow line on. It must occur exactly once.
 ANCHOR = "          python3 -B scripts/check-script-reachability.py\n"
 DEAD = "scripts/run-one-shot-benchmark.sh"
-JQ_LIBRARY = "scripts/protocol-benchmark-record-validator.jq"
+# A jq library reached only through jq's own `include`, with the validator that includes it. The
+# case writes both, so it does not depend on the tree holding such a library: #1075 deleted the
+# last real one, `protocol-benchmark-record-validator.jq`, with the protocol benchmark.
+JQ_LIBRARY = "scripts/new-record-lib.jq"
+JQ_VALIDATOR = "scripts/new-record-validator.jq"
+JQ_INCLUDE = 'include "new-record-lib";\n'
 
 Mutation = Callable[[pathlib.Path], None]
 
@@ -123,16 +128,22 @@ def main() -> int:
         raise AssertionError(f"unmutated scratch rejected: {baseline.stdout}{baseline.stderr}")
     cases = 0
 
-    # jq's extension-less `include "name"` is the only reference to the record validator library;
-    # a basename-only scan would report it dead, and removing the includes must make it dead.
-    refused("jq includes of the record validator removed", {JQ_LIBRARY},
-            replace("scripts/protocol-benchmark-validator.jq",
-                    'include "protocol-benchmark-record-validator";', ""),
-            replace("scripts/run-protocol-benchmark.sh",
-                    'include "protocol-benchmark-record-validator"; ', ""),
-            replace("scripts/test-protocol-benchmark.sh",
-                    'include "protocol-benchmark-record-validator"; ', ""))
-    cases += 1
+    # jq's extension-less `include "name"` is the only reference to the record library; a
+    # basename-only scan would report it dead, and removing the include must make it dead.
+    jq_include = [write(JQ_LIBRARY, "def new_record_valid: true;\n"),
+                  write(JQ_VALIDATOR, JQ_INCLUDE + "new_record_valid\n"),
+                  workflow_line(f"          jq -n -L scripts -f {JQ_VALIDATOR}")]
+    passes("a jq library reached only through a reached validator's include", *jq_include)
+    refused("the jq include of the record library removed", {JQ_LIBRARY}, *jq_include,
+            replace(JQ_VALIDATOR, JQ_INCLUDE, ""))
+    # jq programs are as often inline in a shell script as files of their own.
+    embedder = "scripts/check-new-jq-embed.sh"
+    passes("a jq library included by a jq program inline in a reached shell script",
+           write(JQ_LIBRARY, "def new_record_valid: true;\n"),
+           write(embedder, "#!/usr/bin/env bash\n"
+                           "jq -n -L scripts 'include \"new-record-lib\"; new_record_valid'\n"),
+           workflow_line(f"          bash {embedder}"))
+    cases += 3
 
     # A one-shot runner nothing runs, however it is mentioned outside a live line.
     refused("a new script nothing runs", {DEAD}, DEAD_SCRIPT)
