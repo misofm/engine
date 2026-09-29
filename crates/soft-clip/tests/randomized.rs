@@ -12,7 +12,7 @@
 //! a subnormal input sample in its history rows -- and its own `restore_state_payload` then
 //! refuses the snapshot that carries them (`effect.state.parameter`, `effect.state.history`: those
 //! words must be zero or normal). So a snapshot does not survive its own restore. Until its issue
-//! lands the per-PR test accepts that refusal so long as the scalar instance and every bank lane
+//! (#1051 defect 3) lands the per-PR test accepts that refusal so long as the scalar instance and every bank lane
 //! refuse alike (`Known::SubnormalStateRefusedOnRestore`); the ignored test below is the
 //! reproducer.
 
@@ -29,7 +29,7 @@ conformance::randomized_effect_test!(
 
 /// The same differential without the narrowing: red until the known defect's issue lands.
 #[test]
-#[ignore = "reproduces a known defect found by #1051; see the module documentation"]
+#[ignore = "#1051 defect 3: a snapshot with subnormal words is refused on its own restore; see the module documentation"]
 fn the_bank_renders_its_scalar_instances_including_the_known_defect() {
     bench_support::alloc::assert_installed();
     bench_support::alloc::set_mode(bench_support::alloc::Mode::Count);
@@ -46,4 +46,12 @@ fn the_bank_renders_its_scalar_instances_including_the_known_defect() {
         witness: false,
     });
     conformance::assert_reached(&coverage);
+}
+
+/// The D7 recovery's report against the contract, on fixed input (no seed): red until #1051
+/// defect 5 lands. This effect counts the frames of a failing block, on both channels and on every lane of the bank, where the contract counts blocks on the lane that failed.
+#[test]
+#[ignore = "#1051 defect 5: the D7 recovery's report breaks the contract; see the test's documentation"]
+fn the_d7_recovery_reports_one_block_on_the_failing_lane() {
+    conformance::assert_d7_reports(&soft_clip::SoftClipFactory);
 }

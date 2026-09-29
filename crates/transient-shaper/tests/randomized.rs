@@ -15,3 +15,11 @@ conformance::randomized_effect_test!(
     banks_natively: true,
     witness: false,
 );
+
+/// The D7 recovery's report against the contract, on fixed input (no seed): red until #1051
+/// defect 5 lands. This effect zeroes a failing block and resets, but its report never counts the block.
+#[test]
+#[ignore = "#1051 defect 5: the D7 recovery's report breaks the contract; see the test's documentation"]
+fn the_d7_recovery_reports_one_block_on_the_failing_lane() {
+    conformance::assert_d7_reports(&transient_shaper::TransientShaperFactory);
+}

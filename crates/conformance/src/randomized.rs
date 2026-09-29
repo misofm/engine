@@ -74,18 +74,24 @@ pub enum Known {
     /// a heterogeneous member, before it has validated every member -- where the three-outcome
     /// rule says an invalid member refuses first. Narrowing: the illegal-member probe accepts the
     /// decline.
+    ///
+    /// #1051 defect 2.
     BindDeclinesBeforeValidating,
     /// The effect holds subnormal words it was legally given -- a subnormal parameter value
     /// inside the declared domain, a subnormal input sample in its history -- and its own restore
     /// then refuses the snapshot that carries them, so a snapshot does not survive its own
     /// restore. Narrowing: a refused own snapshot is accepted, so long as the scalar instance and
     /// every bank lane refuse it alike.
+    ///
+    /// #1051 defect 3.
     SubnormalStateRefusedOnRestore,
     /// A lane's rendered bits depend on where its in-flight ramps are cut: by another lane's
     /// retarget in the same bank (so the bank is not its scalar instances), and by a block
     /// boundary (so the render is not partition-invariant, master plan P1). Narrowing: a scenario
     /// either carries automation, on one lane only, or renders chunked blocks, never both; and a
     /// restore carries the lane's own untouched snapshot, so it starts no ramp elsewhere.
+    ///
+    /// #1051 defect 1.
     RampCutsMoveBits,
 }
 
@@ -1826,6 +1832,184 @@ pub fn assert_reached(coverage: &DifferentialCoverage) {
     assert!(
         !coverage.mono_capable || (coverage.collapsed_blocks > 0 && coverage.disengages > 0),
         "a bank that supports the collapse never collapsed and disengaged: {coverage:?}"
+    );
+}
+
+/// The D7 recovery's report against the contract (#1051 defect 5), on fixed input: no seed.
+///
+/// D7 (`docs/EFFECT_CONTRACT_V1.md`) checks output finiteness once per block, zeroes a failing
+/// block, resets state, and increments a **block** counter: "the contract's report counts blocks,
+/// never samples". A scalar instance, and a bank at every width this build binds, render four
+/// blocks of a clean signal at the effect's defaults, unbypassed; on the second block the left
+/// plane of the last lane is NaN throughout. Returns every place the reports break the rule:
+///
+/// * a lane counts more than one block on one channel for one block (samples, not blocks);
+/// * a lane whose input was clean counts a block;
+/// * the failing lane's output is zeroed on the poisoned block, and that block counts nothing.
+#[must_use]
+pub fn d7_report_violations(factory: &dyn NativeEffectFactory) -> Vec<String> {
+    const QUANTUM: u32 = 64;
+    const BLOCKS: usize = 4;
+    const POISONED: usize = 1;
+    let descriptor = factory.descriptor();
+    let link = [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average]
+        .into_iter()
+        .find(|link| descriptor.supported_link_modes.contains(*link))
+        .expect("an effect supports a link mode");
+    let sidechain = descriptor
+        .ports
+        .iter()
+        .find(|port| port.role == PortRole::SidechainInput)
+        .map_or(PreparedSidechainPort::None, |port| {
+            if port.required {
+                PreparedSidechainPort::Connected {
+                    id: port.id,
+                    required: true,
+                }
+            } else {
+                PreparedSidechainPort::Unconnected {
+                    id: port.id,
+                    required: false,
+                }
+            }
+        });
+    let connected = matches!(sidechain, PreparedSidechainPort::Connected { .. });
+    let shape = Shape {
+        quality: descriptor.qualities[0],
+        quantum: QUANTUM,
+        link,
+        bypass: false,
+        ports: PreparedPorts { sidechain },
+        capacity: 1,
+        mono: false,
+        hostile: false,
+    };
+    let values: Vec<InitialParameterValue> = default_initial_values(descriptor).collect();
+    let frames = QUANTUM as usize;
+    // A clean, lane- and channel-distinct signal well inside the D7 bound, and never zero.
+    let signal = |block: usize, lane: usize, channel: usize, frame: usize| -> f32 {
+        let step = ((block * frames + frame) * 37 + lane * 11 + channel * 5) % 97;
+        (step as f32 - 48.25) / 194.0
+    };
+    let mut violations = Vec::new();
+    let mut check = |who: &str,
+                     block: usize,
+                     lane: usize,
+                     poisoned: bool,
+                     report: ProcessReport,
+                     zeroed: bool| {
+        let counts = [report.nonfinite_left_blocks, report.nonfinite_right_blocks];
+        if counts.iter().any(|count| *count > 1) {
+            violations.push(format!(
+                "{who} block {block} lane {lane}: counts {counts:?} for one block (samples, not \
+                 blocks)"
+            ));
+        }
+        if !poisoned && counts.iter().any(|count| *count > 0) {
+            violations.push(format!(
+                "{who} block {block} lane {lane}: counts {counts:?} though its input was clean"
+            ));
+        }
+        // Only on the poisoned block itself: after a reset an effect with latency renders its
+        // cleared delay line, which is zero without any recovery.
+        if poisoned && block == POISONED && zeroed && counts == [0, 0] {
+            violations.push(format!(
+                "{who} block {block} lane {lane}: its output was zeroed and the report counts \
+                 nothing"
+            ));
+        }
+    };
+
+    // The scalar instance: one lane, the poisoned one.
+    let mut scalar = factory
+        .prepare(request(shape, &values))
+        .expect("the defaults prepare");
+    for block in 0..BLOCKS {
+        let first = (block * frames) as u64;
+        let mut left: Vec<f32> = (0..frames).map(|f| signal(block, 0, 0, f)).collect();
+        let mut right: Vec<f32> = (0..frames).map(|f| signal(block, 0, 1, f)).collect();
+        if block == POISONED {
+            left.fill(f32::NAN);
+        }
+        let side: Vec<f32> = (0..frames).map(|f| signal(block, 0, 2, f)).collect();
+        let report = render_scalar(
+            scalar.as_mut(),
+            (&mut left, &mut right),
+            connected.then_some((side.as_slice(), side.as_slice())),
+            first,
+            &[],
+            QUANTUM,
+            None,
+            false,
+        );
+        let zeroed = left.iter().all(|word| word.to_bits() == 0);
+        check("scalar", block, 0, block >= POISONED, report, zeroed);
+    }
+
+    for (width, backend) in WIDTHS {
+        let lanes = width.lanes() as usize;
+        let requests: Vec<PrepareEffectRequest<'_>> =
+            (0..lanes).map(|_| request(shape, &values)).collect();
+        let Ok(Some(mut bank)) = factory.bind_homogeneous_bank(PrepareEffectBankRequest {
+            backend,
+            width,
+            requests: &requests,
+        }) else {
+            continue;
+        };
+        let who = format!("{width:?} bank");
+        let failing = lanes - 1;
+        let offsets = vec![0_u32; lanes + 1];
+        for block in 0..BLOCKS {
+            let first = (block * frames) as u64;
+            let plane = |channel: usize| -> Vec<f32> {
+                (0..frames * lanes)
+                    .map(|word| signal(block, word % lanes, channel, word / lanes))
+                    .collect()
+            };
+            let (mut left, mut right) = (plane(0), plane(1));
+            let side = plane(2);
+            if block == POISONED {
+                for frame in 0..frames {
+                    left[frame * lanes + failing] = f32::NAN;
+                }
+            }
+            let report = bank.process_bank(
+                EffectBankProcessBlock::new(
+                    &mut left,
+                    &mut right,
+                    connected.then_some((side.as_slice(), side.as_slice())),
+                    QUANTUM,
+                    width,
+                    first,
+                    &[],
+                    &offsets,
+                    QUANTUM,
+                )
+                .expect("a well-shaped bank block"),
+            );
+            for lane in 0..lanes {
+                let zeroed = (0..frames).all(|frame| left[frame * lanes + lane].to_bits() == 0);
+                let poisoned = lane == failing && block >= POISONED;
+                check(&who, block, lane, poisoned, report.reports[lane], zeroed);
+            }
+        }
+    }
+    violations
+}
+
+/// Panics with every [`d7_report_violations`] of `factory`.
+///
+/// # Panics
+///
+/// When the D7 recovery's report breaks the contract anywhere.
+pub fn assert_d7_reports(factory: &dyn NativeEffectFactory) {
+    let violations = d7_report_violations(factory);
+    assert!(
+        violations.is_empty(),
+        "{}: the D7 recovery's report breaks the contract (#1051 defect 5):\n{}",
+        factory.descriptor().display_name,
+        violations.join("\n")
     );
 }
 

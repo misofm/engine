@@ -30,8 +30,8 @@ pub use protocol_corpus::{
     complete_all_opcode_fixture_bytes, complete_schema_corpus,
 };
 pub use randomized::{
-    Craft, DifferentialCoverage, EffectDifferential, Known, Payload, assert_reached,
-    run_effect_differential,
+    Craft, DifferentialCoverage, EffectDifferential, Known, Payload, assert_d7_reports,
+    assert_reached, d7_report_violations, run_effect_differential,
 };
 
 #[cfg(test)]
