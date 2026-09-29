@@ -1769,8 +1769,10 @@ fn bind_eligibility(
             "{width:?}: bind refused an illegal member with another code than prepare"
         ),
         (Err(_), Ok(None)) if known.contains(&Known::BindDeclinesBeforeValidating) => {}
-        (Err(member_error), Ok(_)) => panic!(
-            "{width:?}: bind accepted a member prepare refuses ({})",
+        (Err(member_error), Ok(bank)) => panic!(
+            "{width:?}: bind {} a cohort with a member prepare refuses ({}), where the \
+             three-outcome rule refuses it first",
+            if bank.is_some() { "banked" } else { "declined" },
             member_error.code
         ),
         (Ok(_), Ok(None)) if expect_decline => coverage.heterogeneous_declines += 1,

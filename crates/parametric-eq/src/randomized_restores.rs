@@ -230,10 +230,10 @@ fn scenario<L: Lane, const W: usize>(seed: u64, mono: bool, reach: &mut Reach) {
                             .map_err(|error| error.code)
                     })
                     .collect();
-                // Both arms hold the same payload, so they accept or refuse it together. A refusal
-                // is legal here: the restore validates an in-flight ramp's every future step, and
-                // that check refuses some ramps the channel itself is running (see the #1051
-                // evidence), so a mid-ramp snapshot is not always restorable.
+                // Both arms hold the same payload, so they accept or refuse it together. The
+                // rewritten integrator words are all finite, and no restore was refused over 80
+                // seeds (the #1051 evidence); a refusal is still tolerated when both arms agree,
+                // because refusing is the restore's to decide, not this differential's.
                 assert_eq!(
                     results[0], results[1],
                     "{context}: the arms' restores disagree"
