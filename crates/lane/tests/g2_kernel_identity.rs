@@ -1075,10 +1075,11 @@ fn check_skew<L: Lane, const S: usize, const D: usize>(width: &str) {
     }
 }
 
-/// "Both NaN, or equal bits": the compiler may commute an addition in one instantiation and not
-/// the other, and on x86 two NaN operands keep the first one's payload (#944).
+/// "Both NaN, or equal bits", class-A identity's one NaN rule (`dsp_reference::class_a`, #1065):
+/// the compiler may commute an addition in one instantiation and not the other, and on x86 two NaN
+/// operands keep the first one's payload (#944).
 fn same_or_both_nan(a: f32, b: f32) -> bool {
-    a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan())
+    dsp_reference::class_a::same(a, b)
 }
 
 /// Carried blocks per case of the bounded-cascade gate.

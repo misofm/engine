@@ -129,17 +129,14 @@ fn settled_fader_matrix_matches_the_two_primitive_oracle() {
     compare_width::<Simd8>();
 }
 
-/// Class A as issue #944 states it: equal bits, except that a NaN word only has to stay a NaN.
+/// Class A as issue #944 states it and #1065 rules it (`dsp_reference::class_a`): equal bits,
+/// except that a NaN word only has to stay a NaN.
 ///
 /// The release build CI runs commutes the commutative `fadd` differently in the two kernels
 /// (`rr * r + rl * l` against `rl * l + rr * r`), and x86 keeps the first operand's payload when both
 /// are NaN. Every other word, signed zeros and subnormals included, must match bit for bit.
 fn same_word(new: f32, old: f32) -> bool {
-    if new.is_nan() || old.is_nan() {
-        new.is_nan() && old.is_nan()
-    } else {
-        new.to_bits() == old.to_bits()
-    }
+    dsp_reference::class_a::same(new, old)
 }
 
 /// Runs both settled kernels over one family and returns the first differing word, if any.

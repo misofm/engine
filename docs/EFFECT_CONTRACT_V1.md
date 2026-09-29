@@ -45,6 +45,11 @@ Signed finite zero is retained on every non-recursive path. Bypass is an immutab
 configuration, is **not** part of `EffectProgramKey`, and outputs the dry input delayed by
 exactly the declared latency.
 
+Class-A identity, the same bits on every lane width and target, treats every NaN as one value
+(owner decision 10, #1065): tests fold each NaN to `0x7FC00000` through `dsp_reference::class_a`
+before comparing or hashing, the engine does not canonicalize NaNs at render, and finite input
+must still render finite output, with each effect's documented NaN behaviour unchanged.
+
 ## Parameters and automation
 
 Persisted parameter values use descriptor-declared exact-decimal lattices. This follows the

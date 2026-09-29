@@ -1170,6 +1170,7 @@ dependencies = [
 name = "lane"
 version = "0.1.0"
 dependencies = [
+ "dsp-reference",
  "wide",
 ]
 

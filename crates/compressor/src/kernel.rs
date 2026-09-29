@@ -1790,8 +1790,11 @@ mod settled_body_tests {
     //!   #985 and #995) and #982's all-wet grid were retired by #1049 once their slices had landed:
     //!   the grid and the randomized differentials catch every mutant they caught.
     //!
-    //! Every comparison is by bits: rendered words, the recursive words, every coefficient word and
-    //! every ramp field, then the `finish_channel` masks, and the same words again after it.
+    //! Every comparison is class-A (issue #1065): the same bits, with every NaN read as one value
+    //! through `dsp_reference::class_a`, over rendered words, the recursive words, every coefficient
+    //! word and every ramp field, then the `finish_channel` masks, and the same words again after
+    //! it. Digests fold the same way. A NaN payload may differ only in a block the boundary check
+    //! rejects, which each step asserts, so the fold cannot hide a NaN in an accepted block.
 
     use super::{
         Channel, Detector, RAMPING_DUAL_BLOCKS, RAMPING_MONO_BLOCKS, RAMPING_WET_BLOCKS,
@@ -1800,6 +1803,7 @@ mod settled_body_tests {
     use crate::design::{MAX_WIDTH, PARAMETER_COUNT};
     use crate::state::{STATE_HEADER_WORDS, commit_channel, validate_channel, write_channel};
     use core::cell::Cell;
+    use dsp_reference::class_a;
     use effect_contract::LinkMode;
     use lane::{Lane, Simd4, Simd8};
     use sha2::{Digest, Sha256};
@@ -2255,7 +2259,9 @@ mod settled_body_tests {
 
     fn assert_state<L: Lane>(context: &str, oracle: &Channel<L>, candidate: &Channel<L>) {
         let (oracle, candidate) = (state_words(oracle), state_words(candidate));
-        if let Some(index) = (0..oracle.len()).find(|&index| oracle[index] != candidate[index]) {
+        if let Some(index) = (0..oracle.len())
+            .find(|&index| class_a::word(oracle[index]) != class_a::word(candidate[index]))
+        {
             panic!(
                 "{context}: state word {index} differs: oracle {:#010x}, candidate {:#010x}",
                 oracle[index], candidate[index]
@@ -2263,34 +2269,22 @@ mod settled_body_tests {
         }
     }
 
-    /// Asserts two rendered planes equal by bits.
-    fn assert_words(context: &str, oracle: &[f32], candidate: &[f32]) {
-        assert_words_relaxed(context, oracle, candidate, false);
-    }
-
-    /// Asserts two rendered planes equal by bits, except that with `nan_relaxed` two NaN words may
-    /// differ in payload: the all-wet arm's one relaxation (#982). Returns how many did.
-    fn assert_words_relaxed(
-        context: &str,
-        oracle: &[f32],
-        candidate: &[f32],
-        nan_relaxed: bool,
-    ) -> usize {
+    /// Asserts two rendered planes the same class-A words: equal bits, with every NaN one value
+    /// (#1065). Returns how many NaN words differ in sign or payload, which a step allows only in
+    /// a block the boundary check rejects.
+    fn assert_words(context: &str, oracle: &[f32], candidate: &[f32]) -> usize {
         assert_eq!(oracle.len(), candidate.len());
-        let mut relaxed = 0;
+        let mut payloads = 0;
         for (index, (a, b)) in oracle.iter().zip(candidate).enumerate() {
-            if a.to_bits() == b.to_bits() {
-                continue;
-            }
             assert!(
-                nan_relaxed && a.is_nan() && b.is_nan(),
+                class_a::same(*a, *b),
                 "{context}: word {index} differs: oracle {:#010x}, candidate {:#010x}",
                 a.to_bits(),
                 b.to_bits()
             );
-            relaxed += 1;
+            payloads += usize::from(a.to_bits() != b.to_bits());
         }
-        relaxed
+        payloads
     }
 
     /// The all-wet arm's witness: how many settled blocks have taken it on this thread.
@@ -2541,19 +2535,15 @@ mod settled_body_tests {
                 core::array::from_fn(|kind| prefix_after[kind] - prefix_before[kind]),
                 [prefix_expected, false, prefix_wet_expected],
             );
-            // #982's relaxation, granted only where a witness says the arm ran in this block.
-            let relaxed = wet_arm == 1 || prefix[2] == 1;
-            let relaxed_left = assert_words_relaxed(
+            let relaxed_left = assert_words(
                 &format!("{} left kernel", context()),
                 &oracle_left,
                 &candidate_left,
-                relaxed,
             );
-            let relaxed_right = assert_words_relaxed(
+            let relaxed_right = assert_words(
                 &format!("{} right kernel", context()),
                 &oracle_right,
                 &candidate_right,
-                relaxed,
             );
             assert_state(
                 &format!("{} left", context()),
@@ -2713,12 +2703,7 @@ mod settled_body_tests {
                 core::array::from_fn(|kind| prefix_after[kind] - prefix_before[kind]),
                 [false, prefix_expected, prefix_wet_expected],
             );
-            let relaxed = assert_words_relaxed(
-                &format!("{} kernel", context()),
-                &oracle,
-                &candidate,
-                wet_arm == 1 || prefix[2] == 1,
-            );
+            let relaxed = assert_words(&format!("{} kernel", context()), &oracle, &candidate);
             assert_state(&context(), &self.oracle, &self.candidate);
             let oracle_mask = finish_channel::<L>(&mut oracle, &mut self.oracle);
             let candidate_mask = finish_channel::<L>(&mut candidate, &mut self.candidate);
@@ -3191,22 +3176,16 @@ mod settled_body_tests {
         randomized_width::<Simd8>();
     }
 
-    /// Folds a plane into a digest. `canonical` folds every NaN as one word: the only relaxation
-    /// the all-wet arm (#982) is allowed, and one the boundary check makes unobservable.
-    fn fold(hasher: &mut Sha256, words: &[f32], canonical: bool) {
+    /// Folds a plane into a digest by its class-A words: every NaN as one word (#1065).
+    fn fold(hasher: &mut Sha256, words: &[f32]) {
         for word in words {
-            let bits = if canonical && word.is_nan() {
-                0x7fc0_0000
-            } else {
-                word.to_bits()
-            };
-            hasher.update(bits.to_le_bytes());
+            hasher.update(class_a::bits(*word).to_le_bytes());
         }
     }
 
     fn fold_state<L: Lane>(hasher: &mut Sha256, channel: &Channel<L>) {
         for bits in &channel.recursive_bits()[..L::WIDTH] {
-            hasher.update(bits.to_le_bytes());
+            hasher.update(class_a::word(*bits).to_le_bytes());
         }
     }
 
@@ -3325,12 +3304,14 @@ mod settled_body_tests {
         }
     }
 
-    /// Folds every lane's version-1 payload words of one channel.
+    /// Folds every lane's version-1 payload words of one channel, by their class-A words.
     fn fold_payload<L: Lane>(hasher: &mut Sha256, channel: &Channel<L>) {
         for lane in 0..L::WIDTH {
             let mut bytes = [0_u8; STATE_HEADER_WORDS * 4];
             write_channel(&mut bytes, channel, lane);
-            hasher.update(bytes);
+            for word in class_a::le_words(&bytes) {
+                hasher.update(word);
+            }
         }
     }
 
@@ -3345,6 +3326,9 @@ mod settled_body_tests {
         open_at_end: usize,
         /// Discontinuity resets applied while a window was open.
         resets_mid_ramp: usize,
+        /// Kernel words that were NaN before the boundary check, which the digest folds as one
+        /// value (#1065).
+        nan_words: usize,
     }
 
     /// Renders the #1006 scenario for one width, table and link mode, dual and collapsed, and
@@ -3408,11 +3392,18 @@ mod settled_body_tests {
                     .into_iter()
                     .chain([(&mut plane, &mut mono)])
                 {
-                    fold(hasher, words, wet);
+                    coverage.nan_words += words.iter().filter(|word| word.is_nan()).count();
+                    fold(hasher, words);
                     fold_state(hasher, channel);
                     let mask = finish_channel::<L>(words, channel);
                     hasher.update(mask.to_le_bytes());
-                    fold(hasher, words, false);
+                    // The boundary check's promise, and the place the fold must never reach: no
+                    // finished word is NaN, so no NaN can hide in the digest's finished words.
+                    assert!(
+                        words.iter().all(|word| word.is_finite()),
+                        "a finished word is not finite (block {block}, W{width})"
+                    );
+                    fold(hasher, words);
                     fold_state(hasher, channel);
                     fold_payload(hasher, channel);
                 }
@@ -3423,10 +3414,14 @@ mod settled_body_tests {
     /// #1006 gate 3: the ramping prefix under a threshold ride on one lane, an attack ride on
     /// every lane, a makeup and mix ride on an all-wet table, discontinuity resets mid-ramp, a
     /// restored `remaining = 0, current != target` ramp and hostile input, at `f32`, `Simd4` and
-    /// `Simd8`, DualMono and Maximum, dual and collapsed. Kernel words fold canonically on the
-    /// all-wet table only (#982's arm), and by bits after the boundary check. Pinned on the
-    /// unmodified batch head (`081fdc6c`), in dev and release.
-    const SCENARIO_1006: &str = "162979ddfe036f96f2327b7538c95033647d93989eb0430a7bc8fb57bf87e757";
+    /// `Simd8`, DualMono and Maximum, dual and collapsed. Every word folds by class-A (#1065).
+    ///
+    /// Pinned on the unmodified batch head (`081fdc6c`), in dev and release, as `162979dd…`, which
+    /// folded NaNs only in the all-wet table's kernel words. #1065 re-pinned it with every NaN
+    /// folded, and only NaN words moved: the same render hashed the old way still gives
+    /// `162979dd…`, and its other 16,280 NaN words (input payloads, quieted signalling NaNs and
+    /// x86's `0xFFC0_0000`, none of them `0x7FC0_0000`) are the only words the fold changes.
+    const SCENARIO_1006: &str = "bd3d711f86bbd00f015a0ead7e04116daabd154b2b8e9d8ef17dc6e616b7382c";
 
     #[test]
     fn scenario_1006_ramping_prefix_is_pinned() {
@@ -3445,6 +3440,13 @@ mod settled_body_tests {
             "some windows must cross a block boundary"
         );
         assert!(coverage.resets_mid_ramp > 0, "a reset must land mid-ramp");
+        // #1065's guard that NaN still appears where it should: the hostile NaN inputs still
+        // render NaN kernel words, passed through by a dry lane and propagated by the wet
+        // arithmetic, until the boundary check zeroes their blocks.
+        assert!(
+            coverage.nan_words > 0,
+            "the hostile NaNs must still reach the kernel words"
+        );
         let digest = hex(hasher);
         println!("scenario 1006 digest {digest}");
         assert_eq!(digest, SCENARIO_1006);

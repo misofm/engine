@@ -5116,8 +5116,8 @@ mod tests {
                 detector_peak(&mut candidate, x, &fir).store(&mut produced);
                 detector_peak_seeded(&mut oracle, x, &fir).store(&mut expected);
 
-                // The proof's induction, checked phase by phase: the same word, zeros of opposite
-                // sign, or both NaN.
+                // The proof's induction, checked phase by phase: the same class-A word (every NaN
+                // one value, #1065), or zeros of opposite sign.
                 let seedless = annex2_phases(&candidate, &fir);
                 let seeded = annex2_phases_seeded(&candidate, &fir);
                 for (phase, (seedless, seeded)) in seedless.iter().zip(seeded.iter()).enumerate() {
@@ -5127,7 +5127,7 @@ mod tests {
                     seeded.store(&mut old);
                     for lane in 0..bank.len() {
                         let (new, old) = (new[lane], old[lane]);
-                        if new.to_bits() == old.to_bits() || (new.is_nan() && old.is_nan()) {
+                        if dsp_reference::class_a::same(new, old) {
                             continue;
                         }
                         assert!(
@@ -8109,13 +8109,14 @@ mod tests {
         )
     }
 
-    /// Bit identity, with a NaN compared as "both NaN" (the §4.4 check zeroes a non-finite block
-    /// before a host sees it, so this is the harness being general rather than a case it expects).
+    /// Class-A identity: the same bits, with every NaN one value (#1065; the §4.4 check zeroes a
+    /// non-finite block before a host sees it, so this is the harness being general rather than a
+    /// case it expects).
     fn assert_same_words(shipped: &[f32], oracle: &[f32], what: &str) {
         assert_eq!(shipped.len(), oracle.len(), "{what}: length");
         for (index, (a, b)) in shipped.iter().zip(oracle.iter()).enumerate() {
             assert!(
-                a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan()),
+                dsp_reference::class_a::same(*a, *b),
                 "{what}: word {index}: shipped {:#010x}, reference {:#010x}",
                 a.to_bits(),
                 b.to_bits()
