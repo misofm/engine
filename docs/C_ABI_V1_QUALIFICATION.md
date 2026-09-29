@@ -6,7 +6,10 @@ checks; the C ABI stays as the mobile interface. The runner rows below are histo
 Issue 114 qualifies the joined, accepted Issue-116 native PCM runner and Issue-121 C ABI product.
 It does not change or reseal either product. The accepted C header, CAPI/protocol implementation,
 runner, runner contract, portability checks, Cargo lock, session fixture, and native runner corpus
-are pinned by `fixtures/capi-qualification/v1/AUTHORITIES.sha256`.
+were pinned by `fixtures/capi-qualification/v1/AUTHORITIES.sha256`. #1029 deleted that ledger,
+which no code read and which named checkers #319 had already deleted; the files named below are at
+<https://github.com/misofm/engine/tree/5379e46ca3b349b9d277d642c008bb7a9643fb76/fixtures/capi-qualification/v1>.
+The C ABI's live gates are `scripts/check-capi-abi.sh`, the `capi` tests and `audit capi`.
 
 The source authority is clean-main commit `feb039765271ca62b0c905004689b88ad92df65b`, tree
 `e3e11c343c6f6a5b5b380abe03c0431c6fe81579`. Issue 116 is bound to commit/tree
@@ -77,9 +80,9 @@ separate functional one-million-block render/swap audit observed two accepted sw
 deferral, zero forbidden-operation counters, and zero syscalls between the explicit realtime trace
 markers. Neither audit selected a benchmark mode or recorded durations.
 
-The exact matrix is `fixtures/capi-qualification/v1/MATRIX.tsv`. `ARTIFACTS.tsv`, `SYMBOLS.tsv`,
+The exact matrix was `fixtures/capi-qualification/v1/MATRIX.tsv`. `ARTIFACTS.tsv`, `SYMBOLS.tsv`,
 `AUDITS.jsonl`, `QUALIFICATION.tsv`, `CONSUMER_RESULTS.tsv`, `RAW_EVIDENCE.tsv`, `GATES.tsv`, and
-`TOOLCHAINS.tsv` contain its independent evidence, and `EVIDENCE.sha256` binds those files. The
+`TOOLCHAINS.tsv` contained its independent evidence, and `EVIDENCE.sha256` bound those files. The
 semantic checker independently pins every artifact size/hash, symbol set, audit field, result
 counter, consumer exit/binary/library binding, raw-log hash, and strict gate; updating the checksum
 manifest cannot bless correlated fabricated data. Preserved-stage mode additionally checks the raw

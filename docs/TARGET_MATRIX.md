@@ -1,17 +1,15 @@
 # Target matrix
 
-Issue 001 establishes build policy, not a platform audio callback, device link, or browser runtime.
+Which targets the engine builds for, the SIMD policy of each, and the CI rows that qualify it.
 The session model and its semantics do not vary by Cargo feature or target capability.
 
-| Artifact | Architecture and target | SIMD policy | CI evidence in issue 001 |
+| Artifact | Architecture and target | SIMD policy | CI evidence |
 | --- | --- | --- | --- |
-| Native baseline | `x86_64-unknown-linux-gnu` | Scalar baseline. It must not receive a global AVX2 or FMA flag. | Host check/test plus a `-avx2,-fma` compile probe. |
-| Native AVX2 | `x86_64-unknown-linux-gnu` | A future internal AVX2 kernel is entered only after runtime AVX2 detection. | Separate `+avx2,-fma` compile directory and injected capability-assembly test. |
-| Native AVX2/FMA | `x86_64-unknown-linux-gnu` | A future FMA kernel requires both independently detected AVX2 and FMA. | Separate `+avx2,+fma` compile directory and cfg assertion. |
+| Native x86-64 (tooling and tests) | `x86_64-unknown-linux-gnu` | Not a shipped product target. Pinned x86-64-v3 (#83 D4): `.cargo/config.toml` gives every `x86_64` build AVX2 and FMA, so `lane::Backend::current()` is `Simd8`, a compile-time constant. No runtime detection or dispatch. `lane` refuses to compile without both features, and `lane::attest_host()` refuses at boot on a CPU that lacks them. | `lint`: the `-avx2,-fma` and `+avx2,-fma` probes must fail with `requires x86-64-v3`; the `+avx2,+fma` probe compiles, with a cfg assertion. `lint`, `test-debug-a`, `test-debug-b`, `test-release` and `audit-native` run on this target. |
 | ARM64 Android | `aarch64-linux-android` (arm64-v8a) | Product target (#1017). NEON `Simd4`, a compile-time constant; FPCR pinned per render block. | `cross-target`: the product crates checked with `--all-targets --all-features` and linted with clippy `-D warnings`. `aarch64-debug`/`aarch64-release`: tests on `ubuntu-24.04-arm`. |
 | ARM64 iOS | `aarch64-apple-ios` | Product target (#1017). As Android. | `cross-target`: the same check and clippy rows, and the release-assembly scan `ios-asm-memset-pattern16` over every product crate (expected failures per crate until #1018). Tests run on the Linux arm64 legs; see "Native AArch64" below. |
 | Refused | `armv7-linux-androideabi` (armeabi-v7a), `i686-*`, ILP32 ABIs and every other unlisted target | Refused at compile time by `lane` (#1041). | `scripts/check-cross-targets.sh` refusal row on `armv7-linux-androideabi`. |
-| Browser Wasm | `wasm32-unknown-unknown` | Baseline and `+simd128` are distinct artifacts. Four-lane processing uses multiply plus add; relaxed SIMD and FMA assumptions are forbidden. | Two distinct release artifact directories. |
+| Browser Wasm | `wasm32-unknown-unknown` with `+simd128` | One shipped AudioWorklet artifact, `miso-engine-v1-audio-worklet.simd128.wasm` (W4-D1), built by `scripts/build-web-audioworklet.sh`. `Simd4`, a compile-time constant. Four-lane processing uses multiply plus add; relaxed SIMD and FMA assumptions are forbidden. The host refuses a browser without `simd128` with a typed `miso.unsupported.v1` error. A scalar build is not an artifact (see the scalar-wasm CI exception below). | `artifact` builds the module once; `artifact-gates` (`check-web-audioworklet.sh`) and `browser` (Chromium, Firefox, WebKit) qualify that module. |
 
 ## 64-bit only (issue #1041)
 
@@ -45,6 +43,11 @@ target: the one shipped artifact is `simd128` (W4-D1). It stays allowed only bec
 When the legs go, delete the one marked arm of the guard. The scalar arm of
 `lane::Backend::current()` will then be unreachable.
 
+The exception is also why `lane::Backend::Scalar` exists without `lane/test-support` on those
+builds (#1059). A scalar-wasm build names the variant but compiles none of the whole-plan scalar
+lowering, which is test-only: nothing on those legs compiles a plan, and one that tried would stop
+at a named panic in `builtins-compiler`.
+
 ## Dispatch contract
 
 **Superseded by #83 D4 (revision 4) via #84 phase A.** There is no runtime SIMD dispatch and no
@@ -57,19 +60,31 @@ CI exception above, since every other target fails to compile), and
 rather than degrading silently. `effect_contract::BankWidth::for_backend` is the
 workspace's single backend-to-width law.
 
+**The whole-plan scalar backend is a test-only oracle** (owner ruling 2026-09-28, decision 3;
+#1059). `lane::Backend::Scalar` exists only with `lane/test-support` (and on the scalar-wasm
+exception), and the per-node strip lowering, its scalar pair owners and the graph's scalar
+pairing passes compile only for tests and the `test-support` features. Tests compile a plan at
+`Scalar` to prove that banking never moves a rendered bit. `scripts/check-scalar-oracle-absent.py`
+fails if the shipped AudioWorklet module or a release `capi` library contains any of it. The
+one-lane `f32` `Lane`, each effect's per-node leg and every frame loop's tail, is not gated.
+
 No Cargo feature is named `simd128`, `neon`, `avx2`, or `fma`. CPU ISA flags must never be made
 global in `.cargo/config.toml`, package manifests, or release defaults beyond the workspace's
-`x86-64-v3` pin. CI's deliberately scoped probe flags are evidence that separate artifacts
-compile, not deployment defaults.
+`x86-64-v3` pin. CI's deliberately scoped probe flags prove that sub-v3 builds are refused and
+that the pinned set compiles; they are not deployment defaults.
 
 ## Reproducible checks
 
 The pinned `rust-toolchain.toml` installs Rust 1.97.1 with `clippy`, `rustfmt`, and the browser
-Wasm standard library. After the workspace exists, the relevant commands are:
+Wasm standard library. The relevant commands are:
 
 ```bash
 cargo check --locked --workspace --all-targets
 
+# The shipped browser artifact (W4-D1), into an existing empty directory.
+bash scripts/build-web-audioworklet.sh <output-dir>
+
+# Compile checks for the browser crates: the scalar-wasm CI exception, then simd128.
 CARGO_TARGET_DIR=target/ci/wasm-scalar RUSTFLAGS="-C target-feature=-simd128" \
   cargo build --locked --release --target wasm32-unknown-unknown \
   -p engine -p session -p protocol \
@@ -80,8 +95,9 @@ CARGO_TARGET_DIR=target/ci/wasm-simd RUSTFLAGS="-C target-feature=+simd128" \
   -p target-smoke -p host-web
 ```
 
-`cargo check` verifies Rust compilation only. Browser execution needs a browser test harness,
-explicitly deferred to the platform adapter issues.
+`cargo check` verifies Rust compilation only. The browser runtime is qualified on the shipped
+module by the `artifact-gates` and `browser` jobs (`hosts/host-web/qualification`), and native
+AArch64 as below.
 
 ### Native AArch64 (#1017)
 
@@ -157,10 +173,10 @@ AArch64 legs. Each open entry is an expected failure, by name:
   profile. With every NaN folded as one word, these pins are identical on both architectures.
   #1065 asks the owner to rule whether class-A identity treats every NaN as one value. Expected
   failures in `aarch64-debug`: `compressor`
-  `kernel::settled_body_tests::scenario_{981,983,985,995}_*_is_pinned` and
-  `scenario_1006_ramping_prefix_is_pinned`, and `parametric-eq` `bank`
-  `admitted_blocks_render_the_base_bits_without_selects`. Every other test in the two legs passes
-  on AArch64, the console digests and the G5 corpus included.
+  `kernel::settled_body_tests::scenario_1006_ramping_prefix_is_pinned` and `parametric-eq` `bank`
+  `admitted_blocks_render_the_base_bits_without_selects`. (#1049 deleted the compressor's
+  `scenario_{981,983,985,995}` pins, and their rows, as dominated.) Every other test in the two
+  legs passes on AArch64, the console digests and the G5 corpus included.
 - **Darwin `memset_pattern16` in render (#1018).** On Apple targets LLVM lowers a stored `f32x4`
   splat constant to `bl _memset_pattern16`, a libc call. The constants are `lane::FLUSH_EPS` (the
   SVF flush), `1.0`, `0.5`, `2.0`, `1e-8`, `f32::MIN_POSITIVE` and others. So this is not the SVF

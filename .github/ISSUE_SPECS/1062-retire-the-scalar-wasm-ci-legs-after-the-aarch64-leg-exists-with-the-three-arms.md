@@ -121,3 +121,13 @@ See [`../VERIFY-TEST-VALUE.md`](../VERIFY-TEST-VALUE.md). **These amendments sup
 5. **Measured saving.** The scalar build, the atomics check and the scalar G5 guest take a median
    88 s across 8 full-route runs (108 s on PR #1016's run). The cross-target scalar share cannot be
    split from its step, so gate 5's "at least 100 s" becomes "at least 80 s".
+
+## Amendment (root, 2026-09-28): delete #1059's two transitional `target_arch` cfgs
+
+#1059 (merged) keeps `Backend::Scalar` behind `lane`'s `test-support` feature, plus a scalar-wasm
+exception so the scalar-Wasm CI legs still build. That exception carries two `target_arch` cfgs in
+`lane` (on `Backend::Scalar` and on its `width()` arm) that repeat the product-target list of
+`current()`'s complement arm. On every product target they reduce to `feature = "test-support"`.
+When this issue retires the scalar-Wasm legs, delete both cfgs and the exception with them, so
+`lane` names no target list outside `current()` (owner ruling: no target-specific code). See
+`1059-*.md`, "Sol verdict, attempt 1", finding 1.

@@ -40,19 +40,8 @@ TEST_ROWS: dict[str, list[tuple[str, str, str, str, str]]] = {
         # (negative), and a signalling operand wins NaN propagation. These pins fold raw NaN words
         # from hostile input, so they move on AArch64 and nowhere else. The reason is each pin's
         # AArch64 digest: with every NaN folded as one word, the renders are identical to x86's
-        # (#1017 attempt 1 evidence).
-        ("1065", "compressor", "lib",
-         "kernel::settled_body_tests::scenario_981_heterogeneous_hostile_render_is_pinned",
-         'left: "ea812b3a990db96f738c666ff1452ebd62f865a310307b31bec39df846303695"'),
-        ("1065", "compressor", "lib",
-         "kernel::settled_body_tests::scenario_983_chunk_straddling_render_is_pinned",
-         'left: "d4b0bc20c3a07543adab9e6c4d76fc80ee490c4ba33bf382cf799bff322234e4"'),
-        ("1065", "compressor", "lib",
-         "kernel::settled_body_tests::scenario_985_collapsed_render_is_pinned",
-         'left: "ccb2ad34650137f1d272cf620ef41be4b88d04e055709b80f2cab90dbe20e2c5"'),
-        ("1065", "compressor", "lib",
-         "kernel::settled_body_tests::scenario_995_sidechain_render_is_pinned",
-         'left: "ec894a101d1d6654e5e9c22c05159ab6eb5b283f13dcd723767b72ace051d90a"'),
+        # (#1017 attempt 1 evidence). #1049 deleted the compressor's 981, 983, 985 and 995 pins
+        # (and 982) as dominated, and their rows with them.
         ("1065", "compressor", "lib",
          "kernel::settled_body_tests::scenario_1006_ramping_prefix_is_pinned",
          'left: "d13e08319475e968e4f43d253e1314daa55fed339f9e931f2a82023ad78af8a8"'),

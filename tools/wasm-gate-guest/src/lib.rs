@@ -78,10 +78,12 @@ pub extern "C" fn miso_gate_widths() -> u32 {
 /// cannot silently pass as the `simd128` one (or the reverse).
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_gate_backend() -> u32 {
-    match lane::Backend::current() {
-        lane::Backend::Scalar => 0,
-        lane::Backend::Simd4 => 1,
-        lane::Backend::Simd8 => 2,
+    // By width, not by variant: `Backend::Scalar` exists only in `lane/test-support` builds and on
+    // the scalar-wasm CI exception (#1059), so a match on the variants compiles in only one of them.
+    match lane::Backend::current().width() {
+        4 => 1,
+        8 => 2,
+        _ => 0,
     }
 }
 
