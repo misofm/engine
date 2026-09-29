@@ -720,3 +720,93 @@ fn a_zero_latency_bypass_emits_the_current_block_dry() {
         "the first bypassed block is this block's own dry input, not the previous block's"
     );
 }
+
+/// Issue #1087: a session bypass with no console attached is a channel-less lane of this stage.
+///
+/// The slot builds its shunt because a lane is bypassed, although no lane has a live channel, and
+/// the bypassed lane is its latency-matched dry signal while every other lane keeps the wet one.
+/// No lane can stage a span, so the slot holds no staging window: the bank below declares an
+/// automation capacity of `u32::MAX` spans, which a window per lane could never allocate.
+///
+/// Red mutations: build the shunt only for a live channel (drop `|| lane.bypassed()`) -> lane 0
+/// renders wet; size the window by the automation capacity whatever the lanes -> the stage tries
+/// to allocate `u32::MAX` spans per lane and the test aborts.
+#[test]
+fn a_channel_less_bypassed_lane_is_shunted_without_a_staging_window() {
+    const LATENCY: usize = 2;
+    let mut bank = MockGainBank::new(LATENCY);
+    bank.gain = [0.5; LANES];
+    bank.metadata.program_key.automation_capacity = u32::MAX;
+    let stage = ConsoleEffectBankStage::new(
+        Box::new(bank),
+        BankWidth::Four,
+        8,
+        vec![
+            Some(EffectControlLane::without_channel(true)),
+            None,
+            Some(EffectControlLane::without_channel(false)),
+            None,
+        ],
+        vec![None, None, None, None],
+        LATENCY,
+    )
+    .expect("a channel-less slot needs no staging window");
+    let mut chain = BankChain::new(
+        AoSoaScratch::new(BankWidth::Four, 8).expect("scratch"),
+        vec![true; LANES].into_boxed_slice(),
+        vec![BankSlot {
+            stage: Box::new(stage) as Box<dyn BankStage>,
+            active_lanes: vec![true; LANES].into_boxed_slice(),
+        }],
+    )
+    .expect("chain");
+    let mut seen: Vec<Vec<f32>> = vec![Vec::new(); LANES];
+    let mut seen_right: Vec<Vec<f32>> = vec![Vec::new(); LANES];
+    for block in 0..3_u64 {
+        let mut members = Planes {
+            left: (0..LANES)
+                .map(|_| {
+                    (0..8)
+                        .map(|frame| (block as usize * 8 + frame) as f32 + 1.0)
+                        .collect()
+                })
+                .collect(),
+            right: vec![vec![-0.0; 8]; LANES],
+        };
+        chain.run(&mut members, 8, block * 8).expect("run");
+        for lane in 0..LANES {
+            seen[lane].extend_from_slice(&members.left[lane]);
+            seen_right[lane].extend_from_slice(&members.right[lane]);
+        }
+    }
+    for (lane, right) in seen_right.iter().enumerate() {
+        for (index, value) in right.iter().enumerate() {
+            // Both the shunt's line and the mock's own line start at `+0.0`.
+            let expected = if index < LATENCY { 0.0_f32 } else { -0.0 };
+            assert_eq!(
+                value.to_bits(),
+                expected.to_bits(),
+                "lane {lane} sample {index}: a -0.0 input stays -0.0, dry by copy and wet by \
+                 `-0.0 * 0.5`"
+            );
+        }
+    }
+    for (index, bypassed) in seen[0].iter().enumerate() {
+        let delayed = if index < LATENCY {
+            0.0
+        } else {
+            (index - LATENCY) as f32 + 1.0
+        };
+        assert_eq!(
+            *bypassed, delayed,
+            "sample {index}: lane 0 is dry at the latency"
+        );
+        for lane in 1..LANES {
+            assert_eq!(
+                seen[lane][index],
+                delayed * 0.5,
+                "sample {index}: lane {lane} keeps the wet signal"
+            );
+        }
+    }
+}

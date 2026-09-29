@@ -927,7 +927,8 @@ pub struct ConsoleEffectBankStage {
     /// One control lane per bank lane: a live channel, a channel-less lane that carries a
     /// session bypass (issue #1087), or `None` for a lane neither applies to.
     lanes: Box<[Option<EffectControlLane>]>,
-    /// One lane's staging window: the bank's own `automation_capacity` spans.
+    /// One lane's staging window: the bank's own `automation_capacity` spans, or none when no
+    /// lane has a live channel (issue #1087).
     ///
     /// One window serves every lane because a lane's staged prefix is copied into [`Self::packed`]
     /// the moment it is drained, before the next lane touches the window. The bank never sees this
@@ -995,7 +996,18 @@ impl ConsoleEffectBankStage {
             return Err(RackError::ZeroQuantum);
         }
         let lane_count = width.lanes() as usize;
-        let capacity = processor.metadata().program_key.automation_capacity as usize;
+        // Issue #1087: only a live channel ever stages a span. A slot whose lanes are all
+        // channel-less -- session bypasses with no console attached -- holds no window at all: its
+        // drain stages nothing into an empty one, and there is no twin pair for the pairing rule
+        // to protect. The window is the automation capacity per lane of the bank, which a caller
+        // may set as high as `u32::MAX`, so this is what keeps a console-free bypass from costing
+        // a console's staging.
+        let live = lanes.iter().flatten().any(EffectControlLane::has_channel);
+        let capacity = if live {
+            processor.metadata().program_key.automation_capacity as usize
+        } else {
+            0
+        };
         let total = capacity
             .checked_mul(lane_count)
             .ok_or(RackError::Overflow)?;
@@ -1026,9 +1038,11 @@ impl ConsoleEffectBankStage {
         let staging: Box<[PreparedAutomationSpan]> = vec![IDLE_SPAN; capacity].into_boxed_slice();
         // One window serves every lane, and each lane's staged prefix meets the effect's per-lane
         // `span_index < automation_capacity` cut-off; a window of any other size would let a
-        // staged twin pair straddle it (issue #1012).
-        EffectBankProcessBlock::check_automation_window(&staging, &processor.metadata())
-            .map_err(|_| RackError::AutomationWindow)?;
+        // staged twin pair straddle it (issue #1012). A slot with no live channel stages nothing.
+        if live {
+            EffectBankProcessBlock::check_automation_window(&staging, &processor.metadata())
+                .map_err(|_| RackError::AutomationWindow)?;
+        }
         Ok(Self {
             processor,
             designed,
