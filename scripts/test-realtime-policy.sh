@@ -265,10 +265,6 @@ create_fixture() {
         'struct AuditedAllocator;' \
         >"$root/tools/bench-support/src/alloc.rs"
     printf '%s\n' \
-        '#![allow(unsafe_code)]' \
-        'unsafe fn follow() {}' \
-        >"$root/tools/bench/src/protocol.rs"
-    printf '%s\n' \
         'fn measure() {}' \
         >"$root/tools/bench/src/console.rs"
 }
@@ -350,6 +346,10 @@ expect_failure unsafe-outside-capi-audit-main "$unsafe_class" \
 # re-appearing at its old library path is rejected like any other unlisted file.
 expect_failure unsafe-in-deleted-native-pcm-runner-lib "$unsafe_class" \
     'mkdir -p "$root/tools/native-pcm-runner/src"; printf "%s\n" "unsafe fn bad() {}" >"$root/tools/native-pcm-runner/src/lib.rs"'
+# #1075 deleted `tools/bench/src/protocol.rs` with the protocol benchmark; its unsafe exemption went
+# with it, so unsafe code re-appearing at that path is rejected like any other unlisted file.
+expect_failure unsafe-in-deleted-bench-protocol "$unsafe_class" \
+    'printf "%s\n" "unsafe fn follow() {}" >"$root/tools/bench/src/protocol.rs"'
 # #84 phase A deleted `crates/engine/src/arch/`; its unsafe exemption went with it, so
 # unsafe code re-appearing under that path is now rejected like any other unlisted file.
 expect_failure unsafe-in-deleted-core-arch "$unsafe_class" \

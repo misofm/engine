@@ -1,42 +1,33 @@
 #![allow(clippy::disallowed_methods)]
 // D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! Consolidated benchmark subjects.
+//!
+//! A native tool: #1075 retired the `protocol` subject, the last one with a wasm32 build (owner
+//! ruling R9, only real host paths are benchmarked).
 
-#[cfg(not(target_arch = "wasm32"))]
 use std::ffi::OsString;
-#[cfg(not(target_arch = "wasm32"))]
 use std::process::Command;
 
-#[cfg(not(target_arch = "wasm32"))]
 mod console;
-#[cfg(not(target_arch = "wasm32"))]
 mod effect_contract;
-#[cfg(not(target_arch = "wasm32"))]
 mod floor;
-mod protocol;
 
-#[cfg(not(target_arch = "wasm32"))]
 const INTERNAL_SUBJECT: &str = "ENGINE_V1_INTERNAL_BENCH_SUBJECT";
-#[cfg(not(target_arch = "wasm32"))]
-const SUBJECTS: &[&str] = &["console", "effect-contract", "protocol"];
+const SUBJECTS: &[&str] = &["console", "effect-contract"];
 
-#[cfg(not(target_arch = "wasm32"))]
 fn run_subject(subject: &str) {
     match subject {
         "console" => console::main(),
         "effect-contract" => effect_contract::main(),
-        "protocol" => protocol::main(),
         _ => unreachable!("dispatcher validates internal subjects"),
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn usage() -> ! {
     eprintln!("usage: bench <{}> [subject arguments]", SUBJECTS.join("|"));
     std::process::exit(2);
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn launch(mut command: Command) -> ! {
     #[cfg(unix)]
     {
@@ -55,12 +46,6 @@ fn launch(mut command: Command) -> ! {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
-fn main() {
-    protocol::main();
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 fn main() {
     if let Ok(subject) = std::env::var(INTERNAL_SUBJECT) {
         run_subject(&subject);

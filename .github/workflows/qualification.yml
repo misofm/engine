@@ -796,10 +796,6 @@ jobs:
       # The effect-runtime policy and fixture scripts it used to re-run run once, in lint (#1044).
       - name: Native effect runtime conformance bench
         run: bash scripts/check-effect-contract.sh target/release/bench
-      - name: Protocol benchmark runner build and negative argument checks (no benchmark)
-        run: |
-          cargo check --locked -p bench --all-targets
-          bash scripts/test-protocol-benchmark.sh
 
   wasm-guests:
     name: wasm guest legs and cross-target wasm checks under wasmtime

@@ -16,8 +16,9 @@ not a comment:
 
 * by basename, anywhere in the text, after expanding one level of `a{b,c}d` brace lists;
 * a jq module by its extension-less `include "name"` or `import "name" as ...`, which is how jq
-  pulls in a validator library (`protocol-benchmark-record-validator.jq` is reached only this
-  way, and a basename-only scan reports it dead);
+  pulls in a validator library (a library reached only this way, as
+  `protocol-benchmark-record-validator.jq` was until #1075 retired it, is dead to a basename-only
+  scan);
 * a Python module by `import name` or `from name import ...`.
 
 Carriers outside `scripts/` (for example `hosts/host-web/qualification/*.mjs`) count once they
