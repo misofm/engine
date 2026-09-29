@@ -70,3 +70,100 @@ is recorded here, not acted on.
 Gates: no code, test, SDK or artifact changed, so the implementation gates were not run and the
 AudioWorklet module is unchanged (its size and hash are those pinned at `570a79f0`). This
 checkpoint changes only this spec.
+
+## Attempt 2 evidence
+
+Terra, attempt 2, 2026-09-29, branch `codex/1064-remove-protected-observation` from `b695758b`,
+under owner decision 9. Commits `fdd4fec1` (the removal) and `760a577e` (the fixture's
+linear-memory pins).
+
+**Non-use, re-proved on this base.** No shipped caller reaches the protected surface:
+`hosts/host-web/web/` names none of the 18 protected exports; the SDK names only
+`..._boot_with_observation_demand_and_spectrum_hop`, in its optional-export set, and never calls
+it; `misofm/app` at `7effbd6` names none of them (it boots through `boot`/`boot_with_spectrum_hop`
+with `spectrumCollection`). The only callers were `sdk/test/boot-evals.mjs`,
+`sdk/test/browser-evals.mjs`, the host-web unit tests and the layout gates.
+
+**Removed.** The 18 protected exports: `boot_with_observation_demand{,_and_spectrum_hop}` and
+`observation_{preparation,demand,admission,status,capture_identity}_*` plus
+`observation_application_{take,ptr,bytes,capacity}` (each of the latter works only on a protected
+host, so keeping it would have left a vestigial refusal). Also removed: their eight wire records and
+nine vocabularies (including `observationProfiles`, so `legacyUnprotected` goes), `ObservationSideRecords`,
+`PreparedObservationStorage` (the ready host is back to the pre-#825
+`spectrum_capture: Option<PreparedSpectrumCapture>`), `observation_ingress.rs`,
+`validate_protected_options`, `protected_preparation_facts`, the endpoint staging, the protected
+arm of every alias and host method, the render-boundary ingress hook, the raw-observation batch
+gate in `submit_commands`, `SpectrumStaging::stream_history_exhausted` (the compiler proved it
+unused), and the host-web `graph` dev-dependency. `ff5956c2` added that dependency for the
+protected fixtures, and nothing else uses it. Net **−15,593 lines** in 18 files (histogram diff
++276/−15,869). host-web alone is −11,677: `ffi.rs` −6,629, `lib.rs` −2,163, `tests.rs` −2,068, and
+`observation_ingress.rs` −817.
+
+**Ordinary path unchanged.** Every alias (`spectrum_{read,select,stream_select,stream_start,
+stream_read,stream_stop,cancel}`, `meter_lease`, `observation_read`) now has one body, the
+legacy one. The handle half of the old dispatch stays as `verify_live_host`: handle 0 or a
+mismatched handle returns `INVALID_ARGUMENT`, and a failed exclusive borrow returns `INTERNAL`,
+before any staging is touched. That is the code and ordering the ordinary path returned before, so
+no result changes. It is a handle check, not a protected refusal. Two changes are unobservable
+from single-threaded Wasm: boot and dispose no longer borrow the observation staging, which is the
+pre-#825 behaviour (the worklet still forces that staging at init), and the unreachable
+publication-failure diagnostic is renamed `web.observation.staging` → `web.host.publication`.
+
+**Generated surfaces.** Regenerated with `parameter-metadata --print-abi-layout`, `npm run assets`
+and `npm run codegen`: `sdk/assets/miso-engine-v1-abi-layout.json` and
+`scripts/fixtures/abi-layout-v1-self-test.json` lose 196 lines each, and `sdk/src/generated/abi.ts`
+loses 897. The **SDK surface** change: `ABI_LAYOUT.exports` goes from 134 to 116 names; 8 structures
+and 9 constant groups leave `ABI_LAYOUT`, which narrows `AbiStructureName` and
+`AbiConstantName`; no named export is removed; the optional-export set goes from 3 to 2.
+`check-web-audioworklet.sh`'s frozen export list drops the same 18 names.
+`check-abi-layout-v1.py` drops the protected rules. Its mutations go from 27 to 19, and the
+boolean-value mutation is retargeted to `observationChannels`. `sdk/README.md` drops its
+protected-ABI paragraph.
+
+**Module and resources** (`--module-only`, both built by `build-web-audioworklet.sh`):
+
+| | base `b695758b` | this branch |
+|---|---|---|
+| simd128 module bytes | 3,415,176 | 3,322,821 (−92,355, −2.70 %) |
+| functions | 8,081 | 7,787 |
+| sha256 | `9aca423b…` | `5afb47e3…` |
+| render closure (functions / traps) | 8 / 5 | 8 / 5 |
+| `command_submit` closure | 38 | 36 |
+| `bridgeMetadataBytes` / `bridgeRetainedBytes` | 1,149,255 / 1,169,764 | 1,146,259 / 1,166,768 (−2,996) |
+| fixture linear memory at boot | 1,376,256 | 1,310,720 (−1 page) |
+
+The three `memoryBytes` pins in `hosts/host-web/tests/browser-v1/expected.json` return to the
+values `31393181` raised them from. The three PCM digests are unchanged. The release pin and
+`qualification/results.json` are not touched (#1061).
+
+**Test lists** (`cargo test --workspace --all-targets --all-features -- --list`): 2,212 → 2,114.
+host-web goes from 210 to 123; 69 of its removed tests are named `protected_*`. `tests/abi_layout.rs`
+goes from 17 to 6; the 11 removed tests pinned the protected records and vocabularies. The diff
+has 102 removals and 4 additions. The additions are kept ordinary-path tests, moved out of the
+deleted checkpoint modules into `ffi::observation_alias_tests`:
+- `observation_staging_retention_adds_actual_refcell_once` and
+  `invalid_alias_handle_is_terminal_before_any_staging_work` moved unchanged;
+- `protected_alias_host_borrow_refusal_is_terminal_before_any_staging_work` became
+  `alias_host_borrow_refusal_...` and now runs on an ordinary host;
+- `legacy_stream_dispatch_refusals_...` became `stream_guard_refusals_...`, without the protected
+  capture-identity marker.
+
+So 98 tests were removed; every one existed only for the protected path or its records. The
+SDK loses one test, `boot-evals`' protected boot. The #852 hop-boot evals lose their protected
+option. `browser-evals`' BigInt offset test is retargeted to kept u64 fields.
+
+**host-core.** Nothing removed. Its observation-demand API is public and exercised by its own
+tests, so the compiler proves nothing unused: workspace clippy `-D warnings` is clean.
+
+**Gates, all green:**
+- `cargo fmt --check`; `cargo check` and `cargo clippy --workspace --all-targets --all-features -D warnings`; `cargo doc -D warnings` for host-web and parameter-metadata.
+- The wasm32 `+simd128` check and clippy of host-web.
+- Tests for host-web (121 unit + 2 integration), host-core, parameter-metadata and session-validator.
+- `build-web-audioworklet.sh`; `check-web-audioworklet.sh`, including the render, `meter_poll` and `command_submit` callgraphs and kernel shape 15 ≥ 11; `test-web-audioworklet.sh`.
+- The V8 spill gate and its self-test.
+- `check-browser-expected-resources.py --artifacts` (every row within its #1060 ceiling) and `--self-test`.
+- The SDK: `check-sdk-generated.sh`, `check-sdk-deletions.py` and `--self-test`, `check-sdk-types.sh`, `check-sdk-headless.sh` (284/284 evals), and `sdk-package.sh check`.
+- Three-browser qualification in CI mode (`--check-matrix --self-test-mutations`, private PulseAudio sink): Chromium 151, Firefox 153 and WebKit 26.5 all pass.
+- `check-console-fixtures.sh`.
+- The CI routing check and its tests.
+- 58 policy and self-test scripts, run with `python3 -B` for Python: the set of the lint, docs-gates and gate-self-tests jobs, plus `check-release-shape.py`, `check-scalar-oracle-absent.py --wasm` and `web-audioworklet-identity.py --self-test`.
