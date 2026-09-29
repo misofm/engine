@@ -8531,7 +8531,13 @@ mod tests {
     /// the matrix. The linked body must actually have run.
     #[test]
     fn randomized_scenarios_render_exactly_the_unmodified_kernel() {
-        let scenarios = if cfg!(debug_assertions) { 24 } else { 1000 };
+        // Issue #1051's seed discipline: `MISO_ENGINE_RANDOMIZED_SCALE` multiplies the debug share
+        // (the nightly job), `MISO_ENGINE_RANDOMIZED_SEED` replays one scenario.
+        let scenarios = if cfg!(debug_assertions) || dsp_reference::randomized::overridden() {
+            24
+        } else {
+            1000
+        };
         for (label, run) in [
             (
                 "scalar",
@@ -8542,12 +8548,21 @@ mod tests {
         ] {
             let mut engaged = 0;
             let mut rendered = 0;
-            for scenario in 0..scenarios {
-                let (linked, blocks) = run(0x0990_5EED_0000 + scenario as u64, label);
-                engaged += linked;
-                rendered += blocks;
+            dsp_reference::randomized::run_seeds(
+                &format!("randomized_scenarios_render_exactly_the_unmodified_kernel {label}"),
+                "cargo test -p true-peak-limiter --lib -- --exact \
+                 tests::randomized_scenarios_render_exactly_the_unmodified_kernel",
+                scenarios,
+                |scenario| {
+                    let (linked, blocks) = run(0x0990_5EED_0000 + scenario, label);
+                    engaged += linked;
+                    rendered += blocks;
+                },
+            );
+            println!("{label}: {engaged} of {rendered} dual blocks linked");
+            if dsp_reference::randomized::replaying() {
+                continue;
             }
-            println!("{label}: {scenarios} scenarios, {engaged} of {rendered} dual blocks linked");
             assert!(
                 engaged > rendered / 8,
                 "{label}: the linked body ran on {engaged} of {rendered} blocks"

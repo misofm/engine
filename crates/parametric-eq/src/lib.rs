@@ -63,6 +63,8 @@ use lane::kernels::{
 use lane::{Backend, Lane, Simd4, Simd8};
 
 mod control;
+#[cfg(test)]
+mod randomized_restores;
 mod response;
 
 pub use response::{

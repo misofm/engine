@@ -1242,3 +1242,147 @@ mod width_state_tests {
         state_matches_scalar::<Simd8>();
     }
 }
+
+/// Issue #1051: the `DESIGNED` witness against its own definition, one kernel word at a time.
+///
+/// `tests/randomized.rs` restores lanes whose parameter ramps differ in exactly one field, which
+/// is what a payload can carry. It cannot reach a lane whose *coefficient* ramps alone differ: a
+/// restore derives them from the parameter ramps, and a retarget moves the coefficient word with
+/// them. The witness is specified over every word the kernel loads regardless
+/// ([`Instance::designed_channel_symmetry`]), and a wrong `true` is wrong audio, so this draws the
+/// words directly: random in-flight state, symmetric on both channels, then exactly one word or
+/// ramp field of one lane moved on the right channel. The witness must decline that lane and only
+/// that lane.
+#[cfg(test)]
+mod witness_tests {
+    use super::{COEF_COUNT, COMPRESSOR_DESCRIPTOR, Instance, Lane, MAX_WIDTH, RAMP_COUNT};
+    use super::{Simd4, Simd8};
+    use crate::design::{PARAMETER_COUNT, PARAMETER_SPECS};
+    use dsp_reference::randomized::Draw;
+    use effect_contract::{
+        EffectQuality, LinkMode, PrepareEffectLimits, PrepareEffectRequest, PreparedPorts,
+        PreparedSidechainPort, default_initial_values, expected_prepared_metadata,
+    };
+    use effect_runtime::ramp::LinearRamp;
+
+    fn instance<L: Lane>() -> Instance<L> {
+        let values: Vec<_> = default_initial_values(&COMPRESSOR_DESCRIPTOR).collect();
+        let request = PrepareEffectRequest {
+            sample_rate: 48_000,
+            quantum: 128,
+            quality: EffectQuality::Normal,
+            bypass: false,
+            link_mode: LinkMode::DualMono,
+            ports: PreparedPorts {
+                sidechain: PreparedSidechainPort::Unconnected {
+                    id: COMPRESSOR_DESCRIPTOR.ports[2].id,
+                    required: false,
+                },
+            },
+            initial_values: &values,
+            limits: PrepareEffectLimits {
+                maximum_total_state_bytes: 176,
+                maximum_scratch_bytes: 64,
+                maximum_automation_spans_per_block: 16,
+            },
+        };
+        let metadata =
+            expected_prepared_metadata(&COMPRESSOR_DESCRIPTOR, request).expect("a legal request");
+        let defaults: [[f32; PARAMETER_COUNT]; MAX_WIDTH] =
+            [core::array::from_fn(|index| PARAMETER_SPECS[index].default); MAX_WIDTH];
+        Instance::new(metadata, &defaults, &defaults)
+    }
+
+    fn ramp(draw: &mut Draw) -> LinearRamp {
+        LinearRamp {
+            current: draw.noise(4.0),
+            target: draw.noise(4.0),
+            step: draw.noise(0.1),
+            remaining: draw.below(65) as u32,
+        }
+    }
+
+    /// Moves one field to a value with other bits.
+    fn perturb(value: &mut f32, draw: &mut Draw) {
+        *value = if draw.chance(1, 2) {
+            value.next_up()
+        } else {
+            -*value - 1.0
+        };
+    }
+
+    fn witness<L: Lane>(seed: u64) {
+        let mut draw = Draw::new(seed);
+        let mut instance = instance::<L>();
+        for lane in 0..L::WIDTH {
+            for coefficient in 0..COEF_COUNT {
+                instance.left.words[coefficient][lane] = draw.noise(2.0);
+            }
+            for parameter in 0..RAMP_COUNT {
+                instance.left.ramps[parameter][lane] = ramp(&mut draw);
+            }
+            for slot in 0..2 {
+                instance.left.rate_ramps[slot][lane] = ramp(&mut draw);
+            }
+        }
+        instance.right.words = instance.left.words;
+        instance.right.ramps = instance.left.ramps;
+        instance.right.rate_ramps = instance.left.rate_ramps;
+        let moved = draw.below(L::WIDTH);
+        for lane in 0..L::WIDTH {
+            assert!(
+                instance.designed_channel_symmetry(lane),
+                "seed {seed} W{}: symmetric",
+                L::WIDTH
+            );
+        }
+        // One word or one ramp field of lane `moved`, on the right channel only.
+        let right = &mut instance.right;
+        let group = draw.below(3);
+        let field = draw.below(4);
+        let ramp = match group {
+            0 => {
+                perturb(&mut right.words[draw.below(COEF_COUNT)][moved], &mut draw);
+                None
+            }
+            1 => Some(&mut right.ramps[draw.below(RAMP_COUNT)][moved]),
+            _ => Some(&mut right.rate_ramps[draw.below(2)][moved]),
+        };
+        if let Some(ramp) = ramp {
+            match field {
+                0 => perturb(&mut ramp.current, &mut draw),
+                1 => perturb(&mut ramp.target, &mut draw),
+                2 => perturb(&mut ramp.step, &mut draw),
+                _ => ramp.remaining += 1,
+            }
+        }
+        for lane in 0..L::WIDTH {
+            assert_eq!(
+                instance.designed_channel_symmetry(lane),
+                lane != moved,
+                "seed {seed} W{}: group {group} field {field} moved on lane {moved}, asked of lane \
+                 {lane}",
+                L::WIDTH
+            );
+        }
+        assert!(
+            !instance.designed_channel_symmetry(L::WIDTH),
+            "a lane past the width"
+        );
+    }
+
+    #[test]
+    fn the_witness_declines_exactly_the_lane_whose_one_word_moved() {
+        dsp_reference::randomized::run_seeds(
+            "the_witness_declines_exactly_the_lane_whose_one_word_moved",
+            "cargo test -p compressor --lib -- --exact \
+             witness_tests::the_witness_declines_exactly_the_lane_whose_one_word_moved",
+            256,
+            |seed| {
+                witness::<f32>(seed);
+                witness::<Simd4>(seed);
+                witness::<Simd8>(seed);
+            },
+        );
+    }
+}

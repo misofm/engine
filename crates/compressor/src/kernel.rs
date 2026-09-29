@@ -3127,10 +3127,23 @@ mod settled_body_tests {
 
     fn randomized_width<L: Lane>() {
         let mut coverage = Coverage::default();
-        for seed in 0..seeds() {
-            coverage.add(&randomized::<L>(seed, 128));
-        }
+        // Issue #1051's seed discipline: `MISO_ENGINE_RANDOMIZED_SCALE` multiplies the debug share
+        // (the nightly job), `MISO_ENGINE_RANDOMIZED_SEED` replays one seed.
+        let per_pr = if dsp_reference::randomized::overridden() {
+            10
+        } else {
+            seeds()
+        };
+        dsp_reference::randomized::run_seeds(
+            &format!("randomized_differential W{}", L::WIDTH),
+            "cargo test -p compressor --lib -- settled_body_tests::randomized_differential",
+            per_pr,
+            |seed| coverage.add(&randomized::<L>(seed, 128)),
+        );
         println!("W{} randomized coverage {coverage:?}", L::WIDTH);
+        if dsp_reference::randomized::replaying() {
+            return;
+        }
         assert!(
             coverage.settled > coverage.blocks / 2,
             "most blocks must reach the settled body"
