@@ -429,6 +429,14 @@ fn canonicalization_normalizes_and_is_a_fixed_point() {
 }
 
 #[test]
+fn the_report_is_deterministic() {
+    let source = fixture("canonical.json").replacen("\"left_db\": 0.0", "\"left_gain\": 0.0", 1);
+    let first = validate_session_document(&source).render("session.json");
+    let second = validate_session_document(&source).render("session.json");
+    assert_eq!(first, second);
+}
+
+#[test]
 fn effect_preparation_matches_engine_and_cli_refuses_without_canonical_output() {
     use effect_compiler::{
         EffectCompileCaps, launch_native_effect_registry, prepare_native_session_effects,
