@@ -550,3 +550,110 @@ nightly run still covers 100x.
 - **host-core response:** the override-list and grid-law edges (`index_of_parameter`).
 - **host-core consoles:** the armed and the serialized lowering against dual under live records.
 - **D7 probes:** red on #1073 by construction.
+
+## Attempt 2 evidence
+
+Terra, 2026-09-29. `codex/batch-slim-4` at `3a2782f1` merged in first (`c1c34a58`: #1059, #1060,
+#1062, #1032, #1044, #1046, #1047, #1050), then the fixes in `65fdd92b`. Every result below is
+on that merged tree.
+
+### F1: the build break (blocking), fixed
+
+`bind_eligibility`'s malformed-shape probe drops the `Backend::Scalar` row. A shipped build cannot
+form that request since #1059, and the three other rows keep the probe: one member short, one
+long, another width's backend. The commands Sol found broken, each run as written:
+
+| Command | Result |
+|---|---|
+| `cargo check --locked --workspace` | exit 0 |
+| `cargo check --locked --workspace --all-targets --all-features` | exit 0 |
+| lint's `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps` | exit 0 |
+| audit-native's `cargo build --locked --release -p audit -p bench -p capi -p session-validator` | exit 0 |
+| audit-native's `cargo test --locked --release -p audit -p bench -p console-workload` (`--no-run`) | exit 0 |
+| aarch64-release on x86: `cargo test --locked --release -p lane -p math --features math/lane --no-run` | exit 0; 114 tests listed; `judge-skips release` passes |
+| aarch64-release: `cargo test --locked --release -p console-workload --no-run` | exit 0 |
+| aarch64-release: `cargo build --locked --release -p audit` | exit 0 |
+| aarch64-release: `cargo test --locked --release -p wasm-gates --features math/lane --no-run` | exit 0 |
+| `scripts/check-effect-contract.sh`, `scripts/check-builtins-fixtures.sh` | exit 0 |
+| every printed replay command, exactly as printed: the seven effect `--test randomized` replays, the compressor `witness_tests` and `randomized_differential`, the EQ `--lib` restores, the limiter `--lib`, both host-core, builtins and source | all compile and pass |
+| the four seeded reproducers (#1069 seed 1, #1070 seed 0, #1071 seed 0, #1072 seed 7) and the five #1073 D7 reproducers, as printed | all compile and fail as filed |
+
+### F2: the hidden D7 trip (blocking), fixed
+
+A D7 recovery before the drawn hostile block is now red, in the bank mode (`run_width`) and in the
+scalar-twin mode (`run_scalar`, the delay). Every word before that block is legal: input,
+sidechain, spans and restored state. So a recovery there is an effect diverging on legal input,
+and the zeroed block would otherwise pass the bound check vacuously.
+
+- **Sol's plant** (a NaN in the compressor's dual `render` output whenever a word's low 16 bits
+  are `0x1234`):
+  - with attempt 1's harness (plus the one-line F1 fix, so it compiles on the merged tree): green;
+  - with attempt 2's: red at seed 24, "D7 recovered on a block whose input and state are legal".
+- **No false reds.** Every effect differential passes at the per-PR seeds and at 10x.
+
+### F3: the allowances, narrowed
+
+- **#1072 (builtins).**
+  - The differential now compares each stage on its own: input section, then fader, then matrix.
+  - The allowance covers only the matrix stage, on a member whose matrix has settled on
+    identity, and only on the frames where another member's matrix ramp is still in flight.
+  - It forgives only a bank `0x00000000` where the scalar section wrote `0x80000000`.
+  - A reset clears the ramp ends.
+  - It forgives 57 words per PR, as before, and 2160 at 10x.
+  - The strict twin still fails at seed 7, now naming "the matrix stage".
+- **Planted signed-zero flips outside that lane**, `L::WIDTH > 1` only so the scalar sections
+  stay clean:
+
+  | Plant | Attempt 1's test | Attempt 2's test |
+  |---|---|---|
+  | SZ-1: the matrix bank's ramp frames flip `-0.0` to `+0.0` on every lane, the ramping lane included | green (hidden) | red at seed 0: the matrix stage, lane 0, a ramping lane |
+  | SZ-2: the fader bank's output flips `-0.0` to `+0.0` on every lane | red at seed 1 | red at seed 0, naming the fader stage |
+
+  The same flip at the fader's *input* goes green under both: the input section never hands the
+  fader a `-0.0` on these draws.
+- **#1070 (EQ).** The decline is forgiven only at a width this build does not execute (`Four` on
+  x86, `Eight` on AArch64), and only when `prepare` refuses the member with
+  `effect.parameter.initial`.
+  - Planted K-1070, the EQ declining a NaN member at the native width too: attempt 1 green,
+    attempt 2 red at seed 0 ("Eight: bind declined ...").
+- **#1071 (soft clip).** An own-snapshot refusal is forgiven only with `effect.state.parameter` or
+  `effect.state.history`, in both modes.
+  - Planted K-1071, the history refusal under another code: attempt 1 green, attempt 2 red at
+    seed 0.
+
+### F4: host-core's console differential stays
+
+It is kept, per Sol's recommendation.
+
+### F5: NaN folding
+
+The local NaN folds (`same_word` and `first_difference`) stay until root reconciles them with
+#1065's shared helper at merge.
+
+### Gates on the merged tree
+
+- **Build and lint:** check, clippy `-D warnings` (workspace, all features) and fmt pass.
+- **CI's debug commands, as written in `qualification.yml`:**
+  - `test-debug-b`: 788 passed, 0 failed, 28 ignored over 149 binaries (167 s wall, loaded box).
+  - `test-debug-a`: 1,252 passed, 0 failed, 7 ignored over 90 binaries (245 s).
+  - Release, the affected crates (dsp-reference, conformance, the seven effects, the limiter,
+    builtins, source, host-core): 814 passed, 0 failed, 16 ignored over 144 binaries (186 s).
+- **Policy scripts:**
+  - 32 of 33 `check-*.sh` pass. `check-sdk-types.sh` needs `npm ci`, which is environment.
+  - 9 of 16 `check-*.py` pass as run bare, with `python3 -B`. The other seven need an argument;
+    each passes `--self-test`.
+- **AArch64 debug leg on x86:** `--no-run` over its product crates and features exits 0, 1,779
+  tests are listed, `judge-skips debug` passes, the known-defects self-test passes, and the
+  silent-skip scan is clean.
+- **AArch64 release leg:** its `--no-run` and builds are in the F1 table.
+- **Budget:** each new per-PR test was timed alone, single-threaded, at load about 15.
+  - `test-debug-b`: 4.4 s (EQ restores 1.04, EQ 0.63, builtins 0.62, compressor 0.47, soft clip
+    0.42, multiband 0.35, transient 0.33, delay 0.26, gate 0.26, witness 0.02).
+  - `test-debug-a`: 2.8 s (host-core 2.73, source 0.04).
+  - Sol measured about 11 s at load 35-50. Neither figure comes from a quiet box.
+
+### Lines
+
+- Attempt 2's own change (`65fdd92b`): `conformance/src/randomized.rs` +45/-14 and
+  `builtins/tests/randomized.rs` +76/-29.
+- The branch against the batch head: 5,853 code lines added and 11 removed, plus this spec.
