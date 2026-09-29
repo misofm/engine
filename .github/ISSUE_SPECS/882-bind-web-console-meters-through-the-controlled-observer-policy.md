@@ -1,4 +1,10 @@
-# Bind web console meters through the controlled observer policy
+# Skip per-track web meter work while no one holds the meter lease
+
+**Rescoped by owner decision 11 (2026-09-29, `docs/rulings/engine-footprint-2026-09-29.md`).** #1080 removes the controlled observer policy this issue originally planned to build on. The goal is unchanged (an unmetered block does no per-track meter work; class A: when the lease is held, every published value is unchanged), but the mechanism is now the ordinary path's existing `meter_lease` flag, extended from the master-peak scan to the per-track observers, with no controlled-activation protocol. First measure the per-track meter cost on a representative console; if the saving is not worth a branch in render, close this issue with the measurement.
+
+The original body follows for its evidence; its references to the controlled policy are superseded.
+
+<!-- original title: Bind web console meters through the controlled observer policy -->
 
 ## Product outcome
 
