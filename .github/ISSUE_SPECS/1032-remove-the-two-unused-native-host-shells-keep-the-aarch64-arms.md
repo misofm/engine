@@ -165,3 +165,102 @@ only as the browser AudioWorklet") no longer holds.
 6. **Gates for whatever remains:** add `cargo +<toolchain with aarch64 std> check --target
    aarch64-apple-ios` and `--target aarch64-linux-android` for `-p capi -p host-core -p lane -p graph
    -p soft-clip` on base and change.
+
+## Attempt 1 evidence
+
+Terra, 2026-09-29, branch `codex/1032-remove-native-host-shells`. Base is `4a8a4442`, the
+`codex/batch-slim-4` tip (main, #1060 and #1062). The change is base plus `5d0aebfa` (the shells),
+`a73d1879` (a conflict-free merge of the batch tip, for #1062's `lane` edits) and `86bca0f2` (the
+32-bit x86 spellings). The scope follows the owner ruling: amendment steps 1-3 without
+`target-smoke`, AArch64 arms kept. The coordinator added the dead `target_arch = "x86"` removal
+during the attempt.
+
+### What was deleted, and what it covered
+
+| deleted | what it was | who used it |
+|---|---|---|
+| `hosts/host-native` (51 lines) | a binary that ran `lane::attest_host()` and `lane::attest_fp_environment()` and printed `target_smoke()` | only CI's "Native host smoke" step |
+| `hosts/host-mobile` (46 lines) | a library whose one function, `mobile_target_smoke`, attested the CPU and returned `target_smoke()` | nothing |
+| test-debug-a's "Native host smoke" step (`cargo run --locked -p host-native`) | see the next table | - |
+
+Neither crate had a test, so their test binaries listed 0 tests. `target-smoke` stays, because the
+AArch64 debug leg uses it as its width pin (`scripts/run-aarch64-tests.sh:137`). Native iOS and
+Android apps link `crates/capi`, which keeps its own boot attestation.
+
+**The claims the smoke step proved, and the surviving tests that prove them now.** The step only
+checked the exit status; it asserted nothing about the printed values.
+
+| claim | surviving proof |
+|---|---|
+| The x86-64-v3 build runs on the CI CPU, and `lane::attest_host()` accepts it | `miso_engine_v1_engine_create` returns `UNSUPPORTED` when `attest_host()` fails. `check-capi-abi.sh`'s C11 consumer (`crates/capi/tests/c/abi_smoke.c`, audit-native job) and `capi/tests/resource_lifecycle.rs:377` (test-debug-a) both require `OK`. The `aarch64-debug` leg runs capi's tests on arm64. |
+| `lane::attest_fp_environment()` pins and restores the FP environment on a real thread | `lane/tests/fp_env.rs::attestation_passes_on_this_thread` (test-debug-b), and `host-core/tests/fp_environment.rs`, whose `StartedRenderSession::start` attests on its own thread (test-debug-a). Both also run in the AArch64 legs. |
+| `target_smoke()` builds and reports the backend | `target-smoke`'s `tests::smoke_values_are_canonical`. It pins `Simd8` on x86_64 (test-debug-a) and `Simd4` on AArch64 (aarch64-debug). |
+
+**Other edits**
+- `Cargo.toml`, `Cargo.lock`: dropped the two members. The lock loses only their two entries.
+- `check-artifact-evidence-leak.sh`: `shipped` loses `host-mobile`.
+- `test-host-core-policy.sh`: the three generic host cases now mutate `hosts/host-web/src/lib.rs`.
+  Each keeps its own forbidden pattern, and the fixture loses its second host.
+- `test-bench-policy.sh`: the `host-dependency` case now writes `hosts/host-web/Cargo.toml`.
+- `check-stem-store-v1.mjs`: dropped the two deleted scan roots, because `readdir` fails on a
+  missing directory.
+- `docs/REALTIME_DEPENDENCY_POLICY.md`: the attestation table keeps only capi.
+- `target-smoke`'s crate doc: now describes the crate as the per-target width pin CI compiles and
+  tests.
+- Untouched: `host-core/src/lib.rs:44`'s "native and mobile hosts that issue 023 will grow"
+  describes future platform callbacks, not the deleted crates. It is in the artifact closure, so it
+  was left as it is.
+
+**Dead 32-bit x86 spellings (coordinator's addition).** #1041 refuses every 32-bit target, so no
+`target_arch = "x86"` arm can compile. 58 spellings in 18 files were removed:
+- `lane`: `fpenv.rs`, `softfma.rs`, `wide_impl.rs`, `lib.rs`'s v3 guard, and `tests/fp_env.rs`,
+  `tests/g6_ftz_inert.rs`;
+- `graph/src/runtime.rs`, `soft-clip/src/lib.rs`, `target-smoke`;
+- the tests of `capi`, `compressor`, `gate-expander`, `host-core`, `soft-clip` and `wasm-gates`.
+
+The rewrites:
+- `any(x86, x86_64)` becomes `x86_64`;
+- `any(x86, x86_64, aarch64)` becomes `any(x86_64, aarch64)`;
+- softfma's `core::arch::x86` imports and the redundant `x86_64` cfg on their twins are gone.
+
+The one remaining match under `crates/`, `tools/` and `hosts/` is `crates/math/VENDORED.md:57`.
+It is prose that records upstream hunks the vendoring deleted, so it stays.
+
+On `i686-linux-android`, `lane` now fails with #1041's "lane supports 64-bit targets only" error
+plus a follow-on `E0308`, the same shape as armv7. Base also raised the x86-64-v3 error there.
+`x86_64-unknown-linux-gnux32` and `armv7-linux-androideabi` fail exactly as on base.
+
+### Gates (all on this machine, Rust 1.97.1)
+
+| gate | result |
+|---|---|
+| `cargo check --locked --workspace --all-targets --all-features` | pass |
+| `cargo clippy … -- -D warnings`, `cargo fmt --all -- --check`, `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` | pass |
+| `+simd128` wasm check `-p host-web -p lane` | pass |
+| x86 probes | `-avx2,-fma` and `+avx2,-fma` refused with `requires x86-64-v3`; `+avx2,+fma` passes |
+| `check --all-targets --all-features` for `aarch64-apple-ios` and `aarch64-linux-android`, `-p capi -p host-core -p lane -p graph -p soft-clip`, base and change | pass, no warnings, on both |
+| `scripts/check-cross-targets.sh` | PASS. The 10 `ios-asm-memset-pattern16` rows are identical to the pre-x86-edit run, and none belongs to a removed crate: the shells were never in capi's closure. |
+| Console digests (`gain_pan_profile digests`) | 17 rows byte-identical; only the `finished in` time differs |
+| `bash scripts/run-wasm-gates.sh` (native, wasm simd128 and V8 spill) | ok |
+| Shipped module, `build-web-audioworklet.sh --module-only`, base and change | byte-identical, `9aca423b3e36ce6ab1c6d0dd21123d6eab81111ad0b3f47bdf5c8e09c613b2ee` |
+| `check-capi-abi.sh` and `--self-test` | ok (shared and static) |
+| `check-ci-path-routing.py`, `test-ci-path-routing.py` | pass. test-debug-a keeps its job, so the verdict table is unchanged. |
+| `check-script-reachability.py`, `test-script-reachability.py` | pass |
+| 55 policy scripts (every `check-*`/`test-*` policy, leak, boundary, seal, vocabulary, routing, release-shape, stem-store and known-defect self-test; Python with `python3 -B`) | 55/55 pass |
+| x86 `cargo test --no-run` resolution of `run-aarch64-tests.sh`'s sets | debug set (the 25 product crates plus `dsp-reference`, `conformance` and `target-smoke`, with its features) resolves and builds. Release `-p lane -p math --features math/lane`, `-p console-workload` and `build -p audit` also resolve and build. |
+| CI test sets on the change | test-debug-a 1,267 passed, 0 failed, 8 ignored. test-debug-b 793 passed, 0 failed, 27 ignored. test-release (`-p lane -p math -p wasm-gates`) 115 passed, 0 failed, 16 ignored. |
+
+**`cargo test -- --list`, base against change**, with CI's feature sets:
+
+| set | base | change |
+|---|---|---|
+| test-debug-a | 1,275 | 1,275 |
+| test-debug-b | 819 | 819 |
+| test-release | 131 | 131 |
+
+The only difference is two empty test binaries:
+`BINARY host_mobile [unittests src/lib.rs]` and `BINARY host_native [unittests src/main.rs]`. No
+test was removed, and no live claim was lost.
+
+**Size.** 30 files, +72/-207 lines, before this evidence. The two shells account for -97,
+`Cargo.lock` -16, and the x86 spellings +54/-70 across 18 files.
