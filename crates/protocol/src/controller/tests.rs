@@ -40,11 +40,13 @@ fn replay_layout_stays_within_the_capi_resource_oracle() {
     // `graph_entity_indexes` map, a 24-byte `BTreeMap` header.
     // #1034 re-pin (-8): the embedded `ProtocolQueues` drops its unread `control_used_bytes`
     // counter.
+    // #1093 re-pin (+48 each): the `SessionModel` inside the inline `CompiledSession` gains
+    // decision 12's root `console`, two 24-byte `Vec` headers.
     assert_eq!(
         core::mem::size_of::<ProtocolController<MockProvider>>(),
-        6_032
+        6_080
     );
-    assert_eq!(core::mem::size_of::<PreparedStructuralCommand>(), 728);
+    assert_eq!(core::mem::size_of::<PreparedStructuralCommand>(), 776);
 }
 
 #[test]
@@ -494,7 +496,7 @@ fn automation_descriptor() -> crate::ParameterDescriptor {
     crate::ParameterDescriptor {
         handle: 1,
         track_id: "vocal".to_owned(),
-        rack: crate::ParameterRack::Dynamic,
+        rack: crate::ParameterRack::Inserts,
         effect_id: "comp".to_owned(),
         parameter_id: 1,
         channel: crate::ParameterChannel::Left,
@@ -2983,7 +2985,7 @@ fn canonical_json_snapshots_reparse_before_and_after_commit_across_utf8_split_pa
 
     let edits = [SessionEdit::SetEffectIdentity {
         track_id: session::StableId::parse("vocal").expect("track ID"),
-        rack_name: session::RackName::Dynamic,
+        rack_name: session::RackName::Inserts,
         effect_id: session::StableId::parse("eq").expect("effect ID"),
         identity: session::EffectIdentity::ThirdPartyCid {
             cid: "bafy-é-🙂".to_owned(),

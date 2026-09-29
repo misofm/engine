@@ -243,12 +243,12 @@ const fn enum_link(value: session::LinkMode) -> u8 {
 const fn enum_tap(value: session::SendTap) -> u8 {
     match value {
         session::SendTap::Input => 1,
-        session::SendTap::PostInputBuiltins => 2,
-        session::SendTap::PostSimd1 => 3,
-        session::SendTap::PostDynamic => 4,
-        session::SendTap::PostSimd2PreFader => 5,
+        session::SendTap::PostInput => 2,
+        session::SendTap::InsertSend => 3,
+        session::SendTap::InsertReturn => 4,
+        session::SendTap::PreFader => 5,
         session::SendTap::PostFader => 6,
-        session::SendTap::PostMatrix => 7,
+        session::SendTap::PostPan => 7,
     }
 }
 const fn enum_shape(value: AutomationShape) -> u8 {
@@ -882,8 +882,27 @@ fn tx_matrix_or_pan(sink: &mut dyn Sink, value: &MatrixOrPan) -> Result<(), Enco
         }
     }
 }
+fn tx_console_entry(sink: &mut dyn Sink, value: &session::ConsoleEntry) -> Result<(), EncodeError> {
+    tx_start_message(
+        sink,
+        schema::session::console_entry::SPEC
+            .field_count(&[(schema::session::console_entry::PARAM, value.params.len())])?,
+    )?;
+    tx_id(sink, schema::session::console_entry::SLOT, &value.slot)?;
+    tx_bool(sink, schema::session::console_entry::BYPASS, value.bypass)?;
+    for param in &value.params {
+        tx_message(sink, schema::session::console_entry::PARAM, |v| {
+            tx_param(v, param)
+        })?;
+    }
+    Ok(())
+}
 fn tx_track(sink: &mut dyn Sink, value: &session::Track) -> Result<(), EncodeError> {
-    tx_start_message(sink, schema::session::track::SPEC.field_count(&[])?)?;
+    tx_start_message(
+        sink,
+        schema::session::track::SPEC
+            .field_count(&[(schema::session::track::CONSOLE, value.console.len())])?,
+    )?;
     tx_id(sink, schema::session::track::ID, &value.id)?;
     tx_id(sink, schema::session::track::SOURCE_ID, &value.source_id)?;
     tx_u8(
@@ -899,21 +918,21 @@ fn tx_track(sink: &mut dyn Sink, value: &session::Track) -> Result<(), EncodeErr
     tx_message(sink, schema::session::track::BUILTINS, |v| {
         tx_builtins(v, &value.builtins)
     })?;
-    tx_message(sink, schema::session::track::SIMD1, |v| {
-        tx_rack(v, &value.simd1)
-    })?;
-    tx_message(sink, schema::session::track::DYNAMIC, |v| {
-        tx_rack(v, &value.dynamic)
-    })?;
-    tx_message(sink, schema::session::track::SIMD2, |v| {
-        tx_rack(v, &value.simd2)
+    tx_message(sink, schema::session::track::INSERTS, |v| {
+        tx_rack(v, &value.inserts)
     })?;
     tx_message(sink, schema::session::track::FADER, |v| {
         tx_fader(v, &value.fader)
     })?;
     tx_message(sink, schema::session::track::MATRIX_OR_PAN, |v| {
         tx_matrix_or_pan(v, &value.matrix_or_pan)
-    })
+    })?;
+    for entry in &value.console {
+        tx_message(sink, schema::session::track::CONSOLE, |v| {
+            tx_console_entry(v, entry)
+        })?;
+    }
+    Ok(())
 }
 fn tx_submix(sink: &mut dyn Sink, value: &Submix) -> Result<(), EncodeError> {
     tx_start_message(sink, schema::session::submix::SPEC.field_count(&[])?)?;
@@ -1360,14 +1379,11 @@ fn parse_track(message: Message<'_>) -> Result<session::Track, DecodeError> {
         builtins: parse_builtins(
             message.nested_value(one_spec!(message, schema::session::track::BUILTINS)?)?,
         )?,
-        simd1: parse_rack_message(
-            message.nested_value(one_spec!(message, schema::session::track::SIMD1)?)?,
-        )?,
-        dynamic: parse_rack_message(
-            message.nested_value(one_spec!(message, schema::session::track::DYNAMIC)?)?,
-        )?,
-        simd2: parse_rack_message(
-            message.nested_value(one_spec!(message, schema::session::track::SIMD2)?)?,
+        console: values_spec!(message, schema::session::track::CONSOLE)?
+            .map(|value| parse_console_entry(message.nested_value(value)?))
+            .collect::<Result<Vec<_>, _>>()?,
+        inserts: parse_rack_message(
+            message.nested_value(one_spec!(message, schema::session::track::INSERTS)?)?,
         )?,
         fader: parse_fader(
             message.nested_value(one_spec!(message, schema::session::track::FADER)?)?,
@@ -1375,6 +1391,16 @@ fn parse_track(message: Message<'_>) -> Result<session::Track, DecodeError> {
         matrix_or_pan: parse_matrix_or_pan(
             message.nested_value(one_spec!(message, schema::session::track::MATRIX_OR_PAN)?)?,
         )?,
+    })
+}
+fn parse_console_entry(message: Message<'_>) -> Result<session::ConsoleEntry, DecodeError> {
+    let message = message.schema_spec(&schema::session::console_entry::SPEC)?;
+    Ok(session::ConsoleEntry {
+        slot: stable_id(one_spec!(message, schema::session::console_entry::SLOT)?)?,
+        bypass: parse_bool(one_spec!(message, schema::session::console_entry::BYPASS)?)?,
+        params: values_spec!(message, schema::session::console_entry::PARAM)?
+            .map(|value| parse_param(message.nested_value(value)?))
+            .collect::<Result<Vec<_>, _>>()?,
     })
 }
 fn parse_rack_message(message: Message<'_>) -> Result<Rack, DecodeError> {
@@ -1666,12 +1692,12 @@ fn parse_link(value: u8) -> Result<session::LinkMode, DecodeError> {
 fn parse_tap(value: u8) -> Result<session::SendTap, DecodeError> {
     match value {
         1 => Ok(session::SendTap::Input),
-        2 => Ok(session::SendTap::PostInputBuiltins),
-        3 => Ok(session::SendTap::PostSimd1),
-        4 => Ok(session::SendTap::PostDynamic),
-        5 => Ok(session::SendTap::PostSimd2PreFader),
+        2 => Ok(session::SendTap::PostInput),
+        3 => Ok(session::SendTap::InsertSend),
+        4 => Ok(session::SendTap::InsertReturn),
+        5 => Ok(session::SendTap::PreFader),
         6 => Ok(session::SendTap::PostFader),
-        7 => Ok(session::SendTap::PostMatrix),
+        7 => Ok(session::SendTap::PostPan),
         _ => Err(DecodeError::InvalidTlv),
     }
 }

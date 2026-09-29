@@ -67,7 +67,7 @@ fn descriptor_handle_required_flag_is_frozen() {
         descriptors: vec![ParameterDescriptor {
             handle: 1,
             track_id: "track".to_owned(),
-            rack: ParameterRack::Dynamic,
+            rack: ParameterRack::Inserts,
             effect_id: "effect".to_owned(),
             parameter_id: 1,
             channel: ParameterChannel::Left,
