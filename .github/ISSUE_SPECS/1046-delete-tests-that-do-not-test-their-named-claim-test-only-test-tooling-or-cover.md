@@ -420,3 +420,135 @@ No deleted test is red on any of the four bugs.
   ruling are outside this issue's paths, so they are unchanged.
 - effect-runtime's `StatePayloadSizes::total()` has no production caller; D12 is its only test.
 - The release-only bench-support failure above.
+
+## Sol verdict, attempt 1
+
+**PASS.** No deleted test was the sole catcher of a product defect. Every deletion matches its
+category. The migrated allocation gate is equivalent to the private allocator it replaced, and
+every gate is green on the merge into the batch head. The findings below are LOW or INFO. None
+blocks the merge.
+
+### Merge into `codex/batch-slim-4`
+
+The branch was merged at `e53dc445`, which is `main` plus #1044, #1047, #1050, #1060 and #1062, in
+a scratch detached worktree.
+- **Textual conflicts: none.** Four files changed on both sides, and in each the hunks are disjoint:
+  - `graph/src/runtime.rs`: #1062's `FrameLane` arm and #1047's scrape against D10;
+  - `audit/src/fixture_builtins.rs` and `builtins_fixture_check.rs`: #1047's scrapes and
+    `calls_authoring` against H37;
+  - `parameter-metadata/tests/abi_layout.rs`: #1047's export-set scrape against H10.
+- **Semantic conflicts: none.** No test is deleted on one side and edited on the other. #1060's
+  capi rewrite touches no #1046 file. Every surviving guard this record names (20 checked by name)
+  still exists on the merge.
+- **One interaction.** #1047's deletion removes one of H10's surviving guard's `render()` callers.
+  See INFO 4.
+
+### The five checks
+
+1. **No unique catch was lost.** Each mutation below was applied alone to the merge. Each is one
+   that a deleted test would catch, and a kept test turns it red.
+   - **graph D8, tautology.** `reduce_left_to_right` drops its first operand. The graph lib stays
+     green (102). Red: graph-compiler's `graph_fixture` `checked_in_fixtures_are_the_generated_bytes`.
+   - **dsp-reference D18, tautology.** `reference_annex2_phases` reads the taps oldest first.
+     dsp-reference stays green (24). Red: true-peak-limiter `bs1770_annex2_conformance_is_unchanged`.
+   - **true-peak-limiter D13, tautology.** `observe_resident` negates `left`. Red:
+     `automation_withdraws_the_claim_and_the_resident_tap_keeps_up`.
+   - **compressor D13, tautology.** `observe_resident` returns `left = 0.0`. Four tests go red in
+     `observation.rs`, including `the_compressor_reports_the_reduction_its_kernel_smoothed`.
+   - **bench-support H8, tautology.** `per_mille` uses denominator 1,024. Red:
+     `frozen_indices_over_one_thousand_observations` and `small_samples_round_up_to_the_next_rank`.
+   - **bench H12, tautology.** The compressor-only row gains one op. Red:
+     `the_current_effect_recount_…` and `rust_and_jq_floor_tables_have_exact_key_value_parity`
+     (release, as CI runs it).
+   - **D20 and H37, test tooling.** `digest::hex` upper-cases. Four bench-support digest tests go
+     red.
+   - **parameter-metadata H10, tautology.** `render()` is correct on its first call and appends
+     `\n` on every later call. `the_checked_in_self_test_fixture_is_current` is red in 15 of 15
+     runs: 10 at the default thread count and 5 at `--test-threads 4`.
+   - **Historical bugs, on `e53dc445`.** With #994 and then #1015 re-injected, every deleted test in
+     compressor, true-peak-limiter and parametric-eq stays green. The positive control is #1015's
+     three `stationary_subnormal` tests, which go red. No deleted test is a reproducer.
+2. **The categories are honest.**
+   - **Assert nothing, or run nowhere.** D2 is only `println!`. All eight D4 tests and H16 carry an
+     unconditional `#[ignore]`, and no workflow or script names them. The only `--ignored` runs in
+     `.github/` and `scripts/` are math, host-web, host-core, parametric-eq, conformance and
+     graph-compiler rows.
+   - **Tautologies.**
+     - `FP_ENV_CONTROLLED` has no consumer beyond its own definition.
+     - `EFFECTIVE_CASCADE_DEPTH` is a single `const` of 2. Divisibility is a `debug_assert_eq!` at
+       `lib.rs:1931` and `:2492`.
+     - The `const` asserts D10 and D17b repeat are at `graph/src/runtime.rs:2128` (merge line) and
+       `lane/src/f64_lane.rs:214-216`.
+     - `WebMeterHeader` is pinned at `host-web/src/tests.rs:390-391`.
+     - `per_mille` is literally `nearest_rank(.., 1_000)`.
+   - **Test tooling.**
+     - `AliasObserver` and its thread-locals sit inside `builtins-compiler`'s `mod tests`
+       (`:6101-6104`).
+     - The four `hex` adapters wrap `bench_support::digest::hex`.
+     - The four audit `sha256` names are `use bench_support::digest::sha256_hex as sha256`.
+   - **Part B.** No SHA, percentile or escape re-test remains in `tools/bench`.
+3. **The transient-shaper allocation gate.** `bench_support::alloc` counts `alloc`, `alloc_zeroed`,
+   `realloc` and `dealloc` per thread with no arming. That is a superset of the private allocator
+   (`realloc` counts as an allocation rather than as both).
+   - `assert_installed()` runs, and allocates, before the mark. The const-initialized thread-local
+     has no destructor.
+   - Row 11 is red in dev and in release (`left: 2000`).
+   - A planted `drop(black_box(Box::new(..)))` at the top of `process_bank` is red in dev and in
+     release (`left: 1000`).
+   - **Test value** (AGENTS.md, the one rewritten test). `the_render_path_allocates_nothing`
+     defends zero allocations and frees on the transient shaper's scalar and bank render paths.
+     An allocation or free in `Shaper::process_block` or `process_bank` turns it red, and no other
+     test or audit covers this effect: `tools/audit` audits delay, compressor, parametric-eq and
+     gate-expander.
+4. **The pre-existing release failure.** It is `bench-support`
+   `alloc::tests::current_thread_counts_every_allocator_operation`, and it fails in release on
+   `e53dc445` too. The failure reads `allocations: 2, deallocations: 1, … requested_bytes: 48`
+   against `3, 2, 64`: the optimizer removes the unused `alloc_zeroed`/`dealloc` pair.
+   - **Required CI never runs it in release.** `test-debug-a` runs bench-support in debug. The
+     release test steps are `-p audit -p bench -p console-workload` and `-p lane -p math -p
+     wasm-gates`, and `nightly.yml` has no bench-support step. So `main` is green. See LOW 2.
+5. **Gates on the merge.** All green unless noted.
+   - `cargo fmt --check`, `cargo check` and `cargo clippy --all-targets --all-features -D warnings`
+     for the workspace. `cargo doc` with `-D warnings`.
+   - `check-cross-targets.sh`, which includes the AArch64 iOS/Android `--all-targets` clippy rows.
+   - `test-debug-a` and `test-debug-b`, with CI's exact commands.
+   - Release tests:
+     - `audit`, `bench`, `console-workload`, `lane`, `math` and `wasm-gates`;
+     - the changed DSP crates (505 passed);
+     - the changed debug-a packages: 639 passed and 1 failed, the bench-support test in check 4.
+       These ran under `CARGO_PROFILE_RELEASE_PANIC=unwind`, because this package set hits
+       #1008's panic-variant collision (E0460) otherwise. That collision is pre-existing.
+   - **Console digests.** All 17 rows are byte-identical on the base and the merge.
+   - **Policy.** All 57 hermetic steps pass under `python3 -B`, from the route, lint, docs-gates
+     and gate-self-tests jobs plus `release-shape`. They include #1052's lint in
+     `check-workspace-policy.sh` and its planted cases.
+   - **AArch64 on x86.** The debug leg's package and feature set builds 211 executables with
+     `--no-run` and lists 1,753 tests. `judge-skips` passes for debug, and for release on the
+     `lane`/`math` list. Each of the four `aarch64-known-defects.py` rows names exactly one
+     existing test, and none of them is a deleted test. The no-silent-skip scan finds nothing.
+
+### Findings, by severity
+
+1. **LOW: D16 leaves an accessor with no reader.** The deletion leaves
+   `ConsoleEffectBankStage::dropped_records()` (`rack/src/lib.rs:1089`) with no caller anywhere,
+   product or test. A mutant returning 1, or one initializing `dropped: 1`, is now uncaught.
+   - It is not a lost product claim. Nothing reads the accessor, its field is documented as "zero
+     by construction", and amendment 3 orders the deletion.
+   - It is the same shape as D12's `total()`, which was kept. The consistent remedy is to delete
+     the dead accessor in a product issue.
+2. **LOW: D21 cites a positive control that holds only in debug.** D21 now points at the test in
+   check 4, which is valid only in debug. The file's own deleted control was robust in release,
+   because it wrote through a `black_box`ed pointer. The gate is unaffected: see check 3.
+   Follow-up: make the bench-support test keep its `alloc_zeroed` pair live, for example by writing
+   through a `black_box`ed pointer.
+3. **LOW: some citations now point at deleted files.**
+   - The record lists three: `lane/src/lib.rs:202`, `soft-clip/src/lib.rs:22` and
+     `docs/rulings/cross-bank-interleave.md:33`.
+   - It misses two more: `docs/rulings/wasm-simd8-survey.md:132` and
+     `artifacts/issue163-phase2/README.md:115`, the second a `--test b2_interleave` command.
+   - All five are historical. The files remain readable at `351ca593`.
+4. **INFO: H10's surviving guard depends on test order.** It catches a later-call variation only
+   because other tests call `render()` first. Run alone with `--exact`, it would pass. That is
+   acceptable for a tool that renders once per process.
+5. **INFO: one commit message miscounts.** `cb489843`'s message says 43 tests were deleted; the
+   commit deletes 42. With the one `a55c835b` restores, the net is the record's 41, which is right.
