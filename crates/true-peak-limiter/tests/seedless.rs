@@ -23,8 +23,10 @@
 //! `LinkMode::DualMono` (the dual body) and, for the banks, through `process_bank_mono` (the
 //! collapsed body), so all three bodies that reach `annex2_phases` are in the pin. After every
 //! block the digest folds every output word, every track's process report, every track's state
-//! payload and the resident gain-reduction observation. One digest per width.
+//! payload and the resident gain-reduction observation. One digest per width. Every float word is
+//! folded by its class-A bits (`dsp_reference::class_a`, #1065): the NaN's words hash as one value.
 
+use dsp_reference::class_a;
 use effect_contract::{
     BankWidth, EffectBankProcessBlock, EffectProcessBlock, EffectQuality, InitialParameterValue,
     LinkMode, NativeEffectFactory, ObservationSample, ParameterChannel, PrepareEffectBankRequest,
@@ -155,8 +157,8 @@ fn fold_report(hasher: &mut Sha256, report: &ProcessReport) {
 }
 
 fn fold_observation(hasher: &mut Sha256, sample: &ObservationSample) {
-    hasher.update(sample.left.to_bits().to_le_bytes());
-    hasher.update(sample.right.to_bits().to_le_bytes());
+    hasher.update(class_a::bits(sample.left).to_le_bytes());
+    hasher.update(class_a::bits(sample.right).to_le_bytes());
 }
 
 fn fold_payload(
@@ -168,9 +170,11 @@ fn fold_payload(
     let mut left = vec![0_u8; sizes.left_bytes as usize];
     let mut right = vec![0_u8; sizes.right_bytes as usize];
     write(StatePayloadOutput::new(&mut common, &mut left, &mut right, sizes).expect("sizes"));
-    hasher.update(&common);
-    hasher.update(&left);
-    hasher.update(&right);
+    for section in [&common, &left, &right] {
+        for word in class_a::le_words(section) {
+            hasher.update(word);
+        }
+    }
 }
 
 /// The fixed latency at 48 kHz, `N + 6` samples.
@@ -297,13 +301,13 @@ fn bank_run(width: BankWidth, backend: Backend, body: Body, hasher: &mut Sha256)
         match body {
             Body::Dual(_) => {
                 for word in left.iter().chain(right.iter()) {
-                    hasher.update(word.to_bits().to_le_bytes());
+                    hasher.update(class_a::bits(*word).to_le_bytes());
                 }
                 witness.block(block, &[&left, &right]);
             }
             Body::Collapsed => {
                 for word in &left {
-                    hasher.update(word.to_bits().to_le_bytes());
+                    hasher.update(class_a::bits(*word).to_le_bytes());
                 }
                 witness.block(block, &[&left]);
                 // A collapsed bank's right section is stale until the disengage copy; take it
@@ -356,7 +360,7 @@ fn scalar_run(track: usize, link_mode: LinkMode, hasher: &mut Sha256) -> Witness
         );
         hasher.update([block as u8]);
         for word in left.iter().chain(right.iter()) {
-            hasher.update(word.to_bits().to_le_bytes());
+            hasher.update(class_a::bits(*word).to_le_bytes());
         }
         witness.block(block, &[&left, &right]);
         fold_report(hasher, &report);

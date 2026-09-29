@@ -312,7 +312,8 @@ makeup and mix in pass 2. The oracle is `settled_body_tests::reference`'s one-pa
 randomized differentials assert, per block, that the two-pass prefix ran (dual and collapsed
 witnesses) exactly on a `Main` block with an open window, and that it took the all-wet arm exactly
 when the block was unbypassed, no mix ramp was open and every lane's mix was `1`; #982's NaN
-relaxation is granted only in a block whose witness shows an arm ran. The differentials also
+relaxation is granted only in a block whose witness shows an arm ran (#1065 later made every
+comparison class-A, every NaN one value, in every block). The differentials also
 retarget both channels with one value in one block, and restore ramps through the payload codec at
 `remaining = 0` with `current != target`. Two scenarios were pinned on the unmodified batch head
 (`081fdc6c`) before the change: `scenario_1006_ramping_prefix_is_pinned` (kernel, `f32`, `Simd4`,

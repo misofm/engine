@@ -6,9 +6,13 @@
 //! affordable here because there is exactly one realization: the scalar effect is
 //! `Channel<f32, 1>` and a bank is `Channel<Simd4, 4>` or `Channel<Simd8, 8>` of the same generic
 //! body, so a difference would be a `Lane` defect, not an effect defect.
+//!
+//! The digests fold every word through `dsp_reference::class_a`: class-A identity reads every NaN
+//! as one value (issue #1065), because a NaN's sign and payload are the CPU's choice.
 
 mod support;
 
+use dsp_reference::class_a;
 use effect_contract::{
     BankWidth, EffectBankProcessBlock, EffectProcessBlock, NativeEffectFactory, ParameterChannel,
     PrepareEffectBankRequest, PreparedEffectTarget, PreparedNativeEffectBank, StatePayloadInput,
@@ -895,16 +899,25 @@ fn fold_report(hasher: &mut Sha256, report: &effect_contract::ProcessReport) {
     }
 }
 
+/// Folds rendered output words. Each must be finite, the §4.4 check's promise (a non-finite block
+/// is zeroed), so the class-A fold can never hide a NaN in an output word (#1065).
 fn fold_words(hasher: &mut Sha256, words: impl Iterator<Item = f32>) {
     for word in words {
-        hasher.update(word.to_bits().to_le_bytes());
+        assert!(
+            word.is_finite(),
+            "an output word is not finite: {:#010x}",
+            word.to_bits()
+        );
+        hasher.update(class_a::bits(word).to_le_bytes());
     }
 }
 
 fn fold_payload(hasher: &mut Sha256, payload: &Payload) {
-    hasher.update(payload.0);
-    hasher.update(payload.1);
-    hasher.update(payload.2);
+    for section in [&payload.0[..], &payload.1[..], &payload.2[..]] {
+        for word in class_a::le_words(section) {
+            hasher.update(word);
+        }
+    }
 }
 
 /// Resets this thread's count of select-free depth-one tail passes (issue #976 M3); a no-op
@@ -1108,8 +1121,8 @@ const ODD_LIVE_DIGESTS: [(&str, &str); 3] = [
 /// one first, in the middle and last. The input is hostile (subnormals, `+0.0`, magnitudes
 /// `2^-24..2^26`, ragged blocks), and some blocks carry a `-0.0` or a non-finite word, which refuse
 /// elision where they land, so that bank or track renders all six sections. Every output word, every report and every lane's state
-/// payload after every block is folded into one SHA-256 per leg; state words are hashed as raw
-/// bits (no NaN reaches an output word: a non-finite block is zeroed).
+/// payload after every block is folded into one SHA-256 per leg, by class-A words (no NaN reaches
+/// an output word: a non-finite block is zeroed).
 ///
 /// Under `--features test-support` it also asserts M3's performance half: the HPF-everywhere shape
 /// runs its one live section, the odd tail, without the dry select on every admitted stationary
@@ -1606,19 +1619,24 @@ fn select_bank_digest(width: BankWidth, backend: Backend, mono: bool) -> SelectL
 }
 
 /// The digests [`admitted_blocks_render_the_base_bits_without_selects`] pins, recorded on the
-/// unmodified base of issue #977 (every stationary pass still masked).
+/// unmodified base of issue #977 (every stationary pass still masked) as raw bits
+/// (`9316456b…`, `d4a1dc9d…`, `f442a0d3…`), and re-pinned by #1065 with every NaN word folded to
+/// one value. Only NaN words moved: the same render hashed raw still gives the #977 pins, and
+/// its 48 NaN words (the poisoned dry lane's `NaN` integrators, 16 per leg, all `0xFFC0_0000` on
+/// x86) are the only words the fold changes. The folded scalar digest is the raw digest the
+/// AArch64 leg printed for #1017, whose arithmetic NaN is already `0x7FC0_0000`.
 const SELECT_DIGESTS: [(&str, &str); 3] = [
     (
         "scalar",
-        "9316456b588c8e1d52e7c2a0070df003bb01de5b9ba890c91c802eff1853ce2e",
+        "3719d502178e4c1e65fd01d18b9664d4a50259a1fc61d733cd229cd1e7e9f6e3",
     ),
     (
         "bank",
-        "d4a1dc9db58fa425e74034f8c8fedf77fc5a6e1e3a3596053fe07ca1318e71bf",
+        "d68a2494011d118d10eb295683957bd55c09092259d9161ae0bd0a0cfc6ac5b7",
     ),
     (
         "bank-mono",
-        "f442a0d3ea61ce2ca6af9d502b1fb0958ef5632a51554e0c95c350de9db5c162",
+        "e5db81b9acb69a451505fbd48add97d960c928f934b9fc20c6fd136a88b725a6",
     ),
 ];
 
@@ -1632,8 +1650,8 @@ const SELECT_DIGESTS: [(&str, &str); 3] = [
 /// keep its bank on the masked kernel. Hostile input (`+0.0`, subnormals, magnitudes
 /// `2^-24..2^26`, ragged blocks) with `-0.0`, non-finite and oversized words on some blocks, which
 /// refuse the elision where they land. Every output word, every report and every lane's state
-/// payload after every block is folded into one SHA-256 per leg, raw bits (state words included,
-/// `NaN` ones too).
+/// payload after every block is folded into one SHA-256 per leg, by class-A words: state words
+/// included, and every `NaN` one folded to one word (#1065), because the CPU picks its sign.
 ///
 /// Gate 2, under `--features test-support`: over the two switching shapes whose admission the
 /// input alone decides, the masked depth-two pass counter reads zero on every admitted stationary

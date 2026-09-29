@@ -6391,6 +6391,7 @@ mod target_application {
 #[cfg(test)]
 mod ramping_elision {
     use super::*;
+    use dsp_reference::class_a;
     use effect_contract::{
         EffectBankProcessBlock, EffectTargetRequest, NativeEffectTargetPreparation,
     };
@@ -7020,14 +7021,16 @@ mod ramping_elision {
         }
     }
 
-    /// Every word the EQ holds, as bits: coefficients, increments, targets, integrators, the
-    /// countdowns, the identity flags, the semantic targets and the fixed-point witness.
+    /// Every word the EQ holds, as class-A bits (every NaN one value, #1065): coefficients,
+    /// increments, targets, integrators, the countdowns, the identity flags, the semantic targets
+    /// and the fixed-point witness.
     fn fingerprint<L: Lane, const W: usize>(eq: &PreparedParametricEq<L, W>) -> Vec<u32> {
         let mut out = Vec::new();
         let mut lanes = [0_u32; MAX_LANES];
+        // Float words by their class-A bits: every NaN one value (#1065).
         let mut push = |value: L, out: &mut Vec<u32>| {
             value.store_bits(&mut lanes[..L::WIDTH]);
-            out.extend_from_slice(&lanes[..L::WIDTH]);
+            out.extend(lanes[..L::WIDTH].iter().map(|bits| class_a::word(*bits)));
         };
         for channel in [&eq.left, &eq.right] {
             for section in &channel.sections {
@@ -7056,7 +7059,7 @@ mod ramping_elision {
         out
     }
 
-    /// The contract payload of every lane.
+    /// The contract payload of every lane, by class-A words (every NaN one value, #1065).
     fn payloads<L: Lane, const W: usize>(eq: &PreparedParametricEq<L, W>) -> Vec<u8> {
         let mut out = Vec::new();
         for lane in 0..W {
@@ -7072,9 +7075,9 @@ mod ramping_elision {
                 },
             )
             .expect("snapshot");
-            out.extend_from_slice(&common);
-            out.extend_from_slice(&left);
-            out.extend_from_slice(&right);
+            for section in [&common, &left, &right] {
+                out.extend(class_a::le_words(section).flatten());
+            }
         }
         out
     }
@@ -7616,8 +7619,7 @@ mod ramping_elision {
                 candidate.render(&mut candidate_left, &mut candidate_right, mono, first);
             let elided = ramping_elided_block_count() - elided_before;
             assert_eq!(oracle_report, candidate_report, "{context}: report");
-            let same =
-                |a: &[f32], b: &[f32]| a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits());
+            let same = |a: &[f32], b: &[f32]| a.iter().zip(b).all(|(x, y)| class_a::same(*x, *y));
             assert!(
                 same(&oracle_left, &candidate_left),
                 "{context}: left output"

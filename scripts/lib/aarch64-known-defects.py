@@ -34,21 +34,10 @@ import sys
 
 # issue, package, selector (`lib` or `test:<integration test>`), exact test name, reason.
 TEST_ROWS: dict[str, list[tuple[str, str, str, str, str]]] = {
-    "debug": [
-        # #1065, AArch64 NaN encodings, not LANE-3: a debug build makes no fmaxnm fold. An
-        # arithmetic NaN is 0x7FC00000 (positive) on AArch64 where x86 answers 0xFFC00000
-        # (negative), and a signalling operand wins NaN propagation. These pins fold raw NaN words
-        # from hostile input, so they move on AArch64 and nowhere else. The reason is each pin's
-        # AArch64 digest: with every NaN folded as one word, the renders are identical to x86's
-        # (#1017 attempt 1 evidence). #1049 deleted the compressor's 981, 983, 985 and 995 pins
-        # (and 982) as dominated, and their rows with them.
-        ("1065", "compressor", "lib",
-         "kernel::settled_body_tests::scenario_1006_ramping_prefix_is_pinned",
-         'left: "d13e08319475e968e4f43d253e1314daa55fed339f9e931f2a82023ad78af8a8"'),
-        ("1065", "parametric-eq", "test:bank",
-         "admitted_blocks_render_the_base_bits_without_selects",
-         'left: "3719d502178e4c1e65fd01d18b9664d4a50259a1fc61d733cd229cd1e7e9f6e3"'),
-    ],
+    # #1065 (AArch64 NaN encodings) left this leg: class-A identity reads every NaN as one value
+    # (owner decision 10), so its two pins fold NaN words through `dsp_reference::class_a` and
+    # pass on both CPUs.
+    "debug": [],
     "release": [
         # LANE-3 (#1019): in release the D8 `select(a > b, a, b)` folds into `fmaxnm`/`fminnm`
         # inside `exp2_lane` and `log2_lane`, scalar and vector alike. Those instructions answer

@@ -258,7 +258,8 @@ Driver: one mutation at a time applied to `src/lib.rs`, then
 `cargo test --release -p parametric-eq --features test-support --lib --test bank --no-fail-fast`,
 tree restored byte for byte between rows. Gate 1 is `admitted_blocks_render_the_base_bits_without_selects`
 (`tests/bank.rs`; digests pinned on the unmodified base: scalar `9316456b…`, bank `d4a1dc9d…`,
-bank-mono `f442a0d3…`). Gate 2 is its masked depth-two pass counter (`test_only_masked_pair_passes`,
+bank-mono `f442a0d3…`; #1065 re-pinned them with every NaN folded to one word, moving only NaN
+words). Gate 2 is its masked depth-two pass counter (`test_only_masked_pair_passes`,
 so `--features test-support`): zero on the admitted stationary blocks and non-zero on the refused
 ones of the two switching shapes. The in-crate rows are
 `elision::an_admitted_plan_runs_every_pair_select_free` (which also pins the tail's #976 rule

@@ -67,7 +67,7 @@
 //!   differ".
 
 use dsp_reference::{
-    ReferenceSvf, ReferenceSvfCoefficients, ReferenceSvfKind, deterministic_bipolar_noise,
+    ReferenceSvf, ReferenceSvfCoefficients, ReferenceSvfKind, class_a, deterministic_bipolar_noise,
 };
 
 /// `f32` unit roundoff.
@@ -856,10 +856,10 @@ fn exhaustive_identities() {
             let x = f32::from_bits(bits);
             let f = mix_fused(x, g, 0.0);
             let u = mix_unfused(x, g, 0.0);
-            if f.to_bits() != u.to_bits() && !(f.is_nan() && u.is_nan()) {
+            if !class_a::same(f, u) {
                 mismatches += 1;
             }
-            if u.to_bits() != bits && !(x.is_nan() && u.is_nan()) {
+            if !class_a::same(u, x) {
                 carveout.classify(x, (x * g) - x);
             }
         }
@@ -884,10 +884,10 @@ fn exhaustive_identities() {
             let y = f32::from_bits(bits);
             let f = one_pole_fused(0.0, x, y);
             let u = one_pole_unfused(0.0, x, y);
-            if f.to_bits() != u.to_bits() && !(f.is_nan() && u.is_nan()) {
+            if !class_a::same(f, u) {
                 mismatches += 1;
             }
-            if u.to_bits() != flush(y).to_bits() && !(y.is_nan() && u.is_nan()) {
+            if !class_a::same(u, flush(y)) {
                 carveout.classify(y, x - y);
             }
         }
@@ -911,10 +911,10 @@ fn exhaustive_identities() {
             let l = f32::from_bits(bits);
             let f = matrix_fused(1.0, 0.0, l, r);
             let u = matrix_unfused(1.0, 0.0, l, r);
-            if f.to_bits() != u.to_bits() && !(f.is_nan() && u.is_nan()) {
+            if !class_a::same(f, u) {
                 mismatches += 1;
             }
-            if u.to_bits() != l.to_bits() && !(l.is_nan() && u.is_nan()) {
+            if !class_a::same(u, l) {
                 carveout.classify(l, 0.0 * r);
             }
         }
