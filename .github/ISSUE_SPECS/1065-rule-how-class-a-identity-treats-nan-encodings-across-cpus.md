@@ -51,3 +51,147 @@ scenario still yields NaN (so folding cannot hide a NaN appearing where finite o
    for them.
 2. A planted change that turns a finite output into NaN still fails the finite-output tests.
 3. #1019's gate 1 refers to this rule for NaN payloads instead of requiring raw NaN-bit identity.
+
+## Attempt 1 evidence
+
+Terra, 2026-09-29, branch `codex/1065-nan-one-value` from `codex/batch-slim-4` (`b695758b`).
+Implementation commit `88f276df` (19 files, +316 / −135), then this record. No product line
+moved: every Rust hunk is in a `#[cfg(test)]` module, a `tests/` file, the test-only
+`dsp-reference` crate or the `audit` tool.
+
+### The helper
+
+`crates/dsp-reference/src/class_a.rs` (`dsp-reference` has no dependencies and no production
+dependent): `NAN_WORD = 0x7FC0_0000`, `word(bits)`, `bits(f32)`, `same(a, b)` and `le_words(bytes)`
+(a payload or plane folded word by word; hashing its chunks equals hashing the buffer when it holds
+no NaN). Unit tests: the x86 default NaN, the AArch64 one, payloads and both signalling forms fold
+to one word; both zeros, both infinities, `±MAX` and the subnormal boundaries keep their bits; a NaN
+is never `same` as a number; `-0.0` and `+0.0` stay two values. `lane` gains it as a
+dev-dependency (policy-clean: `check-lane-policy.sh` admits workspace crates, and
+`check-conformance-boundaries.sh` reads only `[dependencies]` and `src/`).
+
+### Which digests can see NaN: measured, not guessed
+
+A NaN spy (a scratch copy of `digest` 0.11.3, patched in with `cargo --config patch…`, counting
+every hashed 4-byte word in the NaN range per test thread) ran over a copy of the base tree with
+the CI test sets: `test-debug-a`'s workspace set, `test-debug-b`'s DSP set, `test-release`
+(`lane`, `math`, `wasm-gates` incl. G5 and G6) and `cargo test --release -p audit -p bench -p
+console-workload`, then `check-builtins-fixtures.sh`, `check-effect-contract.sh` and
+`check-console-fixtures.sh` with spied binaries. Three pinned digests hash NaN words:
+
+| digest | NaN words | on x86 |
+|---|---|---|
+| compressor `scenario_1006_ramping_prefix_is_pinned` | 28,800 (12,520 already folded: the all-wet kernel words) | `0xFFC00000` ×9,348, `0x7FC01234` ×6,444, `0xFFE00001` ×6,237, `0x7FC00001` ×5,941, `0x7F800001` ×451, `0xFFA00001` ×379 |
+| EQ `bank` `admitted_blocks_render_the_base_bits_without_selects` | 48 (16 per leg, the poisoned dry lane's integrators) | `0xFFC00000` ×48 |
+| limiter `seedless` `the_seedless_scenario_renders_the_pinned_base_words` | 40 | `0x7FC00000` ×40 (the planted `f32::NAN`, copied) |
+
+The only other hits were halves of `math` M3's `u64` result words (M3, and G5/G6 which replay
+it); a rerun ignoring 8-byte updates gave zero hits for G5, G6 and M3, and no 8-byte update was an
+`f64` NaN. So the G5 corpus (its rule 2 and `g5_lane_corpus_is_finite`), the console digests
+(`console-workload`), the builtins fixtures and the effect-contract harness never hash a NaN
+word, and are unchanged.
+
+### What folds through it
+
+- The three digests above: output words, recursive and state words, and payload words
+  (`le_words`). Masks and report counters are integers and are hashed as before.
+- The compressor's grid and randomized differentials (`assert_words`, `assert_state`): every
+  word class-A in every block. #982's relaxation was granted only in blocks whose witness showed
+  the all-wet arm ran; under the ruling it is universal. The per-step assertion that a NaN payload
+  differs only in a block the boundary check rejects stays.
+- The EQ ramping differential (`ramping_elision::scenario`: outputs, `fingerprint`, `payloads`).
+- The ad-hoc "both NaN" comparisons that already existed now call the helper: `lane`
+  `g2_kernel_identity::same_or_both_nan` and `fader_matrix::same_word`, the limiter's #1013
+  annex-2 induction and `assert_same_words` (its randomized differential), and the `audit unfused-fma`
+  sweeps (each rewrite is the same predicate: `!same(u, flush(y))` is the old two-clause test,
+  since `flush` keeps a NaN a NaN).
+
+Left alone, on purpose: strict `to_bits` comparisons that do not fold NaN today. They compare two
+renders on one CPU, pass on both CPUs (#1017's leg), and are stricter than class A; relaxing them
+buys nothing. G5's op-level counts: the max/min lowering pool compares which operand's NaN a
+`select` returns (D8's contract, and how LANE-3 shows), and the `f64`-lane counts already compare
+an `f64` NaN as one class; the helper is `f32`-only. `math` M2 is #1019's.
+
+### Re-pins: only NaN words moved
+
+The fold is applied with temporary instrumentation (not committed) that could hash the old way
+and count what it folded.
+
+- **Compressor `SCENARIO_1006`**: `162979dd…` → `bd3d711f86bbd00f015a0ead7e04116daabd154b2b8e9d8ef17dc6e616b7382c`.
+  The same render hashed the old way (raw everywhere except the all-wet kernel words) gives
+  `162979dd…` on the new tree, so the stream is unchanged; the old pin hashed 16,280 NaN words
+  raw, none of them `0x7FC00000`, and those are the only words the fold changes.
+- **EQ `SELECT_DIGESTS`**: scalar `9316456b…` → `3719d502178e4c1e65fd01d18b9664d4a50259a1fc61d733cd229cd1e7e9f6e3`,
+  bank `d4a1dc9d…` → `d68a2494011d118d10eb295683957bd55c09092259d9161ae0bd0a0cfc6ac5b7`,
+  bank-mono `f442a0d3…` → `e5db81b9acb69a451505fbd48add97d960c928f934b9fc20c6fd136a88b725a6`.
+  Hashed raw, the new tree still gives the three #977 pins; the fold changes exactly the 48
+  `0xFFC00000` words. **The folded x86 scalar digest is the digest the AArch64 leg printed** (the
+  deleted row's reason, `left: "3719d502…"`): AArch64's arithmetic NaN is already `0x7FC00000`, so
+  folding x86's reproduces AArch64's stream.
+- The limiter's pins do not move: its 40 NaN words are already `0x7FC00000`. Every other pin in
+  `bank.rs` (`ODD_LIVE_DIGESTS`, the skew and block-limit pins) is unchanged.
+
+### Gate 1: the two tests pass, with no rows left
+
+- x86: both pass in dev and release (below).
+- AArch64: **qemu is not available here** (no `qemu-aarch64`, no `aarch64-unknown-linux-gnu`
+  target), so the arm64 CI legs are the confirmation. The EQ case is shown above without it. For the
+  compressor, #1017's evidence found the digests identical on both CPUs with every NaN folded, and
+  this fold covers every float word the digest hashes (kernel, recursive, finished and payload
+  words).
+- `scripts/lib/aarch64-known-defects.py`: the two #1065 rows are gone and `debug` is `[]`.
+  `run-aarch64-tests.sh` refused a leg with no rows (`((${#rows[@]} > 0))`); it now fails only when
+  the table cannot be read, and an empty table names nothing to skip (simulated for both modes).
+- x86 resolution of both legs: the debug set (25 product crates, `dsp-reference`, `conformance`,
+  `target-smoke`, the leg's features) builds with `--no-run` and lists 1,789 tests, both former
+  expected failures among them, and `judge-skips debug` passes; the release set (`lane`, `math`)
+  builds and `judge-skips release` passes, each #1019 row naming exactly one test.
+
+### Gate 2: a planted finite-to-NaN change still fails
+
+Two guards were added. `scenario_1006` asserts that NaN still reaches the kernel words (the
+non-vacuity guard: `nan_words > 0`) and that every finished word, after the boundary check, is
+finite. The EQ bank's `fold_words` asserts every digested output word finite. Three plants, each
+reverted byte for byte:
+
+| plant | failing tests | includes |
+|---|---|---|
+| P1: compressor all-wet settled output × NaN (before the boundary check) | 32 | all three randomized differentials, both grids, `scenario_1006`, `the_corpus_is_finite`, the f64-oracle and partition tests |
+| P2: compressor `finish_channel` writes NaN into word 0 of an accepted block (oracle and candidate both see it, so the differentials cannot) | 20 | `scenario_1006` ("a finished word is not finite (block 0, W1)"), `passes_effect_contract_conformance`, the ramping bank scenario, partition and dry-bit tests |
+| P3: EQ writes NaN into word 0 of an accepted dual block | 19 | `admitted_blocks…` ("an output word is not finite: 0x7fc00000"), every other `bank.rs` pin, conformance, time-domain tests |
+
+P2 is the case the fold could hide: the differential compares NaN with NaN. The finiteness guard
+is what catches it.
+
+### Other gates
+
+- `cargo check --workspace --all-targets --all-features`: ok. `cargo clippy --workspace
+  --all-targets --all-features -- -D warnings`: ok. `cargo fmt --all -- --check`: ok.
+- Dev: `cargo test -p dsp-reference -p compressor -p parametric-eq -p true-peak-limiter -p lane
+  --all-targets --features math/lane,parametric-eq/test-support,lane/test-support`: all pass;
+  `parametric-eq --test bank` without features: 11 pass. Release: the same set: all pass.
+- `cargo test --locked --release -p audit -p console-workload`: all pass; the console digests are
+  unchanged (and hash no NaN).
+- `scripts/run-wasm-gates.sh` (native, wasm simd128 and the V8 spill gate): ok.
+- Policy scripts, 55 runs, all ok: every `check-*`/`test-*` policy pair (workspace,
+  conformance-boundaries, lane, unfused-seal and its `--self-test`, env-vocabulary, realtime,
+  bench, builtins, effect-runtime, graph, host-core, protocol-control, rack, session,
+  realtime-audit-leak, artifact-evidence-leak, dsp-research), `check-parametric-eq-render-contract`,
+  the effect-runtime and builtins fixture scripts, `check-console-benchmark-fixture`,
+  `check-bench-preconditions`, and with `python3 -B`: `check-`/`test-ci-path-routing`,
+  `check-`/`test-script-reachability`, `check-`/`test-test-support-ci`,
+  `check-release-shape --self-test`, `check-scalar-oracle-absent --self-test`, `check-sdk-deletions`
+  (and `--self-test`), `aarch64-known-defects --self-test`, `check-web-audioworklet-v8-spill
+  --self-test`, `web-audioworklet-identity --self-test`, `test-npm-publish-modes` and the
+  stem-identity fixture check.
+- Not run: the 2^32 `audit unfused-fma` sweep (a manual report, not CI; the rewrite is
+  predicate-for-predicate).
+
+### For root
+
+- **#1051** adds `dsp_reference::randomized::same_word`, the same predicate as `class_a::same`.
+  At merge, make it delegate to (or re-export) `class_a::same` so the fold lives in one place.
+  `Cargo.lock`: #1051 and this branch touch different stanzas. The compressor `settled_body_tests`
+  hunks do not overlap #1051's `randomized_width` hunk.
+- The compressor's `MUTATIONS.md` (#1006) and the EQ's (#977) name the old relaxation and pins;
+  each got a one-clause note rather than a rewrite.
