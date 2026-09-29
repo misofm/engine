@@ -119,6 +119,10 @@ fn console_slots_refuse_a_sidechain_and_per_track_fields() {
     }
 }
 
+/// A track's console entries are exactly the session's slots, in slot order. A validator that
+/// matched entries by name alone would accept a misordered track (and then lower it by position
+/// onto the wrong slots); one that only checked the count would accept an unknown, a repeated or a
+/// missing slot.
 #[test]
 fn unknown_missing_duplicate_and_misordered_entries_refuse() {
     let mut unknown = console_document();
@@ -165,6 +169,10 @@ fn unknown_missing_duplicate_and_misordered_entries_refuse() {
     );
 }
 
+/// A console address names the slot and not its section, so a slot ID repeated across
+/// `pre_insert` and `post_insert` would make `(track, console, slot)` ambiguous; and third-party
+/// code is never a console slot. A uniqueness check scoped per section, or a slot parser that took
+/// any effect identity, passes the populated fixtures and fails here.
 #[test]
 fn slot_ids_are_unique_across_sections_and_slots_are_native() {
     let mut repeated = console_document();
@@ -241,6 +249,8 @@ fn retired_tap_tokens_refuse() {
     }
 }
 
+/// The retired rack spellings are unknown automation-target tokens, never aliases: a table that
+/// kept `dynamic` as a synonym for `inserts` would silently accept a pre-decision-12 target.
 #[test]
 fn retired_rack_tokens_refuse() {
     for rack in ["simd1", "dynamic", "simd2"] {

@@ -5268,7 +5268,10 @@ mod tests {
             // Re-pinned again by issue #1080: A1's observation generation goes too, so
             // `MeterSnapshot` is 160 and `MeterAccumulator` 232 bytes; only the resource rows and
             // this joined manifest identity move.
-            "9161d2ca028aeb171f7702f951774298c06d7ebeae434973386f1d465b4ff9d3",
+            // Re-pinned by issue #1093: `canonical.json` moved to decision 12's console shape, so
+            // the two `prepare_256_tracks` workloads name its new digest (and the `post_pan` tap);
+            // no PCM, meter, response or resource payload moved.
+            "fced289fb8d0891068ac824b6104266e33b69876e6014cf06afeed9eb6a1e2f9",
             "accepted joined-corpus manifest identity"
         );
         remove_temporary_root(root);
