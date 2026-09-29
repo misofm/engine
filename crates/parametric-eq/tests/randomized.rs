@@ -11,7 +11,7 @@
 //! answers `Ok(None)` at a width this build does not execute, and on the first heterogeneous
 //! member, before it has validated every member's initial values. The three-outcome rule on
 //! `NativeEffectFactory::bind_homogeneous_bank` says an invalid member refuses first, so "an absent
-//! capability can never hide a malformed member". Until its issue (#1051 defect 2) lands the per-PR test accepts
+//! capability can never hide a malformed member". Until #1070 lands the per-PR test accepts
 //! that decline (`Known::BindDeclinesBeforeValidating`); the ignored test below is the
 //! reproducer.
 
@@ -28,7 +28,7 @@ conformance::randomized_effect_test!(
 
 /// The same differential without the narrowing: red until the known defect's issue lands.
 #[test]
-#[ignore = "#1051 defect 2: bind declines before validating its members; see the module documentation"]
+#[ignore = "#1070: bind declines before validating its members; see the module documentation"]
 fn the_bank_renders_its_scalar_instances_including_the_known_defect() {
     bench_support::alloc::assert_installed();
     bench_support::alloc::set_mode(bench_support::alloc::Mode::Count);

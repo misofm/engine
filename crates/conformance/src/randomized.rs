@@ -75,7 +75,7 @@ pub enum Known {
     /// rule says an invalid member refuses first. Narrowing: the illegal-member probe accepts the
     /// decline.
     ///
-    /// #1051 defect 2.
+    /// Owned by #1070.
     BindDeclinesBeforeValidating,
     /// The effect holds subnormal words it was legally given -- a subnormal parameter value
     /// inside the declared domain, a subnormal input sample in its history -- and its own restore
@@ -83,7 +83,7 @@ pub enum Known {
     /// restore. Narrowing: a refused own snapshot is accepted, so long as the scalar instance and
     /// every bank lane refuse it alike.
     ///
-    /// #1051 defect 3.
+    /// Owned by #1071.
     SubnormalStateRefusedOnRestore,
     /// A lane's rendered bits depend on where its in-flight ramps are cut: by another lane's
     /// retarget in the same bank (so the bank is not its scalar instances), and by a block
@@ -91,7 +91,7 @@ pub enum Known {
     /// either carries automation, on one lane only, or renders chunked blocks, never both; and a
     /// restore carries the lane's own untouched snapshot, so it starts no ramp elsewhere.
     ///
-    /// #1051 defect 1.
+    /// Owned by #1069.
     RampCutsMoveBits,
 }
 
@@ -1837,7 +1837,7 @@ pub fn assert_reached(coverage: &DifferentialCoverage) {
     );
 }
 
-/// The D7 recovery's report against the contract (#1051 defect 5), on fixed input: no seed.
+/// The D7 recovery's report against the contract (#1073), on fixed input: no seed.
 ///
 /// D7 (`docs/EFFECT_CONTRACT_V1.md`) checks output finiteness once per block, zeroes a failing
 /// block, resets state, and increments a **block** counter: "the contract's report counts blocks,
@@ -2009,7 +2009,7 @@ pub fn assert_d7_reports(factory: &dyn NativeEffectFactory) {
     let violations = d7_report_violations(factory);
     assert!(
         violations.is_empty(),
-        "{}: the D7 recovery's report breaks the contract (#1051 defect 5):\n{}",
+        "{}: the D7 recovery's report breaks the contract (#1073):\n{}",
         factory.descriptor().display_name,
         violations.join("\n")
     );

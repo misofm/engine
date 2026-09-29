@@ -22,7 +22,7 @@
 //! its first sample, so where a neighbour's ramp or the host's block ends decides when this lane's
 //! coefficients move.
 //!
-//! Until its issue (#1051 defect 1) lands, the per-PR test lets a scenario either carry automation, on one lane
+//! Until #1069 lands, the per-PR test lets a scenario either carry automation, on one lane
 //! only, or render chunked blocks, never both, and restores only a lane's own untouched snapshot
 //! (`Known::RampCutsMoveBits`); everything else runs at full strength. The ignored test below is
 //! the reproducer and prints the seed that replays it.
@@ -40,7 +40,7 @@ conformance::randomized_effect_test!(
 
 /// The same differential without the narrowing: red until the known defect's issue lands.
 #[test]
-#[ignore = "#1051 defect 1: a ramp's cut moves a lane's bits; see the module documentation"]
+#[ignore = "#1069: a ramp's cut moves a lane's bits; see the module documentation"]
 fn the_bank_renders_its_scalar_instances_including_the_known_defect() {
     bench_support::alloc::assert_installed();
     bench_support::alloc::set_mode(bench_support::alloc::Mode::Count);
@@ -59,10 +59,10 @@ fn the_bank_renders_its_scalar_instances_including_the_known_defect() {
     conformance::assert_reached(&coverage);
 }
 
-/// The D7 recovery's report against the contract, on fixed input (no seed): red until #1051
-/// defect 5 lands. This effect counts the frames of a failing block on both channels, where the contract counts blocks.
+/// The D7 recovery's report against the contract, on fixed input (no seed): red until #1073
+/// lands. This effect counts the frames of a failing block on both channels, where the contract counts blocks.
 #[test]
-#[ignore = "#1051 defect 5: the D7 recovery's report breaks the contract; see the test's documentation"]
+#[ignore = "#1073: the D7 recovery's report breaks the contract; see the test's documentation"]
 fn the_d7_recovery_reports_one_block_on_the_failing_lane() {
     conformance::assert_d7_reports(&multiband_compressor::MultibandCompressorFactory);
 }

@@ -16,10 +16,10 @@ conformance::randomized_effect_test!(
     witness: false,
 );
 
-/// The D7 recovery's report against the contract, on fixed input (no seed): red until #1051
-/// defect 5 lands. This effect counts the frames of a failing block (64 for one block of 64), where the contract counts blocks.
+/// The D7 recovery's report against the contract, on fixed input (no seed): red until #1073
+/// lands. This effect counts the frames of a failing block (64 for one block of 64), where the contract counts blocks.
 #[test]
-#[ignore = "#1051 defect 5: the D7 recovery's report breaks the contract; see the test's documentation"]
+#[ignore = "#1073: the D7 recovery's report breaks the contract; see the test's documentation"]
 fn the_d7_recovery_reports_one_block_on_the_failing_lane() {
     conformance::assert_d7_reports(&gate_expander::GateExpanderFactory);
 }
