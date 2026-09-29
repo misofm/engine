@@ -167,3 +167,148 @@ tests, so the compiler proves nothing unused: workspace clippy `-D warnings` is 
 - `check-console-fixtures.sh`.
 - The CI routing check and its tests.
 - 58 policy and self-test scripts, run with `python3 -B` for Python: the set of the lint, docs-gates and gate-self-tests jobs, plus `check-release-shape.py`, `check-scalar-oracle-absent.py --wasm` and `web-audioworklet-identity.py --self-test`.
+
+## Sol verdict, attempt 2
+
+**PASS.** Sol, 2026-09-29. Verified on a scratch merge of `2f786f97` into the batch head
+`codex/batch-slim-4` at `adddb4e5` (#1060, #1044 and #1047 were already in #1064's base
+`b695758b`; the batch adds #1046, #1075 and #1038). Rust 1.97.1, Node 22.23.2.
+
+### The merge
+
+One textual conflict, in `tools/parameter-metadata/tests/abi_layout.rs`: #1046 deleted
+`rendering_is_deterministic`, which sits inside the region #1064 rewrote. The resolution is #1064's
+file without that one function, and it is exactly #1064's change plus #1046's deletion. No semantic
+conflict:
+- #1060's checker and ceilings pass on the merged artifact.
+- #1044's hand-off passes: `check-sdk-generated.sh` against the artifact's generated documents.
+- #1047's frozen export set in `check-web-audioworklet.sh` passes.
+- The merged module is `5afb47e3…`, the branch's. The base module (`adddb4e5`) is `9aca423b…`, the
+  same as `b695758b`'s.
+- The router gives `route=full` and `self_tests=["sdk-deletions"]` over `adddb4e5..merge`.
+
+### Checks
+
+1. **The ordinary path behaves as before.**
+   - *Source.* I diffed every changed function: 15 top-level in `ffi.rs`, 33 in `lib.rs`.
+     - Every alias body is identical except its handle check. `verify_live_host` returns
+       `INVALID_ARGUMENT` for handle 0 or a mismatch and `INTERNAL` for a failed exclusive borrow,
+       in the same order as `refuse_protected_observation_alias` and `stream_host_dispatch` did on a
+       legacy host.
+     - The host methods lose only `protected_observation_prepared()` branches, which were false on
+       every legacy host. `legacy()` and `legacy_mut()` are exactly `spectrum_capture.as_ref()` and
+       `as_mut()`.
+     - `boot_with_spectrum_config` is `boot_transaction` with the protected argument `None`.
+     - The block removed from `submit_commands_inner` duplicated the two checks that follow it,
+       with the same codes.
+   - *Differential run.* I drove the base and merge modules with identical deterministic call
+     sequences over all 116 shared exports, and they matched byte for byte (83,368 records).
+     - The runs: 4 seeds and 9 scenarios, covering plain, single, collection and explicit-hop
+       boots, a bad hop, handles 0, stale and after dispose, and a double dispose. The `spectrum_*`
+       aliases stage targets through the SDK's own staging functions.
+     - The comparison covers return codes, boot results, and the bytes of the status, command
+       report, meter header, stream metadata, spectrum result and capture, observation results and
+       live-response result.
+     - Every alias returned `ok` as well as its refusals: invalid argument, wrong state,
+       backpressure, unsupported and buffer too small.
+   - *Tests.* Base and merge pass their host-web and host-core tests. The SDK headless evals pass
+     285/285 on base and 284/284 on the merge; the one removed eval is the protected boot. All
+     three browsers pass in CI mode on both.
+   - *The app.* `misofm/app` at `0757a849` and at `7effbd6` names 7 raw exports, all present, and
+     reads only kept `ABI_LAYOUT` keys. Neither `engine-web-adapter` nor the app's vendored packages
+     name a removed item.
+2. **"No named export removed" is honest.**
+   - The merged module has exactly base's function exports minus the 18, and the 116 shared exports
+     have identical signatures.
+   - No removed name appears anywhere in `hosts/host-web/web/`, the SDK or the app.
+   - `sdk/src/index.ts` is unchanged. See finding 4 for the narrowed `ABI_LAYOUT` value and types.
+3. **Memory.** The pins are right, but finding 1 corrects the recorded cause. The #1060 ceilings
+   still discriminate: the self-test is green at every ceiling, with 32 red mutations. See
+   finding 3.
+4. **host-core.** Its observation-demand surface is now orphaned in production (finding 2).
+5. **Test lists** (workspace, merge): 2,166 → 2,068 tests, with 102 removed and 4 added.
+   - Every removed test drove the protected path, its records or its endpoint staging.
+   - Two of them pinned a refusal of boot or dispose while `OBSERVATION_STAGING` was borrowed. That
+     state is unreachable from single-threaded Wasm, because no export re-enters another.
+
+### Gates on the merge
+
+All pass:
+- `cargo fmt --check`.
+- `cargo check` and `clippy -D warnings`, workspace, `--all-targets --all-features`.
+- `cargo doc -D warnings`.
+- wasm `simd128`: `check` for host-web, target-smoke, protocol, dsp-reference and conformance;
+  `clippy -D warnings` for host-web.
+- Tests: host-web (117 unit, 3 integration), host-core, parameter-metadata and session-validator.
+- The SDK: `npm ci`, `check-sdk-generated`, deletions and its self-test, types, headless, and
+  `sdk-package.sh check`.
+- `check-web-audioworklet.sh`, both with and without metadata regeneration. The closures are
+  render 8/5, `meter_poll` 9 and `command_submit` 36, and the kernel shape is 15.
+- `test-web-audioworklet.sh`.
+- The V8 spill gate and its self-test.
+- `check-browser-expected-resources.py --artifacts` and `--self-test`.
+- `check-scalar-oracle-absent.py`, `--wasm` and `--self-test`.
+- `web-audioworklet-identity.py --self-test`.
+- `check-console-fixtures.sh` against the release `session_validator`.
+- `check-capi-abi.sh` and its self-test.
+- 60 lint, docs-gates, gate-self-tests, route and release-shape commands, Python under `python3 -B`.
+- Three-browser qualification with `--check-matrix --self-test-mutations`: Chromium 151, Firefox 153
+  and WebKit 26.5.
+
+### Findings, by severity
+
+No defect.
+
+1. **Medium: the recorded cause of the one-page drop is wrong.**
+   - `760a577e` says removing the protected path "shrinks the shipped module's static footprint by
+     one 64 KiB Wasm page". It does not.
+     - Both modules declare `initial=18` pages.
+     - `.rodata` falls by only 2,984 B (100,596 → 97,612).
+   - The page moved; it was not saved.
+     - `boot` no longer borrows `OBSERVATION_STAGING`. `11d28e8d` added that borrow before
+       `31393181` raised these pins.
+     - So that thread-local's lazy heap allocation moves from `boot` to the first
+       observation-staging query.
+   - Measured with `session.json` in Node:
+
+     | after | base pages | merge pages |
+     |---|---|---|
+     | `boot` | 21 | 20 |
+     | `observation_id_ptr()` | 21 | 21 |
+     | response staging | 38 | 38 |
+
+     With the staging forced before boot, both are 21 after `boot`.
+   - The shipped worklet forces `observation_id_ptr()` immediately after boot
+     (`miso-engine-v1-audio-worklet.js:332`), so shipped memory after init is unchanged.
+   - The direct oracle samples `memoryBytes` right after `boot`, which is why its pins move.
+   - So the attempt-2 claim that the staging change is "unobservable" is not quite right: a status
+     read right after boot sees one page less.
+   - The real savings are the module's −92,355 B and the bridge rows' −2,996 B (the host shell and
+     the staging's `size_of`).
+2. **Medium, follow-up: host-core's observation-demand API is orphaned in production.**
+   - host-web was its only non-test consumer. The compiler proves nothing unused only because the
+     items are `pub`.
+   - In a scratch copy I made `observation_demand` and the four
+     `prepare_host_runtime_with_observation_demand*` functions crate-private.
+     `cargo check --workspace --lib --bins --all-features` still compiles.
+   - `cargo rustc -p host-core --lib -- -A unreachable_pub` then reports 45 dead-code warnings:
+     - all of `observation_demand.rs` (2,501 lines);
+     - the four prepare functions;
+     - the controlled-spectrum machinery in `spectrum.rs` (`ControlledSpectrumCandidate`,
+       `ControlledSpectrumSlot`, `reset_for_controlled_stage` and
+       `retire_controlled_after_receipt`).
+   - Only host-core's own `tests/observation_demand.rs` (25 tests) reaches it.
+   - Decision 9 names only host-web items, so leaving it is within scope. It needs a successor
+     issue: remove it, or rule to keep it for an ordinary-path analyzer.
+3. **Low: the #1060 bridge ceilings keep the old values.**
+   - `bridgeMetadataBytes` is 1,146,259 of 1,159,360, and `bridgeRetainedBytes` is 1,166,768 of
+     1,181,888.
+   - #1060's rule (+10 % beyond the fixed 1 MiB, rounded up to 64 B) now gives 1,156,032 and
+     1,178,624. Headroom is about 13 % rather than 10 %.
+   - #1060 raises ceilings only on growth and leaves decreases to the completeness oracles, so this
+     is optional.
+4. **Low, disclosed: the SDK's public type surface narrows.**
+   - `index.ts` re-exports `generated/abi.ts`. So the public `ABI_LAYOUT` loses 18 `exports`,
+     8 `structures` and 9 `constants` entries.
+   - The public types `AbiLayout`, `ExportName`, `AbiStructureName` and `AbiConstantName` narrow.
+   - No kept entry changed, and no known consumer reads a removed one.
