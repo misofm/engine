@@ -196,5 +196,5 @@ pub fn run_case<L: Lane>(case: usize, out: &mut [u32]) {
 /// A regression guard and the cross-target reference, not an oracle: what makes the values
 /// *correct* is `tests/polyphase_identity.rs` against the frozen 63-tap graph and `tests/contract.rs`
 /// against the `f64` model in `dsp-reference`. These pins were produced by the scalar
-/// `Lane` instantiation on `x86_64` and are checked at all three widths and on both wasm legs.
+/// `Lane` instantiation on `x86_64` and are checked at all three widths and on the wasm leg.
 pub const SOFT_CLIP_DIGESTS: [[u8; 32]; CASE_COUNT] = include!("corpus_digests.in");

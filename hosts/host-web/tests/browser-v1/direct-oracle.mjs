@@ -547,7 +547,7 @@ async function main() {
   const sessionDocument = await readFile(path.join(fixtureDirectory, "session.json"));
   // W4-D1: one shipped artifact, so the direct oracle drives it alone. The cross-backend proof
   // moved to two independent places: #83's G5 corpus runs the same kernels natively at
-  // Scalar/Simd4/Simd8 and under wasmtime with and without simd128, and `nativePcmF32leSha256`
+  // Scalar/Simd4/Simd8 and under wasmtime with simd128, and `nativePcmF32leSha256`
   // below is this exact session rendered through the native `AudioWorkletEngineHost`. Equality is
   // `to_bits` (SHA-256 over little-endian f32 words), never a tolerance.
   const actual = {

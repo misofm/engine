@@ -26,24 +26,13 @@ use core::fmt;
 /// cannot name it. The one-lane [`prim@f32`] [`Lane`](crate::Lane), which every effect's
 /// per-node leg and every frame loop's tail use, is a different thing and is not gated.
 ///
-/// The variant is also present on the targets `current()` gives it to: the scalar-wasm CI
-/// exception (wasm32 without `simd128`, see `lib.rs`) and the targets `lib.rs` refuses to compile
-/// for. Issue #1062 retires the scalar-wasm legs and this second clause with them.
-///
 /// Code outside this crate must not match on the variants exhaustively, because the variant set
 /// depends on a feature that Cargo unifies across a build: ask [`Backend::width`] or compare
 /// with `==`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum Backend {
     /// `f32`, one lane, whole plan: the unbanked test oracle (see the type's documentation).
-    #[cfg(any(
-        feature = "test-support",
-        not(any(
-            target_arch = "x86_64",
-            target_arch = "aarch64",
-            all(target_arch = "wasm32", target_feature = "simd128")
-        ))
-    ))]
+    #[cfg(feature = "test-support")]
     Scalar,
     /// [`wide::f32x4`], four lanes: AArch64 NEON and wasm `simd128`.
     Simd4,
@@ -83,31 +72,16 @@ impl Backend {
         {
             Self::Simd8
         }
-        // Reached only through the scalar-wasm CI exception (wasm32 without `simd128`): `lib.rs`
-        // refuses to compile for every other target this arm used to catch (issue #1041), 32-bit
-        // x86 among them, which is why no arm names `target_arch = "x86"` any more (#1059).
-        #[cfg(not(any(
-            target_arch = "x86_64",
-            target_arch = "aarch64",
-            all(target_arch = "wasm32", target_feature = "simd128")
-        )))]
-        {
-            Self::Scalar
-        }
+        // No arm for any other target: `lib.rs` refuses to compile for every one of them, 32-bit
+        // targets (issue #1041) and wasm32 without `simd128` (issue #1062) alike, so no target
+        // selects `Scalar` and the variant exists only in `test-support` builds.
     }
 
     /// Number of `f32` lanes this backend processes at once.
     #[must_use]
     pub const fn width(self) -> usize {
         match self {
-            #[cfg(any(
-                feature = "test-support",
-                not(any(
-                    target_arch = "x86_64",
-                    target_arch = "aarch64",
-                    all(target_arch = "wasm32", target_feature = "simd128")
-                ))
-            ))]
+            #[cfg(feature = "test-support")]
             Self::Scalar => 1,
             Self::Simd4 => 4,
             Self::Simd8 => 8,
