@@ -20,6 +20,12 @@
  * `--check` needs cargo. That is not a hardship in this repository -- it *is* the Rust repository
  * -- and it is the point: the assets are only as good as the engine they were taken from, so the
  * check re-derives rather than re-reads.
+ *
+ * `--check ENGINE_ARTIFACT_DIRECTORY` (issue #1044) compares with that directory's copies instead
+ * of running cargo. `scripts/build-web-audioworklet.sh` writes them with the same generator's
+ * `--write`, which emits exactly the `--print` documents, so they are the engine's output at the
+ * commit the directory was built from, and the documents the SDK package ships beside the module.
+ * CI builds that directory once per run and hands it to the SDK job.
  */
 
 import { execFileSync } from "node:child_process";
@@ -47,26 +53,39 @@ function render(mode) {
   );
 }
 
-async function run(check) {
+async function run(check, artifacts) {
   let stale = false;
   for (const [name, mode] of documents) {
     const path = resolve(assets, name);
-    const expected = render(mode);
+    // The engine's bytes for this document: generated, or an engine artifact directory's copy.
+    let expected;
+    if (artifacts === undefined) {
+      expected = Buffer.from(render(mode), "utf8");
+    } else {
+      try {
+        expected = await readFile(resolve(artifacts, name));
+      } catch (error) {
+        console.error(`sdk assets: the engine artifact has no ${name}: ${error.message}`);
+        stale = true;
+        continue;
+      }
+    }
     if (!check) {
-      await writeFile(path, expected, "utf8");
+      await writeFile(path, expected);
       console.log(`wrote ${path}`);
       continue;
     }
     let actual;
     try {
-      actual = await readFile(path, "utf8");
+      actual = await readFile(path);
     } catch (error) {
       console.error(`sdk assets: missing ${path}: ${error.message}`);
       stale = true;
       continue;
     }
-    if (actual !== expected) {
-      console.error(`sdk assets: ${path} is stale; run \`npm run assets\` in sdk/`);
+    if (!actual.equals(expected)) {
+      const source = artifacts === undefined ? "the generator's output" : resolve(artifacts, name);
+      console.error(`sdk assets: ${path} differs from ${source}; run \`npm run assets\` in sdk/`);
       stale = true;
     }
   }
@@ -75,7 +94,7 @@ async function run(check) {
 }
 
 const args = process.argv.slice(2);
-if (args.length > 1 || (args.length === 1 && args[0] !== "--check")) {
-  throw new Error("usage: node sdk/codegen/assets.mjs [--check]");
+if (args.length > 2 || (args.length >= 1 && args[0] !== "--check")) {
+  throw new Error("usage: node sdk/codegen/assets.mjs [--check [ENGINE_ARTIFACT_DIRECTORY]]");
 }
-await run(args[0] === "--check");
+await run(args[0] === "--check", args.length === 2 ? resolve(args[1]) : undefined);

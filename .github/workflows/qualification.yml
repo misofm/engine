@@ -100,6 +100,7 @@ jobs:
     outputs:
       sha256: ${{ steps.build.outputs.sha256 }}
       rustc: ${{ steps.build.outputs.rustc }}
+      closure_sha256: ${{ steps.build.outputs.closure_sha256 }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -111,7 +112,10 @@ jobs:
           rustup toolchain install 1.97.1 --profile minimal
           rustup target add --toolchain 1.97.1 wasm32-unknown-unknown
       # Built exactly once here; every consumer downloads it and checks it against this job's
-      # `sha256` output, so every artifact gate in the run reads exactly these bytes. Issue #1061
+      # `sha256` output, so every artifact gate in the run reads exactly these bytes. #1044: the
+      # parameter metadata and ABI layout are generated exactly once too, here, and `closure_sha256`
+      # (one digest over every file's sha256, in byte order of name) is what every consumer checks
+      # the whole directory against, so none of them runs the generator again. Issue #1061
       # (owner decision 5): no comparison with the committed pin here. The pin is the release
       # fingerprint; `artifact-identity` reports whether these bytes changed and holds a release
       # change to the pin (docs/RELEASE.md).
@@ -126,6 +130,8 @@ jobs:
           sha256="$(sha256sum target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm | awk '{print $1}')"
           echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
           echo "rustc=$(rustc -vV | sed -n 's/^release: //p')" >> "$GITHUB_OUTPUT"
+          closure="$(cd target/ci/qualification-artifacts && find . -type f -printf '%P\n' | LC_ALL=C sort | xargs sha256sum -- | sha256sum | awk '{print $1}')"
+          echo "closure_sha256=$closure" >> "$GITHUB_OUTPUT"
           echo "Shipped AudioWorklet module at \`$GITHUB_SHA\`: \`$sha256\` (the \`artifact-identity\` summary says whether it changed)" >> "$GITHUB_STEP_SUMMARY"
       - name: Upload shipped artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -219,11 +225,11 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: sdk/package-lock.json
-      # check-sdk-generated.sh still shells out to the parameter-metadata/session-schema
-      # generators itself, so this job still needs a Rust toolchain even though it consumes the
-      # artifact job's build rather than building its own (design §5/§6.6: moving
-      # check-sdk-generated.sh to compare against the artifact job's JSON documents instead, so
-      # this job needs no toolchain at all, is an implementation issue, not done here).
+      # check-sdk-generated.sh no longer runs the parameter-metadata generator (#1044): it compares
+      # sdk/assets with the documents the artifact job generated, which the closure digest below
+      # proves this job reads. The toolchain stays for check-sdk-headless.sh, whose evals cross-check
+      # the SDK against native debug oracles (`cargo run -p parameter-metadata --bin
+      # parameter_metadata_lattice_oracle`, `cargo run -p host-web --example sdk_render_oracle`).
       - name: Install pinned Rust toolchain and Wasm standard library
         run: |
           rustup toolchain install 1.97.1 --profile minimal
@@ -239,9 +245,12 @@ jobs:
       - name: Verify the downloaded artifact against the artifact job's digest
         env:
           BUILT: ${{ needs.artifact.outputs.sha256 }}
+          CLOSURE: ${{ needs.artifact.outputs.closure_sha256 }}
         run: |
           actual="$(sha256sum target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm | awk '{print $1}')"
           [[ "$BUILT" =~ ^[0-9a-f]{64}$ && "$actual" == "$BUILT" ]] || { echo "downloaded artifact sha256 mismatch: the artifact job built $BUILT, got $actual" >&2; exit 1; }
+          closure="$(cd target/ci/qualification-artifacts && find . -type f -printf '%P\n' | LC_ALL=C sort | xargs sha256sum -- | sha256sum | awk '{print $1}')"
+          [[ "$CLOSURE" =~ ^[0-9a-f]{64}$ && "$closure" == "$CLOSURE" ]] || { echo "downloaded artifact closure mismatch: the artifact job built $CLOSURE, got $closure" >&2; exit 1; }
       # check-sdk-deletions.py's 37-mutation --self-test (design §6.6, S7) runs in gate-self-tests
       # when the gate or the SDK tree it reads changes (#1043); the gate itself runs here.
       # test-sdk-artifact-builder-output-contract.sh (also design §6.6) is not added separately:
@@ -250,7 +259,7 @@ jobs:
       # invocation, not a new gate.
       - name: Qualify the SDK package against the shared artifact
         run: |
-          bash scripts/check-sdk-generated.sh
+          bash scripts/check-sdk-generated.sh target/ci/qualification-artifacts
           python3 -B scripts/check-sdk-deletions.py
           bash scripts/check-sdk-types.sh
           bash scripts/check-sdk-headless.sh target/ci/qualification-artifacts
@@ -281,19 +290,24 @@ jobs:
       - name: Verify the downloaded artifact against the artifact job's digest
         env:
           BUILT: ${{ needs.artifact.outputs.sha256 }}
+          CLOSURE: ${{ needs.artifact.outputs.closure_sha256 }}
         run: |
           actual="$(sha256sum target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm | awk '{print $1}')"
           [[ "$BUILT" =~ ^[0-9a-f]{64}$ && "$actual" == "$BUILT" ]] || { echo "downloaded artifact sha256 mismatch: the artifact job built $BUILT, got $actual" >&2; exit 1; }
+          closure="$(cd target/ci/qualification-artifacts && find . -type f -printf '%P\n' | LC_ALL=C sort | xargs sha256sum -- | sha256sum | awk '{print $1}')"
+          [[ "$CLOSURE" =~ ^[0-9a-f]{64}$ && "$closure" == "$CLOSURE" ]] || { echo "downloaded artifact closure mismatch: the artifact job built $CLOSURE, got $closure" >&2; exit 1; }
       # #106 E1/E2/E5/E7 and the F4 native<->simd128 session parity, over the artifact that ships.
       # check-web-audioworklet.sh asserts the frozen export set, no imports, no shared memory, no
       # atomics or relaxed SIMD, the render export's allocation-free/trap-free closure, and the
       # vector-kernel ratchet. check-browser-expected-resources.py --artifacts runs the same
       # direct-oracle.mjs digest parity and unconditionally self-tests before returning (design
       # §6.3: subsumes the retired web-audioworklet-browser-correctness.py --check and its own
-      # --self-test step).
+      # --self-test step). #1044: `--without-metadata-regeneration` leaves out only the gate's
+      # `parameter-metadata --check`, which here compared the generator with itself: the artifact
+      # job generated these documents at this commit, and the closure digest was verified above.
       - name: Browser AudioWorklet artifact gates and native parity
         run: |
-          bash scripts/check-web-audioworklet.sh target/ci/qualification-artifacts
+          bash scripts/check-web-audioworklet.sh --without-metadata-regeneration target/ci/qualification-artifacts
           python3 -B scripts/check-browser-expected-resources.py --artifacts target/ci/qualification-artifacts
       # #1059: the whole-plan scalar renderer is a test-only oracle; the shipped module must not
       # contain it (owner ruling 2026-09-28, decision 3).
@@ -341,9 +355,12 @@ jobs:
       - name: Verify the downloaded artifact against the artifact job's digest
         env:
           BUILT: ${{ needs.artifact.outputs.sha256 }}
+          CLOSURE: ${{ needs.artifact.outputs.closure_sha256 }}
         run: |
           actual="$(sha256sum target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm | awk '{print $1}')"
           [[ "$BUILT" =~ ^[0-9a-f]{64}$ && "$actual" == "$BUILT" ]] || { echo "downloaded artifact sha256 mismatch: the artifact job built $BUILT, got $actual" >&2; exit 1; }
+          closure="$(cd target/ci/qualification-artifacts && find . -type f -printf '%P\n' | LC_ALL=C sort | xargs sha256sum -- | sha256sum | awk '{print $1}')"
+          [[ "$CLOSURE" =~ ^[0-9a-f]{64}$ && "$closure" == "$CLOSURE" ]] || { echo "downloaded artifact closure mismatch: the artifact job built $CLOSURE, got $closure" >&2; exit 1; }
       - name: Cache Playwright browser binaries
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
@@ -386,10 +403,9 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      # Issue #288: catch stale qualification caller boot shapes before the Rust and artifact
-      # gates. This suite is hermetic and uses only the existing host/worklet fixtures.
-      - name: Hermetic browser host, worklet, and qualification boot tests
-        run: node scripts/test-web-audioworklet.mjs
+      # #1044: the hermetic host, worklet and qualification-boot suite (#288,
+      # scripts/test-web-audioworklet.mjs) runs in artifact-gates, as the first line of
+      # `bash scripts/test-web-audioworklet.sh`, on the same full route; it no longer runs here too.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: lint
@@ -493,11 +509,10 @@ jobs:
           bash scripts/test-effect-runtime-fixtures.sh
       # check-effect-contract.sh has no hermetic no-binary mode either (S1): with no bench binary
       # argument it falls back to `cargo run --locked --release -q -p bench`, a full release build
-      # inside the lint shard, and it re-runs the effect-runtime-policy/fixtures checks the
-      # "Effect runtime dependency-boundary and fixture policy and mutation tests" step above
-      # already ran. audit-native runs the whole script (preconditions, factory-count grep, and
-      # the bench conformance record) once, with the prebuilt release bench binary; nothing here
-      # is lost by removing the bare call.
+      # inside the lint shard. audit-native runs the whole script (the factory-count grep and the
+      # bench conformance record) once, with the prebuilt release bench binary. The step above is
+      # the one run of the effect-runtime policy and fixture scripts; the contract script no longer
+      # repeats them (#1044).
       - name: Conformance boundaries
         run: bash scripts/check-conformance-boundaries.sh
       - name: Step vocabulary uniformity and self-test
@@ -620,10 +635,15 @@ jobs:
       # cross-target digest corpus (#1048); wasm-guests leaves the script's native leg to it.
       - name: Lane and math gates (G1-G4, G6, P1, M1-M3) and wasm-gates G5/G6 in release
         run: cargo test --locked --release -p lane -p math -p wasm-gates --features math/lane
+      # #1044: the step above runs M3 (`m3_determinism`) with FMA on, because `.cargo/config.toml`
+      # builds every x86-64 target with +avx2,+fma and `lane` refuses to compile without both. The
+      # retired "Math M3 digests on an FMA-enabled build" step replaced those flags with +fma alone,
+      # a build that ships nowhere. This prints the cfg cargo gives that step's `math` (no
+      # dependency is built: `math` has none without `lane`), and fails without FMA.
+      - name: M3's leg is built with FMA (cargo's cfg for math)
+        run: cargo rustc --locked --release -p math --lib -- --print cfg | grep -x 'target_feature="fma"'
       # Own CARGO_TARGET_DIR per distinct RUSTFLAGS (design §8): a per-crate override must not
       # invalidate the shared release target dir's fingerprints for every step after it.
-      - name: Math M3 digests on an FMA-enabled build
-        run: CARGO_TARGET_DIR=target/ci/m3-fma RUSTFLAGS='-C target-feature=+fma' cargo test --locked --release -p math --test m3_determinism
       - name: Realtime race model (engine SPSC loom leg)
         run: CARGO_TARGET_DIR=target/ci/loom RUSTFLAGS='--cfg loom --check-cfg=cfg(loom)' cargo test --locked --release -p engine --lib spsc_loom
       - name: Math M1 exhaustive sweep
@@ -778,8 +798,8 @@ jobs:
         run: bash scripts/check-builtins-fixtures.sh . target/release/audit
       - name: Standing console fixtures against the release session-validator
         run: bash scripts/check-console-fixtures.sh target/release/session_validator
-      # The release conformance-bench half of check-effect-contract.sh (design §6.2 split): lint
-      # already ran its preconditions and factory-count grep without a binary.
+      # check-effect-contract.sh's factory-count completeness grep and release conformance bench.
+      # The effect-runtime policy and fixture scripts it used to re-run run once, in lint (#1044).
       - name: Native effect runtime conformance bench
         run: bash scripts/check-effect-contract.sh target/release/bench
       - name: Protocol benchmark runner build and negative argument checks (no benchmark)
