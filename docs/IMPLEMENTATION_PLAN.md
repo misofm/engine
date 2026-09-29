@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This is the concise index for the stateless implementation payloads in [`.github/ISSUE_SPECS`](../.github/ISSUE_SPECS/README.md).  The issue bodies, not this roadmap, are the source of truth.  Engine V1 is greenfield: do not inspect or copy V1/legacy designs.
+This is the concise index for the stateless implementation payloads in [`.github/ISSUE_SPECS`](../.github/ISSUE_SPECS/README.md), which holds the specs of open issues only; a closed issue's spec is on GitHub and in git history.  The issue bodies, not this roadmap, are the source of truth.  Engine V1 is greenfield: do not inspect or copy V1/legacy designs.
 
 ## Delivery sequence
 

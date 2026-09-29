@@ -386,7 +386,7 @@ render state outside its struct.
 **Third-party Wasm (future scope).**
 
 * These effects never bank, and they run on sandbox workers behind at least one quantum of pipeline
-  latency (`.github/ISSUE_SPECS/027-…`, `028-…`; nothing exists in code yet).
+  latency ([#27's spec](https://github.com/misofm/engine/blob/80c4119b9e6814cb450e87568243d6df9b6be7bc/.github/ISSUE_SPECS/027-third-party-wasm-package-and-effect-abi-conformance-kit.md), [#28's spec](https://github.com/misofm/engine/blob/80c4119b9e6814cb450e87568243d6df9b6be7bc/.github/ISSUE_SPECS/028-sandboxed-third-party-wasm-dynamic-rack-executor-post-launch.md); nothing exists in code yet).
 * The render side could skip exchanging a block with the worker, and the worker could skip calling
   the plugin. Either needs one of:
   * a worker-side ABI export of the render state, or a digest of the declared bounded state region,

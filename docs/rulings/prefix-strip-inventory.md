@@ -74,7 +74,7 @@ implementation (unchanged from the de-versioning ruling's list):
 
 | tree | why frozen |
 |---|---|
-| `.github/ISSUE_SPECS/**` | the accepted specification of each issue as it was accepted, carrying sha256 pins of the artifacts of its day; 21 filenames in this tree carry a crate name (`084-audit-miso-engine-core.md` ... `107-audit-miso-engine-session.md`) and are left exactly as accepted. |
+| `.github/ISSUE_SPECS/**` | the accepted specification of each issue as it was accepted, carrying sha256 pins of the artifacts of its day; 21 filenames in this tree carried a crate name (the audit specs of #84 to #107) and were left exactly as accepted; #1040 later removed every closed issue's spec from this tree, and git history keeps them. |
 | `artifacts/**` | sealed measurement evidence. |
 | `dsp-research/**` | sealed listening evidence and archived research. |
 | `fixtures/**` | fixture **bytes** are digest identity. |

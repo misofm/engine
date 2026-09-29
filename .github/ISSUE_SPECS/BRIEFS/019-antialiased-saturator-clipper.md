@@ -14,7 +14,7 @@ The equations, tap literals, operation order, latency and tail below are the fro
 unchanged: the wave-2 polyphase kernel reproduces them **bit for bit**
 (`crates/miso-engine-soft-clip/tests/polyphase_identity.rs` transliterates this section and compares
 900,000 samples with zero mismatches). What did change is recorded in
-`.github/ISSUE_SPECS/019-antialiased-saturator-clipper.md`'s amendment of the same date: state layout
+[issue 019's spec](https://github.com/misofm/engine/blob/80c4119b9e6814cb450e87568243d6df9b6be7bc/.github/ISSUE_SPECS/019-antialiased-saturator-clipper.md)'s amendment of the same date: state layout
 version 2 (104 words per channel, no cursor word, a precomputed ramp `step`), decision D7 replacing
 the per-operation finite/subnormal checks with a per-block boundary check, decision D11 ramps, and
 `miso_engine_math::db_to_gain_f32` in place of `10f32.powf`. The "Each lane is exactly 169

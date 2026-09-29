@@ -1,6 +1,6 @@
 # EQ: keep the dual depth-2 pair's integrators in V8 registers
 
-Weekly-optimisation issue from the #1000 Sol verification (`.github/ISSUE_SPECS/1000-*.md`, draft follow-up). #1000's gate only reports this loop today; this issue would let it hold it.
+Weekly-optimisation issue from the #1000 Sol verification ([#1000's spec](https://github.com/misofm/engine/blob/80c4119b9e6814cb450e87568243d6df9b6be7bc/.github/ISSUE_SPECS/1000-wasm-gates-fail-when-v8-spills-the-eq-s-stationary-cascade-loops-in-the-shipped.md), draft follow-up). #1000's gate only reports this loop today; this issue would let it hold it.
 
 
 ## Problem

@@ -13,10 +13,10 @@ measured rounds through the public factory. More than 95% of the bank's work rem
 per-track loop; the SIMD kernel was called per sample for only four operations. The “SIMD bank” was
 therefore about 40% slower per lane-frame than scalar on that workload.
 
-Source: [Issue #20 decision record](../../.github/ISSUE_SPECS/020-transient-shaper.md),
+Source: [Issue #20 decision record](https://github.com/misofm/engine/blob/80c4119b9e6814cb450e87568243d6df9b6be7bc/.github/ISSUE_SPECS/020-transient-shaper.md),
 “Descriptive before/after (not a gate).” The audit index independently records the same failure
 class for builtins, compressor, gate/expander, and multiband compressor in
-[Issue #83](../../.github/ISSUE_SPECS/083-audit-numeric-and-kernel-contract.md).
+[Issue #83](https://github.com/misofm/engine/blob/80c4119b9e6814cb450e87568243d6df9b6be7bc/.github/ISSUE_SPECS/083-audit-numeric-and-kernel-contract.md).
 
 ## Ruling
 

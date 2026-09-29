@@ -139,7 +139,7 @@ only as the browser AudioWorklet") no longer holds.
      simulators inherit the AVX2+FMA pin from `.cargo/config.toml`, so the engine refuses to start
      on a CPU without them.
 3. **Rulings that must be revisited before mobile work:** #378 ("native AArch64 unsupported, no
-   claim") and #023 ("iOS and Android embedding examples", closed 2026-08-22), with spec 001's "Mobile support is browser-based; native iOS and Android embedding targets are deferred" (`.github/ISSUE_SPECS/001-…md:43`).
+   claim") and #023 ("iOS and Android embedding examples", closed 2026-08-22), with spec 001's "Mobile support is browser-based; native iOS and Android embedding targets are deferred" ([#1's spec, line 43](https://github.com/misofm/engine/blob/80c4119b9e6814cb450e87568243d6df9b6be7bc/.github/ISSUE_SPECS/001-bootstrap-rust-workspace-and-target-matrix.md#L43)).
 4. **What is still genuinely unneeded:** `hosts/host-mobile` (26 lines, one function nothing calls)
    and `hosts/host-native` (30 lines) are stubs that no mobile app would link; the real mobile
    surface is `crates/capi`. `target-smoke` is worth keeping only as the width assertion of a future

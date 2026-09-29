@@ -91,3 +91,152 @@ See `../VERIFY-DEAD-CODE.md`, finding F13. Counts confirmed: 560 numbered specs,
    `tests/polyphase_identity.rs:5`, `:20`; `crates/lane/src/kernels/halfband.rs:3`, `:58`), and
    `BRIEFS/016` is the source for `crates/dsp-reference/src/true_peak_limiter.rs:57`.
 5. **Mobile scope: no effect.**
+
+## Attempt 1 evidence
+
+Terra, 2026-09-29, branch `codex/1040-open-specs-only` from the local batch `codex/batch-slim-5`
+at `c04bc8ea`. No GitHub issue was closed, reopened or edited.
+
+**What was deleted.** 551 numbered specs, 11,278,259 bytes (130,476 lines). The set is every
+numbered spec whose issue `gh issue list --state all` reports closed, and each one was confirmed
+again with `gh issue view N --json state` just before `git rm` (551/551 `CLOSED`). The draft
+counted 509; issues have closed and specs have been added since the audit. #1075 falls in the
+#1069–#1079 range, but it closed on 2026-09-29 in batch-slim-4, which is on `origin/main` (merged
+through PR #1077). The rule deletes it, and keeping it would fail gate 5.
+
+**What was kept.** `README.md`, `BRIEFS/` (77 files, untouched apart from re-pointed citations) and
+the 68 specs of open issues: 15, 17, 26, 124, 338, 391, 763, 774, 881, 882, 883, 887, 888, 889,
+890, 891, 892, 893, 894, 895, 896, 897, 899, 938, 948, 951, 952, 953, 955, 961, 965, 967, 968, 969,
+972, 973, 974, 975, 987, 988, 989, 991, 992, 993, 1008, 1010, 1018, 1019, 1020, 1040, 1045, 1051,
+1053, 1054, 1055, 1057, 1058, 1064, 1065, 1069, 1070, 1071, 1072, 1073, 1074, 1076, 1078, 1079.
+These include this batch's #1045, #1051, #1064, #1065 and #1076. There is no unnumbered spec, and
+every numbered spec has a GitHub issue.
+
+**Permalink commit.** Every citation points at `80c4119b9e6814cb450e87568243d6df9b6be7bc`
+(`origin/main`, PR #1077), not at `c04bc8ea`. `git diff origin/main c04bc8ea` changes none of the
+551 deleted files, so both commits hold the same bytes, and `80c4119b` resolves on GitHub today
+while `c04bc8ea` is not yet pushed. #1031 set this precedent. All 30 distinct permalinks were
+checked with `git cat-file` at that commit, and every line anchor was checked against the text it
+quotes. `gh api …/contents/…013-compressor.md?ref=80c4119b…` resolves.
+
+**Citations re-pointed (36 edits in 25 files).**
+- Open specs: 026 → #114; 1008 → #1001; 1010 → #1000 (amendment 2).
+- `BRIEFS/`: 013, 014, 018, 019, 020, 021 → their own issue's spec; 031 → #031; 071 → #071;
+  081 → #108.
+- Code: `crates/dsp-reference/src/svf.rs` → #045 (amendment 1). This comment is the only code
+  change.
+- Docs: `docs/README.md` → #013; `docs/research/f64-introduction.md` → #031 and #087. The #087 link
+  was already dangling: it named `087-audit-parametric-eq.md`, a file that never existed.
+  `docs/rulings/effect-floor-accounting.md` → #013 (×2);
+  `docs/rulings/simd-wrapper-around-scalar-inner-loop.md` → #020 and #083;
+  `docs/rulings/prefix-strip-inventory.md` names the #84–#107 audit specs by number and records
+  their removal.
+- Handoffs, as permalinks with the cited line anchors: `builtins-less-removal-2026-09-27/SCOPE.md`
+  → #8, #925, #926, #927 (×2), #937, #940, #947; `dead-code-2026-09-28/VERIFY-DEAD-CODE.md` → #1,
+  #140; `issues/R1-…` → #1; `silence-2026-09-27/DESIGN.md` → #27, #28; `issues/S7-…` → #944;
+  `test-value-2026-09-28/TEST-VALUE-AUDIT.md` → #962; `data/bug-reproducers.md` → #970.
+- The amendment's other sites (`effect-package/Cargo.toml`, `check-effect-interchange-*.sh`,
+  `promote-issue006-graph-benchmark.sh`) and every spec-068 reader and allowlist line had already
+  been removed by earlier issues (04b, #1050). No machine reader of a spec file remains.
+
+**Rule recorded.** AGENTS.md's "Issue-first execution" section gains one sentence: "A closed
+issue's spec leaves `.github/ISSUE_SPECS/` at the batch after it closes, and git history keeps it."
+The boundary comparison now reads `gh issue list --state open`. With `--state all` it would report
+551 missing specs. `ISSUE_SPECS/README.md` gains a short "What this folder holds" section, and
+`docs/IMPLEMENTATION_PLAN.md`'s purpose line gains one clause.
+
+**Gates.**
+1. `check-session-policy.sh` and `test-session-policy.sh` pass. So do the docs-gates job
+   (`check-dsp-research.sh`, `check-builtins-listening.sh`, plus `test-dsp-research.sh`), the
+   route job's `check-`/`test-ci-path-routing.py`, every script of the hermetic policy job
+   (env-vocabulary, script-reachability, test-support-CI, workspace, realtime, lane, rack,
+   builtins, graph, effect-runtime, host-core, protocol-control, bench, unfused-seal, stem-store,
+   release-shape and the rest) and the command kind/reason vocabulary checks: 53 invocations, all
+   green. All Python ran with `python3 -B`.
+2. `rg 'ISSUE_SPECS/[0-9]' crates hosts tools scripts sdk fuzz .github/workflows` finds three
+   things: the `svf.rs` permalink, the `0001-fixture.md` paths that `test-env-vocabulary.sh`
+   writes into its temporary roots, and the synthetic `1043-x.md` path in
+   `test-ci-path-routing.py`, which is a routing input and never read. A repo-wide scan of every
+   tracked file (by stem, by `ISSUE_SPECS/NNN-` and by abbreviated `NNN-…`/`NNN-*` form, with
+   permalinks and `BRIEFS/` masked) finds only false positives: branch names in
+   `ci-red-jobs.tsv`, the fixture paths above and a mutation label `918-*`.
+3. `git diff --shortstat c04bc8ea 210f4d3e`: 579 files, +48/−130,476. That is 551 deletions,
+   3 open specs, 9 briefs, the README, AGENTS.md, one Rust comment and 13 docs. No build input,
+   console digest or shipped artifact changes. `cargo fmt --check` passes, and
+   `cargo test --locked -p dsp-reference` passes (31 + 3); it covers the one Rust file touched,
+   where only a comment changed. No test reads a spec, so no wider cargo run was needed.
+4. Routing: the deletions and doc edits route `evidence`. The change as a whole routes `full`,
+   because `AGENTS.md` (slice step 1) and `svf.rs` (amendment 1) are not evidence paths. Measured
+   with `ci-path-router.py` on `c04bc8ea..210f4d3e`. The batch routes `full` anyway.
+   `check-ci-path-routing.py` and `test-ci-path-routing.py` pass.
+5. Local spec numbers (68) = open GitHub issues that have a local spec (68); the diff is empty.
+   The open issues without a local spec are unchanged, at 20: 172, 191, 195, 197, 210, 234, 284,
+   291, 293, 296, 349, 377, 379, 382, 394, 559, 560, 877, 931, 932. The kept list above is the
+   other side.
+6. No test or check reads a deleted spec (gate 2).
+
+## Sol verdict, attempt 1
+
+**PASS.** Sol, 2026-09-29. Reviewed `210f4d3e` and `0146b44d`, merged `--no-ff` onto
+`codex/batch-slim-5` at `c04bc8ea` in a scratch worktree. The merged tree is byte-identical to
+`0146b44d`, because the batch head is this branch's base. Nothing below is blocking.
+
+**What was re-derived.**
+1. **The set is exact.** `gh issue list --state all` returns 734 issues, 88 of them open. `c04bc8ea`
+   holds 619 numbered specs. All 551 deleted specs are CLOSED, and all 68 kept specs are OPEN.
+   No open issue lost its spec. The 20 open issues without a spec are the same 20 as before. No spec
+   lacks an issue. #1040, #1045, #1051, #1064, #1065 and #1076 are kept. #1075 is closed, so
+   deleting it is correct.
+2. **No dangling citation.** Every tracked file at `0146b44d` was scanned, with permalinks masked,
+   for each deleted spec's full stem, a truncated slug of at least four characters,
+   `ISSUE_SPECS/NNN-`, `NNN-*` and `NNN-…`. Each relative link into `ISSUE_SPECS` was resolved.
+   The only hits were false positives: branch names in `ci-red-jobs.tsv` and
+   `VERIFY-TEST-VALUE.md`, the mutation label `918-*`, the synthetic `1043-x.md` and `0001-fixture.md`
+   routing and env-vocabulary inputs, `BRIEFS/` paths, and this spec's own evidence prose.
+   - The tree has 42 distinct permalinks. Thirty point at `80c4119b`, and `git cat-file` resolves
+     every one of them. The one exception is the pre-existing placeholder
+     `tree/a9414c0c/artifacts/…` in handoff `07-…`.
+   - `80c4119b` is an ancestor of `c04bc8ea`, and all 551 deleted blobs are identical at both
+     commits.
+   - All 13 line anchors were compared with the text they quote, and each one matches.
+   - Twelve permalinks were checked on GitHub with `gh api …/contents/…?ref=80c4119b…`. Each remote
+     blob SHA equals the local one.
+3. **Readers.** No code, test, script or workflow reads a spec's content.
+   - `check-env-vocabulary.sh` excludes the folder.
+   - `check-script-reachability.py` treats it as a non-carrier.
+   - `ci-path-router.py` classifies it as evidence.
+   - `test-env-vocabulary.sh` writes its own fixture into temporary roots.
+   - The Rust mentions are comments on `BRIEFS/016` and `BRIEFS/019`, which still exist.
+4. **AGENTS.md.** The new sentence is accurate and one sentence long. The boundary comparison
+   against `--state open` still works: a local spec whose number is not open is either stale or
+   incorrectly closed. `BRIEFS/` still has 77 files. The 9 edited briefs and the other citation edits
+   are one-line swaps (+38/−37).
+5. **`svf.rs`.** The change is to a comment only: one comment line becomes two, at 433–434. It sits
+   inside `#[cfg(test)] mod tests` (lines 421–764), the last item in the file, so no non-test line
+   moves.
+6. **Gates on the merged tree, all exit 0:**
+   - `check-` and `test-ci-path-routing.py`;
+   - `check-dsp-research.sh`, `check-builtins-listening.sh` and `test-dsp-research.sh`;
+   - all 42 script invocations of the lint job;
+   - `check-` and `test-test-support-ci.py`, and `check-` and `test-script-reachability.py`;
+   - `test-env-vocabulary.sh` and `test-conformance-boundaries.sh`;
+   - `check-sdk-deletions.py`, the command reason and kind vocabulary checks, and their self-tests;
+   - `cargo fmt --check`;
+   - `cargo check --locked --workspace --all-targets`;
+   - `cargo test --locked -p dsp-reference` (31 + 3).
+
+   Python ran with `-B`. The router gives `evidence` for the deletions and doc edits alone, and
+   `full` once `AGENTS.md` and `svf.rs` are included. That matches the evidence.
+
+**Findings, by severity.**
+1. **Low: an unrecorded deviation.** Slice step 1 said a spec is deleted "in the same change as the
+   closing evidence commit". The rule as written deletes it "at the batch after it closes". The new
+   timing is the one that fits AGENTS.md, which closes an issue only after its evidence is upstream,
+   so it stands, but the evidence should have named it. "Batch" also has no meaning in
+   checkpoint-push mode. No change is required.
+2. **Info: pre-existing, not introduced here.** The #1045 and #1051 specs link
+   `../TEST-VALUE-AUDIT.md` and `../VERIFY-TEST-VALUE.md`. Those links were copied from the handoff
+   folder and do not resolve from `.github/ISSUE_SPECS/`. Fix them when those specs are next
+   touched.
+3. **Info.** The `--state open` comparison will keep listing the same 20 open issues that have no
+   spec. That was already true under `--state all`.
