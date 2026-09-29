@@ -22,3 +22,14 @@ and differentials fold NaNs to one canonical word before comparing; the promise 
 on every target except a NaN's sign and payload. The existing NaN-safety rules stand: finite input
 must not produce NaN, and each effect's documented NaN behaviour still holds. The engine does not
 canonicalize NaNs at render.
+
+## Decision 11: controlled observation activation and #882 (#1080)
+
+After decisions 9 and 10's work landed, the graph and builtins-compiler "controlled observation
+activation" machinery (about 5,000 lines, including a per-block hook on the render path) had no
+production caller; #882 planned to reuse it to skip per-track meter work while no one holds the
+meter lease. Ruling: **remove it (#1080) and rescope #882** to a simpler lease-driven skip of
+per-track meter work, built on the ordinary path's existing lease flag, if measurement shows the
+saving is worth it. Removing the machinery also removes render's only path to the deallocator.
+#1080 also removed the builtins meter's matching half (`restart_observation`, `observation_generation`),
+which the removal left unused.

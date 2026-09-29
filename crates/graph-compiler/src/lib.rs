@@ -338,9 +338,8 @@ mod tests {
         audit, bounded_spsc,
     };
     use graph::{
-        GraphBindingBlock, GraphNodeBinding, GraphNodeObserverBinding,
-        GraphObservationActivationConfig, GraphObservationBlock, GraphRuntimeBindings,
-        GraphRuntimeObserver, GraphRuntimeProcessor,
+        GraphBindingBlock, GraphNodeBinding, GraphNodeObserverBinding, GraphObservationBlock,
+        GraphRuntimeBindings, GraphRuntimeObserver, GraphRuntimeProcessor,
     };
     use parametric_eq::{PARAMETRIC_EQ_DESCRIPTOR, ParametricEqFactory};
     use session::{
@@ -10368,10 +10367,8 @@ mod tests {
     /// chains, slots, transposes, route folds and scatter redirects -- are the declined arm's.
     ///
     /// The pass count is the only witness that the pass ran at all: the declined arm renders the
-    /// same bits by construction. Two controls hold it at zero: ALL-metric meters, which cannot use
-    /// a peak partial and must not opt in (I5), and a plan bound with an observation activation,
-    /// whose observers -- permanent ones included -- are dispatched by the controlled path the pass
-    /// does not bank (amendment 3).
+    /// same bits by construction. A control holds it at zero: ALL-metric meters, which cannot use
+    /// a peak partial and must not opt in (I5).
     #[test]
     fn post_matrix_peak_meters_merge_one_bank_pass_per_cohort_and_publish_the_scalar_frames() {
         const BLOCKS: u64 = 24;
@@ -10390,7 +10387,6 @@ mod tests {
         let intended = intended_console(METER_CONSOLE_TRACKS);
         let registry = launch_native_effect_registry().expect("launch registry");
         let mut plan_id = 9_430;
-        let mut declined_web_frames = None;
         for dispatch in dispatches {
             let width = BankWidth::for_backend(dispatch).expect("a banked dispatch");
             let cohorts = METER_CONSOLE_TRACKS / width.lanes() as u64;
@@ -10494,9 +10490,6 @@ mod tests {
                             "{context}: a window-crossing block takes the sample loop ({banked_merges})"
                         );
                     }
-                    if dispatch == host && between_render_calls && period == 512 {
-                        declined_web_frames = Some(arms.swap_remove(1).0);
-                    }
                 }
             }
         }
@@ -10521,82 +10514,6 @@ mod tests {
         assert_eq!(builtins::test_only_block_peak_merges(), 0);
         assert_eq!(all_folds, METER_CONSOLE_TRACKS);
         assert!(all_frames.iter().any(|frame| frame.left.energy != 0.0));
-
-        // Control 2: the same web-shape plan bound with an observation activation and one active
-        // controlled observer. Every observer, the permanent meters included, now runs on the
-        // controlled path: no pass, no merge, and the declined arm's PCM and frames.
-        struct Count(Arc<AtomicU64>);
-        impl GraphRuntimeObserver for Count {
-            fn observe(
-                &mut self,
-                _block: GraphObservationBlock<'_>,
-            ) -> Result<(), engine::realtime::RenderError> {
-                self.0.fetch_add(1, Ordering::Relaxed);
-                Ok(())
-            }
-        }
-        let calls = Arc::new(AtomicU64::new(0));
-        let controlled_handle = 0x0943_0000_u64;
-        let artifact = compile_console_model_with_selected_meters(
-            &intended,
-            9_441,
-            &post_matrix_meter_requests(&intended, MeterMetricSet::SAMPLE_PEAK, 512),
-            true,
-            host_dispatch(),
-            &registry,
-        );
-        let envelope = artifact.envelope();
-        let frames = envelope.quantum.0 as usize;
-        let nodes = artifact
-            .external_binding_nodes()
-            .map(|node| GraphNodeBinding::new(node.clone(), console_track_input_binding(node)))
-            .collect();
-        let (bound, mut controller) = artifact
-            .into_bound_with_observation_activation(
-                GraphRuntimeBindings {
-                    envelope,
-                    nodes,
-                    observers: vec![GraphNodeObserverBinding::controlled(
-                        GraphNodeId::TrackStage {
-                            track_id: StableGraphId::parse("ch00").expect("track node id"),
-                            stage: TrackStage::PostMatrix,
-                        },
-                        controlled_handle,
-                        Box::new(Count(Arc::clone(&calls))),
-                    )],
-                },
-                GraphObservationActivationConfig {
-                    maximum_active_observers: 1,
-                    maximum_retained_bytes: u64::MAX,
-                },
-            )
-            .unwrap_or_else(|failure| panic!("activation bind: {}", failure.code));
-        controller
-            .replace(&[controlled_handle])
-            .unwrap_or_else(|error| panic!("controlled activation: {error:?}"));
-        graph::test_only_set_bank_sample_peak_declined(false);
-        builtins::test_only_reset_block_peak_merges();
-        let mixed = render_bound_console_blocks(bound, frames, BLOCKS);
-        assert_eq!(
-            graph::test_only_bank_sample_peak_passes(),
-            0,
-            "a plan bound with an activation runs no pass"
-        );
-        assert_eq!(builtins::test_only_block_peak_merges(), 0);
-        assert_eq!(
-            calls.load(Ordering::Relaxed),
-            BLOCKS,
-            "the controlled row is active"
-        );
-        let declined = declined_web_frames.expect("the web-shape declined arm ran");
-        assert_pcm_bits_equal(&mixed.0, &declined.0, "mixed permanent and controlled plan");
-        assert_eq!(mixed.4.len(), declined.4.len());
-        for (mixed_frame, declined_frame) in mixed.4.iter().zip(declined.4.iter()) {
-            assert_eq!(
-                meter_frame_bits(mixed_frame),
-                meter_frame_bits(declined_frame)
-            );
-        }
     }
 
     /// One arm of issue #950's gate M3: an artifact rendered with the full meter pass on or
@@ -10850,8 +10767,6 @@ mod tests {
     /// * **#943's `SAMPLE_PEAK` fixture** runs no full pass: its meters have no energy, so no lane
     ///   answers a seed.
     /// * **Ballistics.** `ALL` meters with an eight-frame peak hold never accept the pass.
-    /// * **Activation.** A plan bound with an observation activation dispatches every observer,
-    ///   permanent ones included, on the controlled path, which the pass does not bank.
     #[test]
     fn the_full_meter_pass_stays_off_where_no_meter_can_commit_it() {
         const BLOCKS: u64 = 24;
@@ -10955,79 +10870,6 @@ mod tests {
                 (0, 0, 0),
                 "ballistics: a held peak with a hold never banks"
             );
-        }
-
-        // Activation: the ALL web shape plus one active controlled observer, against the same
-        // plan's declined arm without it.
-        let all = post_matrix_meter_requests(&intended, MeterMetricSet::ALL, 512);
-        let declined = arms(&all).swap_remove(1);
-        struct Count(Arc<AtomicU64>);
-        impl GraphRuntimeObserver for Count {
-            fn observe(
-                &mut self,
-                _block: GraphObservationBlock<'_>,
-            ) -> Result<(), engine::realtime::RenderError> {
-                self.0.fetch_add(1, Ordering::Relaxed);
-                Ok(())
-            }
-        }
-        let calls = Arc::new(AtomicU64::new(0));
-        let controlled_handle = 0x0950_0000_u64;
-        plan_id += 1;
-        let artifact = compile_console_model_with_selected_meters(
-            &intended, plan_id, &all, true, host, &registry,
-        );
-        let envelope = artifact.envelope();
-        let frames = envelope.quantum.0 as usize;
-        let nodes = artifact
-            .external_binding_nodes()
-            .map(|node| GraphNodeBinding::new(node.clone(), console_track_input_binding(node)))
-            .collect();
-        let (bound, mut controller) = artifact
-            .into_bound_with_observation_activation(
-                GraphRuntimeBindings {
-                    envelope,
-                    nodes,
-                    observers: vec![GraphNodeObserverBinding::controlled(
-                        GraphNodeId::TrackStage {
-                            track_id: StableGraphId::parse("ch00").expect("track node id"),
-                            stage: TrackStage::PostMatrix,
-                        },
-                        controlled_handle,
-                        Box::new(Count(Arc::clone(&calls))),
-                    )],
-                },
-                GraphObservationActivationConfig {
-                    maximum_active_observers: 1,
-                    maximum_retained_bytes: u64::MAX,
-                },
-            )
-            .unwrap_or_else(|failure| panic!("activation bind: {}", failure.code));
-        controller
-            .replace(&[controlled_handle])
-            .unwrap_or_else(|error| panic!("controlled activation: {error:?}"));
-        graph::test_only_set_bank_meter_declined(false);
-        graph::test_only_set_bank_sample_peak_declined(false);
-        builtins::test_only_reset_banked_meter_commits();
-        let activated = render_bound_console_blocks(bound, frames, BLOCKS);
-        assert_eq!(
-            (
-                graph::test_only_bank_meter_passes(),
-                graph::test_only_bank_sample_peak_passes(),
-                builtins::test_only_banked_meter_commits()
-            ),
-            (0, 0, 0),
-            "a plan bound with an activation runs no pass"
-        );
-        assert_eq!(
-            calls.load(Ordering::Relaxed),
-            BLOCKS,
-            "the controlled row is active"
-        );
-        assert_pcm_bits_equal(&activated.0, &declined.rendered.0, "activation");
-        assert_eq!(activated.4.len(), declined.rendered.4.len());
-        for (activated, declined) in activated.4.iter().zip(declined.rendered.4.iter()) {
-            assert_eq!(meter_frame_bits(activated), meter_frame_bits(declined));
         }
     }
 
@@ -12172,7 +12014,6 @@ mod tests {
             frame.handle.0.get(),
             u64::from(frame.present_metrics.bits()),
             frame.reset_generation,
-            frame.observation_generation,
             frame.window_sequence,
             frame.start_sample,
             frame.end_sample,

@@ -10,7 +10,6 @@
 use core::hint::black_box;
 use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 
-use bench_support::alloc as bench_alloc;
 use builtins::*;
 use lane::{LaneF64, Simd4, Simd8, Widen};
 
@@ -104,71 +103,6 @@ fn meter_windows_discontinuities_resets_and_drops_are_exact() {
     assert_eq!(full_reset.window_sequence, 0);
     assert_eq!(full_reset.cumulative_dropped_snapshots, 0);
     assert_eq!(full_reset.cumulative_discontinuities, 0);
-}
-
-#[test]
-fn meter_observation_restart_discards_partial_window_and_preserves_lifetime_state() {
-    let handle = MeterHandle(NonZeroU64::new(1).expect("constant"));
-    let config = MeterConfig {
-        period_frames: NonZeroU32::new(2).expect("constant"),
-        peak_hold_frames: 0,
-        peak_decay_db_per_second: 0.0,
-        queue_capacity: NonZeroUsize::new(1).expect("constant"),
-        reset_generation: 9,
-    };
-    let PreparedMeter {
-        mut accumulator,
-        mut consumer,
-    } = MeterAccumulator::prepare(handle, config, 48_000).expect("meter");
-
-    accumulator
-        .observe(&[1.0], &[0.5], 10)
-        .expect("partial window");
-    accumulator
-        .observe(&[0.25], &[0.25], 11)
-        .expect("complete old window");
-    accumulator
-        .observe(&[0.0, 0.0], &[0.0, 0.0], 12)
-        .expect("dropped old window");
-
-    accumulator
-        .observe(&[1.0], &[0.75], 14)
-        .expect("new partial window");
-    bench_alloc::assert_installed();
-    bench_alloc::set_mode(bench_alloc::Mode::Count);
-    let restart_mark = bench_alloc::current_thread_counters();
-    accumulator.restart_observation(41);
-    let restart_delta = bench_alloc::current_thread_delta_since(restart_mark);
-    assert_eq!(restart_delta.allocations, 0);
-    assert_eq!(restart_delta.deallocations, 0);
-    assert_eq!(restart_delta.reallocations, 0);
-    assert_eq!(accumulator.observation_generation(), 41);
-    assert_eq!(accumulator.dropped_snapshots(), 1);
-
-    // The old snapshot remains queued while the observation generation changes.
-    let old = consumer.try_pop().expect("old snapshot");
-
-    accumulator
-        .observe(&[0.25, 0.5], &[0.5, 0.25], 100)
-        .expect("fresh window");
-    let fresh = consumer.try_pop().expect("fresh snapshot");
-    assert_eq!(old.observation_generation, 0);
-    assert_eq!(old.reset_generation, config.reset_generation);
-    assert_eq!(old.window_sequence, 0);
-    assert_eq!(fresh.observation_generation, 41);
-    assert_eq!(fresh.reset_generation, config.reset_generation);
-    assert_eq!(
-        (fresh.start_sample, fresh.end_sample, fresh.frames),
-        (100, 102, 2)
-    );
-    assert_eq!(fresh.left.sample_peak, 0.5);
-    assert_eq!(fresh.right.sample_peak, 0.5);
-    assert_eq!(fresh.left.energy, 0.3125);
-    assert_eq!(fresh.right.energy, 0.3125);
-    assert_eq!(fresh.window_sequence, 2);
-    assert_eq!(fresh.cumulative_clipped_samples, 2);
-    assert_eq!(fresh.cumulative_discontinuities, 0);
-    assert_eq!(fresh.cumulative_dropped_snapshots, 1);
 }
 
 #[test]
@@ -689,8 +623,6 @@ enum PeakEvent {
     Block(usize),
     /// Skip this many samples, so the next block is a discontinuity.
     Skip(u64),
-    /// `restart_observation` with this generation.
-    Restart(u64),
 }
 
 /// Xorshift64\*, so both arms and every host see the same words.
@@ -837,12 +769,6 @@ fn peak_differential(
                 time += frames as u64;
             }
             PeakEvent::Skip(samples) => time += samples,
-            PeakEvent::Restart(generation) => {
-                for lane in 0..8 {
-                    scalar[lane].accumulator.restart_observation(generation);
-                    banked[lane].accumulator.restart_observation(generation);
-                }
-            }
         }
         for lane in 0..8 {
             loop {
@@ -875,7 +801,7 @@ fn peak_differential(
 }
 
 /// The streams G2 runs: 64 plain 128-frame blocks, then the same with a skipped block, a
-/// mid-window restart, a zero-frame block, and all three together.
+/// zero-frame block, and both together.
 fn peak_streams() -> Vec<(&'static str, Vec<PeakEvent>)> {
     let plain: Vec<PeakEvent> = (0..64).map(|_| PeakEvent::Block(128)).collect();
     let with = |at: usize, event: PeakEvent| {
@@ -885,12 +811,10 @@ fn peak_streams() -> Vec<(&'static str, Vec<PeakEvent>)> {
     };
     let mut all = plain.clone();
     all.insert(50, PeakEvent::Block(0));
-    all.insert(33, PeakEvent::Restart(7));
     all.insert(20, PeakEvent::Skip(77));
     vec![
         ("plain", plain.clone()),
         ("skip", with(20, PeakEvent::Skip(77))),
-        ("restart", with(33, PeakEvent::Restart(7))),
         ("zero-frame", with(40, PeakEvent::Block(0))),
         ("all", all),
     ]
@@ -915,8 +839,8 @@ fn reset_peak_merges() {
 fn reset_peak_merges() {}
 
 /// Gate G2. Every snapshot of the merge arm equals the scalar arm's, `sample_peak` by bits, at
-/// periods 512, 300, 128 and 64 on hostile and tone input, through discontinuities, a restart and
-/// a zero-frame block. A selection other than exactly `SAMPLE_PEAK` declines the merge.
+/// periods 512, 300, 128 and 64 on hostile and tone input, through discontinuities and a
+/// zero-frame block. A selection other than exactly `SAMPLE_PEAK` declines the merge.
 ///
 /// Built with `--features test-support`, it also pins the merge count: every block at period 512,
 /// none at 64 (each 128-frame block crosses a window boundary), some at 300.
@@ -980,8 +904,6 @@ enum BankedEvent {
     Block(usize),
     /// Skip this many samples, so the next block is a discontinuity.
     Skip(u64),
-    /// `restart_observation` with this generation.
-    Restart(u64),
     /// `reset` with this kind.
     Reset(BuiltinResetKind),
 }
@@ -1040,7 +962,7 @@ fn reset_banked_commits() {
 fn reset_banked_commits() {}
 
 /// Every field of one snapshot as bits, so a float compares by its bits rather than `==`.
-fn banked_snapshot_bits(snapshot: &MeterSnapshot) -> [u64; 24] {
+fn banked_snapshot_bits(snapshot: &MeterSnapshot) -> [u64; 23] {
     let lane = |lane: &MeterLaneSnapshot| {
         [
             u64::from(lane.sample_peak.to_bits()),
@@ -1057,7 +979,6 @@ fn banked_snapshot_bits(snapshot: &MeterSnapshot) -> [u64; 24] {
         snapshot.handle.0.get(),
         u64::from(snapshot.present_metrics.bits()),
         snapshot.reset_generation,
-        snapshot.observation_generation,
         snapshot.window_sequence,
         snapshot.start_sample,
         snapshot.end_sample,
@@ -1249,11 +1170,6 @@ fn banked_differential<L: Widen>(
                 time += frames as u64;
             }
             BankedEvent::Skip(samples) => time += samples,
-            BankedEvent::Restart(generation) => {
-                for meter in scalar.iter_mut().chain(banked.iter_mut()).flatten() {
-                    meter.accumulator.restart_observation(generation);
-                }
-            }
             BankedEvent::Reset(kind) => {
                 for meter in scalar.iter_mut().chain(banked.iter_mut()).flatten() {
                     meter.accumulator.reset(kind);
@@ -1295,18 +1211,17 @@ fn banked_differential<L: Widen>(
     BankedOutcome { compared, commits }
 }
 
-/// The random M2 stream: 150 events of blocks of the brief's sizes, zero-frame blocks, skips,
-/// restarts and both reset kinds.
+/// The random M2 stream: 150 events of blocks of the brief's sizes, zero-frame blocks, skips and
+/// both reset kinds.
 fn banked_random_stream(seed: u64) -> Vec<BankedEvent> {
     const SIZES: [usize; 11] = [1, 2, 3, 63, 64, 127, 128, 129, 256, 300, 511];
     let mut rng = PeakRng(seed);
     (0..150)
-        .map(|_| match rng.below(20) {
+        .map(|_| match rng.below(19) {
             0 | 1 => BankedEvent::Skip(1 + rng.below(5_000) as u64),
-            2 => BankedEvent::Restart(rng.below(1 << 20) as u64),
-            3 => BankedEvent::Reset(BuiltinResetKind::FullToPrepared),
-            4 => BankedEvent::Reset(BuiltinResetKind::DiscontinuityKeepTargets),
-            5 => BankedEvent::Block(0),
+            2 => BankedEvent::Reset(BuiltinResetKind::FullToPrepared),
+            3 => BankedEvent::Reset(BuiltinResetKind::DiscontinuityKeepTargets),
+            4 => BankedEvent::Block(0),
             _ => BankedEvent::Block(SIZES[rng.below(SIZES.len())]),
         })
         .collect()
