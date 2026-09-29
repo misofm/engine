@@ -2,7 +2,7 @@
 
 Slice S1a of *Console strip: session-level console effects with per-track inserts* (owner
 decision 12, `docs/rulings/engine-footprint-2026-09-29.md`; Sol's H4, M5, M9, L6 and amendments 2,
-4, 5 and 14 in `.github/ISSUE_SPECS/DRAFT-console-strip-VERIFY.md`, commit `03aceb94`).
+4, 5 and 14 in `docs/handoffs/console-strip-2026-09-29/VERIFY.md`, commit `03aceb94`).
 
 ## Problem
 
@@ -93,12 +93,54 @@ repinned for that. Session edits are S1b's.
 
 ### Checkpoint 2: migrate every document and repin
 
-Migrate mechanically. A rack becomes a console section when every track carries an identical
-declaration sequence in it: same identity, quality and link mode, no sidechain, and every effect
-eligible. The slot is the effect's ID, and each track's entry takes its own params and bypass. So
-`simd1` becomes `pre_insert` and `simd2` becomes `post_insert`. Any other rack folds into `inserts`
-in chain order: `simd1` (if not console), then `dynamic`, then `simd2` (if not console). A folded ID
-collision is refused, not silently renamed.
+Migrate mechanically, rack by rack. A rack is *uniform* when every effect in it is eligible and
+every track carries an identical declaration sequence in it: the same IDs, identity, quality and
+link mode, and no sidechain. A uniform rack becomes console. Each of its effects becomes a slot
+whose ID is the effect's ID, and each track's entry takes that track's params and bypass.
+
+- `simd1` becomes `pre_insert` when it is uniform.
+- `simd2` becomes `post_insert` when it is uniform.
+- `dynamic` becomes console when it is uniform and the document has two or more tracks. This is the
+  rule that moves the app shape (below).
+  - It is appended to `pre_insert` when `simd1` is console or empty.
+  - Otherwise it is prepended to `post_insert` when `simd2` is console or empty.
+  - Otherwise it stays in `inserts`.
+
+  A single track shows no strip shared across tracks, so a single-track document keeps `dynamic`
+  as `inserts`.
+- Every rack that does not become console folds into `inserts` in chain order: `simd1`, then
+  `dynamic`, then `simd2`. Chain order is preserved in every case.
+- An ID collision is refused, never silently renamed. That covers inserts folded together and a
+  slot ID repeated across `pre_insert` and `post_insert`.
+
+**Named exceptions.** These documents keep a uniform `dynamic` as `inserts`. They are the
+console-versus-insert placement witnesses that AGENTS.md's "a placement change must not move a
+rendered bit" needs:
+- `compressor-dynamic-bank-observation.json`, the insert twin of `compressor-bank-observation.json`;
+- `console-sixty-four-track.json`, the legacy row: EQ as a console slot and the compressor as an
+  insert. Its twin is the `sixty_four_track_eq_comp_simd1` row, which has both as console slots.
+
+**The app shape.** B0's app-shape row, native and V8, carries EQ -> compressor in `dynamic` on
+every track, with the EQ and the compressor bypassed on tracks whose index is 2 mod 3. Under the
+rule it becomes two `pre_insert` slots, and each track's entry keeps its bypass, so the 2-mod-3
+pattern is unchanged. S1a owns that move:
+- in the `tools/console-workload` builder;
+- in B0's app-shape V8 document;
+- in the V8 harness's fixture lookup (`scripts/web-mixing-automation-benchmark.mjs:136-140` reads
+  `track[["simd1","dynamic","simd2"][rack]]`), which must read the console entries and `inserts`
+  instead.
+
+The harness's rack byte (`:279`) and the rack codes in the controls example
+(`tools/console-workload/examples/mixing_automation_controls.rs`, through `src/mixing_automation.rs`)
+are S1c's.
+
+Until S1c, the browser record still addresses the lowered racks: `pre_insert` as `0`, `inserts` as
+`1` and `post_insert` as `2`, each with an index within its section. S1a keeps
+`mixing_automation.rs` emitting exactly that, reading the console entries in place of
+`track.simd1`/`dynamic`/`simd2`.
+
+A `dynamic` rack moved into a console section lowers to `Simd1` or `Simd2` rather than `Dynamic`.
+Its graph text therefore changes by design. Placement invariance (#163) keeps its bits.
 
 The migration tool is a one-off. Commit it only if a gate or a documented operator path reaches it
 (`scripts/check-script-reachability.py`); otherwise attach it to the PR. Update
@@ -120,10 +162,13 @@ R0 classified the 18 documents under this rule:
 - Only `reduced-nobus-from-970-verify.json` has divergent `simd1`/`simd2` racks. They fold into
   `inserts`. Placement invariance (#163) keeps its bits, but its plan shape may move; explain every
   moved pin.
-- `dynamic` becomes `inserts` in every document, so compressor-dynamic and observation-frame-shape
-  keep their effects where they are.
+- The `dynamic` clause moves no committed document. Its only multi-track uniform cases are the two
+  named exceptions. The single-track documents keep `inserts`: compressor-dynamic-observation, the
+  host-web sessions and canonical, whose `dynamic` is not uniform anyway. So does
+  observation-frame-shape, whose `dynamic` diverges. The clause moves the app-shape row.
 - Sol's M9 listed the 9-track ragged strip among the folds. That workload truncates the intended
-  fixture, whose racks are uniform, so it becomes console.
+  fixture, whose racks are uniform, so it becomes console. So do B0's other strip rows and its
+  sparse-activity row.
 
 **Digest chain to repin (M9)**, with a one-line reason for each:
 - `fixtures/session/v1/canonical.json` SHA-256, then
@@ -135,12 +180,32 @@ R0 classified the 18 documents under this rule:
 - the console fixtures, which `scripts/check-console-fixtures.sh` compares with `cmp`;
 - the browser `sessionDocumentBytes` row (`scripts/check-browser-expected-resources.py:80-87`).
 
-**Docs that travel with this slice:** `docs/SESSION_SCHEMA_V1.md` (shape, tokens, retired codes on
-the #1063 precedent, lowering) and `docs/session-v1.schema.json`.
+**Docs and specs that travel with this slice:**
+- `docs/SESSION_SCHEMA_V1.md` (shape, tokens, retired codes on the #1063 precedent, lowering);
+- `docs/session-v1.schema.json`;
+- `docs/BUILTINS_AND_METERING_V1.md`, which spells the old taps (`:4`, `:171-174`);
+- the open specs #973 and #987, and any other open spec whose gates name a retired rack or tap
+  token. Map their vocabulary without changing their scope.
 
-Authorized paths: `crates/session/**`, `crates/protocol/src/{schema,session_wire,message_wire}.rs`
-(model encoding only), the lowering call sites that read `simd1`/`dynamic`/`simd2`, the documents
-and digest pins above, the two derive scripts, the two docs above, and this spec.
+**Benchmark tooling that reads the old shape, and that this slice keeps running:**
+- `tools/console-workload/**`: its builders edit `track.simd1`, `track.dynamic` and `track.simd2`;
+- `tools/bench/src/console.rs`;
+- `scripts/check-console-benchmark-fixture.sh`, the required qualification step "Console benchmark
+  fixture integrity". It reads `simd1`/`dynamic`/`simd2` and `tap == "post_matrix"`;
+- `scripts/check-console-fixtures.sh`;
+- `scripts/test-console-benchmark.sh`;
+- the V8 harness's fixture lookup and B0's V8 documents (above).
+
+Authorized paths:
+- `crates/session/**`;
+- `crates/protocol/src/{schema,session_wire,message_wire}.rs`, for the model encoding only;
+- the lowering call sites that read `simd1`/`dynamic`/`simd2`;
+- the documents and digest pins above;
+- the two derive scripts;
+- the docs, specs and benchmark tooling above;
+- any other file that one of this slice's gates reads and the schema change breaks, named in the PR
+  with the gate that needed it;
+- this spec.
 
 ## Owner decisions that bind this slice
 
@@ -149,7 +214,15 @@ lowering". There is no `ABI_VERSION` bump.
 
 ## Dependencies
 
-None beyond decision 12. Merge after *Add the console-strip benchmark rows* (B0).
+- *Rename the live console to live controls* (S1r, #1095) merges before this slice. It is first in
+  batch C3, so its SDK and browser gates run against an unchanged schema.
+- *Add the console-strip benchmark rows* (B0, #1085) and *Record the console-strip baseline
+  benchmark* (S0, #1086) have landed in batch C1.
+
+From this slice until S1d, the SDK suites, `scripts/check-sdk-generated.sh` and the SDK-driven
+browser qualification are knowingly out of step: the SDK writes `simd1`/`dynamic`/`simd2`
+(`sdk/src/internal/session-json.ts:113-117`). They are not this slice's gates, and batch C3 is not
+pushed until S1d passes them.
 
 ## Objective gates
 
@@ -160,11 +233,23 @@ None beyond decision 12. Merge after *Add the console-strip benchmark rows* (B0)
 3. `RackName` and `ParameterRack` wire codes are explicit and round-trip (`builtins` stays 4). A
    planted index-derived code turns
    `parameter_enum_wire_mappings_are_exhaustive_and_roundtrip` red.
-4. PR evidence, not a committed test: every migrated console fixture produces identical canonical
-   graph text and identical render digests against the pre-change base. List every repinned digest
-   with its reason.
-5. `bash scripts/check-session-policy.sh`, `bash scripts/check-console-fixtures.sh`, the protocol
-   corpus and `cargo test --workspace` pass.
+4. PR evidence, not a committed test, against the pre-change base:
+   - identical canonical graph text for every migrated document whose racks keep their internal
+     rack (`simd1` to `pre_insert`, `simd2` to `post_insert`, `dynamic` to `inserts`);
+   - identical render digests for every migrated document and for the app-shape row, including
+     those whose racks moved.
+
+   List every repinned digest with its reason.
+5. `bash scripts/check-session-policy.sh`, `bash scripts/check-console-fixtures.sh`,
+   `bash scripts/check-console-benchmark-fixture.sh`, `bash scripts/test-console-benchmark.sh`, the
+   protocol corpus and `cargo test --workspace` pass.
+6. The benchmarks still run on the new shape. Both checks are untimed, on a committed clean tree:
+   - `bash scripts/operator/preflight-console-benchmark.sh --step <an unused scratch name>`;
+   - `bash scripts/run-web-mixing-automation-benchmark.sh prepare WORKDIR`, then `preflight
+     WORKDIR`, in an empty scratch directory.
+
+   The app-shape row's compiled plan carries EQ and compressor as `pre_insert` slots, with the
+   2-mod-3 bypass pattern.
 
 ## Standing rules for the implementer
 

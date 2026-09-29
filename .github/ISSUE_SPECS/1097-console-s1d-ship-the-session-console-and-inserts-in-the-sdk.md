@@ -2,7 +2,7 @@
 
 Slice S1d of *Console strip: session-level console effects with per-track inserts* (owner
 decision 12, `docs/rulings/engine-footprint-2026-09-29.md`; Sol's M5 in
-`.github/ISSUE_SPECS/DRAFT-console-strip-VERIFY.md`, commit `03aceb94`).
+`docs/handoffs/console-strip-2026-09-29/VERIFY.md`, commit `03aceb94`).
 
 ## Problem
 
@@ -50,7 +50,10 @@ Decision 12's "Shape", "Wire identity" (the app updates in lockstep) and "The ap
 ## Dependencies
 
 - *Add the session console and per-track inserts to the session schema* (S1a).
-- *Address console slots and inserts in live control* (S1c), which itself follows S1b and S1r.
+- *Address console slots and inserts in live control* (S1c, #1096), which itself follows S1b and
+  S1r.
+
+S1d closes batch C3 (S1r, S1a, S1b, S1c, S1d). The batch is pushed once, after S1d's gates pass.
 
 ## Objective gates
 

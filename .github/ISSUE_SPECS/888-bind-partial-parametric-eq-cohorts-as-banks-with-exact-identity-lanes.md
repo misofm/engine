@@ -56,7 +56,7 @@ console effects with per-track inserts*) splits this issue's two halves.
   insert-only optimisation, and no console slice depends on it.
 - **Inserts bank opportunistically, as today** (decision 12). Whether a partial insert cohort
   should bind padded at all is a measured question: at W=8, a one- or two-member padded bank costs
-  more than per-node rendering (Sol's H5 in `.github/ISSUE_SPECS/DRAFT-console-strip-VERIFY.md`).
+  more than per-node rendering (Sol's H5 in `docs/handoffs/console-strip-2026-09-29/VERIFY.md`).
   The kept half ships only with a measured per-width rule, read against the console benchmark's
   remainder rows after *Measure the console strip against its baseline* (S4).
 - **Dependencies** become P2b, whose mask and lane bookkeeping this reuses. #887 is optional.

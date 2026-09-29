@@ -2,7 +2,7 @@
 
 Slice S1b of *Console strip: session-level console effects with per-track inserts* (owner
 decision 12, `docs/rulings/engine-footprint-2026-09-29.md`; Sol's H4, M5 and amendment 5 in
-`.github/ISSUE_SPECS/DRAFT-console-strip-VERIFY.md`, commit `03aceb94`).
+`docs/handoffs/console-strip-2026-09-29/VERIFY.md`, commit `03aceb94`).
 
 ## Problem
 
@@ -53,7 +53,9 @@ reallocated, and there is no `ABI_VERSION` or protocol-major bump.
 
 ## Dependencies
 
-- *Add the session console and per-track inserts to the session schema* (S1a).
+- *Add the session console and per-track inserts to the session schema* (S1a, #1093).
+
+This is batch C3, which is not pushed until S1d passes its gates.
 
 ## Objective gates
 

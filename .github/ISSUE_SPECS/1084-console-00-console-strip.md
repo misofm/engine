@@ -6,8 +6,9 @@ knobs. Outboard gear is patched into a channel's insert point and differs per ch
 
 **Provenance.**
 - Sol verified the draft and returned SOUND WITH AMENDMENTS
-  (`.github/ISSUE_SPECS/DRAFT-console-strip-VERIFY.md`, commit `03aceb94`; findings H1-H5, M1-M9,
-  L1-L7; amendments 1-14).
+  (`docs/handoffs/console-strip-2026-09-29/VERIFY.md`, first committed at
+  `.github/ISSUE_SPECS/DRAFT-console-strip-VERIFY.md` in `03aceb94`; findings H1-H5, M1-M9, L1-L7;
+  amendments 1-14).
 - The owner answered on 2026-09-29, and **decision 12** in
   `docs/rulings/engine-footprint-2026-09-29.md` records the answers.
 - R0 amended AGENTS.md's chain line, its tap list and its #163 sentence in the same commit.
@@ -167,15 +168,16 @@ cohort's chain cannot fuse across it (L5).
   - The browser's 48-byte command record keeps `1` for `inserts`, retires `0` and `2` and appends
     `3` for `console`. The observation and live-response encodings follow the same rule.
   - There is no `ABI_VERSION` bump. The app and SDK update in lockstep.
-- **Naming** (M6, amendment 13). The session key is `console`. The existing "console" names for the
-  live-control attachment become "live controls":
-  - `HostConsoleRequest`/`HostConsoleHandles`, `ConsoleEffectBankStage` and the rest;
-  - the sealed `miso_engine_web_v1_console_track_*` exports, whose `_v1` stays and whose retired
-    spellings are never exported again;
-  - the four `console*` boot words;
-  - the SDK's live-console API.
-
-  The console benchmark and fixture names stay. `builtins`/`"strip"` is unchanged.
+- **Naming** (M6, amendment 13).
+  - **Owner's decision.** The session key is `console`, and the engine's internal live-console
+    names become "live controls". That covers `HostConsoleRequest`/`HostConsoleHandles`,
+    `ConsoleEffectBankStage`, the fader, mute and pan lanes' console names and the rest. It also
+    covers the sealed `miso_engine_web_v1_console_track_*` exports, whose `_v1` stays and whose
+    retired spellings are never exported again.
+  - **Root's application of it.** The four `console*` boot words and the SDK's public live-console
+    API are renamed with the exports.
+  - **Unchanged.** The console benchmark and fixture names stay. `builtins`/`"strip"` is unchanged,
+    which is R0's reading.
 
 ### Class A by lowering
 
@@ -190,6 +192,25 @@ An equivalent session therefore produces the identical graph, including the seal
 canonical text, and the identical render. The internal names `RackId`, `TrackStage`, `MeterTap` and
 `RackLocation` stay.
 
+### Migration of existing documents (S1a)
+
+The migration is mechanical and works rack by rack. A rack is *uniform* when every effect in it is
+eligible and every track declares it identically, with no sidechain. A uniform rack becomes
+console:
+- `simd1` becomes `pre_insert`;
+- `simd2` becomes `post_insert`;
+- `dynamic` becomes console too, in a document with two or more tracks. It is appended to
+  `pre_insert`, or, if `simd1` stayed an insert, prepended to `post_insert`.
+
+Everything else folds into `inserts` in chain order. Two documents keep a uniform `dynamic` as
+`inserts`, because they are the console-versus-insert placement witnesses:
+`compressor-dynamic-bank-observation.json` and the legacy `console-sixty-four-track.json`.
+
+The rule's `dynamic` clause is what moves B0's app-shape row, native and V8, into
+`console.pre_insert` with its 2-mod-3 bypass pattern, so S4 measures the app on the console. A
+`dynamic` rack moved into a console section lowers to `Simd1` or `Simd2`, so its graph text changes
+by design and its bits do not (#163).
+
 ### #971 under padding
 
 Once every console group binds, the stranded-mono demotion's "binds more banks" objective measures
@@ -199,8 +220,8 @@ standing console row, so the choice must not silently demote mono tracks.
 
 ## Slices
 
-Each slice is its own issue with one adversarial verdict. Docs travel with the slice that changes
-the behaviour. Root renumbers the files once the GitHub issues exist.
+Each slice is its own issue with one adversarial verdict (the issue map is below). Docs travel with
+the slice that changes the behaviour.
 
 | Slice | File (`.github/ISSUE_SPECS/`) | Scope | Depends on |
 |---|---|---|---|
@@ -208,15 +229,15 @@ the behaviour. Root renumbers the files once the GitHub issues exist.
 | B0 | `1085-console-b0-add-the-console-strip-benchmark-rows.md` | Strip at N in {9, 10, 13, 16, 64}, app shape, sparse activity; layout-neutral `strip_layout`; two V8 documents | R0 |
 | S0 | `1086-console-s0-record-the-console-strip-baseline.md` | One native and one V8 run on B0's commit | B0 |
 | P1 | `1087-console-p1-keep-a-bypassed-lane-in-its-effect-bank.md` | Session bypass -> shunt state; mixed-bypass cohorts bind one bank | R0 |
-| P2a | `1088-console-p2a-let-an-effect-bank-bind-a-partial-group.md` | Active mask, padding contract, planner support; every factory still declines | R0 |
+| P2a | `1088-console-p2a-let-an-effect-bank-bind-a-partial-group.md` | Active mask, padding contract, planner support; every factory still declines | P1 (merge order: shared files) |
 | P2b | `1089-console-p2b-pad-parametric-eq-banks.md` | EQ opts in (supersedes #888's absent-member half) | P2a |
 | P2c | `1090-console-p2c-pad-compressor-banks.md` | Compressor opts in (supersedes #889's absent-member half) | P2a |
 | P2d | `1091-console-p2d-pad-true-peak-limiter-banks.md` | Limiter opts in; the clone keeps the fast body | P2a |
 | P2e | `1092-console-p2e-pad-gate-transient-shaper-and-soft-clip-banks.md` | Gate, transient shaper and soft-clip opt in; gate defaults fixed; soft-clip D7 masked | P2a |
-| S1a | `1093-console-s1a-add-the-session-console-and-inserts.md` | Grammar, model, validation, canonical writer, BTLV, lowering; migrate 18 documents; repin | R0 |
+| S1a | `1093-console-s1a-add-the-session-console-and-inserts.md` | Grammar, model, validation, canonical writer, BTLV, lowering; migrate 18 documents and the app-shape row; keep both benchmarks running; repin | S1r (merge order), C1 pushed |
 | S1b | `1094-console-s1b-carry-the-console-and-inserts-in-the-control-protocol.md` | Console session edits, retired codes, registry docs, `COMPLETE_SCHEMA_HASH` | S1a |
-| S1r | `1095-console-s1r-rename-the-live-console-to-live-controls.md` | Rename the live-control attachment's names, exports, boot words and SDK API | R0 |
-| S1c | `1096-console-s1c-address-console-slots-and-inserts-in-live-control.md` | Live addressing, the browser record's rack byte, the observation, live-response and spectrum encodings | S1a, S1b, S1r |
+| S1r | `1095-console-s1r-rename-the-live-console-to-live-controls.md` | Rename the live-control attachment's names, exports, boot words and SDK API | R0; merges before S1a |
+| S1c | `1096-console-s1c-address-console-slots-and-inserts-in-live-control.md` | Live addressing, the browser record's rack byte, the observation, live-response and spectrum encodings, the V8 harness's rack codes | S1a, S1b (S1r already merged) |
 | S1d | `1097-console-s1d-ship-the-session-console-and-inserts-in-the-sdk.md` | SDK builder, types, writer, live controls, CLI, author-session skill, app handoff | S1a, S1c |
 | S2 | `1098-console-s2-bind-every-console-slot-banked.md` | Padding policy for console slots, the no-fallback diagnostic, #971 | P1, P2b-P2e, S1a |
 | S4 | `1099-console-s4-measure-the-console-strip-against-its-baseline.md` | Rerun B0's rows; before/after report | S2, S1d, S0 |
@@ -225,20 +246,36 @@ The rename (S1r) is its own slice rather than part of S1c: it reaches about 80 c
 files, including sealed exports, and would triple S1c while mixing a class-A rename into a
 semantic verdict (decision 12).
 
-**Merge order and batch notes.**
-- B0 merges before any engine slice (P1, P2a, S1a), so that S0 times the engine unchanged. S0 may
-  run later on a clean detached worktree of B0's commit.
-- P1, P2a, S1a and S1r touch different crates and may be implemented in parallel, subject to
-  AGENTS.md's one-feature WIP limit.
-- S1r merges before S1c and S1d.
-- Between S1a and S1d, the SDK and the SDK-driven browser qualification are knowingly out of step
-  with the engine. The batch is not pushed until S1d's gates pass.
+### Batch plan
+
+The work is delivered in four CI-conscious batches. Each batch is pushed once, and its issues close
+after the push.
+
+| Batch | Slices, in merge order | Why this boundary |
+|---|---|---|
+| C1 | R0, B0, then S0's records | The baseline must be recorded on the unchanged engine, so C1 is pushed before any engine slice lands |
+| C2 | P1, P2a, then P2b-P2e | S2's banking prerequisites, with no schema change. Every shipped plan is unchanged except mixed-bypass cohorts (P1) |
+| C3 | S1r, S1a, S1b, S1c, S1d | The schema change, pushed once. From S1a until S1d the SDK is out of step, so nothing is pushed in between |
+| C4 | S2, then S4 | The guarantee, then the after-measurement |
+
+Sequencing inside each batch follows shared files, not only functional dependencies:
+- P1 and P2a both edit `effect-contract/src/lib.rs` and `graph-compiler/src/banks.rs`, so P1
+  merges first.
+- P2b-P2e edit disjoint effect crates and may land in any order after P2a.
+- S1r, S1a and S1c all edit `effect-compiler/src/prepare.rs`, and S1r and P1 both edit
+  `rack/src/lib.rs`. C2 lands before C3, and inside C3 the order is S1r, S1a, S1b, S1c, S1d, one at
+  a time.
+- S1r goes first so that its SDK and browser gates run against an unchanged schema.
+
+C2 and C3 are independent in function. C3 could go first if the SDK work is more urgent, but S2 needs
+both.
 
 ## Objective gates (whole design)
 
 1. **Class A.** Equivalent sessions (today's identical per-track chains against the console form)
-   produce identical canonical graph text and render digests. This is PR evidence in S1a, and by
-   construction through the lowering.
+   produce identical render digests. Where no rack moved in the migration, they also produce
+   identical canonical graph text, by construction through the lowering. This is PR evidence in S1a,
+   and S4 checks it end to end through `output_sha256`.
 2. **Always banked.** Every console slot binds banked at N in {1, 3, 5, 9, 10, 13}, with mixed
    bypass, mixed insert counts and both pool classes. Simd8 runs on x86-64, and Simd4 runs through
    `scripts/run-aarch64-tests.sh` or the wasm gates (S2). Banked, padded and per-node renders are
@@ -286,7 +323,7 @@ S1d's handoff notes carry the name maps.
 | 10 | #971 under padding | Left to S2, with the question stated |
 | 11 | Silence | Accepted (owner): the trade-off stands; sparse row in B0; skip deferred |
 | 12 | App statement | Corrected above; app shape in B0 |
-| 13 | Vocabulary | Owner: session key `console`; live-control names renamed (S1r); `builtins`/`"strip"` unchanged (R0's reading) |
+| 13 | Vocabulary | Owner: session key `console`; the internal live-console names and the two exports renamed (S1r). Root's application: the boot words and the public SDK API. `_v1` stays. `builtins`/`"strip"` unchanged (R0's reading) |
 | 14 | Class A by lowering | Accepted (owner). S1a |
 
 ## Issue map
@@ -443,3 +480,35 @@ through S1d: twelve or more slices, over several days, with no closed issue. Nam
 - **The draft verification sits in the wrong folder.** `DRAFT-console-strip-VERIFY.md` is in
   `.github/ISSUE_SPECS/`, which the README keeps for open-issue specs only (#1040). Move it when
   convenient.
+
+## Attempt 2 (R0)
+
+Terra, 2026-09-29, a spec-only revision answering Sol's R0 verdict above.
+
+- **High (S4 had no owner).**
+  - S1a's migration rule now takes a uniform `dynamic` rack into the console (two or more tracks;
+    two named placement witnesses excepted), which moves the app-shape row, native and V8, into
+    `console.pre_insert` with its bypass pattern.
+  - S1a owns the V8 harness's fixture lookup and the benchmark builders. S1c owns the harness's and
+    the controls example's rack codes.
+  - Both S1a and S1c now gate on the untimed console preflight and the V8 `prepare` plus
+    `preflight`.
+  - S4 lists every row with the slice that moved it, and gates on `output_sha256` equal to S0's.
+- **Medium.**
+  - S1r merges before S1a (S1a, S1c, S1r and the table).
+  - S1a is authorized for `check-console-benchmark-fixture.sh`, `check-console-fixtures.sh`,
+    `test-console-benchmark.sh` and any other gate input the schema breaks.
+  - Decision 12's naming is re-attributed: the internal names and exports are the owner's decision;
+    the boot words and public SDK API are root's application, and `_v1` stays.
+  - The batch plan (C1-C4) is above.
+- **Low.**
+  - The parallelism note is replaced by file-based sequencing.
+  - S2's `console.slot.unbanked` covers production backends only, and the test-only `Scalar` oracle
+    (#1059) is exempt.
+  - S1a owns `docs/BUILTINS_AND_METERING_V1.md` and the open specs #973 and #987.
+  - The stale "until root numbers it" and "Root renumbers" text is gone.
+  - #887 depends on #1085.
+  - S1c's gate 4 says to run without `--sdk-root`.
+  - The design verification moved to `docs/handoffs/console-strip-2026-09-29/VERIFY.md`.
+  - The GitHub bodies (#1084-#1099, and the #887-#889 amendments) are root's to sync after the C1
+    push.

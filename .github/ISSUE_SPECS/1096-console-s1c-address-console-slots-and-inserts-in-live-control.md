@@ -2,7 +2,7 @@
 
 Slice S1c of *Console strip: session-level console effects with per-track inserts* (owner
 decision 12, `docs/rulings/engine-footprint-2026-09-29.md`; Sol's M5 and amendment 5 in
-`.github/ISSUE_SPECS/DRAFT-console-strip-VERIFY.md`, commit `03aceb94`).
+`docs/handoffs/console-strip-2026-09-29/VERIFY.md`, commit `03aceb94`).
 
 ## Problem
 
@@ -45,6 +45,12 @@ After S1a, the session addresses `console` slots and `inserts`, and none of thes
    `trackPostPan` (2) and `output` (3).
 5. Update the host's `.d.ts` and refresh its SDK mirror (`sdk/src/browser/shipped-host.d.ts`,
    compared by `scripts/check-sdk-generated.sh`). Regenerate the ABI layout JSON and bindings.
+6. **The V8 benchmark harness.** It writes the record's rack byte from the controls table
+   (`scripts/web-mixing-automation-benchmark.mjs:279`). The table's codes come from
+   `tools/console-workload/src/mixing_automation.rs`, through
+   `examples/mixing_automation_controls.rs`, and today they are `0`/`1`/`2` with an index within
+   the section (S1a's interim). This slice moves them to `3` plus the slot index for console slots
+   and `1` plus the index for inserts. Without it, S4's V8 run refuses at preflight.
 
 Authorized paths:
 - `crates/effect-compiler/src/prepare.rs` (addressing);
@@ -54,6 +60,9 @@ Authorized paths:
 - the generated `sdk/assets` layout, `sdk/src/generated/abi.ts` and the mirror;
 - `scripts/check-abi-layout-v1.py` and its self-test fixture;
 - `docs` pages that document the record;
+- `scripts/web-mixing-automation-benchmark.mjs` (the rack byte only),
+  `tools/console-workload/src/mixing_automation.rs` and
+  `tools/console-workload/examples/mixing_automation_controls.rs`;
 - this spec.
 
 The SDK's builder and types are S1d's.
@@ -65,9 +74,10 @@ Decision 12's "Wire identity": nothing is renumbered, every retired code is refu
 
 ## Dependencies
 
-- *Add the session console and per-track inserts to the session schema* (S1a).
-- *Carry the session console and inserts in the control protocol* (S1b).
-- *Rename the live console to live controls* (S1r).
+- *Add the session console and per-track inserts to the session schema* (S1a, #1093).
+- *Carry the session console and inserts in the control protocol* (S1b, #1094).
+- *Rename the live console to live controls* (S1r, #1095), which has merged before S1a in the same
+  batch (C3).
 
 ## Objective gates
 
@@ -83,8 +93,15 @@ Decision 12's "Wire identity": nothing is renumbered, every retired code is refu
    `bash scripts/check-capi-abi.sh` pass. The C ABI carries no rack addressing today, so it should
    not move; if it does, explain why.
 4. The host-web qualification that drives the raw exports passes in the three browsers in CI mode.
-   SDK-driven qualification is S1d's gate.
-5. PR evidence: console digests are unchanged.
+   Run it without `--sdk-root` (`hosts/host-web/qualification/run.mjs:837-858`), which leaves out
+   the SDK bundle and runs only the raw-export subset. SDK-driven qualification is S1d's gate.
+5. The benchmarks still run. Both checks are untimed, on a committed clean tree:
+   - `bash scripts/operator/preflight-console-benchmark.sh --step <an unused scratch name>`;
+   - `bash scripts/run-web-mixing-automation-benchmark.sh prepare WORKDIR`, then `preflight
+     WORKDIR`, in an empty scratch directory.
+
+   The V8 preflight exercises the new rack codes through the shipped module.
+6. PR evidence: console digests are unchanged.
 
 ## Standing rules for the implementer
 

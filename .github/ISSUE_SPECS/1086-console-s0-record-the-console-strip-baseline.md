@@ -14,8 +14,9 @@ Time B0's merge commit, once:
 
 - native: `scripts/operator/run-console-benchmark.sh --step console-strip-base`, after
   `scripts/operator/preflight-console-benchmark.sh --step console-strip-base` passes;
-- V8: `scripts/run-web-mixing-automation-benchmark.sh` for B0's two documents on the shipped
-  artifact built from the same commit.
+- V8: `bash scripts/run-web-mixing-automation-benchmark.sh prepare WORKDIR`, then `preflight
+  WORKDIR`, then `run WORKDIR --step console-strip-base`, for the existing row and B0's two
+  documents, on the module built from the same commit.
 
 Each run is one invocation, with one warmup and two measured rounds. If a later console slice has
 merged by then, time a clean detached worktree of B0's commit; the runner refuses a dirty tree.
@@ -28,7 +29,10 @@ writes, and this spec's evidence section.
 
 ## Dependencies
 
-- *Add the console-strip benchmark rows* (B0).
+- *Add the console-strip benchmark rows* (B0, #1085).
+
+This closes batch C1 (R0, B0, S0). Push C1 with S0's records before any engine slice lands, so the
+baseline is recorded on the unchanged engine.
 
 ## Objective gates
 

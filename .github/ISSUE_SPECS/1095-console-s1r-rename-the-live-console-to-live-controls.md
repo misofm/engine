@@ -2,7 +2,7 @@
 
 Slice S1r of *Console strip: session-level console effects with per-track inserts* (owner
 decision 12, `docs/rulings/engine-footprint-2026-09-29.md`, "Naming"; Sol's M6 and amendment 13 in
-`.github/ISSUE_SPECS/DRAFT-console-strip-VERIFY.md`, commit `03aceb94`).
+`docs/handoffs/console-strip-2026-09-29/VERIFY.md`, commit `03aceb94`).
 
 ## Problem
 
@@ -12,8 +12,15 @@ effect parameters and bypass while it renders, and reads its meters and observat
 lands, "console" would mean two things in the same code, and S1c and S1d, which edit that code,
 would inherit the ambiguity.
 
-The owner ruled that the attachment's names are renamed to the "live controls" vocabulary. The
-console benchmark and fixture names stay, because they describe console sessions.
+The owner ruled that the engine's internal live-console names are renamed, for example to "live
+controls". The question the owner answered listed the fader, mute and pan lanes, the
+`miso_engine_web_v1_console_track_*` exports and the benchmark names. So the owner decided to
+rename the internal names (checkpoint 1) and the two exports (checkpoint 2). The console benchmark
+and fixture names stay, because they describe console sessions.
+
+The four boot-option words and the SDK's public live-console API are renamed with the exports, so
+that one vocabulary crosses the boundary. That is root's application of the owner's decision, not a
+separate owner decision (decision 12, "Naming").
 
 ## Why this is its own slice
 
@@ -25,8 +32,9 @@ lines) and about 8 live docs, and it includes:
 - the SDK's public live-console API.
 
 That is more than S1c's half day on its own. Folding it in would put a class-A mechanical rename
-and a semantic addressing change under one verdict. Landing it before S1c means S1c and S1d edit
-code in which "console" has one meaning.
+and a semantic addressing change under one verdict. Landing it first, before S1a, lets its SDK
+gates run against an unchanged schema. It also means S1a, S1c and S1d edit code in which "console"
+has one meaning.
 
 ## Smallest closable slice
 
@@ -72,7 +80,7 @@ description, not in a committed ledger. Where a name is ambiguous, read what it 
 | SDK `sdk/src/core/console.ts`, `EngineConsole`, `ConsoleRack` | `sdk/src/core/live-controls.ts`, `EngineLiveControls`, `LiveControlRack` |
 | SDK `sdk/src/browser/console.ts`, `createBrowserConsole`, `browser.console()` | `sdk/src/browser/live-controls.ts`, `createBrowserLiveControls`, `browser.liveControls()` |
 
-How decision 12 treats the exports:
+How decision 12 treats the exports (the `_v1` wire identities stay):
 - They are class-2 contract identity (`docs/rulings/de-versioning-inventory.md`, "wasm export
   symbol"), pinned by `scripts/check-abi-layout-v1.py` and `sdk/assets/miso-engine-v1-abi-layout.json`.
 - The version-suffix rule governs only their `_v1`, which stays.
@@ -97,13 +105,18 @@ change anywhere.
 
 ## Owner decisions that bind this slice
 
-Decision 12's "Naming" and "Wire identity": the benchmark and fixture names stay, the prelaunch
-identity stays V1, and the app updates in lockstep.
+- Decision 12's "Naming": the owner renamed the internal names and the exports, and the benchmark
+  and fixture names stay. The boot words and the public SDK API follow as root's application.
+- Decision 12's "Wire identity": the prelaunch identity stays V1, `_v1` stays in every export, and
+  the app updates in lockstep.
 
 ## Dependencies
 
-None beyond decision 12. It must merge before *Address console slots and inserts in live control*
-(S1c) and *Ship the session console and inserts in the SDK* (S1d).
+None beyond decision 12. It is the first slice of batch C3, and it must merge **before** *Add the
+session console and per-track inserts to the session schema* (S1a, #1093). After S1a, the SDK
+suites, `check-sdk-generated.sh` and the SDK-driven browser qualification are red until S1d, so
+gate 3 below could not pass. It therefore also precedes *Address console slots and inserts in live
+control* (S1c, #1096) and *Ship the session console and inserts in the SDK* (S1d, #1097).
 
 ## Objective gates
 

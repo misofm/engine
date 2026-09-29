@@ -2,7 +2,7 @@
 
 Slice B0 of *Console strip: session-level console effects with per-track inserts* (owner
 decision 12, `docs/rulings/engine-footprint-2026-09-29.md`; Sol's verification
-`.github/ISSUE_SPECS/DRAFT-console-strip-VERIFY.md`, commit `03aceb94`).
+`docs/handoffs/console-strip-2026-09-29/VERIFY.md`, commit `03aceb94`).
 
 ## Problem
 
@@ -66,7 +66,12 @@ artifact. Add no per-N V8 rows, because that would be a second framework.
 
 None beyond decision 12 and the AGENTS.md amendment, which landed with R0.
 
-Merge order: B0 must merge before any engine slice (P1, P2a, S1a), so that S0 can time B0's commit.
+Batch C1 is R0, B0 and S0, and it is pushed before any engine slice (P1, P2a or S1a) lands, so
+that S0 times B0's commit on the unchanged engine.
+
+S1a (#1093) later moves the app-shape row, native and V8, into `console.pre_insert` with the same
+bypass pattern, and S1c (#1096) moves the V8 rack codes. B0 builds the row in today's `dynamic` form
+only.
 
 ## Objective gates
 

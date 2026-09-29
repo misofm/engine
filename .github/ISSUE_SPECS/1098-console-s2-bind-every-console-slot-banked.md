@@ -2,7 +2,7 @@
 
 Slice S2 of *Console strip: session-level console effects with per-track inserts* (owner
 decision 12, `docs/rulings/engine-footprint-2026-09-29.md`; Sol's H2, H5, M3, L3 and amendments 3,
-9 and 10 in `.github/ISSUE_SPECS/DRAFT-console-strip-VERIFY.md`, commit `03aceb94`).
+9 and 10 in `docs/handoffs/console-strip-2026-09-29/VERIFY.md`, commit `03aceb94`).
 
 ## Problem
 
@@ -22,10 +22,12 @@ remainder renders per node.
 1. **Policy.** The planner forms one bank group per (slot, pool class, dependency level) for every
    console slot, and pads each to W (H2, M3). Inserts keep today's rule: full groups bank and
    remainders render per node (decision 12, "Inserts bank opportunistically, as today").
-2. **Guarantee.** A console slot never renders per node. If a console group does not bind banked,
-   compilation fails with a typed diagnostic (for example `console.slot.unbanked`) naming the slot,
-   pool class and level. There is no silent fallback. S1a's eligibility refusal makes that
-   unreachable for valid sessions; the diagnostic guards against regressions.
+2. **Guarantee.** On every production backend (Simd8 and Simd4), a console slot never renders per
+   node. If a console group does not bind banked, compilation fails with a typed diagnostic (for
+   example `console.slot.unbanked`) naming the slot, pool class and level. There is no silent
+   fallback. S1a's eligibility refusal makes that unreachable for valid sessions; the diagnostic
+   guards against regressions. The test-only `Scalar` oracle (#1059), which exists only for tests
+   and `test-support`, is exempt: it is the per-node reference that gate 2 compares against.
 3. **#971 under padding** (amendment 10). Once every console group binds, the stranded-mono
    demotion's "keep the move only if it binds more banks" objective
    (`crates/graph-compiler/src/banks.rs:243-356`) measures nothing for console slots. Decide one of
@@ -53,6 +55,8 @@ diagnostics, their tests, and this spec.
 
 ## Dependencies
 
+This is batch C4, after batch C2 (P1, P2a-P2e) and batch C3 (S1r, S1a-S1d) have been pushed.
+
 - *Keep a bypassed lane in its effect bank* (P1).
 - *Pad parametric EQ banks with inactive lanes* (P2b).
 - *Pad compressor banks with inactive lanes* (P2c).
@@ -71,11 +75,14 @@ diagnostics, their tests, and this spec.
 
    It runs at Simd8 on x86-64 and at Simd4 through `scripts/run-aarch64-tests.sh` or the wasm gates
    (L3). The group count equals the sum over (pool class, level) of `ceil(n / W)`.
-2. **Class A.** A committed randomized differential renders these sessions banked and per node,
-   and every track is bit-identical in both, with NaNs folded (decision 10). A planted
+2. **Class A.** A committed randomized differential renders these sessions banked, on a
+   production backend, and per node, through the test-only `Scalar` oracle. Every track is
+   bit-identical in both, with NaNs folded (decision 10). A planted
    whole-bank decision that is not bit-neutral per lane turns it red.
-3. **Diagnostic.** A planted factory decline on a console group fails the compile with the typed
-   diagnostic, never a per-node plan.
+3. **Diagnostic.** A planted factory decline on a console group, on a production backend, fails
+   the compile with the typed diagnostic and never yields a per-node plan. The `Scalar` oracle's
+   exemption does not reach a production backend: a test compiles the same session on Simd8 with the
+   planted decline and expects the refusal.
 4. **#971.** The chosen rule is pinned by a test on a session with stranded mono tracks.
 5. **Realtime.** `scripts/check-realtime-policy.sh`, the realtime audits and the callgraph gates
    pass, and render allocates nothing.

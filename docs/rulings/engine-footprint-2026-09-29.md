@@ -37,11 +37,12 @@ which the removal left unused.
 ## Decision 12: the console strip (session-level console slots, per-track inserts)
 
 The owner's console-strip design (umbrella issue *Console strip: session-level console effects
-with per-track inserts*, `.github/ISSUE_SPECS/1084-console-00-console-strip.md` until root numbers it)
+with per-track inserts*, #1084, `.github/ISSUE_SPECS/1084-console-00-console-strip.md`)
 emulates a hardware console: every channel runs the same built-in processing and sets only its own
 knobs, and outboard gear is patched into a channel's insert point. Sol verified the design against
-`5a1421a3` and returned SOUND WITH AMENDMENTS (`.github/ISSUE_SPECS/DRAFT-console-strip-VERIFY.md`,
-commit `03aceb94`; findings H1-H5, M1-M9, L1-L7 and amendments 1-14 below cite it). The owner
+`5a1421a3` and returned SOUND WITH AMENDMENTS (`docs/handoffs/console-strip-2026-09-29/VERIFY.md`,
+first committed at `.github/ISSUE_SPECS/DRAFT-console-strip-VERIFY.md` in `03aceb94`; findings
+H1-H5, M1-M9, L1-L7 and amendments 1-14 below cite it). The owner
 answered the amendments on 2026-09-29. Ruling:
 
 - **Shape.** The session declares `console { "pre_insert": [...], "post_insert": [...] }`. Each
@@ -83,20 +84,29 @@ answered the amendments on 2026-09-29. Ruling:
   bank-mates processing (M4). The baseline measures it with a sparse-activity row; a per-lane
   silence skip is a later issue if the measurement warrants it. An all-lanes-bypassed skip stays
   out of scope and would still have to feed latency lines (amendment 11).
-- **Naming.** The session key is `console`. The engine's existing "console" names for the
-  live-control attachment are renamed to the "live controls" vocabulary (M6, amendment 13):
-  `HostConsoleRequest`/`HostConsoleHandles`, `ConsoleEffectBankStage`, the
-  `miso_engine_web_v1_console_track_*` exports and their four pinned `console*` boot-option words,
-  `sdk/src/core/console.ts`, and every other identifier whose "console" means that attachment. The
-  console benchmark and the console fixtures keep their names, because they describe console
-  sessions.
-  - The two exports are sealed contract identity: exported wasm symbols, pinned by
-    `scripts/check-abi-layout-v1.py` and `sdk/assets/miso-engine-v1-abi-layout.json`, and listed
-    as class 2 in `docs/rulings/de-versioning-inventory.md`. The version-suffix rule governs only
-    their `_v1` suffix, which stays: no V2 is claimed. Renaming the stem is a contract change,
-    admitted as an in-place V1 amendment under the wire-identity ruling below. The boot-option words
-    keep their offsets and types and change only their spellings. A retired spelling is never
-    exported again, for any meaning.
+- **Naming** (M6, amendment 13).
+  - **The owner's decision.** The session key is `console`, and the engine's internal live-console
+    names are renamed, for example to "live controls". The question the owner answered listed the
+    fader, mute and pan lanes, the `miso_engine_web_v1_console_track_*` exports and the benchmark
+    names. So the owner decided to rename:
+    - the internal names: `HostConsoleRequest`/`HostConsoleHandles`, `ConsoleEffectBankStage`, the
+      builtins' console fader, matrix and input processors, and every other internal identifier
+      whose "console" means the live-control attachment;
+    - the two exports.
+
+    The console benchmark and the console fixtures keep their names, because they describe console
+    sessions.
+  - **Root's application of it.** The four pinned `console*` boot-option words and the SDK's public
+    live-console API (`sdk/src/core/console.ts`, `EngineConsole`, `createBrowserConsole`) are
+    renamed with the exports, so one vocabulary crosses the boundary. This is root's reading of the
+    owner's decision, not a separate owner decision.
+  - **The `_v1` wire identities stay.** The two exports are sealed contract identity: exported wasm
+    symbols, pinned by `scripts/check-abi-layout-v1.py` and
+    `sdk/assets/miso-engine-v1-abi-layout.json`, and class 2 in
+    `docs/rulings/de-versioning-inventory.md`. The version-suffix rule governs only their `_v1`,
+    which stays, and no V2 is claimed. Renaming the stem is an in-place V1 amendment under the
+    wire-identity ruling below. The boot-option words keep their offsets and types and change only
+    their spellings. A retired spelling is never exported again, for any meaning.
   - The builtins automation token (`rack: "builtins"`, `effect_id: "strip"`) is unchanged. The
     owner's naming decision does not touch it, and the `rack` token keeps it distinct from a console
     slot that happens to be named `strip`. This is R0's reading, not a separate owner decision.
@@ -125,8 +135,10 @@ answered the amendments on 2026-09-29. Ruling:
   app-shaped row is "every track carries EQ -> compressor, a subset bypassed". The app moves the
   pair into `console.pre_insert` after the SDK slice lands.
 
-The slices, their dependencies and their gates are in the umbrella issue. Sol's revised plan is kept
-with one addition: the live-controls rename is its own slice (S1r) ahead of live addressing (S1c),
-because it reaches about 80 code, script and SDK files (about 780 lines), including two sealed
-exports, four boot-option words and the SDK's public live-console API. That is more than S1c's own
-half day, and it keeps a class-A rename out of a semantic addressing verdict.
+The slices, their dependencies, their gates and the batch plan are in the umbrella issue. Sol's
+revised plan is kept with one addition, the live-controls rename (S1r, #1095). It is a slice of its
+own because it reaches about 80 code, script and SDK files (about 780 lines), including two sealed
+exports, four boot-option words and the SDK's public live-console API. That is more than S1c's half
+day, and a separate slice keeps a class-A rename out of a semantic addressing verdict. It merges
+first in its batch, before the schema slice (S1a), so that its SDK and browser gates run against an
+unchanged schema.

@@ -2,7 +2,7 @@
 
 Slice P2c of *Console strip: session-level console effects with per-track inserts* (owner
 decision 12, `docs/rulings/engine-footprint-2026-09-29.md`; Sol's M1, M2 and amendment 6 in
-`.github/ISSUE_SPECS/DRAFT-console-strip-VERIFY.md`, commit `03aceb94`).
+`docs/handoffs/console-strip-2026-09-29/VERIFY.md`, commit `03aceb94`).
 
 ## Problem
 
@@ -45,7 +45,10 @@ Authorized paths:
 
 ## Dependencies
 
-- *Let an effect bank bind a partial group with inactive lanes* (P2a).
+- *Let an effect bank bind a partial group with inactive lanes* (P2a), #1088).
+
+This is batch C2. P2b-P2e edit disjoint effect crates, so after P2a merges they may land in
+any order, one merge each.
 - It reuses the test shape of *Pad parametric EQ banks with inactive lanes* (P2b) but does not
   depend on it.
 

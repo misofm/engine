@@ -2,7 +2,7 @@
 
 Slice P1 of *Console strip: session-level console effects with per-track inserts* (owner
 decision 12, `docs/rulings/engine-footprint-2026-09-29.md`; Sol's finding H1 and amendment 1 in
-`.github/ISSUE_SPECS/DRAFT-console-strip-VERIFY.md`, commit `03aceb94`).
+`docs/handoffs/console-strip-2026-09-29/VERIFY.md`, commit `03aceb94`).
 
 ## Problem
 
@@ -56,8 +56,11 @@ Authorized paths:
 
 ## Dependencies
 
-None beyond decision 12. Merge after *Add the console-strip benchmark rows* (B0), so that S0 times
-the engine without this change.
+None beyond decision 12. This is the first slice of batch C2, which starts after batch C1 (B0 and
+S0's baseline) has been pushed, so that S0 timed the engine without this change.
+
+P1 and P2a both edit `effect-contract/src/lib.rs` and `graph-compiler/src/banks.rs`, so P1 merges
+before P2a starts.
 
 This changes insert cohorts as well as console slots. On the app's current shape, bypassed tracks
 stop forming their own cohort. S0 and S4's app-shape row measures that change.

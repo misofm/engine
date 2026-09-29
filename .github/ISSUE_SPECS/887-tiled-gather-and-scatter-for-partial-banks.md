@@ -49,9 +49,11 @@ effects with per-track inserts*. What changes here:
 - **Weight, not scope.** After *Bind every console slot banked for every track count* (S2), every
   console remainder is a padded partial bank. The scalar strided gather and scatter then runs on
   every session whose track count is not a multiple of W. This stays a class-A performance issue.
-- **Dependencies.** Still none. It no longer unblocks the identity-lane issues: #888 and #889 are
-  narrowed (see their amendments). The padding slices do not depend on it, because the rack already
-  runs partial chains correctly (Sol's M1 in `.github/ISSUE_SPECS/DRAFT-console-strip-VERIFY.md`).
+- **Dependencies.** *Add the console-strip benchmark rows* (#1085), whose N = 10 and 13 rows the
+  replaced gate 4 reads. There is no functional dependency. It no longer unblocks the identity-lane
+  issues: #888 and #889 are narrowed (see their amendments). The padding slices do not depend on it
+  either, because the rack already runs partial chains correctly (Sol's M1 in
+  `docs/handoffs/console-strip-2026-09-29/VERIFY.md`).
 - **Inactive lanes.** The padding contract feeds a padded lane `+0.0` and discards its output (*Let
   an effect bank bind a partial group with inactive lanes*, P2a). The tiled path must keep both:
   gather inactive lanes from `ARENA_SILENCE_BUFFER`, and never write their output to a member

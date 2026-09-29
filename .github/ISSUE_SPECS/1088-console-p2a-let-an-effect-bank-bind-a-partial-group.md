@@ -2,7 +2,7 @@
 
 Slice P2a of *Console strip: session-level console effects with per-track inserts* (owner
 decision 12, `docs/rulings/engine-footprint-2026-09-29.md`; Sol's M1 and amendment 6 in
-`.github/ISSUE_SPECS/DRAFT-console-strip-VERIFY.md`, commit `03aceb94`).
+`docs/handoffs/console-strip-2026-09-29/VERIFY.md`, commit `03aceb94`).
 
 ## Problem
 
@@ -53,7 +53,10 @@ Authorized paths:
 
 ## Dependencies
 
-None beyond decision 12. Merge after *Add the console-strip benchmark rows* (B0).
+- *Keep a bypassed lane in its effect bank* (P1, #1087). This is merge order, not a functional
+  dependency: both slices edit `effect-contract/src/lib.rs` and `graph-compiler/src/banks.rs`.
+
+This is batch C2, after batch C1 has been pushed.
 
 ## Objective gates
 
