@@ -1784,9 +1784,11 @@ mod settled_body_tests {
     //! * the randomized differential (`randomized_differential_*`): seeded blocks with hostile
     //!   input, parameter extremes, automation that ends mid-block, resets, bypass toggles and every
     //!   detector kind, dual and collapsed, at `f32`, `Simd4` and `Simd8`;
-    //! * the scenario digests (`scenario_*`, gate 2 of each slice), pinned on the unmodified base
-    //!   before the change they gate. A digest pinned after the change would only prove the change
-    //!   deterministic (the #944 lesson).
+    //! * the #1006 scenario digest (`scenario_1006_ramping_prefix_is_pinned`), pinned on the
+    //!   unmodified base before the change it gates. A digest pinned after the change would only
+    //!   prove the change deterministic (the #944 lesson). The earlier slices' digests (#981-#983,
+    //!   #985 and #995) and #982's all-wet grid were retired by #1049 once their slices had landed:
+    //!   the grid and the randomized differentials catch every mutant they caught.
     //!
     //! Every comparison is by bits: rendered words, the recursive words, every coefficient word and
     //! every ramp field, then the `finish_channel` masks, and the same words again after it.
@@ -1803,9 +1805,6 @@ mod settled_body_tests {
     use sha2::{Digest, Sha256};
 
     type Defaults = [[f32; PARAMETER_COUNT]; MAX_WIDTH];
-
-    /// A scenario block: its frame count, and a `(parameter, lane, value)` retarget before it.
-    type ScenarioBlock = (usize, Option<(usize, usize, f32)>);
 
     const SAMPLE_RATE: u32 = 48_000;
     const QUANTUM: usize = 128;
@@ -2904,41 +2903,6 @@ mod settled_body_tests {
         grid_all(&CORPUS_TRACKS, false);
     }
 
-    /// An all-wet table on which the arm is taken (#982 gate 1): every lane `mix == 1` and
-    /// `makeup`, and the lanes cross ratio `{1, 4, 20}` with knee `{0, 6}`.
-    fn wet_table(makeup: f32) -> [[f32; PARAMETER_COUNT]; 8] {
-        core::array::from_fn(|lane| {
-            let lane_f = lane as f32;
-            [
-                -6.0 - 3.0 * lane_f,
-                [1.0, 4.0, 20.0][lane % 3],
-                [0.0, 6.0][lane % 2],
-                2.0 + 1.5 * lane_f,
-                40.0 + 15.0 * lane_f,
-                makeup,
-                1.0,
-            ]
-        })
-    }
-
-    /// #982 gate 1. Makeup `0` is also what the parameter layer delivers for `-0`; the raw `-0.0`
-    /// word, which that layer never delivers, is covered as well.
-    #[test]
-    fn the_all_wet_arm_is_the_base_body_on_all_wet_tables() {
-        for makeup in [0.0, -0.0, 3.0, -12.0] {
-            let coverage = grid_all(&wet_table(makeup), true);
-            assert!(
-                coverage.all_wet_settled > 0,
-                "makeup {makeup}: the arm must be taken"
-            );
-        }
-        let coverage = grid_all(&FIXTURE_TRACKS, true);
-        assert!(
-            coverage.all_wet_settled > 0,
-            "the fixture tracks must take the arm"
-        );
-    }
-
     /// A heavily compressing all-wet table: low thresholds, high ratios, fast attacks, makeup.
     const COMPRESSING_TRACKS: [[f32; PARAMETER_COUNT]; 8] = [
         [-40.0, 20.0, 0.0, 0.1, 5.0, 12.0, 1.0],
@@ -2951,8 +2915,9 @@ mod settled_body_tests {
         [-80.0, 4.0, 18.0, 10.0, 500.0, 24.0, 1.0],
     ];
 
-    /// #985 gate 1's three parameter sets: the fixture (all-wet), a compressing set (all-wet) and
-    /// the parallel corpus table (mixed), through the collapsed body as well as the dual one.
+    /// #985 gate 1's all-wet compressing set, through the collapsed body as well as the dual one:
+    /// with the corpus table (mixed) above, it is also #982's all-wet gate 1 since #1049 retired
+    /// the all-wet grid, whose catch set was this test's.
     #[test]
     fn the_collapsed_settled_body_is_the_base_body_on_the_three_parameter_sets() {
         let coverage = grid_all(&COMPRESSING_TRACKS, true);
@@ -3245,146 +3210,12 @@ mod settled_body_tests {
         }
     }
 
-    /// Renders a fixed dual scenario through `process_block` and folds, per block, the kernel's
-    /// output words and recursive words, then the boundary masks, the finished words and the
-    /// recursive words again. Returns how many blocks started their settled body mid-block.
-    #[allow(clippy::too_many_arguments)]
-    fn scenario_dual<L: Lane>(
-        hasher: &mut Sha256,
-        table: &[[f32; PARAMETER_COUNT]; 8],
-        link: LinkMode,
-        schedule: &[ScenarioBlock],
-        canonical: bool,
-        source: Source,
-    ) -> usize {
-        let width = L::WIDTH;
-        let mut mid_block = 0;
-        for group in 0..8 / width {
-            let left = table_defaults(table, group * width, 0);
-            let right = table_defaults(table, group * width, 3);
-            let mut channels = (
-                Channel::<L>::new(&left, SAMPLE_RATE),
-                Channel::<L>::new(&right, SAMPLE_RATE),
-            );
-            let mut rng = Rng::new(0x5ce0 + group as u64);
-            // The sidechain planes draw from their own generator, so a `Main` scenario renders
-            // exactly the blocks it rendered before the source parameter existed.
-            let mut sidechain_rng = Rng::new(0x51de + group as u64);
-            for (block, &(frames, retarget)) in schedule.iter().enumerate() {
-                if let Some((parameter, lane, value)) = retarget {
-                    channels
-                        .0
-                        .set_parameter_target(parameter, lane % width, value, SAMPLE_RATE);
-                    channels
-                        .1
-                        .set_parameter_target(parameter, lane % width, value, SAMPLE_RATE);
-                }
-                let ramping = channels.0.max_remaining().max(channels.1.max_remaining()) as usize;
-                mid_block += usize::from(ramping > 0 && ramping < frames);
-                let mut left = vec![0.0_f32; frames * width];
-                let mut right = vec![0.0_f32; frames * width];
-                fill(&mut rng, block % PROFILES, width, &mut left);
-                fill(&mut rng, (block + 3) % PROFILES, width, &mut right);
-                let mut sidechain = Sidechain {
-                    left: Vec::new(),
-                    right: Vec::new(),
-                };
-                if source == Source::Sidechain {
-                    sidechain.left = vec![0.0_f32; frames * width];
-                    sidechain.right = vec![0.0_f32; frames * width];
-                    let profile = (block + 5) % PROFILES;
-                    fill(&mut sidechain_rng, profile, width, &mut sidechain.left);
-                    fill(
-                        &mut sidechain_rng,
-                        (profile + 2) % PROFILES,
-                        width,
-                        &mut sidechain.right,
-                    );
-                    // A quiet main under a louder sidechain, as in the grid.
-                    for word in left.iter_mut().chain(&mut right) {
-                        *word *= 1.0e-3;
-                    }
-                }
-                process_block::<L>(
-                    &mut left,
-                    &mut right,
-                    sidechain.detector(source),
-                    frames,
-                    link,
-                    false,
-                    SAMPLE_RATE,
-                    (&mut channels.0, &mut channels.1),
-                );
-                fold(hasher, &left, canonical);
-                fold(hasher, &right, canonical);
-                fold_state(hasher, &channels.0);
-                fold_state(hasher, &channels.1);
-                let masks = [
-                    finish_channel::<L>(&mut left, &mut channels.0),
-                    finish_channel::<L>(&mut right, &mut channels.1),
-                ];
-                for mask in masks {
-                    hasher.update(mask.to_le_bytes());
-                }
-                fold(hasher, &left, false);
-                fold(hasher, &right, false);
-                fold_state(hasher, &channels.0);
-                fold_state(hasher, &channels.1);
-            }
-        }
-        mid_block
-    }
-
     fn hex(hasher: Sha256) -> String {
         hasher
             .finalize()
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect()
-    }
-
-    /// #981 gate 2: 24 heterogeneous blocks, `Simd4` and `Simd8`, DualMono and Maximum, hostile
-    /// input, one automation point that leaves a 23-frame ramp prefix. Pinned on the unmodified
-    /// base (`197db1c9`), in dev and release.
-    const SCENARIO_981: &str = "57cfd7ce05050c68ab73e6585ccc72bd5403543565cd38471fce47bb263e62a0";
-
-    #[test]
-    fn scenario_981_heterogeneous_hostile_render_is_pinned() {
-        let schedule: Vec<ScenarioBlock> = [
-            128, 1, 7, 31, 32, 33, 128, 41, 128, 64, 97, 128, 127, 2, 128, 65, 63, 128, 16, 128,
-            100, 128, 3, 128,
-        ]
-        .iter()
-        .enumerate()
-        .map(|(block, &frames)| (frames, (block == 7).then_some((0, 1, -30.0))))
-        .collect();
-        let mut hasher = Sha256::new();
-        let mut mid_block = 0;
-        for link in [LinkMode::DualMono, LinkMode::Maximum] {
-            mid_block += scenario_dual::<Simd4>(
-                &mut hasher,
-                &CORPUS_TRACKS,
-                link,
-                &schedule,
-                false,
-                Source::Main,
-            );
-            mid_block += scenario_dual::<Simd8>(
-                &mut hasher,
-                &CORPUS_TRACKS,
-                link,
-                &schedule,
-                false,
-                Source::Main,
-            );
-        }
-        assert!(
-            mid_block > 0,
-            "the automation point must leave a settled body mid-block"
-        );
-        let digest = hex(hasher);
-        println!("scenario 981 digest {digest}");
-        assert_eq!(digest, SCENARIO_981);
     }
 
     /// The standing console fixture's first eight compressors
@@ -3400,201 +3231,6 @@ mod settled_body_tests {
         [-15.0, 6.0, 4.5, 11.0, 130.0, 3.0, 1.0],
         [-16.5, 6.75, 6.0, 12.5, 145.0, 0.0, 1.0],
     ];
-
-    /// #982 gate 2: 24 all-wet heterogeneous blocks, `Simd4` and `Simd8`, DualMono and Average,
-    /// hostile input. NaN words fold canonically before the boundary check (the arm's one
-    /// relaxation) and by bits after it. Pinned on the unmodified base (`197db1c9`) and on
-    /// #981, in dev and release.
-    const SCENARIO_982: &str = "cd2d5b11da315893f13e5585bf82fcbb71f9026046497626544a6573ed97c8cf";
-
-    #[test]
-    fn scenario_982_all_wet_render_is_pinned() {
-        let schedule: Vec<ScenarioBlock> = [
-            128, 128, 1, 7, 31, 32, 33, 128, 41, 128, 64, 97, 128, 127, 2, 128, 65, 63, 128, 16,
-            128, 100, 3, 128,
-        ]
-        .iter()
-        .enumerate()
-        .map(|(block, &frames)| (frames, (block == 8).then_some((0, 2, -21.0))))
-        .collect();
-        let mut hasher = Sha256::new();
-        for link in [LinkMode::DualMono, LinkMode::Average] {
-            scenario_dual::<Simd4>(
-                &mut hasher,
-                &FIXTURE_TRACKS,
-                link,
-                &schedule,
-                true,
-                Source::Main,
-            );
-            scenario_dual::<Simd8>(
-                &mut hasher,
-                &FIXTURE_TRACKS,
-                link,
-                &schedule,
-                true,
-                Source::Main,
-            );
-        }
-        let digest = hex(hasher);
-        println!("scenario 982 digest {digest}");
-        assert_eq!(digest, SCENARIO_982);
-    }
-    /// Blocks that straddle 32-frame chunks, and 24-frame fully ramping blocks whose ramps then end
-    /// at frame 40 of the next block, so its settled body starts mid-chunk.
-    fn straddling_schedule(parameter: usize, values: [f32; 6]) -> Vec<ScenarioBlock> {
-        let mut schedule = Vec::new();
-        for (round, &frames) in [31_usize, 32, 33, 64, 97, 128].iter().enumerate() {
-            schedule.push((frames, None));
-            schedule.push((24, Some((parameter, round, values[round]))));
-            schedule.push((frames.max(41), None));
-        }
-        schedule.extend([(128, None), (97, None), (33, None)]);
-        schedule
-    }
-
-    /// #983 gate 2: the chunk-straddling scenario, both tables, every link mode, `Simd4` and
-    /// `Simd8`. Pinned on the unmodified base (`197db1c9`) and on #982, in dev and release.
-    const SCENARIO_983: &str = "47ffff05a0f1b605a42acd320948d09b7137d92e2f3b7925381b6c6dc0aed424";
-
-    #[test]
-    fn scenario_983_chunk_straddling_render_is_pinned() {
-        let schedule = straddling_schedule(0, [-27.0, -33.0, -21.0, -45.0, -9.0, -36.0]);
-        let mut hasher = Sha256::new();
-        let mut mid_block = 0;
-        for link in LINKS {
-            for (table, canonical) in [(&CORPUS_TRACKS, false), (&FIXTURE_TRACKS, true)] {
-                mid_block += scenario_dual::<Simd4>(
-                    &mut hasher,
-                    table,
-                    link,
-                    &schedule,
-                    canonical,
-                    Source::Main,
-                );
-                mid_block += scenario_dual::<Simd8>(
-                    &mut hasher,
-                    table,
-                    link,
-                    &schedule,
-                    canonical,
-                    Source::Main,
-                );
-            }
-        }
-        // Six ramps end at frame 40, per group, table and link mode.
-        assert_eq!(
-            mid_block,
-            6 * 3 * 3 * 2,
-            "every retarget must leave a mid-chunk start"
-        );
-        let digest = hex(hasher);
-        println!("scenario 983 digest {digest}");
-        assert_eq!(digest, SCENARIO_983);
-    }
-    /// #995 gate 2: a connected sidechain, present (`Sidechain`) and absent (`Silent`), through
-    /// the chunk-straddling schedule, both tables, every link mode, at `f32` -- the only width a
-    /// sidechained compressor renders at, since it never banks -- and at `Simd4` and `Simd8`.
-    /// Every word folds by bits: a sidechained block never takes the all-wet arm. Pinned on the
-    /// unmodified batch head (`fc43c97d`), in dev and release.
-    const SCENARIO_995: &str = "25b39c7a6331a1571d2b5bc023e8a7e2d54ffefb9393e6b860b1b95a27e4c482";
-
-    #[test]
-    fn scenario_995_sidechain_render_is_pinned() {
-        let schedule = straddling_schedule(0, [-30.0, -18.0, -42.0, -24.0, -12.0, -36.0]);
-        let mut hasher = Sha256::new();
-        let mut mid_block = 0;
-        for source in [Source::Sidechain, Source::Silent] {
-            for link in LINKS {
-                for table in [&CORPUS_TRACKS, &FIXTURE_TRACKS] {
-                    mid_block +=
-                        scenario_dual::<f32>(&mut hasher, table, link, &schedule, false, source);
-                    mid_block +=
-                        scenario_dual::<Simd4>(&mut hasher, table, link, &schedule, false, source);
-                    mid_block +=
-                        scenario_dual::<Simd8>(&mut hasher, table, link, &schedule, false, source);
-                }
-            }
-        }
-        // Six ramps end at frame 40, per group (8 + 2 + 1), table, link mode and source.
-        assert_eq!(
-            mid_block,
-            6 * 11 * 2 * 3 * 2,
-            "every retarget must leave a mid-chunk start"
-        );
-        let digest = hex(hasher);
-        println!("scenario 995 digest {digest}");
-        assert_eq!(digest, SCENARIO_995);
-    }
-
-    /// The collapsed twin of [`scenario_dual`]: `process_block_mono` over the left defaults.
-    fn scenario_mono<L: Lane>(
-        hasher: &mut Sha256,
-        table: &[[f32; PARAMETER_COUNT]; 8],
-        link: LinkMode,
-        schedule: &[ScenarioBlock],
-        canonical: bool,
-    ) -> usize {
-        let width = L::WIDTH;
-        let mut mid_block = 0;
-        for group in 0..8 / width {
-            let defaults = table_defaults(table, group * width, 0);
-            let mut channel = Channel::<L>::new(&defaults, SAMPLE_RATE);
-            let mut rng = Rng::new(0x5ce1 + group as u64);
-            for (block, &(frames, retarget)) in schedule.iter().enumerate() {
-                if let Some((parameter, lane, value)) = retarget {
-                    channel.set_parameter_target(parameter, lane % width, value, SAMPLE_RATE);
-                }
-                let ramping = channel.max_remaining() as usize;
-                mid_block += usize::from(ramping > 0 && ramping < frames);
-                let mut plane = vec![0.0_f32; frames * width];
-                fill(&mut rng, block % PROFILES, width, &mut plane);
-                process_block_mono::<L>(
-                    &mut plane,
-                    Detector::Main,
-                    frames,
-                    link,
-                    false,
-                    SAMPLE_RATE,
-                    &mut channel,
-                );
-                fold(hasher, &plane, canonical);
-                fold_state(hasher, &channel);
-                let mask = finish_channel::<L>(&mut plane, &mut channel);
-                hasher.update(mask.to_le_bytes());
-                fold(hasher, &plane, false);
-                fold_state(hasher, &channel);
-            }
-        }
-        mid_block
-    }
-
-    /// #985 gate 2: the collapsed body, `Simd4` and `Simd8`, DualMono and Average, all-wet and
-    /// mixed, chunk-straddling blocks, hostile input (its subnormal profile is the Average case).
-    /// Pinned on the unmodified base (`197db1c9`) and on #983, in dev and release.
-    const SCENARIO_985: &str = "b48776f5e0d8609db1df969b051c066c8eac0c8abd0be373de4de529c1d9ff8c";
-
-    #[test]
-    fn scenario_985_collapsed_render_is_pinned() {
-        let schedule = straddling_schedule(1, [2.5, 5.5, 1.25, 9.0, 3.25, 7.0]);
-        let mut hasher = Sha256::new();
-        let mut mid_block = 0;
-        for link in [LinkMode::DualMono, LinkMode::Average] {
-            for (table, canonical) in [(&CORPUS_TRACKS, false), (&FIXTURE_TRACKS, true)] {
-                mid_block += scenario_mono::<Simd4>(&mut hasher, table, link, &schedule, canonical);
-                mid_block += scenario_mono::<Simd8>(&mut hasher, table, link, &schedule, canonical);
-            }
-        }
-        // Six ramps end at frame 40, per group, table and link mode.
-        assert_eq!(
-            mid_block,
-            6 * 3 * 2 * 2,
-            "every retarget must leave a mid-chunk start"
-        );
-        let digest = hex(hasher);
-        println!("scenario 985 digest {digest}");
-        assert_eq!(digest, SCENARIO_985);
-    }
 
     /// One block of the #1006 ramping scenario: its frame count and the events before it.
     #[derive(Clone, Copy, Default)]

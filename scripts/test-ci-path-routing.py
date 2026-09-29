@@ -653,8 +653,8 @@ def test_self_test_contract_mutations(checker) -> None:
                                     "        continue-on-error: true\n"
                                     f"        run: {commands[0]}\n")
         workflow_mutation_fails("nightly.yml",
-                                "            moved-mutation-suites, release-budgets]",
-                                "            release-budgets]")  # the notice stops reporting it
+                                "            moved-mutation-suites, release-budgets, full-size-tests]",
+                                "            release-budgets, full-size-tests]")  # the notice stops reporting it
         workflow_mutation_fails(
             "nightly.yml", "    name: stem-store mutation ledger and script-gate self-tests\n",
             "    name: stem-store mutation ledger and script-gate self-tests\n"

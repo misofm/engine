@@ -173,10 +173,10 @@ AArch64 legs. Each open entry is an expected failure, by name:
   profile. With every NaN folded as one word, these pins are identical on both architectures.
   #1065 asks the owner to rule whether class-A identity treats every NaN as one value. Expected
   failures in `aarch64-debug`: `compressor`
-  `kernel::settled_body_tests::scenario_{981,983,985,995}_*_is_pinned` and
-  `scenario_1006_ramping_prefix_is_pinned`, and `parametric-eq` `bank`
-  `admitted_blocks_render_the_base_bits_without_selects`. Every other test in the two legs passes
-  on AArch64, the console digests and the G5 corpus included.
+  `kernel::settled_body_tests::scenario_1006_ramping_prefix_is_pinned` and `parametric-eq` `bank`
+  `admitted_blocks_render_the_base_bits_without_selects`. (#1049 deleted the compressor's
+  `scenario_{981,983,985,995}` pins, and their rows, as dominated.) Every other test in the two
+  legs passes on AArch64, the console digests and the G5 corpus included.
 - **Darwin `memset_pattern16` in render (#1018).** On Apple targets LLVM lowers a stored `f32x4`
   splat constant to `bl _memset_pattern16`, a libc call. The constants are `lane::FLUSH_EPS` (the
   SVF flush), `1.0`, `0.5`, `2.0`, `1e-8`, `f32::MIN_POSITIVE` and others. So this is not the SVF
