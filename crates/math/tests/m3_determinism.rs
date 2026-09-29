@@ -4,31 +4,22 @@
 //!
 //! * **Structural.** A source scan of `src/vendored/` for the constructs that make a build
 //!   target-dependent: `target_feature`, the `arch` intrinsic modules, and the fused
-//!   multiply-add method. This is the half
-//!   that fails on the host that *does* have FMA, immediately, without needing a second target.
+//!   multiply-add method, plus `unsafe` and libm's `force_eval!`. This is the half that fails on
+//!   the host that *does* have FMA, immediately, without needing a second target. A source scan is
+//!   repository policy, not a test, so it lives in `scripts/check-lane-policy.sh` (issue #1047).
 //! * **Numerical.** SHA-256 digests over a million-point corpus per function, pinned in
-//!   `corpus::M3_DIGESTS`. Job 83d replays the identical corpus under wasmtime and compares
-//!   against these same pins; until that harness exists, the pins are this crate's regression
-//!   guard against an accidental re-introduction of a target-conditional path.
+//!   `corpus::M3_DIGESTS`, in this file. Job 83d replays the identical corpus under wasmtime and
+//!   compares against these same pins; until that harness exists, the pins are this crate's
+//!   regression guard against an accidental re-introduction of a target-conditional path.
 //!
 //! Hazard the structural half exists for (master plan §11): libm's sources fuse a multiply and an
 //! add under an FMA target-feature cfg in places. Vendoring strips those, but a future re-vendor
 //! that forgets would only show up numerically on an FMA-enabled build.
-//!
-//! The needles are assembled from fragments rather than written out, because
-//! `scripts/check-lane-policy.sh` forbids the fusion vocabulary outside `crates/lane`
-//! (D3) and a test that searches for a token would otherwise trip it.
 
 use std::collections::HashSet;
-use std::fs;
-use std::path::{Path, PathBuf};
 
 use math::corpus::{CASE_COUNT, CASE_NAMES, M3_DIGESTS, POINTS, run_case};
 use sha2::{Digest, Sha256};
-
-fn vendored_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("src/vendored")
-}
 
 /// SHA-256 of one corpus case's result words, little-endian.
 fn case_digest(case: usize) -> [u8; 32] {
@@ -43,95 +34,6 @@ fn case_digest(case: usize) -> [u8; 32] {
 
 fn hex(bytes: &[u8; 32]) -> String {
     engine::hex_lower(bytes)
-}
-
-/// The structural half of M3: no construct in `src/vendored/` can make one target diverge.
-///
-/// Red mutation: re-add an FMA fast path in `vendored/exp2.rs` -- an FMA target-feature cfg around
-/// a call to the fused multiply-add method. Both the cfg and the call are rejected, on any host,
-/// without building for a second target.
-#[test]
-fn m3_no_target_conditional_source() {
-    let forbidden: [String; 6] = [
-        "target_feature".to_string(),
-        format!("core::{}", "arch"),
-        format!("std::{}", "arch"),
-        format!("mul{}add", '_'),
-        "target_arch".to_string(),
-        "is_x86_feature".to_string(),
-    ];
-
-    let mut hits = Vec::new();
-    let mut files = 0usize;
-    for entry in fs::read_dir(vendored_dir()).expect("src/vendored must exist") {
-        let path = entry.expect("readable directory entry").path();
-        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-            continue;
-        }
-        files += 1;
-        let text = fs::read_to_string(&path).expect("vendored file must be readable");
-        for (number, line) in text.lines().enumerate() {
-            for needle in &forbidden {
-                if line.contains(needle.as_str()) {
-                    hits.push(format!(
-                        "{}:{}: {needle}: {}",
-                        path.file_name().expect("named file").to_string_lossy(),
-                        number + 1,
-                        line.trim()
-                    ));
-                }
-            }
-        }
-    }
-
-    assert!(
-        files >= 30,
-        "expected the full vendored file set, found {files} files"
-    );
-    assert!(
-        hits.is_empty(),
-        "src/vendored must contain no target-conditional or fused construct:\n{}",
-        hits.join("\n")
-    );
-}
-
-/// The same scan for `unsafe`, which the workspace denies anyway but which the vendoring edits
-/// (libm's `force_eval!`, `i!` and `div!` macros) are specifically responsible for removing.
-#[test]
-fn m3_no_unsafe_or_force_eval_in_vendored_source() {
-    let mut hits = Vec::new();
-    for entry in fs::read_dir(vendored_dir()).expect("src/vendored must exist") {
-        let path = entry.expect("readable directory entry").path();
-        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-            continue;
-        }
-        let text = fs::read_to_string(&path).expect("vendored file must be readable");
-        for (number, line) in text.lines().enumerate() {
-            // The provenance header names `force_eval!` when explaining that it was removed.
-            if line.trim_start().starts_with("//") {
-                continue;
-            }
-            for needle in [
-                "unsafe",
-                "force_eval!",
-                "select_implementation!",
-                "read_volatile",
-            ] {
-                if line.contains(needle) {
-                    hits.push(format!(
-                        "{}:{}: {needle}",
-                        path.file_name().expect("named file").to_string_lossy(),
-                        number + 1
-                    ));
-                }
-            }
-        }
-    }
-    assert!(
-        hits.is_empty(),
-        "vendored source must be free of these constructs:\n{}",
-        hits.join("\n")
-    );
 }
 
 /// The numerical half of M3: every corpus case hashes to its pinned digest.

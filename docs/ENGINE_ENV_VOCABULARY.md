@@ -72,7 +72,6 @@ One name per fact. Set by the runner, read by the bench binary; a name the runne
 | `MISO_ENGINE_BENCH_CPU_AFFINITY` | the CPU number the workload was pinned to, or `uncontrolled` when affinity could not be obtained. |
 | `MISO_ENGINE_BENCH_CORE_CLOCK_HZ` | cycles per second the pinned core actually ran at, measured by `perf stat` over the warmup launch as `cycles / task-clock` and re-checked against each measured round. Empty on a host with no usable performance counter, which is what makes the #184 cycle columns absent rather than wrong. |
 | `MISO_ENGINE_BENCH_CORE_CLOCK_SOURCE` | how `MISO_ENGINE_BENCH_CORE_CLOCK_HZ` was obtained, carried into the record verbatim so a derived cycle count names its instrument. |
-| `MISO_ENGINE_BENCH_RUNTIME_OR_BROWSER` | Wasm runtime or browser identity. |
 | `MISO_ENGINE_BENCH_WASM_HOST` | Wasm host name. |
 | `MISO_ENGINE_BENCH_WASM_HOST_VERSION` | Wasm host version. |
 | `MISO_ENGINE_BENCH_WASM_SCALAR_BYTES` | size of the scalar Wasm artifact. |
@@ -132,8 +131,6 @@ Read by one subject each.
 | `MISO_ENGINE_CAPI_C_FIXTURE` | C-ABI tests: path of the C consumer. |
 | `MISO_ENGINE_CAPI_CPP_FIXTURE` | C-ABI tests: path of the C++ consumer. |
 | `MISO_ENGINE_CAPI_SKIP_BUILD` | C-ABI tests: use a prebuilt library. |
-| `MISO_ENGINE_CHROMIUM_BINARY` | browser gate: Chromium path. |
-| `MISO_ENGINE_CHROMEDRIVER_BINARY` | browser gate: chromedriver path. |
 | `MISO_ENGINE_WEB_ORACLE_PRINT` | `tests/browser-v1/direct-oracle.mjs`: set to `1` to print the derived oracle document instead of asserting it against the pin. The house instrument a browser re-pin is read off, and how `check-browser-expected-resources.py` reads the module's resource rows (#217). |
 | `MISO_ENGINE_SDK_ARTIFACTS_HEX` | SDK evals: canonical lowercase, even-length ASCII hex encoding of the absolute physical release artifact-directory pathname bytes. `scripts/check-sdk-headless.sh` builds one and passes it; the SDK helper decodes it to a byte `Buffer` path. There is no checked-in wasm, because the module is a build output and vendoring one would make the SDK's provenance story a copy rather than a derivation (#243, #331). |
 | `MISO_ENGINE_WEB_STRIP` | AudioWorklet build: the `wasm-strip` binary. |

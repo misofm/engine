@@ -18,5 +18,10 @@ lane.workspace = true
 # AVX2-pinned lane crate into every control-plane consumer of the contract.
 math.workspace = true
 
+[dev-dependencies]
+# Issue #1059: the backend-to-width test pins `for_backend(Backend::Scalar) == None`, and the
+# scalar backend exists only with `lane/test-support`.
+lane = { workspace = true, features = ["test-support"] }
+
 [lints]
 workspace = true

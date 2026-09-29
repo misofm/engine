@@ -48,8 +48,8 @@ trap cleanup EXIT
 # Owner decision W4-D1 (#83, 2026-08-24): the app's browser floor guarantees `simd128`, so exactly
 # one artifact ships. The scalar worklet build and the dual-artifact selection in `host.js` are
 # gone; `host.js` probes `simd128` at init and fails with a typed `miso.unsupported.v1` error when
-# the probe fails -- the browser twin of D4's native boot attestation. The scalar *cargo check*
-# stays in CI: `lane`'s wasm-scalar path is still gated, it just is not shipped.
+# the probe fails -- the browser twin of D4's native boot attestation. No scalar wasm build is
+# left at all: `lane` refuses wasm32 without `simd128` at compile time (issue #1062).
 #
 # The browser artifact is the one place the workspace's `debug = 1` (issue 083 D12) is pure cost.
 # It exists so a native profile or core dump names a kernel; a downloaded AudioWorklet module pays

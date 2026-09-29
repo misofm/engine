@@ -1,5 +1,7 @@
 # Rule how class-A identity treats NaN encodings across CPUs
 
+**Owner ruling (2026-09-29, decision 10 in `docs/rulings/engine-footprint-2026-09-29.md`):** option A. Class-A identity treats every NaN as one value; the engine does not canonicalize NaNs at render.
+
 Found by the AArch64 CI leg (#1017). Owner ruling needed before implementation.
 
 ## Problem
@@ -15,6 +17,11 @@ compressor `kernel::settled_body_tests::scenario_{981,983,985,995,1006}` and the
 `admitted_blocks_render_the_base_bits_without_selects`. With every NaN folded to one value, all
 six compressor scenarios and all three EQ legs give identical digests on both CPUs. #1017 carries
 them as named expected failures under this issue.
+
+Since #1049, two remain: compressor `kernel::settled_body_tests::scenario_1006_ramping_prefix_is_pinned`
+and the EQ bank's `admitted_blocks_render_the_base_bits_without_selects`. #1049 deleted the
+compressor's `scenario_{981,983,985,995}` pins (and `scenario_982`) as dominated, with their
+expected-failure rows.
 
 This is not LANE-3 (#1019). LANE-3 is LLVM folding `max`/`min` into `fmaxnm`/`fminnm`, which a
 code shape can prevent. NaN generation and propagation is the CPU's arithmetic rule, and no code
@@ -34,12 +41,13 @@ shape changes it short of canonicalizing NaNs.
 ## Smallest closable slice (option A)
 
 Fold NaNs in the class-A digest and differential helpers (one shared helper, test-side only);
-document the rule in the effect contract and target matrix; turn #1017's six named expected
+document the rule in the effect contract and target matrix; turn #1017's remaining named expected
 failures into ordinary passing tests on the AArch64 leg; keep one test that proves a NaN-producing
 scenario still yields NaN (so folding cannot hide a NaN appearing where finite output is required).
 
 ## Objective gates
 
-1. The six tests pass on the AArch64 leg and on x86, with no expected-failure entries left for them.
+1. The two remaining tests pass on the AArch64 leg and on x86, with no expected-failure entries left
+   for them.
 2. A planted change that turns a finite output into NaN still fails the finite-output tests.
 3. #1019's gate 1 refers to this rule for NaN payloads instead of requiring raw NaN-bit identity.

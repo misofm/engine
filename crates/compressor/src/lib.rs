@@ -37,7 +37,7 @@ mod state;
 pub mod corpus;
 
 use effect_contract::{
-    AutomationRate, AutomationSpanKind, BankProcessReport, EffectBankProcessBlock,
+    AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
     EffectDescriptor, EffectPrepareError, EffectProcessBlock, EffectQuality, InitialParameterValue,
     LatencySamples, LinkModeSet, NativeEffectFactory, ObservationCadence, ObservationChannels,
     ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind, ObservationSample,
@@ -804,16 +804,20 @@ impl NativeEffectFactory for CompressorFactory {
             width: request.width,
             program_key: metadata.program_key(),
         };
-        Ok(Some(match Backend::current() {
-            Backend::Simd4 => Box::new(PreparedCompressorBank::<Simd4> {
+        // The build's own width, as a constant, so only its bank is instantiated: a runtime match on
+        // `request.width` would compile the other width's bank into every artifact. By width, not
+        // by `Backend` variant, because `Backend::Scalar` is test-only (#1059).
+        const NATIVE: Option<BankWidth> = BankWidth::for_backend(Backend::current());
+        Ok(Some(match NATIVE {
+            Some(BankWidth::Four) => Box::new(PreparedCompressorBank::<Simd4> {
                 metadata: bank_metadata,
                 instance: Instance::new(metadata, &left_defaults, &right_defaults),
             }) as Box<dyn PreparedNativeEffectBank>,
-            Backend::Simd8 => Box::new(PreparedCompressorBank::<Simd8> {
+            Some(BankWidth::Eight) => Box::new(PreparedCompressorBank::<Simd8> {
                 metadata: bank_metadata,
                 instance: Instance::new(metadata, &left_defaults, &right_defaults),
             }) as Box<dyn PreparedNativeEffectBank>,
-            Backend::Scalar => return Ok(None),
+            None => return Ok(None),
         }))
     }
 }

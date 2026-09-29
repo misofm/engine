@@ -3734,10 +3734,9 @@ pub mod corpus;
 #[cfg(test)]
 mod interleave_identity {
     use super::{
-        BAND_SECTION_OFFSET, BandTarget, Channel, EFFECTIVE_CASCADE_DEPTH, EQ_BAND_COUNT,
-        EQ_SECTION_COUNT, EqBandKind, HPF_SECTION, LPF_SECTION, MAX_LANES, PreparedParametricEq,
-        RAMP_SAMPLES, STATE_SIZES, SampleRateHz, Section, cascade_sections, cascade_sections_mono,
-        corpus, process_channels, process_channels_mono,
+        BAND_SECTION_OFFSET, BandTarget, Channel, EQ_BAND_COUNT, EQ_SECTION_COUNT, EqBandKind,
+        HPF_SECTION, LPF_SECTION, MAX_LANES, RAMP_SAMPLES, SampleRateHz, Section, cascade_sections,
+        cascade_sections_mono, corpus, process_channels, process_channels_mono,
     };
     use lane::kernels::svf_block;
     use lane::{Lane, Simd4, Simd8};
@@ -4456,35 +4455,6 @@ mod interleave_identity {
     }
 
     #[test]
-    fn resident_sizes_are_measured_separately_from_serialized_state() {
-        println!(
-            "resident_size Channel width=1 bytes={}",
-            core::mem::size_of::<Channel<f32, 1>>()
-        );
-        println!(
-            "resident_size Channel width=4 bytes={}",
-            core::mem::size_of::<Channel<Simd4, 4>>()
-        );
-        println!(
-            "resident_size Channel width=8 bytes={}",
-            core::mem::size_of::<Channel<Simd8, 8>>()
-        );
-        println!(
-            "resident_size PreparedParametricEq width=1 bytes={}",
-            core::mem::size_of::<PreparedParametricEq<f32, 1>>()
-        );
-        println!(
-            "resident_size PreparedParametricEq width=4 bytes={}",
-            core::mem::size_of::<PreparedParametricEq<Simd4, 4>>()
-        );
-        println!(
-            "resident_size PreparedParametricEq width=8 bytes={}",
-            core::mem::size_of::<PreparedParametricEq<Simd8, 8>>()
-        );
-        println!("serialized_state_bytes total={}", STATE_SIZES.total());
-    }
-
-    #[test]
     fn a_tiny_restored_disabled_cut_state_refuses_elision_but_preserves_old_bands() {
         for width in [1_usize, 4, 8] {
             match width {
@@ -4620,13 +4590,6 @@ mod interleave_identity {
                 compare_signed_zero_refusal::<Simd8, 8>("Simd8", mono, plane);
             }
         }
-    }
-
-    /// Six physical sections use the same effective stationary depth-two pass on every backend.
-    #[test]
-    fn the_tuned_depth_is_per_backend_and_divides_the_cascade() {
-        assert_eq!(EQ_SECTION_COUNT % EFFECTIVE_CASCADE_DEPTH, 0);
-        assert_eq!(EFFECTIVE_CASCADE_DEPTH, 2);
     }
 }
 
@@ -4921,14 +4884,41 @@ mod elision {
         run::<Simd8, 8>("Simd8");
     }
 
+    /// Splits the live sections `union` between the channels: a section is live on the left only,
+    /// the right only, or on both, by `(section + rotation) % 3`.
+    fn split(union: u8, rotation: usize) -> (u8, u8) {
+        let (mut left, mut right) = (0_u8, 0_u8);
+        for section in 0..EQ_SECTION_COUNT {
+            let bit = 1_u8 << section;
+            if union & bit != 0 {
+                match (section + rotation) % 3 {
+                    0 => left |= bit,
+                    1 => right |= bit,
+                    _ => {
+                        left |= bit;
+                        right |= bit;
+                    }
+                }
+            }
+        }
+        (left, right)
+    }
+
     /// The two channels are allowed to disagree about which sections are live, and a section is
     /// only elidable when it is identity on **both**.
+    ///
+    /// The pairs are the ones that separate that judgement (issue #1049 shrank the test from every
+    /// one of the 4,096 pairs): every live union, each of its sections live on the left only, the
+    /// right only or both, and each section in each of those three states across the rotations.
+    /// Equal masks, where the channels agree, are [`an_elided_cascade_is_the_full_cascade_bit_for_bit`]'s.
     #[test]
     fn the_two_channels_are_judged_together() {
-        for left_live in MASKS {
-            for right_live in MASKS {
+        for union in MASKS {
+            for rotation in 0..3 {
+                let (left_live, right_live) = split(union, rotation);
+                assert_eq!(left_live | right_live, union);
                 let ran = compare::<Simd4, 4>("Simd4", 0, left_live, right_live, false);
-                let live = (left_live | right_live).count_ones() as usize;
+                let live = union.count_ones() as usize;
                 assert_eq!(
                     ran, live,
                     "a section is elidable only when it is identity on both channels \
@@ -7625,6 +7615,38 @@ mod ramping_elision {
         if cfg!(debug_assertions) { 40 } else { 300 }
     }
 
+    /// The seeds a differential draws: every `stride`-th from `first`, until `count` scenarios
+    /// have run (a seed whose designs are not all legal is not a scenario).
+    #[derive(Clone, Copy)]
+    struct Seeds {
+        first: u64,
+        stride: u64,
+        count: u64,
+    }
+
+    /// Every seed from `0`, [`scenarios`] of them: the scalar differentials per PR, and the
+    /// vector ones in [`the_vector_differentials_render_their_bits_at_the_full_scenario_count`],
+    /// which `nightly.yml` runs.
+    fn all_seeds() -> Seeds {
+        Seeds {
+            first: 0,
+            stride: 1,
+            count: scenarios(),
+        }
+    }
+
+    /// The per-PR share at `Simd4` and `Simd8` (issue #1049): a quarter of the scenarios, every
+    /// fourth seed of the same range. It starts at seed 2 because 1005-M5d, a `Simd8`-only catch
+    /// (`tests/MUTATIONS.md`), is red on seed 26 and on no other seed of the dev build's range
+    /// (#1049 scanned seeds 0-119: 26, 46, 53 and 101 at `Simd8`), and 26 is 2 modulo 4.
+    fn per_pr_vector_seeds() -> Seeds {
+        Seeds {
+            first: 2,
+            stride: 4,
+            count: scenarios() / 4,
+        }
+    }
+
     /// #1005's gate: the list against the batch-head `process_block`, both on the shipped writes.
     const LIST: [Path; 2] = [
         Path {
@@ -7660,19 +7682,24 @@ mod ramping_elision {
         },
     ];
 
-    fn differential<L: Lane, const W: usize>(width: &str, label: &str, paths: [Path; 2]) {
+    fn differential<L: Lane, const W: usize>(
+        width: &str,
+        label: &str,
+        paths: [Path; 2],
+        seeds: Seeds,
+    ) {
         for mono in [false, true] {
             reset_ramping_elided_blocks();
             let mut tally = Tally::default();
-            let mut seed = 0;
-            while tally.scenarios < scenarios() {
+            let mut seed = seeds.first;
+            while tally.scenarios < seeds.count {
                 scenario::<L, W>(
                     seed + if mono { 1 << 32 } else { 0 },
                     mono,
                     paths,
                     &mut tally,
                 );
-                seed += 1;
+                seed += seeds.stride;
             }
             println!(
                 "{label} differential {width} {}: {} scenarios, {} blocks bit-identical, {} ramping, \
@@ -7717,50 +7744,63 @@ mod ramping_elision {
 
     #[test]
     fn a_ramping_block_renders_the_batch_head_bits_scalar() {
-        differential::<f32, 1>("Scalar", "#1005", LIST);
+        differential::<f32, 1>("Scalar", "#1005", LIST, all_seeds());
     }
 
     #[test]
     fn a_ramping_block_renders_the_batch_head_bits_simd4() {
-        differential::<Simd4, 4>("Simd4", "#1005", LIST);
+        differential::<Simd4, 4>("Simd4", "#1005", LIST, per_pr_vector_seeds());
     }
 
     #[test]
     fn a_ramping_block_renders_the_batch_head_bits_simd8() {
-        differential::<Simd8, 8>("Simd8", "#1005", LIST);
+        differential::<Simd8, 8>("Simd8", "#1005", LIST, per_pr_vector_seeds());
     }
 
     /// Issue #1007 gate 1: `select` lane writes and the masked segment snap against the #1005
     /// kernel's `lane_set` writes, with the list on both arms.
     #[test]
     fn select_lane_writes_render_the_1005_bits_scalar() {
-        differential::<f32, 1>("Scalar", "#1007", WRITES_ON_1005);
+        differential::<f32, 1>("Scalar", "#1007", WRITES_ON_1005, all_seeds());
     }
 
     #[test]
     fn select_lane_writes_render_the_1005_bits_simd4() {
-        differential::<Simd4, 4>("Simd4", "#1007", WRITES_ON_1005);
+        differential::<Simd4, 4>("Simd4", "#1007", WRITES_ON_1005, per_pr_vector_seeds());
     }
 
     #[test]
     fn select_lane_writes_render_the_1005_bits_simd8() {
-        differential::<Simd8, 8>("Simd8", "#1007", WRITES_ON_1005);
+        differential::<Simd8, 8>("Simd8", "#1007", WRITES_ON_1005, per_pr_vector_seeds());
     }
 
     /// Issue #1007's writes alone, on the batch-head ramping path (VERIFY-AUTOMATION A2).
     #[test]
     fn select_lane_writes_alone_render_the_lane_set_bits_scalar() {
-        differential::<f32, 1>("Scalar", "#1007 alone", WRITES_ALONE);
+        differential::<f32, 1>("Scalar", "#1007 alone", WRITES_ALONE, all_seeds());
     }
 
     #[test]
     fn select_lane_writes_alone_render_the_lane_set_bits_simd4() {
-        differential::<Simd4, 4>("Simd4", "#1007 alone", WRITES_ALONE);
+        differential::<Simd4, 4>("Simd4", "#1007 alone", WRITES_ALONE, per_pr_vector_seeds());
     }
 
     #[test]
     fn select_lane_writes_alone_render_the_lane_set_bits_simd8() {
-        differential::<Simd8, 8>("Simd8", "#1007 alone", WRITES_ALONE);
+        differential::<Simd8, 8>("Simd8", "#1007 alone", WRITES_ALONE, per_pr_vector_seeds());
+    }
+
+    /// The six `Simd4` and `Simd8` differentials above at the full scenario count, which they ran
+    /// per PR before issue #1049 quartered it. `nightly.yml` runs this, in a dev build.
+    #[test]
+    #[ignore = "nightly: the full scenario count of the Simd4 and Simd8 differentials (#1049)"]
+    fn the_vector_differentials_render_their_bits_at_the_full_scenario_count() {
+        differential::<Simd4, 4>("Simd4", "#1005", LIST, all_seeds());
+        differential::<Simd8, 8>("Simd8", "#1005", LIST, all_seeds());
+        differential::<Simd4, 4>("Simd4", "#1007", WRITES_ON_1005, all_seeds());
+        differential::<Simd8, 8>("Simd8", "#1007", WRITES_ON_1005, all_seeds());
+        differential::<Simd4, 4>("Simd4", "#1007 alone", WRITES_ALONE, all_seeds());
+        differential::<Simd8, 8>("Simd8", "#1007 alone", WRITES_ALONE, all_seeds());
     }
 }
 

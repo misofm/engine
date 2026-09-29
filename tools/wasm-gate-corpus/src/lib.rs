@@ -578,9 +578,9 @@ const MINMAX_LOWERING_POOL: [u32; 10] = [
 /// `Lane::max`/`Lane::min` to one instruction where the target has one with the D8 rule --
 /// `maxps`/`minps` on x86, operand-swapped `f32x4.pmax`/`f32x4.pmin` on wasm `simd128` -- and the
 /// wasm half of that claim cannot be executed by any native gate. Gate G5 already runs this crate
-/// under wasmtime with and without `simd128`, so the cheapest honest proof is to run the truth
-/// table there and return a count. A count, not bits: rule 2 of this corpus is that no NaN
-/// reaches a digest, and the pool is full of them.
+/// under wasmtime with `simd128`, so the cheapest honest proof is to run the truth table there and
+/// return a count. A count, not bits: rule 2 of this corpus is that no NaN reaches a digest, and
+/// the pool is full of them.
 ///
 /// # Panics
 ///

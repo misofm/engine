@@ -12,11 +12,12 @@ build or link anything itself: `cargo metadata` is read-only, and the root manif
 text. If either input drifts (a new shipped cdylib, a changed profile), the override's reasoning
 should be re-derived, not silently kept valid by a stale pin.
 
-The four packages below are exactly the shipped-cdylib/staticlib set: `capi` (rlib + staticlib +
-cdylib, the native C ABI), `host-web` (rlib + cdylib), and the two wasm guest test cdylibs
-`wasm-gate-guest`/`wasm-console-guest` (their own target triple, so they do not actually clobber,
-but they are still exactly-pinned membership, not "cdylib crates in general"). #359 pinned five;
-#1037 removed `effect-package` (rlib + cdylib) with the third-party effect package surface.
+The three packages below are exactly the shipped-cdylib/staticlib set: `capi` (rlib + staticlib +
+cdylib, the native C ABI), `host-web` (rlib + cdylib), and the wasm guest test cdylib
+`wasm-gate-guest` (its own target triple, so it does not actually clobber, but it is still
+exactly-pinned membership, not "cdylib crates in general"). #359 pinned five; #1037 removed
+`effect-package` (rlib + cdylib) with the third-party effect package surface, and #1039 removed
+the second wasm guest, `wasm-console-guest`, with the wasmtime console benchmark.
 
 By default this runs `cargo metadata --format-version 1 --locked --no-deps` itself. `--metadata
 <file>` accepts a saved `cargo metadata` JSON document instead, so the crate-type assertion can be
@@ -38,7 +39,6 @@ EXPECTED_CDYLIB_OR_STATICLIB = frozenset({
     "capi",
     "host-web",
     "wasm-gate-guest",
-    "wasm-console-guest",
 })
 NATIVE_LIB_CRATE_TYPES = frozenset({"cdylib", "staticlib"})
 
@@ -218,7 +218,6 @@ def _valid_metadata() -> dict:
         _pkg("capi", ["rlib", "staticlib", "cdylib"]),
         _pkg("host-web", ["rlib", "cdylib"]),
         _pkg("wasm-gate-guest", ["cdylib"]),
-        _pkg("wasm-console-guest", ["cdylib"]),
         _pkg("engine", ["lib"]),
         _pkg("lane", ["lib"]),
         _pkg("math", ["lib"]),
@@ -260,15 +259,15 @@ def self_test() -> None:
     assert actual == EXPECTED_CDYLIB_OR_STATICLIB, actual
     check_release_profile(VALID_CARGO_TOML)
 
-    # A fifth cdylib crate is rejected.
-    fifth = _valid_metadata()
-    fifth["packages"].append(_pkg("fifth-shipped-cdylib", ["cdylib"]))
-    _expect_invalid("fifth cdylib crate", check_crate_types, fifth, needle="unexpected")
+    # A fourth cdylib crate is rejected.
+    fourth = _valid_metadata()
+    fourth["packages"].append(_pkg("fourth-shipped-cdylib", ["cdylib"]))
+    _expect_invalid("fourth cdylib crate", check_crate_types, fourth, needle="unexpected")
 
     # A missing expected crate is rejected.
     missing = _valid_metadata()
     missing["packages"] = [
-        package for package in missing["packages"] if package["name"] != "wasm-console-guest"
+        package for package in missing["packages"] if package["name"] != "wasm-gate-guest"
     ]
     _expect_invalid("missing expected crate", check_crate_types, missing, needle="missing")
 

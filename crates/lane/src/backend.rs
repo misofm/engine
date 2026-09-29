@@ -15,9 +15,24 @@
 use core::fmt;
 
 /// The lane width this build was compiled for.
+///
+/// # `Scalar` is a test-only oracle (issue #1059)
+///
+/// A plan compiled at `Scalar` binds no bank: every track renders one at a time, unbanked. That
+/// whole-plan scalar renderer is the correctness reference for vector banking -- "a placement
+/// change must not move a rendered bit" -- and nothing else (owner ruling 2026-09-28, decision 3,
+/// `docs/rulings/engine-footprint-2026-09-28.md`). No shipped target selects it, so the variant
+/// exists only in builds that enable this crate's `test-support` feature, and shipped artifacts
+/// cannot name it. The one-lane [`prim@f32`] [`Lane`](crate::Lane), which every effect's
+/// per-node leg and every frame loop's tail use, is a different thing and is not gated.
+///
+/// Code outside this crate must not match on the variants exhaustively, because the variant set
+/// depends on a feature that Cargo unifies across a build: ask [`Backend::width`] or compare
+/// with `==`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum Backend {
-    /// `f32`, one lane: the oracle, and the scalar tail of every bank.
+    /// `f32`, one lane, whole plan: the unbanked test oracle (see the type's documentation).
+    #[cfg(feature = "test-support")]
     Scalar,
     /// [`wide::f32x4`], four lanes: AArch64 NEON and wasm `simd128`.
     Simd4,
@@ -29,7 +44,7 @@ impl Backend {
     /// The backend this build uses, decided entirely at compile time.
     #[must_use]
     pub const fn current() -> Self {
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        #[cfg(target_arch = "x86_64")]
         {
             Self::Simd8
         }
@@ -57,23 +72,16 @@ impl Backend {
         {
             Self::Simd8
         }
-        // Reached only through the scalar-wasm CI exception (wasm32 without `simd128`): `lib.rs`
-        // refuses to compile for every other target this arm used to catch (issue #1041).
-        #[cfg(not(any(
-            target_arch = "x86",
-            target_arch = "x86_64",
-            target_arch = "aarch64",
-            all(target_arch = "wasm32", target_feature = "simd128")
-        )))]
-        {
-            Self::Scalar
-        }
+        // No arm for any other target: `lib.rs` refuses to compile for every one of them, 32-bit
+        // targets (issue #1041) and wasm32 without `simd128` (issue #1062) alike, so no target
+        // selects `Scalar` and the variant exists only in `test-support` builds.
     }
 
     /// Number of `f32` lanes this backend processes at once.
     #[must_use]
     pub const fn width(self) -> usize {
         match self {
+            #[cfg(feature = "test-support")]
             Self::Scalar => 1,
             Self::Simd4 => 4,
             Self::Simd8 => 8,
@@ -119,7 +127,7 @@ impl core::error::Error for HostAttestation {}
 ///
 /// Returns [`HostAttestation::MissingX86Feature`] naming the first pinned feature this CPU lacks.
 pub fn attest_host() -> Result<(), HostAttestation> {
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     {
         if !std::is_x86_feature_detected!("avx2") {
             return Err(HostAttestation::MissingX86Feature { feature: "avx2" });

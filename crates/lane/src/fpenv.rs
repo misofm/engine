@@ -81,7 +81,7 @@ use core::fmt;
 use core::marker::PhantomData;
 
 /// The architectural default MXCSR word: exceptions masked, round-to-nearest-even, FTZ/DAZ clear.
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 pub const CANONICAL_MXCSR: u32 = 0x1F80;
 
 /// The canonical AArch64 FPCR word: round-to-nearest, `FZ`/`FZ16` clear, no traps, no FEAT_AFP
@@ -96,7 +96,7 @@ pub const CANONICAL_FPCR: u64 = 0;
 /// nothing about how the next operation will round or flush. An attestation asks whether the
 /// canonical control state is in effect, so it compares under this mask; a *restore* is still
 /// bit-exact over the whole word, because a caller's sticky flags are the caller's.
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 pub const MXCSR_CONTROL_MASK: u32 = 0xFFC0;
 
 /// The FPCR bits that are control state: all of them.
@@ -118,14 +118,10 @@ pub const FPCR_FZ16: u64 = 1 << 19;
 ///
 /// `false` on `wasm32`, where the core specification fixes the behaviour the control word would
 /// otherwise select.
-pub const FP_ENV_CONTROLLED: bool = cfg!(any(
-    target_arch = "x86",
-    target_arch = "x86_64",
-    target_arch = "aarch64"
-));
+pub const FP_ENV_CONTROLLED: bool = cfg!(any(target_arch = "x86_64", target_arch = "aarch64"));
 
 /// The kind of the target's floating-point control word.
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 pub type FpControlWord = u32;
 
 /// The kind of the target's floating-point control word.
@@ -134,11 +130,11 @@ pub type FpControlWord = u64;
 
 /// The kind of the target's floating-point control word: the unit type, because this target has no
 /// control word to name.
-#[cfg(not(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")))]
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 pub type FpControlWord = ();
 
 /// Reads this thread's floating-point control word.
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 #[inline]
 #[must_use]
 pub fn read_fp_control_word() -> FpControlWord {
@@ -146,7 +142,7 @@ pub fn read_fp_control_word() -> FpControlWord {
 }
 
 /// Writes this thread's floating-point control word.
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 #[inline]
 pub fn write_fp_control_word(value: FpControlWord) {
     crate::softfma::write_mxcsr(value);
@@ -188,13 +184,13 @@ pub fn write_fp_control_word(value: FpControlWord) {
 }
 
 /// Reads this thread's floating-point control word; there is none on this target.
-#[cfg(not(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")))]
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 #[inline]
 #[must_use]
 pub fn read_fp_control_word() -> FpControlWord {}
 
 /// Writes this thread's floating-point control word; there is none on this target.
-#[cfg(not(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")))]
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 #[inline]
 pub fn write_fp_control_word(value: FpControlWord) {
     let () = value;
@@ -205,7 +201,7 @@ pub fn write_fp_control_word(value: FpControlWord) {
 /// Two words with the same control bits round and flush identically; they may still differ in the
 /// sticky exception flags a previous operation left behind. Attestation compares these; restoration
 /// never does.
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 #[inline]
 #[must_use]
 pub fn fp_control_bits(word: FpControlWord) -> FpControlWord {
@@ -222,7 +218,7 @@ pub fn fp_control_bits(word: FpControlWord) -> FpControlWord {
 
 /// The control-state half of a floating-point control word; this target has none, so the unit
 /// value passes through.
-#[cfg(not(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")))]
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 #[inline]
 #[must_use]
 pub fn fp_control_bits(word: FpControlWord) -> FpControlWord {
@@ -234,7 +230,7 @@ pub fn fp_control_bits(word: FpControlWord) -> FpControlWord {
 /// This is what a render entry's session-start attestation asks after installing the guard, and
 /// what a host asks if it wants to check the state it is about to render in. Sticky exception flags
 /// are ignored; see [`fp_control_bits`].
-#[cfg(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[inline]
 #[must_use]
 pub fn in_canonical_fp_environment() -> bool {
@@ -246,7 +242,7 @@ pub fn in_canonical_fp_environment() -> bool {
 /// Always `true` on a target with no floating-point control word: the WebAssembly core
 /// specification fixes round-to-nearest-even and full subnormal arithmetic, and offers no mode
 /// that could select anything else.
-#[cfg(not(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")))]
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 #[inline]
 #[must_use]
 pub fn in_canonical_fp_environment() -> bool {
@@ -257,7 +253,7 @@ pub fn in_canonical_fp_environment() -> bool {
 #[inline]
 #[must_use]
 pub fn canonical_fp_control_word() -> FpControlWord {
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     {
         CANONICAL_MXCSR
     }
@@ -265,7 +261,7 @@ pub fn canonical_fp_control_word() -> FpControlWord {
     {
         CANONICAL_FPCR
     }
-    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")))]
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {}
 }
 
@@ -288,7 +284,7 @@ pub fn canonical_fp_control_word() -> FpControlWord {
 /// fn requires_sync<T: Sync>() {}
 /// requires_sync::<lane::fpenv::CanonicalFpEnv>();
 /// ```
-#[cfg(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub struct CanonicalFpEnv {
     saved: FpControlWord,
     _not_send_not_sync: PhantomData<*const ()>,
@@ -311,7 +307,7 @@ pub struct CanonicalFpEnv {
 /// environment must anchor it the same way.
 ///
 /// The barrier emits no instructions.
-#[cfg(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[inline(always)]
 fn scheduling_barrier() {
     // SAFETY: an empty assembly template with no operands. It cannot fault, cannot write a
@@ -322,7 +318,7 @@ fn scheduling_barrier() {
     }
 }
 
-#[cfg(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 impl CanonicalFpEnv {
     /// Save the caller's control word and install the canonical one.
     #[inline]
@@ -345,7 +341,7 @@ impl CanonicalFpEnv {
     }
 }
 
-#[cfg(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 impl Drop for CanonicalFpEnv {
     #[inline]
     fn drop(&mut self) {
@@ -370,12 +366,12 @@ impl Drop for CanonicalFpEnv {
 /// fn requires_sync<T: Sync>() {}
 /// requires_sync::<lane::fpenv::CanonicalFpEnv>();
 /// ```
-#[cfg(not(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")))]
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 pub struct CanonicalFpEnv {
     _not_send_not_sync: PhantomData<*const ()>,
 }
 
-#[cfg(not(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")))]
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 impl CanonicalFpEnv {
     /// Enter the canonical environment; a no-op on a target without a control word.
     #[inline]
@@ -439,7 +435,7 @@ impl core::error::Error for FpEnvironmentRejection {}
 ///
 /// Returns [`FpEnvironmentRejection`] if the canonical word does not read back after installation,
 /// or if the caller's exact word is not restored when the guard drops.
-#[cfg(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub fn attest_fp_environment() -> Result<(), FpEnvironmentRejection> {
     let observed = read_fp_control_word();
     let readback = {
@@ -472,7 +468,7 @@ pub fn attest_fp_environment() -> Result<(), FpEnvironmentRejection> {
 /// # Errors
 ///
 /// Never on this target.
-#[cfg(not(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")))]
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 pub fn attest_fp_environment() -> Result<(), FpEnvironmentRejection> {
     let _pinned = CanonicalFpEnv::enter();
     Ok(())

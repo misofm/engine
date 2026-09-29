@@ -18,8 +18,8 @@
 //! `scripts/check-realtime-policy.sh` holds to an approved-unsafe list of exactly two files.
 //!
 //! Under `wasm32-unknown-unknown` without the `atomics` target feature -- the browser-local
-//! fallback the AudioWorklet ships -- every operation below lowers to a plain load or store, which
-//! is what `scripts/check-wasm-realtime-atomics.sh` inspects and requires.
+//! fallback the AudioWorklet ships -- every operation below lowers to a plain load or store (the
+//! script that inspected this, `check-wasm-realtime-atomics.sh`, retired with #1062's legs).
 //!
 //! # Read-reset without a second writer
 //!

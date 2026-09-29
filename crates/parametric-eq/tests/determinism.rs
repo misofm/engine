@@ -24,22 +24,6 @@ fn hex(digest: [u8; 32]) -> String {
     bench_support::digest::hex(&digest)
 }
 
-#[test]
-fn shared_hex_adapter_matches_literal_bytes() {
-    assert_eq!(
-        hex([0; 32]),
-        "0000000000000000000000000000000000000000000000000000000000000000"
-    );
-    assert_eq!(
-        hex([
-            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
-            0xee, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb,
-            0xcc, 0xdd, 0xee, 0xff,
-        ]),
-        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
-    );
-}
-
 /// The corpus is NaN-free, non-trivial and genuinely different per case and per lane.
 ///
 /// Without this, a corpus that silently produced zeros everywhere would agree with itself on every

@@ -11,6 +11,9 @@ from __future__ import annotations
 
 import argparse
 import ast
+import functools
+import importlib.util
+import os
 import pathlib
 import re
 import shlex
@@ -42,6 +45,26 @@ RELEASE_INPUT_FILES = {
     ".cargo/config.toml",
     "scripts/check-release-shape.py",
 }
+# Issue #1043: the script-gate self-test suites. On a pull request each runs in qualification.yml's
+# `gate-self-tests` job only when a changed path hits its key (ci-path-router.py SELF_TEST_INPUTS,
+# in this order), and every night in nightly.yml's `moved-mutation-suites`; its gate runs on every
+# change. Per suite: the job that runs its gate, the gate command, and the self-test commands.
+SELF_TEST_SUITES = {
+    "env-vocabulary": ("lint", "bash scripts/check-env-vocabulary.sh",
+                       ("bash scripts/test-env-vocabulary.sh",)),
+    "conformance-boundaries": ("lint", "bash scripts/check-conformance-boundaries.sh",
+                               ("bash scripts/test-conformance-boundaries.sh",)),
+    "console-benchmark": ("lint", "bash scripts/check-bench-preconditions.sh",
+                          ("bash scripts/test-console-benchmark.sh",)),
+    "sdk-deletions": ("sdk", "python3 -B scripts/check-sdk-deletions.py",
+                      ("python3 -B scripts/check-sdk-deletions.py --self-test",)),
+    "dsp-research": ("docs-gates", "bash scripts/check-dsp-research.sh",
+                     ("bash scripts/test-dsp-research.sh",)),
+}
+SELF_TEST_SHARED_INPUTS = {".github/workflows/qualification.yml"}
+# The mention rule scripts/check-script-reachability.py (#1027) applies to every workflow-reached
+# script: a basename on a line that is not a comment, and a jq `include`/`import` module.
+REACHABILITY_CHECKER = "scripts/check-script-reachability.py"
 
 
 class Invalid(RuntimeError):
@@ -65,6 +88,7 @@ def section(text: str, header: str, next_headers: tuple[str, ...]) -> str:
     return tail[:end]
 
 
+@functools.lru_cache(maxsize=None)
 def job(text: str, name: str) -> str:
     jobs = section(text, "jobs:", ())
     match = re.search(rf"^  {re.escape(name)}:\n", jobs, re.MULTILINE)
@@ -174,6 +198,108 @@ def check_classifier_contract(root: pathlib.Path) -> None:
             and isinstance(command.elts[3].value, ast.Name)
             and command.elts[3].value.id == "revisions",
             "ci-path-router.py: production Git diff must consume the pinned option tuple exactly")
+    check_self_test_inputs(root, tree)
+
+
+def literal_strings(node: ast.expr | None) -> list[str] | None:
+    """The elements of a literal set, tuple or list of string constants, or None."""
+    if not isinstance(node, (ast.Set, ast.Tuple, ast.List)):
+        return None
+    values = [element.value for element in node.elts
+              if isinstance(element, ast.Constant) and isinstance(element.value, str)]
+    return values if len(values) == len(node.elts) else None
+
+
+def suite_scripts(commands: tuple[str, ...]) -> list[str]:
+    """The repository scripts a suite's commands run."""
+    return sorted({word for command in commands for word in shlex.split(command)
+                   if word.startswith("scripts/")})
+
+
+def key_covers(key: set[str], path: str) -> bool:
+    return any(path == entry or (entry.endswith("/") and path.startswith(entry)) for entry in key)
+
+
+def reachability_rule(root: pathlib.Path):
+    source = root / REACHABILITY_CHECKER
+    require(source.is_file(), f"{REACHABILITY_CHECKER} is missing: the self-test keys are checked "
+            "with its mention rule")
+    spec = importlib.util.spec_from_file_location("script_reachability", source)
+    require(spec is not None and spec.loader is not None, f"cannot load {REACHABILITY_CHECKER}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# The mentions of each (script, text) already scanned: a pure function of the text, kept so the
+# mutation tests' in-process runs do not rescan unchanged scripts.
+MENTIONS: dict[tuple[str, str], set[str]] = {}
+
+
+def mention_closure(root: pathlib.Path, reachability):
+    """A function from seed scripts to every file under scripts/ they mention, transitively through
+    the scripts they mention, by the reachability rule's own definition of a mention (#1027)."""
+    by_name: dict[str, list[str]] = {}
+    for directory, subdirectories, files in os.walk(root / "scripts"):
+        subdirectories[:] = sorted(name for name in subdirectories if name != "__pycache__")
+        relative = pathlib.Path(directory).relative_to(root).as_posix()
+        for name in sorted(files):
+            by_name.setdefault(name, []).append(f"{relative}/{name}")
+
+    def mentioned(current: str) -> set[str]:
+        path = root / current
+        if not current.endswith(reachability.CARRIER_SUFFIXES) or not path.is_file():
+            return set()
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if (current, text) not in MENTIONS:
+            MENTIONS[(current, text)] = reachability.mentioned(current, text)
+        return MENTIONS[(current, text)]
+
+    def closure(seeds: list[str]) -> set[str]:
+        reached = set(seeds)
+        frontier = sorted(reached)
+        while frontier:
+            current = frontier.pop()
+            for name in mentioned(current):
+                for target in by_name.get(name, ()):
+                    if target not in reached:
+                        reached.add(target)
+                        frontier.append(target)
+        return reached
+
+    return closure
+
+
+def check_self_test_inputs(root: pathlib.Path, tree: ast.Module) -> None:
+    """Issue #1043: each self-test suite's router key is every file the suite reads, not only its
+    gate (amendment 4). Every script the suite runs, and every script under scripts/ those mention
+    -- the gate, `lib/gate.sh`, jq libraries, validators, runners -- must be in its key, so an edit
+    to any of them runs the suite. A tree read wholesale (the SDK self-test reads `sdk/`) is a
+    prefix entry the rule cannot derive; the evidence in the spec records it."""
+    table = router_assign(tree, "SELF_TEST_INPUTS")
+    require(isinstance(table, ast.Dict),
+            "ci-path-router.py: SELF_TEST_INPUTS must be a literal dict")
+    suites = [key.value if isinstance(key, ast.Constant) else None for key in table.keys]
+    require(suites == list(SELF_TEST_SUITES),
+            "ci-path-router.py: SELF_TEST_INPUTS must name exactly the self-test suites "
+            f"{list(SELF_TEST_SUITES)}, in that order")
+    shared = literal_strings(router_assign(tree, "SELF_TEST_SHARED_INPUTS"))
+    require(isinstance(router_assign(tree, "SELF_TEST_SHARED_INPUTS"), ast.Set)
+            and shared is not None and set(shared) == SELF_TEST_SHARED_INPUTS,
+            "ci-path-router.py: SELF_TEST_SHARED_INPUTS must be exactly the workflow hosting the "
+            "self-test job")
+    closure = mention_closure(root, reachability_rule(root))
+    for suite, value in zip(suites, table.values):
+        entries = literal_strings(value)
+        require(isinstance(value, ast.Set) and entries is not None and entries
+                and len(set(entries)) == len(entries),
+                f"ci-path-router.py: SELF_TEST_INPUTS[{suite!r}] must be a literal set of paths")
+        key = set(entries)
+        missing = sorted(path for path in closure(suite_scripts(SELF_TEST_SUITES[suite][2]))
+                         if not key_covers(key, path))
+        require(not missing,
+                f"ci-path-router.py: SELF_TEST_INPUTS[{suite!r}] misses files its suite reads: "
+                + ", ".join(missing))
 
 
 def check_qualification_no_path_filter(text: str) -> None:
@@ -297,10 +423,12 @@ TEST_SUPPORT_CI_LINES = (
     "python3 -B scripts/test-test-support-ci.py\n",
 )
 
+# check-sdk-deletions.py's --self-test moved to `gate-self-tests` (#1043); SELF_TEST_SUITES pins it.
+# #1044: the SDK drift gate compares sdk/assets with the artifact job's generated documents, so it
+# names the downloaded, closure-verified directory; without it the gate would run the generator.
 SDK_CLOSURE_LINES = (
-    "bash scripts/check-sdk-generated.sh",
+    "bash scripts/check-sdk-generated.sh target/ci/qualification-artifacts",
     "python3 -B scripts/check-sdk-deletions.py",
-    "python3 -B scripts/check-sdk-deletions.py --self-test",
     "bash scripts/check-sdk-types.sh",
     "bash scripts/check-sdk-headless.sh target/ci/qualification-artifacts",
     "bash scripts/sdk-package.sh check target/ci/qualification-artifacts",
@@ -352,8 +480,28 @@ ARTIFACT_DIGEST_OUTPUT = (
     "    outputs:\n"
     "      sha256: ${{ steps.build.outputs.sha256 }}\n"
     "      rustc: ${{ steps.build.outputs.rustc }}\n"
+    "      closure_sha256: ${{ steps.build.outputs.closure_sha256 }}\n"
 )
 ARTIFACT_READERS = ("sdk", "artifact-gates", "browser")
+# Issue #1044: the parameter metadata and ABI layout are generated once per run, by the `artifact`
+# job's delivery build (`parameter-metadata --write`), and every reader checks the whole downloaded
+# directory against the digest of what that job built -- one sha256 over each file's sha256, in
+# byte order of name, computed by exactly this line on both sides -- so the documents a reader
+# consumes are the generator's output at this commit without the reader running it again.
+ARTIFACT_CLOSURE_DIGEST = (
+    "closure=\"$(set -o pipefail; cd target/ci/qualification-artifacts && find . -type f "
+    "-printf '%P\\0' | LC_ALL=C sort -z | xargs -0 sha256sum -- | sha256sum | awk '{print $1}')\"\n"
+)
+ARTIFACT_CLOSURE_VERIFY = (
+    "          CLOSURE: ${{ needs.artifact.outputs.closure_sha256 }}\n",
+    "          " + ARTIFACT_CLOSURE_DIGEST,
+    '          [[ "$CLOSURE" =~ ^[0-9a-f]{64}$ && "$closure" == "$CLOSURE" ]] || { echo "downloaded '
+    'artifact closure mismatch: the artifact job built $CLOSURE, got $closure" >&2; exit 1; }\n',
+)
+# The one flag that lets check-web-audioworklet.sh leave the generator out (#1044), and the only
+# directory it may name: a reader's download, verified against ARTIFACT_CLOSURE_VERIFY first.
+METADATA_SKIP_FLAG = "--without-metadata-regeneration"
+ARTIFACT_DIRECTORY = "target/ci/qualification-artifacts"
 # Issue #1061, attempt 3: a change's report compares its module with the digest its base's own CI
 # run recorded, never with a base rebuilt inside the change's workflow. Attempts 1 and 2 rebuilt the
 # base there, and a toolchain bump, one workflow-level cargo variable or one `GITHUB_PATH` line
@@ -370,8 +518,11 @@ ARTIFACT_READERS = ("sdk", "artifact-gates", "browser")
 # The build environment itself is deliberately not pinned: the record is what the base's own run
 # built in its own environment, so a change to that environment reads CHANGED, as it should.
 ARTIFACT_BUILD_LINES = (
+    "          bash scripts/build-web-audioworklet.sh target/ci/qualification-artifacts\n",
     '          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"\n',
     '          echo "rustc=$(rustc -vV | sed -n \'s/^release: //p\')" >> "$GITHUB_OUTPUT"\n',
+    "          " + ARTIFACT_CLOSURE_DIGEST,
+    '          echo "closure_sha256=$closure" >> "$GITHUB_OUTPUT"\n',
 )
 RECORD_JOB = "artifact-record"
 RECORD_HEAD = (
@@ -436,11 +587,12 @@ def job_steps(job_text: str) -> list[str]:
 def check_qualification_artifact_digest(text: str) -> None:
     """Issue #1061: the `artifact` job publishes its module's digest and rustc release, posts
     main's record on pushes, and every job that reads the module verifies its download against
-    that digest before anything reads it."""
+    that digest before anything reads it. Issue #1044: the same holds for the whole directory,
+    generated documents included, against the job's closure digest."""
     artifact = job(text, "artifact")
     require(ARTIFACT_DIGEST_OUTPUT in artifact,
-            "qualification.yml: the artifact job must publish its module's sha256 and rustc "
-            "release as outputs")
+            "qualification.yml: the artifact job must publish its module's sha256, rustc "
+            "release and closure digest (#1044) as outputs")
     require(UNMASKABLE.search(artifact) is None,
             "qualification.yml: the artifact job must carry no job-level continue-on-error, "
             "defaults or env")
@@ -461,6 +613,13 @@ def check_qualification_artifact_digest(text: str) -> None:
         download = reader.index("path: target/ci/qualification-artifacts")
         verify = reader.index(ARTIFACT_DIGEST_STEP)
         require(download < verify, f"qualification.yml: {name} verifies before it downloads")
+        verify_step = next((step for step in job_steps(reader)
+                            if step.startswith(ARTIFACT_DIGEST_STEP.splitlines(keepends=True)[0])),
+                           "")
+        for line in ARTIFACT_CLOSURE_VERIFY:
+            require(line in verify_step,
+                    f"qualification.yml: {name} must verify its whole download against the artifact "
+                    f"job's closure digest (#1044): missing {line.strip()!r}")
         later = [reader.index(line) for line in ("bash scripts/", "python3 -B scripts/",
                                                  "npm run qualify") if line in reader]
         require(all(verify < index for index in later),
@@ -522,6 +681,102 @@ def check_qualification_artifact_identity(text: str) -> None:
                 "qualification.yml: artifact-identity step differs from its pin: "
                 f"{pinned.splitlines()[0].strip()!r} (scripts/check-ci-path-routing.py "
                 "IDENTITY_STEPS)")
+
+
+def check_qualification_metadata_generated_once(text: str, names: list[str]) -> None:
+    """Issue #1044: `check-web-audioworklet.sh` may leave its `parameter-metadata --check` out only
+    in a job that reads the `artifact` job's download and verifies the whole directory against that
+    job's closure digest first (check_qualification_artifact_digest), and only for that directory:
+    there the check compared the generator with itself. Anywhere else the flag would drop the only
+    regeneration of a directory nothing proves the generator wrote."""
+    for name in names:
+        for command in step_commands(job(text, name)):
+            try:
+                words = shlex.split(command)
+            except ValueError:
+                words = command.split()
+            for index, word in enumerate(words):
+                if not word.endswith("check-web-audioworklet.sh"):
+                    continue
+                arguments = words[index + 1:]
+                if METADATA_SKIP_FLAG not in arguments:
+                    continue
+                require(name in ARTIFACT_READERS,
+                        f"qualification.yml: {name} passes {METADATA_SKIP_FLAG} but does not read "
+                        "the artifact job's closure-verified download")
+                require(arguments == [METADATA_SKIP_FLAG, ARTIFACT_DIRECTORY],
+                        f"qualification.yml: {name} may pass {METADATA_SKIP_FLAG} only for "
+                        f"{ARTIFACT_DIRECTORY}")
+
+
+def check_metadata_skip_elsewhere(root: pathlib.Path) -> None:
+    """Issue #1044: no other workflow may pass the flag; none of them verifies a closure digest."""
+    for workflow in sorted((root / ".github/workflows").glob("*.y*ml")):
+        if workflow.name == "qualification.yml":
+            continue
+        require(METADATA_SKIP_FLAG not in workflow.read_text(encoding="utf-8"),
+                f"{workflow.name}: only qualification.yml's closure-verified artifact readers may "
+                f"pass {METADATA_SKIP_FLAG} (#1044)")
+
+
+# Issue #1044: each duplicate this issue removed names the one job that still runs the claim, on
+# the full route, in a step no condition can skip. Dropping or conditioning any of these lines
+# would take the claim out of CI with every job green.
+# - artifact-gates: scripts/test-web-audioworklet.sh runs scripts/test-web-audioworklet.mjs, the
+#   hermetic host/worklet/boot suite `lint` also ran;
+# - lint: the effect-runtime policy and fixture scripts check-effect-contract.sh also ran;
+# - test-release: a release `cargo test` runs `m3_determinism` on the x86-64-v3 build
+#   (`.cargo/config.toml`, no RUSTFLAGS override on the command; see runs_m3_on_config_flags), and
+#   the cfg line shows cargo builds `math` with FMA there, the claim of the retired
+#   "Math M3 digests on an FMA-enabled build" step.
+DEDUPLICATED_OWNERS = {
+    "artifact-gates": ("bash scripts/test-web-audioworklet.sh",),
+    "lint": (
+        "bash scripts/check-effect-runtime-policy.sh",
+        "bash scripts/test-effect-runtime-policy.sh",
+        "bash scripts/check-effect-runtime-fixtures.sh",
+        "bash scripts/test-effect-runtime-fixtures.sh",
+    ),
+    "test-release": (
+        "cargo rustc --locked --release -p math --lib -- --print cfg | "
+        "grep -x 'target_feature=\"fma\"'",
+    ),
+}
+FULL_ROUTE_IF = "needs.route.outputs.route == 'full'"
+M3_TEST = "m3_determinism"
+
+
+def runs_m3_on_config_flags(command: str) -> bool:
+    """`command` is a release-profile `cargo test` of `math` that runs `m3_determinism`, with no
+    variable assignment in front of it that could replace `.cargo/config.toml`'s rustflags."""
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return False
+    if words[:2] != ["cargo", "test"] or "--release" not in words or "--" in words:
+        return False
+    packages = {words[i + 1] for i, word in enumerate(words[:-1]) if word in ("-p", "--package")}
+    tests = {words[i + 1] for i, word in enumerate(words[:-1]) if word == "--test"}
+    return ("math" in packages
+            and (not tests or M3_TEST in tests)
+            and not any(word in NON_INTEGRATION_TARGET_SELECTORS for word in words))
+
+
+def check_qualification_deduplicated_owners(text: str) -> None:
+    for name, commands in DEDUPLICATED_OWNERS.items():
+        block = job(text, name)
+        require(job_if(block) == FULL_ROUTE_IF,
+                f"qualification.yml: {name} must run on exactly the full route (#1044 owner)")
+        unconditional = unconditional_step_commands(block)
+        for command in commands:
+            require(command in unconditional,
+                    f"qualification.yml: {name} must run `{command}` unconditionally; it is the "
+                    "one run left of a claim #1044 deduplicated")
+    require(any(runs_m3_on_config_flags(command)
+                for command in unconditional_step_commands(job(text, "test-release"))),
+            "qualification.yml: test-release must run M3 (`cargo test --release -p math`, "
+            f"`{M3_TEST}` not deselected) unconditionally with no RUSTFLAGS in front of it, on "
+            "the x86-64-v3 flags .cargo/config.toml pins (#1044)")
 
 
 def check_qualification_v8_spill(text: str) -> None:
@@ -725,6 +980,94 @@ def check_qualification_aarch64_g5(text: str, names: list[str]) -> None:
             "(g5_native_digests_match_pins)")
 
 
+SELF_TEST_JOB = "gate-self-tests"
+SELF_TEST_JOB_HEAD = "    needs: route\n    if: needs.route.outputs.self_tests != '[]'\n"
+SELF_TEST_STEP_IF = "contains(fromJSON(needs.route.outputs.self_tests), '{suite}')"
+SELF_TEST_ROUTE_LINES = (
+    "      self_tests: ${{ steps.classify.outputs.self_tests }}\n",
+    '            | tail -n 4 >> "$GITHUB_OUTPUT"\n',
+)
+SELF_TEST_VERDICT_LINES = (
+    "      SELF_TESTS: ${{ needs.route.outputs.self_tests }}\n",
+    '          [[ "$SELF_TESTS" =~ ^\\[(\\"[a-z-]+\\"(,\\"[a-z-]+\\")*)?\\]$ ]] || '
+    '{ echo "malformed self_tests: $SELF_TESTS" >&2; exit 1; }\n',
+    "          self_tests_expected=skipped\n",
+    "          [[ \"$SELF_TESTS\" != '[]' ]] && self_tests_expected=success\n",
+    '          check gate-self-tests "$GATE_SELF_TESTS_RESULT" "$self_tests_expected"\n',
+)
+NIGHTLY_SELF_TEST_JOB = "moved-mutation-suites"
+NIGHTLY_STEP_IF = "${{ !cancelled() }}"
+STEP_IF = re.compile(r"^        if: (.*)$", re.MULTILINE)
+
+
+def step_if(step: str) -> str | None:
+    match = STEP_IF.search(step)
+    return match.group(1).strip() if match else None
+
+
+def check_qualification_self_tests(text: str) -> None:
+    """Issue #1043: each self-test suite runs in `gate-self-tests` exactly when the router selects
+    it, the job runs exactly when the router selects any, the verdict expects success then and
+    `skipped` otherwise, and every suite's gate still runs in an unconditional step of its per-PR
+    job. Dropping a suite's step, widening or narrowing its condition, masking it, or dropping a
+    gate from its per-PR job would each take a discrimination out of CI with every job green."""
+    route = job(text, "route")
+    for line in SELF_TEST_ROUTE_LINES:
+        require(line in route, f"qualification.yml: route job is missing {line.strip()!r}")
+    block = job(text, SELF_TEST_JOB)
+    require(SELF_TEST_JOB_HEAD in block,
+            f"qualification.yml: {SELF_TEST_JOB} must need route and run exactly when the router "
+            "selects a suite")
+    require(UNMASKABLE.search(block) is None,
+            f"qualification.yml: {SELF_TEST_JOB} must carry no job-level continue-on-error, "
+            "defaults or env")
+    steps = job_steps(block)
+    conditions = {SELF_TEST_STEP_IF.format(suite=suite): suite for suite in SELF_TEST_SUITES}
+    for step in steps:
+        condition = step_if(step)
+        require(condition is None or condition in conditions,
+                f"qualification.yml: {SELF_TEST_JOB} step has an unexpected condition "
+                f"{condition!r}")
+        require("continue-on-error:" not in step,
+                f"qualification.yml: {SELF_TEST_JOB} steps must not continue on error")
+    for suite, (host, gate, commands) in SELF_TEST_SUITES.items():
+        selected = [step for step in steps
+                    if step_if(step) == SELF_TEST_STEP_IF.format(suite=suite)]
+        require(len(selected) == 1,
+                f"qualification.yml: {SELF_TEST_JOB} must run suite {suite!r} in exactly one step "
+                "conditioned on the router selecting it")
+        require(step_commands(selected[0]) == list(commands),
+                f"qualification.yml: {SELF_TEST_JOB}'s {suite!r} step must run exactly {commands}")
+        require(gate in unconditional_step_commands(job(text, host)),
+                f"qualification.yml: {host} must still run the {suite!r} gate `{gate}` "
+                "unconditionally")
+    verdict = job(text, "verdict")
+    for line in SELF_TEST_VERDICT_LINES:
+        require(line in verdict, f"qualification.yml: verdict is missing {line.strip()!r}")
+
+
+def check_nightly_self_tests(root: pathlib.Path) -> None:
+    """Issue #1043: every self-test suite runs every night, in a job the failure notice reports,
+    each step running even after another failed, none masked."""
+    text = (root / ".github/workflows/nightly.yml").read_text(encoding="utf-8")
+    block = job(text, NIGHTLY_SELF_TEST_JOB)
+    require(job_if(block) is None and UNMASKABLE.search(block) is None,
+            f"nightly: {NIGHTLY_SELF_TEST_JOB} must run every night, unmasked")
+    steps = job_steps(block)
+    for suite, (_, _, commands) in SELF_TEST_SUITES.items():
+        for command in commands:
+            require(any(command in step_commands(step)
+                        and step_if(step) in (None, NIGHTLY_STEP_IF)
+                        and "continue-on-error:" not in step for step in steps),
+                    f"nightly: {NIGHTLY_SELF_TEST_JOB} must run `{command}` ({suite}) every night, "
+                    f"unmasked, unconditionally or under {NIGHTLY_STEP_IF}")
+    notice = job(text, "failure-notice")
+    needs = re.search(r"^    needs: \[(.*?)\]", notice, re.MULTILINE | re.DOTALL)
+    require(needs is not None and NIGHTLY_SELF_TEST_JOB in
+            [name.strip() for name in needs.group(1).replace("\n", " ").split(",")],
+            f"nightly: failure-notice must report {NIGHTLY_SELF_TEST_JOB}")
+
+
 def check_qualification_workflow(root: pathlib.Path) -> None:
     text = (root / ".github/workflows/qualification.yml").read_text(encoding="utf-8")
     check_qualification_no_path_filter(text)
@@ -742,10 +1085,13 @@ def check_qualification_workflow(root: pathlib.Path) -> None:
     check_qualification_artifact_digest(text)
     check_qualification_artifact_record(text, names)
     check_qualification_artifact_identity(text)
+    check_qualification_metadata_generated_once(text, names)
+    check_qualification_deduplicated_owners(text)
     check_qualification_v8_spill(text)
     check_qualification_aarch64(text)
     check_qualification_native_g5(text)
     check_qualification_aarch64_g5(text, names)
+    check_qualification_self_tests(text)
 
 
 RETIRED_WORKFLOWS = ("ci.yml", "sdk.yml", "browser-qualification.yml", "release-build.yml")
@@ -791,8 +1137,10 @@ def check(root: pathlib.Path) -> None:
     check_retired_workflows_absent(root)
     check_classifier_contract(root)
     check_qualification_workflow(root)
+    check_metadata_skip_elsewhere(root)
     check_cross_target_aarch64_rows(root)
     check_nightly_budgets(root)
+    check_nightly_self_tests(root)
 
 
 def main() -> int:

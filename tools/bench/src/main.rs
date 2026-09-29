@@ -8,36 +8,24 @@ use std::ffi::OsString;
 use std::process::Command;
 
 #[cfg(not(target_arch = "wasm32"))]
-mod conformance;
-#[cfg(not(target_arch = "wasm32"))]
 mod console;
 #[cfg(not(target_arch = "wasm32"))]
 mod effect_contract;
 #[cfg(not(target_arch = "wasm32"))]
 mod floor;
 mod protocol;
-#[cfg(not(target_arch = "wasm32"))]
-mod session;
 
 #[cfg(not(target_arch = "wasm32"))]
 const INTERNAL_SUBJECT: &str = "ENGINE_V1_INTERNAL_BENCH_SUBJECT";
 #[cfg(not(target_arch = "wasm32"))]
-const SUBJECTS: &[&str] = &[
-    "conformance",
-    "console",
-    "effect-contract",
-    "protocol",
-    "session",
-];
+const SUBJECTS: &[&str] = &["console", "effect-contract", "protocol"];
 
 #[cfg(not(target_arch = "wasm32"))]
 fn run_subject(subject: &str) {
     match subject {
-        "conformance" => conformance::main(),
         "console" => console::main(),
         "effect-contract" => effect_contract::main(),
         "protocol" => protocol::main(),
-        "session" => session::main(),
         _ => unreachable!("dispatcher validates internal subjects"),
     }
 }

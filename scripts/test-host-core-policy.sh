@@ -11,8 +11,7 @@ create_fixture() {
     local root="$1"
     mkdir -p "$root/crates/host-core/src" \
         "$root/crates/capi/src" \
-        "$root/hosts/host-web/src" \
-        "$root/hosts/host-native/src"
+        "$root/hosts/host-web/src"
     printf '%s\n' \
         '[package]' \
         'name = "host-core"' \
@@ -42,13 +41,11 @@ create_fixture() {
         'fn compile_children() { host_core::prepare_host_runtime(); }' \
         >"$root/crates/capi/src/runtime.rs"
     # host-web is no longer exempt (issue #106 is done: it depends on host-core like every
-    # other host) and must use the facade exactly as host-native does below.
+    # other host) and must use the facade. It is the one host under hosts/ since #1032 removed the
+    # unused native and mobile shells, so the generic host cases below mutate it too.
     printf '%s\n' \
         'fn compile() { host_core::prepare_host_runtime(); }' \
         >"$root/hosts/host-web/src/lib.rs"
-    printf '%s\n' \
-        'fn compile() { host_core::prepare_host_runtime(); }' \
-        >"$root/hosts/host-native/src/main.rs"
 }
 
 expect_failure() {
@@ -72,13 +69,13 @@ bash "$policy_script" "$valid" >/dev/null
 expect_failure capi-recompiles-the-pipeline \
     'printf "%s\n" "fn x() { let _ = compile_session(&model, caps); }" >>"$root/crates/capi/src/runtime.rs"'
 expect_failure host-recompiles-the-pipeline \
-    'printf "%s\n" "fn x() { let _ = prepare_session_builtins(&compiled, &[], caps); }" >>"$root/hosts/host-native/src/main.rs"'
+    'printf "%s\n" "fn x() { let _ = prepare_session_builtins(&compiled, &[], caps); }" >>"$root/hosts/host-web/src/lib.rs"'
 expect_failure host-binds-its-own-source-set \
-    'printf "%s\n" "fn x() { let _ = artifact.into_bound_with_source_set(bindings, set); }" >>"$root/hosts/host-native/src/main.rs"'
+    'printf "%s\n" "fn x() { let _ = artifact.into_bound_with_source_set(bindings, set); }" >>"$root/hosts/host-web/src/lib.rs"'
 expect_failure capi-reinvents-the-identity-processor \
     'printf "%s\n" "struct IdentityProcessor;" >>"$root/crates/capi/src/runtime.rs"'
 expect_failure host-reinvents-the-identity-processor \
-    'printf "%s\n" "impl GraphRuntimeProcessor for Passthrough {}" >>"$root/hosts/host-native/src/main.rs"'
+    'printf "%s\n" "impl GraphRuntimeProcessor for Passthrough {}" >>"$root/hosts/host-web/src/lib.rs"'
 expect_failure capi-hand-decodes-the-control-wire \
     'printf "%s\n" "const MAGIC: &[u8] = b\"MISOCTL\";" >>"$root/crates/capi/src/runtime.rs"'
 expect_failure capi-reimplements-the-replay-cache \

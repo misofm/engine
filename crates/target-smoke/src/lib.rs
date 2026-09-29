@@ -1,4 +1,4 @@
-//! Portable target-smoke values used by bootstrap hosts and CI.
+//! Portable target-smoke values: the per-target lane-width pin CI compiles and tests.
 
 use engine::{EngineVersion, QuantumFrames, SampleRateHz};
 use lane::Backend;
@@ -41,10 +41,11 @@ mod tests {
         // Literal, per-target expected backends -- not `report.backend == lane::Backend::current()`,
         // which would compare the same compile-time constant against itself and could never fail.
         // A change to either `lane::Backend::current()`'s target selection or to this pin must fail
-        // this test (AGENTS.md: `x86-64-v3` is pinned to AVX2/FMA, NEON is baseline on AArch64, the
-        // shipped wasm width is four lanes unless issue #183 step 2's measurement cfg widens it, and
-        // every other target is the scalar fallback).
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        // this test (AGENTS.md: `x86-64-v3` is pinned to AVX2/FMA, NEON is baseline on AArch64, and
+        // the shipped wasm width is four lanes unless issue #183 step 2's measurement cfg widens it).
+        // Every other target has no row because `lane` refuses to compile for it (issues #1041 and
+        // #1062), so this crate cannot be built there either.
+        #[cfg(target_arch = "x86_64")]
         assert_eq!(
             report.backend,
             lane::Backend::Simd8,
@@ -71,17 +72,6 @@ mod tests {
             report.backend,
             lane::Backend::Simd8,
             "issue #183 step 2's eight-lane wasm measurement build"
-        );
-        #[cfg(not(any(
-            target_arch = "x86",
-            target_arch = "x86_64",
-            target_arch = "aarch64",
-            all(target_arch = "wasm32", target_feature = "simd128")
-        )))]
-        assert_eq!(
-            report.backend,
-            lane::Backend::Scalar,
-            "every other target is the scalar fallback"
         );
     }
 }

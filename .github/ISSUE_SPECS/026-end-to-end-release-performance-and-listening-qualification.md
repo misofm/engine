@@ -88,8 +88,11 @@ Checksummed report artifact; raw benchmark/soak logs; allocator traces; fixture 
 The accepted `fixtures/capi-qualification/v1` result no longer describes the working tree: eleven of
 the twenty-six paths its `AUTHORITIES.sha256` sealed were rewritten by #102, #103 and the lane
 waves. #104 phase A retired the seal rather than re-computing it, because re-sealing would claim
-evidence for sources that never produced it. The corpus, the runner
-(`scripts/run-capi-qualification-v1.sh`), the two Python checkers and the recorded matrix all
-survive; what this issue owes is one re-run of that matrix against the post-audit tree, re-sealed at
-that commit. See `.github/ISSUE_SPECS/114-qualify-native-c-abi-and-reference-runner-target-matrix.md`
+evidence for sources that never produced it. #319 (`f0509c3f`) then deleted the runner
+(`scripts/run-capi-qualification-v1.sh`) and the two Python checkers, and #1029 deleted the unread
+ledger itself; the recorded matrix is at
+<https://github.com/misofm/engine/tree/5379e46ca3b349b9d277d642c008bb7a9643fb76/fixtures/capi-qualification/v1>.
+What this issue owes is one re-run of that matrix against the post-audit tree, re-sealed at that
+commit. The C ABI's live gates today are `scripts/check-capi-abi.sh`, the `capi` tests and
+`audit capi`. See `.github/ISSUE_SPECS/114-qualify-native-c-abi-and-reference-runner-target-matrix.md`
 for the list of drifted paths.

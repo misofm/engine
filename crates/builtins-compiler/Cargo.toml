@@ -20,8 +20,17 @@ rack-compiler.workspace = true
 effect-contract.workspace = true
 sha2.workspace = true
 
+[dev-dependencies]
+# Issue #1059: this crate's own tests drive the whole-plan scalar oracle, which needs
+# `Backend::Scalar` and the graph's scalar pairing passes; both are test-support only.
+lane = { workspace = true, features = ["test-support"] }
+graph = { workspace = true, features = ["test-support"] }
+
 [features]
-test-support = ["builtins/test-support", "graph/test-support"]
+# `lane/test-support` because the per-node strip owners this feature compiles exist for the
+# test-only `Backend::Scalar` oracle (issue #1059), and `graph/test-support` because they reach
+# the graph's scalar pairing passes.
+test-support = ["builtins/test-support", "graph/test-support", "lane/test-support"]
 
 [lints]
 workspace = true

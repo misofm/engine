@@ -9,8 +9,9 @@
 //!
 //! * **native** — [`wasm_gate_corpus`] linked as an `rlib` and run in-process at
 //!   every width, compared against the pins.
-//! * **wasm** — the same crate compiled to `wasm32-unknown-unknown` (with and without `simd128`)
-//!   and executed under wasmtime, compared against the same pins.
+//! * **wasm** — the same crate compiled to `wasm32-unknown-unknown` with `simd128`, the one wasm
+//!   build that ships, and executed under wasmtime, compared against the same pins. The scalar
+//!   (non-`simd128`) wasm leg retired with #1062: `lane` refuses that build.
 //!
 //! The runtime is configured to *reject* relaxed SIMD (`Config::wasm_relaxed_simd(false)`), so a
 //! guest built with `-C target-feature=+relaxed-simd` that actually emits a relaxed instruction
@@ -36,10 +37,11 @@ pub const WASMTIME_VERSION: &str = "47.0.3";
 pub const WASMTIME_LICENCE: &str = "Apache-2.0 WITH LLVM-exception";
 
 /// Which production backend a run is expected to have used.
+///
+/// No `Scalar`: no target selects the whole-plan scalar backend, and the wasm build without
+/// `simd128` that once reported it is refused at compile time (#1062).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExpectedBackend {
-    /// `f32`, one lane: a wasm build without `simd128`.
-    Scalar,
     /// `Simd4`: wasm with `simd128`, or AArch64 NEON.
     Simd4,
     /// `Simd8`: one `__m256` on `x86-64-v3`.
@@ -54,7 +56,6 @@ impl ExpectedBackend {
     /// Returns the offending text if it names no backend.
     pub fn parse(text: &str) -> Result<Self, String> {
         match text {
-            "scalar" => Ok(Self::Scalar),
             "simd4" => Ok(Self::Simd4),
             "simd8" => Ok(Self::Simd8),
             other => Err(other.to_string()),
@@ -65,7 +66,6 @@ impl ExpectedBackend {
     #[must_use]
     pub const fn code(self) -> u32 {
         match self {
-            Self::Scalar => 0,
             Self::Simd4 => 1,
             Self::Simd8 => 2,
         }
@@ -75,7 +75,6 @@ impl ExpectedBackend {
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
-            Self::Scalar => "scalar",
             Self::Simd4 => "simd4",
             Self::Simd8 => "simd8",
         }
@@ -198,10 +197,12 @@ fn widths_of(case: usize) -> std::ops::Range<usize> {
 
 /// The backend this process was compiled for, in the guest's numbering.
 fn native_backend_code() -> u32 {
-    match lane::Backend::current() {
-        lane::Backend::Scalar => 0,
-        lane::Backend::Simd4 => 1,
-        lane::Backend::Simd8 => 2,
+    // By width, not by variant: `Backend::Scalar` exists only in `lane/test-support` builds
+    // (#1059), so a match on the variants compiles in only one of them.
+    match lane::Backend::current().width() {
+        4 => 1,
+        8 => 2,
+        _ => 0,
     }
 }
 

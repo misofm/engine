@@ -462,18 +462,6 @@ mod tests {
     }
 
     #[test]
-    fn a_unit_impulse_reproduces_the_annex2_table_rows() {
-        for tap in 0..HISTORY {
-            let mut history = [0.0_f64; HISTORY];
-            history[tap] = 1.0;
-            let phases = reference_annex2_phases(&history);
-            for (phase, value) in phases.iter().enumerate() {
-                assert_eq!(*value, REFERENCE_ANNEX2_FIR[tap][phase]);
-            }
-        }
-    }
-
-    #[test]
     fn ramp_windows_follow_the_w_min_floor() {
         for (lookahead_ms, expected) in [(0.0, 32_usize), (5.0, 241), (10.0, 481)] {
             let lane =

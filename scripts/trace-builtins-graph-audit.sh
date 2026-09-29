@@ -62,13 +62,12 @@ jq -e '
   .network_io == 0 and .syscalls == 0 and .panic_unwinds == 0 and
   .total_violations == 0
 ' "$trace_root/audit.json" >/dev/null
-expected_audit_hash=dbac3f3d019ed05b079f40aad61f51e38db90257a7c2de957aae7afbe2590b53
+# #1060: the record's hash is a live report, not a pin. The jq check above holds every claim the
+# record makes (the render/swap/retirement transcript, PDC and taps, and zero allocations, locks
+# and syscalls on render), and the audit compares the rendered PCM and meters with the accepted
+# fixtures byte for byte before it prints. What the hash added was its labels and constants: it was
+# re-pinned five to eight times in September 2026 and never caught a defect.
 audit_hash=$(sha256sum "$trace_root/audit.json" | cut -d' ' -f1)
-[[ "$audit_hash" == "$expected_audit_hash" ]] || {
-  printf 'graph audit record hash differs: expected=%s actual=%s\n' \
-    "$expected_audit_hash" "$audit_hash" >&2
-  exit 1
-}
 raw_hash=$(for file in "$trace_root"/trace.*; do sha256sum "$file" | cut -d' ' -f1; done | sha256sum | cut -d' ' -f1)
 validator_hash=$(sha256sum "$trace_root/validator.json" | cut -d' ' -f1)
 printf 'issue-070 graph all-TID trace: PASS (audit=%s raw=%s validator=%s)\n' \

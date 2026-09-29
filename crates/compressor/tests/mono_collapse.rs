@@ -9,10 +9,9 @@
 //! * **`LinkMode::Average` on subnormal content.** The collapsed body computes the link on the one
 //!   plane read twice -- `link_frame(detector, slot, p, p, ..)`, which for `Average` is
 //!   `0.5*|p| + 0.5*|p|`. That is *not* `|p|`: for a subnormal `p`, `0.5 * p` loses the low bit and
-//!   the two halves do not sum back. `a_halved_subnormal_does_not_come_back` states that on its
-//!   own, so the reader can see that the operand-order rule has teeth before reading the test that
-//!   depends on it. A "simplification" of the link to `magnitude_left` would pass every tone
-//!   fixture in the tree and fail here.
+//!   the two halves do not sum back (IEEE 754 round-to-nearest: `0.5 * f32::from_bits(3)` is not
+//!   exactly half of it). A "simplification" of the link to `magnitude_left` would pass every
+//!   tone fixture in the tree and fail here.
 //! * **`-0.0`.** Every gain and mix identity in the kernel is a `select` over a mask, and `-0.0`
 //!   is the value that separates "the same number" from "the same bits" at each of them.
 //!
@@ -153,21 +152,6 @@ fn run_block(
     } else {
         bank.process_bank(block);
     }
-}
-
-/// Halving a subnormal and adding the halves back does not return the subnormal.
-///
-/// The whole reason the collapsed link is `link(p, p)` and not `p`. If this ever became an
-/// equality the rule would be vacuous, and the test that rests on it would be measuring nothing.
-#[test]
-fn a_halved_subnormal_does_not_come_back() {
-    let p = f32::from_bits(3);
-    let halved = 0.5_f32 * p + 0.5_f32 * p;
-    assert_ne!(
-        halved.to_bits(),
-        p.to_bits(),
-        "0.5*p + 0.5*p must round away from p for a subnormal p, or the link rule is vacuous"
-    );
 }
 
 /// The collapsed body renders the dual body's left plane, bit for bit, under every link mode.

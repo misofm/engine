@@ -41,3 +41,7 @@ three places.
   can re-run the same paired capture and reopen with evidence. Reopening
   requires a fresh paired record on the then-current base — this ruling's
   numbers describe the round-2 tree, nothing later.
+- Later (2026-09-28): #1039 retired the wasmtime console benchmark, including
+  the `--issue183` arm (owner ruling R9, `engine-footprint-2026-09-28.md`), and
+  R7 (#1038) removes the eight-lane wasm measurement build. Re-measuring now
+  means restoring both from git history.

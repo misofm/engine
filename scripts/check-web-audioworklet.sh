@@ -58,8 +58,9 @@ check_clock_policy() {
 
 # Owner decision W4-D1 (#83): exactly one artifact ships and it is built with `+simd128`. The
 # scalar artifact and the dual-artifact selection are gone, so this file no longer has a
-# "scalar must contain no vector opcode" leg; the wasm-scalar *cargo check* stays in CI because
-# `lane`'s scalar wasm path is still gated, it is just not shipped.
+# "scalar must contain no vector opcode" leg. No scalar wasm build is left at all: `lane` refuses
+# wasm32 without `simd128` at compile time (issue #1062), and this file's atomics, import and
+# shared-memory checks on the shipped module took over the retired scalar atomics inspection.
 check_opcode_policy() {
   local simd_text=$1
   grep -q 'f32x4.mul' <<<"$simd_text" || return 1
@@ -121,6 +122,19 @@ if (($# == 1)) && [[ $1 == --source-policy=* ]]; then
   exit 0
 fi
 
+# Issue #1044: `--without-metadata-regeneration` leaves out the one step below that re-runs the
+# metadata generator, `parameter-metadata --check`. Only a caller whose directory was written by
+# `build-web-audioworklet.sh` (which runs the same generator's `--write`) at this commit may pass
+# it: there the check compares the generator with itself. CI's `artifact-gates` passes it for the
+# `artifact` job's download, verified against that job's closure digest first, and
+# scripts/check-ci-path-routing.py refuses the flag in any other job or workflow. It needs an
+# explicit directory; every other form, the local no-argument one included, keeps the check.
+regenerate_metadata=1
+if (($# == 2)) && [[ $1 == --without-metadata-regeneration ]]; then
+  regenerate_metadata=0
+  shift
+fi
+
 # With no argument the gate builds the artifact it checks, so `bash scripts/check-web-audioworklet.sh`
 # is runnable the same way every other `scripts/check-*.sh` is. CI keeps passing the directory it
 # already built (#104 phase A: the no-argument form used to exit 2 and read as a red gate).
@@ -131,8 +145,8 @@ if (($# == 0)); then
   set -- "$self_built_artifacts"
 fi
 
-if (($# != 1)); then
-  echo "usage: $0 [ARTIFACT_DIRECTORY]" >&2
+if (($# != 1)) || [[ $1 == -* ]]; then
+  echo "usage: $0 [[--without-metadata-regeneration] ARTIFACT_DIRECTORY]" >&2
   exit 2
 fi
 
@@ -305,6 +319,27 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_track_response_snapshot_set_bytes \
   miso_engine_web_v1_track_response_track_id_capacity \
   miso_engine_web_v1_track_response_track_id_ptr | sort)
+
+# Issue #1047: the shipped ABI layout document publishes exactly these exports, every one but
+# `memory` (linear memory, not a call). It is read from the artifact, not from the generator's
+# source, and the list above stays independent of the generator, so an export added to one of the
+# module, this list or the generator without the others fails here or at the module check below.
+layout_json="$artifact_dir/miso-engine-v1-abi-layout.json"
+layout_exports=$(python3 -B -c '
+import json, sys
+exports = json.load(open(sys.argv[1], encoding="utf-8"))["exports"]
+assert isinstance(exports, list) and all(isinstance(name, str) for name in exports)
+print("\n".join(exports))
+' "$layout_json" | sort) || {
+  echo "cannot read the published export list from $layout_json" >&2
+  exit 1
+}
+expected_functions=$(grep -vx memory <<<"$expected_exports")
+[[ "$layout_exports" == "$expected_functions" ]] || {
+  echo "the ABI layout document's published exports are not the frozen export set" >&2
+  diff -u <(printf '%s\n' "$expected_functions") <(printf '%s\n' "$layout_exports") >&2 || true
+  exit 1
+}
 
 for module in "$simd"; do
   metadata=$(wasm-objdump -x "$module")
@@ -486,14 +521,20 @@ grep -q 'output\[1\]\.set(this.outputRight)' <<<"$process_body"
 
 # Issue #137 D4/E7: the shipped metadata is exactly what the registry produces right now, and it
 # satisfies its own schema. `--check` regenerates and compares byte for byte, so a stale file, a
-# hand edit, or an effect added to the registry without rebuilding all fail here.
-(
-  cd "$(dirname "${BASH_SOURCE[0]}")/.."
-  cargo run --locked --release -q -p parameter-metadata -- --check "$artifact_dir"
-) >/dev/null || {
-  echo "shipped parameter metadata is stale" >&2
-  exit 1
-}
+# hand edit, or an effect added to the registry without rebuilding all fail here. Issue #1044:
+# left out under `--without-metadata-regeneration` (see the top of this file), where the directory's
+# documents are that generator's output at this commit already; the schema gates below still run.
+if ((regenerate_metadata)); then
+  (
+    cd "$(dirname "${BASH_SOURCE[0]}")/.."
+    cargo run --locked --release -q -p parameter-metadata -- --check "$artifact_dir"
+  ) >/dev/null || {
+    echo "shipped parameter metadata is stale" >&2
+    exit 1
+  }
+else
+  echo "parameter-metadata --check left out: the caller's directory holds the generator's own output at this commit (#1044)"
+fi
 python3 -B "$(dirname "${BASH_SOURCE[0]}")/check-parameter-metadata-v1.py" \
   "$artifact_dir/miso-engine-v1-parameter-metadata.json" || exit 1
 

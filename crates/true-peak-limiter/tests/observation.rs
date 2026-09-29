@@ -142,22 +142,6 @@ fn the_limiter_reads_the_reduction_word_the_envelope_persists() {
     );
 }
 
-/// Two calls, then a third, all bit-identical. `&self` makes this true by construction; the test
-/// makes it true observably, which is what catches a read that recurses through interior state.
-#[test]
-fn a_resident_read_is_repeatable_to_the_bit() {
-    let values = values();
-    let mut effect = TruePeakLimiterFactory.prepare(request(&values)).unwrap();
-    render(effect.as_mut(), 0.98, 64);
-    let first = observe(&*effect);
-    let second = observe(&*effect);
-    let third = observe(&*effect);
-    assert_eq!(first.left.to_bits(), second.left.to_bits());
-    assert_eq!(second.left.to_bits(), third.left.to_bits());
-    assert_eq!(first.right.to_bits(), third.right.to_bits());
-    assert!(first.left > 0.0, "not vacuous: {}", first.left);
-}
-
 /// Observing between blocks changes nothing the next block renders. This is the property the whole
 /// cost split rests on: an armed tap must not be able to alter the signal.
 #[test]

@@ -547,7 +547,7 @@ async function main() {
   const sessionDocument = await readFile(path.join(fixtureDirectory, "session.json"));
   // W4-D1: one shipped artifact, so the direct oracle drives it alone. The cross-backend proof
   // moved to two independent places: #83's G5 corpus runs the same kernels natively at
-  // Scalar/Simd4/Simd8 and under wasmtime with and without simd128, and `nativePcmF32leSha256`
+  // Scalar/Simd4/Simd8 and under wasmtime with simd128, and `nativePcmF32leSha256`
   // below is this exact session rendered through the native `AudioWorkletEngineHost`. Equality is
   // `to_bits` (SHA-256 over little-endian f32 words), never a tolerance.
   const actual = {
@@ -647,7 +647,23 @@ async function main() {
     process.stdout.write(`${JSON.stringify(actual, null, 2)}\n`);
     return;
   }
-  assert.deepEqual(actual, expected.directOracle, "checked raw-Wasm oracle drift");
+  // #1060: the retained-production rows are budgets, not pins. `expected.json` keeps the exact rows
+  // under `resources` and a ceiling for each retained row under `resourceCeilings`; every such row
+  // must be positive and within its ceiling, and everything else must still match exactly.
+  // `scripts/check-browser-expected-resources.py` applies the same two classes to the printed
+  // document.
+  const comparableActual = JSON.parse(JSON.stringify(actual));
+  const comparableExpected = JSON.parse(JSON.stringify(expected.directOracle));
+  const ceilings = comparableExpected.simd128?.resourceCeilings;
+  assert.equal(typeof ceilings, "object", "expected.json must carry resourceCeilings");
+  delete comparableExpected.simd128.resourceCeilings;
+  for (const [name, ceiling] of Object.entries(ceilings)) {
+    const value = BigInt(comparableActual.simd128.resources[name]);
+    assert.ok(value > 0n, `${name} is zero: a retained row stopped being charged`);
+    assert.ok(value <= BigInt(ceiling), `${name} ${value} is over its ceiling ${ceiling}`);
+    delete comparableActual.simd128.resources[name];
+  }
+  assert.deepEqual(comparableActual, comparableExpected, "checked raw-Wasm oracle drift");
   console.log("web AudioWorklet independent raw-Wasm oracle passed");
 }
 

@@ -27,6 +27,9 @@ dsp-reference.workspace = true
 conformance = { workspace = true, features = ["realtime-audit"] }
 # Cross-target digest gate (E4). Never a production dependency.
 sha2.workspace = true
+# Issue #1059: a test pins that the scalar backend is refused, and `Backend::Scalar` exists
+# only with `lane/test-support`.
+lane = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true

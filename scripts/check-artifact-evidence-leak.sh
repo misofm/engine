@@ -26,6 +26,12 @@
 # rule 2's per-target artifact/coverage pairing (which needs a literal target string) stays owned
 # by the workflow scan above -- the calling workflow is where this script's own evidence-crate
 # cross-target coverage already lives (see "Evidence crates compile for Wasm").
+#
+# #1062: the workflow's own wasm artifact line was the scalar eighteen-package build, which retired
+# with the scalar wasm legs. The wasm32 artifact invocation left is the one that ships (W4-D1),
+# `scripts/build-web-audioworklet.sh`'s `-p host-web` build, which the artifact job runs. It is
+# scanned with the workflow for both rules: its target is a literal triple, so its evidence-crate
+# coverage must still come from a workflow line.
 set -euo pipefail
 
 root="$(cd "${1:-$(dirname "${BASH_SOURCE[0]}")/..}" && pwd)"
@@ -40,17 +46,21 @@ for workflow in "${workflows[@]}"; do
 done
 
 cross_targets_script=scripts/check-cross-targets.sh
-[[ -f "$cross_targets_script" ]] ||
-    { printf 'artifact evidence gate failure: missing %s\n' "$cross_targets_script" >&2; exit 1; }
+delivery_script=scripts/build-web-audioworklet.sh
+for script in "$cross_targets_script" "$delivery_script"; do
+    [[ -f "$script" ]] ||
+        { printf 'artifact evidence gate failure: missing %s\n' "$script" >&2; exit 1; }
+done
 
 # The evidence crates: test scaffolding and the f64 oracle. Nothing that ships may resolve with
 # them, because whatever features they turn on are unified into the artifact.
 evidence=(conformance dsp-reference)
-# The packages whose cross-target build IS the deliverable: host-web, host-mobile, host-core and
-# capi, plus effect-compiler, the shipped effect preparation library every host links, whose only
+# The packages whose cross-target build IS the deliverable: host-web, host-core and capi, plus
+# effect-compiler, the shipped effect preparation library every host links, whose only
 # cross-target compile is scripts/check-cross-targets.sh's wasm row -- conformance's features must
-# not unify into it there. (effect-package held that row, and this slot, until #1037 removed it.)
-shipped=(host-web host-mobile host-core capi effect-compiler)
+# not unify into it there. (effect-package held that row, and this slot, until #1037 removed it;
+# host-mobile held a slot until #1032 removed that unused shell: mobile apps link capi.)
+shipped=(host-web host-core capi effect-compiler)
 
 fail() { printf 'artifact evidence gate failure: %s\n' "$1" >&2; exit 1; }
 
@@ -68,11 +78,18 @@ target_of() {
     sed -n 's/.*--target \([A-Za-z0-9_.-]*\).*/\1/p' <<<"$1"
 }
 
+# A script's lines with `\` continuations joined, so a cargo invocation wrapped over several
+# physical lines is seen whole (its `-p ...` list is often on a continuation line of its own).
+joined_lines() {
+    sed -e ':a' -e '/\\$/{N;s/\\\n[[:space:]]*/ /;ba' -e '}' "$1"
+}
+
 total_artifact_targets=0
 for workflow in "${workflows[@]}"; do
     artifact_targets=()
     coverage_targets=()
-    while IFS= read -r line; do
+    # Each line arrives as `<source><TAB><cargo line>`, so a failure names the file it came from.
+    while IFS=$'\t' read -r source line; do
         [[ "$line" == *"--target "* ]] || continue
         target="$(target_of "$line")"
         [[ -n "$target" ]] || continue
@@ -80,7 +97,7 @@ for workflow in "${workflows[@]}"; do
             for crate in "${evidence[@]}"; do
                 if [[ "$line" == *" -p $crate"* ]]; then
                     printf '%s\n' "$line" >&2
-                    fail "$workflow: the $target artifact invocation names the evidence crate $crate"
+                    fail "$source: the $target artifact invocation names the evidence crate $crate"
                 fi
             done
             artifact_targets+=("$target")
@@ -92,9 +109,13 @@ for workflow in "${workflows[@]}"; do
             [[ "$line" == *" -p $crate"* ]] || missing=1
         done
         [[ $missing -eq 0 ]] && coverage_targets+=("$target")
-    done < <(grep -E '(^|[[:space:]])cargo (build|check)([[:space:]]|$)' "$workflow")
+    done < <(for source in "$workflow" "$delivery_script"; do
+        joined_lines "$source" | grep -E '(^|[[:space:]])cargo (build|check)([[:space:]]|$)' |
+            sed "s|^|$source\t|"
+    done)
 
-    [[ ${#artifact_targets[@]} -gt 0 ]] || fail "$workflow: found no cross-target artifact invocation to gate"
+    [[ ${#artifact_targets[@]} -gt 0 ]] ||
+        fail "$workflow (with $delivery_script): found no cross-target artifact invocation to gate"
 
     mapfile -t artifact_targets < <(printf '%s\n' "${artifact_targets[@]}" | LC_ALL=C sort -u)
     coverage_list=" ${coverage_targets[*]:-} "
@@ -120,7 +141,7 @@ while IFS= read -r line; do
             fail "$cross_targets_script: invocation names both a shipped package and evidence crate $crate"
         fi
     done
-done < <(sed -e ':a' -e '/\\$/{N;s/\\\n[[:space:]]*/ /;ba' -e '}' "$cross_targets_script" |
+done < <(joined_lines "$cross_targets_script" |
     grep -E '(^|[[:space:]])cargo (build|check|rustc)([[:space:]]|$)')
 [[ $script_shipped_invocations -gt 0 ]] ||
     fail "$cross_targets_script: found no shipped-package cargo invocation to gate"

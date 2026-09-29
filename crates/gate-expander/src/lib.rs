@@ -1199,10 +1199,11 @@ mod tests {
     /// per-lane scalar peer and with an uninjected control bank of the same width.
     #[test]
     fn injected_nonfinite_gain_has_scalar_parity_at_the_native_width() {
-        match Backend::current() {
-            Backend::Simd8 => injected_nonfinite_gain_parity::<Simd8>(BankWidth::Eight),
-            Backend::Simd4 => injected_nonfinite_gain_parity::<Simd4>(BankWidth::Four),
-            Backend::Scalar => panic!("no product target renders scalar banks"),
+        match BankWidth::for_backend(Backend::current())
+            .expect("no product target renders scalar banks")
+        {
+            BankWidth::Eight => injected_nonfinite_gain_parity::<Simd8>(BankWidth::Eight),
+            BankWidth::Four => injected_nonfinite_gain_parity::<Simd4>(BankWidth::Four),
         }
     }
 

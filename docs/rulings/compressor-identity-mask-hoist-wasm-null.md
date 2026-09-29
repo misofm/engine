@@ -62,3 +62,12 @@ tiers would be materially new evidence — every wasm record here carries
 * `artifacts/compressor-round1-baseline/` — baseline arm.
 * Digest identity: every `output_sha256` on every row of all five legs is byte-identical between
   the two arms, which is this round's class-A null detector.
+
+## History
+
+* **2026-09-28, #1039.** The wasmtime console benchmark that produced this ruling's wasm arm
+  (`tools/wasm-console`, run by `scripts/operator/run-wasm-console-benchmark.sh`) is retired by
+  owner ruling R9 (`docs/rulings/engine-footprint-2026-09-28.md`). The records above stay in
+  `artifacts/compressor-round1/` and `artifacts/compressor-round1-baseline/`. The null stands as
+  measured; a re-measurement comes from V8 rows on the shipped module, which is also the
+  "materially new evidence" the reopen condition names, or it is not made.
