@@ -15,15 +15,39 @@
 #
 # Red mutation: edit one constant in `sdk/src/generated/abi.ts` -> the second check goes red; edit
 # one row in `sdk/assets/miso-engine-v1-abi-layout.json` -> the first does.
+#
+# Usage: check-sdk-generated.sh [ENGINE_ARTIFACT_DIRECTORY]
+#
+# With no argument the first arrow is re-derived by running the generator (cargo). Issue #1044:
+# given the engine artifact directory `build-web-audioworklet.sh` wrote -- the generator's own
+# `--write` output at this commit, the documents the SDK package ships -- the JSON assets are
+# compared byte for byte with that directory's copies instead, and this gate runs no cargo.
+# CI's `sdk` job passes the `artifact` job's download, verified against its closure digest, so a
+# Rust change that alters the metadata without refreshing `sdk/assets` fails there.
 set -euo pipefail
 
+if (($# > 1)); then
+  echo "usage: $0 [ENGINE_ARTIFACT_DIRECTORY]" >&2
+  exit 2
+fi
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+artifact_dir=""
+if (($# == 1)); then
+  [[ -d "$1" && ! -L "$1" ]] || {
+    echo "artifact directory must be a non-symlink directory" >&2
+    exit 2
+  }
+  artifact_dir=$(cd "$1" && pwd -P)
+fi
 cd "$repo_root/sdk"
 
 command -v node >/dev/null || { echo "node is required" >&2; exit 2; }
-command -v cargo >/dev/null || { echo "cargo is required" >&2; exit 2; }
-
-node codegen/assets.mjs --check
+if [[ -n "$artifact_dir" ]]; then
+  node codegen/assets.mjs --check "$artifact_dir"
+else
+  command -v cargo >/dev/null || { echo "cargo is required" >&2; exit 2; }
+  node codegen/assets.mjs --check
+fi
 node codegen/generate.mjs --check
 
 # The generated modules must carry their provenance banner: a module without it reads like a file

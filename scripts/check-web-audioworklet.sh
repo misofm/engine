@@ -122,6 +122,19 @@ if (($# == 1)) && [[ $1 == --source-policy=* ]]; then
   exit 0
 fi
 
+# Issue #1044: `--without-metadata-regeneration` leaves out the one step below that re-runs the
+# metadata generator, `parameter-metadata --check`. Only a caller whose directory was written by
+# `build-web-audioworklet.sh` (which runs the same generator's `--write`) at this commit may pass
+# it: there the check compares the generator with itself. CI's `artifact-gates` passes it for the
+# `artifact` job's download, verified against that job's closure digest first, and
+# scripts/check-ci-path-routing.py refuses the flag in any other job or workflow. It needs an
+# explicit directory; every other form, the local no-argument one included, keeps the check.
+regenerate_metadata=1
+if (($# == 2)) && [[ $1 == --without-metadata-regeneration ]]; then
+  regenerate_metadata=0
+  shift
+fi
+
 # With no argument the gate builds the artifact it checks, so `bash scripts/check-web-audioworklet.sh`
 # is runnable the same way every other `scripts/check-*.sh` is. CI keeps passing the directory it
 # already built (#104 phase A: the no-argument form used to exit 2 and read as a red gate).
@@ -132,8 +145,8 @@ if (($# == 0)); then
   set -- "$self_built_artifacts"
 fi
 
-if (($# != 1)); then
-  echo "usage: $0 [ARTIFACT_DIRECTORY]" >&2
+if (($# != 1)) || [[ $1 == -* ]]; then
+  echo "usage: $0 [[--without-metadata-regeneration] ARTIFACT_DIRECTORY]" >&2
   exit 2
 fi
 
@@ -487,14 +500,20 @@ grep -q 'output\[1\]\.set(this.outputRight)' <<<"$process_body"
 
 # Issue #137 D4/E7: the shipped metadata is exactly what the registry produces right now, and it
 # satisfies its own schema. `--check` regenerates and compares byte for byte, so a stale file, a
-# hand edit, or an effect added to the registry without rebuilding all fail here.
-(
-  cd "$(dirname "${BASH_SOURCE[0]}")/.."
-  cargo run --locked --release -q -p parameter-metadata -- --check "$artifact_dir"
-) >/dev/null || {
-  echo "shipped parameter metadata is stale" >&2
-  exit 1
-}
+# hand edit, or an effect added to the registry without rebuilding all fail here. Issue #1044:
+# left out under `--without-metadata-regeneration` (see the top of this file), where the directory's
+# documents are that generator's output at this commit already; the schema gates below still run.
+if ((regenerate_metadata)); then
+  (
+    cd "$(dirname "${BASH_SOURCE[0]}")/.."
+    cargo run --locked --release -q -p parameter-metadata -- --check "$artifact_dir"
+  ) >/dev/null || {
+    echo "shipped parameter metadata is stale" >&2
+    exit 1
+  }
+else
+  echo "parameter-metadata --check left out: the caller's directory holds the generator's own output at this commit (#1044)"
+fi
 python3 -B "$(dirname "${BASH_SOURCE[0]}")/check-parameter-metadata-v1.py" \
   "$artifact_dir/miso-engine-v1-parameter-metadata.json" || exit 1
 
