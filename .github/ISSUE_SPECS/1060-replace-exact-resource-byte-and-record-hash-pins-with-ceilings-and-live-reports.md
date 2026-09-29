@@ -579,3 +579,116 @@ canonical shrink in `session`. The PCM digests, exact rows and `memoryBytes` are
 **My own error, fixed.** A paragraph edit in `docs/C_ABI_V1_QUALIFICATION.md` dropped that
 paragraph's later sentences (the C response vectors and the RT artifact history); `8bc6ac40`
 restores them word for word.
+
+## Sol verdict, attempt 2
+
+**PASS, with one tracked successor.**
+- Both HIGH findings are closed. The completeness oracle now observes every host-core owner. Plants
+  in the catalog, the canonical JSON and three owners the implementer did not name all go red.
+- The residual plan-bound gap is an honest limit of the one owner that has no exact attribution.
+  It is not a hidden under-count.
+- **Before #1060 closes,** root files the successor below and cites its number in this spec and in
+  the doc comment of `assert_host_owners_are_charged`. That is bookkeeping, not another attempt.
+
+Reviewer: Sol, 2026-09-29. I merged `6ccbe7cf` into a scratch detached checkout of main
+`a8955ad4`. The merge was clean, and its tree is identical to `6ccbe7cf`, because the branch already
+carries batch 3 and main's tree equals `3ba8982a`. No timed workload was run.
+
+### Findings, by severity
+
+1. **MEDIUM, accepted with a successor: the prepared plan is only bounded.** The check still covers
+   the plan: `plan ≤ engine rows`, and the four observed owners must sum to every byte the host-core
+   half retains.
+   - **Slack on AArch64 under qemu:** 128,405 bytes (EQ), 128,730 (soft-clip) and 8,109 (identity).
+     On x86 the evidence reports 128,317, 128,834 and 12,233.
+   - **What the bound catches.** An uncharged plan table goes red above the smallest slack, as my
+     attempt-1 plant at 229 KB did.
+   - **What it misses.** A table below the slack stays green; the evidence reproduces my 1.8 KB
+     plant. Estimate mutants such as `graph_metadata_bytes → Some(0)` are still caught only by
+     graph-compiler's own tests.
+   - **Why this is not a FAIL.**
+     - Amendment 2 allows a bound where exactness is infeasible. It is infeasible here: the plan's
+       rows are the graph compiler's pre-allocation admission estimate, and no API separates what
+       the bound runtime retains from that margin.
+     - Base had no allocator check on the plan at all, so this is new coverage, not a regression.
+     - Admission stays safe (charge ≥ live) on every fixture observed. The risk is a future
+       uncharged table in a session shape with less margin than the fixtures, which is what the
+       successor closes.
+     - Exact attribution is a graph-crate product slice, outside this issue's crates. AGENTS.md
+       says to split such work.
+   - **Successor scope, for root to file:**
+     > Give the bound graph runtime a per-owner `retained_bytes()` walk (units, banks, tables,
+     > delays), checked equal to its observed allocations by an allocator oracle in graph's tests.
+     > Then tighten capi's `resource_lifecycle` oracle from `plan ≤ engine rows` to
+     > `plan == walked ≤ engine rows`, so an uncharged plan table of any size goes red.
+2. **LOW, informational: the C report now carries no canonical-JSON bytes.**
+   - The canonical JSON is charged once, correctly, inside `compiled_model_bytes` in the graph cap,
+     at initial admission and in `validate_replacement_peak`. The budget and double-live tests prove
+     both at exact and one below.
+   - `PlanResourceReport` has never had a compiled-model row. So a host that sums report rows, rather
+     than configuring caps, now sees 16,712 fewer bytes on EQ.
+   - The C ABI qualification doc states this. No action is needed unless a host sums the rows; if
+     one does, the fix is a model row in a later ABI.
+
+### HIGH 1 (completeness trusted two charges): closed
+
+- **Re-planted, both red.**
+  - Reverting the catalog to `collect::<Result<Vec<_>>>` fails three tests: the oracle (261,348
+    against 256,740), tiny-frame (187,670 against 183,062) and the catalog test (129,708 against
+    125,100).
+  - Removing `shrink_to_fit` fails the store check: 38,069 > 23,039.
+- **Owners the implementer did not name, all red.**
+  - **Source producers:** an uncharged `Box<[u64; 4]>` in `SourceControlSet`. The oracle and
+    tiny-frame go red, off by exactly 32 bytes.
+  - **Compiled session (store):** an uncharged `Vec<u64>` of 8 in `CompiledSession`. The store check
+    on the browser identity fixture goes red, 2,931 > 2,869. That fixture's store slack is 2 bytes;
+    EQ's is 1,026.
+  - **capi-owned protocol state:** an uncharged `Box<[u64; 4]>` in `ReplayCache`. The oracle and
+    tiny-frame go red, left 256,788 against right 256,756: the struct grew 16 bytes, which is
+    charged, and the 32-byte heap buffer is not.
+- **`shrink_to_fit` runs off the render path.** `write_canonical` has one production caller,
+  `compile_session`, reached from `SessionStore::new` and apply and from host-core's compile, all
+  control-plane. Every other `canonical_session_json` call is `#[cfg(test)]`. The render-path
+  checks pass: the egress no-allocation test, and `check-realtime-policy.sh` with its tests.
+- **The capi row moves only by the removed double charge.** The drop equals each fixture's canonical
+  length: EQ −16,712, soft-clip 160,893 → 142,440 (−18,453) and identity 133,559 → 131,640 (−1,919).
+  Tiny-frame drops 16,712, and the double-live capi requirement 36,897 (18,453 + 18,444). The catalog
+  fix changes the bytes allocated, not the charge, which is by length and was already 125,100.
+
+### HIGH 2 (#1059 conflict): closed
+
+- `cargo test --locked -p capi` compiles and passes on the merge without `lane/test-support`.
+- `lane` is a plain host-web dev-dependency: the workspace entry has no features. `cargo tree -e
+  features -i lane` shows only `default` for host-web's normal graph, native and wasm32, and for its
+  dev graph.
+- `check-scalar-oracle-absent.py --wasm` passes on the release module (2,649 symbols, none of the
+  17 scalar identifiers), and so do `--native libcapi.so` and `--self-test`.
+
+### The module change is explained
+
+- The merge builds `390fada9…` at 3,415,176 bytes. Main builds `a4a2383f…` at 3,415,107.
+- With only `crates/session/src/canonical.rs` set back to main's version, the merge rebuilds
+  `a4a2383f…` byte for byte. So the whole change, +69 bytes, comes from the shrink.
+- The catalog change cannot reach the module: host-web's wasm graph enables host-core with only
+  `default`, and `control_provider` sits behind `control-provider`. The dev-dependency moves no byte.
+- The browser rows, the PCM digests and `memoryBytes` are unchanged.
+
+### Gates on the merge (tree = `6ccbe7cf`)
+
+- fmt; clippy `--workspace --all-targets --all-features -D warnings`; `cargo check --workspace
+  --all-targets --all-features`.
+- `cargo test -p capi -p host-core -p host-web`: dev 443 passed and release 443 passed, 0 failed.
+  The 4 ignored are the unchanged release-budget and descriptive-timing tests.
+- AArch64 under qemu-user: `resource_lifecycle` 9 passed and `retained_ceilings` 1 passed. The
+  values equal the table: capi 256,740 of 282,432, graph 230,845 of 253,952, and double-live capi
+  167,414.
+- `check-browser-expected-resources.py --artifacts`, green with 32 self-test mutations;
+  `direct-oracle.mjs` in check mode; `check-web-audioworklet.sh`.
+- `check-capi-abi.sh` and its `--self-test`; `console-workload` in release (62 passed).
+- All 57 lint and routing policy commands, run with `python3 -B`, including the three self-tests
+  #1043 made conditional.
+- The x86 `cargo test --no-run` of the `run-aarch64-tests.sh debug` set (28 packages, the leg's
+  features, 218 executables) and of the release leg's `lane`/`math`.
+- **Gate 4, re-run on this tree.** capi `runtime/compile.rs`: 58 caught of 78, against 56 at base
+  `a509b681`, with none lost. The 36 host-core accounting mutants: 12 → 12, the identical set.
+  `build_parameter_catalog`'s 20 mutants, not in the base run: 9 caught.
