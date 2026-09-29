@@ -98,3 +98,86 @@ See `../VERIFY-DEAD-CODE.md`, finding F11. The recommendation is sound; the cont
 3. **It is a lane-width measurement hook, not target-specific code** in the sense of the owner's
    rule; the ruling rests on "modes production never needs are removed", which does apply.
 4. **Mobile scope: no effect.** The cfg is `wasm32`-only.
+
+## Attempt 1 evidence
+
+Terra, attempt 1, on `codex/1038-remove-eight-lane-wasm-build` (the root's branch name, not the
+body's `codex/<issue>-remove-wasm-w8`), cut from the batch `codex/batch-slim-4` at `fcfb76b9`.
+Implementation commit `281f07d6`. No timed benchmark was run.
+
+**Ruling recorded.** The wasm build has one width, `Simd4`. The eight-lane measurement cfg
+(`miso_wasm_simd8`) and its arms are removed. A future re-measurement re-adds a cfg in its own
+issue. `docs/rulings/wasm-simd8-null.md` has a supersession note: what was removed, why, what is
+lost (Amendment 2: #976's ad-hoc `--cfg` leg) and what is kept. `wasm-simd8-survey.md` has a
+two-line pointer note, in the form #1027's note there used.
+
+**Recount on `fcfb76b9`.**
+
+| Slice step | State on this base | Done here |
+|---|---|---|
+| 1. `lane` arm and module doc; `target-smoke` W8 assertion; `check-cfg` entry and comment | all present (#1032 kept `target-smoke`) | removed |
+| 2. `tools/wasm-console` W8 leg, validator branch, mutation cases | moot: #1039 deleted the tool and `test-wasm-console-benchmark.sh` | nothing |
+| 3. `--issue183` operator arms and preflight | moot: #1039 deleted both scripts | nothing |
+| 4. supersession note | the ruling already said #1039 retired the `--issue183` arm | note added |
+
+**Not in the list, but the same class.** `wasm-gates` accepted `--expect-backend simd8`. Only the
+wasm leg reads that argument, and only the measurement cfg could make a wasm guest report backend 2.
+It is removed, as #1062 removed `--expect-backend scalar`. `ExpectedBackend` keeps one variant, and
+`run-wasm-gates.sh` still passes `--expect-backend simd4`. The guest's `miso_gate_backend` mapping
+(`8 => 2`) is width-generic and stays; only its doc line changed. `wasm-gate-corpus` is untouched,
+so its three widths stay.
+
+**Lines.** Code: +21/-55 in 6 files: `Cargo.toml` +1/-4, `lane/src/backend.rs` +4/-24,
+`target-smoke` +4/-15, `wasm-gates` +6/-10, `wasm-gate-guest` +2/-2. Rulings: +31. No live
+source outside the rulings, specs and handoffs names `miso_wasm_simd8`. `lane` now picks a width
+only in `Backend::current()`. It still has ISA arms elsewhere, all older than this issue and out of
+its scope: `wide_impl.rs` max/min operand order, `fpenv.rs` control words, `softfma.rs` and
+`attest_host` on x86.
+
+**Gates.**
+
+| Gate | Result |
+|---|---|
+| 1. `cargo check --locked --workspace --all-targets --all-features` | exit 0 |
+| 1. `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | exit 0 |
+| 1. `RUSTFLAGS='-C target-feature=+simd128' cargo check --locked --target wasm32-unknown-unknown -p host-web -p lane` (plus `target-smoke`) | exit 0 |
+| 1. The same with `--cfg miso_wasm_simd8`, `-p lane -p target-smoke` | exit 0, **no warning** (below) |
+| 2. `gain_pan_profile digests`, release, base and change | 17 digest lines byte-identical (sha256 of the lines `dd0e7194…`); only the harness's `finished in` time differs |
+| 2. `bash scripts/run-wasm-gates.sh` (full: native, wasm `simd128`, V8 spill under Node 22.23.2) | ok. Both legs: 142 cases, 358 comparisons, 0 mismatches; wasm backend 1, native 2 |
+| 3. `build-web-audioworklet.sh --module-only`, base and change, one machine | byte-identical (`cmp`): `9aca423b3e36ce6ab1c6d0dd21123d6eab81111ad0b3f47bdf5c8e09c613b2ee`, 3,415,176 bytes. No `wasm-objdump` diff and no re-pin needed; `backend.rs` has no panic site. The committed pin `6c952a2c…` differs from both local builds, as audit section 9 predicts; CI's `artifact-identity` job is the authority |
+| 3. `check-scalar-oracle-absent.py --wasm` on the change module | ok |
+| 4. `test-wasm-console-benchmark.sh` | moot: #1039 deleted it |
+| 4. `check-ci-path-routing.py`, `test-ci-path-routing.py` | pass. No workflow edit, so the `verdict` table is unchanged. The router gives `route=full`, `self_tests=[]` for `fcfb76b9..HEAD` |
+| 5. `cargo test --locked --workspace --all-targets --all-features -- --list`, base and change | **empty diff**: 2,212 tests in 201 binaries on both sides. The W8 assertion was a wasm-only `cfg` arm inside `smoke_values_are_canonical`, which stays, so no test name goes |
+| `scripts/check-cross-targets.sh` | PASS: x86-64-v3; aarch64 iOS and Android product crates checked and linted; wasm `simd128`; armv7 and scalar wasm refused. The #1018 memset rows are expected failures |
+| clippy `-D warnings`, `-p target-smoke -p lane --all-targets`, on `aarch64-apple-ios` and `aarch64-linux-android` | exit 0 |
+| `cargo fmt --all -- --check`; `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` | pass |
+| `cargo test -p target-smoke`; release `cargo test -p lane -p math -p wasm-gates --features math/lane` | pass (111 passed, 16 ignored) |
+| Every lint, docs-gates and gate-self-tests script, Python under `python3 -B` (58 entries, including `check-lane-policy.sh` and `test-lane-policy.sh`), and both sub-v3 refusal probes | all pass |
+
+**Gate 1: a stale flag compiles silently, not with a warning.** The brief expected an
+unexpected-cfg warning. `unexpected_cfgs` fires on a `cfg` a source condition names. Since no
+source names `miso_wasm_simd8` any more, rustc has nothing to check, and a `--cfg` on the command
+line alone raises nothing. Full output of the command:
+
+```text
+    Checking bytemuck v1.25.2
+    Checking engine v0.1.0 (…/crates/engine)
+    Checking wide v1.6.1
+    Checking lane v0.1.0 (…/crates/lane)
+    Checking target-smoke v0.1.0 (…/crates/target-smoke)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.39s
+```
+
+It still selects `Simd4`, by two measurements:
+
+1. The release `wasm-gate-guest` built with `--cfg miso_wasm_simd8` is byte-identical to the one
+   built without it (`5826c600…`).
+2. Under `wasm_gates <guest> --expect-backend simd4`, it reports `"backend":1` with 358
+   comparisons and 0 mismatches. `--expect-backend simd8` now exits 2 with `unknown backend
+   'simd8'`.
+
+**Pre-existing, not changed here.** Clippy on `wasm32` + `simd128` over `-p lane --all-targets`
+fails with 5 errors in `crates/lane/tests/fp_env.rs` (`let_unit_value`, `unit_cmp`). The failure
+is identical on `fcfb76b9`. CI does not lint `lane`'s tests for wasm; the `lane` lib and
+`target-smoke --all-targets` are clean there. That belongs in a small follow-up, not in this issue.
