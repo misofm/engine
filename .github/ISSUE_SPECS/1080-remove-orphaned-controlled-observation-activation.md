@@ -275,3 +275,172 @@ was the constant 0 at preparation.
 | console digests | all 17 rows identical to `fa48dbbb` |
 | `check-cross-targets.sh`, wasm `simd128` host-web `--all-targets`, `check-realtime-policy.sh` | pass |
 | `cargo test --workspace --all-features -- --list` | 2,045 → 2,044, the removed restart test |
+
+## Sol verdict, attempt 1
+
+**PASS.** Sol, 2026-09-29. Verified on a scratch merge of `a09cf0ee` into the batch-6 head
+`codex/batch-slim-6` at `56900df4` (owner decision 11). Rust 1.97.1, Node 22.23.2.
+
+### The merge
+
+It is clean: `ort`, no textual conflict. Batch 6 adds only the ruling and #882's rescoped spec.
+- The router gives `route=full` and `self_tests=[]` over `56900df4..merge`.
+- Base module: 3,299,125 B, `303a0f3f…`. Merge: 3,254,230 B, `885aa117…`. Both match the
+  branch's figures.
+- The six other delivery files are byte-identical, including the ABI layout and the parameter
+  metadata. Both modules declare `initial=18`, and their 117 exports have identical signatures.
+
+### Checks
+
+1. **Render safety improved, and nothing regressed.**
+   - I rebuilt the direct-call closure of `<GraphExecutor as PreparedPlanExecutor>::render` from
+     both disassemblies, using the gate's own `parse`/`closure`/`FORBIDDEN`.
+     - Base: 59 functions, 333 traps. Five members are `FORBIDDEN`: `__rust_dealloc`,
+       `__rdl_dealloc`, and dlmalloc `free`, `unlink_chunk` and `insert_large_chunk`. All five
+       are reached through `apply_candidate`.
+     - Merge: 50 functions, 320 traps, and no `FORBIDDEN` member.
+     - The merge loses nine members: `apply_candidate`, the five above, `observe_one`, and the
+       now-inlined `write_resident_lane` and `invalidate_observers_after_failure`. It gains none.
+   - `Runtime::begin_observation_block` no longer exists.
+     - Render goes from the host-plane shape check straight to the source work, then calls
+       `observe_unit` for every active unit.
+     - These functions are textually identical to base: `observe_unit`, `observe`,
+       `observe_output`, `observe_output_one`, `write_resident_lane`, `execute`, `unit_inert` and
+       `complete_pending`.
+     - The two `invalidate_observers` functions lose only branches that needed activation state,
+       which no production bind created.
+     - The builtins meter's `emit` loses only the generation field. `observe_input`,
+       `observe_input_banked` and `reset` are identical to base.
+   - Gates, all green:
+     - `check-web-audioworklet.sh`, with and without metadata regeneration: render 8/5,
+       `meter_poll` 9, `command_submit` 36, 15 kernels, `f32x4_arith` 14,007.
+     - `check-realtime-policy.sh` and its mutation tests: 57 → 54 regions, all three inside the
+       deleted file.
+     - audit capi, delay, compressor, parametric-eq and gate-expander: 0 violations each.
+     - The builtins, builtins-graph and graph 1,000,000-block traces.
+     - The protocol allocation audit.
+     - The realtime, builtins and builtins-graph probe mutations.
+     - The 1,000,000-block realtime syscall trace.
+     - The effect-contract 1,000,000-block audit.
+2. **The ordinary path behaves as before.**
+   - *Differential.* I wrote a new lockstep harness, preloaded into Node, that pairs every
+     instantiation of the base module with the merge module.
+     - Each call runs on both modules. Before the call, the input staging (options, document,
+       source, command, selection, spectrum, response, EQ and companion regions) is copied from
+       base to merge. After the call, every return value and every staging region is compared.
+       Pointer returns are compared only as zero or nonzero.
+     - The harness caught a one-bit mutant: the low bit of the meter's `sample_peak` flipped,
+       reported in the meter frame.
+     - Inputs: the SDK's 20 eval files (284/284 pass under the harness), plus a seeded driver.
+       The driver ran 8 seeds × 50 scenarios.
+       - 304 SDK scenarios, 222 booted and 82 seeded refusals: random 1–64-track sessions with
+         effects, buses and taps; console words; budgets; spectrum queries, collections and hops;
+         reboots; lanes; meters; observations; spectrum and track-response reads.
+       - 96 raw-ABI scenarios: every export with misuse arguments, handle 0, stale and
+         double-dispose calls, and the Worker-side stream-analysis import.
+   - *Result.*
+     - 2,271,689 calls; 31,692,389 region and 1,568,308 resource-report comparisons; 1,062
+       successful boots.
+     - All 116 exports were called and all reached `ok`.
+     - **0 mismatches and 0 one-sided traps.**
+     - Allowed differences: 464,648 address-only pointers, and linear-memory size in 71,055
+       records. The peak is equal, at 25,362,432 B.
+   - *Every resource row that moved:*
+     - The three graph rows are −200 B in all 1,568,308 reports.
+       - This is base's per-graph `observation_runtime_state_bytes`: the inline activation owner
+         state, `size_of::<GraphExecutor>() − size_of::<GraphExecutorWithoutObservationActivation>()`,
+         which base charged to every graph.
+       - The delta is constant across 1–64 tracks, so it is that constant and no per-op term. It
+         is −256 B native (`direct-route`).
+     - `bridgeMetadataBytes` and `bridgeRetainedBytes` are −8 B per track meter.
+       - host-web charges `meter_count × size_of::<Option<MeterSnapshot>>()`.
+     - `builtinRetainedBytes` is −80 B per meter, in all 880,621 metered reports.
+       - That is the meter SPSC's 8 + 1 slots × −8, plus `MeterAccumulator`'s −8.
+       - I confirmed it at 1, 5 and 17 tracks: bridge −8/−40/−136, builtin −80/−400/−1,360.
+     - 18 budget diagnostics differ only in the byte count, by −200 − 8·meters − 24·spectrum
+       targets. The −24 is the spectrum observer's −8 plus its two-slot record queue's −16.
+     - No admission flipped.
+   - *`MeterSnapshot` is not an ABI type.*
+     - It is not in `ABI_LAYOUT`, `sdk/assets` or `sdk/src/generated/abi.ts`, all unchanged.
+     - The meter frame publishes only each lane's `sample_peak`.
+     - `check-sdk-generated.sh` passes against the merge's artifacts. No published layout
+       changed, and nothing breaks for the app.
+   - *Behaviour gates.*
+     - The 17 console digests are identical on base and merge.
+     - Browsers, CI mode (`--check-matrix --self-test-mutations`): Chromium 151.0.7922.34,
+       Firefox 153.0 and WebKit 26.5 pass all qualification gates.
+     - SDK headless on the merge: 284/284.
+3. **Nothing live was deleted.**
+   - No removed identifier appears in code under crates, hosts, the SDK, tools, scripts or
+     tests. The remaining hits are historical text in specs, `docs/` and
+     `crates/graph/tests/MUTATIONS.md`.
+   - The deletion itself compiles everywhere. That is stronger than the crate-private proof:
+     - the workspace, `--all-targets --all-features` and default;
+     - host-web `--all-targets --all-features` on wasm32 `simd128`, plus its lib clippy;
+     - `check-cross-targets.sh` (aarch64 iOS and Android check and clippy; #1018 memset rows
+       as expected);
+     - the x86 `--no-run` of both AArch64 legs.
+   - `check-capi-abi.sh` and its self-test pass, with the frozen symbol set unchanged.
+   - host-core's production callers passed `None` for `maximum_pops`, the parameter; only tests
+     passed `Some`. `SpectrumCapturedRecord::observation_generation` was read only as `let _`.
+4. **Resource pins.**
+   - `check-browser-expected-resources.py --artifacts` passes, and `--self-test` is green at
+     every ceiling with 32 red mutations.
+     - Only the graph rows moved: 3,931, 32,202 and 32,202.
+     - The bridge rows (1,146,179 and 1,166,688) and `builtinRetainedBytes` (1,817) are
+       unchanged, because the fixture has no meters.
+   - capi `resource_lifecycle` (#1060) passes 9/9 in release, including
+     `reference_session_retained_rows_stay_within_their_budgets`. Every row only fell.
+5. **Gates on the merge**, all green:
+   - fmt;
+   - `check` (all features, and default) and clippy `-D warnings`, workspace `--all-targets`;
+   - `doc -D warnings`;
+   - graph, builtins, builtins-compiler, host-core, host-web, capi and graph-compiler tests,
+     dev and release, all features;
+   - `test-debug-a` and `test-debug-b`;
+   - audit, bench and console-workload release tests;
+   - lane, math and wasm-gates release tests;
+   - `audit-native`'s steps, including graph determinism 100/100 and the builtins and console
+     fixtures;
+   - wasm-guests' protocol parity and `run-wasm-gates.sh --without-v8-spill --without-native`;
+   - the unwind release check;
+   - `test-web-audioworklet.sh`, the V8 spill gate and its self-test, and the identity self-test;
+   - `check-scalar-oracle-absent.py`, `--wasm` and `--native`;
+   - SDK generated, deletions, types, headless and `sdk-package.sh check`;
+   - every hermetic route, docs-gates, lint, release-shape and gate-self-tests step: 36/36,
+     Python under `python3 -B`, stdin closed.
+
+   Test list: 2,071 → 2,044 (−28, +1), matching the addendum.
+
+### Findings, by severity
+
+No defect.
+
+1. **Low: the evidence understates which rows move.**
+   - The differential and "Why the ordinary path is unchanged" predate `5ec25dad`. They say only
+     the graph rows moved, and the addendum calls the browser rows unchanged. That is true only
+     of the meterless qualification fixture.
+   - In metered sessions:
+     - the bridge rows drop 8 B per meter;
+     - `builtinRetainedBytes` drops 80 B per meter;
+     - spectrum admission projections drop 24 B per target.
+   - Every one of these comes from a removed field. The record should say so.
+2. **Low: the ruling is thinner than the addendum claims.** Decision 11 in
+   `engine-footprint-2026-09-29.md` records removing the activation machinery. It does not
+   mention the builtins meter's `restart_observation`/`observation_generation`, which the addendum
+   attributes to it. The removal is within scope, because the meter hook was the only caller.
+   One line in the ruling would close the gap.
+3. **Info: one ordinary test arm was dropped.**
+   - The spec says "The ordinary arms of mixed tests stay", but
+     `rt9_mixed_permanent_controlled_alias_dispatch_order_and_audio_match` went whole. With it
+     went its permanent arm's fixed order `[1, 0, 2, 3, 4]` for mixed direct and alias rows in a
+     bank.
+   - The ordinary binding order is still covered by
+     `resident_meter_dispatch_preserves_binding_order_lazy_fallback_and_accepted_errors` and by
+     graph-compiler's stable-handle-order tests.
+4. **Info: stale historical references.**
+   - `crates/graph/tests/MUTATIONS.md` rows 916-13, 936-1b and 936-5a name removed items.
+   - capi `resource_lifecycle`'s baseline table comment (graph metadata 56,068) is now 256 B
+     high. Its budgets are ceilings, so they still pass.
+5. **Info: budget thresholds move.** They move by exactly the removed bytes, which is
+   accounting only. The differential saw no admission flip.
