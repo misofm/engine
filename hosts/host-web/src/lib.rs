@@ -67,12 +67,15 @@ pub const MAXIMUM_DOCUMENT_BYTES: u32 = 1 << 20;
 ///
 /// Issue #338 re-measured the then-pinned `jstrict 0.14.0` JSON frontend plus typed model and compilation
 /// over the minimal document, dense one-, 64-, and 192-track documents, and the exact 1 MiB
-/// admitted ceiling. The largest observed ratio was 14.738 bytes per input byte; 17 leaves 15.3%
-/// headroom. Boot checks
+/// admitted ceiling. The largest observed ratio was 14.738 bytes per input byte; 17 left 15.3%
+/// headroom. Issue #1093 re-measured it after decision 12's required root `console` grew the
+/// minimal document from 447 to 511 bytes and its parse, model and compile peak from 6,780 to
+/// 8,944 bytes: 17.503 bytes per input byte, now the largest ratio (the dense documents stay
+/// below 13.1). 20 leaves 14.3% headroom. Boot checks
 /// `document_bytes * PARSE_TRANSIENT_MULTIPLIER` against the effective budget before UTF-8 decode
 /// or parser allocation, and the peak-transient test keeps every phase visible so frontend growth
 /// cannot silently outrun this projection.
-pub const PARSE_TRANSIENT_MULTIPLIER: u64 = 17;
+pub const PARSE_TRANSIENT_MULTIPLIER: u64 = 20;
 
 /// Default host memory ceiling used only when the embedding passes zero.
 ///

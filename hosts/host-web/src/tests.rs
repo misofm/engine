@@ -287,7 +287,7 @@ fn frozen_layouts_and_values_are_exact() {
     assert_eq!(size_of::<WebStatus>(), 80);
     assert_eq!(size_of::<WebResourceReport>(), 224);
     assert_eq!(MAXIMUM_DOCUMENT_BYTES, 1 << 20);
-    assert_eq!(PARSE_TRANSIENT_MULTIPLIER, 17);
+    assert_eq!(PARSE_TRANSIENT_MULTIPLIER, 20);
     assert_eq!(DEFAULT_MAXIMUM_MEMORY_BYTES, 512 << 20);
     assert_eq!(DIAGNOSTIC_BYTES, 1 << 14);
     assert_eq!(
