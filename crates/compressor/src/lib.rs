@@ -1299,7 +1299,7 @@ mod witness_tests {
     }
 
     /// Moves one field to a value with other bits.
-    fn nudge(value: &mut f32, draw: &mut Draw) {
+    fn perturb(value: &mut f32, draw: &mut Draw) {
         *value = if draw.chance(1, 2) {
             value.next_up()
         } else {
@@ -1338,7 +1338,7 @@ mod witness_tests {
         let field = draw.below(4);
         let ramp = match group {
             0 => {
-                nudge(&mut right.words[draw.below(COEF_COUNT)][moved], &mut draw);
+                perturb(&mut right.words[draw.below(COEF_COUNT)][moved], &mut draw);
                 None
             }
             1 => Some(&mut right.ramps[draw.below(RAMP_COUNT)][moved]),
@@ -1346,9 +1346,9 @@ mod witness_tests {
         };
         if let Some(ramp) = ramp {
             match field {
-                0 => nudge(&mut ramp.current, &mut draw),
-                1 => nudge(&mut ramp.target, &mut draw),
-                2 => nudge(&mut ramp.step, &mut draw),
+                0 => perturb(&mut ramp.current, &mut draw),
+                1 => perturb(&mut ramp.target, &mut draw),
+                2 => perturb(&mut ramp.step, &mut draw),
                 _ => ramp.remaining += 1,
             }
         }

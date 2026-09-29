@@ -105,6 +105,10 @@ pub struct EffectDifferential<'a> {
     pub craft: Option<Craft>,
     /// The known defects this run narrows around; empty for the full-strength gate.
     pub known: &'a [Known],
+    /// Whether the effect banks at the width this build executes (every launch effect but the
+    /// delay, which renders per node everywhere). A bank that stops binding natively is then red
+    /// rather than a quiet fall back to scalar instances.
+    pub banks_natively: bool,
 }
 
 /// What the differential reached. A test asserts the parts it relies on, so a generator that
@@ -117,6 +121,10 @@ pub struct DifferentialCoverage {
     pub audited: bool,
     /// Banks bound, at four and at eight lanes.
     pub banks: [u64; 2],
+    /// Banks bound at the width this build executes (`lane::Backend::current`).
+    pub native_banks: u64,
+    /// Whether the effect under test is expected to bank natively.
+    pub banks_natively: bool,
     /// Homogeneous cohorts the factory declined, at four and at eight lanes.
     pub declined: [u64; 2],
     /// Cohorts with a member `prepare` refused, and whose bind refused with the same code.
@@ -171,6 +179,8 @@ impl DifferentialCoverage {
         self.collapsed_blocks += other.collapsed_blocks;
         self.disengages += other.disengages;
         self.mono_capable |= other.mono_capable;
+        self.native_banks += other.native_banks;
+        self.banks_natively |= other.banks_natively;
         self.spans += other.spans;
         self.restores += other.restores;
         self.refused_restores += other.refused_restores;
@@ -193,6 +203,7 @@ pub fn run_effect_differential(spec: &EffectDifferential<'_>) -> DifferentialCov
     let audited = allocation_audit_is_real();
     let mut total = DifferentialCoverage {
         audited,
+        banks_natively: spec.banks_natively,
         ..DifferentialCoverage::default()
     };
     run_seeds(spec.test, spec.replay, spec.seeds, |seed| {
@@ -700,6 +711,9 @@ fn run_width(
         })
         .collect();
     coverage.banks[index_of(width)] += 1;
+    if backend == Backend::current() {
+        coverage.native_banks += 1;
+    }
     let metadata = scalars[0].metadata();
     assert_eq!(bank.metadata().width, width, "the bank's width");
     assert_eq!(
@@ -1714,6 +1728,10 @@ pub fn assert_reached(coverage: &DifferentialCoverage) {
         "neither a bank nor a scalar twin was compared: {coverage:?}"
     );
     assert!(
+        !coverage.banks_natively || coverage.native_banks > 0,
+        "the effect bound no bank at the width this build executes: {coverage:?}"
+    );
+    assert!(
         coverage.blocks > 0 && coverage.chunked_blocks > 0 && coverage.bounded_blocks > 0,
         "blocks were not compared whole, chunked and bounded: {coverage:?}"
     );
@@ -1738,7 +1756,7 @@ pub fn assert_reached(coverage: &DifferentialCoverage) {
 #[macro_export]
 macro_rules! randomized_effect_test {
     ($name:ident, $factory:expr, seeds: $seeds:expr, blocks: $blocks:expr, craft: $craft:expr,
-     known: $known:expr $(,)?) => {
+     known: $known:expr, banks_natively: $banks:expr $(,)?) => {
         #[test]
         fn $name() {
             ::bench_support::alloc::assert_installed();
@@ -1756,6 +1774,7 @@ macro_rules! randomized_effect_test {
                 blocks: $blocks,
                 craft: $craft,
                 known: $known,
+                banks_natively: $banks,
             });
             println!("{coverage:#?}");
             $crate::assert_reached(&coverage);

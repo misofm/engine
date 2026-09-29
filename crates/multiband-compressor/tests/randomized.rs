@@ -22,6 +22,7 @@ conformance::randomized_effect_test!(
     blocks: 24,
     craft: None,
     known: &[conformance::Known::RampCutsMoveBits],
+    banks_natively: true,
 );
 
 /// The same differential without the narrowing: red until the known defect's issue lands.
@@ -39,6 +40,7 @@ fn the_bank_renders_its_scalar_instances_including_the_known_defect() {
         blocks: 24,
         craft: None,
         known: &[],
+        banks_natively: true,
     });
     conformance::assert_reached(&coverage);
 }
