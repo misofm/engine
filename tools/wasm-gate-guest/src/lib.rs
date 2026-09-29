@@ -72,8 +72,8 @@ pub extern "C" fn miso_gate_widths() -> u32 {
     corpus::WIDTHS as u32
 }
 
-/// The production backend this module was compiled for: `1` `Simd4`, `2` `Simd8` (`0` is left
-/// for the scalar backend, which no target selects since #1062).
+/// The production backend this module was compiled for: `1` `Simd4`, the one wasm width (`2` is
+/// `Simd8` and `0` the scalar backend, which no wasm build selects since #1038 and #1062).
 ///
 /// The host asserts this matches what it asked for, so a guest built for another width cannot
 /// silently pass as the `simd128` one.
