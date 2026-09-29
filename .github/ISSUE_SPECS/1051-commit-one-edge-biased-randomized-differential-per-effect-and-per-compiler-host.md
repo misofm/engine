@@ -123,3 +123,271 @@ See [`../VERIFY-TEST-VALUE.md`](../VERIFY-TEST-VALUE.md). **These amendments sup
    mutants (bank eligibility). Add it to slice 5's gate.
 4. **Gate 2.** Baseline the test set unmutated with the same environment first (F4). At opt-level 1
    two `effect-compiler` tests fail without any mutant; they "catch" every mutant otherwise.
+
+## Attempt 1 evidence
+
+Terra, 2026-09-29. Branch `codex/1051-randomized-differentials` from `a509b681` (the local batch
+`codex/batch-slim-3`). No product code changed.
+
+### What landed
+
+- **One seed discipline and one edge-biased generator**, `dsp_reference::randomized`: a SplitMix64
+  `Draw`, input profiles (clean, hostile, silence, signed zeros, subnormal, tiny, exact, loud),
+  the hostile word set (both zeros, `from_bits(1..=3)`, subnormals, the flush edge, infinities,
+  quiet and signalling NaN payloads, `+-MAX`, the words either side of the D7 bound), domain-edge
+  parameter draws, random block lengths including one frame and the full quantum, and
+  `run_seeds`, which prints the failing seed and the one command that replays it.
+  `MISO_ENGINE_RANDOMIZED_SEED=<n>` replays one seed; `MISO_ENGINE_RANDOMIZED_SCALE=<k>`
+  multiplies every per-PR seed set (nightly: 100).
+- **One contract-level bank differential for every launch effect**,
+  `conformance::run_effect_differential`, instantiated by `tests/randomized.rs` in compressor,
+  delay, gate-expander, multiband-compressor, parametric-eq, soft-clip and transient-shaper (the
+  limiter's was built, measured and dropped; see gate 2). Only the shipped contract calls, at every width the build binds. Oracles:
+  bank vs scalar (bits and reports), chunked vs whole (scalar arm), collapsed
+  (`process_bank_mono`) vs forced dual, with the witness modelled from `ChannelSymmetryWitness`,
+  restored vs restored (self, cross-lane, hostile-word and effect-crafted payloads, accepted or
+  refused alike), the snapshot's round trip, and the three-outcome bind rule. Invariants: the D7
+  block bound on every unbypassed output, no allocation, lock or syscall in `process`, and on
+  mono scenarios the witness must hold (`witness: true` for compressor, delay and EQ).
+  Every scenario takes one planned reset, and one block in six is silence. Delay does not bank,
+  so it runs the scalar-twin mode.
+- **Stage differentials**: host-core (random consoles through host-core's own prepare entry
+  points, armed vs forced-dual vs serialized lowering, with random live records; and response
+  queries against the grid law across paths), builtins (input, fader and matrix banks at four and
+  eight lanes vs one scalar section per track, with forced-dual blocks and random retargets),
+  source (random ring schedules vs an independent model written from the documented rules),
+  parametric-eq in-crate `randomized_restores` (stationary vs full cascade across random
+  restores, including subnormal and signed-zero state), and compressor in-crate `witness_tests`
+  (amendment 2: exactly one of `current`, `target`, `step`, `remaining` differing mid-ramp).
+- The compressor's `randomized_width` and the limiter's
+  `randomized_scenarios_render_exactly_the_unmodified_kernel` join the seed discipline.
+- **A D7 report probe**, `conformance::d7_report_violations`, and one `#[ignore]`d reproducer per
+  effect that breaks it (#1073). Every known-defect reproducer names its issue (#1069-#1073).
+- `nightly.yml`: one step on the release link proof's own build, at 100x.
+
+**Scope deviation, for Sol.** The body authorises only the host-core slice; the brief asked for
+every slice in one attempt. The shared harness lives in `conformance` and `dsp-reference`, so eight
+effect crates do not each copy it. Beyond new files: `compressor/src/kernel.rs` and
+`true-peak-limiter/src/lib.rs` (seed plumbing in existing tests), `compressor/src/lib.rs` (an
+appended `#[cfg(test)]` module), `parametric-eq/src/lib.rs` (one `mod` line), `source/Cargo.toml`
+(a `dsp-reference` dev-dependency), and `docs/ENGINE_ENV_VOCABULARY.md` (the two variables).
+
+**NaN as one class (#1065).** `same_word` treats every NaN as one value in: the effect
+differential's output comparisons, the builtins differential's outputs, and host-core's rendered
+outputs. Everything else is compared by bits, signed zeros included. Payloads and the source ring
+are compared by raw bits: they carry words, they do not compute them.
+
+### Gate 1: the historical bugs, re-injected at HEAD
+
+`docs/handoffs/test-value-2026-09-28/tools/revert.py` into a copy of HEAD, the per-PR seeds:
+
+| Bug | Differential | Result | Reverted |
+|---|---|---|---|
+| #970 (`arm_mono_collapse` without `gathers_track_input`) | host-core `randomized_consoles_render_the_same_bits_armed_dual_and_serialized` | red at seed 3 of 12 (armed and forced-dual consoles part at block 2) | green |
+| #1015 (the pre-#1015 stationary predicate) | parametric-eq `randomized_restores::the_stationary_cascade_renders_the_full_cascade_after_random_restores` | red at seed 1 of 8 (`0x80000000` where the full cascade writes `0x00000000`) | green |
+| compressor `designed_channel_symmetry` (amendment 2) | compressor `witness_tests` + `tests/randomized.rs` | all six `\|\| -> &&` at `lib.rs:704-706` and `:714-716` red; 18/18 of the function's survivors red | -- |
+| gate-expander `bind_homogeneous_bank` (amendment 3) | gate-expander `tests/randomized.rs` | at `a509b681` three bind mutants survive the crate's suite, not eight: `1041` and `1061` go red; `1075` is in the `Four` arm, which x86 never binds (expected red on the AArch64 leg's native `Simd4` bind, not run here) | -- |
+
+### Gate 2: mutation yield
+
+cargo-mutants 27.1.0, opt-level 1 (the audit's environment). Every run began with an unmutated
+baseline that passed (F4); the cross-crate test set was baselined separately, unmutated, first.
+The middle column counts mutants that survive the crate's own CI suite at `a509b681` and that a
+new test turns red. The last column is what is left of them after a second pass against the other
+CI suites that render the crate: effect-compiler, graph-compiler, host-core, host-web and capi
+(`test-debug-a`'s features). Only that column is "caught by nothing else".
+
+| Effect or stage | Mutants; survivors of the crate's suite | Caught by the new tests, missed by the crate's suite | Still unique across CI |
+|---|---|---|---|
+| host-core (the spec's `--shard 0/4 --sharding round-robin`) | 359; 63 survive | **9 (14.3 %, gate >= 10 %)**, all in `response.rs` (`apply_overrides`, `index_of_parameter`, `generate_response_grid` x4, `query_response_snapshot_into` x3), by the response differential; the console differential catches #970 | **9**: host-web and capi miss all nine |
+| compressor | 93 survive (the #1049 baseline) | **26**: `designed_channel_symmetry` x18, `channel_symmetry` to true and to false, `lane_channel_symmetry` to true and to false, and four `render` mutants on the silent path (`510:43`, `536:29`, `537:21`, `537:37`), which the audit called output-equivalent and are not | **11**: the six amendment-2 `\|\| -> &&` (`704-706`, `714-716`), the four silent-path `render` mutants, `lane_channel_symmetry -> true` |
+| gate-expander | 229; 41 survive | **10**: `apply_automation` validity x8 (`544-551`), `bind_homogeneous_bank` `1041` and `1061`. `commit_lane` `796` (a restore that does not extend the ramp window) is caught at nightly scale only (seed 128) | **10** |
+| transient-shaper | 169; 19 survive | **7**: `apply_automation` validity (`724-734`) | **7** |
+| delay | 74 on the contract surface; 28 survive | **13**: `bind_homogeneous_bank` `598`, `designed_channel_symmetry` x11, `channel_symmetry` to false | **1**: `bind_homogeneous_bank` `598` (the witness mutants are caught elsewhere) |
+| soft-clip | 274; 28 survive | **2**: `SoftClipState::field_mut` arm 1, the bank's `reset` emptied | **2** |
+| true-peak-limiter | 91 on the contract surface; the new test catches 65 | **7** of those survive the crate's suite: `designed_channel_symmetry` x5, `channel_symmetry` to false, `lane_channel_symmetry` to false | **0**: all seven caught elsewhere; the differential is dropped (below) |
+| parametric-eq | 149 on the contract surface; the new tests catch 67 | **9** of those survive the crate's suite: `designed_channel_symmetry` x7, `channel_symmetry` to false, `lane_channel_symmetry` to false; and #1015 | **0** mutants (all nine caught elsewhere); #1015 and #1070 |
+| multiband-compressor | 49 on the contract surface; 8 survive | **none of the 8** per PR (see below). A planted mutant, `plan_segment` cutting segments on lane 0's ramps only, survives every one of 49 CI test binaries in multiband, effect-compiler, graph-compiler, host-core, conformance, rack and graph; the differential is red at seed 1 | **1** planted (`plan_segment`), and #1069 |
+| builtins | 137 on the bank surface; the new test catches 46 | **none**: the existing suite catches all 46. It catches `MUTATIONS.md` M2-B1 (seed 0), as the existing `chain_shape` test does | **0**; #1072 |
+| source | 176; 25 survive | **3**: `SourceGeneration::is_valid` to true, `validate_submission_metadata` `delete !` (`943`), `PcmSourceConsumer::end_reached` to false | **2**: `is_valid`, `end_reached` (host-core's tests catch `943`) |
+| graph and rack collapse, by host-core's console differential | graph: 28 collapse mutants, of which the console test catches 18; rack: 78, of which it catches 19 | **none**: the existing rack, graph, graph-compiler and host-core suites catch all 37 | **0** |
+
+**What caught nothing new, and why each stays.**
+
+- **builtins** catches no unique mutant. It stays because it found #1072: a real
+  bank-against-scalar break that the fixed-input gate (`stage.rs`) cannot see, because that gate
+  never feeds a signed zero.
+- **multiband** catches none of the eight recorded survivors per PR. The narrowing for #1069
+  forbids chunked blocks on automated scenarios, and chunking was how the first harness reached
+  `apply_automation` `1261` and `1262`. It stays because it found #1069, and because it
+  catches the planted `plan_segment` mutant that nothing else in CI catches. Once #1069 is
+  fixed, the narrowing goes and the strict twin becomes the gate.
+- **host-core's console differential** catches no host-core mutant, because host-core delegates
+  render to graph and rack. It stays for #970; the 37 graph and rack collapse mutants it catches
+  are all caught by existing suites too.
+- **parametric-eq's bank differential** has no unique mutant across CI. It stays because it
+  found #1070; `randomized_restores` catches #1015 (gate 1).
+- **Dropped: the true-peak limiter's bank differential.** Its seven catches are all caught by other
+  crates' suites, and it found no defect. Its file keeps the #1073 reproducer (commit `efe8fff1`).
+
+### Gate 3: budget
+
+Each new test was run alone with `--test-threads=1` on this shared box (load 18-27). Times are
+wall time inside the test binary.
+
+| CI job | Test | debug | release |
+|---|---|---|---|
+| `test-debug-b` | compressor `tests/randomized.rs` | 0.48 s | 0.03 s |
+| `test-debug-b` | compressor `witness_tests` | 0.02 s | 0.00 s |
+| `test-debug-b` | delay | 0.26 s | 0.03 s |
+| `test-debug-b` | gate-expander | 0.26 s | 0.01 s |
+| `test-debug-b` | multiband-compressor | 0.38 s | 0.01 s |
+| `test-debug-b` | parametric-eq `tests/randomized.rs` | 0.62 s | 0.02 s |
+| `test-debug-b` | parametric-eq `randomized_restores` | 1.09 s | 0.06 s |
+| `test-debug-b` | soft-clip | 0.61 s | 0.01 s |
+| `test-debug-b` | transient-shaper | 0.44 s | 0.03 s |
+| `test-debug-b` | builtins | 0.62 s | 0.01 s |
+| `test-debug-b` | dsp-reference `randomized::tests` | 0.01 s | 0.00 s |
+| `test-debug-a` | source | 0.08 s | 0.01 s |
+| `test-debug-a` | host-core consoles | 3.50 s | 0.15 s |
+| `test-debug-a` | host-core response queries | 0.21 s | 0.02 s |
+
+- **Per PR:** about 4.8 s of test time in `test-debug-b` and 3.8 s in `test-debug-a`, about
+  8.6 s in total (the limiter's 0.75 s went with its differential). All of them run again in
+  `aarch64-debug`, whose product crates include every one. Compile time for the eleven new test
+  binaries and the harness was not measured on a quiet box.
+- **Release:** no per-PR release job runs these crates, so nothing is added there.
+- **Largest single test:** host-core's console differential, at 3.5 s. No test comes near 10 s,
+  so no sweep moved to nightly beyond the 100x step.
+- **Unchanged per-PR shares:** the compressor's `randomized_width` and the limiter's randomized
+  scenarios keep theirs.
+- **Nightly:** the whole set at 100x comes to about 45 s of release test time (scaled from the
+  release column), plus the #966 probe at 6400 seeds, on the link proof's existing build.
+- **Flake check:** every new per-PR test ran three times at the per-PR seeds. Exit codes were
+  0 0 0 each time, and the printed coverage was byte-identical across the runs.
+- **Wider sweeps:** scale 10 in debug passes everywhere.
+
+### Gate 4: replayable
+
+A red seed prints the test, the seed, and the one command that replays it
+(`MISO_ENGINE_RANDOMIZED_SEED=<n> cargo test -p <crate> ...`). Every reproducer command below
+was run, and each fails at the seed it names.
+
+### Real defects
+
+These are not fixed here; root filed one issue each. Each reproducer carries
+`#[ignore = "#<issue>: ..."]`. The per-PR test narrows around the defect by a named
+`conformance::Known`, or for builtins by comparing the two zeros as one value on ramping blocks,
+and nowhere else.
+
+1. **#1069, multiband: where a ramp is cut moves a lane's bits.**
+   - Reproducer: `MISO_ENGINE_RANDOMIZED_SEED=1 cargo test -p multiband-compressor --test
+     randomized -- --ignored --exact the_bank_renders_its_scalar_instances_including_the_known_defect`.
+   - What goes wrong: in a four-lane bank, block 11, lane 0 left frame 54, the bank renders
+     `0x3f5e220a` where its scalar instance renders `0x3f5e24e0`. This follows a block-rate
+     retarget while another lane's ramp is in flight. The scalar instance also renders a
+     mid-ramp block differently whole and in two pieces.
+   - Cause: `Instance::plan_segment` ends a segment at any lane's ramp arrival and at every
+     block boundary, and refreshes coefficients per segment.
+   - Breaks: bank bit identity (AGENTS.md: banking never changes per-lane arithmetic) and
+     partition invariance (P1).
+2. **#1070, parametric EQ: bind declines before it validates its members.**
+   - Reproducer: `MISO_ENGINE_RANDOMIZED_SEED=0 cargo test -p parametric-eq --test randomized --
+     --ignored --exact the_bank_renders_its_scalar_instances_including_the_known_defect`.
+   - What goes wrong: at four lanes, a width this x86 build does not execute, and on a
+     heterogeneous member, `bind_homogeneous_bank` answers `Ok(None)` for a cohort whose member
+     `prepare` refuses (`effect.parameter.initial`).
+   - Breaks: validation order, the three-outcome rule on `NativeEffectFactory` (an invalid
+     member refuses first; an absent capability never hides a malformed member).
+3. **#1071, soft clip: a snapshot with subnormal words is refused on its own restore.**
+   - Reproducer: `MISO_ENGINE_RANDOMIZED_SEED=0 cargo test -p soft-clip --test randomized --
+     --ignored --exact the_bank_renders_its_scalar_instances_including_the_known_defect`.
+   - What goes wrong: in an eight-lane bank, block 9, lane 0 refuses its own snapshot. The
+     snapshot holds a legal in-domain subnormal parameter value in a ramp, or a subnormal input
+     sample in the history rows, and restore requires those words to be zero or normal.
+   - Breaks: the snapshot round trip (deterministic state restore) and the NaN/denormal contract
+     (a subnormal input is legal and renders, yet the restore refuses what the effect wrote).
+4. **#1072, builtins: the matrix bank renders a settled lane's `-0.0` as `+0.0`.**
+   - Reproducer: `MISO_ENGINE_RANDOMIZED_SEED=7 cargo test -p builtins --features
+     builtins/test-support --test randomized -- --ignored --exact
+     the_banks_render_their_scalar_sections_including_the_known_defect`.
+   - What goes wrong: at W4, block 9, lane 2 left frame 1, the banks render `0x00000000` where
+     the scalar strip renders `0x80000000`. While any lane's matrix ramps, the bank runs the ramp
+     arithmetic on every lane, and one times `-0.0` plus zero times x is `+0.0`.
+   - Breaks: bank bit identity, and a signed zero retained on a non-recursive path.
+5. **#1073, the D7 recovery's report breaks the contract in five effects.**
+   - Reproducer: `cargo test -p <crate> --test randomized -- --ignored --exact
+     the_d7_recovery_reports_one_block_on_the_failing_lane`, in gate-expander,
+     multiband-compressor, soft-clip, transient-shaper and true-peak-limiter. Fixed input, so no
+     seed: `conformance::d7_report_violations` poisons one lane with a NaN block at the defaults.
+   - Gate-expander counts 64 for one 64-frame block, the frames rather than the block.
+   - Multiband counts the frames on both channels.
+   - Soft clip counts the frames, on both channels, on every lane of the bank.
+   - Transient shaper and limiter zero the block and reset, but count nothing.
+   - Compressor, delay and EQ pass.
+   - Breaks: `docs/EFFECT_CONTRACT_V1.md` D7 ("increments a block counter"; the report "counts
+     blocks, never samples"). Gate-expander's own test at `lib.rs:1313` pins the frame count.
+   - Related, for an owner ruling rather than a defect: soft clip, multiband, transient shaper
+     and limiter zero and reset the whole bank when one lane fails. The contract says "per bank",
+     but AGENTS.md says a placement change must not move a rendered bit, and here a clean
+     neighbour's output depends on its placement. The differential therefore ends a scenario at
+     a D7 block and checks only the bound.
+
+Other findings, not defects:
+
+- Multiband's restore canonicalises a `-0.0` payload word. This is benign, so the round trip
+  compares zeros as one value.
+- An EQ mid-ramp restore refusal seen in an earlier revision of `randomized_restores` did not
+  reproduce. It came from that revision's retargets, which moved a ramp without its prepared
+  target. No restore was refused over 80 seeds, and the test's comment now says so.
+
+### Cross-target
+
+- **Width-agnostic.** The `wide` kernels and the builtins banks run both widths on every host.
+  Effect banks bind at the native width (x86 `Simd8`; multiband binds both), and
+  `banks_natively` makes a native bind required. On AArch64 the same tests bind `Simd4`. They were
+  not run on arm64 here; #1019 and #1065 are the risk.
+- **NaN as one class (#1065).** NaNs compare as one class in the effect differential's output
+  comparisons, in the builtins outputs, and in host-core's outputs.
+- **Raw bits.** Payload words and the source ring compare by raw bits: they carry words, they do
+  not compute them.
+- **AArch64 debug leg on x86.** `cargo test --no-run` over its product crates and features
+  resolves, with 1821 tests listed. `aarch64-known-defects.py judge-skips debug` passes, and the
+  silent-skip scan is clean.
+
+### Gates run
+
+- `cargo check --workspace --all-targets --all-features`; clippy `-D warnings` over the whole
+  workspace with all features; `cargo fmt --check`.
+- Affected crates' full suites, dev and release: dev 835 passed, 19 ignored, 0 failed over 148
+  test binaries (369 s wall at load about 50); release the same counts (65 s). They ran after the
+  D7 probe landed; each later commit (message text, comments, issue tags, the limiter drop) was
+  re-tested in its own crate.
+- Policy scripts:
+  - Every `scripts/check-*.sh` and `check-*.py` ran once this attempt, the Python ones with
+    `python3 -B`. `check-sdk-types.sh` needs `npm ci`, which is environment, not code.
+  - The source-scanning set ran again after the last change: workspace policy including #1052's
+    scrape lint, effect contract, conformance boundaries, realtime, host-core, builtins, graph,
+    rack, lane, env vocabulary, effect runtime, session, the audit leaks, unfused seal, research,
+    bench, step vocabulary, test-support CI, CI path routing, script reachability and release
+    shape.
+  - No new test reads source text.
+- Console digests: no product code changed, and `console-workload` passes in release.
+- Routing: `nightly.yml` changed, and `check-ci-path-routing.py` passes.
+
+### Lines added
+
+`git diff --numstat a509b681..HEAD` before this section: 24 files, 5,775 lines added and 11
+removed. Nearly all of it is test code:
+
+- **Shared harness**, about 2,450 lines: `conformance/src/randomized.rs` (2,053, including the D7
+  probe) and `dsp-reference/src/randomized.rs` (391), plus 6 lines of exports.
+- **Stage differentials**, about 2,735 lines: host-core 1,242, `parametric-eq/src/randomized_restores.rs` 508
+  (plus 2 lines of `mod`), source 493 (plus 3 lines of manifest and lock), builtins 487.
+- **Effect test files**, 389 lines: compressor 134, multiband 68, soft-clip 57, parametric-eq 48,
+  gate-expander 25, transient-shaper 25, delay 17, limiter 15.
+- **In-crate edits**, 181 added and 9 removed: compressor `witness_tests` 144, compressor
+  `kernel.rs` +16/-3, limiter `lib.rs` +21/-6.
+- **CI and docs**, 20 added and 2 removed: `nightly.yml` 16, `ENGINE_ENV_VOCABULARY.md` +4/-2.
+
+Plus this evidence section.
