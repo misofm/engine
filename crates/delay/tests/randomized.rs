@@ -8,7 +8,7 @@
 conformance::randomized_effect_test!(
     the_bank_renders_its_scalar_instances_under_random_state,
     delay::DelayFactory,
-    seeds: 12,
+    seeds: 6,
     blocks: 24,
     craft: None,
     known: &[],

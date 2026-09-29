@@ -443,21 +443,28 @@ fn run_scalar(
             coverage.witness_holds += 1;
         }
         let frames = draw.frames(quantum);
+        let silent = draw.chance(1, 6);
         let invalid = !shape.mono && draw.chance(1, 16);
         let chunk = (frames > 1 && !shape.hostile && !invalid && draw.chance(1, 2))
             .then(|| 1 + draw.below(frames - 1));
         for (lane, (oracle, twin)) in pairs.iter_mut().enumerate() {
             let profile = if terminal && lane == 0 {
                 Profile::Hostile
+            } else if silent {
+                Profile::Silence
             } else {
                 legal_profile(draw)
             };
-            let other = if shape.mono {
+            let other = if shape.mono || silent {
                 profile
             } else {
                 legal_profile(draw)
             };
-            let side_profile = legal_profile(draw);
+            let side_profile = if silent {
+                Profile::Silence
+            } else {
+                legal_profile(draw)
+            };
             let mut left: Vec<f32> = (0..frames).map(|_| draw.sample(profile)).collect();
             let mut right: Vec<f32> = if shape.mono {
                 left.clone()
@@ -858,18 +865,27 @@ fn run_width(
         let mut input_right = vec![0.0_f32; words];
         let mut side_left = vec![0.0_f32; words];
         let mut side_right = vec![0.0_f32; words];
+        // A sixth of the blocks are `+0.0` on every lane: the whole-bank silent fast paths
+        // (#163 phase 4) engage only then, and their claim is earned block by block.
+        let silent = draw.chance(1, 6);
         for lane in 0..lanes {
             let profile = if hostile_block == Some((block, lane)) {
                 Profile::Hostile
+            } else if silent {
+                Profile::Silence
             } else {
                 legal_profile(draw)
             };
-            let other = if shape.mono || draw.chance(2, 3) {
+            let other = if shape.mono || silent || draw.chance(2, 3) {
                 profile
             } else {
                 legal_profile(draw)
             };
-            let side = legal_profile(draw);
+            let side = if silent {
+                Profile::Silence
+            } else {
+                legal_profile(draw)
+            };
             for frame in 0..frames {
                 let word = frame * lanes + lane;
                 input_left[word] = draw.sample(profile);
