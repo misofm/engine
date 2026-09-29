@@ -3,7 +3,7 @@
 //! Two cases render a fixed input through the real prepared effect and yield one `u32` result word
 //! per output sample. Gate G5 (`tools/wasm-gates/tests/g5_native_corpus.rs`) compares each case
 //! against [`G5_DIGESTS`] natively, and `tools/wasm-gate-corpus` replays the identical cases under
-//! wasmtime, at the wasm scalar and simd128 backends, against these same pins. Together they are
+//! wasmtime, at the wasm simd128 backend, against these same pins. Together they are
 //! the cross-target half of decision D5 for this effect: the delay renders the same bits in a
 //! browser as on a native host.
 //!

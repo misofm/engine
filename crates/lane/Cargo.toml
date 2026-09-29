@@ -11,9 +11,9 @@ name = "lane"
 
 [features]
 # Issue #1059: `Backend::Scalar`, the whole-plan unbanked oracle vector banking is tested against,
-# exists only in builds that turn this on (and on the scalar-wasm CI exception; see
-# `src/backend.rs`). Only tests, and the `test-support` features that forward it, enable it, so no
-# shipped artifact can name the scalar backend.
+# exists only in builds that turn this on (see `src/backend.rs`). Only tests, and the
+# `test-support` features that forward it, enable it, so no shipped artifact can name the scalar
+# backend.
 test-support = []
 
 [dependencies]

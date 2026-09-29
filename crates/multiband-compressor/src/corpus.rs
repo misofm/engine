@@ -2,7 +2,7 @@
 //!
 //! Gate G5 (`tools/wasm-gates/tests/g5_native_corpus.rs`) hashes each case at every width and
 //! compares it against [`DIGESTS`] natively; `tools/wasm-gate-corpus` replays the identical cases
-//! under wasmtime, at the wasm scalar and `simd128` backends, against these same pins. Together
+//! under wasmtime, at the wasm `simd128` backend, against these same pins. Together
 //! that is the cross-target half of decision D5 for this effect: the crossover's recursive all-pass
 //! sections, the D7 flush of its six recursive words, the lane `log2`/`exp2` its detector and its
 //! makeup ride, the branching smoother and the detector link all produce the same bits in a browser

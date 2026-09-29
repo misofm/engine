@@ -9,7 +9,9 @@
 #
 # 32-bit targets are refused at compile time (#1041, owner ruling 2026-09-28: mobile ships 64-bit
 # only). The armv7-linux-androideabi row below is a refusal row: it passes only while `lane`
-# fails to compile for that target with its 64-bit-only message.
+# fails to compile for that target with its 64-bit-only message. wasm32 without `simd128` has the
+# same kind of row (#1062, decision 7 of the same ruling): its scalar rows are retired, and the
+# wasm rows run only the `simd128` build that ships.
 #
 # Replaces the cargo/wasm-objdump halves of scripts/check-parametric-eq-targets.sh,
 # scripts/check-builtins-targets.sh and scripts/check-effect-interchange-targets.sh with one script
@@ -121,39 +123,47 @@ printf '%s\n' "$product_list" >"$asm_out/products"
 "${known_defects[@]}" judge-memset "$asm_out/counts" "$asm_out/products" ||
     fail 'ios-asm-memset-pattern16 moved; see above'
 
-for mode in scalar simd; do
-    if [[ "$mode" == scalar ]]; then
-        feature=-simd128
-    else
-        feature=+simd128
-    fi
-    # Every distinct RUSTFLAGS variant gets its own target dir under the wasm triple's directory,
-    # so switching between scalar and simd128 never thrashes the other's fingerprints.
-    target_dir="$base_target_dir/wasm32-unknown-unknown/$mode"
-    flags="-C target-feature=$feature"
+# --- wasm32 without simd128 is refused (#1062) ----------------------------------------------------
+# Owner ruling 2026-09-28, decision 7: the scalar (non-`simd128`) wasm builds and CI legs are
+# retired now that #1017's AArch64 legs run, and `lane` refuses that build with the same 64-bit-only
+# guard, whose supported set names wasm32 only with `simd128`. Restoring the scalar-wasm exception
+# in crates/lane/src/lib.rs turns this row red.
+scalar_wasm_log="$base_target_dir/wasm32-unknown-unknown.scalar-refusal.log"
+if CARGO_TARGET_DIR="$base_target_dir/wasm32-unknown-unknown/scalar-refusal" \
+    RUSTFLAGS='-C target-feature=-simd128' \
+    cargo check --quiet --locked --target wasm32-unknown-unknown -p lane 2>"$scalar_wasm_log"; then
+    fail 'lane compiled for wasm32 without simd128: the scalar-wasm exception is back (#1062)'
+fi
+rg -qF 'lane supports 64-bit targets only' "$scalar_wasm_log" ||
+    fail "wasm32 without simd128 failed without lane's refusal message (#1062); see $scalar_wasm_log"
 
-    # parametric-eq: release `check` (issue #087).
-    CARGO_TARGET_DIR="$target_dir" RUSTFLAGS="$flags" \
-        cargo check --quiet --locked --release --target wasm32-unknown-unknown -p parametric-eq
+# --- wasm32 with simd128, the one shipped wasm build (W4-D1) -------------------------------------
+# Its own target dir under the wasm triple's directory, so the refusal row's RUSTFLAGS never
+# thrash these fingerprints.
+wasm_target_dir="$base_target_dir/wasm32-unknown-unknown/simd"
+wasm_flags='-C target-feature=+simd128'
 
-    # builtins + builtins-compiler: release `build` -- the original script links here, not just
-    # checks (issue #007).
-    CARGO_TARGET_DIR="$target_dir" RUSTFLAGS="$flags" \
-        cargo build --quiet --locked --release --target wasm32-unknown-unknown \
-        -p builtins -p builtins-compiler
+# parametric-eq: release `check` (issue #087).
+CARGO_TARGET_DIR="$wasm_target_dir" RUSTFLAGS="$wasm_flags" \
+    cargo check --quiet --locked --release --target wasm32-unknown-unknown -p parametric-eq
 
-    # effect-compiler: `check --all-targets`, debug (issue #081). Kept apart from the conformance
-    # row below (N1) so the evidence crate's feature/dependency edges never unify into a shipped
-    # crate's build -- what scripts/check-artifact-evidence-leak.sh exists to catch. Both
-    # invocations share $target_dir, so the split costs no extra fetch/compile work on an
-    # incremental rerun.
-    CARGO_TARGET_DIR="$target_dir" RUSTFLAGS="$flags" \
-        cargo check --quiet --locked --all-targets --target wasm32-unknown-unknown \
-        -p effect-compiler
-    # conformance: `check --all-targets`, debug -- evidence-only, no shipped package (N1).
-    CARGO_TARGET_DIR="$target_dir" RUSTFLAGS="$flags" \
-        cargo check --quiet --locked --all-targets --target wasm32-unknown-unknown \
-        -p conformance
-done
+# builtins + builtins-compiler: release `build` -- the original script links here, not just
+# checks (issue #007).
+CARGO_TARGET_DIR="$wasm_target_dir" RUSTFLAGS="$wasm_flags" \
+    cargo build --quiet --locked --release --target wasm32-unknown-unknown \
+    -p builtins -p builtins-compiler
 
-printf 'cross-target matrix: PASS (x86-64-v3; aarch64 iOS and Android product crates checked and linted (#1017), ios-asm-memset-pattern16 expected failures (#1018); wasm scalar/simd128; armv7 refused (#1041); parametric-eq, builtins, effect-compiler rows deduplicated)\n'
+# effect-compiler: `check --all-targets`, debug (issue #081). Kept apart from the conformance
+# row below (N1) so the evidence crate's feature/dependency edges never unify into a shipped
+# crate's build -- what scripts/check-artifact-evidence-leak.sh exists to catch. Both
+# invocations share $wasm_target_dir, so the split costs no extra fetch/compile work on an
+# incremental rerun.
+CARGO_TARGET_DIR="$wasm_target_dir" RUSTFLAGS="$wasm_flags" \
+    cargo check --quiet --locked --all-targets --target wasm32-unknown-unknown \
+    -p effect-compiler
+# conformance: `check --all-targets`, debug -- evidence-only, no shipped package (N1).
+CARGO_TARGET_DIR="$wasm_target_dir" RUSTFLAGS="$wasm_flags" \
+    cargo check --quiet --locked --all-targets --target wasm32-unknown-unknown \
+    -p conformance
+
+printf 'cross-target matrix: PASS (x86-64-v3; aarch64 iOS and Android product crates checked and linted (#1017), ios-asm-memset-pattern16 expected failures (#1018); wasm simd128; armv7 and scalar wasm refused (#1041, #1062); parametric-eq, builtins, effect-compiler rows deduplicated)\n'
