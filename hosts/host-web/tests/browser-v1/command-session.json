@@ -23,17 +23,7 @@
     }
   ],
   "console": {
-    "pre_insert": [
-      {
-        "slot": "eq",
-        "identity": {
-          "kind": "native",
-          "effect_id": "miso.parametric-eq"
-        },
-        "quality": "normal",
-        "link_mode": "dual_mono"
-      }
-    ],
+    "pre_insert": [],
     "post_insert": []
   },
   "tracks": [
@@ -58,40 +48,49 @@
           "delay_samples": 0
         }
       },
-      "console": [
-        {
-          "slot": "eq",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "linear",
-              "value": 2.0
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "hz",
-              "value": 1000.0
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "db",
-              "value": 0.0
-            }
-          ]
-        }
-      ],
+      "console": [],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "eq",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.parametric-eq"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "linear",
+                "value": 2.0
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "hz",
+                "value": 1000.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "db",
+                "value": 0.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": 0.0,

@@ -32,15 +32,6 @@
         },
         "quality": "normal",
         "link_mode": "dual_mono"
-      },
-      {
-        "slot": "comp",
-        "identity": {
-          "kind": "native",
-          "effect_id": "miso.compressor"
-        },
-        "quality": "normal",
-        "link_mode": "dual_mono"
       }
     ],
     "post_insert": []
@@ -121,58 +112,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -6.0
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 1.5
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 3.0
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 2.0
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 40.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 0.0
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -6.0
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 1.5
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 3.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 2.0
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 40.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 0.0
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -3.0,
@@ -261,58 +262,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -7.5
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 2.25
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 4.5
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 3.5
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 55.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 0.5
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -7.5
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 2.25
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 4.5
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 3.5
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 55.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 0.5
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -2.75,
@@ -401,58 +412,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -9.0
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 3.0
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 6.0
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 5.0
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 70.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 1.0
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -9.0
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 3.0
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 6.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 5.0
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 70.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 1.0
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -2.5,
@@ -541,58 +562,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -10.5
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 3.75
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 7.5
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 6.5
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 85.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 1.5
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -10.5
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 3.75
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 7.5
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 6.5
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 85.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 1.5
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -2.25,
@@ -681,58 +712,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -12.0
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 4.5
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 9.0
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 8.0
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 100.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 2.0
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -12.0
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 4.5
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 9.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 8.0
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 100.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 2.0
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -2.0,
@@ -821,58 +862,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -13.5
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 5.25
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 3.0
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 9.5
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 115.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 2.5
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -13.5
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 5.25
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 3.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 9.5
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 115.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 2.5
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -1.75,
@@ -961,58 +1012,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -15.0
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 6.0
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 4.5
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 11.0
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 130.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 3.0
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -15.0
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 6.0
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 4.5
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 11.0
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 130.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 3.0
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -1.5,
@@ -1101,58 +1162,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -16.5
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 6.75
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 6.0
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 12.5
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 145.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 0.0
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -16.5
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 6.75
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 6.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 12.5
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 145.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 0.0
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -1.25,
@@ -1241,58 +1312,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -18.0
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 7.5
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 7.5
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 14.0
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 160.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 0.5
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -18.0
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 7.5
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 7.5
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 14.0
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 160.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 0.5
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -1.0,
@@ -1381,58 +1462,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -19.5
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 1.5
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 9.0
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 15.5
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 175.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 1.0
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -19.5
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 1.5
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 9.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 15.5
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 175.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 1.0
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -0.75,
@@ -1521,58 +1612,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -21.0
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 2.25
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 3.0
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 17.0
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 190.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 1.5
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -21.0
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 2.25
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 3.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 17.0
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 190.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 1.5
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -0.5,
@@ -1661,58 +1762,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -22.5
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 3.0
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 4.5
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 2.0
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 205.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 2.0
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -22.5
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 3.0
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 4.5
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 2.0
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 205.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 2.0
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -0.25,
@@ -1801,58 +1912,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -24.0
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 3.75
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 6.0
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 3.5
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 220.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 2.5
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -24.0
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 3.75
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 6.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 3.5
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 220.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 2.5
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": 0.0,
@@ -1941,58 +2062,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -25.5
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 4.5
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 7.5
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 5.0
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 40.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 3.0
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -25.5
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 4.5
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 7.5
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 5.0
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 40.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 3.0
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": 0.25,
@@ -2081,58 +2212,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -27.0
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 5.25
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 9.0
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 6.5
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 55.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 0.0
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -27.0
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 5.25
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 9.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 6.5
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 55.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 0.0
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": 0.5,
@@ -2221,58 +2362,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -28.5
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 6.0
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 3.0
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 8.0
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 70.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 0.5
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -28.5
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 6.0
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 3.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 8.0
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 70.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 0.5
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": 0.75,
@@ -2361,58 +2512,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -30.0
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 6.75
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 4.5
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 9.5
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 85.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 1.0
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -30.0
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 6.75
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 4.5
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 9.5
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 85.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 1.0
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": 1.0,
@@ -2501,58 +2662,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -31.5
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 7.5
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 6.0
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 11.0
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 100.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 1.5
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -31.5
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 7.5
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 6.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 11.0
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 100.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 1.5
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -3.0,
@@ -2641,58 +2812,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -6.0
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 1.5
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 7.5
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 12.5
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 115.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 2.0
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -6.0
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 1.5
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 7.5
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 12.5
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 115.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 2.0
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -2.75,
@@ -2781,58 +2962,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -7.5
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 2.25
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 9.0
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 14.0
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 130.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 2.5
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -7.5
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 2.25
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 9.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 14.0
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 130.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 2.5
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -2.5,
@@ -2921,58 +3112,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -9.0
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 3.0
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 3.0
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 15.5
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 145.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 3.0
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -9.0
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 3.0
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 3.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 15.5
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 145.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 3.0
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -2.25,
@@ -3061,58 +3262,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -10.5
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 3.75
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 4.5
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 17.0
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 160.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 0.0
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -10.5
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 3.75
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 4.5
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 17.0
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 160.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 0.0
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -2.0,
@@ -3201,58 +3412,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -12.0
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 4.5
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 6.0
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 2.0
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 175.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 0.5
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -12.0
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 4.5
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 6.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 2.0
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 175.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 0.5
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -1.75,
@@ -3341,58 +3562,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -13.5
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 5.25
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 7.5
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 3.5
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 190.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 1.0
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -13.5
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 5.25
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 7.5
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 3.5
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 190.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 1.0
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -1.5,
@@ -3481,58 +3712,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -15.0
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 6.0
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 9.0
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 5.0
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 205.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 1.5
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -15.0
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 6.0
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 9.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 5.0
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 205.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 1.5
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -1.25,
@@ -3621,58 +3862,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -16.5
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 6.75
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 3.0
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 6.5
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 220.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 2.0
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -16.5
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 6.75
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 3.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 6.5
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 220.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 2.0
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -1.0,
@@ -3761,58 +4012,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -18.0
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 7.5
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 4.5
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 8.0
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 40.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 2.5
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -18.0
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 7.5
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 4.5
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 8.0
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 40.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 2.5
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -0.75,
@@ -3901,58 +4162,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -19.5
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 1.5
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 6.0
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 9.5
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 55.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 3.0
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -19.5
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 1.5
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 6.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 9.5
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 55.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 3.0
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -0.5,
@@ -4041,58 +4312,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -21.0
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 2.25
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 7.5
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 11.0
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 70.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 0.0
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -21.0
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 2.25
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 7.5
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 11.0
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 70.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 0.0
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -0.25,
@@ -4181,58 +4462,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -22.5
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 3.0
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 9.0
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 12.5
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 85.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 0.5
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -22.5
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 3.0
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 9.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 12.5
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 85.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 0.5
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": 0.0,
@@ -4321,58 +4612,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -24.0
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 3.75
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 3.0
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 14.0
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 100.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 1.0
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -24.0
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 3.75
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 3.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 14.0
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 100.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 1.0
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": 0.25,
@@ -4461,58 +4762,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -25.5
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 4.5
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 4.5
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 15.5
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 115.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 1.5
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -25.5
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 4.5
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 4.5
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 15.5
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 115.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 1.5
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": 0.5,
@@ -4601,58 +4912,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -27.0
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 5.25
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 6.0
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 17.0
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 130.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 2.0
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -27.0
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 5.25
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 6.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 17.0
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 130.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 2.0
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": 0.75,
@@ -4741,58 +5062,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -28.5
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 6.0
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 7.5
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 2.0
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 145.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 2.5
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -28.5
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 6.0
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 7.5
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 2.0
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 145.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 2.5
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": 1.0,
@@ -4881,58 +5212,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -30.0
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 6.75
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 9.0
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 3.5
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 160.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 3.0
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -30.0
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 6.75
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 9.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 3.5
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 160.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 3.0
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -3.0,
@@ -5021,58 +5362,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -31.5
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 7.5
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 3.0
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 5.0
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 175.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 0.0
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -31.5
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 7.5
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 3.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 5.0
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 175.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 0.0
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -2.75,
@@ -5161,58 +5512,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -6.0
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 1.5
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 4.5
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 6.5
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 190.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 0.5
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -6.0
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 1.5
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 4.5
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 6.5
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 190.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 0.5
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -2.5,
@@ -5301,58 +5662,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -7.5
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 2.25
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 6.0
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 8.0
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 205.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 1.0
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -7.5
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 2.25
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 6.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 8.0
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 205.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 1.0
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -2.25,
@@ -5441,58 +5812,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -9.0
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 3.0
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 7.5
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 9.5
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 220.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 1.5
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -9.0
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 3.0
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 7.5
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 9.5
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 220.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 1.5
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -2.0,
@@ -5581,58 +5962,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -10.5
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 3.75
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 9.0
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 11.0
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 40.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 2.0
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -10.5
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 3.75
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 9.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 11.0
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 40.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 2.0
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -1.75,
@@ -5721,58 +6112,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -12.0
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 4.5
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 3.0
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 12.5
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 55.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 2.5
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -12.0
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 4.5
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 3.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 12.5
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 55.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 2.5
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -1.5,
@@ -5861,58 +6262,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -13.5
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 5.25
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 4.5
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 14.0
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 70.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 3.0
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -13.5
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 5.25
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 4.5
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 14.0
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 70.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 3.0
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -1.25,
@@ -6001,58 +6412,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -15.0
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 6.0
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 6.0
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 15.5
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 85.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 0.0
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -15.0
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 6.0
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 6.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 15.5
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 85.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 0.0
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -1.0,
@@ -6141,58 +6562,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -16.5
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 6.75
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 7.5
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 17.0
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 100.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 0.5
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -16.5
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 6.75
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 7.5
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 17.0
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 100.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 0.5
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -0.75,
@@ -6281,58 +6712,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -18.0
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 7.5
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 9.0
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 2.0
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 115.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 1.0
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -18.0
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 7.5
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 9.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 2.0
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 115.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 1.0
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -0.5,
@@ -6421,58 +6862,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -19.5
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 1.5
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 3.0
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 3.5
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 130.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 1.5
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -19.5
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 1.5
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 3.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 3.5
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 130.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 1.5
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -0.25,
@@ -6561,58 +7012,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -21.0
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 2.25
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 4.5
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 5.0
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 145.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 2.0
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -21.0
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 2.25
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 4.5
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 5.0
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 145.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 2.0
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": 0.0,
@@ -6701,58 +7162,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -22.5
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 3.0
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 6.0
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 6.5
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 160.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 2.5
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -22.5
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 3.0
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 6.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 6.5
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 160.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 2.5
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": 0.25,
@@ -6841,58 +7312,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -24.0
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 3.75
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 7.5
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 8.0
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 175.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 3.0
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -24.0
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 3.75
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 7.5
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 8.0
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 175.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 3.0
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": 0.5,
@@ -6981,58 +7462,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -25.5
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 4.5
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 9.0
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 9.5
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 190.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 0.0
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -25.5
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 4.5
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 9.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 9.5
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 190.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 0.0
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": 0.75,
@@ -7121,58 +7612,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -27.0
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 5.25
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 3.0
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 11.0
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 205.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 0.5
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -27.0
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 5.25
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 3.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 11.0
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 205.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 0.5
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": 1.0,
@@ -7261,58 +7762,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -28.5
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 6.0
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 4.5
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 12.5
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 220.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 1.0
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -28.5
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 6.0
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 4.5
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 12.5
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 220.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 1.0
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -3.0,
@@ -7401,58 +7912,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -30.0
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 6.75
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 6.0
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 14.0
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 40.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 1.5
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -30.0
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 6.75
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 6.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 14.0
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 40.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 1.5
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -2.75,
@@ -7541,58 +8062,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -31.5
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 7.5
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 7.5
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 15.5
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 55.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 2.0
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -31.5
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 7.5
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 7.5
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 15.5
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 55.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 2.0
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -2.5,
@@ -7681,58 +8212,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -6.0
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 1.5
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 9.0
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 17.0
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 70.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 2.5
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -6.0
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 1.5
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 9.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 17.0
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 70.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 2.5
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -2.25,
@@ -7821,58 +8362,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -7.5
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 2.25
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 3.0
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 2.0
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 85.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 3.0
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -7.5
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 2.25
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 3.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 2.0
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 85.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 3.0
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -2.0,
@@ -7961,58 +8512,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -9.0
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 3.0
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 4.5
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 3.5
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 100.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 0.0
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -9.0
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 3.0
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 4.5
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 3.5
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 100.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 0.0
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -1.75,
@@ -8101,58 +8662,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -10.5
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 3.75
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 6.0
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 5.0
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 115.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 0.5
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -10.5
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 3.75
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 6.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 5.0
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 115.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 0.5
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -1.5,
@@ -8241,58 +8812,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -12.0
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 4.5
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 7.5
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 6.5
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 130.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 1.0
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -12.0
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 4.5
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 7.5
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 6.5
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 130.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 1.0
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -1.25,
@@ -8381,58 +8962,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -13.5
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 5.25
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 9.0
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 8.0
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 145.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 1.5
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -13.5
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 5.25
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 9.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 8.0
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 145.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 1.5
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -1.0,
@@ -8521,58 +9112,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -15.0
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 6.0
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 3.0
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 9.5
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 160.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 2.0
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -15.0
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 6.0
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 3.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 9.5
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 160.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 2.0
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -0.75,
@@ -8661,58 +9262,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -16.5
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 6.75
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 4.5
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 11.0
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 175.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 2.5
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -16.5
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 6.75
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 4.5
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 11.0
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 175.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 2.5
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -0.5,
@@ -8801,58 +9412,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -18.0
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 7.5
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 6.0
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 12.5
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 190.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 3.0
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -18.0
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 7.5
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 6.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 12.5
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 190.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 3.0
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": -0.25,
@@ -8941,58 +9562,68 @@
               "value": 1.0
             }
           ]
-        },
-        {
-          "slot": "comp",
-          "bypass": false,
-          "params": [
-            {
-              "parameter_id": 1,
-              "channel": "both",
-              "unit": "db",
-              "value": -19.5
-            },
-            {
-              "parameter_id": 2,
-              "channel": "both",
-              "unit": "ratio",
-              "value": 1.5
-            },
-            {
-              "parameter_id": 3,
-              "channel": "both",
-              "unit": "db",
-              "value": 7.5
-            },
-            {
-              "parameter_id": 4,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 14.0
-            },
-            {
-              "parameter_id": 5,
-              "channel": "both",
-              "unit": "milliseconds",
-              "value": 205.0
-            },
-            {
-              "parameter_id": 6,
-              "channel": "both",
-              "unit": "db",
-              "value": 0.0
-            },
-            {
-              "parameter_id": 7,
-              "channel": "both",
-              "unit": "linear",
-              "value": 1.0
-            }
-          ]
         }
       ],
       "inserts": {
-        "effects": []
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -19.5
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 1.5
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 7.5
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 14.0
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 205.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 0.0
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
       },
       "fader": {
         "left_db": 0.0,
