@@ -108,7 +108,6 @@ pub(crate) fn protocol_queue_config(
 
 pub(crate) fn capi_resources(
     limits: CompileLimits,
-    canonical_bytes: usize,
     source_count: usize,
     source_id_bytes: usize,
     quantum_frames: usize,
@@ -141,8 +140,11 @@ pub(crate) fn capi_resources(
     // The control-source table and ID arena are the facade's own layout; capi reads the mirror
     // (`control_table_bytes` / `source_id_arena_bytes`) rather than restating the struct, so this
     // pre-flight cannot drift when that struct changes.
+    //
+    // The session's canonical JSON is not a capi row. The compiled session owns it, and its
+    // `compiled_model_bytes` already charges it to the graph cap, current and prospective alike
+    // (`validate_replacement_peak`); charging it here too counted one allocation twice (#1060).
     let epoch_rows = [
-        checked_layout::<u8>(canonical_bytes)?,
         host_core::control_table_bytes(source_count)
             .ok_or_else(|| failure("capi.resource.arithmetic"))?,
         host_core::source_id_arena_bytes(source_id_bytes)
@@ -235,7 +237,6 @@ pub(crate) fn prepared_capi_resources(
     Ok((
         capi_resources(
             limits,
-            compiled.canonical_json().len(),
             compiled.source_count(),
             source_id_bytes,
             compiled.quantum().0 as usize,
