@@ -939,12 +939,17 @@ fn run_width(
         // --- The mono arm's mode, decided before anything renders -------------------------------
         // The witness is asked of the dual bank: a collapsed bank's right channel is stale by
         // design, so asking the arm itself would compare it with a channel nothing has advanced.
+        // A fifth of the eligible blocks render dual anyway, as a chain does whenever anything
+        // else asks it to: the disengage copy must then be the never-collapsed state, and the
+        // channels still agree afterwards, so the collapse may engage again.
+        let forced_dual = draw.chance(1, 5);
         let collapse = arm.as_mut().is_some_and(|arm| {
             let designed = (0..lanes).all(|lane| bank.lane_channel_symmetry(lane));
-            let eligible = arm.agree && arm.restored && designed;
+            let holds = arm.restored && designed;
+            let eligible = arm.agree && holds && !forced_dual;
             if !eligible {
                 disengage(arm, bank.as_ref(), sizes, &context, coverage);
-                arm.agree = false;
+                arm.agree &= holds;
             }
             arm.collapsed = eligible;
             eligible

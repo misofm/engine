@@ -232,12 +232,6 @@ fn scenario(seed: u64, backend: Backend, width: BankWidth, strict: bool, reach: 
                 ),
                 _ => Retarget::Matrix(matrix(&mut draw), smoothing(&mut draw)),
             };
-            if collapsed && matches!(retarget, Retarget::Trim(..) | Retarget::Polarity(..)) {
-                // An input record upstream of the seam lands at a block boundary; a collapsed
-                // run ends first, as the chain ends it.
-                twin.desymmetrize();
-                collapsed = false;
-            }
             let scalar = &mut scalars[lane];
             match retarget {
                 Retarget::Trim(lanes, db, window) => {
@@ -322,16 +316,17 @@ fn scenario(seed: u64, backend: Backend, width: BankWidth, strict: bool, reach: 
         }
 
         // --- The mono twin's mode ------------------------------------------------------------------
-        let eligible = mono
-            && agree
-            && twin.supports_mono_collapse()
-            && (0..members).all(|lane| input_bank.lane_symmetry(lane).eligible());
+        // A collapsed run also ends while the witness still holds (a chain renders dual whenever
+        // anything else asks it to): `desymmetrize` must then leave the right channel where a
+        // never-collapsed run holds it, and the channels still agree afterwards.
+        let holds = (0..members).all(|lane| input_bank.lane_symmetry(lane).eligible());
+        let eligible = mono && agree && twin.supports_mono_collapse() && holds && !draw.chance(1, 5);
         if !eligible {
             if collapsed {
                 twin.desymmetrize();
                 collapsed = false;
             }
-            agree = false;
+            agree &= mono && holds;
         }
 
         // --- Scalar strips --------------------------------------------------------------------------
