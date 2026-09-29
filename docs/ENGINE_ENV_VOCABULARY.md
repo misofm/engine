@@ -129,8 +129,6 @@ Read by one subject each.
 | `MISO_ENGINE_CAPI_C_FIXTURE` | C-ABI tests: path of the C consumer. |
 | `MISO_ENGINE_CAPI_CPP_FIXTURE` | C-ABI tests: path of the C++ consumer. |
 | `MISO_ENGINE_CAPI_SKIP_BUILD` | C-ABI tests: use a prebuilt library. |
-| `MISO_ENGINE_CHROMIUM_BINARY` | browser gate: Chromium path. |
-| `MISO_ENGINE_CHROMEDRIVER_BINARY` | browser gate: chromedriver path. |
 | `MISO_ENGINE_WEB_ORACLE_PRINT` | `tests/browser-v1/direct-oracle.mjs`: set to `1` to print the derived oracle document instead of asserting it against the pin. The house instrument a browser re-pin is read off, and how `check-browser-expected-resources.py` reads the module's resource rows (#217). |
 | `MISO_ENGINE_SDK_ARTIFACTS_HEX` | SDK evals: canonical lowercase, even-length ASCII hex encoding of the absolute physical release artifact-directory pathname bytes. `scripts/check-sdk-headless.sh` builds one and passes it; the SDK helper decodes it to a byte `Buffer` path. There is no checked-in wasm, because the module is a build output and vendoring one would make the SDK's provenance story a copy rather than a derivation (#243, #331). |
 | `MISO_ENGINE_WEB_STRIP` | AudioWorklet build: the `wasm-strip` binary. |
