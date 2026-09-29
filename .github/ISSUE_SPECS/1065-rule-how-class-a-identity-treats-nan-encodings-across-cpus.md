@@ -195,3 +195,120 @@ is what catches it.
   hunks do not overlap #1051's `randomized_width` hunk.
 - The compressor's `MUTATIONS.md` (#1006) and the EQ's (#977) name the old relaxation and pins;
   each got a one-clause note rather than a rewrite.
+
+## Sol verdict, attempt 1
+
+**PASS.** Sol, 2026-09-29. Verified on a scratch merge of `f1ad03f9` into the batch head
+`codex/batch-slim-4` at `adddb4e5`. Rust 1.97.1, Node 22.23.2, x86-64 only (no qemu, no
+`aarch64-unknown-linux-gnu` target here).
+
+### The merge
+
+`git merge --no-ff` auto-merges with no conflicts. There is no semantic conflict either:
+- #1046's deletions (the EQ `descriptive_bank_throughput` and two `interleave_identity` tests, the
+  compressor and limiter test files) touch none of #1065's hunks.
+- Every finiteness test the plants below rely on still exists.
+- #1049's pin deletions are already in the base (`b695758b`).
+
+**#1051 is a trial merge on top, not committed.** It auto-merges and
+`cargo check --all-targets` passes. `randomized::same_word` (`bits equal || both NaN`) is the
+same predicate as `class_a::same`: the fold maps a NaN to `NAN_WORD` and leaves every other word
+unchanged, and no other word equals `NAN_WORD`. At merge, #1051 should make `same_word` a
+re-export of, or a one-line delegate to, `class_a::same`, and cite it in its docs. #1051's own
+review should check its raw `to_bits` comparisons for NaN exposure:
+- `parametric-eq/src/randomized_restores.rs:338` and `:469`;
+- `host-core/tests/randomized.rs:210`.
+
+### Checks
+
+1. **The fold is narrow.** An exhaustive scratch program ran over all 2^32 words, using the
+   committed `class_a.rs` through `#[path]`:
+   - `word(b) == NAN_WORD` exactly when `b` is a NaN: 16,777,214 encodings, both signs, quiet
+     and signalling. Every other word maps to itself, and none of them equals `NAN_WORD`.
+   - A pair table keeps these unequal: `±0`, adjacent subnormals, subnormal against zero, the
+     largest subnormal against the smallest normal, `1.0` against the next float, `±inf`, `MAX`
+     against `inf`, and a NaN against a number.
+   - `le_words` refuses a ragged length.
+   - The `audit unfused-fma` rewrites are the same predicates as before (`flush` keeps a NaN a
+     NaN).
+2. **No NaN-hashing comparison was missed.** I built my own spy: `digest` 0.11.3 patched to log
+   every hashed NaN-range word, in one atomic line per update. The workspace's `sha2` 0.11 is its
+   only user; `sha2` 0.10 serves only wasmtime. I ran it over the merge with test-debug-a,
+   test-debug-b, test-release (`lane`, `math`, `wasm-gates`), audit/bench/console-workload in
+   release, and `target-smoke`.
+   - Only the three sites hash 4-byte NaN words: `scenario_1006` (28,800), EQ admitted-select
+     (48) and limiter seedless (40). All of them are now `0x7FC00000`, with none left
+     non-canonical.
+   - G5, G6 and M3 show only 8-byte updates, and none of those is an `f64` NaN (M3 is guarded
+     NaN-free).
+   - The two FNV digests that bypass `digest`, graph `SourceRun::digest` and host-core
+     `source_in_place`, needed a separate spy. They hash NaN only in three #936 inert tests:
+     6 `HOST_PAD` words per master, which is pad memory the render never touches. The hash is
+     independent of the CPU and correctly left raw.
+   - Raw NaN-literal assertions in the tree (`disjoint`, `rack`, `graph`, `conformance`) check
+     poison and sentinel copies, not arithmetic results.
+   - Real arm64 hardware agrees. Main run `36507292157` (job `109211631805`, `a8955ad4`) passed
+     the debug leg with only the two #1065 rows failing, each for its stated reason (`d13e0831…`,
+     `3719d502…`). So every other raw comparison already passes on AArch64.
+3. **Finiteness is still guarded.** Each plant was reverted afterwards.
+   - **C1.** In the compressor's shared `applied_gain`, a gain below −6 dB becomes NaN, for the
+     oracle and the candidate alike. 19 tests go red, including:
+     - `scenario_1006` (digest `77888f08…`);
+     - `the_corpus_is_finite` ("word 949 is NaN");
+     - the f64 oracle and the partition tests.
+
+     The grid differentials stay green, as expected when both sides are NaN.
+   - **E1.** In the EQ's `process_channels`, any output above 0.3 becomes NaN. 27 tests go red,
+     including `admitted_blocks…` ("an output word is not finite: 0x7fc00000"), conformance and
+     the DFT oracle.
+4. **Empty-leg acceptance cannot pass vacuously.** The real `run-aarch64-tests.sh` ran on x86
+   with `CARGO_BUILD_TARGET=aarch64-unknown-linux-gnu`, a stub `cargo` for test and build, and the
+   real `cargo tree`.
+   - The baseline passes: "25 product crates, 0 expected failures".
+   - These plants go red:
+     - the `capi` closure comes back empty;
+     - `product_crates` returns nothing, with its guard bypassed (real cargo refuses `-p ""` with
+       "package name cannot be empty");
+     - the `debug` key is missing from `TEST_ROWS`;
+     - the `rows` subcommand raises.
+   - A stray blank line means no rows, which is correct.
+   - The release rows are still read and judged.
+5. **The re-pins are honest.** I hashed the merged tree the pre-#1065 way: the all-wet kernel
+   words canonical, everything else raw, payloads raw. It gives `162979dd…`, `9316456b…`,
+   `d4a1dc9d…` and `f442a0d3…`, and every other `bank.rs` pin passes raw. Only NaN words moved.
+6. **Gates on the merge.**
+   - `cargo check` and `clippy -D warnings` (`--workspace --all-targets --all-features`) and
+     `fmt --check`: ok.
+   - Dev and release tests of `dsp-reference`, `compressor`, `parametric-eq`,
+     `true-peak-limiter`, `lane` and `math` with the CI features: 392 pass in each profile. EQ
+     `--test bank` without features: 11 pass.
+   - Release `audit`, `bench` and `console-workload`, which include the console digests: 107 pass.
+   - `run-wasm-gates.sh` (native, simd128 and the V8 spill gate): ok.
+   - x86 `--no-run` and `--list` of the debug leg: 25 product crates and 1,756 tests, with both
+     former rows present. The release leg lists 114. `judge-skips` passes for both modes, and so
+     do `rows` and `--self-test`.
+   - 52 policy runs: all ok. They cover every `check-`/`test-` pair for the policies,
+     `unfused-seal` with its `--self-test`, and the Python checks run under `python3 -B`. Three
+     further scripts need an argument, which a bare run does not give.
+
+### Findings, by severity
+
+1. **LOW: residual risk on real AArch64.** Real hardware has not shown these three things:
+   - the compressor's folded `bd3d711f…`;
+   - the EQ `bank` and `bank-mono` legs at `Simd4`, which x86 cannot bind;
+   - the removal of both rows.
+
+   #1017's qemu evidence and hardware's raw scalar EQ digest (the folded pin) support them. The
+   batch's first arm64 CI run confirms them; if it fails, the fold sites are the three above.
+   The evidence's "the EQ case is shown above without it" holds for the scalar leg only.
+2. **LOW: the debug leg lost an incidental non-vacuity signal.** `judge-skips` no longer proves
+   that named tests are in the listing. The guard that remains, `product_crates` (at least 20
+   crates and six named), together with the fixed packages, suffices; a minimum test count would
+   be optional hardening.
+3. **LOW: the docs claim more than the code does.** `EFFECT_CONTRACT_V1` and `TARGET_MATRIX` say
+   every class-A comparison folds. Strict same-CPU `to_bits` differentials and the poison/pad
+   checks remain, which is stricter and correct. Wording such as "folds, or compares strictly"
+   would be exact.
+4. **LOW: `assert_state` also folds integer fields.** It folds `ramp.remaining` through
+   `class_a::word`. A `u32` of `0x7F800001` or more would collapse, but these are sample counts,
+   so there is no practical effect. `le_words` documents the same point; `assert_state` does not.
