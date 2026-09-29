@@ -106,17 +106,24 @@ fn render(
 }
 
 /// E4 (hard gate): the true-peak estimate of the output never exceeds the ceiling.
+///
+/// 288 configurations: the lowest and highest launch rates, both link modes, ceilings of -1 and
+/// -12 dB, lookaheads of 0, 1 and 10 ms, both releases and every corpus. Issue #1049 trimmed it
+/// from 1,152 (the rate is not a branch of the ceiling law); E5 below compares the law itself
+/// with its `f64` oracle.
 #[test]
 fn output_true_peak_never_exceeds_the_ceiling() {
     let frames = 2048_usize;
     let mut worst = f64::NEG_INFINITY;
     let mut worst_case = String::new();
-    for rate in [44_100_u32, 48_000, 88_200, 96_000] {
+    let mut configurations = 0_u32;
+    for rate in [44_100_u32, 96_000] {
         for link in [LinkMode::DualMono, LinkMode::Maximum] {
-            for ceiling in [-1.0_f32, -6.0, -12.0] {
-                for lookahead in [0.0_f32, 1.0, 5.0, 10.0] {
+            for ceiling in [-1.0_f32, -12.0] {
+                for lookahead in [0.0_f32, 1.0, 10.0] {
                     for release in [10.0_f32, 2000.0] {
                         for corpus in 0..6 {
+                            configurations += 1;
                             let (mut left, mut right) = corpus_signal(corpus, frames, rate);
                             let values = values_with(ceiling, release, lookahead);
                             let mut preparation = request_at_rate(&values, rate);
@@ -152,6 +159,7 @@ fn output_true_peak_never_exceeds_the_ceiling() {
             }
         }
     }
+    assert_eq!(configurations, 288);
     // Descriptive, and the number the #49 guard decision needs: the whole matrix stays this
     // far under the user ceiling with the frozen 1 dB internal guard and `W_MIN = 32`.
     println!("worst true-peak margin {worst:+.4} dB at {worst_case}");

@@ -198,10 +198,12 @@ fn widths_of(case: usize) -> std::ops::Range<usize> {
 
 /// The backend this process was compiled for, in the guest's numbering.
 fn native_backend_code() -> u32 {
-    match lane::Backend::current() {
-        lane::Backend::Scalar => 0,
-        lane::Backend::Simd4 => 1,
-        lane::Backend::Simd8 => 2,
+    // By width, not by variant: `Backend::Scalar` exists only in `lane/test-support` builds and on
+    // the scalar-wasm CI exception (#1059), so a match on the variants compiles in only one of them.
+    match lane::Backend::current().width() {
+        4 => 1,
+        8 => 2,
+        _ => 0,
     }
 }
 

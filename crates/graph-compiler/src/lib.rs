@@ -5465,16 +5465,22 @@ mod tests {
     /// Issue #943 gate G4: the banked sample-peak pass is realtime-clean. The browser's shape --
     /// a `SAMPLE_PEAK` meter on every post-matrix boundary, prepared between render calls, at the
     /// web period of 12 blocks -- renders 1,000 blocks under the allocation audit with zero events,
-    /// one pass per cohort per block and one merge per meter per block.
+    /// one pass per cohort per block and one merge per meter per block, on the
+    /// [`METER_CONSOLE_TRACKS`]-track console.
+    ///
+    /// The audit's events here are the render path's own forbidden-operation hooks: this test
+    /// binary installs no counting allocator, so an allocation is not one of them (issue #1049
+    /// injected one into the pass and this stayed green, on 64 tracks as on 8). The bench
+    /// console's `the_metered_console_row_prints_its_meters_and_the_validator_pins_them`, under
+    /// the audited allocator, aborts on it.
     #[test]
     fn the_banked_sample_peak_pass_renders_without_an_audited_event() {
         const BLOCKS: u64 = 1_000;
         let Some(width) = BankWidth::for_backend(host_dispatch()) else {
             return;
         };
-        let cohorts = 64 / width.lanes() as u64;
-        let intended = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
-            .expect("intended fixture");
+        let cohorts = METER_CONSOLE_TRACKS / width.lanes() as u64;
+        let intended = intended_console(METER_CONSOLE_TRACKS);
         let registry = launch_native_effect_registry().expect("launch registry");
         let artifact = compile_console_model_with_selected_meters(
             &intended,
@@ -5526,10 +5532,13 @@ mod tests {
         let snapshot = audit::snapshot();
         assert_eq!(snapshot.total(), 0, "{snapshot:?}");
         assert_eq!(graph::test_only_bank_sample_peak_passes(), BLOCKS * cohorts);
-        assert_eq!(builtins::test_only_block_peak_merges(), BLOCKS * 64);
+        assert_eq!(
+            builtins::test_only_block_peak_merges(),
+            BLOCKS * METER_CONSOLE_TRACKS
+        );
         assert_eq!(
             windows,
-            64 * (BLOCKS / 12),
+            METER_CONSOLE_TRACKS * (BLOCKS / 12),
             "every whole window was published"
         );
     }
@@ -5537,16 +5546,35 @@ mod tests {
     /// Issue #950 gate M4: the full meter pass is realtime-clean. The `console_meters` shape -- an
     /// `ALL` meter on every post-matrix boundary through `prepare_session_builtins`, period 4 x 128,
     /// no hold, no decay -- renders 1,000 blocks under the allocation audit with zero events, one
-    /// full pass per cohort per block and one commit per meter per block.
+    /// full pass per cohort per block and one commit per meter per block, on the
+    /// [`METER_CONSOLE_TRACKS`]-track console.
+    ///
+    /// As for #943's G4 above, the audit's events are the render path's own hooks, not
+    /// allocations: this binary installs no counting allocator (issue #1049). The bench console's
+    /// `the_meters_record_carries_each_arms_fold_and_redirect_counters`, under the audited
+    /// allocator, aborts on an allocation in the pass.
     #[test]
     fn the_full_meter_pass_renders_without_an_audited_event() {
+        full_meter_pass_renders_without_an_audited_event(METER_CONSOLE_TRACKS);
+    }
+
+    /// [`the_full_meter_pass_renders_without_an_audited_event`] on the whole 64-track console, so a
+    /// hook event, pass count or commit count that appears only at size is still seen.
+    /// `nightly.yml` runs it, in a dev build (issue #1049).
+    #[test]
+    #[ignore = "nightly: the 64-track console (#1049); the small console runs per PR"]
+    fn the_full_meter_pass_renders_without_an_audited_event_on_sixty_four_tracks() {
+        full_meter_pass_renders_without_an_audited_event(64);
+    }
+
+    /// Issue #950 gate M4 on the intended console's first `tracks` tracks.
+    fn full_meter_pass_renders_without_an_audited_event(tracks: u64) {
         const BLOCKS: u64 = 1_000;
         let Some(width) = BankWidth::for_backend(host_dispatch()) else {
             return;
         };
-        let cohorts = 64 / width.lanes() as u64;
-        let intended = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
-            .expect("intended fixture");
+        let cohorts = tracks / width.lanes() as u64;
+        let intended = intended_console(tracks);
         let registry = launch_native_effect_registry().expect("launch registry");
         let meters: Vec<MeterRequest> =
             post_matrix_meter_requests(&intended, MeterMetricSet::ALL, 512)
@@ -5598,10 +5626,10 @@ mod tests {
         assert_eq!(snapshot.total(), 0, "{snapshot:?}");
         assert_eq!(graph::test_only_bank_meter_passes(), BLOCKS * cohorts);
         assert_eq!(graph::test_only_bank_sample_peak_passes(), 0);
-        assert_eq!(builtins::test_only_banked_meter_commits(), BLOCKS * 64);
+        assert_eq!(builtins::test_only_banked_meter_commits(), BLOCKS * tracks);
         assert_eq!(
             windows,
-            64 * (BLOCKS / 4),
+            tracks * (BLOCKS / 4),
             "every whole window was published"
         );
     }
@@ -10359,14 +10387,13 @@ mod tests {
         } else {
             vec![host, Backend::Simd4]
         };
-        let intended = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
-            .expect("intended fixture");
+        let intended = intended_console(METER_CONSOLE_TRACKS);
         let registry = launch_native_effect_registry().expect("launch registry");
         let mut plan_id = 9_430;
         let mut declined_web_frames = None;
         for dispatch in dispatches {
             let width = BankWidth::for_backend(dispatch).expect("a banked dispatch");
-            let cohorts = 64 / width.lanes() as u64;
+            let cohorts = METER_CONSOLE_TRACKS / width.lanes() as u64;
             for between_render_calls in [false, true] {
                 for period in [512_u32, 300] {
                     let meters =
@@ -10414,11 +10441,14 @@ mod tests {
                         (scalar.1, scalar.2, scalar.3, scalar.5, scalar.6),
                         "{context}: transposes, chains, slots, redirects and folds"
                     );
-                    assert_eq!(banked.6, 64, "{context}: every route stays folded");
+                    assert_eq!(
+                        banked.6, METER_CONSOLE_TRACKS,
+                        "{context}: every route stays folded"
+                    );
                     assert_eq!(banked.4.len(), scalar.4.len(), "{context}: frame count");
                     assert_eq!(
                         banked.4.len() as u64,
-                        64 * (BLOCKS * 128 / u64::from(period)),
+                        METER_CONSOLE_TRACKS * (BLOCKS * 128 / u64::from(period)),
                         "{context}: every meter publishes every whole window"
                     );
                     for (banked_frame, scalar_frame) in banked.4.iter().zip(scalar.4.iter()) {
@@ -10440,7 +10470,7 @@ mod tests {
                         }),
                         "{context}: some window's left and right peaks differ"
                     );
-                    // Per cohort one final chain carries the meters: at `Simd4` that is sixteen
+                    // Per cohort one final chain carries the meters: at `Simd4` that is two
                     // four-lane passes a block, which is also what says the `Four` arm ran.
                     assert_eq!(
                         *banked_passes,
@@ -10453,10 +10483,14 @@ mod tests {
                         "{context}: the declined arm merges nothing"
                     );
                     if period == 512 {
-                        assert_eq!(*banked_merges, 64 * BLOCKS, "{context}: every block merges");
+                        assert_eq!(
+                            *banked_merges,
+                            METER_CONSOLE_TRACKS * BLOCKS,
+                            "{context}: every block merges"
+                        );
                     } else {
                         assert!(
-                            *banked_merges > 0 && *banked_merges < 64 * BLOCKS,
+                            *banked_merges > 0 && *banked_merges < METER_CONSOLE_TRACKS * BLOCKS,
                             "{context}: a window-crossing block takes the sample loop ({banked_merges})"
                         );
                     }
@@ -10485,7 +10519,7 @@ mod tests {
             "ALL meters must not make a bank run the pass"
         );
         assert_eq!(builtins::test_only_block_peak_merges(), 0);
-        assert_eq!(all_folds, 64);
+        assert_eq!(all_folds, METER_CONSOLE_TRACKS);
         assert!(all_frames.iter().any(|frame| frame.left.energy != 0.0));
 
         // Control 2: the same web-shape plan bound with an observation activation and one active
@@ -10666,8 +10700,7 @@ mod tests {
         } else {
             vec![host, Backend::Simd4]
         };
-        let intended = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
-            .expect("intended fixture");
+        let intended = intended_console(METER_CONSOLE_TRACKS);
         let registry = launch_native_effect_registry().expect("launch registry");
         let mut plan_id = 9_500;
         let assert_frames_carry_signal = |arm: &FullMeterArm, context: &str| {
@@ -10686,7 +10719,7 @@ mod tests {
         };
         for dispatch in dispatches {
             let width = BankWidth::for_backend(dispatch).expect("a banked dispatch");
-            let cohorts = 64 / width.lanes() as u64;
+            let cohorts = METER_CONSOLE_TRACKS / width.lanes() as u64;
             for between_render_calls in [false, true] {
                 for period in [512_u32, 300] {
                     let meters = post_matrix_meter_requests(&intended, MeterMetricSet::ALL, period);
@@ -10726,10 +10759,13 @@ mod tests {
                         off.commits
                     );
                     assert_full_meter_arms_equal(on, off, &context);
-                    assert_eq!(on.rendered.6, 64, "{context}: every route stays folded");
+                    assert_eq!(
+                        on.rendered.6, METER_CONSOLE_TRACKS,
+                        "{context}: every route stays folded"
+                    );
                     assert_eq!(
                         on.rendered.4.len() as u64,
-                        64 * (BLOCKS * 128 / u64::from(period)),
+                        METER_CONSOLE_TRACKS * (BLOCKS * 128 / u64::from(period)),
                         "{context}: every meter publishes every whole window"
                     );
                     assert_frames_carry_signal(on, &context);
@@ -10752,7 +10788,7 @@ mod tests {
                     );
                     assert_eq!(
                         on.commits,
-                        64 * inside,
+                        METER_CONSOLE_TRACKS * inside,
                         "{context}: every meter commits every block its window holds"
                     );
                     assert_eq!(
@@ -10770,7 +10806,7 @@ mod tests {
                 .into_iter()
                 .map(|selected| selected.request)
                 .collect();
-        let cohorts = 64 / host_width.lanes() as u64;
+        let cohorts = METER_CONSOLE_TRACKS / host_width.lanes() as u64;
         let arms: Vec<FullMeterArm> = [false, true]
             .into_iter()
             .map(|declined| {
@@ -10784,7 +10820,7 @@ mod tests {
         assert_full_meter_arms_equal(&arms[0], &arms[1], context);
         assert_frames_carry_signal(&arms[0], context);
         assert_eq!(
-            arms[0].rendered.6, 64,
+            arms[0].rendered.6, METER_CONSOLE_TRACKS,
             "{context}: every route stays folded"
         );
         assert_eq!(
@@ -10794,7 +10830,7 @@ mod tests {
         );
         assert_eq!(
             (arms[0].commits, arms[1].commits),
-            (64 * BLOCKS, 0),
+            (METER_CONSOLE_TRACKS * BLOCKS, 0),
             "{context}"
         );
         assert_eq!(
@@ -10823,9 +10859,8 @@ mod tests {
         let Some(width) = BankWidth::for_backend(host) else {
             return;
         };
-        let cohorts = 64 / width.lanes() as u64;
-        let intended = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
-            .expect("intended fixture");
+        let cohorts = METER_CONSOLE_TRACKS / width.lanes() as u64;
+        let intended = intended_console(METER_CONSOLE_TRACKS);
         let registry = launch_native_effect_registry().expect("launch registry");
         let mut plan_id = 9_520;
         let mut arms = |meters: &[SelectedMeterRequest]| -> Vec<FullMeterArm> {
@@ -10864,13 +10899,17 @@ mod tests {
         assert_eq!(on.peak_passes, 0, "mixed: no sample-peak pass beside it");
         assert_eq!(
             on.merges,
-            32 * BLOCKS,
+            METER_CONSOLE_TRACKS / 2 * BLOCKS,
             "mixed: the peak meters merge its peak"
         );
-        assert_eq!(on.commits, 32 * BLOCKS, "mixed: the ALL meters commit");
+        assert_eq!(
+            on.commits,
+            METER_CONSOLE_TRACKS / 2 * BLOCKS,
+            "mixed: the ALL meters commit"
+        );
         assert_eq!(
             (off.passes, off.peak_passes, off.merges, off.commits),
-            (0, BLOCKS * cohorts, 32 * BLOCKS, 0),
+            (0, BLOCKS * cohorts, METER_CONSOLE_TRACKS / 2 * BLOCKS, 0),
             "mixed, declined: the sample-peak pass serves the peak meters"
         );
 
@@ -10888,7 +10927,7 @@ mod tests {
                 peak[0].merges,
                 peak[0].commits
             ),
-            (0, BLOCKS * cohorts, 64 * BLOCKS, 0),
+            (0, BLOCKS * cohorts, METER_CONSOLE_TRACKS * BLOCKS, 0),
             "SAMPLE_PEAK: no full pass, #943's pass and merges"
         );
 
@@ -11045,8 +11084,7 @@ mod tests {
             (M::ENERGY_RMS, 1536, 0),
             (set(&[M::COUNTS, M::HELD_PEAK]), 64, 0),
         ];
-        let intended = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
-            .expect("intended fixture");
+        let intended = intended_console(METER_CONSOLE_TRACKS);
         let registry = launch_native_effect_registry().expect("launch registry");
         let meters: Vec<SelectedMeterRequest> = post_matrix_meter_requests(&intended, M::ALL, 512)
             .into_iter()
@@ -11060,6 +11098,8 @@ mod tests {
             })
             .collect();
         let inside = |period: u32| blocks_inside_a_window(u64::from(period), BLOCKS, 128);
+        // The console repeats the eight-meter pattern this many times.
+        let eights = METER_CONSOLE_TRACKS / 8;
         // Per eight tracks: the committing meters 0, 1, 2 and 6, and the merging meter 4.
         let commits_per_eight = inside(512) + inside(300) + inside(129) + inside(1536);
         let non_energy_commits_per_eight = inside(300) + inside(129);
@@ -11071,7 +11111,7 @@ mod tests {
         let mut plan_id = 9_560;
         for dispatch in dispatches {
             let width = BankWidth::for_backend(dispatch).expect("a banked dispatch");
-            let cohorts = 64 / width.lanes() as u64;
+            let cohorts = METER_CONSOLE_TRACKS / width.lanes() as u64;
             for between_render_calls in [false, true] {
                 let arms: Vec<FullMeterArm> = [false, true]
                     .into_iter()
@@ -11103,12 +11143,12 @@ mod tests {
                     off.merges,
                     on.commits,
                     off.commits,
-                    8 * non_energy_commits_per_eight
+                    eights * non_energy_commits_per_eight
                 );
                 assert_full_meter_arms_equal(on, off, &context);
                 assert_eq!(
                     on.rendered.4.len() as u64,
-                    8 * windows,
+                    eights * windows,
                     "{context}: every meter publishes every whole window of its own period"
                 );
                 assert_eq!(
@@ -11127,12 +11167,12 @@ mod tests {
                 );
                 assert_eq!(
                     (on.merges, off.merges),
-                    (8 * inside(384), 8 * inside(384)),
+                    (eights * inside(384), eights * inside(384)),
                     "{context}: the SAMPLE_PEAK meters merge every block their windows hold"
                 );
                 assert_eq!(
                     on.commits,
-                    8 * commits_per_eight,
+                    eights * commits_per_eight,
                     "{context}: tracks 0, 1, 2 and 6 commit every block their windows hold, \
                      the non-energy tracks 1 and 2 included"
                 );
@@ -12053,6 +12093,38 @@ mod tests {
             caps: integration_caps(),
         })
         .unwrap_or_else(|_| panic!("production selected-meter console graph"))
+    }
+
+    /// Tracks of the console the bank meter-pass tests render (issue #1049): the smallest
+    /// console whose banks still reach every arm of the pass -- one full cohort at the eight-lane
+    /// width, two at the four-lane one, and the mixed-periods test's eight-meter pattern once. They
+    /// ran on all 64 tracks of the intended console before.
+    const METER_CONSOLE_TRACKS: u64 = 8;
+
+    /// The intended 64-track console's first `tracks` tracks, each with its route to the master.
+    fn intended_console(tracks: u64) -> session::SessionModel {
+        let mut model = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
+            .expect("intended fixture");
+        model
+            .tracks
+            .truncate(usize::try_from(tracks).expect("a track count"));
+        let kept: BTreeSet<String> = model
+            .tracks
+            .iter()
+            .map(|track| track.id.as_str().to_owned())
+            .collect();
+        model.routes.retain(|route| {
+            matches!(
+                &route.source,
+                RouteSource::Track { track_id, .. } if kept.contains(track_id.as_str())
+            )
+        });
+        assert_eq!(
+            model.routes.len() as u64,
+            tracks,
+            "one master route per kept track"
+        );
+        model
     }
 
     /// One `PostMatrix` meter per track of `model`, selecting `metrics`, with no ballistics:
@@ -15771,8 +15843,12 @@ mod tests {
         assert!(pcm[frames + 1..].iter().all(|sample| *sample == 0.0));
     }
 
+    /// Two in-process recompiles, not the 100 this ran before issue #1049: repeats inside one
+    /// process share its hash seeds, so more of them see nothing more. Determinism across fresh
+    /// processes is `scripts/check-graph-determinism.sh`'s: 100 of them, in `qualification.yml`'s
+    /// `audit-native` job.
     #[test]
-    fn canonical_artifacts_are_complete_and_repeatable_100_times() {
+    fn canonical_artifacts_are_complete_and_repeatable() {
         let baseline = compile_fixture(0);
         // #99 F5: the evidence is produced here, by an explicit call, not carried by the report.
         let baseline_evidence = GraphCompiler::evidence(baseline.graph(), baseline.report());
@@ -15808,7 +15884,7 @@ mod tests {
             GraphCompiler::sha256(baseline.graph(), baseline.report()),
             baseline_evidence.sha256
         );
-        for plan_id in 1..=100 {
+        for plan_id in 1..=2 {
             let candidate = compile_fixture(plan_id);
             let evidence = GraphCompiler::evidence(candidate.graph(), candidate.report());
             assert_eq!(evidence.canonical_bytes, baseline_evidence.canonical_bytes);

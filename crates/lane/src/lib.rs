@@ -37,6 +37,10 @@
 //! on the two targets where that instruction is D8 exactly; the difference between borrowing a
 //! semantics and borrowing an instruction is argued case by case in `wide_impl.rs`.
 //!
+//! The `f32` lane is live code at every width: it is each effect's one-lane leg and every frame
+//! loop's tail. Selecting it for a *whole plan* is not: `Backend::Scalar` exists only with this
+//! crate's `test-support` feature, as the oracle vector banking is tested against (issue #1059).
+//!
 //! # `f64` lanes
 //!
 //! The owner ruling of 2026-09-26 -- "We shouldn't leave scalar arithmetic where vector arithmetic

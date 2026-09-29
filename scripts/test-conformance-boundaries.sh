@@ -2,7 +2,7 @@
 set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 scratch=$(mktemp -d); trap 'rm -rf -- "$scratch"' EXIT
-base="$scratch/base"; work="$scratch/work"; checker="${CHECKER:-$root/scripts/check-conformance-boundaries.sh}"
+base="$scratch/base"; work="$scratch/work"; checker="$root/scripts/check-conformance-boundaries.sh"
 mkdir -p "$base"/{crates,hosts,tools} "$base/crates/dsp-reference/src" "$base/crates/conformance/src" "$base/tools/bench/src"
 printf '[package]\nname = "dsp-reference"\n[lib]\nname = "dsp_reference"\n' >"$base/crates/dsp-reference/Cargo.toml"
 printf 'pub fn oracle() {}\n' >"$base/crates/dsp-reference/src/lib.rs"
@@ -132,33 +132,4 @@ reset; rm "$work/crates/protocol/src/controller/tests.rs"; if require_protocol_f
 reset; sed -i '/^#\[cfg(test)\]$/d' "$work/crates/protocol/src/controller.rs"; fail 'crates/protocol/src/controller.rs must contain exactly one literal adjacent' bash "$checker" "$work"
 reset; sed -i 's/^#\[cfg(test)\]$/#[cfg(any(test))]/' "$work/crates/protocol/src/message_wire.rs"; fail 'crates/protocol/src/message_wire.rs must contain exactly one literal adjacent' bash "$checker" "$work"
 reset; printf 'use conformance::complete_schema_corpus;\n' >>"$work/crates/protocol/src/session_wire.rs"; fail 'protocol production code must not use a harness crate' bash "$checker" "$work"
-
-# The workspace-sort status assertion must reject a scratch-only helper that swallows a failing
-# `sort` status. The mutation touches only the copied helper; the candidate checker and fixture
-# remain byte-identical, and the same workspace discriminator drives the red assertion.
-if [[ -z ${MUTANT_RUN:-} ]]; then
-  sort_mutant_root="$scratch/sort-status-mutant/scripts"; mkdir -p "$sort_mutant_root/lib"
-  cp "$checker" "$sort_mutant_root/check-conformance-boundaries.sh"; cp "$root/scripts/lib/gate.sh" "$sort_mutant_root/lib/gate.sh"
-  sed -i '/^gate_sort_lines()/,/^}/ s/else rc=\$?/else rc=0/' "$sort_mutant_root/lib/gate.sh"
-  if MUTANT_RUN=1 CHECKER="$sort_mutant_root/check-conformance-boundaries.sh" bash "$root/scripts/test-conformance-boundaries.sh" >"$scratch/sort-status-mutant.log" 2>&1; then
-    echo 'workspace sort fail-open mutant escaped focused acceptance' >&2; exit 1
-  else
-    sort_mutant_rc=$?
-  fi
-  rg -q 'wrong conformance diagnostic for workspace library manifest discovery sort errored' "$scratch/sort-status-mutant.log" || {
-    echo 'workspace sort mutant failed outside intended assertion' >&2
-    cat "$scratch/sort-status-mutant.log" >&2
-    exit 1
-  }
-  printf 'counter-mutant rejected: workspace gate_sort_lines status (status %s)\n' "$sort_mutant_rc"
-fi
-
-# The directed module assertion must reject Astra's exact fail-open consumer mutant.
-if [[ -z ${MUTANT_RUN:-} ]]; then
-  mutant_root="$scratch/module-mutant/scripts"; mkdir -p "$mutant_root/lib"; cp "$checker" "$mutant_root/check-conformance-boundaries.sh"; cp "$root/scripts/lib/gate.sh" "$mutant_root/lib/gate.sh"
-  sed -i '/module_probe=.*gate_scan_collect/,/)" || exit \$?/ s/|| exit \$?/|| true/' "$mutant_root/check-conformance-boundaries.sh"
-  if MUTANT_RUN=1 CHECKER="$mutant_root/check-conformance-boundaries.sh" bash "$root/scripts/test-conformance-boundaries.sh" >"$scratch/module-mutant.log" 2>&1; then echo 'module fail-open mutant escaped focused acceptance' >&2; exit 1; else mutant_rc=$?; fi
-  rg -q 'conformance fixture unexpectedly passed: engine dsp_reference module probe' "$scratch/module-mutant.log" || { echo 'module mutant failed outside intended assertion' >&2; cat "$scratch/module-mutant.log" >&2; exit 1; }
-  printf 'counter-mutant rejected: module consumer (status %s)\n' "$mutant_rc"
-fi
 printf 'conformance boundary fixtures: ok\n'

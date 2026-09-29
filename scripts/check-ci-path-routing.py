@@ -11,6 +11,9 @@ from __future__ import annotations
 
 import argparse
 import ast
+import functools
+import importlib.util
+import os
 import pathlib
 import re
 import shlex
@@ -42,6 +45,26 @@ RELEASE_INPUT_FILES = {
     ".cargo/config.toml",
     "scripts/check-release-shape.py",
 }
+# Issue #1043: the script-gate self-test suites. On a pull request each runs in qualification.yml's
+# `gate-self-tests` job only when a changed path hits its key (ci-path-router.py SELF_TEST_INPUTS,
+# in this order), and every night in nightly.yml's `moved-mutation-suites`; its gate runs on every
+# change. Per suite: the job that runs its gate, the gate command, and the self-test commands.
+SELF_TEST_SUITES = {
+    "env-vocabulary": ("lint", "bash scripts/check-env-vocabulary.sh",
+                       ("bash scripts/test-env-vocabulary.sh",)),
+    "conformance-boundaries": ("lint", "bash scripts/check-conformance-boundaries.sh",
+                               ("bash scripts/test-conformance-boundaries.sh",)),
+    "console-benchmark": ("lint", "bash scripts/check-bench-preconditions.sh",
+                          ("bash scripts/test-console-benchmark.sh",)),
+    "sdk-deletions": ("sdk", "python3 -B scripts/check-sdk-deletions.py",
+                      ("python3 -B scripts/check-sdk-deletions.py --self-test",)),
+    "dsp-research": ("docs-gates", "bash scripts/check-dsp-research.sh",
+                     ("bash scripts/test-dsp-research.sh",)),
+}
+SELF_TEST_SHARED_INPUTS = {".github/workflows/qualification.yml"}
+# The mention rule scripts/check-script-reachability.py (#1027) applies to every workflow-reached
+# script: a basename on a line that is not a comment, and a jq `include`/`import` module.
+REACHABILITY_CHECKER = "scripts/check-script-reachability.py"
 
 
 class Invalid(RuntimeError):
@@ -65,6 +88,7 @@ def section(text: str, header: str, next_headers: tuple[str, ...]) -> str:
     return tail[:end]
 
 
+@functools.lru_cache(maxsize=None)
 def job(text: str, name: str) -> str:
     jobs = section(text, "jobs:", ())
     match = re.search(rf"^  {re.escape(name)}:\n", jobs, re.MULTILINE)
@@ -174,6 +198,108 @@ def check_classifier_contract(root: pathlib.Path) -> None:
             and isinstance(command.elts[3].value, ast.Name)
             and command.elts[3].value.id == "revisions",
             "ci-path-router.py: production Git diff must consume the pinned option tuple exactly")
+    check_self_test_inputs(root, tree)
+
+
+def literal_strings(node: ast.expr | None) -> list[str] | None:
+    """The elements of a literal set, tuple or list of string constants, or None."""
+    if not isinstance(node, (ast.Set, ast.Tuple, ast.List)):
+        return None
+    values = [element.value for element in node.elts
+              if isinstance(element, ast.Constant) and isinstance(element.value, str)]
+    return values if len(values) == len(node.elts) else None
+
+
+def suite_scripts(commands: tuple[str, ...]) -> list[str]:
+    """The repository scripts a suite's commands run."""
+    return sorted({word for command in commands for word in shlex.split(command)
+                   if word.startswith("scripts/")})
+
+
+def key_covers(key: set[str], path: str) -> bool:
+    return any(path == entry or (entry.endswith("/") and path.startswith(entry)) for entry in key)
+
+
+def reachability_rule(root: pathlib.Path):
+    source = root / REACHABILITY_CHECKER
+    require(source.is_file(), f"{REACHABILITY_CHECKER} is missing: the self-test keys are checked "
+            "with its mention rule")
+    spec = importlib.util.spec_from_file_location("script_reachability", source)
+    require(spec is not None and spec.loader is not None, f"cannot load {REACHABILITY_CHECKER}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# The mentions of each (script, text) already scanned: a pure function of the text, kept so the
+# mutation tests' in-process runs do not rescan unchanged scripts.
+MENTIONS: dict[tuple[str, str], set[str]] = {}
+
+
+def mention_closure(root: pathlib.Path, reachability):
+    """A function from seed scripts to every file under scripts/ they mention, transitively through
+    the scripts they mention, by the reachability rule's own definition of a mention (#1027)."""
+    by_name: dict[str, list[str]] = {}
+    for directory, subdirectories, files in os.walk(root / "scripts"):
+        subdirectories[:] = sorted(name for name in subdirectories if name != "__pycache__")
+        relative = pathlib.Path(directory).relative_to(root).as_posix()
+        for name in sorted(files):
+            by_name.setdefault(name, []).append(f"{relative}/{name}")
+
+    def mentioned(current: str) -> set[str]:
+        path = root / current
+        if not current.endswith(reachability.CARRIER_SUFFIXES) or not path.is_file():
+            return set()
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if (current, text) not in MENTIONS:
+            MENTIONS[(current, text)] = reachability.mentioned(current, text)
+        return MENTIONS[(current, text)]
+
+    def closure(seeds: list[str]) -> set[str]:
+        reached = set(seeds)
+        frontier = sorted(reached)
+        while frontier:
+            current = frontier.pop()
+            for name in mentioned(current):
+                for target in by_name.get(name, ()):
+                    if target not in reached:
+                        reached.add(target)
+                        frontier.append(target)
+        return reached
+
+    return closure
+
+
+def check_self_test_inputs(root: pathlib.Path, tree: ast.Module) -> None:
+    """Issue #1043: each self-test suite's router key is every file the suite reads, not only its
+    gate (amendment 4). Every script the suite runs, and every script under scripts/ those mention
+    -- the gate, `lib/gate.sh`, jq libraries, validators, runners -- must be in its key, so an edit
+    to any of them runs the suite. A tree read wholesale (the SDK self-test reads `sdk/`) is a
+    prefix entry the rule cannot derive; the evidence in the spec records it."""
+    table = router_assign(tree, "SELF_TEST_INPUTS")
+    require(isinstance(table, ast.Dict),
+            "ci-path-router.py: SELF_TEST_INPUTS must be a literal dict")
+    suites = [key.value if isinstance(key, ast.Constant) else None for key in table.keys]
+    require(suites == list(SELF_TEST_SUITES),
+            "ci-path-router.py: SELF_TEST_INPUTS must name exactly the self-test suites "
+            f"{list(SELF_TEST_SUITES)}, in that order")
+    shared = literal_strings(router_assign(tree, "SELF_TEST_SHARED_INPUTS"))
+    require(isinstance(router_assign(tree, "SELF_TEST_SHARED_INPUTS"), ast.Set)
+            and shared is not None and set(shared) == SELF_TEST_SHARED_INPUTS,
+            "ci-path-router.py: SELF_TEST_SHARED_INPUTS must be exactly the workflow hosting the "
+            "self-test job")
+    closure = mention_closure(root, reachability_rule(root))
+    for suite, value in zip(suites, table.values):
+        entries = literal_strings(value)
+        require(isinstance(value, ast.Set) and entries is not None and entries
+                and len(set(entries)) == len(entries),
+                f"ci-path-router.py: SELF_TEST_INPUTS[{suite!r}] must be a literal set of paths")
+        key = set(entries)
+        missing = sorted(path for path in closure(suite_scripts(SELF_TEST_SUITES[suite][2]))
+                         if not key_covers(key, path))
+        require(not missing,
+                f"ci-path-router.py: SELF_TEST_INPUTS[{suite!r}] misses files its suite reads: "
+                + ", ".join(missing))
 
 
 def check_qualification_no_path_filter(text: str) -> None:
@@ -297,10 +423,10 @@ TEST_SUPPORT_CI_LINES = (
     "python3 -B scripts/test-test-support-ci.py\n",
 )
 
+# check-sdk-deletions.py's --self-test moved to `gate-self-tests` (#1043); SELF_TEST_SUITES pins it.
 SDK_CLOSURE_LINES = (
     "bash scripts/check-sdk-generated.sh",
     "python3 -B scripts/check-sdk-deletions.py",
-    "python3 -B scripts/check-sdk-deletions.py --self-test",
     "bash scripts/check-sdk-types.sh",
     "bash scripts/check-sdk-headless.sh target/ci/qualification-artifacts",
     "bash scripts/sdk-package.sh check target/ci/qualification-artifacts",
@@ -725,6 +851,94 @@ def check_qualification_aarch64_g5(text: str, names: list[str]) -> None:
             "(g5_native_digests_match_pins)")
 
 
+SELF_TEST_JOB = "gate-self-tests"
+SELF_TEST_JOB_HEAD = "    needs: route\n    if: needs.route.outputs.self_tests != '[]'\n"
+SELF_TEST_STEP_IF = "contains(fromJSON(needs.route.outputs.self_tests), '{suite}')"
+SELF_TEST_ROUTE_LINES = (
+    "      self_tests: ${{ steps.classify.outputs.self_tests }}\n",
+    '            | tail -n 4 >> "$GITHUB_OUTPUT"\n',
+)
+SELF_TEST_VERDICT_LINES = (
+    "      SELF_TESTS: ${{ needs.route.outputs.self_tests }}\n",
+    '          [[ "$SELF_TESTS" =~ ^\\[(\\"[a-z-]+\\"(,\\"[a-z-]+\\")*)?\\]$ ]] || '
+    '{ echo "malformed self_tests: $SELF_TESTS" >&2; exit 1; }\n',
+    "          self_tests_expected=skipped\n",
+    "          [[ \"$SELF_TESTS\" != '[]' ]] && self_tests_expected=success\n",
+    '          check gate-self-tests "$GATE_SELF_TESTS_RESULT" "$self_tests_expected"\n',
+)
+NIGHTLY_SELF_TEST_JOB = "moved-mutation-suites"
+NIGHTLY_STEP_IF = "${{ !cancelled() }}"
+STEP_IF = re.compile(r"^        if: (.*)$", re.MULTILINE)
+
+
+def step_if(step: str) -> str | None:
+    match = STEP_IF.search(step)
+    return match.group(1).strip() if match else None
+
+
+def check_qualification_self_tests(text: str) -> None:
+    """Issue #1043: each self-test suite runs in `gate-self-tests` exactly when the router selects
+    it, the job runs exactly when the router selects any, the verdict expects success then and
+    `skipped` otherwise, and every suite's gate still runs in an unconditional step of its per-PR
+    job. Dropping a suite's step, widening or narrowing its condition, masking it, or dropping a
+    gate from its per-PR job would each take a discrimination out of CI with every job green."""
+    route = job(text, "route")
+    for line in SELF_TEST_ROUTE_LINES:
+        require(line in route, f"qualification.yml: route job is missing {line.strip()!r}")
+    block = job(text, SELF_TEST_JOB)
+    require(SELF_TEST_JOB_HEAD in block,
+            f"qualification.yml: {SELF_TEST_JOB} must need route and run exactly when the router "
+            "selects a suite")
+    require(UNMASKABLE.search(block) is None,
+            f"qualification.yml: {SELF_TEST_JOB} must carry no job-level continue-on-error, "
+            "defaults or env")
+    steps = job_steps(block)
+    conditions = {SELF_TEST_STEP_IF.format(suite=suite): suite for suite in SELF_TEST_SUITES}
+    for step in steps:
+        condition = step_if(step)
+        require(condition is None or condition in conditions,
+                f"qualification.yml: {SELF_TEST_JOB} step has an unexpected condition "
+                f"{condition!r}")
+        require("continue-on-error:" not in step,
+                f"qualification.yml: {SELF_TEST_JOB} steps must not continue on error")
+    for suite, (host, gate, commands) in SELF_TEST_SUITES.items():
+        selected = [step for step in steps
+                    if step_if(step) == SELF_TEST_STEP_IF.format(suite=suite)]
+        require(len(selected) == 1,
+                f"qualification.yml: {SELF_TEST_JOB} must run suite {suite!r} in exactly one step "
+                "conditioned on the router selecting it")
+        require(step_commands(selected[0]) == list(commands),
+                f"qualification.yml: {SELF_TEST_JOB}'s {suite!r} step must run exactly {commands}")
+        require(gate in unconditional_step_commands(job(text, host)),
+                f"qualification.yml: {host} must still run the {suite!r} gate `{gate}` "
+                "unconditionally")
+    verdict = job(text, "verdict")
+    for line in SELF_TEST_VERDICT_LINES:
+        require(line in verdict, f"qualification.yml: verdict is missing {line.strip()!r}")
+
+
+def check_nightly_self_tests(root: pathlib.Path) -> None:
+    """Issue #1043: every self-test suite runs every night, in a job the failure notice reports,
+    each step running even after another failed, none masked."""
+    text = (root / ".github/workflows/nightly.yml").read_text(encoding="utf-8")
+    block = job(text, NIGHTLY_SELF_TEST_JOB)
+    require(job_if(block) is None and UNMASKABLE.search(block) is None,
+            f"nightly: {NIGHTLY_SELF_TEST_JOB} must run every night, unmasked")
+    steps = job_steps(block)
+    for suite, (_, _, commands) in SELF_TEST_SUITES.items():
+        for command in commands:
+            require(any(command in step_commands(step)
+                        and step_if(step) in (None, NIGHTLY_STEP_IF)
+                        and "continue-on-error:" not in step for step in steps),
+                    f"nightly: {NIGHTLY_SELF_TEST_JOB} must run `{command}` ({suite}) every night, "
+                    f"unmasked, unconditionally or under {NIGHTLY_STEP_IF}")
+    notice = job(text, "failure-notice")
+    needs = re.search(r"^    needs: \[(.*?)\]", notice, re.MULTILINE | re.DOTALL)
+    require(needs is not None and NIGHTLY_SELF_TEST_JOB in
+            [name.strip() for name in needs.group(1).replace("\n", " ").split(",")],
+            f"nightly: failure-notice must report {NIGHTLY_SELF_TEST_JOB}")
+
+
 def check_qualification_workflow(root: pathlib.Path) -> None:
     text = (root / ".github/workflows/qualification.yml").read_text(encoding="utf-8")
     check_qualification_no_path_filter(text)
@@ -746,6 +960,7 @@ def check_qualification_workflow(root: pathlib.Path) -> None:
     check_qualification_aarch64(text)
     check_qualification_native_g5(text)
     check_qualification_aarch64_g5(text, names)
+    check_qualification_self_tests(text)
 
 
 RETIRED_WORKFLOWS = ("ci.yml", "sdk.yml", "browser-qualification.yml", "release-build.yml")
@@ -796,6 +1011,7 @@ def check(root: pathlib.Path) -> None:
     check_qualification_workflow(root)
     check_cross_target_aarch64_rows(root)
     check_nightly_budgets(root)
+    check_nightly_self_tests(root)
 
 
 def main() -> int:
