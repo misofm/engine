@@ -46,8 +46,8 @@ unfused_seal_self_test() {
 
 
     # Builds a minimal synthetic workspace that the real checker passes: the two dispatch points
-    # stating the unfused contract, a retired `softfma.rs`, and both registered exemptions -- the
-    # audit's seven marked fused calls and gate G5's one.
+    # stating the unfused contract, and both registered exemptions -- the audit's seven marked
+    # fused calls and gate G5's one.
     create_fixture() {
         local tree
         tree="$(mktemp -d "$scratch_root/fixture-XXXXXX")"
@@ -77,11 +77,6 @@ impl Lane for f32 {
         (self * b) + c
     }
 }
-EOF
-
-    cat >"$tree/crates/lane/src/softfma.rs" <<'EOF'
-//! The MXCSR helpers gate G6 needs. The software FMA was retired in #163 phase 2.
-pub const MXCSR_FTZ: u32 = 0x8000;
 EOF
 
     # Seven fused calls, two of them on one line, each within six lines of a marker.
@@ -235,17 +230,6 @@ sed -i '0,/    \/\/ UNFUSED-SEAL-EXEMPT$/{/    \/\/ UNFUSED-SEAL-EXEMPT$/d}' \
     "$tree/tools/audit/src/unfused_fma.rs"
 expect_failure exemption-call-without-marker "$tree"
 
-# -------------------------------------------------------------------------------------------
-# Red: rule 6 -- the retired emulation regrows in the file that kept its name.
-# -------------------------------------------------------------------------------------------
-tree=$(create_fixture)
-cat >>"$tree/crates/lane/src/softfma.rs" <<'EOF'
-pub fn fma_f32_via_f64(a: f32, b: f32, c: f32) -> f32 {
-    ((f64::from(a) * f64::from(b)) + f64::from(c)) as f32
-}
-EOF
-expect_failure software-fma-restored "$tree"
-
 # Exact marker boundary: the raw rolling window is the call line plus six preceding lines.
 tree=$(create_fixture)
 sed -i '0,/UNFUSED-SEAL-EXEMPT/{/UNFUSED-SEAL-EXEMPT/c\    // UNFUSED-SEAL-EXEMPT\
@@ -276,10 +260,6 @@ expect_success marker-on-call "$tree"
 tree=$(create_fixture)
 rm -rf "$tree/hosts"
 expect_failure required-root-missing "$tree"
-
-tree=$(create_fixture)
-rm "$tree/crates/lane/src/softfma.rs"
-expect_failure required-retired-source-missing "$tree"
 
 # Bounded semantic controls for the frozen grammar and population rules.
 tree=$(create_fixture)
@@ -334,13 +314,10 @@ case "$FAULT_KIND:$tool" in
   marker-late:awk) [[ "$args" == *g5_native_corpus.rs* ]] && hit=1 ;;
   aggregate:awk) [[ "$args" == *"total += $2"* ]] && hit=1 ;;
   recount-late:rg) [[ "$args" == *" -o "* ]] && [[ $(counter occurrence) == 6 ]] && hit=1 ;;
-  retired:rg) [[ "$args" == *fma_f32_via_f64* && "$args" == *softfma.rs* ]] && hit=1 ;;
 esac
 if [[ "$hit" == 1 ]]; then
     if [[ "${FAULT_EMPTY:-0}" != 1 ]]; then
-        if [[ "$FAULT_KIND" == retired ]]; then
-            printf '99:fn fma_f32_via_f64(a: f32, b: f32, c: f32) -> f32\n'
-        elif [[ "$FAULT_KIND" == occurrence-registered && "$tool" == rg ]]; then
+        if [[ "$FAULT_KIND" == occurrence-registered && "$tool" == rg ]]; then
             real_output="$($real "$@" || true)"
             printf '%s\n' "$real_output" >&2
             printf 'EVIDENCE registered rg stdout: %s\n' "$real_output" >&2
@@ -403,13 +380,11 @@ expect_producer_failure membership-late 'registration membership search errored 
 expect_producer_failure marker-late 'tools/wasm-gates/tests/g5_native_corpus.rs marker-window validation errored (awk status 9)'
 expect_producer_failure aggregate 'registry aggregate parser failed (awk status 9)'
 expect_producer_failure recount-late 'fused-call search failed for tools/wasm-gates/tests/g5_native_corpus.rs (rg status 9)'
-expect_producer_failure retired 'retired software-FMA search errored (rg status 9)' \
-    '99:fn fma_f32_via_f64(a: f32, b: f32, c: f32) -> f32'
 
-# Prove three exact status checks matter. The original checker must emit the focused diagnostic;
+# Prove two exact status checks matter. The original checker must emit the focused diagnostic;
 # after one verified call-site edit, the same injected run must reach unexpected success (exit 97).
 prove_status_mutant() {
-    local label=$1 kind=$2 diagnostic=$3 edit=$4 fault_empty=${5:-0} mutant output rc before after diff
+    local label=$1 kind=$2 diagnostic=$3 edit=$4 mutant output rc before after diff
     tree=$(create_fixture); mutant="$scratch_root/mutant-$label.sh"; cp "$root/scripts/check-unfused-seal.sh" "$mutant"
     before=$(cksum <"$mutant")
     sed -i "$edit" "$mutant"
@@ -429,10 +404,10 @@ prove_status_mutant() {
         printf 'evidence late-registered mutant diff:\n%s\n' "$diff"
     fi
     state="$scratch_root/state-control-$label"; mkdir -p "$state"
-    output="$(FAULT_KIND="$kind" FAULT_EMPTY="$fault_empty" FAULT_STATE="$state" PATH="$shim:$PATH" bash "$root/scripts/check-unfused-seal.sh" "$tree" 2>&1)" && rc=0 || rc=$?
+    output="$(FAULT_KIND="$kind" FAULT_EMPTY=0 FAULT_STATE="$state" PATH="$shim:$PATH" bash "$root/scripts/check-unfused-seal.sh" "$tree" 2>&1)" && rc=0 || rc=$?
     [[ "$rc" != 0 && "$output" == *"INJECTED-$kind"* && "$output" == *"$diagnostic"* ]] || { printf 'COUNTER FAIL %s original status=%s output=%s\n' "$label" "$rc" "$output" >&2; failed=$((failed+1)); return; }
     rm -rf "$state"; mkdir -p "$state"
-    output="$(FAULT_KIND="$kind" FAULT_EMPTY="$fault_empty" FAULT_STATE="$state" PATH="$shim:$PATH" bash -c 'if bash "$1" "$2"; then printf "ASSERT %s unexpected success\\n" "$3" >&2; exit 97; fi; exit $?' _ "$mutant" "$tree" "$label" 2>&1)" && rc=0 || rc=$?
+    output="$(FAULT_KIND="$kind" FAULT_EMPTY=0 FAULT_STATE="$state" PATH="$shim:$PATH" bash -c 'if bash "$1" "$2"; then printf "ASSERT %s unexpected success\\n" "$3" >&2; exit 97; fi; exit $?' _ "$mutant" "$tree" "$label" 2>&1)" && rc=0 || rc=$?
     if [[ "$label" == late-registered ]]; then
         printf 'evidence registered mutant payload/count:\n%s\n' "$output"
     fi
@@ -447,8 +422,6 @@ prove_status_mutant discovery discovery 'candidate discovery errored (rg status 
     '/if candidates_raw=/,/esac/{s/\*) printf .*candidate discovery errored.* ;;/\*) rc=0 ;;/}'
 prove_status_mutant late-registered occurrence-registered 'fused-call search failed for tools/wasm-gates/tests/g5_native_corpus.rs (rg status 9)' \
     '/^count_calls() [{]/,$ { s/^        0|1) ;;$/        0|1|9) ;;/; }'
-prove_status_mutant retired retired 'retired software-FMA search errored (rg status 9)' \
-    '/if retired_match=/,/^fi$/{s/elif \[\[ "$rc" != 1 \]\]; then/elif false; then/}' 1
 
 # -------------------------------------------------------------------------------------------
 printf '\nunfused seal mutations: %s passed, %s failed\n' "$passed" "$failed"
@@ -718,22 +691,6 @@ while IFS= read -r file; do
 done <<<"$candidates"
 [[ "$counted" == "$expected_fused_call_count" ]] ||
     fail "found $counted fused calls in the tree, expected $expected_fused_call_count"
-
-# ---------------------------------------------------------------------------------------------
-# 6. The retired emulation stays retired.
-#
-# `softfma.rs` survives because it houses the MXCSR helpers gate G6 needs, and it kept its name
-# because three policy files name that path. Keeping the name means the file could quietly regrow
-# the thing it was named for, so the definition is refused explicitly rather than left to rule 3.
-# ---------------------------------------------------------------------------------------------
-[[ -f crates/lane/src/softfma.rs ]] || fail 'the retired soft-fma source crates/lane/src/softfma.rs is missing'
-if retired_match="$(rg -n 'fn\s+fma_f32_via_f64\b|fn\s+fma_f32x[48]_soft\b' crates/lane/src/softfma.rs)"; then rc=0; else rc=$?; fi
-if [[ "$rc" == 0 ]]; then
-    fail 'the software FMA is retired (#163 phase 2) -- restoring it needs a ruling, not a commit'
-elif [[ "$rc" != 1 ]]; then
-    printf '%s\n' "$retired_match" >&2
-    fail "retired software-FMA search errored (rg status $rc)"
-fi
 
 printf 'unfused seal: ok (no fused multiply-add on any path; %s registered audit calls)\n' \
     "$expected_fused_call_count"

@@ -19,13 +19,10 @@ source=crates/parametric-eq/src
 
 [[ -f "$source/lib.rs" ]] || fail 'crate source is missing'
 
-# Render-path constructs the audit removed. Production source only: the acceptance gates in
-# `tests/` legitimately name the bank backend enumeration and the reference oracle.
+# Render-path constructs the audit removed, banned in production source only. #1050 dropped the
+# deleted delta-bank kernel's four names: a ban on a deleted name catches only an exact re-add, and
+# the lane-division ban below already refuses the defect that made that kernel wrong.
 forbidden=(
-    'PreparedDeltaBankKernelV1'
-    'DeltaBankKernelError'
-    'KernelBackendV1'
-    'process_delta'
     'sanitize_sample'
     'is_normal'
     'is_subnormal'
