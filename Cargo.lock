@@ -944,7 +944,6 @@ dependencies = [
  "builtins-compiler",
  "effect-contract",
  "engine",
- "graph",
  "host-core",
  "lane",
  "math",

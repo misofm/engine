@@ -48,17 +48,17 @@ function wordAt(block, name) {
   return row.type === "u64" ? view.getBigUint64(row.offset, true) : view.getUint32(row.offset, true);
 }
 
-test("protected observation generated offsets preserve BigInt", () => {
+test("generated u64 offsets preserve BigInt", () => {
   const memory = new WebAssembly.Memory({ initial: 1 });
   const leaves = [
-    { structure: "observationCaptureIdentity", name: "owner", value: 0x0020_0000_0000_0001n },
-    { structure: "observationCaptureIdentity", name: "observationGeneration", value: 0x0040_0000_0000_0003n },
-    { structure: "observationCaptureIdentity", name: "selectionEpoch", value: 0x0080_0000_0000_0005n },
-    { structure: "observationCaptureIdentity", name: "snapshotToken", value: 0x0100_0000_0000_0007n },
-    { structure: "observationPreparation", name: "ingressLimits.maximumRetainedBytes", value: 0x0200_0000_0000_0009n },
-    { structure: "observationAdmission", name: "receipt.owner", value: 0x0400_0000_0000_000bn },
-    { structure: "observationAdmission", name: "receipt.sequence", value: 0xffff_ffff_ffff_ffd1n },
-    { structure: "observationAdmission", name: "receipt.applicationSample", value: 0xffff_ffff_ffff_fff1n },
+    { structure: "spectrumStreamMetadata", name: "captureEpoch", value: 0x0020_0000_0000_0001n },
+    { structure: "spectrumStreamMetadata", name: "analysisEpoch", value: 0x0040_0000_0000_0003n },
+    { structure: "spectrumStreamMetadata", name: "historyStartSample", value: 0x0080_0000_0000_0005n },
+    { structure: "liveResponseResult", name: "snapshotToken", value: 0x0100_0000_0000_0007n },
+    { structure: "liveResponseResult", name: "capturedSample", value: 0x0200_0000_0000_0009n },
+    { structure: "observationResult", name: "firstSample", value: 0x0400_0000_0000_000bn },
+    { structure: "observationResult", name: "sequence", value: 0xffff_ffff_ffff_ffd1n },
+    { structure: "observationResult", name: "endSample", value: 0xffff_ffff_ffff_fff1n },
   ];
   const structures = [...new Set(leaves.map(({ structure }) => structure))];
   const pointers = new Map();
