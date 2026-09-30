@@ -610,10 +610,7 @@ fn bindable_slot_members(
     // Lane `i` runs its own chain in order, so the leader slot maps to the lane's slot by
     // the rank of `slot` among that lane's active positions.
     let mut members = Vec::with_capacity(active);
-    for (lane, id) in group.members.iter().take(active).enumerate() {
-        let Some(id) = id.as_ref() else {
-            return Err(diag("graph.internal.invariant", "$.effects"));
-        };
+    for (lane, id) in group.members.iter().flatten().enumerate() {
         let rank = group.active_slots[lane][..slot]
             .iter()
             .filter(|active| **active)

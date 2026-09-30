@@ -906,7 +906,8 @@ pub struct PrepareEffectRequest<'a> {
 /// A bank binds `members <= lanes` tracks, where `members` is the number of `true` entries of
 /// [`active_mask`](Self::active_mask). A lane whose entry is `false` is a **padded** lane: it carries
 /// no track, and it exists so that a partial group can still be one bank of the build's width. The
-/// contract has four clauses, and every one of them is owed by both sides:
+/// contract has four clauses. The caller (the planner and the rack) owes the clone and a `+0.0`
+/// feed into the first slot of a chain; a factory that accepts padding owes the rest:
 ///
 /// * **A padded lane carries a clone of an active member's prepared request, never zeros.** There is
 ///   still one request per lane, so `requests.len() == lanes` holds for every bank. The clone shares
