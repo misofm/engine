@@ -224,3 +224,125 @@ CI's `artifact-identity` twin adds the `CARGO_HOME` variation.
   covers the build's two outputs.
 - The new `test-ci-path-routing.py` mutation goes red when `artifact-gates` stops verifying the
   twin's download before the V8 gate reads it.
+
+## Sol verdict, attempt 1
+
+**PASS.** Sol, 2026-09-30, on `a9d06569` (`65b513b1` is the change). Every claim below was re-run
+independently; nothing was taken from the attempt's evidence.
+
+**The owner's condition holds.**
+- No shipped JS, SDK source or codegen reads `.stack`, `customSections`, `wasm-function`,
+  `captureStackTrace`/`prepareStackTrace` or `console.trace`. The host maps every failure to a
+  typed code, the worklet swallows a render trap into `RESULT_INTERNAL`, and the SDK's Workers
+  forward only `error.message`.
+- A probe module that traps, with and without a `name` section, in Node 22.23.2 and in Playwright's
+  Chromium 151, Firefox 153 and WebKit 26.5: in every engine the name appears only in `stack`, never
+  in `message` or `String(error)`. So a production error report loses nothing the app reads; only a
+  devtools stack prints `wasm-function[N]`.
+
+**1. The stripper is correct.**
+- An independent check agrees: `wasm-objdump -h` places `name` at `0x2c648a..0x32317a`, after
+  data, and `shipped == named[:0x2c648a] + named[0x32317a:]`. `wasm-validate` accepts both modules.
+- `check` compares every section's raw bytes (id, size encoding, payload) in order, so it equals
+  `shipped == strip(named)`.
+- Mutations planted in the real shipped module are all red, with a typed message:
+  - a code byte at `0x150000`;
+  - the last data byte;
+  - table and memory swapped (refused as out of order);
+  - `producers` moved first (still a valid module);
+  - the two kept custom sections swapped;
+  - an extra `name` section;
+  - one byte truncated.
+- Also red: a twin with a flipped code byte, and the twin passed as the shipped module.
+
+**2. The gates read a twin that is proven to be what ships.**
+- Build: one invocation writes both modules into a fresh `mktemp` target, so no cache, rebuild or
+  `RUSTFLAGS` can split the pair. The pair is also held by the check, whatever produced it.
+- CI: `artifact-gates` checks both downloads against the `artifact` job's digests, then runs
+  `check` on that exact pair (`qualification.yml:330`, and again at
+  `check-web-audioworklet.sh:198`).
+- Fed the shipped module, each gate refuses with its typed message:
+  - call graph (`--callgraph` and `--kernel-shape`): exit 1;
+  - scalar-oracle-absent: exit 1;
+  - V8 spill: exit 2.
+- On the twin all three pass: render closure=8 traps=5, 15 kernels; 2,502 symbols; 3 held loops.
+- `check-web-audioworklet.sh`: passes in both forms. It refuses a missing twin (exit 2), the
+  shipped module as the twin (exit 1) and a flipped-byte twin (exit 1).
+
+**3. Delivery.**
+- Every consumer gets `81c23a64…`:
+  - the delivery closure (7 files, the twin kept outside it);
+  - `sdk/dist` and its manifest;
+  - the browser qualification ("exact 7-file shipped set is pinned");
+  - the V8 harness (`--module-only`).
+- `npm-publish.yml` builds without `--named-twin` and uploads nothing named.
+- `docs/RELEASE.md` is accurate. The twin is a CI artifact only, and the rebuild recipe reproduces
+  it.
+
+**4. Reproducibility.** Two builds give the same digests:
+- one delivery build in the worktree;
+- one `--module-only --named-twin` build from a `git archive` at another path.
+
+Both give shipped `81c23a64…` (2,909,561 B) and twin `ac3a9353…` (3,289,705 B). The twin equals
+`7d030945`'s `audioworklet-sha256` record. Gzip -9: 978,081 → 926,514 B. `name` is 380,144 B;
+`producers` (79 B) and `target_features` (160 B) are kept.
+
+**5. CI routing.**
+- `test-ci-path-routing.py` and `check-ci-path-routing.py` pass.
+- A change to `strip-wasm-names.py` alone, or to the build script alone, routes `full` plus the
+  `console-benchmark` suite.
+- Deleting the new router entry fails the checker ("misses files its suite reads").
+
+**6. Test value.**
+- `strip-wasm-names.py --self-test` goes red when the stripper removes anything but `name`, or when
+  the check misses a changed byte, section, order or size encoding. Six of my mutants were red:
+  - strip keeps `name`;
+  - strip drops every custom section;
+  - check ignores custom sections;
+  - check ignores order;
+  - no end bound;
+  - no order rule.
+- The builder-contract additions go red when the build ships or digests the named module, writes
+  the shipped module as the twin, or skips validating the twin's directory. All five of my
+  build-script mutants were red.
+- The new routing mutation goes red when `artifact-gates` loses the twin's verification step
+  before the V8 gate. My mutants of the V8 line and of the build line were red.
+
+**7. Gates, all green.**
+- Browser qualification `--check-matrix --self-test-mutations`: Chromium, Firefox and WebKit all
+  pass on the shipped closure.
+- `check-browser-expected-resources.py --artifacts` passes.
+- The V8 harness preflight gives the same 7 arm and 2 document digests for `ac3a9353` and
+  `81c23a64`.
+- From a clean `npm ci`:
+  - `check-sdk-generated.sh`, `check-sdk-deletions.py` and `check-sdk-types.sh`;
+  - `check-sdk-headless.sh`;
+  - `sdk-package.sh check`;
+  - `test-web-audioworklet.sh`.
+- `run-wasm-gates.sh --without-native` passes, with its V8 leg on the twin.
+- All 32 `lint`-job run steps pass (installers skipped), and so do all five `gate-self-tests`
+  suites.
+
+**8. Merge with `codex/1110-drop-simd8-wasm` (`006cbfa9`).** `git merge-tree` is clean: no
+conflicts. Both branches edit `run-wasm-gates.sh`, in disjoint hunks.
+
+**Findings.** No H or M.
+- **L1.** No test covers the twin check's exit status or its wiring.
+  - Setting `main()`'s `except Invalid` return (`scripts/strip-wasm-names.py:364`) to 0 keeps the
+    self-test and the builder contract green, while `check` then exits 0 on a planted code flip.
+  - Neither caller of `check` (`check-web-audioworklet.sh:198`, `qualification.yml:330`) is pinned.
+  - The self-test plants its one-byte changes only at section ends (`:256`, `:264`), so a check
+    that skipped each section's leading bytes would survive.
+  - The code is correct today. A subprocess case on a mismatched pair and a mid-section flip would
+    pin it.
+- **L2.** `NAMED_TWIN_DIGEST_STEP` pins only the step's name and `env`
+  (`scripts/check-ci-path-routing.py:473-477`). Deleting the digest comparison inside the step stays
+  green, so the evidence's "goes red when artifact-gates stops verifying the twin's download"
+  overstates it. This is the existing `ARTIFACT_DIGEST_STEP` pattern, and `check` against the
+  digest-verified shipped module still guarantees the code.
+- **L3.** Stale or loose prose:
+  - `tools/wasm-gates/MUTATIONS.md:214-219` still says the V8 gate reads the shipped module.
+  - `scripts/build-web-audioworklet.sh:92-93`: with `MISO_ENGINE_WEB_STRIP=none`, the output
+    module no longer has names; only the twin does.
+  - `docs/RELEASE.md:64-66`'s same-offset claim holds for this module, but `check` does not enforce
+    where `name` sits.
