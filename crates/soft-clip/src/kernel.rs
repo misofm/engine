@@ -41,8 +41,9 @@
 //! once and never accumulated, and the identity path has to reproduce a `-0.0` input exactly.
 //! Flushing `X` cannot change a rendered bit even when it fires on `-0.0`, because every product a
 //! `±0.0` makes is added to an accumulator that is never `-0.0`, and `cubic(±0.0)` is `+0.0` for
-//! either sign. Output finiteness is checked once per block by
-//! `effect_runtime::bank::finish_block`; there is no per-value check anywhere.
+//! either sign. Output finiteness is checked once per block by `effect_runtime::bank::check_block`
+//! in `SoftClip::process`, and `SoftClip::recover_lanes` recovers a failing lane alone (#1092);
+//! there is no per-value check anywhere.
 
 use lane::kernels::halfband::{
     HALFBAND63_BASE, HALFBAND63_ROWS, halfband2x_decim_even, halfband2x_interp_even,
