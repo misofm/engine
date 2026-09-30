@@ -151,6 +151,9 @@ struct Block {
     /// Per member: the spans delivered at this block's first sample (their samples are set when
     /// the block is rendered).
     spans: Vec<Vec<PreparedAutomationSpan>>,
+    /// Spans addressed to every padded lane. No planner sends one; the bank must neither apply
+    /// nor count them, so a padded lane's report stays empty and it stays at rest.
+    stray: Vec<PreparedAutomationSpan>,
 }
 
 /// A padded bank's members, their mask, and what they are fed.
@@ -249,10 +252,12 @@ fn draw_case(seed: u64, width: usize) -> Case {
                 })
                 .collect();
             let spans = (0..members).map(|_| draw_spans(&mut draw, mono)).collect();
+            let stray = draw_spans(&mut draw, false);
             Block {
                 frames,
                 inputs,
                 spans,
+                stray,
             }
         })
         .collect();
@@ -369,6 +374,8 @@ fn banked<L: Lane>(case: &Case, clone_of: usize) -> Rendered {
                     right[frame * lanes + lane] = input_right[frame];
                 }
                 automation.extend(at(&block.spans[member], first_sample));
+            } else {
+                automation.extend(at(&block.stray, first_sample));
             }
             offsets[lane + 1] = automation.len() as u32;
         }
@@ -554,7 +561,7 @@ fn padded_differential<L: Lane>(seed: u64, reach: &mut Reach) {
 /// Red for, among others:
 /// * a whole-bank D7 recovery (the pre-#1090 `kernel::finish_channel`): a hostile word on one
 ///   member zeroes and resets its bank-mates;
-/// * a padded lane's failure reported, or its span applied or counted;
+/// * a padded lane's failure reported, or a span addressed to it counted;
 /// * a padded lane that does not stay at `+0.0` out, or a padded lane counted as a track;
 /// * active bits that depend on the clone source (every source is rendered);
 /// * a link that reads another lane (every link mode, heterogeneous neighbours).
@@ -671,9 +678,11 @@ fn silent_admission<L: Lane>(mono: bool) {
 /// Gate 3: a bank whose members are all silent takes silent admission, padded or not, dual or
 /// collapsed, at `Simd4` and `Simd8`. The full bank (every lane active) is the control.
 ///
-/// Red for a padded lane that is not at rest on `+0.0` input: one bound from all-zero parameters
-/// in place of the clone, one given a ramp or a span, one fed or left anything but `+0.0`. Any of
-/// them keeps the whole bank on its slow body, which moves no bit and so is visible only here.
+/// Red for a padded lane bound off rest: one that took a member's running envelope with its clone
+/// rather than the member's request, say. It releases toward `0` dB for thousands of blocks, and
+/// until its word is bit-stable the whole bank stays on its slow body, which moves no bit and so is
+/// visible only here. (Parameters alone cannot do it: every legal threshold and knee, and even a
+/// zeroed request, leave the silent detector level below the knee, so the envelope stays `+0.0`.)
 #[test]
 fn a_silent_padded_bank_takes_the_silent_fast_path() {
     silent_admission::<Simd4>(false);
