@@ -249,8 +249,9 @@ pub fn finish_block<L: Lane>(
 /// A stereo effect whose channels carry *separate* state — separate rings, separate cursors,
 /// separate recurrences, which is every dynamics processor running `LinkMode::DualMono` — has the
 /// opposite requirement. Its left channel is exactly correct when its right diverged, and zeroing
-/// it would destroy evidence rather than protect anything. Under a linked detector the two fail
-/// together anyway, because the level that diverged reaches both, so the coupled case is not lost.
+/// it would destroy evidence rather than protect anything. A linked detector does not change that:
+/// each channel is still checked and recovered on its own. A shared level that diverges usually
+/// reaches both outputs, and then both recover, but nothing makes them fail together.
 ///
 /// The check itself is identical in both: [`check_block`] once per channel, one `mask_any` for the
 /// whole block, no horizontal reduction inside the loop.
