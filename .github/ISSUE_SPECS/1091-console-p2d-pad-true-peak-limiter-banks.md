@@ -218,3 +218,142 @@ its tests.
 ### Path deviations
 
 None. `crates/effect-contract` changes arrive only through the P2a merge.
+
+## Sol verdict, attempt 1
+
+**PASS.** Sol, 2026-09-30, on head `1cd598a5`. Every gate holds, and every claim that could be
+tested was reproduced. There are no H or M findings. Every mutation and probe below was reverted,
+and the tree is clean.
+
+### The key question: does one lane's recovery move a bank-mate's bits?
+
+No. After a partial recovery the bank leaves the uniform body for the per-lane body. Per lane,
+the two bodies render the same bits, so the switch costs time and nothing else.
+
+- **Probe.** A temporary unit module compared three arms, block by block, for 40 blocks:
+  - a bank in which lane `k` trips at block `n`;
+  - the same bank with nothing tripping;
+  - a scalar twin for each member.
+- **Matrix.** 1,128 scenarios and 45,120 blocks:
+  - `Simd4` and `Simd8`;
+  - `dual_mono` and `maximum`;
+  - dual and collapsed;
+  - members `1..=W`;
+  - the first, middle and last member, and a padded lane, as the one that trips;
+  - three trips: planted NaN state, a NaN input sample, and a `+inf` input sample;
+  - shared and ragged lookaheads, including left/right splits;
+  - a random clone source, and random point automation on members;
+  - per member and block: loud, quiet, `+0.0`, `-0.0`, subnormal or square input;
+  - in 324 scenarios, padded lanes fed garbage, NaN included.
+- **Checks.**
+  - Every member matched its twin in every word.
+  - Every bank-mate that did not trip matched the no-trip bank in output bits and in its whole
+    state payload.
+  - In 18,154 blocks the tripped bank rendered the per-lane body while the no-trip bank rendered
+    the uniform body. That is the "slow" body really running, with no bit moving.
+- **Padded lanes** fed `+0.0` were exactly `+0.0` on every block, through the lookahead. Their
+  state was at rest on both channels (`lane_at_rest`), in both arms.
+
+### Findings
+
+- **L1. After a partial recovery the bank stays on the slower body** (`src/lib.rs:3665`,
+  `:3691-3696`).
+  - **How long.** Until a whole reset: `reset()`, every member failing in the same block, or a
+    re-preparation. The reset lane's van Herk phase keeps a fixed offset from its bank-mates, so
+    in steady playback that means indefinitely.
+  - **Cost.** The per-lane body costs 2.6x the uniform one at `Simd8` and 2.0x at `Simd4`
+    (`docs/handoffs/effects-2026-09-27/LIMITER-DIAGNOSIS.md:122`).
+  - **Why it is only L.** The limiter cannot reach D7 from legal input, because its gain is at
+    most 1.
+  - **A bit-neutral fix exists.**
+    - The fix: after the reset, give each recovered lane the phase of a surviving lane with the
+      same window.
+    - Why it is bit-neutral: every required gain lies in `(0, 1]`, so the window minimum is exact
+      whatever the block phase.
+    - Evidence: the probe ran with this one-loop change. It found 0 mismatches against the twins,
+      and the tripped bank never left the uniform body.
+  - **Recommendation.** A small follow-up issue, not this slice.
+- **L2. A recovered lane's state payload is a rotation of its twin's, not the same bytes.**
+  - The payload carries the bank's running cursors and raw slot order (`src/lib.rs:3975`).
+  - 468 of 504 compared payloads differ in bytes from the twin's.
+  - All 504 restore into a fresh instance and render identically to the twin's.
+  - Rendered bits are class A; payload bytes are not a gate. Record this under the residuals.
+- **L3. No committed planner-level test of a padded limiter bank.**
+  - S2 (#1098) should own it. Its gate 2 already requires a padded differential against the
+    `Scalar` oracle.
+  - Name the limiter explicitly as a padded `post_insert` slot, with mixed bypass, at `Simd8` and
+    `Simd4`.
+  - Feed it hot input, so that the gain path runs rather than the silent or identity paths.
+- **L4. NEON was not run.** There is no AArch64 host here. `Simd4` ran on x86-64 only. CI's
+  `aarch64-debug` is the gate for NEON.
+
+### The implementer's claims
+
+- **Seedless re-pin: fully explained.**
+  - **Test 1.** A scratch copy of `tests/seedless.rs` applied base's whole-bank recovery to the
+    head kernel on the §4.4 block: zero the whole block and call `reset(FullToDefaults)`. It
+    reproduced the **old** pins exactly: W8 `4b57d4da…` and W4 `c5782640…`, all three bodies.
+  - **Test 2.** Without that emulation, it reproduced the new pins. Every lane of both widths, both
+    links, equalled its scalar instance in every word for 96 blocks.
+  - **What moved.** No word moved before block 60, the recovery block. Track 1's own words never
+    moved. So every moved bit is a bank-mate after the recovery, and no per-lane arithmetic
+    changed. The scalar pin passes unchanged.
+- **Allocation test** (`tests/allocation.rs:186`, `:246`, `:309`).
+  - **The old test proved nothing about D7.** An allocation planted in `reset_failed_lanes` left
+    base's `3.0e38` test green. It still showed that rendering, automation and explicit resets
+    allocate nothing.
+  - **The NaN fix is right.** The head test turns red on that mutation. An allocation planted in
+    the partial branch alone turns only the padded leg red.
+- **Mutations.** Five of Sol's own, each red:
+  - `zero_lanes` mask inverted;
+  - the right channel left unreset;
+  - `clear_lane_runtime` skipping the history;
+  - `with_active_lanes` dropped from the binding;
+  - only the left plane zeroed.
+- **Class A.** `console-workload` `digests`, release: 22/22 rows identical to `acc64d42`.
+- **Realtime.** All of these pass:
+  - `audit` capi, delay, compressor and parametric-eq (100,000 blocks each), and gate-expander:
+    0 allocations, deallocations and syscalls;
+  - the builtins, builtins-graph and graph traces;
+  - the protocol allocation audit;
+  - the realtime probe mutation tests;
+  - the effect-contract 1,000,000-block trace;
+  - `check-realtime-policy.sh` (54 regions), `test-realtime-policy.sh` and the audit-leak gate;
+  - the render-export callgraph closure;
+  - the V8 spill gate and its self-test.
+- **iOS `memset_pattern16`.** The limiter's count is 104, and `check-cross-targets.sh` passes.
+
+### Gates Sol ran
+
+- **Build and lint.** `fmt` and `clippy -D warnings` are clean.
+- **Rustdoc.** It fails only at `tools/console-workload/src/lib.rs:374`, as expected. It is clean
+  with that crate excluded.
+- **Tests.**
+  - `true-peak-limiter`, `graph-compiler` and `graph`: 292 passed in dev and 292 in release.
+  - Release `audit`, `bench`, `console-workload`, `effect-contract` and `rack`: 239 passed.
+- **Cross-target.** Wasm `simd128` checks pass. The `aarch64-linux-android` limiter check with
+  `--all-targets` passes, and so does the `aarch64-apple-ios` check.
+- **Wasm and artifact.** `run-wasm-gates.sh` passes. So do `check-web-audioworklet.sh`, the
+  expected-resources check, `check-scalar-oracle-absent.py --wasm` and
+  `test-web-audioworklet.sh`.
+- **Policies.** Effect-runtime (check, test, fixtures), graph, rack, workspace, lane and the
+  unfused seal.
+
+### Artifact
+
+- **Reproduced.** `50310e89…`, 3,264,902 B, which is +2,785 B over base `b2eeb2d9…`.
+- **Where the growth is.** All of it is in `true_peak_limiter` functions:
+  - the recovery path: `reset_lane_to_defaults` +1,053, `seed_lane_defaults` +594,
+    `reset_failed_lanes` +542 and `zero_lanes` +305;
+  - the binding: +714;
+  - the scalar `process_block`: +482, the unreachable partial branch.
+- **The frame loop.** No frame-loop function grew. The bank's `process_block` shrank by 281 B.
+- **Verdict.** Proportionate. The pin was not touched.
+
+### Merge
+
+- Clean into `codex/batch-console-2` at `1f76681c`, and at its current head `65ded1e5`, which
+  already holds #1089, #1090 and #1092.
+- Clean against each of `codex/1089-pad-eq-banks`, `codex/1090-pad-compressor-banks` and
+  `codex/1092-pad-gate-shaper-clip-banks`.
+- No conflicts.
