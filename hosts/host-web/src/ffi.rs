@@ -6366,6 +6366,116 @@ mod observation_alias_tests {
         }
     }
 
+    /// #1096 verdict M1: an observed `post_insert` slot is read at its console slot index, which
+    /// counts after `pre_insert`.
+    ///
+    /// The fixture puts an unobserved EQ in `pre_insert` and the observed compressor in
+    /// `post_insert`, so the compressor is console slot `1`. Red if a numeric read resolves a
+    /// console selection over `pre_insert` alone (`resolve_observation` then finds no `comp` and
+    /// refuses the read), or if `post_insert` is numbered from `0` (the map reports slot `0`, and
+    /// slot `0` is the EQ, which has no tap).
+    #[test]
+    fn a_post_insert_observation_is_read_at_its_console_slot_index() {
+        let mut document: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../../../fixtures/session/v1/compressor-bank-observation.json"
+        ))
+        .expect("the observation fixture is JSON");
+        let compressor = document["console"]["pre_insert"][0].take();
+        assert_eq!(compressor["slot"], "comp");
+        document["console"]["pre_insert"] = serde_json::json!([{
+            "slot": "eq",
+            "identity": { "kind": "native", "effect_id": "miso.parametric-eq" },
+            "quality": "normal",
+            "link_mode": "dual_mono",
+        }]);
+        document["console"]["post_insert"] = serde_json::json!([compressor]);
+        let tracks = document["tracks"]
+            .as_array_mut()
+            .expect("the fixture's tracks");
+        for track in tracks.iter_mut() {
+            track["console"]
+                .as_array_mut()
+                .expect("a track's console entries")
+                .insert(
+                    0,
+                    serde_json::json!({ "slot": "eq", "bypass": false, "params": [] }),
+                );
+        }
+        let bytes = serde_json::to_vec(&document).expect("the moved fixture serializes");
+
+        no_live_host();
+        let options = WebBootOptions {
+            require_sample_rate_hz: 48_000,
+            require_quantum_frames: 128,
+            live_control_command_queue_records: 8,
+            live_control_meter_blocks: 1,
+            live_control_observation_taps: 4,
+            ..WebBootOptions::explicit_defaults()
+        };
+        let handle = test_boot(&bytes, options);
+        assert_ne!(handle, 0, "the post_insert observation fixture must boot");
+        let count = miso_engine_web_v1_observation_count(handle);
+        assert_eq!(
+            count, 8,
+            "one observed compressor per track; the EQ has no tap"
+        );
+        for index in 0..count {
+            assert_eq!(
+                miso_engine_web_v1_observation_rack(handle, index),
+                u32::from(crate::RACK_CONSOLE)
+            );
+            assert_eq!(
+                miso_engine_web_v1_observation_effect_index(handle, index),
+                1,
+                "the post_insert compressor is console slot 1, after the pre_insert EQ"
+            );
+        }
+        let track_index = miso_engine_web_v1_observation_track_index(handle, 5);
+        let tap_id = miso_engine_web_v1_observation_tap_id(handle, 5, 0);
+        let read = |rack: u32, effect_index: u32| {
+            OBSERVATION_STAGING.with(|slot| {
+                slot.borrow_mut().selections[0] = WebObservationSelection {
+                    struct_size: OBSERVATION_SELECTION_BYTES,
+                    abi_version: ABI_VERSION,
+                    track_index,
+                    rack,
+                    effect_index,
+                    tap_id,
+                    channels: OBSERVATION_CHANNEL_BOTH,
+                    reserved: 0,
+                };
+            });
+            miso_engine_web_v1_observation_read(handle, 1)
+        };
+        let console = u32::from(crate::RACK_CONSOLE);
+        assert_eq!(
+            read(console, 1),
+            RESULT_OK,
+            "the numeric read of the post_insert slot"
+        );
+        let row = OBSERVATION_STAGING.with(|slot| slot.borrow().results[0]);
+        assert_eq!(
+            (row.track_index, row.rack, row.effect_index, row.tap_id),
+            (track_index, console, 1, tap_id)
+        );
+        assert_eq!(
+            read(console, 0),
+            RESULT_UNSUPPORTED,
+            "console slot 0 is the untapped EQ"
+        );
+        assert_eq!(
+            read(console, 2),
+            RESULT_INVALID_ARGUMENT,
+            "there is no console slot 2"
+        );
+        assert_eq!(
+            read(u32::from(crate::RACK_INSERTS), 0),
+            RESULT_INVALID_ARGUMENT,
+            "the track has no inserts"
+        );
+        dispose(handle);
+    }
+
     #[test]
     fn observation_staging_retention_adds_actual_refcell_once() {
         let count = MAXIMUM_OBSERVATION_READS as u64;

@@ -288,7 +288,9 @@ export const enum MisoCommandReason {
   /// `trackIndex` is not a track of the compiled session.
   UnknownTrack = 2,
   /// `rack` is not an effect rack (`1` inserts or `3` console) on an effect-addressed kind. The
-  /// retired `simd1` (`0`) and `simd2` (`2`) codes land here (issue #1096).
+  /// retired `simd1` (`0`) and `simd2` (`2`) codes are refused with it only on the raw export
+  /// path (issue #1096); `MisoAudioWorkletHost.command()` refuses them locally, before the port,
+  /// by rejecting with a `miso.error.v1` invalid argument, as it refuses any out-of-set code.
   UnknownRack = 3,
   /// `effectIndex` is not an effect of the addressed rack: no such console slot or insert.
   UnknownEffect = 4,
