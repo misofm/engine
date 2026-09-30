@@ -327,8 +327,9 @@ mod tests {
     use conformance::DualAccumulatorDelayFactory;
     use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
     use effect_compiler::{
-        EffectCompileCaps, EffectPreparedSession, EffectRack, attach_effect_live_controls,
-        launch_native_effect_registry, prepare_native_session_effects_with_console_eligibility,
+        EffectCompileCaps, EffectPreparedSession, EffectRack, LiveEffectAddress,
+        attach_effect_live_controls, launch_native_effect_registry,
+        prepare_native_session_effects_with_console_eligibility,
     };
     use effect_contract::{
         EffectControlLane, EffectControlRecord, EffectPrepareError, EffectProcessBlock,
@@ -1197,8 +1198,7 @@ mod tests {
                     .iter_mut()
                     .find(|producer| {
                         producer.track_id.as_ref() == "cross1"
-                            && producer.rack == EffectRack::Dynamic
-                            && producer.effect_index == 1
+                            && producer.address == LiveEffectAddress::insert(1)
                     })
                     .expect("dynamic slot-1 control producer");
                 for channel in [
@@ -1218,8 +1218,7 @@ mod tests {
                 .iter_mut()
                 .find(|producer| {
                     producer.track_id.as_ref() == "cross0"
-                        && producer.rack == EffectRack::Simd1
-                        && producer.effect_index == 0
+                        && producer.address == LiveEffectAddress::console(0)
                 })
                 .expect("simd1 slot-0 control producer");
             for channel in [
@@ -4789,24 +4788,22 @@ mod tests {
             .iter()
             .find(|producer| {
                 producer.track_id.as_ref() == "cross1"
-                    && producer.rack == EffectRack::Dynamic
-                    && producer.effect_index == 1
+                    && producer.address == LiveEffectAddress::insert(1)
             })
             .expect("independent control target");
         let decoy = crossed_control_producers
             .iter()
             .find(|producer| {
                 producer.track_id.as_ref() == "cross0"
-                    && producer.rack == EffectRack::Simd1
-                    && producer.effect_index == 0
+                    && producer.address == LiveEffectAddress::console(0)
             })
             .expect("independent control decoy");
         assert_eq!(target.effect_id.as_ref(), "chain0");
         assert_eq!(target.track_id.as_ref(), "cross1");
-        assert_eq!(target.rack, EffectRack::Dynamic);
+        assert_eq!(target.address, LiveEffectAddress::insert(1));
         assert_eq!(decoy.effect_id.as_ref(), "chain1");
         assert_ne!(target.effect_id, decoy.effect_id);
-        assert_ne!(target.effect_index, decoy.effect_index);
+        assert_ne!(target.address.index, decoy.address.index);
         let crossed_control_pcm =
             render_cross_index_blocks(crossed_control, crossed_control_producers, 4, true);
         assert!(

@@ -46,8 +46,8 @@ use core::num::{NonZeroU32, NonZeroUsize};
 use builtins::MeterTap;
 use effect_contract::{EffectControlRecord, ParameterChannel};
 use host_core::{
-    ChannelSymmetryWitness, EffectRack, HostLiveControlHandles, HostLiveControlRequest,
-    HostPrepareCaps, HostShapePolicy, PreparedHost, SourceSubmission,
+    ChannelSymmetryWitness, HostLiveControlHandles, HostLiveControlRequest, HostPrepareCaps,
+    HostShapePolicy, LiveEffectAddress, PreparedHost, SourceSubmission,
     prepare_host_session_with_live_controls, session_structural_symmetry,
 };
 use session::{CompiledSession, canonical_session_json, parse_session_json};
@@ -194,11 +194,9 @@ fn push(console: &mut Console, track_id: &str, record: EffectControlRecord) {
         .effect_controls
         .iter_mut()
         .find(|producer| {
-            // Every track carries one EQ, `eq`: a console slot (SIMD rack 1) or, under
-            // `edited_apart`, an insert (the dynamic rack).
-            producer.track_id.as_ref() == track_id
-                && matches!(producer.rack, EffectRack::Simd1 | EffectRack::Dynamic)
-                && producer.effect_id.as_ref() == "eq"
+            // Every track carries one EQ, `eq`: a console slot or, under `edited_apart`, an
+            // insert. Either way its ID is unique on the track.
+            producer.track_id.as_ref() == track_id && producer.effect_id.as_ref() == "eq"
         })
         .expect("a control channel for the addressed effect");
     if let EffectControlRecord::Parameter {
@@ -693,8 +691,7 @@ fn twin_parameter_spans_keep_the_lane_and_a_lone_half_declines_it() {
             .iter_mut()
             .find(|producer| {
                 producer.track_id.as_ref() == track_id
-                    && producer.rack == EffectRack::Simd1
-                    && producer.effect_index == 0
+                    && producer.address == LiveEffectAddress::console(0)
             })
             .expect("a control channel for the compressor")
             .try_push(record)

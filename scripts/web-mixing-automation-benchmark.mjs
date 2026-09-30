@@ -152,27 +152,27 @@ const mixingDocument = loadDocument(FIXTURE_ID);
 const fixture = mixingDocument.fixture;
 
 // Each base is the value the booted document holds, as the native row reads it from the model.
-// Decision 12: the control table addresses the lowered racks -- `0` the console's `pre_insert`
-// slots, `1` the track's inserts, `2` the `post_insert` slots -- each indexed within its section,
-// until #1096 (S1c) gives the record a console rack byte. A console slot's effect is declared once
-// on the session and its knobs are the track's entry, in slot order.
-function loweredSlot(document, track, rack, index) {
-  if (rack === 1) {
+// Decision 12 (#1096): the control table addresses the record's live racks -- `3` a console slot by
+// its index in the session's slot order (`pre_insert`, then `post_insert`), which is its index in
+// the track's `console` entries, and `1` an insert by its index in the track's `inserts`. A console
+// slot's effect is declared once on the session and its knobs are the track's entry.
+const RACK_INSERTS = constant("racks", "inserts");
+const RACK_CONSOLE = constant("racks", "console");
+function liveSlot(document, track, rack, index) {
+  if (rack === RACK_INSERTS) {
     const effect = track.inserts.effects[index];
     return { id: effect.id, effect_id: effect.identity.effect_id, params: effect.params };
   }
-  const section = rack === 0 ? document.console.pre_insert : document.console.post_insert;
-  const offset = rack === 0 ? 0 : document.console.pre_insert.length;
-  const slot = section[index];
-  const entry = track.console[offset + index];
+  const slot = [...document.console.pre_insert, ...document.console.post_insert][index];
+  const entry = track.console[index];
   assert.equal(entry.slot, slot.slot, `${track.id}: console entries follow the slot order`);
   return { id: slot.slot, effect_id: slot.identity.effect_id, params: entry.params };
 }
 for (const control of table.controls) {
   const track = fixture.tracks[control.track_index];
   assert.equal(track.id, control.track_id, `${control.track_id}: track index`);
-  assert.ok([0, 1, 2].includes(control.rack), `${control.track_id}: a lowered rack`);
-  const slot = loweredSlot(fixture, track, control.rack, control.effect_index);
+  assert.ok([RACK_INSERTS, RACK_CONSOLE].includes(control.rack), `${control.track_id}: a live rack`);
+  const slot = liveSlot(fixture, track, control.rack, control.effect_index);
   assert.equal(slot.id, control.slot_id, `${control.track_id}: slot`);
   assert.equal(slot.effect_id, control.effect, `${control.track_id}: effect`);
   const held = slot.params.filter((param) => param.parameter_id === control.parameter_id);

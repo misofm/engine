@@ -51,7 +51,9 @@ use session::CompileCaps;
 
 use control_targets::{PREPARED_EFFECT_COMPANION_CAPACITY, PreparedControlWorkspace};
 
-pub use host_core::EffectRack;
+use host_core::EffectRack;
+/// Live effect addressing in the session's own terms (decision 12, issue #1096).
+pub use host_core::{LiveEffectAddress, LiveEffectRack};
 
 pub use host_core::{SOURCE_STALL_TOLERANCE_MS, default_source_ring_frames};
 
@@ -191,10 +193,12 @@ pub const LIVE_RESPONSE_MODE_TARGET: u32 = 1;
 /// Live response result meaning (`eqFilterSubtotal`).
 pub const LIVE_RESPONSE_MEANING_EQ_FILTER_SUBTOTAL: u32 = 1;
 
-/// Spectrum capture target immediately after the selected track's input builtins.
-pub const SPECTRUM_TARGET_TRACK_POST_INPUT_BUILTINS: u32 = 1;
-/// Spectrum capture target immediately after the selected track's matrix stage.
-pub const SPECTRUM_TARGET_TRACK_POST_MATRIX: u32 = 2;
+/// Spectrum capture target at the selected track's `post_input` tap, after its input section
+/// (`trackPostInput`; the tap rename of decision 12, issue #1096, with the code unchanged).
+pub const SPECTRUM_TARGET_TRACK_POST_INPUT: u32 = 1;
+/// Spectrum capture target at the selected track's `post_pan` tap, after its pan/matrix stage
+/// (`trackPostPan`; the code is unchanged).
+pub const SPECTRUM_TARGET_TRACK_POST_PAN: u32 = 2;
 /// Spectrum capture target at the designated final output node.
 pub const SPECTRUM_TARGET_OUTPUT: u32 = 3;
 /// Capture the left plane.
@@ -373,8 +377,8 @@ pub const SPECTRUM_COLLECTION_TARGET_IDS_BYTES: u32 = 0;
 
 fn spectrum_target_raw(target: &SpectrumTarget) -> u32 {
     match target {
-        SpectrumTarget::TrackPostInputBuiltins(_) => SPECTRUM_TARGET_TRACK_POST_INPUT_BUILTINS,
-        SpectrumTarget::TrackPostMatrix(_) => SPECTRUM_TARGET_TRACK_POST_MATRIX,
+        SpectrumTarget::TrackPostInputBuiltins(_) => SPECTRUM_TARGET_TRACK_POST_INPUT,
+        SpectrumTarget::TrackPostMatrix(_) => SPECTRUM_TARGET_TRACK_POST_PAN,
         SpectrumTarget::Output(_) => SPECTRUM_TARGET_OUTPUT,
     }
 }
@@ -633,9 +637,10 @@ pub enum ObservationReadError {
 pub struct ObservationSelection<'a> {
     /// Canonical normalized track identity.
     pub track_id: &'a str,
-    /// The prepared rack containing the effect.
-    pub rack: EffectRack,
-    /// Stable local effect-slot identity, never an array position.
+    /// The session rack containing the effect: a console slot or an insert (issue #1096).
+    pub rack: LiveEffectRack,
+    /// Stable local effect identity, never an array position: the slot ID of a console slot, the
+    /// insert's ID of an insert.
     pub effect_slot_id: &'a str,
     /// Effect-local declared observation tap id.
     pub tap_id: u32,
@@ -651,9 +656,9 @@ pub struct ObservationSelection<'a> {
 pub struct ObservationAddress {
     /// Canonical normalized track index.
     pub track_index: u32,
-    /// Prepared rack.
-    pub rack: EffectRack,
-    /// Effect position within that rack.
+    /// The session rack (issue #1096).
+    pub rack: LiveEffectRack,
+    /// A console slot's index in the session's slot order, or an insert's index.
     pub effect_index: u32,
     /// Effect-local observation tap id.
     pub tap_id: u32,
@@ -684,9 +689,9 @@ pub struct WebObservationSelection {
     pub abi_version: u32,
     /// Canonical normalized track index.
     pub track_index: u32,
-    /// `0` simd1, `1` dynamic or `2` simd2.
+    /// [`RACK_INSERTS`] or [`RACK_CONSOLE`]; the retired `0` and `2` are refused.
     pub rack: u32,
-    /// Effect position within the selected rack.
+    /// A console slot's index in the session's slot order, or an insert's index.
     pub effect_index: u32,
     /// Effect-local observation tap id.
     pub tap_id: u32,
@@ -708,9 +713,9 @@ pub struct WebObservationResult {
     pub status: u32,
     /// Canonical normalized track index.
     pub track_index: u32,
-    /// `0` simd1, `1` dynamic or `2` simd2.
+    /// [`RACK_INSERTS`] or [`RACK_CONSOLE`]; the retired `0` and `2` are refused.
     pub rack: u32,
-    /// Effect position within the selected rack.
+    /// A console slot's index in the session's slot order, or an insert's index.
     pub effect_index: u32,
     /// Effect-local observation tap id.
     pub tap_id: u32,
@@ -750,8 +755,8 @@ pub const OBSERVATION_RESULT_BYTES: u32 = size_of::<WebObservationResult>() as u
 pub struct ObservationReadResult {
     /// The actual stable tuple resolved by the current prepared host.
     pub track_id: Box<str>,
-    /// The resolved rack.
-    pub rack: EffectRack,
+    /// The resolved session rack.
+    pub rack: LiveEffectRack,
     /// The actual stable local effect-slot identity.
     pub effect_slot_id: Box<str>,
     /// Native effect contract identity from the owner descriptor.
@@ -798,6 +803,13 @@ pub const COMMAND_MUTE: u32 = 4;
 /// Set an effect parameter (live since issue #140 A).
 pub const COMMAND_EFFECT_PARAM: u32 = 5;
 /// Set an effect bypass (live since issue #140 A).
+///
+/// A live bypass engages or lifts the latency-preserving shunt of the addressed console slot or
+/// insert, and it can lift a session `bypass` too (issue #1087), with two exceptions. The delay
+/// and the multiband compressor keep their session bypass as a *prepared* bypass
+/// (`effect_compiler::lowers_session_bypass`; issues #1087 and #1100): their live-control lane is
+/// seeded bypassed, and lifting it is admitted but renders nothing different, because the
+/// processor itself was prepared bypassed. Neither can be a console slot, so both are inserts.
 pub const COMMAND_EFFECT_BYPASS: u32 = 6;
 /// Arm one declared observation tap of one effect instance (issue #143 D3).
 ///
@@ -848,13 +860,75 @@ pub const COMMAND_POLARITY_INVERT: u32 = 11;
 /// Retarget a builtin input HPF/LPF pair through prepared filter targets.
 pub const COMMAND_INPUT_FILTERS: u32 = 12;
 
+/// The `rack` of an effect-addressed record: one of the track's inserts (decision 12, #1096).
+///
+/// It keeps the code the retired `dynamic` rack had. `effect_index` is the insert's position in
+/// the track's `inserts`.
+pub const RACK_INSERTS: u8 = 1;
+/// The `rack` of an effect-addressed record: a session console slot (decision 12, #1096).
+///
+/// Appended. `effect_index` is the slot's position in the session's slot order, `pre_insert` then
+/// `post_insert`, which is its index in the track's `console` entries.
+///
+/// The retired `simd1` and `simd2` codes, `0` and `2`, are refused with
+/// [`COMMAND_REASON_UNKNOWN_RACK`] (or the observation and configuration paths' invalid-argument
+/// result) and are never reallocated. `ABI_VERSION` did not move.
+pub const RACK_CONSOLE: u8 = 3;
+/// The `rack` of a builtin-addressed record, which names no effect rack.
+pub const RACK_NOT_APPLICABLE: u8 = 255;
+
+/// A live-response owner record's `rack`: the builtin input filters (issue #1096).
+pub const LIVE_RESPONSE_RACK_INPUT_FILTERS: u32 = 0;
+/// A live-response owner record's `rack`: one of the track's inserts. It keeps the internal code
+/// the retired `dynamic` rack had.
+pub const LIVE_RESPONSE_RACK_INSERTS: u32 = 2;
+/// A live-response owner record's `rack`: a session console slot, appended. The retired `simd1`
+/// and `simd2` codes, `1` and `3`, are refused and never reallocated.
+pub const LIVE_RESPONSE_RACK_CONSOLE: u32 = 4;
+
+/// Decode a record's `rack` and `effect_index` into a live effect address (issue #1096).
+///
+/// `None` for every other rack, the retired `0` and `2` among them.
+pub(crate) fn live_effect_address(rack: u32, effect_index: u32) -> Option<LiveEffectAddress> {
+    match u8::try_from(rack) {
+        Ok(RACK_INSERTS) => Some(LiveEffectAddress::insert(effect_index)),
+        Ok(RACK_CONSOLE) => Some(LiveEffectAddress::console(effect_index)),
+        _ => None,
+    }
+}
+
+/// The record `rack` of a live effect rack (issue #1096).
+pub(crate) const fn live_effect_rack_raw(rack: LiveEffectRack) -> u8 {
+    match rack {
+        LiveEffectRack::Inserts => RACK_INSERTS,
+        LiveEffectRack::Console => RACK_CONSOLE,
+    }
+}
+
+/// The dense effect position of one live address, given its track's first position and its
+/// lowered rack counts in chain order (issue #1096).
+///
+/// The one place a session address becomes a position in the effect band: preparation places
+/// every producer with it and admission finds it with it, so the two cannot disagree. `None` when
+/// the track has no such console slot or insert.
+fn dense_effect_slot(base: u32, counts: [u32; 3], address: LiveEffectAddress) -> Option<usize> {
+    let (rack, index) = address.lower(counts)?;
+    let earlier = match rack {
+        EffectRack::Simd1 => 0,
+        EffectRack::Dynamic => counts[0],
+        EffectRack::Simd2 => counts[0].checked_add(counts[1])?,
+    };
+    usize::try_from(base.checked_add(earlier)?.checked_add(index)?).ok()
+}
+
 /// The submission was admitted whole.
 pub const COMMAND_REASON_NONE: u32 = 0;
 /// A record's fixed shape is wrong: an unknown kind, a nonzero reserved word, or a non-finite value.
 pub const COMMAND_REASON_MALFORMED: u32 = 1;
 /// `track_index` is not a track of the compiled session.
 pub const COMMAND_REASON_UNKNOWN_TRACK: u32 = 2;
-/// `rack` is not one of the three declared racks.
+/// `rack` is not an effect rack: an effect-addressed kind names [`RACK_INSERTS`] or
+/// [`RACK_CONSOLE`]. The retired `simd1` (`0`) and `simd2` (`2`) codes land here (issue #1096).
 pub const COMMAND_REASON_UNKNOWN_RACK: u32 = 3;
 /// `effect_index` is not an effect of the addressed rack.
 pub const COMMAND_REASON_UNKNOWN_EFFECT: u32 = 4;
@@ -1349,8 +1423,9 @@ struct ReadyOwnership {
     sample_rate_hz: u32,
     /// Canonical normalized track order: the addressing authority for `track_index`.
     tracks: Vec<Box<str>>,
-    /// Effects declared per track per rack, `[simd1, dynamic, simd2]`, so an effect-addressed
-    /// command is answered with `UNKNOWN_RACK` / `UNKNOWN_EFFECT` before anything else.
+    /// Effects per track in each lowered rack, in chain order `[pre_insert, inserts,
+    /// post_insert]`, so an effect-addressed command is answered with `UNKNOWN_EFFECT` before
+    /// anything else ([`LiveEffectAddress::lower`] reads them).
     rack_effects: Box<[[u32; 3]]>,
     /// The optional one-shot spectrum observer or atomically selectable collection. It is
     /// declared before the prepared host so consumers are released before the plan's producers.
@@ -1506,7 +1581,7 @@ impl ReadyOwnership {
     /// | `0 .. tracks` | track `t`'s matrix/pan queue |
     /// | `tracks .. 2 * tracks` | track `t`'s fader/mute queue |
     /// | `2 * tracks .. 3 * tracks` | track `t`'s input trim/polarity queue (#210 phase 3) |
-    /// | `3 * tracks ..` | effect instances, in `(track, simd1, dynamic, simd2, position)` order |
+    /// | `3 * tracks ..` | effect instances, in `(track, pre_insert, inserts, post_insert, position)` order |
     ///
     /// One index therefore serves both the free-room pre-check and the push, and neither pass has
     /// to search. `None` means the address names no channel this session prepared.
@@ -1516,19 +1591,16 @@ impl ReadyOwnership {
     /// `2 * tracks` -> `3 * tracks`. Every site that spells that constant is below and in
     /// [`Self::queue_available`], [`Self::push`] and the `queue_count` allocation; there is no
     /// fourth spelling.
-    fn effect_slot(&self, track: usize, rack: u8, effect_index: u32) -> Option<usize> {
-        let base = *self.effect_base.get(track)? as usize;
-        let counts = self.rack_effects.get(track)?;
-        let mut offset = 0_usize;
-        for earlier in 0..rack as usize {
-            offset = offset.checked_add(*counts.get(earlier)? as usize)?;
-        }
-        if effect_index >= *counts.get(rack as usize)? {
-            return None;
-        }
-        let slot = base
-            .checked_add(offset)?
-            .checked_add(effect_index as usize)?;
+    ///
+    /// An effect is addressed in the session's terms, a console slot by its slot index or an
+    /// insert by its index (issue #1096); [`LiveEffectAddress::lower`] is the one translation to
+    /// the lowered rack that orders the band.
+    fn effect_slot(&self, track: usize, address: LiveEffectAddress) -> Option<usize> {
+        let slot = dense_effect_slot(
+            *self.effect_base.get(track)?,
+            *self.rack_effects.get(track)?,
+            address,
+        )?;
         (slot < self.effect_controls.len()).then_some(slot)
     }
 
@@ -2405,8 +2477,8 @@ impl AudioWorkletEngineHost {
                 return Some(ObservationBinding {
                     address: ObservationAddress {
                         track_index,
-                        rack: handle.rack,
-                        effect_index: handle.effect_index,
+                        rack: handle.address.rack,
+                        effect_index: handle.address.index,
                         tap_id: 0,
                         channels: ObservationReadChannels::Both,
                     },
@@ -2617,13 +2689,14 @@ impl AudioWorkletEngineHost {
         if self.status.state != STATE_READY {
             return self.record(RESULT_WRONG_STATE);
         }
-        if rack > 2 {
+        // The retired `simd1`/`simd2` codes decode to nothing (issue #1096).
+        let Some(address) = live_effect_address(rack, effect_index) else {
             return self.record(RESULT_INVALID_ARGUMENT);
-        }
+        };
         let Some(ready) = self.ready.as_ref() else {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         };
-        let Some(effect) = ready.effect_slot(track_index as usize, rack as u8, effect_index) else {
+        let Some(effect) = ready.effect_slot(track_index as usize, address) else {
             return self.record(RESULT_INVALID_ARGUMENT);
         };
         let Some(producer) = ready.effect_controls.get(effect).and_then(Option::as_ref) else {
@@ -3530,7 +3603,7 @@ fn prepared_queue_address(
     rack: u8,
     effect: u32,
 ) -> Option<(usize, PreparedOwnerKind)> {
-    if rack == 255 {
+    if rack == RACK_NOT_APPLICABLE {
         if effect != 0 || ready.input_filter_shadows.get(track).is_none() {
             return None;
         }
@@ -3539,7 +3612,7 @@ fn prepared_queue_address(
             PreparedOwnerKind::BuiltinInput,
         ));
     }
-    let effect_slot = ready.effect_slot(track, rack, effect)?;
+    let effect_slot = ready.effect_slot(track, live_effect_address(u32::from(rack), effect)?)?;
     Some((
         ready
             .tracks
@@ -3765,11 +3838,11 @@ fn validate_builtin_target_set(
 /// | offset | width | field |
 /// |---|---|---|
 /// | 0 | u8 | `kind`, one of the `COMMAND_*` values |
-/// | 1 | u8 | `rack`: `0` simd1, `1` dynamic, `2` simd2, `255` not applicable |
+/// | 1 | u8 | `rack`: `1` inserts, `3` console, `255` not applicable; `0` and `2` retired |
 /// | 2 | u8 | `channel`: `0` left, `1` right, `2` both, `255` not applicable |
 /// | 3 | u8 | required zero |
 /// | 4 | u32 | `track_index` into the canonical normalized track order |
-/// | 8 | u32 | `effect_index` within the addressed rack |
+/// | 8 | u32 | `effect_index`: a console slot's index in slot order, or an insert's index |
 /// | 12 | u32 | `parameter_id` from the effect contract |
 /// | 16 | u32 | `smoothing_samples`, the ramp window for a retarget |
 /// | 20 | u32 | required zero |
@@ -3850,7 +3923,7 @@ impl CommandRecord {
     }
 
     fn into_input_filter_edit(self) -> Result<InputFilterEdit, u32> {
-        if self.rack != 255
+        if self.rack != RACK_NOT_APPLICABLE
             || self.effect_index != 0
             || self.smoothing_samples != 0
             || self.values[2..].iter().any(|value| value.to_bits() != 0)
@@ -3887,7 +3960,7 @@ impl CommandRecord {
     fn into_track_record(self) -> Result<AdmittedCommand, u32> {
         match self.kind {
             COMMAND_PAN => {
-                if self.rack != 255
+                if self.rack != RACK_NOT_APPLICABLE
                     || self.channel != 255
                     || self.values[2] != 0.0
                     || self.values[3] != 0.0
@@ -3902,7 +3975,7 @@ impl CommandRecord {
                 }))
             }
             COMMAND_MATRIX => {
-                if self.rack != 255 || self.channel != 255 {
+                if self.rack != RACK_NOT_APPLICABLE || self.channel != 255 {
                     return Err(COMMAND_REASON_MALFORMED);
                 }
                 let matrix = Matrix2x2 {
@@ -3919,7 +3992,9 @@ impl CommandRecord {
                 }))
             }
             COMMAND_FADER_DB => {
-                if self.rack != 255 || self.values[1..].iter().any(|value| *value != 0.0) {
+                if self.rack != RACK_NOT_APPLICABLE
+                    || self.values[1..].iter().any(|value| *value != 0.0)
+                {
                     return Err(COMMAND_REASON_MALFORMED);
                 }
                 let lanes = lane_selector(self.channel).ok_or(COMMAND_REASON_MALFORMED)?;
@@ -3934,7 +4009,9 @@ impl CommandRecord {
                 }))
             }
             COMMAND_MUTE => {
-                if self.rack != 255 || self.values[1..].iter().any(|value| *value != 0.0) {
+                if self.rack != RACK_NOT_APPLICABLE
+                    || self.values[1..].iter().any(|value| *value != 0.0)
+                {
                     return Err(COMMAND_REASON_MALFORMED);
                 }
                 let lanes = lane_selector(self.channel).ok_or(COMMAND_REASON_MALFORMED)?;
@@ -3952,7 +4029,9 @@ impl CommandRecord {
             // fader one, which `admit_commands_staged` decides from the lowered variant exactly as
             // it already decides between the matrix and fader bands.
             COMMAND_TRIM_DB => {
-                if self.rack != 255 || self.values[1..].iter().any(|value| *value != 0.0) {
+                if self.rack != RACK_NOT_APPLICABLE
+                    || self.values[1..].iter().any(|value| *value != 0.0)
+                {
                     return Err(COMMAND_REASON_MALFORMED);
                 }
                 let lanes = lane_selector(self.channel).ok_or(COMMAND_REASON_MALFORMED)?;
@@ -3970,7 +4049,9 @@ impl CommandRecord {
             }
             // The shape rules are `mute`'s: a boolean-exact domain on `values[0]`.
             COMMAND_POLARITY_INVERT => {
-                if self.rack != 255 || self.values[1..].iter().any(|value| *value != 0.0) {
+                if self.rack != RACK_NOT_APPLICABLE
+                    || self.values[1..].iter().any(|value| *value != 0.0)
+                {
                     return Err(COMMAND_REASON_MALFORMED);
                 }
                 let lanes = lane_selector(self.channel).ok_or(COMMAND_REASON_MALFORMED)?;
@@ -3995,7 +4076,7 @@ impl CommandRecord {
     /// `mute`'s, with `channel = 255` because solo addresses a strip and not a lane, and the same
     /// `DOMAIN`-for-a-non-boolean rule `mute` uses for `values[0]`.
     const fn into_solo_request(self) -> Result<bool, u32> {
-        if self.rack != 255 || self.channel != 255 {
+        if self.rack != RACK_NOT_APPLICABLE || self.channel != 255 {
             return Err(COMMAND_REASON_MALFORMED);
         }
         if self.values[1] != 0.0 || self.values[2] != 0.0 || self.values[3] != 0.0 {
@@ -4379,17 +4460,17 @@ fn admit_commands_staged(
             | COMMAND_EFFECT_BYPASS
             | COMMAND_OBSERVE_SUBSCRIBE
             | COMMAND_OBSERVE_UNSUBSCRIBE => {
-                if command.rack > 2 {
-                    return Err(refuse(COMMAND_REASON_UNKNOWN_RACK, index));
-                }
-                let Some(counts) = ready.rack_effects.get(track) else {
-                    return Err(refuse(COMMAND_REASON_UNKNOWN_TRACK, index));
-                };
-                if command.effect_index >= counts[command.rack as usize] {
-                    return Err(refuse(COMMAND_REASON_UNKNOWN_EFFECT, index));
-                }
-                let Some(effect) = ready.effect_slot(track, command.rack, command.effect_index)
+                // `inserts` (1) and `console` (3); the retired `simd1` (0) and `simd2` (2) are
+                // refused here and never reinterpreted (decision 12, issue #1096).
+                let Some(address) =
+                    live_effect_address(u32::from(command.rack), command.effect_index)
                 else {
+                    return Err(refuse(COMMAND_REASON_UNKNOWN_RACK, index));
+                };
+                if ready.rack_effects.get(track).is_none() {
+                    return Err(refuse(COMMAND_REASON_UNKNOWN_TRACK, index));
+                }
+                let Some(effect) = ready.effect_slot(track, address) else {
                     return Err(refuse(COMMAND_REASON_UNKNOWN_EFFECT, index));
                 };
                 let (descriptor, is_eq, has_owner) = {
@@ -4970,16 +5051,13 @@ fn observation_selection_for_address<'a>(
         .get(address.track_index as usize)
         .map(Box::as_ref)
         .ok_or(ObservationReadError::InvalidSelection)?;
-    let rack_index = match address.rack {
-        EffectRack::Simd1 => 0_u8,
-        EffectRack::Dynamic => 1,
-        EffectRack::Simd2 => 2,
-    };
     let effect = ready
         .effect_slot(
             address.track_index as usize,
-            rack_index,
-            address.effect_index,
+            LiveEffectAddress {
+                rack: address.rack,
+                index: address.effect_index,
+            },
         )
         .ok_or(ObservationReadError::InvalidSelection)?;
     let effect_slot_id = ready
@@ -5014,20 +5092,23 @@ fn resolve_observation(
         .iter()
         .position(|id| id.as_ref() == selection.track_id)
         .ok_or(ObservationReadError::InvalidSelection)?;
-    let rack_index = match selection.rack {
-        EffectRack::Simd1 => 0_usize,
-        EffectRack::Dynamic => 1,
-        EffectRack::Simd2 => 2,
-    };
-    let effect_count = ready
+    let [pre_insert, inserts, post_insert] = ready
         .rack_effects
         .get(track)
-        .and_then(|counts| counts.get(rack_index))
         .copied()
         .ok_or(ObservationReadError::InvalidSelection)?;
+    // A console slot is searched over both sections, in slot order; an insert over the inserts.
+    let effect_count = match selection.rack {
+        LiveEffectRack::Console => pre_insert.saturating_add(post_insert),
+        LiveEffectRack::Inserts => inserts,
+    };
     let mut addressed = None;
-    for effect_index in 0..effect_count {
-        let Some(effect) = ready.effect_slot(track, rack_index as u8, effect_index) else {
+    for index in 0..effect_count {
+        let address = LiveEffectAddress {
+            rack: selection.rack,
+            index,
+        };
+        let Some(effect) = ready.effect_slot(track, address) else {
             return Err(ObservationReadError::InvalidSelection);
         };
         let Some(producer) = ready.effect_controls.get(effect).and_then(Option::as_ref) else {
@@ -5862,15 +5943,10 @@ fn compile_ready(
         let Some(track) = track_index.get(producer.track_id.as_ref()).copied() else {
             return Err(fixed_diagnostic("web.live_controls.effects").into());
         };
-        let rack = match producer.rack {
-            EffectRack::Simd1 => 0_usize,
-            EffectRack::Dynamic => 1,
-            EffectRack::Simd2 => 2,
-        };
-        let counts = &rack_effects[track];
-        let offset: u32 = counts[..rack].iter().sum();
-        let slot = (effect_base[track] + offset + producer.effect_index) as usize;
-        let Some(entry) = effect_controls.get_mut(slot) else {
+        let Some(entry) =
+            dense_effect_slot(effect_base[track], rack_effects[track], producer.address)
+                .and_then(|slot| effect_controls.get_mut(slot))
+        else {
             return Err(fixed_diagnostic("web.live_controls.effects").into());
         };
         if entry.is_some() {
@@ -5933,14 +6009,10 @@ fn compile_ready(
         let Some(track) = track_index.get(handle.track_id.as_ref()).copied() else {
             return Err(fixed_diagnostic("web.live_controls.observation").into());
         };
-        let rack = match handle.rack {
-            EffectRack::Simd1 => 0_usize,
-            EffectRack::Dynamic => 1,
-            EffectRack::Simd2 => 2,
+        let Some(slot) = dense_effect_slot(effect_base[track], rack_effects[track], handle.address)
+        else {
+            return Err(fixed_diagnostic("web.live_controls.observation").into());
         };
-        let counts = &rack_effects[track];
-        let offset: u32 = counts[..rack].iter().sum();
-        let slot = (effect_base[track] + offset + handle.effect_index) as usize;
         let Some(entry) = effect_observations.get_mut(slot) else {
             return Err(fixed_diagnostic("web.live_controls.observation").into());
         };

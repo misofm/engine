@@ -17,8 +17,8 @@ use effect_contract::{
 };
 use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use host_core::{
-    EffectRack, HostLiveControlHandles, HostLiveControlRequest, HostPrepareCaps, HostShapePolicy,
-    PreparedHost, SourceSubmission, prepare_host_session_with_live_controls,
+    HostLiveControlHandles, HostLiveControlRequest, HostPrepareCaps, HostShapePolicy,
+    LiveEffectRack, PreparedHost, SourceSubmission, prepare_host_session_with_live_controls,
 };
 
 const SESSION: &str = include_str!("../../../fixtures/session/v1/compressor-bank-observation.json");
@@ -181,14 +181,11 @@ fn reader(handles: &HostLiveControlHandles, track: usize) -> &engine::realtime::
     let handle = handles
         .effect_observations
         .iter()
-        .find(|handle| handle.track_id.as_ref() == id && handle.effect_index == 0)
+        .find(|handle| handle.track_id.as_ref() == id && handle.address.index == 0)
         .expect("an observation handle for the addressed effect");
-    // The addressing is `(track, rack, effect_index)`; the fixtures declare exactly one effect per
-    // track, so naming the rack here would only restate which fixture is loaded.
-    assert!(matches!(
-        handle.rack,
-        EffectRack::Simd1 | EffectRack::Dynamic
-    ));
+    // The addressing is `(track, rack, index)`; the fixtures declare exactly one effect per track,
+    // a console slot or an insert, so naming the rack here would only restate which fixture is
+    // loaded.
     &handle.readers[0]
 }
 
@@ -1087,7 +1084,7 @@ fn observation_is_identical_across_rack_placement() {
             .handles
             .effect_observations
             .iter()
-            .all(|handle| matches!(handle.rack, EffectRack::Dynamic)),
+            .all(|handle| handle.address.rack == LiveEffectRack::Inserts),
         "the taps address the rack the fixture actually declares"
     );
 

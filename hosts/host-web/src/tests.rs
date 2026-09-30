@@ -3572,7 +3572,9 @@ fn production_effect_delivery_refuses_prepared_target_without_queue_or_full_muta
         words: [0x55; PREPARED_EFFECT_TARGET_WORDS],
     });
     let ready = host.ready.as_mut().expect("ready ownership");
-    let effect_slot = ready.effect_slot(0, 1, 0).expect("dynamic EQ slot");
+    let effect_slot = ready
+        .effect_slot(0, LiveEffectAddress::insert(0))
+        .expect("inserted EQ slot");
     let queue_slot = ready.tracks.len() * 3 + effect_slot;
     let producer = ready
         .effect_controls
@@ -3671,7 +3673,8 @@ fn prepared_eq_owner_transaction_is_design_and_allocation_free_after_preparation
     let mut bank = bank_effect_live_control_host(QUANTUM, 8);
     feed_and_render_tracks(&mut bank, 0, 0.25);
     host_core::test_only_reset_parametric_eq_design_calls();
-    stage_prepared_eq_parameter(&mut bank, 0, 0, 0, 0, 4, 12.0);
+    // The bank fixture's EQ is console slot 0 (issue #1096).
+    stage_prepared_eq_parameter(&mut bank, 0, 0, RACK_CONSOLE, 0, 4, 12.0);
     assert!(host_core::test_only_parametric_eq_design_call_count() > 0);
     host_core::test_only_reset_parametric_eq_design_calls();
     let left = [0.25_f32; QUANTUM as usize];
@@ -3714,7 +3717,7 @@ fn eq_owner_snapshot(host: &mut AudioWorkletEngineHost) -> (Vec<u8>, u64, u64) {
         .ready
         .as_ref()
         .expect("ready")
-        .effect_slot(0, 1, 0)
+        .effect_slot(0, LiveEffectAddress::insert(0))
         .expect("EQ slot");
     let success = host
         .ready
@@ -5665,7 +5668,7 @@ fn selected_observation_reads_are_bounded_stable_and_non_consuming() {
     let mut host = observation_host(QUANTUM, 2, None);
     let selection = ObservationSelection {
         track_id: "t0",
-        rack: EffectRack::Dynamic,
+        rack: LiveEffectRack::Inserts,
         effect_slot_id: "comp",
         tap_id: 1,
         channels: ObservationReadChannels::Both,
@@ -5735,7 +5738,7 @@ fn selected_observation_reads_are_bounded_stable_and_non_consuming() {
     // from their own resident cells, and neither selected read consumes the publication.
     let gate_selection = ObservationSelection {
         track_id: "t2",
-        rack: EffectRack::Dynamic,
+        rack: LiveEffectRack::Inserts,
         effect_slot_id: "gate",
         tap_id: 1,
         channels: ObservationReadChannels::Left,
@@ -5807,14 +5810,14 @@ fn selected_observation_reads_keep_same_track_owner_windows_and_sequences() {
     let mut host = same_track_observation_host(QUANTUM);
     let compressor = ObservationSelection {
         track_id: "t0",
-        rack: EffectRack::Dynamic,
+        rack: LiveEffectRack::Inserts,
         effect_slot_id: "comp",
         tap_id: 1,
         channels: ObservationReadChannels::Both,
     };
     let gate = ObservationSelection {
         track_id: "t0",
-        rack: EffectRack::Dynamic,
+        rack: LiveEffectRack::Inserts,
         effect_slot_id: "gate",
         tap_id: 1,
         channels: ObservationReadChannels::Both,
@@ -5900,7 +5903,7 @@ fn selected_observation_numeric_read_refuses_failed_host_without_touching_output
     assert_eq!(host.status().state, STATE_FAILED);
     let address = ObservationAddress {
         track_index: 0,
-        rack: EffectRack::Dynamic,
+        rack: LiveEffectRack::Inserts,
         effect_index: 0,
         tap_id: 1,
         channels: ObservationReadChannels::Both,
@@ -6146,12 +6149,21 @@ fn observation_misuse_is_typed_and_all_or_nothing() {
     assert_eq!(host.submit_commands(1), RESULT_INVALID_ARGUMENT);
     assert_eq!(host.command_report().reason, COMMAND_REASON_MALFORMED);
 
-    // Unknown rack and unknown effect keep their own reasons on the observe kinds.
+    // Unknown rack and unknown effect keep their own reasons on the observe kinds. The retired
+    // `simd1`/`simd2` codes are unknown racks (issue #1096); this session has no console slot, so
+    // `console` is a known rack naming an unknown effect.
+    for retired in [0, 2, 4] {
+        assert_eq!(
+            observe(&mut host, 0, retired, 0, 1, 2, true),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_eq!(host.command_report().reason, COMMAND_REASON_UNKNOWN_RACK);
+    }
     assert_eq!(
-        observe(&mut host, 0, 3, 0, 1, 2, true),
+        observe(&mut host, 0, RACK_CONSOLE, 0, 1, 2, true),
         RESULT_INVALID_ARGUMENT
     );
-    assert_eq!(host.command_report().reason, COMMAND_REASON_UNKNOWN_RACK);
+    assert_eq!(host.command_report().reason, COMMAND_REASON_UNKNOWN_EFFECT);
     assert_eq!(
         observe(&mut host, 0, 1, 7, 1, 2, true),
         RESULT_INVALID_ARGUMENT

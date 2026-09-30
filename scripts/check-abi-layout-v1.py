@@ -86,7 +86,17 @@ RESPONSE_TARGETS = [(1, "effect"), (2, "inputFilters")]
 RESPONSE_GRIDS = [(1, "linear"), (2, "logarithmic")]
 RESPONSE_CHANNELS = [(1, "left"), (2, "right"), (3, "both")]
 RESPONSE_FIELDS = [(1, "total"), (2, "sections")]
-SPECTRUM_TARGETS = [(1, "trackPostInputBuiltins"), (2, "trackPostMatrix"), (3, "output")]
+# Decision 12 (#1096): the track targets follow the tap rename; their codes are unchanged.
+SPECTRUM_TARGETS = [(1, "trackPostInput"), (2, "trackPostPan"), (3, "output")]
+# Decision 12 (#1096): the effect racks of the command, observation, companion and configuration
+# records. `inserts` keeps the code `dynamic` had and `console` is appended. The retired `simd1`
+# (0) and `simd2` (2) codes are absent from the vocabulary and never reallocated.
+RACKS = [(1, "inserts"), (3, "console"), (255, "notApplicable")]
+RETIRED_RACKS = {0, 2}
+# The live-response owner record's `rack`: `inserts` keeps 2, `simd1`/`simd2`'s 1 and 3 are retired,
+# and `console` is appended as 4.
+LIVE_RESPONSE_RACKS = [(0, "inputFilters"), (2, "inserts"), (4, "console")]
+RETIRED_LIVE_RESPONSE_RACKS = {1, 3}
 SPECTRUM_CHANNELS = [(1, "left"), (2, "right"), (3, "both")]
 SPECTRUM_STREAM_STATUSES = [
     (0, "inactive"), (1, "warming"), (2, "pending"), (3, "gap"),
@@ -494,7 +504,7 @@ def validate(document: object) -> None:
         "spectrumCollectionEntryCapacity", "spectrumCollectionTargetIdsBytes",
         "spectrumRequestBytes", "spectrumWindowHeaderBytes", "spectrumResultHeaderBytes",
         "spectrumWindowFrames", "spectrumBinCount", "maximumSpectrumIdBytes", "maximumPreparedSpectrumTargets",
-        "spectrumStreamStatuses", "spectrumStreamMetadataBytes",
+        "spectrumStreamStatuses", "spectrumStreamMetadataBytes", "racks", "liveResponseRacks",
     }, f"constants keys are exact: {sorted(constants)}")
 
     check_named(document, "resultCodes", RESULT_CODES)
@@ -509,6 +519,13 @@ def validate(document: object) -> None:
     check_named(document, "responseChannels", RESPONSE_CHANNELS)
     check_named(document, "responseFields", RESPONSE_FIELDS)
     check_named(document, "spectrumTargets", SPECTRUM_TARGETS)
+    check_named(document, "racks", RACKS)
+    check_named(document, "liveResponseRacks", LIVE_RESPONSE_RACKS)
+    # Spelled twice on purpose: a retired code must never be reallocated, whatever it is named.
+    require(not RETIRED_RACKS & {row["value"] for row in constants["racks"]},
+            "constants.racks reallocates a retired simd1/simd2 code")
+    require(not RETIRED_LIVE_RESPONSE_RACKS & {row["value"] for row in constants["liveResponseRacks"]},
+            "constants.liveResponseRacks reallocates a retired simd1/simd2 code")
     check_named(document, "spectrumChannels", SPECTRUM_CHANNELS)
     check_named(document, "spectrumStreamStatuses", SPECTRUM_STREAM_STATUSES)
     check_named(document, "liveResponseModes", [(1, "target")])
@@ -638,6 +655,19 @@ def self_test() -> int:
     def duplicate_result_name(document: dict) -> None:
         document["constants"]["resultCodes"][5]["name"] = "prepareRejected"
 
+    def reallocate_retired_rack(document: dict) -> None:
+        for row in document["constants"]["racks"]:
+            if row["name"] == "console":
+                row["value"] = 0
+                return
+        raise AssertionError("the console rack row exists in the valid fixture")
+
+    def retired_owner_rack_returns(document: dict) -> None:
+        document["constants"]["liveResponseRacks"].append({"value": 1, "name": "simd1"})
+
+    def stale_spectrum_target(document: dict) -> None:
+        document["constants"]["spectrumTargets"][1]["name"] = "trackPostMatrix"
+
     def boolean_named_value(document: dict) -> None:
         rows = document["constants"]["observationChannels"]
         for row in rows:
@@ -666,6 +696,9 @@ def self_test() -> int:
         ("the ABI version goes stale", stale_abi_version),
         ("a retired result name returns", duplicate_result_name),
         ("a named numeric value becomes boolean", boolean_named_value),
+        ("a retired rack code is reallocated to console", reallocate_retired_rack),
+        ("a retired owner-record rack code returns", retired_owner_rack_returns),
+        ("a spectrum target keeps its pre-rename spelling", stale_spectrum_target),
     ]
     for name, mutate in mutations:
         broken = copy.deepcopy(sample)

@@ -17,7 +17,7 @@ use effect_contract::ParameterChannel;
 mod support;
 use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use host_core::{
-    EffectRack, HostLiveControlRequest, HostPrepareCaps, HostShapePolicy, PreparedHost,
+    HostLiveControlRequest, HostPrepareCaps, HostShapePolicy, LiveEffectAddress, PreparedHost,
     SourceSubmission, prepare_host_session_with_live_controls,
 };
 
@@ -138,7 +138,7 @@ fn render(console: &mut Console, blocks: usize) -> Vec<Vec<u32>> {
     peaks
 }
 
-/// Pushes one band-gain retarget into the addressed track's simd1 effect channel.
+/// Pushes one band-gain retarget into the addressed track's first console slot's channel.
 fn command(console: &mut Console, track_id: &str, value: f32) {
     let producer = console
         .handles
@@ -146,8 +146,7 @@ fn command(console: &mut Console, track_id: &str, value: f32) {
         .iter_mut()
         .find(|producer| {
             producer.track_id.as_ref() == track_id
-                && producer.rack == EffectRack::Simd1
-                && producer.effect_index == 0
+                && producer.address == LiveEffectAddress::console(0)
         })
         .expect("a control channel for the addressed effect");
     for channel in [ParameterChannel::Left, ParameterChannel::Right] {

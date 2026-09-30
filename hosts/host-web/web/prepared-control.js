@@ -57,6 +57,9 @@ function schemaOf(layout) {
     resultInternal: constant(layout, "resultCodes", "internal"),
     resultReprepare: constant(layout, "resultCodes", "reprepareRequired"),
     effectParamKind: constant(layout, "wireCommandKinds", "effectParam"),
+    rackInserts: constant(layout, "racks", "inserts"),
+    rackConsole: constant(layout, "racks", "console"),
+    rackNotApplicable: constant(layout, "racks", "notApplicable"),
     inputFiltersKind: constant(layout, "wireCommandKinds", "inputFilters"),
     maximumCommandRecords: scalarConstant(layout, "maximumCommandRecords"),
     command: Object.freeze({
@@ -357,7 +360,9 @@ export function createPreparedControl(options) {
   }
 
   function acceptConfig(address, bytes) {
-    const config = readConfig(bytes, options.sampleRateHz, schema, address.rack === 255 ? "builtin" : "eq");
+    const config = readConfig(
+      bytes, options.sampleRateHz, schema, address.rack === schema.rackNotApplicable ? "builtin" : "eq",
+    );
     if (generation !== 0n && generation !== config.generation) {
       invalidate();
       throw failure(schema.resultWrongState);
@@ -448,9 +453,13 @@ export function createPreparedControl(options) {
     const transfer = records.slice();
     const groups = new Map();
     for (const row of rows) {
-      const family = row.kind === schema.effectParamKind && row.rack <= 2
+      // An EQ lives in an insert or a console slot; a retired rack code goes to the engine as an
+      // ordinary record and is refused there with `unknownRack` (#1096).
+      const family = row.kind === schema.effectParamKind
+          && (row.rack === schema.rackInserts || row.rack === schema.rackConsole)
         ? "eq"
-        : row.kind === schema.inputFiltersKind && row.rack === 255 && row.effectIndex === 0
+        : row.kind === schema.inputFiltersKind && row.rack === schema.rackNotApplicable
+            && row.effectIndex === 0
           ? "builtin" : null;
       if (family === null) continue;
       const address = { trackIndex: row.trackIndex, rack: row.rack, effectIndex: row.effectIndex };

@@ -49,11 +49,12 @@ function fixture() {
     preparedRefusal: refusal, preparedRefusalSync: refusal };
   return { options, log, reject: () => { reject = true; } };
 }
-function records(value, effectIndex = 0, leadingOrdinary = false) {
+// `rack` is the record's live rack (#1096): `1` an insert, `3` a console slot.
+function records(value, effectIndex = 0, leadingOrdinary = false, rack = 1) {
   const bytes = new Uint8Array(48 * (leadingOrdinary ? 2 : 1));
   const offset = leadingOrdinary ? 48 : 0, view = new DataView(bytes.buffer);
   if (leadingOrdinary) view.setUint8(0, 3);
-  view.setUint8(offset, 5); view.setUint8(offset + 2, 2);
+  view.setUint8(offset, 5); view.setUint8(offset + 1, rack); view.setUint8(offset + 2, 2);
   view.setUint32(offset + 8, effectIndex, true); view.setUint32(offset + 12, 65, true);
   view.setFloat32(offset + 24, value, true);
   return bytes;
@@ -99,4 +100,21 @@ e.options.preparedSubmit = e.options.preparedSubmitSync;
 await malformed.submit(records(100), 1);
 assert.equal(e.log.copies, 2);
 assert.deepEqual(e.log.seeds, [0, 0]);
+
+// Decision 12 (#1096): an EQ in a console slot (`3`) is prepared exactly as an insert (`1`) is,
+// and a record carrying a retired `simd1`/`simd2` code (`0`, `2`) is never classified as a
+// prepared owner: it goes to the engine as an ordinary record, which refuses it with
+// `unknownRack`. Red mutation: classify by `rack <= 2` again -> the retired rows copy a config.
+const f = fixture(), consoleOwner = createPreparedControl(f.options);
+assert.equal((await consoleOwner.submit(records(100, 0, false, 3), 1)).admitted, 1);
+assert.equal(f.log.copies, 1, "a console slot EQ is a prepared owner");
+for (const retired of [0, 2]) {
+  const g = fixture(), retiredOwner = createPreparedControl(g.options);
+  let ordinary = 0;
+  g.options.ordinarySubmit = (bytes, count) => { ordinary += 1; return { result: 0, admitted: count, records: bytes }; };
+  await retiredOwner.submit(records(100, 0, false, retired), 1);
+  assert.equal(g.log.copies, 0, `retired rack ${retired} is not a prepared owner`);
+  assert.equal(g.log.payloads.length, 0, `retired rack ${retired} carries no companion`);
+  assert.equal(ordinary, 1, `retired rack ${retired} goes to the engine as an ordinary record`);
+}
 console.log("prepared-control sync/async, transfer/ACK, refusal, busy and lifecycle tests passed");

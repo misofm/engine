@@ -197,6 +197,12 @@ export const enum MisoCommandKind {
   /// Set an effect parameter, delivered as a prepared automation span. Applied (issue #140 A).
   EffectParam = 5,
   /// Set an effect bypass, through the latency-preserving shunt. Applied (issue #140 A).
+  ///
+  /// It can lift a session `bypass` too (issue #1087), except on the two effects that keep
+  /// their session bypass as a prepared one: the delay and the multiband compressor (issues
+  /// #1087 and #1100). Their lane is seeded bypassed; lifting it is admitted and renders nothing
+  /// different, because the processor itself was prepared bypassed. Both are inserts: neither can
+  /// be a console slot.
   EffectBypass = 6,
   /// Arm one declared observation tap of one effect instance. Applied (issue #143).
   ///
@@ -232,9 +238,9 @@ export const enum MisoCommandKind {
   /// starts with every solo bit clear.
   ///
   /// Metering is console-correct across a solo, and the code for it is unchanged: the gate sits at
-  /// the fader, so a session's pre-fader send taps (`input`, `post_input_builtins`, `post_simd1`,
-  /// `post_dynamic`, `post_simd2_pre_fader`) keep reading the un-gated signal, while
-  /// `post_fader`, `post_matrix`, the submixes, the output and this host's own meter frame --
+  /// the fader, so a session's pre-fader send taps (`input`, `post_input`, `insert_send`,
+  /// `insert_return`, `pre_fader`) keep reading the un-gated signal, while
+  /// `post_fader`, `post_pan`, the submixes, the output and this host's own meter frame --
   /// including `masterGrDb` -- read the gated mix. A gain-reduction reading on a strip that solo
   /// has silenced falls toward zero reduction, because that is the true state of its signal path
   /// and not an artifact.
@@ -281,9 +287,10 @@ export const enum MisoCommandReason {
   Malformed = 1,
   /// `trackIndex` is not a track of the compiled session.
   UnknownTrack = 2,
-  /// `rack` is not one of the three declared racks.
+  /// `rack` is not an effect rack (`1` inserts or `3` console) on an effect-addressed kind. The
+  /// retired `simd1` (`0`) and `simd2` (`2`) codes land here (issue #1096).
   UnknownRack = 3,
-  /// `effectIndex` is not an effect of the addressed rack.
+  /// `effectIndex` is not an effect of the addressed rack: no such console slot or insert.
   UnknownEffect = 4,
   /// `parameterId` is not a parameter of the addressed effect.
   UnknownParameter = 5,
@@ -308,14 +315,22 @@ export const enum MisoCommandReason {
 }
 
 /// One live-control command. `255` means "not applicable to this kind".
+///
+/// An effect is addressed in the session's terms (decision 12, issue #1096): a console slot as
+/// `rack` `3` with `effectIndex` the slot's index in the session's slot order (`pre_insert`, then
+/// `post_insert`, which is its index in the track's `console` entries), and an insert as `rack`
+/// `1` with `effectIndex` its index in the track's `inserts`. The retired `simd1` (`0`) and `simd2`
+/// (`2`) codes are refused and never reallocated; the layout JSON's `racks` table is the
+/// vocabulary.
 export interface MisoCommand {
   kind: MisoCommandKind;
-  /// `0` simd1, `1` dynamic, `2` simd2, `255` for a builtin-addressed kind.
+  /// `1` inserts, `3` console, `255` for a builtin-addressed kind.
   rack: number;
   /// `0` left, `1` right, `2` both, `255` for a kind with no lane.
   channel: number;
   /// Index into the canonical track order `sessionMap()` returns.
   trackIndex: number;
+  /// A console slot's index in the session's slot order, or an insert's index.
   effectIndex: number;
   parameterId: number;
   /// Ramp window in sample updates for `Pan`, `Matrix`, `FaderDb`, `Mute`, `Solo`, `TrimDb` and
@@ -385,6 +400,7 @@ export interface MisoSessionMap {
 /** Numeric current-owner address used by the additive selected-observation request. */
 export interface MisoObservationAddress {
   readonly trackIndex: number;
+  /** `1` inserts or `3` console, addressed as `MisoCommand` addresses an effect. */
   readonly rack: number;
   readonly effectIndex: number;
   readonly tapId: number;
@@ -395,6 +411,7 @@ export interface MisoObservationAddress {
 /** One resident observation binding, in the prepared owner's stable map order. */
 export interface MisoObservationMapBinding {
   readonly trackIndex: number;
+  /** `1` inserts or `3` console. */
   readonly rack: number;
   readonly effectIndex: number;
   readonly effectSlotId: string;
@@ -461,7 +478,9 @@ export interface MisoTrackResponseCaptureReply {
   readonly snapshot: Uint8Array;
 }
 
-export type MisoSpectrumTarget = "trackPostInputBuiltins" | "trackPostMatrix" | "output";
+/// The track targets follow the `post_input` and `post_pan` taps (decision 12, issue #1096); their
+/// wire codes, `1` and `2`, are unchanged.
+export type MisoSpectrumTarget = "trackPostInput" | "trackPostPan" | "output";
 export type MisoSpectrumChannels = "left" | "right" | "both";
 
 /** One prepared spectrum boundary passed to the Worklet during boot. */
@@ -597,7 +616,8 @@ export interface MisoMeterFrame {
 export interface MisoObservationSubscription {
   /// Index into the canonical track order `sessionMap()` returns.
   trackIndex: number;
-  /// `0` simd1, `1` dynamic, `2` simd2. There is no `255` here: a tap always names a rack.
+  /// `1` inserts or `3` console, as `MisoCommand` addresses an effect. There is no `255` here:
+  /// a tap always names a rack.
   rack: number;
   effectIndex: number;
   /// The effect-local tap id from the metadata JSON's per-effect `observations[].id`. Never `0`.
@@ -627,7 +647,7 @@ export interface MisoObservationRequest {
 /// and cannot express absence; this can.
 export interface MisoObservationBinding {
   readonly trackIndex: number;
-  /// `0` simd1, `1` dynamic, `2` simd2.
+  /// `1` inserts or `3` console.
   readonly rack: number;
   readonly effectIndex: number;
   /// The effect-local tap id, matching the metadata JSON's per-effect `observations[].id`.
