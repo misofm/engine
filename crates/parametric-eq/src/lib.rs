@@ -1073,16 +1073,20 @@ fn empty_mask<L: Lane>() -> L::Mask {
 }
 
 /// The mask that selects every lane whose bit is set in `bits` (bit `l` is lane `l`), as
-/// [`nonfinite_lane_mask`] reports them. Built from [`lane_mask`]'s one-hot rows, so it is the
-/// backend's canonical mask and never leaves the vector domain. D7's failing path only.
+/// [`nonfinite_lane_mask`] reports them. D7's failing path only.
+///
+/// One load and one compare against `+0.0`, so the mask is the backend's canonical form. Not an
+/// `or` of [`lane_mask`]s: each of those compares with a splatted `1.0`, and on Apple targets LLVM
+/// stores every such splat through `_memset_pattern16` (known defect #1018, whose per-crate
+/// ceilings `check-cross-targets.sh` holds); one flag vector per call needs none.
 fn lanes_mask<L: Lane>(bits: u32) -> L::Mask {
-    let mut mask = empty_mask::<L>();
-    for lane in 0..L::WIDTH {
+    let mut flags = [0.0_f32; MAX_LANES];
+    for (lane, flag) in flags.iter_mut().enumerate().take(L::WIDTH) {
         if bits & (1 << lane) != 0 {
-            mask = L::mask_or(mask, lane_mask::<L>(lane));
+            *flag = -1.0;
         }
     }
-    mask
+    L::load(&flags[..L::WIDTH]).lt(L::zero())
 }
 
 /// Writes `word` into the lanes `mask` selects, bitwise: each selected lane holds exactly `word`'s
