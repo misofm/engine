@@ -282,9 +282,11 @@ impl BankWidth {
     /// Whether this non-scalar bank width is legal for a selected backend.
     #[must_use]
     pub const fn matches_backend(self, backend: Backend) -> bool {
-        match Self::for_backend(backend) {
-            Some(width) => width.lanes() == self.lanes(),
-            None => false,
+        match (self, Self::for_backend(backend)) {
+            (Self::Four, Some(Self::Four)) => true,
+            #[cfg(not(target_arch = "wasm32"))]
+            (Self::Eight, Some(Self::Eight)) => true,
+            _ => false,
         }
     }
 
