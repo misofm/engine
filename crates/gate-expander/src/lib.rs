@@ -42,7 +42,7 @@ use effect_runtime::params::{
 };
 use effect_runtime::ramp::LinearRamp;
 use effect_runtime::state_payload as payload;
-use lane::{Backend, Lane, Simd4, Simd8};
+use lane::{Backend, Lane, Simd4};
 
 use kernel::{GateArgs, GateCoef, GateState, MAX_WIDTH, RAMP_COUNT, gate_block};
 
@@ -900,9 +900,9 @@ impl<const CONNECTED: bool> PreparedNativeEffect for PreparedGate<f32, CONNECTED
     }
 }
 
-/// Whether this artifact executes banks of `width` lanes: a compile-time constant (D4).
-const fn executes(width: BankWidth) -> bool {
-    width.lanes() as usize == Backend::current().width()
+/// Whether this artifact executes banks of `lanes` lanes: a compile-time constant (D4).
+const fn executes(lanes: usize) -> bool {
+    lanes == Backend::current().width()
 }
 
 /// The lane bitmask with every lane of a `width`-lane shape set.
@@ -1012,7 +1012,9 @@ macro_rules! bank_impl {
 }
 
 bank_impl!(Simd4);
-bank_impl!(Simd8);
+// Issue #1110: no eight-lane type on wasm32 (`effect_contract::BankWidth`).
+#[cfg(not(target_arch = "wasm32"))]
+bank_impl!(lane::Simd8);
 
 /// Validates one prepare request's initial values against the frozen domains.
 fn initial_defaults(
@@ -1139,28 +1141,19 @@ fn bind_bank<const NATIVE_ONLY: bool>(
     // instruction set at compile time and the workspace pins `x86-64-v3`, so an unavailable width
     // is a scalar fallback. Each arm's check is a compile-time constant, so a production build
     // never links the bank of a width it does not execute.
-    Ok(Some(match request.width {
-        BankWidth::Four => {
-            if NATIVE_ONLY && !executes(BankWidth::Four) {
+    Ok(Some(effect_contract::match_bank_width!(
+        request.width,
+        |L| {
+            if NATIVE_ONLY && !executes(L::WIDTH) {
                 return Ok(None);
             }
             Box::new(
-                PreparedGate::<Simd4, false>::new(metadata, width, defaults)
+                PreparedGate::<L, false>::new(metadata, width, defaults)
                     .ok_or(invalid)?
                     .with_active_lanes(active),
             ) as Box<dyn PreparedNativeEffectBank>
         }
-        BankWidth::Eight => {
-            if NATIVE_ONLY && !executes(BankWidth::Eight) {
-                return Ok(None);
-            }
-            Box::new(
-                PreparedGate::<Simd8, false>::new(metadata, width, defaults)
-                    .ok_or(invalid)?
-                    .with_active_lanes(active),
-            ) as Box<dyn PreparedNativeEffectBank>
-        }
-    }))
+    )))
 }
 
 #[cfg(test)]
@@ -1171,6 +1164,7 @@ mod tests {
     use super::*;
     use effect_contract::{PrepareEffectLimits, PreparedPorts, validate_descriptor};
     use effect_runtime::params::ParameterKind;
+    use lane::Simd8;
 
     impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         /// Test-only fault injection: makes one lane's smoothed gain a NaN.

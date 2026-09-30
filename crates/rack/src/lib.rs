@@ -12,7 +12,7 @@
 use effect_contract::{
     BankWidth, BypassShunt, ChannelSymmetryWitness, EffectBankProcessBlock, EffectControlLane,
     EffectProgramKey, ObservationLane, ObservationSample, PreparedAutomationSpan,
-    PreparedNativeEffectBank, PreparedSidechainPort, SeamSide, transpose_tile_4, transpose_tile_8,
+    PreparedNativeEffectBank, PreparedSidechainPort, SeamSide, transpose_tile_4,
 };
 use engine::realtime::RenderError;
 
@@ -523,8 +523,12 @@ pub type BankPlanePair<'a> = (&'a mut [f32], &'a mut [f32]);
 
 pub struct BankPlaneViews<'a>(BankPlaneViewsInner<'a>);
 
+/// The views of a four- or an eight-lane bank. `Eight`, [`BankPlaneViews::from_eight`] and their
+/// arms are absent on `wasm32`, which has no eight-lane bank (issue #1110,
+/// [`BankWidth`](effect_contract::BankWidth)).
 enum BankPlaneViewsInner<'a> {
     Four([BankPlanePair<'a>; 4], usize),
+    #[cfg(not(target_arch = "wasm32"))]
     Eight([BankPlanePair<'a>; 8], usize),
 }
 
@@ -543,14 +547,18 @@ impl<'a> BankPlaneViews<'a> {
         Self::capacity(&pairs, frames).then_some(Self(BankPlaneViewsInner::Four(pairs, frames)))
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn from_eight(pairs: [BankPlanePair<'a>; 8], frames: usize) -> Option<Self> {
         Self::capacity(&pairs, frames).then_some(Self(BankPlaneViewsInner::Eight(pairs, frames)))
     }
 
     #[inline(always)]
     fn supports(&self, width: usize, frames: usize) -> bool {
-        matches!(&self.0, BankPlaneViewsInner::Four(_, capacity) if width == 4 && *capacity >= frames)
-            || matches!(&self.0, BankPlaneViewsInner::Eight(_, capacity) if width == 8 && *capacity >= frames)
+        match &self.0 {
+            BankPlaneViewsInner::Four(_, capacity) => width == 4 && *capacity >= frames,
+            #[cfg(not(target_arch = "wasm32"))]
+            BankPlaneViewsInner::Eight(_, capacity) => width == 8 && *capacity >= frames,
+        }
     }
 }
 
@@ -2714,14 +2722,9 @@ impl BankChain {
 
     fn gather_mono<M: BankMembers + ?Sized>(&mut self, members: &M, frames: u32) {
         if self.full_bank {
-            match self.scratch.width {
-                BankWidth::Four => {
-                    self.gather_mono_tiled::<M, 4>(members, frames, transpose_tile_4)
-                }
-                BankWidth::Eight => {
-                    self.gather_mono_tiled::<M, 8>(members, frames, transpose_tile_8);
-                }
-            }
+            effect_contract::match_bank_width!(self.scratch.width, |_, W, transpose| {
+                self.gather_mono_tiled::<M, W>(members, frames, transpose)
+            });
             return;
         }
         for lane in 0..self.lanes {
@@ -2877,10 +2880,9 @@ impl BankChain {
     /// too -- there is no partial-tile transpose and no read past `frames`.
     fn gather<M: BankMembers + ?Sized>(&mut self, members: &M, frames: u32) {
         if self.full_bank {
-            match self.scratch.width {
-                BankWidth::Four => self.gather_tiled::<M, 4>(members, frames, transpose_tile_4),
-                BankWidth::Eight => self.gather_tiled::<M, 8>(members, frames, transpose_tile_8),
-            }
+            effect_contract::match_bank_width!(self.scratch.width, |_, W, transpose| {
+                self.gather_tiled::<M, W>(members, frames, transpose)
+            });
             return;
         }
         for lane in 0..self.lanes {
@@ -2943,10 +2945,9 @@ impl BankChain {
     /// members accept the resident block instead ([`BankMembers::fold_resident`], issue #915).
     fn scatter<M: BankMembers + ?Sized>(&mut self, members: &mut M, frames: u32) {
         if self.full_bank {
-            match self.scratch.width {
-                BankWidth::Four => self.scatter_tiled::<M, 4>(members, frames, transpose_tile_4),
-                BankWidth::Eight => self.scatter_tiled::<M, 8>(members, frames, transpose_tile_8),
-            }
+            effect_contract::match_bank_width!(self.scratch.width, |_, W, transpose| {
+                self.scatter_tiled::<M, W>(members, frames, transpose)
+            });
             return;
         }
         if self.fold.is_empty() {
@@ -3046,20 +3047,21 @@ impl BankChain {
                             transpose_tile_4,
                         );
                     }
+                    #[cfg(not(target_arch = "wasm32"))]
                     BankPlaneViewsInner::Eight(pairs, _) => {
                         tile_scatter_direct_plane(
                             &self.scratch.left,
                             pairs,
                             frames_used,
                             false,
-                            transpose_tile_8,
+                            effect_contract::transpose_tile_8,
                         );
                         tile_scatter_direct_plane(
                             &self.scratch.right,
                             pairs,
                             frames_used,
                             true,
-                            transpose_tile_8,
+                            effect_contract::transpose_tile_8,
                         );
                     }
                 }

@@ -180,6 +180,8 @@ macro_rules! impl_lane_f64_for_wide {
 }
 
 impl_lane_f64_for_wide!(wide::f64x4, 4);
+// Issue #1110: the eight-lane companion exists where `Simd8` does (`lib.rs`, "Absent on wasm32").
+#[cfg(not(target_arch = "wasm32"))]
 impl_lane_f64_for_wide!(wide::f64x8, 8);
 
 impl Widen for f32 {
@@ -200,6 +202,7 @@ impl Widen for wide::f32x4 {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Widen for wide::f32x8 {
     type F64 = wide::f64x8;
 
@@ -213,4 +216,5 @@ impl Widen for wide::f32x8 {
 // compile time here and again by gate 1 (`tests/f64_lane.rs`).
 const _: () = assert!(<f64 as LaneF64>::WIDTH == <f32 as Lane>::WIDTH);
 const _: () = assert!(<wide::f64x4 as LaneF64>::WIDTH == <wide::f32x4 as Lane>::WIDTH);
+#[cfg(not(target_arch = "wasm32"))]
 const _: () = assert!(<wide::f64x8 as LaneF64>::WIDTH == <wide::f32x8 as Lane>::WIDTH);

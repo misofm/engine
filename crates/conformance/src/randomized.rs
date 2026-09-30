@@ -275,8 +275,11 @@ fn audited<T>(armed: bool, what: &str, call: impl FnOnce() -> T) -> T {
     result
 }
 
-const WIDTHS: [(BankWidth, Backend); 2] = [
+/// Every bank width this target has, with the backend that executes it. No eight on `wasm32`,
+/// which has no eight-lane type (issue #1110, `effect_contract::BankWidth`).
+const WIDTHS: &[(BankWidth, Backend)] = &[
     (BankWidth::Four, Backend::Simd4),
+    #[cfg(not(target_arch = "wasm32"))]
     (BankWidth::Eight, Backend::Simd8),
 ];
 
@@ -320,7 +323,7 @@ fn scenario(
         hostile: !mono && draw.chance(1, 2),
     };
     let bound = coverage.banks.iter().sum::<u64>();
-    for (width, backend) in WIDTHS {
+    for &(width, backend) in WIDTHS {
         run_width(spec, &mut draw, shape, width, backend, audited, coverage);
     }
     if coverage.banks.iter().sum::<u64>() == bound {
@@ -689,7 +692,7 @@ fn request<'a>(shape: Shape, values: &'a [InitialParameterValue]) -> PrepareEffe
 }
 
 fn index_of(width: BankWidth) -> usize {
-    usize::from(width == BankWidth::Eight)
+    usize::from(width.lanes() == 8)
 }
 
 /// The dual bank's collapsing twin, and the witness terms that decide its mode.
@@ -1710,15 +1713,17 @@ fn bind_eligibility(
     let short = &base[..lanes - 1];
     let mut long = base.clone();
     long.push(base[0]);
-    let other_backend = match backend {
-        Backend::Simd4 => Backend::Simd8,
-        _ => Backend::Simd4,
-    };
+    // Absent where the target has one bank width, as `wasm32` does (issue #1110).
+    let other_backend = WIDTHS
+        .iter()
+        .map(|&(_, other)| other)
+        .find(|&other| other != backend);
     for (label, requests, backend) in [
-        ("one member short", short, backend),
-        ("one member long", &long[..], backend),
+        ("one member short", short, Some(backend)),
+        ("one member long", &long[..], Some(backend)),
         ("another width's backend", &base[..], other_backend),
     ] {
+        let Some(backend) = backend else { continue };
         match factory.bind_homogeneous_bank(PrepareEffectBankRequest {
             backend,
             width,
@@ -1983,7 +1988,7 @@ pub fn d7_report_violations(factory: &dyn NativeEffectFactory) -> Vec<String> {
         check("scalar", block, 0, block >= POISONED, report, zeroed);
     }
 
-    for (width, backend) in WIDTHS {
+    for &(width, backend) in WIDTHS {
         let lanes = width.lanes() as usize;
         let requests: Vec<PrepareEffectRequest<'_>> =
             (0..lanes).map(|_| request(shape, &values)).collect();

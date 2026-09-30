@@ -294,7 +294,6 @@ use effect_contract::{
     BypassShunt, ChannelSymmetryWitness, EffectControlLane, EffectProcessBlock, ObservationLane,
     ObservationSample, PreparedAutomationSpan, PreparedNativeEffect, ResponseAnalysisError,
     ResponseSnapshotKind, ResponseSnapshotRequest as OwnerSnapshotRequest, ResponseSnapshotSummary,
-    transpose_tile_4, transpose_tile_8,
 };
 use lane::Lane;
 use lane::kernels::{mix2x2_block, ordered_accumulate_block, pdc_delay_block, sum_into_block};
@@ -1669,6 +1668,8 @@ impl BankMembers for ArenaMembers<'_> {
                     frames,
                 )?)
             }
+            // No eight-lane bank on wasm32 (issue #1110, `effect_contract::BankWidth`).
+            #[cfg(not(target_arch = "wasm32"))]
             8 => {
                 let buffers: [u32; 8] = self.outputs.get(..8)?.try_into().ok()?;
                 Some(BankPlaneViews::from_eight(
@@ -1819,12 +1820,9 @@ impl BankMembers for ArenaMembers<'_> {
     /// nothing, and the chain then takes the staged path -- whose `fold_cohort` applies its own
     /// checks exactly as it always has.
     fn fold_resident(&mut self, cohort: ResidentFoldCohort<'_>) -> bool {
-        match cohort.width() {
-            BankWidth::Four => self.fold_resident_tiles::<4, lane::Simd4>(cohort, transpose_tile_4),
-            BankWidth::Eight => {
-                self.fold_resident_tiles::<8, lane::Simd8>(cohort, transpose_tile_8)
-            }
-        }
+        effect_contract::match_bank_width!(cohort.width(), |L, W, transpose| {
+            self.fold_resident_tiles::<W, L>(cohort, transpose)
+        })
     }
 }
 
@@ -3262,10 +3260,7 @@ fn bank_sample_peak(width: BankWidth, left: &[f32], right: &[f32]) -> Option<[[f
         meter_sample_peak_block::<L>(right, frames, L::zero()).store(&mut peaks[1][..L::WIDTH]);
         Some(peaks)
     }
-    match width {
-        BankWidth::Four => planes::<lane::Simd4>(left, right),
-        BankWidth::Eight => planes::<lane::Simd8>(left, right),
-    }
+    effect_contract::match_bank_width!(width, |L| planes::<L>(left, right))
 }
 
 // REALTIME_POLICY_END
@@ -3410,10 +3405,7 @@ fn bank_meter_pass(
             ],
         })
     }
-    match width {
-        BankWidth::Four => planes::<lane::Simd4>(left, right, seeds),
-        BankWidth::Eight => planes::<lane::Simd8>(left, right, seeds),
-    }
+    effect_contract::match_bank_width!(width, |L| planes::<L>(left, right, seeds))
 }
 
 // REALTIME_POLICY_END

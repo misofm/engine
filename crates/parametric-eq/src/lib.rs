@@ -60,7 +60,7 @@ use lane::kernels::{
     svf_cascade_interleaved_bounded, svf_cascade_interleaved_with_dry_masks_bounded,
     svf_cascade_skewed, svf_cascade_skewed_with_dry_masks,
 };
-use lane::{Backend, Lane, Simd4, Simd8};
+use lane::{Backend, Lane};
 
 mod control;
 #[cfg(test)]
@@ -3338,20 +3338,17 @@ fn bind_bank(
     // move it off `+0.0` at rest; the padding contract on `PrepareEffectBankRequest` lists the
     // clauses, and `Channel::recover_failed_lanes` is why a padded lane's bits and an active lane's
     // never meet.
-    Ok(Some(match request.width {
-        BankWidth::Four => Box::new(prepare_width::<Simd4, 4>(
-            metadata,
-            request.width,
-            request.requests,
-            request.active_mask,
-        )?) as Box<dyn PreparedNativeEffectBank>,
-        BankWidth::Eight => Box::new(prepare_width::<Simd8, 8>(
-            metadata,
-            request.width,
-            request.requests,
-            request.active_mask,
-        )?) as Box<dyn PreparedNativeEffectBank>,
-    }))
+    Ok(Some(effect_contract::match_bank_width!(
+        request.width,
+        |L, N| {
+            Box::new(prepare_width::<L, N>(
+                metadata,
+                request.width,
+                request.requests,
+                request.active_mask,
+            )?) as Box<dyn PreparedNativeEffectBank>
+        }
+    )))
 }
 
 /// Maps the shared codec's error onto the contract's.
@@ -6488,6 +6485,7 @@ mod ramping_elision {
     use effect_contract::{
         EffectBankProcessBlock, EffectTargetRequest, NativeEffectTargetPreparation,
     };
+    use lane::{Simd4, Simd8};
 
     const RATE: SampleRateHz = SampleRateHz(48_000);
     const QUANTUM: usize = 128;
@@ -7946,6 +7944,7 @@ mod ramping_elision {
 #[cfg(test)]
 mod stationary_subnormal {
     use super::*;
+    use lane::{Simd4, Simd8};
 
     const RATE: SampleRateHz = SampleRateHz(48_000);
     const FRAMES: usize = 16;
@@ -8320,6 +8319,7 @@ mod padded_banks {
         BypassShunt, EffectBankProcessBlock, EffectTargetRequest, NativeEffectTargetPreparation,
         PreparedAutomationSpan,
     };
+    use lane::{Simd4, Simd8};
 
     const QUANTUM: usize = 128;
     const LAUNCH_RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];

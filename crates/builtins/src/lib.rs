@@ -47,7 +47,7 @@ use effect_contract::{
     ResponseSnapshotSummary,
 };
 use lane::{
-    Backend, Lane, Simd4, Simd8,
+    Backend, Lane, Simd4,
     kernels::{
         SvfCoef,
         builtins::{
@@ -3354,6 +3354,59 @@ impl InputBuiltins {
     }
 }
 
+/// This crate's one dispatch over its per-width bank kernels ([`InputStageKernel`],
+/// [`FaderStageKernel`], [`MatrixStageKernel`]), and the one place outside those enums where their
+/// eight-lane variant is written (issue #1110).
+///
+/// The `Simd8` variants, like `lane::Simd8` and `effect_contract::BankWidth::Eight`, do not exist
+/// on `wasm32`, where the browser runs four lanes only. So each rule's eight-lane arm carries
+/// `#[cfg(not(target_arch = "wasm32"))]`, and every other line of the crate is written once for
+/// both widths:
+///
+/// * `per_width!(Kernel at width, |L| stage)` builds the `Kernel` variant of `width` around
+///   `stage`, with `L` naming that width's lane type in it;
+/// * `per_width!(Kernel(stage) in kernel => body)` evaluates `body` with `stage` bound to the stage
+///   inside `kernel`, whichever width it holds;
+/// * `per_width!((A(a), B(b)) in (x, y) => body, else mismatch)` evaluates `body` on the stages
+///   inside two kernels of the same width, and `mismatch` when their widths differ. That arm, too,
+///   exists only where there is a second width to differ by.
+///
+/// Each form expands to a `match`, so `return` and `?` in a body act on the caller.
+macro_rules! per_width {
+    ($kernel:ident at $width:expr, |$lane:ident| $stage:expr) => {
+        match $width {
+            BankWidth::Four => {
+                type $lane = Simd4;
+                $kernel::Simd4($stage)
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            BankWidth::Eight => {
+                type $lane = lane::Simd8;
+                $kernel::Simd8($stage)
+            }
+        }
+    };
+    ($kernel:ident($binding:ident) in $value:expr => $body:expr) => {
+        match $value {
+            $kernel::Simd4($binding) => $body,
+            #[cfg(not(target_arch = "wasm32"))]
+            $kernel::Simd8($binding) => $body,
+        }
+    };
+    (
+        ($a:ident($x:ident), $b:ident($y:ident)) in $value:expr => $body:expr,
+        else $mismatch:expr
+    ) => {
+        match $value {
+            ($a::Simd4($x), $b::Simd4($y)) => $body,
+            #[cfg(not(target_arch = "wasm32"))]
+            ($a::Simd8($x), $b::Simd8($y)) => $body,
+            #[cfg(not(target_arch = "wasm32"))]
+            _ => $mismatch,
+        }
+    };
+}
+
 /// The input stage of a bank at the width its backend selected.
 ///
 /// The two variants differ in size because their lane words do: an eight-lane coefficient set is
@@ -3365,8 +3418,9 @@ impl InputBuiltins {
 enum InputStageKernel {
     /// Four lanes: AArch64 NEON and wasm `simd128`.
     Simd4(InputStage<Simd4>),
-    /// Eight lanes: `x86-64-v3`.
-    Simd8(InputStage<Simd8>),
+    /// Eight lanes: `x86-64-v3`. Absent on `wasm32` ([`per_width!`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    Simd8(InputStage<lane::Simd8>),
 }
 
 /// A homogeneous input-builtins bank over one AoSoA cohort.
@@ -3393,10 +3447,8 @@ impl BuiltinInputBank {
     /// owns, declines.
     #[must_use]
     pub fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitness {
-        let designed = match &self.stage {
-            InputStageKernel::Simd4(stage) => stage.lane_channel_symmetry(lane),
-            InputStageKernel::Simd8(stage) => stage.lane_channel_symmetry(lane),
-        };
+        let designed =
+            per_width!(InputStageKernel(stage) in &self.stage => stage.lane_channel_symmetry(lane));
         let mut witness = ChannelSymmetryWitness::SYMMETRIC;
         witness.set(ChannelSymmetryWitness::DESIGNED, designed);
         witness
@@ -3424,10 +3476,7 @@ impl BuiltinInputBank {
             .iter()
             .map(|input| input.stage.lane_track(0))
             .collect();
-        let stage = match width {
-            BankWidth::Four => InputStageKernel::Simd4(InputStage::<Simd4>::new(&tracks)),
-            BankWidth::Eight => InputStageKernel::Simd8(InputStage::<Simd8>::new(&tracks)),
-        };
+        let stage = per_width!(InputStageKernel at width, |L| InputStage::<L>::new(&tracks));
         Ok(Self {
             backend,
             width,
@@ -3457,14 +3506,9 @@ impl BuiltinInputBank {
         sample_rate_hz: u32,
         request: ResponseSnapshotRequest<'_>,
     ) -> Result<ResponseSnapshotSummary, ResponseAnalysisError> {
-        match &self.stage {
-            InputStageKernel::Simd4(stage) => {
-                stage.copy_response_snapshot_lane(lane, sample_rate_hz, request)
-            }
-            InputStageKernel::Simd8(stage) => {
-                stage.copy_response_snapshot_lane(lane, sample_rate_hz, request)
-            }
-        }
+        per_width!(InputStageKernel(stage) in &self.stage => {
+            stage.copy_response_snapshot_lane(lane, sample_rate_hz, request)
+        })
     }
 
     /// Renders one AoSoA block of `frames * width.lanes()` samples per channel.
@@ -3480,10 +3524,7 @@ impl BuiltinInputBank {
         let frames = frames as usize;
         debug_assert_eq!(left.len(), frames * self.width.lanes() as usize);
         debug_assert_eq!(right.len(), frames * self.width.lanes() as usize);
-        match &mut self.stage {
-            InputStageKernel::Simd4(stage) => stage.process(left, right, frames),
-            InputStageKernel::Simd8(stage) => stage.process(left, right, frames),
-        }
+        per_width!(InputStageKernel(stage) in &mut self.stage => stage.process(left, right, frames))
     }
 
     /// Renders one AoSoA block of the **collapsed** cohort: the left plane only.
@@ -3493,10 +3534,7 @@ impl BuiltinInputBank {
     pub fn process_mono(&mut self, left: &mut [f32], frames: u32) -> BuiltinProcessReport {
         let frames = frames as usize;
         debug_assert_eq!(left.len(), frames * self.width.lanes() as usize);
-        match &mut self.stage {
-            InputStageKernel::Simd4(stage) => stage.process_mono(left, frames),
-            InputStageKernel::Simd8(stage) => stage.process_mono(left, frames),
-        }
+        per_width!(InputStageKernel(stage) in &mut self.stage => stage.process_mono(left, frames))
     }
 
     /// Whether this bank may run [`BuiltinInputBank::process_mono`] at all.
@@ -3505,28 +3543,19 @@ impl BuiltinInputBank {
     /// `+0.0` state, and nothing on the render path re-decides it.
     #[must_use]
     pub const fn supports_mono_collapse(&self) -> bool {
-        match &self.stage {
-            InputStageKernel::Simd4(stage) => stage.mono_collapse_gate(),
-            InputStageKernel::Simd8(stage) => stage.mono_collapse_gate(),
-        }
+        per_width!(InputStageKernel(stage) in &self.stage => stage.mono_collapse_gate())
     }
 
     /// Copies every lane's left-channel per-channel state onto the right channel (the disengage
     /// copy): the integrators and the trim ramp record.
     pub fn desymmetrize(&mut self) {
-        match &mut self.stage {
-            InputStageKernel::Simd4(stage) => stage.desymmetrize(),
-            InputStageKernel::Simd8(stage) => stage.desymmetrize(),
-        }
+        per_width!(InputStageKernel(stage) in &mut self.stage => stage.desymmetrize())
     }
 
     /// Whether this bank can prove, right now, that its two channels' state is bit-equal (M3).
     #[must_use]
     pub fn channels_agree(&self) -> bool {
-        match &self.stage {
-            InputStageKernel::Simd4(stage) => stage.channels_agree(),
-            InputStageKernel::Simd8(stage) => stage.channels_agree(),
-        }
+        per_width!(InputStageKernel(stage) in &self.stage => stage.channels_agree())
     }
 
     /// Applies one trusted precomputed input-filter target to one populated lane in this bank.
@@ -3539,10 +3568,9 @@ impl BuiltinInputBank {
             return Err(BuiltinParameterError::LaneLength);
         }
         validate_prepared_input_filter_target(&target)?;
-        match &mut self.stage {
-            InputStageKernel::Simd4(stage) => stage.apply_prepared_filter(lane, target),
-            InputStageKernel::Simd8(stage) => stage.apply_prepared_filter(lane, target),
-        }
+        per_width!(InputStageKernel(stage) in &mut self.stage => {
+            stage.apply_prepared_filter(lane, target);
+        });
         Ok(())
     }
 
@@ -3568,14 +3596,9 @@ impl BuiltinInputBank {
             return Err(BuiltinParameterError::LaneLength);
         }
         let gain = checked_trim_gain(db)?;
-        match &mut self.stage {
-            InputStageKernel::Simd4(stage) => {
-                stage.set_trim_db(lane, channels, gain, smoothing_samples);
-            }
-            InputStageKernel::Simd8(stage) => {
-                stage.set_trim_db(lane, channels, gain, smoothing_samples);
-            }
-        }
+        per_width!(InputStageKernel(stage) in &mut self.stage => {
+            stage.set_trim_db(lane, channels, gain, smoothing_samples);
+        });
         Ok(())
     }
 
@@ -3598,32 +3621,21 @@ impl BuiltinInputBank {
         if lane >= self.members {
             return Err(BuiltinParameterError::LaneLength);
         }
-        match &mut self.stage {
-            InputStageKernel::Simd4(stage) => {
-                stage.set_polarity_invert(lane, channels, inverted, smoothing_samples);
-            }
-            InputStageKernel::Simd8(stage) => {
-                stage.set_polarity_invert(lane, channels, inverted, smoothing_samples);
-            }
-        }
+        per_width!(InputStageKernel(stage) in &mut self.stage => {
+            stage.set_polarity_invert(lane, channels, inverted, smoothing_samples);
+        });
         Ok(())
     }
 
     /// The trim coefficient one lane and channel applies to the next frame. Readback only.
     #[must_use]
     pub fn trim_signed(&self, lane: usize, channel: usize) -> f32 {
-        match &self.stage {
-            InputStageKernel::Simd4(stage) => stage.trim_signed(lane, channel),
-            InputStageKernel::Simd8(stage) => stage.trim_signed(lane, channel),
-        }
+        per_width!(InputStageKernel(stage) in &self.stage => stage.trim_signed(lane, channel))
     }
 
     /// Resets only the per-lane filter state; prepared coefficients remain unchanged.
     pub fn reset(&mut self) {
-        match &mut self.stage {
-            InputStageKernel::Simd4(stage) => stage.reset(),
-            InputStageKernel::Simd8(stage) => stage.reset(),
-        }
+        per_width!(InputStageKernel(stage) in &mut self.stage => stage.reset())
     }
 }
 
@@ -3637,8 +3649,9 @@ impl BuiltinInputBank {
 enum FaderStageKernel {
     /// Four lanes: AArch64 NEON and wasm `simd128`.
     Simd4(FaderRampStage<Simd4>),
-    /// Eight lanes: `x86-64-v3`.
-    Simd8(FaderRampStage<Simd8>),
+    /// Eight lanes: `x86-64-v3`. Absent on `wasm32` ([`per_width!`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    Simd8(FaderRampStage<lane::Simd8>),
 }
 
 /// A homogeneous fader/mute bank over one AoSoA cohort (issue #212, the banked strip).
@@ -3695,10 +3708,7 @@ impl BuiltinFaderBank {
             .into_iter()
             .map(fader_lanes)
             .collect::<Result<Vec<_>, _>>()?;
-        let stage = match width {
-            BankWidth::Four => FaderStageKernel::Simd4(FaderRampStage::<Simd4>::new(&lanes)),
-            BankWidth::Eight => FaderStageKernel::Simd8(FaderRampStage::<Simd8>::new(&lanes)),
-        };
+        let stage = per_width!(FaderStageKernel at width, |L| FaderRampStage::<L>::new(&lanes));
         Ok(Self {
             backend,
             width,
@@ -3739,14 +3749,9 @@ impl BuiltinFaderBank {
             return Err(BuiltinParameterError::LaneLength);
         }
         let gain = checked_fader_gain(db)?;
-        match &mut self.stage {
-            FaderStageKernel::Simd4(stage) => {
-                stage.set_fader_gain(lane, channels, gain, smoothing_samples);
-            }
-            FaderStageKernel::Simd8(stage) => {
-                stage.set_fader_gain(lane, channels, gain, smoothing_samples);
-            }
-        }
+        per_width!(FaderStageKernel(stage) in &mut self.stage => {
+            stage.set_fader_gain(lane, channels, gain, smoothing_samples);
+        });
         Ok(())
     }
 
@@ -3765,14 +3770,9 @@ impl BuiltinFaderBank {
         if lane >= self.members {
             return Err(BuiltinParameterError::LaneLength);
         }
-        match &mut self.stage {
-            FaderStageKernel::Simd4(stage) => {
-                stage.set_mute(lane, channels, muted, smoothing_samples)
-            }
-            FaderStageKernel::Simd8(stage) => {
-                stage.set_mute(lane, channels, muted, smoothing_samples)
-            }
-        }
+        per_width!(FaderStageKernel(stage) in &mut self.stage => {
+            stage.set_mute(lane, channels, muted, smoothing_samples)
+        });
         Ok(())
     }
 
@@ -3789,10 +3789,9 @@ impl BuiltinFaderBank {
         let frames = frames as usize;
         debug_assert_eq!(left.len(), frames * self.width.lanes() as usize);
         debug_assert_eq!(right.len(), frames * self.width.lanes() as usize);
-        match &mut self.stage {
-            FaderStageKernel::Simd4(stage) => stage.process(left, right, frames),
-            FaderStageKernel::Simd8(stage) => stage.process(left, right, frames),
-        }
+        per_width!(FaderStageKernel(stage) in &mut self.stage => {
+            stage.process(left, right, frames);
+        });
         BuiltinProcessReport::default()
     }
 
@@ -3813,47 +3812,30 @@ impl BuiltinFaderBank {
         {
             return false;
         }
-        match (&self.stage, &matrix.stage) {
-            (FaderStageKernel::Simd4(fader), MatrixStageKernel::Simd4(matrix)) => {
-                matrix.fused_settled_block(
-                    left,
-                    right,
-                    frames as usize,
-                    fader.ramp[0].current,
-                    fader.ramp[0].mute,
-                    fader.ramp[1].current,
-                    fader.ramp[1].mute,
-                );
-            }
-            (FaderStageKernel::Simd8(fader), MatrixStageKernel::Simd8(matrix)) => {
-                matrix.fused_settled_block(
-                    left,
-                    right,
-                    frames as usize,
-                    fader.ramp[0].current,
-                    fader.ramp[0].mute,
-                    fader.ramp[1].current,
-                    fader.ramp[1].mute,
-                );
-            }
-            _ => return false,
-        }
+        let stages = (&self.stage, &matrix.stage);
+        per_width!((FaderStageKernel(fader), MatrixStageKernel(matrix)) in stages => {
+            matrix.fused_settled_block(
+                left,
+                right,
+                frames as usize,
+                fader.ramp[0].current,
+                fader.ramp[0].mute,
+                fader.ramp[1].current,
+                fader.ramp[1].mute,
+            );
+        }, else return false);
         true
     }
 
     fn remaining_nonzero(&self) -> bool {
-        match &self.stage {
-            FaderStageKernel::Simd4(stage) => stage.remaining.iter().flatten().any(|v| *v != 0),
-            FaderStageKernel::Simd8(stage) => stage.remaining.iter().flatten().any(|v| *v != 0),
-        }
+        per_width!(FaderStageKernel(stage) in &self.stage => {
+            stage.remaining.iter().flatten().any(|v| *v != 0)
+        })
     }
 
     /// Snaps every lane to its target and cancels any ramp in flight.
     pub fn reset(&mut self) {
-        match &mut self.stage {
-            FaderStageKernel::Simd4(stage) => stage.reset(),
-            FaderStageKernel::Simd8(stage) => stage.reset(),
-        }
+        per_width!(FaderStageKernel(stage) in &mut self.stage => stage.reset())
     }
 }
 
@@ -3867,8 +3849,9 @@ impl BuiltinFaderBank {
 enum MatrixStageKernel {
     /// Four lanes: AArch64 NEON and wasm `simd128`.
     Simd4(MatrixStage<Simd4>),
-    /// Eight lanes: `x86-64-v3`.
-    Simd8(MatrixStage<Simd8>),
+    /// Eight lanes: `x86-64-v3`. Absent on `wasm32` ([`per_width!`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    Simd8(MatrixStage<lane::Simd8>),
 }
 
 /// A homogeneous 2x2 pan/matrix bank over one AoSoA cohort (issue #212, the banked strip).
@@ -3912,10 +3895,7 @@ impl BuiltinMatrixBank {
             .into_iter()
             .map(|(matrix, samples)| Ok((matrix.checked()?, samples)))
             .collect::<Result<Vec<_>, BuiltinParameterError>>()?;
-        let stage = match width {
-            BankWidth::Four => MatrixStageKernel::Simd4(MatrixStage::<Simd4>::new(&lanes)),
-            BankWidth::Eight => MatrixStageKernel::Simd8(MatrixStage::<Simd8>::new(&lanes)),
-        };
+        let stage = per_width!(MatrixStageKernel at width, |L| MatrixStage::<L>::new(&lanes));
         Ok(Self {
             backend,
             width,
@@ -3954,14 +3934,9 @@ impl BuiltinMatrixBank {
         if lane >= self.members {
             return Err(BuiltinParameterError::LaneLength);
         }
-        match &mut self.stage {
-            MatrixStageKernel::Simd4(stage) => {
-                stage.set_target_over(lane, target, smoothing_samples)
-            }
-            MatrixStageKernel::Simd8(stage) => {
-                stage.set_target_over(lane, target, smoothing_samples)
-            }
-        }
+        per_width!(MatrixStageKernel(stage) in &mut self.stage => {
+            stage.set_target_over(lane, target, smoothing_samples)
+        })
     }
 
     /// Renders one AoSoA block of `frames * width.lanes()` samples per channel.
@@ -3974,26 +3949,21 @@ impl BuiltinMatrixBank {
         let frames = frames as usize;
         debug_assert_eq!(left.len(), frames * self.width.lanes() as usize);
         debug_assert_eq!(right.len(), frames * self.width.lanes() as usize);
-        match &mut self.stage {
-            MatrixStageKernel::Simd4(stage) => stage.process(left, right, frames),
-            MatrixStageKernel::Simd8(stage) => stage.process(left, right, frames),
-        }
+        per_width!(MatrixStageKernel(stage) in &mut self.stage => {
+            stage.process(left, right, frames);
+        });
         BuiltinProcessReport::default()
     }
 
     fn remaining_nonzero(&self) -> bool {
-        match &self.stage {
-            MatrixStageKernel::Simd4(stage) => stage.remaining.iter().any(|v| *v != 0),
-            MatrixStageKernel::Simd8(stage) => stage.remaining.iter().any(|v| *v != 0),
-        }
+        per_width!(MatrixStageKernel(stage) in &self.stage => {
+            stage.remaining.iter().any(|v| *v != 0)
+        })
     }
 
     /// Snaps every lane to its target and cancels any ramp in flight.
     pub fn reset(&mut self) {
-        match &mut self.stage {
-            MatrixStageKernel::Simd4(stage) => stage.reset(),
-            MatrixStageKernel::Simd8(stage) => stage.reset(),
-        }
+        per_width!(MatrixStageKernel(stage) in &mut self.stage => stage.reset())
     }
 }
 
@@ -5344,10 +5314,7 @@ pub mod test_support {
     /// [`input_trim_ramp_words`] for one lane of a bank.
     #[must_use]
     pub fn bank_trim_ramp_words(bank: &BuiltinInputBank, lane: usize) -> [u32; 8] {
-        match &bank.stage {
-            InputStageKernel::Simd4(stage) => stage.trim_ramp_words(lane),
-            InputStageKernel::Simd8(stage) => stage.trim_ramp_words(lane),
-        }
+        per_width!(InputStageKernel(stage) in &bank.stage => stage.trim_ramp_words(lane))
     }
 
     /// Overwrites the retained state words of one input chain.
@@ -5364,19 +5331,13 @@ pub mod test_support {
     /// Which sections of a bank the render path elides, in the [`input_elision_plan`] order.
     #[must_use]
     pub fn bank_elision_plan(bank: &BuiltinInputBank) -> [[bool; 2]; 2] {
-        match &bank.stage {
-            InputStageKernel::Simd4(stage) => stage.elision_plan(),
-            InputStageKernel::Simd8(stage) => stage.elision_plan(),
-        }
+        per_width!(InputStageKernel(stage) in &bank.stage => stage.elision_plan())
     }
 
     /// Retained state words of one bank lane, in the [`input_state_words`] order.
     #[must_use]
     pub fn bank_lane_state_words(bank: &BuiltinInputBank, lane: usize) -> [u32; 8] {
-        match &bank.stage {
-            InputStageKernel::Simd4(stage) => stage.lane_state_words(lane),
-            InputStageKernel::Simd8(stage) => stage.lane_state_words(lane),
-        }
+        per_width!(InputStageKernel(stage) in &bank.stage => stage.lane_state_words(lane))
     }
 
     /// Cumulative per-channel recovered-lane counts of a bank, `[left, right]`.
@@ -5387,18 +5348,14 @@ pub mod test_support {
     /// is the gate.
     #[must_use]
     pub fn bank_lifetime_recovered(bank: &BuiltinInputBank) -> [u64; 2] {
-        match &bank.stage {
-            InputStageKernel::Simd4(stage) => stage.lifetime_recovered,
-            InputStageKernel::Simd8(stage) => stage.lifetime_recovered,
-        }
+        per_width!(InputStageKernel(stage) in &bank.stage => stage.lifetime_recovered)
     }
 
     /// Overwrites the retained state words of one bank lane.
     pub fn set_bank_lane_state_words(bank: &mut BuiltinInputBank, lane: usize, words: [u32; 8]) {
-        match &mut bank.stage {
-            InputStageKernel::Simd4(stage) => stage.set_lane_state_words(lane, words),
-            InputStageKernel::Simd8(stage) => stage.set_lane_state_words(lane, words),
-        }
+        per_width!(InputStageKernel(stage) in &mut bank.stage => {
+            stage.set_lane_state_words(lane, words)
+        })
     }
 
     /// The current (applied) matrix of a scalar matrix section.
@@ -5472,10 +5429,7 @@ pub mod test_support {
             out[13] = u32::from(stage.muted[1][lane]);
             out
         }
-        match &bank.stage {
-            FaderStageKernel::Simd4(stage) => words(stage, lane),
-            FaderStageKernel::Simd8(stage) => words(stage, lane),
-        }
+        per_width!(FaderStageKernel(stage) in &bank.stage => words(stage, lane))
     }
 
     /// Exact current/target/step/ramp/countdown words for one matrix-bank lane.
@@ -5505,10 +5459,7 @@ pub mod test_support {
             out[14] = stage.smoothing_samples[lane];
             out
         }
-        match &bank.stage {
-            MatrixStageKernel::Simd4(stage) => words(stage, lane),
-            MatrixStageKernel::Simd8(stage) => words(stage, lane),
-        }
+        per_width!(MatrixStageKernel(stage) in &bank.stage => words(stage, lane))
     }
 
     /// The input section of a chain, for state injection.

@@ -6,7 +6,9 @@
 # Two legs, one corpus (tools/wasm-gate-corpus):
 #   native   -- run in this process at Scalar, Simd4 and Simd8.
 #   wasm+simd128 -- the same crate built for wasm32-unknown-unknown with simd128 (backend simd4),
-#                   the one wasm build that ships (W4-D1), at every width too.
+#                   the one wasm build that ships (W4-D1), at every width it has: Scalar and
+#                   Simd4. The browser runs four lanes only, and since #1110 the wasm build has no
+#                   eight-lane type, so the host holds the guest to exactly those two widths.
 #
 # There is no scalar (non-`simd128`) wasm leg: owner ruling 2026-09-28, decision 7, retired it
 # with #1062 once #1017's AArch64 legs ran G5 natively on arm64, and `lane` now refuses that
@@ -83,18 +85,21 @@ run_guest() {
 # or the eleven words a shift actually moves, inside a function the limiter owns. Those two sizes
 # are the signature of the regression and of nothing else: the other copies a limiter block makes
 # -- the `BankProcessReport` at `process_bank`'s exit, a state payload buffer -- are other sizes.
-# The sizes are derived, not guessed: one lane is 4 bytes at `Lane = f32`, 16 at `Simd4` and 32 at
-# the wasm `Simd8` (two v128 halves), and `HISTORY_WORDS` is 12. The guest digests every case at
-# all three widths, so its one build holds the limiter at each of those lane types.
+# The sizes are derived, not guessed: one lane is 4 bytes at `Lane = f32` and 16 at `Simd4`, and
+# `HISTORY_WORDS` is 12. The guest digests every case at both of its widths, so its one build holds
+# the limiter at each of those lane types. (The wasm `Simd8`'s 352 and 384 left with it, #1110.)
 #
 # `HotChannel::load` and `History::load`/`store` are excluded by name, and only they. Those are
 # the once-per-block gather and scatter of the whole hot state; moving twelve words as a unit
 # there is the intended shape, and whether the backend emits it as a block move is a decision
-# about one copy per block rather than one per frame. Deleting the exclusion is how you check the
-# pin is still wired to something: with it gone, the `simd128` guest goes red on its `Simd8`
-# `HotChannel::load` (a 384-byte copy; measured at #1062, where the retired scalar guest went red on
-# its `f32` one as well).
-readonly HISTORY_SHIFT_SIZES="44 48 176 192 352 384"
+# about one copy per block rather than one per frame. Deleting the exclusion used to show the pin
+# still wired to something: the `simd128` guest went red on its `Simd8` `HotChannel::load`, a
+# 384-byte copy (measured at #1062, where the retired scalar guest went red on its `f32` one as
+# well, and again on #1110's base). Since #1110 the guest has no `Simd8`, and neither its `f32` nor
+# its `Simd4` `HotChannel::load` is a block move, so no function here needs the exclusion and
+# deleting it turns nothing red: the pin has no live witness on this guest until a history-sized
+# copy appears, and then it fails.
+readonly HISTORY_SHIFT_SIZES="44 48 176 192"
 
 check_detector_residency() {
     local module="$1" name="$2" found

@@ -2,9 +2,9 @@ use super::{
     BuiltinChain, BuiltinLaneSelector, BuiltinParameters, BuiltinProcessReport, BuiltinResetKind,
     CHANNEL_SYMMETRY_LAST_POST_RAMP_READS, CHANNEL_SYMMETRY_OBSERVE_POST_RAMP,
     CHANNEL_SYMMETRY_PREDICATE_CALLS, Cell, ChannelParameters, DualMonoBlock,
-    FILTER_PREFIX_KERNEL_FRAMES, InputStage, Matrix2x2, Simd4, Simd8, prepare_sections,
-    test_support,
+    FILTER_PREFIX_KERNEL_FRAMES, InputStage, Matrix2x2, Simd4, prepare_sections, test_support,
 };
+use lane::Simd8;
 
 fn selected_snapshot(metrics: super::MeterMetricSet) -> super::MeterSnapshot {
     let config = super::MeterConfig {
