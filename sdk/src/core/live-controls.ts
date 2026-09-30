@@ -797,7 +797,8 @@ export class EngineLiveControls {
     if (this.#booted === undefined) {
       throw new MisoUsageError(
         "withSession() holds the session to the document the engine booted, and these live "
-          + "controls were constructed without it; pass the session to the constructor instead",
+          + "controls were constructed without it; construct them with the booted document (the "
+          + "constructor's `booted` argument) so the session can be checked against it",
       );
     }
     assertBootedSession(session, this.#booted);
