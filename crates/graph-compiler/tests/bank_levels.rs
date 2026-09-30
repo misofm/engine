@@ -67,7 +67,8 @@ pub const WIDTHS: [Backend; 3] = [Backend::Scalar, Backend::Simd4, Backend::Simd
 pub const BLOCKS: u64 = 16;
 
 /// The fewest blocks a render runs past its plan's output latency (`GraphCompileReport::
-/// output_latency`), before which the plan renders silence.
+/// output_latency`). Before that latency the plan's output is silent or nearly so: a limiter's
+/// lookahead pre-ringing can start up to about 100 samples earlier.
 ///
 /// PDC delays the output to the longest path's arrival: one true-peak limiter by 486 samples at
 /// 48 kHz, and a generated track that chains five by more than [`BLOCKS`] 128-frame blocks, so a
