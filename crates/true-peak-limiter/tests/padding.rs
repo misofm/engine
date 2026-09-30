@@ -8,8 +8,8 @@
 //! * **Gate 1.** For every active count `1..W`, the members of a padded bank render the bits the
 //!   same tracks render prepared per node, compared from the first block, while the `N + 6` line is
 //!   still filling. Random parameters, input and automation under both link modes, and the console
-//!   fixture's limiter shape under `maximum`, dual and collapsed. The members sit where the planner
-//!   puts them (lanes `0..members`) and, because the contract allows any mask, at the other end too.
+//!   fixture's limiter shape under `maximum`, dual and collapsed, with a silence long enough for the
+//!   silent fast path to engage. The members sit on lanes `0..members`, the contract's one layout.
 //! * **Gate 3, the coupling rule.** The members' bits do not depend on what the padded lanes carry:
 //!   a clone of any member, a mix of clones, or lanes that are no clone at all and move the bank's
 //!   whole-bank decisions (the uniform-body gate, the linked-pair record).
@@ -20,7 +20,8 @@
 //! Every bank width this build binds is run: `Simd8` and `Simd4` on x86-64-v3, `Simd4` on AArch64,
 //! where `scripts/run-aarch64-tests.sh` runs this file natively. A padded lane is fed what the bank
 //! left in it, as `rack::BankChain` feeds it, so every block also checks that the limiter answers
-//! `+0.0` with `+0.0` there.
+//! `+0.0` with exactly `+0.0` there (gate 3's P2a clause; its state half, which needs the crate's
+//! internals, is `a_padded_lane_stays_at_rest_through_the_lookahead`).
 
 use dsp_reference::class_a;
 use effect_contract::{
@@ -485,23 +486,12 @@ fn assert_members_match(shipped: &Planes, oracle: &Planes, mono: bool, what: &st
     }
 }
 
-/// The planner's layout (members on lanes `0..members`) and its mirror (members on the last
-/// lanes), each padded with clones of the first member.
-fn layouts(lanes: usize, members: usize) -> Vec<(&'static str, Vec<Option<usize>>)> {
-    vec![
-        (
-            "members first",
-            (0..lanes)
-                .map(|lane| (lane < members).then_some(lane))
-                .collect(),
-        ),
-        (
-            "members last",
-            (0..lanes)
-                .map(|lane| (lane >= lanes - members).then(|| lane - (lanes - members)))
-                .collect(),
-        ),
-    ]
+/// The contract's one layout: members on lanes `0..members`, padded lanes after them
+/// (`validate_shape` refuses any other, #1088 verdict L3).
+fn members_first(lanes: usize, members: usize) -> Vec<Option<usize>> {
+    (0..lanes)
+        .map(|lane| (lane < members).then_some(lane))
+        .collect()
 }
 
 /// Every padded lane a clone of `member`.
@@ -532,16 +522,10 @@ fn a_padded_bank_renders_its_members_per_node_bits() {
             }
             for scenario in &scenarios {
                 let oracle = per_node(scenario);
-                for (name, layout) in layouts(lanes, members) {
-                    let padding = clones_of(scenario, lanes, 0);
-                    let shipped = banked(scenario, width, backend, &layout, &padding);
-                    assert_members_match(
-                        &shipped,
-                        &oracle,
-                        scenario.mono,
-                        &format!("{} {name}", scenario.label),
-                    );
-                }
+                let padding = clones_of(scenario, lanes, 0);
+                let layout = members_first(lanes, members);
+                let shipped = banked(scenario, width, backend, &layout, &padding);
+                assert_members_match(&shipped, &oracle, scenario.mono, &scenario.label);
             }
         }
     }
@@ -573,7 +557,7 @@ fn the_members_bits_do_not_depend_on_the_padded_lanes() {
             for scenario in &scenarios {
                 let label = format!("{} {width:?} {members}/{lanes}", scenario.label);
                 let oracle = per_node(scenario);
-                let (_, layout) = layouts(lanes, members).remove(0);
+                let layout = members_first(lanes, members);
                 let reference = banked(
                     scenario,
                     width,
@@ -652,7 +636,7 @@ fn a_member_fed_a_non_finite_sample_fails_alone() {
                     "{}: the twin's boundary check never fired",
                     scenario.label
                 );
-                let (_, layout) = layouts(lanes, members).remove(0);
+                let layout = members_first(lanes, members);
                 let shipped = banked(
                     &scenario,
                     width,

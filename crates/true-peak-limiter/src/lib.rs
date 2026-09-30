@@ -732,15 +732,6 @@ fn every_lane(width: usize) -> u32 {
     (1_u32 << width) - 1
 }
 
-/// The lane mask of a bank request's active lanes: bit `l` is set iff `active_mask[l]`.
-fn active_lane_bits(active_mask: &[bool]) -> u32 {
-    active_mask
-        .iter()
-        .enumerate()
-        .filter(|(_, active)| **active)
-        .fold(0, |bits, (lane, _)| bits | (1 << lane))
-}
-
 /// Zeroes the words of every lane named in `lanes`, in every frame of an AoSoA block.
 ///
 /// The per-lane half of the §4.4 recovery (issue #1091), so it runs on the failing path only,
@@ -4339,7 +4330,9 @@ impl NativeEffectFactory for TruePeakLimiterFactory {
         };
         let left_defaults = left_defaults.into_boxed_slice();
         let right_defaults = right_defaults.into_boxed_slice();
-        let active = active_lane_bits(request.active_mask);
+        // `validate_shape` admits members-first masks only (#1088, verdict L3), so the members
+        // are lanes `0..members`.
+        let active = every_lane(request.active_lanes());
         let bank: Box<dyn PreparedNativeEffectBank> = match request.width {
             BankWidth::Four => Box::new(PreparedTruePeakLimiterBank::<Simd4> {
                 metadata: bank_metadata,
@@ -7783,10 +7776,12 @@ mod tests {
 
     /// Issue #1091 (console strip P2d): the limiter accepts padding. A padded request binds at
     /// every active count, and every lane, member or clone, is still validated before the bank is
-    /// built.
+    /// built or declined.
     ///
-    /// Red if the #1088 decline comes back (no padded request binds), or if the member loop stops
-    /// validating padded lanes (the malformed clone binds instead of being refused).
+    /// Each lane is malformed in turn, the first included, so a validation that stops early or a
+    /// decline hoisted above the member loop is red: a malformed lane after the first must be
+    /// refused with `prepare`'s own code, even when a foreign clone would also make the cohort one
+    /// this artifact declines. Red too if the #1088 decline comes back (no padded request binds).
     #[test]
     fn a_padded_request_binds_after_every_lane_is_validated() {
         let values = initial_values();
@@ -7809,20 +7804,6 @@ mod tests {
                     .unwrap_or_else(|| panic!("{label}: a padded bank binds"));
                 assert_eq!(bank.metadata().width, width, "{label}");
 
-                let mut malformed = requests.clone();
-                malformed[0].quality = EffectQuality::Draft;
-                assert_eq!(
-                    bind(&malformed, &mask).err().map(|error| error.code),
-                    Some("effect.quality.unsupported"),
-                    "{label}: a malformed member is refused"
-                );
-                let mut malformed = requests.clone();
-                malformed[lanes - 1].quality = EffectQuality::Draft;
-                assert_eq!(
-                    bind(&malformed, &mask).err().map(|error| error.code),
-                    Some("effect.quality.unsupported"),
-                    "{label}: a malformed clone is refused like a member"
-                );
                 // A padded lane of another program is not a clone, and a cohort of two programs
                 // is one this artifact declines rather than binds.
                 let mut foreign = requests.clone();
@@ -7833,7 +7814,31 @@ mod tests {
                         .is_none(),
                     "{label}: a foreign clone declines"
                 );
+                for malformed_lane in 0..lanes {
+                    let role = if malformed_lane < members {
+                        "member"
+                    } else {
+                        "clone"
+                    };
+                    for base in [&requests, &foreign] {
+                        let mut malformed = base.clone();
+                        malformed[malformed_lane].quality = EffectQuality::Draft;
+                        assert_eq!(
+                            bind(&malformed, &mask).err().map(|error| error.code),
+                            Some("effect.quality.unsupported"),
+                            "{label}: a malformed {role} on lane {malformed_lane} is refused"
+                        );
+                    }
+                }
             }
+            // The factory validates the shape first: a member after a padded lane is refused.
+            let mut mask = vec![true; lanes];
+            mask[0] = false;
+            assert_eq!(
+                bind(&requests, &mask).err().map(|error| error.code),
+                Some("effect.bank.mask_not_prefix"),
+                "{width:?}: members come first"
+            );
         }
     }
 
@@ -8172,9 +8177,68 @@ mod tests {
                         "{label}: padded lane {lane} is not +0.0"
                     );
                 }
+                for (name, state) in [("left", &self.bank.left), ("right", &self.bank.right)] {
+                    assert!(
+                        lane_at_rest(state, lane),
+                        "{label}: padded lane {lane} {name} is off its rest state"
+                    );
+                }
             }
             self.block += 1;
         }
+    }
+
+    /// `true` when lane `lane` of `state` holds exactly the words `clear_runtime` writes, the van
+    /// Herk phase aside: [`ChannelState::is_at_silent_rest`] for one lane. Every word is finite.
+    fn lane_at_rest(state: &ChannelState, lane: usize) -> bool {
+        let width = state.width;
+        let all = |plane: &[f32], value: f32| {
+            plane
+                .iter()
+                .skip(lane)
+                .step_by(width)
+                .all(|word| word.to_bits() == value.to_bits())
+        };
+        all(&state.history, 0.0)
+            && all(&state.main_ring, 0.0)
+            && all(&state.required_ring, 1.0)
+            && all(&state.box_ring, 1.0)
+            && state.reduction[lane].to_bits() == 0
+            && state.prefix[lane].to_bits() == 1.0_f32.to_bits()
+            && state.box_sum[lane].to_bits() == (state.lane[lane].window as f32).to_bits()
+    }
+
+    /// Issue #1091 gate 3, the P2a verdict's clause (L4): a padded lane fed `+0.0` answers exactly
+    /// `+0.0` (never `-0.0`, never a subnormal) and keeps its state finite and at rest, block after
+    /// block and through the `N + 6` lookahead, while its bank-mates limit hard under either link,
+    /// dual and collapsed.
+    ///
+    /// [`PaddedRun::render`] checks both after every block, and the members against their twins.
+    /// Red if a padded lane is seeded off its rest state, if a whole-bank body writes a padded lane
+    /// from a member's words, or if the recovery leaves a signed zero in a line.
+    #[test]
+    fn a_padded_lane_stays_at_rest_through_the_lookahead() {
+        fn at<L: Lane>() {
+            let lanes = L::WIDTH;
+            let members = fixture_tracks(lanes);
+            for link in [LinkMode::DualMono, LinkMode::Maximum] {
+                for mono in [false, true] {
+                    for active in 1..lanes {
+                        let mut run = PaddedRun::<L>::new(
+                            &members,
+                            active,
+                            link,
+                            format!("W{lanes} {link:?} mono {mono}, {active} active"),
+                        );
+                        for _ in 0..12 {
+                            run.render(mono, "limiting");
+                        }
+                    }
+                }
+            }
+        }
+        at::<Simd4>();
+        at::<Simd8>();
     }
 
     /// Issue #1091 gate 4 at one width: a non-finite state planted in one active lane is

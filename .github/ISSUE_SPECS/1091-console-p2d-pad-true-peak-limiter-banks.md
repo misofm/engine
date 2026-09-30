@@ -46,7 +46,9 @@ any order, one merge each.
    Simd4 through `scripts/run-aarch64-tests.sh` or the wasm gates.
 2. A padded bank of members that share window shape and phase takes the fast body. A test observes
    the body choice, and a padded lane built from zeros or defaults turns it red.
-3. Coupling rule: active lanes' bits do not depend on the clone source.
+3. Coupling rule: active lanes' bits do not depend on the clone source. A padded lane fed `+0.0`
+   produces exactly `+0.0` out (not `-0.0`, not a denormal) and keeps its state finite and at rest,
+   block after block, including through the limiter's lookahead (P2a verdict, L4).
 4. D7: a planted non-finite state in one active lane recovers and reports that lane alone.
 5. `cargo test -p true-peak-limiter -p graph-compiler -p graph` pass, as do
    `scripts/check-effect-runtime-policy.sh`, `scripts/check-realtime-policy.sh` and the realtime
