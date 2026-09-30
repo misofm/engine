@@ -26,8 +26,9 @@ pub use fixture::{FixtureError, FixtureLimits, PcmFixture, crc32c};
 pub use manifest::{ManifestEntry, ManifestError, parse_manifest};
 pub use prng::SplitMix64;
 pub use protocol_corpus::{
-    COMPLETE_SCHEMA_HASH, ConformanceDecoder, ConformanceFrame, complete_all_opcode_fixture,
-    complete_all_opcode_fixture_bytes, complete_schema_corpus,
+    COMPLETE_SCHEMA_HASH, ConformanceDecoder, ConformanceFrame, RetiredCodeRow,
+    complete_all_opcode_fixture, complete_all_opcode_fixture_bytes, complete_schema_corpus,
+    console_session_fixture, retired_code_rows,
 };
 pub use randomized::{
     Craft, DifferentialCoverage, EffectDifferential, Known, Payload, assert_d7_reports,

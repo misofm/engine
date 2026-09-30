@@ -58,4 +58,6 @@ After a command is accepted, queued records have been copied into prepared engin
 
 The encoder emits the negotiated minor. Within a major, IDs, field types, requiredness, enums, statuses, and canonical ordering never change or get reused. Additive optional fields/messages need a minor increment; a semantic or canonical-byte change needs a major increment. Decode then re-encode has exactly one canonical representation. Unknown flag bits and unknown mandatory fields always reject.
 
+Before launch, an owner ruling may instead amend v1 in place, as issue #1063 did (render-profile mode `2`) and owner decision 12 did for the session console (#1093, #1094; `docs/rulings/engine-footprint-2026-09-29.md`). An in-place amendment renumbers nothing, keeps the prelaunch identity v1 with no major or minor increment and no `ABI_VERSION` bump, and requires the app and SDK to move in lockstep. A code it retires is refused and never reallocated; a retired field ID is refused in either flag form, never skipped as an unknown optional field. A code it appends takes the next unallocated ID. The registry lists every retired and appended code.
+
 The media range `0x6000..=0x6fff` is permanently rejected as `PCM_FORBIDDEN` in major 1. The complete message, status, enum, and session-edit registries are in the [registry](CONTROL_PROTOCOL_REGISTRY.md#registries).

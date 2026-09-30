@@ -3519,6 +3519,7 @@ fn transaction_error_diagnostics(error: &SessionStoreError) -> Vec<Diagnostic> {
                 crate::SessionEditError::EmptyAutomationSegments => {
                     "session.edit.empty_automation_segments"
                 }
+                crate::SessionEditError::ConsoleSlotFixed => "session.edit.console_slot_fixed",
             }
             .to_owned(),
             severity: crate::DiagnosticSeverity::Error,

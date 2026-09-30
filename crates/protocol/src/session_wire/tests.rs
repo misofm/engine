@@ -1031,8 +1031,13 @@ fn nested_bytes(write: &dyn Fn(&mut dyn Sink) -> Result<(), EncodeError>) -> Vec
 }
 
 /// Decision 12 retired track fields 6 (`simd1`) and 8 (`simd2`) in place. A peer that still sends
-/// one is refused, never read as a console section or as the inserts rack; the same message
-/// without it decodes, so the refusal is about the retired field and nothing else.
+/// one is refused in either flag form, never read as a console section or as the inserts rack, and
+/// never skipped as an unknown optional field would be (#1094). The same message without it
+/// decodes, and a never-allocated optional field (12) is still skipped, so the refusal is about
+/// the retired IDs and nothing else.
+///
+/// Red if `parse_track` reads the track with the plain `schema_spec` (the optional retired field
+/// is then skipped and the track decodes).
 #[test]
 fn retired_track_rack_fields_are_refused() {
     let session = parse_session_json(include_str!(
@@ -1044,7 +1049,7 @@ fn retired_track_rack_fields_are_refused() {
     let rack = nested_bytes(&|sink| tx_rack(sink, &track.inserts));
     let fader = nested_bytes(&|sink| tx_fader(sink, &track.fader));
     let pan = nested_bytes(&|sink| tx_matrix_or_pan(sink, &track.matrix_or_pan));
-    let message = |retired: Option<u16>| {
+    let message = |extra: Option<(u16, bool)>| {
         let mut fields = vec![
             (1, WIRE_UTF8, true, track.id.as_str().as_bytes().to_vec()),
             (
@@ -1060,23 +1065,122 @@ fn retired_track_rack_fields_are_refused() {
             (9, WIRE_MESSAGE, true, fader.clone()),
             (10, WIRE_MESSAGE, true, pan.clone()),
         ];
-        if let Some(field) = retired {
-            fields.push((field, WIRE_MESSAGE, true, rack.clone()));
+        if let Some((field, mandatory)) = extra {
+            fields.push((field, WIRE_MESSAGE, mandatory, rack.clone()));
             fields.sort_by_key(|(id, ..)| *id);
         }
         raw_message(fields)
     };
+    let parse = |extra| parse_track(Message::nested(&message(extra)).expect("nested track"));
+    assert_eq!(parse(None), Ok(track.clone()));
     assert_eq!(
-        parse_track(Message::nested(&message(None)).expect("nested track")),
-        Ok(track.clone())
+        parse(Some((12, false))),
+        Ok(track.clone()),
+        "an unallocated optional field is still skipped"
     );
     for retired in [6, 8] {
         assert_eq!(
-            parse_track(Message::nested(&message(Some(retired))).expect("nested track")),
+            parse(Some((retired, true))),
             Err(DecodeError::UnknownRequiredField),
-            "retired track field {retired}"
+            "mandatory retired track field {retired}"
+        );
+        assert_eq!(
+            parse(Some((retired, false))),
+            Err(DecodeError::InvalidTlv),
+            "optional retired track field {retired}"
         );
     }
+}
+
+/// Decision 12's console declaration and track entries (#1094): `SetConsole` (`0x0007`) and
+/// `SetTrackConsole` (`0x0211`) round-trip canonically -- both sections, empty sections, a
+/// third-party identity (the codec carries the model; validation refuses it), every quality and
+/// link mode, entries with and without params -- and a slot carries no sidechain field.
+///
+/// Red if a section's field IDs are swapped (a pre-insert slot decodes as post-insert), if a slot
+/// field is dropped or mis-typed, or if the entry repeat count is not derived from the schema.
+#[test]
+fn console_declaration_and_track_entry_opcodes_round_trip_canonically() {
+    let native = |slot: &str, quality, link_mode| session::ConsoleSlot {
+        slot: id(slot),
+        identity: EffectIdentity::Native {
+            effect_id: id("miso.parametric-eq"),
+        },
+        quality,
+        link_mode,
+    };
+    let full = session::Console {
+        pre_insert: vec![
+            native("desk-eq", EffectQuality::Draft, LinkMode::DualMono),
+            native("desk-comp", EffectQuality::Normal, LinkMode::Maximum),
+        ],
+        post_insert: vec![session::ConsoleSlot {
+            slot: id("desk-cid"),
+            identity: EffectIdentity::ThirdPartyCid {
+                cid: "bafycid-demo".to_owned(),
+            },
+            quality: EffectQuality::High,
+            link_mode: LinkMode::Average,
+        }],
+    };
+    let entries = vec![
+        session::ConsoleEntry {
+            slot: id("desk-eq"),
+            bypass: true,
+            params: vec![EffectParam {
+                parameter_id: 1,
+                channel: ParameterChannel::Right,
+                unit: ParameterUnit::Hz,
+                value: 440.0,
+            }],
+        },
+        session::ConsoleEntry {
+            slot: id("desk-comp"),
+            bypass: false,
+            params: Vec::new(),
+        },
+    ];
+    let edits = vec![
+        SessionEdit::SetConsole {
+            console: full.clone(),
+        },
+        SessionEdit::SetConsole {
+            console: session::Console {
+                pre_insert: Vec::new(),
+                post_insert: full.post_insert.clone(),
+            },
+        },
+        SessionEdit::SetConsole {
+            console: session::Console {
+                pre_insert: Vec::new(),
+                post_insert: Vec::new(),
+            },
+        },
+        SessionEdit::SetTrackConsole {
+            track_id: id("vocal"),
+            console: entries,
+        },
+        SessionEdit::SetTrackConsole {
+            track_id: id("vocal"),
+            console: Vec::new(),
+        },
+    ];
+    let bytes = encode(&edits);
+    let codec = ProtocolCodec::default();
+    let decoded = codec
+        .decode_session_transaction(&bytes, &mut DecodeScratch::new(&mut [0_u16; 8]))
+        .expect("console edits decode");
+    assert_eq!(decoded.edits, edits);
+    assert_eq!(encode(&decoded.edits), bytes);
+    assert_eq!(
+        schema::session::console_slot::SPEC
+            .fields
+            .iter()
+            .map(|field| field.id)
+            .collect::<Vec<_>>(),
+        [1, 2, 3, 4],
+        "slot, identity, quality, link mode; no sidechain"
+    );
 }
 
 #[test]

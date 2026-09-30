@@ -5,9 +5,10 @@
 
 use session::{
     Automation, AutomationSegment, AutomationShape, AutomationTarget, ChannelBuiltins,
-    ChannelMatrix, DualMonoBuiltins, DualMonoFader, Effect, EffectIdentity, EffectParam,
-    EffectQuality, MatrixOrPan, Output, OutputProfile, Rack, RackName, RenderProfile, Route,
-    RouteDestination, RouteSource, SidechainDeclaration, Source, SourceBitDepth, StableId, Submix,
+    ChannelMatrix, Console, ConsoleEntry, ConsoleSlot, DualMonoBuiltins, DualMonoFader, Effect,
+    EffectIdentity, EffectParam, EffectQuality, MatrixOrPan, Output, OutputProfile, Rack, RackName,
+    RenderProfile, Route, RouteDestination, RouteSource, SidechainDeclaration, Source,
+    SourceBitDepth, StableId, Submix,
 };
 
 use crate::{
@@ -344,6 +345,9 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEdit) -> Result<(), Encode
         SessionEdit::SetAutomationSegments { segments, .. } => {
             spec.field_count(&[(fields[1], segments.len())])?
         }
+        SessionEdit::SetTrackConsole { console, .. } => {
+            spec.field_count(&[(fields[1], console.len())])?
+        }
         _ => spec.field_count(&[])?,
     };
     tx_start_message(sink, count)?;
@@ -358,6 +362,9 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEdit) -> Result<(), Encode
         }
         SessionEdit::SetOutputProfile { output_profile } => {
             tx_message(sink, fields[0], |v| tx_output_profile(v, output_profile))
+        }
+        SessionEdit::SetConsole { console } => {
+            tx_message(sink, fields[0], |v| tx_console(v, console))
         }
         SessionEdit::UpsertSource { source } => {
             tx_message(sink, fields[0], |v| tx_source(v, source))
@@ -534,6 +541,13 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEdit) -> Result<(), Encode
         } => {
             tx_id(sink, fields[0], track_id)?;
             tx_message(sink, fields[1], |v| tx_matrix_or_pan(v, matrix_or_pan))
+        }
+        SessionEdit::SetTrackConsole { track_id, console } => {
+            tx_id(sink, fields[0], track_id)?;
+            for entry in console {
+                tx_message(sink, fields[1], |v| tx_console_entry(v, entry))?;
+            }
+            Ok(())
         }
         SessionEdit::UpsertSubmix { submix } => {
             tx_message(sink, fields[0], |v| tx_submix(v, submix))
@@ -882,7 +896,47 @@ fn tx_matrix_or_pan(sink: &mut dyn Sink, value: &MatrixOrPan) -> Result<(), Enco
         }
     }
 }
-fn tx_console_entry(sink: &mut dyn Sink, value: &session::ConsoleEntry) -> Result<(), EncodeError> {
+fn tx_console(sink: &mut dyn Sink, value: &Console) -> Result<(), EncodeError> {
+    tx_start_message(
+        sink,
+        schema::session::console::SPEC.field_count(&[
+            (schema::session::console::PRE_INSERT, value.pre_insert.len()),
+            (
+                schema::session::console::POST_INSERT,
+                value.post_insert.len(),
+            ),
+        ])?,
+    )?;
+    for slot in &value.pre_insert {
+        tx_message(sink, schema::session::console::PRE_INSERT, |v| {
+            tx_console_slot(v, slot)
+        })?;
+    }
+    for slot in &value.post_insert {
+        tx_message(sink, schema::session::console::POST_INSERT, |v| {
+            tx_console_slot(v, slot)
+        })?;
+    }
+    Ok(())
+}
+fn tx_console_slot(sink: &mut dyn Sink, value: &ConsoleSlot) -> Result<(), EncodeError> {
+    tx_start_message(sink, schema::session::console_slot::SPEC.field_count(&[])?)?;
+    tx_id(sink, schema::session::console_slot::SLOT, &value.slot)?;
+    tx_message(sink, schema::session::console_slot::IDENTITY, |v| {
+        tx_identity(v, &value.identity)
+    })?;
+    tx_u8(
+        sink,
+        schema::session::console_slot::QUALITY,
+        enum_quality(value.quality),
+    )?;
+    tx_u8(
+        sink,
+        schema::session::console_slot::LINK_MODE,
+        enum_link(value.link_mode),
+    )
+}
+fn tx_console_entry(sink: &mut dyn Sink, value: &ConsoleEntry) -> Result<(), EncodeError> {
     tx_start_message(
         sink,
         schema::session::console_entry::SPEC
@@ -1085,6 +1139,9 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEdit, DecodeError> {
                 payload.nested_value(one_spec!(payload, fields[0])?)?,
             )?,
         }),
+        crate::SessionEditOpcode::SetConsole => Ok(SessionEdit::SetConsole {
+            console: parse_console(payload.nested_value(one_spec!(payload, fields[0])?)?)?,
+        }),
         crate::SessionEditOpcode::UpsertSource => Ok(SessionEdit::UpsertSource {
             source: parse_source(payload.nested_value(one_spec!(payload, fields[0])?)?)?,
         }),
@@ -1222,6 +1279,12 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEdit, DecodeError> {
             matrix_or_pan: parse_matrix_or_pan(
                 payload.nested_value(one_spec!(payload, fields[1])?)?,
             )?,
+        }),
+        crate::SessionEditOpcode::SetTrackConsole => Ok(SessionEdit::SetTrackConsole {
+            track_id: stable_id(one_spec!(payload, fields[0])?)?,
+            console: values_spec!(payload, fields[1])?
+                .map(|value| parse_console_entry(payload.nested_value(value)?))
+                .collect::<Result<Vec<_>, _>>()?,
         }),
         crate::SessionEditOpcode::UpsertSubmix => Ok(SessionEdit::UpsertSubmix {
             submix: parse_submix(payload.nested_value(one_spec!(payload, fields[0])?)?)?,
@@ -1364,7 +1427,11 @@ fn parse_channel_builtins(message: Message<'_>) -> Result<ChannelBuiltins, Decod
     })
 }
 fn parse_track(message: Message<'_>) -> Result<session::Track, DecodeError> {
-    let message = message.schema_spec(&schema::session::track::SPEC)?;
+    // Decision 12 retired fields 6 (`simd1`) and 8 (`simd2`): refused in either flag form.
+    let message = message.schema_spec_retiring(
+        &schema::session::track::SPEC,
+        &schema::session::track::RETIRED,
+    )?;
     Ok(session::Track {
         id: stable_id(one_spec!(message, schema::session::track::ID)?)?,
         source_id: stable_id(one_spec!(message, schema::session::track::SOURCE_ID)?)?,
@@ -1393,9 +1460,37 @@ fn parse_track(message: Message<'_>) -> Result<session::Track, DecodeError> {
         )?,
     })
 }
-fn parse_console_entry(message: Message<'_>) -> Result<session::ConsoleEntry, DecodeError> {
+fn parse_console(message: Message<'_>) -> Result<Console, DecodeError> {
+    let message = message.schema_spec(&schema::session::console::SPEC)?;
+    Ok(Console {
+        pre_insert: values_spec!(message, schema::session::console::PRE_INSERT)?
+            .map(|value| parse_console_slot(message.nested_value(value)?))
+            .collect::<Result<Vec<_>, _>>()?,
+        post_insert: values_spec!(message, schema::session::console::POST_INSERT)?
+            .map(|value| parse_console_slot(message.nested_value(value)?))
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+fn parse_console_slot(message: Message<'_>) -> Result<ConsoleSlot, DecodeError> {
+    let message = message.schema_spec(&schema::session::console_slot::SPEC)?;
+    Ok(ConsoleSlot {
+        slot: stable_id(one_spec!(message, schema::session::console_slot::SLOT)?)?,
+        identity: parse_identity(
+            message.nested_value(one_spec!(message, schema::session::console_slot::IDENTITY)?)?,
+        )?,
+        quality: parse_quality(read_u8_exact(one_spec!(
+            message,
+            schema::session::console_slot::QUALITY
+        )?)?)?,
+        link_mode: parse_link(read_u8_exact(one_spec!(
+            message,
+            schema::session::console_slot::LINK_MODE
+        )?)?)?,
+    })
+}
+fn parse_console_entry(message: Message<'_>) -> Result<ConsoleEntry, DecodeError> {
     let message = message.schema_spec(&schema::session::console_entry::SPEC)?;
-    Ok(session::ConsoleEntry {
+    Ok(ConsoleEntry {
         slot: stable_id(one_spec!(message, schema::session::console_entry::SLOT)?)?,
         bypass: parse_bool(one_spec!(message, schema::session::console_entry::BYPASS)?)?,
         params: values_spec!(message, schema::session::console_entry::PARAM)?

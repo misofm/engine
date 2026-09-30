@@ -8,10 +8,10 @@ use core::fmt;
 
 use session::{
     Automation, AutomationSegment, AutomationTarget, ChannelMatrix, CompileCaps, CompiledSession,
-    DualMonoBuiltins, DualMonoFader, Effect, EffectIdentity, EffectParam, EffectQuality,
-    MatrixOrPan, Output, OutputProfile, Rack, RackName, RenderProfile, Route, RouteDestination,
-    RouteSource, SessionModel, SidechainDeclaration, Source, SourceBitDepth, StableId, Submix,
-    compile_session,
+    Console, ConsoleEntry, DualMonoBuiltins, DualMonoFader, Effect, EffectIdentity, EffectParam,
+    EffectQuality, MatrixOrPan, Output, OutputProfile, Rack, RackName, RenderProfile, Route,
+    RouteDestination, RouteSource, SessionModel, SidechainDeclaration, Source, SourceBitDepth,
+    StableId, Submix, compile_session,
 };
 
 use crate::{ExpectedRevision, SessionRevision};
@@ -30,6 +30,9 @@ pub enum SessionEditOpcode {
     SetRenderProfile = 0x0004,
     /// `SetOutputProfile`.
     SetOutputProfile = 0x0005,
+    /// `SetConsole` (decision 12, #1094). Appended: `0x0006` is retired by #241 and never
+    /// reallocated.
+    SetConsole = 0x0007,
     /// `UpsertSource`.
     UpsertSource = 0x0100,
     /// `RemoveSource`.
@@ -70,6 +73,8 @@ pub enum SessionEditOpcode {
     SetTrackFader = 0x020f,
     /// `SetTrackMatrixOrPan`.
     SetTrackMatrixOrPan = 0x0210,
+    /// `SetTrackConsole` (decision 12, #1094), appended to the track family.
+    SetTrackConsole = 0x0211,
     /// `UpsertSubmix`.
     UpsertSubmix = 0x0300,
     /// `RemoveSubmix`.
@@ -116,6 +121,7 @@ impl SessionEditOpcode {
             0x0003 => Some(Self::SetQuantumFrames),
             0x0004 => Some(Self::SetRenderProfile),
             0x0005 => Some(Self::SetOutputProfile),
+            0x0007 => Some(Self::SetConsole),
             0x0100 => Some(Self::UpsertSource),
             0x0101 => Some(Self::RemoveSource),
             0x0103 => Some(Self::SetSourceContent),
@@ -136,6 +142,7 @@ impl SessionEditOpcode {
             0x020e => Some(Self::RemoveEffectParam),
             0x020f => Some(Self::SetTrackFader),
             0x0210 => Some(Self::SetTrackMatrixOrPan),
+            0x0211 => Some(Self::SetTrackConsole),
             0x0300 => Some(Self::UpsertSubmix),
             0x0301 => Some(Self::RemoveSubmix),
             0x0400 => Some(Self::UpsertOutput),
@@ -170,6 +177,14 @@ pub enum SessionEdit {
     SetRenderProfile { render_profile: RenderProfile },
     /// Replace the V1 output declaration.
     SetOutputProfile { output_profile: OutputProfile },
+    /// Replace the session's whole console declaration: both sections, every slot's identity,
+    /// quality and link mode (decision 12).
+    ///
+    /// This is the only edit that changes the slot set. Every track carries one entry per slot in
+    /// slot order, so a transaction that adds, removes, renames or reorders a slot must rewrite
+    /// every track's entries in the same transaction (`SetTrackConsole` or `UpsertTrack`), or the
+    /// final validation refuses the whole transaction and nothing is committed.
+    SetConsole { console: Console },
     /// Insert or replace one source by stable ID.
     UpsertSource { source: Source },
     /// Remove one source without cascading references.
@@ -323,6 +338,17 @@ pub enum SessionEdit {
         track_id: StableId,
         matrix_or_pan: MatrixOrPan,
     },
+    /// Replace one track's whole console entry array (decision 12).
+    ///
+    /// It carries only that track's knobs, `bypass` and `params`, one entry per session slot in
+    /// slot order. It cannot change the slot set: an entry array that adds, drops or reorders a
+    /// slot refuses at the transaction's final validation.
+    SetTrackConsole {
+        /// Existing track.
+        track_id: StableId,
+        /// The complete ordered entries, one per session console slot.
+        console: Vec<ConsoleEntry>,
+    },
     /// Insert or replace a submix.
     UpsertSubmix { submix: Submix },
     /// Remove a submix without cascading declarations.
@@ -378,6 +404,7 @@ impl SessionEdit {
             Self::SetQuantumFrames { .. } => SessionEditOpcode::SetQuantumFrames,
             Self::SetRenderProfile { .. } => SessionEditOpcode::SetRenderProfile,
             Self::SetOutputProfile { .. } => SessionEditOpcode::SetOutputProfile,
+            Self::SetConsole { .. } => SessionEditOpcode::SetConsole,
             Self::UpsertSource { .. } => SessionEditOpcode::UpsertSource,
             Self::RemoveSource { .. } => SessionEditOpcode::RemoveSource,
             Self::SetSourceContent { .. } => SessionEditOpcode::SetSourceContent,
@@ -398,6 +425,7 @@ impl SessionEdit {
             Self::RemoveEffectParam { .. } => SessionEditOpcode::RemoveEffectParam,
             Self::SetTrackFader { .. } => SessionEditOpcode::SetTrackFader,
             Self::SetTrackMatrixOrPan { .. } => SessionEditOpcode::SetTrackMatrixOrPan,
+            Self::SetTrackConsole { .. } => SessionEditOpcode::SetTrackConsole,
             Self::UpsertSubmix { .. } => SessionEditOpcode::UpsertSubmix,
             Self::RemoveSubmix { .. } => SessionEditOpcode::RemoveSubmix,
             Self::UpsertOutput { .. } => SessionEditOpcode::UpsertOutput,
@@ -427,6 +455,16 @@ pub enum SessionEditError {
     InvalidEffectOrder,
     /// A complete automation segment replacement was empty.
     EmptyAutomationSegments,
+    /// A rack-addressed structural or declaration edit named the `console` rack (decision 12).
+    ///
+    /// A track cannot add, remove or reorder a console slot, and a slot's identity, quality and
+    /// link mode are session-level; a console slot has no sidechain at all. `SetTrackRack`,
+    /// `PutTrackEffect`, `RemoveTrackEffect`, `SetTrackEffectOrder`, `SetEffectIdentity`,
+    /// `SetEffectQuality`, `SetEffectLinkMode` and `SetEffectSidechain` therefore refuse
+    /// `console` whatever the model holds. The slot set and its declarations change only through
+    /// `SetConsole`; a track's knobs through `SetEffectBypass`, `UpsertEffectParam`,
+    /// `RemoveEffectParam` or `SetTrackConsole`.
+    ConsoleSlotFixed,
 }
 
 impl fmt::Display for SessionEditError {
@@ -455,6 +493,7 @@ pub fn apply_session_edit(
         SessionEdit::SetOutputProfile { output_profile } => {
             session.output_profile = output_profile.clone()
         }
+        SessionEdit::SetConsole { console } => session.console = console.clone(),
         SessionEdit::UpsertSource { source } => {
             upsert(&mut session.sources, source, |item| &item.id)
         }
@@ -497,7 +536,7 @@ pub fn apply_session_edit(
             rack_name,
             rack,
         } => {
-            *rack_mut(track_mut(session, track_id)?, *rack_name)? = rack.clone();
+            *rack_mut(session, track_id, *rack_name)? = rack.clone();
         }
         SessionEdit::PutTrackEffect {
             track_id,
@@ -505,7 +544,7 @@ pub fn apply_session_edit(
             final_position,
             effect,
         } => {
-            let effects = &mut rack_mut(track_mut(session, track_id)?, *rack_name)?.effects;
+            let effects = &mut rack_mut(session, track_id, *rack_name)?.effects;
             if let Some(index) = effects.iter().position(|item| item.id == effect.id) {
                 effects.remove(index);
             }
@@ -521,7 +560,7 @@ pub fn apply_session_edit(
             rack_name,
             effect_id,
         } => {
-            let effects = &mut rack_mut(track_mut(session, track_id)?, *rack_name)?.effects;
+            let effects = &mut rack_mut(session, track_id, *rack_name)?.effects;
             let index = effects
                 .iter()
                 .position(|item| &item.id == effect_id)
@@ -533,7 +572,7 @@ pub fn apply_session_edit(
             rack_name,
             effect_ids,
         } => {
-            let effects = &mut rack_mut(track_mut(session, track_id)?, *rack_name)?.effects;
+            let effects = &mut rack_mut(session, track_id, *rack_name)?.effects;
             if effect_ids.len() != effects.len()
                 || effect_ids
                     .iter()
@@ -574,7 +613,7 @@ pub fn apply_session_edit(
             effect_id,
             bypass,
         } => {
-            effect_mut(session, track_id, *rack_name, effect_id)?.bypass = *bypass;
+            *knobs_mut(session, track_id, *rack_name, effect_id)?.bypass = *bypass;
         }
         SessionEdit::SetEffectLinkMode {
             track_id,
@@ -598,7 +637,7 @@ pub fn apply_session_edit(
             effect_id,
             param,
         } => {
-            let params = &mut effect_mut(session, track_id, *rack_name, effect_id)?.params;
+            let params = knobs_mut(session, track_id, *rack_name, effect_id)?.params;
             if let Some(index) = params.iter().position(|item| {
                 item.parameter_id == param.parameter_id && item.channel == param.channel
             }) {
@@ -614,7 +653,7 @@ pub fn apply_session_edit(
             parameter_id,
             channel,
         } => {
-            let params = &mut effect_mut(session, track_id, *rack_name, effect_id)?.params;
+            let params = knobs_mut(session, track_id, *rack_name, effect_id)?.params;
             let index = params
                 .iter()
                 .position(|item| item.parameter_id == *parameter_id && item.channel == *channel)
@@ -629,6 +668,9 @@ pub fn apply_session_edit(
             matrix_or_pan,
         } => {
             track_mut(session, track_id)?.matrix_or_pan = matrix_or_pan.clone();
+        }
+        SessionEdit::SetTrackConsole { track_id, console } => {
+            track_mut(session, track_id)?.console = console.clone();
         }
         SessionEdit::UpsertSubmix { submix } => {
             upsert(&mut session.submixes, submix, |item| &item.id)
@@ -930,42 +972,82 @@ fn automation_mut<'a>(
         .ok_or(SessionEditError::NotFound)
 }
 
-/// The `Rack` a `SessionEdit` rack-addressed edit names.
+/// The `Rack` a `SessionEdit` structural rack-addressed edit names.
 ///
-/// `RackName::Builtins` (#178, ruled by #210's D2) is not one: it is the strip's own builtin
-/// section, which is a `DualMonoBuiltins` and holds no `effects` vector at all, so every edit that
-/// reaches here -- `SetTrackRack`, `PutTrackEffect`, `RemoveTrackEffect`, `SetEffectQuality` and
-/// their siblings -- is addressing something that does not exist. It is refused with
-/// [`SessionEditError::NotFound`], the same answer a named-but-absent effect gets, rather than
-/// given a panicking arm or a silent no-op.
+/// Only a track's `inserts` is a rack of per-track effect instances.
 ///
-/// The strip **is** editable, through `SetTrackBuiltins` (`:516`), which is the edit that owns it
-/// and is unaffected by the new token. The token exists for the automation-target vocabulary and
-/// for nothing else.
-fn rack_mut(
-    track: &mut session::Track,
+/// - `RackName::Builtins` (#178, ruled by #210's D2) is the strip's own builtin section, a
+///   `DualMonoBuiltins` with no `effects` vector, so every edit that reaches here is addressing
+///   something that does not exist. It is refused with [`SessionEditError::NotFound`], the answer a
+///   named-but-absent effect gets, rather than given a panicking arm or a silent no-op. The strip
+///   is edited through `SetTrackBuiltins`, which owns it; the token exists for the
+///   automation-target vocabulary.
+/// - `RackName::Console` (decision 12) names session-level slots. A track cannot add, remove or
+///   reorder one, and a slot's declaration is not per-track, so a structural or declaration edit
+///   naming it is refused with [`SessionEditError::ConsoleSlotFixed`] before the track is even
+///   looked up: the refusal is a property of the edit, not of the model it meets.
+fn rack_mut<'a>(
+    session: &'a mut SessionModel,
+    track_id: &StableId,
     rack_name: RackName,
-) -> Result<&mut Rack, SessionEditError> {
+) -> Result<&'a mut Rack, SessionEditError> {
     match rack_name {
-        RackName::Inserts => Ok(&mut track.inserts),
-        // A console slot is not a rack of instances either: its identity, quality and link mode
-        // are session-level and a track carries only its entry. Console session edits are
-        // #1094's (S1b); until then a rack-addressed edit naming `console` finds nothing.
-        RackName::Builtins | RackName::Console => Err(SessionEditError::NotFound),
+        RackName::Inserts => Ok(&mut track_mut(session, track_id)?.inserts),
+        RackName::Builtins => Err(SessionEditError::NotFound),
+        RackName::Console => Err(SessionEditError::ConsoleSlotFixed),
     }
 }
 
+/// The insert a declaration edit (`SetEffectIdentity`, `SetEffectQuality`, `SetEffectLinkMode`,
+/// `SetEffectSidechain`) names. A console slot's declaration is the session's, so `console` is
+/// refused by [`rack_mut`].
 fn effect_mut<'a>(
     session: &'a mut SessionModel,
     track_id: &StableId,
     rack_name: RackName,
     effect_id: &StableId,
 ) -> Result<&'a mut Effect, SessionEditError> {
-    rack_mut(track_mut(session, track_id)?, rack_name)?
+    rack_mut(session, track_id, rack_name)?
         .effects
         .iter_mut()
         .find(|effect| &effect.id == effect_id)
         .ok_or(SessionEditError::NotFound)
+}
+
+/// One track's knobs for one effect: what `SetEffectBypass`, `UpsertEffectParam` and
+/// `RemoveEffectParam` edit.
+struct KnobsMut<'a> {
+    bypass: &'a mut bool,
+    params: &'a mut Vec<EffectParam>,
+}
+
+/// Resolve the knobs a bypass or parameter edit names.
+///
+/// An insert's knobs live on its effect. A console slot's live on the track's entry for that slot
+/// (decision 12): `effect_id` carries the slot ID, and only that track's entry changes. A track
+/// without an entry for the slot answers [`SessionEditError::NotFound`], as an absent insert does.
+fn knobs_mut<'a>(
+    session: &'a mut SessionModel,
+    track_id: &StableId,
+    rack_name: RackName,
+    effect_id: &StableId,
+) -> Result<KnobsMut<'a>, SessionEditError> {
+    if rack_name == RackName::Console {
+        let entry = track_mut(session, track_id)?
+            .console
+            .iter_mut()
+            .find(|entry| &entry.slot == effect_id)
+            .ok_or(SessionEditError::NotFound)?;
+        return Ok(KnobsMut {
+            bypass: &mut entry.bypass,
+            params: &mut entry.params,
+        });
+    }
+    let effect = effect_mut(session, track_id, rack_name, effect_id)?;
+    Ok(KnobsMut {
+        bypass: &mut effect.bypass,
+        params: &mut effect.params,
+    })
 }
 
 #[cfg(test)]
@@ -1216,6 +1298,32 @@ mod tests {
                 None,
                 "deleted #241 opcode 0x{deleted:04x} must remain unallocated"
             );
+        }
+    }
+
+    /// #1094 appends `SetConsole` (`0x0007`) and `SetTrackConsole` (`0x0211`): every allocated
+    /// code round-trips through `from_raw`, there are exactly 41 of them, and no retired code came
+    /// back.
+    ///
+    /// Red if a new code reuses the retired `0x0006`, if a `from_raw` arm maps a code to another
+    /// variant, or if an opcode is added to the enum but not to `from_raw`.
+    #[test]
+    fn opcode_registry_appends_the_console_edits_and_reallocates_nothing() {
+        let allocated = (0..=u16::MAX)
+            .filter_map(|raw| SessionEditOpcode::from_raw(raw).map(|opcode| (raw, opcode)))
+            .collect::<Vec<_>>();
+        assert_eq!(allocated.len(), 41);
+        assert!(allocated.iter().all(|(raw, opcode)| opcode.raw() == *raw));
+        assert_eq!(
+            SessionEditOpcode::from_raw(0x0007),
+            Some(SessionEditOpcode::SetConsole)
+        );
+        assert_eq!(
+            SessionEditOpcode::from_raw(0x0211),
+            Some(SessionEditOpcode::SetTrackConsole)
+        );
+        for retired in [0x0006, 0x0102, 0x0104] {
+            assert_eq!(SessionEditOpcode::from_raw(retired), None);
         }
     }
 }

@@ -216,8 +216,22 @@ fn controller_at_sample(
     automation_slots: usize,
     current_sample: SampleTime,
 ) -> ProtocolController<MockProvider> {
-    let session = SessionStore::new(
+    controller_over(
         parse_session_json(EXAMPLE).expect("fixture"),
+        replay_entries,
+        automation_slots,
+        current_sample,
+    )
+}
+
+fn controller_over(
+    model: session::SessionModel,
+    replay_entries: usize,
+    automation_slots: usize,
+    current_sample: SampleTime,
+) -> ProtocolController<MockProvider> {
+    let session = SessionStore::new(
+        model,
         CompileCaps {
             max_compiled_model_bytes: u64::MAX,
             max_requested_runtime_bytes: u64::MAX,
@@ -342,10 +356,11 @@ fn public_b1b_uses_exactly_the_typed_reader_passes_and_replays_identical_bytes()
         .expect("frozen transaction frame");
     let mut limited = controller(8, 1);
     // One below the fixture's own edit count: #241 took the corpus from 42 edits to 39 by
-    // deleting opcodes 0x0006/0x0102/0x0104, so the boundary this row exists to probe moved
-    // 41 -> 38. A smaller number still refuses, but it stops being a boundary.
-    assert_eq!(conformance::complete_all_opcode_fixture().len(), 39);
-    limited.config.maximum_transaction_edits = 38;
+    // deleting opcodes 0x0006/0x0102/0x0104, and #1094 appended `SetConsole` and
+    // `SetTrackConsole`, so the boundary this row exists to probe is now 40. A smaller number
+    // still refuses, but it stops being a boundary.
+    assert_eq!(conformance::complete_all_opcode_fixture().len(), 41);
+    limited.config.maximum_transaction_edits = 40;
     assert_eq!(
         limited.process_b1b_btlv(
             &transaction.bytes,
@@ -1550,6 +1565,167 @@ fn edit_rejections_use_typed_operation_diagnostics_not_protocol_failure() {
     assert_eq!(decoded.diagnostics.len(), 1);
     assert_eq!(decoded.diagnostics[0].code, "session.edit.not_found");
     assert_eq!(decoded.diagnostics[0].operation_index, Some(0));
+}
+
+/// Decision 12's retired and refused codes, one conformance row each (#1094): every row's frame,
+/// processed whole by an endpoint over `conformance::console_session_fixture()`, is answered with
+/// the row's status and diagnostic, and a refusing row commits nothing and emits no event -- the
+/// acked-batch question: no ack precedes a drop.
+///
+/// Red if a retired rack code is read as another rack (the edit applies: `OK`), if a retired track
+/// field is skipped as an unknown optional field (`OK`), or if a console-refused edit is routed to
+/// the inserts or the entries (`OK`) or answers `NotFound` (another diagnostic). The control row
+/// must commit, so a broken splice cannot pass as a refusal.
+#[test]
+fn retired_and_console_refused_codes_meet_their_conformance_rows() {
+    let rows = conformance::retired_code_rows();
+    assert_eq!(rows.len(), 24 + 4 + 8 + 1);
+    for row in rows {
+        let mut endpoint =
+            controller_over(conformance::console_session_fixture(), 8, 1, SampleTime(0));
+        let snapshot = endpoint.session().canonical_snapshot().to_owned();
+        let response = process_full_command(&mut endpoint, &row.bytes);
+        let mut fields = [0_u16; 64];
+        let decoded = ProtocolCodec::default()
+            .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
+            .unwrap_or_else(|error| panic!("{}: correlatable response: {error:?}", row.name));
+        match decoded {
+            crate::DecodedTypedResponseFrame::NonOk { header, payload } => {
+                assert_eq!(header.status as u16, row.status, "{}", row.name);
+                assert_eq!(header.request_id, id(1), "{}", row.name);
+                let codes = payload
+                    .diagnostics
+                    .iter()
+                    .map(|diagnostic| diagnostic.code.as_str())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    codes,
+                    row.diagnostic.into_iter().collect::<Vec<_>>(),
+                    "{}",
+                    row.name
+                );
+                assert_eq!(
+                    endpoint.session().revision(),
+                    SessionRevision(7),
+                    "{}",
+                    row.name
+                );
+                assert_eq!(
+                    endpoint.session().canonical_snapshot(),
+                    snapshot,
+                    "{}",
+                    row.name
+                );
+                assert_eq!(
+                    endpoint
+                        .queues()
+                        .report(crate::QueueKind::ReliableEvent)
+                        .occupancy,
+                    0,
+                    "{}: a refusal emits no session event",
+                    row.name
+                );
+            }
+            crate::DecodedTypedResponseFrame::Success { header, .. } => {
+                assert_eq!(row.status, StatusCode::Ok as u16, "{} succeeded", row.name);
+                assert_eq!(header.revision, SessionRevision(8), "{}", row.name);
+                assert_eq!(
+                    endpoint.session().revision(),
+                    SessionRevision(8),
+                    "{}",
+                    row.name
+                );
+            }
+        }
+    }
+}
+
+/// The acked-batch question for the console (#1094): a transaction that changes the slot set but
+/// skips a track's entries is refused before any acknowledgement is written, and a peer that
+/// retries the same bytes gets the same refusal from the replay cache, never an ack.
+///
+/// Red if the controller acknowledged on edit resolution and validated after, or committed the
+/// declaration without the entries.
+#[test]
+fn a_slot_set_change_that_skips_a_track_is_never_acknowledged() {
+    let fixture = conformance::console_session_fixture();
+    let track = fixture.tracks[0].id.clone();
+    let mut console = fixture.console.clone();
+    console.post_insert.push(session::ConsoleSlot {
+        slot: session::StableId::parse("desk-limit").expect("ID"),
+        identity: session::EffectIdentity::Native {
+            effect_id: session::StableId::parse("miso.true-peak-limiter").expect("ID"),
+        },
+        quality: session::EffectQuality::High,
+        link_mode: session::LinkMode::Maximum,
+    });
+    let mut endpoint = controller_over(fixture, 8, 1, SampleTime(0));
+    let snapshot = endpoint.session().canonical_snapshot().to_owned();
+    let edits = [SessionEdit::SetConsole {
+        console: console.clone(),
+    }];
+    let input = full_command(
+        1,
+        ExpectedRevision::Exact(SessionRevision(7)),
+        crate::CommandPayload::SessionTransactionApply(&edits),
+    );
+    let first = process_full_command(&mut endpoint, &input);
+    let replayed = process_full_command(&mut endpoint, &input);
+    assert_eq!(
+        replayed, first,
+        "the replay cache answers with the same refusal"
+    );
+    let mut fields = [0_u16; 64];
+    let crate::DecodedTypedResponseFrame::NonOk { header, payload } = ProtocolCodec::default()
+        .decode_typed_response(&first, &mut DecodeScratch::new(&mut fields))
+        .expect("typed response")
+    else {
+        panic!("a slot set change that skips a track was acknowledged");
+    };
+    assert_eq!(header.status, StatusCode::ValidationFailed);
+    assert_eq!(payload.diagnostics[0].code, "console.entry_missing");
+    assert_eq!(payload.diagnostics[0].operation_index, Some(1));
+    assert_eq!(endpoint.session().revision(), SessionRevision(7));
+    assert_eq!(endpoint.session().canonical_snapshot(), snapshot);
+    assert_eq!(
+        endpoint
+            .queues()
+            .report(crate::QueueKind::ReliableEvent)
+            .occupancy,
+        0
+    );
+
+    let mut entries = endpoint.session().compiled().normalized_model().tracks[0]
+        .console
+        .clone();
+    entries.push(session::ConsoleEntry {
+        slot: session::StableId::parse("desk-limit").expect("ID"),
+        bypass: false,
+        params: Vec::new(),
+    });
+    let whole = [
+        SessionEdit::SetConsole { console },
+        SessionEdit::SetTrackConsole {
+            track_id: track,
+            console: entries,
+        },
+    ];
+    let response = process_full_command(
+        &mut endpoint,
+        &full_command(
+            2,
+            ExpectedRevision::Exact(SessionRevision(7)),
+            crate::CommandPayload::SessionTransactionApply(&whole),
+        ),
+    );
+    let mut fields = [0_u16; 64];
+    assert!(matches!(
+        ProtocolCodec::default()
+            .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
+            .expect("typed response"),
+        crate::DecodedTypedResponseFrame::Success { .. }
+    ));
+    assert_eq!(endpoint.session().revision(), SessionRevision(8));
 }
 
 #[test]

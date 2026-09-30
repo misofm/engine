@@ -9,19 +9,16 @@
 //! `rack_mut` answers [`SessionEditError::NotFound`], which is the same answer a named-but-absent
 //! effect gets, rather than a panicking arm or a silent no-op. This file is the gate on that: an
 //! `unreachable!()` there would abort the control thread on a well-formed wire message, and a
-//! `&mut track.simd1` fallback would edit a rack the caller did not name.
+//! `&mut track.inserts` fallback would edit a rack the caller did not name.
 //!
 //! The strip **is** editable, through `SetTrackBuiltins`, and the last test says so -- without it
 //! a refusal that refused everything would pass.
 //!
-//! Decision 12 added `console` to the same vocabulary for the same reason: a console slot's
-//! identity is session-level and a track carries only its entry, so there is no per-track effect
-//! vector for a rack-addressed edit to reach. Console session edits are #1094's (S1b); until then
-//! the token is refused exactly like `builtins`.
+//! Decision 12's `console` token is refused by the same edits with a typed status of its own,
+//! `SessionEditError::ConsoleSlotFixed`; `console_session_edits.rs` owns it.
 //!
-//! Red mutation: give `rack_mut`'s `RackName::Builtins` (or `Console`) arm
-//! `Ok(&mut track.inserts)` -> the refusal arms below start reporting `Ok` and the effect lands in
-//! the inserts.
+//! Red mutation: give `rack_mut`'s `RackName::Builtins` arm `Ok(&mut track.inserts)` -> the
+//! refusal arms below start reporting `Ok` and the effect lands in the inserts.
 
 use protocol::{SessionEdit, SessionEditError, apply_session_edit};
 use session::{RackName, SessionModel, parse_session_json};
@@ -37,15 +34,10 @@ fn track_id() -> session::StableId {
 }
 
 #[test]
-fn rack_addressed_edits_refuse_the_builtins_and_console_tokens() {
+fn rack_addressed_edits_refuse_the_builtins_token() {
     let effect = session().tracks[0].inserts.effects[0].clone();
     let rack = session().tracks[0].inserts.clone();
-    for token in [RackName::Builtins, RackName::Console] {
-        rack_addressed_edits_refuse(token, &effect, &rack);
-    }
-}
-
-fn rack_addressed_edits_refuse(token: RackName, effect: &session::Effect, rack: &session::Rack) {
+    let token = RackName::Builtins;
     for (name, edit) in [
         (
             "SetTrackRack",
