@@ -10,6 +10,15 @@ set -euo pipefail
 # the release fingerprint: a release change re-pins it, and `npm-publish.yml` publishes only bytes
 # equal to it. docs/RELEASE.md is the procedure.
 #
+# Issue #1109: one cargo build gives two modules. rustc's output is the *named twin*: it keeps the
+# wasm `name` section, the function names a devtools stack trace prints and the gates that find
+# functions by name read (`check-web-audioworklet-callgraph.py`, `check-web-audioworklet-v8-spill.py`,
+# `check-scalar-oracle-absent.py`). The *shipped* module is the named twin minus that one section,
+# every other byte in place (`strip-wasm-names.py`): nothing that runs in the browser reads the
+# names, and every page load would download them. The shipped module is the one this script names,
+# digests, pins and delivers; the named twin is a non-shipped debug artifact, written only where
+# `--named-twin` asks, and `strip-wasm-names.py check` proves a pair are twins.
+#
 # Modes (one at most):
 #   (none)         the delivery closure: module, host and worklet JavaScript, declaration,
 #                  parameter metadata and ABI layout.
@@ -18,24 +27,45 @@ set -euo pipefail
 #                  job's twin build). The build has one home, here.
 #   --check-pin    the delivery closure, refused (exit 1, nothing written) unless the module's digest
 #                  equals the committed pin: the release fingerprint check, runnable locally.
+# With any mode, `--named-twin DIR` also writes the named twin,
+# `miso-engine-v1-audio-worklet.simd128.named.wasm`, into DIR: an existing, empty, non-symlink
+# directory other than the output.
 mode=delivery
-case ${1-} in
-  --module-only) mode=module; shift ;;
-  --check-pin) mode=pinned; shift ;;
-esac
-if (($# != 1)); then
-  echo "usage: $0 [--module-only | --check-pin] EMPTY_OUTPUT_DIRECTORY" >&2
+named_dir=
+while (($# > 1)); do
+  case $1 in
+    --module-only | --check-pin)
+      [[ $mode == delivery ]] || break
+      [[ $1 == --module-only ]] && mode=module || mode=pinned
+      shift
+      ;;
+    --named-twin)
+      [[ -z $named_dir && -n ${2-} ]] || break
+      named_dir=$2
+      shift 2
+      ;;
+    *) break ;;
+  esac
+done
+if (($# != 1)) || [[ $1 == -* ]]; then
+  echo "usage: $0 [--module-only | --check-pin] [--named-twin EMPTY_DIRECTORY] EMPTY_OUTPUT_DIRECTORY" >&2
   exit 2
 fi
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 output_dir=$1
-if [[ ! -d "$output_dir" || -L "$output_dir" ]]; then
-  echo "output must be an existing non-symlink directory" >&2
-  exit 2
-fi
-if [[ -n "$(find "$output_dir" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
-  echo "output directory must be empty; refusing overwrite" >&2
+for dir in "$output_dir" ${named_dir:+"$named_dir"}; do
+  if [[ ! -d "$dir" || -L "$dir" ]]; then
+    echo "output must be an existing non-symlink directory" >&2
+    exit 2
+  fi
+  if [[ -n "$(find "$dir" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+    echo "output directory must be empty; refusing overwrite" >&2
+    exit 2
+  fi
+done
+if [[ -n $named_dir && "$(cd "$named_dir" && pwd -P)" == "$(cd "$output_dir" && pwd -P)" ]]; then
+  echo "the named twin must not be written into the output directory" >&2
   exit 2
 fi
 
@@ -60,7 +90,8 @@ trap cleanup EXIT
 #
 # Stripped here, in the delivery script, and deliberately not in `[profile.release]`: the native
 # artifacts keep their line tables. To build a debuggable browser module, override this with
-# `MISO_ENGINE_WEB_STRIP=none`.
+# `MISO_ENGINE_WEB_STRIP=none`. The `name` section is not stripped here but after the build (see
+# the top of this file): the gates read it from the named twin.
 strip_flag="-C strip=${MISO_ENGINE_WEB_STRIP:-debuginfo}"
 
 # The artifact is content-addressed, so every path rustc embeds in it must be a
@@ -83,7 +114,9 @@ remap="--remap-path-prefix=$cargo_home=/cargo --remap-path-prefix=$repo_root=/re
     cargo build --locked --release --target wasm32-unknown-unknown -p host-web
 )
 
-artifact="$simd_target/wasm32-unknown-unknown/release/host_web.wasm"
+named="$simd_target/wasm32-unknown-unknown/release/host_web.wasm"
+artifact="$simd_target/miso-engine-v1-audio-worklet.simd128.wasm"
+python3 -B "$repo_root/scripts/strip-wasm-names.py" strip "$named" "$artifact" >&2
 observed=$(sha256sum "$artifact" | awk '{print $1}')
 
 if [[ $mode == pinned ]]; then
@@ -97,6 +130,9 @@ if [[ $mode == pinned ]]; then
 fi
 
 printf 'AudioWorklet module %s\n' "$observed"
+if [[ -n $named_dir ]]; then
+  cp "$named" "$named_dir/miso-engine-v1-audio-worklet.simd128.named.wasm"
+fi
 if [[ $mode == module ]]; then
   cp "$artifact" "$output_dir/miso-engine-v1-audio-worklet.simd128.wasm"
   exit 0

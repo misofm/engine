@@ -702,7 +702,7 @@ def test_generated_once_mutations(checker) -> None:
         raise AssertionError(f"#1044 mutation was accepted in {reader}: {old!r}")
 
     skip = ("bash scripts/check-web-audioworklet.sh --without-metadata-regeneration "
-            "target/ci/qualification-artifacts\n")
+            f"target/ci/qualification-artifacts {checker.NAMED_TWIN}\n")
     try:
         checker.check(root)  # the unmutated scratch root passes
         # The producer: the delivery build (the generator's --write) and the published digest.
@@ -710,10 +710,10 @@ def test_generated_once_mutations(checker) -> None:
             "qualification.yml",
             "      closure_sha256: ${{ steps.build.outputs.closure_sha256 }}\n", "")
         workflow_mutation_fails(
-            "qualification.yml",
-            "          bash scripts/build-web-audioworklet.sh target/ci/qualification-artifacts\n",
-            "          bash scripts/build-web-audioworklet.sh --module-only "
-            "target/ci/qualification-artifacts\n")  # no metadata in the closure
+            "qualification.yml", checker.ARTIFACT_BUILD_LINES[0],
+            checker.ARTIFACT_BUILD_LINES[0].replace(
+                "build-web-audioworklet.sh ", "build-web-audioworklet.sh --module-only "))
+        # ^ no metadata in the closure
         workflow_mutation_fails(
             "qualification.yml", "          " + checker.ARTIFACT_CLOSURE_DIGEST,
             "          " + checker.ARTIFACT_CLOSURE_DIGEST.replace("find . -type f",
@@ -1141,19 +1141,18 @@ def main() -> int:
     # Issue #1009: wasm-guests leaves the V8 spill leg to artifact-gates, so artifact-gates must run
     # it on the downloaded artifact, after the digest check.
     workflow_mutation_fails(
-        "qualification.yml",
-        "          python3 -B scripts/check-web-audioworklet-v8-spill.py "
-        "target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm\n",
-        "",
-    )
+        "qualification.yml", "          " + checker.V8_SPILL_ARTIFACT_LINE + "\n", "")
     workflow_mutation_fails(
         "qualification.yml",
         "          shared-key: artifact-gates\n",
         "          shared-key: artifact-gates\n"
         "      - name: V8 spill gate before the digest check\n"
-        "        run: python3 -B scripts/check-web-audioworklet-v8-spill.py "
-        "target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm\n",
+        "        run: " + checker.V8_SPILL_ARTIFACT_LINE + "\n",
     )
+    # Issue #1109: the V8 spill gate reads the named twin, so the twin's own download must be
+    # verified before it: without its step, the gate would read an unverified file.
+    workflow_mutation_fails("qualification.yml", checker.NAMED_TWIN_DIGEST_STEP,
+                            "      - name: Named twin left unverified\n        env:\n")
 
     # Issue #1061: every reader of the shipped module checks its download against the digest the
     # artifact job published, and the identity job reports ARTIFACT CHANGED or UNCHANGED, proves
@@ -1368,10 +1367,7 @@ def main() -> int:
         workflow = root / ".github/workflows/qualification.yml"
         mutate(workflow, "bash scripts/run-wasm-gates.sh --without-v8-spill --without-native\n",
                "bash scripts/run-wasm-gates.sh --without-native --without-v8-spill\n")
-        mutate(workflow,
-               "          python3 -B scripts/check-web-audioworklet-v8-spill.py "
-               "target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm\n",
-               "")
+        mutate(workflow, "          " + checker.V8_SPILL_ARTIFACT_LINE + "\n", "")
         checker_fails(root)
     finally:
         shutil.rmtree(root)
