@@ -414,3 +414,14 @@ No high or medium finding.
   - A padded lane that emits `-0.0` or a denormal would feed the next slot a non-`+0.0` input and
     defeat silent admission: cost, never an active lane's bits. Root should add "`+0.0` out for
     `+0.0` in" to those gates.
+
+## Root addendum after the verdict (L3)
+
+Root chose to narrow the contract rather than widen the planner.
+- `validate_shape` now refuses a mask with an active lane after a padded one, with
+  `effect.bank.mask_not_prefix`. The docs say members come first.
+- `bank_mask::a_mask_is_well_formed_exactly_when_its_members_come_first` enumerates every mask at
+  both widths. It goes red with the rule removed.
+- The affected crates pass: effect-contract, graph-compiler, graph and the eight effects, 731
+  tests.
+- L4 is added to gate 3 of P2b-P2e, L1 to their gate lists, and L2 to S2's resource gate.
