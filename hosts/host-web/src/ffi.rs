@@ -4835,6 +4835,100 @@ pub(crate) mod live_response_ffi_tests {
         );
         assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
     }
+
+    /// Byte offset of each owner record's `rack` word in the captured payload, in record order,
+    /// with the owner's stable identity.
+    fn owner_racks() -> Vec<(String, usize, u32)> {
+        RESPONSE_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            let bytes = &staging.live_result[..staging.live_result_len];
+            let header: WebLiveResponseResult = read_live_record(bytes, 0).expect("header");
+            let owners_start = usize::try_from(header.owners_offset).expect("owners offset");
+            (0..usize::try_from(header.owner_count).expect("owner count"))
+                .map(|index| {
+                    let at = owners_start + index * size_of::<WebLiveResponseOwner>();
+                    let raw: WebLiveResponseOwner =
+                        read_live_record(bytes, u32::try_from(at).expect("offset"))
+                            .expect("owner record");
+                    let stable =
+                        live_payload_bytes(bytes, raw.stable_id_offset, raw.stable_id_bytes)
+                            .expect("stable ID");
+                    (
+                        String::from_utf8(stable.to_vec()).expect("UTF-8 stable ID"),
+                        at + core::mem::offset_of!(WebLiveResponseOwner, rack),
+                        raw.rack,
+                    )
+                })
+                .collect()
+        })
+    }
+
+    /// Decision 12 (issue #1096): the live-response owner record names the input filters `0`, an
+    /// insert `2` (the inserts keep the code `dynamic` had) and a console slot `4` in either
+    /// section, and the analysis refuses a snapshot whose owner carries the retired `simd1` (`1`)
+    /// or `simd2` (`3`) code, or any unallocated one.
+    ///
+    /// Red mutations: pass the engine's native rack through unchanged (the console owners read `1`
+    /// and `3`); or accept any `u8` in `live_response_rack` (a retired code is analysed).
+    #[test]
+    fn live_response_owners_name_console_slots_inserts_and_input_filters() {
+        let mut model = session::parse_session_json(include_str!(
+            "../../../fixtures/session/v1/parametric-eq-nine-track.json"
+        ))
+        .expect("nine-track fixture");
+        let mut post = model.console.pre_insert[0].clone();
+        post.slot = session::StableId::parse("post-eq").expect("slot id");
+        model.console.post_insert = vec![post];
+        for track in &mut model.tracks {
+            let mut entry = track.console[0].clone();
+            entry.slot = session::StableId::parse("post-eq").expect("slot id");
+            track.console.push(entry);
+        }
+        let mut insert = model.lower_track(&model.tracks[0]).pre_insert[0].clone();
+        insert.id = session::StableId::parse("ins-eq").expect("insert id");
+        model.tracks[0].inserts.effects.push(insert);
+        let document = session::canonical_session_json(&model).expect("canonical document");
+        let options = WebBootOptions {
+            require_sample_rate_hz: 48_000,
+            require_quantum_frames: 128,
+            ..WebBootOptions::explicit_defaults()
+        };
+        let handle = test_boot(document.as_bytes(), options);
+        assert_ne!(handle, 0, "the console and insert fixture must boot");
+
+        stage_request(b"eq0");
+        assert_eq!(miso_engine_web_v1_track_response_capture(handle), RESULT_OK);
+        let owners = owner_racks();
+        assert_eq!(
+            owners
+                .iter()
+                .map(|(stable, _, rack)| (stable.as_str(), *rack))
+                .collect::<Vec<_>>(),
+            [
+                ("input-filters", crate::LIVE_RESPONSE_RACK_INPUT_FILTERS),
+                ("eq", crate::LIVE_RESPONSE_RACK_CONSOLE),
+                ("ins-eq", crate::LIVE_RESPONSE_RACK_INSERTS),
+                ("post-eq", crate::LIVE_RESPONSE_RACK_CONSOLE),
+            ],
+            "owners in signal order, each named by its session rack"
+        );
+        assert_eq!(miso_engine_web_v1_track_response_analysis(), RESULT_OK);
+
+        for refused in [1_u32, 3, 5, 255] {
+            stage_request(b"eq0");
+            assert_eq!(miso_engine_web_v1_track_response_capture(handle), RESULT_OK);
+            let (_, at, _) = owner_racks()[1].clone();
+            RESPONSE_STAGING.with(|slot| {
+                slot.borrow_mut().live_result[at..at + 4].copy_from_slice(&refused.to_le_bytes());
+            });
+            assert_eq!(
+                miso_engine_web_v1_track_response_analysis(),
+                RESULT_INVALID_ARGUMENT,
+                "an owner record at rack {refused} is refused"
+            );
+        }
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+    }
 }
 
 #[cfg(test)]
@@ -6196,6 +6290,80 @@ mod observation_alias_tests {
                 markers.result_header
             );
         });
+    }
+
+    /// Decision 12 (issue #1096): the observation map and the selected-read records name a console
+    /// slot `3` and an insert `1`, and a selection carrying the retired `simd1` (`0`) or `simd2`
+    /// (`2`) code, an unallocated code, or the rack the session does not use there is refused.
+    /// The two fixtures are the same compressors as a console slot and as inserts.
+    ///
+    /// Red mutations: encode the console as the retired `0` in `observation_rack_raw`, or decode
+    /// `0`/`2` in `observation_rack` -> a retired selection is read.
+    #[test]
+    fn observation_records_address_console_slots_and_inserts() {
+        let console: &[u8] =
+            include_bytes!("../../../fixtures/session/v1/compressor-bank-observation.json");
+        let inserts: &[u8] =
+            include_bytes!("../../../fixtures/session/v1/compressor-dynamic-bank-observation.json");
+        for (document, rack, unused) in [
+            (console, crate::RACK_CONSOLE, crate::RACK_INSERTS),
+            (inserts, crate::RACK_INSERTS, crate::RACK_CONSOLE),
+        ] {
+            no_live_host();
+            let options = WebBootOptions {
+                require_sample_rate_hz: 48_000,
+                require_quantum_frames: 128,
+                live_control_command_queue_records: 8,
+                live_control_meter_blocks: 1,
+                live_control_observation_taps: 4,
+                ..WebBootOptions::explicit_defaults()
+            };
+            let handle = test_boot(document, options);
+            assert_ne!(handle, 0, "the observation fixture must boot");
+            let count = miso_engine_web_v1_observation_count(handle);
+            assert_eq!(count, 8, "one observed compressor per track");
+            for index in 0..count {
+                assert_eq!(
+                    miso_engine_web_v1_observation_rack(handle, index),
+                    u32::from(rack)
+                );
+                assert_eq!(
+                    miso_engine_web_v1_observation_effect_index(handle, index),
+                    0
+                );
+            }
+            let track_index = miso_engine_web_v1_observation_track_index(handle, 3);
+            let tap_id = miso_engine_web_v1_observation_tap_id(handle, 3, 0);
+            let read = |selection_rack: u32| {
+                OBSERVATION_STAGING.with(|slot| {
+                    slot.borrow_mut().selections[0] = WebObservationSelection {
+                        struct_size: OBSERVATION_SELECTION_BYTES,
+                        abi_version: ABI_VERSION,
+                        track_index,
+                        rack: selection_rack,
+                        effect_index: 0,
+                        tap_id,
+                        channels: OBSERVATION_CHANNEL_BOTH,
+                        reserved: 0,
+                    };
+                });
+                miso_engine_web_v1_observation_read(handle, 1)
+            };
+            assert_eq!(read(u32::from(rack)), RESULT_OK);
+            let row = OBSERVATION_STAGING.with(|slot| slot.borrow().results[0]);
+            assert_eq!(
+                (row.track_index, row.rack, row.effect_index),
+                (track_index, u32::from(rack), 0)
+            );
+            for refused in [0, 2, 4, u32::from(unused)] {
+                assert_eq!(
+                    read(refused),
+                    RESULT_INVALID_ARGUMENT,
+                    "a selection at rack {refused} is refused"
+                );
+            }
+            dispose(handle);
+        }
     }
 
     #[test]

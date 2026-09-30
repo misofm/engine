@@ -372,7 +372,7 @@ async function testMainRealm() {
       const gate = snapshotGate();
       addModuleGate = gate;
       const firstEntry = { target: "output", targetId: "first", channels: "both" };
-      const thirdEntry = { target: "trackPostMatrix", targetId: "third", channels: "left" };
+      const thirdEntry = { target: "trackPostPan", targetId: "third", channels: "left" };
       const entries = [firstEntry, , thirdEntry];
       const collection = { entries, maximumCaptureBytes: 4096 };
       const factory = bootDataFactory({
@@ -389,7 +389,7 @@ async function testMainRealm() {
           entries: [
             { target: "output", targetId: "first", channels: "both" },
             ,
-            { target: "trackPostMatrix", targetId: "third", channels: "left" },
+            { target: "trackPostPan", targetId: "third", channels: "left" },
           ],
           maximumCaptureBytes: 4096,
         },
@@ -459,7 +459,7 @@ async function testMainRealm() {
       });
       const makeEntry = () => ({ target: "output", targetId: "main-out", channels: "both" });
       const makeSpectrum = () => ({
-        target: "trackPostMatrix", targetId: "eq0", channels: "both", maximumCaptureBytes: 4096,
+        target: "trackPostPan", targetId: "eq0", channels: "both", maximumCaptureBytes: 4096,
       });
       const makeCollectionOptions = (entries) => ({
         ...limits, spectrum: null, spectrumCollection: { entries, maximumCaptureBytes: 4096 },
@@ -994,7 +994,7 @@ async function testMainRealm() {
         const readyPause = snapshotGate();
         const abiPause = snapshotGate();
         const spectrum = {
-          target: "trackPostMatrix", targetId: "single", channels: "left", maximumCaptureBytes: 4096,
+          target: "trackPostPan", targetId: "single", channels: "left", maximumCaptureBytes: 4096,
         };
         const options = {
           sourceRingFrames: 0,
@@ -1617,6 +1617,13 @@ async function testMainRealm() {
       1,
     );
     await errorResult(liveControlHost.command({ commands: [] }), 1);
+    // The retired `simd1`/`simd2` rack codes and an unallocated one never reach the port (#1096).
+    for (const rack of [0, 2, 4]) {
+      await errorResult(
+        liveControlHost.command({ commands: [{ ...pan, kind: 5, rack, effectIndex: 0 }] }),
+        1,
+      );
+    }
     await localErrorResult(liveControlHost.command({ requestId: 999, commands: [pan] }), 1);
     await localErrorResult(liveControlHost.observe({ requestId: 999, subscriptions: [{
       trackIndex: 0, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 1, armed: true,
@@ -1784,7 +1791,9 @@ async function testMainRealm() {
     assert.equal(unsubscribed.bindings.length, 1, "an unsubscribe removes exactly one entry");
     assert.equal(unsubscribed.bindings[0].trackIndex, 0);
     for (const broken of [
-      { trackIndex: -1 }, { rack: 3 }, { tapId: 0 }, { armed: "yes" }, { windowBlocks: -1 },
+      // The retired `simd1`/`simd2` codes (`0`, `2`) and an unallocated one are refused (#1096).
+      { trackIndex: -1 }, { rack: 0 }, { rack: 2 }, { rack: 4 }, { tapId: 0 }, { armed: "yes" },
+      { windowBlocks: -1 },
     ]) {
       await errorResult(liveControlHost.observe({
         subscriptions: [{

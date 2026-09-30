@@ -1050,6 +1050,42 @@ mod control_producer_tests {
 }
 
 #[cfg(test)]
+mod live_address_tests {
+    use super::{EffectRack, LiveEffectAddress};
+
+    /// Decision 12's lowering of a live address (issue #1096), on a track with two `pre_insert`
+    /// slots, three inserts and one `post_insert` slot.
+    ///
+    /// Red mutations: lower console slot `k >= pre_insert` into `Simd1` (the `post_insert` slot
+    /// addressed as `pre_insert`), or into `Simd2` at `k` rather than `k - pre_insert`; let an insert
+    /// index reach past the inserts; or accept a console index past the last slot.
+    #[test]
+    fn a_live_address_lowers_through_the_section_split() {
+        let lengths = [2, 3, 1];
+        let cases = [
+            (LiveEffectAddress::console(0), Some((EffectRack::Simd1, 0))),
+            (LiveEffectAddress::console(1), Some((EffectRack::Simd1, 1))),
+            (LiveEffectAddress::console(2), Some((EffectRack::Simd2, 0))),
+            (LiveEffectAddress::console(3), None),
+            (LiveEffectAddress::console(u32::MAX), None),
+            (LiveEffectAddress::insert(0), Some((EffectRack::Dynamic, 0))),
+            (LiveEffectAddress::insert(2), Some((EffectRack::Dynamic, 2))),
+            (LiveEffectAddress::insert(3), None),
+        ];
+        for (address, lowered) in cases {
+            assert_eq!(address.lower(lengths), lowered, "{address:?}");
+        }
+        // An empty console lowers no console address; an empty `pre_insert` puts slot 0 after the
+        // inserts.
+        assert_eq!(LiveEffectAddress::console(0).lower([0, 1, 0]), None);
+        assert_eq!(
+            LiveEffectAddress::console(0).lower([0, 1, 1]),
+            Some((EffectRack::Simd2, 0))
+        );
+    }
+}
+
+#[cfg(test)]
 mod owner_tests {
     use super::*;
     use crate::EffectControlOwnerPhase;
