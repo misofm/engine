@@ -27,8 +27,10 @@
 //!
 //! `console-sixty-four-track-intended.json`, compiled and prepared through the host facade's own
 //! pipeline: sixty-four strips of builtins, EQ and compressor on `simd1`, and a true-peak limiter
-//! (`channel: "both"`, `maximum` link) alone on `simd2`. Two edits, each made for a measured
-//! reason:
+//! (`channel: "both"`, `maximum` link) alone on `simd2`. At a vector width other than the build's
+//! own, the strip runs as every track's inserts instead, because a console slot the build cannot
+//! bank there is refused rather than rendered per node (#1098; see `folded`). Two edits, each made
+//! for a measured reason:
 //!
 //! * **One stereo stream per track.** The fixture's one source is widened to 128 channels and
 //!   track `k` reads channels `2k` and `2k + 1`. With the fixture's one stereo source every lane
@@ -277,14 +279,57 @@ fn live_controls() -> HostLiveControlRequest {
     }
 }
 
-/// The standing fixture with its one stereo source widened to a stereo stream per track.
-fn session() -> String {
+/// Whether `backend` runs the strip as every track's inserts rather than as the console.
+///
+/// A build's factories bind only the widths it executes (D4): an `x86-64-v3` build binds four-lane
+/// banks for the limiter only, and a four-lane build binds no eight-lane bank. A console slot never
+/// renders per node on a vector backend (#1098), so at the other vector width the strip is folded
+/// into every track's inserts, in chain order, where a group this build cannot bank renders per
+/// node, exactly as the console did there before #1098. The chain, and so every word, is the same
+/// (#163's placement invariance), and the limiter still renders in four-lane banks on
+/// `x86-64-v3`.
+fn folded(backend: Backend) -> bool {
+    backend != Backend::current() && backend != Backend::Scalar
+}
+
+/// The address of the strip's `index`-th effect -- EQ 0, compressor 1, limiter 2 -- at `backend`:
+/// a console slot, or an insert where [`folded`].
+fn strip_address(backend: Backend, index: u32) -> LiveEffectAddress {
+    if folded(backend) {
+        LiveEffectAddress::insert(index)
+    } else {
+        LiveEffectAddress::console(index)
+    }
+}
+
+/// The standing fixture with its one stereo source widened to a stereo stream per track, and its
+/// console folded into the inserts where `backend` needs it ([`folded`]).
+fn session(backend: Backend) -> String {
     let mut model = parse_session_json(FIXTURE).expect("the fixture parses");
     assert_eq!(model.sources.len(), 1, "the fixture has one source");
     model.sources[0].channels = u8::try_from(CHANNELS).expect("channel count");
     for (index, track) in model.tracks.iter_mut().enumerate() {
         track.left_source_channel = u8::try_from(2 * index).expect("left channel");
         track.right_source_channel = u8::try_from(2 * index + 1).expect("right channel");
+    }
+    if folded(backend) {
+        let chains: Vec<Vec<session::Effect>> = model
+            .tracks
+            .iter()
+            .map(|track| {
+                let racks = model.lower_track(track);
+                let mut chain = racks.pre_insert;
+                chain.extend_from_slice(racks.inserts);
+                chain.extend(racks.post_insert);
+                chain
+            })
+            .collect();
+        model.console.pre_insert.clear();
+        model.console.post_insert.clear();
+        for (track, chain) in model.tracks.iter_mut().zip(chains) {
+            track.console.clear();
+            track.inserts.effects = chain;
+        }
     }
     canonical_session_json(&model).expect("the widened fixture canonicalizes")
 }
@@ -328,7 +373,7 @@ fn refused(failure: &PrepareDiagnostics) -> ! {
 }
 
 fn prepare(backend: Backend) -> Console {
-    let compiled = compile_host_session(&session(), &caps()).unwrap_or_else(|f| refused(&f));
+    let compiled = compile_host_session(&session(backend), &caps()).unwrap_or_else(|f| refused(&f));
     let (prepared, handles) = prepare_host_runtime_with_live_controls_backend(
         &compiled,
         &caps(),
@@ -362,9 +407,10 @@ fn prepare(backend: Backend) -> Console {
             .collect()
     };
     // The fixture's console is `pre_insert` [eq, comp] and `post_insert` [limiter], so in the
-    // session's slot order the compressor is slot 1 and the limiter slot 2 (issue #1096).
-    let limiters = controls(LiveEffectAddress::console(2), LIMITER);
-    let compressors = controls(LiveEffectAddress::console(1), COMPRESSOR);
+    // session's slot order the compressor is slot 1 and the limiter slot 2 (issue #1096), and
+    // folded into the inserts they are inserts 1 and 2.
+    let limiters = controls(strip_address(backend, 2), LIMITER);
+    let compressors = controls(strip_address(backend, 1), COMPRESSOR);
     let observers = handles
         .tracks
         .iter()
@@ -374,7 +420,7 @@ fn prepare(backend: Backend) -> Console {
                 .iter()
                 .position(|handle| {
                     handle.track_id == *track
-                        && handle.address == LiveEffectAddress::console(2)
+                        && handle.address == strip_address(backend, 2)
                         && handle.descriptor.id.as_str() == LIMITER
                 })
                 .unwrap_or_else(|| panic!("track {track}'s limiter has an observation handle"))

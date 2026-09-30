@@ -791,8 +791,8 @@ impl Budget {
 /// |---|---|---|
 /// | graph session+plan, graph incremental | 237,481 | 230,845 |
 /// | graph metadata | 56,068 | 56,840 |
-/// | effect bank scratch, runtime buffer | 8,192 | 8,192 |
-/// | effect bank metadata | 616 | 736 |
+/// | effect bank scratch, runtime buffer | 16,384 | 12,288 |
+/// | effect bank metadata | 805 | 921 |
 /// | builtin bank | 14,233 | 19,113 |
 /// | builtin bank scratch | 49,152 | 36,864 |
 /// | source PCM payload | 8,192 | 8,192 |
@@ -804,6 +804,16 @@ impl Budget {
 /// capi retained is the one row #1060 attempt 2 moved: 273,452 -> 256,740, -16,712, the EQ
 /// session's canonical JSON, which capi's epoch row charged a second time beside the compiled
 /// model's graph-cap charge.
+///
+/// #1098 raised the three effect-bank rows, a structural move: the session's EQ is its console
+/// slot, and a console slot's remainder now binds as a padded bank instead of rendering per node.
+/// The ninth track's EQ is one more bank at eight lanes (8,192 -> 16,384 scratch and runtime
+/// buffer, 616 -> 805 metadata) and at four (8,192 -> 12,288, 736 -> 921). A padded bank charges
+/// scratch for every lane and member metadata for its members only. The four-lane values are
+/// derived, not measured: the old four-lane baseline plus one four-lane bank (4,096 bytes of scratch
+/// and of runtime buffer; one bank record, four mask bytes and one member, 185 bytes, which is the
+/// eight-lane move less four mask bytes). The graph rows moved by the same amounts and stay inside
+/// their budgets (253,934 of 261,248 at eight lanes).
 /// | largest named allocation | 90,720 | the same |
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
@@ -833,20 +843,20 @@ const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "effect_bank_scratch_bytes",
         value: |report| report.effect_bank_scratch_bytes,
-        eight_lanes: 9_024,
-        four_lanes: 9_024,
+        eight_lanes: 18_048,
+        four_lanes: 13_568,
     },
     Budget {
         row: "effect_bank_runtime_buffer_bytes",
         value: |report| report.effect_bank_runtime_buffer_bytes,
-        eight_lanes: 9_024,
-        four_lanes: 9_024,
+        eight_lanes: 18_048,
+        four_lanes: 13_568,
     },
     Budget {
         row: "effect_bank_metadata_bytes",
         value: |report| report.effect_bank_metadata_bytes,
-        eight_lanes: 704,
-        four_lanes: 832,
+        eight_lanes: 896,
+        four_lanes: 1_024,
     },
     Budget {
         row: "builtin_bank_bytes",

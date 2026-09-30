@@ -250,6 +250,8 @@ mod tests {
 
     /// Issue #1088's padded-bank gate, beside the harness it reuses.
     mod bank_padding;
+    /// Issue #1098's gates: every console slot banked, class A, the diagnostic and #971.
+    mod console_banking;
     use crate::canonical::{
         canonical_parts, edge_text, edge_text_len, hex_sha256, node_text, node_text_len,
         write_canonical,
@@ -5968,8 +5970,9 @@ mod tests {
     }
 
     /// G3 + G5. Adding a ninth track moves the cohort boundary (eight lanes are full, the ninth
-    /// track becomes a padded, unbound group) without changing one bit of the eight tracks already
-    /// in the bank, and the chain performs exactly one planar/AoSoA round-trip per block.
+    /// track becomes a padded group, bound since #1098 because the EQ is a console slot) without
+    /// changing one bit of the eight tracks already in the bank, and the chain performs exactly one
+    /// planar/AoSoA round-trip per block.
     #[test]
     fn add_a_track_keeps_existing_track_bits_and_one_transpose_per_chain() {
         const BLOCKS: u64 = 32;

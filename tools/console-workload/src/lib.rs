@@ -50,7 +50,7 @@ use effect_compiler::{
     attach_effect_observation, launch_native_effect_registry, prepare_native_session_effects,
 };
 use effect_contract::{
-    ChannelSymmetryWitness, EffectControlRecord, ParameterChannel, PreparedEffectTarget,
+    BankWidth, ChannelSymmetryWitness, EffectControlRecord, ParameterChannel, PreparedEffectTarget,
 };
 use engine::realtime::{
     PlanUnitEligibility, PlanarBufferMut, PreparedRenderPlan, RenderError, RenderIo, RenderTime,
@@ -978,6 +978,30 @@ impl PlanConfig {
 /// Split out of `SessionRuntime` so the meter and observation arms build the *same* model the
 /// `sixty_four_track_console` row builds, through the same code, rather than a second transcription
 /// of it.
+/// Every console slot of `model` folded into each track's inserts, in chain order: `pre_insert`
+/// ahead of the track's own inserts and `post_insert` after them, each entry an ordinary effect
+/// with the slot's ID. The lowered chain, and so the render, is unchanged (#163's placement
+/// invariance); only the internal rack its effects sit in moves.
+fn fold_console_into_inserts(model: &mut SessionModel) {
+    let chains: Vec<Vec<session::Effect>> = model
+        .tracks
+        .iter()
+        .map(|track| {
+            let racks = model.lower_track(track);
+            let mut chain = racks.pre_insert;
+            chain.extend_from_slice(racks.inserts);
+            chain.extend(racks.post_insert);
+            chain
+        })
+        .collect();
+    model.console.pre_insert.clear();
+    model.console.post_insert.clear();
+    for (track, chain) in model.tracks.iter_mut().zip(chains) {
+        track.console.clear();
+        track.inserts.effects = chain;
+    }
+}
+
 fn console_model(workload: Workload) -> SessionModel {
     let text = match workload {
         Workload::NineTrackBaseline => NINE_TRACK,
@@ -1221,6 +1245,14 @@ impl SessionRuntime {
     /// eight stays in the table as the backend the product actually records on. This is the
     /// discipline phase 0b's kernel arm already used, applied to the console subject.
     ///
+    /// At a vector width other than the build's own, the session's console is folded into every
+    /// track's inserts first ([`fold_console_into_inserts`]). A build's effect factories bind only
+    /// the widths it executes (D4), and since #1098 a console slot never renders per node on a
+    /// vector backend, so the console as written is refused there. Folded, the chain is the same
+    /// and so is every rendered bit (#163), its effects render per node wherever this build cannot
+    /// bank them, exactly as the console did at that width before #1098, and a live control
+    /// addresses the effect as an insert at the same chain position.
+    ///
     /// # Panics
     ///
     /// As [`SessionRuntime::build`].
@@ -1247,7 +1279,10 @@ impl SessionRuntime {
         dispatch: Backend,
         source: SourceSignal,
     ) -> Self {
-        let model = console_model(workload);
+        let mut model = console_model(workload);
+        if dispatch != Backend::current() && BankWidth::for_backend(dispatch).is_some() {
+            fold_console_into_inserts(&mut model);
+        }
         let session = compile_session(&model, compile_caps()).expect("compiled console session");
         let meters = if config.meters {
             meter_requests(&model)
