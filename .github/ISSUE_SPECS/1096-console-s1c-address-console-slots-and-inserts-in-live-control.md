@@ -68,6 +68,12 @@ Authorized paths:
 
 The SDK's builder and types are S1d's.
 
+Live bypass after P1 (#1087; P1 verdict, L4): a live control can lift the session bypass of
+every effect except two. The delay is seeded bypassed and keeps its prepared bypass. The
+multiband keeps its prepared bypass under P1b (#1100). Document both exceptions where live
+bypass is documented, and test that lifting either is refused or has no effect, whichever the
+code does today.
+
 ## Owner decisions that bind this slice
 
 Decision 12's "Wire identity": nothing is renumbered, every retired code is refused, there is no

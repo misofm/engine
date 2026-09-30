@@ -52,6 +52,8 @@ any order, one merge each.
 3. Coupling rule: active lanes' bits do not depend on the clone source.
 4. D7: for each effect, a planted non-finite state in one active lane recovers and reports that
    lane alone. Soft-clip charges active lanes only.
+   A bypassed lane counts as active: a bypassed lane fed a tripping value (for example `1e30`
+   behind enough legal gain) leaves every enabled bank-mate's bits unchanged (P1 verdict, M2).
 5. `cargo test -p gate-expander -p transient-shaper -p soft-clip -p graph-compiler -p graph` pass,
    as do `scripts/check-effect-runtime-policy.sh`, `scripts/check-realtime-policy.sh` and the
    realtime audits. PR evidence: console digests are unchanged.

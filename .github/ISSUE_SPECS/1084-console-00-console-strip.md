@@ -229,6 +229,7 @@ the slice that changes the behaviour.
 | B0 | `1085-console-b0-add-the-console-strip-benchmark-rows.md` | Strip at N in {9, 10, 13, 16, 64}, app shape, sparse activity; layout-neutral `strip_layout`; two V8 documents | R0 |
 | S0 | `1086-console-s0-record-the-console-strip-baseline.md` | One native and one V8 run on B0's commit | B0 |
 | P1 | `1087-console-p1-keep-a-bypassed-lane-in-its-effect-bank.md` | Session bypass -> shunt state; mixed-bypass cohorts bind one bank | R0 |
+| P1b | `1100-console-p1b-bound-and-charge-the-bypass-shunts.md` | P1's verdict conditions: bound and charge the staging windows and shunts; the multiband keeps its prepared bypass; allocation and `-0.0` witnesses | P1 |
 | P2a | `1088-console-p2a-let-an-effect-bank-bind-a-partial-group.md` | Active mask, padding contract, planner support; every factory still declines | P1 (merge order: shared files) |
 | P2b | `1089-console-p2b-pad-parametric-eq-banks.md` | EQ opts in (supersedes #888's absent-member half) | P2a |
 | P2c | `1090-console-p2c-pad-compressor-banks.md` | Compressor opts in (supersedes #889's absent-member half) | P2a |
@@ -254,7 +255,7 @@ after the push.
 | Batch | Slices, in merge order | Why this boundary |
 |---|---|---|
 | C1 | R0, B0, then S0's records | The baseline must be recorded on the unchanged engine, so C1 is pushed before any engine slice lands |
-| C2 | P1, P2a, then P2b-P2e | S2's banking prerequisites, with no schema change. Every shipped plan is unchanged except mixed-bypass cohorts (P1) |
+| C2 | P1, P1b, P2a, then P2b-P2e | S2's banking prerequisites, with no schema change. Every shipped plan is unchanged except mixed-bypass cohorts (P1) |
 | C3 | S1r, S1a, S1b, S1c, S1d | The schema change, pushed once. From S1a until S1d the SDK is out of step, so nothing is pushed in between |
 | C4 | S2, then S4 | The guarantee, then the after-measurement |
 
@@ -262,6 +263,9 @@ Sequencing inside each batch follows shared files, not only functional dependenc
 - P1 and P2a both edit `effect-contract/src/lib.rs` and `graph-compiler/src/banks.rs`, so P1
   merges first.
 - P2b-P2e edit disjoint effect crates and may land in any order after P2a.
+- C2 is not pushed until P1b, P2b, P2c and P2e have closed (P1 verdict, conditions 1-4). If one of
+  P2b, P2c or P2e cannot close, P1's lowering is withheld for that slice's effects before the
+  push, so no pushed build couples a bypassed lane's D7 to its bank-mates.
 - S1r, S1a and S1c all edit `effect-compiler/src/prepare.rs`, and S1r and P1 both edit
   `rack/src/lib.rs`. C2 lands before C3, and inside C3 the order is S1r, S1a, S1b, S1c, S1d, one at
   a time.
@@ -334,6 +338,7 @@ S1d's handoff notes carry the name maps.
 | B0 | #1085 |
 | S0 | #1086 |
 | P1 | #1087 |
+| P1b | #1100 |
 | P2a | #1088 |
 | P2b | #1089 |
 | P2c | #1090 |

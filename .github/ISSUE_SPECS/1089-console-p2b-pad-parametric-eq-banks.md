@@ -54,6 +54,8 @@ any order, one merge each.
    clone. A test varies the clone source.
 3. A padded lane is never scattered, and its state stays finite on `+0.0` input.
 4. D7: a planted non-finite state in one active lane recovers that lane and reports it alone.
+   A bypassed lane counts as active: a bypassed lane fed a tripping value (for example `1e30`
+   behind enough legal gain) leaves every enabled bank-mate's bits unchanged (P1 verdict, M2).
    Padded lanes are neither reported nor charged.
 5. `cargo test -p parametric-eq -p graph-compiler -p graph` pass, as do
    `scripts/check-parametric-eq-render-contract.sh`, `scripts/check-effect-runtime-policy.sh`,

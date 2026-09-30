@@ -63,6 +63,8 @@ any order, one merge each.
 3. A bank whose active lanes are all silent still takes silent admission. A padded lane that
    defeated it would turn this test red.
 4. D7: a planted non-finite state in one active lane recovers and reports that lane alone.
+   A bypassed lane counts as active: a bypassed lane fed a tripping value (for example `1e30`
+   behind enough legal gain) leaves every enabled bank-mate's bits unchanged (P1 verdict, M2).
 5. `cargo test -p compressor -p graph-compiler -p graph` pass, as do
    `scripts/check-effect-runtime-policy.sh`, `scripts/check-realtime-policy.sh` and the realtime
    audits. PR evidence: console digests are unchanged.
