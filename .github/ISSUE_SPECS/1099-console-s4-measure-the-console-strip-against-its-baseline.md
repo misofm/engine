@@ -534,7 +534,7 @@ mono group: the mono rows carry either 64 mono tracks or 32 mono and 32 stereo, 
 rack" and that "Today a bypassed effect is part of its bank key". The row's record correctly states
 `pre_insert:eq+compressor`. This is S1a's or P1's doc, and S4 changes no code.
 
-#### Draft successor (not filed): skip silent lanes' work in console banks
+#### Successor (filed by root as #1107): skip silent lanes' work in console banks
 
 ```markdown
 # Skip silent lanes' work in console banks

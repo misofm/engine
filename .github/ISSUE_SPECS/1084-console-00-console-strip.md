@@ -296,7 +296,7 @@ both.
 
 ## Follow-ups (not in these slices)
 
-- A per-lane silence skip, if S4's sparse-activity row warrants it.
+- #1107: a per-lane silence skip. S4 warranted it: the sparse row costs 99.6 % of all-active.
 - An all-lanes-bypassed skip for a bank, which must still feed latency lines.
 - ALAP alignment of `post_insert` banks, on measured need.
 - A banked sidechain port (#96 F9).
