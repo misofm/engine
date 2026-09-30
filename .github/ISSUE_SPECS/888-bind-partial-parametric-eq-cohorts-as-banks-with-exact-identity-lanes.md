@@ -38,3 +38,27 @@ No other effect (compressor is a separate issue). No kernel change. No change to
 - Run `cargo fmt --all --check`, `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`, and the focused tests named below before every checkpoint. Commit on a `codex/<issue>-<slug>` branch from synchronized `main`; do not touch paths outside the authorized list.
 - Do not quote a projected saving. If a benchmark row is listed, run it exactly once, one warmup and two measured rounds, and attach the record as descriptive evidence.
 - Source of these findings: `docs/audits/render-path-cost-audit-2026-09-24.md` (PR #879) and tracker #349.
+
+## Amendment (2026-09-29, console strip, owner decision 12)
+
+Decision 12 (`docs/rulings/engine-footprint-2026-09-29.md`; umbrella *Console strip: session-level
+console effects with per-track inserts*) splits this issue's two halves.
+
+- **Superseded: absent-member lanes.** A cohort of fewer than W EQ members binding as one bank
+  moves to two slices:
+  - *Pad parametric EQ banks with inactive lanes* (P2b) owns the mechanism, on the contract of *Let
+    an effect bank bind a partial group with inactive lanes* (P2a). A padded lane clones an active
+    member's request (not identity coefficients), is fed `+0.0`, and has its output discarded. D7
+    is masked to active lanes.
+  - *Bind every console slot banked for every track count* (S2) owns the policy for console slots.
+- **Kept: identity slots.** An insert cohort whose member lacks the EQ slot binds with an identity
+  slot on that lane. Console slots never need this, because every track has every slot. It is an
+  insert-only optimisation, and no console slice depends on it.
+- **Inserts bank opportunistically, as today** (decision 12). Whether a partial insert cohort
+  should bind padded at all is a measured question: at W=8, a one- or two-member padded bank costs
+  more than per-node rendering (Sol's H5 in `docs/handoffs/console-strip-2026-09-29/VERIFY.md`).
+  The kept half ships only with a measured per-width rule, read against the console benchmark's
+  remainder rows after *Measure the console strip against its baseline* (S4).
+- **Dependencies** become P2b, whose mask and lane bookkeeping this reuses. #887 is optional.
+- **Gates** 1 and 2 apply to the kept half: sessions whose EQ insert cohort has a member lacking
+  the slot.

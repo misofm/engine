@@ -33,3 +33,112 @@ per-track meter work, built on the ordinary path's existing lease flag, if measu
 saving is worth it. Removing the machinery also removes render's only path to the deallocator.
 #1080 also removed the builtins meter's matching half (`restart_observation`, `observation_generation`),
 which the removal left unused.
+
+## Decision 12: the console strip (session-level console slots, per-track inserts)
+
+The owner's console-strip design (umbrella issue *Console strip: session-level console effects
+with per-track inserts*, #1084, `.github/ISSUE_SPECS/1084-console-00-console-strip.md`)
+emulates a hardware console: every channel runs the same built-in processing and sets only its own
+knobs, and outboard gear is patched into a channel's insert point. Sol verified the design against
+`5a1421a3` and returned SOUND WITH AMENDMENTS (`docs/handoffs/console-strip-2026-09-29/VERIFY.md`,
+first committed at `.github/ISSUE_SPECS/DRAFT-console-strip-VERIFY.md` in `03aceb94`; findings
+H1-H5, M1-M9, L1-L7 and amendments 1-14 below cite it). The owner
+answered the amendments on 2026-09-29. Ruling:
+
+- **Shape.** The session declares `console { "pre_insert": [...], "post_insert": [...] }`. Each
+  slot is declared once, with `slot` (a stable ID unique across both sections), the native effect
+  `identity`, `quality` and `link_mode`. Every track has every slot: each track carries a `console`
+  array of `{ "slot", "bypass", "params" }` in exactly the session's slot order (`pre_insert`,
+  then `post_insert`). Per-track `inserts` replace `dynamic` with the same semantics; the per-track
+  `simd1` and `simd2` are retired. Either section and `inserts` may be empty (amendments 2 and 4,
+  H4's canonical-order objection).
+- **Chain.** input section (polarity, trim, HPF/LPF) -> `console.pre_insert` -> `inserts` ->
+  `console.post_insert` -> fader/mute -> pan/matrix -> routes. AGENTS.md's chain line, tap list
+  and #163 sentence are amended in the same commit as this ruling (M7).
+- **Sidechain.** Console slots have no sidechain. A keyed effect is an insert. A banked sidechain
+  port would be a future contract issue (#96 F9), with its own level-lift problem (H3).
+- **Banking.** Console slots **always** bank, on every target and for every track count, with
+  partial groups padded with inactive lanes. There is no member threshold. This is the owner's
+  simpler design, chosen knowing that a one- or two-member remainder costs more than per-node
+  rendering at W=8 (H5: about 9.3 µs for a padded bank of the three strip slots against about
+  4.2 µs per per-node track, arithmetic on the uncontrolled `final-0400` record). There is one
+  bank group per (slot, pool class, dependency level), each padded; differing insert counts
+  therefore split `post_insert` into several groups and can cost chain fusion (H2, M3,
+  amendments 3 and 9). Inserts bank opportunistically, as today.
+- **Padding contract.** A padded lane is a clone of an active member's prepared request, never
+  zeros; it is fed `+0.0` and its output is discarded. D7 recovery and reports are masked by active
+  lanes (M1, amendment 6).
+- **Bypass.** Bypass is per lane, through the existing `BypassShunt`, so a bypassed track stays in
+  its bank: a session `bypass` lowers to prepared `bypass = false` plus the lane's initial shunt
+  state, and the shunt is built whenever any lane is bypassed (H1, amendment 1). A bypassed lane
+  runs the wet path; that cost is accepted. Latency is always paid: a bypassed slot still carries
+  its fixed latency on every track (L4).
+- **Coupling rule.** Banking may couple lanes' cost, never their bits. Every whole-bank decision
+  (fast-path gates, D7 recovery, shunt selection) must be bit-neutral per lane (M2, amendment 7).
+- **Eligibility.** A console slot may be the parametric EQ, compressor, gate/expander, soft-clip,
+  transient shaper or true-peak limiter (`miso.parametric-eq`, `miso.compressor`,
+  `miso.gate-expander`, `miso.soft-clip`, `miso.transient-shaper`, `miso.true-peak-limiter`). The
+  delay never banks. The multiband compressor is excluded until #1069 closes. A compile diagnostic
+  enforces the list (L2, amendment 8).
+- **Silence.** Accepted trade-off: the silent fast path is bank-wide, so one active track keeps its
+  bank-mates processing (M4). The baseline measures it with a sparse-activity row; a per-lane
+  silence skip is a later issue if the measurement warrants it. An all-lanes-bypassed skip stays
+  out of scope and would still have to feed latency lines (amendment 11).
+- **Naming** (M6, amendment 13).
+  - **The owner's decision.** The session key is `console`, and the engine's internal live-console
+    names are renamed, for example to "live controls". The question the owner answered listed the
+    fader, mute and pan lanes, the `miso_engine_web_v1_console_track_*` exports and the benchmark
+    names. So the owner decided to rename:
+    - the internal names: `HostConsoleRequest`/`HostConsoleHandles`, `ConsoleEffectBankStage`, the
+      builtins' console fader, matrix and input processors, and every other internal identifier
+      whose "console" means the live-control attachment;
+    - the two exports.
+
+    The console benchmark and the console fixtures keep their names, because they describe console
+    sessions.
+  - **Root's application of it.** The four pinned `console*` boot-option words and the SDK's public
+    live-console API (`sdk/src/core/console.ts`, `EngineConsole`, `createBrowserConsole`) are
+    renamed with the exports, so one vocabulary crosses the boundary. This is root's reading of the
+    owner's decision, not a separate owner decision.
+  - **The `_v1` wire identities stay.** The two exports are sealed contract identity: exported wasm
+    symbols, pinned by `scripts/check-abi-layout-v1.py` and
+    `sdk/assets/miso-engine-v1-abi-layout.json`, and class 2 in
+    `docs/rulings/de-versioning-inventory.md`. The version-suffix rule governs only their `_v1`,
+    which stays, and no V2 is claimed. Renaming the stem is an in-place V1 amendment under the
+    wire-identity ruling below. The boot-option words keep their offsets and types and change only
+    their spellings. A retired spelling is never exported again, for any meaning.
+  - The builtins automation token (`rack: "builtins"`, `effect_id: "strip"`) is unchanged. The
+    owner's naming decision does not touch it, and the `rack` token keeps it distinct from a console
+    slot that happens to be named `strip`. This is R0's reading, not a separate owner decision.
+- **Wire identity.** The change is an in-place V1 amendment on the #1063 precedent (amendment 5).
+  Nothing is renumbered, and every retired code is refused, never reallocated.
+  - Send-tap tokens are renamed with wire codes 1-7 unchanged: `input`, `post_input`,
+    `insert_send`, `insert_return`, `pre_fader`, `post_fader`, `post_pan`.
+  - `dynamic` -> `inserts` keeps rack code 2 and BTLV track field 7. The `simd1`/`simd2` rack
+    codes 1 and 3 and BTLV track fields 6 and 8 are retired. `builtins` keeps code 4.
+  - `console` is appended: a rack code after `builtins`, a session root field and a track field,
+    each the next unallocated ID in its registry. The browser's 48-byte command record keeps `1`
+    for `inserts`, retires `0` and `2` and appends a console value; the observation and
+    live-response rack encodings follow the same rule.
+  - There is no `ABI_VERSION` generation bump. The prelaunch identity stays V1, and the app and SDK
+    update in lockstep.
+- **Class A by lowering.** Internally `pre_insert` lowers to `Simd1`, `inserts` to `Dynamic` and
+  `post_insert` to `Simd2`, so an equivalent session produces the identical graph, including the
+  sealed `MISO-GRAPH-V1` canonical text, and the identical render (M9, amendment 14). The internal
+  Rust names `RackId`, `TrackStage`, `MeterTap` and `RackLocation` stay.
+- **#971 under padding.** Once every console group binds, the stranded-mono demotion's "binds more
+  banks" objective measures nothing (M3). The banking slice chooses between restating the objective
+  (for example, minimise planes x banks) and retiring the demotion for console slots, and records
+  why (amendment 10).
+- **The app.** The problem statement is corrected (M8, amendment 12): the app compiles EQ ->
+  compressor onto every track's dynamic rack and marks unselected tracks `bypass`. The baseline's
+  app-shaped row is "every track carries EQ -> compressor, a subset bypassed". The app moves the
+  pair into `console.pre_insert` after the SDK slice lands.
+
+The slices, their dependencies, their gates and the batch plan are in the umbrella issue. Sol's
+revised plan is kept with one addition, the live-controls rename (S1r, #1095). It is a slice of its
+own because it reaches about 80 code, script and SDK files (about 780 lines), including two sealed
+exports, four boot-option words and the SDK's public live-console API. That is more than S1c's half
+day, and a separate slice keeps a class-A rename out of a semantic addressing verdict. It merges
+first in its batch, before the schema slice (S1a), so that its SDK and browser gates run against an
+unchanged schema.

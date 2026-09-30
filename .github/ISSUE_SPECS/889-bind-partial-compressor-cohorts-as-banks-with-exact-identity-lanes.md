@@ -35,3 +35,19 @@ No kernel arithmetic change on active lanes. No ramp-path change.
 - Run `cargo fmt --all --check`, `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`, and the focused tests named below before every checkpoint. Commit on a `codex/<issue>-<slug>` branch from synchronized `main`; do not touch paths outside the authorized list.
 - Do not quote a projected saving. If a benchmark row is listed, run it exactly once, one warmup and two measured rounds, and attach the record as descriptive evidence.
 - Source of these findings: `docs/audits/render-path-cost-audit-2026-09-24.md` (PR #879) and tracker #349.
+
+## Amendment (2026-09-29, console strip, owner decision 12)
+
+Decision 12 (`docs/rulings/engine-footprint-2026-09-29.md`; umbrella *Console strip: session-level
+console effects with per-track inserts*) splits this issue as it splits #888.
+
+- **Superseded: absent-member lanes.** A cohort of fewer than W compressor members binding as one
+  bank moves to *Pad compressor banks with inactive lanes* (P2c), on P2a's padding contract (a
+  padded lane clones an active member's request, is fed `+0.0` and has its output discarded; D7 is
+  masked), and to S2 for console slots.
+- **Kept: identity slots.** An insert cohort whose member lacks the compressor slot binds with an
+  identity slot on that lane. The lane's detector and gain smoother stay at rest. This is
+  insert-only and optional, and it ships only with the measured per-width rule #888's amendment
+  describes.
+- **Dependencies** become P2c and the amended #888.
+- **Gates** 1 and 2 apply to the kept half, including blocks where active lanes ramp.

@@ -1,10 +1,16 @@
 //! Prints the `console_mixing_automation` row's controls, resolved against the mono console, as
-//! one JSON object (issue #1003).
+//! one JSON object (issue #1003), with the two console-strip documents the browser arm also
+//! renders (issue #1085).
 //!
 //! The browser arm (`scripts/web-mixing-automation-benchmark.mjs`) rides the shipped
 //! `host_web.wasm` with exactly these controls: the same tracks, rack slots, wire parameter ids,
 //! held bases and per-block values the native row pushes. It reads them from here rather than
 //! from a transcription, so the two arms cannot drift apart.
+//!
+//! The documents are the native rows `sixty_four_track_console` and `sixty_four_track_app_shape`:
+//! their fixture, track count, strip content and layout as the native rows state them, and the
+//! bypass census of the session the native row compiles. The browser arm boots each fixture as
+//! written, checks it carries that layout and that bypass, and times its render.
 //!
 //! `cargo run --locked --release -p console-workload --example mixing_automation_controls`
 
@@ -13,7 +19,15 @@ use console_workload::mixing_automation::{
 };
 use console_workload::{
     QUANTUM, SessionRuntime, TONE_AMPLITUDE, TONE_RADIANS_PER_FRAME, TONE_TRACK_PHASE_RADIANS,
+    Workload,
 };
+
+/// The console-strip rows the browser arm renders as documents (issue #1085): the standing
+/// console and the app shape. No per-N browser rows: those would be a second framework.
+const DOCUMENTS: [Workload; 2] = [
+    Workload::SixtyFourTrackConsole,
+    Workload::SixtyFourTrackAppShape,
+];
 
 fn main() {
     let runtime = SessionRuntime::build(mixing_automation::WORKLOAD, mixing_automation::CONFIG);
@@ -64,13 +78,36 @@ fn main() {
         phase = TONE_TRACK_PHASE_RADIANS,
         block = QUANTUM,
     );
+    let documents: Vec<String> = DOCUMENTS
+        .iter()
+        .map(|workload| {
+            let census = SessionRuntime::new(*workload).bypass_census();
+            format!(
+                concat!(
+                    "{{\"workload_kind\":\"{kind}\",\"fixture_id\":\"{fixture}\",",
+                    "\"tracks\":{tracks},\"strip_content\":\"{content}\",",
+                    "\"strip_layout\":\"{layout}\",\"input_signal\":\"{signal}\",",
+                    "\"bypass_pattern\":\"{pattern}\",\"bypassed_tracks\":{bypassed}}}"
+                ),
+                kind = workload.kind(),
+                fixture = workload.fixture_id(),
+                tracks = workload.tracks(),
+                content = workload.strip_content(),
+                layout = workload.strip_layout(),
+                signal = workload.input_signal(),
+                pattern = census.pattern.name(),
+                bypassed = census.bypassed_tracks,
+            )
+        })
+        .collect();
     println!(
-        "{{\"workload_kind\":\"{kind}\",\"fixture_id\":\"{fixture}\",\"preroll_blocks\":{preroll},\"preflight_blocks\":{preflight},\"smoothing_samples\":{smoothing},\"native_input_feed\":{native_input_feed},\"controls\":[{controls}]}}",
+        "{{\"workload_kind\":\"{kind}\",\"fixture_id\":\"{fixture}\",\"preroll_blocks\":{preroll},\"preflight_blocks\":{preflight},\"smoothing_samples\":{smoothing},\"native_input_feed\":{native_input_feed},\"controls\":[{controls}],\"documents\":[{documents}]}}",
         kind = mixing_automation::WORKLOAD.kind(),
         fixture = mixing_automation::WORKLOAD.fixture_id(),
         preroll = PREROLL_BLOCKS,
         preflight = PREFLIGHT_BLOCKS,
         smoothing = SMOOTHING_SAMPLES,
         controls = controls.join(","),
+        documents = documents.join(","),
     );
 }
