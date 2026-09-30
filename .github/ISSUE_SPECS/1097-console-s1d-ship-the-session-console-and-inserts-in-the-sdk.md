@@ -530,3 +530,87 @@ x86-64-v3, from a clean `npm ci`.
 - **`enginectl` key codes:** the request's own key check loses the engine's
   `schema.unknown_field`.
 - **Two tracks' chains:** an insert ID resolved against another track's chain.
+
+## Sol re-check, post-verdict fixes
+
+**CONFIRMED.** On `e99fb6ec` (code `9ed17b58`), M1, M2 and L1-L5 are fixed and tested. Nothing
+regressed. There is no high or medium finding.
+
+### M1: `withSession()` is held to the booted bytes
+
+- **Refusals.** `assertBootedSession` (`sdk/src/core/live-controls.ts:246`) runs inside
+  `withSession()` (`:796`), before any `LiveControlEdits` is built. Its refusal is a typed
+  `MisoUsageError`. `console-evals.mjs:845` refuses a reordered console, a renamed slot and a
+  different insert chain on `b`, and asserts that each differs from the booted text.
+- **My mutation.** A length-only comparison turns the reordered-console variant (the same length)
+  red, and the `loadSession()` test with it: 2 of 329.
+- **Trade-off: acceptable.** The app never needs to match non-canonical text:
+  - `buildEngineSession` boots the builder's `toJson()` text (app `session-document.ts:604` ->
+    `boot.ts:247`). That text is canonical, and `withSession(plan.builder)` matches it.
+  - Imported documents (`authoritative-session.ts:832-933`) have no builder at all
+    (`boot.ts:244-246`). Nothing could be passed to `withSession()` for them either way, so they
+    use index addressing.
+  - A non-canonical boot is refused, not trusted (the `spaced` case, `:861`). The refusal is
+    documented in the README (`:213`), on `withSession()` and in the handoff.
+- **No cheap engine-canonical alternative.**
+  - host-web exports no canonical echo: `document_ptr` only stages input.
+  - `validate()` returns `shape` only.
+  - Observation bindings cover only observed effects, and they carry no authored bypass.
+  - The SDK may not parse (ruling 5438024085).
+  - A canonical-echo export would change the pinned artifact, so it needs its own issue.
+
+### M2: `bypass(false)` refuses a session-bypassed delay or multiband
+
+- **The list.** `PREPARED_BYPASS_EFFECTS` is the engine's `NEVER_BANKED_EFFECTS` plus its
+  `PREPARED_BYPASS_EFFECTS` (`crates/effect-compiler/src/prepare.rs:241`, `:257`). Neither effect is
+  console-eligible, so inserts are the whole surface.
+- **The tests.**
+  - `:953` refuses both effects by ID, by index, through `effect()` and through `withSession()`.
+    The EQ and an unbypassed delay still lift.
+  - `:998` holds the list to the engine: all 8 catalog effects are lifted raw. The 6 unlisted
+    effects render the unbypassed session bit for bit.
+- **My mutation.** When the caller's claimed effect decides the refusal instead of the addressed
+  instance, "the instance at the address governs" goes red: 1 of 329.
+- **Other paths.** Outside the no-session path the README documents (`:223`), the SDK reaches the
+  lift only through its public constructors used without a session, which is the same residual.
+  With a layout, an out-of-range index is not acknowledged: a probe returns `ok: false`,
+  `unknownEffect`.
+
+### L1-L5
+
+- **L1.** The link-mode sweep (`:430`) boots every effect at every mode, as an insert and as a
+  slot, through the engine's `validate()`. My mutation (a slot checked against the compressor's
+  row) is red in the sweep and in its twin.
+- **L2.** The ten new twin rows compare the builder's code with the engine's first diagnostic. A
+  probe confirms the engine's own `schema.unknown_field` for an unknown console key, an unknown
+  track key and a slot sidechain, which the `enginectl` test asserts.
+- **L3.** `ins-eq` is insert 1 on `a` and insert 0 on `b`, and the test reads both.
+- **L4.** The `index.ts` lines `:311`, `:867`, `:876`, `:985` and `:1062`, and `projectedEffects`
+  (`:1116-1124`), match app `0757a84`.
+- **L5.** All three browser runs print "sdk bundle: the source ... (CI's mode)".
+
+### Regressions (x86-64-v3, clean `npm ci`, no `sdk/dist` for browsers)
+
+| Gate | Result |
+|---|---|
+| Artifact | module `e7f2ad31...cdc80be`, 3,283,569 B; closure `19783d70...fa56`. No diff in `crates`, `tools`, `scripts`, `fixtures`, host-web `src`/`web` or `Cargo.*` since `9ae38fed` |
+| `check-sdk-generated.sh ARTIFACTS`, `check-sdk-deletions.py` (and `--self-test`), `check-sdk-types.sh` | pass |
+| `check-sdk-headless.sh` | 329/329 |
+| `sdk-package.sh check` | `enginectl` 14/14, tarball gate pass |
+| Browser `--check-matrix --self-test-mutations` | pass on Chromium 151.0.7922.34, Firefox 153.0 and WebKit 26.5, each with the 7-file set pinned |
+| fmt; workspace, bench and script-reachability policy (check and test); `test-npm-publish-modes.py`; CI path routing (check and test); `check-dsp-research.sh`; `check-builtins-listening.sh` | pass |
+
+Two harness faults were mine, and both reran green:
+- my first `check-sdk-generated` run raced my own build before it wrote the metadata;
+- Chromium's first launch failed because my `TMPDIR` path was too long for its socket.
+
+All three mutations were reverted, and the tree is clean.
+
+### Findings
+
+- **H:** none. **M:** none.
+- **L1.** `withSession()` on live controls constructed without the booted document says "pass the
+  session to the constructor instead" (`live-controls.ts:800`). The constructor holds a session to
+  the track set only, so the message steers a custom host onto the check M1 replaced. It should
+  instead say to pass the booted bytes as the fifth argument. This is a message fix only; the
+  SDK's own engines always pass the bytes.
