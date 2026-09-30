@@ -45,6 +45,77 @@ pub(crate) fn banks_are_permitted(identity: &session::EffectIdentity) -> bool {
     }
 }
 
+/// Which partial groups the planner pads with inactive lanes (issue #1088; decision 12, "Banking").
+///
+/// A *partial* group has fewer members than the bank width. Padding binds it as one bank anyway:
+/// the absent lanes carry a clone of an active member's request and run as padded lanes under the
+/// contract on `effect_contract::PrepareEffectBankRequest`. An unpadded partial group is left
+/// unbound and its members render per node, which is what every group got before #1088.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BankPadding {
+    /// The production policy: a partial group is padded only when it asks for it
+    /// ([`group_asks_for_padding`]). Nothing asks yet, so every shipped plan is unchanged.
+    AsRequested,
+    /// Every partial group is padded, whatever it asks. Test-only: it lets the per-effect padding
+    /// slices (P2b-P2e, #1089-#1092) and this crate's own tests bind padded banks through the real
+    /// planner before any production group asks.
+    #[cfg(test)]
+    EveryGroup,
+}
+
+impl BankPadding {
+    /// Whether `group` is padded under this policy. A full group needs no padding and is bound
+    /// whatever the policy says.
+    fn pads(self, group: &BankGroup<RackChainId>) -> bool {
+        match self {
+            Self::AsRequested => group_asks_for_padding(group),
+            #[cfg(test)]
+            Self::EveryGroup => true,
+        }
+    }
+
+    /// The policy this compile runs under: [`Self::AsRequested`], unless a test has scoped another
+    /// one with [`test_only_with_bank_padding`].
+    fn current() -> Self {
+        #[cfg(test)]
+        if let Some(padding) = TEST_ONLY_BANK_PADDING.with(core::cell::Cell::get) {
+            return padding;
+        }
+        Self::AsRequested
+    }
+}
+
+/// Whether `group` asks to be padded to a whole bank.
+///
+/// Nothing asks yet. Console slots ask from S2 (#1098) on, once every effect on the console
+/// eligibility list accepts padded requests (P2b-P2e). Inserts never ask: they bank
+/// opportunistically, as today, so full groups bank and remainders render per node (decision 12,
+/// "Inserts bank opportunistically, as today").
+const fn group_asks_for_padding(_group: &BankGroup<RackChainId>) -> bool {
+    false
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The policy [`test_only_with_bank_padding`] scoped on this thread, if any.
+    static TEST_ONLY_BANK_PADDING: core::cell::Cell<Option<BankPadding>> =
+        const { core::cell::Cell::new(None) };
+}
+
+/// Runs `body` with every compile on this thread planned under `padding`, then restores the
+/// policy that was in force before, even if `body` panics.
+#[cfg(test)]
+pub(crate) fn test_only_with_bank_padding<R>(padding: BankPadding, body: impl FnOnce() -> R) -> R {
+    struct Restore(Option<BankPadding>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TEST_ONLY_BANK_PADDING.with(|slot| slot.set(self.0));
+        }
+    }
+    let _restore = Restore(TEST_ONLY_BANK_PADDING.with(|slot| slot.replace(Some(padding))));
+    body()
+}
+
 /// Plan the SIMD-rack cohorts over whole rack chains, and bind every slot that can be bound.
 ///
 /// The planner is `rack_compiler::plan_bank_groups` -- the single cohort planner in
@@ -56,10 +127,15 @@ pub(crate) fn banks_are_permitted(identity: &session::EffectIdentity) -> bool {
 /// expressible at all: #96's per-effect candidates carry one-slot programs, so they can only ever
 /// form single-slot banks.
 ///
-/// A slot is bound when the group is full and **every** lane runs that slot. A slot some lane
-/// skips would need a per-lane identity (absent-member) mask in the effect contract, which does
-/// not exist (#96 F7, P2a); those members render on the per-node scalar path exactly as before.
-/// Padded (non-full) groups are likewise unbound, unchanged from #96.
+/// A slot is bound when the group is full, or padded under [`BankPadding`], and **every** member
+/// runs that slot. A slot some member skips would need a per-lane identity slot in the effect
+/// contract, which does not exist (#96 F7; #888's identity half); those members render on the
+/// per-node scalar path exactly as before. A partial group that is not padded is likewise unbound,
+/// unchanged from #96, and no group is padded until one asks ([`group_asks_for_padding`]).
+///
+/// A padded slot binds the group's members on its active lanes and a clone of its first member's
+/// request on every padded lane (issue #1088). The group's `active_mask` travels to the factory and
+/// onto the bound bank, so the rack gathers and scatters the active lanes only.
 ///
 /// A *bypassed* slot is not a skipped one (issue #1087). It has its node and its latency, and a
 /// session bypass never reaches the program key this planner compares: preparation lowers it to
@@ -229,10 +305,12 @@ pub(crate) fn bind_rack_banks_indexed(
         .collect();
     let mut plan = plan_bank_groups(&levels_in, width)
         .map_err(|_| diag("graph.effect.bank_members", "$.effects"))?;
+    let padding = BankPadding::current();
     let bind_group = |index: usize, group: &BankGroup<RackChainId>| {
         bind_group_banks(
             index,
             group,
+            padding.pads(group),
             &chains,
             &level_by_node,
             effects,
@@ -402,11 +480,12 @@ fn stranded_mono_tracks(plan: &BankPlan<RackChainId>) -> Vec<String> {
 type BoundGroup = Vec<(graph::GraphPreparedEffectBank, GraphRackBoundSlot)>;
 
 /// Binds every slot of plan group `group_index` that can be one homogeneous bank and whose
-/// factory consents.
+/// factory consents. `padded` says whether a partial group is padded (issue #1088).
 #[allow(clippy::too_many_arguments)] // The binder's whole context, passed from one closure.
 fn bind_group_banks(
     group_index: usize,
     group: &BankGroup<RackChainId>,
+    padded: bool,
     chains: &BTreeMap<RackChainId, Vec<EffectNodeId>>,
     level_by_node: &BTreeMap<GraphNodeId, u64>,
     effects: &EffectPreparedSession,
@@ -416,7 +495,8 @@ fn bind_group_banks(
 ) -> Result<BoundGroup, GraphDiagnostic> {
     let mut bound = Vec::new();
     for slot in 0..group.program.len() {
-        let Some(members) = bindable_slot_members(group, slot, chains, level_by_node)? else {
+        let Some(members) = bindable_slot_members(group, slot, padded, chains, level_by_node)?
+        else {
             continue;
         };
         let entries: Vec<&EffectPreparedEntry> = members
@@ -428,14 +508,19 @@ fn bind_group_banks(
                 &effects.entries[slot.index()]
             })
             .collect();
-        let requests: Vec<_> = entries
+        // One request per lane: each member's own on its active lane and, on every padded lane, a
+        // clone of the first member's -- never zeros (issue #1088, the padding contract). The
+        // planner emits members before padding, so the members are exactly lanes `0..members`.
+        let mut requests: Vec<_> = entries
             .iter()
             .map(|entry| entry.bank_preparation.request())
             .collect();
+        requests.resize(width.lanes() as usize, requests[0]);
         let request = PrepareEffectBankRequest {
             backend: dispatch,
             width,
             requests: &requests,
+            active_mask: &group.active_mask,
         };
         // Equal program key implies the same registry factory: the registry maps one
         // `EffectId` to one `Arc` (#96 F12), so a per-chunk `Arc::ptr_eq` scan proved nothing.
@@ -482,30 +567,53 @@ fn bind_group_banks(
     Ok(bound)
 }
 
-/// The effect node each lane of `group` runs at leader slot `slot`, when that slot can be one
-/// homogeneous bank; `None` when it cannot, and its members render per node.
+/// The effect node each member of `group` runs at leader slot `slot`, in lane order, when that
+/// slot can be one homogeneous bank; `None` when it cannot, and its members render per node.
+///
+/// `padded` says whether a partial group binds padded (issue #1088). The nodes are the active
+/// lanes' only, so a padded group returns fewer nodes than lanes.
 fn bindable_slot_members(
     group: &BankGroup<RackChainId>,
     slot: usize,
+    padded: bool,
     chains: &BTreeMap<RackChainId, Vec<EffectNodeId>>,
     level_by_node: &BTreeMap<GraphNodeId, u64>,
 ) -> Result<Option<Vec<EffectNodeId>>, GraphDiagnostic> {
-    // A bank binds only a full group (#96 F7): every launch effect factory refuses
-    // `requests.len() != lanes`.
-    if !group.is_full() || group.slot_is_identity_everywhere(slot) {
+    // A partial group binds only when it is padded (issue #1088). Unpadded, its members render
+    // per node, as every partial group's did before (#96 F7).
+    if !(group.is_full() || padded) || group.slot_is_identity_everywhere(slot) {
         return Ok(None);
     }
-    // Every lane must run this slot: the effect contract has no per-lane identity mask
-    // (#96 F7), so a bank some of whose lanes skip the slot cannot be expressed. (Lanes that
+    // Every member must run this slot: the effect contract has no per-lane identity slot
+    // (#96 F7), so a bank some of whose members skip the slot cannot be expressed. A padded lane
+    // has no member and no slots, and is the padding contract's, not an identity. (Lanes that
     // disagree only about bypass all run it: issue #1087 carries bypass on the rack's shunt.)
-    if !group.active_slots.iter().all(|lane| lane[slot]) {
+    if !group
+        .active_slots
+        .iter()
+        .zip(&group.active_mask)
+        .all(|(lane, active)| !*active || lane[slot])
+    {
         return Ok(None);
+    }
+    // Padding lanes come after every member (`rack_compiler::BankGroup::members`), so the
+    // members are exactly lanes `0..members`: the layout the padded request's clone lanes and the
+    // graph runtime's gather and scatter both rely on. The planner asserts it in debug builds;
+    // it is checked here as well because a bank bound from any other layout would feed a member
+    // on a padded lane.
+    let active = group.active_count();
+    if group.members.iter().enumerate().any(|(lane, id)| {
+        id.is_some() != (lane < active) || group.active_mask[lane] != id.is_some()
+    }) {
+        return Err(diag("graph.internal.invariant", "$.effects"));
     }
     // Lane `i` runs its own chain in order, so the leader slot maps to the lane's slot by
     // the rank of `slot` among that lane's active positions.
-    let mut members = Vec::with_capacity(group.members.len());
-    for (lane, id) in group.members.iter().enumerate() {
-        let id = id.as_ref().expect("full group");
+    let mut members = Vec::with_capacity(active);
+    for (lane, id) in group.members.iter().take(active).enumerate() {
+        let Some(id) = id.as_ref() else {
+            return Err(diag("graph.internal.invariant", "$.effects"));
+        };
         let rank = group.active_slots[lane][..slot]
             .iter()
             .filter(|active| **active)
@@ -552,6 +660,13 @@ pub(crate) struct EffectBankResourceEstimate {
     pub(crate) largest_allocation_bytes: u64,
 }
 
+/// The retained cost of the bound effect banks, or `None` when a bank's shape is not one this
+/// compiler binds.
+///
+/// A bank may be padded (issue #1088): it has `1..=lanes` members and its active mask is `true` on
+/// exactly lanes `0..members`, the planner's members-before-padding layout, which is also the
+/// layout the graph runtime gathers and scatters by. Scratch is charged for every lane, because a
+/// padded lane still occupies its AoSoA column; member metadata for the members only.
 pub(crate) fn effect_bank_resource(
     banks: &[graph::GraphPreparedEffectBank],
     quantum: u32,
@@ -568,10 +683,16 @@ pub(crate) fn effect_bank_resource(
     resource.largest_allocation_bytes = bank_array_bytes;
     for bank in banks {
         let lanes = u64::from(bank.scratch.width().lanes());
+        let members = u64::try_from(bank.members.len()).ok()?;
         if bank.scratch.quantum() != quantum
-            || u64::try_from(bank.members.len()).ok()? != lanes
+            || members == 0
+            || members > lanes
             || u64::try_from(bank.active_mask.len()).ok()? != lanes
-            || !bank.active_mask.iter().all(|lane| *lane)
+            || bank
+                .active_mask
+                .iter()
+                .enumerate()
+                .any(|(lane, active)| *active != (lane < bank.members.len()))
             || bank.processor.metadata().width != bank.scratch.width()
         {
             return None;
@@ -594,7 +715,7 @@ pub(crate) fn effect_bank_resource(
 
         let member_array_bytes = u64::try_from(core::mem::size_of::<EffectNodeId>())
             .ok()?
-            .checked_mul(lanes)?;
+            .checked_mul(members)?;
         // One `bool` per lane for the bank's active mask, mirroring the builtin-bank accounting.
         let active_mask_bytes = lanes;
         resource.metadata_bytes = resource

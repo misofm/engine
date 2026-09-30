@@ -79,6 +79,7 @@ fn render(restate: bool, moved: bool, lanes: usize) -> Vec<u32> {
             backend,
             width,
             requests: &requests,
+            active_mask: width.full_mask(),
         })
         .expect("valid bank request")
         .expect("the native width must bind");
@@ -227,6 +228,7 @@ fn a_band_restated_mid_flight_still_settles_at_the_designed_words() {
                 backend,
                 width,
                 requests: &requests,
+                active_mask: width.full_mask(),
             })
             .expect("valid bank request")
             .expect("the native width must bind");

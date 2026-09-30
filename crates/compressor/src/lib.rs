@@ -757,13 +757,7 @@ impl NativeEffectFactory for CompressorFactory {
         &self,
         request: PrepareEffectBankRequest<'_>,
     ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
-        if !request.has_matching_backend_width()
-            || request.requests.len() != request.width.lanes() as usize
-        {
-            return Err(EffectPrepareError {
-                code: "effect.bank.requests",
-            });
-        }
+        request.validate_shape()?;
         let lanes = request.width.lanes() as usize;
         let first = request.requests[0];
         let metadata = expected_prepared_metadata(self.descriptor(), first)?;
@@ -781,6 +775,12 @@ impl NativeEffectFactory for CompressorFactory {
             let (left, right) = initial_defaults(item.initial_values)?;
             left_defaults[track] = left;
             right_defaults[track] = right;
+        }
+        // Issue #1088: this effect has not opted into padding (its P2 slice, #1090), so a request
+        // with a padded lane is declined after every member is validated, never bound: binding it
+        // would run the clone lanes as real tracks.
+        if request.is_padded() {
+            return Ok(None);
         }
         if !same_program {
             return Ok(None);

@@ -64,6 +64,7 @@ pub fn prepare_bank_at_rate(
             backend,
             width,
             requests: &requests,
+            active_mask: width.full_mask(),
         })
         .expect("bank binding")
 }

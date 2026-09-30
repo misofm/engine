@@ -208,6 +208,7 @@ fn bank_run(width: BankWidth, backend: Backend, arm: Arm, hasher: &mut Sha256) -
             backend,
             width,
             requests: &requests,
+            active_mask: width.full_mask(),
         })
         .expect("valid bank request")
         .expect("the width must bind");

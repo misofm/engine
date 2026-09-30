@@ -1037,13 +1037,7 @@ impl NativeEffectFactory for GateExpanderFactory {
         &self,
         request: PrepareEffectBankRequest<'_>,
     ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
-        if !request.has_matching_backend_width()
-            || request.requests.len() != request.width.lanes() as usize
-        {
-            return Err(EffectPrepareError {
-                code: "effect.bank.requests",
-            });
-        }
+        request.validate_shape()?;
         let first = request.requests[0];
         let metadata = expected_prepared_metadata(self.descriptor(), first)?;
         let mut defaults = [[[0.0; PARAMETER_COUNT]; 2]; MAX_WIDTH];
@@ -1054,6 +1048,12 @@ impl NativeEffectFactory for GateExpanderFactory {
                 same_program = false;
             }
             defaults[track] = initial_defaults(item.initial_values)?;
+        }
+        // Issue #1088: this effect has not opted into padding (its P2 slice, #1092), so a request
+        // with a padded lane is declined after every member is validated, never bound: binding it
+        // would run the clone lanes as real tracks.
+        if request.is_padded() {
+            return Ok(None);
         }
         // Every request is validated before the shape is decided, so a malformed member is an
         // error and an unbankable-but-valid cohort is a legal `Ok(None)` fallback.

@@ -223,6 +223,7 @@ fn bank_binding_validates_before_declining_an_unavailable_width() {
             backend: support::backend(BankWidth::Eight),
             width: BankWidth::Eight,
             requests: &requests[..7],
+            active_mask: BankWidth::Eight.full_mask(),
         }),
         Err(EffectPrepareError {
             code: "effect.bank.requests"
@@ -234,6 +235,7 @@ fn bank_binding_validates_before_declining_an_unavailable_width() {
             backend: support::backend(BankWidth::Four),
             width: BankWidth::Eight,
             requests: &requests,
+            active_mask: BankWidth::Eight.full_mask(),
         }),
         Err(EffectPrepareError {
             code: "effect.bank.requests"
@@ -250,6 +252,7 @@ fn bank_binding_validates_before_declining_an_unavailable_width() {
                 backend: support::backend(BankWidth::Eight),
                 width: BankWidth::Eight,
                 requests: &mixed,
+                active_mask: BankWidth::Eight.full_mask(),
             })
             .expect("mixed cohort declines")
             .is_none()
@@ -260,6 +263,7 @@ fn bank_binding_validates_before_declining_an_unavailable_width() {
             backend: support::backend(BankWidth::Eight),
             width: BankWidth::Eight,
             requests: &requests,
+            active_mask: BankWidth::Eight.full_mask(),
         })
         .expect("bind");
     assert_eq!(bound.is_some(), bank_available(BankWidth::Eight));
@@ -312,4 +316,57 @@ fn rectangular_nonfundamental_ratio_db(samples: &[f64], fundamental_bin: usize) 
     assert!(fundamental_energy.is_finite() && fundamental_energy > 0.0);
     assert!(nonfundamental_energy.is_finite() && nonfundamental_energy > 0.0);
     10.0 * (nonfundamental_energy / fundamental_energy).log10()
+}
+
+/// Issue #1088 (console strip P2a), gate 3: the soft clip has not opted into padding (P2e, #1092), so
+/// it declines a padded bank request, and only after it has validated every member.
+///
+/// Red if the guard in `bind_homogeneous_bank` is removed -- a padded request binds, and the bank
+/// runs its clone lanes as real tracks -- or if it moves above member validation, where a padded
+/// request with a malformed member is declined instead of refused.
+#[test]
+fn a_padded_request_is_declined_until_the_soft_clip_opts_in() {
+    let backend = lane::Backend::current();
+    let Some(width) = BankWidth::for_backend(backend) else {
+        return;
+    };
+    let lanes = width.lanes() as usize;
+    let values = initial_values();
+    let requests = vec![request(&values); lanes];
+    let bind = |requests: &[effect_contract::PrepareEffectRequest<'_>], mask: &[bool]| {
+        SoftClipFactory.bind_homogeneous_bank(PrepareEffectBankRequest {
+            backend,
+            width,
+            requests,
+            active_mask: mask,
+        })
+    };
+    assert!(
+        bind(&requests, width.full_mask())
+            .expect("a full bank")
+            .is_some(),
+        "the control: the same members bind as a full bank"
+    );
+    for members in 1..lanes {
+        let mask: Vec<bool> = (0..lanes).map(|lane| lane < members).collect();
+        assert!(
+            bind(&requests, &mask)
+                .expect("a padded request is well formed")
+                .is_none(),
+            "{members} of {lanes} lanes active"
+        );
+    }
+    let mut malformed = requests.clone();
+    malformed[0].limits.maximum_total_state_bytes = 0;
+    let refusal = SoftClipFactory
+        .prepare(malformed[0])
+        .err()
+        .expect("a malformed member")
+        .code;
+    let mask: Vec<bool> = (0..lanes).map(|lane| lane == 0).collect();
+    assert_eq!(
+        bind(&malformed, &mask).err().map(|error| error.code),
+        Some(refusal),
+        "a padded request still validates its members"
+    );
 }

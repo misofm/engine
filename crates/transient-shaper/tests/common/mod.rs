@@ -242,6 +242,7 @@ pub(crate) fn bind_native_bank_quantum(
                 backend,
                 width,
                 requests: &requests,
+                active_mask: width.full_mask(),
             })
             .expect("bank binding")
             .expect("the native width is available"),

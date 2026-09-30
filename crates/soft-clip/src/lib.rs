@@ -880,13 +880,7 @@ impl NativeEffectFactory for SoftClipFactory {
         &self,
         request: PrepareEffectBankRequest<'_>,
     ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
-        if !request.has_matching_backend_width()
-            || request.requests.len() != request.width.lanes() as usize
-        {
-            return Err(EffectPrepareError {
-                code: "effect.bank.requests",
-            });
-        }
+        request.validate_shape()?;
         match request.width {
             BankWidth::Four => prepare_bank::<Simd4>(self, request),
             BankWidth::Eight => prepare_bank::<Simd8>(self, request),
@@ -934,6 +928,12 @@ fn prepare_bank<L: Lane>(
         let (left, right) = initial_defaults(member.initial_values)?;
         left_defaults[track] = left;
         right_defaults[track] = right;
+    }
+    // Issue #1088: this effect has not opted into padding (its P2 slice, #1092), so a request
+    // with a padded lane is declined after every member is validated, never bound: binding it
+    // would run the clone lanes as real tracks.
+    if request.is_padded() {
+        return Ok(None);
     }
     if !same_program || !width_is_native(request.width) {
         return Ok(None);

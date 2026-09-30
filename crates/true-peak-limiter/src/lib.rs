@@ -4155,6 +4155,12 @@ impl NativeEffectFactory for TruePeakLimiterFactory {
             left_defaults.push(left);
             right_defaults.push(right);
         }
+        // Issue #1088: this effect has not opted into padding (its P2 slice, #1091), so a request
+        // with a padded lane is declined after every member is validated, never bound: binding it
+        // would run the clone lanes as real tracks.
+        if request.is_padded() {
+            return Ok(None);
+        }
         // Issue #95: a cohort whose members do not share one program key is a *cohort* this
         // artifact cannot bank, not a malformed request. It declines with `Ok(None)` and the
         // tracks render as scalar instances, which is the contract's frozen rule for every
@@ -4863,6 +4869,7 @@ mod tests {
                 backend,
                 width,
                 requests: &requests,
+                active_mask: width.full_mask(),
             })
             .expect("bank binding")
             .expect("bank available")
@@ -7510,6 +7517,7 @@ mod tests {
             backend: Backend::Simd4,
             width: BankWidth::Eight,
             requests: &requests,
+            active_mask: BankWidth::Eight.full_mask(),
         });
         assert_eq!(
             mismatched.err().map(|error| error.code),
@@ -7528,6 +7536,7 @@ mod tests {
                 backend,
                 width,
                 requests: &heterogeneous,
+                active_mask: width.full_mask(),
             });
         assert!(
             heterogeneous
@@ -7545,10 +7554,55 @@ mod tests {
                     backend,
                     width,
                     requests: &malformed,
+                    active_mask: width.full_mask(),
                 })
                 .err()
                 .map(|error| error.code),
             Some("effect.quality.unsupported")
+        );
+    }
+
+    /// Issue #1088 (console strip P2a), gate 3: the limiter has not opted into padding (P2d,
+    /// #1091), so it declines a padded bank request, and only after it has validated every member.
+    ///
+    /// Red if the guard in `bind_homogeneous_bank` is removed -- a padded request binds, and the
+    /// bank runs its clone lanes as real tracks -- or if it moves above member validation, where a
+    /// padded request with a malformed member is declined instead of refused.
+    #[test]
+    fn a_padded_request_is_declined_until_the_limiter_opts_in() {
+        let (width, backend, lanes) = native_bank();
+        let values = initial_values();
+        let requests = vec![request(&values); lanes];
+        let bind = |requests: &[PrepareEffectRequest<'_>], mask: &[bool]| {
+            TruePeakLimiterFactory.bind_homogeneous_bank(PrepareEffectBankRequest {
+                backend,
+                width,
+                requests,
+                active_mask: mask,
+            })
+        };
+        assert!(
+            bind(&requests, width.full_mask())
+                .expect("a full bank")
+                .is_some(),
+            "the control: the same members bind as a full bank"
+        );
+        for members in 1..lanes {
+            let mask: Vec<bool> = (0..lanes).map(|lane| lane < members).collect();
+            assert!(
+                bind(&requests, &mask)
+                    .expect("a padded request is well formed")
+                    .is_none(),
+                "{members} of {lanes} lanes active"
+            );
+        }
+        let mut malformed = requests.clone();
+        malformed[0].quality = EffectQuality::Draft;
+        let mask: Vec<bool> = (0..lanes).map(|lane| lane == 0).collect();
+        assert_eq!(
+            bind(&malformed, &mask).err().map(|error| error.code),
+            Some("effect.quality.unsupported"),
+            "a padded request still validates its members"
         );
     }
 

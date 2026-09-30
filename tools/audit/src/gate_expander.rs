@@ -217,6 +217,7 @@ fn prepare_bank() -> Option<Box<dyn PreparedNativeEffectBank>> {
             backend,
             width,
             requests: &requests,
+            active_mask: width.full_mask(),
         })
         .expect("valid bank request")
 }

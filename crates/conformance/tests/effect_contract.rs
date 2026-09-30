@@ -72,6 +72,7 @@ fn correct_factory_binds_distinguishable_four_lane_bank() {
             backend: Backend::Simd4,
             width: BankWidth::Four,
             requests: &requests,
+            active_mask: BankWidth::Four.full_mask(),
         })
         .unwrap()
         .expect("positive bank");

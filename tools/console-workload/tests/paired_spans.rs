@@ -232,6 +232,7 @@ fn bind(fx: Fx, width: BankWidth) -> Option<Box<dyn PreparedNativeEffectBank>> {
             backend: backend_of(width),
             width,
             requests: &requests,
+            active_mask: width.full_mask(),
         })
         .expect("a well-formed bank request")
 }
@@ -1609,6 +1610,7 @@ fn every_collapse_capable_launch_effect_is_one_of_these() {
             backend: Backend::current(),
             width,
             requests: &requests,
+            active_mask: width.full_mask(),
         }) else {
             continue;
         };
@@ -1812,6 +1814,7 @@ fn every_launch_effect_applies_a_twin_pair_with_channel_symmetric_validity() {
                 backend: Backend::current(),
                 width,
                 requests: &requests,
+                active_mask: width.full_mask(),
             }) {
                 Ok(Some(bank)) => Subject::Bank(bank, width),
                 _ => Subject::Scalar(factory.prepare(request).expect("scalar prepare")),
@@ -1985,6 +1988,7 @@ fn every_launch_effect_refuses_a_staging_window_that_is_not_its_capacity() {
             backend: Backend::current(),
             width,
             requests: &requests,
+            active_mask: width.full_mask(),
         }) {
             Ok(Some(bank)) => {
                 let metadata = bank.metadata();

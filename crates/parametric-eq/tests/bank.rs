@@ -94,6 +94,7 @@ fn bank_prepared_target_updates_only_the_selected_lane() {
             backend,
             width,
             requests: &requests,
+            active_mask: width.full_mask(),
         })
         .expect("bank request")
         .expect("native bank");
@@ -193,6 +194,7 @@ fn every_width_matches_the_scalar_instantiation() {
             backend,
             width,
             requests: &requests,
+            active_mask: width.full_mask(),
         })
         .expect("valid bank request")
         .expect("the native width must bind");
@@ -339,6 +341,7 @@ fn bank_rendering_is_partition_invariant() {
                 backend,
                 width,
                 requests: &requests,
+                active_mask: width.full_mask(),
             })
             .expect("valid bank request")
             .expect("the native width must bind")
@@ -455,6 +458,7 @@ fn bank_binding_rejects_malformed_shapes_and_declines_a_foreign_width() {
                     backend,
                     width,
                     requests: &requests,
+                    active_mask: width.full_mask(),
                 })
                 .err()
                 .map(|error| error.code),
@@ -473,6 +477,7 @@ fn bank_binding_rejects_malformed_shapes_and_declines_a_foreign_width() {
                 backend: foreign_backend,
                 width: foreign_width,
                 requests: &requests,
+                active_mask: foreign_width.full_mask(),
             })
             .expect("a declined bank is not an error")
             .is_none(),
@@ -496,9 +501,62 @@ fn bank_binding_declines_a_heterogeneous_cohort() {
                 backend,
                 width,
                 requests: &requests,
+                active_mask: width.full_mask(),
             })
             .expect("a declined bank is not an error")
             .is_none()
+    );
+}
+
+/// Issue #1088 (console strip P2a), gate 3: the EQ has not opted into padding (P2b, #1089), so
+/// it declines a padded bank request, and only after it has validated every member.
+///
+/// Red if the guard in `bind_homogeneous_bank` is removed -- a padded request binds, and the bank
+/// runs its clone lanes as real tracks -- or if it moves above member validation, where a padded
+/// request with a malformed member is declined instead of refused.
+#[test]
+fn a_padded_request_is_declined_until_the_eq_opts_in() {
+    let Some((width, backend)) = native_bank() else {
+        return;
+    };
+    let lanes = width.lanes() as usize;
+    let values = values();
+    let requests = vec![request(&values, false); lanes];
+    let bind = |requests: &[effect_contract::PrepareEffectRequest<'_>], mask: &[bool]| {
+        ParametricEqFactory.bind_homogeneous_bank(PrepareEffectBankRequest {
+            backend,
+            width,
+            requests,
+            active_mask: mask,
+        })
+    };
+    assert!(
+        bind(&requests, width.full_mask())
+            .expect("a full bank")
+            .is_some(),
+        "the control: the same members bind as a full bank"
+    );
+    for members in 1..lanes {
+        let mask: Vec<bool> = (0..lanes).map(|lane| lane < members).collect();
+        assert!(
+            bind(&requests, &mask)
+                .expect("a padded request is well formed")
+                .is_none(),
+            "{members} of {lanes} lanes active"
+        );
+    }
+    let mut malformed = requests.clone();
+    malformed[0].limits.maximum_total_state_bytes = 0;
+    let refusal = ParametricEqFactory
+        .prepare(malformed[0])
+        .err()
+        .expect("a malformed member")
+        .code;
+    let mask: Vec<bool> = (0..lanes).map(|lane| lane == 0).collect();
+    assert_eq!(
+        bind(&malformed, &mask).err().map(|error| error.code),
+        Some(refusal),
+        "a padded request still validates its members"
     );
 }
 
@@ -521,6 +579,7 @@ fn bank_lane_and_track_changes_do_not_leak() {
                 backend,
                 width,
                 requests: &requests,
+                active_mask: width.full_mask(),
             })
             .expect("request")
             .expect("native width binds")
@@ -950,6 +1009,7 @@ fn odd_bank_digest(width: BankWidth, backend: Backend, mono: bool) -> OddLeg {
                         backend,
                         width,
                         requests: &requests,
+                        active_mask: width.full_mask(),
                     })
                     .expect("valid bank request")
                     .expect("the native width must bind")
@@ -1440,6 +1500,7 @@ fn select_bank_digest(width: BankWidth, backend: Backend, mono: bool) -> SelectL
                         backend,
                         width,
                         requests: &requests,
+                        active_mask: width.full_mask(),
                     })
                     .expect("valid bank request")
                     .expect("the native width must bind")
@@ -1825,6 +1886,7 @@ fn skew_bank_digest(width: BankWidth, backend: Backend, mono: bool) -> String {
                         backend,
                         width,
                         requests: &requests,
+                        active_mask: width.full_mask(),
                     })
                     .expect("valid bank request")
                     .expect("the native width must bind")
@@ -2141,6 +2203,7 @@ fn cliff_bank_digest(width: BankWidth, backend: Backend, mono: bool) -> (String,
                         backend,
                         width,
                         requests: &requests,
+                        active_mask: width.full_mask(),
                     })
                     .expect("valid bank request")
                     .expect("the native width must bind")
@@ -2655,6 +2718,7 @@ fn limit_bank_digest(width: BankWidth, backend: Backend, mono: bool) -> LimitLeg
                         backend,
                         width,
                         requests: &requests,
+                        active_mask: width.full_mask(),
                     })
                     .expect("valid bank request")
                     .expect("the native width must bind")

@@ -727,6 +727,7 @@ fn run_width(
         backend,
         width,
         requests: &requests,
+        active_mask: width.full_mask(),
     };
 
     // Bind eligibility first: it needs no rendering.
@@ -1721,6 +1722,7 @@ fn bind_eligibility(
             backend,
             width,
             requests,
+            active_mask: width.full_mask(),
         }) {
             Err(error) if error.code == "effect.bank.requests" => coverage.malformed_refusals += 1,
             Err(error) => panic!(
@@ -1788,6 +1790,7 @@ fn bind_eligibility(
         backend,
         width,
         requests: &varied,
+        active_mask: width.full_mask(),
     });
     match (prepared, bound) {
         (Err(member_error), Err(bank_error)) => assert_eq!(
@@ -1987,6 +1990,7 @@ pub fn d7_report_violations(factory: &dyn NativeEffectFactory) -> Vec<String> {
             backend,
             width,
             requests: &requests,
+            active_mask: width.full_mask(),
         }) else {
             continue;
         };

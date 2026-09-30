@@ -817,13 +817,7 @@ impl NativeEffectFactory for TransientShaperFactory {
         &self,
         request: PrepareEffectBankRequest<'_>,
     ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
-        if !request.has_matching_backend_width()
-            || request.requests.len() != request.width.lanes() as usize
-        {
-            return Err(EffectPrepareError {
-                code: "effect.bank.requests",
-            });
-        }
+        request.validate_shape()?;
         match request.width {
             BankWidth::Four => bind::<Simd4, 4>(self, request),
             BankWidth::Eight => bind::<Simd8, 8>(self, request),
@@ -858,6 +852,12 @@ fn bind<L: Lane, const W: usize>(
         let (item_left, item_right) = initial_defaults(item.initial_values)?;
         left[track] = item_left;
         right[track] = item_right;
+    }
+    // Issue #1088: this effect has not opted into padding (its P2 slice, #1092), so a request
+    // with a padded lane is declined after every member is validated, never bound: binding it
+    // would run the clone lanes as real tracks.
+    if request.is_padded() {
+        return Ok(None);
     }
     // There is no runtime SIMD dispatch (D4): this build has exactly one production width, and a
     // plan asking for another one is refused as unavailable rather than quietly served by it.

@@ -164,6 +164,7 @@ fn bank_digest(width: BankWidth, backend: Backend) -> (String, f32) {
             backend,
             width,
             requests: &requests,
+            active_mask: width.full_mask(),
         })
         .expect("valid bank request")
         .expect("the width must bind");

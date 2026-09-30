@@ -140,6 +140,7 @@ fn every_launch_rate_processes_scalar_and_supported_bank_at_zero_latency() {
                 backend,
                 width,
                 requests: &requests,
+                active_mask: width.full_mask(),
             })
             .expect("supported bank bind")
             .expect("supported bank");
@@ -179,6 +180,7 @@ fn every_launch_rate_processes_scalar_and_supported_bank_at_zero_latency() {
                 backend,
                 width,
                 requests: &bypass_requests,
+                active_mask: width.full_mask(),
             })
             .expect("supported bypass bank bind")
             .expect("supported bypass bank");
@@ -330,6 +332,7 @@ fn bank_fallback_never_hides_malformed_or_incompatible_requests() {
                 backend,
                 width,
                 requests: &malformed_requests,
+                active_mask: width.full_mask(),
             })
             .err()
             .expect("malformed values must not be hidden")
@@ -354,6 +357,7 @@ fn bank_fallback_never_hides_malformed_or_incompatible_requests() {
                 backend,
                 width,
                 requests: &connected,
+                active_mask: width.full_mask(),
             })
             .expect("connected fallback")
             .is_none()
@@ -365,6 +369,7 @@ fn bank_fallback_never_hides_malformed_or_incompatible_requests() {
                 backend,
                 width,
                 requests: &connected,
+                active_mask: width.full_mask(),
             })
             .err()
             .expect("connected fallback still validates every request")
@@ -384,6 +389,7 @@ fn bank_fallback_never_hides_malformed_or_incompatible_requests() {
                 backend,
                 width,
                 requests: &heterogeneous,
+                active_mask: width.full_mask(),
             })
             .expect("heterogeneous fallback")
             .is_none()
@@ -396,6 +402,7 @@ fn bank_fallback_never_hides_malformed_or_incompatible_requests() {
                 backend: Backend::Scalar,
                 width,
                 requests: &heterogeneous,
+                active_mask: width.full_mask(),
             })
             .err()
             .expect("mismatched backend and width")
@@ -575,5 +582,58 @@ fn a_malformed_bank_block_is_rejected_before_it_is_indexed() {
         left.iter()
             .any(|sample| sample.to_bits() != 0.5_f32.to_bits()),
         "a well-formed bank block must render rather than leave the input untouched"
+    );
+}
+
+/// Issue #1088 (console strip P2a), gate 3: the compressor has not opted into padding (P2c, #1090), so
+/// it declines a padded bank request, and only after it has validated every member.
+///
+/// Red if the guard in `bind_homogeneous_bank` is removed -- a padded request binds, and the bank
+/// runs its clone lanes as real tracks -- or if it moves above member validation, where a padded
+/// request with a malformed member is declined instead of refused.
+#[test]
+fn a_padded_request_is_declined_until_the_compressor_opts_in() {
+    let backend = lane::Backend::current();
+    let Some(width) = BankWidth::for_backend(backend) else {
+        return;
+    };
+    let lanes = width.lanes() as usize;
+    let values = initial_values();
+    let requests = vec![request(&values); lanes];
+    let bind = |requests: &[effect_contract::PrepareEffectRequest<'_>], mask: &[bool]| {
+        CompressorFactory.bind_homogeneous_bank(PrepareEffectBankRequest {
+            backend,
+            width,
+            requests,
+            active_mask: mask,
+        })
+    };
+    assert!(
+        bind(&requests, width.full_mask())
+            .expect("a full bank")
+            .is_some(),
+        "the control: the same members bind as a full bank"
+    );
+    for members in 1..lanes {
+        let mask: Vec<bool> = (0..lanes).map(|lane| lane < members).collect();
+        assert!(
+            bind(&requests, &mask)
+                .expect("a padded request is well formed")
+                .is_none(),
+            "{members} of {lanes} lanes active"
+        );
+    }
+    let mut malformed = requests.clone();
+    malformed[0].limits.maximum_total_state_bytes = 0;
+    let refusal = CompressorFactory
+        .prepare(malformed[0])
+        .err()
+        .expect("a malformed member")
+        .code;
+    let mask: Vec<bool> = (0..lanes).map(|lane| lane == 0).collect();
+    assert_eq!(
+        bind(&malformed, &mask).err().map(|error| error.code),
+        Some(refusal),
+        "a padded request still validates its members"
     );
 }

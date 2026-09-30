@@ -146,6 +146,7 @@ fn bind(width: BankWidth, backend: Backend, lanes: usize) -> Box<dyn PreparedNat
             backend,
             width,
             requests: &requests,
+            active_mask: width.full_mask(),
         })
         .expect("valid bank request")
         .expect("the native width must bind")
