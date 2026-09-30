@@ -22,6 +22,12 @@
 //! arms it. Banking regroups lanes and never changes per-lane arithmetic (AGENTS.md), so every
 //! width must render the scalar plan's bits.
 //!
+//! A console slot never renders per node on a vector backend (#1098), and a build's factories
+//! bind only the widths it executes (D4): an `x86-64-v3` build binds four-lane banks for the
+//! limiter and the multiband only, and a four-lane build binds no eight-lane bank. So a session
+//! whose console this build cannot bank at a width is refused there with `console.slot.unbanked`,
+//! and that width's plan is asserted by the build that runs it: [`compiled_at`].
+//!
 //! Scope: the claim is that bind never refuses a compiled plan for a cross-level *effect* bank.
 //! Builtin banks are pooled by each node's own level, so they cannot form one.
 
@@ -908,9 +914,29 @@ pub fn reduced_mono_console() -> SessionModel {
     parse_session_json(REDUCED_MONO).expect("the reduced #970 reproducer parses")
 }
 
+/// The refusal a compile at `dispatch` may give when this build cannot bank a console slot there:
+/// a width other than the build's own, whose factories decline it (D4), and since #1098 a console
+/// slot never renders per node on a vector backend.
+const FOREIGN_CONSOLE_REFUSAL: &str = "graph console.slot.unbanked";
+
+/// Whether `outcome` holds a plan: its compile at `dispatch` was accepted. The Scalar oracle and the
+/// build's own width must always compile; a foreign width may be refused with
+/// [`FOREIGN_CONSOLE_REFUSAL`] and nothing else.
+fn compiled_at(name: &str, dispatch: Backend, outcome: &Outcome) -> bool {
+    match outcome.compile.as_deref() {
+        None => true,
+        Some(FOREIGN_CONSOLE_REFUSAL)
+            if dispatch != Backend::Scalar && dispatch != Backend::current() =>
+        {
+            false
+        }
+        Some(code) => panic!("{name} at {dispatch:?}: compile refused with {code}"),
+    }
+}
+
 /// Compile, bind and render `model` at every width, unarmed and armed, and require the scalar
-/// plan's bits everywhere. Returns the unarmed outcomes in `WIDTHS` order, and the armed ones at
-/// `[Simd4, Simd8]`.
+/// plan's bits everywhere a plan compiled ([`compiled_at`]). Returns the unarmed outcomes in
+/// `WIDTHS` order, and the armed ones at `[Simd4, Simd8]`.
 fn assert_binds_and_renders_the_scalar_bits(
     name: &str,
     model: &SessionModel,
@@ -918,7 +944,9 @@ fn assert_binds_and_renders_the_scalar_bits(
     let outcomes =
         WIDTHS.map(|dispatch| compile_bind_render(model, dispatch, BLOCKS, Collapse::Unarmed));
     for (dispatch, outcome) in WIDTHS.iter().zip(&outcomes) {
-        assert_eq!(outcome.compile, None, "{name} at {dispatch:?}: compile");
+        if !compiled_at(name, *dispatch, outcome) {
+            continue;
+        }
         assert_eq!(outcome.bind, None, "{name} at {dispatch:?}: bind");
         assert_eq!(
             outcome.cross_level_banks, 0,
@@ -932,6 +960,9 @@ fn assert_binds_and_renders_the_scalar_bits(
     let armed = [Backend::Simd4, Backend::Simd8]
         .map(|dispatch| compile_bind_render(model, dispatch, BLOCKS, Collapse::Armed));
     for (dispatch, armed) in [Backend::Simd4, Backend::Simd8].iter().zip(&armed) {
+        if !compiled_at(name, *dispatch, armed) {
+            continue;
+        }
         assert_eq!(armed.bind, None, "{name} at {dispatch:?}, armed: bind");
         assert!(
             armed.pcm == outcomes[0].pcm,
@@ -946,34 +977,48 @@ fn assert_binds_and_renders_the_scalar_bits(
 }
 
 /// The planned misaligned slots at `[Simd4, Simd8]`. They are a property of the plan, not of this
-/// build's factories, so both widths are asserted on every host.
+/// build's factories, so each width is asserted on every host that compiles it: always the build's
+/// own, and a foreign one unless its console cannot bank there ([`compiled_at`]).
 fn misaligned_slots(name: &str, outcomes: &[Outcome; 3], expected: [usize; 2]) {
-    assert_eq!(
-        [outcomes[1].misaligned_slots, outcomes[2].misaligned_slots],
-        expected,
-        "{name}: misaligned planned slots at [Simd4, Simd8], each left unbound"
-    );
+    for (index, (dispatch, expected)) in [
+        (1, (Backend::Simd4, expected[0])),
+        (2, (Backend::Simd8, expected[1])),
+    ] {
+        if compiled_at(name, dispatch, &outcomes[index]) {
+            assert_eq!(
+                outcomes[index].misaligned_slots, expected,
+                "{name}: misaligned planned slots at {dispatch:?}, each left unbound"
+            );
+        }
+    }
 }
 
-/// The ragged lanes of each misaligned slot at `[Simd4, Simd8]`: a property of the plan, so both
-/// widths are asserted on every host.
+/// The ragged lanes of each misaligned slot at `[Simd4, Simd8]`: a property of the plan, so each
+/// width is asserted on every host that compiles it ([`compiled_at`]).
 fn ragged_lanes(name: &str, outcomes: &[Outcome; 3], simd4: &[&[usize]], simd8: &[&[usize]]) {
-    let expected: [Vec<Vec<usize>>; 2] =
-        [simd4, simd8].map(|slots| slots.iter().map(|lanes| lanes.to_vec()).collect());
-    assert_eq!(
-        [
-            outcomes[1].early_lanes.clone(),
-            outcomes[2].early_lanes.clone()
-        ],
-        expected,
-        "{name}: the lanes that reach each misaligned slot early, at [Simd4, Simd8]"
-    );
+    for (index, dispatch, expected) in [(1, Backend::Simd4, simd4), (2, Backend::Simd8, simd8)] {
+        if compiled_at(name, dispatch, &outcomes[index]) {
+            let expected: Vec<Vec<usize>> = expected.iter().map(|lanes| lanes.to_vec()).collect();
+            assert_eq!(
+                outcomes[index].early_lanes, expected,
+                "{name}: the lanes that reach each misaligned slot early, at {dispatch:?}"
+            );
+        }
+    }
 }
 
 /// Effect banks the plan binds at this build's own width, where every launch factory in these
 /// reproducers banks: `simd4` on the browser and AArch64 builds, `simd8` on `x86-64-v3`. A factory
 /// declines a width its build was not compiled for (D4), which is why the other width's count is
-/// not pinned. The `simd4` pins were read in a `wasm32` + `simd128` guest, never off an x86 run.
+/// not pinned. The `simd4` pins were read in a `wasm32` + `simd128` guest, never off an x86 run,
+/// until #1098 moved them: its pins are derived from the four-lane plan on `x86-64-v3` (every
+/// console slot of a group, and every aligned slot of a full insert group, binds -- the rule that
+/// gives each eight-lane pin on that host), and the AArch64 leg runs them.
+///
+/// #1098 moved every pin whose session has a console: each console group now binds, padded when
+/// partial. The standard console less some EQs splits its `post_insert` limiter by level (H2): the
+/// tracks without an EQ reach it a level early, so their limiters form their own group, and both
+/// that group and the other tracks' remainder bind padded.
 fn native_bank_count(name: &str, outcomes: &[Outcome; 3], simd4: usize, simd8: usize) {
     let (index, expected) = match Backend::current() {
         Backend::Simd4 => (1, simd4),
@@ -993,7 +1038,8 @@ fn native_bank_count(name: &str, outcomes: &[Outcome; 3], simd4: usize, simd8: u
 ///
 /// Before #966 this refused at `Simd8` on a native host and at `Simd4` in the browser. The fix
 /// unbinds exactly one bank: the compressor slot of `ch00`'s mixed group (22 planned at eight
-/// lanes, 21 bound; 46 and 45 at four).
+/// lanes, 21 bound; 46 and 45 at four). Since #1098 `ch00`'s limiter, a level early, binds as a
+/// padded bank of one, and the other 63 limiters' remainder binds padded too: 23 and 47.
 #[test]
 fn the_sixty_four_track_console_less_one_eq_binds_at_every_width() {
     let name = "64-track console less ch00's EQ";
@@ -1003,7 +1049,7 @@ fn the_sixty_four_track_console_less_one_eq_binds_at_every_width() {
     // tracks at eight lanes and with three at four, as lane 0 of both.
     misaligned_slots(name, &outcomes, [1, 1]);
     ragged_lanes(name, &outcomes, &[&[0]], &[&[0]]);
-    native_bank_count(name, &outcomes, 45, 21);
+    native_bank_count(name, &outcomes, 47, 23);
 }
 
 /// Gate 1 with the ragged lane in the middle of its group. Members sort by active slot count and
@@ -1016,7 +1062,7 @@ fn the_console_less_a_middle_lanes_eq_binds_at_every_width() {
         assert_binds_and_renders_the_scalar_bits(name, &sixty_four_track_console_less_eqs(&[60]));
     misaligned_slots(name, &outcomes, [1, 1]);
     ragged_lanes(name, &outcomes, &[&[0]], &[&[4]]);
-    native_bank_count(name, &outcomes, 45, 21);
+    native_bank_count(name, &outcomes, 47, 23);
 }
 
 /// Gate 1 with the ragged lane last in its group at both widths (`ch63`: lane 7 of `ch56..=ch63`,
@@ -1028,11 +1074,18 @@ fn the_console_less_a_last_lanes_eq_binds_at_every_width() {
         assert_binds_and_renders_the_scalar_bits(name, &sixty_four_track_console_less_eqs(&[63]));
     misaligned_slots(name, &outcomes, [1, 1]);
     ragged_lanes(name, &outcomes, &[&[3]], &[&[7]]);
-    native_bank_count(name, &outcomes, 45, 21);
+    native_bank_count(name, &outcomes, 47, 23);
 }
 
 /// The #962 probe's seed-412 shape. Before #966 it refused at `Simd8` natively; the report that it
 /// bound at `Simd4` came from an `x86-64-v3` host, whose soft-clip factory declines four lanes.
+///
+/// Since #1098 the nine-track console binds its `pre_insert` remainder padded, and the tracks'
+/// zero, one and two inserts put the `post_insert` limiter at three levels, each its own padded
+/// group (H2): eight lanes bind the EQ and compressor twice, no soft-clip and three limiters, 7;
+/// four lanes bind them three times, one soft-clip group and four limiters, 11. An `x86-64-v3`
+/// build cannot bank that console at four lanes and refuses there, so the AArch64 leg holds the
+/// four-lane plan.
 #[test]
 fn a_cohort_lane_behind_an_extra_dynamic_eq_binds_at_every_width() {
     let name = "nine tracks, one soft-clip behind an EQ";
@@ -1040,7 +1093,7 @@ fn a_cohort_lane_behind_an_extra_dynamic_eq_binds_at_every_width() {
     // Eight soft-clip lanes: one full group at eight lanes, two at four, and `ch03`'s group is the
     // one whose soft-clip slot is misaligned either way.
     misaligned_slots(name, &outcomes, [1, 1]);
-    native_bank_count(name, &outcomes, 6, 2);
+    native_bank_count(name, &outcomes, 11, 7);
 }
 
 /// Gate 1 on the mono desk: every track mono-mapped and symmetric, so the rescued plan is one the
@@ -1052,7 +1105,7 @@ fn the_mono_console_less_one_eq_binds_and_collapses_at_every_width() {
     let (outcomes, armed) =
         assert_binds_and_renders_the_scalar_bits(name, &mono_console_less_eqs(&[0]));
     misaligned_slots(name, &outcomes, [1, 1]);
-    native_bank_count(name, &outcomes, 45, 21);
+    native_bank_count(name, &outcomes, 47, 23);
     let native = match Backend::current() {
         Backend::Simd4 => &armed[0],
         Backend::Simd8 => &armed[1],
@@ -1095,7 +1148,8 @@ fn the_reduced_mono_console_from_the_970_probe_binds_at_every_width() {
 /// Nine tracks lack the EQ. `ch56..=ch63` fill one group by themselves, every lane runs the
 /// compressor at rank 0, the compressors share a level, and that bank still binds. Only the
 /// mixed group holding `ch00` loses its compressor bank. A binder that refused every slot
-/// behind an identity slot, rather than every misaligned one, binds one bank fewer here.
+/// behind an identity slot, rather than every misaligned one, binds one bank fewer here. Since
+/// #1098 the nine early limiters and the other 55 each bind a padded remainder: 22 and 45.
 #[test]
 fn lanes_that_skip_the_same_slot_still_bank_it() {
     let name = "64-track console less nine EQs";
@@ -1104,7 +1158,7 @@ fn lanes_that_skip_the_same_slot_still_bank_it() {
         &sixty_four_track_console_less_eqs(&[0, 56, 57, 58, 59, 60, 61, 62, 63]),
     );
     misaligned_slots(name, &outcomes, [1, 1]);
-    native_bank_count(name, &outcomes, 43, 20);
+    native_bank_count(name, &outcomes, 45, 22);
 }
 
 /// The fix must not over-reach past the misaligned slot either: lanes that realign bank again.
@@ -1135,6 +1189,9 @@ fn env_u64(name: &str, default: u64) -> u64 {
 struct SeedReport {
     shape: Option<Shape>,
     compile_refused: u64,
+    /// Widths, in `WIDTHS` order, at which the compile was refused because this build cannot bank
+    /// the session's console there ([`FOREIGN_CONSOLE_REFUSAL`]): expected, and tallied apart.
+    foreign_refused: [bool; 3],
     /// The plan's output latency in samples: each render runs at least [`AUDIBLE_BLOCKS`] past it.
     latency: u64,
     /// Seeds with a misaligned planned slot, per `WIDTHS` entry.
@@ -1154,9 +1211,18 @@ fn probe_seed(seed: u64, blocks: u64, render_all: bool) -> SeedReport {
     };
     for (index, dispatch) in WIDTHS.into_iter().enumerate() {
         let outcome = compile_bind_render(&model, dispatch, 0, Collapse::Unarmed);
-        if outcome.compile.is_some() {
-            report.compile_refused += 1;
-            continue;
+        match outcome.compile.as_deref() {
+            None => {}
+            Some(FOREIGN_CONSOLE_REFUSAL)
+                if dispatch != Backend::Scalar && dispatch != Backend::current() =>
+            {
+                report.foreign_refused[index] = true;
+                continue;
+            }
+            Some(_) => {
+                report.compile_refused += 1;
+                continue;
+            }
         }
         report.misaligned[index] = outcome.misaligned_slots > 0;
         report.latency = report.latency.max(outcome.latency);
@@ -1209,7 +1275,10 @@ fn probe_seed(seed: u64, blocks: u64, render_all: bool) -> SeedReport {
 /// misaligned planned slot is asserted to be nonzero at both SIMD widths. That count is a property
 /// of the plan, so it holds on a host whose factories decline the other width -- an `x86-64-v3`
 /// build binds four-lane banks only for the limiter and the multiband compressor, and the browser
-/// build binds them for every launch effect.
+/// build binds them for every launch effect -- except where that host cannot bank the session's
+/// console at the other width, which refuses the compile there (#1098). Those refusals are
+/// expected, tallied apart and printed; any other refusal, and any at the build's own width or at
+/// `Scalar`, fails the probe.
 ///
 /// Seeds are spread over the host's cores and reported in seed order; each seed is independent.
 #[test]
@@ -1241,6 +1310,7 @@ fn randomized_consoles_compile_bind_and_render_the_scalar_bits() {
     let mut moved = Vec::new();
     let mut silent = Vec::new();
     let mut compile_refused = 0;
+    let mut foreign_refused = [0_u64; 3];
     let mut misaligned = [0_u64; 3];
     let mut rendered = 0_u64;
     let mut collapsed = 0_u64;
@@ -1248,6 +1318,9 @@ fn randomized_consoles_compile_bind_and_render_the_scalar_bits() {
     let mut by_shape: BTreeMap<Shape, [u64; 2]> = BTreeMap::new();
     for (seed, report) in reports {
         compile_refused += report.compile_refused;
+        for (tally, hit) in foreign_refused.iter_mut().zip(report.foreign_refused) {
+            *tally += u64::from(hit);
+        }
         for (tally, hit) in misaligned.iter_mut().zip(report.misaligned) {
             *tally += u64::from(hit);
         }
@@ -1276,7 +1349,8 @@ fn randomized_consoles_compile_bind_and_render_the_scalar_bits() {
         tally[1] += u64::from(report.misaligned.contains(&true));
     }
     eprintln!(
-        "seeds {start}..{}: compile refusals {compile_refused}, seeds with a misaligned slot \
+        "seeds {start}..{}: compile refusals {compile_refused}, console refusals at a foreign \
+         width [scalar, simd4, simd8] {foreign_refused:?}, seeds with a misaligned slot \
          [scalar, simd4, simd8] {misaligned:?}, rendered {rendered}, of which the armed collapse \
          fired in {collapsed}, longest output latency {latency} samples, [seeds, seeds with a \
          misaligned slot] by shape {by_shape:?}",
