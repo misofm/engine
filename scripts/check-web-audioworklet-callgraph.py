@@ -131,7 +131,7 @@ SCALAR_SLACK = 8
 # Measured with this analyser on `miso-engine-v1-audio-worklet.simd128.wasm` built from this tree
 # (vector = `f32x4.{mul,add,sub,div}`, scalar = `f32.{mul,add,sub,div}`):
 #
-#   multiband-compressor f32x8   2560 / 20   ratio 0.0078
+#   (multiband-compressor f32x8 was 2560 / 20; #1110 removed eight lanes from the browser build)
 #   multiband-compressor f32x4   1280 / 20   ratio 0.0156
 #   transient-shaper     f32x4    786 / 72   ratio 0.0916
 #   true-peak-limiter    f32x4    448 /  0   ratio 0        (dual)
@@ -185,7 +185,6 @@ SCALAR_SLACK = 8
 # 224 against 448, 84 against 168) and zero scalar arithmetic, which is what a correct one-plane
 # variant looks like from here.
 KERNEL_ROSTER: tuple[tuple[str, str, float], ...] = (
-    ("multiband-compressor f32x8", r"multiband_compressor.*4wide6f32x8", 0.10),
     ("multiband-compressor f32x4", r"multiband_compressor.*4wide6f32x4", 0.10),
     ("transient-shaper f32x4", r"transient_shaper.*4wide6f32x4", 0.38),
     ("gate-expander f32x4", r"gate_expander.*4wide6f32x4", 0.19),
