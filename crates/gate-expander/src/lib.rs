@@ -900,6 +900,11 @@ impl<const CONNECTED: bool> PreparedNativeEffect for PreparedGate<f32, CONNECTED
     }
 }
 
+/// Whether this artifact executes banks of `width` lanes: a compile-time constant (D4).
+const fn executes(width: BankWidth) -> bool {
+    width.lanes() as usize == Backend::current().width()
+}
+
 /// The lane bitmask with every lane of a `width`-lane shape set.
 const fn all_lanes(width: usize) -> u32 {
     (1 << width) - 1
@@ -1136,7 +1141,7 @@ fn bind_bank<const NATIVE_ONLY: bool>(
     // never links the bank of a width it does not execute.
     Ok(Some(match request.width {
         BankWidth::Four => {
-            if NATIVE_ONLY && Backend::current() != Backend::Simd4 {
+            if NATIVE_ONLY && !executes(BankWidth::Four) {
                 return Ok(None);
             }
             Box::new(
@@ -1146,7 +1151,7 @@ fn bind_bank<const NATIVE_ONLY: bool>(
             ) as Box<dyn PreparedNativeEffectBank>
         }
         BankWidth::Eight => {
-            if NATIVE_ONLY && Backend::current() != Backend::Simd8 {
+            if NATIVE_ONLY && !executes(BankWidth::Eight) {
                 return Ok(None);
             }
             Box::new(

@@ -2,8 +2,8 @@
 //!
 //! The pre-audit crate classified seven intermediates per lane-sample through `Option`, sanitised
 //! every input sample and counted per-sample "recoveries". All of that is gone. What is left is the
-//! `lane::flush` inside the follower and the
-//! `effect_runtime::bank::finish_block` scan of the output.
+//! `lane::flush` inside the follower and one `effect_runtime::bank::check_block` scan of the output
+//! per block, whose failing lanes are recovered one lane at a time (issue #1092).
 
 mod common;
 
@@ -12,10 +12,11 @@ use effect_contract::{EffectBankProcessBlock, EffectProcessBlock, LinkMode};
 
 /// A non-finite output zeroes the block and resets the envelopes.
 ///
-/// This is the master plan §4.4 policy, applied by the shared driver: the whole block is zeroed and
-/// the state reset, rather than the pre-audit per-sample "recover this lane and carry on".
+/// This is the master plan §4.4 policy: the scalar instance's one lane fails, so its whole block is
+/// zeroed and its state reset, rather than the pre-audit per-sample "recover this lane and carry
+/// on".
 ///
-/// Red mutation: skip `finish_block` after the frame loop — the NaN reaches the output.
+/// Red mutation: skip the boundary check after the frame loop — the NaN reaches the output.
 #[test]
 fn a_nonfinite_block_is_zeroed_and_the_envelopes_are_reset() {
     let mut effect = prepare(&values_of(1.0, -1.0, 1.0));
