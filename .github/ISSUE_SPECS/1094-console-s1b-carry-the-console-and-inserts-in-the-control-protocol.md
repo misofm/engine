@@ -189,3 +189,104 @@ Test value: nine one-at-a-time mutations on `ae4c0561` each turned at least one 
 
 Not run, as scoped: the SDK headless and package suites (S1d, #1097; they send old-schema
 documents), live control (S1c, #1096), and the AudioWorklet artifact pin (the batch boundary).
+
+## Sol verdict, attempt 1
+
+**PASS.** Sol, adversarial review of `ae4c0561` (code) and `105064a7` (evidence) on base
+`7ff25845`, x86-64-v3, `CARGO_INCREMENTAL=0`, one scratch target dir.
+
+### Evidence
+
+- **Wire identity.** Every session-edit opcode that ever existed in history (`from_raw` arms of
+  every revision of the protocol model, under both crate names) is `0x0001`-`0x0006`, `0x0100`-
+  `0x0104`, `0x0200`-`0x0210`, `0x0300`-`0x0301`, `0x0400`-`0x0401`, `0x0500`-`0x0505`,
+  `0x0600`-`0x0603`. `0x0007` and `0x0211` were never session-edit opcodes (`0x0007` appears in
+  history only as the unrelated command message ID `TransportGet`). `0x0006`, `0x0102` and `0x0104`
+  still decode to `None`; no other opcode table exists in the repo (SDK, capi, host-core and tools
+  build `SessionEdit` values, never opcodes). No `ABI_VERSION` or protocol-major change.
+- **Atomicity (gate 4), Sol probes, scratch and reverted.** All passed through encode/decode and
+  `SessionStore`:
+  - rewrites *before* `SetConsole` commit, and the snapshot equals the parser's document;
+  - interleaved with inserts edits on the insert that shares the slot ID, plus a console knob edit
+    after the rewrite: commits, canonical JSON equals the hand-written document;
+  - a console knob on the new slot before that track's rewrite: `Edit { operation_index: 2,
+    NotFound }`, nothing committed;
+  - a failing edit after every console edit applied (inserts `NotFound`, console
+    `ConsoleSlotFixed`): revision, snapshot and model unchanged;
+  - `UpsertTrack` as the rewrite commits; a slot rename skipping one track refuses, with every
+    track commits; two `SetConsole`s netting to no change need no rewrite;
+  - controller: with the one reliable-event slot full, a whole slot-set change is `BACKPRESSURE`
+    with nothing committed; the same request ID is re-answered from the replay cache (pre-existing
+    design); a fresh ID commits once (revision 9, one event); replaying it returns byte-identical
+    ack bytes with no second commit or event; a partial slot-set change at revision 9 is
+    `VALIDATION_FAILED`, no event. No path acks or commits a partial model: the ack is encoded only
+    after `prepare_transaction` (final `compile_session`) succeeds, and capi prepares the runtime
+    plan before `commit_prepared_structural`.
+- **Sol mutations, one at a time on the committed tree, `cargo test -p protocol`, reverted.** All
+  six RED:
+  - SM1: `SetConsole` silently re-shapes every track's entries (commits a partial slot-set
+    change): `a_slot_set_change_that_skips_a_track_refuses_whole`,
+    `..._is_never_acknowledged`;
+  - SM1b: S1a's `console.entry_missing` check disabled: the two above plus
+    `a_track_cannot_change_the_slot_set_through_its_entries`;
+  - SM2: a console knob edit resolves the first track carrying the slot, ignoring `track_id`:
+    `every_console_edit_round_trips_to_the_document_the_parser_builds`;
+  - SM3: the slot decoder drops `link_mode` to `dual_mono`: three tests;
+  - SM4: retired track field 8 dropped from `RETIRED`: `retired_track_rack_fields_are_refused`
+    and the conformance rows;
+  - SM6: `0x0006` reallocated to `SetConsole`: both opcode-registry tests.
+- **Gates re-run.**
+  - Formatting, lint and docs: `cargo fmt --all --check`, clippy `--workspace --all-targets
+    --all-features -D warnings` and `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps`
+    all pass.
+  - Tests: `cargo test -p protocol -p conformance -p session` has 235 passed, 0 failed, in both
+    dev and release. The workspace dev run has 293 result lines: 2,103 passed, 0 failed and 40
+    ignored, which matches the claim exactly.
+  - Wasm `simd128`: `cargo check` for `target-smoke`, `protocol`, `dsp-reference` and
+    `conformance` passes. `check-protocol-wasm-parity.sh` reports `ok (simd128)`, and
+    `--self-test` passes with 1 inert row and 3 red rebuilds.
+  - AArch64 iOS and Android: `check-cross-targets.sh` passes, with only the known #1018
+    expected failures.
+  - Fuzz: `cargo check --manifest-path fuzz/Cargo.toml --bins` passes. `run-protocol-fuzz.sh`
+    ran on a `git archive` copy of HEAD: 4 targets x 10,000 runs, exit 0.
+  - Scripts: these all pass:
+    - `check-protocol-control-policy.sh` and its test;
+    - `check-conformance-boundaries.sh` and its test;
+    - `check-session-policy.sh`, `check-workspace-policy.sh` and `check-dsp-research.sh`;
+    - `check-script-reachability.py`, `check-ci-path-routing.py` and
+      `test-ci-path-routing.py`.
+
+    No lint-job script reads the two protocol docs.
+- **SDK.** The AudioWorklet delivery closure was built from `7ff25845` (a `git archive` copy) and
+  from HEAD. All 7 files are byte-identical (module sha256 `14c34b5c...`). `check-sdk-headless.sh`
+  gives 284 tests: 198 pass and 86 fail on both trees, with identical `not ok` sets. Every failure
+  is the old-schema boot refusal that S1d owns. S1b adds no SDK failure. The package suite
+  (`sdk-package.sh`) was not run, because it needs `npm ci` (network, `sdk/node_modules`). It has
+  the same inputs: `sdk/` is unchanged and the artifacts are identical.
+- **Digests.** `console-workload` has no dependency on `protocol` or `conformance`, so the
+  22 identical digests hold by construction.
+- **Out-of-path edits** are minimal and correct:
+  - `conformance/src/lib.rs`: three re-exports;
+  - the parity self-test: two pin literals;
+  - the conformance record and the fuzz manifest: the hash, the opcode count and one sentence.
+- **Merge.** `git merge-tree` of HEAD onto `codex/batch-console-3`: clean, no conflicts. The
+  result differs from HEAD only by batch-3's umbrella-spec (`1084-*.md`) addition.
+
+### Findings
+
+- **H:** none. **M:** none.
+- **L1 (doc).** `docs/CONTROL_PROTOCOL_REGISTRY.md:93` gives the analogue of a console identity
+  change as "`020b` on an insert". `020b` is `SetEffectLinkMode`; the identity edit is `0208`.
+- **L2 (test value).** `docs/CONTROL_PROTOCOL_REGISTRY.md:93` and this spec (line 119) promise
+  that the rewrite may come "in any order". Every committed slot-set test puts `SetConsole` first
+  (`crates/protocol/tests/console_session_edits.rs:677`, `:700`;
+  `crates/protocol/src/controller/tests.rs:1650`). Sol's probe shows that rewrite-before-declaration
+  commits, but no committed test pins it. A future per-edit check of `SetTrackConsole` against the
+  current declaration would pass silently whenever the rewrite follows.
+- **L3 (test value).** `console_knob_edits_change_only_that_tracks_entry`
+  (`crates/protocol/tests/console_session_edits.rs:384`) edits only track `a`, the first track. A
+  knob edit that ignores `track_id` and takes the first matching entry (SM2) passes it. Only the
+  track-`b` `UpsertEffectParam` case at `:228` catches SM2.
+
+None of the three blocks the slice. L1 is a one-token doc fix; L2 and L3 are one-case test
+additions, which can go in any later C3 slice.
