@@ -342,3 +342,144 @@ padding broke in other crates -- `capi/tests/resource_lifecycle.rs`,
 `host-core/src/limiter_linked_session.rs`, `tools/console-workload` (the foreign-width fold in
 `SessionRuntime::build_full` and `chain_shape.rs`) -- and `docs/SESSION_SCHEMA_V1.md`. Each change is
 a test harness or a doc, and each is explained in the table above.
+
+## Sol verdict, attempt 1
+
+**PASS.** Sol, 2026-09-30, on `9bdbb0e2` (`8bb015ea..9bdbb0e2`), x86-64-v3 (AMD EPYC 7313P), rustc
+1.97.1, `CARGO_INCREMENTAL=0`, one `target/`. No valid session was refused on any production
+target, and no bit moved.
+
+### 1. The production-width guarantee
+
+- **Why it holds.** Every production host compiles at `Backend::current()`: host-core's public
+  prepare entries all pass it, the `_with_backend` seams are `#[cfg(test)]` or `pub(crate)` with a
+  `current()` caller, and neither capi nor host-web nor the SDK can choose a width. `current()` is
+  Simd8 on x86-64 and Simd4 on AArch64 and wasm `simd128`. Every eligible factory binds exactly
+  `current()`'s width. The one target-conditional factory arm, `soft-clip`'s `width_is_native`,
+  agrees with `current()` on all three targets, so NEON takes wasm's four-lane path. A console
+  slot's program key is session-level: its quality is `normal`, the only quality any eligible
+  effect declares; its link mode is the slot's; bypass is lowered; there is no sidechain; and the
+  rate, quantum and caps are session-wide. Latency, tail and state come from the quality row, never
+  from parameters. So a console rack's chains share one program, and every member of a group sits
+  at one level.
+- **x86 Simd8, native.** A temporary probe, never committed, compiled 7,488 sessions:
+  - every eligible effect, every link mode its descriptor admits, all four launch rates;
+  - in `pre_insert`, in `post_insert` and in both sections;
+  - N in 1..=9, 13, 17 and 23, four seeds each;
+  - every parameter drawn per track from its domain edges, mixed bypass and mono/stereo feeds;
+  - zero to two inserts from all eight launch effects, the multiband and delay included.
+
+  Every compile succeeded, and every console node is in a bound bank. Each console rack forms
+  exactly `sum over (class, level) of ceil(n / W)` groups, and every bound insert bank is full.
+  The sweep bound 18,652 padded console banks, 2,095 of them mono.
+- **wasm Simd4, production.** The same generator wrote 1,872 documents. All 1,872 boot through
+  the SDK's `validate` on the shipped module `ac3a9353…efc9`. The probe discriminates: a module
+  built with `post_insert` remainders unpadded refused 1,242 of them with `console.slot.unbanked`,
+  each naming the slot, the pool and the level.
+- **AArch64 NEON.** This host cannot run it, so four lanes were emulated on x86:
+  `Backend::current()` returned Simd4 and the soft-clip's `width_is_native` took four lanes. Under
+  the emulation:
+  - the probe bound 2,496 sessions at four lanes, with 5,398 padded console banks;
+  - the release tests passed: `graph-compiler`, `capi`'s `resource_lifecycle`, `host-core` and
+    `console-workload`;
+  - the debug product tests passed: 44 binaries, 664 tests. The one failure,
+    `host-web` `acknowledged_pair_render_records_the_same_live_dispatch`, is a pre-existing
+    eight-lane pin in a crate the AArch64 leg does not run.
+
+  That makes the implementer's derived four-lane pins measured facts: `bank_levels` 47, 45, 11
+  and 22; `chain_shape` `[3, 18]`; and capi's effect-bank rows, 12,288 and 921 of 13,568 and 1,024.
+- **Scalar.** `Scalar` exists only under `lane/test-support`. The scalar-oracle-absent gates
+  passed on `libcapi.so` and on the shipped module.
+- **The adapted tests.** None of capi, host-core or console-workload tested a production path at a
+  foreign width. The Simd4-on-x86 legs they fold are non-production. The one production change is
+  capi's retained bank memory, which is the padding the owner accepted. `audit capi` with the padded
+  bank recorded 0 violations.
+
+### 2-4. Policy, class A and #971
+
+- **Class A, native.** The 22 console digests are identical at head and at base. They are also
+  identical at emulated four lanes. `nine_track_ragged_strip` is `17613a3a…`.
+- **Class A, the V8 harness.** The nine V8 preflight digests are identical at head and at base
+  (module `e7f2ad31…80be`), and the seven arm digests equal `console-strip-base`'s.
+- **Class A, wasm against base.** All 1,872 generated sessions render bit-identical, 40 blocks
+  each, on the base and head wasm modules. The feed peaks at +12 dBFS and silences the left
+  channel on some blocks. 1,838 of the digests are distinct.
+- **Gate 2.** At 400 seeds it gives the implementer's numbers: 993 padded banks with a bypassed
+  lane and 114 padded mono banks.
+- **Sol's own differential.** Each eligible effect is alone in each section, at N = 1..W+1, with
+  random parameters and a hot, quiet, silent or NaN feed. At Simd8 it compared 108 sessions against
+  `Scalar`, and at Simd4 10 limiter sessions natively and 60 under emulation. Every track's bits
+  are identical.
+- **The two shapes.** `[3, 9]` -> `[2, 12]` is the nine-track strip's `[chains, slots]` at eight
+  lanes. Before, the full cohort's six-slot strip was one chain. The one-track tail's EQ,
+  compressor and limiter rendered per node, which left its post-input bank alone and its fader and
+  matrix fused: 3 chains, 9 slots. Now the tail binds padded banks of one and its whole six-slot
+  strip fuses: 2 chains, 12 slots.
+- **#971, what the demotion did.** It moved a mono track whose effect groups were all partial mono
+  groups to the stereo pool, when that move bound more banks. It is now off exactly for console
+  tracks, because a padded group strands nothing, and console-free sessions keep it. The mono pool
+  keeps every mono track. The standing 64-track mono row has no remainder, so M3's gain stands, and
+  its digests are unchanged. Gate 4 pins both halves.
+
+### Test value and mutations
+
+Sol planted these, and each was reverted:
+
+| Mutation | Result |
+|---|---|
+| S1: `post_insert` groups do not pad | red on gates 1, 2, 2L and 4, and on the wasm probe |
+| S2: the guarantee scans `pre_insert` only | red on gate 3 |
+| S3: #971 off for console-free sessions too | red on gate 4 and two #971 tests |
+| S4: scratch charged per member | red on gate 6 and four fixture tests |
+| M4 re-run: metadata charged per lane | red on gate 6 |
+| S5': the compressor claims its silent fixed point without checking its recursive word | green on both gate-2 tests; red on the compressor's own padding test and on Sol's gated-feed differential |
+
+S5' is finding L1.
+
+### Gates, all run here, all exit 0
+
+- **Lint.** fmt, clippy (`-D warnings`, all targets and features) and rustdoc. The 28 lint-job
+  steps passed.
+- **Debug tests.** test-debug-a: 96 binaries, 1,150 passed. test-debug-b: 151 binaries, 834
+  passed, and the fixtures passed.
+- **Release tests.** test-release, including loom.
+- **audit-native.** All 21 steps passed: the capi, effect, builtins, graph and protocol audits,
+  the syscall traces, `check-capi-abi`, determinism 100/100, and the fixtures.
+- **wasm.** The wasm-guests job. `run-wasm-gates.sh` passed on its native and wasm legs, with the
+  V8 spill gate ok.
+- **Cross-target.** `check-cross-targets.sh` passed, with the #1018 rows unchanged.
+- **Artifact.** `ac3a9353…efc9`, 3,289,705 B. artifact-gates passed.
+- **Console benchmark.** `test-console-benchmark.sh` passed. The preflight passed with 0 launches.
+- **V8 harness.** `prepare` and `preflight` passed at head and at base.
+- **AArch64 legs.** Not run on hardware. The emulation above stands in for them.
+
+### Findings
+
+- **L1: gate 2 cannot reach a history-dependent whole-bank decision.**
+  `crates/graph-compiler/src/tests/console_banking.rs:236-260`, `:595-620`. Every feed keeps
+  one gain for the whole render, through 30 Hz / 19 kHz input filters. So a track that was hot
+  never gives a console slot an exact `+0.0` block, and the bank-wide silent fast path never
+  diverges from per-node. S5' went green here. A feed that gates silence per track, with the
+  filters off, turns it red at N = 2. P2c's own test covers it. A successor could add such a feed.
+- **L2: a doc comment moved to the wrong function.** `tools/console-workload/src/lib.rs:976-985`.
+  `console_model`'s doc now sits above `fold_console_into_inserts`, and `console_model` (`:1005`)
+  has none.
+- **L3: the console-to-inserts fold now exists four times.** The new copies are
+  `crates/graph-compiler/tests/bypass_resources.rs:130`, `tools/console-workload/src/lib.rs:985`
+  and `crates/host-core/src/limiter_linked_session.rs:315`. The fourth is the existing
+  `crates/graph-compiler/src/lib.rs:808`.
+- **L4: the seam-side-only chain test now relies on a width no build ships.**
+  `tools/console-workload/tests/chain_shape.rs:641-658`. It builds at the foreign width and
+  loosens `== 1` to `!is_empty()`. The native width with the strip folded into inserts would hold
+  the same property on a shipped plan.
+- **L5: retiring #971 costs one padded one-plane bank per slot where the mono remainder fits the
+  stereo pool's padding.** An example is 63 mono tracks and 1 stereo track: 27 banks against 24,
+  about +11 % plane-banks. The cost is pinned (`crates/graph-compiler/src/lib.rs:8819`) and argued
+  in the evidence. S4 can measure it.
+- **L6: the scope went past the authorized paths.** The attempt changed capi, host-core and
+  console-workload tests, one tool function and `SESSION_SCHEMA_V1.md`. Each change is justified
+  above, and the implementer flagged them.
+
+### Merge
+
+`git merge-tree` of `9bdbb0e2` onto `codex/batch-console-4` (`4ffbeb52`) is clean: no conflicts.
