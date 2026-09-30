@@ -442,10 +442,11 @@ fn gain_mix<L: Lane>(input: L, smoothed: L, coef: &Coef<L>, invariants: &Invaria
 /// `input * 1.0` is `input` for every word but a signalling NaN, which the multiply quiets.
 ///
 /// That one word is the arm's only difference from `gain_mix`, and it cannot leave the effect:
-/// a NaN fails the block-boundary check, which zeroes the whole channel and resets its state, and
-/// the rejection mask depends on NaN-ness, not on the payload. The relaxation therefore rests on
-/// every production caller (`Instance::render` and `render_mono`) applying `finish_channel` before
-/// the output leaves the effect. A new caller that exposes kernel output unchecked must render
+/// a NaN fails the block-boundary check, which zeroes that lane's words of the channel and resets
+/// its envelope (issue #1090: per lane, so a bank-mate is untouched), and the rejection mask
+/// depends on NaN-ness, not on the payload. The relaxation therefore rests on every production
+/// caller (`Instance::render` and `render_mono`) applying that check (`finish_lanes`) before the
+/// output leaves the effect. A new caller that exposes kernel output unchecked must render
 /// the general law. The recursive word never reads the output, so it is never affected.
 #[inline(always)]
 fn settled_output<L: Lane, const WET: bool>(
