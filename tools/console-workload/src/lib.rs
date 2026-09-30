@@ -973,11 +973,6 @@ impl PlanConfig {
     };
 }
 
-/// The parsed, edited session model a workload renders.
-///
-/// Split out of `SessionRuntime` so the meter and observation arms build the *same* model the
-/// `sixty_four_track_console` row builds, through the same code, rather than a second transcription
-/// of it.
 /// Every console slot of `model` folded into each track's inserts, in chain order: `pre_insert`
 /// ahead of the track's own inserts and `post_insert` after them, each entry an ordinary effect
 /// with the slot's ID. The lowered chain, and so the render, is unchanged (#163's placement
@@ -1002,6 +997,11 @@ fn fold_console_into_inserts(model: &mut SessionModel) {
     }
 }
 
+/// The parsed, edited session model a workload renders.
+///
+/// Split out of `SessionRuntime` so the meter and observation arms build the *same* model the
+/// `sixty_four_track_console` row builds, through the same code, rather than a second transcription
+/// of it.
 fn console_model(workload: Workload) -> SessionModel {
     let text = match workload {
         Workload::NineTrackBaseline => NINE_TRACK,
