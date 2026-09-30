@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """V8 register-allocation gate over the EQ's stationary cascade loops in the shipped browser module.
 
-Issues #1000 and #1009. The input is the shipped AudioWorklet module. The pinned Node's V8
-compiles the parametric EQ's two `f32x4` bank bodies with TurboFan; the gate finds the stationary
-cascade's innermost loops in that machine code and fails when one carries a value from one iteration
-to the next through a stack slot. It times nothing.
+Issues #1000 and #1009. The input is the shipped AudioWorklet module's named twin. The pinned
+Node's V8 compiles the parametric EQ's two `f32x4` bank bodies with TurboFan; the gate finds the
+stationary cascade's innermost loops in that machine code and fails when one carries a value from
+one iteration to the next through a stack slot. It times nothing.
 
-It reads the bytes that ship, from one build. CI runs it in `artifact-gates` on the downloaded
-artifact after that job has verified it against the `artifact` job's digest. Locally
-`scripts/run-wasm-gates.sh` runs it on `scripts/build-web-audioworklet.sh --module-only`'s output:
-the delivery build's own cargo line. Neither holds the module to the release pin (#1061).
+It reads the code that ships, from one build. The shipped module carries no `name` section (issue
+#1109) and the gate finds the two functions by name, so it reads the build's named twin, which
+`strip-wasm-names.py check` proves is the shipped module plus that section and nothing else: the
+same code section, so the same code for V8 to compile. CI runs it in `artifact-gates` on the
+downloaded twin, after that job has verified it against the `artifact` job's digest and checked it
+against the shipped module. Locally `scripts/run-wasm-gates.sh` runs it on the named twin
+`scripts/build-web-audioworklet.sh --module-only --named-twin` writes: the delivery build's own
+cargo line. Neither holds the module to the release pin (#1061).
 
 Why it exists
 -------------
@@ -47,7 +51,7 @@ the reference V8"; green does not mean "the browser EQ is as fast as before".
 
 The loops
 ---------
-The functions are found by symbol in the module's name section,
+The functions are found by symbol in the named twin's name section,
 `PreparedParametricEq<f32x4, _>::process_bank` (dual) and `::process_bank_mono` (collapsed), each
 exactly once. A loop inside a function has no symbol, so it is found by what it computes, never by
 where it sits in the listing:
@@ -108,7 +112,7 @@ green, say so, rather than loosening a row to match.
 
 Usage
 -----
-`check-web-audioworklet-v8-spill.py ARTIFACT.wasm` runs the gate.
+`check-web-audioworklet-v8-spill.py NAMED_TWIN.wasm` runs the gate.
 `check-web-audioworklet-v8-spill.py --check-toolchain` checks the pins alone (a runner's preflight).
 `check-web-audioworklet-v8-spill.py --self-test` runs synthetic listings through the analysis.
 """
@@ -740,7 +744,8 @@ def function_names(module: bytes) -> dict[int, str]:
                     cursor += sub_size
         position = end
     if not names:
-        raise GateError("the module has no function names; the gate needs the name section")
+        raise GateError("the module has no function names; the shipped module carries none "
+                        "(#1109), so give the gate the build's named twin")
     return names
 
 
@@ -917,7 +922,7 @@ def self_test() -> int:
 def main() -> int:
     sys.stdout.reconfigure(line_buffering=True)  # keep `ok` and `FAIL` lines in order in a log
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
-    parser.add_argument("artifact", nargs="?", help="the shipped host_web.wasm")
+    parser.add_argument("artifact", nargs="?", help="the shipped module's named twin")
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument(
         "--check-toolchain", action="store_true", help="check the pinned Node, V8 and host only"

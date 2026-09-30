@@ -130,7 +130,7 @@ fi
 # scripts/check-ci-path-routing.py refuses the flag in any other job or workflow. It needs an
 # explicit directory; every other form, the local no-argument one included, keeps the check.
 regenerate_metadata=1
-if (($# == 2)) && [[ $1 == --without-metadata-regeneration ]]; then
+if (($# == 3)) && [[ $1 == --without-metadata-regeneration ]]; then
   regenerate_metadata=0
   shift
 fi
@@ -138,21 +138,34 @@ fi
 # With no argument the gate builds the artifact it checks, so `bash scripts/check-web-audioworklet.sh`
 # is runnable the same way every other `scripts/check-*.sh` is. CI keeps passing the directory it
 # already built (#104 phase A: the no-argument form used to exit 2 and read as a red gate).
+#
+# Issue #1109: the shipped module carries no `name` section, and the call-graph gate below finds
+# functions by name. So the gate takes the build's named twin beside the directory, reads the names
+# from it, and first proves it is the shipped module plus its `name` section and nothing else
+# (`strip-wasm-names.py check`), so what the call graph says of the twin's code holds for the
+# shipped module's. Every other check here reads the shipped module itself.
 if (($# == 0)); then
-  self_built_artifacts=$(mktemp -d)
-  trap 'rm -rf -- "$self_built_artifacts"' EXIT
-  bash "$(dirname "${BASH_SOURCE[0]}")/build-web-audioworklet.sh" "$self_built_artifacts" >&2
-  set -- "$self_built_artifacts"
+  self_built=$(mktemp -d)
+  trap 'rm -rf -- "$self_built"' EXIT
+  mkdir "$self_built/artifacts" "$self_built/named"
+  bash "$(dirname "${BASH_SOURCE[0]}")/build-web-audioworklet.sh" \
+    --named-twin "$self_built/named" "$self_built/artifacts" >&2
+  set -- "$self_built/artifacts" "$self_built/named/miso-engine-v1-audio-worklet.simd128.named.wasm"
 fi
 
-if (($# != 1)) || [[ $1 == -* ]]; then
-  echo "usage: $0 [[--without-metadata-regeneration] ARTIFACT_DIRECTORY]" >&2
+if (($# != 2)) || [[ $1 == -* || $2 == -* ]]; then
+  echo "usage: $0 [[--without-metadata-regeneration] ARTIFACT_DIRECTORY NAMED_TWIN]" >&2
   exit 2
 fi
 
 artifact_dir=$1
+named=$2
 [[ -d "$artifact_dir" && ! -L "$artifact_dir" ]] || {
   echo "artifact directory must be a non-symlink directory" >&2
+  exit 2
+}
+[[ -f "$named" ]] || {
+  echo "the named twin must be a file" >&2
   exit 2
 }
 command -v wasm-objdump >/dev/null || {
@@ -182,6 +195,10 @@ actual=$(find "$artifact_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
 simd="$artifact_dir/miso-engine-v1-audio-worklet.simd128.wasm"
 main_js="$artifact_dir/miso-engine-v1-audio-worklet-host.js"
 worklet_js="$artifact_dir/miso-engine-v1-audio-worklet.js"
+python3 -B "$(dirname "${BASH_SOURCE[0]}")/strip-wasm-names.py" check "$named" "$simd" || {
+  echo "the named twin is not the shipped module plus its name section" >&2
+  exit 1
+}
 
 expected_exports=$(printf '%s\n' \
   memory \
@@ -437,11 +454,12 @@ fi
 # to 11, by the three this wave added. It never drops. The artifact carries thirteen, so the floor
 # keeps exactly the two-kernel slack it had before.
 callgraph="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/check-web-audioworklet-callgraph.py"
+named_disassembly=$(wasm-objdump -d "$named")
 printf '%s
-' "$simd_disassembly" |
+' "$named_disassembly" |
   python3 -B "$callgraph" --callgraph miso_engine_web_v1_render || exit 1
 printf '%s
-' "$simd_disassembly" |
+' "$named_disassembly" |
   python3 -B "$callgraph" --kernel-shape --kernel-pattern '4wide6f32x[48]' --kernel-min 11 ||
   exit 1
 
@@ -454,7 +472,7 @@ printf '%s
 # cursor invariant. The allocation half of the gate is not relaxed at all -- an allocator, a
 # deallocator or drop glue in either closure still fails.
 printf '%s
-' "$simd_disassembly" |
+' "$named_disassembly" |
   python3 -B "$callgraph" --callgraph miso_engine_web_v1_meter_poll \
     --trap-owner 22AudioWorkletEngineHost11poll_meters || exit 1
 # `command_submit` runs in `port.onmessage`, not in `process()`, and its pan-law conversion
@@ -462,7 +480,7 @@ printf '%s
 # engine's rule for the control path is "never allocate on the render thread", so the allocation
 # half is what this export is held to -- and it is held to it absolutely.
 printf '%s
-' "$simd_disassembly" |
+' "$named_disassembly" |
   python3 -B "$callgraph" --callgraph miso_engine_web_v1_command_submit --allocation-only || exit 1
 
 # #137 D3 amends the browser-capability ban deliberately.

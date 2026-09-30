@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Static call-graph and opcode gates over the shipped browser AudioWorklet artifact.
 
-Issue #106 evals E1, E2 and E5. The input is `wasm-objdump -d ARTIFACT` on stdin: the gate reads
-the binary that ships, not an rlib, a debug build or the Rust source, because "the render path
-never frees" is a property of the emitted code and nothing else can witness it.
+Issue #106 evals E1, E2 and E5. The input is `wasm-objdump -d NAMED_TWIN` on stdin: the gate reads
+the emitted code of the build that ships, not an rlib, a debug build or the Rust source, because
+"the render path never frees" is a property of the emitted code and nothing else can witness it.
+It finds functions by name, and the shipped module carries none (issue #1109), so it reads the
+build's named twin, which `strip-wasm-names.py check` proves is the shipped module plus its `name`
+section and nothing else: `check-web-audioworklet.sh` runs that check before this gate.
 
 Modes
 -----
@@ -242,8 +245,9 @@ def parse(text: str) -> dict[int, Function]:
             name = header.group(3)
             if name is None:
                 raise SystemExit(
-                    "name section required: func[%s] has no <name>; a stripped artifact "
-                    "blinds this gate, so `strip` must keep the name section" % header.group(2)
+                    "name section required: func[%s] has no <name>; a module without names "
+                    "blinds this gate, and the shipped one has none (#1109), so give it the "
+                    "build's named twin" % header.group(2)
                 )
             current = Function(int(header.group(2)), name)
             functions[current.index] = current

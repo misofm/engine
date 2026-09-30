@@ -464,10 +464,18 @@ def check_qualification_closures(text: str) -> None:
         require(line in lint, f"qualification.yml: lint job is missing {line!r}")
 
 
-V8_SPILL_ARTIFACT_LINE = (
-    "python3 -B scripts/check-web-audioworklet-v8-spill.py "
-    "target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm"
+# Issue #1109: the shipped module carries no `name` section, so the gates that find functions by
+# name read the build's named twin, which the `artifact` job writes outside the delivery closure and
+# uploads on its own. artifact-gates checks its download against the job's `named_sha256` and then
+# against the shipped module (`strip-wasm-names.py check`) before any gate reads it.
+NAMED_TWIN_DIRECTORY = "target/ci/qualification-named-twin"
+NAMED_TWIN = f"{NAMED_TWIN_DIRECTORY}/miso-engine-v1-audio-worklet.simd128.named.wasm"
+NAMED_TWIN_DIGEST_STEP = (
+    "      - name: Verify the named twin against the artifact job's digest and the shipped module\n"
+    "        env:\n"
+    "          NAMED: ${{ needs.artifact.outputs.named_sha256 }}\n"
 )
+V8_SPILL_ARTIFACT_LINE = f"python3 -B scripts/check-web-audioworklet-v8-spill.py {NAMED_TWIN}"
 # Issue #1061: every job that reads the shipped module checks its download against the digest of
 # the bytes the `artifact` job built -- not against the committed pin, which is the release
 # fingerprint -- so every artifact gate in a run reads exactly those bytes.
@@ -518,7 +526,8 @@ ARTIFACT_DIRECTORY = "target/ci/qualification-artifacts"
 # The build environment itself is deliberately not pinned: the record is what the base's own run
 # built in its own environment, so a change to that environment reads CHANGED, as it should.
 ARTIFACT_BUILD_LINES = (
-    "          bash scripts/build-web-audioworklet.sh target/ci/qualification-artifacts\n",
+    "          bash scripts/build-web-audioworklet.sh --named-twin target/ci/qualification-named-twin "
+    "target/ci/qualification-artifacts\n",
     '          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"\n',
     '          echo "rustc=$(rustc -vV | sed -n \'s/^release: //p\')" >> "$GITHUB_OUTPUT"\n',
     "          " + ARTIFACT_CLOSURE_DIGEST,
@@ -704,9 +713,9 @@ def check_qualification_metadata_generated_once(text: str, names: list[str]) -> 
                 require(name in ARTIFACT_READERS,
                         f"qualification.yml: {name} passes {METADATA_SKIP_FLAG} but does not read "
                         "the artifact job's closure-verified download")
-                require(arguments == [METADATA_SKIP_FLAG, ARTIFACT_DIRECTORY],
+                require(arguments == [METADATA_SKIP_FLAG, ARTIFACT_DIRECTORY, NAMED_TWIN],
                         f"qualification.yml: {name} may pass {METADATA_SKIP_FLAG} only for "
-                        f"{ARTIFACT_DIRECTORY}")
+                        f"{ARTIFACT_DIRECTORY} and its named twin")
 
 
 def check_metadata_skip_elsewhere(root: pathlib.Path) -> None:
@@ -790,12 +799,14 @@ def check_qualification_v8_spill(text: str) -> None:
     if "--without-v8-spill" not in run_wasm_gates_flags(wasm):
         return
     gates = job(text, "artifact-gates")
-    require(V8_SPILL_ARTIFACT_LINE in gates and ARTIFACT_DIGEST_STEP in gates,
+    require(V8_SPILL_ARTIFACT_LINE in gates and ARTIFACT_DIGEST_STEP in gates
+            and NAMED_TWIN_DIGEST_STEP in gates,
             "qualification.yml: wasm-guests runs run-wasm-gates.sh --without-v8-spill, so "
-            "artifact-gates must run the V8 spill gate on the digest-verified artifact")
-    require(gates.index(ARTIFACT_DIGEST_STEP) < gates.index(V8_SPILL_ARTIFACT_LINE),
-            "qualification.yml: artifact-gates must verify the artifact's digest before the V8 "
-            "spill gate reads it")
+            "artifact-gates must run the V8 spill gate on the digest-verified named twin")
+    require(gates.index(ARTIFACT_DIGEST_STEP) < gates.index(NAMED_TWIN_DIGEST_STEP)
+            < gates.index(V8_SPILL_ARTIFACT_LINE),
+            "qualification.yml: artifact-gates must verify the artifact's and the named twin's "
+            "digests before the V8 spill gate reads the twin")
 
 
 AARCH64_JOBS = {

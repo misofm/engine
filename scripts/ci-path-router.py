@@ -68,6 +68,7 @@ SELF_TEST_INPUTS = {
         "scripts/console-benchmark-record-validator.jq",
         "scripts/console-benchmark-validator.jq",
         "scripts/run-web-mixing-automation-benchmark.sh",
+        "scripts/strip-wasm-names.py",
         "scripts/test-console-benchmark.sh",
         "scripts/web-mixing-automation-benchmark.mjs",
         "scripts/web-mixing-automation-lib.jq",

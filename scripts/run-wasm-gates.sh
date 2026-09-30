@@ -194,20 +194,22 @@ check_f64_lane_lowering() {
 # Issues #1000 and #1009: V8's register allocation of the parametric EQ's stationary cascade loops
 # in the shipped AudioWorklet module. `check-web-audioworklet-v8-spill.py` has the rule and what it
 # does and does not prove; it times nothing. The module comes from `build-web-audioworklet.sh
-# --module-only`, so the cargo line has one home and these are the bytes that ship at this commit.
-# It does not hold the module to the release pin (#1061): the loops are a property of the source,
-# not of a release. The toolchain pins are checked first, so a Node other than the pinned one fails
-# before the build.
+# --module-only`, so the cargo line has one home and this is the code that ships at this commit.
+# The gate finds its functions by name, so it reads the named twin the same build writes: the
+# shipped module plus its `name` section (#1109). It does not hold the module to the release pin
+# (#1061): the loops are a property of the source, not of a release. The toolchain pins are checked
+# first, so a Node other than the pinned one fails before the build.
 check_v8_spill() {
     local module_dir="target/ci/wasm-gates-web" started finished
     python3 -B scripts/check-web-audioworklet-v8-spill.py --check-toolchain
     python3 -B scripts/check-web-audioworklet-v8-spill.py --self-test
     rm -rf -- "$module_dir"
-    mkdir -p "$module_dir"
-    bash scripts/build-web-audioworklet.sh --module-only "$module_dir"
+    mkdir -p "$module_dir/shipped" "$module_dir/named"
+    bash scripts/build-web-audioworklet.sh --module-only --named-twin "$module_dir/named" \
+        "$module_dir/shipped"
     started="$EPOCHREALTIME"
     python3 -B scripts/check-web-audioworklet-v8-spill.py \
-        "$module_dir/miso-engine-v1-audio-worklet.simd128.wasm"
+        "$module_dir/named/miso-engine-v1-audio-worklet.simd128.named.wasm"
     finished="$EPOCHREALTIME"
     awk -v a="$started" -v b="$finished" \
         'BEGIN { printf "wasm gates: V8 spill gate ran in %.1f s (build excluded)\n", b - a }'

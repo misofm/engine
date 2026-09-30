@@ -22,8 +22,26 @@ if [[ $1 == build ]]; then
   esac
   output="$CARGO_TARGET_DIR/wasm32-unknown-unknown/release/$artifact.wasm"
   mkdir -p "$(dirname "$output")"
-  # The fixture carries the flags it was built with, so a changed flag is a changed module.
-  printf '%s fixture\n%s\n' "$artifact" "${RUSTFLAGS-}" >"$output"
+  # The fixture is a WebAssembly module, since the build strips its `name` section (#1109). It
+  # carries the flags it was built with in another custom section, so a changed flag is a changed
+  # module.
+  python3 -B - "$output" "$artifact fixture" "${RUSTFLAGS-}" <<'PY'
+import sys
+def custom(name: bytes, body: bytes) -> bytes:
+    payload = bytes([len(name)]) + name + body
+    size = bytearray()
+    value = len(payload)
+    while True:
+        size.append((value & 0x7F) | (0x80 if value >> 7 else 0))
+        value >>= 7
+        if not value:
+            break
+    return b"\x00" + bytes(size) + payload
+fixture = f"\n{sys.argv[2]}\n{sys.argv[3]}\n".encode()
+with open(sys.argv[1], "wb") as output:
+    output.write(b"\0asm\x01\x00\x00\x00" + custom(b"fixture", fixture)
+                 + custom(b"name", b"\x00\x09\x08host_web"))
+PY
   exit 0
 fi
 if [[ $1 == run && " $* " == *" -p parameter-metadata "* ]]; then
@@ -40,7 +58,7 @@ cat >"$mock_bin/sha256sum" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 case "\$1" in
-  */host_web.wasm) [[ \${MOCK_UNPINNED:-0} == 1 ]] && { printf '%064d  %s\\n' 0 "\$1"; exit 0; }
+  */miso-engine-v1-audio-worklet.simd128.wasm) [[ \${MOCK_UNPINNED:-0} == 1 ]] && { printf '%064d  %s\\n' 0 "\$1"; exit 0; }
     printf '%s  %s\\n' "$(tr -d '\n' <"$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256")" "\$1" ;;
   *) echo "unexpected sha256sum input" >&2; exit 1 ;;
 esac
@@ -111,7 +129,7 @@ check_builder() {
   }
   case "$builder" in
     build-web-audioworklet.sh)
-      [[ $(head -n 1 "$output/miso-engine-v1-audio-worklet.simd128.wasm") == 'host_web fixture' ]]
+      grep -aqx 'host_web fixture' "$output/miso-engine-v1-audio-worklet.simd128.wasm"
       cmp -s "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet.js" \
         "$output/miso-engine-v1-audio-worklet.js"
       cmp -s "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js" \
@@ -257,7 +275,8 @@ run_module_only "$repo_root" "$refused" "$scratch/module-refused.log" 2>/dev/nul
 # pin file: --module-only never reads it.
 copy="$scratch/flag-copy"
 mkdir -p "$copy/scripts" "$scratch/flag-before" "$scratch/flag-after"
-cp "$repo_root/scripts/build-web-audioworklet.sh" "$copy/scripts/"
+cp "$repo_root/scripts/build-web-audioworklet.sh" "$repo_root/scripts/strip-wasm-names.py" \
+  "$copy/scripts/"
 run_module_only "$copy" "$scratch/flag-before" "$scratch/flag-before.log"
 sed -i 's/-C target-feature=+simd128 /-C target-feature=+simd128 -C opt-level=s /' \
   "$copy/scripts/build-web-audioworklet.sh"
@@ -267,6 +286,42 @@ run_module_only "$copy" "$scratch/flag-after" "$scratch/flag-after.log"
   echo "a flag changed in build-web-audioworklet.sh did not reach the --module-only module" >&2
   exit 1
 }
+# Issue #1109: the build ships its module without the `name` section and, with `--named-twin`,
+# writes the named twin -- cargo's output, names and all -- beside it, in any mode. The pair are
+# twins by `strip-wasm-names.py check`. The twin's directory is held to the output's rules, and
+# refused before anything is built.
+named_output="$scratch/named-output"
+named_twin="$scratch/named-twin"
+mkdir "$named_output" "$named_twin"
+PATH="$mock_bin:$PATH" bash "$repo_root/scripts/build-web-audioworklet.sh" --module-only \
+  --named-twin "$named_twin" "$named_output" >/dev/null 2>&1
+twin_name=miso-engine-v1-audio-worklet.simd128.named.wasm
+[[ $(find "$named_twin" -mindepth 1 -printf '%f\n') == "$twin_name" ]] &&
+  cmp -s "$named_output/$module_name" "$module/$module_name" &&
+  python3 -B "$repo_root/scripts/strip-wasm-names.py" check "$named_twin/$twin_name" \
+    "$named_output/$module_name" >/dev/null || {
+  echo "--named-twin did not write the named twin of the shipped module" >&2
+  exit 1
+}
+for refused_twin in non-empty same-as-output; do
+  twin_dir="$scratch/twin-$refused_twin"
+  output_dir="$scratch/twin-$refused_twin-output"
+  mkdir "$output_dir"
+  if [[ $refused_twin == non-empty ]]; then
+    mkdir "$twin_dir"
+    printf 'do not overwrite\n' >"$twin_dir/sentinel"
+  else
+    twin_dir=$output_dir
+  fi
+  rm -f "$mock_bin/cargo.log"
+  status=0
+  PATH="$mock_bin:$PATH" bash "$repo_root/scripts/build-web-audioworklet.sh" \
+    --named-twin "$twin_dir" "$output_dir" >/dev/null 2>&1 || status=$?
+  [[ $status == 2 && ! -e $mock_bin/cargo.log && -z $(find "$output_dir" -mindepth 1 -print -quit) ]] || {
+    echo "--named-twin accepted a $refused_twin directory or built after refusing it" >&2
+    exit 1
+  }
+done
 # And the V8 spill leg of run-wasm-gates.sh takes its module from that mode and builds none itself.
 wasm_gates="$repo_root/scripts/run-wasm-gates.sh"
 grep -q 'bash scripts/build-web-audioworklet.sh --module-only' "$wasm_gates" &&
