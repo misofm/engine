@@ -64,7 +64,7 @@ IOS_MEMSET_CEILINGS: dict[str, tuple[str, int]] = {
     "graph": ("1018", 20),
     "host-core": ("1018", 4),
     "multiband-compressor": ("1018", 1132),
-    "parametric-eq": ("1018", 151),
+    "parametric-eq": ("1018", 146),
     "soft-clip": ("1018", 22),
     "transient-shaper": ("1018", 534),
     "true-peak-limiter": ("1018", 104),
