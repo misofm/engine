@@ -5,7 +5,6 @@
 //! There is no audio or detector history: the compressor adds exactly zero samples of latency.
 
 use effect_contract::LinkMode;
-use effect_runtime::bank;
 use effect_runtime::dynamics::{GainComputerCoef, gain_delta_db};
 use effect_runtime::envelope::rms_follow;
 use effect_runtime::ramp::LinearRamp;
@@ -1547,8 +1546,13 @@ fn frames_loop_mono<L: Lane, const RAMPING: bool>(
 }
 
 /// Applies the block-boundary nonfinite policy and clears the envelope on a rejected channel.
+///
+/// The kernel tests' whole-channel form, which their pinned digests fold. Production applies the
+/// same check per lane (`finish_lanes` in `lib.rs`, issue #1090), which is this function at
+/// `L = f32` and on a block where every lane fails.
+#[cfg(test)]
 pub(crate) fn finish_channel<L: Lane>(io: &mut [f32], channel: &mut Channel<L>) -> u32 {
-    bank::finish_channel::<L>(io, || channel.clear_state())
+    effect_runtime::bank::finish_channel::<L>(io, || channel.clear_state())
 }
 
 #[cfg(test)]

@@ -585,14 +585,15 @@ fn a_malformed_bank_block_is_rejected_before_it_is_indexed() {
     );
 }
 
-/// Issue #1088 (console strip P2a), gate 3: the compressor has not opted into padding (P2c, #1090), so
-/// it declines a padded bank request, and only after it has validated every member.
+/// Issue #1090 (console strip P2c): the compressor accepts the padding contract. A padded request
+/// binds, whatever lanes its mask names, and only after every lane's request has been validated.
 ///
-/// Red if the guard in `bind_homogeneous_bank` is removed -- a padded request binds, and the bank
-/// runs its clone lanes as real tracks -- or if it moves above member validation, where a padded
-/// request with a malformed member is declined instead of refused.
+/// Red if the #1088 guard comes back (a padded request is declined), if validation moves after a
+/// fallback (a malformed member, or a malformed padded lane, is declined instead of refused), or if
+/// a padded lane whose request is not the members' program binds: that lane would run another
+/// program under the bank's one metadata, so it is the heterogeneous `Ok(None)`.
 #[test]
-fn a_padded_request_is_declined_until_the_compressor_opts_in() {
+fn a_padded_request_binds_after_every_lane_is_validated() {
     let backend = lane::Backend::current();
     let Some(width) = BankWidth::for_backend(backend) else {
         return;
@@ -614,15 +615,19 @@ fn a_padded_request_is_declined_until_the_compressor_opts_in() {
             .is_some(),
         "the control: the same members bind as a full bank"
     );
-    for members in 1..lanes {
-        let mask: Vec<bool> = (0..lanes).map(|lane| lane < members).collect();
-        assert!(
-            bind(&requests, &mask)
-                .expect("a padded request is well formed")
-                .is_none(),
-            "{members} of {lanes} lanes active"
-        );
+    let mut masks: Vec<Vec<bool>> = (1..lanes)
+        .map(|members| (0..lanes).map(|lane| lane < members).collect())
+        .collect();
+    // The planner lays members out first, but the contract accepts any non-empty mask.
+    masks.push((0..lanes).map(|lane| lane == lanes - 1).collect());
+    masks.push((0..lanes).map(|lane| lane % 2 == 1).collect());
+    for mask in &masks {
+        let bank = bind(&requests, mask)
+            .expect("a padded request is well formed")
+            .unwrap_or_else(|| panic!("mask {mask:?} must bind"));
+        assert_eq!(bank.metadata().width, width);
     }
+
     let mut malformed = requests.clone();
     malformed[0].limits.maximum_total_state_bytes = 0;
     let refusal = CompressorFactory
@@ -630,10 +635,26 @@ fn a_padded_request_is_declined_until_the_compressor_opts_in() {
         .err()
         .expect("a malformed member")
         .code;
-    let mask: Vec<bool> = (0..lanes).map(|lane| lane == 0).collect();
+    let member_zero: Vec<bool> = (0..lanes).map(|lane| lane == 0).collect();
     assert_eq!(
-        bind(&malformed, &mask).err().map(|error| error.code),
+        bind(&malformed, &member_zero).err().map(|error| error.code),
         Some(refusal),
         "a padded request still validates its members"
+    );
+    let member_last: Vec<bool> = (0..lanes).map(|lane| lane == lanes - 1).collect();
+    assert_eq!(
+        bind(&malformed, &member_last).err().map(|error| error.code),
+        Some(refusal),
+        "a padded lane's request is validated like a member's"
+    );
+
+    let mut foreign = requests.clone();
+    foreign[lanes - 1].link_mode = LinkMode::Maximum;
+    let padded_last: Vec<bool> = (0..lanes).map(|lane| lane + 1 < lanes).collect();
+    assert!(
+        bind(&foreign, &padded_last)
+            .expect("a well-formed request")
+            .is_none(),
+        "a padded lane that is not a clone of the members' program is declined"
     );
 }
