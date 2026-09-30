@@ -114,6 +114,10 @@ const structureField = (structure, name) => ABI_LAYOUT.structures[structure].fie
   .find((field) => field.name === name).offset;
 const resultCode = (name) => ABI_LAYOUT.constants.resultCodes.find((row) => row.name === name).value;
 const commandReason = (name) => ABI_LAYOUT.constants.commandReasons.find((row) => row.name === name).value;
+// The effect racks (#1096): `inserts` and `console`. Every other code, the retired ones among them,
+// is an unknown rack.
+const EFFECT_RACKS = new Set(ABI_LAYOUT.constants.racks
+  .filter((row) => row.name !== "notApplicable").map((row) => row.value));
 
 /// Encode only the generated wire record. Preparation and admission stay in the shared helper.
 function encodeCommands(records) {
@@ -169,7 +173,7 @@ function preparedControl(exports, handle) {
     const reason = result === resultCode("invalidArgument")
       ? address.trackIndex >= exports.miso_engine_web_v1_live_control_track_count(handle)
         ? commandReason("unknownTrack")
-        : address.rack > 2 ? commandReason("unknownRack") : commandReason("unknownEffect")
+        : !EFFECT_RACKS.has(address.rack) ? commandReason("unknownRack") : commandReason("unknownEffect")
       : commandReason("none");
     return { result, reason, config: new Uint8Array(0) };
   };

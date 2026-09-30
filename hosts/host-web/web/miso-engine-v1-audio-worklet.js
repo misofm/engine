@@ -1525,7 +1525,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     if (result === RESULT_INVALID_ARGUMENT) {
       reason = message.trackIndex >= this.trackCount
         ? COMMAND_REASON_UNKNOWN_TRACK
-        : message.rack > 2
+        : !effectRack(message.rack)
           ? COMMAND_REASON_UNKNOWN_RACK
           : COMMAND_REASON_UNKNOWN_EFFECT;
     }

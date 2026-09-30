@@ -415,6 +415,8 @@ pub struct WebLiveResponseOwner {
     pub native_id_bytes: u32,
     pub stable_id_offset: u32,
     pub stable_id_bytes: u32,
+    /// [`LIVE_RESPONSE_RACK_INPUT_FILTERS`], [`LIVE_RESPONSE_RACK_INSERTS`] or
+    /// [`LIVE_RESPONSE_RACK_CONSOLE`]; the retired `1` and `3` are refused (issue #1096).
     pub rack: u32,
     pub slot: u32,
     pub kind: u32,
