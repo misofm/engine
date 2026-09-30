@@ -159,6 +159,7 @@ fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
                     backend: backend_for(width),
                     width,
                     requests: &bank_requests,
+                    active_mask: width.full_mask(),
                 })
                 .expect("bank prepare")
                 .expect("bank");
@@ -204,6 +205,7 @@ fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
                     backend: backend_for(width),
                     width,
                     requests: &bypass_bank_requests,
+                    active_mask: width.full_mask(),
                 })
                 .expect("bypass bank prepare")
                 .expect("bypass bank");
@@ -281,6 +283,7 @@ fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
                     backend: backend_for(BankWidth::Four),
                     width: BankWidth::Four,
                     requests: &below_bank_requests,
+                    active_mask: BankWidth::Four.full_mask(),
                 })
                 .err(),
             Some(EffectPrepareError {
@@ -1010,6 +1013,7 @@ fn bank_requests_are_validated_before_any_fallback() {
                 backend: backend_for(BankWidth::Four),
                 width: BankWidth::Four,
                 requests: &wrong_count,
+                active_mask: BankWidth::Four.full_mask(),
             })
             .err(),
         Some(EffectPrepareError {
@@ -1022,6 +1026,7 @@ fn bank_requests_are_validated_before_any_fallback() {
                 backend: backend_for(BankWidth::Four),
                 width: BankWidth::Eight,
                 requests: &requests,
+                active_mask: BankWidth::Eight.full_mask(),
             })
             .err(),
         Some(EffectPrepareError {
@@ -1041,6 +1046,7 @@ fn bank_requests_are_validated_before_any_fallback() {
                 backend: backend_for(BankWidth::Four),
                 width: BankWidth::Four,
                 requests: &malformed,
+                active_mask: BankWidth::Four.full_mask(),
             })
             .err(),
         Some(EffectPrepareError {
@@ -1062,6 +1068,7 @@ fn bank_requests_are_validated_before_any_fallback() {
                 backend: backend_for(BankWidth::Four),
                 width: BankWidth::Four,
                 requests: &mixed_malformed,
+                active_mask: BankWidth::Four.full_mask(),
             })
             .err(),
         Some(EffectPrepareError {
@@ -1080,6 +1087,7 @@ fn bank_requests_are_validated_before_any_fallback() {
                 backend: backend_for(BankWidth::Four),
                 width: BankWidth::Four,
                 requests: &mixed,
+                active_mask: BankWidth::Four.full_mask(),
             })
             .expect("legal request")
             .is_none()
@@ -1111,4 +1119,57 @@ fn bank_requests_are_validated_before_any_fallback() {
     assert_eq!(per_track, 376);
     assert_eq!(per_track * 4, 1_504);
     assert_eq!(per_track * 8, 3_008);
+}
+
+/// Issue #1088 (console strip P2a), gate 3: the multiband compressor has not opted into padding (it is not padded until #1069 closes), so
+/// it declines a padded bank request, and only after it has validated every member.
+///
+/// Red if the guard in `bind_homogeneous_bank` is removed -- a padded request binds, and the bank
+/// runs its clone lanes as real tracks -- or if it moves above member validation, where a padded
+/// request with a malformed member is declined instead of refused.
+#[test]
+fn a_padded_request_is_declined_until_the_multiband_compressor_opts_in() {
+    let backend = lane::Backend::current();
+    let Some(width) = BankWidth::for_backend(backend) else {
+        return;
+    };
+    let lanes = width.lanes() as usize;
+    let values = values();
+    let requests = vec![request(&values); lanes];
+    let bind = |requests: &[effect_contract::PrepareEffectRequest<'_>], mask: &[bool]| {
+        MultibandCompressorFactory.bind_homogeneous_bank(PrepareEffectBankRequest {
+            backend,
+            width,
+            requests,
+            active_mask: mask,
+        })
+    };
+    assert!(
+        bind(&requests, width.full_mask())
+            .expect("a full bank")
+            .is_some(),
+        "the control: the same members bind as a full bank"
+    );
+    for members in 1..lanes {
+        let mask: Vec<bool> = (0..lanes).map(|lane| lane < members).collect();
+        assert!(
+            bind(&requests, &mask)
+                .expect("a padded request is well formed")
+                .is_none(),
+            "{members} of {lanes} lanes active"
+        );
+    }
+    let mut malformed = requests.clone();
+    malformed[0].limits.maximum_total_state_bytes = 0;
+    let refusal = MultibandCompressorFactory
+        .prepare(malformed[0])
+        .err()
+        .expect("a malformed member")
+        .code;
+    let mask: Vec<bool> = (0..lanes).map(|lane| lane == 0).collect();
+    assert_eq!(
+        bind(&malformed, &mask).err().map(|error| error.code),
+        Some(refusal),
+        "a padded request still validates its members"
+    );
 }

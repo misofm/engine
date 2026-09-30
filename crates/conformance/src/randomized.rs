@@ -727,6 +727,7 @@ fn run_width(
         backend,
         width,
         requests: &requests,
+        active_mask: width.full_mask(),
     };
 
     // Bind eligibility first: it needs no rendering.
@@ -1046,10 +1047,11 @@ fn run_width(
         );
         if hostile_now {
             // D7 (docs/EFFECT_CONTRACT_V1.md): output finiteness is checked once per block *per
-            // bank*, and a failing block zeroes that bank's output and resets its state -- every
-            // lane's, not only the failing one's, in most launch effects. So on the block the
-            // hostile words arrive in, the bank and its scalar instances may part by design: both
-            // must keep every word inside the bound, and the scenario ends there.
+            // bank*. Every launch effect recovers the failing lane alone (#1089-#1092) except the
+            // multiband, whose bank still zeroes and resets every lane. So on the block the
+            // hostile words arrive in, a bank and its scalar instances may part by design, and the
+            // allowance is the same for every effect: both must keep every word inside the bound,
+            // and the scenario ends there.
             if !shape.bypass {
                 for (who, planes) in [
                     ("bank", [&bank_left, &bank_right]),
@@ -1721,6 +1723,7 @@ fn bind_eligibility(
             backend,
             width,
             requests,
+            active_mask: width.full_mask(),
         }) {
             Err(error) if error.code == "effect.bank.requests" => coverage.malformed_refusals += 1,
             Err(error) => panic!(
@@ -1788,6 +1791,7 @@ fn bind_eligibility(
         backend,
         width,
         requests: &varied,
+        active_mask: width.full_mask(),
     });
     match (prepared, bound) {
         (Err(member_error), Err(bank_error)) => assert_eq!(
@@ -1987,6 +1991,7 @@ pub fn d7_report_violations(factory: &dyn NativeEffectFactory) -> Vec<String> {
             backend,
             width,
             requests: &requests,
+            active_mask: width.full_mask(),
         }) else {
             continue;
         };

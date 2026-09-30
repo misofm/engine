@@ -1072,6 +1072,23 @@ fn empty_mask<L: Lane>() -> L::Mask {
     L::zero().eq(L::splat(1.0))
 }
 
+/// The mask that selects every lane whose bit is set in `bits` (bit `l` is lane `l`), as
+/// [`nonfinite_lane_mask`] reports them. D7's failing path only.
+///
+/// One load and one compare against `+0.0`, so the mask is the backend's canonical form. Not an
+/// `or` of [`lane_mask`]s: each of those compares with a splatted `1.0`, and on Apple targets LLVM
+/// stores every such splat through `_memset_pattern16` (known defect #1018, whose per-crate
+/// ceilings `check-cross-targets.sh` holds); one flag vector per call needs none.
+fn lanes_mask<L: Lane>(bits: u32) -> L::Mask {
+    let mut flags = [0.0_f32; MAX_LANES];
+    for (lane, flag) in flags.iter_mut().enumerate().take(L::WIDTH) {
+        if bits & (1 << lane) != 0 {
+            *flag = -1.0;
+        }
+    }
+    L::load(&flags[..L::WIDTH]).lt(L::zero())
+}
+
 /// Writes `word` into the lanes `mask` selects, bitwise: each selected lane holds exactly `word`'s
 /// bits afterwards (`+0.0`, `-0.0`, subnormals and NaN payloads included), and every other lane
 /// keeps its own. One `select`, with no round trip through memory.
@@ -1741,6 +1758,58 @@ impl<L: Lane, const W: usize> Channel<L, W> {
         for section in &mut self.sections {
             section.state = SvfState::default();
         }
+    }
+
+    /// D7 recovery of one rejected block of this channel, lane by lane (issue #1089, console strip
+    /// P2b). Returns the lane bitmask it recovered.
+    ///
+    /// A lane recovers when any of its words in `io` fails the §4.4 bound
+    /// ([`nonfinite_lane_mask`]): every word of that lane becomes exactly `+0.0` and its two
+    /// integrators in every section become exactly `+0.0`, which is what `fill(0.0)` and
+    /// [`reset_states`](Self::reset_states) do to a one-lane instance. Every other lane keeps its
+    /// output words and its integrators bit for bit, because both writes are bitwise `select`s
+    /// through one lane mask. Coefficients and ramps are never touched.
+    ///
+    /// # Why lane by lane
+    ///
+    /// The recovery used to zero the whole plane and reset every lane's integrators, so one lane
+    /// that diverged silenced its bank-mates: a bank was not its per-node instances on a fault
+    /// block, and a bypassed lane, which still runs the wet path (#1087), could silence the enabled
+    /// lanes beside it (P1 verdict, M2). Decision 12's coupling rule forbids that: banking may
+    /// couple lanes' cost, never their bits. Per lane, a banked track recovers exactly when, and
+    /// exactly as, its per-node instance does, whatever its bank-mates hold. At `W = 1` this is the
+    /// whole-block recovery it replaced, word for word.
+    ///
+    /// # Padded lanes
+    ///
+    /// A padded lane is fed `+0.0` and starts at rest (`+0.0` integrators). Its words are a
+    /// clone's: designed, so `c1` is in `[0, 1)`, `a2 > 0`, `a3 >= 0`, `m0 >= 0` and no word is
+    /// `-0.0` ([`validate_rounded_svf`]). From `x = +0.0` and `ic1 = ic2 = +0.0`, every product in
+    /// [`svf_block`]'s frame body is a signed zero and every sum has a `+0.0` operand (`a2 * v3` in
+    /// `d1`, `a3 * v3` in `d2`, `m0 * x` in `y`), so under round-to-nearest the frame writes
+    /// `+0.0`, and `flush` leaves both integrators `+0.0`. An elided or dry section passes the
+    /// `+0.0` through. So a padded lane never fails the bound and is never recovered; were it
+    /// recovered, it would be left at `+0.0` at rest, and no other lane would see it.
+    ///
+    /// `#[inline(never)]`: this is the fault path, which a correct session never takes, and it
+    /// sits in the one `process_bank` body whose stationary loops the shipped module's V8 spill
+    /// gate holds (`check-web-audioworklet-v8-spill.py`). Inlined, its lane-mask build and
+    /// block-wide select changed TurboFan's allocation of the dual depth-one tail, which then
+    /// carried two values through stack slots (the #977 mechanism). Outlined, it is one call on a
+    /// branch the loops never reach, and it carries no `f32x4` arithmetic for the kernel roster.
+    #[inline(never)]
+    fn recover_failed_lanes(&mut self, io: &mut [f32]) -> u32 {
+        let failed = nonfinite_lane_mask::<L>(io);
+        debug_assert_ne!(failed, 0, "a rejected block names the lanes that failed it");
+        let lanes = lanes_mask::<L>(failed);
+        for frame in io.chunks_exact_mut(L::WIDTH) {
+            L::select(lanes, L::zero(), L::load(frame)).store(frame);
+        }
+        for section in &mut self.sections {
+            lane_put(&mut section.state.ic1, lanes, 0.0);
+            lane_put(&mut section.state.ic2, lanes, 0.0);
+        }
+        failed
     }
 
     /// Ends every ramp at its target and clears the integrators (a seek or a transport stop).
@@ -2785,6 +2854,17 @@ struct PreparedParametricEq<L: Lane, const W: usize> {
     initial_words: [[[EqSvfWords; EQ_SECTION_COUNT]; 2]; W],
     left: Channel<L, W>,
     right: Channel<L, W>,
+    /// Which lanes carry a member (issue #1089, console strip P2b). The scalar instance's one lane
+    /// and every lane of a full bank are active.
+    ///
+    /// A padded lane (`false`) holds a clone of an active member's prepared request, the caller
+    /// feeds it `+0.0` and discards its output (the padding contract on
+    /// `PrepareEffectBankRequest`). Nothing on the render path reads this array except the report:
+    /// a padded lane runs the same kernel as every other lane, its D7 recovery is its own like
+    /// every lane's (see [`Channel::recover_failed_lanes`]), and its report entry stays empty. The
+    /// control plane reads it to refuse a prepared target or a state restore addressed to a padded
+    /// lane, the two writes that could move it off `+0.0` at rest.
+    active: [bool; W],
     /// Issue #163 phase 4 item 1: the previous block proved this bank is at a silent fixed point.
     ///
     /// Set only by [`render`](Self::render), and only after it has *observed* -- not assumed --
@@ -2814,12 +2894,16 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
     ///
     /// Decoding is bounded and allocation-free. The target's coefficient words are copied into
     /// the existing ramp state; no semantic redesign occurs on this path.
+    ///
+    /// A padded lane carries no track, so it is outside the bank's capacity like a lane past its
+    /// width (issue #1089): a target there would start a ramp nobody asked for on a lane the
+    /// padding contract keeps at rest.
     fn apply_target_lane(
         &mut self,
         lane: usize,
         target: &PreparedEffectTarget,
     ) -> Result<(), EffectTargetError> {
-        if lane >= W || lane >= L::WIDTH {
+        if lane >= W || lane >= L::WIDTH || !self.active[lane] {
             return Err(EffectTargetError::Capacity);
         }
         let (section, channel, band, words) = control::decode_prepared_target(target)?;
@@ -2856,11 +2940,14 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
     /// cascade ends in its depth-one pass on an admitted plan, that pass has already judged every
     /// word as it stored it, and its verdict is used (issue #999; see [`interleave`]); every other
     /// block -- ramped, refused, all-live, an even live count, nothing live -- scans the plane
-    /// after the cascade. The verdict is the same either way, so the zeroing and the reset are too.
-    /// A rejected block is zeroed and the channel's integrators are cleared; coefficients and ramps
+    /// after the cascade. The verdict is the same either way, so the recovery is too.
+    /// A rejected block is recovered lane by lane ([`Channel::recover_failed_lanes`], issue
+    /// #1089): each lane that holds an out-of-bounds word is zeroed and has its integrators
+    /// cleared, and every other lane keeps its output and its state; coefficients and ramps
     /// survive, because a non-finite block is a fault report, not an automation event. The two
     /// channels are judged independently: they carry independent state and independent counters,
-    /// which is what dual-mono means here.
+    /// which is what dual-mono means here. The returned flags name the lanes each channel
+    /// recovered, padded lanes included; the bank's report drops the padded ones.
     ///
     /// `#[inline(always)]`, and [`render_mono`](Self::render_mono) with it: the stationary cascade
     /// is the EQ's arithmetic, and the shipped wasm artifact is gated on it living in the one
@@ -2925,9 +3012,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
             if passed {
                 continue;
             }
-            let mask = nonfinite_lane_mask::<L>(block);
-            block.fill(0.0);
-            channel.reset_states();
+            let mask = channel.recover_failed_lanes(block);
             for (lane, failed) in failures[index].iter_mut().enumerate().take(W) {
                 *failed = mask & (1 << lane) != 0;
             }
@@ -2955,7 +3040,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
     /// the same predicate the dual body evaluates -- see [`process_channels_mono`] for why the
     /// two channels' `remaining` arrays and identity flags agree. `failures[1]` is copied from
     /// `failures[0]`, because the right plane the seam is about to write is this left plane and a
-    /// dual run would have rejected it on the same words.
+    /// dual run would have rejected it on the same words, on the same lanes.
     #[inline(always)]
     fn render_mono(&mut self, left: &mut [f32], frames: usize) -> [[bool; MAX_LANES]; 2] {
         let mut failures = [[false; MAX_LANES]; 2];
@@ -2971,9 +3056,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         }
         let within = process_channels_mono(&mut self.left, left, frames, stationary);
         if !within.unwrap_or_else(|| check_block::<L>(left)) {
-            let mask = nonfinite_lane_mask::<L>(left);
-            left.fill(0.0);
-            self.left.reset_states();
+            let mask = self.left.recover_failed_lanes(left);
             for (lane, failed) in failures[0].iter_mut().enumerate().take(W) {
                 *failed = mask & (1 << lane) != 0;
             }
@@ -3119,13 +3202,21 @@ fn physical_targets(
     Ok(sections)
 }
 
-/// Builds a prepared EQ of width `W` from one request per track.
+/// Builds a prepared EQ of width `W` from one request per lane, and the lanes `active_mask` says
+/// carry a member.
+///
+/// A padded lane is prepared from its request like any other lane: the request is a clone of an
+/// active member's, so its words are designed, finite and stable, and on `+0.0` input from rest
+/// they write exactly `+0.0` and leave the integrators exactly `+0.0` (see
+/// [`Channel::recover_failed_lanes`]).
 fn prepare_width<L: Lane, const W: usize>(
     metadata: PreparedEffectMetadata,
     width: BankWidth,
     requests: &[PrepareEffectRequest<'_>],
+    active_mask: &[bool],
 ) -> Result<PreparedParametricEq<L, W>, EffectPrepareError> {
     debug_assert_eq!(L::WIDTH, W);
+    debug_assert_eq!(active_mask.len(), W);
     let sample_rate = SampleRateHz(metadata.sample_rate);
     let mut initial = [[[BandTarget {
         enabled: false,
@@ -3167,6 +3258,7 @@ fn prepare_width<L: Lane, const W: usize>(
             core::array::from_fn(|track| initial[track][1]),
             core::array::from_fn(|track| initial_words[track][1]),
         ),
+        active: core::array::from_fn(|lane| active_mask.get(lane).copied().unwrap_or(false)),
         // Nothing has been observed yet, so nothing is claimed.
         silent_fixed_point: false,
     })
@@ -3186,6 +3278,7 @@ impl NativeEffectFactory for ParametricEqFactory {
             metadata,
             BankWidth::Four,
             &[request],
+            &[true],
         )?))
     }
 
@@ -3201,42 +3294,64 @@ impl NativeEffectFactory for ParametricEqFactory {
         &self,
         request: PrepareEffectBankRequest<'_>,
     ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
-        // Issue #95: a self-contradicting shape is a contract violation and a typed error; a
-        // width this build does not execute is a capability gap and a legal `Ok(None)`. This
-        // crate used to answer `Ok(None)` to both, which was the other half of the wave-2
-        // divergence (`NativeEffectFactory::bind_homogeneous_bank` states the frozen rule).
-        request.validate_shape()?;
-        let lanes = request.width.lanes() as usize;
-        if lanes != Backend::current().width() {
+        bind_bank(request, Backend::current().width())
+    }
+}
+
+/// [`ParametricEqFactory::bind_homogeneous_bank`] for a build that executes banks of
+/// `native_lanes` lanes.
+///
+/// The product passes [`Backend::current`]'s width, so a build binds only the width it ships.
+/// The unit tests also pass the other width: `Simd4` and `Simd8` both execute on x86-64-v3, and
+/// that is how the four-lane padded bank is exercised on an x86 host (issue #1089).
+fn bind_bank(
+    request: PrepareEffectBankRequest<'_>,
+    native_lanes: usize,
+) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+    // Issue #95: a self-contradicting shape is a contract violation and a typed error; a
+    // width this build does not execute is a capability gap and a legal `Ok(None)`. This
+    // crate used to answer `Ok(None)` to both, which was the other half of the wave-2
+    // divergence (`NativeEffectFactory::bind_homogeneous_bank` states the frozen rule).
+    request.validate_shape()?;
+    let lanes = request.width.lanes() as usize;
+    if lanes != native_lanes {
+        return Ok(None);
+    }
+    let first = request
+        .requests
+        .first()
+        .copied()
+        .ok_or(EffectPrepareError {
+            code: "effect.bank.requests",
+        })?;
+    let metadata = expected_prepared_metadata(&PARAMETRIC_EQ_DESCRIPTOR, first)?;
+    for item in request.requests.iter().copied() {
+        let candidate = expected_prepared_metadata(&PARAMETRIC_EQ_DESCRIPTOR, item)?;
+        if candidate.program_key() != metadata.program_key() {
             return Ok(None);
         }
-        let first = request
-            .requests
-            .first()
-            .copied()
-            .ok_or(EffectPrepareError {
-                code: "effect.bank.requests",
-            })?;
-        let metadata = expected_prepared_metadata(self.descriptor(), first)?;
-        for item in request.requests.iter().copied() {
-            let candidate = expected_prepared_metadata(self.descriptor(), item)?;
-            if candidate.program_key() != metadata.program_key() {
-                return Ok(None);
-            }
-        }
-        Ok(Some(match request.width {
-            BankWidth::Four => Box::new(prepare_width::<Simd4, 4>(
-                metadata,
-                request.width,
-                request.requests,
-            )?) as Box<dyn PreparedNativeEffectBank>,
-            BankWidth::Eight => Box::new(prepare_width::<Simd8, 8>(
-                metadata,
-                request.width,
-                request.requests,
-            )?) as Box<dyn PreparedNativeEffectBank>,
-        }))
     }
+    // Issue #1089 (console strip P2b): the EQ accepts a padded request. Every lane's request, a
+    // padded lane's clone included, has been validated above, so the decision to bind is taken
+    // after validation (#1070's order) and a malformed member is still refused. The mask goes to
+    // the bank, which keeps a padded lane out of every report and refuses the two writes that could
+    // move it off `+0.0` at rest; the padding contract on `PrepareEffectBankRequest` lists the
+    // clauses, and `Channel::recover_failed_lanes` is why a padded lane's bits and an active lane's
+    // never meet.
+    Ok(Some(match request.width {
+        BankWidth::Four => Box::new(prepare_width::<Simd4, 4>(
+            metadata,
+            request.width,
+            request.requests,
+            request.active_mask,
+        )?) as Box<dyn PreparedNativeEffectBank>,
+        BankWidth::Eight => Box::new(prepare_width::<Simd8, 8>(
+            metadata,
+            request.width,
+            request.requests,
+            request.active_mask,
+        )?) as Box<dyn PreparedNativeEffectBank>,
+    }))
 }
 
 /// Maps the shared codec's error onto the contract's.
@@ -3557,8 +3672,17 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
         version: u32,
         input: StatePayloadInput<'_>,
     ) -> Result<(), StatePayloadError> {
+        // Issue #1089: a padded lane carries no track, and a restore is the one write that could
+        // move its integrators off the `+0.0` rest the padding contract holds it at. A snapshot
+        // only reads, so it stays open on every lane.
+        let track = bank_track_index(track_index, W)?;
+        if !self.active[track] {
+            return Err(StatePayloadError {
+                code: "effect.bank.track",
+            });
+        }
         // A refusal is a state-preserving no-op, including the fixed-point witness.
-        let result = self.restore_track(bank_track_index(track_index, W)?, version, input);
+        let result = self.restore_track(track, version, input);
         if result.is_ok() {
             self.silent_fixed_point = false;
         }
@@ -3656,7 +3780,9 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         if !block.automation.is_empty() {
             self.silent_fixed_point = false;
         }
-        for track in 0..W {
+        // Issue #1089: a padded lane carries no track, so nothing is charged to it and its entry
+        // stays empty, here and after the render (the padding contract's D7 clause).
+        for track in (0..W).filter(|&track| self.active[track]) {
             let start = block.automation_offsets[track] as usize;
             let end = block.automation_offsets[track + 1] as usize;
             // Raw semantic EQ spans are refused per addressed bank lane. The bank continues
@@ -3673,8 +3799,10 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
             self.render(block.left, block.right, frames)
         };
         for (track, entry) in report.reports.iter_mut().enumerate().take(W) {
-            entry.nonfinite_left_blocks = u64::from(failures[0][track]);
-            entry.nonfinite_right_blocks = u64::from(failures[1][track]);
+            if self.active[track] {
+                entry.nonfinite_left_blocks = u64::from(failures[0][track]);
+                entry.nonfinite_right_blocks = u64::from(failures[1][track]);
+            }
         }
         report
     }
@@ -6871,10 +6999,10 @@ mod ramping_elision {
     // Gate 1: the bank differential.
     // ---------------------------------------------------------------------------------------
 
-    struct Rng(u64);
+    pub(super) struct Rng(pub(super) u64);
 
     impl Rng {
-        fn next(&mut self) -> u64 {
+        pub(super) fn next(&mut self) -> u64 {
             let mut x = self.0;
             x ^= x >> 12;
             x ^= x << 25;
@@ -6882,16 +7010,16 @@ mod ramping_elision {
             self.0 = x;
             x.wrapping_mul(0x2545_f491_4f6c_dd1d)
         }
-        fn unit(&mut self) -> f32 {
+        pub(super) fn unit(&mut self) -> f32 {
             (self.next() >> 40) as f32 / (1_u64 << 24) as f32
         }
-        fn below(&mut self, n: usize) -> usize {
+        pub(super) fn below(&mut self, n: usize) -> usize {
             (self.next() % n as u64) as usize
         }
-        fn chance(&mut self, p: f32) -> bool {
+        pub(super) fn chance(&mut self, p: f32) -> bool {
             self.unit() < p
         }
-        fn log(&mut self, low: f32, high: f32) -> f32 {
+        pub(super) fn log(&mut self, low: f32, high: f32) -> f32 {
             math::expf(math::logf(low) + self.unit() * (math::logf(high) - math::logf(low)))
                 .clamp(low, high)
         }
@@ -6899,7 +7027,7 @@ mod ramping_elision {
 
     /// One lane's value for descriptor index `index`, from the EQ's domains, with the domain ends
     /// (VERIFY-AUTOMATION A1's boundary targets) drawn often.
-    fn draw(rng: &mut Rng, index: usize) -> f32 {
+    pub(super) fn draw(rng: &mut Rng, index: usize) -> f32 {
         let edge = rng.chance(0.2);
         if index < 24 {
             match index % 6 {
@@ -6926,11 +7054,11 @@ mod ramping_elision {
     }
 
     /// Automatable descriptor indices: band frequency, gain, Q and slope, and every cut parameter.
-    fn automatable(index: usize) -> bool {
+    pub(super) fn automatable(index: usize) -> bool {
         index >= 24 || index % 6 >= 2
     }
 
-    fn request(values: &[InitialParameterValue], rate: u32) -> PrepareEffectRequest<'_> {
+    pub(super) fn request(values: &[InitialParameterValue], rate: u32) -> PrepareEffectRequest<'_> {
         PrepareEffectRequest {
             sample_rate: rate,
             quantum: QUANTUM as u32,
@@ -6949,7 +7077,7 @@ mod ramping_elision {
         }
     }
 
-    fn hostile(rng: &mut Rng, profile: usize) -> f32 {
+    pub(super) fn hostile(rng: &mut Rng, profile: usize) -> f32 {
         match profile {
             0 => 2.0 * rng.unit() - 1.0,
             1 => 0.0,
@@ -7083,7 +7211,8 @@ mod ramping_elision {
             };
             Self {
                 eq: on_path(path, || {
-                    prepare_width::<L, W>(metadata, width, requests).expect("preparation")
+                    prepare_width::<L, W>(metadata, width, requests, &[true; W])
+                        .expect("preparation")
                 }),
                 path,
             }
@@ -7405,7 +7534,8 @@ mod ramping_elision {
             BankWidth::Four
         };
         if metadata.is_err()
-            || prepare_width::<L, W>(metadata.expect("checked"), width, &requests).is_err()
+            || prepare_width::<L, W>(metadata.expect("checked"), width, &requests, &[true; W])
+                .is_err()
         {
             return;
         }
@@ -7942,7 +8072,8 @@ mod stationary_subnormal {
         } else {
             BankWidth::Four
         };
-        let prepare = || prepare_width::<L, W>(metadata, width_tag, &requests).expect("prepared");
+        let prepare =
+            || prepare_width::<L, W>(metadata, width_tag, &requests, &[true; W]).expect("prepared");
         let lane = W - 1;
         let payload = {
             let eq = prepare();
@@ -8167,5 +8298,1262 @@ mod stationary_subnormal {
         flush_eps_boundary::<f32, 1>("Scalar");
         flush_eps_boundary::<Simd4, 4>("Simd4");
         flush_eps_boundary::<Simd8, 8>("Simd8");
+    }
+}
+
+/// Issue #1089 (console strip P2b): a padded EQ bank renders its per-node instances.
+///
+/// Every bank here is bound through [`bind_bank`], the body of `bind_homogeneous_bank`, at `Simd4`
+/// and at `Simd8`. Both execute on x86-64-v3, so an x86 host runs the four-lane padded bank as well
+/// as the eight-lane one, and an AArch64 or `simd128` build runs its own width natively. After the
+/// bind, everything goes through the contract calls, driven the way `rack::BankChain` drives a
+/// bank: one resident block per plane, zero-filled at bind; a member's lane written before each
+/// block and read after it; a padded lane never written or read by the caller, so it is fed
+/// whatever the bank left in it. The per-node oracle is `ParametricEqFactory::prepare`, one scalar
+/// instance per member, compared by class-A words (every NaN one value, #1065).
+#[cfg(test)]
+mod padded_banks {
+    use super::ramping_elision::{Rng, automatable, draw, hostile, request};
+    use super::*;
+    use dsp_reference::class_a;
+    use effect_contract::{
+        BypassShunt, EffectBankProcessBlock, EffectTargetRequest, NativeEffectTargetPreparation,
+        PreparedAutomationSpan,
+    };
+
+    const QUANTUM: usize = 128;
+    const LAUNCH_RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
+
+    /// The bank width, and the backend that agrees with it, for `lanes` lanes.
+    fn width(lanes: usize) -> (BankWidth, Backend) {
+        if lanes == 8 {
+            (BankWidth::Eight, Backend::Simd8)
+        } else {
+            (BankWidth::Four, Backend::Simd4)
+        }
+    }
+
+    /// Binds one bank of `lanes` lanes through the production bind body.
+    fn bind(
+        lanes: usize,
+        requests: &[PrepareEffectRequest<'_>],
+        mask: &[bool],
+    ) -> Box<dyn PreparedNativeEffectBank> {
+        let (width, backend) = width(lanes);
+        bind_bank(
+            PrepareEffectBankRequest {
+                backend,
+                width,
+                requests,
+                active_mask: mask,
+            },
+            lanes,
+        )
+        .expect("a well-formed padded request")
+        .expect("the EQ binds a padded bank")
+    }
+
+    /// One lane's requests for a bank: `member_of[lane]` names the member whose values it carries,
+    /// a clone's source on a padded lane.
+    fn requests<'a>(
+        values: &'a [Vec<InitialParameterValue>],
+        member_of: &[usize],
+        rate: u32,
+    ) -> Vec<PrepareEffectRequest<'a>> {
+        member_of
+            .iter()
+            .map(|&member| request(&values[member], rate))
+            .collect()
+    }
+
+    /// A contract payload: `[common, left, right]`.
+    type Payload = [Vec<u8>; 3];
+
+    fn empty_payload() -> Payload {
+        [
+            vec![0; STATE_SIZES.common],
+            vec![0; STATE_SIZES.left],
+            vec![0; STATE_SIZES.right],
+        ]
+    }
+
+    fn lane_payload(bank: &dyn PreparedNativeEffectBank, lane: usize) -> Payload {
+        let [mut common, mut left, mut right] = empty_payload();
+        bank.snapshot_track_state_payload(
+            lane as u32,
+            StatePayloadOutput {
+                common: &mut common,
+                left: &mut left,
+                right: &mut right,
+            },
+        )
+        .expect("a lane snapshot");
+        [common, left, right]
+    }
+
+    fn scalar_payload(effect: &dyn PreparedNativeEffect) -> Payload {
+        let [mut common, mut left, mut right] = empty_payload();
+        effect
+            .snapshot_state_payload(StatePayloadOutput {
+                common: &mut common,
+                left: &mut left,
+                right: &mut right,
+            })
+            .expect("a scalar snapshot");
+        [common, left, right]
+    }
+
+    /// The first `sections` sections of a payload (common, then left, then right) as class-A words.
+    fn class_a_words(payload: &Payload, sections: usize) -> Vec<[u8; 4]> {
+        payload[..sections]
+            .iter()
+            .flat_map(|section| class_a::le_words(section))
+            .collect()
+    }
+
+    /// Restores `payload` into one bank lane.
+    fn restore_lane(
+        bank: &mut dyn PreparedNativeEffectBank,
+        lane: usize,
+        payload: &Payload,
+    ) -> Result<(), StatePayloadError> {
+        bank.restore_track_state_payload(
+            lane as u32,
+            STATE_LAYOUT_VERSION,
+            StatePayloadInput {
+                common: &payload[0],
+                left: &payload[1],
+                right: &payload[2],
+            },
+        )
+    }
+
+    /// Renders the resident planes' first `frames` frames through one bank.
+    #[allow(clippy::too_many_arguments)]
+    fn render(
+        bank: &mut dyn PreparedNativeEffectBank,
+        planes: &mut [Vec<f32>; 2],
+        lanes: usize,
+        frames: usize,
+        first: u64,
+        mono: bool,
+        automation: &[PreparedAutomationSpan],
+        offsets: &[u32],
+    ) -> BankProcessReport {
+        let (width, _) = width(lanes);
+        let [left, right] = planes;
+        let block = EffectBankProcessBlock::new(
+            &mut left[..frames * lanes],
+            &mut right[..frames * lanes],
+            None,
+            frames as u32,
+            width,
+            first,
+            automation,
+            offsets,
+            QUANTUM as u32,
+        )
+        .expect("bank block");
+        if mono {
+            bank.process_bank_mono(block)
+        } else {
+            bank.process_bank(block)
+        }
+    }
+
+    /// Renders one block of one member through its scalar instance.
+    fn render_scalar(
+        effect: &mut dyn PreparedNativeEffect,
+        input: &[Vec<f32>; 2],
+        first: u64,
+    ) -> ([Vec<f32>; 2], ProcessReport) {
+        let (mut left, mut right) = (input[0].clone(), input[1].clone());
+        let report = effect.process(
+            EffectProcessBlock::new(&mut left, &mut right, None, first, &[], QUANTUM as u32)
+                .expect("scalar block"),
+        );
+        ([left, right], report)
+    }
+
+    /// Writes each member's input into its lane of the resident planes, frame by frame.
+    fn gather(
+        planes: &mut [Vec<f32>; 2],
+        lanes: usize,
+        active: &[usize],
+        inputs: &[[Vec<f32>; 2]],
+    ) {
+        for (&lane, input) in active.iter().zip(inputs) {
+            for (plane, samples) in planes.iter_mut().zip(input) {
+                for (frame, sample) in samples.iter().enumerate() {
+                    plane[frame * lanes + lane] = *sample;
+                }
+            }
+        }
+    }
+
+    /// Lane `lane` of the resident planes' first `frames` frames, one channel.
+    fn column(plane: &[f32], lanes: usize, lane: usize, frames: usize) -> Vec<f32> {
+        (0..frames)
+            .map(|frame| plane[frame * lanes + lane])
+            .collect()
+    }
+
+    /// One track's prepare-time values, drawn from the EQ's domains per channel. A band's
+    /// enable and family are shared by both channels (a prepared target keeps them), the rest are
+    /// drawn per channel on an asymmetric track.
+    fn configuration(rng: &mut Rng) -> Vec<InitialParameterValue> {
+        let parameters = PARAMETRIC_EQ_DESCRIPTOR.parameters.len();
+        let symmetric = rng.chance(0.4);
+        let mut values = Vec::with_capacity(parameters * 2);
+        for index in 0..parameters {
+            let left = draw(rng, index);
+            let right = if symmetric || (index < 24 && index % 6 < 2) {
+                left
+            } else {
+                draw(rng, index)
+            };
+            for (channel, value) in [
+                (ParameterChannel::Left, left),
+                (ParameterChannel::Right, right),
+            ] {
+                values.push(InitialParameterValue {
+                    parameter_index: index as u32,
+                    channel,
+                    value,
+                });
+            }
+        }
+        values
+    }
+
+    /// A 1 kHz sine at `amplitude`, from sample `first` at `rate`, with no `-0.0`.
+    fn sine(amplitude: f64, first: u64, frames: usize, rate: u32, phase: f64) -> Vec<f32> {
+        (0..frames)
+            .map(|frame| {
+                let position = (first + frame as u64) as f64;
+                let value = (amplitude
+                    * math::sin(
+                        core::f64::consts::TAU * 1_000.0 * position / f64::from(rate) + phase,
+                    )) as f32;
+                value + 0.0
+            })
+            .collect()
+    }
+
+    /// What the random differential reached, so that a run which never exercised a leg fails.
+    #[derive(Debug, Default)]
+    struct Reach {
+        /// Scenarios run, by member count.
+        scenarios: [u64; MAX_LANES + 1],
+        mono: u64,
+        blocks: u64,
+        retargets: u64,
+        resets: u64,
+        restores: u64,
+        /// Blocks on which one member recovered (D7) and another member of the bank did not.
+        isolated_recoveries: u64,
+    }
+
+    const BLOCKS: u64 = 32;
+
+    /// Seeds per width and member count: 6 in a dev build, 24 in release.
+    fn seeds() -> u64 {
+        if cfg!(debug_assertions) { 6 } else { 24 }
+    }
+
+    /// One scenario: `members` random tracks, one scalar instance each, and the same members bound
+    /// twice into a bank of `lanes` lanes, padded with clones of different members (gate 2).
+    #[allow(clippy::too_many_lines)]
+    fn scenario(lanes: usize, members: usize, seed: u64, reach: &mut Reach) {
+        let mut rng =
+            Rng((seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (lanes * 16 + members) as u64) | 1);
+        let rate = LAUNCH_RATES[rng.below(LAUNCH_RATES.len())];
+        let mono = rng.chance(0.3);
+        let parameters = PARAMETRIC_EQ_DESCRIPTOR.parameters.len();
+        let initial: Vec<Vec<InitialParameterValue>> =
+            (0..members).map(|_| configuration(&mut rng)).collect();
+        let factory = ParametricEqFactory;
+        // A draw whose designs are not all legal is not a scenario.
+        let Ok(mut scalars) = initial
+            .iter()
+            .map(|values| factory.prepare(request(values, rate)))
+            .collect::<Result<Vec<_>, _>>()
+        else {
+            return;
+        };
+        // Members first, the only layout the contract admits (P2a verdict, L3).
+        let active: Vec<usize> = (0..members).collect();
+        let mask: Vec<bool> = (0..lanes).map(|lane| lane < members).collect();
+        let padded: Vec<usize> = (members..lanes).collect();
+        // Gate 2: every padded lane of the first bank clones one member, and every padded lane of
+        // the second clones a member other than that one (when there is another).
+        let source = rng.below(members);
+        let other = |rng: &mut Rng| {
+            if members > 1 {
+                (source + 1 + rng.below(members - 1)) % members
+            } else {
+                source
+            }
+        };
+        let mut member_of = [
+            vec![source; lanes],
+            (0..lanes).map(|_| other(&mut rng)).collect(),
+        ];
+        for layout in &mut member_of {
+            for (member, &lane) in active.iter().enumerate() {
+                layout[lane] = member;
+            }
+        }
+        let mut banks = member_of
+            .each_ref()
+            .map(|layout| bind(lanes, &requests(&initial, layout, rate), &mask));
+        let at_bind: [Vec<Payload>; 2] = banks.each_ref().map(|bank| {
+            padded
+                .iter()
+                .map(|&lane| lane_payload(bank.as_ref(), lane))
+                .collect()
+        });
+        let mut planes: [[Vec<f32>; 2]; 2] =
+            core::array::from_fn(|_| [vec![0.0; QUANTUM * lanes], vec![0.0; QUANTUM * lanes]]);
+        let offsets = vec![0_u32; lanes + 1];
+        let mut values = initial.clone();
+        let mut first = 0_u64;
+        for block in 0..BLOCKS {
+            let context = format!(
+                "{lanes} lanes, {members} members, seed {seed}, block {block}, mono {mono}"
+            );
+            // Prepared targets on random members: ramps, some of them mid-ramp.
+            if rng.chance(0.4) {
+                for _ in 0..1 + rng.below(3) {
+                    let member = rng.below(members);
+                    let mut index = rng.below(parameters);
+                    while !automatable(index) {
+                        index = rng.below(parameters);
+                    }
+                    let value = draw(&mut rng, index);
+                    let sides: &[usize] = if rng.chance(0.5) {
+                        &[0, 1]
+                    } else if rng.chance(0.5) {
+                        &[0]
+                    } else {
+                        &[1]
+                    };
+                    let mut candidate = values[member].clone();
+                    let mut changed = vec![false; parameters * 2];
+                    for &side in sides {
+                        candidate[index * 2 + side].value = value;
+                        changed[index * 2 + side] = true;
+                    }
+                    let mut targets = [PreparedEffectTarget {
+                        slot: 0,
+                        channel: ParameterChannel::Left,
+                        words: [0; effect_contract::PREPARED_EFFECT_TARGET_WORDS],
+                    }; EQ_SECTION_COUNT * 2];
+                    let Ok(count) = factory.prepare_targets(
+                        EffectTargetRequest {
+                            sample_rate: rate,
+                            values: &candidate,
+                            changed: &changed,
+                        },
+                        &mut targets,
+                    ) else {
+                        continue;
+                    };
+                    values[member] = candidate;
+                    for target in &targets[..count] {
+                        let expected = scalars[member].apply_prepared_target(target);
+                        for bank in &mut banks {
+                            assert_eq!(
+                                bank.apply_prepared_target_lane(active[member], target),
+                                expected,
+                                "{context}: a target on member {member}"
+                            );
+                        }
+                        reach.retargets += u64::from(expected.is_ok());
+                    }
+                }
+            }
+            if rng.chance(0.03) {
+                let kind = if rng.chance(0.5) {
+                    ResetKind::DiscontinuityKeepParameters
+                } else {
+                    values.clone_from(&initial);
+                    ResetKind::FullToDefaults
+                };
+                for scalar in &mut scalars {
+                    scalar.reset(kind);
+                }
+                for bank in &mut banks {
+                    bank.reset(kind);
+                }
+                reach.resets += 1;
+            }
+            // A member's own state with one integrator at `+-f32::MAX`, the largest word a restore
+            // admits: a live section turns it into a non-finite block on that lane alone.
+            if rng.chance(0.06) {
+                let member = rng.below(members);
+                let mut payload = scalar_payload(scalars[member].as_ref());
+                let side = if mono { 1 } else { 1 + rng.below(2) };
+                let word = rng.below(EQ_SECTION_COUNT) * STATE_WORDS_PER_BAND + rng.below(2);
+                let planted = if rng.chance(0.5) { f32::MAX } else { -f32::MAX };
+                payload[side][word * 4..word * 4 + 4]
+                    .copy_from_slice(&planted.to_bits().to_le_bytes());
+                let expected = scalars[member].restore_state_payload(
+                    STATE_LAYOUT_VERSION,
+                    StatePayloadInput {
+                        common: &payload[0],
+                        left: &payload[1],
+                        right: &payload[2],
+                    },
+                );
+                for bank in &mut banks {
+                    assert_eq!(
+                        restore_lane(bank.as_mut(), active[member], &payload),
+                        expected,
+                        "{context}: a restore on member {member}"
+                    );
+                }
+                reach.restores += u64::from(expected.is_ok());
+            }
+            // Each member draws its own input family, so one lane can fault while its bank-mates
+            // play: hostile words (`-0.0`, subnormals, non-finite, the ceiling) now and then, and a
+            // `9.5e29` sine that any boost carries past the §4.4 bound.
+            let frames = if rng.chance(0.6) {
+                QUANTUM
+            } else {
+                1 + rng.below(QUANTUM)
+            };
+            let inputs: Vec<[Vec<f32>; 2]> = (0..members)
+                .map(|_| {
+                    let profile = if rng.chance(0.75) {
+                        [0, 1, 5][rng.below(3)]
+                    } else {
+                        [2, 3, 4, 6, 7][rng.below(5)]
+                    };
+                    let plane = |rng: &mut Rng| -> Vec<f32> {
+                        if profile == 7 {
+                            let phase = f64::from(rng.unit());
+                            sine(9.5e29, first, frames, rate, phase)
+                        } else {
+                            (0..frames).map(|_| hostile(rng, profile)).collect()
+                        }
+                    };
+                    let left = plane(&mut rng);
+                    let right = if mono { left.clone() } else { plane(&mut rng) };
+                    [left, right]
+                })
+                .collect();
+            let expected: Vec<([Vec<f32>; 2], ProcessReport)> = scalars
+                .iter_mut()
+                .zip(&inputs)
+                .map(|(scalar, input)| render_scalar(scalar.as_mut(), input, first))
+                .collect();
+            let recovered = |report: &ProcessReport| {
+                report.nonfinite_left_blocks + report.nonfinite_right_blocks > 0
+            };
+            let tripped = expected
+                .iter()
+                .filter(|(_, report)| recovered(report))
+                .count();
+            reach.isolated_recoveries += u64::from(tripped > 0 && tripped < members);
+            let channels = if mono { 1 } else { 2 };
+            let sections = if mono { 2 } else { 3 };
+            for (index, (bank, planes)) in banks.iter_mut().zip(&mut planes).enumerate() {
+                gather(planes, lanes, &active, &inputs);
+                let report = render(
+                    bank.as_mut(),
+                    planes,
+                    lanes,
+                    frames,
+                    first,
+                    mono,
+                    &[],
+                    &offsets,
+                );
+                for (member, &lane) in active.iter().enumerate() {
+                    let (output, scalar) = &expected[member];
+                    for (channel, plane) in planes.iter().enumerate().take(channels) {
+                        let banked = column(plane, lanes, lane, frames);
+                        if let Some(frame) = (0..frames)
+                            .find(|&frame| !class_a::same(banked[frame], output[channel][frame]))
+                        {
+                            panic!(
+                                "{context}: bank {index}, member {member} on lane {lane}, channel \
+                                 {channel}, frame {frame}: the bank rendered {:#010x} where its \
+                                 per-node instance rendered {:#010x}",
+                                banked[frame].to_bits(),
+                                output[channel][frame].to_bits()
+                            );
+                        }
+                    }
+                    let entry = report.reports[lane];
+                    let right = if mono {
+                        scalar.nonfinite_left_blocks
+                    } else {
+                        scalar.nonfinite_right_blocks
+                    };
+                    assert_eq!(
+                        (
+                            entry.invalid_spans,
+                            entry.nonfinite_left_blocks,
+                            entry.nonfinite_right_blocks
+                        ),
+                        (0, scalar.nonfinite_left_blocks, right),
+                        "{context}: bank {index}, member {member} on lane {lane}: the report"
+                    );
+                    assert!(
+                        class_a_words(&lane_payload(bank.as_ref(), lane), sections)
+                            == class_a_words(&scalar_payload(scalars[member].as_ref()), sections),
+                        "{context}: bank {index}, member {member} on lane {lane}: the state"
+                    );
+                }
+                // Gate 3: a padded lane is fed only what the bank left in it, writes exactly
+                // `+0.0`, is never reported, and its state never moves from where the bind put it.
+                for (slot, &lane) in padded.iter().enumerate() {
+                    for (channel, plane) in planes.iter().enumerate().take(channels) {
+                        assert!(
+                            column(plane, lanes, lane, frames)
+                                .iter()
+                                .all(|word| word.to_bits() == 0),
+                            "{context}: bank {index}, padded lane {lane}, channel {channel}: a \
+                             word other than +0.0"
+                        );
+                    }
+                    assert_eq!(
+                        report.reports[lane],
+                        ProcessReport::default(),
+                        "{context}: bank {index}, padded lane {lane} was reported"
+                    );
+                    assert!(
+                        lane_payload(bank.as_ref(), lane) == at_bind[index][slot],
+                        "{context}: bank {index}, padded lane {lane}: the state moved"
+                    );
+                }
+            }
+            first += frames as u64;
+            reach.blocks += 1;
+        }
+        reach.scenarios[members] += 1;
+        reach.mono += u64::from(mono);
+    }
+
+    /// Gates 1 to 4 at random: for every member count `1..=W` at `Simd4` and at `Simd8`, a padded
+    /// bank's members render their per-node instances' bits, reports and states, whichever member
+    /// its padded lanes clone.
+    ///
+    /// Random configurations and asymmetric channels, random prepared targets (ramps, some cut
+    /// short by another), resets, restores of `+-f32::MAX` integrators, ragged blocks, dual and
+    /// collapsed bodies, and per-member hostile input: `-0.0`,
+    /// subnormals, non-finite words, the ceiling itself, and a `9.5e29` sine that a boost carries
+    /// past the bound, so members recover (D7) alone while their bank-mates play. Full banks
+    /// (`members == W`) run as the control.
+    ///
+    /// Red if a D7 recovery reaches past the lanes that failed (a bank-mate is silenced where its
+    /// per-node instance plays), if an active lane's design or state reads a padded lane's clone
+    /// (the two banks part), if a padded lane writes anything but `+0.0`, moves its state, or is
+    /// reported, or if the bind declines a padded request (the `expect` in `bind`).
+    #[test]
+    fn a_padded_bank_renders_its_per_node_instances() {
+        for lanes in [4, 8] {
+            let mut reach = Reach::default();
+            for members in 1..=lanes {
+                for seed in 0..seeds() {
+                    scenario(lanes, members, seed, &mut reach);
+                }
+            }
+            println!("#1089 padded-bank differential, {lanes} lanes: {reach:?}");
+            assert!(
+                reach.scenarios[1..=lanes].iter().all(|count| *count > 0),
+                "{lanes} lanes: every member count must run a scenario: {reach:?}"
+            );
+            assert!(
+                reach.mono > 0
+                    && reach.retargets > 0
+                    && reach.resets > 0
+                    && reach.restores > 0
+                    && reach.isolated_recoveries > 0,
+                "{lanes} lanes: the differential must reach every leg: {reach:?}"
+            );
+        }
+    }
+
+    /// Gate 3 (P2a verdict, L4): a padded lane fed `+0.0` writes exactly `+0.0` -- never `-0.0`,
+    /// never a subnormal -- and keeps every integrator exactly `+0.0`, finite and at rest, block
+    /// after block, whatever design it clones and whatever schedule its bank takes.
+    ///
+    /// Every band family, at both gain extremes and both Q extremes, on all four bands, with both
+    /// cuts on and the right channel detuned, cloned into every padded lane of a one-member bank at
+    /// both widths. The member drives the bank through each schedule it has: stationary and elided
+    /// (quiet music), refused (a `-0.0` word, then a non-finite one), ramping (a prepared target on
+    /// the member mid-run, so every lane runs the ramped kernel and the padded ones with a `+0.0`
+    /// increment) and faulting (a `9.5e29` sine, D7). `Channel::recover_failed_lanes` states why
+    /// the frame body writes `+0.0` from `+0.0` for every designed word; this is that claim,
+    /// measured.
+    ///
+    /// Red if a padded lane is not at rest when bound, or if any path writes it a signed zero or a
+    /// word other than `+0.0` (a padded lane's output feeds the next slot of a chain and its own
+    /// next block, so a `-0.0` there would travel).
+    #[test]
+    fn a_padded_lane_fed_positive_zero_writes_positive_zero_at_rest() {
+        let rate = 48_000;
+        let parameters = PARAMETRIC_EQ_DESCRIPTOR.parameters.len();
+        let mut blocks = 0_u64;
+        for lanes in [4, 8] {
+            for kind in 1..=6_u32 {
+                for (gain, q) in [(-24.0, 0.1), (24.0, 18.0), (-24.0, 18.0), (24.0, 0.1)] {
+                    let mut values = Vec::with_capacity(parameters * 2);
+                    for index in 0..parameters {
+                        for (side, channel) in [ParameterChannel::Left, ParameterChannel::Right]
+                            .into_iter()
+                            .enumerate()
+                        {
+                            let detune = 1.0 + 0.1 * side as f32;
+                            let value = match (index < 24, index % 6, index) {
+                                (true, 0, _) => 1.0,
+                                (true, 1, _) => kind as f32,
+                                (true, 2, _) => 200.0 * (1 + index / 6) as f32 * detune,
+                                (true, 3, _) => gain,
+                                (true, 4, _) => q,
+                                (true, _, _) => 0.5,
+                                (false, _, 24 | 27) => 1.0,
+                                (false, _, 25) => 20.0 * detune,
+                                (false, _, 28) => 18_000.0 / detune,
+                                (false, _, _) => q,
+                            };
+                            values.push(InitialParameterValue {
+                                parameter_index: index as u32,
+                                channel,
+                                value,
+                            });
+                        }
+                    }
+                    let initial = [values];
+                    let member_of = vec![0; lanes];
+                    let mask: Vec<bool> = (0..lanes).map(|lane| lane == 0).collect();
+                    let mut bank = bind(lanes, &requests(&initial, &member_of, rate), &mask);
+                    let at_bind: Vec<Payload> = (1..lanes)
+                        .map(|lane| lane_payload(bank.as_ref(), lane))
+                        .collect();
+                    let context = format!("{lanes} lanes, kind {kind}, gain {gain}, Q {q}");
+                    let mut planes = [vec![0.0; QUANTUM * lanes], vec![0.0; QUANTUM * lanes]];
+                    let offsets = vec![0_u32; lanes + 1];
+                    for block in 0..12_u64 {
+                        let first = block * QUANTUM as u64;
+                        if block == 4 {
+                            // The member's first band retuned: a 64-sample ramp on lane 0 only.
+                            let mut candidate = initial[0].clone();
+                            let mut changed = vec![false; parameters * 2];
+                            for side in 0..2 {
+                                candidate[2 * 2 + side].value = 3_000.0;
+                                changed[2 * 2 + side] = true;
+                            }
+                            let mut targets = [PreparedEffectTarget {
+                                slot: 0,
+                                channel: ParameterChannel::Left,
+                                words: [0; effect_contract::PREPARED_EFFECT_TARGET_WORDS],
+                            }; EQ_SECTION_COUNT * 2];
+                            let count = ParametricEqFactory
+                                .prepare_targets(
+                                    EffectTargetRequest {
+                                        sample_rate: rate,
+                                        values: &candidate,
+                                        changed: &changed,
+                                    },
+                                    &mut targets,
+                                )
+                                .expect("a legal target");
+                            for target in &targets[..count] {
+                                bank.apply_prepared_target_lane(0, target)
+                                    .expect("a target on the member");
+                            }
+                        }
+                        let mut input = [
+                            sine(1.0e-3, first, QUANTUM, rate, 0.0),
+                            sine(1.0e-3, first, QUANTUM, rate, 1.9),
+                        ];
+                        match block {
+                            2 => input[0][17] = -0.0,
+                            3 => input[1][40] = f32::NAN,
+                            6 | 7 => {
+                                input = [
+                                    sine(9.5e29, first, QUANTUM, rate, 0.0),
+                                    sine(9.5e29, first, QUANTUM, rate, 1.9),
+                                ];
+                            }
+                            _ => {}
+                        }
+                        gather(&mut planes, lanes, &[0], &[input]);
+                        render(
+                            bank.as_mut(),
+                            &mut planes,
+                            lanes,
+                            QUANTUM,
+                            first,
+                            false,
+                            &[],
+                            &offsets,
+                        );
+                        for lane in 1..lanes {
+                            for (channel, plane) in planes.iter().enumerate() {
+                                if let Some(word) = column(plane, lanes, lane, QUANTUM)
+                                    .into_iter()
+                                    .find(|word| word.to_bits() != 0)
+                                {
+                                    panic!(
+                                        "{context}, block {block}: padded lane {lane}, channel \
+                                         {channel} wrote {:#010x}",
+                                        word.to_bits()
+                                    );
+                                }
+                            }
+                            let payload = lane_payload(bank.as_ref(), lane);
+                            for (side, words) in payload.iter().enumerate().skip(1) {
+                                for section in 0..EQ_SECTION_COUNT {
+                                    for integrator in 0..2 {
+                                        let word =
+                                            (section * STATE_WORDS_PER_BAND + integrator) * 4;
+                                        assert_eq!(
+                                            &words[word..word + 4],
+                                            &[0; 4],
+                                            "{context}, block {block}: padded lane {lane}, \
+                                             channel {side}, section {section}: an integrator \
+                                             left +0.0"
+                                        );
+                                    }
+                                }
+                            }
+                            assert!(
+                                payload == at_bind[lane - 1],
+                                "{context}, block {block}: padded lane {lane} moved a word"
+                            );
+                        }
+                        blocks += 1;
+                    }
+                }
+            }
+        }
+        assert!(blocks > 0);
+    }
+
+    /// Gate 4, the planted state: a non-finite integrator planted in one member recovers that
+    /// member alone and reports it alone, at every member count and on either channel.
+    ///
+    /// The plant goes straight into the kernel's state (a restore refuses a non-finite word), a
+    /// `NaN` or an infinity in a random section. The block that carries it is non-finite on that
+    /// member's lane and channel only; the bank zeroes that lane and clears its integrators, as
+    /// its per-node instance does, and every other member plays on: same words, same state,
+    /// nothing reported. Padded lanes are neither reported nor moved.
+    ///
+    /// Red if the recovery zeroes or resets the whole plane (every bank-mate goes silent on the
+    /// fault block and loses its state), if it clears the wrong lane, or if it reports a lane
+    /// that did not fail.
+    #[test]
+    fn a_planted_non_finite_state_recovers_its_own_lane_alone() {
+        planted::<Simd4, 4>();
+        planted::<Simd8, 8>();
+    }
+
+    fn planted<L: Lane, const W: usize>() {
+        let (width, _) = width(W);
+        let mut rng = Rng(0x1089_0004);
+        let rate = 48_000;
+        for members in 1..=W {
+            for victim in 0..members {
+                let initial: Vec<Vec<InitialParameterValue>> =
+                    (0..members).map(|_| configuration(&mut rng)).collect();
+                let metadata = expected_prepared_metadata(
+                    &PARAMETRIC_EQ_DESCRIPTOR,
+                    request(&initial[0], rate),
+                )
+                .expect("metadata");
+                let Ok(mut scalars) = initial
+                    .iter()
+                    .map(|values| {
+                        prepare_width::<f32, 1>(
+                            metadata,
+                            BankWidth::Four,
+                            &[request(values, rate)],
+                            &[true],
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                else {
+                    continue;
+                };
+                // Members first; every padded lane clones the victim, the lane most likely to
+                // drag its clones along.
+                let member_of: Vec<usize> = (0..W)
+                    .map(|lane| if lane < members { lane } else { victim })
+                    .collect();
+                let mask: Vec<bool> = (0..W).map(|lane| lane < members).collect();
+                let mut bank = prepare_width::<L, W>(
+                    metadata,
+                    width,
+                    &requests(&initial, &member_of, rate),
+                    &mask,
+                )
+                .expect("a padded bank");
+                let right = rng.chance(0.5);
+                // A general band: it has no dry select, so its output carries the poison whether
+                // the band is live or the identity (a dry cut would pass its input on instead).
+                let section = BAND_SECTION_OFFSET + rng.below(EQ_BAND_COUNT);
+                let poison = [f32::NAN, f32::INFINITY, f32::NEG_INFINITY][rng.below(3)];
+                let plant_bank = if right {
+                    &mut bank.right
+                } else {
+                    &mut bank.left
+                };
+                lane_put(
+                    &mut plant_bank.sections[section].state.ic1,
+                    lane_mask::<L>(victim),
+                    poison,
+                );
+                let plant_scalar = if right {
+                    &mut scalars[victim].right
+                } else {
+                    &mut scalars[victim].left
+                };
+                plant_scalar.sections[section].state.ic1 = poison;
+                let context = format!(
+                    "W{W}, {members} members, victim {victim}, {} section {section}, {poison}",
+                    if right { "right" } else { "left" }
+                );
+                let mut planes = [vec![0.0; QUANTUM * W], vec![0.0; QUANTUM * W]];
+                let offsets = vec![0_u32; W + 1];
+                for block in 0..3_u64 {
+                    let first = block * QUANTUM as u64;
+                    let inputs: Vec<[Vec<f32>; 2]> = (0..members)
+                        .map(|member| {
+                            let phase = member as f64 * 0.7;
+                            [
+                                sine(0.5, first, QUANTUM, rate, phase),
+                                sine(0.25, first, QUANTUM, rate, phase + 1.9),
+                            ]
+                        })
+                        .collect();
+                    let expected: Vec<([Vec<f32>; 2], ProcessReport)> = scalars
+                        .iter_mut()
+                        .zip(&inputs)
+                        .map(|(scalar, input)| render_scalar(scalar, input, first))
+                        .collect();
+                    let active: Vec<usize> = (0..members).collect();
+                    gather(&mut planes, W, &active, &inputs);
+                    let report = render(
+                        &mut bank,
+                        &mut planes,
+                        W,
+                        QUANTUM,
+                        first,
+                        false,
+                        &[],
+                        &offsets,
+                    );
+                    for member in 0..members {
+                        let (output, scalar) = &expected[member];
+                        for channel in 0..2 {
+                            let banked = column(&planes[channel], W, member, QUANTUM);
+                            assert!(
+                                banked
+                                    .iter()
+                                    .zip(&output[channel])
+                                    .all(|(a, b)| class_a::same(*a, *b)),
+                                "{context}, block {block}: member {member}, channel {channel} is \
+                                 not its per-node instance"
+                            );
+                        }
+                        let failed = block == 0 && member == victim;
+                        assert_eq!(
+                            (
+                                report.reports[member].nonfinite_left_blocks,
+                                report.reports[member].nonfinite_right_blocks
+                            ),
+                            (u64::from(failed && !right), u64::from(failed && right)),
+                            "{context}, block {block}: member {member}'s report"
+                        );
+                        assert_eq!(
+                            report.reports[member], *scalar,
+                            "{context}, block {block}: member {member}'s report is not its \
+                             per-node instance's"
+                        );
+                        assert!(
+                            class_a_words(&lane_payload(&bank, member), 3)
+                                == class_a_words(&scalar_payload(&scalars[member]), 3),
+                            "{context}, block {block}: member {member}'s state"
+                        );
+                        if member != victim {
+                            assert!(
+                                column(&planes[usize::from(right)], W, member, QUANTUM)
+                                    .iter()
+                                    .any(|word| *word != 0.0),
+                                "{context}, block {block}: bank-mate {member} fell silent"
+                            );
+                        }
+                    }
+                    for lane in members..W {
+                        assert_eq!(
+                            report.reports[lane],
+                            ProcessReport::default(),
+                            "{context}, block {block}: padded lane {lane} was reported"
+                        );
+                        for plane in &planes {
+                            assert!(
+                                column(plane, W, lane, QUANTUM)
+                                    .iter()
+                                    .all(|word| word.to_bits() == 0),
+                                "{context}, block {block}: padded lane {lane} wrote a word"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Gate 4, P1's M2: a session-bypassed lane runs the wet path (#1087), so a legal but hot input
+    /// on it -- here `6e29` behind a +24 dB bell, past the `1e30` bound -- faults that lane. The
+    /// enabled bank-mates' bits must not move.
+    ///
+    /// The bypass is the one `ConsoleEffectBankStage` applies: a [`BypassShunt`] captures the dry
+    /// block (the EQ's latency is zero), the bank renders every lane, and the bypassed lane's
+    /// column is restored from the shunt. Each bank renders twice, the bypassed lane hot and then
+    /// quiet, and every enabled member must render the same words, reports and state both times,
+    /// and its per-node instance's. At every member count, every bypassed member, both widths.
+    ///
+    /// Red if the fault recovers the whole plane: every enabled bank-mate goes silent on each hot
+    /// block, which is what the probe behind P1's M2 measured on the base engine.
+    #[test]
+    fn a_bypassed_lane_fed_a_tripping_value_leaves_its_bank_mates_bits() {
+        let rate = 48_000;
+        let mut faults = 0_u64;
+        for lanes in [4, 8] {
+            for members in 1..=lanes {
+                for bypassed in 0..members {
+                    // Every member boosts 1 kHz by +24 dB, the gain domain's edge, detuned per
+                    // member.
+                    let initial: Vec<Vec<InitialParameterValue>> = (0..members)
+                        .map(|member| {
+                            let mut values = Vec::new();
+                            for (index, parameter) in
+                                PARAMETRIC_EQ_DESCRIPTOR.parameters.iter().enumerate()
+                            {
+                                let value = match index {
+                                    0 => 1.0,
+                                    1 => EqBandKind::Bell as u32 as f32,
+                                    2 => 1_000.0 * (1.0 + member as f32 * 0.03),
+                                    3 => 24.0,
+                                    4 => 0.7,
+                                    _ => parameter.default_value,
+                                };
+                                for channel in [ParameterChannel::Left, ParameterChannel::Right] {
+                                    values.push(InitialParameterValue {
+                                        parameter_index: index as u32,
+                                        channel,
+                                        value,
+                                    });
+                                }
+                            }
+                            values
+                        })
+                        .collect();
+                    let member_of: Vec<usize> =
+                        (0..lanes).map(|lane| lane.min(members - 1)).collect();
+                    let mask: Vec<bool> = (0..lanes).map(|lane| lane < members).collect();
+                    let active: Vec<usize> = (0..members).collect();
+                    let mut legs = Vec::new();
+                    for hot in [true, false] {
+                        let mut bank = bind(lanes, &requests(&initial, &member_of, rate), &mask);
+                        let mut scalars: Vec<_> = initial
+                            .iter()
+                            .map(|values| {
+                                ParametricEqFactory
+                                    .prepare(request(values, rate))
+                                    .expect("scalar prepare")
+                            })
+                            .collect();
+                        let mut shunt = BypassShunt::new(QUANTUM * lanes, 0);
+                        let mut planes = [vec![0.0; QUANTUM * lanes], vec![0.0; QUANTUM * lanes]];
+                        let offsets = vec![0_u32; lanes + 1];
+                        let mut rendered = Vec::new();
+                        for block in 0..6_u64 {
+                            let first = block * QUANTUM as u64;
+                            let inputs: Vec<[Vec<f32>; 2]> = (0..members)
+                                .map(|member| {
+                                    let phase = member as f64 * 0.7;
+                                    // Hot on even blocks: `6e29 * 10^(24/20)` is about `9.5e30`.
+                                    let amplitude = if member != bypassed {
+                                        0.5
+                                    } else if hot && block % 2 == 0 {
+                                        6.0e29
+                                    } else {
+                                        1.0e-3
+                                    };
+                                    [
+                                        sine(amplitude, first, QUANTUM, rate, phase),
+                                        sine(amplitude, first, QUANTUM, rate, phase + 1.9),
+                                    ]
+                                })
+                                .collect();
+                            gather(&mut planes, lanes, &active, &inputs);
+                            {
+                                let [left, right] = &planes;
+                                shunt.capture(left, right);
+                            }
+                            let report = render(
+                                bank.as_mut(),
+                                &mut planes,
+                                lanes,
+                                QUANTUM,
+                                first,
+                                false,
+                                &[],
+                                &offsets,
+                            );
+                            let (dry_left, dry_right) = shunt.dry();
+                            for frame in 0..QUANTUM {
+                                let word = frame * lanes + bypassed;
+                                planes[0][word] = dry_left[word];
+                                planes[1][word] = dry_right[word];
+                            }
+                            faults += report.reports[bypassed].nonfinite_left_blocks;
+                            for (member, input) in inputs.iter().enumerate() {
+                                let context = format!(
+                                    "{lanes} lanes, {members} members, bypassed {bypassed}, hot \
+                                     {hot}, block {block}, member {member}"
+                                );
+                                if member == bypassed {
+                                    for (plane, dry) in planes.iter().zip(input) {
+                                        assert!(
+                                            column(plane, lanes, member, QUANTUM)
+                                                .iter()
+                                                .zip(dry)
+                                                .all(|(a, b)| a.to_bits() == b.to_bits()),
+                                            "{context}: the bypassed lane is not its dry input"
+                                        );
+                                    }
+                                    continue;
+                                }
+                                let (output, scalar) =
+                                    render_scalar(scalars[member].as_mut(), input, first);
+                                let columns = [
+                                    column(&planes[0], lanes, member, QUANTUM),
+                                    column(&planes[1], lanes, member, QUANTUM),
+                                ];
+                                assert!(
+                                    columns.iter().zip(&output).all(|(a, b)| a
+                                        .iter()
+                                        .zip(b)
+                                        .all(|(x, y)| class_a::same(*x, *y))),
+                                    "{context}: an enabled member is not its per-node instance"
+                                );
+                                assert_eq!(report.reports[member], scalar, "{context}: the report");
+                                assert_eq!(
+                                    scalar,
+                                    ProcessReport::default(),
+                                    "{context}: the per-node instance faulted"
+                                );
+                                let bits = columns.map(|column| {
+                                    column
+                                        .iter()
+                                        .map(|word| class_a::bits(*word))
+                                        .collect::<Vec<_>>()
+                                });
+                                rendered.push((
+                                    bits,
+                                    report.reports[member],
+                                    lane_payload(bank.as_ref(), member),
+                                ));
+                            }
+                            for lane in members..lanes {
+                                assert_eq!(
+                                    report.reports[lane],
+                                    ProcessReport::default(),
+                                    "padded lane {lane} was reported"
+                                );
+                            }
+                        }
+                        legs.push(rendered);
+                    }
+                    assert!(
+                        legs[0] == legs[1],
+                        "{lanes} lanes, {members} members, bypassed {bypassed}: the hot bypassed \
+                         lane moved an enabled bank-mate's words, report or state"
+                    );
+                }
+            }
+        }
+        assert!(faults > 0, "non-vacuity: the hot bypassed lane must fault");
+    }
+
+    /// Gates 3 and 4, the bookkeeping: a padded lane carries no track, so nothing is ever written
+    /// to it, reported for it or charged to it.
+    ///
+    /// * A prepared target on it is refused as outside the bank's capacity, and a restore as
+    ///   `effect.bank.track`: either could move it off `+0.0` at rest. A snapshot only reads, and
+    ///   stays open. The same calls on a member succeed.
+    /// * Automation spans addressed to it are not charged to it (a member's are).
+    /// * Fed a non-finite value -- which the caller never does -- it is recovered to `+0.0` at
+    ///   rest, is not reported, and no member's words move.
+    ///
+    /// Red if any of the three `active` checks is removed: the target or the restore is accepted,
+    /// or the padded lane's report carries the spans or the fault.
+    #[test]
+    fn a_padded_lane_is_never_written_reported_or_charged() {
+        let rate = 48_000;
+        let mut rng = Rng(0x1089_0003);
+        for lanes in [4, 8] {
+            let members = lanes - 1 - rng.below(lanes - 1);
+            let initial: Vec<Vec<InitialParameterValue>> =
+                (0..members).map(|_| configuration(&mut rng)).collect();
+            let member_of: Vec<usize> = (0..lanes).map(|lane| lane.min(members - 1)).collect();
+            let mask: Vec<bool> = (0..lanes).map(|lane| lane < members).collect();
+            let padded = lanes - 1;
+            let context = format!("{lanes} lanes, {members} members");
+            let mut bank = bind(lanes, &requests(&initial, &member_of, rate), &mask);
+            let mut control = bind(lanes, &requests(&initial, &member_of, rate), &mask);
+
+            let mut targets = [PreparedEffectTarget {
+                slot: 0,
+                channel: ParameterChannel::Left,
+                words: [0; effect_contract::PREPARED_EFFECT_TARGET_WORDS],
+            }; EQ_SECTION_COUNT * 2];
+            let mut values = initial[members - 1].clone();
+            let mut changed = vec![false; values.len()];
+            // The HPF on at 250 Hz, on both channels.
+            for side in 0..2 {
+                for (index, value) in [(24, 1.0), (25, 250.0)] {
+                    values[index * 2 + side].value = value;
+                    changed[index * 2 + side] = true;
+                }
+            }
+            let count = ParametricEqFactory
+                .prepare_targets(
+                    EffectTargetRequest {
+                        sample_rate: rate,
+                        values: &values,
+                        changed: &changed,
+                    },
+                    &mut targets,
+                )
+                .expect("a legal target");
+            assert!(count > 0);
+            assert_eq!(
+                bank.apply_prepared_target_lane(padded, &targets[0]),
+                Err(EffectTargetError::Capacity),
+                "{context}: a target on the padded lane"
+            );
+            for target in &targets[..count] {
+                assert_eq!(bank.apply_prepared_target_lane(members - 1, target), Ok(()));
+                assert_eq!(
+                    control.apply_prepared_target_lane(members - 1, target),
+                    Ok(())
+                );
+            }
+            let snapshot = lane_payload(bank.as_ref(), padded);
+            assert_eq!(
+                restore_lane(bank.as_mut(), padded, &snapshot).map_err(|error| error.code),
+                Err("effect.bank.track"),
+                "{context}: a restore on the padded lane"
+            );
+            let member = lane_payload(bank.as_ref(), members - 1);
+            assert_eq!(restore_lane(bank.as_mut(), members - 1, &member), Ok(()));
+            assert_eq!(restore_lane(control.as_mut(), members - 1, &member), Ok(()));
+
+            // Two spans on the last member, three on the padded lane.
+            let span = PreparedAutomationSpan {
+                kind: effect_contract::AutomationSpanKind::Point,
+                channel: ParameterChannel::Left,
+                parameter_index: 2,
+                start_sample: 0,
+                end_sample: 0,
+                start_value: 500.0,
+                end_value: 500.0,
+            };
+            let automation = [span; 5];
+            let mut offsets = vec![0_u32; lanes + 1];
+            offsets[members..].fill(2);
+            offsets[lanes] = 5;
+            let quiet = vec![0_u32; lanes + 1];
+            let mut planes = [vec![0.0; QUANTUM * lanes], vec![0.0; QUANTUM * lanes]];
+            let mut control_planes = planes.clone();
+            let active: Vec<usize> = (0..members).collect();
+            for block in 0..3_u64 {
+                let first = block * QUANTUM as u64;
+                let inputs: Vec<[Vec<f32>; 2]> = (0..members)
+                    .map(|member| {
+                        let phase = member as f64;
+                        [
+                            sine(0.5, first, QUANTUM, rate, phase),
+                            sine(0.5, first, QUANTUM, rate, phase + 1.0),
+                        ]
+                    })
+                    .collect();
+                gather(&mut planes, lanes, &active, &inputs);
+                gather(&mut control_planes, lanes, &active, &inputs);
+                // The caller's breach: a non-finite word on the padded lane, block 1 only.
+                if block == 1 {
+                    planes[0][5 * lanes + padded] = f32::NAN;
+                }
+                let report = render(
+                    bank.as_mut(),
+                    &mut planes,
+                    lanes,
+                    QUANTUM,
+                    first,
+                    false,
+                    &automation,
+                    &offsets,
+                );
+                let control_report = render(
+                    control.as_mut(),
+                    &mut control_planes,
+                    lanes,
+                    QUANTUM,
+                    first,
+                    false,
+                    &[],
+                    &quiet,
+                );
+                assert_eq!(
+                    report.reports[padded],
+                    ProcessReport::default(),
+                    "{context}, block {block}: the padded lane was charged or reported"
+                );
+                assert_eq!(
+                    report.reports[members - 1].invalid_spans,
+                    2,
+                    "{context}, block {block}: the member's spans"
+                );
+                for lane in 0..members {
+                    assert_eq!(
+                        report.reports[lane].nonfinite_left_blocks
+                            + report.reports[lane].nonfinite_right_blocks,
+                        control_report.reports[lane].nonfinite_left_blocks
+                            + control_report.reports[lane].nonfinite_right_blocks,
+                        "{context}, block {block}: member {lane}'s report"
+                    );
+                    for channel in 0..2 {
+                        assert!(
+                            column(&planes[channel], lanes, lane, QUANTUM)
+                                .iter()
+                                .zip(column(&control_planes[channel], lanes, lane, QUANTUM))
+                                .all(|(a, b)| class_a::same(*a, b)),
+                            "{context}, block {block}: member {lane} moved"
+                        );
+                    }
+                }
+                for plane in &planes {
+                    assert!(
+                        column(plane, lanes, padded, QUANTUM)
+                            .iter()
+                            .all(|word| word.to_bits() == 0),
+                        "{context}, block {block}: the padded lane is not +0.0"
+                    );
+                }
+                assert!(
+                    lane_payload(bank.as_ref(), padded) == snapshot,
+                    "{context}, block {block}: the padded lane is not at rest"
+                );
+            }
+        }
     }
 }

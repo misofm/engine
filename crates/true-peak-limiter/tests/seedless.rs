@@ -17,7 +17,7 @@
 //! * subnormal blocks: random signs and mantissas with a zero exponent. Most products of a
 //!   subnormal and a table coefficient round to a signed zero, the rest stay subnormal;
 //! * one NaN in track 1's left input, whose output a lookahead later trips the §4.4 boundary check
-//!   (zeroed, reset, counted).
+//!   (zeroed, reset, counted) on track 1 alone. In a bank its bank-mates render on untouched.
 //!
 //! It runs under `LinkMode::Maximum` (the #990 linked body while the pair agrees), under
 //! `LinkMode::DualMono` (the dual body) and, for the banks, through `process_bank_mono` (the
@@ -25,6 +25,17 @@
 //! block the digest folds every output word, every track's process report, every track's state
 //! payload and the resident gain-reduction observation. One digest per width. Every float word is
 //! folded by its class-A bits (`dsp_reference::class_a`, #1065): the NaN's words hash as one value.
+//!
+//! # The #1091 re-pin of the two bank digests
+//!
+//! #1091 (console strip P2d; decision 12, "Coupling rule") made a bank's §4.4 recovery per lane.
+//! Before it, track 1's NaN zeroed the whole bank's block and reset every lane, so the bank pins
+//! carried every bank-mate's zeroed block and line fill and their reset state. That coupling is what
+//! #1091 removes, so the W8 and W4 pins were re-recorded on #1091's kernel, with the witness below
+//! tightened from "whole blocks zeroed" to "track 1's lane zeroed, and no other". The scalar pin did
+//! not move: a scalar instance's one lane is every lane, and its recovery is the whole reset it
+//! always was. The bank's members are also held to the scalar instances' bits, word for word, by
+//! `tests/padding.rs`.
 
 use dsp_reference::class_a;
 use effect_contract::{
@@ -46,10 +57,10 @@ const NAN_BLOCK: usize = 56;
 const NAN_TRACK: usize = 1;
 const NAN_FRAME: usize = 37;
 
-/// SHA-256 of the W8 bank's scenario, recorded on the unmodified kernel.
-const W8_DIGEST: &str = "4b57d4daef9181fe499528ad36c114de8c62b0c6fcd1f621d9f7db07fb1898f2";
-/// SHA-256 of the W4 bank's scenario, recorded on the unmodified kernel.
-const W4_DIGEST: &str = "c578264074e61d11f4bda42b1c43835edd569135c54f012972905fffaadd307a";
+/// SHA-256 of the W8 bank's scenario, re-recorded on #1091's per-lane §4.4 recovery.
+const W8_DIGEST: &str = "65609fa00abf6862372589cdaa4fce6b429264e8e1c852ab4b2f17f3869f5f87";
+/// SHA-256 of the W4 bank's scenario, re-recorded on #1091's per-lane §4.4 recovery.
+const W4_DIGEST: &str = "2cd5cb70f15bdfb2e3fe143dd5bd09891c56b84ff9975e88b55fadc18f13f017";
 /// SHA-256 of the scalar instances' scenario (tracks 0-7), recorded on the unmodified kernel.
 const SCALAR_DIGEST: &str = "ec135dac1fd3e82d7d0638130cc1a66879a0c330a515036db33692bf415f7ca2";
 
@@ -201,24 +212,25 @@ fn reset_blocks() -> Vec<usize> {
 }
 
 /// What the non-vacuity checks read: the deepest reduction observed, how many output words were
-/// `-0.0` and subnormal, and which blocks came out entirely `+0.0`.
+/// `-0.0` and subnormal, and which `(block, lane)` pairs came out entirely `+0.0`.
 ///
 /// The limiter's §4.4 reset is not in its `ProcessReport` (the counter is the instance's own
 /// instrumentation), so the host-visible trace of it is the one it leaves in the audio: a whole
-/// block of `+0.0`, then the line fill of an emptied line. Past the first line fill no other block
-/// of this scenario is entirely `+0.0`: a noise block's words are nonzero, a signed-zero block's
-/// carry `-0.0` and a subnormal block's carry subnormals.
+/// block of `+0.0` on the failed lane, then the line fill of its emptied line. Past the first line
+/// fill no other lane's block of this scenario is entirely `+0.0`: a noise block's words are
+/// nonzero, a signed-zero block's carry `-0.0` and a subnormal block's carry subnormals.
 #[derive(Default)]
 struct Witness {
     deepest: f32,
     negative_zeros: usize,
     subnormals: usize,
-    zeroed_blocks: Vec<usize>,
+    zeroed: Vec<(usize, usize)>,
 }
 
 impl Witness {
-    fn block(&mut self, block: usize, planes: &[&[f32]]) {
-        let mut zeroed = true;
+    /// One block of `planes`, each `lanes` wide and lane-interleaved (`lanes == 1` for a scalar
+    /// instance).
+    fn block(&mut self, block: usize, planes: &[&[f32]], lanes: usize) {
         for word in planes.iter().flat_map(|plane| plane.iter()) {
             if word.to_bits() == 0x8000_0000 {
                 self.negative_zeros += 1;
@@ -226,10 +238,18 @@ impl Witness {
             if word.is_subnormal() {
                 self.subnormals += 1;
             }
-            zeroed &= word.to_bits() == 0;
         }
-        if block >= fill_blocks() && zeroed {
-            self.zeroed_blocks.push(block);
+        for lane in 0..lanes {
+            let zeroed = planes.iter().all(|plane| {
+                plane
+                    .iter()
+                    .skip(lane)
+                    .step_by(lanes)
+                    .all(|word| word.to_bits() == 0)
+            });
+            if block >= fill_blocks() && zeroed {
+                self.zeroed.push((block, lane));
+            }
         }
     }
 }
@@ -258,6 +278,7 @@ fn bank_run(width: BankWidth, backend: Backend, body: Body, hasher: &mut Sha256)
             backend,
             width,
             requests: &requests,
+            active_mask: width.full_mask(),
         })
         .expect("valid bank request")
         .expect("the width must bind");
@@ -303,13 +324,13 @@ fn bank_run(width: BankWidth, backend: Backend, body: Body, hasher: &mut Sha256)
                 for word in left.iter().chain(right.iter()) {
                     hasher.update(class_a::bits(*word).to_le_bytes());
                 }
-                witness.block(block, &[&left, &right]);
+                witness.block(block, &[&left, &right], lanes);
             }
             Body::Collapsed => {
                 for word in &left {
                     hasher.update(class_a::bits(*word).to_le_bytes());
                 }
-                witness.block(block, &[&left]);
+                witness.block(block, &[&left], lanes);
                 // A collapsed bank's right section is stale until the disengage copy; take it
                 // before every snapshot, which is always sound and leaves the left run alone.
                 bank.desymmetrize_channels();
@@ -362,7 +383,7 @@ fn scalar_run(track: usize, link_mode: LinkMode, hasher: &mut Sha256) -> Witness
         for word in left.iter().chain(right.iter()) {
             hasher.update(class_a::bits(*word).to_le_bytes());
         }
-        witness.block(block, &[&left, &right]);
+        witness.block(block, &[&left, &right], 1);
         fold_report(hasher, &report);
         fold_payload(hasher, sizes, |output| {
             effect.snapshot_state_payload(output).expect("snapshot");
@@ -376,8 +397,8 @@ fn scalar_run(track: usize, link_mode: LinkMode, hasher: &mut Sha256) -> Witness
 }
 
 /// Non-vacuity of one run. The scenario is about a limiter that limits, that carries signed zeros
-/// and subnormals through its line, and whose §4.4 reset fires once.
-fn check_witness(label: &str, witness: &Witness, expect_reset: bool) {
+/// and subnormals through its line, and whose §4.4 reset fires once, on lane `reset_lane` only.
+fn check_witness(label: &str, witness: &Witness, reset_lane: Option<usize>) {
     assert!(
         witness.deepest > 0.1,
         "{label}: the scenario never limited (deepest {})",
@@ -391,14 +412,15 @@ fn check_witness(label: &str, witness: &Witness, expect_reset: bool) {
         witness.subnormals > 0,
         "{label}: no subnormal reached the output"
     );
-    let expected = if expect_reset {
+    let expected: Vec<(usize, usize)> = reset_lane.map_or_else(Vec::new, |lane| {
         reset_blocks()
-    } else {
-        Vec::new()
-    };
+            .into_iter()
+            .map(|block| (block, lane))
+            .collect()
+    });
     assert_eq!(
-        witness.zeroed_blocks, expected,
-        "{label}: blocks zeroed by the §4.4 reset"
+        witness.zeroed, expected,
+        "{label}: (block, lane) zeroed by the §4.4 reset"
     );
 }
 
@@ -411,7 +433,7 @@ fn bank_digest(width: BankWidth, backend: Backend) -> String {
     ] {
         let witness = bank_run(width, backend, body, &mut hasher);
         // The NaN is in track 1, which is lane 1 of the bank at both widths.
-        check_witness(&format!("{width:?} {name}"), &witness, true);
+        check_witness(&format!("{width:?} {name}"), &witness, Some(NAN_TRACK));
     }
     let bytes: [u8; 32] = hasher.finalize().into();
     bench_support::digest::hex(&bytes)
@@ -428,7 +450,7 @@ fn scalar_digest() -> String {
             check_witness(
                 &format!("scalar {name} track {track}"),
                 &witness,
-                track == NAN_TRACK,
+                (track == NAN_TRACK).then_some(0),
             );
         }
     }

@@ -44,7 +44,7 @@ use effect_contract::{
     StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
     expected_prepared_metadata,
 };
-use effect_runtime::bank::{NonFiniteReport, finish_block};
+use effect_runtime::bank::{NonFiniteReport, check_block, nonfinite_lane_mask};
 use effect_runtime::envelope::{ArCoef, ar_one_pole_step};
 use effect_runtime::params::{
     ParameterSpec, normalize_zero, parameter_value_valid as spec_value_valid,
@@ -437,6 +437,11 @@ struct Shaper<L: Lane, const W: usize> {
     right: Ramps<W>,
     metadata: PreparedEffectMetadata,
     nonfinite: NonFiniteReport,
+    /// Bit `l` is set when lane `l` carries a member (issue #1092). A padded lane's bit is clear:
+    /// it takes no automation, and D7 recovers it without charging it to `nonfinite` (the padding
+    /// contract on `PrepareEffectBankRequest`). Every lane of a scalar instance and of a full bank
+    /// is active.
+    active: u32,
 }
 
 impl<L: Lane, const W: usize> Shaper<L, W> {
@@ -454,6 +459,7 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
             right: Ramps::new(right),
             metadata,
             nonfinite: NonFiniteReport::new(),
+            active: (1 << W) - 1,
         }
     }
 
@@ -480,12 +486,45 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
             LinkMode::Maximum => self.run::<LINK_MAXIMUM>(left, right, frames),
             LinkMode::Average => self.run::<LINK_AVERAGE>(left, right, frames),
         }
-        let (left_env, right_env) = (&mut self.left_env, &mut self.right_env);
-        let report = &mut self.nonfinite;
-        finish_block::<L>(left, right, report, || {
-            *left_env = Env::default();
-            *right_env = Env::default();
-        });
+        if check_block::<L>(left) && check_block::<L>(right) {
+            return;
+        }
+        let failed = nonfinite_lane_mask::<L>(left) | nonfinite_lane_mask::<L>(right);
+        self.recover_lanes(left, right, failed);
+    }
+
+    /// The D7 recovery, one lane at a time (issue #1092; decision 12's coupling rule).
+    ///
+    /// A lane that failed the boundary check on either channel has both of its channels zeroed and
+    /// both of its envelopes reset, which is exactly what the scalar instance does to its one lane;
+    /// every other lane is left bit-unchanged. The shared `effect_runtime::bank::finish_block`
+    /// zeroes and resets the whole bank instead, so one hot track -- a bypassed one whose wet path
+    /// still runs (#1087) -- would silence its bank-mates. The ramps are untouched, as before: a
+    /// reset clears history, not automation.
+    ///
+    /// A padded lane is recovered like any other, so it stays at rest, but only active lanes are
+    /// charged to `nonfinite`.
+    fn recover_lanes(&mut self, left: &mut [f32], right: &mut [f32], failed: u32) {
+        for lane in 0..W {
+            if failed & (1 << lane) == 0 {
+                continue;
+            }
+            for word in left.iter_mut().skip(lane).step_by(W) {
+                *word = 0.0;
+            }
+            for word in right.iter_mut().skip(lane).step_by(W) {
+                *word = 0.0;
+            }
+            for env in [&mut self.left_env, &mut self.right_env] {
+                env.fast = replace_lane(env.fast, lane, 0.0);
+                env.slow = replace_lane(env.slow, lane, 0.0);
+            }
+        }
+        let charged = failed & self.active;
+        if charged != 0 {
+            self.nonfinite.nonfinite_lanes = charged;
+            self.nonfinite.nonfinite_blocks = self.nonfinite.nonfinite_blocks.saturating_add(1);
+        }
     }
 
     #[inline(always)]
@@ -817,24 +856,58 @@ impl NativeEffectFactory for TransientShaperFactory {
         &self,
         request: PrepareEffectBankRequest<'_>,
     ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
-        if !request.has_matching_backend_width()
-            || request.requests.len() != request.width.lanes() as usize
-        {
-            return Err(EffectPrepareError {
-                code: "effect.bank.requests",
-            });
-        }
-        match request.width {
-            BankWidth::Four => bind::<Simd4, 4>(self, request),
-            BankWidth::Eight => bind::<Simd8, 8>(self, request),
-        }
+        bind_bank::<true>(self, request)
     }
 }
 
-fn bind<L: Lane, const W: usize>(
+/// `bind_homogeneous_bank`, with the D4 width check as a switch: `NATIVE_ONLY` declines a width
+/// this artifact does not execute, which is what production asks for. The unit tests pass `false`
+/// to bind the other width's bank on this host through the same code.
+fn bind_bank<const NATIVE_ONLY: bool>(
     factory: &TransientShaperFactory,
     request: PrepareEffectBankRequest<'_>,
 ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+    request.validate_shape()?;
+    Ok(match request.width {
+        BankWidth::Four => {
+            boxed::<Simd4, 4, NATIVE_ONLY>(bind::<_, 4, NATIVE_ONLY>(factory, request)?)
+        }
+        BankWidth::Eight => {
+            boxed::<Simd8, 8, NATIVE_ONLY>(bind::<_, 8, NATIVE_ONLY>(factory, request)?)
+        }
+    })
+}
+
+/// Boxes a bank bound at `W` lanes.
+///
+/// The D4 check of [`bind`] is repeated here, where it is a compile-time constant ahead of the
+/// only reference to the bank's vtable, so a production build never links the render code of a
+/// width it does not execute. `bind` cannot promise that alone: it returns the bank by value, and
+/// the eight-lane shaper would otherwise stay in the four-lane browser artifact.
+fn boxed<L: Lane, const W: usize, const NATIVE_ONLY: bool>(
+    bank: Option<PreparedTransientShaperBank<L, W>>,
+) -> Option<Box<dyn PreparedNativeEffectBank>> {
+    if NATIVE_ONLY && W != Backend::current().width() {
+        return None;
+    }
+    bank.map(|bank| Box::new(bank) as Box<dyn PreparedNativeEffectBank>)
+}
+
+/// Binds one bank of `W` lanes.
+///
+/// # Padding (issue #1092; decision 12)
+///
+/// The shaper accepts a padded request. Each lane, active or padded, is prepared from its own
+/// request, which for a padded lane is the caller's clone of an active member's, so every lane is
+/// validated. A padded lane takes no automation, and D7 recovers it without charging it
+/// ([`Shaper::recover_lanes`]). Fed `+0.0` it writes `+0.0`: both envelopes floor, the contrast
+/// is exactly zero and the shape-zero identity selects the input word. The shaper never reads
+/// across lanes, and its one whole-bank decision, the ramp prefix, is partition-invariant, so an
+/// active lane's bits depend neither on the padded lanes nor on which member they clone.
+fn bind<L: Lane, const W: usize, const NATIVE_ONLY: bool>(
+    factory: &TransientShaperFactory,
+    request: PrepareEffectBankRequest<'_>,
+) -> Result<Option<PreparedTransientShaperBank<L, W>>, EffectPrepareError> {
     let first = request
         .requests
         .first()
@@ -861,17 +934,25 @@ fn bind<L: Lane, const W: usize>(
     }
     // There is no runtime SIMD dispatch (D4): this build has exactly one production width, and a
     // plan asking for another one is refused as unavailable rather than quietly served by it.
-    // `has_matching_backend_width` has already tied the request's backend to its width.
-    if !same_program || request.width.lanes() as usize != Backend::current().width() {
+    // `has_matching_backend_width` has already tied the request's backend to its width `W`, a
+    // compile-time constant here, so a production build never links the other width's bank.
+    if !same_program || (NATIVE_ONLY && W != Backend::current().width()) {
         return Ok(None);
     }
-    Ok(Some(Box::new(PreparedTransientShaperBank::<L, W> {
+    let mut shaper = Shaper::new(metadata, row, left, right);
+    shaper.active = request
+        .active_mask
+        .iter()
+        .enumerate()
+        .filter(|(_, active)| **active)
+        .fold(0, |bits, (lane, _)| bits | (1 << lane));
+    Ok(Some(PreparedTransientShaperBank::<L, W> {
         metadata: PreparedBankMetadata {
             width: request.width,
             program_key: metadata.program_key(),
         },
-        shaper: Shaper::new(metadata, row, left, right),
-    })))
+        shaper,
+    }))
 }
 
 impl PreparedNativeEffect for PreparedTransientShaper {
@@ -933,6 +1014,10 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedTransientShap
             return report;
         }
         for track in 0..W {
+            // A padded lane carries no track, so no span is its to apply (issue #1092).
+            if self.shaper.active & (1 << track) == 0 {
+                continue;
+            }
             let start = block.automation_offsets[track] as usize;
             let end = block.automation_offsets[track + 1] as usize;
             apply_automation(
@@ -968,3 +1053,6 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedTransientShap
         self.shaper.restore(track, state_layout_version, input)
     }
 }
+
+#[cfg(test)]
+mod padding_tests;

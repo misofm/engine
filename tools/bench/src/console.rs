@@ -855,6 +855,7 @@ impl HoistArm {
                     backend,
                     width,
                     requests: &eq_requests,
+                    active_mask: width.full_mask(),
                 })
                 .expect("valid eq bank request")
                 .expect("the native width must bind an eq bank")

@@ -859,12 +859,14 @@ pub(crate) struct SplitPairSlot {
 /// One prepared native effect plus everything its live-console channel needs (issue #140 A).
 ///
 /// Sized once, at bind, from the effect's own prepared metadata: the staging window is exactly
-/// `PreparedEffectMetadata::automation_capacity` spans and the shunt's delay line is exactly
+/// `PreparedEffectMetadata::automation_capacity` spans when the lane has a live channel, and empty
+/// when it does not (issue #1100), and the shunt's delay line is exactly
 /// `PreparedEffectMetadata::latency` samples. Render allocates nothing and frees nothing.
 pub(crate) struct ConsoleEffect {
     pub(crate) effect: GraphPreparedEffect,
     control: Box<EffectControlLane>,
-    /// `automation_capacity` spans; only `[..staged]` is ever handed to the effect.
+    /// `automation_capacity` spans for a live channel, and none for a channel-less lane; only
+    /// `[..staged]` is ever handed to the effect.
     spans: Box<[PreparedAutomationSpan]>,
     /// Latency-preserving dry path, so live bypass keeps the effect's declared latency exactly
     /// and therefore leaves every compiled PDC route timing correct.
@@ -882,7 +884,18 @@ impl ConsoleEffect {
         observation: Option<Box<ObservationLane>>,
         frames: usize,
     ) -> Self {
-        let capacity = effect.metadata.automation_capacity as usize;
+        // Issue #1100, the per-node twin of the rack's #1087 fix: only a live channel ever stages
+        // a span. A channel-less lane -- a session bypass with no console attached -- drains
+        // nothing into an empty window, and there is no twin pair for the pairing rule to protect.
+        // The window is the effect's automation capacity, which a caller may set as high as
+        // `u32::MAX` spans, so this is what keeps a console-free bypass from costing a console's
+        // staging, or aborting bind.
+        let live = control.has_channel();
+        let capacity = if live {
+            effect.metadata.automation_capacity as usize
+        } else {
+            0
+        };
         let latency = usize::try_from(effect.metadata.latency.0).unwrap_or(usize::MAX);
         let spans: Box<[PreparedAutomationSpan]> = vec![
             PreparedAutomationSpan {
@@ -900,8 +913,11 @@ impl ConsoleEffect {
         // The live drain's pairing rule needs the window to be exactly the effect's automation
         // capacity (issue #1012). Checked here, at bind, off the render thread; this node builder
         // is infallible, so a violation is a bind-time panic, as `stage_for`'s validated width is.
-        effect_contract::EffectProcessBlock::check_automation_window(&spans, &effect.metadata)
-            .expect("a console effect's staging window is its automation capacity");
+        // A channel-less lane stages nothing.
+        if live {
+            effect_contract::EffectProcessBlock::check_automation_window(&spans, &effect.metadata)
+                .expect("a console effect's staging window is its automation capacity");
+        }
         Self {
             observation,
             spans,

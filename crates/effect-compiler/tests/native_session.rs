@@ -396,3 +396,167 @@ fn retired_multiband_parameter_id_two_rejects_before_native_publication() {
     assert_eq!(diagnostics.0[0].code, "effect.parameter.unknown");
     assert!(diagnostics.0[0].path.contains("eq"));
 }
+
+/// The 64-track console with track 0's EQ and limiter bypassed, and a delay inserted on tracks 0
+/// (bypassed) and 1 (enabled).
+fn bypassed_console() -> session::CompiledSession {
+    let mut model = parse_session_json(include_str!(
+        "../../../fixtures/session/v1/console-sixty-four-track-intended.json"
+    ))
+    .expect("console fixture");
+    for (index, bypass) in [(0, true), (1, false)] {
+        let track = &mut model.tracks[index];
+        let mut delay = track.simd1.effects[1].clone();
+        delay.id = session::StableId::parse("delay").expect("id");
+        delay.identity = session::EffectIdentity::Native {
+            effect_id: session::StableId::parse("miso.delay").expect("id"),
+        };
+        delay.params.clear();
+        delay.bypass = bypass;
+        let mut multiband = delay.clone();
+        multiband.id = session::StableId::parse("multiband").expect("id");
+        multiband.identity = session::EffectIdentity::Native {
+            effect_id: session::StableId::parse("miso.multiband-compressor").expect("id"),
+        };
+        track.dynamic.effects.push(delay);
+        track.dynamic.effects.push(multiband);
+    }
+    model.tracks[0].simd1.effects[0].bypass = true;
+    model.tracks[0].simd2.effects[0].bypass = true;
+    compile_session(
+        &model,
+        CompileCaps {
+            max_compiled_model_bytes: u64::MAX,
+            max_requested_runtime_bytes: u64::MAX,
+            max_single_allocation_bytes: u64::MAX,
+            max_queue_items: u64::MAX,
+            max_source_ring_frames: u64::MAX,
+            max_source_ring_bytes: u64::MAX,
+        },
+    )
+    .expect("compiled console")
+}
+
+fn entry<'a>(
+    prepared: &'a effect_compiler::EffectPreparedSession,
+    track: &str,
+    effect: &str,
+) -> &'a effect_compiler::EffectPreparedEntry {
+    prepared
+        .entries
+        .iter()
+        .find(|entry| entry.track_id == track && entry.effect_id == effect)
+        .unwrap_or_else(|| panic!("{track} {effect} prepared"))
+}
+
+/// Issue #1087: a session bypass lowers to an enabled effect plus a bypassed channel-less lane,
+/// for every effect that can bank, so a bypassed instance shares its enabled neighbours' program
+/// key. The delay never banks and keeps its prepared bypass, and since #1100 so does the
+/// multiband, whose bank recovery is still whole-bank.
+///
+/// Red mutations: prepare with `bypass: effect.bypass` again -> the bypassed EQ's program key
+/// differs from the enabled one's; drop the channel-less lane -> nothing carries the bypass to the
+/// rack's shunt; lower the delay or the multiband too -> its prepared bypass is gone.
+#[test]
+fn a_session_bypass_lowers_to_an_enabled_effect_and_a_bypassed_lane() {
+    let registry = launch_native_effect_registry().expect("launch registry");
+    let prepared =
+        prepare_native_session_effects(&bypassed_console(), &registry, caps()).expect("prepared");
+    for effect in ["eq", "limiter"] {
+        let bypassed = entry(&prepared, "ch00", effect);
+        let enabled = entry(&prepared, "ch01", effect);
+        assert!(bypassed.initial_bypass && !enabled.initial_bypass);
+        assert!(!bypassed.metadata.bypass && !bypassed.bank_preparation.bypass);
+        assert_eq!(
+            bypassed.metadata.program_key(),
+            enabled.metadata.program_key(),
+            "{effect}: a bypassed and an enabled instance share one program"
+        );
+        let lane = bypassed
+            .control
+            .as_deref()
+            .expect("the bypass rides a lane");
+        assert!(!lane.has_channel() && lane.bypassed());
+        assert!(
+            enabled.control.is_none(),
+            "an enabled instance holds no lane"
+        );
+    }
+    let delay = entry(&prepared, "ch00", "delay");
+    assert!(delay.initial_bypass && delay.metadata.bypass && delay.bank_preparation.bypass);
+    assert!(
+        delay.control.is_none(),
+        "the delay keeps its prepared bypass"
+    );
+    assert!(!entry(&prepared, "ch01", "delay").metadata.bypass);
+    assert_eq!(effect_compiler::NEVER_BANKED_EFFECTS, ["miso.delay"]);
+    let multiband = entry(&prepared, "ch00", "multiband");
+    assert!(
+        multiband.initial_bypass && multiband.metadata.bypass && multiband.bank_preparation.bypass,
+        "the multiband keeps its prepared bypass (#1100)"
+    );
+    assert!(
+        multiband.control.is_none(),
+        "no lane carries a multiband bypass"
+    );
+    assert!(!entry(&prepared, "ch01", "multiband").metadata.bypass);
+    assert_eq!(
+        effect_compiler::PREPARED_BYPASS_EFFECTS,
+        ["miso.multiband-compressor"]
+    );
+    let lowered: Vec<&str> = registry
+        .descriptors()
+        .map(|descriptor| descriptor.id.as_str())
+        .filter(|id| effect_compiler::lowers_session_bypass(id))
+        .collect();
+    assert_eq!(
+        lowered,
+        [
+            "miso.compressor",
+            "miso.gate-expander",
+            "miso.parametric-eq",
+            "miso.soft-clip",
+            "miso.transient-shaper",
+            "miso.true-peak-limiter",
+        ],
+        "every launch effect but the delay and the multiband lowers its session bypass"
+    );
+}
+
+/// Issue #1087: a live console's lane starts from the session bypass, not the prepared one.
+///
+/// Red mutation: seed the live lane from `bank_preparation.bypass` again -> the bypassed EQ's
+/// live lane starts un-bypassed and the track renders wet from its first block.
+#[test]
+fn a_live_console_lane_starts_from_the_session_bypass() {
+    let registry = launch_native_effect_registry().expect("launch registry");
+    let mut prepared =
+        prepare_native_session_effects(&bypassed_console(), &registry, caps()).expect("prepared");
+    let producers = effect_compiler::attach_effect_console(
+        &mut prepared,
+        core::num::NonZeroUsize::new(8).expect("depth"),
+    )
+    .expect("console attached");
+    assert_eq!(producers.len(), prepared.entries.len());
+    for (track, effect, bypassed) in [
+        ("ch00", "eq", true),
+        ("ch00", "comp", false),
+        ("ch00", "limiter", true),
+        ("ch00", "delay", true),
+        ("ch00", "multiband", true),
+        ("ch01", "eq", false),
+        ("ch01", "delay", false),
+        ("ch01", "multiband", false),
+    ] {
+        let lane = entry(&prepared, track, effect)
+            .control
+            .as_deref()
+            .expect("every instance has a live lane");
+        assert!(lane.has_channel(), "{track} {effect}: a live channel");
+        assert_eq!(
+            lane.bypassed(),
+            bypassed,
+            "{track} {effect}: starts bypassed"
+        );
+    }
+}

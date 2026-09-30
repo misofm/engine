@@ -110,8 +110,20 @@ const fn order_key(parameter_index: u32, channel: ParameterChannel) -> (u32, u32
 ///
 /// The consumer half of a [`bounded_spsc`](engine::realtime::bounded_spsc); the producer
 /// stays with the host's control plane. A producer must be dropped before the plan that owns this.
+///
+/// # A lane without a channel (issue #1087)
+///
+/// A session `bypass` is per-lane state, not a prepared program, for every effect whose bypass
+/// `effect_compiler::lowers_session_bypass` (all but the delay and the multiband): preparation
+/// lowers it to a prepared `bypass = false` plus this lane's initial bypass, so a bypassed track keeps its place
+/// in its effect bank and the rack's [`BypassShunt`] selects the dry signal for exactly that lane.
+/// A session with no live console still needs somewhere to hold that bit, so
+/// [`without_channel`](Self::without_channel) builds a lane with no queue: nothing can ever be
+/// admitted to it, its drain stages nothing, and its bypass is the prepared one for the life of
+/// the plan. A live console replaces it with a channel seeded from the same bit.
 pub struct EffectControlLane {
-    control: Consumer<EffectControlRecord>,
+    /// `None` for a lane that only carries a prepared bypass ([`Self::without_channel`]).
+    control: Option<Consumer<EffectControlRecord>>,
     /// Optional FIFO target storage for an owner that has a prepared-target capability.
     ///
     /// This is deliberately lane-owned and sized from the queue's actual capacity. It is absent
@@ -147,6 +159,28 @@ impl EffectControlLane {
         Self::with_target_staging(control, bypass, false)
     }
 
+    /// A lane with no live channel that carries only this instance's prepared bypass (issue
+    /// #1087).
+    ///
+    /// Off the render thread, and it allocates nothing. It exists so that a session-bypassed
+    /// instance reaches the rack's latency-preserving [`BypassShunt`] whether or not a live
+    /// console is attached: the rack builds a shunt for an instance or a bank slot that holds any
+    /// lane, and restores the dry signal into every lane whose [`bypassed`](Self::bypassed) is
+    /// true. The witness' `UNBYPASSED` term is seeded from `bypass` exactly as [`Self::new`]
+    /// seeds it, so a statically bypassed lane declines the collapse from the plan's first block.
+    #[must_use]
+    pub fn without_channel(bypass: bool) -> Self {
+        let mut symmetry = ChannelSymmetryWitness::SYMMETRIC;
+        symmetry.set(ChannelSymmetryWitness::UNBYPASSED, !bypass);
+        Self {
+            control: None,
+            targets: None,
+            staged_targets: 0,
+            bypass,
+            symmetry,
+        }
+    }
+
     /// Binds a prepared-target lane and allocates its FIFO backing off the render thread.
     ///
     /// The backing is exactly the queue's logical capacity. Admission guarantees that every
@@ -176,12 +210,21 @@ impl EffectControlLane {
             .into_boxed_slice()
         });
         Self {
-            control,
+            control: Some(control),
             targets,
             staged_targets: 0,
             bypass,
             symmetry,
         }
+    }
+
+    /// Whether this lane has a live channel a control plane can publish to.
+    ///
+    /// `false` only for a [`without_channel`](Self::without_channel) lane, whose bypass is fixed
+    /// at preparation.
+    #[must_use]
+    pub const fn has_channel(&self) -> bool {
+        self.control.is_some()
     }
 
     // REALTIME_POLICY_BEGIN
@@ -204,11 +247,23 @@ impl EffectControlLane {
 
     /// Exact queue-owned payload layout, including the sentinel slot and shared header.
     ///
+    /// A [`without_channel`](Self::without_channel) lane owns no queue, so its layout is the empty
+    /// one: no slots and no bytes, which an accounting caller charges as nothing.
+    ///
     /// This is a control-plane accounting query; it is never called from `stage` or any other
     /// realtime-marked method.
     #[must_use]
     pub fn retained_queue_payload(&self) -> Option<SpscRetainedPayload> {
-        let capacity = NonZeroUsize::new(self.control.capacity())?;
+        let Some(control) = self.control.as_ref() else {
+            return Some(SpscRetainedPayload {
+                slot_count: 0,
+                ring_header_bytes: 0,
+                ring_header_align: 1,
+                slot_payload_bytes: 0,
+                slot_payload_align: 1,
+            });
+        };
+        let capacity = NonZeroUsize::new(control.capacity())?;
         bounded_spsc_retained_payload::<EffectControlRecord>(capacity).ok()
     }
 
@@ -288,7 +343,12 @@ impl EffectControlLane {
         first_sample: u64,
         observation: Option<&mut ObservationLane>,
     ) -> Staged {
-        let available = self.control.available_at_entry();
+        // A lane without a channel has nothing to drain: the loop below never runs, and the
+        // window, the target prefix and the witness stay exactly as the last block left them.
+        let available = self
+            .control
+            .as_ref()
+            .map_or(0, Consumer::available_at_entry);
         let mut staged = 0_usize;
         self.staged_targets = 0;
         let mut target_error = false;
@@ -302,7 +362,7 @@ impl EffectControlLane {
         let mut deferred: Option<EffectControlRecord> = None;
         while remaining != 0 {
             remaining -= 1;
-            let Ok(record) = self.control.try_pop() else {
+            let Some(Ok(record)) = self.control.as_mut().map(Consumer::try_pop) else {
                 // The entry snapshot and SPSC ownership guarantee this cannot happen. Keep the
                 // drain bounded if a malformed test double violates that invariant.
                 break;
@@ -781,8 +841,29 @@ impl ObservationLane {
 ///   boundary, so a rendered block is entirely dry or entirely wet and the select is a
 ///   `copy_from_slice`, not an arithmetic blend. `-0.0` survives it.
 ///
-/// A shunt is only built for an instance that has a live control channel, so a session with no
-/// console allocates none of this and renders the byte-identical path it always did.
+/// # When a shunt exists (issue #1087)
+///
+/// A session `bypass` is per-lane shunt state, not a prepared program, for every effect whose
+/// bypass `effect_compiler::lowers_session_bypass`: preparation lowers it to a prepared
+/// `bypass = false` plus the lane's initial bypass, carried by an
+/// [`EffectControlLane`] (a live channel, or [`EffectControlLane::without_channel`] when no console
+/// is attached). A shunt is built for every instance, and every bank slot, that holds such a lane:
+/// a live channel, or a lane bypassed at preparation. A session with neither allocates none of
+/// this and renders the byte-identical path it always did.
+///
+/// A shunt-bypassed lane is bit-identical to the same instance prepared with `bypass = true`:
+/// every launch effect that banks emits, under a prepared bypass, its input delayed by exactly its
+/// declared latency from a line that starts at `+0.0`, and checks only that output at its block
+/// boundary (D7), and this shunt emits the same words from a line that starts at `+0.0`, by
+/// copies, so `-0.0` survives. The two differ only where that D7 check fires on the dry block
+/// itself: a non-finite sample, or one at least `1e30` in magnitude. An effect never receives one
+/// in a compiled plan, because the track's input stage sanitises every such sample to `+0.0` and
+/// every stage after it zeroes a block that leaves that range. The delay, whose D7 check also
+/// reads its state, never banks and keeps its prepared bypass
+/// (`effect_compiler::NEVER_BANKED_EFFECTS`), and so does the multiband, whose D7 recovery is
+/// whole-bank (`effect_compiler::PREPARED_BYPASS_EFFECTS`, issue #1100). `graph-compiler`'s
+/// `bypass_shunt_identity` and
+/// `bypass_cohorts` tests are the gates.
 pub struct BypassShunt {
     /// Dry copy of this block's input, taken before the effect runs.
     dry_left: Box<[f32]>,
@@ -807,6 +888,31 @@ impl BypassShunt {
             line_right: vec![0.0; latency].into_boxed_slice(),
             cursor: 0,
         }
+    }
+
+    /// The heap bytes [`Self::new`]`(frames, latency)` allocates, or `None` if they overflow.
+    ///
+    /// Two dry blocks of `frames` words and two latency lines of `latency` words, all `f32`. An
+    /// AoSoA caller passes the interleaved sizes, `quantum * lanes` and `latency * lanes`, exactly
+    /// as it constructs the shunt. This is what a resource estimate charges for a shunt before
+    /// bind allocates it (issue #1100); the shunt's own struct is charged with its owner.
+    #[must_use]
+    pub const fn allocated_bytes(frames: usize, latency: usize) -> Option<usize> {
+        let Some(words) = frames.checked_add(latency) else {
+            return None;
+        };
+        let Some(words) = words.checked_mul(2) else {
+            return None;
+        };
+        words.checked_mul(core::mem::size_of::<f32>())
+    }
+
+    /// The largest single allocation [`Self::new`]`(frames, latency)` makes: one channel's dry
+    /// block or one channel's latency line, whichever is longer, or `None` if it overflows.
+    #[must_use]
+    pub const fn largest_allocation_bytes(frames: usize, latency: usize) -> Option<usize> {
+        let words = if frames > latency { frames } else { latency };
+        words.checked_mul(core::mem::size_of::<f32>())
     }
 
     /// Whether this shunt carries a latency line that has to be fed on every block.

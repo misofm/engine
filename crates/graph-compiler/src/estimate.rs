@@ -6,6 +6,7 @@
 use super::*;
 use crate::canonical::node_text_len;
 use crate::pdc::TimingResult;
+use effect_contract::{BypassShunt, EffectControlLane, ObservationLane, PreparedAutomationSpan};
 
 /// Eleven inputs because the estimate is a function of that many independent facts about the
 /// compile, and bundling them into a struct would only move the argument list. Was inside `lib.rs`
@@ -142,16 +143,48 @@ pub(crate) fn resource_estimate(
     })
 }
 
-/// Exact retained storage for attached effect control channels.
+/// Exact retained storage for attached effect control lanes and the console owners they create.
 ///
 /// Queue payload is charged from the SPSC layout helper using each lane's actual capped capacity.
 /// The lane-owned target FIFO is charged once when present. Scalar lanes retain one boxed lane;
 /// banked lanes are moved into one boxed `Option<EffectControlLane>` array per bank, so this
 /// helper does not count the pre-bank scalar boxes a bank later consumes.
+///
+/// # The console owners (issue #1100)
+///
+/// A lane -- a live channel, or the channel-less lane that carries a session bypass (#1087) --
+/// also makes bind wrap its effect in a console owner, and this charges every byte that owner
+/// allocates beyond the console-free path, in both of its forms:
+///
+/// * **Per node**, `graph`'s `runtime::ConsoleEffect`: the boxed owner, which the console-free
+///   `NodeKind::Effect` does not allocate at all; the staging window of `automation_capacity`
+///   spans, for a live channel only; and the shunt, always.
+/// * **Banked**, `rack::ConsoleEffectBankStage`: its growth over the `rack::EffectBankStage` it
+///   replaces; the one-lane staging window and the packed window of `automation_capacity` spans
+///   per lane, when any lane has a live channel; and the shunt over the whole AoSoA block, when
+///   any lane has a live channel or is bypassed.
+///
+/// A shunt is [`BypassShunt::allocated_bytes`] at the size its owner builds it with. A channel-less
+/// lane holds no window in either form, which is what lets a console-free session bypass bind at
+/// any automation capacity. Before #1100 none of this was charged: P1's session bypass put a
+/// per-node owner on every console-free host, and a live console already had the gap.
 pub(crate) fn effect_control_resource(
     effects: &[EffectPreparedEntry],
     banks: &[GraphPreparedEffectBank],
 ) -> Option<GraphScalarOwnerResourceEstimate> {
+    let bytes = |value: usize| u64::try_from(value).ok();
+    let span_bytes = bytes(core::mem::size_of::<PreparedAutomationSpan>())?;
+    // `graph`'s `runtime::ConsoleEffect` is exactly these five fields; its
+    // `observation_size_accounting` test pins that identity, and `bypass_cohorts`'
+    // allocator-observed estimate test sees the box if it ever outgrows this sum.
+    let console_effect_bytes = bytes(core::mem::size_of::<GraphPreparedEffect>())?
+        .checked_add(bytes(core::mem::size_of::<Box<EffectControlLane>>())?)?
+        .checked_add(bytes(core::mem::size_of::<Box<[PreparedAutomationSpan]>>())?)?
+        .checked_add(bytes(core::mem::size_of::<BypassShunt>())?)?
+        .checked_add(bytes(core::mem::size_of::<Option<Box<ObservationLane>>>())?)?;
+    let console_stage_bytes = bytes(core::mem::size_of::<rack::ConsoleEffectBankStage>())?;
+    let console_stage_growth =
+        console_stage_bytes.saturating_sub(bytes(core::mem::size_of::<rack::EffectBankStage>())?);
     let mut total = 0_u64;
     let mut largest = 0_u64;
     let mut banked: BTreeSet<(String, EffectRack, String)> = BTreeSet::new();
@@ -187,42 +220,110 @@ pub(crate) fn effect_control_resource(
                 u64::try_from(core::mem::size_of::<effect_contract::EffectControlLane>()).ok()?;
             total = total.checked_add(lane)?;
             largest = largest.max(lane);
+            // The per-node console owner: `runtime::ConsoleEffect::new` at the render quantum.
+            let window = if control.has_channel() {
+                u64::from(entry.metadata.automation_capacity).checked_mul(span_bytes)?
+            } else {
+                0
+            };
+            let frames = usize::try_from(entry.metadata.quantum).ok()?;
+            let latency = usize::try_from(entry.metadata.latency.0).ok()?;
+            let shunt = bytes(BypassShunt::allocated_bytes(frames, latency)?)?;
+            let shunt_largest = bytes(BypassShunt::largest_allocation_bytes(frames, latency)?)?;
+            total = total
+                .checked_add(console_effect_bytes)?
+                .checked_add(window)?
+                .checked_add(shunt)?;
+            largest = largest
+                .max(console_effect_bytes)
+                .max(window)
+                .max(shunt_largest);
         }
     }
-    // Every entry that carries a control channel, keyed once (issue #962). Asking each bank member
+    // Every entry that carries a control lane, keyed once (issue #962). Asking each bank member
     // "does any entry match me and carry a control" by scanning every entry made this estimate
     // quadratic in the effect count, and so in the track count on any session with a banked
     // effect per track.
-    let controlled: BTreeSet<(&str, EffectRack, &str)> = effects
+    let controlled: BTreeMap<(&str, EffectRack, &str), &EffectControlLane> = effects
         .iter()
-        .filter(|entry| entry.control.is_some())
-        .map(|entry| {
-            (
-                entry.track_id.as_str(),
-                entry.rack,
-                entry.effect_id.as_str(),
-            )
+        .filter_map(|entry| {
+            let control = entry.control.as_deref()?;
+            Some((
+                (
+                    entry.track_id.as_str(),
+                    entry.rack,
+                    entry.effect_id.as_str(),
+                ),
+                control,
+            ))
         })
         .collect();
     for bank in banks {
-        let has_control = bank.members.iter().any(|member| {
+        let mut has_control = false;
+        let mut live = false;
+        let mut shunted = false;
+        for member in &bank.members {
             let rack = match member.rack {
                 RackId::Simd1 => EffectRack::Simd1,
                 RackId::Dynamic => EffectRack::Dynamic,
                 RackId::Simd2 => EffectRack::Simd2,
             };
-            controlled.contains(&(member.track_id.as_str(), rack, member.effect_id.as_str()))
-        });
+            if let Some(control) =
+                controlled.get(&(member.track_id.as_str(), rack, member.effect_id.as_str()))
+            {
+                has_control = true;
+                live |= control.has_channel();
+                shunted |= control.has_channel() || control.bypassed();
+            }
+        }
         if has_control {
-            let lanes = u64::from(bank.scratch.width().lanes());
-            let bytes = lanes.checked_mul(
+            let lane_count = bank.scratch.width().lanes();
+            let lanes = u64::from(lane_count);
+            let lane_array = lanes.checked_mul(
                 u64::try_from(core::mem::size_of::<
                     Option<effect_contract::EffectControlLane>,
                 >())
                 .ok()?,
             )?;
-            total = total.checked_add(bytes)?;
-            largest = largest.max(bytes);
+            total = total.checked_add(lane_array)?;
+            largest = largest.max(lane_array);
+            // The banked console owner: `rack::ConsoleEffectBankStage::new`, which `graph`'s
+            // `stage_for` builds in place of a plain `EffectBankStage` for any slot with a lane.
+            let metadata = bank.processor.metadata();
+            let capacity = u64::from(metadata.program_key.automation_capacity);
+            let (staging, packed) = if live {
+                (
+                    capacity.checked_mul(span_bytes)?,
+                    capacity.checked_mul(lanes)?.checked_mul(span_bytes)?,
+                )
+            } else {
+                (0, 0)
+            };
+            let (shunt, shunt_largest) = if shunted {
+                let lane_count = usize::try_from(lane_count).ok()?;
+                let frames = usize::try_from(bank.scratch.quantum())
+                    .ok()?
+                    .checked_mul(lane_count)?;
+                let latency = usize::try_from(metadata.program_key.latency.0)
+                    .ok()?
+                    .checked_mul(lane_count)?;
+                (
+                    bytes(BypassShunt::allocated_bytes(frames, latency)?)?,
+                    bytes(BypassShunt::largest_allocation_bytes(frames, latency)?)?,
+                )
+            } else {
+                (0, 0)
+            };
+            total = total
+                .checked_add(console_stage_growth)?
+                .checked_add(staging)?
+                .checked_add(packed)?
+                .checked_add(shunt)?;
+            largest = largest
+                .max(console_stage_bytes)
+                .max(staging)
+                .max(packed)
+                .max(shunt_largest);
         }
     }
     Some(GraphScalarOwnerResourceEstimate {

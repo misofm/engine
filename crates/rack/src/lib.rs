@@ -883,13 +883,24 @@ pub const fn witness_of_designed(designed: bool) -> ChannelSymmetryWitness {
     }
 }
 
-/// The live-console twin of [`EffectBankStage`] (issue #140 A).
+/// The live-console twin of [`EffectBankStage`] (issue #140 A), and the stage of every bank slot
+/// with a lane bypassed at preparation (issue #1087).
 ///
 /// It is a **separate stage type** on purpose, exactly as `ConsoleMatrixProcessor` is a separate
-/// processor from `MatrixProcessor` (#137 D1): a bank prepared without a console keeps
-/// [`EffectBankStage`]'s storage and its `&[]`/zero-offset call, byte for byte, so "control off
-/// costs nothing" stays an identity rather than a claim. Nothing in this type is reachable from a
-/// session that asked for no control channel.
+/// processor from `MatrixProcessor` (#137 D1): a bank prepared without a console and without a
+/// bypassed lane keeps [`EffectBankStage`]'s storage and its `&[]`/zero-offset call, byte for
+/// byte, so "control off costs nothing" stays an identity rather than a claim. Nothing in this
+/// type is reachable from a session that asked for no control channel and bypasses nothing.
+///
+/// # A session bypass is a lane of this stage (issue #1087)
+///
+/// A session's `bypass`, on every effect but the delay and the multiband (which keep a prepared
+/// bypass, issue #1100), is lowered to a prepared `bypass = false` plus a lane
+/// ([`EffectControlLane::without_channel`] when no console is attached) whose bypass is set, so a
+/// bypassed track keeps its bank. Its lane runs the wet path with the others and step 4 restores
+/// its latency-matched dry signal: the same words the effect's own prepared bypass emits, by
+/// copies, so `-0.0` survives, and the select is per lane, so banking couples the lanes' cost and
+/// never their bits.
 ///
 /// # What one block does, in order
 ///
@@ -914,9 +925,11 @@ pub struct ConsoleEffectBankStage {
     quantum: u32,
     /// `lanes + 1` packed offsets into [`Self::spans`], rewritten every block.
     offsets: Box<[u32]>,
-    /// One control channel per lane; `None` for a lane no console addresses.
+    /// One control lane per bank lane: a live channel, a channel-less lane that carries a
+    /// session bypass (issue #1087), or `None` for a lane neither applies to.
     lanes: Box<[Option<EffectControlLane>]>,
-    /// One lane's staging window: the bank's own `automation_capacity` spans.
+    /// One lane's staging window: the bank's own `automation_capacity` spans, or none when no
+    /// lane has a live channel (issue #1087).
     ///
     /// One window serves every lane because a lane's staged prefix is copied into [`Self::packed`]
     /// the moment it is drained, before the next lane touches the window. The bank never sees this
@@ -926,7 +939,7 @@ pub struct ConsoleEffectBankStage {
     /// `[offsets[l], offsets[l + 1])`, which is the partition the effect contract already defines.
     packed: Box<[PreparedAutomationSpan]>,
     /// Latency-preserving dry shunt over the resident AoSoA block, or `None` when no lane of this
-    /// slot can be bypassed live.
+    /// slot can be bypassed: no live channel and no lane bypassed at preparation.
     shunt: Option<BypassShunt>,
     /// Issue #143 D3: one observation lane per bank lane, or `None` for the whole slot when the
     /// plan named no observation capacity. `None` is the byte-identical unobserved path.
@@ -984,7 +997,18 @@ impl ConsoleEffectBankStage {
             return Err(RackError::ZeroQuantum);
         }
         let lane_count = width.lanes() as usize;
-        let capacity = processor.metadata().program_key.automation_capacity as usize;
+        // Issue #1087: only a live channel ever stages a span. A slot whose lanes are all
+        // channel-less -- session bypasses with no console attached -- holds no window at all: its
+        // drain stages nothing into an empty one, and there is no twin pair for the pairing rule
+        // to protect. The window is the automation capacity per lane of the bank, which a caller
+        // may set as high as `u32::MAX`, so this is what keeps a console-free bypass from costing
+        // a console's staging.
+        let live = lanes.iter().flatten().any(EffectControlLane::has_channel);
+        let capacity = if live {
+            processor.metadata().program_key.automation_capacity as usize
+        } else {
+            0
+        };
         let total = capacity
             .checked_mul(lane_count)
             .ok_or(RackError::Overflow)?;
@@ -993,9 +1017,13 @@ impl ConsoleEffectBankStage {
             .checked_mul(lane_count)
             .ok_or(RackError::Overflow)?;
         let line = latency.checked_mul(lane_count).ok_or(RackError::Overflow)?;
+        // Issue #1087: a shunt whenever any lane can be bypassed -- a live channel, which may
+        // bypass at any block, or a lane bypassed at preparation, whether or not a console is
+        // attached. A channel-less lane that is not bypassed can never become so.
         let shunt = lanes
             .iter()
-            .any(Option::is_some)
+            .flatten()
+            .any(|lane| lane.has_channel() || lane.bypassed())
             .then(|| BypassShunt::new(words, line));
         // Issue #143 level-1 zero: a slot no observation request touched holds neither the lane
         // vector nor the per-lane sample scratch.
@@ -1011,9 +1039,11 @@ impl ConsoleEffectBankStage {
         let staging: Box<[PreparedAutomationSpan]> = vec![IDLE_SPAN; capacity].into_boxed_slice();
         // One window serves every lane, and each lane's staged prefix meets the effect's per-lane
         // `span_index < automation_capacity` cut-off; a window of any other size would let a
-        // staged twin pair straddle it (issue #1012).
-        EffectBankProcessBlock::check_automation_window(&staging, &processor.metadata())
-            .map_err(|_| RackError::AutomationWindow)?;
+        // staged twin pair straddle it (issue #1012). A slot with no live channel stages nothing.
+        if live {
+            EffectBankProcessBlock::check_automation_window(&staging, &processor.metadata())
+                .map_err(|_| RackError::AutomationWindow)?;
+        }
         Ok(Self {
             processor,
             designed,

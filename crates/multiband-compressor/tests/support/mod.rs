@@ -134,6 +134,7 @@ pub fn bank(
             backend: backend_for(width),
             width,
             requests,
+            active_mask: width.full_mask(),
         })
         .expect("legal bank request")
         .expect("bank")

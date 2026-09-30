@@ -284,6 +284,7 @@ fn run_bank(mode: Mode, backend: Backend, width: BankWidth) -> Option<BankRun> {
             backend,
             width,
             requests: &requests,
+            active_mask: width.full_mask(),
         })
         .expect("bank prepare")?;
 

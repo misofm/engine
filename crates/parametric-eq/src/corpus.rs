@@ -15,9 +15,9 @@
 //! own four-band configuration, its own signal and — in the ramped case — its own ramp length, so a
 //! cross-lane leak or a mis-split segment cannot pass as agreement.
 //!
-//! The once-per-block boundary check is deliberately **not** in the corpus: it inspects a whole
-//! AoSoA block and would therefore couple lanes that the rest of the path keeps independent. Its
-//! behaviour is a per-block property proven by `tests/faults.rs`, not a cross-target digest.
+//! The once-per-block boundary check is deliberately **not** in the corpus. Its behaviour is a
+//! per-block property proven by `tests/faults.rs`, not a cross-target digest. Since #1089 it
+//! recovers a failing lane alone, so it does not couple lanes either.
 //!
 //! # No NaN
 //!

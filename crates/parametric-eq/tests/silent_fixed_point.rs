@@ -113,6 +113,7 @@ fn render(lanes: usize, restate: bool) -> Vec<u32> {
             backend,
             width,
             requests: &requests,
+            active_mask: width.full_mask(),
         })
         .expect("valid bank request")
         .expect("the native width must bind");
@@ -250,6 +251,7 @@ fn a_negative_zero_input_block_is_not_treated_as_silence() {
                 backend,
                 width,
                 requests: &requests,
+                active_mask: width.full_mask(),
             })
             .expect("valid bank request")
             .expect("the native width must bind");

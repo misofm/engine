@@ -2,7 +2,7 @@
 //!
 //! A counting global allocator, armed only around the calls under test, watches `process` and
 //! `process_bank` over a hundred blocks that include automation, a boundary-check failure and both
-//! resets. The limiter allocates at preparation and at restore — both control plane — and never
+//! resets, and a padded bank whose failures recover one lane (#1091). The limiter allocates at preparation and at restore — both control plane — and never
 //! again; before #90 the render path was allocation-free too, and this gate is what keeps it so
 //! now that the arena, the ramps and the payload codec all changed hands.
 
@@ -178,10 +178,12 @@ fn the_render_path_allocates_nothing() {
     let (allocations, deallocations) = measure(|| {
         for block in 0..100 {
             for (index, sample) in left.iter_mut().enumerate() {
-                // A hostile magnitude every twentieth block: the FIR overflows to infinity and the
+                // A NaN every twentieth block: it reaches the output a lookahead later, where the
                 // once-per-block boundary check zeroes, resets and counts — still without a heap.
+                // (#1091: the `3.0e38` this used to feed never failed the check. The detector's
+                // infinite peak asks for a gain of zero, and `g <= r` delivers it on that sample.)
                 *sample = if block % 20 == 19 {
-                    3.0e38
+                    f32::NAN
                 } else {
                     ((index % 17) as f32 - 8.0) * 0.25
                 };
@@ -221,6 +223,7 @@ fn the_render_path_allocates_nothing() {
             backend,
             width,
             requests: &requests,
+            active_mask: width.full_mask(),
         })
         .expect("bank binding")
         .expect("bank available");
@@ -240,7 +243,7 @@ fn the_render_path_allocates_nothing() {
         for block in 0..100 {
             for (index, sample) in left.iter_mut().enumerate() {
                 *sample = if block % 20 == 19 {
-                    3.0e38
+                    f32::NAN
                 } else {
                     ((index % 23) as f32 - 11.0) * 0.2
                 };
@@ -278,6 +281,7 @@ fn the_render_path_allocates_nothing() {
             backend,
             width,
             requests: &requests,
+            active_mask: width.full_mask(),
         })
         .expect("mono bank binding")
         .expect("mono bank available");
@@ -302,7 +306,7 @@ fn the_render_path_allocates_nothing() {
         for block in 0..100 {
             for (index, sample) in mono_left.iter_mut().enumerate() {
                 *sample = if block % 20 == 19 {
-                    3.0e38
+                    f32::NAN
                 } else {
                     ((index % 23) as f32 - 11.0) * 0.2
                 };
@@ -334,4 +338,70 @@ fn the_render_path_allocates_nothing() {
         (0, 0),
         "mono bank render path allocated"
     );
+
+    // Issue #1091: a padded bank, and its per-lane §4.4 recovery. Every lane but the last carries
+    // a member and the last a clone, fed `+0.0`; only lane 0 is hostile, so each failure recovers
+    // one lane and leaves the others running, which is the path a full bank's all-lanes failure
+    // above never takes.
+    let mask: Vec<bool> = (0..lanes).map(|lane| lane + 1 < lanes).collect();
+    for mono in [false, true] {
+        let mut padded = TruePeakLimiterFactory
+            .bind_homogeneous_bank(PrepareEffectBankRequest {
+                backend,
+                width,
+                requests: &requests,
+                active_mask: &mask,
+            })
+            .expect("padded bank binding")
+            .expect("padded bank available");
+        let mut left = vec![0.0_f32; 128 * lanes];
+        let mut right = vec![0.0_f32; 128 * lanes];
+        let fill = |left: &mut [f32], right: &mut [f32], block: usize| {
+            for (index, (left, right)) in left.iter_mut().zip(right.iter_mut()).enumerate() {
+                let lane = index % lanes;
+                let value = if lane + 1 == lanes {
+                    0.0
+                } else if lane == 0 && block % 20 == 19 {
+                    f32::NAN
+                } else {
+                    ((index % 23) as f32 - 11.0) * 0.2
+                };
+                *left = value;
+                *right = value;
+            }
+        };
+        let mut render = |left: &mut [f32], right: &mut [f32], block: usize| {
+            let spans = automation(block);
+            let request = EffectBankProcessBlock::new(
+                left,
+                right,
+                None,
+                128,
+                width,
+                (block * 128) as u64,
+                &spans,
+                &offsets,
+                128,
+            )
+            .expect("padded bank block");
+            if mono {
+                padded.process_bank_mono(request);
+            } else {
+                padded.process_bank(request);
+            }
+        };
+        fill(&mut left, &mut right, 0);
+        render(&mut left, &mut right, 0);
+        let (allocations, deallocations) = measure(|| {
+            for block in 1..100 {
+                fill(&mut left, &mut right, block);
+                render(&mut left, &mut right, block);
+            }
+        });
+        assert_eq!(
+            (allocations, deallocations),
+            (0, 0),
+            "padded bank render path allocated (mono {mono})"
+        );
+    }
 }

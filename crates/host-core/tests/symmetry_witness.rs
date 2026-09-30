@@ -193,8 +193,10 @@ fn push(console: &mut Console, track_id: &str, record: EffectControlRecord) {
         .effect_controls
         .iter_mut()
         .find(|producer| {
+            // Every track carries one EQ, in SIMD rack 1 or, under `edited_apart`, the dynamic
+            // rack.
             producer.track_id.as_ref() == track_id
-                && producer.rack == EffectRack::Simd1
+                && matches!(producer.rack, EffectRack::Simd1 | EffectRack::Dynamic)
                 && producer.effect_index == 0
         })
         .expect("a control channel for the addressed effect");
@@ -392,11 +394,11 @@ fn declining_tracks(console: &Console) -> std::collections::BTreeSet<String> {
 /// The mono fixture with per-track edits, addressed by track index.
 ///
 /// The two levers are the two the tests below need, and they are levers on *different* things.
-/// `bypass` sets a track's EQ to prepare-time bypass, which changes its `EffectProgramKey` and so
-/// its cohort; `invert` flips one channel's polarity, which clears that track's `DESIGNED` term and
-/// so its **pool class** (mono-collapse M1). Two independent two-valued splits give four cohorts
-/// over eight tracks, which is how [`the_scalar_console_effect_arm_maintains_its_own_live_terms`]
-/// reaches a plan with no effect bank at the eight-lane launch width.
+/// `bypass` sets a track's EQ to prepare-time bypass, which seeds its lane's `UNBYPASSED` term
+/// false; `invert` flips one channel's polarity, which clears that track's `DESIGNED` term and so
+/// its **pool class** (mono-collapse M1). Since #1087 a session bypass no longer changes the
+/// `EffectProgramKey` (it is per-lane shunt state), so it no longer splits a cohort:
+/// [`edited_apart`] is the fixture that still needs the split.
 fn edited(bypass: &[usize], invert: &[usize]) -> String {
     let mut model = parse_session_json(&mono_session()).expect("mono fixture parses");
     for (index, track) in model.tracks.iter_mut().enumerate() {
@@ -405,6 +407,26 @@ fn edited(bypass: &[usize], invert: &[usize]) -> String {
         }
         if invert.contains(&index) {
             track.builtins.right.polarity_invert = true;
+        }
+    }
+    canonical_session_json(&model).expect("edited fixture canonicalizes")
+}
+
+/// [`edited`], with every bypassed track's EQ moved from SIMD rack 1 into the dynamic rack.
+///
+/// Two independent two-valued splits over eight tracks: the rack (a bypassed track's EQ is a
+/// different rack chain, so it never shares a bank with an unbypassed one) crossed with the pool
+/// class. Four cohorts of two do not fill an eight-lane bank, which is how
+/// [`the_scalar_console_effect_arm_maintains_its_own_live_terms`] reaches a plan with no effect
+/// bank at the eight-lane launch width. Before #1087 the bypass itself was the first split,
+/// because it changed the EQ's `EffectProgramKey`; now bypassed and unbypassed EQs share a key
+/// and would bank together.
+fn edited_apart(bypass: &[usize], invert: &[usize]) -> String {
+    let mut model = parse_session_json(&edited(bypass, invert)).expect("edited fixture parses");
+    for (index, track) in model.tracks.iter_mut().enumerate() {
+        if bypass.contains(&index) {
+            let eq = track.simd1.effects.remove(0);
+            track.dynamic.effects.insert(0, eq);
         }
     }
     canonical_session_json(&model).expect("edited fixture canonicalizes")
@@ -452,12 +474,13 @@ fn a_prepare_time_bypass_seeds_the_unbypassed_term_before_any_render() {
 ///
 /// # How the arm is made bank-free at the eight-lane launch width
 ///
-/// Two independent splits over the eight tracks: a prepare-time bypass (which changes the
-/// `EffectProgramKey`, so bypassed and unbypassed tracks can never share a bank) crossed with a
-/// polarity inversion (which clears `DESIGNED`, so mono-collapse M1's pool class separates them).
-/// Four cohorts of two do not fill an eight-lane bank, so **no** effect bank binds and every EQ is
-/// a per-node `ConsoleEffect`. The assertion on `effect_bank_scratch_bytes` is what makes that a
-/// fact rather than an intention.
+/// Two independent splits over the eight tracks: a prepare-time bypass on an EQ moved into the
+/// dynamic rack (so bypassed and unbypassed EQs sit in different rack chains and can never share a
+/// bank; since #1087 the bypass alone would not split them) crossed with a polarity inversion
+/// (which clears `DESIGNED`, so mono-collapse M1's pool class separates them). Four cohorts of two
+/// do not fill an eight-lane bank, so **no** effect bank binds and every EQ is a per-node
+/// `ConsoleEffect`. The assertion on `effect_bank_scratch_bytes` is what makes that a fact rather
+/// than an intention.
 ///
 /// A four-lane build (AArch64 NEON, #1017) does bank a cohort of two, so there this fixture never
 /// reaches the per-node arm and the test is ignored, by name and with its reason, rather than run
@@ -473,7 +496,7 @@ fn a_prepare_time_bypass_seeds_the_unbypassed_term_before_any_render() {
               at the eight-lane launch width (#1017)"
 )]
 fn the_scalar_console_effect_arm_maintains_its_own_live_terms() {
-    let document = edited(&[4, 5, 6, 7], &[2, 3, 6, 7]);
+    let document = edited_apart(&[4, 5, 6, 7], &[2, 3, 6, 7]);
     let (_session, mut console) = prepare_unbanked(&document);
     assert_eq!(
         console.prepared.report.effect_bank_scratch_bytes, 0,

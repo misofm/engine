@@ -37,13 +37,23 @@ three separate mechanisms, each where its hazard is:
 * **Divergence** — output finiteness is checked **once per block per bank** with one vector
   compare, `x == x` and `|x| < 1e30` (`effect_runtime::bank::check_block`). A failing
   block zeroes its output, resets that effect's state to prepared defaults, and increments a
-  **block** counter. The contract's report counts blocks, never samples.
+  **block** counter. The contract's report counts blocks, never samples. In a bank, every launch
+  effect recovers only the failing lane and reports it alone (#1089-#1092), so a lane's fault never
+  moves a bank-mate's bits. The one exception is the multiband, whose bank still zeroes and resets
+  every lane; it therefore keeps a prepared session bypass (#1100).
 * **Input sanitisation** — once per track per block at the track input stage, never inside an
   effect.
 
-Signed finite zero is retained on every non-recursive path. Bypass is an immutable prepared
-configuration, is **not** part of `EffectProgramKey`, and outputs the dry input delayed by
-exactly the declared latency.
+Signed finite zero is retained on every non-recursive path. A prepared bypass is an immutable
+configuration and outputs the dry input delayed by exactly the declared latency. Every bank reads
+one bypass flag for all its lanes, so the prepared flag stays in `EffectProgramKey`. A session's
+bypass is not prepared (issue #1087): `effect-compiler` prepares an effect that can bank
+enabled and carries the bypass as per-lane state to the rack's latency-preserving shunt
+(`BypassShunt`), which copies the same delayed dry words into exactly the bypassed lanes, so a
+bypassed track keeps its bank. Two effects keep their session bypass as a prepared one
+(`effect_compiler::lowers_session_bypass`): the delay, which never banks, and the multiband
+compressor, whose whole-bank D7 recovery would let a bypassed lane silence its bank-mates
+(issue #1100).
 
 Class-A identity, the same bits on every lane width and target, treats every NaN as one value
 (owner decision 10, #1065): tests fold each NaN to `0x7FC00000` through `dsp_reference::class_a`
