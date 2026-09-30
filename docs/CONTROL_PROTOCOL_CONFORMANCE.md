@@ -1,6 +1,6 @@
 # MISO control protocol conformance record
 
-This manifest records Issue 005 non-benchmark evidence and its limits. The normative corpus is `complete_schema_corpus()`: 46 canonical frames covering 11 commands (including one transaction with all 39 edit opcodes), 11 success responses, 18 non-OK statuses including typed backpressure, and six events. Its FNV-1a-64 label-and-byte hash is `e4dec003302d891a` (`COMPLETE_SCHEMA_HASH`; re-pinned for the BLAKE3 source-identity spelling in #787). Auditable seed frames are checked in under [`fuzz/corpus`](../fuzz/corpus/README.md).
+This manifest records Issue 005 non-benchmark evidence and its limits. The normative corpus is `complete_schema_corpus()`: 46 canonical frames covering 11 commands (including one transaction with all 39 edit opcodes), 11 success responses, 18 non-OK statuses including typed backpressure, and six events. Its FNV-1a-64 label-and-byte hash is `af1b9b71a0a31727` (`COMPLETE_SCHEMA_HASH`; re-pinned for the BLAKE3 source-identity spelling in #787, and for decision 12's track encoding in #1093: field 7 carries the inserts, the retired fields 6 and 8 are gone, and field 11 carries the console entries). Auditable seed frames are checked in under [`fuzz/corpus`](../fuzz/corpus/README.md).
 
 | Evidence | Recorded result | Limitation |
 | --- | --- | --- |

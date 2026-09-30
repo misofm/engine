@@ -66,12 +66,15 @@ pub const MAXIMUM_DOCUMENT_BYTES: u32 = 1 << 20;
 ///
 /// Issue #338 re-measured the then-pinned `jstrict 0.14.0` JSON frontend plus typed model and compilation
 /// over the minimal document, dense one-, 64-, and 192-track documents, and the exact 1 MiB
-/// admitted ceiling. The largest observed ratio was 14.738 bytes per input byte; 17 leaves 15.3%
-/// headroom. Boot checks
+/// admitted ceiling. The largest observed ratio was 14.738 bytes per input byte; 17 left 15.3%
+/// headroom. Issue #1093 re-measured it after decision 12's required root `console` grew the
+/// minimal document from 447 to 511 bytes and its parse, model and compile peak from 6,780 to
+/// 8,944 bytes: 17.503 bytes per input byte, now the largest ratio (the dense documents stay
+/// below 13.1). 20 leaves 14.3% headroom. Boot checks
 /// `document_bytes * PARSE_TRANSIENT_MULTIPLIER` against the effective budget before UTF-8 decode
 /// or parser allocation, and the peak-transient test keeps every phase visible so frontend growth
 /// cannot silently outrun this projection.
-pub const PARSE_TRANSIENT_MULTIPLIER: u64 = 17;
+pub const PARSE_TRANSIENT_MULTIPLIER: u64 = 20;
 
 /// Default host memory ceiling used only when the embedding passes zero.
 ///
@@ -5813,14 +5816,18 @@ fn compile_ready(
     prepared_mutes
         .try_reserve_exact(track_count)
         .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
-    for track in &session.normalized_model().tracks {
+    let model = session.normalized_model();
+    for track in &model.tracks {
         let count = |effects: usize| -> Result<u32, Vec<u8>> {
             u32::try_from(effects).map_err(|_| fixed_diagnostic("web.live_controls.effects"))
         };
+        // The lowered racks (decision 12): every track carries every `pre_insert` and
+        // `post_insert` slot, so those counts are the session's; rack bytes `0`/`1`/`2` keep
+        // addressing them until #1096 (S1c) gives the browser record its console byte.
         rack_effects.push([
-            count(track.simd1.effects.len())?,
-            count(track.dynamic.effects.len())?,
-            count(track.simd2.effects.len())?,
+            count(model.console.pre_insert.len())?,
+            count(track.inserts.effects.len())?,
+            count(model.console.post_insert.len())?,
         ]);
         prepared_mutes.push([track.fader.left_mute, track.fader.right_mute]);
     }

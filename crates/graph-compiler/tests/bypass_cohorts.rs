@@ -103,18 +103,16 @@ fn console(tracks: usize, masks: [u64; 3]) -> SessionModel {
     let mut model = parse_session_json(INTENDED).expect("console fixture");
     model.tracks.truncate(tracks);
     model.routes.truncate(tracks);
+    // Every strip slot is a console slot (decision 12): `pre_insert` lowers to SIMD rack 1 and
+    // `post_insert` to SIMD rack 2, and a track's bypass for a slot is its console entry's.
     for (index, track) in model.tracks.iter_mut().enumerate() {
-        for (slot, (rack, id)) in SLOTS.iter().enumerate() {
-            let effects = match rack {
-                RackId::Simd1 => &mut track.simd1.effects,
-                RackId::Dynamic => &mut track.dynamic.effects,
-                RackId::Simd2 => &mut track.simd2.effects,
-            };
-            let effect = effects
+        for (slot, (_, id)) in SLOTS.iter().enumerate() {
+            let entry = track
+                .console
                 .iter_mut()
-                .find(|effect| effect.id.as_str() == *id)
+                .find(|entry| entry.slot.as_str() == *id)
                 .expect("strip slot");
-            effect.bypass = masks[slot] >> index & 1 == 1;
+            entry.bypass = masks[slot] >> index & 1 == 1;
         }
     }
     model
@@ -628,10 +626,18 @@ fn a_negative_zero_from_an_enabled_stage_passes_a_bypassed_slot_unchanged() {
     let eq_mask = 0x5555 & full;
     let mut model = console(lanes, [eq_mask, 0, 0]);
     identity_inputs(&mut model);
+    // The `pre_insert` section (SIMD rack 1) reordered to comp -> eq: the session's slot order,
+    // and every track's entries with it.
+    model.console.pre_insert.swap(0, 1);
+    assert_eq!(
+        model.console.pre_insert[0].slot.as_str(),
+        "comp",
+        "SIMD rack 1 is comp -> eq"
+    );
     for track in &mut model.tracks {
-        track.simd1.effects.swap(0, 1);
-        let comp = &mut track.simd1.effects[0];
-        assert_eq!(comp.id.as_str(), "comp", "SIMD rack 1 is comp -> eq");
+        track.console.swap(0, 1);
+        let comp = &mut track.console[0];
+        assert_eq!(comp.slot.as_str(), "comp", "SIMD rack 1 is comp -> eq");
         comp.params
             .iter_mut()
             .find(|param| param.parameter_id == 6)
@@ -664,21 +670,32 @@ fn a_negative_zero_from_an_enabled_stage_passes_a_bypassed_slot_unchanged() {
     );
 }
 
-/// `tracks` tracks of the multiband compressor alone, at its defaults, in SIMD rack 1, with
-/// identity input sections and track `t`'s instance bypassed when bit `t` of `mask` is set.
+/// `tracks` tracks of the multiband compressor alone, at its defaults, with identity input
+/// sections and track `t`'s instance bypassed when bit `t` of `mask` is set.
+///
+/// The multiband is each track's one insert, so it lowers to the dynamic rack: it is not
+/// console-eligible until #1069 closes (decision 12), so it cannot be a SIMD-rack slot. Bank
+/// eligibility is the effect's, not the rack's (#163), so its cohort banks there exactly as it
+/// did in SIMD rack 1 before #1093.
 fn multiband_console(tracks: usize, mask: u64) -> SessionModel {
     let mut model = console(tracks, [0, 0, 0]);
     identity_inputs(&mut model);
+    let template = model.console.pre_insert[0].clone();
+    model.console.pre_insert.clear();
+    model.console.post_insert.clear();
     for (index, track) in model.tracks.iter_mut().enumerate() {
-        track.simd1.effects.truncate(1);
-        track.simd2.effects.clear();
-        let effect = &mut track.simd1.effects[0];
-        effect.id = StableId::parse("multiband").expect("effect id");
-        effect.identity = EffectIdentity::Native {
-            effect_id: StableId::parse("miso.multiband-compressor").expect("multiband id"),
-        };
-        effect.params.clear();
-        effect.bypass = mask >> index & 1 == 1;
+        track.console.clear();
+        track.inserts.effects = vec![session::Effect {
+            id: StableId::parse("multiband").expect("effect id"),
+            identity: EffectIdentity::Native {
+                effect_id: StableId::parse("miso.multiband-compressor").expect("multiband id"),
+            },
+            quality: template.quality,
+            bypass: mask >> index & 1 == 1,
+            link_mode: template.link_mode,
+            params: Vec::new(),
+            sidechain: session::SidechainDeclaration::None,
+        }];
     }
     model
 }

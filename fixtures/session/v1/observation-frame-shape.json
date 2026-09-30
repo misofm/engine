@@ -22,6 +22,10 @@
       "frames": "48000"
     }
   ],
+  "console": {
+    "pre_insert": [],
+    "post_insert": []
+  },
   "tracks": [
     {
       "id": "t0",
@@ -44,10 +48,8 @@
           "delay_samples": 0
         }
       },
-      "simd1": {
-        "effects": []
-      },
-      "dynamic": {
+      "console": [],
+      "inserts": {
         "effects": [
           {
             "id": "comp",
@@ -108,9 +110,6 @@
           }
         ]
       },
-      "simd2": {
-        "effects": []
-      },
       "fader": {
         "left_db": 0.0,
         "right_db": 0.0,
@@ -144,10 +143,8 @@
           "delay_samples": 0
         }
       },
-      "simd1": {
-        "effects": []
-      },
-      "dynamic": {
+      "console": [],
+      "inserts": {
         "effects": [
           {
             "id": "eq",
@@ -190,9 +187,6 @@
           }
         ]
       },
-      "simd2": {
-        "effects": []
-      },
       "fader": {
         "left_db": 0.0,
         "right_db": 0.0,
@@ -226,10 +220,8 @@
           "delay_samples": 0
         }
       },
-      "simd1": {
-        "effects": []
-      },
-      "dynamic": {
+      "console": [],
+      "inserts": {
         "effects": [
           {
             "id": "gate",
@@ -290,9 +282,6 @@
           }
         ]
       },
-      "simd2": {
-        "effects": []
-      },
       "fader": {
         "left_db": 0.0,
         "right_db": 0.0,
@@ -318,7 +307,7 @@
       "source": {
         "kind": "track",
         "track_id": "t0",
-        "tap": "post_matrix"
+        "tap": "post_pan"
       },
       "destination": {
         "kind": "output_input",
@@ -337,7 +326,7 @@
       "source": {
         "kind": "track",
         "track_id": "t1",
-        "tap": "post_matrix"
+        "tap": "post_pan"
       },
       "destination": {
         "kind": "output_input",
@@ -356,7 +345,7 @@
       "source": {
         "kind": "track",
         "track_id": "t2",
-        "tap": "post_matrix"
+        "tap": "post_pan"
       },
       "destination": {
         "kind": "output_input",

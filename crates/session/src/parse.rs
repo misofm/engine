@@ -112,6 +112,30 @@ impl<'i> Parser<'i> {
         }
     }
 
+    /// [`Self::keys`] for an object where some unknown keys deserve a specific reason: a retired
+    /// key or an effect field in a console entry is still `schema.unknown_field`, at the key, but
+    /// its message says where the field went.
+    fn keys_explained(
+        &mut self,
+        table: TableRef<'_>,
+        allowed: &[&str],
+        explained: &[(&str, &str)],
+        path: &DiagnosticPath<'_>,
+    ) {
+        for entry in table.table.iter_mapped(self.code_map, table.offset) {
+            let key = entry.value.key;
+            let name = key.value.as_str();
+            if !allowed.contains(&name) {
+                let message = explained
+                    .iter()
+                    .find_map(|(candidate, message)| (*candidate == name).then_some(*message))
+                    .unwrap_or("key is not part of SESSION_SCHEMA_VERSION_V1");
+                let span = code_span(self.code_map, key.offset);
+                self.error_at(DiagnosticCode::UnknownField, path.key(name), span, message);
+            }
+        }
+    }
+
     fn reject_key(
         &mut self,
         table: TableRef<'_>,
@@ -712,6 +736,7 @@ fn parse_root(
             "render_profile",
             "output_profile",
             "sources",
+            "console",
             "tracks",
             "submixes",
             "outputs",
@@ -728,6 +753,7 @@ fn parse_root(
     let render_profile = parse_record(parser, table, "render_profile", &path, parse_render_profile);
     let output_profile = parse_record(parser, table, "output_profile", &path, parse_output_profile);
     let sources = parse_list(parser, table, "sources", &path, parse_source);
+    let console = parse_record(parser, table, "console", &path, parse_console);
     let tracks = parse_list(parser, table, "tracks", &path, parse_track);
     let submixes = parse_list(parser, table, "submixes", &path, parse_submix);
     let outputs = parse_list(parser, table, "outputs", &path, parse_output);
@@ -742,6 +768,7 @@ fn parse_root(
         render_profile,
         output_profile,
         sources,
+        console,
         tracks,
         submixes,
         outputs,
@@ -757,6 +784,7 @@ fn parse_root(
             Some(render_profile),
             Some(output_profile),
             Some(sources),
+            Some(console),
             Some(tracks),
             Some(submixes),
             Some(outputs),
@@ -771,6 +799,7 @@ fn parse_root(
             render_profile,
             output_profile,
             sources,
+            console,
             tracks,
             submixes,
             outputs,
@@ -875,8 +904,90 @@ fn parse_source(parser: &mut Parser, table: TableRef<'_>, path: DiagnosticPath) 
     })
 }
 
+/// Why a retired track rack key refuses (decision 12).
+const RETIRED_TRACK_RACK: &str = "retired rack key: declare shared slots once in the session console and a track's own effects in inserts";
+/// Why an effect field refuses inside a per-track console entry (decision 12).
+const CONSOLE_ENTRY_EFFECT_FIELD: &str = "a console entry carries only slot, bypass and params: identity, quality and link_mode are declared once on the session slot, and a console slot has no sidechain";
+
+fn parse_console(
+    parser: &mut Parser,
+    table: TableRef<'_>,
+    path: DiagnosticPath,
+) -> Option<crate::Console> {
+    parser.keys(table, &["pre_insert", "post_insert"], &path);
+    let pre_insert = parse_list(parser, table, "pre_insert", &path, parse_console_slot);
+    let post_insert = parse_list(parser, table, "post_insert", &path, parse_console_slot);
+    Some(crate::Console {
+        pre_insert: pre_insert?,
+        post_insert: post_insert?,
+    })
+}
+
+fn parse_console_slot(
+    parser: &mut Parser,
+    table: TableRef<'_>,
+    path: DiagnosticPath,
+) -> Option<crate::ConsoleSlot> {
+    parser.keys_explained(
+        table,
+        &["slot", "identity", "quality", "link_mode"],
+        &[
+            (
+                "sidechain",
+                "a console slot has no sidechain: a keyed effect is an insert",
+            ),
+            (
+                "bypass",
+                "bypass is per track: set it on each track's console entry",
+            ),
+            (
+                "params",
+                "params are per track: set them on each track's console entry",
+            ),
+        ],
+        &path,
+    );
+    let slot = parser.id(table, "slot", &path);
+    let identity = parse_record(parser, table, "identity", &path, parse_effect_identity);
+    let quality = parser.closed_token(table, "quality", &path, DiagnosticCode::InvalidEnum);
+    let link_mode = parser.closed_token(table, "link_mode", &path, DiagnosticCode::InvalidEnum);
+    Some(crate::ConsoleSlot {
+        slot: slot?,
+        identity: identity?,
+        quality: quality?,
+        link_mode: link_mode?,
+    })
+}
+
+fn parse_console_entry(
+    parser: &mut Parser,
+    table: TableRef<'_>,
+    path: DiagnosticPath,
+) -> Option<crate::ConsoleEntry> {
+    parser.keys_explained(
+        table,
+        &["slot", "bypass", "params"],
+        &[
+            ("id", CONSOLE_ENTRY_EFFECT_FIELD),
+            ("identity", CONSOLE_ENTRY_EFFECT_FIELD),
+            ("quality", CONSOLE_ENTRY_EFFECT_FIELD),
+            ("link_mode", CONSOLE_ENTRY_EFFECT_FIELD),
+            ("sidechain", CONSOLE_ENTRY_EFFECT_FIELD),
+        ],
+        &path,
+    );
+    let slot = parser.id(table, "slot", &path);
+    let bypass = parser.bool(table, "bypass", &path);
+    let params = parse_list(parser, table, "params", &path, parse_param);
+    Some(crate::ConsoleEntry {
+        slot: slot?,
+        bypass: bypass?,
+        params: params?,
+    })
+}
+
 fn parse_track(parser: &mut Parser, table: TableRef<'_>, path: DiagnosticPath) -> Option<Track> {
-    parser.keys(
+    parser.keys_explained(
         table,
         &[
             "id",
@@ -884,12 +995,16 @@ fn parse_track(parser: &mut Parser, table: TableRef<'_>, path: DiagnosticPath) -
             "left_source_channel",
             "right_source_channel",
             "builtins",
-            "simd1",
-            "dynamic",
-            "simd2",
+            "console",
+            "inserts",
             "fader",
             "pan",
             "matrix",
+        ],
+        &[
+            ("simd1", RETIRED_TRACK_RACK),
+            ("dynamic", RETIRED_TRACK_RACK),
+            ("simd2", RETIRED_TRACK_RACK),
         ],
         &path,
     );
@@ -898,9 +1013,8 @@ fn parse_track(parser: &mut Parser, table: TableRef<'_>, path: DiagnosticPath) -
     let left_source_channel = parser.u8(table, "left_source_channel", &path);
     let right_source_channel = parser.u8(table, "right_source_channel", &path);
     let builtins = parse_record(parser, table, "builtins", &path, parse_builtins);
-    let simd1 = parse_record(parser, table, "simd1", &path, parse_rack);
-    let dynamic = parse_record(parser, table, "dynamic", &path, parse_rack);
-    let simd2 = parse_record(parser, table, "simd2", &path, parse_rack);
+    let console = parse_list(parser, table, "console", &path, parse_console_entry);
+    let inserts = parse_record(parser, table, "inserts", &path, parse_rack);
     let fader = parse_record(parser, table, "fader", &path, parse_fader);
     let matrix_or_pan = parse_matrix_or_pan(parser, table, &path);
     Some(Track {
@@ -909,9 +1023,8 @@ fn parse_track(parser: &mut Parser, table: TableRef<'_>, path: DiagnosticPath) -
         left_source_channel: left_source_channel?,
         right_source_channel: right_source_channel?,
         builtins: builtins?,
-        simd1: simd1?,
-        dynamic: dynamic?,
-        simd2: simd2?,
+        console: console?,
+        inserts: inserts?,
         fader: fader?,
         matrix_or_pan: matrix_or_pan?,
     })

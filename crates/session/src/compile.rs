@@ -142,14 +142,23 @@ pub fn compile_session(
         .automation
         .sort_by(|left, right| left.id.cmp(&right.id));
     for track in &mut normalized.tracks {
-        for rack in [&mut track.simd1, &mut track.dynamic, &mut track.simd2] {
-            for effect in &mut rack.effects {
-                effect.params.sort_by(|left, right| {
-                    left.parameter_id
-                        .cmp(&right.parameter_id)
-                        .then(left.channel.cmp(&right.channel))
-                });
-            }
+        let params = track
+            .console
+            .iter_mut()
+            .map(|entry| &mut entry.params)
+            .chain(
+                track
+                    .inserts
+                    .effects
+                    .iter_mut()
+                    .map(|effect| &mut effect.params),
+            );
+        for params in params {
+            params.sort_by(|left, right| {
+                left.parameter_id
+                    .cmp(&right.parameter_id)
+                    .then(left.channel.cmp(&right.channel))
+            });
         }
     }
     let source_indexes = indexed(

@@ -45,8 +45,9 @@ turns off the collapse for the whole chain, builtins included, and the track poo
   release phase.
 * `channels_agree` is false after one dual block with different L/R words, true after
   `desymmetrize_channels`.
-* A console-level check: a mono fixture track with a gate in `simd1` collapses (its cohort's
-  `bank_collapse_counters()` rises) and its digest equals the forced-off arm's.
+* A console-level check: a mono fixture track with a gate as a `console.pre_insert` slot (the
+  lowered first rack, once `simd1`) collapses (its cohort's `bank_collapse_counters()` rises) and
+  its digest equals the forced-off arm's.
 * Two recorded mutations: link computed as `|p|` (fails the subnormal case); `desymmetrize` skips one
   `GateState` field (fails the mid-hold disengage).
 * `cargo test -p gate-expander`, fmt, clippy `-D warnings`.

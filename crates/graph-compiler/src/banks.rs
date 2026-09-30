@@ -121,7 +121,7 @@ pub(crate) fn test_only_with_bank_padding<R>(padding: BankPadding, body: impl Fn
 /// The planner is `rack_compiler::plan_bank_groups` -- the single cohort planner in
 /// the workspace (#96 F1). #99 F3 changes *what is handed to it*: one candidate per
 /// `(track, rack)` whose slots are that track's rack program **in session order**
-/// (`track.simd1.effects` / `track.simd2.effects`), not `EffectPreparedSession::entries` order,
+/// (each lowered rack of `SessionModel::lower_track`), not `EffectPreparedSession::entries` order,
 /// which is sorted by effect id. That is AGENTS.md's cohort model -- a signature over slot
 /// types/order with absent slots as identity kernels -- and it is what makes a multi-slot bank
 /// expressible at all: #96's per-effect candidates carry one-slot programs, so they can only ever
@@ -173,10 +173,12 @@ pub(crate) fn bind_rack_banks_indexed(
     let mut chains: BTreeMap<RackChainId, Vec<EffectNodeId>> = BTreeMap::new();
     let mut programs: BTreeMap<RackChainId, RackProgram> = BTreeMap::new();
     for track in &model.tracks {
+        let lowered = model.lower_track(track);
+        let [pre_insert, inserts, post_insert] = lowered.in_chain_order();
         for (rack, declared) in [
-            (RackId::Simd1, &track.simd1.effects),
-            (RackId::Dynamic, &track.dynamic.effects),
-            (RackId::Simd2, &track.simd2.effects),
+            (RackId::Simd1, pre_insert),
+            (RackId::Dynamic, inserts),
+            (RackId::Simd2, post_insert),
         ] {
             let location = rack_location(rack);
             if declared.is_empty() {

@@ -22,10 +22,11 @@ fn one_track_session(quantum: u32) -> String {
 
 fn one_track_resource_session(quantum: u32) -> String {
     let mut model = parse_session_json(&one_track_session(quantum)).expect("one-track session");
+    model.console.pre_insert.clear();
+    model.console.post_insert.clear();
     for track in &mut model.tracks {
-        track.simd1.effects.clear();
-        track.dynamic.effects.clear();
-        track.simd2.effects.clear();
+        track.console.clear();
+        track.inserts.effects.clear();
     }
     canonical_session_json(&model).expect("canonical resource session")
 }
@@ -51,7 +52,7 @@ fn one_track_multiband_session(quantum: u32) -> String {
     model.sources[0].frames = u64::from(quantum) * 4;
     model.tracks.truncate(1);
     model.routes.truncate(1);
-    let effect = &mut model.tracks[0].dynamic.effects[0];
+    let effect = &mut model.tracks[0].inserts.effects[0];
     effect.identity = session::EffectIdentity::Native {
         effect_id: session::StableId::parse("miso.multiband-compressor")
             .expect("multiband effect ID"),
@@ -286,7 +287,7 @@ fn frozen_layouts_and_values_are_exact() {
     assert_eq!(size_of::<WebStatus>(), 80);
     assert_eq!(size_of::<WebResourceReport>(), 224);
     assert_eq!(MAXIMUM_DOCUMENT_BYTES, 1 << 20);
-    assert_eq!(PARSE_TRANSIENT_MULTIPLIER, 17);
+    assert_eq!(PARSE_TRANSIENT_MULTIPLIER, 20);
     assert_eq!(DEFAULT_MAXIMUM_MEMORY_BYTES, 512 << 20);
     assert_eq!(DIAGNOSTIC_BYTES, 1 << 14);
     assert_eq!(
@@ -2620,7 +2621,7 @@ fn paired_live_control_host(quantum: u32) -> AudioWorkletEngineHost {
     }
     model.routes[0].source = session::RouteSource::Track {
         track_id: session::StableId::parse("track-0").expect("route track"),
-        tap: session::SendTap::PostMatrix,
+        tap: session::SendTap::PostPan,
     };
     let document = canonical_session_json(&model).expect("canonical paired fixture");
     let options = WebBootOptions {
@@ -2657,7 +2658,7 @@ fn meter_tail_host_for_blocks(
     }
     model.routes[0].source = session::RouteSource::Track {
         track_id: session::StableId::parse("track-0").expect("route track"),
-        tap: session::SendTap::PostMatrix,
+        tap: session::SendTap::PostPan,
     };
     let document = canonical_session_json(&model).expect("canonical meter-tail fixture");
     let options = WebBootOptions {
@@ -5638,7 +5639,7 @@ fn same_track_observation_host(quantum: u32) -> AudioWorkletEngineHost {
         "../../../fixtures/session/v1/observation-frame-shape.json"
     ))
     .expect("accepted observation fixture");
-    let mut second_effect = model.tracks[2].dynamic.effects[0].clone();
+    let mut second_effect = model.tracks[2].inserts.effects[0].clone();
     // Remove the fixture's long hold so the quieter right lane closes during this short test
     // window and publishes a distinct, nonzero pair of resident values.
     second_effect.params[5].value = 0.0;
@@ -5647,7 +5648,7 @@ fn same_track_observation_host(quantum: u32) -> AudioWorkletEngineHost {
     model.sources[0].frames = u64::from(quantum) * 8;
     model.tracks.truncate(1);
     model.routes.truncate(1);
-    model.tracks[0].dynamic.effects.push(second_effect);
+    model.tracks[0].inserts.effects.push(second_effect);
     let document = canonical_session_json(&model).expect("canonical two-effect session");
     let options = WebBootOptions {
         source_ring_frames: quantum * 4,

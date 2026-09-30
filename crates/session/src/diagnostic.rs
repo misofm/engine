@@ -65,6 +65,12 @@ pub enum DiagnosticCode {
     CapacityArithmeticOverflow,
     /// A configured resource limit was exceeded.
     ResourceLimitExceeded,
+    /// A track's console has no entry for a declared console slot (decision 12).
+    ConsoleEntryMissing,
+    /// A track's console entries are not in the session's slot order (decision 12).
+    ConsoleEntryOrder,
+    /// A console slot declares a third-party identity; console slots are native (decision 12).
+    ConsoleSlotNotNative,
 }
 
 impl DiagnosticCode {
@@ -97,6 +103,9 @@ impl DiagnosticCode {
             Self::CapacityZero => "capacity.zero",
             Self::CapacityArithmeticOverflow => "capacity.arithmetic_overflow",
             Self::ResourceLimitExceeded => "resource.limit_exceeded",
+            Self::ConsoleEntryMissing => "console.entry_missing",
+            Self::ConsoleEntryOrder => "console.entry_order",
+            Self::ConsoleSlotNotNative => "console.slot_not_native",
         }
     }
 }

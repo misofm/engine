@@ -1,7 +1,8 @@
 # Builtins and metering V1
 
 Issue 007 defines three fixed scalar graph sections per dual-mono track: input processing at
-`post_input_builtins`, fader/mute at `post_fader`, and a declared 2x2 matrix at `post_matrix`.
+`post_input`, fader/mute at `post_fader`, and a declared 2x2 matrix at `post_pan` (the session
+tap tokens decision 12 renamed; the internal stages keep their names).
 The compiler binds these internally, so hosts continue to supply only source/input and output
 bindings. No rack, graph topology, or session-schema semantics are introduced here.
 
@@ -168,10 +169,10 @@ monitor-scene concept and not a V1 key. Nothing here forecloses that.
 
 The code is unchanged; the semantics are worth stating because a console user will ask.
 
-The gate applies at the fader, so taps at `input`, `post_input_builtins`, `post_simd1`,
-`post_dynamic` and `post_simd2_pre_fader` keep reading the **un-gated** signal — input and
+The gate applies at the fader, so taps at `input`, `post_input`, `insert_send`,
+`insert_return` and `pre_fader` keep reading the **un-gated** signal — input and
 pre-fader metering survives a solo, which is console-correct and is what makes gain-riding a
-silenced strip possible. Taps at `post_fader` and `post_matrix`, and everything downstream of them
+silenced strip possible. Taps at `post_fader` and `post_pan`, and everything downstream of them
 (submixes, outputs, the designated master's peak and gain-reduction rows), read the **gated** mix.
 
 A gain-reduction tap on a strip that solo has silenced falls toward zero reduction, because its

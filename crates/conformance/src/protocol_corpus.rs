@@ -15,8 +15,15 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
         session::parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
             .expect("checked-in canonical session fixture is valid");
     let source = session.sources[0].clone();
-    let track = session.tracks[0].clone();
-    let effect = track.dynamic.effects[0].clone();
+    let mut track = session.tracks[0].clone();
+    let effect = track.inserts.effects[0].clone();
+    // Decision 12: carry a console entry so the corpus encodes the track's field 11. The fixture
+    // declares no console slot; this is codec data, not a session a store would accept.
+    track.console = vec![session::ConsoleEntry {
+        slot: StableId::parse("desk-eq").expect("literal stable ID"),
+        bypass: true,
+        params: effect.params.clone(),
+    }];
     let route = session.routes[0].clone();
     let automation = session.automation[0].clone();
     let track_id = track.id.clone();
@@ -69,64 +76,64 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
         },
         SessionEdit::SetTrackRack {
             track_id: track_id.clone(),
-            rack_name: RackName::Dynamic,
-            rack: track.dynamic.clone(),
+            rack_name: RackName::Inserts,
+            rack: track.inserts.clone(),
         },
         SessionEdit::PutTrackEffect {
             track_id: track_id.clone(),
-            rack_name: RackName::Dynamic,
+            rack_name: RackName::Inserts,
             final_position: 0,
             effect: effect.clone(),
         },
         SessionEdit::RemoveTrackEffect {
             track_id: track_id.clone(),
-            rack_name: RackName::Dynamic,
+            rack_name: RackName::Inserts,
             effect_id: effect_id.clone(),
         },
         SessionEdit::SetTrackEffectOrder {
             track_id: track_id.clone(),
-            rack_name: RackName::Dynamic,
+            rack_name: RackName::Inserts,
             effect_ids: vec![effect_id.clone()],
         },
         SessionEdit::SetEffectIdentity {
             track_id: track_id.clone(),
-            rack_name: RackName::Dynamic,
+            rack_name: RackName::Inserts,
             effect_id: effect_id.clone(),
             identity: effect.identity.clone(),
         },
         SessionEdit::SetEffectQuality {
             track_id: track_id.clone(),
-            rack_name: RackName::Dynamic,
+            rack_name: RackName::Inserts,
             effect_id: effect_id.clone(),
             quality: effect.quality,
         },
         SessionEdit::SetEffectBypass {
             track_id: track_id.clone(),
-            rack_name: RackName::Dynamic,
+            rack_name: RackName::Inserts,
             effect_id: effect_id.clone(),
             bypass: effect.bypass,
         },
         SessionEdit::SetEffectLinkMode {
             track_id: track_id.clone(),
-            rack_name: RackName::Dynamic,
+            rack_name: RackName::Inserts,
             effect_id: effect_id.clone(),
             link_mode: effect.link_mode,
         },
         SessionEdit::SetEffectSidechain {
             track_id: track_id.clone(),
-            rack_name: RackName::Dynamic,
+            rack_name: RackName::Inserts,
             effect_id: effect_id.clone(),
             sidechain: effect.sidechain.clone(),
         },
         SessionEdit::UpsertEffectParam {
             track_id: track_id.clone(),
-            rack_name: RackName::Dynamic,
+            rack_name: RackName::Inserts,
             effect_id: effect_id.clone(),
             param: effect.params[0].clone(),
         },
         SessionEdit::RemoveEffectParam {
             track_id: track_id.clone(),
-            rack_name: RackName::Dynamic,
+            rack_name: RackName::Inserts,
             effect_id: effect_id.clone(),
             parameter_id: effect.params[0].parameter_id,
             channel: effect.params[0].channel,
@@ -246,7 +253,10 @@ pub enum ConformanceDecoder {
 /// arm ever computes something else, that is a real target divergence and the parity gate says so.
 /// Issue #787 changed the two source-identity spellings in the transaction frame from `sha256:`
 /// to same-length `blake3:` strings. The frame count and total encoded byte count remain fixed.
-pub const COMPLETE_SCHEMA_HASH: u64 = 0xe4de_c003_302d_891a;
+/// Issue #1093 (decision 12) repinned it: the track message drops the retired fields 6 and 8,
+/// carries `inserts` in field 7 and a console entry in field 11, rack-addressed edits spell the
+/// `inserts` code, and the route taps keep their codes under new names.
+pub const COMPLETE_SCHEMA_HASH: u64 = 0xaf1b_9b71_a0a3_1727;
 
 /// Build every command, successful response, registered non-OK status, event, and all-opcode
 /// session transaction using only public typed encoder entry points.

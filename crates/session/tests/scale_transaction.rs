@@ -31,7 +31,7 @@ fn compiles_65_537_tracks_without_a_product_track_limit() {
     }
     session.routes[0].source = session::RouteSource::Track {
         track_id: StableId::parse("track-0").expect("generated route ID"),
-        tap: session::SendTap::PostMatrix,
+        tap: session::SendTap::PostPan,
     };
     session.automation[0].target.entity_id =
         StableId::parse("track-0").expect("generated automation entity ID");

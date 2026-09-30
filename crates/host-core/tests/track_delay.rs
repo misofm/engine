@@ -77,12 +77,12 @@ fn live_controls() -> HostLiveControlRequest {
 /// The fixture pans **both** lanes hard right, which is fine for what it was written for and would
 /// make the left output plane silent here -- and a silent plane compares equal to anything.
 fn session(left: u32, right: u32, filters: bool) -> String {
-    // The fixture's dynamic rack names `parametric-eq`, an id the launch registry does not carry
+    // The fixture's inserts rack names `parametric-eq`, an id the launch registry does not carry
     // (its effects are `miso.`-prefixed), so a host prepare refuses it. The rack is not the
     // subject here -- the input builtins and the delay are -- so it is emptied rather than
     // renamed, which would also have meant inventing parameter values for a different effect.
     let mut model = parse_session_json(SESSION).expect("fixture parses");
-    model.tracks[0].dynamic.effects.clear();
+    model.tracks[0].inserts.effects.clear();
     model.automation.clear();
     let track = &mut model.tracks[0];
     if let session::MatrixOrPan::Pan { left, right, .. } = &mut track.matrix_or_pan {

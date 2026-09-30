@@ -107,18 +107,16 @@ fn console(tracks: usize, masks: [u64; 3]) -> SessionModel {
     let mut model = parse_session_json(INTENDED).expect("console fixture");
     model.tracks.truncate(tracks);
     model.routes.truncate(tracks);
+    // Every strip slot is a console slot (decision 12): `pre_insert` lowers to SIMD rack 1 and
+    // `post_insert` to SIMD rack 2, and a track's bypass for a slot is its console entry's.
     for (index, track) in model.tracks.iter_mut().enumerate() {
-        for (slot, (rack, id)) in SLOTS.iter().enumerate() {
-            let effects = match rack {
-                RackId::Simd1 => &mut track.simd1.effects,
-                RackId::Dynamic => &mut track.dynamic.effects,
-                RackId::Simd2 => &mut track.simd2.effects,
-            };
-            let effect = effects
+        for (slot, (_, id)) in SLOTS.iter().enumerate() {
+            let entry = track
+                .console
                 .iter_mut()
-                .find(|effect| effect.id.as_str() == *id)
+                .find(|entry| entry.slot.as_str() == *id)
                 .expect("strip slot");
-            effect.bypass = masks[slot] >> index & 1 == 1;
+            entry.bypass = masks[slot] >> index & 1 == 1;
         }
     }
     model
@@ -186,14 +184,21 @@ fn bind(model: &SessionModel, dispatch: Backend, spans: u32, live_controls: bool
         .tracks
         .iter()
         .flat_map(|track| {
-            track
-                .simd1
+            // A lowered console effect's id is its slot.
+            let console = track
+                .console
+                .iter()
+                .filter(|entry| entry.bypass)
+                .map(|entry| entry.slot.as_str());
+            let inserts = track
+                .inserts
                 .effects
                 .iter()
-                .chain(&track.dynamic.effects)
-                .chain(&track.simd2.effects)
                 .filter(|effect| effect.bypass)
-                .map(|effect| (track.id.as_str().to_owned(), effect.id.as_str().to_owned()))
+                .map(|effect| effect.id.as_str());
+            console
+                .chain(inserts)
+                .map(|effect| (track.id.as_str().to_owned(), effect.to_owned()))
         })
         .collect();
     assert_installed();

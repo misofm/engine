@@ -1,10 +1,10 @@
 //! E5: every text-expressible validator mutation has text/typed entry-point parity.
 
 use session::{
-    AutomationShape, CompileCaps, DiagnosticCode, DiagnosticSet, MatrixOrPan, Output,
-    ParameterChannel, ParameterUnit, Rack, RackName, RouteDestination, RouteSource, SendTap,
-    SessionModel, Sidechain, SidechainDeclaration, StableId, canonical_session_json,
-    compile_session, parse_session_json,
+    AutomationShape, CompileCaps, Console, ConsoleEntry, ConsoleSlot, DiagnosticCode,
+    DiagnosticSet, EffectIdentity, MatrixOrPan, Output, ParameterChannel, ParameterUnit, RackName,
+    RouteDestination, RouteSource, SendTap, SessionModel, Sidechain, SidechainDeclaration,
+    StableId, canonical_session_json, compile_session, parse_session_json,
 };
 
 const CANONICAL: &str = include_str!("../../../fixtures/session/v1/canonical.json");
@@ -40,27 +40,42 @@ fn target<'a>(errors: &'a DiagnosticSet, case: &Case) -> &'a session::Diagnostic
             )
         })
 }
-fn set_sidechain(model: &mut SessionModel, rack: RackName, source: RouteSource) {
-    let mut effect = model.tracks[0].dynamic.effects[0].clone();
+/// Set a routed sidechain on insert `position`: `0` rewrites the fixture's one insert, `1` appends
+/// a second insert so the path's index is exercised past the first element.
+fn set_sidechain(model: &mut SessionModel, position: usize, source: RouteSource) {
+    let mut effect = model.tracks[0].inserts.effects[0].clone();
     effect.sidechain = SidechainDeclaration::Routed(Sidechain {
         source,
         port_id: id("detector-in"),
     });
-    match rack {
-        RackName::Simd1 => {
-            model.tracks[0].simd1 = Rack {
-                effects: vec![effect],
-            }
-        }
-        RackName::Dynamic => model.tracks[0].dynamic.effects[0] = effect,
-        RackName::Simd2 => {
-            model.tracks[0].simd2 = Rack {
-                effects: vec![effect],
-            }
-        }
-        // The strip carries no effects and so no sidechain; the cases below never name it.
-        RackName::Builtins => unreachable!("the builtins token addresses no effect rack"),
+    if position == 0 {
+        model.tracks[0].inserts.effects[0] = effect;
+    } else {
+        effect.id = id("keyed");
+        model.tracks[0].inserts.effects.push(effect);
     }
+}
+
+/// Install a console with one slot per section and the one fixture track's entries for them.
+fn with_console(model: &mut SessionModel) {
+    let slot = |name: &str, effect_id: &str| ConsoleSlot {
+        slot: id(name),
+        identity: EffectIdentity::Native {
+            effect_id: id(effect_id),
+        },
+        quality: session::EffectQuality::Normal,
+        link_mode: session::LinkMode::DualMono,
+    };
+    model.console = Console {
+        pre_insert: vec![slot("desk-eq", "miso.parametric-eq")],
+        post_insert: vec![slot("desk-limit", "miso.true-peak-limiter")],
+    };
+    let entry = |name: &str| ConsoleEntry {
+        slot: id(name),
+        bypass: false,
+        params: model.tracks[0].inserts.effects[0].params.clone(),
+    };
+    model.tracks[0].console = vec![entry("desk-eq"), entry("desk-limit")];
 }
 macro_rules! case {
     ($name:literal,$code:ident,$path:literal,$typed:expr) => {
@@ -97,8 +112,8 @@ fn parse_canonical_and_compile_diagnostics_have_code_path_and_span_parity() {
         case!(
             "empty-cid",
             NumericOutOfSchemaRange,
-            "$.tracks[0].dynamic.effects[0].identity.cid",
-            |s| s.tracks[0].dynamic.effects[0].identity =
+            "$.tracks[0].inserts.effects[0].identity.cid",
+            |s| s.tracks[0].inserts.effects[0].identity =
                 session::EffectIdentity::ThirdPartyCid { cid: String::new() }
         ),
         case!("duplicate-source", DuplicateId, "$.sources[1].id", |s| s
@@ -233,15 +248,15 @@ fn parse_canonical_and_compile_diagnostics_have_code_path_and_span_parity() {
         case!(
             "param-finite",
             NumericNonFinite,
-            "$.tracks[0].dynamic.effects[0].params[0].value",
-            |s| s.tracks[0].dynamic.effects[0].params[0].value = f32::NAN
+            "$.tracks[0].inserts.effects[0].params[0].value",
+            |s| s.tracks[0].inserts.effects[0].params[0].value = f32::NAN
         ),
         case!(
             "param-negative",
             NumericOutOfSchemaRange,
-            "$.tracks[0].dynamic.effects[0].params[0].value",
+            "$.tracks[0].inserts.effects[0].params[0].value",
             |s| {
-                let p = &mut s.tracks[0].dynamic.effects[0].params[0];
+                let p = &mut s.tracks[0].inserts.effects[0].params[0];
                 p.unit = ParameterUnit::Hz;
                 p.value = -1.0
             }
@@ -249,9 +264,9 @@ fn parse_canonical_and_compile_diagnostics_have_code_path_and_span_parity() {
         case!(
             "param-fraction",
             NumericOutOfSchemaRange,
-            "$.tracks[0].dynamic.effects[0].params[0].value",
+            "$.tracks[0].inserts.effects[0].params[0].value",
             |s| {
-                let p = &mut s.tracks[0].dynamic.effects[0].params[0];
+                let p = &mut s.tracks[0].inserts.effects[0].params[0];
                 p.unit = ParameterUnit::Samples;
                 p.value = 1.5
             }
@@ -439,79 +454,151 @@ fn parse_canonical_and_compile_diagnostics_have_code_path_and_span_parity() {
             }
         ),
         case!(
-            "simd1-sidechain-track",
+            "insert-sidechain-track",
             MissingEntityReference,
-            "$.tracks[0].simd1.effects[0].sidechain.source.track_id",
+            "$.tracks[0].inserts.effects[0].sidechain.source.track_id",
             |s| set_sidechain(
                 s,
-                RackName::Simd1,
+                0,
                 RouteSource::Track {
                     track_id: id("missing-a"),
-                    tap: SendTap::Input
+                    tap: SendTap::InsertReturn
                 }
             )
         ),
         case!(
-            "dynamic-sidechain-track",
+            "second-insert-sidechain-track",
             MissingEntityReference,
-            "$.tracks[0].dynamic.effects[0].sidechain.source.track_id",
+            "$.tracks[0].inserts.effects[1].sidechain.source.track_id",
             |s| set_sidechain(
                 s,
-                RackName::Dynamic,
+                1,
                 RouteSource::Track {
                     track_id: id("missing-b"),
-                    tap: SendTap::PostFader
+                    tap: SendTap::PostPan
                 }
             )
         ),
         case!(
-            "simd2-sidechain-track",
+            "insert-sidechain-submix",
             MissingEntityReference,
-            "$.tracks[0].simd2.effects[0].sidechain.source.track_id",
+            "$.tracks[0].inserts.effects[0].sidechain.source.submix_id",
             |s| set_sidechain(
                 s,
-                RackName::Simd2,
-                RouteSource::Track {
-                    track_id: id("missing-c"),
-                    tap: SendTap::PostMatrix
-                }
-            )
-        ),
-        case!(
-            "simd1-sidechain-submix",
-            MissingEntityReference,
-            "$.tracks[0].simd1.effects[0].sidechain.source.submix_id",
-            |s| set_sidechain(
-                s,
-                RackName::Simd1,
+                0,
                 RouteSource::SubmixOutput {
                     submix_id: id("missing-d")
                 }
             )
         ),
         case!(
-            "dynamic-sidechain-submix",
+            "second-insert-sidechain-submix",
             MissingEntityReference,
-            "$.tracks[0].dynamic.effects[0].sidechain.source.submix_id",
+            "$.tracks[0].inserts.effects[1].sidechain.source.submix_id",
             |s| set_sidechain(
                 s,
-                RackName::Dynamic,
+                1,
                 RouteSource::SubmixOutput {
                     submix_id: id("missing-e")
                 }
             )
         ),
+        // Decision 12's console refusals, each at its own path.
         case!(
-            "simd2-sidechain-submix",
+            "console-slot-repeated-across-sections",
+            DuplicateId,
+            "$.console.post_insert[0].slot",
+            |s| {
+                with_console(s);
+                s.console.post_insert[0].slot = id("desk-eq");
+            }
+        ),
+        case!(
+            "console-slot-third-party",
+            ConsoleSlotNotNative,
+            "$.console.pre_insert[0].identity",
+            |s| {
+                with_console(s);
+                s.console.pre_insert[0].identity = EffectIdentity::ThirdPartyCid {
+                    cid: "bafyopaque".to_owned(),
+                };
+            }
+        ),
+        case!(
+            "console-entry-unknown-slot",
             MissingEntityReference,
-            "$.tracks[0].simd2.effects[0].sidechain.source.submix_id",
-            |s| set_sidechain(
-                s,
-                RackName::Simd2,
-                RouteSource::SubmixOutput {
-                    submix_id: id("missing-f")
-                }
-            )
+            "$.tracks[0].console[1].slot",
+            |s| {
+                with_console(s);
+                s.tracks[0].console[1].slot = id("desk-undeclared");
+            }
+        ),
+        case!(
+            "console-entry-duplicate-slot",
+            DuplicateId,
+            "$.tracks[0].console[1].slot",
+            |s| {
+                with_console(s);
+                s.tracks[0].console[1].slot = id("desk-eq");
+            }
+        ),
+        case!(
+            "console-entry-misordered",
+            ConsoleEntryOrder,
+            "$.tracks[0].console[0].slot",
+            |s| {
+                with_console(s);
+                s.tracks[0].console.swap(0, 1);
+            }
+        ),
+        case!(
+            "console-entry-missing",
+            ConsoleEntryMissing,
+            "$.tracks[0].console",
+            |s| {
+                with_console(s);
+                s.tracks[0].console.pop();
+            }
+        ),
+        case!(
+            "console-param-finite",
+            NumericNonFinite,
+            "$.tracks[0].console[1].params[0].value",
+            |s| {
+                with_console(s);
+                s.tracks[0].console[1].params[0].value = f32::NAN;
+            }
+        ),
+        case!(
+            "console-param-duplicate",
+            DuplicateId,
+            "$.tracks[0].console[0].params[1].parameter_id",
+            |s| {
+                with_console(s);
+                let repeated = s.tracks[0].console[0].params[0].clone();
+                s.tracks[0].console[0].params.push(repeated);
+            }
+        ),
+        case!(
+            "automation-console-slot",
+            MissingEntityReference,
+            "$.automation[0].target.effect_id",
+            |s| {
+                with_console(s);
+                s.automation[0].target.rack = RackName::Console;
+                s.automation[0].target.effect_id = id("eq");
+            }
+        ),
+        case!(
+            "automation-console-param",
+            MissingEntityReference,
+            "$.automation[0].target.parameter_id",
+            |s| {
+                with_console(s);
+                s.automation[0].target.rack = RackName::Console;
+                s.automation[0].target.effect_id = id("desk-limit");
+                s.automation[0].target.parameter_id = 999;
+            }
         ),
         case!(
             "automation-entity",

@@ -98,6 +98,9 @@ impl EffectBankPreparation {
     }
 }
 
+/// The internal rack an effect instance was lowered into (decision 12, class A by lowering):
+/// `Simd1` holds the session's `console.pre_insert` slots, `Dynamic` the track's `inserts` and
+/// `Simd2` the `console.post_insert` slots.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum EffectRack {
     Simd1,
@@ -125,6 +128,23 @@ pub fn launch_native_effect_registry() -> Result<NativeEffectRegistry, RegistryE
         Box::new(delay::DelayFactory) as Box<dyn NativeEffectFactory>,
     ])
 }
+
+/// The native effects a session console slot may name (owner decision 12, Sol's L2).
+///
+/// A console slot always banks, so it must be an effect whose homogeneous bank kernel the console
+/// can rely on: the parametric EQ, compressor, gate/expander, soft-clip, transient shaper and
+/// true-peak limiter. The delay never banks. The multiband compressor is excluded until #1069
+/// closes. Anything else is refused with `console.slot.ineligible_effect` where native identities
+/// resolve, in [`prepare_native_session_effects`]; the session schema refuses a third-party slot
+/// before this runs.
+pub const CONSOLE_ELIGIBLE_EFFECTS: [&str; 6] = [
+    "miso.parametric-eq",
+    "miso.compressor",
+    "miso.gate-expander",
+    "miso.soft-clip",
+    "miso.transient-shaper",
+    "miso.true-peak-limiter",
+];
 
 /// Launch effects whose factory binds no homogeneous bank at any width (issue #1087).
 ///
@@ -169,6 +189,38 @@ pub fn prepare_native_session_effects(
     registry: &NativeEffectRegistry,
     caps: EffectCompileCaps,
 ) -> Result<EffectPreparedSession, EffectDiagnosticSet> {
+    prepare_with_console_eligibility(session, registry, caps, &CONSOLE_ELIGIBLE_EFFECTS)
+}
+
+/// [`prepare_native_session_effects`] with the console eligibility list supplied by the caller.
+///
+/// Every host prepares through [`prepare_native_session_effects`], which admits exactly
+/// [`CONSOLE_ELIGIBLE_EFFECTS`]. This entry exists for test and audit registries whose test double
+/// (the conformance crate's `conformance.delay`, which no production registry carries) must occupy
+/// a lowered console rack to exercise the graph's internal stages. It changes the list for that
+/// caller and nothing else: identity resolution, parameters and every other refusal are the same.
+///
+/// Compiled only for this crate's tests and under `test-support` (#1093 verdict L2), so no
+/// production build can reach a console slot the fixed list refuses.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn prepare_native_session_effects_with_console_eligibility(
+    session: &CompiledSession,
+    registry: &NativeEffectRegistry,
+    caps: EffectCompileCaps,
+    console_eligible: &[&str],
+) -> Result<EffectPreparedSession, EffectDiagnosticSet> {
+    prepare_with_console_eligibility(session, registry, caps, console_eligible)
+}
+
+/// The one preparation behind both entries: the console slots whose native identity is not in
+/// `console_eligible` are refused, and everything else is prepared.
+fn prepare_with_console_eligibility(
+    session: &CompiledSession,
+    registry: &NativeEffectRegistry,
+    caps: EffectCompileCaps,
+    console_eligible: &[&str],
+) -> Result<EffectPreparedSession, EffectDiagnosticSet> {
     let mut diagnostics = Vec::new();
     let mut entries = Vec::new();
     if caps.maximum_total_state_bytes == 0
@@ -180,11 +232,31 @@ pub fn prepare_native_session_effects(
             path: "$.effect_compile_caps".to_owned(),
         }]));
     }
-    for track in &session.normalized_model().tracks {
+    let model = session.normalized_model();
+    for (section, slots) in [
+        ("pre_insert", &model.console.pre_insert),
+        ("post_insert", &model.console.post_insert),
+    ] {
+        for slot in slots {
+            if let EffectIdentity::Native { effect_id } = &slot.identity
+                && !console_eligible.contains(&effect_id.as_str())
+            {
+                diagnostics.push(EffectDiagnostic {
+                    code: "console.slot.ineligible_effect",
+                    path: format!("$.console.{section}[slot={}].identity", slot.slot),
+                });
+            }
+        }
+    }
+    for track in &model.tracks {
+        // Decision 12, class A by lowering: `pre_insert` is the first internal rack, the track's
+        // inserts the second and `post_insert` the third, each console entry an ordinary effect.
+        let lowered = model.lower_track(track);
+        let [pre_insert, inserts, post_insert] = lowered.in_chain_order();
         for (rack, effects) in [
-            (EffectRack::Simd1, &track.simd1.effects),
-            (EffectRack::Dynamic, &track.dynamic.effects),
-            (EffectRack::Simd2, &track.simd2.effects),
+            (EffectRack::Simd1, pre_insert),
+            (EffectRack::Dynamic, inserts),
+            (EffectRack::Simd2, post_insert),
         ] {
             for effect in effects {
                 let path = format!("$.tracks[id={}].effects[id={}]", track.id, effect.id);
@@ -1526,11 +1598,14 @@ fn declared_effect_indices(
     session: &CompiledSession,
 ) -> BTreeMap<(String, EffectRack, String), u32> {
     let mut declared: BTreeMap<(String, EffectRack, String), u32> = BTreeMap::new();
-    for track in &session.normalized_model().tracks {
+    let model = session.normalized_model();
+    for track in &model.tracks {
+        let lowered = model.lower_track(track);
+        let [pre_insert, inserts, post_insert] = lowered.in_chain_order();
         for (rack, effects) in [
-            (EffectRack::Simd1, &track.simd1.effects),
-            (EffectRack::Dynamic, &track.dynamic.effects),
-            (EffectRack::Simd2, &track.simd2.effects),
+            (EffectRack::Simd1, pre_insert),
+            (EffectRack::Dynamic, inserts),
+            (EffectRack::Simd2, post_insert),
         ] {
             for (index, effect) in effects.iter().enumerate() {
                 declared.insert(

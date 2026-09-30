@@ -87,7 +87,7 @@ fn model_at(n: usize) -> session::SessionModel {
         next_route.id = StableId::parse(&format!("route-{index:04}")).expect("route ID");
         next_route.source = RouteSource::Track {
             track_id,
-            tap: SendTap::PostMatrix,
+            tap: SendTap::PostPan,
         };
         model.tracks.push(next_track);
         model.routes.push(next_route);

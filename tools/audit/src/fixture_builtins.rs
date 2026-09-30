@@ -18,7 +18,10 @@ use conformance::DualAccumulatorDelayFactory;
 use dsp_reference::{
     ReferenceFilterKind, ReferenceRetainedTptF32, ReferenceTptOutput, rbj_butterworth_magnitude_db,
 };
-use effect_compiler::{EffectCompileCaps, prepare_native_session_effects};
+use effect_compiler::{
+    CONSOLE_ELIGIBLE_EFFECTS, EffectCompileCaps,
+    prepare_native_session_effects_with_console_eligibility,
+};
 use effect_contract::{NativeEffectFactory, NativeEffectRegistry};
 use engine::realtime::{PlanarBufferMut, RenderError, RenderIo, RenderTime};
 use graph::{
@@ -564,17 +567,29 @@ fn graph_tap_fixtures() -> (Vec<u8>, String) {
 fn graph_tap_artifact() -> graph_compiler::PreparedGraphBuiltinsArtifact {
     let mut model = parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
         .expect("fixture session");
-    let mut fixture_effect = model.tracks[0].dynamic.effects[0].clone();
+    let mut fixture_effect = model.tracks[0].inserts.effects[0].clone();
     fixture_effect.identity = EffectIdentity::Native {
         effect_id: StableId::parse("conformance.delay").expect("stable effect ID"),
     };
     fixture_effect.params.clear();
-    fixture_effect.id = StableId::parse("fixture-simd1").expect("stable effect ID");
-    model.tracks[0].simd1.effects = vec![fixture_effect.clone()];
+    // Decision 12: one delay in each console section and one insert between them, so each of the
+    // three internal racks carries one delay exactly as before, and every tap sees its own stage.
+    let slot = |name: &str| session::ConsoleSlot {
+        slot: StableId::parse(name).expect("stable effect ID"),
+        identity: fixture_effect.identity.clone(),
+        quality: fixture_effect.quality,
+        link_mode: fixture_effect.link_mode,
+    };
+    let entry = |name: &str| session::ConsoleEntry {
+        slot: StableId::parse(name).expect("stable effect ID"),
+        bypass: fixture_effect.bypass,
+        params: Vec::new(),
+    };
+    model.console.pre_insert = vec![slot("fixture-simd1")];
+    model.console.post_insert = vec![slot("fixture-simd2")];
+    model.tracks[0].console = vec![entry("fixture-simd1"), entry("fixture-simd2")];
     fixture_effect.id = StableId::parse("fixture-dynamic").expect("stable effect ID");
-    model.tracks[0].dynamic.effects = vec![fixture_effect.clone()];
-    fixture_effect.id = StableId::parse("fixture-simd2").expect("stable effect ID");
-    model.tracks[0].simd2.effects = vec![fixture_effect];
+    model.tracks[0].inserts.effects = vec![fixture_effect];
     model.tracks[0].fader.left_db = -6.0;
     model.tracks[0].fader.right_db = 3.0;
     model.automation.clear();
@@ -582,7 +597,7 @@ fn graph_tap_artifact() -> graph_compiler::PreparedGraphBuiltinsArtifact {
     early.id = StableId::parse("to-main-early").expect("stable route ID");
     early.source = RouteSource::Track {
         track_id: model.tracks[0].id.clone(),
-        tap: SendTap::PostInputBuiltins,
+        tap: SendTap::PostInput,
     };
     early.channel_matrix = ChannelMatrix {
         ll: 0.25,
@@ -635,7 +650,11 @@ fn graph_tap_artifact() -> graph_compiler::PreparedGraphBuiltinsArtifact {
         Box::new(DualAccumulatorDelayFactory::correct()) as Box<dyn NativeEffectFactory>
     ])
     .expect("fixture registry");
-    let effects = prepare_native_session_effects(
+    // The fixture's console slots are the conformance delay, a test double no production
+    // registry carries, so it is admitted beside the launch list for this registry only.
+    let mut console_eligible = CONSOLE_ELIGIBLE_EFFECTS.to_vec();
+    console_eligible.push("conformance.delay");
+    let effects = prepare_native_session_effects_with_console_eligibility(
         &session,
         &registry,
         EffectCompileCaps {
@@ -643,6 +662,7 @@ fn graph_tap_artifact() -> graph_compiler::PreparedGraphBuiltinsArtifact {
             maximum_scratch_bytes: u64::MAX,
             maximum_automation_spans_per_block: u32::MAX,
         },
+        &console_eligible,
     )
     .expect("prepare fixture effects");
     let builtins = prepare_session_builtins(
@@ -1412,9 +1432,8 @@ fn resources() -> String {
 fn fixture_session() -> session::CompiledSession {
     let mut model = parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
         .expect("fixture session");
-    model.tracks[0].simd1.effects.clear();
-    model.tracks[0].dynamic.effects.clear();
-    model.tracks[0].simd2.effects.clear();
+    model.tracks[0].console.clear();
+    model.tracks[0].inserts.effects.clear();
     model.automation.clear();
     compile_session(
         &model,
@@ -1437,9 +1456,8 @@ fn fixture_session_tracks(count: usize) -> session::CompiledSession {
     let mut model = parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
         .expect("fixture session");
     let mut template = model.tracks[0].clone();
-    template.simd1.effects.clear();
-    template.dynamic.effects.clear();
-    template.simd2.effects.clear();
+    template.console.clear();
+    template.inserts.effects.clear();
     model.tracks.clear();
     model.tracks.reserve(count);
     for index in 0..count {
@@ -1449,7 +1467,7 @@ fn fixture_session_tracks(count: usize) -> session::CompiledSession {
     }
     model.routes[0].source = RouteSource::Track {
         track_id: StableId::parse("track-0").expect("track ID"),
-        tap: SendTap::PostMatrix,
+        tap: SendTap::PostPan,
     };
     model.automation.clear();
     compile_session(
@@ -5080,12 +5098,12 @@ fn expected_benchmark_fields(kind: BenchmarkKind, rate_hz: u32) -> Vec<(String, 
             benchmark_field_pair("meter_queue_capacity", "4"),
             benchmark_field_pair("state_mode", "\"new_per_prepare\""),
             benchmark_field_pair("session_template_path", "\"fixtures/session/v1/canonical.json\""),
-            benchmark_field_pair("session_template_sha256", "\"1ed6ca319bc7b3e7f630f8e9e0cb0a7eb2cadf26a480194c3a926846b58ff4fd\""),
+            benchmark_field_pair("session_template_sha256", "\"5f887676f5af0b6dd600b5021ad31b1f3512cdd7ad0c770151e7e4f9aca13c07\""),
             benchmark_field_pair("track_id_prefix", "\"benchmark-track-\""),
             benchmark_field_pair("track_id_count", "256"),
             benchmark_field_pair("empty_effect_racks", "true"),
             benchmark_field_pair("route_source_track_id", "\"benchmark-track-0\""),
-            benchmark_field_pair("route_source_tap", "\"post_matrix\""),
+            benchmark_field_pair("route_source_tap", "\"post_pan\""),
             benchmark_field_pair("meter_track_ids", "\"benchmark-track-0,benchmark-track-1,benchmark-track-2,benchmark-track-3,benchmark-track-4,benchmark-track-5,benchmark-track-6,benchmark-track-7\""),
             benchmark_field_pair("meter_taps", "\"input,post_input_builtins,post_simd1,post_dynamic,post_simd2_pre_fader,post_fader,post_matrix\""),
             benchmark_field_pair("meter_period_frames", "128"),
@@ -5250,7 +5268,10 @@ mod tests {
             // Re-pinned again by issue #1080: A1's observation generation goes too, so
             // `MeterSnapshot` is 160 and `MeterAccumulator` 232 bytes; only the resource rows and
             // this joined manifest identity move.
-            "9161d2ca028aeb171f7702f951774298c06d7ebeae434973386f1d465b4ff9d3",
+            // Re-pinned by issue #1093: `canonical.json` moved to decision 12's console shape, so
+            // the two `prepare_256_tracks` workloads name its new digest (and the `post_pan` tap);
+            // no PCM, meter, response or resource payload moved.
+            "fced289fb8d0891068ac824b6104266e33b69876e6014cf06afeed9eb6a1e2f9",
             "accepted joined-corpus manifest identity"
         );
         remove_temporary_root(root);

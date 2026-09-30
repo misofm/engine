@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Derive the app-shape 64-track JSON fixture (issue #1085).
+"""Derive the app-shape 64-track JSON fixture (issue #1085, console shape since #1093).
 
-The app (misofm/app) compiles EQ -> compressor onto every track's dynamic rack
-and marks the tracks a user has not selected ``bypass``. This fixture is that
-shape on the standing console: each track's exact EQ and compressor objects
-move, in order, from ``simd1`` to ``dynamic``; ``simd1`` and ``simd2`` are
-emptied, so the limiter goes; and both effects of every track whose index is 2
-mod 3 (21 of 64, about a third) are bypassed. Nothing else changes. The Rust
-session writer remains the only canonical-format authority.
+The app (misofm/app) compiles EQ -> compressor onto every track and marks the
+tracks a user has not selected ``bypass``. This fixture is that shape on the
+standing console. Under decision 12 the EQ and the compressor are the session's
+two ``pre_insert`` slots, exactly as the standing fixture declares them, and
+each track keeps its own entry for each; the ``post_insert`` limiter slot and
+every track's limiter entry go; and both entries of every track whose index is
+2 mod 3 (21 of 64, about a third) are bypassed. Nothing else changes. Every
+track's ``inserts`` stays empty. The Rust session writer remains the only
+canonical-format authority.
 """
 import json
 import subprocess
@@ -48,24 +50,29 @@ def main() -> int:
         validator = args[1]
     document = json.loads(STANDING.read_text())
     document["session_id"] = "console-sixty-four-track-app"
+    console = document["console"]
+    ids = [slot["identity"]["effect_id"] for slot in console["pre_insert"]]
+    assert ids == ["miso.parametric-eq", "miso.compressor"], ids
+    kept = [slot["slot"] for slot in console["pre_insert"]]
+    dropped = [slot["slot"] for slot in console["post_insert"]]
+    assert [slot["identity"]["effect_id"] for slot in console["post_insert"]] == [
+        "miso.true-peak-limiter"
+    ]
+    console["post_insert"] = []
     tracks = document["tracks"]
     assert len(tracks) == TRACKS
     for index, track in enumerate(tracks):
-        simd1 = track["simd1"]["effects"]
-        ids = [effect["identity"]["effect_id"] for effect in simd1]
-        assert ids == ["miso.parametric-eq", "miso.compressor"], ids
-        assert track["dynamic"]["effects"] == []
-        assert all(not effect["bypass"] for effect in simd1)
-        track["dynamic"]["effects"] = simd1
-        track["simd1"]["effects"] = []
-        track["simd2"]["effects"] = []
+        assert [entry["slot"] for entry in track["console"]] == kept + dropped
+        assert track["inserts"]["effects"] == []
+        assert all(not entry["bypass"] for entry in track["console"])
+        track["console"] = track["console"][: len(kept)]
         if index % 3 == 2:
-            for effect in track["dynamic"]["effects"]:
-                effect["bypass"] = True
-    bypassed = [i for i, t in enumerate(tracks) if all(e["bypass"] for e in t["dynamic"]["effects"])]
+            for entry in track["console"]:
+                entry["bypass"] = True
+    bypassed = [i for i, t in enumerate(tracks) if all(e["bypass"] for e in t["console"])]
     assert bypassed == BYPASSED and len(bypassed) == 21
     assert not any(e["bypass"] for i, t in enumerate(tracks) if i not in BYPASSED
-                   for e in t["dynamic"]["effects"])
+                   for e in t["console"])
     sys.stdout.write(canonicalise(document, validator))
     return 0
 

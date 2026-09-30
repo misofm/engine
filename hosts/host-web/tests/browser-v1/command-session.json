@@ -22,6 +22,10 @@
       "frames": "2048"
     }
   ],
+  "console": {
+    "pre_insert": [],
+    "post_insert": []
+  },
   "tracks": [
     {
       "id": "track",
@@ -44,10 +48,8 @@
           "delay_samples": 0
         }
       },
-      "simd1": {
-        "effects": []
-      },
-      "dynamic": {
+      "console": [],
+      "inserts": {
         "effects": [
           {
             "id": "eq",
@@ -90,9 +92,6 @@
           }
         ]
       },
-      "simd2": {
-        "effects": []
-      },
       "fader": {
         "left_db": 0.0,
         "right_db": 0.0,
@@ -118,7 +117,7 @@
       "source": {
         "kind": "track",
         "track_id": "track",
-        "tap": "post_matrix"
+        "tap": "post_pan"
       },
       "destination": {
         "kind": "output_input",

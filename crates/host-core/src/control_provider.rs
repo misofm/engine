@@ -572,11 +572,13 @@ fn bytes<T>(count: usize) -> Result<u64, SessionControlProviderError> {
     u64::try_from(bytes).map_err(|_| SessionControlProviderError)
 }
 
+/// The session rack a lowered effect is addressed by (decision 12): both console sections lower
+/// to the first and third internal racks and are named `console` with their slot ID, which is
+/// unique across the two sections; the inserts are the second.
 const fn protocol_rack(value: EffectRack) -> ParameterRack {
     match value {
-        EffectRack::Simd1 => ParameterRack::Simd1,
-        EffectRack::Dynamic => ParameterRack::Dynamic,
-        EffectRack::Simd2 => ParameterRack::Simd2,
+        EffectRack::Simd1 | EffectRack::Simd2 => ParameterRack::Console,
+        EffectRack::Dynamic => ParameterRack::Inserts,
     }
 }
 
@@ -688,20 +690,31 @@ mod tests {
             "../../../fixtures/session/v1/parametric-eq-nine-track.json"
         ))
         .expect("session fixture");
-        let template = model.tracks[0].simd1.effects[0].clone();
-        for track in &mut model.tracks {
-            track.simd1.effects.clear();
-            track.dynamic.effects.clear();
-            track.simd2.effects.clear();
-        }
+        // One track carries every launch effect as an insert and every console-eligible one as a
+        // slot in each console section (decision 12), so all three lowered racks are exercised.
+        let template = model.lower_track(&model.tracks[0]).pre_insert[0].clone();
+        let first_track = model.tracks[0].id.clone();
+        model.tracks.truncate(1);
+        model.routes.retain(|route| {
+            matches!(&route.source, session::RouteSource::Track { track_id, .. } if *track_id == first_track)
+        });
+        model.automation.clear();
+        model.console.pre_insert.clear();
+        model.console.post_insert.clear();
+        model.tracks[0].console.clear();
+        model.tracks[0].inserts.effects.clear();
         let registry = effect_compiler::launch_native_effect_registry().expect("registry");
         let descriptor_ids = registry
             .descriptors()
             .map(|descriptor| descriptor.id.as_str().to_owned())
             .collect::<Vec<_>>();
         assert_eq!(descriptor_ids.len(), 8, "complete launch registry");
+        let eligible = descriptor_ids
+            .iter()
+            .filter(|id| effect_compiler::CONSOLE_ELIGIBLE_EFFECTS.contains(&id.as_str()))
+            .count();
+        let mut entries = [Vec::new(), Vec::new()];
         for rack_index in 0..3 {
-            let mut rack_effects = Vec::new();
             for (effect_index, descriptor_id) in descriptor_ids.iter().enumerate() {
                 let mut effect = template.clone();
                 effect.id = session::StableId::parse(&format!("r{rack_index}e{effect_index}"))
@@ -712,18 +725,39 @@ mod tests {
                 if rack_index != 0 || descriptor_id != "miso.parametric-eq" {
                     effect.params.clear();
                 }
-                rack_effects.push(effect);
-            }
-            match rack_index {
-                0 => model.tracks[0].simd1.effects = rack_effects,
-                1 => model.tracks[0].dynamic.effects = rack_effects,
-                2 => model.tracks[0].simd2.effects = rack_effects,
-                _ => unreachable!(),
+                if rack_index == 1 {
+                    model.tracks[0].inserts.effects.push(effect);
+                    continue;
+                }
+                if !effect_compiler::CONSOLE_ELIGIBLE_EFFECTS.contains(&descriptor_id.as_str()) {
+                    continue;
+                }
+                let slot = session::ConsoleSlot {
+                    slot: effect.id.clone(),
+                    identity: effect.identity.clone(),
+                    quality: effect.quality,
+                    link_mode: effect.link_mode,
+                };
+                let entry = session::ConsoleEntry {
+                    slot: effect.id.clone(),
+                    bypass: false,
+                    params: effect.params.clone(),
+                };
+                if rack_index == 0 {
+                    model.console.pre_insert.push(slot);
+                    entries[0].push(entry);
+                } else {
+                    model.console.post_insert.push(slot);
+                    entries[1].push(entry);
+                }
             }
         }
+        // Entries follow the slots in session order: `pre_insert`, then `post_insert`.
+        let [pre_entries, post_entries] = entries;
+        model.tracks[0].console = pre_entries.into_iter().chain(post_entries).collect();
 
         let effects = prepare_effects(&model);
-        assert_eq!(effects.entries.len(), 3 * descriptor_ids.len());
+        assert_eq!(effects.entries.len(), descriptor_ids.len() + 2 * eligible);
         let catalog = SessionControlProvider::prepare_session(&effects.entries).expect("catalog");
         let mut expected_handle = 1_u32;
         let mut offset = 0_usize;
@@ -816,7 +850,7 @@ mod tests {
         let first = &page.descriptors[0];
         assert_eq!(first.handle, 1);
         assert_eq!(first.track_id, "eq0");
-        assert_eq!(first.rack, ParameterRack::Simd1);
+        assert_eq!(first.rack, ParameterRack::Console);
         assert_eq!(first.effect_id, "eq");
         assert_eq!(first.parameter_id, 1);
         assert_eq!(first.channel, ParameterChannel::Left);

@@ -109,7 +109,7 @@ fn all_stereo_track_channel_pairs_fold_without_touching_other_model_values() {
         route.id = StableId::parse(route_id).unwrap();
         route.source = RouteSource::Track {
             track_id,
-            tap: session::SendTap::PostMatrix,
+            tap: session::SendTap::PostPan,
         };
         model.routes.push(route);
     }

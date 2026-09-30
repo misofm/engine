@@ -947,10 +947,11 @@ fn rack_mut(
     rack_name: RackName,
 ) -> Result<&mut Rack, SessionEditError> {
     match rack_name {
-        RackName::Simd1 => Ok(&mut track.simd1),
-        RackName::Dynamic => Ok(&mut track.dynamic),
-        RackName::Simd2 => Ok(&mut track.simd2),
-        RackName::Builtins => Err(SessionEditError::NotFound),
+        RackName::Inserts => Ok(&mut track.inserts),
+        // A console slot is not a rack of instances either: its identity, quality and link mode
+        // are session-level and a track carries only its entry. Console session edits are
+        // #1094's (S1b); until then a rack-addressed edit naming `console` finds nothing.
+        RackName::Builtins | RackName::Console => Err(SessionEditError::NotFound),
     }
 }
 
@@ -1140,7 +1141,7 @@ mod tests {
         let mut store = store();
         let edit = SessionEdit::UpsertEffectParam {
             track_id: id("vocal"),
-            rack_name: RackName::Dynamic,
+            rack_name: RackName::Inserts,
             effect_id: id("eq"),
             param: EffectParam {
                 parameter_id: 1,
@@ -1156,7 +1157,7 @@ mod tests {
             )
             .expect("same compound key replaces");
         let effect = &store.compiled().normalized_model().tracks[0]
-            .dynamic
+            .inserts
             .effects[0];
         assert_eq!(
             effect

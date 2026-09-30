@@ -191,15 +191,20 @@ pub(crate) fn route_destination_node(destination: &RouteDestination) -> GraphNod
         },
     }
 }
+/// A session tap's internal stage. Decision 12 renamed the taps and kept their positions, so the
+/// internal `TrackStage` names (and the sealed graph text that spells them) are unchanged: the
+/// insert send is the stage after the first internal rack (`console.pre_insert`), the insert
+/// return the stage after the second (the track's inserts), and pre-fader the stage after the third
+/// (`console.post_insert`).
 pub(crate) fn stage(tap: SendTap) -> TrackStage {
     match tap {
         SendTap::Input => TrackStage::Input,
-        SendTap::PostInputBuiltins => TrackStage::PostInputBuiltins,
-        SendTap::PostSimd1 => TrackStage::PostSimd1,
-        SendTap::PostDynamic => TrackStage::PostDynamic,
-        SendTap::PostSimd2PreFader => TrackStage::PostSimd2PreFader,
+        SendTap::PostInput => TrackStage::PostInputBuiltins,
+        SendTap::InsertSend => TrackStage::PostSimd1,
+        SendTap::InsertReturn => TrackStage::PostDynamic,
+        SendTap::PreFader => TrackStage::PostSimd2PreFader,
         SendTap::PostFader => TrackStage::PostFader,
-        SendTap::PostMatrix => TrackStage::PostMatrix,
+        SendTap::PostPan => TrackStage::PostMatrix,
     }
 }
 pub(crate) fn stages() -> [TrackStage; 7] {
@@ -220,6 +225,10 @@ pub(crate) fn rack_id(rack: EffectRack) -> RackId {
         EffectRack::Simd2 => RackId::Simd2,
     }
 }
+/// A graph diagnostic and edge path for one lowered effect node. It names the internal rack
+/// (`simd1` holds `console.pre_insert`, `dynamic` the inserts and `simd2` `console.post_insert`)
+/// because these paths are part of the sealed `MISO-GRAPH-V1` canonical text, which decision 12's
+/// class-A-by-lowering keeps byte-identical.
 pub(crate) fn effect_path(track: &str, rack: RackId, effect: &str) -> String {
     format!(
         "$.tracks[id={track}].{}.effects[id={effect}]",

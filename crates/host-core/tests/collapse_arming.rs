@@ -44,7 +44,8 @@ use session::{
     parse_session_json,
 };
 
-/// Eight tracks, one banked parametric EQ each in `simd1`, every route at `post_matrix`.
+/// Eight tracks, one banked parametric EQ each as the `console.pre_insert` slot `eq`, every route
+/// at `post_pan`.
 const BANK: &str = include_str!("../../../fixtures/session/v1/parametric-eq-bank-console.json");
 const QUANTUM: usize = 128;
 const RATE: u32 = 48_000;
@@ -130,16 +131,27 @@ fn set_per_channel(
     }
 }
 
-/// Band gain (parameter 4) of `simd1`'s EQ at `left_db` / `right_db`, and a second, symmetric copy
-/// of the fixture's EQ in `simd2`, so the strip has an upstream stage after `simd1` as well.
+/// A second, symmetric copy of the fixture's EQ slot as the `console.post_insert` slot `eq2`, so
+/// the strip has an upstream stage after `pre_insert` as well.
+fn with_post_insert_eq(model: &mut SessionModel) {
+    let mut second = model.console.pre_insert[0].clone();
+    second.slot = id("eq2");
+    model.console.post_insert = vec![second];
+    for track in &mut model.tracks {
+        let mut entry = track.console[0].clone();
+        entry.slot = id("eq2");
+        track.console.push(entry);
+    }
+}
+
+/// Band gain (parameter 4) of the `pre_insert` EQ at `left_db` / `right_db`, and the symmetric
+/// `post_insert` copy of [`with_post_insert_eq`].
 fn eq_model(left_db: f32, right_db: f32) -> SessionModel {
     let mut model = mono_model();
+    with_post_insert_eq(&mut model);
     for track in &mut model.tracks {
-        let mut second = track.simd1.effects[0].clone();
-        second.id = id("eq2");
-        track.simd2.effects = vec![second];
         set_per_channel(
-            &mut track.simd1.effects[0].params,
+            &mut track.console[0].params,
             4,
             ParameterUnit::Db,
             left_db,
@@ -149,16 +161,15 @@ fn eq_model(left_db: f32, right_db: f32) -> SessionModel {
     model
 }
 
-/// A per-node `miso.delay` in `dynamic` (`left_ms` / `right_ms`) between the banked `simd1` EQ and
-/// a second, banked EQ in `simd2`. The delay banks nowhere, so the strip is two chains around it.
+/// A per-node `miso.delay` insert (`left_ms` / `right_ms`) between the banked `pre_insert` EQ and
+/// a second, banked EQ in `post_insert`. The delay banks nowhere, so the strip is two chains around
+/// it.
 fn delay_model(left_ms: f32, right_ms: f32) -> SessionModel {
     let mut model = mono_model();
+    with_post_insert_eq(&mut model);
+    let eq = model.lower_track(&model.tracks[0]).pre_insert[0].clone();
     for track in &mut model.tracks {
-        let eq = track.simd1.effects[0].clone();
-        let mut second = eq.clone();
-        second.id = id("eq2");
-        track.simd2.effects = vec![second];
-        let mut delay = eq;
+        let mut delay = eq.clone();
         delay.id = id("dly");
         delay.identity = EffectIdentity::Native {
             effect_id: id("miso.delay"),
@@ -171,7 +182,7 @@ fn delay_model(left_ms: f32, right_ms: f32) -> SessionModel {
             left_ms,
             right_ms,
         );
-        track.dynamic.effects = vec![delay];
+        track.inserts.effects = vec![delay];
     }
     model
 }
@@ -228,13 +239,22 @@ fn misaligned_model() -> SessionModel {
         send.id = id(&format!("{name}-main"));
         send.source = RouteSource::Track {
             track_id: id(&name),
-            tap: SendTap::PostMatrix,
+            tap: SendTap::PostPan,
         };
         model.routes.push(send);
     }
-    for (index, track) in model.tracks.iter_mut().enumerate() {
-        if index % 2 == 1 {
-            track.simd1.effects.clear();
+    // A console slot runs on every track (decision 12), so a strip that only the even tracks
+    // carry is an insert on those tracks.
+    let lowered: Vec<_> = model
+        .tracks
+        .iter()
+        .map(|track| model.lower_track(track).pre_insert)
+        .collect();
+    model.console.pre_insert.clear();
+    for (index, (track, eq)) in model.tracks.iter_mut().zip(lowered).enumerate() {
+        track.console.clear();
+        if index % 2 == 0 {
+            track.inserts.effects = eq;
         }
     }
     model
@@ -365,8 +385,9 @@ fn width(units: &[PlanUnitEligibility]) -> usize {
 // The reproducers.
 // ---------------------------------------------------------------------------------------------
 
-/// A stage meter at `PostSimd1` splits the strip after the asymmetric `simd1` EQ; the later chain
-/// (`simd2`'s symmetric EQ) reads the planes that EQ made differ. Shipped: wrong from sample 0.
+/// A stage meter at `PostSimd1` splits the strip after the asymmetric `pre_insert` EQ; the later
+/// chain (the symmetric `post_insert` EQ) reads the planes that EQ made differ. Shipped: wrong from
+/// sample 0.
 #[test]
 fn a_post_simd1_meter_after_an_asymmetric_eq_renders_the_dual_bits() {
     let document = canonical(&eq_model(6.0, -6.0));
@@ -435,10 +456,11 @@ fn only_the_input_gathering_chain_of_a_split_strip_is_armed() {
     }
 }
 
-/// A send at `post_simd1` taps the boundary after the asymmetric EQ and splits the strip there.
+/// A send at `insert_send` taps the boundary after the asymmetric `pre_insert` EQ and splits the
+/// strip there.
 #[test]
 fn a_post_simd1_send_after_an_asymmetric_eq_renders_the_dual_bits() {
-    let document = canonical(&with_send(eq_model(6.0, -6.0), SendTap::PostSimd1));
+    let document = canonical(&with_send(eq_model(6.0, -6.0), SendTap::InsertSend));
     let armed = assert_dual_bits(
         "asymmetric simd1 EQ, post_simd1 send",
         &document,
@@ -460,7 +482,7 @@ fn a_post_input_builtins_send_after_an_asymmetric_trim_renders_the_dual_bits() {
         track.builtins.left.trim_db = 3.0;
         track.builtins.right.trim_db = -3.0;
     }
-    let document = canonical(&with_send(model, SendTap::PostInputBuiltins));
+    let document = canonical(&with_send(model, SendTap::PostInput));
     let armed = assert_dual_bits(
         "asymmetric trim, post_input_builtins send",
         &document,

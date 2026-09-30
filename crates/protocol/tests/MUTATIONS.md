@@ -7,7 +7,7 @@ Driver: one mutation at a time on the committed tree,
 
 | # | mutation | file | test | result |
 |---|---|---|---|---|
-| P3-M45 | `rack_mut`'s `RackName::Builtins` arm returns `Ok(&mut track.simd1)` instead of refusing | `protocol/src/model.rs` | `rack_addressed_edits_refuse_the_builtins_token` | RED — four rack-addressed edits start reporting `Ok`, and a `PutTrackEffect` addressed at the strip lands an effect in `simd1` |
+| P3-M45 | `rack_mut`'s `RackName::Builtins` arm returns `Ok(&mut track.inserts)` instead of refusing (re-run on #1093's console shape, where `track.simd1` no longer exists) | `protocol/src/model.rs` | `rack_addressed_edits_refuse_the_builtins_and_console_tokens` | RED — the first rack-addressed edit, `SetTrackRack` at `Builtins`, reports `Ok(())` instead of `Err(NotFound)` |
 
 The two positive tests in that file are what stop a refusal that refuses everything from passing:
 the same edits against `RackName::Simd1` are applied, and the strip is still editable through

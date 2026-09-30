@@ -10,7 +10,7 @@ Carry an exact per-chain "input is symmetric" fact from the producing chain's ow
 
 ## Objective gates
 
-- The #970 reproducers (asymmetric EQ plus a `PostSimd1` meter; asymmetric per-node delay; sends at `post_input_builtins` or `post_simd1`; a live left-only trim write on misaligned cohorts) stay bit-correct.
+- The #970 reproducers (asymmetric EQ plus a `PostSimd1` meter; asymmetric per-node delay; sends at `post_input` or `insert_send` (decision 12's names for the retired `post_input_builtins` and `post_simd1`); a live left-only trim write on misaligned cohorts) stay bit-correct.
 - The two cost shapes above return to within noise of today's armed cost, with identical bits to the dual render.
 - Every console digest unchanged; red mutations for each proof step.
 

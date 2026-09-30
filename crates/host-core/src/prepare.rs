@@ -1289,15 +1289,14 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     ))
 }
 
-/// Total effect instances across every rack of every track.
+/// Total effect instances across every track: one per console entry, since each lowers to one
+/// effect instance on its track (decision 12), plus the track's inserts.
 pub fn count_effects(model: &SessionModel) -> Result<u64, PrepareDiagnostics> {
     model.tracks.iter().try_fold(0_u64, |total, track| {
         let count = track
-            .simd1
-            .effects
+            .console
             .len()
-            .checked_add(track.dynamic.effects.len())
-            .and_then(|value| value.checked_add(track.simd2.effects.len()))
+            .checked_add(track.inserts.effects.len())
             .ok_or_else(|| resource("host.resource.arithmetic"))?;
         total
             .checked_add(u64::try_from(count).map_err(|_| platform("host.count"))?)
