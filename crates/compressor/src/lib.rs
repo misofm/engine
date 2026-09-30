@@ -807,9 +807,10 @@ pub struct PreparedCompressor {
 ///
 /// On `+0.0` input a padded lane stays at rest and writes `+0.0`, whatever member it cloned: every
 /// legal threshold and knee put the silent detector level, `-160` dB, below the knee, so the curve
-/// target is `+0.0`, the envelope stays `+0.0`, and the output is `+0.0 * gain` or the `+0.0` dry
-/// word. That is the contract's `+0.0`-out clause, and it is why a padded lane never keeps an
-/// otherwise silent bank off the silent fast path.
+/// target is `+0.0`, the envelope stays `+0.0`, and every output word is `+0.0`: the dry word,
+/// `+0.0 * gain`, or their mix, `mix * (+0.0 - +0.0) + +0.0`. That is the contract's `+0.0`-out
+/// clause, and it is why a padded lane never keeps an otherwise silent bank off the silent fast
+/// path.
 ///
 /// # What stays whole-bank, and why no bit moves
 ///
