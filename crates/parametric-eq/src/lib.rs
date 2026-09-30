@@ -1778,15 +1778,15 @@ impl<L: Lane, const W: usize> Channel<L, W> {
     ///
     /// # Padded lanes
     ///
-    /// A padded lane is fed `+0.0` and starts at rest (`+0.0` integrators). Its words are a clone's:
-    /// designed, so `c1` is in `[0, 1)`, `a2 > 0`, `a3 >= 0`, `m0 >= 0` and no word is `-0.0`
-    /// ([`validate_rounded_svf`]). From `x = +0.0` and `ic1 = ic2 = +0.0`, every product in
-    /// [`svf_block`]'s frame body is a signed zero and every sum has a `+0.0` operand (`a2 * v3`
-    /// in `d1`, `a3 * v3` in `d2`, `m0 * x` in `y`), so under round-to-nearest the frame writes
+    /// A padded lane is fed `+0.0` and starts at rest (`+0.0` integrators). Its words are a
+    /// clone's: designed, so `c1` is in `[0, 1)`, `a2 > 0`, `a3 >= 0`, `m0 >= 0` and no word is
+    /// `-0.0` ([`validate_rounded_svf`]). From `x = +0.0` and `ic1 = ic2 = +0.0`, every product in
+    /// [`svf_block`]'s frame body is a signed zero and every sum has a `+0.0` operand (`a2 * v3` in
+    /// `d1`, `a3 * v3` in `d2`, `m0 * x` in `y`), so under round-to-nearest the frame writes
     /// `+0.0`, and `flush` leaves both integrators `+0.0`. An elided or dry section passes the
     /// `+0.0` through. So a padded lane never fails the bound and is never recovered; were it
     /// recovered, it would be left at `+0.0` at rest, and no other lane would see it.
-    fn recover(&mut self, io: &mut [f32]) -> u32 {
+    fn recover_failed_lanes(&mut self, io: &mut [f32]) -> u32 {
         let failed = nonfinite_lane_mask::<L>(io);
         debug_assert_ne!(failed, 0, "a rejected block names the lanes that failed it");
         let lanes = lanes_mask::<L>(failed);
@@ -2849,9 +2849,9 @@ struct PreparedParametricEq<L: Lane, const W: usize> {
     /// feeds it `+0.0` and discards its output (the padding contract on
     /// `PrepareEffectBankRequest`). Nothing on the render path reads this array except the report:
     /// a padded lane runs the same kernel as every other lane, its D7 recovery is its own like
-    /// every lane's (see [`Channel::recover`]), and its report entry stays empty. The control plane
-    /// reads it to refuse a prepared target or a state restore addressed to a padded lane, the two
-    /// writes that could move it off `+0.0` at rest.
+    /// every lane's (see [`Channel::recover_failed_lanes`]), and its report entry stays empty. The
+    /// control plane reads it to refuse a prepared target or a state restore addressed to a padded
+    /// lane, the two writes that could move it off `+0.0` at rest.
     active: [bool; W],
     /// Issue #163 phase 4 item 1: the previous block proved this bank is at a silent fixed point.
     ///
@@ -2929,13 +2929,13 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
     /// word as it stored it, and its verdict is used (issue #999; see [`interleave`]); every other
     /// block -- ramped, refused, all-live, an even live count, nothing live -- scans the plane
     /// after the cascade. The verdict is the same either way, so the recovery is too.
-    /// A rejected block is recovered lane by lane ([`Channel::recover`], issue #1089): each lane
-    /// that holds an out-of-bounds word is zeroed and has its integrators cleared, and every other
-    /// lane keeps its output and its state; coefficients and ramps survive, because a non-finite
-    /// block is a fault report, not an automation event. The two channels are judged
-    /// independently: they carry independent state and independent counters, which is what
-    /// dual-mono means here. The returned flags name the lanes each channel recovered, padded
-    /// lanes included; the bank's report drops the padded ones.
+    /// A rejected block is recovered lane by lane ([`Channel::recover_failed_lanes`], issue
+    /// #1089): each lane that holds an out-of-bounds word is zeroed and has its integrators
+    /// cleared, and every other lane keeps its output and its state; coefficients and ramps
+    /// survive, because a non-finite block is a fault report, not an automation event. The two
+    /// channels are judged independently: they carry independent state and independent counters,
+    /// which is what dual-mono means here. The returned flags name the lanes each channel
+    /// recovered, padded lanes included; the bank's report drops the padded ones.
     ///
     /// `#[inline(always)]`, and [`render_mono`](Self::render_mono) with it: the stationary cascade
     /// is the EQ's arithmetic, and the shipped wasm artifact is gated on it living in the one
@@ -3000,7 +3000,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
             if passed {
                 continue;
             }
-            let mask = channel.recover(block);
+            let mask = channel.recover_failed_lanes(block);
             for (lane, failed) in failures[index].iter_mut().enumerate().take(W) {
                 *failed = mask & (1 << lane) != 0;
             }
@@ -3044,7 +3044,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         }
         let within = process_channels_mono(&mut self.left, left, frames, stationary);
         if !within.unwrap_or_else(|| check_block::<L>(left)) {
-            let mask = self.left.recover(left);
+            let mask = self.left.recover_failed_lanes(left);
             for (lane, failed) in failures[0].iter_mut().enumerate().take(W) {
                 *failed = mask & (1 << lane) != 0;
             }
@@ -3195,7 +3195,8 @@ fn physical_targets(
 ///
 /// A padded lane is prepared from its request like any other lane: the request is a clone of an
 /// active member's, so its words are designed, finite and stable, and on `+0.0` input from rest
-/// they write exactly `+0.0` and leave the integrators exactly `+0.0` (see [`Channel::recover`]).
+/// they write exactly `+0.0` and leave the integrators exactly `+0.0` (see
+/// [`Channel::recover_failed_lanes`]).
 fn prepare_width<L: Lane, const W: usize>(
     metadata: PreparedEffectMetadata,
     width: BankWidth,
@@ -3318,13 +3319,13 @@ fn bind_bank(
             return Ok(None);
         }
     }
-    // Issue #1089 (console strip P2b): the EQ accepts a padded request. Every lane's request,
-    // a padded lane's clone included, has been validated above, so the decision to bind is
-    // taken after validation (#1070's order) and a malformed member is still refused. The
-    // mask goes to the bank, which keeps a padded lane out of every report and refuses the
-    // two writes that could move it off `+0.0` at rest; the padding contract on
-    // `PrepareEffectBankRequest` lists the clauses, and `Channel::recover` is why a padded
-    // lane's bits and an active lane's never meet.
+    // Issue #1089 (console strip P2b): the EQ accepts a padded request. Every lane's request, a
+    // padded lane's clone included, has been validated above, so the decision to bind is taken
+    // after validation (#1070's order) and a malformed member is still refused. The mask goes to
+    // the bank, which keeps a padded lane out of every report and refuses the two writes that could
+    // move it off `+0.0` at rest; the padding contract on `PrepareEffectBankRequest` lists the
+    // clauses, and `Channel::recover_failed_lanes` is why a padded lane's bits and an active lane's
+    // never meet.
     Ok(Some(match request.width {
         BankWidth::Four => Box::new(prepare_width::<Simd4, 4>(
             metadata,
@@ -8869,12 +8870,13 @@ mod padded_banks {
     /// after block, whatever design it clones and whatever schedule its bank takes.
     ///
     /// Every band family, at both gain extremes and both Q extremes, on all four bands, with both
-    /// cuts on and the right channel detuned, cloned into every padded lane of a one-member bank
-    /// at both widths. The member drives the bank through each schedule it has: stationary and
-    /// elided (quiet music), refused (a `-0.0` word, then a non-finite one), ramping (a prepared
-    /// target on the member mid-run, so every lane runs the ramped kernel and the padded ones with
-    /// a `+0.0` increment) and faulting (a `9.5e29` sine, D7). `Channel::recover` states why the
-    /// frame body writes `+0.0` from `+0.0` for every designed word; this is that claim, measured.
+    /// cuts on and the right channel detuned, cloned into every padded lane of a one-member bank at
+    /// both widths. The member drives the bank through each schedule it has: stationary and elided
+    /// (quiet music), refused (a `-0.0` word, then a non-finite one), ramping (a prepared target on
+    /// the member mid-run, so every lane runs the ramped kernel and the padded ones with a `+0.0`
+    /// increment) and faulting (a `9.5e29` sine, D7). `Channel::recover_failed_lanes` states why
+    /// the frame body writes `+0.0` from `+0.0` for every designed word; this is that claim,
+    /// measured.
     ///
     /// Red if a padded lane is not at rest when bound, or if any path writes it a signed zero or a
     /// word other than `+0.0` (a padded lane's output feeds the next slot of a chain and its own
@@ -9158,7 +9160,8 @@ mod padded_banks {
                         );
                         assert_eq!(
                             report.reports[member], *scalar,
-                            "{context}, block {block}: member {member}'s report is not its per-node instance's"
+                            "{context}, block {block}: member {member}'s report is not its \
+                             per-node instance's"
                         );
                         assert!(
                             class_a_words(&lane_payload(&bank, member), 3)
@@ -9199,10 +9202,10 @@ mod padded_banks {
     /// enabled bank-mates' bits must not move.
     ///
     /// The bypass is the one `ConsoleEffectBankStage` applies: a [`BypassShunt`] captures the dry
-    /// block (the EQ's latency is zero), the bank renders every lane, and the bypassed lane's column
-    /// is restored from the shunt. Each bank renders twice, the bypassed lane hot and then quiet,
-    /// and every enabled member must render the same words, reports and state both times, and its
-    /// per-node instance's. At every member count, every bypassed member, both widths.
+    /// block (the EQ's latency is zero), the bank renders every lane, and the bypassed lane's
+    /// column is restored from the shunt. Each bank renders twice, the bypassed lane hot and then
+    /// quiet, and every enabled member must render the same words, reports and state both times,
+    /// and its per-node instance's. At every member count, every bypassed member, both widths.
     ///
     /// Red if the fault recovers the whole plane: every enabled bank-mate goes silent on each hot
     /// block, which is what the probe behind P1's M2 measured on the base engine.
@@ -9213,7 +9216,8 @@ mod padded_banks {
         for lanes in [4, 8] {
             for members in 1..=lanes {
                 for bypassed in 0..members {
-                    // Every member boosts 1 kHz by +24 dB, the gain domain's edge, detuned per member.
+                    // Every member boosts 1 kHz by +24 dB, the gain domain's edge, detuned per
+                    // member.
                     let initial: Vec<Vec<InitialParameterValue>> = (0..members)
                         .map(|member| {
                             let mut values = Vec::new();

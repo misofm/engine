@@ -52,7 +52,9 @@ any order, one merge each.
    wasm gates.
 2. Coupling rule: the active lanes' bits do not depend on which active member the padded lanes
    clone. A test varies the clone source.
-3. A padded lane is never scattered, and its state stays finite on `+0.0` input.
+3. A padded lane is never scattered, and its state stays finite on `+0.0` input. A padded lane
+   fed `+0.0` produces exactly `+0.0` out (not `-0.0`, not a denormal) and keeps its state finite
+   and at rest, block after block (P2a verdict, L4).
 4. D7: a planted non-finite state in one active lane recovers that lane and reports it alone.
    A bypassed lane counts as active: a bypassed lane fed a tripping value (for example `1e30`
    behind enough legal gain) leaves every enabled bank-mate's bits unchanged (P1 verdict, M2).

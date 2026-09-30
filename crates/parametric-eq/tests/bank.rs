@@ -1072,7 +1072,8 @@ impl Layout {
             for plane in core::iter::once(left).chain(right) {
                 assert!(
                     column(plane).iter().all(|word| word.to_bits() == 0),
-                    "#1089: padded lane {lane} of bank {bank} ({self:?}) wrote a word other than +0.0"
+                    "#1089: padded lane {lane} of bank {bank} ({self:?}) wrote a word other \
+                     than +0.0"
                 );
             }
             assert_eq!(
@@ -2309,8 +2310,8 @@ fn overflow_word(frame: usize) -> f32 {
 }
 
 /// The scalar leg of the switched-off-cut scenario, then of the restored-overflow scenario over
-/// `overflow_tracks` tracks, every fourth one (from track 0) planted; and how many left-plane faults
-/// the overflow scenario reported.
+/// `overflow_tracks` tracks, every fourth one (from track 0) planted; and how many left-plane
+/// faults the overflow scenario reported.
 ///
 /// One overflow track is the pinned scalar leg. [`CLIFF_TRACKS`] of them are the bank legs' tracks,
 /// the per-node render each bank leg must reproduce (issue #1089).
