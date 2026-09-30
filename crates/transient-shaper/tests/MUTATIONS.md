@@ -91,6 +91,11 @@ a_nonfinite_block_is_zeroed_and_the_envelopes_are_reset --- FAILED
 a_nonfinite_bank_block_is_rejected_as_a_unit --- FAILED
 ```
 
+Issue #1092 replaced the shared whole-bank `finish_block` with the crate's per-lane
+`Shaper::recover_lanes` (decision 12's coupling rule), and the second test with
+`a_nonfinite_lane_is_rejected_alone`. Skipping the boundary check (the `check_block` early return
+and `recover_lanes`) is the same mutation today, and it turns both tests red the same way.
+
 With `finish_block` gone the NaN reaches the output. This is the D7 replacement for the seven
 per-value `Option` classifications the pre-audit crate ran per lane-sample, so it has to be the
 thing that actually catches a non-finite block, not a formality next to a per-value check.

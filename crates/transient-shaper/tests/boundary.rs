@@ -61,51 +61,82 @@ fn a_nonfinite_block_is_zeroed_and_the_envelopes_are_reset() {
     );
 }
 
-/// A bank rejects the whole bank block, which is the landed driver's semantics.
+/// A bank rejects a failing lane alone (issue #1092; decision 12's coupling rule).
 ///
-/// Master plan §4.4 says a failing block "zeroes its output, resets the failing effect's state";
-/// 83c's `finish_block` applies that to the bank as a unit — both channels, every lane — because a
-/// bank's two channels share their coefficients and their reset. This gate pins what the driver
-/// actually does rather than what a per-lane reading of §4.4 would give; the per-lane isolation
-/// variant is 83c's to decide, not this crate's.
+/// The failing lane has both channels zeroed and both envelopes reset, exactly as its scalar
+/// instance would; every other lane keeps the bits and the state of an unpoisoned control bank.
+/// Master plan §4.4's "resets the failing effect's state" now reads per lane: a bank is a cohort of
+/// tracks, and one hot track -- a bypassed one whose wet path still runs (#1087) -- must not
+/// silence its bank-mates.
+///
+/// Red if the bank is rejected as a unit (the shared `finish_block` this crate used before), or if
+/// the failing lane keeps its envelopes or its right channel.
 #[test]
-fn a_nonfinite_bank_block_is_rejected_as_a_unit() {
-    let Some((_, width)) = native_bank() else {
-        println!("no bank width on this build; skipping");
-        return;
-    };
+fn a_nonfinite_lane_is_rejected_alone() {
+    let (_, width) = native_bank().expect("every product target banks");
     let lanes = width.lanes() as usize;
     let values = vec![values_of(1.0, -1.0, 1.0); lanes];
     let mut bank = bind_native_bank(&values, LinkMode::DualMono).expect("bank");
+    let mut control = bind_native_bank(&values, LinkMode::DualMono).expect("control");
     let frames = 4;
-    let mut left = vec![0.5_f32; frames * lanes];
-    let mut right = vec![0.25_f32; frames * lanes];
-    left[lanes + 2] = f32::NAN;
     let offsets = vec![0_u32; lanes + 1];
-    bank.process_bank(
-        EffectBankProcessBlock::new(
-            &mut left,
-            &mut right,
-            None,
-            frames as u32,
-            width,
-            0,
-            &[],
-            &offsets,
-            128,
-        )
-        .expect("bank block"),
-    );
-    assert!(
-        left.iter()
-            .chain(right.iter())
-            .all(|x| x.to_bits() == 0.0_f32.to_bits())
-    );
+    let block = |bank: &mut dyn effect_contract::PreparedNativeEffectBank, poison: bool| {
+        let mut left: Vec<f32> = (0..frames * lanes)
+            .map(|at| 0.5 - at as f32 * 0.01)
+            .collect();
+        let mut right = vec![0.25_f32; frames * lanes];
+        if poison {
+            left[lanes + 2] = f32::NAN;
+        }
+        bank.process_bank(
+            EffectBankProcessBlock::new(
+                &mut left,
+                &mut right,
+                None,
+                frames as u32,
+                width,
+                0,
+                &[],
+                &offsets,
+                128,
+            )
+            .expect("bank block"),
+        );
+        (left, right)
+    };
+    let (left, right) = block(bank.as_mut(), true);
+    let (control_left, control_right) = block(control.as_mut(), false);
     let sizes = transient_shaper::TRANSIENT_SHAPER_DESCRIPTOR.qualities[1].maximum_state;
-    for track in 0..lanes {
-        let state = bank_snapshot(bank.as_ref(), track as u32, sizes);
-        assert_eq!(state_f32(&state.0, 0).to_bits(), 0.0_f32.to_bits());
-        assert_eq!(state_f32(&state.1, 1).to_bits(), 0.0_f32.to_bits());
+    for lane in 0..lanes {
+        let state = bank_snapshot(bank.as_ref(), lane as u32, sizes);
+        let words = |plane: &[f32]| -> Vec<u32> {
+            (0..frames)
+                .map(|frame| plane[frame * lanes + lane].to_bits())
+                .collect()
+        };
+        if lane == 2 {
+            assert!(
+                words(&left)
+                    .iter()
+                    .chain(&words(&right))
+                    .all(|word| *word == 0),
+                "the failing lane's two channels are zeroed"
+            );
+            for word in [&state.0, &state.1]
+                .into_iter()
+                .flat_map(|section| [state_f32(section, 0), state_f32(section, 1)])
+            {
+                assert_eq!(word.to_bits(), 0, "the failing lane's envelopes are reset");
+            }
+        } else {
+            assert_eq!(words(&left), words(&control_left), "lane {lane} left");
+            assert_eq!(words(&right), words(&control_right), "lane {lane} right");
+            assert_eq!(
+                state,
+                bank_snapshot(control.as_ref(), lane as u32, sizes),
+                "lane {lane}'s state"
+            );
+        }
     }
 }
 
