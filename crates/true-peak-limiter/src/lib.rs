@@ -34,10 +34,11 @@
 //! `f64` by `math` at event time and ramped in the **linear** domain, so a coefficient
 //! is never a transcendental of a per-sample value. No `%` on a cursor (#90 F6): rings are advanced
 //! with a compare and a wrap. No per-value `is_finite`/`is_subnormal`/`Option` plumbing and no
-//! per-lane recovery (#90 F5, decision D7): the only flush is on the single recursive word `d`, and
-//! the only failure path is the once-per-block boundary check of `effect-runtime`. No
-//! second copy of the ramp, the payload codec or the parameter validator (#90 F9): they come from
-//! `effect-runtime`.
+//! per-sample recovery (#90 F5, decision D7): the only flush is on the single recursive word `d`,
+//! and the only failure path is the once-per-block boundary check of `effect-runtime`. Its
+//! recovery is attributed to the lanes that failed, so a bank-mate's bits never depend on another
+//! lane's failure (#1091, decision 12). No second copy of the ramp, the payload codec or the
+//! parameter validator (#90 F9): they come from `effect-runtime`.
 #![allow(missing_docs)]
 
 #[cfg(test)]
@@ -59,7 +60,7 @@ use effect_contract::{
     expected_prepared_metadata,
 };
 use effect_runtime::bank::{
-    NonFiniteReport, block_is_positive_zero, check_block, finish_block, nonfinite_lane_mask,
+    NonFiniteReport, block_is_positive_zero, check_block, nonfinite_lane_mask,
 };
 use effect_runtime::params::{
     ParameterSpec, is_negative_zero, normalize_zero, parameter_value_valid,
@@ -579,12 +580,38 @@ impl ChannelState {
     /// `FullToDefaults`: every runtime word cleared and every ramp snapped to the prepared value.
     fn reset_to_defaults(&mut self, shape: &Shape, defaults: &[[f32; PARAMETER_COUNT]], rate: u32) {
         for (lane, values) in defaults.iter().enumerate() {
-            self.lookahead_ms[lane] = values[2];
-            self.lane[lane] = LaneShape::new(lookahead_samples(values[2], rate, shape.n), shape);
-            self.limit[lane] = LinearRamp::fixed(limit_coefficient(values[0]));
-            self.release[lane] = LinearRamp::fixed(release_coefficient(values[1], rate));
+            self.seed_lane_defaults(lane, shape, values, rate);
         }
         self.clear_runtime(shape);
+    }
+
+    /// Writes one lane's designed words from its prepared defaults: the per-lane half of
+    /// [`reset_to_defaults`](Self::reset_to_defaults), which the per-lane D7 recovery shares
+    /// (issue #1091).
+    fn seed_lane_defaults(
+        &mut self,
+        lane: usize,
+        shape: &Shape,
+        values: &[f32; PARAMETER_COUNT],
+        rate: u32,
+    ) {
+        self.lookahead_ms[lane] = values[2];
+        self.lane[lane] = LaneShape::new(lookahead_samples(values[2], rate, shape.n), shape);
+        self.limit[lane] = LinearRamp::fixed(limit_coefficient(values[0]));
+        self.release[lane] = LinearRamp::fixed(release_coefficient(values[1], rate));
+    }
+
+    /// [`reset_to_defaults`](Self::reset_to_defaults) for lane `lane` alone: the D7 recovery of
+    /// one lane of a bank (issue #1091). Every other lane's words are untouched.
+    fn reset_lane_to_defaults(
+        &mut self,
+        lane: usize,
+        shape: &Shape,
+        values: &[f32; PARAMETER_COUNT],
+        rate: u32,
+    ) {
+        self.seed_lane_defaults(lane, shape, values, rate);
+        self.clear_lane_runtime(lane, shape);
     }
 
     /// `DiscontinuityKeepParameters`: the same runtime words, ramps snapped to their targets.
@@ -613,6 +640,38 @@ impl ChannelState {
         for (sum, shape) in self.box_sum.iter_mut().zip(self.lane.iter()) {
             *sum = shape.window as f32;
         }
+    }
+
+    /// [`clear_runtime`](Self::clear_runtime) for lane `lane` alone, word for word: the same list,
+    /// written at that lane's stride of every ring (issue #1091).
+    ///
+    /// The shared cursors are not reset, and need not be. Every word this writes is uniform along
+    /// its ring (`+0.0` in the history and the main line, `1.0` in both gain rings), and the kernel
+    /// addresses a ring only at an offset from a cursor, so a cleared lane reads what a cleared lane
+    /// at cursor zero reads. That is the rotation [`commit_lane`] performs for a payload, and it is
+    /// why the lane then renders what a scalar instance renders after its own §4.4 reset.
+    /// `a_lane_reset_is_the_whole_reset_at_one_lanes_stride` keeps the list equal to
+    /// [`clear_runtime`](Self::clear_runtime)'s.
+    fn clear_lane_runtime(&mut self, lane: usize, shape: &Shape) {
+        let width = self.width;
+        debug_assert!(lane < width);
+        debug_assert_eq!(self.main_ring.len(), shape.main * width);
+        for word in self.history.iter_mut().skip(lane).step_by(width) {
+            *word = 0.0;
+        }
+        for word in self.main_ring.iter_mut().skip(lane).step_by(width) {
+            *word = 0.0;
+        }
+        for word in self.required_ring.iter_mut().skip(lane).step_by(width) {
+            *word = 1.0;
+        }
+        for word in self.box_ring.iter_mut().skip(lane).step_by(width) {
+            *word = 1.0;
+        }
+        self.reduction[lane] = 0.0;
+        self.prefix[lane] = 1.0;
+        self.phase[lane] = 0;
+        self.box_sum[lane] = self.lane[lane].window as f32;
     }
 
     /// `true` when every runtime word of this channel is exactly what [`clear_runtime`] writes.
@@ -663,6 +722,35 @@ impl ChannelState {
         for (phase, shape) in self.phase.iter_mut().zip(self.lane.iter()) {
             let window = shape.window as usize;
             *phase = ((*phase as usize + frames % window) % window) as u32;
+        }
+    }
+}
+
+/// The lane mask naming every lane of a `width`-lane instance or bank.
+fn every_lane(width: usize) -> u32 {
+    debug_assert!((1..=MAXIMUM_WIDTH).contains(&width));
+    (1_u32 << width) - 1
+}
+
+/// The lane mask of a bank request's active lanes: bit `l` is set iff `active_mask[l]`.
+fn active_lane_bits(active_mask: &[bool]) -> u32 {
+    active_mask
+        .iter()
+        .enumerate()
+        .filter(|(_, active)| **active)
+        .fold(0, |bits, (lane, _)| bits | (1 << lane))
+}
+
+/// Zeroes the words of every lane named in `lanes`, in every frame of an AoSoA block.
+///
+/// The per-lane half of the §4.4 recovery (issue #1091), so it runs on the failing path only,
+/// never on a block that passed the check.
+fn zero_lanes<L: Lane>(io: &mut [f32], lanes: u32) {
+    for frame in io.chunks_exact_mut(L::WIDTH) {
+        for (lane, word) in frame.iter_mut().enumerate() {
+            if lanes & (1 << lane) != 0 {
+                *word = 0.0;
+            }
         }
     }
 }
@@ -746,8 +834,9 @@ fn lane_shapes_agree(left: &ChannelState, right: &ChannelState) -> bool {
 /// `prefix` and `phase`, the running box sum and the recursive reduction word. The detector history
 /// and the main delay ring are per channel by design and are not in the list.
 ///
-/// A full comparison, so it runs on the control path only: after a restore, where the payload's two
-/// sections are arbitrary.
+/// A full comparison, so it runs off the frame loop only: after a restore, where the payload's two
+/// sections are arbitrary, and after a per-lane §4.4 recovery (#1091), which runs only on a block
+/// that failed the boundary check. Bounded by the rings and allocation-free either way.
 fn gain_state_agrees(left: &ChannelState, right: &ChannelState) -> bool {
     let words_agree = |a: &[f32], b: &[f32]| {
         a.iter()
@@ -3323,6 +3412,14 @@ struct LimiterCore<L: Lane> {
     right: ChannelState,
     cursors: Cursors,
     report: NonFiniteReport,
+    /// Issue #1091 (console strip P2d): the lanes that carry a member, bit `l` for lane `l`.
+    ///
+    /// Every lane of a scalar instance and of a full bank. A padded bank's other lanes carry a
+    /// clone of a member's request, are fed `+0.0` and have their output discarded
+    /// (`effect_contract::PrepareEffectBankRequest`). This word masks the §4.4 report, routes no
+    /// automation to a padded lane and refuses a padded lane's state payload, so nothing is charged
+    /// to one. The kernel never reads it: a padded lane is rendered exactly as a member is.
+    active: u32,
     /// Issue #182 S2: the previous block proved this instance is at a silent fixed point.
     ///
     /// Earned only by observation in [`process_block`](Self::process_block), never assumed. This
@@ -3342,11 +3439,11 @@ struct LimiterCore<L: Lane> {
     /// path once, together with the per-block legs that the prepared link is `Maximum`, that both
     /// channels are uniform and that the designed words agree ([`designed_gain_agree`]).
     ///
-    /// * **Established** at construction and by [`reset`](Self::reset) (including the §4.4 reset
-    ///   of a non-finite block) iff every lane's window shape agrees ([`lane_shapes_agree`], which
-    ///   is exact after `clear_runtime`); by [`desymmetrize`](Self::desymmetrize), which copies the
-    ///   left channel over the right; and by [`restore_track`](Self::restore_track), from a full
-    ///   comparison of every lane's gain words.
+    /// * **Established** at construction and by [`reset`](Self::reset) (including the whole §4.4
+    ///   reset of a non-finite block) iff every lane's window shape agrees ([`lane_shapes_agree`],
+    ///   which is exact after `clear_runtime`); by [`desymmetrize`](Self::desymmetrize), which
+    ///   copies the left channel over the right; and by [`restore_track`](Self::restore_track) and
+    ///   the per-lane §4.4 recovery (#1091), from a full comparison of every lane's gain words.
     /// * **Kept** by a dual block that renders under `Maximum` with the designed words agreeing:
     ///   linked, it mirrors every write; dual (the per-lane body), it computes both channels' words
     ///   from equal operands. The silent fast path keeps it too: it advances each channel's phase
@@ -3388,6 +3485,7 @@ impl<L: Lane> LimiterCore<L> {
             right,
             cursors: Cursors::default(),
             report: NonFiniteReport::new(),
+            active: every_lane(width),
             silent_fixed_point: false,
             silent_bypass: metadata.bypass,
             gain_linked,
@@ -3398,6 +3496,14 @@ impl<L: Lane> LimiterCore<L> {
             left_defaults,
             right_defaults,
         })
+    }
+
+    /// Binds a padded bank's active mask (issue #1091). `active` names at least one lane and no
+    /// lane past `L::WIDTH`; the caller has validated the mask with the request.
+    fn with_active_lanes(mut self, active: u32) -> Self {
+        debug_assert!(active != 0 && active & !every_lane(L::WIDTH) == 0);
+        self.active = active;
+        self
     }
 
     /// The two resets, one implementation (#90 F9).
@@ -3427,10 +3533,12 @@ impl<L: Lane> LimiterCore<L> {
 
     /// Runs one block and applies the master plan §4.4 boundary check (decision D7).
     ///
-    /// A block whose output is NaN or at least `1e30` in magnitude is zeroed on both channels, the
-    /// whole instance is reset to its defaults and the bank's counter is incremented. There is no
-    /// per-lane recovery and no per-value check anywhere on this path: a signal that leaves the
-    /// representable range is a bug report, not a signal-processing feature.
+    /// A block whose output is NaN or at least `1e30` in magnitude is recovered lane by lane
+    /// ([`reset_failed_lanes`](Self::reset_failed_lanes)): each lane that failed is zeroed on both
+    /// channels and reset to its defaults, and the counter is incremented for the members among
+    /// them. There is still no per-value check anywhere on this path: a signal that leaves the
+    /// representable range is a bug report, not a signal-processing feature. What is per lane is
+    /// only who pays for it.
     fn process_block(&mut self, left_io: &mut [f32], right_io: &mut [f32], frames: usize) {
         let words = frames * L::WIDTH;
         // Issue #182 S2, the phase-4 admission test. Whole-bank, never per lane, and every leg is
@@ -3516,21 +3624,76 @@ impl<L: Lane> LimiterCore<L> {
             && block_is_positive_zero(&left_io[..words])
             && block_is_positive_zero(&right_io[..words]);
         self.silent_bypass = self.metadata.bypass;
+        // The §4.4 boundary check: one vector scan per channel, exactly `effect-runtime`'s
+        // `finish_block` test. The two channels fail together per lane, as they do there, because
+        // a lane's pair shares its reset.
+        if check_block::<L>(left_io) && check_block::<L>(right_io) {
+            return;
+        }
+        let failed = nonfinite_lane_mask::<L>(left_io) | nonfinite_lane_mask::<L>(right_io);
+        if self.reset_failed_lanes(failed) {
+            left_io.fill(0.0);
+            right_io.fill(0.0);
+        } else {
+            zero_lanes::<L>(left_io, failed);
+            zero_lanes::<L>(right_io, failed);
+        }
+    }
+
+    /// The D7 recovery of a failed block, attributed per lane (issue #1091; decision 12, "Coupling
+    /// rule" and "Padding contract").
+    ///
+    /// `failed` is the lane mask of the block's out-of-bounds words. Returns `true` when the whole
+    /// instance was reset, which the caller answers by zeroing the whole block, and `false` when
+    /// only the lanes of `failed` were, which it answers by zeroing their words alone.
+    ///
+    /// * **Every active lane failed** (always so for a scalar instance, and for a full bank whose
+    ///   lanes all failed): today's whole reset. Both channels return to their defaults, the cursors
+    ///   to zero, and the #990 record is re-established exactly as [`reset`](Self::reset) does it.
+    ///   A padded lane is reset with them; it is at rest, fed `+0.0`, and its output is discarded,
+    ///   so that moves nothing anyone reads, and it brings every lane back to one van Herk phase.
+    /// * **Otherwise** only the failed lanes are reset
+    ///   ([`ChannelState::reset_lane_to_defaults`]), on both channels. A bank-mate that did not
+    ///   fail keeps every word, so its bits are the bits it renders per node: banking couples the
+    ///   lanes' cost, never their bits. The cursors are shared and stay where they are, which is
+    ///   bit-neutral for the reset lane (see [`ChannelState::clear_lane_runtime`]). The reset lane
+    ///   restarts at phase zero, so the bank renders the per-lane body until the next whole reset;
+    ///   that is cost, and only after a bug report. The #990 record is re-derived from the words,
+    ///   every lane, as [`restore_track`](Self::restore_track) re-derives it: after a partial
+    ///   reset no cheaper statement is exact, and this path runs only on a failed block.
+    ///
+    /// The report is masked by [`active`](Self::active): a padded lane that failed is still
+    /// recovered, because it must go on answering `+0.0` with `+0.0`, but it is neither reported
+    /// nor counted.
+    fn reset_failed_lanes(&mut self, failed: u32) -> bool {
+        debug_assert!(failed != 0 && failed & !every_lane(L::WIDTH) == 0);
+        let charged = failed & self.active;
+        if charged != 0 {
+            self.report.nonfinite_lanes = charged;
+            self.report.nonfinite_blocks = self.report.nonfinite_blocks.saturating_add(1);
+        }
         let shape = self.shape;
         let rate = self.metadata.sample_rate;
-        let left = &mut self.left;
-        let right = &mut self.right;
-        let left_defaults = &self.left_defaults;
-        let right_defaults = &self.right_defaults;
-        let cursors = &mut self.cursors;
-        let gain_linked = &mut self.gain_linked;
-        finish_block::<L>(left_io, right_io, &mut self.report, || {
-            left.reset_to_defaults(&shape, left_defaults, rate);
-            right.reset_to_defaults(&shape, right_defaults, rate);
-            *cursors = Cursors::default();
+        if charged == self.active {
+            self.left
+                .reset_to_defaults(&shape, &self.left_defaults, rate);
+            self.right
+                .reset_to_defaults(&shape, &self.right_defaults, rate);
+            self.cursors = Cursors::default();
             // #990: the §4.4 reset re-establishes the record exactly as `reset` does.
-            *gain_linked = lane_shapes_agree(left, right);
-        });
+            self.gain_linked = lane_shapes_agree(&self.left, &self.right);
+            return true;
+        }
+        for lane in (0..L::WIDTH).filter(|lane| failed & (1 << lane) != 0) {
+            self.left
+                .reset_lane_to_defaults(lane, &shape, &self.left_defaults[lane], rate);
+            self.right
+                .reset_lane_to_defaults(lane, &shape, &self.right_defaults[lane], rate);
+        }
+        // #990: the lanes that did not fail keep gain words the record may have been cleared for,
+        // and the reset ones now hold `clear_runtime`'s, so the record is read back from the words.
+        self.gain_linked = gain_state_agrees(&self.left, &self.right);
+        false
     }
 
     #[cfg(test)]
@@ -3563,8 +3726,9 @@ impl<L: Lane> LimiterCore<L> {
     /// [`limiter_block_mono`] for why the two channels' ramps and window shapes agree.
     ///
     /// The §4.4 boundary check scans the one live plane. Its lane mask is the dual check's
-    /// `mask(left) | mask(right)` with `right` equal to `left`, so it is the same mask; the reset
-    /// it triggers still restores **both** channels and the cursors, exactly as the dual one does.
+    /// `mask(left) | mask(right)` with `right` equal to `left`, so it is the same mask; the
+    /// recovery it triggers is the dual one ([`reset_failed_lanes`](Self::reset_failed_lanes)),
+    /// which restores **both** channels of each failed lane.
     fn process_block_mono(&mut self, left_io: &mut [f32], frames: usize) {
         // #990: only the left channel advances from here, the silent path included, so the right
         // channel's gain words go stale until `desymmetrize` copies the left over them.
@@ -3597,16 +3761,12 @@ impl<L: Lane> LimiterCore<L> {
         if check_block::<L>(left_io) {
             return;
         }
-        self.report.nonfinite_lanes = nonfinite_lane_mask::<L>(left_io);
-        self.report.nonfinite_blocks = self.report.nonfinite_blocks.saturating_add(1);
-        left_io.fill(0.0);
-        let shape = self.shape;
-        let rate = self.metadata.sample_rate;
-        self.left
-            .reset_to_defaults(&shape, &self.left_defaults, rate);
-        self.right
-            .reset_to_defaults(&shape, &self.right_defaults, rate);
-        self.cursors = Cursors::default();
+        let failed = nonfinite_lane_mask::<L>(left_io);
+        if self.reset_failed_lanes(failed) {
+            left_io.fill(0.0);
+        } else {
+            zero_lanes::<L>(left_io, failed);
+        }
     }
 
     #[cfg(test)]
@@ -4155,12 +4315,11 @@ impl NativeEffectFactory for TruePeakLimiterFactory {
             left_defaults.push(left);
             right_defaults.push(right);
         }
-        // Issue #1088: this effect has not opted into padding (its P2 slice, #1091), so a request
-        // with a padded lane is declined after every member is validated, never bound: binding it
-        // would run the clone lanes as real tracks.
-        if request.is_padded() {
-            return Ok(None);
-        }
+        // Issue #1091 (console strip P2d): this effect accepts padding. A padded lane's request is
+        // a clone of a member's, validated by the loop above like every member's, so it seeds the
+        // lane with that member's defaults, program key and window shape: the bank takes the body
+        // a full bank of the same members would. The active mask masks the §4.4 report and routes
+        // no automation to a padded lane; nothing else reads it (`LimiterCore::active`).
         // Issue #95: a cohort whose members do not share one program key is a *cohort* this
         // artifact cannot bank, not a malformed request. It declines with `Ok(None)` and the
         // tracks render as scalar instances, which is the contract's frozen rule for every
@@ -4180,23 +4339,25 @@ impl NativeEffectFactory for TruePeakLimiterFactory {
         };
         let left_defaults = left_defaults.into_boxed_slice();
         let right_defaults = right_defaults.into_boxed_slice();
-        let bank: Box<dyn PreparedNativeEffectBank> =
-            match request.width {
-                BankWidth::Four => Box::new(PreparedTruePeakLimiterBank::<Simd4> {
-                    metadata: bank_metadata,
-                    core: LimiterCore::<Simd4>::new(metadata, left_defaults, right_defaults)
-                        .ok_or(EffectPrepareError {
-                            code: "effect.parameter.initial",
-                        })?,
-                }),
-                BankWidth::Eight => Box::new(PreparedTruePeakLimiterBank::<Simd8> {
-                    metadata: bank_metadata,
-                    core: LimiterCore::<Simd8>::new(metadata, left_defaults, right_defaults)
-                        .ok_or(EffectPrepareError {
-                            code: "effect.parameter.initial",
-                        })?,
-                }),
-            };
+        let active = active_lane_bits(request.active_mask);
+        let bank: Box<dyn PreparedNativeEffectBank> = match request.width {
+            BankWidth::Four => Box::new(PreparedTruePeakLimiterBank::<Simd4> {
+                metadata: bank_metadata,
+                core: LimiterCore::<Simd4>::new(metadata, left_defaults, right_defaults)
+                    .ok_or(EffectPrepareError {
+                        code: "effect.parameter.initial",
+                    })?
+                    .with_active_lanes(active),
+            }),
+            BankWidth::Eight => Box::new(PreparedTruePeakLimiterBank::<Simd8> {
+                metadata: bank_metadata,
+                core: LimiterCore::<Simd8>::new(metadata, left_defaults, right_defaults)
+                    .ok_or(EffectPrepareError {
+                        code: "effect.parameter.initial",
+                    })?
+                    .with_active_lanes(active),
+            }),
+        };
         Ok(Some(bank))
     }
 }
@@ -4364,7 +4525,7 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedTruePeakLimiterBank<L> {
         track_index: u32,
         mut output: StatePayloadOutput<'_>,
     ) -> Result<(), StatePayloadError> {
-        let track = checked_track(track_index, L::WIDTH)?;
+        let track = self.checked_member(track_index)?;
         self.core.snapshot_track(track, &mut output)
     }
 
@@ -4374,12 +4535,25 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedTruePeakLimiterBank<L> {
         state_layout_version: u32,
         input: StatePayloadInput<'_>,
     ) -> Result<(), StatePayloadError> {
-        let track = checked_track(track_index, L::WIDTH)?;
+        let track = self.checked_member(track_index)?;
         self.core.restore_track(track, state_layout_version, &input)
     }
 }
 
 impl<L: Lane> PreparedTruePeakLimiterBank<L> {
+    /// A state payload's track index, which must name a lane that carries a member.
+    ///
+    /// Issue #1091: a padded lane carries no track, so it has no state to save and none may be
+    /// restored into it. A restored payload would also leave it off the rest state it must hold to
+    /// answer `+0.0` with `+0.0`.
+    fn checked_member(&self, track_index: u32) -> Result<usize, StatePayloadError> {
+        let track = checked_track(track_index, L::WIDTH)?;
+        if self.core.active & (1 << track) == 0 {
+            return Err(state_error("effect.state.track"));
+        }
+        Ok(track)
+    }
+
     /// The one bank body, dual or collapsed. `MONO` chooses the render body and nothing else.
     ///
     /// A const generic rather than an argument, so the two monomorphise and the dual instantiation
@@ -4405,6 +4579,12 @@ impl<L: Lane> PreparedTruePeakLimiterBank<L> {
         for track in 0..L::WIDTH {
             let start = block.automation_offsets[track] as usize;
             let end = block.automation_offsets[track + 1] as usize;
+            // Issue #1091: a padded lane carries no track. The caller routes it no automation, and
+            // none is applied or charged to it, so its report entry stays empty and its clone
+            // parameters stay the member's.
+            if self.core.active & (1 << track) == 0 {
+                continue;
+            }
             apply_automation(
                 &block.automation[start..end],
                 &self.core.metadata,
@@ -7562,48 +7742,702 @@ mod tests {
         );
     }
 
-    /// Issue #1088 (console strip P2a), gate 3: the limiter has not opted into padding (P2d,
-    /// #1091), so it declines a padded bank request, and only after it has validated every member.
-    ///
-    /// Red if the guard in `bind_homogeneous_bank` is removed -- a padded request binds, and the
-    /// bank runs its clone lanes as real tracks -- or if it moves above member validation, where a
-    /// padded request with a malformed member is declined instead of refused.
-    #[test]
-    fn a_padded_request_is_declined_until_the_limiter_opts_in() {
-        let (width, backend, lanes) = native_bank();
-        let values = initial_values();
-        let requests = vec![request(&values); lanes];
-        let bind = |requests: &[PrepareEffectRequest<'_>], mask: &[bool]| {
-            TruePeakLimiterFactory.bind_homogeneous_bank(PrepareEffectBankRequest {
-                backend,
-                width,
-                requests,
-                active_mask: mask,
-            })
-        };
+    /// The bank widths this build binds: `Four` and `Eight` on x86-64-v3, `Four` on AArch64
+    /// (#1017). A bank wider than the backend declines, so a padded bank is tested at every width
+    /// that binds rather than returning early on the other one.
+    fn bank_widths() -> Vec<(BankWidth, Backend)> {
+        let widths: Vec<(BankWidth, Backend)> = [
+            (BankWidth::Four, Backend::Simd4),
+            (BankWidth::Eight, Backend::Simd8),
+        ]
+        .into_iter()
+        .filter(|(width, _)| width.lanes() as usize <= Backend::current().width())
+        .collect();
         assert!(
-            bind(&requests, width.full_mask())
-                .expect("a full bank")
-                .is_some(),
-            "the control: the same members bind as a full bank"
+            widths.contains(&(native_bank().0, native_bank().1)),
+            "the native width binds"
         );
-        for members in 1..lanes {
-            let mask: Vec<bool> = (0..lanes).map(|lane| lane < members).collect();
-            assert!(
-                bind(&requests, &mask)
+        widths
+    }
+
+    /// `request` with the link mode of the bank under test.
+    fn linked_request(
+        values: &[InitialParameterValue],
+        link: LinkMode,
+    ) -> PrepareEffectRequest<'_> {
+        let mut request = request(values);
+        request.link_mode = link;
+        request
+    }
+
+    /// One [`linked_request`] per lane.
+    fn linked_requests(
+        values: &[[InitialParameterValue; PARAMETER_COUNT * 2]],
+        link: LinkMode,
+    ) -> Vec<PrepareEffectRequest<'_>> {
+        values
+            .iter()
+            .map(|values| linked_request(values, link))
+            .collect()
+    }
+
+    /// Issue #1091 (console strip P2d): the limiter accepts padding. A padded request binds at
+    /// every active count, and every lane, member or clone, is still validated before the bank is
+    /// built.
+    ///
+    /// Red if the #1088 decline comes back (no padded request binds), or if the member loop stops
+    /// validating padded lanes (the malformed clone binds instead of being refused).
+    #[test]
+    fn a_padded_request_binds_after_every_lane_is_validated() {
+        let values = initial_values();
+        for (width, backend) in bank_widths() {
+            let lanes = width.lanes() as usize;
+            let requests = vec![request(&values); lanes];
+            let bind = |requests: &[PrepareEffectRequest<'_>], mask: &[bool]| {
+                TruePeakLimiterFactory.bind_homogeneous_bank(PrepareEffectBankRequest {
+                    backend,
+                    width,
+                    requests,
+                    active_mask: mask,
+                })
+            };
+            for members in 1..lanes {
+                let mask: Vec<bool> = (0..lanes).map(|lane| lane < members).collect();
+                let label = format!("{width:?}, {members} of {lanes} lanes active");
+                let bank = bind(&requests, &mask)
                     .expect("a padded request is well formed")
-                    .is_none(),
-                "{members} of {lanes} lanes active"
-            );
+                    .unwrap_or_else(|| panic!("{label}: a padded bank binds"));
+                assert_eq!(bank.metadata().width, width, "{label}");
+
+                let mut malformed = requests.clone();
+                malformed[0].quality = EffectQuality::Draft;
+                assert_eq!(
+                    bind(&malformed, &mask).err().map(|error| error.code),
+                    Some("effect.quality.unsupported"),
+                    "{label}: a malformed member is refused"
+                );
+                let mut malformed = requests.clone();
+                malformed[lanes - 1].quality = EffectQuality::Draft;
+                assert_eq!(
+                    bind(&malformed, &mask).err().map(|error| error.code),
+                    Some("effect.quality.unsupported"),
+                    "{label}: a malformed clone is refused like a member"
+                );
+                // A padded lane of another program is not a clone, and a cohort of two programs
+                // is one this artifact declines rather than binds.
+                let mut foreign = requests.clone();
+                foreign[lanes - 1].link_mode = LinkMode::Maximum;
+                assert!(
+                    bind(&foreign, &mask)
+                        .expect("a foreign clone is well formed")
+                        .is_none(),
+                    "{label}: a foreign clone declines"
+                );
+            }
         }
-        let mut malformed = requests.clone();
-        malformed[0].quality = EffectQuality::Draft;
-        let mask: Vec<bool> = (0..lanes).map(|lane| lane == 0).collect();
-        assert_eq!(
-            bind(&malformed, &mask).err().map(|error| error.code),
-            Some("effect.quality.unsupported"),
-            "a padded request still validates its members"
-        );
+    }
+
+    /// Issue #1091: a padded lane carries no track, so a state payload never addresses one.
+    ///
+    /// Red if `checked_member` goes: the padded lane's words are snapshotted as a track's, and a
+    /// restored payload leaves it off the rest state it must hold to answer `+0.0` with `+0.0`.
+    #[test]
+    fn a_padded_lane_has_no_state_payload() {
+        let values = values_with(-6.0, 100.0, 5.0);
+        for (width, backend) in bank_widths() {
+            let lanes = width.lanes() as usize;
+            let requests = vec![request(&values); lanes];
+            let mask: Vec<bool> = (0..lanes).map(|lane| lane + 1 < lanes).collect();
+            let mut bank = TruePeakLimiterFactory
+                .bind_homogeneous_bank(PrepareEffectBankRequest {
+                    backend,
+                    width,
+                    requests: &requests,
+                    active_mask: &mask,
+                })
+                .expect("well formed")
+                .expect("binds");
+            let payload = snapshot_track(bank.as_ref(), 0);
+            let sizes = bank.metadata().program_key.state_sizes;
+            let padded = (lanes - 1) as u32;
+            let mut common = vec![0; sizes.common_bytes as usize];
+            let mut left = vec![0; sizes.left_bytes as usize];
+            let mut right = vec![0; sizes.right_bytes as usize];
+            assert_eq!(
+                bank.snapshot_track_state_payload(
+                    padded,
+                    StatePayloadOutput::new(&mut common, &mut left, &mut right, sizes)
+                        .expect("sizes"),
+                )
+                .err()
+                .map(|error| error.code),
+                Some("effect.state.track"),
+                "{width:?}: a padded lane has no snapshot"
+            );
+            let input = || {
+                StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes).expect("sizes")
+            };
+            assert_eq!(
+                bank.restore_track_state_payload(padded, STATE_LAYOUT_VERSION, input())
+                    .err()
+                    .map(|error| error.code),
+                Some("effect.state.track"),
+                "{width:?}: nothing is restored into a padded lane"
+            );
+            bank.restore_track_state_payload(0, STATE_LAYOUT_VERSION, input())
+                .expect("a member still restores");
+        }
+    }
+
+    /// Issue #1091: automation routed to a padded lane is neither applied nor charged to it.
+    ///
+    /// The planner routes a padded lane none, so this is the effect's half of "nothing is ever
+    /// charged to a padded lane": its `BankProcessReport` entry stays empty whatever arrives. Red
+    /// if the padded-lane skip in `process_bank_inner` goes, when the invalid span is counted
+    /// against the padded lane.
+    #[test]
+    fn automation_routed_to_a_padded_lane_is_not_charged() {
+        let values = initial_values();
+        for (width, backend) in bank_widths() {
+            let lanes = width.lanes() as usize;
+            let requests = vec![request(&values); lanes];
+            let mask: Vec<bool> = (0..lanes).map(|lane| lane == 0).collect();
+            let mut bank = TruePeakLimiterFactory
+                .bind_homogeneous_bank(PrepareEffectBankRequest {
+                    backend,
+                    width,
+                    requests: &requests,
+                    active_mask: &mask,
+                })
+                .expect("well formed")
+                .expect("binds");
+            // One invalid span (`Both` is never a limiter channel) on the member and one on the
+            // last, padded, lane.
+            let span = point_span(0, 0, ParameterChannel::Both, -3.0);
+            let spans = [span, span];
+            let offsets: Vec<u32> = (0..=lanes)
+                .map(|lane| match lane {
+                    0 => 0,
+                    lane if lane == lanes => 2,
+                    _ => 1,
+                })
+                .collect();
+            let mut left = vec![0.0_f32; 128 * lanes];
+            let mut right = vec![0.0_f32; 128 * lanes];
+            let report = bank.process_bank(
+                EffectBankProcessBlock::new(
+                    &mut left, &mut right, None, 128, width, 0, &spans, &offsets, 128,
+                )
+                .expect("bank block"),
+            );
+            assert_eq!(
+                report.reports[0].invalid_spans, 1,
+                "{width:?}: the member's"
+            );
+            for lane in 1..lanes {
+                assert_eq!(
+                    report.reports[lane],
+                    ProcessReport::default(),
+                    "{width:?}: padded lane {lane}"
+                );
+            }
+        }
+    }
+
+    /// One dual block and, on a second bank, one collapsed block of a bank bound from `requests`
+    /// and `mask`, and the body each took. Active lanes carry loud noise; padded lanes `+0.0`.
+    fn padded_routes(
+        width: BankWidth,
+        backend: Backend,
+        requests: &[PrepareEffectRequest<'_>],
+        mask: &[bool],
+    ) -> Result<(DispatchRoute, DispatchRoute), EffectPrepareError> {
+        let lanes = width.lanes() as usize;
+        let mut routes = [DispatchRoute::Unset; 2];
+        for (mono, route) in [false, true].into_iter().zip(routes.iter_mut()) {
+            let mut bank = TruePeakLimiterFactory
+                .bind_homogeneous_bank(PrepareEffectBankRequest {
+                    backend,
+                    width,
+                    requests,
+                    active_mask: mask,
+                })?
+                .expect("a padded bank of one program binds");
+            let mut noise = Noise(0x1091_0002);
+            let mut left = vec![0.0_f32; 128 * lanes];
+            let mut right = vec![0.0_f32; 128 * lanes];
+            for (word, (left, right)) in left.iter_mut().zip(right.iter_mut()).enumerate() {
+                if mask[word % lanes] {
+                    *left = noise.next() * 3.0;
+                    *right = noise.next() * 3.0;
+                }
+            }
+            let offsets = vec![0_u32; lanes + 1];
+            let block = EffectBankProcessBlock::new(
+                &mut left,
+                &mut right,
+                None,
+                128,
+                width,
+                0,
+                &[],
+                &offsets,
+                128,
+            )
+            .expect("bank block");
+            clear_dispatch_observation();
+            if mono {
+                bank.process_bank_mono(block);
+            } else {
+                bank.process_bank(block);
+            }
+            *route = dispatch_observation().route;
+        }
+        Ok((routes[0], routes[1]))
+    }
+
+    /// Issue #1091 gate 2: a padded bank of members that share one window shape and one phase
+    /// takes the uniform body, dual and collapsed, exactly as a full bank of them does.
+    ///
+    /// The members carry a 3 ms lookahead, off the 5 ms default, so the arms discriminate. A padded
+    /// lane seeded from the descriptor defaults (5 ms) drags the whole bank onto the per-lane body:
+    /// that is what this test turns red on if the binding stops seeding a padded lane from its
+    /// clone, and the arm below shows the observation can see it. A padded lane of zeros is outside
+    /// the release domain and is refused at bind, so it takes no body at all.
+    #[test]
+    fn a_padded_bank_of_uniform_members_takes_the_uniform_body() {
+        use DispatchRoute::{DualPerLane, DualUniform, MonoPerLane, MonoUniform};
+        let defaults = initial_values();
+        let zeros = values_with(0.0, 0.0, 0.0);
+        for (width, backend) in bank_widths() {
+            let lanes = width.lanes() as usize;
+            let members: Vec<[InitialParameterValue; PARAMETER_COUNT * 2]> = (0..lanes)
+                .map(|track| {
+                    values_with(-3.0 - 0.5 * track as f32, 50.0 + 10.0 * track as f32, 3.0)
+                })
+                .collect();
+            for link in [LinkMode::DualMono, LinkMode::Maximum] {
+                let full = linked_requests(&members, link);
+                assert_eq!(
+                    padded_routes(width, backend, &full, width.full_mask()).expect("full"),
+                    (DualUniform, MonoUniform),
+                    "{width:?} {link:?}: the full bank, the control"
+                );
+                for active in 1..lanes {
+                    let mask: Vec<bool> = (0..lanes).map(|lane| lane < active).collect();
+                    let label = format!("{width:?} {link:?}, {active} of {lanes} active");
+                    let padded = |padding: &[InitialParameterValue; PARAMETER_COUNT * 2]| {
+                        (0..lanes)
+                            .map(|lane| {
+                                if lane < active {
+                                    members[lane]
+                                } else {
+                                    *padding
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                    };
+                    let clone = padded(&members[0]);
+                    assert_eq!(
+                        padded_routes(width, backend, &linked_requests(&clone, link), &mask)
+                            .expect("clone"),
+                        (DualUniform, MonoUniform),
+                        "{label}: padded with a clone"
+                    );
+                    let default_lanes = padded(&defaults);
+                    assert_eq!(
+                        padded_routes(
+                            width,
+                            backend,
+                            &linked_requests(&default_lanes, link),
+                            &mask
+                        )
+                        .expect("defaults"),
+                        (DualPerLane, MonoPerLane),
+                        "{label}: padded with the descriptor defaults"
+                    );
+                    let zero_lanes = padded(&zeros);
+                    assert!(
+                        padded_routes(width, backend, &linked_requests(&zero_lanes, link), &mask)
+                            .is_err(),
+                        "{label}: padded with zeros"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Plants a NaN in `lane`'s recursive word on both channels: non-finite state, which the next
+    /// block carries to the output and the §4.4 check catches.
+    fn plant_nonfinite<L: Lane>(core: &mut LimiterCore<L>, lane: usize) {
+        core.left.reduction[lane] = f32::NAN;
+        core.right.reduction[lane] = f32::NAN;
+    }
+
+    /// A padded core of `L::WIDTH` lanes and the scalar twin of each member, driven block by block.
+    ///
+    /// Members sit on lanes `0..active` (the planner's layout) and every padded lane carries a
+    /// clone of member 0. The bank's planes are its resident block: a padded lane starts at `+0.0`
+    /// and is fed, each block, whatever the bank left in it, as `rack::BankChain` does.
+    struct PaddedRun<L: Lane> {
+        bank: LimiterCore<L>,
+        twins: Vec<LimiterCore<f32>>,
+        left: Vec<f32>,
+        right: Vec<f32>,
+        draw: Draw,
+        block: usize,
+        label: String,
+    }
+
+    impl<L: Lane> PaddedRun<L> {
+        fn new(
+            members: &[[InitialParameterValue; PARAMETER_COUNT * 2]],
+            active: usize,
+            link: LinkMode,
+            label: String,
+        ) -> Self {
+            let lanes = L::WIDTH;
+            let tracks: Vec<_> = (0..lanes)
+                .map(|lane| members[if lane < active { lane } else { 0 }])
+                .collect();
+            let bank = linked_core::<L>(&tracks, link, false, 48_000)
+                .with_active_lanes(every_lane(active));
+            let twins = members[..active]
+                .iter()
+                .map(|values| {
+                    linked_core::<f32>(core::slice::from_ref(values), link, false, 48_000)
+                })
+                .collect();
+            Self {
+                bank,
+                twins,
+                left: vec![0.0; 128 * lanes],
+                right: vec![0.0; 128 * lanes],
+                draw: Draw(0x1091_0004 + active as u64),
+                block: 0,
+                label,
+            }
+        }
+
+        /// One block of loud noise on every member, dual or collapsed (a collapsed block's two
+        /// channels carry one signal). Every member must render its twin's bits and every padded
+        /// lane `+0.0`.
+        fn render(&mut self, mono: bool, what: &str) {
+            let lanes = L::WIDTH;
+            let mut expected = Vec::with_capacity(self.twins.len());
+            for (member, twin) in self.twins.iter_mut().enumerate() {
+                let mut left = vec![0.0_f32; 128];
+                let mut right = vec![0.0_f32; 128];
+                for frame in 0..128 {
+                    left[frame] = self.draw.unit() * 3.0;
+                    right[frame] = if mono {
+                        left[frame]
+                    } else {
+                        self.draw.unit() * 3.0
+                    };
+                    self.left[frame * lanes + member] = left[frame];
+                    self.right[frame * lanes + member] = right[frame];
+                }
+                twin.process_block(&mut left, &mut right, 128);
+                expected.push((left, right));
+            }
+            if mono {
+                self.bank.process_block_mono(&mut self.left, 128);
+            } else {
+                self.bank
+                    .process_block(&mut self.left, &mut self.right, 128);
+            }
+            let label = format!("{}: block {} ({what})", self.label, self.block);
+            let lane_of = |plane: &[f32], lane: usize| -> Vec<f32> {
+                (0..128).map(|frame| plane[frame * lanes + lane]).collect()
+            };
+            for (member, (left, right)) in expected.iter().enumerate() {
+                assert_same_words(
+                    &lane_of(&self.left, member),
+                    left,
+                    &format!("{label}: member {member} left"),
+                );
+                if !mono {
+                    assert_same_words(
+                        &lane_of(&self.right, member),
+                        right,
+                        &format!("{label}: member {member} right"),
+                    );
+                }
+            }
+            for lane in self.twins.len()..lanes {
+                for plane in [&self.left, &self.right] {
+                    assert!(
+                        lane_of(plane, lane).iter().all(|word| word.to_bits() == 0),
+                        "{label}: padded lane {lane} is not +0.0"
+                    );
+                }
+            }
+            self.block += 1;
+        }
+    }
+
+    /// Issue #1091 gate 4 at one width: a non-finite state planted in one active lane is
+    /// recovered and reported for that lane alone, dual and collapsed, with the bank-mates'
+    /// bits and the padded lanes' `+0.0` intact.
+    ///
+    /// The oracle is each member's scalar twin, planted the same way. A twin's recovery is today's
+    /// whole reset at cursor zero, so the failed lane's blocks after the failure also prove that a
+    /// lane reset under the bank's running cursors renders what a fresh twin renders.
+    fn a_failed_lane_is_recovered_and_reported_alone_at<L: Lane>() {
+        let lanes = L::WIDTH;
+        let members = fixture_tracks(lanes);
+        let shape = Shape::new(48_000).expect("shape");
+        for link in [LinkMode::DualMono, LinkMode::Maximum] {
+            for mono in [false, true] {
+                for active in 1..=lanes {
+                    let label = |case: &str| {
+                        format!("W{lanes} {link:?} mono {mono}, {active} active: {case}")
+                    };
+                    let mut targets = vec![0, active - 1];
+                    targets.dedup();
+                    for target in targets {
+                        let mut run = PaddedRun::<L>::new(
+                            &members,
+                            active,
+                            link,
+                            label(&format!("member {target} fails")),
+                        );
+                        for _ in 0..4 {
+                            run.render(mono, "before");
+                        }
+                        let mut running = run.bank.cursors;
+                        running.advance(128, &shape);
+                        plant_nonfinite(&mut run.bank, target);
+                        plant_nonfinite(&mut run.twins[target], 0);
+                        run.render(mono, "failing");
+                        assert_eq!(
+                            run.bank.nonfinite_report(),
+                            NonFiniteReport {
+                                nonfinite_blocks: 1,
+                                nonfinite_lanes: 1 << target,
+                            },
+                            "{}: reported alone",
+                            run.label
+                        );
+                        for (member, twin) in run.twins.iter().enumerate() {
+                            assert_eq!(
+                                twin.nonfinite_report().nonfinite_blocks,
+                                u64::from(member == target),
+                                "{}: twin {member}",
+                                run.label
+                            );
+                        }
+                        // A bank of one member failed on every active lane: the whole reset.
+                        // Otherwise the shared cursors run on.
+                        let cursors = if active == 1 {
+                            Cursors::default()
+                        } else {
+                            running
+                        };
+                        assert_eq!(run.bank.cursors, cursors, "{}: cursors", run.label);
+                        for _ in 0..6 {
+                            run.render(mono, "after");
+                        }
+                    }
+                    if active < lanes {
+                        let mut run = PaddedRun::<L>::new(
+                            &members,
+                            active,
+                            link,
+                            label("a padded lane fails"),
+                        );
+                        for _ in 0..4 {
+                            run.render(mono, "before");
+                        }
+                        plant_nonfinite(&mut run.bank, lanes - 1);
+                        for _ in 0..4 {
+                            run.render(mono, "after");
+                        }
+                        assert_eq!(
+                            run.bank.nonfinite_report(),
+                            NonFiniteReport::new(),
+                            "{}: a padded lane is neither reported nor charged",
+                            run.label
+                        );
+                        assert_eq!(
+                            run.bank.left.reduction[lanes - 1].to_bits(),
+                            0,
+                            "{}: the padded lane was recovered",
+                            run.label
+                        );
+                    }
+                    let mut run =
+                        PaddedRun::<L>::new(&members, active, link, label("every member fails"));
+                    for _ in 0..4 {
+                        run.render(mono, "before");
+                    }
+                    for member in 0..active {
+                        plant_nonfinite(&mut run.bank, member);
+                        plant_nonfinite(&mut run.twins[member], 0);
+                    }
+                    run.render(mono, "failing");
+                    assert_eq!(
+                        run.bank.nonfinite_report(),
+                        NonFiniteReport {
+                            nonfinite_blocks: 1,
+                            nonfinite_lanes: every_lane(active),
+                        },
+                        "{}: reported for every member",
+                        run.label
+                    );
+                    assert_eq!(
+                        run.bank.cursors,
+                        Cursors::default(),
+                        "{}: the whole reset",
+                        run.label
+                    );
+                    for _ in 0..6 {
+                        run.render(mono, "after");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Issue #1091 gate 4: see [`a_failed_lane_is_recovered_and_reported_alone_at`].
+    ///
+    /// Red mutations: the old whole-bank recovery (`reset_failed_lanes` always takes its first
+    /// branch) zeroes and resets the bank-mates; an unmasked report charges the padded lane; a
+    /// recovery that skips padded lanes leaves one answering NaN; resetting the shared cursors on
+    /// a partial recovery moves every bank-mate's ring reads.
+    #[test]
+    fn a_failed_lane_is_recovered_and_reported_alone() {
+        a_failed_lane_is_recovered_and_reported_alone_at::<Simd4>();
+        a_failed_lane_is_recovered_and_reported_alone_at::<Simd8>();
+    }
+
+    /// Every word lane `lane` of `state` holds, designed and running, by bit pattern.
+    fn lane_words(state: &ChannelState, lane: usize) -> Vec<u32> {
+        let width = state.width;
+        let strided = |plane: &[f32]| -> Vec<u32> {
+            plane
+                .iter()
+                .skip(lane)
+                .step_by(width)
+                .map(|word| word.to_bits())
+                .collect()
+        };
+        let mut words = Vec::new();
+        for plane in [
+            &state.history,
+            &state.main_ring,
+            &state.required_ring,
+            &state.box_ring,
+        ] {
+            words.extend(strided(plane));
+        }
+        words.extend([
+            state.reduction[lane].to_bits(),
+            state.prefix[lane].to_bits(),
+            state.box_sum[lane].to_bits(),
+            state.phase[lane],
+            state.lookahead_ms[lane].to_bits(),
+            state.lane[lane].window,
+            state.lane[lane].end_offset,
+            state.lane[lane].box_offset,
+        ]);
+        for ramp in [state.limit[lane], state.release[lane]] {
+            words.extend([
+                ramp.current.to_bits(),
+                ramp.target.to_bits(),
+                ramp.step.to_bits(),
+                ramp.remaining,
+            ]);
+        }
+        words
+    }
+
+    /// Issue #1091: a lane reset is the whole reset at one lane's stride, and touches no other lane.
+    ///
+    /// Each lane carries its own ceiling, release and split lookahead, is rendered off its rest
+    /// state on loud noise and has a ramp in flight, so every word the whole reset writes differs
+    /// before it. Red if `clear_lane_runtime` or `seed_lane_defaults` drops a word
+    /// `clear_runtime` or `reset_to_defaults` writes (`prefix` left unreset, say), or writes
+    /// another lane's.
+    #[test]
+    fn a_lane_reset_is_the_whole_reset_at_one_lanes_stride() {
+        fn at<L: Lane>() {
+            let lanes = L::WIDTH;
+            let tracks: Vec<_> = (0..lanes)
+                .map(|lane| {
+                    values_split(
+                        -2.0 - lane as f32,
+                        30.0 + 7.0 * lane as f32,
+                        1.0 + lane as f32,
+                        9.0 - lane as f32,
+                    )
+                })
+                .collect();
+            let shape = Shape::new(48_000).expect("shape");
+            let dirty = || {
+                let mut core = linked_core::<L>(&tracks, LinkMode::DualMono, false, 48_000);
+                let mut noise = Noise(0x1091_0005);
+                for block in 0..3 {
+                    let mut left: Vec<f32> = (0..128 * lanes).map(|_| noise.next() * 3.0).collect();
+                    let mut right: Vec<f32> =
+                        (0..128 * lanes).map(|_| noise.next() * 3.0).collect();
+                    let first = (block * 128) as u64;
+                    let spans: Vec<Vec<PreparedAutomationSpan>> = (0..lanes)
+                        .map(|_| {
+                            vec![
+                                point_span(first, 0, ParameterChannel::Left, -18.0),
+                                point_span(first, 1, ParameterChannel::Right, 900.0),
+                            ]
+                        })
+                        .collect();
+                    drive_dual(&mut core, &mut left, &mut right, &spans, first);
+                }
+                core
+            };
+            let rate = 48_000;
+            let mut whole = dirty();
+            whole
+                .left
+                .reset_to_defaults(&shape, &whole.left_defaults, rate);
+            whole
+                .right
+                .reset_to_defaults(&shape, &whole.right_defaults, rate);
+            let untouched = dirty();
+            for target in 0..lanes {
+                let mut one = dirty();
+                one.left
+                    .reset_lane_to_defaults(target, &shape, &one.left_defaults[target], rate);
+                one.right
+                    .reset_lane_to_defaults(target, &shape, &one.right_defaults[target], rate);
+                for lane in 0..lanes {
+                    let channels = [
+                        ("left", &one.left, &whole.left, &untouched.left),
+                        ("right", &one.right, &whole.right, &untouched.right),
+                    ];
+                    for (name, one, whole, untouched) in channels {
+                        let expected = if lane == target {
+                            lane_words(whole, lane)
+                        } else {
+                            assert_ne!(
+                                lane_words(untouched, lane),
+                                lane_words(whole, lane),
+                                "W{lanes} lane {lane} {name}: rendered off its rest state"
+                            );
+                            lane_words(untouched, lane)
+                        };
+                        assert_eq!(
+                            lane_words(one, lane),
+                            expected,
+                            "W{lanes}: lane {target} reset, lane {lane} {name}"
+                        );
+                    }
+                }
+            }
+        }
+        at::<f32>();
+        at::<Simd4>();
+        at::<Simd8>();
     }
 
     #[test]
@@ -9179,7 +10013,8 @@ mod tests {
 
         // The §4.4 reset of a non-finite block re-establishes the record, as `reset` does: a pair
         // unlinked by a one-channel retarget links again once the reset has put both channels
-        // back on their (symmetric) defaults.
+        // back on their (symmetric) defaults. Every lane is poisoned, so every lane fails and the
+        // recovery is the whole reset (#1091); the recovery of one lane of a bank follows.
         let mut pair = fresh(LinkMode::Maximum, &fixture, "non-finite");
         assert_eq!(hot_blocks(&mut pair, &mut draw, 1, "before"), 1);
         let mut spans = no_spans(L::WIDTH);
@@ -9190,7 +10025,7 @@ mod tests {
             250.0,
         )];
         let (mut left, right) = linked_planes(LinkedSignal::Hot, &mut draw, 128, &pair.shipped);
-        left[0] = f32::NAN;
+        left[..L::WIDTH].fill(f32::NAN);
         assert!(!pair.dual(&left, &right, &spans, "poisoned"));
         let mut blocks = 0;
         while pair.shipped.nonfinite_report().nonfinite_blocks == 0 {
@@ -9202,10 +10037,55 @@ mod tests {
             blocks += 1;
         }
         assert_eq!(
+            pair.shipped.nonfinite_report().nonfinite_lanes,
+            every_lane(L::WIDTH),
+            "{label}: every lane failed"
+        );
+        assert_eq!(
             hot_blocks(&mut pair, &mut draw, 3, "after"),
             3,
             "{label}: after §4.4"
         );
+
+        // #1091: the recovery of the one failed lane of a bank re-derives the record from the
+        // words, which agree again once the retargeted lane is back on its defaults. The linked
+        // body itself waits: the recovered lane restarts its van Herk phase, so the bank renders
+        // the per-lane body, which never links, until a whole reset brings the phases together.
+        // At `W = 1` the one lane is every lane, which is the case above.
+        if L::WIDTH > 1 {
+            let mut pair = fresh(LinkMode::Maximum, &fixture, "one lane non-finite");
+            assert_eq!(hot_blocks(&mut pair, &mut draw, 1, "before"), 1);
+            let mut spans = no_spans(L::WIDTH);
+            spans[0] = vec![point_span(
+                pair.first_sample,
+                1,
+                ParameterChannel::Left,
+                250.0,
+            )];
+            let (mut left, right) = linked_planes(LinkedSignal::Hot, &mut draw, 128, &pair.shipped);
+            left[0] = f32::NAN;
+            assert!(!pair.dual(&left, &right, &spans, "poisoned"));
+            let mut blocks = 0;
+            while pair.shipped.nonfinite_report().nonfinite_blocks == 0 {
+                assert!(
+                    blocks < 8,
+                    "{label}: the NaN never reached the boundary check"
+                );
+                hot_blocks(&mut pair, &mut draw, 1, "draining");
+                blocks += 1;
+            }
+            assert_eq!(pair.shipped.nonfinite_report().nonfinite_lanes, 1);
+            assert!(
+                pair.shipped.gain_linked,
+                "{label}: one lane's recovery re-derives the record"
+            );
+            assert!(
+                !lanes_uniform(&pair.shipped.left),
+                "{label}: the recovered lane restarted its phase"
+            );
+            // Still the reference kernel's bits, block by block, on the per-lane body.
+            hot_blocks(&mut pair, &mut draw, 3, "after one lane");
+        }
 
         // ceiling retarget at 30, unlinked from the left-only release retarget at 60, linked
         // again from the reset at 90.
