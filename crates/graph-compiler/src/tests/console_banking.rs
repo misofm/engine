@@ -260,25 +260,6 @@ impl GraphRuntimeProcessor for NoiseSource {
     }
 }
 
-/// Every block's bits at one track stage, NaNs folded to one value (decision 10).
-struct Recorder(Arc<std::sync::Mutex<Vec<u32>>>);
-impl GraphRuntimeObserver for Recorder {
-    fn observe(
-        &mut self,
-        block: GraphObservationBlock<'_>,
-    ) -> Result<(), engine::realtime::RenderError> {
-        let mut sink = self.0.lock().expect("recorder");
-        sink.extend(
-            block
-                .left
-                .iter()
-                .chain(block.right)
-                .map(|sample| folded(*sample)),
-        );
-        Ok(())
-    }
-}
-
 /// A sample's bits with every NaN folded to one quiet NaN (decision 10).
 fn folded(sample: f32) -> u32 {
     if sample.is_nan() {
@@ -294,7 +275,7 @@ struct Rendered {
     tracks: Vec<Vec<u32>>,
 }
 
-/// Bind `artifact` with a [`NoiseSource`] per track and a [`Recorder`] at each track's post-pan
+/// Bind `artifact` with a [`NoiseSource`] per track and a `BitRecorder` at each track's post-pan
 /// stage, arm the mono collapse on the mono-mapped tracks as `host-core` arms it, and render
 /// `blocks` blocks, or four past the plan's output latency if that is more.
 fn render(artifact: PreparedGraphBuiltinsArtifact, tracks: &[TrackShape], blocks: u64) -> Rendered {
@@ -326,10 +307,7 @@ fn render(artifact: PreparedGraphBuiltinsArtifact, tracks: &[TrackShape], blocks
             GraphNodeBinding::new(node.clone(), processor)
         })
         .collect();
-    let sinks: Vec<_> = tracks
-        .iter()
-        .map(|_| Arc::new(std::sync::Mutex::new(Vec::new())))
-        .collect();
+    let sinks: Vec<_> = tracks.iter().map(|_| BitSink::default()).collect();
     let observers = sinks
         .iter()
         .enumerate()
@@ -337,7 +315,7 @@ fn render(artifact: PreparedGraphBuiltinsArtifact, tracks: &[TrackShape], blocks
             GraphNodeObserverBinding::new(
                 track_node(&format!("ch{index:02}"), TrackStage::PostMatrix),
                 index as u64 + 1,
-                Box::new(Recorder(Arc::clone(sink))),
+                Box::new(BitRecorder(Arc::clone(sink))),
             )
         })
         .collect();
@@ -369,7 +347,14 @@ fn render(artifact: PreparedGraphBuiltinsArtifact, tracks: &[TrackShape], blocks
         output,
         tracks: sinks
             .iter()
-            .map(|sink| sink.lock().expect("recorder").clone())
+            .map(|sink| {
+                sink.lock()
+                    .expect("recorder")
+                    .iter()
+                    .flat_map(|(left, right)| [left, right])
+                    .map(|bits| folded(f32::from_bits(*bits)))
+                    .collect()
+            })
             .collect(),
     }
 }
