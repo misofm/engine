@@ -62,9 +62,18 @@ const REDUCED_MONO: &str = include_str!("data/reduced-nobus-from-970-verify.json
 /// Every width a host compiles for: the scalar oracle, the browser and mobile width, and native.
 pub const WIDTHS: [Backend; 3] = [Backend::Scalar, Backend::Simd4, Backend::Simd8];
 
-/// The blocks a render compares. PDC delays the output of a limiter or multiband strip by more
-/// than a thousand samples, so two blocks is mostly silence and compares nothing.
+/// The blocks a render compares, unless its plan's output arrives too late to leave
+/// [`AUDIBLE_BLOCKS`] of them.
 pub const BLOCKS: u64 = 16;
+
+/// The fewest blocks a render runs past its plan's output latency (`GraphCompileReport::
+/// output_latency`), before which the plan renders silence.
+///
+/// PDC delays the output to the longest path's arrival: one true-peak limiter by 486 samples at
+/// 48 kHz, and a generated track that chains five by more than [`BLOCKS`] 128-frame blocks, so a
+/// fixed window rendered that plan's silence and compared nothing (#1082). A plan whose output
+/// arrives within `BLOCKS - AUDIBLE_BLOCKS` blocks renders exactly `BLOCKS`, as before.
+pub const AUDIBLE_BLOCKS: u64 = 4;
 
 fn graph_caps() -> GraphCompileCaps {
     GraphCompileCaps {
@@ -205,6 +214,8 @@ pub struct Outcome {
     /// For each misaligned slot, in plan order, the lanes that reach it before the slot's latest
     /// level: the ragged lanes, whose position in the group the reproducers pin.
     pub early_lanes: Vec<Vec<usize>>,
+    /// The plan's output latency in samples, when compile accepted it.
+    pub latency: u64,
     /// Rendered output bits, when rendered.
     pub pcm: Option<Vec<u32>>,
     /// `[collapsed blocks, collapsible cohorts]` after the render.
@@ -212,7 +223,7 @@ pub struct Outcome {
 }
 
 /// Compile `model` the way every host does at `dispatch`, bind it, arm it as `collapse` says, and
-/// render `blocks` blocks.
+/// render `blocks` blocks, or [`AUDIBLE_BLOCKS`] past its output latency if that is more.
 pub fn compile_bind_render(
     model: &SessionModel,
     dispatch: Backend,
@@ -315,6 +326,7 @@ pub fn compile_bind_render(
             )
         })
         .collect();
+    outcome.latency = artifact.report().output_latency.0;
     let envelope = artifact.envelope();
     let frames = envelope.quantum.0 as usize;
     let nodes = artifact
@@ -342,6 +354,7 @@ pub fn compile_bind_render(
         plan.arm_mono_collapse(&|track: &str| mono_source.contains(track));
     }
     if blocks > 0 {
+        let blocks = blocks.max(outcome.latency.div_ceil(frames as u64) + AUDIBLE_BLOCKS);
         let mut bits = Vec::with_capacity(blocks as usize * frames * 2);
         let mut pcm = vec![0.0_f32; frames * 2];
         for block in 0..blocks {
@@ -1121,6 +1134,8 @@ fn env_u64(name: &str, default: u64) -> u64 {
 struct SeedReport {
     shape: Option<Shape>,
     compile_refused: u64,
+    /// The plan's output latency in samples: each render runs at least [`AUDIBLE_BLOCKS`] past it.
+    latency: u64,
     /// Seeds with a misaligned planned slot, per `WIDTHS` entry.
     misaligned: [bool; 3],
     refused: Vec<(Backend, &'static str)>,
@@ -1143,6 +1158,7 @@ fn probe_seed(seed: u64, blocks: u64, render_all: bool) -> SeedReport {
             continue;
         }
         report.misaligned[index] = outcome.misaligned_slots > 0;
+        report.latency = report.latency.max(outcome.latency);
         if let Some(code) = outcome.bind {
             report.refused.push((dispatch, code));
         }
@@ -1182,8 +1198,9 @@ fn probe_seed(seed: u64, blocks: u64, render_all: bool) -> SeedReport {
 /// not touch. Every seed is compiled and bound at all three widths. A seed whose plan has a
 /// misaligned slot at either SIMD width -- the only plans the fix changes -- is also rendered at
 /// all three, unarmed, and at both SIMD widths armed as a host arms it, and compared bit for bit
-/// with the scalar render. The audible count is asserted, because a comparison of two silent
-/// renders proves nothing. The armed collapse must also fire on some rendered seed. The generator
+/// with the scalar render. Each render runs at least [`AUDIBLE_BLOCKS`] past its plan's output
+/// latency, and every rendered seed must be audible, because a comparison of two silent renders
+/// proves nothing. The armed collapse must also fire on some rendered seed. The generator
 /// keeps symmetric all-mono desks, where it fires and a wrong collapse would move a bit, and
 /// asymmetric ones, where it must decline every chain that does not gather the track input (#970).
 ///
@@ -1226,6 +1243,7 @@ fn randomized_consoles_compile_bind_and_render_the_scalar_bits() {
     let mut misaligned = [0_u64; 3];
     let mut rendered = 0_u64;
     let mut collapsed = 0_u64;
+    let mut latency = 0_u64;
     let mut by_shape: BTreeMap<Shape, [u64; 2]> = BTreeMap::new();
     for (seed, report) in reports {
         compile_refused += report.compile_refused;
@@ -1249,6 +1267,7 @@ fn randomized_consoles_compile_bind_and_render_the_scalar_bits() {
         }
         rendered += u64::from(report.rendered);
         collapsed += u64::from(report.collapsed);
+        latency = latency.max(report.latency);
         let tally = by_shape
             .entry(report.shape.expect("every report names its shape"))
             .or_default();
@@ -1258,7 +1277,8 @@ fn randomized_consoles_compile_bind_and_render_the_scalar_bits() {
     eprintln!(
         "seeds {start}..{}: compile refusals {compile_refused}, seeds with a misaligned slot \
          [scalar, simd4, simd8] {misaligned:?}, rendered {rendered}, of which the armed collapse \
-         fired in {collapsed}, [seeds, seeds with a misaligned slot] by shape {by_shape:?}",
+         fired in {collapsed}, longest output latency {latency} samples, [seeds, seeds with a \
+         misaligned slot] by shape {by_shape:?}",
         start + count
     );
     assert!(
