@@ -456,8 +456,10 @@ pub(crate) fn bind_rack_banks_indexed(
 ///   console slot always banks, so no console track is ever in that state.
 /// * **Its objective measures nothing for console groups** (M3). The move is kept when it binds
 ///   more banks. Moving a console remainder can only merge console groups -- the mono remainder
-///   leaves one padded bank per slot and the stereo pool gains at most one -- so the count never
-///   rises, and it scores a merge that saves a padded bank as a loss.
+///   leaves one padded bank per slot and the stereo pool gains at most one -- so their count never
+///   rises, and a merge that saves a padded bank scores as a loss. The count rises only when the
+///   move also fills an insert group, and that trades the track's collapse on every console slot
+///   for an insert remainder, which decision 12 leaves per node by choice.
 /// * **The mono pool is the larger win.** A padded mono bank collapses to one plane, and the pool
 ///   is worth about 36 % on the standing console row (M3). A restated objective (planes x banks)
 ///   would move a mono remainder only when it fits in the stereo pool's padding at every slot and
