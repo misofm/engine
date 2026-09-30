@@ -229,6 +229,25 @@ describe("issue #1097 -- every builder refusal is the engine's, with the engine'
       edit: (model) => { model.console.pre_insert[0].link_mode = "stereo"; },
     },
     {
+      name: "an insert ID repeated on one track",
+      code: "id.duplicate",
+      build: () => stripBase().track("t", {
+        source: "stem",
+        console: stripEntries(),
+        inserts: [
+          effect("miso.parametric-eq", {}, { slotId: "x" }),
+          effect("miso.delay", {}, { slotId: "x" }),
+        ],
+      }),
+      edit: (model) => {
+        const insert = (effectId) => ({
+          id: "x", identity: { kind: "native", effect_id: effectId }, quality: "normal", bypass: false,
+          link_mode: "dual_mono", params: [], sidechain: { kind: "none" },
+        });
+        model.tracks[0].inserts.effects = [insert("miso.parametric-eq"), insert("miso.delay")];
+      },
+    },
+    {
       name: "a retired per-track rack key",
       code: "schema.unknown_field",
       build: () => stripBase().track("t", { source: "stem", console: stripEntries(), dynamic: [] }),

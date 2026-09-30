@@ -140,7 +140,7 @@ const BUILTIN_STRIP_EFFECT_ID = "strip";
  * The native effects a console slot may name (owner decision 12, "Eligibility").
  *
  * This is the engine's `effect_compiler::CONSOLE_ELIGIBLE_EFFECTS`. The parameter metadata does
- * not publish it, so the SDK holds a copy, and `builder-evals.mjs` holds the copy to the engine:
+ * not publish it, so the SDK holds a copy, and `console-evals.mjs` holds the copy to the engine:
  * it boots every catalog effect as a console slot and requires the engine to accept exactly these
  * and refuse every other with `console.slot.ineligible_effect`.
  */
@@ -1000,11 +1000,7 @@ function normalizeParams(
     const previous = params[position - 1];
     if (previous !== undefined
       && previous.parameter_id === row.parameter_id && previous.channel === row.channel) {
-      fail(
-        where,
-        `parameter ${String(row.parameter_id)} is addressed twice on ${String(row.channel)}`,
-        CODE.duplicateId,
-      );
+      fail(where, `parameter ${String(row.parameter_id)} is addressed twice on ${String(row.channel)}`);
     }
   }
   return params;
