@@ -101,7 +101,8 @@ fn effect(kind: Kind, id: &str) -> session::Effect {
 struct Feed {
     gain: f32,
     stereo: bool,
-    /// Whether one input sample, in the third block, is a NaN: a D7 recovery in the lane's banks.
+    /// Whether one input sample, in the third block, is a NaN, which the input section sanitizes on
+    /// its lane alone (D7); a bank that let it reach a bank-mate would move that track's bits.
     poison: bool,
 }
 
@@ -604,7 +605,8 @@ impl Rng {
 /// distinct eligible effects split over the two sections; per track zero to two inserts, a random
 /// bypass on each console slot, its own parameter values ([`VARIANTS`]), a mono or stereo feed, a
 /// gain that is silent, quiet, or hot (+6 to +18 dBFS peak, so every limiter and compressor works
-/// its gain path), and now and then a NaN input sample, which a bank recovers on its lane alone.
+/// its gain path), and now and then a NaN input sample, which the input section's bank sanitizes on
+/// its lane alone.
 fn generate(seed: u64) -> (Console, Vec<TrackShape>) {
     let mut rng = Rng::new(seed);
     let n = TRACK_COUNTS[rng.below(TRACK_COUNTS.len() as u64) as usize];
@@ -723,13 +725,13 @@ fn randomized_console_sessions_render_the_per_node_bits_on_every_track() {
     }
     println!(
         "#1098 randomized console differential: {seeds} seeds, padded banks with a bypassed lane \
-         {padded_with_bypass}, padded mono banks {padded_mono}, banks recovering a NaN lane \
-         beside a bank-mate {poisoned_beside_a_mate}"
+         {padded_with_bypass}, padded mono banks {padded_mono}, effect banks holding a poisoned \
+         track beside a bank-mate {poisoned_beside_a_mate}"
     );
     assert!(
         padded_with_bypass > 0 && padded_mono > 0 && poisoned_beside_a_mate > 0,
-        "the sweep reaches a padded bank with a bypassed lane, a padded mono bank and a bank \
-         recovering a NaN lane beside a bank-mate"
+        "the sweep reaches a padded bank with a bypassed lane, a padded mono bank and a poisoned \
+         track beside a bank-mate"
     );
 }
 
@@ -739,16 +741,20 @@ fn randomized_console_sessions_render_the_per_node_bits_on_every_track() {
 ///
 /// The console is the limiter alone, in `post_insert`; the tracks carry zero, one or two EQ
 /// inserts in turn, so the limiter sits at up to three levels, each a padded group of its own
-/// (H2), and every third track bypasses it. Every track is fed seeded noise at +6 to +18 dBFS
-/// peak, far above the limiter's ceiling, and the gain path is shown to run: the limiter moves
-/// every unbypassed track's bits against the same session with every lane bypassed.
+/// (H2). Tracks alternate mono and stereo, each with its own ceiling ([`VARIANTS`]), and tracks
+/// `2..=3`, `6..=7` and so on bypass the limiter, a pattern that mixes bypassed and unbypassed
+/// lanes inside every (pool, level) group of two or more. Every track is fed seeded noise at +6
+/// to +18 dBFS peak, far above the limiter's ceiling, and the gain path is shown to run: the
+/// limiter moves every unbypassed track's bits against the same session with every lane bypassed.
 ///
 /// Both widths run on every host whose limiter factory binds them: an `x86-64-v3` build binds the
 /// limiter at four lanes as well as eight. On a four-lane build the limiter declines eight lanes,
 /// and the compile must then be refused with `console.slot.unbanked` -- never rendered per node.
 ///
 /// Red if a limiter bank's whole-bank decision (its uniform-body gate, its bank-wide silence and
-/// screen tests, its D7 recovery) moves a lane's bits with its bank-mates, padded lanes included.
+/// screen tests, the rack's shunt selection) moves a lane's bits with its bank-mates, padded lanes
+/// included: restoring the dry signal on every lane of a bank that has one bypassed lane turns it
+/// red (#1098 evidence).
 #[test]
 fn a_hot_padded_post_insert_limiter_renders_the_per_node_bits_at_both_widths() {
     const BLOCKS: u64 = 12;
@@ -768,7 +774,7 @@ fn a_hot_padded_post_insert_limiter_renders_the_per_node_bits_at_both_widths() {
                     poison: false,
                 },
                 inserts: [vec![], vec![Kind::Eq], vec![Kind::Eq, Kind::Eq]][index % 3].clone(),
-                bypass: vec![index % 3 == 1],
+                bypass: vec![(index / 2) % 2 == 1],
                 variant: index % VARIANTS.len(),
             })
             .collect();
