@@ -3434,7 +3434,8 @@ struct LimiterCore<L: Lane> {
     ///   reset of a non-finite block) iff every lane's window shape agrees ([`lane_shapes_agree`],
     ///   which is exact after `clear_runtime`); by [`desymmetrize`](Self::desymmetrize), which
     ///   copies the left channel over the right; and by [`restore_track`](Self::restore_track) and
-    ///   the per-lane §4.4 recovery (#1091), from a full comparison of every lane's gain words.
+    ///   a dual block's per-lane §4.4 recovery (#1091), from a full comparison of every lane's gain
+    ///   words.
     /// * **Kept** by a dual block that renders under `Maximum` with the designed words agreeing:
     ///   linked, it mirrors every write; dual (the per-lane body), it computes both channels' words
     ///   from equal operands. The silent fast path keeps it too: it advances each channel's phase
@@ -3625,9 +3626,16 @@ impl<L: Lane> LimiterCore<L> {
         if self.reset_failed_lanes(failed) {
             left_io.fill(0.0);
             right_io.fill(0.0);
+            // #990: the whole §4.4 reset re-establishes the record exactly as `reset` does.
+            self.gain_linked = lane_shapes_agree(&self.left, &self.right);
         } else {
             zero_lanes::<L>(left_io, failed);
             zero_lanes::<L>(right_io, failed);
+            // #990: the lanes that did not fail keep gain words the record may have been cleared
+            // for, and the reset ones hold `clear_runtime`'s, so the record is read back from the
+            // words, every lane, as `restore_track` reads it. No cheaper statement is exact after a
+            // partial reset, and this runs only on a block that failed the check.
+            self.gain_linked = gain_state_agrees(&self.left, &self.right);
         }
     }
 
@@ -3639,19 +3647,20 @@ impl<L: Lane> LimiterCore<L> {
     /// only the lanes of `failed` were, which it answers by zeroing their words alone.
     ///
     /// * **Every active lane failed** (always so for a scalar instance, and for a full bank whose
-    ///   lanes all failed): today's whole reset. Both channels return to their defaults, the cursors
-    ///   to zero, and the #990 record is re-established exactly as [`reset`](Self::reset) does it.
-    ///   A padded lane is reset with them; it is at rest, fed `+0.0`, and its output is discarded,
-    ///   so that moves nothing anyone reads, and it brings every lane back to one van Herk phase.
+    ///   lanes all failed): today's whole reset. Both channels return to their defaults and the
+    ///   cursors to zero. A padded lane is reset with them; it is at rest, fed `+0.0`, and its
+    ///   output is discarded, so that moves nothing anyone reads, and it brings every lane back to
+    ///   one van Herk phase.
     /// * **Otherwise** only the failed lanes are reset
     ///   ([`ChannelState::reset_lane_to_defaults`]), on both channels. A bank-mate that did not
     ///   fail keeps every word, so its bits are the bits it renders per node: banking couples the
     ///   lanes' cost, never their bits. The cursors are shared and stay where they are, which is
     ///   bit-neutral for the reset lane (see [`ChannelState::clear_lane_runtime`]). The reset lane
     ///   restarts at phase zero, so the bank renders the per-lane body until the next whole reset;
-    ///   that is cost, and only after a bug report. The #990 record is re-derived from the words,
-    ///   every lane, as [`restore_track`](Self::restore_track) re-derives it: after a partial
-    ///   reset no cheaper statement is exact, and this path runs only on a failed block.
+    ///   that is cost, and only after a bug report.
+    ///
+    /// The #990 record is the caller's to restate, because the dual and the collapsed body state
+    /// it differently.
     ///
     /// The report is masked by [`active`](Self::active): a padded lane that failed is still
     /// recovered, because it must go on answering `+0.0` with `+0.0`, but it is neither reported
@@ -3671,8 +3680,6 @@ impl<L: Lane> LimiterCore<L> {
             self.right
                 .reset_to_defaults(&shape, &self.right_defaults, rate);
             self.cursors = Cursors::default();
-            // #990: the §4.4 reset re-establishes the record exactly as `reset` does.
-            self.gain_linked = lane_shapes_agree(&self.left, &self.right);
             return true;
         }
         for lane in (0..L::WIDTH).filter(|lane| failed & (1 << lane) != 0) {
@@ -3681,9 +3688,6 @@ impl<L: Lane> LimiterCore<L> {
             self.right
                 .reset_lane_to_defaults(lane, &shape, &self.right_defaults[lane], rate);
         }
-        // #990: the lanes that did not fail keep gain words the record may have been cleared for,
-        // and the reset ones now hold `clear_runtime`'s, so the record is read back from the words.
-        self.gain_linked = gain_state_agrees(&self.left, &self.right);
         false
     }
 
@@ -3758,6 +3762,8 @@ impl<L: Lane> LimiterCore<L> {
         } else {
             zero_lanes::<L>(left_io, failed);
         }
+        // #990: a collapsed block leaves the record cleared, its recovery included. Only the left
+        // channel advanced, and `desymmetrize` re-establishes the record at the disengage boundary.
     }
 
     #[cfg(test)]
@@ -8153,6 +8159,12 @@ mod tests {
                     .process_block(&mut self.left, &mut self.right, 128);
             }
             let label = format!("{}: block {} ({what})", self.label, self.block);
+            // #990: a collapsed block leaves the linked record cleared, a recovery included, since
+            // only its left channel advanced.
+            assert!(
+                !(mono && self.bank.gain_linked),
+                "{label}: collapsed but linked"
+            );
             let lane_of = |plane: &[f32], lane: usize| -> Vec<f32> {
                 (0..128).map(|frame| plane[frame * lanes + lane]).collect()
             };
