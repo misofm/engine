@@ -539,9 +539,9 @@ sort_fault() {
     mkdir -p "$case_root/shim"
     printf '#!/usr/bin/env bash\nstate=${TMPDIR:-/tmp}/bench-sort-fault-%s\nmode=%q\nn=0; [[ -f "$state" ]] && n=$(<"$state"); n=$((n+1)); printf "%%s" "$n" >"$state"\nif ((n == %s)); then [[ "$mode" == real ]] && /usr/bin/sort "$@"; printf "sort-error-sentinel\\n" >&2; exit 8; fi\nexec /usr/bin/sort "$@"\n' "$label" "$mode" "$ordinal" >"$case_root/shim/sort"
     chmod +x "$case_root/shim/sort"
-    rm -f "/tmp/bench-sort-fault-$label"
+    rm -f "${TMPDIR:-/tmp}/bench-sort-fault-$label"
     expect_failure_with_path "$label" "$case_root/shim" "$expected" 'sort-error-sentinel'
-    rm -f "/tmp/bench-sort-fault-$label"
+    rm -f "${TMPDIR:-/tmp}/bench-sort-fault-$label"
 }
 
 sort_fault allocator-owner-sort-error 2 'allocator has more than one implementation (sort failed with status 8; output: tools/bench-support/src/alloc.rs'
