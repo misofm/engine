@@ -1097,7 +1097,8 @@ impl NativeEffectFactory for GateExpanderFactory {
 /// The gate accepts a padded request. Each lane, active or padded, is prepared from its own
 /// request, which for a padded lane is the caller's clone of an active member's, so every lane is
 /// validated and inside its declared domains; no lane is ever filled with zeros. The rows of the
-/// lane table past this width start as a clone of the first member's values for the same reason.
+/// lane table past this width start as a clone of the first member's (lane 0's) values for the
+/// same reason.
 /// A padded lane takes no automation and is recovered by D7 without being reported
 /// ([`PreparedGate::with_active_lanes`]). Fed `+0.0` it writes `+0.0` (`dry * gain`, or the dry
 /// word), and the gate never reads across lanes, so an active lane's bits depend neither on the
@@ -1107,13 +1108,8 @@ fn bind_bank(
     native: bool,
 ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
     request.validate_shape()?;
-    // `validate_shape` refuses a mask with no member, so a first member exists.
-    let first_member = request
-        .active_mask
-        .iter()
-        .position(|active| *active)
-        .unwrap_or(0);
-    let first = request.requests[first_member];
+    // Members come first (`validate_shape`), so lane 0 carries one.
+    let first = request.requests[0];
     let metadata = expected_prepared_metadata(&GATE_EXPANDER_DESCRIPTOR, first)?;
     let mut defaults = [initial_defaults(first.initial_values)?; MAX_WIDTH];
     let mut same_program = true;

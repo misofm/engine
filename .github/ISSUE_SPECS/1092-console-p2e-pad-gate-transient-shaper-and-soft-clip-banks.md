@@ -49,7 +49,10 @@ any order, one merge each.
    or the wasm gates.
 2. The gate: no lane is ever prepared with a parameter outside its declared domain. A planted
    zero-filled lane turns the test red.
-3. Coupling rule: active lanes' bits do not depend on the clone source.
+3. Coupling rule: active lanes' bits do not depend on the clone source. For each of the gate, the
+   transient shaper and soft-clip, a padded lane fed `+0.0` produces exactly `+0.0` out (not
+   `-0.0`, not a denormal) and keeps its state finite and at rest, block after block (P2a verdict,
+   L4).
 4. D7: for each effect, a planted non-finite state in one active lane recovers and reports that
    lane alone. Soft-clip charges active lanes only.
    A bypassed lane counts as active: a bypassed lane fed a tripping value (for example `1e30`

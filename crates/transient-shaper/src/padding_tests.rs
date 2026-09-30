@@ -30,6 +30,9 @@ const LINKS: [LinkMode; 3] = [LinkMode::DualMono, LinkMode::Maximum, LinkMode::A
 
 type Values = Vec<InitialParameterValue>;
 
+/// Whether a padded lane's state stays exactly at its prepared value when fed `+0.0`. It does for this effect: fed `+0.0` every recursion it runs holds `+0.0`.
+const PADDED_STATE_IS_CONSTANT: bool = true;
+
 // ---------------------------------------------------------------------------------------------
 // The effect under test
 // ---------------------------------------------------------------------------------------------
@@ -327,6 +330,16 @@ fn render(padded: &Padded<'_>, blocks: &[Block], context: &str) -> Vec<Vec<u32>>
         .iter()
         .map(|values| scalar(request(values, padded.rate, padded.link)))
         .collect();
+    let sizes = scalars[0].metadata().state_sizes;
+    // Gate 3's padded-lane clause (P2a verdict, L4): fed `+0.0`, a padded lane keeps its state
+    // finite and at rest, block after block. "At rest" is an idle track's state: the state of a
+    // scalar instance of the member the lane clones, fed `+0.0` and no automation.
+    let idle_request = request(&padded.members[padded.clone_of], padded.rate, padded.link);
+    let rest = payload_of(scalar(idle_request).as_ref(), sizes);
+    let mut idle: Vec<Option<Box<dyn PreparedNativeEffect>>> = lanes
+        .iter()
+        .map(|member| member.is_none().then(|| scalar(idle_request)))
+        .collect();
     let mut outputs = vec![Vec::new(); padded.members.len()];
     let mut first_sample = 0_u64;
     for (index, block) in blocks.iter().enumerate() {
@@ -425,9 +438,46 @@ fn render(padded: &Padded<'_>, blocks: &[Block], context: &str) -> Vec<Vec<u32>>
             );
             outputs[member].extend(own_left.iter().chain(&own_right).map(|word| fold(*word)));
         }
+        for (lane, idle) in idle.iter_mut().enumerate() {
+            let Some(idle) = idle else { continue };
+            let (mut silent_left, mut silent_right) = (vec![0.0; frames], vec![0.0; frames]);
+            idle.process(
+                EffectProcessBlock::new(
+                    &mut silent_left,
+                    &mut silent_right,
+                    None,
+                    first_sample,
+                    &[],
+                    QUANTUM,
+                )
+                .expect("a well-shaped block"),
+            );
+            let state = bank_payload(bank.as_ref(), lane, sizes);
+            let (_, left_words, right_words) = &state;
+            assert!(
+                left_words
+                    .chunks_exact(4)
+                    .chain(right_words.chunks_exact(4))
+                    .all(
+                        |word| f32::from_le_bytes([word[0], word[1], word[2], word[3]]).is_finite()
+                    ),
+                "{context}: block {index}: padded lane {lane} holds a non-finite state word"
+            );
+            assert_eq!(
+                state,
+                payload_of(idle.as_ref(), sizes),
+                "{context}: block {index}: padded lane {lane}'s state is not an idle track's"
+            );
+            if PADDED_STATE_IS_CONSTANT {
+                assert_eq!(
+                    state, rest,
+                    "{context}: block {index}: padded lane {lane}'s state moved from its prepared \
+                     value"
+                );
+            }
+        }
         first_sample += frames as u64;
     }
-    let sizes = scalars[0].metadata().state_sizes;
     for (lane, member) in lanes.iter().enumerate() {
         let Some(member) = *member else { continue };
         assert_eq!(
@@ -636,25 +686,20 @@ fn padded_banks_render_the_fixtures_per_node() {
 
 /// Gate 3: an active lane's bits are the same whichever member the padded lanes clone.
 ///
-/// Scattered masks as well as the planner's members-first one: the contract admits any non-empty
-/// mask. Each render also matches the members' scalar instances (gate 1's checks), and the renders
-/// of one mask must agree word for word across every clone source. Red if a factory lays its
-/// requests out members-first whatever the mask says, so that an active lane after a padded one
-/// runs the clone's parameters; or if a whole-bank decision reads a padded lane's parameters.
+/// Every render also matches the members' scalar instances and checks each padded lane (gate 1's
+/// checks), and the renders of one mask must agree word for word across every clone source,
+/// including a member at every parameter's minimum and one at every maximum. Red if a factory reads
+/// its members from anywhere but lanes `0..members` -- from the tail of the requests, say, as if
+/// padding came first -- so that an active lane runs a clone; or if a whole-bank decision reads a
+/// padded lane's parameters.
 #[test]
 fn active_lanes_do_not_depend_on_the_clone_source() {
     for width in WIDTHS {
         let lanes = width.lanes() as usize;
-        let masks: Vec<Vec<bool>> = [
-            prefix_mask(width, lanes / 2),
-            (0..lanes).map(|lane| lane % 2 == 1).collect(),
-            (0..lanes)
-                .map(|lane| lane == lanes - 1 || lane == 1)
-                .collect(),
-            (0..lanes).map(|lane| lane != 0).collect(),
-        ]
-        .into_iter()
-        .collect();
+        let masks: Vec<Vec<bool>> = [1, 2, lanes / 2 + 1, lanes - 1]
+            .into_iter()
+            .map(|members| prefix_mask(width, members))
+            .collect();
         for (index, mask) in masks.iter().enumerate() {
             let members = mask.iter().filter(|active| **active).count();
             let mut draw = Draw::new(0x1092_0300 + (lanes * 10 + index) as u64);
@@ -816,10 +861,9 @@ fn bank_mates_unchanged(
 /// Red if D7 recovers the whole bank (the shared `finish_block` this crate used before #1092),
 /// leaves the failing lane's envelopes or right channel, or charges a padded lane.
 fn planted_nonfinite_state<L: Lane, const W: usize>(width: BankWidth) {
-    let mask: Vec<bool> = (0..W).map(|lane| lane % 3 != 1).collect();
-    let padded_lane = 1;
-    let active_lane = mask.iter().rposition(|active| *active).expect("a member");
-    assert!(!mask[padded_lane] && active_lane > padded_lane);
+    // Members first: lanes `0..W - 2` carry members and the last two are padded.
+    let mask = prefix_mask(width, W - 2);
+    let (active_lane, padded_lane) = (W - 3, W - 1);
     let values: Vec<Values> = (0..W).map(fixture_values).collect();
     let sizes = TRANSIENT_SHAPER_DESCRIPTOR.qualities[1].maximum_state;
     for (target, is_padded) in [(active_lane, false), (padded_lane, true)] {

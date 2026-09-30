@@ -707,20 +707,24 @@ fn a_padded_request_binds_and_still_validates_every_lane() {
             .unwrap_or_else(|| panic!("{members} of {lanes} lanes active: the bank binds"));
         assert_eq!(bank.metadata().width, width);
     }
+    // Malform a member other than the first, so that a check of the first request alone -- or a
+    // decision taken above the member loop -- goes red.
     let mut malformed = requests.clone();
-    malformed[0].limits.maximum_total_state_bytes = 0;
+    malformed[1].limits.maximum_total_state_bytes = 0;
     let refusal = GateExpanderFactory
-        .prepare(malformed[0])
+        .prepare(malformed[1])
         .err()
         .expect("a malformed member")
         .code;
-    let mask: Vec<bool> = (0..lanes).map(|lane| lane == 0).collect();
+    let mask: Vec<bool> = (0..lanes).map(|lane| lane < 2).collect();
     assert_eq!(
         bind(&malformed, &mask).err().map(|error| error.code),
         Some(refusal),
         "a padded request still validates its members"
     );
-    let mask: Vec<bool> = (0..lanes).map(|lane| lane != 0).collect();
+    let mut malformed = requests.clone();
+    malformed[lanes - 1].limits.maximum_total_state_bytes = 0;
+    let mask: Vec<bool> = (0..lanes).map(|lane| lane == 0).collect();
     assert_eq!(
         bind(&malformed, &mask).err().map(|error| error.code),
         Some(refusal),
