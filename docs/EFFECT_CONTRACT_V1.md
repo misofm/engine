@@ -41,9 +41,14 @@ three separate mechanisms, each where its hazard is:
 * **Input sanitisation** — once per track per block at the track input stage, never inside an
   effect.
 
-Signed finite zero is retained on every non-recursive path. Bypass is an immutable prepared
-configuration, is **not** part of `EffectProgramKey`, and outputs the dry input delayed by
-exactly the declared latency.
+Signed finite zero is retained on every non-recursive path. A prepared bypass is an immutable
+configuration and outputs the dry input delayed by exactly the declared latency. Every bank reads
+one bypass flag for all its lanes, so the prepared flag stays in `EffectProgramKey`. A session's
+bypass is not prepared (issue #1087): `effect-compiler` prepares every effect that can bank
+enabled and carries the bypass as per-lane state to the rack's latency-preserving shunt
+(`BypassShunt`), which copies the same delayed dry words into exactly the bypassed lanes, so a
+bypassed track keeps its bank. An effect that never banks (the delay) keeps its session bypass as
+a prepared one.
 
 Class-A identity, the same bits on every lane width and target, treats every NaN as one value
 (owner decision 10, #1065): tests fold each NaN to `0x7FC00000` through `dsp_reference::class_a`

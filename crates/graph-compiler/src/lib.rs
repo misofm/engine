@@ -4123,27 +4123,27 @@ mod tests {
         assert!(report.scalar_in(RackLocation::Simd1).is_empty());
     }
 
-    /// A slot bypassed at preparation takes its chain out of the cohort, exactly as a slot of a
-    /// different effect would: `bypass` is part of the `EffectProgramKey`, so a bypassed and an
-    /// active instance of one effect never share a bank. And one slot id used in two racks of one
-    /// track prepares as two entries, whose program keys differ when only one is bypassed.
+    /// A session-bypassed slot keeps its chain in the cohort (issue #1087).
     ///
-    /// Two groups' worth of two-slot chains, with the last track's slot 1 bypassed: the first group
-    /// fills and binds both its slots, and the second, one track short of full once the bypassed
-    /// chain leaves it, falls back per node, the bypassed track's two nodes with it. Track 0 also
-    /// carries a bypassed dynamic copy of its SIMD-1 slot 1, under the same id.
+    /// A session's `bypass` lowers to a prepared `bypass = false` plus a bypassed channel-less
+    /// lane, so a bypassed and an active instance of one effect share one `EffectProgramKey`, and
+    /// a bypassed track no longer leaves its bank. One slot id used in two racks of one track still
+    /// prepares as two entries, each with its own lane.
     ///
-    /// Ported by #1027 from the #650 allocation-record audit subject
-    /// (`tools/audit/src/prepared_effect_allocations.rs`:
-    /// `banks64_proves_current_backend_cohort_and_heterogeneous_fallback` and
-    /// `crossed_small_proves_reversed_distinct_prepared_programs`), retired with its record
-    /// validator. Every surviving heterogeneity test varies the effect id, never only the bypass.
+    /// Two groups' worth of two-slot chains, with the last track's slot 1 bypassed: both groups
+    /// fill and bind both their slots, the bypassed track's lane with them. Track 0 also carries a
+    /// bypassed dynamic copy of its SIMD-1 slot 1, under the same id, which is a one-track chain
+    /// and renders per node.
     ///
-    /// Red mutation: `PreparedEffectMetadata::program_key` copies `bypass: false` rather than
-    /// `self.bypass` -> red at the program-key assertions; with those removed, the cohort half is
-    /// red on its own: the bypassed chain rejoins its group, both groups fill, and four slots bind.
+    /// Before #1087 this fixture (ported by #1027 from the #650 allocation-record audit subject)
+    /// pinned the opposite: the bypassed chain left its group, the second group fell one short of
+    /// full, and only two slots bound.
+    ///
+    /// Red mutation: `prepare_native_session_effects` prepares `bypass: effect.bypass` again ->
+    /// red at the program-key assertions; with those removed, the cohort half is red on its own:
+    /// the bypassed chain leaves its group again and only two slots bind.
     #[test]
-    fn a_prepare_time_bypassed_slot_takes_its_chain_out_of_the_cohort() {
+    fn a_prepare_time_bypassed_slot_keeps_its_chain_in_the_cohort() {
         let Some(width) = BankWidth::for_backend(host_dispatch()) else {
             panic!("delivery host must offer a bank width; evidence is vacuous otherwise");
         };
@@ -4166,7 +4166,7 @@ mod tests {
             },
         );
 
-        let key = |track: &str, rack: EffectRack| {
+        let entry = |track: &str, rack: EffectRack| {
             let matching: Vec<_> = effects
                 .entries
                 .iter()
@@ -4177,26 +4177,29 @@ mod tests {
                 })
                 .collect();
             assert_eq!(matching.len(), 1, "{track} {rack:?} prepares chain0 once");
-            matching[0].metadata.program_key()
+            matching[0]
         };
-        let active = key("bank01", EffectRack::Simd1);
-        let bypassed = key(&last, EffectRack::Simd1);
-        assert!(bypassed.bypass && !active.bypass);
-        assert_ne!(bypassed, active, "bypass alone separates the two programs");
+        let active = entry("bank01", EffectRack::Simd1);
+        let bypassed = entry(&last, EffectRack::Simd1);
+        assert!(bypassed.initial_bypass && !active.initial_bypass);
         assert_eq!(
-            effect_contract::EffectProgramKey {
-                bypass: false,
-                ..bypassed
-            },
-            active,
-            "and nothing else does"
+            bypassed.metadata.program_key(),
+            active.metadata.program_key(),
+            "bypass no longer separates the two programs"
         );
-        let shadow = key("bank00", EffectRack::Dynamic);
-        let original = key("bank00", EffectRack::Simd1);
-        assert!(shadow.bypass && !original.bypass);
-        assert_ne!(
-            shadow, original,
-            "one slot id in two racks: two distinct programs"
+        assert!(!bypassed.metadata.program_key().bypass);
+        let lane = bypassed
+            .control
+            .as_deref()
+            .expect("the bypass rides a lane");
+        assert!(!lane.has_channel() && lane.bypassed());
+        assert!(active.control.is_none());
+        let shadow = entry("bank00", EffectRack::Dynamic);
+        let original = entry("bank00", EffectRack::Simd1);
+        assert!(shadow.initial_bypass && !original.initial_bypass);
+        assert!(
+            shadow.control.is_some() && original.control.is_none(),
+            "one slot id in two racks: two entries, and only the bypassed one holds a lane"
         );
 
         let artifact = compile_chain_fixture(effects);
@@ -4204,32 +4207,31 @@ mod tests {
         let bound: Vec<_> = report.bound_slots_in(RackLocation::Simd1).collect();
         assert_eq!(
             bound.len(),
-            2,
-            "only the first group fills, and it binds both slots"
+            4,
+            "both groups fill, and each binds both slots"
         );
-        let second_group = format!("bank{lanes:02}");
         assert!(
-            bound.iter().all(|slot| slot.members.len() == lanes
-                && slot
+            bound.iter().all(|slot| slot.members.len() == lanes),
+            "every bound bank is full"
+        );
+        assert_eq!(
+            bound
+                .iter()
+                .filter(|slot| slot
                     .members
                     .iter()
-                    .all(|member| member.track_id.as_str() < second_group.as_str())),
-            "the bound banks hold the first group's tracks"
-        );
-        let scalar = report.scalar_in(RackLocation::Simd1);
-        assert_eq!(
-            scalar.len(),
-            2 * lanes,
-            "the second group's chains fall back per node"
-        );
-        assert_eq!(
-            scalar
-                .iter()
-                .filter(|node| node.track_id.as_str() == last)
+                    .any(|member| member.track_id.as_str() == last))
                 .count(),
             2,
-            "both of the bypassed track's nodes render per node"
+            "the bypassed track's chain binds with its group"
         );
+        assert!(report.scalar_in(RackLocation::Simd1).is_empty());
+        assert_eq!(
+            report.scalar_in(RackLocation::Dynamic).len(),
+            1,
+            "the one-track dynamic shadow renders per node"
+        );
+        assert_eq!(artifact.graph().prepared_bank_count(), 4);
     }
 
     /// #99 F3: bank membership does not depend on `EffectPreparedSession::entries` order.
