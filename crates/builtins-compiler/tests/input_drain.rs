@@ -7,7 +7,7 @@
 //!
 //! # Why the record type is the right unit to test
 //!
-//! `ChannelSymmetryWitness::admit` is generic over `LiveConsoleRecord` and dispatches on the
+//! `ChannelSymmetryWitness::admit` is generic over `LiveControlRecord` and dispatches on the
 //! record type's `SEAM` const and its `symmetry_event`. Nothing else decides what a drained record
 //! did. So a test of `admit` over this record type is a test of the drain's whole contribution to
 //! the witness, and it cannot go stale against the drain because the drain has no second opinion
@@ -15,7 +15,7 @@
 
 use builtins::{BuiltinLaneSelector, prepare_input_filter_pair};
 use builtins_compiler::TrackInputRecord;
-use effect_contract::{ChannelSymmetryWitness, LiveConsoleRecord, SeamSide, SymmetryEvent};
+use effect_contract::{ChannelSymmetryWitness, LiveControlRecord, SeamSide, SymmetryEvent};
 
 fn trim(lanes: BuiltinLaneSelector) -> TrackInputRecord {
     TrackInputRecord::TrimDb {
@@ -208,7 +208,7 @@ fn both_variants_answer_the_hook_identically_for_the_same_selector() {
 ///
 /// Both drains are held: the banked one (`BuiltinBankProcessor::begin_block`, through the
 /// eight-lane cohort and one-lane tail of the SIMD fixture) and the scalar one
-/// (`ConsoleInputProcessor::process`, through the scalar-dispatch fixture).
+/// (`LiveControlInputProcessor::process`, through the scalar-dispatch fixture).
 ///
 /// Ported by #1027 from the #600 input-trim qualification (`tools/bench/src/input_symmetry.rs`,
 /// `separate_capacity_sixteen_drain_witness_has_no_pending_records`), retired with its capture

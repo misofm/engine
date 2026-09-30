@@ -286,12 +286,12 @@ function boot(document = mixingDocument) {
   u32("sourceRingFrames", SOURCE_RING_FRAMES);
   u32("reserved0", 0);
   u64("maximumMemoryBytes", 0n);
-  // The live console with the default command queue, and no meters, observation or master, as
+  // The live controls with the default command queue, and no meters, observation or master, as
   // the native row prepares its plan (`control: true`, nothing else).
-  u64("consoleCommandQueueRecords", BigInt(COMMAND_QUEUE_RECORDS));
-  u64("consoleMeterBlocks", 0n);
-  u64("consoleObservationTaps", 0n);
-  u64("consoleMasterTrackPlusOne", 0n);
+  u64("liveControlCommandQueueRecords", BigInt(COMMAND_QUEUE_RECORDS));
+  u64("liveControlMeterBlocks", 0n);
+  u64("liveControlObservationTaps", 0n);
+  u64("liveControlMasterTrackPlusOne", 0n);
   const pointer = e.miso_engine_web_v1_document_ptr(documentBytes.byteLength);
   new Uint8Array(e.memory.buffer, pointer, documentBytes.byteLength).set(documentBytes);
   const handle = e.miso_engine_web_v1_boot(documentBytes.byteLength);
@@ -300,13 +300,13 @@ function boot(document = mixingDocument) {
     throw new Error(`boot ${e.miso_engine_web_v1_boot_result()}: ${new TextDecoder().decode(
       new Uint8Array(e.memory.buffer, pointer, bytes))}`);
   }
-  // The wire's track index is the booted console's track order; check the table addresses it.
+  // The wire's track index is the booted live controls' track order; check the table addresses it.
   // The console-strip documents carry no control traffic, so only the mixing document is checked.
   for (const control of document === mixingDocument ? table.controls : []) {
-    const length = e.miso_engine_web_v1_console_track_id(handle, control.track_index);
+    const length = e.miso_engine_web_v1_live_control_track_id(handle, control.track_index);
     const idPointer = e.miso_engine_web_v1_buffer_ptr(handle, BUFFER_SOURCE_ID);
     const id = new TextDecoder().decode(new Uint8Array(e.memory.buffer, idPointer, length));
-    assert.equal(id, control.track_id, `${control.track_id}: console track index`);
+    assert.equal(id, control.track_id, `${control.track_id}: live-control track index`);
   }
   return {
     e, handle, control: preparedControl(e, handle), frame: 0n, block: 0, sourceId: document.sourceId,

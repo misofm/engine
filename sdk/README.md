@@ -24,7 +24,7 @@ download. Keep the SDK, Wasm, host, worklets, and metadata from the same package
 
 | Public import | Use |
 | --- | --- |
-| `@misofm/engine` | `session`, `effect`, generated catalog/ABI, parameter helpers, `EngineConsole`, `ConsoleWriter`, and shared types |
+| `@misofm/engine` | `session`, `effect`, generated catalog/ABI, parameter helpers, `EngineLiveControls`, `LiveControlWriter`, and shared types |
 | `@misofm/engine/headless` | `createOfflineEngine`, validation, bundled-asset loading, and response previews |
 | `@misofm/engine/browser` | `createEngine`, browser preparation, PCM rings/feed, measurements, and response previews |
 | `@misofm/engine/assets` | `BUNDLED_ENGINE_ASSETS` URLs and `BUNDLED_ENGINE_FILES` names |
@@ -104,7 +104,7 @@ export async function startMix(
 ) {
   const engine = await createEngine({
     document,
-    policy: { console: { commandQueueRecords: 64, meterBlocks: 12 } },
+    policy: { liveControls: { commandQueueRecords: 64, meterBlocks: 12 } },
   });
   try {
     await prepareSources(engine);
@@ -136,15 +136,15 @@ mobile audio-device adapter.
 
 ## Change a mix and correlate the acknowledgement
 
-Prepare a positive `console.commandQueueRecords` capacity at boot: pass `console` directly to
-`createOfflineEngine`, or under `policy` to `createEngine`. Audio-only boot remains valid without
-it. `engine.console()` is synchronous headlessly and asynchronous in the browser; `await` works
-for either. With an existing `vocal` track and an EQ in its first SIMD rack slot:
+Prepare a positive `liveControls.commandQueueRecords` capacity at boot: pass `liveControls` directly
+to `createOfflineEngine`, or under `policy` to `createEngine`. Audio-only boot remains valid
+without it. `engine.liveControls()` is synchronous headlessly and asynchronous in the browser;
+`await` works for either. With an existing `vocal` track and an EQ in its first SIMD rack slot:
 
 ```ts
-import type { EngineConsole } from "@misofm/engine";
+import type { EngineLiveControls } from "@misofm/engine";
 
-export async function adjustVocal(controls: EngineConsole) {
+export async function adjustVocal(controls: EngineLiveControls) {
   const vocal = controls.edit.track("vocal");
   const report = await controls.submit(
     vocal.faderDb(-3, { channel: "both", smoothingSamples: 64 }),
@@ -163,9 +163,9 @@ that block. Smoothing may continue after that boundary. Refusals carry typed res
 queue saturation must be handled, and acknowledged batches are not silently dropped.
 
 Parameter keys and units come from the catalog. `inputFilters({ hpfHz, lpfHz })` changes both
-builtin cutoffs atomically; zero disables a filter. `ConsoleWriter` adds bounded batch submission
-and latest-value coalescing for gesture loops. The root entry's `parameter()` helper provides exact
-decimal/lattice edits for agent-facing controls.
+builtin cutoffs atomically; zero disables a filter. `LiveControlWriter` adds bounded batch
+submission and latest-value coalescing for gesture loops. The root entry's `parameter()` helper
+provides exact decimal/lattice edits for agent-facing controls.
 
 ## Observe the rendered mix
 
@@ -207,7 +207,7 @@ entries, with one active spectrum producer. It does not enable simultaneous inde
 Managed observation, response, and spectrum handles expose `readLatest()`, `update()`, and
 `close()`. Browser delivery progresses automatically; headless consumers call `pump()` between
 explicit renders. Pumping never renders audio. Identical subscriptions share work; refused updates
-preserve the prior configuration. Prepare `console.observationTaps` for resident effect taps.
+preserve the prior configuration. Prepare `liveControls.observationTaps` for resident effect taps.
 
 Use the recorded sample spans to compare observations with `appliedAtSample`. A window crossing
 the command boundary can contain both states. A later window may still contain filter settling

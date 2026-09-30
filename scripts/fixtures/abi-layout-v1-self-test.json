@@ -14,8 +14,6 @@
     "miso_engine_web_v1_buffer_ptr",
     "miso_engine_web_v1_command_report_ptr",
     "miso_engine_web_v1_command_submit",
-    "miso_engine_web_v1_console_track_count",
-    "miso_engine_web_v1_console_track_id",
     "miso_engine_web_v1_dispose",
     "miso_engine_web_v1_document_ptr",
     "miso_engine_web_v1_eq_target_close",
@@ -32,6 +30,8 @@
     "miso_engine_web_v1_eq_target_result_ptr",
     "miso_engine_web_v1_input_filters_config_copy",
     "miso_engine_web_v1_input_filters_prepare",
+    "miso_engine_web_v1_live_control_track_count",
+    "miso_engine_web_v1_live_control_track_id",
     "miso_engine_web_v1_meter_header_ptr",
     "miso_engine_web_v1_meter_lease",
     "miso_engine_web_v1_meter_poll",
@@ -132,10 +132,10 @@
         { "name": "sourceRingFrames", "offset": 16, "type": "u32" },
         { "name": "reserved0", "offset": 20, "type": "u32" },
         { "name": "maximumMemoryBytes", "offset": 24, "type": "u64" },
-        { "name": "consoleCommandQueueRecords", "offset": 32, "type": "u64" },
-        { "name": "consoleMeterBlocks", "offset": 40, "type": "u64" },
-        { "name": "consoleObservationTaps", "offset": 48, "type": "u64" },
-        { "name": "consoleMasterTrackPlusOne", "offset": 56, "type": "u64" }
+        { "name": "liveControlCommandQueueRecords", "offset": 32, "type": "u64" },
+        { "name": "liveControlMeterBlocks", "offset": 40, "type": "u64" },
+        { "name": "liveControlObservationTaps", "offset": 48, "type": "u64" },
+        { "name": "liveControlMasterTrackPlusOne", "offset": 56, "type": "u64" }
       ]
     },
     "status": {

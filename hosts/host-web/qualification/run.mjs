@@ -22,8 +22,8 @@ const PLAYWRIGHT_VERSION = JSON.parse(
 const ENGINES = { chromium, firefox, webkit };
 const MUTATIONS = [
   "attestation", "boot", "native-corpus-digest", "main-thread-stall",
-  // Issue #137 E8/E6: the live-console row and the console load carried across the stall.
-  "control-path-applied", "control-path-meter", "control-path-command", "stall-console-load",
+  // Issue #137 E8/E6: the live-control row and the live-control load carried across the stall.
+  "control-path-applied", "control-path-meter", "control-path-command", "stall-live-controls-load",
   // Issue #143 E12: the observation row. `observation-armed` is the eval's named red mutation --
   // a run whose armed tap published nothing, which is exactly what a browser that lost the
   // transport would produce.
@@ -142,11 +142,11 @@ function validate(browserName, result) {
   // #137 E8: one parameter change reached the DSP and did exactly what it declared, and the
   // decimated meter stream produced frames of the declared width whose master peak is a real
   // observation of the rendered output rather than a zero.
-  const live = result.console;
+  const live = result.liveControls;
   gate(browserName, "control-path", live?.commandResult === 0 && live?.commandReason === 0
     && live?.commandAdmitted === 1 && live?.appliedAtSample === "0"
     && Array.isArray(live?.tracks) && live.tracks.length === 1,
-  "the live-console command was not admitted");
+  "the live-control command was not admitted");
   gate(browserName, "control-path", live?.exactRetargetedOutput === true
     && live?.renderedDigest === live?.expectedDigest,
   "the applied parameter change did not produce the exact declared output");
@@ -190,8 +190,8 @@ function validate(browserName, result) {
   const stall = result.stall;
   // #137 E6: the frozen stall requirements are unchanged, and they are now met with the control
   // path and the meter fold both live across the fault.
-  gate(browserName, "main-thread-stall", stall?.consoleCommandResult === 0
-    && stall?.consoleMeterLeaseResult === 0 && stall?.consoleMeterFrames >= 1,
+  gate(browserName, "main-thread-stall", stall?.liveControlCommandResult === 0
+    && stall?.liveControlMeterLeaseResult === 0 && stall?.liveControlMeterFrames >= 1,
   "the stall did not carry a live command and meter load");
   gate(browserName, "main-thread-stall", stall?.minimumStallMs === 100
     && stall?.requestedStallMs >= 100
@@ -578,10 +578,10 @@ function mutate(result, mutation) {
   if (mutation === "boot") copy.boot.ready = false;
   if (mutation === "native-corpus-digest") copy.corpus.browserDigests[0] = "0".repeat(64);
   if (mutation === "main-thread-stall") copy.stall.measuredStallMs = 0;
-  if (mutation === "control-path-applied") copy.console.exactRetargetedOutput = false;
-  if (mutation === "control-path-meter") copy.console.masterPeak = 0;
-  if (mutation === "control-path-command") copy.console.commandAdmitted = 0;
-  if (mutation === "stall-console-load") copy.stall.consoleMeterFrames = 0;
+  if (mutation === "control-path-applied") copy.liveControls.exactRetargetedOutput = false;
+  if (mutation === "control-path-meter") copy.liveControls.masterPeak = 0;
+  if (mutation === "control-path-command") copy.liveControls.commandAdmitted = 0;
+  if (mutation === "stall-live-controls-load") copy.stall.liveControlMeterFrames = 0;
   // Issue #143 E12's named red mutation: `observationArmed = 0`.
   if (mutation === "observation-armed") copy.observation.armed.maximumTrackGrDb = 0;
   if (mutation === "observation-unsubscribe") copy.observation.disarmed.maximumTrackGrDb = 1;

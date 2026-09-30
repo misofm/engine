@@ -17,8 +17,8 @@ use effect_contract::ParameterChannel;
 mod support;
 use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use host_core::{
-    EffectRack, HostConsoleRequest, HostPrepareCaps, HostShapePolicy, PreparedHost,
-    SourceSubmission, prepare_host_session_with_console,
+    EffectRack, HostLiveControlRequest, HostPrepareCaps, HostShapePolicy, PreparedHost,
+    SourceSubmission, prepare_host_session_with_live_controls,
 };
 
 const SESSION: &str = include_str!("../../../fixtures/session/v1/parametric-eq-bank-console.json");
@@ -50,8 +50,8 @@ fn caps() -> HostPrepareCaps {
     }
 }
 
-fn console() -> HostConsoleRequest {
-    HostConsoleRequest {
+fn live_controls() -> HostLiveControlRequest {
+    HostLiveControlRequest {
         control_queue_depth: Some(NonZeroUsize::new(8).expect("depth")),
         meter_period_frames: Some(NonZeroU32::new(QUANTUM as u32).expect("period")),
         meter_queue_depth: NonZeroUsize::new(16).expect("meter depth"),
@@ -64,16 +64,16 @@ fn console() -> HostConsoleRequest {
 /// One prepared console session, its per-track meter consumers, and its effect producers.
 struct Console {
     prepared: PreparedHost,
-    handles: host_core::HostConsoleHandles,
+    handles: host_core::HostLiveControlHandles,
     /// Absolute block cursor, so successive `render` calls stay contiguous in the source ring.
     block: usize,
 }
 
 fn prepare() -> Console {
     let (_session, prepared, handles) =
-        prepare_host_session_with_console(SESSION, &caps(), &console()).unwrap_or_else(|failure| {
-            panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
-        });
+        prepare_host_session_with_live_controls(SESSION, &caps(), &live_controls()).unwrap_or_else(
+            |failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())),
+        );
     assert_eq!(handles.tracks.len(), TRACKS);
     assert_eq!(
         handles.effect_controls.len(),
@@ -155,7 +155,7 @@ fn command(console: &mut Console, track_id: &str, value: f32) {
     }
 }
 
-/// Red mutation: in `ConsoleEffectBankStage::process`, pack every lane at `packed[..staged]`
+/// Red mutation: in `LiveControlEffectBankStage::process`, pack every lane at `packed[..staged]`
 /// instead of at that lane's own running offset -> lane 0 renders lane 2's command and the
 /// "every other track is bit-identical" assertion fails.
 #[test]
@@ -164,12 +164,12 @@ fn a_banked_effect_applies_each_lanes_own_command_and_no_others() {
     let mut commanded = prepare();
 
     // Two blocks with no traffic: the two sessions are bit-identical, which is the baseline the
-    // "an idle console changes nothing" claim rests on.
+    // "idle live controls change nothing" claim rests on.
     let before_control = render(&mut control, 2);
     let before_commanded = render(&mut commanded, 2);
     assert_eq!(
         before_control, before_commanded,
-        "an idle console renders the identical peaks"
+        "idle live controls render the identical peaks"
     );
 
     command(&mut commanded, "eq2", -24.0);

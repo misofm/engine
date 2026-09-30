@@ -46,26 +46,26 @@ pub struct EffectPreparedEntry {
     /// effect share one `EffectProgramKey` and one bank, and this bit is the initial state of the
     /// instance's [`EffectControlLane`], and so of the rack's latency-preserving shunt. A bypassed
     /// instance runs its wet path and emits its input delayed by its declared latency. It also
-    /// seeds a live console's lane ([`attach_effect_console`]) for every effect.
+    /// seeds a live-control lane ([`attach_effect_live_controls`]) for every effect.
     pub initial_bypass: bool,
-    /// The consumer half of this instance's live-console control channel (issue #140 A), or the
+    /// The consumer half of this instance's live-control channel (issue #140 A), or the
     /// channel-less lane that carries a lowered session bypass (issue #1087).
     ///
     /// [`prepare_native_session_effects`] sets
     /// [`EffectControlLane::without_channel`]`(true)` on every bypassed instance of an effect that
-    /// [`lowers_session_bypass`] and `None` on every other, and [`attach_effect_console`] replaces
-    /// it with a live channel seeded from [`Self::initial_bypass`]; nothing else creates one. It
-    /// travels with the entry into `GraphPreparedEffect`, so the plan that renders the effect is
-    /// the one that drains its queue and applies its shunt, and a session with no console and no
-    /// bypassed instance carries a `None` that the runtime turns back into the byte-identical
-    /// console-free path.
+    /// [`lowers_session_bypass`] and `None` on every other, and [`attach_effect_live_controls`]
+    /// replaces it with a live channel seeded from [`Self::initial_bypass`]; nothing else creates
+    /// one. It travels with the entry into `GraphPreparedEffect`, so the plan that renders the
+    /// effect is the one that drains its queue and applies its shunt, and a session with no live
+    /// controls and no bypassed instance carries a `None` that the runtime turns back into the
+    /// byte-identical live-control-free path.
     pub control: Option<Box<EffectControlLane>>,
     /// This instance's observation taps (issue #143 D3, level 1).
     ///
     /// `None` unless [`attach_effect_observation`] was called, which is the only way one is
-    /// ever created. A session whose console request named no observation capacity carries `None`
-    /// here, and the runtime turns that back into the byte-identical unobserved path: there is no
-    /// lane, no slot and no vector anywhere in the compiled plan.
+    /// ever created. A session whose live-control request named no observation capacity carries
+    /// `None` here, and the runtime turns that back into the byte-identical unobserved path: there
+    /// is no lane, no slot and no vector anywhere in the compiled plan.
     pub observation: Option<Box<ObservationLane>>,
 }
 
@@ -499,7 +499,7 @@ pub fn prepare_native_session_effects(
     }
 }
 
-/// One prepared live-console control channel for one effect instance (issue #140 A).
+/// One prepared live-control channel for one effect instance (issue #140 A).
 ///
 /// The producer half stays on the control plane; the consumer half rode into the plan inside the
 /// entry. A producer must be dropped before the plan that owns its consumer, which is why
@@ -1312,7 +1312,7 @@ mod owner_tests {
     }
 }
 
-/// Attach one bounded live-console control channel to every prepared effect of the session.
+/// Attach one bounded live-control channel to every prepared effect of the session.
 ///
 /// # The capacity rule that makes the render-side drain exact
 ///
@@ -1328,7 +1328,7 @@ mod owner_tests {
 /// `effect.control.prepare` if a bounded queue cannot be built, and
 /// `effect.control.capacity` if an effect declares a zero automation capacity, which no launch
 /// effect does and which would leave the channel unable to deliver anything.
-pub fn attach_effect_console(
+pub fn attach_effect_live_controls(
     prepared: &mut EffectPreparedSession,
     depth: NonZeroUsize,
 ) -> Result<Vec<EffectControlProducer>, EffectDiagnosticSet> {
@@ -1435,8 +1435,8 @@ pub struct EffectObservationHandle {
 /// # Level 1 of the two-level zero (issue #143 D3)
 ///
 /// This function is the **only** thing that creates an [`ObservationLane`]. A session whose
-/// console request named no observation capacity never calls it, so its compiled plan contains no
-/// lane, no accumulator and no conflating cell -- not a disabled one, none. That is what makes
+/// live-control request named no observation capacity never calls it, so its compiled plan contains
+/// no lane, no accumulator and no conflating cell -- not a disabled one, none. That is what makes
 /// "observation off costs nothing" an identity rather than a claim, and it is what
 /// `observation_retained_bytes == 0` reports.
 ///
@@ -1444,8 +1444,9 @@ pub struct EffectObservationHandle {
 /// nothing to observe, so it carries nothing.
 ///
 /// `window_blocks` is the plan's default window length in render blocks. It is the *meter* window,
-/// derived by the host from the same `console_meter_blocks` the peak meters use, so a gain-reduction
-/// value and the peak beside it in one `miso.meter.v1` frame describe the same span of samples.
+/// derived by the host from the same `live_control_meter_blocks` the peak meters use, so a
+/// gain-reduction value and the peak beside it in one `miso.meter.v1` frame describe the same span
+/// of samples.
 ///
 /// # Errors
 ///
@@ -1519,8 +1520,8 @@ pub fn attach_effect_observation(
 /// Declared position within each `(track, rack)`, from the normalized model.
 ///
 /// The same order the `miso.command.v1` `effect_index` names and the same order the browser host
-/// counts, extracted once so the console attach and the observation attach cannot disagree about
-/// what "effect 2 of the dynamic rack" means.
+/// counts, extracted once so the live-control attach and the observation attach cannot disagree
+/// about what "effect 2 of the dynamic rack" means.
 fn declared_effect_indices(
     session: &CompiledSession,
 ) -> BTreeMap<(String, EffectRack, String), u32> {

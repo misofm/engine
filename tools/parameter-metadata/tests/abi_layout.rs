@@ -204,7 +204,7 @@ fn the_emitted_command_record_offsets_are_the_engine_s_own_decode_rule() {
         require_sample_rate_hz: 48_000,
         require_quantum_frames: 128,
         source_ring_frames: 128,
-        console_command_queue_records: 64,
+        live_control_command_queue_records: 64,
         ..WebBootOptions::explicit_defaults()
     };
     let mut host = AudioWorkletEngineHost::boot(one_effect_session(first).as_bytes(), options)
@@ -219,7 +219,9 @@ fn the_emitted_command_record_offsets_are_the_engine_s_own_decode_rule() {
     let smoothing = field_offset(&document, "commandRecord", "smoothingSamples");
     let values = field_offset(&document, "commandRecord", "values");
 
-    let staging = host.command_staging_mut().expect("console staging exists");
+    let staging = host
+        .command_staging_mut()
+        .expect("live-control staging exists");
     staging[..COMMAND_RECORD_BYTES as usize].fill(0);
     staging[kind] = u8::try_from(COMMAND_EFFECT_PARAM).expect("kind is a byte");
     // Rack 1 is `dynamic`, which is where the fixture put its one effect.
@@ -374,11 +376,11 @@ fn the_document_carries_its_whole_schema_and_the_engine_s_offsets() {
         24
     );
     assert_eq!(
-        field_offset(&document, "bootOptions", "consoleCommandQueueRecords"),
+        field_offset(&document, "bootOptions", "liveControlCommandQueueRecords"),
         32
     );
     assert_eq!(
-        field_offset(&document, "bootOptions", "consoleMasterTrackPlusOne"),
+        field_offset(&document, "bootOptions", "liveControlMasterTrackPlusOne"),
         56
     );
     assert_eq!(field_offset(&document, "status", "sampleRateHz"), 20);

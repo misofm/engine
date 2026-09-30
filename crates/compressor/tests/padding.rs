@@ -317,8 +317,8 @@ fn the_fixtures_render_through_a_padded_bank_as_they_do_per_node() {
 /// output, so the bypassed lane's wet path still runs and still meets D7. Here the bypassed lane
 /// carries a legal gain of +24 dB (ratio 1, makeup +24) and is fed `1e29` on some blocks, a legal
 /// sample below the `1e30` bound that its wet block pushes past it. The test drives the real
-/// `BypassShunt` the same way `rack::ConsoleEffectBankStage` does: capture the dry block, run the
-/// bank, restore the bypassed lane.
+/// `BypassShunt` the same way `rack::LiveControlEffectBankStage` does: capture the dry block, run
+/// the bank, restore the bypassed lane.
 ///
 /// For every active count `2..=W` (full banks too) and the first and last member bypassed:
 /// * every enabled member renders the bits and reports of the render in which the bypassed lane
@@ -387,7 +387,8 @@ fn a_bypassed_lane_fed_a_tripping_value_moves_no_bank_mates_bit() {
                     inputs,
                     &partitions,
                     |shunt, left, right, frames| {
-                        // `ConsoleEffectBankStage`'s restore: the bypassed lane's dry words, by copy.
+                        // `LiveControlEffectBankStage`'s restore: the bypassed lane's dry words, by
+                        // copy.
                         let (dry_left, dry_right) = shunt.dry();
                         for frame in 0..frames {
                             let word = frame * lanes + bypassed;

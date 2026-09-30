@@ -2,10 +2,10 @@
 //!
 //! Two properties matter and both are gated here.
 //!
-//! 1. **Bit identity with the prepared path when nothing is commanded.** A console-attached track
-//!    that never receives a fader record must render exactly the bits `FaderMuteBuiltins` renders,
-//!    including the exact `+0.0` a declared mute produces. That is what lets #140 add a ramped
-//!    fader without moving a single builtins fixture digest.
+//! 1. **Bit identity with the prepared path when nothing is commanded.** A live-control-attached
+//!    track that never receives a fader record must render exactly the bits `FaderMuteBuiltins`
+//!    renders, including the exact `+0.0` a declared mute produces. That is what lets #140 add a
+//!    ramped fader without moving a single builtins fixture digest.
 //! 2. **Mute is a fader endpoint.** A mute with a window fades; a mute with no window is the
 //!    instantaneous, exact `+0.0` the prepared path gives. Neither is a discontinuity the caller
 //!    did not ask for.

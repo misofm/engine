@@ -32,12 +32,11 @@ use effect_contract::{
 };
 use engine::realtime::{ObservationWindow, PlanarBufferMut, RenderIo, RenderTime};
 use host_core::{
-    CompiledSession, ConsoleSoloState, EffectControlProducer, EffectObservationHandle,
-    HostConsoleRequest, HostMeterRequest, HostPrepareCaps, HostShapePolicy, InputFilterEdit,
-    InputFilterEditErrorKind, PrepareDiagnostics, PrepareRejection, PreparedHost,
-    SourceControlError, SourceSubmission, apply_input_filter_edit, compile_host_model,
-    compiled_session_shape, control_table_bytes, parse_host_session,
-    prepare_host_runtime_with_console_and_spectrum,
+    CompiledSession, EffectControlProducer, EffectObservationHandle, HostLiveControlRequest,
+    HostMeterRequest, HostPrepareCaps, HostShapePolicy, InputFilterEdit, InputFilterEditErrorKind,
+    LiveControlSoloState, PrepareDiagnostics, PrepareRejection, PreparedHost, SourceControlError,
+    SourceSubmission, apply_input_filter_edit, compile_host_model, compiled_session_shape,
+    control_table_bytes, parse_host_session, prepare_host_runtime_with_live_controls_and_spectrum,
     prepare_host_runtime_with_selected_meters_between_render_calls, source_id_arena_bytes,
 };
 use host_core::{
@@ -138,7 +137,7 @@ pub const BUFFER_SOURCE_PCM: u32 = 3;
 pub const BUFFER_DIAGNOSTIC: u32 = 4;
 /// Contiguous dual-mono output buffer.
 pub const BUFFER_OUTPUT_PCM: u32 = 5;
-/// Fixed live-console command staging buffer (issue #137 D1).
+/// Fixed live-control command staging buffer (issue #137 D1).
 pub const BUFFER_COMMAND: u32 = 6;
 /// Fixed decimated meter-frame buffer (issue #137 D2).
 pub const BUFFER_METER_FRAME: u32 = 7;
@@ -563,7 +562,7 @@ pub const COMMAND_RECORD_BYTES: u32 = 48;
 pub const MAXIMUM_COMMAND_RECORDS: u32 = 256;
 /// Per-track control-queue depth used when the configuration asks for the default.
 pub const DEFAULT_COMMAND_QUEUE_RECORDS: u32 = 64;
-/// Largest `console_observation_taps` the browser configuration accepts.
+/// Largest `live_control_observation_taps` the browser configuration accepts.
 ///
 /// The frame carries one gain-reduction slot per track, so a session cannot usefully bind more
 /// taps per effect than a consumer can read; the cap keeps a mistyped configuration from asking
@@ -813,8 +812,8 @@ pub const COMMAND_OBSERVE_UNSUBSCRIBE: u32 = 8;
 /// and `smoothing_samples` the engage/disengage fade -- the same declick window a mute takes.
 ///
 /// It moves no state of its own on the render thread. Admission composes
-/// `effective_mute = user_mute || (any_solo && !my_solo)` over the console's
-/// [`host_core::ConsoleSoloState`] and emits the *existing*
+/// `effective_mute = user_mute || (any_solo && !my_solo)` over the live controls'
+/// [`host_core::LiveControlSoloState`] and emits the *existing*
 /// `TrackFaderRecord::Mute` records into the *existing* per-track fader queues, so this kind is
 /// on the `render` plane (it moves what the render thread reads) while adding nothing below
 /// `admit_commands`. Refusals reuse the existing vocabulary: `malformed` for a wrong-shaped
@@ -868,9 +867,9 @@ pub const COMMAND_REASON_DOMAIN: u32 = 6;
 ///
 /// Issue #140 emptied this of everything the ABI *declares*: pan, matrix, fader, mute, effect
 /// parameter and effect bypass are all live, and `liveUpdatable` is `true` for each. It remains
-/// reachable for the states that are genuinely not addressable -- a host with no console attached
-/// at all, and an effect whose parameter declares `AutomationRate::None`, which no launch effect
-/// does but which a future one may.
+/// reachable for the states that are genuinely not addressable -- a host with no live controls
+/// attached at all, and an effect whose parameter declares `AutomationRate::None`, which no launch
+/// effect does but which a future one may.
 pub const COMMAND_REASON_UNSUPPORTED_KIND: u32 = 7;
 /// A bounded control queue had no room for the submission; nothing was admitted.
 pub const COMMAND_REASON_BACKPRESSURE: u32 = 8;
@@ -885,13 +884,13 @@ pub const COMMAND_REASON_UNKNOWN_TAP: u32 = 10;
 ///
 /// The honest form of "you asked for a subscription this preparation cannot deliver": the effect
 /// is there, the tap is declared, and the plan holds no lane to arm because the host asked for
-/// none. A caller fixes it by preparing with `console_observation_taps` set, not by retrying.
+/// none. A caller fixes it by preparing with `live_control_observation_taps` set, not by retrying.
 pub const COMMAND_REASON_OBSERVATION_UNBOUND: u32 = 11;
 
 /// Default meter window in render blocks: ~31 frames per second at 48 kHz with a 128-frame quantum.
 pub const DEFAULT_METER_BLOCKS: u32 = 12;
 
-/// Exact versioned live-console command report shared with JavaScript (issue #137 D1).
+/// Exact versioned live-control command report shared with JavaScript (issue #137 D1).
 ///
 /// One submission is one transaction: either every staged record was admitted, or none was and
 /// `rejected_index`/`reason` name the first record that broke a rule. `applied_at_sample` is the
@@ -1022,27 +1021,27 @@ pub struct WebBootOptions {
     pub reserved0: u32,
     /// Total boot memory budget, or zero for [`DEFAULT_MAXIMUM_MEMORY_BYTES`].
     pub maximum_memory_bytes: u64,
-    /// Per-track live-console control-queue depth in records, or `0` to attach no control channel
+    /// Per-track live-control queue depth in records, or `0` to attach no control channel
     /// and no command staging at all (issue #137 D1).
-    pub console_command_queue_records: u64,
+    pub live_control_command_queue_records: u64,
     /// Meter window in render blocks, or `0` to attach no meters at all (issue #137 D2).
     ///
     /// Zero is the honest form of "metering off costs nothing": no observer is bound, so the
     /// render path does not fold a single sample. A nonzero value binds one post-matrix meter per
     /// track with a `blocks * quantum_frames` window; the port lease then gates whether a finished
     /// window is posted. `12` is ~31 frames per second at 48 kHz with a 128-frame quantum.
-    pub console_meter_blocks: u64,
+    pub live_control_meter_blocks: u64,
     /// Maximum declared observation taps to bind per effect, or `0` for no observation capacity
     /// at all (issue #143 D3, level 1).
     ///
-    /// Requires `console_command_queue_records != 0`: a subscription rides the effect's own
-    /// command queue, so observation without a console has no delivery path.
-    pub console_observation_taps: u64,
+    /// Requires `live_control_command_queue_records != 0`: a subscription rides the effect's own
+    /// command queue, so observation without live controls has no delivery path.
+    pub live_control_observation_taps: u64,
     /// The designated master track, **plus one**, or `0` for none (issue #143 D6).
     ///
     /// Boot v1 has no structural master bus, so `masterGrDb` is a designation rather than a discovery.
     /// Plus one because zero has to keep meaning "unset" in a word every V1 writer already zeroes.
-    pub console_master_track_plus_one: u64,
+    pub live_control_master_track_plus_one: u64,
 }
 
 impl WebBootOptions {
@@ -1057,19 +1056,19 @@ impl WebBootOptions {
             source_ring_frames: 0,
             reserved0: 0,
             maximum_memory_bytes: 0,
-            console_command_queue_records: 0,
-            console_meter_blocks: 0,
-            console_observation_taps: 0,
-            console_master_track_plus_one: 0,
+            live_control_command_queue_records: 0,
+            live_control_meter_blocks: 0,
+            live_control_observation_taps: 0,
+            live_control_master_track_plus_one: 0,
         }
     }
 
-    /// Explicit defaults with the live web console attached.
+    /// Explicit defaults with the live web controls attached.
     #[must_use]
-    pub const fn console_defaults() -> Self {
+    pub const fn live_control_defaults() -> Self {
         Self {
-            console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
-            console_meter_blocks: DEFAULT_METER_BLOCKS as u64,
+            live_control_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+            live_control_meter_blocks: DEFAULT_METER_BLOCKS as u64,
             ..Self::explicit_defaults()
         }
     }
@@ -1162,8 +1161,8 @@ pub struct WebResourceReport {
     /// Engine-owned bytes the plan's observation lanes and conflating cells retain (issue #143).
     ///
     /// Carved out of the report's first reserved word. Exactly zero for a session prepared with
-    /// `console_observation_taps == 0`, and that zero is *walked* over the built runtime rather
-    /// than computed from the configuration. The 224-byte layout is unchanged.
+    /// `live_control_observation_taps == 0`, and that zero is *walked* over the built runtime
+    /// rather than computed from the configuration. The 224-byte layout is unchanged.
     pub observation_retained_bytes: u64,
     /// Required-zero expansion words.
     pub reserved: [u64; 3],
@@ -1174,7 +1173,7 @@ struct PreparedBuffers {
     source_id: Box<[u8]>,
     source_pcm: Box<[f32]>,
     output_pcm: Box<[f32]>,
-    /// Fixed `MAXIMUM_COMMAND_RECORDS * COMMAND_RECORD_BYTES` live-console staging (issue #137 D1).
+    /// Fixed `MAXIMUM_COMMAND_RECORDS * COMMAND_RECORD_BYTES` live-control staging (issue #137 D1).
     command: Box<[u8]>,
     plane_references: Box<[MaybeUninit<&'static [f32]>]>,
     /// One fixed workspace for the trusted prepared-control companion and addressed EQ config.
@@ -1325,14 +1324,14 @@ struct ReadyOwnership {
     /// addressed to `channel = both` on a per-lane effect parameter lowers to one span per lane,
     /// plus `2 * track_count` for the coalesced solo emission (issue #210 phase 1).
     command_decoded: Box<[StagedCommand]>,
-    /// Issue #210 phase 1: the console's solo bits and its mirrors of user mute and of what the
-    /// render plane was last told. Solo composes into the *existing* mute records at admission and
-    /// adds nothing below it, so this is the whole of solo-in-place on the host side.
-    solo: ConsoleSoloState,
+    /// Issue #210 phase 1: the live controls' solo bits and their mirrors of user mute and of what
+    /// the render plane was last told. Solo composes into the *existing* mute records at admission
+    /// and adds nothing below it, so this is the whole of solo-in-place on the host side.
+    solo: LiveControlSoloState,
     /// Records admitted per destination queue since the last successful render.
     ///
-    /// The browser's control plane and render plane are the same thread and every console stage
-    /// drains its whole queue at the top of every block, so a successful render empties every
+    /// The browser's control plane and render plane are the same thread and every live-control
+    /// stage drains its whole queue at the top of every block, so a successful render empties every
     /// control queue. That is what makes this an exact free-slot count rather than an estimate,
     /// and it is what lets a submission be refused *before* anything is pushed.
     in_flight: Box<[u32]>,
@@ -1355,7 +1354,7 @@ struct ReadyOwnership {
     spectrum_capture: Option<PreparedSpectrumCapture>,
     host: PreparedHost,
     /// Issue #137 D2: meter consumers, declared after the plan that owns their producers. Empty
-    /// when `console_meter_blocks` was zero, in which case no observer exists at all.
+    /// when `live_control_meter_blocks` was zero, in which case no observer exists at all.
     meters: Vec<MeterConsumer>,
     /// Issue #143: one reader set per observed effect instance, in the same dense `effect_slot`
     /// order the command producers use, so an addressed subscription reaches its lane with one
@@ -1495,7 +1494,7 @@ impl ReadyOwnership {
         value
     }
 
-    /// The dense destination-queue index of one addressed console channel.
+    /// The dense destination-queue index of one addressed live-control channel.
     ///
     /// The layout is frozen here and nowhere else:
     ///
@@ -1759,7 +1758,7 @@ impl AudioWorkletEngineHost {
         Self::boot_with_spectrum(document, options, None)
     }
 
-    /// Prepare one optional graph spectrum observer alongside the existing console/meter plan.
+    /// Prepare one optional graph spectrum observer alongside the existing live-control/meter plan.
     ///
     /// The request is supplied before boot because observer bindings are part of the immutable
     /// prepared graph. A replacement/reboot creates a fresh request and a fresh capture owner.
@@ -1938,7 +1937,7 @@ impl AudioWorkletEngineHost {
         &self.resources
     }
 
-    /// Read the last live-console submission report (issue #137 D1).
+    /// Read the last live-control submission report (issue #137 D1).
     #[must_use]
     pub const fn command_report(&self) -> &WebCommandReport {
         &self.command_report
@@ -1946,15 +1945,15 @@ impl AudioWorkletEngineHost {
 
     /// Canonical normalized track order, the addressing authority for `track_index`.
     #[must_use]
-    pub fn console_tracks(&self) -> &[Box<str>] {
+    pub fn live_control_tracks(&self) -> &[Box<str>] {
         self.ready.as_ref().map_or(&[], |ready| &ready.tracks)
     }
 
     /// Number of sources the compiled session declares; zero before compilation (issue #207).
     ///
     /// This is the bounds authority for every other source query, exactly as
-    /// [`AudioWorkletEngineHost::console_tracks`] is for `track_index`: the shape queries report a
-    /// sentinel for an out-of-range index.
+    /// [`AudioWorkletEngineHost::live_control_tracks`] is for `track_index`: the shape queries
+    /// report a sentinel for an out-of-range index.
     #[must_use]
     pub fn session_source_count(&self) -> usize {
         self.ready
@@ -2531,7 +2530,7 @@ impl AudioWorkletEngineHost {
     fn next_meter_boundary(&self, sample: u64) -> u64 {
         let Some(period) = self
             .options
-            .console_meter_blocks
+            .live_control_meter_blocks
             .checked_mul(u64::from(self.status.quantum_frames))
             .filter(|period| *period != 0)
         else {
@@ -2569,7 +2568,7 @@ impl AudioWorkletEngineHost {
         self.buffers.as_ref().map(|value| &*value.output_pcm)
     }
 
-    /// Mutable live-console command staging, or `None` when no console was attached.
+    /// Mutable live-control command staging, or `None` when no live controls were attached.
     ///
     /// This is the buffer the JavaScript side writes records into through
     /// `miso_engine_web_v1_buffer_ptr(handle, BUFFER_COMMAND)`; it is public so an embedding that
@@ -2582,7 +2581,7 @@ impl AudioWorkletEngineHost {
             .filter(|value| !value.is_empty())
     }
 
-    /// Exact byte size of the live-console command staging buffer; zero when none was attached.
+    /// Exact byte size of the live-control command staging buffer; zero when none was attached.
     #[must_use]
     pub fn command_staging_bytes(&self) -> u64 {
         self.buffers
@@ -2711,16 +2710,16 @@ impl AudioWorkletEngineHost {
         self.submit_commands_inner(count, Some(companion_bytes))
     }
 
-    /// Whether preparation attached a live-console control channel (issue #137 D1).
+    /// Whether preparation attached a live-control channel (issue #137 D1).
     #[must_use]
-    pub fn console_attached(&self) -> bool {
+    pub fn live_controls_attached(&self) -> bool {
         self.ready
             .as_ref()
             .is_some_and(|ready| !ready.controls.is_empty())
     }
 
-    /// Copy one canonical console track ID into ID staging; returns its byte length.
-    pub(crate) fn copy_console_track_id(&mut self, index: u32) -> u32 {
+    /// Copy one canonical live-control track ID into ID staging; returns its byte length.
+    pub(crate) fn copy_live_control_track_id(&mut self, index: u32) -> u32 {
         let Some(ready) = self.ready.as_ref() else {
             return 0;
         };
@@ -2865,7 +2864,7 @@ impl AudioWorkletEngineHost {
         let quantum = self.status.quantum_frames as usize;
         let meter_period = self
             .options
-            .console_meter_blocks
+            .live_control_meter_blocks
             .checked_mul(u64::from(self.status.quantum_frames));
         let Some(ready) = self.ready.as_mut() else {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
@@ -2978,7 +2977,7 @@ impl AudioWorkletEngineHost {
         if count > MAXIMUM_COMMAND_RECORDS {
             return self.finish_commands(RESULT_INVALID_ARGUMENT, COMMAND_REASON_MALFORMED, 0, 0);
         }
-        if !self.console_attached() {
+        if !self.live_controls_attached() {
             return self.finish_commands(RESULT_UNSUPPORTED, COMMAND_REASON_UNSUPPORTED_KIND, 0, 0);
         }
         let applied_at_sample = self.status.next_absolute_sample;
@@ -2989,9 +2988,9 @@ impl AudioWorkletEngineHost {
         if self.ready.is_none() {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         }
-        // Disjoint borrows: the staged bytes live in `buffers`, the console lives in `ready`.
+        // Disjoint borrows: the staged bytes live in `buffers`, the live controls live in `ready`.
         let Some((buffers, ready)) = self.buffers.as_ref().zip(self.ready.as_mut()) else {
-            return self.fail(RESULT_INTERNAL, b"web.internal.console\t$\n");
+            return self.fail(RESULT_INTERNAL, b"web.internal.live_controls\t$\n");
         };
         let Some(bytes) = buffers.command.get(..staged) else {
             return self.finish_commands(RESULT_INVALID_ARGUMENT, COMMAND_REASON_MALFORMED, 0, 0);
@@ -3057,20 +3056,20 @@ impl AudioWorkletEngineHost {
         self.ready.as_ref().map(|ready| ready.command_decoded.len())
     }
 
-    /// The console's solo state, for the issue #210 phase 1 evals.
+    /// The live controls' solo state, for the issue #210 phase 1 evals.
     ///
     /// The ABI has no readback of it on purpose -- solo is control-plane state and the app is the
     /// one that issued every gesture that moved it -- so this exists only for the tests that have
     /// to prove the mirror agrees with the session it was prepared from.
     #[cfg(test)]
-    pub(crate) fn console_solo(&self) -> Option<&ConsoleSoloState> {
+    pub(crate) fn live_control_solo(&self) -> Option<&LiveControlSoloState> {
         self.ready.as_ref().map(|ready| &ready.solo)
     }
 
     /// Drain every finished meter window into the frame buffer (issue #137 D2).
     ///
     /// Returns the number of complete windows folded by this call. Zero work happens without the
-    /// lease, and a host prepared with `console_meter_blocks == 0` has no observer to drain.
+    /// lease, and a host prepared with `live_control_meter_blocks == 0` has no observer to drain.
     ///
     /// Allocation-free by construction: it moves `Copy` snapshots out of bounded queues into a
     /// buffer allocated at compilation.
@@ -3878,10 +3877,10 @@ impl CommandRecord {
     /// Lower one addressed track-builtin record, or say why it cannot be.
     ///
     /// Issue #140 C: `fader_db` and `mute` are no longer refused here. They lower onto the live
-    /// ramped fader section (`FaderMuteRampBuiltins`), which a console-attached track binds in
-    /// place of the prepared `FaderMuteBuiltins`. A track with no console still refuses them --
-    /// with [`COMMAND_REASON_UNSUPPORTED_KIND`], because the target exists and the value is legal
-    /// and this *session* has no write path -- which is exactly what the reason means.
+    /// ramped fader section (`FaderMuteRampBuiltins`), which a live-control-attached track binds in
+    /// place of the prepared `FaderMuteBuiltins`. A track with no live controls still refuses them
+    /// -- with [`COMMAND_REASON_UNSUPPORTED_KIND`], because the target exists and the value is
+    /// legal and this *session* has no write path -- which is exactly what the reason means.
     fn into_track_record(self) -> Result<AdmittedCommand, u32> {
         match self.kind {
             COMMAND_PAN => {
@@ -3988,9 +3987,9 @@ impl CommandRecord {
     /// Read one `solo` record's requested bit, or say why it cannot be read (issue #210 phase 1).
     ///
     /// Deliberately *not* an arm of [`Self::into_track_record`]: a solo record lowers to no record
-    /// of its own. It moves console state, and the mute records that state composes to are staged
-    /// once, coalesced, at the end of the submission's first pass. The shape rules are `mute`'s,
-    /// with `channel = 255` because solo addresses a strip and not a lane, and the same
+    /// of its own. It moves live-control state, and the mute records that state composes to are
+    /// staged once, coalesced, at the end of the submission's first pass. The shape rules are
+    /// `mute`'s, with `channel = 255` because solo addresses a strip and not a lane, and the same
     /// `DOMAIN`-for-a-non-boolean rule `mute` uses for `values[0]`.
     const fn into_solo_request(self) -> Result<bool, u32> {
         if self.rack != 255 || self.channel != 255 {
@@ -4158,7 +4157,7 @@ const fn lane_selector(channel: u8) -> Option<BuiltinLaneSelector> {
 ///
 /// # The solo transaction (issue #210 phase 1)
 ///
-/// Pass one now also mutates console solo state -- the solo bits, the user-mute mirror, the
+/// Pass one now also mutates live-control solo state -- the solo bits, the user-mute mirror, the
 /// emitted-mute mirror -- while it is still deciding whether the submission is admissible at all.
 /// So the state carries its own shadow and this wrapper is where it is closed: `commit` once pass
 /// three has actually pushed, `rollback` on every refusal. A refused submission leaves host state
@@ -4309,9 +4308,9 @@ fn admit_commands_staged(
                 });
                 (track_count + track, 1)
             }
-            // Solo lowers to nothing here. It moves one console bit; the records that bit composes
-            // to are the coalescing pass's business, because a batch of alternating toggles would
-            // otherwise fan out up to `2 * track_count` records *per transition*.
+            // Solo lowers to nothing here. It moves one live-control bit; the records that bit
+            // composes to are the coalescing pass's business, because a batch of alternating
+            // toggles would otherwise fan out up to `2 * track_count` records *per transition*.
             COMMAND_SOLO => {
                 let engaged = command
                     .into_solo_request()
@@ -4523,7 +4522,7 @@ fn admit_commands_staged(
         }
     }
     // The coalesced net emission (issue #210 phase 1, correction 1). Every solo and mute change in
-    // the batch has been applied; what the console owes the render plane is now the difference
+    // the batch has been applied; what the live controls owe the render plane is now the difference
     // between the composed effective mute and what the render plane was last told -- at most two
     // records per track, and **never** a redundant one. That last clause is load-bearing for bit
     // identity, not an optimisation: re-muting an already-settled-muted lane with a nonzero
@@ -4532,7 +4531,8 @@ fn admit_commands_staged(
     // mute command already staged its own record and the difference is empty by construction.
     //
     // The fade is the last solo record's `smoothing_samples`: a batch is one gesture, and the
-    // gesture that moved the solo state is the one whose declick window the console asked for.
+    // gesture that moved the solo state is the one whose declick window the live controls asked
+    // for.
     if solo_seen {
         for track in 0..track_count {
             let slot = track_count + track;
@@ -5350,7 +5350,7 @@ fn project_buffers(
     let output_pcm_bytes = u64::from(quantum_frames)
         .checked_mul(8)
         .ok_or_else(arithmetic)?;
-    let command_records = if options.console_command_queue_records == 0 {
+    let command_records = if options.live_control_command_queue_records == 0 {
         0
     } else {
         MAXIMUM_COMMAND_RECORDS
@@ -5490,16 +5490,18 @@ fn validate_options(mut options: WebBootOptions) -> Result<WebBootOptions, BootF
             "web.options.reserved0",
         ));
     }
-    if options.console_observation_taps > u64::from(MAXIMUM_OBSERVATION_TAPS)
-        || (options.console_observation_taps != 0 && options.console_command_queue_records == 0)
-        || options.console_master_track_plus_one > u64::from(u32::MAX)
-        || (options.console_master_track_plus_one != 0 && options.console_observation_taps == 0)
-        || options.console_command_queue_records > u64::from(MAXIMUM_COMMAND_RECORDS)
-        || options.console_meter_blocks > u64::from(u32::MAX)
+    if options.live_control_observation_taps > u64::from(MAXIMUM_OBSERVATION_TAPS)
+        || (options.live_control_observation_taps != 0
+            && options.live_control_command_queue_records == 0)
+        || options.live_control_master_track_plus_one > u64::from(u32::MAX)
+        || (options.live_control_master_track_plus_one != 0
+            && options.live_control_observation_taps == 0)
+        || options.live_control_command_queue_records > u64::from(MAXIMUM_COMMAND_RECORDS)
+        || options.live_control_meter_blocks > u64::from(u32::MAX)
     {
         return Err(BootFailure::fixed(
             RESULT_REFUSED_OPTIONS,
-            "web.options.console",
+            "web.options.live_controls",
         ));
     }
     Ok(options)
@@ -5599,7 +5601,7 @@ fn prepare_caps(
             total.checked_add(u32::try_from(lane.segments.len()).ok()?)
         })
         .unwrap_or(u32::MAX)
-        .max(u32::try_from(options.console_command_queue_records).unwrap_or(u32::MAX))
+        .max(u32::try_from(options.live_control_command_queue_records).unwrap_or(u32::MAX))
         .max(1);
     HostPrepareCaps {
         shape: HostShapePolicy::Exact {
@@ -5639,9 +5641,9 @@ fn compile_ready(
     mut report: WebResourceReport,
     spectrum_request: Option<&SpectrumPreparationRequest>,
 ) -> Result<(ReadyOwnership, WebResourceReport), BootFailure> {
-    let console = console_request(options, session.quantum().0)
-        .ok_or_else(|| fixed_diagnostic("web.console.config"))?;
-    let meters: Vec<HostMeterRequest> = if console.meter_period_frames.is_some() {
+    let live_controls = live_control_request(options, session.quantum().0)
+        .ok_or_else(|| fixed_diagnostic("web.live_controls.config"))?;
+    let meters: Vec<HostMeterRequest> = if live_controls.meter_period_frames.is_some() {
         session
             .normalized_model()
             .tracks
@@ -5657,9 +5659,13 @@ fn compile_ready(
     };
     let (host, handles, spectrum_capture) = match spectrum_request {
         Some(SpectrumPreparationRequest::Single(request)) => {
-            let (host, handles, capture) =
-                prepare_host_runtime_with_console_and_spectrum(&session, caps, &console, request)
-                    .map_err(BootFailure::preparation)?;
+            let (host, handles, capture) = prepare_host_runtime_with_live_controls_and_spectrum(
+                &session,
+                caps,
+                &live_controls,
+                request,
+            )
+            .map_err(BootFailure::preparation)?;
             (
                 host,
                 handles,
@@ -5668,8 +5674,11 @@ fn compile_ready(
         }
         Some(SpectrumPreparationRequest::Collection(request)) => {
             let (host, handles, capture) =
-                host_core::prepare_host_runtime_with_console_and_spectrum_collection(
-                    &session, caps, &console, request,
+                host_core::prepare_host_runtime_with_live_controls_and_spectrum_collection(
+                    &session,
+                    caps,
+                    &live_controls,
+                    request,
                 )
                 .map_err(BootFailure::preparation)?;
             (
@@ -5680,7 +5689,10 @@ fn compile_ready(
         }
         None => {
             let (host, handles) = prepare_host_runtime_with_selected_meters_between_render_calls(
-                &session, caps, &console, &meters,
+                &session,
+                caps,
+                &live_controls,
+                &meters,
             )
             .map_err(BootFailure::preparation)?;
             (host, handles, None)
@@ -5742,13 +5754,13 @@ fn compile_ready(
                 candidate[0],
                 candidate[1],
             )
-            .map_err(|_| fixed_diagnostic("web.console.input_filter"))?;
+            .map_err(|_| fixed_diagnostic("web.live_controls.input_filter"))?;
             builtins::validate_input_filter_pair(
                 session.sample_rate().0,
                 candidate[2],
                 candidate[3],
             )
-            .map_err(|_| fixed_diagnostic("web.console.input_filter"))?;
+            .map_err(|_| fixed_diagnostic("web.live_controls.input_filter"))?;
             input_filter_shadows.push(BuiltinInputShadow {
                 committed: candidate,
                 candidate,
@@ -5786,7 +5798,7 @@ fn compile_ready(
     report.graph_delay_bytes = engine.graph_delay_bytes;
     report.largest_named_allocation_bytes = largest_named;
     // Issue #143 R7: the engine's walked row, carried through unchanged. Zero for a session
-    // prepared with `console_observation_taps == 0`.
+    // prepared with `live_control_observation_taps == 0`.
     report.observation_retained_bytes = engine.observation_retained_bytes;
     let track_count = handles.tracks.len();
     let mut rack_effects = Vec::new();
@@ -5803,7 +5815,7 @@ fn compile_ready(
         .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
     for track in &session.normalized_model().tracks {
         let count = |effects: usize| -> Result<u32, Vec<u8>> {
-            u32::try_from(effects).map_err(|_| fixed_diagnostic("web.console.effects"))
+            u32::try_from(effects).map_err(|_| fixed_diagnostic("web.live_controls.effects"))
         };
         rack_effects.push([
             count(track.simd1.effects.len())?,
@@ -5825,7 +5837,7 @@ fn compile_ready(
         for count in counts {
             total_effects = total_effects
                 .checked_add(*count)
-                .ok_or_else(|| fixed_diagnostic("web.console.effects"))?;
+                .ok_or_else(|| fixed_diagnostic("web.live_controls.effects"))?;
         }
     }
     let track_index: BTreeMap<&str, usize> = handles
@@ -5841,7 +5853,7 @@ fn compile_ready(
     effect_controls.resize_with(total_effects as usize, || None);
     for producer in handles.effect_controls {
         let Some(track) = track_index.get(producer.track_id.as_ref()).copied() else {
-            return Err(fixed_diagnostic("web.console.effects").into());
+            return Err(fixed_diagnostic("web.live_controls.effects").into());
         };
         let rack = match producer.rack {
             EffectRack::Simd1 => 0_usize,
@@ -5852,10 +5864,10 @@ fn compile_ready(
         let offset: u32 = counts[..rack].iter().sum();
         let slot = (effect_base[track] + offset + producer.effect_index) as usize;
         let Some(entry) = effect_controls.get_mut(slot) else {
-            return Err(fixed_diagnostic("web.console.effects").into());
+            return Err(fixed_diagnostic("web.live_controls.effects").into());
         };
         if entry.is_some() {
-            return Err(fixed_diagnostic("web.console.effects").into());
+            return Err(fixed_diagnostic("web.live_controls.effects").into());
         }
         *entry = Some(producer);
     }
@@ -5893,7 +5905,7 @@ fn compile_ready(
     let queue_count = track_count
         .checked_mul(3)
         .and_then(|value| value.checked_add(total_effects as usize))
-        .ok_or_else(|| fixed_diagnostic("web.console.effects"))?;
+        .ok_or_else(|| fixed_diagnostic("web.live_controls.effects"))?;
     // Issue #143: the observation handles are permuted into the same dense `effect_slot` order
     // the command producers use, so one index serves both the subscribe path and the poll.
     let mut effect_observations: Vec<Option<EffectObservationHandle>> = Vec::new();
@@ -5912,7 +5924,7 @@ fn compile_ready(
     let observation_present = vec![false; track_count];
     for handle in handles.effect_observations {
         let Some(track) = track_index.get(handle.track_id.as_ref()).copied() else {
-            return Err(fixed_diagnostic("web.console.observation").into());
+            return Err(fixed_diagnostic("web.live_controls.observation").into());
         };
         let rack = match handle.rack {
             EffectRack::Simd1 => 0_usize,
@@ -5923,15 +5935,15 @@ fn compile_ready(
         let offset: u32 = counts[..rack].iter().sum();
         let slot = (effect_base[track] + offset + handle.effect_index) as usize;
         let Some(entry) = effect_observations.get_mut(slot) else {
-            return Err(fixed_diagnostic("web.console.observation").into());
+            return Err(fixed_diagnostic("web.live_controls.observation").into());
         };
         if entry.is_some() {
-            return Err(fixed_diagnostic("web.console.observation").into());
+            return Err(fixed_diagnostic("web.live_controls.observation").into());
         }
         // The frame carries one gain-reduction slot per track, so every observed effect of a track
         // points at that track and the poll folds them max-magnitude into the one slot.
         observation_tracks[slot] =
-            u32::try_from(track).map_err(|_| fixed_diagnostic("web.console.observation"))?;
+            u32::try_from(track).map_err(|_| fixed_diagnostic("web.live_controls.observation"))?;
         let tap_count = handle.descriptor.observations.len();
         let mut arm_samples = Vec::new();
         arm_samples
@@ -5982,7 +5994,7 @@ fn compile_ready(
         .max(report.largest_bridge_allocation_bytes);
     let mut meter_header = empty_meter_header();
     meter_header.track_count =
-        u32::try_from(track_count).map_err(|_| fixed_diagnostic("web.console.effects"))?;
+        u32::try_from(track_count).map_err(|_| fixed_diagnostic("web.live_controls.effects"))?;
     meter_header.master_track_plus_one = handles
         .master_track
         .map_or(0, |track| track.saturating_add(1));
@@ -6050,7 +6062,7 @@ fn compile_ready(
         effect_base: effect_base.into_boxed_slice(),
         command_wanted: boxed_zero_u32(queue_count)?,
         command_decoded: boxed_command_staging(track_count)?,
-        solo: ConsoleSoloState::try_new(&prepared_mutes)
+        solo: LiveControlSoloState::try_new(&prepared_mutes)
             .map_err(|_| fixed_diagnostic("web.resource.allocation"))?,
         in_flight: boxed_zero_u32(queue_count)?,
         has_in_flight_commands: false,
@@ -6090,30 +6102,34 @@ fn compile_ready(
     Ok((ready, report))
 }
 
-/// Translate the browser configuration's two console words into the facade's console request.
+/// Translate the browser configuration's two live-control words into the facade's live-control
+/// request.
 ///
-/// `console_meter_blocks == 0` is the honest form of "metering off": no observer is bound, so the
-/// render path folds nothing at all. The port lease is a second, finer switch over posting.
-fn console_request(options: WebBootOptions, quantum_frames: u32) -> Option<HostConsoleRequest> {
-    let control_queue_depth = match options.console_command_queue_records {
+/// `live_control_meter_blocks == 0` is the honest form of "metering off": no observer is bound, so
+/// the render path folds nothing at all. The port lease is a second, finer switch over posting.
+fn live_control_request(
+    options: WebBootOptions,
+    quantum_frames: u32,
+) -> Option<HostLiveControlRequest> {
+    let control_queue_depth = match options.live_control_command_queue_records {
         0 => None,
         records => Some(NonZeroUsize::new(u32::try_from(records).ok()? as usize)?),
     };
-    let meter_period_frames = if options.console_meter_blocks == 0 {
+    let meter_period_frames = if options.live_control_meter_blocks == 0 {
         None
     } else {
-        let blocks = u32::try_from(options.console_meter_blocks).ok()?;
+        let blocks = u32::try_from(options.live_control_meter_blocks).ok()?;
         Some(NonZeroU32::new(blocks.checked_mul(quantum_frames)?)?)
     };
-    Some(HostConsoleRequest {
+    Some(HostLiveControlRequest {
         control_queue_depth,
         meter_period_frames,
         // One window per track per post, plus headroom for a control-side stall of a few windows.
         meter_queue_depth: NonZeroUsize::new(8)?,
         meter_tap: MeterTap::PostMatrix,
         // Issue #143 D3/D6: both are carved browser configuration words, translated once, here.
-        observation_taps: u32::try_from(options.console_observation_taps).ok()?,
-        master_track: match options.console_master_track_plus_one {
+        observation_taps: u32::try_from(options.live_control_observation_taps).ok()?,
+        master_track: match options.live_control_master_track_plus_one {
             0 => None,
             value => Some(u32::try_from(value.checked_sub(1)?).ok()?),
         },
@@ -6151,8 +6167,8 @@ fn boxed_command_staging(track_count: usize) -> Result<Box<[StagedCommand]>, Vec
     // parameter lowers to one record per lane (#140 C).
     //
     // Plus `2 * track_count` for issue #210 phase 1's coalesced solo emission. A submission that
-    // moves a solo bit owes the console the difference between the composed effective mute and
-    // what the render plane was last told; that is at most two records per track, because
+    // moves a solo bit owes the live controls the difference between the composed effective mute
+    // and what the render plane was last told; that is at most two records per track, because
     // `TrackFaderRecord::Mute` carries one `muted` bool and a track whose user mute is
     // asymmetric needs one record per lane to restore. The two terms add rather than max: a batch
     // may carry 256 effect-parameter records *and* a solo toggle.

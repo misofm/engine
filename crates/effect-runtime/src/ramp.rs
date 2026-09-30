@@ -64,7 +64,7 @@ impl LinearRamp {
     /// A retarget to the value the ramp already holds arms a ramp whose every step is `+0.0`. It
     /// produces `current` on every sample of the window and then assigns a target that is already
     /// `current` — `samples` samples of arithmetic with no observable effect. It is not a rare
-    /// case: a console re-sends a parameter it did not move on every automation refresh, and
+    /// case: live controls re-send a parameter they did not move on every automation refresh, and
     /// because the bank kernels take their ramping decision across *all* lanes, one lane's no-op
     /// ramp drags a whole eight-track bank onto the ramping path for the length of the window.
     ///

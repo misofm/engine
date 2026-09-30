@@ -500,7 +500,7 @@ describe("validation refusals name the offending path", () => {
 
   test("prepared EQ cuts accept typed booleans while defaults stay sparse", () => {
     // The prepared descriptor rows are authorable through the same catalog as old EQ rows, but
-    // they do not become live console edits. Red mutation: treat booleans as numbers, or assign
+    // they do not become live-control edits. Red mutation: treat booleans as numbers, or assign
     // new rows ahead of the old IDs, and one of these normalized wire records changes.
     const withCuts = oneTrack({
       id: "eq.prepared.cuts",

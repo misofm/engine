@@ -476,11 +476,11 @@ fn mono_reopen_drives_the_next_render_from_the_copied_state() {
 ///
 /// # The seam this closes
 ///
-/// A *live* bypass clears the channel-symmetry witness' `UNBYPASSED` term, so a console-driven
+/// A *live* bypass clears the channel-symmetry witness' `UNBYPASSED` term, so a live-control-driven
 /// bypassed lane declines the collapse and never reaches a one-plane body. A **prepared** bypass on
-/// a console-free bank does not: `EffectBankStage::lane_symmetry` is the effect's designed-word
-/// comparison alone, and it leaves `UNBYPASSED` unconditionally true. That asymmetry is written
-/// down in `effect_contract::symmetry` as "a seam the collapse must close", and this
+/// a live-control-free bank does not: `EffectBankStage::lane_symmetry` is the effect's
+/// designed-word comparison alone, and it leaves `UNBYPASSED` unconditionally true. That asymmetry
+/// is written down in `effect_contract::symmetry` as "a seam the collapse must close", and this
 /// closes it by measurement rather than by the argument that the bypass is per plane inside the
 /// kernel.
 ///

@@ -304,10 +304,11 @@ def check_limits_vocabulary(worklet: str, fixture: str) -> None:
     """The fixture's boot `options` object and the worklet's guard are one vocabulary.
 
     The same staleness class as the resource rows, on the other half of the fixture, and it had
-    already bitten: issue #143 carved `consoleObservationTaps` and `consoleMasterTrackPlusOne`
-    out of the configuration's last two reserved words and added both to the old guard, and the
-    fixture's policy object was never extended. The field list is checked with `exactFields`, so the
-    browser leg refused the fixture at boot with `RESULT_INVALID_ARGUMENT` from #143 until #217.
+    already bitten: issue #143 carved `liveControlObservationTaps` and
+    `liveControlMasterTrackPlusOne` out of the configuration's last two reserved words and added
+    both to the old guard, and the fixture's policy object was never extended. The field list is
+    checked with `exactFields`, so the browser leg refused the fixture at boot with
+    `RESULT_INVALID_ARGUMENT` from #143 until #217.
     Nothing was red: the `--check` leg drives the module through `direct-oracle.mjs`, which writes
     the configuration words itself and never crosses `miso-engine-v1-audio-worklet.js`, and the
     browser leg is not a sweep row because its sibling modes need a browser.
@@ -504,7 +505,7 @@ def self_test() -> int:
     def add_fixture_limit(name: str):
         def apply(pair: tuple) -> tuple:
             actual, expected, worklet, fixture = pair
-            anchor = "\n    consoleMasterTrackPlusOne: 0n,"
+            anchor = "\n    liveControlMasterTrackPlusOne: 0n,"
             require(anchor in fixture, "self-test mutation matched nothing")
             return actual, expected, worklet, fixture.replace(
                 anchor, f"{anchor}\n    {name}: 0n,", 1
@@ -515,7 +516,7 @@ def self_test() -> int:
     def add_worklet_limit(name: str):
         def apply(pair: tuple) -> tuple:
             actual, expected, worklet, fixture = pair
-            anchor = '"consoleObservationTaps", "consoleMasterTrackPlusOne",'
+            anchor = '"liveControlObservationTaps", "liveControlMasterTrackPlusOne",'
             require(anchor in worklet, "self-test mutation matched nothing")
             return actual, expected, worklet.replace(
                 anchor, f'{anchor} "{name}",', 1
@@ -588,12 +589,12 @@ def self_test() -> int:
         # The boot-options vocabulary, and the exact #143 regression this fixture shipped with.
         (
             "the fixture's bootOptions() drops the #143 observation-taps word again",
-            drop_fixture_limit("consoleObservationTaps"),
+            drop_fixture_limit("liveControlObservationTaps"),
             None,
         ),
         (
             "the fixture's bootOptions() drops the #143 master-designation word again",
-            drop_fixture_limit("consoleMasterTrackPlusOne"),
+            drop_fixture_limit("liveControlMasterTrackPlusOne"),
             None,
         ),
         (
@@ -603,12 +604,12 @@ def self_test() -> int:
         ),
         (
             "the worklet declares a word the fixture does not supply",
-            add_worklet_limit("consoleAuxPlaneCount"),
+            add_worklet_limit("liveControlAuxPlaneCount"),
             None,
         ),
         (
             "the fixture supplies a word the worklet does not declare",
-            add_fixture_limit("consoleAuxPlaneCount"),
+            add_fixture_limit("liveControlAuxPlaneCount"),
             None,
         ),
         # The partition itself.

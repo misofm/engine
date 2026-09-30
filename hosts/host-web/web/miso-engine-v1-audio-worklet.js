@@ -71,8 +71,8 @@ const SPECTRUM_STREAM_STATUSES = new Set([0, 1, 2, 3, 4, 5, 6]);
 
 const INIT_FIELDS = ["module", "document", "options"];
 const OPTION_FIELDS = [
-  "sourceRingFrames", "maximumMemoryBytes", "consoleCommandQueueRecords", "consoleMeterBlocks",
-  "consoleObservationTaps", "consoleMasterTrackPlusOne", "spectrumHopFrames", "spectrum",
+  "sourceRingFrames", "maximumMemoryBytes", "liveControlCommandQueueRecords", "liveControlMeterBlocks",
+  "liveControlObservationTaps", "liveControlMasterTrackPlusOne", "spectrumHopFrames", "spectrum",
   "spectrumCollection",
 ];
 const SPECTRUM_OPTION_FIELDS = OPTION_FIELDS.filter((field) => field !== "spectrumHopFrames");
@@ -242,8 +242,8 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     this.handle = 0;
     this.handleDisposed = false;
     this.initializationErrorPosted = false;
-    // Issue #137: both leases start released, so a session that never asks for a console pays a
-    // single `false` test per block and nothing else.
+    // Issue #137: both leases start released, so a session that never asks for live controls pays
+    // a single `false` test per block and nothing else.
     this.meterLease = false;
     this.telemetryLease = false;
     this.meterSequence = 0;
@@ -410,7 +410,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
         || status.nextAbsoluteSample !== 0n || status.renderedQuanta !== 0n) {
       return RESULT_INVALID_ARGUMENT;
     }
-    if (!this.bindConsole(init)) return RESULT_INTERNAL;
+    if (!this.bindLiveControls(init)) return RESULT_INTERNAL;
     this.memoryBytes = this.memoryBuffer.byteLength;
     this.port.postMessage({
       tag: "miso.ready.v1",
@@ -546,15 +546,15 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     return RESULT_OK;
   }
 
-  /// Bind every live-console view and preallocate every frame the render callback posts.
+  /// Bind every live-control view and preallocate every frame the render callback posts.
   ///
   /// Issue #137: nothing in `process()` may allocate, so every message body, every typed-array
   /// copy and every track identity is built here, once, on the construction path that is already
   /// allowed to allocate. `process()` mutates the frozen shapes and posts them; the structured
   /// clone `postMessage` performs is the only allocation left, and it is the one the ABI cannot
   /// avoid.
-  bindConsole(init) {
-    this.consoleAttached = init.options.consoleCommandQueueRecords !== 0n;
+  bindLiveControls(init) {
+    this.liveControlsAttached = init.options.liveControlCommandQueueRecords !== 0n;
     const commandPointer = this.exports.miso_engine_web_v1_buffer_ptr(this.handle, BUFFER_COMMAND);
     const commandCapacity = this.exports.miso_engine_web_v1_buffer_capacity(
       this.handle,
@@ -563,7 +563,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     const reportPointer = this.exports.miso_engine_web_v1_command_report_ptr(this.handle);
     if (!u32(reportPointer) || reportPointer === 0) return false;
     this.commandReport = new DataView(this.memoryBuffer, reportPointer, COMMAND_REPORT_BYTES);
-    if (this.consoleAttached) {
+    if (this.liveControlsAttached) {
       if (!u32(commandPointer) || commandPointer === 0
           || commandCapacity !== MAXIMUM_COMMAND_RECORDS * COMMAND_RECORD_BYTES) return false;
       this.commandStaging = new Uint8Array(this.memoryBuffer, commandPointer, commandCapacity);
@@ -578,7 +578,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
         companionCapacity,
       );
     } else if (commandPointer !== 0 || commandCapacity !== 0) {
-      // A released console must own no staging at all; a nonzero row here would mean the engine
+      // Released live controls must own no staging at all; a nonzero row here would mean the engine
       // charged for a buffer the ABI says does not exist.
       return false;
     } else {
@@ -587,14 +587,14 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       if (companionPointer !== 0 || companionCapacity !== 0) return false;
     }
 
-    this.trackCount = this.exports.miso_engine_web_v1_console_track_count(this.handle);
+    this.trackCount = this.exports.miso_engine_web_v1_live_control_track_count(this.handle);
     if (!u32(this.trackCount)) return false;
     // `TextDecoder` is no more guaranteed in a `WorkletGlobalScope` than `TextEncoder` is, and
     // a session track ID is `[a-z][a-z0-9._-]{0,126}` by the session schema, so every byte is
     // ASCII by construction. A byte that is not is a corrupt artifact, not a decoding problem.
     this.trackIds = [];
     for (let index = 0; index < this.trackCount; index += 1) {
-      const length = this.exports.miso_engine_web_v1_console_track_id(this.handle, index);
+      const length = this.exports.miso_engine_web_v1_live_control_track_id(this.handle, index);
       if (!u32(length) || length === 0 || length > this.sourceIdCapacity) return false;
       const bytes = new Uint8Array(this.memoryBuffer, this.sourceIdPointer, length);
       let id = "";
@@ -709,8 +709,8 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       this.handle,
       BUFFER_METER_FRAME,
     );
-    this.metersAttached = init.options.consoleMeterBlocks !== 0n;
-    this.observationAttached = init.options.consoleObservationTaps !== 0n;
+    this.metersAttached = init.options.liveControlMeterBlocks !== 0n;
+    this.observationAttached = init.options.liveControlObservationTaps !== 0n;
     if (this.metersAttached) {
       // Issue #143 D5: the frame is `3T + 3` words -- the peak section exactly where it was, then
       // one non-negative gain-reduction magnitude per track and the master's.
@@ -800,18 +800,18 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     if (!u32(options.sourceRingFrames) || !validU64(options.maximumMemoryBytes)) {
       throw new RangeError("Invalid boot option");
     }
-    const consoleWords = [
-      options.consoleCommandQueueRecords, options.consoleMeterBlocks,
-      options.consoleObservationTaps, options.consoleMasterTrackPlusOne,
+    const liveControlWords = [
+      options.liveControlCommandQueueRecords, options.liveControlMeterBlocks,
+      options.liveControlObservationTaps, options.liveControlMasterTrackPlusOne,
     ];
-    if (consoleWords.some((value) => !validU64(value))) {
-      throw new RangeError("Invalid console boot option");
+    if (liveControlWords.some((value) => !validU64(value))) {
+      throw new RangeError("Invalid live-control boot option");
     }
     // A subscription rides the effect's own command queue, so capacity without one has no delivery
     // path; a master designation with no capacity would report a number nothing produces.
-    if ((options.consoleObservationTaps !== 0n && options.consoleCommandQueueRecords === 0n)
-        || (options.consoleMasterTrackPlusOne !== 0n
-          && options.consoleObservationTaps === 0n)) {
+    if ((options.liveControlObservationTaps !== 0n && options.liveControlCommandQueueRecords === 0n)
+        || (options.liveControlMasterTrackPlusOne !== 0n
+          && options.liveControlObservationTaps === 0n)) {
       throw new RangeError("Invalid observation boot option");
     }
     const view = new DataView(this.exports.memory.buffer, pointer, BOOT_OPTIONS_BYTES);
@@ -822,7 +822,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     view.setUint32(16, options.sourceRingFrames, true);
     view.setUint32(20, 0, true);
     view.setBigUint64(24, options.maximumMemoryBytes, true);
-    consoleWords.forEach((value, index) => view.setBigUint64(32 + index * 8, value, true));
+    liveControlWords.forEach((value, index) => view.setBigUint64(32 + index * 8, value, true));
   }
 
   readResources() {
@@ -843,7 +843,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       "graphSessionPlusPlanBytes", "graphIncrementalPlanBytes", "graphMetadataBytes",
       "graphDelayBytes", "largestNamedAllocationBytes",
       // Issue #143: carved from the report's first reserved word; zero for a session prepared
-      // with `consoleObservationTaps === 0n`.
+      // with `liveControlObservationTaps === 0n`.
       "observationRetainedBytes",
     ];
     const resources = {
@@ -1443,10 +1443,10 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       this.sticky(RESULT_INVALID_ARGUMENT, message.requestId ?? 0);
       return;
     }
-    if (!this.consoleAttached) {
-      // A session prepared with `consoleCommandQueueRecords === 0n` has no control channel and no
-      // staging buffer. That is a typed refusal of a well-formed request, not a protocol error, so
-      // the batch is acknowledged and its record block goes back to the caller untouched.
+    if (!this.liveControlsAttached) {
+      // A session prepared with `liveControlCommandQueueRecords === 0n` has no control channel and
+      // no staging buffer. That is a typed refusal of a well-formed request, not a protocol error,
+      // so the batch is acknowledged and its record block goes back to the caller untouched.
       this.port.postMessage({
         tag: "miso.ack.v1",
         requestId: message.requestId,

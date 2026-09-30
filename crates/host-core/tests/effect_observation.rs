@@ -17,8 +17,8 @@ use effect_contract::{
 };
 use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use host_core::{
-    EffectRack, HostConsoleHandles, HostConsoleRequest, HostPrepareCaps, HostShapePolicy,
-    PreparedHost, SourceSubmission, prepare_host_session_with_console,
+    EffectRack, HostLiveControlHandles, HostLiveControlRequest, HostPrepareCaps, HostShapePolicy,
+    PreparedHost, SourceSubmission, prepare_host_session_with_live_controls,
 };
 
 const SESSION: &str = include_str!("../../../fixtures/session/v1/compressor-bank-observation.json");
@@ -62,29 +62,29 @@ fn caps() -> HostPrepareCaps {
 /// The four legs of E1. Every one of them must render the corpus to the same bytes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Leg {
-    /// (a) No console at all: the pre-#137 path.
-    NoConsole,
-    /// (b) A console, but no observation capacity: level-1 zero.
-    ConsoleNoCapacity,
+    /// (a) No live controls at all: the pre-#137 path.
+    NoLiveControls,
+    /// (b) Live controls, but no observation capacity: level-1 zero.
+    LiveControlsNoCapacity,
     /// (c) Observation capacity, nothing armed: level-2 zero.
     CapacityUnarmed,
     /// (d) Every declared gain-reduction tap armed.
     AllArmed,
 }
 
-fn console(leg: Leg) -> HostConsoleRequest {
-    let console = matches!(
+fn live_controls(leg: Leg) -> HostLiveControlRequest {
+    let attached = matches!(
         leg,
-        Leg::ConsoleNoCapacity | Leg::CapacityUnarmed | Leg::AllArmed
+        Leg::LiveControlsNoCapacity | Leg::CapacityUnarmed | Leg::AllArmed
     );
-    HostConsoleRequest {
-        control_queue_depth: console.then(|| NonZeroUsize::new(8).expect("depth")),
-        meter_period_frames: console
+    HostLiveControlRequest {
+        control_queue_depth: attached.then(|| NonZeroUsize::new(8).expect("depth")),
+        meter_period_frames: attached
             .then(|| NonZeroU32::new(QUANTUM as u32 * WINDOW_BLOCKS).expect("period")),
         meter_queue_depth: NonZeroUsize::new(16).expect("meter depth"),
         meter_tap: MeterTap::PostMatrix,
         observation_taps: match leg {
-            Leg::NoConsole | Leg::ConsoleNoCapacity => 0,
+            Leg::NoLiveControls | Leg::LiveControlsNoCapacity => 0,
             Leg::CapacityUnarmed | Leg::AllArmed => 4,
         },
         master_track: matches!(leg, Leg::CapacityUnarmed | Leg::AllArmed).then_some(0),
@@ -93,7 +93,7 @@ fn console(leg: Leg) -> HostConsoleRequest {
 
 struct Session {
     prepared: PreparedHost,
-    handles: HostConsoleHandles,
+    handles: HostLiveControlHandles,
     block: usize,
 }
 
@@ -103,9 +103,10 @@ fn prepare(leg: Leg) -> Session {
 
 fn prepare_from(document: &str, leg: Leg) -> Session {
     let (_session, prepared, handles) =
-        prepare_host_session_with_console(document, &caps(), &console(leg)).unwrap_or_else(
-            |failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())),
-        );
+        prepare_host_session_with_live_controls(document, &caps(), &live_controls(leg))
+            .unwrap_or_else(|failure| {
+                panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
+            });
     assert_eq!(handles.tracks.len(), TRACKS);
     assert!(
         prepared.report.effect_bank_scratch_bytes > 0,
@@ -175,7 +176,7 @@ fn subscribe_all(session: &mut Session, armed: bool, window_blocks: u32) -> u64 
 }
 
 /// The reader for one track's compressor tap, in whichever rack the fixture declared it.
-fn reader(handles: &HostConsoleHandles, track: usize) -> &engine::realtime::ObservationReader {
+fn reader(handles: &HostLiveControlHandles, track: usize) -> &engine::realtime::ObservationReader {
     let id = handles.tracks[track].as_ref();
     let handle = handles
         .effect_observations
@@ -259,14 +260,18 @@ fn scalar_reference(threshold: f32, blocks: usize) -> ObservationSample {
 #[test]
 fn every_observation_leg_renders_the_corpus_to_the_same_bytes() {
     const BLOCKS: usize = 32;
-    let mut no_console = prepare(Leg::NoConsole);
-    let baseline = render(&mut no_console, BLOCKS);
+    let mut no_live_controls = prepare(Leg::NoLiveControls);
+    let baseline = render(&mut no_live_controls, BLOCKS);
     assert!(
         baseline.iter().any(|word| *word != 0),
         "the corpus is not silence"
     );
 
-    for leg in [Leg::ConsoleNoCapacity, Leg::CapacityUnarmed, Leg::AllArmed] {
+    for leg in [
+        Leg::LiveControlsNoCapacity,
+        Leg::CapacityUnarmed,
+        Leg::AllArmed,
+    ] {
         let mut session = prepare(leg);
         if leg == Leg::AllArmed {
             subscribe_all(&mut session, true, WINDOW_BLOCKS);
@@ -274,7 +279,7 @@ fn every_observation_leg_renders_the_corpus_to_the_same_bytes() {
         let rendered = render(&mut session, BLOCKS);
         assert_eq!(
             rendered, baseline,
-            "{leg:?} rendered different audio from the console-free path"
+            "{leg:?} rendered different audio from the live-control-free path"
         );
     }
 
@@ -297,7 +302,7 @@ fn every_observation_leg_renders_the_corpus_to_the_same_bytes() {
 /// the structure fails while the output stays identical, which is the point.
 #[test]
 fn a_session_that_asked_for_no_observation_holds_none() {
-    for leg in [Leg::NoConsole, Leg::ConsoleNoCapacity] {
+    for leg in [Leg::NoLiveControls, Leg::LiveControlsNoCapacity] {
         let session = prepare(leg);
         assert!(
             session.handles.effect_observations.is_empty(),
@@ -627,15 +632,15 @@ fn scalar_reference_windows(
 /// The per-node scalar publish site, which the banked fixture never reaches.
 ///
 /// One track cannot fill a cohort, so this instance renders through
-/// `graph::runtime::NodeKind::ConsoleEffect` rather than through a bank stage. Everything the
+/// `graph::runtime::NodeKind::LiveControlEffect` rather than through a bank stage. Everything the
 /// banked evals assert is asserted here for that path: the reading is the block's own, the window
 /// tiles, and the value equals an independent scalar run to the bit.
 ///
-/// Red mutation: publish **before** `process` in the `ConsoleEffect` arm of `execute_op` (the
+/// Red mutation: publish **before** `process` in the `LiveControlEffect` arm of `execute_op` (the
 /// #137-E1 mirror) -> the published window is one block stale and the bit comparison fails.
 #[test]
 fn the_per_node_scalar_path_publishes_its_own_block() {
-    let request = HostConsoleRequest {
+    let request = HostLiveControlRequest {
         control_queue_depth: Some(NonZeroUsize::new(8).expect("depth")),
         meter_period_frames: Some(NonZeroU32::new(QUANTUM as u32 * WINDOW_BLOCKS).expect("period")),
         meter_queue_depth: NonZeroUsize::new(16).expect("meter depth"),
@@ -644,7 +649,7 @@ fn the_per_node_scalar_path_publishes_its_own_block() {
         master_track: Some(0),
     };
     let (_session, prepared, handles) =
-        prepare_host_session_with_console(DYNAMIC_SESSION, &caps(), &request).unwrap_or_else(
+        prepare_host_session_with_live_controls(DYNAMIC_SESSION, &caps(), &request).unwrap_or_else(
             |failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())),
         );
     assert_eq!(
@@ -779,7 +784,7 @@ fn observation_retained_bytes_are_the_declared_menu_times_one_row_and_one_slot()
 
     // The graph's own reported bytes did not move: a session with capacity and one without report
     // the same plan and metadata sizes, because the lane is behind a pointer in a boxed variant.
-    let bare = prepare(Leg::ConsoleNoCapacity);
+    let bare = prepare(Leg::LiveControlsNoCapacity);
     assert_eq!(
         capable.prepared.report.graph_session_plus_plan_bytes,
         bare.prepared.report.graph_session_plus_plan_bytes,
@@ -791,10 +796,10 @@ fn observation_retained_bytes_are_the_declared_menu_times_one_row_and_one_slot()
     );
 }
 
-/// Observation capacity without a console is a rejection, not a silent half-attach.
+/// Observation capacity without live controls is a rejection, not a silent half-attach.
 #[test]
 fn observation_without_a_control_channel_is_refused() {
-    let request = HostConsoleRequest {
+    let request = HostLiveControlRequest {
         control_queue_depth: None,
         meter_period_frames: Some(NonZeroU32::new(QUANTUM as u32 * WINDOW_BLOCKS).expect("period")),
         meter_queue_depth: NonZeroUsize::new(16).expect("meter depth"),
@@ -802,21 +807,21 @@ fn observation_without_a_control_channel_is_refused() {
         observation_taps: 4,
         master_track: None,
     };
-    let failure = prepare_host_session_with_console(SESSION, &caps(), &request)
+    let failure = prepare_host_session_with_live_controls(SESSION, &caps(), &request)
         .err()
         .expect("a subscription has no delivery path without a command queue");
     assert!(
-        String::from_utf8_lossy(failure.as_bytes()).contains("host.observation.console"),
+        String::from_utf8_lossy(failure.as_bytes()).contains("host.observation.live_controls"),
         "the diagnostic names the rule"
     );
 
     // And a designated master must name a track this session has.
-    let request = HostConsoleRequest {
+    let request = HostLiveControlRequest {
         control_queue_depth: Some(NonZeroUsize::new(8).expect("depth")),
         master_track: Some(TRACKS as u32),
         ..request
     };
-    let failure = prepare_host_session_with_console(SESSION, &caps(), &request)
+    let failure = prepare_host_session_with_live_controls(SESSION, &caps(), &request)
         .err()
         .expect("an out-of-range master designation is refused");
     assert!(
@@ -933,7 +938,7 @@ fn observation_cost_classes_are_what_they_claim() {
 /// Release-mode half of the E7 cost-class claim above (issue #143): a real eight-compressor plan
 /// rendered in all four legs, timed, with a synthetic per-sample ring scan as the separating
 /// negative control -- the shape a `Computed` tap would have if one shipped. The scan must be
-/// *measurably* slower than the marginal cost of arming a tap over an unarmed console, or the
+/// *measurably* slower than the marginal cost of arming a tap over unarmed live controls, or the
 /// measurement is too coarse to have said anything, and that is the assertion. The three
 /// observation legs are reported (printed) rather than pinned: a wall clock on a shared machine
 /// is evidence, not a gate.
@@ -944,12 +949,12 @@ fn observation_cost_classes_are_what_they_claim() {
 /// Debug-mode runner variance makes both wall-clock assertions below a coin flip at P95 on a
 /// shared 4-vCPU CI runner, so this runs only in release, nightly, `--ignored` (issue #359 WP-2,
 /// §10). The separating-control assertion compares `AllArmed` against `CapacityUnarmed`, not
-/// `NoConsole`: in an optimized build, merely having a console object attached (present in
-/// `ConsoleNoCapacity`, `CapacityUnarmed` and `AllArmed` alike) costs measurably more than the
-/// baseline with no console at all, and that fixed cost can exceed the true marginal cost of
-/// arming a tap by an order of magnitude. Subtracting `NoConsole` folded both costs into one
-/// delta and made this a false red the first time it was actually run in release; `CapacityUnarmed`
-/// isolates the cost this test is about.
+/// `NoLiveControls`: in an optimized build, merely having a live-control object attached (present
+/// in `LiveControlsNoCapacity`, `CapacityUnarmed` and `AllArmed` alike) costs measurably more than
+/// the baseline with no live controls at all, and that fixed cost can exceed the true marginal cost
+/// of arming a tap by an order of magnitude. Subtracting `NoLiveControls` folded both costs into
+/// one delta and made this a false red the first time it was actually run in release;
+/// `CapacityUnarmed` isolates the cost this test is about.
 #[test]
 #[ignore = "release-mode budget; runs nightly"]
 fn observation_cost_classes_are_separated_from_a_computed_scan_in_release() {
@@ -959,8 +964,8 @@ fn observation_cost_classes_are_separated_from_a_computed_scan_in_release() {
     const RENDER_BLOCKS: usize = 256;
     let mut measured = Vec::new();
     for leg in [
-        Leg::NoConsole,
-        Leg::ConsoleNoCapacity,
+        Leg::NoLiveControls,
+        Leg::LiveControlsNoCapacity,
         Leg::CapacityUnarmed,
         Leg::AllArmed,
     ] {
@@ -1014,34 +1019,36 @@ fn observation_cost_classes_are_separated_from_a_computed_scan_in_release() {
         .1;
     let baseline = measured
         .iter()
-        .find(|(leg, _)| *leg == Leg::NoConsole)
+        .find(|(leg, _)| *leg == Leg::NoLiveControls)
         .expect("baseline leg")
         .1;
     // The negative control isolates the cost of *arming* a tap, so it must be compared against a
-    // leg that already pays for having a console attached but has not armed anything --
-    // `CapacityUnarmed`, not `NoConsole`. In an optimized build the fixed cost of a console being
-    // present at all (present in `ConsoleNoCapacity`, `CapacityUnarmed` and `AllArmed` alike) can
-    // exceed the true per-tap arming cost by an order of magnitude, which made `NoConsole` an
-    // unreliable zero-point here in release: it folded "having a console" and "arming a tap" into
-    // one delta and measurably failed this assertion even though no tap was ever scanned per
-    // sample. `NoConsole` remains the right zero-point for the coarse product-level gate below.
-    let unarmed_with_console = measured
+    // leg that already pays for having live controls attached but has not armed anything --
+    // `CapacityUnarmed`, not `NoLiveControls`. In an optimized build the fixed cost of live
+    // controls being present at all (present in `LiveControlsNoCapacity`, `CapacityUnarmed` and
+    // `AllArmed` alike) can exceed the true per-tap arming cost by an order of magnitude, which
+    // made `NoLiveControls` an unreliable zero-point here in release: it folded "having live
+    // controls" and "arming a tap" into one delta and measurably failed this assertion even though
+    // no tap was ever scanned per sample. `NoLiveControls` remains the right zero-point for the
+    // coarse product-level gate below.
+    let unarmed_with_live_controls = measured
         .iter()
         .find(|(leg, _)| *leg == Leg::CapacityUnarmed)
-        .expect("unarmed-with-console leg")
+        .expect("unarmed-with-live-controls leg")
         .1;
-    // The load-bearing claim: arming eight taps is not measurably slower than an attached-but-
-    // unarmed console. `AllArmed` is not reliably slower than `CapacityUnarmed` at all (the two
-    // legs differ by only eight resident reads and eight `abs`/compare pairs per block, well
+    // The load-bearing claim: arming eight taps is not measurably slower than attached-but-
+    // unarmed live controls. `AllArmed` is not reliably slower than `CapacityUnarmed` at all (the
+    // two legs differ by only eight resident reads and eight `abs`/compare pairs per block, well
     // inside run-to-run noise), so comparing the marginal delta against the synthetic scan is
     // inert: a scan-sized regression in arming cost can leave `armed` still faster than
-    // `unarmed_with_console`, and a `saturating_sub` clamped to a positive floor would pass no
-    // matter what was measured. Assert the bound directly instead.
+    // `unarmed_with_live_controls`, and a `saturating_sub` clamped to a positive floor would pass
+    // no matter what was measured. Assert the bound directly instead.
     assert!(
-        armed.as_secs_f64() <= unarmed_with_console.as_secs_f64() * 1.10 + 50e-6,
-        "arming eight taps must not measurably exceed the cost of an attached-but-unarmed \
-         console: armed={armed:?} unarmed_with_console={unarmed_with_console:?} (allowed up to \
-         10% + 50us over unarmed_with_console)"
+        armed.as_secs_f64() <= unarmed_with_live_controls.as_secs_f64() * 1.10 + 50e-6,
+        "arming eight taps must not measurably exceed the cost of attached-but-unarmed \
+         live controls: armed={armed:?} \
+         unarmed_with_live_controls={unarmed_with_live_controls:?} (allowed up to 10% + 50us \
+         over unarmed_with_live_controls)"
     );
     // A gate, not a pin: eight resident reads and eight `abs`/compare pairs per block cannot
     // plausibly double a plan that runs eight compressors. A regression that does is a regression.
@@ -1057,8 +1064,8 @@ fn observation_cost_classes_are_separated_from_a_computed_scan_in_release() {
 /// `DYNAMIC_BANK_SESSION` is `SESSION` with every compressor moved from SIMD-1 into the dynamic
 /// rack and nothing else changed. Before phase 1b that placement banked nothing, so this pair
 /// would have compared a banked publish site against a per-node one; now both bank, and the #143
-/// gain-reduction taps must resolve through `ConsoleEffectBankStage` on both sides and publish the
-/// same windows to the bit.
+/// gain-reduction taps must resolve through `LiveControlEffectBankStage` on both sides and publish
+/// the same windows to the bit.
 ///
 /// This is what would catch a bank that meters its lanes in the wrong order: the eight thresholds
 /// are all different, so a lane permutation inside the dynamic bank shows up as a permuted set of

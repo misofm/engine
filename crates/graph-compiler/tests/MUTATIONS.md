@@ -185,7 +185,7 @@ a real per-node scalar instance.
 | 143-E5 | zero binding, zero cost | attach lanes whenever the descriptor declares a tap regardless of the request | `host-core/src/prepare.rs` | RED — `a_session_that_asked_for_no_observation_holds_none`. **The output stayed identical**, which is the point: only the structural walk catches it |
 | 143-E2 | bank-lane correctness | the bank publishes `samples[0]` into every lane | `rack/src/lib.rs` | RED — 3 of 5 fail, including the bit-exact comparison against an independently prepared scalar compressor at each lane's own threshold |
 | 143-E3-bank | window exactness | publish **before** `process_bank` | `rack/src/lib.rs` | RED |
-| 143-E3-scalar | window exactness | publish **before** `process` in `execute_op`'s `ConsoleEffect` arm (the #137-E1 mirror) | `graph/src/runtime.rs` | RED — `window 2 published its own blocks, not the previous block's state`, `1088069417` vs `1090923272` |
+| 143-E3-scalar | window exactness | publish **before** `process` in `execute_op`'s `LiveControlEffect` arm (the #137-E1 mirror) | `graph/src/runtime.rs` | RED — `window 2 published its own blocks, not the previous block's state`, `1088069417` vs `1090923272` |
 | 143-E13 | plan replacement | a freshly built lane starts `armed: true`, so a subscription would survive a replacement | `effect-contract/src/live.rs` | RED — `the replacement plan carries capacity and no subscription`, `[8, 8, 8]` vs `[8, 8, 0]` |
 
 ### E7 — the cost classes, measured
@@ -200,14 +200,14 @@ to zero the moment it is disarmed.
 
 The release-only half renders a real eight-compressor plan for 256 blocks in each of the four legs.
 The table below is a debug-profile capture kept for the general shape; the test's actual gate is
-release-only: `armed <= unarmed_with_console * 1.10 + 50 µs`, i.e. arming eight taps is not
-measurably slower than an attached-but-unarmed console (debug profile, `x86_64` Zen 5, one shared
+release-only: `armed <= unarmed_with_live_controls * 1.10 + 50 µs`, i.e. arming eight taps is not
+measurably slower than attached-but-unarmed live controls (debug profile, `x86_64` Zen 5, one shared
 machine — evidence, not a pin):
 
 | leg | 256 blocks | per block |
 |---|---|---|
-| no console | 253.74 ms | 991.2 us |
-| console, no capacity | 252.36 ms | 985.8 us |
+| no live controls | 253.74 ms | 991.2 us |
+| live controls, no capacity | 252.36 ms | 985.8 us |
 | capacity, unarmed | 252.11 ms | 984.8 us |
 | every tap armed | 252.60 ms | 986.7 us |
 | **synthetic computed scan** (negative control) | 14.33 ms | **56.0 us** |

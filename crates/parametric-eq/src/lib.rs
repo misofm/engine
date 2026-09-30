@@ -1427,8 +1427,8 @@ impl<L: Lane, const W: usize> Channel<L, W> {
     /// it is being sent. That costs far more than the lane: `process_section` takes its ramping
     /// decision across **all** `W` lanes of the section, so one lane's no-op window drags the
     /// whole bank onto `svf_block_ramped` -- six vector additions and a negate per frame -- for
-    /// sixty-four samples. A console that re-sends a band it did not move (an automation refresh,
-    /// a touched-but-unmoved control) pays that on every refresh.
+    /// sixty-four samples. Live controls that re-send a band they did not move (an automation
+    /// refresh, a touched-but-unmoved control) pay that on every refresh.
     ///
     /// [`LinearRamp::stationary_at`] decides it by bit compare. The lane is settled instead, which
     /// is bit-identical because a zero increment is bit-preserving on every word -- exactly the
@@ -1514,8 +1514,8 @@ impl<L: Lane, const W: usize> Channel<L, W> {
     /// time this lane's band changed. So when an automation point restates a band it has already
     /// been given, the design does not have to be recomputed -- it can be read. That matters far
     /// more than the ramp arithmetic: the design is an `f64` `design_svf` per lane per event,
-    /// and a console that refreshes its automation is paying it on every refresh for every band it
-    /// did not move.
+    /// and live controls that refresh their automation are paying it on every refresh for every
+    /// band they did not move.
     ///
     /// This is bit-identical rather than approximately equal, by determinism: same band, same
     /// rate, same function, same words.
@@ -1568,7 +1568,7 @@ impl<L: Lane, const W: usize> Channel<L, W> {
     /// Snaps **every** lane of `section` at once: six vector copies and one zeroed step set.
     ///
     /// Bit-identical to snapping every lane one at a time, and it is the shape a
-    /// bank-wide ramp end actually has -- the console moves a band on all `W` lanes of a bank
+    /// bank-wide ramp end actually has -- live controls move a band on all `W` lanes of a bank
     /// together. The per-lane form pays a `lane_get`/`lane_set` pair per word per lane, and each of
     /// those is a full `store`/`load` round trip out of and back into the vector domain: `12 * W`
     /// of them per section, to write words the target already holds in exactly the right lanes.
@@ -3759,8 +3759,8 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
     /// `sixty_four_track_eq_only` row moved 28% against its sealed number on a session that never
     /// collapses. A const generic monomorphises the two, so the dual instantiation is the code that
     /// shipped before the collapse existed and the collapsed one is its own function. "Adding a
-    /// path must not move the path already there" is the same rule `ConsoleEffectBankStage` exists
-    /// for, applied inside a kernel.
+    /// path must not move the path already there" is the same rule `LiveControlEffectBankStage`
+    /// exists for, applied inside a kernel.
     ///
     /// `#[inline(always)]` for the reason on [`render`](Self::render): each instantiation has one
     /// caller, `process_bank` or `process_bank_mono`, and the roster finds the EQ's arithmetic in
@@ -9213,8 +9213,8 @@ mod padded_banks {
     /// on it -- here `6e29` behind a +24 dB bell, past the `1e30` bound -- faults that lane. The
     /// enabled bank-mates' bits must not move.
     ///
-    /// The bypass is the one `ConsoleEffectBankStage` applies: a [`BypassShunt`] captures the dry
-    /// block (the EQ's latency is zero), the bank renders every lane, and the bypassed lane's
+    /// The bypass is the one `LiveControlEffectBankStage` applies: a [`BypassShunt`] captures the
+    /// dry block (the EQ's latency is zero), the bank renders every lane, and the bypassed lane's
     /// column is restored from the shunt. Each bank renders twice, the bypassed lane hot and then
     /// quiet, and every enabled member must render the same words, reports and state both times,
     /// and its per-node instance's. At every member count, every bypassed member, both widths.

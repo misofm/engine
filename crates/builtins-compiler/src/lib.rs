@@ -31,7 +31,7 @@ use builtins::{
     PreparedInputFilterTarget, PreparedMeter, pan_matrix, validate_builtin_filter_cutoff,
 };
 use effect_contract::{
-    BankWidth, ChannelSymmetryWitness, LiveConsoleRecord, ResponseAnalysisError,
+    BankWidth, ChannelSymmetryWitness, LiveControlRecord, ResponseAnalysisError,
     ResponseSnapshotRequest, ResponseSnapshotSummary, SeamSide, SymmetryEvent,
 };
 use engine::realtime::{
@@ -81,7 +81,7 @@ pub struct SelectedMeterRequest {
     pub metrics: MeterMetricSet,
 }
 
-/// One live-console control record for a track's smoothed 2x2 matrix/pan stage (issue #137 D1).
+/// One live-control record for a track's smoothed 2x2 matrix/pan stage (issue #137 D1).
 ///
 /// # Why the matrix stage, and what the sentence here used to say
 ///
@@ -109,7 +109,7 @@ pub struct TrackControlRecord {
     pub smoothing_samples: u32,
 }
 
-/// One live-console fader or mute record for a track's fader/mute stage (issue #140 B).
+/// One live-control fader or mute record for a track's fader/mute stage (issue #140 B).
 ///
 /// # Why this is a second record type and a second queue
 ///
@@ -122,7 +122,7 @@ pub struct TrackControlRecord {
 /// `BUILTIN_PARAMETER_DESCRIPTORS`. (This paragraph read "still declare `PreparedOnly`" until
 /// the rows were flipped; the ABI table is the authority.) The *prepared* fader section,
 /// `FaderMuteBuiltins`, genuinely has no post-preparation write path and is unchanged; what #140
-/// adds is a distinct live section, `FaderMuteRampBuiltins`, bound only where a console asked
+/// adds is a distinct live section, `FaderMuteRampBuiltins`, bound only where live controls asked
 /// for one, and the parameter-metadata `liveUpdatable` flag is what tells a caller which of the
 /// two a session is running.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -147,7 +147,7 @@ pub enum TrackFaderRecord {
     },
 }
 
-/// One live-console trim, polarity or prepared-filter record for a track's **input** stage.
+/// One live-control trim, polarity or prepared-filter record for a track's **input** stage.
 ///
 /// # Why this is a third record type and a third queue
 ///
@@ -210,7 +210,7 @@ pub enum TrackInputRecord {
     },
 }
 
-impl LiveConsoleRecord for TrackInputRecord {
+impl LiveControlRecord for TrackInputRecord {
     /// The input chain is the first stage of the strip, before the fader and the matrix: a
     /// collapsed track runs it **once**, so every record on this queue gates the collapse.
     const SEAM: SeamSide = SeamSide::UpstreamOfSeam;
@@ -229,7 +229,7 @@ impl LiveConsoleRecord for TrackInputRecord {
     }
 }
 
-/// One requested live-console control channel, addressed by session track ID (issue #137 D1).
+/// One requested live-control channel, addressed by session track ID (issue #137 D1).
 #[derive(Clone, Debug, PartialEq)]
 pub struct TrackControlRequest {
     /// Session-stable track identity. It must name a track of the compiled session.
@@ -238,7 +238,7 @@ pub struct TrackControlRequest {
     pub queue_capacity: NonZeroUsize,
 }
 
-/// The control-side producer half of one prepared live-console control channel.
+/// The control-side producer half of one prepared live-control channel.
 ///
 /// The consumer half is owned by the track's matrix processor inside the render plan, exactly as
 /// `MeterConsumer` is the mirror image for metering. A producer must be dropped before the plan
@@ -252,8 +252,9 @@ pub struct TrackControlProducer {
     /// Bounded producer endpoint for the fader/mute stage (issue #140 B), at the same depth.
     ///
     /// It is a field of the same struct rather than a second vector so that "one track, one
-    /// console channel" stays one object with one lifetime: all three halves are created together,
-    /// handed to the caller together, and dropped before the plan that owns their consumers.
+    /// live-control channel" stays one object with one lifetime: all three halves are created
+    /// together, handed to the caller together, and dropped before the plan that owns their
+    /// consumers.
     pub fader: Producer<TrackFaderRecord>,
     /// Bounded producer endpoint for the input trim/polarity stage (#210 phase 3), at the same
     /// depth, for the reason the field above states.
@@ -284,12 +285,12 @@ pub struct MeterConsumer {
     pub consumer: Consumer<MeterSnapshot>,
 }
 
-/// The live console's three consumers for one track.
+/// The live controls' three consumers for one track.
 ///
 /// They travel together because they are leased together (`TrackControlProducer` holds all three
 /// producers) and because whichever owner ends up rendering the track's fader also ends up
 /// rendering its matrix and its input section -- a per-node triple, or three slots of one cohort
-/// chain. Keeping them in one value is what makes "one track, one console channel" hold on the
+/// chain. Keeping them in one value is what makes "one track, one live-control channel" hold on the
 /// consumer side too.
 struct StripControlConsumers {
     /// `None` once a strip bank has claimed this side. The three sides are claimed together --
@@ -324,9 +325,9 @@ struct StripPreparation {
     parameters: BuiltinParameters,
     /// The scalar input section, held here rather than bound eagerly since #210 phase 3, for the
     /// same reason the fader and the matrix are: whether a track's input is a per-node processor
-    /// or one lane of a strip bank is a *lowering* decision, and the console consumer has to move
-    /// to whichever owner wins. A track the input bank claims keeps this value as dead storage the
-    /// bank never renders, exactly as a partly claimed fader does.
+    /// or one lane of a strip bank is a *lowering* decision, and the live-control consumer has to
+    /// move to whichever owner wins. A track the input bank claims keeps this value as dead storage
+    /// the bank never renders, exactly as a partly claimed fader does.
     #[cfg_attr(
         not(any(test, feature = "test-support")),
         allow(dead_code, reason = "read only by the scalar oracle (#1059)")
@@ -360,7 +361,7 @@ pub struct PreparedBuiltinsSession {
     /// owned, counting the strip preparations alongside these bindings.
     processors: Vec<graph::GraphNodeBinding>,
     /// The fader and matrix section of every track, in normalized track order, with the live
-    /// console's consumers where one drives the track.
+    /// controls' consumers where they drive the track.
     ///
     /// Declared after `processors` and before `track_controls` so a dropped preparation releases
     /// the producers before the consumers that own the ring storage.
@@ -386,7 +387,7 @@ pub struct PreparedBuiltinsSession {
 /// collapsed and dual renders are byte-identical.
 const SEAM_SIDE_WITNESS: ChannelSymmetryWitness = ChannelSymmetryWitness::SYMMETRIC;
 
-/// One strip input bank and the console channels of its member lanes (#210 phase 3).
+/// One strip input bank and the live-control channels of its member lanes (#210 phase 3).
 ///
 /// # The third drain, and why it is at bank level
 ///
@@ -396,7 +397,7 @@ const SEAM_SIDE_WITNESS: ChannelSymmetryWitness = ChannelSymmetryWitness::SYMMET
 /// its members' queues in one loop, and not a per-track node sibling. The single-consumer property
 /// is preserved structurally, exactly as it is for the fader and the matrix:
 /// `into_graph_artifact_with_banks` moves each `Consumer` out of its `StripPreparation` once, so a
-/// track's input is either a bank lane or a per-node [`ConsoleInputProcessor`] and never both.
+/// track's input is either a bank lane or a per-node [`LiveControlInputProcessor`] and never both.
 ///
 /// # Why the drain is `begin_block` and not the first paragraph of `process`
 ///
@@ -416,8 +417,8 @@ const SEAM_SIDE_WITNESS: ChannelSymmetryWitness = ChannelSymmetryWitness::SYMMET
 /// call-graph gate green.
 struct BuiltinBankProcessor {
     bank: BuiltinInputBank,
-    /// One channel per bank lane; `None` for a lane no console addresses. Always `lanes` long, so
-    /// the lane index is the array index and no lane map is stored.
+    /// One channel per bank lane; `None` for a lane no live control addresses. Always `lanes` long,
+    /// so the lane index is the array index and no lane map is stored.
     controls: Box<[Option<Consumer<TrackInputRecord>>]>,
     /// Each lane's **live** channel-symmetry terms, retained across blocks for the reason
     /// `EffectControlLane::symmetry` gives: the terms describe what the drained records did, so
@@ -472,7 +473,7 @@ impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
                 };
                 // The one hook. `admit` takes the record by trait, not by kind, so a record type
                 // added to this queue later cannot reach the render state without declaring what
-                // it does to the witness (`effect_contract::symmetry::LiveConsoleRecord`).
+                // it does to the witness (`effect_contract::symmetry::LiveControlRecord`).
                 if let Some(witness) = live.get_mut(lane) {
                     witness.admit(&record);
                 }
@@ -597,7 +598,7 @@ impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
     }
 }
 
-/// One strip fader bank and the console channels of its member lanes (issue #212).
+/// One strip fader bank and the live-control channels of its member lanes (issue #212).
 ///
 /// # The drain contract, at bank level
 ///
@@ -612,15 +613,16 @@ impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
 /// This is the bank-level wiring the plan calls for, and not a per-track node sibling: there is no
 /// second drainer, and the drain is one loop over member lanes at the top of the block, before a
 /// single sample is touched. An admitted move therefore takes effect at exactly the block boundary
-/// the control side was acknowledged with, which is the same rule `ConsoleFaderProcessor` followed.
+/// the control side was acknowledged with, which is the same rule `LiveControlFaderProcessor`
+/// followed.
 ///
 /// `try_pop` moves one `Copy` record and a retarget performs at most one division per channel;
 /// neither allocates, locks, nor drops, which is what keeps the shipped artifact's render
 /// call-graph gate green.
 struct FaderBankProcessor {
     bank: BuiltinFaderBank,
-    /// One channel per bank lane; `None` for a lane no console addresses. Always `lanes` long, so
-    /// the lane index is the array index and no lane map is stored.
+    /// One channel per bank lane; `None` for a lane no live control addresses. Always `lanes` long,
+    /// so the lane index is the array index and no lane map is stored.
     controls: Box<[Option<Consumer<TrackFaderRecord>>]>,
     process_calls: u64,
     frames_processed: u64,
@@ -662,7 +664,7 @@ impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
 
     /// Seam-side: see [`SEAM_SIDE_WITNESS`]. `TrackFaderRecord` is a seam-side record type, so
     /// its drain above deliberately folds nothing into a witness -- and could not, because
-    /// `LiveConsoleRecord::SEAM` compiles the seam-side arm away.
+    /// `LiveControlRecord::SEAM` compiles the seam-side arm away.
     fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitness {
         let _ = lane;
         SEAM_SIDE_WITNESS
@@ -676,13 +678,13 @@ impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
     }
 }
 
-/// One strip matrix/pan bank and the console channels of its member lanes (issue #212).
+/// One strip matrix/pan bank and the live-control channels of its member lanes (issue #212).
 ///
 /// The mirror of [`FaderBankProcessor`], on `TrackControlRecord`, and it carries the same drain
 /// contract for the same reason -- see that type for the argument.
 struct MatrixBankProcessor {
     bank: BuiltinMatrixBank,
-    /// One channel per bank lane; `None` for a lane no console addresses.
+    /// One channel per bank lane; `None` for a lane no live control addresses.
     controls: Box<[Option<Consumer<TrackControlRecord>>]>,
     process_calls: u64,
     frames_processed: u64,
@@ -1208,12 +1210,12 @@ impl TestOnlyFaderMatrixPair {
     }
 }
 
-/// Retained bytes of one strip bank's per-lane console-consumer array.
+/// Retained bytes of one strip bank's per-lane live-control consumer array.
 ///
-/// Charged whether or not a console is attached: the array is `lanes` long either way, and a lane
-/// with no channel holds `None`. That is deliberate -- it is what makes a banked session's
-/// retained payload independent of whether the host leased a console, rather than merely equal to
-/// what it was before consoles existed.
+/// Charged whether or not live controls are attached: the array is `lanes` long either way, and a
+/// lane with no channel holds `None`. That is deliberate -- it is what makes a banked session's
+/// retained payload independent of whether the host leased live controls, rather than merely equal
+/// to what it was before live controls existed.
 fn strip_control_bytes<T: Copy + Send + 'static>(width: effect_contract::BankWidth) -> Option<u64> {
     u64::try_from(core::mem::size_of::<Option<Consumer<T>>>())
         .ok()?
@@ -1382,8 +1384,8 @@ fn build_input_bank(
 ///
 /// `processor_bytes` is the whole per-bank processor cost of that kind: the inline struct plus any
 /// heap it owns. The three strip kinds differ only there -- an input bank owns nothing beyond its
-/// kernel, while a fader or matrix bank owns a `lanes`-long array of optional console consumers --
-/// so the rest of the accounting is shared rather than restated three times.
+/// kernel, while a fader or matrix bank owns a `lanes`-long array of optional live-control
+/// consumers -- so the rest of the accounting is shared rather than restated three times.
 fn builtin_bank_resource(
     groups: &[Box<[GraphNodeId]>],
     width: effect_contract::BankWidth,
@@ -1461,7 +1463,7 @@ struct BuiltinSessionSeal {
     requests: Vec<MeterRequestSeal>,
     observers: Vec<(Box<str>, TrackStage, u64)>,
     consumers: Vec<(u64, Box<str>, MeterTap)>,
-    /// Issue #137 D1: `(track_id, queue_capacity)` per live-console control channel, sorted.
+    /// Issue #137 D1: `(track_id, queue_capacity)` per live-control channel, sorted.
     controls: Vec<(Box<str>, usize)>,
     resources: BuiltinResourceEstimate,
 }
@@ -1686,8 +1688,8 @@ pub fn test_only_scalar_owner_layouts() -> [BuiltinRetainedLayout; 3] {
         allocation_count: 1,
     };
     [
-        layout(core::alloc::Layout::new::<ConsoleFaderProcessor>()),
-        layout(core::alloc::Layout::new::<ConsoleMatrixProcessor>()),
+        layout(core::alloc::Layout::new::<LiveControlFaderProcessor>()),
+        layout(core::alloc::Layout::new::<LiveControlMatrixProcessor>()),
         layout(core::alloc::Layout::new::<ScalarPairProcessor>()),
     ]
 }
@@ -2035,7 +2037,7 @@ impl PreparedBuiltinsSession {
         self.meter_consumers.len()
     }
 
-    /// Number of sealed live-console control channels (issue #137 D1).
+    /// Number of sealed live-control channels (issue #137 D1).
     #[must_use]
     pub fn track_control_count(&self) -> usize {
         self.track_controls.len()
@@ -2162,7 +2164,7 @@ impl PreparedBuiltinsSession {
     /// lane or a per-node processor, never both" a structural fact rather than a rule.
     ///
     /// The input stage joined this list in #210 phase 3, for the reason the stage comment on
-    /// [`StripPreparation::input`] gives: once the input section has a live console channel, which
+    /// [`StripPreparation::input`] gives: once the input section has a live-control channel, which
     /// owner drains it is a lowering decision, and a binding built at preparation could not hand
     /// its consumer to a bank.
     ///
@@ -2204,14 +2206,14 @@ impl PreparedBuiltinsSession {
                     let ramped = FaderMuteRampBuiltins::new(parameters)
                         .expect("preparation validated the ramped fader's gain domain");
                     (
-                        Box::new(ConsoleInputProcessor {
+                        Box::new(LiveControlInputProcessor {
                             input,
                             control: control
                                 .input
                                 .expect("a strip is banked on all three stages or on none"),
                             live: ChannelSymmetryWitness::SYMMETRIC,
                         }),
-                        Box::new(ConsoleFaderProcessor {
+                        Box::new(LiveControlFaderProcessor {
                             fader: ramped,
                             control: control
                                 .fader
@@ -2220,7 +2222,7 @@ impl PreparedBuiltinsSession {
                             #[cfg(any(test, feature = "test-support"))]
                             test_only_owner,
                         }),
-                        Box::new(ConsoleMatrixProcessor {
+                        Box::new(LiveControlMatrixProcessor {
                             matrix,
                             control: control
                                 .matrix
@@ -2297,8 +2299,8 @@ impl PreparedBuiltinsSession {
         levels: &[DependencyLevel],
         classes: &SessionPoolClasses,
     ) -> Option<graph::GraphScalarOwnerResourceEstimate> {
-        let fader = u64::try_from(core::mem::size_of::<ConsoleFaderProcessor>()).ok()?;
-        let matrix = u64::try_from(core::mem::size_of::<ConsoleMatrixProcessor>()).ok()?;
+        let fader = u64::try_from(core::mem::size_of::<LiveControlFaderProcessor>()).ok()?;
+        let matrix = u64::try_from(core::mem::size_of::<LiveControlMatrixProcessor>()).ok()?;
         let outer = u64::try_from(
             core::mem::size_of::<ScalarPairProcessor>()
                 .max(core::mem::size_of::<ScalarSplitPairProcessor>()),
@@ -2458,7 +2460,7 @@ impl PreparedBuiltinsSession {
         let mut bank_inputs: BTreeMap<Box<str>, InputBuiltins> =
             core::mem::take(&mut self.bank_inputs).into_iter().collect();
         // The strip preparations are indexed by track and *consumed* by whichever bank claims
-        // them, so a track's console consumers can only ever reach one owner. Whatever is left
+        // them, so a track's live-control consumers can only ever reach one owner. Whatever is left
         // afterwards keeps its per-node bindings.
         let mut strips: BTreeMap<Box<str>, StripPreparation> = core::mem::take(&mut self.strips)
             .into_iter()
@@ -3154,10 +3156,10 @@ pub fn prepare_session_builtins(
     requests: &[MeterRequest],
     caps: BuiltinCompileCaps,
 ) -> Result<PreparedBuiltinsSession, BuiltinDiagnosticSet> {
-    prepare_session_builtins_with_console(session, requests, &[], caps)
+    prepare_session_builtins_with_live_controls(session, requests, &[], caps)
 }
 
-/// Prepare builtins with live-console control channels attached (issue #137 D1).
+/// Prepare builtins with live-control channels attached (issue #137 D1).
 ///
 /// `controls` requests one bounded control channel per named track; the consumer half is bound
 /// into that track's matrix processor and the producer half is returned in the prepared session
@@ -3165,14 +3167,15 @@ pub fn prepare_session_builtins(
 /// declare, is a preparation diagnostic -- never a silently ignored request.
 ///
 /// [`prepare_session_builtins`] is exactly this call with no control channels, so a host that does
-/// not want a console pays nothing: no queue is allocated and the matrix processors carry `None`.
-pub fn prepare_session_builtins_with_console(
+/// not want live controls pays nothing: no queue is allocated and the matrix processors carry
+/// `None`.
+pub fn prepare_session_builtins_with_live_controls(
     session: &CompiledSession,
     requests: &[MeterRequest],
     controls: &[TrackControlRequest],
     caps: BuiltinCompileCaps,
 ) -> Result<PreparedBuiltinsSession, BuiltinDiagnosticSet> {
-    prepare_session_builtins_with_console_and_policy(
+    prepare_session_builtins_with_live_controls_and_policy(
         session,
         requests,
         None,
@@ -3193,7 +3196,7 @@ pub fn prepare_session_builtins_between_render_calls(
     controls: &[TrackControlRequest],
     caps: BuiltinCompileCaps,
 ) -> Result<PreparedBuiltinsSession, BuiltinDiagnosticSet> {
-    prepare_session_builtins_with_console_and_policy(
+    prepare_session_builtins_with_live_controls_and_policy(
         session,
         requests,
         None,
@@ -3205,14 +3208,14 @@ pub fn prepare_session_builtins_between_render_calls(
 
 /// Prepare explicitly selected meter observers for hosts that deliver control concurrently with
 /// rendering. Selected requests retain the ordinary permanent observer binding policy.
-pub fn prepare_selected_session_builtins_with_console(
+pub fn prepare_selected_session_builtins_with_live_controls(
     session: &CompiledSession,
     requests: &[SelectedMeterRequest],
     controls: &[TrackControlRequest],
     caps: BuiltinCompileCaps,
 ) -> Result<PreparedBuiltinsSession, BuiltinDiagnosticSet> {
     let (plain, metrics) = split_selected_requests(requests);
-    prepare_session_builtins_with_console_and_policy(
+    prepare_session_builtins_with_live_controls_and_policy(
         session,
         &plain,
         Some(&metrics),
@@ -3233,7 +3236,7 @@ pub fn prepare_selected_session_builtins_between_render_calls(
     caps: BuiltinCompileCaps,
 ) -> Result<PreparedBuiltinsSession, BuiltinDiagnosticSet> {
     let (plain, metrics) = split_selected_requests(requests);
-    prepare_session_builtins_with_console_and_policy(
+    prepare_session_builtins_with_live_controls_and_policy(
         session,
         &plain,
         Some(&metrics),
@@ -3255,7 +3258,7 @@ fn split_selected_requests(
     (plain, metrics)
 }
 
-fn prepare_session_builtins_with_console_and_policy(
+fn prepare_session_builtins_with_live_controls_and_policy(
     session: &CompiledSession,
     requests: &[MeterRequest],
     selected_metrics: Option<&[MeterMetricSet]>,
@@ -3584,8 +3587,8 @@ fn resource_plan(
         // ramped section, an uncontrolled one the prepared section -- still holds, and all three
         // sections now live *inline* in the strip vector charged above rather than behind a `Box`,
         // so they are charged by that vector's layout and not per track. `controlled` therefore
-        // changes no byte of the *section* storage, and the only console-dependent rows left are
-        // the three bounded rings charged below.
+        // changes no byte of the *section* storage, and the only live-control-dependent rows left
+        // are the three bounded rings charged below.
     }
     add_vector_layout::<GraphNodeObserverBinding>(&mut meter, request_count)?;
     add_vector_layout::<MeterConsumer>(&mut meter, request_count)?;
@@ -3593,7 +3596,7 @@ fn resource_plan(
     add_vector_layout::<MeterRequestSeal>(&mut meter, request_count)?;
     add_vector_layout::<(Box<str>, TrackStage, u64)>(&mut meter, request_count)?;
     add_vector_layout::<(u64, Box<str>, MeterTap)>(&mut meter, request_count)?;
-    // Issue #137 D1: the live-console control channels are charged to the processor accumulator,
+    // Issue #137 D1: the live-control channels are charged to the processor accumulator,
     // because they are per-track processor storage rather than meter storage: the producer vector,
     // its seal, and one bounded ring per requested track.
     add_vector_layout::<TrackControlProducer>(&mut processor, controls.len())?;
@@ -4022,12 +4025,12 @@ impl GraphRuntimeProcessor for MatrixProcessor {
     }
 }
 
-/// The input trim/polarity stage of one track that a live console drives (#210 phase 3).
+/// The input trim/polarity stage of one track that live controls drive (#210 phase 3).
 ///
 /// The per-node sibling of [`BuiltinBankProcessor`]'s drain, for the tracks a strip bank did not
 /// claim -- a host on a scalar backend, or a plan whose planner emitted no input bank. It is a
-/// separate type from [`InputProcessor`] for the reason [`ConsoleMatrixProcessor`] gives: a
-/// session prepared without a console keeps `InputProcessor` and therefore keeps its exact
+/// separate type from [`InputProcessor`] for the reason [`LiveControlMatrixProcessor`] gives: a
+/// session prepared without live controls keeps `InputProcessor` and therefore keeps its exact
 /// processor storage and its exact rendered bits.
 ///
 /// # The witness, and why this one has to carry it
@@ -4039,7 +4042,7 @@ impl GraphRuntimeProcessor for MatrixProcessor {
 /// `admit` call the banked drain makes, so the two shapes cannot disagree about what a record
 /// meant. If a later phase gives the scalar tail a collapse, the answer is already correct here.
 #[cfg(any(test, feature = "test-support"))]
-struct ConsoleInputProcessor {
+struct LiveControlInputProcessor {
     input: InputBuiltins,
     control: Consumer<TrackInputRecord>,
     /// This track's live channel-symmetry terms, retained across blocks exactly as
@@ -4047,7 +4050,7 @@ struct ConsoleInputProcessor {
     live: ChannelSymmetryWitness,
 }
 #[cfg(any(test, feature = "test-support"))]
-impl GraphRuntimeProcessor for ConsoleInputProcessor {
+impl GraphRuntimeProcessor for LiveControlInputProcessor {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         let available = self.control.available_at_entry();
         for _ in 0..available {
@@ -4100,12 +4103,12 @@ impl GraphRuntimeProcessor for ConsoleInputProcessor {
     }
 }
 
-/// The matrix/pan stage of one track that a live console drives (issue #137 D1).
+/// The matrix/pan stage of one track that live controls drive (issue #137 D1).
 ///
-/// It is a separate type from [`MatrixProcessor`] on purpose: a session prepared without a console
-/// keeps the exact processor storage, and therefore the exact `engine_owned_processor_payload_bytes`
-/// row, it had before this channel existed. "Metering and control off cost nothing" is a byte
-/// identity here, not a figure of speech.
+/// It is a separate type from [`MatrixProcessor`] on purpose: a session prepared without live
+/// controls keeps the exact processor storage, and therefore the exact
+/// `engine_owned_processor_payload_bytes` row, it had before this channel existed. "Metering and
+/// control off cost nothing" is a byte identity here, not a figure of speech.
 ///
 /// The drain runs at the top of the block, before any audio is touched, so an admitted retarget
 /// takes effect at exactly the block boundary the control side was told it would: every sample of
@@ -4113,7 +4116,7 @@ impl GraphRuntimeProcessor for ConsoleInputProcessor {
 /// moves one `Copy` record and `set_target_smoothed` performs four divisions; neither allocates,
 /// locks, nor drops, which is what keeps the shipped artifact's render call-graph gate green.
 #[cfg(any(test, feature = "test-support"))]
-struct ConsoleMatrixProcessor {
+struct LiveControlMatrixProcessor {
     matrix: MatrixBuiltins,
     control: Consumer<TrackControlRecord>,
     control_delivery: BuiltinControlDelivery,
@@ -4121,7 +4124,7 @@ struct ConsoleMatrixProcessor {
     test_only_owner: u16,
 }
 #[cfg(any(test, feature = "test-support"))]
-impl Drop for ConsoleMatrixProcessor {
+impl Drop for LiveControlMatrixProcessor {
     fn drop(&mut self) {
         SCALAR_OWNER_DROPS.with(|value| {
             let mut drops = value.get();
@@ -4131,7 +4134,7 @@ impl Drop for ConsoleMatrixProcessor {
     }
 }
 #[cfg(any(test, feature = "test-support"))]
-impl GraphRuntimeProcessor for ConsoleMatrixProcessor {
+impl GraphRuntimeProcessor for LiveControlMatrixProcessor {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         self.drain_controls().inspect_err(|_| {
             #[cfg(any(test, feature = "test-support"))]
@@ -4146,7 +4149,7 @@ impl GraphRuntimeProcessor for ConsoleMatrixProcessor {
     }
 }
 #[cfg(any(test, feature = "test-support"))]
-impl ConsoleMatrixProcessor {
+impl LiveControlMatrixProcessor {
     fn drain_controls(&mut self) -> Result<(), RenderError> {
         while let Ok(record) = self.control.try_pop() {
             #[cfg(any(test, feature = "test-support"))]
@@ -4162,15 +4165,15 @@ impl ConsoleMatrixProcessor {
         Ok(())
     }
 }
-/// The fader/mute stage of one track that a live console drives (issue #140 B).
+/// The fader/mute stage of one track that live controls drive (issue #140 B).
 ///
-/// The same shape as [`ConsoleMatrixProcessor`], for the same reason: a session prepared without
-/// a console keeps `FaderProcessor` and therefore keeps its exact processor storage and its exact
-/// rendered bits. The drain runs at the top of the block, before any audio is touched, so an
-/// admitted fader move or mute takes effect at exactly the block boundary the control side was
+/// The same shape as [`LiveControlMatrixProcessor`], for the same reason: a session prepared
+/// without live controls keeps `FaderProcessor` and therefore keeps its exact processor storage and
+/// its exact rendered bits. The drain runs at the top of the block, before any audio is touched, so
+/// an admitted fader move or mute takes effect at exactly the block boundary the control side was
 /// acknowledged with.
 #[cfg(any(test, feature = "test-support"))]
-struct ConsoleFaderProcessor {
+struct LiveControlFaderProcessor {
     fader: FaderMuteRampBuiltins,
     control: Consumer<TrackFaderRecord>,
     control_delivery: BuiltinControlDelivery,
@@ -4178,7 +4181,7 @@ struct ConsoleFaderProcessor {
     test_only_owner: u16,
 }
 #[cfg(any(test, feature = "test-support"))]
-impl Drop for ConsoleFaderProcessor {
+impl Drop for LiveControlFaderProcessor {
     fn drop(&mut self) {
         SCALAR_OWNER_DROPS.with(|value| {
             let mut drops = value.get();
@@ -4188,7 +4191,7 @@ impl Drop for ConsoleFaderProcessor {
     }
 }
 #[cfg(any(test, feature = "test-support"))]
-impl GraphRuntimeProcessor for ConsoleFaderProcessor {
+impl GraphRuntimeProcessor for LiveControlFaderProcessor {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         self.drain_controls().inspect_err(|_| {
             #[cfg(any(test, feature = "test-support"))]
@@ -4212,7 +4215,7 @@ impl GraphRuntimeProcessor for ConsoleFaderProcessor {
     }
 }
 #[cfg(any(test, feature = "test-support"))]
-impl ConsoleFaderProcessor {
+impl LiveControlFaderProcessor {
     fn drain_controls(&mut self) -> Result<(), RenderError> {
         while let Ok(record) = self.control.try_pop() {
             #[cfg(any(test, feature = "test-support"))]
@@ -4245,8 +4248,8 @@ impl ConsoleFaderProcessor {
 /// original matrix op as an identity, so this owner is invoked exactly at the fader boundary.
 #[cfg(any(test, feature = "test-support"))]
 struct ScalarPairProcessor {
-    fader: Box<ConsoleFaderProcessor>,
-    matrix: Box<ConsoleMatrixProcessor>,
+    fader: Box<LiveControlFaderProcessor>,
+    matrix: Box<LiveControlMatrixProcessor>,
 }
 #[cfg(any(test, feature = "test-support"))]
 impl Drop for ScalarPairProcessor {
@@ -4371,8 +4374,8 @@ type ScalarPairOwners = (
 /// their two scheduled execution boundaries to the graph runtime.
 #[cfg(any(test, feature = "test-support"))]
 struct ScalarSplitPairProcessor {
-    fader: Box<ConsoleFaderProcessor>,
-    matrix: Box<ConsoleMatrixProcessor>,
+    fader: Box<LiveControlFaderProcessor>,
+    matrix: Box<LiveControlMatrixProcessor>,
     pending_fader: bool,
 }
 
@@ -4530,18 +4533,18 @@ fn make_scalar_pair(
 ) -> Result<Box<dyn GraphRuntimeProcessor>, ScalarPairOwners> {
     // The factory is public through the graph trait. Check both exact concrete owners before
     // consuming either erasure; an unrelated implementation cannot opt itself into a panic.
-    if fader.as_ref().type_id() != core::any::TypeId::of::<ConsoleFaderProcessor>()
-        || matrix.as_ref().type_id() != core::any::TypeId::of::<ConsoleMatrixProcessor>()
+    if fader.as_ref().type_id() != core::any::TypeId::of::<LiveControlFaderProcessor>()
+        || matrix.as_ref().type_id() != core::any::TypeId::of::<LiveControlMatrixProcessor>()
     {
         return Err((fader, matrix));
     }
     let fader_any: Box<dyn Any> = fader;
     let matrix_any: Box<dyn Any> = matrix;
     let fader = fader_any
-        .downcast::<ConsoleFaderProcessor>()
+        .downcast::<LiveControlFaderProcessor>()
         .unwrap_or_else(|_| unreachable!("type id was checked before ownership transfer"));
     let matrix = matrix_any
-        .downcast::<ConsoleMatrixProcessor>()
+        .downcast::<LiveControlMatrixProcessor>()
         .unwrap_or_else(|_| unreachable!("type id was checked before ownership transfer"));
     if fader.control_delivery != BuiltinControlDelivery::BetweenRenderCalls
         || matrix.control_delivery != BuiltinControlDelivery::BetweenRenderCalls
@@ -4571,16 +4574,16 @@ fn make_scalar_split_pair(
     fader: Box<dyn GraphRuntimeProcessor>,
     matrix: Box<dyn GraphRuntimeProcessor>,
 ) -> Result<Box<dyn GraphRuntimeSplitPairProcessor>, ScalarPairOwners> {
-    if fader.as_ref().type_id() != core::any::TypeId::of::<ConsoleFaderProcessor>()
-        || matrix.as_ref().type_id() != core::any::TypeId::of::<ConsoleMatrixProcessor>()
+    if fader.as_ref().type_id() != core::any::TypeId::of::<LiveControlFaderProcessor>()
+        || matrix.as_ref().type_id() != core::any::TypeId::of::<LiveControlMatrixProcessor>()
     {
         return Err((fader, matrix));
     }
     let fader = (fader as Box<dyn Any>)
-        .downcast::<ConsoleFaderProcessor>()
+        .downcast::<LiveControlFaderProcessor>()
         .unwrap_or_else(|_| unreachable!("type id was checked before ownership transfer"));
     let matrix = (matrix as Box<dyn Any>)
-        .downcast::<ConsoleMatrixProcessor>()
+        .downcast::<LiveControlMatrixProcessor>()
         .unwrap_or_else(|_| unreachable!("type id was checked before ownership transfer"));
     if fader.control_delivery != BuiltinControlDelivery::BetweenRenderCalls
         || matrix.control_delivery != BuiltinControlDelivery::BetweenRenderCalls
@@ -5493,12 +5496,12 @@ mod tests {
             let lanes = u64::from(width.lanes());
             let banks = sizes.len() as u64;
             let node_bytes = core::mem::size_of::<GraphNodeId>() as u64;
-            // The struct **plus** the per-lane console-consumer array it owns. #210 phase 3 gave
-            // the input bank the same shape the fader and matrix banks already had: one
-            // `Option<Consumer<_>>` per lane, allocated whether or not a console is attached, so
-            // that a banked session's retained payload does not depend on whether the host leased
-            // one. Written out here rather than read off `strip_processor_bytes`, which is the
-            // function under test.
+            // The struct **plus** the per-lane live-control consumer array it owns. #210 phase 3
+            // gave the input bank the same shape the fader and matrix banks already had: one
+            // `Option<Consumer<_>>` per lane, allocated whether or not live controls are attached,
+            // so that a banked session's retained payload does not depend on whether the host
+            // leased one. Written out here rather than read off `strip_processor_bytes`, which is
+            // the function under test.
             let processor_bytes = core::mem::size_of::<BuiltinBankProcessor>() as u64
                 + core::mem::size_of::<Option<Consumer<TrackInputRecord>>>() as u64 * lanes;
             let plane_bytes = u64::from(quantum) * lanes * 4;
@@ -6385,8 +6388,8 @@ mod tests {
         )
     }
 
-    /// The existing queued graph through the direct-console delivery path, whose separate fader
-    /// and matrix consumers make the adjacent runtime memberships decline pairing.
+    /// The existing queued graph through the direct live-control delivery path, whose separate
+    /// fader and matrix consumers make the adjacent runtime memberships decline pairing.
     #[cfg(feature = "test-support")]
     #[must_use]
     pub fn test_only_prepared_unpaired_graph() -> PreparedBuiltinsGraphBound {
@@ -6651,7 +6654,12 @@ mod tests {
                 caps(),
             )
         } else {
-            prepare_session_builtins_with_console(&compiled, meter.as_slice(), &controls, caps())
+            prepare_session_builtins_with_live_controls(
+                &compiled,
+                meter.as_slice(),
+                &controls,
+                caps(),
+            )
         }
         .expect("prepared builtins");
         let (mut graph, mut levels) = track_graph_variant(n, variant);
@@ -9892,17 +9900,17 @@ mod tests {
         );
     }
 
-    type ScalarConsoleOwners = (
+    type ScalarLiveControlOwners = (
         Box<dyn GraphRuntimeProcessor>,
         Box<dyn GraphRuntimeProcessor>,
         Producer<TrackFaderRecord>,
         Producer<TrackControlRecord>,
     );
 
-    fn scalar_console_owners(
+    fn scalar_live_control_owners(
         fader_delivery: BuiltinControlDelivery,
         matrix_delivery: BuiltinControlDelivery,
-    ) -> ScalarConsoleOwners {
+    ) -> ScalarLiveControlOwners {
         let parameters = BuiltinParameters {
             left: builtins::ChannelParameters {
                 fader_db: -3.0,
@@ -9930,14 +9938,14 @@ mod tests {
             bounded_spsc(NonZeroUsize::new(4).expect("queue"), QueueGeneration(0))
                 .expect("matrix queue");
         (
-            Box::new(ConsoleFaderProcessor {
+            Box::new(LiveControlFaderProcessor {
                 fader: FaderMuteRampBuiltins::new(parameters).expect("fader"),
                 control: fader_rx,
                 control_delivery: fader_delivery,
                 #[cfg(any(test, feature = "test-support"))]
                 test_only_owner: u16::MAX,
             }),
-            Box::new(ConsoleMatrixProcessor {
+            Box::new(LiveControlMatrixProcessor {
                 matrix,
                 control: matrix_rx,
                 control_delivery: matrix_delivery,
@@ -9965,7 +9973,7 @@ mod tests {
         }
 
         let calls = Arc::new(AtomicUsize::new(0));
-        let (fader, matrix, _, _) = scalar_console_owners(
+        let (fader, matrix, _, _) = scalar_live_control_owners(
             BuiltinControlDelivery::BetweenRenderCalls,
             BuiltinControlDelivery::BetweenRenderCalls,
         );
@@ -9983,7 +9991,7 @@ mod tests {
         );
         assert_eq!(
             wrong_first.1.as_ref().type_id(),
-            core::any::TypeId::of::<ConsoleMatrixProcessor>()
+            core::any::TypeId::of::<LiveControlMatrixProcessor>()
         );
         let wrong_second = make_scalar_pair(
             fader,
@@ -9995,7 +10003,7 @@ mod tests {
         .expect("wrong second owner declines");
         assert_eq!(
             wrong_second.0.as_ref().type_id(),
-            core::any::TypeId::of::<ConsoleFaderProcessor>()
+            core::any::TypeId::of::<LiveControlFaderProcessor>()
         );
         assert_eq!(
             wrong_second.1.as_ref().type_id(),
@@ -10018,7 +10026,7 @@ mod tests {
             ),
         ] {
             let (fader, matrix, mut fader_tx, mut matrix_tx) =
-                scalar_console_owners(fader_policy, matrix_policy);
+                scalar_live_control_owners(fader_policy, matrix_policy);
             fader_tx
                 .try_push(TrackFaderRecord::Mute {
                     lanes: BuiltinLaneSelector::Left,
@@ -10036,10 +10044,10 @@ mod tests {
                 .err()
                 .expect("either concurrent owner declines");
             let mut fader = (returned.0 as Box<dyn Any>)
-                .downcast::<ConsoleFaderProcessor>()
+                .downcast::<LiveControlFaderProcessor>()
                 .unwrap();
             let mut matrix = (returned.1 as Box<dyn Any>)
-                .downcast::<ConsoleMatrixProcessor>()
+                .downcast::<LiveControlMatrixProcessor>()
                 .unwrap();
             let mut left = [1.0_f32, 0.5];
             let mut right = [-0.25_f32, -0.75];
@@ -10064,7 +10072,7 @@ mod tests {
     #[test]
     fn scalar_split_owner_defers_settled_fader_and_completes_before_matrix_error() {
         let make = || {
-            scalar_console_owners(
+            scalar_live_control_owners(
                 BuiltinControlDelivery::BetweenRenderCalls,
                 BuiltinControlDelivery::BetweenRenderCalls,
             )
@@ -10106,10 +10114,10 @@ mod tests {
         assert_eq!(paired_left, [0.5, 0.25], "settled fader remains deferred");
         assert_eq!(paired_right, [-0.25, -0.125]);
         let mut separate_fader = (separate_fader as Box<dyn Any>)
-            .downcast::<ConsoleFaderProcessor>()
+            .downcast::<LiveControlFaderProcessor>()
             .unwrap();
         let mut separate_matrix = (separate_matrix as Box<dyn Any>)
-            .downcast::<ConsoleMatrixProcessor>()
+            .downcast::<LiveControlMatrixProcessor>()
             .unwrap();
         separate_fader
             .process(GraphBindingBlock {
@@ -10186,7 +10194,7 @@ mod tests {
 
     #[test]
     fn scalar_split_invalid_begin_envelope_does_not_arm_pending_or_drain_matrix() {
-        let (fader, matrix, mut fader_tx, mut matrix_tx) = scalar_console_owners(
+        let (fader, matrix, mut fader_tx, mut matrix_tx) = scalar_live_control_owners(
             BuiltinControlDelivery::BetweenRenderCalls,
             BuiltinControlDelivery::BetweenRenderCalls,
         );
@@ -10254,7 +10262,7 @@ mod tests {
     #[test]
     fn scalar_invalid_envelope_leaves_the_later_matrix_queue_untouched() {
         let make = || {
-            let (fader, matrix, fader_tx, matrix_tx) = scalar_console_owners(
+            let (fader, matrix, fader_tx, matrix_tx) = scalar_live_control_owners(
                 BuiltinControlDelivery::BetweenRenderCalls,
                 BuiltinControlDelivery::BetweenRenderCalls,
             );
@@ -10340,7 +10348,7 @@ mod tests {
     #[test]
     fn scalar_pair_reset_matches_reset_original_owners() {
         let make = || {
-            scalar_console_owners(
+            scalar_live_control_owners(
                 BuiltinControlDelivery::BetweenRenderCalls,
                 BuiltinControlDelivery::BetweenRenderCalls,
             )
@@ -10353,8 +10361,8 @@ mod tests {
         let (fader, matrix, mut separate_fader_tx, mut separate_matrix_tx) = make();
         let fader: Box<dyn Any> = fader;
         let matrix: Box<dyn Any> = matrix;
-        let mut separate_fader = fader.downcast::<ConsoleFaderProcessor>().unwrap();
-        let mut separate_matrix = matrix.downcast::<ConsoleMatrixProcessor>().unwrap();
+        let mut separate_fader = fader.downcast::<LiveControlFaderProcessor>().unwrap();
+        let mut separate_matrix = matrix.downcast::<LiveControlMatrixProcessor>().unwrap();
         let fader_record = TrackFaderRecord::Mute {
             lanes: BuiltinLaneSelector::Both,
             muted: true,
@@ -10860,7 +10868,8 @@ mod tests {
         };
         let default = collect(prepare_session_builtins(&compiled, &[], caps()).expect("default"));
         let raw = collect(
-            prepare_session_builtins_with_console(&compiled, &[], &controls, caps()).expect("raw"),
+            prepare_session_builtins_with_live_controls(&compiled, &[], &controls, caps())
+                .expect("raw"),
         );
         let between = collect(
             prepare_session_builtins_between_render_calls(&compiled, &[], &controls, caps())
@@ -10926,7 +10935,7 @@ mod tests {
                 .collect::<Vec<_>>()
         };
 
-        let selected = prepare_selected_session_builtins_with_console(
+        let selected = prepare_selected_session_builtins_with_live_controls(
             &compiled,
             std::slice::from_ref(&request),
             &controls,
@@ -10970,8 +10979,8 @@ mod tests {
             .collect::<Vec<_>>();
         let (_, levels) = track_graph(3);
         let classes = SessionPoolClasses::from_session(&compiled);
-        let fader = core::mem::size_of::<ConsoleFaderProcessor>() as u64;
-        let matrix = core::mem::size_of::<ConsoleMatrixProcessor>() as u64;
+        let fader = core::mem::size_of::<LiveControlFaderProcessor>() as u64;
+        let matrix = core::mem::size_of::<LiveControlMatrixProcessor>() as u64;
         let pair_outer = core::mem::size_of::<ScalarPairProcessor>() as u64;
         let split_outer = core::mem::size_of::<ScalarSplitPairProcessor>() as u64;
         let outer = pair_outer.max(split_outer);
@@ -10989,15 +10998,15 @@ mod tests {
         let matrix_fields = core::mem::size_of::<MatrixBuiltins>()
             + core::mem::size_of::<Consumer<TrackControlRecord>>()
             + core::mem::size_of::<BuiltinControlDelivery>();
-        assert!(core::mem::size_of::<ConsoleFaderProcessor>() >= fader_fields);
-        assert!(core::mem::size_of::<ConsoleMatrixProcessor>() >= matrix_fields);
+        assert!(core::mem::size_of::<LiveControlFaderProcessor>() >= fader_fields);
+        assert!(core::mem::size_of::<LiveControlMatrixProcessor>() >= matrix_fields);
         assert!(
-            core::mem::size_of::<ConsoleFaderProcessor>() - fader_fields
-                < core::mem::align_of::<ConsoleFaderProcessor>()
+            core::mem::size_of::<LiveControlFaderProcessor>() - fader_fields
+                < core::mem::align_of::<LiveControlFaderProcessor>()
         );
         assert!(
-            core::mem::size_of::<ConsoleMatrixProcessor>() - matrix_fields
-                < core::mem::align_of::<ConsoleMatrixProcessor>()
+            core::mem::size_of::<LiveControlMatrixProcessor>() - matrix_fields
+                < core::mem::align_of::<LiveControlMatrixProcessor>()
         );
 
         let serialized =
@@ -11017,19 +11026,20 @@ mod tests {
             fader.max(matrix).max(outer).max(split_table_entry)
         );
 
-        let concurrent = prepare_session_builtins_with_console(&compiled, &[], &controls, caps())
-            .expect("concurrent owners")
-            .graph_scalar_owner_resource(Backend::Scalar, &levels, &classes)
-            .expect("checked scalar estimate");
+        let concurrent =
+            prepare_session_builtins_with_live_controls(&compiled, &[], &controls, caps())
+                .expect("concurrent owners")
+                .graph_scalar_owner_resource(Backend::Scalar, &levels, &classes)
+                .expect("checked scalar estimate");
         assert_eq!(concurrent.total_bytes, 3 * (fader + matrix));
         assert_eq!(concurrent.largest_allocation_bytes, fader.max(matrix));
 
-        let no_console = prepare_session_builtins(&compiled, &[], caps())
-            .expect("no-console owners")
+        let no_live_controls = prepare_session_builtins(&compiled, &[], caps())
+            .expect("no-live-control owners")
             .graph_scalar_owner_resource(Backend::Scalar, &levels, &classes)
             .expect("checked scalar estimate");
         assert_eq!(
-            no_console,
+            no_live_controls,
             graph::GraphScalarOwnerResourceEstimate::default()
         );
 
@@ -11467,7 +11477,7 @@ mod tests {
     }
 
     #[test]
-    fn disabled_live_console_input_has_infinite_tail_but_plain_input_does_not() {
+    fn disabled_live_control_input_has_infinite_tail_but_plain_input_does_not() {
         let mut model =
             parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
                 .expect("parse");
@@ -11495,7 +11505,7 @@ mod tests {
             vec![("vocal", BuiltinTail::FiniteZero)]
         );
 
-        let live = prepare_session_builtins_with_console(
+        let live = prepare_session_builtins_with_live_controls(
             &compiled,
             &[],
             &[TrackControlRequest {
@@ -12227,26 +12237,26 @@ mod tests {
         // entry replaced them. 906 -> 954 at one track, and one fewer allocation (19 -> 18).
         //
         // Moved again by #210 phase 3, through the same one dimension, by **+171 bytes per track**
-        // on a console-free preparation -- 954 -> 1_125 on this one-track fixture. Every term is a
-        // `size_of` and they sum exactly:
+        // on a live-control-free preparation -- 954 -> 1_125 on this one-track fixture. Every term
+        // is a `size_of` and they sum exactly:
         //
         // | term | bytes |
         // |---|---|
         // | the `GraphNodeBinding` vector leaves preparation entirely | -72 |
         // | the boxed `InputProcessor` leaves with it | -168 |
         // | one fewer clone of the track ID (ten copies became nine) | -5 (`"vocal"`) |
-        // | `StripPreparation` gains the input section and a third console consumer, 344 -> 656 | +312 |
+        // | `StripPreparation` gains the input section and a third live consumer, 344 -> 656 | +312 |
         // | the `bank_inputs` vector entry grows with `InputBuiltins`, 168 -> 272 | +104 |
         //
         // `InputBuiltins` grew by 104 because `InputStage<f32>` gained the trim ramp: four `f32`
         // ramp words per channel (32), the authoritative `[[u32; 8]; 2]` countdown (64), and the
         // `ramping` flag with its padding (8).
         //
-        // A *console-leased* preparation moves by +827 per controlled track at depth 8 instead:
-        // the same +171, plus 40 for the wider `TrackControlProducer` vector entry (96 -> 136, the
-        // third producer) and 616 for the third bounded ring -- a 256-byte header at 64-byte
-        // alignment plus 360 bytes of slot payload (`TrackInputRecord` is 40 bytes after the
-        // prepared-filter target arm). 1_884 -> 2_711 on this fixture with one depth-8 channel.
+        // A *live-control-leased* preparation moves by +827 per controlled track at depth 8
+        // instead: the same +171, plus 40 for the wider `TrackControlProducer` vector entry (96 ->
+        // 136, the third producer) and 616 for the third bounded ring -- a 256-byte header at
+        // 64-byte alignment plus 360 bytes of slot payload (`TrackInputRecord` is 40 bytes after
+        // the prepared-filter target arm). 1_884 -> 2_711 on this fixture with one depth-8 channel.
         // `maximum_single_allocation_bytes` moves
         // 344 -> 656 with `StripPreparation`, which is the largest single allocation at one track.
         //
@@ -12278,10 +12288,11 @@ mod tests {
         );
     }
 
-    /// The per-node console input processor: the arm a scalar-backend host binds (#210 phase 3).
+    /// The per-node live-control input processor: the arm a scalar-backend host binds (#210 phase
+    /// 3).
     ///
     /// `Backend::current()` is a compile-time constant, so on every architecture the workspace's
-    /// tests run on the strip is banked and `ConsoleInputProcessor` is unreachable from an
+    /// tests run on the strip is banked and `LiveControlInputProcessor` is unreachable from an
     /// end-to-end fixture. It is not unreachable in *production* -- a target with no SIMD binds
     /// it, and so does any lowering the planner leaves unbanked -- so it is driven directly here,
     /// through the same `GraphRuntimeProcessor::process` the runtime calls.
@@ -12293,7 +12304,7 @@ mod tests {
     /// coefficient never moves. Red mutation: drop `self.live.admit(&record)` -> the per-lane arm
     /// keeps claiming symmetry.
     #[test]
-    fn the_per_node_console_input_processor_drains_and_folds_its_witness() {
+    fn the_per_node_live_control_input_processor_drains_and_folds_its_witness() {
         let parameters = BuiltinParameters {
             left: ChannelParameters {
                 trim_db: 0.0,
@@ -12316,7 +12327,7 @@ mod tests {
             .expect("queue");
             (
                 producer,
-                ConsoleInputProcessor {
+                LiveControlInputProcessor {
                     input,
                     control,
                     live: ChannelSymmetryWitness::SYMMETRIC,
@@ -12449,21 +12460,21 @@ mod tests {
         );
     }
 
-    /// Issue #137 D1: a live-console control request is validated like a meter request, sealed
+    /// Issue #137 D1: a live-control request is validated like a meter request, sealed
     /// like a meter consumer, and charges only the tracks that asked for one.
     ///
     /// Red mutation: delete the `control_tracks.insert` / `known_tracks.contains` legs in
-    /// `prepare_session_builtins_with_console` -> the duplicate and unknown-track requests are
-    /// accepted, and the assertions below on `builtin.control.duplicate` /
+    /// `prepare_session_builtins_with_live_controls` -> the duplicate and unknown-track requests
+    /// are accepted, and the assertions below on `builtin.control.duplicate` /
     /// `builtin.control.unknown_track` fail with an `Ok` preparation.
     #[test]
-    fn console_control_requests_are_validated_sealed_and_charged_per_track() {
+    fn live_control_requests_are_validated_sealed_and_charged_per_track() {
         let compiled = session();
         let track = compiled.normalized_model().tracks[0].id.as_str().to_owned();
         let depth = NonZeroUsize::new(3).expect("nonzero");
 
         let baseline = prepare_session_builtins(&compiled, &[], caps()).expect("baseline");
-        let attached = prepare_session_builtins_with_console(
+        let attached = prepare_session_builtins_with_live_controls(
             &compiled,
             &[],
             &[TrackControlRequest {
@@ -12472,7 +12483,7 @@ mod tests {
             }],
             caps(),
         )
-        .expect("attached console");
+        .expect("attached live controls");
         assert_eq!(baseline.track_control_count(), 0);
         assert_eq!(attached.track_control_count(), 1);
         assert!(
@@ -12491,10 +12502,10 @@ mod tests {
         assert_eq!(
             attached.processor_count(),
             baseline.processor_count(),
-            "a console changes no processor count, only one processor's type"
+            "live controls change no processor count, only one processor's type"
         );
 
-        let duplicate = prepare_session_builtins_with_console(
+        let duplicate = prepare_session_builtins_with_live_controls(
             &compiled,
             &[],
             &[
@@ -12519,7 +12530,7 @@ mod tests {
             "{duplicate:?}"
         );
 
-        let unknown = prepare_session_builtins_with_console(
+        let unknown = prepare_session_builtins_with_live_controls(
             &compiled,
             &[],
             &[TrackControlRequest {

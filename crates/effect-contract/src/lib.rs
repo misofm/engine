@@ -36,7 +36,7 @@ pub use step::{
     validate_parameter_lattice_parts,
 };
 pub use symmetry::{
-    ChannelSymmetryWitness, LiveConsoleRecord, SeamSide, SymmetryEvent, payload_sections_agree,
+    ChannelSymmetryWitness, LiveControlRecord, SeamSide, SymmetryEvent, payload_sections_agree,
 };
 
 use core::{fmt, hash::Hash};
@@ -404,7 +404,8 @@ pub struct PortDescriptor {
     pub required: bool,
     pub layout: PortLayout,
 }
-/// One declared observation tap: what an effect will let a console watch, and what watching costs.
+/// One declared observation tap: what an effect will let live controls watch, and what watching
+/// costs.
 ///
 /// # Why a declared menu rather than a host-side table
 ///
@@ -1067,7 +1068,7 @@ pub struct PreparedEffectMetadata {
 /// So preparation does not hand a session's bypass to an effect that can bank (with one exception,
 /// below). `effect-compiler` lowers it to a
 /// prepared `bypass = false` plus the initial state of that lane's [`BypassShunt`], carried by an
-/// [`EffectControlLane`] (`EffectControlLane::without_channel` when no live console is attached):
+/// [`EffectControlLane`] (`EffectControlLane::without_channel` when no live controls are attached):
 ///
 /// * **The wet path still runs.** A bypassed lane's state stays continuous, so un-bypassing does
 ///   not click, and the cohort does not split. That cost is accepted (decision 12).
@@ -1192,7 +1193,7 @@ pub enum ProcessBlockError {
     ZeroFrames,
     Shape,
     Automation,
-    /// A live-console staging window whose span count is not the effect's
+    /// A live-control staging window whose span count is not the effect's
     /// `automation_capacity`; refused at preparation by
     /// [`EffectProcessBlock::check_automation_window`] and
     /// [`EffectBankProcessBlock::check_automation_window`].
@@ -1247,11 +1248,11 @@ impl<'a> EffectProcessBlock<'a> {
         self.left.len()
     }
 
-    /// Refuse, at preparation, a live-console staging window that is not exactly this instance's
+    /// Refuse, at preparation, a live-control staging window that is not exactly this instance's
     /// `automation_capacity` spans (issue #1004 finding 1, issue #1012).
     ///
     /// Every caller that owns the window it hands [`EffectControlLane::stage`] for a prepared
-    /// instance -- `graph`'s per-node console effect today -- calls this once, off the render
+    /// instance -- `graph`'s per-node live-control effect today -- calls this once, off the render
     /// thread, where it allocates the window. The blocks this type builds afterwards carry only the
     /// staged prefix of that window, per block, on the render thread, and never see the window or
     /// the capacity, so this is where the bound can be checked at all.
@@ -1328,12 +1329,12 @@ impl<'a> EffectBankProcessBlock<'a> {
         })
     }
 
-    /// Refuse, at preparation, a live-console staging window that is not exactly this bank's
+    /// Refuse, at preparation, a live-control staging window that is not exactly this bank's
     /// `automation_capacity` spans (issue #1012).
     ///
     /// The bank sibling of [`EffectProcessBlock::check_automation_window`], with the same reason:
-    /// `rack`'s console bank stage drains every lane through one window before packing the lane's
-    /// partition, and each lane's partition meets the effect's per-lane `span_index <
+    /// `rack`'s live-control bank stage drains every lane through one window before packing the
+    /// lane's partition, and each lane's partition meets the effect's per-lane `span_index <
     /// automation_capacity` cut-off, so the window must be exactly that capacity for a staged twin
     /// pair never to straddle it. Called once, off the render thread, where the window is
     /// allocated.
@@ -1939,7 +1940,7 @@ pub trait PreparedNativeEffectBank: Send {
     /// second entry point for it.
     ///
     /// The **caller** owns the substitution, because the caller is what knows the mode.
-    /// `rack::ConsoleEffectBankStage::process_mono` overwrites every published sample's
+    /// `rack::LiveControlEffectBankStage::process_mono` overwrites every published sample's
     /// right field with its left one before the taps accumulate, which is the observation half of
     /// the same seam the fader duplication is: the right channel of a collapsed track *is* its left
     /// channel, at the tap exactly as at the fader. So an implementation writes the two channels it

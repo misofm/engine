@@ -266,13 +266,13 @@ import { WasmBoundary } from "../src/core/boundary.ts";
 import { CATALOG } from "../src/generated/catalog.ts";
 
 test("prepared worker snapshots inputs and retains the exact module after termination", async () => {
-  const worker = new FakeWorker(); const document = new Uint8Array([4]); const options = { console: { meterBlocks: 2 } };
+  const worker = new FakeWorker(); const document = new Uint8Array([4]); const options = { liveControls: { meterBlocks: 2 } };
   const module = await WebAssembly.compile(new Uint8Array([0,97,115,109,1,0,0,0]));
   const pending = prepareBrowserSessionWithWorker({ document, options, moduleUrl: "wasm", createWorker: () => worker });
-  document[0] = 9; options.console.meterBlocks = 99;
+  document[0] = 9; options.liveControls.meterBlocks = 99;
   worker.emit("message", { type: "worker-ready" });
   assert.equal(worker.requests[0].type, "prepare"); assert.equal(worker.requests[0].document[0], 4);
-  assert.equal(worker.requests[0].options.console.meterBlocks, 2);
+  assert.equal(worker.requests[0].options.liveControls.meterBlocks, 2);
   worker.emit("message", { ...result, module });
   assert.equal((await pending).module, module); worker.assertClosed();
 });
@@ -294,11 +294,11 @@ for (const fault of ["post", "missing-module", "abort-before-reply", "reply-befo
 }
 
 test("createEngine snapshots document and nested policy before scratch awaits and forwards prepared identity", async () => {
-  const document = new Uint8Array([3]); const policy = { console: { meterBlocks: 2 } };
+  const document = new Uint8Array([3]); const policy = { liveControls: { meterBlocks: 2 } };
   const module = await WebAssembly.compile(new Uint8Array([0,97,115,109,1,0,0,0]));
   const engine = await createEngine({ document, policy, preparedModule: module, createContext: context,
-    scratchBoot: async request => { document[0] = 8; policy.console.meterBlocks = 9; assert.equal(request.document[0], 3); return shape; },
-    createHost: async request => { assert.equal(request.document[0], 3); assert.equal(request.options.console.meterBlocks, 2); assert.equal(request.preparedModule, module); return { async dispose() {} }; },
+    scratchBoot: async request => { document[0] = 8; policy.liveControls.meterBlocks = 9; assert.equal(request.document[0], 3); return shape; },
+    createHost: async request => { assert.equal(request.document[0], 3); assert.equal(request.options.liveControls.meterBlocks, 2); assert.equal(request.preparedModule, module); return { async dispose() {} }; },
   });
   await engine.close();
 });
@@ -312,7 +312,7 @@ test("preparation compiles once, disposes scratch, and yields fresh stateful liv
   });
   const bytes = await moduleBytes();
   const document = new TextEncoder().encode(sessionDocument({ effects: { simd1: effects }, frames: 16384 }));
-  const options = { console: { commandQueueRecords: 64, meterBlocks: 2, observationTaps: 1 } };
+  const options = { liveControls: { commandQueueRecords: 64, meterBlocks: 2, observationTaps: 1 } };
   let compiles = 0, disposals = 0; const compile = WebAssembly.compile; const dispose = WasmBoundary.prototype.dispose;
   WebAssembly.compile = async (...args) => { compiles++; return compile(...args); };
   WasmBoundary.prototype.dispose = function () { disposals++; return dispose.call(this); };
@@ -349,7 +349,7 @@ test("preparation compiles once, disposes scratch, and yields fresh stateful liv
 });
 
 for (const frames of [0, 1, 129]) for (const channels of [1, 2]) {
-  test(`preparation handles ${frames} frames and ${channels} channels without console`, async () => {
+  test(`preparation handles ${frames} frames and ${channels} channels without live controls`, async () => {
     const pending = prepareBrowserSessionInWorker({ moduleBytes: await moduleBytes(), document: new TextEncoder().encode(sessionDocument({ frames, channels })), options: {} });
     if (frames === 0) { await assert.rejects(pending, error => error instanceof MisoEngineError && error.diagnosticCode === "capacity.zero"); return; }
     const prepared = await pending;
@@ -419,22 +419,22 @@ test("preparation admits several independent mono and stereo sources", async () 
 });
 
 
-for (const initialConsole of [undefined, {}, { commandQueueRecords: 0 }, { commandQueueRecords: 64 }]) {
-  test(`console attachment uses captured boot policy: ${JSON.stringify(initialConsole)}`, async () => {
-    const attached = (initialConsole?.commandQueueRecords ?? 0) > 0;
-    const policy = initialConsole === undefined ? {} : { console: { ...initialConsole } };
+for (const initialLiveControls of [undefined, {}, { commandQueueRecords: 0 }, { commandQueueRecords: 64 }]) {
+  test(`live-control attachment uses captured boot policy: ${JSON.stringify(initialLiveControls)}`, async () => {
+    const attached = (initialLiveControls?.commandQueueRecords ?? 0) > 0;
+    const policy = initialLiveControls === undefined ? {} : { liveControls: { ...initialLiveControls } };
     let maps = 0; let commands = 0; const closed = [];
     const engine = await createEngine({
       document: new Uint8Array([1]), policy,
       scratchBoot: async () => {
-        policy.console ??= {};
-        policy.console.commandQueueRecords = attached ? 0 : 64;
+        policy.liveControls ??= {};
+        policy.liveControls.commandQueueRecords = attached ? 0 : 64;
         return shape;
       },
       createContext: () => ({ sampleRate: 48000, renderQuantumSize: 128, state: "running",
         audioWorklet: { async addModule() {} }, async close() { closed.push("context"); } }),
       createHost: async request => {
-        assert.equal((request.options.console?.commandQueueRecords ?? 0) > 0, attached);
+        assert.equal((request.options.liveControls?.commandQueueRecords ?? 0) > 0, attached);
         return {
           async sessionMap() { maps++; return { tracks: ["t"], sources: [], metersAttached: false }; },
           async command(request) { commands++; return { result: 0, reason: 0, rejectedIndex: 0,
@@ -444,16 +444,16 @@ for (const initialConsole of [undefined, {}, { commandQueueRecords: 0 }, { comma
       },
     });
     let pending;
-    assert.doesNotThrow(() => { pending = engine.console(); });
+    assert.doesNotThrow(() => { pending = engine.liveControls(); });
     assert.ok(pending instanceof Promise);
-    assert.equal(engine.console(), pending, "console Promise is cached");
+    assert.equal(engine.liveControls(), pending, "live-control Promise is cached");
     if (attached) {
       const controls = await pending;
       assert.equal((await controls.submit(controls.edit.track("t").faderDb(-6))).ok, true);
       assert.equal(maps, 1); assert.equal(commands, 1);
     } else {
       await assert.rejects(pending, error => error instanceof MisoUsageError &&
-        error.message.includes("no console attached") && error.message.includes("policy.console.commandQueueRecords"));
+        error.message.includes("no live controls attached") && error.message.includes("policy.liveControls.commandQueueRecords"));
       assert.equal(maps, 0); assert.equal(commands, 0);
     }
     assert.equal(engine.context.state, "running");

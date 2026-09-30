@@ -5,11 +5,11 @@
  * # Why this is a type file rather than an eval
  *
  * The claim has two halves and only one of them is observable at runtime. "The barrel exports
- * `ConsoleWriter`" is a value check any eval could make; "the barrel's `LatticePoint` is the same
- * type as `core/lattice.ts`'s" is not, because the interface is erased before a test could look at
- * it. A barrel that re-exported a *structurally similar* declaration -- the shape drifting by one
- * optional field -- would pass a runtime check and still break the consumer that trusted it. So
- * this file asserts type identity with `Exact`, which compares declarations rather than
+ * `LiveControlWriter`" is a value check any eval could make; "the barrel's `LatticePoint` is the
+ * same type as `core/lattice.ts`'s" is not, because the interface is erased before a test could
+ * look at it. A barrel that re-exported a *structurally similar* declaration -- the shape drifting
+ * by one optional field -- would pass a runtime check and still break the consumer that trusted it.
+ * So this file asserts type identity with `Exact`, which compares declarations rather than
  * assignability, and it is checked by `scripts/check-sdk-types.sh` exactly as
  * `sdk/test/host-mirror.ts` is: it runs nothing, and its job is to fail COMPILATION.
  *
@@ -30,7 +30,7 @@ import * as browserBarrel from "../src/browser/index.ts";
 import * as headlessBarrel from "../src/headless/index.ts";
 
 import * as agent from "../src/core/agent.ts";
-import * as consoleSurface from "../src/core/console.ts";
+import * as liveControlSurface from "../src/core/live-controls.ts";
 import * as liveResponse from "../src/core/live-response.ts";
 import * as catalog from "../src/generated/catalog.ts";
 import * as browserResponse from "../src/browser/response.ts";
@@ -54,22 +54,22 @@ type AgentSetAck = Assert<Exact<barrel.SetAck, agent.SetAck>>;
 
 // --- core/writer.ts: same ----------------------------------------------------------------------
 
-type WriterClass = Assert<Exact<typeof barrel.ConsoleWriter, typeof writer.ConsoleWriter>>;
-type WriterInstance = Assert<Exact<barrel.ConsoleWriter, writer.ConsoleWriter>>;
+type WriterClass = Assert<Exact<typeof barrel.LiveControlWriter, typeof writer.LiveControlWriter>>;
+type WriterInstance = Assert<Exact<barrel.LiveControlWriter, writer.LiveControlWriter>>;
 type WriterLaneEdit = Assert<Exact<barrel.LaneEdit, writer.LaneEdit>>;
 type WriterFlushOutcome = Assert<Exact<barrel.FlushOutcome, writer.FlushOutcome>>;
 type WriterStatsType = Assert<Exact<barrel.WriterStats, writer.WriterStats>>;
 type WriterOptionsType = Assert<Exact<barrel.WriterOptions, writer.WriterOptions>>;
 
-// --- core/console.ts: the semantic path is on the root barrel ---------------------------------
+// --- core/live-controls.ts: the semantic path is on the root barrel ----------------------------
 
-type ConsoleClass = Assert<Exact<typeof barrel.EngineConsole, typeof consoleSurface.EngineConsole>>;
-type ConsoleEditsClass =
-  Assert<Exact<typeof barrel.ConsoleEdits, typeof consoleSurface.ConsoleEdits>>;
-type ConsoleRackType = Assert<Exact<barrel.ConsoleRack, consoleSurface.ConsoleRack>>;
-type ConsoleLiveParameterEdit = Assert<Exact<
+type LiveControlsClass = Assert<Exact<typeof barrel.EngineLiveControls, typeof liveControlSurface.EngineLiveControls>>;
+type LiveControlEditsClass =
+  Assert<Exact<typeof barrel.LiveControlEdits, typeof liveControlSurface.LiveControlEdits>>;
+type LiveControlRackType = Assert<Exact<barrel.LiveControlRack, liveControlSurface.LiveControlRack>>;
+type LiveControlParameterEdit = Assert<Exact<
   barrel.LiveEffectParameterEdit<"miso.compressor">,
-  consoleSurface.LiveEffectParameterEdit<"miso.compressor">
+  liveControlSurface.LiveEffectParameterEdit<"miso.compressor">
 >>;
 
 // --- core/lattice.ts: everything but the two collided names, which are renamed ------------------
@@ -161,10 +161,10 @@ export type BarrelSurfacePins = [
   WriterFlushOutcome,
   WriterStatsType,
   WriterOptionsType,
-  ConsoleClass,
-  ConsoleEditsClass,
-  ConsoleRackType,
-  ConsoleLiveParameterEdit,
+  LiveControlsClass,
+  LiveControlEditsClass,
+  LiveControlRackType,
+  LiveControlParameterEdit,
   LatticePointsFn,
   LatticeResolveStepFn,
   LatticeIndexForDecimalFn,
@@ -215,14 +215,14 @@ function writerSubmissionTypes(report: barrel.CommandReport) {
     }
     return report;
   } };
-  new barrel.ConsoleWriter(encoded);
-  new barrel.ConsoleWriter(semantic);
+  new barrel.LiveControlWriter(encoded);
+  new barrel.LiveControlWriter(semantic);
   // @ts-expect-error both callbacks are ambiguous
-  new barrel.ConsoleWriter({ submit: legacyCallback, submitEdits: semantic.submitEdits });
+  new barrel.LiveControlWriter({ submit: legacyCallback, submitEdits: semantic.submitEdits });
   // @ts-expect-error one callback is required
-  new barrel.ConsoleWriter({ maximumBatch: 4 });
+  new barrel.LiveControlWriter({ maximumBatch: 4 });
   // @ts-expect-error actual CommandReport is required
-  new barrel.ConsoleWriter({ submitEdits: async () => undefined });
+  new barrel.LiveControlWriter({ submitEdits: async () => undefined });
 }
 void writerSubmissionTypes;
 export type _SemanticWriterOptionsType = SemanticWriterOptionsType;

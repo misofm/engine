@@ -143,8 +143,8 @@ pub(crate) fn test_only_with_bank_padding<R>(padding: BankPadding, body: impl Fn
 /// preparation lowers it to
 /// a prepared `bypass = false` plus a bypassed lane on the rack's latency-preserving shunt
 /// (`EffectControlLane::without_channel`), so a cohort's tracks group, and its slots bind, whatever
-/// mix of them is bypassed. The runtime builds the bank's `rack::ConsoleEffectBankStage` from those
-/// lanes, and it restores each bypassed lane's delayed dry signal after the bank runs.
+/// mix of them is bypassed. The runtime builds the bank's `rack::LiveControlEffectBankStage` from
+/// those lanes, and it restores each bypassed lane's delayed dry signal after the bank runs.
 ///
 /// Level bucketing: slot `k` of every chain in a bucket sits at `level + k`, because a rack chain
 /// is a path and a sidechain source never raises a chain member's level. A bank may not cross a

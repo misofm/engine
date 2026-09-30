@@ -217,8 +217,9 @@ fn an_uncommanded_bank_keeps_its_elision_plan() {
             [[true; 2]; 2],
             "an all-disabled bank elides every section at {width:?}"
         );
-        // The banked half of `the_settled_arm_leaves_the_ramp_words_untouched`: a bank no console
-        // addressed renders through the settled arm on every lane, including its padding lanes.
+        // The banked half of `the_settled_arm_leaves_the_ramp_words_untouched`: a bank no live
+        // control addressed renders through the settled arm on every lane, including its padding
+        // lanes.
         let lanes = width.lanes() as usize;
         let before: Vec<[u32; 8]> = (0..lanes)
             .map(|lane| bank_trim_ramp_words(&bank, lane))

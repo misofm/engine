@@ -171,8 +171,8 @@ tree restored between rows.
 
 `a_statically_bypassed_bank_collapses_to_the_dual_bits` carries no mutation of its own: it is
 coverage for the one place a **prepared** bypass and a **live** one differ. A live bypass clears the
-witness' `UNBYPASSED` term and declines the collapse; a prepared bypass on a console-free bank does
-not, because `EffectBankStage::lane_symmetry` is the designed-word comparison alone. The effect
+witness' `UNBYPASSED` term and declines the collapse; a prepared bypass on a live-control-free bank
+does not, because `EffectBankStage::lane_symmetry` is the designed-word comparison alone. The effect
 contract calls that "a seam the collapse must close", and the test closes it by rendering a bypassed
 bank both ways rather than by arguing that the bypass is per plane inside the kernel.
 

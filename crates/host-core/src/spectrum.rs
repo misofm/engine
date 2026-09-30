@@ -26,7 +26,8 @@ pub const SPECTRUM_WINDOW_FRAMES: usize = 2048;
 pub const SPECTRUM_BIN_COUNT: usize = SPECTRUM_WINDOW_FRAMES / 2 + 1;
 /// The finite lower dBFS display floor used by the analyzer.
 pub const SPECTRUM_FLOOR_DB: f32 = -120.0;
-/// A private observer handle outside the meter handle range used by prepared console taps.
+/// A private observer handle outside the meter handle range used by prepared live-control meter
+/// taps.
 const SPECTRUM_OBSERVER_HANDLE: u64 = u64::MAX;
 const IDLE: u8 = 0;
 const ARMED: u8 = 1;
