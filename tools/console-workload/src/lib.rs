@@ -371,7 +371,7 @@ pub enum Workload {
     /// two.
     ///
     /// The first ten tracks of the standing fixture, renamed and routed as the ragged nine-track
-    /// row's are ([`synthesise_tracks`]). With [`Self::NineTrackRaggedStrip`] (remainder one),
+    /// row's are (`synthesise_tracks`). With [`Self::NineTrackRaggedStrip`] (remainder one),
     /// [`Self::ThirteenTrackRaggedStrip`] (remainder five), [`Self::SixteenTrackStrip`] (two full
     /// banks) and [`Self::SixtyFourTrackConsole`] (eight), it is the strip-at-N row set the console
     /// strip's padding changes: today a remainder runs each effect one lane at a time, and after
