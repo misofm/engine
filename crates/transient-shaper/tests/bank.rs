@@ -240,18 +240,17 @@ fn bank_snapshot_restore_and_resets_are_track_local() {
     );
 }
 
-/// Issue #1088 (console strip P2a), gate 3: the transient shaper has not opted into padding (P2e, #1092), so
-/// it declines a padded bank request, and only after it has validated every member.
+/// Issue #1092 (console strip P2e): the transient shaper has opted into padding, so the public
+/// factory binds a padded bank request of every active count at this build's width, and it still
+/// refuses one whose member -- active or padded -- is malformed, with `prepare`'s own code.
 ///
-/// Red if the guard in `bind_homogeneous_bank` is removed -- a padded request binds, and the bank
-/// runs its clone lanes as real tracks -- or if it moves above member validation, where a padded
-/// request with a malformed member is declined instead of refused.
+/// Red if the #1088 guard comes back (a padded request is declined), or if the padded lanes are no
+/// longer validated (a malformed clone binds). `src/padding_tests.rs` holds what the bound bank
+/// renders to the padding contract.
 #[test]
-fn a_padded_request_is_declined_until_the_transient_shaper_opts_in() {
+fn a_padded_request_binds_and_still_validates_every_lane() {
     let backend = lane::Backend::current();
-    let Some(width) = BankWidth::for_backend(backend) else {
-        return;
-    };
+    let width = BankWidth::for_backend(backend).expect("every product target banks");
     let lanes = width.lanes() as usize;
     let values = initial_values();
     let requests = vec![request(&values); lanes];
@@ -271,24 +270,32 @@ fn a_padded_request_is_declined_until_the_transient_shaper_opts_in() {
     );
     for members in 1..lanes {
         let mask: Vec<bool> = (0..lanes).map(|lane| lane < members).collect();
-        assert!(
-            bind(&requests, &mask)
-                .expect("a padded request is well formed")
-                .is_none(),
-            "{members} of {lanes} lanes active"
-        );
+        let bank = bind(&requests, &mask)
+            .expect("a padded request is well formed")
+            .unwrap_or_else(|| panic!("{members} of {lanes} lanes active: the bank binds"));
+        assert_eq!(bank.metadata().width, width);
     }
+    // Malform a member other than the first, so that a check of the first request alone -- or a
+    // decision taken above the member loop -- goes red.
     let mut malformed = requests.clone();
-    malformed[0].limits.maximum_total_state_bytes = 0;
+    malformed[1].limits.maximum_total_state_bytes = 0;
     let refusal = TransientShaperFactory
-        .prepare(malformed[0])
+        .prepare(malformed[1])
         .err()
         .expect("a malformed member")
         .code;
-    let mask: Vec<bool> = (0..lanes).map(|lane| lane == 0).collect();
+    let mask: Vec<bool> = (0..lanes).map(|lane| lane < 2).collect();
     assert_eq!(
         bind(&malformed, &mask).err().map(|error| error.code),
         Some(refusal),
         "a padded request still validates its members"
+    );
+    let mut malformed = requests.clone();
+    malformed[lanes - 1].limits.maximum_total_state_bytes = 0;
+    let mask: Vec<bool> = (0..lanes).map(|lane| lane == 0).collect();
+    assert_eq!(
+        bind(&malformed, &mask).err().map(|error| error.code),
+        Some(refusal),
+        "and its padded lanes' clones"
     );
 }
