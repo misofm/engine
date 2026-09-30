@@ -320,14 +320,14 @@ mod tests {
         BuiltinCompileCaps, MeterRequest, PreparedBuiltinsCorruption,
         PreparedBuiltinsCorruptionCase, SelectedMeterRequest, TrackControlRequest,
         TrackFaderRecord, prepare_selected_session_builtins_between_render_calls,
-        prepare_selected_session_builtins_with_console, prepare_session_builtins,
-        prepare_session_builtins_between_render_calls, prepare_session_builtins_with_console,
+        prepare_selected_session_builtins_with_live_controls, prepare_session_builtins,
+        prepare_session_builtins_between_render_calls, prepare_session_builtins_with_live_controls,
         test_only_fader_matrix_witness, test_only_reset_fader_matrix_witness,
     };
     use conformance::DualAccumulatorDelayFactory;
     use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
     use effect_compiler::{
-        EffectCompileCaps, EffectPreparedSession, EffectRack, attach_effect_console,
+        EffectCompileCaps, EffectPreparedSession, EffectRack, attach_effect_live_controls,
         launch_native_effect_registry, prepare_native_session_effects,
     };
     use effect_contract::{
@@ -2851,8 +2851,8 @@ mod tests {
                 .expect("prepared EQ effects");
             assert_eq!(effects.entries.len(), 8);
             let requested_depth = NonZeroUsize::new(4_103).expect("fixture queue depth");
-            let producers = attach_effect_console(&mut effects, requested_depth)
-                .expect("checked effect-console attachment");
+            let producers = attach_effect_live_controls(&mut effects, requested_depth)
+                .expect("checked effect live-control attachment");
             assert_eq!(producers.len(), effects.entries.len());
             let mut expected_total = 0_u64;
             let mut expected_largest = 0_u64;
@@ -2919,9 +2919,10 @@ mod tests {
                 .map(|width| width.lanes() as usize)
                 .unwrap_or(0);
             let banked = bank_width != 0;
-            // Issue #1100: every controlled instance also gets a console owner around its effect.
-            // Each lane here has a live channel, so each owner holds a staging window of the
-            // effect's automation capacity, and a shunt of two dry blocks and two latency lines.
+            // Issue #1100: every controlled instance also gets a live-control owner around its
+            // effect. Each lane here has a live channel, so each owner holds a staging window of
+            // the effect's automation capacity, and a shunt of two dry blocks and two latency
+            // lines.
             let metadata = &effects.entries[0].metadata;
             let span = size_of::<effect_contract::PreparedAutomationSpan>();
             let capacity = metadata.automation_capacity as usize;
@@ -2935,16 +2936,16 @@ mod tests {
                     .checked_add(bank_bytes * banks)
                     .expect("bank owner arithmetic");
                 expected_largest = expected_largest.max(bank_bytes);
-                // `ConsoleEffectBankStage` in place of `EffectBankStage`: its growth, one lane's
-                // staging window, the packed window of every lane, and the AoSoA shunt.
-                let stage = size_of::<rack::ConsoleEffectBankStage>();
+                // `LiveControlEffectBankStage` in place of `EffectBankStage`: its growth, one
+                // lane's staging window, the packed window of every lane, and the AoSoA shunt.
+                let stage = size_of::<rack::LiveControlEffectBankStage>();
                 let growth = stage - size_of::<rack::EffectBankStage>();
                 let staging = capacity * span;
                 let packed = capacity * bank_width * span;
                 let shunt = 2 * (quantum + latency) * bank_width * size_of::<f32>();
                 expected_total = expected_total
                     .checked_add((growth + staging + packed + shunt) as u64 * banks)
-                    .expect("bank console owner arithmetic");
+                    .expect("bank live-control owner arithmetic");
                 expected_largest = expected_largest
                     .max(stage as u64)
                     .max(staging as u64)
@@ -2959,7 +2960,7 @@ mod tests {
                     .checked_add(scalar_bytes)
                     .expect("scalar owner arithmetic");
                 expected_largest = expected_largest.max(lane_bytes);
-                // `graph`'s boxed `ConsoleEffect`, field by field (its own
+                // `graph`'s boxed `LiveControlEffect`, field by field (its own
                 // `observation_size_accounting` test pins the identity), its staging window and
                 // its shunt.
                 let owner = size_of::<GraphPreparedEffect>()
@@ -2971,7 +2972,7 @@ mod tests {
                 let shunt = 2 * (quantum + latency) * size_of::<f32>();
                 expected_total = expected_total
                     .checked_add((owner + window + shunt) as u64 * controlled as u64)
-                    .expect("scalar console owner arithmetic");
+                    .expect("scalar live-control owner arithmetic");
                 expected_largest = expected_largest
                     .max(owner as u64)
                     .max(window as u64)
@@ -3174,8 +3175,9 @@ mod tests {
             prepare_native_session_effects(&compressor_session, &compressor_registry, effect_caps)
                 .expect("prepared compressor effects");
         let compressor_depth = NonZeroUsize::new(4_103).expect("compressor queue depth");
-        let compressor_producers = attach_effect_console(&mut compressor_effects, compressor_depth)
-            .expect("checked compressor attachment");
+        let compressor_producers =
+            attach_effect_live_controls(&mut compressor_effects, compressor_depth)
+                .expect("checked compressor attachment");
         assert_eq!(compressor_producers.len(), compressor_effects.entries.len());
         for (entry, producer) in compressor_effects.entries.iter().zip(&compressor_producers) {
             assert_eq!(entry.effect_id, "compressor");
@@ -4294,9 +4296,11 @@ mod tests {
         let baseline = compile_chain_fixture(effects);
 
         let (_r2, mut shuffled) = rack_chain_fixture(lanes, 2, |_| 2);
-        let _producers =
-            attach_effect_console(&mut shuffled, NonZeroUsize::new(4).expect("control queue"))
-                .expect("controls attach to every prepared effect");
+        let _producers = attach_effect_live_controls(
+            &mut shuffled,
+            NonZeroUsize::new(4).expect("control queue"),
+        )
+        .expect("controls attach to every prepared effect");
         let mut state = 0x2545_f491_4f6c_dd1d_u64;
         for index in (1..shuffled.entries.len()).rev() {
             state ^= state << 13;
@@ -4343,12 +4347,16 @@ mod tests {
             ));
             entry.metadata.tail = TailSamples::Finite(entry.metadata.latency.0 + 1);
         }
-        let baseline_producers =
-            attach_effect_console(&mut baseline, NonZeroUsize::new(8).expect("control queue"))
-                .expect("baseline controls attach");
-        let candidate_producers =
-            attach_effect_console(&mut candidate, NonZeroUsize::new(8).expect("control queue"))
-                .expect("candidate controls attach");
+        let baseline_producers = attach_effect_live_controls(
+            &mut baseline,
+            NonZeroUsize::new(8).expect("control queue"),
+        )
+        .expect("baseline controls attach");
+        let candidate_producers = attach_effect_live_controls(
+            &mut candidate,
+            NonZeroUsize::new(8).expect("control queue"),
+        )
+        .expect("candidate controls attach");
         candidate.entries.reverse();
         let baseline = compile_with_session_builtins(SessionBuiltinsCompile {
             plan_id: 6_330,
@@ -4425,7 +4433,7 @@ mod tests {
             ));
             entry.metadata.tail = TailSamples::Finite(entry.metadata.latency.0 + 1);
         }
-        let crossed_processor_producers = attach_effect_console(
+        let crossed_processor_producers = attach_effect_live_controls(
             &mut crossed_processor,
             NonZeroUsize::new(8).expect("control queue"),
         )
@@ -4483,7 +4491,7 @@ mod tests {
             ));
             entry.metadata.tail = TailSamples::Finite(entry.metadata.latency.0 + 1);
         }
-        let crossed_control_producers = attach_effect_console(
+        let crossed_control_producers = attach_effect_live_controls(
             &mut crossed_control,
             NonZeroUsize::new(8).expect("control queue"),
         )
@@ -10406,7 +10414,7 @@ mod tests {
     /// cohort run one lane pass per block, every meter merges its lane's block peak instead of
     /// reading its samples, and nothing observable moves.
     ///
-    /// Both deliveries a host prepares selected meters with -- the concurrent console and
+    /// Both deliveries a host prepares selected meters with -- the concurrent live-control path and
     /// `between_render_calls`, the browser's -- at a period the 128-frame block divides (512, so
     /// every block merges) and one it does not (300, so a block that crosses a window takes the
     /// sample loop). Each runs twice: with the pass, and with the pass declined, which is the scalar
@@ -11383,9 +11391,9 @@ mod tests {
     /// still render plausible audio.
     ///
     /// So the oracle is the node form of the same session -- `Backend::Scalar` binds no bank at
-    /// all, so every track keeps its `ConsoleFaderProcessor` -- driven by the *same* commands at
-    /// the *same* blocks, and the two must agree word for word. Lane identity (#83 D4/D5) is what
-    /// makes the scalar arm a legitimate oracle for the vector one.
+    /// all, so every track keeps its `LiveControlFaderProcessor` -- driven by the *same* commands
+    /// at the *same* blocks, and the two must agree word for word. Lane identity (#83 D4/D5) is
+    /// what makes the scalar arm a legitimate oracle for the vector one.
     ///
     /// # Two ways this test was vacuous before it was a gate, both recorded on purpose
     ///
@@ -11512,7 +11520,7 @@ mod tests {
                     if matches!(track_id.as_str(), "ch00" | "ch01")
             )
         });
-        let artifact = compile_scalar_live_console_model(&model, 2_140);
+        let artifact = compile_scalar_live_control_model(&model, 2_140);
         assert_eq!(
             artifact.prepared_builtin_bank_count(),
             0,
@@ -11616,7 +11624,7 @@ mod tests {
                     absolute_sample: block * frames as u64,
                 },
             )
-            .expect("scalar live console render");
+            .expect("scalar live-control render");
             rendered_nonzero |= pcm.iter().any(|sample| *sample != 0.0);
         }
         assert!(rendered_nonzero, "rendered audio must be nonzero");
@@ -11747,7 +11755,7 @@ mod tests {
                 queue_capacity: NonZeroUsize::new(16).expect("constant"),
             })
             .collect();
-        let builtins = prepare_session_builtins_with_console(
+        let builtins = prepare_session_builtins_with_live_controls(
             &session,
             &[],
             &controls,
@@ -11915,7 +11923,7 @@ mod tests {
     }
 
     /// [`compile_console_model_with_builtins`] for metric-selected meters (issue #943), through the
-    /// two selected entry points a host prepares them with: the concurrent console, or
+    /// two selected entry points a host prepares them with: the concurrent live-control path, or
     /// `between_render_calls`, which is what host-core calls for the browser. `dispatch` is the
     /// bank backend, so a test can bind the browser's four-lane banks on an eight-lane host.
     fn compile_console_model_with_selected_meters(
@@ -11962,7 +11970,7 @@ mod tests {
                 &session, meters, &controls, caps,
             )
         } else {
-            prepare_selected_session_builtins_with_console(&session, meters, &controls, caps)
+            prepare_selected_session_builtins_with_live_controls(&session, meters, &controls, caps)
         }
         .expect("prepared selected console builtins");
         GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
@@ -12079,7 +12087,7 @@ mod tests {
     /// intentionally separate from the broad host-dispatch helper above: the split-pair seam is
     /// eligible only for between-render-call controls, and scalar dispatch must disable every
     /// builtin bank before the graph is bound.
-    fn compile_scalar_live_console_model(
+    fn compile_scalar_live_control_model(
         model: &session::SessionModel,
         plan_id: u64,
     ) -> PreparedGraphBuiltinsArtifact {
@@ -12094,7 +12102,7 @@ mod tests {
                 max_source_ring_bytes: u64::MAX,
             },
         )
-        .expect("compiled live console model");
+        .expect("compiled live-control model");
         let controls: Vec<TrackControlRequest> = model
             .tracks
             .iter()
@@ -12137,7 +12145,7 @@ mod tests {
             builtins,
             caps: integration_caps(),
         })
-        .unwrap_or_else(|_| panic!("production scalar live console graph"))
+        .unwrap_or_else(|_| panic!("production scalar live-control graph"))
     }
 
     /// The registry that forces every console effect onto the per-node scalar path.

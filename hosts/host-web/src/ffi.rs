@@ -3812,7 +3812,7 @@ pub extern "C" fn miso_engine_web_v1_resource_ptr(handle: u32) -> u32 {
     })
 }
 
-/// Admit one staged live-console command submission (issue #137 D1).
+/// Admit one staged live-control command submission (issue #137 D1).
 ///
 /// `count` records were written into [`BUFFER_COMMAND`]. The submission is one transaction: the
 /// return value is the frozen result code, and
@@ -3888,7 +3888,7 @@ pub extern "C" fn miso_engine_web_v1_input_filters_config_copy(
     })
 }
 
-/// Return the stable live-console command-report address or zero for an invalid handle.
+/// Return the stable live-control command-report address or zero for an invalid handle.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_command_report_ptr(handle: u32) -> u32 {
     with_host(handle, 0, |host| {
@@ -3937,11 +3937,11 @@ pub extern "C" fn miso_engine_web_v1_meter_header_ptr(handle: u32) -> u32 {
     })
 }
 
-/// Return the number of tracks the live console addresses, or zero before compilation.
+/// Return the number of tracks the live controls address, or zero before compilation.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_console_track_count(handle: u32) -> u32 {
     with_host(handle, 0, |host| {
-        u32::try_from(host.console_tracks().len()).unwrap_or(0)
+        u32::try_from(host.live_control_tracks().len()).unwrap_or(0)
     })
 }
 
@@ -3951,7 +3951,7 @@ pub extern "C" fn miso_engine_web_v1_console_track_count(handle: u32) -> u32 {
 /// preparation already sized for the longest source or track ID in the session.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_console_track_id(handle: u32, index: u32) -> u32 {
-    with_host_mut(handle, 0, |host| host.copy_console_track_id(index))
+    with_host_mut(handle, 0, |host| host.copy_live_control_track_id(index))
 }
 
 /// Return the number of prepared resident observation effects in the current owner map.

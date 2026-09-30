@@ -143,48 +143,49 @@ pub(crate) fn resource_estimate(
     })
 }
 
-/// Exact retained storage for attached effect control lanes and the console owners they create.
+/// Exact retained storage for attached effect control lanes and the live-control owners they
+/// create.
 ///
 /// Queue payload is charged from the SPSC layout helper using each lane's actual capped capacity.
 /// The lane-owned target FIFO is charged once when present. Scalar lanes retain one boxed lane;
 /// banked lanes are moved into one boxed `Option<EffectControlLane>` array per bank, so this
 /// helper does not count the pre-bank scalar boxes a bank later consumes.
 ///
-/// # The console owners (issue #1100)
+/// # The live-control owners (issue #1100)
 ///
 /// A lane -- a live channel, or the channel-less lane that carries a session bypass (#1087) --
-/// also makes bind wrap its effect in a console owner, and this charges every byte that owner
-/// allocates beyond the console-free path, in both of its forms:
+/// also makes bind wrap its effect in a live-control owner, and this charges every byte that owner
+/// allocates beyond the live-control-free path, in both of its forms:
 ///
-/// * **Per node**, `graph`'s `runtime::ConsoleEffect`: the boxed owner, which the console-free
-///   `NodeKind::Effect` does not allocate at all; the staging window of `automation_capacity`
-///   spans, for a live channel only; and the shunt, always.
-/// * **Banked**, `rack::ConsoleEffectBankStage`: its growth over the `rack::EffectBankStage` it
+/// * **Per node**, `graph`'s `runtime::LiveControlEffect`: the boxed owner, which the
+///   live-control-free `NodeKind::Effect` does not allocate at all; the staging window of
+///   `automation_capacity` spans, for a live channel only; and the shunt, always.
+/// * **Banked**, `rack::LiveControlEffectBankStage`: its growth over the `rack::EffectBankStage` it
 ///   replaces; the one-lane staging window and the packed window of `automation_capacity` spans
 ///   per lane, when any lane has a live channel; and the shunt over the whole AoSoA block, when
 ///   any lane has a live channel or is bypassed.
 ///
 /// A shunt is [`BypassShunt::allocated_bytes`] at the size its owner builds it with. A channel-less
-/// lane holds no window in either form, which is what lets a console-free session bypass bind at
-/// any automation capacity. Before #1100 none of this was charged: P1's session bypass put a
-/// per-node owner on every console-free host, and a live console already had the gap.
+/// lane holds no window in either form, which is what lets a live-control-free session bypass bind
+/// at any automation capacity. Before #1100 none of this was charged: P1's session bypass put a
+/// per-node owner on every live-control-free host, and live controls already had the gap.
 pub(crate) fn effect_control_resource(
     effects: &[EffectPreparedEntry],
     banks: &[GraphPreparedEffectBank],
 ) -> Option<GraphScalarOwnerResourceEstimate> {
     let bytes = |value: usize| u64::try_from(value).ok();
     let span_bytes = bytes(core::mem::size_of::<PreparedAutomationSpan>())?;
-    // `graph`'s `runtime::ConsoleEffect` is exactly these five fields; its
+    // `graph`'s `runtime::LiveControlEffect` is exactly these five fields; its
     // `observation_size_accounting` test pins that identity, and `bypass_cohorts`'
     // allocator-observed estimate test sees the box if it ever outgrows this sum.
-    let console_effect_bytes = bytes(core::mem::size_of::<GraphPreparedEffect>())?
+    let live_control_effect_bytes = bytes(core::mem::size_of::<GraphPreparedEffect>())?
         .checked_add(bytes(core::mem::size_of::<Box<EffectControlLane>>())?)?
         .checked_add(bytes(core::mem::size_of::<Box<[PreparedAutomationSpan]>>())?)?
         .checked_add(bytes(core::mem::size_of::<BypassShunt>())?)?
         .checked_add(bytes(core::mem::size_of::<Option<Box<ObservationLane>>>())?)?;
-    let console_stage_bytes = bytes(core::mem::size_of::<rack::ConsoleEffectBankStage>())?;
-    let console_stage_growth =
-        console_stage_bytes.saturating_sub(bytes(core::mem::size_of::<rack::EffectBankStage>())?);
+    let live_control_stage_bytes = bytes(core::mem::size_of::<rack::LiveControlEffectBankStage>())?;
+    let live_control_stage_growth = live_control_stage_bytes
+        .saturating_sub(bytes(core::mem::size_of::<rack::EffectBankStage>())?);
     let mut total = 0_u64;
     let mut largest = 0_u64;
     let mut banked: BTreeSet<(String, EffectRack, String)> = BTreeSet::new();
@@ -220,7 +221,8 @@ pub(crate) fn effect_control_resource(
                 u64::try_from(core::mem::size_of::<effect_contract::EffectControlLane>()).ok()?;
             total = total.checked_add(lane)?;
             largest = largest.max(lane);
-            // The per-node console owner: `runtime::ConsoleEffect::new` at the render quantum.
+            // The per-node live-control owner: `runtime::LiveControlEffect::new` at the render
+            // quantum.
             let window = if control.has_channel() {
                 u64::from(entry.metadata.automation_capacity).checked_mul(span_bytes)?
             } else {
@@ -231,11 +233,11 @@ pub(crate) fn effect_control_resource(
             let shunt = bytes(BypassShunt::allocated_bytes(frames, latency)?)?;
             let shunt_largest = bytes(BypassShunt::largest_allocation_bytes(frames, latency)?)?;
             total = total
-                .checked_add(console_effect_bytes)?
+                .checked_add(live_control_effect_bytes)?
                 .checked_add(window)?
                 .checked_add(shunt)?;
             largest = largest
-                .max(console_effect_bytes)
+                .max(live_control_effect_bytes)
                 .max(window)
                 .max(shunt_largest);
         }
@@ -287,8 +289,9 @@ pub(crate) fn effect_control_resource(
             )?;
             total = total.checked_add(lane_array)?;
             largest = largest.max(lane_array);
-            // The banked console owner: `rack::ConsoleEffectBankStage::new`, which `graph`'s
-            // `stage_for` builds in place of a plain `EffectBankStage` for any slot with a lane.
+            // The banked live-control owner: `rack::LiveControlEffectBankStage::new`, which
+            // `graph`'s `stage_for` builds in place of a plain `EffectBankStage` for any slot with
+            // a lane.
             let metadata = bank.processor.metadata();
             let capacity = u64::from(metadata.program_key.automation_capacity);
             let (staging, packed) = if live {
@@ -315,12 +318,12 @@ pub(crate) fn effect_control_resource(
                 (0, 0)
             };
             total = total
-                .checked_add(console_stage_growth)?
+                .checked_add(live_control_stage_growth)?
                 .checked_add(staging)?
                 .checked_add(packed)?
                 .checked_add(shunt)?;
             largest = largest
-                .max(console_stage_bytes)
+                .max(live_control_stage_bytes)
                 .max(staging)
                 .max(packed)
                 .max(shunt_largest);

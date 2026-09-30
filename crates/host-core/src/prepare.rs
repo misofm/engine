@@ -11,12 +11,12 @@ use builtins::{MeterConfig, MeterHandle, MeterMetricSet, MeterTap};
 use builtins_compiler::{
     BuiltinCompileCaps, MeterConsumer, MeterRequest, SelectedMeterRequest, TrackControlProducer,
     TrackControlRequest, prepare_selected_session_builtins_between_render_calls,
-    prepare_session_builtins_between_render_calls, prepare_session_builtins_with_console,
+    prepare_session_builtins_between_render_calls, prepare_session_builtins_with_live_controls,
     session_structural_symmetry,
 };
 use effect_compiler::{
     EffectCompileCaps, EffectControlProducer, EffectControlResources, EffectObservationHandle,
-    attach_effect_console, attach_effect_observation, effect_control_resources,
+    attach_effect_live_controls, attach_effect_observation, effect_control_resources,
     launch_native_effect_registry, prepare_native_session_effects,
 };
 use effect_contract::TailSamples;
@@ -270,13 +270,13 @@ pub struct HostPrepareReport {
     pub largest_engine_allocation_bytes: u64,
 }
 
-/// What a live console asks preparation to attach (issue #137 D1/D2).
+/// What live controls ask preparation to attach (issue #137 D1/D2).
 ///
 /// Both halves are optional and independent, and the default attaches neither, so
-/// [`prepare_host_runtime`] is exactly `prepare_host_runtime_with_console(.., &Default::default())`
-/// and a host that wants no console allocates nothing extra.
+/// [`prepare_host_runtime`] is exactly `prepare_host_runtime_with_live_controls(..,
+/// &Default::default())` and a host that wants no live controls allocates nothing extra.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct HostConsoleRequest {
+pub struct HostLiveControlRequest {
     /// Bounded per-channel control-queue depth, or `None` for no live control channel.
     ///
     /// Issue #140 turns this into the depth of *every* live channel a track owns: the matrix/pan
@@ -310,7 +310,7 @@ pub struct HostConsoleRequest {
     pub master_track: Option<u32>,
 }
 
-impl Default for HostConsoleRequest {
+impl Default for HostLiveControlRequest {
     fn default() -> Self {
         Self {
             control_queue_depth: None,
@@ -334,12 +334,12 @@ pub struct HostMeterRequest {
     pub metrics: MeterMetricSet,
 }
 
-/// The control-side halves of an attached live console, in canonical track order.
+/// The control-side halves of attached live controls, in canonical track order.
 ///
 /// `tracks` is the compiled session's normalized track order and is the addressing authority: a
 /// host addresses a track by its index in this vector, and `track_controls[i]` / `meters[i]`
 /// belong to `tracks[i]` whenever they are present.
-pub struct HostConsoleHandles {
+pub struct HostLiveControlHandles {
     /// Canonical normalized track identities.
     pub tracks: Vec<Box<str>>,
     /// One control producer per track, in `tracks` order; empty when no channel was requested.
@@ -477,14 +477,15 @@ pub fn prepare_host_session(
     Ok((compiled, prepared))
 }
 
-/// Parse, compile and prepare one session with a live console attached (issue #137 D1/D2).
-pub fn prepare_host_session_with_console(
+/// Parse, compile and prepare one session with live controls attached (issue #137 D1/D2).
+pub fn prepare_host_session_with_live_controls(
     document: &str,
     caps: &HostPrepareCaps,
-    console: &HostConsoleRequest,
-) -> Result<(CompiledSession, PreparedHost, HostConsoleHandles), PrepareDiagnostics> {
+    live_controls: &HostLiveControlRequest,
+) -> Result<(CompiledSession, PreparedHost, HostLiveControlHandles), PrepareDiagnostics> {
     let compiled = compile_host_session(document, caps)?;
-    let (prepared, handles) = prepare_host_runtime_with_console(&compiled, caps, console)?;
+    let (prepared, handles) =
+        prepare_host_runtime_with_live_controls(&compiled, caps, live_controls)?;
     Ok((compiled, prepared, handles))
 }
 
@@ -497,47 +498,51 @@ pub fn prepare_host_runtime(
     compiled: &CompiledSession,
     caps: &HostPrepareCaps,
 ) -> Result<PreparedHost, PrepareDiagnostics> {
-    let (prepared, handles) =
-        prepare_host_runtime_with_console(compiled, caps, &HostConsoleRequest::default())?;
+    let (prepared, handles) = prepare_host_runtime_with_live_controls(
+        compiled,
+        caps,
+        &HostLiveControlRequest::default(),
+    )?;
     debug_assert!(handles.track_controls.is_empty() && handles.meters.is_empty());
     Ok(prepared)
 }
 
-/// Prepare the render plan, source control set and live-console handles for a compiled session.
+/// Prepare the render plan, source control set and live-control handles for a compiled session.
 ///
-/// Issue #137 D1/D2. The console halves are prepared inside the same transaction as the plan, so a
-/// session that cannot carry the requested console is rejected before anything is published: there
-/// is no partially attached console. Requesting nothing is exactly [`prepare_host_runtime`].
+/// Issue #137 D1/D2. The live-control halves are prepared inside the same transaction as the plan,
+/// so a session that cannot carry the requested live controls is rejected before anything is
+/// published: there are no partially attached live controls. Requesting nothing is exactly
+/// [`prepare_host_runtime`].
 #[allow(clippy::too_many_lines)]
-pub fn prepare_host_runtime_with_console(
+pub fn prepare_host_runtime_with_live_controls(
     compiled: &CompiledSession,
     caps: &HostPrepareCaps,
-    console: &HostConsoleRequest,
-) -> Result<(PreparedHost, HostConsoleHandles), PrepareDiagnostics> {
-    prepare_host_runtime_with_console_policy(
+    live_controls: &HostLiveControlRequest,
+) -> Result<(PreparedHost, HostLiveControlHandles), PrepareDiagnostics> {
+    prepare_host_runtime_with_live_controls_policy(
         compiled,
         caps,
-        console,
+        live_controls,
         None,
         false,
         Backend::current(),
     )
 }
 
-/// Prepare a host with live-console handles and one selected, fixed-size spectrum observer.
+/// Prepare a host with live-control handles and one selected, fixed-size spectrum observer.
 ///
-/// Meter configuration remains part of [`HostConsoleRequest`], so this entry keeps the console,
-/// meter and spectrum resources in one transactional preparation boundary.
-pub fn prepare_host_runtime_with_console_and_spectrum(
+/// Meter configuration remains part of [`HostLiveControlRequest`], so this entry keeps the
+/// live-control, meter and spectrum resources in one transactional preparation boundary.
+pub fn prepare_host_runtime_with_live_controls_and_spectrum(
     compiled: &CompiledSession,
     caps: &HostPrepareCaps,
-    console: &HostConsoleRequest,
+    live_controls: &HostLiveControlRequest,
     spectrum: &SpectrumCaptureRequest,
-) -> Result<(PreparedHost, HostConsoleHandles, SpectrumCapture), PrepareDiagnostics> {
-    let (prepared, handles, capture) = prepare_host_runtime_with_console_policy_and_spectrum(
+) -> Result<(PreparedHost, HostLiveControlHandles, SpectrumCapture), PrepareDiagnostics> {
+    let (prepared, handles, capture) = prepare_host_runtime_with_live_controls_policy_and_spectrum(
         compiled,
         caps,
-        console,
+        live_controls,
         None,
         false,
         Backend::current(),
@@ -552,17 +557,24 @@ pub fn prepare_host_runtime_with_console_and_spectrum(
     Ok((prepared, handles, capture))
 }
 
-/// Prepare a host with live-console handles and several atomically selectable spectrum observers.
-pub fn prepare_host_runtime_with_console_and_spectrum_collection(
+/// Prepare a host with live-control handles and several atomically selectable spectrum observers.
+pub fn prepare_host_runtime_with_live_controls_and_spectrum_collection(
     compiled: &CompiledSession,
     caps: &HostPrepareCaps,
-    console: &HostConsoleRequest,
+    live_controls: &HostLiveControlRequest,
     spectrum: &SpectrumCaptureCollectionRequest,
-) -> Result<(PreparedHost, HostConsoleHandles, SpectrumCaptureCollection), PrepareDiagnostics> {
-    let (prepared, handles, capture) = prepare_host_runtime_with_console_policy_and_spectrum(
+) -> Result<
+    (
+        PreparedHost,
+        HostLiveControlHandles,
+        SpectrumCaptureCollection,
+    ),
+    PrepareDiagnostics,
+> {
+    let (prepared, handles, capture) = prepare_host_runtime_with_live_controls_policy_and_spectrum(
         compiled,
         caps,
-        console,
+        live_controls,
         None,
         false,
         Backend::current(),
@@ -578,13 +590,20 @@ pub fn prepare_host_runtime_with_console_and_spectrum_collection(
 /// Test-only preparation seam for exercising the scalar lowering against the native bank.
 /// Production callers remain pinned to [`Backend::current`].
 #[cfg(test)]
-pub(crate) fn prepare_host_runtime_with_console_backend(
+pub(crate) fn prepare_host_runtime_with_live_controls_backend(
     compiled: &CompiledSession,
     caps: &HostPrepareCaps,
-    console: &HostConsoleRequest,
+    live_controls: &HostLiveControlRequest,
     backend: Backend,
-) -> Result<(PreparedHost, HostConsoleHandles), PrepareDiagnostics> {
-    prepare_host_runtime_with_console_policy(compiled, caps, console, None, false, backend)
+) -> Result<(PreparedHost, HostLiveControlHandles), PrepareDiagnostics> {
+    prepare_host_runtime_with_live_controls_policy(
+        compiled,
+        caps,
+        live_controls,
+        None,
+        false,
+        backend,
+    )
 }
 
 /// Prepare a host whose caller retains every returned producer endpoint and admits records only
@@ -596,12 +615,12 @@ pub(crate) fn prepare_host_runtime_with_console_backend(
 pub fn prepare_host_runtime_between_render_calls(
     compiled: &CompiledSession,
     caps: &HostPrepareCaps,
-    console: &HostConsoleRequest,
-) -> Result<(PreparedHost, HostConsoleHandles), PrepareDiagnostics> {
+    live_controls: &HostLiveControlRequest,
+) -> Result<(PreparedHost, HostLiveControlHandles), PrepareDiagnostics> {
     prepare_host_runtime_between_render_calls_with_backend(
         compiled,
         caps,
-        console,
+        live_controls,
         Backend::current(),
     )
 }
@@ -615,10 +634,17 @@ pub fn prepare_host_runtime_between_render_calls(
 pub(crate) fn prepare_host_runtime_between_render_calls_with_backend(
     compiled: &CompiledSession,
     caps: &HostPrepareCaps,
-    console: &HostConsoleRequest,
+    live_controls: &HostLiveControlRequest,
     backend: Backend,
-) -> Result<(PreparedHost, HostConsoleHandles), PrepareDiagnostics> {
-    prepare_host_runtime_with_console_policy(compiled, caps, console, None, true, backend)
+) -> Result<(PreparedHost, HostLiveControlHandles), PrepareDiagnostics> {
+    prepare_host_runtime_with_live_controls_policy(
+        compiled,
+        caps,
+        live_controls,
+        None,
+        true,
+        backend,
+    )
 }
 
 /// Prepare a serialized host with exactly the caller-selected meter observers.
@@ -626,13 +652,13 @@ pub(crate) fn prepare_host_runtime_between_render_calls_with_backend(
 pub fn prepare_host_runtime_with_selected_meters_between_render_calls(
     compiled: &CompiledSession,
     caps: &HostPrepareCaps,
-    console: &HostConsoleRequest,
+    live_controls: &HostLiveControlRequest,
     meters: &[HostMeterRequest],
-) -> Result<(PreparedHost, HostConsoleHandles), PrepareDiagnostics> {
-    prepare_host_runtime_with_console_policy(
+) -> Result<(PreparedHost, HostLiveControlHandles), PrepareDiagnostics> {
+    prepare_host_runtime_with_live_controls_policy(
         compiled,
         caps,
-        console,
+        live_controls,
         Some(meters),
         true,
         Backend::current(),
@@ -640,18 +666,18 @@ pub fn prepare_host_runtime_with_selected_meters_between_render_calls(
 }
 
 #[allow(clippy::too_many_lines)]
-fn prepare_host_runtime_with_console_policy(
+fn prepare_host_runtime_with_live_controls_policy(
     compiled: &CompiledSession,
     caps: &HostPrepareCaps,
-    console: &HostConsoleRequest,
+    live_controls: &HostLiveControlRequest,
     selected_meters: Option<&[HostMeterRequest]>,
     between_render_calls: bool,
     backend: Backend,
-) -> Result<(PreparedHost, HostConsoleHandles), PrepareDiagnostics> {
-    let (prepared, handles, _) = prepare_host_runtime_with_console_policy_and_spectrum(
+) -> Result<(PreparedHost, HostLiveControlHandles), PrepareDiagnostics> {
+    let (prepared, handles, _) = prepare_host_runtime_with_live_controls_policy_and_spectrum(
         compiled,
         caps,
-        console,
+        live_controls,
         selected_meters,
         between_render_calls,
         backend,
@@ -666,10 +692,10 @@ pub fn prepare_host_runtime_with_spectrum(
     caps: &HostPrepareCaps,
     request: &SpectrumCaptureRequest,
 ) -> Result<(PreparedHost, SpectrumCapture), PrepareDiagnostics> {
-    let (prepared, handles, capture) = prepare_host_runtime_with_console_policy_and_spectrum(
+    let (prepared, handles, capture) = prepare_host_runtime_with_live_controls_policy_and_spectrum(
         compiled,
         caps,
-        &HostConsoleRequest::default(),
+        &HostLiveControlRequest::default(),
         None,
         false,
         Backend::current(),
@@ -691,20 +717,21 @@ pub fn prepare_host_runtime_with_spectrum_collection(
     caps: &HostPrepareCaps,
     request: &SpectrumCaptureCollectionRequest,
 ) -> Result<(PreparedHost, SpectrumCaptureCollection), PrepareDiagnostics> {
-    let (prepared, _handles, capture) = prepare_host_runtime_with_console_and_spectrum_collection(
-        compiled,
-        caps,
-        &HostConsoleRequest::default(),
-        request,
-    )?;
+    let (prepared, _handles, capture) =
+        prepare_host_runtime_with_live_controls_and_spectrum_collection(
+            compiled,
+            caps,
+            &HostLiveControlRequest::default(),
+            request,
+        )?;
     Ok((prepared, capture))
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn prepare_host_runtime_with_console_policy_and_spectrum(
+fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     compiled: &CompiledSession,
     caps: &HostPrepareCaps,
-    console: &HostConsoleRequest,
+    live_controls: &HostLiveControlRequest,
     selected_meters: Option<&[HostMeterRequest]>,
     between_render_calls: bool,
     backend: Backend,
@@ -712,7 +739,7 @@ fn prepare_host_runtime_with_console_policy_and_spectrum(
 ) -> Result<
     (
         PreparedHost,
-        HostConsoleHandles,
+        HostLiveControlHandles,
         Option<PreparedSpectrumCapture>,
     ),
     PrepareDiagnostics,
@@ -837,40 +864,43 @@ fn prepare_host_runtime_with_console_policy_and_spectrum(
 
     // Issue #140 A: one bounded live-control channel per prepared effect instance, at the same
     // depth the builtin channels use and capped at each effect's own automation capacity. This is
-    // the only thing that creates one; a host that asks for no console attaches nothing and the
-    // plan renders the byte-identical console-free path.
-    let effect_controls: Vec<EffectControlProducer> = match console.control_queue_depth {
+    // the only thing that creates one; a host that asks for no live controls attaches nothing and
+    // the plan renders the byte-identical live-control-free path.
+    let effect_controls: Vec<EffectControlProducer> = match live_controls.control_queue_depth {
         None => Vec::new(),
-        Some(depth) => attach_effect_console(&mut effects, depth).map_err(effect_diagnostics)?,
+        Some(depth) => {
+            attach_effect_live_controls(&mut effects, depth).map_err(effect_diagnostics)?
+        }
     };
     // Issue #143 D3, level 1. Observation capacity is attached only when it was asked for, and
     // only alongside a control channel: a subscription rides the effect's own command queue, so
-    // "observe without a console" has no delivery path and is a rejection rather than a silent
+    // "observe without live controls" has no delivery path and is a rejection rather than a silent
     // half-attach. The published window is the meter window, derived rather than configured.
-    let observation_window_blocks = match (console.meter_period_frames, compiled.quantum().0) {
+    let observation_window_blocks = match (live_controls.meter_period_frames, compiled.quantum().0)
+    {
         (Some(period), quantum) if quantum > 0 => (period.get() / quantum).max(1),
         _ => 1,
     };
-    let effect_observations: Vec<EffectObservationHandle> = match console.observation_taps {
+    let effect_observations: Vec<EffectObservationHandle> = match live_controls.observation_taps {
         0 => Vec::new(),
-        taps if console.control_queue_depth.is_none() => {
+        taps if live_controls.control_queue_depth.is_none() => {
             let _ = taps;
-            return Err(shape("host.observation.console"));
+            return Err(shape("host.observation.live_controls"));
         }
         taps => attach_effect_observation(&mut effects, taps, observation_window_blocks)
             .map_err(effect_diagnostics)?,
     };
 
-    // Issue #137 D1/D2: the console requests are derived here, once, from the canonical track
-    // order, so `HostConsoleHandles::tracks` and the requested channels cannot disagree.
-    let console_tracks: Vec<Box<str>> = model
+    // Issue #137 D1/D2: the live-control requests are derived here, once, from the canonical track
+    // order, so `HostLiveControlHandles::tracks` and the requested channels cannot disagree.
+    let live_control_tracks: Vec<Box<str>> = model
         .tracks
         .iter()
         .map(|track| Box::<str>::from(track.id.as_str()))
         .collect();
-    let control_requests: Vec<TrackControlRequest> = match console.control_queue_depth {
+    let control_requests: Vec<TrackControlRequest> = match live_controls.control_queue_depth {
         None => Vec::new(),
-        Some(depth) => console_tracks
+        Some(depth) => live_control_tracks
             .iter()
             .map(|track| TrackControlRequest {
                 track_id: track.to_string(),
@@ -879,7 +909,7 @@ fn prepare_host_runtime_with_console_policy_and_spectrum(
             .collect(),
     };
     if selected_meters.is_some_and(|meters| !meters.is_empty())
-        && console.meter_period_frames.is_none()
+        && live_controls.meter_period_frames.is_none()
     {
         return Err(shape("host.meter.period"));
     }
@@ -888,12 +918,12 @@ fn prepare_host_runtime_with_console_policy_and_spectrum(
             .iter()
             .map(|meter| (meter.track_id.clone(), meter.tap, meter.metrics))
             .collect(),
-        None => console_tracks
+        None => live_control_tracks
             .iter()
-            .map(|track| (track.clone(), console.meter_tap, MeterMetricSet::ALL))
+            .map(|track| (track.clone(), live_controls.meter_tap, MeterMetricSet::ALL))
             .collect(),
     };
-    let meter_requests: Vec<SelectedMeterRequest> = match console.meter_period_frames {
+    let meter_requests: Vec<SelectedMeterRequest> = match live_controls.meter_period_frames {
         None => Vec::new(),
         Some(period) => meter_tracks
             .iter()
@@ -915,7 +945,7 @@ fn prepare_host_runtime_with_console_policy_and_spectrum(
                             period_frames: period,
                             peak_hold_frames: 0,
                             peak_decay_db_per_second: 0.0,
-                            queue_capacity: console.meter_queue_depth,
+                            queue_capacity: live_controls.meter_queue_depth,
                             reset_generation: 0,
                         },
                     },
@@ -953,7 +983,7 @@ fn prepare_host_runtime_with_console_policy_and_spectrum(
             builtin_caps,
         )
     } else {
-        prepare_session_builtins_with_console(
+        prepare_session_builtins_with_live_controls(
             compiled,
             &meter_requests
                 .iter()
@@ -1122,7 +1152,7 @@ fn prepare_host_runtime_with_console_policy_and_spectrum(
     let bound = artifact
         .into_bound_with_source_set(bindings, source_set)
         .map_err(|failure| graph_failure(failure.code))?;
-    // Issue #137 D2: exactly the requested console halves come back, in canonical track order.
+    // Issue #137 D2: exactly the requested live-control halves come back, in canonical track order.
     // A session that produced a meter or control channel nobody asked for is still a hard
     // rejection -- that was the pre-#137 rule and it is what keeps an unrequested observer from
     // silently entering a production plan.
@@ -1131,10 +1161,10 @@ fn prepare_host_runtime_with_console_policy_and_spectrum(
     {
         return Err(graph_failure("host.meter.unexpected"));
     }
-    // Canonical normalized track order is the console's addressing authority, so both halves are
-    // permuted into it here rather than into whatever order preparation happened to build them.
+    // Canonical normalized track order is the live controls' addressing authority, so both halves
+    // are permuted into it here rather than into whatever order preparation happened to build them.
     // A channel whose track is not in that order at all is a hard rejection, never a silent drop.
-    let canonical_index: std::collections::BTreeMap<&str, usize> = console_tracks
+    let canonical_index: std::collections::BTreeMap<&str, usize> = live_control_tracks
         .iter()
         .enumerate()
         .map(|(index, track)| (&**track, index))
@@ -1172,8 +1202,8 @@ fn prepare_host_runtime_with_console_policy_and_spectrum(
 
     // Issue #143 D6: a designated master must name a track this session actually has, or the
     // frame would report a master reading nobody can address.
-    let master_track = match console.master_track {
-        Some(index) if (index as usize) < console_tracks.len() => Some(index),
+    let master_track = match live_controls.master_track {
+        Some(index) if (index as usize) < live_control_tracks.len() => Some(index),
         Some(_) => return Err(shape("host.observation.master_track")),
         None => None,
     };
@@ -1247,8 +1277,8 @@ fn prepare_host_runtime_with_console_policy_and_spectrum(
             #[cfg(feature = "control-provider")]
             control_catalog,
         },
-        HostConsoleHandles {
-            tracks: console_tracks,
+        HostLiveControlHandles {
+            tracks: live_control_tracks,
             track_controls,
             effect_controls,
             meters,

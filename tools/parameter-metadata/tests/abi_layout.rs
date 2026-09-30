@@ -219,7 +219,9 @@ fn the_emitted_command_record_offsets_are_the_engine_s_own_decode_rule() {
     let smoothing = field_offset(&document, "commandRecord", "smoothingSamples");
     let values = field_offset(&document, "commandRecord", "values");
 
-    let staging = host.command_staging_mut().expect("console staging exists");
+    let staging = host
+        .command_staging_mut()
+        .expect("live-control staging exists");
     staging[..COMMAND_RECORD_BYTES as usize].fill(0);
     staging[kind] = u8::try_from(COMMAND_EFFECT_PARAM).expect("kind is a byte");
     // Rack 1 is `dynamic`, which is where the fixture put its one effect.

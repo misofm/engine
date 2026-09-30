@@ -5,10 +5,10 @@
 //! Preparation now lowers a session's `bypass` (on every effect but the delay and, since #1100,
 //! the multiband) to a prepared `bypass = false` plus the lane's
 //! initial shunt state (`EffectControlLane::without_channel`), so a bypassed track stays in its
-//! effect bank. The bank runs every lane's wet path and the rack's `ConsoleEffectBankStage`
+//! effect bank. The bank runs every lane's wet path and the rack's `LiveControlEffectBankStage`
 //! restores the latency-matched dry signal into exactly the bypassed lanes; a lane that ends up per
-//! node takes the graph's per-node shunt (`runtime::ConsoleEffect`), which this file re-enacts with
-//! the contract's own `BypassShunt` in the order that node runs it.
+//! node takes the graph's per-node shunt (`runtime::LiveControlEffect`), which this file re-enacts
+//! with the contract's own `BypassShunt` in the order that node runs it.
 //!
 //! The oracle is each lane's own scalar instance, prepared from the same request with the lane's
 //! bypass as the *prepared* flag: today's per-node prepared-bypass render. Every launch effect and
@@ -42,7 +42,7 @@ use effect_contract::{
 };
 use engine::realtime::{QueueGeneration, bounded_spsc};
 use graph_compiler::Backend;
-use rack::{AoSoaScratch, BankChain, BankMembers, BankSlot, BankStage, ConsoleEffectBankStage};
+use rack::{AoSoaScratch, BankChain, BankMembers, BankSlot, BankStage, LiveControlEffectBankStage};
 
 const RATE: u32 = 48_000;
 const QUANTUM: u32 = 128;
@@ -341,7 +341,7 @@ impl BankMembers for Planes {
 }
 
 /// A one-slot chain over `stage`, exactly as the graph runtime builds a single bound effect slot.
-fn chain(stage: ConsoleEffectBankStage) -> BankChain {
+fn chain(stage: LiveControlEffectBankStage) -> BankChain {
     let lanes = width().lanes() as usize;
     BankChain::new(
         AoSoaScratch::new(width(), QUANTUM).expect("scratch"),
@@ -381,7 +381,7 @@ fn patterns(lanes: usize) -> Vec<Vec<bool>> {
 /// spec's attempt-1 evidence records it.
 ///
 /// Red mutations, each of which fails this test:
-/// * the restore in `ConsoleEffectBankStage::process_inner` as an arithmetic select,
+/// * the restore in `LiveControlEffectBankStage::process_inner` as an arithmetic select,
 ///   `fma(0, wet, dry)` -> a `-0.0` input run comes out `+0.0` wherever the wet path still rings;
 /// * the shunt built only when a lane has a live channel (`has_channel()` without
 ///   `|| bypassed()`) -> no shunt, and a bypassed lane renders wet;
@@ -431,7 +431,7 @@ fn a_shunt_bypassed_bank_lane_is_bit_identical_to_prepared_bypass() {
                     .iter()
                     .map(|bypassed| bypassed.then(|| EffectControlLane::without_channel(true)))
                     .collect();
-                let stage = ConsoleEffectBankStage::new(
+                let stage = LiveControlEffectBankStage::new(
                     bank,
                     width,
                     QUANTUM,
@@ -524,10 +524,10 @@ fn a_shunt_bypassed_bank_lane_is_bit_identical_to_prepared_bypass() {
 /// A session-bypassed instance of an effect whose bypass is lowered (every effect that can bank but
 /// the multiband, issue #1100) is prepared `bypass = false` and carries
 /// a channel-less lane, so where it ends up per node -- a partial cohort, a chain with a
-/// sidechained slot, a scalar build -- the graph renders it as a `runtime::ConsoleEffect`: capture
-/// the dry block into the shunt when the lane is bypassed or the shunt feeds a latency line, run
-/// the effect, then copy the latency-matched dry block over the output. This re-enacts that order
-/// with the contract's `BypassShunt` and requires today's prepared-bypass bits, at
+/// sidechained slot, a scalar build -- the graph renders it as a `runtime::LiveControlEffect`:
+/// capture the dry block into the shunt when the lane is bypassed or the shunt feeds a latency
+/// line, run the effect, then copy the latency-matched dry block over the output. This re-enacts
+/// that order with the contract's `BypassShunt` and requires today's prepared-bypass bits, at
 /// [`Level::Extreme`]: there the wet path's own D7 check fires, and the shunt's copy must still be
 /// today's dry block. (The session-level twin, through the real graph, is
 /// `bypass_cohorts::a_session_bypass_renders_todays_bits`.)
@@ -594,8 +594,8 @@ fn a_shunt_bypassed_per_node_instance_is_bit_identical_to_prepared_bypass() {
 
 /// Gate 3 with real effects: a live toggle on a session-bypassed banked lane.
 ///
-/// With a live console attached, the session bypass seeds the lane's live channel
-/// (`attach_effect_console` reads `initial_bypass`), so the lane starts bypassed and a live
+/// With live controls attached, the session bypass seeds the lane's live channel
+/// (`attach_effect_live_controls` reads `initial_bypass`), so the lane starts bypassed and a live
 /// `Bypass(false)` returns the *current* wet signal: its wet path ran all along. The reference is
 /// the same lane rendered per node from a prepared-enabled instance and a shunt switched on the
 /// same blocks, which is the per-node live path a session-enabled instance has always taken. The
@@ -604,7 +604,7 @@ fn a_shunt_bypassed_per_node_instance_is_bit_identical_to_prepared_bypass() {
 ///
 /// Red mutation: the drain leaves `bypass` alone on an `EffectControlRecord::Bypass` record ->
 /// lane 1 stays bypassed after block 5 and renders dry where the reference is wet. (That
-/// `attach_effect_console` seeds the live lane from the session bypass is pinned in
+/// `attach_effect_live_controls` seeds the live lane from the session bypass is pinned in
 /// `effect-compiler`'s `native_session` tests.)
 #[test]
 fn a_live_toggle_on_a_session_bypassed_bank_lane_matches_the_per_node_live_path() {
@@ -654,7 +654,7 @@ fn a_live_toggle_on_a_session_bypassed_bank_lane_matches_the_per_node_live_path(
                 _ => None,
             })
             .collect();
-        let stage = ConsoleEffectBankStage::new(
+        let stage = LiveControlEffectBankStage::new(
             bank,
             width,
             QUANTUM,

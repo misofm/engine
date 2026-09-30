@@ -46,7 +46,7 @@ use bench_support::digest::Sha256Sink;
 use builtins::{MeterConfig, MeterHandle, MeterMetricSet, MeterSnapshot, MeterTap};
 use builtins_compiler::{MeterConsumer, MeterRequest, SelectedMeterRequest};
 use effect_compiler::{
-    EffectCompileCaps, EffectControlProducer, EffectObservationHandle, attach_effect_console,
+    EffectCompileCaps, EffectControlProducer, EffectObservationHandle, attach_effect_live_controls,
     attach_effect_observation, launch_native_effect_registry, prepare_native_session_effects,
 };
 use effect_contract::{
@@ -81,7 +81,7 @@ pub const PLAN_ID: u64 = 149;
 /// frame have to describe the same span of samples, which is the rule
 /// `attach_effect_observation` states and the rule a host follows.
 pub const WINDOW_BLOCKS: u32 = 4;
-/// Bounded depth of each effect's live-console control channel in the observation arms.
+/// Bounded depth of each effect's live-control channel in the observation arms.
 pub const CONTROL_QUEUE_DEPTH: usize = 8;
 /// Cap on declared observation taps per effect, passed to the observation attach.
 pub const MAXIMUM_OBSERVATION_TAPS: u32 = 8;
@@ -90,12 +90,12 @@ pub const METER_QUEUE_DEPTH: usize = 8;
 /// Blocks per meter window on the metered console row (issue #881): the default web boot's.
 ///
 /// `WebBootOptions::console_defaults` sets `console_meter_blocks` to the web host's
-/// `DEFAULT_METER_BLOCKS`, twelve, and its `console_request` turns that into a period of
+/// `DEFAULT_METER_BLOCKS`, twelve, and its `live_control_request` turns that into a period of
 /// `12 * quantum_frames`. Mirrored here rather than imported: the browser host is not a
 /// dependency of this subject, and this crate names the number it renders with.
 pub const WEB_METER_BLOCKS: u32 = 12;
 /// Bounded depth of each meter stream on the metered console row: the depth the web host's
-/// `console_request` asks for (one window per post, plus headroom for a stalled control side).
+/// `live_control_request` asks for (one window per post, plus headroom for a stalled control side).
 pub const WEB_METER_QUEUE_DEPTH: usize = 8;
 
 const NINE_TRACK: &str = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
@@ -341,7 +341,7 @@ pub enum Workload {
     /// are bound as **permanent** observers through
     /// `builtins_compiler::prepare_selected_session_builtins_between_render_calls`, which is the
     /// entry `host_core::prepare_host_runtime_with_selected_meters_between_render_calls` calls for
-    /// that boot. No live-console control channel is attached.
+    /// that boot. No live-control channel is attached.
     ///
     /// **The meters are not the only difference from the standing row.** That entry also selects
     /// `BuiltinControlDelivery::BetweenRenderCalls`, as the default web boot does, and under that
@@ -905,14 +905,14 @@ fn apply_strip(model: &mut SessionModel, strip: Strip) {
 /// Which console-side facilities a prepared arm carries.
 ///
 /// The session rows all use [`PlanConfig::BASELINE`], which is what the console benchmark has
-/// always measured: no meter streams, no live-console control channel, no observation capacity.
+/// always measured: no meter streams, no live-control channel, no observation capacity.
 /// The #163 item 0d arms differ from it in exactly one field each, so the paired delta between two
 /// arms is the cost of that one facility.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct PlanConfig {
     /// One meter stream per track at the post-matrix tap, as a production console prepares.
     pub meters: bool,
-    /// One bounded live-console control channel per prepared effect.
+    /// One bounded live-control channel per prepared effect.
     pub control: bool,
     /// Effect observation capacity, and whether its taps are armed.
     pub observation: ObservationArm,
@@ -1013,8 +1013,8 @@ fn meter_requests(model: &SessionModel) -> Vec<MeterRequest> {
 /// session's normalized model, handles `index + 1` in that order, a window of
 /// [`WEB_METER_BLOCKS`] blocks, no peak hold, peak decay off, a [`WEB_METER_QUEUE_DEPTH`]-deep
 /// queue and reset generation zero. Transcribed field for field from
-/// `prepare_host_runtime_with_console_policy_and_spectrum` and the web host's
-/// `console_request`, because this subject does not link either host.
+/// `prepare_host_runtime_with_live_controls_policy_and_spectrum` and the web host's
+/// `live_control_request`, because this subject does not link either host.
 fn web_meter_requests(session: &session::CompiledSession) -> Vec<SelectedMeterRequest> {
     let config = MeterConfig {
         period_frames: NonZeroU32::new(WEB_METER_BLOCKS * QUANTUM as u32).expect("nonzero period"),
@@ -1247,11 +1247,11 @@ impl SessionRuntime {
         // The control channel is attached for every observation arm including `Absent`, so the
         // paired delta between the arms is the observation lane and not the control queue drain.
         let controls = if config.control {
-            attach_effect_console(
+            attach_effect_live_controls(
                 &mut effects,
                 NonZeroUsize::new(CONTROL_QUEUE_DEPTH).expect("nonzero depth"),
             )
-            .expect("live-console control channels")
+            .expect("live-control channels")
         } else {
             Vec::new()
         };
@@ -1409,10 +1409,10 @@ impl SessionRuntime {
         }
     }
 
-    /// The live-console control channel of the alphabetically first track carrying `effect_id`.
+    /// The live-control channel of the alphabetically first track carrying `effect_id`.
     ///
     /// "One track" has to be chosen by a stable key rather than by taking the first matching
-    /// channel: [`attach_effect_console`] returns channels in prepared-entry order, which is
+    /// channel: [`attach_effect_live_controls`] returns channels in prepared-entry order, which is
     /// sorted by effect id and not by track, so a positional choice would silently address a
     /// different track when the entry set changes. The track id is the session-stable identity, so
     /// picking its minimum is deterministic across every build of every fixture.
@@ -1429,10 +1429,10 @@ impl SessionRuntime {
             .map(|(index, _)| index)
     }
 
-    /// The live-console control channel of `track_id`'s `effect_id` (a contract id), by stable
+    /// The live-control channel of `track_id`'s `effect_id` (a contract id), by stable
     /// identity rather than by position (issue #1003).
     ///
-    /// `attach_effect_console` returns channels in prepared-entry order, which moves when the
+    /// `attach_effect_live_controls` returns channels in prepared-entry order, which moves when the
     /// entry set does, so a row that automates named tracks resolves each one by its session id.
     /// Returns `None` for a `control: false` plan or when the track carries no such effect.
     #[must_use]
@@ -1451,7 +1451,7 @@ impl SessionRuntime {
         (&producer.track_id, &producer.effect_id)
     }
 
-    /// Pushes one live-console bypass record into one prepared effect's bounded queue.
+    /// Pushes one live-control bypass record into one prepared effect's bounded queue.
     ///
     /// The production control path, like [`SessionRuntime::push_parameter`]: the record is drained
     /// by the render thread at the top of the next block, and it moves the channel-symmetry
@@ -1471,7 +1471,7 @@ impl SessionRuntime {
             .is_ok()
     }
 
-    /// Pushes one live-console parameter retarget into one prepared effect's bounded queue.
+    /// Pushes one live-control parameter retarget into one prepared effect's bounded queue.
     ///
     /// This is the production control path and nothing else: the record is drained by the render
     /// thread at the top of the next block and staged as a single

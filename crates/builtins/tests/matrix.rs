@@ -209,7 +209,7 @@ fn matrix_ramp_reaches_target() {
 ///
 /// `matrix_ll/lr/rl/rr` are the only builtin parameters whose declared update rate is
 /// `BuiltinParameterUpdateRate::BlockTarget`, so this is the one live builtin setter the parameter
-/// ABI admits. The window and the target are one event because a console moves both together.
+/// ABI admits. The window and the target are one event because live controls move both together.
 ///
 /// Red mutation: drop `self.smoothing_samples[lane] = samples;` from `MatrixStage::set_target_over`
 /// -> the second retarget below runs over the prepared window of 0 instead of the requested 4, so
@@ -253,7 +253,7 @@ fn explicit_window_retarget_ramps_over_the_requested_window_and_is_adopted() {
         .expect("in-domain target");
     assert_ne!(step(&mut chain), second, "the adopted window still ramps");
 
-    // A zero window is an immediate, unsmoothed jump, which is what a console asks for when the
+    // A zero window is an immediate, unsmoothed jump, which is what live controls ask for when the
     // session declared no pan smoothing.
     test_support::chain_matrix_mut(&mut chain)
         .set_target_smoothed(target, 0)

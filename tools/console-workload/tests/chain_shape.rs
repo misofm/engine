@@ -114,7 +114,7 @@ fn the_intended_strip_is_one_chain_per_cohort() {
 ///   observer of any alias a chain spans. A meter leased at `post_simd1` *would* decline the merge,
 ///   and the engine's `a_leased_stage_meter_declines_the_merge_and_still_meters` pins that; this
 ///   arm pins that the meters a console actually leases do not.
-/// * **The live-console control channel.** Per effect, drained inside the slot's own stage.
+/// * **The live-control channel.** Per effect, drained inside the slot's own stage.
 /// * **Armed effect observation.** `ObservationLane` reads the effect's *resident state* through
 ///   `observe_resident`; it never reads a planar stage buffer. So it is not a
 ///   `GraphNodeObserverBinding`, `runtime::chains_into` does not see it, and it must neither
@@ -1588,9 +1588,9 @@ fn re_equal_designed_words_after_a_one_channel_retarget_never_re_engage() {
 /// rest on -- the right channel of a collapsed track *is* its left channel -- and this is the gate
 /// on it.
 ///
-/// Red mutation: delete the `sample.right = sample.left` loop in `ConsoleEffectBankStage::process_
-/// mono`. Every digest assertion in this file stays green and the two arms' tap readings diverge on
-/// the first window a compressor actually reduces.
+/// Red mutation: delete the `sample.right = sample.left` loop in
+/// `LiveControlEffectBankStage::process_ mono`. Every digest assertion in this file stays green and
+/// the two arms' tap readings diverge on the first window a compressor actually reduces.
 #[test]
 fn a_collapsed_cohorts_right_channel_taps_read_what_a_dual_runs_do() {
     const OBSERVED: PlanConfig = PlanConfig {
@@ -1732,7 +1732,7 @@ fn a_run_that_starts_collapsing_renders_what_an_always_collapsed_run_renders() {
 /// limiter's latency-bearing state from a generic collapse issue: the limiter is discriminatory,
 /// while the compressor and EQ are controls.
 ///
-/// Red mutation: `ConsoleEffectBankStage::process_inner::<true>` captures `block.right` -- the
+/// Red mutation: `LiveControlEffectBankStage::process_inner::<true>` captures `block.right` -- the
 /// ungathered resident scratch -- instead of `block.left`. In exact mutation 2498, with arms
 /// ordered compressor, EQ, limiter, the compressor and EQ arms pass while the limiter fails on
 /// blocks 32-35, which identifies the latency-bearing shunt as the cause.

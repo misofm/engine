@@ -11,7 +11,7 @@
 //! the rendered proof, in four parts:
 //!
 //! 1. **Witness soundness, differential (gate 1).** The real EQ, compressor and true-peak limiter
-//!    banks, alone and chained, each bound behind the production `ConsoleEffectBankStage` in a
+//!    banks, alone and chained, each bound behind the production `LiveControlEffectBankStage` in a
 //!    production `BankChain`, rendered twice from the same records: once with the collapse armed
 //!    and once forced dual. After every block, every output word, every bank report and every
 //!    lane's full state payload is compared by bits. The collapse counters must show it kept
@@ -47,12 +47,13 @@ use effect_contract::{
 use engine::realtime::{Producer, QueueGeneration, RenderError, bounded_spsc};
 use lane::Backend;
 use rack::{
-    AoSoaScratch, BankBlock, BankChain, BankMembers, BankSlot, BankStage, ConsoleEffectBankStage,
+    AoSoaScratch, BankBlock, BankChain, BankMembers, BankSlot, BankStage,
+    LiveControlEffectBankStage,
 };
 
 const RATE: u32 = 48_000;
 const FRAMES: u32 = 128;
-/// Live-console queue depth per lane, and the automation capacity every bank is prepared with, so
+/// Live-control queue depth per lane, and the automation capacity every bank is prepared with, so
 /// the staging window is exactly the queue (preparation refuses a deeper queue in production).
 const QUEUE: usize = 16;
 
@@ -491,7 +492,7 @@ impl Rig {
                     })
                 })
                 .collect();
-            let stage = ConsoleEffectBankStage::new(
+            let stage = LiveControlEffectBankStage::new(
                 Box::new(shared.clone()),
                 width,
                 FRAMES,
@@ -595,7 +596,7 @@ impl EqOwner {
 /// One thing a scenario does between two blocks, to both rigs alike.
 #[derive(Clone, Copy, Debug)]
 enum Write {
-    /// One live-console parameter record into one lane's queue.
+    /// One live-control parameter record into one lane's queue.
     Record {
         slot: usize,
         lane: usize,
@@ -2065,7 +2066,7 @@ fn track_ids(map: &BTreeMap<(String, String), usize>) -> Vec<String> {
     tracks
 }
 
-/// A console write in the product's shapes.
+/// A live-control write in the product's shapes.
 #[derive(Clone, Copy, Debug)]
 enum Push {
     /// The web host's both-channel command: one `Both` owner edit for the EQ, a `Left` and a

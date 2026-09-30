@@ -523,20 +523,20 @@ fn a_session_bypass_lowers_to_an_enabled_effect_and_a_bypassed_lane() {
     );
 }
 
-/// Issue #1087: a live console's lane starts from the session bypass, not the prepared one.
+/// Issue #1087: a live-control lane starts from the session bypass, not the prepared one.
 ///
 /// Red mutation: seed the live lane from `bank_preparation.bypass` again -> the bypassed EQ's
 /// live lane starts un-bypassed and the track renders wet from its first block.
 #[test]
-fn a_live_console_lane_starts_from_the_session_bypass() {
+fn a_live_control_lane_starts_from_the_session_bypass() {
     let registry = launch_native_effect_registry().expect("launch registry");
     let mut prepared =
         prepare_native_session_effects(&bypassed_console(), &registry, caps()).expect("prepared");
-    let producers = effect_compiler::attach_effect_console(
+    let producers = effect_compiler::attach_effect_live_controls(
         &mut prepared,
         core::num::NonZeroUsize::new(8).expect("depth"),
     )
-    .expect("console attached");
+    .expect("live controls attached");
     assert_eq!(producers.len(), prepared.entries.len());
     for (track, effect, bypassed) in [
         ("ch00", "eq", true),

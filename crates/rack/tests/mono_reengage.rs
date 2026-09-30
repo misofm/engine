@@ -12,8 +12,8 @@
 //! drain does, and reads the counters back afterwards. `BankStage` is `Send`, so the handle is an
 //! `Arc<Mutex<..>>`, and `scripts/check-rack-policy.sh` forbids `std::sync` anywhere under
 //! `crates/rack/src` -- rightly, because that directory is render code. An integration
-//! test is not, so the sharing lives here, next to `console_bank.rs`, and everything below goes
-//! through the crate's public surface.
+//! test is not, so the sharing lives here, next to `live_control_bank.rs`, and everything below
+//! goes through the crate's public surface.
 
 use std::sync::{Arc, Mutex};
 

@@ -126,15 +126,15 @@ pub use engine::realtime::{
     ResponseSnapshotOwnerInfo, ResponseSnapshotSection, ResponseSnapshotSink,
 };
 pub use prepare::{
-    HostConsoleHandles, HostConsoleRequest, HostMeterRequest, HostPrepareCaps, HostPrepareReport,
-    HostShapePolicy, PreparedHost, SOURCE_STALL_TOLERANCE_MS, compile_host_model,
-    compile_host_session, count_effects, default_source_ring_frames, parse_host_session,
-    prepare_host_runtime, prepare_host_runtime_between_render_calls,
-    prepare_host_runtime_with_console, prepare_host_runtime_with_console_and_spectrum,
-    prepare_host_runtime_with_console_and_spectrum_collection,
+    HostLiveControlHandles, HostLiveControlRequest, HostMeterRequest, HostPrepareCaps,
+    HostPrepareReport, HostShapePolicy, PreparedHost, SOURCE_STALL_TOLERANCE_MS,
+    compile_host_model, compile_host_session, count_effects, default_source_ring_frames,
+    parse_host_session, prepare_host_runtime, prepare_host_runtime_between_render_calls,
+    prepare_host_runtime_with_live_controls, prepare_host_runtime_with_live_controls_and_spectrum,
+    prepare_host_runtime_with_live_controls_and_spectrum_collection,
     prepare_host_runtime_with_selected_meters_between_render_calls,
     prepare_host_runtime_with_spectrum, prepare_host_runtime_with_spectrum_collection,
-    prepare_host_session, prepare_host_session_with_console,
+    prepare_host_session, prepare_host_session_with_live_controls,
 };
 pub use render_session::StartedRenderSession;
 pub use response::{
@@ -145,7 +145,7 @@ pub use response::{
     generate_response_grid, prepare_response_preview, query_response_snapshot_into,
 };
 pub use shape::{HostSessionShape, compiled_session_shape};
-pub use solo::{ConsoleMuteDelta, ConsoleSoloState};
+pub use solo::{LiveControlMuteDelta, LiveControlSoloState};
 pub use source::{
     SourceControlError, SourceControlSet, SourceSubmission, control_table_bytes,
     source_id_arena_bytes,
@@ -164,7 +164,7 @@ pub use spectrum::{
     spectrum_capture_resources, spectrum_capture_resources_for,
 };
 
-/// The control-side half of one prepared effect's live-console channel (issue #140 A).
+/// The control-side half of one prepared effect's live-control channel (issue #140 A).
 ///
 /// Re-exported here so a host does not have to depend on `effect-compiler` -- the
 /// compile pipeline stays in this crate (#106 F1) and a host names only what its own ABI names.
@@ -202,7 +202,7 @@ pub use spectrum::{
 /// that gather their tracks' inputs; a plan nobody joins never collapses, which is the safe default
 /// and the reason the join is an explicit call rather than an inference.
 pub use builtins_compiler::{session_structural_symmetry, track_mono_source};
-pub use effect_contract::{ChannelSymmetryWitness, LiveConsoleRecord, SeamSide, SymmetryEvent};
+pub use effect_contract::{ChannelSymmetryWitness, LiveControlRecord, SeamSide, SymmetryEvent};
 
 #[doc(hidden)]
 pub use session::CompiledSession;

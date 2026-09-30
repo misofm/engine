@@ -1,4 +1,4 @@
-//! Issue #140 A: the console bank stage feeds every lane its own spans, and bypasses per lane.
+//! Issue #140 A: the live-control bank stage feeds every lane its own spans, and bypasses per lane.
 //!
 //! The bank under test is a deliberate stand-in for a real effect: it applies `parameter 0` as a
 //! per-lane gain, exactly the way every launch effect applies a `Point` span at `first_sample`.
@@ -14,7 +14,7 @@ use effect_contract::{
     StatePayloadSizes, TailSamples,
 };
 use engine::realtime::{QueueGeneration, bounded_spsc};
-use rack::{AoSoaScratch, BankChain, BankMembers, BankSlot, BankStage, ConsoleEffectBankStage};
+use rack::{AoSoaScratch, BankChain, BankMembers, BankSlot, BankStage, LiveControlEffectBankStage};
 
 const LANES: usize = 4;
 const CAPACITY: u32 = 4;
@@ -148,7 +148,7 @@ impl BankMembers for Planes {
 
 type Producers = Vec<engine::realtime::Producer<EffectControlRecord>>;
 
-fn console_chain(latency: usize, controlled: [bool; LANES]) -> (BankChain, Producers) {
+fn live_control_chain(latency: usize, controlled: [bool; LANES]) -> (BankChain, Producers) {
     let mut producers = Vec::new();
     let lanes: Vec<Option<EffectControlLane>> = controlled
         .iter()
@@ -164,7 +164,7 @@ fn console_chain(latency: usize, controlled: [bool; LANES]) -> (BankChain, Produ
             })
         })
         .collect();
-    let stage = ConsoleEffectBankStage::new(
+    let stage = LiveControlEffectBankStage::new(
         Box::new(MockGainBank::new(latency)),
         BankWidth::Four,
         8,
@@ -206,7 +206,7 @@ fn gain(value: f32) -> EffectControlRecord {
 /// the offsets still partition the array, and lane 0 renders lane 2's command.
 #[test]
 fn each_lane_receives_only_its_own_commands() {
-    let (mut chain, mut producers) = console_chain(0, [true, true, true, true]);
+    let (mut chain, mut producers) = live_control_chain(0, [true, true, true, true]);
     let mut members = planes(1.0);
     // Lanes 0 and 2 are commanded with different values; lane 1 stays silent so isolation is
     // observable in both directions.
@@ -232,7 +232,7 @@ fn each_lane_receives_only_its_own_commands() {
 /// bank's own ramp state carries it, exactly as a scalar instance's does.
 #[test]
 fn a_command_applies_at_the_block_boundary_and_persists() {
-    let (mut chain, mut producers) = console_chain(0, [true, false, false, false]);
+    let (mut chain, mut producers) = live_control_chain(0, [true, false, false, false]);
     let mut members = planes(1.0);
     chain.run(&mut members, 8, 0).expect("run");
     assert_eq!(members.left[0][0], 1.0, "no command yet");
@@ -259,7 +259,7 @@ fn a_command_applies_at_the_block_boundary_and_persists() {
 #[test]
 fn bypass_is_per_lane_and_preserves_the_declared_latency() {
     const LATENCY: usize = 2;
-    let (mut chain, mut producers) = console_chain(LATENCY, [true, true, false, false]);
+    let (mut chain, mut producers) = live_control_chain(LATENCY, [true, true, false, false]);
     // Lane 0 is bypassed and gained; lane 1 is only gained.
     producers[0].try_push(gain(0.5)).expect("room");
     producers[0]
@@ -316,7 +316,7 @@ fn bypass_is_per_lane_and_preserves_the_declared_latency() {
 /// the lane was bypassed, so un-bypassing produces the *current* wet signal, not a stale one.
 #[test]
 fn un_bypassing_returns_the_current_wet_signal() {
-    let (mut chain, mut producers) = console_chain(0, [true, false, false, false]);
+    let (mut chain, mut producers) = live_control_chain(0, [true, false, false, false]);
     producers[0].try_push(gain(0.25)).expect("room");
     producers[0]
         .try_push(EffectControlRecord::Bypass(true))
@@ -341,7 +341,7 @@ fn un_bypassing_returns_the_current_wet_signal() {
 #[test]
 fn a_command_timeline_is_partition_invariant() {
     let whole = {
-        let (mut chain, mut producers) = console_chain(2, [true, true, true, true]);
+        let (mut chain, mut producers) = live_control_chain(2, [true, true, true, true]);
         producers[0].try_push(gain(0.5)).expect("room");
         producers[3].try_push(gain(2.0)).expect("room");
         let mut members = planes(1.0);
@@ -349,7 +349,7 @@ fn a_command_timeline_is_partition_invariant() {
         members
     };
     let split = {
-        let (mut chain, mut producers) = console_chain(2, [true, true, true, true]);
+        let (mut chain, mut producers) = live_control_chain(2, [true, true, true, true]);
         producers[0].try_push(gain(0.5)).expect("room");
         producers[3].try_push(gain(2.0)).expect("room");
         let mut first = Planes {
@@ -402,7 +402,7 @@ fn a_command_timeline_is_partition_invariant() {
 #[test]
 fn stage_construction_rejects_a_lane_count_or_quantum_mismatch() {
     assert!(
-        ConsoleEffectBankStage::new(
+        LiveControlEffectBankStage::new(
             Box::new(MockGainBank::new(0)),
             BankWidth::Four,
             8,
@@ -414,7 +414,7 @@ fn stage_construction_rejects_a_lane_count_or_quantum_mismatch() {
         "a lane vector that is not the bank width is refused"
     );
     assert!(
-        ConsoleEffectBankStage::new(
+        LiveControlEffectBankStage::new(
             Box::new(MockGainBank::new(0)),
             BankWidth::Four,
             0,
@@ -479,7 +479,7 @@ impl PreparedNativeEffectBank for ShrinkingCapacityBank {
 /// that still held. The window is refused instead, and a stable bank binds.
 ///
 /// Red mutation (issue #1012): delete the `check_automation_window` call from
-/// `ConsoleEffectBankStage::new` -> this binds a capacity + 1 window and fails.
+/// `LiveControlEffectBankStage::new` -> this binds a capacity + 1 window and fails.
 #[test]
 fn a_staging_window_larger_than_the_capacity_is_refused_at_bind() {
     let shrinking = ShrinkingCapacityBank {
@@ -499,7 +499,7 @@ fn a_staging_window_larger_than_the_capacity_is_refused_at_bind() {
             .collect::<Vec<_>>()
     };
     assert_eq!(
-        ConsoleEffectBankStage::new(
+        LiveControlEffectBankStage::new(
             Box::new(shrinking),
             BankWidth::Four,
             8,
@@ -512,7 +512,7 @@ fn a_staging_window_larger_than_the_capacity_is_refused_at_bind() {
         "a window sized one span past the enforced capacity is refused at bind"
     );
     assert!(
-        ConsoleEffectBankStage::new(
+        LiveControlEffectBankStage::new(
             Box::new(MockGainBank::new(0)),
             BankWidth::Four,
             8,
@@ -527,15 +527,15 @@ fn a_staging_window_larger_than_the_capacity_is_refused_at_bind() {
 
 /// Issue #143 E5, at the bank slot: the observation surface a stage exposes off the render thread.
 ///
-/// `ConsoleEffectBankStage` is where the structural walk bottoms out — `BankChain` sums it and the
-/// runtime sums that — so the counts and the retained bytes it reports are what
+/// `LiveControlEffectBankStage` is where the structural walk bottoms out — `BankChain` sums it and
+/// the runtime sums that — so the counts and the retained bytes it reports are what
 /// `observation_retained_bytes == 0` ultimately rests on. A slot no observation request touched
 /// reports zero for all of them and allocates neither the lane vector nor the per-lane sample
 /// scratch.
 ///
-/// Red mutation: build the sample scratch unconditionally in `ConsoleEffectBankStage::new` -> an
-/// unobserved slot stops being structurally distinguishable from an observed one, and `is_observed`
-/// stops meaning anything.
+/// Red mutation: build the sample scratch unconditionally in `LiveControlEffectBankStage::new` ->
+/// an unobserved slot stops being structurally distinguishable from an observed one, and
+/// `is_observed` stops meaning anything.
 #[test]
 fn an_unobserved_bank_slot_reports_no_observation_state_at_all() {
     use effect_contract::{
@@ -558,7 +558,7 @@ fn an_unobserved_bank_slot_reports_no_observation_state_at_all() {
         maximum: 100.0,
     }];
 
-    let unobserved = ConsoleEffectBankStage::new(
+    let unobserved = LiveControlEffectBankStage::new(
         Box::new(MockGainBank::new(0)),
         BankWidth::Four,
         8,
@@ -587,7 +587,7 @@ fn an_unobserved_bank_slot_reports_no_observation_state_at_all() {
         }
         lanes.push(Some(observation));
     }
-    let mut observed = ConsoleEffectBankStage::new(
+    let mut observed = LiveControlEffectBankStage::new(
         Box::new(MockGainBank::new(0)),
         BankWidth::Four,
         8,
@@ -624,8 +624,8 @@ fn an_unobserved_bank_slot_reports_no_observation_state_at_all() {
 /// This is the tripwire for the capture gate. Phase 4 stopped staging the dry block on a block no
 /// reader can observe, which is sound only because `BypassShunt::feeds_line` keeps the capture
 /// unconditional whenever a latency line exists. Red mutation: gate the capture in
-/// `ConsoleEffectBankStage::process` on `any_bypassed` alone, dropping the `feeds_line()` term ->
-/// the line starves while the lane runs wet, and the first bypassed block below emits stale
+/// `LiveControlEffectBankStage::process` on `any_bypassed` alone, dropping the `feeds_line()` term
+/// -> the line starves while the lane runs wet, and the first bypassed block below emits stale
 /// samples (zeros, or block-0 content) instead of the input from `LATENCY` frames earlier.
 ///
 /// The distinction from `bypass_is_per_lane_and_preserves_the_declared_latency` is the toggle
@@ -636,7 +636,7 @@ fn an_unobserved_bank_slot_reports_no_observation_state_at_all() {
 fn a_mid_session_bypass_emits_the_delayed_dry_signal_captured_while_wet() {
     const LATENCY: usize = 2;
     const FRAMES: usize = 8;
-    let (mut chain, mut producers) = console_chain(LATENCY, [true, false, false, false]);
+    let (mut chain, mut producers) = live_control_chain(LATENCY, [true, false, false, false]);
     producers[0].try_push(gain(0.5)).expect("room");
 
     let input = |block: usize, frame: usize| (block * FRAMES + frame + 1) as f32;
@@ -692,13 +692,13 @@ fn a_mid_session_bypass_emits_the_delayed_dry_signal_captured_while_wet() {
 /// first bypassed block still emits *its own* input because the control drain decides `bypassed`
 /// before the capture runs.
 ///
-/// Red mutation: move the `any_bypassed` decision in `ConsoleEffectBankStage::process` below the
-/// capture, or compute it from a stale pre-drain snapshot -> the first bypassed block emits the
+/// Red mutation: move the `any_bypassed` decision in `LiveControlEffectBankStage::process` below
+/// the capture, or compute it from a stale pre-drain snapshot -> the first bypassed block emits the
 /// previous block's dry samples.
 #[test]
 fn a_zero_latency_bypass_emits_the_current_block_dry() {
     const FRAMES: usize = 8;
-    let (mut chain, mut producers) = console_chain(0, [true, false, false, false]);
+    let (mut chain, mut producers) = live_control_chain(0, [true, false, false, false]);
     producers[0].try_push(gain(0.25)).expect("room");
 
     let mut members = planes(3.0);
@@ -721,7 +721,8 @@ fn a_zero_latency_bypass_emits_the_current_block_dry() {
     );
 }
 
-/// Issue #1087: a session bypass with no console attached is a channel-less lane of this stage.
+/// Issue #1087: a session bypass with no live controls attached is a channel-less lane of this
+/// stage.
 ///
 /// The slot builds its shunt because a lane is bypassed, although no lane has a live channel, and
 /// the bypassed lane is its latency-matched dry signal while every other lane keeps the wet one.
@@ -737,7 +738,7 @@ fn a_channel_less_bypassed_lane_is_shunted_without_a_staging_window() {
     let mut bank = MockGainBank::new(LATENCY);
     bank.gain = [0.5; LANES];
     bank.metadata.program_key.automation_capacity = u32::MAX;
-    let stage = ConsoleEffectBankStage::new(
+    let stage = LiveControlEffectBankStage::new(
         Box::new(bank),
         BankWidth::Four,
         8,

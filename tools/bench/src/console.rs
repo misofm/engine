@@ -75,7 +75,7 @@
 //!
 //! # The console-facility arms (issue #163 item 0d)
 //!
-//! Every session row above renders a plan with no meter stream, no live-console control channel
+//! Every session row above renders a plan with no meter stream, no live-control channel
 //! and no observation capacity -- which is not what a running console is. `console_meters` and
 //! `console_observation` measure what those facilities cost, under the same paired-alternation
 //! protocol as the hoist arms, and through the production entry points rather than a hand-built
@@ -127,7 +127,7 @@
 //! ramping path could move a number in it.
 //!
 //! `console_automation` closes that gap with the console's real traffic shape: **one Point span
-//! per block, on one track**, pushed through the same bounded live-console queue a host pushes
+//! per block, on one track**, pushed through the same bounded live-control queue a host pushes
 //! through, into a real prepared plan. Its three arms carry the identical control channel and
 //! differ only in what rides it -- `quiet` pushes nothing, `restated` restates the value in force
 //! (the #144 hoist settles it, so no window opens), `automated` moves it every block. The paired
@@ -144,7 +144,7 @@
 //! retires for the life of the plan, and the fact that tracks spread across banks each take a
 //! bank down.
 //!
-//! This row is the mono fixture as written, with the live-console control channel, riding eight
+//! This row is the mono fixture as written, with the live-control channel, riding eight
 //! controls on eight tracks, one per eight-lane bank (`console_workload::mixing_automation` is the
 //! table). Each control is pushed in the shape a real host pushes it: the EQ as one owner edit on
 //! `Both`, which designs one `Both` target, and the compressor and the limiter as a Left then a
@@ -1752,7 +1752,7 @@ impl MonoMeasurement {
 /// microsecond of it under two other effects' steady-state cost.
 const AUTOMATION_WORKLOAD: Workload = Workload::SixtyFourTrackCompressorOnly;
 
-/// The plan every automation arm is prepared with: the live-console control channel and nothing
+/// The plan every automation arm is prepared with: the live-control channel and nothing
 /// else.
 ///
 /// All three arms carry the channel, so the deltas between them are the *traffic* and never the
