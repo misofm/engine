@@ -164,7 +164,7 @@ echo "web AudioWorklet transitive process-policy mutations passed"
 # Issue #137 D2/D3: the two amended policy rules each get their own red mutation. The generic
 # `this.port.postMessage({});` mutation above already covers "a third post appears"; these cover
 # "a pinned post disappears" and "the clock leaves its one pinned site".
-console_mutations=(
+live_control_mutations=(
   # A pinned post is renamed: the occurrence count still matches, the pinned line does not.
   's/this\.port\.postMessage(this\.meterMessage);/this.port.postMessage(this.telemetryMessage);/'
   # The telemetry post is dropped from the window: the count no longer matches.
@@ -174,15 +174,15 @@ console_mutations=(
   # The clock is read inside the frozen render-callback body.
   's/const started = this\.telemetryLease ? this\.clock\.read() : 0;/const started = Date.now();/'
 )
-for mutation in "${console_mutations[@]}"; do
-  mutated="$mutation_dir/worklet-console.js"
+for mutation in "${live_control_mutations[@]}"; do
+  mutated="$mutation_dir/worklet-live-controls.js"
   sed "$mutation" "$worklet" >"$mutated"
   if diff -q "$worklet" "$mutated" >/dev/null; then
-    echo "console policy mutation matched nothing: $mutation" >&2
+    echo "live-control policy mutation matched nothing: $mutation" >&2
     exit 1
   fi
   if "$repo_root/scripts/check-web-audioworklet.sh" "--source-policy=$mutated" >/dev/null 2>&1; then
-    echo "console process-policy mutation escaped: $mutation" >&2
+    echo "live-control process-policy mutation escaped: $mutation" >&2
     exit 1
   fi
 done
@@ -198,7 +198,7 @@ if "$repo_root/scripts/check-web-audioworklet.sh" "--source-policy=$mutated" >/d
   echo "clock read outside renderClock() escaped the pinned-site rule" >&2
   exit 1
 fi
-echo "web AudioWorklet console policy mutations passed"
+echo "web AudioWorklet live-control policy mutations passed"
 
 # Issue #137 D4/E7: the metadata schema validator is proved to discriminate before it is trusted,
 # and the emitted document is validated against it.

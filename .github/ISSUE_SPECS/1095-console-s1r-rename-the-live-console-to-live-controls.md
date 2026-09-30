@@ -194,7 +194,7 @@ Terra, 2026-09-30. Branch `codex/1095-rename-live-controls` from `51a1514a` (the
 
 | Gate | Evidence | Result |
 |---|---|---|
-| 1. Class A: console digests | `console-workload`'s ignored `digests` harness in release (`gain_pan_profile`), base tree against head, same target dir: **22 of 22 rows identical**. `cargo test --locked --release -p audit -p bench -p console-workload`: 114 passed (the pinned console digests included). | identical |
+| 1. Class A: console digests | `console-workload`'s ignored `digests` harness in release (`gain_pan_profile`), base against head: **22 of 22 rows identical** with the base built from `51a1514a` source in its own target dir (Sol's reproduction, 63 crates compiled). Attempt 1 ran the base in head's target dir, where cargo can reuse head's binary (L3). `cargo test --locked --release -p audit -p bench -p console-workload`: 114 passed (the pinned console digests included). | identical |
 | 1. Class A: browser | `check-browser-expected-resources.py --artifacts`: the committed `expected.json` digests and exact rows agree with the new module (and its self-test, 32 red mutations). Browser qualification in CI mode (`run.mjs --check-matrix --self-test-mutations`, pulseaudio null sink) on chromium 151.0.7922.34, firefox 153.0 and webkit 26.5: every gate passes and every row equals the committed `results.json`. | unchanged |
 | 1. Class A: V8 harness | `run-web-mixing-automation-benchmark.sh prepare` + `preflight` at `b07c32f0`: all seven preflight digests equal the base record's (`artifacts/steps/console-strip-base/web-mixing-automation.jsonl`, `preflight_output_sha256`: quiet `014e5f5b…`, automated `e7025b5c…`, EQ `2540aff4…`, compressor `c29d12a7…`, limiter `8db18991…`). | identical |
 | 1. Artifact | Shipped module `f767076a03548350a35dc6d758716c328f108de59a40cb31442ace59435a09e8` (3,270,838 B) at base -> `9003bc7d1d75f975b3c6ee8b1a27beb4e76f388e0ffd5e1918e23cc1ed6ca01f` (3,271,342 B, +504 B: export names, symbol names, diagnostic strings). The twin build in `run-wasm-gates.sh` and the V8 harness's `--module-only` build reproduce it. Not re-pinned; the release pin moves at release. | changed, reported |
@@ -253,3 +253,252 @@ Kept, by class (the leftover grep, `git grep -i console` outside history, is all
 - **History**: `docs/handoffs`, `docs/rulings`, `docs/audits`, `docs/derivations`, `artifacts/`, and
   closed or batch-C2 specs. #1053's title stays, since it is the GitHub issue's title.
 - **External**: `misofm/engine-web-adapter/src/console.ts` (a cited source baseline).
+
+## Sol verdict, attempt 1
+
+**PASS.** Sol, 2026-09-30, on head `bca6d777`. Every objective gate holds, and every claim that
+could be tested was reproduced independently. Nothing but names and diagnostic strings moves. There
+are no H findings. There is one M: the browser qualification harness keeps attachment-sense
+names on a rationale that does not hold. It is harness-only, and it is best fixed on this branch
+before the batch boundary. Every probe below was reverted, and the tree is clean.
+
+### Findings
+
+- **M1. The browser qualification row keeps live-control names on an inaccurate rationale.**
+  - **Where.**
+    - `hosts/host-web/qualification/qualification.js`:
+      - `:10-15`: `CONSOLE_BLOCKS`, `CONSOLE_FRAMES`, `CONSOLE_COMMAND_QUEUE_RECORDS`,
+        `CONSOLE_METER_BLOCKS`;
+      - `:273`: `runConsoleQualification`;
+      - `:561-563`: `consoleCommandResult`, `consoleMeterLeaseResult`, `consoleMeterFrames`;
+      - `:624` and `:698`: `console`.
+    - `hosts/host-web/qualification/run.mjs:26` and `:584`: `stall-console-load`, and
+      `:145` and `:193-194`.
+    - `hosts/host-web/MUTATIONS.md:34`.
+  - **These are the attachment sense.** The row boots with live controls (queue 64, meter blocks
+    2), admits a command and leases a meter (#137 E6/E8). It is neither a benchmark nor a console
+    session, so "benchmark names stay" does not cover it. The prose beside it was renamed
+    (`qualification.js:265`, "live-control row"; `run.mjs:25`, "live-control load"), so the code
+    and its comments now disagree.
+  - **The stated reason does not hold** (spec line 188). The reason given is that the keys stay
+    comparable with the base and with `--check-matrix`'s `results.json`. But `results.json`
+    carries none of these keys: its gates are `controlPath`, `observation`, `mainThreadStall` and
+    the rest. The in-run digests do not depend on key names either. Renaming would not have cost
+    that comparability.
+  - **Correctly kept.** `console-session.json`, `console-source` and `web-browser-console` are
+    fixture identities. The source ID is inside the document's canonical identity
+    (`session-identities.mjs`).
+  - **Fix.** A mechanical, harness-only rename. No artifact or `results.json` byte moves.
+- **L1. `scripts/test-web-audioworklet.sh:164-201` is misclassified as JavaScript's `console`**
+  (spec line 249).
+  - The names: `console_mutations`, `worklet-console.js`, "console policy mutation matched
+    nothing", "console process-policy mutation escaped", and "web AudioWorklet console policy
+    mutations passed".
+  - These are the #137 D2/D3 rules for the live controls' posts, lease guard and clock, not
+    `console.` calls. Rename them with M1.
+- **L2. The published export list is no longer sorted.**
+  - `tools/parameter-metadata/src/abi_layout.rs:125` documents "Every function the module
+    exports, sorted".
+  - But `:142-143` puts `live_control_track_*` between `command_submit` and `dispose`. So do
+    `scripts/check-abi-layout-v1.py:116-117`, `sdk/assets/miso-engine-v1-abi-layout.json`,
+    `sdk/src/generated/abi.ts:44-45` and `scripts/fixtures/abi-layout-v1-self-test.json:17-18`.
+  - No gate depends on the order: `check-web-audioworklet.sh` sorts both sides, and the layout
+    gate compares the exact frozen sequence. Either re-sort the list (after
+    `input_filters_prepare`) or correct the comment.
+- **L3. The recorded method for the gate 1 digests can silently compare head with itself.**
+  - The record says: "base tree against head, same target dir".
+  - A base tree extracted with `git archive` has mtimes older than the build. Run into the same
+    target dir, cargo reused head's test binary: 0 crates compiled, finished in 0.07 s. That
+    compares head with itself.
+  - The base rebuilt in a separate target directory compiled 63 crates and still matched 22 of
+    22, so the claim holds. The record should say how the base was built.
+- **L4. Borderline kept names, for S1c.**
+  - The names:
+    - `render_console_fader_script` (`crates/graph-compiler/src/lib.rs:11722`) renders the
+      intended console fixture under a live fader script.
+    - The `Console` test structs (`crates/host-core/tests/symmetry_witness.rs:104`,
+      `crates/host-core/src/limiter_linked_session.rs:315`) hold a prepared console fixture with
+      its `HostLiveControlHandles`.
+  - Read by what they construct, the session reading is defensible. No action is needed unless
+    S1c edits them.
+
+### The judgment calls
+
+- **The diagnostic codes: renaming them is correct.**
+  - **Not frozen.** `docs/EFFECT_CONTRACT_V1.md:202` ("Stable diagnostics") freezes only
+    `effect.*`. At base, nothing matched `web.console.*`, `web.options.console`,
+    `web.internal.console` or `host.observation.console` except their producers, one host-core
+    test and a comment in `sdk/src/browser/host-mirror.ts`. No gate and no SDK code matched them.
+  - **App-visible, though.** They reach the app as a boot error's `diagnosticCode`, so the
+    handoff note is the right place for them.
+  - **Every consumer is updated:**
+    - `crates/host-core/tests/effect_observation.rs:814`;
+    - the `host-mirror.ts:55` comment;
+    - the handoff note's table.
+  - **The wasm diff agrees.** Only two string-length immediates moved: 18 -> 24
+    (`web.console.config`) and 19 -> 25 (`web.options.console`).
+- **The qualification row: not consistent with "benchmark names stay".** See M1.
+
+### Evidence
+
+- **Completeness.**
+  - I walked through every `console` token that `git grep -i console` finds outside history: 160
+    distinct tokens.
+  - Every M6 name and every name in the spec's list is renamed. The retired export, boot-word and
+    SDK spellings have zero hits outside history and this spec.
+  - Nothing that means a console session was renamed:
+    - the benchmark rows and records, including `console_command_queue_records`;
+    - `console-workload`;
+    - the fixtures;
+    - decision 12's key;
+    - the console-strip docs.
+  - The kept list is right except M1 and L1.
+  - Assert, `#[test]` and `#[ignore]` counts are unchanged: 14,919, 2,099 and 46.
+  - No hex digest pin changed in the diff.
+- **Sealed spellings.**
+  - The `_v1` and `miso.*.v1` tokens in the diff's removed and added lines are identical except
+    the two exports. `ABI_VERSION` is unchanged.
+  - The boot-word offsets (32, 40, 48, 56) and types are unchanged.
+  - The worklet `.d.ts` and its SDK mirror are byte-identical.
+  - The layout is byte-equal to the generator's output.
+- **Planted probes, all reverted.**
+  - The layout gate refused:
+    - a copy with the retired export appended ("116 module functions, not 117");
+    - a rename-back ("frozen module function sequence");
+    - `consoleMeterBlocks` restored.
+  - The scalar-oracle gate is not weakened. Its re-spelled roster, run `--native` against a real
+    debug `libbuiltins_compiler` rlib, matched real `LiveControl{Input,Fader,Matrix}Processor`
+    symbols (10, 41 and 41 symbols). On the shipped module: 2,481 symbols, none of the 17 roster
+    names.
+- **Class A.**
+  - **Module.** Base, built from `51a1514a` source, is `f767076a…` (3,270,838 B). That equals
+    the digest CI recorded on `origin/main` `398e8988`. Head is `9003bc7d…` (3,271,342 B).
+    - The 117 exports differ only in the two renamed exports.
+    - The type section is identical, and the code section has the same size (2,786,773 B) and
+      the same 2,481 functions.
+    - With names and static addresses normalized, 2,474 bodies are identical. The other 7
+      differ only in mangled names or in the two string lengths above.
+    - The data section grew by 40 B: the strings.
+  - **Console digests.** `gain_pan_profile digests` in release: base rebuilt from source against
+    head, 22 of 22 identical. `cargo test --release -p audit -p bench -p console-workload`: 114
+    passed.
+  - **V8.** Head's `prepare` and `preflight`: all seven digests equal the base record's. A base
+    preflight (base module, byte-identical `controls.json`) against head: the seven arm digests
+    and both document digests are identical.
+  - **Browsers.** Chromium 151.0.7922.34, Firefox 153.0 and WebKit 26.5, with `--check-matrix
+    --self-test-mutations` and a PulseAudio null sink: every gate passed.
+- **Gates, all green.**
+  - Rust:
+    - `cargo fmt`;
+    - clippy with `-D warnings` on all targets and all features;
+    - rustdoc with `-D warnings`;
+    - `cargo test --workspace`: 291 binaries, 2,076 passed, 0 failed.
+  - Lint job: all 46 script steps and the three x86 probes.
+  - Routing and benchmark: `test-ci-path-routing.py`, `check-ci-path-routing.py`, and
+    `test-console-benchmark.sh` (0 timed invocations).
+  - SDK:
+    - generated, deletions and types;
+    - headless: 284 of 284;
+    - the package tarball gate.
+  - Artifact:
+    - `check-web-audioworklet.sh`;
+    - `check-browser-expected-resources.py --artifacts`: 32 red mutations;
+    - the scalar-oracle gate with `--wasm` and `--self-test`;
+    - `test-web-audioworklet.sh`;
+    - the V8 spill gate and its self-test;
+    - `check-session-map-shape.py`;
+    - `check-abi-layout-v1.py` and its self-test: 19 mutations.
+  - Targets and wasm:
+    - `run-wasm-gates.sh`: native, simd128 and V8;
+    - `check-cross-targets.sh`: AArch64 iOS and Android checked and linted, at the #1018 expected
+      counts, and wasm simd128;
+    - the simd128 compile probes;
+    - `check-protocol-wasm-parity.sh`.
+- **Not run.** AArch64 tests on hardware (there is no arm64 host), and CI's twin-path
+  `artifact-identity` job. The base module built from a different path reproduced CI's digest,
+  which is evidence that the recipe is path-independent.
+
+### Merge
+
+- **Onto `origin/main` `398e8988`: clean.** `git merge-tree` exits 0. `origin/main` differs from
+  the base only in the umbrella spec.
+- **Against S1a `c5699847`: three files conflict.**
+  - Two of them conflict in exactly the same way when S1a is merged with the base alone. They are
+    C2's conflicts, not the rename's:
+    - `crates/effect-compiler/src/prepare.rs` (1 hunk);
+    - `crates/effect-compiler/tests/native_session.rs` (2 hunks).
+  - The rename adds one hunk: the `effect_compiler` import in `crates/graph-compiler/src/lib.rs`
+    (`attach_effect_live_controls` against S1a's
+    `prepare_native_session_effects_with_console_eligibility`).
+  - S1a's added lines use no retired live-control spelling. Its `with_console*` names are the
+    session sense.
+  - `codex/1093-session-console-inserts` has since moved to `616427aa`, which merges this branch
+    into S1a.
+
+## Post-verdict fixes (root-directed)
+
+Terra, 2026-09-30, on `92726408`: Sol's M1 and L1-L3, and L4 recorded. This is not a new attempt.
+Commit `a068202f` holds the change. The shipped module is unchanged.
+
+- **M1.** The #137 E6/E8 row is now the live-control row.
+  - In `qualification.js` and `run.mjs`:
+    - `CONSOLE_*` -> `LIVE_CONTROL_*`;
+    - `runConsoleQualification` -> `runLiveControlQualification`;
+    - the result key `console` -> `liveControls`;
+    - `stall.console{CommandResult,MeterLeaseResult,MeterFrames}` -> `stall.liveControl…`;
+    - `consoleDocument` and `consoleResponse` -> `liveControl…`;
+    - the mutation `stall-console-load` -> `stall-live-controls-load`.
+  - The comments and error strings follow, and so do the `test-web-audioworklet.mjs` hook,
+    `MUTATIONS.md` and derivations 241 and 281.
+  - The derivations get a "Names since #1095" note. Their historical `.toml` paths, the pre-#240
+    field names and the name-minted `sha256:web-browser-console` keep their old spelling.
+- **The fixture is renamed: `console-session.json` -> `live-control-session.json`.** Its session
+  ID becomes `web-browser-live-controls`, and its source ID becomes `live-control-source`.
+  - Only this row and its `diagnoseReady` boot the file, and it holds no effects. S1a gives it the
+    same empty `console` block every migrated document gets, so nothing gives it a console-session
+    meaning.
+  - Keeping the name would have read, after S1a, as a session-console fixture.
+  - The observation document and the SDK rows share the source ID, so they move with it. The
+    content identities are unchanged (`session-identities.mjs`: `965bddf2…`, `0b3c2abe…`,
+    `cdd57923…`).
+  - `git merge-tree` against S1a `3741d34f` is clean, and it leaves one file:
+    `live-control-session.json` with S1a's migration (the `console` block, the `post_pan` tap and
+    `inserts`). No `console-session.json` and no `console-source` remain in `hosts`, `scripts` or
+    `sdk`.
+  - S1a's spec (#1093, line 155) still names `{console,observation,stall}-session.json`, and its
+    branch owns that edit.
+- **L1.** In `test-web-audioworklet.sh`, `console_mutations` -> `live_control_mutations` and
+  `worklet-console.js` -> `worklet-live-controls.js`. Its three messages say "live-control". This
+  corrects the attempt-1 kept list: those were the #137 D2/D3 rules, not JavaScript's `console`.
+- **L2.** The two `live_control_track_*` exports are re-sorted after `input_filters_prepare`, in:
+  - `abi_layout.rs`;
+  - `check-abi-layout-v1.py`;
+  - `abi-layout-v1-self-test.json`;
+  - the regenerated `sdk/assets/miso-engine-v1-abi-layout.json` and `sdk/src/generated/abi.ts`.
+- **L3.** The gate 1 row above now records how the base was built.
+- **L4, for S1c.** `render_console_fader_script` and the `Console` test structs in
+  `symmetry_witness.rs` and `limiter_linked_session.rs` stay. They build a console fixture, and
+  S1c renames them if it edits them.
+
+**Kept "console" hits in the touched files:**
+- **Generic English:**
+  - `qualification.js:495`, "a mixing console";
+  - `MUTATIONS.md:167,170`, "a one-track console" and "a four-track console";
+  - `test-web-audioworklet.mjs:1900-1901`, "a console that lies to its user".
+- **The browser's console:**
+  - `run.mjs:740`, `page.on("console")`;
+  - derivation 281's `; console error:` transcript;
+  - `console.log` in `test-web-audioworklet.mjs`.
+- **History:**
+  - `sha256("web-browser-console")` in `session-identities.mjs:5` and `MUTATIONS.md:244`;
+  - the derivations' `.toml` paths, their pre-#240 field names and the names note.
+
+| Gate | Result |
+|---|---|
+| Browser qualification: `run.mjs --check-matrix --self-test-mutations --sdk-root sdk`, PulseAudio null sink, on chromium 151.0.7922.34, firefox 153.0 and webkit 26.5 | Every gate passes, and every row equals `results.json`. A planted probe that set `stall-live-controls-load`'s value to 1 gave "chromium: stall-live-controls-load: red mutation escaped its gate". It was reverted. |
+| `test-web-audioworklet.sh` (runs `test-web-audioworklet.mjs`) | Green. Boot contract: `callers=5`. The live-control policy mutations pass. |
+| Shipped artifact (`build-web-audioworklet.sh`) | Module `9003bc7d1d75f975b3c6ee8b1a27beb4e76f388e0ffd5e1918e23cc1ed6ca01f`, unchanged. Closure `ca9477a9…`: only the layout JSON's export order moved. |
+| `check-web-audioworklet.sh --without-metadata-regeneration`, `check-sdk-generated.sh` (artifacts), `check-sdk-types.sh`, `check-abi-layout-v1.py` (and `--self-test`, 19), `session-identities.mjs` | Green |
+| `test-ci-path-routing.py`, `check-ci-path-routing.py`, `check-script-reachability.py` (and its test) | Green |
+| Lint scripts that read these paths: `check-workspace-policy`, `test-workspace-policy`, `check-env-vocabulary`, `check-test-support-ci` (and its test), `check-host-core-policy`, `check-realtime-policy`, `check-artifact-evidence-leak` (and its test), `check-lane-policy`, `check-unfused-seal`, `check-effect-runtime-policy`, `check-conformance-boundaries`, `check-release-shape --self-test`, `test-npm-publish-modes`, `check-stem-store-v1.mjs` | Green |
+| `cargo fmt --all --check`; `cargo test -p parameter-metadata` | Green |

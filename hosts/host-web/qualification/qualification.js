@@ -7,12 +7,12 @@ const DEFAULT_RING_FRAMES = 5120;
 const STALL_FRAMES = DEFAULT_RING_FRAMES;
 const STALL_RENDER_FRAMES = STALL_FRAMES;
 const REQUESTED_STALL_MS = 120;
-// Issue #137: the console rows. 130 blocks is one full 128-block telemetry window plus slack, and
-// a two-block meter window makes the decimated cadence observable inside it.
-const CONSOLE_BLOCKS = 130;
-const CONSOLE_FRAMES = CONSOLE_BLOCKS * QUANTUM_FRAMES;
-const CONSOLE_COMMAND_QUEUE_RECORDS = 64n;
-const CONSOLE_METER_BLOCKS = 2n;
+// Issue #137: the live-control rows. 130 blocks is one full 128-block telemetry window plus slack,
+// and a two-block meter window makes the decimated cadence observable inside it.
+const LIVE_CONTROL_BLOCKS = 130;
+const LIVE_CONTROL_FRAMES = LIVE_CONTROL_BLOCKS * QUANTUM_FRAMES;
+const LIVE_CONTROL_COMMAND_QUEUE_RECORDS = 64n;
+const LIVE_CONTROL_METER_BLOCKS = 2n;
 const COMMAND_MATRIX = 2;
 // Issue #143 E12: the observation row. Sixteen blocks is eight two-block windows -- enough for the
 // compressor's 10 ms attack to settle and for `firstSample` monotonicity to be a real sequence
@@ -270,12 +270,16 @@ async function diagnoseGlobals() {
 /// raw-Wasm command-timeline oracles. The retarget halves the left matrix coefficient, so the
 /// expected output is the submitted left plane at half gain and the right plane untouched --
 /// computed here, not read back, so live controls that quietly did nothing cannot pass.
-async function runConsoleQualification(createHost, sessionDocument) {
-  const context = new OfflineAudioContext(2, CONSOLE_FRAMES, SAMPLE_RATE);
+async function runLiveControlQualification(createHost, sessionDocument) {
+  const context = new OfflineAudioContext(2, LIVE_CONTROL_FRAMES, SAMPLE_RATE);
   const host = await createHost({
     context,
     document: sessionDocument,
-    options: bootOptions(CONSOLE_FRAMES, CONSOLE_COMMAND_QUEUE_RECORDS, CONSOLE_METER_BLOCKS),
+    options: bootOptions(
+      LIVE_CONTROL_FRAMES,
+      LIVE_CONTROL_COMMAND_QUEUE_RECORDS,
+      LIVE_CONTROL_METER_BLOCKS,
+    ),
     simd128ModuleUrl: ARTIFACT_URL,
     workletModuleUrl: WORKLET_URL,
   });
@@ -283,9 +287,9 @@ async function runConsoleQualification(createHost, sessionDocument) {
 
   const meterFrames = [];
   const telemetryFrames = [];
-  const expected = [new Float32Array(CONSOLE_FRAMES), new Float32Array(CONSOLE_FRAMES)];
+  const expected = [new Float32Array(LIVE_CONTROL_FRAMES), new Float32Array(LIVE_CONTROL_FRAMES)];
   let inputPeak = 0;
-  for (let block = 0; block < CONSOLE_BLOCKS; block += 1) {
+  for (let block = 0; block < LIVE_CONTROL_BLOCKS; block += 1) {
     const planes = sourcePlanes(block);
     for (let frame = 0; frame < QUANTUM_FRAMES; frame += 1) {
       expected[0][block * QUANTUM_FRAMES + frame] = planes[0][frame] * 0.5;
@@ -293,15 +297,15 @@ async function runConsoleQualification(createHost, sessionDocument) {
       inputPeak = Math.max(inputPeak, Math.abs(planes[0][frame]), Math.abs(planes[1][frame]));
     }
     const acknowledgement = await host.submitSource({
-      sourceId: "console-source",
+      sourceId: "live-control-source",
       generation: 1n,
       startFrame: BigInt(block * QUANTUM_FRAMES),
       sampleRateHz: SAMPLE_RATE,
       planes,
       frames: QUANTUM_FRAMES,
-      endOfRegion: block === CONSOLE_BLOCKS - 1,
+      endOfRegion: block === LIVE_CONTROL_BLOCKS - 1,
     });
-    if (acknowledgement.result !== 0) throw new Error("console prefill rejected");
+    if (acknowledgement.result !== 0) throw new Error("live-control prefill rejected");
   }
 
   // Request IDs are strictly monotonic across the whole port, so the leases and the command are
@@ -339,7 +343,7 @@ async function runConsoleQualification(createHost, sessionDocument) {
 
   let exact = true;
   for (let channel = 0; channel < 2; channel += 1) {
-    for (let frame = 0; frame < CONSOLE_FRAMES; frame += 1) {
+    for (let frame = 0; frame < LIVE_CONTROL_FRAMES; frame += 1) {
       if (!Object.is(actual[channel][frame], expected[channel][frame])) exact = false;
     }
   }
@@ -363,8 +367,8 @@ async function runConsoleQualification(createHost, sessionDocument) {
     masterPeak,
     inputPeak,
     exactRetargetedOutput: exact,
-    expectedDigest: await pcmDigest(expected, CONSOLE_FRAMES),
-    renderedDigest: await pcmDigest(actual, CONSOLE_FRAMES),
+    expectedDigest: await pcmDigest(expected, LIVE_CONTROL_FRAMES),
+    renderedDigest: await pcmDigest(actual, LIVE_CONTROL_FRAMES),
   };
 }
 
@@ -385,8 +389,8 @@ async function runObservationRun(createHost, sessionDocument, armed) {
     document: sessionDocument,
     options: bootOptions(
       OBSERVATION_FRAMES,
-      CONSOLE_COMMAND_QUEUE_RECORDS,
-      CONSOLE_METER_BLOCKS,
+      LIVE_CONTROL_COMMAND_QUEUE_RECORDS,
+      LIVE_CONTROL_METER_BLOCKS,
       OBSERVATION_TAPS,
       OBSERVATION_MASTER_TRACK_PLUS_ONE,
     ),
@@ -398,7 +402,7 @@ async function runObservationRun(createHost, sessionDocument, armed) {
   const frames = [];
   for (let block = 0; block < OBSERVATION_BLOCKS; block += 1) {
     const acknowledgement = await host.submitSource({
-      sourceId: "console-source",
+      sourceId: "live-control-source",
       generation: 1n,
       startFrame: BigInt(block * QUANTUM_FRAMES),
       sampleRateHz: SAMPLE_RATE,
@@ -424,7 +428,7 @@ async function runObservationRun(createHost, sessionDocument, armed) {
     rack: 1,
     effectIndex: 0,
     tapId: OBSERVATION_TAP_ID,
-    windowBlocks: Number(CONSOLE_METER_BLOCKS),
+    windowBlocks: Number(LIVE_CONTROL_METER_BLOCKS),
     armed: true,
   };
   const subscribed = await host.observe({ subscriptions: [subscription] });
@@ -490,7 +494,11 @@ async function runStallQualification(createHost, sessionDocument) {
     // #137 E6: the stall runs with live controls attached and their meter lease held, so the
     // 100 ms fault is survived under exactly the command and metering load a mixing console
     // imposes -- and the frozen exact-output requirement is unchanged.
-    options: bootOptions(DEFAULT_RING_FRAMES, CONSOLE_COMMAND_QUEUE_RECORDS, CONSOLE_METER_BLOCKS),
+    options: bootOptions(
+      DEFAULT_RING_FRAMES,
+      LIVE_CONTROL_COMMAND_QUEUE_RECORDS,
+      LIVE_CONTROL_METER_BLOCKS,
+    ),
     simd128ModuleUrl: ARTIFACT_URL,
     workletModuleUrl: WORKLET_URL,
   });
@@ -558,9 +566,9 @@ async function runStallQualification(createHost, sessionDocument) {
   }
 
   return {
-    consoleCommandResult: stallCommand.result,
-    consoleMeterLeaseResult: meterLease.result,
-    consoleMeterFrames: stallMeterFrames.length,
+    liveControlCommandResult: stallCommand.result,
+    liveControlMeterLeaseResult: meterLease.result,
+    liveControlMeterFrames: stallMeterFrames.length,
     requestedStallMs: REQUESTED_STALL_MS,
     minimumStallMs: MINIMUM_STALL_MS,
     measuredStallMs,
@@ -578,7 +586,7 @@ async function runStallQualification(createHost, sessionDocument) {
 export async function runQualification() {
   const [
     { createMisoAudioWorkletHost }, expectedResponse, sessionResponse, sourceResponse, stallResponse,
-    consoleResponse, observationResponse,
+    liveControlResponse, observationResponse,
   ] =
     await Promise.all([
       import("/artifacts/miso-engine-v1-audio-worklet-host.js"),
@@ -586,21 +594,22 @@ export async function runQualification() {
       fetch("/fixture/session.json"),
       fetch("/fixture/source.json"),
       fetch("/qualification/stall-session.json"),
-      fetch("/qualification/console-session.json"),
+      fetch("/qualification/live-control-session.json"),
       fetch("/qualification/observation-session.json"),
     ]);
   if (!expectedResponse.ok || !sessionResponse.ok || !sourceResponse.ok || !stallResponse.ok
-      || !consoleResponse.ok || !observationResponse.ok) {
+      || !liveControlResponse.ok || !observationResponse.ok) {
     throw new Error("qualification fixture fetch failed");
   }
   const expected = await expectedResponse.json();
   const corpusDocument = new TextEncoder().encode(await sessionResponse.text());
   const source = await sourceResponse.json();
   const stallDocument = new TextEncoder().encode(await stallResponse.text());
-  // Issue #137 E8: the console row needs a region long enough for one full 128-block telemetry
-  // window, which the 40-block stall region is not.
-  const consoleDocument = new TextEncoder().encode(await consoleResponse.text());
-  // Issue #143 E12: the console session plus one compressor, so an armed tap has a real reduction.
+  // Issue #137 E8: the live-control row needs a region long enough for one full 128-block
+  // telemetry window, which the 40-block stall region is not.
+  const liveControlDocument = new TextEncoder().encode(await liveControlResponse.text());
+  // Issue #143 E12: the live-control session plus one compressor, so an armed tap has a real
+  // reduction.
   const observationDocument = new TextEncoder().encode(await observationResponse.text());
   const simd128 = WebAssembly.validate(SIMD128_PROBE);
   const sdkResponse = simd128 && new URL(import.meta.url).searchParams.get("sdk") === "1"
@@ -621,7 +630,7 @@ export async function runQualification() {
       },
       boot: { ready: false, backend: null },
       corpus: null,
-      console: null,
+      liveControls: null,
       observation: null,
       stall: null,
       sdkResponse,
@@ -655,10 +664,10 @@ export async function runQualification() {
   );
   let live;
   try {
-    live = await runConsoleQualification(createMisoAudioWorkletHost, consoleDocument);
+    live = await runLiveControlQualification(createMisoAudioWorkletHost, liveControlDocument);
   } catch (error) {
-    const diagnostic = await diagnoseReady(consoleDocument);
-    throw new Error(`console qualification failed: ${diagnosticJson({
+    const diagnostic = await diagnoseReady(liveControlDocument);
+    throw new Error(`live-control qualification failed: ${diagnosticJson({
       name: error?.name, message: error?.message, ...error, diagnostic,
     })}`);
   }
@@ -695,7 +704,7 @@ export async function runQualification() {
       browserDigests: digests,
       freshContextIdentity: digests[0] === digests[1],
     },
-    console: live,
+    liveControls: live,
     observation,
     stall,
     sdkResponse,
@@ -717,7 +726,7 @@ export const qualificationConstants = Object.freeze({
 export const qualificationBootContract = Object.freeze({
   renderCorpusSegment,
   typedUnsupportedAttestation,
-  runConsoleQualification,
+  runLiveControlQualification,
   runObservationRun,
   runStallQualification,
   diagnoseReady,
@@ -732,14 +741,14 @@ export const qualificationBootContract = Object.freeze({
 // `blocks * quantumFrames` frames -- the declared `frames`.
 export const qualificationSessionSources = Object.freeze([
   Object.freeze({
-    document: "console-session.json",
-    sourceId: "console-source",
-    blocks: CONSOLE_BLOCKS,
+    document: "live-control-session.json",
+    sourceId: "live-control-source",
+    blocks: LIVE_CONTROL_BLOCKS,
     planes: sourcePlanes,
   }),
   Object.freeze({
     document: "observation-session.json",
-    sourceId: "console-source",
+    sourceId: "live-control-source",
     blocks: OBSERVATION_BLOCKS,
     planes: observationPlanes,
   }),

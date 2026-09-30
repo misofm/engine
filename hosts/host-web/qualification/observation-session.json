@@ -15,7 +15,7 @@
   },
   "sources": [
     {
-      "id": "console-source",
+      "id": "live-control-source",
       "content": "blake3:0b3c2abe71c5c6795b8199d1cb6df4f288f0b43b5635f25c50857eee8a6213ea",
       "channels": 2,
       "bit_depth": "32f",
@@ -49,7 +49,7 @@
   "tracks": [
     {
       "id": "track",
-      "source_id": "console-source",
+      "source_id": "live-control-source",
       "left_source_channel": 0,
       "right_source_channel": 1,
       "builtins": {
