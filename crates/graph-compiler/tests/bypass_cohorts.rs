@@ -19,10 +19,10 @@
 
 use builtins_compiler::{BuiltinCompileCaps, prepare_session_builtins};
 use effect_compiler::{
-    EffectCompileCaps, EffectPreparedSession, launch_native_effect_registry,
-    prepare_native_session_effects,
+    EffectCompileCaps, EffectPreparedSession, PREPARED_BYPASS_EFFECTS,
+    launch_native_effect_registry, prepare_native_session_effects,
 };
-use effect_contract::BankWidth;
+use effect_contract::{BankWidth, EffectControlLane};
 use engine::realtime::{PlanarBufferMut, RenderError, RenderIo, RenderTime};
 use graph::{
     GraphBindingBlock, GraphCompileCaps, GraphNodeBinding, GraphNodeId, GraphNodeObserverBinding,
@@ -30,7 +30,9 @@ use graph::{
     RackId, StableGraphId, TrackStage,
 };
 use graph_compiler::{Backend, GraphBuiltinsCompileRequest, GraphCompiler};
-use session::{CompileCaps, SessionModel, compile_session, parse_session_json};
+use session::{
+    CompileCaps, EffectIdentity, SessionModel, StableId, compile_session, parse_session_json,
+};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -142,6 +144,14 @@ enum Feed {
     Music,
     /// The same, with NaN, both infinities and samples at and beyond `1e30` planted in it.
     NonFinite,
+    /// The same, with runs of the smallest negative subnormal, `-2^-149`, in place of every other
+    /// 32 samples: a stage that scales by less than a half turns each one into `-0.0`.
+    NegativeZero,
+    /// A constant-magnitude `6e29` on both channels, its sign flipping every eight samples: legal
+    /// (below the input stage's `1e30` bound), and past the level at which the multiband's
+    /// block-boundary check trips at its defaults (#1087 M2). A constant `6e29` does not trip it:
+    /// its crossover passes DC without the overshoot a step makes.
+    Hot,
 }
 
 struct TrackSource {
@@ -165,6 +175,19 @@ impl GraphRuntimeProcessor for TrackSource {
             };
             *left = self.gain * (math::sinf(t * 0.013) + impulse);
             *right = self.gain * math::cosf(t * 0.021);
+            if self.feed == Feed::NegativeZero && (sample / 32) % 2 == 1 {
+                *left = -f32::from_bits(1);
+                *right = -f32::from_bits(1);
+            }
+            if self.feed == Feed::Hot {
+                let hot = if (sample / 8).is_multiple_of(2) {
+                    6.0e29
+                } else {
+                    -6.0e29
+                };
+                *left = hot;
+                *right = hot;
+            }
             if self.feed == Feed::NonFinite {
                 match sample % 97 {
                     3 => *left = f32::NAN,
@@ -211,6 +234,52 @@ struct Rendered {
 
 /// Compile `model` at `dispatch`, optionally with today's lowering, and render it.
 fn render(model: &SessionModel, dispatch: Backend, today: bool, feed: Feed) -> Rendered {
+    let lowering = if today {
+        Lowering::Today
+    } else {
+        Lowering::Session
+    };
+    render_with(model, dispatch, lowering, &|_| feed)
+}
+
+/// Which preparation a render uses.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Lowering {
+    /// `prepare_native_session_effects` as it is.
+    Session,
+    /// [`todays_lowering`]: every session bypass a prepared bypass, as before #1087.
+    Today,
+    /// [`p1_lowering`]: every session bypass lowered to a shunt, as #1087 left it.
+    P1,
+}
+
+/// Rebuilds #1087's lowering for the effects that keep a prepared bypass since #1100
+/// (`effect_compiler::PREPARED_BYPASS_EFFECTS`): prepared enabled, with a bypassed channel-less
+/// lane, so a bypassed instance shares its enabled neighbours' bank again.
+fn p1_lowering(effects: &mut EffectPreparedSession) {
+    for entry in &mut effects.entries {
+        let id = entry.factory.descriptor().id.as_str();
+        if !entry.initial_bypass || !PREPARED_BYPASS_EFFECTS.contains(&id) {
+            continue;
+        }
+        assert!(entry.metadata.bypass && entry.control.is_none());
+        entry.bank_preparation.bypass = false;
+        entry.processor = entry
+            .factory
+            .prepare(entry.bank_preparation.request())
+            .expect("the same request, prepared enabled");
+        entry.metadata = entry.processor.metadata();
+        entry.control = Some(Box::new(EffectControlLane::without_channel(true)));
+    }
+}
+
+/// Compile `model` at `dispatch` with `lowering`, and render it with `feed(track)` on each track.
+fn render_with(
+    model: &SessionModel,
+    dispatch: Backend,
+    lowering: Lowering,
+    feed: &dyn Fn(u32) -> Feed,
+) -> Rendered {
     let session = compile_session(model, compile_caps()).expect("compiled session");
     let registry = launch_native_effect_registry().expect("launch registry");
     let mut effects = prepare_native_session_effects(
@@ -223,8 +292,10 @@ fn render(model: &SessionModel, dispatch: Backend, today: bool, feed: Feed) -> R
         },
     )
     .expect("prepared effects");
-    if today {
-        todays_lowering(&mut effects);
+    match lowering {
+        Lowering::Session => {}
+        Lowering::Today => todays_lowering(&mut effects),
+        Lowering::P1 => p1_lowering(&mut effects),
     }
     let builtins = prepare_session_builtins(&session, &[], builtin_caps()).expect("builtins");
     let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
@@ -264,7 +335,7 @@ fn render(model: &SessionModel, dispatch: Backend, today: bool, feed: Feed) -> R
                     let index: u32 = track_id.as_str()[2..].parse().expect("chNN");
                     Box::new(TrackSource {
                         gain: 0.1 + index as f32 * 0.07,
-                        feed,
+                        feed: feed(index),
                     })
                 }
                 _ => Box::new(Identity),
@@ -520,4 +591,224 @@ fn non_finite_sources_render_todays_bits() {
     let lowered = render(&model, Backend::current(), false, Feed::NonFinite);
     let today = render(&model, Backend::current(), true, Feed::NonFinite);
     assert_same_bits("non-finite sources", &lowered, &today);
+}
+
+/// Every track's input section at identity: no trim, no filters, no polarity inversion, so a
+/// source sample reaches the first effect unchanged.
+fn identity_inputs(model: &mut SessionModel) {
+    for track in &mut model.tracks {
+        for lane in [&mut track.builtins.left, &mut track.builtins.right] {
+            lane.polarity_invert = false;
+            lane.trim_db = 0.0;
+            lane.hpf_hz = 0.0;
+            lane.lpf_hz = 0.0;
+        }
+    }
+}
+
+/// Issue #1100 (P1's verdict, L3): `-0.0` from an enabled upstream stage reaches a bypassed slot,
+/// and the slot hands it on unchanged, banked and per node.
+///
+/// A source never carries `-0.0` past the input section, but an effect can make one: here SIMD
+/// rack 1 runs `comp -> eq` with the compressor enabled on every track at -12 dB makeup, so each
+/// of the source's `-2^-149` samples leaves it as `-0.0` and reaches the EQ slot, which is bypassed
+/// on alternate tracks. The EQ's wet path is still ringing from the music before each run, so an
+/// arithmetic restore that computes `0 * wet + dry` turns every `-0.0` whose wet sample is not
+/// negative into `+0.0`; the shunt copies it. Today's prepared bypass, the lowered bank and the
+/// scalar per-node shunt must render the same words, and the bypassed tracks must actually carry
+/// `-0.0` out of the slot.
+///
+/// Red mutations: the rack's restore as `fma(0, wet, dry)` -> the lowered leg; `BypassShunt::apply`
+/// as the same blend -> the scalar leg.
+#[test]
+fn a_negative_zero_from_an_enabled_stage_passes_a_bypassed_slot_unchanged() {
+    let lanes = lanes();
+    let full = (1_u64 << lanes) - 1;
+    let eq_mask = 0x5555 & full;
+    let mut model = console(lanes, [eq_mask, 0, 0]);
+    identity_inputs(&mut model);
+    for track in &mut model.tracks {
+        track.simd1.effects.swap(0, 1);
+        let comp = &mut track.simd1.effects[0];
+        assert_eq!(comp.id.as_str(), "comp", "SIMD rack 1 is comp -> eq");
+        comp.params
+            .iter_mut()
+            .find(|param| param.parameter_id == 6)
+            .expect("the compressor's makeup")
+            .value = -12.0;
+    }
+    let lowered = render(&model, Backend::current(), false, Feed::NegativeZero);
+    let today = render(&model, Backend::current(), true, Feed::NegativeZero);
+    let scalar = render(&model, Backend::Scalar, false, Feed::NegativeZero);
+    assert_eq!(
+        lowered.banks.len(),
+        SLOTS.len(),
+        "every slot banked, the EQ with its bypassed lanes"
+    );
+    assert!(scalar.banks.is_empty(), "the scalar oracle binds nothing");
+    assert_same_bits("-0.0 lowered", &lowered, &today);
+    assert_same_bits("-0.0 scalar", &scalar, &today);
+    let negative_zeros: usize = (0..lanes)
+        .filter(|track| eq_mask >> track & 1 == 1)
+        .map(|track| {
+            lowered.nodes[&(format!("ch{track:02}"), "PostSimd1".to_owned())]
+                .iter()
+                .filter(|word| **word == (-0.0_f32).to_bits())
+                .count()
+        })
+        .sum();
+    assert!(
+        negative_zeros > 0,
+        "no -0.0 left a bypassed EQ slot, so the case proves nothing"
+    );
+}
+
+/// `tracks` tracks of the multiband compressor alone, at its defaults, in SIMD rack 1, with
+/// identity input sections and track `t`'s instance bypassed when bit `t` of `mask` is set.
+fn multiband_console(tracks: usize, mask: u64) -> SessionModel {
+    let mut model = console(tracks, [0, 0, 0]);
+    identity_inputs(&mut model);
+    for (index, track) in model.tracks.iter_mut().enumerate() {
+        track.simd1.effects.truncate(1);
+        track.simd2.effects.clear();
+        let effect = &mut track.simd1.effects[0];
+        effect.id = StableId::parse("multiband").expect("effect id");
+        effect.identity = EffectIdentity::Native {
+            effect_id: StableId::parse("miso.multiband-compressor").expect("multiband id"),
+        };
+        effect.params.clear();
+        effect.bypass = mask >> index & 1 == 1;
+    }
+    model
+}
+
+/// Issue #1100, gate 3: a session bypass on the multiband stays a prepared bypass, so a mixed
+/// bypass cohort declines a bank exactly as it did before #1087, and renders the bits #1087's
+/// lowering renders at music levels.
+///
+/// The multiband's bank recovery (D7) is still whole-bank, so it is not lowered until the slice
+/// that makes it console-eligible gives it per-lane recovery (`PREPARED_BYPASS_EFFECTS`). A
+/// bypassed instance is prepared `bypass = true` with no lane, and its program key differs from an
+/// enabled one's: no bound bank mixes the two, and at eight lanes, where neither half of this
+/// cohort fills a bank, nothing binds. #1087's lowering, rebuilt here, banks the whole cohort; at
+/// music levels, where no recovery fires, both render the same words, and so does `Scalar`.
+///
+/// Red mutations: drop the multiband from `PREPARED_BYPASS_EFFECTS` -> the bypassed instances are
+/// prepared enabled and the cohort banks mixed.
+#[test]
+fn a_mixed_bypass_multiband_cohort_keeps_its_prepared_bypass() {
+    const TRACKS: usize = 8;
+    const MASK: u64 = 0b0110_1001;
+    let model = multiband_console(TRACKS, MASK);
+    let session = compile_session(&model, compile_caps()).expect("session");
+    let registry = launch_native_effect_registry().expect("launch registry");
+    let effects = prepare_native_session_effects(
+        &session,
+        &registry,
+        EffectCompileCaps {
+            maximum_total_state_bytes: 1 << 30,
+            maximum_scratch_bytes: 1 << 28,
+            maximum_automation_spans_per_block: 32,
+        },
+    )
+    .expect("prepared effects");
+    for entry in &effects.entries {
+        let index: u32 = entry.track_id[2..].parse().expect("chNN");
+        let bypassed = MASK >> index & 1 == 1;
+        assert_eq!(entry.initial_bypass, bypassed);
+        assert_eq!(
+            entry.metadata.bypass, bypassed,
+            "{}: the session bypass is the prepared one",
+            entry.track_id
+        );
+        assert!(
+            entry.control.is_none(),
+            "{}: no lane carries a multiband bypass",
+            entry.track_id
+        );
+    }
+    let kept = render_with(&model, Backend::current(), Lowering::Session, &|_| {
+        Feed::Music
+    });
+    for bank in &kept.banks {
+        let bypassed = bank
+            .iter()
+            .filter(|(track, _)| MASK >> track[2..].parse::<u32>().expect("chNN") & 1 == 1)
+            .count();
+        assert!(
+            bypassed == 0 || bypassed == bank.len(),
+            "a bound multiband bank mixes bypassed and enabled lanes: {bank:?}"
+        );
+    }
+    if lanes() == TRACKS {
+        assert!(
+            kept.banks.is_empty(),
+            "neither half of the cohort fills an eight-lane bank"
+        );
+    }
+    let lowered = render_with(&model, Backend::current(), Lowering::P1, &|_| Feed::Music);
+    assert_eq!(
+        lowered.banks.len(),
+        TRACKS / lanes(),
+        "#1087's lowering banks the whole mixed cohort"
+    );
+    let scalar = render_with(&model, Backend::Scalar, Lowering::Session, &|_| Feed::Music);
+    assert_same_bits("multiband against #1087's lowering", &kept, &lowered);
+    assert_same_bits("multiband at Scalar", &scalar, &kept);
+    assert!(
+        kept.output.iter().any(|word| f32::from_bits(*word) != 0.0),
+        "the render is audible"
+    );
+}
+
+/// Issue #1100, gate 3 (#1087 verdict, M2): one bypassed multiband lane fed `6e29` leaves its
+/// enabled neighbours' bits unchanged.
+///
+/// `6e29` is a legal sample: the input stage passes anything finite below `1e30`. At the
+/// multiband's defaults it trips the block-boundary check (D7) of any bank it runs in, and that
+/// check zeroes the whole bank. The positive control is #1087's lowering, rebuilt here: there the
+/// hot bypassed lane shares a bank with enabled ones and silences them. With the prepared bypass
+/// kept, the bypassed instance never shares a bank with an enabled one, and every enabled track
+/// renders the same words whatever the bypassed track is fed.
+///
+/// Red mutation: drop the multiband from `PREPARED_BYPASS_EFFECTS` -> the enabled neighbours of
+/// the hot lane are zeroed.
+#[test]
+fn a_hot_bypassed_multiband_lane_leaves_its_neighbours_bits_unchanged() {
+    const TRACKS: usize = 8;
+    const HOT: u32 = 3;
+    let model = multiband_console(TRACKS, 1 << HOT);
+    let neighbours = |rendered: &Rendered| -> BTreeMap<(String, String), Vec<u32>> {
+        rendered
+            .nodes
+            .iter()
+            .filter(|((track, _), _)| track != &format!("ch{HOT:02}"))
+            .map(|(key, words)| (key.clone(), words.clone()))
+            .collect()
+    };
+    for lowering in [Lowering::Session, Lowering::P1] {
+        let quiet = render_with(&model, Backend::current(), lowering, &|_| Feed::Music);
+        let hot = render_with(&model, Backend::current(), lowering, &|track| {
+            if track == HOT { Feed::Hot } else { Feed::Music }
+        });
+        let moved = neighbours(&quiet)
+            .iter()
+            .zip(neighbours(&hot).iter())
+            .filter(|((key, quiet), (_, hot))| {
+                assert_eq!(quiet.len(), hot.len(), "{key:?}: length");
+                folded(quiet) != folded(hot)
+            })
+            .count();
+        match lowering {
+            Lowering::Session => assert_eq!(
+                moved, 0,
+                "a hot bypassed multiband lane moved {moved} of its enabled neighbours' taps"
+            ),
+            _ => assert!(
+                moved > 0,
+                "the positive control: under #1087's lowering the hot lane must reach its \
+                 bank-mates, or this proves nothing"
+            ),
+        }
+    }
 }
