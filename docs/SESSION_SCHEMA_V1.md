@@ -116,6 +116,13 @@ compressor is excluded until #1069 closes. The schema checks the identity's synt
 is enforced where native identities resolve, by effect preparation, which refuses any other slot
 with `console.slot.ineligible_effect` at `$.console.<section>[slot=<id>].identity`.
 
+**Banking.** A console slot always banks, on every vector width and for every track count: the
+graph compiler forms one bank group per (slot, pool class, dependency level) and pads a partial
+group with inactive lanes (decision 12). A console group that does not bind fails the compile with
+`console.slot.unbanked` at `$.console.<section>[slot=<id>].bank[pool=<class>,level=<level>]`;
+there is no per-node fallback. Inserts bank opportunistically: a full group banks and a remainder
+renders per node.
+
 **Class A by lowering.** Internally, `pre_insert` lowers to the graph's first rack
 (`RackId::Simd1`), a track's `inserts` to the second (`Dynamic`) and `post_insert` to the third
 (`Simd2`). Each console entry lowers to an ordinary effect whose ID is the slot, whose identity,

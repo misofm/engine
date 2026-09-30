@@ -45,75 +45,35 @@ pub(crate) fn banks_are_permitted(identity: &session::EffectIdentity) -> bool {
     }
 }
 
-/// Which partial groups the planner pads with inactive lanes (issue #1088; decision 12, "Banking").
+/// Whether a graph rack holds a console section (decision 12, "Class A by lowering").
+///
+/// After S1a (#1093) the two SIMD racks hold exactly the session's console slots: `pre_insert`
+/// lowers to [`RackLocation::Simd1`], `post_insert` to [`RackLocation::Simd2`], and a track's
+/// inserts to [`RackLocation::Dynamic`]. No session reaches either SIMD rack any other way
+/// (`session::SessionModel::lower_track`), so a chain or a group in one of them is a console one.
+pub(crate) const fn is_console_rack(rack: RackLocation) -> bool {
+    matches!(rack, RackLocation::Simd1 | RackLocation::Simd2)
+}
+
+/// Whether the planner pads `group` to a whole bank when it is partial (issues #1088 and #1098;
+/// decision 12, "Banking").
 ///
 /// A *partial* group has fewer members than the bank width. Padding binds it as one bank anyway:
 /// the absent lanes carry a clone of an active member's request and run as padded lanes under the
-/// contract on `effect_contract::PrepareEffectBankRequest`. An unpadded partial group is left
-/// unbound and its members render per node, which is what every group got before #1088.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum BankPadding {
-    /// The production policy: a partial group is padded only when it asks for it
-    /// ([`group_asks_for_padding`]). Nothing asks yet, so every shipped plan is unchanged.
-    AsRequested,
-    /// Every partial group is padded, whatever it asks. Test-only: it lets the per-effect padding
-    /// slices (P2b-P2e, #1089-#1092) and this crate's own tests bind padded banks through the real
-    /// planner before any production group asks.
-    #[cfg(test)]
-    EveryGroup,
-}
-
-impl BankPadding {
-    /// Whether `group` is padded under this policy. A full group needs no padding and is bound
-    /// whatever the policy says.
-    fn pads(self, group: &BankGroup<RackChainId>) -> bool {
-        match self {
-            Self::AsRequested => group_asks_for_padding(group),
-            #[cfg(test)]
-            Self::EveryGroup => true,
-        }
-    }
-
-    /// The policy this compile runs under: [`Self::AsRequested`], unless a test has scoped another
-    /// one with [`test_only_with_bank_padding`].
-    fn current() -> Self {
-        #[cfg(test)]
-        if let Some(padding) = TEST_ONLY_BANK_PADDING.with(core::cell::Cell::get) {
-            return padding;
-        }
-        Self::AsRequested
-    }
-}
-
-/// Whether `group` asks to be padded to a whole bank.
+/// contract on `effect_contract::PrepareEffectBankRequest`. A full group needs no padding and is
+/// bound whatever this says.
 ///
-/// Nothing asks yet. Console slots ask from S2 (#1098) on, once every effect on the console
-/// eligibility list accepts padded requests (P2b-P2e). Inserts never ask: they bank
-/// opportunistically, as today, so full groups bank and remainders render per node (decision 12,
+/// **A console group is always padded** (S2, #1098): console slots bank on every target and for
+/// every track count, with no member threshold. The owner accepted that a one- or two-member
+/// remainder costs more padded than per node at eight lanes (H5). Every effect on the console
+/// eligibility list accepts padded requests (P2b-P2e, #1089-#1092), so for a valid session every
+/// console group binds, and [`unbanked_console_slot`] refuses a compile in which one does not.
+///
+/// **An insert group is never padded:** inserts bank opportunistically, as they did before
+/// decision 12, so a full insert group banks and an insert remainder renders per node (decision 12,
 /// "Inserts bank opportunistically, as today").
-const fn group_asks_for_padding(_group: &BankGroup<RackChainId>) -> bool {
-    false
-}
-
-#[cfg(test)]
-thread_local! {
-    /// The policy [`test_only_with_bank_padding`] scoped on this thread, if any.
-    static TEST_ONLY_BANK_PADDING: core::cell::Cell<Option<BankPadding>> =
-        const { core::cell::Cell::new(None) };
-}
-
-/// Runs `body` with every compile on this thread planned under `padding`, then restores the
-/// policy that was in force before, even if `body` panics.
-#[cfg(test)]
-pub(crate) fn test_only_with_bank_padding<R>(padding: BankPadding, body: impl FnOnce() -> R) -> R {
-    struct Restore(Option<BankPadding>);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            TEST_ONLY_BANK_PADDING.with(|slot| slot.set(self.0));
-        }
-    }
-    let _restore = Restore(TEST_ONLY_BANK_PADDING.with(|slot| slot.replace(Some(padding))));
-    body()
+pub(crate) const fn pads(group: &BankGroup<RackChainId>) -> bool {
+    is_console_rack(group.rack)
 }
 
 /// Plan the SIMD-rack cohorts over whole rack chains, and bind every slot that can be bound.
@@ -127,11 +87,23 @@ pub(crate) fn test_only_with_bank_padding<R>(padding: BankPadding, body: impl Fn
 /// expressible at all: #96's per-effect candidates carry one-slot programs, so they can only ever
 /// form single-slot banks.
 ///
-/// A slot is bound when the group is full, or padded under [`BankPadding`], and **every** member
-/// runs that slot. A slot some member skips would need a per-lane identity slot in the effect
-/// contract, which does not exist (#96 F7; #888's identity half); those members render on the
-/// per-node scalar path exactly as before. A partial group that is not padded is likewise unbound,
-/// unchanged from #96, and no group is padded until one asks ([`group_asks_for_padding`]).
+/// A slot is bound when the group is full, or padded under [`pads`], and **every** member runs
+/// that slot. A slot some member skips would need a per-lane identity slot in the effect contract,
+/// which does not exist (#96 F7; #888's identity half); those members render on the per-node
+/// scalar path exactly as before. A partial group that is not padded -- an insert remainder -- is
+/// likewise unbound, unchanged from #96.
+///
+/// **Console slots always bank** (S2, #1098; decision 12). Every console group is padded, and on a
+/// vector backend a console slot that is not bound fails the compile with `console.slot.unbanked`
+/// ([`unbanked_console_slot`]) rather than rendering per node. There is no silent fallback. For a
+/// valid session that is unreachable: every track carries every slot in one order, so a console
+/// rack's chains share one program, a console slot has no sidechain, and every effect on the
+/// console eligibility list binds padded requests. A console group is formed per (rack, pool class,
+/// dependency level of the chain's first slot), so each console slot binds
+/// `sum over (pool class, level) of ceil(n / W)` banks. Differing insert counts put `post_insert`
+/// at several levels, one group per level, and a cohort whose `post_insert` banks do not line up
+/// with its `pre_insert` ones pays a planar/AoSoA round trip where the chain cannot fuse (H2). That
+/// cost is recorded in #1098's evidence, not fixed here.
 ///
 /// A padded slot binds the group's members on its active lanes and a clone of its first member's
 /// request on every padded lane (issue #1088). The group's `active_mask` travels to the factory and
@@ -157,9 +129,10 @@ pub(crate) fn test_only_with_bank_padding<R>(padding: BankPadding, body: impl Fn
 /// a level; the misaligned ones render per node.
 ///
 /// `classes` is the compile's one pool-class map, and this is the only place it is changed: a
-/// mono track that would strand in a partial mono group is moved to the stereo pool before the
-/// kept plan is formed (issue #971, [`stranded_mono_tracks`]), and the builtin-stage planner reads
-/// the map afterwards, so it pools that track exactly as the rack chains were pooled.
+/// mono track that would bank nowhere is moved to the stereo pool before the kept plan is formed
+/// (issue #971, [`stranded_mono_tracks`]), and the builtin-stage planner reads the map afterwards,
+/// so it pools that track exactly as the rack chains were pooled. A console slot always banks, so a
+/// track that carries one -- in a session with a console, every track -- is never moved (#1098).
 pub(crate) fn bind_rack_banks_indexed(
     effects: &EffectPreparedSession,
     prepared: &PreparedEffectIndex<'_>,
@@ -310,12 +283,11 @@ pub(crate) fn bind_rack_banks_indexed(
         .collect();
     let mut plan = plan_bank_groups(&levels_in, width)
         .map_err(|_| diag("graph.effect.bank_members", "$.effects"))?;
-    let padding = BankPadding::current();
     let bind_group = |index: usize, group: &BankGroup<RackChainId>| {
         bind_group_banks(
             index,
             group,
-            padding.pads(group),
+            pads(group),
             &chains,
             &level_by_node,
             effects,
@@ -333,9 +305,11 @@ pub(crate) fn bind_rack_banks_indexed(
         .collect::<Result<_, _>>()?;
 
     // Issue #971: keep the mono pool a whole number of cohorts. The plan above is the trial.
-    // A mono track every one of whose effect groups is a *partial* mono group banks nowhere in
-    // it, so it is moved to the stereo pool, where it renders dual but can fill a bank; the
-    // classes are then re-read and the session is planned again.
+    // A mono track every one of whose effect groups is a *partial* mono group that is not padded
+    // banks nowhere in it, so it is moved to the stereo pool, where it renders dual but can fill a
+    // bank; the classes are then re-read and the session is planned again. A console group is
+    // always padded and always binds (#1098), so a track carrying a console slot banks somewhere
+    // and is never moved: see [`stranded_mono_tracks`] for why the demotion is retired there.
     //
     // The move is kept only if the new plan **binds** more effect banks than the trial did, and
     // both counts are the banks the factories actually bound, not the slots the planner formed:
@@ -442,7 +416,13 @@ pub(crate) fn bind_rack_banks_indexed(
             slot.group == index && usize::try_from(bank.cohort.group).ok() == Some(index)
         })
     }));
-    let (banks, bound_slots) = bound.into_iter().flatten().unzip();
+    let (banks, bound_slots): (Vec<_>, Vec<_>) = bound.into_iter().flatten().unzip();
+    // S2 (#1098): the guarantee. This is a vector backend (the test-only `Scalar` oracle returned
+    // with no banks above), so every console slot renders banked or the compile fails.
+    if let Some(diagnostic) = unbanked_console_slot(&chains, &bound_slots, &level_by_node, classes)
+    {
+        return Err(diagnostic);
+    }
     Ok((
         banks,
         GraphRackBankReport {
@@ -455,23 +435,48 @@ pub(crate) fn bind_rack_banks_indexed(
 }
 
 /// The mono-class tracks the trial `plan` strands (issue #971): every effect group each one sits in
-/// is a **partial** group of the mono pool, so none of its effect slots can bind.
+/// is a **partial** group of the mono pool that is not padded, so none of its effect slots binds.
 ///
-/// The test is per track over all its groups, not per program. A track whose simd1 chain fills a
-/// mono cohort while its simd2 chain is a partial one is not stranded: moving it would break the
-/// full cohort, and its builtin stages' collapse with it, to gain a bank that may not exist. A
+/// The test is per track over all its groups, not per program. A track whose `pre_insert` chain
+/// fills a mono cohort while its inserts are a partial one is not stranded: moving it would break
+/// the full cohort, and its builtin stages' collapse with it, to gain a bank that may not exist. A
 /// track in no effect group at all (builtins only, or every chain on the per-node path) is not
 /// stranded either: builtin banks pad a partial cohort, so its remainder still banks and still
 /// collapses where it is. A group is class-homogeneous, so a member of a partial mono group is a
 /// mono-class track.
+///
+/// # A console slot never strands a track (#1098, amendment 10)
+///
+/// A console group is padded ([`pads`]), so a partial mono console group binds one padded mono
+/// bank per slot: its members bank there, and a track that carries a console slot -- in a session
+/// with a console, every track -- is never stranded and never moved. That retires the demotion for
+/// console slots, rather than restating its objective, for three reasons:
+///
+/// * **Its premise cannot hold.** The demotion rescues a track that banks nowhere. Under padding a
+///   console slot always banks, so no console track is ever in that state.
+/// * **Its objective measures nothing for console groups** (M3). The move is kept when it binds
+///   more banks. Moving a console remainder can only merge console groups -- the mono remainder
+///   leaves one padded bank per slot and the stereo pool gains at most one -- so their count never
+///   rises, and a merge that saves a padded bank scores as a loss. The count rises only when the
+///   move also fills an insert group, and that trades the track's collapse on every console slot
+///   for an insert remainder, which decision 12 leaves per node by choice.
+/// * **The mono pool is the larger win.** A padded mono bank collapses to one plane, and the pool
+///   is worth about 36 % on the standing console row (M3). A restated objective (planes x banks)
+///   would move a mono remainder only when it fits in the stereo pool's padding at every slot and
+///   builtin stage, to save one one-plane padded bank per stage; weighing that against an insert
+///   remainder the move might fill needs a per-node cost that nothing has measured at four lanes.
+///
+/// A session with no console keeps #971's rule unchanged: its insert remainders still render per
+/// node, so a stranded mono track still banks nowhere, and moving it can still gain a bank.
 fn stranded_mono_tracks(plan: &BankPlan<RackChainId>) -> Vec<String> {
     let mut stranded: BTreeMap<&str, bool> = BTreeMap::new();
     for group in &plan.groups {
-        let partial_mono =
-            group.class == CohortPoolClass::MonoSymmetricAtPrepare && !group.is_full();
+        let binds_nothing = group.class == CohortPoolClass::MonoSymmetricAtPrepare
+            && !group.is_full()
+            && !pads(group);
         for id in group.members.iter().flatten() {
             let entry = stranded.entry(id.track_id.as_str()).or_insert(true);
-            *entry = *entry && partial_mono;
+            *entry = *entry && binds_nothing;
         }
     }
     stranded
@@ -479,6 +484,55 @@ fn stranded_mono_tracks(plan: &BankPlan<RackChainId>) -> Vec<String> {
         .filter(|(_, stranded)| *stranded)
         .map(|(track, _)| track.to_owned())
         .collect()
+}
+
+/// The no-fallback guarantee (S2, #1098; decision 12, "Banking"): the diagnostic for the first
+/// console slot, in chain order, that no bound bank carries, or `None` when every console slot
+/// binds banked.
+///
+/// A console slot never renders per node on a vector backend. When one would -- a factory declined
+/// its group, or the group did not form -- the compile fails with `console.slot.unbanked` at
+/// `$.console.<section>[slot=<id>].bank[pool=<class>,level=<level>]`, naming the slot, its track's
+/// pool class and the slot's dependency level: the group that did not bind. For a valid session
+/// this is unreachable ([`bind_rack_banks_indexed`] says why); it guards a regression in the
+/// planner, the binder or a factory, which would otherwise surface only as a slower render.
+///
+/// Only a vector backend reaches this. A plan compiled at the test-only `Scalar` oracle (#1059)
+/// binds no bank at all, and it is exempt by construction: it is the per-node reference that the
+/// banked render is compared with.
+fn unbanked_console_slot(
+    chains: &BTreeMap<RackChainId, Vec<EffectNodeId>>,
+    bound_slots: &[GraphRackBoundSlot],
+    level_by_node: &BTreeMap<GraphNodeId, u64>,
+    classes: &SessionPoolClasses,
+) -> Option<GraphDiagnostic> {
+    let banked: BTreeSet<&EffectNodeId> = bound_slots
+        .iter()
+        .flat_map(|bound| bound.members.iter())
+        .collect();
+    let (chain, node) = chains
+        .iter()
+        .filter(|(chain, _)| is_console_rack(rack_location(chain.rack)))
+        .flat_map(|(chain, nodes)| nodes.iter().map(move |node| (chain, node)))
+        .find(|(_, node)| !banked.contains(node))?;
+    let section = match chain.rack {
+        RackId::Simd1 => "pre_insert",
+        _ => "post_insert",
+    };
+    let pool = match classes.class_of(&chain.track_id) {
+        CohortPoolClass::MonoSymmetricAtPrepare => "mono",
+        CohortPoolClass::Stereo => "stereo",
+    };
+    let Some(level) = level_by_node.get(&GraphNodeId::Effect(node.clone())) else {
+        return Some(diag("graph.internal.invariant", "$.effects"));
+    };
+    Some(diag(
+        "console.slot.unbanked",
+        &format!(
+            "$.console.{section}[slot={}].bank[pool={pool},level={level}]",
+            node.effect_id.as_str()
+        ),
+    ))
 }
 
 /// The banks bound from one plan group's slots, each with its report entry, in slot order.

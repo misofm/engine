@@ -251,18 +251,18 @@ fn the_two_placements_realise_the_same_chain_shape() {
 /// only fixture in the suite that exercises that fallback, and it exercises it on every block: its
 /// second cohort holds one track in an eight-lane bank.
 ///
-/// # The tail cohort costs one chain, and that is reported rather than hidden
+/// # The tail cohort is one chain, like any other
 ///
-/// Issue #212 took this fixture from `[2 chains, 5 slots]` to `[3 chains, 9 slots]`. The full
-/// eight-lane cohort gained the fader and matrix slots into the chain it already had, exactly as
-/// the 64-track fixture did. The one-track tail could not: its effects never bank (a one-member
-/// group strands), so its post-input bank's successor is a per-node EQ op and cannot be chained
-/// into, while its fader and matrix banks *can* chain into each other. That is one planar/AoSoA
-/// round-trip per block that the tail did not pay before, on one track.
-///
-/// It is the honest price of treating the tail like any other cohort rather than special-casing
-/// it, it is bounded by the number of ragged tails a session has, and the `nine_track_ragged_strip`
-/// bench row is where it is measured rather than argued.
+/// Issue #212 took this fixture from `[2 chains, 5 slots]` to `[3 chains, 9 slots]`: the one-track
+/// tail's effects never banked (a one-member group stranded), so its post-input bank's successor
+/// was a per-node EQ op, and its fader and matrix banks chained only into each other. Since #1098
+/// the strip is the session's console and a console slot always banks: the tail's EQ, compressor
+/// and limiter bind as padded banks of one member, so its whole strip fuses into one chain of six
+/// slots exactly as a full cohort's does. At the eight-lane launch width that is `[2, 12]`, and a
+/// four-lane build (AArch64 NEON, #1017) has three cohorts, `[3, 18]`. The tail pays one
+/// planar/AoSoA round-trip per block, as every cohort does, and a padded bank's full cost for its
+/// one member (H5, which the owner accepted); the `nine_track_ragged_strip` bench row is where that
+/// is measured rather than argued.
 #[test]
 fn the_ragged_tail_banks_like_any_other_cohort_and_pays_one_chain_for_it() {
     let (digest, [chains, slots], transposes) =
@@ -276,10 +276,9 @@ fn the_ragged_tail_banks_like_any_other_cohort_and_pays_one_chain_for_it() {
         chains < slots,
         "the ragged fixture must still fuse something, or it is not testing a chain"
     );
-    // Read as: each full cohort runs the whole strip as one chain of six slots; the one-track tail
-    // runs its post-input bank alone and its fader and matrix banks as a pair. At the eight-lane
-    // launch width that is one full cohort, `[3, 9]`; a four-lane build (AArch64 NEON, #1017) has
-    // two, `[4, 15]`.
+    // Read as: every cohort, the one-track tail's padded one included, runs the whole strip as one
+    // chain of six slots (#1098). At the eight-lane launch width that is `[2, 12]`; a four-lane
+    // build (AArch64 NEON, #1017) has three cohorts, `[3, 18]`.
     let width = Backend::current().width() as u64;
     let tracks = u64::from(Workload::NineTrackRaggedStrip.tracks());
     assert_eq!(
@@ -287,12 +286,11 @@ fn the_ragged_tail_banks_like_any_other_cohort_and_pays_one_chain_for_it() {
         1,
         "the fixture's tail must be one track at width {width}"
     );
-    let full = tracks / width;
+    let cohorts = tracks.div_ceil(width);
     assert_eq!(
         [chains, slots],
-        [full + 2, SLOTS_PER_COHORT * full + 3],
-        "{full} full strip chain(s) at width {width}, plus the tail's lone post-input bank and its \
-         fused fader/matrix pair"
+        [cohorts, SLOTS_PER_COHORT * cohorts],
+        "{cohorts} strip chains at width {width}, the tail's padded one included"
     );
     // Bits, against the same fixture rendered with every console facility attached: a partial
     // bank's scalar transpose must be the tiled path's equal, whatever is bound around it.
@@ -624,11 +622,16 @@ fn the_half_mono_cohort_banks_like_a_uniform_one() {
 /// digest could see the mistake -- which is why the classification is a queryable field rather
 /// than a note in a doc comment.
 ///
-/// The nine-track ragged fixture is where such a unit actually exists. Its one-track tail cannot
-/// bank its effects (a one-member group strands), so its post-input bank has no successor to chain
-/// into, while its fader and matrix banks chain into each other: one unit, two stages, both
-/// seam-side. `the_ragged_tail_banks_like_any_other_cohort_and_pays_one_chain_for_it` is where
-/// that shape is derived; this is what it means for the collapse.
+/// Such a unit exists wherever the stage before a cohort's fader renders per node: its fader and
+/// matrix banks chain into each other and into nothing upstream, one unit, two stages, both
+/// seam-side. Since #1098 a console slot never renders per node, so the nine-track ragged
+/// fixture's tail, which held one before, now fuses its whole strip
+/// (`the_ragged_tail_banks_like_any_other_cohort_and_pays_one_chain_for_it`), and only an insert
+/// can put a per-node stage there. The fixture is therefore built at the other vector width, where
+/// `SessionRuntime` runs its strip as every track's inserts and this build's factories decline
+/// what they cannot bank: the EQ and compressor at four lanes on `x86-64-v3` (the tail cohort's
+/// limiter group is partial too, so one chain is seam-side only), and every effect at eight lanes
+/// on AArch64 (both cohorts' pairs are).
 ///
 /// Red mutation: make `runtime::upstream_of_seam` return `true` for `PostFader`/`PostMatrix` ->
 /// no row is vacuous and the first assertion fails. Make it return `false` for
@@ -636,24 +639,33 @@ fn the_half_mono_cohort_banks_like_a_uniform_one() {
 /// the last assertion fails.
 #[test]
 fn a_seam_side_only_chain_reads_as_vacuous_rather_than_eligible() {
-    let ragged = SessionRuntime::build(Workload::NineTrackRaggedStrip, PlanConfig::BASELINE);
+    let other_width = if Backend::current() == Backend::Simd8 {
+        Backend::Simd4
+    } else {
+        Backend::Simd8
+    };
+    let ragged = SessionRuntime::build_with_dispatch(
+        Workload::NineTrackRaggedStrip,
+        PlanConfig::BASELINE,
+        other_width,
+    );
     let rows = ragged.unit_eligibility();
     let vacuous: Vec<_> = rows
         .iter()
         .filter(|row| row.banked && row.witness_is_vacuous())
         .collect();
-    assert_eq!(
-        vacuous.len(),
-        1,
-        "the ragged tail's fused fader/matrix pair is the one seam-side-only chain"
-    );
-    let seam = vacuous[0];
-    assert_eq!(seam.stages, 2, "the fader and the matrix, fused");
-    assert_eq!(seam.upstream_of_seam_stages, 0);
     assert!(
-        seam.all_lanes_eligible(),
-        "and it claims eligibility unconditionally, which is exactly why the flag is needed"
+        !vacuous.is_empty(),
+        "a per-node stage before a cohort's fader leaves a seam-side-only chain"
     );
+    for seam in vacuous {
+        assert_eq!(seam.stages, 2, "the fader and the matrix, fused");
+        assert_eq!(seam.upstream_of_seam_stages, 0);
+        assert!(
+            seam.all_lanes_eligible(),
+            "and it claims eligibility unconditionally, which is exactly why the flag is needed"
+        );
+    }
 
     // The other side of the pair: the full 64-track strip's chains span both sides of the seam,
     // four upstream stages (post-input builtins, EQ, compressor, limiter) and two seam-side ones,
