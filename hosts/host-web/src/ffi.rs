@@ -34,14 +34,13 @@ use crate::{
     SPECTRUM_REQUEST_BYTES, SPECTRUM_RESULT_HEADER_BYTES, SPECTRUM_STREAM_METADATA_BYTES,
     SPECTRUM_STREAM_STATUS_FAILED, SPECTRUM_STREAM_STATUS_GAP, SPECTRUM_STREAM_STATUS_INACTIVE,
     SPECTRUM_STREAM_STATUS_PENDING, SPECTRUM_STREAM_STATUS_READY, SPECTRUM_STREAM_STATUS_STOPPED,
-    SPECTRUM_STREAM_STATUS_WARMING, SPECTRUM_TARGET_OUTPUT,
-    SPECTRUM_TARGET_TRACK_POST_INPUT_BUILTINS, SPECTRUM_TARGET_TRACK_POST_MATRIX,
-    SPECTRUM_WINDOW_FRAMES, SPECTRUM_WINDOW_HEADER_BYTES, STATE_READY, SpectrumPreparationRequest,
-    WebBootOptions, WebLiveResponseOwner, WebLiveResponseRequest, WebLiveResponseResult,
-    WebLiveResponseSection, WebObservationResult, WebObservationSelection, WebResponseParameter,
-    WebResponseRequest, WebResponseResult, WebSpectrumCollectionEntry,
-    WebSpectrumCollectionRequest, WebSpectrumRequest, WebSpectrumResult, WebSpectrumStreamMetadata,
-    WebSpectrumWindow,
+    SPECTRUM_STREAM_STATUS_WARMING, SPECTRUM_TARGET_OUTPUT, SPECTRUM_TARGET_TRACK_POST_INPUT,
+    SPECTRUM_TARGET_TRACK_POST_PAN, SPECTRUM_WINDOW_FRAMES, SPECTRUM_WINDOW_HEADER_BYTES,
+    STATE_READY, SpectrumPreparationRequest, WebBootOptions, WebLiveResponseOwner,
+    WebLiveResponseRequest, WebLiveResponseResult, WebLiveResponseSection, WebObservationResult,
+    WebObservationSelection, WebResponseParameter, WebResponseRequest, WebResponseResult,
+    WebSpectrumCollectionEntry, WebSpectrumCollectionRequest, WebSpectrumRequest,
+    WebSpectrumResult, WebSpectrumStreamMetadata, WebSpectrumWindow,
 };
 use core::{
     cell::{Cell, RefCell},
@@ -632,11 +631,37 @@ fn buffer_capacity(host: &AudioWorkletEngineHost, kind: u32) -> u32 {
     u32::try_from(bytes).unwrap_or(0)
 }
 
-fn observation_rack(raw: u32) -> Result<host_core::EffectRack, u32> {
+/// An observation record's `rack`: `inserts` (1) or `console` (3). The retired `simd1` (0) and
+/// `simd2` (2) codes are refused and never reinterpreted (decision 12, issue #1096).
+fn observation_rack(raw: u32) -> Result<crate::LiveEffectRack, u32> {
+    crate::live_effect_address(raw, 0)
+        .map(|address| address.rack)
+        .ok_or(RESULT_INVALID_ARGUMENT)
+}
+
+/// A live-response owner record's `rack` for the engine's native owner rack (issue #1096).
+///
+/// The engine reports `0` for the input filters and the internal rack code otherwise (`1` for a
+/// `console.pre_insert` slot, `2` for an insert and `3` for a `console.post_insert` slot). The
+/// record keeps `0` and the inserts' `2`, retires `1` and `3`, and names both console sections
+/// `4`, since a live address does not name the section.
+const fn live_response_rack_raw(native: u8) -> Option<u32> {
+    match native {
+        0 => Some(crate::LIVE_RESPONSE_RACK_INPUT_FILTERS),
+        2 => Some(crate::LIVE_RESPONSE_RACK_INSERTS),
+        1 | 3 => Some(crate::LIVE_RESPONSE_RACK_CONSOLE),
+        _ => None,
+    }
+}
+
+/// Validate a live-response owner record's `rack`. The retired `1` and `3` are refused.
+fn live_response_rack(raw: u32) -> Result<u8, u32> {
     match raw {
-        0 => Ok(host_core::EffectRack::Simd1),
-        1 => Ok(host_core::EffectRack::Dynamic),
-        2 => Ok(host_core::EffectRack::Simd2),
+        crate::LIVE_RESPONSE_RACK_INPUT_FILTERS
+        | crate::LIVE_RESPONSE_RACK_INSERTS
+        | crate::LIVE_RESPONSE_RACK_CONSOLE => {
+            u8::try_from(raw).map_err(|_| RESULT_INVALID_ARGUMENT)
+        }
         _ => Err(RESULT_INVALID_ARGUMENT),
     }
 }
@@ -650,12 +675,8 @@ fn observation_channels(raw: u32) -> Result<ObservationReadChannels, u32> {
     }
 }
 
-fn observation_rack_raw(rack: host_core::EffectRack) -> u32 {
-    match rack {
-        host_core::EffectRack::Simd1 => 0,
-        host_core::EffectRack::Dynamic => 1,
-        host_core::EffectRack::Simd2 => 2,
-    }
+fn observation_rack_raw(rack: crate::LiveEffectRack) -> u32 {
+    u32::from(crate::live_effect_rack_raw(rack))
 }
 
 fn observation_status_raw(status: crate::ObservationReadStatus) -> u32 {
@@ -804,8 +825,8 @@ fn spectrum_target(raw: u32, id: &str) -> Result<SpectrumTarget, u32> {
     }
     let id: Box<str> = id.into();
     match raw {
-        SPECTRUM_TARGET_TRACK_POST_INPUT_BUILTINS => Ok(SpectrumTarget::TrackPostInputBuiltins(id)),
-        SPECTRUM_TARGET_TRACK_POST_MATRIX => Ok(SpectrumTarget::TrackPostMatrix(id)),
+        SPECTRUM_TARGET_TRACK_POST_INPUT => Ok(SpectrumTarget::TrackPostInputBuiltins(id)),
+        SPECTRUM_TARGET_TRACK_POST_PAN => Ok(SpectrumTarget::TrackPostMatrix(id)),
         SPECTRUM_TARGET_OUTPUT => Ok(SpectrumTarget::Output(id)),
         _ => Err(RESULT_INVALID_ARGUMENT),
     }
@@ -1019,8 +1040,7 @@ fn imported_stream_configuration(
         || metadata.abi_version != ABI_VERSION
         || metadata.result != RESULT_OK
         || metadata.status != SPECTRUM_STREAM_STATUS_READY
-        || !(SPECTRUM_TARGET_TRACK_POST_INPUT_BUILTINS..=SPECTRUM_TARGET_OUTPUT)
-            .contains(&metadata.target)
+        || !(SPECTRUM_TARGET_TRACK_POST_INPUT..=SPECTRUM_TARGET_OUTPUT).contains(&metadata.target)
         || !(SPECTRUM_CHANNEL_LEFT..=SPECTRUM_CHANNEL_BOTH).contains(&metadata.channels)
         || metadata.source_underrun > 1
         || metadata.reserved0 != 0
@@ -1101,7 +1121,7 @@ fn write_spectrum_window(
     sample_rate_hz: u32,
     token: u64,
 ) -> u32 {
-    if !(SPECTRUM_TARGET_TRACK_POST_INPUT_BUILTINS..=SPECTRUM_TARGET_OUTPUT).contains(&target)
+    if !(SPECTRUM_TARGET_TRACK_POST_INPUT..=SPECTRUM_TARGET_OUTPUT).contains(&target)
         || window.left.len() != SPECTRUM_WINDOW_FRAMES as usize
         || window.right.len() != SPECTRUM_WINDOW_FRAMES as usize
         || sample_rate_hz == 0
@@ -1206,8 +1226,7 @@ fn run_spectrum_analysis(staging: &mut SpectrumStaging, continuous: bool) -> u32
     };
     if header.struct_size != SPECTRUM_WINDOW_HEADER_BYTES
         || header.abi_version != ABI_VERSION
-        || !(SPECTRUM_TARGET_TRACK_POST_INPUT_BUILTINS..=SPECTRUM_TARGET_OUTPUT)
-            .contains(&header.target)
+        || !(SPECTRUM_TARGET_TRACK_POST_INPUT..=SPECTRUM_TARGET_OUTPUT).contains(&header.target)
         || !(SPECTRUM_CHANNEL_LEFT..=SPECTRUM_CHANNEL_BOTH).contains(&header.channels)
         || header.frames != SPECTRUM_WINDOW_FRAMES
         || header.source_underrun > 1
@@ -1552,7 +1571,7 @@ impl ResponseSnapshotSink for LiveResponseCaptureSink<'_> {
             stable_id_offset,
             stable_id_bytes: u32::try_from(owner.stable_id.len())
                 .map_err(|_| ResponseSnapshotError::Capacity)?,
-            rack: u32::from(owner.rack),
+            rack: live_response_rack_raw(owner.rack).ok_or(ResponseSnapshotError::InvalidShape)?,
             slot: owner.slot,
             kind: owner.kind,
             bypassed: u32::from(owner.bypassed),
@@ -1813,7 +1832,10 @@ fn parse_live_snapshot(staging: &ResponseStaging) -> Result<(ResponseSnapshot, u
             track_id,
             native_id,
             stable_id,
-            rack: u8::try_from(raw.rack).map_err(|_| RESULT_INVALID_ARGUMENT)?,
+            // The worker-side copy keeps the record's own code: both console sections share one
+            // code by design, so the engine's native rack is not recoverable here, and the query
+            // does not read it. A retired or unknown code refuses the whole snapshot.
+            rack: live_response_rack(raw.rack)?,
             slot: raw.slot,
             kind: raw.kind,
             bypassed: raw.bypassed != 0,
@@ -4023,7 +4045,8 @@ pub extern "C" fn miso_engine_web_v1_observation_track_index(handle: u32, index:
     })
 }
 
-/// Return one bound observation effect's rack (`0`, `1` or `2`), or zero when out of range.
+/// Return one bound observation effect's rack (`1` inserts or `3` console), or zero when out of
+/// range. Zero is the retired `simd1` code, so it names no rack (issue #1096).
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_observation_rack(handle: u32, index: u32) -> u32 {
     with_host(handle, 0, |host| {
@@ -4032,7 +4055,8 @@ pub extern "C" fn miso_engine_web_v1_observation_rack(handle: u32, index: u32) -
     })
 }
 
-/// Return one bound observation effect's position within its rack, or zero when out of range.
+/// Return one bound observation effect's index within its rack, or zero when out of range: a
+/// console slot's index in the session's slot order, or an insert's index.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_observation_effect_index(handle: u32, index: u32) -> u32 {
     with_host(handle, 0, |host| {
@@ -4811,6 +4835,100 @@ pub(crate) mod live_response_ffi_tests {
         );
         assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
     }
+
+    /// Byte offset of each owner record's `rack` word in the captured payload, in record order,
+    /// with the owner's stable identity.
+    fn owner_racks() -> Vec<(String, usize, u32)> {
+        RESPONSE_STAGING.with(|slot| {
+            let staging = slot.borrow();
+            let bytes = &staging.live_result[..staging.live_result_len];
+            let header: WebLiveResponseResult = read_live_record(bytes, 0).expect("header");
+            let owners_start = usize::try_from(header.owners_offset).expect("owners offset");
+            (0..usize::try_from(header.owner_count).expect("owner count"))
+                .map(|index| {
+                    let at = owners_start + index * size_of::<WebLiveResponseOwner>();
+                    let raw: WebLiveResponseOwner =
+                        read_live_record(bytes, u32::try_from(at).expect("offset"))
+                            .expect("owner record");
+                    let stable =
+                        live_payload_bytes(bytes, raw.stable_id_offset, raw.stable_id_bytes)
+                            .expect("stable ID");
+                    (
+                        String::from_utf8(stable.to_vec()).expect("UTF-8 stable ID"),
+                        at + core::mem::offset_of!(WebLiveResponseOwner, rack),
+                        raw.rack,
+                    )
+                })
+                .collect()
+        })
+    }
+
+    /// Decision 12 (issue #1096): the live-response owner record names the input filters `0`, an
+    /// insert `2` (the inserts keep the code `dynamic` had) and a console slot `4` in either
+    /// section, and the analysis refuses a snapshot whose owner carries the retired `simd1` (`1`)
+    /// or `simd2` (`3`) code, or any unallocated one.
+    ///
+    /// Red mutations: pass the engine's native rack through unchanged (the console owners read `1`
+    /// and `3`); or accept any `u8` in `live_response_rack` (a retired code is analysed).
+    #[test]
+    fn live_response_owners_name_console_slots_inserts_and_input_filters() {
+        let mut model = session::parse_session_json(include_str!(
+            "../../../fixtures/session/v1/parametric-eq-nine-track.json"
+        ))
+        .expect("nine-track fixture");
+        let mut post = model.console.pre_insert[0].clone();
+        post.slot = session::StableId::parse("post-eq").expect("slot id");
+        model.console.post_insert = vec![post];
+        for track in &mut model.tracks {
+            let mut entry = track.console[0].clone();
+            entry.slot = session::StableId::parse("post-eq").expect("slot id");
+            track.console.push(entry);
+        }
+        let mut insert = model.lower_track(&model.tracks[0]).pre_insert[0].clone();
+        insert.id = session::StableId::parse("ins-eq").expect("insert id");
+        model.tracks[0].inserts.effects.push(insert);
+        let document = session::canonical_session_json(&model).expect("canonical document");
+        let options = WebBootOptions {
+            require_sample_rate_hz: 48_000,
+            require_quantum_frames: 128,
+            ..WebBootOptions::explicit_defaults()
+        };
+        let handle = test_boot(document.as_bytes(), options);
+        assert_ne!(handle, 0, "the console and insert fixture must boot");
+
+        stage_request(b"eq0");
+        assert_eq!(miso_engine_web_v1_track_response_capture(handle), RESULT_OK);
+        let owners = owner_racks();
+        assert_eq!(
+            owners
+                .iter()
+                .map(|(stable, _, rack)| (stable.as_str(), *rack))
+                .collect::<Vec<_>>(),
+            [
+                ("input-filters", crate::LIVE_RESPONSE_RACK_INPUT_FILTERS),
+                ("eq", crate::LIVE_RESPONSE_RACK_CONSOLE),
+                ("ins-eq", crate::LIVE_RESPONSE_RACK_INSERTS),
+                ("post-eq", crate::LIVE_RESPONSE_RACK_CONSOLE),
+            ],
+            "owners in signal order, each named by its session rack"
+        );
+        assert_eq!(miso_engine_web_v1_track_response_analysis(), RESULT_OK);
+
+        for refused in [1_u32, 3, 5, 255] {
+            stage_request(b"eq0");
+            assert_eq!(miso_engine_web_v1_track_response_capture(handle), RESULT_OK);
+            let (_, at, _) = owner_racks()[1].clone();
+            RESPONSE_STAGING.with(|slot| {
+                slot.borrow_mut().live_result[at..at + 4].copy_from_slice(&refused.to_le_bytes());
+            });
+            assert_eq!(
+                miso_engine_web_v1_track_response_analysis(),
+                RESULT_INVALID_ARGUMENT,
+                "an owner record at rack {refused} is refused"
+            );
+        }
+        assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+    }
 }
 
 #[cfg(test)]
@@ -5052,7 +5170,7 @@ mod spectrum_ffi_tests {
                     b"main-out".as_slice(),
                 ),
                 (
-                    SPECTRUM_TARGET_TRACK_POST_MATRIX,
+                    SPECTRUM_TARGET_TRACK_POST_PAN,
                     SPECTRUM_CHANNEL_BOTH,
                     b"eq0".as_slice(),
                 ),
@@ -5299,7 +5417,7 @@ mod spectrum_ffi_tests {
         assert_eq!(
             miso_engine_web_v1_spectrum_select(
                 handle,
-                SPECTRUM_TARGET_TRACK_POST_MATRIX,
+                SPECTRUM_TARGET_TRACK_POST_PAN,
                 SPECTRUM_CHANNEL_BOTH,
                 3,
             ),
@@ -5308,7 +5426,7 @@ mod spectrum_ffi_tests {
         assert_eq!(miso_engine_web_v1_spectrum_selection_epoch(handle), 2);
         assert_eq!(
             with_host(handle, 0, AudioWorkletEngineHost::spectrum_target),
-            SPECTRUM_TARGET_TRACK_POST_MATRIX
+            SPECTRUM_TARGET_TRACK_POST_PAN
         );
         assert_eq!(
             with_host(handle, 0, AudioWorkletEngineHost::spectrum_channels),
@@ -5323,7 +5441,7 @@ mod spectrum_ffi_tests {
         );
         assert_eq!(
             SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata.target),
-            SPECTRUM_TARGET_TRACK_POST_MATRIX
+            SPECTRUM_TARGET_TRACK_POST_PAN
         );
         assert!(SPECTRUM_STAGING.with(|slot| slot.borrow().stream_history.is_none()));
         for block in 16..32_u64 {
@@ -5337,7 +5455,7 @@ mod spectrum_ffi_tests {
         assert_eq!(miso_engine_web_v1_spectrum_stream_read(handle), RESULT_OK);
         assert_eq!(
             SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata.target),
-            SPECTRUM_TARGET_TRACK_POST_MATRIX
+            SPECTRUM_TARGET_TRACK_POST_PAN
         );
 
         // Repeating the exact prepared selection is an idempotent no-op. It must preserve the
@@ -5352,7 +5470,7 @@ mod spectrum_ffi_tests {
         assert_eq!(
             miso_engine_web_v1_spectrum_select(
                 handle,
-                SPECTRUM_TARGET_TRACK_POST_MATRIX,
+                SPECTRUM_TARGET_TRACK_POST_PAN,
                 SPECTRUM_CHANNEL_BOTH,
                 3,
             ),
@@ -5381,12 +5499,12 @@ mod spectrum_ffi_tests {
         );
         let after_refusal = SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata);
         assert_eq!(after_refusal.status, SPECTRUM_STREAM_STATUS_READY);
-        assert_eq!(after_refusal.target, SPECTRUM_TARGET_TRACK_POST_MATRIX);
+        assert_eq!(after_refusal.target, SPECTRUM_TARGET_TRACK_POST_PAN);
         assert_eq!(after_refusal.channels, SPECTRUM_CHANNEL_BOTH);
         assert_eq!(after_refusal.smoothing_ms, 0.0);
         assert_eq!(
             with_host(handle, 0, AudioWorkletEngineHost::spectrum_target),
-            SPECTRUM_TARGET_TRACK_POST_MATRIX
+            SPECTRUM_TARGET_TRACK_POST_PAN
         );
 
         SPECTRUM_STAGING.with(|slot| {
@@ -5484,7 +5602,7 @@ mod spectrum_ffi_tests {
         assert_eq!(
             miso_engine_web_v1_spectrum_select(
                 handle,
-                SPECTRUM_TARGET_TRACK_POST_MATRIX,
+                SPECTRUM_TARGET_TRACK_POST_PAN,
                 SPECTRUM_CHANNEL_BOTH,
                 3,
             ),
@@ -5494,10 +5612,7 @@ mod spectrum_ffi_tests {
         assert_eq!(after_target_restart.status, SPECTRUM_STREAM_STATUS_WARMING);
         assert_eq!(miso_engine_web_v1_spectrum_selection_epoch(handle), 4);
         assert_eq!(after_target_restart.analysis_epoch, 2);
-        assert_eq!(
-            after_target_restart.target,
-            SPECTRUM_TARGET_TRACK_POST_MATRIX
-        );
+        assert_eq!(after_target_restart.target, SPECTRUM_TARGET_TRACK_POST_PAN);
         assert_eq!(after_target_restart.channels, SPECTRUM_CHANNEL_BOTH);
         assert!(SPECTRUM_STAGING.with(|slot| slot.borrow().stream_history.is_some()));
         assert_eq!(miso_engine_web_v1_spectrum_stream_stop(handle), RESULT_OK);
@@ -5627,7 +5742,7 @@ mod spectrum_ffi_tests {
             let mut header: WebSpectrumWindow =
                 read_live_record(staging.capture.as_ref().expect("capture staging"), 0)
                     .expect("window header");
-            header.target = SPECTRUM_TARGET_TRACK_POST_MATRIX;
+            header.target = SPECTRUM_TARGET_TRACK_POST_PAN;
             assert!(copy_live_record(
                 staging.capture.as_mut().expect("capture staging"),
                 0,
@@ -6025,7 +6140,7 @@ mod observation_alias_tests {
         let capture_header = WebSpectrumWindow {
             struct_size: SPECTRUM_WINDOW_HEADER_BYTES,
             abi_version: ABI_VERSION,
-            target: SPECTRUM_TARGET_TRACK_POST_MATRIX,
+            target: SPECTRUM_TARGET_TRACK_POST_PAN,
             channels: SPECTRUM_CHANNEL_BOTH,
             sample_rate_hz: cadence.sample_rate_hz(),
             frames: SPECTRUM_WINDOW_FRAMES,
@@ -6042,7 +6157,7 @@ mod observation_alias_tests {
             struct_size: SPECTRUM_RESULT_HEADER_BYTES,
             abi_version: ABI_VERSION,
             result: RESULT_OK,
-            target: SPECTRUM_TARGET_TRACK_POST_MATRIX,
+            target: SPECTRUM_TARGET_TRACK_POST_PAN,
             channels: SPECTRUM_CHANNEL_BOTH,
             sample_rate_hz: cadence.sample_rate_hz(),
             window_frames: SPECTRUM_WINDOW_FRAMES,
@@ -6091,7 +6206,7 @@ mod observation_alias_tests {
                 abi_version: ABI_VERSION,
                 result: RESULT_OK,
                 status: SPECTRUM_STREAM_STATUS_READY,
-                target: SPECTRUM_TARGET_TRACK_POST_MATRIX,
+                target: SPECTRUM_TARGET_TRACK_POST_PAN,
                 channels: SPECTRUM_CHANNEL_BOTH,
                 sample_rate_hz: cadence.sample_rate_hz(),
                 quantum_frames: cadence.quantum_frames(),
@@ -6175,6 +6290,80 @@ mod observation_alias_tests {
                 markers.result_header
             );
         });
+    }
+
+    /// Decision 12 (issue #1096): the observation map and the selected-read records name a console
+    /// slot `3` and an insert `1`, and a selection carrying the retired `simd1` (`0`) or `simd2`
+    /// (`2`) code, an unallocated code, or the rack the session does not use there is refused.
+    /// The two fixtures are the same compressors as a console slot and as inserts.
+    ///
+    /// Red mutations: encode the console as the retired `0` in `observation_rack_raw`, or decode
+    /// `0`/`2` in `observation_rack` -> a retired selection is read.
+    #[test]
+    fn observation_records_address_console_slots_and_inserts() {
+        let console: &[u8] =
+            include_bytes!("../../../fixtures/session/v1/compressor-bank-observation.json");
+        let inserts: &[u8] =
+            include_bytes!("../../../fixtures/session/v1/compressor-dynamic-bank-observation.json");
+        for (document, rack, unused) in [
+            (console, crate::RACK_CONSOLE, crate::RACK_INSERTS),
+            (inserts, crate::RACK_INSERTS, crate::RACK_CONSOLE),
+        ] {
+            no_live_host();
+            let options = WebBootOptions {
+                require_sample_rate_hz: 48_000,
+                require_quantum_frames: 128,
+                live_control_command_queue_records: 8,
+                live_control_meter_blocks: 1,
+                live_control_observation_taps: 4,
+                ..WebBootOptions::explicit_defaults()
+            };
+            let handle = test_boot(document, options);
+            assert_ne!(handle, 0, "the observation fixture must boot");
+            let count = miso_engine_web_v1_observation_count(handle);
+            assert_eq!(count, 8, "one observed compressor per track");
+            for index in 0..count {
+                assert_eq!(
+                    miso_engine_web_v1_observation_rack(handle, index),
+                    u32::from(rack)
+                );
+                assert_eq!(
+                    miso_engine_web_v1_observation_effect_index(handle, index),
+                    0
+                );
+            }
+            let track_index = miso_engine_web_v1_observation_track_index(handle, 3);
+            let tap_id = miso_engine_web_v1_observation_tap_id(handle, 3, 0);
+            let read = |selection_rack: u32| {
+                OBSERVATION_STAGING.with(|slot| {
+                    slot.borrow_mut().selections[0] = WebObservationSelection {
+                        struct_size: OBSERVATION_SELECTION_BYTES,
+                        abi_version: ABI_VERSION,
+                        track_index,
+                        rack: selection_rack,
+                        effect_index: 0,
+                        tap_id,
+                        channels: OBSERVATION_CHANNEL_BOTH,
+                        reserved: 0,
+                    };
+                });
+                miso_engine_web_v1_observation_read(handle, 1)
+            };
+            assert_eq!(read(u32::from(rack)), RESULT_OK);
+            let row = OBSERVATION_STAGING.with(|slot| slot.borrow().results[0]);
+            assert_eq!(
+                (row.track_index, row.rack, row.effect_index),
+                (track_index, u32::from(rack), 0)
+            );
+            for refused in [0, 2, 4, u32::from(unused)] {
+                assert_eq!(
+                    read(refused),
+                    RESULT_INVALID_ARGUMENT,
+                    "a selection at rack {refused} is refused"
+                );
+            }
+            dispose(handle);
+        }
     }
 
     #[test]

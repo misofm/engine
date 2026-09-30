@@ -3572,7 +3572,9 @@ fn production_effect_delivery_refuses_prepared_target_without_queue_or_full_muta
         words: [0x55; PREPARED_EFFECT_TARGET_WORDS],
     });
     let ready = host.ready.as_mut().expect("ready ownership");
-    let effect_slot = ready.effect_slot(0, 1, 0).expect("dynamic EQ slot");
+    let effect_slot = ready
+        .effect_slot(0, LiveEffectAddress::insert(0))
+        .expect("inserted EQ slot");
     let queue_slot = ready.tracks.len() * 3 + effect_slot;
     let producer = ready
         .effect_controls
@@ -3671,7 +3673,8 @@ fn prepared_eq_owner_transaction_is_design_and_allocation_free_after_preparation
     let mut bank = bank_effect_live_control_host(QUANTUM, 8);
     feed_and_render_tracks(&mut bank, 0, 0.25);
     host_core::test_only_reset_parametric_eq_design_calls();
-    stage_prepared_eq_parameter(&mut bank, 0, 0, 0, 0, 4, 12.0);
+    // The bank fixture's EQ is console slot 0 (issue #1096).
+    stage_prepared_eq_parameter(&mut bank, 0, 0, RACK_CONSOLE, 0, 4, 12.0);
     assert!(host_core::test_only_parametric_eq_design_call_count() > 0);
     host_core::test_only_reset_parametric_eq_design_calls();
     let left = [0.25_f32; QUANTUM as usize];
@@ -3714,7 +3717,7 @@ fn eq_owner_snapshot(host: &mut AudioWorkletEngineHost) -> (Vec<u8>, u64, u64) {
         .ready
         .as_ref()
         .expect("ready")
-        .effect_slot(0, 1, 0)
+        .effect_slot(0, LiveEffectAddress::insert(0))
         .expect("EQ slot");
     let success = host
         .ready
@@ -5665,7 +5668,7 @@ fn selected_observation_reads_are_bounded_stable_and_non_consuming() {
     let mut host = observation_host(QUANTUM, 2, None);
     let selection = ObservationSelection {
         track_id: "t0",
-        rack: EffectRack::Dynamic,
+        rack: LiveEffectRack::Inserts,
         effect_slot_id: "comp",
         tap_id: 1,
         channels: ObservationReadChannels::Both,
@@ -5735,7 +5738,7 @@ fn selected_observation_reads_are_bounded_stable_and_non_consuming() {
     // from their own resident cells, and neither selected read consumes the publication.
     let gate_selection = ObservationSelection {
         track_id: "t2",
-        rack: EffectRack::Dynamic,
+        rack: LiveEffectRack::Inserts,
         effect_slot_id: "gate",
         tap_id: 1,
         channels: ObservationReadChannels::Left,
@@ -5807,14 +5810,14 @@ fn selected_observation_reads_keep_same_track_owner_windows_and_sequences() {
     let mut host = same_track_observation_host(QUANTUM);
     let compressor = ObservationSelection {
         track_id: "t0",
-        rack: EffectRack::Dynamic,
+        rack: LiveEffectRack::Inserts,
         effect_slot_id: "comp",
         tap_id: 1,
         channels: ObservationReadChannels::Both,
     };
     let gate = ObservationSelection {
         track_id: "t0",
-        rack: EffectRack::Dynamic,
+        rack: LiveEffectRack::Inserts,
         effect_slot_id: "gate",
         tap_id: 1,
         channels: ObservationReadChannels::Both,
@@ -5900,7 +5903,7 @@ fn selected_observation_numeric_read_refuses_failed_host_without_touching_output
     assert_eq!(host.status().state, STATE_FAILED);
     let address = ObservationAddress {
         track_index: 0,
-        rack: EffectRack::Dynamic,
+        rack: LiveEffectRack::Inserts,
         effect_index: 0,
         tap_id: 1,
         channels: ObservationReadChannels::Both,
@@ -6146,12 +6149,21 @@ fn observation_misuse_is_typed_and_all_or_nothing() {
     assert_eq!(host.submit_commands(1), RESULT_INVALID_ARGUMENT);
     assert_eq!(host.command_report().reason, COMMAND_REASON_MALFORMED);
 
-    // Unknown rack and unknown effect keep their own reasons on the observe kinds.
+    // Unknown rack and unknown effect keep their own reasons on the observe kinds. The retired
+    // `simd1`/`simd2` codes are unknown racks (issue #1096); this session has no console slot, so
+    // `console` is a known rack naming an unknown effect.
+    for retired in [0, 2, 4] {
+        assert_eq!(
+            observe(&mut host, 0, retired, 0, 1, 2, true),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_eq!(host.command_report().reason, COMMAND_REASON_UNKNOWN_RACK);
+    }
     assert_eq!(
-        observe(&mut host, 0, 3, 0, 1, 2, true),
+        observe(&mut host, 0, RACK_CONSOLE, 0, 1, 2, true),
         RESULT_INVALID_ARGUMENT
     );
-    assert_eq!(host.command_report().reason, COMMAND_REASON_UNKNOWN_RACK);
+    assert_eq!(host.command_report().reason, COMMAND_REASON_UNKNOWN_EFFECT);
     assert_eq!(
         observe(&mut host, 0, 1, 7, 1, 2, true),
         RESULT_INVALID_ARGUMENT
@@ -8366,4 +8378,456 @@ fn ordinary_spectrum_omitted_hop_keeps_default_cadence() {
         host.start_spectrum_stream().expect("default-hop start"),
         SpectrumCadence::new(48_000, 128).expect("default cadence")
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Issue #1096 (S1c): the browser record addresses a console slot by its slot index and an insert
+// by its index.
+// ---------------------------------------------------------------------------------------------
+
+const ADDRESSING_QUANTUM: u32 = 128;
+const ADDRESSING_BLOCKS: u64 = 8;
+/// Track `eq5` of the addressing session: not the first, so a track off-by-one cannot pass.
+const ADDRESSING_TRACK: u32 = 5;
+/// `(rack, effect_index, the instance it names on every track)`, from the session's own slot
+/// order: `pre_insert` [eq, pre-eq2], then `post_insert` [post-eq], and the inserts [ins-eq].
+const ADDRESSING_CASES: [(u8, u32, &str); 4] = [
+    (RACK_CONSOLE, 0, "eq"),
+    (RACK_CONSOLE, 1, "pre-eq2"),
+    (RACK_CONSOLE, 2, "post-eq"),
+    (RACK_INSERTS, 0, "ins-eq"),
+];
+
+/// The EQ bank console widened to two `pre_insert` slots, one `post_insert` slot and one insert
+/// on each of its eight tracks, every instance a parametric EQ at its own frequency and a gain that
+/// differs by track, with `bypassed` (a track and an instance) set to session `bypass`. The same
+/// session as `host-core/tests/live_addressing.rs`.
+fn addressing_document(bypassed: Option<(&str, &str)>) -> String {
+    let mut model = parse_session_json(include_str!(
+        "../../../fixtures/session/v1/parametric-eq-bank-console.json"
+    ))
+    .expect("EQ bank console fixture");
+    let template = model.console.pre_insert[0].clone();
+    let slot = |id: &str| session::ConsoleSlot {
+        slot: session::StableId::parse(id).expect("slot id"),
+        ..template.clone()
+    };
+    model.console.pre_insert = vec![slot("eq"), slot("pre-eq2")];
+    model.console.post_insert = vec![slot("post-eq")];
+    let band = |params: &[session::EffectParam], frequency_hz: f32, gain_db: f32| {
+        params
+            .iter()
+            .map(|param| {
+                let mut param = param.clone();
+                match param.parameter_id {
+                    3 => param.value = frequency_hz,
+                    4 => param.value = gain_db,
+                    _ => {}
+                }
+                param
+            })
+            .collect::<Vec<_>>()
+    };
+    for (index, track) in model.tracks.iter_mut().enumerate() {
+        let spread = index as f32;
+        let params = track.console[0].params.clone();
+        let entry = |id: &str, frequency_hz: f32, gain_db: f32| session::ConsoleEntry {
+            slot: session::StableId::parse(id).expect("slot id"),
+            bypass: bypassed == Some((track.id.as_str(), id)),
+            params: band(&params, frequency_hz, gain_db),
+        };
+        track.console = vec![
+            entry("eq", 1_000.0, 1.0 + spread),
+            entry("pre-eq2", 300.0, -2.0 - spread),
+            entry("post-eq", 5_000.0, 3.0 + spread),
+        ];
+        track.inserts.effects = vec![session::Effect {
+            id: session::StableId::parse("ins-eq").expect("insert id"),
+            identity: template.identity.clone(),
+            quality: template.quality,
+            bypass: bypassed == Some((track.id.as_str(), "ins-eq")),
+            link_mode: template.link_mode,
+            params: band(&params, 150.0, 12.0 - spread),
+            sidechain: session::SidechainDeclaration::None,
+        }];
+    }
+    canonical_session_json(&model).expect("canonical addressing session")
+}
+
+fn addressing_host(document: &str) -> AudioWorkletEngineHost {
+    AudioWorkletEngineHost::boot(
+        document.as_bytes(),
+        WebBootOptions {
+            source_ring_frames: ADDRESSING_QUANTUM * 2,
+            live_control_command_queue_records: 8,
+            ..boot_options(ADDRESSING_QUANTUM)
+        },
+    )
+    .unwrap_or_else(|failure| {
+        panic!(
+            "addressing boot: {}",
+            String::from_utf8_lossy(failure.diagnostic())
+        )
+    })
+}
+
+/// A deterministic broadband block, so every EQ band is audible.
+fn addressing_noise(block: u64, channel: u32) -> Vec<f32> {
+    let mut state = (block as u32).wrapping_mul(0x9e37_79b9) ^ channel.wrapping_mul(0x85eb_ca6b);
+    (0..ADDRESSING_QUANTUM)
+        .map(|_| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            ((state >> 8) as f32 / (1_u32 << 24) as f32 - 0.5) * 0.5
+        })
+        .collect()
+}
+
+/// Render [`ADDRESSING_BLOCKS`] quanta of noise and return every output sample's bits.
+fn addressing_render(host: &mut AudioWorkletEngineHost) -> Vec<u32> {
+    let mut bits = Vec::new();
+    for block in 0..ADDRESSING_BLOCKS {
+        let (left, right) = (addressing_noise(block, 0), addressing_noise(block, 1));
+        let planes: [&[f32]; 2] = [&left, &right];
+        assert_eq!(
+            host.submit_source(
+                b"fixture-source",
+                1,
+                block * u64::from(ADDRESSING_QUANTUM),
+                48_000,
+                &planes,
+                ADDRESSING_QUANTUM,
+                false,
+            ),
+            RESULT_OK,
+        );
+        assert_eq!(host.render_next(), RESULT_OK);
+        bits.extend(
+            host.output_pcm()
+                .expect("output")
+                .iter()
+                .map(|x| x.to_bits()),
+        );
+    }
+    bits
+}
+
+/// `(track_id, effect_id)` of every effect queue holding an admitted, undrained record.
+fn loaded_effect_queues(host: &AudioWorkletEngineHost) -> Vec<(String, String)> {
+    let ready = host.ready.as_ref().expect("ready");
+    let base = ready.tracks.len() * 3;
+    ready
+        .effect_controls
+        .iter()
+        .enumerate()
+        .filter_map(|(effect, producer)| {
+            let producer = producer.as_ref()?;
+            (ready.in_flight[base + effect] > 0).then(|| {
+                (
+                    producer.track_id.to_string(),
+                    producer.effect_id.to_string(),
+                )
+            })
+        })
+        .collect()
+}
+
+/// A browser `effectBypass` record at `(rack, effect_index)` reaches the addressed lane: exactly
+/// the addressed instance's queue is loaded, and the render is the session bypass of that instance
+/// on that track, bit for bit. A live bypass drained before the first block and a session bypass
+/// are the same per-lane shunt (issue #1087), and the shunt selects whole blocks.
+///
+/// Red mutations: `effect_compiler::declared_live_addresses` giving `post_insert` the base `0`
+/// (the `post_insert` slot addressed as `pre_insert` slot 0: boot refuses the colliding table), or
+/// `LiveEffectAddress::lower` taking console slot `k >= pre_insert` to `(Simd1, k - pre_insert)`
+/// (it bypasses `eq` instead of `post-eq`); decoding rack `3` as the inserts.
+#[test]
+fn a_browser_bypass_reaches_the_addressed_lane() {
+    let base = addressing_render(&mut addressing_host(&addressing_document(None)));
+    let mut renders = Vec::new();
+    for (rack, effect_index, instance) in ADDRESSING_CASES {
+        let mut host = addressing_host(&addressing_document(None));
+        stage_command(
+            &mut host,
+            0,
+            COMMAND_EFFECT_BYPASS,
+            rack,
+            255,
+            ADDRESSING_TRACK,
+            effect_index,
+            0,
+            0,
+            [1.0, 0.0, 0.0, 0.0],
+        );
+        assert_eq!(host.submit_commands(1), RESULT_OK, "{instance}");
+        assert_eq!(
+            loaded_effect_queues(&host),
+            [("eq5".to_owned(), instance.to_owned())],
+            "rack {rack}, effect {effect_index} loads exactly eq5/{instance}"
+        );
+        let live = addressing_render(&mut host);
+        let oracle = addressing_render(&mut addressing_host(&addressing_document(Some((
+            "eq5", instance,
+        )))));
+        assert!(
+            live == oracle,
+            "rack {rack}, effect {effect_index} renders the session bypass of eq5/{instance}"
+        );
+        assert!(live != base, "bypassing eq5/{instance} is audible");
+        renders.push(live);
+    }
+    for (index, render) in renders.iter().enumerate() {
+        for later in &renders[index + 1..] {
+            assert!(
+                render != later,
+                "each addressed instance moves the mix in its own way"
+            );
+        }
+    }
+}
+
+/// A browser EQ parameter change at `(rack, effect_index)` reaches the addressed lane through the
+/// prepared path: the configuration copy and the companion record carry the same address, exactly
+/// the addressed instance's queue is loaded, and the ride is audible and distinct per instance.
+///
+/// Red mutations: those of [`a_browser_bypass_reaches_the_addressed_lane`], and resolving the
+/// companion record's `rack` through the retired lowered codes.
+#[test]
+fn a_browser_parameter_reaches_the_addressed_lane() {
+    let base = addressing_render(&mut addressing_host(&addressing_document(None)));
+    let mut renders = Vec::new();
+    for (rack, effect_index, instance) in ADDRESSING_CASES {
+        let mut host = addressing_host(&addressing_document(None));
+        assert_eq!(
+            submit_prepared_eq_parameter(
+                &mut host,
+                0,
+                ADDRESSING_TRACK,
+                rack,
+                effect_index,
+                4,
+                -18.0
+            ),
+            RESULT_OK,
+            "{instance}"
+        );
+        assert_eq!(
+            loaded_effect_queues(&host),
+            [("eq5".to_owned(), instance.to_owned())],
+            "rack {rack}, effect {effect_index} loads exactly eq5/{instance}"
+        );
+        let live = addressing_render(&mut host);
+        assert!(live != base, "riding eq5/{instance} is audible");
+        renders.push(live);
+    }
+    for (index, render) in renders.iter().enumerate() {
+        for later in &renders[index + 1..] {
+            assert!(
+                render != later,
+                "each addressed instance rides its own lane"
+            );
+        }
+    }
+}
+
+/// Decision 12's wire identity (issue #1096): the retired `simd1` (`0`) and `simd2` (`2`) rack
+/// codes are refused on every effect-addressed record, never reinterpreted, and the refusal leaves
+/// the engine untouched. Each refused record is otherwise the valid twin of one the console admits: at
+/// the base, rack `0` effect `0` was this session's `eq`.
+///
+/// Red mutation: decode `0` as the console or `2` as the inserts, or accept any `rack <= 3` -> a
+/// retired record is admitted.
+#[test]
+fn retired_rack_codes_are_refused_on_every_browser_record() {
+    let document = addressing_document(None);
+    let base = addressing_render(&mut addressing_host(&document));
+    let mut host = addressing_host(&document);
+    // `(kind, channel, parameter_id, values)`: a ride, a bypass and both observation kinds.
+    let records: [(u32, u8, u32, [f32; 4]); 4] = [
+        (COMMAND_EFFECT_PARAM, 2, 4, [-6.0, 0.0, 0.0, 0.0]),
+        (COMMAND_EFFECT_BYPASS, 255, 0, [1.0, 0.0, 0.0, 0.0]),
+        (COMMAND_OBSERVE_SUBSCRIBE, 255, 1, [0.0; 4]),
+        (COMMAND_OBSERVE_UNSUBSCRIBE, 255, 1, [0.0; 4]),
+    ];
+    for retired in [0_u8, 2] {
+        for (kind, channel, parameter_id, values) in records {
+            stage_command(
+                &mut host,
+                0,
+                kind,
+                retired,
+                channel,
+                ADDRESSING_TRACK,
+                0,
+                parameter_id,
+                0,
+                values,
+            );
+            assert_eq!(host.submit_commands(1), RESULT_INVALID_ARGUMENT);
+            let report = *host.command_report();
+            assert_eq!(
+                (report.reason, report.admitted, report.rejected_index),
+                (COMMAND_REASON_UNKNOWN_RACK, 0, 0),
+                "kind {kind} at retired rack {retired}"
+            );
+        }
+        // The prepared EQ path: the configuration copy refuses the address outright.
+        assert_eq!(
+            host.copy_eq_target_config(ADDRESSING_TRACK, u32::from(retired), 0),
+            RESULT_INVALID_ARGUMENT,
+            "configuration copy at retired rack {retired}"
+        );
+        // A companion record carrying a retired rack beside a valid console record is malformed.
+        stage_prepared_eq_parameter(&mut host, 0, ADDRESSING_TRACK, RACK_CONSOLE, 0, 4, -6.0);
+        host.prepared_companion_mut().expect("prepared companion")[28..32]
+            .copy_from_slice(&u32::from(retired).to_le_bytes());
+        assert_eq!(
+            host.submit_prepared_commands(1, 104),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            host.command_report().reason,
+            COMMAND_REASON_MALFORMED,
+            "companion at retired rack {retired}"
+        );
+    }
+    assert!(
+        loaded_effect_queues(&host).is_empty(),
+        "nothing was admitted"
+    );
+    // The valid twins are admitted, so each refusal above was the rack's alone.
+    assert_eq!(
+        host.copy_eq_target_config(ADDRESSING_TRACK, u32::from(RACK_CONSOLE), 0),
+        RESULT_OK
+    );
+    stage_command(
+        &mut host,
+        0,
+        COMMAND_EFFECT_BYPASS,
+        RACK_CONSOLE,
+        255,
+        ADDRESSING_TRACK,
+        0,
+        0,
+        0,
+        [0.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    assert_eq!(
+        addressing_render(&mut host),
+        base,
+        "the refusals moved nothing, and un-bypassing an enabled slot renders the base"
+    );
+}
+
+/// The two exceptions to a live bypass lifting a session bypass (P1 verdict L4, #1100): the delay
+/// and the multiband keep their session bypass as a prepared one, so un-bypassing either is
+/// admitted and renders nothing different. The compressor beside them lowers its session bypass to
+/// the shunt, and un-bypassing it is audible, which is what makes the two exceptions observable.
+///
+/// Red mutation: drop `miso.delay` or `miso.multiband-compressor` from the prepared-bypass
+/// effects (`effect_compiler::lowers_session_bypass`) -> lifting its bypass is audible.
+#[test]
+fn a_live_bypass_cannot_lift_the_delay_or_multiband_session_bypass() {
+    let mut model = parse_session_json(include_str!(
+        "../../../fixtures/session/v1/compressor-dynamic-observation.json"
+    ))
+    .expect("accepted compressor fixture");
+    model.quantum_frames = ADDRESSING_QUANTUM;
+    model.sources[0].frames = u64::from(ADDRESSING_QUANTUM) * 64;
+    model.tracks.truncate(1);
+    model.routes.truncate(1);
+    let mut compressor = model.tracks[0].inserts.effects[0].clone();
+    // A threshold under the noise and a makeup gain, so the compressor is never transparent.
+    for param in &mut compressor.params {
+        match param.parameter_id {
+            1 => param.value = -30.0,
+            6 => param.value = 6.0,
+            _ => {}
+        }
+    }
+    let bypassed = |id: &str, effect_id: &str| session::Effect {
+        id: session::StableId::parse(id).expect("insert id"),
+        identity: session::EffectIdentity::Native {
+            effect_id: session::StableId::parse(effect_id).expect("effect id"),
+        },
+        bypass: true,
+        params: Vec::new(),
+        ..compressor.clone()
+    };
+    model.tracks[0].inserts.effects = vec![
+        bypassed("delay", "miso.delay"),
+        bypassed("multiband", "miso.multiband-compressor"),
+        session::Effect {
+            bypass: true,
+            ..compressor
+        },
+    ];
+    let source_id = model.sources[0].id.as_str().as_bytes().to_vec();
+    let document = canonical_session_json(&model).expect("canonical exceptions session");
+    let boot = || {
+        AudioWorkletEngineHost::boot(
+            document.as_bytes(),
+            WebBootOptions {
+                source_ring_frames: ADDRESSING_QUANTUM * 2,
+                live_control_command_queue_records: 8,
+                ..boot_options(ADDRESSING_QUANTUM)
+            },
+        )
+        .unwrap_or_else(|failure| {
+            panic!(
+                "exceptions boot: {}",
+                String::from_utf8_lossy(failure.diagnostic())
+            )
+        })
+    };
+    let render = |host: &mut AudioWorkletEngineHost| {
+        let mut bits = Vec::new();
+        for block in 0..ADDRESSING_BLOCKS {
+            let (left, right) = (addressing_noise(block, 0), addressing_noise(block, 1));
+            let planes: [&[f32]; 2] = [&left, &right];
+            assert_eq!(
+                host.submit_source(
+                    &source_id,
+                    1,
+                    block * u64::from(ADDRESSING_QUANTUM),
+                    48_000,
+                    &planes,
+                    ADDRESSING_QUANTUM,
+                    false,
+                ),
+                RESULT_OK,
+            );
+            assert_eq!(host.render_next(), RESULT_OK);
+            bits.extend(
+                host.output_pcm()
+                    .expect("output")
+                    .iter()
+                    .map(|x| x.to_bits()),
+            );
+        }
+        bits
+    };
+    let base = render(&mut boot());
+    for (effect_index, lifts) in [(0, false), (1, false), (2, true)] {
+        let mut host = boot();
+        stage_command(
+            &mut host,
+            0,
+            COMMAND_EFFECT_BYPASS,
+            RACK_INSERTS,
+            255,
+            0,
+            effect_index,
+            0,
+            0,
+            [0.0; 4],
+        );
+        assert_eq!(host.submit_commands(1), RESULT_OK, "insert {effect_index}");
+        assert_eq!(host.command_report().reason, COMMAND_REASON_NONE);
+        assert_eq!(
+            render(&mut host) != base,
+            lifts,
+            "un-bypassing insert {effect_index} is audible exactly when its bypass is a shunt"
+        );
+    }
 }

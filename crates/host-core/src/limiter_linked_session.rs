@@ -155,8 +155,8 @@ use session::{canonical_session_json, parse_session_json};
 
 use crate::prepare::{compile_host_session, prepare_host_runtime_with_live_controls_backend};
 use crate::{
-    EffectRack, HostLiveControlHandles, HostLiveControlRequest, HostPrepareCaps, HostShapePolicy,
-    PrepareDiagnostics, PreparedHost, SourceSubmission,
+    HostLiveControlHandles, HostLiveControlRequest, HostPrepareCaps, HostShapePolicy,
+    LiveEffectAddress, PrepareDiagnostics, PreparedHost, SourceSubmission,
 };
 
 const FIXTURE: &str =
@@ -344,7 +344,7 @@ fn prepare(backend: Backend) -> Console {
             "track {index} is the table's ch{index:02}"
         );
     }
-    let controls = |rack: EffectRack, effect_index: u32, effect: &str| -> Vec<usize> {
+    let controls = |address: LiveEffectAddress, effect: &str| -> Vec<usize> {
         handles
             .tracks
             .iter()
@@ -354,16 +354,17 @@ fn prepare(backend: Backend) -> Console {
                     .iter()
                     .position(|producer| {
                         producer.track_id == *track
-                            && producer.rack == rack
-                            && producer.effect_index == effect_index
+                            && producer.address == address
                             && producer.descriptor.id.as_str() == effect
                     })
                     .unwrap_or_else(|| panic!("track {track}'s {effect} has a control channel"))
             })
             .collect()
     };
-    let limiters = controls(EffectRack::Simd2, 0, LIMITER);
-    let compressors = controls(EffectRack::Simd1, 1, COMPRESSOR);
+    // The fixture's console is `pre_insert` [eq, comp] and `post_insert` [limiter], so in the
+    // session's slot order the compressor is slot 1 and the limiter slot 2 (issue #1096).
+    let limiters = controls(LiveEffectAddress::console(2), LIMITER);
+    let compressors = controls(LiveEffectAddress::console(1), COMPRESSOR);
     let observers = handles
         .tracks
         .iter()
@@ -373,8 +374,7 @@ fn prepare(backend: Backend) -> Console {
                 .iter()
                 .position(|handle| {
                     handle.track_id == *track
-                        && handle.rack == EffectRack::Simd2
-                        && handle.effect_index == 0
+                        && handle.address == LiveEffectAddress::console(2)
                         && handle.descriptor.id.as_str() == LIMITER
                 })
                 .unwrap_or_else(|| panic!("track {track}'s limiter has an observation handle"))

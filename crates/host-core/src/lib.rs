@@ -170,7 +170,8 @@ pub use spectrum::{
 /// compile pipeline stays in this crate (#106 F1) and a host names only what its own ABI names.
 pub use effect_compiler::{
     EffectControlOwnerError, EffectControlProducer, EffectControlResources,
-    EffectObservationHandle, EffectRack, parametric_eq_target_preparation_factory,
+    EffectObservationHandle, EffectRack, LiveEffectAddress, LiveEffectRack,
+    parametric_eq_target_preparation_factory,
 };
 #[cfg(feature = "test-support")]
 pub use effect_compiler::{
