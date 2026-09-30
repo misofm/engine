@@ -1,8 +1,12 @@
 import type { EffectId } from "../generated/catalog.ts";
+import { MisoUsageError } from "../core/errors.ts";
 import { effect, session } from "../core/session.ts";
 import type { SessionBuilder } from "../core/session.ts";
 import type {
   AutomationSpec,
+  ConsoleEntrySpec,
+  ConsoleSlotSpec,
+  ConsoleSpec,
   EffectOptions,
   RouteDestination,
   RouteSource,
@@ -11,6 +15,14 @@ import type {
   TrackSpec,
 } from "../core/types.ts";
 
+/**
+ * One `enginectl session build` request.
+ *
+ * `console` is the session console (`{ preInsert, postInsert }` of `{ slot, effectId, quality?,
+ * linkMode? }`), and each track spec carries its `console` entries (`{ slot, bypass?, parameters?,
+ * channel? }`, one per slot in slot order) and its `inserts` (effect declarations). The retired
+ * `simd1`, `dynamic` and `simd2` track keys are refused by name.
+ */
 export interface SessionBuildRequestV1 {
   readonly schemaVersion: 1;
   readonly session: {
@@ -20,6 +32,7 @@ export interface SessionBuildRequestV1 {
     readonly quantumFrames?: number;
   };
   readonly sources?: readonly unknown[];
+  readonly console?: unknown;
   readonly tracks?: readonly unknown[];
   readonly submixes?: readonly unknown[];
   readonly outputs?: readonly unknown[];
@@ -38,15 +51,31 @@ function record(value: unknown, path: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+/** The engine's code for a key its schema does not have, where the request mirrors one of its objects. */
+const UNKNOWN_FIELD = "schema.unknown_field";
+
+/**
+ * Refuse a request key outside `allowed`, and a missing required one.
+ *
+ * `unknownFieldCode` is given where the request object mirrors a session object the engine refuses
+ * an unknown member of (a console slot, a console entry, a track): the refusal then carries the
+ * engine's `schema.unknown_field`, as the builder's does, so `enginectl` and the builder name one
+ * code for one defect.
+ */
 function keys(
   value: Record<string, unknown>,
   allowed: readonly string[],
   required: readonly string[],
   path: string,
+  unknownFieldCode?: typeof UNKNOWN_FIELD,
 ): void {
   const admitted = new Set(allowed);
   for (const key of Object.keys(value)) {
-    if (!admitted.has(key)) fail(`${path}.${key}`, "unknown key");
+    if (admitted.has(key)) continue;
+    if (unknownFieldCode !== undefined) {
+      throw new MisoUsageError(`${path}.${key}: unknown key`, unknownFieldCode);
+    }
+    fail(`${path}.${key}`, "unknown key");
   }
   for (const key of required) {
     if (!Object.hasOwn(value, key)) fail(`${path}.${key}`, "required key is missing");
@@ -199,11 +228,70 @@ function effectDecl(value: unknown, path: string): ReturnType<typeof effect> {
   return effect(effectId, parameters as never, options as never);
 }
 
+/** The per-track rack keys decision 12 retired: named, so an old request learns what replaced them. */
+const RETIRED_TRACK_KEYS = ["simd1", "dynamic", "simd2"] as const;
+
+function consoleSlotRequest(value: unknown, path: string): ConsoleSlotSpec {
+  const raw = record(value, path);
+  keys(raw, ["slot", "effectId", "quality", "linkMode"], ["slot", "effectId"], path, UNKNOWN_FIELD);
+  return {
+    slot: string(raw.slot, `${path}.slot`),
+    effectId: string(raw.effectId, `${path}.effectId`) as ConsoleSlotSpec["effectId"],
+    ...(raw.quality === undefined ? {} : { quality: raw.quality as "normal" }),
+    ...(raw.linkMode === undefined ? {} : { linkMode: raw.linkMode as ConsoleSlotSpec["linkMode"] & string }),
+  };
+}
+
+function consoleRequest(value: unknown): ConsoleSpec {
+  const raw = record(value, "$.console");
+  keys(raw, ["preInsert", "postInsert"], [], "$.console", UNKNOWN_FIELD);
+  const section = (name: "preInsert" | "postInsert") => raw[name] === undefined
+    ? []
+    : array(raw[name], `$.console.${name}`).map((slot, index) =>
+      consoleSlotRequest(slot, `$.console.${name}[${index}]`));
+  return { preInsert: section("preInsert"), postInsert: section("postInsert") };
+}
+
+function consoleEntryRequest(value: unknown, path: string): ConsoleEntrySpec {
+  const raw = record(value, path);
+  keys(raw, ["slot", "bypass", "parameters", "channel"], ["slot"], path, UNKNOWN_FIELD);
+  // A null-prototype record for the same reason as `effectDecl`'s: `__proto__` is a member name.
+  const parameters: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  if (raw.parameters !== undefined) {
+    const supplied = record(raw.parameters, `${path}.parameters`);
+    for (const [name, value] of Object.entries(supplied)) {
+      parameters[name] = parameterValue(value, `${path}.parameters.${name}`);
+    }
+  }
+  return {
+    slot: string(raw.slot, `${path}.slot`),
+    ...(raw.bypass === undefined ? {} : { bypass: raw.bypass as boolean }),
+    ...(raw.parameters === undefined ? {} : { parameters: parameters as never }),
+    ...(raw.channel === undefined ? {} : { channel: raw.channel as ConsoleEntrySpec["channel"] & string }),
+  };
+}
+
 function track(value: unknown, path: string): { id: string; spec: TrackSpec } {
   const wrapper = record(value, path);
   keys(wrapper, ["id", "spec"], ["id", "spec"], path);
   const raw = record(wrapper.spec, `${path}.spec`);
-  keys(raw, ["source", "builtins", "fader", "pan", "simd1", "dynamic", "simd2"], ["source"], `${path}.spec`);
+  for (const retired of RETIRED_TRACK_KEYS) {
+    if (Object.hasOwn(raw, retired)) {
+      throw new MisoUsageError(
+        `${path}.spec.${retired}: the per-track simd1, dynamic and simd2 racks are retired; declare `
+          + "session console slots in $.console, each track's knobs for them in spec.console, and "
+          + "per-track effects in spec.inserts",
+        UNKNOWN_FIELD,
+      );
+    }
+  }
+  keys(
+    raw,
+    ["source", "builtins", "console", "inserts", "fader", "pan"],
+    ["source"],
+    `${path}.spec`,
+    UNKNOWN_FIELD,
+  );
 
   let source: TrackSpec["source"];
   if (typeof raw.source === "string") source = raw.source;
@@ -243,23 +331,23 @@ function track(value: unknown, path: string): { id: string; spec: TrackSpec } {
     }
   }
 
-  const rack = (name: "simd1" | "dynamic" | "simd2") => raw[name] === undefined
+  const consoleEntries = raw.console === undefined
     ? undefined
-    : array(raw[name], `${path}.spec.${name}`).map((entry, index) =>
-      effectDecl(entry, `${path}.spec.${name}[${index}]`));
-  const simd1 = rack("simd1");
-  const dynamic = rack("dynamic");
-  const simd2 = rack("simd2");
+    : array(raw.console, `${path}.spec.console`).map((entry, index) =>
+      consoleEntryRequest(entry, `${path}.spec.console[${index}]`));
+  const inserts = raw.inserts === undefined
+    ? undefined
+    : array(raw.inserts, `${path}.spec.inserts`).map((entry, index) =>
+      effectDecl(entry, `${path}.spec.inserts[${index}]`));
   return {
     id: string(wrapper.id, `${path}.id`),
     spec: {
       source,
       ...(raw.builtins === undefined ? {} : { builtins: builtins(raw.builtins, `${path}.spec.builtins`) as NonNullable<TrackSpec["builtins"]> }),
+      ...(consoleEntries === undefined ? {} : { console: consoleEntries }),
+      ...(inserts === undefined ? {} : { inserts }),
       ...(fader === undefined ? {} : { fader }),
       ...(pan === undefined ? {} : { pan }),
-      ...(simd1 === undefined ? {} : { simd1 }),
-      ...(dynamic === undefined ? {} : { dynamic }),
-      ...(simd2 === undefined ? {} : { simd2 }),
     },
   };
 }
@@ -327,7 +415,7 @@ function automation(value: unknown, path: string): AutomationSpec {
 /** Decode and translate one strict V1 authoring request through the public SDK builder. */
 export function sessionBuilderFromRequest(value: unknown): SessionBuilder {
   const root = record(value, "$");
-  keys(root, ["schemaVersion", "session", "sources", "tracks", "submixes", "outputs", "routes", "automation"], ["schemaVersion", "session"], "$");
+  keys(root, ["schemaVersion", "session", "sources", "console", "tracks", "submixes", "outputs", "routes", "automation"], ["schemaVersion", "session"], "$");
   if (root.schemaVersion !== 1) fail("$.schemaVersion", "expected 1");
   const options = record(root.session, "$.session");
   keys(options, ["id", "sampleRateHz", "revision", "quantumFrames"], ["id", "sampleRateHz"], "$.session");
@@ -351,6 +439,8 @@ export function sessionBuilderFromRequest(value: unknown): SessionBuilder {
       content: string(spec.content, `${path}.spec.content`),
     });
   }
+  // The console precedes every track: each track's console entries are checked against it.
+  if (root.console !== undefined) builder = builder.console(consoleRequest(root.console));
   for (const [index, value] of optionalArray(root, "submixes").entries()) {
     builder = builder.submix(string(value, `$.submixes[${index}]`));
   }

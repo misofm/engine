@@ -1,4 +1,4 @@
-//! The live-console control seam: admitted records in, prepared automation spans out.
+//! The live-control seam: admitted records in, prepared automation spans out.
 //!
 //! # Why this lives in the contract crate
 //!
@@ -117,10 +117,10 @@ const fn order_key(parameter_index: u32, channel: ParameterChannel) -> (u32, u32
 /// `effect_compiler::lowers_session_bypass` (all but the delay and the multiband): preparation
 /// lowers it to a prepared `bypass = false` plus this lane's initial bypass, so a bypassed track keeps its place
 /// in its effect bank and the rack's [`BypassShunt`] selects the dry signal for exactly that lane.
-/// A session with no live console still needs somewhere to hold that bit, so
+/// A session with no live controls still needs somewhere to hold that bit, so
 /// [`without_channel`](Self::without_channel) builds a lane with no queue: nothing can ever be
 /// admitted to it, its drain stages nothing, and its bypass is the prepared one for the life of
-/// the plan. A live console replaces it with a channel seeded from the same bit.
+/// the plan. Live controls replace it with a channel seeded from the same bit.
 pub struct EffectControlLane {
     /// `None` for a lane that only carries a prepared bypass ([`Self::without_channel`]).
     control: Option<Consumer<EffectControlRecord>>,
@@ -163,8 +163,8 @@ impl EffectControlLane {
     /// #1087).
     ///
     /// Off the render thread, and it allocates nothing. It exists so that a session-bypassed
-    /// instance reaches the rack's latency-preserving [`BypassShunt`] whether or not a live
-    /// console is attached: the rack builds a shunt for an instance or a bank slot that holds any
+    /// instance reaches the rack's latency-preserving [`BypassShunt`] whether or not live
+    /// controls are attached: the rack builds a shunt for an instance or a bank slot that holds any
     /// lane, and restores the dry signal into every lane whose [`bypassed`](Self::bypassed) is
     /// true. The witness' `UNBYPASSED` term is seeded from `bypass` exactly as [`Self::new`]
     /// seeds it, so a statically bypassed lane declines the collapse from the plan's first block.
@@ -369,7 +369,7 @@ impl EffectControlLane {
             };
             // The one hook. `admit` takes the record by trait, not by kind, so a record type
             // added to this queue later cannot reach the render state without declaring what it
-            // does to the witness (`symmetry::LiveConsoleRecord`). The deferral beside it is the
+            // does to the witness (`symmetry::LiveControlRecord`). The deferral beside it is the
             // one exception, and it is by record *shape*, not a second path: a one-channel
             // `Parameter` is admitted at the end of the drain unless its span pairs.
             if matches!(
@@ -578,11 +578,11 @@ struct ObservationTap {
 ///
 /// # The two-level zero (issue #143 D3)
 ///
-/// Level 1 is that this type does not exist in a plan whose console request named no observation
-/// capacity: there is no lane, no slot and no vector, and the render path is the byte-identical one
-/// it always was. Level 2 is `ObservationTap::armed`: inside a capable plan, an unarmed tap's
-/// effect state is never read, never folded and never stored, and the honest cost is one predicted
-/// branch per driven effect per block.
+/// Level 1 is that this type does not exist in a plan whose live-control request named no
+/// observation capacity: there is no lane, no slot and no vector, and the render path is the
+/// byte-identical one it always was. Level 2 is `ObservationTap::armed`: inside a capable plan, an
+/// unarmed tap's effect state is never read, never folded and never stored, and the honest cost is
+/// one predicted branch per driven effect per block.
 #[derive(Debug)]
 pub struct ObservationLane {
     taps: Box<[ObservationTap]>,
@@ -846,10 +846,10 @@ impl ObservationLane {
 /// A session `bypass` is per-lane shunt state, not a prepared program, for every effect whose
 /// bypass `effect_compiler::lowers_session_bypass`: preparation lowers it to a prepared
 /// `bypass = false` plus the lane's initial bypass, carried by an
-/// [`EffectControlLane`] (a live channel, or [`EffectControlLane::without_channel`] when no console
-/// is attached). A shunt is built for every instance, and every bank slot, that holds such a lane:
-/// a live channel, or a lane bypassed at preparation. A session with neither allocates none of
-/// this and renders the byte-identical path it always did.
+/// [`EffectControlLane`] (a live channel, or [`EffectControlLane::without_channel`] when no live
+/// controls are attached). A shunt is built for every instance, and every bank slot, that holds
+/// such a lane: a live channel, or a lane bypassed at preparation. A session with neither allocates
+/// none of this and renders the byte-identical path it always did.
 ///
 /// A shunt-bypassed lane is bit-identical to the same instance prepared with `bypass = true`:
 /// every launch effect that banks emits, under a prepared bypass, its input delayed by exactly its

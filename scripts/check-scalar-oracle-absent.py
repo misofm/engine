@@ -19,7 +19,7 @@ What is matched
 ---------------
 Rust's symbol manglings (v0 `_R...` and legacy `_ZN...`) both spell an identifier as its decimal
 byte length followed by the identifier, so `19ScalarPairProcessor` is exactly that type and never
-`ConsoleScalarPairProcessor`, and `19into_graph_artifact` is never the banked
+`LiveControlScalarPairProcessor`, and `19into_graph_artifact` is never the banked
 `30into_graph_artifact_with_banks`. A roster entry matches a symbol that contains its
 length-prefixed spelling where the length is not itself the tail of a longer number.
 
@@ -56,9 +56,9 @@ FORBIDDEN: tuple[tuple[str, str, str], ...] = (
     ("InputProcessor", "builtins_compiler", "per-node input strip owner"),
     ("FaderProcessor", "builtins_compiler", "per-node fader strip owner"),
     ("MatrixProcessor", "builtins_compiler", "per-node matrix strip owner"),
-    ("ConsoleInputProcessor", "builtins_compiler", "per-node live input strip owner"),
-    ("ConsoleFaderProcessor", "builtins_compiler", "per-node live fader strip owner"),
-    ("ConsoleMatrixProcessor", "builtins_compiler", "per-node live matrix strip owner"),
+    ("LiveControlInputProcessor", "builtins_compiler", "per-node live input strip owner"),
+    ("LiveControlFaderProcessor", "builtins_compiler", "per-node live fader strip owner"),
+    ("LiveControlMatrixProcessor", "builtins_compiler", "per-node live matrix strip owner"),
     ("ScalarPairProcessor", "builtins_compiler", "serialized scalar fader/matrix pair"),
     ("ScalarSplitPairProcessor", "builtins_compiler", "split scalar fader/matrix owner"),
     ("make_scalar_pair", "builtins_compiler", "scalar pair factory"),
@@ -200,14 +200,16 @@ def check(label: str, symbols: list[str]) -> int:
 
 # Real symbols: from the shipped module and `libcapi.so` at c69736c1 (before #1059), where the
 # scalar path was still compiled in, and, for the two pairing functions a release build inlines,
-# from a debug `graph` rlib built with `test-support`.
+# from a debug `graph` rlib built with `test-support`. Issue #1095 renamed the three per-node live
+# strip owners from `Console*Processor` to `LiveControl*Processor`; their five symbols below are
+# those captures with the type's length-prefixed name re-spelled in place and nothing else moved.
 REAL_FORBIDDEN = {
     "InputProcessor": "_RNvXsd_Cs57Yi9iMBrcW_17builtins_compilerNtB5_14InputProcessorNtCs9KyrgcuZWw8_5graph21GraphRuntimeProcessor7process",
     "FaderProcessor": "_RNvXse_Cs57Yi9iMBrcW_17builtins_compilerNtB5_14FaderProcessorNtCs9KyrgcuZWw8_5graph21GraphRuntimeProcessor7process",
     "MatrixProcessor": "_RNvXsf_Cs57Yi9iMBrcW_17builtins_compilerNtB5_15MatrixProcessorNtCs9KyrgcuZWw8_5graph21GraphRuntimeProcessor7process",
-    "ConsoleInputProcessor": "_RNvXsg_Cs57Yi9iMBrcW_17builtins_compilerNtB5_21ConsoleInputProcessorNtCs9KyrgcuZWw8_5graph21GraphRuntimeProcessor7process",
-    "ConsoleFaderProcessor": "_RNvMsk_Cs57Yi9iMBrcW_17builtins_compilerNtB5_21ConsoleFaderProcessor14drain_controls",
-    "ConsoleMatrixProcessor": "_RNvMsi_Cs57Yi9iMBrcW_17builtins_compilerNtB5_22ConsoleMatrixProcessor14drain_controls",
+    "LiveControlInputProcessor": "_RNvXsg_Cs57Yi9iMBrcW_17builtins_compilerNtB5_25LiveControlInputProcessorNtCs9KyrgcuZWw8_5graph21GraphRuntimeProcessor7process",
+    "LiveControlFaderProcessor": "_RNvMsk_Cs57Yi9iMBrcW_17builtins_compilerNtB5_25LiveControlFaderProcessor14drain_controls",
+    "LiveControlMatrixProcessor": "_RNvMsi_Cs57Yi9iMBrcW_17builtins_compilerNtB5_26LiveControlMatrixProcessor14drain_controls",
     "ScalarPairProcessor": "_RNvXsl_Cs57Yi9iMBrcW_17builtins_compilerNtB5_19ScalarPairProcessorNtCs9KyrgcuZWw8_5graph21GraphRuntimeProcessor7process",
     "ScalarSplitPairProcessor": "_RNvXsm_CseApoyVW5ce9_17builtins_compilerNtB5_24ScalarSplitPairProcessorNtCs2vOlDtAeped_5graph30GraphRuntimeSplitPairProcessor11begin_fader",
     "make_scalar_pair": "_RNvCs57Yi9iMBrcW_17builtins_compiler16make_scalar_pair",
@@ -217,8 +219,8 @@ REAL_FORBIDDEN = {
     "select_scalar_pairs": "_RNvNtCsd3M4iPsRW3L_5graph7runtime19select_scalar_pairs",
     "scalar_pair_is_in_place": "_RNvNtCs9KyrgcuZWw8_5graph7runtime23scalar_pair_is_in_place",
     "scalar_split_interval_is_clear": "_RNvNtCsd3M4iPsRW3L_5graph7runtime30scalar_split_interval_is_clear",
-    "scalar_pair_factory": "_RNvXsj_Cs57Yi9iMBrcW_17builtins_compilerNtB5_21ConsoleFaderProcessorNtCs9KyrgcuZWw8_5graph21GraphRuntimeProcessor19scalar_pair_factory",
-    "scalar_split_pair_factory": "_RNvXsj_Cs57Yi9iMBrcW_17builtins_compilerNtB5_21ConsoleFaderProcessorNtCs9KyrgcuZWw8_5graph21GraphRuntimeProcessor25scalar_split_pair_factory",
+    "scalar_pair_factory": "_RNvXsj_Cs57Yi9iMBrcW_17builtins_compilerNtB5_25LiveControlFaderProcessorNtCs9KyrgcuZWw8_5graph21GraphRuntimeProcessor19scalar_pair_factory",
+    "scalar_split_pair_factory": "_RNvXsj_Cs57Yi9iMBrcW_17builtins_compilerNtB5_25LiveControlFaderProcessorNtCs9KyrgcuZWw8_5graph21GraphRuntimeProcessor25scalar_split_pair_factory",
 }
 REAL_CONTROLS = [
     "_RINvMsa_Cs57Yi9iMBrcW_17builtins_compilerNtB6_23PreparedBuiltinsSession30into_graph_artifact_with_banksNtCseoBS7rBbMCz_14graph_compiler18GraphCompileReportEB1F_",
@@ -231,7 +233,7 @@ REAL_CONTROLS = [
 # suffix.
 NEAR_MISSES = [
     "_RNvXs3_Cs57Yi9iMBrcW_17builtins_compilerNtB5_24FaderMatrixBankProcessorNtCs9KyrgcuZWw8_5graph33GraphPreparedBuiltinBankProcessor7process",
-    "_RNvCs0_4demo26ConsoleScalarPairProcessor",
+    "_RNvCs0_4demo30LiveControlScalarPairProcessor",
     "_RNvCs0_4demo114InputProcessor",
     "_ZN4demo20HostInputProcessor4new17h0123456789abcdefE",
     "_RNvCs0_4demo23scalar_pair_factory_log",

@@ -7,21 +7,21 @@ use crate::message_wire::{ParameterChannel, ParameterRack, ParameterUnit};
 
 pub(crate) const fn parameter_rack_wire(value: ParameterRack) -> u8 {
     match value {
-        ParameterRack::Simd1 => 1,
-        ParameterRack::Dynamic => 2,
-        ParameterRack::Simd2 => 3,
+        ParameterRack::Inserts => 2,
         ParameterRack::Builtins => 4,
+        ParameterRack::Console => 5,
     }
 }
 
 pub(crate) const fn parameter_rack_from_wire(
     value: u8,
 ) -> Result<ParameterRack, crate::DecodeError> {
+    // `1` (`simd1`) and `3` (`simd2`) are retired by decision 12: refused like any unallocated
+    // code, never reinterpreted.
     match value {
-        1 => Ok(ParameterRack::Simd1),
-        2 => Ok(ParameterRack::Dynamic),
-        3 => Ok(ParameterRack::Simd2),
+        2 => Ok(ParameterRack::Inserts),
         4 => Ok(ParameterRack::Builtins),
+        5 => Ok(ParameterRack::Console),
         _ => Err(crate::DecodeError::InvalidTlv),
     }
 }
@@ -879,6 +879,40 @@ pub(crate) mod session {
             fields: &[PARAMETER_ID, CHANNEL, UNIT, VALUE],
         };
     }
+    pub(crate) mod console_entry {
+        use super::*;
+        pub(crate) const SLOT: FieldSpec = FieldSpec::req(1, Wire::Utf8);
+        pub(crate) const BYPASS: FieldSpec = FieldSpec::req(2, Wire::Bool);
+        pub(crate) const PARAM: FieldSpec = FieldSpec::msg(3, true, true, &param::SPEC);
+        pub(crate) static SPEC: MessageSpec = MessageSpec {
+            name: "ConsoleEntry",
+            fields: &[SLOT, BYPASS, PARAM],
+        };
+    }
+    // Decision 12 (#1094): the session console declaration, with the session model's own field
+    // registry (`session::keys::console` and `console_slot`). A slot has no sidechain field.
+    pub(crate) mod console_slot {
+        use super::*;
+        pub(crate) const SLOT: FieldSpec = FieldSpec::req(1, Wire::Utf8);
+        pub(crate) const IDENTITY: FieldSpec =
+            FieldSpec::msg(2, true, false, &effect_identity::SPEC);
+        pub(crate) const QUALITY: FieldSpec = FieldSpec::req(3, Wire::U8);
+        pub(crate) const LINK_MODE: FieldSpec = FieldSpec::req(4, Wire::U8);
+        pub(crate) static SPEC: MessageSpec = MessageSpec {
+            name: "ConsoleSlot",
+            fields: &[SLOT, IDENTITY, QUALITY, LINK_MODE],
+        };
+    }
+    pub(crate) mod console {
+        use super::*;
+        pub(crate) const PRE_INSERT: FieldSpec = FieldSpec::msg(1, true, true, &console_slot::SPEC);
+        pub(crate) const POST_INSERT: FieldSpec =
+            FieldSpec::msg(2, true, true, &console_slot::SPEC);
+        pub(crate) static SPEC: MessageSpec = MessageSpec {
+            name: "Console",
+            fields: &[PRE_INSERT, POST_INSERT],
+        };
+    }
     pub(crate) mod rack {
         use super::*;
         pub(crate) const EFFECT: FieldSpec = FieldSpec::msg(1, true, true, &effect::SPEC);
@@ -942,12 +976,13 @@ pub(crate) mod session {
         pub(crate) const LEFT_SOURCE_CHANNEL: FieldSpec = FieldSpec::req(3, Wire::U8);
         pub(crate) const RIGHT_SOURCE_CHANNEL: FieldSpec = FieldSpec::req(4, Wire::U8);
         pub(crate) const BUILTINS: FieldSpec = FieldSpec::msg(5, true, false, &builtins::SPEC);
-        pub(crate) const SIMD1: FieldSpec = FieldSpec::msg(6, true, false, &rack::SPEC);
-        pub(crate) const DYNAMIC: FieldSpec = FieldSpec::msg(7, true, false, &rack::SPEC);
-        pub(crate) const SIMD2: FieldSpec = FieldSpec::msg(8, true, false, &rack::SPEC);
+        // Decision 12: fields 6 (`simd1`) and 8 (`simd2`) are retired and never reallocated;
+        // `inserts` keeps the retired `dynamic` rack's field 7, and `console` is appended as 11.
+        pub(crate) const INSERTS: FieldSpec = FieldSpec::msg(7, true, false, &rack::SPEC);
         pub(crate) const FADER: FieldSpec = FieldSpec::msg(9, true, false, &fader::SPEC);
         pub(crate) const MATRIX_OR_PAN: FieldSpec =
             FieldSpec::msg(10, true, false, &matrix_or_pan::KNOWN);
+        pub(crate) const CONSOLE: FieldSpec = FieldSpec::msg(11, true, true, &console_entry::SPEC);
         pub(crate) static SPEC: MessageSpec = MessageSpec {
             name: "Track",
             fields: &[
@@ -956,11 +991,20 @@ pub(crate) mod session {
                 LEFT_SOURCE_CHANNEL,
                 RIGHT_SOURCE_CHANNEL,
                 BUILTINS,
-                SIMD1,
-                DYNAMIC,
-                SIMD2,
+                INSERTS,
                 FADER,
                 MATRIX_OR_PAN,
+                CONSOLE,
+            ],
+        };
+        /// The retired track fields (#1094): a peer that sends one is refused in either flag
+        /// form. A mandatory one is an unknown required field; an optional one is *not* skipped
+        /// as an unknown optional field would be, because a retired ID is known, not new.
+        pub(crate) static RETIRED: MessageSpec = MessageSpec {
+            name: "TrackRetiredFields",
+            fields: &[
+                FieldSpec::opt(6, Wire::Message),
+                FieldSpec::opt(8, Wire::Message),
             ],
         };
     }
@@ -1087,6 +1131,14 @@ pub(crate) mod session {
         pub(crate) const VALUE: FieldSpec = FieldSpec::msg(1, true, false, &output_profile::SPEC);
         pub(crate) static SPEC: MessageSpec = MessageSpec {
             name: "SetOutputProfile",
+            fields: &[VALUE],
+        };
+    }
+    pub(crate) mod set_console {
+        use super::*;
+        pub(crate) const VALUE: FieldSpec = FieldSpec::msg(1, true, false, &console::SPEC);
+        pub(crate) static SPEC: MessageSpec = MessageSpec {
+            name: "SetConsole",
             fields: &[VALUE],
         };
     }
@@ -1297,6 +1349,15 @@ pub(crate) mod session {
             fields: &[TRACK_ID, VALUE],
         };
     }
+    pub(crate) mod set_track_console {
+        use super::*;
+        pub(crate) const TRACK_ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
+        pub(crate) const ENTRY: FieldSpec = FieldSpec::msg(2, true, true, &console_entry::SPEC);
+        pub(crate) static SPEC: MessageSpec = MessageSpec {
+            name: "SetTrackConsole",
+            fields: &[TRACK_ID, ENTRY],
+        };
+    }
     pub(crate) mod upsert_submix {
         use super::*;
         pub(crate) const VALUE: FieldSpec = FieldSpec::msg(1, true, false, &submix::SPEC);
@@ -1427,6 +1488,7 @@ pub(crate) mod session {
             SetQuantumFrames => &set_quantum::SPEC,
             SetRenderProfile => &set_render_profile::SPEC,
             SetOutputProfile => &set_output_profile::SPEC,
+            SetConsole => &set_console::SPEC,
             UpsertSource => &upsert_source::SPEC,
             RemoveSource => &remove_source::SPEC,
             SetSourceContent => &set_source_content::SPEC,
@@ -1447,6 +1509,7 @@ pub(crate) mod session {
             RemoveEffectParam => &remove_effect_param::SPEC,
             SetTrackFader => &set_track_fader::SPEC,
             SetTrackMatrixOrPan => &set_track_matrix::SPEC,
+            SetTrackConsole => &set_track_console::SPEC,
             UpsertSubmix => &upsert_submix::SPEC,
             RemoveSubmix => &remove_submix::SPEC,
             UpsertOutput => &upsert_output::SPEC,
@@ -1553,12 +1616,12 @@ mod tests {
     #[test]
     fn parameter_enum_wire_mappings_are_exhaustive_and_roundtrip() {
         for (value, wire) in [
-            (ParameterRack::Simd1, 1),
-            (ParameterRack::Dynamic, 2),
-            (ParameterRack::Simd2, 3),
-            // #178, ruled by #210's D2: the strip's own builtin section. Appended, so the three
-            // existing codes are untouched.
+            // Decision 12: `inserts` kept the retired `dynamic` rack's `2`.
+            (ParameterRack::Inserts, 2),
+            // #178, ruled by #210's D2: the strip's own builtin section, unmoved at `4`.
             (ParameterRack::Builtins, 4),
+            // Decision 12: a session console slot, appended.
+            (ParameterRack::Console, 5),
         ] {
             assert_eq!(value as u64, u64::from(wire));
             assert_eq!(parameter_rack_wire(value), wire);
@@ -1567,6 +1630,18 @@ mod tests {
             assert_eq!(ParameterRack::from(session), value);
             assert_eq!(session_parameter_rack_wire(session), wire);
             assert_eq!(session_parameter_rack_from_wire(wire), Ok(session));
+            // The session enum spells the same explicit codes: an index-derived `RackName::wire()`
+            // would make `inserts` `1` and `builtins` `2`.
+            assert_eq!(session.wire(), wire);
+            assert_eq!(::session::RackName::from_wire(wire), Some(session));
+        }
+        // The retired `simd1` and `simd2` codes are refused on both tables, never reinterpreted.
+        for retired in [1, 3] {
+            assert_eq!(
+                parameter_rack_from_wire(retired),
+                Err(crate::DecodeError::InvalidTlv)
+            );
+            assert_eq!(::session::RackName::from_wire(retired), None);
         }
         for (value, wire) in [
             (ParameterChannel::Left, 1),

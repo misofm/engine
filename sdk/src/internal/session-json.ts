@@ -19,6 +19,7 @@ const ROOT_KEYS = [
   "render_profile",
   "output_profile",
   "sources",
+  "console",
   "tracks",
   "submixes",
   "outputs",
@@ -69,8 +70,10 @@ const OBJECT_KEY_ORDERS = {
   sources: ["id", "content", "channels", "bit_depth", "frames"],
   builtins: ["left", "right"],
   channel_builtins: ["polarity_invert", "trim_db", "hpf_hz", "lpf_hz", "delay_samples"],
-  rack: ["effects"],
+  inserts: ["effects"],
   effects: ["id", "identity", "quality", "bypass", "link_mode", "params", "sidechain"],
+  pre_insert: ["slot", "identity", "quality", "link_mode"],
+  post_insert: ["slot", "identity", "quality", "link_mode"],
   params: ["parameter_id", "channel", "unit", "value"],
   fader: ["left_db", "right_db", "left_mute", "right_mute"],
   pan: ["left", "right", "smoothing_samples"],
@@ -110,11 +113,15 @@ function objectOrder(record: ModelRecord, key: string): readonly string[] {
   if (key === "tracks") {
     return [
       "id", "source_id", "left_source_channel", "right_source_channel", "builtins",
-      "simd1", "dynamic", "simd2", "fader", "pan" in record ? "pan" : "matrix",
+      "console", "inserts", "fader", "pan" in record ? "pan" : "matrix",
     ];
   }
+  // `console` names two records: the session's root declaration and each entry of a track's
+  // console array. The root one is the only record with sections.
+  if (key === "console") {
+    return "pre_insert" in record ? ["pre_insert", "post_insert"] : ["slot", "bypass", "params"];
+  }
   if (key === "left" || key === "right") return OBJECT_KEY_ORDERS.channel_builtins;
-  if (key === "simd1" || key === "dynamic" || key === "simd2") return OBJECT_KEY_ORDERS.rack;
   if (["identity", "sidechain", "source", "destination"].includes(key)) {
     return taggedOrder(record, key);
   }

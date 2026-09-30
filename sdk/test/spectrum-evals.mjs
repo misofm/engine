@@ -35,9 +35,9 @@ function spectrumDocument() {
   return sessionDocument({
     frames: 4_800,
     effects: {
-      simd1: [effectEntry("eq", "miso.parametric-eq", eqParameters())],
-      dynamic: [],
-      simd2: [],
+      preInsert: [effectEntry("eq", "miso.parametric-eq", eqParameters())],
+      inserts: [],
+      postInsert: [],
     },
   });
 }
@@ -103,7 +103,7 @@ function queuedManagedSpectrumOwner(query, queued) {
   const owner = new ObservationSubscriptionOwner({
     observationMap: () => ({ bindings: [] }),
     readObservations: () => [],
-    console: () => { throw new Error("unused"); },
+    liveControls: () => { throw new Error("unused"); },
     spectrumPrepared: () => query,
     spectrumStart: async () => ({
       ok: true,
@@ -198,8 +198,8 @@ test("candidate Wasm spectrum query captures all graph targets through explicit 
 }, async () => {
   const asset = await candidateAsset();
   const queries = [
-    queryFor({ kind: "trackPostInputBuiltins", trackId: "t" }),
-    queryFor({ kind: "trackPostMatrix", trackId: "t" }),
+    queryFor({ kind: "trackPostInput", trackId: "t" }),
+    queryFor({ kind: "trackPostPan", trackId: "t" }),
     queryFor({ kind: "output", outputId: "out" }),
   ];
   const results = [];
@@ -263,7 +263,7 @@ test("candidate Wasm spectrum arm, cancel, and dispose preserve lifecycle refusa
   skip: !process.env.MISO_ENGINE_SDK_ARTIFACTS_HEX,
 }, async () => {
   const asset = await candidateAsset();
-  const query = queryFor({ kind: "trackPostMatrix", trackId: "t" });
+  const query = queryFor({ kind: "trackPostPan", trackId: "t" });
   const engine = await makeEngine(asset, query);
   assert.equal(engine.armSpectrum().ok, true);
   const cancelled = engine.cancelSpectrum();
@@ -282,7 +282,7 @@ test("candidate Wasm spectrum honors a selected channel and explicit capture lim
   skip: !process.env.MISO_ENGINE_SDK_ARTIFACTS_HEX,
 }, async () => {
   const asset = await candidateAsset();
-  const query = queryFor({ kind: "trackPostMatrix", trackId: "t" }, "left");
+  const query = queryFor({ kind: "trackPostPan", trackId: "t" }, "left");
   const engine = await makeEngine(asset, query);
   try {
     assert.equal(engine.armSpectrum().ok, true);
@@ -567,11 +567,11 @@ test("managed spectrum anchors asynchronous reads to native cadence", async (t) 
     const readReleases = [];
     const notifications = [];
     const observationSelection = {
-      trackId: "t", rack: "dynamic", effectSlotId: "comp", tapId: 1, channels: CHANNELS,
+      trackId: "t", rack: "inserts", effectSlotId: "comp", tapId: 1, channels: CHANNELS,
     };
     const observationMap = {
       bindings: [{
-        trackId: "t", rack: "dynamic", effectSlotId: "comp", effectIndex: 0,
+        trackId: "t", rack: "inserts", effectSlotId: "comp", effectIndex: 0,
         nativeEffectId: "miso.compressor", tapIds: [1],
       }],
     };
@@ -628,7 +628,7 @@ test("managed spectrum anchors asynchronous reads to native cadence", async (t) 
           window: { firstSample: 0n, endSample: 128n, sequence: 1n, blocks: 1 },
         } : {}),
       })),
-      console: () => ({
+      liveControls: () => ({
         edit: {
           track: () => ({
             effect: () => ({ observe: (_tap, armed) => ({ kind: armed ? "observeSubscribe" : "observeUnsubscribe" }) }),
@@ -718,7 +718,7 @@ test("managed spectrum anchors asynchronous reads to native cadence", async (t) 
 });
 
 test("managed spectrum collection updates target and smoothing atomically", async () => {
-  const firstQuery = queryFor({ kind: "trackPostMatrix", trackId: "t" });
+  const firstQuery = queryFor({ kind: "trackPostPan", trackId: "t" });
   const secondQuery = queryFor({ kind: "output", outputId: "out" });
   const collection = {
     entries: [
@@ -772,7 +772,7 @@ test("managed spectrum collection updates target and smoothing atomically", asyn
   const owner = new ObservationSubscriptionOwner({
     observationMap: () => ({ bindings: [] }),
     readObservations: () => [],
-    console: () => { throw new Error("unused"); },
+    liveControls: () => { throw new Error("unused"); },
     spectrumPreparedCollection: () => collection,
     spectrumSelect: async () => ({ ok: true, result: 0, code: "ok" }),
     spectrumStreamSelect: async (query, smoothingMs) => {
@@ -907,7 +907,7 @@ test("managed spectrum loss baselines stay monotonic within an epoch and reset o
   const owner = new ObservationSubscriptionOwner({
     observationMap: () => ({ bindings: [] }),
     readObservations: () => [],
-    console: () => { throw new Error("unused"); },
+    liveControls: () => { throw new Error("unused"); },
     spectrumPrepared: () => prepared,
     spectrumStart: async () => ({ ok: true, result: 0, code: "ok", metadata: metadata("warming", 0, 0n) }),
     spectrumRead: async () => reads.shift() ?? { metadata: metadata("pending", 1, 0n), result: undefined },
@@ -961,7 +961,7 @@ test("automatic spectrum drains once after a gap and preserves coalesced losses"
   let stopped = false;
   const owner = new ObservationSubscriptionOwner({
     observationMap: () => ({ bindings: [] }), readObservations: () => [],
-    console: () => { throw new Error("unused"); }, spectrumPrepared: () => prepared,
+    liveControls: () => { throw new Error("unused"); }, spectrumPrepared: () => prepared,
     spectrumStart: async () => ({ ok: true, result: 0, code: "ok", metadata: metadata("warming", 0, 0n) }),
     spectrumRead: async () => { calls++; return await queued.shift(); },
     spectrumStop: async () => { stopped = true; return { ok: true, result: 0, code: "ok" }; },
@@ -1248,7 +1248,7 @@ test("managed spectrum publication metadata survives pending and lifecycle reads
   const owner = new ObservationSubscriptionOwner({
     observationMap: () => ({ bindings: [] }),
     readObservations: () => [],
-    console: () => { throw new Error("unused"); },
+    liveControls: () => { throw new Error("unused"); },
     spectrumPrepared: () => prepared,
     spectrumStart: async () => ({
       ok: true, result: 0, code: "ok", metadata: metadata("warming", 0, 0n),
@@ -1373,7 +1373,7 @@ test("managed spectrum admission refuses before start and preserves a working st
     const owner = new ObservationSubscriptionOwner({
       observationMap: () => ({ bindings: [] }),
       readObservations: () => [],
-      console: () => { throw new Error("unused"); },
+      liveControls: () => { throw new Error("unused"); },
       spectrumPrepared: () => prepared,
       spectrumStart: async () => {
         starts += 1;
@@ -1398,7 +1398,7 @@ test("managed spectrum admission refuses before start and preserves a working st
   );
   assert.deepEqual(refused.counts(), { starts: 0, stops: 0, reads: 0 });
 
-  const malformed = makeOwner(undefined, metadata({ kind: "trackPostMatrix", trackId: "other" }));
+  const malformed = makeOwner(undefined, metadata({ kind: "trackPostPan", trackId: "other" }));
   await assert.rejects(
     malformed.owner.subscribeSpectrum({ ...prepared, cadenceMs: 1 }),
     /target differs|not prepared/,

@@ -1,5 +1,14 @@
 # Issue #281 — the qualification harness's boot refusal, and the corpus-document audit that cleared
 
+> **Names since #1095.** The qualification harness's "console" row is the live-control row.
+> `runConsoleQualification`, `CONSOLE_*`, `consoleDocument`, the result key `console` and the
+> source id `console-source` are now `runLiveControlQualification`, `LIVE_CONTROL_*`,
+> `liveControlDocument`, `liveControls` and `live-control-source`, and the text below uses the new
+> names. Document paths keep their spelling of the time: the documents are canonical JSON since
+> #338, and `console-session` is `live-control-session.json` since #1095. Field names in §4's
+> migration table also keep their spelling of the time; the four boot words are `liveControl*`
+> since #1095.
+
 `hosts/host-web/qualification` failed at boot on unmodified `main` with
 `miso.error.v1`, `requestId 0`, `result 1` — the corpus row, before any audio was rendered. #281
 opened with the leading hypothesis that this was the last member of the #241-fallout class: stale
@@ -42,7 +51,7 @@ was itself refused before it could answer.
 | document | fetched as | booted by |
 | --- | --- | --- |
 | `tests/browser-v1/session.toml` | `/fixture/session.toml` | `runCorpusQualification` (twice, two fresh contexts) |
-| `qualification/console-session.toml` | `/qualification/console-session.toml` | `runConsoleQualification` |
+| `qualification/console-session.toml` | `/qualification/console-session.toml` | `runLiveControlQualification` |
 | `qualification/observation-session.toml` | `/qualification/observation-session.toml` | `runObservationRun` (armed and disarmed) |
 | `qualification/stall-session.toml` | `/qualification/stall-session.toml` | `runStallQualification` and `typedUnsupportedAttestation` |
 
@@ -109,7 +118,7 @@ argument shape:
 | pre-#240 | post-#240 |
 | --- | --- |
 | `{ context, quantumFrames, sessionToml, limits, simd128ModuleUrl, workletModuleUrl }` | `{ context, document, options, simd128ModuleUrl, workletModuleUrl }` |
-| `limits` — 27 fields: 21 capacity ceilings plus `sourceRingFrames` and the four console words | `options` — exactly 6: `sourceRingFrames`, `maximumMemoryBytes`, and the four console words |
+| `limits` — 27 fields: 21 capacity ceilings plus `sourceRingFrames` and the four live-control words | `options` — exactly 6: `sourceRingFrames`, `maximumMemoryBytes`, and the four live-control words |
 | `quantumFrames` supplied by the caller | taken from `context.renderQuantumSize ?? 128` |
 
 `579fbce1` updated `tests/browser-v1/browser-correctness.js`, `direct-oracle.mjs`,
@@ -135,7 +144,7 @@ worklet repeats the same guard on `processorOptions` (`miso-engine-v1-audio-work
 `INIT_FIELDS = ["module","document","options"]`), which is the leg that refused `diagnoseReady`.
 
 Six call sites carried the stale shape: `renderCorpusSegment`, `typedUnsupportedAttestation`,
-`diagnoseReady`, `runConsoleQualification`, `runObservationRun`, `runStallQualification`. The
+`diagnoseReady`, `runLiveControlQualification`, `runObservationRun`, `runStallQualification`. The
 corpus row simply ran first.
 
 ## 4. The migration
@@ -152,15 +161,15 @@ The mapping is total and mechanical:
 | `quantumFrames` (a sibling argument, not a limit) | **deleted**; the context's `renderQuantumSize` is authoritative |
 
 `sessionToml` → `document` at each call site, `limits:` → `options:`; the helper parameter becomes
-`sessionDocument` and `runQualification`'s locals become `corpusDocument`, `consoleDocument`,
+`sessionDocument` and `runQualification`'s locals become `corpusDocument`, `liveControlDocument`,
 `observationDocument`, `stallDocument`. Renaming the *parameters* is not cosmetic and not optional:
 `document` is a live global in the main realm, so an object literal using `{ document, … }`
 shorthand beside a parameter still spelled `sessionToml` would have quietly handed the host the
 page's `Document` object instead of the session bytes.
 
 Not one boot-relevant *value* changes. Every call site keeps the `sourceRingFrames` it had —
-`frames` for the corpus segments, `CONSOLE_FRAMES`, `OBSERVATION_FRAMES`, `DEFAULT_RING_FRAMES`
-for stall — and the four console words are unchanged per row.
+`frames` for the corpus segments, `LIVE_CONTROL_FRAMES`, `OBSERVATION_FRAMES`, `DEFAULT_RING_FRAMES`
+for stall — and the four live-control words are unchanged per row.
 
 ## 5. Why no digest and no byte-length pin moves
 
@@ -171,14 +180,15 @@ fixture, no `expected.json`. So:
 
 * **Byte-length pins.** `sessionTomlBytes` is a function of a document's byte length; no document's
   byte length moved, so `tests/browser-v1/expected.json`'s frozen `"sessionTomlBytes": "1265"` and
-  the `console`/`stall`/`observation` documents' 1,265 / 1,263 / 2,402 bytes (recorded in
+  the live-control, stall and observation documents' 1,265 / 1,263 / 2,402 bytes (recorded in
   `241-browser-source-identities.md`) are all untouched. The live boot in §2 reports `1265`,
   agreeing with the pin. Nothing needed re-deriving.
 * **Rendered digests.** Every digest the harness gates on is computed at run time from rendered or
-  fed PCM: `console.expectedDigest`/`renderedDigest`, `stall.expectedDigest`/`renderedDigest`, the
-  observation rows' `identicalAudio`, and `corpus.browserDigests`. The one *frozen* audio pin on
-  this leg is `corpus.nativeDigest` — `expected.directOracle.nativePcmF32leSha256` from
-  `tests/browser-v1/expected.json`, an unchanged file — and the gate is
+  fed PCM: `liveControls.expectedDigest`/`renderedDigest`, `stall.expectedDigest`/
+  `renderedDigest`, the observation rows' `identicalAudio`, and `corpus.browserDigests`. The one
+  *frozen* audio pin on this leg is `corpus.nativeDigest` —
+  `expected.directOracle.nativePcmF32leSha256` from `tests/browser-v1/expected.json`, an unchanged
+  file — and the gate is
 
   ```js
   corpus.nativeDigest === corpus.shippedArtifactDigest

@@ -255,7 +255,15 @@ async function build(args: BuildArguments): Promise<void> {
       json = sessionBuilderFromRequest(request).toJson();
     } catch (error) {
       if (error instanceof MisoUsageError || error instanceof TypeError) {
-        throw new CliFailure(3, "request.shape", error.message);
+        // A builder refusal the engine would also make carries the engine's own code, so a
+        // request refused here and one refused at boot read in one vocabulary.
+        const code = error instanceof MisoUsageError ? error.diagnosticCode : undefined;
+        throw new CliFailure(
+          3,
+          "request.shape",
+          error.message,
+          code === undefined ? {} : { diagnostics: [{ code, path: "" }] },
+        );
       }
       throw error;
     }

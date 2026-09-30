@@ -7,8 +7,8 @@
 //! parameters drawn from every launch effect's descriptor (symmetric or channel-asymmetric),
 //! bypassed effects, input delays, trims and cuts, compressor and gate sidechains from earlier
 //! tracks, and sends from every tap into submixes. Each console is prepared through host-core's
-//! own entry points with a live console attached, fed one deterministic source, and rendered with
-//! random live-console records at random blocks: input trim and polarity, fader and mute, matrix,
+//! own entry points with live controls attached, fed one deterministic source, and rendered with
+//! random live-control records at random blocks: input trim and polarity, fader and mute, matrix,
 //! effect parameter points (bit-equal `Left`/`Right` twins, or one channel) and live bypass.
 //!
 //! The oracles, every one by bits:
@@ -31,28 +31,28 @@ use core::num::{NonZeroU32, NonZeroUsize};
 use builtins::{BuiltinLaneSelector, Matrix2x2, MeterTap};
 use builtins_compiler::{TrackControlRecord, TrackFaderRecord, TrackInputRecord};
 use dsp_reference::randomized::{Draw, first_difference, run_seeds};
-use effect_compiler::launch_native_effect_registry;
+use effect_compiler::{CONSOLE_ELIGIBLE_EFFECTS, launch_native_effect_registry};
 use effect_contract::{
     AutomationRate, EffectControlRecord, EffectDescriptor, NativeEffectRegistry,
     ParameterChannelPolicy, ParameterDomain,
 };
 use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use host_core::{
-    HostConsoleHandles, HostConsoleRequest, HostPrepareCaps, HostShapePolicy, PreparedHost,
+    HostLiveControlHandles, HostLiveControlRequest, HostPrepareCaps, HostShapePolicy, PreparedHost,
     ResponseParameterOverride, ResponsePreviewError, ResponsePreviewGrid, ResponsePreviewLimits,
     ResponsePreviewOutput, ResponsePreviewRequest, ResponsePreviewTarget,
     ResponseSnapshotCollector, ResponseSnapshotOutput, ResponseSnapshotQueryError,
     SourceSubmission, compile_host_session, prepare_host_runtime_between_render_calls,
-    prepare_host_runtime_with_console, query_response_snapshot_into,
+    prepare_host_runtime_with_live_controls, query_response_snapshot_into,
 };
 use session::{
-    ChannelMatrix, Effect, EffectIdentity, EffectParam, LinkMode, ParameterChannel, ParameterUnit,
-    Route, RouteDestination, RouteSource, SendTap, SessionModel, Sidechain, SidechainDeclaration,
-    StableId, Submix, canonical_session_json, parse_session_json,
+    ChannelMatrix, ConsoleEntry, ConsoleSlot, Effect, EffectIdentity, EffectParam, LinkMode,
+    ParameterChannel, ParameterUnit, Route, RouteDestination, RouteSource, SendTap, SessionModel,
+    Sidechain, SidechainDeclaration, StableId, Submix, canonical_session_json, parse_session_json,
 };
 
-/// Eight tracks, one banked parametric EQ each in `simd1`: the strip every generated track starts
-/// from, and the source and output every console uses.
+/// Eight tracks, one banked parametric EQ each as a `console.pre_insert` slot: the strip every
+/// generated track starts from, and the source and output every console uses.
 const BANK: &str = include_str!("../../../fixtures/session/v1/parametric-eq-bank-console.json");
 const QUANTUM: usize = 128;
 const BLOCKS: usize = 8;
@@ -78,12 +78,12 @@ const SIMD2: &[&[usize]] = &[&[], &[4], &[4], &[5, 4], &[3, 4], &[0, 4]];
 
 const TAPS: [SendTap; 7] = [
     SendTap::Input,
-    SendTap::PostInputBuiltins,
-    SendTap::PostSimd1,
-    SendTap::PostDynamic,
-    SendTap::PostSimd2PreFader,
+    SendTap::PostInput,
+    SendTap::InsertSend,
+    SendTap::InsertReturn,
+    SendTap::PreFader,
     SendTap::PostFader,
-    SendTap::PostMatrix,
+    SendTap::PostPan,
 ];
 
 fn caps() -> HostPrepareCaps {
@@ -109,8 +109,8 @@ fn caps() -> HostPrepareCaps {
     }
 }
 
-fn console(tap: MeterTap) -> HostConsoleRequest {
-    HostConsoleRequest {
+fn live_controls(tap: MeterTap) -> HostLiveControlRequest {
+    HostLiveControlRequest {
         control_queue_depth: Some(NonZeroUsize::new(8).expect("depth")),
         meter_period_frames: Some(NonZeroU32::new(QUANTUM as u32).expect("period")),
         meter_queue_depth: NonZeroUsize::new(16).expect("meter depth"),
@@ -235,6 +235,72 @@ fn effect(
     effect
 }
 
+/// Place generated per-track chains in decision 12's shape, by the rule #1093 migrated the
+/// checked-in documents with: a first or third chain that every track declares identically (IDs,
+/// identity, quality, link mode), keyless and console-eligible, becomes `console.pre_insert` or
+/// `console.post_insert`, with each track's bypass and params in its entries; every other chain
+/// folds into the track's inserts in chain order. Chain order is never changed.
+fn place(model: &mut SessionModel, chains: Vec<[Vec<Effect>; 3]>) {
+    let console = |rack: usize| -> Option<Vec<ConsoleSlot>> {
+        let declaration = |effect: &Effect| {
+            (
+                effect.id.clone(),
+                effect.identity.clone(),
+                effect.quality,
+                effect.link_mode,
+            )
+        };
+        let first: Vec<_> = chains.first()?[rack].iter().map(declaration).collect();
+        let uniform = chains.iter().all(|track| {
+            track[rack]
+                .iter()
+                .map(declaration)
+                .eq(first.iter().cloned())
+                && track[rack].iter().all(|effect| {
+                    effect.sidechain == SidechainDeclaration::None
+                        && matches!(&effect.identity, EffectIdentity::Native { effect_id }
+                            if CONSOLE_ELIGIBLE_EFFECTS.contains(&effect_id.as_str()))
+                })
+        });
+        uniform.then(|| {
+            first
+                .into_iter()
+                .map(|(slot, identity, quality, link_mode)| ConsoleSlot {
+                    slot,
+                    identity,
+                    quality,
+                    link_mode,
+                })
+                .collect()
+        })
+    };
+    let (pre, post) = (console(0), console(2));
+    model.console.pre_insert = pre.clone().unwrap_or_default();
+    model.console.post_insert = post.clone().unwrap_or_default();
+    let entry = |effect: Effect| ConsoleEntry {
+        slot: effect.id,
+        bypass: effect.bypass,
+        params: effect.params,
+    };
+    for (track, [first, second, third]) in model.tracks.iter_mut().zip(chains) {
+        let mut entries = Vec::new();
+        let mut inserts = Vec::new();
+        if pre.is_some() {
+            entries.extend(first.into_iter().map(entry));
+        } else {
+            inserts.extend(first);
+        }
+        inserts.extend(second);
+        if post.is_some() {
+            entries.extend(third.into_iter().map(entry));
+        } else {
+            inserts.extend(third);
+        }
+        track.console = entries;
+        track.inserts.effects = inserts;
+    }
+}
+
 fn route(id: &str, source: RouteSource, destination: RouteDestination, gain_db: f32) -> Route {
     Route {
         id: sid(id),
@@ -260,8 +326,11 @@ fn route(id: &str, source: RouteSource, destination: RouteDestination, gain_db: 
 fn generate(draw: &mut Draw, registry: &NativeEffectRegistry) -> (SessionModel, bool) {
     let mut model = parse_session_json(BANK).expect("the bank fixture");
     model.sample_rate_hz = draw.pick(&[44_100, 48_000, 48_000, 88_200, 96_000]);
-    let strip = model.tracks[0].clone();
-    let template = strip.simd1.effects[0].clone();
+    let mut strip = model.tracks[0].clone();
+    let template = model.lower_track(&strip).pre_insert[0].clone();
+    strip.console.clear();
+    strip.inserts.effects.clear();
+    let mut chains = Vec::new();
     model.tracks.clear();
     model.routes.clear();
     model.submixes.clear();
@@ -355,6 +424,7 @@ fn generate(draw: &mut Draw, registry: &NativeEffectRegistry) -> (SessionModel, 
                 draw.pick(&[-144.0_f32, -24.0, -6.0, 0.0, 6.0])
             };
         }
+        let mut track_chains: [Vec<Effect>; 3] = Default::default();
         for (rack, strip_kinds) in racks.into_iter().enumerate() {
             let mut kinds: Vec<usize> = if free {
                 (0..draw.below(4))
@@ -406,12 +476,9 @@ fn generate(draw: &mut Draw, registry: &NativeEffectRegistry) -> (SessionModel, 
                     effect
                 })
                 .collect();
-            match rack {
-                0 => track.simd1.effects = effects,
-                1 => track.dynamic.effects = effects,
-                _ => track.simd2.effects = effects,
-            }
+            track_chains[rack] = effects;
         }
+        chains.push(track_chains);
         model.tracks.push(track);
         let to_bus = submixes > 0 && draw.chance(1, 4);
         let source = |tap| RouteSource::Track {
@@ -421,7 +488,7 @@ fn generate(draw: &mut Draw, registry: &NativeEffectRegistry) -> (SessionModel, 
         if !to_bus || draw.chance(1, 2) {
             model.routes.push(route(
                 &format!("{id}-main"),
-                source(SendTap::PostMatrix),
+                source(SendTap::PostPan),
                 main_out(),
                 0.0,
             ));
@@ -437,6 +504,7 @@ fn generate(draw: &mut Draw, registry: &NativeEffectRegistry) -> (SessionModel, 
             ));
         }
     }
+    place(&mut model, chains);
     (model, hazard)
 }
 
@@ -444,10 +512,10 @@ fn generate(draw: &mut Draw, registry: &NativeEffectRegistry) -> (SessionModel, 
 struct Arm {
     label: &'static str,
     host: PreparedHost,
-    handles: HostConsoleHandles,
+    handles: HostLiveControlHandles,
 }
 
-/// One block's live-console records, applied to every arm.
+/// One block's live-control records, applied to every arm.
 #[derive(Clone, Copy, Debug)]
 enum Live {
     Input(usize, TrackInputRecord),
@@ -469,8 +537,8 @@ fn smoothing(draw: &mut Draw) -> u32 {
     draw.pick(&[0_u32, 1, 17, 64, 480])
 }
 
-/// Up to three live-console records for this block.
-fn live_records(draw: &mut Draw, handles: &HostConsoleHandles) -> Vec<Live> {
+/// Up to three live-control records for this block.
+fn live_records(draw: &mut Draw, handles: &HostLiveControlHandles) -> Vec<Live> {
     let mut records = Vec::new();
     let tracks = handles.track_controls.len();
     for _ in 0..draw.below(4) {
@@ -580,7 +648,7 @@ fn live_records(draw: &mut Draw, handles: &HostConsoleHandles) -> Vec<Live> {
 
 /// Pushes one record and says whether the queue took it; a full queue answers the same on every
 /// arm, because every arm has seen the same records.
-fn push(handles: &mut HostConsoleHandles, record: Live) -> bool {
+fn push(handles: &mut HostLiveControlHandles, record: Live) -> bool {
     match record {
         Live::Input(track, record) => handles.track_controls[track].input.try_push(record).is_ok(),
         Live::Fader(track, record) => handles.track_controls[track].fader.try_push(record).is_ok(),
@@ -619,7 +687,7 @@ fn probe(seed: u64, registry: &NativeEffectRegistry, reach: &mut Reach) {
             MeterTap::PostInputBuiltins,
         ])
     };
-    let request = console(tap);
+    let request = live_controls(tap);
     let compiled = match compile_host_session(&document, &caps) {
         Ok(compiled) => compiled,
         Err(failure) => {
@@ -637,7 +705,7 @@ fn probe(seed: u64, registry: &NativeEffectRegistry, reach: &mut Reach) {
         let result = if serialized {
             prepare_host_runtime_between_render_calls(&compiled, &caps, &request)
         } else {
-            prepare_host_runtime_with_console(&compiled, &caps, &request)
+            prepare_host_runtime_with_live_controls(&compiled, &caps, &request)
         };
         result.unwrap_or_else(|failure| {
             panic!(
@@ -957,12 +1025,12 @@ fn response_probe(seed: u64, registry: &NativeEffectRegistry, reach: &mut Respon
     model.tracks.truncate(1);
     model.routes.truncate(1);
     let symmetric = draw.chance(1, 3);
-    let template = model.tracks[0].simd1.effects[0].clone();
+    let template = model.lower_track(&model.tracks[0]).pre_insert[0].clone();
     let mut eq = effect(&mut draw, registry, &template, (0, 3), "eq", symmetric);
     eq.bypass = draw.chance(1, 8);
     eq.link_mode = LinkMode::DualMono;
+    place(&mut model, vec![[vec![eq.clone()], Vec::new(), Vec::new()]]);
     let track = &mut model.tracks[0];
-    track.simd1.effects = vec![eq.clone()];
     let nyquist = rate as f32 * 0.5;
     let mut filters = [0.0_f32; 4];
     for (index, builtins) in [&mut track.builtins.left, &mut track.builtins.right]

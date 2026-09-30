@@ -65,7 +65,7 @@ function oneTrack(options = {}) {
     .output("out")
     .route({
       id: "main",
-      source: { kind: "track", trackId, tap: "post_matrix" },
+      source: { kind: "track", trackId, tap: "post_pan" },
       destination: { kind: "output_input", outputId: "out" },
       gainDb,
     });
@@ -96,7 +96,7 @@ describe("eval 5 -- the plan-equality gate", () => {
       () => oneTrack({ bitDepth: "32f", sampleRateHz: 96_000, quantumFrames: 127 }),
       () => oneTrack({ builtins: { left: { trimDb: -3, hpfHz: 80 }, right: { trimDb: 1.5, delaySamples: 128 } } }),
       () => oneTrack({ pan: { matrix: { ll: 1, lr: 0, rl: 0, rr: -1 }, smoothingSamples: 64 } }),
-      () => oneTrack({ racks: { dynamic: [effect("miso.compressor", { threshold: -18, ratio: 4 })] } }),
+      () => oneTrack({ racks: { inserts: [effect("miso.compressor", { threshold: -18, ratio: 4 })] } }),
       () => richSession(),
     ];
     for (const build of corpus) {
@@ -124,7 +124,7 @@ describe("eval 5 -- the plan-equality gate", () => {
       })
       .route({
         id: "r1",
-        source: { kind: "track", trackId: "x", tap: "post_matrix" },
+        source: { kind: "track", trackId: "x", tap: "post_pan" },
         destination: { kind: "output_input", outputId: "o1" },
       });
     const reverse = session({ id: "order", sampleRateHz: 48_000 })
@@ -136,7 +136,7 @@ describe("eval 5 -- the plan-equality gate", () => {
       .output("o1")
       .route({
         id: "r1",
-        source: { kind: "track", trackId: "x", tap: "post_matrix" },
+        source: { kind: "track", trackId: "x", tap: "post_pan" },
         destination: { kind: "output_input", outputId: "o1" },
       })
       .route({
@@ -419,7 +419,7 @@ describe("validation refusals name the offending path", () => {
       () =>
         base.route({
           id: "r",
-          source: { kind: "track", trackId: "nope", tap: "post_matrix" },
+          source: { kind: "track", trackId: "nope", tap: "post_pan" },
           destination: { kind: "output_input", outputId: "out" },
         }),
       /route\("r"\)\.source\.trackId/,
@@ -428,7 +428,7 @@ describe("validation refusals name the offending path", () => {
       () =>
         base.route({
           id: "r",
-          source: { kind: "track", trackId: "t", tap: "post_matrix" },
+          source: { kind: "track", trackId: "t", tap: "post_pan" },
           destination: { kind: "output_input", outputId: "nope" },
         }),
       /route\("r"\)\.destination\.outputId/,
@@ -500,12 +500,12 @@ describe("validation refusals name the offending path", () => {
 
   test("prepared EQ cuts accept typed booleans while defaults stay sparse", () => {
     // The prepared descriptor rows are authorable through the same catalog as old EQ rows, but
-    // they do not become live console edits. Red mutation: treat booleans as numbers, or assign
+    // they do not become live-control edits. Red mutation: treat booleans as numbers, or assign
     // new rows ahead of the old IDs, and one of these normalized wire records changes.
     const withCuts = oneTrack({
       id: "eq.prepared.cuts",
       racks: {
-        dynamic: [effect("miso.parametric-eq", {
+        inserts: [effect("miso.parametric-eq", {
           "hpf-enabled": true,
           "lpf-enabled": false,
           "band-1-enabled": true,
@@ -515,7 +515,7 @@ describe("validation refusals name the offending path", () => {
         })],
       },
     });
-    const params = withCuts.toJSON().tracks[0].dynamic.effects[0].params;
+    const params = withCuts.toJSON().tracks[0].inserts.effects[0].params;
     assert.deepEqual(params.map((row) => row.parameter_id), [1, 2, 3, 4, 65, 81]);
     assert.deepEqual(params.find((row) => row.parameter_id === 65), {
       parameter_id: 65,
@@ -542,9 +542,9 @@ describe("validation refusals name the offending path", () => {
 
     const defaults = oneTrack({
       id: "eq.prepared.defaults",
-      racks: { dynamic: [effect("miso.parametric-eq")] },
+      racks: { inserts: [effect("miso.parametric-eq")] },
     });
-    assert.deepEqual(defaults.toJSON().tracks[0].dynamic.effects[0].params, []);
+    assert.deepEqual(defaults.toJSON().tracks[0].inserts.effects[0].params, []);
   });
 });
 
@@ -656,7 +656,7 @@ describe("issue #278 -- the port table is enforced, not documented", () => {
     // Red mutation: delete the `effect.sidechain.unknown_port` leg in
     // `crates/effect-compiler/src/prepare.rs` -> this boots and the test fails.
     const document = oneTrack({
-      racks: { dynamic: [effect("miso.compressor", { threshold: -18 })] },
+      racks: { inserts: [effect("miso.compressor", { threshold: -18 })] },
     }).toJson().replace(
       '"sidechain": {\n              "kind": "none"\n            }',
       '"sidechain": {"kind":"routed","source":{"kind":"track","track_id":"t",'
@@ -726,7 +726,7 @@ describe("canonical float spellings", () => {
 
   test("a value below the exponent threshold is written out in full", () => {
     const json = oneTrack({
-      racks: { simd1: [effect("miso.compressor", { mix: 1e-7 })] },
+      racks: { inserts: [effect("miso.compressor", { mix: 1e-7 })] },
     }).toJson();
     assertNoNumericExponent(json);
     assert.match(json, /"value": 0\.0000001/);
@@ -740,7 +740,7 @@ describe("canonical float spellings", () => {
       .output("out")
       .route({
         id: "main",
-        source: { kind: "track", trackId: "t", tap: "post_matrix" },
+        source: { kind: "track", trackId: "t", tap: "post_pan" },
         destination: { kind: "output_input", outputId: "out" },
       })
       .automation({
@@ -871,7 +871,7 @@ function builtinsAutomationFixture() {
     .output("main-out")
     .route({
       id: "to-main",
-      source: { kind: "track", trackId: "vocal", tap: "post_matrix" },
+      source: { kind: "track", trackId: "vocal", tap: "post_pan" },
       destination: { kind: "output_input", outputId: "main-out" },
     })
     .automation({
@@ -896,7 +896,7 @@ function builtinsAutomationFixture() {
     });
 }
 
-/** A session that reaches every root key and both automation racks. */
+/** A session that reaches every root key, both console sections, inserts and two automation racks. */
 function richSession() {
   const compressor = effect(
     "miso.compressor",
@@ -918,26 +918,33 @@ function richSession() {
     },
   );
   const limiter = effect("miso.true-peak-limiter", { ceiling: -1 }, { slotId: "limit" });
-  const eq = effect(
-    "miso.parametric-eq",
-    { "band-1-enabled": true, "band-1-gain": -2.5, "band-1-frequency": 120 },
-    { slotId: "eq" },
-  );
   return session({ id: "rich.session", sampleRateHz: 48_000, quantumFrames: 128, revision: 12 })
     .source("voice", { channels: 2, bitDepth: "32f", frames: 48_000, content: CONTENT_B })
     .source("di", { channels: 1, bitDepth: 24, frames: 48_000, content: CONTENT_A })
+    // Both console sections, a per-lane and a shared parameter on the entries, and a keyed
+    // compressor that can only be an insert, because a console slot takes no sidechain.
+    .console({
+      preInsert: [{ slot: "eq", effectId: "miso.parametric-eq" }],
+      postInsert: [{ slot: "clip", effectId: "miso.soft-clip", linkMode: "dual_mono" }],
+    })
     .track("vocal", {
       source: "voice",
       builtins: { left: { trimDb: -1, hpfHz: 80, delaySamples: 24 }, right: { trimDb: -1, hpfHz: 80 } },
       fader: { leftDb: -3, rightDb: -3, leftMute: false, rightMute: false },
       pan: { left: -0.5, right: 0.5, smoothingSamples: 32 },
-      simd1: [eq],
-      dynamic: [compressor, limiter],
+      console: [
+        {
+          slot: "eq",
+          parameters: { "band-1-enabled": true, "band-1-gain": -2.5, "band-1-frequency": 120 },
+        },
+        { slot: "clip", bypass: true },
+      ],
+      inserts: [compressor, limiter],
     })
     .track("bass", {
       source: { id: "di", left: 0, right: 0 },
       pan: { matrix: { ll: 1, lr: 0, rl: 0, rr: 1 }, smoothingSamples: 8 },
-      simd2: [effect("miso.soft-clip", { drive: 3 })],
+      console: [{ slot: "eq" }, { slot: "clip", parameters: { drive: 3 } }],
     })
     .submix("bus")
     .output("main-out")
@@ -954,7 +961,7 @@ function richSession() {
     })
     .route({
       id: "vocal-main",
-      source: { kind: "track", trackId: "vocal", tap: "post_matrix" },
+      source: { kind: "track", trackId: "vocal", tap: "post_pan" },
       destination: { kind: "output_input", outputId: "main-out" },
       matrix: { ll: 1, lr: 0, rl: 0, rr: 1 },
     })
@@ -962,7 +969,7 @@ function richSession() {
       id: "eq-sweep",
       target: {
         trackId: "vocal",
-        rack: "simd1",
+        rack: "console",
         slotId: "eq",
         parameter: "band-1-gain",
         channel: "both",

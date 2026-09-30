@@ -550,7 +550,7 @@ fn b2a_metadata_and_state_are_typed_bounded_and_strict() {
     let descriptor = ParameterDescriptor {
         handle: 1,
         track_id: "vocal".to_owned(),
-        rack: ParameterRack::Dynamic,
+        rack: ParameterRack::Inserts,
         effect_id: "comp".to_owned(),
         parameter_id: 7,
         channel: ParameterChannel::Left,
@@ -662,7 +662,7 @@ fn b2_descriptor(handle: u32, domain: ParameterDomain) -> ParameterDescriptor {
     ParameterDescriptor {
         handle,
         track_id: "vocal".to_owned(),
-        rack: ParameterRack::Dynamic,
+        rack: ParameterRack::Inserts,
         effect_id: "comp".to_owned(),
         parameter_id: handle,
         channel: ParameterChannel::Left,

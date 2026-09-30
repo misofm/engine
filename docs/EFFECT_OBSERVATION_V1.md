@@ -25,7 +25,11 @@ of truth that goes stale the moment a kernel changes.
 * every declared float is finite, ordered and free of `-0.0`, so an identity comparison never
   depends on a zero's sign.
 
-Addressing mirrors `miso.command.v1` exactly: `(track_index, rack, effect_index, tap_id)`.
+Addressing mirrors `miso.command.v1` exactly: `(track_index, rack, effect_index, tap_id)`. The rack
+is the session's (decision 12, #1096): `1` for an insert, with `effect_index` its position in the
+track's `inserts`, and `3` for a console slot, with `effect_index` the slot's position in the
+session's slot order (`pre_insert`, then `post_insert`). The retired `simd1` (`0`) and `simd2` (`2`)
+codes are refused and never reallocated.
 
 ## The two cost classes
 
@@ -45,7 +49,7 @@ zero with no way for the caller to learn why.
 
 ## The two-level zero
 
-**Level 1 — structural.** A session whose console request names no observation capacity
+**Level 1 — structural.** A session whose live-control request names no observation capacity
 (`observation_taps == 0`) has no observation state in the compiled plan *at all*: no lane, no
 accumulator, no conflating cell. Not a disabled one — none. `attach_effect_observation` is the
 only thing that creates one and it is never called. `observation_retained_bytes` is `0`, and that
@@ -88,7 +92,7 @@ a command's `applied_at_sample` rather than against a wall clock.
 > **Deviation from the original design, argued.** D4 proposed opening a fresh window "at
 > `window_blocks` *or* on observing a newer `consumed_sequence`". That would make window length
 > depend on control-plane timing: in the browser, where the reader runs on the render thread between
-> blocks, it collapses every window to one block and defeats `console_meter_blocks`; and it
+> blocks, it collapses every window to one block and defeats `live_control_meter_blocks`; and it
 > decouples the gain-reduction window from the peak-meter window that shares the same
 > `miso.meter.v1` frame. Fixed-length tiling is the stronger property. `consumed_sequence` is kept
 > and is what makes the gap observable.
@@ -125,8 +129,8 @@ tap keeps its own cell.
 no window: `0` would be indistinguishable from "the master is not reducing".
 
 V1 has no structural master bus — submixes and outputs carry no effect racks — so the master
-reading is a **designation** (`console_master_track_plus_one`), not a discovery. The successor is
-effect racks on submixes.
+reading is a **designation** (`live_control_master_track_plus_one`), not a discovery. The successor
+is effect racks on submixes.
 
 ## Plan replacement drops subscriptions
 

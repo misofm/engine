@@ -9,13 +9,16 @@
 //! `rack_mut` answers [`SessionEditError::NotFound`], which is the same answer a named-but-absent
 //! effect gets, rather than a panicking arm or a silent no-op. This file is the gate on that: an
 //! `unreachable!()` there would abort the control thread on a well-formed wire message, and a
-//! `&mut track.simd1` fallback would edit a rack the caller did not name.
+//! `&mut track.inserts` fallback would edit a rack the caller did not name.
 //!
 //! The strip **is** editable, through `SetTrackBuiltins`, and the last test says so -- without it
 //! a refusal that refused everything would pass.
 //!
-//! Red mutation: give `rack_mut`'s `RackName::Builtins` arm `Ok(&mut track.simd1)` -> the four
-//! refusal arms below start reporting `Ok` and the effect lands in `simd1`.
+//! Decision 12's `console` token is refused by the same edits with a typed status of its own,
+//! `SessionEditError::ConsoleSlotFixed`; `console_session_edits.rs` owns it.
+//!
+//! Red mutation: give `rack_mut`'s `RackName::Builtins` arm `Ok(&mut track.inserts)` -> the
+//! refusal arms below start reporting `Ok` and the effect lands in the inserts.
 
 use protocol::{SessionEdit, SessionEditError, apply_session_edit};
 use session::{RackName, SessionModel, parse_session_json};
@@ -32,14 +35,15 @@ fn track_id() -> session::StableId {
 
 #[test]
 fn rack_addressed_edits_refuse_the_builtins_token() {
-    let effect = session().tracks[0].dynamic.effects[0].clone();
-    let rack = session().tracks[0].dynamic.clone();
+    let effect = session().tracks[0].inserts.effects[0].clone();
+    let rack = session().tracks[0].inserts.clone();
+    let token = RackName::Builtins;
     for (name, edit) in [
         (
             "SetTrackRack",
             SessionEdit::SetTrackRack {
                 track_id: track_id(),
-                rack_name: RackName::Builtins,
+                rack_name: token,
                 rack: rack.clone(),
             },
         ),
@@ -47,7 +51,7 @@ fn rack_addressed_edits_refuse_the_builtins_token() {
             "PutTrackEffect",
             SessionEdit::PutTrackEffect {
                 track_id: track_id(),
-                rack_name: RackName::Builtins,
+                rack_name: token,
                 final_position: 0,
                 effect: effect.clone(),
             },
@@ -56,7 +60,7 @@ fn rack_addressed_edits_refuse_the_builtins_token() {
             "RemoveTrackEffect",
             SessionEdit::RemoveTrackEffect {
                 track_id: track_id(),
-                rack_name: RackName::Builtins,
+                rack_name: token,
                 effect_id: effect.id.clone(),
             },
         ),
@@ -64,7 +68,7 @@ fn rack_addressed_edits_refuse_the_builtins_token() {
             "SetTrackEffectOrder",
             SessionEdit::SetTrackEffectOrder {
                 track_id: track_id(),
-                rack_name: RackName::Builtins,
+                rack_name: token,
                 effect_ids: vec![effect.id.clone()],
             },
         ),
@@ -74,7 +78,7 @@ fn rack_addressed_edits_refuse_the_builtins_token() {
         assert_eq!(
             apply_session_edit(&mut model, &edit),
             Err(SessionEditError::NotFound),
-            "{name} addressed at the strip must be refused, not applied"
+            "{name} addressed at {token:?} must be refused, not applied"
         );
         assert_eq!(
             model, before,
@@ -87,20 +91,23 @@ fn rack_addressed_edits_refuse_the_builtins_token() {
 /// about the edits.
 #[test]
 fn the_same_edits_against_a_real_rack_are_applied() {
-    let rack = session().tracks[0].dynamic.clone();
+    let rack = session::Rack {
+        effects: Vec::new(),
+    };
     let mut model = session();
+    assert_ne!(model.tracks[0].inserts, rack);
     assert_eq!(
         apply_session_edit(
             &mut model,
             &SessionEdit::SetTrackRack {
                 track_id: track_id(),
-                rack_name: RackName::Simd1,
+                rack_name: RackName::Inserts,
                 rack: rack.clone(),
             },
         ),
         Ok(()),
     );
-    assert_eq!(model.tracks[0].simd1, rack);
+    assert_eq!(model.tracks[0].inserts, rack);
 }
 
 /// And the strip is edited through the edit that owns it, which the new token does not touch.

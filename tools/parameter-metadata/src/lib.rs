@@ -1,4 +1,4 @@
-//! Build-time parameter-metadata codegen for the browser console (issue #137 D4).
+//! Build-time parameter-metadata codegen for the browser live controls (issue #137 D4).
 //!
 //! # Why this exists
 //!
@@ -20,7 +20,7 @@
 //!
 //! # `liveUpdatable`
 //!
-//! Every parameter carries whether the live-console command path can actually move it. Issue #140
+//! Every parameter carries whether the live-control command path can actually move it. Issue #140
 //! made that true of every builtin block target and every automatable effect parameter: a builtin
 //! row is live exactly when its declared update rate is `blockTarget`, and an effect row is live
 //! exactly when its descriptor declares it automatable. A caller that reads this file never has to
@@ -41,8 +41,8 @@
 //!
 //! `solo` (issue #210 phase 1) is a `"render"` kind with no row in `builtins`, and deliberately:
 //! it moves what the render thread reads -- it composes into the fader section's mute -- but it is
-//! console/monitor state rather than a strip DSP parameter, so it has no parameter descriptor, no
-//! domain table and no session key to be automated from.
+//! live-control/monitor state rather than a strip DSP parameter, so it has no parameter descriptor,
+//! no domain table and no session key to be automated from.
 //!
 //! `trimDb`, `polarityInvert` and `inputFilters` are the opposite case and the ordinary one:
 //! all are `"render"` kinds *and* strip DSP parameters, so each has a `builtins` row. The filter
@@ -643,7 +643,7 @@ fn effect_parameter(parameter: &ParameterDescriptor) -> String {
         "          \"readable\": {}, \"automatable\": {},\n",
         parameter.readable, parameter.automatable
     ));
-    // Issue #140 A: the live-console command path now feeds an admitted parameter into the
+    // Issue #140 A: the live-control command path now feeds an admitted parameter into the
     // running plan as a `PreparedAutomationSpan`, so a parameter is live exactly when its own
     // descriptor says it can be automated. The two statements are the same statement, which is
     // why this is derived from `automatable` rather than written down. A parameter that declares
@@ -701,7 +701,7 @@ fn builtin_parameter(parameter: &BuiltinParameterDescriptor) -> String {
         }
     };
     // `matrix_ll/lr/rl/rr` are the only builtin parameters the ABI declares as `BlockTarget`, and
-    // they are exactly the ones the live-console command path applies. The two statements are the
+    // they are exactly the ones the live-control command path applies. The two statements are the
     // same statement, which is why this is derived from the descriptor rather than written down.
     let live = matches!(
         parameter.update_rate,

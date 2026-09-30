@@ -41,8 +41,6 @@ export const ABI_LAYOUT = deepFreeze(
     "miso_engine_web_v1_buffer_ptr",
     "miso_engine_web_v1_command_report_ptr",
     "miso_engine_web_v1_command_submit",
-    "miso_engine_web_v1_console_track_count",
-    "miso_engine_web_v1_console_track_id",
     "miso_engine_web_v1_dispose",
     "miso_engine_web_v1_document_ptr",
     "miso_engine_web_v1_eq_target_close",
@@ -59,6 +57,8 @@ export const ABI_LAYOUT = deepFreeze(
     "miso_engine_web_v1_eq_target_result_ptr",
     "miso_engine_web_v1_input_filters_config_copy",
     "miso_engine_web_v1_input_filters_prepare",
+    "miso_engine_web_v1_live_control_track_count",
+    "miso_engine_web_v1_live_control_track_id",
     "miso_engine_web_v1_meter_header_ptr",
     "miso_engine_web_v1_meter_lease",
     "miso_engine_web_v1_meter_poll",
@@ -188,22 +188,22 @@ export const ABI_LAYOUT = deepFreeze(
           "type": "u64"
         },
         {
-          "name": "consoleCommandQueueRecords",
+          "name": "liveControlCommandQueueRecords",
           "offset": 32,
           "type": "u64"
         },
         {
-          "name": "consoleMeterBlocks",
+          "name": "liveControlMeterBlocks",
           "offset": 40,
           "type": "u64"
         },
         {
-          "name": "consoleObservationTaps",
+          "name": "liveControlObservationTaps",
           "offset": 48,
           "type": "u64"
         },
         {
-          "name": "consoleMasterTrackPlusOne",
+          "name": "liveControlMasterTrackPlusOne",
           "offset": 56,
           "type": "u64"
         }
@@ -2172,6 +2172,34 @@ export const ABI_LAYOUT = deepFreeze(
         "name": "observationUnbound"
       }
     ],
+    "racks": [
+      {
+        "value": 1,
+        "name": "inserts"
+      },
+      {
+        "value": 3,
+        "name": "console"
+      },
+      {
+        "value": 255,
+        "name": "notApplicable"
+      }
+    ],
+    "liveResponseRacks": [
+      {
+        "value": 0,
+        "name": "inputFilters"
+      },
+      {
+        "value": 2,
+        "name": "inserts"
+      },
+      {
+        "value": 4,
+        "name": "console"
+      }
+    ],
     "observationChannels": [
       {
         "value": 1,
@@ -2259,11 +2287,11 @@ export const ABI_LAYOUT = deepFreeze(
     "spectrumTargets": [
       {
         "value": 1,
-        "name": "trackPostInputBuiltins"
+        "name": "trackPostInput"
       },
       {
         "value": 2,
-        "name": "trackPostMatrix"
+        "name": "trackPostPan"
       },
       {
         "value": 3,

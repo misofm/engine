@@ -269,7 +269,7 @@ fn parametric_eq_catalog_preserves_old_rows_and_appends_prepared_cuts() {
     }
 }
 
-/// A one-track session whose dynamic rack holds every launch effect at its declared defaults.
+/// A one-track session whose inserts hold every launch effect at its declared defaults.
 fn session_with_every_effect(effects: &[&str]) -> String {
     let mut rack = String::from("[");
     for (index, id) in effects.iter().enumerate() {
@@ -285,11 +285,12 @@ fn session_with_every_effect(effects: &[&str]) -> String {
         r#"{{"schema_version":1,"session_id":"metadata-round-trip","revision":"1","sample_rate_hz":48000,"quantum_frames":128,
 "render_profile":{{"id":"native","mode":"single_thread"}},"output_profile":{{"id":"main","channels":2,"sample_format":"f32_planar"}},
 "sources":[{{"id":"s","content":"blake3:0000000000000000000000000000000000000000000000000000000000000000","channels":2,"bit_depth":"32f","frames":"256"}}],
+"console":{{"pre_insert":[],"post_insert":[]}},
 "tracks":[{{"id":"t","source_id":"s","left_source_channel":0,"right_source_channel":1,
 "builtins":{{"left":{{"polarity_invert":false,"trim_db":0.0,"hpf_hz":0.0,"lpf_hz":0.0,"delay_samples":0}},"right":{{"polarity_invert":false,"trim_db":0.0,"hpf_hz":0.0,"lpf_hz":0.0,"delay_samples":0}}}},
-"simd1":{{"effects":[]}},"dynamic":{{"effects":{rack}}},"simd2":{{"effects":[]}},
+"console":[],"inserts":{{"effects":{rack}}},
 "fader":{{"left_db":0.0,"right_db":0.0,"left_mute":false,"right_mute":false}},"pan":{{"left":-1.0,"right":1.0,"smoothing_samples":0}}}}],
-"submixes":[],"outputs":[{{"id":"out"}}],"routes":[{{"id":"r","source":{{"kind":"track","track_id":"t","tap":"post_matrix"}},"destination":{{"kind":"output_input","output_id":"out"}},"channel_matrix":{{"ll":1.0,"lr":0.0,"rl":0.0,"rr":1.0}},"gain_db":0.0}}],"automation":[]}}"#
+"submixes":[],"outputs":[{{"id":"out"}}],"routes":[{{"id":"r","source":{{"kind":"track","track_id":"t","tap":"post_pan"}},"destination":{{"kind":"output_input","output_id":"out"}},"channel_matrix":{{"ll":1.0,"lr":0.0,"rl":0.0,"rr":1.0}},"gain_db":0.0}}],"automation":[]}}"#
     )
 }
 
@@ -382,9 +383,10 @@ fn stage_prepared_eq(
     host.submit_prepared_commands(1, 104)
 }
 
-/// Red mutation: delete the `command.effect_index >= counts[rack]` leg in `admit_commands`
-/// -> an out-of-range effect index is refused as `UNSUPPORTED_KIND`, the completeness assertion
-/// below stops distinguishing "resolved" from "did not resolve", and the negative case fails.
+/// Red mutation: drop the index bound from `LiveEffectAddress::lower` and the table-length check
+/// from `effect_slot` -> an out-of-range effect index is refused as `UNSUPPORTED_KIND`, the
+/// completeness assertion below stops distinguishing "resolved" from "did not resolve", and the
+/// negative case fails.
 #[test]
 fn every_metadata_id_resolves_through_a_command_acknowledgement() {
     let document = parameter_metadata::render();
@@ -406,7 +408,7 @@ fn every_metadata_id_resolves_through_a_command_acknowledgement() {
         require_sample_rate_hz: 48_000,
         require_quantum_frames: 128,
         source_ring_frames: 128,
-        console_command_queue_records: 64,
+        live_control_command_queue_records: 64,
         ..WebBootOptions::explicit_defaults()
     };
     let mut host = AudioWorkletEngineHost::boot(json.as_bytes(), options).expect("boot");
@@ -561,9 +563,9 @@ fn every_metadata_observation_tap_resolves_through_a_command_acknowledgement() {
         require_sample_rate_hz: 48_000,
         require_quantum_frames: 128,
         source_ring_frames: 128,
-        console_command_queue_records: 64,
-        console_meter_blocks: 4,
-        console_observation_taps: 4,
+        live_control_command_queue_records: 64,
+        live_control_meter_blocks: 4,
+        live_control_observation_taps: 4,
         ..WebBootOptions::explicit_defaults()
     };
     let mut host = AudioWorkletEngineHost::boot(json.as_bytes(), options).expect("boot");
@@ -690,16 +692,17 @@ fn prepares(effect_id: &str, port_id: &str) -> bool {
         r#"{{"schema_version":1,"session_id":"port-table-round-trip","revision":"1","sample_rate_hz":48000,"quantum_frames":128,
 "render_profile":{{"id":"native","mode":"single_thread"}},"output_profile":{{"id":"main","channels":2,"sample_format":"f32_planar"}},
 "sources":[{{"id":"s","content":"blake3:0000000000000000000000000000000000000000000000000000000000000000","channels":2,"bit_depth":"32f","frames":"256"}}],
+"console":{{"pre_insert":[],"post_insert":[]}},
 "tracks":[
-{{"id":"a","source_id":"s","left_source_channel":0,"right_source_channel":1,"builtins":{{"left":{{"polarity_invert":false,"trim_db":0.0,"hpf_hz":0.0,"lpf_hz":0.0,"delay_samples":0}},"right":{{"polarity_invert":false,"trim_db":0.0,"hpf_hz":0.0,"lpf_hz":0.0,"delay_samples":0}}}},"simd1":{{"effects":[]}},"dynamic":{{"effects":[]}},"simd2":{{"effects":[]}},"fader":{{"left_db":0.0,"right_db":0.0,"left_mute":false,"right_mute":false}},"pan":{{"left":-1.0,"right":1.0,"smoothing_samples":0}}}},
-{{"id":"b","source_id":"s","left_source_channel":0,"right_source_channel":1,"builtins":{{"left":{{"polarity_invert":false,"trim_db":0.0,"hpf_hz":0.0,"lpf_hz":0.0,"delay_samples":0}},"right":{{"polarity_invert":false,"trim_db":0.0,"hpf_hz":0.0,"lpf_hz":0.0,"delay_samples":0}}}},"simd1":{{"effects":[]}},"dynamic":{{"effects":[{{"id":"e0","identity":{{"kind":"native","effect_id":"{effect_id}"}},"quality":"normal","bypass":false,"link_mode":"dual_mono","params":[],"sidechain":{{"kind":"routed","source":{{"kind":"track","track_id":"a","tap":"post_fader"}},"port_id":"{port_id}"}}}}]}},"simd2":{{"effects":[]}},"fader":{{"left_db":0.0,"right_db":0.0,"left_mute":false,"right_mute":false}},"pan":{{"left":-1.0,"right":1.0,"smoothing_samples":0}}}}],
-"submixes":[],"outputs":[{{"id":"out"}}],"routes":[{{"id":"r","source":{{"kind":"track","track_id":"b","tap":"post_matrix"}},"destination":{{"kind":"output_input","output_id":"out"}},"channel_matrix":{{"ll":1.0,"lr":0.0,"rl":0.0,"rr":1.0}},"gain_db":0.0}}],"automation":[]}}"#
+{{"id":"a","source_id":"s","left_source_channel":0,"right_source_channel":1,"builtins":{{"left":{{"polarity_invert":false,"trim_db":0.0,"hpf_hz":0.0,"lpf_hz":0.0,"delay_samples":0}},"right":{{"polarity_invert":false,"trim_db":0.0,"hpf_hz":0.0,"lpf_hz":0.0,"delay_samples":0}}}},"console":[],"inserts":{{"effects":[]}},"fader":{{"left_db":0.0,"right_db":0.0,"left_mute":false,"right_mute":false}},"pan":{{"left":-1.0,"right":1.0,"smoothing_samples":0}}}},
+{{"id":"b","source_id":"s","left_source_channel":0,"right_source_channel":1,"builtins":{{"left":{{"polarity_invert":false,"trim_db":0.0,"hpf_hz":0.0,"lpf_hz":0.0,"delay_samples":0}},"right":{{"polarity_invert":false,"trim_db":0.0,"hpf_hz":0.0,"lpf_hz":0.0,"delay_samples":0}}}},"console":[],"inserts":{{"effects":[{{"id":"e0","identity":{{"kind":"native","effect_id":"{effect_id}"}},"quality":"normal","bypass":false,"link_mode":"dual_mono","params":[],"sidechain":{{"kind":"routed","source":{{"kind":"track","track_id":"a","tap":"post_fader"}},"port_id":"{port_id}"}}}}]}},"fader":{{"left_db":0.0,"right_db":0.0,"left_mute":false,"right_mute":false}},"pan":{{"left":-1.0,"right":1.0,"smoothing_samples":0}}}}],
+"submixes":[],"outputs":[{{"id":"out"}}],"routes":[{{"id":"r","source":{{"kind":"track","track_id":"b","tap":"post_pan"}},"destination":{{"kind":"output_input","output_id":"out"}},"channel_matrix":{{"ll":1.0,"lr":0.0,"rl":0.0,"rr":1.0}},"gain_db":0.0}}],"automation":[]}}"#
     );
     let options = WebBootOptions {
         require_sample_rate_hz: 48_000,
         require_quantum_frames: 128,
         source_ring_frames: 128,
-        console_command_queue_records: 64,
+        live_control_command_queue_records: 64,
         ..WebBootOptions::explicit_defaults()
     };
     AudioWorkletEngineHost::boot(json.as_bytes(), options).is_ok()

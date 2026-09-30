@@ -2,9 +2,9 @@
 
 use session::{
     AutomationShape, CompileCaps, DiagnosticCode, DiagnosticSet, Effect, MatrixOrPan, Output,
-    ParameterChannel, ParameterUnit, Rack, RackName, RouteDestination, RouteSource, SendTap,
-    SessionModel, Sidechain, SidechainDeclaration, StableId, canonical_session_json,
-    compile_session, estimate_session_resources, parse_session_json,
+    ParameterChannel, ParameterUnit, RouteDestination, RouteSource, SendTap, SessionModel,
+    Sidechain, SidechainDeclaration, StableId, canonical_session_json, compile_session,
+    estimate_session_resources, parse_session_json,
 };
 
 const EXAMPLE: &str = include_str!("../../../fixtures/session/v1/canonical.json");
@@ -82,13 +82,13 @@ fn u64_model_fields_accept_the_full_unsigned_domain() {
 #[test]
 fn empty_third_party_cid_is_reported_at_the_identity_leaf() {
     let mut session = parse_session_json(EXAMPLE).expect("fixture parses");
-    session.tracks[0].dynamic.effects[0].identity =
+    session.tracks[0].inserts.effects[0].identity =
         session::EffectIdentity::ThirdPartyCid { cid: String::new() };
     let error = canonical_session_json(&session).expect_err("empty CID must be rejected");
     assert_diagnostic(
         &error,
         DiagnosticCode::NumericOutOfSchemaRange,
-        "$.tracks[0].dynamic.effects[0].identity.cid",
+        "$.tracks[0].inserts.effects[0].identity.cid",
     );
 }
 
@@ -275,13 +275,13 @@ fn schema_version_and_type_category_has_16_distinct_cases() {
         &mut count,
         &replaced("quality = \"normal\"", "quality = \"ultra\""),
         DiagnosticCode::InvalidEnum,
-        "$.tracks[0].dynamic.effects[0].quality",
+        "$.tracks[0].inserts.effects[0].quality",
     );
     parse_case(
         &mut count,
         &replaced("sidechain = { kind = \"none\" }", "sidechain = false"),
         DiagnosticCode::WrongType,
-        "$.tracks[0].dynamic.effects[0].sidechain",
+        "$.tracks[0].inserts.effects[0].sidechain",
     );
     parse_case(
         &mut count,
@@ -332,12 +332,12 @@ fn stable_id_category_has_20_distinct_cases() {
         (
             "[{ id = \"eq\", identity",
             "[{ id = \"Bad\", identity",
-            "$.tracks[0].dynamic.effects[0].id",
+            "$.tracks[0].inserts.effects[0].id",
         ),
         (
             "effect_id = \"parametric-eq\"",
             "effect_id = \"Bad\"",
-            "$.tracks[0].dynamic.effects[0].identity.effect_id",
+            "$.tracks[0].inserts.effects[0].identity.effect_id",
         ),
         (
             "{ id = \"main-out\" }",
@@ -395,7 +395,7 @@ fn stable_id_category_has_20_distinct_cases() {
             "sidechain = { kind = \"routed\", source = { kind = \"track\", track_id = \"vocal\", tap = \"input\" }, port_id = \"Bad\" }",
         ),
         DiagnosticCode::InvalidId,
-        "$.tracks[0].dynamic.effects[0].sidechain.port_id",
+        "$.tracks[0].inserts.effects[0].sidechain.port_id",
     );
     model_case(
         &mut count,
@@ -532,27 +532,27 @@ fn finite_unit_and_local_range_category_has_24_distinct_cases() {
         "$.routes[0].channel_matrix.rr"
     );
     case!(
-        |s| s.tracks[0].dynamic.effects[0].params[0].value = f32::NAN,
+        |s| s.tracks[0].inserts.effects[0].params[0].value = f32::NAN,
         DiagnosticCode::NumericNonFinite,
-        "$.tracks[0].dynamic.effects[0].params[0].value"
+        "$.tracks[0].inserts.effects[0].params[0].value"
     );
     case!(
         |s| {
-            let p = &mut s.tracks[0].dynamic.effects[0].params[0];
+            let p = &mut s.tracks[0].inserts.effects[0].params[0];
             p.unit = ParameterUnit::Hz;
             p.value = -1.0;
         },
         DiagnosticCode::NumericOutOfSchemaRange,
-        "$.tracks[0].dynamic.effects[0].params[0].value"
+        "$.tracks[0].inserts.effects[0].params[0].value"
     );
     case!(
         |s| {
-            let p = &mut s.tracks[0].dynamic.effects[0].params[0];
+            let p = &mut s.tracks[0].inserts.effects[0].params[0];
             p.unit = ParameterUnit::Samples;
             p.value = 1.5;
         },
         DiagnosticCode::NumericOutOfSchemaRange,
-        "$.tracks[0].dynamic.effects[0].params[0].value"
+        "$.tracks[0].inserts.effects[0].params[0].value"
     );
     case!(
         |s| s.automation[0].segments[0].start_value = f32::NAN,
@@ -836,74 +836,67 @@ fn schema_owned_reference_category_has_20_distinct_cases() {
         DiagnosticCode::MissingEntityReference,
         "$.routes[1].destination.submix_id",
     );
-    for (rack, source, path) in [
+    for (position, source, path) in [
         (
-            RackName::Simd1,
+            0,
             RouteSource::Track {
                 track_id: id("missing-a"),
                 tap: SendTap::Input,
             },
-            "$.tracks[0].simd1.effects[0].sidechain.source.track_id",
+            "$.tracks[0].inserts.effects[0].sidechain.source.track_id",
         ),
         (
-            RackName::Dynamic,
+            1,
             RouteSource::Track {
                 track_id: id("missing-b"),
                 tap: SendTap::PostFader,
             },
-            "$.tracks[0].dynamic.effects[0].sidechain.source.track_id",
+            "$.tracks[0].inserts.effects[1].sidechain.source.track_id",
         ),
         (
-            RackName::Simd2,
+            2,
             RouteSource::Track {
                 track_id: id("missing-c"),
-                tap: SendTap::PostMatrix,
+                tap: SendTap::PostPan,
             },
-            "$.tracks[0].simd2.effects[0].sidechain.source.track_id",
+            "$.tracks[0].inserts.effects[2].sidechain.source.track_id",
         ),
         (
-            RackName::Simd1,
+            0,
             RouteSource::SubmixOutput {
                 submix_id: id("missing-d"),
             },
-            "$.tracks[0].simd1.effects[0].sidechain.source.submix_id",
+            "$.tracks[0].inserts.effects[0].sidechain.source.submix_id",
         ),
         (
-            RackName::Dynamic,
+            1,
             RouteSource::SubmixOutput {
                 submix_id: id("missing-e"),
             },
-            "$.tracks[0].dynamic.effects[0].sidechain.source.submix_id",
+            "$.tracks[0].inserts.effects[1].sidechain.source.submix_id",
         ),
         (
-            RackName::Simd2,
+            2,
             RouteSource::SubmixOutput {
                 submix_id: id("missing-f"),
             },
-            "$.tracks[0].simd2.effects[0].sidechain.source.submix_id",
+            "$.tracks[0].inserts.effects[2].sidechain.source.submix_id",
         ),
     ] {
         model_case(
             &mut count,
             |s| {
-                let effect = routed_effect(&s.tracks[0].dynamic.effects[0], source);
-                match rack {
-                    RackName::Simd1 => {
-                        s.tracks[0].simd1 = Rack {
-                            effects: vec![effect],
-                        }
-                    }
-                    RackName::Dynamic => s.tracks[0].dynamic.effects[0] = effect,
-                    RackName::Simd2 => {
-                        s.tracks[0].simd2 = Rack {
-                            effects: vec![effect],
-                        }
-                    }
-                    // The strip carries no effects; the case table above never names it.
-                    RackName::Builtins => {
-                        unreachable!("the builtins token addresses no effect rack")
-                    }
+                let effects = &mut s.tracks[0].inserts.effects;
+                let effect = routed_effect(&effects[0], source);
+                while effects.len() <= position {
+                    let mut filler = effects[0].clone();
+                    filler.id = id(&format!("filler-{}", effects.len()));
+                    effects.push(filler);
                 }
+                effects[position] = Effect {
+                    id: effects[position].id.clone(),
+                    ..effect
+                };
             },
             DiagnosticCode::MissingEntityReference,
             path,
@@ -1068,7 +1061,7 @@ fn automation_category_has_20_distinct_cases() {
     );
     parse_case(
         &mut count,
-        &replaced("rack = \"dynamic\"", "rack = \"master\""),
+        &replaced("rack = \"inserts\"", "rack = \"master\""),
         DiagnosticCode::InvalidEnum,
         "$.automation[0].target.rack",
     );

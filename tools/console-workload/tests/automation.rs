@@ -4,7 +4,7 @@
 //! `console_model` clears the fixture's automation table unconditionally, both fixture gates
 //! assert the standing sessions declare none, and the only arm in the benchmark that delivers
 //! spans drives parametric EQs. The row's answer is the console's real traffic shape -- one Point
-//! span per block, on one track, through the live-console control queue.
+//! span per block, on one track, through the live-control queue.
 //!
 //! Three things have to be true for its paired ramp delta to mean what it says, and none of them
 //! is something a benchmark may assume:
@@ -138,10 +138,10 @@ fn moving_the_threshold_moves_rendered_bits_on_every_block() {
 
 /// "One track" is chosen by the stable session identity, not by position.
 ///
-/// `attach_effect_console` returns channels in prepared-entry order, which is sorted by effect
-/// id and not by track, so taking the first matching channel would silently address a different
-/// track when the entry set changed. The row names the track it automated in its record; this pins
-/// that the name is derived from a key that cannot drift.
+/// `attach_effect_live_controls` returns channels in prepared-entry order, which is sorted by
+/// effect id and not by track, so taking the first matching channel would silently address a
+/// different track when the entry set changed. The row names the track it automated in its record;
+/// this pins that the name is derived from a key that cannot drift.
 #[test]
 fn the_automated_track_is_the_stable_minimum() {
     let runtime = SessionRuntime::build(WORKLOAD, CONFIG);
@@ -168,7 +168,7 @@ fn a_plan_without_a_control_channel_resolves_nothing() {
     let runtime = SessionRuntime::new(WORKLOAD);
     assert!(
         runtime.first_track_control_channel(EFFECT_ID).is_none(),
-        "PlanConfig::BASELINE attaches no live-console control channel"
+        "PlanConfig::BASELINE attaches no live-control channel"
     );
 }
 

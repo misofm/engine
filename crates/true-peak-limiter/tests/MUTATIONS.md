@@ -451,7 +451,7 @@ retried:
 
 The gate is `crates/host-core/src/limiter_linked_session.rs`, three unit tests,
 `the_hot_console_renders_the_pre_990_words_at_simd8`, `_at_simd4` and `_at_scalar`. They are unit
-tests so that they can prepare through `prepare_host_runtime_with_console_backend`, the
+tests so that they can prepare through `prepare_host_runtime_with_live_controls_backend`, the
 `#[cfg(test)]` backend seam in `crates/host-core/src/prepare.rs`. The scenario is #996's with:
 
 * four linked ramps: both channels of every lane of a bank still linked, `ch16`-`ch23` at blocks

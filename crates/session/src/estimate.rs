@@ -61,22 +61,39 @@ pub fn estimate_session_resources(
     let output_count = count(session.outputs.len(), "$.outputs", &mut errors);
     let route_count = count(session.routes.len(), "$.routes", &mut errors);
     let automation_count = count(session.automation.len(), "$.automation", &mut errors);
-    let effect_count = sum_counts(
-        session
-            .tracks
-            .iter()
-            .flat_map(|track| [&track.simd1, &track.dynamic, &track.simd2]),
-        |rack| rack.effects.len(),
+    // A console entry is an effect instance on its track once lowered, so it counts as one.
+    let effect_count = checked_add(
+        sum_counts(
+            session.tracks.iter(),
+            |track| track.console.len(),
+            "$.tracks",
+            &mut errors,
+        ),
+        sum_counts(
+            session.tracks.iter(),
+            |track| track.inserts.effects.len(),
+            "$.tracks",
+            &mut errors,
+        ),
         "$.tracks",
         &mut errors,
     );
-    let parameter_count = sum_counts(
-        session
-            .tracks
-            .iter()
-            .flat_map(|track| [&track.simd1, &track.dynamic, &track.simd2])
-            .flat_map(|rack| rack.effects.iter()),
-        |effect| effect.params.len(),
+    let parameter_count = checked_add(
+        sum_counts(
+            session.tracks.iter().flat_map(|track| &track.console),
+            |entry| entry.params.len(),
+            "$.tracks",
+            &mut errors,
+        ),
+        sum_counts(
+            session
+                .tracks
+                .iter()
+                .flat_map(|track| &track.inserts.effects),
+            |effect| effect.params.len(),
+            "$.tracks",
+            &mut errors,
+        ),
         "$.tracks",
         &mut errors,
     );
@@ -109,33 +126,49 @@ pub fn estimate_session_resources(
         }};
     }
     vector!(session.sources, crate::Source, "$.sources");
+    vector!(session.console.pre_insert, crate::ConsoleSlot, "$.console");
+    vector!(session.console.post_insert, crate::ConsoleSlot, "$.console");
     vector!(session.tracks, crate::Track, "$.tracks");
     vector!(session.submixes, crate::Submix, "$.submixes");
     vector!(session.outputs, crate::Output, "$.outputs");
     vector!(session.routes, crate::Route, "$.routes");
     vector!(session.automation, crate::Automation, "$.automation");
     for track in &session.tracks {
-        for rack in [&track.simd1, &track.dynamic, &track.simd2] {
-            let path = "$.tracks.racks.effects";
+        let path = "$.tracks.console";
+        let bytes = checked_mul(
+            count(track.console.len(), path, &mut errors),
+            size::<crate::ConsoleEntry>(),
+            path,
+            &mut errors,
+        );
+        model_vector_bytes = checked_add(model_vector_bytes, bytes, path, &mut errors);
+        largest_model_allocation = largest_model_allocation.max(bytes);
+        let path = "$.tracks.inserts.effects";
+        let bytes = checked_mul(
+            count(track.inserts.effects.len(), path, &mut errors),
+            size::<crate::Effect>(),
+            path,
+            &mut errors,
+        );
+        model_vector_bytes = checked_add(model_vector_bytes, bytes, path, &mut errors);
+        largest_model_allocation = largest_model_allocation.max(bytes);
+        let params = track.console.iter().map(|entry| entry.params.len()).chain(
+            track
+                .inserts
+                .effects
+                .iter()
+                .map(|effect| effect.params.len()),
+        );
+        for params in params {
+            let path = "$.tracks.effects.params";
             let bytes = checked_mul(
-                count(rack.effects.len(), path, &mut errors),
-                size::<crate::Effect>(),
+                count(params, path, &mut errors),
+                size::<crate::EffectParam>(),
                 path,
                 &mut errors,
             );
             model_vector_bytes = checked_add(model_vector_bytes, bytes, path, &mut errors);
             largest_model_allocation = largest_model_allocation.max(bytes);
-            for effect in &rack.effects {
-                let path = "$.tracks.racks.effects.params";
-                let bytes = checked_mul(
-                    count(effect.params.len(), path, &mut errors),
-                    size::<crate::EffectParam>(),
-                    path,
-                    &mut errors,
-                );
-                model_vector_bytes = checked_add(model_vector_bytes, bytes, path, &mut errors);
-                largest_model_allocation = largest_model_allocation.max(bytes);
-            }
         }
     }
     for automation in &session.automation {

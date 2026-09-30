@@ -129,6 +129,7 @@ pub(crate) fn validate_session(session: &SessionModel) -> Result<(), DiagnosticS
     let index = Index { sources, graph };
     let mut local = LocalUniqueness::default();
     validate_sources(session, &root, &mut diagnostics);
+    validate_console(session, &root, &mut diagnostics);
     validate_tracks(session, &index, &root, &mut diagnostics, &mut local);
     validate_routes(session, &index, &root, &mut diagnostics);
     validate_automation(session, &index, &root, &mut diagnostics);
@@ -189,6 +190,102 @@ fn valid_source_content_identity(value: &str) -> bool {
     })
 }
 
+/// The session console's own rules (decision 12): slot IDs are unique across both sections,
+/// because a console address names the slot and not its section, and a slot is native.
+///
+/// Whether a native slot is on the console eligibility list is a registry question, answered
+/// where native identities resolve (`effect_compiler`'s `console.slot.ineligible_effect`).
+fn validate_console(session: &SessionModel, root: &PathRef<'_>, diagnostics: &mut Vec<Diagnostic>) {
+    let console_path = root.key("console");
+    let mut slots = HashSet::with_capacity(
+        session.console.pre_insert.len() + session.console.post_insert.len(),
+    );
+    for (section, declared) in [
+        ("pre_insert", &session.console.pre_insert),
+        ("post_insert", &session.console.post_insert),
+    ] {
+        let section_path = console_path.key(section);
+        for (position, slot) in declared.iter().enumerate() {
+            let slot_path = section_path.index(position);
+            if !slots.insert(slot.slot.as_str()) {
+                error(
+                    diagnostics,
+                    DiagnosticCode::DuplicateId,
+                    &slot_path.key("slot"),
+                    "console slot ID is repeated; slot IDs are unique across pre_insert and \
+                     post_insert",
+                );
+            }
+            if let crate::EffectIdentity::ThirdPartyCid { .. } = slot.identity {
+                error(
+                    diagnostics,
+                    DiagnosticCode::ConsoleSlotNotNative,
+                    &slot_path.key("identity"),
+                    "a console slot is a native effect; third-party code is never a console slot",
+                );
+            }
+        }
+    }
+}
+
+/// One track's console entries against the session's slots: exactly one entry per slot, in slot
+/// order (`pre_insert`, then `post_insert`), each carrying valid params.
+///
+/// `declared` is the session's slot IDs, built once for every track, so a track costs one lookup
+/// per entry and per slot rather than a scan of the other side (#1093 verdict L3).
+fn validate_console_entries<'a>(
+    session: &SessionModel,
+    declared: &HashSet<&str>,
+    track: &'a Track,
+    path: &PathRef<'_>,
+    diagnostics: &mut Vec<Diagnostic>,
+    local: &mut LocalUniqueness<'a>,
+) {
+    let console_path = path.key("console");
+    local.effect_ids.clear();
+    let mut expected = session.console.slots();
+    for (position, entry) in track.console.iter().enumerate() {
+        let entry_path = console_path.index(position);
+        let slot_path = entry_path.key("slot");
+        let expected_slot = expected.next();
+        if !declared.contains(entry.slot.as_str()) {
+            error(
+                diagnostics,
+                DiagnosticCode::MissingEntityReference,
+                &slot_path,
+                "console entry names no declared console slot",
+            );
+        } else if !local.effect_ids.insert(entry.slot.as_str()) {
+            error(
+                diagnostics,
+                DiagnosticCode::DuplicateId,
+                &slot_path,
+                "console entry repeats a slot; a track carries each slot exactly once",
+            );
+        } else if expected_slot.is_none_or(|slot| slot.slot != entry.slot) {
+            error(
+                diagnostics,
+                DiagnosticCode::ConsoleEntryOrder,
+                &slot_path,
+                "console entries follow the session's slot order: pre_insert, then post_insert",
+            );
+        }
+        validate_params(diagnostics, &entry.params, &entry_path.key("params"), local);
+    }
+    // Every entry that names a declared slot is in `local.effect_ids` now, so a slot missing from
+    // it has no entry.
+    for slot in session.console.slots() {
+        if !local.effect_ids.contains(slot.slot.as_str()) {
+            error(
+                diagnostics,
+                DiagnosticCode::ConsoleEntryMissing,
+                &console_path,
+                "track console has no entry for a declared slot; every track carries every slot",
+            );
+        }
+    }
+}
+
 fn validate_tracks<'a>(
     session: &'a SessionModel,
     index: &Index<'_>,
@@ -197,6 +294,11 @@ fn validate_tracks<'a>(
     local: &mut LocalUniqueness<'a>,
 ) {
     let tracks_path = root.key("tracks");
+    let declared: HashSet<&str> = session
+        .console
+        .slots()
+        .map(|slot| slot.slot.as_str())
+        .collect();
     for (position, track) in session.tracks.iter().enumerate() {
         let path = tracks_path.index(position);
         let source = index.sources.get(track.source_id.as_str()).copied();
@@ -266,13 +368,14 @@ fn validate_tracks<'a>(
                 }
             }
         }
-        for (name, rack) in [
-            ("simd1", &track.simd1),
-            ("dynamic", &track.dynamic),
-            ("simd2", &track.simd2),
-        ] {
-            validate_rack(diagnostics, index, rack, &path.key(name), local);
-        }
+        validate_console_entries(session, &declared, track, &path, diagnostics, local);
+        validate_rack(
+            diagnostics,
+            index,
+            &track.inserts,
+            &path.key("inserts"),
+            local,
+        );
     }
 }
 
@@ -325,9 +428,17 @@ fn validate_effect(
             &sidechain_path.key("source"),
         );
     }
-    let params_path = path.key("params");
+    validate_params(diagnostics, &effect.params, &path.key("params"), local);
+}
+
+fn validate_params(
+    diagnostics: &mut Vec<Diagnostic>,
+    params: &[crate::EffectParam],
+    params_path: &PathRef<'_>,
+    local: &mut LocalUniqueness<'_>,
+) {
     local.parameters.clear();
-    for (position, parameter) in effect.params.iter().enumerate() {
+    for (position, parameter) in params.iter().enumerate() {
         let parameter_path = params_path.index(position);
         let channel = match parameter.channel {
             crate::ParameterChannel::Left => 0_u8,
@@ -573,23 +684,32 @@ fn validate_automation(
             }
         };
         if let Some(track) = track {
-            let rack = match automation.target.rack {
-                RackName::Simd1 => Some(&track.simd1),
-                RackName::Dynamic => Some(&track.dynamic),
-                RackName::Simd2 => Some(&track.simd2),
+            // Rack size is resource-bounded; this is one of two intentional local searches.
+            let params = match automation.target.rack {
+                RackName::Inserts => Some(
+                    track
+                        .inserts
+                        .effects
+                        .iter()
+                        .find(|effect| effect.id == automation.target.effect_id)
+                        .map(|effect| effect.params.as_slice()),
+                ),
+                // A console slot is addressed by its slot ID, in either section (decision 12).
+                RackName::Console => Some(
+                    track
+                        .console
+                        .iter()
+                        .find(|entry| entry.slot == automation.target.effect_id)
+                        .map(|entry| entry.params.as_slice()),
+                ),
                 // The strip is not a rack of effects, so there is nothing to search; the arm
                 // below validates the target against the builtin parameter ABI instead.
                 RackName::Builtins => None,
             };
-            if let Some(rack) = rack {
-                // Rack size is resource-bounded; this is one of two intentional local searches.
-                let effect = rack
-                    .effects
-                    .iter()
-                    .find(|effect| effect.id == automation.target.effect_id);
-                if let Some(effect) = effect {
+            if let Some(params) = params {
+                if let Some(params) = params {
                     // Parameter count is resource-bounded; keep the local `(id, channel)` search.
-                    if !effect.params.iter().any(|parameter| {
+                    if !params.iter().any(|parameter| {
                         parameter.parameter_id == automation.target.parameter_id
                             && parameter.channel == automation.target.channel
                     }) {

@@ -14,30 +14,43 @@ import type {
  * of a table that has already drifted five times (issue #207's N-13(d)), so there is none.
  */
 
-/** The three effect racks a track carries, in signal order. */
-export type Rack = "simd1" | "dynamic" | "simd2";
+/**
+ * The two places an effect instance lives (owner decision 12).
+ *
+ * `console` is the session-level console strip: each slot is declared once for the session, in
+ * `pre_insert` or `post_insert`, and every track carries one entry per slot with only its own
+ * bypass and parameters. `inserts` is the per-track chain between the two console sections, with
+ * full effect declarations. These are the session's rack tokens, and the live controls, the
+ * observations and the automation targets all name an effect by one of them.
+ */
+export type Rack = "console" | "inserts";
 
 /**
- * The four racks an automation target may name.
+ * The three racks an automation target may name.
  *
  * `builtins` is not a rack of instances -- it is the strip's own fixed section, admitted as an
  * automation target by issue #178 under #210's D2. It is spelled here rather than in `Rack`
- * because a track has three *effect* racks and a caller must not be able to place an effect in a
- * fourth one that does not exist.
+ * because a caller must not be able to place an effect in it.
  */
 export type AutomationRack = Rack | "builtins";
 
 export type Channel = "left" | "right" | "both";
 
-/** The seven track taps a route or a routed sidechain may read from. */
+/**
+ * The seven track taps a route or a routed sidechain may read from, in signal order.
+ *
+ * Decision 12 renamed them in place, with wire codes 1-7 unchanged: `post_input` follows the
+ * input section, `insert_send` follows `console.pre_insert`, `insert_return` follows the inserts,
+ * `pre_fader` follows `console.post_insert`, and `post_pan` follows the pan or matrix.
+ */
 export type SendTap =
   | "input"
-  | "post_input_builtins"
-  | "post_simd1"
-  | "post_dynamic"
-  | "post_simd2_pre_fader"
+  | "post_input"
+  | "insert_send"
+  | "insert_return"
+  | "pre_fader"
   | "post_fader"
-  | "post_matrix";
+  | "post_pan";
 
 export type Matrix2x2 = Readonly<{ ll: number; lr: number; rl: number; rr: number }>;
 
@@ -115,11 +128,68 @@ export type TrackSourceSpec =
 export interface TrackSpec {
   readonly source: TrackSourceSpec;
   readonly builtins?: PerLane<BuiltinsSpec>;
+  /**
+   * This track's knobs for every session console slot: exactly one entry per slot, in the
+   * session's slot order (`pre_insert`, then `post_insert`). May be omitted only when the session
+   * declares no slot; otherwise the builder refuses the track with `console.entry_missing`, as
+   * the engine would, rather than inventing entries the caller never wrote.
+   */
+  readonly console?: readonly ConsoleEntrySpec[];
+  /** The per-track insert chain, in signal order: full effect declarations from `effect()`. */
+  readonly inserts?: readonly EffectDecl[];
   readonly fader?: FaderSpec;
   readonly pan?: PanSpec;
-  readonly simd1?: readonly EffectDecl[];
-  readonly dynamic?: readonly EffectDecl[];
-  readonly simd2?: readonly EffectDecl[];
+}
+
+/**
+ * The native effects a console slot may name (owner decision 12, "Eligibility").
+ *
+ * Every console slot always banks, so it must be an effect whose bank kernel the console can rely
+ * on. The list is the engine's `effect_compiler::CONSOLE_ELIGIBLE_EFFECTS`; the SDK's copy is
+ * held to it by an eval that boots every catalog effect as a slot.
+ */
+export type ConsoleEffectId =
+  | "miso.parametric-eq"
+  | "miso.compressor"
+  | "miso.gate-expander"
+  | "miso.soft-clip"
+  | "miso.transient-shaper"
+  | "miso.true-peak-limiter";
+
+/**
+ * One session console slot, declared once for every track.
+ *
+ * A slot carries exactly the fields the session's slot declaration has: its stable `slot` ID,
+ * unique across both sections, its native effect, and the quality and link mode every track runs
+ * it at. It takes no sidechain -- a keyed effect is an insert -- and no bypass or parameters,
+ * which are each track's own, in its `console` entry.
+ */
+export interface ConsoleSlotSpec<E extends ConsoleEffectId = ConsoleEffectId> {
+  readonly slot: string;
+  readonly effectId: E;
+  /** Launch native descriptors publish only the normal quality row. */
+  readonly quality?: "normal";
+  readonly linkMode?: "dual_mono" | "maximum" | "average";
+}
+
+/** The session console: the slots before the insert point, and the slots after it. */
+export interface ConsoleSpec {
+  readonly preInsert?: readonly ConsoleSlotSpec[];
+  readonly postInsert?: readonly ConsoleSlotSpec[];
+}
+
+/**
+ * One track's knobs for one console slot.
+ *
+ * `parameters` are display-unit values by catalog name, exactly as `effect()` takes them, and are
+ * checked against the slot's own effect. Pass the slot's effect as `E` to have them typed.
+ */
+export interface ConsoleEntrySpec<E extends EffectId = EffectId> {
+  readonly slot: string;
+  readonly bypass?: boolean;
+  readonly parameters?: EffectParamValues<E>;
+  /** The channel a scalar parameter value addresses. Per-lane pairs override it. */
+  readonly channel?: Channel;
 }
 
 export type RouteSource =
@@ -177,7 +247,7 @@ export type EffectParamValues<E extends EffectId> = Partial<{
 }>;
 
 export interface EffectOptions<E extends EffectId = EffectId> {
-  /** Session V1 rack-local identity. Deliberately separate from the native `effectId`. */
+  /** The insert's stable ID on its track. Deliberately separate from the native `effectId`. */
   readonly slotId?: string;
   readonly bypass?: boolean;
   /** Launch native descriptors publish only the normal quality row. */
@@ -191,9 +261,9 @@ export interface EffectOptions<E extends EffectId = EffectId> {
 export interface EffectDecl<E extends EffectId = EffectId> {
   readonly effectId: E;
   /**
-   * An omitted slot is materialized by `.track()` from the rack name and declaration order, so
-   * the emitted document always carries a nonempty rack-local ID even though a caller who does
-   * not automate the effect never has to invent one.
+   * An omitted ID is materialized by `.track()` from the insert's position (`insert-1`, ...), so
+   * the emitted document always carries a nonempty ID even though a caller who does not address
+   * the insert never has to invent one.
    */
   readonly slotId?: string;
   readonly parameters: EffectParamValues<E>;
@@ -219,16 +289,17 @@ export interface AutomationSegment {
 /**
  * What a span addresses.
  *
- * `slotId` names a rack-local effect, never a positional index, so inserting an effect ahead of an
- * automated one cannot silently re-point the automation. For `rack: "builtins"` there is no
- * instance to name and the key may be omitted; the builder writes the schema's fixed `"strip"`
- * literal, and refuses any other spelling.
+ * `slotId` names an effect by its stable ID, never a positional index, so inserting an effect
+ * ahead of an automated one cannot silently re-point the automation. For `rack: "console"` it is
+ * the console slot's ID, and for `rack: "inserts"` the insert's ID on this track. For
+ * `rack: "builtins"` there is no instance to name and the key may be omitted; the builder writes
+ * the schema's fixed `"strip"` literal, and refuses any other spelling.
  */
 export interface AutomationTarget {
   readonly trackId: string;
   readonly rack: AutomationRack;
   readonly slotId?: string;
-  /** A catalog parameter name for an effect rack, or a builtin parameter name for `builtins`. */
+  /** A catalog parameter name for an effect, or a builtin parameter name for `builtins`. */
   readonly parameter: string;
   readonly channel: Channel;
 }

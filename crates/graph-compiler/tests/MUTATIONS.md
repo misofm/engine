@@ -185,7 +185,7 @@ a real per-node scalar instance.
 | 143-E5 | zero binding, zero cost | attach lanes whenever the descriptor declares a tap regardless of the request | `host-core/src/prepare.rs` | RED — `a_session_that_asked_for_no_observation_holds_none`. **The output stayed identical**, which is the point: only the structural walk catches it |
 | 143-E2 | bank-lane correctness | the bank publishes `samples[0]` into every lane | `rack/src/lib.rs` | RED — 3 of 5 fail, including the bit-exact comparison against an independently prepared scalar compressor at each lane's own threshold |
 | 143-E3-bank | window exactness | publish **before** `process_bank` | `rack/src/lib.rs` | RED |
-| 143-E3-scalar | window exactness | publish **before** `process` in `execute_op`'s `ConsoleEffect` arm (the #137-E1 mirror) | `graph/src/runtime.rs` | RED — `window 2 published its own blocks, not the previous block's state`, `1088069417` vs `1090923272` |
+| 143-E3-scalar | window exactness | publish **before** `process` in `execute_op`'s `LiveControlEffect` arm (the #137-E1 mirror) | `graph/src/runtime.rs` | RED — `window 2 published its own blocks, not the previous block's state`, `1088069417` vs `1090923272` |
 | 143-E13 | plan replacement | a freshly built lane starts `armed: true`, so a subscription would survive a replacement | `effect-contract/src/live.rs` | RED — `the replacement plan carries capacity and no subscription`, `[8, 8, 8]` vs `[8, 8, 0]` |
 
 ### E7 — the cost classes, measured
@@ -200,14 +200,14 @@ to zero the moment it is disarmed.
 
 The release-only half renders a real eight-compressor plan for 256 blocks in each of the four legs.
 The table below is a debug-profile capture kept for the general shape; the test's actual gate is
-release-only: `armed <= unarmed_with_console * 1.10 + 50 µs`, i.e. arming eight taps is not
-measurably slower than an attached-but-unarmed console (debug profile, `x86_64` Zen 5, one shared
+release-only: `armed <= unarmed_with_live_controls * 1.10 + 50 µs`, i.e. arming eight taps is not
+measurably slower than attached-but-unarmed live controls (debug profile, `x86_64` Zen 5, one shared
 machine — evidence, not a pin):
 
 | leg | 256 blocks | per block |
 |---|---|---|
-| no console | 253.74 ms | 991.2 us |
-| console, no capacity | 252.36 ms | 985.8 us |
+| no live controls | 253.74 ms | 991.2 us |
+| live controls, no capacity | 252.36 ms | 985.8 us |
 | capacity, unarmed | 252.11 ms | 984.8 us |
 | every tap armed | 252.60 ms | 986.7 us |
 | **synthetic computed scan** (negative control) | 14.33 ms | **56.0 us** |
@@ -281,16 +281,21 @@ restored. Host: `x86_64` (`x86-64-v3`, eight-lane banks), rustc 1.97.1, debug,
 command for every row is `cargo test -p graph-compiler --test bank_levels`. The unmutated tree
 passes 9 of 9.
 
+Refreshed on #1093's C3 rebase (the session console and inserts, after batch C2; Sol's #1093
+verdict, finding 5): every row re-run on that tree, same host and command. The generator and the
+reproducers now build the console shape, so the probe's seed and line counts, M1 and M7's counts
+and M10's changed; each result below is the refreshed one.
+
 | # | mutation | file | result |
 |---|---|---|---|
-| 966-M1 | delete the level check (the base tree's binder) | `graph-compiler/src/banks.rs` | RED, 9 of 9. Every reproducer and guard refuses with `graph.scheduler.layout` at `Simd8`; the probe refuses 28 lines over 22 seeds (15 at `Simd4`, 13 at `Simd8`) |
+| 966-M1 | delete the level check (the base tree's binder) | `graph-compiler/src/banks.rs` | RED, 8 of 9. Every reproducer and guard but the reduced #970 reproducer refuses with `graph.scheduler.layout` at `Simd8`; the probe refuses 42 lines over 25 seeds (21 at `Simd4`, 21 at `Simd8`). The reduced #970 reproducer stays green since #1093: its soft-clip is now an insert extending `t11`/`t13`'s own chain rather than a later chain, so it has no misaligned slot (`[0, 0]`); the seven other reproducers and the probe still see the mutation |
 | 966-M2 | over-strict check: leave a slot unbound whenever any lane skipped an earlier slot (`rank != slot`), instead of whenever the members' levels differ | as M1 | RED, 2 of 9, and only the two over-reach guards: `lanes_that_skip_the_same_slot_still_bank_it` (19 banks, not 20) and `a_slot_after_a_misaligned_one_realigns_and_still_banks` (8, not 9). Nothing else can see a pure banking-count loss, which is why both guards exist |
-| 966-M7 | `continue` becomes `break` in the check, so every slot after a group's first misaligned slot is dropped, including slots where the lanes realign | as M1 | RED, 1 of 9: `a_slot_after_a_misaligned_one_realigns_and_still_banks` (8 banks, not 9). The #966 verification found M7 green against the prototype's four tests ([`VERIFY-966.md`](https://github.com/misofm/engine/blob/5379e46ca3b349b9d277d642c008bb7a9643fb76/docs/handoffs/bug-966-2026-09-27/VERIFY-966.md), finding 2; removed by #1031): in every other reproducer the slots after the misaligned one are misaligned too |
-| 966-M3 | compare only the first and the last member's level | as M1 | RED, 3 of 9: `the_console_less_a_middle_lanes_eq_binds_at_every_width` (`ch60` is lane 4 of 8), the seed-412 shape and the probe (11 lines over 10 seeds), each with `graph.scheduler.layout`. The first-lane and last-lane gate-1 variants stay green, which is why the middle-lane variant exists |
-| 966-M8 | skip lane 1 in the comparison (`.skip(2)`) | as M1 | RED, 1 of 9: only the probe (seeds 31 and 58). No reproducer puts its ragged lane at lane 1 |
-| 966-M10 | compare only the members whose lane ran every earlier slot (`active[..slot]` all true), so a ragged lane is never compared | as M1 | RED, 9 of 9, each with `graph.scheduler.layout`: every reproducer's ragged lane is exactly the one this skips. (Sol's attempt-1 review reported its own M10 red on 4 of 9; its exact code is not recorded, so this row is this formulation only) |
-| 966-M9 | the test's own source feeds a mono-mapped track's right side from the next source channel, so the collapse's premise is false | `graph-compiler/tests/bank_levels.rs` (`TrackSource`) | RED, 2 of 9, armed legs only: `the_mono_console_less_one_eq_binds_and_collapses_at_every_width` (`Simd4`, armed) and the probe (11 lines over 6 seeds, every one `Armed`). The armed comparisons can see a wrong collapse; every unarmed comparison stays green |
-| 966-M970 | revert #970's arming check: `Runtime::arm_mono_collapse` arms a chain without `identity.banking.gathers_track_input()`, so a later chain of a split strip is armed again | `graph/src/runtime.rs` | RED, 1 of 9: the probe, 5 armed lines over 4 seeds (12, 48, 50, 54), all on even-seed all-mono desks with the intended fixture's asymmetric strip. Attempt 1 drew every all-mono desk from the symmetric mono fixture, and under this mutation all 9 stayed green (Sol, attempt-1 verdict): wrongly arming a later chain is bit-exact when nothing upstream of it is asymmetric. That is why the generator keeps both strips |
+| 966-M7 | `continue` becomes `break` in the check, so every slot after a group's first misaligned slot is dropped, including slots where the lanes realign | as M1 | RED, 2 of 9: `a_slot_after_a_misaligned_one_realigns_and_still_banks` (8 banks, not 9) and, since #1093, `lanes_that_skip_the_same_slot_still_bank_it` (19, not 20; the mutation was applied as `continue` -> `break` on `bind_group_banks`' unbindable slot). The #966 verification found M7 green against the prototype's four tests ([`VERIFY-966.md`](https://github.com/misofm/engine/blob/5379e46ca3b349b9d277d642c008bb7a9643fb76/docs/handoffs/bug-966-2026-09-27/VERIFY-966.md), finding 2; removed by #1031): in every other reproducer the slots after the misaligned one are misaligned too |
+| 966-M3 | compare only the first and the last member's level | as M1 | RED, 3 of 9: `the_console_less_a_middle_lanes_eq_binds_at_every_width` (`ch60` is lane 4 of 8), the seed-412 shape and the probe (16 lines over 14 seeds), each with `graph.scheduler.layout`. The first-lane and last-lane gate-1 variants stay green, which is why the middle-lane variant exists |
+| 966-M8 | skip lane 1 in the comparison (`.skip(2)`) | as M1 | RED, 1 of 9: only the probe (4 lines over seeds 31, 36 and 48). No reproducer puts its ragged lane at lane 1 |
+| 966-M10 | compare only the members whose lane ran every earlier slot (`active[..slot]` all true), so a ragged lane is never compared | as M1 | RED, 3 of 9, each with `graph.scheduler.layout`: the middle- and last-lane gate-1 variants and the probe (19 lines over 14 seeds). The six other reproducers stay green under this formulation on the console-shape tree (9 of 9 before it); the reason was not investigated (Sol's attempt-1 review reported its own M10 red on 4 of 9; its exact code is not recorded, so this row is this formulation only) |
+| 966-M9 | the test's own source feeds a mono-mapped track's right side from the next source channel, so the collapse's premise is false | `graph-compiler/tests/bank_levels.rs` (`TrackSource`) | RED, 2 of 9, armed legs only: `the_mono_console_less_one_eq_binds_and_collapses_at_every_width` (`Simd4`, armed) and the probe (9 lines over 5 seeds, every one `Armed`). The armed comparisons can see a wrong collapse; every unarmed comparison stays green |
+| 966-M970 | revert #970's arming check: `Runtime::arm_mono_collapse` arms a chain without `identity.banking.gathers_track_input()`, so a later chain of a split strip is armed again | `graph/src/runtime.rs` | RED, 1 of 9: the probe, 6 armed lines over 5 seeds (12, 28, 48, 50, 62; 5 at `Simd4`, 1 at `Simd8`). Also RED in 7 of 9 `host-core` `collapse_arming` tests. Attempt 1 drew every all-mono desk from the symmetric mono fixture, and under this mutation all 9 stayed green (Sol, attempt-1 verdict): wrongly arming a later chain is bit-exact when nothing upstream of it is asymmetric. That is why the generator keeps both strips |
 
 ---
 

@@ -7,7 +7,7 @@
 use builtins::{MeterMetricSet, MeterTap};
 use core::mem::{size_of, size_of_val};
 use host_core::{
-    EffectControlProducer, HostConsoleRequest, HostMeterRequest, HostPrepareCaps,
+    EffectControlProducer, HostLiveControlRequest, HostMeterRequest, HostPrepareCaps,
     HostPrepareReport, HostShapePolicy, LAUNCH_SAMPLE_RATES, PrepareRejection,
     SOURCE_STALL_TOLERANCE_MS, SourceControlError, SourceSubmission, compile_host_session,
     control_table_bytes, default_source_ring_frames, diagnostic_lines, prepare_host_runtime,
@@ -53,10 +53,10 @@ fn report() -> HostPrepareReport {
 #[test]
 fn selected_meter_observers_preserve_caller_order_taps_and_metric_identity() {
     let compiled = compile_host_session(SESSION, &caps()).expect("compiled fixture");
-    let console = HostConsoleRequest {
+    let live_controls = HostLiveControlRequest {
         meter_period_frames: core::num::NonZeroU32::new(128),
         meter_queue_depth: core::num::NonZeroUsize::new(2).unwrap(),
-        ..HostConsoleRequest::default()
+        ..HostLiveControlRequest::default()
     };
     let meters = [
         HostMeterRequest {
@@ -75,7 +75,10 @@ fn selected_meter_observers_preserve_caller_order_taps_and_metric_identity() {
     limits.maximum_meter_items = u64::MAX;
     limits.maximum_meter_bytes = u64::MAX;
     let (_host, handles) = prepare_host_runtime_with_selected_meters_between_render_calls(
-        &compiled, &limits, &console, &meters,
+        &compiled,
+        &limits,
+        &live_controls,
+        &meters,
     )
     .expect("selected observers");
     assert_eq!(handles.meters.len(), 2);
@@ -90,7 +93,10 @@ fn selected_meter_observers_preserve_caller_order_taps_and_metric_identity() {
         metrics: MeterMetricSet::from_bits_retain(0x80),
     }];
     let Err(error) = prepare_host_runtime_with_selected_meters_between_render_calls(
-        &compiled, &limits, &console, &invalid,
+        &compiled,
+        &limits,
+        &live_controls,
+        &invalid,
     ) else {
         panic!("unknown metric bit must be rejected");
     };
@@ -375,17 +381,17 @@ fn retained_bytes_projection_matches_the_live_set() {
 #[test]
 fn effect_control_report_uses_actual_native_capacity_strings_and_owners() {
     let compiled = compile_host_session(SESSION, &caps()).expect("compiled fixture");
-    let console = HostConsoleRequest {
+    let live_controls = HostLiveControlRequest {
         control_queue_depth: core::num::NonZeroUsize::new(4),
-        ..HostConsoleRequest::default()
+        ..HostLiveControlRequest::default()
     };
     let (prepared, handles) = prepare_host_runtime_with_selected_meters_between_render_calls(
         &compiled,
         &caps(),
-        &console,
+        &live_controls,
         &[],
     )
-    .expect("console preparation");
+    .expect("live-control preparation");
     assert_eq!(
         handles.effect_controls.len(),
         9,
@@ -458,17 +464,17 @@ fn effect_control_report_uses_actual_native_capacity_strings_and_owners() {
 #[test]
 fn effect_control_bytes_join_the_graph_session_cap() {
     let compiled = compile_host_session(SESSION, &caps()).expect("compiled fixture");
-    let console = HostConsoleRequest {
+    let live_controls = HostLiveControlRequest {
         control_queue_depth: core::num::NonZeroUsize::new(4),
-        ..HostConsoleRequest::default()
+        ..HostLiveControlRequest::default()
     };
     let (prepared, _handles) = prepare_host_runtime_with_selected_meters_between_render_calls(
         &compiled,
         &caps(),
-        &console,
+        &live_controls,
         &[],
     )
-    .expect("console preparation");
+    .expect("live-control preparation");
     let admitted = prepared
         .report
         .graph_session_plus_plan_bytes
@@ -488,7 +494,7 @@ fn effect_control_bytes_join_the_graph_session_cap() {
     prepare_host_runtime_with_selected_meters_between_render_calls(
         &compiled,
         &equal,
-        &console,
+        &live_controls,
         &[],
     )
     .expect("exact graph plus effect budget must admit");
@@ -497,7 +503,7 @@ fn effect_control_bytes_join_the_graph_session_cap() {
     let failure = match prepare_host_runtime_with_selected_meters_between_render_calls(
         &compiled,
         &below,
-        &console,
+        &live_controls,
         &[],
     ) {
         Ok(_) => panic!("one byte below graph plus effect budget must refuse"),
@@ -662,32 +668,33 @@ fn contract_types_are_send_and_not_sync() {
     assert_send::<engine::realtime::PreparedRenderPlan>();
 }
 
-/// Issue #137 D1/D2: the live-console halves are prepared inside the plan transaction, addressed
+/// Issue #137 D1/D2: the live-control halves are prepared inside the plan transaction, addressed
 /// by the canonical normalized track order, and bounded exactly as requested.
 ///
 /// Red mutation: drop the `bound.track_controls.len() != control_requests.len()` leg of the
-/// console arity check in `prepare_host_runtime_with_console` and make
-/// `prepare_session_builtins_with_console` skip one requested channel -> this test still finds
-/// nine tracks but only eight producers, so the `zip` below panics on the missing channel.
+/// live-control arity check in `prepare_host_runtime_with_live_controls` and make
+/// `prepare_session_builtins_with_live_controls` skip one requested channel -> this test still
+/// finds nine tracks but only eight producers, so the `zip` below panics on the missing channel.
 #[test]
-fn console_attaches_bounded_control_and_meter_halves_in_canonical_track_order() {
+fn live_controls_attach_bounded_control_and_meter_halves_in_canonical_track_order() {
     use core::num::{NonZeroU32, NonZeroUsize};
-    use host_core::{HostConsoleRequest, prepare_host_session_with_console};
+    use host_core::{HostLiveControlRequest, prepare_host_session_with_live_controls};
 
-    let mut console_caps = caps();
-    console_caps.maximum_meter_streams = 16;
-    console_caps.maximum_meter_items = 1 << 16;
-    console_caps.maximum_meter_bytes = 1 << 24;
-    let console = HostConsoleRequest {
+    let mut live_control_caps = caps();
+    live_control_caps.maximum_meter_streams = 16;
+    live_control_caps.maximum_meter_items = 1 << 16;
+    live_control_caps.maximum_meter_bytes = 1 << 24;
+    let live_controls = HostLiveControlRequest {
         control_queue_depth: Some(NonZeroUsize::new(4).expect("nonzero")),
         meter_period_frames: Some(NonZeroU32::new(128).expect("nonzero")),
         meter_queue_depth: NonZeroUsize::new(8).expect("nonzero"),
-        ..HostConsoleRequest::default()
+        ..HostLiveControlRequest::default()
     };
     let (compiled, prepared, mut handles) =
-        prepare_host_session_with_console(SESSION, &console_caps, &console).unwrap_or_else(
-            |failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())),
-        );
+        prepare_host_session_with_live_controls(SESSION, &live_control_caps, &live_controls)
+            .unwrap_or_else(|failure| {
+                panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
+            });
     let expected: Vec<String> = compiled
         .normalized_model()
         .tracks
@@ -701,7 +708,7 @@ fn console_attaches_bounded_control_and_meter_halves_in_canonical_track_order() 
             .map(|value| value.to_string())
             .collect::<Vec<_>>(),
         expected,
-        "console track order is the canonical normalized order"
+        "live-control track order is the canonical normalized order"
     );
     assert_eq!(handles.track_controls.len(), expected.len());
     assert_eq!(handles.meters.len(), expected.len());
@@ -733,19 +740,21 @@ fn console_attaches_bounded_control_and_meter_halves_in_canonical_track_order() 
     assert_eq!(full.value, record, "a full queue returns the record");
 }
 
-/// Issue #137: a host that asks for no console gets none, and pays for none.
+/// Issue #137: a host that asks for no live controls gets none, and pays for none.
 #[test]
-fn no_console_request_attaches_nothing_and_charges_nothing() {
+fn no_live_control_request_attaches_nothing_and_charges_nothing() {
     use host_core::{
-        HostConsoleRequest, compile_host_session as compile, prepare_host_runtime_with_console,
+        HostLiveControlRequest, compile_host_session as compile,
+        prepare_host_runtime_with_live_controls,
     };
 
     let compiled = compile(SESSION, &caps()).expect("compiled fixture");
-    let (plain, handles) =
-        prepare_host_runtime_with_console(&compiled, &caps(), &HostConsoleRequest::default())
-            .unwrap_or_else(|failure| {
-                panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
-            });
+    let (plain, handles) = prepare_host_runtime_with_live_controls(
+        &compiled,
+        &caps(),
+        &HostLiveControlRequest::default(),
+    )
+    .unwrap_or_else(|failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())));
     assert!(handles.track_controls.is_empty());
     assert!(handles.meters.is_empty());
     assert_eq!(handles.tracks.len(), 9);
@@ -757,7 +766,7 @@ fn no_console_request_attaches_nothing_and_charges_nothing() {
         .report;
     assert_eq!(
         plain.report.builtin_processor_payload_bytes, baseline.builtin_processor_payload_bytes,
-        "an unattached console changes no processor byte"
+        "unattached live controls change no processor byte"
     );
     assert_eq!(plain.report, baseline);
 }

@@ -192,7 +192,7 @@ interface BootSnapshot {
 function snapshotBootOptions(options: BootOptions): BootSnapshot {
   // Read and validate the plain preparation value before any caller-visible suspension. The
   // spectrum objects retain their existing deep copies, while the surrounding options object and
-  // console words become private snapshots for the later instantiate/stage sequence.
+  // live-control words become private snapshots for the later instantiate/stage sequence.
   const spectrumHopFrames = validateSpectrumHopFrames(options.spectrumHopFrames);
   const spectrumQuery = options.spectrum === undefined ? undefined : cloneSpectrumQuery(options.spectrum);
   const spectrumCollection = options.spectrumCollection === undefined
@@ -200,13 +200,13 @@ function snapshotBootOptions(options: BootOptions): BootSnapshot {
   if (spectrumQuery !== undefined && spectrumCollection !== undefined) {
     throw new MisoUsageError("spectrum and spectrumCollection are mutually exclusive");
   }
-  const consoleOptions = options.console === undefined ? undefined : (() => {
+  const liveControlOptions = options.liveControls === undefined ? undefined : (() => {
     const {
       commandQueueRecords,
       meterBlocks,
       observationTaps,
       masterTrackPlusOne,
-    } = options.console!;
+    } = options.liveControls!;
     return Object.freeze({
       ...(commandQueueRecords === undefined ? {} : { commandQueueRecords }),
       ...(meterBlocks === undefined ? {} : { meterBlocks }),
@@ -216,7 +216,7 @@ function snapshotBootOptions(options: BootOptions): BootSnapshot {
   })();
   const bootOptions: BootOptions = Object.freeze({
     ...options,
-    ...(consoleOptions === undefined ? {} : { console: consoleOptions }),
+    ...(liveControlOptions === undefined ? {} : { liveControls: liveControlOptions }),
     ...(spectrumHopFrames === undefined ? {} : { spectrumHopFrames }),
     ...(spectrumQuery === undefined ? {} : { spectrum: spectrumQuery }),
     ...(spectrumCollection === undefined ? {} : { spectrumCollection }),
@@ -347,7 +347,7 @@ export class WasmBoundary {
       exports,
       staged.handle,
       staged.optionBytes,
-      (snapshot.options.console?.meterBlocks ?? 0) > 0,
+      (snapshot.options.liveControls?.meterBlocks ?? 0) > 0,
       snapshot.spectrumQuery,
       snapshot.spectrumCollection,
     );
@@ -380,7 +380,7 @@ export class WasmBoundary {
     );
     this.#handle = staged.handle;
     this.#optionBytes = staged.optionBytes;
-    this.#metersAttached = (snapshot.options.console?.meterBlocks ?? 0) > 0;
+    this.#metersAttached = (snapshot.options.liveControls?.meterBlocks ?? 0) > 0;
     this.#spectrumQuery = snapshot.spectrumQuery;
     this.#spectrumCollection = snapshot.spectrumCollection;
     this.#spectrumActiveQuery = snapshot.spectrumQuery;
@@ -456,10 +456,10 @@ export class WasmBoundary {
         frames: BigInt(this.#exports.miso_engine_web_v1_source_frames(handle, index)),
       }));
     }
-    const trackCount = Number(this.#exports.miso_engine_web_v1_console_track_count(handle));
+    const trackCount = Number(this.#exports.miso_engine_web_v1_live_control_track_count(handle));
     const tracks: string[] = [];
     for (let index = 0; index < trackCount; index += 1) {
-      const idBytes = Number(this.#exports.miso_engine_web_v1_console_track_id(handle, index));
+      const idBytes = Number(this.#exports.miso_engine_web_v1_live_control_track_id(handle, index));
       tracks.push(this.#readIdBuffer(idBytes));
     }
     return Object.freeze({
@@ -1140,7 +1140,7 @@ export class WasmBoundary {
     const staging = this.#buffer("command");
     if (staging.pointer === 0 || staging.capacity === 0) {
       throw new MisoUsageError(
-        "this engine booted with no console attached; set console.commandQueueRecords",
+        "this engine booted with no live controls attached; set liveControls.commandQueueRecords",
       );
     }
     if (records.byteLength !== count * recordBytes) {
@@ -1204,10 +1204,14 @@ export class WasmBoundary {
     }
     let reason = commandReasonValue("none");
     if (result === constantValue("resultCodes", "invalidArgument")) {
-      const trackCount = Number(this.#exports.miso_engine_web_v1_console_track_count(handle));
+      const trackCount = Number(this.#exports.miso_engine_web_v1_live_control_track_count(handle));
+      // An effect lives in an insert (`1`) or a console slot (`3`); anything else, the retired
+      // `0` and `2` included, is an unknown rack, as the worklet classifies it (#1096).
+      const effectRack = address.rack === constantValue("racks", "inserts")
+        || address.rack === constantValue("racks", "console");
       reason = address.trackIndex >= trackCount
         ? commandReasonValue("unknownTrack")
-        : address.rack > 2
+        : !effectRack
           ? commandReasonValue("unknownRack")
           : commandReasonValue("unknownEffect");
     }

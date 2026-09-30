@@ -16,7 +16,7 @@ import assert from "node:assert/strict";
 import { before, describe, test } from "node:test";
 
 import { MisoEngineAsset } from "../src/core/asset.ts";
-import { ConsoleWriter } from "../src/core/writer.ts";
+import { LiveControlWriter } from "../src/core/writer.ts";
 import { MisoUsageError } from "../src/core/errors.ts";
 import { ABI_LAYOUT } from "../src/generated/abi.ts";
 import { CATALOG } from "../src/generated/catalog.ts";
@@ -40,10 +40,10 @@ const EQ_PARAMS = [
  * the queue ever saw it. One EQ publishes twenty-two live per-lane rows, so four instances give
  * sixty-four addresses -- comfortably past the boundary being probed.
  */
-function consoleDocument(instances = 1) {
+function liveControlDocument(instances = 1) {
   return sessionDocument({
     effects: {
-      simd1: Array.from({ length: instances }, (_unused, index) =>
+      preInsert: Array.from({ length: instances }, (_unused, index) =>
         effectEntry(`eq${index}`, "miso.parametric-eq", EQ_PARAMS)),
     },
   });
@@ -54,7 +54,7 @@ function compressorDocument() {
   const compressor = CATALOG.effects.find((effect) => effect.id === "miso.compressor");
   return sessionDocument({
     effects: {
-      dynamic: [effectEntry(
+      inserts: [effectEntry(
         "compressor",
         compressor.id,
         compressor.parameters.map((row) => ({
@@ -92,7 +92,7 @@ function gainEdit(parameterId, channel, value) {
   return {
     kind: "effectParam",
     trackIndex: 0,
-    rack: 0,
+    rack: 3, // console: the EQs are console slots
     channel,
     effectIndex: 0,
     parameterId,
@@ -122,9 +122,9 @@ before(async () => {
 });
 
 async function pausedEngine(instances = 1) {
-  return createOfflineEngine(consoleDocument(instances), {
+  return createOfflineEngine(liveControlDocument(instances), {
     asset,
-    console: { commandQueueRecords: QUEUE_RECORDS },
+    liveControls: { commandQueueRecords: QUEUE_RECORDS },
   });
 }
 
@@ -147,7 +147,7 @@ function bothLaneAddresses(instances) {
       edits.push({
         kind: "effectParam",
         trackIndex: 0,
-        rack: 0,
+        rack: 3, // console
         channel: 2,
         effectIndex,
         parameterId: row.id,
@@ -186,7 +186,7 @@ describe("the writer contract -- paused", () => {
     const engine = await pausedEngine();
     try {
       const submit = (records, count) => engine.submitCommands(records, count);
-      const writer = new ConsoleWriter({ submit, maximumBatch: 4 });
+      const writer = new LiveControlWriter({ submit, maximumBatch: 4 });
 
       assert.equal(GAIN_IDS.length, 4, "four bands give four non-coalescing addresses");
       let admittedFlushes = 0;
@@ -226,7 +226,7 @@ describe("the writer contract -- paused", () => {
     const engine = await pausedEngine();
     try {
       const submit = (records, count) => engine.submitCommands(records, count);
-      const writer = new ConsoleWriter({ submit, maximumBatch: 4 });
+      const writer = new LiveControlWriter({ submit, maximumBatch: 4 });
 
       // Fill the queue while paused.
       for (let flush = 0; flush < 24; flush += 1) {
@@ -288,7 +288,7 @@ describe("the writer contract -- paused", () => {
     for (let count = 30; count <= 34; count += 1) {
       const engine = await createOfflineEngine(compressorDocument(), {
         asset,
-        console: { commandQueueRecords: QUEUE_RECORDS },
+        liveControls: { commandQueueRecords: QUEUE_RECORDS },
       });
       try {
         const report = engine.submitCommands(rawBatch(count), count);
@@ -332,12 +332,12 @@ describe("the writer contract -- paused", () => {
       "twenty-two semantic rows exceed the deliberately small prepared queue",
     );
 
-    const engine = await createOfflineEngine(consoleDocument(1), {
+    const engine = await createOfflineEngine(liveControlDocument(1), {
       asset,
-      console: { commandQueueRecords: smallQueue },
+      liveControls: { commandQueueRecords: smallQueue },
     });
     try {
-      const writer = new ConsoleWriter({
+      const writer = new LiveControlWriter({
         submit: (records, count) => engine.submitCommands(records, count),
         maximumBatch: addresses.length,
       });
@@ -374,13 +374,13 @@ describe("the writer contract -- paused", () => {
   test("a paired builtin filter edit stays whole when only one queue slot remains", async () => {
     const engine = await createOfflineEngine(compressorDocument(), {
       asset,
-      console: { commandQueueRecords: 2 },
+      liveControls: { commandQueueRecords: 2 },
     });
     try {
-      const console = engine.console();
-      const seed = await console.submit(console.edit.track("t").hpfHz(80, { channel: "both" }));
+      const liveControls = engine.liveControls();
+      const seed = await liveControls.submit(liveControls.edit.track("t").hpfHz(80, { channel: "both" }));
       assert.equal(seed.ok, true, "one prepared section target occupies one of two queue slots");
-      const writer = new ConsoleWriter({
+      const writer = new LiveControlWriter({
         submit: (records, count) => engine.submitCommands(records, count),
         maximumBatch: 1,
       });
@@ -419,7 +419,7 @@ describe("the writer contract -- playing", () => {
     const engine = await pausedEngine();
     try {
       const submit = (records, count) => engine.submitCommands(records, count);
-      const writer = new ConsoleWriter({ submit, maximumBatch: 8 });
+      const writer = new LiveControlWriter({ submit, maximumBatch: 8 });
 
       for (let block = 0; block < 64; block += 1) {
         writer.stage(gainEdit(GAIN_IDS[0], 2, -0.05 * block));
@@ -441,7 +441,7 @@ describe("the writer contract -- playing", () => {
 
 describe("the writer contract -- coalescing and escalation", () => {
   test("a hundred positions of one control collapse to one pending record", () => {
-    const writer = new ConsoleWriter({
+    const writer = new LiveControlWriter({
       submit: () => { throw new Error("not reached"); },
       maximumBatch: 4,
     });
@@ -453,7 +453,7 @@ describe("the writer contract -- coalescing and escalation", () => {
   });
 
   test("distinct addresses do not coalesce into each other", () => {
-    const writer = new ConsoleWriter({
+    const writer = new LiveControlWriter({
       submit: () => { throw new Error("not reached"); },
       maximumBatch: 4,
     });
@@ -470,7 +470,7 @@ describe("the writer contract -- coalescing and escalation", () => {
     // retrying it silently would be an infinite loop wearing the costume of resilience.
     const engine = await pausedEngine();
     try {
-      const writer = new ConsoleWriter({
+      const writer = new LiveControlWriter({
         submit: (records, count) => engine.submitCommands(records, count),
         maximumBatch: 4,
       });
@@ -500,9 +500,9 @@ describe("the writer contract -- the async submit boundary", () => {
   async function episode(wrap, semantic = false) {
     const engine = await pausedEngine();
     try {
-      const writer = new ConsoleWriter({
+      const writer = new LiveControlWriter({
         ...(semantic
-          ? { submitEdits: edits => engine.console().submit(...edits) }
+          ? { submitEdits: edits => engine.liveControls().submit(...edits) }
           : { submit: wrap((records, count) => engine.submitCommands(records, count)) }),
         maximumBatch: 4,
       });
@@ -568,7 +568,7 @@ describe("the writer contract -- the async submit boundary", () => {
       const submitted = [];
       let inFlight = 0;
       let concurrent = 0;
-      const writer = new ConsoleWriter({
+      const writer = new LiveControlWriter({
         submit: async (records, count) => {
           inFlight += 1;
           concurrent = Math.max(concurrent, inFlight);
@@ -661,11 +661,11 @@ describe("the writer contract -- races the async boundary opens", () => {
       const entered = new Promise((resolve) => { announceEntry = resolve; });
       let held = false;
 
-      const writer = new ConsoleWriter({
+      const writer = new LiveControlWriter({
         ...(semantic ? { submitEdits: async edits => {
           submissions.push(edits.map(edit => ({ address: `${edit.channel}/${edit.parameterId}`, value: edit.values[0] })));
           if (!held) { held = true; announceEntry(); await gate; }
-          return engine.console().submit(...edits);
+          return engine.liveControls().submit(...edits);
         } } : { submit: async (records, count) => {
           submissions.push(decode(records, count));
           if (!held) { held = true; announceEntry(); await gate; }
@@ -732,14 +732,14 @@ describe("the writer contract -- races the async boundary opens", () => {
     try {
       let calls = 0;
       const corrupt = new Set([1, 3]);
-      const writer = new ConsoleWriter({
+      const writer = new LiveControlWriter({
         ...(semantic ? { submitEdits: async edits => {
           await Promise.resolve();
           calls += 1;
           const submitted = corrupt.has(calls)
             ? edits.map((edit, index) => index === 0 ? { ...edit, trackIndex: 99 } : edit)
             : edits;
-          return engine.console().submit(...submitted);
+          return engine.liveControls().submit(...submitted);
         } } : { submit: async (records, count) => {
           await Promise.resolve();
           calls += 1;
@@ -787,7 +787,7 @@ describe("the writer contract -- races the async boundary opens", () => {
     try {
       // Fill the queue through a writer of its own, so the probe writer's batch is still its
       // untouched ceiling of eight when it makes its one attempt.
-      const filler = new ConsoleWriter({
+      const filler = new LiveControlWriter({
         submit: (records, count) => engine.submitCommands(records, count),
         maximumBatch: 4,
       });
@@ -798,7 +798,7 @@ describe("the writer contract -- races the async boundary opens", () => {
       }
       assert.equal(filler.stats.admitted, QUEUE_RECORDS, "the queue is full to the record");
 
-      const writer = new ConsoleWriter({
+      const writer = new LiveControlWriter({
         submit: async (records, count) => {
           await Promise.resolve();
           return engine.submitCommands(records, count);
@@ -829,8 +829,8 @@ describe("the writer contract -- races the async boundary opens", () => {
 test("writer construction requires exactly one callable submission path", () => {
   const submit = () => { throw new Error("constructor must not submit"); };
   for (const options of [{}, { submit, submitEdits: submit }, { submit: 1 }, { submitEdits: null }]) {
-    assert.throws(() => new ConsoleWriter(options), MisoUsageError);
+    assert.throws(() => new LiveControlWriter(options), MisoUsageError);
   }
-  assert.doesNotThrow(() => new ConsoleWriter({ submit }));
-  assert.doesNotThrow(() => new ConsoleWriter({ submitEdits: submit }));
+  assert.doesNotThrow(() => new LiveControlWriter({ submit }));
+  assert.doesNotThrow(() => new LiveControlWriter({ submitEdits: submit }));
 });

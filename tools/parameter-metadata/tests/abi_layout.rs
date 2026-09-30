@@ -127,7 +127,7 @@ fn scalar_after(document: &str, after: &str, name: &str) -> u64 {
         .expect("scalar is an integer")
 }
 
-/// A one-track session whose dynamic rack holds one launch effect, so an `effectParam` record has
+/// A one-track session whose inserts hold one launch effect, so an `effectParam` record has
 /// a real address to resolve against.
 fn one_effect_session(effect_id: &str) -> String {
     format!(
@@ -140,6 +140,7 @@ fn one_effect_session(effect_id: &str) -> String {
   "render_profile": {{ "id": "native", "mode": "single_thread" }},
   "output_profile": {{ "id": "main", "channels": 2, "sample_format": "f32_planar" }},
   "sources": [{{ "id": "s", "content": "blake3:{}", "channels": 2, "bit_depth": 24, "frames": "48000" }}],
+  "console": {{ "pre_insert": [], "post_insert": [] }},
   "tracks": [{{
     "id": "t",
     "source_id": "s",
@@ -149,8 +150,8 @@ fn one_effect_session(effect_id: &str) -> String {
       "left": {{ "polarity_invert": false, "trim_db": 0.0, "hpf_hz": 0.0, "lpf_hz": 0.0, "delay_samples": 0 }},
       "right": {{ "polarity_invert": false, "trim_db": 0.0, "hpf_hz": 0.0, "lpf_hz": 0.0, "delay_samples": 0 }}
     }},
-    "simd1": {{ "effects": [] }},
-    "dynamic": {{ "effects": [{{
+    "console": [],
+    "inserts": {{ "effects": [{{
       "id": "e",
       "identity": {{ "kind": "native", "effect_id": "{effect_id}" }},
       "quality": "normal",
@@ -159,7 +160,6 @@ fn one_effect_session(effect_id: &str) -> String {
       "params": [],
       "sidechain": {{ "kind": "none" }}
     }}] }},
-    "simd2": {{ "effects": [] }},
     "fader": {{ "left_db": 0.0, "right_db": 0.0, "left_mute": false, "right_mute": false }},
     "pan": {{ "left": -1.0, "right": 1.0, "smoothing_samples": 0 }}
   }}],
@@ -167,7 +167,7 @@ fn one_effect_session(effect_id: &str) -> String {
   "outputs": [{{ "id": "out" }}],
   "routes": [{{
     "id": "r",
-    "source": {{ "kind": "track", "track_id": "t", "tap": "post_matrix" }},
+    "source": {{ "kind": "track", "track_id": "t", "tap": "post_pan" }},
     "destination": {{ "kind": "output_input", "output_id": "out" }},
     "channel_matrix": {{ "ll": 1.0, "lr": 0.0, "rl": 0.0, "rr": 1.0 }},
     "gain_db": 0.0
@@ -204,7 +204,7 @@ fn the_emitted_command_record_offsets_are_the_engine_s_own_decode_rule() {
         require_sample_rate_hz: 48_000,
         require_quantum_frames: 128,
         source_ring_frames: 128,
-        console_command_queue_records: 64,
+        live_control_command_queue_records: 64,
         ..WebBootOptions::explicit_defaults()
     };
     let mut host = AudioWorkletEngineHost::boot(one_effect_session(first).as_bytes(), options)
@@ -219,10 +219,12 @@ fn the_emitted_command_record_offsets_are_the_engine_s_own_decode_rule() {
     let smoothing = field_offset(&document, "commandRecord", "smoothingSamples");
     let values = field_offset(&document, "commandRecord", "values");
 
-    let staging = host.command_staging_mut().expect("console staging exists");
+    let staging = host
+        .command_staging_mut()
+        .expect("live-control staging exists");
     staging[..COMMAND_RECORD_BYTES as usize].fill(0);
     staging[kind] = u8::try_from(COMMAND_EFFECT_PARAM).expect("kind is a byte");
-    // Rack 1 is `dynamic`, which is where the fixture put its one effect.
+    // Rack 1 is the inserts (the lowered `dynamic` rack), where the fixture put its one effect.
     staging[rack] = 1;
     staging[channel] = 2;
     staging[track_index..track_index + 4].copy_from_slice(&0_u32.to_le_bytes());
@@ -374,11 +376,11 @@ fn the_document_carries_its_whole_schema_and_the_engine_s_offsets() {
         24
     );
     assert_eq!(
-        field_offset(&document, "bootOptions", "consoleCommandQueueRecords"),
+        field_offset(&document, "bootOptions", "liveControlCommandQueueRecords"),
         32
     );
     assert_eq!(
-        field_offset(&document, "bootOptions", "consoleMasterTrackPlusOne"),
+        field_offset(&document, "bootOptions", "liveControlMasterTrackPlusOne"),
         56
     );
     assert_eq!(field_offset(&document, "status", "sampleRateHz"), 20);

@@ -32,7 +32,8 @@ import type {
   SpectrumSubscriptionLimits,
   SpectrumSubscriptionRequest,
 } from "../core/observation-subscriptions.ts";
-import { EngineConsole } from "../core/console.ts";
+import { EngineLiveControls } from "../core/live-controls.ts";
+import { SessionBuilder } from "../core/session.ts";
 import { MisoEngineError, MisoUsageError } from "../core/errors.ts";
 import type { ErrorPhase, MisoDiagnostic, MisoErrorCode } from "../core/errors.ts";
 import { loadBundledEngineAsset } from "./assets.ts";
@@ -75,6 +76,14 @@ function defaultBundledAsset(): Promise<MisoEngineAsset> {
 /** Anything that can be handed to the engine as a Session V1 document. */
 export type SessionDocument = string | Uint8Array | { toJson(): string };
 
+/**
+ * The builder behind a document, when the SDK built it: what lets live controls resolve console
+ * slot and insert IDs without the SDK ever parsing a document.
+ */
+function builtSession(document: SessionDocument): SessionBuilder | undefined {
+  return document instanceof SessionBuilder ? document : undefined;
+}
+
 function documentBytes(document: SessionDocument): Uint8Array<ArrayBuffer> {
   if (typeof document === "string") return new TextEncoder().encode(document);
   if (document instanceof Uint8Array) {
@@ -105,6 +114,9 @@ export interface OfflineEngineOptions extends BootOptions {
 export class OfflineEngine {
   readonly #boundary: WasmBoundary;
   readonly #asset: MisoEngineAsset;
+  #session: SessionBuilder | undefined;
+  /** The document the engine booted, as staged: what `withSession()` holds a builder to. */
+  #booted: Uint8Array | undefined;
   readonly #observationLimits: ObservationSubscriptionLimits | undefined;
   #observationSubscriptions: ObservationSubscriptionOwner | undefined;
   readonly #responseLimits: TrackResponseSubscriptionLimits | undefined;
@@ -113,12 +125,16 @@ export class OfflineEngine {
   private constructor(
     asset: MisoEngineAsset,
     boundary: WasmBoundary,
+    session: SessionBuilder | undefined,
+    booted: Uint8Array,
     observationLimits: ObservationSubscriptionLimits | undefined,
     responseLimits: TrackResponseSubscriptionLimits | undefined,
     spectrumLimits: SpectrumSubscriptionLimits | undefined,
   ) {
     this.#asset = asset;
     this.#boundary = boundary;
+    this.#session = session;
+    this.#booted = booted;
     this.#observationLimits = observationLimits;
     this.#responseLimits = responseLimits;
     this.#spectrumLimits = spectrumLimits;
@@ -149,9 +165,13 @@ export class OfflineEngine {
         ...(spectrumCollection === undefined ? {} : { spectrumCollection }),
       };
     const asset = suppliedAsset ?? await defaultBundledAsset();
+    const bytes = documentBytes(document);
     return new OfflineEngine(
       asset,
-      await WasmBoundary.boot(asset, documentBytes(document), bootOptions),
+      await WasmBoundary.boot(asset, bytes, bootOptions),
+      builtSession(document),
+      // A copy: a caller's Uint8Array is staged as is, and may change after the boot.
+      bytes.slice(),
       observationSubscriptionLimits,
       responseSubscriptionLimits,
       spectrumSubscriptionLimits,
@@ -235,11 +255,18 @@ export class OfflineEngine {
     return this.#boundary.cancelSpectrum();
   }
 
-  /** A semantic console bound to the currently loaded session. */
-  console(): EngineConsole {
-    return new EngineConsole(this.sessionMap(), (edits) =>
+  /**
+   * Semantic live controls bound to the currently loaded session.
+   *
+   * When that session was booted from a `SessionBuilder`, console slots and inserts are also
+   * addressable by their stable IDs; otherwise use `withSession()` or address them by index.
+   */
+  liveControls(): EngineLiveControls {
+    return new EngineLiveControls(this.sessionMap(), (edits) =>
       this.submitCommands(encodeLaneEdits(edits), edits.length),
-      (edits, managed) => this.#observationSubscriptions?.beforeConsoleSubmit(edits, managed));
+      (edits, managed) => this.#observationSubscriptions?.beforeLiveControlSubmit(edits, managed),
+      this.#session,
+      this.#booted);
   }
 
   nextAbsoluteSample(): bigint {
@@ -304,7 +331,13 @@ export class OfflineEngine {
    */
   loadSession(document: SessionDocument, options: BootOptions = {}): void {
     this.#observationSubscriptions?.invalidate();
-    this.#boundary.reboot(documentBytes(document), options);
+    // Cleared first, so a refused reboot cannot leave IDs resolving against the replaced session.
+    this.#session = undefined;
+    this.#booted = undefined;
+    const bytes = documentBytes(document);
+    this.#boundary.reboot(bytes, options);
+    this.#session = builtSession(document);
+    this.#booted = bytes.slice();
   }
 
   dispose(): void {
@@ -316,7 +349,7 @@ export class OfflineEngine {
     return this.#observationSubscriptions ??= new ObservationSubscriptionOwner({
       observationMap: () => this.observationMap(),
       readObservations: (selections) => this.readObservations(selections),
-      console: () => this.console(),
+      liveControls: () => this.liveControls(),
       spectrumPrepared: () => this.#boundary.preparedSpectrumQuery(),
       spectrumPreparedCollection: () => this.#boundary.preparedSpectrumCollection(),
       spectrumSelect: (query) => this.#boundary.selectSpectrum(query),

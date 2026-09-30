@@ -16,14 +16,14 @@
 | `web-audioworklet-identity.py` candidate lineage rule (#338; moved from `run.mjs --check-matrix` by #1061, release changes only) | record a 39-hex-digit `candidateCommit` in a release change | `--self-test`: `**FAIL** candidate-lineage` |
 | `web-audioworklet-identity.py` artifact lineage rule (#338; moved from `run.mjs --check-matrix` by #1061, release changes only) | record another module's `wasmSha256` in a release change | `--self-test`: `**FAIL** artifact-lineage` |
 | `host_core::PreparedHost` `compile_fail` doctest (callback contract) | add `unsafe impl Sync for PreparedHost {}` | the doctest compiles and `cargo test --doc` exits 101 |
-| `tests::command_ack_names_the_exact_application_sample` (#137 E1) | move the `while let Ok(record) = self.control.try_pop()` drain in `ConsoleMatrixProcessor::process` to after `self.matrix.process(block)` | the reported sample is one block early and the block at `applied_at_sample` still renders the pre-command value |
+| `tests::command_ack_names_the_exact_application_sample` (#137 E1) | move the `while let Ok(record) = self.control.try_pop()` drain in `LiveControlMatrixProcessor::process` to after `self.matrix.process(block)` | the reported sample is one block early and the block at `applied_at_sample` still renders the pre-command value |
 | `tests::command_flood_is_typed_backpressure_and_leaves_the_render_untouched` (#137 E3) | delete the free-room pre-check loop in `admit_commands` | the flood is admitted record by record until `try_push` fails, the transaction stops being all-or-nothing, and the flooded run's output differs from the clean run's |
 | `tests::unknown_targets_are_typed_and_leave_the_engine_untouched` (#137 E4) | delete the `track >= track_count` leg in `admit_commands` | the unknown-track record is refused as `UNSUPPORTED` instead of `INVALID_ARGUMENT`/`UNKNOWN_TRACK` |
-| `tests::meter_frames_equal_an_offline_fold_and_cost_the_render_nothing` (#137 E5) | make `console_request` use `blocks` frames instead of `blocks * quantum_frames` for the meter period | a window closes mid-block, `poll_meters` reports more windows than blocks rendered, and the cadence assertion fails |
-| `tests::native_command_timeline_digest_pins_the_wasm_parity` + `direct-oracle.mjs::runCommandTimeline` (#137 E2) | change the matrix retarget's expected `applied_at_sample` to `2 * QUANTUM` | the native assertion fails; moving the drain in `ConsoleMatrixProcessor::process` instead moves both digests together, which is the point |
+| `tests::meter_frames_equal_an_offline_fold_and_cost_the_render_nothing` (#137 E5) | make `live_control_request` use `blocks` frames instead of `blocks * quantum_frames` for the meter period | a window closes mid-block, `poll_meters` reports more windows than blocks rendered, and the cadence assertion fails |
+| `tests::native_command_timeline_digest_pins_the_wasm_parity` + `direct-oracle.mjs::runCommandTimeline` (#137 E2) | change the matrix retarget's expected `applied_at_sample` to `2 * QUANTUM` | the native assertion fails; moving the drain in `LiveControlMatrixProcessor::process` instead moves both digests together, which is the point |
 | `tests/matrix.rs::explicit_window_retarget_ramps_over_the_requested_window_and_is_adopted` (#137 D1) | drop `self.smoothing_samples[lane] = samples;` from `MatrixStage::set_target_over` | the second retarget runs over the prepared window of `0` instead of the requested `4` and settles on the first frame |
-| `builtins-compiler::console_control_requests_are_validated_sealed_and_charged_per_track` (#137 D1) | delete the `control_tracks.insert` / `known_tracks.contains` legs in `prepare_session_builtins_with_console` | the duplicate and unknown-track requests are accepted instead of producing `builtin.control.duplicate` / `builtin.control.unknown_track` |
-| `host-core::console_attaches_bounded_control_and_meter_halves_in_canonical_track_order` (#137 D1/D2) | drop the `bound.track_controls.len() != control_requests.len()` leg of the console arity check | a silently skipped channel leaves nine tracks with eight producers and the per-track walk panics |
+| `builtins-compiler::live_control_requests_are_validated_sealed_and_charged_per_track` (#137 D1) | delete the `control_tracks.insert` / `known_tracks.contains` legs in `prepare_session_builtins_with_live_controls` | the duplicate and unknown-track requests are accepted instead of producing `builtin.control.duplicate` / `builtin.control.unknown_track` |
+| `host-core::live_controls_attach_bounded_control_and_meter_halves_in_canonical_track_order` (#137 D1/D2) | drop the `bound.track_controls.len() != control_requests.len()` leg of the live-control arity check | a silently skipped channel leaves nine tracks with eight producers and the per-track walk panics |
 | `check-web-audioworklet.sh --source-policy` pinned-post rule (#137 D2/D3) | rename one pinned post, drop the telemetry post, or remove the meter lease guard at its call site | the occurrence count or the pinned line no longer matches and the frozen render-callback policy fails; `test-web-audioworklet.sh` runs all three |
 | `check-web-audioworklet.sh --source-policy` pinned-clock rule (#137 D3) | read `Date.now()` anywhere outside `renderClock()`, including inside `process()` | the pinned-site count disagrees, or `process_policy_re` catches it in the frozen body |
 | `check-web-audioworklet-callgraph.py --self-test` (b1)/(b1b) (#137) | `--trap-owner` naming a different symbol, or `--allocation-only` over a closure that reaches a free | each case fails; neither new mode can admit an allocator |
@@ -31,7 +31,7 @@
 | `parameter_metadata -- --check` (#137 D4) | hand-edit one `liveUpdatable` in the shipped document | byte equality against a freshly generated document fails |
 | `tools/parameter-metadata/tests/round_trip.rs` (#137 E7) | delete the `effect_index >= rack_effects[rack]` leg in `CommandRecord::into_matrix` | an out-of-range effect index is refused as `UNSUPPORTED_KIND`, so the test stops distinguishing "resolved" from "did not resolve" and its negative case fails |
 | `qualification/run.mjs --self-test-mutations` control-path gates (#137 E8) | `exactRetargetedOutput = false`, `masterPeak = 0`, or `commandAdmitted = 0` | `<browser>: control-path` fails on the applied change, on the meter frame, and on the admission |
-| `qualification/run.mjs --self-test-mutations` stall console load (#137 E6) | `stall.consoleMeterFrames = 0` | `<browser>: main-thread-stall` fails because the stall no longer carried a live command and meter load |
+| `qualification/run.mjs --self-test-mutations` `stall-live-controls-load` (#137 E6) | `stall.liveControlMeterFrames = 0` | `<browser>: main-thread-stall` fails because the stall no longer carried a live command and meter load |
 
 ## Issue #140 — the automation-span feed, the live fader, and GR observation
 
@@ -160,13 +160,13 @@ was performed on the working tree, run, and reverted; every one was observed red
 
 | gate | mutation | observed red |
 |---|---|---|
-| `tests::solo_is_bit_identically_mute_on_the_complement` (P1-1) | drop `&& !self.solo(track)` from `ConsoleSoloState::effective_mute`, so the gate silences everything | the soloed tracks silence with the rest and the first commanded block differs from the explicit-mute arm |
+| `tests::solo_is_bit_identically_mute_on_the_complement` (P1-1) | drop `&& !self.solo(track)` from `LiveControlSoloState::effective_mute`, so the gate silences everything | the soloed tracks silence with the rest and the first commanded block differs from the explicit-mute arm |
 | `tests::un_solo_restores_the_exact_per_lane_user_mute_set` (P1-2) | restore from the gate alone — `track_delta` composes `any_solo && !solo(track)` instead of `effective_mute` | the session's baked `left_mute` comes back unmuted and every block after the settle differs from the never-soloed arm |
 | `tests::mute_and_solo_are_separate_states` (P1-4) | make `set_solo` clear that track's `user_mute` | a repeated solo engage un-mutes the track it re-engages, and the host mirror reads `[false, false]` where the user set `[true, true]` |
-| `tests::a_refused_solo_submission_leaves_the_console_untouched` (P1-5) | delete the `ready.solo.rollback()` on `admit_commands`'s refusal path | the refused engage sticks in host state; the refused console and the untouched console diverge on the retry |
-| `tests::a_solo_that_changes_nothing_emits_nothing` (the −0.0 pin) | drop the changed-lanes test in `ConsoleSoloState::track_delta` — `match (true, true)` | soloing the only track of a one-track console re-mutes its already-settled-muted lanes, the ramp kernel runs instead of the fill, and a negative input renders `-0.0` where the settled path renders exact `+0.0` |
+| `tests::a_refused_solo_submission_leaves_the_live_controls_untouched` (P1-5) | delete the `ready.solo.rollback()` on `admit_commands`'s refusal path | the refused engage sticks in host state; the refused host and the untouched host diverge on the retry |
+| `tests::a_solo_that_changes_nothing_emits_nothing` (the −0.0 pin) | drop the changed-lanes test in `LiveControlSoloState::track_delta` — `match (true, true)` | soloing the only track of a one-track console re-mutes its already-settled-muted lanes, the ramp kernel runs instead of the fill, and a negative input renders `-0.0` where the settled path renders exact `+0.0` |
 | `tests::a_batch_of_alternating_solo_toggles_coalesces_to_its_net_effect` (the coalescing pin) | run the net-emission pass once per solo record rather than once per submission, and drop its `record_emitted` sync — per-command fan-out | a 256-record batch of alternating toggles fans out a gate record per track per transition and is refused instead of admitted |
-| `tests::a_console_that_never_solos_renders_what_it_always_did` (the class-A OFF gate) | route `mute` through the coalesced net emission instead of staging its own record | the redundant re-mute of a settled-muted lane stages nothing, the plane stays `+0.0`, and the pinned `-0.0` ramp block is gone — a digest change on a path no solo command touched |
+| `tests::live_controls_that_never_solo_render_what_they_always_did` (the class-A OFF gate) | route `mute` through the coalesced net emission instead of staging its own record | the redundant re-mute of a settled-muted lane stages nothing, the plane stays `+0.0`, and the pinned `-0.0` ramp block is gone — a digest change on a path no solo command touched |
 | `tests::the_decode_staging_holds_a_full_batch_plus_a_solo_transition` (the sizing correction) | size `command_decoded` `2 * MAXIMUM_COMMAND_RECORDS` again, without the `2 * track_count` term | 255 `channel = both` effect-parameter records (510 spans) plus one solo record on a four-track console need 513 entries; the batch is refused `malformed` by the staging bound |
 
 `host_core::solo`'s own unit tests carry the state machine's algebra — the complement
@@ -185,7 +185,7 @@ restored between rows.
 | P3-M33 | an input record is routed to the fader band | (5 tests) | RED |
 | P3-M34 | the effect band is not moved past the new per-track band | (7 tests) | RED |
 | P3-M35 | `queue_count` is not widened for the third band | (13 tests) | RED |
-| P3-M36 | `queue_capacity` reports the fader depth for an input slot | — | **EQUIVALENT, and argued in the test**: a console leases all three of a track's queues at one depth (`TrackControlRequest::queue_capacity` is a single field), so the wrong queue's capacity is the right number. It becomes observable the day the three depths can differ, and the line is written per band so that day is a one-line change |
+| P3-M36 | `queue_capacity` reports the fader depth for an input slot | — | **EQUIVALENT, and argued in the test**: live controls lease all three of a track's queues at one depth (`TrackControlRequest::queue_capacity` is a single field), so the wrong queue's capacity is the right number. It becomes observable the day the three depths can differ, and the line is written per band so that day is a one-line change |
 | P3-M37 | the `trim_db` domain check is dropped | `trim_and_polarity_refuse_on_the_declared_terms` | RED |
 | P3-M38 | the `polarity_invert` boolean-exact check is dropped | same | RED |
 | P3-M39 | a trim record accepts a rack byte | same | RED |
@@ -197,7 +197,7 @@ restored between rows.
 The three lane-index defects the banked drain can have -- a missed member queue, an off-by-one
 lane, a constant lane -- are **not** reachable from this file: the web host's fixtures are one and
 four tracks and the mix cannot tell identical tracks apart. They are gated end to end, per track,
-through the post-matrix meters, in `crates/host-core/tests/input_liveness_console.rs`.
+through the post-matrix meters, in `crates/host-core/tests/input_liveness_live_controls.rs`.
 
 ## Issue #240 — atomic document-owned boot
 
@@ -238,14 +238,14 @@ failure was observed, and the mutation was reverted in the same session.
 
 | Target | Mutation | Observed failure |
 |---|---|---|
-| `session-identities.mjs` console row | flip one hex digit of `console-session.json`'s declared `content` | `session-identity: console-session.json: declared source row is not the fed PCM's canonical identity` |
+| `session-identities.mjs` live-control row | flip one hex digit of `live-control-session.json`'s declared `content` | `session-identity: live-control-session.json: declared source row is not the fed PCM's canonical identity` |
 | `session-identities.mjs` stall row | flip one hex digit of `stall-session.json`'s declared `content` | same refusal, naming `stall-session.json` |
 | `session-identities.mjs` observation row | flip one hex digit of `observation-session.json`'s declared `content` | same refusal, naming `observation-session.json` |
-| the #272 defect itself | restore the pre-#272 name-minted `sha256("web-browser-console")` on `console-session.json` | refused; the check states the derived identity the document must carry |
-| cross-document reuse | declare the stall document's identity on the console document | refused; one digest cannot stand for two different fed regions |
+| the #272 defect itself | restore the pre-#272 name-minted `sha256("web-browser-console")` on `live-control-session.json` | refused; the check states the derived identity the document must carry |
+| cross-document reuse | declare the stall document's identity on the live-control document | refused; one digest cannot stand for two different fed regions |
 | shape drift | `"frames": "5120"` -> `"5121"` on `stall-session.json` | refused; shape and identity are one pinned row, because the preimage length is `frames * channels * 4` |
 | generator drift | `OBSERVATION_LEVEL` `0.5` -> `0.25` in `qualification.js` | the derived identity moves to `680aca77…` and the unchanged document is refused — a pinned hex string would have stayed green |
-| generator drift | flip the sign of `sourcePlanes`'s right plane | the console identity moves to `7499a91c…` and the unchanged document is refused |
+| generator drift | flip the sign of `sourcePlanes`'s right plane | the live-control identity moves to `7499a91c…` and the unchanged document is refused |
 | stale row beside a truthful one | add a second `"content": "sha256:…"` source row to `stall-session.json` | `expected exactly one source content identity, found 2` |
 | the check's own comparison | the flipped-digit self-proof inside `checkSessionIdentities` | asserts a one-digit-off identity never matches, so the comparison cannot be loosened into a vacuous pass |
 

@@ -39,9 +39,8 @@ fn builtin_caps() -> BuiltinCompileCaps {
 fn prepares_65_537_tracks_or_rejects_only_the_configured_resource() {
     let mut model = parse_session_json(SESSION).expect("fixture");
     let mut template = model.tracks[0].clone();
-    template.simd1.effects.clear();
-    template.dynamic.effects.clear();
-    template.simd2.effects.clear();
+    template.console.clear();
+    template.inserts.effects.clear();
     model.automation.clear();
     model.tracks.clear();
     model.tracks.reserve(65_537);
@@ -52,7 +51,7 @@ fn prepares_65_537_tracks_or_rejects_only_the_configured_resource() {
     }
     model.routes[0].source = RouteSource::Track {
         track_id: StableId::parse("track-0").expect("route track"),
-        tap: SendTap::PostMatrix,
+        tap: SendTap::PostPan,
     };
     let session = compile_session(&model, session_caps()).expect("scale session");
 

@@ -310,6 +310,7 @@ both.
   `effect_runtime::bank::nonfinite_lane_mask`, in the spirit of #95's ratchet (#1089 verdict L4).
   File it when a fifth copy would otherwise appear.
 - Multiband per-lane D7, which lifts its prepared session bypass (#1100) once #1069 closes.
+- #1104: make the session parse-transient bound affine (#1093 verdict, low 4).
 
 ## App (misofm/app; out of this repo's scope)
 
@@ -656,3 +657,105 @@ commits.
 - The browser legs' pulse socket and Chromium's `TMPDIR` needed short `/tmp` paths. The scratchpad
   path is longer than the 108-byte Unix-socket limit. The first Chromium attempt aborted on that
   ("Socket path too long") before any gate ran.
+
+## C3 boundary evidence
+
+**PASS, nothing fixed.** Terra checked the merged batch once, as `qualification.yml` would. The
+batch is `codex/batch-console-3` at `8bb015ea` on `origin/main` `398e8988`. It merges S1r #1095,
+S1a #1093, S1b #1094, S1c #1096, S1d #1097 and #1082, plus root's doc commits, the
+`test-bench-policy.sh` `TMPDIR` fix (`da236a4b`) and the removal of 16 closed specs.
+- The router gives `route=full`, `math_closure=false`, `release_inputs=true` and
+  `self_tests=["console-benchmark","sdk-deletions"]` (`ci-path-router.py --flags --event push`,
+  base `398e8988`).
+- 101 steps ran on an x86-64-v3 host (AMD EPYC 7313P) with rustc 1.97.1, `CARGO_INCREMENTAL=0` and
+  the worktree's `target/`. Every step exited 0.
+- No merge-interaction defect was found, and nothing needed a commit beyond this record.
+
+| Job | Gate (command) | Result |
+|---|---|---|
+| route | `check-ci-path-routing.py`, `test-ci-path-routing.py` | ok |
+| docs-gates | `check-dsp-research.sh`, `check-builtins-listening.sh` | ok |
+| lint | `cargo fmt --all -- --check` | ok |
+| lint | `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | ok |
+| lint | `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps` | ok |
+| lint | every `check-*`/`test-*` step of the job, the same list as C2's, including `test-bench-policy.sh` with `TMPDIR` in scratch | all ok |
+| lint | the three sub-v3 probes: scalar and AVX2-without-FMA are refused with "requires x86-64-v3", and AVX2+FMA compiles | ok |
+| gate-self-tests | the two routed suites, `test-console-benchmark.sh` and `check-sdk-deletions.py --self-test`, plus the three unrouted ones: env-vocabulary, conformance-boundaries and dsp-research | all ok |
+| test-debug-a | `cargo test --locked --workspace --all-targets --exclude …` with the job's features | 96 binaries, 1144 passed, 0 failed |
+| test-debug-b | `cargo test --locked --all-targets -p lane … -p conformance` with the job's features; `conformance_fixtures -- --check` | 151 binaries, 834 passed, 0 failed; fixtures ok |
+| test-release | `cargo test --locked --release -p lane -p math -p wasm-gates --features math/lane` | 109 passed; `g5_native_digests_match_pins` ok |
+| test-release | the M3 FMA cfg check; loom `spsc_loom`. M1 and F1 are not routed (`math_closure=false`). | ok |
+| audit-native | release build; `cargo test --release -p audit -p bench -p console-workload` | 114 passed, 0 failed |
+| audit-native | `audit capi` and its record validator; `audit delay`, `compressor` and `parametric-eq` at 100,000 blocks; `audit gate-expander` (bank width 8, `bank_available`) | every counter 0, `total_violations` 0 |
+| audit-native | the builtins, builtins-graph, graph, realtime and effect-contract traces at 1,000,000 blocks; the protocol allocation audit; the realtime, builtins and builtins-graph probe mutations | ok |
+| audit-native | `check-capi-abi.sh` and `--self-test`; scalar oracle absent from `libcapi.so`; graph determinism 100/100; builtins fixtures (50 files); console fixtures; `check-effect-contract.sh` (8 factories, 0 failed gates) | ok |
+| wasm-guests | runner build; simd128 probe; evidence crates; `check-protocol-wasm-parity.sh`; `run-wasm-gates.sh --without-v8-spill --without-native` | ok |
+| cross-target | `scripts/check-cross-targets.sh` | PASS. The iOS `memset_pattern16` rows are the #1018 expected failures (parametric-eq 146). |
+| release-shape | `check-release-shape.py`; `CARGO_PROFILE_RELEASE_PANIC=unwind cargo check --locked --release --workspace --all-targets` | ok |
+| artifact | `build-web-audioworklet.sh target/ci/qualification-artifacts` | module `e7f2ad31…80be`, closure `19783d70…fa56` |
+| artifact-identity | a twin `--module-only` build from another path and `CARGO_HOME`; `web-audioworklet-identity.py --self-test` and `report --event push --before 398e8988` | reproducible; **ARTIFACT CHANGED** |
+| artifact-gates | `check-web-audioworklet.sh --without-metadata-regeneration`; `check-browser-expected-resources.py --artifacts`; scalar oracle absent from the module; `test-web-audioworklet.sh`; the V8 spill self-test and gate (Node 22.23.2) | ok |
+| sdk | from a clean `npm ci`: `check-sdk-generated.sh`, `check-sdk-deletions.py`, `check-sdk-types.sh`, `check-sdk-headless.sh` (329 passed) and `sdk-package.sh check` | ok |
+| browser | `npm run qualify -- … --check-matrix --self-test-mutations` for Chromium 151, Firefox 153 and WebKit 26.5, each in CI's source-bundle mode | all qualification gates passed |
+| nightly, #1082 | `PROBE_966_COUNT=6400 CARGO_PROFILE_RELEASE_PANIC=unwind MISO_ENGINE_RANDOMIZED_SCALE=100 cargo test --locked --release -p graph-compiler --test bank_levels -- --exact randomized_consoles_compile_bind_and_render_the_scalar_bits` | 1 passed |
+| console benchmark | `scripts/test-console-benchmark.sh`; `operator/preflight-console-benchmark.sh --step terra-c3-boundary-scratch` | PASS; the preflight PASS has 0 workload launches and wrote no step directory |
+| V8 harness | `run-web-mixing-automation-benchmark.sh prepare` and then `preflight`, into empty scratch directories | PASS |
+| aarch64-debug/-release | see below | resolved; not run (no arm64 host) |
+
+**Artifact.** ARTIFACT CHANGED:
+
+| | main `398e8988` | batch `8bb015ea` |
+|---|---|---|
+| Module digest | `f767076a03548350a35dc6d758716c328f108de59a40cb31442ace59435a09e8` | `e7f2ad317b37187eaa77c25618003e3521ee4bb68376bef9c4b75ac85cdc80be` |
+| Size | 3,270,838 B | 3,283,569 B |
+
+- The batch module is 12,731 B (0.39 %) larger. S1a to S1d change the session, protocol and
+  live-control surfaces that `host-web` compiles, so a change is expected.
+- The main digest is the `audioworklet-sha256` status that main's own run recorded. The V8
+  harness's `prepare`, run on a detached clone of `398e8988`, reproduces it byte for byte.
+- The committed pin (`6c952a2c…`) was not touched. Under #1061 it is checked only at release.
+
+**Class A.** The head and a detached clone of `398e8988` each got their own release build, with
+the base's in `target/ci/base-398e8988`.
+- **Console digests.** `cargo test --release -p console-workload --test gain_pan_profile digests
+  -- --ignored`: **22 of 22 rows are identical**, including `sixty_four_track_app_shape`
+  `c740fa2dd904`.
+- **`bench console --preflight`.** The output is identical (16 lines).
+- **V8 preflight.** The 7 arm digests are identical to the base's and to S0's record
+  (`preflight_output_sha256`): quiet and restated `014e5f5b…`, automated `e7025b5c…`, EQ
+  `2540aff4…`, compressor `c29d12a7…`, limiter `8db18991…`. Both documents are identical: console
+  `d913ad961d2d` and app `3dd8b2fff4b9`.
+- **`controls.json`.** It differs only in the addresses #1096 recorded (EQ and compressor rack
+  `0` -> `3`, limiter `2`/`0` -> `3`/`2`) and in the app document's `strip_layout`.
+- **S0's baselines.** One direct run of the head's release `bench console` subject (round marker
+  `1`; timings discarded, no artifact written) gives all 30 of S0's round-1 records in
+  `artifacts/steps/console-strip-base/`.
+  - All 43 render-digest fields are equal. Among them are `output_sha256`, the mixing row's
+    quiet, restated and moving digests, the metered row's meters-off and meters-on digests, and
+    the collapse, armed, absent and chain digests.
+  - Only the app row's `strip_layout` differs (`inserts:` -> `pre_insert:eq+compressor`), and
+    the record validator accepts both spellings.
+  - S4 can compare against S0 directly.
+
+**AArch64 legs.** They cannot run on this host. Resolved:
+- **Debug leg.** The 25 product crates (`capi`'s closure, from `scripts/lib/product-crates.sh`)
+  plus `dsp-reference`, `conformance` and `target-smoke`. It has no expected-failure rows.
+- **Release leg.** `lane` and `math` with `math/lane`, then `console-workload`, then the capi,
+  delay, compressor, parametric-eq and gate-expander audits. It has two #1019 rows:
+  `m2_exp2_lane_identity` and `m2_log2_lane_identity`, both in `math`'s `m2_lane_identity`.
+- **Checks run here.**
+  - The no-silent-skip scan (rg exit 1, no match).
+  - The known-defect self-test.
+  - `judge-skips` over each leg's `--list`: debug 1811 tests, release 114 tests. The listings come
+    from x86 builds of the same packages and features. Every row names exactly one test.
+
+**Local deviations, none a gate change.**
+- The twin build's second checkout is a `git archive` of `HEAD`.
+- The identity report ran as the main push will: `--event push --before 398e8988`.
+- The release-shape unwind check and the #1082 nightly test used their own target directories,
+  `target/ci/unwind` and `target/ci/nightly-unwind`. That keeps the `panic=unwind` outputs from
+  clobbering the shared release directory.
+- The browser legs' pulse sockets and `TMPDIR` used short `/tmp` paths, as in C2.
+- `sdk-package.sh check` leaves a built `sdk/dist` (untracked), and while one exists the
+  qualification runner uses it instead of the source. A first Chromium pass over it was green.
+  It was then moved aside, so that all three legs ran in CI's source-bundle mode.

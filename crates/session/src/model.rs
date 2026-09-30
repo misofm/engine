@@ -45,6 +45,43 @@ macro_rules! closed_tokens {
             const ALL: &'static [(Self, &'static str)] = Self::ALL;
         }
     };
+    // Explicit wire codes, for a table that has retired a code: an index-derived code would
+    // silently renumber every later token when an earlier one is removed.
+    ($(#[$enum_meta:meta])* pub enum $name:ident explicit {
+        $($(#[$variant_meta:meta])* $variant:ident = $wire:literal => $token:literal),+ $(,)?
+    }) => {
+        $(#[$enum_meta])*
+        #[repr(u8)]
+        pub enum $name { $($(#[$variant_meta])* $variant = $wire),+ }
+
+        impl $name {
+            /// Every token value in wire-code order.
+            pub const ALL: &'static [(Self, &'static str)] = &[$((Self::$variant, $token)),+];
+            /// Return this value's canonical session token.
+            #[must_use]
+            pub const fn token(self) -> &'static str {
+                match self { $(Self::$variant => $token),+ }
+            }
+            /// Parse one canonical session token.
+            #[must_use]
+            pub fn from_token(token: &str) -> Option<Self> {
+                Self::ALL
+                    .iter()
+                    .find_map(|(value, candidate)| (*candidate == token).then_some(*value))
+            }
+            /// Return the stable nonzero wire code, spelled explicitly per variant.
+            #[must_use]
+            pub const fn wire(self) -> u8 { self as u8 }
+            /// Parse a stable nonzero wire code. A retired code is refused, never reinterpreted.
+            #[must_use]
+            pub const fn from_wire(wire: u8) -> Option<Self> {
+                match wire { $($wire => Some(Self::$variant),)+ _ => None }
+            }
+        }
+        impl ClosedToken for $name {
+            const ALL: &'static [(Self, &'static str)] = Self::ALL;
+        }
+    };
 }
 
 /// Strict Session V1 model after JSON syntax/schema parsing.
@@ -66,6 +103,8 @@ pub struct SessionModel {
     pub output_profile: OutputProfile,
     /// Sources, order-insensitive by stable ID.
     pub sources: Vec<Source>,
+    /// The session-level console: every track carries every slot, in this order (decision 12).
+    pub console: Console,
     /// Tracks, order-insensitive by stable ID.
     pub tracks: Vec<Track>,
     /// Submixes, order-insensitive by stable ID.
@@ -189,16 +228,136 @@ pub struct Track {
     pub right_source_channel: u8,
     /// Independent left/right fixed input processors.
     pub builtins: DualMonoBuiltins,
-    /// Homogeneous-rack candidate declarations; compatibility is deferred to issue 008.
-    pub simd1: Rack,
-    /// General dynamic-rack declarations.
-    pub dynamic: Rack,
-    /// Second homogeneous-rack candidate declarations.
-    pub simd2: Rack,
+    /// This track's knobs for every session console slot, in exactly the session's slot order:
+    /// `console.pre_insert`, then `console.post_insert` (decision 12).
+    pub console: Vec<ConsoleEntry>,
+    /// Per-track ordered inserts, between the two console sections. Replaces the retired
+    /// `dynamic` rack with the same semantics.
+    pub inserts: Rack,
     /// Independent left/right fader and mute declaration.
     pub fader: DualMonoFader,
     /// Explicit pan or cross-channel matrix; no implicit stereo operation exists.
     pub matrix_or_pan: MatrixOrPan,
+}
+
+/// The session-level console (owner decision 12).
+///
+/// Each slot is declared once, and every track carries every slot with only its own `bypass` and
+/// `params`. `pre_insert` runs before a track's inserts and `post_insert` after them. Either list
+/// may be empty. Slot IDs are unique across both lists, because a console address names the slot
+/// and not its section.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Console {
+    /// Slots between the input section and the inserts, in chain order.
+    pub pre_insert: Vec<ConsoleSlot>,
+    /// Slots between the inserts and the fader, in chain order.
+    pub post_insert: Vec<ConsoleSlot>,
+}
+
+impl Console {
+    /// Every declared slot in track-entry order: `pre_insert`, then `post_insert`.
+    pub fn slots(&self) -> impl Iterator<Item = &ConsoleSlot> {
+        self.pre_insert.iter().chain(&self.post_insert)
+    }
+}
+
+/// One session console slot: the effect every track runs at this point in its chain.
+///
+/// A console slot has no sidechain: a keyed effect is an insert (decision 12).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConsoleSlot {
+    /// Stable slot identity, unique across both console sections.
+    pub slot: StableId,
+    /// The native effect identity. A third-party (`cid`) identity is refused.
+    pub identity: EffectIdentity,
+    /// Requested quality profile, shared by every track.
+    pub quality: EffectQuality,
+    /// Explicit detector/channel link mode, shared by every track.
+    pub link_mode: LinkMode,
+}
+
+/// One track's knobs for one console slot. It carries no effect fields.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConsoleEntry {
+    /// The declared slot this entry configures.
+    pub slot: StableId,
+    /// Latency-preserving bypass for this track.
+    pub bypass: bool,
+    /// Parameter declarations, canonicalized by parameter ID then channel.
+    pub params: Vec<EffectParam>,
+}
+
+/// A track's chain lowered to the engine's three internal racks (decision 12, class A by
+/// lowering).
+///
+/// `console.pre_insert` lowers to the first rack (`RackId::Simd1` in the graph), the track's
+/// `inserts` to the second (`Dynamic`) and `console.post_insert` to the third (`Simd2`). Each
+/// console entry becomes an [`Effect`] whose `id` is the slot, whose identity, quality and link
+/// mode come from the session slot, whose bypass and params come from the track, and whose
+/// sidechain is `none`. An equivalent session therefore compiles to the identical graph.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LoweredRacks<'a> {
+    /// `console.pre_insert`, lowered.
+    pub pre_insert: Vec<Effect>,
+    /// The track's own inserts, borrowed unchanged.
+    pub inserts: &'a [Effect],
+    /// `console.post_insert`, lowered.
+    pub post_insert: Vec<Effect>,
+}
+
+impl LoweredRacks<'_> {
+    /// The three racks in chain order: pre-insert, inserts, post-insert.
+    #[must_use]
+    pub fn in_chain_order(&self) -> [&[Effect]; 3] {
+        [&self.pre_insert, self.inserts, &self.post_insert]
+    }
+
+    /// Effect instances across the three racks.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.pre_insert.len() + self.inserts.len() + self.post_insert.len()
+    }
+
+    /// Whether the track runs no effect at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl SessionModel {
+    /// Lower one track's console entries and inserts to the three internal racks.
+    ///
+    /// The console entries are matched to the session slots by position, which validation makes
+    /// exact: a validated track carries one entry per slot, in slot order. On an unvalidated model
+    /// a surplus entry or slot is dropped rather than guessed at.
+    #[must_use]
+    pub fn lower_track<'a>(&self, track: &'a Track) -> LoweredRacks<'a> {
+        let (pre_entries, post_entries) = track
+            .console
+            .split_at(self.console.pre_insert.len().min(track.console.len()));
+        LoweredRacks {
+            pre_insert: lower_section(&self.console.pre_insert, pre_entries),
+            inserts: &track.inserts.effects,
+            post_insert: lower_section(&self.console.post_insert, post_entries),
+        }
+    }
+}
+
+fn lower_section(slots: &[ConsoleSlot], entries: &[ConsoleEntry]) -> Vec<Effect> {
+    slots
+        .iter()
+        .zip(entries)
+        .map(|(slot, entry)| Effect {
+            id: slot.slot.clone(),
+            identity: slot.identity.clone(),
+            quality: slot.quality,
+            bypass: entry.bypass,
+            link_mode: slot.link_mode,
+            params: entry.params.clone(),
+            sidechain: SidechainDeclaration::None,
+        })
+        .collect()
 }
 
 /// Independent builtins for the two dual-mono lanes.
@@ -489,22 +648,26 @@ pub struct ChannelMatrix {
 
 closed_tokens! {
     /// Stable explicit chain boundary names.
+    ///
+    /// Decision 12 renamed the tokens and kept every position and wire code `1..=7`. The retired
+    /// spellings (`post_input_builtins`, `post_simd1`, `post_dynamic`, `post_simd2_pre_fader`,
+    /// `post_matrix`) are unknown values and refuse.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum SendTap {
         /// Input signal.
         Input => "input",
-        /// After input builtins.
-        PostInputBuiltins => "post_input_builtins",
-        /// After SIMD rack 1.
-        PostSimd1 => "post_simd1",
-        /// After dynamic rack.
-        PostDynamic => "post_dynamic",
-        /// After SIMD rack 2 and before fader.
-        PostSimd2PreFader => "post_simd2_pre_fader",
+        /// After the input section (polarity, trim, filters).
+        PostInput => "post_input",
+        /// After `console.pre_insert`: the insert send.
+        InsertSend => "insert_send",
+        /// After the track's inserts: the insert return.
+        InsertReturn => "insert_return",
+        /// After `console.post_insert` and before the fader.
+        PreFader => "pre_fader",
         /// After fader.
         PostFader => "post_fader",
-        /// After matrix/pan.
-        PostMatrix => "post_matrix",
+        /// After pan/matrix.
+        PostPan => "post_pan",
     }
 }
 
@@ -536,14 +699,13 @@ pub struct AutomationTarget {
 
 closed_tokens! {
     /// One V1 rack token.
+    ///
+    /// The wire codes are explicit (decision 12). `1` (`simd1`) and `3` (`simd2`) are retired:
+    /// refused, never reallocated, and their spellings are unknown tokens.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub enum RackName {
-        /// First homogeneous rack.
-        Simd1 => "simd1",
-        /// Dynamic rack.
-        Dynamic => "dynamic",
-        /// Second homogeneous rack.
-        Simd2 => "simd2",
+    pub enum RackName explicit {
+        /// A track's inserts. It kept the retired `dynamic` rack's code.
+        Inserts = 2 => "inserts",
         /// The strip's own builtin section: trim, polarity, filters, fader, mute and the
         /// matrix/pan pair (issue #178, ruled by #210's D2).
         ///
@@ -554,9 +716,11 @@ closed_tokens! {
         /// `"strip"` (the schema has no optional keys, so the field must carry a value rather
         /// than be omitted) and `parameter_id` carries a builtin descriptor id.
         ///
-        /// **Appended, never inserted.** The wire code is the declaration index plus one, so
-        /// `builtins` is `4` and no existing rack renumbers.
-        Builtins => "builtins",
+        /// **Appended, never inserted.** Its code is `4`, spelled explicitly so that retiring
+        /// `simd1` and `simd2` renumbered nothing.
+        Builtins = 4 => "builtins",
+        /// A session console slot: `effect_id` names the slot, in either section (decision 12).
+        Console = 5 => "console",
     }
 }
 

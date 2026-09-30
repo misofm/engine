@@ -138,10 +138,10 @@
 //!
 //! # Width
 //!
-//! A unit test, so that it can prepare through `prepare_host_runtime_with_console_backend`, the
-//! `#[cfg(test)]` seam that is `prepare_host_runtime_with_console` at a named backend. It renders
-//! all three widths on every host, CI's `x86-64-v3` arm included. The wasm guest is not covered:
-//! it plays one frozen block per track, and a per-block source there is tooling (the #996
+//! A unit test, so that it can prepare through `prepare_host_runtime_with_live_controls_backend`,
+//! the `#[cfg(test)]` seam that is `prepare_host_runtime_with_live_controls` at a named backend. It
+//! renders all three widths on every host, CI's `x86-64-v3` arm included. The wasm guest is not
+//! covered: it plays one frozen block per track, and a per-block source there is tooling (the #996
 //! verdict's owner ruling).
 
 use core::num::NonZeroUsize;
@@ -153,10 +153,10 @@ use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use graph_compiler::Backend;
 use session::{canonical_session_json, parse_session_json};
 
-use crate::prepare::{compile_host_session, prepare_host_runtime_with_console_backend};
+use crate::prepare::{compile_host_session, prepare_host_runtime_with_live_controls_backend};
 use crate::{
-    EffectRack, HostConsoleHandles, HostConsoleRequest, HostPrepareCaps, HostShapePolicy,
-    PrepareDiagnostics, PreparedHost, SourceSubmission,
+    HostLiveControlHandles, HostLiveControlRequest, HostPrepareCaps, HostShapePolicy,
+    LiveEffectAddress, PrepareDiagnostics, PreparedHost, SourceSubmission,
 };
 
 const FIXTURE: &str =
@@ -269,11 +269,11 @@ fn caps() -> HostPrepareCaps {
 }
 
 /// A live control channel per effect and one observation tap per effect; no meters.
-fn console() -> HostConsoleRequest {
-    HostConsoleRequest {
+fn live_controls() -> HostLiveControlRequest {
+    HostLiveControlRequest {
         control_queue_depth: Some(NonZeroUsize::new(8).expect("depth")),
         observation_taps: 1,
-        ..HostConsoleRequest::default()
+        ..HostLiveControlRequest::default()
     }
 }
 
@@ -314,7 +314,7 @@ fn source_sample(channel: u64, frame: u64) -> f32 {
 
 struct Console {
     prepared: PreparedHost,
-    handles: HostConsoleHandles,
+    handles: HostLiveControlHandles,
     /// `limiters[t]` indexes `handles.effect_controls` for track `t`'s limiter.
     limiters: Vec<usize>,
     /// `compressors[t]` indexes `handles.effect_controls` for track `t`'s compressor.
@@ -329,9 +329,13 @@ fn refused(failure: &PrepareDiagnostics) -> ! {
 
 fn prepare(backend: Backend) -> Console {
     let compiled = compile_host_session(&session(), &caps()).unwrap_or_else(|f| refused(&f));
-    let (prepared, handles) =
-        prepare_host_runtime_with_console_backend(&compiled, &caps(), &console(), backend)
-            .unwrap_or_else(|f| refused(&f));
+    let (prepared, handles) = prepare_host_runtime_with_live_controls_backend(
+        &compiled,
+        &caps(),
+        &live_controls(),
+        backend,
+    )
+    .unwrap_or_else(|f| refused(&f));
     assert_eq!(handles.tracks.len(), TRACKS);
     for (index, track) in handles.tracks.iter().enumerate() {
         assert_eq!(
@@ -340,7 +344,7 @@ fn prepare(backend: Backend) -> Console {
             "track {index} is the table's ch{index:02}"
         );
     }
-    let controls = |rack: EffectRack, effect_index: u32, effect: &str| -> Vec<usize> {
+    let controls = |address: LiveEffectAddress, effect: &str| -> Vec<usize> {
         handles
             .tracks
             .iter()
@@ -350,16 +354,17 @@ fn prepare(backend: Backend) -> Console {
                     .iter()
                     .position(|producer| {
                         producer.track_id == *track
-                            && producer.rack == rack
-                            && producer.effect_index == effect_index
+                            && producer.address == address
                             && producer.descriptor.id.as_str() == effect
                     })
                     .unwrap_or_else(|| panic!("track {track}'s {effect} has a control channel"))
             })
             .collect()
     };
-    let limiters = controls(EffectRack::Simd2, 0, LIMITER);
-    let compressors = controls(EffectRack::Simd1, 1, COMPRESSOR);
+    // The fixture's console is `pre_insert` [eq, comp] and `post_insert` [limiter], so in the
+    // session's slot order the compressor is slot 1 and the limiter slot 2 (issue #1096).
+    let limiters = controls(LiveEffectAddress::console(2), LIMITER);
+    let compressors = controls(LiveEffectAddress::console(1), COMPRESSOR);
     let observers = handles
         .tracks
         .iter()
@@ -369,8 +374,7 @@ fn prepare(backend: Backend) -> Console {
                 .iter()
                 .position(|handle| {
                     handle.track_id == *track
-                        && handle.rack == EffectRack::Simd2
-                        && handle.effect_index == 0
+                        && handle.address == LiveEffectAddress::console(2)
                         && handle.descriptor.id.as_str() == LIMITER
                 })
                 .unwrap_or_else(|| panic!("track {track}'s limiter has an observation handle"))
@@ -438,7 +442,7 @@ fn placement(console: &Console, backend: Backend) -> Vec<(usize, usize)> {
         .collect()
 }
 
-fn push(handles: &mut HostConsoleHandles, channel: usize, record: EffectControlRecord) {
+fn push(handles: &mut HostLiveControlHandles, channel: usize, record: EffectControlRecord) {
     handles.effect_controls[channel]
         .try_push(record)
         .unwrap_or_else(|_| panic!("room in control channel {channel}'s queue"));

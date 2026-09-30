@@ -451,7 +451,7 @@ fn effect_preparation_matches_engine_and_cli_refuses_without_canonical_output() 
         ("unknown-parameter", Some("effect.parameter.unknown")),
     ] {
         let mut value = base.clone();
-        let effect = &mut value["tracks"][0]["dynamic"]["effects"][0];
+        let effect = &mut value["tracks"][0]["inserts"]["effects"][0];
         match label {
             "ratio-max" => effect["params"][1]["value"] = serde_json::json!(20.0),
             "ratio-next" => {

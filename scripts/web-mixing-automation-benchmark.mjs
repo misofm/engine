@@ -152,13 +152,30 @@ const mixingDocument = loadDocument(FIXTURE_ID);
 const fixture = mixingDocument.fixture;
 
 // Each base is the value the booted document holds, as the native row reads it from the model.
-const RACKS = ["simd1", "dynamic", "simd2"];
+// Decision 12 (#1096): the control table addresses the record's live racks -- `3` a console slot by
+// its index in the session's slot order (`pre_insert`, then `post_insert`), which is its index in
+// the track's `console` entries, and `1` an insert by its index in the track's `inserts`. A console
+// slot's effect is declared once on the session and its knobs are the track's entry.
+const RACK_INSERTS = constant("racks", "inserts");
+const RACK_CONSOLE = constant("racks", "console");
+function liveSlot(document, track, rack, index) {
+  if (rack === RACK_INSERTS) {
+    const effect = track.inserts.effects[index];
+    return { id: effect.id, effect_id: effect.identity.effect_id, params: effect.params };
+  }
+  const slot = [...document.console.pre_insert, ...document.console.post_insert][index];
+  const entry = track.console[index];
+  assert.equal(entry.slot, slot.slot, `${track.id}: console entries follow the slot order`);
+  return { id: slot.slot, effect_id: slot.identity.effect_id, params: entry.params };
+}
 for (const control of table.controls) {
   const track = fixture.tracks[control.track_index];
   assert.equal(track.id, control.track_id, `${control.track_id}: track index`);
-  const slot = track[RACKS[control.rack]].effects[control.effect_index];
+  assert.ok([RACK_INSERTS, RACK_CONSOLE].includes(control.rack),
+    `${control.track_id}: a live rack`);
+  const slot = liveSlot(fixture, track, control.rack, control.effect_index);
   assert.equal(slot.id, control.slot_id, `${control.track_id}: slot`);
-  assert.equal(slot.identity.effect_id, control.effect, `${control.track_id}: effect`);
+  assert.equal(slot.effect_id, control.effect, `${control.track_id}: effect`);
   const held = slot.params.filter((param) => param.parameter_id === control.parameter_id);
   assert.ok(held.length > 0, `${control.track_id}: the document holds the parameter`);
   for (const param of held) {
@@ -167,26 +184,41 @@ for (const control of table.controls) {
 }
 
 // The two console-strip documents (#1085), as the native rows state them. Each fixture is checked
-// against the table's facts from its own JSON: every track's effects, section by section in the
-// console vocabulary of `console_workload::Workload::strip_layout` (`simd1` reads `pre_insert`,
-// `dynamic` `inserts`, `simd2` `post_insert`), and which tracks bypass them.
+// against the table's facts from its own JSON: every track's effects, section by section in strip
+// order, in the console vocabulary of `console_workload::Workload::strip_layout` (decision 12,
+// #1093: the session's `pre_insert` slots, the track's `inserts`, then the `post_insert` slots),
+// and which tracks bypass them.
 const DOCUMENT_KINDS = ["sixty_four_track_console", "sixty_four_track_app_shape"];
-const SECTIONS = [["simd1", "pre_insert"], ["dynamic", "inserts"], ["simd2", "post_insert"]];
 const SHORT_NAMES = {
   "miso.parametric-eq": "eq", "miso.compressor": "compressor", "miso.true-peak-limiter": "limiter",
 };
-const effectNames = (effects) => effects.map((effect) => SHORT_NAMES[effect.identity.effect_id] ?? "other");
-function trackLayout(track) {
-  const sections = SECTIONS.filter(([rack]) => track[rack].effects.length > 0)
-    .map(([rack, name]) => `${name}:${effectNames(track[rack].effects).join("+")}`);
+const shortName = (effect) => SHORT_NAMES[effect.effect_id] ?? "other";
+// A track's strip as `[section, effects]` in strip order, each effect `{ effect_id, bypass }`. A
+// console slot's effect is declared once on the session; its bypass is the track's entry.
+function trackSections(document, track) {
+  const { pre_insert: pre, post_insert: post } = document.console;
+  const declared = new Map([...pre, ...post].map((slot) => [slot.slot, slot.identity.effect_id]));
+  const entries = (slots) => {
+    const names = new Set(slots.map((slot) => slot.slot));
+    return track.console.filter((entry) => names.has(entry.slot))
+      .map((entry) => ({ effect_id: declared.get(entry.slot), bypass: entry.bypass }));
+  };
+  const inserts = track.inserts.effects
+    .map((effect) => ({ effect_id: effect.identity.effect_id, bypass: effect.bypass }));
+  return [["pre_insert", entries(pre)], ["inserts", inserts], ["post_insert", entries(post)]];
+}
+const trackEffects = (document, track) => trackSections(document, track).flatMap(([, effects]) => effects);
+function trackLayout(document, track) {
+  const sections = trackSections(document, track).filter(([, effects]) => effects.length > 0)
+    .map(([name, effects]) => `${name}:${effects.map(shortName).join("+")}`);
   return sections.length === 0 ? "builtins" : sections.join(",");
 }
-function bypassCensus(tracks) {
+function bypassCensus(document) {
   let any = false;
   let exact = true;
   let bypassed = 0;
-  tracks.forEach((track, index) => {
-    const effects = SECTIONS.flatMap(([rack]) => track[rack].effects);
+  document.tracks.forEach((track, index) => {
+    const effects = trackEffects(document, track);
     const some = effects.some((effect) => effect.bypass);
     const every = effects.length > 0 && effects.every((effect) => effect.bypass);
     any ||= some;
@@ -199,14 +231,14 @@ assert.deepEqual((table.documents ?? []).map((doc) => doc.workload_kind), DOCUME
   "the table lists the two console-strip documents");
 const DOCUMENTS = table.documents.map((doc) => {
   const loaded = loadDocument(doc.fixture_id);
-  const { tracks } = loaded.fixture;
-  assert.equal(tracks.length, doc.tracks, `${doc.workload_kind}: track count`);
-  for (const track of tracks) {
-    assert.equal(trackLayout(track), doc.strip_layout, `${doc.workload_kind} ${track.id}: layout`);
-    const content = effectNames(SECTIONS.flatMap(([rack]) => track[rack].effects)).join("+");
+  const document = loaded.fixture;
+  assert.equal(document.tracks.length, doc.tracks, `${doc.workload_kind}: track count`);
+  for (const track of document.tracks) {
+    assert.equal(trackLayout(document, track), doc.strip_layout, `${doc.workload_kind} ${track.id}: layout`);
+    const content = trackEffects(document, track).map(shortName).join("+");
     assert.equal(content, doc.strip_content, `${doc.workload_kind} ${track.id}: content`);
   }
-  const census = bypassCensus(tracks);
+  const census = bypassCensus(document);
   assert.equal(census.pattern, doc.bypass_pattern, `${doc.workload_kind}: bypass pattern`);
   assert.equal(census.bypassed, doc.bypassed_tracks, `${doc.workload_kind}: bypassed tracks`);
   return { doc, loaded };
@@ -286,12 +318,12 @@ function boot(document = mixingDocument) {
   u32("sourceRingFrames", SOURCE_RING_FRAMES);
   u32("reserved0", 0);
   u64("maximumMemoryBytes", 0n);
-  // The live console with the default command queue, and no meters, observation or master, as
+  // The live controls with the default command queue, and no meters, observation or master, as
   // the native row prepares its plan (`control: true`, nothing else).
-  u64("consoleCommandQueueRecords", BigInt(COMMAND_QUEUE_RECORDS));
-  u64("consoleMeterBlocks", 0n);
-  u64("consoleObservationTaps", 0n);
-  u64("consoleMasterTrackPlusOne", 0n);
+  u64("liveControlCommandQueueRecords", BigInt(COMMAND_QUEUE_RECORDS));
+  u64("liveControlMeterBlocks", 0n);
+  u64("liveControlObservationTaps", 0n);
+  u64("liveControlMasterTrackPlusOne", 0n);
   const pointer = e.miso_engine_web_v1_document_ptr(documentBytes.byteLength);
   new Uint8Array(e.memory.buffer, pointer, documentBytes.byteLength).set(documentBytes);
   const handle = e.miso_engine_web_v1_boot(documentBytes.byteLength);
@@ -300,13 +332,13 @@ function boot(document = mixingDocument) {
     throw new Error(`boot ${e.miso_engine_web_v1_boot_result()}: ${new TextDecoder().decode(
       new Uint8Array(e.memory.buffer, pointer, bytes))}`);
   }
-  // The wire's track index is the booted console's track order; check the table addresses it.
+  // The wire's track index is the booted live controls' track order; check the table addresses it.
   // The console-strip documents carry no control traffic, so only the mixing document is checked.
   for (const control of document === mixingDocument ? table.controls : []) {
-    const length = e.miso_engine_web_v1_console_track_id(handle, control.track_index);
+    const length = e.miso_engine_web_v1_live_control_track_id(handle, control.track_index);
     const idPointer = e.miso_engine_web_v1_buffer_ptr(handle, BUFFER_SOURCE_ID);
     const id = new TextDecoder().decode(new Uint8Array(e.memory.buffer, idPointer, length));
-    assert.equal(id, control.track_id, `${control.track_id}: console track index`);
+    assert.equal(id, control.track_id, `${control.track_id}: live-control track index`);
   }
   return {
     e, handle, control: preparedControl(e, handle), frame: 0n, block: 0, sourceId: document.sourceId,

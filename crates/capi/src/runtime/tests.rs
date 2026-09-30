@@ -85,9 +85,11 @@ fn pinned_hex(value: &str) -> Vec<u8> {
 
 const ALL_COMMAND_RESPONSE_VECTORS: [&str; 11] = [
     "4d49534f43544c00010000003000020001000000c801000001000000000000002a000000000000001b000000000000000100020102000000010000000000000002000201020000000000000000000000030002010200000001000000000000000400020102000000000000000000000005000401080000000010000000000000060003010400000000080000000000000700040108000000001000000000000008000101010000000400000000000000090002010200000000010000000000000a0004010800000001000000000000000b0004010800000000100000000000000c0004010800000001000000000000000d0004010800000001000000000000000e0004010800000002000000000000000f00040108000000010000000000000010000401080000001000000000000000110004010800000000200000000000001200040108000000001000000000000013000401080000008000000000000000140004010800000080000000000000001500020102000000000100000000000016000201020000000001000000000000170002010200000000010000000000001800030104000000000800000000000019000c01160000000100020003000400050006000700080009000a000b0000001a000c010c000000018002801080208021803080000000001b00040108000000ff3f000000000000",
-    // #338 re-pin: canonical JSON snapshot bytes are 16,712 (0x4148), beginning with `{`.
-    "4d49534f43544c000100000030000200020000004000000002000000000000002a000000000000000400000000000000010004010800000048410000000000000200040108000000000000000000000003000a01010000007b0000000000000004000801010000000000000000000000",
-    "4d49534f43544c000100000030000200040000003801000003000000000000002a000000000000000300000000000000010003010400000001000000000000000200080101000000000000000000000003000b011001000010000000000000000100030104000000010000000000000002000901030000006571300000000000030001010100000001000000000000000400090102000000657100000000000005000301040000000100000000000000060001010100000001000000000000000700010101000000010000000000000008000101010000000500000000000000090001010100000002000000000000000c0006010400000000000000000000000d0001010100000004000000000000000e0001010100000003000000000000000f00030104000000000000000000000010000301040000000500000000000000110009000e00000062616e642d312d656e61626c6564000012000900060000006f6e2f6f66660000",
+    // #338 re-pin: canonical JSON snapshot bytes were 16,712 (0x4148), beginning with `{`.
+    // #1093 re-pin: 13,729 (0x35a1) after the fixture moved to decision 12's console shape.
+    "4d49534f43544c000100000030000200020000004000000002000000000000002a0000000000000004000000000000000100040108000000a1350000000000000200040108000000000000000000000003000a01010000007b0000000000000004000801010000000000000000000000",
+    // #1093 re-pin: the first descriptor's rack is `console` (5), was `simd1` (1).
+    "4d49534f43544c000100000030000200040000003801000003000000000000002a000000000000000300000000000000010003010400000001000000000000000200080101000000000000000000000003000b011001000010000000000000000100030104000000010000000000000002000901030000006571300000000000030001010100000005000000000000000400090102000000657100000000000005000301040000000100000000000000060001010100000001000000000000000700010101000000010000000000000008000101010000000500000000000000090001010100000002000000000000000c0006010400000000000000000000000d0001010100000004000000000000000e0001010100000003000000000000000f00030104000000000000000000000010000301040000000500000000000000110009000e00000062616e642d312d656e61626c6564000012000900060000006f6e2f6f66660000",
     "4d49534f43544c000100000030000200050000004800000004000000000000002a00000000000000040000000000000001000401080000000000000000000000020002010200000001000000000000000300020102000000100000000000000004000a011000000001000000010000000000803f00000000",
     "4d49534f43544c000100000030000200060005004800000005000000000000002a00000000000000020000000000000001000b01300000000200000000000000010009011000000070726f746f636f6c2e6661696c7572650200010101000000030000000000000002000301040000000000000000000000",
     "4d49534f43544c000100000030000200070000003000000006000000000000002a000000000000000300000000000000010001010100000001000000000000000200040108000000000000000000000003000401080000000000000000000000",
@@ -109,13 +111,17 @@ fn generated_parity_session(track_count: usize, sample_rate_hz: u32) -> String {
         assert_eq!(track_count, 10);
         let mut track = model.tracks[8].clone();
         track.id = session::StableId::parse("eq9").expect("tenth track");
-        let effect = &mut track.simd1.effects[0];
+        // The console EQ runs on every track (decision 12), so the tenth track's own effect, a
+        // bypassed limiter, is an insert after its bypassed EQ.
+        track.console[0].bypass = true;
+        let mut effect = model.lower_track(&track).pre_insert[0].clone();
         effect.id = session::StableId::parse("limiter").expect("limiter slot");
         effect.identity = session::EffectIdentity::Native {
             effect_id: session::StableId::parse("miso.true-peak-limiter").expect("limiter id"),
         };
         effect.params.clear();
         effect.bypass = true;
+        track.inserts.effects = vec![effect];
         let mut route = model.routes[8].clone();
         route.id = session::StableId::parse("eq9-main").expect("tenth route");
         let session::RouteSource::Track { track_id, .. } = &mut route.source else {
@@ -214,15 +220,20 @@ fn command_c_capacity(
 #[test]
 fn c_commands_publish_the_replacement_parameter_catalog() {
     let (c_session, c_plan) = boxed_c_children(SESSION);
-    let edit = protocol::SessionEdit::RemoveTrackEffect {
-        track_id: session::StableId::parse("eq0").expect("track ID"),
-        rack_name: session::RackName::Simd1,
-        effect_id: session::StableId::parse("eq").expect("effect ID"),
-    };
+    // The EQ is a console slot every track carries (decision 12), so the replacement catalog
+    // drops `eq0`'s EQ by removing the track and its route; console edits are #1094's.
+    let edits = [
+        protocol::SessionEdit::RemoveRoute {
+            route_id: session::StableId::parse("eq0-main").expect("route ID"),
+        },
+        protocol::SessionEdit::RemoveTrack {
+            track_id: session::StableId::parse("eq0").expect("track ID"),
+        },
+    ];
     let replace = command_bytes_at_revision(
         1,
         ExpectedRevision::Exact(SessionRevision(42)),
-        protocol::CommandPayload::SessionTransactionApply(core::slice::from_ref(&edit)),
+        protocol::CommandPayload::SessionTransactionApply(&edits),
     );
     assert_eq!(command_c(c_session, &replace).0, crate::RESULT_OK);
 
@@ -250,7 +261,7 @@ fn c_commands_publish_the_replacement_parameter_catalog() {
     assert_eq!(page.descriptors.len(), 1);
     assert_eq!(page.descriptors[0].handle, 1);
     assert_eq!(page.descriptors[0].track_id, "eq1");
-    assert_eq!(page.descriptors[0].rack, protocol::ParameterRack::Simd1);
+    assert_eq!(page.descriptors[0].rack, protocol::ParameterRack::Console);
 
     crate::ffi::test_plan_destroy(c_plan);
     crate::ffi::test_session_destroy(c_session);
@@ -966,16 +977,22 @@ fn control_calls_inside_a_plan_swapping_render_call_keep_replacement_live() {
 /// render call published its epoch.
 #[test]
 fn a_valid_edit_inside_the_swap_window_is_backpressured_not_compile_rejected() {
-    let full = compile_children(SESSION, limits())
-        .expect("nine EQs")
+    // The fixture's EQ is a console slot on all nine tracks, which a track cannot drop (decision
+    // 12), so the edited EQ is a tenth instance: an insert on the first track. Console session
+    // edits are #1094's.
+    let mut model = parse_session_json(SESSION).expect("fixture");
+    let reduced_session = session::canonical_session_json(&model).expect("canonical");
+    let mut eq = model.lower_track(&model.tracks[0]).pre_insert[0].clone();
+    eq.id = session::StableId::parse("eq-insert").expect("insert slot");
+    model.tracks[0].inserts.effects.push(eq.clone());
+    let full_session = session::canonical_session_json(&model).expect("canonical");
+    let full = compile_children(&full_session, limits())
+        .expect("ten EQs")
         .plan
         .resources()
         .effect_scalar_state_bytes;
-    let mut model = parse_session_json(SESSION).expect("fixture");
-    let eq = model.tracks[0].simd1.effects.remove(0);
-    let reduced_session = session::canonical_session_json(&model).expect("canonical");
     let reduced = compile_children(&reduced_session, limits())
-        .expect("eight EQs")
+        .expect("nine EQs")
         .plan
         .resources()
         .effect_scalar_state_bytes;
@@ -983,7 +1000,7 @@ fn a_valid_edit_inside_the_swap_window_is_backpressured_not_compile_rejected() {
     let mut tight = limits();
     tight.maximum_effect_state_bytes = full + reduced;
 
-    let mut children = compile_children(SESSION, tight).expect("tight children");
+    let mut children = compile_children(&full_session, tight).expect("tight children");
     let mut pcm = [0.0_f32; 256];
     children
         .plan
@@ -995,12 +1012,12 @@ fn a_valid_edit_inside_the_swap_window_is_backpressured_not_compile_rejected() {
     let track_id = model.tracks[0].id.clone();
     let remove = protocol::SessionEdit::RemoveTrackEffect {
         track_id: track_id.clone(),
-        rack_name: session::RackName::Simd1,
+        rack_name: session::RackName::Inserts,
         effect_id: eq.id.clone(),
     };
     let put_back = protocol::SessionEdit::PutTrackEffect {
         track_id,
-        rack_name: session::RackName::Simd1,
+        rack_name: session::RackName::Inserts,
         final_position: 0,
         effect: eq,
     };

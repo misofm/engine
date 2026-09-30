@@ -4,7 +4,7 @@ import type { CommandReport } from "./boundary.ts";
 import { MisoUsageError } from "./errors.ts";
 
 /**
- * The live-console writer (issue #243, adopted ruling 5462139867 finding 5).
+ * The live-control writer (issue #243, adopted ruling 5462139867 finding 5).
  *
  * # What the writer is for
  *
@@ -38,15 +38,19 @@ import { MisoUsageError } from "./errors.ts";
  * which means the writer stays correct if the lowering rule ever changes.
  */
 
-/** One addressed console edit, in the wire's own vocabulary. */
+/** One addressed live-control edit, in the wire's own vocabulary. */
 export interface LaneEdit {
   /** A `wireCommandKinds` name, e.g. `effectParam`, `faderDb`, `mute`. */
   readonly kind: CommandKindName;
   readonly trackIndex: number;
-  /** `0` simd1, `1` dynamic, `2` simd2, `255` not applicable. */
+  /**
+   * The record's rack byte: `1` inserts, `3` console, `255` not applicable (S1c). The retired `0`
+   * and `2` are refused by the engine with `unknownRack`.
+   */
   readonly rack: number;
   /** `0` left, `1` right, `2` both, `255` not applicable. */
   readonly channel: number;
+  /** A console slot's index in the session's slot order, or an insert's index on its track. */
   readonly effectIndex?: number;
   readonly parameterId?: number;
   readonly smoothingSamples?: number;
@@ -99,7 +103,7 @@ export interface WriterOptions {
   readonly maximumBatch?: number;
 }
 
-/** Submit addressed edits directly through a semantic console transport. */
+/** Submit addressed edits directly through a semantic live-control transport. */
 export interface SemanticWriterOptions extends Omit<WriterOptions, "submit"> {
   readonly submit?: never;
   readonly submitEdits: (edits: readonly LaneEdit[]) => CommandReport | Promise<CommandReport>;
@@ -162,7 +166,7 @@ export function encodeLaneEdits(edits: readonly LaneEdit[]): Uint8Array {
   return records;
 }
 
-export class ConsoleWriter {
+export class LiveControlWriter {
   readonly #submit: SemanticWriterOptions["submitEdits"];
   readonly #maximumBatch: number;
   /** Insertion-ordered by key, which is what makes coalescing a map update rather than a scan. */
@@ -190,13 +194,13 @@ export class ConsoleWriter {
   constructor(options: (WriterOptions & { readonly submitEdits?: never }) | SemanticWriterOptions) {
     const { submit, submitEdits } = options;
     if ((submit !== undefined) === (submitEdits !== undefined)) {
-      throw new MisoUsageError("ConsoleWriter requires exactly one of submit or submitEdits");
+      throw new MisoUsageError("LiveControlWriter requires exactly one of submit or submitEdits");
     }
     if (typeof submitEdits === "function") this.#submit = submitEdits;
     else if (typeof submit === "function") {
       this.#submit = (edits) => submit(encodeLaneEdits(edits), edits.length);
     } else {
-      throw new MisoUsageError("ConsoleWriter submission callback must be a function");
+      throw new MisoUsageError("LiveControlWriter submission callback must be a function");
     }
     this.#maximumBatch = options.maximumBatch ?? ABI_LAYOUT.constants.defaultCommandQueueRecords;
     if (!Number.isInteger(this.#maximumBatch) || this.#maximumBatch < 1) {
@@ -307,7 +311,7 @@ export class ConsoleWriter {
     if (report.reason !== BACKPRESSURE) {
       this.#escalations += 1;
       throw new MisoUsageError(
-        `the console refused a batch for ${report.reasonName} at record ${report.rejectedIndex}; `
+        `the live controls refused a batch for ${report.reasonName} at record ${report.rejectedIndex}; `
         + "this is a caller error, not flow control, and will not succeed on retry",
       );
     }

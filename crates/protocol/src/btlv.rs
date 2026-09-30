@@ -233,14 +233,32 @@ impl<'a> Fields<'a> {
         }
     }
 
-    pub(crate) fn schema_spec(mut self, spec: &'static MessageSpec) -> Result<Self, DecodeError> {
+    pub(crate) fn schema_spec(self, spec: &'static MessageSpec) -> Result<Self, DecodeError> {
+        self.schema_spec_known(spec, None)
+    }
+
+    /// [`Self::schema_spec`] for a message that has retired field IDs. A retired ID is refused in
+    /// either flag form: never skipped as an unknown optional field, never reinterpreted.
+    pub(crate) fn schema_spec_retiring(
+        self,
+        spec: &'static MessageSpec,
+        retired: &'static MessageSpec,
+    ) -> Result<Self, DecodeError> {
+        self.schema_spec_known(spec, Some(retired))
+    }
+
+    fn schema_spec_known(
+        mut self,
+        spec: &'static MessageSpec,
+        known: Option<&'static MessageSpec>,
+    ) -> Result<Self, DecodeError> {
         debug_assert!(!spec.name.is_empty());
         if spec.fields.len() > self.slots.len() {
             return Err(DecodeError::LimitExceeded);
         }
         let mut reader = Reader::new(self.bytes, self.count);
         while let Some(field) = reader.next_field()? {
-            self.consume_schema_field(spec, None, field)?;
+            self.consume_schema_field(spec, known, field)?;
         }
         self.spec = Some(spec);
         Ok(self)

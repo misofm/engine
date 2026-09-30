@@ -1,7 +1,8 @@
 # Builtins and metering V1
 
 Issue 007 defines three fixed scalar graph sections per dual-mono track: input processing at
-`post_input_builtins`, fader/mute at `post_fader`, and a declared 2x2 matrix at `post_matrix`.
+`post_input`, fader/mute at `post_fader`, and a declared 2x2 matrix at `post_pan` (the session
+tap tokens decision 12 renamed; the internal stages keep their names).
 The compiler binds these internally, so hosts continue to supply only source/input and output
 bindings. No rack, graph topology, or session-schema semantics are introduced here.
 
@@ -93,14 +94,14 @@ those explicitly out-of-scope claims.
 
 Meters observe *boundaries*; observation taps observe *effects*. A track's peak is a fold over
 samples the meter can see; a compressor's gain reduction is state only the compressor holds, and it
-reaches a console through a separate mechanism with its own declared menu, cost classes and
+reaches the live controls through a separate mechanism with its own declared menu, cost classes and
 conflating transport. `docs/EFFECT_OBSERVATION_V1.md` is that mechanism in full.
 
 What belongs here is where the two meet: **one frame, one timeline**. Gain reduction rides the
 existing `miso.meter.v1` post rather than a second message, so the pinned-occurrence rule for the
 render callback is unchanged, and the window a gain-reduction value describes is the *same* meter
 window the peak beside it describes — the observation window length is derived from
-`console_meter_blocks`, not configured separately.
+`live_control_meter_blocks`, not configured separately.
 
 The frame is `3 * trackCount + 3` `f32` words: the frozen `2T + 2` peak section exactly where it
 was, then one **non-negative decibel magnitude** per track and the designated master's. The sample
@@ -113,10 +114,10 @@ request.
 
 ## Solo in place (issue #210 phase 1)
 
-Solo is **console state, composed at command admission, with no render-plane code at all**. The
+Solo is **live-control state, composed at command admission, with no render-plane code at all**. The
 strip already carries a per-lane declicked gate whose target is `0.0` or the lane's fader gain, fed
 by a bounded per-track queue of mute records. Solo-in-place adds a state machine above that queue —
-`ConsoleSoloState` in `host-core` — which composes
+`LiveControlSoloState` in `host-core` — which composes
 
 ```
 effective_mute(track, lane) = user_mute(track, lane) || (any_solo_engaged && !this_track_soloed)
@@ -158,7 +159,7 @@ silence stems that the session, read as a document, says are audible.
 
 This does not violate the standing "protocol mutations update the typed session model and must be
 snapshot-able" law, because solo deliberately does not mutate the session model — exactly as live
-fader, pan, mute and effect-parameter moves already do not. Live console state is rebuilt from the
+fader, pan, mute and effect-parameter moves already do not. Live-control state is rebuilt from the
 session on reload and is never written back.
 
 Persisted solo-safe or monitor-scene semantics, if the product ever wants them, are a future session
@@ -168,10 +169,10 @@ monitor-scene concept and not a V1 key. Nothing here forecloses that.
 
 The code is unchanged; the semantics are worth stating because a console user will ask.
 
-The gate applies at the fader, so taps at `input`, `post_input_builtins`, `post_simd1`,
-`post_dynamic` and `post_simd2_pre_fader` keep reading the **un-gated** signal — input and
+The gate applies at the fader, so taps at `input`, `post_input`, `insert_send`,
+`insert_return` and `pre_fader` keep reading the **un-gated** signal — input and
 pre-fader metering survives a solo, which is console-correct and is what makes gain-riding a
-silenced strip possible. Taps at `post_fader` and `post_matrix`, and everything downstream of them
+silenced strip possible. Taps at `post_fader` and `post_pan`, and everything downstream of them
 (submixes, outputs, the designated master's peak and gain-reduction rows), read the **gated** mix.
 
 A gain-reduction tap on a strip that solo has silenced falls toward zero reduction, because its

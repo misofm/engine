@@ -114,8 +114,8 @@ export interface BootOptions {
   readonly maximumMemoryBytes?: bigint;
   /** Optional prepared continuous-spectrum hop, selected outside the packed boot options block. */
   readonly spectrumHopFrames?: 256 | 512 | 1024 | 2048;
-  /** The four console words. Absent attaches no console at all. */
-  readonly console?: {
+  /** The four live-control words. Absent attaches no live controls at all. */
+  readonly liveControls?: {
     readonly commandQueueRecords?: number;
     readonly meterBlocks?: number;
     readonly observationTaps?: number;
@@ -132,16 +132,16 @@ export interface BootOptions {
  *
  * Adopted ruling 5462139867 finding 3: "identical options struct" was literally impossible, since
  * the scratch boot writes `require_* = 0` while the worklet writes the physical rate and quantum.
- * The divergence class A-1 actually named was the *console* words, so the equality rule is stated
- * over the policy words and the two `require_*` words are role-defined.
+ * The divergence class A-1 actually named was the *live-control* words, so the equality rule is
+ * stated over the policy words and the two `require_*` words are role-defined.
  */
 export const POLICY_WORDS = Object.freeze([
   "sourceRingFrames",
   "maximumMemoryBytes",
-  "consoleCommandQueueRecords",
-  "consoleMeterBlocks",
-  "consoleObservationTaps",
-  "consoleMasterTrackPlusOne",
+  "liveControlCommandQueueRecords",
+  "liveControlMeterBlocks",
+  "liveControlObservationTaps",
+  "liveControlMasterTrackPlusOne",
 ] as const);
 
 /** The two words whose values are defined by the boot's role rather than shared. */
@@ -183,10 +183,10 @@ export function writeBootOptions(
   u32("requireQuantumFrames", options.requireQuantumFrames ?? 0);
   u32("sourceRingFrames", options.sourceRingFrames ?? 0);
   u64("maximumMemoryBytes", options.maximumMemoryBytes ?? 0n);
-  u64("consoleCommandQueueRecords", BigInt(options.console?.commandQueueRecords ?? 0));
-  u64("consoleMeterBlocks", BigInt(options.console?.meterBlocks ?? 0));
-  u64("consoleObservationTaps", BigInt(options.console?.observationTaps ?? 0));
-  u64("consoleMasterTrackPlusOne", BigInt(options.console?.masterTrackPlusOne ?? 0));
+  u64("liveControlCommandQueueRecords", BigInt(options.liveControls?.commandQueueRecords ?? 0));
+  u64("liveControlMeterBlocks", BigInt(options.liveControls?.meterBlocks ?? 0));
+  u64("liveControlObservationTaps", BigInt(options.liveControls?.observationTaps ?? 0));
+  u64("liveControlMasterTrackPlusOne", BigInt(options.liveControls?.masterTrackPlusOne ?? 0));
 
   // A detached copy, so a caller can compare two boots' option blocks after the fact without
   // holding a view onto wasm memory that a later `document_ptr` growth could detach.
@@ -211,7 +211,7 @@ export function defaultSourceRingFrames(sampleRateHz: number, quantumFrames: num
 /** Numeric value of a named constant group row, e.g. `constantValue("bufferKinds", "command")`. */
 export function constantValue(
   group: "resultCodes" | "bootResultAliases" | "states" | "backends" | "bufferKinds"
-    | "wireCommandKinds" | "commandReasons",
+    | "wireCommandKinds" | "commandReasons" | "racks" | "liveResponseRacks",
   name: string,
 ): number {
   const row = ABI_LAYOUT.constants[group].find((entry) => entry.name === name);

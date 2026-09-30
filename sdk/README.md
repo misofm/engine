@@ -5,8 +5,9 @@ session builder, semantic controls, analysis APIs, and packaged WebAssembly runt
 rendering and browser playback. The engine produces planar `Float32Array` PCM; your application
 owns source delivery, playback UI, storage, and output encoding.
 
-Sessions are strict, versioned canonical JSON. Tracks have independent left/right processing,
-three effect racks, explicit routing and integer-sample delay compensation. The native effect
+Sessions are strict, versioned canonical JSON. Tracks have independent left/right processing, a
+session-level console strip, per-track inserts, explicit routing and integer-sample delay
+compensation. The native effect
 library includes EQ, compressor, gate/expander, limiter, multiband compressor, saturator/clipper,
 transient shaper, and delay. The generated catalog describes their parameters,
 units, domains, and observation capabilities.
@@ -24,7 +25,7 @@ download. Keep the SDK, Wasm, host, worklets, and metadata from the same package
 
 | Public import | Use |
 | --- | --- |
-| `@misofm/engine` | `session`, `effect`, generated catalog/ABI, parameter helpers, `EngineConsole`, `ConsoleWriter`, and shared types |
+| `@misofm/engine` | `session`, `effect`, generated catalog/ABI, parameter helpers, `EngineLiveControls`, `LiveControlWriter`, and shared types |
 | `@misofm/engine/headless` | `createOfflineEngine`, validation, bundled-asset loading, and response previews |
 | `@misofm/engine/browser` | `createEngine`, browser preparation, PCM rings/feed, measurements, and response previews |
 | `@misofm/engine/assets` | `BUNDLED_ENGINE_ASSETS` URLs and `BUNDLED_ENGINE_FILES` names |
@@ -39,6 +40,53 @@ export function packageInfo() {
   return { parameterCount: catalog().length, wasmUrl: BUNDLED_ENGINE_ASSETS.wasm };
 }
 ```
+
+## Build a session
+
+A session declares its console once: `preInsert` slots run before each track's inserts and
+`postInsert` slots after them, each with a slot ID, an effect, and the quality and link mode every
+track runs it at. Every track then carries one `console` entry per slot, in slot order, with only
+its own `bypass` and parameters, plus its own `inserts`. A console slot is one of the six effects
+in `CONSOLE_ELIGIBLE_EFFECTS` and takes no sidechain; a keyed or other effect is an insert.
+
+```ts
+import { effect, session } from "@misofm/engine";
+
+export function vocalMix() {
+  return session({ id: "vocal.mix", sampleRateHz: 48_000 })
+    .source("vox", { channels: 2, bitDepth: 24, frames: 480_000, content: `blake3:${"0".repeat(64)}` })
+    .console({
+      preInsert: [
+        { slot: "eq", effectId: "miso.parametric-eq" },
+        { slot: "comp", effectId: "miso.compressor" },
+      ],
+      postInsert: [{ slot: "limiter", effectId: "miso.true-peak-limiter", linkMode: "maximum" }],
+    })
+    .track("vocal", {
+      source: "vox",
+      console: [
+        { slot: "eq", parameters: { "band-1-enabled": true, "band-1-gain": 3 } },
+        { slot: "comp", bypass: true },
+        { slot: "limiter" },
+      ],
+      inserts: [effect("miso.delay", { "delay time": 120 }, { slotId: "echo" })],
+    })
+    .output("main")
+    .route({
+      id: "vocal-main",
+      source: { kind: "track", trackId: "vocal", tap: "post_pan" },
+      destination: { kind: "output_input", outputId: "main" },
+    });
+}
+```
+
+The builder refuses what the engine refuses -- a missing, repeated or misordered console entry, an
+unknown slot, an ineligible effect, a sidechain or bypass on a slot, a link mode the effect does
+not support (`EFFECT_LINK_MODES`: the EQ, soft-clip and delay are `dual_mono` only, and the limiter
+has no `average`) -- and `MisoUsageError`'s `diagnosticCode` is the engine's own code for it
+(`console.entry_order`, `console.slot.ineligible_effect`, `effect.link_mode.unsupported`, ...).
+The seven track taps are `input`, `post_input`, `insert_send`, `insert_return`, `pre_fader`,
+`post_fader` and `post_pan`.
 
 ## Render offline
 
@@ -104,7 +152,7 @@ export async function startMix(
 ) {
   const engine = await createEngine({
     document,
-    policy: { console: { commandQueueRecords: 64, meterBlocks: 12 } },
+    policy: { liveControls: { commandQueueRecords: 64, meterBlocks: 12 } },
   });
   try {
     await prepareSources(engine);
@@ -136,25 +184,44 @@ mobile audio-device adapter.
 
 ## Change a mix and correlate the acknowledgement
 
-Prepare a positive `console.commandQueueRecords` capacity at boot: pass `console` directly to
-`createOfflineEngine`, or under `policy` to `createEngine`. Audio-only boot remains valid without
-it. `engine.console()` is synchronous headlessly and asynchronous in the browser; `await` works
-for either. With an existing `vocal` track and an EQ in its first SIMD rack slot:
+Prepare a positive `liveControls.commandQueueRecords` capacity at boot: pass `liveControls` directly
+to `createOfflineEngine`, or under `policy` to `createEngine`. Audio-only boot remains valid
+without it. `engine.liveControls()` is synchronous headlessly and asynchronous in the browser;
+`await` works for either. With the `vocal` track and `eq` console slot built above:
 
 ```ts
-import type { EngineConsole } from "@misofm/engine";
+import type { EngineLiveControls } from "@misofm/engine";
 
-export async function adjustVocal(controls: EngineConsole) {
+export async function adjustVocal(controls: EngineLiveControls) {
   const vocal = controls.edit.track("vocal");
   const report = await controls.submit(
     vocal.faderDb(-3, { channel: "both", smoothingSamples: 64 }),
-    vocal.effect("simd1", 0, "miso.parametric-eq")
+    vocal.console("eq", "miso.parametric-eq")
       .parameter({ key: "band-1-gain", value: 6, channel: "both" }),
+    vocal.insert("echo", "miso.delay").bypass(true),
   );
   if (!report.ok) throw new Error(`${report.code}: ${report.reasonName}`);
   return report.appliedAtSample;
 }
 ```
+
+`console(slot, effectId)` addresses a session console slot by its slot ID and `insert(id or index,
+effectId)` one of the track's inserts; `effect("console" | "inserts", index, effectId)` takes the
+live address directly (a console slot's index in `preInsert`-then-`postInsert` order). IDs resolve
+against the session the engine booted when it was booted from a `session(...)` builder; for a
+document booted from text, call `controls.withSession(builder)` first, because the SDK never parses
+a document. `withSession()` holds the builder to the booted document byte for byte: its `toJson()`
+must be exactly the booted text, so any other session (a reordered console, a renamed slot, another
+insert chain) throws a `MisoUsageError` rather than resolve IDs to addresses that name other
+instances. Boot the builder's `toJson()`, or the engine's canonical text of it.
+
+A live `bypass(true)` or `bypass(false)` is a latency-preserving shunt, and it can lift a bypass the
+session authored, except on the delay and the multiband compressor (`PREPARED_BYPASS_EFFECTS`):
+they keep a session bypass as a prepared one, and the engine acknowledges a live un-bypass of either
+and renders nothing different. So when the SDK has the session, `bypass(false)` on a
+session-bypassed delay or multiband throws a `MisoUsageError` before anything is sent; author it
+unbypassed and reload the session to hear it. Addressed by index with no session, the SDK cannot
+know, and that lift is acknowledged and changes nothing. Setting a bypass on either works.
 
 One `submit()` is one atomic admission: all edits are accepted or none are. A successful report's
 `appliedAtSample` is the absolute engine sample at which the edits take effect, at the start of
@@ -163,9 +230,9 @@ that block. Smoothing may continue after that boundary. Refusals carry typed res
 queue saturation must be handled, and acknowledged batches are not silently dropped.
 
 Parameter keys and units come from the catalog. `inputFilters({ hpfHz, lpfHz })` changes both
-builtin cutoffs atomically; zero disables a filter. `ConsoleWriter` adds bounded batch submission
-and latest-value coalescing for gesture loops. The root entry's `parameter()` helper provides exact
-decimal/lattice edits for agent-facing controls.
+builtin cutoffs atomically; zero disables a filter. `LiveControlWriter` adds bounded batch
+submission and latest-value coalescing for gesture loops. The root entry's `parameter()` helper
+provides exact decimal/lattice edits for agent-facing controls.
 
 ## Observe the rendered mix
 
@@ -200,14 +267,14 @@ instead of growing with stem duration.
 | Render telemetry | Browser `subscribeTelemetry()` reports CPU/deadline measurements. It has no audio sample span. |
 
 For spectrum, pass either `spectrum` for one boundary or `spectrumCollection` for several
-budgeted boundaries at engine creation. Supported targets are `trackPostInputBuiltins`,
-`trackPostMatrix`, and `output`. A collection permits atomic managed selection among prepared
+budgeted boundaries at engine creation. Supported targets are `trackPostInput`,
+`trackPostPan`, and `output`. A collection permits atomic managed selection among prepared
 entries, with one active spectrum producer. It does not enable simultaneous independent streams.
 
 Managed observation, response, and spectrum handles expose `readLatest()`, `update()`, and
 `close()`. Browser delivery progresses automatically; headless consumers call `pump()` between
 explicit renders. Pumping never renders audio. Identical subscriptions share work; refused updates
-preserve the prior configuration. Prepare `console.observationTaps` for resident effect taps.
+preserve the prior configuration. Prepare `liveControls.observationTaps` for resident effect taps.
 
 Use the recorded sample spans to compare observations with `appliedAtSample`. A window crossing
 the command boundary can contain both states. A later window may still contain filter settling
@@ -255,8 +322,10 @@ enginectl session build --request request.json --output session.json
 enginectl session build --request - --output - < request.json
 ```
 
-Requests use `schemaVersion: 1`, a required `session` object, and optional `sources`, `tracks`,
-`submixes`, `outputs`, `routes`, and `automation` arrays. The CLI validates with the packaged engine before publishing
+Requests use `schemaVersion: 1`, a required `session` object, an optional `console` object
+(`preInsert` and `postInsert` slot arrays), and optional `sources`, `tracks`, `submixes`,
+`outputs`, `routes`, and `automation` arrays; each track spec carries its `console` entries and
+`inserts`. The CLI validates with the packaged engine before publishing
 canonical Session V1 JSON. File output preserves existing destinations unless `--overwrite` is
 specified; stdout output contains only the document. It does not download or decode stems.
 See the [CLI request shape](https://github.com/misofm/engine/blob/main/sdk/src/cli/session-request.ts) and

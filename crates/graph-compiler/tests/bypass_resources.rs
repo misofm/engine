@@ -1,13 +1,13 @@
 //! Issue #1100 (console strip P1b): a session bypass is bounded, charged and allocation-free.
 //!
 //! P1 (#1087) lowered a session `bypass` to a prepared `bypass = false` plus a channel-less lane on
-//! a latency-preserving shunt, so every bypassed instance now has a console owner: a per-node
-//! `graph` `ConsoleEffect`, or a `rack::ConsoleEffectBankStage` for its bank slot. This file gates
-//! the three things that owner must not cost:
+//! a latency-preserving shunt, so every bypassed instance now has a live-control owner: a per-node
+//! `graph` `LiveControlEffect`, or a `rack::LiveControlEffectBankStage` for its bank slot. This
+//! file gates the three things that owner must not cost:
 //!
-//! * **Gate 1, bounded.** A channel-less lane holds no staging window, so a console-free bypass
-//!   binds at any automation capacity, per node and banked.
-//! * **Gate 2, charged.** The graph estimate charges every byte a bypass or a live console makes
+//! * **Gate 1, bounded.** A channel-less lane holds no staging window, so a live-control-free
+//!   bypass binds at any automation capacity, per node and banked.
+//! * **Gate 2, charged.** The graph estimate charges every byte a bypass or live controls make
 //!   bind retain -- windows, shunts and the owners that hold them -- measured here by the
 //!   workspace's audited allocator, not taken from the accounting under test.
 //! * **Gate 4, allocation-free.** A plan with mixed session bypass, banked and per node, renders
@@ -24,7 +24,7 @@ use bench_support::alloc::{
 };
 use builtins_compiler::{BuiltinCompileCaps, prepare_session_builtins};
 use effect_compiler::{
-    EffectCompileCaps, attach_effect_console, launch_native_effect_registry,
+    EffectCompileCaps, attach_effect_live_controls, launch_native_effect_registry,
     prepare_native_session_effects,
 };
 use effect_contract::BankWidth;
@@ -107,18 +107,16 @@ fn console(tracks: usize, masks: [u64; 3]) -> SessionModel {
     let mut model = parse_session_json(INTENDED).expect("console fixture");
     model.tracks.truncate(tracks);
     model.routes.truncate(tracks);
+    // Every strip slot is a console slot (decision 12): `pre_insert` lowers to SIMD rack 1 and
+    // `post_insert` to SIMD rack 2, and a track's bypass for a slot is its console entry's.
     for (index, track) in model.tracks.iter_mut().enumerate() {
-        for (slot, (rack, id)) in SLOTS.iter().enumerate() {
-            let effects = match rack {
-                RackId::Simd1 => &mut track.simd1.effects,
-                RackId::Dynamic => &mut track.dynamic.effects,
-                RackId::Simd2 => &mut track.simd2.effects,
-            };
-            let effect = effects
+        for (slot, (_, id)) in SLOTS.iter().enumerate() {
+            let entry = track
+                .console
                 .iter_mut()
-                .find(|effect| effect.id.as_str() == *id)
+                .find(|entry| entry.slot.as_str() == *id)
                 .expect("strip slot");
-            effect.bypass = masks[slot] >> index & 1 == 1;
+            entry.bypass = masks[slot] >> index & 1 == 1;
         }
     }
     model
@@ -173,35 +171,43 @@ struct Bound {
     shape: Shape,
 }
 
-/// Prepare, compile and bind `model` at `dispatch`, with a live console on every effect when
-/// `console` is set, measuring what the preparation leaves live.
+/// Prepare, compile and bind `model` at `dispatch`, with live controls on every effect when
+/// `live_controls` is set, measuring what the preparation leaves live.
 ///
 /// The measured window starts at effect preparation, so it frees nothing it did not allocate, and
-/// ends with the bound plan and nothing else alive: the console's producers, which a host keeps
-/// beside the plan and charges separately, are dropped inside it.
-fn bind(model: &SessionModel, dispatch: Backend, spans: u32, console: bool) -> Bound {
+/// ends with the bound plan and nothing else alive: the live controls' producers, which a host
+/// keeps beside the plan and charges separately, are dropped inside it.
+fn bind(model: &SessionModel, dispatch: Backend, spans: u32, live_controls: bool) -> Bound {
     let session = compile_session(model, compile_caps()).expect("compiled session");
     let registry = launch_native_effect_registry().expect("launch registry");
     let bypassed: Vec<(String, String)> = model
         .tracks
         .iter()
         .flat_map(|track| {
-            track
-                .simd1
+            // A lowered console effect's id is its slot.
+            let console = track
+                .console
+                .iter()
+                .filter(|entry| entry.bypass)
+                .map(|entry| entry.slot.as_str());
+            let inserts = track
+                .inserts
                 .effects
                 .iter()
-                .chain(&track.dynamic.effects)
-                .chain(&track.simd2.effects)
                 .filter(|effect| effect.bypass)
-                .map(|effect| (track.id.as_str().to_owned(), effect.id.as_str().to_owned()))
+                .map(|effect| effect.id.as_str());
+            console
+                .chain(inserts)
+                .map(|effect| (track.id.as_str().to_owned(), effect.to_owned()))
         })
         .collect();
     assert_installed();
     let mark = current_thread_counters();
     let mut effects =
         prepare_native_session_effects(&session, &registry, effect_caps(spans)).expect("effects");
-    let producers = console.then(|| {
-        attach_effect_console(&mut effects, NonZeroUsize::new(8).expect("depth")).expect("console")
+    let producers = live_controls.then(|| {
+        attach_effect_live_controls(&mut effects, NonZeroUsize::new(8).expect("depth"))
+            .expect("live controls")
     });
     let builtins = prepare_session_builtins(&session, &[], builtin_caps()).expect("builtins");
     let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
@@ -288,22 +294,22 @@ fn render_blocks(plan: &mut PreparedRenderPlan, pcm: &mut [f32], first: u64, blo
     }
 }
 
-/// Gate 1: a console-free session bypass binds and renders at `u32::MAX` automation spans, per node
-/// and banked.
+/// Gate 1: a live-control-free session bypass binds and renders at `u32::MAX` automation spans, per
+/// node and banked.
 ///
 /// A channel-less lane stages nothing, so neither owner holds a window: before #1100 the per-node
-/// `ConsoleEffect` sized one from the automation capacity whatever the lane, and bind aborted on
-/// `memory allocation of 171798691800 bytes failed` (`u32::MAX` spans of 40 bytes). Its estimate
+/// `LiveControlEffect` sized one from the automation capacity whatever the lane, and bind aborted
+/// on `memory allocation of 171798691800 bytes failed` (`u32::MAX` spans of 40 bytes). Its estimate
 /// charges no window either, so it stays far below the 172 GB the window would have cost.
 ///
 /// A host with that much memory does not abort, so the test also asserts, from the audited
 /// allocator, that the bound plan retains less than 1 GiB.
 ///
-/// Red mutations: size `ConsoleEffect::new`'s window by the automation capacity whatever the lane
-/// (the per-node leg); size `ConsoleEffectBankStage::new`'s windows likewise (the banked leg,
-/// `baa03f09`'s twin). Each aborts bind or retains 172 GB.
+/// Red mutations: size `LiveControlEffect::new`'s window by the automation capacity whatever the
+/// lane (the per-node leg); size `LiveControlEffectBankStage::new`'s windows likewise (the banked
+/// leg, `baa03f09`'s twin). Each aborts bind or retains 172 GB.
 #[test]
-fn a_console_free_bypass_binds_at_any_automation_capacity() {
+fn a_live_control_free_bypass_binds_at_any_automation_capacity() {
     let lanes = host_lanes();
     for (label, tracks, eq_mask) in [
         ("one per-node bypassed EQ", 1, 1_u64),
@@ -343,24 +349,24 @@ fn a_console_free_bypass_binds_at_any_automation_capacity() {
     }
 }
 
-/// Gate 2: the graph estimate charges at least the bytes a session bypass, or a live console,
-/// makes the bound plan retain.
+/// Gate 2: the graph estimate charges at least the bytes a session bypass, or live controls,
+/// make the bound plan retain.
 ///
-/// Each case is a pair of plans that differ only in the bypass or the console, and compares the
-/// two differences: the estimate's (`incremental_plan_bytes`) against the bytes the audited
+/// Each case is a pair of plans that differ only in the bypass or the live controls, and compares
+/// the two differences: the estimate's (`incremental_plan_bytes`) against the bytes the audited
 /// allocator saw the preparation leave live. The allocator is the independent witness, so an
 /// owner the estimate forgets, or one that outgrows its charge, is red here without a byte literal.
 ///
-/// * One per-node bypassed EQ: its `ConsoleEffect` box, its lane and its shunt's dry blocks. P1
+/// * One per-node bypassed EQ: its `LiveControlEffect` box, its lane and its shunt's dry blocks. P1
 ///   retained 6,186 bytes here against a 72-byte charge (#1087 verdict, M1).
-/// * One bypassed lane of a limiter bank: the console stage's growth over the plain stage and the
-///   shunt over the whole AoSoA block, including the limiter's 486-sample line on every lane.
-/// * A live console, per node and banked: the same owners plus their staging windows of 128 spans.
+/// * One bypassed lane of a limiter bank: the live-control stage's growth over the plain stage and
+///   the shunt over the whole AoSoA block, including the limiter's 486-sample line on every lane.
+/// * Live controls, per node and banked: the same owners plus their staging windows of 128 spans.
 ///
 /// Red mutations: drop the shunt from `effect_control_resource` (every case); drop the window
 /// (the live cases); drop the per-node owner's box (the per-node cases).
 #[test]
-fn a_bypass_or_a_console_is_charged_at_least_what_it_retains() {
+fn a_bypass_or_live_controls_are_charged_at_least_what_they_retain() {
     const SPANS: u32 = 128;
     let lanes = host_lanes();
     let cases: [(&str, usize, [u64; 3], bool); 4] = [
@@ -371,10 +377,10 @@ fn a_bypass_or_a_console_is_charged_at_least_what_it_retains() {
             [0, 0, 1],
             false,
         ),
-        ("a per-node live console", 1, [0, 0, 0], true),
-        ("a banked live console", lanes, [0, 0, 0], true),
+        ("per-node live controls", 1, [0, 0, 0], true),
+        ("banked live controls", lanes, [0, 0, 0], true),
     ];
-    for (label, tracks, masks, console_attached) in cases {
+    for (label, tracks, masks, live_controls_attached) in cases {
         let plain = bind(
             &console(tracks, [0, 0, 0]),
             Backend::current(),
@@ -385,7 +391,7 @@ fn a_bypass_or_a_console_is_charged_at_least_what_it_retains() {
             &console(tracks, masks),
             Backend::current(),
             SPANS,
-            console_attached,
+            live_controls_attached,
         );
         if tracks == 1 {
             assert_eq!(owned.shape.banks, 0, "{label}: one track banks nothing");
@@ -393,7 +399,7 @@ fn a_bypass_or_a_console_is_charged_at_least_what_it_retains() {
             assert_eq!(owned.shape.banks, 3, "{label}: one bank per slot");
             assert_eq!(plain.shape.banks, 3, "{label}: one bank per slot");
         }
-        if !console_attached {
+        if !live_controls_attached {
             let bypassed = owned.shape.bypassed_per_node + owned.shape.banks_with_a_bypassed_lane;
             assert_eq!(bypassed, 1, "{label}: exactly one bypassed owner");
         }

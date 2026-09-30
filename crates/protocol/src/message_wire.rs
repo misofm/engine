@@ -195,14 +195,15 @@ pub enum ParameterValueKind {
 #[repr(u8)]
 #[allow(missing_docs)]
 pub enum ParameterRack {
-    Simd1 = 1,
-    Dynamic = 2,
-    Simd2 = 3,
-    /// The strip's own builtin section (#178, ruled by #210's D2). Appended, so no existing wire
-    /// code moves; `RackName::wire()` derives the same `4` from the declaration order of the
-    /// session enum, and `parameter_enum_wire_mappings_are_exhaustive_and_roundtrip` is what holds
-    /// the two hand-written tables to each other.
+    /// A track's inserts (decision 12). It kept the retired `dynamic` rack's code `2`; codes `1`
+    /// (`simd1`) and `3` (`simd2`) are retired, refused and never reallocated.
+    Inserts = 2,
+    /// The strip's own builtin section (#178, ruled by #210's D2). Its code `4` is unmoved.
+    /// `RackName::wire()` spells the same explicit code table, and
+    /// `parameter_enum_wire_mappings_are_exhaustive_and_roundtrip` holds the two to each other.
     Builtins = 4,
+    /// A session console slot (decision 12), appended.
+    Console = 5,
 }
 /// Fixed B2a parameter channel registry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -248,19 +249,17 @@ pub enum ParameterAutomationRate {
 impl ParameterRack {
     pub(crate) const fn from_session(value: session::RackName) -> Self {
         match value {
-            session::RackName::Simd1 => Self::Simd1,
-            session::RackName::Dynamic => Self::Dynamic,
-            session::RackName::Simd2 => Self::Simd2,
+            session::RackName::Inserts => Self::Inserts,
             session::RackName::Builtins => Self::Builtins,
+            session::RackName::Console => Self::Console,
         }
     }
 
     pub(crate) const fn into_session(self) -> session::RackName {
         match self {
-            Self::Simd1 => session::RackName::Simd1,
-            Self::Dynamic => session::RackName::Dynamic,
-            Self::Simd2 => session::RackName::Simd2,
+            Self::Inserts => session::RackName::Inserts,
             Self::Builtins => session::RackName::Builtins,
+            Self::Console => session::RackName::Console,
         }
     }
 }

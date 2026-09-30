@@ -272,7 +272,7 @@ const builtDocument = imported["."].session({ id: "tarball.boot", sampleRateHz: 
   .output("main")
   .route({
     id: "main",
-    source: { kind: "track", trackId: "track", tap: "post_matrix" },
+    source: { kind: "track", trackId: "track", tap: "post_pan" },
     destination: { kind: "output_input", outputId: "main" },
   })
   .toJson();
@@ -281,27 +281,27 @@ const sibling = await imported["./headless"].createOfflineEngine(
   builtDocument.replace('"session_id": "tarball.boot"', '"session_id": "tarball.sibling"'),
 );
 try {
-  const controls = engine.console();
+  const controls = engine.liveControls();
   await assert.rejects(controls.submit(controls.edit.track("track").faderDb(-6)), error =>
-    error.name === "MisoUsageError" && error.message.includes("no console attached") &&
-    error.message.includes("console.commandQueueRecords"));
+    error.name === "MisoUsageError" && error.message.includes("no live controls attached") &&
+    error.message.includes("liveControls.commandQueueRecords"));
   const browser = await imported["./browser"].createEngine({
     document: builtDocument,
     scratchBoot: async () => engine.shape(),
     createContext: () => ({ sampleRate: 48000, state: "running",
       audioWorklet: { async addModule() {} }, async close() {} }),
     createHost: async () => ({
-      async sessionMap() { assert.fail("no-console access must not request sessionMap"); },
-      async command() { assert.fail("no-console access must not send commands"); },
+      async sessionMap() { assert.fail("no-live-control access must not request sessionMap"); },
+      async command() { assert.fail("no-live-control access must not send commands"); },
       async dispose() {},
     }),
   });
   try {
     let pending;
-    assert.doesNotThrow(() => { pending = browser.console(); });
+    assert.doesNotThrow(() => { pending = browser.liveControls(); });
     assert.ok(pending instanceof Promise);
     await assert.rejects(pending, error => error.name === "MisoUsageError" &&
-      error.message.includes("policy.console.commandQueueRecords"));
+      error.message.includes("policy.liveControls.commandQueueRecords"));
   } finally { await browser.close(); }
   assert.equal(engine.asset.sha256?.length, 64);
   assert.equal(engine.asset, sibling.asset, "default engines share one verified compilation");
@@ -326,7 +326,7 @@ const cliRequest = JSON.stringify({
   outputs: ["main"],
   routes: [{
     id: "main",
-    source: { kind: "track", trackId: "track", tap: "post_matrix" },
+    source: { kind: "track", trackId: "track", tap: "post_pan" },
     destination: { kind: "output_input", outputId: "main" },
   }],
 });
@@ -361,7 +361,7 @@ const expectedCliDocument = imported["."].session({ id: "tarball.cli", sampleRat
   .output("main")
   .route({
     id: "main",
-    source: { kind: "track", trackId: "track", tap: "post_matrix" },
+    source: { kind: "track", trackId: "track", tap: "post_pan" },
     destination: { kind: "output_input", outputId: "main" },
   })
   .toJson();
@@ -412,16 +412,17 @@ const causalDocument = (withBypassedCompressor) => imported["."].session({
   .source("stem", {
     channels: 2, bitDepth: "32f", frames: 128, content: `blake3:${"0".repeat(64)}`,
   })
+  .console({
+    preInsert: withBypassedCompressor ? [{ slot: "comp", effectId: "miso.compressor" }] : [],
+  })
   .track("track", {
     source: "stem",
-    ...(withBypassedCompressor
-      ? { simd1: [imported["."].effect("miso.compressor", {}, { bypass: true })] }
-      : {}),
+    ...(withBypassedCompressor ? { console: [{ slot: "comp", bypass: true }] } : {}),
   })
   .output("main")
   .route({
     id: "main",
-    source: { kind: "track", trackId: "track", tap: "post_matrix" },
+    source: { kind: "track", trackId: "track", tap: "post_pan" },
     destination: { kind: "output_input", outputId: "main" },
   })
   .toJson();
@@ -588,7 +589,7 @@ document.querySelector('#meter').onclick = async () => {
       stop = undefined;
       window.resolveMeter = resolve;
     });
-    engine = await createEngine({ document: meterDocument, policy: { console: { commandQueueRecords: 8, meterBlocks: 1 } } });
+    engine = await createEngine({ document: meterDocument, policy: { liveControls: { commandQueueRecords: 8, meterBlocks: 1 } } });
     stop = await engine.subscribeMeters(update => {
       if (window.meterCandidate) return;
       const track = update.tracks.get('track');

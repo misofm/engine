@@ -71,8 +71,8 @@ const OPTION_FIELDS = [
   "workletModuleUrl",
 ];
 const BOOT_OPTION_FIELDS = [
-  "sourceRingFrames", "maximumMemoryBytes", "consoleCommandQueueRecords", "consoleMeterBlocks",
-  "consoleObservationTaps", "consoleMasterTrackPlusOne", "spectrumHopFrames", "spectrum",
+  "sourceRingFrames", "maximumMemoryBytes", "liveControlCommandQueueRecords", "liveControlMeterBlocks",
+  "liveControlObservationTaps", "liveControlMasterTrackPlusOne", "spectrumHopFrames", "spectrum",
   "spectrumCollection",
 ];
 const NEW_NO_SPECTRUM_BOOT_OPTION_FIELDS = BOOT_OPTION_FIELDS.slice(0, -2);
@@ -94,7 +94,7 @@ const SEEK_FIELDS = ["sourceId", "generation", "sourceFrame"];
 // Issue #137 D1: the frozen 48-byte little-endian command record.
 const COMMAND_RECORD_BYTES = 48;
 const MAXIMUM_COMMAND_RECORDS = 256;
-// Issue #143: the largest `consoleObservationTaps` the frozen configuration accepts.
+// Issue #143: the largest `liveControlObservationTaps` the frozen configuration accepts.
 const MAXIMUM_OBSERVATION_TAPS = 16;
 // Issue #143: the two observation command kinds, named here so `observe()` never writes a literal.
 // Not `MISO_`-prefixed: `scripts/check-env-vocabulary.sh` reserves that prefix for the engine's
@@ -136,7 +136,7 @@ const LIVE_RESPONSE_MAXIMUM_BYTES = 1 << 20;
 const SPECTRUM_BOOT_FIELDS = ["target", "targetId", "channels", "maximumCaptureBytes"];
 const SPECTRUM_COLLECTION_ENTRY_FIELDS = ["target", "targetId", "channels"];
 const SPECTRUM_COLLECTION_FIELDS = ["entries", "maximumCaptureBytes"];
-const SPECTRUM_TARGETS = new Set(["trackPostInputBuiltins", "trackPostMatrix", "output"]);
+const SPECTRUM_TARGETS = new Set(["trackPostInput", "trackPostPan", "output"]);
 const SPECTRUM_CHANNELS = new Set(["left", "right", "both"]);
 const SPECTRUM_MAXIMUM_ID_BYTES = 127;
 const SPECTRUM_MAXIMUM_BYTES = 1 << 20;
@@ -157,10 +157,18 @@ const SPECTRUM_STREAM_READ_REPLY_FIELDS = [
   "tag", "requestId", "operation", "result", "byteLength", "buffer", "metadata",
 ];
 
+// Decision 12 (#1096): an effect is addressed as `1` inserts, by its index in the track's inserts,
+// or `3` console, by the slot's index in the session's slot order (`pre_insert`, then
+// `post_insert`). The retired `simd1` (`0`) and `simd2` (`2`) codes are refused and never
+// reallocated.
+const RACK_INSERTS = 1;
+const RACK_CONSOLE = 3;
+const effectRack = (rack) => rack === RACK_INSERTS || rack === RACK_CONSOLE;
+
 function validSubscription(subscription) {
   return hasExactFields(subscription, SUBSCRIPTION_FIELDS)
     && validU32(subscription.trackIndex)
-    && Number.isSafeInteger(subscription.rack) && subscription.rack >= 0 && subscription.rack <= 2
+    && effectRack(subscription.rack)
     && validU32(subscription.effectIndex)
     && validU32(subscription.tapId) && subscription.tapId > 0
     && validU32(subscription.windowBlocks)
@@ -170,7 +178,7 @@ function validSubscription(subscription) {
 function validObservationAddress(address) {
   return hasExactFields(address, OBSERVATION_ADDRESS_FIELDS)
     && validU32(address.trackIndex)
-    && validU32(address.rack) && address.rack <= 2
+    && effectRack(address.rack)
     && validU32(address.effectIndex)
     && validU32(address.tapId) && address.tapId > 0
     && validU32(address.channels) && OBSERVATION_CHANNELS.has(address.channels);
@@ -179,7 +187,7 @@ function validObservationAddress(address) {
 function validObservationMapBinding(binding) {
   return hasExactFields(binding, OBSERVATION_MAP_FIELDS)
     && validU32(binding.trackIndex)
-    && validU32(binding.rack) && binding.rack <= 2
+    && effectRack(binding.rack)
     && validU32(binding.effectIndex)
     && typeof binding.effectSlotId === "string" && binding.effectSlotId.length > 0
     && typeof binding.nativeEffectId === "string" && binding.nativeEffectId.length > 0
@@ -190,7 +198,7 @@ function validObservationMapBinding(binding) {
 function validObservationRow(row) {
   return hasExactFields(row, OBSERVATION_ROW_FIELDS)
     && validU32(row.trackIndex)
-    && validU32(row.rack) && row.rack <= 2
+    && effectRack(row.rack)
     && validU32(row.effectIndex)
     && validU32(row.tapId) && row.tapId > 0
     && validU32(row.channels) && OBSERVATION_CHANNELS.has(row.channels)
@@ -252,7 +260,7 @@ const NOT_APPLICABLE = 255;
 function validCommand(command) {
   return hasExactFields(command, COMMAND_FIELDS)
     && COMMAND_KINDS.has(command.kind)
-    && (validU32(command.rack) && (command.rack <= 2 || command.rack === NOT_APPLICABLE))
+    && (effectRack(command.rack) || command.rack === NOT_APPLICABLE)
     && (validU32(command.channel) && (command.channel <= 2 || command.channel === NOT_APPLICABLE))
     && validU32(command.trackIndex) && validU32(command.effectIndex)
     && validU32(command.parameterId) && validU32(command.smoothingSamples)
@@ -260,7 +268,7 @@ function validCommand(command) {
     && command.values.every((value) => typeof value === "number" && Number.isFinite(value));
 }
 
-/// Encode one live-console submission into the existing 48-byte semantic wire record.
+/// Encode one live-control submission into the existing 48-byte semantic wire record.
 function encodeCommands(commands) {
   const records = new Uint8Array(commands.length * COMMAND_RECORD_BYTES);
   const view = new DataView(records.buffer);
@@ -482,10 +490,10 @@ function snapshotBootOptions(value) {
   const snapshot = {
     sourceRingFrames: captured.descriptors.get("sourceRingFrames").value,
     maximumMemoryBytes: captured.descriptors.get("maximumMemoryBytes").value,
-    consoleCommandQueueRecords: captured.descriptors.get("consoleCommandQueueRecords").value,
-    consoleMeterBlocks: captured.descriptors.get("consoleMeterBlocks").value,
-    consoleObservationTaps: captured.descriptors.get("consoleObservationTaps").value,
-    consoleMasterTrackPlusOne: captured.descriptors.get("consoleMasterTrackPlusOne").value,
+    liveControlCommandQueueRecords: captured.descriptors.get("liveControlCommandQueueRecords").value,
+    liveControlMeterBlocks: captured.descriptors.get("liveControlMeterBlocks").value,
+    liveControlObservationTaps: captured.descriptors.get("liveControlObservationTaps").value,
+    liveControlMasterTrackPlusOne: captured.descriptors.get("liveControlMasterTrackPlusOne").value,
     spectrumHopFrames: hopDescriptor === undefined ? 0 : hopDescriptor.value,
     spectrum,
     spectrumCollection,
@@ -593,16 +601,16 @@ function validBootOptions(options) {
     && SPECTRUM_HOP_FRAMES.has(options.spectrumHopFrames)
     && validU32(options.sourceRingFrames)
     && validU64(options.maximumMemoryBytes)
-    && validU64(options.consoleCommandQueueRecords)
-    && options.consoleCommandQueueRecords <= BigInt(MAXIMUM_COMMAND_RECORDS)
-    && validU64(options.consoleMeterBlocks)
-    && options.consoleMeterBlocks <= 0xffffffffn
-    && validU64(options.consoleObservationTaps)
-    && options.consoleObservationTaps <= BigInt(MAXIMUM_OBSERVATION_TAPS)
-    && (options.consoleObservationTaps === 0n || options.consoleCommandQueueRecords !== 0n)
-    && validU64(options.consoleMasterTrackPlusOne)
-    && options.consoleMasterTrackPlusOne <= 0xffffffffn
-    && (options.consoleMasterTrackPlusOne === 0n || options.consoleObservationTaps !== 0n)
+    && validU64(options.liveControlCommandQueueRecords)
+    && options.liveControlCommandQueueRecords <= BigInt(MAXIMUM_COMMAND_RECORDS)
+    && validU64(options.liveControlMeterBlocks)
+    && options.liveControlMeterBlocks <= 0xffffffffn
+    && validU64(options.liveControlObservationTaps)
+    && options.liveControlObservationTaps <= BigInt(MAXIMUM_OBSERVATION_TAPS)
+    && (options.liveControlObservationTaps === 0n || options.liveControlCommandQueueRecords !== 0n)
+    && validU64(options.liveControlMasterTrackPlusOne)
+    && options.liveControlMasterTrackPlusOne <= 0xffffffffn
+    && (options.liveControlMasterTrackPlusOne === 0n || options.liveControlObservationTaps !== 0n)
     && validSpectrumBoot(options.spectrum ?? null)
     && validSpectrumCollectionBoot(options.spectrumCollection ?? null)
     && (options.spectrum === null || options.spectrum === undefined
@@ -711,7 +719,7 @@ class MisoAudioWorkletHost {
   #inFlightSpectrum = 0;
   #inFlightLease = new Set();
   #commandQueueRecords;
-  #consoleMeterBlocks;
+  #liveControlMeterBlocks;
   /// Issue #143: the host's own record of the taps it armed, keyed by the four addressing numbers.
   /// It is what `trackGrDb`'s positional array structurally cannot express.
   #observations = new Map();
@@ -737,7 +745,7 @@ class MisoAudioWorkletHost {
     memoryBytes,
     ringBlocks,
     commandQueueRecords,
-    consoleMeterBlocks,
+    liveControlMeterBlocks,
     preparedModule,
     preparedAbiLayout,
   ) {
@@ -752,7 +760,7 @@ class MisoAudioWorkletHost {
     this.#quantumFrames = quantumFrames;
     this.#ringBlocks = ringBlocks;
     this.#commandQueueRecords = commandQueueRecords;
-    this.#consoleMeterBlocks = consoleMeterBlocks;
+    this.#liveControlMeterBlocks = liveControlMeterBlocks;
     // The prepared path is private and dormant until the production cutover. Keeping the
     // verified module here lets that path instantiate one main-realm preparation workspace lazily;
     // ordinary command() therefore has exactly its existing transport and no speculative ABI load.
@@ -1263,7 +1271,7 @@ class MisoAudioWorkletHost {
     return this.#request({ tag: "miso.status.v1" }, [], "status");
   }
 
-  /// Submit one live-console command batch (issue #137 D1).
+  /// Submit one live-control command batch (issue #137 D1).
   ///
   /// The whole batch is one transaction: the acknowledgement's `result` is `RESULT_OK` only when
   /// every record was admitted, and `appliedAtSample` is the exact absolute sample the batch takes
@@ -1327,7 +1335,7 @@ class MisoAudioWorkletHost {
             // The frame carries one gain-reduction slot per track, so the slot is the track.
             frameSlot: subscription.trackIndex,
             windowBlocks: subscription.windowBlocks === 0
-              ? Number(this.#consoleMeterBlocks)
+              ? Number(this.#liveControlMeterBlocks)
               : subscription.windowBlocks,
           });
         } else {
@@ -1696,10 +1704,10 @@ export async function createMisoAudioWorkletHost(options) {
       (bootOptions.sourceRingFrames === 0
         ? Math.ceil(sampleRateHz / 10 / quantumFrames) + 2
         : bootOptions.sourceRingFrames / quantumFrames),
-      Number(bootOptions.consoleCommandQueueRecords) || 1,
+      Number(bootOptions.liveControlCommandQueueRecords) || 1,
       // Issue #143: the plan's default observation window is the meter window; a subscription that
       // names `windowBlocks: 0` gets it, and the returned map says which one it got.
-      Number(bootOptions.consoleMeterBlocks),
+      Number(bootOptions.liveControlMeterBlocks),
       selected.module,
       preparedAbiLayout,
     );

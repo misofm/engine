@@ -1,5 +1,5 @@
 use super::*;
-use crate::btlv::{WIRE_BOOL, WIRE_F32, WIRE_U8, WIRE_U32, WIRE_UTF8};
+use crate::btlv::{WIRE_BOOL, WIRE_F32, WIRE_MESSAGE, WIRE_U8, WIRE_U32, WIRE_UTF8};
 use session::{
     LinkMode, ParameterChannel, ParameterUnit, RenderMode, SampleFormat, SendTap, Sidechain, Track,
     parse_session_json,
@@ -174,7 +174,7 @@ fn all_opcode_edits_64() -> Vec<SessionEdit> {
     .expect("fixture");
     let source = session.sources[0].clone();
     let track = session.tracks[0].clone();
-    let effect = track.dynamic.effects[0].clone();
+    let effect = track.inserts.effects[0].clone();
     let route = session.routes[0].clone();
     let automation = session.automation[0].clone();
     let track_id = track.id.clone();
@@ -226,64 +226,64 @@ fn all_opcode_edits_64() -> Vec<SessionEdit> {
         },
         SessionEdit::SetTrackRack {
             track_id: track_id.clone(),
-            rack_name: RackName::Dynamic,
-            rack: track.dynamic.clone(),
+            rack_name: RackName::Inserts,
+            rack: track.inserts.clone(),
         },
         SessionEdit::PutTrackEffect {
             track_id: track_id.clone(),
-            rack_name: RackName::Dynamic,
+            rack_name: RackName::Inserts,
             final_position: 0,
             effect: effect.clone(),
         },
         SessionEdit::RemoveTrackEffect {
             track_id: track_id.clone(),
-            rack_name: RackName::Dynamic,
+            rack_name: RackName::Inserts,
             effect_id: effect_id.clone(),
         },
         SessionEdit::SetTrackEffectOrder {
             track_id: track_id.clone(),
-            rack_name: RackName::Dynamic,
+            rack_name: RackName::Inserts,
             effect_ids: vec![effect_id.clone()],
         },
         SessionEdit::SetEffectIdentity {
             track_id: track_id.clone(),
-            rack_name: RackName::Dynamic,
+            rack_name: RackName::Inserts,
             effect_id: effect_id.clone(),
             identity: effect.identity.clone(),
         },
         SessionEdit::SetEffectQuality {
             track_id: track_id.clone(),
-            rack_name: RackName::Dynamic,
+            rack_name: RackName::Inserts,
             effect_id: effect_id.clone(),
             quality: effect.quality,
         },
         SessionEdit::SetEffectBypass {
             track_id: track_id.clone(),
-            rack_name: RackName::Dynamic,
+            rack_name: RackName::Inserts,
             effect_id: effect_id.clone(),
             bypass: effect.bypass,
         },
         SessionEdit::SetEffectLinkMode {
             track_id: track_id.clone(),
-            rack_name: RackName::Dynamic,
+            rack_name: RackName::Inserts,
             effect_id: effect_id.clone(),
             link_mode: effect.link_mode,
         },
         SessionEdit::SetEffectSidechain {
             track_id: track_id.clone(),
-            rack_name: RackName::Dynamic,
+            rack_name: RackName::Inserts,
             effect_id: effect_id.clone(),
             sidechain: effect.sidechain.clone(),
         },
         SessionEdit::UpsertEffectParam {
             track_id: track_id.clone(),
-            rack_name: RackName::Dynamic,
+            rack_name: RackName::Inserts,
             effect_id: effect_id.clone(),
             param: effect.params[0].clone(),
         },
         SessionEdit::RemoveEffectParam {
             track_id: track_id.clone(),
-            rack_name: RackName::Dynamic,
+            rack_name: RackName::Inserts,
             effect_id: effect_id.clone(),
             parameter_id: effect.params[0].parameter_id,
             channel: effect.params[0].channel,
@@ -457,7 +457,7 @@ fn direct_full_schema_encoder_is_byte_identical_in_caller_storage() {
 fn transaction_repeated_fields_match_schema_derived_count() {
     let edits = [SessionEdit::SetTrackEffectOrder {
         track_id: id("track.repeated"),
-        rack_name: RackName::Dynamic,
+        rack_name: RackName::Inserts,
         effect_ids: vec![id("effect.one"), id("effect.two"), id("effect.three")],
     }];
     let transaction = SessionTransactionFrame {
@@ -819,9 +819,20 @@ fn every_track_effect_opcode_and_nested_variant_round_trips_canonically() {
             port_id: id("key"),
         }),
     );
-    full_track.simd1.effects = vec![native.clone(), cid.clone()];
-    full_track.dynamic.effects = vec![cid.clone(), high.clone()];
-    full_track.simd2.effects = vec![high.clone(), native.clone()];
+    // Decision 12's track: two console entries (field 11, repeated) and the inserts rack.
+    full_track.console = vec![
+        session::ConsoleEntry {
+            slot: id("desk-eq"),
+            bypass: true,
+            params: parameters.clone(),
+        },
+        session::ConsoleEntry {
+            slot: id("desk-limit"),
+            bypass: false,
+            params: Vec::new(),
+        },
+    ];
+    full_track.inserts.effects = vec![cid.clone(), high.clone()];
     let track_id = full_track.id.clone();
     let source_id = full_track.source_id.clone();
     let mut edits = vec![
@@ -843,9 +854,14 @@ fn every_track_effect_opcode_and_nested_variant_round_trips_canonically() {
         },
     ];
     for (rack_name, rack) in [
-        (RackName::Simd1, full_track.simd1.clone()),
-        (RackName::Dynamic, full_track.dynamic.clone()),
-        (RackName::Simd2, full_track.simd2.clone()),
+        (RackName::Inserts, full_track.inserts.clone()),
+        // Codec coverage of the appended rack code; the store refuses it until #1094 (S1b).
+        (
+            RackName::Console,
+            Rack {
+                effects: vec![native.clone()],
+            },
+        ),
     ] {
         edits.push(SessionEdit::SetTrackRack {
             track_id: track_id.clone(),
@@ -856,89 +872,89 @@ fn every_track_effect_opcode_and_nested_variant_round_trips_canonically() {
     edits.extend([
         SessionEdit::PutTrackEffect {
             track_id: track_id.clone(),
-            rack_name: RackName::Dynamic,
+            rack_name: RackName::Inserts,
             final_position: 1,
             effect: native.clone(),
         },
         SessionEdit::RemoveTrackEffect {
             track_id: track_id.clone(),
-            rack_name: RackName::Dynamic,
+            rack_name: RackName::Inserts,
             effect_id: cid.id.clone(),
         },
         SessionEdit::SetTrackEffectOrder {
             track_id: track_id.clone(),
-            rack_name: RackName::Dynamic,
+            rack_name: RackName::Inserts,
             effect_ids: vec![cid.id.clone(), high.id.clone()],
         },
         SessionEdit::SetEffectIdentity {
             track_id: track_id.clone(),
-            rack_name: RackName::Dynamic,
+            rack_name: RackName::Inserts,
             effect_id: native.id.clone(),
             identity: native.identity.clone(),
         },
         SessionEdit::SetEffectIdentity {
             track_id: track_id.clone(),
-            rack_name: RackName::Dynamic,
+            rack_name: RackName::Inserts,
             effect_id: cid.id.clone(),
             identity: cid.identity.clone(),
         },
         SessionEdit::SetEffectQuality {
             track_id: track_id.clone(),
-            rack_name: RackName::Simd1,
+            rack_name: RackName::Console,
             effect_id: native.id.clone(),
             quality: EffectQuality::Draft,
         },
         SessionEdit::SetEffectQuality {
             track_id: track_id.clone(),
-            rack_name: RackName::Dynamic,
+            rack_name: RackName::Inserts,
             effect_id: cid.id.clone(),
             quality: EffectQuality::Normal,
         },
         SessionEdit::SetEffectQuality {
             track_id: track_id.clone(),
-            rack_name: RackName::Simd2,
+            rack_name: RackName::Builtins,
             effect_id: high.id.clone(),
             quality: EffectQuality::High,
         },
         SessionEdit::SetEffectBypass {
             track_id: track_id.clone(),
-            rack_name: RackName::Dynamic,
+            rack_name: RackName::Inserts,
             effect_id: native.id.clone(),
             bypass: true,
         },
         SessionEdit::SetEffectLinkMode {
             track_id: track_id.clone(),
-            rack_name: RackName::Simd1,
+            rack_name: RackName::Console,
             effect_id: native.id.clone(),
             link_mode: LinkMode::DualMono,
         },
         SessionEdit::SetEffectLinkMode {
             track_id: track_id.clone(),
-            rack_name: RackName::Dynamic,
+            rack_name: RackName::Inserts,
             effect_id: cid.id.clone(),
             link_mode: LinkMode::Maximum,
         },
         SessionEdit::SetEffectLinkMode {
             track_id: track_id.clone(),
-            rack_name: RackName::Simd2,
+            rack_name: RackName::Builtins,
             effect_id: high.id.clone(),
             link_mode: LinkMode::Average,
         },
         SessionEdit::SetEffectSidechain {
             track_id: track_id.clone(),
-            rack_name: RackName::Dynamic,
+            rack_name: RackName::Inserts,
             effect_id: native.id.clone(),
             sidechain: SidechainDeclaration::None,
         },
         SessionEdit::SetEffectSidechain {
             track_id: track_id.clone(),
-            rack_name: RackName::Dynamic,
+            rack_name: RackName::Inserts,
             effect_id: cid.id.clone(),
             sidechain: cid.sidechain.clone(),
         },
         SessionEdit::SetEffectSidechain {
             track_id: track_id.clone(),
-            rack_name: RackName::Simd2,
+            rack_name: RackName::Builtins,
             effect_id: high.id.clone(),
             sidechain: high.sidechain.clone(),
         },
@@ -946,7 +962,7 @@ fn every_track_effect_opcode_and_nested_variant_round_trips_canonically() {
     for parameter in parameters {
         edits.push(SessionEdit::UpsertEffectParam {
             track_id: track_id.clone(),
-            rack_name: RackName::Dynamic,
+            rack_name: RackName::Inserts,
             effect_id: native.id.clone(),
             param: parameter,
         });
@@ -954,7 +970,7 @@ fn every_track_effect_opcode_and_nested_variant_round_trips_canonically() {
     edits.extend([
         SessionEdit::RemoveEffectParam {
             track_id: track_id.clone(),
-            rack_name: RackName::Dynamic,
+            rack_name: RackName::Inserts,
             effect_id: native.id.clone(),
             parameter_id: 11,
             channel: ParameterChannel::Left,
@@ -994,12 +1010,176 @@ fn every_track_effect_opcode_and_nested_variant_round_trips_canonically() {
     };
     assert_eq!(
         decoded_track
-            .dynamic
+            .inserts
             .effects
             .iter()
             .map(|effect| effect.id.as_str())
             .collect::<Vec<_>>(),
         ["cid-fx", "high-fx"]
+    );
+    assert_eq!(decoded_track.console, full_track.console);
+}
+
+fn nested_bytes(write: &dyn Fn(&mut dyn Sink) -> Result<(), EncodeError>) -> Vec<u8> {
+    let limits = ProtocolCodec::default().limits();
+    let mut count = CountSink::new(limits);
+    write(&mut count).expect("size nested message");
+    let mut encoded = vec![0; count.written()];
+    let mut writer = SliceSink::new(&mut encoded, limits);
+    write(&mut writer).expect("encode nested message");
+    encoded
+}
+
+/// Decision 12 retired track fields 6 (`simd1`) and 8 (`simd2`) in place. A peer that still sends
+/// one is refused in either flag form, never read as a console section or as the inserts rack, and
+/// never skipped as an unknown optional field would be (#1094). The same message without it
+/// decodes, and a never-allocated optional field (12) is still skipped, so the refusal is about
+/// the retired IDs and nothing else.
+///
+/// Red if `parse_track` reads the track with the plain `schema_spec` (the optional retired field
+/// is then skipped and the track decodes).
+#[test]
+fn retired_track_rack_fields_are_refused() {
+    let session = parse_session_json(include_str!(
+        "../../../../fixtures/session/v1/canonical.json"
+    ))
+    .expect("fixture");
+    let track = &session.tracks[0];
+    let builtins = nested_bytes(&|sink| tx_builtins(sink, &track.builtins));
+    let rack = nested_bytes(&|sink| tx_rack(sink, &track.inserts));
+    let fader = nested_bytes(&|sink| tx_fader(sink, &track.fader));
+    let pan = nested_bytes(&|sink| tx_matrix_or_pan(sink, &track.matrix_or_pan));
+    let message = |extra: Option<(u16, bool)>| {
+        let mut fields = vec![
+            (1, WIRE_UTF8, true, track.id.as_str().as_bytes().to_vec()),
+            (
+                2,
+                WIRE_UTF8,
+                true,
+                track.source_id.as_str().as_bytes().to_vec(),
+            ),
+            (3, WIRE_U8, true, vec![track.left_source_channel]),
+            (4, WIRE_U8, true, vec![track.right_source_channel]),
+            (5, WIRE_MESSAGE, true, builtins.clone()),
+            (7, WIRE_MESSAGE, true, rack.clone()),
+            (9, WIRE_MESSAGE, true, fader.clone()),
+            (10, WIRE_MESSAGE, true, pan.clone()),
+        ];
+        if let Some((field, mandatory)) = extra {
+            fields.push((field, WIRE_MESSAGE, mandatory, rack.clone()));
+            fields.sort_by_key(|(id, ..)| *id);
+        }
+        raw_message(fields)
+    };
+    let parse = |extra| parse_track(Message::nested(&message(extra)).expect("nested track"));
+    assert_eq!(parse(None), Ok(track.clone()));
+    assert_eq!(
+        parse(Some((12, false))),
+        Ok(track.clone()),
+        "an unallocated optional field is still skipped"
+    );
+    for retired in [6, 8] {
+        assert_eq!(
+            parse(Some((retired, true))),
+            Err(DecodeError::UnknownRequiredField),
+            "mandatory retired track field {retired}"
+        );
+        assert_eq!(
+            parse(Some((retired, false))),
+            Err(DecodeError::InvalidTlv),
+            "optional retired track field {retired}"
+        );
+    }
+}
+
+/// Decision 12's console declaration and track entries (#1094): `SetConsole` (`0x0007`) and
+/// `SetTrackConsole` (`0x0211`) round-trip canonically -- both sections, empty sections, a
+/// third-party identity (the codec carries the model; validation refuses it), every quality and
+/// link mode, entries with and without params -- and a slot carries no sidechain field.
+///
+/// Red if a section's field IDs are swapped (a pre-insert slot decodes as post-insert), if a slot
+/// field is dropped or mis-typed, or if the entry repeat count is not derived from the schema.
+#[test]
+fn console_declaration_and_track_entry_opcodes_round_trip_canonically() {
+    let native = |slot: &str, quality, link_mode| session::ConsoleSlot {
+        slot: id(slot),
+        identity: EffectIdentity::Native {
+            effect_id: id("miso.parametric-eq"),
+        },
+        quality,
+        link_mode,
+    };
+    let full = session::Console {
+        pre_insert: vec![
+            native("desk-eq", EffectQuality::Draft, LinkMode::DualMono),
+            native("desk-comp", EffectQuality::Normal, LinkMode::Maximum),
+        ],
+        post_insert: vec![session::ConsoleSlot {
+            slot: id("desk-cid"),
+            identity: EffectIdentity::ThirdPartyCid {
+                cid: "bafycid-demo".to_owned(),
+            },
+            quality: EffectQuality::High,
+            link_mode: LinkMode::Average,
+        }],
+    };
+    let entries = vec![
+        session::ConsoleEntry {
+            slot: id("desk-eq"),
+            bypass: true,
+            params: vec![EffectParam {
+                parameter_id: 1,
+                channel: ParameterChannel::Right,
+                unit: ParameterUnit::Hz,
+                value: 440.0,
+            }],
+        },
+        session::ConsoleEntry {
+            slot: id("desk-comp"),
+            bypass: false,
+            params: Vec::new(),
+        },
+    ];
+    let edits = vec![
+        SessionEdit::SetConsole {
+            console: full.clone(),
+        },
+        SessionEdit::SetConsole {
+            console: session::Console {
+                pre_insert: Vec::new(),
+                post_insert: full.post_insert.clone(),
+            },
+        },
+        SessionEdit::SetConsole {
+            console: session::Console {
+                pre_insert: Vec::new(),
+                post_insert: Vec::new(),
+            },
+        },
+        SessionEdit::SetTrackConsole {
+            track_id: id("vocal"),
+            console: entries,
+        },
+        SessionEdit::SetTrackConsole {
+            track_id: id("vocal"),
+            console: Vec::new(),
+        },
+    ];
+    let bytes = encode(&edits);
+    let codec = ProtocolCodec::default();
+    let decoded = codec
+        .decode_session_transaction(&bytes, &mut DecodeScratch::new(&mut [0_u16; 8]))
+        .expect("console edits decode");
+    assert_eq!(decoded.edits, edits);
+    assert_eq!(encode(&decoded.edits), bytes);
+    assert_eq!(
+        schema::session::console_slot::SPEC
+            .fields
+            .iter()
+            .map(|field| field.id)
+            .collect::<Vec<_>>(),
+        [1, 2, 3, 4],
+        "slot, identity, quality, link mode; no sidechain"
     );
 }
 
@@ -1062,12 +1242,12 @@ fn tagged_pan_rejects_optional_field_known_only_to_matrix_variant() {
 fn every_send_tap_tag_is_typed_and_canonical() {
     for tap in [
         SendTap::Input,
-        SendTap::PostInputBuiltins,
-        SendTap::PostSimd1,
-        SendTap::PostDynamic,
-        SendTap::PostSimd2PreFader,
+        SendTap::PostInput,
+        SendTap::InsertSend,
+        SendTap::InsertReturn,
+        SendTap::PreFader,
         SendTap::PostFader,
-        SendTap::PostMatrix,
+        SendTap::PostPan,
     ] {
         let source = RouteSource::Track {
             track_id: id("vocal"),
@@ -1147,7 +1327,7 @@ fn every_route_and_automation_opcode_round_trips_canonically() {
             route_id: route.id.clone(),
             source: RouteSource::Track {
                 track_id: id("vocal"),
-                tap: SendTap::PostMatrix,
+                tap: SendTap::PostPan,
             },
         },
         SessionEdit::SetRouteSource {

@@ -43,13 +43,13 @@ const qualificationUrl = qualificationModuleIndex === -1
 const limits = Object.freeze({
   sourceRingFrames: 256,
   maximumMemoryBytes: 0n,
-  // Issue #137 D1/D2 and #143 D3/D6: the four console words. All zero is "default command-queue
-  // depth, no meter observers, no observation capacity, no master designation"; the console tests
-  // below override them.
-  consoleCommandQueueRecords: 4n,
-  consoleMeterBlocks: 2n,
-  consoleObservationTaps: 2n,
-  consoleMasterTrackPlusOne: 1n,
+  // Issue #137 D1/D2 and #143 D3/D6: the four live-control words. All zero is "default
+  // command-queue depth, no meter observers, no observation capacity, no master designation"; the
+  // live-control tests below override them.
+  liveControlCommandQueueRecords: 4n,
+  liveControlMeterBlocks: 2n,
+  liveControlObservationTaps: 2n,
+  liveControlMasterTrackPlusOne: 1n,
 });
 
 function resourceReport(backend, quantumFrames) {
@@ -372,7 +372,7 @@ async function testMainRealm() {
       const gate = snapshotGate();
       addModuleGate = gate;
       const firstEntry = { target: "output", targetId: "first", channels: "both" };
-      const thirdEntry = { target: "trackPostMatrix", targetId: "third", channels: "left" };
+      const thirdEntry = { target: "trackPostPan", targetId: "third", channels: "left" };
       const entries = [firstEntry, , thirdEntry];
       const collection = { entries, maximumCaptureBytes: 4096 };
       const factory = bootDataFactory({
@@ -389,7 +389,7 @@ async function testMainRealm() {
           entries: [
             { target: "output", targetId: "first", channels: "both" },
             ,
-            { target: "trackPostMatrix", targetId: "third", channels: "left" },
+            { target: "trackPostPan", targetId: "third", channels: "left" },
           ],
           maximumCaptureBytes: 4096,
         },
@@ -459,7 +459,7 @@ async function testMainRealm() {
       });
       const makeEntry = () => ({ target: "output", targetId: "main-out", channels: "both" });
       const makeSpectrum = () => ({
-        target: "trackPostMatrix", targetId: "eq0", channels: "both", maximumCaptureBytes: 4096,
+        target: "trackPostPan", targetId: "eq0", channels: "both", maximumCaptureBytes: 4096,
       });
       const makeCollectionOptions = (entries) => ({
         ...limits, spectrum: null, spectrumCollection: { entries, maximumCaptureBytes: 4096 },
@@ -821,12 +821,12 @@ async function testMainRealm() {
         ["u32 bound", plainOptions({ sourceRingFrames: 0x1_0000_0000 })],
         ["u64 type", plainOptions({ maximumMemoryBytes: 0 })],
         ["u64 bound", plainOptions({ maximumMemoryBytes: 0x1_0000_0000_0000_0000n })],
-        ["command queue bound", plainOptions({ consoleCommandQueueRecords: 257n })],
-        ["observation taps bound", plainOptions({ consoleObservationTaps: 17n })],
+        ["command queue bound", plainOptions({ liveControlCommandQueueRecords: 257n })],
+        ["observation taps bound", plainOptions({ liveControlObservationTaps: 17n })],
         ["observation taps dependency", plainOptions({
-          consoleCommandQueueRecords: 0n, consoleObservationTaps: 1n,
+          liveControlCommandQueueRecords: 0n, liveControlObservationTaps: 1n,
         })],
-        ["master dependency", plainOptions({ consoleObservationTaps: 0n })],
+        ["master dependency", plainOptions({ liveControlObservationTaps: 0n })],
         ["spectrum hop unsupported", plainOptions({
           spectrumHopFrames: 300, spectrum: null, spectrumCollection: null,
         })],
@@ -994,15 +994,15 @@ async function testMainRealm() {
         const readyPause = snapshotGate();
         const abiPause = snapshotGate();
         const spectrum = {
-          target: "trackPostMatrix", targetId: "single", channels: "left", maximumCaptureBytes: 4096,
+          target: "trackPostPan", targetId: "single", channels: "left", maximumCaptureBytes: 4096,
         };
         const options = {
           sourceRingFrames: 0,
           maximumMemoryBytes: 0n,
-          consoleCommandQueueRecords: 0n,
-          consoleMeterBlocks: 7n,
-          consoleObservationTaps: 0n,
-          consoleMasterTrackPlusOne: 0n,
+          liveControlCommandQueueRecords: 0n,
+          liveControlMeterBlocks: 7n,
+          liveControlObservationTaps: 0n,
+          liveControlMasterTrackPlusOne: 0n,
           spectrumHopFrames: 256,
           spectrum,
           spectrumCollection: null,
@@ -1039,8 +1039,8 @@ async function testMainRealm() {
           spectrum.targetId = "mutated-spectrum-before-construction";
           options.spectrumHopFrames = 1024;
           options.sourceRingFrames = 128;
-          options.consoleCommandQueueRecords = 8n;
-          options.consoleMeterBlocks = 99n;
+          options.liveControlCommandQueueRecords = 8n;
+          options.liveControlMeterBlocks = 99n;
           factory.options = { ...options, spectrum: { ...spectrum, target: "output" } };
           factory.context = replacementContext;
           factory.preparedModule = replacementModule;
@@ -1054,16 +1054,16 @@ async function testMainRealm() {
           spectrum.targetId = "mutated-spectrum-while-ready";
           options.spectrumHopFrames = 1024;
           options.sourceRingFrames = 256;
-          options.consoleCommandQueueRecords = 4n;
-          options.consoleMeterBlocks = 101n;
+          options.liveControlCommandQueueRecords = 4n;
+          options.liveControlMeterBlocks = 101n;
           factory.options = { ...options, spectrum: { ...spectrum, target: "input" } };
           readyPause.release();
           await abiPause.started;
           spectrum.targetId = "mutated-spectrum-while-abi";
           options.spectrumHopFrames = 1024;
           options.sourceRingFrames = 64;
-          options.consoleCommandQueueRecords = 2n;
-          options.consoleMeterBlocks = 103n;
+          options.liveControlCommandQueueRecords = 2n;
+          options.liveControlMeterBlocks = 103n;
           factory.options = { ...options, spectrum: { ...spectrum, target: "output" } };
           factory.context = { ...replacementContext, sampleRate: 96000 };
           factory.preparedModule = replacementModule;
@@ -1150,7 +1150,7 @@ async function testMainRealm() {
           });
           assert.equal(observeAck.result, 0, "captured observation default command accepted");
           assert.equal(observeAck.bindings[0].windowBlocks, 7,
-            "windowBlocks: 0 uses captured consoleMeterBlocks");
+            "windowBlocks: 0 uses captured liveControlMeterBlocks");
         } finally {
           addGate.release();
           readyPause.release();
@@ -1470,15 +1470,15 @@ async function testMainRealm() {
       "the probe refuses before any artifact is fetched",
     );
 
-    // Issue #137 D1/D2/D3: the live console's main-realm half.
-    const consoleHost = await createMisoAudioWorkletHost({
+    // Issue #137 D1/D2/D3: the live controls' main-realm half.
+    const liveControlHost = await createMisoAudioWorkletHost({
       context,
       document: new TextEncoder().encode("{\"schema_version\":0}"),
       options: limits,
       simd128ModuleUrl: "simd.wasm",
       workletModuleUrl: "processor.js",
     });
-    const map = await consoleHost.sessionMap();
+    const map = await liveControlHost.sessionMap();
     assert.deepEqual(map.tracks, ["kick", "snare"], "the canonical track order is the ABI");
     // Issue #241: the source list crosses the port with its `bigint` frame count intact, and the host's
     // acknowledgement validator accepted it -- a malformed row fails the whole host with 255, so
@@ -1502,19 +1502,19 @@ async function testMainRealm() {
       trackIndex: 0, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 1, armed: true,
     };
     for (let round = 0; round < 25; round += 1) {
-      mixedAcks.push((await consoleHost.command({ commands: [pan] })).requestId);
-      mixedAcks.push((await consoleHost.observe({ subscriptions: [mixedSubscription] })).requestId);
-      mixedAcks.push((await consoleHost.meters({ enabled: true, onFrame: null })).requestId);
-      mixedAcks.push((await consoleHost.meters({ enabled: false, onFrame: null })).requestId);
-      mixedAcks.push((await consoleHost.telemetry({ enabled: true, onFrame: null })).requestId);
-      mixedAcks.push((await consoleHost.telemetry({ enabled: false, onFrame: null })).requestId);
+      mixedAcks.push((await liveControlHost.command({ commands: [pan] })).requestId);
+      mixedAcks.push((await liveControlHost.observe({ subscriptions: [mixedSubscription] })).requestId);
+      mixedAcks.push((await liveControlHost.meters({ enabled: true, onFrame: null })).requestId);
+      mixedAcks.push((await liveControlHost.meters({ enabled: false, onFrame: null })).requestId);
+      mixedAcks.push((await liveControlHost.telemetry({ enabled: true, onFrame: null })).requestId);
+      mixedAcks.push((await liveControlHost.telemetry({ enabled: false, onFrame: null })).requestId);
       const mixedBuffer = new ArrayBuffer(16);
       const mixedLeft = new Float32Array(mixedBuffer, 0, 2);
       const mixedRight = new Float32Array(mixedBuffer, 8, 2);
       mixedLeft.set([round, round + 1]);
       mixedRight.set([round + 2, round + 3]);
       mixedSuccess = true;
-      const mixedSourceAck = await consoleHost.submitSource({
+      const mixedSourceAck = await liveControlHost.submitSource({
         sourceId: "mixed-source", generation: BigInt(round + 1), startFrame: 0n,
         sampleRateHz: 48000, planes: [mixedLeft, mixedRight], frames: 2, endOfRegion: true,
       });
@@ -1529,11 +1529,11 @@ async function testMainRealm() {
       assert.equal(mixedSourceEvent[2], mixedSourceAck.requestId);
       assert.equal(mixedSourceEvent[3], 1, "shared mixed source storage transfers once");
       mixedAcks.push(mixedSourceAck.requestId);
-      mixedAcks.push((await consoleHost.seekSource({
+      mixedAcks.push((await liveControlHost.seekSource({
         sourceId: "mixed-source", generation: BigInt(round + 1), sourceFrame: 0n,
       })).requestId);
-      mixedAcks.push((await consoleHost.status()).requestId);
-      mixedAcks.push((await consoleHost.sessionMap()).requestId);
+      mixedAcks.push((await liveControlHost.status()).requestId);
+      mixedAcks.push((await liveControlHost.sessionMap()).requestId);
     }
     assert.equal(mixedAcks.length, 250, "mixed host regression covers 250 successful calls");
     const mixedSendIds = events.slice(mixedSendStart).map((event) => event[2]);
@@ -1547,12 +1547,13 @@ async function testMainRealm() {
     assert.equal(new Set(mixedAcks).size, mixedAcks.length, "mixed acknowledgements are unique");
     console.log("Issue393 mixed calls: 250 result-zero, send IDs 2..251, adjacent, observe single allocation");
     // The shipped SDK consumer uses the same real host: sessionMap -> direct meter lease ->
-    // semantic console submit. This is the collision reproducer that the host-owned ledger fixes.
-    const { createBrowserConsole } = await import(new URL("./sdk/src/browser/console.ts", root));
-    const browserConsole = await createBrowserConsole(consoleHost);
-    await consoleHost.meters({ enabled: true, onFrame: null });
-    const sdkReport = await browserConsole.submit(browserConsole.edit.track("kick").faderDb(-1));
-    assert.equal(sdkReport.ok, true, "SDK console submits through the real host after direct meters");
+    // semantic live-control submit. This is the collision reproducer that the host-owned ledger
+    // fixes.
+    const { createBrowserLiveControls } = await import(new URL("./sdk/src/browser/live-controls.ts", root));
+    const browserLiveControls = await createBrowserLiveControls(liveControlHost);
+    await liveControlHost.meters({ enabled: true, onFrame: null });
+    const sdkReport = await browserLiveControls.submit(browserLiveControls.edit.track("kick").faderDb(-1));
+    assert.equal(sdkReport.ok, true, "SDK live controls submit through the real host after direct meters");
     // Every bounded response class refuses locally with requestId 0 and leaves the next accepted
     // request exactly one ID later. Hold each class independently so the fake port cannot answer.
     const assertBoundedNoBurn = async (label, heldCall, refusedCall, nextCall) => {
@@ -1569,23 +1570,23 @@ async function testMainRealm() {
       return next;
     };
     await assertBoundedNoBurn(
-      "status", () => consoleHost.status(), () => consoleHost.status(), () => consoleHost.status(),
+      "status", () => liveControlHost.status(), () => liveControlHost.status(), () => liveControlHost.status(),
     );
     await assertBoundedNoBurn(
-      "sessionMap", () => consoleHost.sessionMap(), () => consoleHost.sessionMap(),
-      () => consoleHost.sessionMap(),
+      "sessionMap", () => liveControlHost.sessionMap(), () => liveControlHost.sessionMap(),
+      () => liveControlHost.sessionMap(),
     );
     await assertBoundedNoBurn(
-      "meters", () => consoleHost.meters({ enabled: false, onFrame: null }),
-      () => consoleHost.meters({ enabled: true, onFrame: null }),
-      () => consoleHost.meters({ enabled: false, onFrame: null }),
+      "meters", () => liveControlHost.meters({ enabled: false, onFrame: null }),
+      () => liveControlHost.meters({ enabled: true, onFrame: null }),
+      () => liveControlHost.meters({ enabled: false, onFrame: null }),
     );
     await assertBoundedNoBurn(
-      "telemetry", () => consoleHost.telemetry({ enabled: false, onFrame: null }),
-      () => consoleHost.telemetry({ enabled: true, onFrame: null }),
-      () => consoleHost.telemetry({ enabled: false, onFrame: null }),
+      "telemetry", () => liveControlHost.telemetry({ enabled: false, onFrame: null }),
+      () => liveControlHost.telemetry({ enabled: true, onFrame: null }),
+      () => liveControlHost.telemetry({ enabled: false, onFrame: null }),
     );
-    const commandAck = await consoleHost.command({ commands: [pan] });
+    const commandAck = await liveControlHost.command({ commands: [pan] });
     assert.equal(commandAck.tag, "miso.ack.v1");
     assert.equal(commandAck.result, 0);
     assert.equal(commandAck.admitted, 1);
@@ -1608,34 +1609,41 @@ async function testMainRealm() {
     // A malformed command never reaches the port.
     const beforeMalformed = events.length;
     await errorResult(
-      consoleHost.command({ commands: [{ ...pan, kind: 99 }] }),
+      liveControlHost.command({ commands: [{ ...pan, kind: 99 }] }),
       1,
     );
     await errorResult(
-      consoleHost.command({ commands: [{ ...pan, values: [0, 0, 0, NaN] }] }),
+      liveControlHost.command({ commands: [{ ...pan, values: [0, 0, 0, NaN] }] }),
       1,
     );
-    await errorResult(consoleHost.command({ commands: [] }), 1);
-    await localErrorResult(consoleHost.command({ requestId: 999, commands: [pan] }), 1);
-    await localErrorResult(consoleHost.observe({ requestId: 999, subscriptions: [{
+    await errorResult(liveControlHost.command({ commands: [] }), 1);
+    // The retired `simd1`/`simd2` rack codes and an unallocated one never reach the port (#1096).
+    for (const rack of [0, 2, 4]) {
+      await errorResult(
+        liveControlHost.command({ commands: [{ ...pan, kind: 5, rack, effectIndex: 0 }] }),
+        1,
+      );
+    }
+    await localErrorResult(liveControlHost.command({ requestId: 999, commands: [pan] }), 1);
+    await localErrorResult(liveControlHost.observe({ requestId: 999, subscriptions: [{
       trackIndex: 0, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 1, armed: true,
     }] }), 1);
     const oldShapeBuffer = new ArrayBuffer(256);
-    await localErrorResult(consoleHost.submitSource({
+    await localErrorResult(liveControlHost.submitSource({
       requestId: 999, sourceId: "extra", generation: 1n, startFrame: 0n,
       sampleRateHz: 48000, planes: [new Float32Array(oldShapeBuffer)], frames: 64, endOfRegion: false,
     }), 1);
     assert.equal(oldShapeBuffer.byteLength, 256, "malformed source keeps caller ownership");
-    await localErrorResult(consoleHost.seekSource({
+    await localErrorResult(liveControlHost.seekSource({
       requestId: 999, sourceId: "extra", generation: 1n, sourceFrame: 0n,
     }), 1);
-    await localErrorResult(consoleHost.meters({ requestId: 999, enabled: true, onFrame: null }), 1);
-    await localErrorResult(consoleHost.telemetry({ requestId: 999, enabled: true, onFrame: null }), 1);
+    await localErrorResult(liveControlHost.meters({ requestId: 999, enabled: true, onFrame: null }), 1);
+    await localErrorResult(liveControlHost.telemetry({ requestId: 999, enabled: true, onFrame: null }), 1);
     assert.equal(events.length, beforeMalformed, "a malformed batch costs no message");
 
     // Engine backpressure is a resolved acknowledgement that admits nothing.
     commandResult = 6;
-    const refused = await consoleHost.command({ commands: [pan] });
+    const refused = await liveControlHost.command({ commands: [pan] });
     assert.equal(refused.result, 6);
     assert.equal(refused.admitted, 0);
     assert.equal(refused.reason, 8);
@@ -1645,15 +1653,15 @@ async function testMainRealm() {
     // refused here, before any transfer, and the caller keeps its records.
     holdAll = true;
     const commandEventsBefore = events.length;
-    const held4 = Array.from({ length: 4 }, () => consoleHost.command({ commands: [pan] }));
-    await localErrorResult(consoleHost.command({ commands: [pan] }), 6);
-    await localErrorResult(consoleHost.observe({ subscriptions: [mixedSubscription] }), 6);
+    const held4 = Array.from({ length: 4 }, () => liveControlHost.command({ commands: [pan] }));
+    await localErrorResult(liveControlHost.command({ commands: [pan] }), 6);
+    await localErrorResult(liveControlHost.observe({ subscriptions: [mixedSubscription] }), 6);
     assert.equal(events.length, commandEventsBefore + 4, "command/observe saturation posts no refusal");
     holdAll = false;
     for (const respond of heldAll) respond();
     heldAll.length = 0;
     const heldCommandAcks = await Promise.all(held4);
-    const commandAfterBound = await consoleHost.command({ commands: [pan] });
+    const commandAfterBound = await liveControlHost.command({ commands: [pan] });
     assert.equal(
       commandAfterBound.requestId,
       Math.max(...heldCommandAcks.map((ack) => ack.requestId)) + 1,
@@ -1664,11 +1672,11 @@ async function testMainRealm() {
     const meterFrames = [];
     const telemetryFrames = [];
     assert.equal(
-      (await consoleHost.meters({ enabled: true, onFrame: (frame) => meterFrames.push(frame) })).result,
+      (await liveControlHost.meters({ enabled: true, onFrame: (frame) => meterFrames.push(frame) })).result,
       0,
     );
     assert.equal(
-      (await consoleHost.telemetry({ enabled: true, onFrame: (frame) => telemetryFrames.push(frame) })).result,
+      (await liveControlHost.telemetry({ enabled: true, onFrame: (frame) => telemetryFrames.push(frame) })).result,
       0,
     );
     const node = FakeNode.latest;
@@ -1759,7 +1767,7 @@ async function testMainRealm() {
     // at all -- so it is checked as carefully as the frame: the exact wire kinds go out, the map
     // is canonically ordered, `windowBlocks: 0` resolves to the plan default, and an unsubscribe
     // removes exactly one entry.
-    const observeAck = await consoleHost.observe({
+    const observeAck = await liveControlHost.observe({
       subscriptions: [
         { trackIndex: 1, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 0, armed: true },
         { trackIndex: 0, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 8, armed: true },
@@ -1772,10 +1780,10 @@ async function testMainRealm() {
     assert.deepEqual(observeAck.bindings[0], {
       trackIndex: 0, rack: 1, effectIndex: 0, tapId: 1, frameSlot: 0, windowBlocks: 8,
     });
-    assert.equal(observeAck.bindings[1].windowBlocks, Number(limits.consoleMeterBlocks),
+    assert.equal(observeAck.bindings[1].windowBlocks, Number(limits.liveControlMeterBlocks),
       "`windowBlocks: 0` resolves to the plan default, and the map says which one it got");
     assert.equal(Object.isFrozen(observeAck.bindings), true);
-    const unsubscribed = await consoleHost.observe({
+    const unsubscribed = await liveControlHost.observe({
       subscriptions: [
         { trackIndex: 1, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 0, armed: false },
       ],
@@ -1783,16 +1791,18 @@ async function testMainRealm() {
     assert.equal(unsubscribed.bindings.length, 1, "an unsubscribe removes exactly one entry");
     assert.equal(unsubscribed.bindings[0].trackIndex, 0);
     for (const broken of [
-      { trackIndex: -1 }, { rack: 3 }, { tapId: 0 }, { armed: "yes" }, { windowBlocks: -1 },
+      // The retired `simd1`/`simd2` codes (`0`, `2`) and an unallocated one are refused (#1096).
+      { trackIndex: -1 }, { rack: 0 }, { rack: 2 }, { rack: 4 }, { tapId: 0 }, { armed: "yes" },
+      { windowBlocks: -1 },
     ]) {
-      await errorResult(consoleHost.observe({
+      await errorResult(liveControlHost.observe({
         subscriptions: [{
           trackIndex: 0, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 0, armed: true,
           ...broken,
         }],
       }), 1);
     }
-    await errorResult(consoleHost.observe({ subscriptions: [] }), 1);
+    await errorResult(liveControlHost.observe({ subscriptions: [] }), 1);
 
     // Issue #143's two reasons, and the #151 defect they exposed: a refused subscription is a
     // typed *per-request* rejection and costs the host nothing.
@@ -1802,7 +1812,7 @@ async function testMainRealm() {
     // therefore read as a malformed acknowledgement and tripped the sticky 255 that fails every
     // unsettled request and every later one -- so one refused subscription cost the whole
     // session. That is what kept the app's gain-reduction meters dead: the app arms its taps
-    // once at startup, and a single refusal took the console with it.
+    // once at startup, and a single refusal took the live controls with it.
     //
     // Red mutation: restore `validU32(message.reason) && message.reason <= 9` in `#receive` ->
     // every assertion below fails with the sticky signature, starting with `refused.tag` because
@@ -1819,7 +1829,7 @@ async function testMainRealm() {
     ]) {
       commandResult = result;
       commandMutation = (response) => ({ ...response, reason, rejectedIndex: 0, admitted: 0 });
-      const refused = await consoleHost.observe({
+      const refused = await liveControlHost.observe({
         subscriptions: [
           { trackIndex: 0, rack: 1, effectIndex: 0, tapId: 9, windowBlocks: 0, armed: true },
         ],
@@ -1838,14 +1848,14 @@ async function testMainRealm() {
 
       // The host is fully healthy afterwards. Each of these is a request the sticky error would
       // have failed with `{tag: "miso.error.v1", result: 255}`.
-      assert.equal((await consoleHost.status()).result, 0, `${what}: status still answers`);
-      const laterCommand = await consoleHost.command({
+      assert.equal((await liveControlHost.status()).result, 0, `${what}: status still answers`);
+      const laterCommand = await liveControlHost.command({
         commands: [pan],
       });
       assert.equal(laterCommand.result, 0, `${what}: the command path still admits a batch`);
       assert.equal(laterCommand.admitted, 1);
       assert.deepEqual(
-        (await consoleHost.sessionMap()).tracks,
+        (await liveControlHost.sessionMap()).tracks,
         ["kick", "snare"],
         `${what}: the addressing authority still answers`,
       );
@@ -1867,7 +1877,7 @@ async function testMainRealm() {
       assert.equal(meterFrames.at(-1).trackGrDb[0], 3.25);
 
       // And a *correct* subscription still arms, so nothing about the map machinery was poisoned.
-      const recovered = await consoleHost.observe({
+      const recovered = await liveControlHost.observe({
         subscriptions: [
           { trackIndex: 1, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 4, armed: true },
         ],
@@ -1875,7 +1885,7 @@ async function testMainRealm() {
       assert.equal(recovered.result, 0, `${what}: a correct subscription still arms after it`);
       assert.equal(recovered.reason, 0);
       assert.deepEqual(recovered.bindings.map((binding) => binding.trackIndex), [0, 1]);
-      const undo = await consoleHost.observe({
+      const undo = await liveControlHost.observe({
         subscriptions: [
           { trackIndex: 1, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 4, armed: false },
         ],
@@ -1885,7 +1895,7 @@ async function testMainRealm() {
 
     // A released lease detaches the callback: a late frame is delivered nowhere.
     const framesAtRelease = meterFrames.length;
-    await consoleHost.meters({ enabled: false, onFrame: null });
+    await liveControlHost.meters({ enabled: false, onFrame: null });
     node.port.onmessage({
       data: {
         tag: "miso.meter.v1", sequence: 2, generation: 1n, validity: 0x3, lossCount: 0,
@@ -1899,7 +1909,7 @@ async function testMainRealm() {
     // A malformed frame is a hard failure, not a silent skip: a console that ignores a broken
     // frame is a console that lies to its user. Red mutation: replace the `#fail` in the
     // `miso.meter.v1` branch of `#receive` with `return` -> this status stays pending forever.
-    const doomed = consoleHost.status();
+    const doomed = liveControlHost.status();
     node.port.onmessage({
       data: {
         tag: "miso.meter.v1", sequence: 3, generation: 1n, validity: 0x3, lossCount: 0,
@@ -1909,18 +1919,18 @@ async function testMainRealm() {
       },
     });
     await errorResult(doomed, 255);
-    await consoleHost.dispose();
+    await liveControlHost.dispose();
     const disposedEvents = events.length;
-    await localErrorResult(consoleHost.status(), 3);
-    await localErrorResult(consoleHost.command({ commands: [pan] }), 3);
-    await localErrorResult(consoleHost.observe({ subscriptions: [mixedSubscription] }), 3);
-    await localErrorResult(consoleHost.sessionMap(), 3);
-    await localErrorResult(consoleHost.meters({ enabled: false, onFrame: null }), 3);
-    await localErrorResult(consoleHost.telemetry({ enabled: false, onFrame: null }), 3);
-    await localErrorResult(consoleHost.seekSource({
+    await localErrorResult(liveControlHost.status(), 3);
+    await localErrorResult(liveControlHost.command({ commands: [pan] }), 3);
+    await localErrorResult(liveControlHost.observe({ subscriptions: [mixedSubscription] }), 3);
+    await localErrorResult(liveControlHost.sessionMap(), 3);
+    await localErrorResult(liveControlHost.meters({ enabled: false, onFrame: null }), 3);
+    await localErrorResult(liveControlHost.telemetry({ enabled: false, onFrame: null }), 3);
+    await localErrorResult(liveControlHost.seekSource({
       sourceId: "disposed", generation: 1n, sourceFrame: 0n,
     }), 3);
-    await localErrorResult(consoleHost.submitSource({
+    await localErrorResult(liveControlHost.submitSource({
       sourceId: "disposed", generation: 1n, startFrame: 0n, sampleRateHz: 48000,
       planes: [new Float32Array(2)], frames: 2, endOfRegion: true,
     }), 3);
@@ -1979,10 +1989,10 @@ async function testMainRealm() {
     assert.deepEqual(rearmed.bindings.map((binding) => binding.effectIndex), [1, 1],
       "the map holds the replacement's addressing, not the retired plan's");
     assert.deepEqual(rearmed.bindings.map((binding) => binding.windowBlocks),
-      [Number(limits.consoleMeterBlocks), Number(limits.consoleMeterBlocks)],
+      [Number(limits.liveControlMeterBlocks), Number(limits.liveControlMeterBlocks)],
       "`windowBlocks: 0` resolves against the replacement's own default");
 
-    // The rest of the console is live on the replacement.
+    // The rest of the live-control surface is live on the replacement.
     const rearmedFrames = [];
     assert.equal(
       (await afterEdit.meters({
@@ -2012,7 +2022,7 @@ async function testMainRealm() {
   }
 }
 
-function createFakeExports(quantum, backend = 1, consoleAttached = true) {
+function createFakeExports(quantum, backend = 1, liveControlsAttached = true) {
   const memory = { buffer: new ArrayBuffer(65536) };
   const statusPointer = 16384;
   const resourcePointer = 17000;
@@ -2071,11 +2081,11 @@ function createFakeExports(quantum, backend = 1, consoleAttached = true) {
   report.setUint32(0, 48, true);
   report.setUint32(4, 0x00010000, true);
   const pointers = {
-    2: 4096, 3: 5000, 5: 8192, 6: consoleAttached ? commandPointer : 0, 7: meterFramePointer,
+    2: 4096, 3: 5000, 5: 8192, 6: liveControlsAttached ? commandPointer : 0, 7: meterFramePointer,
   };
   const capacities = {
     2: 64, 3: 2 * quantum * 4, 5: 2 * quantum * 4,
-    6: consoleAttached ? 256 * 48 : 0,
+    6: liveControlsAttached ? 256 * 48 : 0,
     7: meterFrameFloats * 4,
   };
   // Issue #143: the additive observation ABI is present even in this hermetic processor fake.
@@ -2148,10 +2158,10 @@ function createFakeExports(quantum, backend = 1, consoleAttached = true) {
     },
     miso_engine_web_v1_command_report_ptr: () => reportPointer,
     miso_engine_web_v1_prepared_companion_ptr: () => (
-      consoleAttached ? preparedCompanionPointer : 0
+      liveControlsAttached ? preparedCompanionPointer : 0
     ),
     miso_engine_web_v1_prepared_companion_capacity: () => (
-      consoleAttached ? preparedCompanionCapacity : 0
+      liveControlsAttached ? preparedCompanionCapacity : 0
     ),
     miso_engine_web_v1_command_submit: (_handle, count) => {
       calls.commands.push(new Uint8Array(memory.buffer, commandPointer, count * 48).slice());
@@ -2178,8 +2188,8 @@ function createFakeExports(quantum, backend = 1, consoleAttached = true) {
       frame.fill(6.5, trackIds.length * 2 + 2);
       return 1;
     },
-    miso_engine_web_v1_console_track_count: () => trackIds.length,
-    miso_engine_web_v1_console_track_id: (_handle, index) => {
+    miso_engine_web_v1_live_control_track_count: () => trackIds.length,
+    miso_engine_web_v1_live_control_track_id: (_handle, index) => {
       const id = trackIds[index];
       const bytes = new Uint8Array(memory.buffer, pointers[2], id.length);
       for (let byte = 0; byte < id.length; byte += 1) bytes[byte] = id.charCodeAt(byte);
@@ -2352,7 +2362,7 @@ async function testQualificationBoot({ registered, makeFake, setNextFake, setPro
       setNextFake(makeFake(
         context.renderQuantumSize,
         1,
-        processorOptions?.consoleCommandQueueRecords !== 0n,
+        processorOptions?.liveControlCommandQueueRecords !== 0n,
       ));
       setProcessorPortFactory(() => processorPort);
       try {
@@ -2471,8 +2481,8 @@ async function testQualificationBoot({ registered, makeFake, setNextFake, setPro
       true,
       "qualification boot contract: typed unsupported catch did not receive its typed refusal",
     );
-    await expectStop("runConsoleQualification", () => hooks.runConsoleQualification(
-      forwardingCreateHost("runConsoleQualification"), documentBytes,
+    await expectStop("runLiveControlQualification", () => hooks.runLiveControlQualification(
+      forwardingCreateHost("runLiveControlQualification"), documentBytes,
     ));
     await expectStop("runObservationRun", () => hooks.runObservationRun(
       forwardingCreateHost("runObservationRun"), documentBytes, true,
@@ -2484,7 +2494,7 @@ async function testQualificationBoot({ registered, makeFake, setNextFake, setPro
     assert.deepEqual(
       observed.map(({ label }) => label),
       [
-        "renderCorpusSegment", "typedUnsupportedAttestation", "runConsoleQualification",
+        "renderCorpusSegment", "typedUnsupportedAttestation", "runLiveControlQualification",
         "runObservationRun", "runStallQualification",
       ],
       "qualification boot contract: caller witness set changed",
@@ -2494,21 +2504,22 @@ async function testQualificationBoot({ registered, makeFake, setNextFake, setPro
     assert.equal(sentinelStops, 4, "qualification boot contract: every non-attestation path must stop its sentinel");
     const plain = observed.filter(({ label }) =>
       label === "renderCorpusSegment" || label === "typedUnsupportedAttestation");
-    assert(plain.every(({ options }) => options.options.consoleCommandQueueRecords === 0n
-      && options.options.consoleMeterBlocks === 0n
-      && options.options.consoleObservationTaps === 0n
-      && options.options.consoleMasterTrackPlusOne === 0n),
+    assert(plain.every(({ options }) => options.options.liveControlCommandQueueRecords === 0n
+      && options.options.liveControlMeterBlocks === 0n
+      && options.options.liveControlObservationTaps === 0n
+      && options.options.liveControlMasterTrackPlusOne === 0n),
     "qualification boot contract: plain option variant changed");
-    const consoleOptions = observed.find(({ label }) => label === "runConsoleQualification").options.options;
-    assert.equal(consoleOptions.consoleCommandQueueRecords, 64n);
-    assert.equal(consoleOptions.consoleMeterBlocks, 2n);
-    assert.equal(consoleOptions.consoleObservationTaps, 0n);
-    assert.equal(consoleOptions.consoleMasterTrackPlusOne, 0n);
+    const liveControlOptions = observed
+      .find(({ label }) => label === "runLiveControlQualification").options.options;
+    assert.equal(liveControlOptions.liveControlCommandQueueRecords, 64n);
+    assert.equal(liveControlOptions.liveControlMeterBlocks, 2n);
+    assert.equal(liveControlOptions.liveControlObservationTaps, 0n);
+    assert.equal(liveControlOptions.liveControlMasterTrackPlusOne, 0n);
     const observationOptions = observed.find(({ label }) => label === "runObservationRun").options.options;
-    assert.equal(observationOptions.consoleCommandQueueRecords, 64n);
-    assert.equal(observationOptions.consoleMeterBlocks, 2n);
-    assert.equal(observationOptions.consoleObservationTaps, 4n);
-    assert.equal(observationOptions.consoleMasterTrackPlusOne, 1n);
+    assert.equal(observationOptions.liveControlCommandQueueRecords, 64n);
+    assert.equal(observationOptions.liveControlMeterBlocks, 2n);
+    assert.equal(observationOptions.liveControlObservationTaps, 4n);
+    assert.equal(observationOptions.liveControlMasterTrackPlusOne, 1n);
 
     const diagnosis = await bounded(hooks.diagnoseReady(documentBytes), "diagnoseReady");
     assert.equal(diagnosis.kind, "message", "qualification boot contract: diagnoseReady did not reach node message");

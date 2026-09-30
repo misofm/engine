@@ -5,9 +5,10 @@
 
 use session::{
     Automation, AutomationSegment, AutomationShape, AutomationTarget, ChannelBuiltins,
-    ChannelMatrix, DualMonoBuiltins, DualMonoFader, Effect, EffectIdentity, EffectParam,
-    EffectQuality, MatrixOrPan, Output, OutputProfile, Rack, RackName, RenderProfile, Route,
-    RouteDestination, RouteSource, SidechainDeclaration, Source, SourceBitDepth, StableId, Submix,
+    ChannelMatrix, Console, ConsoleEntry, ConsoleSlot, DualMonoBuiltins, DualMonoFader, Effect,
+    EffectIdentity, EffectParam, EffectQuality, MatrixOrPan, Output, OutputProfile, Rack, RackName,
+    RenderProfile, Route, RouteDestination, RouteSource, SidechainDeclaration, Source,
+    SourceBitDepth, StableId, Submix,
 };
 
 use crate::{
@@ -243,12 +244,12 @@ const fn enum_link(value: session::LinkMode) -> u8 {
 const fn enum_tap(value: session::SendTap) -> u8 {
     match value {
         session::SendTap::Input => 1,
-        session::SendTap::PostInputBuiltins => 2,
-        session::SendTap::PostSimd1 => 3,
-        session::SendTap::PostDynamic => 4,
-        session::SendTap::PostSimd2PreFader => 5,
+        session::SendTap::PostInput => 2,
+        session::SendTap::InsertSend => 3,
+        session::SendTap::InsertReturn => 4,
+        session::SendTap::PreFader => 5,
         session::SendTap::PostFader => 6,
-        session::SendTap::PostMatrix => 7,
+        session::SendTap::PostPan => 7,
     }
 }
 const fn enum_shape(value: AutomationShape) -> u8 {
@@ -344,6 +345,9 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEdit) -> Result<(), Encode
         SessionEdit::SetAutomationSegments { segments, .. } => {
             spec.field_count(&[(fields[1], segments.len())])?
         }
+        SessionEdit::SetTrackConsole { console, .. } => {
+            spec.field_count(&[(fields[1], console.len())])?
+        }
         _ => spec.field_count(&[])?,
     };
     tx_start_message(sink, count)?;
@@ -358,6 +362,9 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEdit) -> Result<(), Encode
         }
         SessionEdit::SetOutputProfile { output_profile } => {
             tx_message(sink, fields[0], |v| tx_output_profile(v, output_profile))
+        }
+        SessionEdit::SetConsole { console } => {
+            tx_message(sink, fields[0], |v| tx_console(v, console))
         }
         SessionEdit::UpsertSource { source } => {
             tx_message(sink, fields[0], |v| tx_source(v, source))
@@ -534,6 +541,13 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEdit) -> Result<(), Encode
         } => {
             tx_id(sink, fields[0], track_id)?;
             tx_message(sink, fields[1], |v| tx_matrix_or_pan(v, matrix_or_pan))
+        }
+        SessionEdit::SetTrackConsole { track_id, console } => {
+            tx_id(sink, fields[0], track_id)?;
+            for entry in console {
+                tx_message(sink, fields[1], |v| tx_console_entry(v, entry))?;
+            }
+            Ok(())
         }
         SessionEdit::UpsertSubmix { submix } => {
             tx_message(sink, fields[0], |v| tx_submix(v, submix))
@@ -882,8 +896,67 @@ fn tx_matrix_or_pan(sink: &mut dyn Sink, value: &MatrixOrPan) -> Result<(), Enco
         }
     }
 }
+fn tx_console(sink: &mut dyn Sink, value: &Console) -> Result<(), EncodeError> {
+    tx_start_message(
+        sink,
+        schema::session::console::SPEC.field_count(&[
+            (schema::session::console::PRE_INSERT, value.pre_insert.len()),
+            (
+                schema::session::console::POST_INSERT,
+                value.post_insert.len(),
+            ),
+        ])?,
+    )?;
+    for slot in &value.pre_insert {
+        tx_message(sink, schema::session::console::PRE_INSERT, |v| {
+            tx_console_slot(v, slot)
+        })?;
+    }
+    for slot in &value.post_insert {
+        tx_message(sink, schema::session::console::POST_INSERT, |v| {
+            tx_console_slot(v, slot)
+        })?;
+    }
+    Ok(())
+}
+fn tx_console_slot(sink: &mut dyn Sink, value: &ConsoleSlot) -> Result<(), EncodeError> {
+    tx_start_message(sink, schema::session::console_slot::SPEC.field_count(&[])?)?;
+    tx_id(sink, schema::session::console_slot::SLOT, &value.slot)?;
+    tx_message(sink, schema::session::console_slot::IDENTITY, |v| {
+        tx_identity(v, &value.identity)
+    })?;
+    tx_u8(
+        sink,
+        schema::session::console_slot::QUALITY,
+        enum_quality(value.quality),
+    )?;
+    tx_u8(
+        sink,
+        schema::session::console_slot::LINK_MODE,
+        enum_link(value.link_mode),
+    )
+}
+fn tx_console_entry(sink: &mut dyn Sink, value: &ConsoleEntry) -> Result<(), EncodeError> {
+    tx_start_message(
+        sink,
+        schema::session::console_entry::SPEC
+            .field_count(&[(schema::session::console_entry::PARAM, value.params.len())])?,
+    )?;
+    tx_id(sink, schema::session::console_entry::SLOT, &value.slot)?;
+    tx_bool(sink, schema::session::console_entry::BYPASS, value.bypass)?;
+    for param in &value.params {
+        tx_message(sink, schema::session::console_entry::PARAM, |v| {
+            tx_param(v, param)
+        })?;
+    }
+    Ok(())
+}
 fn tx_track(sink: &mut dyn Sink, value: &session::Track) -> Result<(), EncodeError> {
-    tx_start_message(sink, schema::session::track::SPEC.field_count(&[])?)?;
+    tx_start_message(
+        sink,
+        schema::session::track::SPEC
+            .field_count(&[(schema::session::track::CONSOLE, value.console.len())])?,
+    )?;
     tx_id(sink, schema::session::track::ID, &value.id)?;
     tx_id(sink, schema::session::track::SOURCE_ID, &value.source_id)?;
     tx_u8(
@@ -899,21 +972,21 @@ fn tx_track(sink: &mut dyn Sink, value: &session::Track) -> Result<(), EncodeErr
     tx_message(sink, schema::session::track::BUILTINS, |v| {
         tx_builtins(v, &value.builtins)
     })?;
-    tx_message(sink, schema::session::track::SIMD1, |v| {
-        tx_rack(v, &value.simd1)
-    })?;
-    tx_message(sink, schema::session::track::DYNAMIC, |v| {
-        tx_rack(v, &value.dynamic)
-    })?;
-    tx_message(sink, schema::session::track::SIMD2, |v| {
-        tx_rack(v, &value.simd2)
+    tx_message(sink, schema::session::track::INSERTS, |v| {
+        tx_rack(v, &value.inserts)
     })?;
     tx_message(sink, schema::session::track::FADER, |v| {
         tx_fader(v, &value.fader)
     })?;
     tx_message(sink, schema::session::track::MATRIX_OR_PAN, |v| {
         tx_matrix_or_pan(v, &value.matrix_or_pan)
-    })
+    })?;
+    for entry in &value.console {
+        tx_message(sink, schema::session::track::CONSOLE, |v| {
+            tx_console_entry(v, entry)
+        })?;
+    }
+    Ok(())
 }
 fn tx_submix(sink: &mut dyn Sink, value: &Submix) -> Result<(), EncodeError> {
     tx_start_message(sink, schema::session::submix::SPEC.field_count(&[])?)?;
@@ -1066,6 +1139,9 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEdit, DecodeError> {
                 payload.nested_value(one_spec!(payload, fields[0])?)?,
             )?,
         }),
+        crate::SessionEditOpcode::SetConsole => Ok(SessionEdit::SetConsole {
+            console: parse_console(payload.nested_value(one_spec!(payload, fields[0])?)?)?,
+        }),
         crate::SessionEditOpcode::UpsertSource => Ok(SessionEdit::UpsertSource {
             source: parse_source(payload.nested_value(one_spec!(payload, fields[0])?)?)?,
         }),
@@ -1203,6 +1279,12 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEdit, DecodeError> {
             matrix_or_pan: parse_matrix_or_pan(
                 payload.nested_value(one_spec!(payload, fields[1])?)?,
             )?,
+        }),
+        crate::SessionEditOpcode::SetTrackConsole => Ok(SessionEdit::SetTrackConsole {
+            track_id: stable_id(one_spec!(payload, fields[0])?)?,
+            console: values_spec!(payload, fields[1])?
+                .map(|value| parse_console_entry(payload.nested_value(value)?))
+                .collect::<Result<Vec<_>, _>>()?,
         }),
         crate::SessionEditOpcode::UpsertSubmix => Ok(SessionEdit::UpsertSubmix {
             submix: parse_submix(payload.nested_value(one_spec!(payload, fields[0])?)?)?,
@@ -1345,7 +1427,11 @@ fn parse_channel_builtins(message: Message<'_>) -> Result<ChannelBuiltins, Decod
     })
 }
 fn parse_track(message: Message<'_>) -> Result<session::Track, DecodeError> {
-    let message = message.schema_spec(&schema::session::track::SPEC)?;
+    // Decision 12 retired fields 6 (`simd1`) and 8 (`simd2`): refused in either flag form.
+    let message = message.schema_spec_retiring(
+        &schema::session::track::SPEC,
+        &schema::session::track::RETIRED,
+    )?;
     Ok(session::Track {
         id: stable_id(one_spec!(message, schema::session::track::ID)?)?,
         source_id: stable_id(one_spec!(message, schema::session::track::SOURCE_ID)?)?,
@@ -1360,14 +1446,11 @@ fn parse_track(message: Message<'_>) -> Result<session::Track, DecodeError> {
         builtins: parse_builtins(
             message.nested_value(one_spec!(message, schema::session::track::BUILTINS)?)?,
         )?,
-        simd1: parse_rack_message(
-            message.nested_value(one_spec!(message, schema::session::track::SIMD1)?)?,
-        )?,
-        dynamic: parse_rack_message(
-            message.nested_value(one_spec!(message, schema::session::track::DYNAMIC)?)?,
-        )?,
-        simd2: parse_rack_message(
-            message.nested_value(one_spec!(message, schema::session::track::SIMD2)?)?,
+        console: values_spec!(message, schema::session::track::CONSOLE)?
+            .map(|value| parse_console_entry(message.nested_value(value)?))
+            .collect::<Result<Vec<_>, _>>()?,
+        inserts: parse_rack_message(
+            message.nested_value(one_spec!(message, schema::session::track::INSERTS)?)?,
         )?,
         fader: parse_fader(
             message.nested_value(one_spec!(message, schema::session::track::FADER)?)?,
@@ -1375,6 +1458,44 @@ fn parse_track(message: Message<'_>) -> Result<session::Track, DecodeError> {
         matrix_or_pan: parse_matrix_or_pan(
             message.nested_value(one_spec!(message, schema::session::track::MATRIX_OR_PAN)?)?,
         )?,
+    })
+}
+fn parse_console(message: Message<'_>) -> Result<Console, DecodeError> {
+    let message = message.schema_spec(&schema::session::console::SPEC)?;
+    Ok(Console {
+        pre_insert: values_spec!(message, schema::session::console::PRE_INSERT)?
+            .map(|value| parse_console_slot(message.nested_value(value)?))
+            .collect::<Result<Vec<_>, _>>()?,
+        post_insert: values_spec!(message, schema::session::console::POST_INSERT)?
+            .map(|value| parse_console_slot(message.nested_value(value)?))
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+fn parse_console_slot(message: Message<'_>) -> Result<ConsoleSlot, DecodeError> {
+    let message = message.schema_spec(&schema::session::console_slot::SPEC)?;
+    Ok(ConsoleSlot {
+        slot: stable_id(one_spec!(message, schema::session::console_slot::SLOT)?)?,
+        identity: parse_identity(
+            message.nested_value(one_spec!(message, schema::session::console_slot::IDENTITY)?)?,
+        )?,
+        quality: parse_quality(read_u8_exact(one_spec!(
+            message,
+            schema::session::console_slot::QUALITY
+        )?)?)?,
+        link_mode: parse_link(read_u8_exact(one_spec!(
+            message,
+            schema::session::console_slot::LINK_MODE
+        )?)?)?,
+    })
+}
+fn parse_console_entry(message: Message<'_>) -> Result<ConsoleEntry, DecodeError> {
+    let message = message.schema_spec(&schema::session::console_entry::SPEC)?;
+    Ok(ConsoleEntry {
+        slot: stable_id(one_spec!(message, schema::session::console_entry::SLOT)?)?,
+        bypass: parse_bool(one_spec!(message, schema::session::console_entry::BYPASS)?)?,
+        params: values_spec!(message, schema::session::console_entry::PARAM)?
+            .map(|value| parse_param(message.nested_value(value)?))
+            .collect::<Result<Vec<_>, _>>()?,
     })
 }
 fn parse_rack_message(message: Message<'_>) -> Result<Rack, DecodeError> {
@@ -1666,12 +1787,12 @@ fn parse_link(value: u8) -> Result<session::LinkMode, DecodeError> {
 fn parse_tap(value: u8) -> Result<session::SendTap, DecodeError> {
     match value {
         1 => Ok(session::SendTap::Input),
-        2 => Ok(session::SendTap::PostInputBuiltins),
-        3 => Ok(session::SendTap::PostSimd1),
-        4 => Ok(session::SendTap::PostDynamic),
-        5 => Ok(session::SendTap::PostSimd2PreFader),
+        2 => Ok(session::SendTap::PostInput),
+        3 => Ok(session::SendTap::InsertSend),
+        4 => Ok(session::SendTap::InsertReturn),
+        5 => Ok(session::SendTap::PreFader),
         6 => Ok(session::SendTap::PostFader),
-        7 => Ok(session::SendTap::PostMatrix),
+        7 => Ok(session::SendTap::PostPan),
         _ => Err(DecodeError::InvalidTlv),
     }
 }

@@ -21,7 +21,7 @@ function observationDocument() {
   assert.ok(compressor && gate);
   return sessionDocument({
     effects: {
-      dynamic: [
+      inserts: [
         effectEntry("comp", compressor.id, compressor.parameters.map((row) => ({
           id: row.id, unit: row.unitName, value: row.default, channel: "both",
         }))),
@@ -34,7 +34,7 @@ function observationDocument() {
 }
 
 function selection(effectSlotId, channels = "both") {
-  return { trackId: "t", rack: "dynamic", effectSlotId, tapId: 1, channels };
+  return { trackId: "t", rack: "inserts", effectSlotId, tapId: 1, channels };
 }
 
 function feed(engine, block) {
@@ -62,16 +62,16 @@ function injectedOwner() {
   let timer;
   let submitHook;
   let readHook;
-  let consoleHook;
+  let liveControlHook;
   let readCount = 0;
   let submitCount = 0;
   const map = {
     bindings: [{
-      trackId: "t", rack: "dynamic", effectSlotId: "comp", effectIndex: 0,
+      trackId: "t", rack: "inserts", effectSlotId: "comp", effectIndex: 0,
       nativeEffectId: "miso.compressor", tapIds: [1],
     }],
   };
-  const console = {
+  const liveControls = {
     edit: {
       track: () => ({
         effect: () => ({
@@ -91,7 +91,7 @@ function injectedOwner() {
   };
   const owner = new ObservationSubscriptionOwner({
     observationMap: () => map,
-    console: () => consoleHook === undefined ? console : consoleHook(),
+    liveControls: () => liveControlHook === undefined ? liveControls : liveControlHook(),
     readObservations: async (selections) => {
       readCount += 1;
       if (readHook) await readHook();
@@ -115,12 +115,12 @@ function injectedOwner() {
   return {
     owner,
     map,
-    console,
+    liveControls,
     fire: () => timer?.(),
     setSequence: (value) => { sequence = value; },
     setSubmit: (hook) => { submitHook = hook; },
     setRead: (hook) => { readHook = hook; },
-    setConsole: (hook) => { consoleHook = hook; },
+    setLiveControls: (hook) => { liveControlHook = hook; },
     readCount: () => readCount,
     submitCount: () => submitCount,
   };
@@ -132,7 +132,7 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
   test("shares bindings, preserves owned rows, guards manual edits, and closes last owner", async () => {
     const engine = await createOfflineEngine(observationDocument(), {
       asset,
-      console: { commandQueueRecords: 64, observationTaps: 4 },
+      liveControls: { commandQueueRecords: 64, observationTaps: 4 },
     });
     const compLeft = selection("comp", "left");
     const gateRight = selection("gate", "right");
@@ -145,9 +145,9 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
       });
       assert.equal(first.configuration.windowBlocks, 2);
       assert.deepEqual(first.readLatest().map((row) => row.status), ["pending", "pending"]);
-      const console = engine.console();
+      const liveControls = engine.liveControls();
       await assert.rejects(
-        () => console.submit(console.edit.track("t").effect("dynamic", 0, "miso.compressor")
+        () => liveControls.submit(liveControls.edit.track("t").effect("inserts", 0, "miso.compressor")
           .observe("Gain Reduction", false, 2)),
         /conflict/,
       );
@@ -191,7 +191,7 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
   test("invalidates a handle at headless replacement", async () => {
     const engine = await createOfflineEngine(observationDocument(), {
       asset,
-      console: { commandQueueRecords: 64, observationTaps: 2 },
+      liveControls: { commandQueueRecords: 64, observationTaps: 2 },
     });
     const sub = await engine.subscribeObservations({ selections: [selection("comp")], windowBlocks: 1 });
     try {
@@ -210,7 +210,7 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
     const pending = harness.owner.subscribe({ selections: [injectedSelection], windowBlocks: 1 });
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.throws(
-      () => harness.owner.beforeConsoleSubmit([{ kind: "observeUnsubscribe" }]),
+      () => harness.owner.beforeLiveControlSubmit([{ kind: "observeUnsubscribe" }]),
       /conflict/,
     );
     releaseSubmit();
@@ -233,7 +233,7 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
 
     const mutationHarness = injectedOwner();
     mutationHarness.map.bindings.push({
-      trackId: "t", rack: "dynamic", effectSlotId: "gate", effectIndex: 1,
+      trackId: "t", rack: "inserts", effectSlotId: "gate", effectIndex: 1,
       nativeEffectId: "miso.compressor", tapIds: [1],
     });
     const managed = (await mutationHarness.owner.subscribe({
@@ -305,12 +305,12 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
     await joining.close();
 
     const epochHarness = injectedOwner();
-    let releaseConsole;
-    epochHarness.setConsole(() => new Promise((resolve) => { releaseConsole = resolve; }));
+    let releaseLiveControls;
+    epochHarness.setLiveControls(() => new Promise((resolve) => { releaseLiveControls = resolve; }));
     const stale = epochHarness.owner.subscribe({ selections: [injectedSelection], windowBlocks: 1 });
     await new Promise((resolve) => setTimeout(resolve, 0));
     epochHarness.owner.invalidate();
-    releaseConsole(epochHarness.console);
+    releaseLiveControls(epochHarness.liveControls);
     await assert.rejects(stale, /owner changed/);
     assert.equal(epochHarness.submitCount(), 0);
   });
@@ -328,7 +328,7 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
       () => new ObservationSubscriptionOwner({
         observationMap: () => harness.map,
         readObservations: () => [],
-        console: () => harness.console,
+        liveControls: () => harness.liveControls,
       }, { maximumBindings: 257 }),
       /maximumBindings.*256/,
     );

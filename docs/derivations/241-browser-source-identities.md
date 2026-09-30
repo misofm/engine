@@ -1,5 +1,12 @@
 # Issue #241 follow-up — canonical source identities for the browser-v1 and qualification fixtures
 
+> **Names since #1095.** The qualification harness's "console" row is the live-control row.
+> `runConsoleQualification`, `CONSOLE_*`, `consoleDocument`, the result key `console` and the
+> source id `console-source` are now `runLiveControlQualification`, `LIVE_CONTROL_*`,
+> `liveControlDocument`, `liveControls` and `live-control-source`, and the text below uses the new
+> names. Document paths keep their spelling of the time: the documents are canonical JSON since
+> #338, and `console-session` is `live-control-session.json` since #1095.
+
 `04d291dd` (`Implement canonical PCM source schema`) replaced the nested
 `content = { identity, locator }` / `mapping.region` source shape with the flat
 `{ id, content, channels, bit_depth, frames }` row. In the web browser fixtures the migration
@@ -116,14 +123,14 @@ One trap is worth naming. `qualification.js::pcmDigest` — the function behind 
 `expectedDigest`/`renderedDigest` render pins — serializes **planar** (all of channel 0, then all of
 channel 1). That is a different question and a different answer. `STEM_IDENTITY_V1` identity is
 **interleaved** frame-major. The two layouts agree only for a mono or a constant-across-channels
-source, so reusing `pcmDigest` here would have produced a right-looking wrong number on the console
-and stall rows and a coincidentally right one on the observation row.
+source, so reusing `pcmDigest` here would have produced a right-looking wrong number on the
+live-control and stall rows and a coincidentally right one on the observation row.
 
 ## 4. `qualification/console-session.toml` — 16,640 frames
 
-`runConsoleQualification` feeds `CONSOLE_BLOCKS = 130` blocks (`130 * 128 = 16640` frames, one full
-128-block telemetry window plus slack) from `qualification.js::sourcePlanes(block)`. With the global
-frame index `n = block * 128 + frame`, that generator is
+`runLiveControlQualification` feeds `LIVE_CONTROL_BLOCKS = 130` blocks (`130 * 128 = 16640` frames,
+one full 128-block telemetry window plus slack) from `qualification.js::sourcePlanes(block)`. With
+the global frame index `n = block * 128 + frame`, that generator is
 
 ```
 left[n]  =  (n + 1) / 8192        (= (n + 1) * 2^-13)
@@ -139,8 +146,9 @@ exact 15-bit significand: the f64 arithmetic JavaScript performs and the f32 sto
 blake3 = 965bddf2dc4159cd2e3cf9826ceed5a5fdd0e1774ebba4e5c73052a80b06e5ff
 ```
 
-The console row's own gate is unaffected: its `expectedDigest` is the *rendered* output after the
-matrix retarget halves the left coefficient, which is a function of this PCM, not of this identity.
+The live-control row's own gate is unaffected: its `expectedDigest` is the *rendered* output after
+the matrix retarget halves the left coefficient, which is a function of this PCM, not of this
+identity.
 
 ## 5. `qualification/observation-session.toml` — 2,048 frames
 
@@ -175,16 +183,16 @@ blake3 = cdd579231aadf4a1c6d53b4bcaa435cd707bdc81fb8ec3377c3be0e2c25d2324
 ```
 
 It is *not* a prefix relation on the digest — BLAKE3-256 of a prefix shares nothing with BLAKE3-256 of the
-whole — which is exactly why the console and stall documents, fed by one generator, must still
+whole — which is exactly why the live-control and stall documents, fed by one generator, must still
 carry two different identities. Sharing one would be the #241 defect again in a new spelling.
 
 ## Reproduction — all five distinct identities
 
-`hosts/host-web/qualification/session-identities.mjs` derives the console, observation, and stall
-rows from the harness's own exported PCM generators with the browser's BLAKE3 implementation.
+`hosts/host-web/qualification/session-identities.mjs` derives the live-control, observation, and
+stall rows from the harness's own exported PCM generators with the browser's BLAKE3 implementation.
 
 When this derivation was written, the repository's native reference oracle (`stem-hasher`, in
-`raw` mode over each canonical preimage) agreed on all three: `965bddf2…` (console, 16,640
+`raw` mode over each canonical preimage) agreed on all three: `965bddf2…` (live-control, 16,640
 frames), `cdd57923…` (stall, 5,120 frames) and `0b3c2abe…` (observation, 2,048 frames), each
 stereo `32f`. #1035 removed `stem-hasher` and the engine now carries no hashing tool
 (`docs/STEM_IDENTITY_V1.md`, "Implementations and the corpus gate"); any BLAKE3-256 implementation
@@ -204,7 +212,7 @@ feeds), serializes per `STEM_IDENTITY_V1`, and requires the document to carry th
 verbatim, shape and identity together:
 
 ```
-{ id = "console-source", content = "blake3:…", channels = 2, bit_depth = "32f", frames = 16640 },
+{ id = "live-control-source", content = "blake3:…", channels = 2, bit_depth = "32f", frames = 16640 },
 ```
 
 A pinned hex string would need editing in step with any generator change, and "edited out of step"
@@ -224,7 +232,7 @@ and `host.sessionMap()` returns track and tap structure only — the harness rea
 `^blake3:[0-9a-f]{64}$` grammar test, and `visit.rs`, which re-serializes it into the canonical
 document form; no resolver ever fetches bytes by identity on this leg, and the PCM arrives instead
 through `miso_engine_web_v1_source_submit`. Every digest the qualification gates compare
-(`corpus.nativeDigest`, `console.expectedDigest`/`renderedDigest`, `stall.expectedDigest`/
+(`corpus.nativeDigest`, `liveControls.expectedDigest`/`renderedDigest`, `stall.expectedDigest`/
 `renderedDigest`, the observation rows' `identicalAudio`) is computed from rendered or fed PCM, so
 none of them can see this edit. Each fix also substitutes 64 hex characters for 64, so
 `console-session.toml` stays 1,265 bytes, `stall-session.toml` 1,263, and

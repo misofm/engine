@@ -15,7 +15,7 @@ const SAMPLE_RATE = 48000;
 const BUFFER_SOURCE_ID = 2;
 const BUFFER_SOURCE_PCM = 3;
 const BUFFER_OUTPUT_PCM = 5;
-// Issue #137 D1: the live-console command path.
+// Issue #137 D1: the live-control command path.
 const BUFFER_COMMAND = 6;
 const COMMAND_RECORD_BYTES = ABI_LAYOUT.commandRecord.bytes;
 const COMMAND_QUEUE_RECORDS = 4;
@@ -86,7 +86,7 @@ function resources(exports, handle) {
   return report;
 }
 
-function boot(exports, document, consoleWords = [0n, 0n, 0n, 0n]) {
+function boot(exports, document, liveControlWords = [0n, 0n, 0n, 0n]) {
   const pointer = exports.miso_engine_web_v1_boot_options_ptr();
   assert.notEqual(pointer, 0);
   const view = new DataView(exports.memory.buffer, pointer, BOOT_OPTIONS_BYTES);
@@ -99,7 +99,7 @@ function boot(exports, document, consoleWords = [0n, 0n, 0n, 0n]) {
   view.setUint32(16, QUANTUM, true);
   view.setUint32(20, 0, true);
   view.setBigUint64(24, 0n, true);
-  consoleWords.forEach((value, index) => view.setBigUint64(32 + index * 8, value, true));
+  liveControlWords.forEach((value, index) => view.setBigUint64(32 + index * 8, value, true));
   const documentPointer = exports.miso_engine_web_v1_document_ptr(document.byteLength);
   assert.notEqual(documentPointer, 0);
   new Uint8Array(exports.memory.buffer, documentPointer, document.byteLength).set(document);
@@ -114,6 +114,10 @@ const structureField = (structure, name) => ABI_LAYOUT.structures[structure].fie
   .find((field) => field.name === name).offset;
 const resultCode = (name) => ABI_LAYOUT.constants.resultCodes.find((row) => row.name === name).value;
 const commandReason = (name) => ABI_LAYOUT.constants.commandReasons.find((row) => row.name === name).value;
+// The effect racks (#1096): `inserts` and `console`. Every other code, the retired ones among them,
+// is an unknown rack.
+const EFFECT_RACKS = new Set(ABI_LAYOUT.constants.racks
+  .filter((row) => row.name !== "notApplicable").map((row) => row.value));
 
 /// Encode only the generated wire record. Preparation and admission stay in the shared helper.
 function encodeCommands(records) {
@@ -167,9 +171,11 @@ function preparedControl(exports, handle) {
         config: new Uint8Array(exports.memory.buffer, pointer, configBytes).slice() };
     }
     const reason = result === resultCode("invalidArgument")
-      ? address.trackIndex >= exports.miso_engine_web_v1_console_track_count(handle)
+      ? address.trackIndex >= exports.miso_engine_web_v1_live_control_track_count(handle)
         ? commandReason("unknownTrack")
-        : address.rack > 2 ? commandReason("unknownRack") : commandReason("unknownEffect")
+        : !EFFECT_RACKS.has(address.rack)
+          ? commandReason("unknownRack")
+          : commandReason("unknownEffect")
       : commandReason("none");
     return { result, reason, config: new Uint8Array(0) };
   };
@@ -371,7 +377,7 @@ async function runCommandTimeline(modulePath, sessionDocument, sourceId) {
     sessionDocument,
     [BigInt(COMMAND_QUEUE_RECORDS), 0n, 0n, 0n],
   );
-  assert.equal(exports.miso_engine_web_v1_console_track_count(handle), 1);
+  assert.equal(exports.miso_engine_web_v1_live_control_track_count(handle), 1);
   const control = preparedControl(exports, handle);
 
   const memoryBuffer = exports.memory.buffer;
@@ -462,7 +468,7 @@ async function runObservationTimeline(modulePath, sessionDocument, sourceId, tap
     BigInt(COMMAND_QUEUE_RECORDS), BigInt(OBSERVATION_WINDOW_BLOCKS), taps, taps === 0n ? 0n : 1n,
   ]);
   const control = preparedControl(exports, handle);
-  assert.equal(exports.miso_engine_web_v1_console_track_count(handle), 1);
+  assert.equal(exports.miso_engine_web_v1_live_control_track_count(handle), 1);
   const resourceReport = resources(exports, handle);
   assert.equal(
     resourceReport.observationRetainedBytes === "0",

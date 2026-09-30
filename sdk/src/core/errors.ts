@@ -115,10 +115,21 @@ export class MisoEngineError extends Error {
   }
 }
 
-/** A programming error in SDK usage -- never an engine refusal. */
+/**
+ * A programming error in SDK usage -- never an engine refusal.
+ *
+ * When the SDK refuses, before boot, something the engine would refuse too -- a console entry out
+ * of slot order, an ineligible console effect -- it names the engine's own diagnostic code, so a
+ * caller sees one vocabulary whichever side answered first. `diagnosticCode` is that code, and it
+ * is absent for a refusal the engine has no counterpart for (an API misuse such as a console
+ * declared after a track).
+ */
 export class MisoUsageError extends Error {
-  constructor(message: string) {
-    super(message);
+  readonly diagnosticCode: string | undefined;
+
+  constructor(message: string, diagnosticCode?: string) {
+    super(diagnosticCode === undefined ? message : `${message} (${diagnosticCode})`);
     this.name = "MisoUsageError";
+    this.diagnosticCode = diagnosticCode;
   }
 }

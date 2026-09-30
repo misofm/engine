@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "session_id": "web-browser-console",
+  "session_id": "web-browser-live-controls",
   "revision": "1",
   "sample_rate_hz": 48000,
   "quantum_frames": 128,
@@ -15,13 +15,17 @@
   },
   "sources": [
     {
-      "id": "console-source",
+      "id": "live-control-source",
       "content": "blake3:965bddf2dc4159cd2e3cf9826ceed5a5fdd0e1774ebba4e5c73052a80b06e5ff",
       "channels": 2,
       "bit_depth": "32f",
       "frames": "16640"
     }
   ],
+  "console": {
+    "pre_insert": [],
+    "post_insert": []
+  },
   "submixes": [],
   "outputs": [
     {
@@ -34,7 +38,7 @@
       "source": {
         "kind": "track",
         "track_id": "track",
-        "tap": "post_matrix"
+        "tap": "post_pan"
       },
       "destination": {
         "kind": "output_input",
@@ -53,7 +57,7 @@
   "tracks": [
     {
       "id": "track",
-      "source_id": "console-source",
+      "source_id": "live-control-source",
       "left_source_channel": 0,
       "right_source_channel": 1,
       "builtins": {
@@ -72,13 +76,8 @@
           "delay_samples": 0
         }
       },
-      "simd1": {
-        "effects": []
-      },
-      "dynamic": {
-        "effects": []
-      },
-      "simd2": {
+      "console": [],
+      "inserts": {
         "effects": []
       },
       "fader": {

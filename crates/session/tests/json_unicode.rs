@@ -7,7 +7,7 @@ const CANONICAL: &str = include_str!("../../../fixtures/session/v1/canonical.jso
 #[test]
 fn escaped_and_direct_unicode_decode_equally_and_emit_directly() {
     let mut model = parse_session_json(CANONICAL).expect("fixture");
-    model.tracks[0].dynamic.effects[0].identity = session::EffectIdentity::ThirdPartyCid {
+    model.tracks[0].inserts.effects[0].identity = session::EffectIdentity::ThirdPartyCid {
         cid: "bafy.\u{e9}\u{2028}\u{1f642}".to_owned(),
     };
     let direct = canonical_session_json(&model).expect("direct Unicode");

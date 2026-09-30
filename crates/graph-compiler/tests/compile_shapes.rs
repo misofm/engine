@@ -23,7 +23,10 @@ use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use builtins::{MeterConfig, MeterHandle, MeterTap};
 use builtins_compiler::{BuiltinCompileCaps, MeterRequest, prepare_session_builtins};
 use conformance::DualAccumulatorDelayFactory;
-use effect_compiler::{EffectCompileCaps, EffectPreparedSession, prepare_native_session_effects};
+use effect_compiler::{
+    CONSOLE_ELIGIBLE_EFFECTS, EffectCompileCaps, EffectPreparedSession,
+    prepare_native_session_effects_with_console_eligibility,
+};
 use effect_contract::{NativeEffectFactory, NativeEffectRegistry};
 use engine::realtime::{PlanarBufferMut, PreparedRenderPlan, RenderError, RenderIo, RenderTime};
 use graph::{
@@ -36,9 +39,10 @@ use graph_compiler::{
 };
 use rack::RackLocation;
 use session::{
-    ChannelMatrix, CompileCaps, CompiledSession, EffectIdentity, EffectParam, ParameterChannel,
-    ParameterUnit, Route, RouteDestination, RouteSource, SendTap, SessionModel, Sidechain,
-    SidechainDeclaration, StableId, Submix, compile_session, parse_session_json,
+    ChannelMatrix, CompileCaps, CompiledSession, ConsoleEntry, ConsoleSlot, EffectIdentity,
+    EffectParam, ParameterChannel, ParameterUnit, Route, RouteDestination, RouteSource, SendTap,
+    SessionModel, Sidechain, SidechainDeclaration, StableId, Submix, compile_session,
+    parse_session_json,
 };
 
 const SESSION: &str = include_str!("../../../fixtures/session/v1/canonical.json");
@@ -95,7 +99,11 @@ fn prepared_effects(session: &CompiledSession) -> EffectPreparedSession {
         Box::new(DualAccumulatorDelayFactory::correct()) as Box<dyn NativeEffectFactory>
     ])
     .expect("conformance registry");
-    prepare_native_session_effects(
+    // The seven-tap fixture's console slots are this test double, admitted beside the launch
+    // list for this registry only.
+    let mut console_eligible = CONSOLE_ELIGIBLE_EFFECTS.to_vec();
+    console_eligible.push("conformance.delay");
+    prepare_native_session_effects_with_console_eligibility(
         session,
         &registry,
         EffectCompileCaps {
@@ -103,6 +111,7 @@ fn prepared_effects(session: &CompiledSession) -> EffectPreparedSession {
             maximum_scratch_bytes: u64::MAX,
             maximum_automation_spans_per_block: u32::MAX,
         },
+        &console_eligible,
     )
     .expect("prepared effects")
 }
@@ -203,9 +212,8 @@ fn mixed_twelve_track_session() -> CompiledSession {
             track.builtins.right.trim_db = 2.0 - lane * 0.2;
             track.builtins.right.hpf_hz = 60.0 + lane * 2.0;
             track.builtins.right.lpf_hz = 14_000.0 - lane * 80.0;
-            track.dynamic.effects.clear();
-            track.simd2.effects.clear();
-            let mut effect = template.dynamic.effects[0].clone();
+            track.inserts.effects.clear();
+            let mut effect = template.inserts.effects[0].clone();
             effect.id = stable("delay-main");
             effect.identity = EffectIdentity::Native {
                 effect_id: stable("conformance.delay"),
@@ -228,7 +236,9 @@ fn mixed_twelve_track_session() -> CompiledSession {
                     port_id: stable("sidechain-in"),
                 })
             };
-            track.simd1.effects = if matches!(index, 2 | 5) || index >= 10 {
+            // Per-track chains of different depths, and keyed ones, are inserts: a console slot
+            // runs on every track and takes no sidechain (decision 12).
+            track.inserts.effects = if matches!(index, 2 | 5) || index >= 10 {
                 vec![effect]
             } else {
                 let mut leading = effect.clone();
@@ -248,7 +258,7 @@ fn mixed_twelve_track_session() -> CompiledSession {
             next.id = stable(&format!("bank-route{index}"));
             next.source = RouteSource::Track {
                 track_id: track.id.clone(),
-                tap: SendTap::PostMatrix,
+                tap: SendTap::PostPan,
             };
             next
         })
@@ -306,7 +316,7 @@ fn mixed_rack_depths_bank_every_stage_and_leave_subsequences_and_sidechains_scal
         // remainder and render per node, beside the two connected-sidechain fallbacks.
         let cohorts = &artifact.report().rack_cohorts;
         assert_eq!(cohorts.dispatch, dispatch);
-        let bound_groups: Vec<_> = cohorts.bound_groups_in(RackLocation::Simd1).collect();
+        let bound_groups: Vec<_> = cohorts.bound_groups_in(RackLocation::Dynamic).collect();
         assert_eq!(
             bound_groups.len(),
             FULL_CHAIN_TRACKS / lanes,
@@ -319,7 +329,7 @@ fn mixed_rack_depths_bank_every_stage_and_leave_subsequences_and_sidechains_scal
                 .iter()
                 .all(|group| group.active_count() == lanes)
         );
-        let bound_slots: Vec<_> = cohorts.bound_slots_in(RackLocation::Simd1).collect();
+        let bound_slots: Vec<_> = cohorts.bound_slots_in(RackLocation::Dynamic).collect();
         assert_eq!(
             bound_slots.len(),
             2 * FULL_CHAIN_TRACKS / lanes,
@@ -339,7 +349,7 @@ fn mixed_rack_depths_bank_every_stage_and_leave_subsequences_and_sidechains_scal
             "{dispatch:?}: the report is the bound plan"
         );
         let mut scalar: Vec<_> = cohorts
-            .scalar_in(RackLocation::Simd1)
+            .scalar_in(RackLocation::Dynamic)
             .into_iter()
             .map(|member| member.track_id.as_str().to_owned())
             .collect();
@@ -359,16 +369,16 @@ fn mixed_rack_depths_bank_every_stage_and_leave_subsequences_and_sidechains_scal
 fn taps() -> [SendTap; 7] {
     [
         SendTap::Input,
-        SendTap::PostInputBuiltins,
-        SendTap::PostSimd1,
-        SendTap::PostDynamic,
-        SendTap::PostSimd2PreFader,
+        SendTap::PostInput,
+        SendTap::InsertSend,
+        SendTap::InsertReturn,
+        SendTap::PreFader,
         SendTap::PostFader,
-        SendTap::PostMatrix,
+        SendTap::PostPan,
     ]
 }
 
-/// 256 tracks, every fourth carrying a dynamic-rack delay and every eighth a routed sidechain;
+/// 256 tracks, every fourth carrying an insert delay and every eighth a routed sidechain;
 /// 992 track routes into 32 submixes from all seven taps, and 32 submix routes to the output.
 fn representative_console() -> SessionModel {
     let mut model = parse_session_json(SESSION).expect("seed session");
@@ -384,11 +394,10 @@ fn representative_console() -> SessionModel {
         .map(|index| {
             let mut track = track_template.clone();
             track.id = stable(&format!("track-{index:03}"));
-            track.simd1.effects.clear();
-            track.simd2.effects.clear();
-            track.dynamic.effects.clear();
+            track.console.clear();
+            track.inserts.effects.clear();
             if index % 4 == 1 {
-                let mut effect = track_template.dynamic.effects[0].clone();
+                let mut effect = track_template.inserts.effects[0].clone();
                 effect.id = stable("delay");
                 effect.identity = EffectIdentity::Native {
                     effect_id: stable("conformance.delay"),
@@ -412,7 +421,7 @@ fn representative_console() -> SessionModel {
                 } else {
                     SidechainDeclaration::None
                 };
-                track.dynamic.effects.push(effect);
+                track.inserts.effects.push(effect);
             }
             track
         })
@@ -460,15 +469,9 @@ fn representative_console_compiles_with_builtins_and_reports_its_shape() {
     let effects: Vec<_> = model
         .tracks
         .iter()
-        .flat_map(|track| {
-            track
-                .simd1
-                .effects
-                .iter()
-                .chain(&track.dynamic.effects)
-                .chain(&track.simd2.effects)
-        })
+        .flat_map(|track| &track.inserts.effects)
         .collect();
+    assert!(model.console.slots().next().is_none());
     assert_eq!(effects.len(), 64);
     assert_eq!(
         effects
@@ -493,22 +496,33 @@ fn representative_console_compiles_with_builtins_and_reports_its_shape() {
     assert!(!evidence.dot.is_empty());
 }
 
-/// The canonical session with the conformance delay in each of track `vocal`'s three racks, and
-/// a meter at each of its seven taps: one-quantum windows, a one-slot queue, reset generation 7.
+/// The canonical session with the conformance delay in each of track `vocal`'s three lowered
+/// racks -- a `pre_insert` slot, an insert and a `post_insert` slot -- and a meter at each of its
+/// seven taps: one-quantum windows, a one-slot queue, reset generation 7.
 fn seven_tap_artifact() -> PreparedGraphBuiltinsArtifact {
     let mut model = parse_session_json(SESSION).expect("canonical session");
     model.automation.clear();
-    let mut delay = model.tracks[0].dynamic.effects[0].clone();
+    let mut delay = model.tracks[0].inserts.effects[0].clone();
     delay.identity = EffectIdentity::Native {
         effect_id: stable("conformance.delay"),
     };
     delay.params.clear();
-    delay.id = stable("simd1-delay");
-    model.tracks[0].simd1.effects = vec![delay.clone()];
+    let slot = |name: &str| ConsoleSlot {
+        slot: stable(name),
+        identity: delay.identity.clone(),
+        quality: delay.quality,
+        link_mode: delay.link_mode,
+    };
+    let entry = |name: &str| ConsoleEntry {
+        slot: stable(name),
+        bypass: delay.bypass,
+        params: Vec::new(),
+    };
+    model.console.pre_insert = vec![slot("simd1-delay")];
+    model.console.post_insert = vec![slot("simd2-delay")];
+    model.tracks[0].console = vec![entry("simd1-delay"), entry("simd2-delay")];
     delay.id = stable("dynamic-delay");
-    model.tracks[0].dynamic.effects = vec![delay.clone()];
-    delay.id = stable("simd2-delay");
-    model.tracks[0].simd2.effects = vec![delay];
+    model.tracks[0].inserts.effects = vec![delay];
     let session = compile_session(&model, compile_caps()).expect("canonical session");
     assert_eq!(session.quantum().0 as usize, QUANTUM);
     let config = MeterConfig {

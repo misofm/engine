@@ -51,38 +51,45 @@ assert intended["sample_rate_hz"] == mono["sample_rate_hz"] == 48000
 assert intended["quantum_frames"] == mono["quantum_frames"] == 128
 assert intended["sources"] == mono["sources"]
 assert len(intended["tracks"]) == len(mono["tracks"]) == 64
-for track in intended["tracks"]:
-    ids = [e["identity"]["effect_id"] for e in track["simd1"]["effects"]]
+# Decision 12: EQ -> compressor are the session's `pre_insert` slots and the limiter its
+# `post_insert` slot (with the `maximum` link); every track carries all three, in slot order, and
+# no inserts.
+for document in (intended, mono):
+    console = document["console"]
+    ids = [s["identity"]["effect_id"] for s in console["pre_insert"]]
     assert ids == ["miso.parametric-eq", "miso.compressor"]
-    assert track["dynamic"]["effects"] == []
-    limiter = track["simd2"]["effects"]
+    limiter = console["post_insert"]
     assert len(limiter) == 1 and limiter[0]["identity"]["effect_id"] == "miso.true-peak-limiter"
     assert limiter[0]["link_mode"] == "maximum"
-assert len({t["simd2"]["effects"][0]["params"][0]["value"] for t in intended["tracks"]}) == 64
+    slots = [s["slot"] for s in console["pre_insert"] + console["post_insert"]]
+    for track in document["tracks"]:
+        assert [entry["slot"] for entry in track["console"]] == slots
+        assert track["inserts"]["effects"] == []
+assert len({t["console"][2]["params"][0]["value"] for t in intended["tracks"]}) == 64
 for track in mono["tracks"]:
     assert track["left_source_channel"] == track["right_source_channel"] == 0
     assert track["builtins"]["left"] == track["builtins"]["right"]
-    for rack in ("simd1", "dynamic", "simd2"):
-        for effect in track[rack]["effects"]:
-            values = {(p["parameter_id"], p["channel"], p["unit"]): p["value"] for p in effect["params"]}
-            for (parameter_id, channel, unit), value in values.items():
-                if channel == "left":
-                    assert values[(parameter_id, "right", unit)] == value
+    for entry in track["console"]:
+        values = {(p["parameter_id"], p["channel"], p["unit"]): p["value"] for p in entry["params"]}
+        for (parameter_id, channel, unit), value in values.items():
+            if channel == "left":
+                assert values[(parameter_id, "right", unit)] == value
 assert sum(t["fader"]["left_db"] != t["fader"]["right_db"] for t in mono["tracks"]) == 49
 assert sum(t["pan"]["left"] != t["pan"]["right"] for t in mono["tracks"]) == 50
-# #1085: the app shape. The standing strip's own EQ and compressor on `dynamic`, no limiter, and
-# both effects bypassed on exactly the tracks whose index is 2 mod 3.
+# #1085: the app shape, in decision 12's console shape since #1093. The standing EQ and compressor
+# slots are the session's `pre_insert`, with no `post_insert` limiter; each track's two entries are
+# its standing entries, both bypassed on exactly the tracks whose index is 2 mod 3; no inserts.
 assert app["session_id"] == "console-sixty-four-track-app"
-outer = lambda d: {k: v for k, v in d.items() if k not in ("session_id", "tracks")}
+outer = lambda d: {k: v for k, v in d.items() if k not in ("session_id", "console", "tracks")}
 assert outer(app) == outer(intended) and len(app["tracks"]) == 64
+assert app["console"] == {"pre_insert": intended["console"]["pre_insert"], "post_insert": []}
 for index, (track, standing) in enumerate(zip(app["tracks"], intended["tracks"])):
-    assert track["simd1"]["effects"] == [] and track["simd2"]["effects"] == []
-    moved = [dict(e, bypass=False) for e in track["dynamic"]["effects"]]
-    assert moved == standing["simd1"]["effects"]
-    assert all(e["bypass"] == (index % 3 == 2) for e in track["dynamic"]["effects"])
-    rest = lambda t: {k: v for k, v in t.items() if k not in ("simd1", "dynamic", "simd2")}
+    assert track["inserts"]["effects"] == []
+    assert [dict(e, bypass=False) for e in track["console"]] == standing["console"][:2]
+    assert all(e["bypass"] == (index % 3 == 2) for e in track["console"])
+    rest = lambda t: {k: v for k, v in t.items() if k != "console"}
     assert rest(track) == rest(standing)
-assert sum(e["bypass"] for t in app["tracks"] for e in t["dynamic"]["effects"]) == 2 * 21
+assert sum(e["bypass"] for t in app["tracks"] for e in t["console"]) == 2 * 21
 PY
 
 printf 'console session fixtures: ok (canonical regeneration and 64-track intended/mono/app witnesses)\n'

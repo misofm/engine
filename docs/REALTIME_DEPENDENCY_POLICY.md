@@ -253,10 +253,10 @@ have run them. Both are now resolved (issue #359 WP-2/WP-5b):
 - `observation_cost_classes_are_separated_from_a_computed_scan_in_release` (#143, in
   `crates/host-core/tests/effect_observation.rs`, `--ignored`, release only) failed
   deterministically. Arming eight taps costs nothing measurable — `AllArmed` sits at or below
-  `CapacityUnarmed` — while the old assertion subtracted the `NoConsole` baseline and so charged
-  observation for the cost of a console *existing*. It is rebaselined to assert the claim that is
-  actually load-bearing: `armed <= unarmed_with_console * 1.10 + 50 µs`, i.e. arming is not
-  measurably slower than an attached-but-unarmed console.
+  `CapacityUnarmed` — while the old assertion subtracted the `NoLiveControls` baseline and so
+  charged observation for the cost of live controls *existing*. It is rebaselined to assert the
+  claim that is actually load-bearing: `armed <= unarmed_with_live_controls * 1.10 + 50 µs`, i.e. arming is not
+  measurably slower than attached-but-unarmed live controls.
 - `a_million_windows_are_read_whole_and_in_order` (#160) (#143, in
   `crates/engine/tests/observation_transport.rs`) failed intermittently: three of five
   full-workspace release runs, against 20 of 20 passing standalone release reruns. It was

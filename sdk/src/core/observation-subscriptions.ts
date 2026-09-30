@@ -2,7 +2,7 @@ import { ABI_LAYOUT } from "../generated/abi.ts";
 import { constantValue } from "./abi.ts";
 import { CATALOG } from "../generated/catalog.ts";
 import type { CommandReport } from "./boundary.ts";
-import { EngineConsole } from "./console.ts";
+import { EngineLiveControls } from "./live-controls.ts";
 import { MisoEngineError, MisoUsageError } from "./errors.ts";
 import {
   MAXIMUM_OBSERVATION_READS,
@@ -128,7 +128,7 @@ export interface ObservationSubscriptionScheduler {
 export interface ObservationSubscriptionTransport {
   observationMap(): MaybePromise<ObservationMap>;
   readObservations(selections: readonly ObservationSelection[]): MaybePromise<readonly ObservationReadResult[]>;
-  console(): MaybePromise<EngineConsole>;
+  liveControls(): MaybePromise<EngineLiveControls>;
   /** Optional live-response capture/evaluation seam owned by the same lifetime. */
   readonly responseRead?: (
     request: TrackResponseQuery,
@@ -255,8 +255,8 @@ function normalizedRequest(
   if (request.selections.length > subscriptionLimits.maximumSelections) {
     throw new MisoUsageError(`observation subscription selections are capped at ${subscriptionLimits.maximumSelections}`);
   }
-  // `readObservations` also validates, but admission must happen before the console transaction.
-  // Calling it here avoids reserving a binding for a malformed target.
+  // `readObservations` also validates, but admission must happen before the live-control
+  // transaction. Calling it here avoids reserving a binding for a malformed target.
   validateObservationSelections(request.selections);
   const selections = request.selections.map((selection) => cloneSelection(selection));
   if (!Number.isSafeInteger(request.windowBlocks)
@@ -540,11 +540,11 @@ export class ObservationSubscriptionOwner {
       }
       const preflight = await this.#preflight(newEntries, epoch);
       this.#assertCommandSize(newEntries.length);
-      const console = newEntries.length === 0 ? undefined : await this.#transport.console();
+      const liveControls = newEntries.length === 0 ? undefined : await this.#transport.liveControls();
       this.#assertEpoch(epoch);
       const edits = newEntries.map((entry) =>
-        this.#edit(console!, entry, true, normalized.configuration.windowBlocks));
-      const report = await this.#submit(console, edits, epoch);
+        this.#edit(liveControls!, entry, true, normalized.configuration.windowBlocks));
+      const report = await this.#submit(liveControls, edits, epoch);
       this.#assertEpoch(epoch);
       const appliedAtSample = report?.appliedAtSample ?? this.#existingSample(entries);
       const state = this.#newHandle(normalized.configuration, entries, normalized.callback, appliedAtSample);
@@ -610,19 +610,19 @@ export class ObservationSubscriptionOwner {
         return current.baseKey === entry.baseKey && binding?.refs === 1;
       }));
       const preflight = await this.#preflight(preflightEntries, epoch);
-      const console = disarm.length + newEntries.length === 0
+      const liveControls = disarm.length + newEntries.length === 0
         ? undefined
-        : await this.#transport.console();
+        : await this.#transport.liveControls();
       this.#assertEpoch(epoch);
       const edits: LaneEdit[] = [
         ...disarm.map((entry) => this.#edit(
-          console!, entry, false, this.#bindings.get(entry.key)!.windowBlocks,
+          liveControls!, entry, false, this.#bindings.get(entry.key)!.windowBlocks,
         )),
         ...newEntries.map((entry) => this.#edit(
-          console!, entry, true, normalized.configuration.windowBlocks,
+          liveControls!, entry, true, normalized.configuration.windowBlocks,
         )),
       ];
-      const report = await this.#submit(console, edits, epoch);
+      const report = await this.#submit(liveControls, edits, epoch);
       this.#assertEpoch(epoch);
       const appliedAtSample = report?.appliedAtSample ?? this.#existingSample(entries);
       disarm.forEach((entry) => this.#bindings.delete(entry.key));
@@ -683,12 +683,12 @@ export class ObservationSubscriptionOwner {
         return binding !== undefined && binding.refs === 1;
       });
       this.#assertCommandSize(disarm.length);
-      const console = disarm.length === 0 ? undefined : await this.#transport.console();
+      const liveControls = disarm.length === 0 ? undefined : await this.#transport.liveControls();
       this.#assertEpoch(epoch);
       const edits = disarm.map((entry) => this.#edit(
-        console!, entry, false, this.#bindings.get(entry.key)!.windowBlocks,
+        liveControls!, entry, false, this.#bindings.get(entry.key)!.windowBlocks,
       ));
-      const report = await this.#submit(console, edits, epoch);
+      const report = await this.#submit(liveControls, edits, epoch);
       this.#assertEpoch(epoch);
       if (report !== undefined && !report.ok) throw commandFailure("observation close was refused", report);
       disarm.forEach((entry) => this.#bindings.delete(entry.key));
@@ -751,8 +751,8 @@ export class ObservationSubscriptionOwner {
     return this.#spectrumHandles.size !== 0;
   }
 
-  /** Guard the public console's observation edits while this owner has managed bindings. */
-  beforeConsoleSubmit(edits: readonly LaneEdit[], managed = false): void {
+  /** Guard the public live controls' observation edits while this owner has managed bindings. */
+  beforeLiveControlSubmit(edits: readonly LaneEdit[], managed = false): void {
     if (managed) return;
     if (!this.#mutationBusy && this.#bindings.size === 0) return;
     if (edits.some((edit) => edit.kind === "observeSubscribe" || edit.kind === "observeUnsubscribe")) {
@@ -830,32 +830,33 @@ export class ObservationSubscriptionOwner {
   }
 
   #edit(
-    console: EngineConsole,
+    liveControls: EngineLiveControls,
     entry: ResolvedSelection,
     armed: boolean,
     windowBlocks: number,
   ): LaneEdit {
-    // `effect` and tap names come from the generated catalog after map validation. The console's
-    // generic type cannot express a runtime catalog row, so this is the one narrow cast at the seam.
-    return console.edit.track(entry.selection.trackId)
+    // `effect` and tap names come from the generated catalog after map validation. The live
+    // controls' generic type cannot express a runtime catalog row, so this is the one narrow cast
+    // at the seam.
+    return liveControls.edit.track(entry.selection.trackId)
       .effect(entry.selection.rack, entry.binding.effectIndex, entry.binding.nativeEffectId as never)
       .observe(tapName(entry.binding, entry.selection.tapId) as never, armed, windowBlocks);
   }
 
   async #submit(
-    console: EngineConsole | undefined,
+    liveControls: EngineLiveControls | undefined,
     edits: readonly LaneEdit[],
     epoch: bigint,
   ): Promise<CommandReport | undefined> {
     if (edits.length === 0) return undefined;
     this.#assertEpoch(epoch);
     let report: CommandReport;
-    const managedSubmit = (console as EngineConsole & {
+    const managedSubmit = (liveControls as EngineLiveControls & {
       readonly submitManaged?: (...edits: readonly LaneEdit[]) => Promise<CommandReport>;
     } | undefined)?.submitManaged;
     report = managedSubmit === undefined
-      ? await console!.submit(...edits)
-      : await managedSubmit.call(console, ...edits);
+      ? await liveControls!.submit(...edits)
+      : await managedSubmit.call(liveControls, ...edits);
     if (!report.ok) throw commandFailure("observation transaction was refused", report);
     return report;
   }

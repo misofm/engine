@@ -62,7 +62,7 @@ type HostFeed<Frame, Update> = {
  * The small shared lease reconciler is adapted from the adapter's HostFeed at
  * `misofm/engine-web-adapter/src/console.ts` as of source baseline
  * `f833303f146de7cbe1705fe88ae68a6d6e0d4e45`. It lives here so the SDK owns
- * measurement lifetime alongside its console and observation owners.
+ * measurement lifetime alongside its live-control and observation owners.
  */
 function createHostFeed<Frame, Update>(options: {
   readonly name: "meters" | "telemetry";
@@ -160,7 +160,7 @@ function createHostFeed<Frame, Update>(options: {
       if (closed) throw new MisoUsageError("the browser engine is closed");
       if (!options.available) {
         throw new MisoUsageError(
-          "this engine booted with no console attached; set policy.console and subscribe again",
+          "this engine booted with no live controls attached; set policy.liveControls and subscribe again",
         );
       }
       const subscription = { listener };

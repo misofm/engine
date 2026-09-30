@@ -1,4 +1,4 @@
-//! Console solo-in-place state, shared by every host that attaches a live console (issue #210).
+//! Live-control solo-in-place state, shared by every host that attaches live controls (issue #210).
 //!
 //! # Solo is 100% control plane
 //!
@@ -20,14 +20,14 @@
 //! # Why the host has to mirror user mute
 //!
 //! Once solo exists, the render side's `muted` flag holds the **effective** mute, and there is no
-//! host readback of it. So the host keeps [`ConsoleSoloState::user_mute`] -- the user's *intent*,
-//! initialized at preparation from the compiled session's baked fader mutes and updated on every
-//! admitted mute command. Un-soloing restores exactly that set, which is what makes
+//! host readback of it. So the host keeps [`LiveControlSoloState::user_mute`] -- the user's
+//! *intent*, initialized at preparation from the compiled session's baked fader mutes and updated
+//! on every admitted mute command. Un-soloing restores exactly that set, which is what makes
 //! snapshot/restore correct by construction: solo and user mute never overwrite each other.
 //!
 //! Restore is **per lane**. `TrackFaderRecord::Mute` carries one `muted` bool, so a track whose
-//! user mute is `[true, false]` needs two records, not one; the worst case for a whole console is
-//! `2 * track_count` records. [`ConsoleSoloState::track_delta`] is what states that bound.
+//! user mute is `[true, false]` needs two records, not one; the worst case for a whole session is
+//! `2 * track_count` records. [`LiveControlSoloState::track_delta`] is what states that bound.
 //!
 //! # Never emit a redundant mute record
 //!
@@ -40,17 +40,18 @@
 //!
 //! > a solo-derived record is emitted for exactly those lanes whose effective mute **changed**.
 //!
-//! [`ConsoleSoloState::emitted_mute`] is the mirror of what the render plane was last told, and
-//! [`ConsoleSoloState::track_delta`] is the difference between it and the composed effective mute.
+//! [`LiveControlSoloState::emitted_mute`] is the mirror of what the render plane was last told, and
+//! [`LiveControlSoloState::track_delta`] is the difference between it and the composed effective
+//! mute.
 //!
 //! # The transaction
 //!
 //! Command admission is all-or-nothing across every queue in a submission. Solo state is mutated
 //! while a submission is still being validated, so this type carries its own shadow: the first
-//! mutation of a transaction copies the live arrays aside, [`ConsoleSoloState::rollback`] restores
-//! them on any refusal, and [`ConsoleSoloState::commit`] closes the transaction once the records
-//! are actually in their queues. A refused submission therefore leaves host state exactly as it
-//! was -- the same contract the queues already keep.
+//! mutation of a transaction copies the live arrays aside, [`LiveControlSoloState::rollback`]
+//! restores them on any refusal, and [`LiveControlSoloState::commit`] closes the transaction once
+//! the records are actually in their queues. A refused submission therefore leaves host state
+//! exactly as it was -- the same contract the queues already keep.
 //!
 //! The shadow is allocated at preparation like every other array here. Nothing in this module
 //! allocates, and nothing in it runs on a render thread.
@@ -76,16 +77,16 @@ const fn covers(lanes: BuiltinLaneSelector, lane: usize) -> bool {
 ///
 /// At most two, because a lane selector carries one `muted` bool and a track has two lanes. Both
 /// lanes changing to the *same* value is one `Both` record -- which is exactly the record an
-/// explicit `mute` command with `channel = 2` lowers to, so a soloed console and an explicitly
-/// muted one put the same bytes in the same queue.
-pub type ConsoleMuteDelta = [Option<(BuiltinLaneSelector, bool)>; 2];
+/// explicit `mute` command with `channel = 2` lowers to, so a solo and an explicit mute put
+/// the same bytes in the same queue.
+pub type LiveControlMuteDelta = [Option<(BuiltinLaneSelector, bool)>; 2];
 
-/// Solo-in-place console state for one prepared session.
+/// Solo-in-place live-control state for one prepared session.
 ///
-/// Track indices are the canonical track order (`HostConsoleHandles::tracks`), which is the
+/// Track indices are the canonical track order (`HostLiveControlHandles::tracks`), which is the
 /// compiled session's normalized order and the same order every queue and meter slot uses.
 #[derive(Debug)]
-pub struct ConsoleSoloState {
+pub struct LiveControlSoloState {
     solo: Box<[bool]>,
     user_mute: Box<[[bool; 2]]>,
     emitted: Box<[[bool; 2]]>,
@@ -97,8 +98,8 @@ pub struct ConsoleSoloState {
     open: bool,
 }
 
-impl ConsoleSoloState {
-    /// Allocate console solo state for a session whose baked per-lane fader mutes are `mutes`.
+impl LiveControlSoloState {
+    /// Allocate live-control solo state for a session whose baked per-lane fader mutes are `mutes`.
     ///
     /// `mutes[t]` is `[left_mute, right_mute]` of track `t` as the compiled session declares it --
     /// the same words `track_parameters` bakes into the prepared fader section. Solo starts
@@ -129,7 +130,7 @@ impl ConsoleSoloState {
         })
     }
 
-    /// Tracks this console addresses.
+    /// Tracks these live controls address.
     #[must_use]
     pub const fn track_count(&self) -> usize {
         self.solo.len()
@@ -147,7 +148,8 @@ impl ConsoleSoloState {
         self.solo_count
     }
 
-    /// Whether one track's solo bit is engaged. `false` for an index this console has no track for.
+    /// Whether one track's solo bit is engaged. `false` for an index these live controls have no
+    /// track for.
     #[must_use]
     pub fn solo(&self, track: usize) -> bool {
         self.solo.get(track).copied().unwrap_or(false)
@@ -233,7 +235,7 @@ impl ConsoleSoloState {
 
     /// The records this track still owes -- never a redundant one, at most two.
     #[must_use]
-    pub fn track_delta(&self, track: usize) -> ConsoleMuteDelta {
+    pub fn track_delta(&self, track: usize) -> LiveControlMuteDelta {
         let left = self.effective_mute(track, 0);
         let right = self.effective_mute(track, 1);
         match (
@@ -299,8 +301,8 @@ fn try_boxed_from(values: &[[bool; 2]]) -> Result<Box<[[bool; 2]]>, TryReserveEr
 mod tests {
     use super::*;
 
-    fn state(mutes: &[[bool; 2]]) -> ConsoleSoloState {
-        ConsoleSoloState::try_new(mutes).expect("solo state")
+    fn state(mutes: &[[bool; 2]]) -> LiveControlSoloState {
+        LiveControlSoloState::try_new(mutes).expect("solo state")
     }
 
     /// Solo `S` composes to exactly "mute everything outside `S`", and nothing else moves.

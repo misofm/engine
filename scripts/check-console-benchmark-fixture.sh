@@ -19,10 +19,13 @@ assert document["quantum_frames"] == 128
 assert document["session_id"] == "console-sixty-four-track"
 assert document["automation"] == []
 assert len(document["routes"]) == 64
-assert all(route["source"]["tap"] == "post_matrix" for route in document["routes"])
+assert all(route["source"]["tap"] == "post_pan" for route in document["routes"])
+# Decision 12: the console's slots run on every track; a track's inserts are its own.
+slots = {slot["slot"]: slot["identity"].get("effect_id")
+         for section in ("pre_insert", "post_insert") for slot in document["console"][section]}
 for track in tracks:
-    effects = track["simd1"]["effects"] + track["dynamic"]["effects"] + track["simd2"]["effects"]
-    ids = {effect["identity"].get("effect_id") for effect in effects}
+    ids = {slots[entry["slot"]] for entry in track["console"]}
+    ids |= {effect["identity"].get("effect_id") for effect in track["inserts"]["effects"]}
     assert {"miso.parametric-eq", "miso.compressor"} <= ids
 distinct = len({track["builtins"]["left"]["trim_db"] for track in tracks})
 assert distinct >= 8

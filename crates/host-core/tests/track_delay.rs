@@ -27,8 +27,8 @@ use core::num::{NonZeroU32, NonZeroUsize};
 use builtins::MeterTap;
 use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use host_core::{
-    HostConsoleRequest, HostPrepareCaps, HostShapePolicy, SourceSubmission,
-    prepare_host_session_with_console, session_structural_symmetry,
+    HostLiveControlRequest, HostPrepareCaps, HostShapePolicy, SourceSubmission,
+    prepare_host_session_with_live_controls, session_structural_symmetry,
 };
 use session::{canonical_session_json, parse_session_json};
 
@@ -60,8 +60,8 @@ fn caps() -> HostPrepareCaps {
     }
 }
 
-fn console() -> HostConsoleRequest {
-    HostConsoleRequest {
+fn live_controls() -> HostLiveControlRequest {
+    HostLiveControlRequest {
         control_queue_depth: Some(NonZeroUsize::new(8).expect("depth")),
         meter_period_frames: Some(NonZeroU32::new(QUANTUM as u32).expect("period")),
         meter_queue_depth: NonZeroUsize::new(16).expect("meter depth"),
@@ -77,12 +77,12 @@ fn console() -> HostConsoleRequest {
 /// The fixture pans **both** lanes hard right, which is fine for what it was written for and would
 /// make the left output plane silent here -- and a silent plane compares equal to anything.
 fn session(left: u32, right: u32, filters: bool) -> String {
-    // The fixture's dynamic rack names `parametric-eq`, an id the launch registry does not carry
+    // The fixture's inserts rack names `parametric-eq`, an id the launch registry does not carry
     // (its effects are `miso.`-prefixed), so a host prepare refuses it. The rack is not the
     // subject here -- the input builtins and the delay are -- so it is emptied rather than
     // renamed, which would also have meant inventing parameter values for a different effect.
     let mut model = parse_session_json(SESSION).expect("fixture parses");
-    model.tracks[0].dynamic.effects.clear();
+    model.tracks[0].inserts.effects.clear();
     model.automation.clear();
     let track = &mut model.tracks[0];
     if let session::MatrixOrPan::Pan { left, right, .. } = &mut track.matrix_or_pan {
@@ -119,9 +119,10 @@ fn signal(index: usize) -> f32 {
 /// "the same source, already late".
 fn render(document: &str, pad: usize, blocks: usize, collapse: Option<bool>) -> [Vec<f32>; 2] {
     let (_, mut prepared, mut handles) =
-        prepare_host_session_with_console(document, &caps(), &console()).unwrap_or_else(
-            |failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())),
-        );
+        prepare_host_session_with_live_controls(document, &caps(), &live_controls())
+            .unwrap_or_else(|failure| {
+                panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
+            });
     if let Some(forced_off) = collapse {
         prepared.plan.force_mono_collapse_off(forced_off);
     }
