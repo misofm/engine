@@ -886,6 +886,31 @@ impl BypassShunt {
         }
     }
 
+    /// The heap bytes [`Self::new`]`(frames, latency)` allocates, or `None` if they overflow.
+    ///
+    /// Two dry blocks of `frames` words and two latency lines of `latency` words, all `f32`. An
+    /// AoSoA caller passes the interleaved sizes, `quantum * lanes` and `latency * lanes`, exactly
+    /// as it constructs the shunt. This is what a resource estimate charges for a shunt before
+    /// bind allocates it (issue #1100); the shunt's own struct is charged with its owner.
+    #[must_use]
+    pub const fn allocated_bytes(frames: usize, latency: usize) -> Option<usize> {
+        let Some(words) = frames.checked_add(latency) else {
+            return None;
+        };
+        let Some(words) = words.checked_mul(2) else {
+            return None;
+        };
+        words.checked_mul(core::mem::size_of::<f32>())
+    }
+
+    /// The largest single allocation [`Self::new`]`(frames, latency)` makes: one channel's dry
+    /// block or one channel's latency line, whichever is longer, or `None` if it overflows.
+    #[must_use]
+    pub const fn largest_allocation_bytes(frames: usize, latency: usize) -> Option<usize> {
+        let words = if frames > latency { frames } else { latency };
+        words.checked_mul(core::mem::size_of::<f32>())
+    }
+
     /// Whether this shunt carries a latency line that has to be fed on every block.
     ///
     /// # Why a caller needs to ask (issue #163 phase 4 item 4)

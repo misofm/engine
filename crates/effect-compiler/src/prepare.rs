@@ -35,29 +35,30 @@ pub struct EffectPreparedEntry {
     pub factory: Arc<dyn effect_contract::NativeEffectFactory>,
     /// Exact owned request inputs used to prepare the scalar processor.
     ///
-    /// Its `bypass` is `false` for every effect that can bank, whose session bypass is lowered to
+    /// Its `bypass` is `false` for every effect whose session bypass is lowered to
     /// [`Self::initial_bypass`] (issue #1087), and the session's bypass for an effect in
-    /// [`NEVER_BANKED_EFFECTS`].
+    /// [`NEVER_BANKED_EFFECTS`] or [`PREPARED_BYPASS_EFFECTS`] ([`lowers_session_bypass`]).
     pub bank_preparation: EffectBankPreparation,
     /// The session's `bypass` for this instance (issue #1087).
     ///
-    /// For an effect that can bank it is lowered to per-lane shunt state: the effect is prepared
-    /// with `bypass = false`, so a bypassed and an enabled instance of one effect share one
-    /// `EffectProgramKey` and one bank, and this bit is the initial state of the instance's
-    /// [`EffectControlLane`], and so of the rack's latency-preserving shunt. A bypassed instance
-    /// runs its wet path and emits its input delayed by its declared latency. It also seeds a live
-    /// console's lane ([`attach_effect_console`]) for every effect.
+    /// For an effect that [`lowers_session_bypass`] it is lowered to per-lane shunt state: the
+    /// effect is prepared with `bypass = false`, so a bypassed and an enabled instance of one
+    /// effect share one `EffectProgramKey` and one bank, and this bit is the initial state of the
+    /// instance's [`EffectControlLane`], and so of the rack's latency-preserving shunt. A bypassed
+    /// instance runs its wet path and emits its input delayed by its declared latency. It also
+    /// seeds a live console's lane ([`attach_effect_console`]) for every effect.
     pub initial_bypass: bool,
     /// The consumer half of this instance's live-console control channel (issue #140 A), or the
     /// channel-less lane that carries a lowered session bypass (issue #1087).
     ///
     /// [`prepare_native_session_effects`] sets
     /// [`EffectControlLane::without_channel`]`(true)` on every bypassed instance of an effect that
-    /// can bank and `None` on every other, and [`attach_effect_console`] replaces it with a live
-    /// channel seeded from [`Self::initial_bypass`]; nothing else creates one. It travels with the
-    /// entry into `GraphPreparedEffect`, so the plan that renders the effect is the one that drains
-    /// its queue and applies its shunt, and a session with no console and no bypassed instance
-    /// carries a `None` that the runtime turns back into the byte-identical console-free path.
+    /// [`lowers_session_bypass`] and `None` on every other, and [`attach_effect_console`] replaces
+    /// it with a live channel seeded from [`Self::initial_bypass`]; nothing else creates one. It
+    /// travels with the entry into `GraphPreparedEffect`, so the plan that renders the effect is
+    /// the one that drains its queue and applies its shunt, and a session with no console and no
+    /// bypassed instance carries a `None` that the runtime turns back into the byte-identical
+    /// console-free path.
     pub control: Option<Box<EffectControlLane>>,
     /// This instance's observation taps (issue #143 D3, level 1).
     ///
@@ -137,6 +138,30 @@ pub fn launch_native_effect_registry() -> Result<NativeEffectRegistry, RegistryE
 /// `graph-compiler`'s `bypass_shunt_identity` test holds this list to exactly the launch factories
 /// that decline a well-formed bank at the host's width.
 pub const NEVER_BANKED_EFFECTS: [&str; 1] = ["miso.delay"];
+
+/// Launch effects that bank, but whose session bypass stays a prepared bypass (issue #1100).
+///
+/// A lowered bypass keeps a bypassed lane in a bank beside enabled lanes, and a bank's
+/// block-boundary recovery (D7) zeroes the whole bank when any lane trips it. A bypassed lane still
+/// runs its wet path, so a bypassed multiband lane fed a legal but extreme input (about `6e29` at
+/// its defaults) would trip that recovery and silence its enabled bank-mates. That couples bits
+/// across lanes, which decision 12 forbids. The other bankable effects make their recovery per lane
+/// in their own slices (#1089, #1090, #1092); nothing does so for the multiband yet.
+///
+/// So a session bypass on an effect listed here is prepared exactly as it was before #1087:
+/// `bypass = true`, no lane, and a program key that differs from an enabled instance's, so a mixed
+/// bypass cohort declines a bank and a uniform one still binds. This is a separate list from
+/// [`NEVER_BANKED_EFFECTS`] because these effects do bank. The slice that makes the multiband
+/// console-eligible, after #1069, owns its per-lane D7 and removes it from this list.
+pub const PREPARED_BYPASS_EFFECTS: [&str; 1] = ["miso.multiband-compressor"];
+
+/// Whether a session bypass on `effect_id` is lowered to per-lane shunt state (issue #1087), or
+/// stays a prepared bypass: for an effect that never banks, or one in
+/// [`PREPARED_BYPASS_EFFECTS`].
+#[must_use]
+pub fn lowers_session_bypass(effect_id: &str) -> bool {
+    !NEVER_BANKED_EFFECTS.contains(&effect_id) && !PREPARED_BYPASS_EFFECTS.contains(&effect_id)
+}
 
 pub fn prepare_native_session_effects(
     session: &CompiledSession,
@@ -383,8 +408,9 @@ pub fn prepare_native_session_effects(
                 // program. An effect that can bank is prepared enabled, so it shares its program
                 // key and its bank with every enabled instance, and the bit rides the instance's
                 // control lane to the rack's shunt, which emits the latency-matched dry signal for
-                // this lane. An effect that never banks keeps its prepared bypass.
-                let lowered = !NEVER_BANKED_EFFECTS.contains(&effect_id.as_str());
+                // this lane. An effect that never banks keeps its prepared bypass, and so does one
+                // whose bank recovery is still whole-bank (issue #1100).
+                let lowered = lowers_session_bypass(effect_id.as_str());
                 let bank_preparation = EffectBankPreparation {
                     sample_rate: session.sample_rate().0,
                     quantum: session.quantum().0,

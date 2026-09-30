@@ -2915,13 +2915,37 @@ mod tests {
                 .map(|width| width.lanes() as usize)
                 .unwrap_or(0);
             let banked = bank_width != 0;
+            // Issue #1100: every controlled instance also gets a console owner around its effect.
+            // Each lane here has a live channel, so each owner holds a staging window of the
+            // effect's automation capacity, and a shunt of two dry blocks and two latency lines.
+            let metadata = &effects.entries[0].metadata;
+            let span = size_of::<effect_contract::PreparedAutomationSpan>();
+            let capacity = metadata.automation_capacity as usize;
+            let quantum = metadata.quantum as usize;
+            let latency = usize::try_from(metadata.latency.0).expect("EQ latency");
             if banked && controlled != 0 {
                 assert_eq!(8 % bank_width, 0, "EQ fixture fills complete banks");
+                let banks = controlled.div_ceil(bank_width) as u64;
                 let bank_bytes = (bank_width * size_of::<Option<EffectControlLane>>()) as u64;
                 expected_total = expected_total
-                    .checked_add(bank_bytes * controlled.div_ceil(bank_width) as u64)
+                    .checked_add(bank_bytes * banks)
                     .expect("bank owner arithmetic");
                 expected_largest = expected_largest.max(bank_bytes);
+                // `ConsoleEffectBankStage` in place of `EffectBankStage`: its growth, one lane's
+                // staging window, the packed window of every lane, and the AoSoA shunt.
+                let stage = size_of::<rack::ConsoleEffectBankStage>();
+                let growth = stage - size_of::<rack::EffectBankStage>();
+                let staging = capacity * span;
+                let packed = capacity * bank_width * span;
+                let shunt = 2 * (quantum + latency) * bank_width * size_of::<f32>();
+                expected_total = expected_total
+                    .checked_add((growth + staging + packed + shunt) as u64 * banks)
+                    .expect("bank console owner arithmetic");
+                expected_largest = expected_largest
+                    .max(stage as u64)
+                    .max(staging as u64)
+                    .max(packed as u64)
+                    .max((quantum.max(latency) * bank_width * size_of::<f32>()) as u64);
             } else if !banked && controlled != 0 {
                 let lane_bytes = size_of::<EffectControlLane>() as u64;
                 let scalar_bytes = (controlled as u64)
@@ -2931,6 +2955,23 @@ mod tests {
                     .checked_add(scalar_bytes)
                     .expect("scalar owner arithmetic");
                 expected_largest = expected_largest.max(lane_bytes);
+                // `graph`'s boxed `ConsoleEffect`, field by field (its own
+                // `observation_size_accounting` test pins the identity), its staging window and
+                // its shunt.
+                let owner = size_of::<GraphPreparedEffect>()
+                    + size_of::<Box<EffectControlLane>>()
+                    + size_of::<Box<[effect_contract::PreparedAutomationSpan]>>()
+                    + size_of::<effect_contract::BypassShunt>()
+                    + size_of::<Option<Box<effect_contract::ObservationLane>>>();
+                let window = capacity * span;
+                let shunt = 2 * (quantum + latency) * size_of::<f32>();
+                expected_total = expected_total
+                    .checked_add((owner + window + shunt) as u64 * controlled as u64)
+                    .expect("scalar console owner arithmetic");
+                expected_largest = expected_largest
+                    .max(owner as u64)
+                    .max(window as u64)
+                    .max((quantum.max(latency) * size_of::<f32>()) as u64);
             }
             (
                 effects,

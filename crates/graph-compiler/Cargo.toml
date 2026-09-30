@@ -25,6 +25,9 @@ rack-compiler.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]
+# Issue #1100: `tests/bypass_resources.rs` measures what a session bypass retains and what its
+# render allocates with the workspace's one audited allocator. Test-only, as the bench policy allows.
+bench-support.workspace = true
 builtins-compiler = { workspace = true, features = ["test-support"] }
 conformance = { workspace = true, features = ["realtime-audit"] }
 parametric-eq.workspace = true
