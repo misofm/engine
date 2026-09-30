@@ -246,3 +246,220 @@ All were reverted, and the file was compared byte-for-byte with the committed on
   cloned. The collapse moves no bit (it is class A), so this couples cost only, which decision 12
   allows. Answering `true` for a padded lane would decouple it, but the contract calls a wrong
   `true` the one unsound answer. This slice does not make that call.
+
+## Sol verdict, attempt 1
+
+Sol, 2026-09-30. Verified `2b993c6d` (`8ce84d41`..`858ccb84` and the evidence, on P2a's `b2027254`)
+against this body, decision 12, the umbrella, P2a's contract and verdict, and P1's M2.
+
+**PASS.** Every moved bit is the whole-bank to per-lane D7 change and nothing else, shipped plans
+move no bit, render stays allocation-free, and five of Sol's six planted mutations go red. One
+medium finding is a closing condition, not a blocker: gate 1's NEON leg is still owed by CI.
+
+### Evidence
+
+**The re-pinned rows (the hardest claim).** Five scenarios moved two rows each, dual and
+collapsed. Scalar rows did not move. Two independent runs in a scratch worktree tie every moved
+bit to the recovery:
+
+- **E1.** Base's unrefactored `tests/bank.rs` against the head source. Six tests pass. The five
+  scenario tests fail at their `bank` row, and the #1088 decline test fails as expected. The digests
+  they print are exactly the new pins, dual and collapsed. Each dual digest equals its scalar row:
+  odd-live `81015a5c…`, admitted-select `3719d502…`, skewed-pass `9fdeb65d…` and block-limit
+  `69929ee0…`. So the `Layout` refactor moved nothing. For switched-off-cut, the head test asserts
+  that the dual row equals `cliff_scalar_digest(8)`, and it passes.
+- **E2.** The same file with the head source and `recover_failed_lanes` restored to
+  `io.fill(0.0); self.reset_states()`. All ten old pins pass, and only the decline test fails. So
+  nothing else in the source moves a pinned bit: not the bind, the `active` array or the report
+  masking.
+- **The rows that moved.** All five scenarios plant faults on some tracks only. The whole-plane
+  recovery silenced the tracks beside those faults. Per-lane recovery is decision 12's coupling fix
+  (M1, amendment 6, and M2's "D7 recovery … bit-neutral per lane"). No row without a fault moved.
+  Every other EQ fixture test and pin is unchanged and passes.
+- **At `W = 1`.** `lanes_mask::<f32>(1)` selects lane 0, so the scalar recovery is the old one word
+  for word. The unchanged scalar pins confirm it.
+
+**Coupling, from Sol's own differential.** A scratch module `sol_probe`, never committed, with its
+own RNG, parameter draws from the descriptor domains, and input families. Configs are drawn with
+per-channel enable and family too, and every draw prepared.
+
+- **Widths and members.** Banks bind through `bind_bank` at W = 4 and 8, for every member count
+  `1..=W`.
+- **Three banks per scenario**, every block compared with one `prepare`d twin per track:
+  1. padded, cloning one random member, with the padded lanes left resident;
+  2. padded, each lane cloning a random member, with the padded lanes fed garbage every block
+     (NaN, inf, `-1e30`, `-0.0`, subnormals, `3e38`), which breaches the contract;
+  3. a full bank whose extra lanes are real tracks fed hostile and hot input.
+- **What the blocks carry:**
+  - a bypass shunt on random lanes, which are fed `6e29` and `9.5e29` sines half the time;
+  - `-0.0`, subnormal, NaN, inf and ceiling-edge words;
+  - raw spans on every lane, padded ones included;
+  - prepared-target ramps, both resets, and `+-f32::MAX` restores;
+  - ragged blocks, and the collapsed body.
+- **What must match the twin:** every active lane's words (class A), report and state payload.
+  Every padded lane stays unreported, and targets and restores addressed to one are refused.
+- **Gate 3.** In bank 1, every padded lane wrote bit-exact `+0.0` and held its bind-time payload,
+  with all 24 integrator words at `+0.0`, on every block.
+- **Scale.** Release, 60 seeds: W4 9,600 blocks and W8 19,200 blocks, each through all three banks.
+  It reached 3,253 and 11,118 blocks with an isolated fault, 897 and 3,139 bypassed lanes that
+  faulted, 3,040 and 5,240 collapsed blocks, 15,290 and 61,850 spans, 8,456 and 17,044 retargets,
+  681 and 1,346 restores, and 367 and 796 resets. **All green.** The same probe goes red with the
+  whole-plane recovery restored.
+- **Link modes.** The EQ declares dual-mono only. `Maximum` and `Average` are refused with
+  `effect.link_mode.unsupported` by `prepare` and by every bind, full or padded, at both widths.
+- **Long rest.** In release, 20 designs x 2 widths x 2,000 blocks. A one-member bank plays, ramps,
+  refuses and faults, and its padded lanes stay at `+0.0` and at rest.
+
+**Class A for shipped plans.**
+
+- `console-workload`'s ignored `digests` harness, in release, at the head and at `acc64d42` (a
+  detached worktree): **all 22 rows identical**, the 64-track console included.
+- `cargo test --release -p console-workload`: 68 tests pass, and the pinned digests with them.
+- `check-console-fixtures.sh` and `check-builtins-fixtures.sh` (50 files) pass, as does
+  `check-graph-determinism.sh` (100/100).
+
+**Realtime.**
+
+- **Every CI `audit-native` step**, in release, reports 0 allocations, deallocations, locks and
+  syscalls: `audit` capi, delay, compressor, parametric-eq (100,000 blocks) and gate-expander; the
+  builtins, builtins-graph and graph traces; the protocol audit; the realtime probes and the
+  1,000,000-block trace; the probe mutations; and the 1,000,000-call effect-contract trace.
+- **The EQ audit never faults**, so it does not reach this slice's path. Sol's audited-allocator
+  probe does. It renders a padded bank at every member count, dual and collapsed, with ragged
+  blocks, spans, faulting members and garbage-fed padded lanes: 4,608 blocks and 2,513 lane faults
+  made **0 allocator calls**, in dev and in release. The new code is loads, compares, selects and
+  stores, and carries no I/O.
+- **Callgraph.** `check-web-audioworklet.sh --without-metadata-regeneration` passes on a fresh
+  delivery build: render closure 8, kernel roster ok. `check-parametric-eq-render-contract.sh`
+  passes, and so does `check-realtime-policy.sh` with its test.
+
+**The two gate fixes are genuine.**
+
+- **The V8 spill gate.** The head passes. Its held loops are identical to base: the dual depth-1
+  tail has 109 instructions, the mono pair 78 and the mono tail 53, all with no carried slot. The
+  unheld dual pair goes from 182 to 183 instructions, with 10 slots at both.
+  - With `#[inline(never)]` removed, the module (`14fc168c…`) fails the gate: one failure.
+  - Outlining a cold fault path keeps the hot loops as they were at base. That fixes the cause; it
+    does not hide it.
+- **The iOS memset count.** 151 at base, 146 at the head, and 146 on a merge of
+  `codex/batch-console-2` with this branch.
+  - Per function: `process_bank<f32x4>` goes from 84 to 77, and base's outlined
+    `nonfinite_lane_mask<f32x4>` (2) is gone.
+  - Each `recover_failed_lanes` (`f32x4` and `f32x8`) carries 2.
+  - The mask is built from one flag vector compared with `+0.0`, which is bit-equivalent (every
+    test above). The libc calls are really gone, which is exactly what the ratchet measures.
+
+**AArch64 (question 5).**
+
+- **Lower the row.** Root should lower `parametric-eq` in `scripts/lib/aarch64-known-defects.py:67`
+  from 151 to 146 when #1089 lands on the batch. The count is deterministic under the pinned 1.97.1,
+  measured on the merged tree, and the script itself asks for it.
+- **NEON risk is low.** The recovery adds only `load`, `lt`, `select` and `store`, all exact and
+  bitwise (`vbslq`). No arithmetic changed, and nothing touches #1019's `fmaxnm` folding.
+- **The iOS and Android rows** of `check-cross-targets.sh`, check and clippy `-D warnings` with all
+  targets and all features, pass. So `padded_banks` compiles for AArch64. See M1 for what is still
+  owed.
+
+**The AudioWorklet artifact.**
+
+- Base (`acc64d42`, built here) is `b2eeb2d9…` at 3,262,117 B. The head is `30b66801…` at
+  3,261,159 B, −958 B. Both match Terra's digests.
+- `twiggy diff`:
+  - bind: `prepare_width` −5,188 against `bind_homogeneous_bank` +4,984;
+  - render: dual `process_bank` −1,161, scalar `process` −562, `nonfinite_lane_mask` −392,
+    `process_bank_mono` −183;
+  - new: `recover_failed_lanes` +946 (`f32x4`) and +461 (`f32`);
+  - names +90.
+- All of it is in the EQ's bind and D7 path, so the change is proportionate. Not re-pinned.
+
+**Gates.**
+
+- **Lint.** `cargo fmt --all --check` passes. So does `cargo clippy --locked --workspace
+  --all-targets --all-features -- -D warnings`.
+- **Rustdoc.** `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps` stops only at
+  the known `tools/console-workload/src/lib.rs:374`. With `--exclude console-workload`, the
+  workspace documents clean.
+- **Cross-target.** `check-cross-targets.sh`: PASS.
+- **Wasm `simd128` checks** all pass:
+  - CI's two `target/ci/wasm-simd` lines;
+  - `parametric-eq --all-targets` with `test-support`;
+  - `host-web --all-features`.
+- **Tests.**
+  - `cargo test -p parametric-eq -p graph-compiler -p graph`: 28 binaries, 361 passed, in dev and
+    in release.
+  - CI debug-a: 92 binaries, 1,103 passed, 0 failed.
+  - CI debug-b: 149 binaries, 803 passed, 0 failed.
+  - `audit`, `bench` and `console-workload` in release: 114 passed.
+- **Wasm and artifact.** `run-wasm-gates.sh` passes: native, `simd128` and the V8 EQ loops. So do
+  `check-browser-expected-resources.py --artifacts`, `check-scalar-oracle-absent.py --wasm` and
+  `--native`, `test-web-audioworklet.sh`, and the spill self-test.
+- **Scripts.** Each passes:
+  - `check-parametric-eq-render-contract.sh`;
+  - `check-effect-runtime-policy.sh` and its test;
+  - `check-realtime-policy.sh` and its test;
+  - the workspace, lane, rack and graph policies;
+  - `check-realtime-audit-leak.sh` and its test;
+  - `check-conformance-boundaries.sh`;
+  - `check-capi-abi.sh` and its self-test;
+  - `check-effect-contract.sh` (8 factories).
+
+**Test value (question 6).** Six mutations of Sol's own, each reverted, run against the
+committed `padded_banks` unit tests and `tests/bank.rs`:
+
+| # | Mutation | Result |
+|---|---|---|
+| S1 | `lanes_mask` never selects the last lane | red: the differential, bookkeeping and planted tests; block-limit |
+| S2 | recovery clears `ic1` but not `ic2` | red: three unit tests, all five fixture tests |
+| S3 | a padded-lane restore writes, then returns the refusal | **survives** (L1) |
+| S4 | `active` built all-`true` (the mask ignored) | red: bookkeeping |
+| S5 | `render_mono` drops `failures[1] = failures[0]` | red: the differential, all five fixture tests |
+| S6 | the report masks on `active[0]` instead of `active[track]` | red: bookkeeping |
+
+Sol's probe catches S3: a padded lane then writes a word other than `+0.0`.
+
+**Merge (question 9).** `git merge-tree` reports **no conflicts** in any of the three merges:
+
+- into `codex/batch-console-2` (`1f76681c`);
+- with `codex/1090-pad-compressor-banks` (`f7849fe0`);
+- batch + #1090 + this branch.
+
+On the merged batch + #1089 tree, `cargo test --release -p parametric-eq --features test-support`
+passes 131 tests.
+
+### Findings
+
+No high finding.
+
+- **M1. Gate 1's NEON (or wasm) leg is not yet evidenced.** Gate 1 asks for Simd4 "through
+  `scripts/run-aarch64-tests.sh` or the wasm gates".
+  - Both local Simd4 runs, Terra's and Sol's, are x86 SSE `f32x4`. The wasm guest binds no padded
+    bank, and this host has no arm64 runner or qemu.
+  - The route is `full`, so CI's required `aarch64-debug` and `aarch64-release` legs will run
+    `tests/bank.rs`'s padded legs at native Simd4 and the `padded_banks` unit tests on NEON.
+  - **Condition: close #1089 only after both legs are green on the batch push.** The risk is low
+    (see AArch64), and Terra disclosed the gap.
+- **L1. The padded-lane restore refusal is not pinned all-or-none.**
+  - `a_padded_lane_is_never_written_reported_or_charged` restores the padded lane with its own
+    snapshot (`crates/parametric-eq/src/lib.rs:9451-9455`). So a refusal that writes first (S3)
+    stays green.
+  - Restoring a member's payload with a planted integrator, then asserting the padded lane's
+    snapshot and its `+0.0` output, would pin it. Nothing in production addresses a padded lane
+    today.
+- **L2. "#1070's order holds" is overstated** (this spec, line 95).
+  - `bind_bank` still declines at the first heterogeneous lane before it validates later lanes
+    (`crates/parametric-eq/src/lib.rs:3328-3333`).
+  - Sol's probe: lane 1 heterogeneous and lane 2 malformed returns `Ok(None)`, where `prepare`
+    refuses lane 2 with `effect.prepare.capacity`. That holds at every member count from three, full
+    or padded.
+  - This is pre-existing, unchanged by this slice, and #1070's open defect. This slice only had to
+    remove the #1088 guard without adding a decline, and it did. #1070 stays open.
+- **L3. Row count.** The evidence says 21 digest rows (line 143); the harness prints 22. All 22
+  are identical.
+- **L4. Residuals outside the slice.**
+  - Terra's stale-sentence list is accurate: `docs/EFFECT_CONTRACT_V1.md:39`,
+    `crates/parametric-eq/src/corpus.rs:18-19` and conformance's randomized text.
+  - #1090 adds a parallel per-lane recovery (`compressor::finish_lanes`). Once P2c-P2e land, the
+    frame-zeroing half may belong beside `effect_runtime::bank::nonfinite_lane_mask`, in the spirit
+    of #95's ratchet.
+  - Root should give both an owner.
+  - Terra's mono-collapse residual is cost-only, as stated.
