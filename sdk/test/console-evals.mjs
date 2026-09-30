@@ -514,6 +514,22 @@ describe("issue #1097 -- what the builder writes is what the engine's canonical 
     return built;
   }
 
+  test("the author-session skill's worked session is canonical and boots", async () => {
+    // #1097 gate 5: the skill teaches the console shape by example, so its example must stay a
+    // document the engine takes. `session_validator --canonical` runs all five stages (grammar,
+    // typed model, compile, builtins, effects) and prints nothing on a refusal; the wasm boot then
+    // compiles the graph. Red mutation: give the worked session's bass track a `dynamic` key or
+    // move its keyed compressor into the console -> the validator refuses and this goes red.
+    const path = join(REPO_ROOT, ".claude", "skills", "author-session", "worked-session.json");
+    const text = await readFile(path, "utf8");
+    assert.equal(await engineCanonical("worked-session", text), text);
+    const outcome = await validate(text, { asset });
+    assert.equal(outcome.ok, true, JSON.stringify(outcome.diagnostics));
+    const model = JSON.parse(text);
+    assert.ok(model.console.pre_insert.length > 0 && model.console.post_insert.length > 0);
+    assert.ok(model.tracks.some((track) => track.inserts.effects.some((row) => row.sidechain.kind === "routed")));
+  });
+
   for (const [fixture, what] of [
     ["console-sixty-four-track-app.json", "the app shape: EQ -> compressor pre_insert, 2-mod-3 bypass"],
     ["console-sixty-four-track-intended.json", "both sections: EQ -> compressor, then the limiter"],
