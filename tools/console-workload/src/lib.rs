@@ -1246,7 +1246,7 @@ impl SessionRuntime {
     /// discipline phase 0b's kernel arm already used, applied to the console subject.
     ///
     /// At a vector width other than the build's own, the session's console is folded into every
-    /// track's inserts first ([`fold_console_into_inserts`]). A build's effect factories bind only
+    /// track's inserts first (`fold_console_into_inserts`). A build's effect factories bind only
     /// the widths it executes (D4), and since #1098 a console slot never renders per node on a
     /// vector backend, so the console as written is refused there. Folded, the chain is the same
     /// and so is every rendered bit (#163), its effects render per node wherever this build cannot
